@@ -31,6 +31,10 @@ layout (location = 3) in uint  aAtlasLayer;
 layout (location = 4) in float aRotation;   // normalized: angle = aRotation * PI
 layout (location = 5) in float aStreak;      // normalized: aspect = aStreak * 16
 
+// Raw rotation code: -128 is reserved for radial ambient dust; all authored
+// atlas layers and non-dust rotation codes remain independent of this tag.
+layout (location = 6) in int aAmbientMote;
+
 uniform mat4  u_view;
 uniform mat4  u_projection;
 uniform vec3  u_cameraRight;
@@ -47,6 +51,7 @@ out VS_OUT {
     vec2  texCoord;
     vec4  color;
     flat float atlasLayer;
+    flat uint ambientMote;
     float distanceToCamera;
     float viewDepth;   // positive linear view-space depth of the billboard centre
     vec3  worldPos;    // billboard corner world position (soft-particle depth)
@@ -90,6 +95,7 @@ void main() {
     vs_out.texCoord = corner * 0.5 + 0.5;
     vs_out.color = aColor;
     vs_out.atlasLayer = float(aAtlasLayer);
+    vs_out.ambientMote = aAmbientMote == -128 ? 1u : 0u;
     vs_out.distanceToCamera = length(aPos - u_cameraPos);
     vs_out.viewDepth = -viewPos.z;
     vs_out.worldPos = worldCorner;

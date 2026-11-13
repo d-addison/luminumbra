@@ -357,6 +357,7 @@ void WritePlayerViewAnalysis(
             {"pitch_degrees", capture.station.pitch_degrees},
             {"aim_at_target", capture.station.aim_at_target},
             {"target", Vec3ToJson(capture.station.target)},
+            {"terrain_peak", capture.terrain_peak},
             {"file", capture.file},
             {"coverage",
              {

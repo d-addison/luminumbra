@@ -167,6 +167,78 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("std::max(terrain_height, water_height) + 1.8f", eye)
         self.assertIn("camera->Position = PlayerViewEyePosition(game_session);", source)
 
+    def test_peak_station_records_rendered_centre_and_target_mesh_diagnostics(self):
+        capture = read(ROOT / "src/luminumbra_client/core/ScenarioRunnerCapture.cpp")
+        player = body(capture, "void ScenarioRunnerImpl::capturePlayerView(")
+        self.assertIn('if (capture.station.name == "peak")', player)
+        peak = compact(body(player, 'if (capture.station.name == "peak")'))
+        self.assertEqual(peak, "capture.terrain_peak = "
+                         "renderPipeline.terrain_peak_diagnostics(capture.station.target);")
+        self.assertLess(player.index("terrain_peak_diagnostics("),
+                        player.index("WritePixelBufferPpm("))
+        writer = read(ROOT / "src/luminumbra_client/core/scenarios/PlayerViewSmoke.cpp")
+        self.assertIn('{"terrain_peak", capture.terrain_peak}', writer)
+        source = read(RENDERING / "TerrainCoverageCapture.cpp")
+        diagnostic = body(source, "nlohmann::json RenderPipeline::terrain_peak_diagnostics(")
+        self.assertIn('out["target"] = describe({target.x, target.y, target.z});', diagnostic)
+        self.assertIn('out["centre"] = describe({position.x, position.y, position.z});', diagnostic)
+        for key in ("lod", "sample_step_m", "mesh_path", "terrain_owner",
+                    "mesh_metadata_status", "far_mode", "far_draws"):
+            self.assertIn('"' + key + '"', diagnostic)
+        self.assertIn("const ReadbackState restore(gbuffer().fbo_id);", diagnostic)
+        self.assertNotIn("glGetError(", diagnostic)
+        self.assertIn("static_cast<double>(pixel_x) + 0.5", diagnostic)
+        self.assertIn("projection[2][0] += m_taau_jitter_ndc.x;", diagnostic)
+        self.assertIn("projection[2][1] += m_taau_jitter_ndc.y;", diagnostic)
+        self.assertNotIn("get_renderable_chunks(", diagnostic)
+        self.assertIn("std::min(snapshots.size(), kFarWorldLiveCellLimit)", diagnostic)
+        native = read(ROOT / "test/rendering/FarWorldWaterGl_test.cpp")
+        for regression in ("PeakDiagnosticsObserveCentreDepthAndStableMeshInputs",
+                           "PeakDiagnosticsDoNotGuessPendingUnknownOrInvalidMeshPaths"):
+            self.assertIn("TEST_F(FarWorldWaterGl, " + regression + ")", native)
+
+    def test_peak_ownership_preserves_legacy_overlap_and_incomplete_evidence(self):
+        source = read(RENDERING / "TerrainCoverageCapture.cpp")
+        self.assertIn("nlohmann::json RenderPipeline::terrain_peak_diagnostics(", source)
+        diagnostic = compact(body(source, "nlohmann::json RenderPipeline::terrain_peak_diagnostics("))
+        live = re.search(r"const bool exclusive_live = (.*?);", diagnostic).group(1)
+        far = re.search(r'else if \((!presented.*?)\) \{ '
+                        r'point\["terrain_owner"\] = "far";', diagnostic).group(1)
+
+        def expression(text):
+            for before, after in (
+                ("m_frame_far_selection.effective == FarWorldMode::Ladder", "ladder"),
+                ("m_frame_far_selection.effective != FarWorldMode::Ladder", "(not ladder)"),
+                ("m_last_render_pass_stats.far_region_draws", "draws"),
+                ("snapshots.size() == count", "complete_search"),
+                ("ownership.complete()", "complete_mask"),
+                ("&&", " and "), ("||", " or "),
+            ):
+                text = text.replace(before, after)
+            return re.sub(r"!(?!=)", " not ", text).strip()
+
+        live, far = expression(live), expression(far)
+        # All 128 boolean combinations, including absent/stale uploads,
+        # incomplete masks/searches and Legacy overlap, use the shipping predicates.
+        for bits in range(128):
+            presented, inner, ladder, ladder_owned, complete_mask, complete_search, drawn = (
+                bool(bits & (1 << bit)) for bit in range(7))
+            state = dict(presented=presented, inner=inner, ladder=ladder,
+                         ladder_owned=ladder_owned, complete_mask=complete_mask,
+                         complete_search=complete_search, draws=int(drawn))
+            actual = "unresolved"
+            if presented and eval(live, {"__builtins__": {}}, state):
+                actual = "live"
+            elif eval(far, {"__builtins__": {}}, state):
+                actual = "far"
+            expected = "unresolved"
+            if presented and (inner or not drawn or (ladder and ladder_owned)):
+                expected = "live"
+            elif (not presented and complete_search and not inner and drawn and
+                  (not ladder or (complete_mask and not ladder_owned))):
+                expected = "far"
+            self.assertEqual(actual, expected, state)
+
     def test_wiring_regression_runs_in_ctest_and_python_ci(self):
         registration = read(ROOT / "test/CMakeLists.txt")
         self.assertEqual(registration.count("add_test(NAME UploadBudgetWiringPython "), 1)
@@ -1347,6 +1419,22 @@ class UploadBudgetWiring(unittest.TestCase):
         for name in ('capture_frame_parity', 'capture_upscale_seam_parity', 'capture_ssao_parity'):
             self.assertRegex(compact(regression), r'EXPECT_FALSE\(\s*pipeline\.' + name + r'\(')
 
+    def test_parity_captures_refuse_frame_errors_before_allocations_can_consume_them(self):
+        for name in ("frame", "upscale_seam", "ssao"):
+            capture = body(self.pipeline, "bool RenderPipeline::capture_" + name + "_parity(")
+            check = capture.index("if (glGetError() != GL_NO_ERROR)")
+            refusal = body(capture, "if (glGetError() != GL_NO_ERROR)")
+            self.assertEqual(compact(refusal), "return false;")
+            self.assertLess(capture.index("CapturePixelBytes("), check)
+            first_work = "RenderContext ctx" if name == "ssao" else "auto make_target"
+            self.assertLess(check, capture.index(first_work))
+            self.assertLess(check, capture.index("std::filesystem::create_directories("))
+        resize = body(self.pipeline, "bool RenderPipeline::resize_graphics_targets(")
+        self.assertIn("m_render_registry.replace_targets(", resize)
+        registry = read(RENDERING / "RenderResourceRegistry.cpp")
+        allocation = body(registry, "bool allocate_texture_storage(")
+        self.assertIn("while (glGetError() != GL_NO_ERROR)", allocation)
+
     def test_survey_and_all_parity_siblings_propagate_required_artifact_failure(self):
         survey = compact(body(read(RENDERING / "SceneSurvey.cpp"), "bool RunSceneSurvey("))
         self.assertIn('if (!WriteCaptureText(out_dir / "survey.json",', survey)
@@ -1404,8 +1492,8 @@ class UploadBudgetWiring(unittest.TestCase):
             self.assertLess(source.index("WithCaptureManifest("), source.index("glReadPixels("))
         self.assertLess(survey.index("WithCaptureManifest("), survey.index("ScanFrame("))
         self.assertLess(scan.index("WithCaptureManifest("), scan.index("ScanFrame("))
-        self.assertLess(scan.index("ObserveCaptureManifest("), scan.index("set_time_of_day("))
-        self.assertLess(scan.index("ObserveCaptureManifest("), scan.index("g_camera->Position ="))
+        self.assertNotIn("set_time_of_day(", scan)
+        self.assertNotIn("g_camera->Position =", scan)
         self.assertIn("frame_scan_manifest,", scan)
         self.assertIn("if (!captured) return false;", compact(survey))
         self.assertIn("if (!captured) return false;", compact(timelapse))
@@ -1453,6 +1541,217 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("std::filesystem::rename(temporary, path, error)", builder)
         self.assertIn('std::fopen(temporary.c_str(), "wbx")', builder)
         self.assertIn('_wfopen_s(&output, temporary.c_str(), L"wbx")', builder)
+
+
+class SkyAppearanceWiring(unittest.TestCase):
+    def test_ambient_tag_is_confined_to_render_instances(self):
+        particles = read(RENDERING / "passes/ParticlePass.cpp")
+        update = compact(body(particles, "void ParticlePass::update("))
+        self.assertIn("rec.atlas_layer = emitter.data.atlas_layer;", update)
+        self.assertIn("rec.rotation = p.emitter_index == m_ambient_emitter_index ? "
+                      "std::numeric_limits<int8_t>::min() : "
+                      "static_cast<int8_t>(std::lround(angle_norm * 127.0f));", update)
+        setup = compact(body(particles, "void ParticlePass::init_buffers("))
+        self.assertIn("kMaxInstances * sizeof(InstanceRecord)", setup)
+        self.assertIn("glVertexAttribIFormat(6, 1, GL_BYTE, "
+                      "offsetof(InstanceRecord, rotation))", setup)
+        self.assertIn("glVertexAttribBinding(6, 0)", setup)
+        # The magical fixture and the authored ambient descriptor keep layer 0.
+        for filename in ("ambient_motes.json", "fixture_sparkle.json"):
+            self.assertRegex(read(ROOT / "data/common/particles" / filename),
+                             r'"atlas_layer"\s*:\s*0\b')
+        for stage in ("vert", "geom", "frag"):
+            source = read(ROOT / ("res/shaders/magical_particles." + stage))
+            self.assertIn("flat float atlasLayer;", source)
+            self.assertIn("flat uint ambientMote;", source)
+        vertex = read(ROOT / "res/shaders/magical_particles.vert")
+        self.assertIn("layout (location = 6) in int aAmbientMote;", vertex)
+        self.assertIn("vs_out.ambientMote = aAmbientMote == -128 ? 1u : 0u;", vertex)
+        geometry = read(ROOT / "res/shaders/magical_particles.geom")
+        self.assertIn("gs_out.ambientMote = gs_in[0].ambientMote;", geometry)
+        native = read(ROOT / "test/rendering/particle_determinism_test.cpp")
+        self.assertIn("TEST_F(ParticleLiveTest, AmbientFlagPreservesEveryAuthoredLayer)", native)
+        self.assertIn("layers{0, 1, 2, 3, 4, 65535}", native)
+
+    def test_ambient_dust_scattering_rejects_sky_and_fades_with_distance(self):
+        shader = read(ROOT / "res/shaders/magical_particles.frag")
+        self.assertIn("bool isAmbientMote = fs_in.ambientMote != 0u;", shader)
+        dust = compact(body(shader, "if (isAmbientMote)"))
+        self.assertIn("sceneDepthRaw > 0.0 ? 1.0 : 0.0", dust)
+        self.assertIn("1.0 - smoothstep(4.0, 24.0, fs_in.distanceToCamera)", dust)
+        self.assertIn("finalColor.rgb *= clamp(lit, vec3(0.0), vec3(1.0));", dust)
+        self.assertIn("finalColor.a *= shape * softFade * skyFade * distanceFade;", dust)
+        self.assertNotIn("+=", dust)
+        self.assertIn("else if (isRain || isSnow)", shader)
+        native = body(read(ROOT / "test/rendering/render_smoke_test.cpp"),
+                      "TEST(RenderSmokeTest, ReversedDepthSoftParticlesFadeAgainstGeometry)")
+        for assertion in ("EXPECT_FLOAT_EQ(alpha(0), 0.0f)",
+                          "EXPECT_FLOAT_EQ(alpha(32), 0.0f)",
+                          "EXPECT_NEAR(alpha(3000), 1.0f", "EXPECT_NEAR(alpha(32), 0.5f",
+                          "EXPECT_NEAR(probe.draw()[16].r, 0.25f",
+                          "for (GLuint layer : {0u, 1u, 2u, 3u, 4u, 65535u})"):
+            self.assertIn(assertion, native)
+
+    def test_star_cell_hash_mixes_all_coordinates_without_lattice_repetition(self):
+        shader = read(ROOT / "res/shaders/enhanced_skybox.frag")
+        # Pin the complete integer algorithm so this mirror cannot silently drift.
+        self.assertEqual(compact(body(shader, "uint starCellSeed(")), compact("""
+            uvec3 p = uvec3(cell);
+            uint seed = (p.x * 0x8da6b343u) ^ (p.y * 0xd8163841u) ^ (p.z * 0xcb1ab31fu);
+            seed ^= seed >> 16u;
+            seed *= 0x7feb352du;
+            seed ^= seed >> 15u;
+            seed *= 0x846ca68bu;
+            return seed ^ (seed >> 16u);
+        """))
+        self.assertEqual(compact(body(shader, "float starRandom(")), compact("""
+            seed ^= seed >> 16u;
+            seed *= 0x7feb352du;
+            seed ^= seed >> 15u;
+            seed *= 0x846ca68bu;
+            seed ^= seed >> 16u;
+            return float(seed >> 8u) * (1.0 / 16777216.0);
+        """))
+        stars = compact(body(shader, "vec3 renderStars("))
+        self.assertIn("vec3 p = viewDir * 320.0;", stars)
+        self.assertIn("uint seed = starCellSeed(ivec3(floor(p)));", stars)
+        self.assertIn("float brightness = starRandom(seed);", stars)
+        for salt in ("0x9e3779b9u", "0x85ebca6bu", "0xc2b2ae35u"):
+            self.assertIn("starRandom(seed ^ " + salt + ")", stars)
+
+        def mix(seed):
+            seed ^= seed >> 16
+            seed = (seed * 0x7feb352d) & 0xffffffff
+            seed ^= seed >> 15
+            seed = (seed * 0x846ca68b) & 0xffffffff
+            return seed ^ (seed >> 16)
+
+        def cell_seed(cell):
+            seed = 0
+            for coordinate, multiplier in zip(cell, (0x8da6b343, 0xd8163841, 0xcb1ab31f)):
+                seed ^= (coordinate * multiplier) & 0xffffffff
+            return mix(seed)
+
+        # Negative coordinates, zero and extrema around the old lattice
+        # collision. All grid samples and their partners fit the live range.
+        for x in range(-283, 321, 19):
+            for y in range(-249, 321, 19):
+                for z in range(-320, 320, 19):
+                    first = cell_seed((x, y, z))
+                    second = cell_seed((x - 37, y - 71, z + 1))
+                    self.assertNotEqual(first, second, (x, y, z))
+                    outputs = lambda seed: tuple(mix(seed ^ salt) >> 8 for salt in
+                                                 (0, 0x9e3779b9, 0x85ebca6b, 0xc2b2ae35))
+                    self.assertNotEqual(outputs(first), outputs(second), (x, y, z))
+        for offset in ((-37, -71, 1), (37, 71, 1)):
+            self.assertNotEqual(cell_seed((0, 0, 0)), cell_seed(offset), offset)
+        for axis in range(3):
+            for coordinate in range(-320, 321):
+                cell = [0, 0, 0]
+                cell[axis] = coordinate
+                self.assertNotEqual(cell_seed(cell), cell_seed(
+                    tuple(value - delta for value, delta in zip(cell, (37, 71, -1)))))
+
+    def test_stars_have_a_horizon_cutoff_in_both_sky_palette_paths(self):
+        shader = read(ROOT / "res/shaders/enhanced_skybox.frag")
+        stars = compact(body(shader, "vec3 renderStars("))
+        self.assertIn("nightIntensity < 0.1 || viewDir.y <= 0.0", stars)
+        self.assertIn("float horizonFade = smoothstep(0.0, 0.1, viewDir.y);", stars)
+        self.assertIn("* nightIntensity * horizonFade;", stars)
+        # Stars use one path after LUT/fallback selection, rather than a capture override.
+        main = body(shader, "void main()")
+        self.assertGreater(main.index("skyColor += renderStars("),
+                           main.index("skyColor = legacyGradient("))
+
+    def test_stars_use_compact_radial_profiles_without_grid_noise_thresholds(self):
+        shader = read(ROOT / "res/shaders/enhanced_skybox.frag")
+        stars = compact(body(shader, "vec3 renderStars("))
+        self.assertIn("starProfile(length(fract(p) - centre))", stars)
+        self.assertIn("* 0.5 + 0.25;", stars)
+        self.assertNotIn("noise(", stars)
+        profile = compact(body(shader, "float starProfile("))
+        # Evaluate the production scalar profile, including its support boundary.
+        expression = re.fullmatch(r"return (.*);", profile).group(1)
+
+        def smoothstep(low, high, value):
+            t = min(1.0, max(0.0, (value - low) / (high - low)))
+            return t * t * (3.0 - 2.0 * t)
+
+        def sample(radius):
+            return eval(expression, {"__builtins__": {}},
+                        {"radius": radius, "smoothstep": smoothstep})
+
+        self.assertEqual(sample(0.0), 1.0)
+        previous = 1.0
+        for index in range(1, 101):
+            value = sample(index * 0.003)
+            self.assertGreaterEqual(value, 0.0)
+            self.assertLessEqual(value, previous)
+            previous = value
+        for radius in (0.18, 0.25, 0.5, 1.0):
+            self.assertEqual(sample(radius), 0.0)
+        self.assertGreater(sample(0.09), 0.0)
+
+    def test_aurora_and_stars_share_cloud_transmittance(self):
+        shader = read(ROOT / "res/shaders/enhanced_skybox.frag")
+        main = body(shader, "void main()")
+        cloud = main.index("skyColor = renderClouds(viewDir, skyColor, dayFactor);")
+        for layer in ("renderAurora(viewDir, dayFactor)", "renderStars(viewDir, nightFactor)"):
+            self.assertEqual(main.count(layer), 1)
+            self.assertLess(main.index("skyColor += " + layer), cloud)
+        clouds = body(shader, "vec3 renderClouds(")
+        self.assertIn("return mix(baseColor, cloudColor, alpha);", clouds)
+        self.assertIn("return baseColor;", clouds)
+
+class NightLightingSourceTests(unittest.TestCase):
+    def test_frame_scan_pins_override_live_clock_before_the_rendered_capture(self):
+        source = read(ROOT / 'src/luminumbra_client/main_client.cpp')
+        signature = 'if (g_app.capture.frame_scan_active && g_camera)'
+        pin = body(source, signature)
+        self.assertIn('renderPipeline.set_time_of_day(0.04f);', pin)
+        self.assertIn('g_camera->Position = glm::vec3(8.0f, 24.0f, 8.0f);', pin)
+        self.assertIn('g_camera->updateCameraVectors();', pin)
+        self.assertNotIn('frame_scan_settle', pin)
+        self.assertNotIn('render_uploads_settled', pin)
+        position = source.index(signature)
+        rendered = source.index('renderPipeline.render_frame(', position)
+        captured = source.index('frame_scan_manifest =', rendered)
+        self.assertLess(source.index('renderPipeline.set_world_clock(gameSession->GetWorldClock())'), position)
+        self.assertLess(source.index('renderPipeline.set_time_of_day_tick(sim_tick)'), position)
+        pin_end = source.index('{', position) + len(pin) + 2
+        self.assertNotIn('set_time_of_day(', source[pin_end:rendered])
+        self.assertLess(rendered, captured)
+
+    def test_shipping_terrain_and_foliage_share_lunar_inputs_and_exposure_cap(self):
+        source = (ROOT / 'src/luminumbra_client/rendering/RenderPipeline.cpp').read_text(encoding='utf-8')
+        for name, following in (('make_foliage_context', 'make_lighting_context'),
+                                ('make_lighting_context', 'make_skybox_context')):
+            body = source.split('RenderContext RenderPipeline::' + name + '(', 1)[1].split(
+                'RenderContext RenderPipeline::' + following + '(', 1)[0]
+            self.assertIn('ctx.moon_radiance = m_moonRadiance * MoonLightFactor(1.0f, m_moonUpFactor)', body)
+            self.assertIn('ctx.moon_illumination = m_moonIllumination', body)
+            self.assertIn('m_auto_exposure_metered && m_metered_valid', body)
+            self.assertIn('ctx.exposure = SelectRenderExposure(', body)
+            self.assertIn('MoonScaledAutoExposure(', body)
+            self.assertIn('-m_sun.direction.y, m_moonIllumination, m_moonUpFactor)', body)
+        self.assertIn('NightAmbientColor(m_moonIllumination, m_moonUpFactor)', source)
+        self.assertNotIn('kStarlightFrac', source)
+
+    def test_forward_and_deferred_keys_use_the_scaled_radiance(self):
+        for filename in ('lighting_pass.frag', 'foliage.frag'):
+            source = (ROOT / 'res/shaders' / filename).read_text(encoding='utf-8')
+            self.assertIn('const float kMoonKeyScale = 0.12;', source)
+            self.assertIn('u_moonRadiance *', source)
+            self.assertIn('kMoonKeyScale * u_moonIllum * SUN_IRRADIANCE_SCALE', source)
+            self.assertNotIn('const vec3 kMoonColor', source)
+        foliage = (ROOT / 'res/shaders/foliage.frag').read_text(encoding='utf-8')
+        self.assertIn('color *= mix(1.0, u_exposure, nightFactor);', foliage)
+        source = (ROOT / 'src/luminumbra_client/rendering/passes/FoliagePass.cpp').read_text(encoding='utf-8')
+        for field, uniform in (('moon_radiance', 'u_moonRadiance'),
+                               ('moon_illumination', 'u_moonIllum'), ('exposure', 'u_exposure')):
+            self.assertIn(f'.{field} = glGetUniformLocation(program, "{uniform}")', source)
+            self.assertIn(f'm_draw_uniforms.{field}', source)
+            self.assertIn(f'ctx.{field}', source)
 
 
 if __name__ == "__main__":

@@ -26,6 +26,8 @@ out VS_OUT {
     vec3 WorldNormal;  // WORLD SPACE
     vec2 UV;           // mesh UV (skinned/creature texturing, )
     flat uint MaterialID;
+    vec4 GroundWeights; // interpolated Stone, Soil, Grass, Sand coverage
+    float DeepslateWeight;
     vec3 Tint;         // per-instance tint (skinned: white = no-op, matches g_buffer.frag VS_OUT)
     vec3 PrevWorldPos; //  TAAU: camera-reprojected (prev-bone-palette skinning is a implementation note)
     vec3 FarRelativeWorldPos; // interface match; unused outside ladder terrain
@@ -64,6 +66,8 @@ void main()
     vs_out.UV = aUV;
 
     vs_out.MaterialID = uint(u_materialId);
+    vs_out.GroundWeights = vec4(0.0);
+    vs_out.DeepslateWeight = 0.0;
     vs_out.Tint = vec3(1.0);  // skinned meshes are never per-instance tinted
     vs_out.FarRelativeWorldPos = vec3(0.0);
     vs_out.FarTileLocalPos = vec3(0.0);

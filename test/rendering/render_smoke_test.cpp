@@ -2554,12 +2554,13 @@ TEST(RenderSmokeTest, ReversedDepthSoftParticlesFadeAgainstGeometry) {
     ASSERT_NE(program, 0u);
     FullscreenFloatProbe probe;
     // One round billboard at 30 m, using the production vertex and fragment stages.
-    for (GLuint attribute = 0; attribute < 6; ++attribute)
+    for (GLuint attribute = 0; attribute < 7; ++attribute)
         glDisableVertexAttribArray(attribute);
     glVertexAttrib3f(0, 0, 0, -30);
     glVertexAttrib1f(1, 60);
     glVertexAttrib4f(2, 1, 1, 1, 1);
     glVertexAttribI1ui(3, 0);
+    glVertexAttribI1i(6, 0);
     glVertexAttrib1f(4, 0);
     glVertexAttrib1f(5, 0);
     glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
@@ -2587,6 +2588,41 @@ TEST(RenderSmokeTest, ReversedDepthSoftParticlesFadeAgainstGeometry) {
     EXPECT_NEAR(alpha(30.75f), 0.5f, 0.001f);
     EXPECT_FLOAT_EQ(alpha(29), 0.0f);
     EXPECT_NEAR(alpha(0), 1.0f, 0.001f) << "cleared sky must not fade particles";
+    // The render-only ambient tag must not glow against sky or survive far away.
+    glVertexAttribI1i(6, -128);
+    EXPECT_FLOAT_EQ(alpha(0), 0.0f);
+    EXPECT_FLOAT_EQ(alpha(32), 0.0f);
+    glVertexAttrib3f(0, 0, 0, -3);
+    glVertexAttrib1f(1, 6);
+    glUniform3f(glGetUniformLocation(program, "u_ambientColor"), 0.25f, 0.25f, 0.25f);
+    EXPECT_NEAR(alpha(5), 1.0f, 0.001f) << "nearby dust remains visible over geometry";
+    EXPECT_NEAR(probe.draw()[16].r, 0.25f, 0.001f) << "dust has no emissive core";
+    EXPECT_NEAR(alpha(3.75f), 0.5f, 0.001f);
+    EXPECT_FLOAT_EQ(alpha(2), 0.0f);
+    EXPECT_FLOAT_EQ(alpha(0), 0.0f);
+    // Nonzero depth, however distant, still means geometry rather than sky.
+    EXPECT_NEAR(alpha(3000), 1.0f, 0.001f);
+    glVertexAttrib3f(0, 0, 0, -14);
+    glVertexAttrib1f(1, 28);
+    EXPECT_NEAR(alpha(32), 0.5f, 0.001f) << "dust fades continuously with camera distance";
+    glVertexAttribI1i(6, 0);
+    for (GLuint layer : {0u, 1u, 2u, 3u, 4u, 65535u}) {
+        glVertexAttribI1ui(3, layer);
+        EXPECT_GT(alpha(0), 0.0f) << "only ambient dust is suppressed over sky: " << layer;
+    }
+    // Every ordinary rotation code, including both endpoints, keeps authored
+    // layer 3 emissive over sky and distant geometry.
+    glVertexAttribI1ui(3, 3);
+    glVertexAttrib3f(0, 0, 0, -30);
+    glVertexAttrib1f(1, 60);
+    for (GLint rotation : {-127, -1, 0, 1, 127}) {
+        glVertexAttribI1i(6, rotation);
+        EXPECT_NEAR(alpha(0), 1.0f, 0.001f);
+        EXPECT_NEAR(alpha(30.75f), 0.5f, 0.001f);
+        EXPECT_FLOAT_EQ(alpha(29), 0.0f);
+        EXPECT_NEAR(alpha(32), 1.0f, 0.001f);
+        EXPECT_GT(probe.draw()[16].r, 0.25f);
+    }
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
     glDeleteProgram(program);
 }

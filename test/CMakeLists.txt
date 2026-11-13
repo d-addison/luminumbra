@@ -222,6 +222,7 @@ add_executable(common_tests
     common/FarVolumeTierMemory_test.cpp
     rendering/FarWorldWaterMesh_test.cpp
     rendering/FarVolumeRenderMesh_test.cpp
+    rendering/NearTerrainRefinement_test.cpp
     rendering/FarVolumeBuildQueue_test.cpp
     rendering/FarVolumeUpload_test.cpp
     rendering/FarVolumeGpuBackend_test.cpp
@@ -251,6 +252,7 @@ add_executable(common_tests
     ../src/luminumbra_client/rendering/FarVolumeResidency.cpp
     ../src/luminumbra_client/rendering/FarWorldWaterMesh.cpp
     ../src/luminumbra_client/rendering/FarVolumeRenderMesh.cpp
+    ../src/luminumbra_client/rendering/NearTerrainRefinement.cpp
     common/FarTierTable_test.cpp
     common/FarHorizon_test.cpp
     common/FarWantedSet_test.cpp
@@ -361,6 +363,7 @@ add_executable(common_tests
     sim/ecology_pipeline_test.cpp
     sim/ecology_hash_test.cpp
     sim/crop_lifecycle_test.cpp
+    sim/PlantReproductionContinuation_test.cpp
     sim/foliage_drift_integration_test.cpp
     sim/species_registry_test.cpp
     sim/movement_hardening_test.cpp
@@ -437,7 +440,9 @@ luminumbra_configure_first_party_target(rendering_defaults_test)
 # GL-free capture provenance builder and filesystem publication lifecycle.
 add_executable(capture_manifest_test
     rendering/capture_manifest_test.cpp
-    ../src/luminumbra_client/rendering/CaptureManifest.cpp)
+    rendering/diagnostic_capture_test.cpp
+    ../src/luminumbra_client/rendering/CaptureManifest.cpp
+    ../src/luminumbra_client/rendering/DiagnosticCapture.cpp)
 target_include_directories(capture_manifest_test PRIVATE ../src ../src/luminumbra_client)
 target_link_libraries(capture_manifest_test PRIVATE gtest_main nlohmann_json::nlohmann_json)
 luminumbra_configure_first_party_target(capture_manifest_test)
@@ -2711,6 +2716,8 @@ add_test(NAME ContainmentLinkClosurePython COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/ci/test_containment_link_closure.py)
 add_test(NAME AsanShardContractPython COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/ci/test_asan_shards.py)
+add_test(NAME ShaderCompilePython COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/tools/ci/test_compile_shaders.py)
 set_tests_properties(AsanShardContractPython PROPERTIES TIMEOUT 60)
 add_test(NAME RuntimeConfigSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_runtime_config_contract.py)
