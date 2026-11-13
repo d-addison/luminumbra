@@ -1,6 +1,7 @@
 #include "TerrainCullingTestPeer.h"
 #include "luminumbra_client/core/IsolationConfig.h"
 #include "luminumbra_client/rendering/Camera.h"
+#include "luminumbra_client/rendering/DiagnosticReadback.h"
 #include "luminumbra_client/rendering/EnvironmentBrdfLut.gen.h"
 #include "luminumbra_client/rendering/FarVolumeGlBackend.h"
 #include "luminumbra_client/rendering/FarWorldDepthBias.h"
@@ -49,6 +50,38 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+namespace {
+class DiagnosticGlOutput final : public Luminumbra::Rendering::DiagnosticBundleOutput {
+public:
+    std::array<std::ostringstream, 8> streams;
+    bool committed = false;
+    bool reserve(std::span<const std::string> names) override {
+        return names.size() <= streams.size();
+    }
+    std::ostream* open(std::size_t index) override {
+        return &streams.at(index);
+    }
+    bool close() override {
+        return true;
+    }
+    bool commit() override {
+        committed = true;
+        return true;
+    }
+    void rollback() noexcept override {
+        committed = false;
+    }
+};
+std::uint32_t DiagnosticGlWord(const std::string& bytes, std::size_t offset) {
+    std::uint32_t result = 0;
+    for (unsigned int i = 0; i < 4; ++i) {
+        result |= static_cast<std::uint32_t>(static_cast<unsigned char>(bytes.at(offset + i)))
+                  << (i * 8U);
+    }
+    return result;
+}
+} // namespace
 
 namespace fs = std::filesystem;
 
@@ -7271,4 +7304,179 @@ TEST(RenderSmokeTest, FarWorldPlaneCoherenceThroughProductionConsumers) {
         ExpectProjectionPlane(glm::make_mat4(stored_projection.data()), expected, jitter);
         EXPECT_EQ(glGetError(), GL_NO_ERROR);
     }
+}
+
+TEST(RenderSmokeTest, DiagnosticReadbackDecodesAndNormalizesWhileRestoringState) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    RenderResourceRegistry resources;
+    GBuffer gbuffer;
+    CreateGBufferTargets(gbuffer, resources, 1, 2);
+    DiagnosticTargets targets;
+    ASSERT_TRUE(targets.ensure(true, {1, 2}, 7));
+    DiagnosticDrawTable draws;
+    DiagnosticId id{};
+    ASSERT_TRUE(draws.submit({.mesh_path = "models/pattern.lmesh",
+                              .shader_variant = "pattern",
+                              .chunk = {},
+                              .lod = 0,
+                              .ownership = DiagnosticOwnership::Live,
+                              .pass = DiagnosticPass::GBuffer,
+                              .provenance = DiagnosticProvenance::Mesh},
+                             id));
+    const std::array<DiagnosticId, 2> ids{DiagnosticId{}, id};
+    glBindTexture(GL_TEXTURE_2D, targets.texture());
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 2, GL_RGBA_INTEGER, GL_UNSIGNED_INT, ids.data());
+    const std::array<unsigned char, 8> normal{255, 128, 0, 17, 255, 255, 0, 251};
+    glBindTexture(GL_TEXTURE_2D, gbuffer.normal_texture);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 2, GL_RGBA, GL_UNSIGNED_BYTE, normal.data());
+    const std::array<unsigned char, 8> albedo{0, 51, 102, 255, 153, 204, 255, 255};
+    glBindTexture(GL_TEXTURE_2D, gbuffer.albedo_texture);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 2, GL_RGBA, GL_UNSIGNED_BYTE, albedo.data());
+    const std::array<float, 2> depth{.25f, .75f};
+    glBindTexture(GL_TEXTURE_2D, gbuffer.depth_texture);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 2, GL_DEPTH_COMPONENT, GL_FLOAT, depth.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+    // Preserve both source FBO read-buffer choices and an unrelated caller FBO.
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, gbuffer.fbo_id);
+    glReadBuffer(GL_COLOR_ATTACHMENT3);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, targets.framebuffer());
+    glReadBuffer(GL_NONE);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    glReadBuffer(GL_BACK);
+    GLuint pack = 0;
+    glGenBuffers(1, &pack);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, pack);
+    glBufferData(GL_PIXEL_PACK_BUFFER, 4, nullptr, GL_STREAM_READ);
+    const std::array<GLenum, 6> names{GL_PACK_ALIGNMENT,
+                                      GL_PACK_ROW_LENGTH,
+                                      GL_PACK_SKIP_ROWS,
+                                      GL_PACK_SKIP_PIXELS,
+                                      GL_PACK_SWAP_BYTES,
+                                      GL_PACK_LSB_FIRST};
+    const std::array<GLint, 6> values{8, 11, 2, 3, GL_TRUE, GL_TRUE};
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        glPixelStorei(names[i], values[i]);
+    }
+    DiagnosticGlSource source(gbuffer, targets, {1, 2});
+    std::array<float, 6> normals{};
+    ASSERT_TRUE(source.read_aov(DiagnosticAov::Normal, normals));
+    EXPECT_NEAR(normals[0], 1.0f, .001f);
+    EXPECT_NEAR(normals[1], 0.0f, .001f);
+    EXPECT_NEAR(normals[2], -1.0f / 255.0f, .001f);
+    EXPECT_EQ(normals[3], 0.0f);
+    EXPECT_EQ(normals[4], 0.0f);
+    EXPECT_EQ(normals[5], -1.0f);
+    DiagnosticBundleFrame frame;
+    frame.extent = {1, 2};
+    frame.identity_complete = true;
+    frame.capture_filename = "pattern.ppm";
+    frame.manifest_filename = "pattern.manifest.json";
+    DiagnosticGlOutput output;
+    ASSERT_TRUE(
+        WriteDiagnosticBundle({.enabled = true, .probe = std::array<std::uint32_t, 2>{0, 0}},
+                              frame,
+                              draws,
+                              source,
+                              output));
+    EXPECT_TRUE(output.committed);
+    const auto serialized = output.streams[4].str();
+    ASSERT_EQ(serialized.size(), 48U);
+    EXPECT_EQ(DiagnosticGlWord(serialized, 16), id[0]);
+    EXPECT_EQ(DiagnosticGlWord(serialized, 32), 0U);
+    const auto probe = nlohmann::json::parse(output.streams[6].str());
+    EXPECT_EQ(probe["material"], 251);
+    EXPECT_EQ(probe["depth_hardware"], .75f);
+    EXPECT_EQ(probe["normal_view"], (nlohmann::json::array({0, 0, -1})));
+    EXPECT_NEAR(probe["albedo_linear"][0].get<float>(), .6f, .00001f);
+    EXPECT_NEAR(probe["albedo_linear"][1].get<float>(), .8f, .00001f);
+    EXPECT_EQ(probe["albedo_linear"][2], 1.0f);
+    std::array<float, 1> wrong_size{};
+    EXPECT_FALSE(source.read_aov(DiagnosticAov::Normal, wrong_size));
+    EXPECT_FALSE(source.read_aov(static_cast<DiagnosticAov>(99), wrong_size));
+    GLuint incomplete = 0;
+    glGenFramebuffers(1, &incomplete);
+    GBuffer missing;
+    missing.fbo_id = incomplete;
+    DiagnosticGlSource refused(missing, targets, {1, 2});
+    std::array<float, 2> refused_depth{};
+    EXPECT_FALSE(refused.read_aov(DiagnosticAov::Depth, refused_depth));
+    EXPECT_FALSE(source.read_ids({}));
+    glDeleteFramebuffers(1, &incomplete);
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        GLint actual = 0;
+        glGetIntegerv(names[i], &actual);
+        EXPECT_EQ(actual, values[i]);
+        glPixelStorei(names[i], i == 0 ? 4 : 0);
+    }
+    GLint actual = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &actual);
+    EXPECT_EQ(actual, 0);
+    glGetIntegerv(GL_READ_BUFFER, &actual);
+    EXPECT_EQ(actual, GL_BACK);
+    glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &actual);
+    EXPECT_EQ(static_cast<GLuint>(actual), pack);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    glDeleteBuffers(1, &pack);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, gbuffer.fbo_id);
+    glGetIntegerv(GL_READ_BUFFER, &actual);
+    EXPECT_EQ(actual, GL_COLOR_ATTACHMENT3);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, targets.framebuffer());
+    glGetIntegerv(GL_READ_BUFFER, &actual);
+    EXPECT_EQ(actual, GL_NONE);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    DestroyGBufferTargets(gbuffer, resources);
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, DiagnosticAdmissionBudgetAndScopeRefusalAreSafe) {
+    // Size refusal must work before a context exists or a GL entry point is read.
+    std::size_t admitted_bytes = 0;
+    EXPECT_TRUE(DiagnosticReadbackBudget({3840, 1600}, admitted_bytes));
+    EXPECT_EQ(admitted_bytes,
+              128U * 1024U * 1024U + 65536U + 3840U * 1600U * (sizeof(DiagnosticId) + 3U));
+    std::size_t retained = 123;
+    for (const DiagnosticExtent extent :
+         {DiagnosticExtent{0, 1}, {1, 0}, {16385, 1}, {16384, 16384}, {4096, 4096}, {3200, 3000}}) {
+        EXPECT_FALSE(DiagnosticFrameCapture::Admitted(extent, retained));
+        EXPECT_EQ(retained, 123U);
+        DiagnosticFrameCapture refused(extent);
+        EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
+    }
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    ASSERT_TRUE(DiagnosticFrameCapture::Admitted({1, 2}, retained));
+    EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
+    // An unattached frame refuses and consumes its capture scope.
+    {
+        DiagnosticFrameCapture capture({1, 2});
+        EXPECT_NE(GBufferDiagnosticCapture::Current(), nullptr);
+        DiagnosticBundleFrame frame;
+        frame.extent = {1, 2};
+        EXPECT_FALSE(capture.finish({}, {.enabled = true, .probe = std::nullopt}, frame, {}));
+        EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
+    }
+    EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
+    try {
+        DiagnosticFrameCapture capture({1, 2});
+        throw std::runtime_error("capture aborted");
+    } catch (const std::runtime_error&) {
+        EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
+    }
+    RenderPipeline pipeline;
+    bool called = false;
+    EXPECT_TRUE(pipeline.capture_diagnostics({}));
+    EXPECT_TRUE(pipeline.with_diagnostic_capture(
+        {},
+        [&]() -> CaptureManifestInput {
+            ADD_FAILURE() << "disabled capture observed metadata";
+            return {};
+        },
+        [&] {
+            called = true;
+            return true;
+        }));
+    EXPECT_TRUE(called);
+    EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }

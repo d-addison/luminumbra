@@ -280,6 +280,78 @@ TEST_F(DiagnosticBundleTest, RuntimeAdmissionRefusesBeforeSaveRootOutput) {
     EXPECT_FALSE(std::filesystem::exists(directory / "must-not-exist"));
 }
 
+TEST_F(DiagnosticBundleTest, RuntimeAdmissionRetainsResolvedCaptureOptions) {
+    std::array<std::string, 4> text{
+        "client", "--capture-diagnostics", "--capture-probe=0,1", "--scenario=world_visual_sweep"};
+    std::array<char*, 4> arguments{};
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        arguments[i] = text[i].data();
+    }
+    const auto resolved = Luminumbra::Client::ScenarioHarness::ParseRuntimePathOptions(
+        static_cast<int>(arguments.size()), arguments.data());
+    EXPECT_TRUE(resolved.diagnostics.enabled);
+    EXPECT_EQ(resolved.diagnostics.probe, (std::array<std::uint32_t, 2>{0, 1}));
+    for (const auto path : {"--frame-scan=view.json", "--render-benchmark-screenshot=view.ppm"}) {
+        text[3] = path;
+        arguments[3] = text[3].data();
+        if (text[3].starts_with("--render-benchmark-screenshot")) {
+            text[2] = "--render-benchmark=2";
+            arguments[2] = text[2].data();
+        }
+        EXPECT_TRUE(Luminumbra::Client::ScenarioHarness::ParseRuntimePathOptions(
+                        static_cast<int>(arguments.size()), arguments.data())
+                        .diagnostics.enabled);
+    }
+    std::array<std::string, 6> refused_text{"client",
+                                            "--capture-diagnostics",
+                                            "--scenario=weather_visual_smoke",
+                                            "--frame-scan=view.json",
+                                            "--save-root",
+                                            (directory / "must-not-exist").string()};
+    std::array<char*, 6> refused_arguments{};
+    for (std::size_t i = 0; i < refused_text.size(); ++i) {
+        refused_arguments[i] = refused_text[i].data();
+    }
+    EXPECT_THROW(Luminumbra::Client::ScenarioHarness::ParseRuntimePathOptions(
+                     static_cast<int>(refused_arguments.size()), refused_arguments.data()),
+                 std::invalid_argument);
+    EXPECT_FALSE(std::filesystem::exists(directory / "must-not-exist"));
+}
+
+TEST(DiagnosticBundleWiring, SharedAdapterOwnsEveryAdmittedCapturePath) {
+    const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
+    const auto pipeline = ReadFile(root / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const auto main = ReadFile(root / "src/luminumbra_client/main_client.cpp");
+    const auto sweep = ReadFile(root / "src/luminumbra_client/core/scenarios/WorldVisualSweep.cpp");
+    const auto hooks = ReadFile(root / "src/luminumbra_client/core/ScenarioRunnerCapture.cpp");
+    EXPECT_NE(pipeline.find("DiagnosticFrameCapture::Admitted"), std::string::npos);
+    EXPECT_NE(pipeline.find("scope->unsupported(\"later_deferred_contributors\")"),
+              std::string::npos);
+    EXPECT_NE(pipeline.find("scope->unsupported(\"forward_contributors\")"), std::string::npos);
+    EXPECT_NE(pipeline.find("!m_glass_pane_items.empty()"), std::string::npos);
+    EXPECT_NE(pipeline.find("m_capture_waterfall_geometry)"), std::string::npos);
+    EXPECT_NE(pipeline.find("m_capture_waterfall_geometry = "
+                            "!m_waterfall_pass->waterfall_sites(world).empty()"),
+              std::string::npos);
+    EXPECT_NE(pipeline.find("ending->finish(capture, m_capture_diagnostics, frame, gbuffer())"),
+              std::string::npos);
+    EXPECT_NE(main.find("renderPipeline.set_capture_diagnostics(path_options.diagnostics)"),
+              std::string::npos);
+    EXPECT_NE(main.find("capture_finished = renderPipeline.capture_diagnostics(image)"),
+              std::string::npos);
+    EXPECT_NE(main.find("renderPipeline.with_diagnostic_capture("), std::string::npos);
+    EXPECT_NE(sweep.find("pipeline->with_diagnostic_capture("), std::string::npos);
+    EXPECT_NE(sweep.find("pipeline->end_diagnostic_capture()"), std::string::npos);
+    EXPECT_NE(hooks.find("renderPipeline.end_diagnostic_capture()"), std::string::npos);
+    const auto header = ReadFile(root / "src/luminumbra_client/rendering/RenderPipeline.h");
+    EXPECT_NE(header.find("const bool has_sheets = !geometry.sites.empty()"), std::string::npos);
+    EXPECT_NE(header.find("m_capture_waterfall_geometry = has_sheets"), std::string::npos);
+    EXPECT_NE(
+        header.find("if (!m_capture_diagnostics.enabled) {\n            return write_capture();"),
+        std::string::npos);
+    EXPECT_EQ(pipeline.find("ReadEnvironment(\"LUMIN_CAPTURE_DIAGNOSTICS\")"), std::string::npos);
+}
+
 TEST_F(DiagnosticBundleTest, StreamsTopFirstIdsAndSamePixelAovsAndProbe) {
     MemoryOutput output;
     ASSERT_TRUE(write(output));

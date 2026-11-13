@@ -660,9 +660,22 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
                                           cell.non_black,
                                           cell.water_like_pixels,
                                           cell.water_like_ratio);
-                        cell.produced =
-                            WritePixelBufferPpm(deps.artifact_dir / cell.file, fb_w, fb_h, pixels);
+                        const auto capture_path = deps.artifact_dir / cell.file;
+                        cell.produced = pipeline->with_diagnostic_capture(
+                            capture_path,
+                            [&] {
+                                auto input = pipeline->diagnostic_capture_manifest();
+                                input.simulation_tick = deps.game_session->GetSimulationTickCount();
+                                input.world_seed = deps.game_session->GetMetadata().seed;
+                                input.asset_hash = {deps.game_session->PresetContentHash(),
+                                                    "session_preset_content_identity_unavailable"};
+                                input.asset_hash_scope =
+                                    "terrain_preset_and_resolved_dependency_content_identity";
+                                return input;
+                            },
+                            [&] { return WritePixelBufferPpm(capture_path, fb_w, fb_h, pixels); });
                     }
+                    pipeline->end_diagnostic_capture();
                     cells.push_back(std::move(cell));
                 }
             }
