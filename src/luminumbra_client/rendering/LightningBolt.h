@@ -13,6 +13,8 @@
 // polyline test (no new GL objects): the caller projects these world points to NDC
 // and pushes them as uniforms. See LightingPass / lighting_pass.frag.
 
+#include "LiveStrikeComposer.h"
+
 #include <cstdint>
 #include <vector>
 
@@ -28,6 +30,42 @@ struct LightningBoltGeometry {
     glm::vec3 ground_point = glm::vec3(0.0f);     // strike terminus (world)
     float magnitude = 0.0f;                       // [0,1] strike strength (copied)
 };
+
+// Project the generated world geometry without re-anchoring or reshaping it in
+// screen space. Default generated bolts have 33 channel points and at most three
+// four-point branches. ComposeLiveStrikes applies the fixed upload budget next.
+inline ProjectedLiveStrike ProjectLightningBolt(const LightningBoltGeometry& bolt,
+                                                const glm::mat4& view_projection,
+                                                float pulse) {
+    const auto project = [&](const glm::vec3& point) {
+        const glm::vec4 clip = view_projection * glm::vec4(point, 1.0f);
+        if (!std::isfinite(clip.w) || !(clip.w > 0.0f)) {
+            return kLiveBoltPenUp;
+        }
+        const glm::vec2 ndc(clip.x / clip.w, clip.y / clip.w);
+        if (!std::isfinite(ndc.x) || !std::isfinite(ndc.y)) {
+            return kLiveBoltPenUp;
+        }
+        return ndc;
+    };
+    const auto project_stroke = [&](const std::vector<glm::vec3>& stroke) {
+        std::vector<glm::vec2> points;
+        points.reserve(stroke.size());
+        for (const auto& point : stroke) {
+            points.push_back(project(point));
+        }
+        return points;
+    };
+    ProjectedLiveStrike projected;
+    projected.main_channel = project_stroke(bolt.main_channel);
+    projected.branches.reserve(bolt.branches.size());
+    for (const auto& branch : bolt.branches) {
+        projected.branches.push_back(project_stroke(branch));
+    }
+    projected.strike_ndc = project(bolt.ground_point);
+    projected.pulse = pulse;
+    return projected;
+}
 
 // Parameters controlling the fractal subdivision. Defaults give a readable,
 // believable bolt at the gate's framing; all deterministic.
