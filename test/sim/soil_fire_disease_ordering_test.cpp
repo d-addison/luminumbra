@@ -4,6 +4,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <stdexcept>
 #include <vector>
 
 #include "systems/FireSpreadSystem.h"
@@ -227,6 +229,175 @@ TEST(SoilFireDiseaseOrdering, DiseaseIntegerReductionAndWritesArePermutationInva
         do {
             EXPECT_EQ(DiseaseTrace<true>(permutation, regional, true), expected);
         } while (std::next_permutation(permutation.begin(), permutation.end()));
+    }
+}
+
+void ExpectDiseaseRosterUnchanged(const entt::registry& registry,
+                                  const std::array<entt::entity, 5>& plants,
+                                  const std::array<Comp::PlantHealthComponent, 5>& initial,
+                                  std::size_t rejected,
+                                  const std::optional<std::uint64_t>& rejected_id) {
+    for (std::size_t index = 0; index < plants.size(); ++index) {
+        const auto plant = plants[index];
+        ASSERT_TRUE(registry.valid(plant));
+        EXPECT_TRUE(registry.all_of<Comp::PlantTag>(plant));
+        const auto& health = registry.get<Comp::PlantHealthComponent>(plant);
+        EXPECT_EQ(health.infection, initial[index].infection);
+        EXPECT_EQ(health.resistance, initial[index].resistance);
+        EXPECT_EQ(health.state, initial[index].state);
+        EXPECT_EQ(health.infected_ticks, initial[index].infected_ticks);
+        const auto& transform = registry.get<Comp::TransformComponent>(plant);
+        EXPECT_EQ(transform.position, glm::vec3(static_cast<float>(index), 0, 0));
+        EXPECT_EQ(transform.rotation, glm::quat(1, 0, 0, 0));
+        EXPECT_EQ(transform.scale, glm::vec3(1));
+        const auto* identity = registry.try_get<Comp::SimulationIdentityComponent>(plant);
+        if (index == rejected && !rejected_id) {
+            EXPECT_EQ(identity, nullptr);
+        } else {
+            ASSERT_NE(identity, nullptr);
+            EXPECT_EQ(identity->id, index == rejected ? rejected_id.value_or(0) : 100u + index);
+        }
+    }
+}
+
+void ExpectDiseaseIdentityRefusal(const std::optional<std::uint64_t>& rejected_id,
+                                  bool has_sources) {
+    std::array<Comp::PlantHealthComponent, 5> initial{{
+        {.infection = 400,
+         .resistance = 0,
+         .state = static_cast<std::uint8_t>(Comp::PlantDiseaseState::Infected),
+         .infected_ticks = F::kSickTicks - 1},
+        {.infection = 400,
+         .resistance = 600,
+         .state = static_cast<std::uint8_t>(Comp::PlantDiseaseState::Infected),
+         .infected_ticks = F::kSickTicks - 1},
+        {.infection = 490,
+         .resistance = 0,
+         .state = static_cast<std::uint8_t>(Comp::PlantDiseaseState::Healthy),
+         .infected_ticks = 0},
+        {.infection = 100,
+         .resistance = 600,
+         .state = static_cast<std::uint8_t>(Comp::PlantDiseaseState::Recovered),
+         .infected_ticks = 0},
+        {.infection = 1000,
+         .resistance = 0,
+         .state = static_cast<std::uint8_t>(Comp::PlantDiseaseState::Dead),
+         .infected_ticks = F::kSickTicks},
+    }};
+    if (!has_sources) {
+        for (auto& health : initial) {
+            if (health.state == static_cast<std::uint8_t>(Comp::PlantDiseaseState::Infected)) {
+                health.state = static_cast<std::uint8_t>(Comp::PlantDiseaseState::Healthy);
+                health.infected_ticks = 0;
+            }
+        }
+    }
+    for (const bool regional : {false, true}) {
+        // Every role, including a terminal plant, must be admitted before any writes.
+        for (std::size_t rejected = 0; rejected < initial.size(); ++rejected) {
+            if (rejected_id && *rejected_id == 100u + rejected) {
+                continue;
+            }
+            entt::registry registry;
+            std::array<entt::entity, 5> plants{};
+            for (std::size_t index = 0; index < plants.size(); ++index) {
+                plants[index] = Identified(registry, 100u + index, true);
+                registry.emplace<Comp::PlantTag>(plants[index]);
+                registry.emplace<Comp::PlantHealthComponent>(plants[index], initial[index]);
+                registry.get<Comp::TransformComponent>(plants[index]).position.x =
+                    static_cast<float>(index);
+            }
+            registry.remove<Comp::SimulationIdentityComponent>(plants[rejected]);
+            if (rejected_id) {
+                registry.emplace<Comp::SimulationIdentityComponent>(plants[rejected], *rejected_id);
+            }
+            const std::array due{RegionKey{0, 0}};
+            const auto gate = regional ? RegionConsumerGate(registry, due) : RegionConsumerGate{};
+            auto expected_rng = registry.ctx().emplace<luminumbra::core::DeterministicRng>(123);
+            F::PlantDiseaseStats stats{11, 12, 13, 14, 15};
+            for (unsigned attempt = 0; attempt < 2; ++attempt) {
+                EXPECT_THROW(stats = F::RunPlantDiseaseOnTick<true>(registry, 1, 123, gate),
+                             std::logic_error);
+                EXPECT_EQ(stats.considered, 11);
+                EXPECT_EQ(stats.infected, 12);
+                EXPECT_EQ(stats.new_infections, 13);
+                EXPECT_EQ(stats.recovered, 14);
+                EXPECT_EQ(stats.died, 15);
+                ExpectDiseaseRosterUnchanged(registry, plants, initial, rejected, rejected_id);
+                EXPECT_EQ(registry.ctx().get<luminumbra::core::DeterministicRng>().next_u64(),
+                          expected_rng.next_u64());
+            }
+            // Shipping mode accepts broken IDs, with or without infectious sources.
+            stats = F::RunPlantDiseaseOnTick(registry, 1, 123, gate);
+            EXPECT_EQ(stats.considered, 5);
+            EXPECT_EQ(stats.infected, has_sources ? 1 : 0);
+            EXPECT_EQ(stats.new_infections, has_sources ? 1 : 0);
+            EXPECT_EQ(stats.recovered, has_sources ? 1 : 0);
+            EXPECT_EQ(stats.died, has_sources ? 1 : 0);
+        }
+    }
+}
+
+TEST(SoilFireDiseaseOrdering, CandidateDiseaseRefusesMissingIdentitiesBeforeMutation) {
+    for (const bool has_sources : {false, true}) {
+        ExpectDiseaseIdentityRefusal(std::nullopt, has_sources);
+    }
+}
+
+TEST(SoilFireDiseaseOrdering, CandidateDiseaseRefusesInvalidIdentitiesBeforeMutation) {
+    for (const auto id : {std::uint64_t{0},
+                          std::uint64_t{1} << 63,
+                          (std::uint64_t{1} << 63) + 1,
+                          ~std::uint64_t{0}}) {
+        for (const bool has_sources : {false, true}) {
+            ExpectDiseaseIdentityRefusal(id, has_sources);
+        }
+    }
+}
+
+TEST(SoilFireDiseaseOrdering, CandidateDiseaseRefusesDuplicateIdentitiesBeforeMutation) {
+    // Exercise collisions with both ends of the participant list, excluding self matches.
+    for (const auto id : {std::uint64_t{100}, std::uint64_t{104}}) {
+        for (const bool has_sources : {false, true}) {
+            ExpectDiseaseIdentityRefusal(id, has_sources);
+        }
+    }
+}
+
+TEST(SoilFireDiseaseOrdering, CandidateDiseaseAdmitsBoundaryIdsAndIgnoresNonparticipants) {
+    entt::registry registry;
+    for (const auto id : {std::uint64_t{1}, (std::uint64_t{1} << 63) - 1}) {
+        const auto plant = Identified(registry, id, true);
+        registry.emplace<Comp::PlantTag>(plant);
+        registry.emplace<Comp::PlantHealthComponent>(plant).state =
+            static_cast<std::uint8_t>(Comp::PlantDiseaseState::Dead);
+    }
+    // Each missing required component excludes the entity, even with a colliding ID.
+    for (unsigned missing = 0; missing < 3; ++missing) {
+        const auto entity = Identified(registry, 1, false);
+        if (missing != 0) {
+            registry.emplace<Comp::PlantTag>(entity);
+        }
+        if (missing != 1) {
+            registry.emplace<Comp::PlantHealthComponent>(entity).infection = 100;
+        }
+        if (missing == 2) {
+            registry.remove<Comp::TransformComponent>(entity);
+        }
+    }
+    EXPECT_EQ(F::RunPlantDiseaseOnTick<true>(registry, 1).considered, 2);
+    const auto excluded = Identified(registry, 0, false);
+    registry.emplace<Comp::PlantTag>(excluded);
+    registry.emplace<Comp::PlantHealthComponent>(excluded).infection = 100;
+    registry.get<Comp::TransformComponent>(excluded).position.x = 512;
+    const std::array due{RegionKey{0, 0}};
+    const RegionConsumerGate gate(registry, due);
+    EXPECT_EQ(F::RunPlantDiseaseOnTick<true>(registry, 1, 0, gate).considered, 2);
+    for (const auto entity : registry.view<Comp::PlantHealthComponent>()) {
+        const auto& health = registry.get<Comp::PlantHealthComponent>(entity);
+        if (health.state == static_cast<std::uint8_t>(Comp::PlantDiseaseState::Healthy)) {
+            EXPECT_EQ(health.infection, 100);
+        }
     }
 }
 } // namespace

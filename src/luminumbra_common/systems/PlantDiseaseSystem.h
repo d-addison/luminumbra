@@ -14,7 +14,7 @@
 //
 // DETERMINISM (this changes sim state -> world_hash):
 //   * Each source contribution becomes an integer before summation. Legacy
-//     traversal sorts runtime handles; the candidate needs no ordering (proof below).
+//     traversal sorts runtime handles; the candidate validates common identities.
 //   * TWO-PHASE: we snapshot the infected set FIRST, then mutate health, so a
 //     plant infected THIS tick does not retroactively infect its neighbours within
 //     the same tick (order-independent spread).
@@ -40,6 +40,7 @@
 #include "../core/DeterministicMath.h" // Sqrt (IEEE-deterministic)
 #include "../core/DeterministicRng.h"  // reserved (offset +20) for a stochastic variant
 
+#include "../simulation/SimulationParticipantOrder.h"
 #include "RegionConsumerGate.h"
 
 namespace luminumbra::foliage {
@@ -100,7 +101,8 @@ inline std::uint16_t SatSub(std::uint16_t a, std::uint32_t b) {
 // The candidate traversal is permutation invariant: each source contribution is
 // converted to an integer before summation (unsigned addition is associative),
 // and each health write reads only the pre-tick source snapshot. There are no
-// ordered events or entity destruction here. Keep the legacy sort until activation.
+// ordered events or entity destruction here. Candidate ordering validates identity
+// admission before the snapshot; keep the legacy sort until activation.
 template<bool StableIdentity = false>
 inline PlantDiseaseStats
 RunPlantDiseaseOnTick(entt::registry& reg,
@@ -121,7 +123,9 @@ RunPlantDiseaseOnTick(entt::registry& reg,
             ents.push_back(e);
         }
     }
-    if constexpr (!StableIdentity) {
+    if constexpr (StableIdentity) {
+        ::Luminumbra::simulation::OrderSimulationParticipants(reg, ents);
+    } else {
         std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
             return entt::to_integral(a) < entt::to_integral(b);
         });
