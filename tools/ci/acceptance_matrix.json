@@ -1949,7 +1949,7 @@
     {
       "id": "sim.budget-capture",
       "source": "docs/sim-budget-telemetry.md",
-      "statement": "Per-system simulation tick work counts must be captured deterministically on representative worlds. SimBudgetCaptureContract validates synthetic artifacts and command construction; representative-world capture receipts remain required.",
+      "statement": "Per-system simulation tick work counts must be captured deterministically on representative worlds. SimBudgetCaptureContract validates synthetic artifacts and command construction; retained populated default/mountains/archipelago before/after captures with per-stage p50/p95/p99 durations and measured workload identities remain PENDING.",
       "status": "needs-native-run",
       "evidence": [
         {
@@ -1970,7 +1970,7 @@
     {
       "id": "sim.budget-enforcement",
       "source": "docs/sim-budget-telemetry.md",
-      "statement": "Synthetic caps are enforced in SimBudgetProfileTest and SimBudgetTelemetry: stage work above the cap is a violation, equality passes, missing residency samples remain unevaluated, and synthetic smoke artifacts fail on a stage violation. Production enforcement remains deferred: all committed baseline limits are null and CI runs check_sim_budgets.py without --require-complete. Measured limits must be pinned and --require-complete enabled in CI before production coverage can be claimed.",
+      "statement": "Synthetic caps are enforced in SimBudgetProfileTest and SimBudgetTelemetry: stage work above the cap is a violation, equality passes, missing residency samples remain unevaluated, and synthetic smoke artifacts fail on a stage violation. Performance CI captures shipping simulation defaults on populated default/mountains/archipelago worlds with seed 1337, 600 ticks, surface radius 1 and collision radius 1, then runs check_sim_budgets.py with --require-complete against the committed baseline. Each preset has nonnegative integer max_work_per_tick limits for all 30 stages and the per-tick total (221289), including zero limits for idle stages; wind and weather are explicitly expected inactive on the combined wind_weather path. The checker rejects stage or total overages and incomplete entries or unexpected inactivity; durations remain advisory. Revision and fixture hash remain unpinned. Representative-world capture, duration and equality qualification remains PENDING.",
       "status": "partial",
       "evidence": [
         {
@@ -1991,8 +1991,16 @@
         },
         {
           "kind": "script",
-          "ref": "tools/perf/baselines/sim-budgets.json",
-          "planned": "pin measured limits and workload identity, then enable --require-complete in CI; owner: ac"
+          "ref": "tools/perf/baselines/sim-budgets.json"
+        },
+        {
+          "kind": "script",
+          "ref": ".github/workflows/performance.yml"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/v0.3-acceptance.md",
+          "planned": "retain representative-world before/after captures, per-stage p50/p95/p99 durations, measured workload identities and telemetry-on/off state-hash and replay-work equality receipts; owner: ac"
         }
       ],
       "requirements": [
@@ -3091,7 +3099,7 @@
     {
       "id": "iss.129",
       "source": "issue #129",
-      "statement": "Per-system simulation tick budgets must be measured on representative worlds and proposed from observed work. Capture and proposal tooling is available and tested with synthetic inputs; representative-world capture and proposal receipts remain required.",
+      "statement": "Per-system simulation tick budgets must be measured on representative worlds and proposed from observed work. Capture and proposal tooling is available and tested with synthetic inputs. Complete pinned integer work limits for the 600-tick shipping workload do not qualify representative-world captures, duration distributions or telemetry-on/off state-hash and replay-work equality; those remain PENDING. Retain populated default/mountains/archipelago before/after capture and proposal receipts, per-stage p50/p95/p99 durations and measured workload identities. Equality qualification includes the existing populated 3,600-tick parity configurations with active regions enabled and disabled.",
       "status": "needs-native-run",
       "evidence": [
         {
@@ -3159,12 +3167,13 @@
     {
       "id": "iss.141",
       "source": "issue #141",
-      "statement": "The expanded v0.3 contract requires native qualification and production simulation and residency budget enforcement. Measured simulation limits and --require-complete in CI remain outstanding; residency classes are unevaluated until the engine emits samples. The aggregate v0.3 driver does not evaluate simulation or residency budgets.",
+      "statement": "The expanded v0.3 contract requires native qualification and production simulation and residency budget enforcement. Performance CI already enforces complete pinned integer stage and total work limits for the 600-tick shipping workload with --require-complete. Representative-world capture and equality qualification remains PENDING; residency classes without engine samples remain unevaluated. The aggregate v0.3 driver does not evaluate simulation or residency budgets; separate budget qualification remains required.",
       "status": "needs-native-run",
       "evidence": [
         {
           "kind": "script",
-          "ref": "tools/perf/check_residency.py"
+          "ref": "tools/perf/check_residency.py",
+          "planned": "production residency samples and separate budget qualification remain outstanding; owner: ac"
         },
         {
           "kind": "ctest",
@@ -3172,14 +3181,25 @@
         },
         {
           "kind": "script",
-          "ref": "tools/perf/baselines/sim-budgets.json",
-          "planned": "pin measured limits and require complete CI checks; production residency samples and separate budget qualification are outstanding; owner: ac"
+          "ref": "tools/perf/baselines/sim-budgets.json"
         },
         {
           "kind": "native",
           "ref": "tools/gates/run-v03-acceptance.ps1",
           "command": "pwsh tools/gates/run-v03-acceptance.ps1 -Package <dir> -FixtureDir <dir> -OutDir <dir> -BuildDir <dir> -PerfEvidence <file> -AudioChecklist <file>",
           "receipt_schema": "luminumbra.v03_acceptance.v1"
+        },
+        {
+          "kind": "script",
+          "ref": "tools/perf/check_sim_budgets.py"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SimBudgetGateContract"
+        },
+        {
+          "kind": "script",
+          "ref": ".github/workflows/performance.yml"
         }
       ],
       "requirements": [
