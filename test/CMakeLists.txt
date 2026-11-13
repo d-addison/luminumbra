@@ -1626,6 +1626,7 @@ add_executable(frontier_gates_test
     scripting/aether_script_binding_test.cpp
     fields/scalar_field_diffusion_gate_test.cpp
     fields/energy_field_state_test.cpp
+    fields/source_identity_test.cpp
     persistence/world_save_service_test.cpp
     persistence/plant_persistence_test.cpp
     persistence/world_save_region_format_test.cpp
