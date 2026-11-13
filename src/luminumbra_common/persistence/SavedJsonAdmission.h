@@ -235,22 +235,29 @@ private:
 class SavedJsonReadScope {
 public:
     SavedJsonReadScope() {
-        ++s_cache.m_depth;
+        ++cache().m_depth;
     }
     SavedJsonReadScope(const SavedJsonReadScope&) = delete;
     SavedJsonReadScope& operator=(const SavedJsonReadScope&) = delete;
     ~SavedJsonReadScope() {
-        if (--s_cache.m_depth == 0) {
-            s_cache.m_entries.clear();
-            s_cache.m_bytes = 0;
+        SavedJsonReadCache& slot = cache();
+        if (--slot.m_depth == 0) {
+            slot.m_entries.clear();
+            slot.m_bytes = 0;
         }
     }
     static SavedJsonReadCache* active() {
-        return s_cache.m_depth == 0 ? nullptr : &s_cache;
+        SavedJsonReadCache& slot = cache();
+        return slot.m_depth == 0 ? nullptr : &slot;
     }
 
 private:
-    static inline thread_local SavedJsonReadCache s_cache;
+    // A function-local slot: MinGW emits a non-COMDAT TLS init function for an
+    // inline thread_local data member, which fails to link across translation units.
+    static SavedJsonReadCache& cache() {
+        thread_local SavedJsonReadCache slot;
+        return slot;
+    }
 };
 
 inline std::atomic<std::uint64_t>& SavedJsonParseCounter() {
