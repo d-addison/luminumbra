@@ -50,15 +50,8 @@ public:
                                          !std::isfinite(intent.extra_span->max_y) ||
                                          intent.extra_span->min_y > intent.extra_span->max_y)))
             return fail(FarVolumeFacadeError::InvalidIntent);
-        if (!ValidCaves(authority_.caves) ||
-            (authority_.numeric != FarVolumeNumericProfile::RawFloat &&
-             authority_.numeric != FarVolumeNumericProfile::LegacySigned16) ||
-            !authority_.height || !authority_.density)
-            return fail(FarVolumeFacadeError::InvalidAuthority);
-        dimensions_ = *d;
-        if (!TileOrigin(intent.key.x, d->tile_edge_meters, origin_x_) ||
-            !TileOrigin(intent.key.z, d->tile_edge_meters, origin_z_))
-            return fail(FarVolumeFacadeError::CoordinateRange);
+        if (!prepare(intent.key))
+            return false;
         if (limits_.max_height_samples < kTileSide * kTileSide)
             return fail(FarVolumeFacadeError::HeightLimit);
         heights_.resize(kHeightSide * kHeightSide);
@@ -93,6 +86,50 @@ public:
         request = {intent.key,
                    {first * d->brick_edge_meters, last * d->brick_edge_meters},
                    authority_.field_identity};
+        return true;
+    }
+
+    bool compile_request(const FarVolumeCoverageIntent& intent,
+                         const FarVolumeCompilationLimits&,
+                         FarVolumeRequest& request) {
+        return resolve(intent, request);
+    }
+
+    bool compile_request(const FarVolumeRequest& input,
+                         const FarVolumeCompilationLimits& limits,
+                         FarVolumeRequest& request) {
+        const auto tier = FarTierAt(input.key.tier);
+        if (!tier || input.span.min_y >= input.span.max_y ||
+            input.span.min_y % tier->brick_edge_meters != 0 ||
+            input.span.max_y % tier->brick_edge_meters != 0)
+            return fail(FarVolumeFacadeError::InvalidIntent);
+        const auto step = static_cast<std::int64_t>(tier->sample_spacing_meters);
+        if (input.span.min_y <= -kCoordinateLimit + step ||
+            input.span.max_y >= kCoordinateLimit - step)
+            return fail(FarVolumeFacadeError::CoordinateRange);
+        if (input.field_identity != authority_.field_identity)
+            return fail(FarVolumeFacadeError::InvalidAuthority);
+        if (!prepare(input.key))
+            return false;
+        // The exact-coordinate domain bounds subtraction and all products:
+        // fewer than 2^24 metres, 2^20 layers and 2^30 candidate bricks.
+        const auto layers = static_cast<std::uint64_t>((input.span.max_y - input.span.min_y) /
+                                                       dimensions_.brick_edge_meters);
+        const auto across = static_cast<std::uint64_t>(dimensions_.tile_edge_meters /
+                                                       dimensions_.brick_edge_meters);
+        const auto candidates = layers * across * across;
+        if (candidates > limits.generation.max_candidate_bricks) {
+            failure_.generation = FarVolumeBuildError::WorkLimit;
+            return fail(FarVolumeFacadeError::GenerationRefused);
+        }
+        if (limits_.max_height_samples == 0)
+            return fail(FarVolumeFacadeError::HeightLimit);
+        if (candidates * kFarVolumeBrickSamples > limits_.max_density_samples)
+            return fail(FarVolumeFacadeError::DensityLimit);
+        // Fixed 131x131 columns include the complete horizontal normal halo.
+        // Explicit spans skip surface discovery; heights are filled on demand.
+        heights_.resize(kHeightSide * kHeightSide);
+        request = input;
         return true;
     }
 
@@ -146,6 +183,22 @@ public:
     }
 
 private:
+    bool prepare(const FarVolumeTileKey& key) {
+        if (!ValidCaves(authority_.caves) ||
+            (authority_.numeric != FarVolumeNumericProfile::RawFloat &&
+             authority_.numeric != FarVolumeNumericProfile::LegacySigned16) ||
+            !authority_.height || !authority_.density)
+            return fail(FarVolumeFacadeError::InvalidAuthority);
+        const auto tier = FarTierAt(key.tier);
+        if (!tier)
+            return fail(FarVolumeFacadeError::InvalidIntent);
+        dimensions_ = *tier;
+        if (!TileOrigin(key.x, tier->tile_edge_meters, origin_x_) ||
+            !TileOrigin(key.z, tier->tile_edge_meters, origin_z_))
+            return fail(FarVolumeFacadeError::CoordinateRange);
+        return true;
+    }
+
     std::optional<float> height(std::int64_t x, std::int64_t z) {
         const auto spacing = static_cast<std::int64_t>(dimensions_.sample_spacing_meters);
         if (!Coordinate(x) || !Coordinate(z) || x < origin_x_ - spacing ||
@@ -440,12 +493,21 @@ bool CompileFarVolume(const FarVolumeCoverageIntent& intent,
     return CompileFarVolumeCharged(intent, authority, limits, FarVolumeMemory{}, output, failure);
 }
 
-bool CompileFarVolumeCharged(const FarVolumeCoverageIntent& intent,
-                             const FarVolumeAuthority& authority,
-                             const FarVolumeCompilationLimits& limits,
-                             const FarVolumeMemory& memory,
-                             FarVolumeCompilation& output,
-                             FarVolumeFacadeFailure* failure) {
+namespace {
+const FarVolumeCoverageIntent& CompilationIntent(const FarVolumeCoverageIntent& intent) {
+    return intent;
+}
+FarVolumeCoverageIntent CompilationIntent(const FarVolumeRequest& request) {
+    return {request.key, {}};
+}
+
+template<class Input>
+bool CompileWith(const Input& input,
+                 const FarVolumeAuthority& authority,
+                 const FarVolumeCompilationLimits& limits,
+                 const FarVolumeMemory& memory,
+                 FarVolumeCompilation& output,
+                 FarVolumeFacadeFailure* failure) {
     try {
         FarVolumeMemoryScope scope(memory, true);
         if (!scope.valid()) {
@@ -465,10 +527,10 @@ bool CompileFarVolumeCharged(const FarVolumeCoverageIntent& intent,
             return false;
         };
         FarVolumeRequest request;
-        if (!session.resolve(intent, request))
+        if (!session.compile_request(input, limits, request))
             return publish_failure();
         FarVolumeCompilation candidate;
-        candidate.intent = intent;
+        candidate.intent = CompilationIntent(input);
         candidate.caves = session.authority().caves;
         candidate.numeric = session.authority().numeric;
         const FarVolumeSampler sampler = [&](const FarVolumePosition& p) {
@@ -525,6 +587,34 @@ bool CompileFarVolumeCharged(const FarVolumeCoverageIntent& intent,
                         {}};
         return false;
     }
+}
+
+} // namespace
+
+bool CompileFarVolumeCharged(const FarVolumeCoverageIntent& intent,
+                             const FarVolumeAuthority& authority,
+                             const FarVolumeCompilationLimits& limits,
+                             const FarVolumeMemory& memory,
+                             FarVolumeCompilation& output,
+                             FarVolumeFacadeFailure* failure) {
+    return CompileWith(intent, authority, limits, memory, output, failure);
+}
+
+bool CompileFarVolumeSpan(const FarVolumeRequest& request,
+                          const FarVolumeAuthority& authority,
+                          const FarVolumeCompilationLimits& limits,
+                          FarVolumeCompilation& output,
+                          FarVolumeFacadeFailure* failure) {
+    return CompileFarVolumeSpanCharged(request, authority, limits, {}, output, failure);
+}
+
+bool CompileFarVolumeSpanCharged(const FarVolumeRequest& request,
+                                 const FarVolumeAuthority& authority,
+                                 const FarVolumeCompilationLimits& limits,
+                                 const FarVolumeMemory& memory,
+                                 FarVolumeCompilation& output,
+                                 FarVolumeFacadeFailure* failure) {
+    return CompileWith(request, authority, limits, memory, output, failure);
 }
 
 bool FarVolumeLegacyChecksum(const FarVolumeTile& tile, FarCaveMode caves, std::uint32_t& output) {

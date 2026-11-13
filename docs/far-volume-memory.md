@@ -33,6 +33,7 @@ while the old one is still held, so the peak is old plus new.
 
 - `BuildFarVolumeTileCharged`, `MeshFarVolumeTileCharged`
 - `ResolveFarVolumeCoverageCharged`, `CompileFarVolumeCharged`
+- `CompileFarVolumeSpanCharged`, `CompilePristineFarVolumeSpanCharged`
 - `FarVolumeLegacyChecksumCharged`
 
 The existing `BuildFarVolumeTile`, `MeshFarVolumeTile`, `ResolveFarVolumeCoverage`,
@@ -119,13 +120,38 @@ counts, separately from contiguous bytes. Actual node and buffer allocations mus
 still use the canonical charged APIs and their byte pool. This admission is not an
 aggregate byte reservation for concurrent or retained pages.
 
-Explicit-span charged facade compilation, full-span/page geometry equivalence,
-seam qualification and production page ownership remain separate work. Registered
-planner regressions await native execution.
+`CompileFarVolumeSpan` and `CompileFarVolumeSpanCharged` compile an exact canonical
+request through the existing authority session. The planner supplies page requests;
+the facade validates the canonical key, brick-aligned nonempty span and complete
+normal halo in the exact-coordinate domain. Its field identity must match the
+supplied authority. They do not discover or extend coverage. Heights are cached on demand
+in the same fixed 131x131 cache, including the horizontal normal halo. The output's
+tile and mesh retain the exact request; its coverage intent is the key with no
+extra span. Limits apply to the whole requested span, including spans covering
+several planner windows. Invalid requests, identity/memory bindings and insufficient
+generation candidate/density budgets refuse before callbacks; remaining limits
+are enforced during compilation. All allocations use the existing charged path,
+and failures preserve output, retained lease and pool usage.
+
+`CompilePristineFarVolumeSpan` and `CompilePristineFarVolumeSpanCharged` share the
+pristine adapter and hold one world-generation sampling scope through generation,
+meshing, normal halos and checksum work. Their charged and null-pool behavior
+matches the generic wrappers. These explicit-span paths remain dormant: only
+tests call them. Field purity and identity across separate calls remain the
+caller's responsibility; resident density and material disagreement with the
+mesher's authority is refused even at a page boundary.
+
+Registered regressions compare full-span and paged bricks and world-space triangle
+multisets, including normals, materials and winding. They cover Y faces, XZ edges
+and corners, a torus crossing zero, boundary material disagreement, invalid inputs,
+pre-callback refusal, cancellation and every allocation admission in a sparse
+mixed-page fixture for both numeric profiles. Planner and facade regressions await
+native execution. Production page ownership, aggregate retained-page accounting,
+streaming and native seam qualification remain separate work.
 
 ## Out of scope
 
-- Queue and worker integration, and a charged `CompilePristineFarVolume` (needs the world).
+- Page queue and worker integration.
 - Render-mesh conversion buffers.
 - Residency eviction policy.
 - Approved runtime byte caps. Limits are supplied by the caller.
