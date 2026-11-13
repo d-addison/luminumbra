@@ -2,6 +2,7 @@
 
 #include "FarVolumeResidency.h"
 #include "FarWorldSelection.h"
+#include "world/FarWorldAuthorityProducer.h"
 #include <memory>
 #include <nlohmann/json_fwd.hpp>
 #include <optional>
@@ -16,12 +17,19 @@ struct FarWorldTierDiagnostic {
     std::uint64_t evicted_range = 0, evicted_budget = 0, stale_rebuilds = 0;
     std::size_t draws = 0, indices = 0, draw_refusals = 0;
 };
+enum class FarWorldAuthorityKind {
+    Fixture,
+    Session
+};
+struct FarWorldHandoffDiagnosticSnapshot;
 struct FarWorldTileDiagnostic {
     World::FarBuildIdentity desired, built;
     World::FarVolumeCoverageIntent intent;
     World::FarVolumeRequest request;
     World::FarTileStatus coverage;
     FarVolumeEligibility eligibility = FarVolumeEligibility::Wanted;
+    std::uint64_t accepted_content_identity = 0;
+    World::FarVolumeNumericProfile numeric = World::FarVolumeNumericProfile::LegacySigned16;
     bool has_pair = false;
     bool water_complete = false, water_known_dry = false;
     std::uint64_t terrain_indices = 0, water_indices = 0;
@@ -36,6 +44,10 @@ enum class FarWorldSubmissionRefusal {
 };
 struct FarWorldDiagnosticSnapshot {
     FarWorldSelection selection;
+    FarWorldAuthorityKind authority_kind = FarWorldAuthorityKind::Fixture;
+    std::uint64_t serving_serial = 0, target_serial = 0, submitted_water_indices = 0;
+    bool latest_target_ready = false;
+    World::FarWorldAuthorityProducer::FrozenResult source_failure;
     FarWorldSubmissionRefusal submission_refusal = FarWorldSubmissionRefusal::None;
     std::uint64_t world_epoch = 0, frame = 0, content_identity = 0, bake_generation = 0;
     float far_plane = World::kLegacyFarPlaneMeters;
@@ -81,6 +93,12 @@ constexpr FarWorldSelection FarWorldSubmissionOverride(FarWorldSelection selecte
 const char* FarWorldModeName(FarWorldMode mode) noexcept;
 const char* FarWorldRefusalName(FarWorldRefusal refusal) noexcept;
 const char* FarWorldSubmissionRefusalName(FarWorldSubmissionRefusal refusal) noexcept;
+// Total projection of typed producer errors; handoff refusals retain their exact enum.
+FarWorldRefusal
+FarWorldProducerRefusal(const World::FarWorldAuthorityProducer::FrozenResult&) noexcept;
+void ProjectFarWorldSessionDiagnostic(const FarWorldHandoffDiagnosticSnapshot&,
+                                      World::FarVolumeNumericProfile,
+                                      FarWorldDiagnosticSnapshot&) noexcept;
 nlohmann::json FarWorldDiagnosticJson(const FarWorldDiagnosticSnapshot& snapshot);
 // Pure readiness: the independent gate additionally checks the expected set.
 // Timeout is inclusive at 90 seconds; incomplete/stale/spans never qualify.

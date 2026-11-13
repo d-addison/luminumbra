@@ -1,4 +1,5 @@
 #include "FarWorldRenderer.h"
+#include "FarWorldHandoffRenderer.h"
 #include "core/JobSystem.h"
 #include "luminumbra_client/rendering/FarVolumeBuildQueue.h"
 #include "luminumbra_client/rendering/FarVolumeGpuBackend.h"
@@ -215,19 +216,114 @@ FarWorldRenderer::BindFixture(JobSystem& jobs,
         throw;
     }
 }
+FarWorldRefusal FarWorldRenderer::BindSession(JobSystem& jobs,
+                                              std::uint64_t epoch,
+                                              FarCaveMode caves,
+                                              FarVolumeNumericProfile numeric,
+                                              const FarWorldExperimentalLimits& limits) {
+    CheckOwner();
+    Drain();
+    if (!requested_caves_) {
+        return refusal_ = FarWorldRefusal::InvalidCavePolicy;
+    }
+    if (!limits.Complete()) {
+        return refusal_ = FarWorldRefusal::MissingLimits;
+    }
+    if (!epoch || (numeric != FarVolumeNumericProfile::RawFloat &&
+                   numeric != FarVolumeNumericProfile::LegacySigned16)) {
+        return refusal_ = FarWorldRefusal::InvalidRequests;
+    }
+    if (caves != FarCaveMode::BandLimited && caves != FarCaveMode::BoxFiltered) {
+        return refusal_ = FarWorldRefusal::InvalidCavePolicy;
+    }
+    if (caves != *requested_caves_) {
+        return refusal_ = FarWorldRefusal::CavePolicyMismatch;
+    }
+    if (!driver_ || !driver_->ValidContext()) {
+        return refusal_ = FarWorldRefusal::BackendUnavailable;
+    }
+    if (limits.budgets.bytes.back() <
+        sizeof(*this) + sizeof(FarWorldHandoffRenderer) + sizeof(FarVolumeHandoff)) {
+        return refusal_ = FarWorldRefusal::AdmissionFailed;
+    }
+    try {
+        session_ = std::make_unique<FarWorldHandoffRenderer>();
+        session_->InstallBackend(std::move(driver_));
+        if (!session_->Bind(jobs, epoch, caves, numeric, limits.budgets, limits.residency)) {
+            Drain();
+            return refusal_ = FarWorldRefusal::AdmissionFailed;
+        }
+        integration_charge_.emplace(*session_->MemoryPool(kFarTierCount));
+        if (!integration_charge_->TryCharge(sizeof(*this))) {
+            Drain();
+            return refusal_ = FarWorldRefusal::AdmissionFailed;
+        }
+        limits_ = limits;
+        world_epoch_ = epoch;
+        session_caves_ = caves;
+        session_numeric_ = numeric;
+        stopping_ = false;
+        // The binding has no eligible immutable target until staging succeeds.
+        refusal_ = FarWorldRefusal::ImmutableAuthorityUnavailable;
+        return FarWorldRefusal::None;
+    } catch (const std::bad_alloc&) {
+        Drain();
+        return refusal_ = FarWorldRefusal::AdmissionFailed;
+    }
+}
+bool FarWorldRenderer::StageSessionTarget(const FarWorldAuthorityProducer& producer,
+                                          const Systems::SHIELD_WorldSystem& world,
+                                          std::span<const FarSessionHandoffTile> tiles,
+                                          const FarWorldAuthorityProducer::FrozenPolicy& policy,
+                                          const FarFrozenCaptureLimits& limits,
+                                          const FarFrozenCaptureWork::Counts& samples) {
+    CheckOwner();
+    if (!session_) {
+        refusal_ = FarWorldRefusal::InvalidRequests;
+        return false;
+    }
+    const bool accepted =
+        session_->StageSessionTarget(producer, world, tiles, policy, limits, samples);
+    refusal_ = session_->AdmissionRefusal();
+    return accepted;
+}
+const FarWorldHandoffDiagnosticSnapshot* FarWorldRenderer::SessionDiagnostic() const {
+    CheckOwner();
+    return session_ ? &session_->Diagnostic() : nullptr;
+}
+void FarWorldRenderer::BeginLiveOwnership(std::uint64_t frame, std::size_t limit) {
+    CheckOwner();
+    if (session_) {
+        session_->BeginLiveOwnership(frame, limit);
+    } else {
+        ownership_.Begin(frame, limit);
+    }
+}
+bool FarWorldRenderer::AddLiveUpload(const FarWorldLiveUpload& upload) {
+    CheckOwner();
+    return session_ ? session_->AddLiveUpload(upload) : ownership_.Add(upload);
+}
+bool FarWorldRenderer::FinishLiveOwnership() {
+    CheckOwner();
+    return session_ ? session_->FinishLiveOwnership() : ownership_.Finish();
+}
+const FarWorldOwnership& FarWorldRenderer::LiveOwnership() const noexcept {
+    return session_ ? session_->LiveOwnership() : ownership_;
+}
 FarWorldSelection FarWorldRenderer::Selection(FarWorldPurpose purpose,
                                               bool enabled) const noexcept {
     auto prerequisite = refusal_;
     if (requested_ == FarWorldMode::Ladder && !requested_caves_)
         prerequisite = FarWorldRefusal::InvalidCavePolicy;
-    if (prerequisite == FarWorldRefusal::None && (!driver_ || !driver_->ValidContext()))
+    if (prerequisite == FarWorldRefusal::None &&
+        !(session_ ? session_->BackendAvailable() : driver_ && driver_->ValidContext()))
         prerequisite = FarWorldRefusal::BackendUnavailable;
     return SelectFarWorld(requested_, purpose, prerequisite, enabled);
 }
 
 FarWorldCavePolicy FarWorldRenderer::CavePolicy(const FarWorldSelection& selection) const noexcept {
     return SelectFarWorldCavePolicy(
-        requested_caves_, fixture_ ? std::optional(fixture_->caves()) : std::nullopt, selection);
+        requested_caves_, fixture_ ? std::optional(fixture_->caves()) : session_caves_, selection);
 }
 
 FarVolumeAuthorityProducer FarWorldRenderer::Producer() const {
@@ -385,6 +481,19 @@ bool FarWorldRenderer::PrepareFrame(std::uint64_t frame,
                                     const std::array<double, 3>& camera,
                                     std::span<const FarVolumeCoverageSpan> extensions) {
     CheckOwner();
+    if (session_) {
+        if (stopping_ || !extensions.empty() ||
+            Selection(FarWorldPurpose::World).effective != FarWorldMode::Ladder ||
+            (advanced_frame_ && frame <= *advanced_frame_)) {
+            return false;
+        }
+        if (!session_->AdvanceFrame(frame, camera, limits_.frame)) {
+            return false;
+        }
+        advanced_frame_ = frame;
+        last_frame_ = session_->Diagnostic().upload;
+        return true;
+    }
     if (!residency_ || Selection(FarWorldPurpose::World).effective != FarWorldMode::Ladder)
         return false;
     if (advanced_frame_ && frame <= *advanced_frame_)
@@ -560,6 +669,20 @@ FarWorldSubmitStats FarWorldRenderer::Submit(const std::array<double, 3>& camera
                                              const FarWorldPrepareDraw& prepare) {
     CheckOwner();
     FarWorldSubmitStats stats;
+    if (session_) {
+        if (stopping_ || Selection(FarWorldPurpose::World).effective != FarWorldMode::Ladder) {
+            return stats;
+        }
+        submitting_ = true;
+        try {
+            stats = session_->Submit(camera, prepare);
+        } catch (...) {
+            submitting_ = false;
+            throw;
+        }
+        submitting_ = false;
+        return stats;
+    }
     for (auto& tier : diagnostic_tiers_) {
         tier.resident.submitted_water_indices = 0;
         tier.draws = 0;
@@ -669,6 +792,11 @@ void FarWorldRenderer::CaptureDiagnostic(FarWorldSelection selection,
     diagnostic_.submission_occurred = draws != 0;
     if (advanced && selection.effective == FarWorldMode::Ladder)
         diagnostic_.upload = last_frame_;
+    if (session_) {
+        ProjectFarWorldSessionDiagnostic(session_->Diagnostic(), session_numeric_, diagnostic_);
+        diagnostic_.source_failure = session_->SessionCaptureFailure();
+        return;
+    }
     if (fixture_) {
         if (selection.effective == FarWorldMode::Ladder) {
             diagnostic_.water_capability = fixture_->WaterCapability();
@@ -739,6 +867,14 @@ void FarWorldRenderer::Drain() {
     fixture_.reset();
     ownership_gpu_charge_.reset();
     ownership_.Begin(0);
+    if (session_) {
+        // Keep the memory domain alive through draining and the facade lease.
+        const auto pool = session_->MemoryPool(kFarTierCount);
+        driver_ = session_->TakeBackend();
+        integration_charge_.reset();
+        session_.reset();
+    }
+    session_caves_.reset();
     // Free retained scratch before its charge, including failed bindings.
     std::vector<World::FarTileKey>{}.swap(wanted_);
     integration_charge_.reset();

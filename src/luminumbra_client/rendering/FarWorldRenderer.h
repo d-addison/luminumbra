@@ -7,6 +7,9 @@
 #include "FarWorldSelection.h"
 
 namespace Luminumbra::Rendering {
+class FarWorldHandoffRenderer;
+struct FarSessionHandoffTile;
+struct FarWorldHandoffDiagnosticSnapshot;
 
 // Explicit immutable fixture authority only. Implementations and all reachable
 // data must be bounded, pure, immutable and worker safe; never wrap a mutable
@@ -74,6 +77,21 @@ public:
                                 std::uint64_t world_epoch,
                                 std::uint64_t bake_generation,
                                 const FarWorldExperimentalLimits& limits);
+    // Explicit inactive session seam. Capture uses the adapter's owning pools;
+    // only immutable SessionRender images enter this binding.
+    FarWorldRefusal BindSession(JobSystem& jobs,
+                                std::uint64_t world_epoch,
+                                World::FarCaveMode caves,
+                                World::FarVolumeNumericProfile numeric,
+                                const FarWorldExperimentalLimits& limits);
+    bool StageSessionTarget(const World::FarWorldAuthorityProducer& producer,
+                            const Systems::SHIELD_WorldSystem& world,
+                            std::span<const FarSessionHandoffTile> tiles,
+                            const World::FarWorldAuthorityProducer::FrozenPolicy& policy,
+                            const World::FarFrozenCaptureLimits& limits,
+                            const World::FarFrozenCaptureWork::Counts& transaction_samples);
+    // Value diagnostics only; the pointer lasts until the binding drains.
+    const FarWorldHandoffDiagnosticSnapshot* SessionDiagnostic() const;
     FarWorldSelection Selection(FarWorldPurpose purpose, bool enabled = true) const noexcept;
     // Pass the pipeline's final selection so shader refusal/preview overrides
     // are reflected in effective policy. No borrowed authority is exposed.
@@ -116,21 +134,10 @@ public:
     void Shutdown();
     // Publication is independent of the culler. The pipeline feeds every prepared
     // snapshot after live GPU management; only complete masks permit submission.
-    void BeginLiveOwnership(std::uint64_t frame, std::size_t limit = kFarWorldLiveCellLimit) {
-        CheckOwner();
-        ownership_.Begin(frame, limit);
-    }
-    bool AddLiveUpload(const FarWorldLiveUpload& upload) {
-        CheckOwner();
-        return ownership_.Add(upload);
-    }
-    bool FinishLiveOwnership() {
-        CheckOwner();
-        return ownership_.Finish();
-    }
-    const FarWorldOwnership& LiveOwnership() const noexcept {
-        return ownership_;
-    }
+    void BeginLiveOwnership(std::uint64_t frame, std::size_t limit = kFarWorldLiveCellLimit);
+    bool AddLiveUpload(const FarWorldLiveUpload& upload);
+    bool FinishLiveOwnership();
+    const FarWorldOwnership& LiveOwnership() const noexcept;
     const FarVolumeFrameResult& LastFrame() const noexcept {
         return last_frame_;
     }
@@ -177,6 +184,9 @@ private:
         diagnostic_budget_before_{};
     // Explicit destruction in Drain, then Shutdown: residency -> authority and
     // integration charges -> memory -> driver. Driver lives through GPU release.
+    std::unique_ptr<FarWorldHandoffRenderer> session_;
+    std::optional<World::FarCaveMode> session_caves_;
+    World::FarVolumeNumericProfile session_numeric_ = World::FarVolumeNumericProfile::RawFloat;
     std::unique_ptr<FarVolumeGpuDriver> driver_;
     std::unique_ptr<World::FarVolumeTierMemory> memory_;
     std::optional<World::FarVolumeMemoryLease> integration_charge_;

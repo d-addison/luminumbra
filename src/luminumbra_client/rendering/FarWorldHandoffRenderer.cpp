@@ -128,15 +128,75 @@ FarWorldHandoffRenderer::MemoryPool(std::size_t tier) const {
 }
 bool FarWorldHandoffRenderer::StageTarget(const FarHandoffManifest& manifest) {
     Guard const guard(*this);
-    if (!handoff_ || manifest.world_epoch != world_epoch_ || manifest.caves != caves_ ||
-        manifest.numeric != numeric_)
+    admission_refusal_ = FarWorldRefusal::None;
+    capture_failure_ = {};
+    if (!handoff_ || manifest.world_epoch != world_epoch_ || manifest.numeric != numeric_) {
+        admission_refusal_ = FarWorldRefusal::InvalidRequests;
         return false;
+    }
+    if (manifest.caves != caves_) {
+        admission_refusal_ = FarWorldRefusal::CavePolicyMismatch;
+        return false;
+    }
     Unbind();
-    if (!handoff_->StageTarget(manifest))
+    if (!handoff_->StageTarget(manifest)) {
+        admission_refusal_ = handoff_->AdmissionRefusal();
         return false;
+    }
     const auto upload = diagnostic_.upload;
     CaptureFarWorldHandoffDiagnostic(*handoff_, frame_.value_or(0), upload, diagnostic_);
     return true;
+}
+bool FarWorldHandoffRenderer::StageSessionTarget(
+    const World::FarWorldAuthorityProducer& producer,
+    const Systems::SHIELD_WorldSystem& world,
+    std::span<const FarSessionHandoffTile> tiles,
+    const World::FarWorldAuthorityProducer::FrozenPolicy& policy,
+    const World::FarFrozenCaptureLimits& limits,
+    const World::FarFrozenCaptureWork::Counts& samples) {
+    Guard const guard(*this);
+    capture_failure_ = {};
+    if (!handoff_ || policy.numeric != numeric_) {
+        admission_refusal_ = FarWorldRefusal::InvalidRequests;
+        return false;
+    }
+    if (policy.caves != caves_) {
+        admission_refusal_ = FarWorldRefusal::CavePolicyMismatch;
+        return false;
+    }
+    const auto status = producer.capture_status();
+    if (status.error == World::FarWorldAuthorityProducer::Error::None &&
+        (status.active || status.queued || status.paused)) {
+        admission_refusal_ = FarWorldRefusal::AdmissionFailed;
+        return false;
+    }
+    Unbind();
+    const bool accepted = handoff_->StageSessionTarget(
+        producer, world, world_epoch_, tiles, policy, limits, samples, memory_);
+    admission_refusal_ = handoff_->AdmissionRefusal();
+    capture_failure_ = handoff_->SessionCaptureFailure();
+    if (accepted) {
+        const auto upload = diagnostic_.upload;
+        CaptureFarWorldHandoffDiagnostic(*handoff_, frame_.value_or(0), upload, diagnostic_);
+    }
+    return accepted;
+}
+FarWorldRefusal FarWorldHandoffRenderer::AdmissionRefusal() const {
+    CheckOwner();
+    return admission_refusal_;
+}
+World::FarWorldAuthorityProducer::FrozenResult
+FarWorldHandoffRenderer::SessionCaptureFailure() const {
+    CheckOwner();
+    return capture_failure_;
+}
+std::unique_ptr<FarVolumeGpuDriver> FarWorldHandoffRenderer::TakeBackend() {
+    Guard const guard(*this);
+    Drain();
+    return std::move(driver_);
+}
+bool FarWorldHandoffRenderer::BackendAvailable() const noexcept {
+    return driver_ && driver_->ValidContext();
 }
 bool FarWorldHandoffRenderer::AdvanceFrame(std::uint64_t frame,
                                            const std::array<double, 3>& camera,
@@ -301,6 +361,8 @@ void FarWorldHandoffRenderer::Drain() {
     memory_.reset();
     frame_.reset();
     world_epoch_ = 0;
+    admission_refusal_ = FarWorldRefusal::None;
+    capture_failure_ = {};
 }
 void FarWorldHandoffRenderer::Shutdown() {
     Guard const guard(*this);
