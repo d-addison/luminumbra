@@ -1,5 +1,6 @@
 """Check that presentation integration uses the tested clock-free policy."""
 from pathlib import Path
+import math
 import re
 import unittest
 
@@ -1415,6 +1416,148 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("std::filesystem::rename(temporary, path, error)", builder)
         self.assertIn('std::fopen(temporary.c_str(), "wbx")', builder)
         self.assertIn('_wfopen_s(&output, temporary.c_str(), L"wbx")', builder)
+
+
+class SkyLutContinuity(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.source = read(RENDERING / "SkyAtmosphereLut.ipp")
+
+    def cpu_sampler(self, width, height, values):
+        if "sample_lut_linear(" not in self.source:
+            # Model the old production lookup too, so the numeric regressions
+            # fail on its radiance step rather than on a missing helper name.
+            trans = compact(body(self.source, "glm::vec3 SkyAtmosphereLut::sample_transmittance("))
+            self.assertIn("static_cast<int>(u * kTransmittanceWidth)", trans)
+            self.assertIn("static_cast<int>(v * kTransmittanceHeight)", trans)
+
+            def nearest(u, v):
+                x = min(width - 1, int(min(1.0, max(0.0, u)) * width))
+                y = min(height - 1, int(min(1.0, max(0.0, v)) * height))
+                return values[y * width + x]
+
+            return nearest
+        helper = compact(body(self.source, "sample_lut_linear("))
+        self.assertIn("const int x0 = static_cast<int>(x);", helper)
+        self.assertIn("const int y0 = static_cast<int>(y);", helper)
+        self.assertIn("const int x1 = std::min(x0 + 1, width - 1);", helper)
+        self.assertIn("const int y1 = std::min(y0 + 1, height - 1);", helper)
+        self.assertIn("lut[static_cast<std::size_t>(row) * static_cast<std::size_t>(width) + "
+                      "static_cast<std::size_t>(column)]", helper)
+
+        def expression(text):
+            text = text.replace("glm::clamp", "clamp").replace("glm::mix", "mix")
+            text = text.replace("static_cast<float>", "float")
+            return re.sub(r"(?<=\d)f\b", "", text)
+
+        axes = [expression(re.search(r"const float " + axis + r" = (.*?);", helper).group(1))
+                for axis in ("x", "y")]
+        blend = expression(re.search(r"return (glm::mix\(.*);$", helper).group(1))
+        functions = {"float": float, "clamp": lambda x, lo, hi: min(hi, max(lo, x)),
+                     "mix": lambda a, b, t: a * (1.0 - t) + b * t}
+
+        def sample(u, v):
+            scope = dict(functions, width=width, height=height, u=u, v=v)
+            x, y = [eval(axis, {"__builtins__": {}}, scope) for axis in axes]
+            x0, y0 = int(x), int(y)
+            scope.update(x=x, y=y, x0=x0, y0=y0,
+                         x1=min(x0 + 1, width - 1), y1=min(y0 + 1, height - 1),
+                         at=lambda column, row: values[row * width + column])
+            return eval(blend, {"__builtins__": {}}, scope)
+
+        return sample
+
+    def test_cpu_and_both_compute_builders_use_continuous_nonperiodic_sampling(self):
+        trans = compact(body(self.source, "glm::vec3 SkyAtmosphereLut::sample_transmittance("))
+        self.assertIn("return sample_lut_linear(m_transmittance_cpu, kTransmittanceWidth, "
+                      "kTransmittanceHeight, u, v);", trans)
+        sky = compact(body(self.source, "void SkyAtmosphereLut::build_sky_view_cpu("))
+        self.assertIn("sample_lut_linear(m_multiscatter_cpu, kMultiScatterWidth, "
+                      "kMultiScatterHeight, ms_u, ms_v)", sky)
+        self.assertNotIn("static_cast<int>", sky)
+        for builder in ("build_multiscatter_cpu", "build_sky_view_cpu"):
+            self.assertIn("sample_transmittance(", body(self.source, "void SkyAtmosphereLut::" + builder))
+        for name in ("kSkyViewComputeSrc", "kMultiscatterComputeSrc"):
+            shader = self.source.split('const char* ' + name + ' = R"GLSL(', 1)[1].split(')GLSL"', 1)[0]
+            with self.subTest(builder=name):
+                helper = compact(body(shader, "vec3 sampleLutLinear("))
+                self.assertEqual(helper, "vec2 halfTexel = 0.5 / vec2(textureSize(lut, 0)); "
+                                 "return textureLod(lut, clamp(uv, halfTexel, "
+                                 "vec2(1.0) - halfTexel), 0.0).rgb;")
+                self.assertIn("return sampleLutLinear(u_transmittance, vec2(u, v));",
+                              body(shader, "vec3 sampleTransmittance("))
+                self.assertNotIn("texelFetch(", shader)
+                if name == "kSkyViewComputeSrc":
+                    self.assertIn("sampleLutLinear(u_multiscatter, vec2(msU, msV))", shader)
+        # Linear filtering is required in both CPU-upload and GPU-allocation paths.
+        for signature in ("void SkyAtmosphereLut::upload_texture(", "void allocate_empty_lut_texture("):
+            self.assertIn("GL_TEXTURE_MIN_FILTER, GL_LINEAR", body(self.source, signature))
+            self.assertIn("GL_TEXTURE_MAG_FILTER, GL_LINEAR", body(self.source, signature))
+
+    def test_production_bilinear_mapping_centres_edges_and_every_old_cell_boundary(self):
+        # These are the two bounded LUT dimensions, not a per-frame allocation.
+        for width, height in ((256, 64), (32, 32)):
+            values = [float((x * 17 + y * 7) % 31) for y in range(height) for x in range(width)]
+            sample = self.cpu_sampler(width, height, values)
+            for x, y in ((0, 0), (width // 2, height // 2), (width - 1, height - 1)):
+                self.assertEqual(sample((x + 0.5) / width, (y + 0.5) / height), values[y * width + x])
+            for u, v, index in ((-1.0, -1.0, 0), (0.0, 0.0, 0),
+                                (1.0, 1.0, -1), (2.0, 2.0, -1)):
+                self.assertEqual(sample(u, v), values[index])
+            # GPU normalized coordinates clamp before filtering, while the CPU
+            # clamps in texel space. Check agreement when just one axis clamps.
+            for u in (-1.0, 0.0, 0.5 / width, 0.37, 1.0 - 0.5 / width, 1.0, 2.0):
+                for v in (-1.0, 0.0, 0.5 / height, 0.63, 1.0 - 0.5 / height, 1.0, 2.0):
+                    gu = min(1.0 - 0.5 / width, max(0.5 / width, u)) * width - 0.5
+                    gv = min(1.0 - 0.5 / height, max(0.5 / height, v)) * height - 0.5
+                    expected = sum(values[y * width + x] * wx * wy
+                                   for x, wx in ((int(gu), 1.0 - gu % 1.0),
+                                                 (min(int(gu) + 1, width - 1), gu % 1.0))
+                                   for y, wy in ((int(gv), 1.0 - gv % 1.0),
+                                                 (min(int(gv) + 1, height - 1), gv % 1.0)))
+                    self.assertAlmostEqual(sample(u, v), expected)
+            u, v = (3.5 + 0.25) / width, (4.5 + 0.75) / height
+            expected = sum(values[y * width + x] * wx * wy
+                           for x, wx in ((3, 0.75), (4, 0.25))
+                           for y, wy in ((4, 0.25), (5, 0.75)))
+            self.assertAlmostEqual(sample(u, v), expected)
+            epsilon = 1e-10
+            for axis, count in ((0, width), (1, height)):
+                for cell in range(1, count):
+                    before, after = [0.5, 0.5], [0.5, 0.5]
+                    before[axis], after[axis] = cell / count - epsilon, cell / count + epsilon
+                    self.assertLess(abs(sample(*before) - sample(*after)), 1e-5)
+
+    def test_dusk_zero_cosine_meridian_is_continuous_and_matches_sweep_seam(self):
+        # Summer, dusk and camera values are pinned to the shipping sweep inputs.
+        sweep = read(ROOT / "src/luminumbra_client/core/scenarios/WorldVisualSweep.cpp")
+        self.assertIn('{"dusk", 0.25f}', sweep)
+        self.assertIn('{"yaw120", 120.0f, 0.0f, false', sweep)
+        self.assertIn('camera->Zoom = 75.0f;', sweep)
+        tilt = float(re.search(r"kSeasonalTiltAmplitude = ([0-9.]+)f",
+                              read(RENDERING / "TimeOfDayModel.h")).group(1))
+        sun_z = 0.2 - math.sin(tilt)
+        bearing = math.degrees(math.atan2(sun_z, -1.0)) % 360.0
+        meridian = bearing - 90.0
+        focal = 800.0 / math.tan(math.radians(75.0 / 2.0))
+        x = 1920.0 + focal * math.tan(math.radians(meridian - 120.0))
+        self.assertAlmostEqual(x, 1566.0, delta=2.0)
+        for width, height in ((256, 64), (32, 32)):
+            # A nonconstant fixture isolates the bin-crossing discontinuity from
+            # the integration. All march samples cross this boundary together.
+            values = [float(x >= width // 2) for _ in range(height) for x in range(width)]
+            sample = self.cpu_sampler(width, height, values)
+            for zenith in (0.1, 0.5, 1.0, math.radians(89.0)):
+                def mu(azimuth):
+                    return 0.01 * math.sin(zenith) * math.cos(math.radians(azimuth - bearing))
+
+                left = (mu(meridian - 1e-5) + 1.0) * 0.5
+                right = (mu(meridian + 1e-5) + 1.0) * 0.5
+                self.assertLess(abs(sample(left, 0.2) - sample(right, 0.2)), 1e-6)
+                # Negative control: devel's nearest lookup has a full step here.
+                old_left = values[int(left * width)]
+                old_right = values[int(right * width)]
+                self.assertEqual(abs(old_left - old_right), 1.0)
 
 
 class SkyAppearanceWiring(unittest.TestCase):

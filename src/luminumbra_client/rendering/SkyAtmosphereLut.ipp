@@ -51,9 +51,31 @@ float mie_phase(float cos_theta, float g) {
 
 constexpr float kEpsilonM = 10.0f; // lift the viewer off the exact ground sphere
 
+// Populated 256x64 or 32x32 nonperiodic LUTs use texel-centred bilinear sampling.
+// Nearest sampling jumps at mu=0 during dusk integration, leaving a meridian
+// in the sky-view LUT even though its final azimuth sampling is seamless.
+glm::vec3
+sample_lut_linear(const std::vector<glm::vec3>& lut, int width, int height, float u, float v) {
+    const float x =
+        glm::clamp(u * static_cast<float>(width) - 0.5f, 0.0f, static_cast<float>(width - 1));
+    const float y =
+        glm::clamp(v * static_cast<float>(height) - 0.5f, 0.0f, static_cast<float>(height - 1));
+    const int x0 = static_cast<int>(x);
+    const int y0 = static_cast<int>(y);
+    const int x1 = std::min(x0 + 1, width - 1);
+    const int y1 = std::min(y0 + 1, height - 1);
+    const auto at = [&](int column, int row) {
+        return lut[static_cast<std::size_t>(row) * static_cast<std::size_t>(width) +
+                   static_cast<std::size_t>(column)];
+    };
+    return glm::mix(glm::mix(at(x0, y0), at(x1, y0), x - static_cast<float>(x0)),
+                    glm::mix(at(x0, y1), at(x1, y1), x - static_cast<float>(x0)),
+                    y - static_cast<float>(y0));
+}
+
 //  GPU-compute port of build_sky_view_cpu. One invocation per sky-view texel
 // (192x108), marching kMarchSamples=30 single+multi scatter, sampling the already-uploaded
-// transmittance/multiscatter textures with the SAME nearest indexing as the CPU helpers. Writes
+// transmittance/multiscatter textures with the same bilinear sampling as the CPU helpers. Writes
 // L (vec3) into an std430 float[] SSBO (3 per texel) so it can be uploaded to the RGB16F sky-view
 // texture via a PIXEL_UNPACK_BUFFER (RGB16F is not image-store-able) and read back for the CPU
 // ambient reduction. The math mirrors the CPU reference line-for-line.
@@ -99,13 +121,15 @@ float miePhase(float ct, float g) {
   float den = (2.0 + g2) * pow(1.0 + g2 - 2.0 * g * ct, 1.5);
   return 3.0 / (8.0 * PI) * num / max(den, 1e-6);
 }
+vec3 sampleLutLinear(sampler2D lut, vec2 uv) {
+  vec2 halfTexel = 0.5 / vec2(textureSize(lut, 0));
+  return textureLod(lut, clamp(uv, halfTexel, vec2(1.0) - halfTexel), 0.0).rgb;
+}
 vec3 sampleTransmittance(float alt, float cz) {
   float top = ATMO_TOP - PLANET_R;
   float v = clamp(alt / top, 0.0, 1.0);
   float u = clamp((cz + 1.0) * 0.5, 0.0, 1.0);
-  int x = min(TW - 1, int(u * float(TW)));
-  int y = min(TH - 1, int(v * float(TH)));
-  return texelFetch(u_transmittance, ivec2(x, y), 0).rgb;
+  return sampleLutLinear(u_transmittance, vec2(u, v));
 }
 void main() {
   ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
@@ -152,9 +176,7 @@ void main() {
       vec3 single = (sigmaSr * phaseR + sigmaSm * phaseM) * tSun;
       float msU = clamp((cosSun + 1.0) * 0.5, 0.0, 1.0);
       float msV = clamp(alt / (ATMO_TOP - PLANET_R), 0.0, 1.0);
-      int msx = min(MSW - 1, int(msU * float(MSW)));
-      int msy = min(MSH - 1, int(msV * float(MSH)));
-      vec3 ms = texelFetch(u_multiscatter, ivec2(msx, msy), 0).rgb;
+      vec3 ms = sampleLutLinear(u_multiscatter, vec2(msU, msV));
       vec3 multi = (sigmaSr + sigmaSm) * ms;
       vec3 stepTr = exp(-sigmaE * dt);
       vec3 inScatter = single + multi;
@@ -235,11 +257,14 @@ float raySphere(vec3 o, vec3 d, float r) {
   if (t1 < 0.0) return -1.0; return t0 < 0.0 ? t1: t0;
 }
 vec2 densityRatio(float a) { return vec2(exp(-a / RAYLEIGH_H), exp(-a / MIE_H)); }
+vec3 sampleLutLinear(sampler2D lut, vec2 uv) {
+  vec2 halfTexel = 0.5 / vec2(textureSize(lut, 0));
+  return textureLod(lut, clamp(uv, halfTexel, vec2(1.0) - halfTexel), 0.0).rgb;
+}
 vec3 sampleTransmittance(float alt, float cz) {
   float top = ATMO_TOP - PLANET_R;
   float v = clamp(alt / top, 0.0, 1.0); float u = clamp((cz + 1.0) * 0.5, 0.0, 1.0);
-  int x = min(TW - 1, int(u * float(TW))); int y = min(TH - 1, int(v * float(TH)));
-  return texelFetch(u_transmittance, ivec2(x, y), 0).rgb;
+  return sampleLutLinear(u_transmittance, vec2(u, v));
 }
 void main() {
   ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
@@ -368,10 +393,7 @@ glm::vec3 SkyAtmosphereLut::sample_transmittance(float altitude_m, float cos_zen
     const float top = kAtmosphereTopM - kPlanetRadiusM;
     const float v = glm::clamp(altitude_m / top, 0.0f, 1.0f);
     const float u = glm::clamp((cos_zenith + 1.0f) * 0.5f, 0.0f, 1.0f);
-    const int x = std::min(kTransmittanceWidth - 1, static_cast<int>(u * kTransmittanceWidth));
-    const int y = std::min(kTransmittanceHeight - 1, static_cast<int>(v * kTransmittanceHeight));
-    return m_transmittance_cpu[static_cast<std::size_t>(y) * kTransmittanceWidth +
-                               static_cast<std::size_t>(x)];
+    return sample_lut_linear(m_transmittance_cpu, kTransmittanceWidth, kTransmittanceHeight, u, v);
 }
 
 glm::vec3 SkyAtmosphereLut::sun_transmittance(float sun_cos_zenith) const {
@@ -535,14 +557,15 @@ void SkyAtmosphereLut::build_sky_view_cpu(const glm::vec3& sun_dir_world) {
                 // Single scatter (phase-weighted) + isotropic multi-scatter.
                 const glm::vec3 single = (sigma_s_r * phase_r + sigma_s_m * phase_m) * t_sun;
                 const float ms_u = glm::clamp((cos_sun + 1.0f) * 0.5f, 0.0f, 1.0f);
-                const float ms_v = glm::clamp(std::max(0.0f, alt) / (kAtmosphereTopM - kPlanetRadiusM), 0.0f, 1.0f);
-                const int msx = std::min(kMultiScatterWidth - 1, static_cast<int>(ms_u * kMultiScatterWidth));
-                const int msy = std::min(kMultiScatterHeight - 1, static_cast<int>(ms_v * kMultiScatterHeight));
-                const glm::vec3 ms =
-                    m_multiscatter_cpu.empty()
-                        ? glm::vec3(0.0f)
-                        : m_multiscatter_cpu[static_cast<std::size_t>(msy) * kMultiScatterWidth +
-                                             static_cast<std::size_t>(msx)];
+                const float ms_v = glm::clamp(
+                    std::max(0.0f, alt) / (kAtmosphereTopM - kPlanetRadiusM), 0.0f, 1.0f);
+                const glm::vec3 ms = m_multiscatter_cpu.empty()
+                                         ? glm::vec3(0.0f)
+                                         : sample_lut_linear(m_multiscatter_cpu,
+                                                             kMultiScatterWidth,
+                                                             kMultiScatterHeight,
+                                                             ms_u,
+                                                             ms_v);
                 const glm::vec3 multi = (sigma_s_r + sigma_s_m) * ms;
 
                 const glm::vec3 step_tr = glm::exp(-sigma_e * dt);
