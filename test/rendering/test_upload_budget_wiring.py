@@ -1477,8 +1477,8 @@ class UploadBudgetWiring(unittest.TestCase):
             self.assertLess(source.index("WithCaptureManifest("), source.index("glReadPixels("))
         self.assertLess(survey.index("WithCaptureManifest("), survey.index("ScanFrame("))
         self.assertLess(scan.index("WithCaptureManifest("), scan.index("ScanFrame("))
-        self.assertLess(scan.index("ObserveCaptureManifest("), scan.index("set_time_of_day("))
-        self.assertLess(scan.index("ObserveCaptureManifest("), scan.index("g_camera->Position ="))
+        self.assertNotIn("set_time_of_day(", scan)
+        self.assertNotIn("g_camera->Position =", scan)
         self.assertIn("frame_scan_manifest,", scan)
         self.assertIn("if (!captured) return false;", compact(survey))
         self.assertIn("if (!captured) return false;", compact(timelapse))
@@ -1526,6 +1526,57 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("std::filesystem::rename(temporary, path, error)", builder)
         self.assertIn('std::fopen(temporary.c_str(), "wbx")', builder)
         self.assertIn('_wfopen_s(&output, temporary.c_str(), L"wbx")', builder)
+
+
+class NightLightingSourceTests(unittest.TestCase):
+    def test_frame_scan_pins_override_live_clock_before_the_rendered_capture(self):
+        source = read(ROOT / 'src/luminumbra_client/main_client.cpp')
+        signature = 'if (g_app.capture.frame_scan_active && g_camera)'
+        pin = body(source, signature)
+        self.assertIn('renderPipeline.set_time_of_day(0.04f);', pin)
+        self.assertIn('g_camera->Position = glm::vec3(8.0f, 24.0f, 8.0f);', pin)
+        self.assertIn('g_camera->updateCameraVectors();', pin)
+        self.assertNotIn('frame_scan_settle', pin)
+        self.assertNotIn('render_uploads_settled', pin)
+        position = source.index(signature)
+        rendered = source.index('renderPipeline.render_frame(', position)
+        captured = source.index('frame_scan_manifest =', rendered)
+        self.assertLess(source.index('renderPipeline.set_world_clock(gameSession->GetWorldClock())'), position)
+        self.assertLess(source.index('renderPipeline.set_time_of_day_tick(sim_tick)'), position)
+        pin_end = source.index('{', position) + len(pin) + 2
+        self.assertNotIn('set_time_of_day(', source[pin_end:rendered])
+        self.assertLess(rendered, captured)
+
+    def test_shipping_terrain_and_foliage_share_lunar_inputs_and_exposure_cap(self):
+        source = (ROOT / 'src/luminumbra_client/rendering/RenderPipeline.cpp').read_text(encoding='utf-8')
+        for name, following in (('make_foliage_context', 'make_lighting_context'),
+                                ('make_lighting_context', 'make_skybox_context')):
+            body = source.split('RenderContext RenderPipeline::' + name + '(', 1)[1].split(
+                'RenderContext RenderPipeline::' + following + '(', 1)[0]
+            self.assertIn('ctx.moon_radiance = m_moonRadiance * MoonLightFactor(1.0f, m_moonUpFactor)', body)
+            self.assertIn('ctx.moon_illumination = m_moonIllumination', body)
+            self.assertIn('m_auto_exposure_metered && m_metered_valid', body)
+            self.assertIn('ctx.exposure = SelectRenderExposure(', body)
+            self.assertIn('MoonScaledAutoExposure(', body)
+            self.assertIn('-m_sun.direction.y, m_moonIllumination, m_moonUpFactor)', body)
+        self.assertIn('NightAmbientColor(m_moonIllumination, m_moonUpFactor)', source)
+        self.assertNotIn('kStarlightFrac', source)
+
+    def test_forward_and_deferred_keys_use_the_scaled_radiance(self):
+        for filename in ('lighting_pass.frag', 'foliage.frag'):
+            source = (ROOT / 'res/shaders' / filename).read_text(encoding='utf-8')
+            self.assertIn('const float kMoonKeyScale = 0.12;', source)
+            self.assertIn('u_moonRadiance *', source)
+            self.assertIn('kMoonKeyScale * u_moonIllum * SUN_IRRADIANCE_SCALE', source)
+            self.assertNotIn('const vec3 kMoonColor', source)
+        foliage = (ROOT / 'res/shaders/foliage.frag').read_text(encoding='utf-8')
+        self.assertIn('color *= mix(1.0, u_exposure, nightFactor);', foliage)
+        source = (ROOT / 'src/luminumbra_client/rendering/passes/FoliagePass.cpp').read_text(encoding='utf-8')
+        for field, uniform in (('moon_radiance', 'u_moonRadiance'),
+                               ('moon_illumination', 'u_moonIllum'), ('exposure', 'u_exposure')):
+            self.assertIn(f'.{field} = glGetUniformLocation(program, "{uniform}")', source)
+            self.assertIn(f'm_draw_uniforms.{field}', source)
+            self.assertIn(f'ctx.{field}', source)
 
 
 if __name__ == "__main__":
