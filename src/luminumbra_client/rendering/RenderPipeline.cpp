@@ -2861,6 +2861,10 @@ void RenderPipeline::prepare_camera_projection(const Camera& camera) {
 }
 
 void RenderPipeline::dispatch_stages(const Camera& camera) {
+    const auto diagnostic_frame =
+        m_debug_view_pass && DebugViewPass::controls().enabled && DebugViewPass::controls().refresh
+            ? m_debug_view_pass->begin_frame(make_debug_view_context(camera))
+            : nullptr;
     // the pure GPU stage sequence over the prepared frame. Each
     // execute_stage_* body moved VERBATIM from the pre-split render_frame and
     // reads only FramePrepared + pipeline members. This function must be

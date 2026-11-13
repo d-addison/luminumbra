@@ -23,6 +23,20 @@ uniform sampler2D gNormalMaterial;  // unit 1: oct-normal.xy + material-id.a (RG
 uniform sampler2D gAlbedo;          // unit 2: base color (sRGB8)
 uniform sampler2D gDepth;           // unit 3: hardware depth texture
 
+#ifdef LUMIN_DIAG_VIEWS
+layout(binding = 4) uniform usampler2D gIdentity;
+layout(binding = 5) uniform usamplerBuffer gDrawMetadata;
+uniform int u_identityReady = 0;
+uniform int u_inspect = 0;
+uniform int u_pixelX = 0;
+uniform int u_pixelY = 0;
+layout(std430, binding = 7) buffer InspectorResult {
+    uvec4 inspectorId;
+    vec4 inspectorAlbedo;
+    vec4 inspectorNormalDepth;
+};
+#endif
+
 uniform int   u_mode;               // 1..5; see DebugViewPass::Mode
 uniform float u_near = 0.1;         // camera near plane (for hw-depth linearization)
 uniform float u_far  = 4000.0;      // camera far plane
@@ -54,7 +68,68 @@ vec3 hash_id_color(uint id) {
     return clamp(vec3(r, g, b) * 0.85 + 0.15, 0.0, 1.0);
 }
 
+#ifdef LUMIN_DIAG_VIEWS
+// Stable uint32 hash, identical to DebugViewPass::hash_id.
+uint diagnosticHash(uint value) {
+    return value * 2654435761u;
+}
+vec3 diagnosticColor(uint value) {
+    uint hashed = diagnosticHash(value);
+    return vec3(hashed & 255u, (hashed >> 8u) & 255u, (hashed >> 16u) & 255u) / 255.0;
+}
+vec3 unsupportedColor() {
+    // Legend: magenta hatch = zero, unresolved, unsupported or unavailable.
+    return (int(gl_FragCoord.x + gl_FragCoord.y) / 6) % 2 == 0
+        ? vec3(1.0, 0.0, 1.0) : vec3(0.15, 0.0, 0.15);
+}
+vec3 identityColor() {
+    if (u_identityReady == 0) return unsupportedColor();
+    ivec2 extent = textureSize(gIdentity, 0);
+    ivec2 pixel = clamp(ivec2(TexCoords * vec2(extent)), ivec2(0), extent - 1);
+    uvec4 id = texelFetch(gIdentity, pixel, 0);
+    if (id.x == 0u || id.x >= uint(textureSize(gDrawMetadata) / 2)) return unsupportedColor();
+    uvec4 exactId = texelFetch(gDrawMetadata, int(id.x * 2u));
+    uvec4 metadata = texelFetch(gDrawMetadata, int(id.x * 2u + 1u));
+    if (any(notEqual(id, exactId)) || metadata.y == 0u) return unsupportedColor();
+    if (u_mode == 6) return diagnosticColor(id.x);
+    if (u_mode == 7) return diagnosticColor(id.y);
+    if (u_mode == 8) return diagnosticColor(id.z);
+    if (u_mode == 9) return diagnosticColor(metadata.x);
+    if (u_mode == 10) {
+        // Terrain, impostor, foliage, static, far volume. Owner: live / legacy / ladder.
+        const vec3 colors[5] = vec3[5](vec3(0.7,0.4,0.1), vec3(0.1,0.8,0.9),
+            vec3(0.2,0.8,0.2), vec3(0.9,0.8,0.2), vec3(0.3,0.3,1.0));
+        if (metadata.y > 5u) return unsupportedColor();
+        uint owner = id.w & 255u;
+        return colors[metadata.y - 1u] * (owner == 1u ? 1.0 : owner == 2u ? 0.7 : 0.45);
+    }
+    // Mesh path provenance: mesh=hashed path index, SDF=orange, heightfield=blue.
+    if (metadata.z == 1u) return diagnosticColor(id.y);
+    if (metadata.z == 2u) return vec3(1.0, 0.4, 0.05);
+    if (metadata.z == 3u) return vec3(0.1, 0.4, 1.0);
+    return unsupportedColor();
+}
+
+#endif
+
 void main() {
+#ifdef LUMIN_DIAG_VIEWS
+    if (u_inspect != 0) {
+        ivec2 pixel = ivec2(u_pixelX, u_pixelY);
+        inspectorId = texelFetch(gIdentity, pixel, 0);
+        vec4 normalMaterial = texelFetch(gNormalMaterial, pixel, 0);
+        inspectorAlbedo = vec4(texelFetch(gAlbedo, pixel, 0).rgb,
+                               round(normalMaterial.a * 255.0));
+        inspectorNormalDepth = vec4(decode_octahedral(normalMaterial.xy),
+                                    texelFetch(gDepth, pixel, 0).r);
+        FragColor = vec4(0.0);
+        return;
+    }
+    if (u_mode >= 6 && u_mode <= 11) {
+        FragColor = vec4(identityColor(), 1.0);
+        return;
+    }
+#endif
     vec3 viewPos = vec3(0.0);
     bool validPosition = farWorldPosition(gPosition, gDepth, TexCoords, viewPos);
     vec4 nrmData  = texture(gNormalMaterial, TexCoords);
