@@ -521,6 +521,9 @@ private:
         int sun_intensity = -1;
         int ambient_color = -1;
         int moon_dir = -1;
+        int moon_radiance = -1;
+        int moon_illumination = -1;
+        int exposure = -1;
         int cloud_shadow_enabled = -1;
         int cloud_scroll_offset = -1;
         int cloud_coverage_amount = -1;
