@@ -196,6 +196,53 @@ std::string DebugViewPass::join(std::string_view table, const DiagnosticId& id) 
     return record.is_null() ? std::string{} : record.dump();
 }
 
+std::string_view DebugViewPass::contribution_legend(int mode) {
+    switch (mode) {
+        case DirectSun:
+            return "Deferred direct sun: linear BRDF, shadow, cloud and transmission; RGB x/(1+x)";
+        case DirectMoon:
+            return "Deferred direct moon: wrapped diffuse + specular, shadow and lunar tint; RGB "
+                   "x/(1+x)";
+        case Ambient:
+            return "Deferred sky ambient: diffuse + environment specular, AO and sky visibility; "
+                   "RGB x/(1+x)";
+        case ShadowFactor:
+            return "Deferred key shadow factor: sun by day, softened moon at night; white=lit";
+        case Ao:
+            return "Deferred applied AO: SSAO, multiplied by material AO only for authored "
+                   "surfaces; white=unoccluded";
+        case Emissive:
+            return "Deferred emissive: crystal + field + marker + authored emission; RGB x/(1+x)";
+        case Specular:
+            return "Deferred specular: sun + tinted moon + points + environment; RGB x/(1+x)";
+        case Roughness:
+            return "Deferred effective roughness: clamped and snow-adjusted; black=0, white=1";
+        case Metallic:
+            return "Deferred metallic: black=dielectric, white=metal";
+        case NormalView:
+            return "Deferred decoded view normal: RGB = XYZ * 0.5 + 0.5";
+        case NormalWorld:
+            return "Deferred transformed world normal: RGB = XYZ * 0.5 + 0.5";
+        case SkyVisibility:
+            return "Deferred screen-space sky visibility: white=open; 1 when disabled";
+        case MaterialAo:
+            return "Deferred material AO: decoded signed far-surface tag; white=unoccluded";
+        case Lighting:
+            return "Pre-albedo sun + moon + point diffuse irradiance / PI, before BRDF and lunar "
+                   "tint; RGB x/(1+x)";
+        case Fog:
+            return "Fog / atmosphere contribution: unsupported (producer not instrumented)";
+        case ForwardPlane:
+            return "Forward contributor plane: unsupported (producer not instrumented)";
+        case SkyPlane:
+            return "Sky contributor plane: unsupported (producer not instrumented)";
+        case ShadowPlane:
+            return "Shadow contributor plane: unsupported (producer not instrumented)";
+        default:
+            return "Unsupported contribution mode";
+    }
+}
+
 void DebugViewPass::set_mode(int mode) {
     m_mode = mode;
     if (m_snapshot && !controls().enabled) {
@@ -206,6 +253,11 @@ void DebugViewPass::set_mode(int mode) {
 std::shared_ptr<DebugViewPass::Frame> DebugViewPass::begin_frame(const RenderContext& ctx) {
     auto& control = controls();
     if (!control.enabled || !control.refresh || ctx.frozen_replay) {
+        return {};
+    }
+    if (contribution_mode(control.view)) {
+        // Live lighting terms need no identity capture, geometry replay or readback.
+        control.refresh = false;
         return {};
     }
     if (GBufferDiagnosticCapture::Current()) {
@@ -448,6 +500,7 @@ DebugViewPass::DebugViewPass() = default;
 DebugViewPass::~DebugViewPass() = default;
 
 void DebugViewPass::init_shader(const std::filesystem::path& root_path) {
+    m_contribution_shader.reset();
     const std::string vert = (root_path / "res/shaders/fullscreen_tri.vert").string();
     const std::string frag = (root_path / "res/shaders/debug_view.frag").string();
     m_shader = std::make_unique<Shader>(vert.c_str(), frag.c_str());
@@ -472,6 +525,7 @@ void DebugViewPass::destroy_buffers() {
 }
 
 void DebugViewPass::reset_shader() {
+    m_contribution_shader.reset();
     m_shader.reset();
 }
 
@@ -480,9 +534,30 @@ void DebugViewPass::execute(const RenderContext& ctx) {
     // Default-OFF guard: Mode::None (0) is a true no-op so the normal render is untouched.
     if (mode() == Mode::None)
         return;
+    const bool contribution_view = controls().enabled && contribution_mode(mode());
+    if (contribution_view && !m_contribution_shader && m_shader) {
+        m_contribution_shader =
+            std::make_unique<Shader>(m_shader->VertexPath().c_str(),
+                                     m_shader->FragmentPath().c_str(),
+                                     std::vector<std::string>{},
+                                     std::vector<std::string>{"LUMIN_DIAG_VIEWS 1"});
+    }
     const bool identity_view = controls().enabled && mode() >= DrawId;
     Shader* shader = identity_view && m_snapshot && m_snapshot->shader ? m_snapshot->shader.get()
                                                                        : m_shader.get();
+    if (contribution_view) {
+        // If the opt-in program is unavailable, the original shader's unknown-mode
+        // sentinel paints magenta instead of leaving a plausible final scene visible.
+        const bool overlay_available = m_contribution_shader && m_contribution_shader->IsValid();
+        shader = overlay_available ? m_contribution_shader.get() : m_shader.get();
+        controls().result.clear();
+        controls().status = std::string(contribution_legend(mode()));
+        controls().status +=
+            overlay_available
+                ? "; magenta hatch=unsupported/unavailable/sky; magenta=NaN, cyan=Inf. "
+                  "Deferred surface only; forward/sky/shadow contributors unsupported."
+                : "; overlay shader unavailable: solid magenta error sentinel";
+    }
     if (!shader || !shader->IsValid() || m_vao == 0)
         return;
 
@@ -504,7 +579,7 @@ void DebugViewPass::execute(const RenderContext& ctx) {
     shader->setInt("u_farWorldLadder", ctx.far_world_ladder ? 1 : 0);
     shader->setMat4("u_gbufferInverseProjection", ctx.gbuffer_inverse_projection);
     shader->setInt("u_mode", mode());
-    if (identity_view && m_snapshot && m_snapshot->shader) {
+    if (identity_view) {
         shader->setInt("u_inspect", 0);
     }
     shader->setFloat("u_near", near_plane);
@@ -540,6 +615,18 @@ void DebugViewPass::bind_sources(const RenderContext& ctx, Shader& shader) {
     glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_depth.id);
     shader.setInt("gDepth", 3);
 
+    if (contribution_mode(mode())) {
+        const auto& control = controls();
+        const bool ready = control.enabled && supported_contribution(mode()) &&
+                           !ctx.frozen_replay && control.contribution_texture != 0 &&
+                           control.contribution_view == mode() &&
+                           control.contribution_size.width == ctx.internal_w() &&
+                           control.contribution_size.height == ctx.internal_h();
+        shader.setInt("u_contributionReady", ready ? 1 : 0);
+        glActiveTexture(GL_TEXTURE6);
+        glBindTexture(GL_TEXTURE_2D, ready ? control.contribution_texture : 0);
+        return;
+    }
     if (!m_snapshot || &shader != m_snapshot->shader.get()) {
         return;
     }

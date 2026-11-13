@@ -746,6 +746,7 @@ endif()
 add_executable(pass_context_test
     rendering/pass_context_test.cpp
     rendering/diagnostic_inspector_test.cpp
+    rendering/diagnostic_contributions_test.cpp
     # Evidence reuse, stable surface slots and column-local invalidation on both backends.
     rendering/foliage_rebuild_test.cpp
     # Includes deterministic CPU/compute work budgets, idle zero and stale results.
