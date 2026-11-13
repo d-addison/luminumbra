@@ -1,4 +1,5 @@
 #include "FarVolumeGlBackend.h"
+#include "GBufferTargets.h"
 #include "rendering/AttributedGl.h"
 
 #include <glad/glad.h>
@@ -214,6 +215,15 @@ void FarVolumeGlDriver::EnableAttribute(FarVolumeVertexAttribute attribute) noex
     glEnableVertexAttribArray(static_cast<GLuint>(attribute));
 }
 bool FarVolumeGlDriver::DrawIndexed(std::int32_t index_count) noexcept {
+    struct DiagnosticDrawResult {
+        GBufferDiagnosticCapture* capture;
+        bool submitted = false;
+        ~DiagnosticDrawResult() {
+            if (!submitted && capture && capture->deferred_attached()) {
+                capture->abort();
+            }
+        }
+    } diagnostic{GBufferDiagnosticCapture::Current()};
     if (index_count <= 0 || !ValidContext() || !glGetVertexAttribiv || !glGetIntegeri_v ||
         !glGetInteger64i_v || !glBindBufferBase || !glBindBufferRange)
         return false;
@@ -239,6 +249,9 @@ bool FarVolumeGlDriver::DrawIndexed(std::int32_t index_count) noexcept {
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, static_cast<GLuint>(vertex_buffer));
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, static_cast<GLuint>(index_buffer));
     bool success = !HasError();
+    if (success && diagnostic.capture) {
+        success = diagnostic.capture->write_ladder(index_count);
+    }
     if (success) {
         // farTileLocal SSBO addressing assumes zero index offset, zero base vertex, no
         // instancing and no multi-draw; update reconstruction if these change.
@@ -261,6 +274,7 @@ bool FarVolumeGlDriver::DrawIndexed(std::int32_t index_count) noexcept {
     }
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, static_cast<GLuint>(generic));
     const bool restored = !HasError();
-    return success && restored;
+    diagnostic.submitted = success && restored;
+    return diagnostic.submitted;
 }
 } // namespace Luminumbra::Rendering

@@ -630,6 +630,9 @@ bool MakeFarWorldDrawCommand(const FarVolumeDrawRecord& record,
                                        static_cast<double>(record.origin_meters.y),
                                        static_cast<double>(record.origin_meters.z)};
     FarWorldDrawCommand candidate;
+    candidate.diagnostic_identity = record.identity;
+    candidate.diagnostic_span = {record.request.span.min_y, record.request.span.max_y};
+    candidate.diagnostic_water_indices = record.water_indices;
     for (std::size_t i = 0; i < origin.size(); ++i) {
         if (!std::isfinite(camera[i]) ||
             std::abs(origin[i]) > kFarVolumeExactCoordinateLimitMeters ||

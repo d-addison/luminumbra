@@ -953,6 +953,7 @@ FarLodWorkerBuildOutcome BuildFarLodWorkerTile(const Systems::SHIELD_WorldSystem
         outcome.error = "far-SDF worker produced an empty mesh";
         return outcome;
     }
+    outcome.terrain_has_sdf = !assembly.bricks.empty() || !tile.sdf_bricks.empty();
     outcome.ok = true;
     outcome.tile = std::move(tile);
     return outcome;
@@ -1156,6 +1157,11 @@ void FarLodSystem::integrate_completed_builds() {
             result.tile_changed && !result.save_dir.empty() && !result.persistence_allowed;
 
         ResidentRegion region;
+        region.terrain_has_sdf = result.terrain_has_sdf;
+        region.diagnostic_generation = {result.epoch,
+                                        result.capture_epoch,
+                                        result.params_hash,
+                                        result.region_authority_revision};
         region.tier = result.tier;
         region.rx = result.rx;
         region.rz = result.rz;
@@ -1466,6 +1472,7 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system,
                                     static_cast<float>(World::FarLodSampleStepMeters(tier));
                 result.max_height = World::DequantizeFarLodHeight(max_q);
                 result.mesh = std::move(outcome.mesh);
+                result.terrain_has_sdf = outcome.terrain_has_sdf;
                 // build the flat water sheet from the same
                 // tile's water flags (river channels + seabeds beyond the live ring).
                 BuildFarLodWaterSheet(tile, result.water_mesh);
@@ -1719,6 +1726,14 @@ void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
         geometry_shader.setMat3("normalMatrix", normal_matrix);
         glBindVertexArray(region.vao);
         if (auto* capture = GBufferDiagnosticCapture::Current()) {
+            // Fixed-width numeric inputs bound the complete key to 256 bytes.
+            const auto& generation = region.diagnostic_generation;
+            const std::string mesh_key =
+                "legacy/terrain/" + std::to_string(static_cast<unsigned int>(region.tier)) + "/" +
+                std::to_string(region.rx) + "/" + std::to_string(region.rz) + "/epoch/" +
+                std::to_string(generation[0]) + "/capture/" + std::to_string(generation[1]) +
+                "/params/" + std::to_string(generation[2]) + "/revision/" +
+                std::to_string(generation[3]);
             capture->write(geometry_shader,
                            {.mesh_path = {},
                             .shader_variant = "legacy_far_terrain",
@@ -1726,7 +1741,10 @@ void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
                             .lod = static_cast<std::uint32_t>(region.tier),
                             .ownership = DiagnosticOwnership::LegacyFar,
                             .pass = DiagnosticPass::GBuffer,
-                            .provenance = DiagnosticProvenance::Unsupported});
+                            .provenance = region.terrain_has_sdf
+                                              ? DiagnosticProvenance::Unknown
+                                              : DiagnosticProvenance::Heightfield,
+                            .generated_mesh = mesh_key});
         }
         Luminumbra::Rendering::AttributedGl::Submit(glDrawElements,
                                                     GL_TRIANGLES,
@@ -1762,6 +1780,14 @@ void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
         geometry_shader.setMat3("normalMatrix", normal_matrix);
         glBindVertexArray(region.water_vao);
         if (auto* capture = GBufferDiagnosticCapture::Current()) {
+            // Fixed-width numeric inputs bound the complete key to 256 bytes.
+            const auto& generation = region.diagnostic_generation;
+            const std::string mesh_key =
+                "legacy/water/" + std::to_string(static_cast<unsigned int>(region.tier)) + "/" +
+                std::to_string(region.rx) + "/" + std::to_string(region.rz) + "/epoch/" +
+                std::to_string(generation[0]) + "/capture/" + std::to_string(generation[1]) +
+                "/params/" + std::to_string(generation[2]) + "/revision/" +
+                std::to_string(generation[3]);
             capture->write(geometry_shader,
                            {.mesh_path = {},
                             .shader_variant = "legacy_far_water",
@@ -1769,7 +1795,8 @@ void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
                             .lod = static_cast<std::uint32_t>(region.tier),
                             .ownership = DiagnosticOwnership::LegacyFar,
                             .pass = DiagnosticPass::GBuffer,
-                            .provenance = DiagnosticProvenance::Unsupported});
+                            .provenance = DiagnosticProvenance::Mesh,
+                            .generated_mesh = mesh_key});
         }
         Luminumbra::Rendering::AttributedGl::Submit(
             glDrawElements,
