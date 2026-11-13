@@ -1,5 +1,7 @@
 #include "GlassOitPass.h"
+#include "../DiagnosticDrawTable.h"
 #include "../FarWorldReplay.h"
+#include "../GBufferTargets.h"
 #include "core/Profiler.h"
 #include "rendering/AttributedGl.h"
 
@@ -7,6 +9,8 @@
 #include "core/Log.h"
 #include "rendering/Camera.h"
 #include "rendering/Shader.h"
+
+#include <optional>
 
 namespace Luminumbra::Rendering {
 
@@ -105,22 +109,44 @@ void GlassOitPass::execute_accum(const RenderContext& ctx, const GlassOitPassInp
     glBlendFunci(0, GL_ONE, GL_ONE);
     glBlendFunci(1, GL_ZERO, GL_ONE_MINUS_SRC_ALPHA);
 
-    m_accum_shader->use();
-    m_accum_shader->setMat4("u_view", ctx.view);
-    m_accum_shader->setMat4("u_projection", ctx.projection);
+    Shader* draw_shader = m_accum_shader.get();
+    std::optional<GBufferDiagnosticAttachment> diagnostic_attachment;
+    if (auto* capture = GBufferDiagnosticCapture::Current()) {
+        if (!m_resolve_shader || !m_resolve_shader->IsValid() || ctx.screen_quad_vao == 0) {
+            capture->unsupported(
+                "glass_resolve_unavailable", 0, DiagnosticOwnership::Live, DiagnosticPass::Forward);
+        }
+        diagnostic_attachment.emplace(
+            m_fbo, m_accum_tex, DiagnosticExtent{ctx.internal_w(), ctx.internal_h()});
+        draw_shader = capture->variant(draw_shader, false);
+    }
+
+    draw_shader->use();
+    draw_shader->setMat4("u_view", ctx.view);
+    draw_shader->setMat4("u_projection", ctx.projection);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, ctx.opaque_scene.id);
-    m_accum_shader->setInt("u_opaqueScene", 0);
-    m_accum_shader->setVec2(
+    draw_shader->setInt("u_opaqueScene", 0);
+    draw_shader->setVec2(
         "u_screenSize",
         glm::vec2(static_cast<float>(ctx.internal_w()), static_cast<float>(ctx.internal_h())));
-    m_accum_shader->setVec3("u_cameraPos", ctx.camera->Position);
-    m_accum_shader->setFloat("u_refractionStrength", 0.35f);
+    draw_shader->setVec3("u_cameraPos", ctx.camera->Position);
+    draw_shader->setFloat("u_refractionStrength", 0.35f);
     glBindVertexArray(input.glass_vao);
     for (const GlassPaneItem& pane : *input.glass_items) {
-        m_accum_shader->setMat4("u_model", pane.model);
-        m_accum_shader->setVec3("u_tint", pane.tint);
-        m_accum_shader->setFloat("u_thickness", pane.thickness);
+        draw_shader->setMat4("u_model", pane.model);
+        draw_shader->setVec3("u_tint", pane.tint);
+        draw_shader->setFloat("u_thickness", pane.thickness);
+        if (auto* capture = GBufferDiagnosticCapture::Current()) {
+            capture->write_current({.mesh_path = {},
+                                    .shader_variant = "glass_oit",
+                                    .chunk = {},
+                                    .lod = 0,
+                                    .ownership = DiagnosticOwnership::Live,
+                                    .pass = DiagnosticPass::Forward,
+                                    .provenance = DiagnosticProvenance::Mesh,
+                                    .generated_mesh = "glass/unit-pane"});
+        }
         Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLES, 0, 6);
     }
     glBindVertexArray(0);

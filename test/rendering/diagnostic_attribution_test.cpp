@@ -2,7 +2,9 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -129,6 +131,66 @@ std::string WithoutLaterSubmissionDiagnostics(std::string source) {
         source.replace(position, draw.size(), "m_shader->");
     }
     return source;
+}
+
+// Capture-off execution keeps the complete original call sequence and arguments.
+// Ignore formatting only, so running the formatter cannot change the baseline.
+std::string WithoutWhitespace(std::string source) {
+    source.erase(
+        std::remove_if(source.begin(),
+                       source.end(),
+                       [](unsigned char character) { return std::isspace(character) != 0; }),
+        source.end());
+    return source;
+}
+
+std::string WithoutForwardSubmissionDiagnostics(std::string source, std::string_view member) {
+    constexpr std::string_view branch = "if (auto* capture = GBufferDiagnosticCapture::Current())";
+    const auto setup = source.find("Shader* draw_shader = " + std::string(member) + ".get();");
+    const auto attachment = Body(source, branch);
+    EXPECT_NE(setup, std::string::npos);
+    EXPECT_FALSE(attachment.empty());
+    if (setup == std::string::npos || attachment.empty()) {
+        return {};
+    }
+    const auto start = source.rfind('\n', setup) + 1;
+    const auto end = source.find(attachment) + attachment.size();
+    source.erase(start, end - start);
+    const auto submission = Body(source, branch);
+    EXPECT_FALSE(submission.empty());
+    if (submission.empty()) {
+        return {};
+    }
+    const auto submission_start = source.rfind('\n', source.find(branch)) + 1;
+    const auto submission_end = source.find(submission) + submission.size();
+    source.erase(submission_start, submission_end - submission_start);
+    constexpr std::string_view selected = "draw_shader->";
+    const std::string original = std::string(member) + "->";
+    for (auto position = source.find(selected); position != std::string::npos;
+         position = source.find(selected, position + original.size())) {
+        source.replace(position, selected.size(), original);
+    }
+    return WithoutWhitespace(source);
+}
+
+void ForwardSubmissionContract(const std::string& draw, const std::string& fragment) {
+    Contains(draw, "std::optional<GBufferDiagnosticAttachment> diagnostic_attachment;");
+    Contains(draw, "if (auto* capture = GBufferDiagnosticCapture::Current())");
+    Contains(draw, "DiagnosticExtent{ctx.internal_w(), ctx.internal_h()}");
+    Contains(draw, "draw_shader = capture->variant(draw_shader, false)");
+    Contains(draw, "capture->write_current({.mesh_path = {},");
+    Contains(draw, ".lod = 0");
+    Contains(draw, ".ownership = DiagnosticOwnership::Live");
+    Contains(draw, ".pass = DiagnosticPass::Forward");
+    Contains(draw, ".provenance = DiagnosticProvenance::Mesh");
+    EXPECT_LT(draw.find("diagnostic_attachment.emplace("), draw.find("draw_shader->use()"));
+    EXPECT_LT(draw.find("capture->write_current("), draw.find("AttributedGl::Submit"));
+    EXPECT_EQ(Count(draw, "capture->write_current("), 1u);
+    Contains(fragment,
+             "#ifdef LUMIN_DIAG_IDS\nlayout (location = 6) out uvec4 gDiagnosticIds;\n"
+             "uniform uvec4 u_diagnosticIds;\n#endif");
+    Contains(fragment, "    gDiagnosticIds = u_diagnosticIds;\n#endif");
+    EXPECT_EQ(Count(fragment, "gDiagnosticIds ="), 1u);
 }
 
 const std::string kTargets = "src/luminumbra_client/rendering/GBufferTargets.cpp";
@@ -811,4 +873,107 @@ TEST(DiagnosticAttribution, LaterAttachmentsPreserveIdsBuffersAndExtentAcrossSta
              "glClearTexImage(targets.texture(), 0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, nullptr)");
     EXPECT_EQ(Count(attach, "glClearTexImage("), 1u);
     EXPECT_LT(attach.find("if (!complete)"), attach.find("if (!already_captured)"));
+}
+
+TEST(DiagnosticAttribution, WaterAttributesOriginalChunkSubmissionsOnTheContributorPlane) {
+    const auto source = Read("src/luminumbra_client/rendering/passes/WaterPass.cpp");
+    const auto draw = Body(source, "WaterPass::execute(");
+    const auto shader = Read("res/shaders/water.frag");
+    ForwardSubmissionContract(draw, shader);
+    Contains(WithoutWhitespace(draw),
+             "diagnostic_attachment.emplace(ctx.lit_scene.id,static_cast<GLuint>(color_texture),");
+    Contains(draw, "glGetNamedFramebufferAttachmentParameteriv(ctx.lit_scene.id,");
+    Contains(draw, "GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE");
+    Contains(draw, "if (attachment_type == GL_TEXTURE)");
+    Contains(draw, "GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME");
+    Contains(draw, "for (const auto& item : input.draw_items)");
+    Contains(draw, "draw_shader->setMat4(\"u_model\", item.model)");
+    Contains(draw, "item.model != translated || item.model[3].w != 1.0f");
+    Contains(draw, "water_shader_unavailable");
+    Contains(draw, "if (!draw_shader || !draw_shader->IsValid())");
+    Contains(Body(draw, "if (!draw_shader || !draw_shader->IsValid())"),
+             "throw std::runtime_error(\"Water diagnostic shader is unavailable\")");
+    Contains(draw, "water_submission_transform_unavailable");
+    Contains(draw, "for (int axis = 0; axis < 3; ++axis)");
+    Contains(draw, "!std::isfinite(coordinate) || std::trunc(coordinate) != coordinate");
+    Contains(draw, "coordinate <= -16777216.0 || coordinate >= 16777216.0");
+    Contains(draw, "coordinate < std::numeric_limits<std::int32_t>::min()");
+    Contains(draw, "coordinate > std::numeric_limits<std::int32_t>::max()");
+    Contains(draw, "water_submission_chunk_unavailable");
+    EXPECT_LT(draw.find("water_submission_chunk_unavailable"),
+              draw.find("static_cast<std::int32_t>(coordinate)"));
+    EXPECT_EQ(Count(draw, "throw std::runtime_error("), 3u);
+    Contains(draw, "\"water/chunk/\" + std::to_string(chunk[0])");
+    Contains(draw, "std::to_string(chunk[1])");
+    Contains(draw, "std::to_string(chunk[2])");
+    Contains(draw, "std::to_string(item.element_count)");
+    Contains(draw, ".chunk = chunk");
+    Contains(draw, ".shader_variant = \"water\"");
+    Contains(draw, ".generated_mesh = mesh_key");
+    EXPECT_EQ(Count(draw, "glDrawElements,"), 1u);
+    EXPECT_LT(shader.rfind("discard;"), shader.find("gDiagnosticIds ="));
+    EXPECT_EQ(SourceHash(WithoutForwardSubmissionDiagnostics(draw, "m_water_shader")),
+              0xbcd8c2b14ef59ca1ull);
+    EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(shader, 3)), 0x9bb7b237f54a53a7ull);
+    EXPECT_EQ(SourceHash(WithoutWhitespace(Body(source, "void WaterPass::generate_caustics("))),
+              0xac4d90167f595e96ull);
+}
+
+TEST(DiagnosticAttribution, GlassAttributesEachPaneBeforeOitResolveWithoutReplacingItsIds) {
+    const auto source = Read("src/luminumbra_client/rendering/passes/GlassOitPass.cpp");
+    const auto draw = Body(source, "void GlassOitPass::execute_accum(");
+    const auto shader = Read("res/shaders/glass_oit.frag");
+    ForwardSubmissionContract(draw, shader);
+    Contains(draw, "m_fbo, m_accum_tex, DiagnosticExtent");
+    Contains(
+        WithoutWhitespace(Body(
+            draw,
+            "if (!m_resolve_shader || !m_resolve_shader->IsValid() || ctx.screen_quad_vao == 0)")),
+        "capture->unsupported(\"glass_resolve_unavailable\",0,DiagnosticOwnership::Live,"
+        "DiagnosticPass::Forward);");
+    EXPECT_LT(draw.find("glClearBufferfv(GL_COLOR, 1"),
+              draw.find("diagnostic_attachment.emplace("));
+    Contains(draw, "for (const GlassPaneItem& pane : *input.glass_items)");
+    Contains(draw, "draw_shader->setMat4(\"u_model\", pane.model)");
+    Contains(draw, "draw_shader->setVec3(\"u_tint\", pane.tint)");
+    Contains(draw, "draw_shader->setFloat(\"u_thickness\", pane.thickness)");
+    Contains(draw, ".shader_variant = \"glass_oit\"");
+    Contains(draw, ".generated_mesh = \"glass/unit-pane\"");
+    EXPECT_EQ(Count(draw, "Submit(glDrawArrays,"), 1u);
+    Contains(shader, "float alpha = 0.85;"); // Every depth-passing pane contributes.
+    EXPECT_LT(shader.find("outReveal ="), shader.find("gDiagnosticIds ="));
+    EXPECT_EQ(SourceHash(WithoutForwardSubmissionDiagnostics(draw, "m_accum_shader")),
+              0xba16573f1a9b983aull);
+    EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(shader)), 0x65ad88713c0671a3ull);
+    const auto resolve = Body(source, "void GlassOitPass::execute_resolve(");
+    EXPECT_EQ(resolve.find("Diagnostic"), std::string::npos);
+    EXPECT_EQ(SourceHash(WithoutWhitespace(resolve)), 0xa0909c1bcc79f42dull);
+}
+
+TEST(DiagnosticAttribution, WaterfallAttributesOnlySubmittedSheetPoolSlotsAndNonzeroAlpha) {
+    const auto draw = Body(Read("src/luminumbra_client/rendering/passes/WaterfallPass.cpp"),
+                           "void WaterfallPass::execute(");
+    const auto shader = Read("res/shaders/waterfall.frag");
+    ForwardSubmissionContract(draw, shader);
+    Contains(WithoutWhitespace(draw),
+             "diagnostic_attachment.emplace(ctx.lit_scene.id,static_cast<GLuint>(color_texture),");
+    Contains(draw, "glGetNamedFramebufferAttachmentParameteriv(ctx.lit_scene.id,");
+    Contains(draw, "GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE");
+    Contains(draw, "if (attachment_type == GL_TEXTURE)");
+    Contains(draw, "GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME");
+    Contains(draw, "m_geometry_built && !m_pages.empty() && !m_sheet_sites.empty()");
+    Contains(draw, "m_pages[i / kSitesPerPage].vao");
+    Contains(draw, "\"waterfall/sheet-pool/\" + std::to_string(i)");
+    Contains(draw, ".shader_variant = \"waterfall\"");
+    Contains(draw, ".generated_mesh = mesh_key");
+    Contains(draw, "static_cast<GLint>((i % kSitesPerPage) * 12), 12");
+    EXPECT_LT(draw.find("if (live < 0.02f)"), draw.find("capture->write_current("));
+    Contains(Body(draw, "if (live < 0.02f)"), "continue;");
+    EXPECT_EQ(Count(draw, "glDrawArrays,"), 1u);
+    Contains(shader, "#ifdef LUMIN_DIAG_IDS\n    if (alpha <= 0.0) { discard; }");
+    EXPECT_LT(shader.find("alpha *= clamp(u_live_factor"), shader.find("discard;"));
+    EXPECT_LT(shader.find("discard;"), shader.find("gDiagnosticIds ="));
+    EXPECT_EQ(SourceHash(WithoutForwardSubmissionDiagnostics(draw, "m_shader")),
+              0x1d7f36c59bf22b7bull);
+    EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(shader, 3)), 0x031258f2195ef329ull);
 }
