@@ -340,17 +340,36 @@ float starProfile(float radius) {
     return 1.0 - smoothstep(0.0, 0.18, radius);
 }
 
+// Integer cells span [-320, 320]; conversion is exact before unsigned mixing.
+uint starCellSeed(ivec3 cell) {
+    uvec3 p = uvec3(cell);
+    uint seed = (p.x * 0x8da6b343u) ^ (p.y * 0xd8163841u) ^ (p.z * 0xcb1ab31fu);
+    seed ^= seed >> 16u;
+    seed *= 0x7feb352du;
+    seed ^= seed >> 15u;
+    seed *= 0x846ca68bu;
+    return seed ^ (seed >> 16u);
+}
+
+float starRandom(uint seed) {
+    seed ^= seed >> 16u;
+    seed *= 0x7feb352du;
+    seed ^= seed >> 15u;
+    seed *= 0x846ca68bu;
+    seed ^= seed >> 16u;
+    return float(seed >> 8u) * (1.0 / 16777216.0);
+}
+
 // A 3D field avoids projection seams and axis-aligned noise peaks. Intersecting
 // each spherical spot with the view sphere gives a round, soft stellar disc.
 vec3 renderStars(vec3 viewDir, float nightIntensity) {
     if (nightIntensity < 0.1 || viewDir.y <= 0.0) return vec3(0.0);
     vec3 p = viewDir * 320.0;
-    vec3 cell = floor(p);
-    vec2 seed = cell.xy + cell.z * vec2(37.0, 71.0);
-    float brightness = hash(seed);
-    vec3 centre = vec3(hash(seed + vec2(11.0, 23.0)),
-                       hash(seed + vec2(43.0, 17.0)),
-                       hash(seed + vec2(19.0, 53.0))) * 0.5 + 0.25;
+    uint seed = starCellSeed(ivec3(floor(p)));
+    float brightness = starRandom(seed);
+    vec3 centre = vec3(starRandom(seed ^ 0x9e3779b9u),
+                       starRandom(seed ^ 0x85ebca6bu),
+                       starRandom(seed ^ 0xc2b2ae35u)) * 0.5 + 0.25;
     float radial = starProfile(length(fract(p) - centre));
     float horizonFade = smoothstep(0.0, 0.1, viewDir.y);
     float twinkle = 0.8 + 0.2 * sin(u_time * 3.0 + brightness * 1000.0);

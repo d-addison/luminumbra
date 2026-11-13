@@ -18,6 +18,7 @@ in VS_OUT {
     vec2  texCoord;
     vec4  color;
     flat float atlasLayer;
+    flat uint ambientMote;
     float distanceToCamera;
     float viewDepth;
     vec3  worldPos;
@@ -80,7 +81,7 @@ void main() {
     bool isStreak = fs_in.streakAspect > 1.5;
     bool isRain = abs(fs_in.atlasLayer - 1.0) < 0.25 || isStreak;
     bool isSnow = abs(fs_in.atlasLayer - 2.0) < 0.25;
-    bool isAmbientMote = abs(fs_in.atlasLayer - 3.0) < 0.25;
+    bool isAmbientMote = fs_in.ambientMote != 0u;
     // rain-impact FOAM is tagged with a dedicated atlas
     // layer sentinel (precip_splash.json atlas_layer = 4) so it renders as a clean
     // whitish foam burst rather than a scene-tinted emissive sprite. All other

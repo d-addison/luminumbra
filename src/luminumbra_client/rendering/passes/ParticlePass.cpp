@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <limits>
 
 namespace Luminumbra::Rendering {
 
@@ -174,6 +175,11 @@ void ParticlePass::init_buffers() {
     glVertexAttribFormat(5, 1, GL_UNSIGNED_BYTE, GL_TRUE, offsetof(InstanceRecord, streak));
     glVertexAttribBinding(5, 0);
 
+    // The unused snorm8 code -128 tags radial ambient dust. Ordinary rotation
+    // uses [-127, 127], so every non-dust record keeps its original bytes.
+    glEnableVertexAttribArray(6);
+    glVertexAttribIFormat(6, 1, GL_BYTE, offsetof(InstanceRecord, rotation));
+    glVertexAttribBinding(6, 0);
     glBindVertexBuffer(0, m_instance_vbo[0], 0, sizeof(InstanceRecord));
 
     glBindVertexArray(0);
@@ -653,17 +659,17 @@ void ParticlePass::update(float dt) {
         rec.color[1] = to_unorm8(emitter.data.g_curve.sample(life_t));
         rec.color[2] = to_unorm8(emitter.data.b_curve.sample(life_t));
         rec.color[3] = to_unorm8(emitter.data.a_curve.sample(life_t));
-        // Layer 3 identifies ambient dust only in the render instance stream;
-        // authored emitter descriptors (including magical layer 0) stay unchanged.
-        rec.atlas_layer =
-            p.emitter_index == m_ambient_emitter_index ? uint16_t{3} : emitter.data.atlas_layer;
+        rec.atlas_layer = emitter.data.atlas_layer;
         // Pack rotation as snorm8 (angle/pi in [-1,1]) and the per-emitter streak
         // aspect as unorm8 (aspect/kMaxStreakAspect). Round particles carry aspect
         // 1 -> a square billboard; rain carries streak_aspect > 1 -> the vertex
         // stage elongates the velocity-aligned quad into a streak.
         const float angle_norm =
             std::clamp(rotation * (1.0f / 3.14159265358979323846f), -1.0f, 1.0f);
-        rec.rotation = static_cast<int8_t>(std::lround(angle_norm * 127.0f));
+        // Dust has a radial mask, so its orientation does not affect scattering.
+        rec.rotation = p.emitter_index == m_ambient_emitter_index
+                           ? std::numeric_limits<int8_t>::min()
+                           : static_cast<int8_t>(std::lround(angle_norm * 127.0f));
         // The authored shutter-length aspect follows projected fall velocity.
         // Horizontal wind tilts the streak; it does not invent vertical stretch.
         float effective_aspect = emitter.data.streak_aspect;
@@ -710,7 +716,10 @@ std::size_t ParticlePass::execute(const RenderContext& ctx, const Camera& camera
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, ctx.lit_scene.id);
-    glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // particles into the internal scene
+    glViewport(0,
+               0,
+               static_cast<GLsizei>(ctx.internal_w()),
+               static_cast<GLsizei>(ctx.internal_h())); // particles into the internal scene
 
     // Transparent particles: test against scene depth but do not write depth,
     // and blend additively into the HDR lighting target.
@@ -802,7 +811,7 @@ std::size_t ParticlePass::execute(const RenderContext& ctx, const Camera& camera
     PreserveReplayObject(ReplayObjectKind::VertexArray, m_vao);
     glBindVertexBuffer(0, m_instance_vbo[m_ring_cursor], 0, sizeof(InstanceRecord));
     Luminumbra::Rendering::AttributedGl::Submit(glDrawArraysInstanced,
-                                                GL_TRIANGLE_STRIP,
+                                                GLenum{GL_TRIANGLE_STRIP},
                                                 0,
                                                 4,
                                                 static_cast<GLsizei>(m_frame_instance_count));
