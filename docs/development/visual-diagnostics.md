@@ -15,6 +15,7 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | Debug views and inspector | Planned | Extend `DebugViewPass` and developer console widgets |
 | Linux shader compilation and software-GL reference scenes | Planned | Fast Linux workflow steps; no required-check or ruleset changes |
 | Automated image checks | Planned | Bundle-aware checks alongside existing render-health gates |
+| Temporal audits and all-features profile (E1–E3) | Planned; gap inventory below describes current code | Exact-tick site sequences, temporal metrics and non-vacuous feature evidence require implementation; existing captures do not establish this coverage |
 
 The codecs alone do not create scenario bundles or enable a runtime flag. They are
 compiled in the existing GL-free capture test target; rendering does not call them yet.
@@ -205,6 +206,276 @@ identifies the draw/asset/pass. First integrate as additional diagnostic evidenc
 qualify new production-image thresholds on repeated captures before enforcement.
 Keep `diff-render-health.ps1`, native shader-health checks and current thresholds.
 
+## E: temporal audits and all-features captures
+
+E1–E3 are planned. This documentation adds no runtime flag, capture guarantee,
+metric enforcement or CI job. The inventory below distinguishes current behavior
+from the proposed all-features contract. Existing specialized gates remain useful
+and retain their baselines; passing them does not establish an all-features audit.
+
+### Current capture gap inventory
+
+Evidence paths in this subsection are repository-relative: `client/` means
+`src/luminumbra_client/`, `core/` means `src/luminumbra_client/core/`,
+`rendering/` means `src/luminumbra_client/rendering/`, and `frontier` means
+`tools/gates/validate-engine-frontier.ps1`. Line numbers refer to the code reviewed
+for this design. These are all sibling entry paths of the proposed contract;
+headless capture is a wrapper around two of them, not a separate renderer.
+Windows and POSIX use these same C++ paths; the frontier launch wrapper is
+PowerShell and the existing assembly wrapper is Python.
+
+ON means the normal producer is eligible with shipped configuration, not that
+anything was visible. OFF means an explicit suppression. FORCED means a capture
+pin, reset or fixture replaces the ordinary producer. CONDITIONAL requires content,
+configuration, view or a named option. Unknown presence is never evidence of ON.
+
+Shared defaults: `data/common/systems.json:5` enables plant growth, `:6` erosion,
+`:38` weather hydrology, `:40` weather events, `:50` tree wind, `:51` procgen plants,
+`:55` creature spawning and `:59` live weather. The live bridge feeds weather,
+precipitation and clouds before capture overrides (`client/main_client.cpp:5706`);
+lightning consumes the sim strike schedule (`:5736`). Ambient motes run in the
+ordinary frame path without a `--no-ui` guard (`:6015`). Foliage preparation is
+synchronous/complete for captures (`:1039`, `:5565`). Water, rivers, waterfalls,
+caves and structures still require suitable generated/authored content and framing;
+there is no universal presence test for these modes. Waterfall preparation is part
+of world entry (`:4361`); isolation is a separate render/spawn mask
+(`core/RuntimeScenarioConfig.h:77`, `client/main_client.cpp:2406`).
+Grass can still be disabled by resolved graphics (`rendering/RenderPipeline.cpp:3851`);
+isolation can suppress water, foliage, particles and lightning (`:3313`, `:3459`,
+`:3522`, `:3546`). ON below assumes default graphics and no isolation override.
+Sky/lighting receive cloud/moon inputs through their normal contexts
+(`rendering/RenderPipeline.cpp:980`, `:1013`); visibility still depends on content
+and camera, not just constructing those passes. Cave-flourish OFF below describes
+the automatic scatter: `--debug-goto cave` can still light one framed hero crystal
+(`client/app/CaveFlourishes.cpp:158`), without restoring the complete scatter.
+
+| Mode | Creatures / animals | Foliage; caves; structures; water / rivers / waterfalls | Weather / precipitation; clouds / cloud shadows | Lightning; particles | Sky / moon / stars | Weather cycle; several sim days with creatures ticking |
+| --- | --- | --- | --- | --- | --- | --- |
+| `--timelapse` family (`--timelapse-frames`) | Ambient OFF by default; CONDITIONAL `--timelapse-living` permits wildlife; `--timelapse-creatures` uses ecology spawns/markers (`client/main_client.cpp:5555`, `:5933`; `client/app/ClientAppContext.h:165`). | Foliage ON/complete; optional grow/season are FORCED visual rebakes, simgrow uses live plants (`client/main_client.cpp:1012`, `:1024`). Cave flourishes OFF (`client/app/CaveFlourishes.cpp:75`); cave terrain and structures CONDITIONAL; water/rivers/waterfalls CONDITIONAL, dig/drain/rain alter the demo world (`client/main_client.cpp:892`, `:920`, `:976`). | Live weather, precipitation and cloud/shadow bridge ON if configured (`client/main_client.cpp:5706`). Rain demo FORCES hydrology input then evaporation, not a clear–storm–clear atmosphere script (`:980`, `:5274`). | Live strikes CONDITIONAL on schedule/view (`:5736`); motes/precipitation ON via common path (`:5716`, `:6015`), presence unverified. | ON, visibility CONDITIONAL on TOD/view. Start TOD/daystep options exist (`client/app/ClientAppContext.h:149`, `:159`); final frame has intervening live clock writes (`client/main_client.cpp:5692`). | Natural weather can evolve; no scripted full cycle. YES, extra fixed ticks can span days with opted-in creatures, but are added to normal frame ticks (`client/main_client.cpp:994`, `:5339`); not an exact-tick audit schedule. |
+| Frame-scan | Ambient eligible when no scenario is active: the predicate does not exclude frame-scan (`client/main_client.cpp:5555`); assets/species still required (`:5575`). | Foliage ON/complete (`:1044`); cave flourishes OFF (`client/app/CaveFlourishes.cpp:76`); caves/structures/water/rivers/waterfalls CONDITIONAL. Scanner observes a rendered frame, does not enable these (`rendering/FrameScan.cpp:81`). | Live bridge ON/CONDITIONAL (`client/main_client.cpp:5706`); no weather pin in scan camera/TOD block (`:6038`). | Live strikes and common particles CONDITIONAL; no scan-specific guarantee (`:5736`, `:6015`). | FORCED noon `0.04` and fixed pose (`:6041`); sky ON, night moon/star evidence absent by design. | NO cycle or multi-day sequence: settles, writes once, exits (`:6197`, `:6419`). Sim ticks before capture do not prove creature progression over days. |
+| World visual sweep | Ambient OFF because scenario active (`client/main_client.cpp:5555`); no sweep creature fixture. | Foliage FORCED empty for upward cameras (`core/scenarios/WorldVisualSweep.cpp:379`). Other views use complete scatter. Cave terrain/structures/water/rivers/waterfalls CONDITIONAL; water-aimed cells require water draws/indices (`:430`). Cave flourish suppression depends on other capture flags, not scenario alone (`client/app/CaveFlourishes.cpp:75`). | FORCED independent clear/storm cells; clouds/shadows ON in both (`core/scenarios/WorldVisualSweep.cpp:455`, `:509`); storm rain ON, clear rain OFF; emitters cleared each cell (`:452`). | FORCED fixed active storm bolt, clear bolt OFF (`:479`, `:503`); particles reset, storm rain emitter added (`:452`, `:473`), other emitters not preserved. | FORCED discrete TOD/season matrix (`:528`); sky/moon/stars CONDITIONAL on cell/view. | NO temporal cycle: independent still weather cells. NO sim days/creature ticks inside synchronous matrix: callback only updates residency and renders (`core/ScenarioRunnerCapture.cpp:141`); settles are renders (`core/scenarios/WorldVisualSweep.cpp:391`). |
+| Scenario capture (general) | Ambient OFF (`client/main_client.cpp:5555`); CONDITIONAL scenario-owned rigs. CreatureSlice explicitly probes planner and skinned draws before/after stimulus (`core/ScenarioRunnerCapture.cpp:2055`, `:2074`), not a general wildlife guarantee. | Foliage ON/complete except scenario/isolation overrides; caves/structures/water/rivers/waterfalls CONDITIONAL. Water smoke explicitly waits for water draws (`core/ScenarioRunnerCapture.cpp:476`); general capture does not. Cave flourishes not suppressed by scenario alone (`client/app/CaveFlourishes.cpp:75`). | Live defaults ON/CONDITIONAL, then scenario pins override (`core/ScenarioRunnerCapture.cpp:195`); no universal weather schedule. | Live CONDITIONAL or FORCED by atmosphere driver (`core/ScenarioRunnerCapture.cpp:198`). Particle availability/content CONDITIONAL. | Many visual smokes FORCE noon; other scenarios use their own pins/live clock (`core/ScenarioRunnerCapture.cpp:201`). | Scenario-specific; no generic clear–storm–clear or exact multi-day creature audit. Normal sim uses frame delta (`client/main_client.cpp:5339`); capture progress uses elapsed time (`core/ScenarioRunnerCapture.cpp:219`). |
+| Time-of-day sweep | Ambient OFF (scenario); no creature fixture (`client/main_client.cpp:5555`). | Foliage ON; caves/structures/water/rivers/waterfalls CONDITIONAL; emissive discovery can change camera for an extra shot (`core/ScenarioRunnerDrive.cpp:736`). | Live bridge ON/CONDITIONAL; TOD pins do not supply a weather cycle (`core/ScenarioRunnerCapture.cpp:210`). Clouds/shadows follow live sample (`client/main_client.cpp:5724`). | Live strikes/particles CONDITIONAL (`client/main_client.cpp:5736`, `:6015`); no presence qualification. | FORCED summer/winter noon/dusk/night plans, one pending capture at a time (`core/ScenarioRunnerCapture.cpp:235`); not continuous dawn/dusk. | NO scripted weather cycle or multi-day animals. Season tick is a render pin, not elapsed sim days (`:245`). Frontier launches a timed scenario with `--no-ui` (`frontier:3035`). |
+| Weather visual | Ambient OFF (scenario); no creature fixture (`client/main_client.cpp:5555`). | Foliage ON; caves/structures/water/rivers/waterfalls CONDITIONAL, not asserted by this gate. | FORCED clear control then rain floored to 1.0; final precipitation follows pin (`core/ScenarioRunnerDrive.cpp:245`, `:258`, `:282`). Clouds/shadows retain live bridge, not a prescribed full cloud cycle (`client/main_client.cpp:5724`). | FORCED bolt only in progress window 0.80–0.84 (`core/ScenarioRunnerDrive.cpp:305`); rain particles ON in weather phase, emission OFF in clear control (`:282`); ambient motes common. | FORCED noon (`core/ScenarioRunnerCapture.cpp:203`); sky ON, night moon/stars absent. | NO return-to-clear cycle or multi-day animals. Motion clip is 240 render samples at 1/60 s (`core/ScenarioRunnerCapture.cpp:90`); frontier also runs a separate 300-tick weather bench, not an ecological capture (`frontier:2596`). |
+| Headless in-game capture gate | Same eligibility as frame-scan/scene when no scenario active (`client/main_client.cpp:5555`); no spawn/visibility assertion. | Foliage ON/complete; cave flourishes OFF for both legs (`client/app/CaveFlourishes.cpp:76`); caves/structures/water/rivers/waterfalls CONDITIONAL. | Noon scan retains live weather; night scene FORCES default None precipitation; clouds only explicitly replaced if requested (`client/main_client.cpp:5973`, `:5987`). | Scan live; night scene still inherits live lightning because scene block has no lightning override (`:5965`); particles ON but scene precipitation set to zero (`:5981`). | FORCED noon scan plus midnight `0.5`, full moon `1.0` scene; stars CONDITIONAL on view (`frontier:5867`). | NO: two independent still runs (`frontier:5847`, `:5877`), no continuous weather or multi-day creature progression. Hidden-window mode only sets window visibility (`core/RuntimeScenarioConfig.cpp:261`). |
+
+`--no-ui` sets ImGui availability and skips UI setup, not weather, particles or
+simulation (`client/main_client.cpp:1530`, `:2376`). Capture developer-widget policy
+also suppresses shortcuts (`client/app/ClientAppContext.h:423`), but ecology's
+creature labels remain an explicit exception (`client/main_client.cpp:6503`;
+`docs/developer-console.md:141`). That label overlay is not animal visibility
+proof. Deterministic still pins likewise do not imply deterministic temporal
+sampling: ordinary frame dt is wall-clock derived (`client/main_client.cpp:4518`),
+and current time-lapse adds ticks after readback. Its 45 initial settle frames
+(`client/app/ClientAppContext.h:60`) do not settle each later sample. The existing
+assembler naturally sorts filenames and loads all frames, uses Pillow for GIF
+and optionally ffmpeg for MP4 (`tools/timelapse.py:35`, `:43`, `:75`); it does not
+validate a sequence manifest or produce a temporal contact sheet.
+
+### E1: fixed-camera time-lapse audit runs
+
+Use the audit site's recorded seed, content/settings identity, camera position,
+orientation, projection, resolution and D2 ROIs. Run each site/camera from the same
+fresh deterministic initial state for each of the three spans below. Sites must
+cover foliage/LOD boundaries, open water/river/waterfall, structures and cave
+interior/mouth plus sky; additional fixed companion cameras are explicit site
+entries, never camera motion hidden inside a sequence. Refuse a missing site,
+unknown ROI or unsupported producer. Do not replace a site with the current
+spawn-grove camera or reframe it after a feature goes missing.
+
+Let D be the resolved simulation calendar's ticks per day and T the recorded
+simulation tick rate. Record both; do not equate a render season pin with sim
+elapsed time. The planned scheduler owns all tick advancement: no extra ordinary
+frame-delta ticks, no dropped catch-up ticks, no wall-clock phase selection.
+After initialization, advance exactly to target integer ticks through normal
+simulation, including creatures, plants, erosion and hydrology, with the same
+participating region/streaming policy recorded for replay. Preserve physics and
+creature movement dependencies; fail on scheduler faults or stalled progression.
+Audit annotations must not modify ordinary play or authority state. Scripted
+simulation inputs must participate in the existing config/session identity and
+save/replay hash paths; any required format change needs its own versioned
+read/write migration slice before admission, never an unversioned audit field.
+
+| Span per site/camera | Planned cadence and controls |
+| --- | --- |
+| Full day/night | Inclusive samples from tick t0 through t0+D, every ceil(D/720) ticks plus exact endpoint. TOD follows the sim calendar through dusk, midnight and dawn. Record actual intervals, not a claimed 720 equal intervals when division has a remainder. |
+| Weather cycle | 120 sim seconds: 20 clear, 30 ramp to storm, 40 storm, 30 return to clear; one sample per T ticks plus both endpoints and every phase boundary. Pin TOD at noon for response comparison, recording that render-only pin. Weather remains enabled in clear phases. |
+| Several sim days | Three complete sim days, inclusive t0 through t0+3D, every ceil(D/240) ticks plus exact endpoints/day boundaries. Use live plants and natural erosion/hydrology; animals stay active. Do not substitute visual grow/season or dig/drain demos for ecological progression. Report actual plant stages, erosion deltas, water levels and animal displacement even when change is zero. |
+
+For micro problems, add a 120-render-frame burst at 60 Hz at dusk, dawn, each
+weather boundary and a scheduled storm strike; deduplicate overlapping samples.
+Each pair of burst renders advances one 30 Hz sim tick (generalize from recorded
+T); subframe presentation time is rational and recorded. Also capture a 120-frame
+steady-lighting hold with moving-subject masks for flicker analysis. After the
+weather span's final clear endpoint, add a separately labelled 120-frame night
+presence hold at render TOD 0.5, the same camera and the final sim tick, with a
+declared moon phase. Include it in that capture's feature evidence and frame
+budget, but exclude it from weather-response and lighting-continuity metrics.
+This gives moon/stars a predeclared window even though the primary weather
+comparison pins noon; if the fixed view cannot show them, refuse coverage. The
+weather cycle's noon/night pins and holds are explicit controls, not a replacement
+for the live multi-day clock. Long intervals still execute every sim tick and
+required particle presentation substep; sampling sparsely must not reset particles or freeze animals.
+
+Warm up for 90 render frames at fixed 1/60 s presentation steps with simulation
+frozen at the admitted initial tick, then require residency, required meshes,
+foliage and expected feature readiness; at most 300
+additional render attempts at a held presentation phase. Record t0 and the
+exact warmup history so worker scheduling cannot change initial simulation time.
+At each sample, allow 3 render-only settle frames, then at most 60 upload/readiness retries
+with simulation and presentation phase held fixed. Settle frames do not enter the
+sequence or spawn/age particles repeatedly. Refuse exhausted readiness; never
+capture a half-loaded frame as a valid sample. Dense bursts preserve temporal
+history and have no per-frame history reset.
+
+Weather scripting is a new tick-indexed scenario input, applied before simulation
+weather/hydrology consumers and mapped through the live render bridge afterwards.
+Use an explicit versioned keyframe table of category, precipitation, storm,
+wetness/fog, wind and cloud targets with specified interpolation, seed-derived
+strike tick/position/magnitude and precipitation emitter seeds. Record requested
+and actual sim/render states; disagreement fails the run. Clear–storm–clear must
+reach zero precipitation at both ends and at least one scheduled visible strike
+in the storm interval. Do not reuse elapsed-progress pins, a permanently active
+bolt or render-only rain as evidence that the simulation experienced the cycle.
+The script/config/content digest must cover resolved referenced bytes in canonical
+order. If the existing configuration cannot express a field, report unsupported
+until its scenario adapter and deterministic regression exist.
+
+Planned output is `temporal/<site>/<camera>/<span>/`, with `run.json`,
+`frames/frame-000000.png` (or PPM) and each frame's A4/D1 bundle/manifest,
+`metrics/`, and `review/sequence.gif`, `review/sequence.mp4`,
+`review/contact-sheet.png`, `review/worst-<metric>.png` and `review/review.json`.
+Frames are ordered by manifest indices, never directory glob order. Input readers
+refuse unknown schemas, partial payloads, duplicate keys/indices, nonfinite or
+out-of-range numbers and inconsistent tick/phase bounds. Open each input once,
+verify a regular file within the run root and hash/decode that same handle; reject
+links, escapes and device/FIFO inputs. Close payload handles before rename or
+cleanup on Windows; retain the A4 identity-checked cleanup rule. The run
+manifest carries schema version, completion/refusal reason, seed, build and resolved
+content/config/script hashes with scopes/unavailable reasons, backend/device,
+feature-profile digest, site/ROI version, T/D, start/end/target/actual tick,
+subframe time, TOD/season, full requested/actual weather/cloud/strike states,
+particle seeds, fixed camera/matrices, resolution/exposure/history policy, readiness
+and settle counts, per-frame feature evidence and payload hashes. Bind evidence
+to the same completed frame; capture-local IDs may change between frames.
+
+Publish payloads first and completion manifest last into a fresh destination,
+using A4's transaction/cleanup rules; any refusal stays incomplete/failed. Assembly
+validates every expected frame/bundle and hash before writing derivatives. A
+missing/corrupt/duplicate/out-of-order frame leaves a labelled contact-sheet slot
+and fails assembly; it is never omitted. GIF and MP4 play at 12 fps for the sparse
+sequence and 60 fps for separately labelled bursts; label tick/TOD/weather/camera
+on the contact sheet and include start/end, phase boundaries and worst frames.
+Both formats are required for a complete review; missing Pillow/ffmpeg is an
+explicit assembly failure, preserving raw evidence, not a successful skipped MP4.
+Assembly success leaves visual approval pending.
+
+Bound each site/camera/span to 4,096 recorded frames including bursts, 10 million
+sim ticks, 16,384 pixels per dimension and 16,777,216 pixels per frame. Cap a run
+at 32 site/camera pairs and 512 GiB of outputs, checked with overflow-safe exact
+byte arithmetic before allocation/output. Refuse rather than shorten a span.
+Stream assembly/metrics with at most three full-resolution frames, 512 MiB CPU
+staging, and one A4-bounded bundle at a time; never load a whole sequence. GIF
+palettes/encoder buffers count against this budget. Per-frame work is bounded by
+pixels and participating items, never a fresh whole-world scan; run analysis is
+O(frames × pixels × fixed metric count). Preflight bounds include readiness and
+all simulation/presentation substeps, not just saved frames.
+
+### E2: temporal metrics and qualification
+
+Reuse D1's validated bundle/ID/AOV reader and D2's ROI/mask reader and montage
+labels. No independent permissive parser or inferred draw identity. Validate
+frame order, tick spacing, fixed camera/projection, dimensions, attachment roles
+and hashes before comparing. Across frames, join stable chunk/asset/producer/LOD
+keys, not numeric capture-local draw IDs. Occlusion or missing attribution is
+explicit unsupported coverage. Analyze linear lighting/contribution channels
+where available; final color deltas are labelled post/exposure-dependent.
+
+| Metric | Measurement and false-positive control | Initial status |
+| --- | --- | --- |
+| Frame-to-frame delta maps | Absolute linear RGB/luminance and depth/material/ownership changes for adjacent samples; report mean, p95/p99 and changed area per ROI, with actual delta ticks. Separate moving animals, rain, wind foliage and lightning masks; retain an unmasked companion map. | Advisory; qualify separately by cadence/span/backend/ROI, not one threshold for all time gaps. |
+| Flicker | In steady-lighting 120-frame windows, luminance residual after removing the recorded smooth lighting/exposure trend; count alternating-sign differences and peak-to-peak/p95 amplitude on persistent surfaces. Require at least 30 usable samples, at least 64 valid pixels covering 1% of the ROI and known steady light. Moving subjects, strikes and cloud-shadow edges are classified and reported separately. | Advisory; not eligible outside a steady window or when coverage is insufficient. |
+| Pops | Sudden local residual/changed area between adjacent frames, associated with depth, LOD, foliage/impostor or ownership transitions using stable producer keys. Report magnitude, area and before/after attribution. Distinguish expected motion/disocclusion/weather from unexplained jumps; a raw color jump alone cannot identify an LOD defect. | Advisory; qualify using labelled known-good transitions and injected one-frame switches. |
+| Dusk/dawn lighting continuity | Track static terrain/sky ROI linear light and exposure, first differences normalized by tick interval and second differences; label horizon crossings, cascade changes and cloud/strike contributions. Compare against smooth expected solar progression, not a zero-change threshold. | Advisory; qualified only with valid lighting channels and repeated dusk/dawn fixtures. |
+| Seam persistence | Reuse D2 pinned seam/boundary bands and D1 ownership/depth validity. Count consecutive affected samples, elapsed sim ticks and affected area; join the same world seam across frames. Exclude authored openings via versioned masks; unknown or empty expected seam masks refuse eligibility. | Advisory; qualify static persistent defects and transient streaming cases separately. |
+
+Each result records `advisory`, `qualified` or `ineligible`, coverage/reason,
+units, span/cadence, masks, threshold/baseline version, actual values and the
+worst frame indices/ticks. Qualification requires repeated identical-input runs,
+known-good and deliberately defective sequences, backend/cadence-specific bounds
+and owner review, as in D2; only a separately qualified threshold may affect a
+visual gate. Missing inputs never become a zero score or pass. Structural and
+presence refusals remain hard failures even while visual metrics are advisory.
+Emit the top 8 events per metric with deterministic tie order (score, then frame
+index, then ROI); labelled worst-frame montages show before/current/after,
+delta/mask, site/camera, tick/TOD/weather, metric/status and draw/asset probes.
+Cap ROIs at 64 and metric events at 40 per sequence; reuse bounded rolling
+accumulators and fixed 256-bin histograms, not retained full-resolution maps for
+every frame. Store only the current maps and selected worst-event payloads within
+the E1 output budget.
+
+### E3: all-features profile and non-vacuous evidence
+
+A new explicit `all_features` capture profile will resolve a versioned feature
+manifest at admission. It requires animals/creatures (spawning, AI, animation),
+foliage/plant growth/wind, weather and precipitation, clouds and cloud shadows,
+lightning, water/river/waterfall rendering and hydrology, particles, cave geometry
+and flourishes, structures, and sky/moon/stars. Record requested/effective flags,
+resolved assets/config hashes, mode capability and refusal reason for every entry.
+No capture-mode shortcut, UI suppression, determinism option, isolation layer or
+fallback may silently disable a producer. Resolve once at setup and verify final
+producer state after every scenario/scene pin; no per-frame environment reads.
+Use transient capture settings without saving user preferences or changing
+ordinary specialized-gate baselines.
+
+| Required feature | Per-capture presence evidence, bound to frame/tick and ROI |
+| --- | --- |
+| Animals/creatures | Spawned/live/ticked counts, planner/animation progress and stable entity trajectories plus visible skinned/creature contributor pixels. Labels/marker-only ecology images cannot prove shipping animal rendering. |
+| Foliage | Submitted instances/draws and visible foliage pixels, asset/LOD/impostor transitions, live plant stage/tick and wind state. |
+| Weather/precipitation | Actual sim and final render state, emitter/live drop counts and visible rain/snow contribution in the declared weather interval; zero at declared clear endpoints. |
+| Clouds/cloud shadows | Cloud draws/coverage and visible cloud pixels, shadow-enabled state and nonzero measured shadow contribution over a declared ground ROI. |
+| Lightning | Scheduled and consumed strike IDs/ticks, visible bolt/flash pixels and labelled before/strike/after frames. A strike count or active flag alone is insufficient. |
+| Water/rivers/waterfalls | Water-surface draws/indices and visible water pixels; resolved river/waterfall site identity, actual river surface and waterfall draws/pixels, flow/level observations and spray evidence separately. Generic water cannot stand in for all three. |
+| Particles | Emitter categories, alive/submitted counts and visible contribution, distinguishing ambient, precipitation and waterfall spray. An allocated pool is not presence. |
+| Caves/flourishes; structures | Site/mesh/draw identity and visible geometry in registered ROIs; expected cave/crystal lighting contributions and structure pixels, not merely world-generation flags. |
+| Sky/moon/stars | Sky draw and contributor coverage; visible lunar disk and star contribution during declared night/view windows, zero star contribution in daylight. |
+
+Record counters and visible contributions per frame, plus aggregate presence over
+the named capture sequence and its declared phase windows. All producers stay
+enabled throughout; physical absence in a clear/day frame is recorded explicitly
+as expected zero. Every required feature must have positive evidence in its
+predeclared presence window somewhere in that capture. Zero where required,
+unknown counters, offscreen-only spawns or an empty ROI refuse the capture as
+non-vacuous coverage failure. A still cannot claim all-features success unless
+its required evidence is visible in that still; incompatible day/night or
+interior/exterior requirements need explicitly registered companion sequences in
+the site audit set. Companion coverage is reported separately and cannot turn a
+failed individual capture into a pass. The three spans remain required for every
+registered fixed camera; do not silently drop a cave or sky camera.
+
+Capability reporting has `supported`, `unsupported` and `refused` plus reasons;
+presence has counts/coverage and expected windows, not a boolean derived from the
+requested flag. A mode unable to enable any required feature emits `unsupported`
+and cannot earn the all-features result. Preflight capability/refusal occurs
+before world/output creation; runtime zero-presence publishes failed evidence
+without a completion marker. The report preserves unsupported rows even when all
+other features pass. Unsupported diagnostics/contributor planes also preclude
+presence qualification until instrumented; final-color guesses do not suffice.
+
+Current blockers and required work are explicit: scenario wildlife suppression
+needs a profile-aware spawn path with real rigs/AI; the synchronous world sweep
+needs the E1 tick driver rather than still-cell reuse; frame-scan/headless stills
+need a sequence adapter and night/weather windows; time-of-day/weather smokes need
+continuous tick schedules including dawn and return-to-clear; cave automation
+needs bounded explicit flourish initialization; upward sweep foliage clearing and
+per-cell particle resets need profile-aware alternatives. Live-weather/cloud,
+lightning and transient precipitation must share one final tick-indexed state,
+with real producer evidence for forward water/particles/sky (A/B coverage gaps).
+A missing asset/system is unsupported, never an automatic fallback to markers.
+Until these adapters and evidence producers land, no current mode is certified as
+an all-features temporal audit. Add support in bounded slices below, keeping the
+same capability/presence semantics across every sibling path and platform.
+
 ## Ordered delivery
 
 Each row is one reviewable change of at most ten files. Paths below are explicit;
@@ -225,8 +496,28 @@ edits when parallel branches join. No new required CI checks are part of any row
 | C2: llvmpipe scenes | `tools/gates/shader-scenes.py`; `tools/gates/test_shader_scenes.py`; `test/rendering/shader_scenes/scenes.json`; `test/rendering/shader_scenes/references/material.ppm`; `test/rendering/shader_scene_render_test.cpp`; `test/CMakeLists.txt`; `tools/ci/ci_paths.py`; `.github/workflows/ci.yml`; `config/public-asset-inventory.json`; `docs/development/visual-diagnostics.md` (10) | After C1. First reference/metric/regeneration vertical path; extend the scene catalogue in later bounded changes. Avoids owned files; reference and consumer share one path gate. |
 | D1: bundle/ID/AOV validity checks | `tools/gates/check-diagnostic-capture.py`; `tools/gates/test_diagnostic_capture.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `tools/gates/diff-render-health.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (8) | After A4; parallel with B/C. Registered Python reader tests cover little endian, dimensions, partial payloads, unknown versions and nonfinite values. Avoids owned files. |
 | D2: qualified image metrics | `tools/gates/check-diagnostic-capture.py`; `tools/gates/test_diagnostic_capture.py`; `tools/gates/baselines/diagnostic-rois.json`; `tools/gates/build-visual-sweep-montages.py`; `tools/gates/test_diagnostic_rois.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After D1 and relevant C2 fixtures/B2 channels. Coverage/weather/edge metrics and labeled worst-pixel montages; qualify enforcement separately. Avoids owned files. |
+| E1a: exact-tick plan and admission | `rendering/TemporalAudit.h`; `rendering/TemporalAudit.cpp`; `src/luminumbra_client/core/RuntimeScenarioConfig.h`; `src/luminumbra_client/core/RuntimeScenarioConfig.cpp`; `src/luminumbra_client/sources.cmake`; `test/rendering/temporal_audit_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After A4, D1. Register GL-free tick/cadence/overflow/refusal regressions in capture_manifest_test. Coordinate configuration ownership; admission alone cannot advertise runtime support. |
+| E1b: deterministic weather input | `src/luminumbra_common/systems/WeatherSystem.h`; `src/luminumbra_common/systems/WeatherSystem.cpp`; `src/luminumbra_common/world/GameSession.cpp`; `rendering/TemporalAudit.cpp`; `test/rendering/temporal_weather_test.cpp`; `test/CMakeLists.txt`; `src/luminumbra_client/core/ScenarioRunnerDrive.cpp`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E1a. Coordinate simulation owners: register fixed-tick weather/hydrology/strike and identity/replay tests before enabling script support. Exercise normal live bridge; any format migration is a prerequisite separate slice with both readers/writers, not hidden in this count. |
+| E1c: site sequence driver | `src/luminumbra_client/main_client.cpp`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `src/luminumbra_client/core/ScenarioRunnerImpl.h`; `rendering/TemporalAudit.cpp`; `test/rendering/temporal_sequence_test.cpp`; `test/CMakeLists.txt`; `tools/gates/validate-engine-frontier.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E1b, A4, D1. Coordinate app/scenario ownership. Register sequence/readiness/phase and creature-tick tests plus native fixed-site capture through existing frontier actions. No all-features claim before E3. |
+| E1d: manifest-aware assembly | `tools/timelapse.py`; `tools/gates/test_temporal_assembly.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/visual-regression.md`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (8) | After E1c and D1. Register Python manifest/order/hash/partial-input/encoder-failure/budget tests in PYTHON_TESTS and CTest; preserve existing assembler callers. Existing generic workflow invokes the registry. Coordinate shared assembler and document edits. |
+| E2a: temporal measurements | `tools/gates/check-temporal-capture.py`; `tools/gates/test_temporal_capture.py`; `tools/gates/check-diagnostic-capture.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (8) | After E1d, D1, D2. Register Python fixtures for all five metrics, unknown metadata, empty masks and stable cross-frame identity; reuse D1/D2 readers. Avoid owned rendering files. |
+| E2b: qualification and worst events | `tools/gates/check-temporal-capture.py`; `tools/gates/test_temporal_capture.py`; `tools/gates/baselines/diagnostic-rois.json`; `tools/gates/build-visual-sweep-montages.py`; `tools/gates/test_temporal_montages.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E2a and relevant B2/C2 contributions. Register qualification-status, repeated-run, injected-defect and labelled failure-slot tests in PYTHON_TESTS/CTest. Threshold enforcement requires separately reviewed qualification evidence. Coordinate shared ROI/montage edits. |
+| E3a: profile and capability manifest | `rendering/CaptureFeatureProfile.h`; `rendering/CaptureFeatureProfile.cpp`; `src/luminumbra_client/sources.cmake`; `src/luminumbra_client/core/RuntimeScenarioConfig.h`; `src/luminumbra_client/core/RuntimeScenarioConfig.cpp`; `test/rendering/capture_feature_profile_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After A4, D1; may precede E1. Register GL-free profile/capability/unknown-feature/incompatible-option tests. Default every unimplemented adapter to unsupported. Coordinate configuration ownership. |
+| E3b: shared app and scenario policy | `src/luminumbra_client/main_client.cpp`; `src/luminumbra_client/app/ClientAppContext.h`; `src/luminumbra_client/app/CaveFlourishes.cpp`; `src/luminumbra_client/core/ScenarioRunnerDrive.cpp`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `rendering/CaptureFeatureProfile.cpp`; `test/rendering/capture_feature_policy_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `docs/visual-regression.md` (10) | After E3a and E1c. Coordinate app/scenario/cave ownership; register ordinary-play equivalence and profile tests across timelapse, scan, general scenario, TOD/weather and both headless legs, including no-ui and determinism options. Remove suppression only for admitted profile runs. |
+| E3c: sweep profile adapter | `scenarios/WorldVisualSweep.cpp`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `rendering/TemporalAudit.cpp`; `rendering/CaptureFeatureProfile.cpp`; `test/rendering/temporal_sweep_test.cpp`; `test/CMakeLists.txt`; `tools/gates/validate-engine-frontier.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E3b. Coordinate sweep ownership. Register exact-tick sweep/particle-continuity/creature tests; existing still matrix keeps its pins. Feature-incompatible camera/profile combinations refuse explicitly. |
+| E3d: forward feature evidence | `rendering/DiagnosticContributions.h`; `rendering/DiagnosticContributions.cpp`; `rendering/passes/WaterPass.cpp`; `rendering/passes/WaterfallPass.cpp`; `rendering/passes/ParticlePass.cpp`; `rendering/passes/FoliagePass.cpp`; `rendering/RenderPipeline.cpp`; `test/rendering/capture_forward_presence_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md` (10) | After B2 and E3a. Coordinate owned producers. Register GL-free counter joins and native visible-contribution/occlusion fixtures; separate river/waterfall/spray evidence, and report unsupported until instrumented shader contributors land in additional bounded slices with asset inventory updates. |
+| E3e: geometry and atmosphere evidence | `rendering/DiagnosticContributions.h`; `rendering/DiagnosticContributions.cpp`; `rendering/passes/GBufferPass.cpp`; `rendering/passes/SkyboxPass.cpp`; `rendering/passes/LightingPass.cpp`; `rendering/RenderPipeline.cpp`; `test/rendering/capture_scene_presence_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `docs/visual-regression.md` (10) | After E3d. Coordinate owned passes. Register creature/cave/structure/sky/moon/star/cloud-shadow/bolt visibility fixtures, including absent/offscreen cases; shader variants and public asset inventory changes are prerequisite bounded slices under B2, not implicit extra files. |
+| E3f: non-vacuous acceptance report | `rendering/CaptureFeatureProfile.cpp`; `rendering/TemporalAudit.cpp`; `tools/gates/check-temporal-capture.py`; `tools/gates/test_temporal_capture.py`; `test/rendering/capture_feature_profile_test.cpp`; `test/CMakeLists.txt`; `tools/gates/validate-engine-frontier.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E3c–E3e and E2b. Extend registered suites and existing frontier consumers: zero/unknown/unsupported presence, wrong-frame evidence and failed publication cannot pass; full site/span success requires all expected windows. Qualification/visual approval remain distinct. |
 
 Start A, B interface design, C and D fixture design together; GPU attribution is the
 critical dependency for trustworthy production pixel claims. Forward/transparency
 producer coverage and additional shader references proceed as subsequent bounded
 changes using the same formats, with coverage gaps visible until implemented.
+
+E rows include local inventory updates in their stated counts. Every new Python
+suite enters `tools/ci/ci_paths.py` PYTHON_TESTS and CTest in its introducing row;
+CI's existing standalone-contract registry invocation supplies workflow coverage.
+New native sources enter the appropriate existing target/source list and CTest;
+new capture actions, if needed beyond the listed frontier consumers, require a
+separate at-most-ten-file slice including workflow invocation and path filters.
+Do not report a registered native fixture as executed until its native lane runs.

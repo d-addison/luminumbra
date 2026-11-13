@@ -109,6 +109,15 @@ Thresholds are per-backend in spirit (FLIP/SSIM/luma are not the same scale).
 Pin a threshold against a known-good vs known-bad pair when you add a new golden;
 `0.05` is a reasonable starting point for FLIP/luma.
 
+## Planned temporal audits
+
+[Visual diagnostics Layer E](development/visual-diagnostics.md#e-temporal-audits-and-all-features-captures)
+inventories current capture feature gaps and designs fixed-camera day/night,
+clear–storm–clear and multi-day sequences, temporal metrics and an all-features
+profile with non-vacuous presence evidence. These are planned capabilities;
+current still gates and `tools/timelapse.py` do not establish this coverage or
+visual approval.
+
 ## World-sweep review sheets
 
 For a completed or failed `world_visual_sweep` capture directory, run:
