@@ -19,7 +19,7 @@ class TerrainShaderContract(unittest.TestCase):
     def setUp(self):
         self.shader = source("res/shaders/g_buffer.frag")
         self.main = self.shader.split("void main()", 1)[1]
-        self.terrain = self.main.split("else if (texInfo.a > 0.5 && u_forceFlat == 0)", 1)[1]
+        self.terrain = self.shader.split("void terrainSurface(", 1)[1].split("void main()", 1)[0]
 
     def test_projection_and_slope_use_the_face_before_normal_mapping_or_discard(self):
         # Collapsed relative derivatives retain a finite interpolated normal;
@@ -35,7 +35,7 @@ class TerrainShaderContract(unittest.TestCase):
         self.assertLess(self.terrain.index("float geomSlope"),
                         self.terrain.index("triplanar_normal("))
         for channel in ("albedo", "normal", "roughness"):
-            self.assertIn(f"triplanar_{channel}(fs_in.WorldPos, "
+            self.assertIn(f"triplanar_{channel}(worldPos, "
                           + ("worldN, " if channel == "normal" else "") + "weights,",
                           self.terrain)
 
@@ -80,7 +80,8 @@ class TerrainShaderContract(unittest.TestCase):
     def test_face_normal_work_is_only_in_a_uniform_terrain_gate_before_discard(self):
         # Anchor the entire prologue: no varying branch or earlier discard may
         # surround the derivatives, including in the ladder program variant.
-        self.assertRegex(self.main, r"^ \{ vec3 surfaceN = vec3\(0.0\); "
+        self.assertRegex(self.main, r"^ \{ vec3 worldDx = dFdx\(fs_in.WorldPos\), "
+                         r"worldDy = dFdy\(fs_in.WorldPos\); vec3 surfaceN = vec3\(0.0\); "
                          r"if \(u_macroRockOverlay == 1\) \{ "
                          r"surfaceN = terrain_surface_normal\([^;]+; \}")
         self.assertEqual(self.main.count("terrain_surface_normal("), 1)
@@ -93,7 +94,7 @@ class TerrainShaderContract(unittest.TestCase):
 
     def test_steep_sand_has_defined_rock_coverage_and_flat_ground_is_preserved(self):
         guard = re.search(r"if \(u_macroRockOverlay == 1 && geomSlope < ([\d.]+) && "
-                          r"fs_in.MaterialID >= (\d+)u && fs_in.MaterialID <= (\d+)u\)",
+                          r"materialId >= (\d+)u && materialId <= (\d+)u\)",
                           self.terrain)
         self.assertIsNotNone(guard)
         cutoff, first, last = float(guard[1]), int(guard[2]), int(guard[3])
@@ -102,7 +103,7 @@ class TerrainShaderContract(unittest.TestCase):
                           r"([\d.]+) \+ jitter, geomSlope\);", self.terrain)
         self.assertIsNotNone(blend, "GLSL smoothstep requires ascending edges")
         low, high = float(blend[1]), float(blend[2])
-        jitter = re.search(r"float jitter = \(vnoise\(fs_in.WorldPos \* [\d.]+\) - 0.5\) "
+        jitter = re.search(r"float jitter = \(vnoise\(worldPos \* [\d.]+\) - 0.5\) "
                            r"\* ([\d.]+);", self.terrain)
         self.assertIsNotNone(jitter)
         radius = float(jitter[1]) / 2
@@ -115,8 +116,13 @@ class TerrainShaderContract(unittest.TestCase):
                     self.assertAlmostEqual(1 - t * t * (3 - 2 * t), expected)
 
     def test_rock_uses_its_own_calibration_and_scalar_roughness_fallback(self):
-        self.assertRegex(self.terrain, r"vec3 baseAlbedo\s*=\s*triplanar_albedo\([^;]+\)"
-                         r"\s*\* albedoScale \* albedoTint;")
+        self.assertIn("vec3 baseAlbedo = triplanar_albedo(worldPos, weights, texLayer, scale, dx, dy);",
+                      self.terrain)
+        calibration = "baseAlbedo *= albedoScale * albedoTint;"
+        self.assertEqual(self.terrain.count(calibration), 1)
+        self.assertLess(self.terrain.index("baseAlbedo = mix(baseAlbedo, triplanar_albedo(detailPos,"),
+                        self.terrain.index(calibration))
+        self.assertLess(self.terrain.index(calibration), self.terrain.index("float rockW"))
         self.assertIn("rockAlbedo *= rockAlbedoScale * rockAlbedoTint;", self.terrain)
         for row in (2, 3):
             self.assertRegex(self.terrain, rf"vec2\(1.0\s*/\s*255.0, lutRowV\({row}\)\)")
@@ -132,9 +138,24 @@ class TerrainShaderContract(unittest.TestCase):
             "vec3 triplanar_normal(", 1)[0]
         self.assertIn("vec3 baseLod =", albedo)
         self.assertIn("vec3 blurLod = baseLod + kDetailBlurLod + u_lodBias;", albedo)
+        self.assertIn("vec2 texSize = vec2(textureSize(u_terrainTextures, 0).xy);", albedo)
+        self.assertIn("vec3 baseLod = max(log2(max(footprint, vec3(1e-8))), vec3(0.0));", albedo)
+        footprints = ", ".join(
+            f"max(length(dx.{plane} * scale * texSize), length(dy.{plane} * scale * texSize))"
+            for plane in ("zy", "xz", "xy"))
+        self.assertIn(f"vec3 footprint = vec3( {footprints});", albedo)
+        self.assertNotIn("textureQueryLod(", albedo)
         for axis in "xyz":
-            self.assertEqual(albedo.count(f"textureQueryLod(u_terrainTextures, uv_{axis})"), 1)
             self.assertIn(f"vec3(uv_{axis}, layer), blurLod.{axis})", albedo)
+
+    def test_all_surface_evaluations_receive_the_shared_face_normal(self):
+        self.assertIn("vec3 dx, vec3 dy, vec3 surfaceN, inout vec3 worldN", self.terrain)
+        calls = re.findall(r"terrainSurface\(([^;]+)\);", self.main)
+        self.assertEqual(len(calls), 2)
+        for material in ("uint(lane + 1)", "fs_in.MaterialID"):
+            call = next(value for value in calls if value.startswith(material + ","))
+            self.assertTrue(call.startswith(material +
+                            ", fs_in.WorldPos, worldDx, worldDy, surfaceN, "))
 
     def test_only_terrain_draws_opt_into_slope_material_substitution(self):
         self.assertIn("uniform int u_macroRockOverlay = 0;", self.shader)
