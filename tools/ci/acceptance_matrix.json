@@ -8172,6 +8172,36 @@
       "requirements": []
     },
     {
+      "id": "worldgen.band-limited-preset",
+      "source": "issue #876",
+      "statement": "The additional mountains_band_limited preset uses four octaves, base amplitude 66.6666667 and authored continental, erosion and peaks splines with all other mountains generation parameters preserved. Python pins the canonical preset checksum and content hash with an empty dependency manifest; registered loader coverage checks parsed controls, new-world resolution, saved JSON identity and a distinct dependency-inclusive identity from mountains. The frozen revision-6 catalog remains separate. Binary packages include the preset through the worlds directory install. UI selection, generated height pins and native qualification remain pending.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "FrozenTerrainPresetsContract"
+        },
+        {
+          "kind": "script",
+          "ref": "tools/test_frozen_terrain_presets.py"
+        },
+        {
+          "kind": "ctest",
+          "ref": "TerrainPresetLoaderTest.BandLimitedMountainsPreservesResolvedContent",
+          "planned": "Run registered loader regression; generated height pins and native qualification remain pending; owner: maintainers"
+        },
+        {
+          "kind": "ctest",
+          "ref": "TerrainPresetLoaderTest.AllShippedPresetsLoadWithoutErrorsOrWarnings"
+        },
+        {
+          "kind": "script",
+          "ref": "CMakeLists.txt"
+        }
+      ],
+      "requirements": []
+    },
+    {
       "id": "terrain.resolution-options",
       "source": "issue #876",
       "statement": "Terrain resolution design compares an opt-in band-limited new-world preset and a half-metre authoritative grid, including parameter sources, identity and save compatibility, resource costs, consumer audit and bounded delivery slices. Implementation, measured candidate facet reduction and native performance qualification remain pending.",
