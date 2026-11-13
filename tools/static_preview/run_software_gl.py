@@ -35,12 +35,22 @@ EXPECTED_CASES = frozenset({
 })
 
 
-def validate_report(root):
+SHADER_CASES = frozenset({("ShaderScene", "MaterialLinearReferenceAndOcclusionBlend")})
+
+# Every wait is bounded so display startup, the test child and server cleanup
+# finish inside the smallest CTest TIMEOUT that registers this runner. A CTest
+# kill would skip the finally block and leave the detached Xvfb running.
+DISPLAY_READY_SECONDS = 10
+CHILD_TIMEOUT_SECONDS = 150
+SERVER_STOP_SECONDS = 5
+
+
+def validate_report(root, expected=EXPECTED_CASES):
     """Require the exact successful GoogleTest inventory before claiming a render pass."""
     cases = root.findall('.//testcase')
-    if (len(cases) != len(EXPECTED_CASES)
-            or {(x.get('classname'), x.get('name')) for x in cases} != EXPECTED_CASES):
-        raise RuntimeError('Expected fourteen production rendering tests and one renderer-profile test')
+    if (len(cases) != len(expected)
+            or {(x.get('classname'), x.get('name')) for x in cases} != expected):
+        raise RuntimeError(f'Expected exact rendering inventory: {sorted(expected)}')
     if any(x.find('skipped') is not None or x.find('failure') is not None or x.find('error') is not None or
            x.get('status') != 'run' or x.get('result') not in (None, 'completed') for x in cases):
         raise RuntimeError('Rendering tests contain a skipped, failed or unexecuted case')
@@ -50,11 +60,21 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--binary', required=True)
     parser.add_argument('--xvfb', default='/usr/bin/Xvfb')
-    parser.add_argument('--output')
+    destination = parser.add_mutually_exclusive_group()
+    destination.add_argument('--output')
+    # Repeatable registrations get a fresh child directory per invocation.
+    destination.add_argument('--output-parent')
+    parser.add_argument('--profile', choices=('static-preview', 'shader-scenes'), default='static-preview')
     args = parser.parse_args()
-    output = Path(args.output) if args.output else Path(tempfile.mkdtemp(prefix='luminumbra-static-software-'))
     if args.output:
+        output = Path(args.output)
         output.mkdir(parents=False, exist_ok=False)
+    elif args.output_parent:
+        parent = Path(args.output_parent)
+        parent.mkdir(parents=False, exist_ok=True)
+        output = Path(tempfile.mkdtemp(prefix='capture-', dir=parent))
+    else:
+        output = Path(tempfile.mkdtemp(prefix='luminumbra-static-software-'))
     env = dict(os.environ)
     for pin in ('LUMINUMBRA_PREVIEW_EXPECT_NATIVE_VENDOR', 'LUMINUMBRA_PREVIEW_EXPECT_NATIVE_RENDERER'):
         env.pop(pin, None)
@@ -76,23 +96,26 @@ def main():
             write_fd = -1
             selector = selectors.DefaultSelector()
             selector.register(read_fd, selectors.EVENT_READ)
-            if not selector.select(10):
+            if not selector.select(DISPLAY_READY_SECONDS):
                 raise RuntimeError('Owned software display did not become ready')
             display = os.read(read_fd, 32).decode('ascii').strip()
             selector.close()
             if not display.isdigit():
                 raise RuntimeError('Invalid owned software display identity')
             env['DISPLAY'] = ':' + display
+            if args.profile == 'shader-scenes':
+                env['LUMINUMBRA_SHADER_SCENE_OUTPUT'] = str(output.resolve())
             result = subprocess.run([args.binary, '--gtest_output=xml:' + str(output / 'tests.xml')],
                                     env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                    timeout=180, check=False)
+                                    timeout=CHILD_TIMEOUT_SECONDS, check=False)
             (output / 'tests.log').write_bytes(result.stdout)
             print(result.stdout.decode('utf-8', errors='replace'), end='')
             if result.returncode:
                 raise RuntimeError(f'Production software rendering tests exited {result.returncode}')
             root = ET.parse(output / 'tests.xml').getroot()
-            validate_report(root)
-            print(f'Software GL: 14 actual llvmpipe cases and one profile test passed; artifacts: {output}')
+            expected = SHADER_CASES if args.profile == 'shader-scenes' else EXPECTED_CASES
+            validate_report(root, expected)
+            print(f'Software GL: {len(expected)} exact {args.profile} cases passed; artifacts: {output}')
     finally:
         if write_fd >= 0:
             os.close(write_fd)
@@ -100,10 +123,10 @@ def main():
         if server is not None and server.poll() is None:
             os.killpg(server.pid, signal.SIGTERM)
             try:
-                server.wait(timeout=5)
+                server.wait(timeout=SERVER_STOP_SECONDS)
             except subprocess.TimeoutExpired:
                 os.killpg(server.pid, signal.SIGKILL)
-                server.wait(timeout=5)
+                server.wait(timeout=SERVER_STOP_SECONDS)
 
 
 if __name__ == '__main__':

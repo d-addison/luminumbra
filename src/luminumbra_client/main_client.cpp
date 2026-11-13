@@ -4493,6 +4493,8 @@ int main(int argc, char* argv[]) {
     }
     while (!glfwWindowShouldClose(window)) {
         LUMIN_PROFILE_FRAME_N("Client");
+        // Release weather before any frame writer, including menu previews.
+        g_app.hud.photoWeather.Restore(renderPipeline);
         if (benchmark_v4 && Luminumbra::Filesystem::capture_content_paths().refused()) {
             LUMINUMBRA_CORE_ERROR("Benchmark content reference escapes inventoried trees");
             exit_code = 2;
@@ -5684,6 +5686,8 @@ int main(int argc, char* argv[]) {
                     scenario_runner->onPreRenderWorldSweep();
                 }
                 if (gameSession->GetWorldSystem() && g_camera) {
+                    // Release the previous photo hold before sampling live defaults.
+                    renderPipeline.set_time_of_day_hold(false);
                     // Live play runs on the
                     // authoritative sim tick — season AND time-of-day become pure
                     // functions of it (no more frozen season-neutral tick 0; no more
@@ -5924,6 +5928,18 @@ int main(int argc, char* argv[]) {
                             }
                         }
                     }
+                    // Environment writer order: live clock/weather, photo selection,
+                    // scenario pins, benchmark/scene pins, foliage QA, frame-scan pin,
+                    // render. World sweeps render their own pins before this path;
+                    // timelapse advances its next-frame pin after capture.
+                    const bool photo_capture_pinned =
+                        scenario_config.active() || g_rb_active ||
+                        g_app.capture.timelapse_frames != 0 || g_app.capture.scene_active ||
+                        g_app.capture.frame_scan_active || g_app.capture.render_parity_active ||
+                        g_app.capture.survey_active || !g_app.capture.bake_impostor_path.empty() ||
+                        !g_app.capture.ui_screenshot_screen.empty() || g_app.capture.ui_thumbs != 0;
+                    UpdatePhotoEnvironment(
+                        g_app, g_playerController.get(), renderPipeline, photo_capture_pinned);
                     // Scenario capture render pins (fixed time-of-day for the
                     // visual smokes; the season sweep's pin schedule) run at
                     // this exact point so they override the live-tick
