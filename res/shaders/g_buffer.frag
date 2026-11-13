@@ -1,4 +1,9 @@
 #version 450 core
+
+#ifdef LUMIN_DIAG_IDS
+layout (location = 6) out uvec4 gDiagnosticIds;
+uniform uvec4 u_diagnosticIds;
+#endif
 layout (location = 5) out vec4 gAuthoredSurface; // RGB emission, A material lane
 layout (location = 0) out vec3 gPosition;          // RGB16F: full view-space position
 layout (location = 1) out vec4 gNormalMaterial;    // RGBA8: Oct normal, marker emissivity, material ID
@@ -610,6 +615,9 @@ void main()
     gNormalMaterial = vec4(encoded_normal * 0.5 + 0.5, 0.0, material_id_normalized);
 
     gAlbedoRoughness = vec4(albedo * fs_in.Tint, roughness);
+#ifdef LUMIN_DIAG_IDS
+    gDiagnosticIds = u_diagnosticIds;
+#endif
     gMetallicAO = vec2(metallic, ao);
 #ifdef LUMINUMBRA_FAR_WORLD_LADDER
     // Signed RG16F AO tag, mirrored by FarWorldSurfaceTag.h. Keep RGBA8
