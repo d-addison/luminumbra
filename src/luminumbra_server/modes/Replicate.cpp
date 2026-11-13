@@ -73,7 +73,8 @@ int RunReplicate(const ServerCliOptions& options) {
         const float wx = npc_origin.x + 2.0f;
         const float wz = npc_origin.z + 14.0f; // ahead of the NPC line
         const float wy = world_sys ? world_sys->GetTerrainHeightAt(wx, wz) : npc_origin.y;
-        water_opportunity = registry.create();
+        water_opportunity = Luminumbra::world::GameSession::CreateSimulationParticipant(
+            registry, Luminumbra::world::GameSession::SpawnSource::Replication);
         auto& otf = registry.emplace<Luminumbra::Components::TransformComponent>(water_opportunity);
         otf.position = Luminumbra::Vec3(wx, wy, wz);
         auto& opp =
@@ -99,7 +100,8 @@ int RunReplicate(const ServerCliOptions& options) {
         const float by = (world_sys ? world_sys->GetTerrainHeightAt(bx, bz) : npc_origin.y) + 1.5f;
         const std::size_t ci =
             npc_physics ? npc_physics->create_avatar_character(Luminumbra::Vec3(bx, by, bz)) : 0u;
-        auto e = registry.create();
+        auto e = Luminumbra::world::GameSession::CreateSimulationParticipant(
+            registry, Luminumbra::world::GameSession::SpawnSource::Replication);
         auto& tf = registry.emplace<Luminumbra::Components::TransformComponent>(e);
         tf.position = Luminumbra::Vec3(bx, by, bz);
         auto& rep = registry.emplace<Luminumbra::Components::ReplicatedComponent>(e);
@@ -119,6 +121,7 @@ int RunReplicate(const ServerCliOptions& options) {
         loco.slow_radius = 4.0f;
         npc_recs.push_back({e, ci, Luminumbra::Vec3(bx, by, bz)});
     }
+    Luminumbra::world::GameSession::PublishSimulationSpawns(registry);
 
     //  one server-authoritative ballistic ARROW (type_id 2). Fired at tick 10,
     // integrated under gravity, despawned (reliable removed_id) on ground-hit/timeout.
@@ -196,7 +199,8 @@ int RunReplicate(const ServerCliOptions& options) {
             const Luminumbra::Vec3 spawn_pos(from.x, from.y + 1.2f, from.z);
             arrow_body = physics->create_dynamic_sphere(
                 spawn_pos, Luminumbra::Vec3(10.0f, 6.0f, 0.0f), 0.12f);
-            arrow_entity = registry.create();
+            arrow_entity = Luminumbra::world::GameSession::CreateSimulationParticipant(
+                registry, Luminumbra::world::GameSession::SpawnSource::Replication);
             auto& tf = registry.emplace<Luminumbra::Components::TransformComponent>(arrow_entity);
             tf.position = spawn_pos;
             auto& rep = registry.emplace<Luminumbra::Components::ReplicatedComponent>(arrow_entity);
@@ -204,6 +208,7 @@ int RunReplicate(const ServerCliOptions& options) {
             rep.type_id = 2u; // "arrow"
             arrow_active = true;
         }
+        Luminumbra::world::GameSession::PublishSimulationSpawns(registry);
         if (arrow_active && physics && registry.valid(arrow_entity)) {
             // Jolt stepped the body in RunFixedTicks above; mirror its position.
             const Luminumbra::Vec3 apos = physics->get_body_position(arrow_body);

@@ -224,7 +224,8 @@ entt::entity PromoteNearestScatter(ProcgenPlantState& state,
     if (best < 0)
         return entt::null;
     ProcgenPlantInstance& inst = state.plants[static_cast<std::size_t>(best)];
-    const entt::entity e = reg.create();
+    const entt::entity e = Luminumbra::world::GameSession::CreateSimulationParticipant(
+        reg, Luminumbra::world::GameSession::SpawnSource::Promotion);
     auto& tf = reg.emplace<C::TransformComponent>(e);
     tf.position = Luminumbra::Vec3(inst.worldPos.x, inst.worldPos.y, inst.worldPos.z);
     reg.emplace<C::PlantTag>(e);
