@@ -231,8 +231,17 @@ class RenderRunnerTests(unittest.TestCase):
             self.assertIn('far_world', data)
             perf.validate_far_world_reporting(data)
             for key, mode in (('requested_mode', 'ladder'), ('effective_mode', 'legacy'),
-                              ('refusal', 'ImmutableAuthorityUnavailable')):
+                              ('refusal', 'AdmissionFailed')):
                 self.assertEqual(data['far_world']['summary'][key], {mode: data['frames']})
+            # Saved entry now attempts session admission. These short, uncalibrated
+            # captures must retain that refusal, without claiming Ladder coverage
+            # or hiding the fallback behind submission isolation.
+            self.assertEqual(data['far_world']['summary']['suppressed_frames'], 0)
+            self.assertEqual(data['far_world']['summary']['submission_refusal'],
+                             {'None': data['frames']})
+            for row in data['far_world']['frames']:
+                self.assertEqual((row['requested_mode'], row['effective_mode'], row['refusal']),
+                                 ('ladder', 'legacy', 'AdmissionFailed'))
             self.assertEqual(data['world_content_identity'], data['workload']['content_identity'])
             contract.validate(data, data['adapter']['renderer'], traversal=self.script)
             self.assertEqual(data['workload']['actual_ticks'], 4)
@@ -242,7 +251,7 @@ class RenderRunnerTests(unittest.TestCase):
         for name in ('first', 'second'):
             output = self.log_path(name).read_text(
                 errors='replace', encoding='utf-8')
-            self.assertIn('Far world: requested=ladder effective=legacy refusal=ImmutableAuthorityUnavailable', output)
+            self.assertIn('Far world: requested=ladder effective=legacy refusal=AdmissionFailed', output)
         for name, option in (('separate', ['--render-benchmark-frames', '4']),
                              ('assigned', ['--render-benchmark-frames=4'])):
             with self.subTest(frame_option=name):

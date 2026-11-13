@@ -711,16 +711,55 @@ restart the client. The per-user settings overlay only reads `user.*`; this flag
 has no environment or CLI override. Effective selection still falls back to
 Legacy when Ladder cannot bind, with requested/effective mode and refusals in
 the debug HUD and diagnostics. See [Far world horizon v2](far-world-horizon-v2.md)
-for the config example and qualification gates. Saved-world entry now attaches
-the session authority producer through explicit session binding. Preparation runs
-before each normal frame selects its effective mode; immutable session captures
-feed the selected scheduler and submission with same-frame live ownership.
-Source, capture and backend refusals select Legacy with the original Ladder
-request and typed refusal retained. Preview and paired OFF rendering keep their
-existing isolated paths. World replacement and shutdown drain the backend before
-releasing the binding; refused opens retain it and resume source reads. The named
-play limits are finite admission ceilings awaiting native calibration, and do not
-establish native qualification.
+for the config example and qualification gates.
+
+#### Saved-world session authority
+
+Normal saved-world entry now binds the session producer without fixture binding.
+Each normal frame pumps source preparation before selecting its effective mode, then publishes same-frame
+live terrain/water ownership before advancing exactly one selected scheduler.
+Submission goes through the same renderer facade. Legacy opt-out, transient menu
+worlds, preview and paired OFF replay do not start session preparation.
+
+The producer composes immutable SessionRender observations from the committed
+baseline and published live/parked terrain and water. Numeric policy is RawFloat;
+the binding retains the requested cave policy, and water resolution comes from
+the bound world. Source assembly,
+span discovery and complete-manifest capture must succeed before Ladder can be
+selected. Pending or refused preparation selects Legacy with a typed refusal.
+Session diagnostics distinguish per-tile fingerprints, committed generation,
+serving/target serials, latest-target readiness and actual combined submission.
+A retained old cohort cannot establish current session qualification.
+
+The separately named play limits are uncalibrated finite admission ceilings.
+The total memory partition is 256 MiB per tier, with 128 MiB of V5 reserved for
+source/control storage and the remaining 128 MiB for its handoff. There are
+512 source index records, 512 wanted/history slots, 64 handoff entries per tier,
+two result slots per tier, 32 MiB of volatile copies and at most ten million
+source-query columns per transaction. Reads allow 32,768 region members (including
+absence evidence), 512 records, 65,536 headers, 131,072 probes, 8/32 MiB compressed
+member/aggregate bytes, 16/64 MiB decoded member/aggregate bytes and 4 MiB of
+reader controls. Refresh has a 120-prepared-frame and two-second source/capture
+deadline. Discovery visits at most 131 squared columns and 1536 source records
+per wanted tile; each record has at most 1024 water cells. Frozen capture allows
+one region, 200,000 height,
+20 million density and 200,000 water operations and 64 MiB per tile; the complete
+manifest has separate 16 million height/water and 128 million density operation
+ceilings. Spans stay within [-8192,8192] m with a 2048 m monotone extension hull.
+The selected scheduler permits two build/upload attempts and 16 MiB attempted
+uploads per frame. Any limit failure refuses rather than changing cave policy,
+water truth or simulation. These ceilings require native measurement before
+release; they are not a qualified production preset.
+
+A fallible world open fences source reads while retaining the old binding.
+Refusal or cancellation before adoption resumes those reads. Committed
+replacement, world exit and shutdown drain the selected backend and its workers
+before releasing session preparation or immutable images. Save fences retain
+render state; canonical save refresh remains owned by GameSession.
+
+The PowerShell Ladder gate retains its pre-launch authority guard. Removing
+and qualifying that guard, native execution and measured production limits
+remain outstanding. A Legacy fallback cannot qualify Ladder.
 
 ### Developer console
 

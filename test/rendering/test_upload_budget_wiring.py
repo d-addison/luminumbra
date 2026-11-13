@@ -80,6 +80,29 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("finish_world_entry(true);", prepare)
         self.assertNotIn("bind_far_world_session(", body(self.main, "if (want_backdrop)"))
 
+    def test_traversal_saved_entry_reports_admission_instead_of_unbound_authority(self):
+        traversal = body(self.main, "if (!traversal_path.empty())")
+        self.assertIn("scenario_config.auto_create_world = true;", traversal)
+        create = body(self.main, "auto start_world_creation =")
+        self.assertLess(create.index("gameSession->CreateWorld("),
+                        create.index("finish_world_entry();"))
+        self.assertLess(create.index("gameSession->LoadWorldState()"),
+                        create.index("finish_world_entry();"))
+        # Attachment, pending capture and exhausted admission are distinct from
+        # an unbound renderer or an invalidated source, on every backend.
+        attach = body(self.pipeline, "void RenderPipeline::bind_far_world_session(")
+        self.assertIn("preparation.refusal = FarWorldRefusal::AdmissionFailed;",
+                      body(attach, "if (!session.EnableFarWorldAuthorityProducer("))
+        pump = body(self.pipeline, "void RenderPipeline::pump_far_world_session(")
+        self.assertEqual(compact(body(pump, "if (!status.latest_ready)")),
+                         "preparation.refusal = FarWorldRefusal::AdmissionFailed; return;")
+        runner = read(ROOT / "tools/perf/test_render_runner.py")
+        evidence = runner.split("    def test_traversal_twice(self):", 1)[1].split(
+            "    def short_save_load_script", 1)[0]
+        self.assertIn("('refusal', 'AdmissionFailed')", evidence)
+        self.assertIn("('ladder', 'legacy', 'AdmissionFailed')", evidence)
+        self.assertNotIn("ImmutableAuthorityUnavailable", evidence)
+
     def test_saved_play_preparation_precedes_selection_and_keeps_one_dispatch(self):
         render = body(self.pipeline, "void RenderPipeline::render_frame(")
         self.assertLess(render.index("pump_far_world_session(camera, purpose);"),

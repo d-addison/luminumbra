@@ -5997,7 +5997,7 @@
     },
     {
       "id": "render.session-producer-activation",
-      "source": "docs/far-world-horizon-v2.md#far-world-horizon-v2-fw-slice-d",
+      "source": "docs/engine-guide.md#saved-world-session-authority",
       "statement": "Normal saved-world entry binds session authority without fixture binding, pumps bounded preparation before effective selection, forwards same-frame live ownership and uses one selected scheduler and submission. Pending or refused preparation retains the Ladder request and typed Legacy fallback. Legacy opt-out, preview and paired OFF replay remain isolated. Failed opens resume the old binding; committed replacement, exit and shutdown drain workers and backend resources before releasing it. Named finite play limits await native calibration, and the PowerShell pre-launch guard and native qualification remain outstanding.",
       "status": "partial",
       "evidence": [
