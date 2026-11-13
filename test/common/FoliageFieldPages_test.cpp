@@ -1438,3 +1438,30 @@ TEST(FoliageFieldPages, InvalidEmptyLiveTickRetainsItsCursorAndCanRetry) {
     EXPECT_EQ(replay.remaining_steps(), 0u);
 }
 } // namespace
+
+namespace {
+TEST(FoliageFieldPages, ExplicitEditMaterializationRequiresOneCompleteBoundedPass) {
+    using luminumbra::foliage::MaterializeFoliageEdit;
+    for (const std::uint64_t elapsed : {0u, 1u, 32u, 33u}) {
+        entt::registry registry;
+        FieldPageState candidate;
+        ASSERT_TRUE(candidate.set_soil({8, 8}, 0));
+        const auto before = candidate.serialize();
+        EXPECT_EQ(MaterializeFoliageEdit(registry, candidate, {0, 0}, 31, 31 + elapsed),
+                  elapsed <= 32);
+        if (elapsed <= 32) {
+            EXPECT_EQ(candidate.soil().sample({8, 8}, -1),
+                      static_cast<std::int32_t>(elapsed) * luminumbra::foliage::kSoilRegenPerTick);
+        } else {
+            EXPECT_EQ(candidate.serialize(), before);
+        }
+    }
+    entt::registry registry;
+    FieldPageState empty;
+    const auto before = empty.serialize();
+    EXPECT_FALSE(MaterializeFoliageEdit(registry, empty, {0, 0}, 32, 31));
+    EXPECT_FALSE(MaterializeFoliageEdit(registry, empty, {0, 0}, 0, 33));
+    EXPECT_TRUE(MaterializeFoliageEdit(registry, empty, {0, 0}, 0, 32));
+    EXPECT_EQ(empty.serialize(), before);
+}
+} // namespace
