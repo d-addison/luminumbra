@@ -36,7 +36,10 @@ inline WeatherRenderState BuildWeatherRenderState(const Systems::WeatherSample& 
     // The aerial pass already supplies clear-air haze. Add the lowland weather
     // layer only for actual fog; an unconditional veil whitened dry terrain.
     w.fog_density = (s.category == WeatherCategory::Fog) ? 0.4f : 0.0f;
-    w.storm_intensity = std::clamp(s.storm_intensity, 0.0f, 1.0f);
+    // Rain carries the same overcast component as the direct Rain control, even
+    // when no lightning-producing storm is nearby.
+    w.storm_intensity =
+        std::max(std::clamp(s.storm_intensity, 0.0f, 1.0f), 0.25f * w.rain_intensity);
     w.wetness = precip;
     const float wlen = std::sqrt(s.wind.x * s.wind.x + s.wind.y * s.wind.y);
     if (wlen > 1e-4f) {

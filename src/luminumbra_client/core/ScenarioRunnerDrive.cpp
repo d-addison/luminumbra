@@ -93,10 +93,9 @@ ScenarioRunner::InGameDrive ScenarioRunnerImpl::onGameStateInGame(float deltaTim
         return InGameDrive::kBreakCase;
     }
     if (driveLodGround() || driveWaterVisual() || driveMaterialVisual() || driveSkyboxVisual() ||
-        driveWeatherVisual() || driveCloudShadow() || driveParticleDeterminism() ||
-        driveFoliageVisual() || drivePrecipitation() || driveTimeOfDaySweep() ||
-        driveLodBoundaryOscillation() || driveLodSeamArrival() || drivePlayerView() ||
-        driveFarLodHorizon() || driveSkinnedMeshVisual(deltaTime) ||
+        driveAtmosphereCamera() || driveParticleDeterminism() || driveFoliageVisual() ||
+        driveTimeOfDaySweep() || driveLodBoundaryOscillation() || driveLodSeamArrival() ||
+        drivePlayerView() || driveFarLodHorizon() || driveSkinnedMeshVisual(deltaTime) ||
         driveCreatureSlice(deltaTime) || driveNetworkedSession()) {
         return scenario_failed ? InGameDrive::kBreakCase : InGameDrive::kHandled;
     }
@@ -215,9 +214,22 @@ bool ScenarioRunnerImpl::driveSkyboxVisual() {
     return false;
 }
 
+bool ScenarioRunnerImpl::driveAtmosphereCamera() {
+    if (scenario_ready && g_camera &&
+        (scenario_config.weather_visual_smoke() || scenario_config.cloud_shadow_smoke() ||
+         scenario_config.precipitation_smoke())) {
+        // Streaming needs the capture camera before the live weather sample. Render
+        // pins are applied later, after that sample has supplied the frame defaults.
+        ApplySkyboxVisualCamera(gameSession.get(),
+                                g_camera.get(),
+                                scenario_config.precipitation_smoke() ? 0.30f : 0.04f);
+        return true;
+    }
+    return false;
+}
+
 bool ScenarioRunnerImpl::driveWeatherVisual() {
     if (scenario_config.weather_visual_smoke() && scenario_ready && g_camera) {
-        ApplySkyboxVisualCamera(gameSession.get(), g_camera.get(), 0.04f);
         // SIM-DRIVEN weather overlay (one-way, ). First
         // half of the run captures the CLEAR-SKY control (premise guard
         // this is the dedicated weather scenario with a clear-sky
@@ -262,6 +274,18 @@ bool ScenarioRunnerImpl::driveWeatherVisual() {
         } else {
             // Clear-sky control: a driven CLEAR state (overlay off).
             renderPipeline.set_weather_state(wstate);
+        }
+
+        // Precipitation is rendered by the same world-space emitters as live play.
+        // Consume the final pin rather than the earlier live sample, including the
+        // clear control that stops emission before its baseline capture.
+        if (auto* particles = renderPipeline.particles()) {
+            const auto& frame_weather = renderPipeline.get_weather_state();
+            particles->set_precipitation(root_dir / "data/common/particles",
+                                         g_camera->Position,
+                                         frame_weather.rain_intensity,
+                                         frame_weather.snow_intensity);
+            particles->set_wind(frame_weather.wind_direction * frame_weather.wind_strength * 8.0f);
         }
 
         // LIGHTNING. The SIM strike schedule is a pure
@@ -380,7 +404,6 @@ bool ScenarioRunnerImpl::driveCloudShadow() {
         // coverage field across the run so a shadow edge crawls over the
         // fixed terrain ROI between the two captures. Render-only :
         // the cloud state never feeds back into the sim.
-        ApplySkyboxVisualCamera(gameSession.get(), g_camera.get(), 0.04f);
         const double elapsed_play_seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                           scenario_play_started_at)
@@ -539,7 +562,6 @@ bool ScenarioRunnerImpl::drivePrecipitation() {
         // phase (zero wind -> vertical fall) then a WINDY phase (strong
         // horizontal wind -> diagonal slant). ONE-WAY : we READ
         // weather/wind and write nothing back to sim/world_hash.
-        ApplySkyboxVisualCamera(gameSession.get(), g_camera.get(), 0.30f);
         const double elapsed_play_seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                           scenario_play_started_at)

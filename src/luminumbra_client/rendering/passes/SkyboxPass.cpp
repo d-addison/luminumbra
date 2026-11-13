@@ -3,6 +3,7 @@
 #include "rendering/AttributedGl.h"
 
 #include "../PassShaderLayouts.h" // enumerable ExpectedLayout registry
+#include "../WeatherOverlayModel.h"
 #include "PassGlHelpers.h"
 #include "core/IsolationConfig.h"
 #include "rendering/Camera.h"
@@ -318,11 +319,13 @@ void SkyboxPass::execute(const RenderContext& ctx,
         const float aurora_strength = glm::smoothstep(-0.22f, -0.42f, sun_up_factor);
         m_skybox_shader->setFloat("u_auroraStrength", aurora_strength);
 
-        const float storm_floor = glm::clamp(ctx.weather_state->storm_intensity, 0.0f, 1.0f);
+        const auto weather =
+            ResolveWeatherOverlayState(*ctx.weather_state, ctx.weather_type, ctx.weather_intensity);
+        const float storm_floor = glm::clamp(weather.storm_intensity, 0.0f, 1.0f);
         m_skybox_shader->setFloat("u_stormSkyFloor", storm_floor);
     }
     glBindVertexArray(m_skybox_vao);
-    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLES, 0, 36);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GLenum{GL_TRIANGLES}, 0, 36);
     (*ctx.skybox_draw_counter)++;
     glBindVertexArray(0);
     if (sky_lut_ready) {
@@ -414,61 +417,18 @@ void SkyboxPass::execute_weather_overlay(const RenderContext& ctx,
     // WeatherType+intensity) is the FALLBACK for non-driven callers. The wetness
     // material response (u_wetness) is: it shifts roughness/albedo by
     // local precip and never feeds back into the sim or world_hash.
-    float rain = 0.0f;
-    float snow = 0.0f;
-    float fog = 0.0f;
-    float storm = 0.0f;
-    float wetness = 0.0f;
-    glm::vec3 wind_dir(1.0f, 0.0f, 0.0f);
-    float wind_strength = 0.0f;
-    if (ctx.weather_state->driven) {
-        const WeatherRenderState& w = *ctx.weather_state;
-        rain = w.rain_intensity;
-        snow = w.snow_intensity;
-        fog = w.fog_density;
-        storm = w.storm_intensity;
-        wetness = w.wetness;
-        wind_dir = w.wind_direction;
-        wind_strength = w.wind_strength;
-    } else {
-        // Legacy DEBUG mapping. Rain carries a sub-lightning storm component
-        // (overcast darkening without flashes) and light fog; Storm enables the
-        // full storm path.
-        const float intensity = ctx.weather_intensity;
-        switch (ctx.weather_type) {
-            case WeatherType::Rain:
-                rain = intensity;
-                storm = 0.25f * intensity;
-                fog = 0.1f * intensity;
-                break;
-            case WeatherType::Snow:
-                snow = intensity;
-                fog = 0.05f * intensity;
-                break;
-            case WeatherType::Fog:
-                fog = intensity;
-                break;
-            case WeatherType::Storm:
-                rain = intensity;
-                storm = intensity;
-                break;
-            case WeatherType::None:
-            default:
-                break;
-        }
-        wetness = rain;
-        wind_strength = 0.3f * intensity;
-    }
-    m_weather_shader->setFloat("u_rainIntensity", rain);
-    m_weather_shader->setFloat("u_snowIntensity", snow);
-    m_weather_shader->setFloat("u_fogDensity", fog);
-    m_weather_shader->setFloat("u_stormIntensity", storm);
-    m_weather_shader->setFloat("u_wetness", wetness);
-    m_weather_shader->setVec3("u_windDirection", wind_dir);
-    m_weather_shader->setFloat("u_windStrength", wind_strength);
+    const auto weather =
+        ResolveWeatherOverlayState(*ctx.weather_state, ctx.weather_type, ctx.weather_intensity);
+    m_weather_shader->setFloat("u_rainIntensity", weather.rain_intensity);
+    m_weather_shader->setFloat("u_snowIntensity", weather.snow_intensity);
+    m_weather_shader->setFloat("u_fogDensity", weather.fog_density);
+    m_weather_shader->setFloat("u_stormIntensity", weather.storm_intensity);
+    m_weather_shader->setFloat("u_wetness", weather.wetness);
+    m_weather_shader->setVec3("u_windDirection", weather.wind_direction);
+    m_weather_shader->setFloat("u_windStrength", weather.wind_strength);
 
     glBindVertexArray(ctx.screen_quad_vao);
-    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GLenum{GL_TRIANGLE_STRIP}, 0, 4);
     glBindVertexArray(0);
     glActiveTexture(GL_TEXTURE0);
     glEnable(GL_DEPTH_TEST);

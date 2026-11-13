@@ -1,5 +1,9 @@
 #include <gtest/gtest.h>
 
+#include "luminumbra_client/rendering/WeatherOverlayModel.h"
+#include "luminumbra_client/rendering/WeatherRenderBridge.h"
+
+#include <algorithm>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
@@ -111,6 +115,126 @@ TEST(ShaderCompositingContract, WaterSamplesTheResolvedSceneAtFarDepth) {
     ExpectContains(source, "background_has_opaque_depth ? u_sky_color : resolved_background_color");
     ExpectContains(source, "if (!has_opaque_depth(mid_depth))");
     EXPECT_EQ(source.find("refraction_depth"), std::string::npos);
+}
+
+TEST(WeatherFrameContract, LiveRainReachesSkyAndOverlayWithoutANearbyStorm) {
+    namespace R = Luminumbra::Rendering;
+    using Luminumbra::Systems::WeatherCategory;
+    Luminumbra::Systems::WeatherSample sample{};
+    sample.category = WeatherCategory::Rain;
+    sample.wind = {3.0f, 4.0f};
+    // Dry, partial and full rain, with and without a stronger nearby storm.
+    for (const float precipitation : {-1.0f, 0.0f, 0.4f, 1.0f, 2.0f}) {
+        for (const float storm : {-1.0f, 0.0f, 0.8f, 2.0f}) {
+            sample.precip_intensity = precipitation;
+            sample.storm_intensity = storm;
+            const auto state = R::WeatherBridge::BuildWeatherRenderState(sample);
+            const auto uniforms = R::ResolveWeatherOverlayState(state, R::WeatherType::None, 0.0f);
+            EXPECT_TRUE(uniforms.driven);
+            const float rain = std::clamp(precipitation, 0.0f, 1.0f);
+            EXPECT_FLOAT_EQ(uniforms.rain_intensity, rain);
+            EXPECT_FLOAT_EQ(uniforms.snow_intensity, 0.0f);
+            EXPECT_FLOAT_EQ(uniforms.storm_intensity,
+                            std::max(std::clamp(storm, 0.0f, 1.0f), 0.25f * rain));
+            EXPECT_FLOAT_EQ(uniforms.wetness, rain);
+            EXPECT_FLOAT_EQ(uniforms.fog_density, 0.0f);
+            EXPECT_FLOAT_EQ(uniforms.wind_strength, 5.0f / 13.0f);
+            EXPECT_EQ(uniforms.wind_direction, glm::vec3(0.6f, 0.0f, 0.8f));
+            const auto clouds = R::WeatherBridge::BuildCloudRenderState(sample, 30);
+            EXPECT_GE(clouds.coverage_amount, 0.8f);
+        }
+    }
+    // Snow and fog keep their own response; returning to clear removes all rain.
+    sample.storm_intensity = 0.0f;
+    sample.precip_intensity = 1.0f;
+    sample.category = WeatherCategory::Snow;
+    const auto snow = R::WeatherBridge::BuildWeatherRenderState(sample);
+    EXPECT_FLOAT_EQ(snow.rain_intensity, 0.0f);
+    EXPECT_FLOAT_EQ(snow.snow_intensity, 1.0f);
+    EXPECT_FLOAT_EQ(snow.storm_intensity, 0.0f);
+    sample.precip_intensity = 0.0f;
+    for (const auto category : {WeatherCategory::Clear, WeatherCategory::Fog}) {
+        sample.category = category;
+        const auto state = R::WeatherBridge::BuildWeatherRenderState(sample);
+        const auto uniforms = R::ResolveWeatherOverlayState(state, R::WeatherType::Storm, 1.0f);
+        EXPECT_FLOAT_EQ(uniforms.rain_intensity, 0.0f);
+        EXPECT_FLOAT_EQ(uniforms.storm_intensity, 0.0f);
+        EXPECT_FLOAT_EQ(uniforms.wetness, 0.0f);
+        EXPECT_FLOAT_EQ(uniforms.fog_density, category == WeatherCategory::Fog ? 0.4f : 0.0f);
+    }
+}
+
+TEST(WeatherFrameContract, DirectControlsReplaceStaleDrivenFieldsForBothConsumers) {
+    namespace R = Luminumbra::Rendering;
+    R::WeatherRenderState stale;
+    stale.rain_intensity = stale.storm_intensity = stale.wetness = 1.0f;
+    stale.fog_density = 0.8f;
+    stale.wind_direction = glm::vec3(0.0f, 0.0f, 1.0f);
+    stale.wind_strength = 1.0f;
+    for (const float intensity : {0.0f, 0.5f, 1.0f}) {
+        for (const auto type : {R::WeatherType::None,
+                                R::WeatherType::Rain,
+                                R::WeatherType::Snow,
+                                R::WeatherType::Fog,
+                                R::WeatherType::Storm,
+                                static_cast<R::WeatherType>(99)}) {
+            const auto uniforms = R::ResolveWeatherOverlayState(stale, type, intensity);
+            const bool rain = type == R::WeatherType::Rain || type == R::WeatherType::Storm;
+            EXPECT_FLOAT_EQ(uniforms.rain_intensity, rain ? intensity : 0.0f);
+            EXPECT_FLOAT_EQ(uniforms.snow_intensity,
+                            type == R::WeatherType::Snow ? intensity : 0.0f);
+            EXPECT_FLOAT_EQ(uniforms.storm_intensity,
+                            type == R::WeatherType::Storm  ? intensity
+                            : type == R::WeatherType::Rain ? 0.25f * intensity
+                                                           : 0.0f);
+            const float fog = type == R::WeatherType::Fog    ? intensity
+                              : type == R::WeatherType::Rain ? 0.1f * intensity
+                              : type == R::WeatherType::Snow ? 0.05f * intensity
+                                                             : 0.0f;
+            EXPECT_FLOAT_EQ(uniforms.fog_density, fog);
+            EXPECT_FLOAT_EQ(uniforms.wetness, rain ? intensity : 0.0f);
+            EXPECT_EQ(uniforms.wind_direction, glm::vec3(1.0f, 0.0f, 0.0f));
+            EXPECT_FLOAT_EQ(uniforms.wind_strength, 0.3f * intensity);
+        }
+    }
+}
+
+TEST(WeatherFrameContract, FinalScenarioPinsAndConsumersShareTheResolvedFrame) {
+    const auto main = ReadShader("src/luminumbra_client/main_client.cpp");
+    const auto live = main.find("renderPipeline.set_weather_state(weather_state);");
+    const auto pins = main.find("scenario_runner->onPreRenderCapturePins();");
+    ASSERT_NE(live, std::string::npos);
+    ASSERT_NE(pins, std::string::npos);
+    EXPECT_LT(live, pins);
+    const auto capture = ReadShader("src/luminumbra_client/core/ScenarioRunnerCapture.cpp");
+    const auto pin_body =
+        ExtractBlock(capture, "void ScenarioRunnerImpl::onPreRenderCapturePins()");
+    const auto drive = ReadShader("src/luminumbra_client/core/ScenarioRunnerDrive.cpp");
+    const auto early = ExtractBlock(drive, "ScenarioRunnerImpl::onGameStateInGame(");
+    ExpectContains(early, "driveAtmosphereCamera()");
+    for (const char* driver :
+         {"driveWeatherVisual()", "driveCloudShadow()", "drivePrecipitation()"}) {
+        ExpectContains(pin_body, driver);
+        EXPECT_EQ(early.find(driver), std::string::npos);
+    }
+    const auto weather_driver =
+        ExtractBlock(drive, "bool ScenarioRunnerImpl::driveWeatherVisual()");
+    ExpectContains(weather_driver, "renderPipeline.get_weather_state()");
+    ExpectContains(weather_driver, "particles->set_precipitation(");
+    ExpectContains(weather_driver, "frame_weather.rain_intensity");
+    ExpectContains(weather_driver, "frame_weather.snow_intensity");
+    ExpectContains(weather_driver, "particles->set_wind(");
+    const auto pipeline = ReadShader("src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const auto context = ExtractBlock(pipeline, "RenderPipeline::make_skybox_context(");
+    ExpectContains(context, "ctx.weather_state = &m_weather_state;");
+    ExpectContains(context, "ctx.weather_type = m_weather_type;");
+    ExpectContains(context, "ctx.weather_intensity = m_weather_intensity;");
+    const auto sky = ReadShader("src/luminumbra_client/rendering/passes/SkyboxPass.cpp");
+    EXPECT_EQ(CountOccurrences(sky, "ResolveWeatherOverlayState("), 2u);
+    ExpectContains(sky, "glm::clamp(weather.storm_intensity, 0.0f, 1.0f)");
+    ExpectContains(sky, "setFloat(\"u_stormIntensity\", weather.storm_intensity)");
+    ExpectContains(sky, "setFloat(\"u_fogDensity\", weather.fog_density)");
+    ExpectContains(sky, "setFloat(\"u_wetness\", weather.wetness)");
 }
 
 TEST(FarWorldPositionContract, EveryPositionReadIncludingNeighborsUsesTheSharedHelper) {
