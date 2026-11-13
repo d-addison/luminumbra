@@ -54,12 +54,21 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--binary', required=True)
     parser.add_argument('--xvfb', default='/usr/bin/Xvfb')
-    parser.add_argument('--output')
+    destination = parser.add_mutually_exclusive_group()
+    destination.add_argument('--output')
+    # Repeatable registrations get a fresh child directory per invocation.
+    destination.add_argument('--output-parent')
     parser.add_argument('--profile', choices=('static-preview', 'shader-scenes'), default='static-preview')
     args = parser.parse_args()
-    output = Path(args.output) if args.output else Path(tempfile.mkdtemp(prefix='luminumbra-static-software-'))
     if args.output:
+        output = Path(args.output)
         output.mkdir(parents=False, exist_ok=False)
+    elif args.output_parent:
+        parent = Path(args.output_parent)
+        parent.mkdir(parents=False, exist_ok=True)
+        output = Path(tempfile.mkdtemp(prefix='capture-', dir=parent))
+    else:
+        output = Path(tempfile.mkdtemp(prefix='luminumbra-static-software-'))
     env = dict(os.environ)
     for pin in ('LUMINUMBRA_PREVIEW_EXPECT_NATIVE_VENDOR', 'LUMINUMBRA_PREVIEW_EXPECT_NATIVE_RENDERER'):
         env.pop(pin, None)

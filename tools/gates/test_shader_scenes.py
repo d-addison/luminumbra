@@ -390,6 +390,59 @@ class ShaderScenesTests(unittest.TestCase):
                     software.main()
                     self.assertTrue((output / 'tests.log').is_file())
 
+    def test_runner_output_parent_allocates_a_fresh_capture_per_invocation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary) / 'shader-scene-capture'
+            outputs = []
+
+            def execute(command, **kwargs):
+                output = Path(kwargs['env']['LUMINUMBRA_SHADER_SCENE_OUTPUT'])
+                self.assertEqual(output.parent, parent.resolve())
+                outputs.append(output)
+                root = ET.Element('testsuites')
+                for classname, name in sorted(software.SHADER_CASES):
+                    ET.SubElement(root, 'testcase', classname=classname, name=name, status='run')
+                (output / 'tests.xml').write_bytes(ET.tostring(root))
+                return SimpleNamespace(returncode=0, stdout=b'fixture output')
+
+            for _ in range(2):
+                with patch.object(sys, 'argv', ['run_software_gl.py', '--binary', 'fixture-binary',
+                                               '--output-parent', str(parent), '--profile',
+                                               'shader-scenes']), \
+                        patch.object(software.subprocess, 'Popen') as server, \
+                        patch.object(software.subprocess, 'run', side_effect=execute), \
+                        patch.object(software.selectors, 'DefaultSelector') as selector, \
+                        patch.object(software.os, 'read', return_value=b'42\n'):
+                    server.return_value.poll.return_value = 0
+                    selector.return_value.select.return_value = [True]
+                    software.main()
+            self.assertEqual(len(outputs), 2)
+            self.assertNotEqual(outputs[0], outputs[1])
+            for output in outputs:
+                self.assertTrue((output / 'tests.log').is_file())
+            with patch.object(sys, 'argv', ['run_software_gl.py', '--binary', 'fixture-binary',
+                                           '--output', str(parent / 'a'), '--output-parent',
+                                           str(parent)]), self.assertRaises(SystemExit):
+                software.main()
+
+    def test_fixture_hash_reconfigures_and_scene_demand_provisions_native_setup(self):
+        cmake = (ROOT / 'test/CMakeLists.txt').read_text(encoding='utf-8')
+        block = cmake.split('if(LUMINUMBRA_SHADER_SCENES)', 1)[1].split('\nendif()', 1)[0]
+        self.assertLess(block.index('CMAKE_CONFIGURE_DEPENDS'), block.index('string(SHA256 _shader_scene_hash'))
+        self.assertIn('"${CMAKE_SOURCE_DIR}/test/rendering/shader_scene_render_test.cpp")', block)
+        workflow = (ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8').split('  fast-compile:', 1)[1].split('  tidy-shard:', 1)[0]
+        demand = "steps.shader-scenes.outputs.needs_shader_scenes == 'true'"
+        for step in ('Install fast validation dependencies', 'Restore fast dependency sources',
+                     'Populate missing fast dependency sources',
+                     'Verify and stage isolated fast dependency sources',
+                     'Configure GCC and Clang databases and generate headers'):
+            with self.subTest(step=step):
+                block = workflow.split('- name: ' + step, 1)[1].split('      - name:', 1)[0]
+                condition = next(line for line in block.splitlines() if line.strip().startswith('if:'))
+                self.assertIn("steps.route.outputs.native != 'false' || " + demand, condition)
+        render = workflow.split('- name: Render and compare software shader scenes', 1)[1].split('      - name:', 1)[0]
+        self.assertNotIn('steps.route.outputs.native', render)
+
     def test_ci_registration_and_gate_share_reference_and_consumer(self):
         self.assertIn(('tools/gates/test_shader_scenes.py',), paths.python_test_commands(ROOT))
         cmake = (ROOT / 'test/CMakeLists.txt').read_text(encoding='utf-8')
@@ -451,7 +504,7 @@ class ShaderScenesTests(unittest.TestCase):
                         Path(sys.executable).as_posix(), '-I', '-B',
                         (ROOT / 'tools/static_preview/run_software_gl.py').as_posix(),
                         '--binary', Path(sys.executable).as_posix(), '--profile', 'shader-scenes',
-                        '--output', (build / 'shader-scene-capture').as_posix()])
+                        '--output-parent', (build / 'shader-scene-capture').as_posix()])
                     for forbidden in ('DISABLED', 'SKIP_RETURN_CODE', 'SKIP_REGULAR_EXPRESSION',
                                       'LABELS', 'RUN_SERIAL'):
                         self.assertNotIn(forbidden, properties)

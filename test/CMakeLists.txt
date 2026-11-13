@@ -222,6 +222,7 @@ add_executable(common_tests
     common/FarVolumeTierMemory_test.cpp
     rendering/FarWorldWaterMesh_test.cpp
     rendering/FarVolumeRenderMesh_test.cpp
+    rendering/NearTerrainRefinement_test.cpp
     rendering/FarVolumeBuildQueue_test.cpp
     rendering/FarVolumeUpload_test.cpp
     rendering/FarVolumeGpuBackend_test.cpp
@@ -251,6 +252,7 @@ add_executable(common_tests
     ../src/luminumbra_client/rendering/FarVolumeResidency.cpp
     ../src/luminumbra_client/rendering/FarWorldWaterMesh.cpp
     ../src/luminumbra_client/rendering/FarVolumeRenderMesh.cpp
+    ../src/luminumbra_client/rendering/NearTerrainRefinement.cpp
     common/FarTierTable_test.cpp
     common/FarHorizon_test.cpp
     common/FarWantedSet_test.cpp
@@ -361,6 +363,7 @@ add_executable(common_tests
     sim/ecology_pipeline_test.cpp
     sim/ecology_hash_test.cpp
     sim/crop_lifecycle_test.cpp
+    sim/PlantReproductionContinuation_test.cpp
     sim/foliage_drift_integration_test.cpp
     sim/species_registry_test.cpp
     sim/movement_hardening_test.cpp
@@ -2306,6 +2309,9 @@ set_tests_properties(ShieldRtSpike PROPERTIES
 
 # Simulation telemetry captures require the standard-library Python validator.
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME RegionFixtureRegeneratorContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/test/tools/test_regenerate_region_fixtures.py")
+
 add_test(NAME SystemConfigIdentityPython COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/test/tools/test_system_config_identity.py")
 set_tests_properties(SystemConfigIdentityPython PROPERTIES LABELS "tools" TIMEOUT 60)
@@ -2750,6 +2756,9 @@ add_test(NAME RenderSceneMatrixPython COMMAND "${Python3_EXECUTABLE}" -B ${CMAKE
 option(LUMINUMBRA_SHADER_SCENES "Register software shader reference scenes" OFF)
 if(LUMINUMBRA_SHADER_SCENES)
     add_executable(shader_scene_render_test rendering/shader_scene_render_test.cpp)
+    # Re-run configuration when the fixture changes so its embedded hash stays current.
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/test/rendering/shader_scene_render_test.cpp")
     file(READ "${CMAKE_SOURCE_DIR}/test/rendering/shader_scene_render_test.cpp" _shader_scene_source)
     string(REPLACE "\r\n" "\n" _shader_scene_source "${_shader_scene_source}")
     string(SHA256 _shader_scene_hash "${_shader_scene_source}")
@@ -2768,7 +2777,7 @@ if(LUMINUMBRA_SHADER_SCENES)
     add_test(NAME ShaderSceneSoftwareGl COMMAND "${Python3_EXECUTABLE}" -I -B
         "${CMAKE_SOURCE_DIR}/tools/static_preview/run_software_gl.py"
         --binary "$<TARGET_FILE:shader_scene_render_test>" --profile shader-scenes
-        --output "${CMAKE_BINARY_DIR}/shader-scene-capture")
+        --output-parent "${CMAKE_BINARY_DIR}/shader-scene-capture")
     set_tests_properties(ShaderSceneSoftwareGl PROPERTIES TIMEOUT 180
         RESOURCE_LOCK luminumbra_gl_context)
 endif()
