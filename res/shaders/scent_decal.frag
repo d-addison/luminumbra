@@ -1,4 +1,9 @@
 #version 450 core
+
+#ifdef LUMIN_DIAG_IDS
+layout (location = 6) out uvec4 gDiagnosticIds;
+uniform uvec4 u_diagnosticIds;
+#endif
 #include "far_world_position.glsl"
 
 // PHEROMONE TRAIL GROUND DECAL — render-only deferred decal.
@@ -32,17 +37,29 @@ const vec3 HOME_COLOR = vec3(0.25, 0.55, 0.85);
 
 void main() {
     vec3 viewPos = vec3(0.0);
+#ifdef LUMIN_DIAG_IDS
+    if (!farWorldPosition(gPosition, gDepth, TexCoords, viewPos)) { discard; }
+#else
     if (!farWorldPosition(gPosition, gDepth, TexCoords, viewPos)) { FragColor = vec4(0.0); return; }
+#endif
     // Empty/sky G-buffer pixels are (0,0,0) in view space; reject them.
+#ifdef LUMIN_DIAG_IDS
+    if (dot(viewPos, viewPos) < 1e-8) { discard; }
+#else
     if (dot(viewPos, viewPos) < 1e-8) { FragColor = vec4(0.0); return; }
+#endif
 
     vec3 worldPos = vec3(u_inverseView * vec4(viewPos, 1.0));
 
     // Project world XZ -> [0,1] grid UV; outside the field contributes nothing.
     vec2 uv = (worldPos.xz - u_scentWorldOrigin) * u_scentInvWorldSpan;
     if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) {
+#ifdef LUMIN_DIAG_IDS
+        discard;
+#else
         FragColor = vec4(0.0);
         return;
+#endif
     }
 
     vec2 scent = texture(u_scentField, uv).rg;   // R=food, G=home
@@ -54,8 +71,15 @@ void main() {
 
     vec3  tint = FOOD_COLOR * foodI + HOME_COLOR * homeI;
     float intensity = max(foodI, homeI * 0.7);
+#ifdef LUMIN_DIAG_IDS
+    if (intensity <= 0.0025) { discard; }
+#else
     if (intensity <= 0.0025) { FragColor = vec4(0.0); return; }
+#endif
 
     // glBlendFunc(SRC_ALPHA, ONE): rgb scaled by alpha, so carry strength in.a.
     FragColor = vec4(tint, intensity);
+#ifdef LUMIN_DIAG_IDS
+    gDiagnosticIds = u_diagnosticIds;
+#endif
 }
