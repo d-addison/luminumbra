@@ -869,6 +869,13 @@ RenderContext RenderPipeline::make_foliage_context(const Camera& camera) {
     ctx.sun = m_sun;
     ctx.sky_ambient_color = m_skyAmbientColor;
     ctx.moon_light_dir = m_moonLightDir;
+    ctx.moon_radiance = m_moonRadiance * MoonLightFactor(1.0f, m_moonUpFactor);
+    ctx.moon_illumination = m_moonIllumination;
+    const float automatic =
+        (m_auto_exposure_metered && m_metered_valid) ? m_metered_exposure : m_scene_exposure;
+    ctx.exposure = SelectRenderExposure(
+        m_exposureOverride,
+        MoonScaledAutoExposure(automatic, -m_sun.direction.y, m_moonIllumination, m_moonUpFactor));
     ctx.cloud_state = m_cloud_state;
     ctx.lit_scene =
         m_render_registry.adopt_fbo("lit_scene", m_lighting_pass->lighting_fbo().fbo_id);
@@ -944,14 +951,17 @@ RenderContext RenderPipeline::make_lighting_context(const Camera& camera) {
     ctx.sky_ambient_color = m_skyAmbientColor;
     ctx.moon_light_dir = m_moonLightDir;
     ctx.moon_illumination = m_moonIllumination; //  rendering (): lunar phase / two night modes
-    ctx.moon_radiance = m_moonRadiance; //  rendering : the moon's dedicated radiance channel
+    ctx.moon_radiance = m_moonRadiance * MoonLightFactor(1.0f, m_moonUpFactor);
     //  rendering: photo-mode manual EV OVERRIDES the auto exposure;
     // the -1 sentinel (photo mode inactive) selects it.: with
     // metering ON and a first readback consumed, the ring-fed damped servo IS the
     // auto source; otherwise the analytic TOD curve (/) remains.
     const float auto_exposure =
         (m_auto_exposure_metered && m_metered_valid) ? m_metered_exposure : m_scene_exposure;
-    ctx.exposure = SelectRenderExposure(m_exposureOverride, auto_exposure);
+    ctx.exposure = SelectRenderExposure(
+        m_exposureOverride,
+        MoonScaledAutoExposure(
+            auto_exposure, -m_sun.direction.y, m_moonIllumination, m_moonUpFactor));
     ctx.emissive_lut_scale = kEmissiveLutScale;
     ctx.point_lights = &m_point_lights_this_frame;
     ctx.cloud_state = m_cloud_state;
@@ -5865,19 +5875,7 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     glm::vec3 dayAmbient = m_sky_lut.ready()
                                ? m_sky_lut.sky_ambient() * kSkyAmbientRenderScale
                                : glm::vec3(0.1f, 0.15f, 0.2f) * kAmbientIrradianceScale;
-    // moon-shadows: a real NIGHT SKYLIGHT fill (was 0.01,0.02,0.04). The moon
-    // directional only lights up-facing ground; camera-facing SLOPES get NdotL~0
-    // from an overhead moon, so without skylight they read pure black at night
-    // (daytime fills them via the ~10x-larger day ambient). A moonlit sky IS a
-    // large soft cool light source — lift the night hemisphere ambient so slopes
-    // and moon-shadowed areas stay dim-but-NAVIGABLE and cool, while the moon
-    // directional still gives form + cast shadows on flat ground. Cool/blue-biased.
-    //  rendering: the night skylight FILL scales with the lunar phase so a
-    // full moon gives a brighter, navigable night hemisphere and a new moon a darker one,
-    // never fully black (a starlight floor keeps deep new-moon nights navigable-with-effort).
-    constexpr float kStarlightFrac = 0.40f; // new-moon night keeps ~40% of the moonlit skylight
-    glm::vec3 nightAmbient = glm::vec3(0.060f, 0.090f, 0.165f) * kAmbientIrradianceScale *
-                             glm::mix(kStarlightFrac, 1.0f, m_moonIllumination);
+    const glm::vec3 nightAmbient = NightAmbientColor(m_moonIllumination, m_moonUpFactor);
     m_skyAmbientColor = glm::mix(nightAmbient, dayAmbient, m_sun.intensity);
     //  tint the daytime ambient HUE toward the sky-view scattering
     // ambient (the same LUT integral) while preserving the calibrated ambient

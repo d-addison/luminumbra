@@ -1491,9 +1491,13 @@ struct WorldVisualSweepDeps {
     std::filesystem::path artifact_dir;
     // Renders ONE frame with the current camera/pipeline state and presents it,
     // then reads the backbuffer into `out_pixels` (RGB, bottom-up glReadPixels
-    // layout) and reports the framebuffer size. Returns false on a GL/size error.
-    std::function<bool(std::vector<unsigned char>& out_pixels, int& width, int& height)>
+    // layout) and reports the framebuffer size. stream_world runs the normal
+    // streaming/water update at the camera, only during warmup.
+    // Returns false on a GL/size error.
+    std::function<bool(
+        std::vector<unsigned char>& out_pixels, int& width, int& height, bool stream_world)>
         render_and_read;
+    int readiness_timeout_seconds = 120;
     // Whether to also capture the winter season pass (summer is always captured).
     bool include_winter = true;
 };
