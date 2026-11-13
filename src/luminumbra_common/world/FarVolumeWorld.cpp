@@ -14,6 +14,7 @@
 #include <functional>
 #include <memory>
 #include <new>
+#include <type_traits>
 
 namespace Luminumbra::World {
 namespace {
@@ -152,15 +153,17 @@ bool CompilePristineFarVolume(const Systems::SHIELD_WorldSystem& world,
         world, intent, field_identity, caves, numeric, limits, {}, output, failure);
 }
 
-bool CompilePristineFarVolumeCharged(const Systems::SHIELD_WorldSystem& world,
-                                     const FarVolumeCoverageIntent& intent,
-                                     std::uint64_t field_identity,
-                                     FarCaveMode caves,
-                                     FarVolumeNumericProfile numeric,
-                                     const FarVolumeCompilationLimits& limits,
-                                     const FarVolumeMemory& memory,
-                                     FarVolumeCompilation& output,
-                                     FarVolumeFacadeFailure* failure) {
+namespace {
+template<class Input>
+bool CompilePristineWith(const Systems::SHIELD_WorldSystem& world,
+                         const Input& input,
+                         std::uint64_t field_identity,
+                         FarCaveMode caves,
+                         FarVolumeNumericProfile numeric,
+                         const FarVolumeCompilationLimits& limits,
+                         const FarVolumeMemory& memory,
+                         FarVolumeCompilation& output,
+                         FarVolumeFacadeFailure* failure) {
     try {
         // One scope owns every world observation, including the normal halo. The
         // synchronous operation never hands a borrowed world pointer to a worker.
@@ -187,7 +190,11 @@ bool CompilePristineFarVolumeCharged(const Systems::SHIELD_WorldSystem& world,
             return FarVolumeSample{world.SamplePristineFarDensity(p, height, spacing, mode),
                                    static_cast<std::uint8_t>(material)};
         };
-        return CompileFarVolumeCharged(intent, authority, limits, memory, output, failure);
+        if constexpr (std::is_same_v<Input, FarVolumeRequest>) {
+            return CompileFarVolumeSpanCharged(input, authority, limits, memory, output, failure);
+        } else {
+            return CompileFarVolumeCharged(input, authority, limits, memory, output, failure);
+        }
     } catch (const std::bad_alloc&) {
         if (failure)
             *failure = {FarVolumeFacadeError::AllocationFailure,
@@ -203,6 +210,44 @@ bool CompilePristineFarVolumeCharged(const Systems::SHIELD_WorldSystem& world,
                         {}};
         return false;
     }
+}
+
+} // namespace
+
+bool CompilePristineFarVolumeCharged(const Systems::SHIELD_WorldSystem& world,
+                                     const FarVolumeCoverageIntent& intent,
+                                     std::uint64_t field_identity,
+                                     FarCaveMode caves,
+                                     FarVolumeNumericProfile numeric,
+                                     const FarVolumeCompilationLimits& limits,
+                                     const FarVolumeMemory& memory,
+                                     FarVolumeCompilation& output,
+                                     FarVolumeFacadeFailure* failure) {
+    return CompilePristineWith(
+        world, intent, field_identity, caves, numeric, limits, memory, output, failure);
+}
+
+bool CompilePristineFarVolumeSpan(const Systems::SHIELD_WorldSystem& world,
+                                  const FarVolumeRequest& request,
+                                  FarCaveMode caves,
+                                  FarVolumeNumericProfile numeric,
+                                  const FarVolumeCompilationLimits& limits,
+                                  FarVolumeCompilation& output,
+                                  FarVolumeFacadeFailure* failure) {
+    return CompilePristineFarVolumeSpanCharged(
+        world, request, caves, numeric, limits, {}, output, failure);
+}
+
+bool CompilePristineFarVolumeSpanCharged(const Systems::SHIELD_WorldSystem& world,
+                                         const FarVolumeRequest& request,
+                                         FarCaveMode caves,
+                                         FarVolumeNumericProfile numeric,
+                                         const FarVolumeCompilationLimits& limits,
+                                         const FarVolumeMemory& memory,
+                                         FarVolumeCompilation& output,
+                                         FarVolumeFacadeFailure* failure) {
+    return CompilePristineWith(
+        world, request, request.field_identity, caves, numeric, limits, memory, output, failure);
 }
 
 } // namespace Luminumbra::World

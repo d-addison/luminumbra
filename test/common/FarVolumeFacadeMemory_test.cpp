@@ -4,6 +4,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cstdint>
 #include <initializer_list>
 #include <limits>
@@ -403,3 +404,149 @@ TEST(FarVolumeFacadeMemory, LegacyChecksumChargedRefusalReturnsFalseWithoutChang
     EXPECT_EQ(charged, expected);
     EXPECT_EQ(large.used(), 0u);
 }
+
+namespace {
+FarVolumeAuthority SpanSparseAuthority(FarVolumeNumericProfile profile) {
+    auto authority = MemPlane(profile);
+    authority.density = [](const FarVolumePosition& p, float, std::uint32_t, FarCaveMode) {
+        return FarVolumeSample{p.x == 0 && p.y == 0 && p.z == 0 ? -1.0f : 1.0f, 7};
+    };
+    return authority;
+}
+FarVolumeCompilationLimits SpanSparseLimits() {
+    // One candidate layer, one mixed brick and one triangle per page. This keeps
+    // exhaustive allocation refusal bounded even under instrumented execution.
+    return {{131 * 131, 130'000}, {1024, 1}, {64, 1000, 3, 3}};
+}
+
+TEST(FarVolumeFacadeMemory, ExplicitSpanEveryAllocationRefusalPreservesOutputAndReservation) {
+    const std::array<FarVolumeRequest, 2> pages{
+        {{{5, 0, 0}, {-256, 0}, 42}, {{5, 0, 0}, {0, 256}, 42}}};
+    for (const auto profile :
+         {FarVolumeNumericProfile::RawFloat, FarVolumeNumericProfile::LegacySigned16}) {
+        const auto authority = SpanSparseAuthority(profile);
+        for (const auto& request : pages) {
+            FarVolumeMemoryPool pool(kMemLargeLimit);
+            FarVolumeMemoryLease retained(pool);
+            FarVolumeCompilation output;
+            ASSERT_TRUE(CompileFarVolumeSpanCharged(
+                request, authority, SpanSparseLimits(), {&pool, &retained, nullptr}, output));
+            const auto attempts = pool.attempts();
+            ASSERT_GT(attempts, 0u);
+            ASSERT_LT(attempts, 1000u);
+            ASSERT_FALSE(output.mesh.indices.empty());
+            const auto saved = output;
+            const auto held = retained.bytes();
+            // Refuse every successful-run admission in turn, including height,
+            // retained buffers, all map nodes and checksum scratch.
+            for (std::uint64_t allocation = 0; allocation < attempts; ++allocation) {
+                SCOPED_TRACE(allocation);
+                pool.RefuseAttemptsFrom(pool.attempts() + allocation);
+                FarVolumeFacadeFailure failure;
+                EXPECT_FALSE(CompileFarVolumeSpanCharged(request,
+                                                         authority,
+                                                         SpanSparseLimits(),
+                                                         {&pool, &retained, nullptr},
+                                                         output,
+                                                         &failure));
+                EXPECT_EQ(failure.code, FarVolumeFacadeError::AllocationFailure);
+                EXPECT_EQ(output, saved);
+                EXPECT_EQ(retained.bytes(), held);
+                EXPECT_EQ(pool.used(), held);
+            }
+            pool.RefuseAttemptsFrom(kMemNoFailure);
+            ASSERT_TRUE(CompileFarVolumeSpanCharged(
+                request, authority, SpanSparseLimits(), {&pool, &retained, nullptr}, output));
+            EXPECT_EQ(output, saved);
+            EXPECT_EQ(pool.used(), retained.bytes());
+            FarVolumeCompilation uncharged, null_pool;
+            ASSERT_TRUE(CompileFarVolumeSpan(request, authority, SpanSparseLimits(), uncharged));
+            ASSERT_TRUE(
+                CompileFarVolumeSpanCharged(request, authority, SpanSparseLimits(), {}, null_pool));
+            EXPECT_EQ(output, uncharged);
+            EXPECT_EQ(output, null_pool);
+        }
+    }
+}
+
+TEST(FarVolumeFacadeMemory, ExplicitSpanCancellationUnwindsGenerationAndMesh) {
+    const FarVolumeRequest request{{5, 0, 0}, {-256, 0}, 42};
+    const auto limits = SpanSparseLimits();
+    // Cancel the first height, a generation density and the first mesher sample.
+    for (const std::uint64_t stop : {0u, 5u, 128001u}) {
+        auto authority = SpanSparseAuthority(FarVolumeNumericProfile::RawFloat);
+        std::uint64_t heights = 0, densities = 0;
+        authority.height = [&](std::int64_t, std::int64_t) -> std::optional<float> {
+            ++heights;
+            return stop == 0 ? std::nullopt : std::optional<float>{0.0f};
+        };
+        authority.density = [&](const FarVolumePosition& p,
+                                float,
+                                std::uint32_t,
+                                FarCaveMode) -> std::optional<FarVolumeSample> {
+            ++densities;
+            if (densities == stop) {
+                return std::nullopt;
+            }
+            return FarVolumeSample{p.x == 0 && p.y == 0 && p.z == 0 ? -1.0f : 1.0f, 7};
+        };
+        FarVolumeMemoryPool pool(kMemLargeLimit);
+        FarVolumeMemoryLease retained(pool);
+        FarVolumeCompilation output;
+        output.mesh.vertices.emplace_back();
+        output.tile.request = MemHeld();
+        ASSERT_TRUE(retained.TryCharge(FarVolumeCompilationRetainedBytes(output)));
+        const auto saved = output;
+        const auto held = retained.bytes();
+        FarVolumeFacadeFailure failure;
+        EXPECT_FALSE(CompileFarVolumeSpanCharged(
+            request, authority, limits, {&pool, &retained, nullptr}, output, &failure));
+        EXPECT_EQ(failure.code, FarVolumeFacadeError::SamplerFailure);
+        EXPECT_EQ(densities, stop);
+        EXPECT_GT(heights, 0u);
+        if (stop > 128000) {
+            EXPECT_EQ(failure.mesh, FarVolumeMeshError::SamplerFailure);
+        } else {
+            EXPECT_EQ(failure.generation, FarVolumeBuildError::SamplerFailure);
+        }
+        EXPECT_EQ(output, saved);
+        EXPECT_EQ(retained.bytes(), held);
+        EXPECT_EQ(pool.used(), held);
+    }
+}
+
+TEST(FarVolumeFacadeMemory, ExplicitSpanInvalidMemoryAndFirstAllocationRefuseBeforeCallbacks) {
+    auto authority = MemPlane(FarVolumeNumericProfile::RawFloat);
+    std::uint64_t calls = 0;
+    authority.height = [&](std::int64_t, std::int64_t) {
+        ++calls;
+        return 0.0f;
+    };
+    const FarVolumeRequest request{{5, 0, 0}, {-256, 0}, 42};
+    FarVolumeMemoryPool pool(kMemLargeLimit), other(kMemLargeLimit);
+    FarVolumeMemoryLease retained(other);
+    FarVolumeCompilation output;
+    output.tile.request = MemHeld();
+    const auto held = output;
+    for (auto* binding : {static_cast<FarVolumeMemoryLease*>(nullptr), &retained}) {
+        FarVolumeFacadeFailure failure;
+        EXPECT_FALSE(CompileFarVolumeSpanCharged(
+            request, authority, SpanSparseLimits(), {&pool, binding, nullptr}, output, &failure));
+        EXPECT_EQ(failure.code, FarVolumeFacadeError::InvalidMemory);
+        EXPECT_EQ(failure.work, FarVolumeAuthorityWork{});
+        EXPECT_EQ(output, held);
+        EXPECT_EQ(pool.attempts(), 0u);
+    }
+    FarVolumeMemoryLease valid(pool);
+    pool.RefuseAttemptsFrom(0);
+    FarVolumeFacadeFailure failure;
+    EXPECT_FALSE(CompileFarVolumeSpanCharged(
+        request, authority, SpanSparseLimits(), {&pool, &valid, nullptr}, output, &failure));
+    EXPECT_EQ(failure.code, FarVolumeFacadeError::AllocationFailure);
+    EXPECT_EQ(failure.work, FarVolumeAuthorityWork{});
+    EXPECT_EQ(output, held);
+    EXPECT_EQ(calls, 0u);
+    EXPECT_EQ(pool.used(), 0u);
+    EXPECT_EQ(other.used(), 0u);
+}
+} // namespace

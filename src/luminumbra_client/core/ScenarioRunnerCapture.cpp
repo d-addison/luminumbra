@@ -120,6 +120,7 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
         deps.camera = g_camera.get();
         deps.root_dir = root_dir;
         deps.artifact_dir = scenario_config.artifact_dir;
+        deps.readiness_timeout_seconds = scenario_config.readiness_timeout_seconds;
         // Winter is the second season pass; gate it behind the env flag
         // so the standing gate (summer-only, 48 cells) stays fast while a
         // manual LUMINUMBRA_VISUAL_SWEEP_WINTER=1 run captures both seasons.
@@ -129,21 +130,18 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
         }
         // The anchor position is FIXED across the whole matrix (only the
         // camera orientation changes per cell), so the world only needs to
-        // stream ONCE. We stream for a bounded warmup, then skip the
+        // stream ONCE. We stream until warmup confirms residency, then skip the
         // expensive per-frame world update and just re-render — the same
         // settled geometry is reused for every subsequent cell.
-        int sweep_stream_frames = 0;
-        deps.render_and_read = [&, sweep_stream_frames](std::vector<unsigned char>& out_pixels,
-                                                        int& w,
-                                                        int& h) mutable -> bool {
+        deps.render_and_read =
+            [&](std::vector<unsigned char>& out_pixels, int& w, int& h, bool stream_world) -> bool {
             LUMIN_PROFILE_FRAME_N("Client capture");
             LUMIN_PROFILE_ZONE_N("Client capture frame");
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-            if (sweep_stream_frames < 24) {
+            if (stream_world) {
                 gameSession->GetWorldSystem()->update(gameSession->GetRegistry(),
                                                       Luminumbra::Vec3(g_camera->Position),
                                                       gameSession->GetPhysicsSystem());
-                ++sweep_stream_frames;
             }
             renderPipeline.render_frame(gameSession->GetRegistry(),
                                         *gameSession->GetWorldSystem(),
@@ -169,7 +167,9 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
                     }))
                 return false;
             glfwGetFramebufferSize(window, &w, &h);
-            if (w <= 0 || h <= 0) {
+            if (w <= 0 || h <= 0 ||
+                static_cast<std::size_t>(w) >
+                    out_pixels.max_size() / static_cast<std::size_t>(h) / 3u) {
                 return false;
             }
             out_pixels.assign(static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 3u, 0u);
