@@ -84,6 +84,7 @@
 #include "luminumbra_common/systems/FoliageRegistryStage.h"
 #include "luminumbra_common/systems/IrrigationSystem.h"
 #include "luminumbra_common/systems/PlantGrowthSystem.h"
+#include "luminumbra_common/systems/RegionalFoliage.h"
 #include "luminumbra_common/systems/SoilNutrientSystem.h"
 #include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
@@ -9155,7 +9156,8 @@ void LoadScheduledFieldFixture(GameSession& session,
         ASSERT_TRUE(transaction.begin(&errors));
         auto saved_ledger = ledger;
         ASSERT_TRUE(P::WorldSaveService::save_metadata_and_active_regions(
-            metadata.dump(), saved_ledger, input, &errors));
+            metadata.dump(), saved_ledger, input, &errors))
+            << ::testing::PrintToString(errors);
         ASSERT_TRUE(P::WorldSaveService::save_field_pages(fields, input, &errors));
         if (energy && !energy->empty()) {
             ASSERT_TRUE(transaction.protect({"aether_state.efs"}, &errors));
@@ -9192,23 +9194,26 @@ void CheckScheduledFieldOrderAndCompletedWork() {
     auto work = fields.step_scheduled(ledger.records(), expected_schedule.due, 1337, 32, &previous);
     ASSERT_TRUE(fields.set_weather_age(left, 8));
     ASSERT_TRUE(fields.set_weather_age(right, 1));
-    ++work[left];
+    work[left] += 3; // One weather clock and two initialized foliage cells.
     ++work[right];
+    ASSERT_TRUE(fields.set_soil({1, 1}, 123 + luminumbra::foliage::kSoilRegenPerTick));
+    ASSERT_TRUE(fields.set_irrigation({1, 1}, 456 - luminumbra::foliage::kMoistureDrainPerTick));
     ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
     ASSERT_FALSE(session.GetRegionSchedulerFault());
     EXPECT_EQ(session.GetRegionSchedule(), expected_schedule);
     EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
     EXPECT_NE(fields.serialize(), previous.serialize());
-    // Left: 441 cells + 2*840 interior edges + 21 shared edges + one weather clock.
+    // Left: 441 cells + 2*840 interior edges + 21 shared edges, one weather clock
+    // and two initialized foliage cells.
     // Right has 462 cells and its own weather clock.
-    EXPECT_EQ(work.at(left), 2143u);
+    EXPECT_EQ(work.at(left), 2145u);
     EXPECT_EQ(work.at(right), 2246u);
     EXPECT_EQ(session.GetActiveRegionLedger().completed_work(), work);
     EXPECT_EQ(session.GetRegionSchedule().work, 0u);
     EXPECT_EQ(session.GetFieldPages().weather_clocks(), fields.weather_clocks());
     EXPECT_EQ(session.GetFieldPages().scent_cells(), previous.scent_cells());
-    EXPECT_EQ(session.GetFieldPages().soil().pages(), previous.soil().pages());
-    EXPECT_EQ(session.GetFieldPages().irrigation().pages(), previous.irrigation().pages());
+    EXPECT_EQ(session.GetFieldPages().soil().pages(), fields.soil().pages());
+    EXPECT_EQ(session.GetFieldPages().irrigation().pages(), fields.irrigation().pages());
 
     const auto save = root.path() / "scheduled-field-continuation";
     ASSERT_TRUE(session.SaveWorldStateTo(save));
@@ -9222,7 +9227,7 @@ void CheckScheduledFieldOrderAndCompletedWork() {
     ASSERT_EQ(reopened.TickSimulation(reopened.GetSimulationClock().fixed_dt()), 1u);
     ASSERT_FALSE(session.GetRegionSchedulerFault());
     ASSERT_FALSE(reopened.GetRegionSchedulerFault());
-    EXPECT_EQ(session.GetRegionSchedule().work, 4389u);
+    EXPECT_EQ(session.GetRegionSchedule().work, 4391u);
     EXPECT_EQ(reopened.GetRegionSchedule(), session.GetRegionSchedule());
     EXPECT_EQ(reopened.GetFieldPages().serialize(), session.GetFieldPages().serialize());
     EXPECT_EQ(reopened.GetActiveRegionLedger().canonical_bytes(),
@@ -9298,14 +9303,15 @@ void CheckScheduledFieldFaultRollback(bool standard_exception) {
     EXPECT_EQ(session.TickSimulation(0), 0u);
     EXPECT_EQ(session.GetFieldPages().serialize(), bytes);
     int calls = 0;
-    session.GetSimulationEventBus().subscribe([&](const auto&) {
+    AdoptUnpromotedWaterChunk(session);
+    session.GetWorldSystem()->SetWaterAuthorityObserver([&](const auto&) {
         ++calls;
         if (standard_exception)
             throw std::runtime_error("injected scheduled-field consumer fault");
         throw 7;
     });
-    session.GetSimulationEventBus().publish(32, "field-test", "");
     ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    session.GetWorldSystem()->SetWaterAuthorityObserver({});
     EXPECT_EQ(calls, 1);
     const auto fault = session.GetRegionSchedulerFault();
     ASSERT_TRUE(fault.has_value());
@@ -9321,8 +9327,19 @@ void CheckScheduledFieldFaultRollback(bool standard_exception) {
     EXPECT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 0u);
     EXPECT_EQ(session.GetFieldPages().serialize(), bytes);
     const auto save = root.path() / "faulted-field-state";
-    ASSERT_TRUE(session.SaveWorldStateTo(save));
-    ASSERT_NO_FATAL_FAILURE(ExpectIndexedSessionFields(save, fields));
+    const auto disk = SavedPresetTestDiskBytes(session.GetWorldSaveDir());
+    // The fields rolled back, but the unpublished foliage tick is incomplete.
+    EXPECT_FALSE(session.SaveWorldStateTo(save));
+    EXPECT_FALSE(fs::exists(save));
+    EXPECT_FALSE(session.SaveWorldState());
+    EXPECT_FALSE(session.SaveWorld());
+    EXPECT_EQ(SavedPresetTestDiskBytes(session.GetWorldSaveDir()), disk);
+    EXPECT_EQ(session.GetFieldPages().serialize(), bytes);
+    ASSERT_TRUE(session.LoadWorldStateFrom(root.path() / "scheduled-field-input"));
+    EXPECT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetFieldPages().serialize(), bytes);
+    ASSERT_NO_FATAL_FAILURE(
+        ExpectIndexedSessionFields(root.path() / "scheduled-field-input", fields));
 }
 
 void CheckScheduledFieldFreeze(bool corrupt_digest) {
@@ -10120,8 +10137,11 @@ void ExpectWeatherOverlayPublication(GameSession& session, const FieldPageState&
     ++clocks.at(kFieldOwner);
     EXPECT_EQ(published.weather_clocks(), clocks);
     EXPECT_EQ(published.scent_cells(), before.scent_cells());
-    EXPECT_EQ(published.soil().pages(), before.soil().pages());
-    EXPECT_EQ(published.irrigation().pages(), before.irrigation().pages());
+    auto foliage = before.foliage_snapshot();
+    ASSERT_TRUE(foliage.set_soil({0, 0}, 100 + luminumbra::foliage::kSoilRegenPerTick));
+    ASSERT_TRUE(foliage.set_irrigation({0, 0}, 200 - luminumbra::foliage::kMoistureDrainPerTick));
+    EXPECT_EQ(published.soil().pages(), foliage.soil().pages());
+    EXPECT_EQ(published.irrigation().pages(), foliage.irrigation().pages());
     FieldPageState decoded;
     std::string error;
     ASSERT_TRUE(FieldPageState::parse(published.serialize(), decoded, error)) << error;
@@ -10209,9 +10229,8 @@ void CheckBoundedWeatherOverlay(std::size_t unrelated_pages, WeatherOverlayFailu
     const auto before_hashes = WeatherOverlayHashes(session);
     std::array<std::string, 3> during_hashes;
     int observations = 0;
-    session.GetSimulationEventBus().subscribe([&](const auto& event) {
-        if (event.topic != "weather-overlay-test")
-            return;
+    AdoptUnpromotedWaterChunk(session);
+    session.GetWorldSystem()->SetWaterAuthorityObserver([&](const auto&) {
         ++observations;
         EXPECT_EQ(session.GetRegionalFieldCandidatePageCount(), 1u);
         EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
@@ -10230,8 +10249,8 @@ void CheckBoundedWeatherOverlay(std::size_t unrelated_pages, WeatherOverlayFailu
             records.erase(kFieldOwner);
         }
     });
-    session.GetSimulationEventBus().publish(32, "weather-overlay-test", "");
     TickOnce(session);
+    session.GetWorldSystem()->SetWaterAuthorityObserver({});
     EXPECT_EQ(observations, 1);
     EXPECT_EQ(session.GetRegionalFieldCandidatePageCount(), 0u);
     if (failure != WeatherOverlayFailure::None) {
@@ -10326,6 +10345,10 @@ void CheckFrozenWeatherWork(std::size_t frozen_owners,
         AddWeatherOverlayCell(fields, 21, {1024, 64512, 32768, 32768, 16384});
     const auto ledger = ScheduledFieldLedger(31, owners);
     ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    auto expected = fields;
+    if (work_kind == 0) {
+        ASSERT_TRUE(expected.set_soil({0, 0}, 100 + luminumbra::foliage::kSoilRegenPerTick));
+    }
     EXPECT_EQ(session.GetWeatherSystem()->live_strike_count(), 0);
     EXPECT_TRUE(session.GetWeatherSystem()->StrikeSchedule().empty());
     int observations = 0;
@@ -10346,7 +10369,8 @@ void CheckFrozenWeatherWork(std::size_t frozen_owners,
                          session.GetRegionalWeatherScanCount(),
                          session.GetRegionalWeatherProjectionVisitCount()};
         }
-        EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
+        EXPECT_EQ(session.GetFieldPages().serialize(),
+                  work_kind == 0 ? expected.serialize() : fields.serialize());
     });
     session.GetSimulationEventBus().publish(32, "weather-work-test", "");
     TickOnce(session);
@@ -10357,8 +10381,9 @@ void CheckFrozenWeatherWork(std::size_t frozen_owners,
     EXPECT_EQ(weather->AnchorCategory(),
               weather->SampleAt(session.GetMetadata().spawnPoint).category);
     if (work_kind == 0) {
-        EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
-        EXPECT_TRUE(session.GetActiveRegionLedger().completed_work().empty());
+        EXPECT_EQ(session.GetFieldPages().serialize(), expected.serialize());
+        EXPECT_EQ(session.GetActiveRegionLedger().completed_work(),
+                  (std::map<RegionKey, std::uint64_t>{{kFieldOwner, 1}}));
     } else {
         EXPECT_EQ(session.GetFieldPages().weather_clocks().at(kFieldOwner),
                   work_kind == 1 ? 8u : 1u);
@@ -10526,6 +10551,12 @@ void CheckWeatherWithoutAmbientPages(int authority, bool clock) {
         EXPECT_TRUE(session.GetFieldPages().weather_clocks().empty());
     }
     EXPECT_EQ(session.GetFieldPages().scent_cells(), fields.scent_cells());
+    if (authority == 1) {
+        ASSERT_TRUE(fields.set_soil({0, 0}, 100 + luminumbra::foliage::kSoilRegenPerTick));
+    } else if (authority == 2) {
+        ASSERT_TRUE(
+            fields.set_irrigation({0, 0}, 200 - luminumbra::foliage::kMoistureDrainPerTick));
+    }
     EXPECT_EQ(session.GetFieldPages().soil().pages(), fields.soil().pages());
     EXPECT_EQ(session.GetFieldPages().irrigation().pages(), fields.irrigation().pages());
 }
@@ -10552,10 +10583,18 @@ void CheckUnrelatedFieldOwnerWeather(int authority) {
     for (int i = 0; i < 2; ++i) {
         TickOnce(session);
         ASSERT_FALSE(session.GetRegionSchedulerFault());
+        if (authority == 1) {
+            ASSERT_TRUE(
+                fields.set_soil({0, 0}, 100 + (i + 1) * luminumbra::foliage::kSoilRegenPerTick));
+        } else if (authority == 2) {
+            ASSERT_TRUE(fields.set_irrigation(
+                {0, 0}, 200 - (i + 1) * luminumbra::foliage::kMoistureDrainPerTick));
+        }
         EXPECT_EQ(session.GetFieldPages().region_bytes(kFieldOwner),
                   fields.region_bytes(kFieldOwner));
         EXPECT_FALSE(session.GetFieldPages().owns_weather(kFieldOwner));
-        EXPECT_FALSE(session.GetActiveRegionLedger().completed_work().contains(kFieldOwner));
+        EXPECT_EQ(session.GetActiveRegionLedger().completed_work().contains(kFieldOwner),
+                  authority != 0);
         EXPECT_EQ(session.GetFieldPages().weather_clocks().at(weather_owner),
                   static_cast<std::uint64_t>(8 + i));
     }
@@ -13352,6 +13391,7 @@ void CheckFoliageConsumerRollback(bool standard_exception,
     const auto plants_before = FoliageSnapshot(session.GetRegistry());
     const auto pages_before = session.GetFieldPages().serialize();
     const auto next_id = session.GetActiveRegionLedger().next_persistent_id();
+    const auto tick_before = session.GetActiveRegionLedger().records().at(kFieldOwner).last_ticked;
     int callbacks = 0;
     int water_observations = 0;
     const auto ages_before = session.GetActiveRegionLedger().energy_ages();
@@ -13360,6 +13400,8 @@ void CheckFoliageConsumerRollback(bool standard_exception,
         session.GetWorldSystem()->SetWaterAuthorityObserver([&](const auto&) {
             ++water_observations;
             EXPECT_EQ(session.GetActiveRegionLedger().energy_ages(), ages_before);
+            EXPECT_EQ(session.GetActiveRegionLedger().records().at(kFieldOwner).last_ticked,
+                      tick_before);
             EXPECT_EQ(session.GetFieldPages().serialize(), pages_before);
             EXPECT_EQ(FoliageSnapshot(session.GetRegistry()), plants_before);
             EXPECT_EQ(session.GetRegistry().get<C::MortalComponent>(mortal).age_ticks, 0u);
@@ -13392,6 +13434,7 @@ void CheckFoliageConsumerRollback(bool standard_exception,
     EXPECT_EQ(session.GetRegistry().get<C::MortalComponent>(mortal).age_ticks, 0u);
     EXPECT_EQ(session.GetFieldPages().serialize(), pages_before);
     EXPECT_EQ(session.GetActiveRegionLedger().next_persistent_id(), next_id);
+    EXPECT_EQ(session.GetActiveRegionLedger().records().at(kFieldOwner).last_ticked, tick_before);
     EXPECT_EQ(callbacks, 0);
     EXPECT_EQ(water_observations, 1);
     EXPECT_EQ(session.GetActiveRegionLedger().energy_ages(), ages_before);
@@ -13418,35 +13461,26 @@ void CheckFoliageIdleStaging() {
     session.GetRegistry().emplace<C::WaterSourceComponent>(plant).output = 80;
     std::uint64_t due_ticks{0};
     for (std::uint64_t tick{32}; tick < std::uint64_t{44}; ++tick) {
-        const auto* soil_before = session.GetFoliageSoilGrid();
-        const auto* water_before = session.GetFoliageIrrigationGrid();
-        const auto soil_copies = soil_before ? soil_before->buffer_copies() : 0u;
-        const auto water_copies = water_before ? water_before->buffer_copies() : 0u;
+        const auto soil_before = session.GetFieldPages().soil().records();
+        const auto water_before = session.GetFieldPages().irrigation().records();
         const auto absorbed = session.GetRegistry().get<C::SoilFeederComponent>(plant).absorbed;
         TickOnce(session);
         ASSERT_FALSE(session.GetRegionSchedulerFault());
         const bool due = !session.GetRegionSchedule().due.empty();
         if (due) {
             ++due_ticks;
-            ASSERT_NE(session.GetFoliageSoilGrid(), nullptr);
-            ASSERT_NE(session.GetFoliageIrrigationGrid(), nullptr);
-            EXPECT_NE(session.GetFoliageSoilGrid(), soil_before);
-            EXPECT_NE(session.GetFoliageIrrigationGrid(), water_before);
-            EXPECT_EQ(session.GetFoliageSoilGrid()->buffer_copies(), due_ticks - 1);
-            EXPECT_EQ(session.GetFoliageIrrigationGrid()->buffer_copies(), 2 * due_ticks - 1);
+            EXPECT_FALSE(session.GetFieldPages().soil().empty());
+            EXPECT_FALSE(session.GetFieldPages().irrigation().empty());
+            EXPECT_NE(session.GetFieldPages().soil().records(), soil_before);
+            EXPECT_NE(session.GetFieldPages().irrigation().records(), water_before);
             EXPECT_GT(session.GetRegistry().get<C::SoilFeederComponent>(plant).absorbed, absorbed);
         } else {
-            EXPECT_EQ(session.GetFoliageSoilGrid(), soil_before);
-            EXPECT_EQ(session.GetFoliageIrrigationGrid(), water_before);
-            if (soil_before) {
-                EXPECT_EQ(session.GetFoliageSoilGrid()->buffer_copies(), soil_copies);
-            }
-            if (water_before) {
-                EXPECT_EQ(session.GetFoliageIrrigationGrid()->buffer_copies(), water_copies);
-            }
+            EXPECT_EQ(session.GetFieldPages().soil().records(), soil_before);
+            EXPECT_EQ(session.GetFieldPages().irrigation().records(), water_before);
             EXPECT_EQ(session.GetRegistry().get<C::SoilFeederComponent>(plant).absorbed, absorbed);
         }
-        // Begin owns both rollback grid copies; a flat visit count excludes those copies too.
+        EXPECT_EQ(session.GetFoliageSoilGrid(), nullptr);
+        EXPECT_EQ(session.GetFoliageIrrigationGrid(), nullptr);
         EXPECT_EQ(session.GetFoliageRegistryStageVisits(), due_ticks);
         EXPECT_EQ(session.GetFoliageRegistryPublications(), due_ticks);
         EXPECT_EQ(session.GetRegistry().get<C::DecayComponent>(mortal).decay_ticks, due_ticks);
@@ -13561,6 +13595,7 @@ void CheckFoliageCallbacks(bool birth, int failure) {
     EXPECT_EQ(callbacks, 1);
     EXPECT_EQ(session.GetRegionSchedulerFault().has_value(), failure != 0);
     EXPECT_EQ(session.GetFoliageRegistryPublications(), 1u);
+    EXPECT_EQ(session.GetActiveRegionLedger().records().at(kFieldOwner).last_ticked, 32u);
     EXPECT_EQ(session.GetRegistry().get<C::PlantGrowthComponent>(plant).tended, 120u);
     EXPECT_TRUE(session.GetRegistry().all_of<C::PlantHealthComponent>(plant));
     EXPECT_NE(ground_id, 0u);
@@ -13573,8 +13608,17 @@ void CheckFoliageCallbacks(bool birth, int failure) {
         ASSERT_FALSE(session.GetRegionSchedulerFault());
         EXPECT_EQ(session.GetRegionSchedule().work, 9u);
         EXPECT_EQ(session.GetRegionSchedule().rejected.work, 1u);
+        if (birth) {
+            const auto feeders = session.GetRegistry().view<C::SoilFeederComponent>();
+            ASSERT_EQ(feeders.size(), 1u);
+            EXPECT_GT(feeders.get<C::SoilFeederComponent>(feeders.front()).absorbed, 0u);
+            EXPECT_EQ(session.GetFieldPages().soil().pages().size(), 1u);
+            EXPECT_EQ(session.GetActiveRegionLedger().completed_work().at(kFieldOwner), 257u);
+        } else {
+            EXPECT_TRUE(session.GetFieldPages().soil().empty());
+        }
         TickOnce(session);
-        EXPECT_EQ(session.GetRegionSchedule().work, 1u);
+        EXPECT_EQ(session.GetRegionSchedule().work, birth ? 257u : 1u);
         EXPECT_EQ(session.GetRegionSchedule().rejected.work, 0u);
         EXPECT_EQ(callbacks, 1);
     }
@@ -13630,10 +13674,10 @@ void CheckUnscheduledFoliage(RegionState state, bool owner) {
     using luminumbra::simulation::SimBudgetStage;
     const auto& plants = samples[static_cast<std::size_t>(SimBudgetStage::Plants)];
     ASSERT_EQ(plants.size(), 1u);
-    EXPECT_EQ(plants.front().work, 6u);
+    EXPECT_EQ(plants.front().work, 0u);
     const auto& lifespan = samples[static_cast<std::size_t>(SimBudgetStage::Lifespan)];
     ASSERT_EQ(lifespan.size(), 1u);
-    EXPECT_EQ(lifespan.front().work, 3u);
+    EXPECT_EQ(lifespan.front().work, 0u);
     for (const auto stage : {SimBudgetStage::Irrigation, SimBudgetStage::Soil}) {
         const auto& grid = samples[static_cast<std::size_t>(stage)];
         ASSERT_EQ(grid.size(), 1u);
@@ -13641,8 +13685,13 @@ void CheckUnscheduledFoliage(RegionState state, bool owner) {
     }
     EXPECT_EQ(session.GetFoliageSoilGrid(), nullptr);
     EXPECT_EQ(session.GetFoliageIrrigationGrid(), nullptr);
+    EXPECT_TRUE(session.GetFieldPages().soil().empty());
+    EXPECT_TRUE(session.GetFieldPages().irrigation().empty());
     EXPECT_EQ(session.GetFoliageRegistryStageVisits(), 0u);
     EXPECT_EQ(session.GetFoliageRegistryPublications(), 0u);
+    EXPECT_EQ(session.GetFoliageReplayPreparationPages(), 0u);
+    EXPECT_EQ(session.GetFoliageReplayCellVisits(), 0u);
+    EXPECT_EQ(session.GetFoliageReplayRemainingSteps(), 0u);
 }
 
 template<typename Participant>
@@ -14190,7 +14239,6 @@ TEST(GameSessionHeadlessWorldTest, FoliageStagingKeepsEmptyDefaultAndFlagOffWorl
     }
     EXPECT_NE(SessionWorldHash(disabled), legacy_before);
 }
-
 TEST(GameSessionHeadlessWorldTest, EmptyFoliageTicksPreservePrepublicationEventDelivery) {
     for (const int failure : {0, 1, 2}) {
         ASSERT_NO_FATAL_FAILURE(CheckFoliageEmptyTickEvents(false, false, failure));
@@ -14214,10 +14262,10 @@ TEST(GameSessionHeadlessWorldTest, DueFoliageFailureRestoresExistingResourceGrid
     session.GetRegistry().emplace<C::DecayComponent>(corpse).decay_duration = 100;
     TickOnce(session);
     ASSERT_FALSE(session.GetRegionSchedulerFault());
-    ASSERT_NE(session.GetFoliageSoilGrid(), nullptr);
-    ASSERT_NE(session.GetFoliageIrrigationGrid(), nullptr);
-    const auto soil_before = *session.GetFoliageSoilGrid();
-    const auto water_before = *session.GetFoliageIrrigationGrid();
+    ASSERT_FALSE(session.GetFieldPages().soil().empty());
+    ASSERT_FALSE(session.GetFieldPages().irrigation().empty());
+    const auto soil_before = session.GetFieldPages().soil().pages();
+    const auto water_before = session.GetFieldPages().irrigation().pages();
     const auto absorbed = session.GetRegistry().get<C::SoilFeederComponent>(plant).absorbed;
     const auto decay_before = session.GetRegistry().get<C::DecayComponent>(corpse);
     const auto fields_before = session.GetFieldPages().serialize();
@@ -14248,10 +14296,1207 @@ TEST(GameSessionHeadlessWorldTest, DueFoliageFailureRestoresExistingResourceGrid
     EXPECT_EQ(session.GetActiveRegionLedger().next_persistent_id(), next_id);
     EXPECT_EQ(callbacks, 0);
     EXPECT_EQ(session.GetSimulationEventBus().pending_count(), 1u);
-    for (int z = 0; z < soil_before.height(); ++z) {
-        for (int x = 0; x < soil_before.width(); ++x) {
-            EXPECT_EQ(session.GetFoliageSoilGrid()->AtCell(x, z), soil_before.AtCell(x, z));
-            EXPECT_EQ(session.GetFoliageIrrigationGrid()->AtCell(x, z), water_before.AtCell(x, z));
+    EXPECT_EQ(session.GetFieldPages().soil().pages(), soil_before);
+    EXPECT_EQ(session.GetFieldPages().irrigation().pages(), water_before);
+    EXPECT_EQ(session.GetFoliageSoilGrid(), nullptr);
+    EXPECT_EQ(session.GetFoliageIrrigationGrid(), nullptr);
+}
+
+namespace {
+void CompleteFoliageTick(GameSession& session) {
+    const auto initial_tick = session.GetSimulationTickCount();
+    for (unsigned update = 0; update < 2050; ++update) {
+        const auto ticks = session.TickSimulation(session.GetSimulationClock().fixed_dt());
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        if (ticks != 0) {
+            ASSERT_EQ(ticks, 1u);
+            EXPECT_EQ(session.GetSimulationTickCount(), initial_tick + 1);
+            return;
+        }
+        EXPECT_EQ(session.GetSimulationTickCount(), initial_tick);
+    }
+    FAIL() << "Bounded foliage replay did not complete";
+}
+
+TEST(GameSessionHeadlessWorldTest, FoliageHistoryDropsEveryEvictedOwnerIncludingTransitions) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    const auto tick = ActiveRegionLedger::kIdleEvictionTicks;
+    std::map<RegionKey, RegionState> owners;
+    for (int index = 0; index < 32; ++index) {
+        owners.emplace(RegionKey{index, 0},
+                       index == 0 ? RegionState::Reduced : RegionState::Active);
+    }
+    auto ledger =
+        ScheduledFieldLedger(tick - 1, owners, {std::numeric_limits<std::uint64_t>::max(), 1, 2});
+    for (int index = 0; index < 32; ++index) {
+        ledger.pin({index, 0}, false, WorldClock(tick - 1));
+        auto& record =
+            const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at({index, 0});
+        record.last_proximity = static_cast<std::uint64_t>(index);
+    }
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, {}));
+    session.SetReplicatedSimulationAnchors({});
+    for (int index = 0; index < 32; ++index) {
+        TickOnce(session);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        const RegionKey removed{index, 0};
+        EXPECT_FALSE(session.GetActiveRegionLedger().records().contains(removed));
+        EXPECT_EQ(session.GetRegionSchedule().evicted, std::vector<RegionKey>{removed});
+        EXPECT_EQ(session.GetFoliageHistorySize(),
+                  session.GetActiveRegionLedger().records().size());
+        if (index == 0) {
+            ASSERT_EQ(session.GetRegionSchedule().transitions.size(), 1u);
+            EXPECT_EQ(session.GetRegionSchedule().transitions.front().key, removed);
         }
     }
+    EXPECT_EQ(session.GetFoliageHistorySize(), 0u);
 }
+
+TEST(GameSessionHeadlessWorldTest, RefreezingFoliageRetainsOnlyUnpublishedResumeHistory) {
+    for (const unsigned history : {0u, 1u, 2u}) {
+        auto ledger = ScheduledFieldLedger(31, {{kFieldOwner, RegionState::Reduced}}, {0, 1, 2});
+        ledger.pin(kFieldOwner, false, WorldClock(31));
+        auto& record =
+            const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at(kFieldOwner);
+        record.first_active = 0;
+        record.last_ticked = history == 2 ? 21 : 19;
+        record.frozen_at = history == 0 ? 0 : 20;
+        const std::array work{Luminumbra::world::RegionWork{kFieldOwner, 1, 0, 0, 0}};
+        const auto schedule = ledger.schedule(WorldClock(32),
+                                              std::span<const Luminumbra::Vec3>{},
+                                              work,
+                                              [](RegionKey) { return 42u; });
+        ASSERT_EQ(schedule.transitions.size(), 1u);
+        EXPECT_EQ(record.state, RegionState::Frozen);
+        EXPECT_EQ(record.frozen_at, history == 1 ? 20u : 32u);
+        EXPECT_EQ(record.last_ticked, history == 2 ? 21u : 19u);
+        ActiveRegionLedger restored;
+        std::string error;
+        EXPECT_TRUE(ActiveRegionLedger::decode(ledger.encode(), restored, error)) << error;
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, FoliageCompletionStampRefusesUnknownFrozenAndFutureOwners) {
+    auto ledger = ScheduledFieldLedger(
+        31, {{kFieldOwner, RegionState::Active}, {{1, 0}, RegionState::Frozen}});
+    const auto before = ledger.encode();
+    EXPECT_FALSE(ledger.set_foliage_tick({2, 0}, 1));
+    EXPECT_FALSE(ledger.set_foliage_tick({1, 0}, 1));
+    EXPECT_FALSE(ledger.set_foliage_tick(kFieldOwner, 32));
+    EXPECT_EQ(ledger.encode(), before);
+    ASSERT_TRUE(ledger.set_foliage_tick(kFieldOwner, 17));
+    EXPECT_EQ(ledger.records().at(kFieldOwner).last_ticked, 17u);
+    ASSERT_TRUE(ledger.set_foliage_tick(kFieldOwner, 0));
+    EXPECT_EQ(ledger.encode(), before);
+}
+
+TEST(GameSessionHeadlessWorldTest, FoliageThawToReducedResumesWithoutAnyDueOwner) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    auto ledger = ScheduledFieldLedger(30,
+                                       {{kFieldOwner, RegionState::Frozen}},
+                                       {std::numeric_limits<std::uint64_t>::max(), 1, 2});
+    auto& record =
+        const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at(kFieldOwner);
+    record.first_active = 0;
+    record.last_ticked = 29;
+    std::uint64_t id = 0;
+    ASSERT_TRUE(ledger.allocate_persistent_id(id));
+    FieldPageState fields;
+    ASSERT_TRUE(fields.set_soil({8, 8}, 0));
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    session.SetReplicatedSimulationAnchors({});
+    const auto plant = ClockTestPlant(session.GetRegistry(), {8, 0, 8});
+    session.GetRegistry().emplace<C::PlantRegionComponent>(plant, id, 0, 0, std::uint64_t{30});
+    session.GetRegistry().get<C::PlantGrowthComponent>(plant).last_tick = 30;
+    ASSERT_NE(ActiveRegionLedger::phase(kFieldOwner, 2), 31u % 4);
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_TRUE(session.GetRegionSchedule().due.empty());
+    EXPECT_EQ(session.GetActiveRegionLedger().records().at(kFieldOwner).state,
+              RegionState::Reduced);
+    EXPECT_EQ(session.GetActiveRegionLedger().records().at(kFieldOwner).frozen_at, 0u);
+    EXPECT_EQ(session.GetActiveRegionLedger().records().at(kFieldOwner).last_ticked, 31u);
+    EXPECT_EQ(session.GetRegistry().get<C::PlantGrowthComponent>(plant).last_tick, 31u);
+    EXPECT_EQ(session.GetFieldPages().soil().sample({8, 8}, -1), Foliage::kSoilRegenPerTick);
+}
+
+TEST(GameSessionHeadlessWorldTest, FoliageReplayAllowanceIsIndependentOfHostFrameBatching) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession batched, separate;
+    const auto ledger = ScheduledFieldLedger(31, {{kFieldOwner, RegionState::Active}});
+    FieldPageState fields;
+    ASSERT_TRUE(fields.set_soil({8, 8}, 0));
+    ASSERT_TRUE(fields.set_irrigation({8, 8}, 8000));
+    for (auto* session : {&batched, &separate}) {
+        ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(*session, root, jobs, ledger, fields));
+        session->SetReplicatedSimulationAnchors({});
+        const auto plant = ClockTestPlant(session->GetRegistry(), {8, 0, 8});
+        session->GetRegistry().emplace<C::SoilFeederComponent>(plant);
+    }
+    ASSERT_EQ(batched.TickSimulation(2 * batched.GetSimulationClock().fixed_dt()), 2u);
+    TickOnce(separate);
+    TickOnce(separate);
+    ASSERT_FALSE(batched.GetRegionSchedulerFault());
+    ASSERT_FALSE(separate.GetRegionSchedulerFault());
+    EXPECT_EQ(batched.GetFoliageRegistryPublications(), 2u);
+    EXPECT_GT(batched.GetFieldPages().soil().sample({8, 8}, -1), 0);
+    EXPECT_EQ(batched.GetFieldPages().serialize(), separate.GetFieldPages().serialize());
+    EXPECT_EQ(FoliageSnapshot(batched.GetRegistry()), FoliageSnapshot(separate.GetRegistry()));
+    EXPECT_EQ(batched.GetActiveRegionLedger().canonical_bytes(),
+              separate.GetActiveRegionLedger().canonical_bytes());
+}
+
+TEST(GameSessionHeadlessWorldTest, ScentAdmissionUsesSchedulingBeforeFoliageStampPublication) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    const auto ledger = ScheduledFieldLedger(31, {{kFieldOwner, RegionState::Active}});
+    const auto committed_tick = ledger.records().at(kFieldOwner).last_ticked;
+    FieldPageState fields;
+    ASSERT_TRUE(fields.set_soil({8, 8}, 0));
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    session.SetReplicatedSimulationAnchors({});
+    AdoptUnpromotedWaterChunk(session);
+    unsigned observations = 0;
+    session.GetWorldSystem()->SetWaterAuthorityObserver([&](const auto&) {
+        ++observations;
+        EXPECT_EQ(session.GetActiveRegionLedger().records().at(kFieldOwner).last_ticked,
+                  committed_tick);
+        // No scent participants have filled the gate cache before this observer.
+        EXPECT_TRUE(session.GetScentField()->SimulationCellAllowed(session.ScentWorldToCellX(8),
+                                                                   session.ScentWorldToCellZ(8)));
+    });
+    TickOnce(session);
+    session.GetWorldSystem()->SetWaterAuthorityObserver({});
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    ASSERT_EQ(observations, 1u);
+    EXPECT_EQ(session.GetActiveRegionLedger().records().at(kFieldOwner).last_ticked, 32u);
+}
+
+TEST(GameSessionHeadlessWorldTest, LongFoliageWindowStopsRemainingHostBatchUntilReplayCompletes) {
+    std::optional<RegionKey> owner;
+    for (int x = -64; x < 64 && !owner; ++x) {
+        for (int z = -64; z < 64 && !owner; ++z) {
+            if (ActiveRegionLedger::phase({x, z}, 6) == 34) {
+                owner = RegionKey{x, z};
+            }
+        }
+    }
+    ASSERT_TRUE(owner.has_value());
+    if (!owner) {
+        return;
+    }
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession batched, separate;
+    auto ledger = ScheduledFieldLedger(
+        0, {{*owner, RegionState::Reduced}}, {std::numeric_limits<std::uint64_t>::max(), 10000, 6});
+    FieldPageState fields;
+    ASSERT_TRUE(fields.set_soil({owner->x * 512 + 8, owner->z * 512 + 8}, 0));
+    for (auto* session : {&batched, &separate}) {
+        ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(*session, root, jobs, ledger, fields));
+        session->SetReplicatedSimulationAnchors({});
+        for (unsigned tick = 0; tick < 32; ++tick) {
+            TickOnce(*session);
+            ASSERT_FALSE(session->GetRegionSchedulerFault());
+        }
+    }
+    ASSERT_EQ(batched.TickSimulation(4 * batched.GetSimulationClock().fixed_dt()), 2u);
+    EXPECT_EQ(batched.GetSimulationTickCount(), 34u);
+    EXPECT_EQ(batched.GetWorldClock().tick(), 34u);
+    TickOnce(separate);
+    TickOnce(separate);
+    EXPECT_EQ(batched.GetFieldPages().serialize(), fields.serialize());
+    EXPECT_EQ(batched.GetFoliageRegistryPublications(), 0u);
+    for (auto* session : {&batched, &separate}) {
+        ASSERT_NO_FATAL_FAILURE(CompleteFoliageTick(*session));
+        TickOnce(*session);
+        ASSERT_FALSE(session->GetRegionSchedulerFault());
+        EXPECT_EQ(session->GetSimulationTickCount(), 36u);
+    }
+    EXPECT_EQ(batched.GetFieldPages().serialize(), separate.GetFieldPages().serialize());
+    EXPECT_EQ(batched.GetActiveRegionLedger().canonical_bytes(),
+              separate.GetActiveRegionLedger().canonical_bytes());
+}
+
+TEST(GameSessionHeadlessWorldTest, FoliagePublicationRefusesMissingFrozenOrChangedResumeOwners) {
+    for (const unsigned failure : {0u, 1u, 2u, 3u}) {
+        SCOPED_TRACE(failure);
+        const HeadlessRoot root;
+        JobSystem jobs;
+        jobs.startup(1);
+        GameSession session;
+        auto ledger = ScheduledFieldLedger(31, {{kFieldOwner, RegionState::Active}});
+        auto& record =
+            const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at(kFieldOwner);
+        record.first_active = 0;
+        record.last_ticked = 19;
+        record.frozen_at = 20;
+        FieldPageState fields;
+        ASSERT_TRUE(fields.set_soil({8, 8}, 0));
+        ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+        session.SetReplicatedSimulationAnchors({});
+        AdoptUnpromotedWaterChunk(session);
+        unsigned observations = 0;
+        session.GetWorldSystem()->SetWaterAuthorityObserver([&](const auto&) {
+            ++observations;
+            auto& records = const_cast<std::map<RegionKey, ActiveRegionRecord>&>(
+                session.GetActiveRegionLedger().records());
+            if (failure == 0) {
+                records.erase(kFieldOwner);
+            } else if (failure == 1) {
+                records.at(kFieldOwner).state = RegionState::Frozen;
+            } else {
+                records.at(kFieldOwner).frozen_at = failure == 2 ? 0 : 21;
+            }
+        });
+        TickOnce(session);
+        session.GetWorldSystem()->SetWaterAuthorityObserver({});
+        ASSERT_EQ(observations, 1u);
+        EXPECT_TRUE(session.GetRegionSchedulerFault());
+        EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
+        EXPECT_EQ(session.GetFoliageRegistryPublications(), 0u);
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, FoliageSelectionVisitsOnlyDueOwnerParticipantsAfterWarmup) {
+    for (const int count : {1, 64}) {
+        const HeadlessRoot root;
+        JobSystem jobs;
+        jobs.startup(1);
+        GameSession session;
+        std::map<RegionKey, RegionState> owners{{kFieldOwner, RegionState::Active}};
+        for (int index = 1; index < count; ++index) {
+            owners.emplace(RegionKey{index, 0}, RegionState::Frozen);
+        }
+        const auto ledger = ScheduledFieldLedger(31, owners);
+        ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, {}));
+        session.SetReplicatedSimulationAnchors({});
+        auto& registry = session.GetRegistry();
+        for (int index = 0; index < count; ++index) {
+            const auto source = registry.create();
+            registry.emplace<C::TransformComponent>(source).position = {
+                static_cast<float>(index * 512 + 8), 0, 8};
+            registry.emplace<C::WaterSourceComponent>(source);
+            registry.emplace<C::MortalComponent>(source);
+        }
+        session.SetSimBudgetTelemetryEnabled(true);
+        TickOnce(session);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        const auto visits = session.GetFoliageSelectionVisits();
+        TickOnce(session);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        EXPECT_EQ(session.GetFoliageSelectionVisits() - visits, 13u);
+        const auto& lifespan =
+            session.GetSimBudgetTelemetry().SamplesByStage()[static_cast<std::size_t>(
+                luminumbra::simulation::SimBudgetStage::Lifespan)];
+        ASSERT_FALSE(lifespan.empty());
+        EXPECT_EQ(lifespan.back().work, 1u);
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, FoliageOwnerIndexTracksOwnershipRemovalAndRecycledHandles) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    const auto ledger = ScheduledFieldLedger(
+        31, {{kFieldOwner, RegionState::Active}, {{1, 0}, RegionState::Frozen}});
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, {}));
+    session.SetReplicatedSimulationAnchors({});
+    auto& registry = session.GetRegistry();
+    const auto entity = StagedMortal(registry);
+    registry.patch<C::TransformComponent>(
+        entity, [](auto& transform) { transform.position = {520, 0, 8}; });
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(registry.get<C::MortalComponent>(entity).age_ticks, 0u);
+    registry.patch<C::TransformComponent>(entity,
+                                          [](auto& transform) { transform.position = {8, 0, 8}; });
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(registry.get<C::MortalComponent>(entity).age_ticks, 1u);
+    registry.emplace<C::PlantRegionComponent>(entity, std::uint64_t{1}, 1, 0, std::uint64_t{0});
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(registry.get<C::MortalComponent>(entity).age_ticks, 1u);
+    registry.patch<C::PlantRegionComponent>(entity, [](auto& identity) { identity.owner_x = 0; });
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(registry.get<C::MortalComponent>(entity).age_ticks, 2u);
+    registry.remove<C::PlantRegionComponent>(entity);
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(registry.get<C::MortalComponent>(entity).age_ticks, 3u);
+    registry.remove<C::TransformComponent>(entity);
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    // Missing transforms remain staged opt-ins; position-gated consumers ignore them.
+    EXPECT_EQ(registry.get<C::MortalComponent>(entity).age_ticks, 3u);
+    registry.destroy(entity);
+    for (unsigned generation = 0; generation < 64; ++generation) {
+        registry.destroy(StagedMortal(registry));
+    }
+    const auto replacement = StagedMortal(registry);
+    ASSERT_NE(replacement, entity);
+    const auto visits = session.GetFoliageSelectionVisits();
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(registry.get<C::MortalComponent>(replacement).age_ticks, 1u);
+    EXPECT_EQ(session.GetFoliageSelectionVisits() - visits, 14u);
+}
+
+TEST(GameSessionHeadlessWorldTest, NewFoliageOwnerDoesNotReplayBeforeItsActivation) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    const auto ledger = ScheduledFieldLedger(1003, {{kFieldOwner, RegionState::Active}});
+    FieldPageState fields;
+    ASSERT_TRUE(fields.set_soil({8, 8}, 0));
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    session.SetReplicatedSimulationAnchors({});
+    EXPECT_TRUE(Foliage::FarmingActionsAllowed(session.GetRegistry()));
+    constexpr entt::entity kNullEntity = entt::null;
+    EXPECT_NE(Foliage::PlantSeed(session.GetRegistry(), {8, 0, 8}, {}, 0, 1003), kNullEntity);
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetFieldPages().soil().sample({8, 8}, -1), Foliage::kSoilRegenPerTick);
+    EXPECT_EQ(session.GetFoliageReplayCellVisits(), 1u);
+    EXPECT_EQ(session.GetFoliageRegistryPublications(), 1u);
+    EXPECT_TRUE(Foliage::FarmingActionsAllowed(session.GetRegistry()));
+}
+
+TEST(GameSessionHeadlessWorldTest, MovingFoliageSourceReindexesBeforeItsPreviousOwnerSleeps) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    const auto tick = std::uint64_t{32} + ActiveRegionLedger::phase(kFieldOwner, 1);
+    const auto ledger =
+        ScheduledFieldLedger(tick - 1,
+                             {{kFieldOwner, RegionState::Reduced}, {{1, 0}, RegionState::Active}},
+                             {std::numeric_limits<std::uint64_t>::max(), 10000, 1});
+    FieldPageState fields;
+    ASSERT_TRUE(Foliage::ActivateFoliagePage(fields, {511, 8}, false));
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    session.SetReplicatedSimulationAnchors({});
+    auto& registry = session.GetRegistry();
+    const auto spring = registry.create();
+    registry.emplace<C::TransformComponent>(spring).position = {511.99f, 0, 8};
+    registry.emplace<C::CreatureComponent>(spring).move_speed = 60;
+    registry.emplace<C::WaterSourceComponent>(spring).output = 800;
+    registry.emplace<C::MortalComponent>(spring);
+    const auto predator = registry.create();
+    registry.emplace<C::TransformComponent>(predator).position = {506, 0, 8};
+    auto& hunter = registry.emplace<C::CreatureComponent>(predator);
+    hunter.is_predator = true;
+    hunter.move_speed = 0;
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    const auto position = registry.get<C::TransformComponent>(spring).position;
+    ASSERT_GE(position.x, 512);
+    ASSERT_LT(position.x, 528);
+    const auto cell = Foliage::FoliageCell(position);
+    EXPECT_GT(session.GetFieldPages().irrigation().sample(cell, -1), 0);
+    EXPECT_EQ(registry.get<C::MortalComponent>(spring).age_ticks, 1u);
+    registry.get<C::CreatureComponent>(spring).move_speed = 0;
+    TickOnce(session);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    ASSERT_EQ(session.GetRegionSchedule().due, (std::vector<RegionKey>{{1, 0}}));
+    EXPECT_EQ(registry.get<C::MortalComponent>(spring).age_ticks, 2u);
+    EXPECT_GT(session.GetFieldPages().irrigation().sample(cell, -1), 0);
+    EXPECT_EQ(session.GetFoliageRegistryPublications(), 2u);
+}
+
+TEST(GameSessionHeadlessWorldTest, IrrigationAdmissionDiscoveryRequiresWetScheduledOwners) {
+    const RegionKey donor{0, 0}, recipient{1, 0};
+    const std::array owners{donor};
+    const auto ledger =
+        ScheduledFieldLedger(31, {{donor, RegionState::Active}, {recipient, RegionState::Active}});
+    FieldPageState fields;
+    EXPECT_TRUE(Foliage::FoliageBorderEdges(fields, ledger.records(), owners, true).empty());
+    ASSERT_TRUE(fields.set_irrigation({511, 8}, 0));
+    EXPECT_TRUE(Foliage::FoliageBorderEdges(fields, ledger.records(), owners, true).empty());
+    ASSERT_TRUE(fields.set_irrigation({511, 8}, 800));
+    const Foliage::FoliageEdges expected{{{511, 8}, {512, 8}}};
+    EXPECT_EQ(Foliage::FoliageBorderEdges(fields, ledger.records(), owners, true), expected);
+    const std::array reverse_owners{recipient};
+    EXPECT_EQ(Foliage::FoliageBorderEdges(fields, ledger.records(), reverse_owners, true),
+              expected);
+    EXPECT_TRUE(Foliage::FoliageBorderEdges(fields, ledger.records(), owners).empty());
+    EXPECT_FALSE(fields.irrigation().initialized({512, 8}));
+    EXPECT_TRUE(Foliage::FoliageBorderEdges(fields, ledger.records(), {}, true).empty());
+    EXPECT_TRUE(Foliage::FoliageBorderEdges(fields, {}, owners, true).empty());
+    for (const bool missing : {false, true}) {
+        auto records = ledger.records();
+        if (missing) {
+            records.erase(recipient);
+        } else {
+            records.at(recipient).state = RegionState::Frozen;
+        }
+        EXPECT_TRUE(Foliage::FoliageBorderEdges(fields, records, owners, true).empty());
+    }
+    auto records = ledger.records();
+    records.at(recipient).cadence_shift = 2;
+    records.at(recipient).cadence_phase = 1;
+    const auto edges = Foliage::FoliageBorderEdges(fields, records, owners, true);
+    EXPECT_TRUE(Foliage::SelectFoliageBorderEdges(edges, records, 32).empty());
+    EXPECT_EQ(Foliage::SelectFoliageBorderEdges(edges, records, 33), expected);
+    records.at(recipient).cadence_shift = 17;
+    EXPECT_TRUE(Foliage::SelectFoliageBorderEdges(edges, records, 33).empty());
+}
+
+TEST(GameSessionHeadlessWorldTest, IrrigationBorderAdmissionAtCapacityLeavesAuthorityUnchanged) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    const auto ledger = ScheduledFieldLedger(31,
+                                             {{{-1, 0}, RegionState::Active},
+                                              {{0, 0}, RegionState::Active},
+                                              {{1, 0}, RegionState::Frozen},
+                                              {{2, 0}, RegionState::Frozen},
+                                              {{3, 0}, RegionState::Frozen}});
+    FieldPageState fields;
+    for (int x = 0; x < 128; ++x) {
+        for (int z = 0; z < 32; ++z) {
+            ASSERT_TRUE(fields.set_irrigation({x * 16, z * 16}, 800));
+        }
+    }
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    const auto replacement = GameSession::PrepareWorldState(
+        session.CaptureWorldPreparationOptions(), root.path() / "scheduled-field-input");
+    ASSERT_TRUE(GameSession::WorldPreparationError(*replacement).empty());
+    const auto before = session.GetFieldPages().serialize();
+    TickOnce(session);
+    ASSERT_TRUE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetFieldPages().serialize(), before);
+    EXPECT_TRUE(session.GetActiveRegionLedger().completed_work().empty());
+    EXPECT_EQ(session.GetFoliageRegistryPublications(), 0u);
+    EXPECT_EQ(session.GetFoliageReplayRemainingSteps(), 0u);
+    const auto disk = SavedPresetTestDiskBytes(session.GetWorldSaveDir());
+    const auto target = root.path() / "faulted-foliage-save";
+    Luminumbra::world::WorldStateSaveReport report{1, 2, 3, true};
+    EXPECT_FALSE(session.SaveWorldState(&report));
+    EXPECT_EQ(report.chunks_total, 1u);
+    EXPECT_EQ(report.chunks_dirty, 2u);
+    EXPECT_EQ(report.chunks_saved, 3u);
+    EXPECT_TRUE(report.saved);
+    EXPECT_FALSE(session.SaveWorld());
+    EXPECT_FALSE(session.SaveWorldStateTo(target));
+    EXPECT_FALSE(fs::exists(target));
+    EXPECT_EQ(SavedPresetTestDiskBytes(session.GetWorldSaveDir()), disk);
+    EXPECT_FALSE(session.LoadWorldFrom("missing-foliage-world", root.path()));
+    EXPECT_FALSE(session.GetWorldOpenError().empty());
+    EXPECT_TRUE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetFieldPages().serialize(), before);
+    const auto revision = session.WorldRevision();
+    const auto input = root.path() / "scheduled-field-input";
+    const auto ledger_path = P::WorldSaveService::active_regions_path(input);
+    auto corrupt_ledger = ReadClockTestFile(ledger_path);
+    ASSERT_GT(corrupt_ledger.size(), 8u);
+    corrupt_ledger[8] ^= 1;
+    ASSERT_TRUE(P::WorldSaveService::write_file_durably(ledger_path, corrupt_ledger));
+    const auto corrupt_disk = SavedPresetTestDiskBytes(input);
+    EXPECT_FALSE(session.LoadWorldStateFrom(input));
+    EXPECT_EQ(session.GetWorldOpenError(), ActiveRegionLedger::kCorruptMessage);
+    EXPECT_TRUE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.WorldRevision(), revision);
+    EXPECT_EQ(session.GetFieldPages().serialize(), before);
+    EXPECT_EQ(SavedPresetTestDiskBytes(input), corrupt_disk);
+    EXPECT_TRUE(session.AdoptPreparedWorld(replacement));
+    EXPECT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetFieldPages().serialize(), before);
+}
+
+void CheckHistoricallyWettedBorder(bool capacity, bool partial_recipient) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    const RegionKey left{0, 0}, right{1, 0};
+    auto ledger = ScheduledFieldLedger(33,
+                                       {{left, RegionState::Active},
+                                        {right, RegionState::Active},
+                                        {{2, 0}, RegionState::Frozen},
+                                        {{3, 0}, RegionState::Frozen},
+                                        {{4, 0}, RegionState::Frozen},
+                                        {{5, 0}, RegionState::Frozen}});
+    for (const auto owner : {left, right}) {
+        auto& record =
+            const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at(owner);
+        record.first_active = 0;
+        record.last_ticked = 31;
+        record.frozen_at = 32;
+    }
+    FieldPageState fields;
+    ASSERT_TRUE(fields.set_irrigation({510, 8}, 8000));
+    ASSERT_TRUE(fields.set_irrigation({511, 8}, 0));
+    if (partial_recipient) {
+        ASSERT_TRUE(fields.set_irrigation({513, 8}, 0));
+    }
+    if (capacity) {
+        for (int index = 0; fields.irrigation().pages().size() < 4096; ++index) {
+            ASSERT_TRUE(fields.set_irrigation({1024 + (index / 32) * 16, (index % 32) * 16}, 0));
+        }
+    }
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    const auto before = session.GetFieldPages().serialize();
+    const auto plants = FoliageSnapshot(session.GetRegistry());
+    const auto owners = std::array{left, right};
+    ASSERT_TRUE(Foliage::FoliageBorderEdges(fields, ledger.records(), owners, true).empty());
+    // One historical step wets the boundary; only then does the missing
+    // recipient become eligible for this tick's border exchange.
+    const std::map<RegionKey, std::uint32_t> due{{left, 1}, {right, 1}};
+    Foliage::FoliageInteriorReplay history;
+    history.Step(fields, due);
+    ASSERT_GT(fields.irrigation().sample({511, 8}, 0), 0);
+    const auto edges = Foliage::SelectFoliageBorderEdges(
+        Foliage::FoliageBorderEdges(fields, ledger.records(), owners, true), ledger.records(), 34);
+    ASSERT_FALSE(edges.empty());
+    TickOnce(session);
+    if (capacity) {
+        ASSERT_TRUE(session.GetRegionSchedulerFault());
+        EXPECT_EQ(session.GetFieldPages().serialize(), before);
+        EXPECT_EQ(FoliageSnapshot(session.GetRegistry()), plants);
+        for (const auto owner : owners) {
+            EXPECT_EQ(session.GetActiveRegionLedger().records().at(owner).last_ticked, 31u);
+            EXPECT_EQ(session.GetActiveRegionLedger().records().at(owner).frozen_at, 32u);
+        }
+        EXPECT_EQ(session.GetActiveRegionLedger().next_persistent_id(),
+                  ledger.next_persistent_id());
+        EXPECT_TRUE(session.GetActiveRegionLedger().completed_work().empty());
+        EXPECT_EQ(session.GetFoliageRegistryPublications(), 0u);
+        EXPECT_EQ(session.GetFoliageReplayRemainingSteps(), 0u);
+        const auto target = root.path() / "faulted-historical-foliage-save";
+        EXPECT_FALSE(session.SaveWorld());
+        EXPECT_FALSE(session.SaveWorldState());
+        EXPECT_FALSE(session.SaveWorldStateTo(target));
+        EXPECT_FALSE(fs::exists(target));
+        EXPECT_TRUE(session.LoadWorldStateFrom(root.path() / "scheduled-field-input"));
+        EXPECT_FALSE(session.GetRegionSchedulerFault());
+        EXPECT_EQ(session.GetFieldPages().serialize(), before);
+        return;
+    }
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    for (const auto& [a, b] : edges) {
+        ASSERT_TRUE(Foliage::ActivateFoliagePage(fields, a, false));
+        ASSERT_TRUE(Foliage::ActivateFoliagePage(fields, b, false));
+    }
+    const auto flux = Foliage::FoliageBorderFluxes(fields.irrigation(), edges);
+    entt::registry empty;
+    history.LiveStep(empty, fields, due, owners);
+    Foliage::ExchangeFoliageBorders(fields, flux, edges);
+    EXPECT_GT(session.GetFieldPages().irrigation().sample({512, 8}, 0), 0);
+    EXPECT_EQ(session.GetFieldPages().irrigation().pages(), fields.irrigation().pages());
+    EXPECT_EQ(session.GetFoliageRegistryPublications(), 1u);
+}
+
+TEST(GameSessionHeadlessWorldTest, IrrigationBorderDiscoveryUsesCompletedHistoricalLevels) {
+    ASSERT_NO_FATAL_FAILURE(CheckHistoricallyWettedBorder(false, false));
+    ASSERT_NO_FATAL_FAILURE(CheckHistoricallyWettedBorder(false, true));
+    ASSERT_NO_FATAL_FAILURE(CheckHistoricallyWettedBorder(true, false));
+}
+
+} // namespace
+
+namespace {
+RegionKey LongCadenceOwner() {
+    for (int x = -64; x < 64; ++x) {
+        for (int z = -64; z < 64; ++z) {
+            if (ActiveRegionLedger::phase({x, z}, 6) == 34) {
+                return {x, z};
+            }
+        }
+    }
+    ADD_FAILURE() << "No cadence fixture owner";
+    return {};
+}
+
+void BuildOrdinaryFoliageGap(GameSession& session,
+                             const HeadlessRoot& root,
+                             JobSystem& jobs,
+                             unsigned dormant) {
+    const auto owner = LongCadenceOwner();
+    std::map<RegionKey, RegionState> owners{{owner, RegionState::Reduced}};
+    FieldPageState fields;
+    ASSERT_TRUE(fields.set_soil({owner.x * 512 + 8, owner.z * 512 + 8}, 0));
+    for (unsigned index = 0; index < dormant; ++index) {
+        const auto x = static_cast<int>(index) + 100;
+        owners.emplace(RegionKey{x, 0}, RegionState::Frozen);
+        ASSERT_TRUE(fields.set_soil({x * 512 + 8, 8}, 17));
+    }
+    // Frozen owners require last_ticked < frozen_at, so begin after tick zero.
+    const auto ledger =
+        ScheduledFieldLedger(1, owners, {std::numeric_limits<std::uint64_t>::max(), 10000, 6});
+    auto& record = const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at(owner);
+    record.first_active = 0;
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    for (std::uint64_t tick = ledger.tick(); tick < 32; ++tick) {
+        TickOnce(session);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+    }
+    ASSERT_EQ(session.GetWorldClock().tick(), 32u);
+    ASSERT_EQ(session.GetActiveRegionLedger().records().at(owner).last_ticked, 0u);
+}
+
+void CheckPublishedFoliageFaultSave(bool standard_exception) {
+    SCOPED_TRACE(standard_exception);
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    auto ledger = ScheduledFieldLedger(31, {{kFieldOwner, RegionState::Active}});
+    std::uint64_t identity = 0;
+    ASSERT_TRUE(ledger.allocate_persistent_id(identity));
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, {}));
+    auto& registry = session.GetRegistry();
+    const auto plant = ClockTestPlant(registry, {8, 0, 8});
+    registry.emplace<C::PlantRegionComponent>(
+        plant, identity, kFieldOwner.x, kFieldOwner.z, std::uint64_t{31});
+    int callbacks = 0;
+    session.GetSimulationEventBus().subscribe([&](const auto& event) {
+        if (event.topic != "published-foliage-fault") {
+            return;
+        }
+        ++callbacks;
+        if (standard_exception) {
+            throw std::runtime_error("injected published foliage callback fault");
+        }
+        throw 7;
+    });
+    session.GetSimulationEventBus().publish(32, "published-foliage-fault", "");
+    TickOnce(session);
+    ASSERT_TRUE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(callbacks, 1);
+    EXPECT_EQ(session.GetFoliageRegistryPublications(), 1u);
+    EXPECT_EQ(session.GetFoliageReplayRemainingSteps(), 0u);
+    EXPECT_EQ(session.GetActiveRegionLedger().records().at(kFieldOwner).last_ticked, 32u);
+    EXPECT_EQ(registry.get<C::PlantGrowthComponent>(plant).last_tick, 32u);
+    ASSERT_TRUE(session.SaveWorldState());
+    ASSERT_TRUE(session.LoadWorldStateFrom(session.GetWorldSaveDir()));
+    EXPECT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetWorldClock().tick(), 32u);
+    TickOnce(session);
+    EXPECT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetWorldClock().tick(), 33u);
+    EXPECT_EQ(callbacks, 1);
+}
+
+TEST(GameSessionHeadlessWorldTest, PublishedFoliageFaultKeepsCompleteWorldSaveable) {
+    for (const bool standard_exception : {false, true}) {
+        ASSERT_NO_FATAL_FAILURE(CheckPublishedFoliageFaultSave(standard_exception));
+    }
+}
+
+void CheckShortFoliageHarvestSources(bool perennial) {
+    SCOPED_TRACE(perennial);
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, control;
+    const auto owner = LongCadenceOwner();
+    const Luminumbra::Vec3 position{
+        static_cast<float>(owner.x * 512 + 8), 0, static_cast<float>(owner.z * 512 + 8)};
+    auto ledger =
+        ScheduledFieldLedger(0,
+                             {{owner, RegionState::Reduced}, {kFieldOwner, RegionState::Active}},
+                             {std::numeric_limits<std::uint64_t>::max(), 10000, 6});
+    FieldPageState fields;
+    ASSERT_TRUE(fields.set_soil({owner.x * 512 + 8, owner.z * 512 + 8}, Foliage::kSoilBaseline));
+    ASSERT_TRUE(fields.set_soil({8, 8}, Foliage::kSoilBaseline));
+    std::array<entt::entity, 2> plants{};
+    std::array<entt::entity, 2> current_plants{};
+    const std::array sessions{&session, &control};
+    for (std::size_t index = 0; index < sessions.size(); ++index) {
+        ASSERT_NO_FATAL_FAILURE(
+            LoadScheduledFieldFixture(*sessions[index], root, jobs, ledger, fields));
+        auto& registry = sessions[index]->GetRegistry();
+        const auto plant = ClockTestPlant(registry, position);
+        plants[index] = plant;
+        registry.get<C::PlantGrowthComponent>(plant).stage =
+            static_cast<std::uint8_t>(C::PlantStage::Fruiting);
+        registry.emplace<C::SoilFeederComponent>(plant).uptake = 64;
+        auto& crop = registry.emplace<C::CropLifecycleComponent>(plant);
+        crop.perennial = perennial;
+        crop.lifespan_ticks = 10000;
+        current_plants[index] = ClockTestPlant(registry, {8, 0, 8});
+    }
+    Foliage::FarmingController farming;
+    for (unsigned tick = 1; tick <= 34; ++tick) {
+        TickOnce(session);
+        TickOnce(control);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        ASSERT_FALSE(control.GetRegionSchedulerFault());
+        if (tick == 1 || tick == 31) {
+            auto& registry = session.GetRegistry();
+            const auto snapshot = FoliageSnapshot(registry);
+            EXPECT_TRUE(Foliage::FarmingActionsAllowed(registry));
+            EXPECT_FALSE(Foliage::FarmingActionsAllowed(registry, plants[0]));
+            EXPECT_FALSE(farming.Water(registry, plants[0]));
+            EXPECT_FALSE(farming.Fertilize(registry, plants[0]));
+            ASSERT_FALSE(farming.Harvest(registry, plants[0]).harvestable);
+            EXPECT_EQ(FoliageSnapshot(registry), snapshot);
+            EXPECT_EQ(farming.harvests, 0);
+            EXPECT_EQ(farming.seeds, 5);
+            EXPECT_EQ(farming.total_yield, 0.0f);
+            for (std::size_t index = 0; index < sessions.size(); ++index) {
+                auto& current_registry = sessions[index]->GetRegistry();
+                EXPECT_TRUE(
+                    Foliage::FarmingActionsAllowed(current_registry, current_plants[index]));
+                EXPECT_TRUE(farming.Water(current_registry, current_plants[index]));
+                EXPECT_TRUE(farming.Fertilize(current_registry, current_plants[index]));
+            }
+        }
+    }
+    ASSERT_NO_FATAL_FAILURE(CompleteFoliageTick(session));
+    ASSERT_NO_FATAL_FAILURE(CompleteFoliageTick(control));
+    EXPECT_GT(session.GetRegistry().get<C::SoilFeederComponent>(plants[0]).absorbed, 0u);
+    EXPECT_EQ(session.GetFieldPages().serialize(), control.GetFieldPages().serialize());
+    EXPECT_EQ(FoliageSnapshot(session.GetRegistry()), FoliageSnapshot(control.GetRegistry()));
+    EXPECT_TRUE(Foliage::FarmingActionsAllowed(session.GetRegistry()));
+    EXPECT_TRUE(farming.Harvest(session.GetRegistry(), plants[0]).harvestable);
+    EXPECT_EQ(session.GetRegistry().valid(plants[0]), perennial);
+}
+
+TEST(GameSessionHeadlessWorldTest, ShortFoliageGapsPreserveAnnualAndPerennialHarvestSources) {
+    for (const bool perennial : {false, true}) {
+        ASSERT_NO_FATAL_FAILURE(CheckShortFoliageHarvestSources(perennial));
+    }
+}
+
+void CheckFrozenFoliageHarvestSources(bool perennial) {
+    SCOPED_TRACE(perennial);
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, control;
+    const auto ledger = ScheduledFieldLedger(31, {{kFieldOwner, RegionState::Frozen}});
+    FieldPageState fields;
+    ASSERT_TRUE(fields.set_soil({8, 8}, Foliage::kSoilBaseline));
+    std::array<entt::entity, 2> plants{};
+    const std::array sessions{&session, &control};
+    for (std::size_t index = 0; index < sessions.size(); ++index) {
+        ASSERT_NO_FATAL_FAILURE(
+            LoadScheduledFieldFixture(*sessions[index], root, jobs, ledger, fields));
+        auto& registry = sessions[index]->GetRegistry();
+        const auto plant = ClockTestPlant(registry, {8, 0, 8});
+        plants[index] = plant;
+        registry.get<C::PlantGrowthComponent>(plant).stage =
+            static_cast<std::uint8_t>(C::PlantStage::Fruiting);
+        registry.emplace<C::SoilFeederComponent>(plant).uptake = 64;
+        auto& crop = registry.emplace<C::CropLifecycleComponent>(plant);
+        crop.perennial = perennial;
+        crop.lifespan_ticks = 10000;
+        TickOnce(*sessions[index]);
+        ASSERT_FALSE(sessions[index]->GetRegionSchedulerFault());
+        ASSERT_EQ(sessions[index]->GetActiveRegionLedger().records().at(kFieldOwner).state,
+                  RegionState::Frozen);
+    }
+    auto& registry = session.GetRegistry();
+    const auto snapshot = FoliageSnapshot(registry);
+    Foliage::FarmingController farming;
+    EXPECT_TRUE(Foliage::FarmingActionsAllowed(registry));
+    EXPECT_FALSE(Foliage::FarmingActionsAllowed(registry, plants[0]));
+    EXPECT_FALSE(farming.Water(registry, plants[0]));
+    EXPECT_FALSE(farming.Fertilize(registry, plants[0]));
+    ASSERT_FALSE(farming.Harvest(registry, plants[0]).harvestable);
+    EXPECT_EQ(FoliageSnapshot(registry), snapshot);
+    EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
+    EXPECT_EQ(farming.harvests, 0);
+    EXPECT_EQ(farming.seeds, 5);
+    for (std::size_t index = 0; index < sessions.size(); ++index) {
+        auto* current = sessions[index];
+        current->PinActiveRegion(kFieldOwner, true);
+        EXPECT_FALSE(Foliage::FarmingActionsAllowed(current->GetRegistry(), plants[index]));
+        ASSERT_NO_FATAL_FAILURE(CompleteFoliageTick(*current));
+        ASSERT_FALSE(current->GetRegionSchedulerFault());
+    }
+    EXPECT_GT(registry.get<C::SoilFeederComponent>(plants[0]).absorbed, 0u);
+    EXPECT_EQ(session.GetFieldPages().serialize(), control.GetFieldPages().serialize());
+    EXPECT_EQ(FoliageSnapshot(registry), FoliageSnapshot(control.GetRegistry()));
+    EXPECT_TRUE(Foliage::FarmingActionsAllowed(registry, plants[0]));
+    EXPECT_TRUE(farming.Harvest(registry, plants[0]).harvestable);
+    EXPECT_EQ(registry.valid(plants[0]), perennial);
+}
+
+TEST(GameSessionHeadlessWorldTest, FrozenFoliageSourcesWaitForActivationBeforeFarming) {
+    for (const bool perennial : {false, true}) {
+        ASSERT_NO_FATAL_FAILURE(CheckFrozenFoliageHarvestSources(perennial));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, FarmingHistoryGateKeepsCurrentAndUntrackedOwnersEditable) {
+    const RegionKey pending{2, 3}, current{4, 5}, untracked{6, 7}, frozen{8, 9};
+    const auto ledger = ScheduledFieldLedger(1, {{frozen, RegionState::Frozen}});
+    const std::map<RegionKey, std::uint64_t> deadlines{{pending, 32}, {current, 33}};
+    entt::registry registry;
+    auto& gate = registry.ctx().emplace<Foliage::FarmingReplayGate>(
+        Foliage::FarmingReplayGate{.blocked = false,
+                                   .inputs_pending = true,
+                                   .owner_deadlines = &deadlines,
+                                   .current_deadline = 33,
+                                   .owner_ledger = &ledger});
+    EXPECT_TRUE(Foliage::FarmingActionsAllowed(registry));
+    EXPECT_FALSE(Foliage::FarmingActionsAllowed(registry, pending));
+    EXPECT_TRUE(Foliage::FarmingActionsAllowed(registry, current));
+    EXPECT_TRUE(Foliage::FarmingActionsAllowed(registry, untracked));
+    EXPECT_FALSE(Foliage::FarmingActionsAllowed(registry, frozen));
+    const Luminumbra::Vec3 pending_position{2 * 512 + 8, 0, 3 * 512 + 8};
+    const Luminumbra::Vec3 current_position{4 * 512 + 8, 0, 5 * 512 + 8};
+    const Luminumbra::Vec3 frozen_position{8 * 512 + 8, 0, 9 * 512 + 8};
+    const Luminumbra::Vec3 invalid{std::numeric_limits<float>::infinity(), 0, 0};
+    const auto plant = ClockTestPlant(registry, pending_position);
+    registry.get<C::PlantGrowthComponent>(plant).stage =
+        static_cast<std::uint8_t>(C::PlantStage::Fruiting);
+    const auto incomplete = registry.create();
+    EXPECT_FALSE(Foliage::FarmingActionsAllowed(registry, plant));
+    EXPECT_FALSE(Foliage::FarmingActionsAllowed(registry, incomplete));
+    EXPECT_FALSE(Foliage::FarmingActionsAllowed(registry, entt::entity{12345}));
+    EXPECT_FALSE(Foliage::FarmingActionsAllowed(registry, static_cast<entt::entity>(entt::null)));
+    EXPECT_FALSE(Foliage::FarmingActionsAllowed(registry, invalid));
+    Foliage::FarmingController farming;
+    auto rng = luminumbra::core::DeterministicRng::seeded(1, 2, 3);
+    auto expected_rng = rng;
+    ActiveRegionLedger allocator;
+    const auto allocation = allocator.encode();
+    const auto snapshot = FoliageSnapshot(registry);
+    const auto entities = registry.storage<entt::entity>().size();
+    const Foliage::SpeciesTemplate species;
+    constexpr entt::entity kNullEntity = entt::null;
+    EXPECT_EQ(Foliage::PlantSeed(registry, pending_position, {}, 0, 1), kNullEntity);
+    EXPECT_EQ(Foliage::PlantSeed(registry, pending_position, {}, 0, 1, allocator), kNullEntity);
+    EXPECT_EQ(Foliage::MakePlantFromSpecies(registry, pending_position, species, rng, 1),
+              kNullEntity);
+    EXPECT_EQ(
+        Foliage::MakePlantFromSpecies(registry, pending_position, species, rng, 1, &allocator),
+        kNullEntity);
+    EXPECT_EQ(farming.Seed(registry, pending_position, species, rng, 1), kNullEntity);
+    EXPECT_EQ(farming.Seed(registry, pending_position, species, rng, 1, allocator), kNullEntity);
+    EXPECT_EQ(Foliage::PlantSeed(registry, invalid, {}, 0, 1), kNullEntity);
+    EXPECT_EQ(Foliage::PlantSeed(registry, frozen_position, {}, 0, 1), kNullEntity);
+    EXPECT_FALSE(farming.Water(registry, plant));
+    EXPECT_FALSE(farming.Fertilize(registry, plant));
+    ASSERT_FALSE(farming.Harvest(registry, plant).harvestable);
+    EXPECT_EQ(FoliageSnapshot(registry), snapshot);
+    EXPECT_EQ(registry.storage<entt::entity>().size(), entities);
+    EXPECT_EQ(allocator.encode(), allocation);
+    EXPECT_EQ(rng.next_u64(), expected_rng.next_u64());
+    EXPECT_EQ(farming.seeds, 5);
+    EXPECT_EQ(farming.harvests, 0);
+    registry.emplace<C::PlantRegionComponent>(
+        plant, std::uint64_t{1}, pending.x, pending.z, std::uint64_t{0});
+    registry.get<C::TransformComponent>(plant).position = current_position;
+    EXPECT_FALSE(Foliage::FarmingActionsAllowed(registry, plant));
+    registry.get<C::PlantRegionComponent>(plant).owner_x = current.x;
+    registry.get<C::PlantRegionComponent>(plant).owner_z = current.z;
+    EXPECT_TRUE(Foliage::FarmingActionsAllowed(registry, plant));
+    EXPECT_TRUE(farming.Water(registry, plant));
+    EXPECT_TRUE(farming.Fertilize(registry, plant));
+    EXPECT_TRUE(farming.Harvest(registry, plant).harvestable);
+    EXPECT_FALSE(registry.valid(plant));
+    EXPECT_NE(Foliage::PlantSeed(registry, current_position, {}, 0, 1), kNullEntity);
+    gate.owner_deadlines = nullptr;
+    EXPECT_FALSE(Foliage::FarmingActionsAllowed(registry, current_position));
+    gate.inputs_pending = false;
+    EXPECT_TRUE(Foliage::FarmingActionsAllowed(registry, pending_position));
+    EXPECT_FALSE(Foliage::FarmingActionsAllowed(registry, frozen_position));
+    gate.owner_ledger = nullptr;
+    EXPECT_TRUE(Foliage::FarmingActionsAllowed(registry, frozen_position));
+    gate.blocked = true;
+    EXPECT_FALSE(Foliage::FarmingActionsAllowed(registry));
+    EXPECT_FALSE(Foliage::FarmingActionsAllowed(registry, current));
+    EXPECT_FALSE(Foliage::FarmingActionsAllowed(registry, current_position));
+    EXPECT_FALSE(Foliage::FarmingActionsAllowed(registry, incomplete));
+    registry.ctx().erase<Foliage::FarmingReplayGate>();
+    EXPECT_TRUE(Foliage::FarmingActionsAllowed(registry, pending_position));
+}
+
+TEST(GameSessionHeadlessWorldTest, StaleFoliageInputsRefuseCreationBeforeTheNextDuePhase) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    ASSERT_NO_FATAL_FAILURE(BuildOrdinaryFoliageGap(session, root, jobs, 0));
+    auto& registry = session.GetRegistry();
+    const auto plant = ClockTestPlant(registry, {8, 0, 8});
+    registry.get<C::PlantGrowthComponent>(plant).stage =
+        static_cast<std::uint8_t>(C::PlantStage::Fruiting);
+    const auto fields = session.GetFieldPages().serialize();
+    const auto plants = FoliageSnapshot(registry);
+    const auto ledger = session.GetActiveRegionLedger().encode();
+    const auto entities = registry.storage<entt::entity>().size();
+    auto allocator = session.GetActiveRegionLedger();
+    const auto allocator_bytes = allocator.encode();
+    auto rng = luminumbra::core::DeterministicRng::seeded(1, 2, 3);
+    auto expected_rng = rng;
+    const Foliage::SpeciesTemplate species;
+    const Luminumbra::Vec3 position{8, 0, 8};
+    constexpr entt::entity kNullEntity = entt::null;
+    Foliage::FarmingController farming;
+    EXPECT_FALSE(Foliage::FarmingActionsAllowed(registry));
+    EXPECT_EQ(Foliage::PlantSeed(registry, position, {}, 0, 32), kNullEntity);
+    EXPECT_EQ(Foliage::PlantSeed(registry, position, {}, 0, 32, allocator), kNullEntity);
+    EXPECT_EQ(Foliage::MakePlantFromSpecies(registry, position, species, rng, 32), kNullEntity);
+    EXPECT_EQ(Foliage::MakePlantFromSpecies(registry, position, species, rng, 32, &allocator),
+              kNullEntity);
+    EXPECT_EQ(farming.Seed(registry, position, species, rng, 32), kNullEntity);
+    EXPECT_EQ(farming.Seed(registry, position, species, rng, 32, allocator), kNullEntity);
+    for (const auto target : {plant, entt::entity{12345}, kNullEntity}) {
+        EXPECT_FALSE(farming.Water(registry, target));
+        EXPECT_FALSE(farming.Fertilize(registry, target));
+        EXPECT_FALSE(farming.Harvest(registry, target).harvestable);
+    }
+    EXPECT_EQ(FoliageSnapshot(registry), plants);
+    Foliage::FoliageRegistryStage candidate;
+    candidate.Begin(registry, session.GetActiveRegionLedger().next_persistent_id());
+    EXPECT_NE(Foliage::PlantSeed(candidate.registry(), position, {}, 0, 32), kNullEntity);
+    EXPECT_EQ(farming.seeds, 5);
+    EXPECT_EQ(rng.next_u64(), expected_rng.next_u64());
+    EXPECT_EQ(allocator.encode(), allocator_bytes);
+    EXPECT_EQ(registry.storage<entt::entity>().size(), entities);
+    EXPECT_EQ(session.GetFieldPages().serialize(), fields);
+    EXPECT_EQ(session.GetActiveRegionLedger().encode(), ledger);
+    // A stale input does not make tick 33 due. Historical preparation starts only
+    // after tick 34 has scheduled this owner and deferred its publication.
+    TickOnce(session);
+    EXPECT_TRUE(session.GetRegionSchedule().due.empty());
+    EXPECT_EQ(session.GetFoliageReplayRemainingSteps(), 0u);
+    TickOnce(session);
+    EXPECT_FALSE(Foliage::FarmingActionsAllowed(registry));
+    ASSERT_NO_FATAL_FAILURE(CompleteFoliageTick(session));
+    EXPECT_TRUE(Foliage::FarmingActionsAllowed(registry));
+    EXPECT_TRUE(farming.Water(registry, plant));
+    EXPECT_TRUE(farming.Fertilize(registry, plant));
+    EXPECT_NE(farming.Seed(registry, position, species, rng, 35), kNullEntity);
+    EXPECT_EQ(farming.seeds, 4);
+    EXPECT_TRUE(farming.Harvest(registry, plant).harvestable);
+}
+
+TEST(GameSessionHeadlessWorldTest, PendingFoliagePersistenceRefusesBeforeMutatingLiveOrDiskState) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    ASSERT_NO_FATAL_FAILURE(BuildOrdinaryFoliageGap(session, root, jobs, 0));
+    const auto input = root.path() / "scheduled-field-input";
+    const auto prepared =
+        GameSession::PrepareWorldState(session.CaptureWorldPreparationOptions(), input);
+    ASSERT_TRUE(GameSession::WorldPreparationError(*prepared).empty());
+    for (unsigned phase = 0; phase < 2; ++phase) {
+        const auto fields = session.GetFieldPages().serialize();
+        const auto ledger = session.GetActiveRegionLedger().encode();
+        const auto revision = session.WorldRevision();
+        const auto failures = session.GetPersistenceStatus().failures;
+        const auto canonical = SavedPresetTestDiskBytes(session.GetWorldSaveDir());
+        const auto target = root.path() / "refused-foliage-save";
+        Luminumbra::world::WorldStateSaveReport report{1, 2, 3, true};
+        EXPECT_FALSE(session.SaveWorldState(&report));
+        EXPECT_EQ(report.chunks_total, 1u);
+        EXPECT_EQ(report.chunks_dirty, 2u);
+        EXPECT_EQ(report.chunks_saved, 3u);
+        EXPECT_TRUE(report.saved);
+        EXPECT_FALSE(session.SaveWorld());
+        EXPECT_FALSE(session.SaveWorldState());
+        EXPECT_FALSE(session.SaveWorldStateTo(target));
+        EXPECT_FALSE(fs::exists(target));
+        EXPECT_FALSE(session.LoadWorldStateFrom(input));
+        EXPECT_FALSE(session.AdoptPreparedWorld(prepared));
+        EXPECT_FALSE(session.LoadWorld(session.GetMetadata().worldId));
+        EXPECT_FALSE(session.LoadWorldFrom(session.GetMetadata().worldId, root.path()));
+        EXPECT_EQ(session.GetFieldPages().serialize(), fields);
+        EXPECT_EQ(session.GetActiveRegionLedger().encode(), ledger);
+        EXPECT_EQ(session.WorldRevision(), revision);
+        EXPECT_EQ(session.GetPersistenceStatus().failures, failures);
+        EXPECT_EQ(SavedPresetTestDiskBytes(session.GetWorldSaveDir()), canonical);
+        if (phase == 0) {
+            TickOnce(session);
+            TickOnce(session);
+            ASSERT_FALSE(session.GetRegionSchedulerFault());
+        }
+    }
+    ASSERT_NO_FATAL_FAILURE(CompleteFoliageTick(session));
+    EXPECT_TRUE(session.AdoptPreparedWorld(prepared));
+}
+
+TEST(GameSessionHeadlessWorldTest, FoliageReplayVisitBudgetExcludesDormantPages) {
+    for (const unsigned dormant : {0u, 64u}) {
+        const HeadlessRoot root;
+        JobSystem jobs;
+        jobs.startup(1);
+        GameSession session;
+        ASSERT_NO_FATAL_FAILURE(BuildOrdinaryFoliageGap(session, root, jobs, dormant));
+        const auto fields = session.GetFieldPages().serialize();
+        TickOnce(session);
+        TickOnce(session);
+        EXPECT_EQ(session.GetFieldPages().serialize(), fields);
+        EXPECT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 0u);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        EXPECT_EQ(session.GetFoliageReplayCellVisits(), 32u);
+        EXPECT_EQ(session.GetFoliageReplayRemainingSteps(), 3u);
+        EXPECT_EQ(session.GetFoliageReplayPreparationPages(), 2u);
+        EXPECT_EQ(session.GetFieldPages().serialize(), fields);
+        TickOnce(session);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        EXPECT_EQ(session.GetFoliageReplayCellVisits(), 35u);
+        EXPECT_EQ(session.GetFoliageRegistryPublications(), 1u);
+    }
+}
+} // namespace
+
+namespace {
+void CheckPlantOnlyHistoryLoad(
+    bool persistent, unsigned gap, bool frozen, bool empty, bool known_owner = true) {
+    SCOPED_TRACE(persistent);
+    SCOPED_TRACE(gap);
+    SCOPED_TRACE(frozen);
+    SCOPED_TRACE(empty);
+    SCOPED_TRACE(known_owner);
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    EnableSnapshotSession(session, root, jobs);
+    ASSERT_TRUE(session.CreateWorld("Plant history admission", "1337", "default"));
+    const auto owner = LongCadenceOwner();
+    const Luminumbra::Vec3 position{
+        static_cast<float>(owner.x * 512 + 8), 0, static_cast<float>(owner.z * 512 + 8)};
+    const WorldClock clock(34);
+    const std::map<RegionKey, RegionState> owners =
+        known_owner ? std::map<RegionKey, RegionState>{{owner,
+                                                        frozen ? RegionState::Frozen
+                                                               : RegionState::Reduced}}
+                    : std::map<RegionKey, RegionState>{};
+    auto ledger = ScheduledFieldLedger(
+        clock.tick(), owners, {std::numeric_limits<std::uint64_t>::max(), 10000, 6});
+    const auto prior_tick = clock.tick() - gap;
+    if (known_owner) {
+        auto& record =
+            const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at(owner);
+        record.first_active = 0;
+        record.last_ticked = prior_tick;
+        if (frozen) {
+            record.frozen_at = prior_tick + 1;
+        }
+    }
+    entt::registry plants;
+    if (!empty) {
+        const auto plant = ClockTestPlant(plants, position);
+        plants.get<C::PlantGrowthComponent>(plant).last_tick = prior_tick;
+        if (persistent) {
+            std::uint64_t id = 0;
+            ASSERT_TRUE(ledger.allocate_persistent_id(id));
+            plants.emplace<C::PlantRegionComponent>(plant, id, owner.x, owner.z, prior_tick);
+        }
+    }
+    const auto input = root.path() / "plant-only-history";
+    fs::create_directories(input);
+    nlohmann::json metadata = {{"container_version", P::WorldSaveService::kContainerVersion}};
+    clock.write_metadata(metadata);
+    auto snapshot = Foliage::BuildPlantEntitySnapshot(plants, persistent);
+    if (!persistent) {
+        if (!empty) {
+            snapshot.entities.front().components.push_back(
+                {"FuturePlantMetadata", {{"version", 1}}});
+        }
+        snapshot.entities.push_back(
+            {.entity_id = 1000, .name = "future-entity", .components = {}, .legacy_entity_id = 0});
+        Luminumbra::Ecs::SortEntityRegistrySnapshot(snapshot);
+    }
+    {
+        P::WorldSaveService::SaveFactsScope facts(input);
+        P::SaveTransaction transaction(
+            input, clock.tick(), {}, &P::WorldSaveService::member_digest);
+        std::vector<std::string> errors;
+        ASSERT_TRUE(transaction.begin(&errors));
+        ASSERT_TRUE(P::WorldSaveService::save_metadata_and_active_regions(
+            metadata.dump(), ledger, input, &errors));
+        ASSERT_TRUE(P::WorldSaveService::save_plant_entities(snapshot, input, &errors));
+        ASSERT_TRUE(P::WorldSaveService::finalize_indexed_envelope(input, &errors));
+        ASSERT_TRUE(transaction.commit(&errors));
+    }
+    const auto fields = session.GetFieldPages().serialize();
+    const auto live_ledger = session.GetActiveRegionLedger().encode();
+    const auto live_clock = session.GetWorldClock().canonical_bytes();
+    const auto revision = session.WorldRevision();
+    const auto disk = SavedPresetTestDiskBytes(input);
+    const auto prepared =
+        GameSession::PrepareWorldState(session.CaptureWorldPreparationOptions(), input);
+    const bool refused =
+        known_owner && !empty && !frozen && gap >= Foliage::FoliageWindowReplay::kStepBudget;
+    if (refused) {
+        EXPECT_EQ(GameSession::WorldPreparationError(*prepared),
+                  "Pending foliage history cannot be loaded.");
+        EXPECT_FALSE(session.LoadWorldStateFrom(input));
+        EXPECT_EQ(session.GetWorldOpenError(), "Pending foliage history cannot be loaded.");
+        EXPECT_FALSE(session.AdoptPreparedWorld(prepared));
+        EXPECT_EQ(session.GetFieldPages().serialize(), fields);
+        EXPECT_EQ(session.GetActiveRegionLedger().encode(), live_ledger);
+        EXPECT_EQ(session.GetWorldClock().canonical_bytes(), live_clock);
+        EXPECT_EQ(session.WorldRevision(), revision);
+        EXPECT_TRUE(session.SaveWorld());
+    } else {
+        ASSERT_TRUE(GameSession::WorldPreparationError(*prepared).empty());
+        EXPECT_TRUE(session.AdoptPreparedWorld(prepared));
+        EXPECT_EQ(session.GetWorldClock().tick(), clock.tick());
+        EXPECT_TRUE(session.GetFieldPages().soil().empty());
+        EXPECT_TRUE(session.GetFieldPages().irrigation().empty());
+        EXPECT_EQ(Foliage::FarmingActionsAllowed(session.GetRegistry(), position),
+                  !known_owner || (!frozen && (empty || gap == 0)));
+    }
+    EXPECT_EQ(SavedPresetTestDiskBytes(input), disk);
+}
+
+TEST(GameSessionHeadlessWorldTest, PlantOnlyOwnersRefuseUnreconstructableHistoryBeforeAdoption) {
+    for (const bool persistent : {false, true}) {
+        for (const unsigned gap : {0u, 1u, 31u, 32u, 33u}) {
+            ASSERT_NO_FATAL_FAILURE(CheckPlantOnlyHistoryLoad(persistent, gap, false, false));
+        }
+        ASSERT_NO_FATAL_FAILURE(CheckPlantOnlyHistoryLoad(persistent, 33, true, false));
+        ASSERT_NO_FATAL_FAILURE(CheckPlantOnlyHistoryLoad(persistent, 33, false, true));
+        ASSERT_NO_FATAL_FAILURE(CheckPlantOnlyHistoryLoad(persistent, 33, true, true));
+    }
+    ASSERT_NO_FATAL_FAILURE(CheckPlantOnlyHistoryLoad(false, 33, false, false, false));
+}
+
+TEST(GameSessionHeadlessWorldTest, PendingFoliageLoadRefusesBeforeAdoption) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession source, session;
+    ASSERT_NO_FATAL_FAILURE(BuildOrdinaryFoliageGap(source, root, jobs, 0));
+    const auto input = root.path() / "pending-foliage-input";
+    ASSERT_NO_FATAL_FAILURE(WriteSessionFieldInput(source, input, source.GetFieldPages()));
+    EnableSnapshotSession(session, root, jobs);
+    ASSERT_TRUE(session.CreateWorld("Foliage load refusal", "1337", "default"));
+    const auto fields = session.GetFieldPages().serialize();
+    const auto ledger = session.GetActiveRegionLedger().encode();
+    const auto clock = session.GetWorldClock().canonical_bytes();
+    const auto revision = session.WorldRevision();
+    const auto disk = SavedPresetTestDiskBytes(input);
+    EXPECT_FALSE(session.LoadWorldStateFrom(input));
+    EXPECT_EQ(session.GetWorldOpenError(), "Pending foliage history cannot be loaded.");
+    const auto prepared =
+        GameSession::PrepareWorldState(session.CaptureWorldPreparationOptions(), input);
+    EXPECT_EQ(GameSession::WorldPreparationError(*prepared),
+              "Pending foliage history cannot be loaded.");
+    EXPECT_FALSE(session.AdoptPreparedWorld(prepared));
+    EXPECT_EQ(session.GetFieldPages().serialize(), fields);
+    EXPECT_EQ(session.GetActiveRegionLedger().encode(), ledger);
+    EXPECT_EQ(session.GetWorldClock().canonical_bytes(), clock);
+    EXPECT_EQ(session.WorldRevision(), revision);
+    EXPECT_EQ(SavedPresetTestDiskBytes(input), disk);
+    EXPECT_TRUE(session.SaveWorld());
+}
+} // namespace

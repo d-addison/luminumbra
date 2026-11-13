@@ -489,6 +489,7 @@ ActiveRegionLedger::schedule(const WorldClock& clock,
     result.rejected = {};
     result.due.clear();
     result.transitions.clear();
+    result.evicted.clear();
     scratch.added.clear();
     auto& visits = scratch.visits;
     visits.clear();
@@ -543,7 +544,9 @@ ActiveRegionLedger::schedule(const WorldClock& clock,
     auto& rows = scratch.rows;
     rows.clear();
     rows.reserve(m_records.size() + scratch.added.size());
+    // Publication swaps these buffers; retain both capacities for warm calls.
     scratch.evictions.reserve(rows.capacity());
+    result.evicted.reserve(rows.capacity());
     auto existing = m_records.begin();
     auto added = scratch.added.begin();
     auto next_visit = visits.begin();
@@ -666,7 +669,11 @@ ActiveRegionLedger::schedule(const WorldClock& clock,
             if (r.state == RegionState::Frozen) {
                 r.frozen_digest = frozen_digest;
                 m_legacyFrozenDigests.erase(key);
-                r.frozen_at = clock.tick();
+                // An unpublished resume still owns its original history. A new
+                // freeze must not discard it before foliage commits its stamp.
+                if (r.frozen_at == 0 || r.last_ticked >= r.frozen_at) {
+                    r.frozen_at = clock.tick();
+                }
             }
             r.over_hold = r.under_hold = 0;
             r.cadence_shift = r.state == RegionState::Active ? 0 : m_config.reduced_shift;
@@ -720,6 +727,7 @@ ActiveRegionLedger::schedule(const WorldClock& clock,
         m_records.erase(record);
     }
     std::erase_if(result.due, [this](const RegionKey& key) { return !m_records.contains(key); });
+    result.evicted.swap(scratch.evictions);
     result.ledger_records = m_records.size();
     return result;
 }
