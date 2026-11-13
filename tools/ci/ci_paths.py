@@ -23,6 +23,7 @@ PYTHON_TESTS = (
     "tools/ci/test_local_rmlui_recipe.py",
     "tools/gates/test_station_discovery.py",
     "tools/gates/test_common_library_isa.py",
+    "tools/gates/test_visual_lint.py",
     "test/tools/test_runtime_config_contract.py",
     "test/tools/test_graphics_ui_contract.py",
     "test/tools/test_frame_pacing_contract.py",
@@ -86,6 +87,7 @@ PYTHON_TESTS = (
 )
 PYTHON_MODULES = {
     "tools/gates/shader-scenes.py",
+    "tools/gates/visual_lint.py",
     "tools/regenerate_region_fixtures.py",
 
     "tools/ci/compile_shaders.py",
