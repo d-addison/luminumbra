@@ -98,8 +98,11 @@ MeasureImpostorCoverage(std::span<const std::uint8_t> rgba, int width, int heigh
         total += covered;
     }
     result.coverage = static_cast<double>(total) / static_cast<double>(bytes / 4u);
-    result.state = result.coverage <= kImpostorEmptyCoverage    ? ImpostorCoverageState::Empty
-                   : result.coverage >= kImpostorOpaqueCoverage ? ImpostorCoverageState::Opaque
+    // Every view cell must pass on its own: a single empty view makes the
+    // impostor vanish from that angle and a single opaque view draws a card,
+    // even when the whole-atlas average stays between the thresholds.
+    result.state = result.min_cell <= kImpostorEmptyCoverage    ? ImpostorCoverageState::Empty
+                   : result.max_cell >= kImpostorOpaqueCoverage ? ImpostorCoverageState::Opaque
                                                                 : ImpostorCoverageState::Accepted;
     return result;
 }

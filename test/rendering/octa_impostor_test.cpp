@@ -184,7 +184,9 @@ TEST(ImpostorCoverage, CellsHaveIndependentCountsAndExtrema) {
         rgba[pixel * 4u + 3u] = 255;
     }
     const auto result = MeasureImpostorCoverage(rgba, 4, 4, 2);
-    ASSERT_TRUE(result.usable());
+    // Whole-atlas coverage is 0.5, but an empty view cell still refuses.
+    EXPECT_EQ(result.state, ImpostorCoverageState::Empty);
+    EXPECT_TRUE(result.refused());
     EXPECT_DOUBLE_EQ(result.coverage, 0.5);
     EXPECT_DOUBLE_EQ(result.cells[0], 0.0);
     EXPECT_DOUBLE_EQ(result.cells[1], 0.5);
@@ -192,6 +194,31 @@ TEST(ImpostorCoverage, CellsHaveIndependentCountsAndExtrema) {
     EXPECT_DOUBLE_EQ(result.cells[3], 1.0);
     EXPECT_DOUBLE_EQ(result.min_cell, 0.0);
     EXPECT_DOUBLE_EQ(result.max_cell, 1.0);
+}
+
+TEST(ImpostorCoverage, OneEmptyOrOpaqueViewCellRefusesAnAcceptableAverage) {
+    // 8x8 atlas, 2x2 grid of 4x4 views. Three views hold a 2x3 silhouette;
+    // the fourth is either fully empty or fully opaque.
+    for (const bool opaque_view : {false, true}) {
+        auto rgba = CoveragePixels(64, 0);
+        for (std::size_t y = 0; y < 8; ++y) {
+            for (std::size_t x = 0; x < 8; ++x) {
+                const bool last_view = y >= 4u && x >= 4u;
+                const bool silhouette = y % 4u < 3u && (x % 4u == 1u || x % 4u == 2u);
+                if (last_view ? opaque_view : silhouette) {
+                    rgba[(y * 8u + x) * 4u + 3u] = 255;
+                }
+            }
+        }
+        const auto result = MeasureImpostorCoverage(rgba, 8, 8, 2);
+        EXPECT_GT(result.coverage, kImpostorEmptyCoverage);
+        EXPECT_LT(result.coverage, kImpostorOpaqueCoverage);
+        EXPECT_EQ(result.state,
+                  opaque_view ? ImpostorCoverageState::Opaque : ImpostorCoverageState::Empty);
+        EXPECT_TRUE(result.refused());
+        EXPECT_FALSE(result.usable());
+        EXPECT_DOUBLE_EQ(result.cells[3], opaque_view ? 1.0 : 0.0);
+    }
 }
 
 TEST(ImpostorCoverage, InclusiveThresholdBoundariesAndAdjacentTexels) {
@@ -248,9 +275,16 @@ TEST(ImpostorCoverage, RejectsInvalidDimensionsAndPartialOrExcessData) {
     }
     EXPECT_EQ(ImpostorRgbaBytes(kImpostorMaxAtlasSide, kImpostorMaxAtlasSide, kImpostorMaxGrid),
               268435456u);
-    const auto maximal_grid = MeasureImpostorCoverage(CoveragePixels(256, 128), 16, 16, 16);
+    // 32x32 atlas at the maximal 16x16 grid: every 2x2 view keeps two covered texels.
+    auto maximal_rgba = CoveragePixels(1024, 0);
+    for (std::size_t pixel = 0; pixel < 1024u; pixel += 2u) {
+        maximal_rgba[pixel * 4u + 3u] = 255;
+    }
+    const auto maximal_grid = MeasureImpostorCoverage(maximal_rgba, 32, 32, 16);
     EXPECT_TRUE(maximal_grid.usable());
     EXPECT_EQ(maximal_grid.cell_count, 256u);
+    EXPECT_DOUBLE_EQ(maximal_grid.min_cell, 0.5);
+    EXPECT_DOUBLE_EQ(maximal_grid.max_cell, 0.5);
 }
 
 TEST(ImpostorCoverage, RefusedAtlasCannotDrawAndRetainsMeshLod) {
