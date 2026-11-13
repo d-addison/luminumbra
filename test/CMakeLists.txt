@@ -2744,6 +2744,35 @@ add_test(NAME RenderRunnerEvidencePython COMMAND "${Python3_EXECUTABLE}" ${CMAKE
 set_tests_properties(RenderRunnerEvidencePython PROPERTIES TIMEOUT 60)
 add_test(NAME RenderSceneMatrixPython COMMAND "${Python3_EXECUTABLE}" -B ${CMAKE_SOURCE_DIR}/tools/rendering/acceptance/test_scene_matrix.py)
 
+# Opt-in advisory scenes do not enter required native test plans.
+option(LUMINUMBRA_SHADER_SCENES "Register software shader reference scenes" OFF)
+if(LUMINUMBRA_SHADER_SCENES)
+    add_executable(shader_scene_render_test rendering/shader_scene_render_test.cpp)
+    file(READ "${CMAKE_SOURCE_DIR}/test/rendering/shader_scene_render_test.cpp" _shader_scene_source)
+    string(REPLACE "\r\n" "\n" _shader_scene_source "${_shader_scene_source}")
+    string(SHA256 _shader_scene_hash "${_shader_scene_source}")
+    target_compile_definitions(shader_scene_render_test PRIVATE
+        LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+        LUMINUMBRA_SHADER_SCENE_INPUT_HASH="${_shader_scene_hash}")
+    target_link_libraries(shader_scene_render_test PRIVATE gtest_main glfw glad)
+    if(WIN32)
+        target_link_libraries(shader_scene_render_test PRIVATE opengl32)
+    elseif(APPLE)
+        target_link_libraries(shader_scene_render_test PRIVATE ${OPENGL_LIBRARIES})
+    else()
+        target_link_libraries(shader_scene_render_test PRIVATE OpenGL::GL)
+    endif()
+    luminumbra_configure_first_party_target(shader_scene_render_test)
+    add_test(NAME ShaderSceneSoftwareGl COMMAND "${Python3_EXECUTABLE}" -I -B
+        "${CMAKE_SOURCE_DIR}/tools/static_preview/run_software_gl.py"
+        --binary "$<TARGET_FILE:shader_scene_render_test>" --profile shader-scenes
+        --output "${CMAKE_BINARY_DIR}/shader-scene-capture")
+    set_tests_properties(ShaderSceneSoftwareGl PROPERTIES TIMEOUT 180
+        RESOURCE_LOCK luminumbra_gl_context)
+endif()
+add_test(NAME ShaderScenesPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/tools/gates/test_shader_scenes.py")
+
 # Ordinary test lanes need no downloaded game art. Generate valid synthetic
 # meshes/materials and their manifest solely for the isolated runner roots.
 add_test(NAME RenderBenchmarkAssets COMMAND "${Python3_EXECUTABLE}"

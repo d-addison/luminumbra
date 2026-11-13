@@ -35,12 +35,15 @@ EXPECTED_CASES = frozenset({
 })
 
 
-def validate_report(root):
+SHADER_CASES = frozenset({("ShaderScene", "MaterialLinearReferenceAndOcclusionBlend")})
+
+
+def validate_report(root, expected=EXPECTED_CASES):
     """Require the exact successful GoogleTest inventory before claiming a render pass."""
     cases = root.findall('.//testcase')
-    if (len(cases) != len(EXPECTED_CASES)
-            or {(x.get('classname'), x.get('name')) for x in cases} != EXPECTED_CASES):
-        raise RuntimeError('Expected fourteen production rendering tests and one renderer-profile test')
+    if (len(cases) != len(expected)
+            or {(x.get('classname'), x.get('name')) for x in cases} != expected):
+        raise RuntimeError(f'Expected exact rendering inventory: {sorted(expected)}')
     if any(x.find('skipped') is not None or x.find('failure') is not None or x.find('error') is not None or
            x.get('status') != 'run' or x.get('result') not in (None, 'completed') for x in cases):
         raise RuntimeError('Rendering tests contain a skipped, failed or unexecuted case')
@@ -51,6 +54,7 @@ def main():
     parser.add_argument('--binary', required=True)
     parser.add_argument('--xvfb', default='/usr/bin/Xvfb')
     parser.add_argument('--output')
+    parser.add_argument('--profile', choices=('static-preview', 'shader-scenes'), default='static-preview')
     args = parser.parse_args()
     output = Path(args.output) if args.output else Path(tempfile.mkdtemp(prefix='luminumbra-static-software-'))
     if args.output:
@@ -83,6 +87,8 @@ def main():
             if not display.isdigit():
                 raise RuntimeError('Invalid owned software display identity')
             env['DISPLAY'] = ':' + display
+            if args.profile == 'shader-scenes':
+                env['LUMINUMBRA_SHADER_SCENE_OUTPUT'] = str(output.resolve())
             result = subprocess.run([args.binary, '--gtest_output=xml:' + str(output / 'tests.xml')],
                                     env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                     timeout=180, check=False)
@@ -91,8 +97,9 @@ def main():
             if result.returncode:
                 raise RuntimeError(f'Production software rendering tests exited {result.returncode}')
             root = ET.parse(output / 'tests.xml').getroot()
-            validate_report(root)
-            print(f'Software GL: 14 actual llvmpipe cases and one profile test passed; artifacts: {output}')
+            expected = SHADER_CASES if args.profile == 'shader-scenes' else EXPECTED_CASES
+            validate_report(root, expected)
+            print(f'Software GL: {len(expected)} exact {args.profile} cases passed; artifacts: {output}')
     finally:
         if write_fd >= 0:
             os.close(write_fd)

@@ -13,6 +13,7 @@ import sys
 # Only reviewed, test-backed files may skip native builds. New files require
 # an explicit coverage decision; directory membership never grants an exemption.
 PYTHON_TESTS = (
+    "tools/gates/test_shader_scenes.py",
     "tools/ci/test_compile_shaders.py",
     "tools/ci/test_ui_layout_contract.py",
     "tools/ci/test_rmlui_source.py",
@@ -80,6 +81,7 @@ PYTHON_TESTS = (
     "tools/rendering/acceptance/test_scene_matrix.py",
 )
 PYTHON_MODULES = {
+    "tools/gates/shader-scenes.py",
     "tools/ci/compile_shaders.py",
     "tools/ci/rmlui_source.py",
     "tools/ci/check_acceptance_matrix.py",
@@ -159,6 +161,7 @@ CI_ENTRYPOINTS = (
     | {command[0] for command in PYTHON_SELF_CHECKS.values()}
     | {
         "tools/assets/acquire.py", "tools/blender/authoring/probes/run.py",
+        "tools/gates/shader-scenes.py",
         "tools/check_runtime_data_manifest.py", "tools/check_sdf_contract_doc.py",
         "tools/config_codegen.py", "tools/perf/capture_sim_budget.py",
         "tools/perf/check_sim_budgets.py", "tools/perf/fixture_hash.py",
@@ -304,6 +307,27 @@ def classify_performance(root: Path, event: str, base: str, head: str,
     return any(needs_server_perf(path) for path in paths)
 
 
+def needs_shader_scenes(path: str) -> bool:
+    return path.startswith(("res/shaders/", "src/luminumbra_client/rendering/",
+                            "test/rendering/", "tools/static_preview/", "tools/gates/shader-scenes",
+                            "tools/gates/test_shader_scenes", "tools/ci/compile_shaders",
+                            "tools/ci/test_compile_shaders", "tools/ci/shader_variants",
+                            "tools/ci/ci_paths", "tools/ci/test_ci_paths", ".github/workflows/")) or path in {
+                                ".gitattributes", "CMakeLists.txt", "test/CMakeLists.txt", "src/luminumbra_client/sources.cmake"}
+
+
+def classify_shader_scenes(root: Path, event: str, base: str, head: str) -> bool:
+    if event != "pull_request":
+        return True
+    # Unlike native routing, unknown classification is an error in this lane.
+    if not base or not head:
+        raise ValueError("missing shader-scene comparison revisions")
+    paths = changed_paths(root, base, head)
+    if not paths:
+        raise ValueError("empty shader-scene comparison diff")
+    return any(needs_shader_scenes(path) for path in paths)
+
+
 def python_test_commands(root: Path) -> list[tuple[str, ...]]:
     commands = [(test,) for test in PYTHON_TESTS]
     commands.extend(sorted(set(PYTHON_SELF_CHECKS.values())))
@@ -312,7 +336,7 @@ def python_test_commands(root: Path) -> list[tuple[str, ...]]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("classify", "classify-performance", "python-tests"))
+    parser.add_argument("mode", choices=("classify", "classify-performance", "classify-shader-scenes", "python-tests"))
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--event", default=os.environ.get("CI_EVENT", ""))
     parser.add_argument("--base", default=os.environ.get("CI_BASE_SHA", ""))
@@ -328,7 +352,14 @@ def main() -> int:
             print("Running:", " ".join(command), flush=True)
             subprocess.run([sys.executable, "-B", *command], cwd=root, check=True)
         return 0
-    if args.mode == "classify-performance":
+    if args.mode == "classify-shader-scenes":
+        try:
+            scenes = classify_shader_scenes(root, args.event, args.base, args.head)
+        except (OSError, ValueError, subprocess.CalledProcessError) as error:
+            print(f"Cannot classify shader scenes: {error}", file=sys.stderr)
+            return 1
+        output = f"needs_shader_scenes={str(scenes).lower()}\n"
+    elif args.mode == "classify-performance":
         performance = classify_performance(root, args.event, args.base, args.head,
                                           args.repository, args.head_repository, args.base_ref)
         output = f"needs_server_perf={str(performance).lower()}\n"
