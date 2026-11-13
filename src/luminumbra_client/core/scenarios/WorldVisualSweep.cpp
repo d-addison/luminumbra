@@ -494,7 +494,7 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
             auto composed =
                 ComposeLiveStrikes(std::span(&projected, 1), kMaxBoltSegmentPoints, margin);
             lstate.bolt_points_ndc = std::move(composed.points);
-            lstate.strike_ndc = projected.strike_ndc;
+            lstate.flashes = composed.flashes;
             lstate.ground_ndc = projected.strike_ndc;
             const bool ground_on_screen = !IsLiveBoltPenUp(projected.strike_ndc) &&
                                           std::abs(projected.strike_ndc.x) <= 1.0f &&

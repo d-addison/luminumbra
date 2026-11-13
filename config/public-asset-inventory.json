@@ -1667,6 +1667,13 @@
       "source": "Luminumbra authored worlds"
     },
     {
+      "bytes": 1807,
+      "license": "MIT",
+      "path": "worlds/atlas/presets/mountains_band_limited.json",
+      "sha256": "b027bb37db2baf7bffda18e0d48f58d8e144de96c2c61240d9d2defff9c08632",
+      "source": "Luminumbra authored worlds"
+    },
+    {
       "bytes": 1530,
       "license": "MIT",
       "path": "worlds/atlas/presets/temperate_forest.json",

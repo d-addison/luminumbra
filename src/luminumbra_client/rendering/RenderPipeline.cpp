@@ -364,7 +364,8 @@ bool RenderPipeline::startup(u32 screen_width,
             g.tileResolution = 384;
             const ImpostorAtlasTextures ia =
                 BakeTreeImpostorAtlasToTextures(m_root_path.string(), *this, g);
-            if (ia.ok) {
+            m_treeImpostorCoverage = ia.alpha_coverage;
+            if (ia.drawable()) {
                 m_treeImpostorAlbedo = ia.albedoTex;
                 m_treeImpostorNormal = ia.normalTex;
                 m_treeImpostorGrid = ia.grid;
@@ -378,7 +379,7 @@ bool RenderPipeline::startup(u32 screen_width,
                     ia.grid,
                     g.tileResolution,
                     ia.radius);
-            } else {
+            } else if (!ia.alpha_coverage.refused()) {
                 LUMINUMBRA_CORE_WARN("Tree impostor bake failed: {}", ia.error);
             }
         }
@@ -4239,6 +4240,8 @@ RenderContext RenderPipeline::make_taau_context() {
     ctx.lit_scene = m_render_registry.adopt_fbo("lit_scene", lfbo.fbo_id);
     ctx.motion_vectors = m_render_registry.adopt_texture(
         "motion_vectors", m_gbuffer_pass->gbuffer().motion_vector_texture);
+    ctx.gbuffer_depth =
+        m_render_registry.adopt_texture("gbuffer_depth", m_gbuffer_pass->gbuffer().depth_texture);
     return ctx;
 }
 
@@ -4351,6 +4354,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_staticModelTextures.clear();
     m_staticModelNextLayer = 0;
     m_treeImpostorsEnabled = false;
+    m_treeImpostorCoverage = {};
     m_treeImpostorGrid = 0;
     m_treeImpostorAtlasSize = 0;
     m_treeImpostorRadius = 0.0f;
