@@ -1237,11 +1237,14 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         self.assertIn("CI_FULL_SELECTION: ${{ steps.route.outputs.full }}", fast)
         self.assertIn('if [ "$CI_FULL_SELECTION" != false ]', fast)
         native_steps = {value(step, "- name", 6): step for step in steps(fast)}
+        scene_or_native = ("(steps.route.outputs.native != 'false' || "
+                           "steps.shader-scenes.outputs.needs_shader_scenes == 'true')")
         for name in ("Install fast validation dependencies",
-                     "Configure GCC and Clang databases and generate headers",
-                     "Replay selected compiles and both tidy configurations"):
+                     "Configure GCC and Clang databases and generate headers"):
             step = native_steps[name]
-            self.assertEqual(value(step, "if", 8), "steps.route.outputs.native != 'false'")
+            self.assertEqual(value(step, "if", 8), scene_or_native)
+        replay = native_steps["Replay selected compiles and both tidy configurations"]
+        self.assertEqual(value(replay, "if", 8), "steps.route.outputs.native != 'false'")
         evidence = native_steps["Upload fast selection and replay evidence"]
         self.assertEqual(value(evidence, "if", 8), "always() && steps.route.outputs.native != 'false'")
         self.assertIn("uses: actions/upload-artifact@", evidence)
@@ -1301,7 +1304,9 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         named = {value(step, "- name", 6): step for step in steps(fast)}
         restore = named["Restore fast dependency sources"]
         self.assertIn("uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9", restore)
-        self.assertEqual(value(restore, "if", 8), "steps.route.outputs.native != 'false'")
+        scene_or_native = ("(steps.route.outputs.native != 'false' || "
+                           "steps.shader-scenes.outputs.needs_shader_scenes == 'true')")
+        self.assertEqual(value(restore, "if", 8), scene_or_native)
         self.assertNotIn("restore-keys:", restore)
         key = value(restore, "key", 10)
         self.assertTrue(key.startswith("fast-deps-v1-${{ runner.os }}-${{ hashFiles("))
@@ -1313,7 +1318,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         self.assertIn("steps.fast-deps.outputs.cache-hit != 'true'", value(populate, "if", 8))
         self.assertIn("offline_deps.py snapshot", value(populate, "run", 8))
         stage = named["Verify and stage isolated fast dependency sources"]
-        self.assertEqual(value(stage, "if", 8), "steps.route.outputs.native != 'false'")
+        self.assertEqual(value(stage, "if", 8), scene_or_native)
         script = value(stage, "run", 8)
         self.assertIn("offline_deps.py stage --build-local", script)
         self.assertIn("for compiler in gcc clang", script)
