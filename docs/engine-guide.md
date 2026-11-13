@@ -713,7 +713,7 @@ Legacy when Ladder cannot bind, with requested/effective mode and refusals in
 the debug HUD and diagnostics. See [Far world horizon v2](far-world-horizon-v2.md)
 for the config example and qualification gates.
 
-#### Saved-world session authority
+### Saved-world session authority
 
 Normal saved-world entry now binds the session producer without fixture binding.
 Each normal frame pumps source preparation before selecting its effective mode, then publishes same-frame
