@@ -226,4 +226,19 @@ TEST(PlantDisease, OrderIndependentSpread) {
     EXPECT_EQ(scenario(true), scenario(false));
 }
 
+TEST(PlantDisease, CandidateEmptyAndNonParticipantRostersAreNoOps) {
+    entt::registry registry;
+    const auto entity = registry.create();
+    registry.emplace<Comp::PlantTag>(entity);
+    registry.emplace<Comp::TransformComponent>(entity);
+    const auto stats = RunPlantDiseaseOnTick<true>(registry, 1);
+    EXPECT_EQ(stats.considered, 0);
+    EXPECT_EQ(stats.infected, 0);
+    EXPECT_EQ(stats.new_infections, 0);
+    EXPECT_EQ(stats.recovered, 0);
+    EXPECT_EQ(stats.died, 0);
+    registry.clear();
+    EXPECT_EQ(RunPlantDiseaseOnTick<true>(registry, 2).considered, 0);
+}
+
 } // namespace
