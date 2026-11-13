@@ -415,9 +415,13 @@ struct EligibilityPatch {
         evidence.unedited_halo = true;
     }
 
-    std::shared_ptr<const World::NearTerrainMeshSnapshot> Publish() {
+    std::shared_ptr<const World::NearTerrainMeshSnapshot> Publish(bool retain_densities = true) {
         auto densities = MakePatch().densities;
-        const auto snapshot = World::CompleteNearTerrainMeshSnapshot(evidence, densities);
+        chunks[13]->sdf_data = densities;
+        const auto snapshot =
+            World::CompleteNearTerrainMeshSnapshot(evidence, densities, retain_densities);
+        EXPECT_EQ(snapshot->densities.size(),
+                  retain_densities ? World::kNearTerrainDensityCount : 0u);
         chunks[13]->mesh_version.store(evidence.mesh_version);
         chunks[13]->near_terrain_snapshot.store(snapshot);
         return snapshot;
@@ -923,6 +927,265 @@ TEST(NearTerrainUpload, RefinedBytesAndDeadlineDeferWorkBeforeKernelExecution) {
     EXPECT_EQ(resumed.adopted, 1u);
     EXPECT_EQ(queue.size(), 0u);
     EXPECT_EQ(cache.builds(), 1u);
+}
+
+TEST(NearTerrainUpload, LiveEligibilityCopiesItsLatticeWithoutMovingAuthority) {
+    EligibilityPatch patch;
+    const auto evidence = patch.Publish(false);
+    ASSERT_TRUE(evidence->densities.empty());
+    ASSERT_TRUE(evidence->eligible(*patch.chunks[13], 7, 0));
+    const auto original = MakePatch().mesh;
+    const auto source = patch.chunks[13]->sdf_data;
+    auto payload = original;
+    NearTerrainRefinementCache cache;
+    EXPECT_EQ(Prepare(cache, patch, payload), NearTerrainUploadResult::Unrefined);
+    ExpectIdenticalPayload(payload, original);
+    cache.set_enabled(true);
+    EXPECT_EQ(Prepare(cache, patch, payload, 3.0), NearTerrainUploadResult::Deferred);
+    EXPECT_EQ(cache.builds(), 0u);
+    EXPECT_EQ(patch.chunks[13]->sdf_data, source);
+    ASSERT_EQ(Prepare(cache, patch, payload), NearTerrainUploadResult::Refined);
+    EXPECT_GT(payload.indices.size(), original.indices.size());
+    EXPECT_EQ(patch.chunks[13]->sdf_data, source);
+    EXPECT_TRUE(evidence->densities.empty());
+    EXPECT_EQ(cache.builds(), 1u);
+    const auto refined = payload;
+    payload = original;
+    ASSERT_EQ(Prepare(cache, patch, payload), NearTerrainUploadResult::Refined);
+    ExpectIdenticalPayload(payload, refined);
+    EXPECT_EQ(cache.builds(), 1u);
+    patch.chunks[13]->mark_sdf_loaded_or_edited();
+    payload = original;
+    EXPECT_EQ(Prepare(cache, patch, payload), NearTerrainUploadResult::Unrefined);
+    ExpectIdenticalPayload(payload, original);
+    EXPECT_EQ(cache.size(), 0u);
+}
+
+TEST(NearTerrainUpload, LiveLatticeRefusesMissingPartialOversizedAndInvalidSamples) {
+    for (int invalid = 0; invalid < 5; ++invalid) {
+        SCOPED_TRACE(invalid);
+        EligibilityPatch patch;
+        const auto evidence = patch.Publish(false);
+        auto& source = patch.chunks[13]->sdf_data;
+        if (invalid == 0) {
+            source.clear();
+        } else if (invalid == 1) {
+            source.pop_back();
+        } else if (invalid == 2) {
+            source.push_back(0);
+        } else if (invalid == 3) {
+            source[0] = std::numeric_limits<float>::infinity();
+        } else {
+            source[8 + 8 * 17 + 8 * 17 * 17] = -1;
+        }
+        const auto expected_source = source;
+        const auto original = MakePatch().mesh;
+        auto payload = original;
+        NearTerrainRefinementCache cache;
+        cache.set_enabled(true);
+        EXPECT_EQ(Prepare(cache, patch, payload), NearTerrainUploadResult::Unrefined);
+        ExpectIdenticalPayload(payload, original);
+        EXPECT_EQ(source, expected_source);
+        EXPECT_TRUE(evidence->densities.empty());
+        EXPECT_EQ(cache.builds(), 1u);
+        EXPECT_EQ(Prepare(cache, patch, payload, 3.0), NearTerrainUploadResult::Unrefined);
+        ExpectIdenticalPayload(payload, original);
+        EXPECT_EQ(cache.builds(), 1u);
+    }
+}
+
+TEST(NearTerrainUpload, CachedRefusalsRemainImmediateAfterTheDeadline) {
+    EligibilityPatch patch;
+    patch.Publish();
+    NearTerrainRefinementCache cache;
+    cache.set_enabled(true);
+    auto original = MakePatch().mesh;
+    original.indices.front() = std::numeric_limits<u32>::max();
+    auto payload = original;
+    ASSERT_EQ(Prepare(cache, patch, payload), NearTerrainUploadResult::Unrefined);
+    ASSERT_EQ(cache.builds(), 1u);
+    for (const double elapsed : {3.0,
+                                 4.0,
+                                 -1.0,
+                                 std::numeric_limits<double>::infinity(),
+                                 std::numeric_limits<double>::quiet_NaN()}) {
+        SCOPED_TRACE(elapsed);
+        EXPECT_EQ(Prepare(cache, patch, payload, elapsed), NearTerrainUploadResult::Unrefined);
+        ExpectIdenticalPayload(payload, original);
+        EXPECT_EQ(cache.builds(), 1u);
+    }
+    // An otherwise identical publication still invalidates the refusal key.
+    patch.Publish();
+    EXPECT_EQ(Prepare(cache, patch, payload, 3.0), NearTerrainUploadResult::Deferred);
+    EXPECT_EQ(cache.size(), 0u);
+    EXPECT_EQ(cache.builds(), 1u);
+    ExpectIdenticalPayload(payload, original);
+    EXPECT_EQ(Prepare(cache, patch, payload), NearTerrainUploadResult::Unrefined);
+    EXPECT_EQ(cache.builds(), 2u);
+}
+
+TEST(NearTerrainUpload, SaturatedDeadlineStillUploadsBaselineMeshes) {
+    EligibilityPatch patch;
+    const auto evidence = patch.Publish();
+    const auto original = MakePatch().mesh;
+    NearTerrainRefinementCache cache;
+    cache.set_enabled(true);
+    UploadQueue<int> baseline;
+    UploadQueue<int> refinement;
+    baseline.refresh(1, 1);
+    baseline.refresh(2, 2);
+    refinement.refresh(3, 3);
+    NearTerrainUploadState resident;
+    const auto cost = [](int) {
+        return std::size_t{1};
+    };
+    const auto adopt = [&](int item) {
+        auto payload = original;
+        const auto result = Prepare(cache, patch, payload, 3.0);
+        EXPECT_EQ(result, NearTerrainUploadResult::Deferred);
+        ExpectIdenticalPayload(payload, original);
+        resident.set(result == NearTerrainUploadResult::Deferred ? nullptr : evidence);
+        EXPECT_FALSE(resident.matches(evidence));
+        EXPECT_LT(item, 3);
+        return true;
+    };
+    for (std::size_t frame = 0; frame < 2; ++frame) {
+        const auto work =
+            drain_terrain_uploads(baseline, refinement, cost, adopt, [] { return 3.0; });
+        EXPECT_EQ(work.attempts, 1u);
+        EXPECT_EQ(work.adopted, 1u);
+        EXPECT_EQ(baseline.size(), 1u - frame);
+        EXPECT_EQ(refinement.size(), 1u);
+        EXPECT_EQ(cache.builds(), 0u);
+    }
+    const auto resumed = drain_terrain_uploads(
+        baseline,
+        refinement,
+        cost,
+        [&](int item) {
+            EXPECT_EQ(item, 3);
+            auto payload = original;
+            const auto result = Prepare(cache, patch, payload);
+            EXPECT_EQ(result, NearTerrainUploadResult::Refined);
+            EXPECT_GT(payload.indices.size(), original.indices.size());
+            resident.set(evidence);
+            return result == NearTerrainUploadResult::Refined;
+        },
+        [] { return 0.0; });
+    EXPECT_EQ(resumed.adopted, 1u);
+    EXPECT_EQ(refinement.size(), 0u);
+    EXPECT_TRUE(resident.matches(evidence));
+    EXPECT_EQ(cache.builds(), 1u);
+}
+
+TEST(NearTerrainUpload, OptionalReplacementsShareLimitsAndNeverClaimProgressAllowance) {
+    for (const double elapsed : {3.0,
+                                 -1.0,
+                                 std::numeric_limits<double>::infinity(),
+                                 std::numeric_limits<double>::quiet_NaN()}) {
+        SCOPED_TRACE(elapsed);
+        UploadQueue<int> baseline;
+        UploadQueue<int> refinement;
+        refinement.refresh(1, 1);
+        const auto work = drain_terrain_uploads(
+            baseline,
+            refinement,
+            [](int) { return std::size_t{1}; },
+            [](int) {
+                ADD_FAILURE();
+                return true;
+            },
+            [elapsed] { return elapsed; });
+        EXPECT_EQ(work.attempts, 0u);
+        EXPECT_EQ(refinement.size(), 1u);
+    }
+    for (int limit = 0; limit < 4; ++limit) {
+        SCOPED_TRACE(limit);
+        UploadQueue<int> baseline;
+        UploadQueue<int> refinement;
+        const auto baseline_count = limit == 1 ? kTerrainUploadLimits.count : std::size_t{1};
+        if (limit < 2) {
+            for (std::size_t index = 0; index < baseline_count; ++index) {
+                baseline.refresh(index, 0);
+            }
+        }
+        if (limit != 3) {
+            refinement.refresh(9, 1);
+        }
+        const auto work = drain_terrain_uploads(
+            baseline,
+            refinement,
+            [limit](int item) {
+                return limit == 0 || (limit == 2 && item == 1)
+                           ? kTerrainUploadLimits.bytes + (limit == 2 ? 1u : 0u)
+                           : std::size_t{1};
+            },
+            [](int item) {
+                EXPECT_EQ(item, 0);
+                return true;
+            },
+            [] { return 0.0; });
+        EXPECT_EQ(work.attempts, limit < 2 ? baseline_count : 0u);
+        EXPECT_EQ(refinement.size(), limit == 3 ? 0u : 1u);
+    }
+}
+
+TEST(NearTerrainUpload, DeadlineAfterOptionalCopyPreservesResidentAndRetries) {
+    EligibilityPatch patch;
+    const auto evidence = patch.Publish();
+    const auto original = MakePatch().mesh;
+    NearTerrainRefinementCache cache;
+    cache.set_enabled(true);
+    NearTerrainUploadState resident;
+    UploadQueue<int> baseline;
+    UploadQueue<int> refinement;
+    refinement.refresh(1, 1);
+    const auto work = drain_terrain_uploads(
+        baseline,
+        refinement,
+        [](int) { return std::size_t{1}; },
+        [&](int) {
+            auto payload = original;
+            const auto result = Prepare(cache, patch, payload, 3.0);
+            EXPECT_EQ(result, NearTerrainUploadResult::Deferred);
+            ExpectIdenticalPayload(payload, original);
+            return result != NearTerrainUploadResult::Deferred;
+        },
+        [] { return 0.0; });
+    EXPECT_EQ(work.attempts, 1u);
+    EXPECT_EQ(work.adopted, 0u);
+    EXPECT_EQ(refinement.size(), 1u);
+    EXPECT_EQ(cache.builds(), 0u);
+    EXPECT_TRUE(resident.matches(nullptr));
+    EXPECT_FALSE(resident.matches(evidence));
+}
+
+TEST(NearTerrainUpload, OptionalFailureRotatesWithoutRepeatingAndCanResume) {
+    UploadQueue<int> baseline;
+    UploadQueue<int> refinement;
+    refinement.refresh(1, 1);
+    refinement.refresh(2, 2);
+    int calls = 0;
+    const auto cost = [](int) {
+        return std::size_t{1};
+    };
+    const auto failed = drain_terrain_uploads(
+        baseline,
+        refinement,
+        cost,
+        [&](int) {
+            ++calls;
+            return false;
+        },
+        [] { return 0.0; });
+    EXPECT_EQ(calls, 2);
+    EXPECT_EQ(failed.attempts, 2u);
+    EXPECT_EQ(failed.adopted, 0u);
+    EXPECT_EQ(refinement.size(), 2u);
+    const auto resumed = drain_terrain_uploads(
+        baseline, refinement, cost, [](int) { return true; }, [] { return 0.0; });
+    EXPECT_EQ(resumed.adopted, 2u);
+    EXPECT_EQ(refinement.size(), 0u);
 }
 
 TEST(NearTerrainUpload, SettingDefaultsAndPersistenceRoundTrip) {

@@ -91,9 +91,9 @@ enum class NearTerrainUploadResult {
     Deferred
 };
 
-// Context-thread render cache. Fixed FIFO of 64 entries: at most 64 * 452 KiB
-// geometry plus 64 * 4913 floats of evidence; no chunk ownership. Lookups and
-// retirement are expected O(1), eviction is O(1), and clearing visits 64 slots.
+// Owner/context-thread render cache, like the source chunk meshes and SDF. Fixed FIFO of 64
+// entries: at most 64 * 452 KiB geometry plus 64 * 4913 floats of evidence; no chunk ownership.
+// Lookups and retirement are expected O(1), eviction is O(1), and clearing visits 64 slots.
 class NearTerrainRefinementCache {
 public:
     static constexpr std::size_t kCapacity = 64;
@@ -172,14 +172,27 @@ public:
         if (!current) {
             return NearTerrainUploadResult::Unrefined;
         }
-        // Unlike the upload lane's progress allowance, refinement never starts
-        // after the inclusive frame deadline. The queue retains deferred work.
+        auto found = m_index.find(chunk.get_id());
+        // Cached refusals need neither kernel work nor a replacement copy, even
+        // when baseline upload preparation has exhausted the frame deadline.
+        if (found != m_index.end() && !m_entries[found->second].refined) {
+            return NearTerrainUploadResult::Unrefined;
+        }
         if (!std::isfinite(elapsed_ms) || elapsed_ms < 0 ||
             elapsed_ms >= kTerrainUploadLimits.milliseconds) {
             return NearTerrainUploadResult::Deferred;
         }
-        auto found = m_index.find(chunk.get_id());
         if (found == m_index.end()) {
+            // Both world publishers retain classification only. The matching
+            // version/halo proof above certifies this owner-thread SDF too.
+            // Copy exactly 17^3 samples before the kernel; never move authority
+            // data or allocate for a partial/unbounded lattice. The immutable
+            // local copy lives through refinement and is released afterwards.
+            const std::vector<float> density_copy =
+                current->densities.empty() &&
+                        chunk.sdf_data.size() == World::kNearTerrainDensityCount
+                    ? chunk.sdf_data
+                    : std::vector<float>{};
             Entry replacement;
             replacement.id = chunk.get_id();
             replacement.version = version;
@@ -188,7 +201,9 @@ public:
             replacement.refined =
                 RefineNearTerrain({.vertices = vertices,
                                    .indices = indices,
-                                   .densities = current->densities,
+                                   .densities = current->densities.empty()
+                                                    ? std::span<const float>(density_copy)
+                                                    : std::span<const float>(current->densities),
                                    .sample_step = current->sample_step,
                                    .chunk_distance_squared = distance_squared,
                                    .enabled = true,
@@ -237,5 +252,41 @@ private:
     std::size_t m_builds = 0;
     bool m_enabled = false;
 };
+
+// Both queues share one upload budget. Baseline uploads retain the guaranteed
+// progress attempt; optional replacements run only in remaining bytes/time.
+// Each queue has one entry per participating chunk, visited at most once here.
+template<typename Item, typename Cost, typename Adopt, typename Elapsed>
+UploadWorkStats drain_terrain_uploads(UploadQueue<Item>& baseline,
+                                      UploadQueue<Item>& refinement,
+                                      Cost cost,
+                                      Adopt adopt,
+                                      Elapsed elapsed) {
+    UploadBudget budget(kTerrainUploadLimits);
+    const auto drain = [&](auto& queue, bool optional) {
+        const auto pending = queue.size();
+        for (std::size_t visited = 0; visited < pending; ++visited) {
+            const auto& item = queue.front();
+            const auto bytes = cost(item);
+            const auto elapsed_ms = elapsed();
+            const auto used = budget.finish(elapsed_ms);
+            if (optional && (!std::isfinite(elapsed_ms) || elapsed_ms < 0 ||
+                             elapsed_ms >= kTerrainUploadLimits.milliseconds ||
+                             used.bytes > kTerrainUploadLimits.bytes ||
+                             bytes > kTerrainUploadLimits.bytes - used.bytes)) {
+                break;
+            }
+            if (!budget.admits(bytes, elapsed_ms)) {
+                break;
+            }
+            const bool adopted = adopt(item);
+            budget.charge(bytes, adopted);
+            queue.complete(adopted);
+        }
+    };
+    drain(baseline, false);
+    drain(refinement, true);
+    return budget.finish(elapsed());
+}
 
 } // namespace Luminumbra::Rendering

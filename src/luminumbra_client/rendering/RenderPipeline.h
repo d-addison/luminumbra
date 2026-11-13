@@ -1074,9 +1074,11 @@ private:
         bool is_stale = false;
         float distance_sq = 0;
         std::size_t bytes = 0;
+        bool refinement_only = false;
     };
     NearTerrainRefinementCache m_near_terrain_refinement;
     UploadQueue<MeshUploadCandidate> m_terrain_upload_queue;
+    UploadQueue<MeshUploadCandidate> m_near_terrain_upload_queue;
     UploadQueue<MeshUploadCandidate> m_water_upload_queue;
     template<bool Water>
     void manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks,
