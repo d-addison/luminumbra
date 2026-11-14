@@ -203,6 +203,9 @@ if(MSVC)
         COMPILE_OPTIONS "/bigobj")
 endif()
 
+# GL-free temporal plan admission (shared by both client source sets).
+list(APPEND CLIENT_INTERNAL_SOURCES ${CMAKE_CURRENT_LIST_DIR}/rendering/TemporalAudit.cpp)
+
 # Complete executable source set for legacy consumers that include this file
 # directly.
 set(CLIENT_SOURCES
