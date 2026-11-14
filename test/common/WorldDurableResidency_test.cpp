@@ -989,6 +989,47 @@ TEST(WorldDurableResidency, SessionSavesAndReloadsParkedEditedChunk) {
     EXPECT_EQ(HashVec(loaded->sdf_data), recorded_hash);
 }
 
+TEST(WorldDurableResidency, DeterministicWaterInitializationAndRefreshKeepAuthority) {
+    Luminumbra::Systems::TerrainGenParams params{};
+    params.rivers_enabled = false;
+    SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    Luminumbra::Systems::WaterSystem water(nullptr, &world);
+    water.SetSimResolution(8);
+    water.SetHydrology(true, 0, 0);
+    entt::registry registry;
+    const auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+    chunk->set_state(ChunkState::Idle);
+    chunk->heightmap_data.assign(17u * 17u, 10000.0f);
+    chunk->mark_sdf_generated_current_params();
+    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    const std::unordered_map<Luminumbra::ChunkID, std::shared_ptr<Chunk>> chunks{
+        {chunk->get_id(), chunk}};
+    const auto inputs = world.water_authority_input_items();
+    for (std::uint32_t tick = 0; tick < 3u; ++tick) {
+        SCOPED_TRACE(tick);
+        if (tick == 1) {
+            // Historical grids may omit momentum; repairing it changes hashed state.
+            chunk->water_edge_flux.clear();
+        }
+        if (tick == 2) {
+            chunk->water_level_data.assign(64, -1.0f);
+        }
+        water.update(registry, chunks, true);
+        ASSERT_TRUE(chunk->has_complete_water_state());
+        EXPECT_EQ(chunk->water_depth_mm, std::vector<std::int32_t>(64, 0));
+        EXPECT_EQ(chunk->water_edge_flux, std::vector<std::int32_t>(128, 0));
+        EXPECT_EQ(chunk->ticks_below_threshold, tick + 1);
+        EXPECT_EQ(chunk->water_revision(), tick == 2 ? 5u : 2u * (tick + 1u));
+        EXPECT_TRUE(chunk->is_water_state_dirty());
+        EXPECT_TRUE(chunk->is_voxel_data_dirty());
+        world.sync_water_authority();
+        EXPECT_TRUE(chunk->needs_authority());
+        EXPECT_TRUE(chunk->has_water_authority());
+        EXPECT_FALSE(chunk->is_water_state_dirty());
+        EXPECT_EQ(world.water_authority_input_items(), inputs + tick + 1u);
+    }
+}
+
 TEST(WorldDurableResidency, ReloadRestartsUnsavedWaterBesidePersistedSleepCounter) {
     using Luminumbra::Persistence::WorldSaveService;
     DurableFixture fx(/*durable=*/true, /*active_regions=*/true, /*high_res=*/false);

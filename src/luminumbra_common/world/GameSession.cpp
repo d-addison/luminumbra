@@ -4049,6 +4049,14 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
         for (const auto& chunk : m_activeRegionsEnabled
                                      ? m_worldSystem->snapshot_authoritative_chunks()
                                      : m_worldSystem->snapshot_streamed_chunks()) {
+            // Indexed worlds regenerate unowned terrain and water. Selecting them for a
+            // full snapshot would turn disposable generation output into loaded authority.
+            // Dirty water has already acquired ownership above; keep all owned state,
+            // including calm counters, even when its depth and flux match generation.
+            if (m_activeRegionsEnabled && chunk &&
+                chunk->sdf_provenance() == ChunkSdfProvenance::GeneratedCurrentParams &&
+                !chunk->needs_authority() && !chunk->is_voxel_data_dirty())
+                continue;
             state.insert_chunk(chunk);
         }
         result.chunks_total = state.size();

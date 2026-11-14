@@ -60,6 +60,28 @@ auto Snapshot(const Chunk& chunk) {
                            chunk.water_revision());
 }
 
+TEST(RegionalWater, MissingAndPartialFluxReplacementPublishWaterChanges) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    for (const bool partial : {false, true}) {
+        SCOPED_TRACE(partial);
+        Chunk chunk({0, 0, 0});
+        FillWater(chunk, 8, 0);
+        chunk.water_edge_flux.assign(partial ? 127u : 0u, 0);
+        const auto before = Snapshot(chunk);
+        EXPECT_FALSE(WaterKernels::StepInterior(chunk, shield, {}).applied);
+        EXPECT_EQ(Snapshot(chunk), before);
+        ASSERT_TRUE(
+            WaterKernels::StepInterior(
+                chunk, shield, {.finite_hydrology = true}, WaterKernels::OverflowPolicy::Saturate)
+                .applied);
+        EXPECT_EQ(chunk.water_depth_mm, std::vector<std::int32_t>(64, 0));
+        EXPECT_EQ(chunk.water_edge_flux, std::vector<std::int32_t>(128, 0));
+        EXPECT_TRUE(chunk.is_water_state_dirty());
+        EXPECT_TRUE(chunk.is_voxel_data_dirty());
+        EXPECT_EQ(chunk.water_revision(), 1u);
+    }
+}
+
 TEST(RegionalWater, MaximalDirtyTickCounterInvalidatesWithoutOverflow) {
     SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
     for (const auto policy :
@@ -2267,6 +2289,105 @@ std::string TransactionBytes(const Chunk& chunk, bool metadata = true) {
                                static_cast<std::uint64_t>(chunk.sdf_provenance())};
     append(revisions);
     return bytes;
+}
+
+TEST(RegionalWaterTransaction, InitializationPublishesWaterAuthority) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    auto ledger = PlanningLedger({{0, 0}});
+    const auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+    const std::vector chunks{chunk};
+    Planning::Transaction stage;
+    stage.Begin(ledger, 0, chunks, {});
+    stage.PrepareGrid(chunk->get_id(), shield, 8);
+    stage.Inject({.target = chunk->get_id(), .cell = 0, .millimetres = 0});
+    stage.Publish(&shield);
+    EXPECT_TRUE(chunk->has_complete_water_state());
+    EXPECT_TRUE(chunk->has_water_authority());
+    EXPECT_TRUE(chunk->is_voxel_data_dirty());
+    EXPECT_EQ(chunk->water_revision(), 1u);
+}
+
+TEST(RegionalWaterTransaction, MirrorRefreshAndCalmTimePublishWaterAuthority) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    for (const bool owned : {false, true}) {
+        SCOPED_TRACE(owned);
+        auto ledger = PlanningLedger({{0, 0}});
+        const auto chunk = TransactionChunk(0, 0);
+        if (owned) {
+            chunk->set_water_authority();
+        }
+        chunk->clear_voxel_data_dirty();
+        const std::vector chunks{chunk};
+        Planning::Transaction stage;
+        stage.Begin(ledger, 0, chunks, {});
+        ASSERT_TRUE(
+            stage.StepInterior(chunk->get_id(), shield, {.finite_hydrology = true}).applied);
+        if (!owned) {
+            stage.FinishInterior(chunk->get_id());
+        }
+        stage.Publish(&shield);
+        EXPECT_EQ(chunk->water_level_data, std::vector<float>(64, 1.0f));
+        EXPECT_EQ(chunk->ticks_below_threshold, owned ? 0 : 1);
+        EXPECT_TRUE(chunk->has_water_authority());
+        EXPECT_TRUE(chunk->is_voxel_data_dirty());
+        EXPECT_EQ(chunk->water_revision(), 1u);
+    }
+}
+
+TEST(RegionalWaterTransaction, GenuineMutationsPublishAndRoundTripAfterCleanPreparation) {
+    namespace P = Luminumbra::Persistence;
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    // Depth, flux-only decay, sleep, wake, and resolution each publish another revision.
+    for (int mutation = 0; mutation < 5; ++mutation) {
+        SCOPED_TRACE(mutation);
+        auto ledger = PlanningLedger({{0, 0}});
+        const auto chunk = TransactionChunk(0, 0);
+        const std::vector chunks{chunk};
+        {
+            Planning::Transaction clean;
+            clean.Begin(ledger, 0, chunks, {});
+            ASSERT_TRUE(
+                clean.StepInterior(chunk->get_id(), shield, {.finite_hydrology = true}).applied);
+            clean.Publish(&shield);
+        }
+        ASSERT_TRUE(chunk->has_water_authority());
+        ASSERT_EQ(chunk->water_revision(), 1u);
+        chunk->clear_voxel_data_dirty();
+        if (mutation == 1) {
+            chunk->water_edge_flux[0] = 1;
+        }
+        if (mutation == 2) {
+            chunk->ticks_below_threshold = 119;
+        }
+        if (mutation == 3) {
+            chunk->is_water_sleeping.store(true);
+            chunk->max_water_delta_last_tick = 1.0f;
+        }
+        Planning::Transaction stage;
+        stage.Begin(ledger, 0, chunks, {});
+        if (mutation == 0) {
+            stage.Inject({.target = chunk->get_id(), .cell = 0, .millimetres = 7});
+        } else if (mutation == 1) {
+            ASSERT_TRUE(
+                stage.StepInterior(chunk->get_id(), shield, {.finite_hydrology = true}).applied);
+            EXPECT_EQ(stage.staged(chunk->get_id())->water_depth_mm, chunk->water_depth_mm);
+        } else if (mutation == 4) {
+            stage.PrepareGrid(chunk->get_id(), shield, 16);
+        } else {
+            stage.FinishInterior(chunk->get_id());
+        }
+        stage.Publish(&shield);
+        EXPECT_TRUE(chunk->has_water_authority());
+        EXPECT_TRUE(chunk->is_voxel_data_dirty());
+        EXPECT_EQ(chunk->water_revision(), 2u);
+        WorldStreamingState restored;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(
+            P::SerializeChunkRecordPayloadJson(*chunk), restored, errors, {.strict_water = true}));
+        const auto actual = restored.find_chunk(chunk->get_coords());
+        ASSERT_NE(actual, nullptr);
+        EXPECT_TRUE(actual->same_water_state(*chunk));
+    }
 }
 
 TEST(RegionalWaterTransaction, GeneratedPlansPreserveCappedCreditAndZeroCandidateDebt) {
