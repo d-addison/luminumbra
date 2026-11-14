@@ -6013,7 +6013,7 @@
     {
       "id": "render.session-render-admission",
       "source": "docs/far-volume-memory.md#serving-and-target-handoff",
-      "statement": "SessionRender composes published live and parked terrain/water over a committed durable baseline without advancing its generation, refuses prepared images and durable baking, and is eligible for explicit handoff staging. Preview remains ineligible and Committed capture fingerprints are unchanged. Typed staging refusals use existing selection names and preserve target and retained charges, including capacity and memory refusal. Normal-play activation, native qualification and a separately named measured production limits profile remain outstanding.",
+      "statement": "SessionRender composes published live and parked terrain/water over a committed durable baseline without advancing its generation, refuses prepared images and durable baking, and is eligible for explicit handoff staging. Preview remains ineligible and Committed capture fingerprints are unchanged. Typed staging refusals use existing selection names and preserve target and retained charges, including capacity and memory refusal. Native qualification and a separately named measured production limits profile remain outstanding.",
       "status": "partial",
       "evidence": [
         {
@@ -6039,6 +6039,56 @@
         {
           "kind": "doc",
           "ref": "docs/far-volume-memory.md"
+        }
+      ]
+    },
+    {
+      "id": "render.session-producer-activation",
+      "source": "docs/engine-guide.md#saved-world-session-authority",
+      "statement": "Normal saved-world entry binds session authority without fixture binding, pumps bounded preparation before effective selection, forwards same-frame live ownership and uses one selected scheduler and submission. Pending or refused preparation retains the Ladder request and typed Legacy fallback. Legacy opt-out, preview and paired OFF replay remain isolated. Failed opens resume the old binding; committed replacement, exit and shutdown drain workers and backend resources before releasing it. Newly completed matching serials stage while newer sources queue; already staged serials cannot qualify a pending target, and fenced reads refuse staging. Source qualification remains separate. Recoverable attachment and idle capture failures retry with a 30-frame backoff; capture cooldown retains dirty work and ages active captures with reads fenced. Discovery consumes at most 65,536 column/record/water-cell work units and completes at most eight tiles per pump, retaining cursors and extrema. Discovery observes the existing 1 ms water-work ceiling with one indivisible operation for progress. Idle consumer descriptors retire before span history is pruned against captured complete diagnostics; partial observations preserve all retained constraints. Runtime mode and cave-policy changes detach preparation for rebinding. Regenerated saved worlds reattach after publication settles. Named finite play limits await native calibration, and the PowerShell pre-launch guard and native qualification remain outstanding.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "SavedPlayDispatch.*",
+          "planned": "native saved-source dispatch, refusal, reporting and isolation execution; owner: rendering"
+        },
+        {
+          "kind": "ctest",
+          "ref": "SavedPipelinePreparation.*",
+          "planned": "native production pipeline attachment retry, capture admission, discovery work and policy lifecycle execution; owner: rendering"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarWorldLegacyIsolation.SpanHistoryAdmitsMoreThan512DistinctRangeKeys",
+          "planned": "native consumer history range traversal execution; owner: rendering"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarWorldLegacyIsolation.PartialOrMissingHistoryObservationPreservesAllConstraints",
+          "planned": "native complete diagnostic requirement regression execution; owner: rendering"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarWorldLegacyIsolation.SavedWorldActivationDecisionsBindPumpRefuseAndReport",
+          "planned": "native pipeline admission decision regression execution; owner: rendering"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarWorldLegacyIsolation.AttachmentRetryAndCaptureDecisionFailureMatrix",
+          "planned": "native attachment and capture decision failure matrix execution; owner: rendering"
+        },
+        {
+          "kind": "ctest",
+          "ref": "UploadBudgetWiringPython"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/engine-guide.md"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/far-world-horizon-v2.md"
         }
       ]
     },

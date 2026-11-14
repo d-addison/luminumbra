@@ -132,12 +132,15 @@ class RenderRunnerLogPathsTests(unittest.TestCase):
                                   'omit --render-benchmark-frames')
                     else:
                         artifact.write_text(json.dumps(data), encoding='utf-8')
+                        selection = data['far_world']['frames'][0]
                         output = ('Static-model textures registered (3 models).\n' +
                                   '\n'.join(f"tree_small_02_{part}.lmesh' (3 verts, 3 indices)"
                                             for part in ('trunk', 'branches', 'leaves')) +
-                                  '\nFar world: requested=ladder effective=legacy '
-                                  'refusal=ImmutableAuthorityUnavailable\n'
-                                  'suppressed=true submission_refusal=IsolationSuppressed')
+                                  f"\nFar world: requested={selection['requested_mode']} "
+                                  f"effective={selection['effective_mode']} "
+                                  f"refusal={selection['refusal']}\n"
+                                  f"suppressed={str(selection['suppressed']).lower()} "
+                                  f"submission_refusal={selection['submission_refusal']}")
                     log.write_text(output, encoding='utf-8')
                     return subprocess.CompletedProcess(command, expected_exit), []
                 with mock.patch.object(runner, 'OPTIONS', types.SimpleNamespace(
@@ -166,9 +169,25 @@ class RenderRunnerLogPathsTests(unittest.TestCase):
             data['world_content_identity'] = data['workload']['content_identity']
             data['far_world'] = contract_fixtures.far_capture()['far_world']
             for row in data['far_world']['frames']:
-                row.update(effective_mode='legacy', refusal='ImmutableAuthorityUnavailable')
+                row.update(effective_mode='legacy', refusal='AdmissionFailed')
             contract_fixtures.update_far_summary(data)
             self.check_case('test_traversal_twice', data, script)
+            # The source is attached by saved entry; absence of an injected
+            # fixture must no longer pass as the traversal's refusal evidence.
+            for refusal in ('ImmutableAuthorityUnavailable', 'None', 'BackendUnavailable'):
+                with self.subTest(refusal=refusal):
+                    row = data['far_world']['frames'][0]
+                    row['refusal'] = refusal
+                    contract_fixtures.update_far_summary(data)
+                    with self.assertRaises(AssertionError):
+                        self.check_case('test_traversal_twice', data, script)
+                    row['refusal'] = 'AdmissionFailed'
+            contract_fixtures.update_far_summary(data)
+            data['far_world']['frames'][0].update(
+                suppressed=True, submission_refusal='IsolationSuppressed')
+            contract_fixtures.update_far_summary(data)
+            with self.assertRaises(AssertionError):
+                self.check_case('test_traversal_twice', data, script)
 
     def test_isolation_reader_uses_unique_writer_path(self):
         data = contract_fixtures.artifact()

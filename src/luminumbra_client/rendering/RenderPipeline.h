@@ -31,12 +31,15 @@
 #include "passes/SsaoData.h" // SSAOData (extracted; still read here for stats)
 #include "passes/WaterfallPass.h"
 #include <array>
+#include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <map>
 #include <memory>
 #include <nlohmann/json_fwd.hpp>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -48,12 +51,35 @@ namespace Luminumbra {
 class Chunk;
 class JobSystem;
 } // namespace Luminumbra
+namespace Luminumbra::world {
+class GameSession;
+}
 namespace Luminumbra::Systems {
 class SHIELD_WorldSystem;
 struct TerrainGenParams;
 } // namespace Luminumbra::Systems
 namespace Luminumbra::Rendering {
 struct StaticDrawSnapshot;
+
+// Context-free saved-world admission decisions. The state belongs to the
+// pipeline owner; no source or graphics resources are accessed here.
+void FarWorldSessionAttachmentFailed(std::uint32_t& retry_frames,
+                                     bool& retryable,
+                                     bool recoverable) noexcept;
+bool RetryFarWorldSessionAttachment(std::uint32_t& retry_frames,
+                                    bool retryable,
+                                    bool attached,
+                                    bool source_enabled) noexcept;
+bool FarWorldSessionCaptureAdmission(bool discovering, bool admitted) noexcept;
+bool FarWorldSessionDiscoveryAdmission(std::size_t work,
+                                       std::size_t used,
+                                       double elapsed_ms) noexcept;
+bool FarWorldSessionCaptureAge(bool discovering, bool admitted, bool active) noexcept;
+FarWorldSelection FarWorldSessionSelection(const FarWorldSelection& selected,
+                                           FarWorldPurpose purpose,
+                                           FarWorldRefusal attachment,
+                                           FarWorldRefusal request,
+                                           FarWorldRefusal preparation) noexcept;
 
 class Shader;
 class Camera;
@@ -176,6 +202,32 @@ struct WaterRenderData {
 
 // LightningRenderState (+ kMaxBoltSegmentPoints) moved to RenderFrameTypes.h (included
 //  above). Definition unchanged.
+
+// Render-only span history, bounded to the producer's 512-key manifest. Reclaim
+// only after consumer retirement, with no staging between retirement and snapshot.
+struct FarWorldSessionSpanHistory {
+    static constexpr std::size_t kSlots = World::FarWorldAuthorityProducer::kSlots;
+    std::array<World::FarVolumeSpanLedger, kSlots> spans{};
+    std::array<World::FarTileKey, kSlots> keys{};
+    std::size_t count = 0;
+    // Missing, uncaptured or partial observations cannot prune a nonempty history.
+    bool Reclaim(const FarWorldHandoffDiagnosticSnapshot* snapshot,
+                 std::span<const World::FarTileKey> requested);
+    bool Extend(const World::FarTileKey& key,
+                const World::FarVolumeCoverageSpan& span,
+                const World::FarVolumeSpanLedgerLimits& limits);
+};
+
+// Value-only owner-frame diagnostics. Counters describe actual admitted work;
+// they do not affect simulation, persisted state or source identity.
+struct FarWorldSessionPreparationStats {
+    std::size_t discovery_work = 0, discovery_columns = 0, history_keys = 0;
+    std::uint32_t attachment_retry_frames = 0, capture_retry_frames = 0;
+    bool attached = false, source_enabled = false, discovering = false;
+    bool capture_admitted = false;
+};
+
+struct SessionFarWorldPreparation;
 
 class RenderPipeline {
 public:
@@ -874,8 +926,16 @@ public:
     // Retire the old binding and visuals at a committed world replacement.
     // Before a fallible open, wait_for_world_readers keeps the old world resumable.
     void prepare_world_swap();
-    // Internal, non-persisted request. Normal worlds retain a typed refusal until
-    // immutable committed authority is available. Fixtures bind explicitly.
+    // Saved-play attachment, before streaming starts. Draining the pipeline
+    // detaches it; failed world admission retains the old immutable binding.
+    void bind_far_world_session(world::GameSession& session, JobSystem& jobs);
+    // Retry attachment after an in-place drain once regenerated publication settles.
+    void resume_far_world_session(world::GameSession& session, JobSystem& jobs);
+    // CPU preparation at the owner frame boundary, before effective selection.
+    // Call once per frame; render_frame calls this for normal rendering.
+    void pump_far_world_session(const Camera& camera, FarWorldPurpose purpose);
+    FarWorldSessionPreparationStats far_world_session_preparation_stats() const;
+    // Internal, non-persisted request. Preparation failures retain typed refusal.
     void set_far_world_mode(FarWorldMode requested);
     // Startup/world-entry policy; runtime changes first reset history via
     // set_far_world_mode. Returns the resolved request for caller diagnostics.
@@ -883,20 +943,19 @@ public:
     const FarWorldRenderer& far_world_renderer() const {
         return *m_far_world;
     }
-    const FarWorldDiagnosticSnapshot& far_world_diagnostic() const {
-        return m_far_world->Diagnostic();
-    }
+    const FarWorldDiagnosticSnapshot& far_world_diagnostic() const;
     FarWorldReportingState far_world_reporting_state() const {
         const auto& diagnostic = m_far_world->Diagnostic();
         const bool terrain_submission =
             m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Terrain);
         if (diagnostic.captured) {
             auto state = FarWorldReportState(diagnostic, terrain_submission);
-            state.coverage_settled =
-                state.coverage_settled && diagnostic.frame == m_far_world_frame;
+            state.coverage_settled = state.coverage_settled &&
+                                     diagnostic.frame == m_far_world_frame &&
+                                     far_world_source_current();
             return state;
         }
-        return {.selection = m_far_world->Selection(FarWorldPurpose::World),
+        return {.selection = prepared_far_world_selection(FarWorldPurpose::World),
                 .submission_refusal = terrain_submission
                                           ? FarWorldSubmissionRefusal::None
                                           : FarWorldSubmissionRefusal::IsolationSuppressed,
@@ -1405,6 +1464,10 @@ private:
     // using values published by the Legacy branch rather than Ladder reading its counters.
     std::size_t m_legacy_far_resident_bytes = 0, m_legacy_far_vertex_arrays = 0;
     std::unique_ptr<FarWorldRenderer> m_far_world;
+    std::unique_ptr<SessionFarWorldPreparation> m_far_world_session;
+    FarWorldRefusal m_session_attachment_refusal = FarWorldRefusal::None;
+    std::uint32_t m_session_attachment_retry_frames = 0;
+    bool m_session_attachment_retryable = false;
     FarWorldSelection m_frame_far_selection;
     std::uint64_t m_far_world_frame = 0;
     bool m_far_world_preview = false;
@@ -1525,6 +1588,8 @@ private:
 
     // the prepared per-frame state dispatch_stages reads (see prepare_frame).
     FramePrepared m_frame_prepared;
+    bool far_world_source_current() const;
+    FarWorldSelection prepared_far_world_selection(FarWorldPurpose purpose) const;
     void select_frame_far_world(FarWorldSelection selection, const Camera& camera);
     void prepare_camera_projection(const Camera& camera);
     nlohmann::json terrain_coverage_camera_metadata() const;
