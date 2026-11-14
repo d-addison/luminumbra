@@ -6,6 +6,7 @@
 #include "luminumbra_common/persistence/SyntheticSaveFixture.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "world/FarLodStore.h"
+#include "world/GameSession.h"
 
 #include <gtest/gtest.h>
 
@@ -75,6 +76,39 @@ void WriteBytes(const fs::path& path, const std::string& bytes) {
     ASSERT_TRUE(output.good());
 }
 
+// Re-seal one single-record region from its raw lod-0 stream, deliberately bypassing
+// payload admission so a matching fingerprint cannot hide an inspection regression.
+void IndexSingleRecordRegion(const fs::path& save, int rx, int rz) {
+    namespace P = Luminumbra::Persistence;
+    const auto raw = ReadBytes(WorldSaveService::region_file_path(save, rx, rz));
+    ASSERT_GT(raw.size(), 26u);
+    ASSERT_EQ(static_cast<unsigned char>(raw[6]), 1u);
+    ASSERT_EQ(static_cast<unsigned char>(raw[7]), 0u);
+    ASSERT_EQ(static_cast<unsigned char>(raw[16]), 0u);
+    // Omit the 8-byte file header and the record's lod byte, as the index requires.
+    const auto stream = raw.substr(8, 8) + raw.substr(17);
+    P::SnapshotIndex index;
+    ASSERT_TRUE(P::read_snapshot_index(save, index, nullptr));
+    const auto path = "chunks/region/r." + std::to_string(rx) + "." + std::to_string(rz) + ".lmr";
+    const P::SnapshotMember replacement{.path = path,
+                                        .cls = P::MemberClass::Authoritative,
+                                        .present = true,
+                                        .bytes = static_cast<std::uint64_t>(stream.size()),
+                                        .fnv64 = P::fnv1a64_bytes(stream.data(), stream.size()),
+                                        .generation = index.generation};
+    const auto member = std::find_if(
+        index.members.begin(), index.members.end(), [&](const auto& m) { return m.path == path; });
+    if (member == index.members.end())
+        index.members.push_back(replacement);
+    else
+        *member = replacement;
+    std::sort(index.members.begin(), index.members.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.path < rhs.path;
+    });
+    ASSERT_NO_FATAL_FAILURE(
+        WriteBytes(P::snapshot_index_path(save), P::encode_snapshot_index(index)));
+}
+
 std::map<fs::path, std::string> SavedBytes(const fs::path& directory) {
     std::map<fs::path, std::string> result;
     for (const auto& entry : fs::recursive_directory_iterator(directory)) {
@@ -136,6 +170,7 @@ TEST_F(SavedWorldCatalogResponsiveness, IndexedCatalogNeverDecodesColdChunksOrCh
         ASSERT_TRUE(catalog.error.empty()) << catalog.error;
         ASSERT_EQ(catalog.worlds.size(), 1u);
         EXPECT_TRUE(catalog.worlds.front().error.empty()) << catalog.worlds.front().error;
+        EXPECT_FALSE(catalog.worlds.front().payloads_verified);
         EXPECT_EQ(catalog.worlds.front().metadata.worldId, "catalog-indexed");
         const auto inspected = P::InspectSavedWorld(root,
                                                     fs::path(LUMINUMBRA_SOURCE_ROOT),
@@ -143,6 +178,7 @@ TEST_F(SavedWorldCatalogResponsiveness, IndexedCatalogNeverDecodesColdChunksOrCh
                                                     {},
                                                     P::SavedWorldValidation::Catalog);
         EXPECT_TRUE(inspected.error.empty()) << inspected.error;
+        EXPECT_FALSE(inspected.payloads_verified);
         EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes);
         EXPECT_EQ(SavedBytes(report.save_dir), bytes);
     }
@@ -151,6 +187,7 @@ TEST_F(SavedWorldCatalogResponsiveness, IndexedCatalogNeverDecodesColdChunksOrCh
     const auto complete =
         P::InspectSavedWorld(root, fs::path(LUMINUMBRA_SOURCE_ROOT), "catalog-indexed");
     ASSERT_TRUE(complete.error.empty()) << complete.error;
+    EXPECT_TRUE(complete.payloads_verified);
     EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes + chunks);
     Luminumbra::WorldStreamingState loaded;
     std::vector<std::string> errors;
@@ -162,6 +199,100 @@ TEST_F(SavedWorldCatalogResponsiveness, IndexedCatalogNeverDecodesColdChunksOrCh
     Luminumbra::WorldStreamingState reloaded;
     ASSERT_TRUE(WorldSaveService{}.load_world(reloaded, report.save_dir, errors));
     EXPECT_EQ(WorldSaveService{}.world_hash(reloaded), hash);
+}
+
+TEST_F(SavedWorldCatalogResponsiveness, IndexedCatalogRefusesMisplacedAndCrossRegionDuplicateIds) {
+    namespace P = Luminumbra::Persistence;
+    // Positive and negative X/Z mismatches, then an id repeated in another region.
+    for (const int fault : {0, 1, 2, 3, 4}) {
+        SCOPED_TRACE(fault);
+        const auto root = NewRoot("header_identity");
+        const auto report = WriteSyntheticSave(Spec("fixture", 1), root);
+        ASSERT_TRUE(report.ok) << report.error;
+        ASSERT_TRUE(Luminumbra::Test::PublishIndexedSave(report.save_dir, [] { return true; }));
+        const auto region = WorldSaveService::region_file_path(report.save_dir, 0, 0);
+        auto raw = ReadBytes(region);
+        ASSERT_GT(raw.size(), 26u);
+        fs::path damaged_region;
+        if (fault == 4) {
+            damaged_region = WorldSaveService::region_file_path(report.save_dir, 1, 0);
+            ASSERT_NO_FATAL_FAILURE(WriteBytes(damaged_region, raw));
+            ASSERT_NO_FATAL_FAILURE(IndexSingleRecordRegion(report.save_dir, 1, 0));
+        } else {
+            const int coordinate = fault % 2 == 0 ? 32 : -1;
+            const auto id = Luminumbra::Chunk::calculate_id(
+                {fault < 2 ? coordinate : 0, 0, fault < 2 ? 0 : coordinate});
+            for (unsigned byte = 0; byte < 8; ++byte)
+                raw[8 + byte] = static_cast<char>((id >> (byte * 8u)) & 0xffu);
+            damaged_region = region;
+            ASSERT_NO_FATAL_FAILURE(WriteBytes(region, raw));
+            ASSERT_NO_FATAL_FAILURE(IndexSingleRecordRegion(report.save_dir, 0, 0));
+        }
+        const auto bytes = SavedBytes(report.save_dir);
+        const auto decodes = WorldSaveService::chunk_record_decode_count_for_testing();
+        const auto catalog = EnumerateSavedWorlds(root, fs::path(LUMINUMBRA_SOURCE_ROOT));
+        ASSERT_EQ(catalog.worlds.size(), 1u);
+        EXPECT_EQ(catalog.worlds.front().error,
+                  "corrupt chunk region identity or duplicate id: " +
+                      Luminumbra::Filesystem::GenericUtf8PathString(damaged_region));
+        EXPECT_FALSE(catalog.worlds.front().payloads_verified);
+        EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes);
+        EXPECT_EQ(SavedBytes(report.save_dir), bytes);
+    }
+}
+
+TEST_F(SavedWorldCatalogResponsiveness,
+       MatchingFingerprintLeavesMalformedPayloadUnverifiedUntilOpen) {
+    namespace P = Luminumbra::Persistence;
+    using Luminumbra::world::GameSession;
+    const auto root = NewRoot("unverified_payload");
+    const auto report = WriteSyntheticSave(Spec("fixture", 1), root);
+    ASSERT_TRUE(report.ok) << report.error;
+    ASSERT_TRUE(Luminumbra::Test::PublishIndexedSave(report.save_dir, [] { return true; }));
+    const auto region = WorldSaveService::region_file_path(report.save_dir, 0, 0);
+    auto raw = ReadBytes(region);
+    ASSERT_GT(raw.size(), 28u);
+    raw[26] = 0;
+    raw[27] = 0;
+    raw[28] = 0;
+    ASSERT_NO_FATAL_FAILURE(WriteBytes(region, raw));
+    ASSERT_NO_FATAL_FAILURE(IndexSingleRecordRegion(report.save_dir, 0, 0));
+    const auto bytes = SavedBytes(report.save_dir);
+    const auto decodes = WorldSaveService::chunk_record_decode_count_for_testing();
+    const auto catalog = EnumerateSavedWorlds(root, fs::path(LUMINUMBRA_SOURCE_ROOT));
+    ASSERT_EQ(catalog.worlds.size(), 1u);
+    EXPECT_TRUE(catalog.worlds.front().error.empty()) << catalog.worlds.front().error;
+    EXPECT_FALSE(catalog.worlds.front().payloads_verified);
+    EXPECT_EQ(WorldSaveService::chunk_record_decode_count_for_testing(), decodes);
+
+    const std::string expected = "LZ4 decompression of a region record failed";
+    const auto complete = P::InspectSavedWorld(root, fs::path(LUMINUMBRA_SOURCE_ROOT), "fixture");
+    EXPECT_EQ(complete.error, expected);
+    EXPECT_FALSE(complete.payloads_verified);
+    for (const bool retain : {false, true}) {
+        Luminumbra::WorldStreamingState loaded;
+        loaded.get_or_create_chunk({9, 0, 9});
+        const std::unordered_set<Luminumbra::ChunkID> retain_none;
+        std::vector<std::string> errors;
+        EXPECT_FALSE(WorldSaveService{}.load_world(
+            loaded, report.save_dir, errors, {}, retain ? nullptr : &retain_none));
+        ASSERT_FALSE(errors.empty());
+        EXPECT_EQ(errors.front(), expected);
+        EXPECT_TRUE(loaded.empty());
+    }
+    GameSession session;
+    auto options = session.CaptureWorldPreparationOptions();
+    options.root_path = LUMINUMBRA_SOURCE_ROOT;
+    options.save_root = root;
+    options.active_regions = false;
+    options.job_system_available = true;
+    const auto prepared = GameSession::PrepareWorldLoad(options, "fixture");
+    ASSERT_NE(prepared, nullptr);
+    EXPECT_EQ(GameSession::WorldPreparationError(*prepared), expected);
+    EXPECT_FALSE(session.AdoptPreparedWorld(prepared));
+    EXPECT_EQ(session.GetWorldOpenError(), expected);
+    EXPECT_EQ(session.GetWorldSystem(), nullptr);
+    EXPECT_EQ(SavedBytes(report.save_dir), bytes);
 }
 
 TEST_F(SavedWorldCatalogResponsiveness, CatalogKeepsCompleteLoadAndWriterRefusalReasons) {
@@ -271,19 +402,38 @@ TEST_F(SavedWorldCatalogResponsiveness, CatalogAdmissionHandlesMissingPartialAnd
     namespace P = Luminumbra::Persistence;
     const auto root = NewRoot("admission");
     std::vector<std::string> errors;
-    EXPECT_TRUE(WorldSaveService::inspect_save(root, &errors));
+    bool payloads_verified = true;
+    EXPECT_TRUE(WorldSaveService::inspect_save(root, &errors, {}, &payloads_verified));
     EXPECT_TRUE(errors.empty());
+    EXPECT_FALSE(payloads_verified);
     const auto report = WriteSyntheticSave(Spec("fixture", 1), root);
     ASSERT_TRUE(report.ok) << report.error;
     for (const bool indexed : {false, true}) {
         if (indexed) {
             ASSERT_TRUE(Luminumbra::Test::PublishIndexedSave(report.save_dir, [] { return true; }));
         }
+        payloads_verified = true;
+        EXPECT_TRUE(
+            WorldSaveService::inspect_save(report.save_dir, &errors, {}, &payloads_verified));
+        EXPECT_EQ(payloads_verified, !indexed);
+        const auto catalog = EnumerateSavedWorlds(root, fs::path(LUMINUMBRA_SOURCE_ROOT));
+        ASSERT_EQ(catalog.worlds.size(), 1u);
+        EXPECT_TRUE(catalog.worlds.front().error.empty()) << catalog.worlds.front().error;
+        EXPECT_EQ(catalog.worlds.front().payloads_verified, !indexed);
+        const auto deferred = P::InspectSavedWorld(root,
+                                                   fs::path(LUMINUMBRA_SOURCE_ROOT),
+                                                   "fixture",
+                                                   {},
+                                                   P::SavedWorldValidation::DeferredToPreparation);
+        EXPECT_TRUE(deferred.error.empty()) << deferred.error;
+        EXPECT_FALSE(deferred.payloads_verified);
         std::stop_source cancellation;
         cancellation.request_stop();
         errors.clear();
-        EXPECT_FALSE(
-            WorldSaveService::inspect_save(report.save_dir, &errors, cancellation.get_token()));
+        payloads_verified = true;
+        EXPECT_FALSE(WorldSaveService::inspect_save(
+            report.save_dir, &errors, cancellation.get_token(), &payloads_verified));
+        EXPECT_FALSE(payloads_verified);
         ASSERT_EQ(errors.size(), 1u);
         EXPECT_EQ(errors.front(), "Saved-world validation cancelled.");
         const auto metadata = report.save_dir / "world_info.json";
@@ -292,7 +442,10 @@ TEST_F(SavedWorldCatalogResponsiveness, CatalogAdmissionHandlesMissingPartialAnd
             ASSERT_NO_FATAL_FAILURE(WriteBytes(metadata, partial));
             std::vector<std::string> complete_errors;
             errors.clear();
-            EXPECT_FALSE(WorldSaveService::inspect_save(report.save_dir, &errors));
+            payloads_verified = true;
+            EXPECT_FALSE(
+                WorldSaveService::inspect_save(report.save_dir, &errors, {}, &payloads_verified));
+            EXPECT_FALSE(payloads_verified);
             EXPECT_FALSE(WorldSaveService::validate_save(report.save_dir, &complete_errors));
             EXPECT_EQ(errors, complete_errors);
             EXPECT_FALSE(errors.empty());

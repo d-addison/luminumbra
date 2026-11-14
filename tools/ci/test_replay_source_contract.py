@@ -781,7 +781,7 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         inspect = self.function(source, "inspect_save", "WorldSaveService::")
         validate = self.function(source, "validate_save", "WorldSaveService::")
         self.assertRegex(load, r"return load_world_impl\([\s\S]*,\s*false\);")
-        self.assertRegex(inspect, r"load_world_impl\([\s\S]*nullptr, nullptr, true\);")
+        self.assertRegex(inspect, r"load_world_impl\([\s\S]*nullptr,\s*nullptr,\s*true,\s*payloads_verified\);")
         self.assertIn(".load_world(", validate)
         self.assertNotIn("load_world_impl", validate)
         world = self.function(source, "load_world_impl", "WorldSaveService::")
