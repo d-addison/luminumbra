@@ -239,8 +239,11 @@ SavedWorld InspectSavedWorld(const fs::path& root,
                 result.error = "Saved-world validation cancelled.";
             return result;
         }
-        if (current_container && validation == SavedWorldValidation::Complete &&
-            !WorldSaveService::validate_save(save, &errors, stop)) {
+        const bool needs_validation = validation != SavedWorldValidation::DeferredToPreparation;
+        if (current_container && needs_validation &&
+            !(validation == SavedWorldValidation::Catalog
+                  ? WorldSaveService::inspect_save(save, &errors, stop, &result.payloads_verified)
+                  : WorldSaveService::validate_save(save, &errors, stop))) {
             result.error = errors.empty() ? "Corrupt world save." : errors.front();
             return result;
         }
@@ -248,6 +251,8 @@ SavedWorld InspectSavedWorld(const fs::path& root,
             result.error = "Saved-world validation cancelled.";
             return result;
         }
+        if (validation == SavedWorldValidation::Complete || !current_container)
+            result.payloads_verified = true;
         result.error.clear();
     } catch (const nlohmann::json::exception& e) {
         result.error = std::string("Corrupt world metadata: ") + e.what();
@@ -284,7 +289,8 @@ SavedWorldCatalog EnumerateSavedWorlds(const fs::path& root,
                     InspectSavedWorld(root,
                                       runtime_root,
                                       Filesystem::GenericUtf8PathString(entry.path().filename()),
-                                      stop));
+                                      stop,
+                                      SavedWorldValidation::Catalog));
         }
         if (stop.stop_requested()) {
             result.worlds.clear();

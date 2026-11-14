@@ -26,6 +26,9 @@ struct SavedWorld {
     // An interrupted indexed save left a journal. The listing is metadata-only; opening the world
     // recovers it first (inspection itself never mutates).
     bool pending_recovery = false;
+    // True only after complete payload validation. Indexed catalog and deferred results
+    // remain unverified; opening must validate before adopting any world state.
+    bool payloads_verified = false;
     // Empty when inspection succeeds; deferred inspection still requires state preparation.
     std::string error;
 };
@@ -38,7 +41,10 @@ struct SavedWorldCatalog {
 
 enum class SavedWorldValidation {
     Complete,
-    // Preparation must call load_world before adopting any state. Catalog callers use Complete.
+    // Indexed listings check structure and fingerprints without decoding chunk payloads.
+    // Legacy saves still require complete validation. Opening always validates payloads.
+    Catalog,
+    // Preparation must call load_world before adopting any state.
     DeferredToPreparation
 };
 

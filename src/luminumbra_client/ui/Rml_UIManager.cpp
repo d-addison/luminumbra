@@ -552,6 +552,8 @@ void Rml_UIManager::PopulateWorlds(Rml::ElementDocument* document,
                 if (std::strftime(date, sizeof(date), "%Y-%m-%d %H:%M", time))
                     description += " · created " + std::string(date);
             }
+            if (!world.payloads_verified)
+                description += " · payloads unverified; checked when opened";
         } else {
             description = world.error;
         }
