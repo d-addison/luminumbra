@@ -42,6 +42,209 @@ class UploadBudgetWiring(unittest.TestCase):
         cls.header = read(RENDERING / "RenderPipeline.h")
         cls.main = read(ROOT / "src/luminumbra_client/main_client.cpp")
 
+    def test_near_refinement_runs_only_in_admitted_terrain_uploads(self):
+        manage = body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources(")
+        drain = manage[manage.index("const auto adopt ="):]
+        self.assertIn("copy_terrain_mesh_payload(candidate.chunk, payload)", compact(drain))
+        self.assertLess(drain.index("if (!copied)"),
+                        drain.index("m_near_terrain_refinement.prepare("))
+        self.assertLess(drain.index("m_near_terrain_refinement.prepare("),
+                        drain.index("upload_chunk_mesh(candidate.chunk, payload)"))
+        water = body(drain, "if constexpr (Water)")
+        self.assertNotIn("m_near_terrain_refinement", water)
+        self.assertIn("payload.vertices, payload.indices, elapsed()", compact(drain))
+        self.assertIn("NearTerrainUploadResult::Deferred", drain)
+        self.assertIn("payload.refinement.set(result == NearTerrainUploadResult::Deferred ? nullptr", compact(drain))
+
+    def test_live_refinement_copies_exact_owner_lattice_after_admission_and_validation(self):
+        policy = read(RENDERING / "NearTerrainRefinement.h")
+        prepare = body(policy, "prepare(")
+        self.assertIn("chunk.sdf_data.size() == World::kNearTerrainDensityCount", prepare)
+        self.assertIn("const std::vector<float> density_copy", prepare)
+        self.assertIn("? chunk.sdf_data", prepare)
+        self.assertNotIn("std::move(chunk.sdf_data)", prepare)
+        self.assertIn("std::span<const float>(density_copy)", prepare)
+        self.assertLess(prepare.index("observe(chunk, version, evidence, distance_squared)"),
+                        prepare.index("const std::vector<float> density_copy"))
+        self.assertLess(prepare.index("elapsed_ms >= kTerrainUploadLimits.milliseconds"),
+                        prepare.index("const std::vector<float> density_copy"))
+        self.assertLess(prepare.index("const std::vector<float> density_copy"),
+                        prepare.index("RefineNearTerrain("))
+        native = read(ROOT / "test/rendering/NearTerrainRefinement_test.cpp")
+        for regression in ("LiveEligibilityCopiesItsLatticeWithoutMovingAuthority",
+                           "LiveLatticeRefusesMissingPartialOversizedAndInvalidSamples"):
+            self.assertIn("TEST(NearTerrainUpload, " + regression + ")", native)
+
+    def test_saturated_deadline_preserves_baselines_and_separately_schedules_refinement(self):
+        manage = body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources(")
+        self.assertIn("const auto adopt =", manage)
+        adopt = body(manage, "const auto adopt =")
+        deferred = body(adopt, "if (candidate.refinement_only && result == NearTerrainUploadResult::Deferred)")
+        self.assertEqual(compact(deferred), "return false;")
+        self.assertIn("payload.refinement.set(result == NearTerrainUploadResult::Deferred ? nullptr",
+                      compact(adopt))
+        self.assertLess(adopt.index("payload.refinement.set("),
+                        adopt.index("upload_chunk_mesh(candidate.chunk, payload)"))
+        self.assertIn("auto& destination = refinement_only ? refinement_candidates : candidates", manage)
+        self.assertIn("drain_terrain_uploads(queue, m_near_terrain_upload_queue, cost, adopt, elapsed)",
+                      compact(manage))
+        policy = read(RENDERING / "NearTerrainRefinement.h")
+        scheduler = body(policy, "UploadWorkStats drain_terrain_uploads(")
+        self.assertEqual(scheduler.count("UploadBudget budget("), 1)
+        self.assertLess(scheduler.index("drain(baseline, false)"),
+                        scheduler.index("drain(refinement, true)"))
+        for guard in ("!std::isfinite(elapsed_ms)", "elapsed_ms < 0",
+                      "elapsed_ms >= kTerrainUploadLimits.milliseconds",
+                      "bytes > kTerrainUploadLimits.bytes - used.bytes"):
+            self.assertIn(guard, scheduler)
+        prepare = body(policy, "prepare(")
+        self.assertLess(prepare.index("!m_entries[found->second].refined"),
+                        prepare.index("elapsed_ms >= kTerrainUploadLimits.milliseconds"))
+        for signature in ("void RenderPipeline::clear_all_chunk_data()",
+                          "void RenderPipeline::cleanup_gpu_resources()"):
+            self.assertIn("m_near_terrain_upload_queue.clear()", body(self.pipeline, signature))
+        native = read(ROOT / "test/rendering/NearTerrainRefinement_test.cpp")
+        for regression in ("SaturatedDeadlineStillUploadsBaselineMeshes",
+                           "CachedRefusalsRemainImmediateAfterTheDeadline",
+                           "OptionalReplacementsShareLimitsAndNeverClaimProgressAllowance",
+                           "OptionalFailureRotatesWithoutRepeatingAndCanResume",
+                           "DeadlineAfterOptionalCopyPreservesResidentAndRetries"):
+            self.assertIn("TEST(NearTerrainUpload, " + regression + ")", native)
+
+    def test_near_refinement_cost_reserves_expansion_before_payload_copy(self):
+        manage = body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources(")
+        self.assertLess(manage.index("NearTerrainRefinementCache::upload_cost("),
+                        manage.index("const auto adopt ="))
+        policy = read(RENDERING / "NearTerrainRefinement.h")
+        cost = body(policy, "static std::size_t upload_cost(")
+        self.assertIn("vertices > kNearTerrainMaxInputVertices", cost)
+        self.assertIn("indices / 3 > kNearTerrainMaxInputTriangles", cost)
+        self.assertIn("indices % 3 != 0", cost)
+        self.assertIn("mesh_upload_bytes(", cost)
+        self.assertIn("original_bytes + refined_bytes", cost)
+        prepare = body(policy, "prepare(")
+        self.assertLess(prepare.index("elapsed_ms >= kTerrainUploadLimits.milliseconds"),
+                        prepare.index("RefineNearTerrain("))
+        self.assertIn("NearTerrainUploadResult::Deferred", prepare)
+
+    def test_near_refinement_cache_keys_bounds_and_lifecycle(self):
+        policy = read(RENDERING / "NearTerrainRefinement.h")
+        self.assertIn("kCapacity = 64", policy)
+        self.assertIn("std::array<Entry, kCapacity>", policy)
+        observe = body(policy, "observe(")
+        self.assertIn("evidence->eligible(chunk, version, distance_squared)", compact(observe))
+        self.assertIn("entry.version != version || entry.evidence != current", observe)
+        prepare = body(policy, "prepare(")
+        self.assertLess(prepare.index("m_index.find(chunk.get_id())"),
+                        prepare.index("RefineNearTerrain("))
+        self.assertIn("forget(*m_entries[m_next].id)", prepare)
+        self.assertLess(prepare.index("m_index.emplace("),
+                        prepare.index("forget(*m_entries[m_next].id)"))
+        for signature in ("void RenderPipeline::clear_all_chunk_data()",
+                          "void RenderPipeline::cleanup_gpu_resources()"):
+            self.assertIn("m_near_terrain_refinement.clear()", body(self.pipeline, signature))
+        self.assertIn("m_near_terrain_refinement.forget(chunk_id)",
+                      body(self.pipeline, "void RenderPipeline::unload_chunk_resources("))
+
+    def test_near_refinement_resident_stamp_detects_evidence_and_range_changes(self):
+        manage = body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources(")
+        self.assertLess(manage.index("m_near_terrain_refinement.observe("),
+                        manage.index("if (!is_new && !is_stale)"))
+        self.assertIn("!resident->second.refinement.matches(evidence)", manage)
+        self.assertIn("is_stale = is_stale || refinement_changed", manage)
+        upload = body(self.pipeline, "void RenderPipeline::upload_chunk_mesh(")
+        self.assertLess(upload.index("if (new_handle == ChunkRenderData::kInvalidPoolHandle)"),
+                        upload.index("render_data.refinement = payload.refinement"))
+        self.assertIn("payload.vertices, payload.indices", upload)
+
+    def test_same_version_republished_refinement_uses_required_queue(self):
+        manage = body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources(")
+        # A resident request includes both refined output and cached refusals.
+        # Changed eligible evidence must retire either through required work;
+        # the first upgrade from an unrefined baseline remains optional.
+        self.assertIn("retire_refined = found != records.end() && found->second.refinement.requested",
+                      compact(manage))
+        classification = re.search(r"const bool refinement_only\s*=\s*(.*?);", manage, re.S)
+        self.assertIsNotNone(classification)
+        self.assertEqual(compact(classification.group(1)),
+                         "!Water && !is_new && !is_stale && refinement_requested && !retire_refined")
+        self.assertLess(manage.index("is_stale = is_stale || refinement_changed"),
+                        manage.index("if (!is_new && !is_stale)"))
+        self.assertIn("auto& destination = refinement_only ? refinement_candidates : candidates",
+                      manage)
+        self.assertIn("refresh_uploads( queue, candidates,", compact(manage))
+        self.assertIn("drain_terrain_uploads(queue, m_near_terrain_upload_queue, cost, adopt, elapsed)",
+                      compact(manage))
+
+    def test_last_deferred_baseline_enqueues_refinement_before_settled_accounting(self):
+        manage = body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources(")
+        adopt = body(manage, "const auto adopt =")
+        terrain = body(adopt, "else {")
+        guard = ("if (result == NearTerrainUploadResult::Deferred && "
+                 "failures == stats.terrain_upload_failures)")
+        self.assertIn(guard, compact(terrain))
+        enqueue = body(terrain, "if (result == NearTerrainUploadResult::Deferred &&")
+        for statement in ("auto refinement = candidate;", "refinement.is_new = false;",
+                          "refinement.is_stale = true;", "refinement.refinement_only = true;",
+                          "m_near_terrain_upload_queue.refresh(candidate.chunk.id, refinement);"):
+            self.assertIn(statement, enqueue)
+        # Failed copies/uploads retain required work; optional deferrals retain
+        # their queue entry; completed/refused requests never enqueue a retry.
+        self.assertLess(adopt.index("if (!copied)"), adopt.index(guard.split(" &&")[0]))
+        self.assertLess(terrain.index("if (candidate.refinement_only &&"), terrain.index("auto refinement ="))
+        self.assertLess(terrain.index("upload_chunk_mesh(candidate.chunk, payload)"),
+                        terrain.index("auto refinement ="))
+        accounting = "queue.size() + (Water ? 0 : m_near_terrain_upload_queue.size()) + invalid_payloads"
+        self.assertIn(accounting, compact(manage))
+        self.assertLess(manage.index("m_near_terrain_upload_queue.refresh(candidate.chunk.id, refinement)"),
+                        manage.index(accounting))
+        settled = body(self.header, "bool render_uploads_settled() const")
+        self.assertIn("m_last_mesh_upload_stats.terrain_uploads_deferred == 0", settled)
+
+    def test_near_refinement_retired_or_emptied_mesh_releases_displaced_surface(self):
+        manage = body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources(")
+        residents = body(manage, "for (auto& [id, data] : records)")
+        self.assertIn("m_near_terrain_refinement.forget(id)", residents)
+        self.assertIn("found->second.refinement.requested", manage)
+        self.assertIn("(!Water && !retire_refined)", manage)
+        drain = manage[manage.index("const auto adopt ="):]
+        self.assertIn("unload_chunk_resources(candidate.chunk.id)", drain)
+        copy = body(self.pipeline, "bool RenderPipeline::copy_terrain_mesh_payload(")
+        self.assertIn("(chunk.terrain_vertex_count == 0) != (chunk.terrain_index_count == 0)", copy)
+        self.assertIn("payload.vertices.empty() != payload.indices.empty()", copy)
+        self.assertNotIn("!chunk.has_terrain_mesh()", copy)
+
+    def test_near_refinement_setting_is_off_persistent_and_applied_transactionally(self):
+        presets = ROOT / "src/luminumbra_common/core"
+        self.assertIn("bool terrain_near_refinement = false;", read(presets / "GraphicsPresets.h"))
+        source = read(presets / "GraphicsPresets.cpp")
+        self.assertIn(".terrain_near_refinement = false,", source)
+        self.assertIn('key == "terrain_near_refinement"', source)
+        self.assertIn("values.terrain_near_refinement = *enabled", source)
+        self.assertIn("values.terrain_near_refinement);", source)
+        apply = body(self.pipeline, "bool RenderPipeline::apply_graphics(")
+        self.assertLess(apply.index("if (!resize_graphics_targets("),
+                        apply.index("m_near_terrain_refinement.set_enabled("))
+        self.assertIn("resolved.values.terrain_near_refinement", apply)
+        native = read(ROOT / "test/rendering/NearTerrainRefinement_test.cpp")
+        self.assertIn("SettingDefaultsAndPersistenceRoundTrip", native)
+        self.assertIn("config.SaveUserOverlay(file.Path().string())", native)
+        self.assertIn('SystemConfig::LoadLayered("", file.Path().string())', native)
+
+    def test_near_refinement_ui_toggle_uses_boolean_graphics_listing(self):
+        import xml.etree.ElementTree as ET
+        markup = ET.parse(ROOT / "data/ui/settings.rml").getroot()
+        controls = {item.get("id"): item for item in markup.iter() if item.get("id")}
+        control = controls["graphics_terrain_near_refinement"]
+        self.assertEqual(control.get("data-key"), "terrain_near_refinement")
+        self.assertIn("graphics-control", control.get("class"))
+        self.assertEqual([option.get("value") for option in control], ["on", "off"])
+        self.assertIn("graphics_terrain_near_refinement_session", controls)
+        ui = read(ROOT / "src/luminumbra_client/ui/Rml_UIManager.cpp")
+        self.assertIn('edit.key == "grass_enabled" || edit.key == "terrain_near_refinement"', ui)
+        self.assertIn('document->GetElementById("graphics_terrain_near_refinement")', ui)
+        self.assertIn('values.terrain_near_refinement ? "on" : "off"', ui)
+
     def test_near_terrain_eligibility_publishes_with_matching_mesh_version(self):
         world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
         self.assertIn("CaptureNearTerrainMeshEvidence(", world)
@@ -835,7 +1038,9 @@ class UploadBudgetWiring(unittest.TestCase):
 
     def test_empty_water_replacements_are_adopted_through_the_budget(self):
         integrate = body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources(")
-        self.assertIn("!Water || found == records.end() || found->second.element_count == 0", integrate)
+        self.assertIn("(!Water && !retire_refined) || found == records.end() ||", compact(integrate))
+        self.assertIn("found->second.element_count == 0", integrate)
+        self.assertIn("bool retire_refined = false", integrate)
         self.assertIn("!chunk.water_metadata_valid", integrate)
         self.assertIn("if (payload.has_mesh())", integrate)
         self.assertIn("unload_water_resources(candidate.chunk.id)", integrate)

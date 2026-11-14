@@ -1397,6 +1397,8 @@ void Rml_UIManager::PopulateGraphicsForm(Rml::ElementDocument* document) {
                     std::to_string(values.volumetric_quality));
     SetControlValue(document->GetElementById("graphics_grass_enabled"),
                     values.grass_enabled ? "on" : "off");
+    SetControlValue(document->GetElementById("graphics_terrain_near_refinement"),
+                    values.terrain_near_refinement ? "on" : "off");
     SetControlValue(document->GetElementById("graphics_ui_blur"),
                     values.ui_blur == luminumbra::core::UiBlurQuality::Off    ? "off"
                     : values.ui_blur == luminumbra::core::UiBlurQuality::Half ? "half"
@@ -1556,7 +1558,7 @@ void Rml_UIManager::BindSettingsListeners(Rml::ElementDocument* document) {
                 const auto text = ReadFormControlValue(target, "");
                 if (edit.key == "ui_blur") {
                     edit.value = text;
-                } else if (edit.key == "grass_enabled") {
+                } else if (edit.key == "grass_enabled" || edit.key == "terrain_near_refinement") {
                     if (text != "on" && text != "off")
                         return;
                     edit.value = text == "on";
