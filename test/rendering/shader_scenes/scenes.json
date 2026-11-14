@@ -11,20 +11,35 @@
       ],
       "name": "material",
       "reference": "references/material.ppm"
+    },
+    {
+      "mask": [
+        0,
+        0,
+        128,
+        128
+      ],
+      "name": "tree-cutout",
+      "reference": "references/tree-cutout.ppm"
     }
   ],
   "inputs": {
     "res/shaders/static_asset.frag": "1d2262e2c9d905e69560c8879c1a5f88c283a6fa3e38ddeb46c06306f91a7512",
     "res/shaders/static_asset.vert": "3c6ca3b3154e0f28bbecd1c5fa2048b09e6623a1a58823b64d6a01e5f78e475d",
-    "test/rendering/shader_scene_render_test.cpp": "dd629fc7dcb1218aa1f59affa364b6ad6d27f7cbc22acb033f1c526d5fa43e9b"
+    "res/shaders/tree_impostor.frag": "25391749ee76bcbf3804cbacd7746426bf97926e7e1b0dc07ca8b90306e74764",
+    "res/shaders/tree_impostor.vert": "6e69ff1391d2d6dd6ef93d7c72c3c387cc4009b3bccf317e5c050018f2e1d796",
+    "test/rendering/shader_scene_render_test.cpp": "9b606df90efa2c3b99fd54a197d6da58c9a946ffb932b3eedd82d74412137881"
   },
   "reference_capture": {
     "origin": "analytical",
-    "renderer": "analytical material fixture",
+    "renderer": "analytical material and tree cutout fixtures",
     "version": "not captured"
   },
-  "reference_sha256": "a7b13d68514eae8135d6f6b4921a85157476061fee5e1e70807978daba64b855",
-  "schema": 1,
+  "reference_sha256": {
+    "material": "a7b13d68514eae8135d6f6b4921a85157476061fee5e1e70807978daba64b855",
+    "tree-cutout": "d2f7312235786b11c22e66a155d2f4699ab7112bd80a65e30e88558a89705e95"
+  },
+  "schema": 2,
   "size": [
     128,
     128
