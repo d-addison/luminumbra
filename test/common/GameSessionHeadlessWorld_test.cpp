@@ -11020,6 +11020,132 @@ entt::entity AddSessionScentParticipant(GameSession& session, int kind, float x)
     return entity;
 }
 
+class CopyCheckedCellGate {
+public:
+    explicit CopyCheckedCellGate(const bool& fail)
+        : m_fail(fail) {}
+    CopyCheckedCellGate(const CopyCheckedCellGate& other)
+        : m_fail(other.m_fail) {
+        if (m_fail) {
+            throw std::runtime_error("cell gate copy failed");
+        }
+    }
+    bool operator()(int, int) const {
+        return true;
+    }
+
+private:
+    const bool& m_fail;
+};
+
+void CheckConcreteScentAdmission(bool active_regions) {
+    SCOPED_TRACE(active_regions);
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession concrete, erased;
+    const auto ledger = ScheduledFieldLedger(31,
+                                             {{kFieldOwner, RegionState::Active},
+                                              {{-1, 0}, RegionState::Frozen},
+                                              {{0, -1}, RegionState::Reduced}});
+    for (auto* session : {&concrete, &erased}) {
+        if (active_regions) {
+            ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(*session, root, jobs, ledger, {}));
+        } else {
+            EnableSnapshotSession(*session, root, jobs);
+            session->SetActiveRegionsEnabled(false);
+            ASSERT_TRUE(session->CreateWorld("Legacy scent admission", "1337", "default"));
+        }
+        for (int kind = 0; kind < 3; ++kind) {
+            AddSessionScentParticipant(*session, kind, -1);
+            AddSessionScentParticipant(*session, kind, 1);
+        }
+    }
+    if (active_regions) {
+        erased.GetScentField()->BindDepositGate(
+            [&erased](int x, int z) { return erased.ScentCellDue(x, z); });
+    }
+    for (int tick = 0; tick < 5; ++tick) {
+        SCOPED_TRACE(tick);
+        // Include every grid cell, missing/frozen/reduced owners, and the outer boundary.
+        const int cells = concrete.ScentFieldCells();
+        std::size_t allowed_cells = 0;
+        for (int x = -1; x <= cells; ++x) {
+            for (int z = -1; z <= cells; ++z) {
+                const bool allowed = concrete.GetScentField()->SimulationCellAllowed(x, z);
+                allowed_cells +=
+                    static_cast<std::size_t>(allowed && concrete.GetScentField()->in_bounds(x, z));
+                EXPECT_EQ(allowed, erased.GetScentField()->SimulationCellAllowed(x, z));
+                for (auto* session : {&concrete, &erased}) {
+                    session->GetScentField()->Deposit(0, x, z, 0.125);
+                }
+            }
+        }
+        if (active_regions && tick > 0) {
+            EXPECT_GT(allowed_cells, 0u);
+            EXPECT_LT(allowed_cells,
+                      static_cast<std::size_t>(cells) * static_cast<std::size_t>(cells));
+        }
+        TickOnce(concrete);
+        TickOnce(erased);
+        ASSERT_FALSE(concrete.GetRegionSchedulerFault());
+        ASSERT_FALSE(erased.GetRegionSchedulerFault());
+        EXPECT_EQ(SessionScentBits(concrete), SessionScentBits(erased));
+        EXPECT_FALSE(concrete.ComputeScentSubHash().empty());
+        EXPECT_EQ(concrete.ComputeScentSubHash(), erased.ComputeScentSubHash());
+        EXPECT_EQ(concrete.GetFieldPages().serialize(), erased.GetFieldPages().serialize());
+        namespace C = Luminumbra::Components;
+        for (const auto entity : concrete.GetRegistry().view<C::ForagerComponent>()) {
+            const auto& actual = concrete.GetRegistry().get<C::ForagerComponent>(entity);
+            const auto& expected = erased.GetRegistry().get<C::ForagerComponent>(entity);
+            EXPECT_EQ(actual.cell_x, expected.cell_x);
+            EXPECT_EQ(actual.cell_z, expected.cell_z);
+            EXPECT_EQ(actual.carrying_food, expected.carrying_food);
+            EXPECT_EQ(actual.deliveries, expected.deliveries);
+        }
+        for (const auto entity : concrete.GetRegistry().view<C::LocomotionIntentComponent>()) {
+            EXPECT_EQ(concrete.GetRegistry().get<C::LocomotionIntentComponent>(entity).wish_xz,
+                      erased.GetRegistry().get<C::LocomotionIntentComponent>(entity).wish_xz);
+        }
+    }
+    ASSERT_TRUE(concrete.SaveWorld());
+    ASSERT_TRUE(erased.SaveWorld());
+    const auto saved_fields =
+        ReadClockTestFile(P::WorldSaveService::field_pages_path(concrete.GetWorldSaveDir()));
+    if (active_regions) {
+        EXPECT_FALSE(saved_fields.empty());
+    }
+    EXPECT_EQ(saved_fields,
+              ReadClockTestFile(P::WorldSaveService::field_pages_path(erased.GetWorldSaveDir())));
+
+    if (active_regions) {
+        auto field = *concrete.GetScentField();
+        field.BindDepositGate({});
+        EXPECT_TRUE(field.SimulationCellAllowed(-1, -1));
+        field.BindSessionAdmission(concrete);
+        EXPECT_FALSE(field.SimulationCellAllowed(-1, -1));
+        bool fail_copy = false;
+        const luminumbra::ai::ScentField::CellGate callback{CopyCheckedCellGate(fail_copy)};
+        fail_copy = true;
+        EXPECT_THROW(field.BindDepositGate(callback), std::runtime_error);
+        EXPECT_FALSE(field.SimulationCellAllowed(-1, -1));
+        const auto spawn = concrete.GetMetadata().spawnPoint;
+        auto invalid_spawn = spawn;
+        invalid_spawn.x = std::numeric_limits<float>::quiet_NaN();
+        concrete.SetSpawnPoint(invalid_spawn);
+        EXPECT_FALSE(field.SimulationCellAllowed(64, 64));
+        EXPECT_FALSE(concrete.GetScentField()->SimulationCellAllowed(64, 64));
+        concrete.SetSpawnPoint(spawn);
+        concrete.GetSimulationEventBus().subscribe(
+            [](const auto&) { throw std::runtime_error("scent admission fault"); });
+        concrete.GetSimulationEventBus().publish(
+            concrete.GetWorldClock().tick() + 1, "scent-test", "");
+        TickOnce(concrete);
+        ASSERT_TRUE(concrete.GetRegionSchedulerFault());
+        EXPECT_FALSE(field.SimulationCellAllowed(64, 64));
+    }
+}
+
 void CheckSpawnScentConsumers(GameSession& session) {
     namespace C = Luminumbra::Components;
     const auto spawn = session.GetMetadata().spawnPoint;
@@ -11843,6 +11969,12 @@ TEST(GameSessionHeadlessWorldTest, RegionalScentRecentersOnSpawnWithoutChangingH
 
 TEST(GameSessionHeadlessWorldTest, ScentEligibilityWorkStaysFixedAsDueRegionsGrow) {
     ASSERT_NO_FATAL_FAILURE(CheckSessionScentDueQueryCost());
+}
+
+TEST(GameSessionHeadlessWorldTest, ConcreteScentAdmissionMatchesErasedGridHashesAndSaveBytes) {
+    for (const bool active_regions : {false, true}) {
+        ASSERT_NO_FATAL_FAILURE(CheckConcreteScentAdmission(active_regions));
+    }
 }
 
 TEST(GameSessionHeadlessWorldTest, ActiveScentContinuesBitExactlyAcrossReopenAtCurrentSpawn) {

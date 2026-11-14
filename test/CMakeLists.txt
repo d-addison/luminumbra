@@ -199,6 +199,7 @@ add_executable(common_tests
     common/StationDiscovery_test.cpp
     common/Crc32_test.cpp
     rendering/shader_compositing_contract_test.cpp
+    rendering/photo_environment_test.cpp
     common/AnimationRuntime_test.cpp
     common/AnimationClipFormat_test.cpp
     common/BiomeReverb_test.cpp
@@ -437,14 +438,14 @@ target_include_directories(rendering_defaults_test PRIVATE ../src)
 target_link_libraries(rendering_defaults_test PRIVATE gtest_main)
 luminumbra_configure_first_party_target(rendering_defaults_test)
 
-# GL-free capture provenance builder and filesystem publication lifecycle.
+# Capture codecs, bounded draw registry, filesystem publication and modeled GL target lifecycle.
 add_executable(capture_manifest_test
     rendering/capture_manifest_test.cpp
     rendering/diagnostic_capture_test.cpp
     ../src/luminumbra_client/rendering/CaptureManifest.cpp
     ../src/luminumbra_client/rendering/DiagnosticCapture.cpp)
 target_include_directories(capture_manifest_test PRIVATE ../src ../src/luminumbra_client)
-target_link_libraries(capture_manifest_test PRIVATE gtest_main nlohmann_json::nlohmann_json)
+target_link_libraries(capture_manifest_test PRIVATE gtest_main nlohmann_json::nlohmann_json glad)
 luminumbra_configure_first_party_target(capture_manifest_test)
 
 #  far-field impostors: the hemi-octahedral view<->tile mapping math (GL-free,
@@ -2774,6 +2775,38 @@ add_test(NAME ReplaySourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
 add_test(NAME RenderRunnerEvidencePython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_runner_evidence.py)
 set_tests_properties(RenderRunnerEvidencePython PROPERTIES TIMEOUT 60)
 add_test(NAME RenderSceneMatrixPython COMMAND "${Python3_EXECUTABLE}" -B ${CMAKE_SOURCE_DIR}/tools/rendering/acceptance/test_scene_matrix.py)
+
+# Opt-in advisory scenes do not enter required native test plans.
+option(LUMINUMBRA_SHADER_SCENES "Register software shader reference scenes" OFF)
+if(LUMINUMBRA_SHADER_SCENES)
+    add_executable(shader_scene_render_test rendering/shader_scene_render_test.cpp)
+    # Re-run configuration when the fixture changes so its embedded hash stays current.
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/test/rendering/shader_scene_render_test.cpp")
+    file(READ "${CMAKE_SOURCE_DIR}/test/rendering/shader_scene_render_test.cpp" _shader_scene_source)
+    string(REPLACE "\r\n" "\n" _shader_scene_source "${_shader_scene_source}")
+    string(SHA256 _shader_scene_hash "${_shader_scene_source}")
+    target_compile_definitions(shader_scene_render_test PRIVATE
+        LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+        LUMINUMBRA_SHADER_SCENE_INPUT_HASH="${_shader_scene_hash}")
+    target_link_libraries(shader_scene_render_test PRIVATE gtest_main glfw glad)
+    if(WIN32)
+        target_link_libraries(shader_scene_render_test PRIVATE opengl32)
+    elseif(APPLE)
+        target_link_libraries(shader_scene_render_test PRIVATE ${OPENGL_LIBRARIES})
+    else()
+        target_link_libraries(shader_scene_render_test PRIVATE OpenGL::GL)
+    endif()
+    luminumbra_configure_first_party_target(shader_scene_render_test)
+    add_test(NAME ShaderSceneSoftwareGl COMMAND "${Python3_EXECUTABLE}" -I -B
+        "${CMAKE_SOURCE_DIR}/tools/static_preview/run_software_gl.py"
+        --binary "$<TARGET_FILE:shader_scene_render_test>" --profile shader-scenes
+        --output-parent "${CMAKE_BINARY_DIR}/shader-scene-capture")
+    set_tests_properties(ShaderSceneSoftwareGl PROPERTIES TIMEOUT 180
+        RESOURCE_LOCK luminumbra_gl_context)
+endif()
+add_test(NAME ShaderScenesPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/tools/gates/test_shader_scenes.py")
 
 # Ordinary test lanes need no downloaded game art. Generate valid synthetic
 # meshes/materials and their manifest solely for the isolated runner roots.
