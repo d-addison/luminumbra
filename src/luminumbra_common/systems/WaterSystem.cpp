@@ -346,11 +346,8 @@ void StepChunkWaterFixed(Chunk& c,
     // Bed/depth are authoritative. Flux may be absent in adopted grids; restore
     // the historical zero-momentum initialization, bounded to 2 * 32 * 32 entries.
     if (c.water_edge_flux.size() != 2 * static_cast<std::size_t>(n)) {
-        const bool replacing_flux = !c.water_edge_flux.empty();
         c.water_edge_flux.assign(2 * static_cast<std::size_t>(n), 0);
-        if (replacing_flux) {
-            MarkRuntimeWaterMutation(c);
-        }
+        MarkRuntimeWaterMutation(c);
     }
 
     // Refusal scratch is bounded by the validated 32x32 grid; the legacy path copies nothing.
@@ -1123,10 +1120,8 @@ void WaterSystem::initialize_water_chunks(std::span<Chunk* const> pending,
             seed_chunk_water(to_init[i],
                              terrain_seed[i],
                              inputs && inputs->ready_for(m_sim_resolution) ? inputs : nullptr);
-            // Worldgen seeding is regenerable, including on the deterministic path.
-            // Existing owned water still needs its replacement state saved.
-            if (to_init[i]->has_water_authority()) {
-                MarkRuntimeWaterMutation(*to_init[i]);
+            if (deterministic_authority || to_init[i]->needs_authority()) {
+                MarkRuntimeWaterMutation(*to_init[i], deterministic_authority);
             }
             m_water_activity_cache.erase(to_init[i]->get_id());
             m_mesh_invalidations.insert(to_init[i]->get_id());
@@ -1674,6 +1669,9 @@ void WaterSystem::update(entt::registry& registry,
     std::int64_t depth_before = 0, depth_after = 0;
     std::int64_t src_mm = 0, sink_mm = 0;
     for (Chunk* chunk : chunks_to_sim) {
+        if (deterministic_authority && !chunk->has_water_authority()) {
+            chunk->mark_water_data_dirty();
+        }
         const auto result =
             WaterKernels::StepInterior(*chunk,
                                        *m_shield_system,
@@ -1733,11 +1731,6 @@ void WaterSystem::update(entt::registry& registry,
     const float SLEEP_THRESHOLD = 0.0001f; // The max water level change to be considered "calm"
 
     for (Chunk* chunk : chunks_to_sim) {
-        // Kernels and seams queue real evolution; an idle visit must not claim ownership.
-        if (deterministic_authority && chunk->is_water_state_dirty() &&
-            !chunk->has_water_authority()) {
-            chunk->mark_water_data_dirty();
-        }
         const auto previous_counter = chunk->ticks_below_threshold;
         const bool was_sleeping = chunk->is_water_sleeping.load(std::memory_order_relaxed);
         if (chunk->max_water_delta_last_tick < SLEEP_THRESHOLD) {
@@ -1752,12 +1745,9 @@ void WaterSystem::update(entt::registry& registry,
             chunk->ticks_below_threshold = 0;
             chunk->is_water_sleeping.store(false, std::memory_order_relaxed);
         }
-        if (chunk->is_water_sleeping.load(std::memory_order_relaxed) != was_sleeping) {
+        if (chunk->ticks_below_threshold != previous_counter ||
+            chunk->is_water_sleeping.load(std::memory_order_relaxed) != was_sleeping)
             MarkWaterBookkeeping(*chunk, deterministic_authority);
-        } else if (chunk->ticks_below_threshold != previous_counter &&
-                   chunk->has_water_authority()) {
-            MarkWaterBookkeeping(*chunk);
-        }
         if (m_sim_resolution != static_cast<int>(WaterDetailLevel::Medium)) {
             m_water_activity_cache[chunk->get_id()] = WaterActivityScore(*chunk);
         }

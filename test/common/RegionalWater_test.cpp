@@ -60,7 +60,7 @@ auto Snapshot(const Chunk& chunk) {
                            chunk.water_revision());
 }
 
-TEST(RegionalWater, MissingZeroFluxInitializationDoesNotDirtyButPartialFluxReplacementDoes) {
+TEST(RegionalWater, MissingAndPartialFluxReplacementPublishWaterChanges) {
     SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
     for (const bool partial : {false, true}) {
         SCOPED_TRACE(partial);
@@ -76,9 +76,9 @@ TEST(RegionalWater, MissingZeroFluxInitializationDoesNotDirtyButPartialFluxRepla
                 .applied);
         EXPECT_EQ(chunk.water_depth_mm, std::vector<std::int32_t>(64, 0));
         EXPECT_EQ(chunk.water_edge_flux, std::vector<std::int32_t>(128, 0));
-        EXPECT_EQ(chunk.is_water_state_dirty(), partial);
-        EXPECT_EQ(chunk.is_voxel_data_dirty(), partial);
-        EXPECT_EQ(chunk.water_revision(), partial ? 1u : 0u);
+        EXPECT_TRUE(chunk.is_water_state_dirty());
+        EXPECT_TRUE(chunk.is_voxel_data_dirty());
+        EXPECT_EQ(chunk.water_revision(), 1u);
     }
 }
 
@@ -2291,7 +2291,7 @@ std::string TransactionBytes(const Chunk& chunk, bool metadata = true) {
     return bytes;
 }
 
-TEST(RegionalWaterTransaction, InitializationDoesNotPublishDurableWater) {
+TEST(RegionalWaterTransaction, InitializationPublishesWaterAuthority) {
     SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
     auto ledger = PlanningLedger({{0, 0}});
     const auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
@@ -2302,12 +2302,12 @@ TEST(RegionalWaterTransaction, InitializationDoesNotPublishDurableWater) {
     stage.Inject({.target = chunk->get_id(), .cell = 0, .millimetres = 0});
     stage.Publish(&shield);
     EXPECT_TRUE(chunk->has_complete_water_state());
-    EXPECT_FALSE(chunk->has_water_authority());
-    EXPECT_FALSE(chunk->is_voxel_data_dirty());
-    EXPECT_EQ(chunk->water_revision(), 0u);
+    EXPECT_TRUE(chunk->has_water_authority());
+    EXPECT_TRUE(chunk->is_voxel_data_dirty());
+    EXPECT_EQ(chunk->water_revision(), 1u);
 }
 
-TEST(RegionalWaterTransaction, MirrorRefreshAndUnownedCalmTimeDoNotPublishDurableWater) {
+TEST(RegionalWaterTransaction, MirrorRefreshAndCalmTimePublishWaterAuthority) {
     SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
     for (const bool owned : {false, true}) {
         SCOPED_TRACE(owned);
@@ -2328,16 +2328,16 @@ TEST(RegionalWaterTransaction, MirrorRefreshAndUnownedCalmTimeDoNotPublishDurabl
         stage.Publish(&shield);
         EXPECT_EQ(chunk->water_level_data, std::vector<float>(64, 1.0f));
         EXPECT_EQ(chunk->ticks_below_threshold, owned ? 0 : 1);
-        EXPECT_EQ(chunk->has_water_authority(), owned);
-        EXPECT_FALSE(chunk->is_voxel_data_dirty());
-        EXPECT_EQ(chunk->water_revision(), 0u);
+        EXPECT_TRUE(chunk->has_water_authority());
+        EXPECT_TRUE(chunk->is_voxel_data_dirty());
+        EXPECT_EQ(chunk->water_revision(), 1u);
     }
 }
 
 TEST(RegionalWaterTransaction, GenuineMutationsPublishAndRoundTripAfterCleanPreparation) {
     namespace P = Luminumbra::Persistence;
     SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
-    // Depth, flux-only decay, sleep, wake, and resolution each independently claim ownership.
+    // Depth, flux-only decay, sleep, wake, and resolution each publish another revision.
     for (int mutation = 0; mutation < 5; ++mutation) {
         SCOPED_TRACE(mutation);
         auto ledger = PlanningLedger({{0, 0}});
@@ -2350,8 +2350,9 @@ TEST(RegionalWaterTransaction, GenuineMutationsPublishAndRoundTripAfterCleanPrep
                 clean.StepInterior(chunk->get_id(), shield, {.finite_hydrology = true}).applied);
             clean.Publish(&shield);
         }
-        ASSERT_FALSE(chunk->has_water_authority());
-        ASSERT_EQ(chunk->water_revision(), 0u);
+        ASSERT_TRUE(chunk->has_water_authority());
+        ASSERT_EQ(chunk->water_revision(), 1u);
+        chunk->clear_voxel_data_dirty();
         if (mutation == 1) {
             chunk->water_edge_flux[0] = 1;
         }
@@ -2378,7 +2379,7 @@ TEST(RegionalWaterTransaction, GenuineMutationsPublishAndRoundTripAfterCleanPrep
         stage.Publish(&shield);
         EXPECT_TRUE(chunk->has_water_authority());
         EXPECT_TRUE(chunk->is_voxel_data_dirty());
-        EXPECT_EQ(chunk->water_revision(), 1u);
+        EXPECT_EQ(chunk->water_revision(), 2u);
         WorldStreamingState restored;
         std::vector<std::string> errors;
         ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(

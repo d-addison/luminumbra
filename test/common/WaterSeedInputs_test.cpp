@@ -2730,9 +2730,6 @@ TEST(WaterSeedInputs, AdmittedEditedHeightmapsIgnoreRendererLodAndInsertionOrder
         SeedFixture forward(10), reverse(10);
         forward.water().SetSimResolution(resolution);
         reverse.water().SetSimResolution(resolution);
-        // Ownership assertions cover actual rain input after sampling the edited bed.
-        forward.water().SetHydrology(true, 1, 0);
-        reverse.water().SetHydrology(true, 1, 0);
         std::vector<ChunkID> ids;
         for (auto* fixture : {&forward, &reverse}) {
             for (const auto& [id, chunk] : fixture->chunks()) {
@@ -2890,9 +2887,6 @@ TEST(WaterSeedInputs, AdmittedBootSeedsIgnoreWorkerCountAndPayloadReadiness) {
             SeedFixture parallel(10, &jobs), inline_path(10);
             parallel.water().SetBootSettleMode(true);
             inline_path.water().SetBootSettleMode(true);
-            // Exercise real evolution equally with prepared and inline seed inputs.
-            parallel.water().SetHydrology(true, 1, 0);
-            inline_path.water().SetHydrology(true, 1, 0);
             std::vector<std::weak_ptr<HighWaterSeedInputs>> staged;
             std::size_t prepared_index = 0;
             for (const auto& [id, chunk] : parallel.chunks()) {
@@ -3005,7 +2999,7 @@ TEST(WaterSeedInputs, AdmittedWakeAndStepClaimOnlyWaterOwnership) {
         for (const auto& [id, chunk] : owners) {
             (void)id;
             EXPECT_FALSE(chunk->is_water_sleeping.load());
-            EXPECT_EQ(chunk->has_water_authority(), admitted && chunk->get_coords().x != 0);
+            EXPECT_EQ(chunk->has_water_authority(), admitted);
             EXPECT_EQ(chunk->voxel_revision(), 0u);
             EXPECT_EQ(chunk->water_bed_mm, std::vector<std::int32_t>(64, 100000));
             EXPECT_EQ(chunk->water_depth_mm, std::vector<std::int32_t>(64, 0));

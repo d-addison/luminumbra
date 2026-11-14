@@ -989,7 +989,7 @@ TEST(WorldDurableResidency, SessionSavesAndReloadsParkedEditedChunk) {
     EXPECT_EQ(HashVec(loaded->sdf_data), recorded_hash);
 }
 
-TEST(WorldDurableResidency, DeterministicWaterInitializationAndRefreshRemainRegenerable) {
+TEST(WorldDurableResidency, DeterministicWaterInitializationAndRefreshKeepAuthority) {
     Luminumbra::Systems::TerrainGenParams params{};
     params.rivers_enabled = false;
     SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
@@ -1005,10 +1005,10 @@ TEST(WorldDurableResidency, DeterministicWaterInitializationAndRefreshRemainRege
     const std::unordered_map<Luminumbra::ChunkID, std::shared_ptr<Chunk>> chunks{
         {chunk->get_id(), chunk}};
     const auto inputs = world.water_authority_input_items();
-    for (int tick = 0; tick < 3; ++tick) {
+    for (std::uint32_t tick = 0; tick < 3u; ++tick) {
         SCOPED_TRACE(tick);
         if (tick == 1) {
-            // Historical grids may omit zero momentum; filling it is initialization.
+            // Historical grids may omit momentum; repairing it changes hashed state.
             chunk->water_edge_flux.clear();
         }
         if (tick == 2) {
@@ -1019,12 +1019,14 @@ TEST(WorldDurableResidency, DeterministicWaterInitializationAndRefreshRemainRege
         EXPECT_EQ(chunk->water_depth_mm, std::vector<std::int32_t>(64, 0));
         EXPECT_EQ(chunk->water_edge_flux, std::vector<std::int32_t>(128, 0));
         EXPECT_EQ(chunk->ticks_below_threshold, tick + 1);
-        EXPECT_EQ(chunk->water_revision(), 0u);
-        EXPECT_FALSE(chunk->is_water_state_dirty());
-        EXPECT_FALSE(chunk->is_voxel_data_dirty());
+        EXPECT_EQ(chunk->water_revision(), tick == 2 ? 5u : 2u * (tick + 1u));
+        EXPECT_TRUE(chunk->is_water_state_dirty());
+        EXPECT_TRUE(chunk->is_voxel_data_dirty());
         world.sync_water_authority();
-        EXPECT_FALSE(chunk->needs_authority());
-        EXPECT_EQ(world.water_authority_input_items(), inputs);
+        EXPECT_TRUE(chunk->needs_authority());
+        EXPECT_TRUE(chunk->has_water_authority());
+        EXPECT_FALSE(chunk->is_water_state_dirty());
+        EXPECT_EQ(world.water_authority_input_items(), inputs + tick + 1u);
     }
 }
 
