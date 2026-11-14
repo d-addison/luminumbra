@@ -6975,19 +6975,31 @@ SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const {
     return snapshot;
 }
 
-bool SHIELD_WorldSystem::is_far_lod_sdf_snapshot_current(const FarLodSdfSnapshot& snapshot) const {
+bool SHIELD_WorldSystem::is_far_lod_sdf_snapshot_current(const FarLodSdfSnapshot& snapshot,
+                                                         bool region_scoped) const {
     if (m_durable_read_failed)
         return false;
     constexpr int kFootprintSpan = World::kFarLodRegionSizeMeters / CHUNK_SIZE_X + 2;
     if (snapshot.params_hash != World::ComputeTerrainParamsHash(m_params, m_seed) ||
-        snapshot.authority_revision !=
-            m_far_lod_authority_revision.load(std::memory_order_acquire) ||
         snapshot.min_chunk_coords.x < Chunk::kPackedMinXz ||
         snapshot.min_chunk_coords.y < Chunk::kPackedMinXz ||
         static_cast<std::int64_t>(snapshot.min_chunk_coords.x) + kFootprintSpan - 1 >
             Chunk::kPackedMaxXz ||
         static_cast<std::int64_t>(snapshot.min_chunk_coords.y) + kFootprintSpan - 1 >
             Chunk::kPackedMaxXz) {
+        return false;
+    }
+    if (region_scoped) {
+        constexpr int kRegionSpan = World::kFarLodRegionSizeMeters / CHUNK_SIZE_X;
+        const int home_x = snapshot.min_chunk_coords.x + 1;
+        const int home_z = snapshot.min_chunk_coords.y + 1;
+        if (home_x % kRegionSpan != 0 || home_z % kRegionSpan != 0 ||
+            snapshot.region_authority_revision !=
+                far_lod_region_authority_revision(home_x / kRegionSpan, home_z / kRegionSpan)) {
+            return false;
+        }
+    } else if (snapshot.authority_revision !=
+               m_far_lod_authority_revision.load(std::memory_order_acquire)) {
         return false;
     }
 

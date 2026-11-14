@@ -1556,6 +1556,8 @@ TEST(FarLodWorker, CameraRegionCoveragePreservesLiveTerrainAndWaterOwnership) {
                 far.update(world, pose.camera);
                 jobs.wait(jobs.dispatch_batch({[] {
                 }}));
+                // Unrelated authority changes must not starve terrain and water uploads.
+                world.notify_far_lod_authority_changed(IVec3(10000, 0, 10000));
             }
             const int rx = static_cast<int>(std::floor(pose.camera.x / 512.0f));
             const int rz = static_cast<int>(std::floor(pose.camera.z / 512.0f));
