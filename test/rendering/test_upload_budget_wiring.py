@@ -332,7 +332,8 @@ class UploadBudgetWiring(unittest.TestCase):
         cleanup = body(self.main, "auto finish_world_replacement =")
         guard = "if (gameSession->WorldRevision() != entry_world_revision)"
         self.assertIn(guard, cleanup)
-        self.assertEqual(compact(cleanup.split(guard, 1)[1]), "prepare_world_entry();")
+        self.assertEqual(compact(cleanup.split(guard, 1)[1]),
+                         "{ release_player_controller(); prepare_world_entry(); }")
         # Both outcomes use the same revision predicate: refusal before adoption
         # preserves state; success and a failure after adoption both retire it.
         expression = re.search(r"if \((.*)\)", cleanup).group(1)
