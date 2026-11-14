@@ -4551,7 +4551,8 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
                 is_stale || (!is_new && m_frame_far_selection.effective == FarWorldMode::Ladder &&
                              !found->second.LadderUploadValid());
         }
-        const bool refinement_only = !Water && !is_new && !is_stale && refinement_requested;
+        const bool refinement_only =
+            !Water && !is_new && !is_stale && refinement_requested && !retire_refined;
         is_stale = is_stale || refinement_changed;
         if (!is_new && !is_stale)
             continue;
@@ -4661,6 +4662,16 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
                 upload_chunk_mesh(candidate.chunk, payload);
             } else {
                 unload_chunk_resources(candidate.chunk.id);
+            }
+            if (result == NearTerrainUploadResult::Deferred &&
+                failures == stats.terrain_upload_failures) {
+                // One metadata entry per adopted baseline keeps settling aware
+                // of its pending refinement before the next frame's discovery.
+                auto refinement = candidate;
+                refinement.is_new = false;
+                refinement.is_stale = true;
+                refinement.refinement_only = true;
+                m_near_terrain_upload_queue.refresh(candidate.chunk.id, refinement);
             }
         }
         return failures == (Water ? stats.water_upload_failures : stats.terrain_upload_failures);

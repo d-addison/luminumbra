@@ -420,8 +420,10 @@ struct EligibilityPatch {
         chunks[13]->sdf_data = densities;
         const auto snapshot =
             World::CompleteNearTerrainMeshSnapshot(evidence, densities, retain_densities);
-        EXPECT_EQ(snapshot->densities.size(),
-                  retain_densities ? World::kNearTerrainDensityCount : 0u);
+        // Completion retains densities only for eligible step-1, current, unedited evidence.
+        const bool retained = retain_densities && evidence.sample_step == 1 &&
+                              evidence.generated_current_params && evidence.unedited_halo;
+        EXPECT_EQ(snapshot->densities.size(), retained ? World::kNearTerrainDensityCount : 0u);
         chunks[13]->mesh_version.store(evidence.mesh_version);
         chunks[13]->near_terrain_snapshot.store(snapshot);
         return snapshot;

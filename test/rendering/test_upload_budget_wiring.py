@@ -157,6 +157,50 @@ class UploadBudgetWiring(unittest.TestCase):
                         upload.index("render_data.refinement = payload.refinement"))
         self.assertIn("payload.vertices, payload.indices", upload)
 
+    def test_same_version_republished_refinement_uses_required_queue(self):
+        manage = body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources(")
+        # A resident request includes both refined output and cached refusals.
+        # Changed eligible evidence must retire either through required work;
+        # the first upgrade from an unrefined baseline remains optional.
+        self.assertIn("retire_refined = found != records.end() && found->second.refinement.requested",
+                      compact(manage))
+        classification = re.search(r"const bool refinement_only\s*=\s*(.*?);", manage, re.S)
+        self.assertIsNotNone(classification)
+        self.assertEqual(compact(classification.group(1)),
+                         "!Water && !is_new && !is_stale && refinement_requested && !retire_refined")
+        self.assertLess(manage.index("is_stale = is_stale || refinement_changed"),
+                        manage.index("if (!is_new && !is_stale)"))
+        self.assertIn("auto& destination = refinement_only ? refinement_candidates : candidates",
+                      manage)
+        self.assertIn("refresh_uploads( queue, candidates,", compact(manage))
+        self.assertIn("drain_terrain_uploads(queue, m_near_terrain_upload_queue, cost, adopt, elapsed)",
+                      compact(manage))
+
+    def test_last_deferred_baseline_enqueues_refinement_before_settled_accounting(self):
+        manage = body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources(")
+        adopt = body(manage, "const auto adopt =")
+        terrain = body(adopt, "else {")
+        guard = ("if (result == NearTerrainUploadResult::Deferred && "
+                 "failures == stats.terrain_upload_failures)")
+        self.assertIn(guard, compact(terrain))
+        enqueue = body(terrain, "if (result == NearTerrainUploadResult::Deferred &&")
+        for statement in ("auto refinement = candidate;", "refinement.is_new = false;",
+                          "refinement.is_stale = true;", "refinement.refinement_only = true;",
+                          "m_near_terrain_upload_queue.refresh(candidate.chunk.id, refinement);"):
+            self.assertIn(statement, enqueue)
+        # Failed copies/uploads retain required work; optional deferrals retain
+        # their queue entry; completed/refused requests never enqueue a retry.
+        self.assertLess(adopt.index("if (!copied)"), adopt.index(guard.split(" &&")[0]))
+        self.assertLess(terrain.index("if (candidate.refinement_only &&"), terrain.index("auto refinement ="))
+        self.assertLess(terrain.index("upload_chunk_mesh(candidate.chunk, payload)"),
+                        terrain.index("auto refinement ="))
+        accounting = "queue.size() + (Water ? 0 : m_near_terrain_upload_queue.size()) + invalid_payloads"
+        self.assertIn(accounting, compact(manage))
+        self.assertLess(manage.index("m_near_terrain_upload_queue.refresh(candidate.chunk.id, refinement)"),
+                        manage.index(accounting))
+        settled = body(self.header, "bool render_uploads_settled() const")
+        self.assertIn("m_last_mesh_upload_stats.terrain_uploads_deferred == 0", settled)
+
     def test_near_refinement_retired_or_emptied_mesh_releases_displaced_surface(self):
         manage = body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources(")
         residents = body(manage, "for (auto& [id, data] : records)")
