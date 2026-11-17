@@ -9,6 +9,7 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/app/CrashHandler.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/HangWatchdog.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/DebugOverlays.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/app/PhotoEnvironment.h
     ${CMAKE_CURRENT_LIST_DIR}/app/FrameAudio.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/GameAssets.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/UiInputRouter.cpp
@@ -201,6 +202,9 @@ if(MSVC)
     set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/main_client.cpp PROPERTIES
         COMPILE_OPTIONS "/bigobj")
 endif()
+
+# GL-free temporal plan admission (shared by both client source sets).
+list(APPEND CLIENT_INTERNAL_SOURCES ${CMAKE_CURRENT_LIST_DIR}/rendering/TemporalAudit.cpp)
 
 # Complete executable source set for legacy consumers that include this file
 # directly.

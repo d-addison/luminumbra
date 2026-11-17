@@ -2631,11 +2631,22 @@ int main(int argc, char* argv[]) {
         jobSystem.wait(s_worldDressingHandle);
     };
 
+    // Player ownership marks a live gameplay presentation. Retiring it is the
+    // common boundary for menu exits, world replacements and failed-entry drains.
+    auto release_player_controller = [&]() {
+        if (g_playerController) {
+            ReleasePhotoModeAndHud(g_app, renderPipeline);
+            g_playerController.reset();
+        }
+    };
+
     auto entry_world_revision = gameSession->WorldRevision();
     auto finish_world_replacement = [&]() {
         // An open can refuse before adoption. Preserve the still-live world's visuals/results.
-        if (gameSession->WorldRevision() != entry_world_revision)
+        if (gameSession->WorldRevision() != entry_world_revision) {
+            release_player_controller();
             prepare_world_entry();
+        }
     };
     std::string world_entry_error;
     auto refuse_world_entry = [&](const std::string& fallback, bool use_world_error = true) {
@@ -2647,7 +2658,7 @@ int main(int argc, char* argv[]) {
             g_uiManager->ShowMessage(error);
         if (gameSession->WorldRevision() != entry_world_revision) {
             g_app.menu.menu_backdrop_active = false;
-            g_playerController.reset();
+            release_player_controller();
         }
         scenario_failed = benchmark_v3 || scenario_config.active() ||
                           HasCommandLineOption(argc, argv, "--load-world") ||
@@ -2683,7 +2694,7 @@ int main(int argc, char* argv[]) {
     };
 
     auto finish_world_entry = [&](bool staged_entry = false) {
-        g_playerController.reset();
+        release_player_controller();
         g_procgen = {};
         g_app.worldDressing = {};
         g_app.foragers = {};
@@ -3420,7 +3431,7 @@ int main(int argc, char* argv[]) {
                     return;
                 }
                 prepare_world_entry();
-                g_playerController.reset();
+                release_player_controller();
                 SetGamePaused(window, false);
                 SetGameState(window, gameStateManager, GameState::MAIN_MENU);
                 if (g_uiManager)
@@ -4149,7 +4160,7 @@ int main(int argc, char* argv[]) {
             if (auto* world = gameSession->GetWorldSystem())
                 world->clear_world(gameSession->GetPhysicsSystem());
             g_app.menu.menu_backdrop_active = false;
-            g_playerController.reset();
+            release_player_controller();
         }
         const auto rollback_error = entry_artifacts.rollback();
         if (!rollback_error.empty()) {
@@ -4184,6 +4195,7 @@ int main(int argc, char* argv[]) {
         return WorldEntryResult::Complete;
     };
     auto return_entry_to_menu = [&]() {
+        release_player_controller();
         SetGameState(window, gameStateManager, GameState::MAIN_MENU);
         if (g_uiManager)
             g_uiManager->RequestLoadDocument("main_menu.rml");
@@ -4493,6 +4505,8 @@ int main(int argc, char* argv[]) {
     }
     while (!glfwWindowShouldClose(window)) {
         LUMIN_PROFILE_FRAME_N("Client");
+        // Release weather before any frame writer, including menu previews.
+        g_app.hud.photoWeather.Restore(renderPipeline);
         if (benchmark_v4 && Luminumbra::Filesystem::capture_content_paths().refused()) {
             LUMINUMBRA_CORE_ERROR("Benchmark content reference escapes inventoried trees");
             exit_code = 2;
@@ -4539,10 +4553,12 @@ int main(int argc, char* argv[]) {
         if (benchmark_v3 && !benchmark_world_checked && gameSession &&
             gameStateManager.GetCurrentState() == GameState::IN_GAME) {
             try {
-                const auto saved =
-                    Luminumbra::Persistence::InspectSavedWorld(gameSession->GetSaveRootPath(),
-                                                               root_path_str,
-                                                               gameSession->GetMetadata().worldId);
+                const auto saved = Luminumbra::Persistence::InspectSavedWorld(
+                    gameSession->GetSaveRootPath(),
+                    root_path_str,
+                    gameSession->GetMetadata().worldId,
+                    {},
+                    Luminumbra::Persistence::SavedWorldValidation::Catalog);
                 if (!saved.error.empty())
                     throw std::runtime_error(saved.error);
                 const auto preset = nlohmann::json::parse(saved.preset_json);
@@ -4646,7 +4662,7 @@ int main(int argc, char* argv[]) {
                         }
                         if (saved && main_menu) {
                             prepare_world_entry();
-                            g_playerController.reset();
+                            release_player_controller();
                             SetGamePaused(window, false);
                             SetGameState(window, gameStateManager, GameState::MAIN_MENU);
                             g_uiManager->RequestLoadDocument("main_menu.rml");
@@ -5684,6 +5700,8 @@ int main(int argc, char* argv[]) {
                     scenario_runner->onPreRenderWorldSweep();
                 }
                 if (gameSession->GetWorldSystem() && g_camera) {
+                    // Release the previous photo hold before sampling live defaults.
+                    renderPipeline.set_time_of_day_hold(false);
                     // Live play runs on the
                     // authoritative sim tick — season AND time-of-day become pure
                     // functions of it (no more frozen season-neutral tick 0; no more
@@ -5941,6 +5959,18 @@ int main(int argc, char* argv[]) {
                             }
                         }
                     }
+                    // Environment writer order: live clock/weather, photo selection,
+                    // scenario pins, benchmark/scene pins, foliage QA, frame-scan pin,
+                    // render. World sweeps render their own pins before this path;
+                    // timelapse advances its next-frame pin after capture.
+                    const bool photo_capture_pinned =
+                        scenario_config.active() || g_rb_active ||
+                        g_app.capture.timelapse_frames != 0 || g_app.capture.scene_active ||
+                        g_app.capture.frame_scan_active || g_app.capture.render_parity_active ||
+                        g_app.capture.survey_active || !g_app.capture.bake_impostor_path.empty() ||
+                        !g_app.capture.ui_screenshot_screen.empty() || g_app.capture.ui_thumbs != 0;
+                    UpdatePhotoEnvironment(
+                        g_app, g_playerController.get(), renderPipeline, photo_capture_pinned);
                     // Scenario capture render pins (fixed time-of-day for the
                     // visual smokes; the season sweep's pin schedule) run at
                     // this exact point so they override the live-tick
@@ -7674,7 +7704,7 @@ int main(int argc, char* argv[]) {
         world_system->clear_world(gameSession->GetPhysicsSystem());
         mark_shutdown("world_cleared");
     }
-    g_playerController.reset();
+    release_player_controller();
     mark_shutdown("player_controller_reset");
     g_camera.reset();
     mark_shutdown("camera_reset");
