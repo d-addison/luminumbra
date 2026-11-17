@@ -645,6 +645,30 @@ TEST(CaptureFeatureProfile, RequestedUnchangedDisabledFeatureIsRefusedNotMalform
     EXPECT_EQ(State(profile, Feature::Water).capability_reason, "water_disabled");
 }
 
+TEST(CaptureFeatureProfile, ObservedDisabledRefusalKeepsAdapterReasonOverBaselineSuppression) {
+    // Foliage has a graphics gate and isolation layers; the adapter's own
+    // disabled observation must remain the reported refusal reason.
+    auto context = EnabledContext();
+    Adapter(context, Feature::Foliage) = {
+        .enabled = false, .change = Change::Unchanged, .reason = "foliage_adapter_disabled"};
+    luminumbra::core::GraphicsValues graphics;
+    graphics.grass_enabled = false;
+    auto profile = Resolve(AllFeatures(), context, {}, graphics);
+    EXPECT_EQ(profile.capability(), Capability::Refused);
+    EXPECT_EQ(State(profile, Feature::Foliage).change, Change::Unchanged);
+    EXPECT_EQ(State(profile, Feature::Foliage).reason, "foliage_adapter_disabled");
+    EXPECT_EQ(State(profile, Feature::Foliage).capability_reason, "foliage_adapter_disabled");
+
+    auto runtime = AllFeatures();
+    runtime.isolation_layers = "water";
+    profile = Resolve(runtime, context);
+    EXPECT_EQ(profile.capability(), Capability::Refused);
+    EXPECT_EQ(State(profile, Feature::Foliage).change, Change::Unchanged);
+    EXPECT_EQ(State(profile, Feature::Foliage).capability_reason, "foliage_adapter_disabled");
+    // An enabled feature under the same isolation is still suppressed by it.
+    EXPECT_EQ(State(profile, Feature::PlantWind).capability_reason, "isolation_layer_suppressed");
+}
+
 TEST(CaptureFeatureProfile, UnrequestedUnchangedEnabledFeaturesAreReportedInExplicitSubset) {
     auto context = EnabledContext();
     const std::array<std::string_view, 1> requested{"water"};
