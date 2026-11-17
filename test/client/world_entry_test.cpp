@@ -1426,11 +1426,13 @@ TEST(WorldEntryWiring, EarlyCancellationAndRefusalKeepTheMenuWorldAndBackdrop) {
                                         "cancel_waterfall_adoption()",
                                         "clear_world(",
                                         "menu_backdrop_active = false",
-                                        "g_playerController.reset()"}) {
+                                        "g_playerController.reset()",
+                                        "release_player_controller()"}) {
             EXPECT_EQ(outside.find(destructive), std::string::npos) << region << destructive;
         }
         EXPECT_NE(guarded.find("menu_backdrop_active = false"), std::string::npos);
-        EXPECT_NE(guarded.find("g_playerController.reset()"), std::string::npos);
+        // Controller retirement goes through the shared helper, which also releases photo state.
+        EXPECT_NE(guarded.find("release_player_controller()"), std::string::npos);
         if (std::string(region) == "auto drain_entry =") {
             EXPECT_NE(guarded.find("prepare_world_entry()"), std::string::npos);
             EXPECT_NE(guarded.find("cancel_waterfall_adoption()"), std::string::npos);
@@ -1443,6 +1445,13 @@ TEST(WorldEntryWiring, EarlyCancellationAndRefusalKeepTheMenuWorldAndBackdrop) {
             EXPECT_GT(rollback, guard_end);
         }
     }
+
+    const auto helper = source.find("auto release_player_controller =");
+    ASSERT_NE(helper, std::string::npos);
+    const auto helper_end = source.find("\n    };", helper);
+    ASSERT_NE(helper_end, std::string::npos);
+    const auto helper_body = source.substr(helper, helper_end - helper);
+    EXPECT_NE(helper_body.find("g_playerController.reset()"), std::string::npos);
 }
 
 } // namespace
