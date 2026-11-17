@@ -323,11 +323,30 @@ TEST_P(SimBudgetAutosave, StationaryCaptureStaysSettledAcrossAutosaves) {
     ASSERT_TRUE(runner.Boot());
     ASSERT_TRUE(runner.Session()->ActiveRegionsEnabled());
     ASSERT_TRUE(runner.Session()->FiniteHydrologyEnabled());
+    namespace C = Luminumbra::Components;
+    const auto plants = runner.Session()->GetRegistry().view<const C::PlantGrowthComponent>();
+    ASSERT_EQ(plants.size(), 6u);
+    for (const auto entity : plants) {
+        const auto& growth = plants.get<const C::PlantGrowthComponent>(entity);
+        EXPECT_EQ(growth.last_tick, 0u);
+        EXPECT_EQ(growth.growth_points, 0u);
+        EXPECT_EQ(growth.stress_points, 0u);
+    }
     const auto report = runner.RunFixedTicks(ticks);
     ASSERT_EQ(report.ticks_executed, ticks);
     EXPECT_FALSE(report.region_fault) << report.region_fault_message;
     EXPECT_EQ(report.autosave_passes, ticks / config.autosave_interval_ticks);
     EXPECT_EQ(runner.Session()->GetPersistenceStatus().failures, 0u);
+    // Exercise the shipping no-avatar configuration without supplying anchors or pinning
+    // regions here. Candidate counts alone used to report work for plants that never grew.
+    ASSERT_EQ(plants.size(), 6u);
+    for (const auto entity : plants) {
+        const auto& growth = plants.get<const C::PlantGrowthComponent>(entity);
+        EXPECT_EQ(growth.last_tick, ticks);
+        EXPECT_TRUE(growth.growth_points > 0u || growth.stress_points > 0u);
+    }
+    const auto& trace = runner.Session()->GetSimBudgetTelemetry();
+    EXPECT_GT(trace.Summarize(SimBudgetStage::Plants).work_total, 0u);
     const auto& samples =
         runner.Session()
             ->GetSimBudgetTelemetry()

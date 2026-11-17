@@ -1951,6 +1951,10 @@ TEST(FarWorldHandoffRenderer, IdleRetirementMakesCompleteDiagnosticsSafeForHisto
                               FarVolumeNumericProfile::RawFloat,
                               RendererHandoffBudgets(),
                               RendererHandoffLimits()));
+    EXPECT_EQ(renderer.RetireIdleHistory(), 0u);
+    EXPECT_TRUE(renderer.Diagnostic().captured);
+    EXPECT_TRUE(renderer.Diagnostic().complete);
+    EXPECT_EQ(renderer.Diagnostic().tile_count, 0u);
     const std::array first{RendererHandoffInput(renderer, {5, -1, 0}, 1, false)};
     const std::array next{RendererHandoffInput(renderer, {5, 1, 0}, 2, false)};
     ASSERT_TRUE(renderer.StageTarget(RendererHandoffManifest(1, first)));
@@ -1962,7 +1966,14 @@ TEST(FarWorldHandoffRenderer, IdleRetirementMakesCompleteDiagnosticsSafeForHisto
     ASSERT_TRUE(renderer.Diagnostic().complete);
     ASSERT_EQ(renderer.Diagnostic().tile_count, 1u);
     EXPECT_EQ(renderer.Diagnostic().tiles[0].key, next[0].wanted.identity.key);
+    EXPECT_EQ(renderer.Submit({0, 0, 0}, [](const auto&) { return true; }).refused, 1u);
+    ASSERT_EQ(renderer.Diagnostic().submission.refused, 1u);
     EXPECT_EQ(renderer.RetireIdleHistory(), 1u);
+    EXPECT_TRUE(renderer.Diagnostic().captured);
+    EXPECT_TRUE(renderer.Diagnostic().complete);
+    ASSERT_EQ(renderer.Diagnostic().tile_count, 1u);
+    EXPECT_EQ(renderer.Diagnostic().tiles[0].key, next[0].wanted.identity.key);
+    EXPECT_EQ(renderer.Diagnostic().submission.refused, 0u);
     EXPECT_EQ(renderer.AdmissionRefusal(), FarWorldRefusal::SpanRejected);
     EXPECT_EQ(renderer.RetireIdleHistory(), 0u);
     EXPECT_TRUE(renderer.StageTarget(RendererHandoffManifest(3, returned)));

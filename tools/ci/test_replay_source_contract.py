@@ -674,6 +674,43 @@ class ReplaySourceContract(unittest.TestCase):
 
 
 class SessionUsabilitySourceContract(unittest.TestCase):
+    def assert_concrete_ecology_admission(self, source):
+        self.assertRegex(source, r"const auto plant_env\s*=\s*\[")
+        self.assertNotRegex(source, r"\bEnvSampler\b")
+        self.assertRegex(
+            source,
+            r"RunPlantGrowthSystemOnTick\(\s*foliage_registry, current_tick, plant_env, foliage_gate\)")
+        initialize = self.function(source, "InitializeScentField")
+        self.assertIn("m_scentField->BindSessionAdmission(*this);", initialize)
+        self.assertNotIn("BindDepositGate", initialize)
+        admission = self.function(source, "SessionCellAllowed", "luminumbra::ai::ScentField::")
+        self.assertIn("return m_admissionSession->ScentCellDue(x, z);", admission)
+
+    def test_shipping_plant_and_scent_admission_use_concrete_dispatch(self):
+        self.assert_concrete_ecology_admission(
+            read_source("src/luminumbra_common/world/GameSession.cpp"))
+        header = read_source("src/luminumbra_common/ai/ScentField.h")
+        self.assertIn("const ::Luminumbra::world::GameSession* m_admissionSession", header)
+        admission = self.function(header, "SimulationCellAllowed", "")
+        self.assertRegex(admission, r"if \(m_admissionSession\)\s*\{\s*"
+                         r"return SessionCellAllowed\(x, z\);\s*\}")
+        deposit = self.function(header, "Deposit", "")
+        self.assertIn("!SimulationCellAllowed(x, z)", deposit)
+        self.assertNotIn("m_deposit_gate", deposit)
+
+    def test_concrete_ecology_guard_rejects_erased_shipping_regressions(self):
+        source = read_source("src/luminumbra_common/world/GameSession.cpp")
+        for before, after in (
+            ("const auto plant_env", "const luminumbra::foliage::EnvSampler plant_env"),
+            ("m_scentField->BindSessionAdmission(*this);",
+             "m_scentField->BindDepositGate([this](int x, int z) { return ScentCellDue(x, z); });"),
+            ("return m_admissionSession->ScentCellDue(x, z);", "return m_deposit_gate(x, z);"),
+        ):
+            with self.subTest(regression=after):
+                self.assertIn(before, source)
+                with self.assertRaises(AssertionError):
+                    self.assert_concrete_ecology_admission(source.replace(before, after, 1))
+
     def test_serialization_reuse_covers_every_canonical_chunk_input(self):
         source = read_source("src/luminumbra_common/persistence/WorldPersistenceRoundtrip.cpp")
         serialized = (self.function(source, "ChunkToJson", "") +
@@ -768,12 +805,27 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn("::read(m_descriptor, &trailing, 1)", admission)
         self.assertIn("::ReadFile(m_handle, &trailing, 1, &received, nullptr) && received == 0",
                       admission)
-        world = self.function(source, "load_world", "WorldSaveService::")
+        world = self.function(source, "load_world_impl", "WorldSaveService::")
         self.assertIn("load_plant_entities(plants, save_dir, &errors, stop)", world)
         session = self.function(read_source("src/luminumbra_common/world/GameSession.cpp"),
                                 "ReadPreparedWorldState")
         self.assertRegex(session, r"WorldSaveService::load_plant_entities\(\s*state.plants, "
                          r"save_dir, &errors, stop\)")
+
+    def test_catalog_inspection_keeps_complete_validation_for_load_and_writers(self):
+        source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        load = self.function(source, "load_world", "WorldSaveService::")
+        inspect = self.function(source, "inspect_save", "WorldSaveService::")
+        validate = self.function(source, "validate_save", "WorldSaveService::")
+        self.assertRegex(load, r"return load_world_impl\([\s\S]*,\s*false\);")
+        self.assertRegex(inspect, r"load_world_impl\([\s\S]*nullptr,\s*nullptr,\s*true,\s*payloads_verified\);")
+        self.assertIn(".load_world(", validate)
+        self.assertNotIn("load_world_impl", validate)
+        world = self.function(source, "load_world_impl", "WorldSaveService::")
+        skip = world.index("if (catalog_only && indexed && !retain)")
+        self.assertLess(world.index("ReadRegionFile(path, records, &errors, stop)"), skip)
+        self.assertLess(world.index("retain_chunks->contains(record.id)"), skip)
+        self.assertLess(skip, world.index("AdmitChunkRecord(record,"))
 
     def test_native_saved_input_holds_publication_until_after_close(self):
         source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
