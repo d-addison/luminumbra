@@ -5930,7 +5930,7 @@ void GameSession::InitializeScentField(const Vec3& /*anchor*/) {
     m_scentField = std::make_unique<luminumbra::ai::ScentField>(
         kScentFieldCells, kScentFieldCells, kScentFieldChannels);
     if (m_activeRegionsEnabled) {
-        m_scentField->BindDepositGate([this](int x, int z) { return ScentCellDue(x, z); });
+        m_scentField->BindSessionAdmission(*this);
         RestoreRegionalScent();
     }
     LUMINUMBRA_CORE_INFO("Scent field initialized: {}x{} cells, {} channel(s), cell_size={}",
@@ -6309,3 +6309,7 @@ std::string GameSession::ComputePlantSubHash() const {
 }
 
 } // namespace Luminumbra::world
+
+bool luminumbra::ai::ScentField::SessionCellAllowed(int x, int z) const {
+    return m_admissionSession->ScentCellDue(x, z);
+}

@@ -6745,6 +6745,7 @@ void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
     invalidate_renderable_chunks();
     m_streaming_state.chunks.clear();
     m_parked.clear();
+    m_parked_columns.clear();
     m_durable_chunks.clear();
     m_digest_members.clear();
     ++m_digest_membership_revision;
@@ -6923,25 +6924,43 @@ SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const {
 
     // Capture after streaming publication. Each chunk retains one immutable
     // payload; overlapping regions and unchanged captures share those bytes.
-    for (const auto& chunk : snapshot_authoritative_chunks()) {
+    const auto capture = [&](const std::shared_ptr<Chunk>& chunk) {
+        ++m_far_lod_capture_input_items;
         // Generation writes live vectors while Loading. Only owner-thread
         // publication makes those bytes eligible, even if a worker is finished.
         if (!HasPublishedFarLodSdf(chunk.get())) {
-            continue;
+            return;
         }
-        const IVec3& coords = chunk->get_coords();
-        if (coords.x < min_chunk_x || coords.x > max_chunk_x || coords.z < min_chunk_z ||
-            coords.z > max_chunk_z) {
-            continue;
-        }
-
         FarLodSdfSnapshotEntry entry;
-        entry.coords = coords;
+        entry.coords = chunk->get_coords();
         entry.provenance = chunk->sdf_provenance();
         entry.voxel_revision = chunk->voxel_revision();
         entry.authority_durable = !chunk->is_voxel_data_dirty();
         entry.payload = chunk->capture_far_lod_sdf(snapshot->bytes_copied);
         snapshot->entries.push_back(std::move(entry));
+    };
+    // Fixed bound: 34 x 34 columns, with at most the packed-Y range per column.
+    // Visit only this region's participants; never copy or scan the resident maps.
+    // The final z/x/y sort preserves the full-scan output order for both sources.
+    const auto& columns = m_activation_index.columns();
+    for (int z = min_chunk_z; z <= max_chunk_z; ++z) {
+        for (int x = min_chunk_x; x <= max_chunk_x; ++x) {
+            const auto key = World::ActivationResidencyIndex::column_key(x, z);
+            const auto live = columns.find(key);
+            if (live != columns.end()) {
+                for (const auto& [id, chunk] : live->second.residents) {
+                    (void)id;
+                    capture(chunk);
+                }
+            }
+            const auto parked = m_parked_columns.find(key);
+            if (parked != m_parked_columns.end()) {
+                for (const auto& [id, chunk] : parked->second) {
+                    (void)id;
+                    capture(chunk);
+                }
+            }
+        }
     }
 
     std::sort(snapshot->entries.begin(),
@@ -6956,19 +6975,31 @@ SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const {
     return snapshot;
 }
 
-bool SHIELD_WorldSystem::is_far_lod_sdf_snapshot_current(const FarLodSdfSnapshot& snapshot) const {
+bool SHIELD_WorldSystem::is_far_lod_sdf_snapshot_current(const FarLodSdfSnapshot& snapshot,
+                                                         bool region_scoped) const {
     if (m_durable_read_failed)
         return false;
     constexpr int kFootprintSpan = World::kFarLodRegionSizeMeters / CHUNK_SIZE_X + 2;
     if (snapshot.params_hash != World::ComputeTerrainParamsHash(m_params, m_seed) ||
-        snapshot.authority_revision !=
-            m_far_lod_authority_revision.load(std::memory_order_acquire) ||
         snapshot.min_chunk_coords.x < Chunk::kPackedMinXz ||
         snapshot.min_chunk_coords.y < Chunk::kPackedMinXz ||
         static_cast<std::int64_t>(snapshot.min_chunk_coords.x) + kFootprintSpan - 1 >
             Chunk::kPackedMaxXz ||
         static_cast<std::int64_t>(snapshot.min_chunk_coords.y) + kFootprintSpan - 1 >
             Chunk::kPackedMaxXz) {
+        return false;
+    }
+    if (region_scoped) {
+        constexpr int kRegionSpan = World::kFarLodRegionSizeMeters / CHUNK_SIZE_X;
+        const int home_x = snapshot.min_chunk_coords.x + 1;
+        const int home_z = snapshot.min_chunk_coords.y + 1;
+        if (home_x % kRegionSpan != 0 || home_z % kRegionSpan != 0 ||
+            snapshot.region_authority_revision !=
+                far_lod_region_authority_revision(home_x / kRegionSpan, home_z / kRegionSpan)) {
+            return false;
+        }
+    } else if (snapshot.authority_revision !=
+               m_far_lod_authority_revision.load(std::memory_order_acquire)) {
         return false;
     }
 
@@ -7175,6 +7206,21 @@ void SHIELD_WorldSystem::note_digest_chunk(const std::shared_ptr<Chunk>& chunk,
                                            bool present) {
     if (!chunk)
         return;
+    if (parked) {
+        const auto coords = chunk->get_coords();
+        const auto key = World::ActivationResidencyIndex::column_key(coords.x, coords.z);
+        if (present) {
+            m_parked_columns[key].insert_or_assign(chunk->get_id(), chunk);
+        } else {
+            const auto column = m_parked_columns.find(key);
+            if (column != m_parked_columns.end()) {
+                column->second.erase(chunk->get_id());
+                if (column->second.empty()) {
+                    m_parked_columns.erase(column);
+                }
+            }
+        }
+    }
     if (m_far_world_changes) {
         m_far_world_changes->membership(chunk, parked, present);
     }

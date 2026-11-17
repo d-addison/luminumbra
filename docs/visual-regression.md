@@ -109,6 +109,15 @@ Thresholds are per-backend in spirit (FLIP/SSIM/luma are not the same scale).
 Pin a threshold against a known-good vs known-bad pair when you add a new golden;
 `0.05` is a reasonable starting point for FLIP/luma.
 
+## Planned temporal audits
+
+[Visual diagnostics](development/visual-diagnostics.md), section "E: temporal audits and all-features captures"
+inventories current capture feature gaps and designs fixed-camera day/night,
+clear–storm–clear and multi-day sequences, temporal metrics and an all-features
+profile with non-vacuous presence evidence. These are planned capabilities;
+current still gates and `tools/timelapse.py` do not establish this coverage or
+visual approval.
+
 ## World-sweep review sheets
 
 For offline PNG diagnostics, run `python3 -I -B tools/gates/visual_lint.py CAPTURES > report.json` (Pillow and NumPy). JSON goes to stdout and the human summary to stderr; exit 0 means no candidates, 1 means candidates, and 2 means incomplete or invalid input. The centralized threshold table bounds input sizes and analysis resolution. Checks cover sentinel-color clusters, sky below a measured or estimated horizon, repeated gradient steps, flat opaque rectangles, unchanged frames or bottom-30% ground approximations in matched weather sweeps, and histogram drift with `--baseline DIRECTORY` (matching names and dimensions required). Optional `--sidecars DIRECTORY` selects per-image `<stem>.json` or `<name>.png.json` objects with `horizon_row_from_top` (also under `pixels`), `camera.pitch`/`camera.fov` or `pitch_degrees`/`fov_degrees` in degrees; positive pitch looks up and absent FOV uses 70 degrees. Explicit `comparison_group`/`variant` strings pair other captures expected to differ. Known clear/storm sweep and weather-baseline/weather-visual names pair automatically; identical duplicate sweep exports share a variant. Reports label horizon estimates and unresolved horizons; findings are heuristic candidates for review, not pixel attribution or visual approval. Inputs remain unchanged and the checker runs only when invoked.
