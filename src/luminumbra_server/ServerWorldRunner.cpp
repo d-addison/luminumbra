@@ -932,7 +932,8 @@ std::string ServerWorldRunner::ComputeWorldHash() {
     if (!m_booted || !m_session) {
         return {};
     }
-    const auto result = m_session->CaptureAuthorityHashes();
+    const auto result =
+        m_session->CaptureAuthorityHashes({}, Persistence::AuthorityCaptureParts::Composite);
     return result.capture ? result.capture->composite : std::string();
 }
 
@@ -942,7 +943,8 @@ Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHash
     }
     const std::string entities_snapshot =
         Ecs::SerializeEntityRegistrySnapshotJson(World::BuildAvatarEntitySnapshot(m_avatars));
-    const auto result = m_session->CaptureAuthorityHashes(entities_snapshot);
+    const auto result = m_session->CaptureAuthorityHashes(
+        entities_snapshot, Persistence::AuthorityCaptureParts::SubHashes);
     return result.capture ? result.capture->sub : Persistence::WorldStreamingStateSubHashes{};
 }
 

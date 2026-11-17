@@ -2,6 +2,7 @@
 #include "ModeHelpers.h"
 #include "Modes.h"
 #include "luminumbra_common/HashCheckpoint.h"
+#include "luminumbra_common/persistence/WorldSaveService.h"
 
 using Luminumbra::Server::AuthoritativeStateEqual;
 using Luminumbra::Server::CaptureGroundObjects;
@@ -83,7 +84,8 @@ nlohmann::json HeavyHashJson(const HeavyHashes& h) {
 
 } // namespace
 
-int RunHeavy(const ServerCliOptions& options) {
+namespace {
+int RunHeavyChecked(const ServerCliOptions& options) {
     LUMINUMBRA_CORE_INFO(
         "Headless server HEAVY oracle: preset={} seed={} ticks={} resim={} radius={}/{}",
         options.preset,
@@ -359,4 +361,15 @@ int RunHeavy(const ServerCliOptions& options) {
                          options.heavy_resim,
                          orig_final.world_hash);
     return 0;
+}
+} // namespace
+
+int RunHeavy(const ServerCliOptions& options) {
+    try {
+        return RunHeavyChecked(options);
+    } catch (const Luminumbra::Persistence::AuthorityCaptureRefused&) {
+        // A refused capture fails the oracle before any comparison or artifact is written.
+        LUMINUMBRA_CORE_ERROR("heavy: authority hash capture refused; oracle aborted");
+        return 1;
+    }
 }

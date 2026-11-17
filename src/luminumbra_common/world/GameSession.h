@@ -40,6 +40,7 @@ struct FarWorldAuthorityConfig;
 namespace Luminumbra::Persistence {
 class CreatedWorldArtifacts;
 struct AuthorityCaptureResult;
+enum class AuthorityCaptureParts;
 } // namespace Luminumbra::Persistence
 
 namespace luminumbra::fields {
@@ -633,8 +634,12 @@ public:
     // path retains the existing streamed-state projection and wire/checkpoint slots.
     [[nodiscard]] std::string ComputeChunkStateHash();
     // Owner-thread checked observation. Failure publishes no legacy output slots.
+    // The one-argument form captures every slot.
     [[nodiscard]] Persistence::AuthorityCaptureResult
     CaptureAuthorityHashes(const std::string& entity_snapshot_json = {});
+    [[nodiscard]] Persistence::AuthorityCaptureResult
+    CaptureAuthorityHashes(const std::string& entity_snapshot_json,
+                           Persistence::AuthorityCaptureParts parts);
     [[nodiscard]] bool IsSimulationTickBoundary() const {
         return !m_activeRegionsEnabled || (!m_simulationBatchInProgress && m_regionWork.empty());
     }

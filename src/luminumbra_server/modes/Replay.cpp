@@ -1,9 +1,11 @@
 #include "ModeHelpers.h"
 #include "Modes.h"
 #include "luminumbra_common/persistence/ReplacementOutputFile.h"
+#include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/replay/RegionScheduleTrace.h"
 
 #include <algorithm>
+#include <optional>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -32,12 +34,18 @@ constexpr std::uint64_t kCheckpointIntervalTicks = 30; // one second at 30 Hz
 
 // Captures a checkpoint record at the given tick from a booted runner. Uses the
 // single-snapshot combined hash path (one settled-state read per checkpoint).
-Luminumbra::Replay::CheckpointRecord
+// A refused authority capture yields no record, so callers abort before publishing.
+std::optional<Luminumbra::Replay::CheckpointRecord>
 CaptureCheckpoint(std::uint64_t tick, Luminumbra::Server::ServerWorldRunner& runner) {
     Luminumbra::Replay::CheckpointRecord cp;
     cp.tick = tick;
     Luminumbra::Persistence::WorldStreamingStateSubHashes sub;
-    runner.ComputeWorldHashAndSubHashes(cp.world_hash, sub);
+    try {
+        runner.ComputeWorldHashAndSubHashes(cp.world_hash, sub);
+    } catch (const Luminumbra::Persistence::AuthorityCaptureRefused&) {
+        LUMINUMBRA_CORE_ERROR("replay: authority hash capture refused at tick {}", tick);
+        return std::nullopt;
+    }
     cp.terrain = sub.terrain;
     cp.water = sub.water;
     cp.entities = sub.entities;
@@ -112,14 +120,22 @@ int RunRecord(const ServerCliOptions& options) {
         if (runner.Session()->ActiveRegionsEnabled())
             schedule_trace.emplace_back(executed, runner.Session()->GetRegionSchedule().digest);
         if ((executed % kCheckpointIntervalTicks) == 0) {
-            writer.RecordCheckpoint(CaptureCheckpoint(executed, runner));
+            auto checkpoint = CaptureCheckpoint(executed, runner);
+            if (!checkpoint) {
+                return 1; // Nothing is published: the writer only flushes at Finalize.
+            }
+            writer.RecordCheckpoint(*checkpoint);
         }
     }
 
     // Authenticate positive off-cadence runs without changing the bytes
     // or checkpoint cadence of existing 30/90-tick recordings.
     if (executed != 0 && (executed % kCheckpointIntervalTicks) != 0) {
-        writer.RecordCheckpoint(CaptureCheckpoint(executed, runner));
+        auto checkpoint = CaptureCheckpoint(executed, runner);
+        if (!checkpoint) {
+            return 1;
+        }
+        writer.RecordCheckpoint(*checkpoint);
     }
 
     const auto* trace = runner.Session()->ActiveRegionsEnabled() ? &schedule_trace : nullptr;
@@ -339,7 +355,12 @@ int RunReplay(const ServerCliOptions& options) {
                 runner.Shutdown();
                 return 1;
             }
-            const auto live = CaptureCheckpoint(executed, runner);
+            const auto live_checkpoint = CaptureCheckpoint(executed, runner);
+            if (!live_checkpoint) {
+                runner.Shutdown();
+                return 1;
+            }
+            const auto& live = *live_checkpoint;
             // Compare top-level hash, then localize via authoritative sub-hashes.
             if (live.world_hash != recorded->world_hash || live.terrain != recorded->terrain ||
                 live.water != recorded->water || live.entities != recorded->entities) {

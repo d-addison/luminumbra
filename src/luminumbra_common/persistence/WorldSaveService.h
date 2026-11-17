@@ -98,6 +98,15 @@ public:
         return "authority capture refused";
     }
 };
+// Which slots a consumer reads. Skipped slots stay empty; every requested slot is computed
+// from the same observation as a full capture. Single-slot consumers avoid re-serializing
+// the streamed state for slots they discard.
+enum class AuthorityCaptureParts {
+    All,       // streamed, chunk, composite and sub-hashes
+    Composite, // streamed, chunk and composite
+    SubHashes, // sub-hashes only
+    Chunk      // streamed and chunk only
+};
 struct AuthorityCaptureResult {
     AuthorityCaptureStatus status = AuthorityCaptureStatus::PreparationRefused;
     std::optional<AuthorityHashCapture> capture;
@@ -110,7 +119,8 @@ CaptureAuthorityHashes(const WorldStreamingState& state,
                        std::optional<std::uint64_t> water_sim_cursor,
                        const std::optional<std::string>& regional_projection = std::nullopt,
                        const std::string& entity_snapshot_json = {},
-                       const AuthorityRuntimeHashes& runtime = {});
+                       const AuthorityRuntimeHashes& runtime = {},
+                       AuthorityCaptureParts parts = AuthorityCaptureParts::All);
 
 // One owner-thread digest operation admits the index once. Durable authority is cached by
 // publication revision and native file versions; live and parked inputs are always projected.
