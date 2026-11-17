@@ -1,12 +1,14 @@
 #pragma once
 
 #include "SaveTransaction.h"
+#include "WorldPersistenceRoundtrip.h"
 #include "fields/FieldPageState.h"
 #include "world/ActiveRegionLedger.h"
 #include "world/FarVolumeMemory.h"
 #include "world/GroundObjectStore.h"
 #include "world/WorldClock.h"
 #include "world/WorldStreamingState.h"
+#include <exception>
 
 #include <cstddef>
 #include <cstdint>
@@ -55,12 +57,68 @@ struct RegionDigestInputs {
     std::string field_page_bytes{};
 };
 
+// Prepared on the owner boundary; chunk references stay fenced until hashing finishes.
+// Chunks are already filtered and sorted by id, with live over parked over durable precedence.
+struct PreparedRegionDigest {
+    std::vector<std::shared_ptr<Chunk>> chunks;
+    std::string ground_object_bytes;
+    std::string field_page_bytes;
+};
+std::uint64_t HashPreparedRegionDigest(const PreparedRegionDigest& prepared);
+
+// Process-local values only: never serialized or used as a cache key.
+struct AuthorityRuntimeHashes {
+    std::string wind;
+    std::string weather;
+    std::string aether;
+    std::string scent;
+    std::string ecology;
+    std::string plant;
+    std::string aether_state;
+};
+
+// Each legacy consumer selects its own quantity from the same immutable observation.
+struct AuthorityHashCapture {
+    const std::string streamed;
+    const std::string chunk;
+    const std::string composite;
+    const WorldStreamingStateSubHashes sub;
+};
+
+enum class AuthorityCaptureStatus {
+    Ready,
+    MissingCursor,
+    IncompleteOwner,
+    PreparationRefused
+};
+// Bridges the legacy void hash callbacks. The checked API itself returns status.
+class AuthorityCaptureRefused final : public std::exception {
+public:
+    const char* what() const noexcept override {
+        return "authority capture refused";
+    }
+};
+struct AuthorityCaptureResult {
+    AuthorityCaptureStatus status = AuthorityCaptureStatus::PreparationRefused;
+    std::optional<AuthorityHashCapture> capture;
+};
+
+// Owner-thread, settled inputs only. Refusal never returns a partially filled capture.
+// An absent regional projection selects the legacy streamed chunk slot.
+[[nodiscard]] AuthorityCaptureResult
+CaptureAuthorityHashes(const WorldStreamingState& state,
+                       std::optional<std::uint64_t> water_sim_cursor,
+                       const std::optional<std::string>& regional_projection = std::nullopt,
+                       const std::string& entity_snapshot_json = {},
+                       const AuthorityRuntimeHashes& runtime = {});
+
 // One owner-thread digest operation admits the index once. Durable authority is cached by
 // publication revision and native file versions; live and parked inputs are always projected.
 class RegionDigestOperation {
 public:
     RegionDigestOperation(const std::filesystem::path& save_dir, bool require_index);
     std::uint64_t digest(world::RegionKey key, const RegionDigestInputs& inputs);
+    PreparedRegionDigest prepare(world::RegionKey key, const RegionDigestInputs& inputs);
     [[nodiscard]] std::size_t index_reads() const {
         return m_index_reads;
     }
@@ -69,6 +127,7 @@ public:
     }
 
 private:
+    PreparedRegionDigest PrepareChunks(world::RegionKey key, const RegionDigestInputs& inputs);
     std::filesystem::path m_save_dir;
     SnapshotIndex m_index;
     std::uint64_t m_publication_revision = 0;

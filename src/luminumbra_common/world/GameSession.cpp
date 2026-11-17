@@ -21,6 +21,7 @@
 #include "../ai/CreatureReproductionSystem.h" // Generational evolution.
 #include "../ai/CreatureTickAdmission.h"
 #include "../ai/DecompositionSystem.h" // Releases nutrients after death.
+#include "../ai/EcologyHash.h"
 #include "../ai/EcologyTuningConfig.h"
 #include "../ai/ForagingSystem.h"  // ant-trail foraging (Deneubourg double-bridge)
 #include "../ai/HerdAlarmSystem.h" // Collective-vigilance alarm.
@@ -3394,49 +3395,101 @@ void GameSession::RecordPersistenceSaveOutcome(bool ok, double elapsed_ms) {
 }
 
 std::string GameSession::ComputeChunkStateHash() {
-    // Ownership is settled by the host's completed tick, never by observing its hash.
-    if (!m_worldSystem)
-        return {};
-    if (!m_activeRegionsEnabled) {
-        const auto live = m_worldSystem->snapshot_streamed_chunks();
-        WorldStreamingState state;
-        for (const auto& chunk : live)
-            state.insert_chunk(chunk);
-        return Persistence::ComputeWorldStreamingStateHash(
-            state, m_worldSystem->GetWaterSimWindowCursor());
+    const auto result = CaptureAuthorityHashes();
+    return result.capture ? result.capture->chunk : std::string();
+}
+
+Persistence::AuthorityCaptureResult
+GameSession::CaptureAuthorityHashes(const std::string& entity_snapshot_json) {
+    using Persistence::AuthorityCaptureStatus;
+    if (!m_worldSystem || !m_waterSystem) {
+        return {AuthorityCaptureStatus::MissingCursor, std::nullopt};
     }
-    const auto keys = m_worldSystem->authority_region_keys();
-    const auto directory =
-        m_regionDurableDirectory.empty() ? GetWorldSaveDir() : m_regionDurableDirectory;
-    std::string projection =
-        "authoritative_chunks:v2:" + std::to_string(m_worldSystem->GetWaterSimWindowCursor()) + ":";
+    if (!m_worldUsable || !IsSimulationTickBoundary() || m_regionFault) {
+        return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
+    }
     try {
-        std::optional<Persistence::RegionDigestOperation> operation;
-        RunWorkerBoundary(m_jobSystem,
-                          [&] { operation.emplace(directory, m_regionRequiresIndex); });
-        for (const auto& [rx, rz] : keys) {
-            const RegionKey key{rx, rz};
-            const auto record = m_activeRegionLedger.records().find(key);
-            std::uint64_t digest = 0;
-            if (record != m_activeRegionLedger.records().end() &&
-                record->second.state == RegionState::Frozen && !record->second.wake_pending) {
-                digest = record->second.frozen_digest;
-            } else {
-                auto inputs = m_worldSystem->region_digest_inputs(rx, rz);
-                inputs.require_index = m_regionRequiresIndex;
-                RunWorkerBoundary(m_jobSystem, [&] {
-                    if (operation) {
-                        digest = operation->digest(key, inputs);
-                    }
-                });
+        // Observation never settles water ownership; the host finishes that at its tick boundary.
+        m_worldSystem->wait_for_streaming_jobs();
+        const auto cursor = m_worldSystem->GetWaterSimWindowCursor();
+        WorldStreamingState state;
+        for (const auto& chunk : m_worldSystem->snapshot_streamed_chunks()) {
+            if (chunk && chunk->has_simulation_authority() &&
+                chunk->get_state() == ChunkState::Loading) {
+                return {AuthorityCaptureStatus::IncompleteOwner, std::nullopt};
             }
-            projection += std::to_string(key.x) + "," + std::to_string(key.z) + ":" +
-                          std::to_string(digest) + ";";
+            state.insert_chunk(chunk);
         }
+        std::optional<std::string> projection;
+        if (m_activeRegionsEnabled) {
+            const auto keys = m_worldSystem->authority_region_keys();
+            const auto directory =
+                m_regionDurableDirectory.empty() ? GetWorldSaveDir() : m_regionDurableDirectory;
+            std::string regional = "authoritative_chunks:v2:" + std::to_string(cursor) + ":";
+            std::optional<Persistence::RegionDigestOperation> operation;
+            RunWorkerBoundary(m_jobSystem,
+                              [&] { operation.emplace(directory, m_regionRequiresIndex); });
+            struct RegionInput {
+                RegionKey key;
+                std::uint64_t frozen_digest;
+                std::optional<Persistence::PreparedRegionDigest> prepared;
+            };
+            // One entry per participating authority region, only at explicit hash capture.
+            std::vector<RegionInput> regions;
+            regions.reserve(keys.size());
+            for (const auto& [rx, rz] : keys) {
+                const RegionKey key{rx, rz};
+                const auto record = m_activeRegionLedger.records().find(key);
+                RegionInput input{key, 0, std::nullopt};
+                if (record != m_activeRegionLedger.records().end() &&
+                    record->second.state == RegionState::Frozen && !record->second.wake_pending) {
+                    input.frozen_digest = record->second.frozen_digest;
+                } else {
+                    auto inputs = m_worldSystem->region_digest_inputs(rx, rz);
+                    inputs.require_index = m_regionRequiresIndex;
+                    for (const auto& parked : inputs.parked) {
+                        if (parked && parked->has_simulation_authority() &&
+                            parked->get_state() == ChunkState::Loading) {
+                            return {AuthorityCaptureStatus::IncompleteOwner, std::nullopt};
+                        }
+                    }
+                    RunWorkerBoundary(m_jobSystem, [&] {
+                        if (operation) {
+                            input.prepared = operation->prepare(key, inputs);
+                        }
+                    });
+                }
+                regions.push_back(std::move(input));
+            }
+            // All refusals from regional reads precede the first authority hash fold.
+            for (const auto& input : regions) {
+                const auto digest = input.prepared
+                                        ? Persistence::HashPreparedRegionDigest(*input.prepared)
+                                        : input.frozen_digest;
+                regional += std::to_string(input.key.x) + "," + std::to_string(input.key.z) + ":" +
+                            std::to_string(digest) + ";";
+            }
+            projection = std::move(regional);
+        }
+        const std::string aether_state = ComputeAetherStateSubHash();
+        const std::string aether =
+            m_aetherFieldSystem ? m_aetherFieldSystem->ComputeAetherSubHash() : std::string();
+        const Persistence::AuthorityRuntimeHashes runtime{
+            .wind = m_windFieldSystem ? m_windFieldSystem->ComputeWindSubHash() : std::string(),
+            .weather = m_weatherSystem ? m_weatherSystem->ComputeWeatherSubHash() : std::string(),
+            .aether = aether_state.empty()
+                          ? aether
+                          : Persistence::StableChecksum(aether + "|state:" + aether_state),
+            .scent = ComputeScentSubHash(),
+            .ecology = FoldClockIntoEcologyHash(luminumbra::ai::ComputeEcologySubHash(m_registry)),
+            .plant = ComputePlantSubHash(),
+            .aether_state = aether_state};
+        return Persistence::CaptureAuthorityHashes(
+            state, cursor, projection, entity_snapshot_json, runtime);
     } catch (const std::exception& error) {
         LatchRegionFault(m_worldClock.tick(), error.what());
+        return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
     }
-    return Persistence::StableChecksum(projection);
 }
 
 std::string GameSession::FoldClockIntoEcologyHash(const std::string& ecology_hash) const {

@@ -1,6 +1,7 @@
 #include "WorldPersistenceRoundtrip.h"
 #include "SavedInputLimits.h"
 #include "WorldSaveEncoding.h"
+#include "WorldSaveService.h"
 
 #include "../HashCheckpoint.h"
 #include "../core/Log.h"
@@ -1937,11 +1938,8 @@ std::string SerializeWorldStreamingStateSimTruthForHash(const WorldStreamingStat
 
 std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state,
                                            std::uint64_t water_sim_cursor) {
-    // Determinism oracle over SIM TRUTH only (render mesh excluded — see
-    // kRenderMeshHashExcludedFields). The save/load snapshot remains the full
-    // SerializeWorldStreamingStateSnapshotJson; only the HASH scope changes.
-    return Checksum(SerializeWorldStreamingStateSimTruthForHash(state),
-                    WaterCursorHashInput(water_sim_cursor));
+    const auto result = CaptureAuthorityHashes(state, water_sim_cursor);
+    return result.capture ? result.capture->streamed : std::string();
 }
 
 RegionContentHasher::RegionContentHasher(bool diagnostics)
@@ -2160,6 +2158,41 @@ ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state,
     WorldStreamingStateSubHashes sub = ComputeWorldStreamingStateSubHashes(state, water_sim_cursor);
     sub.entities = Checksum(entity_snapshot_json);
     return sub;
+}
+
+AuthorityCaptureResult CaptureAuthorityHashes(const WorldStreamingState& state,
+                                              std::optional<std::uint64_t> water_sim_cursor,
+                                              const std::optional<std::string>& regional_projection,
+                                              const std::string& entity_snapshot_json,
+                                              const AuthorityRuntimeHashes& runtime) try {
+    if (!water_sim_cursor.has_value()) {
+        return {AuthorityCaptureStatus::MissingCursor, std::nullopt};
+    }
+    const auto cursor = water_sim_cursor.value();
+    const std::string streamed =
+        Checksum(SerializeWorldStreamingStateSimTruthForHash(state), WaterCursorHashInput(cursor));
+    const std::string chunk = regional_projection ? StableChecksum(*regional_projection) : streamed;
+    auto sub = ComputeWorldStreamingStateSubHashes(state, cursor);
+    if (!entity_snapshot_json.empty()) {
+        sub.entities = StableChecksum(entity_snapshot_json);
+    }
+    sub.wind = runtime.wind;
+    sub.weather = runtime.weather;
+    sub.aether = runtime.aether;
+    sub.aether_state = runtime.aether_state;
+    return {AuthorityCaptureStatus::Ready,
+            AuthorityHashCapture{streamed,
+                                 chunk,
+                                 ComposeWorldHash(chunk,
+                                                  runtime.wind,
+                                                  runtime.weather,
+                                                  runtime.aether,
+                                                  runtime.scent,
+                                                  runtime.ecology,
+                                                  runtime.plant),
+                                 std::move(sub)}};
+} catch (const std::exception&) {
+    return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
 }
 
 std::string ComposeWorldHash(const std::string& chunk_hash,

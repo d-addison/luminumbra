@@ -5698,6 +5698,16 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
     }
 }
 
+namespace {
+PreparedRegionDigest PrepareRegionDigest(const std::filesystem::path& save_dir,
+                                         world::RegionKey key,
+                                         const RegionDigestInputs& inputs,
+                                         const SnapshotIndex* admitted_index);
+std::uint64_t HashRegionDigestChunks(const std::vector<std::shared_ptr<Chunk>>& chunks,
+                                     const std::string& ground_object_bytes,
+                                     const std::string& field_page_bytes);
+} // namespace
+
 RegionDigestOperation::RegionDigestOperation(const std::filesystem::path& save_dir,
                                              bool require_index)
     : m_save_dir(save_dir)
@@ -5718,6 +5728,22 @@ RegionDigestOperation::RegionDigestOperation(const std::filesystem::path& save_d
 std::uint64_t RegionDigestOperation::digest(world::RegionKey key,
                                             const RegionDigestInputs& inputs) {
     const detail::SnapshotReadOwnership ownership;
+    const auto prepared = PrepareChunks(key, inputs);
+    return HashRegionDigestChunks(
+        prepared.chunks, inputs.ground_object_bytes, inputs.field_page_bytes);
+}
+
+PreparedRegionDigest RegionDigestOperation::prepare(world::RegionKey key,
+                                                    const RegionDigestInputs& inputs) {
+    auto prepared = PrepareChunks(key, inputs);
+    prepared.ground_object_bytes = inputs.ground_object_bytes;
+    prepared.field_page_bytes = inputs.field_page_bytes;
+    return prepared;
+}
+
+PreparedRegionDigest RegionDigestOperation::PrepareChunks(world::RegionKey key,
+                                                          const RegionDigestInputs& inputs) {
+    const detail::SnapshotReadOwnership ownership;
     const auto revision = PublicationRevision().load(std::memory_order_relaxed);
     if (!m_save_dir.empty() && revision != m_publication_revision) {
         WorldSaveService::SaveFormat format;
@@ -5730,7 +5756,7 @@ std::uint64_t RegionDigestOperation::digest(world::RegionKey key,
         m_publication_revision = revision;
     }
     m_input_items += inputs.live.size() + inputs.parked.size() + inputs.durable.size();
-    return WorldSaveService::region_simulation_digest(m_save_dir, key, inputs, &m_index);
+    return PrepareRegionDigest(m_save_dir, key, inputs, &m_index);
 }
 
 namespace {
@@ -5835,10 +5861,11 @@ bool ReadDigestAuthority(const std::filesystem::path& save_dir,
 }
 } // namespace
 
-std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::path& save_dir,
-                                                         world::RegionKey key,
-                                                         const RegionDigestInputs& inputs,
-                                                         const SnapshotIndex* admitted_index) {
+namespace {
+PreparedRegionDigest PrepareRegionDigest(const std::filesystem::path& save_dir,
+                                         world::RegionKey key,
+                                         const RegionDigestInputs& inputs,
+                                         const SnapshotIndex* admitted_index) {
     const detail::SnapshotReadOwnership ownership;
     ValidateRegionDigestKey(key);
     WorldStreamingState region;
@@ -5848,7 +5875,7 @@ std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::
         if (!chunk || !chunk->has_simulation_authority())
             return false;
         int rx = 0, rz = 0;
-        region_coords_for_chunk(chunk->get_coords(), rx, rz);
+        WorldSaveService::region_coords_for_chunk(chunk->get_coords(), rx, rz);
         return rx == key.x && rz == key.z;
     };
     for (const auto& chunk : inputs.live) {
@@ -5874,12 +5901,49 @@ std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::
                 region.insert_chunk(chunk);
         }
     }
-    std::string composed = ComputeRegionContentHash(region);
-    if (!inputs.ground_object_bytes.empty())
-        composed = StableChecksum(composed + "|ground:" + inputs.ground_object_bytes);
-    if (!inputs.field_page_bytes.empty())
-        composed = StableChecksum(composed + "|pages:" + inputs.field_page_bytes);
+    auto chunks = region.snapshot_chunks();
+    std::sort(chunks.begin(), chunks.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs->get_id() < rhs->get_id();
+    });
+    return {.chunks = std::move(chunks), .ground_object_bytes = {}, .field_page_bytes = {}};
+}
+} // namespace
+
+namespace {
+std::uint64_t HashRegionDigestChunks(const std::vector<std::shared_ptr<Chunk>>& chunks,
+                                     const std::string& ground_object_bytes,
+                                     const std::string& field_page_bytes) {
+    RegionContentHasher hasher;
+    for (const auto& chunk : chunks) {
+        hasher.append(*chunk);
+    }
+    std::ostringstream stream;
+    stream << std::hex << std::setw(16) << std::setfill('0') << hasher.value();
+    std::string composed = stream.str();
+    if (!ground_object_bytes.empty()) {
+        composed = StableChecksum(composed + "|ground:" + ground_object_bytes);
+    }
+    if (!field_page_bytes.empty()) {
+        composed = StableChecksum(composed + "|pages:" + field_page_bytes);
+    }
     return std::stoull(composed, nullptr, 16);
+}
+
+} // namespace
+
+std::uint64_t HashPreparedRegionDigest(const PreparedRegionDigest& prepared) {
+    return HashRegionDigestChunks(
+        prepared.chunks, prepared.ground_object_bytes, prepared.field_page_bytes);
+}
+
+std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::path& save_dir,
+                                                         world::RegionKey key,
+                                                         const RegionDigestInputs& inputs,
+                                                         const SnapshotIndex* admitted_index) {
+    const detail::SnapshotReadOwnership ownership;
+    const auto prepared = PrepareRegionDigest(save_dir, key, inputs, admitted_index);
+    return HashRegionDigestChunks(
+        prepared.chunks, inputs.ground_object_bytes, inputs.field_page_bytes);
 }
 
 std::uint64_t
