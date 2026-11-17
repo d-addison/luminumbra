@@ -2505,6 +2505,18 @@ std::string GameSession::RegionalAmbientHash(std::uint8_t channels, bool weather
     return Persistence::StableChecksum(bytes);
 }
 
+std::string GameSession::ComputeRegionalWindSubHash() const {
+    return RegionalAmbientHash(3, false);
+}
+
+std::string GameSession::ComputeRegionalWeatherSubHash() const {
+    return RegionalAmbientHash(12, true);
+}
+
+std::string GameSession::ComputeRegionalAetherSubHash() const {
+    return RegionalAmbientHash(16, false);
+}
+
 Vec2 GameSession::SampleRegionalWind(const Vec3& position, Systems::WindLayer layer) const {
     // Stored signed words are 1/1024 m/s. Higher layers use exact powers of two.
     const float scale = layer == Systems::WindLayer::Ground ? 1.0f

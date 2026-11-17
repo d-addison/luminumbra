@@ -141,9 +141,14 @@ public:
     // registry, the deterministic runtime contract  -- appended FIRST, append only, never
     // reusing +1..+11).
     explicit WeatherSystem(int world_seed);
+    WeatherSystem(const WeatherSystem&) = default;
+    WeatherSystem(WeatherSystem&&) noexcept = default;
+    WeatherSystem& operator=(const WeatherSystem&) = default;
+    WeatherSystem& operator=(WeatherSystem&& other) noexcept;
     // Borrow the session until clear/rebind or destruction. The session must outlive this
-    // binding. Copies (including assignment and moves) drop the borrowed binding;
-    // callback compatibility bindings retain their existing copy semantics.
+    // binding. Copies and moves to a distinct object drop the borrowed binding;
+    // self-assignment preserves it.
+    // Callback compatibility bindings retain their existing copy semantics.
     void BindRegionalSession(const world::GameSession& session);
     // Compatibility/reference path. Empty callbacks clear either kind of binding.
     void BindRegionalBackend(std::function<WeatherSample(const Vec3&)> sample,
@@ -277,8 +282,10 @@ private:
         const world::GameSession* session = nullptr;
         SessionBinding() = default;
         SessionBinding(const SessionBinding&) noexcept {}
-        SessionBinding& operator=(const SessionBinding&) noexcept {
-            session = nullptr;
+        SessionBinding& operator=(const SessionBinding& other) noexcept {
+            if (this != &other) {
+                session = nullptr;
+            }
             return *this;
         }
     };

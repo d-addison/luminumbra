@@ -69,9 +69,14 @@ public:
     // seed is the WORLD seed; the emission noise uses seed + 14 (append-only
     // seed-offset registry: +11 wind, +12 weather, +13 lightning, +14 aether).
     explicit AetherFieldSystem(int world_seed);
+    AetherFieldSystem(const AetherFieldSystem&) = default;
+    AetherFieldSystem(AetherFieldSystem&&) noexcept = default;
+    AetherFieldSystem& operator=(const AetherFieldSystem&) = default;
+    AetherFieldSystem& operator=(AetherFieldSystem&& other) noexcept;
     // Borrow the session until clear/rebind or destruction. The session must outlive this
-    // binding. Copies (including assignment and moves) drop the borrowed binding;
-    // callback compatibility bindings retain their existing copy semantics.
+    // binding. Copies and moves to a distinct object drop the borrowed binding;
+    // self-assignment preserves it.
+    // Callback compatibility bindings retain their existing copy semantics.
     void BindRegionalSession(const world::GameSession& session);
     // Compatibility/reference path. Empty callbacks clear either kind of binding.
     void BindRegionalBackend(std::function<float(const Vec3&)> sample,
@@ -130,8 +135,10 @@ private:
         const world::GameSession* session = nullptr;
         SessionBinding() = default;
         SessionBinding(const SessionBinding&) noexcept {}
-        SessionBinding& operator=(const SessionBinding&) noexcept {
-            session = nullptr;
+        SessionBinding& operator=(const SessionBinding& other) noexcept {
+            if (this != &other) {
+                session = nullptr;
+            }
             return *this;
         }
     };

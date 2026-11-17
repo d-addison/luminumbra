@@ -935,7 +935,7 @@ WeatherSample WeatherSystem::SampleAt(const Vec3& world_pos) const {
 
 std::string WeatherSystem::ComputeWeatherSubHash() const {
     if (m_sessionBinding.session) {
-        return m_sessionBinding.session->RegionalAmbientHash(12, true);
+        return m_sessionBinding.session->ComputeRegionalWeatherSubHash();
     }
     if (m_regional_hash)
         return m_regional_hash();
@@ -994,6 +994,47 @@ std::string WeatherSystem::ComputeWeatherSubHash() const {
     std::ostringstream stream;
     stream << std::hex << std::setw(16) << std::setfill('0') << hash;
     return stream.str();
+}
+
+WeatherSystem& WeatherSystem::operator=(WeatherSystem&& other) noexcept {
+    if (this == &other) {
+        return *this;
+    }
+    m_sessionBinding = other.m_sessionBinding;
+    m_regional_sample = std::move(other.m_regional_sample);
+    m_regional_hash = std::move(other.m_regional_hash);
+    m_regionalStorms = std::move(other.m_regionalStorms);
+    m_regionalStrikes = std::move(other.m_regionalStrikes);
+    m_regionalStormIndex = std::move(other.m_regionalStormIndex);
+    m_regionalStormCache = std::move(other.m_regionalStormCache);
+    m_regionalStrikeCache = std::move(other.m_regionalStrikeCache);
+    m_precip = std::move(other.m_precip);
+    m_category = std::move(other.m_category);
+    m_storm_cells = std::move(other.m_storm_cells);
+    m_strikes = std::move(other.m_strikes);
+    m_pressure_noise = std::move(other.m_pressure_noise);
+    m_temperature_noise = std::move(other.m_temperature_noise);
+    m_humidity_noise = std::move(other.m_humidity_noise);
+    m_scratch_px = std::move(other.m_scratch_px);
+    m_scratch_pz = std::move(other.m_scratch_pz);
+    m_scratch_pressure = std::move(other.m_scratch_pressure);
+    m_scratch_temperature = std::move(other.m_scratch_temperature);
+    m_scratch_humidity = std::move(other.m_scratch_humidity);
+    m_regionalWeatherKeyed = other.m_regionalWeatherKeyed;
+    m_regionalProjectionWork = other.m_regionalProjectionWork;
+    m_regionalStormNodeChanges = other.m_regionalStormNodeChanges;
+    m_regionalStrikesDeliveredThrough = other.m_regionalStrikesDeliveredThrough;
+    m_hiddenRegionalStrikes = other.m_hiddenRegionalStrikes;
+    m_regionalStormCacheValid = other.m_regionalStormCacheValid;
+    m_regionalStrikeCacheValid = other.m_regionalStrikeCacheValid;
+    m_weather_seed = other.m_weather_seed;
+    m_lightning_seed = other.m_lightning_seed;
+    m_grid_extent = other.m_grid_extent;
+    m_grid_cell_size = other.m_grid_cell_size;
+    m_anchor_wind = other.m_anchor_wind;
+    m_anchor_category = other.m_anchor_category;
+    m_last_tick = other.m_last_tick;
+    return *this;
 }
 
 void WeatherSystem::BindRegionalSession(const world::GameSession& session) {

@@ -734,6 +734,53 @@ class SessionUsabilitySourceContract(unittest.TestCase):
             self.assertRegex(sampler, r"if \(m_sessionBinding.session\)\s*\{\s*return "
                              + rf"m_sessionBinding.session->SampleRegional{sample}\(")
 
+    def assert_regional_self_assignment(self, header, source, system):
+        binding = header.split("struct SessionBinding {", 1)[1].split("SessionBinding m_sessionBinding", 1)[0]
+        self.assertRegex(binding, r"operator=\(const SessionBinding& other\) noexcept\s*\{\s*"
+                         r"if \(this != &other\)\s*\{\s*session = nullptr;\s*\}\s*return \*this;")
+        move = self.function(source, "operator=", system + "::")
+        self.assertRegex(move, r"\{\s*if \(this == &other\)\s*\{\s*return \*this;\s*\}")
+        # The guarded move must retain the full default memberwise assignment contract.
+        members = set(re.findall(r"\bm_\w+\b", header))
+        assignments = set(re.findall(r"\b(m_\w+) = (?:std::move\()?other\.\1\)?;", move))
+        self.assertEqual(assignments, members)
+
+    def test_regional_self_assignment_guards_and_registered_regressions(self):
+        native = read_source("test/common/GameSessionHeadlessWorld_test.cpp")
+        cmake = read_source("test/CMakeLists.txt")
+        self.assertIn("common/GameSessionHeadlessWorld_test.cpp", cmake)
+        self.assertIn("gtest_discover_tests(${_lum_gtest_target}", cmake)
+        helper = self.function(native, "CheckRegionalSamplerSelfAssignment", "")
+        for operation in ("system = alias;", "system = std::move(alias);"):
+            self.assertIn(operation, helper)
+        self.assertIn("ASSERT_NE(legacy_sample, expected_sample)", helper)
+        self.assertIn("ASSERT_NE(legacy_hash, expected_hash)", helper)
+        for system, name in (("WindFieldSystem", "Wind"), ("WeatherSystem", "Weather"),
+                             ("AetherFieldSystem", "Aether")):
+            with self.subTest(system=system):
+                header = read_source(f"src/luminumbra_common/systems/{system}.h")
+                source = read_source(f"src/luminumbra_common/systems/{system}.cpp")
+                self.assert_regional_self_assignment(header, source, system)
+                self.assertRegex(native, r"TEST\(GameSessionHeadlessWorldTest,\s*"
+                                 + f"Regional{name}SelfAssignmentPreservesSessionBinding" + r"\)")
+
+    def test_regional_hash_interface_has_fixed_inputs(self):
+        header = read_source("src/luminumbra_common/world/GameSession.h")
+        source = read_source("src/luminumbra_common/world/GameSession.cpp")
+        declaration = "std::string RegionalAmbientHash(std::uint8_t channels, bool weather) const;"
+        self.assertEqual(header.count(declaration), 1)
+        self.assertGreater(header.index(declaration), header.rindex("\nprivate:"))
+        for system, name, inputs in (("WindFieldSystem", "Wind", "3, false"),
+                                     ("WeatherSystem", "Weather", "12, true"),
+                                     ("AetherFieldSystem", "Aether", "16, false")):
+            with self.subTest(system=system):
+                projection = self.function(source, f"ComputeRegional{name}SubHash")
+                self.assertRegex(projection, r"\{\s*return RegionalAmbientHash\("
+                                 + re.escape(inputs) + r"\);\s*\}")
+                sampler = read_source(f"src/luminumbra_common/systems/{system}.cpp")
+                self.assertNotIn("->RegionalAmbientHash(", sampler)
+                self.assertIn(f"->ComputeRegional{name}SubHash()", sampler)
+
     def test_concrete_regional_guard_rejects_each_erased_binding(self):
         source = read_source("src/luminumbra_common/world/GameSession.cpp")
         for system in ("windFieldSystem", "weatherSystem", "aetherFieldSystem"):

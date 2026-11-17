@@ -71,10 +71,15 @@ public:
     // seed is the world seed; wind base-direction noise uses the dedicated
     // append-only seed offset +11.
     explicit WindFieldSystem(int world_seed);
+    WindFieldSystem(const WindFieldSystem&) = default;
+    WindFieldSystem(WindFieldSystem&&) noexcept = default;
+    WindFieldSystem& operator=(const WindFieldSystem&) = default;
+    WindFieldSystem& operator=(WindFieldSystem&& other) noexcept;
 
     // Borrow the session until clear/rebind or destruction. The session must outlive this
-    // binding. Copies (including assignment and moves) drop the borrowed binding;
-    // callback compatibility bindings retain their existing copy semantics.
+    // binding. Copies and moves to a distinct object drop the borrowed binding;
+    // self-assignment preserves it.
+    // Callback compatibility bindings retain their existing copy semantics.
     void BindRegionalSession(const world::GameSession& session);
     // Compatibility/reference path. Empty callbacks clear either kind of binding.
     void BindRegionalBackend(std::function<Vec2(const Vec3&, WindLayer)> sample,
@@ -143,8 +148,10 @@ private:
         const world::GameSession* session = nullptr;
         SessionBinding() = default;
         SessionBinding(const SessionBinding&) noexcept {}
-        SessionBinding& operator=(const SessionBinding&) noexcept {
-            session = nullptr;
+        SessionBinding& operator=(const SessionBinding& other) noexcept {
+            if (this != &other) {
+                session = nullptr;
+            }
             return *this;
         }
     };

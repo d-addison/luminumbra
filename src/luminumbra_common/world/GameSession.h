@@ -510,7 +510,10 @@ public:
     [[nodiscard]] Vec2 SampleRegionalWind(const Vec3& position, Systems::WindLayer layer) const;
     [[nodiscard]] Systems::WeatherSample SampleRegionalWeather(const Vec3& position) const;
     [[nodiscard]] float SampleRegionalAether(const Vec3& position) const;
-    [[nodiscard]] std::string RegionalAmbientHash(std::uint8_t channels, bool weather) const;
+    // Fixed per-system diagnostics use the same canonical bytes as the bound samplers.
+    [[nodiscard]] std::string ComputeRegionalWindSubHash() const;
+    [[nodiscard]] std::string ComputeRegionalWeatherSubHash() const;
+    [[nodiscard]] std::string ComputeRegionalAetherSubHash() const;
 
     // Returns the per-world species-definition table, loaded at world
     // create/load from <root>/data/common/creatures/species/*.json (filename-sorted — a pure
@@ -770,6 +773,7 @@ private:
                                     bool defer_water_authority);
     void BindRegionalFieldQueries();
     [[nodiscard]] FieldPageView RegionalFields() const;
+    [[nodiscard]] std::string RegionalAmbientHash(std::uint8_t channels, bool weather) const;
     [[nodiscard]] std::uint16_t SampleRegionalChannel(int channel, const Vec3& position) const;
     void ProjectRegionalWeather(std::uint64_t tick,
                                 bool restoring = false,

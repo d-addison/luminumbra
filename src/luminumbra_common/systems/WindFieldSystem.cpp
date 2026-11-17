@@ -302,7 +302,7 @@ Vec2 WindFieldSystem::SampleWind(const Vec3& world_pos) const {
 
 std::string WindFieldSystem::ComputeWindSubHash() const {
     if (m_sessionBinding.session) {
-        return m_sessionBinding.session->RegionalAmbientHash(3, false);
+        return m_sessionBinding.session->ComputeRegionalWindSubHash();
     }
     if (m_regional_hash)
         return m_regional_hash();
@@ -331,6 +331,25 @@ std::string WindFieldSystem::ComputeWindSubHash() const {
     std::ostringstream stream;
     stream << std::hex << std::setw(16) << std::setfill('0') << hash;
     return stream.str();
+}
+
+WindFieldSystem& WindFieldSystem::operator=(WindFieldSystem&& other) noexcept {
+    if (this == &other) {
+        return *this;
+    }
+    m_sessionBinding = other.m_sessionBinding;
+    m_regional_sample = std::move(other.m_regional_sample);
+    m_regional_hash = std::move(other.m_regional_hash);
+    m_grid = std::move(other.m_grid);
+    m_direction_noise = std::move(other.m_direction_noise);
+    m_scratch_px = std::move(other.m_scratch_px);
+    m_scratch_pz = std::move(other.m_scratch_pz);
+    m_scratch_cell_noise = std::move(other.m_scratch_cell_noise);
+    m_storm_perturbations = std::move(other.m_storm_perturbations);
+    m_wind_seed = other.m_wind_seed;
+    m_base_direction = other.m_base_direction;
+    m_last_tick = other.m_last_tick;
+    return *this;
 }
 
 void WindFieldSystem::BindRegionalSession(const world::GameSession& session) {
