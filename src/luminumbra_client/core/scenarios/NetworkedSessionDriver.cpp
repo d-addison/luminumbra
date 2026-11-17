@@ -129,6 +129,10 @@ bool NetSessionApplyStep(std::uint64_t /*tick*/,
     // then quiesce so the next scheduler decision observes the identical settled
     // state on both peers. The streaming anchor is the spawn point -- NOT the
     // client camera -- so render-side look can never alter the hashed world.
+    if (!physics_system->prepare_simulation_collisions(
+            {}, ctx->session->GetSimulationTickCount() + 1)) {
+        return false; // No physics or session tick is consumed on refusal.
+    }
     physics_system->update(static_cast<float>(ctx->fixed_dt));
     const std::uint32_t ran =
         ctx->session->TickSimulation(ctx->fixed_dt, /*defer_water_authority=*/true);
@@ -347,6 +351,15 @@ bool NetworkedSessionDriver::StepAgreedTick() {
         return false;
     }
     const std::uint64_t budget = m_impl->config.budget_ticks;
+    // apply_and_step(false) is terminal in lockstep. Preflight both worlds before
+    // either peer consumes inputs, so resource refusal waits for the next frame.
+    // The hook reuses this tick's publication and cannot spend the budget twice.
+    for (auto* ctx : {&m_impl->host_ctx, &m_impl->client_ctx}) {
+        if (!ctx->session->GetPhysicsSystem()->prepare_simulation_collisions(
+                {}, ctx->session->GetSimulationTickCount() + 1)) {
+            return true;
+        }
+    }
 
     // Pump both peers until BOTH advance one more agreed tick (or terminate). The
     // loopback is in-process, so a bounded pump count is enough; a runaway is

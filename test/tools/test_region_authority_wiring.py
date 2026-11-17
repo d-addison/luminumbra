@@ -223,5 +223,111 @@ class RegionAuthorityWiring(unittest.TestCase):
             self.assertIn("TEST(AsyncWaterMeshing, " + case + ")", native)
 
 
+class SimulationCollisionWiring(unittest.TestCase):
+    HOSTS = (
+        ("src/luminumbra_server/ServerWorldRunner.cpp",
+         "ServerTickReport ServerWorldRunner::RunFixedTicks(", "physics_system->update("),
+        ("src/luminumbra_client/core/scenarios/NetworkedSessionDriver.cpp",
+         "bool NetSessionApplyStep(", "physics_system->update("),
+        ("src/luminumbra_client/main_client.cpp", None, "physics->update("),
+        ("src/luminumbra_common/world/GameSession.cpp",
+         "std::uint32_t GameSession::TickSimulation(", "StepCreatureAvatars("),
+    )
+
+    def assert_barrier(self, source, name, step):
+        body = function(source, name) if name else source.split(
+            "case GameState::IN_GAME:", 1)[1].split("case GameState::", 1)[0]
+        self.assertIn("prepare_simulation_collisions(", body)
+        self.assertRegex(body, r"prepare_simulation_collisions\(\s*\{\},")
+        prepare = body.index("prepare_simulation_collisions(")
+        self.assertLess(prepare, body.index(step))
+        if name is None:
+            self.assertLess(prepare, body.index("g_playerController->Update("))
+            self.assertIn("break;", body[prepare:body.index("g_playerController->Update(")])
+        elif "ServerWorldRunner" in name:
+            self.assertLess(prepare, body.index("physics_system->update_avatars("))
+            self.assertIn("break;", body[prepare:body.index(step)])
+        elif "GameSession" in name:
+            self.assertIn("return i;", body[prepare:body.index(step)])
+            self.assertLess(prepare, body.index("m_worldClock.set_tick("))
+        else:
+            self.assertIn("return false;", body[prepare:body.index(step)])
+
+    def test_all_hosts_prepare_before_physics(self):
+        for path, name, step in self.HOSTS:
+            with self.subTest(path=path):
+                self.assert_barrier((ROOT / path).read_text(encoding="utf-8"), name, step)
+
+    def test_missing_preparation_is_detected_at_every_host(self):
+        for path, name, step in self.HOSTS:
+            source = (ROOT / path).read_text(encoding="utf-8")
+            with self.subTest(path=path), self.assertRaises(AssertionError):
+                self.assert_barrier(source.replace("prepare_simulation_collisions(",
+                                                   "removed_preparation(", 1), name, step)
+
+    def test_lockstep_refusal_waits_before_consuming_either_peer_input(self):
+        source = (ROOT / "src/luminumbra_client/core/scenarios/NetworkedSessionDriver.cpp").read_text(
+            encoding="utf-8")
+        step = function(source, "bool NetworkedSessionDriver::StepAgreedTick(")
+        prepare = step.index("prepare_simulation_collisions(")
+        self.assertRegex(step, r"prepare_simulation_collisions\(\s*\{\},")
+        self.assertIn("&m_impl->host_ctx, &m_impl->client_ctx", step)
+        self.assertLess(prepare, step.index("m_impl->host->PumpTick("))
+        self.assertIn("return true;", step[prepare:step.index("m_impl->host->PumpTick(")])
+
+    def test_traversal_catchup_stops_on_a_refused_tick(self):
+        source = (ROOT / "src/luminumbra_client/main_client.cpp").read_text(encoding="utf-8")
+        loop = source.split("while (!gameSession->GetRegionSchedulerFault()", 1)[1].split(
+            "traversal_ticks += advanced;", 1)[0]
+        self.assertIn("const auto advanced =", loop)
+        self.assertIn("if (advanced == 0)", loop)
+        self.assertIn("break;", loop.split("if (advanced == 0)", 1)[1])
+
+    def test_collision_regressions_remain_registered(self):
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        for path, cases in (
+            ("common/GameSessionHeadlessWorld_test.cpp", (
+                "SimulationHorizonIgnoresRenderCollidersAndIncludesEveryBodyOwner",
+                "SimulationPreparationRefusesWithoutPublicationAndRetryMatchesPeer",
+                "SimulationPreparationBoundsInputsAndMissingAuthority",
+                "SimulationPreparationCanonicalizesOrderAndPreservesLegacyPath",
+                "SimulationOwnerRegistrationAndTickReuseStayBounded",
+                "SimulationPreparationVisitsOnlyLiveAvatarOwners")),
+            ("common/GameSessionHeadlessWorld_test.cpp", (
+                "SimulationCollisionsIgnoreRenderCadenceAcrossSessionTicks",
+                "LegacyColliderPreparationPreservesHashesAndSaveBytes",
+                "RefusedCollisionBarrierPreservesTheSessionTickAndAccumulator",
+                "SessionCollisionBarrierPrecedesTheFirstCreatureStep")),
+        ):
+            self.assertIn(path, cmake)
+            native = (ROOT / "test" / path).read_text(encoding="utf-8")
+            for case in cases:
+                self.assertRegex(native, r"TEST\(\w+,\s*" + case + r"\)")
+
+    def test_render_mutation_and_refused_physics_are_guarded(self):
+        source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(
+            encoding="utf-8")
+        for name in ("bool PhysicsSystem::add_chunk_collision(",
+                     "void PhysicsSystem::remove_chunk_collision("):
+            self.assertIn("if (simulation_collisions_enabled())", function(source, name))
+        for name in ("void PhysicsSystem::update(", "void PhysicsSystem::update_avatars(",
+                     "void PhysicsSystem::update_player("):
+            self.assertIn("!simulation_collisions_ready()", function(source, name))
+        prepare = function(source, "bool PhysicsSystem::prepare_simulation_collisions(")
+        self.assertLess(prepare.index("sample_simulation_collision("),
+                        prepare.index("m_body_interface->RemoveBody("))
+        for whole_world_scan in ("snapshot_streamed_chunks", "m_chunk_bodies", "GetBodies(",
+                                 "m_avatars.size()", "avatar : m_avatars"):
+            self.assertNotIn(whole_world_scan, prepare)
+
+    def test_expected_collision_authority_cannot_be_masked_by_water_or_unknown_metadata(self):
+        source = (ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp").read_text(
+            encoding="utf-8")
+        sample = function(source, "bool SHIELD_WorldSystem::sample_simulation_collision(")
+        self.assertIn("expected && (!chunk || !chunk->has_terrain_authority())", sample)
+        self.assertIn("expected && (!chunk || !chunk->has_simulation_authority())", sample)
+        self.assertLess(sample.index("read_committed_chunk("), sample.index("std::copy("))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -6738,6 +6738,7 @@ void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
     m_pending_water_changes.clear();
 
     if (physics_system) {
+        physics_system->clear_simulation_collisions();
         for (const auto& [id, chunk] : m_streaming_state.chunks) {
             physics_system->remove_chunk_collision(id);
         }
@@ -7041,6 +7042,54 @@ bool SHIELD_WorldSystem::is_far_lod_sdf_snapshot_current(const FarLodSdfSnapshot
         }
     }
     return published_sdfs == captured_resident_sdfs;
+}
+
+bool SHIELD_WorldSystem::sample_simulation_collision(i32 chunk_x,
+                                                     i32 chunk_z,
+                                                     std::span<float> heights) const {
+    constexpr std::size_t kSide = CHUNK_SIZE_X + 1;
+    static_assert(CHUNK_SIZE_X == CHUNK_SIZE_Z);
+    if (m_durable_read_failed || heights.size() != kSide * kSide || chunk_x < Chunk::kPackedMinXz ||
+        chunk_x > Chunk::kPackedMaxXz || chunk_z < Chunk::kPackedMinXz ||
+        chunk_z > Chunk::kPackedMaxXz) {
+        return false;
+    }
+    // Scalar/grid parity is pinned by terrain tests. Scalar sampling needs no growing
+    // SIMD scratch vectors; each column always visits exactly the 17x17 lattice.
+    for (int z = 0; z <= CHUNK_SIZE_Z; ++z) {
+        for (int x = 0; x <= CHUNK_SIZE_X; ++x) {
+            heights[static_cast<std::size_t>(z) * kSide + static_cast<std::size_t>(x)] =
+                GetTerrainHeightAt(static_cast<float>(chunk_x * CHUNK_SIZE_X + x),
+                                   static_cast<float>(chunk_z * CHUNK_SIZE_Z + z));
+        }
+    }
+    const float centre = heights[(CHUNK_SIZE_Z / 2) * kSide + CHUNK_SIZE_X / 2];
+    const double layer = std::floor(static_cast<double>(centre) / CHUNK_SIZE_Y);
+    if (!std::isfinite(layer) || layer < Chunk::kPackedMinY || layer > Chunk::kPackedMaxY) {
+        return false;
+    }
+    const IVec3 coords(chunk_x, static_cast<i32>(layer), chunk_z);
+    auto chunk = find_authoritative_chunk(coords);
+    const bool expected = m_durable_chunks.contains(Chunk::calculate_id(coords));
+    if (expected && (!chunk || !chunk->has_terrain_authority())) {
+        // A render or water-only placeholder cannot mask committed terrain.
+        chunk = read_committed_chunk(coords);
+    }
+    if (m_durable_read_failed || (expected && (!chunk || !chunk->has_simulation_authority()))) {
+        // A required committed record needs known authority metadata.
+        return false;
+    }
+    if (chunk && chunk->has_terrain_authority()) {
+        if (chunk->heightmap_data.size() != heights.size()) {
+            return false;
+        }
+        std::copy(chunk->heightmap_data.begin(), chunk->heightmap_data.end(), heights.begin());
+    }
+    return std::all_of(heights.begin(), heights.end(), [](float height) {
+        constexpr float kMinHeight = static_cast<float>(Chunk::kPackedMinY) * CHUNK_SIZE_Y;
+        constexpr float kMaxHeight = (static_cast<float>(Chunk::kPackedMaxY) + 1) * CHUNK_SIZE_Y;
+        return std::isfinite(height) && height >= kMinHeight && height < kMaxHeight;
+    });
 }
 
 std::shared_ptr<Luminumbra::Chunk>

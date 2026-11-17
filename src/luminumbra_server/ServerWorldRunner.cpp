@@ -641,6 +641,11 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         const std::uint64_t budget_tick = m_session->GetSimulationTickCount() + 1;
         luminumbra::simulation::SimBudgetTelemetry::TickScope physics_budget(budget, budget_tick);
         physics_budget.Next(BudgetStage::ServerPhysics, [] { return 1u; });
+        // Every host gathers the same registered controllers and projectiles.
+        // No host-specific spawn/camera anchor can change the horizon or its budget.
+        if (!physics_system->prepare_simulation_collisions({}, budget_tick)) {
+            break; // Leave this tick unconsumed; the next call retries preparation.
+        }
         physics_system->update(static_cast<float>(fixed_dt));
         //  step the server-authoritative avatar characters (gravity +
         // world collision; deterministic index order) and read their settled

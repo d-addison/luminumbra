@@ -17,7 +17,9 @@
 #include <cstdint>
 #include <functional>
 #include <glm/glm.hpp>
+#include <limits>
 #include <memory>
+#include <span>
 #include <unordered_map>
 #include <vector>
 
@@ -67,6 +69,21 @@ public:
     // False only when the body pool refuses creation; callers may retry later.
     bool add_chunk_collision(Chunk& chunk);
     void remove_chunk_collision(ChunkID chunk_id);
+    // Shared owner-thread barrier before rigid bodies or characters advance. Inert unless
+    // region authority is enabled. A refusal publishes nothing and pauses physics until a
+    // successful retry; hosts must also leave their simulation tick unconsumed.
+    // A concrete tick id reuses its successful publication across host/session consumers.
+    // Fixed one-chunk X/Z radius, 64 owners and 128 distinct columns per tick. Storage
+    // and body slots are fixed; only changed heightfield shapes replace bounded storage.
+    static constexpr std::size_t kSimulationOwnerBudget = 64;
+    static constexpr std::size_t kSimulationColliderBudget = 128;
+    bool
+    prepare_simulation_collisions(std::span<const Vec3> anchors,
+                                  std::uint64_t tick = std::numeric_limits<std::uint64_t>::max());
+    void clear_simulation_collisions();
+    // Const diagnostics, never session hash/save inputs. Counts actual sampled columns.
+    std::size_t simulation_collision_sample_count() const;
+    std::uint64_t simulation_collision_hash() const;
 
     // ---  : dynamic rigid bodies (projectiles e.g. an arrow) ---
     // Spawns a small dynamic sphere with an initial velocity: it falls under the
@@ -138,9 +155,7 @@ public:
     // physics before the world system and destroys it first, so the pointer
     // cannot dangle). Null (standalone tests) keeps the legacy Y-band
     // classification byte-identical.
-    void set_world_system(const SHIELD_WorldSystem* world_system) {
-        m_world_system = world_system;
-    }
+    void set_world_system(const SHIELD_WorldSystem* world_system);
 
     struct AudioRaycastResult {
         bool hit = false;
@@ -221,6 +236,10 @@ public:
     }
 
 private:
+    struct SimulationCollisions;
+    std::unique_ptr<SimulationCollisions> m_simulation_collisions;
+    bool simulation_collisions_enabled() const;
+    bool simulation_collisions_ready() const;
     WorkItems m_work_items{};
     // Independent ownership, released only after all Jolt resources.
     std::unique_ptr<JoltRuntimeLease> m_runtime_lease;
@@ -241,13 +260,19 @@ private:
     // + the shared avatar capsule shape. Stepped in index order for determinism.
     // A single, nonthrowing-movable element keeps ownership and movement state
     // together if vector growth refuses an allocation.
+    static constexpr std::size_t kNoAvatar = std::numeric_limits<std::size_t>::max();
     struct AvatarState {
         std::unique_ptr<JPH::CharacterVirtual> character;
         glm::vec2 wish{0.0f};
         JPH::BodyID frozen_body;
         bool frozen = false;
+        std::size_t previous = kNoAvatar;
+        std::size_t next = kNoAvatar;
     };
     std::vector<AvatarState> m_avatars;
+    std::size_t m_avatar_head = kNoAvatar;
+    std::size_t m_avatar_tail = kNoAvatar;
+    std::size_t m_live_avatar_count = 0;
     JPH::Ref<JPH::Shape> m_avatar_shape;
 
     // Track collision bodies for loaded chunks
