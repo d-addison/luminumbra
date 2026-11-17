@@ -15,7 +15,7 @@ enum class FarHandoffAdmissionStatus {
 };
 struct FarHandoffAdmissionPump {
     FarHandoffAdmissionStatus status = FarHandoffAdmissionStatus::NotApplicable;
-    // One column observation, input header, support region or final span check.
+    // One preparation step, column observation, header, region or final span check.
     // Atomic publication uses the existing bounded descriptor/index commit.
     std::uint64_t work = 0;
     // Actual indexed height reads in this pump, excluding source capture.
@@ -109,7 +109,8 @@ public:
     bool StageTarget(const FarHandoffManifest&);
     // Retains inputs privately, bounded by the preallocated descriptor capacity
     // (512 for session capture). Starting replaces any pending attempt.
-    // Pump budgets cover coverage validation and every height observation.
+    // Start only retains capacity-bounded inputs. Pump budgets cover descriptor
+    // preparation, sorting, coverage validation and every height observation.
     // A session owns the producer's frozen cursor exclusively until terminal.
     // Optional work/deadline contexts must outlive the pending transaction.
     FarHandoffAdmissionStatus StartTarget(const FarHandoffManifest&);
@@ -215,8 +216,9 @@ private:
     struct Admission;
     FarHandoffAdmissionStatus
     StartTarget(const FarHandoffManifest&, World::FarFrozenCaptureWork*, bool capture = false);
-    bool PrepareTarget(const FarHandoffManifest&, std::array<std::size_t, World::kFarTierCount>&);
-    bool CommitTarget(const FarHandoffManifest&, std::span<const World::FarVolumeRequest>);
+    bool ValidateManifest(const FarHandoffManifest&);
+    FarWorldRefusal PrepareStep(Admission&);
+    bool CommitTarget(const Admission&);
     FarWorldRefusal ValidateInput(const FarHandoffManifest&,
                                   const FarHandoffTileInput&,
                                   bool duplicate,

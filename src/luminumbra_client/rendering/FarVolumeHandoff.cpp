@@ -135,6 +135,11 @@ struct FarVolumeHandoff::Admission {
     enum class Phase {
         CaptureStart,
         CapturePump,
+        Index,
+        Sort,
+        SortCopy,
+        Keys,
+        Descriptors,
         Header,
         Columns,
         Regions,
@@ -144,7 +149,8 @@ struct FarVolumeHandoff::Admission {
         : control(std::move(charge))
         , resource(control)
         , inputs(&resource)
-        , resolved(&resource) {}
+        , resolved(&resource)
+        , scratch(&resource) {}
     // Direct manifests are bounded by the preallocated descriptor union; session
     // requests retain the producer's fixed 512-slot bound. All buffers are charged.
     World::FarVolumeMemoryLease control;
@@ -152,6 +158,8 @@ struct FarVolumeHandoff::Admission {
     std::pmr::vector<FarHandoffTileInput> inputs;
     std::array<FarSessionHandoffTile, World::FarWorldAuthorityProducer::kSlots> requests{};
     std::pmr::vector<World::FarVolumeRequest> resolved;
+    // At most count indices, separate from AdvanceFrame's descriptor ordering.
+    std::pmr::vector<std::size_t> scratch;
     FarHandoffManifest manifest;
     FarHandoffState before;
     World::FarVolumeCoverageCursor coverage;
@@ -166,19 +174,31 @@ struct FarVolumeHandoff::Admission {
     std::size_t count = 0, tile = 0, region = 0, height_region = 0;
     std::uint64_t height_observations = 0;
     bool support = false, duplicate = false;
-    Phase phase = Phase::Header;
-    bool Current(const FarHandoffState& state) const {
+    std::array<std::size_t, World::kFarTierCount> counts{};
+    std::array<bool, World::kFarTierCount> sorted{true, true, true, true, true};
+    std::size_t tier = 0, cursor = 0, old_count = 0, fallbacks = 0;
+    std::size_t width = 1, left = 0, middle = 0, right = 0, output = 0;
+    Phase phase = Phase::Index;
+    World::FarWorldAuthorityProducer::FrozenResult Failure(const FarHandoffState& state) const {
+        using Error = World::FarWorldAuthorityProducer::Error;
+        using CaptureError = World::FarFrozenCaptureError;
+        if (producer) {
+            const auto status = producer->capture_status();
+            if (status.error != Error::None)
+                return {status.error, CaptureError::None};
+            const auto* source = producer->capture();
+            if (source && source->deadline.expired())
+                return {Error::SourceReadExpired, CaptureError::None};
+            if (!world_guard.current())
+                return {Error::None, CaptureError::IdentityMismatch};
+            if (!source || status.paused || status.serving_serial != manifest.publication_serial ||
+                source->committed.generation != manifest.committed_generation)
+                return {Error::AuthorityUnavailable, CaptureError::None};
+        }
         if (before.target_serial != state.target_serial || before.promotions != state.promotions ||
             before.world_epoch != state.world_epoch)
-            return false;
-        if (!producer)
-            return true;
-        const auto status = producer->capture_status();
-        const auto* source = producer->capture();
-        return source && status.error == World::FarWorldAuthorityProducer::Error::None &&
-               !status.paused && status.serving_serial == manifest.publication_serial &&
-               source->committed.generation == manifest.committed_generation &&
-               !source->deadline.expired() && world_guard.current();
+            return {Error::AuthorityUnavailable, CaptureError::None};
+        return {};
     }
 };
 class FarVolumeHandoff::Guard {
@@ -546,8 +566,7 @@ FarHandoffAdmissionStatus FarVolumeHandoff::StartTarget(const FarHandoffManifest
     session_capture_failure_ = {};
     admission_status_ = FarHandoffAdmissionStatus::Refused;
     if (!capture) {
-        std::array<std::size_t, World::kFarTierCount> counts{};
-        if (!PrepareTarget(manifest, counts))
+        if (!ValidateManifest(manifest))
             return admission_status_;
     }
     std::size_t capacity = 0;
@@ -560,7 +579,8 @@ FarHandoffAdmissionStatus FarVolumeHandoff::StartTarget(const FarHandoffManifest
         manifest.tiles.size() >
             std::numeric_limits<std::size_t>::max() / sizeof(FarHandoffTileInput) ||
         manifest.tiles.size() >
-            std::numeric_limits<std::size_t>::max() / sizeof(World::FarVolumeRequest)) {
+            std::numeric_limits<std::size_t>::max() / sizeof(World::FarVolumeRequest) ||
+        manifest.tiles.size() > std::numeric_limits<std::size_t>::max() / sizeof(std::size_t)) {
         admission_refusal_ = FarWorldRefusal::AdmissionFailed;
         return admission_status_;
     }
@@ -571,6 +591,7 @@ FarHandoffAdmissionStatus FarVolumeHandoff::StartTarget(const FarHandoffManifest
         auto pending = std::make_unique<Admission>(std::move(control));
         pending->inputs.resize(manifest.tiles.size());
         pending->resolved.resize(manifest.tiles.size());
+        pending->scratch.resize(manifest.tiles.size());
         pending->before = state_;
         pending->count = manifest.tiles.size();
         std::copy(manifest.tiles.begin(), manifest.tiles.end(), pending->inputs.begin());
@@ -640,6 +661,7 @@ FarHandoffAdmissionStatus FarVolumeHandoff::StartSessionTarget(
     try {
         pending.inputs.resize(requests.size());
         pending.resolved.resize(requests.size());
+        pending.scratch.resize(requests.size());
     } catch (...) {
         return refuse(FarWorldRefusal::AdmissionFailed);
     }
@@ -655,6 +677,115 @@ FarHandoffAdmissionStatus FarVolumeHandoff::StartSessionTarget(
     }
     pending.phase = Admission::Phase::CaptureStart;
     return admission_status_;
+}
+FarWorldRefusal FarVolumeHandoff::PrepareStep(Admission& pending) {
+    const auto& manifest = pending.manifest;
+    if (pending.phase == Admission::Phase::Index) {
+        if (pending.cursor == pending.count) {
+            if (pending.fallbacks == 0)
+                return FarWorldRefusal::InvalidRequests;
+            pending.cursor = 0;
+            pending.phase = Admission::Phase::Sort;
+            return FarWorldRefusal::None;
+        }
+        const auto index = pending.cursor++;
+        const auto& input = pending.inputs[index];
+        const auto& wanted = input.wanted;
+        World::FarTileKey key;
+        if (!World::ToFarTileKey(wanted.intent.key, key) || key != wanted.identity.key ||
+            wanted.identity.world_epoch != manifest.world_epoch ||
+            wanted.identity.cave_policy != static_cast<std::uint8_t>(manifest.caves))
+            return FarWorldRefusal::InvalidRequests;
+        if (!input.observation)
+            return FarWorldRefusal::ImmutableAuthorityUnavailable;
+        auto& tier = GetTier(key.tier - 1);
+        auto& count = pending.counts[key.tier - 1];
+        if (count == tier.entries.size())
+            return FarWorldRefusal::AdmissionFailed;
+        auto incoming = std::span(tier.key_index).subspan(tier.entries.size());
+        if (count != 0) {
+            ++admission_work_.key_comparisons;
+            const bool in_order = manifest.tiles[incoming[count - 1]].wanted.identity.key < key;
+            pending.sorted[key.tier - 1] = pending.sorted[key.tier - 1] && in_order;
+        }
+        incoming[count++] = index;
+        pending.fallbacks += key.tier == World::kFarTierCount;
+        return FarWorldRefusal::None;
+    }
+    if (pending.tier == tiers_.size()) {
+        pending.tier = 0;
+        pending.cursor = 0;
+        if (pending.phase == Admission::Phase::Descriptors) {
+            if (pending.duplicate && pending.old_count != pending.count)
+                return FarWorldRefusal::InvalidRequests;
+            pending.phase = Admission::Phase::Header;
+        } else {
+            pending.phase = Admission::Phase::Descriptors;
+        }
+        return FarWorldRefusal::None;
+    }
+    auto& tier = GetTier(pending.tier);
+    const auto count = pending.counts[pending.tier];
+    auto incoming = std::span(tier.key_index).subspan(tier.entries.size(), count);
+    if (pending.phase == Admission::Phase::Descriptors) {
+        if (pending.cursor == tier.entries.size()) {
+            ++pending.tier;
+            pending.cursor = 0;
+        } else {
+            const auto index = pending.cursor++;
+            ++admission_work_.descriptor_visits;
+            pending.old_count += tier.entries[index].target.has_value();
+        }
+    } else if (pending.phase == Admission::Phase::Sort) {
+        if (pending.sorted[pending.tier] || pending.width >= count) {
+            pending.phase = Admission::Phase::Keys;
+            pending.cursor = 1;
+        } else if (pending.output == count) {
+            pending.phase = Admission::Phase::SortCopy;
+            pending.cursor = 0;
+        } else {
+            // Bottom-up merge: one emitted index (at most one comparison) per
+            // budget unit, using the charged manifest-sized scratch buffer.
+            if (pending.output == pending.right) {
+                pending.left = pending.output;
+                pending.middle = pending.left + std::min(pending.width, count - pending.left);
+                pending.right = pending.middle + std::min(pending.width, count - pending.middle);
+                pending.cursor = pending.middle;
+            }
+            bool take_left = pending.left < pending.middle;
+            if (take_left && pending.cursor < pending.right) {
+                ++admission_work_.key_comparisons;
+                take_left = manifest.tiles[incoming[pending.left]].wanted.identity.key <
+                            manifest.tiles[incoming[pending.cursor]].wanted.identity.key;
+            }
+            pending.scratch[pending.output++] =
+                incoming[take_left ? pending.left++ : pending.cursor++];
+        }
+    } else if (pending.phase == Admission::Phase::SortCopy) {
+        if (pending.cursor == count) {
+            // Avoid overflow even for the largest admitted descriptor capacity.
+            pending.width = pending.width >= count - pending.width ? count : 2 * pending.width;
+            pending.left = pending.middle = pending.right = pending.output = 0;
+            pending.phase = Admission::Phase::Sort;
+        } else {
+            incoming[pending.cursor] = pending.scratch[pending.cursor];
+            ++pending.cursor;
+        }
+    } else if (pending.phase == Admission::Phase::Keys) {
+        if (pending.cursor >= count) {
+            ++pending.tier;
+            pending.width = 1;
+            pending.left = pending.middle = pending.right = pending.output = 0;
+            pending.phase = Admission::Phase::Sort;
+        } else {
+            const auto index = pending.cursor++;
+            ++admission_work_.key_comparisons;
+            if (manifest.tiles[incoming[index - 1]].wanted.identity.key ==
+                manifest.tiles[incoming[index]].wanted.identity.key)
+                return FarWorldRefusal::InvalidRequests;
+        }
+    }
+    return FarWorldRefusal::None;
 }
 FarWorldRefusal FarVolumeHandoff::AdmissionStep(Admission& pending) {
     const auto& input = pending.inputs[pending.tile];
@@ -683,6 +814,12 @@ FarWorldRefusal FarVolumeHandoff::AdmissionStep(Admission& pending) {
         }
         case Admission::Phase::CapturePump:
             throw std::logic_error("Capture pump requires its remaining budget");
+        case Admission::Phase::Index:
+        case Admission::Phase::Sort:
+        case Admission::Phase::SortCopy:
+        case Admission::Phase::Keys:
+        case Admission::Phase::Descriptors:
+            return PrepareStep(pending);
         case Admission::Phase::Header: {
             World::FarTileKey converted;
             if (!World::ToFarTileKey(wanted.intent.key, converted) || converted != key ||
@@ -792,19 +929,20 @@ FarHandoffAdmissionPump FarVolumeHandoff::PumpAdmission(std::uint64_t budget) {
         return result;
     };
     auto& pending = *admission_;
-    if (!pending.Current(state_)) {
-        if (pending.producer) {
-            if (!pending.world_guard.current())
-                session_capture_failure_.capture = World::FarFrozenCaptureError::IdentityMismatch;
-            else
-                session_capture_failure_.source =
-                    World::FarWorldAuthorityProducer::Error::AuthorityUnavailable;
+    const auto check_current = [&]() {
+        const auto failure = pending.Failure(state_);
+        if (!failure.ok()) {
+            if (pending.producer)
+                session_capture_failure_ = failure;
+            return FarWorldProducerRefusal(failure);
         }
-        return refuse(FarWorldRefusal::ImmutableAuthorityUnavailable);
-    }
+        return FarWorldRefusal::None;
+    };
+    if (const auto refusal = check_current(); refusal != FarWorldRefusal::None)
+        return refuse(refusal);
     while (result.work < budget && pending.tile < pending.count) {
-        if (!pending.Current(state_))
-            return refuse(FarWorldRefusal::ImmutableAuthorityUnavailable);
+        if (const auto refusal = check_current(); refusal != FarWorldRefusal::None)
+            return refuse(refusal);
         if (pending.sampling && !pending.sampling->CheckDeadline()) {
             session_capture_failure_.capture = World::FarFrozenCaptureError::DeadlineExceeded;
             return refuse(FarWorldRefusal::AdmissionFailed);
@@ -837,9 +975,8 @@ FarHandoffAdmissionPump FarVolumeHandoff::PumpAdmission(std::uint64_t budget) {
             pending.phase = Admission::Phase::CaptureStart;
             if (pending.tile == pending.count) {
                 pending.tile = 0;
-                pending.phase = Admission::Phase::Header;
-                std::array<std::size_t, World::kFarTierCount> counts{};
-                if (!PrepareTarget(pending.manifest, counts))
+                pending.phase = Admission::Phase::Index;
+                if (!ValidateManifest(pending.manifest))
                     return refuse(admission_refusal_);
             }
         } else {
@@ -852,13 +989,13 @@ FarHandoffAdmissionPump FarVolumeHandoff::PumpAdmission(std::uint64_t budget) {
         }
     }
     if (pending.tile == pending.count && budget != 0) {
-        if (!pending.Current(state_))
-            return refuse(FarWorldRefusal::ImmutableAuthorityUnavailable);
+        if (const auto refusal = check_current(); refusal != FarWorldRefusal::None)
+            return refuse(refusal);
         if (pending.sampling && !pending.sampling->CheckDeadline()) {
             session_capture_failure_.capture = World::FarFrozenCaptureError::DeadlineExceeded;
             return refuse(FarWorldRefusal::AdmissionFailed);
         }
-        if (!CommitTarget(pending.manifest, {pending.resolved.data(), pending.count}))
+        if (!CommitTarget(pending))
             return refuse(admission_refusal_);
         ReleaseAdmission();
         result.status = admission_status_ = FarHandoffAdmissionStatus::Complete;
@@ -875,9 +1012,7 @@ bool FarVolumeHandoff::StageTarget(const FarHandoffManifest& manifest) {
     return AdmissionStatus() == FarHandoffAdmissionStatus::Complete;
 }
 
-bool FarVolumeHandoff::PrepareTarget(const FarHandoffManifest& manifest,
-                                     std::array<std::size_t, World::kFarTierCount>& counts) {
-    auto& work = admission_work_;
+bool FarVolumeHandoff::ValidateManifest(const FarHandoffManifest& manifest) {
     admission_refusal_ = FarWorldRefusal::None;
     const auto refuse = [this](FarWorldRefusal reason) {
         admission_refusal_ = reason;
@@ -900,68 +1035,28 @@ bool FarVolumeHandoff::PrepareTarget(const FarHandoffManifest& manifest,
     const bool duplicate = manifest.publication_serial == state_.target_serial;
     if (duplicate && manifest.committed_generation != state_.committed_generation)
         return refuse(FarWorldRefusal::ImmutableAuthorityUnavailable);
-    counts = {};
-    std::size_t fallbacks = 0, old_count = 0;
-    for (auto& tier : tiers_) {
-        if (!tier)
-            throw std::logic_error("Far-volume handoff missing tier");
-        tier->order.assign(tier->entries.size(), 0);
-        for (const auto& entry : tier->entries) {
-            ++work.descriptor_visits;
-            old_count += entry.target.has_value();
-        }
-    }
-    if (duplicate && old_count != manifest.tiles.size())
+    if (manifest.tiles.empty())
         return refuse(FarWorldRefusal::InvalidRequests);
-    // Bound each tier before sorting or resolving authority. Only charged,
-    // preallocated scratch changes before the whole manifest validates.
-    for (std::size_t index = 0; index < manifest.tiles.size(); ++index) {
-        const auto& input = manifest.tiles[index];
-        const auto& wanted = input.wanted;
-        const auto& identity = wanted.identity;
-        World::FarTileKey key;
-        if (!World::ToFarTileKey(wanted.intent.key, key) || key != identity.key ||
-            identity.world_epoch != manifest.world_epoch ||
-            identity.cave_policy != static_cast<std::uint8_t>(manifest.caves))
-            return refuse(FarWorldRefusal::InvalidRequests);
-        if (!input.observation)
-            return refuse(FarWorldRefusal::ImmutableAuthorityUnavailable);
-        auto& tier = GetTier(key.tier - 1);
-        auto& count = counts[key.tier - 1];
-        if (count == tier.entries.size())
-            return refuse(FarWorldRefusal::AdmissionFailed);
-        tier.key_index[tier.entries.size() + count++] = index;
-        fallbacks += key.tier == World::kFarTierCount;
-    }
-    if (fallbacks == 0)
-        return refuse(FarWorldRefusal::InvalidRequests);
-    for (std::size_t i = 0; i < tiers_.size(); ++i) {
-        auto& tier = GetTier(i);
-        auto incoming = std::span(tier.key_index).subspan(tier.entries.size(), counts[i]);
-        std::sort(incoming.begin(), incoming.end(), [&](std::size_t a, std::size_t b) {
-            ++work.key_comparisons;
-            return manifest.tiles[a].wanted.identity.key < manifest.tiles[b].wanted.identity.key;
-        });
-        for (std::size_t j = 1; j < incoming.size(); ++j) {
-            ++work.key_comparisons;
-            if (manifest.tiles[incoming[j - 1]].wanted.identity.key ==
-                manifest.tiles[incoming[j]].wanted.identity.key)
-                return refuse(FarWorldRefusal::InvalidRequests);
-        }
-    }
     return true;
 }
-bool FarVolumeHandoff::CommitTarget(const FarHandoffManifest& manifest,
-                                    std::span<const World::FarVolumeRequest> resolved) {
-    std::array<std::size_t, World::kFarTierCount> counts{}, new_keys{}, next_free{};
-    if (!PrepareTarget(manifest, counts))
-        return false;
-    const bool duplicate = manifest.publication_serial == state_.target_serial;
+bool FarVolumeHandoff::CommitTarget(const Admission& pending) {
+    const auto& manifest = pending.manifest;
+    const auto& counts = pending.counts;
+    const auto resolved = std::span(pending.resolved);
+    std::array<std::size_t, World::kFarTierCount> new_keys{}, next_free{};
+    const bool duplicate = pending.duplicate;
     auto& work = admission_work_;
     const auto refuse = [this](FarWorldRefusal reason) {
         admission_refusal_ = reason;
         return false;
     };
+    // AdvanceFrame may reuse descriptor ordering between any two pumps. Reset
+    // its membership marks only in this bounded, non-yielding publication step.
+    for (auto& tier : tiers_) {
+        if (!tier)
+            throw std::logic_error("Far-volume handoff missing tier");
+        tier->order.assign(tier->entries.size(), 0);
+    }
     std::array<std::size_t, World::kFarTierCount> validated{};
     for (std::size_t index = 0; index < manifest.tiles.size(); ++index) {
         const auto& input = manifest.tiles[index];

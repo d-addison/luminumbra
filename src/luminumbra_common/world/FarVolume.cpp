@@ -1,6 +1,7 @@
 #include "FarVolume.h"
 
 #include "FarDensityQuantization.h"
+#include "FarFrozenObservation.h"
 #include "core/Crc32.h"
 
 #include <algorithm>

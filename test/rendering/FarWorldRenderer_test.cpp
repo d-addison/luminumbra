@@ -3091,6 +3091,135 @@ TEST_F(HandoffAdmissionTest, ColumnBudgetsPreservePrivateInputsAndSynchronousTil
     EXPECT_EQ(Complete(64), 2u * 129u * 129u);
 }
 
+TEST_F(HandoffAdmissionTest, StartDefersManifestScansAndSortToBudgetedPumps) {
+    const std::array inputs{RendererHandoffInput(renderer, {5, 2, 0}, 1, false),
+                            RendererHandoffInput(renderer, {5, 1, 0}, 1, false),
+                            RendererHandoffInput(renderer, {5, 0, 0}, 1, false)};
+    ASSERT_EQ(renderer.StartTarget(RendererHandoffManifest(1, inputs)),
+              FarHandoffAdmissionStatus::Pending);
+    const auto* handoff = renderer.Handoff();
+    ASSERT_NE(handoff, nullptr);
+    EXPECT_EQ(handoff->AdmissionWork().descriptor_visits, 0u);
+    EXPECT_EQ(handoff->AdmissionWork().key_comparisons, 0u);
+    EXPECT_EQ(renderer.PumpAdmission(0).work, 0u);
+    EXPECT_EQ(handoff->AdmissionWork().descriptor_visits, 0u);
+    EXPECT_EQ(handoff->AdmissionWork().key_comparisons, 0u);
+    // Input indexing and all comparisons must be charged before coverage begins.
+    std::uint64_t columns = 0;
+    for (std::size_t pump = 0; pump < 1024; ++pump) {
+        const auto before = handoff->AdmissionWork();
+        const auto result = renderer.PumpAdmission(1);
+        EXPECT_EQ(result.work, 1u);
+        EXPECT_EQ(result.status, FarHandoffAdmissionStatus::Pending);
+        // Frame preparation must not overwrite the pending sort's scratch.
+        renderer.AdvanceFrame(pump, {0, 0, 0}, {});
+        const auto after = handoff->AdmissionWork();
+        EXPECT_LE(after.descriptor_visits - before.descriptor_visits, result.work);
+        EXPECT_LE(after.key_comparisons - before.key_comparisons, result.work);
+        columns += result.height_observations;
+        if (columns != 0) {
+            break;
+        }
+    }
+    ASSERT_EQ(columns, 1u);
+    EXPECT_EQ(columns + Complete(64), 3u * 129u * 129u);
+    const auto expected = FarWorldHandoffDiagnosticJson(renderer.Diagnostic())["tiles"].dump();
+    auto sorted = inputs;
+    std::reverse(sorted.begin(), sorted.end());
+    ASSERT_TRUE(renderer.StageTarget(RendererHandoffManifest(2, sorted)));
+    EXPECT_EQ(FarWorldHandoffDiagnosticJson(renderer.Diagnostic())["tiles"].dump(), expected);
+    // A published target makes frame preparation actively overwrite its own
+    // ordering buffer between merge emissions and the eventual publication.
+    ASSERT_EQ(renderer.StartTarget(RendererHandoffManifest(3, inputs)),
+              FarHandoffAdmissionStatus::Pending);
+    columns = 0;
+    for (std::size_t pump = 0; pump < 1024; ++pump) {
+        const auto result = renderer.PumpAdmission(1);
+        ASSERT_EQ(result.status, FarHandoffAdmissionStatus::Pending);
+        EXPECT_EQ(result.work, 1u);
+        renderer.AdvanceFrame(1024 + pump, {0, 0, 0}, {});
+        columns += result.height_observations;
+        if (columns != 0) {
+            break;
+        }
+    }
+    ASSERT_EQ(columns, 1u);
+    EXPECT_EQ(columns + Complete(64), 3u * 129u * 129u);
+    EXPECT_EQ(FarWorldHandoffDiagnosticJson(renderer.Diagnostic())["tiles"].dump(), expected);
+    // Duplicate serials still validate the full set, without observing heights.
+    ASSERT_EQ(renderer.StartTarget(RendererHandoffManifest(3, inputs)),
+              FarHandoffAdmissionStatus::Pending);
+    EXPECT_EQ(Complete(64), 0u);
+    auto incomplete = RendererHandoffManifest(3, inputs);
+    incomplete.tiles = incomplete.tiles.first(2);
+    ASSERT_EQ(renderer.StartTarget(incomplete), FarHandoffAdmissionStatus::Pending);
+    FarHandoffAdmissionPump refused;
+    for (std::size_t pump = 0; pump < 1024; ++pump) {
+        refused = renderer.PumpAdmission(1);
+        EXPECT_EQ(refused.height_observations, 0u);
+        if (refused.status != FarHandoffAdmissionStatus::Pending) {
+            break;
+        }
+    }
+    EXPECT_EQ(refused.status, FarHandoffAdmissionStatus::Refused);
+    EXPECT_EQ(renderer.AdmissionRefusal(), FarWorldRefusal::InvalidRequests);
+    EXPECT_EQ(renderer.Handoff()->State().target_serial, 3u);
+}
+
+TEST_F(HandoffAdmissionTest, BudgetedPreparationRefusesInvalidSetsWithoutPublication) {
+    const auto input = RendererHandoffInput(renderer, {5, 0, 0}, 1, false);
+    for (int invalid = 0; invalid < 6; ++invalid) {
+        SCOPED_TRACE(invalid);
+        std::array tiles{input, input};
+        auto manifest = RendererHandoffManifest(1, tiles);
+        auto expected = FarWorldRefusal::InvalidRequests;
+        if (invalid == 1) {
+            tiles[1].observation.reset();
+            expected = FarWorldRefusal::ImmutableAuthorityUnavailable;
+        } else if (invalid == 2) {
+            tiles[1].wanted.identity.key.tier = 0;
+        } else if (invalid == 3) {
+            tiles[1].wanted.identity.world_epoch = 0;
+        } else if (invalid == 4) {
+            tiles[1].wanted.identity.cave_policy = 255;
+        } else if (invalid == 5) {
+            tiles[0].wanted.identity.key.tier = 1;
+            ASSERT_TRUE(
+                ToFarVolumeTileKey(tiles[0].wanted.identity.key, tiles[0].wanted.intent.key));
+            manifest.tiles = {tiles.data(), 1}; // No coarsest fallback.
+        }
+        ASSERT_EQ(renderer.StartTarget(manifest), FarHandoffAdmissionStatus::Pending);
+        FarHandoffAdmissionPump result;
+        for (std::size_t pump = 0; pump < 1024; ++pump) {
+            result = renderer.PumpAdmission(1);
+            EXPECT_LE(result.work, 1u);
+            EXPECT_EQ(result.height_observations, 0u);
+            if (result.status != FarHandoffAdmissionStatus::Pending) {
+                break;
+            }
+        }
+        EXPECT_EQ(result.status, FarHandoffAdmissionStatus::Refused);
+        EXPECT_EQ(renderer.AdmissionRefusal(), expected);
+        EXPECT_EQ(renderer.Handoff()->State().target_serial, 0u);
+    }
+}
+
+TEST_F(HandoffAdmissionTest, PerTierCapacityRefusesBeforeSortingOrCoverage) {
+    std::array<FarHandoffTileInput, FarWorldAuthorityProducer::kSlots + 1> inputs{};
+    inputs.fill(RendererHandoffInput(renderer, {5, 0, 0}, 1, false));
+    ASSERT_EQ(renderer.StartTarget(RendererHandoffManifest(1, inputs)),
+              FarHandoffAdmissionStatus::Pending);
+    FarHandoffAdmissionPump result;
+    for (std::size_t index = 0; index < inputs.size(); ++index) {
+        result = renderer.PumpAdmission(1);
+        EXPECT_EQ(result.work, 1u);
+        EXPECT_EQ(result.height_observations, 0u);
+    }
+    EXPECT_EQ(result.status, FarHandoffAdmissionStatus::Refused);
+    EXPECT_EQ(renderer.AdmissionRefusal(), FarWorldRefusal::AdmissionFailed);
+    EXPECT_EQ(renderer.Handoff()->State().target_serial, 0u);
+}
+
 TEST_F(HandoffAdmissionTest, MaximumManifestYieldsAtColumnsBeforeLaterInputRefusal) {
     std::array<FarHandoffTileInput, FarWorldAuthorityProducer::kSlots> inputs{};
     inputs.fill(RendererHandoffInput(renderer, {5, 0, 0}, 1, false));
@@ -3101,6 +3230,8 @@ TEST_F(HandoffAdmissionTest, MaximumManifestYieldsAtColumnsBeforeLaterInputRefus
     }
     ASSERT_EQ(renderer.StartTarget(RendererHandoffManifest(1, inputs)),
               FarHandoffAdmissionStatus::Pending);
+    EXPECT_EQ(renderer.Handoff()->AdmissionWork().descriptor_visits, 0u);
+    EXPECT_EQ(renderer.Handoff()->AdmissionWork().key_comparisons, 0u);
     std::uint64_t columns = 0;
     for (std::size_t pump = 0; pump < 300; ++pump) {
         const auto result = renderer.PumpAdmission(64);
@@ -3187,7 +3318,12 @@ TEST_F(HandoffAdmissionTest, MetadataAndLateRefusalsRemainAtomicAndRestartable) 
                 tiles[0].observation.reset();
                 break;
         }
-        EXPECT_EQ(renderer.StartTarget(bad), FarHandoffAdmissionStatus::Refused);
+        if (invalid == 5) {
+            ASSERT_EQ(renderer.StartTarget(bad), FarHandoffAdmissionStatus::Pending);
+            EXPECT_EQ(renderer.PumpAdmission(1).status, FarHandoffAdmissionStatus::Refused);
+        } else {
+            EXPECT_EQ(renderer.StartTarget(bad), FarHandoffAdmissionStatus::Refused);
+        }
         EXPECT_EQ(renderer.AdmissionStatus(), FarHandoffAdmissionStatus::Refused);
         EXPECT_EQ(renderer.PumpAdmission(1).work, 0u);
         EXPECT_EQ(renderer.Handoff()->State().target_serial, 0u);
@@ -3223,6 +3359,8 @@ TEST(FarWorldRenderer, BoundedAdmissionIsTypedNotApplicableWithoutSessionOrInLeg
 namespace {
 class SessionAdmissionTest : public SessionRendererTest {
 protected:
+    // Declared before the producer so every capture clock borrower dies first.
+    std::uint64_t capture_now = 0;
     std::shared_ptr<Producer> source;
     std::shared_ptr<const Systems::SHIELD_WorldSystem> sampling_world;
     void SetUp() override {
@@ -3280,6 +3418,96 @@ protected:
 };
 } // namespace
 
+TEST_F(SessionAdmissionTest, PrivateAdmissionAndCancellationKeepPublishedSelection) {
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).effective, FarWorldMode::Legacy);
+    ASSERT_EQ(Start(capture_limits), FarHandoffAdmissionStatus::Pending);
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).effective, FarWorldMode::Legacy);
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal,
+              FarWorldRefusal::ImmutableAuthorityUnavailable);
+    ASSERT_TRUE(ReachAdmission());
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).effective, FarWorldMode::Legacy);
+    EXPECT_EQ(renderer.CancelAdmission(), FarHandoffAdmissionStatus::Idle);
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).effective, FarWorldMode::Legacy);
+    EXPECT_EQ(renderer.PumpAdmission(0).status, FarHandoffAdmissionStatus::Idle);
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).effective, FarWorldMode::Legacy);
+    EXPECT_EQ(
+        renderer.StartSessionTarget({}, sampling_world, Tiles(), policy, capture_limits, samples),
+        FarHandoffAdmissionStatus::Refused);
+    EXPECT_EQ(renderer.CancelAdmission(), FarHandoffAdmissionStatus::Idle);
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).effective, FarWorldMode::Legacy);
+    ASSERT_EQ(Start(capture_limits), FarHandoffAdmissionStatus::Pending);
+    ASSERT_TRUE(CompleteSession());
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).effective, FarWorldMode::Ladder);
+    ASSERT_TRUE(source->request_capture(windows));
+    source->pump_capture();
+    source->pump_capture();
+    ASSERT_EQ(Start(capture_limits), FarHandoffAdmissionStatus::Pending);
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).effective, FarWorldMode::Ladder);
+    EXPECT_EQ(renderer.CancelAdmission(), FarHandoffAdmissionStatus::Idle);
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).effective, FarWorldMode::Ladder);
+    // A refused replacement does not erase the published target on cancellation.
+    EXPECT_EQ(
+        renderer.StartSessionTarget({}, sampling_world, Tiles(), policy, capture_limits, samples),
+        FarHandoffAdmissionStatus::Refused);
+    EXPECT_EQ(renderer.CancelAdmission(), FarHandoffAdmissionStatus::Idle);
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).effective, FarWorldMode::Ladder);
+}
+
+TEST_F(SessionAdmissionTest, BetweenPumpSourceFailuresRetainTypedDiagnostics) {
+    const Save::AuthorityReadLimits reads{
+        512, 512, 1024, 8192, 4194304, 16777216, 4194304, 16777216, 131072};
+    std::string error;
+    for (const bool deadline : {false, true}) {
+        SCOPED_TRACE(deadline);
+        ASSERT_TRUE(source->admit_saved_source(root, reads, error)) << error;
+        capture_now = 0;
+        const Producer::CaptureClock clock{[](const void* context) noexcept -> std::uint64_t {
+                                               return *static_cast<const std::uint64_t*>(context);
+                                           },
+                                           &capture_now,
+                                           1};
+        ASSERT_TRUE(source->configure_capture({reads, 4, clock}));
+        ASSERT_TRUE(source->request_capture(windows));
+        source->pump_capture();
+        source->pump_capture();
+        ASSERT_EQ(Start(capture_limits), FarHandoffAdmissionStatus::Pending);
+        ASSERT_TRUE(ReachAdmission());
+        if (deadline) {
+            capture_now = 1;
+        } else {
+            ASSERT_FALSE(source->admit_saved_source(root / "missing", reads, error));
+            ASSERT_EQ(source->capture_status().error, Producer::Error::CommittedReadRefused);
+        }
+        const auto result = renderer.PumpAdmission(1);
+        EXPECT_EQ(result.status, FarHandoffAdmissionStatus::Refused);
+        EXPECT_EQ(result.work, 0u);
+        EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal,
+                  FarWorldRefusal::AdmissionFailed);
+        renderer.CaptureDiagnostic(renderer.Selection(FarWorldPurpose::World),
+                                   0,
+                                   {0, 0, 0},
+                                   kLegacyFarPlaneMeters,
+                                   false,
+                                   0,
+                                   0);
+        EXPECT_EQ(renderer.Diagnostic().source_failure.source,
+                  deadline ? Producer::Error::SourceReadExpired
+                           : Producer::Error::CommittedReadRefused);
+        EXPECT_EQ(renderer.Diagnostic().source_failure.capture, FarFrozenCaptureError::None);
+        EXPECT_EQ(renderer.SessionDiagnostic()->state.target_serial, 0u);
+        EXPECT_FALSE(source->frozen_active());
+    }
+    // A fresh source capture permits restart after either refusal.
+    const Producer::CaptureClock clock{
+        [](const void*) noexcept -> std::uint64_t { return 0; }, nullptr, 1};
+    ASSERT_TRUE(source->configure_capture({reads, 4, clock}));
+    ASSERT_TRUE(source->request_capture(windows));
+    source->pump_capture();
+    source->pump_capture();
+    ASSERT_EQ(Start(capture_limits), FarHandoffAdmissionStatus::Pending);
+    ASSERT_TRUE(CompleteSession());
+}
+
 TEST_F(SessionAdmissionTest, CaptureAndAdmissionComposeWithOwnedInputsAndIdenticalBytes) {
     ASSERT_TRUE(renderer.StageSessionTarget(
         *source, *sampling_world, Tiles(), policy, capture_limits, samples));
@@ -3309,6 +3537,7 @@ TEST_F(SessionAdmissionTest, CaptureAndAdmissionComposeWithOwnedInputsAndIdentic
 
 TEST_F(SessionAdmissionTest, SourceReplacementFenceAndGenerationRetirementRefuseAfterCapture) {
     for (int change = 0; change < 4; ++change) {
+        SCOPED_TRACE(change);
         ASSERT_EQ(Start(capture_limits), FarHandoffAdmissionStatus::Pending);
         ASSERT_TRUE(ReachAdmission());
         EXPECT_EQ(renderer.SessionDiagnostic()->state.target_serial, 0u);
@@ -3336,6 +3565,13 @@ TEST_F(SessionAdmissionTest, SourceReplacementFenceAndGenerationRetirementRefuse
         source->fence_source_reads(false);
         auto mutable_world = std::const_pointer_cast<Systems::SHIELD_WorldSystem>(sampling_world);
         mutable_world->set_seed(1337);
+        if (change == 0) {
+            EXPECT_FALSE(source->request_capture(windows));
+            const Save::AuthorityReadLimits reads{
+                512, 512, 1024, 8192, 4194304, 16777216, 4194304, 16777216, 131072};
+            std::string error;
+            ASSERT_TRUE(source->admit_saved_source(root, reads, error)) << error;
+        }
         ASSERT_TRUE(source->request_capture(windows));
         source->pump_capture();
         source->pump_capture();
@@ -3417,6 +3653,16 @@ TEST_F(SessionAdmissionTest, MissingOwnersInvalidLimitsAndExpiredDeadlinePermitR
     const auto refused = renderer.PumpAdmission(1);
     EXPECT_EQ(refused.status, FarHandoffAdmissionStatus::Refused);
     EXPECT_EQ(refused.work, 0u);
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal, FarWorldRefusal::AdmissionFailed);
+    renderer.CaptureDiagnostic(renderer.Selection(FarWorldPurpose::World),
+                               0,
+                               {0, 0, 0},
+                               kLegacyFarPlaneMeters,
+                               false,
+                               0,
+                               0);
+    EXPECT_EQ(renderer.Diagnostic().source_failure.capture,
+              FarFrozenCaptureError::DeadlineExceeded);
     EXPECT_EQ(renderer.SessionDiagnostic()->state.target_serial, 0u);
     ASSERT_EQ(Start(capture_limits), FarHandoffAdmissionStatus::Pending);
     ASSERT_TRUE(CompleteSession());
@@ -3434,7 +3680,7 @@ TEST_F(HandoffAdmissionTest, AllocationRefusalOversizeAndReplacementReleasePendi
         EXPECT_EQ(renderer.AdmissionRefusal(), FarWorldRefusal::AdmissionFailed);
     }
     EXPECT_EQ(pool->used(), used);
-    for (std::uint64_t allocation = 0; allocation < 3; ++allocation) {
+    for (const std::uint64_t allocation : {0u, 1u, 2u, 3u}) {
         pool->RefuseAttemptsFrom(pool->attempts() + allocation);
         EXPECT_EQ(renderer.StartTarget(manifest), FarHandoffAdmissionStatus::Refused);
         EXPECT_EQ(renderer.Handoff()->State().target_serial, 0u);
@@ -3443,7 +3689,12 @@ TEST_F(HandoffAdmissionTest, AllocationRefusalOversizeAndReplacementReleasePendi
     }
     ASSERT_EQ(renderer.StartTarget(manifest), FarHandoffAdmissionStatus::Pending);
     EXPECT_EQ(renderer.PumpAdmission(64).status, FarHandoffAdmissionStatus::Pending);
-    std::array<FarHandoffTileInput, FarWorldAuthorityProducer::kSlots + 1> oversized{};
+    const auto residency = RendererHandoffLimits();
+    auto capacity = FarWorldAuthorityProducer::kSlots;
+    for (std::size_t tier = 0; tier + 1 < residency.entry_slots.size(); ++tier) {
+        capacity += residency.entry_slots[tier];
+    }
+    std::vector<FarHandoffTileInput> oversized(capacity + 1);
     EXPECT_EQ(renderer.StartTarget(RendererHandoffManifest(1, oversized)),
               FarHandoffAdmissionStatus::Refused);
     EXPECT_EQ(pool->used(), used);

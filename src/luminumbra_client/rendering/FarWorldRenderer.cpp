@@ -299,7 +299,10 @@ FarHandoffAdmissionStatus FarWorldRenderer::StartSessionTarget(
         return FarHandoffAdmissionStatus::NotApplicable;
     const auto result =
         session_->StartSessionTarget(producer, world, tiles, policy, limits, samples);
-    refusal_ = session_->AdmissionRefusal();
+    refusal_ = result == FarHandoffAdmissionStatus::Refused ? session_->AdmissionRefusal()
+               : session_->Diagnostic().state.target_serial != 0
+                   ? FarWorldRefusal::None
+                   : FarWorldRefusal::ImmutableAuthorityUnavailable;
     return result;
 }
 FarHandoffAdmissionPump FarWorldRenderer::PumpAdmission(std::uint64_t budget) {
@@ -307,14 +310,21 @@ FarHandoffAdmissionPump FarWorldRenderer::PumpAdmission(std::uint64_t budget) {
     if (requested_ != FarWorldMode::Ladder || !session_ || stopping_)
         return {};
     const auto result = session_->PumpAdmission(budget);
-    refusal_ = session_->AdmissionRefusal();
+    if (result.status != FarHandoffAdmissionStatus::Pending &&
+        result.status != FarHandoffAdmissionStatus::Idle) {
+        refusal_ = session_->AdmissionRefusal();
+    }
     return result;
 }
 FarHandoffAdmissionStatus FarWorldRenderer::CancelAdmission() {
     CheckOwner();
-    return requested_ == FarWorldMode::Ladder && session_ && !stopping_
-               ? session_->CancelAdmission()
-               : FarHandoffAdmissionStatus::NotApplicable;
+    if (requested_ != FarWorldMode::Ladder || !session_ || stopping_)
+        return FarHandoffAdmissionStatus::NotApplicable;
+    const auto result = session_->CancelAdmission();
+    refusal_ = session_->Diagnostic().state.target_serial != 0
+                   ? FarWorldRefusal::None
+                   : FarWorldRefusal::ImmutableAuthorityUnavailable;
+    return result;
 }
 FarHandoffAdmissionStatus FarWorldRenderer::AdmissionStatus() const {
     CheckOwner();

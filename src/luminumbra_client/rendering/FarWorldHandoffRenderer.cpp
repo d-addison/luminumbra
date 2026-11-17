@@ -169,8 +169,6 @@ FarHandoffAdmissionStatus FarWorldHandoffRenderer::StartTarget(const FarHandoffM
     }
     admission_status_ = handoff_->StartTarget(manifest);
     admission_refusal_ = handoff_->AdmissionRefusal();
-    const auto upload = diagnostic_.upload;
-    CaptureFarWorldHandoffDiagnostic(*handoff_, frame_.value_or(0), upload, diagnostic_);
     return admission_status_;
 }
 FarHandoffAdmissionStatus FarWorldHandoffRenderer::StartSessionTarget(
@@ -198,8 +196,6 @@ FarHandoffAdmissionStatus FarWorldHandoffRenderer::StartSessionTarget(
         producer, world, world_epoch_, tiles, policy, limits, samples, memory_);
     admission_refusal_ = handoff_->AdmissionRefusal();
     capture_failure_ = handoff_->SessionCaptureFailure();
-    const auto upload = diagnostic_.upload;
-    CaptureFarWorldHandoffDiagnostic(*handoff_, frame_.value_or(0), upload, diagnostic_);
     return admission_status_ = result;
 }
 FarHandoffAdmissionPump FarWorldHandoffRenderer::PumpAdmission(std::uint64_t budget) {
