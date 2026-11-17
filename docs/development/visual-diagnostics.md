@@ -20,8 +20,9 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | Debug views and inspector | Planned | Extend `DebugViewPass` and developer console widgets |
 | Linux shader compilation and software-GL reference scenes | Partial | Fast Linux steps and material/alpha-cutout fixtures registered; analytical references checked; software-GL execution pending; no required-check or ruleset changes |
 | Automated image checks | Planned | Bundle-aware checks alongside existing render-health gates |
+| Capture feature profile and capability manifest | Implemented as GL-free setup logic; app wiring pending | `CaptureFeatureProfile.h/.cpp`; strict `--capture-feature-profile=none\|all_features` runtime selection; registered `CaptureFeatureProfile.*` regressions; native execution pending |
 | Temporal audit plans and admission | Implemented as GL-free planning only; runtime execution refused | `TemporalAudit.h/.cpp`, `RuntimeScenarioConfig.h/.cpp`; registered `TemporalAudit.*` regressions in `capture_manifest_test`; native execution pending |
-| Temporal sequences and all-features profile (E1–E3) | Planned; gap inventory below describes current capture code | Exact-tick site execution, temporal metrics and non-vacuous feature evidence require implementation; existing captures do not establish this coverage |
+| Temporal sequences and non-vacuous evidence (E1–E3) | Planned; gap inventory below describes current capture code | Exact-tick site execution, temporal metrics, shared producer policy and non-vacuous feature evidence require implementation; existing captures do not establish this coverage |
 
 The codecs and standalone helpers do not create scenario bundles or enable a runtime
 flag. The capture test target uses modeled GL entry points for target lifecycle tests;
@@ -317,10 +318,12 @@ Keep `diff-render-health.ps1`, native shader-health checks and current threshold
 
 ## E: temporal audits and all-features captures
 
-Temporal plan admission is implemented; sequence execution and E2–E3 remain planned.
-Admission adds no capture guarantee, metric enforcement or CI job. The inventory below distinguishes current capture behavior
-from the proposed all-features contract. Existing specialized gates remain useful
-and retain their baselines; passing them does not establish an all-features audit.
+Temporal plan admission is implemented, as are the profile selection and GL-free
+capability resolver described under E3; sequence execution, E2 and the rest of E3
+remain planned. Neither adds a capture guarantee, metric enforcement or CI job.
+The inventory below distinguishes current capture behavior from the proposed
+all-features contract. Existing specialized gates remain useful and retain their
+baselines; passing them does not establish an all-features audit.
 
 ### Current capture gap inventory
 
@@ -566,6 +569,53 @@ every frame. Store only the current maps and selected worst-event payloads withi
 the E1 output budget.
 
 ### E3: all-features profile and non-vacuous evidence
+
+Implemented profile foundation: `--capture-feature-profile=all_features` selects
+the complete 31-entry catalog; absent selection or `none` preserves ordinary
+launch behavior. Both launch parsers reject missing, empty, unknown and repeated
+selections before save-root creation. `CaptureFeatureProfile::Resolve` accepts the
+runtime configuration, resolved systems/graphics and an explicit mode adapter
+snapshot. It also accepts a nonempty explicit feature subset without the all-features
+selection, refusing unknown/duplicate names and conflicting selections. The eight
+mode labels cover time-lapse, frame-scan, world sweep, general scenario, time-of-day,
+weather and both headless legs. Every unimplemented adapter defaults to unsupported,
+with unknown effective state represented as null. No shipping adapter is implemented
+or certified by this foundation.
+
+The resolver records requested/effective settings, forced/suppressed/unavailable
+reasons, per-feature and aggregate capability, and resolved asset/config identities
+or explicit unavailable reasons. Missing identities prevent aggregate support;
+requested disabled settings are refused. It applies actual weather-hydrology,
+weather-event and live-bridge gates, resolved grass disablement, scenario ambient
+animal suppression, consumed isolation render masks and sky backdrop replacement.
+Code inspection distinguishes tuning switches from producer gates: disabling
+creature-spawn tuning still uses the compiled herd count, and plant-growth,
+ecology, tree-wind and moonlight tuning flags do not prove producer disablement.
+Terrain isolation suppresses cave/structure geometry and static vegetation;
+skinned isolation suppresses ambient animals and the creature spawning, AI and
+animation consumers. Foliage and plant wind require both terrain/static-plant and
+foliage/grass consumers; omitting either layer explicitly refuses requested support,
+including when a producer adapter is unavailable. Water/rivers, particles and
+lightning follow their corresponding render masks. The separate procedural-plant
+(including plant growth) and waterfall-sheet stages, weather overlays and lighting
+do not consume isolation layer bits. The aerial fog consumer has no separate catalog
+entry; reserved sky and far-field bits do not gate draws. Other final producer
+settings, assets and scenario pins require adapter observations in later slices.
+Explicit final forced/suppressed adapter observations take precedence over baseline
+producer controls, so later policy can report transient producer overrides without
+changing saved preferences. Final enabled settings cannot restore draws omitted by
+the resolved isolation masks or sky backdrop; explicit suppression reasons survive.
+
+The immutable result serializes schema `luminumbra.capture_capabilities.v1` in fixed
+catalog/key order, including every unrequested or unsupported row. `WriteManifest`
+writes to a caller-owned stream and checks write/flush failure, including stream
+exceptions; filesystem publication and app admission remain later work. Metadata
+is bounded to 256 UTF-8 bytes per field, isolation inputs to 1024/256 bytes and
+feature requests to the catalog size with 64-byte names; invalid metadata/enums
+are refused before stream output. Presence is always `not_evaluated`, never inferred
+from settings. Resolution mutates no settings and adds no tick/frame work.
+
+The remaining end-to-end contract is planned below.
 
 A new explicit `all_features` capture profile will resolve a versioned feature
 manifest at admission. It requires animals/creatures (spawning, AI, animation),

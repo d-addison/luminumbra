@@ -242,6 +242,13 @@ struct RuntimeScenarioConfig {
     bool requires_pinned_capture() const {
         return active();
     }
+
+    // Capture feature selection only; producer policy is resolved separately.
+    enum class FeatureProfile {
+        None,
+        AllFeatures
+    };
+    FeatureProfile capture_feature_profile = FeatureProfile::None;
 };
 
 RuntimeScenarioConfig
@@ -277,6 +284,9 @@ struct GLDebugRuntimeStats {
 };
 
 GLDebugRuntimeStats CurrentGLDebugRuntimeStats();
+
+// Strict, side-effect-free admission shared by both launch parsers.
+RuntimeScenarioConfig::FeatureProfile ParseCaptureFeatureProfile(int argc, char* argv[]);
 
 } // namespace Luminumbra::Client::ScenarioHarness
 

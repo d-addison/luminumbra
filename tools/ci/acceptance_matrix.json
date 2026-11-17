@@ -50,6 +50,28 @@
       "requirements": []
     },
     {
+      "id": "render.capture-feature-capabilities",
+      "source": "docs/development/visual-diagnostics.md#e3-all-features-profile-and-non-vacuous-evidence",
+      "statement": "GL-free capture feature resolution names 31 producer/settings features, records requested/effective state and forced, suppressed or unavailable reasons, and serializes a versioned capability manifest with resolved asset/config identities or unavailable reasons. Strict runtime all_features selection is validated by both launch parsers before save-root creation. Unimplemented adapters default to unsupported across all eight capture modes; disabled requested settings refuse support and missing identities prevent aggregate support. Explicit final forced/suppressed observations take precedence over baseline producer controls; resolved isolation masks and sky backdrops still suppress forced enabled settings while preserving explicit suppression reasons. Registered regressions cover selections, catalog completeness, explicit subsets, every missing or suppressed feature, actual system and graphics gates, terrain cave/structure and static-plant isolation, skinned creature isolation, vegetation requiring both terrain and foliage consumers, missing-adapter and explicit-subset isolation refusals, independent ungated stages, tuning-default semantics, malformed metadata/enums, exact bounds, snapshot ownership and stream write/flush failures. Native execution, app/scenario producer policy, admission/publication wiring and per-frame presence evidence remain pending; selection and capability do not certify an all-features capture.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "CaptureFeatureProfile.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "CaptureFeaturePolicy.*",
+          "planned": "Implement and qualify shared app/scenario policy and feature presence in later slices; owner: maintainers"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development/visual-diagnostics.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
       "id": "render.temporal-audit-plan",
       "source": "docs/development/visual-diagnostics.md#e1-fixed-camera-time-lapse-audit-runs",
       "statement": "GL-free temporal admission plans inclusive day/night, 120-second clear-storm-clear and three-day schedules using exact simulation ticks, ceiling sparse cadence, rational 60 Hz bursts, deduplicated overlaps, explicit final-tick steady/night holds and bounded warmup/readiness/settling. Plans cap recorded frames at 4096 and simulation advancement at 10 million ticks, bound presentation work, and refuse invalid calendars, rates, spans, clock bounds, budgets and malformed or duplicate CLI options with reasons. The O(1) advancement query refuses invalid indices and clock faults. Both shipping startup parsers refuse temporal execution before save-root or world/output creation; planning alone cannot advertise runtime or all-features support. Registered regressions cover acceptance, tick schedules, rational cadence, limits and refusal paths; native execution, weather input, site/sequence driving, capability checks, run/output-byte budgets and assembly remain pending.",
