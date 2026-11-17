@@ -43,6 +43,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -532,6 +533,10 @@ RunMatingResolveOnTick(entt::registry& reg,
         cr.hunger = 0.5f;
         cr.stamina = 1.0f;
         cr.move_speed = b.genome.move_speed;
+        // Lifecycle participation is required for newborns; keep the independent
+        // brute-force partner selection above as the full-rate oracle.
+        reg.emplace<Comp::MortalComponent>(child).lifespan_ticks = tuning.lifespan_ticks;
+        reg.emplace<Comp::DecayComponent>(child).decay_duration = 900u;
         auto& gn = reg.emplace<Comp::CreatureGenomeComponent>(child);
         gn.move_speed = b.genome.move_speed;
         gn.vigilance = b.genome.vigilance;
@@ -1784,6 +1789,34 @@ TEST(RegionConsumerGate, EmptyAndInvalidCreatureOwnersAreDeniedBeforeCoreWork) {
         EXPECT_EQ(registry.get<C::MortalComponent>(invalid).age_ticks, 0u);
         EXPECT_FLOAT_EQ(registry.get<C::CreatureComponent>(invalid).wish_x, 0.0f);
     }
+}
+
+TEST(RegionConsumerGate, SessionRefusesUnversionedLifecycleOverridesBeforeChangingTuning) {
+    W::GameSession session;
+    ASSERT_NO_THROW(session.ApplySystemConfig(luminumbra::core::SystemConfig::Defaults()));
+    const auto before = session.SystemConfigIdentity();
+    AI::ReproductionTuning defaults;
+    EXPECT_NO_THROW(session.SetReproductionTuning(defaults));
+    EXPECT_EQ(session.SystemConfigIdentity(), before);
+    for (const bool capacity : {false, true}) {
+        for (const std::uint32_t value : {0u, 1u, std::numeric_limits<std::uint32_t>::max()}) {
+            auto tuning = defaults;
+            tuning.maturity_ticks = 1; // a partial assignment would change the existing identity
+            if (capacity) {
+                tuning.species_capacity = value;
+            } else {
+                tuning.lifespan_ticks = value;
+            }
+            EXPECT_THROW(session.SetReproductionTuning(tuning), std::invalid_argument);
+            EXPECT_EQ(session.SystemConfigIdentity(), before);
+        }
+    }
+    // Existing identified tuning remains writable and contributes to the same identity slots.
+    defaults.maturity_ticks = 1;
+    EXPECT_NO_THROW(session.SetReproductionTuning(defaults));
+    EXPECT_NE(session.SystemConfigIdentity(), before);
+    EXPECT_NO_THROW(session.ApplySystemConfig(luminumbra::core::SystemConfig::Defaults()));
+    EXPECT_EQ(session.SystemConfigIdentity(), before);
 }
 
 TEST(RegionConsumerGate, InactiveCreaturePipelineMatchesIndependentFullRateOracle) {
