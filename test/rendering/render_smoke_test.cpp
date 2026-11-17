@@ -3666,6 +3666,172 @@ TEST(RenderSmokeTest, LightningOverlayUploadsCurrentProjectionJitter) {
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }
 
+TEST(RenderSmokeTest, WaterVisibilityAcceptsBlueAndWarmSurvivorsOnlyInTargetRegion) {
+    using Luminumbra::Rendering::WaterVisibilityMask;
+    for (const auto& rgb :
+         {std::array<unsigned char, 3>{20, 100, 200}, std::array<unsigned char, 3>{220, 90, 20}}) {
+        std::vector<unsigned char> rgba(8u * 8u * 4u, 0);
+        const std::size_t center = (4u * 8u + 4u) * 4u;
+        std::copy(rgb.begin(), rgb.end(), rgba.begin() + static_cast<std::ptrdiff_t>(center));
+        rgba[center + 3u] = 150;
+        const auto visible = WaterVisibilityMask::FromRgba(8, 8, rgba);
+        ASSERT_TRUE(visible.valid());
+        EXPECT_EQ(visible.visible_pixels_in_target(), 1u);
+        rgba[center + 3u] = 0; // no surviving water, even with a blue background
+        EXPECT_EQ(WaterVisibilityMask::FromRgba(8, 8, rgba).visible_pixels_in_target(), 0u);
+        rgba[3] = 150; // water outside the intended region is insufficient
+        EXPECT_EQ(WaterVisibilityMask::FromRgba(8, 8, rgba).visible_pixels_in_target(), 0u);
+    }
+    EXPECT_FALSE(WaterVisibilityMask::FromRgba(0, 8, {}).valid());
+    EXPECT_FALSE(WaterVisibilityMask::FromRgba(-1, 8, {}).valid());
+    EXPECT_FALSE(WaterVisibilityMask::FromRgba(4097, 8, {}).valid());
+    EXPECT_FALSE(WaterVisibilityMask::FromRgba(8, 8, std::vector<unsigned char>(255)).valid());
+    EXPECT_FALSE(WaterVisibilityMask::FromRgba(8, 8, std::vector<unsigned char>(257)).valid());
+    EXPECT_EQ(WaterVisibilityMask{}.visible_pixels_in_target(), 0u);
+}
+
+TEST(RenderSmokeTest, WaterTargetSearchIsBoundedAndRefusesDryObstructedOrUnknownTerrain) {
+    using Luminumbra::Rendering::FindWaterVisibilityTarget;
+    int queries = 0;
+    const auto open = FindWaterVisibilityTarget(glm::vec3(0), 0.0f, [&](float, float) {
+        ++queries;
+        return -2.0f;
+    });
+    ASSERT_TRUE(open.found);
+    EXPECT_EQ(open.focus, glm::vec3(0, 0.1f, 0));
+    EXPECT_EQ(open.eye, open.focus + glm::vec3(0, 12, 16));
+    EXPECT_LE(queries, 169 * (25 + 9 * 33));
+    for (const float height : {1.0f,
+                               -0.5f,
+                               std::numeric_limits<float>::quiet_NaN(),
+                               std::numeric_limits<float>::infinity()}) {
+        queries = 0;
+        const auto absent = FindWaterVisibilityTarget(glm::vec3(0), 0.0f, [&](float, float) {
+            ++queries;
+            return height;
+        });
+        EXPECT_FALSE(absent.found);
+        EXPECT_LE(queries, 169 * (25 + 9 * 33));
+    }
+    // Every grid point is submerged, but each sight line crosses a narrow ridge
+    // between those points. A nearest-height-only search would accept this.
+    const auto ridged = FindWaterVisibilityTarget(glm::vec3(0), 0.0f, [](float, float z) {
+        const float phase = z - 8.0f * std::floor(z / 8.0f);
+        return phase > 3.0f && phase < 5.0f ? 30.0f : -2.0f;
+    });
+    EXPECT_FALSE(ridged.found);
+    queries = 0;
+    const auto invalid = FindWaterVisibilityTarget(
+        glm::vec3(std::numeric_limits<float>::infinity()), 0.0f, [&](float, float) {
+            ++queries;
+            return -2.0f;
+        });
+    EXPECT_FALSE(invalid.found);
+    EXPECT_EQ(queries, 0);
+}
+
+TEST(RenderSmokeTest, WaterVisibilityReplayRejectsSubmittedOccludedWaterAndEmptyBlueSky) {
+    using namespace Luminumbra::Rendering;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
+    RenderResourceRegistry resources;
+    LightingPass lighting;
+    GBufferPass gbuffer;
+    WaterPass water;
+    lighting.init_lighting_fbo(resources, 64, 64);
+    gbuffer.init_gbuffer(resources, 64, 64);
+    water.init_shader(SourceRoot());
+    water.init_water_fallback_textures(resources);
+    ASSERT_TRUE(water.shader()->IsValid());
+    GLuint vao = 0, vbo = 0, ebo = 0;
+    const std::array<float, 12> vertices{-40, 0, -40, 40, 0, -40, 40, 0, 40, -40, 0, 40};
+    const std::array<unsigned int, 6> indices{0, 1, 2, 0, 2, 3};
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &vbo);
+    glGenBuffers(1, &ebo);
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+    glVertexAttrib3f(1, 0, 1, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices.data(), GL_STATIC_DRAW);
+    Camera camera({0, 12, 16}, {0, 1, 0}, -90, -36.87f);
+    RenderContext ctx;
+    ctx.screen_width = 64;
+    ctx.screen_height = 64;
+    ctx.screen_quad_vao = vao;
+    ctx.lit_scene = FboHandle{lighting.lighting_fbo().fbo_id, true};
+    ctx.lit_scene_depth = RenderbufferHandle{lighting.lighting_fbo().depth_texture};
+    ctx.opaque_scene = TextureHandle{lighting.lighting_fbo().opaque_color_texture};
+    ctx.gbuffer_depth = TextureHandle{gbuffer.gbuffer().depth_texture};
+    ctx.sun.direction = glm::normalize(glm::vec3(0, -1, -1));
+    ctx.sun.color = glm::vec3(1);
+    ctx.sun.intensity = 1;
+    WaterPassInput input;
+    input.draw_items.push_back({glm::mat4(1), vao, 6});
+    const glm::vec4 sky(0.1f, 0.4f, 0.9f, 1.0f);
+    glClearTexImage(ctx.opaque_scene.id, 0, GL_RGBA, GL_FLOAT, &sky[0]);
+    const auto draw = [&](double depth, bool capture, bool empty, double sampled_depth = 0.0) {
+        glViewport(0, 0, 64, 64);
+        glBindFramebuffer(GL_FRAMEBUFFER, gbuffer.gbuffer().fbo_id);
+        glDepthMask(GL_TRUE);
+        glClearDepth(sampled_depth);
+        glClear(GL_DEPTH_BUFFER_BIT);
+        glBindFramebuffer(GL_FRAMEBUFFER, ctx.lit_scene.id);
+        glClearDepth(depth);
+        glClearColor(0.1f, 0.4f, 0.9f, 1); // blue sky must never enter the mask
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        return water.execute(ctx, empty ? WaterPassInput{} : input, camera, capture);
+    };
+    for (const bool ladder : {false, true}) {
+        ctx.set_gbuffer_depth_contract(ladder, camera.GetProjectionMatrix(64, 64), {});
+        const auto visible = draw(0, true, false);
+        EXPECT_EQ(visible.water_draws, 1u);
+        ASSERT_TRUE(water.visibility_mask().valid());
+        EXPECT_GT(water.visibility_mask().visible_pixels_in_target(), 0u);
+        const auto occluded = draw(1, true, false);
+        EXPECT_EQ(occluded.water_draws, 1u);
+        EXPECT_EQ(occluded.water_indices, 6u);
+        ASSERT_TRUE(water.visibility_mask().valid());
+        EXPECT_EQ(water.visibility_mask().visible_pixels_in_target(), 0u);
+        draw(0, true, true);
+        EXPECT_EQ(water.visibility_mask().visible_pixels_in_target(), 0u);
+        draw(0, true, false, 1); // shader discard, even though attachment depth permits it
+        EXPECT_EQ(water.visibility_mask().visible_pixels_in_target(), 0u);
+        draw(0, false, false);
+        EXPECT_FALSE(water.visibility_mask().valid());
+        ctx.frozen_replay = true;
+        draw(0, true, false);
+        EXPECT_FALSE(water.visibility_mask().valid());
+        ctx.frozen_replay = false;
+    }
+    for (const auto invalid : {0u, std::numeric_limits<Luminumbra::u32>::max()}) {
+        input.draw_items[0].element_count = invalid;
+        const auto refused = draw(0, true, false);
+        EXPECT_EQ(refused.water_draws, 0u);
+        EXPECT_EQ(refused.water_indices, 0u);
+        EXPECT_EQ(water.visibility_mask().visible_pixels_in_target(), 0u);
+    }
+    input.draw_items[0].element_count = 6;
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    ctx.internal_width = 4097;
+    draw(0, true, false);
+    EXPECT_FALSE(water.visibility_mask().valid());
+    ctx.internal_width = 0;
+    ctx.lit_scene_depth = {};
+    draw(0, true, false);
+    EXPECT_FALSE(water.visibility_mask().valid());
+    glDeleteBuffers(1, &ebo);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    water.destroy_water_fallback_textures(resources);
+    lighting.destroy_lighting_fbo(resources);
+    gbuffer.destroy_gbuffer(resources);
+}
+
 TEST(RenderSmokeTest, WaterCausticsRetainPatternInNormalizedTarget) {
     HiddenGlContext context;
     if (!context.ready())

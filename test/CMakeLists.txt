@@ -261,6 +261,8 @@ add_executable(common_tests
     # Snapshot cursor restoration and destination refusal cases are discovered
     # by common_tests for both active-region settings.
     common/GameSessionHeadlessWorld_test.cpp
+    # Sole definition of the test-only GameSession authority-profile constructor.
+    common/GameSessionAuthorityProfileTestSeam.cpp
     common/GameSessionPlantPersistence_test.cpp
     common/RegionFixtureCapture_test.cpp
     # Incremental cursor layout and staged-load refusal regressions use the same discovery.
@@ -610,6 +612,7 @@ if(MSVC)
 endif()
 
 add_executable(render_smoke_test
+    rendering/diagnostic_attribution_test.cpp
     rendering/render_smoke_test.cpp
     rendering/FarWorldLegacyIsolation_test.cpp
     rendering/FarWorldShadow_test.cpp

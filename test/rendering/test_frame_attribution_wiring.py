@@ -639,6 +639,20 @@ class FrameAttributionWiring(unittest.TestCase):
                          r"//[^\n]*? if \(g_app.capture.timelapse_creatures\) "
                          r"DrawCreatureNameplates\(")
 
+    def test_timelapse_day_drift_overrides_live_clock_by_frame_order(self):
+        # Writer order: live clock, time-lapse drift, then scenario pins, so the drift beats the
+        # live clock while a scenario's fixed time of day still beats the drift.
+        main = self.main
+        live = main.index("renderPipeline.set_time_of_day_hold(false);")
+        start = main.index("if (g_app.capture.timelapse_frames > 0 &&\n", live)
+        drift = compact(block(main[start:], "if (g_app.capture.timelapse_frames > 0 &&"))
+        self.assertEqual(drift, "renderPipeline.set_time_of_day(g_app.capture.timelapse_tod);")
+        self.assertIn("g_app.capture.timelapse_daystep > 0.0f",
+                      main[start:main.index("renderPipeline.set_time_of_day(g_app.capture"
+                                            ".timelapse_tod);", start)])
+        pins = main.index("scenario_runner->onPreRenderCapturePins();", live)
+        self.assertLess(start, pins)
+
     def test_capture_day_phase_uses_calendar_without_frame_drift(self):
         update = block(read(CLIENT / "rendering/RenderPipeline.cpp"),
                        "void RenderPipeline::update_time_of_day(")
@@ -2996,30 +3010,146 @@ class WorldVisualSweepWiring(unittest.TestCase):
         for field in ("water_draws", "water_indices_drawn"):
             self.assertIn(f"cell.{field} = stats.{field};", self.sweep)
             self.assertIn(f'{{"{field}", c.{field}}}', self.sweep)
-        # Retain the existing daytime pixel-presence check as well.
-        self.assertIn("c.water_aimed && c.daytime && c.water_like_pixels == 0", self.sweep)
+        # Presence is depth-tested and colour independent; submission remains required.
+        self.assertIn("c.water_aimed && c.visible_water_pixels == 0", self.sweep)
+        self.assertIn("c.water_aimed && !c.water_mask_valid", self.sweep)
         self.assertIn('manifest["warmup_water_indices_drawn"] = water_indices_drawn;', self.sweep)
 
     def test_water_target_is_local_and_absence_refuses_the_sweep(self):
         self.assertNotIn("FindWaterVisualCameraTarget(game_session)", self.sweep)
         self.assertIn("std::max(land_terrain_h, Luminumbra::SEA_LEVEL) + 2.5f", self.sweep)
-        search = block(self.sweep, "for (int dz = -96;")
+        helper = read(CLIENT / "rendering/WaterVisibility.h")
+        search = block(helper, "FindWaterVisibilityTarget(")
+        self.assertIn("for (int dz = -96; dz <= 96; dz += 16)", search)
         self.assertIn("for (int dx = -96; dx <= 96; dx += 16)", search)
-        self.assertIn("anchor.x + static_cast<float>(dx)", search)
-        self.assertIn("anchor.z + static_cast<float>(dz)", search)
-        expression = re.search(r"if \((height <[^{}]+)\) \{", search).group(1)
-        expression = expression.replace("Luminumbra::SEA_LEVEL", "sea").replace("0.5f", "0.5")
-        for height, distance, nearest, expected in ((-1, 256, 1024, True),
-                                                   (-0.5, 256, 1024, False),
-                                                   (2, 256, 1024, False),
-                                                   (-1, 1024, 256, False),
-                                                   (-1, 256, 256, False)):
-            self.assertEqual(cpp_expression(expression, height=height, sea=0,
-                                            distance_sq=distance,
-                                            nearest_water_distance_sq=nearest), expected)
+        self.assertIn("for (int step = 0; step <= 32 && clear; ++step)", search)
+        self.assertIn("h < sea_level - 0.5f", search)
+        self.assertIn("h < point.y - 0.5f", search)
+        self.assertIn("std::isfinite(h)", search)
+        self.assertIn("result = {.found = true, .eye = eye, .focus = focus};", search)
+        self.assertIn("FindWaterVisibilityTarget(", self.sweep)
+        self.assertIn("camera->Position = water_target.eye;", self.sweep)
+        verify = block(self.sweep, "if (!target_rendered || !target_mask_written")
+        self.assertIn("return false;", verify)
+        self.assertIn("pipeline->water_visibility_mask());", self.sweep)
+        self.assertIn("const bool target_rendered = render_settled(3);", self.sweep)
+        self.assertIn("pipeline->water_visibility_mask().visible_pixels_in_target() == 0", self.sweep)
         self.assertIn("return false;", block(self.sweep, "if (!water_target.found)"))
         self.assertLess(self.sweep.index("if (!water_target.found)"),
                         self.sweep.index("// --- run the matrix"))
+
+    def test_water_presence_refuses_empty_target_even_with_geometry_or_sky_hue(self):
+        condition = re.search(r"if \((c.water_aimed && c.visible_water_pixels[^)]+)\)",
+                              self.sweep).group(1)
+        for aimed, visible, expected in ((True, 0, True), (True, 1, False),
+                                         (False, 0, False), (False, 1, False)):
+            self.assertEqual(cpp_expression(condition, **{
+                "c.water_aimed": aimed, "c.visible_water_pixels": visible}), expected)
+        invalid = block(self.sweep, "if (c.water_aimed && !c.water_mask_valid)")
+        self.assertIn('failures.push_back("missing_water_mask:" + c.file);', invalid)
+        self.assertIn("WriteSweepWaterMask(deps.artifact_dir / cell.water_mask_file, mask)",
+                      compact(self.sweep))
+        self.assertIn("return passed && manifest_written;", self.sweep)
+
+    def test_water_target_rejects_every_invalid_patch_and_sight_line(self):
+        search = block(read(CLIENT / "rendering/WaterVisibility.h"), "FindWaterVisibilityTarget(")
+        assignments = re.findall(r"clear = (std::isfinite[^;]+);", search)
+        self.assertEqual(len(assignments), 2)
+        for expression, limit in zip(assignments, (0.0, 10.0)):
+            expression = expression.replace("std::isfinite(h)", "finite").replace("0.5f", "0.5")
+            for height, finite in ((limit - 1, True), (limit - 0.5, True),
+                                   (limit, True), (limit - 1, False)):
+                self.assertEqual(cpp_expression(expression, finite=finite, h=height,
+                                                sea_level=limit, **{"point.y": limit}),
+                                 finite and height < limit - 0.5)
+        selected = re.search(r"if \(([^()]+)\) \{\s*nearest = distance;", search).group(1)
+        for clear in (False, True):
+            self.assertEqual(cpp_expression(selected, clear=clear), clear)
+        self.assertIn("WaterVisibilityTarget result;", search)
+        self.assertIn("return result;", search)
+        self.assertIn("bool found = false;", read(CLIENT / "rendering/WaterVisibility.h"))
+
+    def test_water_visibility_uses_surviving_alpha_not_blue_or_warm_rgb(self):
+        helper = read(CLIENT / "rendering/WaterVisibility.h")
+        conversion = block(helper, "static WaterVisibilityMask FromRgba(")
+        predicate = re.search(r"result.pixels\[i\] = (.*?) \? 255 : 0;", conversion).group(1)
+        for label, rgb, alpha, expected in (
+                ("blue water", (20, 100, 200), 150, True),
+                ("warm water", (220, 90, 20), 150, True),
+                ("blue sky", (20, 100, 200), 0, False),
+                ("occluded water", (0, 0, 0), 0, False)):
+            with self.subTest(label=label):
+                self.assertEqual(cpp_expression(predicate, alpha=alpha,
+                                                r=rgb[0], g=rgb[1], b=rgb[2]), expected)
+        self.assertIn("rgba[i * 4u + 3u]", conversion)
+        self.assertIn("rgba.size() != count * 4u", conversion)
+        roi = block(helper, "std::uint64_t visible_pixels_in_target() const")
+        self.assertIn("if (!valid())", roi)
+        self.assertIn("y = height / 4; y < height - height / 4", roi)
+        self.assertIn("x = width / 4; x < width - width / 4", roi)
+        self.assertIn("WaterVisibilityMask::FromRgba(width, height, rgba)",
+                      read(CLIENT / "rendering/passes/WaterPass.cpp"))
+
+    def test_water_mask_sizes_refuse_both_invalid_axes_before_arithmetic(self):
+        helper = read(CLIENT / "rendering/WaterVisibility.h")
+        expression = re.search(r"return ([^;]+);", block(helper, "static bool valid_size(")).group(1)
+        for axis in ("w", "h"):
+            expression = expression.replace(f"static_cast<std::size_t>({axis})", axis)
+        for w, h, expected in ((0, 8, False), (8, 0, False), (-1, 8, False),
+                                (8, -1, False), (3, 8, False), (8, 3, False),
+                                (4, 4, True), (4096, 4096, True),
+                                (4097, 8, False), (8, 4097, False)):
+            with self.subTest(w=w, h=h):
+                self.assertEqual(cpp_expression(expression, w=w, h=h, kMaxPixels=4096 * 4096),
+                                 expected)
+
+    def test_water_draw_and_visibility_replay_refuse_unrepresentable_counts(self):
+        source = read(CLIENT / "rendering/passes/WaterPass.cpp")
+        guard = block(source, "GLsizei WaterElementCount(")
+        condition = re.search(r"if \((.*?)\) \{", guard).group(1)
+        condition = condition.replace("static_cast<u32>(std::numeric_limits<GLsizei>::max())", "limit")
+        for count in (0, 1, 2147483647, 2147483648, 4294967295):
+            self.assertEqual(cpp_expression(condition, count=count, limit=2147483647),
+                             count > 2147483647)
+        self.assertIn("return 0;", guard)
+        self.assertEqual(source.count("WaterElementCount(item.element_count)"), 2)
+        self.assertIn("continue;", block(block(source, "WaterPass::execute("), "if (count == 0)"))
+        self.assertIn("continue;", block(block(source, "void WaterPass::capture_visibility("),
+                                         "if (elements == 0)"))
+
+    def test_water_visibility_replays_shipping_shader_and_exact_depth_only_when_requested(self):
+        source = read(CLIENT / "rendering/passes/WaterPass.cpp")
+        execute = block(source, "WaterPass::execute(")
+        self.assertIn("m_visibility_mask = {};", execute)
+        self.assertIn("glEnable(GL_DEPTH_TEST)", execute)
+        self.assertIn("glDepthFunc(GL_GREATER)", execute)
+        self.assertIn("glDepthMask(GL_FALSE)", execute)
+        self.assertIn("capture_visibility(ctx, input);",
+                      block(execute, "if (capture_visibility_requested)"))
+        capture = block(source, "void WaterPass::capture_visibility(")
+        self.assertIn("ctx.frozen_replay", capture)
+        self.assertIn("ctx.lit_scene_depth.id == 0", capture)
+        self.assertIn("glFramebufferRenderbuffer( GL_FRAMEBUFFER", compact(capture))
+        self.assertIn("ctx.lit_scene_depth.id", capture)
+        self.assertNotIn("glDisable(GL_DEPTH_TEST)", capture)
+        self.assertNotIn("glDepthMask(GL_TRUE)", capture)
+        self.assertNotIn("glUseProgram", capture)
+        self.assertIn("for (const auto& item : input.draw_items)", capture)
+        self.assertIn("glDrawElements", capture)
+        self.assertIn("glGetError() == GL_NO_ERROR", capture)
+        self.assertIn("glClearTexImage(color, 0, GL_RGBA, GL_FLOAT, zero)", capture)
+        self.assertIn("glReadPixels", capture)
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        water = block(pipeline, "void RenderPipeline::execute_stage_water(")
+        self.assertIn("water_ctx, water_input, camera, m_water_visibility_capture_enabled", compact(water))
+        self.assertIn("ctx.lit_scene_depth = RenderbufferHandle", block(
+            pipeline, "RenderContext RenderPipeline::make_water_context("))
+        gate = read(ROOT / "tools/gates/validate-engine-frontier.ps1")
+        water_gate = gate.split("$waterCells =", 1)[1].split("# No rain", 1)[0]
+        self.assertIn("$cell.visible_water_pixels -lt 1", water_gate)
+        self.assertIn("$cell.water_mask_valid", water_gate)
+        self.assertIn("Assert-PpmArtifact -Path $cell.water_mask_file", water_gate)
+        self.assertNotIn("$cell.water_like_pixels", water_gate)
 
     def test_rain_pool_is_reset_for_every_cell_not_just_clear_weather(self):
         weather = block(self.sweep, "const auto apply_weather =")
