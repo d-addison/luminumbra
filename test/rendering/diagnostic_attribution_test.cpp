@@ -675,6 +675,7 @@ TEST_F(DiagnosticAttributionGl, AuthoredUpgradeRestoresLiveCallerFramebuffers) {
     RenderViewDescription description;
     description.width = 32;
     description.height = 32;
+    description.revision = 1;
     const auto projection = glm::perspectiveRH_ZO(
         glm::radians(45.0), 1.0, description.far_plane, description.near_plane);
     std::copy_n(glm::value_ptr(projection), 16, description.projection.begin());
