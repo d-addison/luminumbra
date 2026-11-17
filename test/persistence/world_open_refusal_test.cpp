@@ -4310,3 +4310,483 @@ TEST_F(WorldOpenRefusal, MetadataTextWriterRefusesBeforeWorldCreationChangesAnyt
 }
 
 } // namespace
+
+namespace {
+using WeatherScript = Luminumbra::Systems::WeatherSchedule;
+using WeatherKind = Luminumbra::Systems::WeatherCategory;
+namespace P = Luminumbra::Persistence;
+
+WeatherScript ShortWeatherScript() {
+    return {.phases = {{0, WeatherKind::Clear, 0, 0},
+                       {2, WeatherKind::Clear, 0, 0},
+                       {5, WeatherKind::Rain, 65535, 65535},
+                       {8, WeatherKind::Rain, 65535, 65535},
+                       {11, WeatherKind::Clear, 0, 0}},
+            .strike_tick = 7};
+}
+
+TEST(WeatherScheduleTest, WeatherScriptCanonicalBoundsAndFailureAtomicity) {
+    const auto script = ShortWeatherScript();
+    ASSERT_TRUE(script.valid());
+    const auto bytes = script.canonical_bytes();
+    EXPECT_EQ(bytes,
+              "WSC10500000000000000000000000000"
+              "00000000000000020000000000"
+              "000000000000000502ffffffff"
+              "000000000000000802ffffffff"
+              "000000000000000b0000000000"
+              "010000000000000007");
+    WeatherScript decoded;
+    ASSERT_TRUE(WeatherScript::Decode(bytes, decoded));
+    EXPECT_EQ(decoded, script);
+    auto no_strike = script;
+    no_strike.strike_tick.reset();
+    ASSERT_TRUE(WeatherScript::Decode(no_strike.canonical_bytes(), decoded));
+    EXPECT_EQ(decoded, no_strike);
+    decoded = script;
+    std::vector<std::string> invalid = {"",
+                                        "WSC1",
+                                        bytes + "0",
+                                        "WSC2" + bytes.substr(4),
+                                        std::string(WeatherScript::kMaxEncodedBytes + 1, '0')};
+    auto invalid_encoding = bytes;
+    invalid_encoding.replace(4, 2, "21");
+    invalid.push_back(invalid_encoding);
+    invalid_encoding = bytes;
+    invalid_encoding.replace(32, 16, "0000000000000000");
+    invalid.push_back(invalid_encoding);
+    invalid_encoding = bytes;
+    invalid_encoding.replace(22, 2, "05");
+    invalid.push_back(invalid_encoding);
+    invalid_encoding = bytes;
+    invalid_encoding.replace(136, 2, "02");
+    invalid.push_back(invalid_encoding);
+    for (std::size_t size = 0; size < bytes.size(); ++size) {
+        invalid.push_back(bytes.substr(0, size));
+    }
+    for (const auto offset : {4u, 22u, 24u, 136u}) {
+        auto corrupt = bytes;
+        corrupt.at(offset) = 'G';
+        invalid.push_back(corrupt);
+    }
+    for (const auto& corrupt : invalid) {
+        EXPECT_FALSE(WeatherScript::Decode(corrupt, decoded));
+        EXPECT_EQ(decoded, script);
+    }
+    std::vector<WeatherScript> refused;
+    auto bad = script;
+    bad.phases.clear();
+    refused.push_back(bad);
+    bad = script;
+    bad.phases.resize(WeatherScript::kMaxPhases + 1);
+    refused.push_back(bad);
+    bad = script;
+    bad.phases[1].start_tick = 0;
+    refused.push_back(bad);
+    bad = script;
+    bad.phases[2].start_tick = 1;
+    refused.push_back(bad);
+    bad = script;
+    bad.phases.back().start_tick = WeatherScript::kMaxSpanTicks + 1;
+    refused.push_back(bad);
+    bad = script;
+    bad.phases.back().start_tick = std::numeric_limits<std::uint64_t>::max();
+    refused.push_back(bad);
+    bad = script;
+    bad.phases[1].category = static_cast<WeatherKind>(255);
+    refused.push_back(bad);
+    for (const auto tick :
+         {std::uint64_t{0}, std::uint64_t{12}, std::numeric_limits<std::uint64_t>::max()}) {
+        bad = script;
+        bad.strike_tick = tick;
+        refused.push_back(bad);
+    }
+    GameSession session;
+    const auto unscheduled = session.SystemConfigIdentity();
+    ASSERT_TRUE(session.SetWeatherSchedule(script));
+    const auto scheduled = session.SystemConfigIdentity();
+    EXPECT_NE(scheduled, unscheduled);
+    GameSession changed;
+    auto changed_script = script;
+    changed_script.strike_tick = 6;
+    ASSERT_TRUE(changed.SetWeatherSchedule(changed_script));
+    EXPECT_NE(changed.SystemConfigIdentity(), scheduled);
+    changed_script = script;
+    changed_script.phases[2].storm = 65534;
+    ASSERT_TRUE(changed.SetWeatherSchedule(changed_script));
+    EXPECT_NE(changed.SystemConfigIdentity(), scheduled);
+    changed_script.phases.clear();
+    EXPECT_EQ(changed.GetWeatherSchedule()->phases.size(), script.phases.size());
+    for (const auto& candidate : refused) {
+        EXPECT_FALSE(candidate.valid());
+        EXPECT_TRUE(candidate.canonical_bytes().empty());
+        EXPECT_FALSE(session.SetWeatherSchedule(candidate));
+        EXPECT_EQ(session.SystemConfigIdentity(), scheduled);
+    }
+    WeatherScript maximal;
+    for (std::uint64_t i = 0; i < WeatherScript::kMaxPhases; ++i) {
+        maximal.phases.push_back({i, WeatherKind::Clear, 0, 0});
+    }
+    maximal.phases.back().start_tick = WeatherScript::kMaxSpanTicks;
+    maximal.strike_tick = WeatherScript::kMaxSpanTicks;
+    ASSERT_TRUE(maximal.valid());
+    EXPECT_EQ(maximal.canonical_bytes().size(), WeatherScript::kMaxEncodedBytes);
+    ASSERT_TRUE(WeatherScript::Decode(maximal.canonical_bytes(), decoded));
+    EXPECT_EQ(decoded, maximal);
+}
+
+TEST(WeatherScheduleTest, InstallationSamplesBothBackendsAndLocksEveryUpdateEntry) {
+    const auto script = ShortWeatherScript();
+    EXPECT_FLOAT_EQ(script.Sample(3).precip_intensity, 21845.0f / 65535.0f);
+    EXPECT_EQ(script.Sample(5).category, WeatherKind::Rain);
+    EXPECT_EQ(script.Sample(12).precip_intensity, 0.0f);
+    for (const std::uint64_t sample_tick : {0u, 5u}) {
+        for (const bool regional : {false, true}) {
+            for (int entry = 0; entry < 8; ++entry) {
+                SCOPED_TRACE(testing::Message() << regional << '/' << entry);
+                Systems::WeatherSystem weather(1337), ordinary(1337);
+                Systems::WindFieldSystem wind(1337);
+                if (regional) {
+                    for (auto* system : {&weather, &ordinary}) {
+                        system->BindRegionalBackend(
+                            [](const Vec3&) { return Systems::WeatherSample{}; },
+                            [] { return std::string("regional-weather"); });
+                    }
+                }
+                const auto ordinary_hash = ordinary.ComputeWeatherSubHash();
+                auto invalid = script;
+                invalid.phases.clear();
+                EXPECT_FALSE(weather.SetSchedule(invalid));
+                ASSERT_TRUE(weather.SetSchedule(script));
+                const auto installed_hash = weather.ComputeWeatherSubHash();
+                EXPECT_FALSE(weather.SetSchedule(invalid));
+                EXPECT_EQ(weather.ComputeWeatherSubHash(), installed_hash);
+                EXPECT_NE(weather.ComputeWeatherSubHash(), ordinary_hash);
+                switch (entry) {
+                    case 0:
+                        weather.Update(sample_tick, Vec3(0.0f), &wind);
+                        break;
+                    case 1:
+                        weather.UpdateFromClock(sample_tick, Vec3(0.0f), wind);
+                        break;
+                    case 2:
+                        weather.RestoreAtTick(sample_tick, Vec3(0.0f), wind);
+                        break;
+                    case 3:
+                        weather.RefreshRegionalWeather(sample_tick, Vec3(0.0f));
+                        break;
+                    case 4:
+                        weather.RefreshRegionalWeather(sample_tick, Vec3(0.0f), {});
+                        break;
+                    case 5:
+                    case 6:
+                        weather.AdoptRegionalWeather(
+                            sample_tick, Vec3(0.0f), {}, {}, regional, entry == 6);
+                        break;
+                    case 7:
+                        weather.Update(sample_tick, Vec3(0.0f), nullptr);
+                        break;
+                    default:
+                        FAIL() << "uncovered entry point";
+                }
+                const auto expected = script.Sample(sample_tick);
+                EXPECT_EQ(weather.CategoryAt(Vec3(1.0f)), expected.category);
+                EXPECT_EQ(weather.PrecipitationAt(Vec3(1.0f)), expected.precip_intensity);
+                EXPECT_EQ(weather.SampleAt(Vec3(1.0f)).storm_intensity, expected.storm_intensity);
+                const auto hash = weather.ComputeWeatherSubHash();
+                EXPECT_FALSE(weather.SetSchedule(script));
+                EXPECT_EQ(weather.ComputeWeatherSubHash(), hash);
+                // The declared tick constructs its single simulation event directly.
+                weather.Update(7, Vec3(0.0f), nullptr);
+                ASSERT_EQ(weather.StrikesThisTick().size(), 1u);
+                EXPECT_EQ(weather.live_strike_count(), 1);
+                weather.Update(8, Vec3(0.0f), nullptr);
+                EXPECT_TRUE(weather.StrikesThisTick().empty());
+                EXPECT_EQ(ordinary.ComputeWeatherSubHash(), ordinary_hash);
+            }
+        }
+    }
+}
+
+TEST_F(WorldOpenRefusal, RemovedScheduleCannotReturnAfterSavingLegacySnapshot) {
+    const auto legacy_bytes = Read(save / "world_info.json");
+    ASSERT_FALSE(nlohmann::json::parse(legacy_bytes).contains("renderCalendar"));
+    for (const bool prepared : {false, true}) {
+        for (const bool full_metadata : {false, true}) {
+            SCOPED_TRACE(testing::Message() << prepared << '/' << full_metadata);
+            GameSession scheduled, reopened;
+            for (auto* session : {&scheduled, &reopened}) {
+                session->SetRootPath(RootString());
+                session->SetJobSystem(&jobs);
+                session->SetActiveRegionsEnabled(false);
+            }
+            ASSERT_TRUE(scheduled.SetWeatherSchedule(ShortWeatherScript()));
+            ASSERT_TRUE(scheduled.CreateWorld("Schedule removal", "1337", "default"));
+            ASSERT_TRUE(scheduled.SaveWorld());
+            const auto destination = scheduled.GetWorldSaveDir();
+            const auto initial = nlohmann::json::parse(Read(destination / "world_info.json"));
+            ASSERT_EQ(initial.at("container_version"), P::kScheduledWeatherMetadataVersion);
+            ASSERT_TRUE(initial.contains("weatherScheduleTick"));
+            if (prepared) {
+                const auto state = GameSession::PrepareWorldState(
+                    scheduled.CaptureWorldPreparationOptions(), save);
+                ASSERT_TRUE(scheduled.AdoptPreparedWorld(state)) << scheduled.GetWorldOpenError();
+            } else {
+                ASSERT_TRUE(scheduled.LoadWorldStateFrom(save)) << scheduled.GetWorldOpenError();
+            }
+            ASSERT_EQ(scheduled.GetWeatherSchedule(), nullptr);
+            ASSERT_TRUE(full_metadata ? scheduled.SaveWorld() : scheduled.SaveWorldState());
+            const auto metadata = nlohmann::json::parse(Read(destination / "world_info.json"));
+            EXPECT_FALSE(metadata.contains("weatherSchedule"));
+            EXPECT_FALSE(metadata.contains("weatherScheduleTick"));
+            EXPECT_EQ(metadata.at("container_version"),
+                      metadata.contains("snapshotFormat")
+                          ? WorldSaveService::kIndexedMetadataVersion
+                          : WorldSaveService::kContainerVersion);
+            ASSERT_TRUE(reopened.LoadWorld(scheduled.GetMetadata().worldId))
+                << reopened.GetWorldOpenError();
+            EXPECT_EQ(reopened.GetWeatherSchedule(), nullptr);
+            EXPECT_EQ(Read(save / "world_info.json"), legacy_bytes);
+        }
+    }
+}
+
+TEST_F(WorldOpenRefusal, ScheduledCalendarRequiresNonzeroSimulationClockAtAdmission) {
+    auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    world::WorldClock(4).write_metadata(metadata);
+    metadata["container_version"] = P::kScheduledWeatherMetadataVersion;
+    metadata["weatherSchedule"] = ShortWeatherScript().canonical_bytes();
+    metadata["weatherScheduleTick"] = 4;
+    ASSERT_TRUE(WorldSaveService::admit_metadata_bytes(metadata.dump()));
+    metadata.erase("simulationTick");
+    ASSERT_TRUE(metadata.contains("calendar"));
+    Write(save / "world_info.json", metadata.dump());
+    const auto disk = DiskBytes(root);
+    auto retained = std::make_shared<const WeatherScript>(ShortWeatherScript());
+    const auto original = retained;
+    std::uint64_t tick = 99;
+    EXPECT_FALSE(P::ReadWeatherSchedule(save, retained, tick));
+    EXPECT_EQ(retained, original);
+    EXPECT_EQ(tick, 99u);
+    EXPECT_FALSE(WorldSaveService::admit_metadata_bytes(metadata.dump()));
+    EXPECT_FALSE(WorldSaveService::save_metadata(metadata.dump(), root / "refused-clock"));
+    for (const auto mode : {P::SavedWorldValidation::Catalog,
+                            P::SavedWorldValidation::Complete,
+                            P::SavedWorldValidation::DeferredToPreparation}) {
+        const auto inspected = P::InspectSavedWorld(root, root, "fixture", {}, mode);
+        EXPECT_NE(inspected.error.find("invalid weather schedule"), std::string::npos);
+    }
+    EXPECT_EQ(DiskBytes(root), disk);
+    // Tick zero is unambiguous even if the legacy regional clock is implicit.
+    metadata["weatherScheduleTick"] = 0;
+    EXPECT_TRUE(WorldSaveService::admit_metadata_bytes(metadata.dump()));
+}
+
+TEST_F(WorldOpenRefusal, ScheduleAdmissionIsAtomicAcrossReadersAndWriters) {
+    const auto script = ShortWeatherScript();
+    const nlohmann::json valid = {{"container_version", P::kScheduledWeatherMetadataVersion},
+                                  {"weatherSchedule", script.canonical_bytes()},
+                                  {"weatherScheduleTick", 4}};
+    const auto input = root / "schedule-input";
+    fs::create_directory(input);
+    auto retained = std::make_shared<const WeatherScript>(script);
+    std::uint64_t tick = 99;
+    ASSERT_TRUE(P::ReadWeatherSchedule(input, retained, tick));
+    EXPECT_EQ(retained, nullptr);
+    EXPECT_EQ(tick, 0u);
+    Write(input / "world_info.json", valid.dump());
+    ASSERT_TRUE(P::ReadWeatherSchedule(input, retained, tick));
+    ASSERT_NE(retained, nullptr);
+    EXPECT_EQ(*retained, script);
+    EXPECT_EQ(tick, 4u);
+    std::vector<nlohmann::json> cases;
+    for (const auto version : {2, 3, 5}) {
+        auto bad = valid;
+        bad["container_version"] = version;
+        cases.push_back(bad);
+    }
+    for (const auto& version :
+         {nlohmann::json(4.0), nlohmann::json("4"), nlohmann::json(nullptr)}) {
+        auto bad = valid;
+        bad["container_version"] = version;
+        cases.push_back(bad);
+    }
+    for (const auto* field : {"weatherSchedule", "weatherScheduleTick", "container_version"}) {
+        auto bad = valid;
+        bad.erase(field);
+        cases.push_back(bad);
+    }
+    for (const auto& encoding :
+         {nlohmann::json("WSC2"),
+          nlohmann::json("WSC1"),
+          nlohmann::json(0),
+          nlohmann::json(""),
+          nlohmann::json(std::string(WeatherScript::kMaxEncodedBytes + 1, '0'))}) {
+        auto bad = valid;
+        bad["weatherSchedule"] = encoding;
+        cases.push_back(bad);
+    }
+    for (const auto& bad_tick : {nlohmann::json(-1),
+                                 nlohmann::json(1.0),
+                                 nlohmann::json(1e38),
+                                 nlohmann::json(world::WorldClock::kTickLimit)}) {
+        auto bad = valid;
+        bad["weatherScheduleTick"] = bad_tick;
+        cases.push_back(bad);
+    }
+    auto mismatch = valid;
+    mismatch["simulationTick"] = 3;
+    cases.push_back(mismatch);
+    auto invalid_calendar = valid;
+    invalid_calendar["calendar"] = {{"dayLengthTicks", 0}};
+    cases.push_back(invalid_calendar);
+    auto absent = valid;
+    absent.erase("weatherSchedule");
+    absent.erase("weatherScheduleTick");
+    cases.push_back(absent);
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(session.SetWeatherSchedule(script));
+    ASSERT_TRUE(session.CreateTransientWorld("Live schedule", "1337", "default"));
+    auto* const world = session.GetWorldSystem();
+    const auto revision = session.WorldRevision();
+    const auto identity = session.SystemConfigIdentity();
+    const auto hash = session.GetWeatherSystem()->ComputeWeatherSubHash();
+    for (const auto& metadata : cases) {
+        SCOPED_TRACE(metadata.dump());
+        Write(input / "world_info.json", metadata.dump());
+        const auto disk = DiskBytes(root);
+        const auto original = retained;
+        EXPECT_FALSE(P::ReadWeatherSchedule(input, retained, tick));
+        EXPECT_EQ(retained, original);
+        EXPECT_EQ(tick, 4u);
+        EXPECT_FALSE(WorldSaveService::save_metadata(metadata.dump(), root / "refused-schedule"));
+        EXPECT_FALSE(session.LoadWorldStateFrom(input));
+        const auto prepared =
+            GameSession::PrepareWorldState(session.CaptureWorldPreparationOptions(), input);
+        EXPECT_FALSE(session.AdoptPreparedWorld(prepared));
+        EXPECT_EQ(session.GetWorldSystem(), world);
+        EXPECT_EQ(session.WorldRevision(), revision);
+        EXPECT_EQ(session.SystemConfigIdentity(), identity);
+        EXPECT_EQ(session.GetWeatherSystem()->ComputeWeatherSubHash(), hash);
+        EXPECT_EQ(DiskBytes(root), disk);
+    }
+    for (const auto& bytes :
+         {std::string("{"), std::string(P::SavedInputLimits::kMetadataBytes + 1, ' ')}) {
+        Write(input / "world_info.json", bytes);
+        const auto original = retained;
+        EXPECT_FALSE(P::ReadWeatherSchedule(input, retained, tick));
+        EXPECT_EQ(retained, original);
+        EXPECT_EQ(tick, 4u);
+        EXPECT_FALSE(session.LoadWorldStateFrom(input));
+        EXPECT_EQ(session.WorldRevision(), revision);
+    }
+    fs::remove(input / "world_info.json");
+    fs::create_directory(input / "world_info.json");
+    const auto original = retained;
+    EXPECT_FALSE(P::ReadWeatherSchedule(input, retained, tick));
+    EXPECT_EQ(retained, original);
+    EXPECT_EQ(tick, 4u);
+    fs::remove(input / "world_info.json");
+    Write(input / "world_info.json", valid.dump());
+    std::stop_source cancellation;
+    cancellation.request_stop();
+    EXPECT_FALSE(P::ReadWeatherSchedule(input, retained, tick, nullptr, cancellation.get_token()));
+    EXPECT_EQ(retained, original);
+    EXPECT_EQ(tick, 4u);
+    const auto cancelled = GameSession::PrepareWorldState(
+        session.CaptureWorldPreparationOptions(), input, cancellation.get_token());
+    EXPECT_FALSE(session.AdoptPreparedWorld(cancelled));
+    EXPECT_EQ(session.WorldRevision(), revision);
+}
+
+TEST_F(WorldOpenRefusal, ScheduleClockWithoutCalendarDoesNotRewindAnExistingLedger) {
+    const auto input = root / "schedule-ledger";
+    const auto script = ShortWeatherScript();
+    const nlohmann::json metadata = {{"container_version", P::kScheduledWeatherMetadataVersion},
+                                     {"weatherSchedule", script.canonical_bytes()},
+                                     {"weatherScheduleTick", 4}};
+    Write(input / "world_info.json", metadata.dump());
+    Write(WorldSaveService::active_regions_path(input), world::ActiveRegionLedger{}.encode());
+    for (const bool prepared : {false, true}) {
+        GameSession target;
+        target.SetRootPath(RootString());
+        target.SetJobSystem(&jobs);
+        target.SetActiveRegionsEnabled(true);
+        ASSERT_TRUE(target.CreateTransientWorld("Schedule clock", "1337", "default"));
+        if (prepared) {
+            const auto state =
+                GameSession::PrepareWorldState(target.CaptureWorldPreparationOptions(), input);
+            ASSERT_TRUE(target.AdoptPreparedWorld(state)) << target.GetWorldOpenError();
+        } else {
+            ASSERT_TRUE(target.LoadWorldStateFrom(input)) << target.GetWorldOpenError();
+        }
+        EXPECT_EQ(target.GetSimulationTickCount(), 4u);
+        EXPECT_EQ(target.GetWeatherSystem()->PrecipitationAt(Vec3(0.0f)),
+                  script.Sample(4).precip_intensity);
+    }
+}
+
+TEST_F(WorldOpenRefusal, ScheduledMetadataRoundTripsBothClockBackendsAndLegacyBytesStayExact) {
+    const auto script = ShortWeatherScript();
+    for (const bool regional : {false, true}) {
+        GameSession scheduled, reopened;
+        for (auto* session : {&scheduled, &reopened}) {
+            session->SetRootPath(RootString());
+            session->SetJobSystem(&jobs);
+            session->SetActiveRegionsEnabled(regional);
+            session->SetAetherStateEnabled(true);
+        }
+        ASSERT_TRUE(scheduled.SetWeatherSchedule(script));
+        ASSERT_TRUE(scheduled.CreateWorld("Scheduled metadata", "1337", "default"));
+        EXPECT_FALSE(scheduled.SetWeatherSchedule(script));
+        scheduled.SetReplicatedSimulationAnchors({});
+        for (int index = 0; index < 4; ++index) {
+            ASSERT_EQ(scheduled.TickSimulation(scheduled.GetSimulationClock().fixed_dt()), 1u);
+            ASSERT_FALSE(scheduled.GetRegionSchedulerFault());
+        }
+        ASSERT_TRUE(scheduled.SaveWorld());
+        const auto path = scheduled.GetWorldSaveDir() / "world_info.json";
+        const auto metadata = nlohmann::json::parse(Read(path));
+        EXPECT_EQ(metadata.at("container_version"), P::kScheduledWeatherMetadataVersion);
+        EXPECT_EQ(metadata.at("weatherScheduleTick"), 4);
+        ASSERT_TRUE(reopened.LoadWorld(scheduled.GetMetadata().worldId))
+            << reopened.GetWorldOpenError();
+        ASSERT_NE(reopened.GetWeatherSchedule(), nullptr);
+        EXPECT_EQ(*reopened.GetWeatherSchedule(), script);
+        EXPECT_EQ(reopened.GetSimulationTickCount(), 4u);
+        EXPECT_EQ(reopened.SystemConfigIdentity(), scheduled.SystemConfigIdentity());
+        EXPECT_EQ(reopened.GetWeatherSystem()->PrecipitationAt(Vec3(0.0f)),
+                  script.Sample(4).precip_intensity);
+        EXPECT_EQ(reopened.GetEnergyFieldState()->next_fire_tick(),
+                  scheduled.GetEnergyFieldState()->next_fire_tick());
+        for (const bool prepared : {false, true}) {
+            GameSession target;
+            target.SetRootPath(RootString());
+            target.SetJobSystem(&jobs);
+            target.SetActiveRegionsEnabled(regional);
+            target.SetAetherStateEnabled(true);
+            ASSERT_TRUE(target.CreateTransientWorld("Schedule adoption", "1337", "default"));
+            if (prepared) {
+                const auto state = GameSession::PrepareWorldState(
+                    target.CaptureWorldPreparationOptions(), scheduled.GetWorldSaveDir());
+                ASSERT_TRUE(target.AdoptPreparedWorld(state)) << target.GetWorldOpenError();
+            } else {
+                ASSERT_TRUE(target.LoadWorldStateFrom(scheduled.GetWorldSaveDir()))
+                    << target.GetWorldOpenError();
+            }
+            ASSERT_NE(target.GetWeatherSchedule(), nullptr);
+            EXPECT_EQ(*target.GetWeatherSchedule(), script);
+            EXPECT_EQ(target.GetSimulationTickCount(), 4u);
+            EXPECT_EQ(target.GetWeatherSystem()->PrecipitationAt(Vec3(0.0f)),
+                      script.Sample(4).precip_intensity);
+        }
+    }
+    const std::string legacy = "{\"container_version\":2,\"extension\":\"retained\"}\n";
+    const auto output = root / "legacy-metadata";
+    ASSERT_TRUE(WorldSaveService::save_metadata(legacy, output));
+    EXPECT_EQ(Read(output / "world_info.json"), legacy);
+}
+} // namespace
