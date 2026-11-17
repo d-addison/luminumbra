@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <string>
 #include <utility>
 
@@ -21,7 +22,7 @@
 namespace {
 constexpr int Size = 128;
 // Fixed fixture: six RGBA float attachments and one RGB readback, below 2 MiB.
-constexpr std::size_t PixelCount = Size * Size;
+constexpr std::size_t PixelCount = static_cast<std::size_t>(Size) * static_cast<std::size_t>(Size);
 
 class ShaderScene : public testing::Test {
 protected:
@@ -78,9 +79,10 @@ protected:
             return 0;
         }
         // Shader inputs are fixed repository files, capped before compilation.
-        std::array<char, 256 * 1024 + 1> sourceBytes{};
+        constexpr std::streamsize MaxShaderBytes = 262144;
+        std::array<char, static_cast<std::size_t>(MaxShaderBytes) + 1> sourceBytes{};
         file.read(sourceBytes.data(), static_cast<std::streamsize>(sourceBytes.size()));
-        if (file.bad() || file.gcount() > 256 * 1024) {
+        if (file.bad() || file.gcount() > MaxShaderBytes) {
             ADD_FAILURE() << filename << ": unreadable or oversized shader";
             return 0;
         }
@@ -116,6 +118,39 @@ protected:
         const GLint location = glGetUniformLocation(program, name);
         EXPECT_GE(location, 0) << name;
         return location;
+    }
+    static void Save(const char* name, const std::array<float, PixelCount * 3>& pixels) {
+        const char* output = std::getenv("LUMINUMBRA_SHADER_SCENE_OUTPUT");
+        ASSERT_NE(output, nullptr);
+        ASSERT_NE(glGetString(GL_VERSION), nullptr);
+        const std::filesystem::path directory(output);
+        const std::string fixtureHash = LUMINUMBRA_SHADER_SCENE_INPUT_HASH;
+        ASSERT_EQ(fixtureHash.size(), 64u) << "Build the registered scene target";
+        std::ofstream identity(directory / "fixture-sha256.txt", std::ios::binary);
+        identity << fixtureHash << '\n';
+        identity.close();
+        ASSERT_TRUE(identity);
+        std::ofstream image(directory / (std::string(name) + ".pfm"), std::ios::binary);
+        image << "PF\n128 128\n-1.0\n";
+        for (const float value : pixels) {
+            const auto bits = std::bit_cast<std::uint32_t>(value);
+            const std::array<char, 4> bytes{static_cast<char>(bits),
+                                            static_cast<char>(bits >> 8),
+                                            static_cast<char>(bits >> 16),
+                                            static_cast<char>(bits >> 24)};
+            image.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        }
+        image.close();
+        ASSERT_TRUE(image);
+        constexpr std::array<std::pair<const char*, GLenum>, 2> metadataFiles{
+            std::pair<const char*, GLenum>{"renderer.txt", GL_RENDERER},
+            std::pair<const char*, GLenum>{"version.txt", GL_VERSION}};
+        for (const auto& [filename, glName] : metadataFiles) {
+            std::ofstream metadata(directory / filename, std::ios::binary);
+            metadata << reinterpret_cast<const char*>(glGetString(glName)) << '\n';
+            metadata.close();
+            ASSERT_TRUE(metadata);
+        }
     }
 };
 
@@ -236,36 +271,135 @@ TEST_F(ShaderScene, MaterialLinearReferenceAndOcclusionBlend) {
     }
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     ASSERT_FALSE(HasFailure());
-    const char* output = std::getenv("LUMINUMBRA_SHADER_SCENE_OUTPUT");
-    ASSERT_NE(output, nullptr);
-    ASSERT_NE(glGetString(GL_VERSION), nullptr);
-    const std::filesystem::path directory(output);
-    const std::string fixtureHash = LUMINUMBRA_SHADER_SCENE_INPUT_HASH;
-    ASSERT_EQ(fixtureHash.size(), 64u) << "Build the registered scene target";
-    std::ofstream identity(directory / "fixture-sha256.txt", std::ios::binary);
-    identity << fixtureHash << '\n';
-    identity.close();
-    ASSERT_TRUE(identity);
-    std::ofstream image(directory / "material.pfm", std::ios::binary);
-    image << "PF\n128 128\n-1.0\n";
-    for (const float value : pixels) {
-        const auto bits = std::bit_cast<std::uint32_t>(value);
-        const std::array<char, 4> bytes{static_cast<char>(bits),
-                                        static_cast<char>(bits >> 8),
-                                        static_cast<char>(bits >> 16),
-                                        static_cast<char>(bits >> 24)};
-        image.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    Save("material", pixels);
+}
+
+TEST_F(ShaderScene, TreeImpostorAtlasCutout) {
+    const GLuint vertex = Compile(GL_VERTEX_SHADER, "tree_impostor.vert");
+    const GLuint fragment = Compile(GL_FRAGMENT_SHADER, "tree_impostor.frag");
+    ASSERT_NE(vertex, 0u);
+    ASSERT_NE(fragment, 0u);
+    program = glCreateProgram();
+    glAttachShader(program, vertex);
+    glAttachShader(program, fragment);
+    glLinkProgram(program);
+    glDeleteShader(vertex);
+    glDeleteShader(fragment);
+    GLint linked = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    ASSERT_EQ(linked, GL_TRUE);
+    glUseProgram(program);
+    constexpr std::array<float, 16> identity{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    glUniformMatrix4fv(Uniform("u_view"), 1, GL_FALSE, identity.data());
+    glUniformMatrix4fv(Uniform("u_proj"), 1, GL_FALSE, identity.data());
+    glUniform3f(Uniform("u_cameraPos"), 0, 0, 2);
+    glUniform3f(Uniform("u_center"), 0, 0, 0);
+    glUniform1f(Uniform("u_radius"), 1);
+    glUniform1f(Uniform("u_grid"), 2);
+    glUniform1f(Uniform("u_materialId"), 4.f / 255.f);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    // Disabled matrix attributes supply the one fixed instance without buffers.
+    for (GLuint column = 0; column < 4; ++column) {
+        glVertexAttrib4fv(column, identity.data() + static_cast<std::size_t>(column) * 4);
     }
-    image.close();
-    ASSERT_TRUE(image);
-    constexpr std::array<std::pair<const char*, GLenum>, 2> metadataFiles{
-        std::pair<const char*, GLenum>{"renderer.txt", GL_RENDERER},
-        std::pair<const char*, GLenum>{"version.txt", GL_VERSION}};
-    for (const auto& [filename, name] : metadataFiles) {
-        std::ofstream metadata(directory / filename, std::ios::binary);
-        metadata << reinterpret_cast<const char*>(glGetString(name)) << '\n';
-        metadata.close();
-        ASSERT_TRUE(metadata);
+    glVertexAttrib4f(4, 1, 1, 1, 1);
+    glGenTextures(static_cast<GLsizei>(textures.size()), textures.data());
+    // 2x2 tiles, each 4x4 texels. Only the selected (+Z) tile (1,1) has
+    // transparent, just-below-cutoff, exact-cutoff and opaque texels. Other
+    // tiles are opaque red, making a wrong octahedral tile selection visible.
+    std::array<float, 256> atlas{};
+    std::array<float, 256> normals{};
+    constexpr std::array<float, 4> alpha{0, .499f, .5f, 1};
+    for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            const auto offset = (static_cast<std::size_t>(y) * 8 + static_cast<std::size_t>(x)) * 4;
+            const bool selected = x >= 4 && y >= 4;
+            const float coverage = selected ? alpha[static_cast<std::size_t>((x + y) % 4)] : 1;
+            atlas[offset] = (selected ? .25f : 1.f) * coverage;
+            atlas[offset + 1] = selected ? .5f * coverage : 0;
+            atlas[offset + 2] = selected ? .75f * coverage : 0;
+            atlas[offset + 3] = coverage;
+            normals[offset] = .5f * coverage;
+            normals[offset + 1] = .5f * coverage;
+            normals[offset + 2] = .75f * coverage;
+            normals[offset + 3] = coverage;
+        }
     }
+    for (int unit = 0; unit < 2; ++unit) {
+        glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(unit));
+        glBindTexture(GL_TEXTURE_2D, textures[static_cast<std::size_t>(unit)]);
+        glTexImage2D(GL_TEXTURE_2D,
+                     0,
+                     GL_RGBA32F,
+                     8,
+                     8,
+                     0,
+                     GL_RGBA,
+                     GL_FLOAT,
+                     unit == 0 ? atlas.data() : normals.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glUniform1i(Uniform(unit == 0 ? "u_albedo" : "u_normal"), unit);
+    }
+    glGenFramebuffers(1, &framebuffer);
+    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+    glGenTextures(static_cast<GLsizei>(attachments.size()), attachments.data());
+    std::array<GLenum, 6> buffers{};
+    for (std::size_t index = 0; index < attachments.size(); ++index) {
+        glBindTexture(GL_TEXTURE_2D, attachments[index]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, Size, Size, 0, GL_RGBA, GL_FLOAT, nullptr);
+        buffers[index] = GL_COLOR_ATTACHMENT0 + static_cast<GLenum>(index);
+        glFramebufferTexture2D(
+            GL_FRAMEBUFFER, buffers[index], GL_TEXTURE_2D, attachments[index], 0);
+    }
+    glBindTexture(GL_TEXTURE_2D, textures[1]);
+    glDrawBuffers(static_cast<GLsizei>(buffers.size()), buffers.data());
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+    constexpr std::array<float, 4> background{.0625f, .125f, .1875f, .25f};
+    for (int index = 0; index < 6; ++index) {
+        glClearBufferfv(GL_COLOR, index, background.data());
+    }
+    glViewport(0, 0, Size, Size);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    // Check all six attachments: discard must preserve even outputs assigned
+    // before the discard, including gAuthoredSurface. Coverage is exactly 50%.
+    std::array<float, PixelCount * 4> values{};
+    std::array<float, PixelCount * 3> pixels{};
+    constexpr std::array<std::size_t, 6> outputComponents{3, 4, 4, 2, 2, 4};
+    for (int attachment = 0; attachment < 6; ++attachment) {
+        glReadBuffer(GL_COLOR_ATTACHMENT0 + static_cast<GLenum>(attachment));
+        glReadPixels(0, 0, Size, Size, GL_RGBA, GL_FLOAT, values.data());
+        for (int y = 0; y < Size; ++y) {
+            for (int x = 0; x < Size; ++x) {
+                const auto pixel = static_cast<std::size_t>(y) * static_cast<std::size_t>(Size) +
+                                   static_cast<std::size_t>(x);
+                const bool discarded = (x / 32 + y / 32) % 4 < 2;
+                for (std::size_t channel = 0; channel < 4; ++channel) {
+                    const float value = values[pixel * 4 + channel];
+                    // Surviving vec2/vec3 outputs do not define the unused
+                    // RGBA components. Discard preserves all cleared channels.
+                    if (discarded ||
+                        channel < outputComponents[static_cast<std::size_t>(attachment)]) {
+                        ASSERT_TRUE(std::isfinite(value));
+                    }
+                    if (discarded) {
+                        EXPECT_FLOAT_EQ(value, background[channel]);
+                    } else if (attachment == 2) {
+                        constexpr std::array<float, 4> expected{.25f, .5f, .75f, .75f};
+                        EXPECT_FLOAT_EQ(value, expected[channel]);
+                    }
+                    if (attachment == 2 && channel < 3) {
+                        pixels[pixel * 3 + channel] = value;
+                    }
+                }
+            }
+        }
+    }
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    ASSERT_FALSE(HasFailure());
+    Save("tree-cutout", pixels);
 }
 } // namespace
