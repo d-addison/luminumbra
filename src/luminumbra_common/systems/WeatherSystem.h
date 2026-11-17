@@ -164,7 +164,7 @@ public:
     // registry, the deterministic runtime contract  -- appended FIRST, append only, never
     // reusing +1..+11).
     explicit WeatherSystem(int world_seed);
-    // Setup only; invalid schedules and changes after the first update refuse.
+    // Setup only; invalid schedules and changes after any update or restore refuse.
     bool SetSchedule(const WeatherSchedule& schedule);
     void BindRegionalBackend(std::function<WeatherSample(const Vec3&)> sample,
                              std::function<std::string()> hash);
@@ -223,9 +223,9 @@ public:
 
     void Update(std::uint64_t tick, const Vec3& region_anchor, const WindFieldSystem* wind);
 
-    // --- Public weather-state query API (stable; consumed by  lightning
-    //     +  precip + 5b ecology/audio). All are pure functions of the
-    //     CURRENT state; none mutate. ---
+    // --- Public weather-state query API (stable; consumed by lightning
+    //     + precip + ecology/audio). Only presentation polling acknowledges
+    //     transient history; queries never mutate simulation state. ---
 
     // Region weather category at a world position (the large-scale sky state).
     [[nodiscard]] WeatherCategory CategoryAt(const Vec3& world_pos) const;
@@ -248,9 +248,10 @@ public:
 
     // The live lightning STRIKE schedule. Canonical order: strike_tick
     // ascending, then storm_salt, then x, then z (deterministic, stable). Folded
-    // into the `weather` world_hash sub-hash. The RENDER side reads strikes whose
-    // strike_tick == the current tick to fire bolt/pulse/scorch/thunder (one-way,
-    // ). Bounded: <= kMaxLiveStrikes entries.
+    // into the `weather` world_hash sub-hash. The RENDER side consumes due strikes
+    // to fire bolt/pulse/scorch/thunder (one-way). Bounded: <= kMaxLiveStrikes entries.
+    // A declared schedule retains its one presentation event across catch-up ticks.
+    // Polling acknowledges it; the next update releases it. This history is never hashed.
     [[nodiscard]] const std::vector<StrikeEvent>& StrikeSchedule() const;
     [[nodiscard]] int live_strike_count() const noexcept {
         if (m_schedule)
@@ -260,7 +261,7 @@ public:
                                     : m_strikes.size());
     }
     // Strikes whose strike_tick == the LAST updated tick (the bolts that land THIS
-    // tick). A convenience for the render/audio hook; pure read of current state.
+    // tick). Simulation delivery only; independent of presentation polling.
     [[nodiscard]] std::vector<StrikeEvent> StrikesThisTick() const;
 
     // The dominant region category at the anchor (gate diagnostics / overlay).
@@ -300,6 +301,9 @@ private:
     WeatherSample m_scheduledSample;
     // At most one declared event; reserve once during setup, never allocate per tick.
     std::vector<StrikeEvent> m_scheduledStrikes;
+    std::vector<StrikeEvent> m_scheduledPresentationStrikes; // bounded to one declared event
+    mutable bool m_scheduledPresentationConsumed = false;
+    bool m_hasUpdatedOrRestored = false; // setup guard only; never saved or hashed
     Vec3 m_scheduleAnchor{};
     void UpdateSchedule(std::uint64_t tick, const Vec3& anchor);
     std::function<WeatherSample(const Vec3&)> m_regional_sample;

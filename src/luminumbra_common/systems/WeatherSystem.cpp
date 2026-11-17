@@ -231,11 +231,14 @@ WeatherSample WeatherSchedule::Sample(std::uint64_t tick) const {
 }
 
 bool WeatherSystem::SetSchedule(const WeatherSchedule& schedule) {
-    if (m_last_tick != 0 || !schedule.valid())
+    if (m_hasUpdatedOrRestored || !schedule.valid())
         return false;
     m_schedule = schedule;
     m_scheduleBytes = schedule.canonical_bytes();
     m_scheduledStrikes.reserve(1);
+    m_scheduledPresentationStrikes.reserve(1);
+    m_scheduledPresentationStrikes.clear();
+    m_scheduledPresentationConsumed = false;
     UpdateSchedule(0, Vec3(0.0f));
     return true;
 }
@@ -248,6 +251,10 @@ void WeatherSystem::UpdateSchedule(std::uint64_t tick, const Vec3& anchor) {
     m_scheduledSample = m_schedule->Sample(tick);
     m_anchor_category = m_scheduledSample.category;
     m_scheduledStrikes.clear();
+    if (m_scheduledPresentationConsumed) {
+        m_scheduledPresentationStrikes.clear();
+        m_scheduledPresentationConsumed = false;
+    }
     if (m_schedule->strike_tick && tick == *m_schedule->strike_tick) {
         const auto seed = static_cast<std::uint64_t>(static_cast<std::uint32_t>(m_lightning_seed));
         const auto salt = Mix64(seed ^ tick);
@@ -256,6 +263,8 @@ void WeatherSystem::UpdateSchedule(std::uint64_t tick, const Vec3& anchor) {
                                       anchor.z + (UnitFloat(salt ^ 1) * 2.0f - 1.0f) * 32.0f,
                                       0.5f + UnitFloat(salt ^ 2) * 0.5f,
                                       static_cast<std::uint32_t>(salt)});
+        // Repeated updates at the strike tick replace the single bounded event.
+        m_scheduledPresentationStrikes = m_scheduledStrikes;
     }
 }
 
@@ -777,7 +786,7 @@ void WeatherSystem::BindRegionalBackend(std::function<WeatherSample(const Vec3&)
     }
     if (!sample && m_regionalWeatherKeyed) {
         m_storm_cells = StormCells();
-        m_strikes = StrikeSchedule();
+        m_strikes = m_schedule ? m_scheduledStrikes : StrikeSchedule();
         m_regionalWeatherKeyed = false;
     }
     if (sample && !m_regionalWeatherKeyed) {
@@ -830,8 +839,10 @@ const std::vector<StormCell>& WeatherSystem::StormCells() const {
     return m_regionalStormCache;
 }
 const std::vector<StrikeEvent>& WeatherSystem::StrikeSchedule() const {
-    if (m_schedule)
-        return m_scheduledStrikes;
+    if (m_schedule) {
+        m_scheduledPresentationConsumed = true;
+        return m_scheduledPresentationStrikes;
+    }
     if (!m_regionalWeatherKeyed) {
         return m_strikes;
     }
@@ -850,6 +861,7 @@ const std::vector<StrikeEvent>& WeatherSystem::StrikeSchedule() const {
 }
 
 void WeatherSystem::RefreshRegionalWeather(std::uint64_t tick, const Vec3& anchor) {
+    m_hasUpdatedOrRestored = true;
     m_last_tick = tick;
     if (m_regional_sample) {
         const auto sample = m_regional_sample(anchor);
@@ -965,6 +977,7 @@ float WeatherSystem::StormIntensityAt(const Vec3& world_pos) const {
 void WeatherSystem::UpdateFromClock(std::uint64_t tick,
                                     const Vec3& region_anchor,
                                     WindFieldSystem& wind) {
+    m_hasUpdatedOrRestored = true;
     if (m_regional_sample) {
         m_last_tick = tick;
         wind.Update(tick, region_anchor);
@@ -984,10 +997,11 @@ void WeatherSystem::UpdateFromClock(std::uint64_t tick,
 void WeatherSystem::RestoreAtTick(std::uint64_t tick,
                                   const Vec3& region_anchor,
                                   WindFieldSystem& wind) {
+    m_hasUpdatedOrRestored = true;
+    m_scheduledPresentationStrikes.clear();
+    m_scheduledPresentationConsumed = false;
     if (m_schedule && !m_regional_sample) {
-        wind.ClearStormPerturbations();
-        wind.Update(tick, region_anchor);
-        Update(tick, region_anchor, &wind);
+        UpdateFromClock(tick, region_anchor, wind);
         return;
     }
     if (m_regional_sample) {
@@ -1013,6 +1027,7 @@ void WeatherSystem::RestoreAtTick(std::uint64_t tick,
 void WeatherSystem::Update(std::uint64_t tick,
                            const Vec3& region_anchor,
                            const WindFieldSystem* wind) {
+    m_hasUpdatedOrRestored = true;
     m_last_tick = tick;
     if (m_schedule) {
         UpdateSchedule(tick, region_anchor);

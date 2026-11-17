@@ -4580,6 +4580,171 @@ TEST(WeatherScheduleTest, WeatherScriptExactBoundariesAndBothBackendHashes) {
     }
 }
 
+TEST(WeatherScheduleTest, WeatherScriptLocksSetupAfterEveryTickZeroEntryPoint) {
+    const auto script = ShortWeatherScript();
+    auto replacement = script;
+    replacement.phases[2].precipitation = 65534;
+    auto invalid = script;
+    invalid.phases.clear();
+    for (const bool regional : {false, true}) {
+        for (const bool installed : {false, true}) {
+            for (int entry = 0; entry < 8; ++entry) {
+                SCOPED_TRACE(testing::Message() << regional << '/' << installed << '/' << entry);
+                Luminumbra::Systems::WeatherSystem weather(1337);
+                Luminumbra::Systems::WindFieldSystem wind(1337);
+                if (regional) {
+                    weather.BindRegionalBackend(
+                        [](const Vec3&) { return Luminumbra::Systems::WeatherSample{}; },
+                        [] { return std::string("base-regional-hash"); });
+                }
+                EXPECT_FALSE(weather.SetSchedule(invalid));
+                if (installed) {
+                    ASSERT_TRUE(weather.SetSchedule(replacement));
+                    ASSERT_TRUE(weather.SetSchedule(script));
+                }
+                switch (entry) {
+                    case 0:
+                        weather.Update(0, Vec3(8.0f), &wind);
+                        break;
+                    case 1:
+                        weather.UpdateFromClock(0, Vec3(8.0f), wind);
+                        break;
+                    case 2:
+                        weather.RestoreAtTick(0, Vec3(8.0f), wind);
+                        break;
+                    case 3:
+                        weather.RefreshRegionalWeather(0, Vec3(8.0f));
+                        break;
+                    case 4:
+                        weather.RefreshRegionalWeather(0, Vec3(8.0f), {});
+                        break;
+                    case 5:
+                    case 6:
+                        weather.AdoptRegionalWeather(0, Vec3(8.0f), {}, {}, regional, entry == 6);
+                        break;
+                    case 7:
+                        weather.Update(0, Vec3(8.0f), nullptr);
+                        break;
+                    default:
+                        FAIL() << "uncovered weather entry point";
+                }
+                const auto hash = weather.ComputeWeatherSubHash();
+                EXPECT_FALSE(weather.SetSchedule(replacement));
+                EXPECT_FALSE(weather.SetSchedule(invalid));
+                EXPECT_EQ(weather.ComputeWeatherSubHash(), hash);
+                EXPECT_EQ(weather.last_tick(), 0u);
+            }
+        }
+    }
+}
+
+TEST(WeatherScheduleTest, WeatherScriptPresentationSurvivesCatchUpWithoutChangingSimulation) {
+    for (const bool regional : {false, true}) {
+        for (const std::uint64_t strike_tick : {0u, 7u}) {
+            auto script = ShortWeatherScript();
+            script.strike_tick = strike_tick;
+            Luminumbra::Systems::WeatherSystem weather(1337), restored(1337);
+            Luminumbra::Systems::WindFieldSystem wind(1337), restored_wind(1337);
+            for (auto* system : {&weather, &restored}) {
+                ASSERT_TRUE(system->SetSchedule(script));
+                if (regional) {
+                    system->BindRegionalBackend(
+                        [](const Vec3&) { return Luminumbra::Systems::WeatherSample{}; },
+                        [] { return std::string("base-regional-hash"); });
+                }
+            }
+            weather.UpdateFromClock(strike_tick, Vec3(8.0f), wind);
+            const auto delivered = weather.StrikesThisTick();
+            ASSERT_EQ(delivered.size(), 1u);
+            // Repeated calls must retain at most the one declared event.
+            weather.UpdateFromClock(strike_tick, Vec3(8.0f), wind);
+            weather.UpdateFromClock(strike_tick + 1, Vec3(8.0f), wind);
+            weather.UpdateFromClock(strike_tick + 2, Vec3(8.0f), wind);
+            EXPECT_TRUE(weather.StrikesThisTick().empty());
+            EXPECT_EQ(weather.live_strike_count(), 0);
+            restored.RestoreAtTick(strike_tick + 2, Vec3(8.0f), restored_wind);
+            const auto hash = weather.ComputeWeatherSubHash();
+            EXPECT_EQ(hash, restored.ComputeWeatherSubHash());
+            const auto& presentation = weather.StrikeSchedule();
+            ASSERT_EQ(presentation.size(), 1u);
+            EXPECT_EQ(presentation.front().strike_tick, strike_tick);
+            EXPECT_EQ(presentation.front().storm_salt, delivered.front().storm_salt);
+            EXPECT_FLOAT_EQ(presentation.front().world_x, delivered.front().world_x);
+            EXPECT_FLOAT_EQ(presentation.front().world_z, delivered.front().world_z);
+            EXPECT_FLOAT_EQ(presentation.front().magnitude, delivered.front().magnitude);
+            EXPECT_EQ(weather.StrikeSchedule().size(), 1u);
+            EXPECT_EQ(weather.ComputeWeatherSubHash(), hash);
+            EXPECT_TRUE(weather.StrikesThisTick().empty());
+            weather.UpdateFromClock(strike_tick + 3, Vec3(8.0f), wind);
+            EXPECT_TRUE(weather.StrikeSchedule().empty());
+            // Detaching a keyed backend must copy simulation state without polling presentation.
+            weather.UpdateFromClock(strike_tick, Vec3(8.0f), wind);
+            weather.AdoptRegionalWeather(strike_tick + 1, Vec3(8.0f), {}, {}, true);
+            weather.BindRegionalBackend({}, {});
+            weather.UpdateFromClock(strike_tick + 2, Vec3(8.0f), wind);
+            ASSERT_EQ(weather.StrikeSchedule().size(), 1u);
+            EXPECT_TRUE(weather.StrikesThisTick().empty());
+            // Restoring backwards must discard an unconsumed presentation event, too.
+            weather.UpdateFromClock(strike_tick, Vec3(8.0f), wind);
+            weather.RestoreAtTick(strike_tick + 2, Vec3(8.0f), wind);
+            EXPECT_TRUE(weather.StrikeSchedule().empty());
+        }
+    }
+}
+
+TEST(WeatherScheduleTest, WeatherScriptRestoreUsesLiveGroundWindAtElevatedAnchors) {
+    const auto script = ShortWeatherScript();
+    for (const float height : {-32.0f, 0.0f, 31.0f, 32.0f, 96.0f}) {
+        SCOPED_TRACE(height);
+        const Vec3 anchor(8.0f, height, 8.0f);
+        Luminumbra::Systems::WeatherSystem live(1337), restored(1337);
+        Luminumbra::Systems::WindFieldSystem wind(1337), restored_wind(1337);
+        ASSERT_TRUE(live.SetSchedule(script));
+        ASSERT_TRUE(restored.SetSchedule(script));
+        live.UpdateFromClock(5, anchor, wind);
+        restored.RestoreAtTick(5, anchor, restored_wind);
+        const auto expected = live.SampleAt(anchor);
+        const auto actual = restored.SampleAt(anchor);
+        EXPECT_FLOAT_EQ(actual.wind.x, expected.wind.x);
+        EXPECT_FLOAT_EQ(actual.wind.y, expected.wind.y);
+        EXPECT_EQ(restored.ComputeWeatherSubHash(), live.ComputeWeatherSubHash());
+    }
+}
+
+TEST_P(WeatherScheduleSaveTest, WeatherScriptLegacyMigrationPreservesAbsoluteTickAndWeather) {
+    const auto script = ShortWeatherScript();
+    for (const std::uint64_t saved_tick : {0u, 4u, 7u, 8u}) {
+        SCOPED_TRACE(saved_tick);
+        GameSession original, loaded;
+        Configure(original);
+        Configure(loaded);
+        original.SetActiveRegionsEnabled(false);
+        ASSERT_TRUE(original.SetWeatherSchedule(script));
+        ASSERT_TRUE(original.CreateWorld("Scheduled migration", "1337", "default"));
+        original.SetReplicatedSimulationAnchors({});
+        for (std::uint64_t tick = 0; tick < saved_tick; ++tick)
+            TickScriptSession(original);
+        ASSERT_TRUE(original.SaveWorld());
+        const auto disk = DiskBytes(original.GetWorldSaveDir());
+        ASSERT_TRUE(loaded.LoadWorld(original.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+        loaded.SetReplicatedSimulationAnchors({});
+        EXPECT_EQ(DiskBytes(original.GetWorldSaveDir()), disk);
+        EXPECT_EQ(loaded.GetSimulationTickCount(), saved_tick);
+        if (GetParam()) {
+            EXPECT_EQ(loaded.GetWorldClock().tick(), saved_tick);
+            EXPECT_EQ(loaded.GetActiveRegionLedger().header_tick(), saved_tick);
+        }
+        ASSERT_NE(loaded.GetWeatherSystem(), nullptr);
+        ExpectScriptWeather(*loaded.GetWeatherSystem(), script, saved_tick);
+        EXPECT_EQ(loaded.GetWeatherSystem()->ComputeWeatherSubHash(),
+                  original.GetWeatherSystem()->ComputeWeatherSubHash());
+        TickScriptSession(loaded);
+        EXPECT_EQ(loaded.GetSimulationTickCount(), saved_tick + 1);
+        EXPECT_FALSE(loaded.GetRegionSchedulerFault());
+        ExpectScriptWeather(*loaded.GetWeatherSystem(), script, saved_tick + 1);
+    }
+}
+
 TEST_P(WeatherScheduleSaveTest, WeatherScriptSaveContinuationAndEnvelopeVersion) {
     const auto script = ShortWeatherScript();
     GameSession original, loaded;

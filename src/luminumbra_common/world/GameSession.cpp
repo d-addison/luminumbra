@@ -4525,6 +4525,10 @@ bool GameSession::ReadPreparedWorldState(
         // Presentation-only saves recorded the calendar but no simulation tick.
         if (state.render_calendar)
             state.clock = WorldClock(0, *state.render_calendar);
+        // A legacy scheduled save has an absolute tick even without a regional clock.
+        // Seed migration before the absent ledger and energy cadence are constructed.
+        if (state.weather_schedule && !requires_active_regions)
+            state.clock.set_tick(state.weather_schedule_tick);
         state.ledger.emplace(options.ledger_config);
         if (!Persistence::WorldSaveService::load_active_regions(
                 *state.ledger, save_dir, &errors, state.clock, stop)) {
