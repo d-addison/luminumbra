@@ -14691,8 +14691,11 @@ TEST(GameSessionHeadlessWorldTest, RegionScheduleRetainsOnlySurvivingDueRollback
             record.frozen_digest = 123;
             record.wake_pending = false;
         }
-        const auto& first =
-            ledger.schedule(WorldClock(tick + 1), std::span<const Luminumbra::Vec3>{});
+        // Retention requires a probe proving that no durable authority owns the candidate.
+        const auto& first = ledger.schedule(
+            WorldClock(tick + 1), std::span<const Luminumbra::Vec3>{}, {}, {}, [](RegionKey) {
+                return false;
+            });
         EXPECT_EQ(ledger.last_schedule(), &first);
         ASSERT_EQ(first.due, (std::vector<RegionKey>{kFieldOwner}));
         EXPECT_EQ(first.evicted, (std::vector<RegionKey>{evicted}));
@@ -14744,7 +14747,7 @@ void CheckFoliagePrePrepareFaultRecovery(bool warm, bool populated) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session, reference;
+    GameSession session, reference, reloaded;
     const RegionKey frozen{1, 0};
     auto ledger = ScheduledFieldLedger(
         31, {{kFieldOwner, RegionState::Active}, {frozen, RegionState::Frozen}});
@@ -14769,7 +14772,8 @@ void CheckFoliagePrePrepareFaultRecovery(bool warm, bool populated) {
     const auto before_plants = FoliageSnapshot(session.GetRegistry());
     const auto publications = session.GetFoliageRegistryPublications();
     const auto stage_visits = session.GetFoliageRegistryStageVisits();
-    const auto expected = root.path() / "committed-foliage-reference";
+    const auto reference_root = root.path() / "committed-foliage-reference";
+    const auto expected = reference_root / "worlds/saves" / session.GetMetadata().worldId;
     ASSERT_TRUE(session.SaveWorldStateTo(expected));
     ASSERT_NO_FATAL_FAILURE(
         WriteFoliageRecoveryReference(expected,
@@ -14790,38 +14794,46 @@ void CheckFoliagePrePrepareFaultRecovery(bool warm, bool populated) {
     EXPECT_EQ(session.GetFieldPages().serialize(), before_fields);
     EXPECT_EQ(FoliageSnapshot(session.GetRegistry()), before_plants);
     session.GetRegistry().destroy(emitter);
-    const auto recovery = root.path() / "recovered-foliage";
+    const auto recovery_root = root.path() / "recovered-foliage";
+    const auto recovery = recovery_root / "worlds/saves" / session.GetMetadata().worldId;
     Luminumbra::world::WorldStateSaveReport report;
     ASSERT_TRUE(session.SaveWorldState(&report));
-    EXPECT_TRUE(report.saved);
+    // A successful metadata/field save writes no chunks in this fixture.
+    EXPECT_FALSE(report.saved);
+    EXPECT_EQ(report.chunks_saved, 0u);
     ASSERT_TRUE(session.SaveWorld());
     ASSERT_TRUE(session.SaveWorldStateTo(recovery));
     EnableSnapshotSession(reference, root, jobs);
-    ASSERT_TRUE(reference.LoadWorld(session.GetMetadata().worldId));
-    ASSERT_TRUE(reference.LoadWorldStateFrom(expected));
+    // A world load replaces the registry. Legacy state-only plant snapshots append,
+    // so loading the canonical world and then the checkpoint would duplicate plants.
+    ASSERT_TRUE(reference.LoadWorldFrom(session.GetMetadata().worldId, reference_root));
     const auto reference_save = root.path() / "reference-foliage-save";
     ASSERT_TRUE(reference.SaveWorldStateTo(reference_save));
     EXPECT_EQ(SavedPresetTestDiskBytes(recovery), SavedPresetTestDiskBytes(reference_save));
-    ASSERT_TRUE(session.LoadWorldStateFrom(recovery));
-    session.SetReplicatedSimulationAnchors({});
+    // Restore the exported save into a fresh registry, whose legacy handles
+    // have the same allocation history as the checkpoint and reference.
+    EnableSnapshotSession(reloaded, root, jobs);
+    ASSERT_TRUE(reloaded.LoadWorldFrom(session.GetMetadata().worldId, recovery_root));
+    reloaded.SetReplicatedSimulationAnchors({});
     reference.SetReplicatedSimulationAnchors({});
-    EXPECT_FALSE(session.GetRegionSchedulerFault());
-    EXPECT_EQ(session.GetFieldPages().serialize(), before_fields);
-    EXPECT_EQ(FoliageSnapshot(session.GetRegistry()), before_plants);
+    EXPECT_FALSE(reloaded.GetRegionSchedulerFault());
+    EXPECT_EQ(reloaded.GetFieldPages().serialize(), before_fields);
+    EXPECT_EQ(FoliageSnapshot(reloaded.GetRegistry()), before_plants);
     for (const unsigned continuation : {0u, 1u}) {
         SCOPED_TRACE(continuation);
-        TickOnce(session);
+        TickOnce(reloaded);
         TickOnce(reference);
-        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        ASSERT_FALSE(reloaded.GetRegionSchedulerFault());
         ASSERT_FALSE(reference.GetRegionSchedulerFault());
-        EXPECT_EQ(session.GetFieldPages().serialize(), reference.GetFieldPages().serialize());
-        EXPECT_EQ(FoliageSnapshot(session.GetRegistry()), FoliageSnapshot(reference.GetRegistry()));
-        EXPECT_EQ(session.GetActiveRegionLedger().encode(),
+        EXPECT_EQ(reloaded.GetFieldPages().serialize(), reference.GetFieldPages().serialize());
+        EXPECT_EQ(FoliageSnapshot(reloaded.GetRegistry()),
+                  FoliageSnapshot(reference.GetRegistry()));
+        EXPECT_EQ(reloaded.GetActiveRegionLedger().encode(),
                   reference.GetActiveRegionLedger().encode());
-        EXPECT_EQ(SessionWorldSubHashes(session), SessionWorldSubHashes(reference));
+        EXPECT_EQ(SessionWorldSubHashes(reloaded), SessionWorldSubHashes(reference));
     }
     if (populated) {
-        EXPECT_NE(session.GetFieldPages().serialize(), before_fields);
+        EXPECT_NE(reloaded.GetFieldPages().serialize(), before_fields);
     }
 }
 
@@ -14842,11 +14854,14 @@ TEST(GameSessionHeadlessWorldTest, FoliagePrePrepareFaultRestoresNewlyScheduledO
     ASSERT_NO_FATAL_FAILURE(
         LoadScheduledFieldFixture(session, root, jobs, ledger, {}, std::string{}));
     ASSERT_FALSE(session.GetActiveRegionLedger().records().contains(kFieldOwner));
+    // An empty ledger has no persisted member; admission retains the session's
+    // effective configuration rather than the fixture builder's unused settings.
+    const auto admitted_ledger = session.GetActiveRegionLedger();
     const std::array anchors{Luminumbra::Vec3{8, 0, 8}};
     const auto expected = root.path() / "new-owner-reference";
     ASSERT_TRUE(session.SaveWorldStateTo(expected));
     ASSERT_NO_FATAL_FAILURE(
-        WriteFoliageRecoveryReference(expected, ledger, WorldClock(32), anchors));
+        WriteFoliageRecoveryReference(expected, admitted_ledger, WorldClock(32), anchors));
     session.SetReplicatedSimulationAnchors(
         std::vector<Luminumbra::Vec3>(anchors.begin(), anchors.end()));
     const auto emitter = session.GetRegistry().create();
@@ -15457,7 +15472,20 @@ TEST(GameSessionHeadlessWorldTest, FoliagePublicationRefusesMissingFrozenOrChang
             } else if (failure == 0) {
                 records.erase(kFieldOwner);
             } else if (failure == 1) {
-                records.at(kFieldOwner).state = RegionState::Frozen;
+                auto& owner = records.at(kFieldOwner);
+                EXPECT_EQ(owner.last_ticked, 19u);
+                owner.state = RegionState::Frozen;
+                owner.cadence_shift = session.GetActiveRegionLedger().config().reduced_shift;
+                owner.cadence_phase = ActiveRegionLedger::phase(kFieldOwner, owner.cadence_shift);
+                // Prepare already restored 19. Require a stamp mutation on a valid
+                // frozen record, unlike the recoverable committed-history case.
+                owner.last_ticked = 18;
+                owner.frozen_digest = 42;
+                ActiveRegionLedger checked;
+                std::string error;
+                ASSERT_TRUE(ActiveRegionLedger::decode(
+                    session.GetActiveRegionLedger().encode(), checked, error))
+                    << error;
             } else {
                 records.at(kFieldOwner).frozen_at = failure == 2 ? 0 : 21;
             }
@@ -15706,7 +15734,9 @@ TEST(GameSessionHeadlessWorldTest, IrrigationBorderAdmissionAtCapacityLeavesAuth
     const auto target = root.path() / "faulted-foliage-save";
     Luminumbra::world::WorldStateSaveReport report;
     ASSERT_TRUE(session.SaveWorldState(&report));
-    EXPECT_TRUE(report.saved);
+    // Only fields/metadata changed; the report counts chunk writes separately.
+    EXPECT_FALSE(report.saved);
+    EXPECT_EQ(report.chunks_saved, 0u);
     ASSERT_TRUE(session.SaveWorld());
     ASSERT_TRUE(session.SaveWorldStateTo(target));
     ASSERT_NO_FATAL_FAILURE(ExpectIndexedSessionFields(target, fields));
@@ -15766,6 +15796,7 @@ void CheckHistoricallyWettedBorder(bool capacity, bool partial_recipient) {
         }
     }
     ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    const auto committed_fields = fields;
     const auto before = session.GetFieldPages().serialize();
     const auto plants = FoliageSnapshot(session.GetRegistry());
     const auto owners = std::array{left, right};
@@ -15797,7 +15828,7 @@ void CheckHistoricallyWettedBorder(bool capacity, bool partial_recipient) {
         ASSERT_TRUE(session.SaveWorld());
         ASSERT_TRUE(session.SaveWorldState());
         ASSERT_TRUE(session.SaveWorldStateTo(target));
-        ASSERT_NO_FATAL_FAILURE(ExpectIndexedSessionFields(target, fields));
+        ASSERT_NO_FATAL_FAILURE(ExpectIndexedSessionFields(target, committed_fields));
         EXPECT_TRUE(session.LoadWorldStateFrom(root.path() / "scheduled-field-input"));
         EXPECT_FALSE(session.GetRegionSchedulerFault());
         EXPECT_EQ(session.GetFieldPages().serialize(), before);
