@@ -2628,9 +2628,17 @@ TEST(UiSmokeTest, WorldSelectEmptyGuardAndHotReload) {
     // Establish a selection so reload must clear both DOM and manager state.
     Rml::Element* selected_before_reload = FirstWorldListItem(ws);
     ASSERT_NE(selected_before_reload, nullptr);
+    EXPECT_NE(
+        selected_before_reload->GetInnerRML().find("payloads unverified; checked when opened"),
+        Rml::String::npos);
     ClickAndUpdate(ui, selected_before_reload);
     EXPECT_TRUE(selected_before_reload->IsClassSet("selected"));
     // The manager tracks selection internally; reloading the doc resets it to empty.
+    ui.SetSavedWorldList([] {
+        auto catalog = SavedWorldFixture();
+        catalog.worlds.front().payloads_verified = true;
+        return catalog;
+    });
     ui.ReloadActiveDocument();
     ui.Update();
     AwaitWorldCatalog(ui);
@@ -2646,6 +2654,7 @@ TEST(UiSmokeTest, WorldSelectEmptyGuardAndHotReload) {
     // Selecting an item then loading DOES fire (proves the guard, not a dead button).
     Rml::Element* first = FirstWorldListItem(ws);
     ASSERT_NE(first, nullptr);
+    EXPECT_EQ(first->GetInnerRML().find("payloads unverified"), Rml::String::npos);
     ClickAndUpdate(ui, first);
     ClickAndUpdate(ui, ws->GetElementById("load_selected_btn"));
     EXPECT_EQ(load_calls, 1) << "load fires once a world is selected";
