@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -563,6 +564,88 @@ TEST(WorldDurableResidency, RegionDigestExcludesWaterMirrorsAndDirtyBookkeeping)
     EXPECT_EQ(P::WorldSaveService::region_simulation_digest({}, {0, 0}, inputs), digest);
     chunk->water_depth_mm.front() += 1;
     EXPECT_NE(P::WorldSaveService::region_simulation_digest({}, {0, 0}, inputs), digest);
+}
+
+std::shared_ptr<Chunk> FlowingRegionChunk(const IVec3& coords) {
+    auto chunk = std::make_shared<Chunk>(coords);
+    chunk->set_state(ChunkState::Idle);
+    // Fixed fixture bounds: a 17^3 terrain lattice and a 16^2 water grid.
+    chunk->sdf_data.assign(std::size_t{17} * 17 * 17, 1.0f);
+    chunk->heightmap_data.assign(std::size_t{17} * 17, 0.0f);
+    chunk->material_data.assign(std::size_t{17} * 17 * 17, 2);
+    constexpr std::size_t cells = std::size_t{16} * 16;
+    chunk->has_water_sim.store(true);
+    chunk->current_water_resolution.store(16);
+    chunk->water_depth_mm.assign(cells, 1000);
+    chunk->water_depth_mm[15] = 4000;
+    chunk->water_bed_mm.assign(cells, 0);
+    chunk->water_edge_flux.assign(2 * cells, 7);
+    chunk->water_level_data.assign(cells, 1.0f);
+    chunk->water_flow_data.assign(cells, Luminumbra::Vec2(0.0f));
+    chunk->water_sim_terrain_height.assign(cells, 0.0f);
+    chunk->water_rest_level.assign(cells, 0.0f);
+    chunk->is_water_sleeping.store(false);
+    chunk->max_water_delta_last_tick = 0.25f;
+    chunk->ticks_below_threshold = 2;
+    chunk->mark_voxel_data_dirty();
+    return chunk;
+}
+
+TEST(ActiveRegions, IncrementalRegionDigestPreservesCanonicalJsonBytes) {
+    namespace P = Luminumbra::Persistence;
+    Luminumbra::WorldStreamingState state;
+    const auto verify = [&state] {
+        const auto snapshot =
+            nlohmann::json::parse(P::SerializeWorldStreamingStateSnapshotJson(state));
+        auto contents = nlohmann::json::array();
+        for (const auto& chunk : snapshot.at("chunks")) {
+            nlohmann::json content;
+            for (const auto* field : {"chunk_id",
+                                      "coords",
+                                      "sdf_data",
+                                      "heightmap_data",
+                                      "material_data",
+                                      "water_depth_mm",
+                                      "water_bed_mm",
+                                      "water_edge_flux",
+                                      "has_water_sim",
+                                      "current_water_resolution",
+                                      "is_water_sleeping",
+                                      "max_water_delta_last_tick",
+                                      "ticks_below_threshold"})
+                content[field] = chunk.at(field);
+            contents.push_back(std::move(content));
+        }
+        const nlohmann::json canonical = {{"hash_scope", "region_content_v2"},
+                                          {"chunks", contents}};
+        EXPECT_EQ(P::ComputeRegionContentHash(state), P::StableChecksum(canonical.dump(4) + "\n"));
+    };
+    verify();
+    state.insert_chunk(FlowingRegionChunk({32, 0, 0}));
+    verify();
+    state.insert_chunk(FlowingRegionChunk({31, 0, 0}));
+    verify();
+}
+
+TEST(WorldDurableResidency, EvictionSnapshotExcludesWorkerStagingAndPreservesAuthority) {
+    namespace P = Luminumbra::Persistence;
+    auto chunk = FlowingRegionChunk({0, 0, 0});
+    chunk->pending_mesh_indices = {0, 1, 2};
+    chunk->pending_water_mesh_indices = {2, 1, 0};
+    Luminumbra::WorldStreamingState state;
+    state.insert_chunk(chunk);
+    const auto full = nlohmann::json::parse(P::SerializeWorldStreamingStateSnapshotJson(state));
+    const auto authority = nlohmann::json::parse(P::SerializeChunkAuthoritySnapshotJson(*chunk));
+    EXPECT_FALSE(full.at("chunks").at(0).at("pending_mesh_indices").empty());
+    EXPECT_TRUE(authority.at("chunks").at(0).at("pending_mesh_indices").empty());
+    EXPECT_TRUE(authority.at("chunks").at(0).at("pending_water_mesh_indices").empty());
+    Luminumbra::WorldStreamingState loaded;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(authority.dump(), loaded, errors));
+    const auto restored = loaded.find_chunk(chunk->get_id());
+    ASSERT_NE(restored, nullptr);
+    // This one-region fixture uses the complete terrain/water authority projection.
+    EXPECT_EQ(P::ComputeRegionContentHash(state), P::ComputeRegionContentHash(loaded));
 }
 
 TEST(WorldDurableResidency, GeneratedWaterAuthoritySurvivesLodPromotionAndPersistence) {
