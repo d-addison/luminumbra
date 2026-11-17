@@ -1039,6 +1039,10 @@ public:
         bool save_requested = false;
     };
     void set_durable_residency(bool on);
+    // Canonical collision lattice, independent of render LOD/residency. Uses committed or
+    // edited authority when present, refuses incomplete authority instead of regenerating it.
+    // Exactly (CHUNK_SIZE_X+1)*(CHUNK_SIZE_Z+1) samples; no world mutation.
+    bool sample_simulation_collision(i32 chunk_x, i32 chunk_z, std::span<float> heights) const;
     bool durable_residency() const {
         return m_durable_residency;
     }

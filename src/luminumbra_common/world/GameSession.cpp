@@ -808,6 +808,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
         bool m_previous;
     };
     const BatchGuard guard(m_simulationBatchInProgress, m_activeRegionsEnabled);
+    const auto clock_before = m_simulationClock;
     std::uint32_t ticks_executed;
     if (m_activeRegionsEnabled) {
         auto advanced_clock = m_simulationClock;
@@ -827,6 +828,19 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
     const std::uint64_t first_tick = m_simulationClock.tick_count() - ticks_executed + 1;
     for (std::uint32_t i = 0; i < ticks_executed; ++i) {
         const std::uint64_t current_tick = first_tick + i;
+        // Standalone session hosts also step creature controllers. Reuse a host's
+        // successful barrier for this tick; otherwise prepare before any tick writes.
+        if (m_activeRegionsEnabled && m_physicsSystem &&
+            !m_physicsSystem->prepare_simulation_collisions({}, current_tick)) {
+            // Preserve the pre-frame fractional accumulator and telemetry. Only
+            // time for ticks already completed in this batch has been consumed.
+            m_simulationClock = clock_before;
+            if (i != 0) {
+                m_simulationClock.advance(static_cast<double>(i) * m_simulationClock.fixed_dt());
+            }
+            SettleWaterAuthority(defer_water_authority);
+            return i; // Retry this unconsumed tick with the same simulation inputs.
+        }
         using Stage = luminumbra::simulation::SimBudgetStage;
         namespace TelemetryComp = Luminumbra::Components;
         luminumbra::simulation::SimBudgetTelemetry::TickScope budget(m_simBudgetTelemetry,

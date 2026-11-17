@@ -97,6 +97,7 @@
 #include <unistd.h>
 #endif
 
+#include "../fixtures/TerrainFixtureParams.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/ecs/EntitySnapshot.h"
@@ -105,6 +106,7 @@
 #include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/scripting/LuaState.h"
+#include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/FarAuthorityOverlay.h"
@@ -15458,4 +15460,466 @@ TEST(GameSessionHeadlessWorldTest, RegionalAetherSelfAssignmentPreservesSessionB
         [](const auto& system, const auto& position) { return system.SampleAether(position); },
         [](const auto& system) { return system.ComputeAetherSubHash(); },
         [](const auto& session) { return session.ComputeRegionalAetherSubHash(); }));
+}
+
+TEST(GameSessionHeadlessWorldTest, SimulationCollisionsIgnoreRenderCadenceAcrossSessionTicks) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession quiet, busy;
+    for (auto* session : {&quiet, &busy}) {
+        EnableSnapshotSession(*session, root, jobs);
+        ASSERT_TRUE(session->CreateTransientWorld("Collision cadence", "1337", "default"));
+        session->GetWorldSystem()->debug_set_streaming_radius_cap(1);
+        const auto spawn = session->GetMetadata().spawnPoint;
+        session->SetReplicatedSimulationAnchors({spawn});
+        session->GetPhysicsSystem()->create_avatar_character(spawn);
+        session->GetPhysicsSystem()->set_avatar_wish_velocity(0, {0.5f, 0});
+    }
+    const auto anchor = quiet.GetMetadata().spawnPoint;
+    const auto dt = quiet.GetSimulationClock().fixed_dt();
+    // Only busy pumps render-only streaming. Neither peer needs render residency to
+    // prepare terrain, and render-only generation must not admit collision authority.
+    for (int tick = 0; tick < 12; ++tick) {
+        SCOPED_TRACE(tick);
+        for (int frame = 0; frame < 2; ++frame) {
+            busy.GetWorldSystem()->update(
+                busy.GetRegistry(), anchor, busy.GetPhysicsSystem(), false);
+            busy.GetWorldSystem()->wait_for_streaming_jobs();
+        }
+        for (auto* session : {&quiet, &busy}) {
+            auto* physics = session->GetPhysicsSystem();
+            ASSERT_TRUE(
+                physics->prepare_simulation_collisions({}, session->GetSimulationTickCount() + 1));
+            EXPECT_EQ(physics->simulation_collision_sample_count(), 9u);
+            physics->update(static_cast<float>(dt));
+            physics->update_avatars(static_cast<float>(dt));
+            ASSERT_EQ(session->TickSimulation(dt), 1u);
+            ASSERT_FALSE(session->GetRegionSchedulerFault());
+        }
+        const auto a = quiet.GetPhysicsSystem()->get_avatar_position(0);
+        const auto b = busy.GetPhysicsSystem()->get_avatar_position(0);
+        for (int axis = 0; axis < 3; ++axis) {
+            EXPECT_EQ(std::bit_cast<std::uint32_t>(a[axis]), std::bit_cast<std::uint32_t>(b[axis]));
+        }
+        EXPECT_EQ(quiet.GetPhysicsSystem()->simulation_collision_hash(),
+                  busy.GetPhysicsSystem()->simulation_collision_hash());
+        EXPECT_EQ(SessionWorldSubHashes(quiet), SessionWorldSubHashes(busy));
+    }
+    EXPECT_FALSE(busy.GetWorldSystem()->snapshot_streamed_chunks().empty());
+    EXPECT_TRUE(quiet.GetWorldSystem()->snapshot_streamed_chunks().empty());
+}
+
+TEST(GameSessionHeadlessWorldTest, LegacyColliderPreparationPreservesHashesAndSaveBytes) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    EnableSnapshotSession(session, root, jobs);
+    session.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(session.CreateWorld("Legacy collision barrier", "1337", "default"));
+    ASSERT_TRUE(session.SaveWorldState());
+    const auto save = session.GetWorldSaveDir();
+    const auto bytes = SavedPresetTestDiskBytes(save);
+    const auto before = SessionWorldSubHashes(session);
+    const std::array<Luminumbra::Vec3, 1> invalid{{{std::numeric_limits<float>::infinity(), 0, 0}}};
+    ASSERT_TRUE(session.GetPhysicsSystem()->prepare_simulation_collisions(invalid));
+    EXPECT_EQ(session.GetPhysicsSystem()->simulation_collision_sample_count(), 0u);
+    EXPECT_EQ(SessionWorldSubHashes(session), before);
+    ASSERT_TRUE(session.SaveWorldState());
+    EXPECT_EQ(SavedPresetTestDiskBytes(save), bytes);
+    EXPECT_EQ(SessionWorldSubHashes(session), before);
+}
+
+namespace {
+using Luminumbra::Chunk;
+using Luminumbra::IVec3;
+using Luminumbra::Systems::PhysicsSystem;
+using Luminumbra::Systems::SHIELD_WorldSystem;
+std::unique_ptr<SHIELD_WorldSystem> MakeSimulationCollisionWorld() {
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0;
+    params.peaks_amplitude = 0;
+    params.height_offset = 8;
+    params.continental_spline = {{{-1, 0}}, {{1, 0}}};
+    auto world = std::make_unique<SHIELD_WorldSystem>(nullptr, nullptr, params, 4242);
+    world->set_durable_residency(true);
+    return world;
+}
+
+std::shared_ptr<Chunk> SimulationFloorChunk(const IVec3& coords, float height) {
+    auto chunk = std::make_shared<Chunk>(coords);
+    constexpr std::size_t kSide = Luminumbra::CHUNK_SIZE_X + 1;
+    chunk->heightmap_data.assign(kSide * kSide, height);
+    return chunk;
+}
+
+void ExpectPositionBits(const glm::vec3& actual, const glm::vec3& expected) {
+    for (int axis = 0; axis < 3; ++axis) {
+        EXPECT_EQ(std::bit_cast<std::uint32_t>(actual[axis]),
+                  std::bit_cast<std::uint32_t>(expected[axis]));
+    }
+}
+} // namespace
+
+TEST(SurfaceQuery, SimulationHorizonIgnoresRenderCollidersAndIncludesEveryBodyOwner) {
+    auto quiet_world = MakeSimulationCollisionWorld();
+    auto busy_world = MakeSimulationCollisionWorld();
+    PhysicsSystem quiet, busy;
+    quiet.startup();
+    busy.startup();
+    quiet.set_world_system(quiet_world.get());
+    busy.set_world_system(busy_world.get());
+    const glm::vec3 feet(8.25f, 8.25f, 8.25f);
+    const auto quiet_avatar = quiet.create_avatar_character(feet);
+    const auto busy_avatar = busy.create_avatar_character(feet);
+    quiet.create_player_controller({168.25f, 8.25f, 8.25f});
+    busy.create_player_controller({168.25f, 8.25f, 8.25f});
+    const auto quiet_body = quiet.create_dynamic_sphere({328.25f, 9, 8.25f}, {0, 0, 0}, 0.2f);
+    const auto busy_body = busy.create_dynamic_sphere({328.25f, 9, 8.25f}, {0, 0, 0}, 0.2f);
+    ASSERT_FALSE(quiet_body.IsInvalid());
+    ASSERT_FALSE(busy_body.IsInvalid());
+    auto render_floor = SimulationFloorChunk({0, 0, 0}, 12);
+    for (int column = 100; column < 200; ++column) {
+        ASSERT_TRUE(busy_world->adopt_streamed_chunk(SimulationFloorChunk({column, 0, 100}, 12)));
+    }
+    for (int tick = 0; tick < 30; ++tick) {
+        SCOPED_TRACE(tick);
+        // Extra render-only collision creation, remesh removal and insertion order.
+        ASSERT_TRUE(busy.add_chunk_collision(*render_floor));
+        busy.remove_chunk_collision(render_floor->get_id());
+        ASSERT_TRUE(busy.add_chunk_collision(*render_floor));
+        ASSERT_TRUE(quiet.prepare_simulation_collisions({}));
+        ASSERT_TRUE(busy.prepare_simulation_collisions({}));
+        EXPECT_EQ(quiet.simulation_collision_sample_count(), 27u);
+        EXPECT_EQ(busy.simulation_collision_sample_count(), 27u);
+        EXPECT_EQ(quiet.simulation_collision_hash(), busy.simulation_collision_hash());
+        // Render-only work after publication cannot enter the pending physics step either.
+        ASSERT_TRUE(busy.add_chunk_collision(*render_floor));
+        quiet.update(1.0f / 30);
+        busy.update(1.0f / 30);
+        quiet.update_avatars(1.0f / 30);
+        busy.update_avatars(1.0f / 30);
+        quiet.update_player({0, 0, 0}, false, 0, 1.0f / 30);
+        busy.update_player({0, 0, 0}, false, 0, 1.0f / 30);
+        ExpectPositionBits(quiet.get_avatar_position(quiet_avatar),
+                           busy.get_avatar_position(busy_avatar));
+        ExpectPositionBits(quiet.get_player_position(), busy.get_player_position());
+        ExpectPositionBits(quiet.get_body_position(quiet_body), busy.get_body_position(busy_body));
+    }
+    EXPECT_TRUE(quiet.is_avatar_grounded(quiet_avatar));
+    EXPECT_GT(quiet.get_body_position(quiet_body).y, 8);
+}
+
+TEST(SurfaceQuery, SimulationPreparationRefusesWithoutPublicationAndRetryMatchesPeer) {
+    auto world = MakeSimulationCollisionWorld();
+    auto peer_world = MakeSimulationCollisionWorld();
+    PhysicsSystem physics, peer;
+    physics.startup();
+    peer.startup();
+    physics.set_world_system(world.get());
+    peer.set_world_system(peer_world.get());
+    physics.create_avatar_character({8.25f, 8.25f, 8.25f});
+    peer.create_avatar_character({8.25f, 8.25f, 8.25f});
+    const auto before = physics.simulation_collision_hash();
+    auto partial = SimulationFloorChunk({0, 0, 0}, 8);
+    partial->heightmap_data.resize(1);
+    partial->mark_sdf_loaded_or_edited();
+    ASSERT_TRUE(world->adopt_streamed_chunk(partial));
+    EXPECT_FALSE(physics.prepare_simulation_collisions({}));
+    EXPECT_EQ(physics.simulation_collision_hash(), before);
+    EXPECT_FALSE(physics.audio_raycast({8.25f, 16, 8.25f}, {8.25f, 0, 8.25f}).hit);
+    const auto position = physics.get_avatar_position(0);
+    physics.update(1.0f / 30);
+    physics.update_avatars(1.0f / 30);
+    ExpectPositionBits(physics.get_avatar_position(0), position);
+    partial->heightmap_data.assign(17 * 17, 8);
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}));
+    ASSERT_TRUE(peer.prepare_simulation_collisions({}));
+    EXPECT_EQ(physics.simulation_collision_hash(), peer.simulation_collision_hash());
+    physics.update_avatars(1.0f / 30);
+    peer.update_avatars(1.0f / 30);
+    ExpectPositionBits(physics.get_avatar_position(0), peer.get_avatar_position(0));
+    const auto published = physics.simulation_collision_hash();
+    partial->heightmap_data[0] = std::numeric_limits<float>::quiet_NaN();
+    EXPECT_FALSE(physics.prepare_simulation_collisions({}));
+    EXPECT_EQ(physics.simulation_collision_hash(), published);
+    EXPECT_TRUE(physics.audio_raycast({8.25f, 16, 8.25f}, {8.25f, 0, 8.25f}).hit);
+    partial->heightmap_data[0] = std::numeric_limits<float>::max();
+    EXPECT_FALSE(physics.prepare_simulation_collisions({}));
+    EXPECT_EQ(physics.simulation_collision_hash(), published);
+    partial->heightmap_data[0] = 8;
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}));
+    EXPECT_EQ(physics.simulation_collision_hash(), published);
+}
+
+TEST(SurfaceQuery, SimulationPreparationBoundsInputsAndMissingAuthority) {
+    auto world = MakeSimulationCollisionWorld();
+    PhysicsSystem physics;
+    physics.startup();
+    physics.set_world_system(world.get());
+    ASSERT_TRUE(physics.prepare_simulation_collisions({})); // Empty owners publish empty.
+    const auto empty = physics.simulation_collision_hash();
+    std::array<Luminumbra::Vec3, PhysicsSystem::kSimulationOwnerBudget + 1> owners{};
+    EXPECT_FALSE(physics.prepare_simulation_collisions(owners));
+    EXPECT_EQ(physics.simulation_collision_sample_count(), 0u);
+    EXPECT_EQ(physics.simulation_collision_hash(), empty);
+    for (std::size_t i = 0; i < owners.size(); ++i) {
+        owners[i] = {static_cast<float>(i) * 64, 8, 0};
+    }
+    // Fifteen nonoverlapping 3x3 horizons exceed the 128-column preparation budget.
+    EXPECT_FALSE(physics.prepare_simulation_collisions(std::span(owners).first(15)));
+    EXPECT_EQ(physics.simulation_collision_sample_count(), 0u);
+    EXPECT_EQ(physics.simulation_collision_hash(), empty);
+    for (const auto invalid :
+         {std::numeric_limits<float>::infinity(),
+          std::numeric_limits<float>::quiet_NaN(),
+          std::numeric_limits<float>::max(),
+          static_cast<float>(Chunk::kPackedMaxXz * Luminumbra::CHUNK_SIZE_X)}) {
+        owners[0] = {invalid, 0, 0};
+        EXPECT_FALSE(physics.prepare_simulation_collisions(std::span(owners).first(1)));
+        EXPECT_EQ(physics.simulation_collision_hash(), empty);
+    }
+    owners[0] = {8, 8, 8};
+    world->remember_durable_chunks({IVec3(0, 0, 0)});
+    world->set_durable_chunk_loader([](const IVec3&) { return std::shared_ptr<Chunk>{}; }, nullptr);
+    EXPECT_FALSE(physics.prepare_simulation_collisions(std::span(owners).first(1)));
+    EXPECT_EQ(physics.simulation_collision_hash(), empty);
+    EXPECT_TRUE(world->durable_read_failed());
+
+    auto masked_world = MakeSimulationCollisionWorld();
+    auto placeholder = SimulationFloorChunk({0, 0, 0}, 8);
+    placeholder->set_water_authority();
+    ASSERT_TRUE(masked_world->adopt_streamed_chunk(placeholder));
+    masked_world->remember_durable_chunks({IVec3(0, 0, 0)});
+    auto committed = SimulationFloorChunk({0, 0, 0}, 12);
+    committed->mark_sdf_loaded_or_edited();
+    masked_world->set_durable_chunk_loader([committed](const IVec3&) { return committed; },
+                                           nullptr);
+    PhysicsSystem masked;
+    masked.startup();
+    masked.set_world_system(masked_world.get());
+    ASSERT_TRUE(masked.prepare_simulation_collisions(std::span(owners).first(1)));
+    const auto published = masked.simulation_collision_hash();
+    const auto hit = masked.audio_raycast({8.25f, 16, 8.25f}, {8.25f, 0, 8.25f});
+    ASSERT_TRUE(hit.hit);
+    EXPECT_EQ(hit.hit_point.y, 12);
+
+    auto unknown = SimulationFloorChunk({0, 0, 0}, 12);
+    masked_world->set_durable_chunk_loader([unknown](const IVec3&) { return unknown; }, nullptr);
+    EXPECT_FALSE(masked.prepare_simulation_collisions(std::span(owners).first(1)));
+    EXPECT_EQ(masked.simulation_collision_hash(), published);
+    // A committed water-only record legitimately retains procedural terrain.
+    masked_world->set_durable_chunk_loader([placeholder](const IVec3&) { return placeholder; },
+                                           nullptr);
+    ASSERT_TRUE(masked.prepare_simulation_collisions(std::span(owners).first(1)));
+    EXPECT_NE(masked.simulation_collision_hash(), published);
+    const auto water_only = masked.simulation_collision_hash();
+    masked_world->set_durable_chunk_loader([](const IVec3&) { return std::shared_ptr<Chunk>{}; },
+                                           nullptr);
+    EXPECT_FALSE(masked.prepare_simulation_collisions(std::span(owners).first(1)));
+    EXPECT_EQ(masked.simulation_collision_hash(), water_only);
+    EXPECT_TRUE(masked_world->durable_read_failed());
+}
+
+TEST(SurfaceQuery, SimulationPreparationCanonicalizesOrderAndPreservesLegacyPath) {
+    auto world = MakeSimulationCollisionWorld();
+    PhysicsSystem physics;
+    physics.startup();
+    physics.set_world_system(world.get());
+    std::array<Luminumbra::Vec3, 3> anchors{{{8, 8, 8}, {-40, 8, -40}, {-40, 8, -40}}};
+    ASSERT_TRUE(physics.prepare_simulation_collisions(anchors));
+    const auto hash = physics.simulation_collision_hash();
+    std::reverse(anchors.begin(), anchors.end());
+    ASSERT_TRUE(physics.prepare_simulation_collisions(anchors));
+    EXPECT_EQ(physics.simulation_collision_hash(), hash);
+    EXPECT_EQ(physics.simulation_collision_sample_count(), 18u);
+    physics.clear_simulation_collisions();
+    EXPECT_FALSE(physics.audio_raycast({8.25f, 16, 8.25f}, {8.25f, 0, 8.25f}).hit);
+    ASSERT_TRUE(physics.prepare_simulation_collisions(anchors));
+    EXPECT_EQ(physics.simulation_collision_hash(), hash);
+
+    auto legacy_world = std::make_unique<SHIELD_WorldSystem>(
+        nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 4242);
+    PhysicsSystem legacy;
+    legacy.startup();
+    legacy.set_world_system(legacy_world.get());
+    auto floor = SimulationFloorChunk({0, 0, 0}, 8);
+    ASSERT_TRUE(legacy.add_chunk_collision(*floor));
+    const auto work = legacy.work_items();
+    ASSERT_TRUE(legacy.prepare_simulation_collisions(anchors));
+    EXPECT_EQ(legacy.simulation_collision_sample_count(), 0u);
+    EXPECT_TRUE(legacy.audio_raycast({8.25f, 16, 8.25f}, {8.25f, 0, 8.25f}).hit);
+    EXPECT_EQ(legacy.work_items().bodies, work.bodies);
+}
+
+TEST(GameSessionHeadlessWorldTest, RefusedCollisionBarrierPreservesTheSessionTickAndAccumulator) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, peer;
+    for (auto* current : {&session, &peer}) {
+        EnableSnapshotSession(*current, root, jobs);
+        ASSERT_TRUE(current->CreateTransientWorld("Collision refusal", "1337", "default"));
+        current->GetPhysicsSystem()->create_avatar_character(current->GetMetadata().spawnPoint);
+    }
+    const auto dt = session.GetSimulationClock().fixed_dt();
+    ASSERT_EQ(session.TickSimulation(dt / 2), 0u);
+    ASSERT_EQ(peer.TickSimulation(dt / 2), 0u);
+    const auto before = SessionWorldSubHashes(session);
+    const auto accumulated = session.GetSimulationClock().accumulator();
+    const auto position = session.GetPhysicsSystem()->get_avatar_position(0);
+    const auto spawn = session.GetMetadata().spawnPoint;
+    const auto coords = session.GetWorldSystem()->world_to_chunk_coords(
+        {spawn.x, session.GetWorldSystem()->GetTerrainHeightAt(8, 8), spawn.z});
+    auto incomplete = SimulationFloorChunk(coords, 0);
+    incomplete->heightmap_data.resize(1);
+    incomplete->mark_sdf_loaded_or_edited();
+    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(incomplete));
+    const auto authority_before = SessionWorldSubHashes(session);
+    EXPECT_EQ(session.TickSimulation(dt / 2), 0u);
+    EXPECT_EQ(session.GetSimulationTickCount(), 0u);
+    EXPECT_EQ(session.GetWorldClock().tick(), 0u);
+    EXPECT_EQ(session.GetSimulationClock().accumulator(), accumulated);
+    EXPECT_EQ(SessionWorldSubHashes(session), authority_before);
+    ExpectPositionBits(session.GetPhysicsSystem()->get_avatar_position(0), position);
+    session.GetWorldSystem()->clear_world(session.GetPhysicsSystem());
+    EXPECT_EQ(SessionWorldSubHashes(session), before);
+    ASSERT_EQ(session.TickSimulation(dt / 2), 1u);
+    ASSERT_EQ(peer.TickSimulation(dt / 2), 1u);
+    EXPECT_EQ(SessionWorldSubHashes(session), SessionWorldSubHashes(peer));
+    EXPECT_EQ(session.GetPhysicsSystem()->simulation_collision_hash(),
+              peer.GetPhysicsSystem()->simulation_collision_hash());
+    ExpectPositionBits(session.GetPhysicsSystem()->get_avatar_position(0),
+                       peer.GetPhysicsSystem()->get_avatar_position(0));
+}
+
+TEST(SurfaceQuery, SimulationOwnerRegistrationAndTickReuseStayBounded) {
+    auto world = MakeSimulationCollisionWorld();
+    PhysicsSystem physics;
+    physics.startup();
+    physics.set_world_system(world.get());
+    std::array<JPH::BodyID, PhysicsSystem::kSimulationOwnerBudget> owners{};
+    for (auto& owner : owners) {
+        owner = physics.create_dynamic_sphere({8, 10, 8}, {0, 0, 0}, 0.1f);
+        ASSERT_FALSE(owner.IsInvalid());
+    }
+    EXPECT_TRUE(physics.create_dynamic_sphere({8, 10, 8}, {0, 0, 0}, 0.1f).IsInvalid());
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}, 1));
+    EXPECT_EQ(physics.simulation_collision_sample_count(), 9u);
+    const auto hash = physics.simulation_collision_hash();
+    // A later consumer of the same tick reuses the successful publication. The
+    // next tick observes changed authority and refuses before changing that set.
+    auto partial = SimulationFloorChunk({0, 0, 0}, 8);
+    partial->heightmap_data.resize(1);
+    partial->mark_sdf_loaded_or_edited();
+    ASSERT_TRUE(world->adopt_streamed_chunk(partial));
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}, 1));
+    EXPECT_EQ(physics.simulation_collision_hash(), hash);
+    EXPECT_FALSE(physics.prepare_simulation_collisions({}, 2));
+    EXPECT_EQ(physics.simulation_collision_hash(), hash);
+    for (const auto owner : owners) {
+        physics.destroy_body(owner);
+    }
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}, 2));
+    EXPECT_EQ(physics.simulation_collision_sample_count(), 0u);
+    EXPECT_NE(physics.simulation_collision_hash(), hash);
+    physics.create_avatar_character({168, 10, 8});
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}, 2));
+    EXPECT_EQ(physics.simulation_collision_sample_count(), 9u);
+    physics.create_player_controller({328, 10, 8});
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}, 2));
+    EXPECT_EQ(physics.simulation_collision_sample_count(), 18u);
+}
+
+TEST(SurfaceQuery, SimulationPreparationVisitsOnlyLiveAvatarOwners) {
+    auto world = MakeSimulationCollisionWorld();
+    PhysicsSystem physics;
+    physics.startup();
+    physics.set_world_system(world.get());
+    // Retired slots never consume the per-tick live-owner budget, even after
+    // more than one full budget of creature/avatar lifetimes has elapsed.
+    for (std::uint64_t tick = 1; tick <= 128; ++tick) {
+        const auto owner = physics.create_avatar_character({8, 10, 8});
+        ASSERT_TRUE(physics.prepare_simulation_collisions({}, tick));
+        EXPECT_EQ(physics.simulation_collision_sample_count(), 9u);
+        physics.remove_avatar_character(owner);
+        ASSERT_TRUE(physics.prepare_simulation_collisions({}, tick));
+        EXPECT_EQ(physics.simulation_collision_sample_count(), 0u);
+        physics.remove_avatar_character(owner); // Repeated removal is inert.
+    }
+    const auto first = physics.create_avatar_character({8, 10, 8});
+    const auto middle = physics.create_avatar_character({168, 10, 8});
+    const auto last = physics.create_avatar_character({328, 10, 8});
+    physics.remove_avatar_character(middle);
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}));
+    EXPECT_EQ(physics.simulation_collision_sample_count(), 18u);
+    physics.remove_avatar_character(first);
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}));
+    EXPECT_EQ(physics.simulation_collision_sample_count(), 9u);
+    physics.remove_avatar_character(last);
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}));
+    EXPECT_EQ(physics.simulation_collision_sample_count(), 0u);
+
+    std::array<std::size_t, PhysicsSystem::kSimulationOwnerBudget> owners{};
+    for (auto& owner : owners) {
+        owner = physics.create_avatar_character({8, 10, 8});
+    }
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}));
+    const auto hash = physics.simulation_collision_hash();
+    const auto excess = physics.create_avatar_character({8, 10, 8});
+    EXPECT_FALSE(physics.prepare_simulation_collisions({}));
+    EXPECT_EQ(physics.simulation_collision_hash(), hash);
+    physics.remove_avatar_character(excess);
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}));
+    EXPECT_EQ(physics.simulation_collision_hash(), hash);
+    physics.clear_avatar_characters();
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}));
+    EXPECT_EQ(physics.simulation_collision_sample_count(), 0u);
+}
+
+TEST(GameSessionHeadlessWorldTest, SessionCollisionBarrierPrecedesTheFirstCreatureStep) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession reference, streamed;
+    for (auto* session : {&reference, &streamed}) {
+        EnableSnapshotSession(*session, root, jobs);
+        ASSERT_TRUE(session->CreateTransientWorld("First creature collision", "1337", "default"));
+        auto* world = session->GetWorldSystem();
+        world->debug_set_streaming_radius_cap(1);
+        auto feet = session->GetMetadata().spawnPoint;
+        feet.y = world->GetTerrainHeightAt(feet.x, feet.z);
+        session->SetReplicatedSimulationAnchors({feet});
+        auto floor = SimulationFloorChunk(world->world_to_chunk_coords(feet), feet.y);
+        floor->mark_sdf_loaded_or_edited();
+        ASSERT_TRUE(world->adopt_streamed_chunk(floor));
+        auto& registry = session->GetRegistry();
+        const auto creature = registry.create();
+        // An inert creature still owns a physics controller, without brain movement.
+        registry.emplace<C::CreatureComponent>(creature).eaten = true;
+        registry.emplace<C::TransformComponent>(creature).position = feet;
+        registry.emplace<C::CreaturePhysicsComponent>(
+            creature, session->GetPhysicsSystem()->create_avatar_character(feet));
+    }
+    // Independent reference publication: the streamed peer must obtain its first
+    // horizon through the shipping TickSimulation barrier, before touching the floor.
+    ASSERT_TRUE(reference.GetPhysicsSystem()->prepare_simulation_collisions({}, 1));
+    const auto dt = reference.GetSimulationClock().fixed_dt();
+    for (int tick = 0; tick < 4; ++tick) {
+        SCOPED_TRACE(tick);
+        streamed.GetWorldSystem()->update(streamed.GetRegistry(),
+                                          streamed.GetMetadata().spawnPoint,
+                                          streamed.GetPhysicsSystem(),
+                                          false);
+        streamed.GetWorldSystem()->wait_for_streaming_jobs();
+        ASSERT_EQ(reference.TickSimulation(dt), 1u);
+        ASSERT_EQ(streamed.TickSimulation(dt), 1u);
+        ExpectPositionBits(reference.GetPhysicsSystem()->get_avatar_position(0),
+                           streamed.GetPhysicsSystem()->get_avatar_position(0));
+        EXPECT_EQ(reference.GetPhysicsSystem()->simulation_collision_hash(),
+                  streamed.GetPhysicsSystem()->simulation_collision_hash());
+        EXPECT_EQ(SessionWorldSubHashes(reference), SessionWorldSubHashes(streamed));
+    }
+    EXPECT_TRUE(reference.GetPhysicsSystem()->is_avatar_grounded(0));
 }
