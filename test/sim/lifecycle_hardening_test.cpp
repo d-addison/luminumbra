@@ -1070,6 +1070,9 @@ TEST(LifecycleHardening, SpeciesCapacityHoldsForThousandsOfTicksAndReopensAfterD
     std::array<bool, 2> reached{};
     std::array<bool, 2> died_after_cap{};
     std::array<bool, 2> resumed{};
+    // Two species, 24 live each, lifespan 80 and decay 900: at most 13
+    // overlapping cohorts of 48, including the current live cohort (624 total).
+    constexpr std::size_t retained_bound = 48u * 13u;
     for (std::uint64_t tick = 0; tick < 4000; ++tick) {
         for (const auto entity : registry.view<Comp::CreatureComponent>()) {
             registry.get<Comp::CreatureComponent>(entity).hunger = 0;
@@ -1100,6 +1103,10 @@ TEST(LifecycleHardening, SpeciesCapacityHoldsForThousandsOfTicksAndReopensAfterD
             }
         }
         AI::RunDecompositionOnTick(registry, tick);
+        const auto cleanup = AI::CleanupNewbornCarcasses(registry);
+        ASSERT_LE(registry.storage<entt::entity>().free_list(), retained_bound) << tick;
+        ASSERT_LE(registry.view<Comp::DecayComponent>().size(), retained_bound) << tick;
+        ASSERT_LE(cleanup.visited, retained_bound + 48u) << tick;
     }
     for (std::size_t species_id = 0; species_id < reached.size(); ++species_id) {
         EXPECT_TRUE(reached[species_id]);

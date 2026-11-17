@@ -1536,6 +1536,9 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                     return i + 1;
                 }
             }
+            // All tick consumers/callbacks have finished and staged decay is live.
+            // Later hash/render consumers build fresh views of the published roster.
+            luminumbra::ai::CleanupNewbornCarcasses(m_registry);
         } catch (const std::exception& error) {
             if (!m_activeRegionsEnabled)
                 throw;

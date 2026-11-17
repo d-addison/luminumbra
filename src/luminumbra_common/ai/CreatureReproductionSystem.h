@@ -24,6 +24,7 @@
 // REPRODUCTION CLAIMS +16. Recorded here and at the GameSession wire site.
 
 #include "CreatureTickAdmission.h"
+#include "DecompositionSystem.h"
 #include "MateSpatialIndex.h"
 
 #include <algorithm>
@@ -52,6 +53,106 @@ namespace Comp = ::Luminumbra::Components;
 namespace dm = ::Luminumbra::DeterministicMath;
 
 inline constexpr std::uint64_t kReproSeedOffset = 16ull;
+
+// Runtime ownership only: deliberately absent from snapshots, saves, wire and hashes.
+// Replay recreates this tag by re-simulating births. Ambient/founder carcasses retain
+// their historical lifetime, including their entity IDs in the ecology hash.
+struct ReproductionBorn {};
+
+struct NewbornCarcassCleanupStats {
+    std::size_t visited = 0;
+    std::size_t reference_visits = 0;
+    std::size_t removed = 0;
+};
+
+// Call once at the tick publication boundary, after consumers and staged foliage
+// commit. No consumer may retain a registry view/reference across that boundary.
+inline NewbornCarcassCleanupStats CleanupNewbornCarcasses(entt::registry& reg) {
+    NewbornCarcassCleanupStats stats;
+    const auto born = reg.view<ReproductionBorn, Comp::DecayComponent>();
+    if (born.begin() == born.end()) {
+        return stats;
+    }
+    struct Scratch {
+        struct Retiring {};
+        // At most one handle per reproduction-born entity (EnTT entity-mask bound).
+        // Capacity is reused; unrelated world entities are never staged or visited.
+        std::vector<entt::entity> finished;
+        entt::storage<Retiring> membership;
+    };
+    auto* scratch = reg.ctx().find<Scratch>();
+    if (!scratch) {
+        scratch = &reg.ctx().emplace<Scratch>();
+    }
+    auto& finished = scratch->finished;
+    finished.clear();
+    scratch->membership.clear();
+    for (const auto entity : born) {
+        ++stats.visited;
+        const auto& decay = born.get<Comp::DecayComponent>(entity);
+        if (decay.fully_decomposed != 0 &&
+            decay.nutrient_released_milli == kNutrientPerCorpseMilli && DecompIsDead(reg, entity)) {
+            finished.push_back(entity);
+            scratch->membership.emplace(entity);
+        }
+    }
+    if (finished.empty()) {
+        return stats;
+    }
+    std::sort(finished.begin(), finished.end(), [](entt::entity left, entt::entity right) {
+        return entt::to_integral(left) < entt::to_integral(right);
+    });
+    const auto retiring = [&](entt::entity entity) {
+        return scratch->membership.contains(entity);
+    };
+    // Sweep only reference-bearing component pools, once per nonempty retirement
+    // batch. Nested work is bounded by their stored actions/children, with no copies.
+    for (const auto entity : reg.view<Comp::SensesComponent>()) {
+        ++stats.reference_visits;
+        auto& senses = reg.get<Comp::SensesComponent>(entity);
+        for (auto* target :
+             {&senses.nearest_food_source, &senses.nearest_water_source, &senses.nearest_threat}) {
+            if (retiring(*target)) {
+                *target = entt::null;
+            }
+        }
+    }
+    for (const auto entity : reg.view<Comp::ActionPlanComponent>()) {
+        ++stats.reference_visits;
+        for (auto& action : reg.get<Comp::ActionPlanComponent>(entity).plan) {
+            ++stats.reference_visits;
+            if (retiring(action.target)) {
+                action.target = entt::null;
+            }
+        }
+    }
+    for (const auto entity : reg.view<Comp::HierarchyComponent>()) {
+        ++stats.reference_visits;
+        auto& hierarchy = reg.get<Comp::HierarchyComponent>(entity);
+        if (retiring(hierarchy.parent)) {
+            hierarchy.parent = entt::null;
+        }
+        std::erase_if(hierarchy.children, [&](entt::entity child) {
+            ++stats.reference_visits;
+            return retiring(child);
+        });
+    }
+    auto* admission = reg.ctx().find<CreatureTickAdmission>();
+    for (const auto entity : finished) {
+        if (admission) {
+            admission->Forget(entity);
+        }
+        // The session's on_destroy hook releases the avatar and frozen collision
+        // body while the entity and all other components still exist. Render and
+        // mate indexes are rebuilt from live views; codex stores species IDs only.
+        reg.remove<Comp::CreaturePhysicsComponent>(entity);
+        reg.destroy(entity);
+        ++stats.removed;
+    }
+    finished.clear();
+    scratch->membership.clear();
+    return stats;
+}
 
 // Eligibility: mature, healthy, well-fed, off cooldown, alive (and prey — predators don't
 // breed in this slice; the heritable population being selected on is the prey).
@@ -399,6 +500,7 @@ RunMatingResolveOnTick(entt::registry& reg,
     // One child per completed female courtship: ascending mother ID, child ordinal zero.
     for (const Birth& b : births) {
         const auto child = reg.create();
+        reg.emplace<ReproductionBorn>(child);
         if (stable_identity)
             reg.emplace<Comp::SimulationIdentityComponent>(child, b.identity);
         auto& tf = reg.emplace<Comp::TransformComponent>(child);
