@@ -451,9 +451,9 @@ float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
         // independent of thickness. Stopping on entry into the thickness band
         // would make its outer edge select a different occlusion strength.
         // Silhouettes must still supply an observed sample inside the band.
-        // Preserve the base contribution only for recovery: ordinary crossings
-        // must continue to select their contribution exclusively by refinement.
-        if (emptyCrossing && depthGap < u_caveThickness) {
+        // Preserve every observed in-band coarse endpoint: refinement may
+        // replace it with unrelated foreground before missing data stops it.
+        if ((crossing || emptyCrossing) && depthGap < u_caveThickness) {
             float distanceWeight = 1.0 - clamp(length(sampPos - ro) / u_caveSkyMaxDist, 0.0, 1.0);
             float thicknessWeight = 1.0 - smoothstep(0.5 * u_caveThickness, u_caveThickness, depthGap);
             occluded = max(occluded, distanceWeight * thicknessWeight);

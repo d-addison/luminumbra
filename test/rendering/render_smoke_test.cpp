@@ -414,6 +414,8 @@ GLuint LinkProgram(const ShaderProgramSpec& spec) {
 }
 
 std::vector<ShaderProgramSpec> PipelineProgramSpecs() {
+    // Also consumed by the offline GLSL linker. Keep entries literal so additions
+    // cannot escape its exhaustive registry parser and permutation coverage check.
     return {
         {"basic", "basic.vert", "basic.frag"},
         {"g_buffer", "g_buffer.vert", "g_buffer.frag"},
@@ -443,6 +445,22 @@ std::vector<ShaderProgramSpec> PipelineProgramSpecs() {
         {"ssao_bilateral_upsample", "ssao.vert", "ssao_bilateral_upsample.frag"},
         // Fidelity: screen-space crepuscular rays (god rays).
         {"god_rays", "ssao.vert", "god_rays.frag"},
+        {"tree_impostor", "tree_impostor.vert", "tree_impostor.frag"},
+        {"static_asset", "static_asset.vert", "static_asset.frag"},
+        {"shadow_tint", "shadow_tint.vert", "shadow_tint.frag"},
+        {"plant_procgen", "plant_procgen.vert", "plant_procgen.frag"},
+        {"waterfall", "basic.vert", "waterfall.frag"},
+        {"caustics_generator", "lighting_pass.vert", "caustics_generator.frag"},
+        {"taau_resolve", "ssao.vert", "taau_resolve.frag"},
+        {"glass_oit", "glass_oit.vert", "glass_oit.frag"},
+        {"glass_oit_resolve", "volumetric_lighting.vert", "glass_oit_resolve.frag"},
+        {"aerial_perspective", "ssao.vert", "volumetric_lighting.frag"},
+        {"lightning_overlay", "lightning_overlay.vert", "lightning_overlay.frag"},
+        {"weather_overlay", "ssao.vert", "weather_system.frag"},
+        {"debug_view", "fullscreen_tri.vert", "debug_view.frag"},
+        {"scent_decal", "fullscreen_tri.vert", "scent_decal.frag"},
+        // The live particle path omits geometry; retain both registered pipelines.
+        {"magical_particles_billboards", "magical_particles.vert", "magical_particles.frag"},
     };
 }
 
@@ -2571,44 +2589,51 @@ TEST(RenderSmokeTest, CanopyEmptyRecoveryRetainsCoarseHitAcrossForegroundThenSky
     glUniform1f(glGetUniformLocation(program, "u_caveThickness"), 1.5f);
     glUniform1i(glGetUniformLocation(program, "u_caveSkySteps"), 8);
     // Fixed 4096-row textures isolate the 6 m coarse hit and 4.5 m midpoint.
-    // The 3 m coarse tap and every subsequent refinement see empty geometry.
+    // Exercise empty recovery and ordinary refinement with an open 3 m tap.
     constexpr int rows = 4096;
-    std::vector<glm::vec4> positions(rows, glm::vec4(0));
-    std::vector<glm::vec4> depths(rows, glm::vec4(0));
-    glm::vec3 coarsePosition(0);
-    for (float distance : {6.0f, 4.5f}) {
-        const glm::vec3 point(0, distance - 3, -12);
-        const float gap = distance == 6 ? 0.8f : 8.0f;
-        const glm::vec3 position = point * (1 - gap / glm::length(point));
-        const glm::vec4 clip = projection * glm::vec4(position, 1);
-        const auto row = static_cast<std::size_t>((0.5f + 0.5f * clip.y / clip.w) * rows);
-        ASSERT_LT(row, positions.size());
-        positions[row] = glm::vec4(position, 1);
-        depths[row] = glm::vec4(clip.z / clip.w);
-        if (distance == 6) {
-            coarsePosition = position;
+    for (bool openPrevious : {false, true}) {
+        SCOPED_TRACE(openPrevious);
+        std::vector<glm::vec4> positions(rows, glm::vec4(0));
+        std::vector<glm::vec4> depths(rows, glm::vec4(0));
+        glm::vec3 coarsePosition(0);
+        for (float distance : {3.0f, 6.0f, 4.5f}) {
+            if (distance == 3 && !openPrevious) {
+                continue;
+            }
+            const glm::vec3 point(0, distance - 3, -12);
+            const float gap = distance == 3 ? 0.0f : distance == 6 ? 0.8f : 8.0f;
+            const glm::vec3 position = point * (1 - gap / glm::length(point));
+            const glm::vec4 clip = projection * glm::vec4(position, 1);
+            const auto row = static_cast<std::size_t>((0.5f + 0.5f * clip.y / clip.w) * rows);
+            ASSERT_LT(row, positions.size());
+            positions[row] = glm::vec4(position, 1);
+            depths[row] = glm::vec4(clip.z / clip.w);
+            if (distance == 6) {
+                coarsePosition = position;
+            }
         }
-    }
-    // Evaluate the base formula independently using the uploaded coarse hit.
-    const float gap = glm::length(glm::vec3(0, 3, -12)) - glm::length(coarsePosition);
-    const float ramp = (gap - 0.75f) / 0.75f;
-    const float baseOcclusion = (1 - glm::length(coarsePosition - glm::vec3(0, -3, -12)) / 24) *
-                                (1 - ramp * ramp * (3 - 2 * ramp));
-    ASSERT_GT(baseOcclusion, 0.7f);
-    for (int ladder : {0, 1}) {
-        SCOPED_TRACE(ladder);
-        glUniform1i(glGetUniformLocation(program, "u_farWorldLadder"), ladder);
-        probe.texture(0, positions, rows);
-        probe.texture(1, depths, rows);
-        const auto result = probe.draw()[16];
-        EXPECT_GE((1 - result.r) / 0.94f, baseOcclusion - 0.000001f);
-        EXPECT_NEAR(result.r, 1 - 0.94f * baseOcclusion, 0.000001f);
-        EXPECT_FLOAT_EQ(result.g, 11) << "three coarse reads plus eight empty-recovery reads";
-        EXPECT_LE(result.g, 40);
-        if (ladder != 0) {
-            probe.texture(1, std::vector<glm::vec4>(rows, glm::vec4(0)), rows);
-            EXPECT_FLOAT_EQ(probe.draw()[16].r, 1)
-                << "coarse preservation still requires valid Ladder depth";
+        // Evaluate the base formula independently using the uploaded coarse hit.
+        const float gap = glm::length(glm::vec3(0, 3, -12)) - glm::length(coarsePosition);
+        const float ramp = (gap - 0.75f) / 0.75f;
+        const float baseOcclusion = (1 - glm::length(coarsePosition - glm::vec3(0, -3, -12)) / 24) *
+                                    (1 - ramp * ramp * (3 - 2 * ramp));
+        ASSERT_GT(baseOcclusion, 0.7f);
+        for (int ladder : {0, 1}) {
+            SCOPED_TRACE(ladder);
+            glUniform1i(glGetUniformLocation(program, "u_farWorldLadder"), ladder);
+            probe.texture(0, positions, rows);
+            probe.texture(1, depths, rows);
+            const auto result = probe.draw()[16];
+            EXPECT_GE((1 - result.r) / 0.94f, baseOcclusion - 0.000001f);
+            EXPECT_NEAR(result.r, 1 - 0.94f * baseOcclusion, 0.000001f);
+            EXPECT_FLOAT_EQ(result.g, openPrevious ? 5 : 11)
+                << "three coarse reads plus two ordinary or eight empty-recovery reads";
+            EXPECT_LE(result.g, 40);
+            if (ladder != 0) {
+                probe.texture(1, std::vector<glm::vec4>(rows, glm::vec4(0)), rows);
+                EXPECT_FLOAT_EQ(probe.draw()[16].r, 1)
+                    << "coarse preservation still requires valid Ladder depth";
+            }
         }
     }
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
