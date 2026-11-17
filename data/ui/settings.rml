@@ -185,6 +185,13 @@
                                 </select>
                             </div>
                             <div class="form-group settings-row">
+                                <label for="graphics_terrain_near_refinement">near terrain refinement<span id="graphics_terrain_near_refinement_session"></span></label>
+                                <select id="graphics_terrain_near_refinement" data-key="terrain_near_refinement" class="form-control graphics-control">
+                                    <option value="on">On</option>
+                                    <option value="off">Off</option>
+                                </select>
+                            </div>
+                            <div class="form-group settings-row">
                                 <label for="graphics_shadow_resolution">shadow resolution<span id="graphics_shadow_resolution_session"></span></label>
                                 <select id="graphics_shadow_resolution" data-key="shadow_resolution" class="form-control graphics-control">
                                     <option value="1024">1024</option>
