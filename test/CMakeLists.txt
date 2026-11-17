@@ -455,6 +455,7 @@ luminumbra_configure_first_party_target(capture_manifest_test)
 add_executable(capture_feature_profile_test
     rendering/capture_feature_profile_test.cpp
     ../src/luminumbra_client/rendering/CaptureFeatureProfile.cpp
+    ../src/luminumbra_client/rendering/TemporalAudit.cpp
     ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp)
 target_include_directories(capture_feature_profile_test PRIVATE ../src ../src/luminumbra_client)
 target_link_libraries(capture_feature_profile_test PRIVATE
