@@ -635,6 +635,15 @@ jobs:
             --output "$GITHUB_OUTPUT" --summary-file "$GITHUB_STEP_SUMMARY"
       - name: Validate shared selector contracts
         run: python3 -I -B tools/ci/test_changed_tus.py
+      - name: Classify software shader scenes
+        id: shader-scenes
+        env:
+          CI_EVENT: ${{ github.event_name }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python3 -I -B tools/ci/ci_paths.py classify-shader-scenes
+      - name: Validate shader scene contracts
+        run: python3 -I -B tools/gates/test_shader_scenes.py
       - name: Install offline shader compiler
         run: |
           sudo apt-get update
@@ -644,29 +653,29 @@ jobs:
           python3 -I -B tools/ci/test_compile_shaders.py --validator glslangValidator
           python3 -I -B tools/ci/compile_shaders.py
       - name: Install fast validation dependencies
-        if: steps.route.outputs.native != 'false'
+        if: (steps.route.outputs.native != 'false' || steps.shader-scenes.outputs.needs_shader_scenes == 'true')
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential ccache clang-18 clang-tidy-18 cmake extra-cmake-modules \
             libfreetype6-dev libgl1-mesa-dev libglu1-mesa-dev libwayland-dev \
             libxkbcommon-dev ninja-build pkg-config python3-numpy python3-pil \
-            wayland-protocols xorg-dev
+            wayland-protocols xorg-dev xvfb libgl1-mesa-dri
       - name: Restore fast dependency sources
         id: fast-deps
-        if: steps.route.outputs.native != 'false'
+        if: (steps.route.outputs.native != 'false' || steps.shader-scenes.outputs.needs_shader_scenes == 'true')
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: scratch/fast-deps
           key: fast-deps-v1-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'vendor/CMakeLists.txt', 'tools/ci/deps-lock.json', 'tools/ci/offline_deps.py', 'tools/ci/path_safety.py', 'tools/ci/jolt_startup.py', 'cmake/jolt_startup.cmake', 'cmake/patches/jolt-startup.*') }}
       - name: Populate missing fast dependency sources
-        if: steps.route.outputs.native != 'false' && steps.fast-deps.outputs.cache-hit != 'true'
+        if: (steps.route.outputs.native != 'false' || steps.shader-scenes.outputs.needs_shader_scenes == 'true') && steps.fast-deps.outputs.cache-hit != 'true'
         run: >-
           python3 -I -B tools/ci/offline_deps.py snapshot
           --cache scratch/fast-deps/sources --lock scratch/fast-deps/lock.json
       - name: Verify and stage isolated fast dependency sources
         id: stage-deps
-        if: steps.route.outputs.native != 'false'
+        if: (steps.route.outputs.native != 'false' || steps.shader-scenes.outputs.needs_shader_scenes == 'true')
         run: |
           for compiler in gcc clang; do
             python3 -I -B tools/ci/offline_deps.py stage --build-local \
@@ -688,11 +697,12 @@ jobs:
           path: scratch/fast-deps
           key: ${{ steps.fast-deps.outputs.cache-primary-key }}
       - name: Configure GCC and Clang databases and generate headers
-        if: steps.route.outputs.native != 'false'
+        if: (steps.route.outputs.native != 'false' || steps.shader-scenes.outputs.needs_shader_scenes == 'true')
         run: |
           python3 -I -B tools/ci/rmlui_source.py init --root build/fast-gcc
           cmake -C scratch/fast-gcc-init.cmake -S . -B build/fast-gcc -G Ninja "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DBUILD_TESTING=ON \
+            -DLUMINUMBRA_SHADER_SCENES="${{ steps.shader-scenes.outputs.needs_shader_scenes }}" \
             -DLUMINUMBRA_ENABLE_DILIGENT=OFF -DLUMINUMBRA_ENABLE_PREFAB_RUNTIME=ON \
             -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON \
             -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
@@ -700,10 +710,24 @@ jobs:
           python3 -I -B tools/ci/rmlui_source.py init --root build/fast-clang
           cmake -C scratch/fast-clang-init.cmake -S . -B build/fast-clang -G Ninja "-DPython3_EXECUTABLE=$(python3 -I -B -c 'import sys; print(sys.executable)')" -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DBUILD_TESTING=ON \
+            -DLUMINUMBRA_SHADER_SCENES="${{ steps.shader-scenes.outputs.needs_shader_scenes }}" \
             -DLUMINUMBRA_ENABLE_DILIGENT=OFF -DLUMINUMBRA_ENABLE_PREFAB_RUNTIME=ON \
             -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON \
             -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18
           cmake --build build/fast-clang --target glad --parallel 2
+      - name: Render and compare software shader scenes
+        if: steps.shader-scenes.outputs.needs_shader_scenes == 'true'
+        run: |
+          cmake --build build/fast-gcc --target shader_scene_render_test --parallel 2
+          python3 -I -B tools/static_preview/run_software_gl.py --binary build/fast-gcc/bin/shader_scene_render_test --profile shader-scenes --output build/fast-gcc/shader-scene-capture
+          python3 -I -B tools/gates/shader-scenes.py compare --manifest test/rendering/shader_scenes/scenes.json --capture build/fast-gcc/shader-scene-capture
+      - name: Upload software shader scenes
+        if: always() && steps.shader-scenes.outputs.needs_shader_scenes == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: shader-scene-capture
+          path: build/fast-gcc/shader-scene-capture
+          if-no-files-found: error
       - name: Replay selected compiles and both tidy configurations
         if: steps.route.outputs.native != 'false'
         env:

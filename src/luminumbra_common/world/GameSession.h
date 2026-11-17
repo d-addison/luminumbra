@@ -359,6 +359,8 @@ public:
     const luminumbra::ai::ScentField* GetScentField() const {
         return m_scentField.get();
     }
+    // Live regional cell eligibility shared with the session-owned scent field.
+    [[nodiscard]] bool ScentCellDue(int x, int z) const;
     // Observational eligibility work; never persisted or included in a hash.
     [[nodiscard]] std::size_t GetScentEligibilityVisits() const {
         return m_scentDueCache.query_visits();
@@ -866,7 +868,6 @@ private:
     [[nodiscard]] float ScentDomainOrigin(bool x_axis) const;
     [[nodiscard]] RegionKey ScentCellOwner(int x, int z) const;
     [[nodiscard]] bool ScentOwnerDue(RegionKey owner) const;
-    [[nodiscard]] bool ScentCellDue(int x, int z) const;
     [[nodiscard]] bool ScentEdgeOpen(int x, int z, int nx, int nz) const;
     void RefreshScentDueCache() const;
     void RebaseForagingCells(int dx, int dz);
