@@ -4524,11 +4524,11 @@ bool GameSession::ReadPreparedWorldState(
                                           stop,
                                           &state.weather_schedule_anchor)) {
         error = errors.empty() ? "Corrupt weather schedule." : errors.front();
-        // Preserve legacy damaged-snapshot invalidation, while new schedule/version
-        // admission failures leave the live session intact.
+        // Preserve legacy damaged-snapshot invalidation, including an unscheduled session
+        // refusing a future metadata container version. Schedule admission failures leave
+        // the live session intact.
         state.input_refused = options.weather_schedule ||
                               error.find("weather schedule") != std::string::npos ||
-                              error.starts_with("unsupported future world metadata container") ||
                               error.starts_with("Saved-input admission refused:");
         return false;
     }
