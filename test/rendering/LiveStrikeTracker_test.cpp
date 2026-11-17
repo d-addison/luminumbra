@@ -11,6 +11,7 @@
 #include "luminumbra_client/rendering/LightningBolt.h"
 #include "luminumbra_client/rendering/LiveStrikeComposer.h"
 #include "luminumbra_client/rendering/LiveStrikeTracker.h"
+#include "luminumbra_common/systems/WindFieldSystem.h"
 
 namespace {
 
@@ -133,6 +134,117 @@ TEST(LiveStrikeTracker, TickZeroAndMaximumTickDoNotOverflowTheWindow) {
     tracker.AdvanceTo(last_tick);
     EXPECT_FALSE(tracker.TryConsume(last));
     EXPECT_EQ(tracker.size(), 2u);
+}
+
+Luminumbra::Systems::WeatherSchedule PresentationWeatherSchedule() {
+    using Luminumbra::Systems::WeatherCategory;
+    return {.phases = {{0, WeatherCategory::Clear, 0, 0},
+                       {5, WeatherCategory::Rain, 65535, 65535},
+                       {11, WeatherCategory::Clear, 0, 0}},
+            .strike_tick = 7};
+}
+
+TEST(LiveStrikeTracker, ScheduledCatchUpRetainsPositionAndConsumesOnceThroughGraceWindow) {
+    using namespace Luminumbra;
+    for (const bool regional : {false, true}) {
+        for (const std::uint64_t polled_tick : {7u, 8u, 9u, 10u}) {
+            SCOPED_TRACE(testing::Message() << regional << '/' << polled_tick);
+            Systems::WeatherSystem weather(1337);
+            Systems::WindFieldSystem wind(1337);
+            ASSERT_TRUE(weather.SetSchedule(PresentationWeatherSchedule()));
+            if (regional) {
+                weather.BindRegionalBackend([](const Vec3&) { return Systems::WeatherSample{}; },
+                                            [] { return std::string("regional"); });
+            }
+            weather.RestoreAtTick(4, Vec3(8.0f), wind);
+            for (std::uint64_t tick = 5; tick <= 7; ++tick) {
+                weather.UpdateFromClock(tick, Vec3(8.0f), wind);
+            }
+            ASSERT_EQ(weather.StrikeSchedule().size(), 1u);
+            const auto strike = weather.StrikeSchedule().front();
+            for (std::uint64_t tick = 8; tick <= polled_tick; ++tick) {
+                weather.UpdateFromClock(tick, Vec3(1200.0f), wind);
+                EXPECT_TRUE(weather.StrikesThisTick().empty());
+            }
+            LiveStrikeTracker tracker;
+            tracker.AdvanceTo(polled_tick);
+            if (polled_tick <= 9) {
+                ASSERT_EQ(weather.StrikeSchedule().size(), 1u);
+                const auto& retained = weather.StrikeSchedule().front();
+                EXPECT_EQ(retained.world_x, strike.world_x);
+                EXPECT_EQ(retained.world_z, strike.world_z);
+                EXPECT_TRUE(tracker.TryConsume(retained));
+                EXPECT_FALSE(tracker.TryConsume(retained));
+            } else {
+                EXPECT_TRUE(weather.StrikeSchedule().empty());
+                EXPECT_FALSE(tracker.TryConsume(strike));
+            }
+        }
+    }
+}
+
+TEST(LiveStrikeTracker, RestoredCompletedPresentationStaysHiddenAfterTrackerReset) {
+    using namespace Luminumbra;
+    for (const bool regional : {false, true}) {
+        // Before the event, exactly on it, inside grace, and after expiry.
+        for (const std::uint64_t saved_tick : {4u, 7u, 8u, 9u, 10u}) {
+            for (const bool adopted : {false, true}) {
+                SCOPED_TRACE(testing::Message() << regional << '/' << saved_tick << '/' << adopted);
+                Systems::WeatherSystem weather(1337);
+                Systems::WindFieldSystem wind(1337);
+                ASSERT_TRUE(weather.SetSchedule(PresentationWeatherSchedule()));
+                if (regional) {
+                    weather.BindRegionalBackend(
+                        [](const Vec3&) { return Systems::WeatherSample{}; },
+                        [] { return std::string("regional"); });
+                }
+                weather.UpdateFromClock(7, Vec3(8.0f), wind);
+                ASSERT_EQ(weather.StrikeSchedule().size(), 1u);
+                LiveStrikeTracker tracker;
+                tracker.AdvanceTo(7);
+                ASSERT_TRUE(tracker.TryConsume(weather.StrikeSchedule().front()));
+                if (adopted) {
+                    weather.AdoptRegionalWeather(saved_tick, Vec3(8.0f), {}, {}, regional, true);
+                } else {
+                    weather.RestoreAtTick(saved_tick, Vec3(8.0f), wind);
+                }
+                EXPECT_TRUE(weather.StrikeSchedule().empty());
+                EXPECT_EQ(weather.StrikesThisTick().size(), saved_tick == 7 ? 1u : 0u);
+                // Repeating the same restored tick must not reveal it again.
+                weather.UpdateFromClock(saved_tick, Vec3(8.0f), wind);
+                EXPECT_TRUE(weather.StrikeSchedule().empty());
+                tracker.Clear();
+                std::size_t consumed = 0;
+                for (std::uint64_t tick = saved_tick + 1; tick <= 11; ++tick) {
+                    weather.UpdateFromClock(tick, Vec3(8.0f), wind);
+                    tracker.AdvanceTo(tick);
+                    for (const auto& strike : weather.StrikeSchedule()) {
+                        consumed += tracker.TryConsume(strike) ? 1u : 0u;
+                    }
+                }
+                EXPECT_EQ(consumed, saved_tick < 7 ? 1u : 0u);
+                // A fresh restore before the event resets completed-presentation history.
+                weather.RestoreAtTick(4, Vec3(8.0f), wind);
+                weather.UpdateFromClock(7, Vec3(8.0f), wind);
+                ASSERT_EQ(weather.StrikeSchedule().size(), 1u);
+            }
+        }
+    }
+}
+
+TEST(LiveStrikeTracker, ScheduleWithoutStrikeNeverProducesAPresentation) {
+    using namespace Luminumbra;
+    auto schedule = PresentationWeatherSchedule();
+    schedule.strike_tick.reset();
+    Systems::WeatherSystem weather(1337);
+    Systems::WindFieldSystem wind(1337);
+    ASSERT_TRUE(weather.SetSchedule(schedule));
+    weather.RestoreAtTick(7, Vec3(8.0f), wind);
+    for (const std::uint64_t tick : {7u, 8u, 9u, 10u}) {
+        weather.UpdateFromClock(tick, Vec3(8.0f), wind);
+        EXPECT_TRUE(weather.StrikesThisTick().empty());
+        EXPECT_TRUE(weather.StrikeSchedule().empty());
+    }
 }
 
 std::vector<ProjectedBoltPoint> Stroke(glm::vec2 from, glm::vec2 to, std::size_t count) {

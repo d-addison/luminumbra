@@ -3594,6 +3594,23 @@ bool ReadWaterCursor(const nlohmann::json& metadata, std::size_t& cursor, std::s
     return true;
 }
 
+// The unreleased v4 envelope stores three finite floats within the simulation
+// anchor domain, before wind restoration converts horizontal coordinates to cells.
+bool ValidWeatherScheduleAnchor(const nlohmann::json& anchor) {
+    if (!anchor.is_array() || anchor.size() != 3)
+        return false;
+    for (const auto& coordinate : anchor) {
+        if (!coordinate.is_number())
+            return false;
+        const auto value = coordinate.get<double>();
+        if (!std::isfinite(value) || value < -std::numeric_limits<float>::max() ||
+            value > std::numeric_limits<float>::max())
+            return false;
+    }
+    return world::ActiveRegionLedger::valid_anchor(
+        Vec3(anchor.at(0).get<float>(), anchor.at(1).get<float>(), anchor.at(2).get<float>()));
+}
+
 // Metadata gate shared by load_world and member_digest. Returns an empty string when the file is
 // absent or valid, else the rejection message. Malformed JSON throws like before.
 std::string CheckMetadataValue(const nlohmann::json& metadata,
@@ -3618,13 +3635,15 @@ std::string CheckMetadataValue(const nlohmann::json& metadata,
     }
     const bool scheduled = version == kScheduledWeatherMetadataVersion;
     if (metadata.contains("weatherSchedule") != scheduled ||
-        metadata.contains("weatherScheduleTick") != scheduled)
+        metadata.contains("weatherScheduleTick") != scheduled ||
+        metadata.contains("weatherScheduleAnchor") != scheduled)
         return "corrupt world metadata: weather schedule version mismatch";
     if (scheduled) {
         const auto& encoding = metadata.at("weatherSchedule");
         const auto& tick = metadata.at("weatherScheduleTick");
         Systems::WeatherSchedule schedule;
-        if (!encoding.is_string() ||
+        if (!ValidWeatherScheduleAnchor(metadata.at("weatherScheduleAnchor")) ||
+            !encoding.is_string() ||
             !Systems::WeatherSchedule::Decode(encoding.get_ref<const std::string&>(), schedule) ||
             !tick.is_number_integer() || (!tick.is_number_unsigned() && tick < 0) ||
             tick >= world::WorldClock::kTickLimit ||
@@ -3666,6 +3685,7 @@ std::string CheckMetadataValue(const nlohmann::json& metadata,
 // schedule fields and explicit unsupported versions before any publication.
 std::string CheckMetadataVersionInput(const nlohmann::json& metadata) {
     if (metadata.contains("weatherSchedule") || metadata.contains("weatherScheduleTick") ||
+        metadata.contains("weatherScheduleAnchor") ||
         (metadata.contains("container_version") &&
          metadata.at("container_version") != WorldSaveService::kContainerVersion &&
          metadata.at("container_version") != WorldSaveService::kIndexedMetadataVersion))
@@ -4671,7 +4691,8 @@ bool ReadWeatherSchedule(const std::filesystem::path& save_dir,
                          std::shared_ptr<const Systems::WeatherSchedule>& schedule,
                          std::uint64_t& tick,
                          std::vector<std::string>* errors,
-                         const std::stop_token& stop) {
+                         const std::stop_token& stop,
+                         Vec3* anchor) {
     nlohmann::json metadata;
     bool missing = false;
     SavedJsonFailure failure = SavedJsonFailure::None;
@@ -4696,7 +4717,8 @@ bool ReadWeatherSchedule(const std::filesystem::path& save_dir,
         if (!error.empty()) {
             AddError(errors,
                      metadata.contains("weatherSchedule") ||
-                             metadata.contains("weatherScheduleTick")
+                             metadata.contains("weatherScheduleTick") ||
+                             metadata.contains("weatherScheduleAnchor")
                          ? "Corrupt weather schedule metadata: " + error
                          : error);
             return false;
@@ -4704,6 +4726,7 @@ bool ReadWeatherSchedule(const std::filesystem::path& save_dir,
     }
     std::shared_ptr<const Systems::WeatherSchedule> decoded;
     std::uint64_t decoded_tick = 0;
+    Vec3 decoded_anchor(0.0f);
     if (!missing && metadata.contains("weatherSchedule")) {
         Systems::WeatherSchedule value;
         if (!Systems::WeatherSchedule::Decode(
@@ -4711,9 +4734,15 @@ bool ReadWeatherSchedule(const std::filesystem::path& save_dir,
             return false;
         decoded = std::make_shared<const Systems::WeatherSchedule>(std::move(value));
         decoded_tick = metadata.at("weatherScheduleTick").get<std::uint64_t>();
+        const auto& coordinates = metadata.at("weatherScheduleAnchor");
+        decoded_anchor = Vec3(coordinates.at(0).get<float>(),
+                              coordinates.at(1).get<float>(),
+                              coordinates.at(2).get<float>());
     }
     schedule = std::move(decoded);
     tick = decoded_tick;
+    if (anchor)
+        *anchor = decoded_anchor;
     return true;
 }
 

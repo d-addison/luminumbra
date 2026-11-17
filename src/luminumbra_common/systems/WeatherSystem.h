@@ -169,6 +169,11 @@ public:
     explicit WeatherSystem(int world_seed);
     // Setup only; invalid schedules and changes after any update or restore refuse.
     bool SetSchedule(const WeatherSchedule& schedule);
+    // Actual saved-tick anchor, independent of the player's next respawn position.
+    [[nodiscard]] const Vec3& ScheduleAnchor() const {
+        return m_scheduleAnchor;
+    }
+    static constexpr std::uint64_t kStrikePresentationGraceTicks = 2;
     void BindRegionalBackend(std::function<WeatherSample(const Vec3&)> sample,
                              std::function<std::string()> hash);
     // Pure query projections adopted from FPG authority; this does not advance evolution.
@@ -249,11 +254,11 @@ public:
     // Const work diagnostic: storms examined by each precipitation/intensity query.
     [[nodiscard]] std::size_t storm_candidates_at(const Vec3& world_pos) const;
 
-    // The live lightning STRIKE schedule. Canonical order: strike_tick
-    // ascending, then storm_salt, then x, then z (deterministic, stable). Folded
-    // into the `weather` world_hash sub-hash. The RENDER side reads strikes whose
-    // strike_tick == the current tick to fire bolt/pulse/scorch/thunder (one-way,
-    // ). Bounded: <= kMaxLiveStrikes entries.
+    // Presentation strikes, ordered by tick, salt, x, then z. Scheduled weather
+    // retains at most one through kStrikePresentationGraceTicks and suppresses
+    // completed presentations after restoration; this buffer is not hashed.
+    // Unscheduled weather retains its existing hashing and storage bounds.
+    // Simulation consumers use StrikesThisTick instead.
     [[nodiscard]] const std::vector<StrikeEvent>& StrikeSchedule() const;
     [[nodiscard]] int live_strike_count() const noexcept {
         if (m_schedule)
@@ -303,6 +308,9 @@ private:
     WeatherSample m_scheduledSample;
     // At most one declared event; reserve once during setup, never allocate per tick.
     std::vector<StrikeEvent> m_scheduledStrikes;
+    // At most one presentation, retained across render catch-up, never saved or hashed.
+    std::vector<StrikeEvent> m_scheduledPresentations;
+    std::optional<std::uint64_t> m_scheduledDeliveredThrough;
     bool m_hasUpdatedOrRestored = false; // setup guard only; never saved or hashed
     Vec3 m_scheduleAnchor{};
     void UpdateSchedule(std::uint64_t tick, const Vec3& anchor);
@@ -385,11 +393,12 @@ namespace Luminumbra::Persistence {
 
 // Schedule-bearing metadata only; region payloads retain their existing version.
 inline constexpr std::uint16_t kScheduledWeatherMetadataVersion = 4;
-// Stages both outputs; malformed or unsupported envelopes leave them unchanged.
+// Stages all outputs; malformed or unsupported envelopes leave them unchanged.
 bool ReadWeatherSchedule(const std::filesystem::path& save_dir,
                          std::shared_ptr<const Systems::WeatherSchedule>& schedule,
                          std::uint64_t& tick,
                          std::vector<std::string>* errors = nullptr,
-                         const std::stop_token& stop = {});
+                         const std::stop_token& stop = {},
+                         Vec3* anchor = nullptr);
 
 } // namespace Luminumbra::Persistence

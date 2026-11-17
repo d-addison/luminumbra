@@ -236,6 +236,7 @@ bool WeatherSystem::SetSchedule(const WeatherSchedule& schedule) {
     m_schedule = schedule;
     m_scheduleBytes = schedule.canonical_bytes();
     m_scheduledStrikes.reserve(1);
+    m_scheduledPresentations.reserve(1);
     UpdateSchedule(0, Vec3(0.0f));
     return true;
 }
@@ -248,15 +249,24 @@ void WeatherSystem::UpdateSchedule(std::uint64_t tick, const Vec3& anchor) {
     m_scheduledSample = m_schedule->Sample(tick);
     m_anchor_category = m_scheduledSample.category;
     m_scheduledStrikes.clear();
-    if (m_schedule->strike_tick && tick == *m_schedule->strike_tick) {
-        const auto seed = static_cast<std::uint64_t>(static_cast<std::uint32_t>(m_lightning_seed));
-        const auto salt = Mix64(seed ^ tick);
-        m_scheduledStrikes.push_back({tick,
-                                      anchor.x + (UnitFloat(salt) * 2.0f - 1.0f) * 32.0f,
-                                      anchor.z + (UnitFloat(salt ^ 1) * 2.0f - 1.0f) * 32.0f,
-                                      0.5f + UnitFloat(salt ^ 2) * 0.5f,
-                                      static_cast<std::uint32_t>(salt)});
+    if (!m_schedule->strike_tick || tick < *m_schedule->strike_tick ||
+        tick - *m_schedule->strike_tick > kStrikePresentationGraceTicks) {
+        m_scheduledPresentations.clear();
+        return;
     }
+    const auto strike_tick = *m_schedule->strike_tick;
+    const auto seed = static_cast<std::uint64_t>(static_cast<std::uint32_t>(m_lightning_seed));
+    const auto salt = Mix64(seed ^ strike_tick);
+    const StrikeEvent strike{strike_tick,
+                             anchor.x + (UnitFloat(salt) * 2.0f - 1.0f) * 32.0f,
+                             anchor.z + (UnitFloat(salt ^ 1) * 2.0f - 1.0f) * 32.0f,
+                             0.5f + UnitFloat(salt ^ 2) * 0.5f,
+                             static_cast<std::uint32_t>(salt)};
+    if (tick == strike_tick)
+        m_scheduledStrikes.push_back(strike);
+    if ((!m_scheduledDeliveredThrough || strike_tick > *m_scheduledDeliveredThrough) &&
+        m_scheduledPresentations.empty())
+        m_scheduledPresentations.push_back(strike);
 }
 
 const char* WeatherCategoryName(WeatherCategory category) noexcept {
@@ -815,6 +825,10 @@ void WeatherSystem::AdoptRegionalWeather(std::uint64_t tick,
         RebuildRegionalStormIndex();
     }
     RefreshRegionalWeather(tick, anchor);
+    if (m_schedule && restoring) {
+        m_scheduledDeliveredThrough = tick;
+        m_scheduledPresentations.clear();
+    }
 }
 
 const std::vector<StormCell>& WeatherSystem::StormCells() const {
@@ -833,7 +847,7 @@ const std::vector<StormCell>& WeatherSystem::StormCells() const {
 }
 const std::vector<StrikeEvent>& WeatherSystem::StrikeSchedule() const {
     if (m_schedule)
-        return m_scheduledStrikes;
+        return m_scheduledPresentations;
     if (!m_regionalWeatherKeyed) {
         return m_strikes;
     }
@@ -991,6 +1005,8 @@ void WeatherSystem::RestoreAtTick(std::uint64_t tick,
     m_hasUpdatedOrRestored = true;
     if (m_schedule) {
         UpdateFromClock(tick, region_anchor, wind);
+        m_scheduledDeliveredThrough = tick;
+        m_scheduledPresentations.clear();
         return;
     }
     if (m_regional_sample) {

@@ -7,6 +7,7 @@
 #include "luminumbra_client/app/SessionExit.h"
 #include "luminumbra_client/ui/core/UIHotReload.h"
 #include <chrono>
+#include <cmath>
 #include <gtest/gtest.h>
 #include <thread>
 
@@ -4539,6 +4540,7 @@ TEST_F(WorldOpenRefusal, RemovedScheduleCannotReturnAfterSavingLegacySnapshot) {
             const auto metadata = nlohmann::json::parse(Read(destination / "world_info.json"));
             EXPECT_FALSE(metadata.contains("weatherSchedule"));
             EXPECT_FALSE(metadata.contains("weatherScheduleTick"));
+            EXPECT_FALSE(metadata.contains("weatherScheduleAnchor"));
             EXPECT_EQ(metadata.at("container_version"),
                       metadata.contains("snapshotFormat")
                           ? WorldSaveService::kIndexedMetadataVersion
@@ -4557,6 +4559,7 @@ TEST_F(WorldOpenRefusal, ScheduledCalendarRequiresNonzeroSimulationClockAtAdmiss
     metadata["container_version"] = P::kScheduledWeatherMetadataVersion;
     metadata["weatherSchedule"] = ShortWeatherScript().canonical_bytes();
     metadata["weatherScheduleTick"] = 4;
+    metadata["weatherScheduleAnchor"] = {0.0f, 0.0f, 0.0f};
     ASSERT_TRUE(WorldSaveService::admit_metadata_bytes(metadata.dump()));
     metadata.erase("simulationTick");
     ASSERT_TRUE(metadata.contains("calendar"));
@@ -4586,12 +4589,15 @@ TEST_F(WorldOpenRefusal, ScheduleAdmissionIsAtomicAcrossReadersAndWriters) {
     const auto script = ShortWeatherScript();
     const nlohmann::json valid = {{"container_version", P::kScheduledWeatherMetadataVersion},
                                   {"weatherSchedule", script.canonical_bytes()},
-                                  {"weatherScheduleTick", 4}};
+                                  {"weatherScheduleTick", 4},
+                                  {"weatherScheduleAnchor", {0.0f, 0.0f, 0.0f}}};
     const auto input = root / "schedule-input";
     fs::create_directory(input);
     auto retained = std::make_shared<const WeatherScript>(script);
     std::uint64_t tick = 99;
-    ASSERT_TRUE(P::ReadWeatherSchedule(input, retained, tick));
+    Vec3 anchor(99.0f);
+    ASSERT_TRUE(P::ReadWeatherSchedule(input, retained, tick, nullptr, {}, &anchor));
+    EXPECT_EQ(anchor, Vec3(0.0f));
     EXPECT_EQ(retained, nullptr);
     EXPECT_EQ(tick, 0u);
     Write(input / "world_info.json", valid.dump());
@@ -4599,6 +4605,20 @@ TEST_F(WorldOpenRefusal, ScheduleAdmissionIsAtomicAcrossReadersAndWriters) {
     ASSERT_NE(retained, nullptr);
     EXPECT_EQ(*retained, script);
     EXPECT_EQ(tick, 4u);
+    auto extreme = valid;
+    extreme["weatherScheduleAnchor"] = {-16777216.0f, -0.0f, 16777215.0f};
+    Write(input / "world_info.json", extreme.dump());
+    ASSERT_TRUE(P::ReadWeatherSchedule(input, retained, tick, nullptr, {}, &anchor));
+    EXPECT_EQ(anchor.x, -16777216.0f);
+    EXPECT_TRUE(std::signbit(anchor.y));
+    EXPECT_EQ(anchor.z, 16777215.0f);
+    for (const float height :
+         {-std::numeric_limits<float>::max(), std::numeric_limits<float>::max()}) {
+        extreme["weatherScheduleAnchor"] = {0.0f, height, 0.0f};
+        Write(input / "world_info.json", extreme.dump());
+        ASSERT_TRUE(P::ReadWeatherSchedule(input, retained, tick, nullptr, {}, &anchor));
+        EXPECT_EQ(anchor, Vec3(0.0f, height, 0.0f));
+    }
     std::vector<nlohmann::json> cases;
     for (const auto version : {2, 3, 5}) {
         auto bad = valid;
@@ -4611,7 +4631,8 @@ TEST_F(WorldOpenRefusal, ScheduleAdmissionIsAtomicAcrossReadersAndWriters) {
         bad["container_version"] = version;
         cases.push_back(bad);
     }
-    for (const auto* field : {"weatherSchedule", "weatherScheduleTick", "container_version"}) {
+    for (const auto* field :
+         {"weatherSchedule", "weatherScheduleTick", "weatherScheduleAnchor", "container_version"}) {
         auto bad = valid;
         bad.erase(field);
         cases.push_back(bad);
@@ -4632,6 +4653,43 @@ TEST_F(WorldOpenRefusal, ScheduleAdmissionIsAtomicAcrossReadersAndWriters) {
                                  nlohmann::json(world::WorldClock::kTickLimit)}) {
         auto bad = valid;
         bad["weatherScheduleTick"] = bad_tick;
+        cases.push_back(bad);
+    }
+    for (const auto& bad_anchor : {nlohmann::json(nullptr),
+                                   nlohmann::json(0),
+                                   nlohmann::json("0,0,0"),
+                                   nlohmann::json::array(),
+                                   nlohmann::json::array({0, 0}),
+                                   nlohmann::json::array({0, 0, 0, 0}),
+                                   nlohmann::json::object({{"x", 0}, {"y", 0}, {"z", 0}})}) {
+        auto bad = valid;
+        bad["weatherScheduleAnchor"] = bad_anchor;
+        cases.push_back(bad);
+    }
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        for (const auto& coordinate : {nlohmann::json(nullptr),
+                                       nlohmann::json(true),
+                                       nlohmann::json("0"),
+                                       nlohmann::json(1e38 * 10),
+                                       nlohmann::json(-1e38 * 10)}) {
+            auto bad = valid;
+            bad["weatherScheduleAnchor"][axis] = coordinate;
+            cases.push_back(bad);
+        }
+    }
+    // Float-representable horizontal values must also stay inside the simulation domain.
+    for (const std::size_t axis : {0u, 2u}) {
+        for (const double coordinate : {-1e38, -16777218.0, 16777215.9, 16777216.0, 1e38}) {
+            auto bad = valid;
+            bad["weatherScheduleAnchor"][axis] = coordinate;
+            cases.push_back(bad);
+        }
+    }
+    for (const auto version : {2, 3}) {
+        auto bad = valid;
+        bad["container_version"] = version;
+        bad.erase("weatherSchedule");
+        bad.erase("weatherScheduleTick");
         cases.push_back(bad);
     }
     auto mismatch = valid;
@@ -4659,7 +4717,9 @@ TEST_F(WorldOpenRefusal, ScheduleAdmissionIsAtomicAcrossReadersAndWriters) {
         Write(input / "world_info.json", metadata.dump());
         const auto disk = DiskBytes(root);
         const auto original = retained;
-        EXPECT_FALSE(P::ReadWeatherSchedule(input, retained, tick));
+        anchor = Vec3(99.0f);
+        EXPECT_FALSE(P::ReadWeatherSchedule(input, retained, tick, nullptr, {}, &anchor));
+        EXPECT_EQ(anchor, Vec3(99.0f));
         EXPECT_EQ(retained, original);
         EXPECT_EQ(tick, 4u);
         EXPECT_FALSE(WorldSaveService::save_metadata(metadata.dump(), root / "refused-schedule"));
@@ -4677,7 +4737,9 @@ TEST_F(WorldOpenRefusal, ScheduleAdmissionIsAtomicAcrossReadersAndWriters) {
          {std::string("{"), std::string(P::SavedInputLimits::kMetadataBytes + 1, ' ')}) {
         Write(input / "world_info.json", bytes);
         const auto original = retained;
-        EXPECT_FALSE(P::ReadWeatherSchedule(input, retained, tick));
+        anchor = Vec3(99.0f);
+        EXPECT_FALSE(P::ReadWeatherSchedule(input, retained, tick, nullptr, {}, &anchor));
+        EXPECT_EQ(anchor, Vec3(99.0f));
         EXPECT_EQ(retained, original);
         EXPECT_EQ(tick, 4u);
         EXPECT_FALSE(session.LoadWorldStateFrom(input));
@@ -4686,14 +4748,19 @@ TEST_F(WorldOpenRefusal, ScheduleAdmissionIsAtomicAcrossReadersAndWriters) {
     fs::remove(input / "world_info.json");
     fs::create_directory(input / "world_info.json");
     const auto original = retained;
-    EXPECT_FALSE(P::ReadWeatherSchedule(input, retained, tick));
+    anchor = Vec3(99.0f);
+    EXPECT_FALSE(P::ReadWeatherSchedule(input, retained, tick, nullptr, {}, &anchor));
+    EXPECT_EQ(anchor, Vec3(99.0f));
     EXPECT_EQ(retained, original);
     EXPECT_EQ(tick, 4u);
     fs::remove(input / "world_info.json");
     Write(input / "world_info.json", valid.dump());
     std::stop_source cancellation;
     cancellation.request_stop();
-    EXPECT_FALSE(P::ReadWeatherSchedule(input, retained, tick, nullptr, cancellation.get_token()));
+    anchor = Vec3(99.0f);
+    EXPECT_FALSE(
+        P::ReadWeatherSchedule(input, retained, tick, nullptr, cancellation.get_token(), &anchor));
+    EXPECT_EQ(anchor, Vec3(99.0f));
     EXPECT_EQ(retained, original);
     EXPECT_EQ(tick, 4u);
     const auto cancelled = GameSession::PrepareWorldState(
@@ -4707,7 +4774,8 @@ TEST_F(WorldOpenRefusal, ScheduleClockWithoutCalendarDoesNotRewindAnExistingLedg
     const auto script = ShortWeatherScript();
     const nlohmann::json metadata = {{"container_version", P::kScheduledWeatherMetadataVersion},
                                      {"weatherSchedule", script.canonical_bytes()},
-                                     {"weatherScheduleTick", 4}};
+                                     {"weatherScheduleTick", 4},
+                                     {"weatherScheduleAnchor", {0.0f, 0.0f, 0.0f}}};
     Write(input / "world_info.json", metadata.dump());
     Write(WorldSaveService::active_regions_path(input), world::ActiveRegionLedger{}.encode());
     for (const bool prepared : {false, true}) {
@@ -4726,6 +4794,143 @@ TEST_F(WorldOpenRefusal, ScheduleClockWithoutCalendarDoesNotRewindAnExistingLedg
         EXPECT_EQ(target.GetSimulationTickCount(), 4u);
         EXPECT_EQ(target.GetWeatherSystem()->PrecipitationAt(Vec3(0.0f)),
                   script.Sample(4).precip_intensity);
+    }
+}
+
+void ExpectScriptWeather(const Systems::WeatherSystem& weather,
+                         const WeatherScript& script,
+                         std::uint64_t tick,
+                         bool restored = false) {
+    const auto expected = script.Sample(tick);
+    EXPECT_EQ(weather.SampleAt(Vec3(0.0f)).category, expected.category);
+    EXPECT_EQ(weather.SampleAt(Vec3(0.0f)).precip_intensity, expected.precip_intensity);
+    EXPECT_EQ(weather.SampleAt(Vec3(0.0f)).storm_intensity, expected.storm_intensity);
+    const bool due = script.strike_tick && tick == *script.strike_tick;
+    EXPECT_EQ(weather.StrikesThisTick().size(), due ? 1u : 0u);
+    EXPECT_EQ(weather.StrikeSchedule().size(), due && !restored ? 1u : 0u);
+    EXPECT_EQ(weather.live_strike_count(), due ? 1 : 0);
+}
+
+void ExpectRestoredStrike(const GameSession& target,
+                          const WeatherScript& script,
+                          const std::string& hash,
+                          const Vec3& anchor,
+                          const Systems::StrikeEvent& strike) {
+    const auto* restored = target.GetWeatherSystem();
+    ASSERT_NE(restored, nullptr);
+    ASSERT_NO_FATAL_FAILURE(ExpectScriptWeather(*restored, script, 7, true));
+    EXPECT_EQ(restored->ScheduleAnchor(), anchor);
+    EXPECT_EQ(restored->ComputeWeatherSubHash(), hash);
+    const auto rebuilt = restored->StrikesThisTick();
+    ASSERT_EQ(rebuilt.size(), 1u);
+    EXPECT_EQ(rebuilt.front().world_x, strike.world_x);
+    EXPECT_EQ(rebuilt.front().world_z, strike.world_z);
+    EXPECT_EQ(rebuilt.front().storm_salt, strike.storm_salt);
+}
+
+void ExpectCompletedPresentationSuppressed(GameSession& target) {
+    const auto* restored = target.GetWeatherSystem();
+    ASSERT_NE(restored, nullptr);
+    // Completed presentation remains suppressed through the grace window.
+    target.SetReplicatedSimulationAnchors({});
+    for (int index = 0; index < 3; ++index) {
+        ASSERT_EQ(target.TickSimulation(target.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_FALSE(target.GetRegionSchedulerFault());
+        EXPECT_TRUE(restored->StrikeSchedule().empty());
+        EXPECT_TRUE(restored->StrikesThisTick().empty());
+    }
+}
+
+void ExpectScheduledCatchUp(GameSession& target, const fs::path& before_strike, int backend) {
+    if (backend == 1) {
+        ASSERT_TRUE(target.LoadWorldStateFrom(before_strike)) << target.GetWorldOpenError();
+    } else {
+        const auto prepared =
+            GameSession::PrepareWorldState(target.CaptureWorldPreparationOptions(), before_strike);
+        ASSERT_TRUE(target.AdoptPreparedWorld(prepared)) << target.GetWorldOpenError();
+    }
+    ASSERT_EQ(target.GetSimulationTickCount(), 4u);
+    target.SetReplicatedSimulationAnchors({});
+    // One render frame catches up across tick 7 and polls weather at tick 8.
+    ASSERT_EQ(target.TickSimulation(target.GetSimulationClock().fixed_dt() * 4), 4u);
+    ASSERT_FALSE(target.GetRegionSchedulerFault());
+    const auto* caught_up = target.GetWeatherSystem();
+    ASSERT_NE(caught_up, nullptr);
+    ASSERT_EQ(target.GetSimulationTickCount(), 8u);
+    EXPECT_TRUE(caught_up->StrikesThisTick().empty());
+    ASSERT_EQ(caught_up->StrikeSchedule().size(), 1u);
+    EXPECT_EQ(caught_up->StrikeSchedule().front().strike_tick, 7u);
+    ASSERT_EQ(target.TickSimulation(target.GetSimulationClock().fixed_dt()), 1u);
+    EXPECT_EQ(caught_up->StrikeSchedule().size(), 1u);
+    ASSERT_EQ(target.TickSimulation(target.GetSimulationClock().fixed_dt()), 1u);
+    EXPECT_TRUE(caught_up->StrikeSchedule().empty());
+}
+
+class WeatherAnchorSaveTest : public WorldOpenRefusal {};
+INSTANTIATE_TEST_SUITE_P(WeatherAndLoadBackends,
+                         WeatherAnchorSaveTest,
+                         testing::Combine(testing::Values(0, 1), testing::Values(0, 1, 2)));
+
+TEST_P(WeatherAnchorSaveTest, SavedStrikeAnchorSurvivesRespawnChangeAcrossLoadBackends) {
+    const auto [regional_mode, backend] = GetParam();
+    const bool regional = regional_mode != 0;
+    const auto script = ShortWeatherScript();
+    const Vec3 respawn(1200.25f, 31.0f, -937.5f);
+    GameSession source;
+    source.SetRootPath(RootString());
+    source.SetJobSystem(&jobs);
+    source.SetActiveRegionsEnabled(regional);
+    ASSERT_TRUE(source.SetWeatherSchedule(script));
+    ASSERT_TRUE(source.CreateWorld("Saved weather anchor", "1337", "default"));
+    source.SetReplicatedSimulationAnchors({});
+    const auto before_strike =
+        root / (regional ? "regional-before-strike" : "legacy-before-strike");
+    for (int index = 0; index < 7; ++index) {
+        ASSERT_EQ(source.TickSimulation(source.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_FALSE(source.GetRegionSchedulerFault());
+        if (index == 3) {
+            ASSERT_TRUE(source.SaveWorldStateTo(before_strike, nullptr, true));
+        }
+    }
+    const auto* weather = source.GetWeatherSystem();
+    ASSERT_NE(weather, nullptr);
+    ASSERT_NO_FATAL_FAILURE(ExpectScriptWeather(*weather, script, 7));
+    const auto strikes = weather->StrikesThisTick();
+    ASSERT_EQ(strikes.size(), 1u);
+    const auto hash = weather->ComputeWeatherSubHash();
+    const auto anchor = weather->ScheduleAnchor();
+    ASSERT_NE(anchor, respawn);
+    // Normal exit updates respawn after the final simulation tick.
+    source.SetSpawnPoint(respawn);
+    ASSERT_TRUE(source.SaveWorld());
+    EXPECT_EQ(weather->ComputeWeatherSubHash(), hash);
+    const auto metadata = nlohmann::json::parse(Read(source.GetWorldSaveDir() / "world_info.json"));
+    EXPECT_EQ(metadata.at("weatherScheduleAnchor"),
+              nlohmann::json::array({anchor.x, anchor.y, anchor.z}));
+    EXPECT_EQ(metadata.at("spawnPoint").at("x"), respawn.x);
+    GameSession target;
+    target.SetRootPath(RootString());
+    target.SetJobSystem(&jobs);
+    target.SetActiveRegionsEnabled(regional);
+    if (backend == 0) {
+        ASSERT_TRUE(target.LoadWorld(source.GetMetadata().worldId)) << target.GetWorldOpenError();
+        EXPECT_EQ(target.GetMetadata().spawnPoint, respawn);
+    } else {
+        ASSERT_TRUE(target.CreateTransientWorld("Anchor adoption", "1337", "default"));
+        target.SetSpawnPoint(respawn);
+        if (backend == 1) {
+            ASSERT_TRUE(target.LoadWorldStateFrom(source.GetWorldSaveDir()))
+                << target.GetWorldOpenError();
+        } else {
+            const auto prepared = GameSession::PrepareWorldState(
+                target.CaptureWorldPreparationOptions(), source.GetWorldSaveDir());
+            ASSERT_TRUE(target.AdoptPreparedWorld(prepared)) << target.GetWorldOpenError();
+        }
+    }
+    ASSERT_NO_FATAL_FAILURE(ExpectRestoredStrike(target, script, hash, anchor, strikes.front()));
+    ASSERT_NO_FATAL_FAILURE(ExpectCompletedPresentationSuppressed(target));
+    if (backend != 0) {
+        ASSERT_NO_FATAL_FAILURE(ExpectScheduledCatchUp(target, before_strike, backend));
     }
 }
 

@@ -269,6 +269,7 @@ struct GameSession::LoadedWorldState {
     std::shared_ptr<const Systems::WeatherSchedule> weather_schedule;
     std::unique_ptr<Systems::WeatherSystem> weather_system;
     std::uint64_t weather_schedule_tick = 0;
+    Vec3 weather_schedule_anchor{};
     std::size_t water_sim_cursor = 0;
     std::optional<Vec3> ambient_anchor;
     std::optional<WorldCalendar> render_calendar;
@@ -3913,6 +3914,7 @@ bool GameSession::PrepareWorldMetadataTo(const fs::path& save_dir,
         // reinstall a schedule removed by snapshot adoption.
         metadata.erase("weatherSchedule");
         metadata.erase("weatherScheduleTick");
+        metadata.erase("weatherScheduleAnchor");
         if (metadata.contains("container_version") &&
             metadata.at("container_version") == Persistence::kScheduledWeatherMetadataVersion) {
             metadata["container_version"] =
@@ -3971,6 +3973,8 @@ bool GameSession::PrepareWorldMetadataTo(const fs::path& save_dir,
         metadata_json["container_version"] = Persistence::kScheduledWeatherMetadataVersion;
         metadata_json["weatherSchedule"] = m_weatherSchedule->canonical_bytes();
         metadata_json["weatherScheduleTick"] = GetSimulationTickCount();
+        const auto& anchor = m_weatherSystem->ScheduleAnchor();
+        metadata_json["weatherScheduleAnchor"] = {anchor.x, anchor.y, anchor.z};
     }
     if (!Persistence::AdmitMetadata(metadata_json) ||
         !Persistence::BoundedJsonDump(
@@ -4498,8 +4502,12 @@ bool GameSession::ReadPreparedWorldState(
             return false;
         }
     }
-    if (!Persistence::ReadWeatherSchedule(
-            save_dir, state.weather_schedule, state.weather_schedule_tick, &errors, stop)) {
+    if (!Persistence::ReadWeatherSchedule(save_dir,
+                                          state.weather_schedule,
+                                          state.weather_schedule_tick,
+                                          &errors,
+                                          stop,
+                                          &state.weather_schedule_anchor)) {
         error = errors.empty() ? "Corrupt weather schedule." : errors.front();
         // Preserve legacy damaged-snapshot invalidation, while new schedule/version
         // admission failures leave the live session intact.
@@ -4718,10 +4726,11 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
     }
     if (!saved.ledger && replace_weather) {
         m_simulationClock.reset(m_weatherSchedule ? saved.weather_schedule_tick : 0);
-        if (m_weatherSchedule && m_weatherSystem) {
-            m_weatherSystem->Update(
-                GetSimulationTickCount(), m_ambientFieldAnchor, m_windFieldSystem.get());
-        }
+    }
+    if (m_weatherSchedule && m_weatherSystem && m_windFieldSystem) {
+        // The respawn and ambient anchors may have changed since weather's saved tick.
+        m_weatherSystem->RestoreAtTick(
+            saved.weather_schedule_tick, saved.weather_schedule_anchor, *m_windFieldSystem);
     }
     if (m_energyFieldState && saved.energy)
         *m_energyFieldState = std::move(*saved.energy);
