@@ -1,6 +1,7 @@
 #include "FarVolume.h"
 
 #include "FarDensityQuantization.h"
+#include "FarFrozenObservation.h"
 #include "core/Crc32.h"
 
 #include <algorithm>
@@ -35,6 +36,13 @@ bool TileOrigin(std::int64_t tile, std::uint32_t edge, std::int64_t& output) {
     return true;
 }
 
+bool ValidCoverageIntent(const FarVolumeCoverageIntent& intent) {
+    return FarTierAt(intent.key.tier) &&
+           (!intent.extra_span ||
+            (std::isfinite(intent.extra_span->min_y) && std::isfinite(intent.extra_span->max_y) &&
+             intent.extra_span->min_y <= intent.extra_span->max_y));
+}
+
 class AuthoritySession {
 public:
     AuthoritySession(const FarVolumeAuthority& authority,
@@ -45,48 +53,28 @@ public:
         , heights_(resource) {}
 
     bool resolve(const FarVolumeCoverageIntent& intent, FarVolumeRequest& request) {
-        const auto d = FarTierAt(intent.key.tier);
-        if (!d || (intent.extra_span && (!std::isfinite(intent.extra_span->min_y) ||
-                                         !std::isfinite(intent.extra_span->max_y) ||
-                                         intent.extra_span->min_y > intent.extra_span->max_y)))
+        if (!ValidCoverageIntent(intent))
             return fail(FarVolumeFacadeError::InvalidIntent);
         if (!prepare(intent.key))
             return false;
+        FarVolumeCoverageCursor cursor;
+        const auto error = cursor.Start(intent, authority_.field_identity);
+        if (error != FarVolumeFacadeError::None)
+            return fail(error);
         if (limits_.max_height_samples < kTileSide * kTileSide)
             return fail(FarVolumeFacadeError::HeightLimit);
         heights_.resize(kHeightSide * kHeightSide);
-        float low = std::numeric_limits<float>::max();
-        float high = std::numeric_limits<float>::lowest();
-        for (std::size_t z = 0; z < kTileSide; ++z)
-            for (std::size_t x = 0; x < kTileSide; ++x) {
-                const auto value =
-                    height(origin_x_ + static_cast<std::int64_t>(x) * d->sample_spacing_meters,
-                           origin_z_ + static_cast<std::int64_t>(z) * d->sample_spacing_meters);
-                if (!value)
-                    return false;
-                low = std::min(low, *value);
-                high = std::max(high, *value);
-            }
-        // Preserve the foundation's float arithmetic and inclusive top-plane
-        // behavior before resolving to canonical integer brick boundaries.
-        low -= kFarVolumeInteriorDepthMeters;
-        if (intent.extra_span) {
-            low = std::min(low, intent.extra_span->min_y);
-            high = std::max(high, intent.extra_span->max_y);
+        while (!cursor.Complete()) {
+            const auto [x, z] = cursor.Column();
+            const auto value = height(x, z);
+            if (!value)
+                return false;
+            const auto observed = cursor.Observe(value);
+            if (observed != FarVolumeFacadeError::None)
+                return fail(observed);
         }
-        // The 1024 m margin is at least four of the largest (256 m) brick edges, so the
-        // brick-aligned endpoints computed below stay strictly inside +/-kCoordinateLimit.
-        if (low <= -kCoordinateLimit + 1024 || high >= kCoordinateLimit - 1024)
-            return fail(FarVolumeFacadeError::CoordinateRange);
-        const auto first =
-            static_cast<std::int64_t>(std::floor(static_cast<double>(low) / d->brick_edge_meters));
-        const auto last = static_cast<std::int64_t>(
-                              std::floor(static_cast<double>(high) / d->brick_edge_meters)) +
-                          1;
-        request = {intent.key,
-                   {first * d->brick_edge_meters, last * d->brick_edge_meters},
-                   authority_.field_identity};
-        return true;
+        const auto finished = cursor.Finish(request);
+        return finished == FarVolumeFacadeError::None || fail(finished);
     }
 
     bool compile_request(const FarVolumeCoverageIntent& intent,
@@ -441,6 +429,63 @@ void PublishRetained(const FarVolumeMemory& memory,
     *memory.retained = std::move(combined);
 }
 } // namespace
+
+FarVolumeFacadeError FarVolumeCoverageCursor::Start(const FarVolumeCoverageIntent& intent,
+                                                    std::uint64_t identity) {
+    *this = {};
+    const auto dimensions = FarTierAt(intent.key.tier);
+    if (!dimensions || !ValidCoverageIntent(intent))
+        return FarVolumeFacadeError::InvalidIntent;
+    if (!TileOrigin(intent.key.x, dimensions->tile_edge_meters, x_) ||
+        !TileOrigin(intent.key.z, dimensions->tile_edge_meters, z_))
+        return FarVolumeFacadeError::CoordinateRange;
+    intent_ = intent;
+    identity_ = identity;
+    spacing_ = dimensions->sample_spacing_meters;
+    brick_ = dimensions->brick_edge_meters;
+    low_ = std::numeric_limits<float>::max();
+    high_ = std::numeric_limits<float>::lowest();
+    return FarVolumeFacadeError::None;
+}
+bool FarVolumeCoverageCursor::Complete() const noexcept {
+    return spacing_ != 0 && column_ == kTileSide * kTileSide;
+}
+std::pair<std::int64_t, std::int64_t> FarVolumeCoverageCursor::Column() const {
+    return {x_ + static_cast<std::int64_t>(column_ % kTileSide) * spacing_,
+            z_ + static_cast<std::int64_t>(column_ / kTileSide) * spacing_};
+}
+FarVolumeFacadeError FarVolumeCoverageCursor::Observe(const std::optional<float>& value) {
+    if (spacing_ == 0 || Complete())
+        return FarVolumeFacadeError::InvalidIntent;
+    if (!value)
+        return FarVolumeFacadeError::SamplerFailure;
+    if (!std::isfinite(*value))
+        return FarVolumeFacadeError::NonFiniteSample;
+    if (*value <= -kCoordinateLimit + 1024 || *value >= kCoordinateLimit - 1024)
+        return FarVolumeFacadeError::CoordinateRange;
+    low_ = std::min(low_, *value);
+    high_ = std::max(high_, *value);
+    ++column_;
+    return FarVolumeFacadeError::None;
+}
+FarVolumeFacadeError FarVolumeCoverageCursor::Finish(FarVolumeRequest& output) const {
+    if (!Complete())
+        return FarVolumeFacadeError::InvalidIntent;
+    // Keep float band/extension arithmetic and the inclusive top-plane rule.
+    // The 1024 m margin keeps aligned endpoints strictly in the exact domain.
+    float low = low_ - kFarVolumeInteriorDepthMeters;
+    float high = high_;
+    if (intent_.extra_span) {
+        low = std::min(low, intent_.extra_span->min_y);
+        high = std::max(high, intent_.extra_span->max_y);
+    }
+    if (low <= -kCoordinateLimit + 1024 || high >= kCoordinateLimit - 1024)
+        return FarVolumeFacadeError::CoordinateRange;
+    const auto first = static_cast<std::int64_t>(std::floor(static_cast<double>(low) / brick_));
+    const auto last = static_cast<std::int64_t>(std::floor(static_cast<double>(high) / brick_)) + 1;
+    output = {intent_.key, {first * brick_, last * brick_}, identity_};
+    return FarVolumeFacadeError::None;
+}
 
 bool ResolveFarVolumeCoverage(const FarVolumeCoverageIntent& intent,
                               const FarVolumeAuthority& authority,
