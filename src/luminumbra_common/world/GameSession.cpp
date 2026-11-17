@@ -4744,6 +4744,12 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
         if (m_weatherSchedule) {
             m_ambientFieldAnchor = saved.weather_schedule_anchor;
             RestoreAmbientFieldsAtTick(saved.weather_schedule_tick);
+        } else {
+            // Match a fresh legacy load: all three ambient constructors seed tick
+            // zero at the origin, with emission-only aether and no wind advection.
+            const int world_seed = static_cast<int>(m_numericSeed);
+            m_windFieldSystem = std::make_unique<Systems::WindFieldSystem>(world_seed);
+            m_aetherFieldSystem = std::make_unique<Systems::AetherFieldSystem>(world_seed);
         }
     }
     if (saved.ledger && m_weatherSchedule && m_weatherSystem && m_windFieldSystem) {

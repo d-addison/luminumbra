@@ -1,4 +1,5 @@
 #include "../support/CalendarMetadataCases.h"
+#include "../support/GameSessionTestWorld.h"
 #include "../support/IndexedSaveFixture.h"
 #include "../support/PersistenceFileOps.h"
 #include "../support/SessionEnergyTick.h"
@@ -4553,6 +4554,123 @@ TEST_F(WorldOpenRefusal, RemovedScheduleCannotReturnAfterSavingLegacySnapshot) {
     }
 }
 
+TEST_F(WorldOpenRefusal, RemovedScheduleRestoresLegacyAmbientHashesRegardlessOfHistory) {
+    GameSession legacy;
+    legacy.SetRootPath(RootString());
+    legacy.SetJobSystem(&jobs);
+    legacy.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(legacy.LoadWorld("fixture")) << legacy.GetWorldOpenError();
+    const auto expected = TestSupport::SessionWorldSubHashes(legacy);
+    const auto expected_world = TestSupport::SessionWorldHash(legacy);
+    const auto expected_wind = legacy.GetWindFieldSystem()->ComputeWindSubHash();
+    const auto expected_aether = legacy.GetAetherFieldSystem()->ComputeAetherSubHash();
+    for (const bool prepared : {false, true}) {
+        for (const int prior_ticks : {0, 11}) {
+            SCOPED_TRACE(testing::Message() << prepared << '/' << prior_ticks);
+            GameSession target;
+            target.SetRootPath(RootString());
+            target.SetJobSystem(&jobs);
+            target.SetActiveRegionsEnabled(false);
+            ASSERT_TRUE(target.SetWeatherSchedule(ShortWeatherScript()));
+            ASSERT_TRUE(target.CreateTransientWorld("Ambient reset", "1337", "default"));
+            for (int tick = 0; tick < prior_ticks; ++tick) {
+                ASSERT_EQ(target.TickSimulation(target.GetSimulationClock().fixed_dt()), 1u);
+            }
+            if (prior_ticks != 0) {
+                EXPECT_NE(target.GetWindFieldSystem()->ComputeWindSubHash(), expected_wind);
+                EXPECT_NE(target.GetAetherFieldSystem()->ComputeAetherSubHash(), expected_aether);
+            }
+            if (prepared) {
+                const auto state =
+                    GameSession::PrepareWorldState(target.CaptureWorldPreparationOptions(), save);
+                ASSERT_TRUE(target.AdoptPreparedWorld(state)) << target.GetWorldOpenError();
+            } else {
+                ASSERT_TRUE(target.LoadWorldStateFrom(save)) << target.GetWorldOpenError();
+            }
+            ASSERT_EQ(target.GetWeatherSchedule(), nullptr);
+            EXPECT_EQ(target.GetSimulationClock().tick_count(), 0u);
+            const auto actual = TestSupport::SessionWorldSubHashes(target);
+            EXPECT_EQ(actual.at("weather"), expected.at("weather"));
+            EXPECT_EQ(actual.at("wind"), expected.at("wind"));
+            EXPECT_EQ(actual.at("aether"), expected.at("aether"));
+            EXPECT_EQ(target.GetAetherFieldSystem()->ComputeAetherSubHash(), expected_aether);
+            EXPECT_EQ(TestSupport::SessionWorldHash(target), expected_world);
+        }
+    }
+}
+
+TEST_F(WorldOpenRefusal, ClockAmbientAnchorsRefuseOutOfDomainCoordinatesBeforeAdoption) {
+    const auto input = root / "ambient-input";
+    nlohmann::json metadata = {{"container_version", WorldSaveService::kContainerVersion},
+                               {"seed", "1337"}};
+    world::WorldClock(4).write_metadata(metadata);
+    GameSession live;
+    live.SetRootPath(RootString());
+    live.SetJobSystem(&jobs);
+    live.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(live.SetWeatherSchedule(ShortWeatherScript()));
+    ASSERT_TRUE(live.CreateTransientWorld("Anchor refusal", "1337", "default"));
+    live.SetReplicatedSimulationAnchors({});
+    ASSERT_EQ(live.TickSimulation(live.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_FALSE(live.GetFieldPages().has_ambient());
+    const auto before = TestSupport::SessionWorldSubHashes(live);
+    const auto before_world = TestSupport::SessionWorldHash(live);
+    for (const char* key : {"spawnPoint", "ambientFieldAnchor"}) {
+        for (const char* axis : {"x", "z"}) {
+            // The simulation domain includes -2^24 and the last float below +2^24.
+            for (const float coordinate : {-16777216.0f, 0.0f, 16777215.0f}) {
+                SCOPED_TRACE(testing::Message() << key << '/' << axis << '/' << coordinate);
+                auto valid = metadata;
+                valid[key] = {{"x", 0.0f}, {"y", 0.0f}, {"z", 0.0f}};
+                valid[key][axis] = coordinate;
+                Write(input / "world_info.json", valid.dump());
+                ASSERT_TRUE(WorldSaveService::validate_save(input));
+                world::WorldClock clock;
+                bool required = false;
+                std::optional<Vec3> anchor;
+                ASSERT_TRUE(WorldSaveService::read_clock_metadata(
+                    input, clock, required, nullptr, &anchor));
+                ASSERT_TRUE(anchor.has_value());
+                EXPECT_EQ(axis[0] == 'x' ? anchor->x : anchor->z, coordinate);
+                EXPECT_TRUE(required);
+                EXPECT_EQ(clock.tick(), 4u);
+            }
+            const auto valid_bytes = Read(input / "world_info.json");
+            for (const double coordinate :
+                 {-1e30, 1e30, -16777218.0, -16777217.0, 16777215.9, 16777216.0, 16777217.0}) {
+                SCOPED_TRACE(testing::Message() << key << '/' << axis << '/' << coordinate);
+                auto invalid = metadata;
+                invalid[key] = {{"x", 0.0f}, {"y", 0.0f}, {"z", 0.0f}};
+                invalid[key][axis] = coordinate;
+                // Writers must refuse without changing the installed metadata.
+                EXPECT_FALSE(WorldSaveService::save_metadata(invalid.dump(), input));
+                EXPECT_EQ(Read(input / "world_info.json"), valid_bytes);
+                Write(input / "world_info.json", invalid.dump());
+                const auto disk = DiskBytes(input);
+                EXPECT_FALSE(WorldSaveService::validate_save(input));
+                world::WorldClock clock;
+                bool required = false;
+                std::optional<Vec3> anchor;
+                EXPECT_FALSE(WorldSaveService::read_clock_metadata(
+                    input, clock, required, nullptr, &anchor));
+                EXPECT_FALSE(anchor.has_value());
+                const auto state =
+                    GameSession::PrepareWorldState(live.CaptureWorldPreparationOptions(), input);
+                EXPECT_FALSE(live.AdoptPreparedWorld(state));
+                EXPECT_FALSE(live.LoadWorldStateFrom(input));
+                const auto after = TestSupport::SessionWorldSubHashes(live);
+                EXPECT_EQ(after.at("weather"), before.at("weather"));
+                EXPECT_EQ(after.at("wind"), before.at("wind"));
+                EXPECT_EQ(after.at("aether"), before.at("aether"));
+                EXPECT_EQ(TestSupport::SessionWorldHash(live), before_world);
+                EXPECT_EQ(live.GetSimulationClock().tick_count(), 1u);
+                EXPECT_EQ(DiskBytes(input), disk);
+                Write(input / "world_info.json", valid_bytes);
+            }
+        }
+    }
+}
+
 TEST_F(WorldOpenRefusal, ScheduledCalendarRequiresNonzeroSimulationClockAtAdmission) {
     auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
     world::WorldClock(4).write_metadata(metadata);
@@ -4679,7 +4797,8 @@ TEST_F(WorldOpenRefusal, ScheduleAdmissionIsAtomicAcrossReadersAndWriters) {
     }
     // Float-representable horizontal values must also stay inside the simulation domain.
     for (const std::size_t axis : {0u, 2u}) {
-        for (const double coordinate : {-1e38, -16777218.0, 16777215.9, 16777216.0, 1e38}) {
+        for (const double coordinate :
+             {-1e38, -16777218.0, -16777217.0, 16777215.9, 16777216.0, 1e38}) {
             auto bad = valid;
             bad["weatherScheduleAnchor"][axis] = coordinate;
             cases.push_back(bad);

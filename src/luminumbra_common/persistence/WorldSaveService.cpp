@@ -665,6 +665,15 @@ bool AllowPublication(const std::filesystem::path& path,
     return true;
 }
 
+bool ValidSimulationAnchorCoordinate(double value, bool horizontal) {
+    // ActiveRegionLedger's horizontal domain is [-2^24, 2^24) metres. This
+    // also leaves ample int64_t headroom for wind/aether cell origins and extents.
+    constexpr double kSimulationAnchorLimitM = 16777216.0;
+    return std::isfinite(value) && value >= -std::numeric_limits<float>::max() &&
+           value <= std::numeric_limits<float>::max() &&
+           (!horizontal || (value >= -kSimulationAnchorLimitM && value < kSimulationAnchorLimitM));
+}
+
 bool ReadAmbientAnchor(const nlohmann::json& metadata,
                        std::optional<Vec3>& anchor,
                        std::string& error) {
@@ -684,11 +693,16 @@ bool ReadAmbientAnchor(const nlohmann::json& metadata,
             error = "Corrupt world metadata: invalid ambient field anchor.";
             return false;
         }
-        point[i] = value.at(axis).get<float>();
-        if (!std::isfinite(point[i])) {
-            error = "Corrupt world metadata: ambient field anchor must be finite.";
+        const double coordinate = value.at(axis).get<double>();
+        if (!ValidSimulationAnchorCoordinate(coordinate, i != 1)) {
+            error = "Corrupt world metadata: ambient field anchor outside simulation domain.";
             return false;
         }
+        point[i] = value.at(axis).get<float>();
+    }
+    if (!world::ActiveRegionLedger::valid_anchor(point)) {
+        error = "Corrupt world metadata: ambient field anchor outside simulation domain.";
+        return false;
     }
     anchor = point;
     return true;
@@ -3599,12 +3613,12 @@ bool ReadWaterCursor(const nlohmann::json& metadata, std::size_t& cursor, std::s
 bool ValidWeatherScheduleAnchor(const nlohmann::json& anchor) {
     if (!anchor.is_array() || anchor.size() != 3)
         return false;
-    for (const auto& coordinate : anchor) {
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        const auto& coordinate = anchor.at(axis);
         if (!coordinate.is_number())
             return false;
         const auto value = coordinate.get<double>();
-        if (!std::isfinite(value) || value < -std::numeric_limits<float>::max() ||
-            value > std::numeric_limits<float>::max())
+        if (!ValidSimulationAnchorCoordinate(value, axis != 1))
             return false;
     }
     return world::ActiveRegionLedger::valid_anchor(
