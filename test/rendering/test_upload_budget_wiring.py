@@ -42,6 +42,41 @@ class UploadBudgetWiring(unittest.TestCase):
         cls.header = read(RENDERING / "RenderPipeline.h")
         cls.main = read(ROOT / "src/luminumbra_client/main_client.cpp")
 
+    def test_world_presentation_blocks_both_entry_paths_and_timelapse(self):
+        preload = body(self.main, "auto wait_for_world_presentation =")
+        self.assertIn("/*advance_simulation=*/false", preload)
+        self.assertNotIn("TickSimulation(", preload)
+        self.assertIn("ObserveWorldPresentation(", preload)
+        self.assertIn("return entry_presentation_gate.waiting();", preload)
+        staged = body(self.main, "auto run_entry_stage =")
+        activation = staged.split("case WorldEntryStage::Activate:", 1)[1].split(
+            "case WorldEntryStage::Count:", 1)[0]
+        self.assertRegex(compact(activation), r"if \(wait_for_world_presentation\(\)\) \{ "
+                         r"return WorldEntryResult::Pending; \} activate_loaded_world\(\);")
+        loading = self.main.split("case GameState::WORLD_LOADING:", 1)[1].split(
+            "case GameState::IN_GAME:", 1)[0]
+        self.assertIn("const bool waiting = wait_for_world_presentation();", loading)
+        self.assertRegex(compact(loading), r"if \(waiting\) \{ .*?DrawLoadingOverlay\(.*?"
+                         r"\} else \{ activate_loaded_world\(\);")
+        bypass = body(self.main, "if (bypass_loading_ui)")
+        self.assertNotIn("GameState::IN_GAME", bypass)
+        self.assertNotIn("kTimelapseSettleFrames", self.main)
+        self.assertIn("const bool simulate_frame = !timelapse_waiting &&", compact(self.main))
+        self.assertIn("scenario_drive = scenario_runner && !timelapse_waiting ?", compact(self.main))
+        for hook in ("onPreRenderWorldSweep();", "onPostRenderCapture(deltaTime);"):
+            self.assertRegex(compact(self.main), r"if \(scenario_runner && !timelapse_waiting\) \{ "
+                             + re.escape("scenario_runner->" + hook))
+        capture = body(self.main, "static bool CaptureTimelapseFrame(")
+        self.assertIn("if (!presentation_ready)", capture)
+        observation = body(self.main, "ObserveWorldPresentation(")
+        for signal in ("coverage.near_field_renderable", "coverage.ready_surface_chunks",
+                       "coverage.pending_lod_chunks", "diagnostic.missing == 0",
+                       "diagnostic.stale == 0", "diagnostic.pending == 0",
+                       "far.coverage_settled", "uploads.water_uploads_deferred == 0",
+                       "foliage->build_pending()", "pipeline.render_uploads_settled()",
+                       "streaming.quiescent()"):
+            self.assertIn(signal, observation)
+
     def test_near_refinement_runs_only_in_admitted_terrain_uploads(self):
         manage = body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources(")
         drain = manage[manage.index("const auto adopt ="):]
