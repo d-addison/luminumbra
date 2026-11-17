@@ -77,7 +77,9 @@ void ValidateIdentity(const CaptureIdentity& identity) {
     }
 }
 
-void ValidateAdapter(const CaptureFeatureAdapter& adapter, bool requested) {
+// Adapter state is validated on its own. Request membership is applied later:
+// a requested feature observed disabled is a refusal, not malformed input.
+void ValidateAdapter(const CaptureFeatureAdapter& adapter) {
     ValidateText(adapter.reason, false);
     bool valid = false;
     switch (adapter.change) {
@@ -85,7 +87,7 @@ void ValidateAdapter(const CaptureFeatureAdapter& adapter, bool requested) {
             valid = !adapter.enabled.has_value();
             break;
         case Change::Unchanged:
-            valid = adapter.enabled.has_value() && adapter.enabled == requested;
+            valid = adapter.enabled.has_value();
             break;
         case Change::Forced:
             valid = adapter.enabled == true;
@@ -240,8 +242,8 @@ CaptureFeatureProfile::Resolve(const Client::ScenarioHarness::RuntimeScenarioCon
         }
         selected[index] = true;
     }
-    for (std::size_t index = 0; index < kCaptureFeatureCount; ++index) {
-        ValidateAdapter(context.adapters[index], selected[index]);
+    for (const auto& adapter : context.adapters) {
+        ValidateAdapter(adapter);
     }
 
     const auto isolation = Client::ScenarioHarness::ParseIsolationConfig(
@@ -257,9 +259,14 @@ CaptureFeatureProfile::Resolve(const Client::ScenarioHarness::RuntimeScenarioCon
         state.effective = adapter.enabled;
         state.change = adapter.change;
         state.reason = adapter.reason;
+        // An unchanged final observation of a disabled feature already explains
+        // its state; later suppression reasons must not replace the adapter reason.
+        const bool observed_disabled =
+            adapter.change == Change::Unchanged && adapter.enabled == false;
         // Explicit final observations describe transient mode policy after pins.
         // Baseline controls fill gaps; they cannot overwrite a reported override.
-        if (adapter.change != Change::Forced && adapter.change != Change::Suppressed) {
+        if (!observed_disabled && adapter.change != Change::Forced &&
+            adapter.change != Change::Suppressed) {
             const auto disabled = DisabledSetting(feature, systems, graphics);
             if (!disabled.empty()) {
                 Suppress(state, disabled);
@@ -270,7 +277,7 @@ CaptureFeatureProfile::Resolve(const Client::ScenarioHarness::RuntimeScenarioCon
         }
         // A final producer override cannot restore draws omitted by the resolved
         // isolation configuration. Preserve already explicit suppression reasons.
-        if (adapter.change != Change::Suppressed) {
+        if (!observed_disabled && adapter.change != Change::Suppressed) {
             const auto layers = RenderLayers(feature);
             if ((isolation.layer_mask & layers) != layers) {
                 Suppress(state, "isolation_layer_suppressed");
