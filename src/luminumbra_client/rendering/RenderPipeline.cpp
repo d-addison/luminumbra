@@ -31,6 +31,7 @@
 #include "luminumbra_common/core/GraphicsPresets.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
+#include "luminumbra_common/world/NearTerrainMeshSnapshot.h"
 #include "passes/AerialPass.h"
 #include "passes/DebugViewPass.h" // render-only G-buffer debug visualizer (default-OFF)
 #include "passes/FinalBlitPass.h" // -T01: FinalBlit on the RenderContext seam
@@ -364,7 +365,8 @@ bool RenderPipeline::startup(u32 screen_width,
             g.tileResolution = 384;
             const ImpostorAtlasTextures ia =
                 BakeTreeImpostorAtlasToTextures(m_root_path.string(), *this, g);
-            if (ia.ok) {
+            m_treeImpostorCoverage = ia.alpha_coverage;
+            if (ia.drawable()) {
                 m_treeImpostorAlbedo = ia.albedoTex;
                 m_treeImpostorNormal = ia.normalTex;
                 m_treeImpostorGrid = ia.grid;
@@ -378,7 +380,7 @@ bool RenderPipeline::startup(u32 screen_width,
                     ia.grid,
                     g.tileResolution,
                     ia.radius);
-            } else {
+            } else if (!ia.alpha_coverage.refused()) {
                 LUMINUMBRA_CORE_WARN("Tree impostor bake failed: {}", ia.error);
             }
         }
@@ -2411,6 +2413,8 @@ RenderPipeline::build_chunk_snapshots(const std::vector<Chunk*>& renderable_chun
         snapshot.coords = chunk->get_coords();
         snapshot.source_chunk = chunk;
         snapshot.mesh_version = chunk->mesh_version.load(std::memory_order_acquire);
+        snapshot.near_terrain_snapshot =
+            chunk->near_terrain_snapshot.load(std::memory_order_acquire);
         snapshot.water_mesh_version = chunk->water_mesh_version.load(std::memory_order_acquire);
         snapshot.terrain_vertex_count = chunk->mesh_vertices.size();
         snapshot.terrain_index_count = chunk->mesh_indices.size();
@@ -2421,6 +2425,7 @@ RenderPipeline::build_chunk_snapshots(const std::vector<Chunk*>& renderable_chun
         const u32 water_version_after_metadata =
             chunk->water_mesh_version.load(std::memory_order_acquire);
         if (version_after_metadata != snapshot.mesh_version) {
+            snapshot.near_terrain_snapshot.reset();
             snapshot.mesh_version = version_after_metadata;
             snapshot.terrain_vertex_count = 0;
             snapshot.terrain_index_count = 0;
@@ -3854,6 +3859,10 @@ bool RenderPipeline::apply_graphics(const luminumbra::core::ResolvedGraphics& re
     m_farlod->set_horizon(config.far_radius_m, config.far_outer_clip_m);
     set_volumetric_quality(config.volumetric_quality);
     m_ui_blur = config.ui_blur;
+    if (m_near_terrain_refinement.set_enabled(resolved.values.terrain_near_refinement)) {
+        m_taau_pass->invalidate_history();
+        m_frustumCache.valid = false;
+    }
     // Scale changes already reset history during target publication. Other presentation
     // changes also invalidate the accumulated image, even with unchanged target extents.
     if (config != previous && config.render_scale == previous.render_scale) {
@@ -3907,6 +3916,8 @@ void RenderPipeline::clear_all_chunk_data() {
     }
     m_chunk_render_data.clear();
     m_terrain_upload_queue.clear();
+    m_near_terrain_upload_queue.clear();
+    m_near_terrain_refinement.clear();
     for (auto& data : m_free_chunk_render_slots) {
         delete_chunk_slot(data);
     }
@@ -4239,6 +4250,8 @@ RenderContext RenderPipeline::make_taau_context() {
     ctx.lit_scene = m_render_registry.adopt_fbo("lit_scene", lfbo.fbo_id);
     ctx.motion_vectors = m_render_registry.adopt_texture(
         "motion_vectors", m_gbuffer_pass->gbuffer().motion_vector_texture);
+    ctx.gbuffer_depth =
+        m_render_registry.adopt_texture("gbuffer_depth", m_gbuffer_pass->gbuffer().depth_texture);
     return ctx;
 }
 
@@ -4259,6 +4272,8 @@ void RenderPipeline::cleanup_gpu_resources() {
     }
     m_chunk_render_data.clear();
     m_terrain_upload_queue.clear();
+    m_near_terrain_upload_queue.clear();
+    m_near_terrain_refinement.clear();
     for (auto& d : m_free_chunk_render_slots) {
         delete_chunk_slot(d);
     }
@@ -4351,6 +4366,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_staticModelTextures.clear();
     m_staticModelNextLayer = 0;
     m_treeImpostorsEnabled = false;
+    m_treeImpostorCoverage = {};
     m_treeImpostorGrid = 0;
     m_treeImpostorAtlasSize = 0;
     m_treeImpostorRadius = 0.0f;
@@ -4468,8 +4484,14 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
     for (auto& [id, data] : records) {
         if (active.contains(id))
             data.frames_since_inactive = 0;
-        else if (++data.frames_since_inactive > inactive_ttl)
-            expired.push_back(id);
+        else {
+            if constexpr (!Water) {
+                m_near_terrain_refinement.forget(id);
+            }
+            if (++data.frames_since_inactive > inactive_ttl) {
+                expired.push_back(id);
+            }
+        }
     }
     for (const auto id : expired) {
         if constexpr (Water)
@@ -4480,6 +4502,8 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
 
     std::vector<MeshUploadCandidate> candidates;
     candidates.reserve(chunks.size());
+    // Metadata only: each visible chunk enters at most one of these queues.
+    std::vector<MeshUploadCandidate> refinement_candidates;
     std::size_t invalid_payloads = 0;
     for (const auto& chunk : chunks) {
         if constexpr (Water) {
@@ -4490,11 +4514,34 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
                 continue;
             }
         }
+        const glm::vec3 center(chunk.coords.x * CHUNK_SIZE_X + CHUNK_SIZE_X * 0.5f,
+                               chunk.coords.y * CHUNK_SIZE_Y + CHUNK_SIZE_Y * 0.5f,
+                               chunk.coords.z * CHUNK_SIZE_Z + CHUNK_SIZE_Z * 0.5f);
+        const auto delta = center - camera.Position;
+        const float distance = glm::dot(delta, delta);
+        bool refinement_requested = false;
+        bool refinement_changed = false;
+        if constexpr (!Water) {
+            if (chunk.source_chunk) {
+                const auto evidence = m_near_terrain_refinement.observe(
+                    *chunk.source_chunk, chunk.mesh_version, chunk.near_terrain_snapshot, distance);
+                refinement_requested = static_cast<bool>(evidence);
+                const auto resident = records.find(chunk.id);
+                refinement_changed =
+                    resident != records.end() && !resident->second.refinement.matches(evidence);
+            }
+        }
         const auto found = records.find(chunk.id);
+        bool retire_refined = false;
+        if constexpr (!Water) {
+            retire_refined = found != records.end() && found->second.refinement.requested;
+        }
         // A published empty water mesh is a real replacement, adopted through
-        // the same bounded queue. Absent chunks still use the inactivity grace.
+        // the same bounded queue. An emptied refined terrain mesh also retires
+        // its displaced surface. Absent chunks still use the inactivity grace.
         if (!(Water ? chunk.has_water_mesh() : chunk.has_terrain_mesh()) &&
-            (!Water || found == records.end() || found->second.element_count == 0))
+            ((!Water && !retire_refined) || found == records.end() ||
+             found->second.element_count == 0))
             continue;
         const bool is_new = found == records.end() || found->second.element_count == 0;
         bool is_stale = !is_new && found->second.mesh_version !=
@@ -4504,6 +4551,9 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
                 is_stale || (!is_new && m_frame_far_selection.effective == FarWorldMode::Ladder &&
                              !found->second.LadderUploadValid());
         }
+        const bool refinement_only =
+            !Water && !is_new && !is_stale && refinement_requested && !retire_refined;
+        is_stale = is_stale || refinement_changed;
         if (!is_new && !is_stale)
             continue;
         ++(is_new
@@ -4523,24 +4573,28 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
                             : stats.terrain_stale_uploads_deferred));
             continue;
         }
-        const glm::vec3 center(chunk.coords.x * CHUNK_SIZE_X + CHUNK_SIZE_X * 0.5f,
-                               chunk.coords.y * CHUNK_SIZE_Y + CHUNK_SIZE_Y * 0.5f,
-                               chunk.coords.z * CHUNK_SIZE_Z + CHUNK_SIZE_Z * 0.5f);
-        const auto delta = center - camera.Position;
-        const float distance = glm::dot(delta, delta);
-        candidates.push_back(
+        if constexpr (!Water) {
+            bytes = NearTerrainRefinementCache::upload_cost(
+                refinement_requested, chunk.terrain_vertex_count, chunk.terrain_index_count, bytes);
+        }
+        auto& destination = refinement_only ? refinement_candidates : candidates;
+        destination.push_back(
             {chunk,
              is_new,
              is_stale,
              std::isfinite(distance) ? distance : std::numeric_limits<float>::max(),
-             bytes});
+             bytes,
+             refinement_only});
     }
     (Water ? stats.water_upload_candidates : stats.terrain_upload_candidates) =
-        candidates.size() + invalid_payloads;
-    if (!candidates.empty()) {
+        candidates.size() + refinement_candidates.size() + invalid_payloads;
+    if (!candidates.empty() || !refinement_candidates.empty()) {
         float nearest = std::numeric_limits<float>::max();
-        for (const auto& candidate : candidates)
-            nearest = std::min(nearest, candidate.distance_sq);
+        for (const auto* pending : {&candidates, &refinement_candidates}) {
+            for (const auto& candidate : *pending) {
+                nearest = std::min(nearest, candidate.distance_sq);
+            }
+        }
         (Water ? stats.water_nearest_candidate_distance_sq
                : stats.terrain_nearest_candidate_distance_sq) = nearest;
     }
@@ -4556,66 +4610,115 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
                     << 1u) |
                    (item.is_new ? 0u : 1u);
         });
+    if constexpr (!Water) {
+        refresh_uploads(
+            m_near_terrain_upload_queue,
+            refinement_candidates,
+            [](const auto& item) { return static_cast<std::uint64_t>(item.chunk.id); },
+            [](const auto& item) { return static_cast<std::uint64_t>(item.chunk.id); });
+    }
     float farthest_selected = 0;
-    const auto work = drain_uploads(
-        queue,
-        Water ? kWaterUploadLimits : kTerrainUploadLimits,
-        [](const auto& candidate) { return candidate.bytes; },
-        [&](const auto& candidate) {
-            ++(candidate.is_new
-                   ? (Water ? stats.water_new_uploads_selected : stats.terrain_new_uploads_selected)
-                   : (Water ? stats.water_stale_uploads_selected
-                            : stats.terrain_stale_uploads_selected));
-            farthest_selected = std::max(farthest_selected, candidate.distance_sq);
-            ChunkMeshPayload payload;
-            const bool copied = Water ? copy_water_mesh_payload(candidate.chunk, payload)
-                                      : copy_terrain_mesh_payload(candidate.chunk, payload);
-            if (!copied) {
-                ++(Water ? stats.water_upload_failures : stats.terrain_upload_failures);
+    const auto adopt = [&](const auto& candidate) {
+        ++(candidate.is_new
+               ? (Water ? stats.water_new_uploads_selected : stats.terrain_new_uploads_selected)
+               : (Water ? stats.water_stale_uploads_selected
+                        : stats.terrain_stale_uploads_selected));
+        farthest_selected = std::max(farthest_selected, candidate.distance_sq);
+        ChunkMeshPayload payload;
+        const bool copied = Water ? copy_water_mesh_payload(candidate.chunk, payload)
+                                  : copy_terrain_mesh_payload(candidate.chunk, payload);
+        if (!copied) {
+            ++(Water ? stats.water_upload_failures : stats.terrain_upload_failures);
+            return false;
+        }
+        ++(Water ? stats.water_payload_copies : stats.terrain_payload_copies);
+        (Water ? stats.water_payload_bytes : stats.terrain_payload_bytes) += candidate.bytes;
+        const auto failures = Water ? stats.water_upload_failures : stats.terrain_upload_failures;
+        if constexpr (Water) {
+            if (payload.has_mesh())
+                upload_water_mesh(candidate.chunk, payload);
+            else
+                unload_water_resources(candidate.chunk.id);
+        } else {
+            const auto evidence = m_near_terrain_refinement.observe(*candidate.chunk.source_chunk,
+                                                                    payload.mesh_version,
+                                                                    payload.near_terrain_snapshot,
+                                                                    candidate.distance_sq);
+            const auto result = m_near_terrain_refinement.prepare(*candidate.chunk.source_chunk,
+                                                                  payload.mesh_version,
+                                                                  evidence,
+                                                                  candidate.distance_sq,
+                                                                  payload.vertices,
+                                                                  payload.indices,
+                                                                  elapsed());
+            if (candidate.refinement_only && result == NearTerrainUploadResult::Deferred) {
                 return false;
             }
-            ++(Water ? stats.water_payload_copies : stats.terrain_payload_copies);
-            (Water ? stats.water_payload_bytes : stats.terrain_payload_bytes) += candidate.bytes;
-            const auto failures =
-                Water ? stats.water_upload_failures : stats.terrain_upload_failures;
-            if constexpr (Water) {
-                if (payload.has_mesh())
-                    upload_water_mesh(candidate.chunk, payload);
-                else
-                    unload_water_resources(candidate.chunk.id);
-            } else
+            // A deferred baseline remains eligible for a separate optional
+            // replacement; only completed/refused requests stamp evidence.
+            payload.refinement.set(result == NearTerrainUploadResult::Deferred ? nullptr
+                                                                               : evidence);
+            if (payload.has_mesh()) {
                 upload_chunk_mesh(candidate.chunk, payload);
-            return failures ==
-                   (Water ? stats.water_upload_failures : stats.terrain_upload_failures);
-        },
-        elapsed);
+            } else {
+                unload_chunk_resources(candidate.chunk.id);
+            }
+            if (result == NearTerrainUploadResult::Deferred &&
+                failures == stats.terrain_upload_failures) {
+                // One metadata entry per adopted baseline keeps settling aware
+                // of its pending refinement before the next frame's discovery.
+                auto refinement = candidate;
+                refinement.is_new = false;
+                refinement.is_stale = true;
+                refinement.refinement_only = true;
+                m_near_terrain_upload_queue.refresh(candidate.chunk.id, refinement);
+            }
+        }
+        return failures == (Water ? stats.water_upload_failures : stats.terrain_upload_failures);
+    };
+    const auto cost = [](const auto& candidate) {
+        return candidate.bytes;
+    };
+    const auto work = [&] {
+        if constexpr (Water) {
+            return drain_uploads(queue, kWaterUploadLimits, cost, adopt, elapsed);
+        } else {
+            return drain_terrain_uploads(queue, m_near_terrain_upload_queue, cost, adopt, elapsed);
+        }
+    }();
     (Water ? stats.water_budget : stats.terrain_budget) = work;
     (Water ? stats.water_uploads : stats.terrain_uploads) = work.adopted;
     (Water ? stats.water_uploads_deferred : stats.terrain_uploads_deferred) =
-        queue.size() + invalid_payloads;
+        queue.size() + (Water ? 0 : m_near_terrain_upload_queue.size()) + invalid_payloads;
     (Water ? stats.water_farthest_selected_distance_sq
            : stats.terrain_farthest_selected_distance_sq) = farthest_selected;
     float nearest_deferred = std::numeric_limits<float>::max();
-    for (const auto& candidate : candidates) {
-        if (!queue.contains(candidate.chunk.id))
-            continue;
-        ++(candidate.is_new
-               ? (Water ? stats.water_new_uploads_deferred : stats.terrain_new_uploads_deferred)
-               : (Water ? stats.water_stale_uploads_deferred
-                        : stats.terrain_stale_uploads_deferred));
-        nearest_deferred = std::min(nearest_deferred, candidate.distance_sq);
-        if (work.attempts && candidate.distance_sq < farthest_selected)
-            ++(Water ? stats.water_deferred_nearer_than_selected
-                     : stats.terrain_deferred_nearer_than_selected);
+    for (const auto* pending : {&candidates, &refinement_candidates}) {
+        for (const auto& candidate : *pending) {
+            if (!queue.contains(candidate.chunk.id) &&
+                (Water || !m_near_terrain_upload_queue.contains(candidate.chunk.id))) {
+                continue;
+            }
+            ++(candidate.is_new
+                   ? (Water ? stats.water_new_uploads_deferred : stats.terrain_new_uploads_deferred)
+                   : (Water ? stats.water_stale_uploads_deferred
+                            : stats.terrain_stale_uploads_deferred));
+            nearest_deferred = std::min(nearest_deferred, candidate.distance_sq);
+            if (work.attempts && candidate.distance_sq < farthest_selected) {
+                ++(Water ? stats.water_deferred_nearer_than_selected
+                         : stats.terrain_deferred_nearer_than_selected);
+            }
+        }
     }
-    if (queue.size())
+    if (queue.size() || (!Water && m_near_terrain_upload_queue.size()))
         (Water ? stats.water_nearest_deferred_distance_sq
                : stats.terrain_nearest_deferred_distance_sq) = nearest_deferred;
 }
 
 bool RenderPipeline::copy_terrain_mesh_payload(const ChunkMeshSnapshot& chunk,
                                                ChunkMeshPayload& payload) const {
-    if (!chunk.source_chunk || !chunk.has_terrain_mesh()) {
+    if (!chunk.source_chunk ||
+        ((chunk.terrain_vertex_count == 0) != (chunk.terrain_index_count == 0))) {
         return false;
     }
 
@@ -4634,9 +4737,15 @@ bool RenderPipeline::copy_terrain_mesh_payload(const ChunkMeshSnapshot& chunk,
     payload.mesh_version = version_before;
     payload.vertices = chunk.source_chunk->mesh_vertices;
     payload.indices = chunk.source_chunk->mesh_indices;
+    payload.near_terrain_snapshot = chunk.near_terrain_snapshot;
+    if (payload.near_terrain_snapshot &&
+        !payload.near_terrain_snapshot->matches(*chunk.source_chunk, version_before)) {
+        payload.near_terrain_snapshot.reset();
+    }
 
     const u32 version_after = chunk.source_chunk->mesh_version.load(std::memory_order_acquire);
-    if (version_after != version_before || !payload.has_mesh()) {
+    if (version_after != version_before || (payload.vertices.empty() != payload.indices.empty())) {
+        payload.near_terrain_snapshot.reset();
         payload.vertices.clear();
         payload.indices.clear();
         return false;
@@ -4880,6 +4989,7 @@ void RenderPipeline::upload_chunk_mesh(const ChunkMeshSnapshot& chunk,
     render_data.index_capacity = alloc.index_slot;
     render_data.element_count = index_count;
     render_data.mesh_version = payload.mesh_version;
+    render_data.refinement = payload.refinement;
     render_data.frames_since_inactive = 0;
 
     // Telemetry parity with the legacy slot accounting: a brand-new record is a
@@ -4915,6 +5025,7 @@ void RenderPipeline::unload_water_resources(ChunkID chunk_id) {
 }
 
 void RenderPipeline::unload_chunk_resources(ChunkID chunk_id) {
+    m_near_terrain_refinement.forget(chunk_id);
     m_foliage_pass->remove_ground_mesh(chunk_id);
     auto it = m_chunk_render_data.find(chunk_id);
     if (it != m_chunk_render_data.end()) {

@@ -2631,11 +2631,22 @@ int main(int argc, char* argv[]) {
         jobSystem.wait(s_worldDressingHandle);
     };
 
+    // Player ownership marks a live gameplay presentation. Retiring it is the
+    // common boundary for menu exits, world replacements and failed-entry drains.
+    auto release_player_controller = [&]() {
+        if (g_playerController) {
+            ReleasePhotoModeAndHud(g_app, renderPipeline);
+            g_playerController.reset();
+        }
+    };
+
     auto entry_world_revision = gameSession->WorldRevision();
     auto finish_world_replacement = [&]() {
         // An open can refuse before adoption. Preserve the still-live world's visuals/results.
-        if (gameSession->WorldRevision() != entry_world_revision)
+        if (gameSession->WorldRevision() != entry_world_revision) {
+            release_player_controller();
             prepare_world_entry();
+        }
     };
     std::string world_entry_error;
     auto refuse_world_entry = [&](const std::string& fallback, bool use_world_error = true) {
@@ -2647,7 +2658,7 @@ int main(int argc, char* argv[]) {
             g_uiManager->ShowMessage(error);
         if (gameSession->WorldRevision() != entry_world_revision) {
             g_app.menu.menu_backdrop_active = false;
-            g_playerController.reset();
+            release_player_controller();
         }
         scenario_failed = benchmark_v3 || scenario_config.active() ||
                           HasCommandLineOption(argc, argv, "--load-world") ||
@@ -2675,14 +2686,15 @@ int main(int argc, char* argv[]) {
         }
         if (Luminumbra::Rendering::TreeImpostorsRequested(
                 Luminumbra::Core::ReadEnvironment("LUMIN_TREE_IMPOSTORS")) &&
-            !renderPipeline.tree_impostor_enabled())
+            !renderPipeline.tree_impostor_enabled() &&
+            !renderPipeline.tree_impostor_coverage().refused())
             return "Required tree impostor baking failed. Check the client log for the renderer "
                    "error.";
         return {};
     };
 
     auto finish_world_entry = [&](bool staged_entry = false) {
-        g_playerController.reset();
+        release_player_controller();
         g_procgen = {};
         g_app.worldDressing = {};
         g_app.foragers = {};
@@ -3419,7 +3431,7 @@ int main(int argc, char* argv[]) {
                     return;
                 }
                 prepare_world_entry();
-                g_playerController.reset();
+                release_player_controller();
                 SetGamePaused(window, false);
                 SetGameState(window, gameStateManager, GameState::MAIN_MENU);
                 if (g_uiManager)
@@ -4148,7 +4160,7 @@ int main(int argc, char* argv[]) {
             if (auto* world = gameSession->GetWorldSystem())
                 world->clear_world(gameSession->GetPhysicsSystem());
             g_app.menu.menu_backdrop_active = false;
-            g_playerController.reset();
+            release_player_controller();
         }
         const auto rollback_error = entry_artifacts.rollback();
         if (!rollback_error.empty()) {
@@ -4183,6 +4195,7 @@ int main(int argc, char* argv[]) {
         return WorldEntryResult::Complete;
     };
     auto return_entry_to_menu = [&]() {
+        release_player_controller();
         SetGameState(window, gameStateManager, GameState::MAIN_MENU);
         if (g_uiManager)
             g_uiManager->RequestLoadDocument("main_menu.rml");
@@ -4492,6 +4505,8 @@ int main(int argc, char* argv[]) {
     }
     while (!glfwWindowShouldClose(window)) {
         LUMIN_PROFILE_FRAME_N("Client");
+        // Release weather before any frame writer, including menu previews.
+        g_app.hud.photoWeather.Restore(renderPipeline);
         if (benchmark_v4 && Luminumbra::Filesystem::capture_content_paths().refused()) {
             LUMINUMBRA_CORE_ERROR("Benchmark content reference escapes inventoried trees");
             exit_code = 2;
@@ -4538,10 +4553,12 @@ int main(int argc, char* argv[]) {
         if (benchmark_v3 && !benchmark_world_checked && gameSession &&
             gameStateManager.GetCurrentState() == GameState::IN_GAME) {
             try {
-                const auto saved =
-                    Luminumbra::Persistence::InspectSavedWorld(gameSession->GetSaveRootPath(),
-                                                               root_path_str,
-                                                               gameSession->GetMetadata().worldId);
+                const auto saved = Luminumbra::Persistence::InspectSavedWorld(
+                    gameSession->GetSaveRootPath(),
+                    root_path_str,
+                    gameSession->GetMetadata().worldId,
+                    {},
+                    Luminumbra::Persistence::SavedWorldValidation::Catalog);
                 if (!saved.error.empty())
                     throw std::runtime_error(saved.error);
                 const auto preset = nlohmann::json::parse(saved.preset_json);
@@ -4645,7 +4662,7 @@ int main(int argc, char* argv[]) {
                         }
                         if (saved && main_menu) {
                             prepare_world_entry();
-                            g_playerController.reset();
+                            release_player_controller();
                             SetGamePaused(window, false);
                             SetGameState(window, gameStateManager, GameState::MAIN_MENU);
                             g_uiManager->RequestLoadDocument("main_menu.rml");
@@ -5683,6 +5700,8 @@ int main(int argc, char* argv[]) {
                     scenario_runner->onPreRenderWorldSweep();
                 }
                 if (gameSession->GetWorldSystem() && g_camera) {
+                    // Release the previous photo hold before sampling live defaults.
+                    renderPipeline.set_time_of_day_hold(false);
                     // Live play runs on the
                     // authoritative sim tick — season AND time-of-day become pure
                     // functions of it (no more frozen season-neutral tick 0; no more
@@ -5788,19 +5807,15 @@ int main(int argc, char* argv[]) {
                                         g_camera->GetViewMatrix();
                                     const auto project = [&](const glm::vec3& wp) -> glm::vec2 {
                                         const glm::vec4 clip = vp * glm::vec4(wp, 1.0f);
-                                        if (clip.w <= 0.0f)
+                                        if (!std::isfinite(clip.w) || !(clip.w > 0.0f)) {
                                             return Luminumbra::Rendering::kLiveBoltPenUp;
-                                        return glm::vec2(clip.x / clip.w, clip.y / clip.w);
+                                        }
+                                        const glm::vec2 ndc(clip.x / clip.w, clip.y / clip.w);
+                                        if (!std::isfinite(ndc.x) || !std::isfinite(ndc.y)) {
+                                            return Luminumbra::Rendering::kLiveBoltPenUp;
+                                        }
+                                        return ndc;
                                     };
-                                    const auto project_stroke =
-                                        [&](const std::vector<glm::vec3>& stroke) {
-                                            std::vector<glm::vec2> points;
-                                            points.reserve(stroke.size());
-                                            for (const glm::vec3& wp : stroke) {
-                                                points.push_back(project(wp));
-                                            }
-                                            return points;
-                                        };
                                     const auto project_strike = [&](std::size_t index) {
                                         const auto& strike = *consumed[index].event;
                                         const float gy = consumed[index].ground_y;
@@ -5811,16 +5826,8 @@ int main(int argc, char* argv[]) {
                                             strike.magnitude,
                                             (static_cast<std::uint64_t>(strike.storm_salt) << 32) ^
                                                 strike.strike_tick);
-                                        Luminumbra::Rendering::ProjectedLiveStrike projected;
-                                        projected.main_channel = project_stroke(bolt.main_channel);
-                                        projected.branches.reserve(bolt.branches.size());
-                                        for (const auto& br : bolt.branches) {
-                                            projected.branches.push_back(project_stroke(br));
-                                        }
-                                        projected.pulse = pulses[index];
-                                        projected.strike_ndc =
-                                            project(glm::vec3(strike.world_x, gy, strike.world_z));
-                                        return projected;
+                                        return Luminumbra::Rendering::ProjectLightningBolt(
+                                            bolt, vp, pulses[index]);
                                     };
                                     // Each candidate has 33 channel points and at most three
                                     // 4-point branches. Test visibility before the 48-strike cap;
@@ -5836,20 +5843,34 @@ int main(int argc, char* argv[]) {
                                                     LiveStrikeMayBeVisible(project_strike(index),
                                                                            view_margin);
                                             });
-                                    // At most 48 geometry candidates plus one flash-only entry.
-                                    frame_strikes.reserve(selected.size() + 1);
-                                    const auto strongest = static_cast<std::size_t>(
-                                        std::max_element(pulses.begin(), pulses.end()) -
-                                        pulses.begin());
-                                    const auto& flash = *consumed[strongest].event;
-                                    auto& flash_only = frame_strikes.emplace_back();
-                                    flash_only.pulse = pulses[strongest];
-                                    flash_only.strike_ndc =
-                                        project(glm::vec3(flash.world_x,
-                                                          consumed[strongest].ground_y,
-                                                          flash.world_z));
-                                    for (const std::size_t index : selected) {
-                                        frame_strikes.push_back(project_strike(index));
+                                    const auto flash_selected =
+                                        Luminumbra::Rendering::SelectLiveStrikeFlashCandidates(
+                                            pulses);
+                                    // At most 48 geometry candidates plus eight flash candidates.
+                                    // Merge by original input index so ties have the same stable
+                                    // key.
+                                    auto frame_indices = selected;
+                                    for (const std::size_t index : flash_selected) {
+                                        if (!std::binary_search(
+                                                selected.begin(), selected.end(), index)) {
+                                            frame_indices.push_back(index);
+                                        }
+                                    }
+                                    std::sort(frame_indices.begin(), frame_indices.end());
+                                    frame_strikes.reserve(frame_indices.size());
+                                    for (const std::size_t index : frame_indices) {
+                                        if (std::binary_search(
+                                                selected.begin(), selected.end(), index)) {
+                                            frame_strikes.push_back(project_strike(index));
+                                        } else {
+                                            const auto& flash = *consumed[index].event;
+                                            auto& flash_only = frame_strikes.emplace_back();
+                                            flash_only.pulse = pulses[index];
+                                            flash_only.strike_ndc =
+                                                project(glm::vec3(flash.world_x,
+                                                                  consumed[index].ground_y,
+                                                                  flash.world_z));
+                                        }
                                     }
                                 }
                                 if (!frame_strikes.empty()) {
@@ -5863,7 +5884,7 @@ int main(int argc, char* argv[]) {
                                     g_app.weather.liveBolt.bolt_points_ndc =
                                         std::move(composed.points);
                                     g_app.weather.liveBolt.pulse_intensity = composed.pulse;
-                                    g_app.weather.liveBolt.strike_ndc = composed.strike_ndc;
+                                    g_app.weather.liveBolt.flashes = composed.flashes;
                                     g_app.weather.liveBolt.bolt_width_ndc = bolt_width;
                                     g_app.weather.liveBolt.bolt_glow_ndc = bolt_glow;
                                     g_app.weather.boltFramesLeft = 3; // a few frames of flash
@@ -5921,6 +5942,18 @@ int main(int argc, char* argv[]) {
                             }
                         }
                     }
+                    // Environment writer order: live clock/weather, photo selection,
+                    // scenario pins, benchmark/scene pins, foliage QA, frame-scan pin,
+                    // render. World sweeps render their own pins before this path;
+                    // timelapse advances its next-frame pin after capture.
+                    const bool photo_capture_pinned =
+                        scenario_config.active() || g_rb_active ||
+                        g_app.capture.timelapse_frames != 0 || g_app.capture.scene_active ||
+                        g_app.capture.frame_scan_active || g_app.capture.render_parity_active ||
+                        g_app.capture.survey_active || !g_app.capture.bake_impostor_path.empty() ||
+                        !g_app.capture.ui_screenshot_screen.empty() || g_app.capture.ui_thumbs != 0;
+                    UpdatePhotoEnvironment(
+                        g_app, g_playerController.get(), renderPipeline, photo_capture_pinned);
                     // Scenario capture render pins (fixed time-of-day for the
                     // visual smokes; the season sweep's pin schedule) run at
                     // this exact point so they override the live-tick
@@ -7654,7 +7687,7 @@ int main(int argc, char* argv[]) {
         world_system->clear_world(gameSession->GetPhysicsSystem());
         mark_shutdown("world_cleared");
     }
-    g_playerController.reset();
+    release_player_controller();
     mark_shutdown("player_controller_reset");
     g_camera.reset();
     mark_shutdown("camera_reset");

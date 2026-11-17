@@ -73,12 +73,10 @@ uniform vec3 u_albedo_tint = vec3(1.0);
 uniform int u_alphaTest = 0; // 0 opaque, 1 texture-luma cutout, 2 procedural leaf silhouette, 3 authored alpha cutoff.
 
 // macro ROCK-on-steep-faces overlay is a TERRAIN-only macro-variation
-// (natural cliffs read as scree). It costs vnoise + up to 3 extra triplanar samples per
-// fragment. Instanced foliage/props (procgen trees/bushes/rocks) used materials 1-3 and so
-// paid this every leaf/bark fragment — heavily overdrawn — for no visual benefit (a leaf
-// card should never sample rock). Terrain sets this to 1 (byte-identical to before); the
-// instanced static-mesh path sets it to 0, which skips the branch entirely..
-uniform int u_macroRockOverlay = 1;
+// (natural cliffs read as scree). Terrain explicitly enables it for live and far draws. Other users
+// of this shader (models and isolated material plates) retain their authored
+// material unless the draw opts into terrain slope substitution.
+uniform int u_macroRockOverlay = 0;
 
 // force the cheap FLAT-material path (skip ALL triplanar sampling) for the
 // procedural foliage cards (leaves + bushes). These are alpha-keyed, heavily overdrawn, and
@@ -218,6 +216,16 @@ const float kDetailGain    = 1.4;   // high-freq amplification (>1 sharpens). Gr
 // adding meaningful detail (the albedo unsharp carries the gain). The speckle is a
 // separate lighting implementation note (terrain lighting contract).
 
+// Vertex normals smooth across ridges; using them for projection gives cliffs
+// weight in the collapsed top-down projection and stretches its texels.
+vec3 terrain_surface_normal(vec3 viewPos, vec3 smoothNormal) {
+    // Differentiate camera-relative coordinates, then undo the rigid view rotation.
+    vec3 face = transpose(u_normalViewMatrix) * cross(dFdx(viewPos), dFdy(viewPos));
+    float extent = dot(face, face);
+    vec3 n = extent > 1e-20 ? face * inversesqrt(extent) : smoothNormal;
+    return dot(n, smoothNormal) < 0.0 ? -n : n;
+}
+
 // Triplanar blend weights from a world-space normal (sharpened, normalized).
 vec3 triplanar_weights(vec3 n) {
     vec3 w = pow(abs(n), vec3(4.0));
@@ -268,13 +276,16 @@ vec3 triplanar_albedo(vec3 worldPos, vec3 weights, float layer, float scale, vec
     // detail survives to the horizon. Mean-preserving (unsharp), so the calibration
     // luminance is unchanged near camera.
     vec2 texSize = vec2(textureSize(u_terrainTextures, 0).xy);
-    float footprint = max(length(dx.xz * scale * texSize), length(dy.xz * scale * texSize));
-    float baseLod = max(log2(max(footprint, 1e-8)), 0.0);
+    vec3 footprint = vec3(
+        max(length(dx.zy * scale * texSize), length(dy.zy * scale * texSize)),
+        max(length(dx.xz * scale * texSize), length(dy.xz * scale * texSize)),
+        max(length(dx.xy * scale * texSize), length(dy.xy * scale * texSize)));
+    vec3 baseLod = max(log2(max(footprint, vec3(1e-8))), vec3(0.0));
     // Keep the blur separated from the biased sharp sample.
-    float blurLod = baseLod + kDetailBlurLod + u_lodBias;
-    vec3 bx = textureLod(u_terrainTextures, vec3(uv_x, layer), blurLod).rgb;
-    vec3 by = textureLod(u_terrainTextures, vec3(uv_y, layer), blurLod).rgb;
-    vec3 bz = textureLod(u_terrainTextures, vec3(uv_z, layer), blurLod).rgb;
+    vec3 blurLod = baseLod + kDetailBlurLod + u_lodBias;
+    vec3 bx = textureLod(u_terrainTextures, vec3(uv_x, layer), blurLod.x).rgb;
+    vec3 by = textureLod(u_terrainTextures, vec3(uv_y, layer), blurLod.y).rgb;
+    vec3 bz = textureLod(u_terrainTextures, vec3(uv_z, layer), blurLod.z).rgb;
     vec3 blur = bx * weights.x + by * weights.y + bz * weights.z;
     return clamp(blur + (sharp - blur) * kDetailGain, 0.0, 1.0);
 }
@@ -332,7 +343,7 @@ vec3 materialAlbedo(uint materialId) {
 }
 
 // Evaluate one material before coverage blending, including its own calibration.
-void terrainSurface(uint materialId, vec3 worldPos, vec3 dx, vec3 dy,
+void terrainSurface(uint materialId, vec3 worldPos, vec3 dx, vec3 dy, vec3 surfaceN,
                     inout vec3 worldN, out vec3 albedo, out float roughness,
                     out float metallic, out float ao) {
     float matIndex = float(materialId) / 255.0;
@@ -349,8 +360,8 @@ void terrainSurface(uint materialId, vec3 worldPos, vec3 dx, vec3 dy,
     float normLayer = floor(texInfo.g * 255.0 + 0.5);
     float tiling = max(texInfo.b * 64.0, 0.0625);
     float scale = 1.0 / tiling; // repeats per world unit
-    vec3 weights = triplanar_weights(worldN);
-    float geomSlope = worldN.y; // up-facing-ness (1 flat, 0 vertical), pre normal-map
+    vec3 weights = triplanar_weights(u_macroRockOverlay == 1 ? surfaceN : worldN);
+    float geomSlope = surfaceN.y; // up-facing-ness (1 flat, 0 vertical), pre normal-map
     vec3 baseAlbedo = triplanar_albedo(worldPos, weights, texLayer, scale, dx, dy);
     vec3 baseN      = triplanar_normal(worldPos, worldN, weights, normLayer, scale, dx, dy);
     // terrain PBR roughness-map: per-texel roughness from the AmbientCG roughness map
@@ -371,34 +382,48 @@ void terrainSurface(uint materialId, vec3 worldPos, vec3 dx, vec3 dy,
         }
     }
 
-    // Preserve the terrain-only rock overlay on steep Stone/Soil/Grass.
-    // It is evaluated per source material before coverage blending.
-    if (u_macroRockOverlay == 1 && geomSlope < 0.89 && materialId >= 1u && materialId <= 3u) {
+    // Calibrate each source before rock substitution and coverage blending.
+    baseAlbedo *= albedoScale * albedoTint;
+
+    // Natural ground, including sand, exposes rock on steep faces. Flat sand
+    // keeps its calibrated reflectance. Jitter is bounded to +/-0.09, so slopes
+    // at or above 0.89 need no noise evaluation or additional texture samples.
+    if (u_macroRockOverlay == 1 && geomSlope < 0.89 && materialId >= 1u && materialId <= 4u) {
         float jitter = (vnoise(worldPos * 0.05) - 0.5) * 0.18; // ~20 m break-up
-        float rockW = smoothstep(0.80 + jitter, 0.50 + jitter, geomSlope); // steep -> rock
+        float rockW = 1.0 - smoothstep(0.50 + jitter, 0.80 + jitter, geomSlope); // steep -> rock
         if (rockW > 0.002) {
             vec4 rockInfo = texture(u_materialLUT, vec2(1.0/255.0, lutRowV(1))); // Stone row 1
             float rockTex   = floor(rockInfo.r * 255.0 + 0.5);
             float rockNrm   = floor(rockInfo.g * 255.0 + 0.5);
             float rockScale = 1.0 / max(rockInfo.b * 64.0, 0.0625);
             vec3 rockAlbedo = triplanar_albedo(worldPos, weights, rockTex, rockScale, dx, dy);
+            float rockAlbedoScale = texture(u_materialLUT, vec2(1.0 / 255.0, lutRowV(2))).g;
+            vec3 rockAlbedoTint = texture(u_materialLUT, vec2(1.0 / 255.0, lutRowV(3))).rgb;
+            rockAlbedo *= rockAlbedoScale * rockAlbedoTint;
             vec3 rockN      = triplanar_normal(worldPos, worldN, weights, rockNrm, rockScale, dx, dy);
             baseAlbedo = mix(baseAlbedo, rockAlbedo, rockW);
             baseN      = normalize(mix(baseN, rockN, rockW));
-            if (u_terrainRoughnessValid == 1) {
-                float rockRough = triplanar_roughness(worldPos, weights, rockTex, rockScale, dx, dy);
-                baseRoughness = mix(baseRoughness, rockRough, rockW);
-            }
+            vec4 rockProps = texture(u_materialLUT, vec2(1.0 / 255.0, lutRowV(0)));
+            float rockRough = u_terrainRoughnessValid == 1
+                ? triplanar_roughness(worldPos, weights, rockTex, rockScale, dx, dy)
+                : rockProps.g;
+            baseRoughness = mix(baseRoughness, rockRough, rockW);
+            metallic = mix(metallic, rockProps.r, rockW);
         }
     }
     worldN = baseN;
-    albedo = baseAlbedo * albedoScale * albedoTint;
+    albedo = baseAlbedo;
     roughness = baseRoughness;
 }
 
 void main()
 {
     vec3 worldDx = dFdx(fs_in.WorldPos), worldDy = dFdy(fs_in.WorldPos);
+    // The draw-uniform terrain gate keeps derivatives before any discard.
+    vec3 surfaceN = vec3(0.0);
+    if (u_macroRockOverlay == 1) {
+        surfaceN = terrain_surface_normal(fs_in.FragPos, normalize(fs_in.WorldNormal));
+    }
 #ifdef LUMINUMBRA_FAR_WORLD_LADDER
     // A program writing gl_FragDepth must assign it on every surviving path.
     // Live, legacy, static and skinned depth/material outputs stay inert.
@@ -592,7 +617,7 @@ void main()
                     vec3 laneN = geomN;
                     vec3 laneAlbedo = vec3(0.7);
                     float laneRoughness, laneMetallic, laneAO;
-                    terrainSurface(uint(lane + 1), fs_in.WorldPos, worldDx, worldDy,
+                    terrainSurface(uint(lane + 1), fs_in.WorldPos, worldDx, worldDy, surfaceN,
                                    laneN, laneAlbedo, laneRoughness, laneMetallic, laneAO);
                     float normalizedWeight = weight / coverage;
                     albedo += laneAlbedo * normalizedWeight;
@@ -604,7 +629,7 @@ void main()
             }
             worldN = normalize(worldN);
         } else {
-            terrainSurface(fs_in.MaterialID, fs_in.WorldPos, worldDx, worldDy,
+            terrainSurface(fs_in.MaterialID, fs_in.WorldPos, worldDx, worldDy, surfaceN,
                            worldN, albedo, roughness, metallic, ao);
         }
         textured = true;

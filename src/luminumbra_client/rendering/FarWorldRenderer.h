@@ -90,6 +90,11 @@ public:
                             const World::FarWorldAuthorityProducer::FrozenPolicy& policy,
                             const World::FarFrozenCaptureLimits& limits,
                             const World::FarFrozenCaptureWork::Counts& transaction_samples);
+    // Explicit owner-thread retirement of idle session handoff history. Returns
+    // the retired count; unbound sessions and requested Legacy are no-ops.
+    // Retire first, then prune consumer history only against a captured, complete
+    // SessionDiagnostic() snapshot. Never stage between retirement and pruning.
+    std::size_t RetireIdleHistory();
     // Value diagnostics only; the pointer lasts until the binding drains.
     const FarWorldHandoffDiagnosticSnapshot* SessionDiagnostic() const;
     FarWorldSelection Selection(FarWorldPurpose purpose, bool enabled = true) const noexcept;

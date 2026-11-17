@@ -1,90 +1,124 @@
 #version 450 core
-// lightning light-pulse + bolt overlay (, one-way ).
-// A strike is a deterministic SIM world event (in the `weather` world_hash
-// sub-hash). This overlay is the full-scene render response for the frame(s) the
-// bolt shows: a transient additive luminance PULSE over the whole frame + a
-// screen-space BOLT polyline rasterized as a distance-to-line test in NDC. It is
-// drawn additively into the (already tonemapped) lighting FBO AFTER the skybox so
-// it composites over both terrain and sky -- the photography timing shot.
+// Composites the projected world-space bolt and localized lightning response
+// after terrain and sky. Cloud coverage comes from the world cloud renderer.
 out vec4 FragColor;
 in vec2 TexCoords;
 
+uniform sampler2D u_sceneDepth; // D32F reversed-Z: near 1, sky 0
+uniform mat4 u_gbufferInverseProjection; // selected Legacy or Ladder projection
+uniform vec2 u_jitter_ndc; // current G-buffer projection jitter; zero when TAAU is off
 uniform sampler2D u_scene;   // the composited (lit + sky) tonemapped color
 
 #define MAX_BOLT_POINTS 96
-// Matches Rendering::kLiveBoltPenUp and IsLiveBoltPenUp in LiveStrikeComposer.h.
-// Real live-bolt endpoints are clipped to [-1, 1] before upload.
+#define MAX_STRIKE_FLASHES 8
+// Matches Rendering::kLiveBoltPenUp and IsLiveBoltPenUp in LiveStrikeFlash.h.
+// Bolt endpoints are clipped to the view with a glow margin before upload.
 const vec2 kLiveBoltPenUp = vec2(-3.0, -3.0);
 uniform int   u_active = 0;
-uniform float u_pulse = 0.0;             // full-scene additive flash strength
+uniform float u_pulse = 0.0;             // strongest pulse: overlay gate and bolt brightness
 uniform vec3  u_color = vec3(0.72, 0.82, 1.0);
-uniform vec2  u_strikeNdc = vec2(0.0);   // strike point in NDC (radial centre)
+uniform int   u_flashCount = 0;
+uniform vec2  u_flashNdc[MAX_STRIKE_FLASHES];
+uniform float u_flashPulse[MAX_STRIKE_FLASHES];
+uniform int   u_flashOnscreen[MAX_STRIKE_FLASHES];
 uniform float u_boltWidth = 0.012;       // bolt core half-width (NDC)
 uniform float u_boltGlow = 0.040;        // bolt glow falloff radius (NDC)
 uniform int   u_boltCount = 0;
 uniform vec2  u_bolt[MAX_BOLT_POINTS];   // flattened NDC polyline with kLiveBoltPenUp breaks
+uniform float u_boltInverseDepth[MAX_BOLT_POINTS]; // reciprocal positive view depth
 uniform float u_aspect = 1.777;          // framebuffer width/height
 // GROUND-IMPACT flash. The bolt must visibly TOUCH DOWN:
 // a bright radial bloom at the touchdown point sells the strike connecting to the
 // terrain. u_groundNdc is the projected ground terminus; u_groundFlash scales it.
 uniform vec2  u_groundNdc = vec2(0.0, -1.0);
 uniform float u_groundFlash = 0.0;       // 0 = no impact bloom
-// DARK STORM CLOUD the bolt emerges from. u_cloudNdc is
-// the bolt-top anchor (cloud base) in NDC; u_cloudDark scales a dark, billowing
-// cloud mass painted across the upper frame around that anchor. The flash then
-// lights this cloud from within so the strike clearly STEMS FROM the cloud.
-uniform vec2  u_cloudNdc = vec2(0.0, 0.85);
-uniform float u_cloudDark = 0.0;         // 0 = no cloud overlay
-
-// --- cheap value-noise FBM for the cloud silhouette (hash-based, no textures) ---
-float hash21(vec2 p) {
-    p = fract(p * vec2(123.34, 345.45));
-    p += dot(p, p + 34.345);
-    return fract(p.x * p.y);
-}
-float vnoise(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    float a = hash21(i + vec2(0.0, 0.0));
-    float b = hash21(i + vec2(1.0, 0.0));
-    float c = hash21(i + vec2(0.0, 1.0));
-    float d = hash21(i + vec2(1.0, 1.0));
-    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-}
-float fbm(vec2 p) {
-    float v = 0.0;
-    float amp = 0.5;
-    for (int i = 0; i < 5; ++i) {
-        v += amp * vnoise(p);
-        p *= 2.02;
-        amp *= 0.5;
-    }
-    return v;
+// A finite flash footprint in aspect-corrected NDC. Scene luminance limits the
+// response in dark exposures; black pixels receive no ambient visibility floor.
+float flashResponse(float distanceToStrike, float sceneLuma) {
+    return (1.0 - smoothstep(0.0, 1.6, distanceToStrike)) * clamp(sceneLuma * 4.0, 0.0, 1.0);
 }
 
-// Shortest distance (aspect-corrected NDC) from a screen point to the bolt
-// polyline. The explicit kLiveBoltPenUp marker breaks disjoint strokes.
-float boltDistance(vec2 ndc) {
+// Only offscreen strikes receive a bounded scene-wide floor, including the
+// kLiveBoltPenUp sentinel used for strikes behind the camera. strikeExtent is the larger
+// absolute NDC component of the centre; the floor ramps in smoothly past the edge.
+float offscreenFlashFloor(float strikeExtent, float sceneLuma) {
+    return 0.35 * smoothstep(1.0, 1.3, strikeExtent) * clamp(sceneLuma * 4.0, 0.0, 1.0);
+}
+
+// Reconstruct positive reciprocal view depth in the scene's selected projection.
+// Clear sky and invalid samples never occlude. This also handles Ladder's far
+// plane and temporal jitter without assuming the bolt used the same projection.
+float sceneInverseDepth(vec2 uv) {
+    // projection[2].xy += jitter shifts raster NDC by minus jitter (w = -z).
+    // The overlay is unjittered: sample its ray in the jittered G-buffer, and
+    // use that same NDC with the inverse of the jittered projection.
+    vec2 depthUv = uv - u_jitter_ndc * 0.5;
+    float depth = texture(u_sceneDepth, depthUv).r;
+    if (isnan(depth) || isinf(depth) || depth <= 0.0 || depth > 1.0) return 0.0;
+    vec4 view = u_gbufferInverseProjection * vec4(depthUv * 2.0 - 1.0, depth, 1.0);
+    if (any(isnan(view)) || any(isinf(view)) || view.z >= 0.0 || view.w <= 0.0) return 0.0;
+    float inverseDepth = view.w / -view.z;
+    return isnan(inverseDepth) || isinf(inverseDepth) ? 0.0 : inverseDepth;
+}
+
+float boltVisibility(float boltDepth, float sceneDepth) {
+    if (sceneDepth <= 0.0) return 1.0;
+    // No attenuation in front or at equal depth. Fade over one percent of the
+    // occluder's distance to avoid a hard depth seam at a nearly touching ridge.
+    return 1.0 - smoothstep(0.0, 0.01, (sceneDepth - boltDepth) / sceneDepth);
+}
+
+vec2 channelResponse(float distance, float coreHalf, float glowRadius) {
+    float core = 1.0 - smoothstep(coreHalf * 0.6, coreHalf, distance);
+    float glowLin = glowRadius > coreHalf ? 1.0 - smoothstep(coreHalf, glowRadius, distance) : 0.0;
+    return vec2(core, glowLin * glowLin);
+}
+
+// Compare each segment independently before taking the strongest contribution:
+// a hidden branch must not mask another visible channel at the same pixel.
+vec2 boltResponse(vec2 ndc) {
+    float coreHalf = clamp(min(u_boltWidth * 0.18, u_boltGlow * 0.10), 0.0010, 0.0024);
+    float glowRadius = min(u_boltGlow, 0.030);
+    float sceneDepth = sceneInverseDepth(TexCoords);
     float best = 1e9;
+    vec2 faded = vec2(0.0);
     vec2 prev = vec2(0.0);
+    float prevDepth = 0.0;
     bool have_prev = false;
     for (int i = 0; i < MAX_BOLT_POINTS; ++i) {
         if (i >= u_boltCount) break;
         vec2 p = u_bolt[i];
-        if (all(equal(p, kLiveBoltPenUp))) { have_prev = false; continue; }
+        float depth = u_boltInverseDepth[i];
+        if (all(equal(p, kLiveBoltPenUp)) || isnan(depth) || isinf(depth) || depth <= 0.0) {
+            have_prev = false;
+            continue;
+        }
         if (have_prev) {
             vec2 a = vec2(prev.x * u_aspect, prev.y);
             vec2 b = vec2(p.x * u_aspect, p.y);
             vec2 q = vec2(ndc.x * u_aspect, ndc.y);
             vec2 ab = b - a;
-            float t = clamp(dot(q - a, ab) / max(dot(ab, ab), 1e-8), 0.0, 1.0);
-            best = min(best, length(q - (a + t * ab)));
+            float lengthSquared = dot(ab, ab);
+            float t = clamp(dot(q - a, ab) / max(lengthSquared, 1e-8), 0.0, 1.0);
+            float bd = length(q - (a + t * ab));
+            // Outside the core/glow support there is no channel contribution.
+            if (bd <= max(coreHalf, glowRadius)) {
+                // A subpixel stroke can collapse along the view ray. Its nearer
+                // endpoint must remain visible regardless of polyline order.
+                float boltDepth = lengthSquared > 1e-8 ? mix(prevDepth, depth, t) : max(prevDepth, depth);
+                float visibility = boltVisibility(boltDepth, sceneDepth);
+                if (visibility == 1.0) {
+                    best = min(best, bd);
+                } else if (visibility > 0.0) {
+                    faded = max(faded, channelResponse(bd, coreHalf, glowRadius) * visibility);
+                }
+            }
         }
         prev = p;
+        prevDepth = depth;
         have_prev = true;
     }
-    return best;
+    return max(channelResponse(best, coreHalf, glowRadius), faded);
 }
 
 void main() {
@@ -92,43 +126,23 @@ void main() {
     if (u_active == 1 && u_pulse > 0.0) {
         vec2 ndc = TexCoords * 2.0 - 1.0;
 
-        // --- DARK STORM CLOUD ------------------------
-        // Paint a dark, billowing cloud mass across the upper frame, densest around
-        // the bolt-top anchor (u_cloudNdc) and thinning downward, so the bolt
-        // emerges from a visible cloud rather than thin air. The cloud is composited
-        // FIRST (darkening the sky) and then lit by the flash below.
-        float cloudLight = 0.0; // remembered cloud density at this pixel for the flash
-        if (u_cloudDark > 0.0) {
-            // Cloud field: low-frequency FBM in aspect-corrected NDC, biased so the
-            // billows pool near the top of the frame and around the strike column.
-            vec2 cp = vec2(ndc.x * u_aspect, ndc.y);
-            float billow = fbm(cp * 2.4 + vec2(7.0, 3.0));
-            billow = billow * 0.65 + 0.5 * fbm(cp * 5.0 + vec2(19.0, 2.0));
-            // Vertical envelope: full strength at/above the cloud base anchor,
-            // tapering off below it (the underside of the storm deck).
-            float vert = smoothstep(u_cloudNdc.y - 0.85, u_cloudNdc.y + 0.15, ndc.y);
-            // Horizontal pooling toward the strike column (denser overhead the bolt).
-            float horiz = 1.0 - 0.45 * clamp(abs(ndc.x - u_cloudNdc.x) * u_aspect / 1.8, 0.0, 1.0);
-            float density = clamp(billow * vert * horiz, 0.0, 1.0);
-            // Soft cloud coverage mask (rolling billow edges, not a flat band).
-            float cover = smoothstep(0.42, 0.78, density);
-            cloudLight = cover;
-            // Darken the scene under the cloud toward a deep storm-grey.
-            vec3 cloudCol = vec3(0.06, 0.07, 0.10);
-            color = mix(color, cloudCol, cover * u_cloudDark);
+        float sceneLuma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+        float flash = 0.0;
+        for (int i = 0; i < MAX_STRIKE_FLASHES; ++i) {
+            if (i >= u_flashCount) break;
+            vec2 centre = u_flashNdc[i];
+            float response = 0.0;
+            if (!all(equal(centre, kLiveBoltPenUp))) {
+                float distanceToStrike = length((ndc - centre) * vec2(u_aspect, 1.0));
+                response = flashResponse(distanceToStrike, sceneLuma);
+            }
+            if (u_flashOnscreen[i] == 0) {
+                float strikeExtent = max(abs(centre.x), abs(centre.y));
+                response = max(response, offscreenFlashFloor(strikeExtent, sceneLuma));
+            }
+            flash = max(flash, u_flashPulse[i] * response);
         }
-
-        // Full-scene flash: additive lift, mildly stronger toward the strike.
-        float radial = 1.0 - 0.35 * clamp(length((ndc - u_strikeNdc) * vec2(u_aspect, 1.0)) / 2.0, 0.0, 1.0);
-        color += u_color * (u_pulse * radial);
-        // Flash lights the storm cloud FROM WITHIN: the strike briefly back-lights
-        // the dark deck near the bolt top, the readable "thunderhead lit by lightning"
-        // signature. Brightest in the cloud directly around the strike column.
-        if (u_cloudDark > 0.0 && cloudLight > 0.0) {
-            float toStrike = 1.0 - clamp(length((ndc - u_cloudNdc) * vec2(u_aspect, 1.0)) / 1.6, 0.0, 1.0);
-            vec3 litCloud = mix(u_color, vec3(1.0), 0.4);
-            color += litCloud * cloudLight * toStrike * u_pulse * 1.6;
-        }
+        color += u_color * flash;
         // Bolt: a THIN hot near-white core with a soft, falling-off bluish glow
         // halo along the polyline. The old single
         // wide smoothstep + core*3.0 painted a fat opaque white worm; this splits
@@ -142,17 +156,9 @@ void main() {
         // near-binary edge a hair wide in NDC) regardless of the glow tuning, and
         // the glow halo is kept tight + faint so it frames the bolt rather than
         // bloating it. The result reads as a hot jagged crack of light, not a tube.
-        float bd = boltDistance(ndc);
-        // Core half-width in NDC clamped to a ~1-2px equivalent ribbon so the bolt
-        // is sharp at any resolution. (0.0016 NDC ~= 1.5px on a 1080-tall frame.)
-        float coreHalf = clamp(min(u_boltWidth * 0.18, u_boltGlow * 0.10), 0.0010, 0.0024);
-        // Hot core: hard near-binary inner ribbon (thin bright filament). A tiny
-        // smoothstep band gives 1px antialiasing without widening the core.
-        float core = 1.0 - smoothstep(coreHalf * 0.6, coreHalf, bd);
-        // Glow: tight quadratic falloff, kept faint so it does not read as girth.
-        float glowRadius = min(u_boltGlow, 0.030);
-        float glowLin = 1.0 - smoothstep(coreHalf, glowRadius, bd);
-        float glow = glowLin * glowLin;
+        vec2 bolt = boltResponse(ndc);
+        float core = bolt.x;
+        float glow = bolt.y;
         vec3 hotCore = mix(u_color, vec3(1.0), 0.97);   // near-white hot filament
         vec3 glowCol = u_color;                          // bluish additive halo
         // Core is the dominant bright channel; glow is a thin translucent halo.

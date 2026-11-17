@@ -199,6 +199,7 @@ add_executable(common_tests
     common/StationDiscovery_test.cpp
     common/Crc32_test.cpp
     rendering/shader_compositing_contract_test.cpp
+    rendering/photo_environment_test.cpp
     common/AnimationRuntime_test.cpp
     common/AnimationClipFormat_test.cpp
     common/BiomeReverb_test.cpp
@@ -230,7 +231,6 @@ add_executable(common_tests
     rendering/FarWorldReplay_test.cpp
     rendering/FarWorldDiagnostics_test.cpp
     rendering/FarWorldRenderer_test.cpp
-    rendering/FarWorldLegacyIsolation_test.cpp
     rendering/FarWorldOwnership_test.cpp
     rendering/FarWorldDepthBias_test.cpp
     rendering/FarWorldFog_test.cpp
@@ -437,15 +437,29 @@ target_include_directories(rendering_defaults_test PRIVATE ../src)
 target_link_libraries(rendering_defaults_test PRIVATE gtest_main)
 luminumbra_configure_first_party_target(rendering_defaults_test)
 
-# GL-free capture provenance builder and filesystem publication lifecycle.
+# Capture codecs, bounded draw registry, filesystem publication and modeled GL target lifecycle.
 add_executable(capture_manifest_test
     rendering/capture_manifest_test.cpp
     rendering/diagnostic_capture_test.cpp
+    rendering/temporal_audit_test.cpp
+    ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp
+    ../src/luminumbra_client/rendering/TemporalAudit.cpp
     ../src/luminumbra_client/rendering/CaptureManifest.cpp
     ../src/luminumbra_client/rendering/DiagnosticCapture.cpp)
 target_include_directories(capture_manifest_test PRIVATE ../src ../src/luminumbra_client)
-target_link_libraries(capture_manifest_test PRIVATE gtest_main nlohmann_json::nlohmann_json)
+target_link_libraries(capture_manifest_test PRIVATE gtest_main nlohmann_json::nlohmann_json luminumbra_common glad)
 luminumbra_configure_first_party_target(capture_manifest_test)
+
+# GL-free feature selection, runtime resolution and capability manifest contracts.
+add_executable(capture_feature_profile_test
+    rendering/capture_feature_profile_test.cpp
+    ../src/luminumbra_client/rendering/CaptureFeatureProfile.cpp
+    ../src/luminumbra_client/rendering/TemporalAudit.cpp
+    ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp)
+target_include_directories(capture_feature_profile_test PRIVATE ../src ../src/luminumbra_client)
+target_link_libraries(capture_feature_profile_test PRIVATE
+    gtest_main luminumbra_common nlohmann_json glm)
+luminumbra_configure_first_party_target(capture_feature_profile_test)
 
 #  far-field impostors: the hemi-octahedral view<->tile mapping math (GL-free,
 # the shared source of truth for the atlas bake + the impostor shader).
@@ -589,9 +603,11 @@ endif()
 
 add_executable(render_smoke_test
     rendering/render_smoke_test.cpp
+    rendering/FarWorldLegacyIsolation_test.cpp
     rendering/FarWorldShadow_test.cpp
     rendering/FarWorldFogGl_test.cpp
     rendering/FarWorldWaterGl_test.cpp
+    rendering/SkyAtmosphereLutGl_test.cpp
     rendering/TerrainCullingTestPeer.h
 )
 
@@ -1959,6 +1975,10 @@ target_link_libraries(audio_disabled_test PRIVATE
     glm
 )
 
+# Shared GL-free dependency for the standalone launch-parser consumers.
+target_sources(runtime_surface_options_test PRIVATE ../src/luminumbra_client/rendering/TemporalAudit.cpp)
+target_sources(audio_disabled_test PRIVATE ../src/luminumbra_client/rendering/TemporalAudit.cpp)
+
 #  capture-native update the baseline: resolution-relative gate-threshold scaling unit
 # tests (core/CaptureScale.h is dependency-free, so this needs no GL/common libs).
 add_executable(capture_scale_test
@@ -2112,6 +2132,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     tree_lod_test
     rendering_defaults_test
     capture_manifest_test
+    capture_feature_profile_test
     # the hemi-octa mapping test was built but never
     # registered — the atlas-bake/shader shared source of truth had zero
     # executing coverage. GL-free pure math, safe in the default lane.
@@ -2396,6 +2417,10 @@ set_tests_properties(ShieldRtFarFieldMaxMipGpu PROPERTIES
 # test with the first that has it (the same strategy the validator gate uses to
 # pick $VISUAL_SWEEP_PYTHON). If none has numpy, warn and skip registration.
 find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_FOUND)
+    add_test(NAME FrozenTerrainPresetsContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B ${CMAKE_SOURCE_DIR}/tools/test_frozen_terrain_presets.py)
+endif()
 # File-only PowerShell checks are optional on hosts without PowerShell. The Lua
 # source mode only inspects source files; neither check runs the engine or graphics APIs.
 if(WIN32)
@@ -2531,6 +2556,24 @@ if(_tl_python)
     message(STATUS "TimelapseSelftest registered using python: ${_tl_python}")
 else()
     message(FATAL_ERROR "No python with Pillow found: TimelapseSelftest cannot be registered. Install Pillow or configure with -DBUILD_TESTING=OFF.")
+endif()
+
+# Capture diagnostics need both image packages in the same interpreter.
+set(_vl_python "")
+foreach(_cand ${_vc_candidates})
+    execute_process(COMMAND "${_cand}" -I -B -c "import PIL, numpy"
+        RESULT_VARIABLE _vl_rc OUTPUT_QUIET ERROR_QUIET)
+    if(_vl_rc EQUAL 0)
+        set(_vl_python "${_cand}")
+        break()
+    endif()
+endforeach()
+if(_vl_python)
+    add_test(NAME VisualLintCaptures
+        COMMAND "${_vl_python}" -I -B ${CMAKE_SOURCE_DIR}/tools/gates/test_visual_lint.py)
+    set_tests_properties(VisualLintCaptures PROPERTIES LABELS "visual;tools" TIMEOUT 60)
+else()
+    message(FATAL_ERROR "VisualLintCaptures requires a Python interpreter with Pillow and NumPy.")
 endif()
 
 # SDF-contract doc-lint. Assert docs/shield/sdf-contract.md

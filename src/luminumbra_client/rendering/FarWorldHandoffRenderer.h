@@ -23,6 +23,10 @@ public:
     // Owning aliases permit frozen capture to retain this exact memory domain.
     std::shared_ptr<World::FarVolumeMemoryPool> MemoryPool(std::size_t tier) const;
     bool StageTarget(const FarHandoffManifest&);
+    // Retire idle handoff constraints before pruning consumer history against a
+    // complete Diagnostic().tiles snapshot. Do not stage between retire and prune.
+    // Serving/target keys and the current staging refusal remain unchanged.
+    std::size_t RetireIdleHistory();
     bool StageSessionTarget(const World::FarWorldAuthorityProducer&,
                             const Systems::SHIELD_WorldSystem&,
                             std::span<const FarSessionHandoffTile>,

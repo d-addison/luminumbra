@@ -674,6 +674,43 @@ class ReplaySourceContract(unittest.TestCase):
 
 
 class SessionUsabilitySourceContract(unittest.TestCase):
+    def assert_concrete_ecology_admission(self, source):
+        self.assertRegex(source, r"const auto plant_env\s*=\s*\[")
+        self.assertNotRegex(source, r"\bEnvSampler\b")
+        self.assertRegex(
+            source,
+            r"RunPlantGrowthSystemOnTick\(\s*foliage_registry, current_tick, plant_env, foliage_gate\)")
+        initialize = self.function(source, "InitializeScentField")
+        self.assertIn("m_scentField->BindSessionAdmission(*this);", initialize)
+        self.assertNotIn("BindDepositGate", initialize)
+        admission = self.function(source, "SessionCellAllowed", "luminumbra::ai::ScentField::")
+        self.assertIn("return m_admissionSession->ScentCellDue(x, z);", admission)
+
+    def test_shipping_plant_and_scent_admission_use_concrete_dispatch(self):
+        self.assert_concrete_ecology_admission(
+            read_source("src/luminumbra_common/world/GameSession.cpp"))
+        header = read_source("src/luminumbra_common/ai/ScentField.h")
+        self.assertIn("const ::Luminumbra::world::GameSession* m_admissionSession", header)
+        admission = self.function(header, "SimulationCellAllowed", "")
+        self.assertRegex(admission, r"if \(m_admissionSession\)\s*\{\s*"
+                         r"return SessionCellAllowed\(x, z\);\s*\}")
+        deposit = self.function(header, "Deposit", "")
+        self.assertIn("!SimulationCellAllowed(x, z)", deposit)
+        self.assertNotIn("m_deposit_gate", deposit)
+
+    def test_concrete_ecology_guard_rejects_erased_shipping_regressions(self):
+        source = read_source("src/luminumbra_common/world/GameSession.cpp")
+        for before, after in (
+            ("const auto plant_env", "const luminumbra::foliage::EnvSampler plant_env"),
+            ("m_scentField->BindSessionAdmission(*this);",
+             "m_scentField->BindDepositGate([this](int x, int z) { return ScentCellDue(x, z); });"),
+            ("return m_admissionSession->ScentCellDue(x, z);", "return m_deposit_gate(x, z);"),
+        ):
+            with self.subTest(regression=after):
+                self.assertIn(before, source)
+                with self.assertRaises(AssertionError):
+                    self.assert_concrete_ecology_admission(source.replace(before, after, 1))
+
     def test_serialization_reuse_covers_every_canonical_chunk_input(self):
         source = read_source("src/luminumbra_common/persistence/WorldPersistenceRoundtrip.cpp")
         serialized = (self.function(source, "ChunkToJson", "") +
@@ -768,12 +805,27 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn("::read(m_descriptor, &trailing, 1)", admission)
         self.assertIn("::ReadFile(m_handle, &trailing, 1, &received, nullptr) && received == 0",
                       admission)
-        world = self.function(source, "load_world", "WorldSaveService::")
+        world = self.function(source, "load_world_impl", "WorldSaveService::")
         self.assertIn("load_plant_entities(plants, save_dir, &errors, stop)", world)
         session = self.function(read_source("src/luminumbra_common/world/GameSession.cpp"),
                                 "ReadPreparedWorldState")
         self.assertRegex(session, r"WorldSaveService::load_plant_entities\(\s*state.plants, "
                          r"save_dir, &errors, stop\)")
+
+    def test_catalog_inspection_keeps_complete_validation_for_load_and_writers(self):
+        source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        load = self.function(source, "load_world", "WorldSaveService::")
+        inspect = self.function(source, "inspect_save", "WorldSaveService::")
+        validate = self.function(source, "validate_save", "WorldSaveService::")
+        self.assertRegex(load, r"return load_world_impl\([\s\S]*,\s*false\);")
+        self.assertRegex(inspect, r"load_world_impl\([\s\S]*nullptr,\s*nullptr,\s*true,\s*payloads_verified\);")
+        self.assertIn(".load_world(", validate)
+        self.assertNotIn("load_world_impl", validate)
+        world = self.function(source, "load_world_impl", "WorldSaveService::")
+        skip = world.index("if (catalog_only && indexed && !retain)")
+        self.assertLess(world.index("ReadRegionFile(path, records, &errors, stop)"), skip)
+        self.assertLess(world.index("retain_chunks->contains(record.id)"), skip)
+        self.assertLess(skip, world.index("AdmitChunkRecord(record,"))
 
     def test_native_saved_input_holds_publication_until_after_close(self):
         source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
@@ -919,6 +971,43 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                         metadata_admission.index("BoundedJsonDump("))
         pair = self.function(source, "save_metadata_and_active_regions", "WorldSaveService::")
         self.assertLess(pair.index("admit_metadata_bytes(bytes"), pair.index("save_active_regions("))
+
+    def test_clean_generated_chunk_omission_is_incremental_only(self):
+        session = read_source("src/luminumbra_common/world/GameSession.cpp")
+        save = self.function(session, "SaveWorldStateToImpl")
+        selection = save.split("WorldStreamingState state;", 1)[1].split(
+            "result.chunks_total = state.size();", 1)[0]
+        self.assertRegex(
+            selection,
+            r"if\s*\(m_activeRegionsEnabled\s*&&\s*!full_snapshot\s*&&\s*chunk\s*&&\s*"
+            r"chunk->sdf_provenance\(\)\s*==\s*ChunkSdfProvenance::GeneratedCurrentParams\s*&&\s*"
+            r"!chunk->needs_authority\(\)\s*&&\s*!chunk->is_voxel_data_dirty\(\)\)\s*"
+            r"continue;\s*state.insert_chunk\(chunk\);")
+        self.assertLess(save.index("m_worldSystem->sync_water_authority();"),
+                        save.index("WorldStreamingState state;"))
+        regression = read_source("test/common/GameSessionHeadlessWorld_test.cpp")
+        for name in ("FirstEnabledChunkSaveIncludesCleanResidentRegions",
+                     "IndexedFullSnapshotsIncludeCleanGeneratedWater",
+                     "IndexedFullSnapshotsAdmitEmptyAndRejectMalformedCleanWater"):
+            self.assertIn("TEST(GameSessionHeadlessWorldTest, " + name + ")", regression)
+
+    def test_water_mutation_roundtrip_matches_saved_resolution_before_adoption(self):
+        regression = read_source("test/common/GameSessionHeadlessWorld_test.cpp")
+        body = regression.split(
+            "TEST(GameSessionHeadlessWorldTest, GenuineWaterChangesAfterCleanInitializationPersistAndRoundTrip)",
+            1)[1].split("\nTEST(", 1)[0]
+        self.assertIn("mutation < 5", body)
+        self.assertIn("water->ResizeSimulationGrid(*chunk, Luminumbra::Systems::WaterDetailLevel::High)",
+                      body)
+        self.assertIn("if (mutation != 4)", body)
+        self.assertRegex(
+            body,
+            r"EnableSnapshotSession\(reopened, root, jobs\);\s*"
+            r"reopened.SetWaterHighResEnabled\(mutation == 4\);\s*"
+            r'ASSERT_TRUE\(reopened.CreateWorld\("Water mutation reload", "1337", "default"\)\);\s*'
+            r"ASSERT_TRUE\(reopened.LoadWorldStateFrom\(session.GetWorldSaveDir\(\)\)\);")
+        self.assertIn("EXPECT_TRUE(adopted->same_water_state(*chunk));", body)
+        self.assertIn("EXPECT_EQ(reopened.ComputeChunkStateHash(), before_save);", body)
 
     def test_saved_json_depth_is_admitted_before_parsing_and_component_copying(self):
         admission = read_source("src/luminumbra_common/persistence/SavedJsonAdmission.h")

@@ -1028,10 +1028,54 @@ TEST(TerrainPresetLoaderTest, ShippedPresetResolvesReadableBiomeTable) {
                      .empty());
 }
 
+TEST(TerrainPresetLoaderTest, BandLimitedMountainsPreservesResolvedContent) {
+    using Luminumbra::world::CanonicalResolvedTerrainPresetJson;
+    using Luminumbra::world::ResolveEffectivePreset;
+    using Luminumbra::world::TerrainPresetContentHash;
+    using Luminumbra::world::TerrainPresetUse;
+    std::ifstream input(PresetDir() / "mountains_band_limited.json");
+    ASSERT_TRUE(input.good());
+    const auto preset = nlohmann::json::parse(input);
+    const auto current = ResolveEffectivePreset(preset, TerrainPresetUse::NewWorld);
+    EXPECT_EQ(current, preset);
+    const auto saved = nlohmann::json::parse(CanonicalResolvedTerrainPresetJson(current));
+    EXPECT_EQ(saved, preset);
+    EXPECT_EQ(TerrainPresetContentHash(saved), "957792f21f80de77");
+
+    const auto loaded = LoadTerrainPreset(PresetDir() / "mountains_band_limited.json");
+    ASSERT_TRUE(loaded.ok);
+    EXPECT_TRUE(loaded.errors.empty());
+    EXPECT_TRUE(loaded.warnings.empty());
+    const auto restored = LoadTerrainPresetFromJson(
+        saved, PresetDir().parent_path().parent_path().parent_path() / "data");
+    ASSERT_TRUE(restored.ok);
+    EXPECT_EQ(restored.preset_content_hash, loaded.preset_content_hash);
+    const auto original = LoadTerrainPreset(PresetDir() / "mountains.json");
+    ASSERT_TRUE(original.ok);
+    EXPECT_NE(loaded.preset_content_hash, original.preset_content_hash);
+    EXPECT_EQ(loaded.params.surface_sampling_revision, 2);
+    EXPECT_EQ(loaded.params.octaves, 4);
+    EXPECT_FLOAT_EQ(loaded.params.base_amplitude, 66.6666667f);
+    const std::vector<std::array<float, 2>> continental{
+        {-1.0f, -6.0f}, {-0.2f, 4.0f}, {0.3f, 8.0f}, {0.65f, 25.0f}, {1.0f, 44.0f}};
+    const std::vector<std::array<float, 2>> erosion{{-1.0f, 0.44f},
+                                                    {-0.6f, 0.34f},
+                                                    {-0.35f, 0.26f},
+                                                    {0.0f, 0.20f},
+                                                    {0.4f, 0.15f},
+                                                    {1.0f, 0.12f}};
+    const std::vector<std::array<float, 2>> peaks{
+        {-1.0f, 0.0f}, {0.35f, 0.10f}, {0.72f, 0.48f}, {1.0f, 0.85f}};
+    EXPECT_EQ(loaded.params.continental_spline, continental);
+    EXPECT_EQ(loaded.params.erosion_spline, erosion);
+    EXPECT_EQ(loaded.params.peaks_spline, peaks);
+}
+
 TEST(TerrainPresetLoaderTest, AllShippedPresetsLoadWithoutErrorsOrWarnings) {
     for (const char* name : {"default",
                              "flat_lands",
                              "mountains",
+                             "mountains_band_limited",
                              "archipelago",
                              "temperate_forest",
                              "amplified",
@@ -1394,8 +1438,9 @@ TEST(TerrainPresetLoaderTest, FileAndOverrideAdmissionShareDepthAndByteBoundarie
         std::string error;
         EXPECT_EQ(Luminumbra::world::LoadTerrainPresetOverride(path, {}, text, error), accepted);
         EXPECT_EQ(error.empty(), accepted);
-        if (!accepted)
+        if (!accepted) {
             EXPECT_EQ(text, "unchanged");
+        }
     };
     auto preset = nlohmann::json::parse(kMinimalPreset);
     nlohmann::json extension = 0;
