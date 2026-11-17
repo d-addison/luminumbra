@@ -3071,12 +3071,8 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
             draw_chunks_mdi(visible_chunks, draws, indices);
             if (m_farlod) {
                 auto& live = m_farlod->submitted_live_terrain();
-                live.clear();
-                // Only successful MDI commands have origins; ignore stale scratch on zero
-                // draws.
-                for (std::size_t i = 0; i < draws; ++i) {
-                    live.add_origin(glm::vec3(m_mdi_origin_scratch[i]));
-                }
+                // Only successful MDI commands have origins; zero draws ignores stale scratch.
+                live.assign_origins(std::span<const glm::vec4>(m_mdi_origin_scratch.data(), draws));
             }
             return TerrainSubmitStats{visible_chunks.size(), draws, indices};
         };

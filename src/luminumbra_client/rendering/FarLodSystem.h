@@ -25,8 +25,10 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace Luminumbra::Systems {
@@ -41,16 +43,27 @@ struct FarWorldSelection;
 
 // Coverage of nonempty live chunks submitted to GPU storage or a draw pass.
 // The caller owns the lifetime: resident chunks survive frame visibility changes.
-// Storage is bounded by the live GPU chunks (or the current pass's subset).
+// Storage is bounded by the largest live GPU chunk set or submitted pass seen.
 class SubmittedLiveTerrain {
 public:
     void clear();
     void add_origin(const glm::vec3& origin);
+    // Bulk frame replacement: sort once, retain capacity, then O(log n) queries.
+    // Incremental resident updates use add_origin/remove_chunk instead.
+    void assign_origins(std::span<const glm::vec4> origins);
+    // Const diagnostic for verifying bulk-frame storage reuse.
+    std::size_t submission_capacity() const {
+        return m_submitted_chunks.capacity();
+    }
     void remove_chunk(u64 chunk_id);
     bool covers(const glm::vec3& position) const;
 
 private:
     std::unordered_set<u64> m_chunks;
+    // Bounded by the successful live draw commands in the largest submitted frame.
+    // Sorted key/active pairs let retirement invalidate in place without shifting entries.
+    std::vector<std::pair<u64, bool>> m_submitted_chunks;
+    std::size_t submitted_index(u64 chunk_id) const;
 };
 
 enum class StaticPropSubmission {

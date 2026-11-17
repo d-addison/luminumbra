@@ -698,6 +698,30 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         }
         return {nullptr, basePath};
     };
+    auto resolve_lod = [&](const CachedStaticProp& cp, bool authoredTree, int lod) {
+        const std::uint64_t rkey = cp.baseMeshHash ^ (static_cast<std::uint64_t>(lod) *
+                                                      std::uint64_t{0x9E3779B97F4A7C15ull});
+        auto rit = m_resolveMemo.find(rkey);
+        if (rit == m_resolveMemo.end()) {
+            const std::string& basePath = m_propMeshPaths[cp.pathIndex];
+            const std::string candidatePath = LodMeshPath(basePath, lod);
+            auto resolved = resolve_mesh(candidatePath, candidatePath);
+            // At most kTreeLodCount probes for authored trees, only on a memo miss.
+            // Cache failed loads too; steady frames do no new probing or allocation.
+            if (authoredTree) {
+                for (int mesh_lod = lod - 1; !resolved.first && mesh_lod >= 0; --mesh_lod) {
+                    const std::string fallbackPath = LodMeshPath(basePath, mesh_lod);
+                    resolved = resolve_mesh(fallbackPath, fallbackPath);
+                }
+            } else if (!resolved.first) {
+                resolved = resolve_mesh(basePath, basePath);
+            }
+            rit = m_resolveMemo
+                      .emplace(rkey, std::make_pair(resolved.first, std::move(resolved.second)))
+                      .first;
+        }
+        return rit;
+    };
     // Reuse the per-group buffers across frames: keep capacity, clear contents,
     // mark inactive. A group's mesh/drawPath/basePath/material are fixed by its key
     // (rkey encodes baseMeshHash+lod), so the metadata is set once and kept.
@@ -729,6 +753,12 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         bool impostor_candidate = false;
         if (impostorsOn && authoredTree && lod == 3 && cp.impostorTree) {
             impostor_candidate = true; // a tree part -> impostor replaces it at LOD3
+        }
+        // A paired far-OFF replay may need meshes even when this frame uses an
+        // impostor. Resolve every eligible part before freezing, including failed
+        // probes, so replay only consumes the same memoized fallback chain.
+        if (impostor_candidate && !ctx.frozen_replay) {
+            (void)resolve_lod(cp, authoredTree, 2);
         }
         // Submitted chunks are resident too; culling the ground must not remove
         // support while its canopy is still visible (including the authored LOD3 band).
@@ -769,27 +799,8 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             }
             continue; // all LOD3 tree parts are folded into the billboard
         }
-        const std::uint64_t rkey = cp.baseMeshHash ^ (static_cast<std::uint64_t>(lod) *
-                                                      std::uint64_t{0x9E3779B97F4A7C15ull});
-        auto rit = m_resolveMemo.find(rkey);
-        if (rit == m_resolveMemo.end()) {
-            const std::string& basePath = m_propMeshPaths[cp.pathIndex];
-            const std::string candidatePath = LodMeshPath(basePath, lod);
-            auto resolved = resolve_mesh(candidatePath, candidatePath);
-            // At most kTreeLodCount probes for authored trees, only on a memo miss.
-            // Cache failed loads too; steady frames do no new probing or allocation.
-            if (authoredTree) {
-                for (int mesh_lod = lod - 1; !resolved.first && mesh_lod >= 0; --mesh_lod) {
-                    const std::string fallbackPath = LodMeshPath(basePath, mesh_lod);
-                    resolved = resolve_mesh(fallbackPath, fallbackPath);
-                }
-            } else if (!resolved.first) {
-                resolved = resolve_mesh(basePath, basePath);
-            }
-            rit = m_resolveMemo
-                      .emplace(rkey, std::make_pair(resolved.first, std::move(resolved.second)))
-                      .first;
-        }
+        const auto rit = resolve_lod(cp, authoredTree, lod);
+        const std::uint64_t rkey = rit->first;
         Mesh* mesh = rit->second.first;
         if (!mesh)
             continue;

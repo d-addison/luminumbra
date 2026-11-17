@@ -1356,6 +1356,21 @@ void main() { color = vec4(1); }
         }}));
     }
     ASSERT_GT(far.stats().regions_resident, 0u);
+    // The orbit camera is farther than the outer clip from this resident terrain.
+    const glm::vec3 preview_tree(camera.x, 12, camera.z);
+    ASSERT_GT(glm::length(preview_tree - camera), far.outer_clip_m());
+    EXPECT_FALSE(far.terrain_resident_at(preview_tree));
+    far.set_preview_anchor(preview_tree, 0.0f);
+    EXPECT_TRUE(far.terrain_resident_at(preview_tree));
+    EXPECT_FALSE(far.terrain_resident_at(preview_tree + glm::vec3(4000, 0, 0)));
+    EXPECT_FALSE(far.terrain_resident_at({0, std::numeric_limits<float>::infinity(), 0}));
+    far.set_enabled(false);
+    EXPECT_FALSE(far.terrain_resident_at(preview_tree));
+    far.set_enabled(true);
+    far.set_preview_anchor(preview_tree, 1.0f);
+    EXPECT_FALSE(far.terrain_resident_at(preview_tree));
+    far.clear_preview_anchor();
+    EXPECT_FALSE(far.terrain_resident_at(preview_tree));
     shader.use();
     const auto view = glm::lookAt(camera, camera - glm::vec3(0, 1, 0), glm::vec3(0, 0, -1));
     shader.setMat4("view", view);

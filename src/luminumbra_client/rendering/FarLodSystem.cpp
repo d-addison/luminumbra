@@ -1674,6 +1674,21 @@ bool live_chunk_key(const glm::vec3& position, u64& key) {
 
 void SubmittedLiveTerrain::clear() {
     m_chunks.clear();
+    m_submitted_chunks.clear();
+}
+
+void SubmittedLiveTerrain::assign_origins(std::span<const glm::vec4> origins) {
+    m_submitted_chunks.reserve(origins.size());
+    clear();
+    for (const auto& origin : origins) {
+        u64 key = 0;
+        if (live_chunk_key(glm::vec3(origin), key)) {
+            m_submitted_chunks.emplace_back(key, true);
+        }
+    }
+    std::sort(m_submitted_chunks.begin(), m_submitted_chunks.end());
+    m_submitted_chunks.erase(std::unique(m_submitted_chunks.begin(), m_submitted_chunks.end()),
+                             m_submitted_chunks.end());
 }
 
 void SubmittedLiveTerrain::add_origin(const glm::vec3& origin) {
@@ -1685,11 +1700,31 @@ void SubmittedLiveTerrain::add_origin(const glm::vec3& origin) {
 
 void SubmittedLiveTerrain::remove_chunk(u64 chunk_id) {
     m_chunks.erase(chunk_id);
+    const auto index = submitted_index(chunk_id);
+    if (index < m_submitted_chunks.size()) {
+        m_submitted_chunks[index].second = false;
+    }
+}
+
+std::size_t SubmittedLiveTerrain::submitted_index(u64 chunk_id) const {
+    const auto found =
+        std::lower_bound(m_submitted_chunks.begin(),
+                         m_submitted_chunks.end(),
+                         chunk_id,
+                         [](const auto& chunk, u64 key) { return chunk.first < key; });
+    return found != m_submitted_chunks.end() && found->first == chunk_id
+               ? static_cast<std::size_t>(found - m_submitted_chunks.begin())
+               : m_submitted_chunks.size();
 }
 
 bool SubmittedLiveTerrain::covers(const glm::vec3& position) const {
+    const auto contains = [this](u64 chunk_id) {
+        const auto index = submitted_index(chunk_id);
+        return m_chunks.contains(chunk_id) ||
+               (index < m_submitted_chunks.size() && m_submitted_chunks[index].second);
+    };
     u64 key = 0;
-    if (live_chunk_key(position, key) && m_chunks.contains(key)) {
+    if (live_chunk_key(position, key) && contains(key)) {
         return true;
     }
     // A root exactly on a chunk's top face is supported by the chunk below it.
@@ -1699,7 +1734,7 @@ bool SubmittedLiveTerrain::covers(const glm::vec3& position) const {
     const glm::vec3 below(position.x,
                           std::nextafter(position.y, -std::numeric_limits<float>::infinity()),
                           position.z);
-    return live_chunk_key(below, key) && m_chunks.contains(key);
+    return live_chunk_key(below, key) && contains(key);
 }
 
 bool FarLodSystem::terrain_resident_at(const glm::vec3& position) const {
@@ -1713,7 +1748,8 @@ bool FarLodSystem::terrain_resident_at(const glm::vec3& position) const {
             ? glm::length(glm::vec2(position.x - m_preview_anchor.x,
                                     position.z - m_preview_anchor.z)) < m_preview_inner_radius
             : distance < kFarClipInnerRadiusMeters;
-    if (!std::isfinite(distance) || distance > m_outer_clip_m || inner_clipped) {
+    if ((!m_preview_mode && (!std::isfinite(distance) || distance > m_outer_clip_m)) ||
+        inner_clipped) {
         return false;
     }
     const double region_x = std::floor(static_cast<double>(position.x) / kRegionSize);
@@ -1763,8 +1799,11 @@ void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
     // the centre region (where the slice sits). So in preview mode disable those
     // and instead discard far fragments inside the FIXED live slice via the
     // centre-relative world-space radius (u_farPreviewInnerRadius). Live geometry
-    // still wins in the slice via the depth bias + polygon offset above.
+    // still wins in the slice via the depth bias + polygon offset above. The
+    // orbit camera can also lie beyond the resident slice's outer clip, so
+    // preview disables that camera-relative boundary as well.
     if (m_preview_mode) {
+        geometry_shader.setFloat("u_farClipFarRadius", 0.0f);
         geometry_shader.setFloat("u_farClipInnerRadius", 0.0f);
         geometry_shader.setFloat("u_farClipNearRadius", 0.0f);
         geometry_shader.setVec2("u_farPreviewCenterXZ",

@@ -1,3 +1,4 @@
+#include "../fixtures/TerrainFixtureParams.h"
 #include "TerrainCullingTestPeer.h"
 #include "luminumbra_client/core/IsolationConfig.h"
 #include "luminumbra_client/rendering/Camera.h"
@@ -21,6 +22,7 @@
 #include "luminumbra_common/animation/AnimationRuntime.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/core/FilesystemPath.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "gtest/gtest.h"
 #include <glm/gtc/type_ptr.hpp>
@@ -161,6 +163,51 @@ TEST(RenderSmokeTest, SubmittedLiveTerrainRejectsMissingAndInvalidChunksAtBounda
     ASSERT_TRUE(far.submitted_live_terrain().covers({0, 1, 0}));
     far.prepare_world_swap();
     EXPECT_FALSE(far.submitted_live_terrain().covers({0, 1, 0}));
+}
+
+TEST(RenderSmokeTest, SubmittedLiveTerrainBulkFramesRetainCapacityAndReplaceCoverage) {
+    using namespace Luminumbra::Rendering;
+    SubmittedLiveTerrain live;
+    const std::array<glm::vec4, 6> origins{{{32, 0, 0, 1},
+                                            {-16, -16, 0, 1},
+                                            {0, 0, 0, 1},
+                                            {32, 0, 0, 1},
+                                            {std::numeric_limits<float>::infinity(), 0, 0, 1},
+                                            {0, std::numeric_limits<float>::max(), 0, 1}}};
+    live.assign_origins(origins);
+    const auto capacity = live.submission_capacity();
+    ASSERT_GE(capacity, origins.size());
+    // Repeated, reversed, shrinking, empty and invalid-only frames all reuse storage.
+    for (int frame = 0; frame < 8; ++frame) {
+        live.clear();
+        EXPECT_EQ(live.submission_capacity(), capacity);
+        live.assign_origins(origins);
+        EXPECT_TRUE(live.covers({32, 1, 0}));
+        EXPECT_TRUE(live.covers({-1, 0, 0}));
+        EXPECT_TRUE(live.covers({0, 1, 0}));
+        EXPECT_FALSE(live.covers({16, 1, 0}));
+        live.remove_chunk(Luminumbra::Chunk::calculate_id({1, 0, 0}));
+        EXPECT_TRUE(live.covers({32, 1, 0}));
+        live.remove_chunk(Luminumbra::Chunk::calculate_id({2, 0, 0}));
+        EXPECT_FALSE(live.covers({32, 1, 0}));
+        EXPECT_TRUE(live.covers({0, 1, 0}));
+        EXPECT_TRUE(live.covers({-1, 0, 0}));
+        live.remove_chunk(Luminumbra::Chunk::calculate_id({2, 0, 0}));
+        auto reversed = origins;
+        std::reverse(reversed.begin(), reversed.end());
+        live.assign_origins(reversed);
+        EXPECT_TRUE(live.covers({32, 1, 0}));
+        live.assign_origins(std::span<const glm::vec4>(origins).subspan(4));
+        EXPECT_FALSE(live.covers({0, 1, 0}));
+        live.assign_origins({});
+        EXPECT_FALSE(live.covers({-1, 0, 0}));
+        EXPECT_EQ(live.submission_capacity(), capacity);
+    }
+    // Incremental residency and bulk submission can both be queried and retired.
+    live.add_origin({16, 0, 0});
+    EXPECT_TRUE(live.covers({16, 1, 0}));
+    live.assign_origins(origins);
+    EXPECT_FALSE(live.covers({16, 1, 0}));
 }
 
 TEST(RenderSmokeTest, StaticPropCollectionKeepsFarSupportAfterLiveSubmissionDisappears) {
@@ -7616,6 +7663,31 @@ TEST(RenderSmokeTest, RefusedTreeImpostorsSubmitAvailableMeshLods) {
     input.tree_impostor_grid = 1;
     input.tree_impostor_radius = 1;
     const glm::vec3 root(200, 12, 0);
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = root.y;
+    params.caves_enabled = false;
+    params.island_mask_enabled = false;
+    Luminumbra::Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    FarLodSystem far;
+    far.attach_job_system(&jobs);
+    struct FarCleanup {
+        FarLodSystem& far;
+        Luminumbra::JobSystem& jobs;
+        ~FarCleanup() {
+            far.shutdown();
+            jobs.shutdown();
+        }
+    } far_cleanup{far, jobs};
+    far.set_horizon(FarLodSystem::kF1OuterRangeMeters, FarLodSystem::kF1OuterRangeMeters + 50.0f);
+    for (int frame = 0; frame < 12; ++frame) {
+        far.update(world, camera.Position);
+        jobs.wait(jobs.dispatch_batch({[] {
+        }}));
+    }
+    ASSERT_TRUE(far.terrain_resident_at(root));
     SubmittedLiveTerrain support;
     entt::registry entities;
     TreeSubmissionCapture submissions;
@@ -7648,6 +7720,32 @@ TEST(RenderSmokeTest, RefusedTreeImpostorsSubmitAvailableMeshLods) {
             entities.emplace<Luminumbra::Components::TransformComponent>(entity).position = root;
             entities.emplace<Luminumbra::Components::StaticMeshComponent>(entity).meshPath = base;
         }
+        // Cold far-supported ON frame goes directly to frozen OFF. No mesh-support
+        // warm-up is allowed, even for empty or malformed fallback chains.
+        input.far_selection =
+            SelectFarWorld(FarWorldMode::Legacy, FarWorldPurpose::World, FarWorldRefusal::None);
+        input.legacy_far = &far;
+        ctx.far_world_ladder = false;
+        input.resident_live_terrain = nullptr;
+        input.submitted_live_terrain = nullptr;
+        ctx.frozen_replay = false;
+        capture.mesh_draws = 0;
+        capture.impostor_draws = 0;
+        ASSERT_NO_THROW((void)pass.execute(ctx, entities, input));
+        EXPECT_EQ(capture.mesh_draws, 0u);
+        EXPECT_EQ(capture.impostor_draws, 1u);
+        input.far_selection.submit = false;
+        ctx.frozen_replay = true;
+        capture.mesh_draws = 0;
+        capture.impostor_draws = 0;
+        ASSERT_NO_THROW((void)pass.execute(ctx, entities, input));
+        EXPECT_EQ(capture.mesh_draws, highest_lod >= 0 ? 3u : 0u);
+        EXPECT_EQ(capture.impostor_draws, 0u);
+        if (highest_lod >= 0) {
+            EXPECT_EQ(capture.mesh_indices, 3 * (highest_lod + 1));
+        }
+        ctx.frozen_replay = false;
+        input.legacy_far = nullptr;
         for (const auto mode : {FarWorldMode::Legacy, FarWorldMode::Ladder}) {
             input.far_selection =
                 SelectFarWorld(mode, FarWorldPurpose::World, FarWorldRefusal::None);

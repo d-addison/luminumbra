@@ -286,7 +286,7 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertTrue(compact(tree).endswith("continue; // all LOD3 tree parts are folded into the billboard"))
         self.assertLess(collect.index(decision.split("(")[0]), collect.index(guard))
         self.assertLess(collect.index(guard), collect.index("impostorInstances.push_back"))
-        self.assertLess(collect.index("impostorInstances.push_back"), collect.index("auto rit = m_resolveMemo.find(rkey)"))
+        self.assertLess(collect.index("impostorInstances.push_back"), collect.index("const auto rit = resolve_lod(cp, authoredTree, lod)"))
         legacy = read(RENDERING / "FarLodSystem.cpp")
         policy = compact(body(legacy, "StaticPropSubmission SelectStaticPropSubmission("))
         self.assertLess(policy.index("if (!impostor_candidate)"), policy.index("if (live_terrain_owned)"))
@@ -306,7 +306,8 @@ class UploadBudgetWiring(unittest.TestCase):
     def test_refused_impostors_resolve_farthest_available_mesh_through_ordinary_batch(self):
         collect = body(read(RENDERING / "passes/GBufferPass.cpp"),
                        "for (const CachedStaticProp& cp : m_staticPropCache)")
-        memo = body(collect, "if (rit == m_resolveMemo.end())")
+        resolver = body(read(RENDERING / "passes/GBufferPass.cpp"), "auto resolve_lod =")
+        memo = body(resolver, "if (rit == m_resolveMemo.end())")
         self.assertIn("resolve_mesh(candidatePath, candidatePath)", memo)
         self.assertIn("for (int mesh_lod = lod - 1; !resolved.first && mesh_lod >= 0; --mesh_lod)", memo)
         self.assertIn("resolve_mesh(fallbackPath, fallbackPath)", memo)
@@ -325,14 +326,87 @@ class UploadBudgetWiring(unittest.TestCase):
                          "fs::create_directories", 'partial << "LM"', "ctx.frozen_replay = replay"):
             self.assertIn(required, regression)
 
+    def test_cold_far_supported_frame_prepares_frozen_mesh_fallback(self):
+        source = read(RENDERING / "passes/GBufferPass.cpp")
+        collect = body(source, "for (const CachedStaticProp& cp : m_staticPropCache)")
+        self.assertIn("if (impostor_candidate && !ctx.frozen_replay)", collect)
+        warm = body(collect, "if (impostor_candidate && !ctx.frozen_replay)")
+        self.assertIn("resolve_lod(cp, authoredTree, 2)", warm)
+        self.assertLess(collect.index("if (impostor_candidate && !ctx.frozen_replay)"),
+                        collect.index("if (submission == StaticPropSubmission::Impostor)"))
+        resolver = body(source, "auto resolve_lod =")
+        self.assertIn("m_resolveMemo.find(rkey)", resolver)
+        self.assertIn("m_resolveMemo", body(resolver, "if (rit == m_resolveMemo.end())"))
+        self.assertIn("const auto rit = resolve_lod(cp, authoredTree, lod);", collect)
+        regression = body(read(ROOT / "test/rendering/render_smoke_test.cpp"),
+                          "TEST(RenderSmokeTest, RefusedTreeImpostorsSubmitAvailableMeshLods)")
+        cold = regression[regression.index("input.legacy_far = &far;"):
+                          regression.index("input.legacy_far = nullptr;")]
+        self.assertIn("ASSERT_TRUE(far.terrain_resident_at(root))", regression)
+        self.assertEqual(cold.count("pass.execute(ctx, entities, input)"), 2)
+        self.assertLess(cold.index("ctx.frozen_replay = false"), cold.index("pass.execute"))
+        self.assertLess(cold.index("pass.execute"), cold.index("input.far_selection.submit = false"))
+        self.assertLess(cold.index("input.far_selection.submit = false"), cold.index("ctx.frozen_replay = true"))
+        for assertion in ("EXPECT_EQ(capture.impostor_draws, 1u)",
+                          "EXPECT_EQ(capture.impostor_draws, 0u)",
+                          "EXPECT_EQ(capture.mesh_draws, highest_lod >= 0 ? 3u : 0u)",
+                          "EXPECT_EQ(capture.mesh_indices, 3 * (highest_lod + 1))"):
+            self.assertIn(assertion, cold)
+
+    def test_preview_support_and_draw_skip_camera_outer_clip_together(self):
+        source = read(RENDERING / "FarLodSystem.cpp")
+        query = compact(body(source, "bool FarLodSystem::terrain_resident_at("))
+        self.assertIn("!m_preview_mode && (!std::isfinite(distance) || distance > m_outer_clip_m)", query)
+        draw = body(source, "void FarLodSystem::draw_gbuffer(")
+        preview = body(draw, "if (m_preview_mode)")
+        for uniform in ("u_farClipFarRadius", "u_farClipNearRadius", "u_farClipInnerRadius"):
+            self.assertIn('geometry_shader.setFloat("' + uniform + '", 0.0f)', preview)
+        regression = body(read(ROOT / "test/rendering/far_lod_worker_test.cpp"),
+                          "TEST(FarLodWorker, ElevatedCameraSeesTerrainInsideItsOwnRegion)")
+        for assertion in ("ASSERT_GT(glm::length(preview_tree - camera), far.outer_clip_m())",
+                          "EXPECT_FALSE(far.terrain_resident_at(preview_tree))",
+                          "far.set_preview_anchor(preview_tree, 0.0f)",
+                          "EXPECT_TRUE(far.terrain_resident_at(preview_tree))",
+                          "far.set_preview_anchor(preview_tree, 1.0f)",
+                          "far.set_enabled(false)", "far.clear_preview_anchor()"):
+            self.assertIn(assertion, regression)
+
+    def test_bulk_submitted_coverage_reuses_storage_and_binary_searches(self):
+        source = read(RENDERING / "FarLodSystem.cpp")
+        bulk = body(source, "void SubmittedLiveTerrain::assign_origins(")
+        self.assertIn("m_submitted_chunks.reserve(origins.size())", bulk)
+        self.assertIn("live_chunk_key(glm::vec3(origin), key)", bulk)
+        self.assertIn("m_submitted_chunks.emplace_back(key, true)", bulk)
+        self.assertIn("std::sort(m_submitted_chunks.begin(), m_submitted_chunks.end())", bulk)
+        self.assertIn("std::unique(m_submitted_chunks.begin(), m_submitted_chunks.end())", bulk)
+        self.assertNotIn("m_chunks.insert", bulk)
+        clear = body(source, "void SubmittedLiveTerrain::clear(")
+        self.assertIn("m_submitted_chunks.clear()", clear)
+        for forbidden in ("shrink_to_fit", "swap", "reserve", "resize"):
+            self.assertNotIn(forbidden, clear)
+        query = body(source, "bool SubmittedLiveTerrain::covers(")
+        self.assertIn("index < m_submitted_chunks.size() && m_submitted_chunks[index].second", compact(query))
+        search = body(source, "std::size_t SubmittedLiveTerrain::submitted_index(")
+        self.assertIn("std::lower_bound", search)
+        self.assertIn("found->first == chunk_id", search)
+        frame = body(self.pipeline, "void RenderPipeline::execute_stage_gbuffer(")
+        self.assertNotIn("live.add_origin", frame)
+        self.assertIn("live.assign_origins(std::span<const glm::vec4>(m_mdi_origin_scratch.data(), draws))", compact(frame))
+        regression = body(read(ROOT / "test/rendering/render_smoke_test.cpp"),
+                          "TEST(RenderSmokeTest, SubmittedLiveTerrainBulkFramesRetainCapacityAndReplaceCoverage)")
+        for assertion in ("live.assign_origins({})", "std::reverse", "subspan(4)",
+                          "EXPECT_EQ(live.submission_capacity(), capacity)",
+                          "live.remove_chunk", "EXPECT_FALSE(live.covers({32, 1, 0}))"):
+            self.assertIn(assertion, regression)
+
     def assert_live_submission_wiring(self):
         source = read(RENDERING / "FarLodSystem.cpp")
         self.assertTrue("bool SubmittedLiveTerrain::covers(" in source,
                         "live support must be derived from this frame's submitted chunks")
         query = body(source, "bool SubmittedLiveTerrain::covers(")
-        self.assertIn("if (live_chunk_key(position, key) && m_chunks.contains(key))", query)
+        self.assertIn("if (live_chunk_key(position, key) && contains(key))", query)
         self.assertIn("std::nextafter", query)
-        self.assertIn("live_chunk_key(below, key) && m_chunks.contains(key)", query)
+        self.assertIn("live_chunk_key(below, key) && contains(key)", query)
         self.assertNotIn("for (", query)
         self.assertNotIn("while (", query)
         key = body(source, "bool live_chunk_key(")
@@ -344,7 +418,8 @@ class UploadBudgetWiring(unittest.TestCase):
         add = body(source, "void SubmittedLiveTerrain::add_origin(")
         self.assertIn("if (live_chunk_key(origin, key))", add)
         self.assertIn("m_chunks.insert(key)", add)
-        self.assertEqual(compact(body(source, "void SubmittedLiveTerrain::clear(")), "m_chunks.clear();")
+        self.assertEqual(compact(body(source, "void SubmittedLiveTerrain::clear(")),
+                         "m_chunks.clear(); m_submitted_chunks.clear();")
         submit = body(self.pipeline, "SubmitTerrainChunksFn RenderPipeline::make_terrain_submitter(")
         self.assertNotIn("m_farlod", submit)
         frame = body(self.pipeline, "void RenderPipeline::execute_stage_gbuffer(")
@@ -353,10 +428,9 @@ class UploadBudgetWiring(unittest.TestCase):
             self.assertIn("draw_chunks_mdi(visible_chunks, draws, indices)", branch)
             self.assertIn("m_terrain_coverage_visible.insert(chunk->id)", branch)
             self.assertIn("TerrainSubmitStats{visible_chunks.size(), draws, indices}", branch)
-        self.assertLess(frame.index("draw_chunks_mdi(visible_chunks, draws, indices)"), frame.index("live.add_origin("))
-        self.assertIn("i < draws", frame)
-        self.assertIn("live.add_origin(glm::vec3(m_mdi_origin_scratch[i]))", frame)
-        self.assertLess(frame.index("live.clear();"), frame.index("live.add_origin("))
+        self.assertLess(frame.index("draw_chunks_mdi(visible_chunks, draws, indices)"), frame.index("live.assign_origins("))
+        self.assertIn("live.assign_origins(std::span<const glm::vec4>(m_mdi_origin_scratch.data(), draws))", compact(frame))
+        self.assertLess(frame.index("live.clear();"), frame.index("live.assign_origins("))
         self.assertLess(frame.index("live.clear();"), frame.index("m_gbuffer_pass->execute("))
         self.assertIn("gbuffer_input.submitted_live_terrain = &live", frame)
         collect = body(read(RENDERING / "passes/GBufferPass.cpp"),
@@ -453,7 +527,10 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("m_resident_live_terrain.clear()", shutdown)
         self.assertIn("m_farlod->shutdown();", body(self.pipeline, "void RenderPipeline::cleanup_gpu_resources("))
         removal = body(far, "void SubmittedLiveTerrain::remove_chunk(")
-        self.assertEqual(compact(removal), "m_chunks.erase(chunk_id);")
+        self.assertIn("m_chunks.erase(chunk_id);", removal)
+        self.assertIn("submitted_index(chunk_id)", removal)
+        self.assertIn("m_submitted_chunks[index].second = false", removal)
+        self.assertNotIn("m_submitted_chunks.erase", removal)
 
     def test_missing_live_and_far_terrain_still_refuses_tree(self):
         self.assert_resident_live_support_wiring()
