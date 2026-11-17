@@ -14503,7 +14503,7 @@ void CheckRegionalSamplerSelfAssignment(GetSystem get_system,
     jobs.startup(1);
     GameSession session;
     FieldPageState fields;
-    // One populated cell and one storm distinguish bound samples from the legacy grids.
+    // One populated cell and one storm provide the bound samples.
     AddWeatherOverlayCell(fields, 4, {1024, 64512, 32768, 32768, 16384});
     ASSERT_TRUE(fields.replace_weather({SessionStorm(kFieldOwner, 108, 108, 0, 0, 31, 7)}, {}));
     const auto ledger = ScheduledFieldLedger(31, {{kFieldOwner, RegionState::Active}});
@@ -14512,6 +14512,12 @@ void CheckRegionalSamplerSelfAssignment(GetSystem get_system,
     using System = std::decay_t<decltype(reference)>;
     System system(reference);
     system.BindRegionalBackend({}, {});
+    if constexpr (std::is_same_v<System, Luminumbra::Systems::AetherFieldSystem>) {
+        // Loading projects regional aether into the render grid, so clearing the binding
+        // alone leaves the same sample. Recenter only the copy's legacy grid so the probe
+        // lies outside it and reads zero, while the bound overlay remains populated.
+        system.Update(31, Luminumbra::Vec3(4096, 0, 4096));
+    }
     const Luminumbra::Vec3 position{108, 0, 108};
     const auto legacy_sample = sample(system, position);
     const auto legacy_hash = hash(system);
