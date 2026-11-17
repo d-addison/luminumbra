@@ -26,6 +26,7 @@ namespace Luminumbra::Rendering {
 struct StaticDrawSnapshot;
 class RenderView;
 class FarLodSystem; // far-LOD region meshes drawn with the GBuffer pass's own shader
+class SubmittedLiveTerrain;
 
 // ----------------------------------------------------------------------------
 // GBuffer (T11) — non-ctx inputs for the deferred geometry pass.
@@ -42,6 +43,10 @@ struct GBufferPassInput {
     // ctx.frustum_planes into a local glm::vec4 fp[6] before calling this
     // (ctx.frustum_planes is a pointer; the callback takes an array reference).
     SubmitTerrainChunksFn submit_terrain_chunks;
+    // Filled by this frame's live submit; null means no submitted live support.
+    const SubmittedLiveTerrain* submitted_live_terrain = nullptr;
+    // Resident nonempty live GPU chunks, including chunks outside the frustum.
+    const SubmittedLiveTerrain* resident_live_terrain = nullptr;
 
     // Exclusive selected far submission. Legacy uses the pass-owned shader;
     // ladder consumes value commands synchronously through its owned backend.

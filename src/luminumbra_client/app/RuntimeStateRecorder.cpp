@@ -4,12 +4,15 @@
 
 #include "app/RuntimeStateRecorder.h"
 
+#include "audio/MiniaudioManager.h"
+#include "audio/NullAudioManager.h"
 #include "core/Log.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "rendering/Camera.h"
 #include "rendering/FarLodSystem.h" // retained Legacy compatibility telemetry
 #include "rendering/RenderPipeline.h"
+#include "ui/Rml_UIManager.h"
 
 #include <algorithm>
 #include <cmath>
@@ -121,6 +124,57 @@ RuntimeStateRecorder::RuntimeStateRecorder(
     , m_started_at(std::chrono::steady_clock::now()) {
     std::error_code ec;
     std::filesystem::create_directories(m_config.artifact_dir, ec);
+}
+
+void RuntimeStateRecorder::bind_audio_acceptance(const std::unique_ptr<IAudioManager>& audio,
+                                                 const luminumbra::core::SystemConfig& settings,
+                                                 const std::unique_ptr<Rml_UIManager>& ui,
+                                                 bool enable_audio_requested) {
+    m_audio = &audio;
+    m_audio_settings = &settings;
+    m_audio_ui = &ui;
+    const auto& user = settings.user();
+    m_loaded_audio_volumes = AudioVolumes{user.audio_master, user.audio_music, user.audio_sfx};
+    m_enable_audio_requested = enable_audio_requested;
+}
+
+bool RuntimeStateRecorder::audio_controls_changed() {
+    if (!m_audio_ui || !*m_audio_ui) {
+        return false;
+    }
+    const auto generation = (*m_audio_ui)->document_generation();
+    if (generation == m_audio_document_generation) {
+        return false;
+    }
+    m_audio_document_generation = generation;
+    return (*m_audio_ui)->AudioControlsState().present == 3;
+}
+
+nlohmann::json RuntimeStateRecorder::audio_acceptance_json() const {
+    AudioBackendState backend;
+    if (m_audio && *m_audio) {
+        if (const auto* device = dynamic_cast<const MiniaudioManager*>(m_audio->get())) {
+            backend = device->AcceptanceState();
+        } else if (const auto* null_audio = dynamic_cast<const NullAudioManager*>(m_audio->get())) {
+            backend = null_audio->AcceptanceState();
+        } else {
+            backend.mode = "unknown";
+        }
+    }
+    std::optional<AudioVolumes> current;
+    if (m_audio_settings) {
+        const auto& user = m_audio_settings->user();
+        current = AudioVolumes{user.audio_master, user.audio_music, user.audio_sfx};
+    }
+    const AudioControlState controls =
+        m_audio_ui && *m_audio_ui ? (*m_audio_ui)->AudioControlsState() : AudioControlState{};
+    return BuildAudioAcceptance({.no_audio = m_config.no_audio,
+                                 .enable_audio = m_enable_audio_requested,
+                                 .telemetry = !m_config.audio_telemetry_path.empty()},
+                                m_loaded_audio_volumes,
+                                current,
+                                backend,
+                                controls);
 }
 
 const std::filesystem::path& RuntimeStateRecorder::artifact_dir() const {
@@ -381,6 +435,7 @@ RuntimeStateRecorder::build_state_json(const std::string& phase,
           {"no_ui", m_config.no_ui},
           {"hidden_window", m_config.hidden_window},
           {"memory_watermark_mb", m_config.memory_watermark_mb}}},
+        {"audio_acceptance", audio_acceptance_json()},
         {"memory", MemoryToJson(memory)},
         {"estimated_vram_bytes", 0},
         {"chunk_states", nlohmann::json::object()},

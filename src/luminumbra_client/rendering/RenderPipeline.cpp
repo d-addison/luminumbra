@@ -3021,6 +3021,12 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
         RenderContext gbuffer_ctx = make_gbuffer_context(camera, frustum_planes);
         gbuffer_ctx.frozen_replay = m_far_world_paired;
         GBufferPassInput gbuffer_input;
+        if (m_farlod) {
+            auto& live = m_farlod->submitted_live_terrain();
+            live.clear();
+            gbuffer_input.submitted_live_terrain = &live;
+            gbuffer_input.resident_live_terrain = &m_farlod->resident_live_terrain();
+        }
         m_authored_view.reset();
         if (m_authored_draws && !m_authored_draws->draws.empty()) {
             if (m_taau_enabled || m_render_scale != 1.0f)
@@ -3047,9 +3053,29 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
             gbuffer_input.authored_draws = m_authored_draws;
             gbuffer_input.authored_view = m_authored_view.get();
         }
-        // Live-terrain submit: the shared callback (CullHierarchical +
-        // draw_chunks_mdi, byte-identical), shared with ShadowPass.
-        gbuffer_input.submit_terrain_chunks = make_terrain_submitter(true);
+        // G-buffer submission also records the successful live draws supporting props.
+        // Shadow submission keeps the same cull/draw sequence without publishing support.
+        gbuffer_input.submit_terrain_chunks =
+            [this](const glm::vec4(&planes)[6]) -> TerrainSubmitStats {
+            std::vector<const ChunkCullEntry*> visible_chunks;
+            m_hierarchicalCuller.CullHierarchical(planes, visible_chunks);
+            if (m_terrain_coverage_enabled && !m_far_world_paired) {
+                m_terrain_coverage_live_submit_observed = true;
+                m_terrain_coverage_visible.clear();
+                for (const auto* chunk : visible_chunks) {
+                    m_terrain_coverage_visible.insert(chunk->id);
+                }
+            }
+            std::size_t draws = 0;
+            std::size_t indices = 0;
+            draw_chunks_mdi(visible_chunks, draws, indices);
+            if (m_farlod) {
+                auto& live = m_farlod->submitted_live_terrain();
+                // Only successful MDI commands have origins; zero draws ignores stale scratch.
+                live.assign_origins(std::span<const glm::vec4>(m_mdi_origin_scratch.data(), draws));
+            }
+            return TerrainSubmitStats{visible_chunks.size(), draws, indices};
+        };
         gbuffer_input.far_selection = m_frame_far_selection;
         gbuffer_input.legacy_far = legacy_far_compatibility();
         if (m_frame_far_selection.effective == FarWorldMode::Ladder)
@@ -3906,6 +3932,10 @@ void RenderPipeline::clear_offscreen_target() {
 }
 
 void RenderPipeline::clear_all_chunk_data() {
+    if (m_farlod) {
+        m_farlod->resident_live_terrain().clear();
+        m_farlod->submitted_live_terrain().clear();
+    }
     m_foliage_pass->clear_ground_meshes();
     // Force clear all cached chunk render data to ensure fresh uploads.
     // Retire the world's pool slices while keeping pending GPU storage charged
@@ -4992,6 +5022,11 @@ void RenderPipeline::upload_chunk_mesh(const ChunkMeshSnapshot& chunk,
     render_data.refinement = payload.refinement;
     render_data.frames_since_inactive = 0;
 
+    if (m_farlod) {
+        m_farlod->resident_live_terrain().add_origin(
+            glm::vec3(chunk.coords) * glm::vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z));
+    }
+
     // Telemetry parity with the legacy slot accounting: a brand-new record is a
     // "slot created"; an existing chunk whose mesh outgrew its reserved slot
     // (so the pool reallocated, raising capacity) is a "slot grown"; a
@@ -5025,6 +5060,10 @@ void RenderPipeline::unload_water_resources(ChunkID chunk_id) {
 }
 
 void RenderPipeline::unload_chunk_resources(ChunkID chunk_id) {
+    if (m_farlod) {
+        m_farlod->resident_live_terrain().remove_chunk(chunk_id);
+        m_farlod->submitted_live_terrain().remove_chunk(chunk_id);
+    }
     m_near_terrain_refinement.forget(chunk_id);
     m_foliage_pass->remove_ground_mesh(chunk_id);
     auto it = m_chunk_render_data.find(chunk_id);

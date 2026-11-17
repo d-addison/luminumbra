@@ -1,5 +1,6 @@
 #include "ui/Rml_UIManager.h"
 #include "app/FrameAttribution.h"
+#include "audio/AudioAcceptance.h"
 #include "audio/IAudioManager.h"
 #include "luminumbra_common/core/CaptureContentPaths.h"
 #include "luminumbra_common/core/FramePacing.h"
@@ -1122,6 +1123,28 @@ void Rml_UIManager::SetBackdropBlurQuality(luminumbra::core::UiBlurQuality quali
         for (int i = 0; i < m_context->GetNumDocuments(); ++i)
             ApplyBackdropClass(m_context->GetDocument(i));
     }
+}
+
+AudioControlState Rml_UIManager::AudioControlsState() const {
+    if (!m_context) {
+        return {};
+    }
+    auto* document = m_context->GetDocument("settings");
+    if (!document) {
+        return {};
+    }
+    AudioControlState state;
+    // Fixed bound: the three shipped volume controls, never the document tree.
+    for (const char* id : {"setting_audio_master", "setting_audio_sfx", "setting_audio_music"}) {
+        if (const auto* control =
+                dynamic_cast<Rml::ElementFormControl*>(document->GetElementById(id))) {
+            ++state.present;
+            if (control->HasAttribute("disabled")) {
+                ++state.disabled;
+            }
+        }
+    }
+    return state;
 }
 
 void Rml_UIManager::RefreshGraphicsSettings() {
