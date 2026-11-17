@@ -398,6 +398,58 @@ float canopyOcclusion(vec3 sampPos, vec3 ro, float depthGap) {
     return 0.0;
 }
 
+// Ordinary crossings and deferred empty-sample recovery share exactly eight
+// position lookups. Selection remains independent of the thickness cutoff.
+float refineCanopyOcclusion(vec3 ro, vec3 skyDirView, float frontDistance,
+                           float backDistance, vec3 sampPos, float depthGap,
+                           bool originBracket, bool emptyCrossing,
+                           inout int refinementTaps) {
+    for (int refinement = 0; refinement < 8; ++refinement) {
+        if (refinementTaps >= 8) break;
+        float midpoint = 0.5 * (frontDistance + backDistance);
+        vec3 refinedPoint = ro + skyDirView * midpoint;
+        vec4 refinedClip = u_projection * vec4(refinedPoint, 1.0);
+        if (refinedClip.w <= 0.0) break;
+        vec2 refinedUv = (refinedClip.xy / refinedClip.w) * 0.5 + 0.5;
+        if (refinedUv.x < 0.0 || refinedUv.x > 1.0 || refinedUv.y < 0.0 || refinedUv.y > 1.0) break;
+        vec3 refinedPosition = vec3(0.0);
+        ++refinementTaps;
+        if (!farWorldPosition(gPosition, u_sceneDepth, refinedUv, refinedPosition) ||
+            dot(refinedPosition, refinedPosition) < 1e-6) {
+            // The origin or an empty coarse tap is already open even
+            // when refinement projects onto sky before the ceiling.
+            // Once the open side has geometry, a hole invalidates it.
+            if (originBracket) {
+                frontDistance = midpoint;
+                continue;
+            }
+            break;
+        }
+        float refinedGap = length(refinedPoint) - length(refinedPosition);
+        // Empty-sample recovery accepts only overhead back-side geometry,
+        // like its coarse endpoint; foreground below the origin is
+        // unobserved for this bracket and cannot become the ceiling.
+        if (emptyCrossing && refinedGap > 0.05 &&
+            dot(refinedPosition - ro, skyDirView) <= 0.0) {
+            if (originBracket) {
+                frontDistance = midpoint;
+                continue;
+            }
+            break;
+        }
+        if (refinedGap <= 0.05) {
+            frontDistance = midpoint;
+            originBracket = false;
+        } else {
+            backDistance = midpoint;
+            sampPos = refinedPosition;
+            depthGap = refinedGap;
+        }
+    }
+    // Retain the last observed back-side sample on missing data or budget exhaustion.
+    return canopyOcclusion(sampPos, ro, depthGap);
+}
+
 // Long-range sky visibility via an upward view-space ray-march against the
 // G-buffer. Returns 1.0 = fully open to the sky, -> u_caveAmbientFloor when the
 // fragment is roofed over (cave/overhang). At most 32 march position taps plus
@@ -427,6 +479,11 @@ float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
     float previousDistance = 0.0;
     float previousDepthGap = 0.0;
     int refinementTaps = 0;
+    // Each recovery needs an empty tap followed by geometry, so 32 coarse
+    // taps produce at most 16 brackets. Cache endpoints without rereading them.
+    vec4 recoverySamples[16];
+    vec2 recoveryDistances[16];
+    int recoveryCount = 0;
     for (int s = 1; s <= 32; ++s) {
         if (s > steps) break;
         float distanceAlongRay = stepLen * float(s);
@@ -456,69 +513,31 @@ float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
         bool emptyCrossing = !previousValid && depthGap > 0.05 &&
             dot(sampPos - ro, skyDirView) > 0.0;
         if (emptyCrossing) {
-            // Recovery may encounter unrelated foreground and then sky. Keep
-            // the observed coarse hit so refinement can only add occlusion.
-            occluded = max(occluded, canopyOcclusion(sampPos, ro, depthGap));
+            recoverySamples[recoveryCount] = vec4(sampPos, depthGap);
+            recoveryDistances[recoveryCount] = vec2(previousDistance, distanceAlongRay);
+            ++recoveryCount;
         }
-        crossing = crossing || emptyCrossing;
         float frontDistance = previousDistance;
         float backDistance = distanceAlongRay;
         previousValid = true;
         previousDistance = distanceAlongRay;
         previousDepthGap = depthGap;
-        // Resolve every front-to-back bracket with the same fixed bisection,
-        // independent of thickness. Stopping on entry into the thickness band
-        // would make its outer edge select a different occlusion strength.
-        // Silhouettes must still supply an observed sample inside the band.
+        // Real geometry crossings retain the base march's refinement order.
+        float contribution = canopyOcclusion(sampPos, ro, depthGap);
         if (crossing) {
-            bool originBracket = s == 1;
-            originBracket = originBracket || emptyCrossing;
-            for (int refinement = 0; refinement < 8; ++refinement) {
-                if (refinementTaps >= 8) break;
-                float midpoint = 0.5 * (frontDistance + backDistance);
-                vec3 refinedPoint = ro + skyDirView * midpoint;
-                vec4 refinedClip = u_projection * vec4(refinedPoint, 1.0);
-                if (refinedClip.w <= 0.0) break;
-                vec2 refinedUv = (refinedClip.xy / refinedClip.w) * 0.5 + 0.5;
-                if (refinedUv.x < 0.0 || refinedUv.x > 1.0 || refinedUv.y < 0.0 || refinedUv.y > 1.0) break;
-                vec3 refinedPosition = vec3(0.0);
-                ++refinementTaps;
-                if (!farWorldPosition(gPosition, u_sceneDepth, refinedUv, refinedPosition) ||
-                    dot(refinedPosition, refinedPosition) < 1e-6) {
-                    // The origin or an empty coarse tap is already open even
-                    // when refinement projects onto sky before the ceiling.
-                    // Once the open side has geometry, a hole invalidates it.
-                    if (originBracket) {
-                        frontDistance = midpoint;
-                        continue;
-                    }
-                    break;
-                }
-                float refinedGap = length(refinedPoint) - length(refinedPosition);
-                // Empty-sample recovery accepts only overhead back-side geometry,
-                // like its coarse endpoint; foreground below the origin is
-                // unobserved for this bracket and cannot become the ceiling.
-                if (emptyCrossing && refinedGap > 0.05 &&
-                    dot(refinedPosition - ro, skyDirView) <= 0.0) {
-                    if (originBracket) {
-                        frontDistance = midpoint;
-                        continue;
-                    }
-                    break;
-                }
-                if (refinedGap <= 0.05) {
-                    frontDistance = midpoint;
-                    originBracket = false;
-                } else {
-                    backDistance = midpoint;
-                    sampPos = refinedPosition;
-                    depthGap = refinedGap;
-                }
-            }
-            // Missing data or an exhausted budget retains the last observed
-            // back-side sample; neither condition changes selection at thickness.
+            contribution = refineCanopyOcclusion(ro, skyDirView, frontDistance,
+                backDistance, sampPos, depthGap, s == 1, false, refinementTaps);
         }
-        occluded = max(occluded, canopyOcclusion(sampPos, ro, depthGap));
+        occluded = max(occluded, contribution);
+    }
+    // Only unused refinement taps may recover empty-to-geometry brackets.
+    // Recovery endpoints were already accumulated, so recovery can only add.
+    for (int recovery = 0; recovery < 16; ++recovery) {
+        if (recovery >= recoveryCount || refinementTaps >= 8) break;
+        vec4 hit = recoverySamples[recovery];
+        vec2 distances = recoveryDistances[recovery];
+        occluded = max(occluded, refineCanopyOcclusion(ro, skyDirView, distances.x,
+            distances.y, hit.xyz, hit.w, true, true, refinementTaps));
     }
     // occluded in [0,1]; map to a sky-visibility multiplier in [floor,1].
     return mix(1.0, u_caveAmbientFloor, clamp(occluded, 0.0, 1.0));
