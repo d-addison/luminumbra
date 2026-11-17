@@ -133,6 +133,8 @@ public:
                 .playback_volumes =
                     m_engine && m_sfxGroup
                         ? std::optional<AudioVolumes>({ma_engine_get_volume(m_engine.get()),
+                                                       // Music-bus setting as applied; voice gain
+                                                       // also folds bank volume and ducking.
                                                        m_musicVolume,
                                                        ma_sound_group_get_volume(m_sfxGroup.get())})
                         : std::nullopt,

@@ -25,6 +25,9 @@ struct AudioBackendState {
     bool ambient_routed = false;
     bool events_routed = false;
     bool ui_routed = false;
+    // Bus-level gains read from the live mixer: engine master, the music-bus setting
+    // and the SFX group. Music has no group node; its bus gain multiplies each
+    // voice's authored bank volume and any music duck, which are not reported here.
     std::optional<AudioVolumes> playback_volumes;
     bool telemetry_enabled = false;
     std::size_t retained_requests = 0;
@@ -83,6 +86,7 @@ inline nlohmann::json BuildAudioAcceptance(const AudioAcceptanceRequest& request
               {"in_effect", AudioVolumesToJson(current)},
               {"unchanged",
                loaded && current ? nlohmann::json(*loaded == *current) : nlohmann::json(nullptr)},
+              // Bus gains, not per-voice gains (see AudioBackendState::playback_volumes).
               // Null/unavailable playback has no mixer gains, even with nonzero preferences.
               {"playback_gains", AudioVolumesToJson(backend.playback_volumes)}}},
             {"controls",
