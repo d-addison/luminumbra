@@ -83,10 +83,11 @@ class ReplayWorkspaceContract(unittest.TestCase):
         source = read("src/luminumbra_common/replay/ReplayStream.cpp")
         opened = body(source, "bool BoundedReplayRecorder::Open(")
         refusals = len(re.findall(r"return Refused\(\s*std::snprintf\(m_open_refusal\.data\(\),", opened))
-        self.assertEqual(refusals, 6)
+        self.assertEqual(refusals, 7)
         self.assertEqual(opened.count("kOpenRefusalBytes,"), refusals)
         self.assertEqual(opened.count("return false;"), 0)
-        for stage in ("unconfigured: ", "already-open: ", "header-budget: ", "create-parent: ",
+        for stage in ("unconfigured: ", "already-open: ", "authority-boot: ",
+                      "header-budget: ", "create-parent: ",
                       "reserve-directory: ", "exhausted: "):
             self.assertEqual(opened.count(f'"{stage}'), 1, stage)
         # Paths and OS messages enter the refusal only through the bounded helpers.
