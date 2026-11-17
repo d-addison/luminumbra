@@ -1,5 +1,7 @@
 #include "WeatherSystem.h"
 
+#include "../world/GameSession.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -310,6 +312,98 @@ WeatherSystem::WeatherSystem(int world_seed)
     Update(0, Vec3(0.0f), nullptr);
     // Construction is setup; only a caller's tick or restore locks installation.
     m_hasUpdatedOrRestored = false;
+}
+
+WeatherSystem::WeatherSystem(const WeatherSystem& other)
+    : m_schedule(other.m_schedule)
+    , m_scheduleBytes(other.m_scheduleBytes)
+    , m_scheduledSample(other.m_scheduledSample)
+    , m_scheduledStrikes(other.m_scheduledStrikes)
+    , m_hasUpdatedOrRestored(other.m_hasUpdatedOrRestored)
+    , m_scheduleAnchor(other.m_scheduleAnchor)
+    , m_sessionBinding(other.m_sessionBinding)
+    , m_regional_sample(other.m_regional_sample)
+    , m_regional_hash(other.m_regional_hash)
+    , m_regionalWeatherKeyed(other.m_regionalWeatherKeyed)
+    , m_regionalProjectionWork(other.m_regionalProjectionWork)
+    , m_regionalStormNodeChanges(other.m_regionalStormNodeChanges)
+    , m_regionalStorms(other.m_regionalStorms)
+    , m_regionalStrikes(other.m_regionalStrikes)
+    , m_regionalStrikesDeliveredThrough(other.m_regionalStrikesDeliveredThrough)
+    , m_hiddenRegionalStrikes(other.m_hiddenRegionalStrikes)
+    , m_regionalStormIndex(other.m_regionalStormIndex)
+    , m_regionalStormCache(other.m_regionalStormCache)
+    , m_regionalStrikeCache(other.m_regionalStrikeCache)
+    , m_regionalStormCacheValid(other.m_regionalStormCacheValid)
+    , m_regionalStrikeCacheValid(other.m_regionalStrikeCacheValid)
+    , m_weather_seed(other.m_weather_seed)
+    , m_lightning_seed(other.m_lightning_seed)
+    , m_precip(other.m_precip)
+    , m_category(other.m_category)
+    , m_grid_extent(other.m_grid_extent)
+    , m_grid_cell_size(other.m_grid_cell_size)
+    , m_anchor_wind(other.m_anchor_wind)
+    , m_anchor_category(other.m_anchor_category)
+    , m_last_tick(other.m_last_tick)
+    , m_storm_cells(other.m_storm_cells)
+    , m_strikes(other.m_strikes)
+    , m_pressure_noise(other.m_pressure_noise)
+    , m_temperature_noise(other.m_temperature_noise)
+    , m_humidity_noise(other.m_humidity_noise)
+    , m_scratch_px(other.m_scratch_px)
+    , m_scratch_pz(other.m_scratch_pz)
+    , m_scratch_pressure(other.m_scratch_pressure)
+    , m_scratch_temperature(other.m_scratch_temperature)
+    , m_scratch_humidity(other.m_scratch_humidity) {
+    if (other.m_sessionBinding.session) {
+        SelectRegionalBackend(false);
+    }
+}
+
+WeatherSystem::WeatherSystem(WeatherSystem&& other)
+    : m_schedule(std::move(other.m_schedule))
+    , m_scheduleBytes(std::move(other.m_scheduleBytes))
+    , m_scheduledSample(other.m_scheduledSample)
+    , m_scheduledStrikes(std::move(other.m_scheduledStrikes))
+    , m_hasUpdatedOrRestored(other.m_hasUpdatedOrRestored)
+    , m_scheduleAnchor(other.m_scheduleAnchor)
+    , m_sessionBinding(other.m_sessionBinding)
+    , m_regional_sample(std::move(other.m_regional_sample))
+    , m_regional_hash(std::move(other.m_regional_hash))
+    , m_regionalWeatherKeyed(other.m_regionalWeatherKeyed)
+    , m_regionalProjectionWork(other.m_regionalProjectionWork)
+    , m_regionalStormNodeChanges(other.m_regionalStormNodeChanges)
+    , m_regionalStorms(std::move(other.m_regionalStorms))
+    , m_regionalStrikes(std::move(other.m_regionalStrikes))
+    , m_regionalStrikesDeliveredThrough(other.m_regionalStrikesDeliveredThrough)
+    , m_hiddenRegionalStrikes(other.m_hiddenRegionalStrikes)
+    , m_regionalStormIndex(std::move(other.m_regionalStormIndex))
+    , m_regionalStormCache(std::move(other.m_regionalStormCache))
+    , m_regionalStrikeCache(std::move(other.m_regionalStrikeCache))
+    , m_regionalStormCacheValid(other.m_regionalStormCacheValid)
+    , m_regionalStrikeCacheValid(other.m_regionalStrikeCacheValid)
+    , m_weather_seed(other.m_weather_seed)
+    , m_lightning_seed(other.m_lightning_seed)
+    , m_precip(std::move(other.m_precip))
+    , m_category(std::move(other.m_category))
+    , m_grid_extent(other.m_grid_extent)
+    , m_grid_cell_size(other.m_grid_cell_size)
+    , m_anchor_wind(other.m_anchor_wind)
+    , m_anchor_category(other.m_anchor_category)
+    , m_last_tick(other.m_last_tick)
+    , m_storm_cells(std::move(other.m_storm_cells))
+    , m_strikes(std::move(other.m_strikes))
+    , m_pressure_noise(std::move(other.m_pressure_noise))
+    , m_temperature_noise(std::move(other.m_temperature_noise))
+    , m_humidity_noise(std::move(other.m_humidity_noise))
+    , m_scratch_px(std::move(other.m_scratch_px))
+    , m_scratch_pz(std::move(other.m_scratch_pz))
+    , m_scratch_pressure(std::move(other.m_scratch_pressure))
+    , m_scratch_temperature(std::move(other.m_scratch_temperature))
+    , m_scratch_humidity(std::move(other.m_scratch_humidity)) {
+    if (other.m_sessionBinding.session) {
+        SelectRegionalBackend(false);
+    }
 }
 
 void WeatherSystem::LocalCell(const Vec3& world_pos,
@@ -777,16 +871,31 @@ void WeatherSystem::BindRegionalBackend(std::function<WeatherSample(const Vec3&)
     if (static_cast<bool>(sample) != static_cast<bool>(hash)) {
         throw std::invalid_argument("regional backend needs both a sampler and a hash");
     }
-    if (!sample && m_regionalWeatherKeyed) {
+    SelectRegionalBackend(static_cast<bool>(sample));
+    m_sessionBinding.session = nullptr;
+    m_regional_sample = std::move(sample);
+    m_regional_hash = std::move(hash);
+}
+
+void WeatherSystem::SelectRegionalBackend(bool enabled) {
+    if (!enabled && m_regionalWeatherKeyed) {
         m_storm_cells = StormCells();
         m_strikes = StrikeSchedule();
         m_regionalWeatherKeyed = false;
     }
-    if (sample && !m_regionalWeatherKeyed) {
+    if (!enabled) {
+        m_regionalStorms.clear();
+        m_regionalStrikes.clear();
+        m_regionalStormIndex.clear();
+        m_regionalStrikesDeliveredThrough.reset();
+        m_hiddenRegionalStrikes = 0;
+        m_regionalStormCache.clear();
+        m_regionalStrikeCache.clear();
+        m_regionalStormCacheValid = m_regionalStrikeCacheValid = false;
+    }
+    if (enabled && !m_regionalWeatherKeyed) {
         RebuildRegionalStormIndex();
     }
-    m_regional_sample = std::move(sample);
-    m_regional_hash = std::move(hash);
 }
 
 void WeatherSystem::AdoptRegionalWeather(std::uint64_t tick,
@@ -854,8 +963,8 @@ const std::vector<StrikeEvent>& WeatherSystem::StrikeSchedule() const {
 void WeatherSystem::RefreshRegionalWeather(std::uint64_t tick, const Vec3& anchor) {
     m_hasUpdatedOrRestored = true;
     m_last_tick = tick;
-    if (m_regional_sample) {
-        const auto sample = m_regional_sample(anchor);
+    if (HasRegionalBackend()) {
+        const auto sample = SampleRegional(anchor);
         m_anchor_category = sample.category;
         m_anchor_wind = sample.wind;
     }
@@ -901,7 +1010,7 @@ const WeatherSystem::StormEntries* WeatherSystem::RegionalStormEntries(const Vec
 }
 
 std::size_t WeatherSystem::storm_candidates_at(const Vec3& world_pos) const {
-    if (!m_regional_sample) {
+    if (!HasRegionalBackend()) {
         return m_storm_cells.size();
     }
     const auto* entries = RegionalStormEntries(world_pos);
@@ -921,7 +1030,7 @@ float WeatherSystem::StormPrecipAt(const Vec3& world_pos) const {
         const float falloff = t * t;
         precip += cell.intensity * falloff;
     };
-    if (m_regional_sample) {
+    if (HasRegionalBackend()) {
         if (const auto* entries = RegionalStormEntries(world_pos)) {
             for (const auto& [identity, cell] : *entries) {
                 (void)identity;
@@ -950,7 +1059,7 @@ float WeatherSystem::StormIntensityAt(const Vec3& world_pos) const {
             }
         }
     };
-    if (m_regional_sample) {
+    if (HasRegionalBackend()) {
         if (const auto* entries = RegionalStormEntries(world_pos)) {
             for (const auto& [identity, cell] : *entries) {
                 (void)identity;
@@ -969,7 +1078,7 @@ void WeatherSystem::UpdateFromClock(std::uint64_t tick,
                                     const Vec3& region_anchor,
                                     WindFieldSystem& wind) {
     m_hasUpdatedOrRestored = true;
-    if (m_regional_sample) {
+    if (HasRegionalBackend()) {
         m_last_tick = tick;
         wind.Update(tick, region_anchor);
         UpdateSchedule(tick, region_anchor);
@@ -993,7 +1102,7 @@ void WeatherSystem::RestoreAtTick(std::uint64_t tick,
         UpdateFromClock(tick, region_anchor, wind);
         return;
     }
-    if (m_regional_sample) {
+    if (HasRegionalBackend()) {
         // Storms are adopted projections; wind still has to reach the restored tick.
         UpdateFromClock(tick, region_anchor, wind);
         return;
@@ -1025,7 +1134,7 @@ void WeatherSystem::Update(std::uint64_t tick,
                  : Vec2(0.0f);
         return;
     }
-    if (m_regional_sample)
+    if (HasRegionalBackend())
         return;
     // 1) Category map + base precipitation field for this tick.
     RebuildFields(tick, region_anchor);
@@ -1047,8 +1156,8 @@ void WeatherSystem::Update(std::uint64_t tick,
 WeatherCategory WeatherSystem::CategoryAt(const Vec3& world_pos) const {
     if (m_schedule)
         return m_scheduledSample.category;
-    if (m_regional_sample)
-        return m_regional_sample(world_pos).category;
+    if (HasRegionalBackend())
+        return SampleRegional(world_pos).category;
     int lx = 0;
     int lz = 0;
     bool in_region = false;
@@ -1062,9 +1171,9 @@ WeatherCategory WeatherSystem::CategoryAt(const Vec3& world_pos) const {
 float WeatherSystem::PrecipitationAt(const Vec3& world_pos) const {
     if (m_schedule)
         return m_scheduledSample.precip_intensity;
-    if (m_regional_sample)
+    if (HasRegionalBackend())
         return (std::min)(1.0f,
-                          m_regional_sample(world_pos).precip_intensity + StormPrecipAt(world_pos));
+                          SampleRegional(world_pos).precip_intensity + StormPrecipAt(world_pos));
     int lx = 0;
     int lz = 0;
     bool in_region = false;
@@ -1080,11 +1189,11 @@ float WeatherSystem::PrecipitationAt(const Vec3& world_pos) const {
 WeatherSample WeatherSystem::SampleAt(const Vec3& world_pos) const {
     if (m_schedule) {
         auto sample = m_scheduledSample;
-        sample.wind = m_regional_sample ? m_regional_sample(world_pos).wind : m_anchor_wind;
+        sample.wind = HasRegionalBackend() ? SampleRegional(world_pos).wind : m_anchor_wind;
         return sample;
     }
-    if (m_regional_sample) {
-        auto sample = m_regional_sample(world_pos);
+    if (HasRegionalBackend()) {
+        auto sample = SampleRegional(world_pos);
         sample.precip_intensity =
             (std::min)(1.0f, sample.precip_intensity + StormPrecipAt(world_pos));
         sample.storm_intensity = StormIntensityAt(world_pos);
@@ -1108,15 +1217,20 @@ std::string WeatherSystem::ComputeWeatherSubHash() const {
         MixU64(hash, static_cast<std::uint32_t>(m_lightning_seed));
         MixFloat(hash, m_scheduleAnchor.x);
         MixFloat(hash, m_scheduleAnchor.z);
-        if (m_regional_hash) {
-            for (const auto c : m_regional_hash())
-                MixU8(hash, static_cast<std::uint8_t>(c));
-        }
+        const std::string regional = m_sessionBinding.session
+                                         ? m_sessionBinding.session->ComputeRegionalWeatherSubHash()
+                                     : m_regional_hash ? m_regional_hash()
+                                                       : std::string();
+        for (const auto c : regional)
+            MixU8(hash, static_cast<std::uint8_t>(c));
         constexpr std::string_view hex = "0123456789abcdef";
         std::string result(16, '0');
         for (unsigned i = 0; i < 16; ++i)
             result[i] = hex[(hash >> ((15 - i) * 4)) & 15];
         return result;
+    }
+    if (m_sessionBinding.session) {
+        return m_sessionBinding.session->ComputeRegionalWeatherSubHash();
     }
     if (m_regional_hash)
         return m_regional_hash();
@@ -1175,6 +1289,79 @@ std::string WeatherSystem::ComputeWeatherSubHash() const {
     std::ostringstream stream;
     stream << std::hex << std::setw(16) << std::setfill('0') << hash;
     return stream.str();
+}
+
+WeatherSystem& WeatherSystem::operator=(WeatherSystem&& other) {
+    if (this == &other) {
+        return *this;
+    }
+    if (other.m_sessionBinding.session) {
+        // Materialize before replacing the destination: allocation failure leaves it intact.
+        WeatherSystem detached(std::move(other));
+        return *this = std::move(detached);
+    }
+    m_schedule = std::move(other.m_schedule);
+    m_scheduleBytes = std::move(other.m_scheduleBytes);
+    m_scheduledSample = other.m_scheduledSample;
+    m_scheduledStrikes = std::move(other.m_scheduledStrikes);
+    m_hasUpdatedOrRestored = other.m_hasUpdatedOrRestored;
+    m_scheduleAnchor = other.m_scheduleAnchor;
+    m_sessionBinding = other.m_sessionBinding;
+    m_regional_sample = std::move(other.m_regional_sample);
+    m_regional_hash = std::move(other.m_regional_hash);
+    m_regionalStorms = std::move(other.m_regionalStorms);
+    m_regionalStrikes = std::move(other.m_regionalStrikes);
+    m_regionalStormIndex = std::move(other.m_regionalStormIndex);
+    m_regionalStormCache = std::move(other.m_regionalStormCache);
+    m_regionalStrikeCache = std::move(other.m_regionalStrikeCache);
+    m_precip = std::move(other.m_precip);
+    m_category = std::move(other.m_category);
+    m_storm_cells = std::move(other.m_storm_cells);
+    m_strikes = std::move(other.m_strikes);
+    m_pressure_noise = std::move(other.m_pressure_noise);
+    m_temperature_noise = std::move(other.m_temperature_noise);
+    m_humidity_noise = std::move(other.m_humidity_noise);
+    m_scratch_px = std::move(other.m_scratch_px);
+    m_scratch_pz = std::move(other.m_scratch_pz);
+    m_scratch_pressure = std::move(other.m_scratch_pressure);
+    m_scratch_temperature = std::move(other.m_scratch_temperature);
+    m_scratch_humidity = std::move(other.m_scratch_humidity);
+    m_regionalWeatherKeyed = other.m_regionalWeatherKeyed;
+    m_regionalProjectionWork = other.m_regionalProjectionWork;
+    m_regionalStormNodeChanges = other.m_regionalStormNodeChanges;
+    m_regionalStrikesDeliveredThrough = other.m_regionalStrikesDeliveredThrough;
+    m_hiddenRegionalStrikes = other.m_hiddenRegionalStrikes;
+    m_regionalStormCacheValid = other.m_regionalStormCacheValid;
+    m_regionalStrikeCacheValid = other.m_regionalStrikeCacheValid;
+    m_weather_seed = other.m_weather_seed;
+    m_lightning_seed = other.m_lightning_seed;
+    m_grid_extent = other.m_grid_extent;
+    m_grid_cell_size = other.m_grid_cell_size;
+    m_anchor_wind = other.m_anchor_wind;
+    m_anchor_category = other.m_anchor_category;
+    m_last_tick = other.m_last_tick;
+    return *this;
+}
+
+WeatherSystem& WeatherSystem::operator=(const WeatherSystem& other) {
+    if (this == &other) {
+        return *this;
+    }
+    return *this = WeatherSystem(other);
+}
+
+void WeatherSystem::BindRegionalSession(const world::GameSession& session) {
+    SelectRegionalBackend(true);
+    m_regional_sample = {};
+    m_regional_hash = {};
+    m_sessionBinding.session = &session;
+}
+
+WeatherSample WeatherSystem::SampleRegional(const Vec3& position) const {
+    if (m_sessionBinding.session) {
+        return m_sessionBinding.session->SampleRegionalWeather(position);
+    }
+    return m_regional_sample(position);
 }
 
 } // namespace Luminumbra::Systems

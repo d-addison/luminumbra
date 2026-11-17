@@ -54,6 +54,10 @@
 #include "../../../include/luminumbra/core/Types.h"
 #include "../fields/FieldGrid.h"
 
+namespace Luminumbra::world {
+class GameSession;
+}
+
 namespace Luminumbra::Systems {
 
 // Region weather category. The enum order is the canonical hash/serialization
@@ -169,6 +173,16 @@ public:
     explicit WeatherSystem(int world_seed);
     // Setup only; invalid schedules and changes after any update or restore refuse.
     bool SetSchedule(const WeatherSchedule& schedule);
+    WeatherSystem(const WeatherSystem& other);
+    WeatherSystem(WeatherSystem&& other);
+    WeatherSystem& operator=(const WeatherSystem& other);
+    WeatherSystem& operator=(WeatherSystem&& other);
+    // Borrow the session until clear/rebind or destruction. The session must outlive this
+    // binding. Copies and moves to a distinct object drop the borrowed binding;
+    // self-assignment preserves it.
+    // Callback compatibility bindings retain their existing copy semantics.
+    void BindRegionalSession(const world::GameSession& session);
+    // Compatibility/reference path. Empty callbacks clear either kind of binding.
     void BindRegionalBackend(std::function<WeatherSample(const Vec3&)> sample,
                              std::function<std::string()> hash);
     // Pure query projections adopted from FPG authority; this does not advance evolution.
@@ -306,6 +320,23 @@ private:
     bool m_hasUpdatedOrRestored = false; // setup guard only; never saved or hashed
     Vec3 m_scheduleAnchor{};
     void UpdateSchedule(std::uint64_t tick, const Vec3& anchor);
+    struct SessionBinding {
+        const world::GameSession* session = nullptr;
+        SessionBinding() = default;
+        SessionBinding(const SessionBinding&) noexcept {}
+        SessionBinding& operator=(const SessionBinding& other) noexcept {
+            if (this != &other) {
+                session = nullptr;
+            }
+            return *this;
+        }
+    };
+    void SelectRegionalBackend(bool enabled);
+    SessionBinding m_sessionBinding;
+    [[nodiscard]] bool HasRegionalBackend() const {
+        return m_sessionBinding.session || static_cast<bool>(m_regional_sample);
+    }
+    [[nodiscard]] WeatherSample SampleRegional(const Vec3& position) const;
     std::function<WeatherSample(const Vec3&)> m_regional_sample;
     std::function<std::string()> m_regional_hash;
     // Map a world position to a local cell (clamped result reported via in_region).
