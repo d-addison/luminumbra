@@ -128,6 +128,9 @@ public:
                                     bool water_smoke);
     bool IncludePhysicsOwner(std::uint32_t body_id);
     void SetOwnerContinuationAnchor(const Vec3& origin, const Vec3& anchor, std::uint64_t tick);
+    // Const owner-thread diagnostic using the same bounded capture as explicit saves.
+    // Refusal leaves bytes unchanged; call only between completed simulation ticks.
+    bool CaptureOwnerContinuation(std::string& bytes) const;
     const Persistence::OwnerContinuation* RestoredOwnerContinuation() const;
     void SetOwnerContinuationSimulationAnchors(std::span<const Vec3> anchors);
 
@@ -716,7 +719,6 @@ public:
     std::filesystem::path GetSaveRootPath() const;
 
 private:
-    bool CaptureOwnerContinuation(std::string& bytes) const;
     AuthorityProfileOptions m_authorityProfileOptions;
     const std::vector<World::PlayerAvatar>* m_ownerAvatarSources = nullptr;
     std::optional<std::uint32_t> m_ownerRosterCount;
