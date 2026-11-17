@@ -2923,6 +2923,253 @@ FragColor = vec4(shadow, shadow, shadow, 1); })";
         glDeleteProgram(program);
 }
 
+// A reduced-resolution G-buffer silhouette moves between depth texels across
+// subpixel jitter phases. Check both sides of the unjittered channel and glow.
+void ExpectLightningJitteredSilhouettes(
+    Luminumbra::Rendering::Shader& shader,
+    FullscreenFloatProbe& probe,
+    const glm::mat4& projection,
+    float occluder_depth,
+    const std::array<glm::vec4, FullscreenFloatProbe::width>& flash_pixels,
+    const std::array<glm::vec4, FullscreenFloatProbe::width>& sky_pixels) {
+    std::array<glm::vec4, FullscreenFloatProbe::width> first_phase{};
+    for (int phase = 0; phase < 2; ++phase) {
+        const glm::vec2 jitter =
+            phase == 0 ? glm::vec2(0.025f, -0.015f) : glm::vec2(-0.025f, 0.015f);
+        auto jittered_projection = projection;
+        jittered_projection[2][0] += jitter.x;
+        jittered_projection[2][1] += jitter.y;
+        shader.setMat4("u_gbufferInverseProjection", glm::inverse(jittered_projection));
+        shader.setVec2("u_jitter_ndc", jitter);
+        // Fixed 24-texel storage models a 75-percent internal render scale.
+        std::vector<glm::vec4> silhouette_depth(24, glm::vec4(0));
+        for (std::size_t texel = 0; texel < silhouette_depth.size(); ++texel) {
+            const float raster_uv = (static_cast<float>(texel) + 0.5f) / 24.0f;
+            const float unjittered_uv = raster_uv + jitter.x * 0.5f;
+            if (unjittered_uv < 0.56f) {
+                silhouette_depth[texel] = glm::vec4(occluder_depth);
+            }
+        }
+        probe.texture(1, silhouette_depth);
+        const auto pixels = probe.draw();
+        EXPECT_FLOAT_EQ(pixels[17].r, flash_pixels[17].r);
+        EXPECT_FLOAT_EQ(pixels[18].r, sky_pixels[18].r);
+        if (phase == 0) {
+            first_phase = pixels;
+        } else {
+            for (std::size_t pixel = 0; pixel < pixels.size(); ++pixel) {
+                EXPECT_FLOAT_EQ(pixels[pixel].r, first_phase[pixel].r);
+                EXPECT_FLOAT_EQ(pixels[pixel].g, first_phase[pixel].g);
+                EXPECT_FLOAT_EQ(pixels[pixel].b, first_phase[pixel].b);
+            }
+        }
+        // Also cross a horizontal silhouette: the single output row's ray
+        // stays behind terrain while its depth row changes with Y jitter.
+        for (std::size_t texel = 0; texel < silhouette_depth.size(); ++texel) {
+            const float raster_uv = (static_cast<float>(texel) + 0.5f) / 24.0f;
+            silhouette_depth[texel] =
+                glm::vec4(raster_uv + jitter.y * 0.5f < 0.515f ? occluder_depth : 0.0f);
+        }
+        probe.texture(1, silhouette_depth, 24);
+        const auto horizontal_pixels = probe.draw();
+        for (std::size_t pixel = 0; pixel < horizontal_pixels.size(); ++pixel) {
+            EXPECT_FLOAT_EQ(horizontal_pixels[pixel].r, flash_pixels[pixel].r);
+            EXPECT_FLOAT_EQ(horizontal_pixels[pixel].g, flash_pixels[pixel].g);
+            EXPECT_FLOAT_EQ(horizontal_pixels[pixel].b, flash_pixels[pixel].b);
+        }
+    }
+    shader.setVec2("u_jitter_ndc", {0, 0});
+    shader.setMat4("u_gbufferInverseProjection", glm::inverse(projection));
+}
+
+TEST(RenderSmokeTest, LightningChannelAndGlowRespectReversedSceneDepthAndRidges) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    const auto vertex = (SourceRoot() / "res/shaders/lightning_overlay.vert").string();
+    const auto fragment = (SourceRoot() / "res/shaders/lightning_overlay.frag").string();
+    Luminumbra::Rendering::Shader shader(vertex.c_str(), fragment.c_str());
+    ASSERT_TRUE(shader.IsValid());
+    FullscreenFloatProbe probe;
+    shader.use();
+    shader.setInt("u_scene", 0);
+    shader.setInt("u_sceneDepth", 1);
+    shader.setVec2("u_jitter_ndc", {0, 0});
+    shader.setInt("u_active", 1);
+    shader.setFloat("u_pulse", 1);
+    shader.setFloat("u_aspect", 1);
+    shader.setFloat("u_boltWidth", 0.010f);
+    shader.setFloat("u_boltGlow", 0.034f);
+    // Keep a localized world flash present: occlusion must affect only geometry.
+    shader.setInt("u_flashCount", 1);
+    shader.setVec2("u_flashNdc[0]", {0, 0});
+    shader.setFloat("u_flashPulse[0]", 0.2f);
+    shader.setInt("u_flashOnscreen[0]", 1);
+    probe.texture(0, {glm::vec4(0.1f, 0.1f, 0.1f, 1)});
+    const auto bolt = [&](float y, float inverse_depth) {
+        shader.setInt("u_boltCount", 2);
+        shader.setVec2("u_bolt[0]", {-0.9f, y});
+        shader.setVec2("u_bolt[1]", {0.9f, y});
+        shader.setFloat("u_boltInverseDepth[0]", inverse_depth);
+        shader.setFloat("u_boltInverseDepth[1]", inverse_depth);
+    };
+    for (float far_plane : {3200.0f, 17408.0f}) {
+        auto projection =
+            Luminumbra::Rendering::ReversedZPerspective(glm::radians(70.0f), 1.0f, 0.1f, far_plane);
+        shader.setMat4("u_gbufferInverseProjection", glm::inverse(projection));
+        const auto depth_at = [&](float distance) {
+            const glm::vec4 clip = projection * glm::vec4(0, 0, -distance, 1);
+            return clip.z / clip.w;
+        };
+        bolt(0, 0.01f);                   // channel 100 m away
+        probe.texture(1, {glm::vec4(0)}); // cleared sky never occludes
+        const auto sky_pixels = probe.draw();
+        const auto sky = sky_pixels[16];
+        EXPECT_GT(sky.r, 3.2f);
+        for (float distance : {100.0f, 200.0f, 14000.0f}) {
+            if (distance < far_plane) {
+                probe.texture(1, {glm::vec4(depth_at(distance))});
+                EXPECT_NEAR(probe.draw()[16].r, sky.r, 0.0001f);
+            }
+        }
+        shader.setInt("u_boltCount", 0);
+        const auto flash_pixels = probe.draw();
+        const auto flash_only = flash_pixels[16];
+        EXPECT_GT(flash_only.r, 0.1f);
+        EXPECT_NEAR(sky.r, flash_only.r + 3.46112f, 0.0001f);
+        EXPECT_FLOAT_EQ(sky_pixels.front().r, flash_pixels.front().r);
+        EXPECT_FLOAT_EQ(sky_pixels.back().r, flash_pixels.back().r);
+        bolt(0, 0.01f);
+        probe.texture(1, {glm::vec4(depth_at(25))}); // opaque cave wall / hill
+        EXPECT_NEAR(probe.draw()[16].r, flash_only.r, 0.0001f);
+        probe.texture(1, {glm::vec4(depth_at(99.5f))}); // near-contact ridge: soft edge
+        const auto ridge = probe.draw()[16];
+        EXPECT_GT(ridge.r, flash_only.r + 0.5f);
+        EXPECT_LT(ridge.r, sky.r - 0.5f);
+        // The tight glow, as well as the core, is suppressed below the ridge;
+        // the sky on its other side retains exactly the unobstructed response.
+        bolt(0.015f, 0.01f);
+        probe.texture(1, {glm::vec4(0)});
+        const auto sky_glow = probe.draw();
+        EXPECT_GT(sky_glow[16].r, flash_only.r + 0.01f);
+        std::vector<glm::vec4> ridge_depth(FullscreenFloatProbe::width, glm::vec4(0));
+        std::fill_n(ridge_depth.begin(), FullscreenFloatProbe::width / 2, glm::vec4(depth_at(25)));
+        probe.texture(1, ridge_depth);
+        const auto ridge_glow = probe.draw();
+        EXPECT_NEAR(ridge_glow[15].r, flash_only.r, 0.0001f);
+        EXPECT_FLOAT_EQ(ridge_glow[16].r, sky_glow[16].r);
+        bolt(0, 0.01f);
+        ExpectLightningJitteredSilhouettes(
+            shader, probe, projection, depth_at(25), flash_pixels, sky_pixels);
+        // A hidden closest segment must not erase an overlapping visible one.
+        bolt(0, 0.01f);
+        shader.setInt("u_boltCount", 5);
+        shader.setVec2("u_bolt[2]", {-3, -3});
+        shader.setFloat("u_boltInverseDepth[2]", 0);
+        shader.setVec2("u_bolt[3]", {-0.9f, 0});
+        shader.setVec2("u_bolt[4]", {0.9f, 0});
+        shader.setFloat("u_boltInverseDepth[3]", 0.1f);
+        shader.setFloat("u_boltInverseDepth[4]", 0.1f);
+        probe.texture(1, {glm::vec4(depth_at(25))});
+        EXPECT_NEAR(probe.draw()[16].r, sky.r, 0.0001f);
+        for (float invalid : {0.0f,
+                              -1.0f,
+                              std::numeric_limits<float>::infinity(),
+                              std::numeric_limits<float>::quiet_NaN()}) {
+            bolt(0, invalid);
+            probe.texture(1, {glm::vec4(0)});
+            EXPECT_NEAR(probe.draw()[16].r, flash_only.r, 0.0001f);
+        }
+        for (float invalid : {-1.0f,
+                              2.0f,
+                              std::numeric_limits<float>::infinity(),
+                              std::numeric_limits<float>::quiet_NaN()}) {
+            bolt(0, 0.01f);
+            probe.texture(1, {glm::vec4(invalid)});
+            EXPECT_NEAR(probe.draw()[16].r, sky.r, 0.0001f);
+        }
+        // Collapsed or subpixel strokes use the nearer endpoint in either order.
+        for (float span : {0.0f, 0.00001f}) {
+            for (float first_depth : {0.01f, 0.1f}) {
+                bolt(0, first_depth);
+                shader.setVec2("u_bolt[0]", {0.03125f - span, 0});
+                shader.setVec2("u_bolt[1]", {0.03125f + span, 0});
+                shader.setFloat("u_boltInverseDepth[1]", first_depth == 0.01f ? 0.1f : 0.01f);
+                probe.texture(1, {glm::vec4(depth_at(25))});
+                EXPECT_NEAR(probe.draw()[16].r, sky.r, 0.0001f);
+            }
+        }
+        // A zero or sub-core glow radius still has a core, with no inverted halo.
+        for (float radius : {-0.01f, 0.0f, 0.0005f, 0.001f}) {
+            shader.setFloat("u_boltGlow", radius);
+            bolt(0, 0.01f);
+            probe.texture(1, {glm::vec4(depth_at(25))});
+            EXPECT_NEAR(probe.draw()[16].r, flash_only.r, 0.0001f);
+            probe.texture(1, {glm::vec4(0)});
+            const auto core_only = probe.draw();
+            EXPECT_NEAR(core_only[16].r, flash_only.r + 3.17312f, 0.0001f);
+            EXPECT_FLOAT_EQ(core_only.front().r, flash_pixels.front().r);
+        }
+        shader.setFloat("u_boltGlow", 0.034f);
+        // Unavailable or malformed reconstruction must not manufacture an occluder.
+        std::array<glm::mat4, 5> invalid_inverse{
+            glm::mat4(0), glm::mat4(1), glm::mat4(-1), glm::mat4(1), glm::mat4(1)};
+        invalid_inverse[3][0][0] = std::numeric_limits<float>::quiet_NaN();
+        invalid_inverse[4][2][2] = -std::numeric_limits<float>::min();
+        probe.texture(1, {glm::vec4(depth_at(25))});
+        for (const auto& inverse : invalid_inverse) {
+            shader.setMat4("u_gbufferInverseProjection", inverse);
+            EXPECT_NEAR(probe.draw()[16].r, sky.r, 0.0001f);
+        }
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, LightningOverlayUploadsCurrentProjectionJitter) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    FullscreenFloatProbe probe;
+    probe.texture(1, {glm::vec4(0)});
+    // Exercise the production upload too: make_lighting_context supplies the
+    // jittered depth contract but leaves its generic taau_jitter_ndc at zero.
+    GLint quad = 0;
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &quad);
+    glActiveTexture(GL_TEXTURE1);
+    GLint depth_texture = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &depth_texture);
+    Luminumbra::Rendering::RenderResourceRegistry registry;
+    Luminumbra::Rendering::LightingPass lighting;
+    lighting.init_shader(SourceRoot());
+    lighting.init_lighting_fbo(registry, FullscreenFloatProbe::width, 1);
+    Luminumbra::Rendering::LightningRenderState lightning;
+    lightning.active = true;
+    lightning.pulse_intensity = 1;
+    Luminumbra::Rendering::RenderContext ctx;
+    ctx.screen_width = FullscreenFloatProbe::width;
+    ctx.screen_height = 1;
+    ctx.lightning_state = &lightning;
+    ctx.screen_quad_vao = static_cast<GLuint>(quad);
+    ctx.gbuffer_depth.id = static_cast<GLuint>(depth_texture);
+    for (bool ladder : {false, true}) {
+        const auto projection = Luminumbra::Rendering::ReversedZPerspective(
+            glm::radians(70.0f), 1.0f, 0.1f, ladder ? 17408.0f : 3200.0f);
+        for (const glm::vec2 jitter :
+             {glm::vec2(0), glm::vec2(0.025f, -0.015f), glm::vec2(-0.025f, 0.015f)}) {
+            ctx.set_gbuffer_depth_contract(ladder, projection, jitter);
+            lighting.execute_lightning_overlay(ctx);
+            GLint program = 0;
+            glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+            const auto overlay = static_cast<GLuint>(program);
+            const GLint location = glGetUniformLocation(overlay, "u_jitter_ndc");
+            ASSERT_GE(location, 0);
+            glm::vec2 uploaded(0);
+            glGetUniformfv(overlay, location, &uploaded.x);
+            EXPECT_EQ(uploaded, jitter);
+        }
+    }
+    lighting.destroy_lighting_fbo(registry);
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
 TEST(RenderSmokeTest, WaterCausticsRetainPatternInNormalizedTarget) {
     HiddenGlContext context;
     if (!context.ready())
