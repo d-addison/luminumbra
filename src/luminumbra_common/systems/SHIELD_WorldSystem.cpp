@@ -644,6 +644,15 @@ bool HasRenderableGeometry(const Chunk& chunk) {
            (!chunk.water_mesh_vertices.empty() && !chunk.water_mesh_indices.empty());
 }
 
+void ClearPublishedWaterMesh(const SHIELD_WorldSystem& world_system, Chunk& chunk) {
+    if (!chunk.water_mesh_vertices.empty() || !chunk.water_mesh_indices.empty()) {
+        world_system.notify_renderable_chunks_changed();
+    }
+    chunk.water_mesh_vertices.clear();
+    chunk.water_mesh_indices.clear();
+    chunk.water_mesh_generated.store(false, std::memory_order_release);
+}
+
 bool replace_chunk_collision(PhysicsSystem& physics_system, Luminumbra::Chunk& chunk) {
     const ChunkID id = chunk.get_id();
     physics_system.remove_chunk_collision(id);
@@ -3604,10 +3613,8 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                 // Publish its water departure independently of terrain LOD. A pending
                 // worker owns its staging buffers until completion; supersede only
                 // its water version so terrain publication remains eligible.
-                chunk_ptr->water_mesh_vertices.clear();
-                chunk_ptr->water_mesh_indices.clear();
+                ClearPublishedWaterMesh(*this, *chunk_ptr);
                 ++chunk_ptr->water_mesh_version;
-                chunk_ptr->water_mesh_generated.store(false, std::memory_order_release);
             }
 
             if (pending_lod >= 0) {
@@ -4745,9 +4752,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
             Luminumbra::World::MarchingCubes::PolygoniseTerrain(
                 *this, *chunk, 0.0f, build_chunk.step);
             chunk->applied_transition_faces.store(0, std::memory_order_release);
-            chunk->water_mesh_vertices.clear();
-            chunk->water_mesh_indices.clear();
-            chunk->water_mesh_generated.store(false, std::memory_order_release);
+            ClearPublishedWaterMesh(*this, *chunk);
             chunk->current_lod.store(build_chunk.lod);
             chunk->near_terrain_snapshot.store({}, std::memory_order_release);
             chunk->mesh_version++;
@@ -5639,7 +5644,7 @@ const std::vector<Luminumbra::Chunk*>& SHIELD_WorldSystem::renderable_chunks_vie
     ++m_renderable_view_work.rebuilds;
     for (const auto& [id, chunk] : m_streaming_state.chunks) {
         ++m_renderable_view_work.chunk_visits;
-        if (chunk->get_state() == ChunkState::Ready && !chunk->mesh_vertices.empty()) {
+        if (chunk->get_state() == ChunkState::Ready && HasRenderableGeometry(*chunk)) {
             m_renderable_chunks.push_back(chunk.get());
         }
     }
@@ -6602,6 +6607,12 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
                 completed_lod == 0 || !HasAuthoritativeHeightmapOnly(*chunk);
             if (replaces_water && water_current &&
                 (!job_chunk.terrain_mesh_required || terrain_current)) {
+                if (chunk->water_mesh_vertices.empty() !=
+                        chunk->pending_water_mesh_vertices.empty() ||
+                    chunk->water_mesh_indices.empty() !=
+                        chunk->pending_water_mesh_indices.empty()) {
+                    notify_renderable_chunks_changed();
+                }
                 chunk->water_mesh_vertices = std::move(chunk->pending_water_mesh_vertices);
                 chunk->water_mesh_indices = std::move(chunk->pending_water_mesh_indices);
                 chunk->water_mesh_version++;

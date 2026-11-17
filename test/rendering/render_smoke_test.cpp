@@ -1,3 +1,4 @@
+#include "../fixtures/TerrainFixtureParams.h"
 #include "TerrainCullingTestPeer.h"
 #include "luminumbra_client/core/IsolationConfig.h"
 #include "luminumbra_client/rendering/Camera.h"
@@ -19,6 +20,7 @@
 #include "luminumbra_common/animation/AnimationRuntime.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/core/FilesystemPath.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "gtest/gtest.h"
 #include <glm/gtc/type_ptr.hpp>
 #include <nlohmann/json.hpp>
@@ -42,6 +44,7 @@
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -7876,6 +7879,77 @@ void ExpectProjectionPlane(const glm::mat4& projection, float far_plane, glm::ve
     EXPECT_NEAR(far_clip.y / far_clip.w, -jitter.y, 1e-6);
 }
 } // namespace
+
+TEST(RenderSmokeTest, WaterOnlyOwnerSubmitsWaterAndTracksTerrainPresence) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    RenderPipeline pipeline;
+    pipeline.enable_static_model_content(false);
+    ASSERT_TRUE(pipeline.startup(32, 32, SourceRoot()));
+    pipeline.set_far_world_mode(FarWorldMode::Legacy);
+    pipeline.set_far_lod_enabled(false);
+    pipeline.set_taau_enabled(false);
+    Luminumbra::Systems::SHIELD_WorldSystem world(
+        nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0));
+    chunk->set_state(Luminumbra::ChunkState::Ready);
+    chunk->water_mesh_vertices = {
+        {{0, 6, 0}, {0, 1, 0}, 0u},
+        {{0, 6, 16}, {0, 1, 0}, 0u},
+        {{16, 6, 0}, {0, 1, 0}, 0u},
+    };
+    chunk->water_mesh_indices = {0u, 1u, 2u};
+    chunk->water_mesh_version.store(1u);
+    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    entt::registry registry;
+    Camera camera({8, 12, 8}, {0, 1, 0}, -90, -89);
+    const auto render = [&] {
+        pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    };
+    render();
+    EXPECT_EQ(world.renderable_chunks_view(), std::vector<Luminumbra::Chunk*>{chunk.get()});
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().snapshot_count, 1u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().water_draws, 1u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().water_indices_drawn, 3u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().terrain_draws, 0u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().shadow_draws, 0u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().culling_hierarchy_chunks, 0u);
+    EXPECT_EQ(pipeline.get_last_mesh_upload_stats().terrain_upload_candidates, 0u);
+
+    // Membership stays identical when terrain appears: its culling cache must change.
+    chunk->mesh_vertices = chunk->water_mesh_vertices;
+    chunk->mesh_indices = chunk->water_mesh_indices;
+    ++chunk->mesh_version;
+    world.notify_renderable_chunks_changed();
+    render();
+    EXPECT_EQ(world.renderable_chunks_view(), std::vector<Luminumbra::Chunk*>{chunk.get()});
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().water_draws, 1u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().terrain_draws, 1u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().culling_hierarchy_chunks, 1u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().culling_hierarchy_rebuilds, 1u);
+
+    // A retained terrain GPU record must not draw once only water remains.
+    chunk->mesh_vertices.clear();
+    chunk->mesh_indices.clear();
+    ++chunk->mesh_version;
+    world.notify_renderable_chunks_changed();
+    render();
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().water_draws, 1u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().terrain_draws, 0u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().shadow_draws, 0u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().culling_hierarchy_chunks, 0u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().culling_hierarchy_rebuilds, 1u);
+    chunk->water_mesh_vertices.clear();
+    chunk->water_mesh_indices.clear();
+    ++chunk->water_mesh_version;
+    world.notify_renderable_chunks_changed();
+    render();
+    EXPECT_TRUE(world.renderable_chunks_view().empty());
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().snapshot_count, 0u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().water_draws, 0u);
+    pipeline.shutdown();
+}
 
 TEST(RenderSmokeTest, WorldSwapRetainsLegacyDiagnosticInventoryUntilShutdown) {
     HiddenGlContext context;

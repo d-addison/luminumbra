@@ -2448,7 +2448,9 @@ void RenderPipeline::ensure_terrain_culling_hierarchy(
     std::vector<ChunkID> sorted_chunk_ids;
     sorted_chunk_ids.reserve(renderable_chunks.size());
     for (const auto& chunk : renderable_chunks) {
-        sorted_chunk_ids.push_back(chunk.id);
+        if (chunk.has_terrain_mesh()) {
+            sorted_chunk_ids.push_back(chunk.id);
+        }
     }
     std::sort(sorted_chunk_ids.begin(), sorted_chunk_ids.end());
 
@@ -2459,7 +2461,7 @@ void RenderPipeline::ensure_terrain_culling_hierarchy(
     }
 
     const bool needs_rebuild = !m_terrainCullingCache.valid ||
-                               m_terrainCullingCache.chunk_count != renderable_chunks.size() ||
+                               m_terrainCullingCache.chunk_count != sorted_chunk_ids.size() ||
                                m_terrainCullingCache.chunk_set_signature != signature;
     if (!needs_rebuild) {
         m_last_render_pass_stats.culling_hierarchy_chunks = m_terrainCullingCache.chunk_count;
@@ -2468,10 +2470,10 @@ void RenderPipeline::ensure_terrain_culling_hierarchy(
 
     m_hierarchicalCuller.BuildHierarchy(renderable_chunks);
     m_terrainCullingCache.chunk_set_signature = signature;
-    m_terrainCullingCache.chunk_count = renderable_chunks.size();
+    m_terrainCullingCache.chunk_count = sorted_chunk_ids.size();
     m_terrainCullingCache.valid = true;
     m_last_render_pass_stats.culling_hierarchy_rebuilds++;
-    m_last_render_pass_stats.culling_hierarchy_chunks = renderable_chunks.size();
+    m_last_render_pass_stats.culling_hierarchy_chunks = sorted_chunk_ids.size();
 }
 
 void RenderPipeline::render_frame(entt::registry& registry,
@@ -2746,7 +2748,7 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
             FarWorldLiveUpload upload;
             upload.cell = {chunk.coords.x, chunk.coords.y, chunk.coords.z, 0};
             upload.snapshot_version = chunk.mesh_version;
-            if (found != m_chunk_render_data.end()) {
+            if (chunk.has_terrain_mesh() && found != m_chunk_render_data.end()) {
                 const auto& data = found->second;
                 // Ownership describes the retained surface actually drawn,
                 // even while a newer snapshot waits in the upload queue.

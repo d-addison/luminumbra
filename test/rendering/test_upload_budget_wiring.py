@@ -42,6 +42,77 @@ class UploadBudgetWiring(unittest.TestCase):
         cls.header = read(RENDERING / "RenderPipeline.h")
         cls.main = read(ROOT / "src/luminumbra_client/main_client.cpp")
 
+    def test_renderable_owner_accepts_independent_complete_water_geometry(self):
+        world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        selection = body(world, "SHIELD_WorldSystem::renderable_chunks_view()")
+        selection = body(selection, "for (const auto& [id, chunk] : m_streaming_state.chunks)")
+        predicate = re.search(r"if \((.*?)\) \{\s*m_renderable_chunks.push_back", selection,
+                              re.S).group(1)
+        geometry = body(world, "bool HasRenderableGeometry(")
+        geometry = re.search(r"return (.*?);", geometry, re.S).group(1)
+        predicate = predicate.replace("HasRenderableGeometry(*chunk)", "(" + geometry + ")")
+        predicate = predicate.replace("chunk->get_state() == ChunkState::Ready", "ready")
+        for field in ("mesh_vertices", "mesh_indices", "water_mesh_vertices", "water_mesh_indices"):
+            predicate = re.sub(r"chunk(?:->|\.)" + field + r"\.empty\(\)", field, predicate)
+        predicate = compact(predicate).replace("&&", " and ").replace("||", " or ")
+        predicate = re.sub(r"!(?!=)", " not ", predicate).strip()
+        # Check water-only first, then all ready/empty/partial/complete combinations.
+        for bits in (25, *range(32)):
+            ready, terrain_vertices, terrain_indices, water_vertices, water_indices = (
+                bool(bits & (1 << bit)) for bit in range(5))
+            actual = eval(predicate, {"__builtins__": {}}, dict(
+                ready=ready, mesh_vertices=not terrain_vertices, mesh_indices=not terrain_indices,
+                water_mesh_vertices=not water_vertices, water_mesh_indices=not water_indices))
+            expected = ready and ((terrain_vertices and terrain_indices) or
+                                  (water_vertices and water_indices))
+            self.assertEqual(actual, expected, bits)
+
+    def test_water_geometry_changes_invalidate_selection_at_every_publication(self):
+        world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        publication = body(world, "bool SHIELD_WorldSystem::publish_front_meshing_batch(")
+        water = body(publication, "if (replaces_water && water_current &&")
+        transition = body(water, "if (chunk->water_mesh_vertices.empty() !=")
+        self.assertEqual(compact(transition), "notify_renderable_chunks_changed();")
+        self.assertIn("chunk->pending_water_mesh_vertices.empty() || "
+                      "chunk->water_mesh_indices.empty() != "
+                      "chunk->pending_water_mesh_indices.empty()", compact(water))
+        self.assertLess(water.index("notify_renderable_chunks_changed();"),
+                        water.index("chunk->water_mesh_vertices ="))
+        scheduler = body(world, "const auto collect_candidate =")
+        departure = body(scheduler, "if (!water_lod_requested && required_lod >= 0 &&")
+        self.assertIn("ClearPublishedWaterMesh(*this, *chunk_ptr);", departure)
+        removal = body(world, "void ClearPublishedWaterMesh(")
+        self.assertLess(removal.index("notify_renderable_chunks_changed();"),
+                        removal.index("chunk.water_mesh_vertices.clear();"))
+        self.assertIn("ClearPublishedWaterMesh(*this, *chunk);", world)
+        mesher = read(ROOT / "src/luminumbra_common/world/MarchingCubes.cpp")
+        direct = body(mesher, "void GenerateWaterMesh(")
+        ready = body(direct, "if (chunk.get_state() == ChunkState::Ready)")
+        self.assertIn("world_system.notify_renderable_chunks_changed();", ready)
+        self.assertLess(direct.index("notify_renderable_chunks_changed();"),
+                        direct.index("const int resolution"))
+
+    def test_terrain_hierarchy_and_cache_exclude_water_only_owners(self):
+        hierarchy = read(RENDERING / "passes/HierarchicalCuller.cpp")
+        build = body(hierarchy, "void RenderPipeline::HierarchicalCuller::BuildHierarchy(")
+        loop = body(build, "for (const auto& chunk : chunks)")
+        self.assertEqual(compact(body(loop, "if (!chunk.has_terrain_mesh())")), "continue;")
+        self.assertLess(loop.index("if (!chunk.has_terrain_mesh())"),
+                        loop.index("chunk_refs.push_back("))
+        self.assertEqual(compact(body(build, "if (chunk_refs.empty())")),
+                         "m_root.reset(); return;")
+        cache = body(self.pipeline, "void RenderPipeline::ensure_terrain_culling_hierarchy(")
+        ids = body(cache, "for (const auto& chunk : renderable_chunks)")
+        self.assertEqual(compact(body(ids, "if (chunk.has_terrain_mesh())")),
+                         "sorted_chunk_ids.push_back(chunk.id);")
+        self.assertIn("m_terrainCullingCache.chunk_count != sorted_chunk_ids.size()", cache)
+        self.assertIn("m_terrainCullingCache.chunk_count = sorted_chunk_ids.size();", cache)
+        prepare = body(self.pipeline, "void RenderPipeline::prepare_frame(")
+        self.assertIn("if (chunk.has_terrain_mesh() && found != m_chunk_render_data.end())", prepare)
+        water = body(self.pipeline, "void RenderPipeline::execute_stage_water(")
+        self.assertIn("for (const auto& chunk : renderable_chunk_snapshots)", water)
+        self.assertIn("water_input.draw_items.push_back(", water)
+
     def test_near_refinement_runs_only_in_admitted_terrain_uploads(self):
         manage = body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources(")
         drain = manage[manage.index("const auto adopt ="):]

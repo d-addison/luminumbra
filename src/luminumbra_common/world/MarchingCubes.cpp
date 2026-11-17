@@ -2069,6 +2069,11 @@ void GenerateWaterMesh(const Systems::WaterSystem& water_system,
                        const Systems::SHIELD_WorldSystem& world_system,
                        Chunk& chunk) {
     (void)water_system;
+    // Direct water remeshing can change selection without a Ready state transition.
+    // Worker scratch chunks stay Unloaded until owner-thread publication.
+    if (chunk.get_state() == ChunkState::Ready) {
+        world_system.notify_renderable_chunks_changed();
+    }
     const int resolution = chunk.current_water_resolution.load(std::memory_order_acquire);
     // Supported water detail levels bound each mesh to 32*32 quads.
     if (resolution <= 1 || resolution > 32 || !HasCompleteWaterGrid(chunk, resolution)) {
