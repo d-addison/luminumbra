@@ -144,7 +144,9 @@ FarVolumeSubmitStatus FarVolumeBuildQueue::Submit(const FarVolumeQueueRequest& r
         if (!held)
             return FarVolumeSubmitStatus::Invalid;
         const auto& previous = *held;
-        if (previous.identity == request.identity) {
+        // Forgotten descriptors retain only the cancelled worker's storage.
+        // A returning key starts a fresh contract, even under an equal identity.
+        if (!descriptors_[*existing].forget && previous.identity == request.identity) {
             if (previous.intent != request.intent ||
                 previous.authority.numeric != request.authority.numeric ||
                 bool(previous.water) != bool(request.water) ||
@@ -152,10 +154,8 @@ FarVolumeSubmitStatus FarVolumeBuildQueue::Submit(const FarVolumeQueueRequest& r
                 (previous.water && request.water &&
                  previous.water->content_identity() != request.water->content_identity()))
                 return FarVolumeSubmitStatus::Invalid;
-            // Forgotten in-flight work revives only after cancellation drains.
-            // Ordinary equal requests still cannot restart/retry completed work.
-            if (!descriptors_[*existing].forget)
-                return FarVolumeSubmitStatus::Duplicate;
+            // Equal live requests cannot restart/retry completed work.
+            return FarVolumeSubmitStatus::Duplicate;
         }
     } else {
         for (std::size_t i = 0; i < descriptors_.size(); ++i)
