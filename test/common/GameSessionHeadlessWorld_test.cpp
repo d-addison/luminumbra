@@ -14493,6 +14493,166 @@ void CheckRegionalSamplerLifetime(const System& source, const GameSession& sessi
     EXPECT_EQ(hash(assigned), detached_hash);
 }
 
+void ExpectRegionalWeatherProjection(const Luminumbra::Systems::WeatherSystem& weather,
+                                     const std::vector<Luminumbra::Systems::StormCell>& storms,
+                                     const std::vector<Luminumbra::Systems::StrikeEvent>& strikes) {
+    ASSERT_EQ(weather.StormCells().size(), storms.size());
+    EXPECT_EQ(weather.active_storm_count(), static_cast<int>(storms.size()));
+    for (std::size_t i = 0; i < storms.size(); ++i) {
+        const auto& actual = weather.StormCells()[i];
+        const auto& expected = storms[i];
+        EXPECT_EQ(actual.center_world, expected.center_world);
+        EXPECT_EQ(actual.velocity, expected.velocity);
+        EXPECT_EQ(actual.intensity, expected.intensity);
+        EXPECT_EQ(actual.spawn_tick, expected.spawn_tick);
+        EXPECT_EQ(actual.lifetime_ticks, expected.lifetime_ticks);
+        EXPECT_EQ(actual.seed_salt, expected.seed_salt);
+    }
+    ASSERT_EQ(weather.StrikeSchedule().size(), strikes.size());
+    EXPECT_EQ(weather.live_strike_count(), static_cast<int>(strikes.size()));
+    for (std::size_t i = 0; i < strikes.size(); ++i) {
+        const auto& actual = weather.StrikeSchedule()[i];
+        const auto& expected = strikes[i];
+        EXPECT_EQ(actual.strike_tick, expected.strike_tick);
+        EXPECT_EQ(actual.world_x, expected.world_x);
+        EXPECT_EQ(actual.world_z, expected.world_z);
+        EXPECT_EQ(actual.magnitude, expected.magnitude);
+        EXPECT_EQ(actual.storm_salt, expected.storm_salt);
+    }
+}
+
+template<bool Moving, bool Assignment>
+Luminumbra::Systems::WeatherSystem DetachRegionalWeather(Luminumbra::Systems::WeatherSystem& source,
+                                                         const GameSession& session) {
+    using Luminumbra::Systems::WeatherSystem;
+    if constexpr (Assignment) {
+        WeatherSystem destination(42);
+        destination.BindRegionalSession(session);
+        destination.AdoptRegionalWeather(99, Luminumbra::Vec3(0), {}, {{999, 0, 0, 1, 99}}, true);
+        if constexpr (Moving) {
+            destination = std::move(source);
+        } else {
+            destination = source;
+        }
+        return destination;
+    } else if constexpr (Moving) {
+        return WeatherSystem(std::move(source));
+    } else {
+        return WeatherSystem(source);
+    }
+}
+
+template<bool Moving, bool Assignment>
+void CheckDetachedRegionalWeatherCase(int state) {
+    using namespace Luminumbra::Systems;
+    using Luminumbra::Vec2;
+    using Luminumbra::Vec3;
+    GameSession session;
+    SCOPED_TRACE(state);
+    WeatherSystem source(1337), baseline(1337);
+    const bool callback = state == 3;
+    const auto sample_backend = [](const Vec3&) {
+        return WeatherSample{.category = WeatherCategory::Rain,
+                             .precip_intensity = 0.125f,
+                             .storm_intensity = 0.0f,
+                             .wind = Vec2(3, 4)};
+    };
+    if (callback) {
+        source.BindRegionalBackend(sample_backend, [] { return std::string("callback"); });
+    } else {
+        source.BindRegionalSession(session);
+    }
+    std::vector<StormCell> storms;
+    std::vector<StrikeEvent> strikes;
+    if (state != 0) {
+        storms = {{.center_world = Vec2(108),
+                   .velocity = Vec2(0),
+                   .intensity = 0.5f,
+                   .spawn_tick = 1,
+                   .lifetime_ticks = 200,
+                   .seed_salt = 7},
+                  {.center_world = Vec2(2108),
+                   .velocity = Vec2(0),
+                   .intensity = 0.75f,
+                   .spawn_tick = 2,
+                   .lifetime_ticks = 200,
+                   .seed_salt = 8}};
+        strikes = {{101, 108, 108, 0.5f, 7}, {102, 2108, 2108, 0.75f, 8}};
+    }
+    auto input_storms = storms;
+    auto input_strikes = strikes;
+    if (state != 4) {
+        std::reverse(input_storms.begin(), input_storms.end());
+        std::reverse(input_strikes.begin(), input_strikes.end());
+    }
+    if (state == 2) {
+        input_strikes.push_back({100, 108, 108, 0.25f, 7}); // Delivered, hence invisible.
+    }
+    source.AdoptRegionalWeather(
+        100, Vec3(0), std::move(input_storms), std::move(input_strikes), state != 4, state == 2);
+    ASSERT_NO_FATAL_FAILURE(ExpectRegionalWeatherProjection(source, storms, strikes));
+    if (state == 2) {
+        // Invalidate both caches without changing the public projections.
+        source.PutRegionalStorm(storms.front());
+        source.PutRegionalStrike(strikes.front());
+    }
+    const auto source_hash = source.ComputeWeatherSubHash();
+    const auto source_work = source.RegionalProjectionWork();
+    const auto source_changes = source.RegionalStormNodeChanges();
+    auto detached = DetachRegionalWeather<Moving, Assignment>(source, session);
+    ASSERT_NO_FATAL_FAILURE(ExpectRegionalWeatherProjection(detached, storms, strikes));
+    EXPECT_EQ(detached.last_tick(), 100u);
+    EXPECT_EQ(detached.RegionalProjectionWork(), source_work);
+    EXPECT_EQ(detached.RegionalStormNodeChanges(), source_changes);
+    for (const auto& storm : storms) {
+        const Vec3 position(storm.center_world.x, 0, storm.center_world.y);
+        const auto sample = detached.SampleAt(position);
+        const float base = callback ? 0.125f : baseline.PrecipitationAt(position);
+        EXPECT_FLOAT_EQ(sample.storm_intensity, storm.intensity);
+        EXPECT_FLOAT_EQ(sample.precip_intensity, (std::min)(1.0f, base + storm.intensity));
+        EXPECT_FLOAT_EQ(detached.PrecipitationAt(position), sample.precip_intensity);
+    }
+    // Neither the spawn nor strike schedule has an opportunity at this expiry tick.
+    detached.Update(302, Vec3(0), nullptr);
+    if (callback) {
+        ASSERT_NO_FATAL_FAILURE(ExpectRegionalWeatherProjection(detached, storms, strikes));
+        EXPECT_EQ(detached.ComputeWeatherSubHash(), "callback");
+        EXPECT_EQ(detached.SampleAt(Vec3(108, 0, 108)).wind, Vec2(3, 4));
+    } else {
+        ASSERT_NO_FATAL_FAILURE(ExpectRegionalWeatherProjection(detached, {}, {}));
+        baseline.Update(302, Vec3(0), nullptr);
+        EXPECT_EQ(detached.ComputeWeatherSubHash(), baseline.ComputeWeatherSubHash());
+        for (const Vec3 position : {Vec3(108, 0, 108), Vec3(2108, 0, 2108)}) {
+            const auto sample = detached.SampleAt(position);
+            EXPECT_FLOAT_EQ(sample.storm_intensity, 0.0f);
+            EXPECT_FLOAT_EQ(sample.precip_intensity, baseline.SampleAt(position).precip_intensity);
+        }
+    }
+    if constexpr (!Moving) {
+        ASSERT_NO_FATAL_FAILURE(ExpectRegionalWeatherProjection(source, storms, strikes));
+        EXPECT_EQ(source.ComputeWeatherSubHash(), source_hash);
+        EXPECT_EQ(source.last_tick(), 100u);
+        EXPECT_EQ(source.RegionalProjectionWork(), source_work);
+        EXPECT_EQ(source.RegionalStormNodeChanges(), source_changes);
+        for (const auto& storm : storms) {
+            EXPECT_FLOAT_EQ(source.SampleAt(Vec3(storm.center_world.x, 0, storm.center_world.y))
+                                .storm_intensity,
+                            storm.intensity);
+        }
+        // Releasing a restored visibility filter must still reveal the source's event.
+        source.RevealRegionalStrikeSchedule();
+        EXPECT_EQ(source.live_strike_count(), state == 2 ? 3 : static_cast<int>(strikes.size()));
+    }
+}
+
+template<bool Moving, bool Assignment>
+void CheckDetachedRegionalWeather() {
+    // Exercise empty, visible, restored, callback and non-keyed session projections.
+    for (int state = 0; state < 5; ++state) {
+        ASSERT_NO_FATAL_FAILURE((CheckDetachedRegionalWeatherCase<Moving, Assignment>(state)));
+    }
+}
+
 template<class GetSystem, class Sample, class Hash, class SessionHash>
 void CheckRegionalSamplerSelfAssignment(GetSystem get_system,
                                         Sample sample,
@@ -14698,6 +14858,22 @@ TEST(GameSessionHeadlessWorldTest, RegionalWindSelfAssignmentPreservesSessionBin
         [](const auto& system, const auto& position) { return system.SampleWind(position); },
         [](const auto& system) { return system.ComputeWindSubHash(); },
         [](const auto& session) { return session.ComputeRegionalWindSubHash(); }));
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalWeatherCopyConstructionNormalizesDetachedStorage) {
+    ASSERT_NO_FATAL_FAILURE((CheckDetachedRegionalWeather<false, false>()));
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalWeatherMoveConstructionNormalizesDetachedStorage) {
+    ASSERT_NO_FATAL_FAILURE((CheckDetachedRegionalWeather<true, false>()));
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalWeatherCopyAssignmentNormalizesDetachedStorage) {
+    ASSERT_NO_FATAL_FAILURE((CheckDetachedRegionalWeather<false, true>()));
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalWeatherMoveAssignmentNormalizesDetachedStorage) {
+    ASSERT_NO_FATAL_FAILURE((CheckDetachedRegionalWeather<true, true>()));
 }
 
 TEST(GameSessionHeadlessWorldTest, RegionalWeatherSelfAssignmentPreservesSessionBinding) {

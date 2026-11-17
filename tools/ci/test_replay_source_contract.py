@@ -764,6 +764,83 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                 self.assertRegex(native, r"TEST\(GameSessionHeadlessWorldTest,\s*"
                                  + f"Regional{name}SelfAssignmentPreservesSessionBinding" + r"\)")
 
+    def assert_weather_detachment(self, header, source, native):
+        members = set(re.findall(r"\bm_\w+\b", header))
+        normalize = (r"if \(other\.m_sessionBinding\.session\)\s*\{\s*"
+                     r"SelectRegionalBackend\(false\);")
+        for parameter in ("const WeatherSystem&", "WeatherSystem&&"):
+            signature = f"WeatherSystem::WeatherSystem({parameter} other)"
+            self.assertIn(signature, source)
+            constructor = source.split(signature, 1)[1]
+            constructor = constructor.split("\n}", 1)[0]
+            initialized = set(re.findall(
+                r"\b(m_\w+)\((?:std::move\()?other\.\1\)?\)", constructor))
+            self.assertEqual(initialized, members)
+            self.assertRegex(constructor, normalize)
+        move = self.function(source, "operator=", "WeatherSystem::")
+        self.assertRegex(move, r"if \(other\.m_sessionBinding\.session\)\s*\{\s*"
+                         r"WeatherSystem detached\(std::move\(other\)\);\s*"
+                         r"return \*this = std::move\(detached\);")
+        copy_source = source.split(
+            "WeatherSystem& WeatherSystem::operator=(const WeatherSystem& other)", 1)[1]
+        copy = copy_source.split("\n}", 1)[0]
+        self.assertRegex(copy, r"if \(this == &other\)\s*\{\s*return \*this;")
+        self.assertIn("return *this = WeatherSystem(other);", copy)
+        clear = self.function(source, "SelectRegionalBackend", "WeatherSystem::")
+        for projection in ("m_storm_cells = StormCells();", "m_strikes = StrikeSchedule();"):
+            self.assertLess(clear.index(projection), clear.index("m_regionalWeatherKeyed = false;"))
+        for member in ("m_regionalStorms", "m_regionalStrikes", "m_regionalStormIndex",
+                       "m_regionalStormCache", "m_regionalStrikeCache"):
+            self.assertIn(member + ".clear();", clear)
+        self.assertIn("m_regionalStrikesDeliveredThrough.reset();", clear)
+        self.assertIn("m_hiddenRegionalStrikes = 0;", clear)
+        factory = self.function(native, "DetachRegionalWeather", "")
+        for operation in ("return WeatherSystem(source);", "return WeatherSystem(std::move(source));",
+                          "destination = source;", "destination = std::move(source);"):
+            self.assertIn(operation, factory)
+        helper = self.function(native, "CheckDetachedRegionalWeatherCase", "")
+        for operation in ("detached.Update(302, Vec3(0), nullptr);",
+                          "source.RevealRegionalStrikeSchedule();"):
+            self.assertIn(operation, helper)
+        for name, arguments in (("CopyConstruction", "false, false"),
+                                ("MoveConstruction", "true, false"),
+                                ("CopyAssignment", "false, true"),
+                                ("MoveAssignment", "true, true")):
+            regression = re.search(
+                r"TEST\(GameSessionHeadlessWorldTest,\s*RegionalWeather" + name
+                + r"NormalizesDetachedStorage\)\s*\{([^}]+)\}", native)
+            self.assertIsNotNone(regression)
+            self.assertIn("CheckDetachedRegionalWeather<" + arguments + ">()", regression[1])
+
+    def test_weather_detachment_preserves_members_and_registers_all_operations(self):
+        self.assert_weather_detachment(
+            read_source("src/luminumbra_common/systems/WeatherSystem.h"),
+            read_source("src/luminumbra_common/systems/WeatherSystem.cpp"),
+            read_source("test/common/GameSessionHeadlessWorld_test.cpp"))
+
+    def test_weather_detachment_guard_rejects_each_lost_normalization(self):
+        header = read_source("src/luminumbra_common/systems/WeatherSystem.h")
+        source = read_source("src/luminumbra_common/systems/WeatherSystem.cpp")
+        native = read_source("test/common/GameSessionHeadlessWorld_test.cpp")
+        for signature in ("WeatherSystem::WeatherSystem(const WeatherSystem& other)",
+                          "WeatherSystem::WeatherSystem(WeatherSystem&& other)",
+                          "WeatherSystem& WeatherSystem::operator=(WeatherSystem&& other)",
+                          "WeatherSystem& WeatherSystem::operator=(const WeatherSystem& other)"):
+            with self.subTest(operation=signature):
+                start = source.index(signature)
+                end = source.index("\n}", start)
+                body = source[start:end]
+                if "const WeatherSystem&" in signature and "operator=" in signature:
+                    mutated = body.replace("return *this = WeatherSystem(other);", "return *this;")
+                elif "operator=" in signature:
+                    mutated = re.sub(r"WeatherSystem detached\(std::move\(other\)\);\s*"
+                                     r"return \*this = std::move\(detached\);", "", body)
+                else:
+                    mutated = body.replace("SelectRegionalBackend(false);", "")
+                self.assertNotEqual(mutated, body)
+                with self.assertRaises(AssertionError):
+                    self.assert_weather_detachment(header, source[:start] + mutated + source[end:], native)
+
     def test_regional_hash_interface_has_fixed_inputs(self):
         header = read_source("src/luminumbra_common/world/GameSession.h")
         source = read_source("src/luminumbra_common/world/GameSession.cpp")
