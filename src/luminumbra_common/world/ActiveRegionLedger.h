@@ -103,6 +103,9 @@ struct RegionRejections {
 struct RegionSchedule {
     std::uint64_t tick = 0, work = 0;
     std::vector<RegionKey> due; // Unique keys in scheduler rank/proximity order.
+    // Runtime-only rollback stamps parallel to due, bounded by kMaxRegions.
+    // Neither these stamps nor the schedule result enter persistence or hashes.
+    std::vector<std::uint64_t> prior_ticks;
     std::vector<RegionTransition> transitions;
     // Runtime-only retention delta, bounded by kMaxRegions; never encoded or hashed.
     std::vector<RegionKey> evicted;
@@ -351,6 +354,9 @@ public:
              std::span<const RegionWork> work = {},
              const DurableDigest& durable_digest = {},
              const OwnershipProbe& owned = {});
+    // The retained runtime result supports rollback even if copying schedule()
+    // to a consumer throws. Null before scheduling; valid until the next call.
+    [[nodiscard]] const RegionSchedule* last_schedule() const noexcept;
     [[nodiscard]] std::string canonical_bytes() const;
     // Throws std::length_error if the envelope would exceed kMaxFileBytes.
     [[nodiscard]] std::string encode() const;

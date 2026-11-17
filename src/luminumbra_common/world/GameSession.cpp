@@ -588,12 +588,14 @@ struct GameSession::FoliageStep {
     }
     static bool PersistencePending(const GameSession& session) {
         const auto* step = session.m_foliageStep.get();
+        // A fault permanently stops replay. Its detached work can be discarded
+        // once rollback proved that every saved stamp describes live foliage.
         return step &&
-               (step->incomplete || step->blocked || step->prepared || !step->stale_inputs.empty());
+               (step->incomplete || (!session.m_regionFault && (step->blocked || step->prepared ||
+                                                                !step->stale_inputs.empty())));
     }
     static bool LoadPending(const GameSession& session) {
-        // A fault stops replay permanently. A validated replacement is the
-        // recovery path; saving the incomplete world must still refuse.
+        // A validated replacement can recover even an unrestorable fault.
         return !session.m_regionFault && PersistencePending(session);
     }
 
@@ -737,7 +739,11 @@ struct GameSession::FoliageStep {
                 border_owners[record.cadence_shift].insert(transition.key);
             }
         }
-        for (const auto key : session.m_regionSchedule.due) {
+        for (std::size_t index = 0; index < session.m_regionSchedule.due.size(); ++index) {
+            const auto key = session.m_regionSchedule.due[index];
+            // A new owner's committed stamp precedes scheduling, even when
+            // Prepare is its first encounter with the runtime foliage index.
+            committed_ticks.try_emplace(key, session.m_regionSchedule.prior_ticks[index]);
             if (!cadences.contains(key)) {
                 const auto found = records.find(key);
                 if (found != records.end()) {
@@ -1003,10 +1009,14 @@ struct GameSession::FoliageStep {
             }
             step.prepared = false;
             step.registry.Abort();
-            step.RestoreUnpublishedTicks(session);
+            if (!step.RestoreUnpublishedTicks(session)) {
+                throw std::runtime_error("Foliage stamp rollback refused");
+            }
             return nullptr;
         }
-        step.RestoreUnpublishedTicks(session);
+        if (!step.RestoreUnpublishedTicks(session)) {
+            throw std::runtime_error("Foliage stamp rollback refused");
+        }
         step.AdvanceReplay();
         auto live_owners = step.AdmitLiveSources(session);
         step.AdmitHistoricalBorders(session, live_owners);
@@ -1148,23 +1158,61 @@ struct GameSession::FoliageStep {
         }
         return {owners.begin(), owners.end()};
     }
-    void RestoreUnpublishedTicks(GameSession& session) const noexcept {
-        // Early consumers can refuse before Begin populates windows. The scheduler
-        // has already advanced these owners, but their foliage is still committed.
-        if (incomplete) {
-            for (const auto key : session.m_regionSchedule.due) {
-                const auto prior = committed_ticks.find(key);
-                if (prior != committed_ticks.end()) {
-                    session.m_activeRegionLedger.set_foliage_tick(key, prior->second);
+    bool RestoreUnpublishedTicks(GameSession& session) const noexcept {
+        auto& ledger = session.m_activeRegionLedger;
+        // Use the ledger's retained result: the session copy may itself have
+        // refused allocation after scheduling published its record changes.
+        const auto* schedule = ledger.last_schedule();
+        const bool scheduled = incomplete && ledger.tick() == session.m_worldClock.tick();
+        const bool unpublished = target_tick > published_tick;
+        if (scheduled && (!schedule || schedule->tick != ledger.tick() ||
+                          schedule->prior_ticks.size() != schedule->due.size())) {
+            return false;
+        }
+        // Missing owners, changed resume tokens, or a frozen stamp requiring
+        // mutation cannot be restored:
+        // keep persistence fenced rather than save an unverifiable history.
+        // Two passes validate before changing any stamp. Both are bounded by
+        // due owners and the retained replay window, never the resident world.
+        const auto restore = [&](bool apply) {
+            const auto stamp = [&](RegionKey key, std::uint64_t tick) {
+                const auto owner = ledger.records().find(key);
+                if (owner == ledger.records().end() || tick > ledger.tick()) {
+                    return false;
+                }
+                if (owner->second.state == RegionState::Frozen) {
+                    return owner->second.last_ticked == tick;
+                }
+                return !apply || ledger.set_foliage_tick(key, tick);
+            };
+            if (unpublished) {
+                for (const auto& [key, token] : windows.resumes) {
+                    const auto owner = ledger.records().find(key);
+                    if (owner == ledger.records().end() || owner->second.frozen_at != token) {
+                        return false;
+                    }
+                }
+                for (const auto& [key, elapsed] : windows.elapsed) {
+                    const auto prior = committed_ticks.find(key);
+                    if (prior == committed_ticks.end() || !stamp(key, prior->second)) {
+                        return false;
+                    }
                 }
             }
-        }
-        for (const auto& [key, elapsed] : windows.elapsed) {
-            const auto prior = committed_ticks.find(key);
-            if (prior != committed_ticks.end()) {
-                session.m_activeRegionLedger.set_foliage_tick(key, prior->second);
+            if (scheduled && schedule) {
+                for (std::size_t index = 0; index < schedule->due.size(); ++index) {
+                    const auto key = schedule->due[index];
+                    const auto prior = committed_ticks.find(key);
+                    if (!stamp(key,
+                               prior == committed_ticks.end() ? schedule->prior_ticks[index]
+                                                              : prior->second)) {
+                        return false;
+                    }
+                }
             }
-        }
+            return true;
+        };
+        return restore(false) && restore(true);
     }
     static std::int32_t Sample(const GameSession& session, const Vec3& position, bool soil) {
         namespace fol = luminumbra::foliage;
@@ -3463,6 +3511,51 @@ std::string GameSession::RegionalAmbientHash(std::uint8_t channels, bool weather
     return Persistence::StableChecksum(bytes);
 }
 
+std::string GameSession::ComputeRegionalWindSubHash() const {
+    return RegionalAmbientHash(3, false);
+}
+
+std::string GameSession::ComputeRegionalWeatherSubHash() const {
+    return RegionalAmbientHash(12, true);
+}
+
+std::string GameSession::ComputeRegionalAetherSubHash() const {
+    return RegionalAmbientHash(16, false);
+}
+
+Vec2 GameSession::SampleRegionalWind(const Vec3& position, Systems::WindLayer layer) const {
+    // Stored signed words are 1/1024 m/s. Higher layers use exact powers of two.
+    const float scale = layer == Systems::WindLayer::Ground ? 1.0f
+                        : layer == Systems::WindLayer::Mid  ? 2.0f
+                                                            : 4.0f;
+    return Vec2(
+        static_cast<float>(std::bit_cast<std::int16_t>(SampleRegionalChannel(0, position))) *
+            (scale / 1024.0f),
+        static_cast<float>(std::bit_cast<std::int16_t>(SampleRegionalChannel(1, position))) *
+            (scale / 1024.0f));
+}
+
+Systems::WeatherSample GameSession::SampleRegionalWeather(const Vec3& position) const {
+    Systems::WeatherSample sample;
+    const auto moisture = SampleRegionalChannel(2, position);
+    const auto front = SampleRegionalChannel(3, position);
+    sample.category = front < 13107   ? Systems::WeatherCategory::Clear
+                      : front < 26214 ? Systems::WeatherCategory::Overcast
+                      : front < 39321 ? Systems::WeatherCategory::Rain
+                      : front < 52428 ? Systems::WeatherCategory::Snow
+                                      : Systems::WeatherCategory::Fog;
+    sample.precip_intensity = sample.category == Systems::WeatherCategory::Rain ||
+                                      sample.category == Systems::WeatherCategory::Snow
+                                  ? static_cast<float>(moisture) / 65535.0f
+                                  : 0.0f;
+    sample.wind = m_windFieldSystem ? m_windFieldSystem->SampleWind(position) : Vec2(0.0f);
+    return sample;
+}
+
+float GameSession::SampleRegionalAether(const Vec3& position) const {
+    return static_cast<float>(SampleRegionalChannel(4, position)) / 65535.0f;
+}
+
 void GameSession::BindRegionalFieldQueries() {
     if (!m_windFieldSystem || !m_weatherSystem || !m_aetherFieldSystem)
         return;
@@ -3480,43 +3573,9 @@ void GameSession::BindRegionalFieldQueries() {
         return;
     }
     m_regionalFieldsBound = true;
-    m_windFieldSystem->BindRegionalBackend(
-        [this](const Vec3& position, Systems::WindLayer layer) {
-            // Stored signed words are 1/1024 m/s. Higher layers use exact powers of two.
-            const float scale = layer == Systems::WindLayer::Ground ? 1.0f
-                                : layer == Systems::WindLayer::Mid  ? 2.0f
-                                                                    : 4.0f;
-            return Vec2(static_cast<float>(
-                            std::bit_cast<std::int16_t>(SampleRegionalChannel(0, position))) *
-                            (scale / 1024.0f),
-                        static_cast<float>(
-                            std::bit_cast<std::int16_t>(SampleRegionalChannel(1, position))) *
-                            (scale / 1024.0f));
-        },
-        [this] { return RegionalAmbientHash(3, false); });
-    m_weatherSystem->BindRegionalBackend(
-        [this](const Vec3& position) {
-            Systems::WeatherSample sample;
-            const auto moisture = SampleRegionalChannel(2, position);
-            const auto front = SampleRegionalChannel(3, position);
-            sample.category = front < 13107   ? Systems::WeatherCategory::Clear
-                              : front < 26214 ? Systems::WeatherCategory::Overcast
-                              : front < 39321 ? Systems::WeatherCategory::Rain
-                              : front < 52428 ? Systems::WeatherCategory::Snow
-                                              : Systems::WeatherCategory::Fog;
-            sample.precip_intensity = sample.category == Systems::WeatherCategory::Rain ||
-                                              sample.category == Systems::WeatherCategory::Snow
-                                          ? static_cast<float>(moisture) / 65535.0f
-                                          : 0.0f;
-            sample.wind = m_windFieldSystem->SampleWind(position);
-            return sample;
-        },
-        [this] { return RegionalAmbientHash(12, true); });
-    m_aetherFieldSystem->BindRegionalBackend(
-        [this](const Vec3& position) {
-            return static_cast<float>(SampleRegionalChannel(4, position)) / 65535.0f;
-        },
-        [this] { return RegionalAmbientHash(16, false); });
+    m_windFieldSystem->BindRegionalSession(*this);
+    m_weatherSystem->BindRegionalSession(*this);
+    m_aetherFieldSystem->BindRegionalSession(*this);
 }
 
 namespace {
@@ -3999,7 +4058,7 @@ void GameSession::LatchRegionFault(std::uint64_t tick, const std::string& messag
         // Begin and admission can refuse before the candidate becomes active,
         // including preflight before the per-tick guard exists.
         if (m_foliageStep->published_tick != m_worldClock.tick()) {
-            m_foliageStep->RestoreUnpublishedTicks(*this);
+            m_foliageStep->incomplete = !m_foliageStep->RestoreUnpublishedTicks(*this);
         }
         if (m_foliageStep->incomplete || m_foliageStep->prepared || m_foliageStep->active) {
             m_foliageStep->blocked = true;

@@ -9711,12 +9711,12 @@ void CheckScheduledFieldFaultRollback(bool standard_exception) {
     EXPECT_EQ(session.GetFieldPages().serialize(), bytes);
     const auto save = root.path() / "faulted-field-state";
     const auto disk = SavedPresetTestDiskBytes(session.GetWorldSaveDir());
-    // The fields rolled back, but the unpublished foliage tick is incomplete.
-    EXPECT_FALSE(session.SaveWorldStateTo(save));
-    EXPECT_FALSE(fs::exists(save));
-    EXPECT_FALSE(session.SaveWorldState());
-    EXPECT_FALSE(session.SaveWorld());
-    EXPECT_EQ(SavedPresetTestDiskBytes(session.GetWorldSaveDir()), disk);
+    // Discarded candidates and restored stamps remain a complete recovery save.
+    ASSERT_TRUE(session.SaveWorldStateTo(save));
+    ASSERT_NO_FATAL_FAILURE(ExpectIndexedSessionFields(save, fields));
+    ASSERT_TRUE(session.SaveWorldState());
+    ASSERT_TRUE(session.SaveWorld());
+    EXPECT_NE(SavedPresetTestDiskBytes(session.GetWorldSaveDir()), disk);
     EXPECT_EQ(session.GetFieldPages().serialize(), bytes);
     ASSERT_TRUE(session.LoadWorldStateFrom(root.path() / "scheduled-field-input"));
     EXPECT_FALSE(session.GetRegionSchedulerFault());
@@ -14672,103 +14672,237 @@ TEST(GameSessionHeadlessWorldTest, FoliageSelectionPreservesReferenceViewsAndSha
     }
 }
 
-TEST(GameSessionHeadlessWorldTest, FoliagePrePrepareFaultRestoresDueStampsAndRefusesEverySave) {
+TEST(GameSessionHeadlessWorldTest, RegionScheduleRetainsOnlySurvivingDueRollbackStamps) {
+    for (const unsigned dormant : {0u, 64u}) {
+        SCOPED_TRACE(dormant);
+        constexpr auto tick = ActiveRegionLedger::kIdleEvictionTicks + 31;
+        auto ledger = ScheduledFieldLedger(tick, {{kFieldOwner, RegionState::Active}});
+        EXPECT_EQ(ledger.last_schedule(), nullptr);
+        const RegionKey evicted{2, 0};
+        ledger.pin(evicted, true, WorldClock(tick));
+        ledger.pin(evicted, false, WorldClock(tick));
+        for (unsigned index = 0; index < dormant; ++index) {
+            const RegionKey key{static_cast<std::int32_t>(index + 3), 0};
+            ledger.pin(key, true, WorldClock(tick));
+            auto& record =
+                const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at(key);
+            record.state = RegionState::Frozen;
+            record.frozen_at = tick;
+            record.frozen_digest = 123;
+            record.wake_pending = false;
+        }
+        const auto& first =
+            ledger.schedule(WorldClock(tick + 1), std::span<const Luminumbra::Vec3>{});
+        EXPECT_EQ(ledger.last_schedule(), &first);
+        ASSERT_EQ(first.due, (std::vector<RegionKey>{kFieldOwner}));
+        EXPECT_EQ(first.evicted, (std::vector<RegionKey>{evicted}));
+        EXPECT_EQ(first.prior_ticks, (std::vector<std::uint64_t>{0}));
+        EXPECT_EQ(first.prior_ticks.size(), first.due.size());
+        EXPECT_LE(first.prior_ticks.capacity(), 2u);
+        const auto second =
+            ledger.schedule(WorldClock(tick + 2), std::span<const Luminumbra::Vec3>{});
+        EXPECT_EQ(second.prior_ticks, (std::vector<std::uint64_t>{tick + 1}));
+        EXPECT_EQ(second.prior_ticks.size(), second.due.size());
+    }
+    auto empty = ScheduledFieldLedger(31, {});
+    const auto schedule = empty.schedule(WorldClock(32), std::span<const Luminumbra::Vec3>{});
+    EXPECT_TRUE(schedule.due.empty());
+    EXPECT_TRUE(schedule.prior_ticks.empty());
+}
+
+// Build an independent recovery reference from the checkpoint: scheduling may
+// decide cadence/retention, but no due foliage stamp has advanced. No fault
+// handling code participates in constructing these expected durable bytes.
+void WriteFoliageRecoveryReference(const fs::path& directory,
+                                   ActiveRegionLedger ledger,
+                                   const WorldClock& clock,
+                                   std::span<const Luminumbra::Vec3> anchors) {
+    const auto committed = ledger.records();
+    const auto schedule = ledger.schedule(clock, anchors);
+    for (const auto key : schedule.due) {
+        const auto prior = committed.find(key);
+        ASSERT_TRUE(
+            ledger.set_foliage_tick(key, prior == committed.end() ? 0 : prior->second.last_ticked));
+    }
+    ledger.clear_completed_work();
+    auto metadata = nlohmann::json::parse(ReadClockTestFile(directory / "world_info.json"));
+    clock.write_metadata(metadata);
+    P::WorldSaveService::SaveFactsScope facts(directory);
+    P::SaveTransaction transaction(
+        directory, clock.tick(), {}, &P::WorldSaveService::member_digest);
+    std::vector<std::string> errors;
+    ASSERT_TRUE(transaction.begin(&errors));
+    ASSERT_TRUE(P::WorldSaveService::save_metadata_and_active_regions(
+        metadata.dump(4), ledger, directory, &errors));
+    ASSERT_TRUE(P::WorldSaveService::finalize_indexed_envelope(directory, &errors));
+    ASSERT_TRUE(transaction.commit(&errors));
+}
+
+void CheckFoliagePrePrepareFaultRecovery(bool warm, bool populated) {
+    SCOPED_TRACE(warm);
+    SCOPED_TRACE(populated);
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, reference;
+    const RegionKey frozen{1, 0};
+    auto ledger = ScheduledFieldLedger(
+        31, {{kFieldOwner, RegionState::Active}, {frozen, RegionState::Frozen}});
+    ASSERT_TRUE(ledger.set_energy_age(kFieldOwner, 0));
+    FieldPageState fields;
+    if (populated) {
+        ASSERT_TRUE(fields.set_soil({8, 8}, 0));
+    }
+    ASSERT_NO_FATAL_FAILURE(
+        LoadScheduledFieldFixture(session, root, jobs, ledger, fields, std::string{}));
+    if (populated) {
+        const auto plant = ClockTestPlant(session.GetRegistry(), {8, 0, 8});
+        session.GetRegistry().emplace<C::SoilFeederComponent>(plant);
+    }
+    if (warm) {
+        TickOnce(session);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+    }
+    const auto prior_tick = session.GetActiveRegionLedger().records().at(kFieldOwner).last_ticked;
+    const auto frozen_tick = session.GetActiveRegionLedger().records().at(frozen).last_ticked;
+    const auto before_fields = session.GetFieldPages().serialize();
+    const auto before_plants = FoliageSnapshot(session.GetRegistry());
+    const auto publications = session.GetFoliageRegistryPublications();
+    const auto stage_visits = session.GetFoliageRegistryStageVisits();
+    const auto expected = root.path() / "committed-foliage-reference";
+    ASSERT_TRUE(session.SaveWorldStateTo(expected));
+    ASSERT_NO_FATAL_FAILURE(
+        WriteFoliageRecoveryReference(expected,
+                                      session.GetActiveRegionLedger(),
+                                      WorldClock(session.GetWorldClock().tick() + 1),
+                                      {}));
+    const auto emitter = session.GetRegistry().create();
+    session.GetRegistry().emplace<C::TransformComponent>(emitter).position = {8, 0, 8};
+    // Channel 7 is invalid for the two-channel session. Energy admission
+    // runs after scheduling and before foliage Prepare, on every platform.
+    session.GetRegistry().emplace<C::FieldEmitterComponent>(emitter, 7, 1000u, 1);
+    TickOnce(session);
+    ASSERT_TRUE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetFoliageRegistryStageVisits(), stage_visits);
+    EXPECT_EQ(session.GetFoliageRegistryPublications(), publications);
+    EXPECT_EQ(session.GetActiveRegionLedger().records().at(kFieldOwner).last_ticked, prior_tick);
+    EXPECT_EQ(session.GetActiveRegionLedger().records().at(frozen).last_ticked, frozen_tick);
+    EXPECT_EQ(session.GetFieldPages().serialize(), before_fields);
+    EXPECT_EQ(FoliageSnapshot(session.GetRegistry()), before_plants);
+    session.GetRegistry().destroy(emitter);
+    const auto recovery = root.path() / "recovered-foliage";
+    Luminumbra::world::WorldStateSaveReport report;
+    ASSERT_TRUE(session.SaveWorldState(&report));
+    EXPECT_TRUE(report.saved);
+    ASSERT_TRUE(session.SaveWorld());
+    ASSERT_TRUE(session.SaveWorldStateTo(recovery));
+    EnableSnapshotSession(reference, root, jobs);
+    ASSERT_TRUE(reference.LoadWorld(session.GetMetadata().worldId));
+    ASSERT_TRUE(reference.LoadWorldStateFrom(expected));
+    const auto reference_save = root.path() / "reference-foliage-save";
+    ASSERT_TRUE(reference.SaveWorldStateTo(reference_save));
+    EXPECT_EQ(SavedPresetTestDiskBytes(recovery), SavedPresetTestDiskBytes(reference_save));
+    ASSERT_TRUE(session.LoadWorldStateFrom(recovery));
+    session.SetReplicatedSimulationAnchors({});
+    reference.SetReplicatedSimulationAnchors({});
+    EXPECT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetFieldPages().serialize(), before_fields);
+    EXPECT_EQ(FoliageSnapshot(session.GetRegistry()), before_plants);
+    for (const unsigned continuation : {0u, 1u}) {
+        SCOPED_TRACE(continuation);
+        TickOnce(session);
+        TickOnce(reference);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        ASSERT_FALSE(reference.GetRegionSchedulerFault());
+        EXPECT_EQ(session.GetFieldPages().serialize(), reference.GetFieldPages().serialize());
+        EXPECT_EQ(FoliageSnapshot(session.GetRegistry()), FoliageSnapshot(reference.GetRegistry()));
+        EXPECT_EQ(session.GetActiveRegionLedger().encode(),
+                  reference.GetActiveRegionLedger().encode());
+        EXPECT_EQ(SessionWorldSubHashes(session), SessionWorldSubHashes(reference));
+    }
+    if (populated) {
+        EXPECT_NE(session.GetFieldPages().serialize(), before_fields);
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, FoliagePrePrepareFaultSavesCommittedBytesAndReplaysOnReload) {
     for (const bool warm : {false, true}) {
         for (const bool populated : {false, true}) {
-            SCOPED_TRACE(warm);
-            SCOPED_TRACE(populated);
-            const HeadlessRoot root;
-            JobSystem jobs;
-            jobs.startup(1);
-            GameSession session;
-            const RegionKey frozen{1, 0};
-            auto ledger = ScheduledFieldLedger(
-                31, {{kFieldOwner, RegionState::Active}, {frozen, RegionState::Frozen}});
-            ASSERT_TRUE(ledger.set_energy_age(kFieldOwner, 0));
-            FieldPageState fields;
-            if (populated) {
-                ASSERT_TRUE(fields.set_soil({8, 8}, 0));
-            }
-            ASSERT_NO_FATAL_FAILURE(
-                LoadScheduledFieldFixture(session, root, jobs, ledger, fields, std::string{}));
-            if (populated) {
-                const auto plant = ClockTestPlant(session.GetRegistry(), {8, 0, 8});
-                session.GetRegistry().emplace<C::SoilFeederComponent>(plant);
-            }
-            if (warm) {
-                TickOnce(session);
-                ASSERT_FALSE(session.GetRegionSchedulerFault());
-                ASSERT_TRUE(session.SaveWorldState());
-            }
-            const auto prior_tick =
-                session.GetActiveRegionLedger().records().at(kFieldOwner).last_ticked;
-            const auto frozen_tick =
-                session.GetActiveRegionLedger().records().at(frozen).last_ticked;
-            const auto before_fields = session.GetFieldPages().serialize();
-            const auto before_plants = FoliageSnapshot(session.GetRegistry());
-            const auto publications = session.GetFoliageRegistryPublications();
-            const auto stage_visits = session.GetFoliageRegistryStageVisits();
-            const auto emitter = session.GetRegistry().create();
-            session.GetRegistry().emplace<C::TransformComponent>(emitter).position = {8, 0, 8};
-            // Channel 7 is invalid for the two-channel session. Energy admission
-            // runs after scheduling and before foliage Prepare, on every platform.
-            session.GetRegistry().emplace<C::FieldEmitterComponent>(emitter, 7, 1000u, 1);
-            TickOnce(session);
-            ASSERT_TRUE(session.GetRegionSchedulerFault());
-            EXPECT_EQ(session.GetFoliageRegistryStageVisits(), stage_visits);
-            EXPECT_EQ(session.GetFoliageRegistryPublications(), publications);
-            EXPECT_EQ(session.GetActiveRegionLedger().records().at(kFieldOwner).last_ticked,
-                      prior_tick);
-            EXPECT_EQ(session.GetActiveRegionLedger().records().at(frozen).last_ticked,
-                      frozen_tick);
-            EXPECT_EQ(session.GetFieldPages().serialize(), before_fields);
-            EXPECT_EQ(FoliageSnapshot(session.GetRegistry()), before_plants);
-            const auto disk = SavedPresetTestDiskBytes(session.GetWorldSaveDir());
-            const auto target = root.path() / "incomplete-foliage-save";
-            Luminumbra::world::WorldStateSaveReport report{1, 2, 3, true};
-            EXPECT_FALSE(session.SaveWorldState(&report));
-            EXPECT_EQ(report.chunks_total, 1u);
-            EXPECT_EQ(report.chunks_dirty, 2u);
-            EXPECT_EQ(report.chunks_saved, 3u);
-            EXPECT_TRUE(report.saved);
-            EXPECT_FALSE(session.SaveWorld());
-            EXPECT_FALSE(session.SaveWorldStateTo(target));
-            EXPECT_FALSE(fs::exists(target));
-            EXPECT_EQ(SavedPresetTestDiskBytes(session.GetWorldSaveDir()), disk);
-            session.GetRegistry().destroy(emitter);
-            ASSERT_TRUE(session.LoadWorldStateFrom(root.path() / "scheduled-field-input"));
-            EXPECT_FALSE(session.GetRegionSchedulerFault());
-            TickOnce(session);
-            ASSERT_FALSE(session.GetRegionSchedulerFault());
-            EXPECT_TRUE(session.SaveWorldState());
+            ASSERT_NO_FATAL_FAILURE(CheckFoliagePrePrepareFaultRecovery(warm, populated));
         }
     }
 }
 
-TEST(GameSessionHeadlessWorldTest, FoliagePrePrepareFaultSealsNewlyScheduledOwner) {
+TEST(GameSessionHeadlessWorldTest, FoliagePrePrepareFaultRestoresNewlyScheduledOwners) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
+    GameSession session, reference;
     const auto ledger = ScheduledFieldLedger(31, {});
     ASSERT_NO_FATAL_FAILURE(
         LoadScheduledFieldFixture(session, root, jobs, ledger, {}, std::string{}));
     ASSERT_FALSE(session.GetActiveRegionLedger().records().contains(kFieldOwner));
-    session.SetReplicatedSimulationAnchors({{8, 0, 8}});
+    const std::array anchors{Luminumbra::Vec3{8, 0, 8}};
+    const auto expected = root.path() / "new-owner-reference";
+    ASSERT_TRUE(session.SaveWorldStateTo(expected));
+    ASSERT_NO_FATAL_FAILURE(
+        WriteFoliageRecoveryReference(expected, ledger, WorldClock(32), anchors));
+    session.SetReplicatedSimulationAnchors(
+        std::vector<Luminumbra::Vec3>(anchors.begin(), anchors.end()));
     const auto emitter = session.GetRegistry().create();
     session.GetRegistry().emplace<C::TransformComponent>(emitter).position = {8, 0, 8};
     session.GetRegistry().emplace<C::FieldEmitterComponent>(emitter, 7, 1000u, 1);
-    const auto disk = SavedPresetTestDiskBytes(session.GetWorldSaveDir());
     TickOnce(session);
     ASSERT_TRUE(session.GetRegionSchedulerFault());
     EXPECT_TRUE(session.GetActiveRegionLedger().records().contains(kFieldOwner));
     EXPECT_EQ(session.GetFoliageRegistryStageVisits(), 0u);
-    const auto target = root.path() / "new-owner-incomplete-save";
-    EXPECT_FALSE(session.SaveWorld());
-    EXPECT_FALSE(session.SaveWorldState());
-    EXPECT_FALSE(session.SaveWorldStateTo(target));
-    EXPECT_FALSE(fs::exists(target));
-    EXPECT_EQ(SavedPresetTestDiskBytes(session.GetWorldSaveDir()), disk);
+    EXPECT_EQ(session.GetRegionSchedule().prior_ticks.size(),
+              session.GetRegionSchedule().due.size());
+    for (const auto key : session.GetRegionSchedule().due) {
+        EXPECT_EQ(session.GetActiveRegionLedger().records().at(key).last_ticked, 0u);
+    }
+    session.GetRegistry().destroy(emitter);
+    const auto recovery = root.path() / "new-owner-recovery";
+    ASSERT_TRUE(session.SaveWorld());
+    ASSERT_TRUE(session.SaveWorldState());
+    ASSERT_TRUE(session.SaveWorldStateTo(recovery));
+    EnableSnapshotSession(reference, root, jobs);
+    ASSERT_TRUE(reference.LoadWorld(session.GetMetadata().worldId));
+    ASSERT_TRUE(reference.LoadWorldStateFrom(expected));
+    const auto reference_save = root.path() / "new-owner-reference-save";
+    ASSERT_TRUE(reference.SaveWorldStateTo(reference_save));
+    EXPECT_EQ(SavedPresetTestDiskBytes(recovery), SavedPresetTestDiskBytes(reference_save));
+    ASSERT_TRUE(session.LoadWorldStateFrom(recovery));
+    for (auto* current : {&session, &reference}) {
+        current->SetReplicatedSimulationAnchors(
+            std::vector<Luminumbra::Vec3>(anchors.begin(), anchors.end()));
+        TickOnce(*current);
+        ASSERT_FALSE(current->GetRegionSchedulerFault());
+    }
+    EXPECT_EQ(SessionWorldSubHashes(session), SessionWorldSubHashes(reference));
+    EXPECT_EQ(session.GetActiveRegionLedger().encode(), reference.GetActiveRegionLedger().encode());
+}
+
+TEST(GameSessionHeadlessWorldTest, ScatterPromotionFiltersBlockedOwnersBeforeRanking) {
+    const auto source = ReadClockTestFile(fs::path(LUMINUMBRA_SOURCE_ROOT) /
+                                          "src/luminumbra_client/app/ProcgenPalettes.cpp");
+    const auto begin = source.find("entt::entity PromoteNearestScatter(");
+    ASSERT_NE(begin, std::string::npos);
+    const auto loop = source.find("for (std::size_t i = 0; i < state.plants.size(); ++i)", begin);
+    const auto ranking = source.find("if (d <= bestD)", loop);
+    ASSERT_NE(loop, std::string::npos);
+    ASSERT_NE(ranking, std::string::npos);
+    const auto candidates = source.substr(loop, ranking - loop);
+    EXPECT_NE(candidates.find("if (!luminumbra::foliage::FarmingActionsAllowed(reg, candidate))"),
+              std::string::npos);
+    EXPECT_NE(candidates.find("continue;", candidates.find("FarmingActionsAllowed")),
+              std::string::npos);
+    const auto selected = source.find("if (best < 0)", ranking);
+    ASSERT_NE(selected, std::string::npos);
+    const auto creation = source.find("const entt::entity e = reg.create();", selected);
+    ASSERT_NE(creation, std::string::npos);
+    EXPECT_EQ(source.substr(selected, creation - selected).find("FarmingActionsAllowed"),
+              std::string::npos);
 }
 
 TEST(GameSessionHeadlessWorldTest, FoliageAllocatorAdmitsFirstAndLastIdsAndRefusesExhaustion) {
@@ -15209,8 +15343,91 @@ TEST(GameSessionHeadlessWorldTest, LongFoliageWindowStopsRemainingHostBatchUntil
               separate.GetActiveRegionLedger().canonical_bytes());
 }
 
+TEST(GameSessionHeadlessWorldTest, FoliageFaultRestoresWhenTheCopiedScheduleIsIncomplete) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    const auto ledger = ScheduledFieldLedger(31, {{kFieldOwner, RegionState::Active}});
+    FieldPageState fields;
+    ASSERT_TRUE(fields.set_soil({8, 8}, 0));
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    AdoptUnpromotedWaterChunk(session);
+    unsigned observations = 0;
+    session.GetWorldSystem()->SetWaterAuthorityObserver([&](const auto&) {
+        ++observations;
+        const_cast<Luminumbra::world::RegionSchedule&>(session.GetRegionSchedule())
+            .prior_ticks.clear();
+        throw std::runtime_error("incomplete copied schedule");
+    });
+    TickOnce(session);
+    session.GetWorldSystem()->SetWaterAuthorityObserver({});
+    ASSERT_EQ(observations, 1u);
+    ASSERT_TRUE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetActiveRegionLedger().records().at(kFieldOwner).last_ticked, 0u);
+    EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
+    ASSERT_TRUE(session.SaveWorld());
+    ASSERT_TRUE(session.SaveWorldState());
+    const auto recovery = root.path() / "incomplete-copied-schedule";
+    ASSERT_TRUE(session.SaveWorldStateTo(recovery));
+    ASSERT_TRUE(session.LoadWorldStateFrom(recovery));
+    EXPECT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetActiveRegionLedger().records().at(kFieldOwner).last_ticked, 0u);
+    EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
+}
+
+TEST(GameSessionHeadlessWorldTest, FoliagePublicationFaultSavesAlreadyCommittedFrozenHistory) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    auto ledger = ScheduledFieldLedger(31, {{kFieldOwner, RegionState::Active}});
+    auto& record =
+        const_cast<std::map<RegionKey, ActiveRegionRecord>&>(ledger.records()).at(kFieldOwner);
+    record.first_active = 0;
+    record.last_ticked = 19;
+    record.frozen_at = 20;
+    FieldPageState fields;
+    ASSERT_TRUE(fields.set_soil({8, 8}, 0));
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    session.SetReplicatedSimulationAnchors({});
+    AdoptUnpromotedWaterChunk(session);
+    unsigned observations = 0;
+    session.GetWorldSystem()->SetWaterAuthorityObserver([&](const auto&) {
+        ++observations;
+        auto& owner = const_cast<std::map<RegionKey, ActiveRegionRecord>&>(
+                          session.GetActiveRegionLedger().records())
+                          .at(kFieldOwner);
+        // Publication must refuse this changed state, but rollback needs no
+        // mutation when the frozen history already has its committed stamp.
+        owner.state = RegionState::Frozen;
+        owner.cadence_shift = session.GetActiveRegionLedger().config().reduced_shift;
+        owner.cadence_phase = ActiveRegionLedger::phase(kFieldOwner, owner.cadence_shift);
+        owner.last_ticked = 19;
+        owner.frozen_digest = 42;
+    });
+    TickOnce(session);
+    session.GetWorldSystem()->SetWaterAuthorityObserver({});
+    ASSERT_EQ(observations, 1u);
+    ASSERT_TRUE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
+    EXPECT_EQ(session.GetFoliageRegistryPublications(), 0u);
+    ASSERT_TRUE(session.SaveWorld());
+    ASSERT_TRUE(session.SaveWorldState());
+    const auto recovery = root.path() / "committed-frozen-history";
+    ASSERT_TRUE(session.SaveWorldStateTo(recovery));
+    ASSERT_TRUE(session.LoadWorldStateFrom(recovery));
+    EXPECT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
+    const auto& restored = session.GetActiveRegionLedger().records().at(kFieldOwner);
+    EXPECT_EQ(restored.state, RegionState::Frozen);
+    EXPECT_EQ(restored.last_ticked, 19u);
+    EXPECT_EQ(restored.frozen_at, 20u);
+    EXPECT_EQ(restored.frozen_digest, 42u);
+}
+
 TEST(GameSessionHeadlessWorldTest, FoliagePublicationRefusesMissingFrozenOrChangedResumeOwners) {
-    for (const unsigned failure : {0u, 1u, 2u, 3u}) {
+    for (const unsigned failure : {0u, 1u, 2u, 3u, 4u}) {
         SCOPED_TRACE(failure);
         const HeadlessRoot root;
         JobSystem jobs;
@@ -15232,7 +15449,12 @@ TEST(GameSessionHeadlessWorldTest, FoliagePublicationRefusesMissingFrozenOrChang
             ++observations;
             auto& records = const_cast<std::map<RegionKey, ActiveRegionRecord>&>(
                 session.GetActiveRegionLedger().records());
-            if (failure == 0) {
+            if (failure == 4) {
+                const auto* schedule = session.GetActiveRegionLedger().last_schedule();
+                ASSERT_NE(schedule, nullptr);
+                const_cast<Luminumbra::world::RegionSchedule*>(schedule)->prior_ticks.clear();
+                throw std::runtime_error("incomplete rollback snapshot");
+            } else if (failure == 0) {
                 records.erase(kFieldOwner);
             } else if (failure == 1) {
                 records.at(kFieldOwner).state = RegionState::Frozen;
@@ -15246,6 +15468,20 @@ TEST(GameSessionHeadlessWorldTest, FoliagePublicationRefusesMissingFrozenOrChang
         EXPECT_TRUE(session.GetRegionSchedulerFault());
         EXPECT_EQ(session.GetFieldPages().serialize(), fields.serialize());
         EXPECT_EQ(session.GetFoliageRegistryPublications(), 0u);
+        // These callbacks destroyed the committed owner/history identity; no
+        // stamp rollback can prove that the saved foliage would be replayable.
+        const auto disk = SavedPresetTestDiskBytes(session.GetWorldSaveDir());
+        const auto target = root.path() / "unrestorable-foliage";
+        Luminumbra::world::WorldStateSaveReport report{1, 2, 3, true};
+        EXPECT_FALSE(session.SaveWorldState(&report));
+        EXPECT_EQ(report.chunks_total, 1u);
+        EXPECT_EQ(report.chunks_dirty, 2u);
+        EXPECT_EQ(report.chunks_saved, 3u);
+        EXPECT_TRUE(report.saved);
+        EXPECT_FALSE(session.SaveWorld());
+        EXPECT_FALSE(session.SaveWorldStateTo(target));
+        EXPECT_FALSE(fs::exists(target));
+        EXPECT_EQ(SavedPresetTestDiskBytes(session.GetWorldSaveDir()), disk);
     }
 }
 
@@ -15468,16 +15704,13 @@ TEST(GameSessionHeadlessWorldTest, IrrigationBorderAdmissionAtCapacityLeavesAuth
     EXPECT_EQ(session.GetFoliageReplayRemainingSteps(), 0u);
     const auto disk = SavedPresetTestDiskBytes(session.GetWorldSaveDir());
     const auto target = root.path() / "faulted-foliage-save";
-    Luminumbra::world::WorldStateSaveReport report{1, 2, 3, true};
-    EXPECT_FALSE(session.SaveWorldState(&report));
-    EXPECT_EQ(report.chunks_total, 1u);
-    EXPECT_EQ(report.chunks_dirty, 2u);
-    EXPECT_EQ(report.chunks_saved, 3u);
+    Luminumbra::world::WorldStateSaveReport report;
+    ASSERT_TRUE(session.SaveWorldState(&report));
     EXPECT_TRUE(report.saved);
-    EXPECT_FALSE(session.SaveWorld());
-    EXPECT_FALSE(session.SaveWorldStateTo(target));
-    EXPECT_FALSE(fs::exists(target));
-    EXPECT_EQ(SavedPresetTestDiskBytes(session.GetWorldSaveDir()), disk);
+    ASSERT_TRUE(session.SaveWorld());
+    ASSERT_TRUE(session.SaveWorldStateTo(target));
+    ASSERT_NO_FATAL_FAILURE(ExpectIndexedSessionFields(target, fields));
+    EXPECT_NE(SavedPresetTestDiskBytes(session.GetWorldSaveDir()), disk);
     EXPECT_FALSE(session.LoadWorldFrom("missing-foliage-world", root.path()));
     EXPECT_FALSE(session.GetWorldOpenError().empty());
     EXPECT_TRUE(session.GetRegionSchedulerFault());
@@ -15561,10 +15794,10 @@ void CheckHistoricallyWettedBorder(bool capacity, bool partial_recipient) {
         EXPECT_EQ(session.GetFoliageRegistryPublications(), 0u);
         EXPECT_EQ(session.GetFoliageReplayRemainingSteps(), 0u);
         const auto target = root.path() / "faulted-historical-foliage-save";
-        EXPECT_FALSE(session.SaveWorld());
-        EXPECT_FALSE(session.SaveWorldState());
-        EXPECT_FALSE(session.SaveWorldStateTo(target));
-        EXPECT_FALSE(fs::exists(target));
+        ASSERT_TRUE(session.SaveWorld());
+        ASSERT_TRUE(session.SaveWorldState());
+        ASSERT_TRUE(session.SaveWorldStateTo(target));
+        ASSERT_NO_FATAL_FAILURE(ExpectIndexedSessionFields(target, fields));
         EXPECT_TRUE(session.LoadWorldStateFrom(root.path() / "scheduled-field-input"));
         EXPECT_FALSE(session.GetRegionSchedulerFault());
         EXPECT_EQ(session.GetFieldPages().serialize(), before);
@@ -16181,3 +16414,496 @@ TEST(GameSessionHeadlessWorldTest, PendingFoliageLoadRefusesBeforeAdoption) {
     EXPECT_TRUE(session.SaveWorld());
 }
 } // namespace
+
+namespace {
+
+std::vector<std::uint32_t> RegionalSamplerBits(const Luminumbra::Systems::WindFieldSystem& wind,
+                                               const Luminumbra::Systems::WeatherSystem& weather,
+                                               const Luminumbra::Systems::AetherFieldSystem& aether,
+                                               const Luminumbra::Vec3& anchor) {
+    using namespace Luminumbra::Systems;
+    std::vector<std::uint32_t> bits;
+    // Fixed 66 x 66 footprint includes the grid edge and neighbouring/missing owners.
+    bits.reserve(66u * 66u * 13u);
+    const auto add = [&bits](float value) {
+        bits.push_back(std::bit_cast<std::uint32_t>(value));
+    };
+    for (int z = -33; z <= 32; ++z) {
+        for (int x = -33; x <= 32; ++x) {
+            const auto position =
+                anchor +
+                Luminumbra::Vec3(static_cast<float>(x) * 24.0f, 0, static_cast<float>(z) * 24.0f);
+            for (const auto layer : {WindLayer::Ground, WindLayer::Mid, WindLayer::High}) {
+                const auto value = wind.SampleWind(position, layer);
+                add(value.x);
+                add(value.y);
+            }
+            const auto sample = weather.SampleAt(position);
+            bits.push_back(static_cast<std::uint32_t>(sample.category));
+            add(sample.precip_intensity);
+            add(sample.storm_intensity);
+            add(sample.wind.x);
+            add(sample.wind.y);
+            add(aether.SampleAether(position));
+            EXPECT_EQ(weather.CategoryAt(position), sample.category);
+            EXPECT_EQ(std::bit_cast<std::uint32_t>(weather.PrecipitationAt(position)),
+                      std::bit_cast<std::uint32_t>(sample.precip_intensity));
+        }
+    }
+    for (const float value : aether.grid().cells()) {
+        add(value);
+    }
+    const auto direction = wind.BaseDirection();
+    add(direction.x);
+    add(direction.y);
+    return bits;
+}
+
+template<class System, class Hash>
+void CheckRegionalSamplerLifetime(const System& source, const GameSession& session, Hash hash) {
+    System bound(source);
+    bound.BindRegionalSession(session);
+    const auto regional_hash = hash(bound);
+    System copied(bound);
+    System assigned(source);
+    assigned.BindRegionalSession(session);
+    assigned = bound;
+    System moved(std::move(bound));
+    EXPECT_EQ(hash(copied), hash(moved));
+    System move_assigned(source);
+    move_assigned.BindRegionalSession(session);
+    move_assigned = std::move(moved);
+    EXPECT_NE(hash(copied), regional_hash); // Copies must use the unbound fallback.
+    EXPECT_EQ(hash(copied), hash(assigned));
+    EXPECT_EQ(hash(copied), hash(move_assigned));
+    copied.BindRegionalSession(session);
+    EXPECT_EQ(hash(copied), regional_hash);
+    EXPECT_THROW(copied.BindRegionalBackend({}, [] { return std::string("invalid pair"); }),
+                 std::invalid_argument);
+    EXPECT_EQ(hash(copied), regional_hash);
+    copied.BindRegionalBackend({}, {});
+    const auto cleared = hash(copied);
+    copied.BindRegionalSession(session);
+    EXPECT_EQ(hash(copied), regional_hash);
+    copied.BindRegionalBackend({}, {});
+    EXPECT_EQ(hash(copied), cleared);
+    // A copy may outlive its borrowed owner, even if that owner was destroyed while bound.
+    std::string detached_hash;
+    {
+        GameSession temporary;
+        System temporary_bound(source);
+        temporary_bound.BindRegionalSession(temporary);
+        EXPECT_NE(hash(temporary_bound), regional_hash);
+        assigned = temporary_bound;
+        detached_hash = hash(assigned);
+    }
+    EXPECT_EQ(hash(assigned), detached_hash);
+}
+
+void ExpectRegionalWeatherProjection(const Luminumbra::Systems::WeatherSystem& weather,
+                                     const std::vector<Luminumbra::Systems::StormCell>& storms,
+                                     const std::vector<Luminumbra::Systems::StrikeEvent>& strikes) {
+    ASSERT_EQ(weather.StormCells().size(), storms.size());
+    EXPECT_EQ(weather.active_storm_count(), static_cast<int>(storms.size()));
+    for (std::size_t i = 0; i < storms.size(); ++i) {
+        const auto& actual = weather.StormCells()[i];
+        const auto& expected = storms[i];
+        EXPECT_EQ(actual.center_world, expected.center_world);
+        EXPECT_EQ(actual.velocity, expected.velocity);
+        EXPECT_EQ(actual.intensity, expected.intensity);
+        EXPECT_EQ(actual.spawn_tick, expected.spawn_tick);
+        EXPECT_EQ(actual.lifetime_ticks, expected.lifetime_ticks);
+        EXPECT_EQ(actual.seed_salt, expected.seed_salt);
+    }
+    ASSERT_EQ(weather.StrikeSchedule().size(), strikes.size());
+    EXPECT_EQ(weather.live_strike_count(), static_cast<int>(strikes.size()));
+    for (std::size_t i = 0; i < strikes.size(); ++i) {
+        const auto& actual = weather.StrikeSchedule()[i];
+        const auto& expected = strikes[i];
+        EXPECT_EQ(actual.strike_tick, expected.strike_tick);
+        EXPECT_EQ(actual.world_x, expected.world_x);
+        EXPECT_EQ(actual.world_z, expected.world_z);
+        EXPECT_EQ(actual.magnitude, expected.magnitude);
+        EXPECT_EQ(actual.storm_salt, expected.storm_salt);
+    }
+}
+
+template<bool Moving, bool Assignment>
+Luminumbra::Systems::WeatherSystem DetachRegionalWeather(Luminumbra::Systems::WeatherSystem& source,
+                                                         const GameSession& session) {
+    using Luminumbra::Systems::WeatherSystem;
+    if constexpr (Assignment) {
+        WeatherSystem destination(42);
+        destination.BindRegionalSession(session);
+        destination.AdoptRegionalWeather(99, Luminumbra::Vec3(0), {}, {{999, 0, 0, 1, 99}}, true);
+        if constexpr (Moving) {
+            destination = std::move(source);
+        } else {
+            destination = source;
+        }
+        return destination;
+    } else if constexpr (Moving) {
+        return WeatherSystem(std::move(source));
+    } else {
+        return WeatherSystem(source);
+    }
+}
+
+template<bool Moving, bool Assignment>
+void CheckDetachedRegionalWeatherCase(int state) {
+    using namespace Luminumbra::Systems;
+    using Luminumbra::Vec2;
+    using Luminumbra::Vec3;
+    GameSession session;
+    SCOPED_TRACE(state);
+    WeatherSystem source(1337), baseline(1337);
+    const bool callback = state == 3;
+    const auto sample_backend = [](const Vec3&) {
+        return WeatherSample{.category = WeatherCategory::Rain,
+                             .precip_intensity = 0.125f,
+                             .storm_intensity = 0.0f,
+                             .wind = Vec2(3, 4)};
+    };
+    if (callback) {
+        source.BindRegionalBackend(sample_backend, [] { return std::string("callback"); });
+    } else {
+        source.BindRegionalSession(session);
+    }
+    std::vector<StormCell> storms;
+    std::vector<StrikeEvent> strikes;
+    if (state != 0) {
+        storms = {{.center_world = Vec2(108),
+                   .velocity = Vec2(0),
+                   .intensity = 0.5f,
+                   .spawn_tick = 1,
+                   .lifetime_ticks = 200,
+                   .seed_salt = 7},
+                  {.center_world = Vec2(2108),
+                   .velocity = Vec2(0),
+                   .intensity = 0.75f,
+                   .spawn_tick = 2,
+                   .lifetime_ticks = 200,
+                   .seed_salt = 8}};
+        strikes = {{101, 108, 108, 0.5f, 7}, {102, 2108, 2108, 0.75f, 8}};
+    }
+    auto input_storms = storms;
+    auto input_strikes = strikes;
+    if (state != 4) {
+        std::reverse(input_storms.begin(), input_storms.end());
+        std::reverse(input_strikes.begin(), input_strikes.end());
+    }
+    if (state == 2) {
+        input_strikes.push_back({100, 108, 108, 0.25f, 7}); // Delivered, hence invisible.
+    }
+    source.AdoptRegionalWeather(
+        100, Vec3(0), std::move(input_storms), std::move(input_strikes), state != 4, state == 2);
+    ASSERT_NO_FATAL_FAILURE(ExpectRegionalWeatherProjection(source, storms, strikes));
+    if (state == 2) {
+        // Invalidate both caches without changing the public projections.
+        source.PutRegionalStorm(storms.front());
+        source.PutRegionalStrike(strikes.front());
+    }
+    const auto source_hash = source.ComputeWeatherSubHash();
+    const auto source_work = source.RegionalProjectionWork();
+    const auto source_changes = source.RegionalStormNodeChanges();
+    auto detached = DetachRegionalWeather<Moving, Assignment>(source, session);
+    ASSERT_NO_FATAL_FAILURE(ExpectRegionalWeatherProjection(detached, storms, strikes));
+    EXPECT_EQ(detached.last_tick(), 100u);
+    EXPECT_EQ(detached.RegionalProjectionWork(), source_work);
+    EXPECT_EQ(detached.RegionalStormNodeChanges(), source_changes);
+    for (const auto& storm : storms) {
+        const Vec3 position(storm.center_world.x, 0, storm.center_world.y);
+        const auto sample = detached.SampleAt(position);
+        const float base = callback ? 0.125f : baseline.PrecipitationAt(position);
+        EXPECT_FLOAT_EQ(sample.storm_intensity, storm.intensity);
+        EXPECT_FLOAT_EQ(sample.precip_intensity, (std::min)(1.0f, base + storm.intensity));
+        EXPECT_FLOAT_EQ(detached.PrecipitationAt(position), sample.precip_intensity);
+    }
+    // Neither the spawn nor strike schedule has an opportunity at this expiry tick.
+    detached.Update(302, Vec3(0), nullptr);
+    if (callback) {
+        ASSERT_NO_FATAL_FAILURE(ExpectRegionalWeatherProjection(detached, storms, strikes));
+        EXPECT_EQ(detached.ComputeWeatherSubHash(), "callback");
+        EXPECT_EQ(detached.SampleAt(Vec3(108, 0, 108)).wind, Vec2(3, 4));
+    } else {
+        ASSERT_NO_FATAL_FAILURE(ExpectRegionalWeatherProjection(detached, {}, {}));
+        baseline.Update(302, Vec3(0), nullptr);
+        EXPECT_EQ(detached.ComputeWeatherSubHash(), baseline.ComputeWeatherSubHash());
+        for (const Vec3 position : {Vec3(108, 0, 108), Vec3(2108, 0, 2108)}) {
+            const auto sample = detached.SampleAt(position);
+            EXPECT_FLOAT_EQ(sample.storm_intensity, 0.0f);
+            EXPECT_FLOAT_EQ(sample.precip_intensity, baseline.SampleAt(position).precip_intensity);
+        }
+    }
+    if constexpr (!Moving) {
+        ASSERT_NO_FATAL_FAILURE(ExpectRegionalWeatherProjection(source, storms, strikes));
+        EXPECT_EQ(source.ComputeWeatherSubHash(), source_hash);
+        EXPECT_EQ(source.last_tick(), 100u);
+        EXPECT_EQ(source.RegionalProjectionWork(), source_work);
+        EXPECT_EQ(source.RegionalStormNodeChanges(), source_changes);
+        for (const auto& storm : storms) {
+            EXPECT_FLOAT_EQ(source.SampleAt(Vec3(storm.center_world.x, 0, storm.center_world.y))
+                                .storm_intensity,
+                            storm.intensity);
+        }
+        // Releasing a restored visibility filter must still reveal the source's event.
+        source.RevealRegionalStrikeSchedule();
+        EXPECT_EQ(source.live_strike_count(), state == 2 ? 3 : static_cast<int>(strikes.size()));
+    }
+}
+
+template<bool Moving, bool Assignment>
+void CheckDetachedRegionalWeather() {
+    // Exercise empty, visible, restored, callback and non-keyed session projections.
+    for (int state = 0; state < 5; ++state) {
+        ASSERT_NO_FATAL_FAILURE((CheckDetachedRegionalWeatherCase<Moving, Assignment>(state)));
+    }
+}
+
+template<class GetSystem, class Sample, class Hash, class SessionHash>
+void CheckRegionalSamplerSelfAssignment(GetSystem get_system,
+                                        Sample sample,
+                                        Hash hash,
+                                        SessionHash session_hash) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    FieldPageState fields;
+    // One populated cell and one storm provide the bound samples.
+    AddWeatherOverlayCell(fields, 4, {1024, 64512, 32768, 32768, 16384});
+    ASSERT_TRUE(fields.replace_weather({SessionStorm(kFieldOwner, 108, 108, 0, 0, 31, 7)}, {}));
+    const auto ledger = ScheduledFieldLedger(31, {{kFieldOwner, RegionState::Active}});
+    ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, fields));
+    const auto& reference = get_system(session);
+    using System = std::decay_t<decltype(reference)>;
+    System system(reference);
+    system.BindRegionalBackend({}, {});
+    if constexpr (std::is_same_v<System, Luminumbra::Systems::AetherFieldSystem>) {
+        // Loading projects regional aether into the render grid, so clearing the binding
+        // alone leaves the same sample. Recenter only the copy's legacy grid so the probe
+        // lies outside it and reads zero, while the bound overlay remains populated.
+        system.Update(31, Luminumbra::Vec3(4096, 0, 4096));
+    }
+    const Luminumbra::Vec3 position{108, 0, 108};
+    const auto legacy_sample = sample(system, position);
+    const auto legacy_hash = hash(system);
+    const auto expected_sample = sample(reference, position);
+    const auto expected_hash = session_hash(session);
+    ASSERT_NE(legacy_sample, expected_sample);
+    ASSERT_NE(legacy_hash, expected_hash);
+    system.BindRegionalSession(session);
+    ASSERT_EQ(sample(system, position), expected_sample);
+    ASSERT_EQ(hash(system), expected_hash);
+    for (int repeat = 0; repeat < 2; ++repeat) {
+        auto& alias = system;
+        system = alias;
+        EXPECT_EQ(sample(system, position), expected_sample);
+        EXPECT_EQ(hash(system), expected_hash);
+        system = std::move(alias);
+        EXPECT_EQ(sample(system, position), expected_sample);
+        EXPECT_EQ(hash(system), expected_hash);
+    }
+    // Both self-assignment forms must preserve the underlying fallback state too.
+    system.BindRegionalBackend({}, {});
+    EXPECT_EQ(sample(system, position), legacy_sample);
+    EXPECT_EQ(hash(system), legacy_hash);
+    auto& unbound_alias = system;
+    system = unbound_alias;
+    system = std::move(unbound_alias);
+    EXPECT_EQ(sample(system, position), legacy_sample);
+    EXPECT_EQ(hash(system), legacy_hash);
+}
+
+void CheckConcreteRegionalSamplers(bool active_regions) {
+    using namespace Luminumbra::Systems;
+    SCOPED_TRACE(active_regions);
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession concrete, erased;
+    FieldPageState fields;
+    ASSERT_NO_FATAL_FAILURE(PopulateSessionFieldFixture(fields, 1337));
+    ASSERT_TRUE(fields.set_weather_age(kFieldOwner, 44));
+    ASSERT_TRUE(fields.replace_weather({SessionStorm(kFieldOwner, 24, 24, 0, 0, 31, 7)}, {}));
+    const auto ledger = ScheduledFieldLedger(31,
+                                             {{kFieldOwner, RegionState::Active},
+                                              {{-1, 0}, RegionState::Frozen},
+                                              {{0, -1}, RegionState::Reduced}});
+    for (auto* session : {&concrete, &erased}) {
+        if (active_regions) {
+            ASSERT_NO_FATAL_FAILURE(
+                LoadScheduledFieldFixture(*session, root, jobs, ledger, fields));
+        } else {
+            EnableSnapshotSession(*session, root, jobs);
+            session->SetActiveRegionsEnabled(false);
+            ASSERT_TRUE(session->CreateWorld("Legacy regional samplers", "1337", "default"));
+        }
+    }
+    for (int step = 0; step < 4; ++step) {
+        SCOPED_TRACE(step);
+        TickOnce(concrete);
+        TickOnce(erased);
+        ASSERT_FALSE(concrete.GetRegionSchedulerFault());
+        ASSERT_FALSE(erased.GetRegionSchedulerFault());
+        const auto anchor = concrete.GetMetadata().spawnPoint;
+        const auto tick = concrete.GetWorldClock().tick();
+        // Tick setup can rebind its systems. Install the reference after setup and before
+        // exercising Update/Restore and every public sampler, so it stays erased throughout.
+        EXPECT_EQ(SessionWorldSubHashes(concrete), SessionWorldSubHashes(erased));
+        if (!active_regions) {
+            // Legacy shipping remains unbound; also exercise both regional projections on
+            // a legacy session, where channel queries use their deterministic seed fallback.
+            concrete.GetWindFieldSystem()->BindRegionalSession(concrete);
+            concrete.GetWeatherSystem()->BindRegionalSession(concrete);
+            concrete.GetAetherFieldSystem()->BindRegionalSession(concrete);
+        }
+        {
+            erased.GetWindFieldSystem()->BindRegionalBackend(
+                [&erased](const auto& position, WindLayer layer) {
+                    return erased.SampleRegionalWind(position, layer);
+                },
+                [&erased] { return erased.ComputeRegionalWindSubHash(); });
+            erased.GetWeatherSystem()->BindRegionalBackend(
+                [&erased](const auto& position) { return erased.SampleRegionalWeather(position); },
+                [&erased] { return erased.ComputeRegionalWeatherSubHash(); });
+            erased.GetAetherFieldSystem()->BindRegionalBackend(
+                [&erased](const auto& position) { return erased.SampleRegionalAether(position); },
+                [&erased] { return erased.ComputeRegionalAetherSubHash(); });
+            for (auto* session : {&concrete, &erased}) {
+                session->GetWeatherSystem()->RestoreAtTick(
+                    tick, anchor, *session->GetWindFieldSystem());
+                session->GetWeatherSystem()->RefreshRegionalWeather(tick, anchor);
+                session->GetWeatherSystem()->Update(tick, anchor, session->GetWindFieldSystem());
+                session->GetAetherFieldSystem()->Update(
+                    tick, anchor, session->GetWindFieldSystem());
+            }
+        }
+        EXPECT_EQ(RegionalSamplerBits(*concrete.GetWindFieldSystem(),
+                                      *concrete.GetWeatherSystem(),
+                                      *concrete.GetAetherFieldSystem(),
+                                      anchor),
+                  RegionalSamplerBits(*erased.GetWindFieldSystem(),
+                                      *erased.GetWeatherSystem(),
+                                      *erased.GetAetherFieldSystem(),
+                                      anchor));
+        for (const float invalid : {std::numeric_limits<float>::quiet_NaN(),
+                                    std::numeric_limits<float>::infinity(),
+                                    std::numeric_limits<float>::max()}) {
+            for (auto* session : {&concrete, &erased}) {
+                session->GetAetherFieldSystem()->Update(
+                    tick, Luminumbra::Vec3(invalid, 0, 0), session->GetWindFieldSystem());
+                for (const float value : session->GetAetherFieldSystem()->grid().cells()) {
+                    EXPECT_EQ(std::bit_cast<std::uint32_t>(value), 0u);
+                }
+                session->GetAetherFieldSystem()->Update(
+                    tick, anchor, session->GetWindFieldSystem());
+            }
+        }
+        EXPECT_EQ(SessionWorldSubHashes(concrete), SessionWorldSubHashes(erased));
+        EXPECT_EQ(concrete.GetFieldPages().serialize(), erased.GetFieldPages().serialize());
+        if (!active_regions) {
+            for (auto* session : {&concrete, &erased}) {
+                session->GetWindFieldSystem()->BindRegionalBackend({}, {});
+                session->GetWeatherSystem()->BindRegionalBackend({}, {});
+                session->GetAetherFieldSystem()->BindRegionalBackend({}, {});
+            }
+        }
+    }
+    ASSERT_TRUE(concrete.SaveWorld());
+    ASSERT_TRUE(erased.SaveWorld());
+    EXPECT_EQ(ReadClockTestFile(P::WorldSaveService::field_pages_path(concrete.GetWorldSaveDir())),
+              ReadClockTestFile(P::WorldSaveService::field_pages_path(erased.GetWorldSaveDir())));
+    if (active_regions) {
+        ASSERT_NO_FATAL_FAILURE(CheckRegionalSamplerLifetime(
+            *concrete.GetWindFieldSystem(), concrete, [](const auto& system) {
+                return system.ComputeWindSubHash();
+            }));
+        ASSERT_NO_FATAL_FAILURE(CheckRegionalSamplerLifetime(
+            *concrete.GetWeatherSystem(), concrete, [](const auto& system) {
+                return system.ComputeWeatherSubHash();
+            }));
+        ASSERT_NO_FATAL_FAILURE(CheckRegionalSamplerLifetime(
+            *concrete.GetAetherFieldSystem(), concrete, [](const auto& system) {
+                return system.ComputeAetherSubHash();
+            }));
+    }
+}
+
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest, ConcreteRegionalSamplersMatchErasedBitsHashesAndBytes) {
+    for (const bool active_regions : {false, true}) {
+        ASSERT_NO_FATAL_FAILURE(CheckConcreteRegionalSamplers(active_regions));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalWeatherBindingBeforeWorldCreationHasNoWind) {
+    using namespace Luminumbra::Systems;
+    GameSession session;
+    WeatherSystem concrete(1337), erased(1337);
+    concrete.BindRegionalSession(session);
+    erased.BindRegionalBackend(
+        [&session](const auto& position) { return session.SampleRegionalWeather(position); },
+        [&session] { return session.ComputeRegionalWeatherSubHash(); });
+    for (const auto& position : {Luminumbra::Vec3(0), Luminumbra::Vec3(-24, 0, 24)}) {
+        const auto actual = concrete.SampleAt(position);
+        const auto reference = erased.SampleAt(position);
+        EXPECT_EQ(actual.wind, Luminumbra::Vec2(0));
+        EXPECT_EQ(actual.wind, reference.wind);
+        EXPECT_EQ(actual.category, reference.category);
+        EXPECT_EQ(std::bit_cast<std::uint32_t>(actual.precip_intensity),
+                  std::bit_cast<std::uint32_t>(reference.precip_intensity));
+        EXPECT_EQ(actual.storm_intensity, 0.0f);
+    }
+    EXPECT_EQ(concrete.ComputeWeatherSubHash(), erased.ComputeWeatherSubHash());
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalWindSelfAssignmentPreservesSessionBinding) {
+    ASSERT_NO_FATAL_FAILURE(CheckRegionalSamplerSelfAssignment(
+        [](GameSession& session) -> const auto& { return *session.GetWindFieldSystem(); },
+        [](const auto& system, const auto& position) { return system.SampleWind(position); },
+        [](const auto& system) { return system.ComputeWindSubHash(); },
+        [](const auto& session) { return session.ComputeRegionalWindSubHash(); }));
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalWeatherCopyConstructionNormalizesDetachedStorage) {
+    ASSERT_NO_FATAL_FAILURE((CheckDetachedRegionalWeather<false, false>()));
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalWeatherMoveConstructionNormalizesDetachedStorage) {
+    ASSERT_NO_FATAL_FAILURE((CheckDetachedRegionalWeather<true, false>()));
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalWeatherCopyAssignmentNormalizesDetachedStorage) {
+    ASSERT_NO_FATAL_FAILURE((CheckDetachedRegionalWeather<false, true>()));
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalWeatherMoveAssignmentNormalizesDetachedStorage) {
+    ASSERT_NO_FATAL_FAILURE((CheckDetachedRegionalWeather<true, true>()));
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalWeatherSelfAssignmentPreservesSessionBinding) {
+    ASSERT_NO_FATAL_FAILURE(CheckRegionalSamplerSelfAssignment(
+        [](GameSession& session) -> const auto& { return *session.GetWeatherSystem(); },
+        [](const auto& system, const auto& position) {
+            const auto sample = system.SampleAt(position);
+            return std::array<std::uint32_t, 6>{
+                static_cast<std::uint32_t>(sample.category),
+                std::bit_cast<std::uint32_t>(sample.precip_intensity),
+                std::bit_cast<std::uint32_t>(sample.storm_intensity),
+                std::bit_cast<std::uint32_t>(sample.wind.x),
+                std::bit_cast<std::uint32_t>(sample.wind.y),
+                std::bit_cast<std::uint32_t>(system.PrecipitationAt(position))};
+        },
+        [](const auto& system) { return system.ComputeWeatherSubHash(); },
+        [](const auto& session) { return session.ComputeRegionalWeatherSubHash(); }));
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalAetherSelfAssignmentPreservesSessionBinding) {
+    ASSERT_NO_FATAL_FAILURE(CheckRegionalSamplerSelfAssignment(
+        [](GameSession& session) -> const auto& { return *session.GetAetherFieldSystem(); },
+        [](const auto& system, const auto& position) { return system.SampleAether(position); },
+        [](const auto& system) { return system.ComputeAetherSubHash(); },
+        [](const auto& session) { return session.ComputeRegionalAetherSubHash(); }));
+}

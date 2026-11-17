@@ -220,6 +220,9 @@ entt::entity PromoteNearestScatter(ProcgenPlantState& state,
         const ProcgenPlantInstance& inst = state.plants[i];
         if (inst.suppressed)
             continue;
+        const Luminumbra::Vec3 candidate{inst.worldPos.x, inst.worldPos.y, inst.worldPos.z};
+        if (!luminumbra::foliage::FarmingActionsAllowed(reg, candidate))
+            continue;
         const float dx = inst.worldPos.x - aim.x, dz = inst.worldPos.z - aim.z;
         const float d = dx * dx + dz * dz;
         if (d <= bestD) {
@@ -231,8 +234,6 @@ entt::entity PromoteNearestScatter(ProcgenPlantState& state,
         return entt::null;
     ProcgenPlantInstance& inst = state.plants[static_cast<std::size_t>(best)];
     const Luminumbra::Vec3 position{inst.worldPos.x, inst.worldPos.y, inst.worldPos.z};
-    if (!luminumbra::foliage::FarmingActionsAllowed(reg, position))
-        return entt::null;
     const entt::entity e = reg.create();
     auto& tf = reg.emplace<C::TransformComponent>(e);
     tf.position = position;

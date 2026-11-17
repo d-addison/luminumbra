@@ -469,6 +469,10 @@ struct ActiveRegionLedger::ScheduleScratch {
     std::string trace;
 };
 
+const RegionSchedule* ActiveRegionLedger::last_schedule() const noexcept {
+    return m_scheduleScratch ? &m_scheduleScratch->result : nullptr;
+}
+
 const RegionSchedule&
 ActiveRegionLedger::schedule(const WorldClock& clock,
                              std::optional<std::span<const Vec3>> replicated_anchors,
@@ -488,6 +492,7 @@ ActiveRegionLedger::schedule(const WorldClock& clock,
     result.work = 0;
     result.rejected = {};
     result.due.clear();
+    result.prior_ticks.clear();
     result.transitions.clear();
     result.evicted.clear();
     scratch.added.clear();
@@ -550,6 +555,7 @@ ActiveRegionLedger::schedule(const WorldClock& clock,
     auto existing = m_records.begin();
     auto added = scratch.added.begin();
     auto next_visit = visits.begin();
+    std::size_t rollback_capacity = 0;
     while (existing != m_records.end() || added != scratch.added.end()) {
         const auto current = added == scratch.added.end() ||
                                      (existing != m_records.end() && existing->first < added->first)
@@ -560,6 +566,13 @@ ActiveRegionLedger::schedule(const WorldClock& clock,
         const bool nearby = next_visit != visits.end() && *next_visit == key;
         if (nearby)
             ++next_visit;
+        // Forced wakes run Active. The later budget decision can admit at
+        // most one additional due owner; frozen residents need no stamp space.
+        if (nearby || r.wake_pending ||
+            (r.state != RegionState::Frozen &&
+             (clock.tick() & ((std::uint64_t{1} << r.cadence_shift) - 1)) == r.cadence_phase)) {
+            ++rollback_capacity;
+        }
         const auto proximity = nearby ? clock.tick() : r.last_proximity;
         const bool idle =
             clock.tick() >= proximity && clock.tick() - proximity >= kIdleEvictionTicks;
@@ -610,6 +623,7 @@ ActiveRegionLedger::schedule(const WorldClock& clock,
     std::erase_if(scratch.evictions, [&](const RegionKey& key) { return !owned || owned(key); });
     // Complete every throwing operation before publishing any record changes.
     result.due.reserve(rows.size());
+    result.prior_ticks.reserve(std::min(rows.size(), rollback_capacity + (selected ? 1u : 0u)));
     result.transitions.reserve(rows.size());
     result.digest.resize(16);
     auto& trace = scratch.trace;
@@ -684,6 +698,7 @@ ActiveRegionLedger::schedule(const WorldClock& clock,
         r.last_decision = clock.tick();
         if (r.state != RegionState::Frozen &&
             (clock.tick() & ((std::uint64_t{1} << r.cadence_shift) - 1)) == r.cadence_phase) {
+            result.prior_ticks.push_back(r.last_ticked);
             r.last_ticked = clock.tick();
             result.due.push_back(key);
         }
@@ -726,7 +741,18 @@ ActiveRegionLedger::schedule(const WorldClock& clock,
             --m_frozenHistoryCount;
         m_records.erase(record);
     }
-    std::erase_if(result.due, [this](const RegionKey& key) { return !m_records.contains(key); });
+    // Compact the parallel rollback stamps together with the surviving due
+    // keys. This replaces the existing retention pass without another scan.
+    std::size_t retained = 0;
+    for (std::size_t index = 0; index < result.due.size(); ++index) {
+        if (m_records.contains(result.due[index])) {
+            result.due[retained] = result.due[index];
+            result.prior_ticks[retained] = result.prior_ticks[index];
+            ++retained;
+        }
+    }
+    result.due.resize(retained);
+    result.prior_ticks.resize(retained);
     result.evicted.swap(scratch.evictions);
     result.ledger_records = m_records.size();
     return result;
