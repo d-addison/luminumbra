@@ -105,6 +105,7 @@
 #include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/scripting/LuaState.h"
+#include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/FarAuthorityOverlay.h"
@@ -112,6 +113,7 @@
 #include "luminumbra_common/world/FarWantedSet.h"
 #include "luminumbra_common/world/FarWorldAuthorityProducer.h"
 #include "luminumbra_common/world/GameSession.h"
+#include "luminumbra_common/world/PlayerAvatar.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
 
@@ -15261,4 +15263,81 @@ TEST(GameSessionHeadlessWorldTest, RegionalAetherSelfAssignmentPreservesSessionB
         [](const auto& system, const auto& position) { return system.SampleAether(position); },
         [](const auto& system) { return system.ComputeAetherSubHash(); },
         [](const auto& session) { return session.ComputeRegionalAetherSubHash(); }));
+}
+
+TEST(GameSessionHeadlessWorldTest, InternalAvatarOwnerRestoresWithoutSpawnOrPersistence) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    {
+        GameSession source;
+        source.SetJobSystem(&jobs);
+        source.SetRootPath(root.root_string());
+        source.SetActiveRegionsEnabled(false);
+        ASSERT_TRUE(source.CreateWorld("OwnerSource", "12345", "default"));
+        auto* original = source.GetPhysicsSystem();
+        ASSERT_NE(original, nullptr);
+        const auto index =
+            original->create_avatar_character(Luminumbra::Vec3(1.234567f, 40.125f, 2.765432f));
+        original->set_avatar_wish_velocity(index, glm::vec2(0.1234567f, 0.0765432f));
+        for (int tick = 0; tick < 7; ++tick) {
+            original->update_avatars(1.0f / 30.0f);
+        }
+        Luminumbra::World::PlayerAvatar avatar{.player_id = 42,
+                                               .position = original->get_avatar_position(index),
+                                               .facing = -0.1256789f,
+                                               .velocity = original->get_avatar_velocity(index)};
+        Luminumbra::World::PlayerAvatarOwnerState captured;
+        ASSERT_TRUE(source.CaptureAvatarOwner(avatar, index, captured));
+        GameSession restored;
+        restored.SetJobSystem(&jobs);
+        restored.SetRootPath(root.root_string());
+        restored.SetActiveRegionsEnabled(false);
+        ASSERT_TRUE(restored.CreateWorld("OwnerRestored", "12345", "default"));
+        const auto metadata_before =
+            ReadClockTestFile(restored.GetWorldSaveDir() / "world_info.json");
+        Luminumbra::World::PlayerAvatar actual;
+        std::size_t restored_index = 123;
+        auto invalid = captured;
+        invalid.avatar.velocity.x = std::numeric_limits<float>::infinity();
+        EXPECT_FALSE(restored.RestoreAvatarOwner(invalid, actual, restored_index));
+        EXPECT_EQ(restored_index, 123u);
+        EXPECT_EQ(actual.player_id, 0u);
+        ASSERT_EQ(restored.GetPhysicsSystem()->avatar_character_slot_count(), 0u);
+        ASSERT_TRUE(restored.RestoreAvatarOwner(captured, actual, restored_index));
+        EXPECT_EQ(actual.player_id, avatar.player_id);
+        EXPECT_EQ(std::bit_cast<std::uint32_t>(actual.facing),
+                  std::bit_cast<std::uint32_t>(avatar.facing));
+        EXPECT_EQ(ReadClockTestFile(restored.GetWorldSaveDir() / "world_info.json"),
+                  metadata_before);
+        for (int tick = 0; tick < 20; ++tick) {
+            original->update_avatars(1.0f / 30.0f);
+            restored.GetPhysicsSystem()->update_avatars(1.0f / 30.0f);
+            avatar.position = original->get_avatar_position(index);
+            avatar.velocity = original->get_avatar_velocity(index);
+            actual.position = restored.GetPhysicsSystem()->get_avatar_position(restored_index);
+            actual.velocity = restored.GetPhysicsSystem()->get_avatar_velocity(restored_index);
+            Luminumbra::World::PlayerAvatarOwnerState expected_state;
+            Luminumbra::World::PlayerAvatarOwnerState actual_state;
+            ASSERT_TRUE(source.CaptureAvatarOwner(avatar, index, expected_state));
+            ASSERT_TRUE(restored.CaptureAvatarOwner(actual, restored_index, actual_state));
+            std::array<std::uint8_t, Luminumbra::World::kMaxAvatarOwnerBytes> expected_bytes{};
+            std::array<std::uint8_t, Luminumbra::World::kMaxAvatarOwnerBytes> actual_bytes{};
+            std::size_t expected_size = 0;
+            std::size_t actual_size = 0;
+            ASSERT_TRUE(Luminumbra::World::EncodeAvatarOwner(
+                expected_state, expected_bytes, expected_size));
+            ASSERT_TRUE(
+                Luminumbra::World::EncodeAvatarOwner(actual_state, actual_bytes, actual_size));
+            ASSERT_EQ(expected_size, actual_size);
+            EXPECT_EQ(expected_bytes, actual_bytes);
+        }
+        Luminumbra::World::PlayerAvatarOwnerState retained = captured;
+        EXPECT_FALSE(source.CaptureAvatarOwner(avatar, 999, retained));
+        EXPECT_EQ(retained.physics.bytes, captured.physics.bytes);
+        GameSession unopened;
+        EXPECT_FALSE(unopened.CaptureAvatarOwner(avatar, index, retained));
+        EXPECT_FALSE(unopened.RestoreAvatarOwner(captured, actual, restored_index));
+    }
+    jobs.shutdown();
 }

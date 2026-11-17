@@ -24,7 +24,9 @@
 
 #include <entt/entt.hpp>
 
+#include <array>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace Luminumbra::World {
@@ -35,6 +37,27 @@ struct PlayerAvatar {
     float facing = 0.0f; // yaw radians
     Vec3 velocity{0.0f}; // world units / second (kinematic until  physics)
 };
+
+// Internal continuation values, independent of the quantized diagnostic and wire
+// projections. Version 1 uses little-endian scalar fields, never struct padding.
+// The physics payload is bounded to 64 KiB per owner (including contact caches).
+struct PhysicsOwnerState {
+    static constexpr std::size_t kMaxBytes = 65536;
+    std::array<std::uint8_t, kMaxBytes> bytes{};
+    std::uint32_t size = 0;
+};
+
+struct PlayerAvatarOwnerState {
+    PlayerAvatar avatar{};
+    PhysicsOwnerState physics{};
+};
+
+inline constexpr std::size_t kMaxAvatarOwnerBytes = PhysicsOwnerState::kMaxBytes + 40;
+bool ValidateAvatarOwner(const PlayerAvatarOwnerState& state);
+bool EncodeAvatarOwner(const PlayerAvatarOwnerState& state,
+                       std::span<std::uint8_t> output,
+                       std::size_t& written);
+bool DecodeAvatarOwner(std::span<const std::uint8_t> input, PlayerAvatarOwnerState& output);
 
 // Deterministic spawn OFFSET (world XZ, Y left 0) for player N, as a phyllotaxis
 // (sunflower) ring around the world spawn so N players fan out reproducibly and

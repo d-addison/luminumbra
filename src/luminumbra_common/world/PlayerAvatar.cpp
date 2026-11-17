@@ -1,4 +1,5 @@
 #include "PlayerAvatar.h"
+#include "../systems/PhysicsSystem.h"
 
 #include "../components/CoreComponents.h"
 #include "../core/DeterministicMath.h"
@@ -6,6 +7,8 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <cmath>
 
 namespace Luminumbra::World {
@@ -17,6 +20,95 @@ std::int64_t to_mm(float v) {
     return static_cast<std::int64_t>(std::lround(static_cast<double>(v) * 1000.0));
 }
 } // namespace
+
+namespace {
+bool ValidAvatar(const PlayerAvatar& avatar) {
+    return std::isfinite(avatar.position.x) && std::isfinite(avatar.position.y) &&
+           std::isfinite(avatar.position.z) && std::isfinite(avatar.facing) &&
+           std::isfinite(avatar.velocity.x) && std::isfinite(avatar.velocity.y) &&
+           std::isfinite(avatar.velocity.z);
+}
+
+void WriteOwnerWord(std::span<std::uint8_t> output, std::size_t& cursor, std::uint32_t word) {
+    for (unsigned shift = 0; shift < 32; shift += 8) {
+        output[cursor++] = static_cast<std::uint8_t>(word >> shift);
+    }
+}
+
+std::uint32_t ReadOwnerWord(std::span<const std::uint8_t> input, std::size_t& cursor) {
+    std::uint32_t result = 0;
+    for (unsigned shift = 0; shift < 32; shift += 8) {
+        result |= static_cast<std::uint32_t>(input[cursor++]) << shift;
+    }
+    return result;
+}
+} // namespace
+
+bool ValidateAvatarOwner(const PlayerAvatarOwnerState& state) {
+    return ValidAvatar(state.avatar) &&
+           Systems::PhysicsSystem::validate_avatar_owner_state(state.physics, state.avatar);
+}
+
+bool EncodeAvatarOwner(const PlayerAvatarOwnerState& state,
+                       std::span<std::uint8_t> output,
+                       std::size_t& written) {
+    // Header: version, player ID, position xyz, yaw, velocity xyz, physics size.
+    // Validate first; neither output bytes nor written change on refusal.
+    if (!ValidateAvatarOwner(state) || output.size() < 40 ||
+        state.physics.size > output.size() - 40) {
+        return false;
+    }
+    std::array<std::uint8_t, kMaxAvatarOwnerBytes> staged{};
+    const std::span<std::uint8_t> destination(staged);
+    std::size_t cursor = 0;
+    WriteOwnerWord(destination, cursor, 1);
+    WriteOwnerWord(destination, cursor, state.avatar.player_id);
+    const std::array<float, 7> scalars{state.avatar.position.x,
+                                       state.avatar.position.y,
+                                       state.avatar.position.z,
+                                       state.avatar.facing,
+                                       state.avatar.velocity.x,
+                                       state.avatar.velocity.y,
+                                       state.avatar.velocity.z};
+    for (const auto scalar : scalars) {
+        WriteOwnerWord(destination, cursor, std::bit_cast<std::uint32_t>(scalar));
+    }
+    WriteOwnerWord(destination, cursor, state.physics.size);
+    std::copy_n(state.physics.bytes.begin(), state.physics.size, destination.begin() + 40);
+    const std::size_t total = 40 + state.physics.size;
+    std::copy_n(staged.begin(), total, output.begin());
+    written = total;
+    return true;
+}
+
+bool DecodeAvatarOwner(std::span<const std::uint8_t> input, PlayerAvatarOwnerState& output) {
+    if (input.size() < 40 || input.size() > kMaxAvatarOwnerBytes) {
+        return false;
+    }
+    std::size_t cursor = 0;
+    if (ReadOwnerWord(input, cursor) != 1) {
+        return false;
+    }
+    PlayerAvatarOwnerState staged;
+    staged.avatar.player_id = ReadOwnerWord(input, cursor);
+    std::array<float, 7> scalars{};
+    for (auto& scalar : scalars) {
+        scalar = std::bit_cast<float>(ReadOwnerWord(input, cursor));
+    }
+    staged.avatar.position = Vec3(scalars[0], scalars[1], scalars[2]);
+    staged.avatar.facing = scalars[3];
+    staged.avatar.velocity = Vec3(scalars[4], scalars[5], scalars[6]);
+    staged.physics.size = ReadOwnerWord(input, cursor);
+    if (!ValidAvatar(staged.avatar) || staged.physics.size != input.size() - 40) {
+        return false;
+    }
+    std::copy(input.begin() + 40, input.end(), staged.physics.bytes.begin());
+    if (!ValidateAvatarOwner(staged)) {
+        return false;
+    }
+    output = staged;
+    return true;
+}
 
 Vec3 DeterministicAvatarSpawnOffset(std::uint32_t player_id) {
     if (player_id == 0) {
