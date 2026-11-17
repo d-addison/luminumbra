@@ -6359,7 +6359,10 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(std::span<const MeshingWorkItem> chunk
         const bool has_active_mesh =
             chunk->get_state() == Luminumbra::ChunkState::Ready && HasRenderableGeometry(*chunk);
 
-        if (!has_active_mesh) {
+        // Water-only work preserves terrain readiness even when both published
+        // meshes are empty. A Ready -> Meshing -> Ready round-trip would dirty
+        // the renderable view on every dry remesh without changing selection.
+        if (terrain_mesh_required && !has_active_mesh) {
             set_renderable_chunk_state(*chunk, Luminumbra::ChunkState::Meshing);
         }
         chunk->pending_mesh_vertices.clear();
