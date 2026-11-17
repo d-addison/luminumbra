@@ -33,6 +33,10 @@
 #include "../../../include/luminumbra/core/Types.h"
 #include "../fields/FieldGrid.h"
 
+namespace Luminumbra::world {
+class GameSession;
+}
+
 namespace Luminumbra::Systems {
 
 // Wind layers (AGL bands). Vertical wind is not modeled; each layer carries a
@@ -67,11 +71,22 @@ public:
     // seed is the world seed; wind base-direction noise uses the dedicated
     // append-only seed offset +11.
     explicit WindFieldSystem(int world_seed);
+    WindFieldSystem(const WindFieldSystem&) = default;
+    WindFieldSystem(WindFieldSystem&&) noexcept = default;
+    WindFieldSystem& operator=(const WindFieldSystem&) = default;
+    WindFieldSystem& operator=(WindFieldSystem&& other) noexcept;
 
+    // Borrow the session until clear/rebind or destruction. The session must outlive this
+    // binding. Copies and moves to a distinct object drop the borrowed binding;
+    // self-assignment preserves it.
+    // Callback compatibility bindings retain their existing copy semantics.
+    void BindRegionalSession(const world::GameSession& session);
+    // Compatibility/reference path. Empty callbacks clear either kind of binding.
     void BindRegionalBackend(std::function<Vec2(const Vec3&, WindLayer)> sample,
                              std::function<std::string()> hash) {
         if (static_cast<bool>(sample) != static_cast<bool>(hash))
             throw std::invalid_argument("regional backend needs both a sampler and a hash");
+        m_sessionBinding.session = nullptr;
         m_regional_sample = std::move(sample);
         m_regional_hash = std::move(hash);
     }
@@ -129,6 +144,22 @@ public:
     }
 
 private:
+    struct SessionBinding {
+        const world::GameSession* session = nullptr;
+        SessionBinding() = default;
+        SessionBinding(const SessionBinding&) noexcept {}
+        SessionBinding& operator=(const SessionBinding& other) noexcept {
+            if (this != &other) {
+                session = nullptr;
+            }
+            return *this;
+        }
+    };
+    SessionBinding m_sessionBinding;
+    [[nodiscard]] bool HasRegionalBackend() const {
+        return m_sessionBinding.session || static_cast<bool>(m_regional_sample);
+    }
+    [[nodiscard]] Vec2 SampleRegional(const Vec3& position, WindLayer layer) const;
     std::function<Vec2(const Vec3&, WindLayer)> m_regional_sample;
     std::function<std::string()> m_regional_hash;
     // Resolve world_pos.y to a layer band.
