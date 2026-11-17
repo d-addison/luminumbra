@@ -7100,7 +7100,7 @@ TEST(GameSessionHeadlessWorldTest, NoEditWaterTickAfterOpenMatchesFreshSaveBytes
         ASSERT_TRUE(session->LoadWorld(owner.GetMetadata().worldId));
         ASSERT_EQ(session->TickSimulation(session->GetSimulationClock().fixed_dt()), 1u);
     }
-    // Compare incremental saves at the same simulation tick and snapshot generation.
+    // Compare incremental saves at the same simulation tick.
     // Only the opened session receives a regenerable water column and a water update.
     ASSERT_TRUE(control.SaveWorldState());
     const auto fresh_bytes = SavedPresetTestDiskBytes(control.GetWorldSaveDir());
@@ -7131,7 +7131,26 @@ TEST(GameSessionHeadlessWorldTest, NoEditWaterTickAfterOpenMatchesFreshSaveBytes
     EXPECT_FALSE(chunk->has_water_authority());
     EXPECT_EQ(P::WorldSaveService::read_chunk(after_tick, chunk->get_coords(), true).status,
               P::WorldSaveService::ChunkReadStatus::Absent);
-    EXPECT_EQ(SavedPresetTestDiskBytes(after_tick), fresh_bytes);
+    // Both sessions save into one world directory, so the opened save is exactly the next
+    // snapshot transaction. Apart from that counter, every saved byte must match.
+    auto opened_bytes = SavedPresetTestDiskBytes(after_tick);
+    auto control_bytes = fresh_bytes;
+    const std::string snapshot_member = "chunks/region/snapshot.json";
+    ASSERT_TRUE(opened_bytes.contains(snapshot_member));
+    ASSERT_TRUE(control_bytes.contains(snapshot_member));
+    auto opened_snapshot = nlohmann::json::parse(opened_bytes.at(snapshot_member));
+    auto control_snapshot = nlohmann::json::parse(control_bytes.at(snapshot_member));
+    for (const char* counter : {"generation", "txn_id"}) {
+        EXPECT_EQ(opened_snapshot.at(counter).get<std::uint64_t>(),
+                  control_snapshot.at(counter).get<std::uint64_t>() + 1u)
+            << counter;
+        opened_snapshot.erase(counter);
+        control_snapshot.erase(counter);
+    }
+    EXPECT_EQ(opened_snapshot, control_snapshot);
+    opened_bytes.erase(snapshot_member);
+    control_bytes.erase(snapshot_member);
+    EXPECT_EQ(opened_bytes, control_bytes);
     EXPECT_EQ(opened.ComputeChunkStateHash(), control.ComputeChunkStateHash());
     ASSERT_TRUE(opened.SaveWorldState(&report));
     EXPECT_EQ(report.chunks_total, 0u);
