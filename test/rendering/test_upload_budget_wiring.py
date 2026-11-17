@@ -87,8 +87,12 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("ClearPublishedWaterMesh(*this, *chunk);", world)
         mesher = read(ROOT / "src/luminumbra_common/world/MarchingCubes.cpp")
         direct = body(mesher, "void GenerateWaterMesh(")
-        ready = body(direct, "if (chunk.get_state() == ChunkState::Ready)")
+        ready = body(direct,
+                     "if (chunk.get_state() == ChunkState::Ready && has_water() != had_water)")
         self.assertIn("world_system.notify_renderable_chunks_changed();", ready)
+        self.assertEqual(direct.count("notify_if_presence_changed();"), 2)
+        self.assertLess(direct.index("const bool had_water = has_water();"),
+                        direct.index("chunk.water_mesh_vertices.clear();"))
         self.assertLess(direct.index("notify_renderable_chunks_changed();"),
                         direct.index("const int resolution"))
 
