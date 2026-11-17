@@ -8,6 +8,9 @@
 #include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 
+#include <array>
+#include <limits>
+
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
@@ -80,7 +83,10 @@ TEST(GameSessionHeadlessWorldTest, DisabledRegionsMatchDevelWorldHashAndExactSav
     }
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session, expected;
+    GameSession session;
+    GameSession expected(GameSession::AuthorityProfileOptions{.residency_free_eviction = true,
+                                                              .simulation_host_integration = true},
+                         GameSession::AuthorityProfileTestOnly{});
     for (auto* s : {&session, &expected}) {
         s->SetRootPath(root.root_string());
         s->SetJobSystem(&jobs);
@@ -96,6 +102,10 @@ TEST(GameSessionHeadlessWorldTest, DisabledRegionsMatchDevelWorldHashAndExactSav
         s->GetWorldSystem()->SetWaterHydrology(false, 0, 0);
         ASSERT_NO_FATAL_FAILURE(AdoptRegionGoldenChunk(*s, 0));
     }
+    const std::array ignored{Luminumbra::Vec3(std::numeric_limits<float>::infinity())};
+    ASSERT_TRUE(expected.SetHostSimulationAnchors(ignored));
+    ASSERT_TRUE(expected.PrepareSimulationCollisions(1));
+    EXPECT_FALSE(expected.SimulationHostIntegrationEnabled());
     // Disabled entry points must be inert, including otherwise invalid inputs.
     session.SetLocalPlayerSimulationPosition(Luminumbra::Vec3(20000, 0, 20000), true);
     session.PinActiveRegion({123, 45}, true);
@@ -123,6 +133,18 @@ TEST(GameSessionHeadlessWorldTest, DisabledRegionsMatchDevelWorldHashAndExactSav
     }
     EXPECT_EQ(files, 2u);
     EXPECT_FALSE(fs::exists(P::WorldSaveService::active_regions_path(save)));
+    const auto profile_save = root.path() / "profile-golden-save";
+    ASSERT_TRUE(expected.SaveWorldStateTo(profile_save));
+    std::size_t profile_files = 0;
+    for (const auto& entry : fs::recursive_directory_iterator(profile_save)) {
+        if (!entry.is_regular_file()) {
+            continue;
+        }
+        ++profile_files;
+        EXPECT_EQ(ReadClockTestFile(entry.path()),
+                  ReadClockTestFile(fixture / entry.path().filename()));
+    }
+    EXPECT_EQ(profile_files, 2u);
 }
 
 void SavePlantRosterThenMultiRegionEdit(GameSession& session, const fs::path& save) {

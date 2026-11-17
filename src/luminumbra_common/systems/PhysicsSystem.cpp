@@ -1060,7 +1060,8 @@ void PhysicsSystem::update_avatars(float dt) {
     // yet -- gravity when airborne, ground-stick when grounded (the avatars fall
     // and settle on the terrain). Mirrors update_player's vertical handling.
     const JPH::Vec3 gravity = m_jolt_system->GetGravity();
-    for (std::size_t i = 0; i < m_avatars.size(); ++i) {
+    // The fixed-tick host path visits live owners only, in stable index order.
+    for (auto i = m_avatar_head; i != kNoAvatar; i = m_avatars[i].next) {
         auto& character = m_avatars[i].character;
         if (!character || m_avatars[i].frozen)
             continue;

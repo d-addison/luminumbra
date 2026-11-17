@@ -602,6 +602,16 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
     auto* physics_system = m_session->GetPhysicsSystem();
     const Vec3 spawn_anchor = m_session->GetMetadata().spawnPoint;
     const double fixed_dt = m_session->GetSimulationClock().fixed_dt();
+    const auto smoke_anchor =
+        tick_count != 0 && m_session->SimulationHostIntegrationEnabled() && m_avatars.empty()
+            ? m_session->DefaultSimulationSmokeAnchor()
+            : std::optional<Vec3>{};
+    if (tick_count != 0 && m_session->SimulationHostIntegrationEnabled() && m_avatars.empty() &&
+        !smoke_anchor) {
+        report.region_fault = true;
+        report.region_fault_message = "Simulation smoke requires a wet region seam";
+        return report;
+    }
 
     // per-tick main-thread blocking-wait samples (ms) at the streaming barrier.
     std::vector<double> wait_samples;
@@ -643,15 +653,37 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         physics_budget.Next(BudgetStage::ServerPhysics, [] { return 1u; });
         // Every host gathers the same registered controllers and projectiles.
         // No host-specific spawn/camera anchor can change the horizon or its budget.
-        if (!physics_system->prepare_simulation_collisions({}, budget_tick)) {
+        if (m_session->SimulationHostIntegrationEnabled()) {
+            // At most the R2 owner budget; fixed storage, retained session capacity.
+            std::array<Vec3, Systems::PhysicsSystem::kSimulationOwnerBudget> anchors{};
+            if (m_avatars.size() > anchors.size()) {
+                break;
+            }
+            std::size_t count = 0;
+            for (const auto& avatar : m_avatars) {
+                anchors[count++] = avatar.position;
+            }
+            if (count == 0) {
+                if (!smoke_anchor) {
+                    break;
+                }
+                anchors[count++] = *smoke_anchor;
+            }
+            if (!m_session->SetHostSimulationAnchors({anchors.data(), count})) {
+                break;
+            }
+        }
+        if (!m_session->PrepareSimulationCollisions(budget_tick)) {
             break; // Leave this tick unconsumed; the next call retries preparation.
         }
-        physics_system->update(static_cast<float>(fixed_dt));
+        if (!m_session->SimulationHostIntegrationEnabled()) {
+            physics_system->update(static_cast<float>(fixed_dt));
+        }
         //  step the server-authoritative avatar characters (gravity +
         // world collision; deterministic index order) and read their settled
         // transforms back into m_avatars, so the streaming anchors + the
         // `entities` sub-hash reflect the physics-authoritative positions.
-        if (!m_avatars.empty()) {
+        if (!m_avatars.empty() && !m_session->SimulationHostIntegrationEnabled()) {
             physics_system->update_avatars(static_cast<float>(fixed_dt));
             for (std::size_t i = 0; i < m_avatars.size(); ++i) {
                 m_avatars[i].position = physics_system->get_avatar_position(i);
@@ -659,7 +691,7 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
             }
         }
         physics_budget.Finish();
-        if (m_session->ActiveRegionsEnabled()) {
+        if (m_session->ActiveRegionsEnabled() && !m_session->SimulationHostIntegrationEnabled()) {
             std::vector<Vec3> anchors;
             for (const auto& avatar : m_avatars)
                 anchors.push_back(avatar.position);
@@ -667,6 +699,12 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         }
         report.ticks_executed +=
             m_session->TickSimulation(fixed_dt, /*defer_water_authority=*/true);
+        if (m_session->SimulationHostIntegrationEnabled()) {
+            for (std::size_t i = 0; i < m_avatars.size(); ++i) {
+                m_avatars[i].position = physics_system->get_avatar_position(i);
+                m_avatars[i].velocity = physics_system->get_avatar_velocity(i);
+            }
+        }
         report.frames_executed += 1;
         if (const auto& fault = m_session->GetRegionSchedulerFault()) {
             report.region_fault = true;

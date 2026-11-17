@@ -5153,11 +5153,9 @@ int main(int argc, char* argv[]) {
                 // Prepare before the local character driver as well as the rigid-body
                 // step below. Render camera/streaming inputs never enter this horizon.
                 if (advance_frame_simulation && !scenario_config.networked_session_smoke()) {
-                    if (auto* physics = gameSession->GetPhysicsSystem()) {
-                        if (!physics->prepare_simulation_collisions(
-                                {}, gameSession->GetSimulationTickCount() + 1)) {
-                            break; // Leave this frame's simulation unconsumed on refusal.
-                        }
+                    if (!gameSession->PrepareSimulationCollisions(
+                            gameSession->GetSimulationTickCount() + 1)) {
+                        break; // Leave this frame's simulation unconsumed on refusal.
                     }
                 }
                 // Scenario driving (the persistence phase + the per-scenario
@@ -5345,8 +5343,10 @@ int main(int argc, char* argv[]) {
                     }
                 }
                 if (advance_frame_simulation) {
-                    if (auto* physics = gameSession->GetPhysicsSystem())
-                        physics->update(deltaTime * g_app.capture.timeScale);
+                    if (!gameSession->SimulationHostIntegrationEnabled()) {
+                        if (auto* physics = gameSession->GetPhysicsSystem())
+                            physics->update(deltaTime * g_app.capture.timeScale);
+                    }
                 }
                 // fixed 30 Hz simulation tick (SimulationClock +
                 // OrderedEventBus drain) hosted by GameSession. Render,
@@ -5359,7 +5359,8 @@ int main(int argc, char* argv[]) {
                 _rb_sim_t0 = std::chrono::steady_clock::now(); //
                 if (!scenario_config.networked_session_smoke()) {
                     if (advance_frame_simulation) {
-                        if (benchmark_v4 && g_camera)
+                        if (benchmark_v4 && g_camera &&
+                            !gameSession->SimulationHostIntegrationEnabled())
                             gameSession->SetLocalPlayerSimulationPosition(g_camera->Position, true);
                         else if (g_playerController)
                             gameSession->SetLocalPlayerSimulationPosition(
