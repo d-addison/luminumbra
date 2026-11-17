@@ -1364,8 +1364,12 @@ bool PhysicsSystem::restore_avatar_owner(const World::PhysicsOwnerState& state,
         const JPH::BodyID id(recipe.body);
         const JPH::BodyLockRead lock(m_jolt_system->GetBodyLockInterface(), id);
         if (lock.Succeeded()) {
+            // Jolt stores the centre of mass; GetPosition() subtracts the capsule's
+            // offset again and is not bit-exact. Compare the stored value with the
+            // same expression Jolt used to create or move the capsule at the feet.
             if (!lock.GetBody().IsStatic() || lock.GetBody().GetShape() != m_avatar_shape ||
-                lock.GetBody().GetPosition() != recipe.feet ||
+                lock.GetBody().GetCenterOfMassPosition() !=
+                    recipe.feet + JPH::Quat::sIdentity() * m_avatar_shape->GetCenterOfMass() ||
                 lock.GetBody().GetRotation() != JPH::Quat::sIdentity()) {
                 return false;
             }
