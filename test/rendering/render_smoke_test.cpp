@@ -414,6 +414,8 @@ GLuint LinkProgram(const ShaderProgramSpec& spec) {
 }
 
 std::vector<ShaderProgramSpec> PipelineProgramSpecs() {
+    // Also consumed by the offline GLSL linker. Keep entries literal so additions
+    // cannot escape its exhaustive registry parser and permutation coverage check.
     return {
         {"basic", "basic.vert", "basic.frag"},
         {"g_buffer", "g_buffer.vert", "g_buffer.frag"},
@@ -443,6 +445,22 @@ std::vector<ShaderProgramSpec> PipelineProgramSpecs() {
         {"ssao_bilateral_upsample", "ssao.vert", "ssao_bilateral_upsample.frag"},
         // Fidelity: screen-space crepuscular rays (god rays).
         {"god_rays", "ssao.vert", "god_rays.frag"},
+        {"tree_impostor", "tree_impostor.vert", "tree_impostor.frag"},
+        {"static_asset", "static_asset.vert", "static_asset.frag"},
+        {"shadow_tint", "shadow_tint.vert", "shadow_tint.frag"},
+        {"plant_procgen", "plant_procgen.vert", "plant_procgen.frag"},
+        {"waterfall", "basic.vert", "waterfall.frag"},
+        {"caustics_generator", "lighting_pass.vert", "caustics_generator.frag"},
+        {"taau_resolve", "ssao.vert", "taau_resolve.frag"},
+        {"glass_oit", "glass_oit.vert", "glass_oit.frag"},
+        {"glass_oit_resolve", "volumetric_lighting.vert", "glass_oit_resolve.frag"},
+        {"aerial_perspective", "ssao.vert", "volumetric_lighting.frag"},
+        {"lightning_overlay", "lightning_overlay.vert", "lightning_overlay.frag"},
+        {"weather_overlay", "ssao.vert", "weather_system.frag"},
+        {"debug_view", "fullscreen_tri.vert", "debug_view.frag"},
+        {"scent_decal", "fullscreen_tri.vert", "scent_decal.frag"},
+        // The live particle path omits geometry; retain both registered pipelines.
+        {"magical_particles_billboards", "magical_particles.vert", "magical_particles.frag"},
     };
 }
 
