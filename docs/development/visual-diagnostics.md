@@ -15,10 +15,11 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | Capture-local draw registry | Implemented as a standalone, GL-free helper | `DiagnosticDrawTable.h`; registered `DiagnosticDrawTable.*` regressions in `capture_manifest_test`; native execution pending |
 | GPU attribution, readback and scenario opt-in | Planned | Requires coordinated local changes in owned G-buffer submission and scenario capture files |
 | Debug views and inspector | Planned | Extend `DebugViewPass` and developer console widgets |
-| Linux shader compilation and software-GL reference scenes | Planned | Fast Linux workflow steps; no required-check or ruleset changes |
+| Linux shader compilation and software-GL reference scenes | Partial | Fast Linux steps and material/alpha-cutout fixtures registered; analytical references checked; software-GL execution pending; no required-check or ruleset changes |
 | Automated image checks | Planned | Bundle-aware checks alongside existing render-health gates |
+| Capture feature profile and capability manifest | Implemented as GL-free setup logic; app wiring pending | `CaptureFeatureProfile.h/.cpp`; strict `--capture-feature-profile=none\|all_features` runtime selection; registered `CaptureFeatureProfile.*` regressions; native execution pending |
 | Temporal audit plans and admission | Implemented as GL-free planning only; runtime execution refused | `TemporalAudit.h/.cpp`, `RuntimeScenarioConfig.h/.cpp`; registered `TemporalAudit.*` regressions in `capture_manifest_test`; native execution pending |
-| Temporal sequences and all-features profile (E1–E3) | Planned; gap inventory below describes current capture code | Exact-tick site execution, temporal metrics and non-vacuous feature evidence require implementation; existing captures do not establish this coverage |
+| Temporal sequences and non-vacuous evidence (E1–E3) | Planned; gap inventory below describes current capture code | Exact-tick site execution, temporal metrics, shared producer policy and non-vacuous feature evidence require implementation; existing captures do not establish this coverage |
 
 The codecs, standalone draw registry and standalone target do not create scenario bundles or enable a runtime
 flag. The capture test target models GL entry points for target lifecycle regressions;
@@ -190,16 +191,61 @@ Include material blend, alpha cutout, normal decode, reversed-Z, sky horizon and
 post-edge fixtures, plus a compute SSBO readback fixture. No native client smoke
 test is needed to compile shaders in Linux CI.
 
-Planned references live in `test/rendering/shader_scenes/references/` with a manifest
+References live in `test/rendering/shader_scenes/references/` with a manifest
 recording source/define/input hashes, Mesa renderer/version and color encoding.
 Compare linear RGB: mean absolute error <= 0.005 and 99th-percentile absolute
 channel error <= 0.02 on each fixture's explicit mask; NaN/Inf always fails.
 Hard categorical/depth invariants use exact IDs or documented float epsilon,
-never a loose image score. Regeneration command after the harness lands:
-`python3 -I -B tools/gates/shader-scenes.py regenerate --manifest test/rendering/shader_scenes/scenes.json`.
-Regeneration requires review of diffs and asset-inventory refresh; it is never an
+never a loose image score. Regeneration uses the capture and fresh candidate
+paths shown in the scene catalogue below. It requires review of diffs and
+asset-inventory refresh; it is never an
 automatic response to CI failure. Cap fixture count at 64, includes at 64 levels
 and 8 MiB expanded source per translation unit; refuse budgets before compilation.
+
+### Scene catalogue
+
+The schema-2 scene manifest is the reference inventory: it pins both 128x128 PPM
+hashes, all four consumed shader sources and the capture translation unit, including
+its fixed uniforms and generated textures. References are analytical, quantized
+linear RGB with bottom-first rows; renderer metadata must not imply a GL capture.
+The existing binary PPM attribute covers every reference in this directory.
+
+| Scene | Real shader pair | Metric and tolerance |
+| --- | --- | --- |
+| `material` | `static_asset.vert/.frag` | Full-image linear RGB MAE <= 0.005 and channel-error p99 <= 0.02; existing exact material assertions retained |
+| `tree-cutout` | `tree_impostor.vert/.frag` | Same reference thresholds; maximum RGB error against independent atlas categories <= 0.000001; the GL test checks unchanged background on all six attachments for discarded texels |
+
+The tree fixture selects one tile from a generated 2x2 atlas. Its 4x4 tile repeats
+alpha 0, 0.499, 0.5 and 1, giving exactly 50% discarded pixels. Other tiles are
+opaque red to expose incorrect tile selection. Surviving albedo is checked after
+coverage division. This isolates the shader's alpha cutoff; it does not qualify
+the production atlas bake, binding or distant-tree submission.
+
+Sky horizon and radial-star expectations are deferred: at the pinned source
+revision, `renderStars` adds thresholded noise without a horizon mask or a radial
+profile. The harness has
+no known-failure mode, so those defects must not become accepted baselines. Dusk
+azimuth continuity and the reported sky seam still require software-GL evidence.
+Terrain material-transition coverage is deferred; the flat material ID does not
+provide an interpolated transition between provoking vertices.
+
+To compare or regenerate, first configure the existing opt-in scene target with
+`LUMINUMBRA_SHADER_SCENES=ON` and build `shader_scene_render_test`. Capture to a
+fresh directory using the existing runner (replace the example binary path with
+your build's target location):
+
+```sh
+python3 -I -B tools/static_preview/run_software_gl.py --binary build/fast-gcc/bin/shader_scene_render_test --profile shader-scenes --output build/scene-capture
+python3 -I -B tools/gates/shader-scenes.py compare --capture build/scene-capture
+python3 -I -B tools/gates/shader-scenes.py regenerate --capture build/scene-capture --output build/scene-candidates
+```
+
+Regeneration checks both captures, source identities, renderer evidence and the
+categorical cutout invariant before creating the candidate directory. It writes
+both reference payloads before `scenes.json`; an I/O failure cannot publish a
+complete candidate manifest. Review and copy the candidate manifest and references
+together. Their hashes are refreshed in that manifest; rerun the scene contracts
+and acceptance/public-tree validators. Never regenerate to bless a shader defect.
 
 ## D: capture checks
 
@@ -229,10 +275,12 @@ Keep `diff-render-health.ps1`, native shader-health checks and current threshold
 
 ## E: temporal audits and all-features captures
 
-Temporal plan admission is implemented; sequence execution and E2–E3 remain planned.
-Admission adds no capture guarantee, metric enforcement or CI job. The inventory below distinguishes current capture behavior
-from the proposed all-features contract. Existing specialized gates remain useful
-and retain their baselines; passing them does not establish an all-features audit.
+Temporal plan admission is implemented, as are the profile selection and GL-free
+capability resolver described under E3; sequence execution, E2 and the rest of E3
+remain planned. Neither adds a capture guarantee, metric enforcement or CI job.
+The inventory below distinguishes current capture behavior from the proposed
+all-features contract. Existing specialized gates remain useful and retain their
+baselines; passing them does not establish an all-features audit.
 
 ### Current capture gap inventory
 
@@ -478,6 +526,53 @@ every frame. Store only the current maps and selected worst-event payloads withi
 the E1 output budget.
 
 ### E3: all-features profile and non-vacuous evidence
+
+Implemented profile foundation: `--capture-feature-profile=all_features` selects
+the complete 31-entry catalog; absent selection or `none` preserves ordinary
+launch behavior. Both launch parsers reject missing, empty, unknown and repeated
+selections before save-root creation. `CaptureFeatureProfile::Resolve` accepts the
+runtime configuration, resolved systems/graphics and an explicit mode adapter
+snapshot. It also accepts a nonempty explicit feature subset without the all-features
+selection, refusing unknown/duplicate names and conflicting selections. The eight
+mode labels cover time-lapse, frame-scan, world sweep, general scenario, time-of-day,
+weather and both headless legs. Every unimplemented adapter defaults to unsupported,
+with unknown effective state represented as null. No shipping adapter is implemented
+or certified by this foundation.
+
+The resolver records requested/effective settings, forced/suppressed/unavailable
+reasons, per-feature and aggregate capability, and resolved asset/config identities
+or explicit unavailable reasons. Missing identities prevent aggregate support;
+requested disabled settings are refused. It applies actual weather-hydrology,
+weather-event and live-bridge gates, resolved grass disablement, scenario ambient
+animal suppression, consumed isolation render masks and sky backdrop replacement.
+Code inspection distinguishes tuning switches from producer gates: disabling
+creature-spawn tuning still uses the compiled herd count, and plant-growth,
+ecology, tree-wind and moonlight tuning flags do not prove producer disablement.
+Terrain isolation suppresses cave/structure geometry and static vegetation;
+skinned isolation suppresses ambient animals and the creature spawning, AI and
+animation consumers. Foliage and plant wind require both terrain/static-plant and
+foliage/grass consumers; omitting either layer explicitly refuses requested support,
+including when a producer adapter is unavailable. Water/rivers, particles and
+lightning follow their corresponding render masks. The separate procedural-plant
+(including plant growth) and waterfall-sheet stages, weather overlays and lighting
+do not consume isolation layer bits. The aerial fog consumer has no separate catalog
+entry; reserved sky and far-field bits do not gate draws. Other final producer
+settings, assets and scenario pins require adapter observations in later slices.
+Explicit final forced/suppressed adapter observations take precedence over baseline
+producer controls, so later policy can report transient producer overrides without
+changing saved preferences. Final enabled settings cannot restore draws omitted by
+the resolved isolation masks or sky backdrop; explicit suppression reasons survive.
+
+The immutable result serializes schema `luminumbra.capture_capabilities.v1` in fixed
+catalog/key order, including every unrequested or unsupported row. `WriteManifest`
+writes to a caller-owned stream and checks write/flush failure, including stream
+exceptions; filesystem publication and app admission remain later work. Metadata
+is bounded to 256 UTF-8 bytes per field, isolation inputs to 1024/256 bytes and
+feature requests to the catalog size with 64-byte names; invalid metadata/enums
+are refused before stream output. Presence is always `not_evaluated`, never inferred
+from settings. Resolution mutates no settings and adds no tick/frame work.
+
+The remaining end-to-end contract is planned below.
 
 A new explicit `all_features` capture profile will resolve a versioned feature
 manifest at admission. It requires animals/creatures (spawning, AI, animation),

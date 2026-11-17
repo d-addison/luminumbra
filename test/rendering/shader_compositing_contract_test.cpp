@@ -782,7 +782,7 @@ TEST(CanopyAmbientContract, SkyVisibilityUsesThicknessAndContinuousDistance) {
     ExpectContains(body, "float previousDepthGap = 0.0;");
     ExpectContains(body, "previousValid && previousDepthGap <= 0.05 && depthGap > 0.05");
     ExpectContains(body, "for (int refinement = 0; refinement < 8; ++refinement)");
-    ExpectContains(body, "if (refinementTaps >= 8) break;");
+    ExpectContains(body, "if (emptyCrossing ? recoveryTaps >= 8 : refinementTaps >= 8) break;");
     ExpectContains(body, "float midpoint = 0.5 * (frontDistance + backDistance);");
     ExpectContains(body, "previousValid = false;");
     ExpectContains(body, "if (refinedGap <= 0.05)");
@@ -790,10 +790,10 @@ TEST(CanopyAmbientContract, SkyVisibilityUsesThicknessAndContinuousDistance) {
     ExpectContains(body, "backDistance = midpoint;");
     ExpectContains(body, "sampPos = refinedPosition;");
     ExpectContains(body, "depthGap = refinedGap;");
-    ExpectContains(body, "bool originBracket = s == 1;");
+    ExpectContains(body, "bool originBracket = s == 1 || emptyCrossing;");
     ExpectContains(body, "if (originBracket)");
     ExpectContains(body, "originBracket = false;");
-    const auto refinement = ExtractBlock(body, "if (crossing)");
+    const auto refinement = ExtractBlock(body, "if (crossing || emptyCrossing)");
     EXPECT_EQ(refinement.find("u_caveThickness"), std::string::npos)
         << "intersection selection must not branch or stop at the thickness cutoff";
     ExpectContains(body, "farWorldPosition(gPosition, u_sceneDepth, refinedUv, refinedPosition)");
@@ -814,19 +814,35 @@ struct CanopySample {
     double surfaceDistance;
     bool valid;
     bool onScreen;
+    double surfaceRise;
 };
 
 struct CanopyProbe {
     double visibility;
     int taps;
+    double occlusion;
 };
+
+double CanopyOcclusion(const CanopySample& hit, double maxDistance, double thickness) {
+    if (hit.gap > 0.05 && hit.gap < thickness) {
+        const double distanceWeight = 1 - std::clamp(hit.surfaceDistance / maxDistance, 0.0, 1.0);
+        const double ramp = std::clamp((hit.gap - 0.5 * thickness) / (0.5 * thickness), 0.0, 1.0);
+        const double thicknessWeight = 1 - ramp * ramp * (3 - 2 * ramp);
+        return distanceWeight * thicknessWeight;
+    }
+    return 0;
+}
 
 // Scalar mirror of computeSkyVisibility; the source contract above pins the
 // origin, crossing predicate, bisection, read budget and both falloff factors.
 template<typename Sample>
-CanopyProbe ProbeCanopy(const Sample& sample, double maxDistance, double thickness, int steps) {
+CanopyProbe ProbeCanopy(const Sample& sample,
+                        double maxDistance,
+                        double thickness,
+                        int steps,
+                        bool recoverEmpty = true) {
     if (maxDistance <= 0 || thickness <= 0 || steps <= 0) {
-        return {1, 0};
+        return {1, 0, 0};
     }
     steps = std::min(steps, 32);
     const double stepLength = maxDistance / steps;
@@ -834,6 +850,7 @@ CanopyProbe ProbeCanopy(const Sample& sample, double maxDistance, double thickne
     double previousDistance = 0;
     double previousGap = 0;
     int refinementTaps = 0;
+    int recoveryTaps = 0;
     int taps = 0;
     double occluded = 0;
     for (int step = 1; step <= steps; ++step) {
@@ -845,18 +862,24 @@ CanopyProbe ProbeCanopy(const Sample& sample, double maxDistance, double thickne
         ++taps;
         if (!hit.valid) {
             previousValid = false;
+            previousDistance = distance;
             continue;
         }
         const bool crossing = previousValid && previousGap <= 0.05 && hit.gap > 0.05;
+        const bool emptyCrossing =
+            recoverEmpty && !previousValid && hit.gap > 0.05 && hit.surfaceRise > 0;
         double frontDistance = previousDistance;
         double backDistance = distance;
         previousValid = true;
         previousDistance = distance;
         previousGap = hit.gap;
-        if (crossing) {
-            bool originBracket = step == 1;
+        if (crossing || emptyCrossing) {
+            occluded = std::max(occluded, CanopyOcclusion(hit, maxDistance, thickness));
+        }
+        if (crossing || emptyCrossing) {
+            bool originBracket = step == 1 || emptyCrossing;
             for (int refinement = 0; refinement < 8; ++refinement) {
-                if (refinementTaps >= 8) {
+                if (emptyCrossing ? recoveryTaps >= 8 : refinementTaps >= 8) {
                     break;
                 }
                 const double midpoint = 0.5 * (frontDistance + backDistance);
@@ -864,9 +887,20 @@ CanopyProbe ProbeCanopy(const Sample& sample, double maxDistance, double thickne
                 if (!refined.onScreen) {
                     break;
                 }
-                ++refinementTaps;
+                if (emptyCrossing) {
+                    ++recoveryTaps;
+                } else {
+                    ++refinementTaps;
+                }
                 ++taps;
                 if (!refined.valid) {
+                    if (originBracket) {
+                        frontDistance = midpoint;
+                        continue;
+                    }
+                    break;
+                }
+                if (emptyCrossing && refined.gap > 0.05 && refined.surfaceRise <= 0) {
                     if (originBracket) {
                         frontDistance = midpoint;
                         continue;
@@ -882,16 +916,10 @@ CanopyProbe ProbeCanopy(const Sample& sample, double maxDistance, double thickne
                 }
             }
         }
-        if (hit.gap > 0.05 && hit.gap < thickness) {
-            const double distanceWeight =
-                1 - std::clamp(hit.surfaceDistance / maxDistance, 0.0, 1.0);
-            const double ramp =
-                std::clamp((hit.gap - 0.5 * thickness) / (0.5 * thickness), 0.0, 1.0);
-            const double thicknessWeight = 1 - ramp * ramp * (3 - 2 * ramp);
-            occluded = std::max(occluded, distanceWeight * thicknessWeight);
-        }
+        occluded = std::max(occluded, CanopyOcclusion(hit, maxDistance, thickness));
     }
-    return {1 - 0.94 * std::clamp(occluded, 0.0, 1.0), taps};
+    const double occlusion = std::clamp(occluded, 0.0, 1.0);
+    return {1 - 0.94 * occlusion, taps, occlusion};
 }
 
 // Level perspective camera, fragment (0,-1.7,-12), upward normal, 60 degree
@@ -899,23 +927,83 @@ CanopyProbe ProbeCanopy(const Sample& sample, double maxDistance, double thickne
 CanopySample CanopyRoomSample(double distance, double ceilingHeight, double originY = -1.65) {
     const double rayY = originY + distance;
     if (rayY == 0) {
-        return {0, 0, false, true};
+        return {0, 0, false, true, 0};
     }
     const double surfaceY = rayY > 0 ? ceilingHeight : originY - 0.05;
     const double surfaceZ = -12 * surfaceY / rayY;
     return {std::hypot(rayY, 12) - std::hypot(surfaceY, surfaceZ),
             std::hypot(surfaceY - originY, surfaceZ + 12),
             true,
-            std::abs(rayY) <= 12 / std::sqrt(3.0)};
+            std::abs(rayY) <= 12 / std::sqrt(3.0),
+            surfaceY - originY};
 }
 
 void ExpectCanopyMirrorContract() {
     const auto body =
         ExtractBlock(ReadShader("res/shaders/lighting_pass.frag"), "float computeSkyVisibility(");
+    ASSERT_FALSE(body.empty());
     ExpectContains(body, "bool previousValid = true;");
     ExpectContains(body, "previousValid && previousDepthGap <= 0.05 && depthGap > 0.05");
-    EXPECT_EQ(ExtractBlock(body, "if (crossing)").find("u_caveThickness"), std::string::npos);
+    ExpectContains(body, "bool emptyCrossing = !previousValid && depthGap > 0.05 &&");
+    ExpectContains(body, "dot(sampPos - ro, skyDirView) > 0.0;");
+    const auto empty = ExtractBlock(body, "if (!valid || dot(sampPos, sampPos) < 1e-6)");
+    ExpectContains(empty, "previousValid = false;");
+    ExpectContains(empty, "previousDistance = distanceAlongRay;");
+    // Pin ordering as well as presence: the saved open endpoint must precede
+    // the update, or both ordinary and recovery intervals collapse to a point.
+    ExpectContains(body,
+                   "float frontDistance = previousDistance;\n"
+                   "        float backDistance = distanceAlongRay;\n"
+                   "        previousValid = true;\n"
+                   "        previousDistance = distanceAlongRay;");
+    const auto coarse =
+        ExtractBlock(body, "if ((crossing || emptyCrossing) && depthGap < u_caveThickness)");
+    ExpectContains(
+        coarse,
+        "float distanceWeight = 1.0 - clamp(length(sampPos - ro) / u_caveSkyMaxDist, 0.0, 1.0);");
+    ExpectContains(coarse,
+                   "float thicknessWeight = 1.0 - smoothstep(0.5 * u_caveThickness, "
+                   "u_caveThickness, depthGap);");
+    ExpectContains(coarse, "occluded = max(occluded, distanceWeight * thicknessWeight);");
+    EXPECT_LT(body.find("if ((crossing || emptyCrossing) && depthGap < u_caveThickness)"),
+              body.find("if (crossing || emptyCrossing)"));
+    const auto refinement = ExtractBlock(body, "if (crossing || emptyCrossing)");
+    ASSERT_FALSE(refinement.empty());
+    EXPECT_EQ(refinement.find("u_caveThickness"), std::string::npos);
+    ExpectContains(body, "int refinementTaps = 0;");
+    ExpectContains(body, "int recoveryTaps = 0;");
+    ExpectContains(refinement, "bool originBracket = s == 1 || emptyCrossing;");
+    ExpectContains(refinement, "for (int refinement = 0; refinement < 8; ++refinement)");
+    ExpectContains(refinement,
+                   "if (emptyCrossing ? recoveryTaps >= 8 : refinementTaps >= 8) break;");
+    ExpectContains(refinement,
+                   "if (emptyCrossing) {\n"
+                   "                    ++recoveryTaps;\n"
+                   "                } else {\n"
+                   "                    ++refinementTaps;\n"
+                   "                }");
+    ExpectContains(refinement, "float midpoint = 0.5 * (frontDistance + backDistance);");
+    ExpectContains(refinement, "if (emptyCrossing && refinedGap > 0.05 &&");
+    const auto overhead = ExtractBlock(refinement, "if (emptyCrossing && refinedGap > 0.05 &&");
+    ExpectContains(refinement, "dot(refinedPosition - ro, skyDirView) <= 0.0)");
+    ExpectContains(overhead, "if (originBracket)");
+    ExpectContains(overhead, "frontDistance = midpoint;");
+    ExpectContains(overhead, "continue;");
+    ExpectContains(overhead, "break;");
+    ExpectContains(refinement, "if (refinedGap <= 0.05)");
+    ExpectContains(refinement, "originBracket = false;");
+    ExpectContains(refinement, "backDistance = midpoint;");
+    ExpectContains(refinement, "sampPos = refinedPosition;");
+    ExpectContains(refinement, "depthGap = refinedGap;");
+    EXPECT_EQ(CountOccurrences(body, "farWorldPosition("), 2u);
+    EXPECT_EQ(CountOccurrences(body, "occluded = max(occluded, distanceWeight * thicknessWeight);"),
+              2u);
+    ExpectContains(body, "int steps = min(u_caveSkySteps, 32);");
+    ExpectContains(body, "depthGap > 0.05 && depthGap < u_caveThickness");
+    ExpectContains(body, "length(sampPos - ro) / u_caveSkyMaxDist");
+    ExpectContains(body, "smoothstep(0.5 * u_caveThickness, u_caveThickness, depthGap)");
 }
+
 } // namespace
 
 TEST(CanopyAmbientContract, FirstIntervalCeilingIsOccluded) {
@@ -939,6 +1027,370 @@ TEST(CanopyAmbientContract, FirstIntervalCeilingIsOccluded) {
     };
     EXPECT_LT(ProbeCanopy(ceilingBeforeOpenGeometry, 24, 1.5, 8).visibility, 0.3)
         << "a back-side hit before an empty open-side probe must retain the origin bracket";
+}
+
+TEST(CanopyAmbientContract, EmptyCoarseSamplesRetainFiniteCeilingRecovery) {
+    ExpectCanopyMirrorContract();
+    const auto roof = [](double distance) {
+        auto sample = CanopyRoomSample(distance, 2, -3);
+        const double rayY = -3 + distance;
+        sample.valid = rayY > 0 && rayY >= 24.0 / 60 && rayY <= 24.0 / 2.5;
+        return sample;
+    };
+    ASSERT_FALSE(roof(3).valid);
+    ASSERT_NEAR(roof(6).gap, 4.12, 0.01);
+    ASSERT_NEAR(roof(9).gap, 8.94, 0.01);
+    for (int steps : {8, 16}) {
+        const auto result = ProbeCanopy(roof, 24, 1.5, steps);
+        EXPECT_LT(result.visibility, 0.4);
+        EXPECT_GT(result.taps, 3);
+        EXPECT_LE(result.taps, 40);
+    }
+    // This finite roof queries at most 12 distances, including screen exit.
+    // Recovery must resolve the same crossing even when the final thickness
+    // band rejects every observed back-side hit.
+    std::vector<double> reference;
+    for (double thickness : {0.05, 0.12, 1.5, 8.0}) {
+        std::vector<double> distances;
+        const auto recordedRoof = [&](double distance) {
+            distances.push_back(distance);
+            return roof(distance);
+        };
+        const auto result = ProbeCanopy(recordedRoof, 24, thickness, 8);
+        EXPECT_LE(result.taps, 40);
+        if (reference.empty()) {
+            reference = distances;
+        }
+        EXPECT_EQ(distances, reference);
+        if (thickness <= 0.05) {
+            EXPECT_DOUBLE_EQ(result.visibility, 1);
+        }
+    }
+    double cutoff = 1.5;
+    for (double distance : reference) {
+        const auto hit = roof(distance);
+        if (hit.valid && hit.gap > 0.05) {
+            cutoff = std::min(cutoff, hit.gap);
+        }
+    }
+    ASSERT_LT(cutoff, 1.5);
+    const auto below = ProbeCanopy(roof, 24, cutoff - 0.0001, 8);
+    const auto above = ProbeCanopy(roof, 24, cutoff + 0.0001, 8);
+    EXPECT_DOUBLE_EQ(below.visibility, 1);
+    EXPECT_LT(above.visibility, 1);
+    EXPECT_NEAR(below.visibility, above.visibility, 0.0001);
+}
+
+TEST(CanopyAmbientContract, EmptyCoarseRecoveryRequiresObservedOverheadBandHit) {
+    ExpectCanopyMirrorContract();
+    for (double gap : {-1.0, 0.0, 0.05}) {
+        const auto open = [gap](double distance) {
+            return CanopySample{gap, 1, distance >= 6, true, 5};
+        };
+        const auto result = ProbeCanopy(open, 6, 1.5, 2);
+        EXPECT_DOUBLE_EQ(result.visibility, 1);
+        EXPECT_EQ(result.taps, 2) << "an open-side hit cannot start empty-sample recovery";
+    }
+    for (double rise : {-1.0, 0.0, 0.05, 5.0}) {
+        const auto silhouette = [rise](double distance) {
+            return CanopySample{8, 1, distance >= 6, true, rise};
+        };
+        const auto result = ProbeCanopy(silhouette, 6, 1.5, 2);
+        EXPECT_DOUBLE_EQ(result.visibility, 1);
+        EXPECT_EQ(result.taps, rise > 0 ? 10 : 2);
+    }
+    for (bool onScreen : {false, true}) {
+        const auto interrupted = [onScreen](double distance) {
+            const bool present = distance == 6;
+            return CanopySample{8, 1, present, present || onScreen || distance == 3, 5};
+        };
+        const auto result = ProbeCanopy(interrupted, 6, 1.5, 2);
+        EXPECT_DOUBLE_EQ(result.visibility, 1);
+        EXPECT_EQ(result.taps, onScreen ? 10 : 2);
+    }
+    const auto openThenHole = [](double distance) {
+        return CanopySample{
+            distance <= 4.5 ? 0.0 : 8.0, 1, distance != 3 && distance != 5.25, true, 5};
+    };
+    const auto hole = ProbeCanopy(openThenHole, 6, 1.5, 2);
+    EXPECT_DOUBLE_EQ(hole.visibility, 1);
+    EXPECT_EQ(hole.taps, 4) << "a refined hole after observed open geometry still aborts";
+    const auto observedBand = [](double distance) {
+        return CanopySample{0.5, 1, distance == 6, true, 5};
+    };
+    const auto retained = ProbeCanopy(observedBand, 6, 1.5, 2);
+    EXPECT_NEAR(retained.visibility, 0.06 + 0.94 / 6, 1e-12);
+    EXPECT_EQ(retained.taps, 10) << "empty refinements retain an observed in-band hit";
+    const auto exhausted = [](double distance) {
+        return CanopySample{8, 1, distance >= 1.5, true, 5};
+    };
+    const auto bounded = ProbeCanopy(exhausted, 24, 1.5, 64);
+    EXPECT_DOUBLE_EQ(bounded.visibility, 1);
+    EXPECT_EQ(bounded.taps, 40) << "empty recovery has its own eight-read refinement budget";
+    // An overhead coarse endpoint outside the band followed by refined
+    // in-band foreground below the origin must not darken the fragment.
+    for (double refinedRise : {-1.0, 0.0, 1.0}) {
+        const auto belowOrigin = [refinedRise](double distance) {
+            if (distance == 6) {
+                return CanopySample{8, 1, true, true, 5};
+            }
+            return CanopySample{0.5, 1, distance != 3, true, refinedRise};
+        };
+        const auto result = ProbeCanopy(belowOrigin, 6, 1.5, 2);
+        EXPECT_EQ(result.taps, 10);
+        if (refinedRise > 0) {
+            EXPECT_LT(result.visibility, 1) << "overhead refined band hits still occlude";
+        } else {
+            EXPECT_DOUBLE_EQ(result.visibility, 1)
+                << "below-origin refined foreground cannot become the ceiling";
+        }
+    }
+}
+
+TEST(CanopyAmbientContract, RecoveryRejectsBelowOriginHitAfterObservedOpenGeometry) {
+    ExpectCanopyMirrorContract();
+    const auto samples = [](double distance) {
+        if (distance == 6) {
+            return CanopySample{8, 1, true, true, 5};
+        }
+        return CanopySample{distance <= 4.5 ? 0.0 : 0.5, 1, distance != 3, true, -1};
+    };
+    const auto result = ProbeCanopy(samples, 6, 1.5, 2);
+    EXPECT_DOUBLE_EQ(result.visibility, 1);
+    EXPECT_EQ(result.taps, 4);
+}
+
+TEST(CanopyAmbientContract, EmptyRecoveryRetainsCoarseHitAcrossForegroundThenSky) {
+    ExpectCanopyMirrorContract();
+    // Perspective ray from (0,-3,-12): empty at 3 m, an overhead band hit
+    // at 6 m, unrelated foreground at 4.5 m, then only empty refinements.
+    const auto samples = [](double distance) {
+        const double rayY = distance - 3;
+        const double gap = distance == 6 ? 0.8 : 8.0;
+        const double scale = 1 - gap / std::hypot(rayY, 12);
+        const double rise = rayY * scale + 3;
+        return CanopySample{gap,
+                            std::hypot(rise, 12 * (1 - scale)),
+                            distance == 6 || distance == 4.5,
+                            std::abs(rayY) <= 12 / std::sqrt(3.0),
+                            rise};
+    };
+    ASSERT_FALSE(samples(3).valid);
+    const auto coarse = samples(6);
+    ASSERT_TRUE(coarse.valid);
+    ASSERT_GT(coarse.surfaceRise, 0);
+    ASSERT_GT(coarse.gap, 0.05);
+    ASSERT_LT(coarse.gap, 1.5);
+    ASSERT_GT(samples(4.5).gap, 1.5);
+    ASSERT_GT(samples(4.5).surfaceRise, 0);
+    ASSERT_FALSE(samples(3.75).valid);
+    // Independent base contribution for the only in-band coarse sample.
+    const double ramp = (coarse.gap - 0.75) / 0.75;
+    const double baseOcclusion =
+        (1 - coarse.surfaceDistance / 24) * (1 - ramp * ramp * (3 - 2 * ramp));
+    ASSERT_GT(baseOcclusion, 0.7);
+    const auto result = ProbeCanopy(samples, 24, 1.5, 8);
+    EXPECT_GE(result.occlusion, baseOcclusion);
+    EXPECT_NEAR(result.visibility, 1 - 0.94 * baseOcclusion, 1e-12);
+    EXPECT_EQ(result.taps, 11) << "three coarse reads and eight recovery refinement reads";
+}
+
+TEST(CanopyAmbientContract, EmptyRecoveryOnlyAddsToCoarseContribution) {
+    ExpectCanopyMirrorContract();
+    // All cases replace or interrupt the first midpoint, followed by a hole.
+    // Include weaker/stronger band hits, both band boundaries, below-origin
+    // geometry, missing data and projection exit. Storage is fixed at 9 cases.
+    for (const auto& midpoint : std::array<CanopySample, 9>{{
+             {8, 1, true, true, 5},
+             {1.4, 5, true, true, 5},
+             {0.5, 1, true, true, 5},
+             {0.05, 1, true, true, 5},
+             {1.5, 1, true, true, 5},
+             {0.5, 1, true, true, 0},
+             {0, 1, true, true, 5},
+             {0, 0, false, true, 0},
+             {0, 0, false, false, 0},
+         }}) {
+        SCOPED_TRACE(midpoint.gap);
+        SCOPED_TRACE(midpoint.valid);
+        SCOPED_TRACE(midpoint.onScreen);
+        const auto samples = [&](double distance) {
+            if (distance == 6) {
+                return CanopySample{0.8, 5, true, true, 5};
+            }
+            if (distance == 4.5) {
+                return midpoint;
+            }
+            return CanopySample{0, 0, false, true, 0};
+        };
+        const double ramp = (0.8 - 0.75) / 0.75;
+        const double baseOcclusion = (1 - 5.0 / 6) * (1 - ramp * ramp * (3 - 2 * ramp));
+        const auto result = ProbeCanopy(samples, 6, 1.5, 2);
+        EXPECT_GE(result.occlusion, baseOcclusion);
+        EXPECT_LE(result.taps, 10);
+        if (midpoint.gap == 0.5 && midpoint.surfaceRise > 0) {
+            EXPECT_GT(result.occlusion, baseOcclusion)
+                << "refinement can still add a stronger observed contribution";
+        } else {
+            EXPECT_NEAR(result.visibility, 1 - 0.94 * baseOcclusion, 1e-12);
+        }
+    }
+}
+
+TEST(CanopyAmbientContract, EmptyRecoveryUsesSavedOpenEndpoint) {
+    ExpectCanopyMirrorContract();
+    const auto samples = [](double distance) {
+        return CanopySample{distance == 6 ? 8.0 : 0.5, 1, distance != 3, true, 1};
+    };
+    const auto result = ProbeCanopy(samples, 6, 1.5, 2);
+    EXPECT_NEAR(result.visibility, 0.06 + 0.94 / 6, 1e-12);
+    EXPECT_EQ(result.taps, 10);
+    EXPECT_DOUBLE_EQ(ProbeCanopy(samples, 6, 1.5, 2, false).visibility, 1);
+}
+
+TEST(CanopyAmbientContract, OrdinaryRefinementRetainsCoarseHitAcrossForegroundThenSky) {
+    ExpectCanopyMirrorContract();
+    // Open geometry at 3 m, an in-band ceiling at 6 m, foreground at 4.5 m,
+    // then a hole at 3.75 m: the foreground must not erase the observed ceiling.
+    const auto samples = [](double distance) {
+        const double gap = distance == 3 ? 0 : distance == 6 ? 0.5 : 8;
+        return CanopySample{gap, 1, distance != 3.75, true, 1};
+    };
+    ASSERT_TRUE(samples(3).valid);
+    ASSERT_LE(samples(3).gap, 0.05);
+    ASSERT_GT(samples(6).gap, 0.05);
+    ASSERT_LT(samples(6).gap, 1.5);
+    ASSERT_GT(samples(4.5).gap, 1.5);
+    ASSERT_FALSE(samples(3.75).valid);
+    const auto result = ProbeCanopy(samples, 6, 1.5, 2);
+    EXPECT_NEAR(result.occlusion, 1 - 1.0 / 6, 1e-12);
+    EXPECT_NEAR(result.visibility, 0.06 + 0.94 / 6, 1e-12);
+    EXPECT_EQ(result.taps, 4) << "two coarse reads and two ordinary refinement reads";
+}
+
+TEST(CanopyAmbientContract, OrdinaryRefinementOnlyAddsToCoarseContribution) {
+    ExpectCanopyMirrorContract();
+    // Fixed 9-case matrix covers replacement hits, both band boundaries,
+    // open geometry, missing data and projection exit, then missing data.
+    for (const auto& midpoint : std::array<CanopySample, 9>{{
+             {8, 1, true, true, 5},
+             {1.4, 5, true, true, 5},
+             {0.5, 1, true, true, 5},
+             {0.05, 1, true, true, 5},
+             {1.5, 1, true, true, 5},
+             {0.5, 1, true, true, 0},
+             {0, 1, true, true, 5},
+             {0, 0, false, true, 0},
+             {0, 0, false, false, 0},
+         }}) {
+        SCOPED_TRACE(midpoint.gap);
+        SCOPED_TRACE(midpoint.surfaceRise);
+        SCOPED_TRACE(midpoint.valid);
+        SCOPED_TRACE(midpoint.onScreen);
+        for (bool firstInterval : {false, true}) {
+            SCOPED_TRACE(firstInterval);
+            const auto samples = [&](double distance) {
+                if (distance == 6) {
+                    return CanopySample{0.8, 5, true, true, 5};
+                }
+                if (distance == 3 && !firstInterval) {
+                    return CanopySample{0, 1, true, true, 1};
+                }
+                if (distance == (firstInterval ? 3 : 4.5)) {
+                    return midpoint;
+                }
+                return CanopySample{0, 0, false, true, 0};
+            };
+            const double ramp = (0.8 - 0.75) / 0.75;
+            const double coarseOcclusion = (1 - 5.0 / 6) * (1 - ramp * ramp * (3 - 2 * ramp));
+            const auto result = ProbeCanopy(samples, 6, 1.5, firstInterval ? 1 : 2);
+            const double refinedOcclusion = CanopyOcclusion(midpoint, 6, 1.5);
+            EXPECT_NEAR(result.occlusion, std::max(coarseOcclusion, refinedOcclusion), 1e-12);
+            EXPECT_GE(result.occlusion, coarseOcclusion);
+            EXPECT_LE(result.taps, firstInterval ? 9 : 4);
+        }
+    }
+}
+
+TEST(CanopyAmbientContract, OrdinaryRefinementWithoutBandHitRemainsOpen) {
+    ExpectCanopyMirrorContract();
+    // Fixed boundaries include the self-bias and thickness cutoff. Neither a
+    // coarse endpoint nor a replacement outside the band may add occlusion.
+    for (double coarseGap : {0.0, 0.05, 1.5, 8.0}) {
+        for (bool missing : {false, true}) {
+            SCOPED_TRACE(coarseGap);
+            SCOPED_TRACE(missing);
+            const auto samples = [=](double distance) {
+                const double gap = distance == 3 ? 0 : distance == 6 ? coarseGap : 8;
+                return CanopySample{gap, 1, !missing || distance != 3.75, true, 1};
+            };
+            const auto result = ProbeCanopy(samples, 6, 1.5, 2);
+            EXPECT_DOUBLE_EQ(result.visibility, 1);
+            EXPECT_DOUBLE_EQ(result.occlusion, 0);
+            const int expectedTaps = coarseGap <= 0.05 ? 2 : missing ? 4 : 10;
+            EXPECT_EQ(result.taps, expectedTaps);
+        }
+    }
+}
+
+TEST(CanopyAmbientContract, RefinedRecoveryRejectsForegroundBelowElevatedOrigin) {
+    ExpectCanopyMirrorContract();
+    // Scalar rise is measured from the biased fragment, not world y=0.
+    const auto samples = [](double distance) {
+        return CanopySample{
+            distance == 6 ? 8.0 : 0.5, 1, distance != 3, true, distance == 6 ? 5.0 : -1.0};
+    };
+    const auto result = ProbeCanopy(samples, 6, 1.5, 2);
+    EXPECT_DOUBLE_EQ(result.visibility, 1);
+    EXPECT_EQ(result.taps, 10);
+}
+
+TEST(CanopyAmbientContract, EmptyRecoveryCannotStarveLaterRealRoofCrossing) {
+    ExpectCanopyMirrorContract();
+    int roofTaps = 0;
+    int recoveryTaps = 0;
+    const auto samples = [&](double distance) {
+        if (distance == 3) {
+            return CanopySample{0, 0, false, true, 0};
+        }
+        if (distance == 6) {
+            return CanopySample{8, 6, true, true, 5};
+        }
+        if (distance < 6) {
+            ++recoveryTaps;
+            return CanopySample{0, 0, false, true, 0};
+        }
+        if (distance > 9 && distance < 12) {
+            ++roofTaps;
+        }
+        return CanopySample{distance - 10, 5, true, true, 5};
+    };
+    const auto base = ProbeCanopy(samples, 12, 1.5, 4, false);
+    EXPECT_NEAR(base.visibility, 0.06 + 0.94 * 5 / 12, 1e-12);
+    EXPECT_EQ(base.taps, 12);
+    roofTaps = 0;
+    recoveryTaps = 0;
+    const auto result = ProbeCanopy(samples, 12, 1.5, 4);
+    EXPECT_DOUBLE_EQ(result.visibility, base.visibility);
+    EXPECT_EQ(roofTaps, 8);
+    EXPECT_EQ(recoveryTaps, 8);
+    EXPECT_EQ(result.taps, 20);
+}
+
+TEST(CanopyAmbientContract, IndependentBudgetsHaveTightFixedLookupBounds) {
+    ExpectCanopyMirrorContract();
+    for (int requested : {1, 2, 3, 32, 64}) {
+        SCOPED_TRACE(requested);
+        const int steps = std::min(requested, 32);
+        const auto samples = [steps](double distance) {
+            const double emptyDistance = steps == 2 ? 3 : 6;
+            const bool laterEmpty = distance >= 12 && std::fmod(distance, 6.0) == 0;
+            return CanopySample{8, 1, distance != emptyDistance && !laterEmpty, true, 1};
+        };
+        const auto result = ProbeCanopy(samples, 3.0 * steps, 1.5, requested);
+        EXPECT_DOUBLE_EQ(result.visibility, 1);
+        EXPECT_EQ(result.taps, steps + (steps <= 2 ? 8 : 16));
+    }
 }
 
 TEST(CanopyAmbientContract, CrossingWeightsAreContinuousAtThicknessCutoff) {
@@ -970,7 +1422,7 @@ TEST(CanopyAmbientContract, InvalidRefinementAndExhaustedBudgetDoNotInventHits) 
         for (bool onScreen : {false, true}) {
             const auto missing = [onScreen, missingDistance](double distance) {
                 const bool present = distance != missingDistance;
-                return CanopySample{distance <= 3 ? 0.0 : 8.0, 1, present, present || onScreen};
+                return CanopySample{distance <= 3 ? 0.0 : 8.0, 1, present, present || onScreen, 1};
             };
             const auto result = ProbeCanopy(missing, 6, 1.5, 2);
             EXPECT_DOUBLE_EQ(result.visibility, 1);
@@ -979,13 +1431,13 @@ TEST(CanopyAmbientContract, InvalidRefinementAndExhaustedBudgetDoNotInventHits) 
         }
     }
     const auto emptyOriginInterval = [](double distance) {
-        return CanopySample{8, 1, distance == 3, true};
+        return CanopySample{8, 1, distance == 3, true, 1};
     };
     const auto empty = ProbeCanopy(emptyOriginInterval, 3, 1.5, 1);
     EXPECT_DOUBLE_EQ(empty.visibility, 1) << "empty probes cannot invent a hit inside the band";
     EXPECT_EQ(empty.taps, 9);
     const auto originHole = [](double distance) {
-        return CanopySample{distance <= 1.5 ? 0.0 : 8.0, 1, distance != 2.25, true};
+        return CanopySample{distance <= 1.5 ? 0.0 : 8.0, 1, distance != 2.25, true, 1};
     };
     const auto hole = ProbeCanopy(originHole, 3, 1.5, 1);
     EXPECT_DOUBLE_EQ(hole.visibility, 1)
@@ -993,7 +1445,7 @@ TEST(CanopyAmbientContract, InvalidRefinementAndExhaustedBudgetDoNotInventHits) 
     EXPECT_EQ(hole.taps, 3);
     const auto stripes = [](double distance) {
         const auto band = static_cast<int>(std::floor(distance / 0.75 + 0.5));
-        return CanopySample{band % 2 == 0 ? 8.0 : -80.0, 1, true, true};
+        return CanopySample{band % 2 == 0 ? 8.0 : -80.0, 1, true, true, 1};
     };
     const auto exhausted = ProbeCanopy(stripes, 24, 1.5, 64);
     EXPECT_DOUBLE_EQ(exhausted.visibility, 1);
@@ -1002,14 +1454,14 @@ TEST(CanopyAmbientContract, InvalidRefinementAndExhaustedBudgetDoNotInventHits) 
         const double gap = distance < 1.125 || (distance > 1.5 && distance <= 2.25) ? -80
                            : distance > 2.25 && distance <= 3                       ? 0.5
                                                                                     : 8;
-        return CanopySample{gap, 1, true, true};
+        return CanopySample{gap, 1, true, true, 1};
     };
     const auto retained = ProbeCanopy(laterHit, 24, 1.5, 32);
     EXPECT_LT(retained.visibility, 0.2)
         << "an observed in-band hit survives exhaustion of the shared refinement budget";
     EXPECT_EQ(retained.taps, 40);
     const auto interruptedHit = [](double distance) {
-        return CanopySample{distance <= 3 ? 0 : 0.5, 1, distance != 4.5, true};
+        return CanopySample{distance <= 3 ? 0 : 0.5, 1, distance != 4.5, true, 1};
     };
     const auto interrupted = ProbeCanopy(interruptedHit, 6, 1.5, 2);
     EXPECT_NEAR(interrupted.visibility, 0.06 + 0.94 / 6, 1e-12)
@@ -1030,17 +1482,18 @@ TEST(CanopyAmbientContract, InvalidRefinementAndExhaustedBudgetDoNotInventHits) 
 TEST(CanopyAmbientContract, BiasAndMissingSamplesPreserveThicknessAcceptance) {
     ExpectCanopyMirrorContract();
     const auto shallowFront = [](double distance) {
-        return CanopySample{distance <= 3 ? 0.03 : 0.5, 1, true, true};
+        return CanopySample{distance <= 3 ? 0.03 : 0.5, 1, true, true, 1};
     };
     const auto crossing = ProbeCanopy(shallowFront, 6, 1.5, 2);
     EXPECT_NEAR(crossing.visibility, 0.06 + 0.94 / 6, 1e-12);
     EXPECT_EQ(crossing.taps, 10) << "a positive gap below the self-bias is still an open bracket";
     for (double gap : {-0.1, 0.01, 0.05, 0.8, 1.4, 1.5, 1.6}) {
         const auto unbracketed = [gap](double distance) {
-            return CanopySample{gap, 1, distance != 1.5, true};
+            return CanopySample{gap, 1, distance != 1.5, true, 1};
         };
         const auto result = ProbeCanopy(unbracketed, 3, 1.5, 2);
-        EXPECT_EQ(result.taps, 2) << "missing geometry must invalidate the bracket";
+        EXPECT_EQ(result.taps, gap > 0.05 ? 10 : 2)
+            << "only back-side geometry can recover after an empty coarse tap";
         if (gap > 0.05 && gap < 1.5) {
             EXPECT_LT(result.visibility, 1);
         } else {

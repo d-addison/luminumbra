@@ -379,6 +379,7 @@ TEST(FarWorldRenderer, DefaultExplicitRefusedAndPreviewSelection) {
     const auto legacy = std::make_unique<const FarWorldRenderer>(FarWorldMode::Legacy);
     EXPECT_EQ(legacy->Selection(FarWorldPurpose::World).requested, FarWorldMode::Legacy);
     EXPECT_EQ(legacy->Selection(FarWorldPurpose::World).effective, FarWorldMode::Legacy);
+    EXPECT_EQ(legacy->Selection(FarWorldPurpose::World).refusal, FarWorldRefusal::None);
     const auto refused = std::make_unique<const FarWorldRenderer>();
     const auto normal = refused->Selection(FarWorldPurpose::World);
     EXPECT_EQ(normal.requested, FarWorldMode::Ladder);
@@ -2402,6 +2403,7 @@ TEST_F(SessionRendererTest, IdleRetirementMatchesHandoffCountAndAdmitsFreshRetur
         EXPECT_EQ(
             accepted,
             direct.StageSessionTarget(producer, *world, tiles, policy, capture_limits, samples));
+        EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal, direct.AdmissionRefusal());
         return accepted;
     };
     const auto tiles = Tiles();
@@ -2420,7 +2422,9 @@ TEST_F(SessionRendererTest, IdleRetirementMatchesHandoffCountAndAdmitsFreshRetur
     auto returned = tiles;
     returned[0].wanted.intent.extra_span = FarVolumeCoverageSpan{-128, 0};
     EXPECT_FALSE(stage(returned));
-    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal, FarWorldRefusal::SpanRejected);
+    // A new capture serial with unchanged content still reuses the tile identity.
+    // Changed metadata under that retained identity is an invalid request.
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal, FarWorldRefusal::InvalidRequests);
     const auto* diagnostic = renderer.SessionDiagnostic();
     ASSERT_NE(diagnostic, nullptr);
     ASSERT_TRUE(diagnostic->captured);
@@ -2430,7 +2434,7 @@ TEST_F(SessionRendererTest, IdleRetirementMatchesHandoffCountAndAdmitsFreshRetur
     const auto retired = direct.RetireIdleHistory();
     ASSERT_EQ(retired, 1u);
     EXPECT_EQ(renderer.RetireIdleHistory(), retired);
-    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal, FarWorldRefusal::SpanRejected);
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal, FarWorldRefusal::InvalidRequests);
     EXPECT_EQ(renderer.RetireIdleHistory(), 0u);
     EXPECT_EQ(direct.RetireIdleHistory(), 0u);
     ASSERT_TRUE(stage(returned));
@@ -2467,7 +2471,95 @@ TEST_F(SessionRendererTest, LegacyIdleRetirementPreservesBoundSessionHistory) {
     returned[0].wanted.intent.extra_span = FarVolumeCoverageSpan{-128, 0};
     EXPECT_FALSE(
         renderer.StageSessionTarget(producer, *world, returned, policy, capture_limits, samples));
+    EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal, FarWorldRefusal::InvalidRequests);
+    EXPECT_EQ(renderer.RetireIdleHistory(), 0u);
+    EXPECT_EQ(diagnostic->state.target_serial, target);
+    // A different capture support changes the identity, exposing the retained
+    // extra-span constraint rather than the equal-identity metadata check.
+    returned[0].capture.span.max_y += 16;
+    EXPECT_FALSE(
+        renderer.StageSessionTarget(producer, *world, returned, policy, capture_limits, samples));
     EXPECT_EQ(renderer.Selection(FarWorldPurpose::World).refusal, FarWorldRefusal::SpanRejected);
+    EXPECT_EQ(diagnostic->state.target_serial, target);
+}
+
+TEST_F(SessionRendererTest, SessionSelectionPreservesAdmissionRefusalsAndPurposeOverrides) {
+    for (const auto mode : {FarWorldMode::Ladder, FarWorldMode::Legacy}) {
+        SCOPED_TRACE(static_cast<int>(mode));
+        renderer.SetRequested(mode);
+        ASSERT_EQ(renderer.BindSession(jobs, 1, policy.caves, policy.numeric, limits),
+                  FarWorldRefusal::None);
+        const auto check = [&](FarWorldRefusal refusal) {
+            for (const bool enabled : {false, true}) {
+                const auto selection = renderer.Selection(FarWorldPurpose::World, enabled);
+                EXPECT_EQ(selection.refusal, refusal);
+                EXPECT_EQ(selection.effective,
+                          refusal == FarWorldRefusal::None ? mode : FarWorldMode::Legacy);
+                EXPECT_EQ(selection.advance, enabled);
+                EXPECT_EQ(selection.submit, enabled);
+                const auto preview = renderer.Selection(FarWorldPurpose::Preview, enabled);
+                EXPECT_EQ(preview.refusal, FarWorldRefusal::PreviewOverride);
+                EXPECT_EQ(preview.effective, FarWorldMode::Legacy);
+                EXPECT_EQ(preview.advance, enabled);
+                EXPECT_EQ(preview.submit, enabled);
+                const auto offscreen =
+                    renderer.Selection(FarWorldPurpose::OffscreenPreview, enabled);
+                EXPECT_EQ(offscreen.refusal, FarWorldRefusal::OffscreenSuppressed);
+                EXPECT_EQ(offscreen.effective, FarWorldMode::Legacy);
+                EXPECT_FALSE(offscreen.advance);
+                EXPECT_FALSE(offscreen.submit);
+            }
+        };
+        check(FarWorldRefusal::ImmutableAuthorityUnavailable);
+        ASSERT_TRUE(Stage());
+        check(FarWorldRefusal::None);
+        state.current = false;
+        check(FarWorldRefusal::BackendUnavailable);
+        state.current = true;
+        check(FarWorldRefusal::None);
+        const auto target = renderer.SessionDiagnostic()->state.target_serial;
+        auto invalid = Tiles();
+        invalid[0].capture.span.min_y += 1;
+        EXPECT_FALSE(renderer.StageSessionTarget(
+            producer, *world, invalid, policy, capture_limits, samples));
+        check(FarWorldRefusal::SpanRejected);
+        EXPECT_FALSE(
+            renderer.StageSessionTarget(producer, *world, {}, policy, capture_limits, samples));
+        check(FarWorldRefusal::InvalidRequests);
+        auto unknown = policy;
+        unknown.numeric = static_cast<FarVolumeNumericProfile>(255);
+        EXPECT_FALSE(renderer.StageSessionTarget(
+            producer, *world, Tiles(), unknown, capture_limits, samples));
+        check(FarWorldRefusal::InvalidRequests);
+        unknown = policy;
+        unknown.caves = static_cast<FarCaveMode>(255);
+        EXPECT_FALSE(renderer.StageSessionTarget(
+            producer, *world, Tiles(), unknown, capture_limits, samples));
+        check(FarWorldRefusal::CavePolicyMismatch);
+        auto incomplete = capture_limits;
+        incomplete.max_bytes = 0;
+        EXPECT_FALSE(
+            renderer.StageSessionTarget(producer, *world, Tiles(), policy, incomplete, samples));
+        check(FarWorldRefusal::MissingLimits);
+        auto partial = samples;
+        partial.density = 1;
+        EXPECT_FALSE(renderer.StageSessionTarget(
+            producer, *world, Tiles(), policy, capture_limits, partial));
+        check(FarWorldRefusal::AdmissionFailed);
+        auto expired = capture_limits;
+        expired.deadline = {[](const void*) noexcept -> std::uint64_t { return 1; }, nullptr, 1};
+        EXPECT_FALSE(
+            renderer.StageSessionTarget(producer, *world, Tiles(), policy, expired, samples));
+        check(FarWorldRefusal::AdmissionFailed);
+        producer.fence_source_reads(true);
+        EXPECT_FALSE(Stage());
+        check(FarWorldRefusal::AdmissionFailed);
+        producer.fence_source_reads(false);
+        EXPECT_EQ(renderer.SessionDiagnostic()->state.target_serial, target);
+        EXPECT_EQ(renderer.SessionDiagnostic()->state.serving_serial, 0u);
+        ASSERT_TRUE(Stage());
+        check(FarWorldRefusal::None);
+    }
 }
 
 TEST_F(SessionRendererTest, ProducerSessionInputsBindAndSubmitHeterogeneousTileFingerprints) {

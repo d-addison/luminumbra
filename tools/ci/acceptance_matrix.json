@@ -5,7 +5,7 @@
     {
       "id": "render.visual-diagnostic-codecs",
       "source": "docs/development/visual-diagnostics.md#implementation-inventory",
-      "statement": "Independent GL-free diagnostic codecs serialize linear albedo, signed view normals, raw hardware depth and integral material IDs as little-endian PFM, exact RGBA32UI draw/mesh/LOD/ownership/pass identities as a versioned binary image, and schema-1 top-left JSON point probes. Exact sizes, bounded dimensions and identity/material metadata are validated before stream writes; nonfinite floating samples survive in AOVs and become explicit null channels in probes. Registered regressions cover encoding, orientation, invalid input, nonfinite values and partial stream failures. A standalone header-only helper adds a submission-ordered capture-local draw/mesh registry bounded to 65,536 entries each and 16 MiB escaped JSON with generic UTF-8 asset paths and explicit unsupported coverage. Registered registry regressions cover refusal, IDs, metadata, bounds and reset. A second standalone helper adds lazy RGBA32UI targets with capability and dimension refusal, transactional resize and caller binding restoration. Move-only attachment leases protect caller attachments on bound and unbound framebuffers: resize, reset and disable refuse while leased, and owner destruction with live leases terminates before deletion. Registered modeled-driver regressions cover lifecycle, refusal, attachment retention, moves and release. Native execution, GPU attribution, opt-in configuration and scenario bundle publication remain pending. The design also specifies debug views, a pixel inspector, every-PR Linux shader compilation, path-gated llvmpipe scenes and capture image checks; these layers are planned and do not yet change runtime rendering or CI checks.",
+      "statement": "Independent GL-free diagnostic codecs serialize linear albedo, signed view normals, raw hardware depth and integral material IDs as little-endian PFM, exact RGBA32UI draw/mesh/LOD/ownership/pass identities as a versioned binary image, and schema-1 top-left JSON point probes. Exact sizes, bounded dimensions and identity/material metadata are validated before stream writes; nonfinite floating samples survive in AOVs and become explicit null channels in probes. Registered regressions cover encoding, orientation, invalid input, nonfinite values and partial stream failures. A standalone header-only helper adds a submission-ordered capture-local draw/mesh registry bounded to 65,536 entries each and 16 MiB escaped JSON with generic UTF-8 asset paths and explicit unsupported coverage. Registered registry regressions cover refusal, IDs, metadata, bounds and reset. A second standalone helper adds lazy RGBA32UI targets with capability and dimension refusal, transactional resize and caller binding restoration. Move-only attachment leases protect caller attachments on bound and unbound framebuffers: resize, reset and disable refuse while leased, and owner destruction with live leases terminates before deletion. Registered modeled-driver regressions cover lifecycle, refusal, attachment retention, moves and release. Native execution, GPU attribution, opt-in configuration and scenario bundle publication remain pending. Every-PR Linux shader compilation and path-gated llvmpipe scene tooling are registered. The scene catalogue pins analytical material and tree-impostor cutout references, source identities, full-image MAE/p99 thresholds and an independent cutout/background invariant; software-GL execution and sky/terrain regression qualification remain pending. Debug views, a pixel inspector and capture image checks remain planned.",
       "status": "partial",
       "evidence": [
         {
@@ -24,6 +24,37 @@
           "kind": "ctest",
           "ref": "DiagnosticCaptureIntegration.*",
           "planned": "Add and run GPU attribution and scenario capture bundle regressions; owner: maintainers"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development/visual-diagnostics.md"
+        },
+        {
+          "kind": "script",
+          "ref": "tools/gates/test_shader_scenes.py"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ShaderScene.*",
+          "planned": "Run the registered opt-in material and tree-impostor scenes under llvmpipe; owner: maintainers"
+        }
+      ],
+      "requirements": []
+    },
+    {
+      "id": "render.capture-feature-capabilities",
+      "source": "docs/development/visual-diagnostics.md#e3-all-features-profile-and-non-vacuous-evidence",
+      "statement": "GL-free capture feature resolution names 31 producer/settings features, records requested/effective state and forced, suppressed or unavailable reasons, and serializes a versioned capability manifest with resolved asset/config identities or unavailable reasons. Strict runtime all_features selection is validated by both launch parsers before save-root creation. Unimplemented adapters default to unsupported across all eight capture modes; disabled requested settings refuse support and missing identities prevent aggregate support. Explicit final forced/suppressed observations take precedence over baseline producer controls; resolved isolation masks and sky backdrops still suppress forced enabled settings while preserving explicit suppression reasons. Registered regressions cover selections, catalog completeness, explicit subsets, every missing or suppressed feature, actual system and graphics gates, terrain cave/structure and static-plant isolation, skinned creature isolation, vegetation requiring both terrain and foliage consumers, missing-adapter and explicit-subset isolation refusals, independent ungated stages, tuning-default semantics, malformed metadata/enums, exact bounds, snapshot ownership and stream write/flush failures. Native execution, app/scenario producer policy, admission/publication wiring and per-frame presence evidence remain pending; selection and capability do not certify an all-features capture.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "CaptureFeatureProfile.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "CaptureFeaturePolicy.*",
+          "planned": "Implement and qualify shared app/scenario policy and feature presence in later slices; owner: maintainers"
         },
         {
           "kind": "doc",
