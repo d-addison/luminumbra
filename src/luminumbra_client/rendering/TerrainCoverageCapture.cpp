@@ -459,7 +459,13 @@ bool RenderPipeline::capture_terrain_coverage(const std::filesystem::path& out_d
         ReadbackState state(gbuffer().fbo_id);
         glReadBuffer(GL_BACK);
         std::vector<unsigned char> color(color_pixels * 3);
-        glReadPixels(0, 0, m_screen_width, m_screen_height, GL_RGB, GL_UNSIGNED_BYTE, color.data());
+        glReadPixels(0,
+                     0,
+                     static_cast<GLsizei>(m_screen_width),
+                     static_cast<GLsizei>(m_screen_height),
+                     GL_RGB,
+                     GL_UNSIGNED_BYTE,
+                     color.data());
         if (glGetError() != GL_NO_ERROR ||
             !WriteBytePlane(out_dir / "color.ppm", m_screen_width, m_screen_height, 3, color))
             return false;
@@ -470,8 +476,13 @@ bool RenderPipeline::capture_terrain_coverage(const std::filesystem::path& out_d
             if (format != GL_DEPTH_COMPONENT)
                 glReadBuffer(attachment);
             std::vector<float> values(pixels * static_cast<std::size_t>(channels));
-            glReadPixels(
-                0, 0, m_internal_width, m_internal_height, format, GL_FLOAT, values.data());
+            glReadPixels(0,
+                         0,
+                         static_cast<GLsizei>(m_internal_width),
+                         static_cast<GLsizei>(m_internal_height),
+                         format,
+                         GL_FLOAT,
+                         values.data());
             return glGetError() == GL_NO_ERROR &&
                    WriteFloatPlane(
                        out_dir / name, m_internal_width, m_internal_height, channels, values);
@@ -483,8 +494,13 @@ bool RenderPipeline::capture_terrain_coverage(const std::filesystem::path& out_d
         std::vector<unsigned char> encoded(pixels * 4), ids(pixels);
         std::vector<float> normals(pixels * 3);
         glReadBuffer(GL_COLOR_ATTACHMENT1);
-        glReadPixels(
-            0, 0, m_internal_width, m_internal_height, GL_RGBA, GL_UNSIGNED_BYTE, encoded.data());
+        glReadPixels(0,
+                     0,
+                     static_cast<GLsizei>(m_internal_width),
+                     static_cast<GLsizei>(m_internal_height),
+                     GL_RGBA,
+                     GL_UNSIGNED_BYTE,
+                     encoded.data());
         if (glGetError() != GL_NO_ERROR)
             return false;
         for (std::size_t i = 0; i < pixels; ++i) {

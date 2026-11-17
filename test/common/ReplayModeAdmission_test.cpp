@@ -129,6 +129,30 @@ protected:
 class ReplayModeRoundtrip : public ReplayModeAdmission,
                             public testing::WithParamInterface<std::uint64_t> {};
 
+TEST_F(ReplayModeAdmission, BootSchemaIsOptInAndRefusedUntilPlaybackWiring) {
+    options.ticks = 0;
+    ASSERT_EQ(RunRecord(options), 0);
+    const auto recorded = replay::ReadReplay(options.record_path);
+    ASSERT_TRUE(recorded.has_value());
+    if (!recorded.has_value()) {
+        return;
+    }
+    EXPECT_EQ(recorded->header.version, 3u);
+    EXPECT_FALSE(recorded->header.authority_boot.has_value());
+    for (const auto version : {replay::kLrec1BootVersion, replay::kLrec1BootElidedVersion}) {
+        auto changed = *recorded;
+        changed.header.version = version;
+        Luminumbra::world::AuthorityBootDescriptor boot;
+        boot.authority_rules_revision =
+            luminumbra::core::SimulationIdentityValues::kAuthorityRulesRevision;
+        boot.system_config_identity = changed.header.system_config_identity;
+        changed.header.authority_boot = boot;
+        Rewrite(changed);
+        ASSERT_FALSE(testing::Test::HasFatalFailure());
+        ExpectAdmissionRefused("unsupported LREC version");
+    }
+}
+
 TEST_F(ReplayModeAdmission, FixtureMutationRecoversInterruptedPublicationBeforeReplacing) {
     using Identity = std::array<std::uint64_t, 3>;
     const auto identify = [](const fs::path& path) {

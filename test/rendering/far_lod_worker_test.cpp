@@ -23,6 +23,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <set>
 #include <sstream>
@@ -1355,6 +1356,21 @@ void main() { color = vec4(1); }
         }}));
     }
     ASSERT_GT(far.stats().regions_resident, 0u);
+    // The orbit camera is farther than the outer clip from this resident terrain.
+    const glm::vec3 preview_tree(camera.x, 12, camera.z);
+    ASSERT_GT(glm::length(preview_tree - camera), far.outer_clip_m());
+    EXPECT_FALSE(far.terrain_resident_at(preview_tree));
+    far.set_preview_anchor(preview_tree, 0.0f);
+    EXPECT_TRUE(far.terrain_resident_at(preview_tree));
+    EXPECT_FALSE(far.terrain_resident_at(preview_tree + glm::vec3(4000, 0, 0)));
+    EXPECT_FALSE(far.terrain_resident_at({0, std::numeric_limits<float>::infinity(), 0}));
+    far.set_enabled(false);
+    EXPECT_FALSE(far.terrain_resident_at(preview_tree));
+    far.set_enabled(true);
+    far.set_preview_anchor(preview_tree, 1.0f);
+    EXPECT_FALSE(far.terrain_resident_at(preview_tree));
+    far.clear_preview_anchor();
+    EXPECT_FALSE(far.terrain_resident_at(preview_tree));
     shader.use();
     const auto view = glm::lookAt(camera, camera - glm::vec3(0, 1, 0), glm::vec3(0, 0, -1));
     shader.setMat4("view", view);
@@ -1381,6 +1397,32 @@ void main() { color = vec4(1); }
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
     far.shutdown();
     jobs.shutdown();
+}
+
+void ExpectFarPropResidency(FarLodSystem& far, const glm::vec3& camera, float surface_height) {
+    const glm::vec3 far_prop(camera.x + 300.0f, surface_height, camera.z);
+    EXPECT_TRUE(far.terrain_resident_at(far_prop));
+    EXPECT_FALSE(far.terrain_resident_at(glm::vec3(camera.x, surface_height, camera.z)));
+    EXPECT_FALSE(far.terrain_resident_at(far_prop + glm::vec3(4000, 0, 0)));
+    far.set_enabled(false);
+    EXPECT_FALSE(far.terrain_resident_at(far_prop));
+    far.set_enabled(true);
+    far.set_preview_anchor(far_prop, 1.0f);
+    EXPECT_FALSE(far.terrain_resident_at(far_prop));
+    far.set_preview_anchor(far_prop, 0.0f);
+    EXPECT_TRUE(far.terrain_resident_at(far_prop));
+    far.clear_preview_anchor();
+}
+
+TEST(FarLodWorker, FarPropsRequireResidentTerrainAndFinitePositions) {
+    FarLodSystem far;
+    for (const glm::vec3 position : {glm::vec3(300, 12, 0),
+                                     glm::vec3(-300, 12, -1),
+                                     glm::vec3(std::numeric_limits<float>::infinity(), 0, 0),
+                                     glm::vec3(0, std::numeric_limits<float>::quiet_NaN(), 0),
+                                     glm::vec3(0, 0, std::numeric_limits<float>::max())}) {
+        EXPECT_FALSE(far.terrain_resident_at(position));
+    }
 }
 
 // Uses the production vertex and fragment shaders, the real region scheduler,
@@ -1559,6 +1601,7 @@ TEST(FarLodWorker, CameraRegionCoveragePreservesLiveTerrainAndWaterOwnership) {
                 // Unrelated authority changes must not starve terrain and water uploads.
                 world.notify_far_lod_authority_changed(IVec3(10000, 0, 10000));
             }
+            ExpectFarPropResidency(far, pose.camera, surface_height);
             const int rx = static_cast<int>(std::floor(pose.camera.x / 512.0f));
             const int rz = static_cast<int>(std::floor(pose.camera.z / 512.0f));
             const auto camera_row = [&]() -> const FarLodSystem::RegionCoverage* {
