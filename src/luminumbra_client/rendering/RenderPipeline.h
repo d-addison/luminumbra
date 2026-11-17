@@ -14,6 +14,7 @@
 #include "GraphicsRuntimeConfig.h"
 #include "ImpostorCoverage.h"
 #include "Mesh.h"
+#include "NearTerrainRefinement.h"
 #include "RenderContext.h"          // pass contract (make_ssao_context returns by value)
 #include "RenderFrameTypes.h"       // light/weather/cloud PODs (extracted)
 #include "RenderInputs.h"           //  GlassPaneItem (the glass draw list member)
@@ -99,6 +100,7 @@ namespace Luminumbra::Rendering {
 // pool blocks instead (see get_resource_registry_stats). pool_handle == kInvalid
 // means "not pool-resident".
 struct ChunkRenderData {
+    NearTerrainUploadState refinement;
     u32 vao_id = 0;
     u32 vbo_id = 0;
     u32 ebo_id = 0;
@@ -1055,6 +1057,7 @@ private:
     };
 
     struct ChunkMeshPayload {
+        NearTerrainUploadState refinement;
         u32 mesh_version = 0;
         std::vector<VoxelVertex> vertices;
         std::vector<u32> indices;
@@ -1071,8 +1074,11 @@ private:
         bool is_stale = false;
         float distance_sq = 0;
         std::size_t bytes = 0;
+        bool refinement_only = false;
     };
+    NearTerrainRefinementCache m_near_terrain_refinement;
     UploadQueue<MeshUploadCandidate> m_terrain_upload_queue;
+    UploadQueue<MeshUploadCandidate> m_near_terrain_upload_queue;
     UploadQueue<MeshUploadCandidate> m_water_upload_queue;
     template<bool Water>
     void manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks,

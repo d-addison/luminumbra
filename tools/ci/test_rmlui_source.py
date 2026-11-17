@@ -1347,6 +1347,58 @@ class DeliveryRefusals(unittest.TestCase):
             self.assertEqual(final_scans, 1)
         self.assertEqual(target.read_bytes(), b"source")
 
+    def test_inventory_counts_each_directory_before_reading_entry_metadata(self):
+        options = ({}, {"live_git": True}, {"ignore_git": True},
+                   {"allowed_directories": {"entries"}})
+        for kwargs, nested, count in itertools.product(options, (False, True), (0, 2, 3, 4)):
+            with self.subTest(options=kwargs, nested=nested, count=count), \
+                    tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                parent = root / "entries" if nested else root
+                parent.mkdir(exist_ok=True)
+                leaves = {parent / str(index) for index in range(count)}
+                for path in leaves:
+                    path.touch()
+                lstat, inspected = os.lstat, []
+                def inspect(candidate, *args, **fields):
+                    if Path(candidate) in leaves:
+                        inspected.append(Path(candidate))
+                    return lstat(candidate, *args, **fields)
+                with mock.patch.object(M, "STORAGE_ENTRIES", 3 + int(nested)), \
+                        mock.patch.object(M.os, "lstat", side_effect=inspect):
+                    if count > 3:
+                        with self.assertRaisesRegex(M.Refusal, "source entry bound exceeded"):
+                            M.inventory(root, **kwargs)
+                        self.assertEqual(inspected, [])
+                    else:
+                        actual = M.inventory(root, **kwargs)
+                        self.assertEqual(set(actual), {p.relative_to(root).as_posix() for p in leaves})
+                        self.assertCountEqual(inspected, leaves)
+
+    def test_inventory_partial_directory_reads_refuse_before_entry_metadata(self):
+        for live, partial, error in itertools.product((False, True), (False, True),
+                                                     (FileNotFoundError, PermissionError)):
+            with self.subTest(live=live, partial=partial, error=error), \
+                    tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "file").touch()
+                scandir = os.scandir
+                class InterruptedScan:
+                    def __enter__(self):
+                        self.entries = scandir(root)
+                        return self
+                    def __exit__(self, *args):
+                        return self.entries.__exit__(*args)
+                    def __iter__(self):
+                        if partial:
+                            yield next(self.entries)
+                        raise error("controlled directory read failure")
+                with mock.patch.object(M.os, "scandir", return_value=InterruptedScan()), \
+                        mock.patch.object(M, "safe_relative") as validate:
+                    with self.assertRaisesRegex(error, "controlled directory read failure"):
+                        M.inventory(root, live_git=live)
+                    validate.assert_not_called()
+
     def test_live_git_inventory_link_counts_are_scoped_to_ordinary_admin_files(self):
         cases = (("source", (1,)), ("nested/.git/object", (1,)),
                  (".git-object", (1,)), (".git/objects/xx/tmp_obj_1", (0, 1, 2)))
@@ -2964,6 +3016,17 @@ class OwnedCommandLifetime(unittest.TestCase):
             process.wait = mock.Mock(side_effect=AssertionError("replaced wait must not run"))
         self.stop_command_tree()
 
+    def test_deadline_diagnostics_refuse_oversized_directory_before_metadata_walk(self):
+        lstat, inspected = os.lstat, []
+        entries = self.root / "entries"
+        def inspect(candidate, *args, **kwargs):
+            if Path(candidate).parent == entries:
+                inspected.append(Path(candidate))
+            return lstat(candidate, *args, **kwargs)
+        with mock.patch.object(M.os, "lstat", side_effect=inspect):
+            self.test_deadline_diagnostics_capture_the_actual_owned_parent_stack()
+        self.assertEqual(inspected, [], "oversized directory delayed command retirement")
+
     def test_deadline_diagnostics_report_missing_progress_without_waiting(self):
         details = self.command_diagnostics(threading.current_thread())
         self.assertEqual(details["launches"], [])
@@ -3102,8 +3165,13 @@ class OwnedCommandLifetime(unittest.TestCase):
                     raise AssertionError("writer startup fixture did not start")
                 time.sleep(0.005)
             return process
+        native_start = threading.Thread.start
+        def start(thread):
+            if thread.daemon:
+                raise RuntimeError("thread start refused")
+            return native_start(thread)
         with mock.patch.object(M.subprocess, "Popen", side_effect=launch), \
-                mock.patch.object(threading.Thread, "start", side_effect=RuntimeError("thread start refused")):
+                mock.patch.object(threading.Thread, "start", start):
             with self.assertRaisesRegex(RuntimeError, "thread start refused"):
                 M.git(self.root, "--version", input_bytes=b"input")
         before = (self.root / "work").stat().st_size
@@ -3148,8 +3216,19 @@ class CommandCancellationContract(unittest.TestCase):
                                 self.assertEqual(signal.getsignal(sig), signal.SIG_IGN)
                                 self.assertNotIn(sig, inner.handlers)
                         self.assertIsNone(outer.pending)
-                        with outer.command():
-                            outer.check()
+                        # POSIX command registrations are admitted only on workers.
+                        errors = []
+                        def register():
+                            try:
+                                with outer.command():
+                                    outer.check()
+                            except BaseException as error:
+                                errors.append(error)
+                        worker = threading.Thread(target=register)
+                        worker.start()
+                        worker.join(2)
+                        self.assertFalse(worker.is_alive())
+                        self.assertEqual(errors, [])
                         raise OSError("scope failure")
                     for sig, callback in before.items():
                         self.assertEqual(signal.getsignal(sig), signal.SIG_IGN if sig in ignored else callback)
@@ -3176,6 +3255,258 @@ class CommandCancellationContract(unittest.TestCase):
                     stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn("Ran 5 tests", result.stderr)
+
+    def test_worker_cannot_close_the_main_thread_owner(self):
+        if os.name != "posix":
+            self.test_registration_failure_restores_prior_handlers()
+            return
+        errors = []
+        with M.CommandCancellation() as owner:
+            before = dict(owner.handlers)
+            def close():
+                try:
+                    owner.__exit__(None, None, None)
+                except BaseException as error:
+                    errors.append(error)
+            worker = threading.Thread(target=close)
+            worker.start()
+            worker.join(2)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(len(errors), 1)
+            self.assertIsInstance(errors[0], M.Refusal)
+            self.assertIn("main-thread owner", str(errors[0]))
+            self.assertTrue(owner.open)
+            self.assertEqual(owner.handlers, before)
+            for signum in before:
+                self.assertEqual(signal.getsignal(signum), owner.record)
+
+    def test_main_thread_cannot_hold_a_posix_command_registration(self):
+        if os.name != "posix":
+            self.test_owner_closes_admission_restores_handlers_and_forwards_once()
+            return
+        with M.CommandCancellation() as owner:
+            with self.assertRaisesRegex(M.Refusal, "requires a POSIX worker"), owner.command():
+                self.fail("signal-handling thread admitted a command registration")
+            self.assertEqual(owner.active, 0)
+            self.assertTrue(owner.open)
+
+    def test_reentrant_signal_cannot_overwrite_the_first_published_cancellation(self):
+        calls = []
+        previous = lambda signum, frame: calls.append(signum)
+        signal.signal(signal.SIGINT, previous)
+        signal.signal(signal.SIGTERM, previous)
+        with M.CommandCancellation() as owner:
+            class Handlers(dict):
+                def __getitem__(self, signum):
+                    if signum == signal.SIGTERM:
+                        owner.record(signal.SIGINT, None)
+                    return super().__getitem__(signum)
+            # Interrupt construction of the outer record, at the actual prior
+            # callback lookup, before its publication operation can run.
+            owner.handlers = Handlers(owner.handlers)
+            owner.record(signal.SIGTERM, None)
+            self.assertEqual(owner.pending[:2], (signal.SIGINT, None))
+        self.assertEqual(calls, [signal.SIGINT])
+
+    def test_registration_failure_forwards_pending_signal_after_restoration(self):
+        if os.name != "posix":
+            self.test_registration_failure_restores_prior_handlers()
+            return
+        native = signal.signal
+        calls = []
+        def previous(signum, frame):
+            self.assertEqual(owner.handlers, {})
+            self.assertEqual(signal.getsignal(signum), previous)
+            calls.append(signum)
+        native(signal.SIGINT, previous)
+        owner = M.CommandCancellation()
+        def install(signum, callback):
+            if signum == signal.SIGTERM and callback == owner.record:
+                owner.record(signal.SIGINT, None)
+                raise OSError("registration denied after signal")
+            return native(signum, callback)
+        with mock.patch.object(M.signal, "signal", side_effect=install):
+            with self.assertRaisesRegex(OSError, "registration denied after signal"):
+                owner.__enter__()
+        self.assertEqual(calls, [signal.SIGINT])
+        self.assertIsNone(owner.pending)
+        self.assertFalse(owner.open)
+
+    def test_owner_worker_start_failure_restores_handlers_without_spawning(self):
+        if os.name != "posix":
+            self.test_registration_failure_restores_prior_handlers()
+            return
+        before = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+        with mock.patch.object(threading.Thread, "start", side_effect=RuntimeError("worker start refused")), \
+                mock.patch.object(M.subprocess, "Popen", side_effect=AssertionError("must not launch")) as launch:
+            with self.assertRaisesRegex(RuntimeError, "worker start refused"):
+                M.run_command(Path("unused"), [sys.executable], dict(os.environ))
+        launch.assert_not_called()
+        for sig, callback in before.items():
+            self.assertEqual(signal.getsignal(sig), callback)
+
+    def test_signal_handler_retires_group_before_return_and_restores_before_forwarding(self):
+        if os.name != "posix":
+            self.test_owner_closes_admission_restores_handlers_and_forwards_once()
+            return
+        for mode in ("main", "worker", "spawn", "exited", "forward-denied", "forward-gone", "nested"):
+            for signum in (signal.SIGTERM, signal.SIGINT):
+                with self.subTest(mode=mode, signal=signum), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory).resolve(strict=True)
+                    script = root / "owner.py"
+                    script.write_text(textwrap.dedent('''\
+                        import importlib.util, os, select, signal, subprocess, sys, threading, time
+                        from pathlib import Path
+                        loader = importlib.util.spec_from_file_location("source_helper", sys.argv[1])
+                        module = importlib.util.module_from_spec(loader)
+                        loader.loader.exec_module(module)
+                        root, mode, signum = Path(sys.argv[2]), sys.argv[3], int(sys.argv[4])
+                        source = root / 'source'
+                        source.mkdir()
+                        retired, witness = os.pipe()
+                        calls, observed = [], []
+                        def previous(sig, frame):
+                            assert signal.getsignal(sig) is previous
+                            assert signal.getsignal(other) == prior_other
+                            assert observed == ['retired'] * (2 if mode == 'nested' else 1), observed
+                            calls.append(sig)
+                        other = signal.SIGINT if signum == signal.SIGTERM else signal.SIGTERM
+                        prior_other = signal.getsignal(other)
+                        signal.signal(signum, previous)
+                        native_record = module.CommandCancellation.record
+                        def record(owner, sig, frame):
+                            first = owner.pending is None
+                            native_record(owner, sig, frame)
+                            if first:
+                                assert select.select([retired], [], [], 0)[0], 'group alive at handler return'
+                                assert os.read(retired, 1) == b'', 'group witness was not EOF'
+                                observed.append('retired')
+                        module.CommandCancellation.record = record
+                        # Both processes retain the witness until death. The
+                        # writer acknowledges forwarding but keeps writing, and
+                        # its leader ignores the signal: cleanup must escalate.
+                        writer = ("import os,signal,sys,threading,time; from pathlib import Path; "
+                                  "root=Path(sys.argv[1]); "
+                                  "signal.signal(int(sys.argv[2]), lambda *args: (root/'forwarded').touch()); "
+                                  "watch=threading.Timer(4,lambda:os._exit(8)); watch.daemon=True; watch.start(); "
+                                  "f=(root/'work').open('ab',buffering=0); f.write(bytes([120])); "
+                                  "print('writer-ready',flush=True); "
+                                  "exec('while True: f.write(bytes([120])); time.sleep(0.005)')")
+                        leader = ("import os,signal,subprocess,sys,threading,time; "
+                                  "signal.signal(int(sys.argv[3]),signal.SIG_IGN); "
+                                  "watch=threading.Timer(4,lambda:os._exit(8)); watch.daemon=True; watch.start(); "
+                                  "subprocess.Popen([sys.executable,'-I','-B','-c',sys.argv[1],sys.argv[2],sys.argv[3]], "
+                                  "pass_fds=(int(sys.argv[4]),)); "
+                                  "time.sleep(0.02 if sys.argv[5]=='exited' else 4)")
+                        launch = module.subprocess.Popen
+                        launched = []
+                        def popen(*args, **kwargs):
+                            kwargs['pass_fds'] = (witness,)
+                            process = launch(*args, **kwargs)
+                            launched.append(process)
+                            os.close(witness)
+                            if mode == 'spawn':
+                                assert process.stdout.readline() == b'writer-ready\\n'
+                                os.kill(os.getpid(), signum)
+                                # Hold Popen's return until cancellation is
+                                # recorded, proving custody across this window.
+                                until = time.monotonic() + 2
+                                while not owner.pending:
+                                    assert time.monotonic() < until, 'signal was not recorded'
+                                    time.sleep(0.005)
+                            return process
+                        module.subprocess.Popen = popen
+                        native_read = module.os.read
+                        def read(fd, count):
+                            data = native_read(fd, count)
+                            if b'writer-ready' in data:
+                                if mode == 'exited':
+                                    until = time.monotonic() + 2
+                                    while True:
+                                        info = os.waitid(os.P_PID, launched[0].pid,
+                                            os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                                        if info is not None and info.si_pid == launched[0].pid:
+                                            break
+                                        assert time.monotonic() < until, 'leader did not exit'
+                                        time.sleep(0.005)
+                                print('ready', flush=True)
+                            return data
+                        module.os.read = read
+                        native_killpg = module.os.killpg
+                        def killpg(pid, sig):
+                            # A different repeated signal during group cleanup
+                            # must neither interrupt it nor forward a second time.
+                            os.kill(os.getpid(), other)
+                            if sig == signum and mode == 'forward-denied':
+                                raise PermissionError('forward denied')
+                            if sig == signum and mode == 'forward-gone':
+                                raise ProcessLookupError('forward group gone')
+                            result = native_killpg(pid, sig)
+                            if sig == signum:
+                                # Observe real forwarding independently of the
+                                # scheduler fitting a callback into the grace.
+                                until = time.monotonic() + 1
+                                while not (root/'forwarded').exists():
+                                    assert time.monotonic() < until, 'signal was not forwarded'
+                                    time.sleep(0.005)
+                            return result
+                        module.os.killpg = killpg
+                        errors = []
+                        def run():
+                            try:
+                                module.run_command(source, [sys.executable,'-I','-B','-c',leader,
+                                    writer,str(root),str(signum),str(witness),mode], dict(os.environ), cancellation=owner)
+                            except module.Refusal as error:
+                                errors.append(error)
+                        with module.CommandCancellation() as owner:
+                            if mode == 'nested':
+                                with module.CommandCancellation():
+                                    worker = threading.Thread(target=run)
+                                    worker.start()
+                                    worker.join()
+                            elif mode == 'worker':
+                                worker = threading.Thread(target=run)
+                                worker.start()
+                                worker.join()
+                            else:
+                                run()
+                        assert len(errors) == 1, errors
+                        assert calls == [signum], calls
+                        if mode == 'forward-denied':
+                            assert 'forward denied' in str(errors[0]), errors
+                        if mode not in ('forward-denied', 'forward-gone'):
+                            assert (root/'forwarded').exists(), 'original signal never reached descendant'
+                        before = (root/'work').stat().st_size
+                        time.sleep(0.05)
+                        assert (root/'work').stat().st_size == before, 'writer survived cancellation'
+                        os.close(retired)
+                        print('retired-and-restored', flush=True)
+                        '''), encoding="utf-8")
+                    process = subprocess.Popen([sys.executable, "-I", "-B", str(script),
+                                                str(MODULE_PATH.resolve()), str(root), mode, str(signum)],
+                                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                    reader = None
+                    try:
+                        if mode != "spawn":
+                            lines = []
+                            reader = threading.Thread(target=lambda: lines.append(process.stdout.readline()))
+                            reader.start()
+                            reader.join(3)
+                            self.assertFalse(reader.is_alive(), "writer did not become ready")
+                            self.assertEqual(lines, [b"ready\n"])
+                            process.send_signal(signum)
+                        output = process.communicate(timeout=2)[0]
+                        self.assertEqual(process.returncode, 0, output.decode())
+                        self.assertIn(b"retired-and-restored\n", output)
+                    finally:
+                        # Only our launched process is killed. Fixture children
+                        # have their own four-second watchdog even on the base.
+                        if process.poll() is None:
+                            process.kill()
+                        process.communicate(timeout=6)
+                        if reader is not None:
+                            reader.join(2)
+                            self.assertFalse(reader.is_alive())
 
     def test_worker_without_owner_refuses_before_spawn(self):
         errors = []
