@@ -591,6 +591,34 @@ TEST(ShaderCompositingContract, CloudAndAuroraGatesCoverTheFullStormSlab) {
     ExpectContains(source, "overcastGate * stormGate");
 }
 
+TEST(ShaderCompositingContract, SkyGradesAllChannelsBeforeReservingDisplayWhiteForTheDisc) {
+    const auto source = ReadShader("res/shaders/enhanced_skybox.frag");
+    const auto main = ExtractBlock(source, "void main()");
+    const auto clouds = ExtractBlock(source, "vec3 renderClouds(");
+    ExpectContains(clouds, "dot(cloudColor, lumaWeights)");
+    ExpectContains(clouds, "dot(warmCloud, lumaWeights)");
+    const auto grade = ExtractBlock(source, "vec3 preserveSkyLuminance(");
+    ASSERT_FALSE(grade.empty());
+    ExpectContains(grade, "dot(color, lumaWeights)");
+    ExpectContains(grade, "dot(graded, lumaWeights)");
+    ExpectContains(grade, "luminance / gradedLuminance");
+    ExpectContains(grade, "(1.0 - luminance) / chroma[channel]");
+    ExpectContains(grade, "-luminance / chroma[channel]");
+    ExpectContains(main, "skyColor = preserveSkyLuminance(skyColor, graded);");
+    EXPECT_EQ(main.find("tintLuma"), std::string::npos);
+    const auto powers = main.find("graded = pow(");
+    const auto correction = main.find("skyColor = preserveSkyLuminance(");
+    const auto gamma = main.find("skyColor = min(pow(skyColor,");
+    const auto core = main.find("skyColor = mix(skyColor, vec3(1.0)");
+    ASSERT_NE(powers, std::string::npos);
+    ASSERT_NE(correction, std::string::npos);
+    ASSERT_NE(gamma, std::string::npos);
+    ASSERT_NE(core, std::string::npos);
+    EXPECT_LT(powers, correction);
+    EXPECT_LT(correction, gamma);
+    EXPECT_LT(gamma, core);
+}
+
 TEST(ShaderCompositingContract, StarsAreGatedByNightAndComposedBeforeClouds) {
     const std::string source = ReadShader("res/shaders/enhanced_skybox.frag");
     ASSERT_FALSE(source.empty());

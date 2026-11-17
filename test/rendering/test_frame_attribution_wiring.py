@@ -2229,6 +2229,25 @@ class FrameAttributionWiring(unittest.TestCase):
                                          requested in (2, 4, 8, 16) and resolution == requested)
 
 
+class SkySunProjectionWiring(unittest.TestCase):
+    def test_capture_projects_the_resolved_rendered_direction(self):
+        source = read(CLIENT / "core/ScenarioRunnerCapture.cpp")
+        projection = re.search(r"const bool sun_on_screen = ProjectDirectionToScreen\((.*?);",
+                               source, re.S)
+        self.assertIsNotNone(projection)
+        self.assertIn("-renderPipeline.sun_direction()", projection[1])
+        self.assertNotIn("TowardSunDirection(", projection[1])
+        sky_pass = read(CLIENT / "rendering/passes/SkyboxPass.cpp")
+        self.assertIn("const glm::vec3 toward_sun = -ctx.sun.direction;", sky_pass)
+        self.assertIn('setVec3("u_sunDirection", toward_sun)', sky_pass)
+        self.assertIn('setFloat("u_sunCosZenith", toward_sun.y)', compact(sky_pass))
+        aiming = block(read(CLIENT / "core/scenarios/SkyboxVisual.cpp"),
+                       "Luminumbra::Vec3 TowardSunDirection(")
+        self.assertIn("ComputeSunGeometry(time_of_day, 0.0f)", aiming)
+        self.assertNotIn("std::sin", aiming)
+        self.assertNotIn("std::cos", aiming)
+
+
 class CloudRenderingWiring(unittest.TestCase):
     """Exercise scalar shader policy and its shipping pass bindings without GL."""
 
@@ -2308,7 +2327,7 @@ class CloudRenderingWiring(unittest.TestCase):
         self.assertIn("sunTransmittance(u_sunCosZenith) * (2.4 * sunlight)", march)
         self.assertIn("mix(vec3(0.025, 0.028, 0.035), vec3(0.42, 0.47, 0.58), dayFactor)", march)
         self.assertNotIn("cloudColor * 0.12", march)
-        self.assertIn("pow(skyColor, mix(vec3(1.0), vec3(0.9, 0.95, 1.05), dayFactor))", source)
+        self.assertIn("pow(graded, mix(vec3(1.0), vec3(0.9, 0.95, 1.05), dayFactor))", source)
 
     def test_taau_sky_bypass_precedes_history_and_sharpen_in_live_and_replay(self):
         shader = read(ROOT / "res/shaders/taau_resolve.frag")
