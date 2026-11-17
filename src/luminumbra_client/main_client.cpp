@@ -5961,6 +5961,13 @@ int main(int argc, char* argv[]) {
                     if (scenario_runner) {
                         scenario_runner->onPreRenderCapturePins();
                     }
+                    // Time-lapse day drift: the live clock above rewrites time of day every
+                    // frame, so re-apply the capture's drifting value here (frame order,
+                    // like the scene pins). daystep 0 keeps the live clock.
+                    if (g_app.capture.timelapse_frames > 0 &&
+                        g_app.capture.timelapse_daystep > 0.0f) {
+                        renderPipeline.set_time_of_day(g_app.capture.timelapse_tod);
+                    }
                     //  re-bake the creature markers from the live (just-ticked) positions
                     // so the ecology timelapse shows them actually moving each frame.
                     if (g_app.capture.timelapse_creatures) {
