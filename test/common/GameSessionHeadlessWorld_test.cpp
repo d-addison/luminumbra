@@ -15341,3 +15341,186 @@ TEST(GameSessionHeadlessWorldTest, InternalAvatarOwnerRestoresWithoutSpawnOrPers
     }
     jobs.shutdown();
 }
+
+namespace {
+// Keep the bounded C2 scratch records off the Windows test thread's stack.
+struct ContinuationOwnerBuffers {
+    Luminumbra::World::PhysicsOwnerState expected_body, actual_body, expected_player, actual_player,
+        expected_frozen, actual_frozen;
+    Luminumbra::World::PlayerAvatarOwnerState expected_avatar, actual_avatar;
+    std::array<std::uint8_t, Luminumbra::World::kMaxAvatarOwnerBytes> expected_bytes{},
+        actual_bytes{};
+    Luminumbra::Persistence::OwnerContinuation persisted;
+};
+
+void ExpectOwnerContinuationCheckpoint(
+    GameSession& original,
+    GameSession& restored,
+    std::vector<Luminumbra::World::PlayerAvatar>& avatars,
+    std::vector<Luminumbra::World::PlayerAvatar>& restored_avatars,
+    JPH::BodyID body,
+    std::size_t frozen_index,
+    ContinuationOwnerBuffers& buffers) {
+    namespace W = Luminumbra::World;
+    auto* physics = original.GetPhysicsSystem();
+    auto* loaded_physics = restored.GetPhysicsSystem();
+    auto& expected_body = buffers.expected_body;
+    auto& actual_body = buffers.actual_body;
+    ASSERT_TRUE(physics->capture_body_owner(body, expected_body));
+    ASSERT_TRUE(loaded_physics->capture_body_owner(body, actual_body));
+    EXPECT_EQ(expected_body.size, actual_body.size);
+    EXPECT_EQ(expected_body.bytes, actual_body.bytes);
+    auto& expected_player = buffers.expected_player;
+    auto& actual_player = buffers.actual_player;
+    ASSERT_TRUE(physics->capture_player_owner(expected_player));
+    ASSERT_TRUE(loaded_physics->capture_player_owner(actual_player));
+    EXPECT_EQ(expected_player.size, actual_player.size);
+    EXPECT_EQ(expected_player.bytes, actual_player.bytes);
+    auto& expected_frozen = buffers.expected_frozen;
+    auto& actual_frozen = buffers.actual_frozen;
+    ASSERT_TRUE(physics->capture_avatar_owner(frozen_index, expected_frozen));
+    ASSERT_TRUE(loaded_physics->capture_avatar_owner(frozen_index, actual_frozen));
+    EXPECT_EQ(expected_frozen.size, actual_frozen.size);
+    EXPECT_EQ(expected_frozen.bytes, actual_frozen.bytes);
+    avatars[0].position = physics->get_avatar_position(0);
+    avatars[0].velocity = physics->get_avatar_velocity(0);
+    restored_avatars[0].position = loaded_physics->get_avatar_position(0);
+    restored_avatars[0].velocity = loaded_physics->get_avatar_velocity(0);
+    auto& expected_avatar = buffers.expected_avatar;
+    auto& actual_avatar = buffers.actual_avatar;
+    ASSERT_TRUE(original.CaptureAvatarOwner(avatars[0], 0, expected_avatar));
+    ASSERT_TRUE(restored.CaptureAvatarOwner(restored_avatars[0], 0, actual_avatar));
+    auto& expected_bytes = buffers.expected_bytes;
+    auto& actual_bytes = buffers.actual_bytes;
+    expected_bytes.fill(0);
+    actual_bytes.fill(0);
+    std::size_t expected_size = 0, actual_size = 0;
+    ASSERT_TRUE(W::EncodeAvatarOwner(expected_avatar, expected_bytes, expected_size));
+    ASSERT_TRUE(W::EncodeAvatarOwner(actual_avatar, actual_bytes, actual_size));
+    EXPECT_EQ(expected_size, actual_size);
+    EXPECT_EQ(expected_bytes, actual_bytes);
+}
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest, SavedOwnerContinuationRetainsMotionSpinAndTerrainIdentity) {
+    namespace P = Luminumbra::Persistence;
+    namespace W = Luminumbra::World;
+    using Luminumbra::Vec3;
+    const auto buffers = std::make_unique<ContinuationOwnerBuffers>();
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    for (const bool regions : {false, true}) {
+        SCOPED_TRACE(regions);
+        std::vector<W::PlayerAvatar> avatars(2), restored_avatars;
+        GameSession original({.owner_continuation = true});
+        original.SetJobSystem(&jobs);
+        original.SetRootPath(root.root_string());
+        original.SetActiveRegionsEnabled(regions);
+        original.ConfigureOwnerContinuation(avatars, 2, false, false);
+        ASSERT_TRUE(original.CreateWorld("Owner motion", "1337", "default"));
+        auto floor = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+        floor->set_state(Luminumbra::ChunkState::Idle);
+        floor->heightmap_data.assign(static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
+                                         (Luminumbra::CHUNK_SIZE_Z + 1),
+                                     8.0f);
+        floor->mark_sdf_loaded_or_edited();
+        ASSERT_TRUE(original.GetWorldSystem()->adopt_streamed_chunk(floor));
+        auto* physics = original.GetPhysicsSystem();
+        // Leave a hole in the terrain ID sequence: recreating bodies in chunk order
+        // must not accidentally satisfy this regression.
+        const auto retired = physics->create_dynamic_sphere(Vec3(30, 40, 30), Vec3(0), 0.3f);
+        ASSERT_FALSE(retired.IsInvalid());
+        ASSERT_TRUE(physics->add_chunk_collision(*floor));
+        physics->destroy_body(retired);
+        floor->has_collision.store(true);
+        const auto terrain_id = physics->chunk_collision_body(floor->get_id());
+        ASSERT_TRUE(terrain_id.has_value());
+        const auto body = physics->create_dynamic_sphere(
+            Vec3(5.0f, 8.4f, 5.0f), Vec3(0.1234567f, 0.0f, 0.0765432f), 0.3f);
+        ASSERT_FALSE(body.IsInvalid());
+        ASSERT_TRUE(original.IncludePhysicsOwner(body.GetIndexAndSequenceNumber()));
+        EXPECT_FALSE(original.IncludePhysicsOwner(body.GetIndexAndSequenceNumber()));
+        const auto avatar_index = physics->create_avatar_character(Vec3(2.0f, 9.5f, 2.0f));
+        const Vec3 frozen_position(14.0f, 8.0f, 14.0f);
+        const auto frozen_index = physics->create_avatar_character(frozen_position);
+        physics->set_avatar_frozen(frozen_index, true, frozen_position);
+        avatars[1].player_id = 1;
+        avatars[1].position = frozen_position;
+        physics->create_player_controller(Vec3(11.0f, 9.5f, 11.0f));
+        ASSERT_TRUE(physics->set_player_crouched(true));
+        physics->set_avatar_wish_velocity(avatar_index, glm::vec2(0.1234567f, 0.0765432f));
+        avatars[0].facing = -0.1256789f;
+        constexpr float dt = 1.0f / 30.0f;
+        for (int tick = 0; tick < 12; ++tick) {
+            physics->update(dt);
+            physics->update_avatars(dt);
+            physics->update_player(Vec3(0.234567f, 0, 0.125f), false, 5.0f, dt);
+        }
+        avatars[0].position = physics->get_avatar_position(avatar_index);
+        avatars[0].velocity = physics->get_avatar_velocity(avatar_index);
+        auto& expected_body = buffers->expected_body;
+        ASSERT_TRUE(physics->capture_body_owner(body, expected_body));
+        const auto word = [&](std::size_t offset) {
+            std::uint32_t result = 0;
+            for (unsigned i = 0; i < 4; ++i) {
+                result |= static_cast<std::uint32_t>(expected_body.bytes[offset + i]) << (8 * i);
+            }
+            return result;
+        };
+        ASSERT_TRUE(word(72) != 0u || word(80) != 0u); // nonzero angular velocity
+        ASSERT_TRUE(original.SaveWorldState());
+        const auto metadata = nlohmann::json::parse(
+            ReadClockTestFile(original.GetWorldSaveDir() / "world_info.json"));
+        auto& persisted = buffers->persisted;
+        ASSERT_TRUE(P::DecodeOwnerContinuation(metadata.at("owner_continuation").get<std::string>(),
+                                               persisted));
+        ASSERT_EQ(persisted.bodies.size(), 1u);
+        EXPECT_EQ(persisted.bodies[0].state.size, expected_body.size);
+        EXPECT_EQ(persisted.bodies[0].state.bytes, expected_body.bytes);
+
+        GameSession restored({.owner_continuation = true});
+        restored.SetJobSystem(&jobs);
+        restored.SetRootPath(root.root_string());
+        restored.SetActiveRegionsEnabled(regions);
+        restored.ConfigureOwnerContinuation(restored_avatars, 2, false, false);
+        ASSERT_TRUE(restored.LoadWorld(original.GetMetadata().worldId));
+        const auto* continuation = restored.RestoredOwnerContinuation();
+        ASSERT_NE(continuation, nullptr);
+        ASSERT_EQ(continuation->avatars.size(), 2u);
+        for (const auto& owner : continuation->avatars) {
+            restored_avatars.push_back(owner.avatar);
+        }
+        auto* loaded_physics = restored.GetPhysicsSystem();
+        ASSERT_TRUE(loaded_physics->has_player_controller());
+        ASSERT_EQ(loaded_physics->avatar_character_slot_count(), 2u);
+        EXPECT_EQ(loaded_physics->chunk_collision_body(floor->get_id()), terrain_id);
+        // State-only adoption must replace existing terrain, not retain a live
+        // chunk whose shape disagrees with the restored contact topology.
+        const auto previous_floor =
+            restored.GetWorldSystem()->find_streamed_chunk(floor->get_coords());
+        ASSERT_NE(previous_floor, nullptr);
+        previous_floor->heightmap_data[0] += 1.0f;
+        ASSERT_TRUE(restored.LoadWorldStateFrom(original.GetWorldSaveDir()));
+        const auto reloaded_floor =
+            restored.GetWorldSystem()->find_streamed_chunk(floor->get_coords());
+        ASSERT_NE(reloaded_floor, nullptr);
+        EXPECT_NE(previous_floor, reloaded_floor);
+        EXPECT_EQ(reloaded_floor->heightmap_data, floor->heightmap_data);
+        loaded_physics = restored.GetPhysicsSystem();
+        for (int tick = 0; tick < 20; ++tick) {
+            SCOPED_TRACE(tick);
+            if (tick != 0) {
+                physics->update(dt);
+                physics->update_avatars(dt);
+                loaded_physics->update(dt);
+                loaded_physics->update_avatars(dt);
+                physics->update_player(Vec3(0.234567f, 0, 0.125f), false, 5.0f, dt);
+                loaded_physics->update_player(Vec3(0.234567f, 0, 0.125f), false, 5.0f, dt);
+            }
+            ASSERT_NO_FATAL_FAILURE(ExpectOwnerContinuationCheckpoint(
+                original, restored, avatars, restored_avatars, body, frozen_index, *buffers));
+        }
+    }
+    jobs.shutdown();
+}

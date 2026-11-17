@@ -18,8 +18,10 @@
 #include <functional>
 #include <glm/glm.hpp>
 #include <memory>
+#include <optional>
 #include <span>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace Luminumbra {
@@ -71,6 +73,12 @@ public:
     static constexpr std::uint32_t kTerrainBodyHeadroom = 8192;
     // False only when the body pool refuses creation; callers may retry later.
     bool add_chunk_collision(Chunk& chunk);
+    bool add_chunk_collision(Chunk& chunk, JPH::BodyID restored_id);
+    // Const continuation diagnostic. Missing means this chunk has no terrain body.
+    std::optional<JPH::BodyID> chunk_collision_body(ChunkID chunk_id) const;
+    // Explicit-save capture only; refuses above the 8192-terrain-owner bound
+    // before allocating. Output is sorted by chunk ID and unchanged on refusal.
+    bool capture_chunk_collision_owners(std::vector<std::pair<ChunkID, JPH::BodyID>>& output) const;
     void remove_chunk_collision(ChunkID chunk_id);
 
     // ---  : dynamic rigid bodies (projectiles e.g. an arrow) ---
@@ -94,6 +102,9 @@ public:
                        float delta_time);
     void set_player_position(const glm::vec3& position);
     glm::vec3 get_player_position() const;
+    bool has_player_controller() const {
+        return m_player_character != nullptr;
+    }
     bool is_player_grounded() const;
     // Returns false when collision prevents changing shape; the old stance remains.
     bool set_player_crouched(bool is_crouched);

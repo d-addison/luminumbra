@@ -872,7 +872,36 @@ void PhysicsSystem::update(float delta_time) {
     m_batched_queries.ProcessBatch(this);
 }
 
+std::optional<JPH::BodyID> PhysicsSystem::chunk_collision_body(ChunkID chunk_id) const {
+    const auto found = m_chunk_bodies.find(chunk_id);
+    if (found == m_chunk_bodies.end()) {
+        return std::nullopt;
+    }
+    return found->second.body_id;
+}
+
 bool PhysicsSystem::add_chunk_collision(Chunk& chunk) {
+    return add_chunk_collision(chunk, JPH::BodyID());
+}
+
+bool PhysicsSystem::capture_chunk_collision_owners(
+    std::vector<std::pair<ChunkID, JPH::BodyID>>& output) const {
+    if (m_chunk_bodies.size() > kTerrainBodyHeadroom) {
+        return false;
+    }
+    std::vector<std::pair<ChunkID, JPH::BodyID>> candidate;
+    candidate.reserve(m_chunk_bodies.size());
+    for (const auto& [chunk_id, collision] : m_chunk_bodies) {
+        candidate.emplace_back(chunk_id, collision.body_id);
+    }
+    std::sort(candidate.begin(), candidate.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.first < rhs.first;
+    });
+    output = std::move(candidate);
+    return true;
+}
+
+bool PhysicsSystem::add_chunk_collision(Chunk& chunk, JPH::BodyID restored_id) {
     if (!m_body_interface)
         return true;
     if (m_chunk_bodies.find(chunk.get_id()) != m_chunk_bodies.end())
@@ -946,7 +975,9 @@ bool PhysicsSystem::add_chunk_collision(Chunk& chunk) {
                                             JPH::Quat::sIdentity(),
                                             JPH::EMotionType::Static,
                                             Layers::NON_MOVING);
-    JPH::Body* body = m_body_interface->CreateBody(body_settings);
+    JPH::Body* body = restored_id.IsInvalid()
+                          ? m_body_interface->CreateBody(body_settings)
+                          : m_body_interface->CreateBodyWithID(restored_id, body_settings);
     if (body == nullptr) {
         LUMINUMBRA_CORE_WARN(
             "Body pool refused chunk collision for chunk ({},{},{})", cc.x, cc.y, cc.z);

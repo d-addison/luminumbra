@@ -27,6 +27,7 @@
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/replay/ReplayStream.h"
 #include "luminumbra_common/systems/AetherFieldSystem.h"
+#include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
@@ -46,6 +47,7 @@
 #include <array>
 #include <atomic>
 #include <barrier>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -3205,6 +3207,412 @@ bool HoldSessionMetadata() {
     ActiveSessionSaveOverlap()->release.arrive_and_wait();
     return true;
 }
+TEST_F(WorldOpenRefusal, OwnerContinuationDescriptorsRefuseBeforeEveryAdoptionPath) {
+    Systems::PhysicsSystem source;
+    source.startup();
+    const auto index = source.create_avatar_character(Vec3(8.25f, 40.125f, 8.75f));
+    source.set_avatar_wish_velocity(index, glm::vec2(0.125f, 0.25f));
+    source.update_avatars(1.0f / 30.0f);
+    Persistence::OwnerContinuation record;
+    record.origin = Vec3(8, 18, 8);
+    record.anchor = source.get_avatar_position(index);
+    World::PlayerAvatarOwnerState avatar;
+    avatar.avatar.position = record.anchor;
+    avatar.avatar.velocity = source.get_avatar_velocity(index);
+    ASSERT_TRUE(source.capture_avatar_owner(index, avatar.physics));
+    record.avatars.push_back(avatar);
+    const auto sphere = source.create_dynamic_sphere(Vec3(30, 50, 30), Vec3(0.1f, 0, 0.2f), 0.3f);
+    ASSERT_FALSE(sphere.IsInvalid());
+    Persistence::PhysicsOwnerContinuation body;
+    body.owner_id = sphere.GetIndexAndSequenceNumber();
+    body.anchor = source.get_body_position(sphere);
+    ASSERT_TRUE(source.capture_body_owner(sphere, body.state));
+    record.bodies.push_back(body);
+    source.create_player_controller(Vec3(40, 50, 40));
+    record.player.emplace();
+    record.player->anchor = source.get_player_position();
+    ASSERT_TRUE(source.capture_player_owner(record.player->state));
+    std::string encoded;
+    ASSERT_TRUE(Persistence::EncodeOwnerContinuation(record, encoded));
+    const auto valid = nlohmann::json::parse(encoded);
+    const auto original_metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+
+    GameSession live({.owner_continuation = true});
+    live.SetRootPath(RootString());
+    live.SetJobSystem(&jobs);
+    ASSERT_TRUE(live.LoadWorld("fixture"));
+    const auto* world = live.GetWorldSystem();
+    const auto* physics = live.GetPhysicsSystem();
+    const auto revision = live.WorldRevision();
+    const auto id = live.GetMetadata().worldId;
+    const auto chunk_hash = live.ComputeChunkStateHash();
+    const auto sentinel = live.GetRegistry().create();
+    std::vector<std::pair<std::string, nlohmann::json>> invalid;
+    const auto add = [&](const std::string& name, const nlohmann::json& value) {
+        invalid.emplace_back(name, value.dump());
+    };
+    auto changed = valid;
+    changed["version"] = 2u;
+    add("version", changed);
+    invalid.emplace_back("truncated", encoded.substr(0, encoded.size() / 2));
+    invalid.emplace_back("empty", "");
+    invalid.emplace_back("non-string record", valid);
+    invalid.emplace_back("null record", nullptr);
+    invalid.emplace_back("oversized",
+                         std::string(Persistence::kOwnerContinuationRecordBytes + 1, ' '));
+    changed = valid;
+    changed["origin"][0] = std::bit_cast<std::uint32_t>(std::numeric_limits<float>::infinity());
+    add("non-finite origin", changed);
+    changed = valid;
+    changed["origin"][1] = std::bit_cast<std::uint32_t>(1.0e38f);
+    add("finite origin outside chunk range", changed);
+    changed = valid;
+    changed["anchor"][0] = std::bit_cast<std::uint32_t>(16777216.0f);
+    add("finite anchor outside chunk range", changed);
+    changed = valid;
+    changed["anchor"][0] = std::bit_cast<std::uint32_t>(std::numeric_limits<float>::quiet_NaN());
+    add("non-finite moving anchor", changed);
+    changed = valid;
+    changed["avatars"][0]["anchor"][0] = 0u;
+    add("avatar anchor disagreement", changed);
+    changed = valid;
+    changed["avatars"].push_back(changed["avatars"][0]);
+    changed["avatar_count"] = 2u;
+    add("duplicate id", changed);
+    changed = valid;
+    changed["avatars"][0]["id"] = 99u;
+    add("unknown id", changed);
+    changed = valid;
+    changed["avatar_count"] = 0u;
+    add("roster disagreement", changed);
+    changed = valid;
+    changed["avatar_count"] = 4097u;
+    add("avatar count bound", changed);
+    changed = valid;
+    changed["body_count"] = 129u;
+    add("body count bound", changed);
+    changed = valid;
+    changed["player"]["id"] = 1u;
+    add("unknown player owner", changed);
+    changed = valid;
+    changed["player"]["anchor"][0] =
+        std::bit_cast<std::uint32_t>(std::numeric_limits<float>::infinity());
+    add("non-finite player anchor", changed);
+    changed = valid;
+    changed["player"]["anchor"][0] = 0u;
+    add("player anchor disagreement", changed);
+    changed = valid;
+    changed["bodies"][0]["anchor"][0] = 0u;
+    add("body anchor disagreement", changed);
+    changed = valid;
+    changed["bodies"][0]["id"] = 100u;
+    add("body id disagreement", changed);
+    changed = valid;
+    changed["bodies"].push_back(changed["bodies"][0]);
+    changed["body_count"] = 2u;
+    add("duplicate body", changed);
+    changed = valid;
+    changed["bodies"][0]["state"] = "00";
+    add("truncated physics state", changed);
+    changed = valid;
+    changed["avatars"][0]["state"] = std::string(2 * (World::kMaxAvatarOwnerBytes + 1), '0');
+    add("oversized avatar payload", changed);
+    changed = valid;
+    changed["avatar_count"] = -1;
+    add("negative roster count", changed);
+    changed = valid;
+    changed["stream_tick"] = world::WorldClock::kTickLimit + 1;
+    add("stream clock bound", changed);
+    changed = valid;
+    changed["simulation_tick"] = 1u;
+    add("clock disagreement", changed);
+    changed = valid;
+    changed["moving_anchor"] = true;
+    add("moving mode disagreement", changed);
+    changed = valid;
+    changed["water_smoke"] = true;
+    add("water mode disagreement", changed);
+    changed = valid;
+    changed["avatars"][0]["state"] = "00";
+    add("truncated C2 owner", changed);
+    changed = valid;
+    changed["avatars"][0]["state"] = "xx";
+    add("invalid C2 encoding", changed);
+    changed = valid;
+    changed["avatars"][0]["state"] = "!!!!";
+    add("invalid base64 alphabet", changed);
+    changed = valid;
+    changed["avatars"][0]["state"] = "AB==";
+    add("noncanonical base64 padding", changed);
+    changed = valid;
+    changed.erase("avatar_count");
+    add("missing descriptor field", changed);
+    changed = valid;
+    changed["avatars"] = nullptr;
+    add("wrong roster type", changed);
+    changed = valid;
+    changed["anchor"] = {0u, 0u};
+    add("partial anchor", changed);
+    changed = valid;
+    changed["terrain"] = {{{"chunk_id", 0u}, {"body_id", 10240u}}};
+    add("unknown terrain id", changed);
+    changed = valid;
+    changed["terrain"] = {{{"chunk_id", UINT64_MAX}, {"body_id", 2u}}};
+    add("missing terrain owner", changed);
+    changed = valid;
+    changed["terrain"] = {{{"chunk_id", 0u}, {"body_id", 0u}}, {{"chunk_id", 1u}, {"body_id", 0u}}};
+    add("conflicting terrain slots", changed);
+    changed = valid;
+    changed["terrain"] = {{{"chunk_id", 1u}, {"body_id", 3u}}, {{"chunk_id", 0u}, {"body_id", 4u}}};
+    add("unsorted terrain", changed);
+    for (const auto& [name, bytes] : invalid) {
+        SCOPED_TRACE(name);
+        auto metadata = original_metadata;
+        metadata["owner_continuation"] = bytes;
+        Write(save / "world_info.json", metadata.dump());
+        const auto disk = DiskBytes(root);
+        EXPECT_FALSE(live.LoadWorld("fixture"));
+        EXPECT_FALSE(live.LoadWorldStateFrom(save));
+        const auto prepared =
+            GameSession::PrepareWorldLoad(live.CaptureWorldPreparationOptions(), "fixture");
+        EXPECT_FALSE(live.AdoptPreparedWorld(prepared));
+        EXPECT_EQ(live.GetWorldSystem(), world);
+        EXPECT_EQ(live.GetPhysicsSystem(), physics);
+        EXPECT_EQ(live.WorldRevision(), revision);
+        EXPECT_EQ(live.GetMetadata().worldId, id);
+        EXPECT_EQ(live.ComputeChunkStateHash(), chunk_hash);
+        EXPECT_TRUE(live.GetRegistry().valid(sentinel));
+        EXPECT_EQ(DiskBytes(root), disk);
+    }
+    Write(save / "world_info.json", original_metadata.dump());
+    EXPECT_TRUE(live.SaveWorldState());
+}
+
+TEST_F(WorldOpenRefusal, OwnerContinuationRunnerRestoresRosterAndRejectsConflictingBoot) {
+    auto config = SnapshotRunnerConfig(RootString(), false);
+    config.avatar_count = 1;
+    Server::ServerWorldRunner original(config, {.owner_continuation = true});
+    ASSERT_TRUE(original.Boot()) << original.GetBootError();
+    EXPECT_EQ(original.SpawnedAvatarCount(), 1u);
+    original.SetAvatarMove(0, 0.125f, 0.25f);
+    ASSERT_EQ(original.RunFixedTicks(3).ticks_executed, 3u);
+    ASSERT_GT(original.SaveFullSnapshot(), 0u);
+    config.world_id = original.Session()->GetMetadata().worldId;
+    Server::ServerWorldRunner restored(config, {.owner_continuation = true});
+    ASSERT_TRUE(restored.Boot()) << restored.GetBootError();
+    EXPECT_EQ(restored.SpawnedAvatarCount(), 0u);
+    ASSERT_EQ(restored.Avatars().size(), 1u);
+    for (int tick = 0; tick < 4; ++tick) {
+        World::PlayerAvatarOwnerState expected, actual;
+        ASSERT_TRUE(original.CaptureAvatarOwner(0, expected));
+        ASSERT_TRUE(restored.CaptureAvatarOwner(0, actual));
+        EXPECT_EQ(expected.physics.size, actual.physics.size);
+        EXPECT_EQ(expected.physics.bytes, actual.physics.bytes);
+        EXPECT_EQ(original.ComputeWorldSubHashes().entities,
+                  restored.ComputeWorldSubHashes().entities);
+        ExpectSameServerWaterHashes(ReadServerWaterHashes(restored),
+                                    ReadServerWaterHashes(original));
+        ASSERT_EQ(original.RunFixedTicks(1).ticks_executed, 1u);
+        ASSERT_EQ(restored.RunFixedTicks(1).ticks_executed, 1u);
+        EXPECT_EQ(original.OwnerAnchorVisitCount(), original.Avatars().size());
+        EXPECT_EQ(restored.OwnerAnchorVisitCount(), restored.Avatars().size());
+    }
+    ++config.avatar_count;
+    const auto before = DiskBytes(root);
+    Server::ServerWorldRunner conflict(config, {.owner_continuation = true});
+    EXPECT_FALSE(conflict.Boot());
+    EXPECT_EQ(conflict.SpawnedAvatarCount(), 0u);
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, OwnerContinuationDefaultOffRetainsLegacyBytesAndAuthorityHashes) {
+    auto config = SnapshotRunnerConfig(RootString(), false);
+    Server::ServerWorldRunner legacy(config);
+    ASSERT_TRUE(legacy.Boot());
+    ASSERT_GT(legacy.SaveFullSnapshot(), 0u);
+    config.world_id = legacy.Session()->GetMetadata().worldId;
+    const auto directory = legacy.Session()->GetWorldSaveDir();
+    const auto expected = ReadServerWaterHashes(legacy);
+    const auto bytes = DiskBytes(directory);
+    EXPECT_FALSE(
+        nlohmann::json::parse(Read(directory / "world_info.json")).contains("owner_continuation"));
+    Server::ServerWorldRunner disabled(config, {.owner_continuation = false});
+    ASSERT_TRUE(disabled.Boot());
+    EXPECT_EQ(disabled.SpawnedAvatarCount(), 0u);
+    ASSERT_GT(disabled.SaveFullSnapshot(), 0u);
+    const auto actual = ReadServerWaterHashes(disabled);
+    EXPECT_EQ(actual.world, expected.world);
+    ExpectSameServerSubHashes(actual.sub, expected.sub);
+    EXPECT_EQ(DiskBytes(directory), bytes);
+}
+
+TEST_F(WorldOpenRefusal, OwnerContinuationMovingAnchorResumesAcrossRunBoundaries) {
+    auto config = SnapshotRunnerConfig(RootString(), false);
+    config.moving_anchor = true;
+    Server::ServerWorldRunner original(config, {.owner_continuation = true});
+    ASSERT_TRUE(original.Boot());
+    constexpr std::uint64_t saved_ticks = 2u * (CHUNK_SIZE_X + 1u);
+    ASSERT_EQ(original.RunFixedTicks(saved_ticks).ticks_executed, saved_ticks);
+    ASSERT_GT(original.SaveFullSnapshot(), 0u);
+    config.world_id = original.Session()->GetMetadata().worldId;
+    Server::ServerWorldRunner restored(config, {.owner_continuation = true});
+    ASSERT_TRUE(restored.Boot()) << restored.GetBootError();
+    ASSERT_NE(restored.Session()->RestoredOwnerContinuation(), nullptr);
+    EXPECT_EQ(restored.Session()->RestoredOwnerContinuation()->stream_tick, saved_ticks);
+    ExpectSameServerWaterHashes(ReadServerWaterHashes(restored), ReadServerWaterHashes(original));
+    ASSERT_EQ(original.RunFixedTicks(2).ticks_executed, 2u);
+    ASSERT_EQ(restored.RunFixedTicks(2).ticks_executed, 2u);
+    ExpectSameServerWaterHashes(ReadServerWaterHashes(restored), ReadServerWaterHashes(original));
+    EXPECT_EQ(original.OwnerAnchorVisitCount(), 0u);
+    EXPECT_EQ(restored.OwnerAnchorVisitCount(), 0u);
+    ASSERT_GT(original.SaveFullSnapshot(), 0u);
+    const auto original_record =
+        nlohmann::json::parse(Read(original.Session()->GetWorldSaveDir() / "world_info.json"))
+            .at("owner_continuation");
+    ASSERT_GT(restored.SaveFullSnapshot(), 0u);
+    const auto restored_record =
+        nlohmann::json::parse(Read(restored.Session()->GetWorldSaveDir() / "world_info.json"))
+            .at("owner_continuation");
+    EXPECT_EQ(original_record, restored_record);
+}
+
+TEST_F(WorldOpenRefusal, OwnerContinuationRunnerRefusesRosterBoundsAndExhaustedClock) {
+    auto config = SnapshotRunnerConfig(RootString(), false);
+    const auto disk = DiskBytes(root);
+    for (const int count : {-1, 4097}) {
+        SCOPED_TRACE(count);
+        config.avatar_count = count;
+        Server::ServerWorldRunner invalid(config, {.owner_continuation = true});
+        EXPECT_FALSE(invalid.Boot());
+        EXPECT_EQ(invalid.Session(), nullptr);
+        EXPECT_EQ(invalid.SpawnedAvatarCount(), 0u);
+        EXPECT_EQ(DiskBytes(root), disk);
+    }
+    config.avatar_count = 0;
+    Server::ServerWorldRunner original(config, {.owner_continuation = true});
+    ASSERT_TRUE(original.Boot());
+    const auto spawn = original.Session()->GetMetadata().spawnPoint;
+    original.Session()->SetOwnerContinuationAnchor(spawn, spawn, world::WorldClock::kTickLimit);
+    ASSERT_GT(original.SaveFullSnapshot(), 0u);
+    config.world_id = original.Session()->GetMetadata().worldId;
+    Server::ServerWorldRunner restored(config, {.owner_continuation = true});
+    ASSERT_TRUE(restored.Boot()) << restored.GetBootError();
+    const auto before = DiskBytes(root);
+    const auto hashes = ReadServerWaterHashes(restored);
+    const auto report = restored.RunFixedTicks(1);
+    EXPECT_EQ(report.ticks_executed, 0u);
+    EXPECT_EQ(report.frames_executed, 0u);
+    EXPECT_TRUE(report.region_fault);
+    ExpectSameServerWaterHashes(ReadServerWaterHashes(restored), hashes);
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, OwnerContinuationMetadataFailureRollsBackAndKeepsOwnersPending) {
+    auto config = SnapshotRunnerConfig(RootString(), false);
+    config.avatar_count = 1;
+    Server::ServerWorldRunner runner(config, {.owner_continuation = true});
+    ASSERT_TRUE(runner.Boot());
+    ASSERT_GT(runner.SaveFullSnapshot(), 0u);
+    runner.SetAvatarMove(0, 0.125f, 0.25f);
+    ASSERT_EQ(runner.RunFixedTicks(2).ticks_executed, 2u);
+    const auto directory = runner.Session()->GetWorldSaveDir();
+    const auto before = DiskBytes(directory);
+    World::PlayerAvatarOwnerState owner;
+    ASSERT_TRUE(runner.CaptureAvatarOwner(0, owner));
+    SiblingWriteFailure failure;
+    failure.ArmMetadata(directory);
+    EXPECT_EQ(runner.SaveFullSnapshot(), 0u);
+    failure.Reset();
+    EXPECT_TRUE(failure.reached());
+    EXPECT_EQ(DiskBytes(directory), before);
+    World::PlayerAvatarOwnerState pending;
+    ASSERT_TRUE(runner.CaptureAvatarOwner(0, pending));
+    EXPECT_EQ(owner.physics.size, pending.physics.size);
+    EXPECT_EQ(owner.physics.bytes, pending.physics.bytes);
+    EXPECT_FALSE(Persistence::journal_pending(directory));
+    EXPECT_GT(runner.SaveFullSnapshot(), 0u);
+}
+
+TEST_F(WorldOpenRefusal, OwnerContinuationTransientSnapshotsRetainOwnersAndMetadata) {
+    const auto original_metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    std::vector<World::PlayerAvatar> avatars(1);
+    GameSession source({.owner_continuation = true});
+    source.SetJobSystem(&jobs);
+    source.SetRootPath(RootString());
+    source.SetActiveRegionsEnabled(false);
+    source.ConfigureOwnerContinuation(avatars, 1, false, false);
+    ASSERT_TRUE(source.CreateTransientWorld("Owner snapshot", "1337", "default"));
+    auto* physics = source.GetPhysicsSystem();
+    const auto index = physics->create_avatar_character(Vec3(8.25f, 40.125f, 8.75f));
+    physics->set_avatar_wish_velocity(index, glm::vec2(0.125f, 0.25f));
+    physics->update_avatars(1.0f / 30.0f);
+    avatars[0].position = physics->get_avatar_position(index);
+    avatars[0].velocity = physics->get_avatar_velocity(index);
+    World::PlayerAvatarOwnerState expected;
+    ASSERT_TRUE(source.CaptureAvatarOwner(avatars[0], index, expected));
+    for (const auto& destination : {save, root / "owner-snapshot"}) {
+        SCOPED_TRACE(destination.generic_string());
+        ASSERT_TRUE(source.SaveWorldStateTo(destination, nullptr, true));
+        const auto metadata = nlohmann::json::parse(Read(destination / "world_info.json"));
+        ASSERT_TRUE(metadata.contains("owner_continuation"));
+        if (destination == save) {
+            EXPECT_EQ(metadata.at("name"), original_metadata.at("name"));
+            EXPECT_EQ(metadata.at("creationTime"), original_metadata.at("creationTime"));
+        }
+        std::vector<World::PlayerAvatar> restored_avatars;
+        GameSession restored({.owner_continuation = true});
+        restored.SetJobSystem(&jobs);
+        restored.SetRootPath(RootString());
+        restored.SetActiveRegionsEnabled(false);
+        restored.ConfigureOwnerContinuation(restored_avatars, 1, false, false);
+        ASSERT_TRUE(restored.CreateTransientWorld("Owner reader", "1337", "default"));
+        ASSERT_TRUE(restored.LoadWorldStateFrom(destination)) << restored.GetWorldOpenError();
+        ASSERT_NE(restored.RestoredOwnerContinuation(), nullptr);
+        ASSERT_EQ(restored.RestoredOwnerContinuation()->avatars.size(), 1u);
+        World::PhysicsOwnerState actual;
+        ASSERT_TRUE(restored.GetPhysicsSystem()->capture_avatar_owner(0, actual));
+        EXPECT_EQ(actual.size, expected.physics.size);
+        EXPECT_EQ(actual.bytes, expected.physics.bytes);
+    }
+    // The input itself fits the existing metadata bound; adding the owner record
+    // must refuse before payload publication, including for a keyless export.
+    auto metadata = original_metadata;
+    metadata["extension"] = "";
+    const auto remaining = Persistence::SavedInputLimits::kMetadataBytes - metadata.dump().size();
+    metadata["extension"] = std::string(remaining - 64u, 'x');
+    const auto destination = root / "owner-metadata-bound";
+    Write(destination / "world_info.json", metadata.dump());
+    ASSERT_LE(Read(destination / "world_info.json").size(),
+              Persistence::SavedInputLimits::kMetadataBytes);
+    ASSERT_FALSE(Persistence::snapshot_index_exists(destination));
+    const auto before = DiskBytes(destination);
+    EXPECT_FALSE(source.SaveWorldStateTo(destination, nullptr, true));
+    EXPECT_EQ(DiskBytes(destination), before);
+    EXPECT_FALSE(Persistence::journal_pending(destination));
+}
+
+TEST_F(WorldOpenRefusal, OwnerContinuationPreparedRosterChangeRefusesWithoutPublication) {
+    std::vector<World::PlayerAvatar> avatars;
+    GameSession live({.owner_continuation = true});
+    live.SetJobSystem(&jobs);
+    live.SetRootPath(RootString());
+    ASSERT_TRUE(live.LoadWorld("fixture"));
+    ASSERT_TRUE(live.SaveWorldState());
+    const auto prepared =
+        GameSession::PrepareWorldLoad(live.CaptureWorldPreparationOptions(), "fixture");
+    ASSERT_TRUE(GameSession::WorldPreparationError(*prepared).empty());
+    const auto* world = live.GetWorldSystem();
+    const auto* physics = live.GetPhysicsSystem();
+    const auto revision = live.WorldRevision();
+    const auto bytes = DiskBytes(root);
+    live.ConfigureOwnerContinuation(avatars, 1, false, false);
+    EXPECT_FALSE(live.AdoptPreparedWorld(prepared));
+    EXPECT_EQ(live.GetWorldSystem(), world);
+    EXPECT_EQ(live.GetPhysicsSystem(), physics);
+    EXPECT_EQ(live.WorldRevision(), revision);
+    EXPECT_EQ(DiskBytes(root), bytes);
+}
+
 } // namespace
 
 TEST_F(WorldOpenRefusal, OverlappingSessionSaveOwnsDestinationThroughMetadataAndRefusal) {

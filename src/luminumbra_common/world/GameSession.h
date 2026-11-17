@@ -28,6 +28,7 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <span>
 #include <stop_token>
 #include <string>
 #include <vector>
@@ -42,6 +43,7 @@ struct FarWorldAuthorityConfig;
 namespace Luminumbra::Persistence {
 class CreatedWorldArtifacts;
 struct AuthorityCaptureResult;
+struct OwnerContinuation;
 } // namespace Luminumbra::Persistence
 
 namespace luminumbra::fields {
@@ -82,6 +84,10 @@ struct WeatherEventState; //  (): the epoch-schedule POD (WeatherEventSystem.h)
 
 namespace Luminumbra::world {
 
+struct AuthorityProfileOptions {
+    bool owner_continuation = false;
+};
+
 struct WorldConfigValidationResult {
     bool ok = false;
     std::filesystem::path preset_path;
@@ -111,7 +117,19 @@ struct PersistenceStatus {
 class GameSession {
 public:
     GameSession();
+    explicit GameSession(const AuthorityProfileOptions& options);
     ~GameSession();
+
+    // Internal owner-thread binding. The roster outlives the session; capture occurs
+    // between ticks, before dispatching persistence work. IDs are ascending and contiguous.
+    void ConfigureOwnerContinuation(const std::vector<World::PlayerAvatar>& avatars,
+                                    std::uint32_t expected_count,
+                                    bool moving_anchor,
+                                    bool water_smoke);
+    bool IncludePhysicsOwner(std::uint32_t body_id);
+    void SetOwnerContinuationAnchor(const Vec3& origin, const Vec3& anchor, std::uint64_t tick);
+    const Persistence::OwnerContinuation* RestoredOwnerContinuation() const;
+    void SetOwnerContinuationSimulationAnchors(std::span<const Vec3> anchors);
 
     // Initialize a new world with the given parameters. Refusal before adoption
     // preserves the current world and its save eligibility, including fatal state.
@@ -178,6 +196,10 @@ public:
         bool aether_state = false;
         bool job_system_available = false;
         bool transient_creation = false;
+        bool owner_continuation = false;
+        std::optional<std::uint32_t> owner_roster_count;
+        bool owner_moving_anchor = false;
+        bool owner_water_smoke = false;
     };
     struct WorldPreparation;
     WorldPreparationOptions CaptureWorldPreparationOptions() const;
@@ -694,6 +716,18 @@ public:
     std::filesystem::path GetSaveRootPath() const;
 
 private:
+    bool CaptureOwnerContinuation(std::string& bytes) const;
+    AuthorityProfileOptions m_authorityProfileOptions;
+    const std::vector<World::PlayerAvatar>* m_ownerAvatarSources = nullptr;
+    std::optional<std::uint32_t> m_ownerRosterCount;
+    bool m_ownerMovingAnchor = false;
+    bool m_ownerWaterSmoke = false;
+    Vec3 m_ownerOrigin{};
+    Vec3 m_ownerAnchor{};
+    std::uint64_t m_ownerStreamTick = 0;
+    bool m_ownerAnchorSet = false;
+    std::vector<std::uint32_t> m_ownerBodyIds;
+    std::shared_ptr<Persistence::OwnerContinuation> m_restoredOwnerContinuation;
     void DisableFarWorldAuthorityProducer();
     std::unique_ptr<World::FarWorldAuthorityProducer> m_farWorldAuthorityProducer;
     bool m_farWorldSourceNeedsRefresh = false;
@@ -719,16 +753,19 @@ private:
     void RestoreWorldClock(const WorldClock& clock);
     void RestoreAmbientFieldsAtTick(std::uint64_t tick);
     bool SaveWorldMetadataTo(const std::filesystem::path& save_dir,
-                             Persistence::CreatedWorldArtifacts* artifacts = nullptr) const;
+                             Persistence::CreatedWorldArtifacts* artifacts = nullptr,
+                             const std::string* owner_bytes = nullptr) const;
     bool SaveWorldStateToImpl(const std::filesystem::path& save_dir,
                               WorldStateSaveReport* report,
                               bool full_snapshot,
                               bool write_metadata);
     bool PrepareWorldMetadataTo(const std::filesystem::path& save_dir,
                                 bool full_metadata,
-                                std::string& bytes) const;
+                                std::string& bytes,
+                                const std::string* owner_bytes = nullptr) const;
     friend class GameSessionGroundMetadataTest;
-    bool ReconcileWorldStateMetadataTo(const std::filesystem::path& save_dir);
+    bool ReconcileWorldStateMetadataTo(const std::filesystem::path& save_dir,
+                                       const std::string* owner_bytes = nullptr);
     struct LoadedWorldState;
     bool ReadWorldStateFrom(const std::filesystem::path& save_dir,
                             LoadedWorldState& state,
