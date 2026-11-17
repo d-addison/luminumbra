@@ -245,6 +245,24 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn('document->GetElementById("graphics_terrain_near_refinement")', ui)
         self.assertIn('values.terrain_near_refinement ? "on" : "off"', ui)
 
+    def test_far_render_integration_uses_region_freshness_and_keeps_strict_default(self):
+        legacy = read(RENDERING / "FarLodSystem.cpp")
+        current = body(legacy, "bool FarLodSystem::build_result_current(")
+        self.assertIn("is_far_lod_sdf_snapshot_current(*result.sdf_snapshot, true)", current)
+        self.assertIn("far_lod_region_authority_revision(result.rx, result.rz)", current)
+        world_header = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.h")
+        self.assertIn("bool region_scoped = false", world_header)
+        world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        validation = body(world, "bool SHIELD_WorldSystem::is_far_lod_sdf_snapshot_current(")
+        regional = body(validation, "if (region_scoped)")
+        self.assertIn("snapshot.region_authority_revision", regional)
+        self.assertIn("far_lod_region_authority_revision(", regional)
+        self.assertNotIn("m_far_lod_authority_revision.load", regional)
+        self.assertIn("} else if (snapshot.authority_revision !=", validation)
+        for retained in ("m_durable_read_failed", "snapshot.params_hash",
+                         "HasPublishedFarLodSdf", "published_sdfs == captured_resident_sdfs"):
+            self.assertIn(retained, validation)
+
     def test_near_terrain_eligibility_publishes_with_matching_mesh_version(self):
         world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
         self.assertIn("CaptureNearTerrainMeshEvidence(", world)
@@ -517,7 +535,8 @@ class UploadBudgetWiring(unittest.TestCase):
         cleanup = body(self.main, "auto finish_world_replacement =")
         guard = "if (gameSession->WorldRevision() != entry_world_revision)"
         self.assertIn(guard, cleanup)
-        self.assertEqual(compact(cleanup.split(guard, 1)[1]), "prepare_world_entry();")
+        self.assertEqual(compact(cleanup.split(guard, 1)[1]),
+                         "{ release_player_controller(); prepare_world_entry(); }")
         # Both outcomes use the same revision predicate: refusal before adoption
         # preserves state; success and a failure after adoption both retire it.
         expression = re.search(r"if \((.*)\)", cleanup).group(1)
