@@ -387,7 +387,10 @@ vec3 CalculateLightContribution(vec3 L, vec3 V, vec3 N, vec3 F0, vec3 albedo, fl
 // Long-range sky visibility via an upward view-space ray-march against the
 // G-buffer. Returns 1.0 = fully open to the sky, -> u_caveAmbientFloor when the
 // fragment is roofed over (cave/overhang). At most 32 march position taps plus
-// 8 refinement position taps shared by all crossings, for a maximum of 40.
+// 8 ordinary refinement and 8 independent recovery position lookups: at most
+// 48. For n = min(u_caveSkySteps, 32), the tight bound is n + 8 when n <= 2,
+// otherwise n + 16; nonpositive distance, thickness or steps perform zero reads.
+// Both refinement budgets are global to this march, independent of thickness.
 // Only called when u_caveAmbientOcclusion > 0.5 (see main); zero cost when OFF.
 float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
     if (u_caveSkyMaxDist <= 0.0 || u_caveThickness <= 0.0 || u_caveSkySteps <= 0) {
@@ -411,6 +414,7 @@ float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
     float previousDistance = 0.0;
     float previousDepthGap = 0.0;
     int refinementTaps = 0;
+    int recoveryTaps = 0;
     for (int s = 1; s <= 32; ++s) {
         if (s > steps) break;
         float distanceAlongRay = stepLen * float(s);
@@ -425,6 +429,7 @@ float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
         // gPosition is 0 where nothing was rendered (sky); skip those (open).
         if (!valid || dot(sampPos, sampPos) < 1e-6) {
             previousValid = false;
+            previousDistance = distanceAlongRay;
             continue;
         }
         // The ray point p and the stored surface sampPos share the same screen
@@ -433,6 +438,10 @@ float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
         // upward sample.
         float depthGap = length(p) - length(sampPos);
         bool crossing = previousValid && previousDepthGap <= 0.05 && depthGap > 0.05;
+        // An empty coarse tap supplies an open endpoint, but only overhead
+        // geometry may start recovery. Save the endpoint before advancing it.
+        bool emptyCrossing = !previousValid && depthGap > 0.05 &&
+            dot(sampPos - ro, skyDirView) > 0.0;
         float frontDistance = previousDistance;
         float backDistance = distanceAlongRay;
         previousValid = true;
@@ -442,10 +451,17 @@ float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
         // independent of thickness. Stopping on entry into the thickness band
         // would make its outer edge select a different occlusion strength.
         // Silhouettes must still supply an observed sample inside the band.
-        if (crossing) {
-            bool originBracket = s == 1;
+        // Preserve the base contribution only for recovery: ordinary crossings
+        // must continue to select their contribution exclusively by refinement.
+        if (emptyCrossing && depthGap < u_caveThickness) {
+            float distanceWeight = 1.0 - clamp(length(sampPos - ro) / u_caveSkyMaxDist, 0.0, 1.0);
+            float thicknessWeight = 1.0 - smoothstep(0.5 * u_caveThickness, u_caveThickness, depthGap);
+            occluded = max(occluded, distanceWeight * thicknessWeight);
+        }
+        if (crossing || emptyCrossing) {
+            bool originBracket = s == 1 || emptyCrossing;
             for (int refinement = 0; refinement < 8; ++refinement) {
-                if (refinementTaps >= 8) break;
+                if (emptyCrossing ? recoveryTaps >= 8 : refinementTaps >= 8) break;
                 float midpoint = 0.5 * (frontDistance + backDistance);
                 vec3 refinedPoint = ro + skyDirView * midpoint;
                 vec4 refinedClip = u_projection * vec4(refinedPoint, 1.0);
@@ -453,7 +469,11 @@ float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
                 vec2 refinedUv = (refinedClip.xy / refinedClip.w) * 0.5 + 0.5;
                 if (refinedUv.x < 0.0 || refinedUv.x > 1.0 || refinedUv.y < 0.0 || refinedUv.y > 1.0) break;
                 vec3 refinedPosition = vec3(0.0);
-                ++refinementTaps;
+                if (emptyCrossing) {
+                    ++recoveryTaps;
+                } else {
+                    ++refinementTaps;
+                }
                 if (!farWorldPosition(gPosition, u_sceneDepth, refinedUv, refinedPosition) ||
                     dot(refinedPosition, refinedPosition) < 1e-6) {
                     // The origin is already known open even when the first
@@ -466,6 +486,16 @@ float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
                     break;
                 }
                 float refinedGap = length(refinedPoint) - length(refinedPosition);
+                // Below-origin foreground cannot replace an overhead recovery
+                // endpoint, including when viewing elevated geometry from below.
+                if (emptyCrossing && refinedGap > 0.05 &&
+                    dot(refinedPosition - ro, skyDirView) <= 0.0) {
+                    if (originBracket) {
+                        frontDistance = midpoint;
+                        continue;
+                    }
+                    break;
+                }
                 if (refinedGap <= 0.05) {
                     frontDistance = midpoint;
                     originBracket = false;

@@ -4049,6 +4049,14 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
         for (const auto& chunk : m_activeRegionsEnabled
                                      ? m_worldSystem->snapshot_authoritative_chunks()
                                      : m_worldSystem->snapshot_streamed_chunks()) {
+            // Incremental indexed saves regenerate unowned terrain and water. Full snapshots
+            // retain the complete resident set, including clean generated chunks.
+            // Dirty water has already acquired ownership above; keep all owned state,
+            // including calm counters, even when its depth and flux match generation.
+            if (m_activeRegionsEnabled && !full_snapshot && chunk &&
+                chunk->sdf_provenance() == ChunkSdfProvenance::GeneratedCurrentParams &&
+                !chunk->needs_authority() && !chunk->is_voxel_data_dirty())
+                continue;
             state.insert_chunk(chunk);
         }
         result.chunks_total = state.size();
@@ -4122,7 +4130,7 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
             (retarget && std::ranges::any_of(state.snapshot_chunks(), [](const auto& chunk) {
                  return chunk && chunk->needs_authority();
              }));
-        // A first chunk snapshot includes all residents. Later incremental saves
+        // A first chunk snapshot includes all selected residents. Later incremental saves
         // replace only dirty regions, even when unrelated residents exceed writer caps.
         const bool has_snapshot =
             !write_chunks || full_snapshot

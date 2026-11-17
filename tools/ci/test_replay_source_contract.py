@@ -972,6 +972,43 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         pair = self.function(source, "save_metadata_and_active_regions", "WorldSaveService::")
         self.assertLess(pair.index("admit_metadata_bytes(bytes"), pair.index("save_active_regions("))
 
+    def test_clean_generated_chunk_omission_is_incremental_only(self):
+        session = read_source("src/luminumbra_common/world/GameSession.cpp")
+        save = self.function(session, "SaveWorldStateToImpl")
+        selection = save.split("WorldStreamingState state;", 1)[1].split(
+            "result.chunks_total = state.size();", 1)[0]
+        self.assertRegex(
+            selection,
+            r"if\s*\(m_activeRegionsEnabled\s*&&\s*!full_snapshot\s*&&\s*chunk\s*&&\s*"
+            r"chunk->sdf_provenance\(\)\s*==\s*ChunkSdfProvenance::GeneratedCurrentParams\s*&&\s*"
+            r"!chunk->needs_authority\(\)\s*&&\s*!chunk->is_voxel_data_dirty\(\)\)\s*"
+            r"continue;\s*state.insert_chunk\(chunk\);")
+        self.assertLess(save.index("m_worldSystem->sync_water_authority();"),
+                        save.index("WorldStreamingState state;"))
+        regression = read_source("test/common/GameSessionHeadlessWorld_test.cpp")
+        for name in ("FirstEnabledChunkSaveIncludesCleanResidentRegions",
+                     "IndexedFullSnapshotsIncludeCleanGeneratedWater",
+                     "IndexedFullSnapshotsAdmitEmptyAndRejectMalformedCleanWater"):
+            self.assertIn("TEST(GameSessionHeadlessWorldTest, " + name + ")", regression)
+
+    def test_water_mutation_roundtrip_matches_saved_resolution_before_adoption(self):
+        regression = read_source("test/common/GameSessionHeadlessWorld_test.cpp")
+        body = regression.split(
+            "TEST(GameSessionHeadlessWorldTest, GenuineWaterChangesAfterCleanInitializationPersistAndRoundTrip)",
+            1)[1].split("\nTEST(", 1)[0]
+        self.assertIn("mutation < 5", body)
+        self.assertIn("water->ResizeSimulationGrid(*chunk, Luminumbra::Systems::WaterDetailLevel::High)",
+                      body)
+        self.assertIn("if (mutation != 4)", body)
+        self.assertRegex(
+            body,
+            r"EnableSnapshotSession\(reopened, root, jobs\);\s*"
+            r"reopened.SetWaterHighResEnabled\(mutation == 4\);\s*"
+            r'ASSERT_TRUE\(reopened.CreateWorld\("Water mutation reload", "1337", "default"\)\);\s*'
+            r"ASSERT_TRUE\(reopened.LoadWorldStateFrom\(session.GetWorldSaveDir\(\)\)\);")
+        self.assertIn("EXPECT_TRUE(adopted->same_water_state(*chunk));", body)
+        self.assertIn("EXPECT_EQ(reopened.ComputeChunkStateHash(), before_save);", body)
+
     def test_saved_json_depth_is_admitted_before_parsing_and_component_copying(self):
         admission = read_source("src/luminumbra_common/persistence/SavedJsonAdmission.h")
         traversal = admission.split("inline bool AdmitJsonValueDepth(", 1)[1].split("inline bool BoundedJsonDump(", 1)[0]

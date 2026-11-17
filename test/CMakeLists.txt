@@ -231,7 +231,6 @@ add_executable(common_tests
     rendering/FarWorldReplay_test.cpp
     rendering/FarWorldDiagnostics_test.cpp
     rendering/FarWorldRenderer_test.cpp
-    rendering/FarWorldLegacyIsolation_test.cpp
     rendering/FarWorldOwnership_test.cpp
     rendering/FarWorldDepthBias_test.cpp
     rendering/FarWorldFog_test.cpp
@@ -451,6 +450,17 @@ target_include_directories(capture_manifest_test PRIVATE ../src ../src/luminumbr
 target_link_libraries(capture_manifest_test PRIVATE gtest_main nlohmann_json::nlohmann_json luminumbra_common glad)
 luminumbra_configure_first_party_target(capture_manifest_test)
 
+# GL-free feature selection, runtime resolution and capability manifest contracts.
+add_executable(capture_feature_profile_test
+    rendering/capture_feature_profile_test.cpp
+    ../src/luminumbra_client/rendering/CaptureFeatureProfile.cpp
+    ../src/luminumbra_client/rendering/TemporalAudit.cpp
+    ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp)
+target_include_directories(capture_feature_profile_test PRIVATE ../src ../src/luminumbra_client)
+target_link_libraries(capture_feature_profile_test PRIVATE
+    gtest_main luminumbra_common nlohmann_json glm)
+luminumbra_configure_first_party_target(capture_feature_profile_test)
+
 #  far-field impostors: the hemi-octahedral view<->tile mapping math (GL-free,
 # the shared source of truth for the atlas bake + the impostor shader).
 add_executable(octa_impostor_test
@@ -593,6 +603,7 @@ endif()
 
 add_executable(render_smoke_test
     rendering/render_smoke_test.cpp
+    rendering/FarWorldLegacyIsolation_test.cpp
     rendering/FarWorldShadow_test.cpp
     rendering/FarWorldFogGl_test.cpp
     rendering/FarWorldWaterGl_test.cpp
@@ -2121,6 +2132,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     tree_lod_test
     rendering_defaults_test
     capture_manifest_test
+    capture_feature_profile_test
     # the hemi-octa mapping test was built but never
     # registered — the atlas-bake/shader shared source of truth had zero
     # executing coverage. GL-free pure math, safe in the default lane.
