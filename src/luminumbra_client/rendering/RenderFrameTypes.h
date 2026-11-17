@@ -94,6 +94,24 @@ struct CloudRenderState {
 //    kLiveBoltPenUp separators) in NDC; the lighting frag adds bright pixels near any
 //    segment so the capture shows a thin high-gradient structure.
 inline constexpr int kMaxBoltSegmentPoints = 96; // GLSL uniform array cap
+// Screen coordinates plus reciprocal positive view depth. Reciprocal depth is
+// affine along a projected segment, including endpoints clipped to the view.
+// Zero marks unavailable depth; these points never draw a channel.
+struct ProjectedBoltPoint : glm::vec2 {
+    float inverse_depth = 0.0f;
+
+    ProjectedBoltPoint()
+        : glm::vec2(0.0f) {}
+    ProjectedBoltPoint(glm::vec2 ndc, float depth = 0.0f)
+        : glm::vec2(ndc)
+        , inverse_depth(depth) {}
+    ProjectedBoltPoint(float x_ndc, float y_ndc)
+        : ProjectedBoltPoint(glm::vec2(x_ndc, y_ndc)) {}
+    bool operator==(const ProjectedBoltPoint& other) const {
+        return glm::vec2(*this) == glm::vec2(other) && inverse_depth == other.inverse_depth;
+    }
+};
+
 struct LightningRenderState {
     bool active = false;          // master toggle (false == zero added cost)
     float pulse_intensity = 0.0f; // [0,~3] strongest strike pulse
@@ -110,7 +128,7 @@ struct LightningRenderState {
     // LiveStrikeFlash.h, is the exact PEN-UP separator between disjoint polylines
     // (main channel / each branch). Points are clipped to the view with a glow margin.
     // Drawn as connected segments between consecutive non-separator points.
-    std::vector<glm::vec2> bolt_points_ndc;
+    std::vector<ProjectedBoltPoint> bolt_points_ndc;
 };
 
 } // namespace Luminumbra::Rendering

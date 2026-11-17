@@ -7,6 +7,8 @@
 #include <vector>
 
 #include "luminumbra_client/audio/IAudioManager.h"
+#include "luminumbra_client/rendering/Camera.h"
+#include "luminumbra_client/rendering/LightningBolt.h"
 #include "luminumbra_client/rendering/LiveStrikeComposer.h"
 #include "luminumbra_client/rendering/LiveStrikeTracker.h"
 
@@ -17,6 +19,7 @@ using Luminumbra::Rendering::IsLiveBoltPenUp;
 using Luminumbra::Rendering::kLiveBoltPenUp;
 using Luminumbra::Rendering::LiveSegmentTouchesView;
 using Luminumbra::Rendering::LiveStrikeTracker;
+using Luminumbra::Rendering::ProjectedBoltPoint;
 using Luminumbra::Rendering::ProjectedLiveStrike;
 using Luminumbra::Rendering::SelectLiveStrikeGeometry;
 using Luminumbra::Systems::StrikeEvent;
@@ -132,8 +135,8 @@ TEST(LiveStrikeTracker, TickZeroAndMaximumTickDoNotOverflowTheWindow) {
     EXPECT_EQ(tracker.size(), 2u);
 }
 
-std::vector<glm::vec2> Stroke(glm::vec2 from, glm::vec2 to, std::size_t count) {
-    std::vector<glm::vec2> points;
+std::vector<ProjectedBoltPoint> Stroke(glm::vec2 from, glm::vec2 to, std::size_t count) {
+    std::vector<ProjectedBoltPoint> points;
     for (std::size_t i = 0; i < count; ++i) {
         const float t = static_cast<float>(i) / static_cast<float>(count - 1);
         points.push_back(from + (to - from) * t);
@@ -152,7 +155,7 @@ ProjectedLiveStrike Strike(glm::vec2 origin, std::size_t branches, float pulse) 
     return strike;
 }
 
-std::size_t Strokes(const std::vector<glm::vec2>& points) {
+std::size_t Strokes(const std::vector<ProjectedBoltPoint>& points) {
     std::size_t strokes = points.empty() ? 0 : 1;
     for (const glm::vec2& point : points) {
         if (IsLiveBoltPenUp(point)) {
@@ -173,8 +176,8 @@ TEST(LiveStrikeComposer, LaterVisibleChannelSurvivesHeavilyBranchedEarlierStrike
     EXPECT_EQ(Strokes(composed.points), 3u);
     EXPECT_EQ(composed.points.front(), strikes[0].main_channel.front());
     EXPECT_EQ(composed.points[31], strikes[1].main_channel.front());
-    EXPECT_EQ(composed.points[30], kLiveBoltPenUp);
-    EXPECT_EQ(composed.points[61], kLiveBoltPenUp);
+    EXPECT_EQ(glm::vec2(composed.points[30]), kLiveBoltPenUp);
+    EXPECT_EQ(glm::vec2(composed.points[61]), kLiveBoltPenUp);
     EXPECT_EQ(composed.points[62], strikes[0].branches[0].front());
 }
 
@@ -320,8 +323,8 @@ TEST(LiveStrikeComposer, CrossingStrokeIsVisibleAndTiesKeepTheEarlierFlash) {
     const std::vector<ProjectedLiveStrike> strikes{crossing, later};
     const auto composed = ComposeLiveStrikes(strikes, 96);
     ASSERT_EQ(composed.points.size(), 2u + 1u + 30u);
-    EXPECT_EQ(composed.points[0], glm::vec2(-1.0f, 0.0f));
-    EXPECT_EQ(composed.points[1], glm::vec2(1.0f, 0.0f));
+    EXPECT_EQ(glm::vec2(composed.points[0]), glm::vec2(-1.0f, 0.0f));
+    EXPECT_EQ(glm::vec2(composed.points[1]), glm::vec2(1.0f, 0.0f));
     EXPECT_FALSE(IsLiveBoltPenUp(composed.points[0]));
     EXPECT_FALSE(IsLiveBoltPenUp(composed.points[1]));
     EXPECT_EQ(composed.flashes.entries[0].strike_ndc, crossing.strike_ndc);
@@ -366,22 +369,22 @@ TEST(LiveStrikeComposer, ClippedExcursionsAndPenUpsKeepDisconnectedPiecesSeparat
                            kLiveBoltPenUp,
                            {-2.0f, -0.5f},
                            {2.0f, -0.5f}};
-    const std::vector<glm::vec2> expected{{-1.0f, 0.0f},
-                                          {0.0f, 0.0f},
-                                          {1.0f, 0.0f},
-                                          kLiveBoltPenUp,
-                                          {1.0f, 0.5f},
-                                          {0.0f, 0.5f},
-                                          kLiveBoltPenUp,
-                                          {-1.0f, -0.5f},
-                                          {1.0f, -0.5f}};
+    const std::vector<ProjectedBoltPoint> expected{{-1.0f, 0.0f},
+                                                   {0.0f, 0.0f},
+                                                   {1.0f, 0.0f},
+                                                   kLiveBoltPenUp,
+                                                   {1.0f, 0.5f},
+                                                   {0.0f, 0.5f},
+                                                   kLiveBoltPenUp,
+                                                   {-1.0f, -0.5f},
+                                                   {1.0f, -0.5f}};
     EXPECT_EQ(ComposeLiveStrikes(std::span(&strike, 1), expected.size()).points, expected);
     // A stroke that grows beyond the budget through clipping is dropped whole.
     EXPECT_TRUE(ComposeLiveStrikes(std::span(&strike, 1), expected.size() - 1).points.empty());
     // A turn outside the view also needs a break when both segments touch the view.
     strike.main_channel = {{0.0f, 0.0f}, {2.0f, 0.0f}, {0.0f, 1.0f}};
     EXPECT_EQ(ComposeLiveStrikes(std::span(&strike, 1), 5).points,
-              (std::vector<glm::vec2>{
+              (std::vector<ProjectedBoltPoint>{
                   {0.0f, 0.0f}, {1.0f, 0.0f}, kLiveBoltPenUp, {1.0f, 0.5f}, {0.0f, 1.0f}}));
     // Overflow rolls back only this stroke, preserving earlier geometry and its flash.
     const ProjectedLiveStrike earlier = Strike({-0.5f, 0.5f}, 0, 0.2f);
@@ -405,7 +408,7 @@ TEST(LiveStrikeComposer, NonFiniteEndpointsDoNotUploadOrJoinAcrossInvalidSegment
         EXPECT_FALSE(LiveSegmentTouchesView(invalid, {0.0f, 0.0f}));
         strike.main_channel = {{-0.5f, 0.0f}, {0.0f, 0.0f}, invalid, {0.0f, 0.5f}, {0.5f, 0.5f}};
         EXPECT_EQ(ComposeLiveStrikes(std::span(&strike, 1), 96).points,
-                  (std::vector<glm::vec2>{
+                  (std::vector<ProjectedBoltPoint>{
                       {-0.5f, 0.0f}, {0.0f, 0.0f}, kLiveBoltPenUp, {0.0f, 0.5f}, {0.5f, 0.5f}}));
     }
 }
@@ -591,3 +594,75 @@ TEST(LiveStrikeComposer, EmptyInputAndTinyCapacityDrawNothing) {
 }
 
 } // namespace
+
+TEST(LightningBoltDepth, ProjectionAndClippingPreserveReciprocalViewDepth) {
+    using namespace Luminumbra::Rendering;
+    LightningBoltGeometry bolt;
+    bolt.main_channel = {{6.0f, 5.0f, 18.0f}, {26.0f, 5.0f, 12.0f}};
+    bolt.branches = {{{10.0f, 5.0f, 16.0f}, {10.0f, 7.0f, 16.0f}}};
+    const auto view = glm::translate(glm::mat4(1), glm::vec3(-10, -5, -20));
+    bolt.ground_point = bolt.main_channel.back();
+    for (float far_plane : {3200.0f, 17408.0f}) {
+        const auto projection = ReversedZPerspective(glm::radians(90.0f), 1.0f, 0.1f, far_plane);
+        const auto strike = ProjectLightningBolt(bolt, projection * view, 0.7f);
+        ASSERT_EQ(strike.main_channel.size(), 2u);
+        EXPECT_FLOAT_EQ(strike.main_channel[0].inverse_depth, 0.5f);
+        EXPECT_FLOAT_EQ(strike.main_channel[1].inverse_depth, 0.125f);
+        EXPECT_NEAR(strike.main_channel[0].x, -2.0f, 0.00001f);
+        EXPECT_NEAR(strike.main_channel[1].x, 2.0f, 0.00001f);
+        const auto composed = ComposeLiveStrikes(std::span(&strike, 1), 96);
+        ASSERT_EQ(composed.points.size(), 5u);
+        EXPECT_NEAR(composed.points[0].inverse_depth, 0.40625f, 0.000001f);
+        EXPECT_NEAR(composed.points[1].inverse_depth, 0.21875f, 0.000001f);
+        EXPECT_TRUE(IsLiveBoltPenUp(composed.points[2]));
+        EXPECT_FLOAT_EQ(composed.points[2].inverse_depth, 0.0f);
+        EXPECT_FLOAT_EQ(composed.points[3].inverse_depth, 0.25f);
+        EXPECT_FLOAT_EQ(composed.points[4].inverse_depth, 0.25f);
+        EXPECT_FLOAT_EQ(composed.pulse, 0.7f);
+        EXPECT_EQ(composed.flashes.entries[0].strike_ndc, strike.strike_ndc);
+        EXPECT_TRUE(ComposeLiveStrikes(std::span(&strike, 1), 1).points.empty());
+    }
+}
+
+TEST(LightningBoltDepth, InvalidProjectionAndUnavailableDepthDoNotBridgeStrokes) {
+    using namespace Luminumbra::Rendering;
+    const auto projection = ReversedZPerspective(glm::radians(90.0f), 1.0f, 0.1f, 3200.0f);
+    for (float z : {0.0f,
+                    1.0f,
+                    -std::numeric_limits<float>::denorm_min(),
+                    std::numeric_limits<float>::infinity(),
+                    std::numeric_limits<float>::quiet_NaN()}) {
+        LightningBoltGeometry bolt;
+        bolt.main_channel = {{-1, 0, -2}, {0, 0, z}, {1, 0, -2}};
+        const auto strike = ProjectLightningBolt(bolt, projection, 1.0f);
+        EXPECT_TRUE(ComposeLiveStrikes(std::span(&strike, 1), 96).points.empty());
+        EXPECT_FLOAT_EQ(strike.main_channel[1].inverse_depth, 0.0f);
+    }
+    for (float depth : {0.0f,
+                        -1.0f,
+                        std::numeric_limits<float>::infinity(),
+                        std::numeric_limits<float>::quiet_NaN()}) {
+        ProjectedLiveStrike strike;
+        strike.main_channel = {ProjectedBoltPoint({-2, 0}, depth),
+                               ProjectedBoltPoint({2, 0}, 0.5f)};
+        const auto composed = ComposeLiveStrikes(std::span(&strike, 1), 2);
+        ASSERT_EQ(composed.points.size(), 2u);
+        EXPECT_FLOAT_EQ(composed.points[0].inverse_depth, 0.0f);
+        EXPECT_FLOAT_EQ(composed.points[1].inverse_depth, 0.0f);
+        strike.main_channel = {ProjectedBoltPoint({-0.8f, 0}, 0.5f),
+                               ProjectedBoltPoint({-0.4f, 0}, depth),
+                               ProjectedBoltPoint({0.4f, 0}, 0.5f),
+                               ProjectedBoltPoint({0.8f, 0}, 0.5f)};
+        const auto recovered = ComposeLiveStrikes(std::span(&strike, 1), 96);
+        ASSERT_EQ(recovered.points.size(), 6u);
+        EXPECT_TRUE(IsLiveBoltPenUp(recovered.points[3]));
+        EXPECT_FLOAT_EQ(recovered.points[4].inverse_depth, 0.5f);
+        EXPECT_FLOAT_EQ(recovered.points[5].inverse_depth, 0.5f);
+    }
+    ProjectedLiveStrike degenerate;
+    degenerate.main_channel = {ProjectedBoltPoint({0, 0}, 0.5f), ProjectedBoltPoint({0, 0}, 0.25f)};
+    const auto composed = ComposeLiveStrikes(std::span(&degenerate, 1), 2);
+    ASSERT_EQ(composed.points.size(), 2u);
+    EXPECT_FLOAT_EQ(composed.points[0].inverse_depth, 0.5f);
+    EXPECT_FLOAT_EQ(composed.points[1].inverse_depth, 0.25f);
+}
