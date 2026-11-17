@@ -2365,7 +2365,450 @@ private:
     GLuint target = 0, fbo = 0, vao = 0, vbo = 0;
     std::array<GLuint, 6> inputs{};
 };
+void CompileCanopyProbeProgram(GLuint& program) {
+    std::string source, positions, diagnostic;
+    ASSERT_TRUE(
+        ReadShaderSource(SourceRoot() / "res/shaders/lighting_pass.frag", source, diagnostic))
+        << diagnostic;
+    ASSERT_TRUE(ReadShaderSource(
+        SourceRoot() / "res/shaders/far_world_position.glsl", positions, diagnostic))
+        << diagnostic;
+    const auto begin = source.find("float computeSkyVisibility(");
+    ASSERT_NE(begin, std::string::npos);
+    const auto end = source.find("void main()", begin);
+    ASSERT_NE(end, std::string::npos);
+    // Compile the shipping march and position decoder with controlled geometry.
+    std::string fragmentSource = R"(#version 450 core
+out vec4 FragColor;
+uniform sampler2D gPosition, u_sceneDepth;
+uniform mat4 u_inverseView, u_projection;
+uniform float u_caveSkyMaxDist, u_caveThickness, u_caveAmbientFloor;
+uniform int u_caveSkySteps;
+uniform vec3 probePosition;
+#define farWorldPosition decodePosition
+)" + positions + R"(
+#undef farWorldPosition
+int positionTaps = 0;
+bool farWorldPosition(sampler2D storedPosition, sampler2D floatDepth, vec2 uv,
+                      inout vec3 position) {
+    ++positionTaps;
+    return decodePosition(storedPosition, floatDepth, uv, position);
+}
+)" + source.substr(begin, end - begin) +
+                                 R"(
+void main() {
+    float visibility = computeSkyVisibility(probePosition, vec3(0, 1, 0));
+    FragColor = vec4(visibility, float(positionTaps), 0, 1);
+})";
+    const GLuint fragment = glCreateShader(GL_FRAGMENT_SHADER);
+    const char* fragmentText = fragmentSource.c_str();
+    glShaderSource(fragment, 1, &fragmentText, nullptr);
+    glCompileShader(fragment);
+    GLint compiled = GL_FALSE;
+    glGetShaderiv(fragment, GL_COMPILE_STATUS, &compiled);
+    ASSERT_EQ(compiled, GL_TRUE) << GetShaderInfoLog(fragment);
+    const GLuint vertex = CompileShader(SourceRoot() / "res/shaders/ssao.vert", GL_VERTEX_SHADER);
+    ASSERT_NE(vertex, 0u);
+    program = glCreateProgram();
+    glAttachShader(program, vertex);
+    glAttachShader(program, fragment);
+    glLinkProgram(program);
+    glDeleteShader(vertex);
+    glDeleteShader(fragment);
+    GLint linked = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    ASSERT_EQ(linked, GL_TRUE) << GetProgramInfoLog(program);
+}
+
+void ExpectCanopyRoomCrossings(GLuint program,
+                               FullscreenFloatProbe& probe,
+                               const glm::mat4& projection) {
+    constexpr int planeRows = 4096;
+    const auto roomPositions = [&](float ceilingHeight, bool floorVisible = true) {
+        // The fixed row count bounds storage; include the fragment's floor so
+        // samples below the horizon contain actual open-side geometry.
+        std::vector<glm::vec4> room(planeRows, glm::vec4(0));
+        for (int row = 0; row < planeRows; ++row) {
+            const float ndcY = 2 * (static_cast<float>(row) + 0.5f) / planeRows - 1;
+            if (!floorVisible && ndcY < 0) {
+                continue;
+            }
+            const float surfaceY = ndcY > 0 ? ceilingHeight : -1.7f;
+            room[static_cast<std::size_t>(row)] =
+                glm::vec4(0, surfaceY, -surfaceY * projection[1][1] / ndcY, 1);
+        }
+        return room;
+    };
+    glUniform1f(glGetUniformLocation(program, "u_caveSkyMaxDist"), 24);
+    glUniform1f(glGetUniformLocation(program, "u_caveThickness"), 1.5f);
+    glUniform1i(glGetUniformLocation(program, "u_caveSkySteps"), 8);
+    // All these room samples are near-lane positions; float depth still
+    // validates each Ladder read independently of the stored positions.
+    probe.texture(1, {glm::vec4(0.5f)});
+    for (bool floorVisible : {false, true}) {
+        probe.texture(0, roomPositions(1, floorVisible), planeRows);
+        const auto firstCeiling = probe.draw()[16];
+        EXPECT_LT(firstCeiling.r, 0.3f) << "a ceiling crossed in the first 3 m interval occludes";
+        EXPECT_GT(firstCeiling.g, 2);
+        EXPECT_LE(firstCeiling.g, 40);
+    }
+    glUniform3f(glGetUniformLocation(program, "probePosition"), 0, -0.85f, -12);
+    probe.texture(0, roomPositions(0.1f, false), planeRows);
+    EXPECT_LT(probe.draw()[16].r, 0.3f)
+        << "the first refined back-side hit can precede an empty open-side probe";
+    glUniform3f(glGetUniformLocation(program, "probePosition"), 0, -1.7f, -12);
+
+    // Account for the sampled texel centre when placing the ceiling around
+    // the second coarse tap's thickness cutoff.
+    const float coarseY = -1.65f + 6;
+    const float coarseUv = 0.5f + 0.5f * projection[1][1] * coarseY / 12;
+    const float sampledNdc = 2 * (std::floor(coarseUv * planeRows) + 0.5f) / planeRows - 1;
+    const float surfaceScale = glm::length(glm::vec2(1, projection[1][1] / sampledNdc));
+    float cutoffVisibility[2]{};
+    int cutoffIndex = 0;
+    for (float gap : {1.499f, 1.501f}) {
+        const float height = (glm::length(glm::vec2(coarseY, 12)) - gap) / surfaceScale;
+        probe.texture(0, roomPositions(height), planeRows);
+        const auto result = probe.draw()[16];
+        EXPECT_LT(result.r, 0.4f);
+        EXPECT_LE(result.g, 40);
+        cutoffVisibility[cutoffIndex++] = result.r;
+    }
+    EXPECT_NEAR(cutoffVisibility[0], cutoffVisibility[1], 0.005f)
+        << "crossings on both sides of the thickness cutoff use the same intersection";
+}
 } // namespace
+
+TEST(RenderSmokeTest, CanopySkyVisibilityRecoversCeilingAfterEmptyCoarseSample) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    GLuint program = 0;
+    ASSERT_NO_FATAL_FAILURE(CompileCanopyProbeProgram(program));
+    FullscreenFloatProbe probe;
+    glUseProgram(program);
+    glUniform1i(glGetUniformLocation(program, "gPosition"), 0);
+    glUniform1i(glGetUniformLocation(program, "u_sceneDepth"), 1);
+    SetMat4Identity(program, "u_inverseView");
+    const auto projection =
+        Luminumbra::Rendering::ReversedZPerspective(glm::radians(60.0f), 1.0f, 0.1f, 3200.0f);
+    const auto inverseProjection = glm::inverse(projection);
+    glUniformMatrix4fv(
+        glGetUniformLocation(program, "u_projection"), 1, GL_FALSE, &projection[0][0]);
+    glUniformMatrix4fv(glGetUniformLocation(program, "u_gbufferInverseProjection"),
+                       1,
+                       GL_FALSE,
+                       &inverseProjection[0][0]);
+    glUniform3f(glGetUniformLocation(program, "probePosition"), 0, -3, -12);
+    glUniform1f(glGetUniformLocation(program, "u_caveSkyMaxDist"), 24);
+    glUniform1f(glGetUniformLocation(program, "u_caveAmbientFloor"), 0.06f);
+    glUniform1f(glGetUniformLocation(program, "u_caveThickness"), 1.5f);
+    glUniform1i(glGetUniformLocation(program, "u_caveSkySteps"), 8);
+    // A finite y=2 roof, z in [-60,-2.5]. The first coarse ray point at
+    // y=0.05 projects beyond its far edge; the next two gaps exceed 1.5 m.
+    // Fixed 4096-row buffers bound storage and resolve the refined crossing.
+    constexpr int rows = 4096;
+    std::vector<glm::vec4> positions(rows, glm::vec4(0));
+    std::vector<glm::vec4> depths(rows, glm::vec4(0));
+    for (int row = 0; row < rows; ++row) {
+        const float ndcY = 2 * (static_cast<float>(row) + 0.5f) / rows - 1;
+        if (ndcY <= 0) {
+            continue;
+        }
+        const glm::vec4 position(0, 2, -2 * projection[1][1] / ndcY, 1);
+        if (position.z < -60 || position.z > -2.5f) {
+            continue;
+        }
+        const glm::vec4 clip = projection * position;
+        positions[static_cast<std::size_t>(row)] = position;
+        depths[static_cast<std::size_t>(row)] = glm::vec4(clip.z / clip.w);
+    }
+    for (int ladder : {0, 1}) {
+        SCOPED_TRACE(ladder);
+        glUniform1i(glGetUniformLocation(program, "u_farWorldLadder"), ladder);
+        probe.texture(0, positions, rows);
+        probe.texture(1, depths, rows);
+        for (int steps : {8, 16}) {
+            glUniform1i(glGetUniformLocation(program, "u_caveSkySteps"), steps);
+            const auto ceiling = probe.draw()[16];
+            EXPECT_LT(ceiling.r, 0.4f) << "empty coarse taps must not hide the real ceiling";
+            EXPECT_GT(ceiling.g, 3);
+            EXPECT_LE(ceiling.g, 40);
+        }
+        probe.texture(0, std::vector<glm::vec4>(rows, glm::vec4(0)), rows);
+        EXPECT_FLOAT_EQ(probe.draw()[16].r, 1) << "empty recovery cannot invent geometry";
+        if (ladder != 0) {
+            probe.texture(0, positions, rows);
+            probe.texture(1, std::vector<glm::vec4>(rows, glm::vec4(0)), rows);
+            EXPECT_FLOAT_EQ(probe.draw()[16].r, 1) << "stale positions need valid depth";
+        }
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteProgram(program);
+}
+
+TEST(RenderSmokeTest, CanopyEmptyRecoveryRetainsCoarseHitAcrossForegroundThenSky) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    GLuint program = 0;
+    ASSERT_NO_FATAL_FAILURE(CompileCanopyProbeProgram(program));
+    FullscreenFloatProbe probe;
+    glUseProgram(program);
+    glUniform1i(glGetUniformLocation(program, "gPosition"), 0);
+    glUniform1i(glGetUniformLocation(program, "u_sceneDepth"), 1);
+    SetMat4Identity(program, "u_inverseView");
+    const auto projection =
+        Luminumbra::Rendering::ReversedZPerspective(glm::radians(60.0f), 1.0f, 0.1f, 3200.0f);
+    const auto inverseProjection = glm::inverse(projection);
+    glUniformMatrix4fv(
+        glGetUniformLocation(program, "u_projection"), 1, GL_FALSE, &projection[0][0]);
+    glUniformMatrix4fv(glGetUniformLocation(program, "u_gbufferInverseProjection"),
+                       1,
+                       GL_FALSE,
+                       &inverseProjection[0][0]);
+    glUniform3f(glGetUniformLocation(program, "probePosition"), 0, -3.05f, -12);
+    glUniform1f(glGetUniformLocation(program, "u_caveSkyMaxDist"), 24);
+    glUniform1f(glGetUniformLocation(program, "u_caveAmbientFloor"), 0.06f);
+    glUniform1f(glGetUniformLocation(program, "u_caveThickness"), 1.5f);
+    glUniform1i(glGetUniformLocation(program, "u_caveSkySteps"), 8);
+    // Fixed 4096-row textures isolate the 6 m coarse hit and 4.5 m midpoint.
+    // The 3 m coarse tap and every subsequent refinement see empty geometry.
+    constexpr int rows = 4096;
+    std::vector<glm::vec4> positions(rows, glm::vec4(0));
+    std::vector<glm::vec4> depths(rows, glm::vec4(0));
+    glm::vec3 coarsePosition(0);
+    for (float distance : {6.0f, 4.5f}) {
+        const glm::vec3 point(0, distance - 3, -12);
+        const float gap = distance == 6 ? 0.8f : 8.0f;
+        const glm::vec3 position = point * (1 - gap / glm::length(point));
+        const glm::vec4 clip = projection * glm::vec4(position, 1);
+        const auto row = static_cast<std::size_t>((0.5f + 0.5f * clip.y / clip.w) * rows);
+        ASSERT_LT(row, positions.size());
+        positions[row] = glm::vec4(position, 1);
+        depths[row] = glm::vec4(clip.z / clip.w);
+        if (distance == 6) {
+            coarsePosition = position;
+        }
+    }
+    // Evaluate the base formula independently using the uploaded coarse hit.
+    const float gap = glm::length(glm::vec3(0, 3, -12)) - glm::length(coarsePosition);
+    const float ramp = (gap - 0.75f) / 0.75f;
+    const float baseOcclusion = (1 - glm::length(coarsePosition - glm::vec3(0, -3, -12)) / 24) *
+                                (1 - ramp * ramp * (3 - 2 * ramp));
+    ASSERT_GT(baseOcclusion, 0.7f);
+    for (int ladder : {0, 1}) {
+        SCOPED_TRACE(ladder);
+        glUniform1i(glGetUniformLocation(program, "u_farWorldLadder"), ladder);
+        probe.texture(0, positions, rows);
+        probe.texture(1, depths, rows);
+        const auto result = probe.draw()[16];
+        EXPECT_GE((1 - result.r) / 0.94f, baseOcclusion - 0.000001f);
+        EXPECT_NEAR(result.r, 1 - 0.94f * baseOcclusion, 0.000001f);
+        EXPECT_FLOAT_EQ(result.g, 11) << "three coarse reads plus eight empty-recovery reads";
+        EXPECT_LE(result.g, 40);
+        if (ladder != 0) {
+            probe.texture(1, std::vector<glm::vec4>(rows, glm::vec4(0)), rows);
+            EXPECT_FLOAT_EQ(probe.draw()[16].r, 1)
+                << "coarse preservation still requires valid Ladder depth";
+        }
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteProgram(program);
+}
+
+TEST(RenderSmokeTest, CanopySkyVisibilityRejectsForegroundAndRetainsRealCeilings) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    GLuint program = 0;
+    ASSERT_NO_FATAL_FAILURE(CompileCanopyProbeProgram(program));
+    FullscreenFloatProbe probe;
+    glUseProgram(program);
+    glUniform1i(glGetUniformLocation(program, "gPosition"), 0);
+    glUniform1i(glGetUniformLocation(program, "u_sceneDepth"), 1);
+    probe.texture(1, {glm::vec4(0.5f)});
+    SetMat4Identity(program, "u_inverseView");
+    glm::mat4 projection(1);
+    projection[1][1] = 0.01f; // Keep the entire 24 m upward march in view.
+    glUniformMatrix4fv(
+        glGetUniformLocation(program, "u_projection"), 1, GL_FALSE, &projection[0][0]);
+    glm::mat4 inverseProjection(1);
+    inverseProjection[2][2] = -1; // Valid depth reconstruction; the near lane reads gPosition.
+    glUniformMatrix4fv(glGetUniformLocation(program, "u_gbufferInverseProjection"),
+                       1,
+                       GL_FALSE,
+                       &inverseProjection[0][0]);
+    glUniform1f(glGetUniformLocation(program, "u_caveAmbientFloor"), 0.06f);
+    glUniform3f(glGetUniformLocation(program, "probePosition"), 0, 0, -10);
+    const auto settings = [&](float distance, float thickness, int steps) {
+        glUniform1f(glGetUniformLocation(program, "u_caveSkyMaxDist"), distance);
+        glUniform1f(glGetUniformLocation(program, "u_caveThickness"), thickness);
+        glUniform1i(glGetUniformLocation(program, "u_caveSkySteps"), steps);
+    };
+    const auto visibility = [&](const glm::vec3& position) {
+        probe.texture(0, {glm::vec4(position, 1)});
+        return probe.draw()[16].r;
+    };
+    for (int ladder : {0, 1}) {
+        glUniform1i(glGetUniformLocation(program, "u_farWorldLadder"), ladder);
+        settings(24, 1.5f, 8);
+        EXPECT_FLOAT_EQ(visibility({0, 0, -2}), 1)
+            << "foreground foliage eight metres from the ray is not a roof";
+        EXPECT_FLOAT_EQ(visibility({0, 0, 0}), 1) << "missing geometry leaves the sky open";
+        const float ceiling = visibility({0, 1.5f, -10});
+        EXPECT_GT(ceiling, 0.06f);
+        EXPECT_LT(ceiling, 0.3f) << "a nearby ceiling must still block sky ambient";
+        const float movedCeiling = visibility({0, 1.6f, -10});
+        EXPECT_GT(movedCeiling - ceiling, 0.003f)
+            << "occlusion must track observed distance within one march step";
+        settings(3, 1.5f, 2);
+        const float rayDepth = glm::length(glm::vec3(0, 3.05f, -10));
+        const auto unbracketedVisibility = [&](const glm::vec3& position) {
+            // A missing first coarse sample isolates the direct thickness
+            // acceptance interval from the known-open origin's refinement.
+            constexpr int rows = 512;
+            std::vector<glm::vec4> samples(rows, glm::vec4(position, 1));
+            const auto firstRow = static_cast<std::size_t>((0.5f + 0.005f * 1.55f) * rows);
+            samples[firstRow] = glm::vec4(0);
+            probe.texture(0, samples, rows);
+            return probe.draw()[16].r;
+        };
+        for (float gap : {-0.1f, 0.01f, 1.5f, 1.6f}) {
+            EXPECT_NEAR(unbracketedVisibility({0, 0, -(rayDepth - gap)}), 1, 0.000001f)
+                << "only the open depth interval (0.05, thickness) occludes: " << gap;
+        }
+        const float innerBand = unbracketedVisibility({0, 0, -(rayDepth - 0.8f)});
+        const float outerBand = unbracketedVisibility({0, 0, -(rayDepth - 1.4f)});
+        EXPECT_LT(innerBand, outerBand);
+        EXPECT_LT(outerBand, 1);
+        settings(24, 1.5f, 32);
+        const float bounded = visibility({0, 20, -10});
+        EXPECT_LT(bounded, 0.9f);
+        settings(24, 1.5f, 64);
+        EXPECT_FLOAT_EQ(visibility({0, 20, -10}), bounded)
+            << "the capped march must still cover the requested distance";
+        for (float invalid : {0.0f, -1.0f}) {
+            settings(invalid, 1.5f, 8);
+            EXPECT_FLOAT_EQ(visibility({0, 1.5f, -10}), 1);
+            settings(24, invalid, 8);
+            EXPECT_FLOAT_EQ(visibility({0, 1.5f, -10}), 1);
+        }
+        for (int invalid : {0, -1}) {
+            settings(24, 1.5f, invalid);
+            EXPECT_FLOAT_EQ(visibility({0, 1.5f, -10}), 1);
+        }
+        settings(24, 1.5f, 8);
+        if (ladder != 0) {
+            probe.texture(1, {glm::vec4(0)});
+            EXPECT_FLOAT_EQ(visibility({0, 1.5f, -10}), 1)
+                << "cleared depth refuses an occluder even if position is stale";
+        }
+    }
+
+    // A level perspective camera sees the underside of a horizontal plane at
+    // y=1.5. Each texel stores its camera-ray/plane intersection, not a constant
+    // position. The fixed 4096-row buffer resolves the thin acceptance band.
+    constexpr int planeRows = 4096;
+    std::vector<glm::vec4> planePositions(planeRows, glm::vec4(0));
+    std::vector<glm::vec4> planeDepths(planeRows, glm::vec4(0));
+    projection =
+        Luminumbra::Rendering::ReversedZPerspective(glm::radians(60.0f), 1.0f, 0.1f, 3200.0f);
+    inverseProjection = glm::inverse(projection);
+    for (int row = 0; row < planeRows; ++row) {
+        const float ndcY = 2 * (static_cast<float>(row) + 0.5f) / planeRows - 1;
+        if (ndcY <= 0) {
+            continue;
+        }
+        const glm::vec4 position(0, 1.5f, -1.5f * projection[1][1] / ndcY, 1);
+        const glm::vec4 clip = projection * position;
+        if (clip.z <= 0) {
+            continue;
+        }
+        planePositions[static_cast<std::size_t>(row)] = position;
+        planeDepths[static_cast<std::size_t>(row)] = glm::vec4(clip.z / clip.w);
+    }
+    glUniformMatrix4fv(
+        glGetUniformLocation(program, "u_projection"), 1, GL_FALSE, &projection[0][0]);
+    glUniformMatrix4fv(glGetUniformLocation(program, "u_gbufferInverseProjection"),
+                       1,
+                       GL_FALSE,
+                       &inverseProjection[0][0]);
+    glUniform3f(glGetUniformLocation(program, "probePosition"), 0, -1.7f, -12);
+    for (int ladder : {0, 1}) {
+        SCOPED_TRACE(ladder);
+        glUniform1i(glGetUniformLocation(program, "u_farWorldLadder"), ladder);
+        ExpectCanopyRoomCrossings(program, probe, projection);
+
+        probe.texture(0, planePositions, planeRows);
+        probe.texture(1, planeDepths, planeRows);
+        settings(24, 1.5f, 8);
+        const auto ceiling = probe.draw()[16];
+        EXPECT_LT(ceiling.r, 0.3f) << "the default 3 m steps must retain a real ceiling";
+        EXPECT_GT(ceiling.g, 2) << "the two on-screen coarse taps need crossing refinement";
+        EXPECT_LE(ceiling.g, 40);
+        settings(24, 0.12f, 8);
+        const auto canopy = probe.draw()[16];
+        EXPECT_GT(canopy.r, 0.85f) << "a thin band must retain its thickness falloff";
+        EXPECT_LT(canopy.r, 0.99f) << "a thin crossing must still be found between coarse taps";
+        EXPECT_LE(canopy.g, 40);
+        settings(24, 0.05f, 8);
+        EXPECT_FLOAT_EQ(probe.draw()[16].r, 1) << "a band inside the self-bias stays open";
+
+        settings(24, 1.5f, 8);
+        // The first midpoint lies at y=2.85. Missing geometry must abort the
+        // bracket rather than inventing a crossing from its endpoints.
+        const float midpointUv = 0.5f + 0.5f * projection[1][1] * 2.85f / 12;
+        const auto midpointRow = static_cast<std::size_t>(midpointUv * planeRows);
+        auto missing = planePositions;
+        missing[midpointRow] = glm::vec4(0);
+        probe.texture(0, missing, planeRows);
+        EXPECT_FLOAT_EQ(probe.draw()[16].r, 1);
+        if (ladder != 0) {
+            probe.texture(0, planePositions, planeRows);
+            auto cleared = planeDepths;
+            cleared[midpointRow] = glm::vec4(0);
+            probe.texture(1, cleared, planeRows);
+            EXPECT_FLOAT_EQ(probe.draw()[16].r, 1)
+                << "cleared depth invalidates a refined sample even with stale position";
+        }
+        probe.texture(1, planeDepths, planeRows);
+        auto silhouette = planePositions;
+        for (int row = 0; row < planeRows; ++row) {
+            const float uv = (static_cast<float>(row) + 0.5f) / planeRows;
+            silhouette[static_cast<std::size_t>(row)] =
+                glm::vec4(0, 0, uv < 0.7f ? -100.0f : -2.0f, 1);
+        }
+        probe.texture(0, silhouette, planeRows);
+        const auto discontinuity = probe.draw()[16];
+        EXPECT_FLOAT_EQ(discontinuity.r, 1)
+            << "a silhouette depth jump never supplies a sample inside the thickness band";
+        EXPECT_FLOAT_EQ(discontinuity.g, 10) << "two coarse taps plus eight failed refinements";
+    }
+
+    // Alternating foreground/background stripes make repeated false brackets.
+    // The refinement budget is shared across the whole march, not per bracket.
+    projection = glm::mat4(1);
+    projection[1][1] = 0.01f;
+    glUniformMatrix4fv(
+        glGetUniformLocation(program, "u_projection"), 1, GL_FALSE, &projection[0][0]);
+    glUniform3f(glGetUniformLocation(program, "probePosition"), 0, 0, -10);
+    for (int row = 0; row < planeRows; ++row) {
+        const float uv = (static_cast<float>(row) + 0.5f) / planeRows;
+        const float viewY = (2 * uv - 1) / projection[1][1];
+        const int band = static_cast<int>(std::floor((viewY - 0.05f) / 0.75f + 0.5f));
+        planePositions[static_cast<std::size_t>(row)] =
+            glm::vec4(0, 0, band % 2 == 0 ? -2.0f : -100.0f, 1);
+    }
+    probe.texture(0, planePositions, planeRows);
+    probe.texture(1, {glm::vec4(0.5f)});
+    for (int ladder : {0, 1}) {
+        glUniform1i(glGetUniformLocation(program, "u_farWorldLadder"), ladder);
+        settings(24, 1.5f, 64);
+        const auto bounded = probe.draw()[16];
+        EXPECT_FLOAT_EQ(bounded.r, 1);
+        EXPECT_FLOAT_EQ(bounded.g, 40) << "32 coarse taps and at most eight refinements total";
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteProgram(program);
+}
 
 TEST(RenderSmokeTest, ReversedDepthCloudMaskPreservesDistantGeometry) {
     HiddenGlContext context;
@@ -2387,6 +2830,58 @@ TEST(RenderSmokeTest, ReversedDepthCloudMaskPreservesDistantGeometry) {
         // int ternary here, and the render tests build with warnings as errors.
         EXPECT_FLOAT_EQ(pixels[static_cast<std::size_t>(x)].r, x < 16 ? 0.0f : 1.0f);
         EXPECT_FLOAT_EQ(pixels[static_cast<std::size_t>(x)].g, x < 16 ? 1.0f : 0.0f);
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteProgram(program);
+}
+
+TEST(RenderSmokeTest, TaauSkyKeepsCurrentColorWhileDistantGeometryAccumulates) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    const GLuint program = LinkProgram({"taau_resolve", "ssao.vert", "taau_resolve.frag"});
+    ASSERT_NE(program, 0u);
+    FullscreenFloatProbe probe;
+    glUseProgram(program);
+    glUniform1i(glGetUniformLocation(program, "u_current"), 0);
+    glUniform1i(glGetUniformLocation(program, "u_history"), 1);
+    glUniform1i(glGetUniformLocation(program, "u_motion"), 2);
+    glUniform1i(glGetUniformLocation(program, "u_sceneDepth"), 3);
+    glUniform2f(glGetUniformLocation(program, "u_texel"), 1.0f / 32.0f, 1.0f);
+    glUniform1f(glGetUniformLocation(program, "u_blend"), 0.9f);
+    // Include sharpening in the test: bypass must precede both temporal operations.
+    glUniform1f(glGetUniformLocation(program, "u_sharpness"), 0.4f);
+    std::vector<glm::vec4> current;
+    std::vector<glm::vec4> depth;
+    // Fixed 32-texel probe; adjacent colors admit the stale history through its AABB.
+    current.reserve(32);
+    depth.reserve(32);
+    for (int x = 0; x < 32; ++x) {
+        current.emplace_back(x % 2 == 0 ? 0.25f : 0.75f);
+        depth.emplace_back(x < 16 ? 0.0f : 1e-9f);
+    }
+    probe.texture(0, current);
+    probe.texture(1, {glm::vec4(0.5f)});
+    probe.texture(2, {glm::vec4(0.0f)});
+    probe.texture(3, depth);
+    for (const int valid : {0, 1}) {
+        glUniform1i(glGetUniformLocation(program, "u_history_valid"), valid);
+        const auto pixels = probe.draw();
+        for (std::size_t x = 0; x < pixels.size(); ++x) {
+            // Texel 15 is cleared sky beside geometry and must retain edge coverage.
+            if (valid == 0 || x < 15) {
+                EXPECT_FLOAT_EQ(pixels[x].r, current[x].r);
+                EXPECT_FLOAT_EQ(pixels[x].g, current[x].g);
+                EXPECT_FLOAT_EQ(pixels[x].b, current[x].b);
+            } else {
+                EXPECT_GT(std::abs(pixels[x].r - current[x].r), 0.1f);
+            }
+        }
+    }
+    // Off-screen reprojection still rejects history for positive-depth geometry.
+    probe.texture(2, {glm::vec4(4.0f, 0.0f, 0.0f, 0.0f)});
+    const auto offscreen = probe.draw();
+    for (std::size_t x = 0; x < offscreen.size(); ++x) {
+        EXPECT_FLOAT_EQ(offscreen[x].r, current[x].r);
     }
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
     glDeleteProgram(program);
@@ -2567,6 +3062,253 @@ FragColor = vec4(shadow, shadow, shadow, 1); })";
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
     for (GLuint program : programs)
         glDeleteProgram(program);
+}
+
+// A reduced-resolution G-buffer silhouette moves between depth texels across
+// subpixel jitter phases. Check both sides of the unjittered channel and glow.
+void ExpectLightningJitteredSilhouettes(
+    Luminumbra::Rendering::Shader& shader,
+    FullscreenFloatProbe& probe,
+    const glm::mat4& projection,
+    float occluder_depth,
+    const std::array<glm::vec4, FullscreenFloatProbe::width>& flash_pixels,
+    const std::array<glm::vec4, FullscreenFloatProbe::width>& sky_pixels) {
+    std::array<glm::vec4, FullscreenFloatProbe::width> first_phase{};
+    for (int phase = 0; phase < 2; ++phase) {
+        const glm::vec2 jitter =
+            phase == 0 ? glm::vec2(0.025f, -0.015f) : glm::vec2(-0.025f, 0.015f);
+        auto jittered_projection = projection;
+        jittered_projection[2][0] += jitter.x;
+        jittered_projection[2][1] += jitter.y;
+        shader.setMat4("u_gbufferInverseProjection", glm::inverse(jittered_projection));
+        shader.setVec2("u_jitter_ndc", jitter);
+        // Fixed 24-texel storage models a 75-percent internal render scale.
+        std::vector<glm::vec4> silhouette_depth(24, glm::vec4(0));
+        for (std::size_t texel = 0; texel < silhouette_depth.size(); ++texel) {
+            const float raster_uv = (static_cast<float>(texel) + 0.5f) / 24.0f;
+            const float unjittered_uv = raster_uv + jitter.x * 0.5f;
+            if (unjittered_uv < 0.56f) {
+                silhouette_depth[texel] = glm::vec4(occluder_depth);
+            }
+        }
+        probe.texture(1, silhouette_depth);
+        const auto pixels = probe.draw();
+        EXPECT_FLOAT_EQ(pixels[17].r, flash_pixels[17].r);
+        EXPECT_FLOAT_EQ(pixels[18].r, sky_pixels[18].r);
+        if (phase == 0) {
+            first_phase = pixels;
+        } else {
+            for (std::size_t pixel = 0; pixel < pixels.size(); ++pixel) {
+                EXPECT_FLOAT_EQ(pixels[pixel].r, first_phase[pixel].r);
+                EXPECT_FLOAT_EQ(pixels[pixel].g, first_phase[pixel].g);
+                EXPECT_FLOAT_EQ(pixels[pixel].b, first_phase[pixel].b);
+            }
+        }
+        // Also cross a horizontal silhouette: the single output row's ray
+        // stays behind terrain while its depth row changes with Y jitter.
+        for (std::size_t texel = 0; texel < silhouette_depth.size(); ++texel) {
+            const float raster_uv = (static_cast<float>(texel) + 0.5f) / 24.0f;
+            silhouette_depth[texel] =
+                glm::vec4(raster_uv + jitter.y * 0.5f < 0.515f ? occluder_depth : 0.0f);
+        }
+        probe.texture(1, silhouette_depth, 24);
+        const auto horizontal_pixels = probe.draw();
+        for (std::size_t pixel = 0; pixel < horizontal_pixels.size(); ++pixel) {
+            EXPECT_FLOAT_EQ(horizontal_pixels[pixel].r, flash_pixels[pixel].r);
+            EXPECT_FLOAT_EQ(horizontal_pixels[pixel].g, flash_pixels[pixel].g);
+            EXPECT_FLOAT_EQ(horizontal_pixels[pixel].b, flash_pixels[pixel].b);
+        }
+    }
+    shader.setVec2("u_jitter_ndc", {0, 0});
+    shader.setMat4("u_gbufferInverseProjection", glm::inverse(projection));
+}
+
+TEST(RenderSmokeTest, LightningChannelAndGlowRespectReversedSceneDepthAndRidges) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    const auto vertex = (SourceRoot() / "res/shaders/lightning_overlay.vert").string();
+    const auto fragment = (SourceRoot() / "res/shaders/lightning_overlay.frag").string();
+    Luminumbra::Rendering::Shader shader(vertex.c_str(), fragment.c_str());
+    ASSERT_TRUE(shader.IsValid());
+    FullscreenFloatProbe probe;
+    shader.use();
+    shader.setInt("u_scene", 0);
+    shader.setInt("u_sceneDepth", 1);
+    shader.setVec2("u_jitter_ndc", {0, 0});
+    shader.setInt("u_active", 1);
+    shader.setFloat("u_pulse", 1);
+    shader.setFloat("u_aspect", 1);
+    shader.setFloat("u_boltWidth", 0.010f);
+    shader.setFloat("u_boltGlow", 0.034f);
+    // Keep a localized world flash present: occlusion must affect only geometry.
+    shader.setInt("u_flashCount", 1);
+    shader.setVec2("u_flashNdc[0]", {0, 0});
+    shader.setFloat("u_flashPulse[0]", 0.2f);
+    shader.setInt("u_flashOnscreen[0]", 1);
+    probe.texture(0, {glm::vec4(0.1f, 0.1f, 0.1f, 1)});
+    const auto bolt = [&](float y, float inverse_depth) {
+        shader.setInt("u_boltCount", 2);
+        shader.setVec2("u_bolt[0]", {-0.9f, y});
+        shader.setVec2("u_bolt[1]", {0.9f, y});
+        shader.setFloat("u_boltInverseDepth[0]", inverse_depth);
+        shader.setFloat("u_boltInverseDepth[1]", inverse_depth);
+    };
+    for (float far_plane : {3200.0f, 17408.0f}) {
+        auto projection =
+            Luminumbra::Rendering::ReversedZPerspective(glm::radians(70.0f), 1.0f, 0.1f, far_plane);
+        shader.setMat4("u_gbufferInverseProjection", glm::inverse(projection));
+        const auto depth_at = [&](float distance) {
+            const glm::vec4 clip = projection * glm::vec4(0, 0, -distance, 1);
+            return clip.z / clip.w;
+        };
+        bolt(0, 0.01f);                   // channel 100 m away
+        probe.texture(1, {glm::vec4(0)}); // cleared sky never occludes
+        const auto sky_pixels = probe.draw();
+        const auto sky = sky_pixels[16];
+        EXPECT_GT(sky.r, 3.2f);
+        for (float distance : {100.0f, 200.0f, 14000.0f}) {
+            if (distance < far_plane) {
+                probe.texture(1, {glm::vec4(depth_at(distance))});
+                EXPECT_NEAR(probe.draw()[16].r, sky.r, 0.0001f);
+            }
+        }
+        shader.setInt("u_boltCount", 0);
+        const auto flash_pixels = probe.draw();
+        const auto flash_only = flash_pixels[16];
+        EXPECT_GT(flash_only.r, 0.1f);
+        EXPECT_NEAR(sky.r, flash_only.r + 3.46112f, 0.0001f);
+        EXPECT_FLOAT_EQ(sky_pixels.front().r, flash_pixels.front().r);
+        EXPECT_FLOAT_EQ(sky_pixels.back().r, flash_pixels.back().r);
+        bolt(0, 0.01f);
+        probe.texture(1, {glm::vec4(depth_at(25))}); // opaque cave wall / hill
+        EXPECT_NEAR(probe.draw()[16].r, flash_only.r, 0.0001f);
+        probe.texture(1, {glm::vec4(depth_at(99.5f))}); // near-contact ridge: soft edge
+        const auto ridge = probe.draw()[16];
+        EXPECT_GT(ridge.r, flash_only.r + 0.5f);
+        EXPECT_LT(ridge.r, sky.r - 0.5f);
+        // The tight glow, as well as the core, is suppressed below the ridge;
+        // the sky on its other side retains exactly the unobstructed response.
+        bolt(0.015f, 0.01f);
+        probe.texture(1, {glm::vec4(0)});
+        const auto sky_glow = probe.draw();
+        EXPECT_GT(sky_glow[16].r, flash_only.r + 0.01f);
+        std::vector<glm::vec4> ridge_depth(FullscreenFloatProbe::width, glm::vec4(0));
+        std::fill_n(ridge_depth.begin(), FullscreenFloatProbe::width / 2, glm::vec4(depth_at(25)));
+        probe.texture(1, ridge_depth);
+        const auto ridge_glow = probe.draw();
+        EXPECT_NEAR(ridge_glow[15].r, flash_only.r, 0.0001f);
+        EXPECT_FLOAT_EQ(ridge_glow[16].r, sky_glow[16].r);
+        bolt(0, 0.01f);
+        ExpectLightningJitteredSilhouettes(
+            shader, probe, projection, depth_at(25), flash_pixels, sky_pixels);
+        // A hidden closest segment must not erase an overlapping visible one.
+        bolt(0, 0.01f);
+        shader.setInt("u_boltCount", 5);
+        shader.setVec2("u_bolt[2]", {-3, -3});
+        shader.setFloat("u_boltInverseDepth[2]", 0);
+        shader.setVec2("u_bolt[3]", {-0.9f, 0});
+        shader.setVec2("u_bolt[4]", {0.9f, 0});
+        shader.setFloat("u_boltInverseDepth[3]", 0.1f);
+        shader.setFloat("u_boltInverseDepth[4]", 0.1f);
+        probe.texture(1, {glm::vec4(depth_at(25))});
+        EXPECT_NEAR(probe.draw()[16].r, sky.r, 0.0001f);
+        for (float invalid : {0.0f,
+                              -1.0f,
+                              std::numeric_limits<float>::infinity(),
+                              std::numeric_limits<float>::quiet_NaN()}) {
+            bolt(0, invalid);
+            probe.texture(1, {glm::vec4(0)});
+            EXPECT_NEAR(probe.draw()[16].r, flash_only.r, 0.0001f);
+        }
+        for (float invalid : {-1.0f,
+                              2.0f,
+                              std::numeric_limits<float>::infinity(),
+                              std::numeric_limits<float>::quiet_NaN()}) {
+            bolt(0, 0.01f);
+            probe.texture(1, {glm::vec4(invalid)});
+            EXPECT_NEAR(probe.draw()[16].r, sky.r, 0.0001f);
+        }
+        // Collapsed or subpixel strokes use the nearer endpoint in either order.
+        for (float span : {0.0f, 0.00001f}) {
+            for (float first_depth : {0.01f, 0.1f}) {
+                bolt(0, first_depth);
+                shader.setVec2("u_bolt[0]", {0.03125f - span, 0});
+                shader.setVec2("u_bolt[1]", {0.03125f + span, 0});
+                shader.setFloat("u_boltInverseDepth[1]", first_depth == 0.01f ? 0.1f : 0.01f);
+                probe.texture(1, {glm::vec4(depth_at(25))});
+                EXPECT_NEAR(probe.draw()[16].r, sky.r, 0.0001f);
+            }
+        }
+        // A zero or sub-core glow radius still has a core, with no inverted halo.
+        for (float radius : {-0.01f, 0.0f, 0.0005f, 0.001f}) {
+            shader.setFloat("u_boltGlow", radius);
+            bolt(0, 0.01f);
+            probe.texture(1, {glm::vec4(depth_at(25))});
+            EXPECT_NEAR(probe.draw()[16].r, flash_only.r, 0.0001f);
+            probe.texture(1, {glm::vec4(0)});
+            const auto core_only = probe.draw();
+            EXPECT_NEAR(core_only[16].r, flash_only.r + 3.17312f, 0.0001f);
+            EXPECT_FLOAT_EQ(core_only.front().r, flash_pixels.front().r);
+        }
+        shader.setFloat("u_boltGlow", 0.034f);
+        // Unavailable or malformed reconstruction must not manufacture an occluder.
+        std::array<glm::mat4, 5> invalid_inverse{
+            glm::mat4(0), glm::mat4(1), glm::mat4(-1), glm::mat4(1), glm::mat4(1)};
+        invalid_inverse[3][0][0] = std::numeric_limits<float>::quiet_NaN();
+        invalid_inverse[4][2][2] = -std::numeric_limits<float>::min();
+        probe.texture(1, {glm::vec4(depth_at(25))});
+        for (const auto& inverse : invalid_inverse) {
+            shader.setMat4("u_gbufferInverseProjection", inverse);
+            EXPECT_NEAR(probe.draw()[16].r, sky.r, 0.0001f);
+        }
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, LightningOverlayUploadsCurrentProjectionJitter) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    FullscreenFloatProbe probe;
+    probe.texture(1, {glm::vec4(0)});
+    // Exercise the production upload too: make_lighting_context supplies the
+    // jittered depth contract but leaves its generic taau_jitter_ndc at zero.
+    GLint quad = 0;
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &quad);
+    glActiveTexture(GL_TEXTURE1);
+    GLint depth_texture = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &depth_texture);
+    Luminumbra::Rendering::RenderResourceRegistry registry;
+    Luminumbra::Rendering::LightingPass lighting;
+    lighting.init_shader(SourceRoot());
+    lighting.init_lighting_fbo(registry, FullscreenFloatProbe::width, 1);
+    Luminumbra::Rendering::LightningRenderState lightning;
+    lightning.active = true;
+    lightning.pulse_intensity = 1;
+    Luminumbra::Rendering::RenderContext ctx;
+    ctx.screen_width = FullscreenFloatProbe::width;
+    ctx.screen_height = 1;
+    ctx.lightning_state = &lightning;
+    ctx.screen_quad_vao = static_cast<GLuint>(quad);
+    ctx.gbuffer_depth.id = static_cast<GLuint>(depth_texture);
+    for (bool ladder : {false, true}) {
+        const auto projection = Luminumbra::Rendering::ReversedZPerspective(
+            glm::radians(70.0f), 1.0f, 0.1f, ladder ? 17408.0f : 3200.0f);
+        for (const glm::vec2 jitter :
+             {glm::vec2(0), glm::vec2(0.025f, -0.015f), glm::vec2(-0.025f, 0.015f)}) {
+            ctx.set_gbuffer_depth_contract(ladder, projection, jitter);
+            lighting.execute_lightning_overlay(ctx);
+            GLint program = 0;
+            glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+            const auto overlay = static_cast<GLuint>(program);
+            const GLint location = glGetUniformLocation(overlay, "u_jitter_ndc");
+            ASSERT_GE(location, 0);
+            glm::vec2 uploaded(0);
+            glGetUniformfv(overlay, location, &uploaded.x);
+            EXPECT_EQ(uploaded, jitter);
+        }
+    }
+    lighting.destroy_lighting_fbo(registry);
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }
 
 TEST(RenderSmokeTest, WaterCausticsRetainPatternInNormalizedTarget) {
@@ -4710,7 +5452,7 @@ TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
          "result.authority_revision == result.sdf_snapshot->authority_revision &&",
          "result.region_authority_revision == result.sdf_snapshot->region_authority_revision &&",
          "m_world->far_lod_region_authority_revision(result.rx, result.rz) &&",
-         "m_world->is_far_lod_sdf_snapshot_current(*result.sdf_snapshot);",
+         "m_world->is_far_lod_sdf_snapshot_current(*result.sdf_snapshot, true);",
          "if (!build_result_current(result) || result.authority_build_failed ||",
          "result.mesh.vertices.empty() || result.mesh.indices.empty())",
          "++m_stats.builds_failed_total;",
@@ -4742,6 +5484,11 @@ TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
                                  "SHIELD_WorldSystem::find_streamed_chunk(");
     expect_ordered(current,
                    {"snapshot.params_hash != World::ComputeTerrainParamsHash(m_params, m_seed) ||",
+                    "if (region_scoped)",
+                    "home_x % kRegionSpan != 0 || home_z % kRegionSpan != 0 ||",
+                    "snapshot.region_authority_revision !=",
+                    "far_lod_region_authority_revision(home_x / kRegionSpan, home_z / kRegionSpan)",
+                    "return false;",
                     "snapshot.authority_revision !=",
                     "m_far_lod_authority_revision.load(std::memory_order_acquire)",
                     "return false;",

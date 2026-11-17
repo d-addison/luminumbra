@@ -336,7 +336,7 @@ bool ScenarioRunnerImpl::driveWeatherVisual() {
             auto composed = Luminumbra::Rendering::ComposeLiveStrikes(
                 std::span(&projected, 1), Luminumbra::Rendering::kMaxBoltSegmentPoints, margin);
             lstate.bolt_points_ndc = std::move(composed.points);
-            lstate.strike_ndc = projected.strike_ndc;
+            lstate.flashes = composed.flashes;
         }
         renderPipeline.set_lightning_state(lstate);
         return true;
@@ -704,7 +704,7 @@ bool ScenarioRunnerImpl::drivePrecipitation() {
                 auto composed = Luminumbra::Rendering::ComposeLiveStrikes(
                     std::span(&projected, 1), Luminumbra::Rendering::kMaxBoltSegmentPoints, margin);
                 lstate.bolt_points_ndc = std::move(composed.points);
-                lstate.strike_ndc = projected.strike_ndc;
+                lstate.flashes = composed.flashes;
                 lstate.ground_ndc = projected.strike_ndc;
                 const bool ground_on_screen =
                     !Luminumbra::Rendering::IsLiveBoltPenUp(projected.strike_ndc) &&

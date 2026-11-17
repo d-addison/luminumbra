@@ -136,6 +136,15 @@ CaptureManifestInput ObserveCaptureManifest(const world::GameSession& session,
     input.render_settings.emplace("isolation_backdrop",
                                   std::int64_t(pipeline.isolation_config().backdrop));
     input.render_settings.emplace("tree_impostor_enabled", pipeline.tree_impostor_enabled());
+    const auto& atlas = pipeline.tree_impostor_coverage();
+    input.render_settings.emplace("tree_impostor_atlas", std::string(kTreeImpostorAtlasName));
+    input.render_settings.emplace("tree_impostor_alpha_coverage", atlas.coverage);
+    input.render_settings.emplace("tree_impostor_alpha_refused", atlas.refused());
+    input.render_settings.emplace("tree_impostor_alpha_status", std::string(atlas.status()));
+    input.render_settings.emplace("tree_impostor_alpha_min_cell", atlas.min_cell);
+    input.render_settings.emplace("tree_impostor_alpha_max_cell", atlas.max_cell);
+    input.render_settings.emplace("tree_impostor_alpha_cell_count",
+                                  std::uint64_t(atlas.cell_count));
     const auto sun = pipeline.sun_direction();
     input.render_settings.emplace("sun_direction_x", double(sun.x));
     input.render_settings.emplace("sun_direction_y", double(sun.y));
