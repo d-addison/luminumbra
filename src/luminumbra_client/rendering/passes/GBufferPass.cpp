@@ -75,6 +75,9 @@ GBufferDiagnosticCapture::~GBufferDiagnosticCapture() {
 void GBufferDiagnosticCapture::unsupported(std::string_view producer,
                                            std::uint32_t lod,
                                            DiagnosticOwnership ownership) {
+    if (state_->refused) {
+        return;
+    }
     DiagnosticId unused{};
     if (!state_->table.submit({.mesh_path = {},
                                .shader_variant = producer,
@@ -84,8 +87,12 @@ void GBufferDiagnosticCapture::unsupported(std::string_view producer,
                                .pass = DiagnosticPass::GBuffer,
                                .provenance = DiagnosticProvenance::Unsupported},
                               unused)) {
-        throw std::runtime_error("Diagnostic unsupported record exceeds registry bounds");
+        state_->refused = true;
     }
+}
+
+bool GBufferDiagnosticCapture::refused() const {
+    return state_->refused;
 }
 
 bool GBufferDiagnosticCapture::complete() const {
@@ -132,10 +139,11 @@ void GBufferDiagnosticCapture::write(const Shader& shader, const DiagnosticSubmi
             continue;
         }
         DiagnosticId id{};
-        if (!state_->table.submit(submission, id)) {
-            unsupported("diagnostic_identity_refused", submission.lod, submission.ownership);
-            throw std::runtime_error("Diagnostic identity submission refused");
+        if (!state_->refused && !state_->table.submit(submission, id)) {
+            state_->refused = true;
         }
+        // Refused draws carry no identity, never the previous draw's ID. Once
+        // refused, do no more registry work or allocation for this capture.
         glProgramUniform4uiv(shader.Id(), entry.identity, 1, id.data());
         return;
     }
@@ -381,6 +389,23 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
                                       entt::registry& registry,
                                       const GBufferPassInput& input) {
     LUMIN_PROFILE_ZONE_N("GL GBufferPass.execute");
+    // Save once per pass, before any binding or cull change. All producer exits,
+    // including exceptions from callbacks, restore the caller's exact bindings.
+    GLint previous_vao = 0, previous_draw_fbo = 0, previous_read_fbo = 0;
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &previous_vao);
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous_draw_fbo);
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read_fbo);
+    const GLboolean previous_cull = glIsEnabled(GL_CULL_FACE);
+    ReplayRollback restore_gl([=]() noexcept {
+        glBindVertexArray(static_cast<GLuint>(previous_vao));
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(previous_draw_fbo));
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(previous_read_fbo));
+        if (previous_cull) {
+            glEnable(GL_CULL_FACE);
+        } else {
+            glDisable(GL_CULL_FACE);
+        }
+    });
     // ON already populated persistent mesh caches. Keep reused per-dispatch
     // scratch exactly as ON left it, including when a later stage throws.
     auto restore = [this,
@@ -476,7 +501,6 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
         geometry_pass_skinned_meshes(ctx, input, registry, camera, fp, stats);
     }
 
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
     return stats;
 }
 
@@ -933,6 +957,18 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         Mesh* mesh = batch.mesh;
         if (!mesh || matrices.empty())
             continue;
+        if (capture) {
+            if (mesh->indexCount >
+                static_cast<std::uint32_t>(std::numeric_limits<GLsizei>::max())) {
+                capture->unsupported("diagnostic_static_mesh_index_count");
+                continue;
+            }
+            // Bound temporary LOD-path copies to the registry's 1,024-byte UTF-8 limit.
+            if (batch.basePath.size() > 1024 || batch.drawPath.size() > 1024) {
+                capture->unsupported("static_mesh_identity_path_limit");
+                continue;
+            }
+        }
         shader->setInt("u_materialId", static_cast<int>(batch.materialId));
         bool two_sided = false;
         //  static-model UV texture lane: if this mesh has registered bark/leaf
@@ -1019,16 +1055,6 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             glVertexAttribPointer(7, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)nullptr);
             glVertexAttribDivisor(7, 1);
             if (capture) {
-                if (mesh->indexCount >
-                    static_cast<std::uint32_t>(std::numeric_limits<GLsizei>::max())) {
-                    capture->unsupported("diagnostic_static_mesh_index_count");
-                    throw std::runtime_error("Diagnostic static mesh index count exceeds GLsizei");
-                }
-                // Bound temporary LOD-path copies to the registry's UTF-8 path limit.
-                if (batch.basePath.size() > 1024 || batch.drawPath.size() > 1024) {
-                    capture->unsupported("static_mesh_identity_path_limit");
-                    throw std::runtime_error("Diagnostic static mesh path exceeds registry bounds");
-                }
                 std::uint32_t resolved_lod = 0;
                 for (int level = 1; level < kTreeLodCount; ++level) {
                     if (batch.drawPath == LodMeshPath(batch.basePath, level)) {

@@ -24,6 +24,8 @@ public:
     GBufferDiagnosticCapture& operator=(const GBufferDiagnosticCapture&) = delete;
     static GBufferDiagnosticCapture* Current();
     bool complete() const;
+    // Sticky submission refusal, separate from unsupported producer coverage.
+    bool refused() const;
     Shader* variant(Shader* shader, bool ladder);
     void write(const Shader& shader, const DiagnosticSubmission& submission);
     void unsupported(std::string_view producer,
@@ -35,6 +37,7 @@ private:
         explicit State(DiagnosticDrawTable& draw_table);
         ~State();
         DiagnosticDrawTable& table;
+        bool refused = false;
         struct Variant {
             std::string vertex;
             std::string fragment;

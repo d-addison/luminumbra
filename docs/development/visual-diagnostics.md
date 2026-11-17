@@ -13,7 +13,7 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | AOV serialization, integer ID encoding and point-probe JSON | Implemented as independent, GL-free codecs | `DiagnosticCapture.h/.cpp`; registered `DiagnosticCapture.*` regressions in `capture_manifest_test`; native execution pending |
 | Lazy integer target with attachment leases | Implemented as a standalone helper | `DiagnosticTargets.h`; registered `DiagnosticTargetDriver.*` regressions in `capture_manifest_test`; native execution pending |
 | Capture-local draw registry | Implemented as a standalone, GL-free helper | `DiagnosticDrawTable.h`; registered `DiagnosticDrawTable.*` regressions in `capture_manifest_test`; native execution pending |
-| Deferred attribution producers | Implemented without an ID attachment | `GBufferTargets.h` and `GBufferPass.cpp` add a render-thread producer scope, capture-local draw identities and explicit unsupported records; `g_buffer.frag` and `foliage.frag` have additive `LUMIN_DIAG_IDS` outputs; registered `DiagnosticAttribution.*` source-contract regressions in `capture_manifest_test`; native execution pending |
+| Deferred attribution producers | Implemented without an ID attachment | `GBufferTargets.h` and `GBufferPass.cpp` add a render-thread producer scope, capture-local draw identities and explicit unsupported records; `g_buffer.frag` and `foliage.frag` have additive `LUMIN_DIAG_IDS` outputs; registered `DiagnosticAttribution.*` source-contract and `DiagnosticAttributionGl.*` hidden-GL regressions in `render_smoke_test`; native execution pending |
 | G-buffer ID attachment | Pending | Attachment integration must hold an `AttachmentLease` for the entire caller attachment lifetime, including rollback, resize and teardown; producer scopes currently always report incomplete coverage |
 | Exact producer coverage | Partial | Inside an explicit producer scope, file-backed static instances and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier with unsupported generated-mesh metadata. Live terrain MDI, ladder backend, authored surfaces and tree impostors explicitly invalidate coverage; procedural static meshes also remain unsupported. Later plant/decal stages are outside the scope. Foliage has a guarded shader output but no instrumented forward submission or separate contributor plane |
 | Readback and scenario opt-in | Planned | Requires scenario capture integration and completion of the unsupported producer paths |
@@ -67,7 +67,15 @@ During collection, static instances are submitted once each using their existing
 attributes and base-instance offset, so repeated instances get separate ordered
 draw IDs without replay. Resolved mesh paths determine mesh LOD, including fallback
 to the base mesh. The existing 65,536-entry registry limit refuses excessive capture
-submissions. Normal rendering keeps its batched draws and original attachments.
+submissions. A failed submission sets the scope's sticky `refused()` flag without
+appending another record or throwing. Later writes upload zero IDs and stop
+registry work; `complete()` remains false. Static metadata refusals record
+unsupported coverage and omit the invalid draw. Every pass exit restores caller
+culling, VAO and separate read/draw framebuffer bindings, including exceptional
+producer exits. Registered hidden-GL regressions cover the exact entry bound,
+repeated refusal, zero IDs, double-sided foliage and exceptional state restoration;
+native execution remains pending. Normal rendering keeps its batched draws and
+original attachments.
 
 Completing exact coverage requires changes beyond the deferred attachment owners:
 the live MDI origin/identity transport in `RenderPipeline.cpp`, the ladder submission

@@ -442,7 +442,6 @@ luminumbra_configure_first_party_target(rendering_defaults_test)
 add_executable(capture_manifest_test
     rendering/capture_manifest_test.cpp
     rendering/diagnostic_capture_test.cpp
-    rendering/diagnostic_attribution_test.cpp
     rendering/temporal_audit_test.cpp
     ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp
     ../src/luminumbra_client/rendering/TemporalAudit.cpp
@@ -450,7 +449,6 @@ add_executable(capture_manifest_test
     ../src/luminumbra_client/rendering/DiagnosticCapture.cpp)
 target_include_directories(capture_manifest_test PRIVATE ../src ../src/luminumbra_client)
 target_link_libraries(capture_manifest_test PRIVATE gtest_main nlohmann_json::nlohmann_json luminumbra_common glad)
-target_compile_definitions(capture_manifest_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
 luminumbra_configure_first_party_target(capture_manifest_test)
 
 #  far-field impostors: the hemi-octahedral view<->tile mapping math (GL-free,
@@ -594,6 +592,7 @@ if(MSVC)
 endif()
 
 add_executable(render_smoke_test
+    rendering/diagnostic_attribution_test.cpp
     rendering/render_smoke_test.cpp
     rendering/FarWorldShadow_test.cpp
     rendering/FarWorldFogGl_test.cpp
