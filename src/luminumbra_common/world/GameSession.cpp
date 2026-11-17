@@ -487,10 +487,12 @@ bool GameSession::AdoptPreparedWorld(const std::shared_ptr<WorldPreparation>& pr
 }
 
 GameSession::GameSession()
-    : GameSession(AuthorityProfileOptions{}, AuthorityProfileTestKey{}) {}
+    : GameSession(AuthorityProfileOptions{}, AuthorityProfileTag{}) {}
 
+// The public test-only opt-in constructor is deliberately NOT defined in src/
+// (see GameSession.h); its only definition is the test seam source.
 GameSession::GameSession(const AuthorityProfileOptions& authority_profile,
-                         AuthorityProfileTestKey /*key*/)
+                         AuthorityProfileTag /*tag*/)
     : m_authorityProfile(authority_profile) {
     m_scriptState = std::make_unique<Luminumbra::scripting::LuaState>();
     m_registry.on_destroy<Luminumbra::Components::CreaturePhysicsComponent>()

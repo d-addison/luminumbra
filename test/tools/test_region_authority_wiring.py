@@ -44,8 +44,8 @@ class RegionAuthorityWiring(unittest.TestCase):
         peer = function(native, "TEST(GameSessionHeadlessWorldTest, "
                         "IdleRetentionUsesWorkRegardlessOfStreamedResidency)")
         self.assertIn("const GameSession::AuthorityProfileOptions profile{.residency_free_eviction = true};", peer)
-        self.assertIn("GameSession session(profile, GameSessionAuthorityProfileTestAccess::Key()),", peer)
-        self.assertIn("peer(profile, GameSessionAuthorityProfileTestAccess::Key());", peer)
+        self.assertIn("GameSession session(profile, GameSession::AuthorityProfileTestOnly{}),", peer)
+        self.assertIn("peer(profile, GameSession::AuthorityProfileTestOnly{});", peer)
         for assertion in (
                 "EXPECT_EQ(session.GetRegionSchedule(), peer.GetRegionSchedule());",
                 "EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), "
@@ -61,30 +61,44 @@ class RegionAuthorityWiring(unittest.TestCase):
 
     def test_profile_opt_in_is_reachable_only_from_tests(self):
         # Until slice I binds the option to negotiated identity, no production
-        # source may mint the passkey or construct a non-default profile.
+        # binary may construct a non-default profile. The opt-in constructor is
+        # declared in the header but defined only in a test-only source, so a
+        # production caller fails to link instead of relying on a nameable friend.
         header = (ROOT / "src/luminumbra_common/world/GameSession.h").read_text(
             encoding="utf-8")
-        key = function(header, "class AuthorityProfileTestKey")
-        self.assertIn("friend struct GameSessionAuthorityProfileTestAccess;", key)
-        self.assertIn("AuthorityProfileTestKey() = default;", key)
-        self.assertNotIn("public:", key)
+        tag = function(header, "struct AuthorityProfileTestOnly")
+        self.assertEqual(tag, "explicit AuthorityProfileTestOnly() = default;")
         self.assertIn("GameSession(const AuthorityProfileOptions& authority_profile, "
-                      "AuthorityProfileTestKey key);", header)
-        self.assertNotIn("explicit GameSession(const AuthorityProfileOptions&", header)
+                      "AuthorityProfileTestOnly);", header)
+        self.assertIn("GameSession(const AuthorityProfileOptions& authority_profile, "
+                      "AuthorityProfileTag);", header)
+        private = header[header.index("\nprivate:\n", header.index("class GameSession {")):]
+        self.assertIn("struct AuthorityProfileTag {};", private)
+        self.assertNotIn("friend struct GameSessionAuthorityProfileTestAccess", header)
+        self.assertNotIn("AuthorityProfileTestKey", header)
         for path in sorted((ROOT / "src").rglob("*")):
             if path.suffix not in (".h", ".hpp", ".cpp", ".cc", ".inl"):
                 continue
             text = path.read_text(encoding="utf-8", errors="replace")
             rel = path.relative_to(ROOT).as_posix()
             if rel != "src/luminumbra_common/world/GameSession.h":
-                self.assertNotIn("GameSessionAuthorityProfileTestAccess", text, rel)
+                self.assertNotIn("AuthorityProfileTestOnly", text, rel)
             if rel not in ("src/luminumbra_common/world/GameSession.h",
                            "src/luminumbra_common/world/GameSession.cpp"):
-                self.assertNotIn("AuthorityProfileTestKey", text, rel)
+                self.assertNotIn("AuthorityProfileTag", text, rel)
                 self.assertNotIn("residency_free_eviction", text, rel)
-        tests = (ROOT / "test/common/GameSessionHeadlessWorld_test.cpp").read_text(
-            encoding="utf-8")
-        self.assertIn("struct GameSessionAuthorityProfileTestAccess {", tests)
+        # The seam source is the only definition, and only a test target compiles it.
+        seam_name = "GameSessionAuthorityProfileTestSeam.cpp"
+        seam = (ROOT / "test/common" / seam_name).read_text(encoding="utf-8")
+        self.assertIn("AuthorityProfileTestOnly /*test_only*/)", seam)
+        self.assertIn(": GameSession(authority_profile, AuthorityProfileTag{}) {}", seam)
+        for path in sorted(ROOT.rglob("CMakeLists.txt")) + sorted(ROOT.rglob("*.cmake")):
+            rel = path.relative_to(ROOT).as_posix()
+            if rel.startswith(("build/", ".git/", "vendor/", "_deps/")) or "/_deps/" in rel:
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            expected = 1 if rel == "test/CMakeLists.txt" else 0
+            self.assertEqual(text.count(seam_name), expected, rel)
 
     def test_default_eviction_preserves_legacy_residency_probe(self):
         session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(
@@ -101,7 +115,7 @@ class RegionAuthorityWiring(unittest.TestCase):
         self.assertEqual(function(header, "struct AuthorityProfileOptions"),
                          "bool residency_free_eviction = false;")
         self.assertIn("const AuthorityProfileOptions m_authorityProfile;", header)
-        self.assertIn(": GameSession(AuthorityProfileOptions{}, AuthorityProfileTestKey{}) {}", session)
+        self.assertIn(": GameSession(AuthorityProfileOptions{}, AuthorityProfileTag{}) {}", session)
         self.assertIn(": m_authorityProfile(authority_profile)", session)
         # Construction and the single probe gate are its only production uses.
         # In particular, preparation, config, hashes and save writers cannot read it.

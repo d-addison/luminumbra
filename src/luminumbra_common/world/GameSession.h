@@ -113,17 +113,18 @@ public:
         bool residency_free_eviction = false;
     };
 
-    // Passkey: only the test-only GameSessionAuthorityProfileTestAccess (defined in
-    // test sources, never in src/) can mint one, so no runtime, client, server or
-    // replay caller can opt in before slice I ties the option to negotiated identity.
-    class AuthorityProfileTestKey {
-        friend class GameSession; // default construction delegates with the legacy profile
-        friend struct GameSessionAuthorityProfileTestAccess;
-        AuthorityProfileTestKey() = default;
+    // Selects the test-only opt-in constructor below.
+    struct AuthorityProfileTestOnly {
+        explicit AuthorityProfileTestOnly() = default;
     };
 
     GameSession();
-    GameSession(const AuthorityProfileOptions& authority_profile, AuthorityProfileTestKey key);
+    // Link boundary: this constructor is DEFINED only in
+    // test/common/GameSessionAuthorityProfileTestSeam.cpp, which is compiled into test
+    // executables and never into a src/ library. A runtime, client, server or replay
+    // binary that names it fails to link, so nothing can opt in before slice I ties
+    // the option to negotiated identity.
+    GameSession(const AuthorityProfileOptions& authority_profile, AuthorityProfileTestOnly);
     ~GameSession();
 
     // Initialize a new world with the given parameters. Refusal before adoption
@@ -696,6 +697,10 @@ public:
     std::filesystem::path GetSaveRootPath() const;
 
 private:
+    struct AuthorityProfileTag {};
+    // The single real constructor; the default and the test-only constructors delegate here.
+    GameSession(const AuthorityProfileOptions& authority_profile, AuthorityProfileTag);
+
     const AuthorityProfileOptions m_authorityProfile;
     void DisableFarWorldAuthorityProducer();
     std::unique_ptr<World::FarWorldAuthorityProducer> m_farWorldAuthorityProducer;
