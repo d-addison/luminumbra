@@ -8,10 +8,13 @@ import copy
 import io
 import json
 import re
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import check_v03_receipt as tool
 
 REQUIRED = [
@@ -25,6 +28,32 @@ REQUIRED = [
 ]
 
 
+def audio_run(playback: bool) -> dict:
+    volumes = {"master": 0.8, "music": 0.6, "sfx": 0.4}
+    return {"exit_code": 0, "timed_out": False, "state": {
+        "schema": "luminumbra.runtime_state.v1",
+        "audio_acceptance": {
+            "schema": "luminumbra.audio_acceptance.v1",
+            "resolution": {"no_audio_requested": not playback,
+                           "enable_audio_requested": not playback,
+                           "requested_mode": "device" if playback else "null",
+                           "resolved_mode": "device" if playback else "null",
+                           "reason": "default" if playback else "flag"},
+            "backend": {"playback_enabled": playback, "engine_initialized": playback,
+                        "device_started": playback,
+                        "routing": {key: playback for key in ("sfx", "ambient", "events", "ui")}},
+            "saved_volumes": {"loaded": volumes.copy(), "in_effect": volumes.copy(),
+                              "unchanged": True,
+                              "playback_gains": volumes.copy() if playback else None},
+            "controls": {"observed": True, "present": 3,
+                         "disabled_count": 0 if playback else 3, "match_playback": True},
+            "telemetry": {"opt_in_requested": False, "enabled": False,
+                          "retained_requests": 0, "opt_in_only": True},
+            "no_audio_precedence": None if playback else True,
+            "controls_disabled": not playback,
+        }}}
+
+
 def valid_receipt() -> dict:
     sections = {}
     for name in REQUIRED:
@@ -35,6 +64,9 @@ def valid_receipt() -> dict:
     sections["net_soak"]["required_tests"] = ["NetSoak"]
     sections["net_soak"]["discovered_tests"] = ["NetSoak"]
     sections["net_soak"]["skipped_tests"] = 0
+    sections["audio_off"]["runtime_snapshots"] = {
+        "ordinary": audio_run(True), "no_audio": audio_run(False),
+        "no_audio_reversed": audio_run(False)}
     return {
         "schema": "luminumbra.v03_acceptance.v1",
         "revision": "0123abcd",
@@ -100,6 +132,159 @@ class V03AcceptanceReceiptContract(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn("pass render_qualification: evidence: logs/render_qualification.json", out)
         self.assertIn("overall: pass", out)
+
+    def _audio_refuses(self, mutate, message: str, role: str = "ordinary") -> None:
+        receipt = valid_receipt()
+        audio = receipt["sections"]["audio_off"]["runtime_snapshots"][role]["state"]["audio_acceptance"]
+        mutate(audio)
+        check = self._expect(receipt, "audio_off", "fail")
+        self.assertIn(message, check["detail"])
+
+    def test_audio_stale_default_off_only_refuses(self) -> None:
+        receipt = valid_receipt()
+        receipt["sections"]["audio_off"] = {
+            "status": "pass", "evidence": "logs/audio_off.json",
+            "default_null_playback_with_saved_volume": True,
+            "no_audio_precedence": True, "controls_disabled": True}
+        check = self._expect(receipt, "audio_off", "fail")
+        self.assertIn("stale default-off-only", check["detail"])
+
+    def test_audio_missing_object_refuses(self) -> None:
+        receipt = valid_receipt()
+        del receipt["sections"]["audio_off"]["runtime_snapshots"]["ordinary"]["state"]["audio_acceptance"]
+        check = self._expect(receipt, "audio_off", "fail")
+        self.assertIn("audio_acceptance: missing key", check["detail"])
+
+    def test_audio_false_started_device_refuses(self) -> None:
+        self._audio_refuses(lambda a: a["backend"].update(device_started=False), "device_started")
+
+    def test_audio_wrong_type_refuses(self) -> None:
+        self._audio_refuses(lambda a: a["backend"].update(device_started=1), "device_started")
+
+    def test_audio_wrong_version_refuses(self) -> None:
+        self._audio_refuses(lambda a: a.update(schema="luminumbra.audio_acceptance.v2"), "schema")
+
+    def test_audio_telemetry_without_opt_in_refuses(self) -> None:
+        self._audio_refuses(lambda a: a["telemetry"].update(enabled=True),
+                            "without opt-in", "no_audio")
+
+    def test_audio_controls_not_observed_refuses(self) -> None:
+        self._audio_refuses(lambda a: a["controls"].update(observed=False), "controls.observed")
+
+    def test_audio_volumes_changed_refuses(self) -> None:
+        self._audio_refuses(lambda a: a["saved_volumes"]["in_effect"].update(master=0.5),
+                            "saved volumes changed", "no_audio")
+
+    def test_audio_volumes_changed_across_runs_refuses(self) -> None:
+        def change(audio):
+            for field in ("loaded", "in_effect"):
+                audio["saved_volumes"][field]["master"] = 0.5
+        self._audio_refuses(change, "saved volumes changed", "no_audio_reversed")
+
+    def test_audio_suppression_requires_explicit_null_gains(self) -> None:
+        self._audio_refuses(lambda a: a["saved_volumes"].update(playback_gains={}),
+                            "expected explicit null", "no_audio")
+
+    def test_audio_failed_partial_or_timed_out_sessions_refuse(self) -> None:
+        for role in ("ordinary", "no_audio", "no_audio_reversed"):
+            for fields in ({"exit_code": 2}, {"timed_out": True}, {"state": None},
+                           {"state": {"schema": "luminumbra.runtime_state.v2"}}):
+                with self.subTest(role=role, fields=fields):
+                    receipt = valid_receipt()
+                    receipt["sections"]["audio_off"]["runtime_snapshots"][role].update(fields)
+                    self._expect(receipt, "audio_off", "fail")
+        for snapshots in (None, [], {}, {"ordinary": {}}):
+            with self.subTest(snapshots=snapshots):
+                receipt = valid_receipt()
+                receipt["sections"]["audio_off"]["runtime_snapshots"] = snapshots
+                self._expect(receipt, "audio_off", "fail")
+
+    def test_audio_flag_precedence_and_truthful_controls(self) -> None:
+        for role in ("ordinary", "no_audio", "no_audio_reversed"):
+            for group, field in (("resolution", "resolved_mode"), ("resolution", "requested_mode"),
+                                 ("resolution", "reason"), ("resolution", "no_audio_requested"),
+                                 ("resolution", "enable_audio_requested"),
+                                 ("backend", "playback_enabled"), ("backend", "engine_initialized"),
+                                 ("controls", "match_playback"), ("controls", "disabled_count")):
+                with self.subTest(role=role, group=group, field=field):
+                    self._audio_refuses(lambda a: a[group].update({field: "unknown"}),
+                                        f"{group}.{field}", role)
+            for route in ("sfx", "ambient", "events", "ui"):
+                with self.subTest(role=role, route=route):
+                    self._audio_refuses(lambda a: a["backend"]["routing"].update(
+                        {route: role != "ordinary"}), f"routing.{route}", role)
+
+    def test_audio_every_required_key_and_unknown_observation_refuses(self) -> None:
+        def paths(obj, prefix=()):
+            for key, value in obj.items():
+                yield prefix + (key,)
+                if isinstance(value, dict):
+                    yield from paths(value, prefix + (key,))
+        baseline = valid_receipt()
+        snapshots = baseline["sections"]["audio_off"]["runtime_snapshots"]
+        # Fixed v1 fixture: visit every object and leaf, including run metadata.
+        for path in paths(snapshots):
+            for mutation in ("missing", "null", "wrong_type"):
+                receipt = copy.deepcopy(baseline)
+                parent = receipt["sections"]["audio_off"]["runtime_snapshots"]
+                for key in path[:-1]:
+                    parent = parent[key]
+                original = parent[path[-1]]
+                if original is None and mutation == "null":
+                    continue  # These two explicit null fields are required observations.
+                with self.subTest(path=path, mutation=mutation):
+                    if mutation == "missing":
+                        del parent[path[-1]]
+                    else:
+                        parent[path[-1]] = None if mutation == "null" else []
+                    self._expect(receipt, "audio_off", "fail")
+
+    def test_audio_volume_boundaries_and_nonfinite_refuse(self) -> None:
+        for level in (True, "0.5", 0, -1, 1.01, float("nan"), float("inf"), 10**400):
+            with self.subTest(level=level):
+                self._audio_refuses(lambda a: a["saved_volumes"]["loaded"].update(master=level),
+                                    "finite nonzero level")
+        self._audio_refuses(lambda a: a["saved_volumes"]["playback_gains"].update(master=0.3),
+                            "differs from saved volumes")
+
+    def test_audio_telemetry_types_retention_and_opt_in(self) -> None:
+        for values, message in (({"opt_in_only": False}, "opt_in_only"),
+                                ({"enabled": "false"}, "enabled: expected boolean"),
+                                ({"opt_in_requested": 1}, "opt_in_requested: expected boolean"),
+                                ({"retained_requests": True}, "expected nonnegative integer"),
+                                ({"retained_requests": -1}, "expected nonnegative integer"),
+                                ({"retained_requests": 1}, "without opt-in")):
+            with self.subTest(values=values):
+                self._audio_refuses(lambda a: a["telemetry"].update(values), message, "no_audio")
+        self._audio_refuses(lambda a: a["telemetry"].update(opt_in_requested=True),
+                            "ordinary startup must not opt in")
+        receipt = valid_receipt()
+        receipt["sections"]["audio_off"]["runtime_snapshots"]["no_audio"]["state"][
+            "audio_acceptance"]["telemetry"].update(
+                opt_in_requested=True, enabled=True, retained_requests=2)
+        self._expect(receipt, "audio_off", "pass")
+
+    def test_isolated_entrypoint_from_other_directory(self) -> None:
+        result = subprocess.run([sys.executable, "-I", "-B", str(Path(__file__).resolve()),
+                                 "V03AcceptanceReceiptContract.test_valid_receipt_passes_overall_with_exit_zero"],
+                                cwd=self.base, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_audio_driver_collects_observed_sessions_and_both_flag_orders(self) -> None:
+        script = (Path(__file__).resolve().parents[1] / "gates" /
+                  "run-v03-acceptance.ps1").read_text(encoding="utf-8")
+        audio = script.split("# --- audio_off", 1)[1].split("} catch {\n    $orchestratorError", 1)[0]
+        self.assertIn('name = "ordinary"; flags = @()', audio)
+        self.assertIn('name = "no_audio"; flags = @("--enable-audio", "--no-audio")', audio)
+        self.assertIn('name = "no_audio_reversed"; flags = @("--no-audio", "--enable-audio")', audio)
+        self.assertIn(') + @($session.flags)', audio)
+        self.assertIn('Invoke-ClientSession -Exe $exePath -ArgumentList $audioArgs', audio)
+        self.assertIn('"last-known-runtime.json"', audio)
+        self.assertIn('state = $audioState', audio)
+        self.assertIn('exit_code = [int]$audioRun.exit_code', audio)
+        self.assertIn('timed_out = [bool]$audioRun.timed_out', audio)
+        self.assertIn('-Extra @{ runtime_snapshots = $audioSnapshots }', audio)
+        self.assertNotIn('default_null_playback_with_saved_volume', audio)
 
     def _absent_render_driver_section(self) -> dict:
         # Inspect the actual emission branch so this portable test catches a

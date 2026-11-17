@@ -7,7 +7,7 @@ backend's actual availability and disable playback controls when unavailable.
 Saved master, music and SFX levels remain authoritative; changing the playback
 default does not overwrite them.
 
-Qualification, preview and capture launch commands must pass `--no-audio`
+Render qualification, preview and capture launch commands must pass `--no-audio`
 explicitly, including GPU and headless captures. Null playback
 retains no request history or per-frame telemetry writes unless
 `--audio-telemetry-path <file>` is requested. Historical null telemetry fixtures
@@ -37,10 +37,41 @@ issue #71 are amended to the ordinary-startup audio-on policy above:
 
 Native startup/settings/package qualification and preview delivery remain pending.
 Audible quality and complete event coverage remain separate device qualification.
-The historical `audio_off` receipt section in `tools/gates/run-v03-acceptance.ps1`
-still requests `default_null_playback_with_saved_volume` (lines 381–415); it needs
-alignment with this amended contract before it can qualify ordinary startup.
-Its existing receipt is not evidence that the amended native acceptance passed.
+The historical `audio_off` section name remains compatible in
+`tools/gates/run-v03-acceptance.ps1`, but its old default-off-only checklist cannot
+qualify acceptance. The driver collects three sessions: ordinary startup without
+audio flags, `--enable-audio --no-audio`, and `--no-audio --enable-audio`. In each
+session, open Settings, leave all three audio controls visible without changing
+levels, then quit within `-TimeoutSeconds`. Use nonzero saved master, music and
+SFX levels. `-AudioChecklist` remains accepted as supplementary evidence only.
+
+The receipt embeds `runtime_snapshots` in that section, keyed by `ordinary`,
+`no_audio` and `no_audio_reversed`. Each entry contains `exit_code`, `timed_out`
+and the runtime snapshot as `state`; the same entries are retained in
+`audio-acceptance.json`, alongside raw runtime artifacts and logs. The checker
+requires successful exits without timeouts and each state's
+`luminumbra.audio_acceptance.v1` object. Its `resolution`, `backend`,
+`saved_volumes`, `controls` and `telemetry` observations must establish:
+
+- ordinary default resolution to `device`, enabled playback, an initialized engine,
+  a started device and SFX, ambient, event and UI routing;
+- explicit resolution to `null` in both flag orders, with engine, device, playback
+  and routing false and `no_audio_precedence` true;
+- equal nonzero `loaded` and `in_effect` saved volumes within and across sessions,
+  `unchanged` true, device `playback_gains` equal to saved levels, and suppressed
+  `playback_gains` explicitly null;
+- `controls.observed` true, exactly three controls, disabled counts of zero for
+  playback and three for suppression, `match_playback` true, and a matching
+  `controls_disabled` alias;
+- boolean telemetry opt-in and enabled observations, `opt_in_only` true, and no
+  enabled telemetry or retained requests without opt-in. Ordinary startup must
+  not request telemetry.
+
+Ordinary `no_audio_precedence` is explicitly null because no disable flag was
+requested. Unknown, missing, wrongly typed, false qualifying observations and
+unsupported schema versions refuse qualification; unobserved controls and
+unavailable saved volumes never pass. Required nulls must be present as keys.
+These receipt checks do not establish audible quality or complete event coverage.
 
 Source evidence: `src/luminumbra_client/core/RuntimeScenarioConfig.cpp:255–256`
 parses the explicit disable flag and enables ordinary startup;
