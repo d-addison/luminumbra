@@ -3095,8 +3095,8 @@ TEST_F(HandoffAdmissionTest, StartDefersManifestScansAndSortToBudgetedPumps) {
     const std::array inputs{RendererHandoffInput(renderer, {5, 2, 0}, 1, false),
                             RendererHandoffInput(renderer, {5, 1, 0}, 1, false),
                             RendererHandoffInput(renderer, {5, 0, 0}, 1, false)};
-    ASSERT_EQ(renderer.StartTarget(RendererHandoffManifest(1, inputs)),
-              FarHandoffAdmissionStatus::Pending);
+    auto manifest = RendererHandoffManifest(1, inputs);
+    ASSERT_EQ(renderer.StartTarget(manifest), FarHandoffAdmissionStatus::Pending);
     const auto* handoff = renderer.Handoff();
     ASSERT_NE(handoff, nullptr);
     EXPECT_EQ(handoff->AdmissionWork().descriptor_visits, 0u);
@@ -3126,12 +3126,16 @@ TEST_F(HandoffAdmissionTest, StartDefersManifestScansAndSortToBudgetedPumps) {
     const auto expected = FarWorldHandoffDiagnosticJson(renderer.Diagnostic())["tiles"].dump();
     auto sorted = inputs;
     std::reverse(sorted.begin(), sorted.end());
-    ASSERT_TRUE(renderer.StageTarget(RendererHandoffManifest(2, sorted)));
+    // Reordering and republishing retain the observations' committed generation.
+    manifest.publication_serial = 2;
+    manifest.tiles = sorted;
+    ASSERT_TRUE(renderer.StageTarget(manifest));
     EXPECT_EQ(FarWorldHandoffDiagnosticJson(renderer.Diagnostic())["tiles"].dump(), expected);
     // A published target makes frame preparation actively overwrite its own
     // ordering buffer between merge emissions and the eventual publication.
-    ASSERT_EQ(renderer.StartTarget(RendererHandoffManifest(3, inputs)),
-              FarHandoffAdmissionStatus::Pending);
+    manifest.publication_serial = 3;
+    manifest.tiles = inputs;
+    ASSERT_EQ(renderer.StartTarget(manifest), FarHandoffAdmissionStatus::Pending);
     columns = 0;
     for (std::size_t pump = 0; pump < 1024; ++pump) {
         const auto result = renderer.PumpAdmission(1);
@@ -3147,10 +3151,9 @@ TEST_F(HandoffAdmissionTest, StartDefersManifestScansAndSortToBudgetedPumps) {
     EXPECT_EQ(columns + Complete(64), 3u * 129u * 129u);
     EXPECT_EQ(FarWorldHandoffDiagnosticJson(renderer.Diagnostic())["tiles"].dump(), expected);
     // Duplicate serials still validate the full set, without observing heights.
-    ASSERT_EQ(renderer.StartTarget(RendererHandoffManifest(3, inputs)),
-              FarHandoffAdmissionStatus::Pending);
+    ASSERT_EQ(renderer.StartTarget(manifest), FarHandoffAdmissionStatus::Pending);
     EXPECT_EQ(Complete(64), 0u);
-    auto incomplete = RendererHandoffManifest(3, inputs);
+    auto incomplete = manifest;
     incomplete.tiles = incomplete.tiles.first(2);
     ASSERT_EQ(renderer.StartTarget(incomplete), FarHandoffAdmissionStatus::Pending);
     FarHandoffAdmissionPump refused;
