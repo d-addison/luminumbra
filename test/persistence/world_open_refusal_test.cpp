@@ -2530,10 +2530,11 @@ TEST_F(WorldOpenRefusal, ServerWaterHashesAreIndependentOfSaveTimingWithoutRegio
         const auto inputs = session->GetWorldSystem()->water_authority_input_items();
         const auto before = ReadServerWaterHashes(runner);
         ExpectSameServerWaterHashes(ReadServerWaterHashes(runner), before);
-        if (full_snapshot)
+        if (full_snapshot) {
             ASSERT_GT(runner.SaveFullSnapshot(), 0u);
-        else
+        } else {
             ASSERT_TRUE(session->SaveWorldState());
+        }
         ExpectSameServerWaterHashes(ReadServerWaterHashes(runner), before);
         // Hashes and saves must find the water queue already drained by the host tick.
         EXPECT_EQ(session->GetWorldSystem()->water_authority_input_items(), inputs);
@@ -4640,7 +4641,7 @@ TEST(WeatherScheduleTest, WeatherScriptLocksSetupAfterEveryTickZeroEntryPoint) {
 
 TEST(WeatherScheduleTest, WeatherScriptPresentationSurvivesCatchUpWithoutChangingSimulation) {
     for (const bool regional : {false, true}) {
-        for (const std::uint64_t strike_tick : {0u, 7u}) {
+        for (const std::uint64_t strike_tick : {1u, 7u}) {
             auto script = ShortWeatherScript();
             script.strike_tick = strike_tick;
             Luminumbra::Systems::WeatherSystem weather(1337), restored(1337);
@@ -4692,6 +4693,28 @@ TEST(WeatherScheduleTest, WeatherScriptPresentationSurvivesCatchUpWithoutChangin
     }
 }
 
+TEST(WeatherScheduleTest, WeatherScriptRefusesStrikeAtTickZeroWithoutChangingSetup) {
+    const auto script = ShortWeatherScript();
+    auto invalid = script;
+    invalid.strike_tick = 0;
+    EXPECT_FALSE(invalid.valid());
+    EXPECT_TRUE(invalid.canonical_bytes().empty());
+    auto encoding = script.canonical_bytes();
+    encoding.replace(encoding.size() - 16, 16, "0000000000000000");
+    auto decoded = script;
+    EXPECT_FALSE(WeatherScript::Decode(encoding, decoded));
+    EXPECT_EQ(decoded, script);
+    Luminumbra::Systems::WeatherSystem weather(1337);
+    const auto hash = weather.ComputeWeatherSubHash();
+    EXPECT_FALSE(weather.SetSchedule(invalid));
+    EXPECT_EQ(weather.ComputeWeatherSubHash(), hash);
+    ASSERT_TRUE(weather.SetSchedule(script));
+    const auto scheduled_hash = weather.ComputeWeatherSubHash();
+    EXPECT_FALSE(weather.SetSchedule(invalid));
+    EXPECT_EQ(weather.ComputeWeatherSubHash(), scheduled_hash);
+    EXPECT_TRUE(weather.SetSchedule(script));
+}
+
 TEST(WeatherScheduleTest, WeatherScriptRestoreUsesLiveGroundWindAtElevatedAnchors) {
     const auto script = ShortWeatherScript();
     for (const float height : {-32.0f, 0.0f, 31.0f, 32.0f, 96.0f}) {
@@ -4708,6 +4731,37 @@ TEST(WeatherScheduleTest, WeatherScriptRestoreUsesLiveGroundWindAtElevatedAnchor
         EXPECT_FLOAT_EQ(actual.wind.x, expected.wind.x);
         EXPECT_FLOAT_EQ(actual.wind.y, expected.wind.y);
         EXPECT_EQ(restored.ComputeWeatherSubHash(), live.ComputeWeatherSubHash());
+    }
+}
+
+TEST(WeatherScheduleTest, WeatherScriptLegacyUpdateAndRestoreUseTheSameGroundWind) {
+    const auto script = ShortWeatherScript();
+    for (const bool scheduled : {false, true}) {
+        for (const float height : {-32.0f, 0.0f, 31.0f, 32.0f, 96.0f}) {
+            SCOPED_TRACE(testing::Message() << scheduled << '/' << height);
+            const Vec3 anchor(8.0f, height, 8.0f);
+            Luminumbra::Systems::WeatherSystem live(1337), restored(1337);
+            Luminumbra::Systems::WindFieldSystem wind(1337), restored_wind(1337);
+            if (scheduled) {
+                ASSERT_TRUE(live.SetSchedule(script));
+                ASSERT_TRUE(restored.SetSchedule(script));
+            }
+            wind.Update(5, anchor);
+            live.Update(5, anchor, &wind);
+            restored.RestoreAtTick(5, anchor, restored_wind);
+            const auto ground = wind.SampleWind(Vec3(anchor.x, 5.0f, anchor.z),
+                                                Luminumbra::Systems::WindLayer::Ground);
+            const auto expected = live.SampleAt(anchor);
+            const auto actual = restored.SampleAt(anchor);
+            EXPECT_FLOAT_EQ(expected.wind.x, ground.x);
+            EXPECT_FLOAT_EQ(expected.wind.y, ground.y);
+            EXPECT_FLOAT_EQ(actual.wind.x, expected.wind.x);
+            EXPECT_FLOAT_EQ(actual.wind.y, expected.wind.y);
+            EXPECT_EQ(restored.ComputeWeatherSubHash(), live.ComputeWeatherSubHash());
+            live.Update(5, anchor, nullptr);
+            EXPECT_FLOAT_EQ(live.SampleAt(anchor).wind.x, 0.0f);
+            EXPECT_FLOAT_EQ(live.SampleAt(anchor).wind.y, 0.0f);
+        }
     }
 }
 
@@ -4820,6 +4874,105 @@ TEST_P(WeatherScheduleSaveTest, WeatherScriptSaveContinuationAndEnvelopeVersion)
     EXPECT_EQ(loaded.SystemConfigIdentity(), unscheduled.SystemConfigIdentity());
     EXPECT_EQ(loaded.GetWeatherSystem()->ComputeWeatherSubHash(),
               unscheduled.GetWeatherSystem()->ComputeWeatherSubHash());
+}
+
+TEST_P(WeatherScheduleSaveTest, WeatherScriptPreparedStateInstallsAndClearsSchedule) {
+    const auto script = ShortWeatherScript();
+    for (const bool incoming_schedule : {false, true}) {
+        SCOPED_TRACE(incoming_schedule);
+        GameSession source, target;
+        Configure(source);
+        Configure(target);
+        if (incoming_schedule) {
+            ASSERT_TRUE(source.SetWeatherSchedule(script));
+        } else {
+            ASSERT_TRUE(target.SetWeatherSchedule(script));
+        }
+        ASSERT_TRUE(source.CreateWorld("Weather source", "1337", "default"));
+        ASSERT_TRUE(target.CreateWorld("Weather target", "1337", "default"));
+        if (incoming_schedule) {
+            for (int tick = 0; tick < 4; ++tick) {
+                TickScriptSession(source);
+            }
+        }
+        ASSERT_TRUE(source.SaveWorld());
+        const auto prepared = GameSession::PrepareWorldState(
+            target.CaptureWorldPreparationOptions(), source.GetWorldSaveDir());
+        ASSERT_TRUE(target.AdoptPreparedWorld(prepared)) << target.GetWorldOpenError();
+        EXPECT_EQ(target.GetSimulationTickCount(), incoming_schedule ? 4u : 0u);
+        if (incoming_schedule) {
+            ASSERT_NE(target.GetWeatherSchedule(), nullptr);
+            EXPECT_EQ(*target.GetWeatherSchedule(), script);
+            ExpectScriptWeather(*target.GetWeatherSystem(), script, 4);
+        } else {
+            EXPECT_EQ(target.GetWeatherSchedule(), nullptr);
+        }
+        EXPECT_EQ(target.GetWeatherSystem()->ComputeWeatherSubHash(),
+                  source.GetWeatherSystem()->ComputeWeatherSubHash());
+        ASSERT_TRUE(target.SaveWorld());
+        const auto metadata =
+            nlohmann::json::parse(ReadClockTestFile(target.GetWorldSaveDir() / "world_info.json"));
+        EXPECT_EQ(metadata.contains("weatherSchedule"), incoming_schedule);
+    }
+}
+
+TEST_P(WeatherScheduleSaveTest, WeatherScriptCatalogAdmitsEnvelopeBeforePayloadValidation) {
+    GameSession session;
+    Configure(session);
+    const auto script = ShortWeatherScript();
+    ASSERT_TRUE(session.SetWeatherSchedule(script));
+    ASSERT_TRUE(session.CreateWorld("Weather catalog", "1337", "default"));
+    ASSERT_TRUE(session.SaveWorld());
+    const auto save = session.GetWorldSaveDir();
+    const auto metadata_path = save / "world_info.json";
+    const auto valid = nlohmann::json::parse(ReadClockTestFile(metadata_path));
+    const auto& id = session.GetMetadata().worldId;
+    for (const auto mode : {P::SavedWorldValidation::Catalog,
+                            P::SavedWorldValidation::Complete,
+                            P::SavedWorldValidation::DeferredToPreparation}) {
+        EXPECT_TRUE(P::InspectSavedWorld(Root().path(), Root().path(), id, {}, mode).error.empty());
+    }
+    std::vector<nlohmann::json> cases;
+    for (const auto& encoding : {std::string("WSC2"), script.canonical_bytes().substr(0, 16)}) {
+        auto bad = valid;
+        bad["weatherSchedule"] = encoding;
+        cases.push_back(bad);
+    }
+    for (const auto& tick :
+         {nlohmann::json(-1), nlohmann::json(1.0), nlohmann::json(WorldClock::kTickLimit)}) {
+        auto bad = valid;
+        bad["weatherScheduleTick"] = tick;
+        cases.push_back(bad);
+    }
+    for (const auto* field : {"weatherSchedule", "weatherScheduleTick"}) {
+        auto bad = valid;
+        bad.erase(field);
+        cases.push_back(bad);
+    }
+    auto mismatch = valid;
+    mismatch["simulationTick"] = 1;
+    cases.push_back(mismatch);
+    auto wrong_version = valid;
+    wrong_version["container_version"] = 3;
+    cases.push_back(wrong_version);
+    for (const auto& metadata : cases) {
+        SCOPED_TRACE(metadata.dump());
+        ASSERT_TRUE(P::WorldSaveService::write_file_durably(metadata_path, metadata.dump()));
+        const auto disk = DiskBytes(Root().path());
+        for (const auto mode : {P::SavedWorldValidation::Catalog,
+                                P::SavedWorldValidation::Complete,
+                                P::SavedWorldValidation::DeferredToPreparation}) {
+            const auto inspected = P::InspectSavedWorld(Root().path(), Root().path(), id, {}, mode);
+            EXPECT_TRUE(inspected.error.starts_with("Corrupt weather schedule metadata:"))
+                << inspected.error;
+            EXPECT_FALSE(inspected.payloads_verified);
+        }
+        const auto catalog = P::EnumerateSavedWorlds(Root().path());
+        ASSERT_TRUE(catalog.error.empty());
+        ASSERT_EQ(catalog.worlds.size(), 1u);
+        EXPECT_TRUE(catalog.worlds.front().error.starts_with("Corrupt weather schedule metadata:"));
+        EXPECT_EQ(DiskBytes(Root().path()), disk);
+    }
 }
 
 TEST_P(WeatherScheduleSaveTest, WeatherScriptInvalidMetadataRefusesWithoutLiveOrDiskMutation) {

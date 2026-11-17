@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <ctime>
 #include <filesystem>
+#include <memory>
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
 #include <stop_token>
@@ -195,6 +196,14 @@ SavedWorld InspectSavedWorld(const fs::path& root,
              json.at("container_version") == WorldSaveService::kScheduledMetadataVersion);
         if (!current_container && !WorldSaveService::validate_save(save, &errors, stop)) {
             result.error = errors.empty() ? "Corrupt world save." : errors.front();
+            return result;
+        }
+        // Admit the envelope even when payload validation is deferred to preparation.
+        std::shared_ptr<const Systems::WeatherSchedule> weather_schedule;
+        std::uint64_t weather_tick = 0;
+        if (current_container && !WorldSaveService::read_weather_schedule(
+                                     save, weather_schedule, weather_tick, &errors, stop)) {
+            result.error = errors.empty() ? "Corrupt weather schedule metadata." : errors.front();
             return result;
         }
         result.metadata.name = json.value("name", "Unnamed World");

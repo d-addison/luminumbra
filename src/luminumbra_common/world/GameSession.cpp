@@ -267,6 +267,7 @@ struct GameSession::LoadedWorldState {
     std::vector<IVec3> durable_inventory;
     WorldClock clock;
     std::shared_ptr<const Systems::WeatherSchedule> weather_schedule;
+    std::unique_ptr<Systems::WeatherSystem> weather_system;
     std::uint64_t weather_schedule_tick = 0;
     std::size_t water_sim_cursor = 0;
     std::optional<Vec3> ambient_anchor;
@@ -281,6 +282,19 @@ struct GameSession::LoadedWorldState {
     bool input_refused = false;
     std::optional<luminumbra::fields::EnergyFieldState> energy;
 };
+
+namespace {
+std::unique_ptr<Systems::WeatherSystem> PrepareWeatherSystem(
+    int seed, const std::shared_ptr<const Systems::WeatherSchedule>& schedule, std::string& error) {
+    auto weather = std::make_unique<Systems::WeatherSystem>(seed);
+    if (schedule && !weather->SetSchedule(*schedule)) {
+        error = "Weather schedule installation refused: invalid schedule or setup already locked.";
+        LUMINUMBRA_CORE_ERROR("World open refused: {}", error);
+        return nullptr;
+    }
+    return weather;
+}
+} // namespace
 
 struct GameSession::FoliageStep {
     luminumbra::foliage::FoliageRegistryStage registry;
@@ -480,6 +494,17 @@ bool GameSession::AdoptPreparedWorld(const std::shared_ptr<WorldPreparation>& pr
          (!m_worldUsable || !m_worldSystem || options.world_revision != WorldRevision()))) {
         m_worldOpenError = "World preparation no longer matches session configuration.";
         return false;
+    }
+    // Install before any durable creation writes or publication of replacement state.
+    const auto& schedule = prepared->create ? m_weatherSchedule : prepared->loaded.weather_schedule;
+    if (prepared->create || m_weatherSchedule || schedule) {
+        const int seed = prepared->create ? static_cast<int>(prepared->metadata.resolvedSeed)
+                                          : (prepared->state_only ? static_cast<int>(m_numericSeed)
+                                                                  : prepared->world_seed);
+        prepared->loaded.weather_system = PrepareWeatherSystem(seed, schedule, m_worldOpenError);
+        if (!prepared->loaded.weather_system) {
+            return false;
+        }
     }
     // Consuming a prepared result twice must never replace live state twice.
     prepared->ready = false;
@@ -1879,9 +1904,7 @@ bool GameSession::AdoptCreatedWorld(WorldPreparation& prepared,
     // 5.  : the deterministic weather core. Pure function of the world
     //    seed (uses seed+12 for its pressure/climate noise + storm schedule);
     //    updated per tick AFTER wind (advects storm cells by the wind grid).
-    m_weatherSystem = std::make_unique<Systems::WeatherSystem>(world_seed);
-    if (m_weatherSchedule)
-        m_weatherSystem->SetSchedule(*m_weatherSchedule);
+    m_weatherSystem = std::move(prepared.loaded.weather_system);
     LUMINUMBRA_CORE_INFO("Weather system initialized.");
 
     // 6.: the deterministic Aether scalar field. Pure function of the
@@ -4397,6 +4420,13 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         }
         return false;
     }
+    if (m_weatherSchedule || state.weather_schedule) {
+        state.weather_system = PrepareWeatherSystem(
+            static_cast<int>(m_numericSeed), state.weather_schedule, m_worldOpenError);
+        if (!state.weather_system) {
+            return false;
+        }
+    }
     AdoptWorldStateFrom(save_dir, state);
     return true;
 }
@@ -4645,10 +4675,8 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
     const bool replace_weather = m_weatherSchedule || saved.weather_schedule;
     m_weatherSchedule = std::move(saved.weather_schedule);
     if (replace_weather) {
-        // Replacing a paused state may move backwards in time; install before restoration.
-        m_weatherSystem = std::make_unique<Systems::WeatherSystem>(static_cast<int>(m_numericSeed));
-        if (m_weatherSchedule)
-            m_weatherSystem->SetSchedule(*m_weatherSchedule);
+        // Installation passed before publication; restoration may move backwards in time.
+        m_weatherSystem = std::move(saved.weather_system);
         ApplyWeatherRainWiring();
     }
     if (saved.ledger) {

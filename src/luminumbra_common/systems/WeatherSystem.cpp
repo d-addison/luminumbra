@@ -317,6 +317,8 @@ WeatherSystem::WeatherSystem(int world_seed)
 
     // Seed the fields at tick 0 so a pre-Update sample is coherent.
     Update(0, Vec3(0.0f), nullptr);
+    // Construction is setup; only a caller's tick or restore locks installation.
+    m_hasUpdatedOrRestored = false;
 }
 
 void WeatherSystem::LocalCell(const Vec3& world_pos,
@@ -1031,7 +1033,9 @@ void WeatherSystem::Update(std::uint64_t tick,
     m_last_tick = tick;
     if (m_schedule) {
         UpdateSchedule(tick, region_anchor);
-        m_anchor_wind = wind ? wind->SampleWind(region_anchor) : Vec2(0.0f);
+        m_anchor_wind =
+            wind ? wind->SampleWind(Vec3(region_anchor.x, 5.0f, region_anchor.z), WindLayer::Ground)
+                 : Vec2(0.0f);
         return;
     }
     if (m_regional_sample)
