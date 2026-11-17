@@ -846,8 +846,8 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     // instance picks a LOD bucket from its camera distance (SelectTreeLod) and the
     // group is keyed by the RESOLVED LOD mesh path so distant trees draw a coarser
     // variant; texture/material lookup uses the BASE path so LOD never loses the
-    // bark/leaf textures.. Missing LOD variant -> LOD0 fallback, so a
-    // world with no LOD variants is byte-identical to the pre-LOD renderer.
+    // bark/leaf textures. Authored trees try lower mesh LODs in descending order;
+    // other props retain the LOD0 fallback when their selected variant is missing.
     const glm::vec3 cameraPos = camera.Position;
     const bool impostorsOn = input.tree_impostor_enabled;
     TreeLodConfig kTreeLodCfg; // data-driven defaults; render.tree_lod.* may override later.
@@ -881,6 +881,30 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         }
         return {nullptr, basePath};
     };
+    auto resolve_lod = [&](const CachedStaticProp& cp, bool authoredTree, int lod) {
+        const std::uint64_t rkey = cp.baseMeshHash ^ (static_cast<std::uint64_t>(lod) *
+                                                      std::uint64_t{0x9E3779B97F4A7C15ull});
+        auto rit = m_resolveMemo.find(rkey);
+        if (rit == m_resolveMemo.end()) {
+            const std::string& basePath = m_propMeshPaths[cp.pathIndex];
+            const std::string candidatePath = LodMeshPath(basePath, lod);
+            auto resolved = resolve_mesh(candidatePath, candidatePath);
+            // At most kTreeLodCount probes for authored trees, only on a memo miss.
+            // Cache failed loads too; steady frames do no new probing or allocation.
+            if (authoredTree) {
+                for (int mesh_lod = lod - 1; !resolved.first && mesh_lod >= 0; --mesh_lod) {
+                    const std::string fallbackPath = LodMeshPath(basePath, mesh_lod);
+                    resolved = resolve_mesh(fallbackPath, fallbackPath);
+                }
+            } else if (!resolved.first) {
+                resolved = resolve_mesh(basePath, basePath);
+            }
+            rit = m_resolveMemo
+                      .emplace(rkey, std::make_pair(resolved.first, std::move(resolved.second)))
+                      .first;
+        }
+        return rit;
+    };
     // Reuse the per-group buffers across frames: keep capacity, clear contents,
     // mark inactive. A group's mesh/drawPath/basePath/material are fixed by its key
     // (rkey encodes baseMeshHash+lod), so the metadata is set once and kept.
@@ -909,8 +933,36 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         if (cp.impostorTree && !authoredTree) {
             lod = std::min(lod, 2);
         }
-        if (impostorsOn && authoredTree && lod == 3 &&
-            cp.impostorTree) {     // a tree part -> impostor replaces it at LOD3
+        bool impostor_candidate = false;
+        if (impostorsOn && authoredTree && lod == 3 && cp.impostorTree) {
+            impostor_candidate = true; // a tree part -> impostor replaces it at LOD3
+        }
+        // A paired far-OFF replay may need meshes even when this frame uses an
+        // impostor. Resolve every eligible part before freezing, including failed
+        // probes, so replay only consumes the same memoized fallback chain.
+        if (impostor_candidate && !ctx.frozen_replay) {
+            (void)resolve_lod(cp, authoredTree, 2);
+        }
+        // Submitted chunks are resident too; culling the ground must not remove
+        // support while its canopy is still visible (including the authored LOD3 band).
+        const bool live_terrain_owned =
+            impostor_candidate &&
+            ((input.submitted_live_terrain && input.submitted_live_terrain->covers(cp.position)) ||
+             (input.resident_live_terrain && input.resident_live_terrain->covers(cp.position)));
+        // Ladder exposes no per-position coverage here; unknown support refuses.
+        // Never substitute the inactive Legacy owner for selected Ladder terrain.
+        const bool far_terrain_resident =
+            impostor_candidate && !live_terrain_owned && input.far_selection.submit &&
+            input.far_selection.effective == FarWorldMode::Legacy && input.legacy_far &&
+            input.legacy_far->terrain_resident_at(cp.position);
+        const auto submission = SelectStaticPropSubmission(
+            input.far_selection, impostor_candidate, live_terrain_owned, far_terrain_resident);
+        if (submission == StaticPropSubmission::Refused) {
+            // Refusing the billboard must not remove its leaf, bark or trunk parts.
+            // Rejoin ordinary mesh batching with the same transform/material/attribution.
+            lod = 2;
+        }
+        if (submission == StaticPropSubmission::Impostor) {
             if (cp.impostorLeaf) { // the per-tree representative; bark/trunk are folded into the
                                    // billboard
                 const glm::vec3 c =
@@ -930,17 +982,8 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             }
             continue; // all LOD3 tree parts are folded into the billboard
         }
-        const std::uint64_t rkey = cp.baseMeshHash ^ (static_cast<std::uint64_t>(lod) *
-                                                      std::uint64_t{0x9E3779B97F4A7C15ull});
-        auto rit = m_resolveMemo.find(rkey);
-        if (rit == m_resolveMemo.end()) {
-            const std::string& basePath = m_propMeshPaths[cp.pathIndex];
-            const std::string candidatePath = LodMeshPath(basePath, lod);
-            auto resolved = resolve_mesh(candidatePath, basePath);
-            rit = m_resolveMemo
-                      .emplace(rkey, std::make_pair(resolved.first, std::move(resolved.second)))
-                      .first;
-        }
+        const auto rit = resolve_lod(cp, authoredTree, lod);
+        const std::uint64_t rkey = rit->first;
         Mesh* mesh = rit->second.first;
         if (!mesh)
             continue;
@@ -958,7 +1001,7 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             continue;
         // Group by a cheap uint64 (no per-instance string alloc/copy/compare).
         const std::uint64_t gkey =
-            rkey ^ (static_cast<std::uint64_t>(cp.materialId) * 0x100000001B3ull);
+            rkey ^ (static_cast<std::uint64_t>(cp.materialId) * std::uint64_t{0x100000001B3ull});
         auto& batch = m_visibleGroups[gkey];
         if (batch.mesh == nullptr) { // first ever sighting fixes the group metadata
             batch.mesh = mesh;
@@ -1057,7 +1100,7 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                             static_cast<GLsizeiptr>(static_cast<std::size_t>(instance_count) *
                                                     sizeof(glm::mat4)),
                             matrices.data() + offset);
-            for (GLuint i = 0; i < 4; i++) {
+            for (GLuint i = 0; i < 4; ++i) {
                 glEnableVertexAttribArray(3 + i);
                 glVertexAttribPointer(3 + i,
                                       4,
