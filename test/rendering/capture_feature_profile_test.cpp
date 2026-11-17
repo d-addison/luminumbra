@@ -606,7 +606,6 @@ TEST(CaptureFeatureProfile, RefusesInvalidEnumsBoundsIdentitiesAndAdapterStates)
     for (const auto& adapter :
          std::array{CaptureFeatureAdapter{true, Change::Unavailable, "unavailable"},
                     CaptureFeatureAdapter{std::nullopt, Change::Unchanged, "unknown"},
-                    CaptureFeatureAdapter{false, Change::Unchanged, "mismatch"},
                     CaptureFeatureAdapter{false, Change::Forced, "contradiction"},
                     CaptureFeatureAdapter{true, Change::Suppressed, "contradiction"},
                     CaptureFeatureAdapter{std::nullopt, Change::Forced, "unknown"},
@@ -620,6 +619,52 @@ TEST(CaptureFeatureProfile, RefusesInvalidEnumsBoundsIdentitiesAndAdapterStates)
         Adapter(context, Feature::Water) = adapter;
         EXPECT_THROW((void)Resolve(AllFeatures(), context), std::invalid_argument);
     }
+}
+
+TEST(CaptureFeatureProfile, RequestedUnchangedDisabledFeatureIsRefusedNotMalformed) {
+    // All-features profile: every feature is requested.
+    auto context = EnabledContext();
+    Adapter(context, Feature::Water) = {
+        .enabled = false, .change = Change::Unchanged, .reason = "water_disabled"};
+    auto profile = Resolve(AllFeatures(), context);
+    EXPECT_EQ(profile.capability(), Capability::Refused);
+    EXPECT_TRUE(State(profile, Feature::Water).requested);
+    EXPECT_EQ(State(profile, Feature::Water).effective, false);
+    EXPECT_EQ(State(profile, Feature::Water).change, Change::Unchanged);
+    EXPECT_EQ(State(profile, Feature::Water).capability, Capability::Refused);
+    EXPECT_EQ(State(profile, Feature::Water).capability_reason, "water_disabled");
+    auto manifest = nlohmann::json::parse(profile.Manifest());
+    EXPECT_EQ(manifest.at("capability"), "refused");
+    EXPECT_EQ(manifest.at("capability_reason"), "requested_feature_suppressed");
+
+    // Explicit subset: the requested feature is disabled, the rest are enabled.
+    const std::array<std::string_view, 1> requested{"water"};
+    profile = CaptureFeatureProfile::Resolve({}, {}, {}, context, requested);
+    EXPECT_EQ(profile.capability(), Capability::Refused);
+    EXPECT_EQ(State(profile, Feature::Water).capability, Capability::Refused);
+    EXPECT_EQ(State(profile, Feature::Water).capability_reason, "water_disabled");
+}
+
+TEST(CaptureFeatureProfile, UnrequestedUnchangedEnabledFeaturesAreReportedInExplicitSubset) {
+    auto context = EnabledContext();
+    const std::array<std::string_view, 1> requested{"water"};
+    const auto profile = CaptureFeatureProfile::Resolve({}, {}, {}, context, requested);
+    EXPECT_EQ(profile.capability(), Capability::Supported);
+    for (std::size_t index = 0; index < kCaptureFeatureCount; ++index) {
+        const auto& state = profile.features()[index];
+        EXPECT_EQ(state.requested, static_cast<Feature>(index) == Feature::Water);
+        EXPECT_EQ(state.effective, true);
+        EXPECT_EQ(state.change, Change::Unchanged);
+        EXPECT_EQ(state.capability, Capability::Supported);
+    }
+    const auto manifest = nlohmann::json::parse(profile.Manifest());
+    EXPECT_EQ(manifest.at("profile"), "explicit");
+    EXPECT_EQ(manifest.at("capability"), "supported");
+    const auto& stars = manifest.at("features").at(static_cast<std::size_t>(Feature::Stars));
+    EXPECT_EQ(stars.at("feature"), "stars");
+    EXPECT_EQ(stars.at("requested"), false);
+    EXPECT_EQ(stars.at("effective"), true);
+    EXPECT_EQ(stars.at("change"), "unchanged");
 }
 
 TEST(CaptureFeatureProfile, AcceptsExactBoundsAndOwnsSnapshotAfterResolution) {

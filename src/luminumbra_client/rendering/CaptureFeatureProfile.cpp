@@ -77,7 +77,9 @@ void ValidateIdentity(const CaptureIdentity& identity) {
     }
 }
 
-void ValidateAdapter(const CaptureFeatureAdapter& adapter, bool requested) {
+// Adapter state is validated on its own. Request membership is applied later:
+// a requested feature observed disabled is a refusal, not malformed input.
+void ValidateAdapter(const CaptureFeatureAdapter& adapter) {
     ValidateText(adapter.reason, false);
     bool valid = false;
     switch (adapter.change) {
@@ -85,7 +87,7 @@ void ValidateAdapter(const CaptureFeatureAdapter& adapter, bool requested) {
             valid = !adapter.enabled.has_value();
             break;
         case Change::Unchanged:
-            valid = adapter.enabled.has_value() && adapter.enabled == requested;
+            valid = adapter.enabled.has_value();
             break;
         case Change::Forced:
             valid = adapter.enabled == true;
@@ -240,8 +242,8 @@ CaptureFeatureProfile::Resolve(const Client::ScenarioHarness::RuntimeScenarioCon
         }
         selected[index] = true;
     }
-    for (std::size_t index = 0; index < kCaptureFeatureCount; ++index) {
-        ValidateAdapter(context.adapters[index], selected[index]);
+    for (const auto& adapter : context.adapters) {
+        ValidateAdapter(adapter);
     }
 
     const auto isolation = Client::ScenarioHarness::ParseIsolationConfig(
