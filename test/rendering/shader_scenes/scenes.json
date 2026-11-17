@@ -52,7 +52,7 @@
     }
   ],
   "inputs": {
-    "res/shaders/enhanced_skybox.frag": "9efb4054bc7658e857f8fb38c946b3a3ee6f735ab135b6e3611e1cbb23356b3f",
+    "res/shaders/enhanced_skybox.frag": "7844dcd132b6369b33590cb6e4cce0032a4dfa6e0cf76618725dcfa0d72982e3",
     "res/shaders/g_buffer.frag": "56c5cd1aedf7467668f8d69d4a6c7112480e9da08cd1d4571a89466b7f5b12be",
     "res/shaders/g_buffer.vert": "209c1c0801801209e669e60dcadfa7085e8e44780f9e2c7599a7d48a5fe2abed",
     "res/shaders/static_asset.frag": "1d2262e2c9d905e69560c8879c1a5f88c283a6fa3e38ddeb46c06306f91a7512",

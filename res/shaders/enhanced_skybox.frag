@@ -543,7 +543,7 @@ void main()
     // Deepen the hue so the bright midday sky still resolves a clearly warm
     // (pale-amber) band rather than the too-blue Rayleigh dome. R stays ~1
     // (peak), G/B pushed DOWN (exponent > 1 on a sub-unit value shrinks it). At
-    // low sun the hue is already deeply red so this saturates harmlessly.
+    // low sun the hue is already deeply red; section 7 bounds its saturation.
     aerialHue = pow(clamp(aerialHue, vec3(0.0), vec3(1.0)), vec3(1.0, 1.45, 2.6));
     float aerialHorizonF = 1.0 - 0.55 * smoothstep(0.25, 1.0, max(viewDir.y, 0.0));
     float aerialTowardSun = 0.80 + 0.20 * clamp(dot(viewDir, u_sunDirection), -1.0, 1.0);
@@ -663,18 +663,26 @@ void main()
     // POST-tonemap aerial warm grade. The bright dome lives in the ACES
     // saturating region where a pre-tonemap chroma tint is crushed back to white,
     // so the warm sun-path-transmittance hue is re-applied HERE where it survives.
-    // Implemented as a luminance-preserving channel rescale: push the tonemapped
-    // color toward the warm hue without darkening (divide-by-mean keeps overall
-    // brightness, so the luminance-ordering / PlayerView gates are unaffected).
+    // Keep the luminance-normalized result wherever it fits the display gamut;
+    // compress excess saturation so low sun cannot clip away dome/cloud detail.
     if (u_useSkyLut != 0) {
         const vec3 kLumaW = vec3(0.2126, 0.7152, 0.0722); // gate luminance weights
         vec3 tint = mix(vec3(1.0), aerialHue, clamp(aerialWarm, 0.0, 1.0));
-        // Normalize by the LUMINANCE of the tint (not its arithmetic mean) so the
-        // grade is a pure hue rotation that leaves perceived luminance EXACTLY
-        // unchanged -- the warm shift cannot brighten the dusk dome relative to
-        // noon (which previously inverted the noon>dusk luminance ordering).
         float tintLuma = max(dot(tint, kLumaW), 1e-4);
         skyColor *= tint / tintLuma;
+        // Desaturate toward this pixel's luminance, preserving the physical warm
+        // channel ordering and brightness variation. Only out-of-gamut colors
+        // change. Include the overshoot in the denominator so their peak rolls
+        // BELOW 1 instead of pinning a whole red/yellow band to the gamut edge.
+        // ACES can itself exceed 1 for extreme HDR inputs; bound that luminance.
+        float gradePeak = max(skyColor.r, max(skyColor.g, skyColor.b));
+        if (gradePeak > 1.0) {
+            float gradeLuma = clamp(dot(skyColor, kLumaW), 0.0, 1.0);
+            float gradeOvershoot = gradePeak - 1.0;
+            float gradeSaturation = (1.0 - gradeLuma)
+                / max(gradePeak - gradeLuma + gradeOvershoot, 1e-4);
+            skyColor = mix(vec3(gradeLuma), skyColor, gradeSaturation);
+        }
 
         // kill the SICKLY YELLOW-GREEN dawn cast.
         // At a low-but-positive sun (dawn, sun ~27 deg up) the sky-view LUT radiance

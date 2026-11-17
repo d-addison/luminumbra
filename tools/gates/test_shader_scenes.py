@@ -32,6 +32,210 @@ software = module('scene_software', 'tools/static_preview/run_software_gl.py')
 MANIFEST = ROOT / 'test/rendering/shader_scenes/scenes.json'
 
 
+class SkyWarmGradeTests(unittest.TestCase):
+    """CPU grade evaluation; no graphics context or replacement golden images.
+
+    The source contract pins the mirrored expressions. Saturation compression is
+    enabled by its shipping assignment, so reverting it mutates the numeric tests.
+    These analytical dome inputs isolate the grade, not LUT/cloud rendering.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.shader = (ROOT / 'res/shaders/enhanced_skybox.frag').read_text(encoding='utf-8')
+
+    @staticmethod
+    def smoothstep(low, high, value):
+        value = min(1, max(0, (value - low) / (high - low)))
+        return value * value * (3 - 2 * value)
+
+    @staticmethod
+    def luma(color):
+        return sum(c * weight for c, weight in zip(color, (.2126, .7152, .0722)))
+
+    @staticmethod
+    def transmittance(sun_y):
+        # Mirror the ground row's two bilinear texels in the production 256x64
+        # transmittance compute LUT: 2 texels * 40 midpoint samples, bounded.
+        column = min(255, max(0, (sun_y + 1) * .5 * 256 - .5))
+        first = int(column)
+
+        def texel(index):
+            radius = 6360000 + .5 * 100000 / 64
+            mu = (index + .5) / 256 * 2 - 1
+            distance = -radius * mu + math.sqrt(
+                (radius * mu) ** 2 - radius ** 2 + 6460000 ** 2)
+            step = distance / 40
+            rayleigh = mie = 0
+            for sample in range(40):
+                along = step * (sample + .5)
+                altitude = max(0, math.sqrt(radius ** 2 + along ** 2
+                                           + 2 * radius * mu * along) - 6360000)
+                rayleigh += math.exp(-altitude / 8000) * step
+                mie += math.exp(-altitude / 1200) * step
+            return tuple(math.exp(-beta * rayleigh - 4.4e-6 * mie)
+                         for beta in (5.802e-6, 13.558e-6, 33.1e-6))
+
+        left, right = texel(first), texel(min(first + 1, 255))
+        return tuple(a + (b - a) * (column - first) for a, b in zip(left, right))
+
+    def tint(self, transmittance, sun_y, day_factor, elevation, azimuth):
+        peak = max(max(transmittance), 1e-4)
+        hue = tuple(min(1, max(0, c / peak)) ** exponent
+                    for c, exponent in zip(transmittance, (1, 1.45, 2.6)))
+        horizon = 1 - .55 * self.smoothstep(.25, 1, math.sin(elevation))
+        sun_dot = (math.sin(elevation) * sun_y + math.cos(elevation)
+                   * math.sqrt(1 - sun_y ** 2) * math.cos(azimuth))
+        toward = .80 + .20 * min(1, max(-1, sun_dot))
+        low_sun = 1.05 + .40 * (1 - self.smoothstep(.10, .85, sun_y))
+        warmth = min(1, max(0, horizon * toward * low_sun))
+        warmth *= self.smoothstep(0, .22, day_factor)
+        return tuple(1 + (c - 1) * warmth for c in hue)
+
+    def grade(self, color, tint):
+        luma = max(self.luma(tint), 1e-4)
+        graded = tuple(c * t / luma for c, t in zip(color, tint))
+        # The original shader has no saturation assignment and keeps the unsafe
+        # result. Read the consumed source, so that mutation exercises the mirror.
+        if 'skyColor = mix(vec3(gradeLuma), skyColor, gradeSaturation);' not in self.shader:
+            return graded
+        peak = max(graded)
+        if peak <= 1:
+            return graded
+        grade_luma = min(1, max(0, self.luma(graded)))
+        overshoot = peak - 1
+        saturation = (1 - grade_luma) / max(peak - grade_luma + overshoot, 1e-4)
+        return tuple(grade_luma + (c - grade_luma) * saturation for c in graded)
+
+    def test_grade_source_contract(self):
+        source = re.sub(r'//[^\n]*', '', self.shader)
+        source = ' '.join(source.split())
+        for expression in (
+                'aerialTrans / max(aerialNorm, 1e-4)',
+                'pow(clamp(aerialHue, vec3(0.0), vec3(1.0)), vec3(1.0, 1.45, 2.6))',
+                '1.0 - 0.55 * smoothstep(0.25, 1.0, max(viewDir.y, 0.0))',
+                '0.80 + 0.20 * clamp(dot(viewDir, u_sunDirection), -1.0, 1.0)',
+                'mix(1.05, 1.45, 1.0 - smoothstep(0.10, 0.85, u_sunCosZenith))',
+                'smoothstep(0.0, 0.22, dayFactor)',
+                'clamp(aerialHorizonF * aerialTowardSun * aerialLowSun, 0.0, 1.0) * aerialNightFade',
+                'const vec3 kLumaW = vec3(0.2126, 0.7152, 0.0722);',
+                'vec3 tint = mix(vec3(1.0), aerialHue, clamp(aerialWarm, 0.0, 1.0));',
+                'float tintLuma = max(dot(tint, kLumaW), 1e-4);',
+                'skyColor *= tint / tintLuma;',
+                'skyColor *= tint / tintLuma; '
+                'float gradePeak = max(skyColor.r, max(skyColor.g, skyColor.b)); '
+                'if (gradePeak > 1.0) { '
+                'float gradeLuma = clamp(dot(skyColor, kLumaW), 0.0, 1.0); '
+                'float gradeOvershoot = gradePeak - 1.0; '
+                'float gradeSaturation = (1.0 - gradeLuma) '
+                '/ max(gradePeak - gradeLuma + gradeOvershoot, 1e-4); '
+                'skyColor = mix(vec3(gradeLuma), skyColor, gradeSaturation); }'):
+            self.assertIn(expression, source)
+        self.assertIn('skyColor = pow(skyColor, mix(vec3(1.0), vec3(0.9, 0.95, 1.05), dayFactor));',
+                      source)
+        self.assertIn('skyColor = pow(skyColor, vec3(1.0/2.2));', source)
+        self.assertEqual(source.count('skyColor *= tint /'), 1)
+        main = source.split('void main()', 1)[1]
+        self.assertIn('if (u_useSkyLut != 0) { const vec3 kLumaW', main)
+        self.assertLess(main.index('skyColor = renderClouds('), main.index('float gradePeak'))
+        self.assertLess(main.index('2.51 * skyColor'), main.index('float gradePeak'))
+        self.assertLess(main.index('float gradePeak'), main.index('vec3(1.0/2.2)'))
+        lut = (ROOT / 'src/luminumbra_client/rendering/SkyAtmosphereLut.ipp').read_text(
+            encoding='utf-8').split('const char* kTransmittanceComputeSrc', 1)[1].split(')GLSL"', 1)[0]
+        for expression in ('6360000.0', '6460000.0', '8000.0', '1200.0',
+                           '4.4e-6', 'vec3(5.802e-6, 13.558e-6, 33.1e-6)',
+                           'TW = 256', 'TH = 64', 'SAMPLES = 40'):
+            self.assertIn(expression, lut)
+
+    def test_dusk_and_dawn_dome_keeps_gradient_without_clipped_plateau(self):
+        # Existing dusk scene sun and dawn gate sun, plus their horizon approach
+        # on either side. Each evaluates a bounded 32 azimuths * 64 elevations.
+        for sun_y, day_factor in ((-.08, .43), (0, .43), (.10, .65), (.47, 1)):
+            transmittance = self.transmittance(sun_y)
+            with self.subTest(sun_y=sun_y):
+                dome = []
+                for row in range(64):
+                    height = row / 63
+                    elevation = height * math.pi / 2
+                    # Neutral analytical radiance isolates the tint from the LUT;
+                    # the existing horizon brightness must survive the grade.
+                    color = (.95 - .55 * height,) * 3
+                    band = []
+                    for column in range(32):
+                        azimuth = column * 2 * math.pi / 32
+                        tint = self.tint(transmittance, sun_y, day_factor, elevation, azimuth)
+                        band.append(self.grade(color, tint))
+                    dome.append(band)
+                clipped = sum(max(pixel) >= 1 for band in dome for pixel in band)
+                self.assertEqual(clipped, 0, 'the grade introduces a channel-clipped plateau')
+                # Include the shader's final day grade, gamma and 8-bit display.
+                exponents = tuple(1 + (e - 1) * day_factor for e in (.9, .95, 1.05))
+                display = [tuple(round(c ** (e / 2.2) * 255)
+                                 for c, e in zip(pixel, exponents))
+                           for band in dome for pixel in band]
+                self.assertGreater(len(set(display[::32])), 48)
+                for column in range(32):
+                    clipped_rows = [max(display[row * 32 + column]) == 255 for row in range(64)]
+                    self.assertFalse(any(a and b for a, b in zip(clipped_rows, clipped_rows[1:])),
+                                     'display quantization creates a clipped vertical plateau')
+                for row in range(1, 64):
+                    self.assertGreater(self.luma(dome[row - 1][0]) - self.luma(dome[row][0]), .008)
+                self.assertGreater(self.luma(dome[0][0]) - self.luma(dome[-1][0]), .5)
+                for band in dome[:32]:
+                    red, green, blue = band[0]  # Sun-facing half of the dome.
+                    self.assertGreaterEqual(red, green)
+                    self.assertGreaterEqual(green, blue)
+                    self.assertGreater(red - blue, .01)
+
+    def test_gamut_bound_preserves_in_range_grades_luminance_and_extinction(self):
+        # 8 tint corners, neutral/faded/near-zero tints, and 125 input colors.
+        tints = [(r, g, b) for r in (0, 1) for g in (0, 1) for b in (0, 1)]
+        tints += [(1, 1, 1), (.7, .7, .7), (1e-8, 2e-8, 3e-8), (1, .1, 0)]
+        for tint in tints:
+            for red in (0, .01, .2, .8, 1):
+                for green in (0, .01, .2, .8, 1):
+                    for blue in (0, .01, .2, .8, 1):
+                        color = (red, green, blue)
+                        graded = self.grade(color, tint)
+                        self.assertTrue(all(math.isfinite(c) and 0 <= c <= 1 for c in graded))
+                        unbounded = tuple(c * t / max(self.luma(tint), 1e-4)
+                                          for c, t in zip(color, tint))
+                        self.assertAlmostEqual(self.luma(graded), self.luma(unbounded))
+                        if max(unbounded) <= 1:
+                            for actual, expected in zip(graded, unbounded):
+                                self.assertAlmostEqual(actual, expected)
+                        order = sorted(range(3), key=lambda channel: unbounded[channel])
+                        self.assertLessEqual(graded[order[0]], graded[order[1]])
+                        self.assertLessEqual(graded[order[1]], graded[order[2]])
+                        if tint == (1, 1, 1):
+                            self.assertEqual(graded, color)
+                            self.assertEqual(self.luma(graded), self.luma(color))
+        for day_factor in (0, .1, .22, 1):
+            for transmittance in ((0, 0, 0), (1e-8, 0, 0), (1, 1, 1)):
+                tint = self.tint(transmittance, 0, day_factor, 0, 0)
+                graded = self.grade((.8, .6, .4), tint)
+                self.assertTrue(all(math.isfinite(c) and 0 <= c <= 1 for c in graded))
+                if day_factor == 0:
+                    self.assertEqual(graded, (.8, .6, .4))
+
+    def test_compression_boundary_and_hdr_extremes(self):
+        # Cross both the compression branch and its luminance clamp, including
+        # the near-white epsilon denominator and ACES's 2.51/2.43 HDR limit.
+        for delta in (-1e-5, 0, 1e-8, 1e-5, .1, 2.51 / 2.43 - 1):
+            for other in (0, .3, 1):
+                color = (1 + delta, other, other)
+                graded = self.grade(color, (1, 1, 1))
+                self.assertTrue(all(math.isfinite(c) and 0 <= c <= 1 for c in graded))
+                self.assertAlmostEqual(self.luma(graded), min(1, self.luma(color)))
+                self.assertGreaterEqual((graded[0] - graded[1]) * (color[0] - color[1]), 0)
+                self.assertEqual(graded[1], graded[2])
+                if max(color) <= 1:
+                    self.assertEqual(graded, color)
+                if abs(delta) <= 1e-5:
+                    self.assertLess(max(abs(a - b) for a, b in zip(graded, color)), 1e-4)
+        self.assertEqual(self.grade((2.51 / 2.43,) * 3, (1, 1, 1)), (1, 1, 1))
+
+
 class ShaderScenesTests(unittest.TestCase):
     def capture(self, directory, value=.25):
         for name in sorted(scene.INPUTS - {'test/rendering/shader_scene_render_test.cpp'}):
