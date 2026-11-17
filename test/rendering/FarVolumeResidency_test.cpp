@@ -2535,6 +2535,59 @@ TEST(FarVolumeHandoff, ExplicitRetirementDoesNotWaitForOrResurrectCancelledAutho
     }
 }
 
+TEST(FarVolumeHandoff, RetiredIdentityCanReturnWithNarrowerIntentBeforeCancelledWorkerDrains) {
+    for (const std::size_t result_slots : {1u, 2u}) {
+        SCOPED_TRACE(result_slots);
+        JobSystem jobs;
+        jobs.startup(1);
+        auto memory = std::make_shared<FarVolumeTierMemory>(Budgets());
+        HandoffWorkerGate gate;
+        auto limits = Limits();
+        limits.queues[4].result_slots = result_slots;
+        FarVolumeHandoff owner(jobs, *memory, limits, &gate);
+        HandoffGateRelease const release{gate};
+        const std::array original{HandoffInput(memory, {5, -1, 0}, 1, false, -512, 512)};
+        ASSERT_TRUE(owner.StageTarget(HandoffManifest(1, original)));
+        gate.Arm();
+        ASSERT_EQ(owner.AdvanceFrame(0, 0, {1, 0, 0}, {}).dispatched, 1u);
+        ASSERT_TRUE(HandoffWait([&] { return gate.Entered(); }));
+        const std::array replacement{HandoffInput(memory, {5, 1, 0}, 1, false)};
+        auto manifest = HandoffManifest(2, replacement);
+        manifest.committed_generation = 1;
+        ASSERT_TRUE(owner.StageTarget(manifest));
+        ASSERT_EQ(owner.RetireIdleHistory(), 1u);
+        auto returned = original;
+        returned[0].wanted.intent.extra_span = FarVolumeCoverageSpan{-256, 64};
+        ASSERT_EQ(returned[0].wanted.identity, original[0].wanted.identity);
+        ASSERT_NE(returned[0].wanted.intent, original[0].wanted.intent);
+        manifest = HandoffManifest(3, returned);
+        manifest.committed_generation = 1;
+        ASSERT_TRUE(owner.StageTarget(manifest));
+        const auto waiting = owner.AdvanceFrame(0, 0, {1, 0, 0}, {});
+        EXPECT_EQ(waiting.build_attempts, result_slots == 1 ? 0u : 1u);
+        EXPECT_EQ(waiting.dispatched, 0u);
+        EXPECT_EQ(waiting.rejected, 0u);
+        const auto pending = HandoffObserve(owner, {5, -1, 0});
+        EXPECT_EQ(pending.target_eligibility,
+                  result_slots == 1 ? FarVolumeEligibility::Wanted : FarVolumeEligibility::Pending);
+        EXPECT_FALSE(pending.target_build_failure);
+        EXPECT_FALSE(owner.TryPromote());
+        gate.Release();
+        std::size_t calls = 0;
+        ASSERT_TRUE(HandoffSettle(owner, returned, Backend(calls)));
+        ASSERT_TRUE(owner.TryPromote());
+        EXPECT_EQ(owner.State().serving_serial, 3u);
+        EXPECT_EQ(calls, 0u);
+        const auto serving = HandoffObserve(owner, {5, -1, 0});
+        ASSERT_TRUE(serving.serving);
+        if (serving.serving) {
+            EXPECT_EQ(serving.serving->identity, returned[0].wanted.identity);
+            EXPECT_EQ(serving.serving->intent, returned[0].wanted.intent);
+        }
+        EXPECT_TRUE(IsFarTileCovering(serving.serving_coverage));
+    }
+}
+
 TEST(FarVolumeHandoff, SpanHistorySurvivesRangeRemovalAndRefusesRegression) {
     JobSystem jobs;
     jobs.startup(1);

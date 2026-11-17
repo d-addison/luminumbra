@@ -149,7 +149,12 @@ bool FarWorldHandoffRenderer::StageTarget(const FarHandoffManifest& manifest) {
 }
 std::size_t FarWorldHandoffRenderer::RetireIdleHistory() {
     Guard const guard(*this);
-    return handoff_ ? handoff_->RetireIdleHistory() : 0;
+    if (!handoff_)
+        return 0;
+    const auto retired = handoff_->RetireIdleHistory();
+    const auto upload = diagnostic_.upload;
+    CaptureFarWorldHandoffDiagnostic(*handoff_, frame_.value_or(0), upload, diagnostic_);
+    return retired;
 }
 bool FarWorldHandoffRenderer::StageSessionTarget(
     const World::FarWorldAuthorityProducer& producer,
