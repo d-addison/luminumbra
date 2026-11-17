@@ -3142,5 +3142,86 @@ class TreeImpostorCoverageWiringTest(unittest.TestCase):
         self.assertIn("static_cast<GLsizei>(bytes), out.rgba.data()", render)
 
 
+class ComparisonAtmosphereWiring(unittest.TestCase):
+    def test_comparison_pins_follow_live_defaults_for_both_scenarios(self):
+        main = read(CLIENT / "main_client.cpp")
+        hook = main.index("scenario_runner->onPreRenderCapturePins();")
+        self.assertLess(main.index("renderPipeline.set_cloud_state("), hook)
+        self.assertLess(main.index("renderPipeline.set_weather_state(weather_state);"), hook)
+        drive = read(CLIENT / "core/ScenarioRunnerDrive.cpp")
+        weather = re.sub(r"\(\s+", "(", compact(block(drive, "bool ScenarioRunnerImpl::driveWeatherVisual()")))
+        self.assertIn('PinComparisonAtmosphere(renderPipeline, root_dir / "data/common/particles", '
+                      'g_camera->Position, weather_phase);', weather)
+        self.assertIn("renderPipeline.set_season_tick(0);", weather)
+        self.assertNotIn("SampleAt(", weather)
+        capture = read(CLIENT / "core/ScenarioRunnerCapture.cpp")
+        pins = block(capture, "void ScenarioRunnerImpl::onPreRenderCapturePins()")
+        self.assertIn("(void)driveWeatherVisual();", pins)
+        sweep = re.sub(r"\(\s+", "(", compact(block(pins, "scenario_config.timeofday_sweep_smoke()")))
+        self.assertIn('PinComparisonAtmosphere(renderPipeline, root_dir / "data/common/particles", '
+                      'g_camera->Position, false);', sweep)
+        self.assertLess(sweep.index("PinComparisonAtmosphere("), sweep.index("set_season_tick("))
+
+    def test_complete_atmosphere_and_presentation_replace_live_inputs(self):
+        source = read(CLIENT / "core/scenarios/WeatherVisual.cpp")
+        pin = compact(block(source, "void PinComparisonAtmosphere("))
+        for call in ("pipeline.set_weather_state(state.weather);",
+                     "pipeline.set_cloud_state(state.clouds);",
+                     "pipeline.set_lightning_state({});",
+                     "pipeline.set_time_of_day_hold(true);",
+                     "presentation_clock.set_capture_tick(kComparisonPresentationTick, "
+                     "kComparisonPresentationRate);",
+                     "particles->set_precipitation(particle_data_root, camera_position, "
+                     "frame_weather.rain_intensity, frame_weather.snow_intensity);",
+                     "particles->set_wind(frame_weather.wind_direction * "
+                     "frame_weather.wind_strength * 8.0f);"):
+            self.assertIn(call, pin)
+        builder = compact(block(read(CLIENT / "core/scenarios/ScenarioCommon.h"),
+                                "BuildComparisonAtmosphere(bool rain)"))
+        for assignment in ("state.weather.driven = true;",
+                           "state.weather.rain_intensity = rain ? 1.0f : 0.0f;",
+                           "state.weather.fog_density = rain ? 0.1f : 0.0f;",
+                           "state.weather.storm_intensity = rain ? 0.4f : 0.0f;",
+                           "state.weather.wetness = rain ? 1.0f : 0.0f;",
+                           "state.weather.wind_strength = 0.0f;",
+                           "state.clouds.enabled = true;",
+                           "state.clouds.shadow_enabled = true;",
+                           "state.clouds.coverage_amount = rain ? 0.8f : 0.0f;",
+                           "state.clouds.shadow_strength = rain ? 0.45f : 0.0f;"):
+            self.assertIn(assignment, builder)
+        # set_cloud_state preserves old scroll; only the enabled per-frame
+        # advance actually resolves it from the fixed presentation clock.
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        advance = block(pipeline, "void RenderPipeline::advance_cloud_phase(")
+        self.assertIn("presentation_clock.capture_seconds()", advance)
+        self.assertIn("m_cloud_phase = static_cast<float>(*seconds);", advance)
+        self.assertIn("m_cloud_state.scroll_offset = wind_xz * (m_cloud_phase * speed);", advance)
+
+    def test_actual_inputs_are_snapshotted_with_every_comparison_capture(self):
+        capture = read(CLIENT / "core/ScenarioRunnerCapture.cpp")
+        for function in ("captureWeatherVisual(", "captureTimeOfDaySweep("):
+            body = block(capture, "void ScenarioRunnerImpl::" + function)
+            assignment = "stats.atmosphere = ResolvedAtmosphereToJson(renderPipeline);"
+            self.assertIn(assignment, body)
+            self.assertLess(body.index("glReadPixels("), body.index(assignment))
+            self.assertLess(body.index(assignment), body.index("WritePixelBufferPpm("))
+        for file, function in (("WeatherVisual.cpp", "WeatherPixelStatsToJson("),
+                               ("TimeOfDaySeasonSweep.cpp", "TimeOfDayPixelStatsToJson(")):
+            writer = block(read(CLIENT / "core/scenarios" / file), function)
+            self.assertIn('{"atmosphere", stats.atmosphere}', writer)
+        snapshot = block(read(CLIENT / "core/scenarios/WeatherVisual.cpp"),
+                         "ResolvedAtmosphereToJson(")
+        for field in ("driven", "rain_intensity", "snow_intensity", "fog_density",
+                      "storm_intensity", "wetness", "wind_direction", "wind_strength"):
+            self.assertIn("weather." + field, snapshot)
+        for field in ("enabled", "shadow_enabled", "coverage_amount", "biome_variation",
+                      "plane_height", "shadow_strength", "scroll_offset", "sun_travel_dir"):
+            self.assertIn("clouds." + field, snapshot)
+        self.assertIn("pipeline.get_time_of_day()", snapshot)
+        self.assertIn("pipeline.get_season_tick()", snapshot)
+        self.assertIn("presentation_clock.capture_seconds()", snapshot)
+        self.assertIn("particles->wind_velocity()", snapshot)
+
+
 if __name__ == "__main__":
     unittest.main()

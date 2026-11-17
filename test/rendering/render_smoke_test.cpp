@@ -1,6 +1,9 @@
 #include "../fixtures/TerrainFixtureParams.h"
 #include "TerrainCullingTestPeer.h"
 #include "luminumbra_client/core/IsolationConfig.h"
+#include "luminumbra_client/core/PresentationClock.h"
+#include "luminumbra_client/core/RuntimeScenarioHarness.h"
+#include "luminumbra_client/core/scenarios/ScenarioCommon.h"
 #include "luminumbra_client/rendering/Camera.h"
 #include "luminumbra_client/rendering/EnvironmentBrdfLut.gen.h"
 #include "luminumbra_client/rendering/FarLodSystem.h"
@@ -3881,6 +3884,237 @@ TEST(RenderSmokeTest, GodRaysUseSkyOcclusionAndRemainVisibleInAir) {
     EXPECT_FLOAT_EQ(probe.draw()[24].r, 0.0f);
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
     glDeleteProgram(program);
+}
+
+namespace {
+struct ComparisonClockGuard {
+    Luminumbra::Client::PresentationClock saved = Luminumbra::Client::presentation_clock;
+    ~ComparisonClockGuard() {
+        Luminumbra::Client::presentation_clock = saved;
+    }
+};
+
+// Fixed 256x144 colour and depth storage bounds this controlled particle probe.
+struct ComparisonParticleTarget {
+    static constexpr int width = 256;
+    static constexpr int height = 144;
+    GLuint fbo = 0;
+    std::array<GLuint, 2> textures{};
+    std::vector<unsigned char> background;
+    ComparisonParticleTarget()
+        : background(static_cast<std::size_t>(width * height * 3)) {
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                const auto offset = static_cast<std::size_t>((y * width + x) * 3);
+                for (std::size_t channel = 0; channel < 3; ++channel) {
+                    background[offset + channel] = static_cast<unsigned char>(
+                        static_cast<std::size_t>(100 + x / 32 + y / 12) + channel * 15u);
+                }
+            }
+        }
+        glGenFramebuffers(1, &fbo);
+        glGenTextures(2, textures.data());
+        for (const auto texture : textures) {
+            glBindTexture(GL_TEXTURE_2D, texture);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        }
+        const std::vector<float> depth(static_cast<std::size_t>(width * height), 0.0f);
+        glTexImage2D(GL_TEXTURE_2D,
+                     0,
+                     GL_DEPTH_COMPONENT32F,
+                     width,
+                     height,
+                     0,
+                     GL_DEPTH_COMPONENT,
+                     GL_FLOAT,
+                     depth.data());
+        glBindTexture(GL_TEXTURE_2D, textures[0]);
+        glTexImage2D(GL_TEXTURE_2D,
+                     0,
+                     GL_RGB8,
+                     width,
+                     height,
+                     0,
+                     GL_RGB,
+                     GL_UNSIGNED_BYTE,
+                     background.data());
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, textures[0], 0);
+    }
+    ~ComparisonParticleTarget() {
+        glDeleteTextures(2, textures.data());
+        glDeleteFramebuffers(1, &fbo);
+    }
+    void Reset() const {
+        glBindTexture(GL_TEXTURE_2D, textures[0]);
+        glTexSubImage2D(
+            GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, background.data());
+    }
+    std::vector<unsigned char> Read() const {
+        std::vector<unsigned char> pixels(background.size());
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
+        return pixels;
+    }
+};
+} // namespace
+
+TEST(RenderSmokeTest, ComparisonAtmosphereReplacesAdverseDefaultsBeforeEveryPhase) {
+    using namespace Luminumbra::Rendering;
+    using namespace Luminumbra::Client::ScenarioHarness;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    const ComparisonClockGuard clock_guard;
+    RenderPipeline pipeline;
+    Luminumbra::Client::presentation_clock.use_wall_clock();
+    EXPECT_TRUE(ResolvedAtmosphereToJson(pipeline)["presentation_seconds"].is_null());
+    auto* particles = pipeline.particles();
+    ASSERT_NE(particles, nullptr);
+    particles->init_buffers();
+    const auto data_root = SourceRoot() / "data/common/particles";
+    // Control, rain, six season/solar captures, then a repeated clear control.
+    for (int phase = -2; phase <= kTimeOfDaySweepCaptureCount; ++phase) {
+        const bool rain = phase == -1;
+        WeatherRenderState adverse;
+        adverse.rain_intensity = 1;
+        adverse.snow_intensity = 1;
+        adverse.fog_density = 1;
+        adverse.storm_intensity = 1;
+        adverse.wetness = 1;
+        adverse.wind_direction = glm::vec3(0, 0, -1);
+        adverse.wind_strength = 1;
+        pipeline.set_weather_state(adverse);
+        CloudRenderState clouds;
+        clouds.enabled = true;
+        clouds.shadow_enabled = true;
+        clouds.coverage_amount = 1;
+        clouds.biome_variation = -1;
+        clouds.plane_height = 12;
+        clouds.shadow_strength = 1;
+        pipeline.set_cloud_state(clouds);
+        LightningRenderState lightning;
+        lightning.active = true;
+        lightning.pulse_intensity = 1;
+        pipeline.set_lightning_state(lightning);
+        particles->set_precipitation(data_root, glm::vec3(0), 1, 1);
+        particles->set_wind(glm::vec3(20, 0, -30));
+        Luminumbra::Client::presentation_clock.set_capture_tick(9999, 30);
+        PinComparisonAtmosphere(pipeline, data_root, glm::vec3(0), rain);
+        const auto expected = BuildComparisonAtmosphere(rain);
+        const auto& actual = pipeline.get_weather_state();
+        EXPECT_TRUE(actual.driven);
+        EXPECT_FLOAT_EQ(actual.rain_intensity, expected.weather.rain_intensity);
+        EXPECT_FLOAT_EQ(actual.snow_intensity, 0);
+        EXPECT_FLOAT_EQ(actual.fog_density, expected.weather.fog_density);
+        EXPECT_FLOAT_EQ(actual.storm_intensity, expected.weather.storm_intensity);
+        EXPECT_FLOAT_EQ(actual.wetness, expected.weather.wetness);
+        EXPECT_EQ(actual.wind_direction, glm::vec3(1, 0, 0));
+        EXPECT_FLOAT_EQ(actual.wind_strength, 0);
+        const auto& resolved_clouds = pipeline.get_cloud_state();
+        EXPECT_TRUE(resolved_clouds.enabled);
+        EXPECT_TRUE(resolved_clouds.shadow_enabled);
+        EXPECT_FLOAT_EQ(resolved_clouds.coverage_amount, expected.clouds.coverage_amount);
+        EXPECT_FLOAT_EQ(resolved_clouds.biome_variation, 0);
+        EXPECT_FLOAT_EQ(resolved_clouds.plane_height, 900);
+        EXPECT_FLOAT_EQ(resolved_clouds.shadow_strength, expected.clouds.shadow_strength);
+        EXPECT_EQ(particles->wind_velocity(), glm::vec3(0));
+        // Drain prior drops while applying the resolved emission, without clearing
+        // the pool: returning from rain to clear must really stop precipitation.
+        for (int frame = 0; frame < 50; ++frame) {
+            particles->update(0.1f);
+        }
+        if (rain) {
+            EXPECT_GT(particles->frame_instance_count(), 0u);
+        } else {
+            EXPECT_EQ(particles->frame_instance_count(), 0u);
+        }
+        const auto json = ResolvedAtmosphereToJson(pipeline);
+        EXPECT_EQ(json["weather"]["rain_intensity"], actual.rain_intensity);
+        EXPECT_EQ(json["clouds"]["coverage_amount"], resolved_clouds.coverage_amount);
+        EXPECT_EQ(json["clouds"]["scroll_offset"][0], resolved_clouds.scroll_offset.x);
+        EXPECT_EQ(json["particles"]["wind_velocity"], nlohmann::json::array({0, 0, 0}));
+        EXPECT_EQ(json["presentation_seconds"], 4.0);
+        EXPECT_EQ(json["lightning_active"], false);
+        if (phase >= 0 && phase < kTimeOfDaySweepCaptureCount) {
+            const auto& plan = TimeOfDaySweepCapturePlanAt(phase);
+            pipeline.set_season_tick(SeasonSweepTick(plan.season_index));
+            pipeline.set_time_of_day(plan.phase_time);
+            const auto phase_json = ResolvedAtmosphereToJson(pipeline);
+            EXPECT_EQ(phase_json["season_tick"], SeasonSweepTick(plan.season_index));
+            EXPECT_EQ(phase_json["time_of_day"], plan.phase_time);
+        }
+    }
+    particles->destroy_buffers();
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, ControlledRainParticlePairRejectsZeroRainNegativeControl) {
+    using namespace Luminumbra::Rendering;
+    using namespace Luminumbra::Client::ScenarioHarness;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    const ComparisonClockGuard clock_guard;
+    RenderPipeline pipeline;
+    auto* particles = pipeline.particles();
+    ASSERT_NE(particles, nullptr);
+    particles->init_shader(SourceRoot());
+    particles->init_buffers();
+    ComparisonParticleTarget target;
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+    Camera camera;
+    camera.Position = glm::vec3(0, 20, 0);
+    camera.Zoom = 60;
+    const std::vector<PointLight> lights;
+    RenderContext frame;
+    frame.screen_width = ComparisonParticleTarget::width;
+    frame.screen_height = ComparisonParticleTarget::height;
+    frame.lit_scene = {.id = target.fbo, .valid = true};
+    frame.gbuffer_depth = {.id = target.textures[1]};
+    frame.point_lights = &lights;
+    frame.sky_ambient_color = glm::vec3(0.3f);
+    frame.time_seconds = 4;
+    const auto data_root = SourceRoot() / "data/common/particles";
+    const auto draw = [&](bool rain, bool zero_rain) {
+        particles->clear_emitters();
+        PinComparisonAtmosphere(pipeline, data_root, camera.Position, rain);
+        if (zero_rain) {
+            particles->set_precipitation(data_root, camera.Position, 0, 0);
+        }
+        particles->rebuild_emitter_descriptors(1337, 120);
+        target.Reset();
+        // Prime the production screen basis, then warm a bounded 90 frames.
+        for (int frame_index = 0; frame_index < 90; ++frame_index) {
+            particles->update(1.0f / 60.0f);
+            (void)particles->execute(frame, camera);
+        }
+        target.Reset();
+        const auto drawn = particles->execute(frame, camera);
+        if (rain && !zero_rain) {
+            EXPECT_GT(drawn, 0u);
+        } else {
+            EXPECT_EQ(drawn, 0u);
+        }
+        return target.Read();
+    };
+    const auto baseline = draw(false, false);
+    const auto rain = draw(true, false);
+    const auto zero_rain = draw(true, true);
+    EXPECT_EQ(zero_rain, baseline);
+    EXPECT_NE(rain, baseline);
+    const auto baseline_stats = AnalyzeWeatherPixels(baseline, target.width, target.height);
+    const auto rain_stats = AnalyzeWeatherPixels(rain, target.width, target.height);
+    const auto zero_stats = AnalyzeWeatherPixels(zero_rain, target.width, target.height);
+    ASSERT_GT(baseline_stats.sky_horizontal_gradient_mean, 0);
+    const auto ratio =
+        rain_stats.sky_horizontal_gradient_mean / baseline_stats.sky_horizontal_gradient_mean;
+    EXPECT_GE(ratio, 1.25) << "shipping rain must add streak energy to the fixed background";
+    EXPECT_LT(zero_stats.sky_horizontal_gradient_mean / baseline_stats.sky_horizontal_gradient_mean,
+              1.25);
+    particles->destroy_buffers();
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }
 
 TEST(RenderSmokeTest, WeatherFogIntegratesTheGroundLayerFromAnElevatedCamera) {
