@@ -115,12 +115,22 @@
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
 
+namespace Luminumbra::world {
+// Test-only passkey minter for the dormant authority profile (see GameSession.h).
+struct GameSessionAuthorityProfileTestAccess {
+    static GameSession::AuthorityProfileTestKey Key() {
+        return {};
+    }
+};
+} // namespace Luminumbra::world
+
 namespace fs = std::filesystem;
 
 namespace {
 
 using Luminumbra::JobSystem;
 using Luminumbra::world::GameSession;
+using Luminumbra::world::GameSessionAuthorityProfileTestAccess;
 using Luminumbra::world::WorldConfigValidationResult;
 
 using Luminumbra::TestSupport::AdoptRegionGoldenChunk;
@@ -5125,7 +5135,8 @@ TEST(GameSessionHeadlessWorldTest, DormantEvictionProfileDoesNotAffectDisabledRe
     JobSystem jobs;
     jobs.startup(1);
     GameSession session;
-    GameSession candidate(GameSession::AuthorityProfileOptions{.residency_free_eviction = true});
+    GameSession candidate(GameSession::AuthorityProfileOptions{.residency_free_eviction = true},
+                          GameSessionAuthorityProfileTestAccess::Key());
     for (auto* current : {&session, &candidate}) {
         current->SetRootPath(root.root_string());
         current->SetJobSystem(&jobs);
@@ -5263,7 +5274,8 @@ TEST(GameSessionHeadlessWorldTest, IdleRetentionUsesWorkRegardlessOfStreamedResi
     JobSystem jobs;
     jobs.startup(1);
     const GameSession::AuthorityProfileOptions profile{.residency_free_eviction = true};
-    GameSession session(profile), peer(profile);
+    GameSession session(profile, GameSessionAuthorityProfileTestAccess::Key()),
+        peer(profile, GameSessionAuthorityProfileTestAccess::Key());
     for (auto* current : {&session, &peer}) {
         current->SetRootPath(root.root_string());
         current->SetJobSystem(&jobs);

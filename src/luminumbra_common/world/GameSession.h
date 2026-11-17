@@ -113,8 +113,17 @@ public:
         bool residency_free_eviction = false;
     };
 
+    // Passkey: only the test-only GameSessionAuthorityProfileTestAccess (defined in
+    // test sources, never in src/) can mint one, so no runtime, client, server or
+    // replay caller can opt in before slice I ties the option to negotiated identity.
+    class AuthorityProfileTestKey {
+        friend class GameSession; // default construction delegates with the legacy profile
+        friend struct GameSessionAuthorityProfileTestAccess;
+        AuthorityProfileTestKey() = default;
+    };
+
     GameSession();
-    explicit GameSession(const AuthorityProfileOptions& authority_profile);
+    GameSession(const AuthorityProfileOptions& authority_profile, AuthorityProfileTestKey key);
     ~GameSession();
 
     // Initialize a new world with the given parameters. Refusal before adoption
