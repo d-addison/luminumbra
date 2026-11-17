@@ -963,6 +963,30 @@ bool FarVolumeHandoff::TryPromote() {
     }
     return true;
 }
+std::size_t FarVolumeHandoff::RetireIdleHistory() {
+    Guard const guard(*this);
+    std::size_t retired = 0;
+    for (auto& tier : tiers_) {
+        if (!tier)
+            throw std::logic_error("Far-volume handoff missing tier");
+        std::size_t retained = 0;
+        // Compact the sorted index in place, bounded by this tier's entry_slots.
+        // Omitted work was already forgotten by StageTarget; no worker owns Entry.
+        for (std::size_t position = 0; position < tier->index_count; ++position) {
+            const auto index = tier->key_index[position];
+            tier->key_index[position] = kEmptyIndex;
+            auto& entry = tier->entries[index];
+            if (entry.serving || entry.target) {
+                tier->key_index[retained++] = index;
+            } else {
+                entry = Entry{};
+                ++retired;
+            }
+        }
+        tier->index_count = retained;
+    }
+    return retired;
+}
 std::optional<FarHandoffTileObservation>
 FarVolumeHandoff::Observe(const World::FarTileKey& key) const {
     CheckOwner();

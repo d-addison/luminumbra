@@ -3002,6 +3002,8 @@ TEST(WaterSeedInputs, AdmittedWakeAndStepClaimOnlyWaterOwnership) {
             EXPECT_EQ(chunk->has_water_authority(), admitted);
             EXPECT_EQ(chunk->voxel_revision(), 0u);
             EXPECT_EQ(chunk->water_bed_mm, std::vector<std::int32_t>(64, 100000));
+            EXPECT_EQ(chunk->water_depth_mm, std::vector<std::int32_t>(64, 0));
+            EXPECT_EQ(chunk->water_edge_flux, std::vector<std::int32_t>(128, 0));
         }
     }
 }
