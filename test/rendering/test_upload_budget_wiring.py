@@ -74,7 +74,10 @@ class UploadBudgetWiring(unittest.TestCase):
                     "live_terrain_owned, far_terrain_resident)")
         self.assertIn(decision, compact(collect))
         guard = "if (submission == StaticPropSubmission::Refused)"
-        self.assertEqual(compact(body(collect, guard)), "continue;")
+        fallback = body(collect, guard)
+        self.assertIn("lod = 2;", fallback)
+        self.assertNotIn("continue;", fallback)
+        self.assertNotIn("return", fallback)
         tree = body(collect, "if (submission == StaticPropSubmission::Impostor)")
         self.assertIn("impostorInstances.push_back", tree)
         self.assertTrue(compact(tree).endswith("continue; // all LOD3 tree parts are folded into the billboard"))
@@ -85,6 +88,9 @@ class UploadBudgetWiring(unittest.TestCase):
         policy = compact(body(legacy, "StaticPropSubmission SelectStaticPropSubmission("))
         self.assertLess(policy.index("if (!impostor_candidate)"), policy.index("if (live_terrain_owned)"))
         self.assertLess(policy.index("if (live_terrain_owned)"), policy.index("if (!selection.submit"))
+        self.assertEqual(compact(body(policy, "if (live_terrain_owned)")),
+                         "return StaticPropSubmission::Impostor;")
+        self.assertTrue(policy.endswith("return StaticPropSubmission::Impostor;"))
         self.assertIn("if (!selection.submit || !far_terrain_resident)", policy)
         query = body(legacy, "bool FarLodSystem::terrain_resident_at(")
         self.assertEqual(query.count("m_residents.find("), 1)
@@ -93,6 +99,28 @@ class UploadBudgetWiring(unittest.TestCase):
                          "inner_clipped", "m_preview_mode", "m_preview_inner_radius",
                          "found->second.element_count != 0"):
             self.assertIn(retained, query)
+
+    def test_refused_impostors_resolve_farthest_available_mesh_through_ordinary_batch(self):
+        collect = body(read(RENDERING / "passes/GBufferPass.cpp"),
+                       "for (const CachedStaticProp& cp : m_staticPropCache)")
+        memo = body(collect, "if (rit == m_resolveMemo.end())")
+        self.assertIn("resolve_mesh(candidatePath, candidatePath)", memo)
+        self.assertIn("for (int mesh_lod = lod - 1; !resolved.first && mesh_lod >= 0; --mesh_lod)", memo)
+        self.assertIn("resolve_mesh(fallbackPath, fallbackPath)", memo)
+        self.assertIn("LodMeshPath(basePath, mesh_lod)", memo)
+        self.assertIn("if (authoredTree)", memo)
+        self.assertIn("m_resolveMemo", memo)
+        for retained in ("cp.model * glm::vec4(glm::vec3(mesh->boundingSphere), 1.0f)",
+                         "batch.materialId = cp.materialId", "batch.mats.push_back(cp.model)",
+                         "batch.tints.push_back(cp.tint)"):
+            self.assertIn(retained, collect)
+        tests = read(ROOT / "test/rendering/render_smoke_test.cpp")
+        regression = body(tests, "TEST(RenderSmokeTest, RefusedTreeImpostorsSubmitAvailableMeshLods)")
+        for required in ("FarWorldMode::Legacy", "FarWorldMode::Ladder", "highest_lod",
+                         "capture.mesh_draws", "capture.impostor_draws", "support.clear()",
+                         "input.resident_live_terrain = &support", "input.submitted_live_terrain = &support",
+                         "fs::create_directories", 'partial << "LM"', "ctx.frozen_replay = replay"):
+            self.assertIn(required, regression)
 
     def assert_live_submission_wiring(self):
         source = read(RENDERING / "FarLodSystem.cpp")

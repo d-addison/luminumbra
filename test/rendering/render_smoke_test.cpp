@@ -7128,6 +7128,186 @@ struct ReloadShaderSources {
     }
 };
 
+// Observe real driver submissions through the public pass, restoring GL entry points.
+struct TreeSubmissionCapture {
+    struct Counts {
+        std::size_t mesh_draws = 0, impostor_draws = 0;
+        GLsizei mesh_indices = 0;
+        PFNGLDRAWELEMENTSINSTANCEDPROC elements = nullptr;
+        PFNGLDRAWARRAYSINSTANCEDPROC arrays = nullptr;
+    };
+    static Counts& Current() {
+        static Counts counts;
+        return counts;
+    }
+    static void APIENTRY
+    DrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instances) {
+        auto& state = Current();
+        if (!state.elements) {
+            ADD_FAILURE() << "Missing indexed draw entry point";
+            return;
+        }
+        ++state.mesh_draws;
+        state.mesh_indices = count;
+        state.elements(mode, count, type, indices, instances);
+    }
+    static void APIENTRY DrawArrays(GLenum mode, GLint first, GLsizei count, GLsizei instances) {
+        auto& state = Current();
+        if (!state.arrays) {
+            ADD_FAILURE() << "Missing array draw entry point";
+            return;
+        }
+        ++state.impostor_draws;
+        state.arrays(mode, first, count, instances);
+    }
+    TreeSubmissionCapture() {
+        auto& capture = Current();
+        capture = {.mesh_draws = 0,
+                   .impostor_draws = 0,
+                   .mesh_indices = 0,
+                   .elements = glDrawElementsInstanced,
+                   .arrays = glDrawArraysInstanced};
+        glad_glDrawElementsInstanced = DrawElements;
+        glad_glDrawArraysInstanced = DrawArrays;
+    }
+    ~TreeSubmissionCapture() {
+        glDrawElementsInstanced = Current().elements;
+        glDrawArraysInstanced = Current().arrays;
+    }
+};
+
+TEST(RenderSmokeTest, RefusedTreeImpostorsSubmitAvailableMeshLods) {
+    using namespace Luminumbra::Rendering;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    ReloadShaderSources sources;
+    RenderResourceRegistry resources;
+    GBufferPass pass;
+    pass.init_geometry_shader(SourceRoot());
+    pass.init_instanced_static_mesh(SourceRoot());
+    pass.init_skinned_mesh(SourceRoot());
+    pass.init_gbuffer(resources, 32, 32);
+    struct Cleanup {
+        GBufferPass& pass;
+        RenderResourceRegistry& resources;
+        ~Cleanup() {
+            pass.destroy_instanced_static_mesh();
+            pass.destroy_skinned_mesh();
+            pass.destroy_gbuffer(resources);
+        }
+    } cleanup{pass, resources};
+    Camera camera({0, 0, 0});
+    Luminumbra::Client::ScenarioHarness::IsolationConfig isolation;
+    glm::vec4 planes[6];
+    std::fill_n(planes, 6, glm::vec4(0, 0, 0, 1));
+    RenderContext ctx;
+    ctx.camera = &camera;
+    ctx.screen_width = 32;
+    ctx.screen_height = 32;
+    ctx.isolation = &isolation;
+    ctx.frustum_planes = planes;
+    GBufferPassInput input;
+    input.root_path = sources.directory;
+    input.submit_terrain_chunks = [](const glm::vec4(&)[6]) {
+        return TerrainSubmitStats{};
+    };
+    input.submit_ladder = [](const FarWorldPrepareDraw&) {
+        return FarWorldSubmitStats{};
+    };
+    input.static_model_tex = [](const std::string&) -> const StaticModelTex* {
+        return nullptr;
+    };
+    input.tree_impostor_enabled = true;
+    input.tree_impostor_grid = 1;
+    input.tree_impostor_radius = 1;
+    const glm::vec3 root(200, 12, 0);
+    SubmittedLiveTerrain support;
+    entt::registry entities;
+    TreeSubmissionCapture submissions;
+    auto& capture = TreeSubmissionCapture::Current();
+    // Empty, sparse and complete sets; missing, partial and wrong-type higher LODs.
+    for (const int highest_lod : {-1, 0, 1, 2}) {
+        SCOPED_TRACE(highest_lod);
+        for (const char* part : {"leaf", "bark", "trunk"}) {
+            const std::string base = "game-assets/tree-small-02/residency-" +
+                                     std::to_string(highest_lod) + "-" + part + ".lmesh";
+            fs::create_directories((sources.directory / base).parent_path());
+            if (highest_lod == 0) {
+                std::ofstream partial(sources.directory / LodMeshPath(base, 2), std::ios::binary);
+                partial << "LM";
+            }
+            if (highest_lod == 1) {
+                fs::create_directories(sources.directory / LodMeshPath(base, 2));
+            }
+            for (int mesh_lod = 0; mesh_lod <= highest_lod; ++mesh_lod) {
+                const std::vector<std::uint32_t> indices(
+                    static_cast<std::size_t>(3 * (mesh_lod + 1)), 0);
+                auto mesh = MeshLoader::CreateFromArrays({{{-1, -1, -5}, {0, 0, 1}, {0, 0}},
+                                                          {{1, -1, -5}, {0, 0, 1}, {1, 0}},
+                                                          {{0, 1, -5}, {0, 0, 1}, {.5f, 1}}},
+                                                         indices);
+                ASSERT_NE(mesh, nullptr);
+                pass.register_cached_mesh(LodMeshPath(base, mesh_lod), std::move(mesh));
+            }
+            const auto entity = entities.create();
+            entities.emplace<Luminumbra::Components::TransformComponent>(entity).position = root;
+            entities.emplace<Luminumbra::Components::StaticMeshComponent>(entity).meshPath = base;
+        }
+        for (const auto mode : {FarWorldMode::Legacy, FarWorldMode::Ladder}) {
+            input.far_selection =
+                SelectFarWorld(mode, FarWorldPurpose::World, FarWorldRefusal::None);
+            ASSERT_TRUE(pass.instanced_static_mesh_shader(mode)->IsValid());
+            ctx.far_world_ladder = mode == FarWorldMode::Ladder;
+            // Null, empty and retired support all require meshes. Confirmed support
+            // uses one leaf representative, folding in bark and trunk, in either mode.
+            for (const int support_state : {0, 1, 2, 3, 4}) {
+                support.clear();
+                input.resident_live_terrain = nullptr;
+                input.submitted_live_terrain = nullptr;
+                if (support_state != 0) {
+                    input.resident_live_terrain = &support;
+                }
+                if (support_state >= 2) {
+                    support.add_origin({192, 0, 0});
+                }
+                if (support_state == 3) {
+                    input.resident_live_terrain = nullptr;
+                    input.submitted_live_terrain = &support;
+                }
+                if (support_state == 4) {
+                    support.clear();
+                }
+                const bool confirmed = support_state == 2 || support_state == 3;
+                for (const bool submit : {false, true}) {
+                    input.far_selection.submit = submit;
+                    // Warm normally, then verify frozen reuse without loading meshes.
+                    for (const bool replay : {false, true}) {
+                        ctx.frozen_replay = replay;
+                        capture.mesh_draws = 0;
+                        capture.impostor_draws = 0;
+                        const auto stats = pass.execute(ctx, entities, input);
+                        EXPECT_EQ(stats.invalid_program_refusals, 0u);
+                        EXPECT_EQ(capture.mesh_draws, !confirmed && highest_lod >= 0 ? 3u : 0u);
+                        EXPECT_EQ(capture.impostor_draws, confirmed ? 1u : 0u);
+                        if (!confirmed && highest_lod >= 0) {
+                            EXPECT_EQ(capture.mesh_indices, 3 * (highest_lod + 1));
+                            glm::mat4 model(0);
+                            glBindBuffer(GL_ARRAY_BUFFER, pass.instance_matrix_vbo());
+                            glGetBufferSubData(
+                                GL_ARRAY_BUFFER, 0, sizeof(model), glm::value_ptr(model));
+                            EXPECT_EQ(glm::vec3(model[3]), root);
+                        }
+                    }
+                }
+            }
+        }
+        ctx.frozen_replay = false;
+        entities.clear();
+        (void)pass.execute(ctx, entities, input); // Invalidate the population cache.
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
 void CheckDirectFarWorldReload(bool prepare_first) {
     ReloadShaderSources sources;
     ASSERT_TRUE(sources.EnableFarWorldClipInputs());

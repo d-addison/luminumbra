@@ -663,8 +663,8 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     // instance picks a LOD bucket from its camera distance (SelectTreeLod) and the
     // group is keyed by the RESOLVED LOD mesh path so distant trees draw a coarser
     // variant; texture/material lookup uses the BASE path so LOD never loses the
-    // bark/leaf textures.. Missing LOD variant -> LOD0 fallback, so a
-    // world with no LOD variants is byte-identical to the pre-LOD renderer.
+    // bark/leaf textures. Authored trees try lower mesh LODs in descending order;
+    // other props retain the LOD0 fallback when their selected variant is missing.
     const glm::vec3 cameraPos = camera.Position;
     const bool impostorsOn = input.tree_impostor_enabled;
     TreeLodConfig kTreeLodCfg; // data-driven defaults; render.tree_lod.* may override later.
@@ -745,7 +745,9 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         const auto submission = SelectStaticPropSubmission(
             input.far_selection, impostor_candidate, live_terrain_owned, far_terrain_resident);
         if (submission == StaticPropSubmission::Refused) {
-            continue;
+            // Refusing the billboard must not remove its leaf, bark or trunk parts.
+            // Rejoin ordinary mesh batching with the same transform/material/attribution.
+            lod = 2;
         }
         if (submission == StaticPropSubmission::Impostor) {
             if (cp.impostorLeaf) { // the per-tree representative; bark/trunk are folded into the
@@ -773,7 +775,17 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         if (rit == m_resolveMemo.end()) {
             const std::string& basePath = m_propMeshPaths[cp.pathIndex];
             const std::string candidatePath = LodMeshPath(basePath, lod);
-            auto resolved = resolve_mesh(candidatePath, basePath);
+            auto resolved = resolve_mesh(candidatePath, candidatePath);
+            // At most kTreeLodCount probes for authored trees, only on a memo miss.
+            // Cache failed loads too; steady frames do no new probing or allocation.
+            if (authoredTree) {
+                for (int mesh_lod = lod - 1; !resolved.first && mesh_lod >= 0; --mesh_lod) {
+                    const std::string fallbackPath = LodMeshPath(basePath, mesh_lod);
+                    resolved = resolve_mesh(fallbackPath, fallbackPath);
+                }
+            } else if (!resolved.first) {
+                resolved = resolve_mesh(basePath, basePath);
+            }
             rit = m_resolveMemo
                       .emplace(rkey, std::make_pair(resolved.first, std::move(resolved.second)))
                       .first;
