@@ -193,8 +193,9 @@ void SpawnEcologyRoster(entt::registry& r, const Vec3& anchor) {
 // rather than only the empty-neutral path. Uses the  MakePlantFromSpecies (sample genome ->
 // PlantSeed -> stamp CropLifecycle) from an INLINE species template (no file I/O), seeded from
 // ints, so the roster is a pure function of (seed, preset) via the anchor -> run==replay.
-void SpawnPlantRoster(entt::registry& r, const Vec3& anchor) {
+void SpawnPlantRoster(world::GameSession& session, const Vec3& anchor) {
     namespace fol = luminumbra::foliage;
+    auto& r = session.GetRegistry();
     fol::SpeciesTemplate tmpl;
     tmpl.id = "smoke_crop";
     tmpl.perennial = false;
@@ -204,6 +205,9 @@ void SpawnPlantRoster(entt::registry& r, const Vec3& anchor) {
     auto rng = luminumbra::core::DeterministicRng::seeded(fol::kPlantSeedOffset, 9001u, 7u);
     for (int i = 0; i < 6; ++i) {
         const Vec3 pos(anchor.x - 6.0f + static_cast<float>(i) * 2.0f, anchor.y, anchor.z + 4.0f);
+        // Admit only the six roster positions' regions, even with no avatar anchors.
+        // The consumer gate resolves these legacy plants' owners from their transforms.
+        session.PinActiveRegion(world::ActiveRegionLedger::region_at(pos), true);
         fol::MakePlantFromSpecies(r, pos, tmpl, rng, 0u);
     }
 }
@@ -447,7 +451,7 @@ bool ServerWorldRunner::Boot() {
     //  opt-in plant roster so the smoke exercises the plant sub-hash + growth +
     // persistence end-to-end (empty otherwise -> plant_hash neutral). Pure fn of (seed, preset).
     if (m_config.planted_roster) {
-        SpawnPlantRoster(m_session->GetRegistry(), spawn_anchor);
+        SpawnPlantRoster(*m_session, spawn_anchor);
         LUMINUMBRA_CORE_INFO("ServerWorldRunner: spawned deterministic plant roster (6 plants).");
     }
 
