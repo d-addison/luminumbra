@@ -203,6 +203,16 @@ public:
         return grids_.size();
     }
     std::optional<FarFrozenRegion> Region(std::size_t region) const;
+    // Constant-time indexed column access for resumable consumers. Coordinates
+    // are grid indices including the one-column halo; invalid indices are absent.
+    std::optional<float> RegionHeight(std::size_t region, std::size_t x, std::size_t z) const {
+        if (region >= grids_.size())
+            return {};
+        const auto& grid = grids_[region];
+        if (x >= grid.side[0] || z >= grid.side[2])
+            return {};
+        return heights_[grid.column_offset + z * grid.side[0] + x];
+    }
     std::optional<float> Height(std::uint8_t tier, std::int64_t x, std::int64_t z) const;
     std::optional<FarVolumeSample>
     Sample(std::uint8_t tier, const FarVolumePosition& p, bool pristine = false) const;

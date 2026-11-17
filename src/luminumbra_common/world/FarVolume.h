@@ -5,6 +5,7 @@
 #include "FarVolumeMesher.h"
 #include <glm/vec3.hpp>
 #include <memory>
+#include <utility>
 
 namespace Luminumbra::Systems {
 class SHIELD_WorldSystem;
@@ -121,6 +122,26 @@ struct FarVolumeFacadeFailure {
     FarVolumeBuildError generation = FarVolumeBuildError::None;
     FarVolumeMeshError mesh = FarVolumeMeshError::None;
     FarVolumeAuthorityWork work;
+};
+
+// Constant-storage coverage accumulator. Start validates coordinates/intent;
+// each Observe consumes exactly one column in row-major order. No callbacks or
+// allocation occur here. Finish preserves output until all 129x129 columns pass.
+class FarVolumeCoverageCursor {
+public:
+    FarVolumeFacadeError Start(const FarVolumeCoverageIntent&, std::uint64_t identity);
+    FarVolumeFacadeError Observe(const std::optional<float>&);
+    bool Complete() const noexcept;
+    std::pair<std::int64_t, std::int64_t> Column() const;
+    FarVolumeFacadeError Finish(FarVolumeRequest&) const;
+
+private:
+    FarVolumeCoverageIntent intent_;
+    std::uint64_t identity_ = 0;
+    std::size_t column_ = 0;
+    std::int64_t x_ = 0, z_ = 0;
+    std::uint32_t spacing_ = 0, brick_ = 0;
+    float low_ = 0, high_ = 0;
 };
 
 struct FarVolumeCompilation {
