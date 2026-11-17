@@ -12,7 +12,6 @@
 
 namespace Luminumbra::Rendering {
 namespace {
-using Client::ScenarioHarness::IsolationLayer::All;
 using Feature = CaptureFeature;
 using Change = CaptureFeatureChange;
 using Capability = CaptureFeatureCapability;
@@ -100,14 +99,26 @@ void ValidateAdapter(const CaptureFeatureAdapter& adapter, bool requested) {
     }
 }
 
-std::uint32_t RenderLayer(Feature feature) {
+std::uint32_t RenderLayers(Feature feature) {
     namespace Layer = Client::ScenarioHarness::IsolationLayer;
+    // Required draw consumers, not producer/tuning gates. Every bit must survive
+    // isolation: retaining grass alone cannot preserve static trees or their wind.
     switch (feature) {
+        case Feature::AmbientAnimals:
+        case Feature::CreatureSpawning:
+        case Feature::CreatureAI:
+        case Feature::CreatureAnimation:
+            return Layer::Skinned;
+        case Feature::Caves:
+        case Feature::CaveFlourishes:
+        case Feature::Structures:
+            return Layer::Terrain;
+        case Feature::Foliage:
+        case Feature::PlantWind:
+            return Layer::Terrain | Layer::Foliage;
         case Feature::Water:
         case Feature::Rivers:
             return Layer::Water;
-        case Feature::Foliage:
-            return Layer::Foliage;
         case Feature::Particles:
         case Feature::AmbientParticles:
         case Feature::PrecipitationParticles:
@@ -115,8 +126,11 @@ std::uint32_t RenderLayer(Feature feature) {
             return Layer::Particles;
         case Feature::Lightning:
             return Layer::Lightning;
+        // Procedural plants (including growth), waterfall sheets, weather
+        // overlays and lighting have no isolation-layer gate. The sky dome uses
+        // the backdrop control instead; neither Skybox nor FarField is consumed.
         default:
-            return All;
+            return 0;
     }
 }
 
@@ -250,17 +264,21 @@ CaptureFeatureProfile::Resolve(const Client::ScenarioHarness::RuntimeScenarioCon
             if (!disabled.empty()) {
                 Suppress(state, disabled);
             }
-            const auto layer = RenderLayer(feature);
-            if (layer != All && !isolation.renders(layer)) {
+            if (feature == Feature::AmbientAnimals && runtime.active()) {
+                Suppress(state, "scenario_suppresses_ambient_animals");
+            }
+        }
+        // A final producer override cannot restore draws omitted by the resolved
+        // isolation configuration. Preserve already explicit suppression reasons.
+        if (adapter.change != Change::Suppressed) {
+            const auto layers = RenderLayers(feature);
+            if ((isolation.layer_mask & layers) != layers) {
                 Suppress(state, "isolation_layer_suppressed");
             }
             if ((feature == Feature::Sky || feature == Feature::Moon || feature == Feature::Stars ||
                  feature == Feature::Clouds) &&
                 isolation.backdrop != Client::ScenarioHarness::BackdropMode::Scene) {
                 Suppress(state, "isolation_backdrop_replaces_sky");
-            }
-            if (feature == Feature::AmbientAnimals && runtime.active()) {
-                Suppress(state, "scenario_suppresses_ambient_animals");
             }
         }
         // A known requested disablement is refused even if its adapter is

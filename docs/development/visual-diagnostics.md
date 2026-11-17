@@ -441,12 +441,20 @@ animal suppression, consumed isolation render masks and sky backdrop replacement
 Code inspection distinguishes tuning switches from producer gates: disabling
 creature-spawn tuning still uses the compiled herd count, and plant-growth,
 ecology, tree-wind and moonlight tuning flags do not prove producer disablement.
-The waterfall stage does not consume the water isolation mask; reserved skinned
-and sky layer bits likewise do not establish suppression. Other final producer
+Terrain isolation suppresses cave/structure geometry and static vegetation;
+skinned isolation suppresses ambient animals and the creature spawning, AI and
+animation consumers. Foliage and plant wind require both terrain/static-plant and
+foliage/grass consumers; omitting either layer explicitly refuses requested support,
+including when a producer adapter is unavailable. Water/rivers, particles and
+lightning follow their corresponding render masks. The separate procedural-plant
+(including plant growth) and waterfall-sheet stages, weather overlays and lighting
+do not consume isolation layer bits. The aerial fog consumer has no separate catalog
+entry; reserved sky and far-field bits do not gate draws. Other final producer
 settings, assets and scenario pins require adapter observations in later slices.
 Explicit final forced/suppressed adapter observations take precedence over baseline
-controls, so later policy can report transient producer overrides without changing
-saved preferences.
+producer controls, so later policy can report transient producer overrides without
+changing saved preferences. Final enabled settings cannot restore draws omitted by
+the resolved isolation masks or sky backdrop; explicit suppression reasons survive.
 
 The immutable result serializes schema `luminumbra.capture_capabilities.v1` in fixed
 catalog/key order, including every unrequested or unsupported row. `WriteManifest`

@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <array>
 #include <filesystem>
 #include <sstream>
@@ -332,10 +333,171 @@ TEST(CaptureFeatureProfile, IsolationMasksEveryActualRenderConsumerAndBackdropRe
         EXPECT_EQ(State(profile, feature).effective, false);
         EXPECT_EQ(State(profile, feature).reason, "isolation_backdrop_replaces_sky");
     }
-    // The shipping renderer does not consume its reserved skinned/sky layer bits.
     runtime.isolation_layers = "water,foliage,particles,lightning";
     runtime.isolation_backdrop = "scene";
+    profile = Resolve(runtime, EnabledContext());
+    EXPECT_EQ(profile.capability(), Capability::Refused);
+    for (const auto feature : {Feature::Caves, Feature::Structures, Feature::CreatureAnimation}) {
+        EXPECT_EQ(State(profile, feature).effective, false);
+        EXPECT_EQ(State(profile, feature).reason, "isolation_layer_suppressed");
+    }
+    runtime.isolation_layers = "terrain,skinned,water,foliage,particles,lightning";
     EXPECT_EQ(Resolve(runtime, EnabledContext()).capability(), Capability::Supported);
+}
+
+void CheckRequiredIsolationLayers(Feature feature,
+                                  std::span<const std::string_view> excluded_selections,
+                                  std::string_view included_selection) {
+    const std::array requested{CaptureFeatureName(feature)};
+    for (const auto observation : {Change::Unchanged, Change::Unavailable, Change::Forced}) {
+        const bool missing_adapter = observation == Change::Unavailable;
+        for (const bool explicit_subset : {false, true}) {
+            SCOPED_TRACE(requested.front());
+            SCOPED_TRACE(static_cast<int>(observation));
+            SCOPED_TRACE(explicit_subset);
+            auto context = EnabledContext();
+            if (explicit_subset) {
+                context.adapters.fill(CaptureFeatureAdapter{});
+                Adapter(context, feature) = {.enabled = true,
+                                             .change = Change::Unchanged,
+                                             .reason = "final_setting_enabled"};
+            }
+            if (missing_adapter) {
+                Adapter(context, feature) = {};
+            } else {
+                Adapter(context, feature).change = observation;
+            }
+            auto runtime = explicit_subset ? RuntimeScenarioConfig{} : AllFeatures();
+            const auto names = explicit_subset ? std::span<const std::string_view>(requested)
+                                               : std::span<const std::string_view>{};
+            for (const auto selection : excluded_selections) {
+                SCOPED_TRACE(selection);
+                runtime.isolation_layers = selection;
+                const auto profile =
+                    CaptureFeatureProfile::Resolve(runtime, {}, {}, context, names);
+                const auto& state = State(profile, feature);
+                EXPECT_TRUE(state.requested);
+                EXPECT_EQ(state.effective, false);
+                EXPECT_EQ(state.change, Change::Suppressed);
+                EXPECT_EQ(state.reason, "isolation_layer_suppressed");
+                EXPECT_EQ(state.capability_reason, state.reason);
+                EXPECT_EQ(state.capability, Capability::Refused);
+                EXPECT_EQ(profile.capability(), Capability::Refused);
+                const auto manifest = nlohmann::json::parse(profile.Manifest());
+                const auto& entry = manifest.at("features").at(static_cast<std::size_t>(feature));
+                EXPECT_EQ(entry.at("effective"), false);
+                EXPECT_EQ(entry.at("capability"), "refused");
+            }
+            // Retaining every required consumer, no isolation and unknown-only
+            // selections must leave observed/unknown producer settings intact.
+            for (const auto selection :
+                 {included_selection, std::string_view{}, std::string_view{"unknown_layer"}}) {
+                runtime.isolation_layers = selection;
+                const auto profile =
+                    CaptureFeatureProfile::Resolve(runtime, {}, {}, context, names);
+                const auto& state = State(profile, feature);
+                EXPECT_EQ(state.effective,
+                          missing_adapter ? std::optional<bool>{} : std::optional<bool>{true});
+                EXPECT_EQ(state.capability,
+                          missing_adapter ? Capability::Unsupported : Capability::Supported);
+                if (explicit_subset) {
+                    EXPECT_EQ(profile.capability(), state.capability);
+                }
+            }
+        }
+    }
+}
+
+TEST(CaptureFeatureProfile, TerrainIsolationRefusesCavesFlourishesAndStructures) {
+    constexpr std::array<std::string_view, 3> excluded{
+        "water,foliage,particles,lightning", "skinned", "unknown_layer,foliage"};
+    for (const auto feature : {Feature::Caves, Feature::CaveFlourishes, Feature::Structures}) {
+        CheckRequiredIsolationLayers(feature, excluded, "terrain");
+    }
+}
+
+TEST(CaptureFeatureProfile, SkinnedIsolationRefusesEveryCreatureConsumer) {
+    constexpr std::array<std::string_view, 3> excluded{
+        "water,foliage,particles,lightning", "terrain", "unknown_layer,terrain"};
+    for (const auto feature : {Feature::AmbientAnimals,
+                               Feature::CreatureSpawning,
+                               Feature::CreatureAI,
+                               Feature::CreatureAnimation}) {
+        CheckRequiredIsolationLayers(feature, excluded, "creatures");
+    }
+}
+
+TEST(CaptureFeatureProfile, VegetationRequiresBothStaticPlantsAndGrassConsumers) {
+    constexpr std::array<std::string_view, 4> excluded{
+        "water,foliage,particles,lightning", "terrain", "grass", "skinned"};
+    for (const auto feature : {Feature::Foliage, Feature::PlantWind}) {
+        CheckRequiredIsolationLayers(feature, excluded, "terrain,grass");
+    }
+}
+
+TEST(CaptureFeatureProfile, IsolationDoesNotInventGatesForIndependentStagesOrLighting) {
+    auto runtime = AllFeatures();
+    runtime.isolation_layers = "skinned";
+    const auto profile = Resolve(runtime, EnabledContext());
+    for (const auto feature : {Feature::PlantGrowth,
+                               Feature::ProceduralPlants,
+                               Feature::Waterfalls,
+                               Feature::Hydrology,
+                               Feature::WeatherHydrology,
+                               Feature::Weather,
+                               Feature::WeatherEvents,
+                               Feature::LiveWeatherBridge,
+                               Feature::Precipitation,
+                               Feature::Clouds,
+                               Feature::CloudShadows,
+                               Feature::Sky,
+                               Feature::Moon,
+                               Feature::Moonlight,
+                               Feature::Stars}) {
+        EXPECT_EQ(State(profile, feature).effective, true);
+        EXPECT_EQ(State(profile, feature).capability, Capability::Supported);
+    }
+}
+
+TEST(CaptureFeatureProfile, BackdropSuppressesFinalEnabledSettingsAndPreservesExplicitRefusals) {
+    for (const auto observation :
+         {Change::Unchanged, Change::Unavailable, Change::Forced, Change::Suppressed}) {
+        auto context = EnabledContext();
+        for (auto& adapter : context.adapters) {
+            if (observation == Change::Unavailable) {
+                adapter = {};
+            } else {
+                adapter = {.enabled = observation != Change::Suppressed,
+                           .change = observation,
+                           .reason = "final_setting"};
+            }
+        }
+        auto runtime = AllFeatures();
+        for (const auto backdrop : {"void", "greenscreen", "checker", "transparent"}) {
+            SCOPED_TRACE(backdrop);
+            runtime.isolation_backdrop = backdrop;
+            const auto profile = Resolve(runtime, context);
+            EXPECT_EQ(profile.capability(), Capability::Refused);
+            for (const auto feature :
+                 {Feature::Sky, Feature::Moon, Feature::Stars, Feature::Clouds}) {
+                const auto& state = State(profile, feature);
+                EXPECT_EQ(state.effective, false);
+                EXPECT_EQ(state.change, Change::Suppressed);
+                EXPECT_EQ(state.capability, Capability::Refused);
+                EXPECT_EQ(state.reason,
+                          observation == Change::Suppressed ? "final_setting"
+                                                            : "isolation_backdrop_replaces_sky");
+            }
+        }
+        for (const auto backdrop : {"scene", "", "unknown_backdrop"}) {
+            runtime.isolation_backdrop = backdrop;
+            const auto profile = Resolve(runtime, context);
+            EXPECT_EQ(profile.capability(),
+                      observation == Change::Unavailable  ? Capability::Unsupported
+                      : observation == Change::Suppressed ? Capability::Refused
+                                                          : Capability::Supported);
+        }
+    }
 }
 
 TEST(CaptureFeatureProfile, MissingIdentitiesPreventSupportAndReasonsSurviveSerialization) {
@@ -352,6 +514,21 @@ TEST(CaptureFeatureProfile, MissingIdentitiesPreventSupportAndReasonsSurviveSeri
 }
 
 TEST(CaptureFeatureProfile, FinalForcedAndSuppressedObservationsOverrideBaselineControls) {
+    constexpr std::array layer_suppressed{Feature::AmbientAnimals,
+                                          Feature::CreatureSpawning,
+                                          Feature::CreatureAI,
+                                          Feature::CreatureAnimation,
+                                          Feature::Foliage,
+                                          Feature::PlantWind,
+                                          Feature::Water,
+                                          Feature::Rivers,
+                                          Feature::Particles,
+                                          Feature::AmbientParticles,
+                                          Feature::PrecipitationParticles,
+                                          Feature::WaterfallSpray,
+                                          Feature::Lightning};
+    constexpr std::array backdrop_suppressed{
+        Feature::Sky, Feature::Moon, Feature::Stars, Feature::Clouds};
     auto runtime = AllFeatures();
     runtime.scenario = "world_visual_sweep";
     runtime.isolation_layers = "terrain";
@@ -368,12 +545,36 @@ TEST(CaptureFeatureProfile, FinalForcedAndSuppressedObservationsOverrideBaseline
                        .change = enabled ? Change::Forced : Change::Suppressed,
                        .reason = "final_mode_override"};
         }
-        const auto profile = Resolve(runtime, context, systems, graphics);
-        EXPECT_EQ(profile.capability(), enabled ? Capability::Supported : Capability::Refused);
-        for (const auto& state : profile.features()) {
+        auto unrestricted = runtime;
+        unrestricted.isolation_layers.clear();
+        unrestricted.isolation_backdrop = "scene";
+        const auto producer_profile = Resolve(unrestricted, context, systems, graphics);
+        EXPECT_EQ(producer_profile.capability(),
+                  enabled ? Capability::Supported : Capability::Refused);
+        for (const auto& state : producer_profile.features()) {
             EXPECT_EQ(state.effective, enabled);
             EXPECT_EQ(state.change, enabled ? Change::Forced : Change::Suppressed);
             EXPECT_EQ(state.reason, "final_mode_override");
+        }
+        const auto profile = Resolve(runtime, context, systems, graphics);
+        EXPECT_EQ(profile.capability(), Capability::Refused);
+        for (std::size_t index = 0; index < kCaptureFeatureCount; ++index) {
+            const auto feature = static_cast<Feature>(index);
+            const bool layer_omitted =
+                enabled && std::find(layer_suppressed.begin(), layer_suppressed.end(), feature) !=
+                               layer_suppressed.end();
+            const bool backdrop_omitted =
+                enabled &&
+                std::find(backdrop_suppressed.begin(), backdrop_suppressed.end(), feature) !=
+                    backdrop_suppressed.end();
+            const auto& state = profile.features()[index];
+            const bool effective = enabled && !layer_omitted && !backdrop_omitted;
+            EXPECT_EQ(state.effective, effective);
+            EXPECT_EQ(state.change, effective ? Change::Forced : Change::Suppressed);
+            EXPECT_EQ(state.reason,
+                      layer_omitted      ? "isolation_layer_suppressed"
+                      : backdrop_omitted ? "isolation_backdrop_replaces_sky"
+                                         : "final_mode_override");
         }
     }
 }
