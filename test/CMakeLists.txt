@@ -612,6 +612,7 @@ if(MSVC)
 endif()
 
 add_executable(render_smoke_test
+    rendering/diagnostic_attribution_test.cpp
     rendering/render_smoke_test.cpp
     rendering/FarWorldLegacyIsolation_test.cpp
     rendering/FarWorldShadow_test.cpp
