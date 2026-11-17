@@ -71,6 +71,10 @@ Ordinary `no_audio_precedence` is explicitly null because no disable flag was
 requested. Unknown, missing, wrongly typed, false qualifying observations and
 unsupported schema versions refuse qualification; unobserved controls and
 unavailable saved volumes never pass. Required nulls must be present as keys.
+Every audio-schema object must carry exactly its v1 keys: an extra key refuses,
+even when every required key is correct. The acceptance driver reports audio as
+unevaluated, never pass, on non-Windows hosts, because only Windows sessions own
+the client process tree.
 These receipt checks do not establish audible quality or complete event coverage.
 
 Source evidence: `src/luminumbra_client/core/RuntimeScenarioConfig.cpp:255–256`

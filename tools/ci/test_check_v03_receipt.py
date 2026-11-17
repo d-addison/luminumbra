@@ -239,6 +239,32 @@ class V03AcceptanceReceiptContract(unittest.TestCase):
                         parent[path[-1]] = None if mutation == "null" else []
                     self._expect(receipt, "audio_off", "fail")
 
+    def test_audio_unknown_key_in_every_schema_object_refuses(self) -> None:
+        def objects(obj, prefix=()):
+            yield prefix, obj
+            for key, value in obj.items():
+                if isinstance(value, dict):
+                    yield from objects(value, prefix + (key,))
+        baseline = valid_receipt()
+        for role in ("ordinary", "no_audio", "no_audio_reversed"):
+            audio = baseline["sections"]["audio_off"]["runtime_snapshots"][role]["state"][
+                "audio_acceptance"]
+            visited = 0
+            for path, _ in objects(audio):
+                visited += 1
+                receipt = copy.deepcopy(baseline)
+                target = receipt["sections"]["audio_off"]["runtime_snapshots"][role]["state"][
+                    "audio_acceptance"]
+                for key in path:
+                    target = target[key]
+                target["unexpected_observation"] = True
+                with self.subTest(role=role, path=path):
+                    check = self._expect(receipt, "audio_off", "fail")
+                    self.assertIn("unexpected_observation: unknown key", check["detail"])
+            # Every v1 audio object: top level, resolution, backend, routing, saved_volumes,
+            # loaded, in_effect, controls, telemetry, plus playback_gains when playing.
+            self.assertEqual(visited, 10 if role == "ordinary" else 9)
+
     def test_audio_volume_boundaries_and_nonfinite_refuse(self) -> None:
         for level in (True, "0.5", 0, -1, 1.01, float("nan"), float("inf"), 10**400):
             with self.subTest(level=level):
@@ -285,6 +311,12 @@ class V03AcceptanceReceiptContract(unittest.TestCase):
         self.assertIn('timed_out = [bool]$audioRun.timed_out', audio)
         self.assertIn('-Extra @{ runtime_snapshots = $audioSnapshots }', audio)
         self.assertNotIn('default_null_playback_with_saved_volume', audio)
+        # Non-Windows hosts never qualify: a clean collection there is unevaluated, not pass.
+        self.assertIn('$audioNativeHost = ($PSVersionTable.PSEdition -eq "Desktop") -or '
+                      '($IsWindows -eq $true)', audio)
+        self.assertRegex(audio, r'\} elseif \(-not \$audioNativeHost\) \{\s*(#[^\n]*\s*)?'
+                                r'\$audioStatus = "unevaluated"')
+        self.assertLess(audio.index('$audioProblems.Count -gt 0'), audio.index('-not $audioNativeHost'))
 
     def _absent_render_driver_section(self) -> dict:
         # Inspect the actual emission branch so this portable test catches a

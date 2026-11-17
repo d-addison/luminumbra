@@ -73,9 +73,42 @@ def _audio_match(actual, expected, path: str) -> None:
         raise AudioEvidenceError(f"{path}: expected {expected!r} ({type(expected).__name__})")
 
 
+_AUDIO_VOLUME_KEYS = frozenset(("master", "music", "sfx"))
+# Exact key sets of the luminumbra.audio_acceptance.v1 objects (AudioAcceptance.h).
+# Unknown or extra observations refuse rather than being ignored.
+_AUDIO_OBJECT_KEYS = {
+    "": frozenset(("schema", "resolution", "backend", "saved_volumes", "controls", "telemetry",
+                   "no_audio_precedence", "controls_disabled")),
+    "resolution": frozenset(("no_audio_requested", "enable_audio_requested", "requested_mode",
+                             "resolved_mode", "reason")),
+    "backend": frozenset(("playback_enabled", "engine_initialized", "device_started", "routing")),
+    "backend.routing": frozenset(("sfx", "ambient", "events", "ui")),
+    "saved_volumes": frozenset(("loaded", "in_effect", "unchanged", "playback_gains")),
+    "controls": frozenset(("observed", "present", "disabled_count", "match_playback")),
+    "telemetry": frozenset(("opt_in_requested", "enabled", "retained_requests", "opt_in_only")),
+}
+
+
+def _audio_exact_keys(value, allowed: frozenset, path: str) -> None:
+    if not isinstance(value, dict):
+        raise AudioEvidenceError(f"{path}: expected object")
+    unknown = sorted(key for key in value if key not in allowed)
+    if unknown:
+        raise AudioEvidenceError(f"{path}.{unknown[0]}: unknown key")
+
+
+def _audio_schema_keys(audio: dict, path: str) -> None:
+    for subpath, allowed in _AUDIO_OBJECT_KEYS.items():
+        value = audio
+        for part in subpath.split(".") if subpath else ():
+            value = value[part]
+        _audio_exact_keys(value, allowed, f"{path}.{subpath}" if subpath else path)
+
+
 def _audio_volumes(value, path: str) -> dict:
     if not isinstance(value, dict):
         raise AudioEvidenceError(f"{path}: expected observed volumes object")
+    _audio_exact_keys(value, _AUDIO_VOLUME_KEYS, path)
     for channel in ("master", "music", "sfx"):
         if channel not in value:
             raise AudioEvidenceError(f"{path}.{channel}: missing key")
@@ -139,6 +172,7 @@ def _check_audio(section: dict) -> None:
             "no_audio_precedence": None if playback else True,
             "controls_disabled": not playback,
         }, path)
+        _audio_schema_keys(audio, path)
         volumes = audio["saved_volumes"]
         for key in ("loaded", "in_effect", "playback_gains"):
             if key not in volumes:

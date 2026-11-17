@@ -430,9 +430,15 @@ try {
     Write-JsonFile -Object $audioSnapshots -Path (Join-Path $OutAbs "audio-acceptance.json")
     $audioStatus = "pass"
     $audioDetail = "runtime snapshots collected; checker must validate amended audio acceptance"
+    # Windows PowerShell 5.1 (Desktop edition) predates $IsWindows; pwsh defines it.
+    $audioNativeHost = ($PSVersionTable.PSEdition -eq "Desktop") -or ($IsWindows -eq $true)
     if ($audioProblems.Count -gt 0) {
         $audioStatus = "fail"
         $audioDetail = $audioProblems -join "; "
+    } elseif (-not $audioNativeHost) {
+        # Invoke-ClientSession only owns the process tree on Windows, so other hosts are not native qualification.
+        $audioStatus = "unevaluated"
+        $audioDetail = "audio sessions ran on a non-Windows host; not native qualification"
     }
     $sections["audio_off"] = New-Section -Status $audioStatus -Evidence "audio-acceptance.json" -Detail $audioDetail -Extra @{ runtime_snapshots = $audioSnapshots }
 
