@@ -13,9 +13,11 @@
 #include <gtest/gtest.h>
 
 #include "audio/MiniaudioManager.h"
+#include "audio/NullAudioManager.h"
 #include "core/Log.h"
 #include "luminumbra_common/components/audio/AudioTypes.h"
 #include "luminumbra_common/core/CaptureContentPaths.h"
+#include "luminumbra_common/core/SystemConfig.h"
 
 #include <spdlog/sinks/base_sink.h>
 
@@ -171,6 +173,145 @@ ma_result InitSilentAudio(const ma_engine_config*, ma_engine* engine) {
     return ma_engine_init(&config, engine);
 }
 } // namespace
+
+TEST(AudioPhysicsBinding, AcceptanceNullPreservesLoadedPreferencesAndFlagPrecedence) {
+    using namespace Luminumbra::Client;
+    const Luminumbra::TestSupport::ScopedTempFile saved("audio-preferences-", ".json");
+    {
+        std::ofstream output(saved.Path());
+        output << R"({"user":{"audio":{"master":0.75,"music":0.5,"sfx":0.25}}})";
+        ASSERT_TRUE(output.good());
+    }
+    const auto settings = luminumbra::core::SystemConfig::LoadLayered({}, saved.Path());
+    const auto& user = settings.user();
+    const AudioVolumes loaded{user.audio_master, user.audio_music, user.audio_sfx};
+    ASSERT_FLOAT_EQ(loaded.master, 0.75f);
+    ASSERT_FLOAT_EQ(loaded.music, 0.5f);
+    ASSERT_FLOAT_EQ(loaded.sfx, 0.25f);
+    for (const bool enable_requested : {false, true}) {
+        NullAudioManager manager({}, NullAudioActivation::ExplicitNoAudio);
+        ASSERT_TRUE(manager.Init());
+        manager.SetMasterVolume(loaded.master);
+        manager.SetMusicVolume(loaded.music);
+        manager.SetSfxVolume(loaded.sfx);
+        manager.PlayMusic("suppressed");
+        const auto evidence = BuildAudioAcceptance(
+            {.no_audio = true, .enable_audio = enable_requested, .telemetry = false},
+            loaded,
+            AudioVolumes{user.audio_master, user.audio_music, user.audio_sfx},
+            manager.AcceptanceState(),
+            {.present = 3, .disabled = 3});
+        EXPECT_EQ(evidence["schema"], "luminumbra.audio_acceptance.v1");
+        EXPECT_EQ(evidence["resolution"]["requested_mode"], "null");
+        EXPECT_EQ(evidence["resolution"]["resolved_mode"], "null");
+        EXPECT_EQ(evidence["resolution"]["reason"], "flag");
+        EXPECT_EQ(evidence["resolution"]["enable_audio_requested"], enable_requested);
+        EXPECT_EQ(evidence["no_audio_precedence"], true);
+        EXPECT_EQ(evidence["backend"]["engine_initialized"], false);
+        EXPECT_EQ(evidence["backend"]["device_started"], false);
+        EXPECT_EQ(evidence["backend"]["playback_enabled"], false);
+        EXPECT_EQ(evidence["backend"]["routing"]["sfx"], false);
+        EXPECT_EQ(evidence["saved_volumes"]["loaded"], evidence["saved_volumes"]["in_effect"]);
+        EXPECT_EQ(evidence["saved_volumes"]["unchanged"], true);
+        EXPECT_EQ(evidence["saved_volumes"]["playback_gains"], nullptr);
+        EXPECT_EQ(evidence["controls_disabled"], true);
+        EXPECT_EQ(evidence["controls"]["match_playback"], true);
+        EXPECT_EQ(evidence["telemetry"]["enabled"], false);
+        EXPECT_EQ(evidence["telemetry"]["opt_in_only"], true);
+        EXPECT_EQ(evidence["telemetry"]["retained_requests"], 0);
+        manager.Shutdown();
+    }
+}
+
+TEST(AudioPhysicsBinding, AcceptanceObservesTelemetryAndUnknownControlsWithoutInventingSuccess) {
+    using namespace Luminumbra::Client;
+    const Luminumbra::TestSupport::ScopedTempFile telemetry("audio-evidence-", ".json");
+    NullAudioManager manager(telemetry.Path(), NullAudioActivation::ExplicitNoAudio);
+    ASSERT_TRUE(manager.Init());
+    manager.PlayMusic("suppressed");
+    for (const auto controls : {AudioControlState{},
+                                AudioControlState{2, 2},
+                                AudioControlState{3, 0},
+                                AudioControlState{3, 2}}) {
+        const auto evidence =
+            BuildAudioAcceptance({.no_audio = true, .enable_audio = true, .telemetry = true},
+                                 AudioVolumes{},
+                                 AudioVolumes{0.5f, 1.0f, 1.0f},
+                                 manager.AcceptanceState(),
+                                 controls);
+        EXPECT_EQ(evidence["telemetry"]["enabled"], true);
+        EXPECT_EQ(evidence["telemetry"]["retained_requests"], 1);
+        EXPECT_EQ(evidence["telemetry"]["opt_in_only"], true);
+        EXPECT_EQ(evidence["saved_volumes"]["unchanged"], false);
+        if (controls.present == 3) {
+            EXPECT_EQ(evidence["controls_disabled"], false);
+            EXPECT_EQ(evidence["controls"]["match_playback"], false);
+        } else {
+            EXPECT_EQ(evidence["controls_disabled"], nullptr);
+            EXPECT_EQ(evidence["controls"]["match_playback"], nullptr);
+        }
+    }
+    AudioBackendState unknown;
+    unknown.mode = "unknown";
+    const auto unknown_evidence = BuildAudioAcceptance({}, {}, {}, unknown, {});
+    EXPECT_EQ(unknown_evidence["resolution"]["resolved_mode"], "unknown");
+    EXPECT_EQ(unknown_evidence["controls_disabled"], nullptr);
+    const auto unexpected = BuildAudioAcceptance({}, {}, {}, manager.AcceptanceState(), {});
+    EXPECT_EQ(unexpected["telemetry"]["opt_in_only"], false);
+    EXPECT_EQ(unexpected["saved_volumes"]["unchanged"], nullptr);
+    EXPECT_EQ(unexpected["saved_volumes"]["loaded"], nullptr);
+    manager.Shutdown();
+}
+
+TEST(AudioPhysicsBinding, AcceptanceDeviceRequiresAStartedDeviceBeyondEngineInitialization) {
+    using namespace Luminumbra::Client;
+    MiniaudioManager manager(".");
+    const AudioVolumes loaded{0.75f, 0.5f, 0.25f};
+    const auto before = BuildAudioAcceptance({}, loaded, loaded, manager.AcceptanceState(), {});
+    EXPECT_EQ(before["resolution"]["requested_mode"], "device");
+    EXPECT_EQ(before["resolution"]["resolved_mode"], "device");
+    EXPECT_EQ(before["resolution"]["reason"], "default");
+    EXPECT_EQ(before["backend"]["engine_initialized"], false);
+    EXPECT_EQ(before["backend"]["device_started"], false);
+    ASSERT_TRUE(manager.Init(InitSilentAudio));
+    manager.SetMasterVolume(loaded.master);
+    manager.SetMusicVolume(loaded.music);
+    manager.SetSfxVolume(loaded.sfx);
+    const auto evidence = BuildAudioAcceptance(
+        {}, loaded, loaded, manager.AcceptanceState(), {.present = 3, .disabled = 0});
+    EXPECT_EQ(evidence["backend"]["engine_initialized"], true);
+    EXPECT_EQ(evidence["backend"]["playback_enabled"], true);
+    // A noDevice engine must never masquerade as activated hardware.
+    EXPECT_EQ(evidence["backend"]["device_started"], false);
+    for (const char* bus : {"sfx", "ambient", "events", "ui"}) {
+        EXPECT_EQ(evidence["backend"]["routing"][bus], true);
+    }
+    EXPECT_EQ(evidence["saved_volumes"]["playback_gains"], AudioVolumesToJson(loaded));
+    EXPECT_EQ(evidence["saved_volumes"]["unchanged"], true);
+    EXPECT_EQ(evidence["controls_disabled"], false);
+    EXPECT_EQ(evidence["controls"]["match_playback"], true);
+    EXPECT_EQ(evidence["no_audio_precedence"], nullptr);
+    manager.SetMasterVolume(0.0f);
+    const auto muted = manager.AcceptanceState();
+    manager.Shutdown();
+    ASSERT_TRUE(muted.playback_volumes.has_value());
+    if (muted.playback_volumes.has_value()) {
+        EXPECT_FLOAT_EQ(muted.playback_volumes->master, 0.0f);
+    }
+    EXPECT_TRUE(muted.playback_enabled);
+    const auto after = manager.AcceptanceState();
+    EXPECT_FALSE(after.engine_initialized);
+    EXPECT_FALSE(after.device_started);
+    EXPECT_FALSE(after.playback_enabled);
+    EXPECT_FALSE(after.sfx_routed);
+    EXPECT_FALSE(after.playback_volumes.has_value());
+    ASSERT_FALSE(manager.Init([](const ma_engine_config*, ma_engine*) { return MA_NO_DEVICE; }));
+    const auto failed = manager.AcceptanceState();
+    EXPECT_FALSE(failed.engine_initialized);
+    EXPECT_FALSE(failed.device_started);
+    EXPECT_FALSE(failed.playback_enabled);
+    manager.Shutdown();
+}
 
 TEST(AudioPhysicsBinding, FailedFileLoadsReleaseAllocationsAndLeaveNoWindNode) {
     EXPECT_EQ(CountAudioMalloc(0, nullptr), nullptr);

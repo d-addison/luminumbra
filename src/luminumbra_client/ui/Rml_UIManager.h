@@ -22,6 +22,7 @@ struct GLFWwindow;
 namespace Luminumbra::Client {
 
 class IAudioManager;
+struct AudioControlState;
 
 // --- Callbacks for UI interaction ---
 // WorldGenParam (the customize-form param transport) lives in the world layer, not here.
@@ -114,6 +115,8 @@ public:
     }
     void SetBackdropBlurQuality(luminumbra::core::UiBlurQuality quality);
     void RefreshGraphicsSettings();
+    // Observe the actual settings DOM. An unopened or partial form is not evidence.
+    AudioControlState AudioControlsState() const;
     const BackdropBlurQuality& GetBackdropBlurQuality() const {
         return m_backdropBlur;
     }
