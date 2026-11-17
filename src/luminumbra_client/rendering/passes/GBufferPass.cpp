@@ -979,6 +979,9 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         Mesh* mesh = batch.mesh;
         if (!mesh || matrices.empty())
             continue;
+        // Set when the mesh identity cannot be recorded: the draw is still submitted,
+        // carrying an unsupported (path-less) identity so the scene is unchanged.
+        bool identity_path_unrecordable = false;
         if (capture) {
             if (mesh->indexCount >
                 static_cast<std::uint32_t>(std::numeric_limits<GLsizei>::max())) {
@@ -986,10 +989,8 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                 continue;
             }
             // Bound temporary LOD-path copies to the registry's 1,024-byte UTF-8 limit.
-            if (batch.basePath.size() > 1024 || batch.drawPath.size() > 1024) {
-                capture->unsupported("static_mesh_identity_path_limit");
-                continue;
-            }
+            identity_path_unrecordable =
+                batch.basePath.size() > 1024 || batch.drawPath.size() > 1024;
         }
         shader->setInt("u_materialId", static_cast<int>(batch.materialId));
         bool two_sided = false;
@@ -1078,26 +1079,29 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             glVertexAttribDivisor(7, 1);
             if (capture) {
                 std::uint32_t resolved_lod = 0;
-                for (int level = 1; level < kTreeLodCount; ++level) {
+                for (int level = 1; !identity_path_unrecordable && level < kTreeLodCount; ++level) {
                     if (batch.drawPath == LodMeshPath(batch.basePath, level)) {
                         resolved_lod = static_cast<std::uint32_t>(level);
                         break;
                     }
                 }
                 const bool generated = batch.drawPath.starts_with("procgen://");
+                const bool unattributed = generated || identity_path_unrecordable;
+                const std::string_view variant =
+                    identity_path_unrecordable ? "static_mesh_identity_path_limit"
+                    : input.far_selection.effective == FarWorldMode::Ladder
+                        ? "instanced_static_mesh_ladder"
+                        : "instanced_static_mesh";
                 for (GLsizei instance = 0; instance < instance_count; ++instance) {
-                    capture->write(
-                        *shader,
-                        {.mesh_path = generated ? std::string_view{} : batch.drawPath,
-                         .shader_variant = input.far_selection.effective == FarWorldMode::Ladder
-                                               ? "instanced_static_mesh_ladder"
-                                               : "instanced_static_mesh",
-                         .chunk = {},
-                         .lod = resolved_lod,
-                         .ownership = DiagnosticOwnership::Live,
-                         .pass = DiagnosticPass::GBuffer,
-                         .provenance = generated ? DiagnosticProvenance::Unsupported
-                                                 : DiagnosticProvenance::Mesh});
+                    capture->write(*shader,
+                                   {.mesh_path = unattributed ? std::string_view{} : batch.drawPath,
+                                    .shader_variant = variant,
+                                    .chunk = {},
+                                    .lod = resolved_lod,
+                                    .ownership = DiagnosticOwnership::Live,
+                                    .pass = DiagnosticPass::GBuffer,
+                                    .provenance = unattributed ? DiagnosticProvenance::Unsupported
+                                                               : DiagnosticProvenance::Mesh});
                     Luminumbra::Rendering::AttributedGl::Submit(
                         glDrawElementsInstancedBaseInstance,
                         GLenum{GL_TRIANGLES},

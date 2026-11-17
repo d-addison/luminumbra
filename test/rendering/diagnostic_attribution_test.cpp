@@ -228,6 +228,10 @@ TEST(DiagnosticAttribution, StaticInstancesSubmitOnceEachWithTheResolvedLod) {
     Contains(pass, "static_cast<GLuint>(instance)");
     Contains(pass, "batch.basePath.size() > 1024 || batch.drawPath.size() > 1024");
     Contains(pass, "static_mesh_identity_path_limit");
+    // An unrecordable identity path still draws; only the index-count refusal skips.
+    Contains(pass, "!identity_path_unrecordable && level < kTreeLodCount");
+    EXPECT_EQ(pass.find("capture->unsupported(\"static_mesh_identity_path_limit\")"),
+              std::string::npos);
     Contains(pass,
              "} else {\n                "
              "Luminumbra::Rendering::AttributedGl::Submit(glDrawElementsInstanced,");
@@ -802,11 +806,19 @@ void DiagnosticAttributionGl::ExpectInvalidMetadata(bool excessive_path) {
     GLuint primitives = 1;
     glGetQueryObjectuiv(query, GL_QUERY_RESULT, &primitives);
     glDeleteQueries(1, &query);
-    EXPECT_EQ(primitives, 0u);
+    // An excessive identity path is still drawn (the scene must not change); an
+    // unrepresentable index count cannot be submitted at all.
+    EXPECT_EQ(primitives, excessive_path ? 1u : 0u);
     EXPECT_FALSE(capture.complete());
     EXPECT_FALSE(table_.complete_coverage());
     const auto document = nlohmann::json::parse(table_.json());
     ASSERT_FALSE(document.at("draws").empty());
+    if (excessive_path) {
+        EXPECT_EQ(document.at("draws").back().at("supported"), false);
+        for (const auto& recorded : document.at("meshes")) {
+            EXPECT_NE(recorded.at("path"), path);
+        }
+    }
     EXPECT_EQ(document.at("draws").back().at("shader_variant"),
               excessive_path ? "static_mesh_identity_path_limit"
                              : "diagnostic_static_mesh_index_count");
@@ -817,7 +829,7 @@ TEST_F(DiagnosticAttributionGl, InvalidIndexCountRecordsIncompleteCoverageWithou
     ExpectInvalidMetadata(false);
 }
 
-TEST_F(DiagnosticAttributionGl, ExcessivePathRecordsIncompleteCoverageWithoutDrawing) {
+TEST_F(DiagnosticAttributionGl, ExcessivePathRecordsIncompleteCoverageAndStillDraws) {
     ExpectInvalidMetadata(true);
 }
 
