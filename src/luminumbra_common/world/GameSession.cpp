@@ -2228,8 +2228,9 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                             owned_regions->insert({owner.owner_x, owner.owner_z});
                         }
                     }
-                    return owned_regions->contains(key) ||
-                           (m_worldSystem && m_worldSystem->has_region_members(key.x, key.z));
+                    // Anchors refresh proximity and durable edits are retained by the ledger.
+                    // Streaming membership (including Loading caches) is not simulation ownership.
+                    return owned_regions->contains(key);
                 });
             m_scentDueCacheValid = false;
             m_regionWork.clear();

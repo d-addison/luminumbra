@@ -25,6 +25,35 @@ def function(source, name):
 
 
 class RegionAuthorityWiring(unittest.TestCase):
+    def test_eviction_ownership_probe_excludes_streaming_residency(self):
+        session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(
+            encoding="utf-8")
+        schedule = function(session, "void GameSession::RunRegionScheduler(")
+        enabled = function(schedule, "if (m_activeRegionsEnabled && !m_regionFault)")
+        probe = function(enabled, "[this, &owned_regions](RegionKey key)")
+        self.assertNotIn("has_region_members", probe)
+        self.assertNotIn("m_worldSystem", probe)
+        for owner in ("m_groundObjects.owns_region(key)", "m_fieldPages.owns_region(key)",
+                      "m_energyFieldState->OwnsRegion(key)", "m_regionWork",
+                      "PlantRegionComponent", "owned_regions->contains(key)"):
+            self.assertIn(owner, probe)
+        native = (ROOT / "test/common/GameSessionHeadlessWorld_test.cpp").read_text(
+            encoding="utf-8")
+        peer = function(native, "TEST(GameSessionHeadlessWorldTest, "
+                        "IdleRetentionUsesWorkRegardlessOfStreamedResidency)")
+        for assertion in (
+                "EXPECT_EQ(session.GetRegionSchedule(), peer.GetRegionSchedule());",
+                "EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), "
+                "peer.GetActiveRegionLedger().canonical_bytes());",
+                "EXPECT_EQ(session.GetActiveRegionLedger().encode(), "
+                "peer.GetActiveRegionLedger().encode());",
+                "EXPECT_EQ(session.ComputeChunkStateHash(), peer.ComputeChunkStateHash());",
+                "EXPECT_EQ(SessionWorldHash(session), SessionWorldHash(peer));"):
+            self.assertGreaterEqual(peer.count(assertion), 2)
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("common/GameSessionHeadlessWorld_test.cpp", cmake)
+        self.assertIn("gtest_discover_tests(${_lum_gtest_target}", cmake)
+
     def test_far_authority_capture_is_bounded_and_regressions_are_registered(self):
         source = SOURCE.read_text(encoding="utf-8")
         capture = function(source, "SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(")
