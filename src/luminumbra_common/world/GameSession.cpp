@@ -11,6 +11,7 @@
 #include "ActiveRegionLedger.h"
 #include "Chunk.h"
 #include "FarWorldAuthorityProducer.h"
+#include "PlayerAvatar.h"
 #include "entt/entity/fwd.hpp"
 #include "entt/entt.hpp"
 #include "luminumbra/core/Types.h"
@@ -5045,6 +5046,38 @@ void GameSession::RebaseForagingCells(int dx, int dz) {
         food.cell_x = shift(food.cell_x, dx);
         food.cell_z = shift(food.cell_z, dz);
     }
+}
+
+bool GameSession::CaptureAvatarOwner(const World::PlayerAvatar& avatar,
+                                     std::size_t physics_index,
+                                     World::PlayerAvatarOwnerState& output) const {
+    if (!m_physicsSystem) {
+        return false;
+    }
+    World::PlayerAvatarOwnerState staged;
+    staged.avatar = avatar;
+    if (!m_physicsSystem->capture_avatar_owner(physics_index, staged.physics)) {
+        return false;
+    }
+    if (!World::ValidateAvatarOwner(staged)) {
+        return false;
+    }
+    output = staged;
+    return true;
+}
+
+bool GameSession::RestoreAvatarOwner(const World::PlayerAvatarOwnerState& state,
+                                     World::PlayerAvatar& avatar,
+                                     std::size_t& physics_index) {
+    if (!m_physicsSystem) {
+        return false;
+    }
+    if (!World::ValidateAvatarOwner(state) ||
+        !m_physicsSystem->restore_avatar_owner(state.physics, physics_index)) {
+        return false;
+    }
+    avatar = state.avatar;
+    return true;
 }
 
 void GameSession::SetSpawnPoint(const Vec3& new_spawn) {

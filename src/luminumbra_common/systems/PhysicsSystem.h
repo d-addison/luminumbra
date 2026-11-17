@@ -18,12 +18,17 @@
 #include <functional>
 #include <glm/glm.hpp>
 #include <memory>
+#include <span>
 #include <unordered_map>
 #include <vector>
 
 namespace Luminumbra {
 
 class Chunk;
+namespace World {
+struct PhysicsOwnerState;
+struct PlayerAvatar;
+} // namespace World
 
 namespace Systems {
 
@@ -131,6 +136,27 @@ public:
     glm::vec3 get_avatar_position(std::size_t index) const;
     glm::vec3 get_avatar_velocity(std::size_t index) const;
     bool is_avatar_grounded(std::size_t index) const;
+
+    // Internal continuation entry points; owner thread, between fixed ticks.
+    // Restore creates owners instead of spawning them. Terrain must already have
+    // the captured BodyIDs and identical shapes/settings. Bodies are restored as
+    // one complete set before controllers, preserving shared contact caches.
+    // The body batch also accepts frozen-avatar captures to stage their capsules
+    // before moving controllers adopt them (including mutually dependent contacts).
+    // The destination may contain static terrain/capsules, but no dynamic bodies.
+    // No existing boot, persistence, replication or hash caller uses these APIs.
+    static constexpr std::size_t kMaxRestoredBodies = 128;
+    static constexpr std::size_t kMaxRestoredAvatars = 4096;
+    bool capture_avatar_owner(std::size_t index, World::PhysicsOwnerState& output) const;
+    bool restore_avatar_owner(const World::PhysicsOwnerState& state, std::size_t& index);
+    bool capture_player_owner(World::PhysicsOwnerState& output) const;
+    bool restore_player_owner(const World::PhysicsOwnerState& state);
+    bool capture_body_owner(JPH::BodyID body, World::PhysicsOwnerState& output) const;
+    bool restore_body_owners(std::span<const World::PhysicsOwnerState> states,
+                             std::span<JPH::BodyID> bodies);
+    static bool validate_owner_state(const World::PhysicsOwnerState& state);
+    static bool validate_avatar_owner_state(const World::PhysicsOwnerState& state,
+                                            const World::PlayerAvatar& avatar);
 
     // --- Audio-Physics Integration ---
     // Non-owning world-generation seam for surface-material classification on

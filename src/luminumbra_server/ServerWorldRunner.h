@@ -265,6 +265,11 @@ public:
         return m_avatars;
     }
 
+    // Internal continuation entry points for a caller that restores owners in
+    // player-ID order instead of using the existing Boot spawn path.
+    bool CaptureAvatarOwner(std::size_t index, World::PlayerAvatarOwnerState& output) const;
+    bool RestoreAvatarOwner(const World::PlayerAvatarOwnerState& state);
+
     //  gate: the per-tick availability-set trace captured during the last
     // RunFixedTicks when config.availability_trace was set. Each entry is
     // (tick_index, digest) where digest is a deterministic FNV-1a over the sorted

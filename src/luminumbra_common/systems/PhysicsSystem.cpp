@@ -1,10 +1,12 @@
 #include "PhysicsSystem.h"
 #include "../../../include/luminumbra/core/Types.h"
 #include "../world/Chunk.h"
+#include "../world/PlayerAvatar.h"
 #include "SHIELD_WorldSystem.h"
 
 #include <Jolt/Core/Factory.h>
 #include <Jolt/Core/JobSystemThreadPool.h>
+#include <Jolt/Geometry/Sphere.h>
 #include <Jolt/Physics/Body/Body.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyLock.h>
@@ -20,11 +22,15 @@
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
+#include <Jolt/Physics/StateRecorder.h>
 #include <Jolt/RegisterTypes.h>
 
 #include "../core/Log.h"
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <cmath>
+#include <cstring>
 #include <exception>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -37,6 +43,514 @@ using namespace JPH;
 
 namespace Luminumbra {
 namespace Systems {
+
+namespace {
+// The schemas below deliberately bridge Jolt's typed state calls rather than
+// publishing its native streams: SIMD padding, enum widths and endianness are
+// not part of the continuation format. Update the version if these schemas change.
+constexpr std::uint32_t kOwnerVersion = 1;
+constexpr std::uint32_t kAvatarOwner = 1;
+constexpr std::uint32_t kPlayerOwner = 2;
+constexpr std::uint32_t kSphereOwner = 3;
+constexpr std::uint32_t kMaxOwnerContacts = 256;
+constexpr std::uint32_t kMaxOwnerPairs = 64;
+struct OwnerStateRefusal {};
+
+class OwnerNativeStream final : public JPH::StateRecorder {
+public:
+    void WriteBytes(const void* data, std::size_t count) override {
+        if (count > bytes.size() - size) {
+            throw OwnerStateRefusal{};
+        }
+        std::memcpy(bytes.data() + size, data, count);
+        size += count;
+    }
+    void ReadBytes(void* data, std::size_t count) override {
+        if (count > size - cursor) {
+            throw OwnerStateRefusal{};
+        }
+        std::memcpy(data, bytes.data() + cursor, count);
+        cursor += count;
+    }
+    bool IsEOF() const override {
+        return cursor == size;
+    }
+    bool IsFailed() const override {
+        return false;
+    }
+    // Both native scratch storage and the canonical payload have a 64 KiB cap.
+    std::array<std::uint8_t, World::PhysicsOwnerState::kMaxBytes> bytes{};
+    std::size_t size = 0;
+    std::size_t cursor = 0;
+};
+
+class OwnerCodec {
+public:
+    explicit OwnerCodec(World::PhysicsOwnerState& output)
+        : m_output(&output) {}
+    explicit OwnerCodec(const World::PhysicsOwnerState& input)
+        : m_input(&input) {
+        require(input.size <= input.bytes.size());
+    }
+    static void require(bool condition) {
+        if (!condition) {
+            throw OwnerStateRefusal{};
+        }
+    }
+    bool reading() const {
+        return m_input != nullptr;
+    }
+    void finish() {
+        if (reading()) {
+            require(m_cursor == m_input->size);
+        } else {
+            m_output->size = static_cast<std::uint32_t>(m_cursor);
+        }
+    }
+    std::uint32_t word(std::uint32_t value = 0) {
+        const auto limit = reading() ? m_input->size : m_output->bytes.size();
+        require(m_cursor <= limit && 4 <= limit - m_cursor);
+        if (reading()) {
+            value = 0;
+            for (unsigned i = 0; i < 4; ++i) {
+                value |= static_cast<std::uint32_t>(m_input->bytes[m_cursor++]) << (8 * i);
+            }
+        } else {
+            for (unsigned i = 0; i < 4; ++i) {
+                m_output->bytes[m_cursor++] = static_cast<std::uint8_t>(value >> (8 * i));
+            }
+        }
+        return value;
+    }
+    float number(float value = 0.0f) {
+        value = std::bit_cast<float>(word(std::bit_cast<std::uint32_t>(value)));
+        require(std::isfinite(value));
+        return value;
+    }
+    double wide_number(double value = 0.0) {
+        const auto bits = std::bit_cast<std::uint64_t>(value);
+        const auto low = word(static_cast<std::uint32_t>(bits));
+        const auto high = word(static_cast<std::uint32_t>(bits >> 32));
+        value = std::bit_cast<double>((static_cast<std::uint64_t>(high) << 32) | low);
+        require(std::isfinite(value));
+        return value;
+    }
+    template<class T>
+    T integer(OwnerNativeStream& native, std::uint32_t maximum) {
+        T value{};
+        if (!reading()) {
+            native.Read(value);
+        }
+        const auto result = word(static_cast<std::uint32_t>(value));
+        require(result <= maximum);
+        value = static_cast<T>(result);
+        if (reading()) {
+            native.Write(value);
+        }
+        return value;
+    }
+    float scalar(OwnerNativeStream& native) {
+        float value = 0.0f;
+        if (!reading()) {
+            native.Read(value);
+        }
+        value = number(value);
+        if (reading()) {
+            native.Write(value);
+        }
+        return value;
+    }
+    JPH::Vec3 vector(OwnerNativeStream& native) {
+        JPH::Vec3 value = JPH::Vec3::sZero();
+        if (!reading()) {
+            native.Read(value);
+        }
+        const float x = number(value.GetX());
+        const float y = number(value.GetY());
+        const float z = number(value.GetZ());
+        value = JPH::Vec3(x, y, z);
+        if (reading()) {
+            native.Write(value);
+        }
+        return value;
+    }
+    JPH::RVec3 position(OwnerNativeStream& native) {
+        JPH::RVec3 value = JPH::RVec3::sZero();
+        if (!reading()) {
+            native.Read(value);
+        }
+        std::array<JPH::Real, 3> components{value.GetX(), value.GetY(), value.GetZ()};
+        for (auto& component : components) {
+#ifdef JPH_DOUBLE_PRECISION
+            auto bits = std::bit_cast<std::uint64_t>(component);
+#else
+            auto bits = widen_float_bits(std::bit_cast<std::uint32_t>(component));
+#endif
+            const auto low = word(static_cast<std::uint32_t>(bits));
+            const auto high = word(static_cast<std::uint32_t>(bits >> 32));
+            bits = (static_cast<std::uint64_t>(high) << 32) | low;
+            require(((bits >> 52) & 2047u) != 2047u);
+#ifdef JPH_DOUBLE_PRECISION
+            component = std::bit_cast<double>(bits);
+#else
+            component = std::bit_cast<float>(narrow_float_bits(bits));
+#endif
+            // Public owner coordinates use float32 even with float64 Jolt
+            // positions. Refuse out-of-range input before any later narrowing.
+            constexpr auto max_coordinate =
+                static_cast<JPH::Real>((std::numeric_limits<float>::max)());
+            require(component >= -max_coordinate && component <= max_coordinate);
+        }
+        if (reading()) {
+            value = JPH::RVec3(components[0], components[1], components[2]);
+            native.Write(value);
+        }
+        return value;
+    }
+    void normal(OwnerNativeStream& native, bool allow_zero = false) {
+        const auto value = vector(native);
+        require(value.IsNormalized() || (allow_zero && value == JPH::Vec3::sZero()));
+    }
+    void quaternion(OwnerNativeStream& native) {
+        JPH::Quat value = JPH::Quat::sIdentity();
+        if (!reading()) {
+            native.Read(value);
+        }
+        const float x = number(value.GetX());
+        const float y = number(value.GetY());
+        const float z = number(value.GetZ());
+        const float w = number(value.GetW());
+        const JPH::Quat rotation(x, y, z, w);
+        require(rotation.IsNormalized());
+        if (reading()) {
+            native.Write(rotation);
+        }
+    }
+    std::uint32_t body_id(OwnerNativeStream& native) {
+        JPH::BodyID value;
+        if (!reading()) {
+            native.Read(value);
+        }
+        const auto id = checked_body_id(word(value.GetIndexAndSequenceNumber()));
+        if (reading()) {
+            native.Write(JPH::BodyID(id));
+        }
+        return id;
+    }
+    static std::uint32_t checked_body_id(std::uint32_t id) {
+        require(id == JPH::BodyID::cInvalidBodyID || ((id & JPH::BodyID::cBroadPhaseBit) == 0 &&
+                                                      (id & JPH::BodyID::cMaxBodyIndex) < 10240));
+        return id;
+    }
+    void floats(OwnerNativeStream& native, std::size_t count) {
+        for (std::size_t i = 0; i < count; ++i) {
+            scalar(native);
+        }
+    }
+
+private:
+#ifndef JPH_DOUBLE_PRECISION
+    // Integer IEEE-754 conversion keeps signed zero and subnormals exact even
+    // when the simulation thread enables flush-to-zero/denormals-are-zero.
+    static std::uint64_t widen_float_bits(std::uint32_t bits) {
+        const auto sign = static_cast<std::uint64_t>(bits & 0x80000000u) << 32;
+        const auto exponent = (bits >> 23) & 255u;
+        const auto fraction = bits & 0x7fffffu;
+        require(exponent != 255u);
+        if (exponent != 0) {
+            return sign | (static_cast<std::uint64_t>(exponent + 896u) << 52) |
+                   (static_cast<std::uint64_t>(fraction) << 29);
+        }
+        if (fraction == 0) {
+            return sign;
+        }
+        const auto leading = static_cast<unsigned>(std::bit_width(fraction)) - 1u;
+        if (leading > 22u) {
+            throw OwnerStateRefusal{};
+        }
+        return sign | (static_cast<std::uint64_t>(leading + 874u) << 52) |
+               (static_cast<std::uint64_t>(fraction - (1u << leading)) << (52u - leading));
+    }
+    static std::uint32_t narrow_float_bits(std::uint64_t bits) {
+        const auto sign = static_cast<std::uint32_t>(bits >> 32) & 0x80000000u;
+        const auto exponent = static_cast<std::uint32_t>((bits >> 52) & 2047u);
+        const auto fraction = bits & ((std::uint64_t{1} << 52) - 1);
+        if (exponent == 0) {
+            require(fraction == 0);
+            return sign;
+        }
+        if (exponent >= 897u && exponent <= 1150u) {
+            require((fraction & ((std::uint64_t{1} << 29) - 1)) == 0);
+            return sign | ((exponent - 896u) << 23) | static_cast<std::uint32_t>(fraction >> 29);
+        }
+        if (exponent < 874u || exponent > 896u) {
+            throw OwnerStateRefusal{};
+        }
+        const auto leading = exponent - 874u;
+        const auto shift = 52u - leading;
+        require((fraction & ((std::uint64_t{1} << shift) - 1)) == 0);
+        return sign | (1u << leading) | static_cast<std::uint32_t>(fraction >> shift);
+    }
+#endif
+    const World::PhysicsOwnerState* m_input = nullptr;
+    World::PhysicsOwnerState* m_output = nullptr;
+    std::size_t m_cursor = 0;
+};
+
+struct OwnerRecipe {
+    std::uint32_t kind = 0;
+    std::uint32_t flags = 0;
+    glm::vec2 wish{0.0f};
+    std::uint32_t body = JPH::BodyID::cInvalidBodyID;
+    float radius = 0.0f;
+    JPH::RVec3 feet = JPH::RVec3::sZero();
+    JPH::Vec3 velocity = JPH::Vec3::sZero();
+    OwnerNativeStream owner;
+    OwnerNativeStream scene;
+    // References include ground, character contacts, body pairs and CCD contacts.
+    // At most 1 + 256 + 2*64 + 2*256 entries can occur in these bounded schemas.
+    std::array<std::uint32_t, 897> references{};
+    std::size_t reference_count = 0;
+    using ContactKey = std::array<std::uint32_t, 4>;
+    std::array<ContactKey, kMaxOwnerPairs> pairs{};
+    std::array<ContactKey, 2 * kMaxOwnerContacts> contacts{};
+    std::size_t pair_count = 0;
+    std::size_t contact_count = 0;
+    void reference(std::uint32_t id) {
+        if (id != JPH::BodyID::cInvalidBodyID) {
+            OwnerCodec::require(reference_count < references.size());
+            references[reference_count++] = id;
+        }
+    }
+};
+
+void CharacterSchema(OwnerCodec& codec, OwnerRecipe& recipe) {
+    auto& native = recipe.owner;
+    codec.integer<JPH::CharacterBase::EGroundState>(native, 3);
+    recipe.reference(codec.body_id(native));
+    codec.integer<std::uint32_t>(native, UINT32_MAX); // ground subshape
+    static_cast<void>(codec.position(native));
+    codec.normal(native, true);              // no ground contact initially has a zero normal
+    static_cast<void>(codec.vector(native)); // ground velocity
+    recipe.feet = codec.position(native);
+    codec.quaternion(native);
+    recipe.velocity = codec.vector(native);            // linear velocity
+    OwnerCodec::require(codec.scalar(native) >= 0.0f); // previous delta time
+    codec.integer<bool>(native, 1);                    // hit limit reached
+    const auto count = codec.integer<std::uint32_t>(native, kMaxOwnerContacts);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        recipe.reference(codec.body_id(native));
+        // No character-vs-character provider is installed by either controller path.
+        const auto character = codec.integer<std::uint32_t>(native, UINT32_MAX);
+        OwnerCodec::require(character == UINT32_MAX);
+        codec.integer<std::uint32_t>(native, UINT32_MAX); // subshape
+        static_cast<void>(codec.position(native));
+        static_cast<void>(codec.vector(native)); // contact velocity
+        codec.normal(native);                    // contact normal
+        codec.normal(native);                    // surface normal
+        codec.floats(native, 2);                 // distance, fraction
+        codec.integer<JPH::EMotionType>(native, 2);
+        codec.integer<bool>(native, 1); // sensor
+        codec.integer<bool>(native, 1); // collided
+        codec.integer<bool>(native, 1); // discarded
+        codec.integer<bool>(native, 1); // can push
+    }
+}
+
+void BodySchema(OwnerCodec& codec, OwnerNativeStream& native) {
+    codec.integer<bool>(native, 1); // active list membership
+    static_cast<void>(codec.position(native));
+    codec.quaternion(native);
+    for (unsigned i = 0; i < 4; ++i) {
+        static_cast<void>(codec.vector(native));
+    } // velocity, spin, force, torque
+    // The canonical sleep offset is always three float64 scalars. Jolt omits it
+    // in single-precision builds, which can accept only a zero offset.
+    for (unsigned i = 0; i < 3; ++i) {
+        double offset = 0.0;
+#ifdef JPH_DOUBLE_PRECISION
+        if (!codec.reading()) {
+            native.Read(offset);
+        }
+#endif
+        offset = codec.wide_number(offset);
+        constexpr auto max_offset = static_cast<double>((std::numeric_limits<float>::max)());
+        OwnerCodec::require(offset >= -max_offset && offset <= max_offset);
+#ifdef JPH_DOUBLE_PRECISION
+        if (codec.reading()) {
+            native.Write(offset);
+        }
+#else
+        OwnerCodec::require(offset == 0.0);
+#endif
+    }
+    // Sleep-test sphere centers and radii, followed by their accumulated timer.
+    for (unsigned sphere = 0; sphere < 3; ++sphere) {
+        codec.floats(native, 3);
+        OwnerCodec::require(codec.scalar(native) >= 0.0f);
+    }
+    OwnerCodec::require(codec.scalar(native) >= 0.0f); // sleep timer
+    codec.integer<bool>(native, 1);
+}
+
+OwnerRecipe::ContactKey PairKeySchema(OwnerCodec& codec, OwnerRecipe& recipe, bool subshapes) {
+    const auto first = codec.body_id(recipe.scene);
+    const auto first_shape =
+        subshapes ? codec.integer<std::uint32_t>(recipe.scene, UINT32_MAX) : 0u;
+    const auto second = codec.body_id(recipe.scene);
+    const auto second_shape =
+        subshapes ? codec.integer<std::uint32_t>(recipe.scene, UINT32_MAX) : 0u;
+    OwnerCodec::require(first < second && first != JPH::BodyID::cInvalidBodyID &&
+                        second != JPH::BodyID::cInvalidBodyID);
+    OwnerCodec::require(first == recipe.body || second == recipe.body);
+    recipe.reference(first);
+    recipe.reference(second);
+    return {first, first_shape, second, second_shape};
+}
+
+void CheckUniqueKeys(std::span<OwnerRecipe::ContactKey> keys) {
+    std::sort(keys.begin(), keys.end());
+    OwnerCodec::require(std::adjacent_find(keys.begin(), keys.end()) == keys.end());
+}
+
+void SceneSchema(OwnerCodec& codec, OwnerRecipe& recipe) {
+    auto& native = recipe.scene;
+    const auto flags = codec.integer<JPH::EStateRecorderState>(native, 15);
+    OwnerCodec::require(flags ==
+                        (JPH::EStateRecorderState::Global | JPH::EStateRecorderState::Contacts));
+    OwnerCodec::require(codec.scalar(native) >= 0.0f); // warm-start step delta
+    static_cast<void>(codec.vector(native));           // gravity
+    const auto pairs = codec.integer<std::uint32_t>(native, kMaxOwnerPairs);
+    std::uint32_t total_manifolds = 0;
+    for (std::uint32_t i = 0; i < pairs; ++i) {
+        const auto parent = PairKeySchema(codec, recipe, false);
+        recipe.pairs[recipe.pair_count++] = parent;
+        codec.floats(native, 6); // relative position, quaternion xyz
+        const auto manifolds = codec.integer<std::uint32_t>(native, kMaxOwnerContacts);
+        OwnerCodec::require(manifolds <= kMaxOwnerContacts - total_manifolds);
+        total_manifolds += manifolds;
+        for (std::uint32_t j = 0; j < manifolds; ++j) {
+            // SubShapeIDPair consists of four scalar IDs, never padding.
+            // Pair references were already recorded; keep the reference bound fixed.
+            const auto previous_count = recipe.reference_count;
+            const auto key = PairKeySchema(codec, recipe, true);
+            OwnerCodec::require(key[0] == parent[0] && key[2] == parent[2]);
+            recipe.contacts[recipe.contact_count++] = key;
+            recipe.reference_count = previous_count;
+            const auto points = codec.integer<JPH::uint16>(native, 4);
+            OwnerCodec::require(points != 0);
+            const auto normal_x = codec.scalar(native);
+            const auto normal_y = codec.scalar(native);
+            const auto normal_z = codec.scalar(native);
+            OwnerCodec::require(JPH::Vec3(normal_x, normal_y, normal_z).IsNormalized());
+            for (JPH::uint16 point = 0; point < points; ++point) {
+                codec.floats(native, 9); // two positions, normal impulse, two friction impulses
+            }
+        }
+    }
+    const auto ccd = codec.integer<std::uint32_t>(native, kMaxOwnerContacts);
+    for (std::uint32_t i = 0; i < ccd; ++i) {
+        recipe.contacts[recipe.contact_count++] = PairKeySchema(codec, recipe, true);
+    }
+    CheckUniqueKeys(std::span(recipe.pairs).first(recipe.pair_count));
+    CheckUniqueKeys(std::span(recipe.contacts).first(recipe.contact_count));
+}
+
+void OwnerSchema(OwnerCodec& codec, OwnerRecipe& recipe) {
+    OwnerCodec::require(codec.word(kOwnerVersion) == kOwnerVersion);
+    recipe.kind = codec.word(recipe.kind);
+    OwnerCodec::require(recipe.kind >= kAvatarOwner && recipe.kind <= kSphereOwner);
+    if (recipe.kind == kSphereOwner) {
+        recipe.body = OwnerCodec::checked_body_id(codec.word(recipe.body));
+        OwnerCodec::require(recipe.body != JPH::BodyID::cInvalidBodyID);
+        recipe.radius = codec.number(recipe.radius);
+        OwnerCodec::require(recipe.radius > 0.0f);
+        // Reconstruct only radii whose default mass/inertia can form a dynamic
+        // body. Finite radii alone can still underflow mass or overflow inertia.
+        const auto properties = JPH::SphereShape(recipe.radius).GetMassProperties();
+        const auto inertia = properties.mInertia.GetDiagonal3();
+        OwnerCodec::require(std::isfinite(properties.mMass) && properties.mMass > 0.0f &&
+                            std::isfinite(2.5f / properties.mMass) &&
+                            std::isfinite(inertia.GetX()) && std::isfinite(inertia.GetY()) &&
+                            std::isfinite(inertia.GetZ()));
+        BodySchema(codec, recipe.owner);
+        SceneSchema(codec, recipe);
+    } else {
+        recipe.flags = codec.word(recipe.flags);
+        OwnerCodec::require(recipe.kind == kAvatarOwner
+                                ? recipe.flags <= 1u
+                                : (recipe.flags == 0u || recipe.flags == 2u));
+        recipe.wish.x = codec.number(recipe.wish.x);
+        recipe.wish.y = codec.number(recipe.wish.y);
+        OwnerCodec::require(recipe.flags != 1u || recipe.wish == glm::vec2(0.0f));
+        OwnerCodec::require(recipe.kind != kPlayerOwner || recipe.wish == glm::vec2(0.0f));
+        recipe.body = OwnerCodec::checked_body_id(codec.word(recipe.body));
+        OwnerCodec::require(recipe.kind == kAvatarOwner ||
+                            recipe.body == JPH::BodyID::cInvalidBodyID);
+        OwnerCodec::require(recipe.flags == 1 || recipe.body == JPH::BodyID::cInvalidBodyID);
+        CharacterSchema(codec, recipe);
+    }
+    codec.finish();
+    if (!codec.reading()) {
+        OwnerCodec::require(recipe.owner.IsEOF() && recipe.scene.IsEOF());
+    }
+}
+
+bool ParseOwner(const World::PhysicsOwnerState& state, OwnerRecipe& recipe) {
+    try {
+        OwnerCodec codec(state);
+        OwnerSchema(codec, recipe);
+        return true;
+    } catch (const OwnerStateRefusal&) {
+        return false;
+    }
+}
+
+bool WriteOwner(OwnerRecipe& recipe, World::PhysicsOwnerState& output) {
+    try {
+        World::PhysicsOwnerState staged;
+        OwnerCodec codec(staged);
+        OwnerSchema(codec, recipe);
+        output = staged;
+        return true;
+    } catch (const OwnerStateRefusal&) {
+        return false;
+    }
+}
+
+class OwnerContactFilter final : public JPH::StateRecorderFilter {
+public:
+    OwnerContactFilter(JPH::BodyID owner, const JPH::PhysicsSystem& system)
+        : m_owner(owner)
+        , m_system(system) {}
+    bool ShouldSaveContact(const JPH::BodyID& first, const JPH::BodyID& second) const override {
+        if (first != m_owner && second != m_owner) {
+            return false;
+        }
+        const auto other = first == m_owner ? second : first;
+        const JPH::BodyLockRead lock(m_system.GetBodyLockInterface(), other);
+        // Each pair belongs to its lower-ID dynamic body, or its sole dynamic
+        // body when the other side is terrain/a frozen capsule. No duplicates
+        // when a complete owner set is restored in multiple Jolt parts.
+        return lock.Succeeded() && (lock.GetBody().IsStatic() || m_owner < other);
+    }
+
+private:
+    JPH::BodyID m_owner;
+    const JPH::PhysicsSystem& m_system;
+};
+
+bool ReferencesExist(const OwnerRecipe& recipe, const JPH::PhysicsSystem& system) {
+    for (std::size_t i = 0; i < recipe.reference_count; ++i) {
+        const JPH::BodyLockRead lock(system.GetBodyLockInterface(),
+                                     JPH::BodyID(recipe.references[i]));
+        if (!lock.Succeeded()) {
+            return false;
+        }
+    }
+    return true;
+}
+} // namespace
 
 // --- Jolt Layer Implementations (Unchanged) ---
 namespace Layers {
@@ -785,6 +1299,331 @@ bool PhysicsSystem::is_avatar_grounded(std::size_t index) const {
         return false;
     return m_avatars[index].character->GetGroundState() ==
            JPH::CharacterBase::EGroundState::OnGround;
+}
+
+bool PhysicsSystem::validate_owner_state(const World::PhysicsOwnerState& state) {
+    OwnerRecipe recipe;
+    return ParseOwner(state, recipe);
+}
+
+bool PhysicsSystem::validate_avatar_owner_state(const World::PhysicsOwnerState& state,
+                                                const World::PlayerAvatar& avatar) {
+    OwnerRecipe recipe;
+    if (!ParseOwner(state, recipe) || recipe.kind != kAvatarOwner) {
+        return false;
+    }
+    const std::array<float, 6> captured{static_cast<float>(recipe.feet.GetX()),
+                                        static_cast<float>(recipe.feet.GetY()),
+                                        static_cast<float>(recipe.feet.GetZ()),
+                                        recipe.velocity.GetX(),
+                                        recipe.velocity.GetY(),
+                                        recipe.velocity.GetZ()};
+    const std::array<float, 6> projected{avatar.position.x,
+                                         avatar.position.y,
+                                         avatar.position.z,
+                                         avatar.velocity.x,
+                                         avatar.velocity.y,
+                                         avatar.velocity.z};
+    for (std::size_t i = 0; i < captured.size(); ++i) {
+        if (std::bit_cast<std::uint32_t>(captured[i]) !=
+            std::bit_cast<std::uint32_t>(projected[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool PhysicsSystem::capture_avatar_owner(std::size_t index,
+                                         World::PhysicsOwnerState& output) const {
+    if (!m_jolt_system || index >= m_avatars.size() || !m_avatars[index].character) {
+        return false;
+    }
+    const auto& avatar = m_avatars[index];
+    OwnerRecipe recipe;
+    recipe.kind = kAvatarOwner;
+    recipe.flags = avatar.frozen ? 1u : 0u;
+    recipe.wish = avatar.wish;
+    recipe.body = avatar.frozen_body.GetIndexAndSequenceNumber();
+    try {
+        avatar.character->SaveState(recipe.owner);
+        return WriteOwner(recipe, output);
+    } catch (const OwnerStateRefusal&) {
+        return false;
+    }
+}
+
+bool PhysicsSystem::restore_avatar_owner(const World::PhysicsOwnerState& state,
+                                         std::size_t& index) {
+    OwnerRecipe recipe;
+    if (!m_jolt_system || m_avatars.size() >= kMaxRestoredAvatars || !ParseOwner(state, recipe) ||
+        recipe.kind != kAvatarOwner || !ReferencesExist(recipe, *m_jolt_system)) {
+        return false;
+    }
+    bool prepared_capsule = false;
+    if (recipe.body != JPH::BodyID::cInvalidBodyID) {
+        const JPH::BodyID id(recipe.body);
+        const JPH::BodyLockRead lock(m_jolt_system->GetBodyLockInterface(), id);
+        if (lock.Succeeded()) {
+            if (!lock.GetBody().IsStatic() || lock.GetBody().GetShape() != m_avatar_shape ||
+                lock.GetBody().GetPosition() != recipe.feet ||
+                lock.GetBody().GetRotation() != JPH::Quat::sIdentity()) {
+                return false;
+            }
+            for (const auto& owned : m_avatars) {
+                if (owned.frozen_body == id) {
+                    return false;
+                }
+            }
+            prepared_capsule = true;
+        }
+    }
+    // Reserve before creating Jolt owners; malformed input has already been fully
+    // refused. A frozen capsule is staged before the slot is published.
+    m_avatars.reserve(m_avatars.size() + 1);
+    const auto slot = create_avatar_character(glm::vec3(0.0f));
+    auto& avatar = m_avatars[slot];
+    avatar.character->RestoreState(recipe.owner);
+    if (prepared_capsule) {
+        avatar.frozen_body = JPH::BodyID(recipe.body);
+    } else if (recipe.body != JPH::BodyID::cInvalidBodyID) {
+        const JPH::BodyCreationSettings settings(m_avatar_shape,
+                                                 avatar.character->GetPosition(),
+                                                 JPH::Quat::sIdentity(),
+                                                 JPH::EMotionType::Static,
+                                                 Layers::NON_MOVING);
+        auto* body = m_body_interface->CreateBodyWithID(JPH::BodyID(recipe.body), settings);
+        if (body == nullptr) {
+            m_avatars.pop_back();
+            return false;
+        }
+        avatar.frozen_body = body->GetID();
+        m_body_interface->AddBody(avatar.frozen_body, JPH::EActivation::DontActivate);
+    }
+    avatar.frozen = recipe.flags == 1;
+    avatar.wish = recipe.wish;
+    index = slot;
+    return true;
+}
+
+bool PhysicsSystem::capture_player_owner(World::PhysicsOwnerState& output) const {
+    if (!m_player_character) {
+        return false;
+    }
+    OwnerRecipe recipe;
+    recipe.kind = kPlayerOwner;
+    recipe.flags = m_player_character->GetShape() == m_player_crouch_shape ? 2u : 0u;
+    try {
+        m_player_character->SaveState(recipe.owner);
+        return WriteOwner(recipe, output);
+    } catch (const OwnerStateRefusal&) {
+        return false;
+    }
+}
+
+bool PhysicsSystem::restore_player_owner(const World::PhysicsOwnerState& state) {
+    OwnerRecipe recipe;
+    if (!m_jolt_system || m_player_character || !ParseOwner(state, recipe) ||
+        recipe.kind != kPlayerOwner || !ReferencesExist(recipe, *m_jolt_system)) {
+        return false;
+    }
+    create_player_controller(glm::vec3(0.0f));
+    if (recipe.flags == 2) {
+        // No collision query is appropriate while restoring a known stance.
+        // Construct with the saved shape rather than asking to change stance.
+        JPH::CharacterVirtualSettings settings;
+        settings.mShape = m_player_crouch_shape;
+        settings.mMass = 80.0f;
+        settings.mMaxSlopeAngle = glm::radians(50.0f);
+        settings.mSupportingVolume = JPH::Plane(JPH::Vec3::sAxisY(), -0.4f);
+        m_player_character = std::make_unique<JPH::CharacterVirtual>(
+            &settings, JPH::RVec3::sZero(), JPH::Quat::sIdentity(), m_jolt_system.get());
+    }
+    m_player_character->RestoreState(recipe.owner);
+    return true;
+}
+
+bool PhysicsSystem::capture_body_owner(JPH::BodyID body, World::PhysicsOwnerState& output) const {
+    if (!m_jolt_system || body.IsInvalid()) {
+        return false;
+    }
+    OwnerRecipe recipe;
+    recipe.kind = kSphereOwner;
+    recipe.body = body.GetIndexAndSequenceNumber();
+    try {
+        {
+            const JPH::BodyLockRead lock(m_jolt_system->GetBodyLockInterface(), body);
+            if (!lock.Succeeded() || !lock.GetBody().IsDynamic() ||
+                lock.GetBody().GetShape()->GetSubType() != JPH::EShapeSubType::Sphere) {
+                return false;
+            }
+            recipe.radius =
+                static_cast<const JPH::SphereShape*>(lock.GetBody().GetShape())->GetRadius();
+            m_jolt_system->SaveBodyState(lock.GetBody(), recipe.owner);
+        }
+        const OwnerContactFilter filter(body, *m_jolt_system);
+        // Jolt scans its bounded 10240-body-pair cache only on explicit capture,
+        // never on a tick or hash path. The output still has the 64 KiB cap.
+        m_jolt_system->SaveState(recipe.scene,
+                                 JPH::EStateRecorderState::Global |
+                                     JPH::EStateRecorderState::Contacts,
+                                 &filter);
+        return WriteOwner(recipe, output);
+    } catch (const OwnerStateRefusal&) {
+        return false;
+    }
+}
+
+bool PhysicsSystem::restore_body_owners(std::span<const World::PhysicsOwnerState> states,
+                                        std::span<JPH::BodyID> bodies) {
+    if (!m_jolt_system || states.size() > kMaxRestoredBodies || bodies.size() != states.size()) {
+        return false;
+    }
+    if (states.empty()) {
+        return true;
+    }
+    // Explicit restore only: at most 128 recipes, each with two 64 KiB native
+    // buffers. No storage or work is added to the simulation tick.
+    std::vector<OwnerRecipe> recipes(states.size());
+    for (std::size_t i = 0; i < states.size(); ++i) {
+        auto& recipe = recipes[i];
+        if (!ParseOwner(states[i], recipe) ||
+            (recipe.kind != kSphereOwner && !(recipe.kind == kAvatarOwner && recipe.flags == 1 &&
+                                              recipe.body != JPH::BodyID::cInvalidBodyID))) {
+            return false;
+        }
+        const JPH::BodyLockRead lock(m_jolt_system->GetBodyLockInterface(),
+                                     JPH::BodyID(recipe.body));
+        if (lock.Succeeded()) {
+            return false;
+        }
+        for (std::size_t j = 0; j < i; ++j) {
+            if ((recipes[j].body & JPH::BodyID::cMaxBodyIndex) ==
+                (recipe.body & JPH::BodyID::cMaxBodyIndex)) {
+                return false;
+            }
+        }
+        if (recipe.kind == kSphereOwner) {
+            const auto scene_prefix =
+                sizeof(JPH::EStateRecorderState) + sizeof(float) + sizeof(JPH::Vec3);
+            for (std::size_t j = 0; j < i; ++j) {
+                if (recipes[j].kind == kSphereOwner && std::memcmp(recipe.scene.bytes.data(),
+                                                                   recipes[j].scene.bytes.data(),
+                                                                   scene_prefix) != 0) {
+                    return false;
+                }
+            }
+        }
+    }
+    // Validate topology before creating anything, including references to bodies
+    // in this batch. Missing external bodies are a refusal, never a dropped contact.
+    for (const auto& recipe : recipes) {
+        if (recipe.kind != kSphereOwner) {
+            continue;
+        }
+        for (std::size_t ref = 0; ref < recipe.reference_count; ++ref) {
+            const auto id = recipe.references[ref];
+            const bool staged =
+                std::any_of(recipes.begin(), recipes.end(), [id](const auto& candidate) {
+                    return candidate.body == id;
+                });
+            if (!staged) {
+                const JPH::BodyLockRead lock(m_jolt_system->GetBodyLockInterface(),
+                                             JPH::BodyID(id));
+                if (!lock.Succeeded()) {
+                    return false;
+                }
+            }
+        }
+    }
+    JPH::BodyIDVector existing;
+    m_jolt_system->GetBodies(existing);
+    for (const auto id : existing) {
+        const JPH::BodyLockRead lock(m_jolt_system->GetBodyLockInterface(), id);
+        if (!lock.Succeeded() || !lock.GetBody().IsStatic()) {
+            return false;
+        }
+    }
+    std::vector<OwnerRecipe::ContactKey> pairs;
+    std::vector<OwnerRecipe::ContactKey> contacts;
+    // Jolt was initialized with 10240 pairs and 10240 manifold slots. Refuse
+    // before inserting into either cache; each manifold has at most four points.
+    for (const auto& recipe : recipes) {
+        if (recipe.pair_count > 10240 - pairs.size() ||
+            recipe.contact_count > 10240 - contacts.size()) {
+            return false;
+        }
+        pairs.insert(pairs.end(), recipe.pairs.begin(), recipe.pairs.begin() + recipe.pair_count);
+        contacts.insert(contacts.end(),
+                        recipe.contacts.begin(),
+                        recipe.contacts.begin() + recipe.contact_count);
+    }
+    try {
+        CheckUniqueKeys(pairs);
+        CheckUniqueKeys(contacts);
+    } catch (const OwnerStateRefusal&) {
+        return false;
+    }
+    const bool has_capsules = std::any_of(recipes.begin(), recipes.end(), [](const auto& recipe) {
+        return recipe.kind == kAvatarOwner;
+    });
+    if (has_capsules && m_avatar_shape == nullptr) {
+        const JPH::Ref<JPH::Shape> capsule = JPH::CapsuleShapeSettings(0.9f, 0.4f).Create().Get();
+        m_avatar_shape = JPH::RotatedTranslatedShapeSettings(
+                             JPH::Vec3(0.0f, 1.3f, 0.0f), JPH::Quat::sIdentity(), capsule.GetPtr())
+                             .Create()
+                             .Get();
+    }
+    std::size_t created = 0;
+    std::size_t sphere_count = 0;
+    for (auto& recipe : recipes) {
+        JPH::BodyCreationSettings settings;
+        if (recipe.kind == kSphereOwner) {
+            settings = JPH::BodyCreationSettings(new JPH::SphereShape(recipe.radius),
+                                                 JPH::RVec3::sZero(),
+                                                 JPH::Quat::sIdentity(),
+                                                 JPH::EMotionType::Dynamic,
+                                                 Layers::MOVING);
+            settings.mMotionQuality = JPH::EMotionQuality::LinearCast;
+            ++sphere_count;
+        } else {
+            settings = JPH::BodyCreationSettings(m_avatar_shape,
+                                                 recipe.feet,
+                                                 JPH::Quat::sIdentity(),
+                                                 JPH::EMotionType::Static,
+                                                 Layers::NON_MOVING);
+        }
+        auto* body = m_body_interface->CreateBodyWithID(JPH::BodyID(recipe.body), settings);
+        if (body == nullptr) {
+            for (std::size_t i = 0; i < created; ++i) {
+                destroy_body(JPH::BodyID(recipes[i].body));
+            }
+            return false;
+        }
+        m_body_interface->AddBody(body->GetID(), JPH::EActivation::DontActivate);
+        ++created;
+    }
+    for (auto& recipe : recipes) {
+        if (recipe.kind != kSphereOwner) {
+            continue;
+        }
+        const JPH::BodyLockWrite lock(m_jolt_system->GetBodyLockInterface(),
+                                      JPH::BodyID(recipe.body));
+        m_jolt_system->RestoreBodyState(lock.GetBody(), recipe.owner);
+    }
+    for (auto& recipe : recipes) {
+        if (recipe.kind != kSphereOwner) {
+            continue;
+        }
+        --sphere_count;
+        recipe.scene.SetIsLastPart(sphere_count == 0);
+        if (!m_jolt_system->RestoreState(recipe.scene)) {
+            return false;
+        }
+    }
+    for (std::size_t i = 0; i < recipes.size(); ++i) {
+        bodies[i] = JPH::BodyID(recipes[i].body);
+    }
+    return true;
 }
 
 bool PhysicsSystem::player_has_space_to_stand() const {

@@ -527,6 +527,31 @@ bool ServerWorldRunner::Boot() {
     return true;
 }
 
+bool ServerWorldRunner::CaptureAvatarOwner(std::size_t index,
+                                           World::PlayerAvatarOwnerState& output) const {
+    return m_session && index < m_avatars.size() &&
+           m_session->CaptureAvatarOwner(m_avatars[index], index, output);
+}
+
+bool ServerWorldRunner::RestoreAvatarOwner(const World::PlayerAvatarOwnerState& state) {
+    if (!m_session || state.avatar.player_id != m_avatars.size()) {
+        return false;
+    }
+    auto* physics = m_session->GetPhysicsSystem();
+    if (!physics || physics->avatar_character_slot_count() != m_avatars.size() ||
+        m_avatars.size() >= Systems::PhysicsSystem::kMaxRestoredAvatars) {
+        return false;
+    }
+    m_avatars.reserve(m_avatars.size() + 1);
+    World::PlayerAvatar avatar;
+    std::size_t index = 0;
+    if (!m_session->RestoreAvatarOwner(state, avatar, index)) {
+        return false;
+    }
+    m_avatars.push_back(avatar);
+    return true;
+}
+
 void ServerWorldRunner::SetAvatarMove(std::uint32_t player_id, float move_x, float move_z) {
     if (!m_session)
         return;
