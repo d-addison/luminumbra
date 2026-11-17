@@ -805,12 +805,27 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn("::read(m_descriptor, &trailing, 1)", admission)
         self.assertIn("::ReadFile(m_handle, &trailing, 1, &received, nullptr) && received == 0",
                       admission)
-        world = self.function(source, "load_world", "WorldSaveService::")
+        world = self.function(source, "load_world_impl", "WorldSaveService::")
         self.assertIn("load_plant_entities(plants, save_dir, &errors, stop)", world)
         session = self.function(read_source("src/luminumbra_common/world/GameSession.cpp"),
                                 "ReadPreparedWorldState")
         self.assertRegex(session, r"WorldSaveService::load_plant_entities\(\s*state.plants, "
                          r"save_dir, &errors, stop\)")
+
+    def test_catalog_inspection_keeps_complete_validation_for_load_and_writers(self):
+        source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        load = self.function(source, "load_world", "WorldSaveService::")
+        inspect = self.function(source, "inspect_save", "WorldSaveService::")
+        validate = self.function(source, "validate_save", "WorldSaveService::")
+        self.assertRegex(load, r"return load_world_impl\([\s\S]*,\s*false\);")
+        self.assertRegex(inspect, r"load_world_impl\([\s\S]*nullptr,\s*nullptr,\s*true,\s*payloads_verified\);")
+        self.assertIn(".load_world(", validate)
+        self.assertNotIn("load_world_impl", validate)
+        world = self.function(source, "load_world_impl", "WorldSaveService::")
+        skip = world.index("if (catalog_only && indexed && !retain)")
+        self.assertLess(world.index("ReadRegionFile(path, records, &errors, stop)"), skip)
+        self.assertLess(world.index("retain_chunks->contains(record.id)"), skip)
+        self.assertLess(skip, world.index("AdmitChunkRecord(record,"))
 
     def test_native_saved_input_holds_publication_until_after_close(self):
         source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
