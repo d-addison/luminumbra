@@ -176,6 +176,240 @@ class MenuCaptureEvaluation:
         return "Ready" if requested else "Waiting"
 
 
+class GameplayPhotoRelease(unittest.TestCase):
+    """Trace the shipping exit boundary without running native code or GL."""
+
+    def setUp(self):
+        self.main = read(CLIENT / "main_client.cpp")
+        self.overlays = read(CLIENT / "app/DebugOverlays.cpp")
+        self.photo_header = read(CLIENT / "app/PhotoEnvironment.h")
+        self.player = True
+        self.exposure = 4.0
+        self.exposure_applied = True
+        self.hold = True
+        self.weather = "Storm"
+        self.driven = True
+        self.weather_payload = {"rain_intensity": 0.6, "storm_intensity": 0.8,
+                                "wetness": 0.9, "wind_strength": 0.4}
+        self.photo_env = True
+        self.weather_snapshot = None
+        self.photo = True
+        self.photo_ui = True
+        self.releases = 0
+
+    def restore_photo_weather(self):
+        restore = compact(block(self.photo_header, "void Restore("))
+        self.assertTrue(restore.startswith("if (!applied_) { return; }"), restore)
+        self.assertIn("if (state_.driven) { pipeline.set_weather_state(state_); } "
+                      "else { pipeline.set_weather(weather_, intensity_); } "
+                      "applied_ = false;", restore)
+        if self.weather_snapshot is None:
+            return
+        self.weather, self.driven, self.weather_payload = self.weather_snapshot
+        self.weather_snapshot = None
+
+    def release_photo_exposure(self, photo_active):
+        release = compact(block(self.photo_header, "void ReleaseIfInactive("))
+        self.assertEqual(release, "if (photo_mode_active || !applied_) { return; } "
+                         "pipeline.set_exposure_override(-1.0f); applied_ = false;")
+        if photo_active or not self.exposure_applied:
+            return
+        self.exposure = -1.0
+        self.exposure_applied = False
+
+    def leave_photo_environment(self):
+        """One gameplay frame after photo mode turned off, without a retirement."""
+        frame = self.main[self.main.index("while (!glfwWindowShouldClose(window))"):]
+        frame = block(frame, "while (!glfwWindowShouldClose(window))")
+        self.assertIn("g_app.hud.photoWeather.Restore(renderPipeline);", frame)
+        self.restore_photo_weather()
+        update = block(self.overlays, "void UpdatePhotoEnvironment(")
+        self.assertIn("app.hud.photoExposure.ReleaseIfInactive(renderPipeline, photo_active);",
+                      update)
+        self.release_photo_exposure(self.photo)
+        self.assertIn("if (!photo_active || capture_pinned) { photo = {}; }", compact(update))
+        if not self.photo:
+            self.photo_env = False
+
+    def apply_photo_weather(self, index):
+        update = compact(block(self.overlays, "void UpdatePhotoEnvironment("))
+        self.assertIn("if (selected.weather_active) { app.hud.photoWeather.Apply("
+                      "renderPipeline, selected.weather, selected.intensity); }", update)
+        apply = compact(block(self.photo_header, "void Apply(Pipeline& pipeline, "
+                              "Luminumbra::Rendering::WeatherType"))
+        self.assertIn("if (!applied_) { weather_ = pipeline.get_weather_type(); "
+                      "intensity_ = pipeline.get_weather_intensity(); "
+                      "state_ = pipeline.get_weather_state(); applied_ = true; }", apply)
+        presets = re.search(r"constexpr std::array presets = \{([^}]+)\}",
+                            self.photo_header).group(1)
+        types = [entry.strip().split("::")[-1] for entry in presets.split(",")]
+        self.assertEqual(len(types), 6)
+        if self.weather_snapshot is None:
+            self.weather_snapshot = (self.weather, self.driven, dict(self.weather_payload))
+        self.photo_env = True
+        self.weather = types[index]
+        self.driven = False
+
+    def retire(self):
+        if "auto release_player_controller =" not in self.main:
+            self.player = False
+            return
+        owner = compact(block(self.main, "auto release_player_controller ="))
+        self.assertEqual(owner, "if (g_playerController) { "
+                         "ReleasePhotoModeAndHud(g_app, renderPipeline); "
+                         "g_playerController.reset(); }")
+        if not self.player:
+            return
+        self.releases += 1
+        release = compact(re.sub(r"//[^\n]*", "",
+                                 block(self.overlays, "void ReleasePhotoModeAndHud(")))
+        if "app.hud.photoMode = {};" in release:
+            self.photo = False
+        if "app.hud.photoModeUiShown = false;" in release:
+            self.photo_ui = False
+        if "app.hud.photoEnvironment = {};" in release:
+            self.photo_env = False
+        if "app.hud.photoWeather.Restore(renderPipeline);" in release:
+            self.restore_photo_weather()
+        if "app.hud.photoExposure.ReleaseIfInactive(renderPipeline, false);" in release:
+            self.release_photo_exposure(False)
+        for method, value in re.findall(r"renderPipeline\.(set_\w+)\(([^;]*)\);", release):
+            if method == "set_time_of_day_hold":
+                self.hold = cpp_expression(value, false=False, true=True)
+            else:
+                self.fail(f"release writes an unowned renderer setting: {method}")
+        self.player = False
+
+    def assert_released(self):
+        self.assertEqual(self.exposure, -1.0, "manual exposure leaked into the menu preview")
+        self.assertFalse(self.exposure_applied)
+        self.assertFalse(self.hold)
+        self.assertEqual(self.weather, "Storm")
+        self.assertTrue(self.driven)
+        self.assertFalse(self.photo_env)
+        self.assertIsNone(self.weather_snapshot)
+        self.assertFalse(self.photo)
+        self.assertFalse(self.photo_ui)
+        self.assertFalse(self.player)
+        self.assertEqual(self.releases, 1)
+
+    def test_quit_to_menu_releases_manual_exposure_before_preview(self):
+        quit_body = block(self.main, 'else if (act == "quit")')
+        retirement = ("release_player_controller();" if "release_player_controller();" in quit_body
+                      else "g_playerController.reset();")
+        self.assertLess(quit_body.index(retirement), quit_body.index("GameState::MAIN_MENU"))
+        self.retire()
+        self.assert_released()
+
+    def test_release_preserves_weather_and_exposure_without_a_photo_override(self):
+        for engaged, driven in ((False, False), (False, True), (True, False), (True, True)):
+            with self.subTest(engaged=engaged, driven=driven):
+                self.setUp()
+                self.photo_env = engaged
+                self.driven = driven
+                self.exposure_applied = False
+                before = (self.weather, self.driven, dict(self.weather_payload), self.exposure)
+                self.retire()
+                self.assertEqual(
+                    (self.weather, self.driven, self.weather_payload, self.exposure), before)
+
+    def test_each_photo_weather_override_restores_driven_weather_on_both_exits(self):
+        for index in range(1, 6):
+            for retire_player in (False, True):
+                with self.subTest(index=index, retire_player=retire_player):
+                    self.setUp()
+                    payload = dict(self.weather_payload)
+                    self.apply_photo_weather(index)
+                    # Cycling again keeps the first live snapshot, not a photo preset.
+                    self.apply_photo_weather(5 if index != 5 else 2)
+                    if retire_player:
+                        self.retire()
+                        self.assert_released()
+                    else:
+                        self.photo = False
+                        self.leave_photo_environment()
+                    self.assertEqual((self.weather, self.driven), ("Storm", True))
+                    self.assertEqual(self.weather_payload, payload)
+                    self.assertIsNone(self.weather_snapshot)
+                    self.assertFalse(self.photo_env)
+                    self.assertEqual(self.exposure, -1.0)
+                    # Repeated exit and a fresh photo session without cycling must
+                    # not overwrite a later weather update from another owner.
+                    self.weather = "Rain"
+                    self.leave_photo_environment()
+                    self.photo_env = True
+                    self.leave_photo_environment()
+                    self.assertEqual((self.weather, self.driven), ("Rain", True))
+
+    def test_weather_pipeline_retains_payload_and_reenables_driven_classification(self):
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        direct = block(pipeline, "void RenderPipeline::set_weather(")
+        direct = compact(re.sub(r"//[^\n]*", "", direct))
+        self.assertEqual(direct, "m_weather_type = type; "
+                         "m_weather_intensity = std::clamp(intensity, 0.0f, 1.0f); "
+                         "m_weather_state.driven = false;")
+        driven = compact(block(pipeline, "void RenderPipeline::set_weather_state("))
+        self.assertIn("m_weather_state = state; m_weather_state.driven = true;", driven)
+        self.assertIn("const auto classification = ClassifyWeatherState(m_weather_state); "
+                      "m_weather_type = classification.type; "
+                      "m_weather_intensity = classification.intensity;", driven)
+
+    def test_save_refusals_preserve_photo_presentation(self):
+        quit_body = block(self.main, 'else if (act == "quit")')
+        retirement = quit_body.index("release_player_controller();" if
+                                     "release_player_controller();" in quit_body else
+                                     "g_playerController.reset();")
+        self.assertIn("return;", block(quit_body, "if (!gameSession->SaveWorld())"))
+        self.assertLess(quit_body.index("if (!gameSession->SaveWorld())"), retirement)
+        self.assertRegex(quit_body[:retirement],
+                         r"if \(!session_persistence_allowed\(\)\)\s+return;")
+        self.assertEqual((self.exposure, self.hold, self.player), (4.0, True, True))
+
+    def test_every_controller_retirement_uses_the_shared_release(self):
+        # Includes quit, benchmark quit, immediate and staged load/create,
+        # adopted-world refusal, rollback-to-menu and final shutdown.
+        self.assertEqual(self.main.count("g_playerController.reset();"), 1)
+        for marker in ("auto finish_world_replacement =", "auto refuse_world_entry =",
+                       "auto finish_world_entry =", 'else if (act == "quit")',
+                       "auto drain_entry =", "auto return_entry_to_menu =",
+                       "if (saved && main_menu)"):
+            with self.subTest(site=marker):
+                self.assertIn("release_player_controller();", block(self.main, marker))
+        replacement = block(self.main, "auto finish_world_replacement =")
+        self.assertIn("release_player_controller();", block(
+            replacement, "if (gameSession->WorldRevision() != entry_world_revision)"))
+        shutdown = self.main[self.main.index('trace_shutdown("world_save_finished")'):]
+        self.assertIn("release_player_controller();", shutdown)
+
+    def test_rollback_and_shutdown_cannot_release_a_retired_player_twice(self):
+        self.retire()
+        self.retire()
+        self.retire()
+        self.assert_released()
+
+    def test_no_player_leaves_unowned_renderer_settings_unchanged(self):
+        self.player = False
+        self.retire()
+        self.assertEqual((self.exposure, self.hold, self.weather, self.releases),
+                         (4.0, True, "Storm", 0))
+
+    def test_replacement_refusal_and_adoption(self):
+        replacement = block(self.main, "auto finish_world_replacement =")
+        condition = re.search(r"if \((.*)\)", replacement).group(1)
+        for revision, releases in ((10, 0), (11, 1)):
+            with self.subTest(revision=revision):
+                self.setUp()
+                changed = cpp_expression(condition, **{
+                    "gameSession->WorldRevision()": revision, "entry_world_revision": 10})
+                if changed and "release_player_controller();" in replacement:
+                    self.retire()
+                if releases:
+                    self.assert_released()
+                else:
+                    self.assertEqual((self.exposure, self.hold, self.player, self.releases),
+                                     (4.0, True, True, 0))
+
+
 class FrameAttributionWiring(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -2568,6 +2802,108 @@ class TerrainMaterialWiring(unittest.TestCase):
             settings = after_bind.split("glBindTexture(GL_TEXTURE_2D_ARRAY,", 1)[0]
             guarded = block(settings, "if (terrain_anisotropy_supported)")
             self.assertIn("GL_TEXTURE_MAX_ANISOTROPY, terrain_anisotropy", guarded)
+
+class PhotoEnvironmentWiring(unittest.TestCase):
+    def test_exposure_release_is_independent_of_time_capture_pins_and_pause(self):
+        overlays = read(CLIENT / "app/DebugOverlays.cpp")
+        capture = compact(block(overlays, "void UpdatePhotoCapture("))
+        self.assertIn("app.hud.photoExposure.Apply( renderPipeline, "
+                      "Luminumbra::Rendering::ManualExposureMultiplier(app.hud.photoMode.lens));",
+                      capture)
+        self.assertNotIn("set_exposure_override(", capture)
+        context = block(read(CLIENT / "app/ClientAppContext.h"), "struct HudState")
+        self.assertIn("PhotoExposureOverride photoExposure;", context)
+        update = block(overlays, "void UpdatePhotoEnvironment(")
+        release = "app.hud.photoExposure.ReleaseIfInactive(renderPipeline, photo_active);"
+        self.assertIn(release, update)
+        self.assertNotIn("if (", update.split(release, 1)[0])
+        self.assertLess(update.index(release), update.index("if (!photo_active || capture_pinned)"))
+        self.assertNotIn("set_exposure_override(", update)
+        self.assertNotIn("photoExposure =", update)
+        self.assertIn("const bool photo_active = playerController && "
+                      "playerController->photo_mode_active();", compact(update))
+        hud = compact(block(overlays, "void UpdatePhotoModeAndHud("))
+        self.assertIn("app.hud.photoMode.active = playerController->photo_mode_active();", hud)
+        self.assertNotIn("capture_pinned", hud)
+        exposure = block(read(CLIENT / "app/PhotoEnvironment.h"), "class PhotoExposureOverride")
+        self.assertIn("bool applied_ = false;", exposure)
+        self.assertNotIn("time_active", exposure)
+        apply = block(exposure, "void Apply(")
+        self.assertIn("pipeline.set_exposure_override(multiplier);", apply)
+        self.assertIn("applied_ = true;", apply)
+        release_body = block(exposure, "void ReleaseIfInactive(")
+        guard = re.search(r"if\s*\(([^()]*)\)", release_body).group(1)
+        self.assertIn("return;", block(release_body, "if ("))
+        self.assertIn("pipeline.set_exposure_override(-1.0f);", release_body)
+        self.assertIn("applied_ = false;", release_body)
+        for active in (False, True):
+            for applied in (False, True):
+                with self.subTest(active=active, applied=applied):
+                    self.assertEqual(cpp_expression(guard, photo_mode_active=active, applied_=applied),
+                                     active or not applied)
+
+    def test_photo_selection_follows_live_defaults_and_precedes_pins_and_render(self):
+        main = read(CLIENT / "main_client.cpp")
+        release = main.index("renderPipeline.set_time_of_day_hold(false);")
+        weather_release = main.index("g_app.hud.photoWeather.Restore(renderPipeline);")
+        loop = block(main, "while (!glfwWindowShouldClose(window))")
+        before_restore = loop.split("g_app.hud.photoWeather.Restore(renderPipeline);", 1)[0]
+        self.assertNotIn("if (", before_restore)
+        self.assertLess(weather_release, main.index("GameState currentState ="))
+        self.assertLess(weather_release, main.index("RenderMenuScreens("))
+        weather_writer_guard = "if (g_systemConfig.enabled(luminumbra::core::SysKey::RenderLiveWeather))"
+        self.assertLess(weather_release, main.index(weather_writer_guard))
+        self.assertNotIn("photoWeather.Restore", block(main, weather_writer_guard))
+        photo = main.index("UpdatePhotoEnvironment(")
+        for live in ("renderPipeline.set_world_clock(gameSession->GetWorldClock());",
+                     "renderPipeline.set_time_of_day_tick(sim_tick);",
+                     "renderPipeline.set_weather_state(weather_state);"):
+            self.assertLess(release, main.index(live))
+            self.assertLess(weather_release, main.index(live))
+            self.assertLess(main.index(live), photo)
+        for pin in ("scenario_runner->onPreRenderCapturePins();",
+                    "renderPipeline.set_time_of_day(Luminumbra::BenchmarkPose::kTimeOfDay);",
+                    "renderPipeline.set_weather(wt, g_app.capture.scene_weather_intensity);",
+                    "scenario_runner->onPreRenderFoliage()"):
+            self.assertLess(photo, main.index(pin))
+        self.assertLess(photo, main.index("renderPipeline.render_frame(", photo))
+
+    def test_photo_capture_has_no_late_environment_writers(self):
+        overlays = read(CLIENT / "app/DebugOverlays.cpp")
+        capture = block(overlays, "void UpdatePhotoCapture(")
+        for setter in ("set_weather(", "set_time_of_day(", "set_time_of_day_hold(",
+                       "consume_tod_nudge()", "consume_weather_cycle()"):
+            self.assertNotIn(setter, capture)
+        update = block(overlays, "void UpdatePhotoEnvironment(")
+        self.assertIn("SelectPhotoEnvironment(live, photo, photo_active, capture_pinned)", update)
+        self.assertIn("renderPipeline.set_time_of_day(selected.time_of_day);",
+                      block(update, "if (selected.time_active)"))
+        self.assertIn("app.hud.photoWeather.Apply(renderPipeline, selected.weather, selected.intensity);",
+                      block(update, "if (selected.weather_active)"))
+
+    def test_weather_snapshot_survives_photo_selection_reset(self):
+        context = block(read(CLIENT / "app/ClientAppContext.h"), "struct HudState")
+        self.assertIn("PhotoWeatherOverride photoWeather;", context)
+        update = block(read(CLIENT / "app/DebugOverlays.cpp"), "void UpdatePhotoEnvironment(")
+        self.assertIn("photo = {};", update)
+        self.assertNotIn("photoWeather =", update)
+
+    def test_all_capture_modes_disable_photo_overrides(self):
+        main = compact(read(CLIENT / "main_client.cpp"))
+        guard = re.search(r"const bool photo_capture_pinned = ([^;]+);", main).group(1)
+        flags = ("scenario_config.active()", "g_rb_active", "g_app.capture.timelapse_frames",
+                 "g_app.capture.scene_active", "g_app.capture.frame_scan_active",
+                 "g_app.capture.render_parity_active", "g_app.capture.survey_active",
+                 "g_app.capture.bake_impostor_path.empty()",
+                 "g_app.capture.ui_screenshot_screen.empty()", "g_app.capture.ui_thumbs")
+        defaults = {flag: flag.endswith(".empty()") for flag in flags}
+        self.assertFalse(cpp_expression(guard, **defaults))
+        for flag in flags:
+            with self.subTest(flag=flag):
+                inputs = dict(defaults)
+                inputs[flag] = not inputs[flag]
+                self.assertTrue(cpp_expression(guard, **inputs))
+
 
 class WorldVisualSweepWiring(unittest.TestCase):
     @classmethod

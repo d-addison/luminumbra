@@ -258,6 +258,15 @@ public:
                               std::vector<std::string>* errors = nullptr,
                               const std::stop_token& stop = {});
 
+    // Read-only catalog inspection. Indexed saves check container structure and all snapshot
+    // fingerprints without decoding lod-0 payloads. Unindexed saves use complete validation.
+    // This verdict never authorizes loading or writing: those require validate_save/load_world.
+    // The optional output stays false on refusal or when indexed payloads were skipped.
+    static bool inspect_save(const std::filesystem::path& save_dir,
+                             std::vector<std::string>* errors = nullptr,
+                             const std::stop_token& stop = {},
+                             bool* payloads_verified = nullptr);
+
     // Uses the same durable temporary-file/atomic replacement path as chunk containers.
     // Refuses an unsupported existing save before touching its metadata.
     static bool save_metadata(const std::string& bytes,
@@ -780,6 +789,17 @@ public:
                                            const std::filesystem::path& save_dir,
                                            std::vector<std::string>* errors = nullptr,
                                            bool acknowledge_dirty = true) const;
+
+private:
+    bool load_world_impl(WorldStreamingState& state,
+                         const std::filesystem::path& save_dir,
+                         std::vector<std::string>& errors,
+                         const std::stop_token& stop,
+                         const std::unordered_set<ChunkID>* retain_chunks,
+                         std::vector<IVec3>* authoritative_inventory,
+                         std::size_t* decoded_chunk_count,
+                         bool catalog_only,
+                         bool* payloads_verified = nullptr) const;
 };
 
 } // namespace Luminumbra::Persistence
