@@ -96,6 +96,26 @@ public:
             return source == Error::None && capture == FarFrozenCaptureError::None;
         }
     };
+    struct FrozenPump {
+        FrozenResult result{};
+        std::uint64_t work = 0;
+        bool complete = false;
+    };
+    // Retains the immutable accepted source and world. Owner-thread calls only;
+    // the host fences publication during each pump, never across frames.
+    // A unit validates one record header, scalar, water cell or shared node,
+    // performs one bounded heap operation, or advances observation by one unit.
+    // No unit reads more than two shared nodes or invokes more than six samplers.
+    // Optional transaction counters and clock contexts must outlive the cursor.
+    FrozenResult start_frozen(const std::shared_ptr<const Systems::SHIELD_WorldSystem>& world,
+                              const FarVolumeRequest& request,
+                              const FrozenPolicy& policy,
+                              const FarFrozenCaptureLimits& limits,
+                              const std::shared_ptr<FarVolumeMemoryPool>& pool);
+    FrozenPump pump_frozen(std::uint64_t budget,
+                           std::shared_ptr<const FarFrozenObservation>& output);
+    void cancel_frozen();
+    bool frozen_active() const;
     explicit FarWorldAuthorityProducer(const Limits& limits);
     // Heap owners admit the object before allocation and transfer this same-pool
     // token. Stack construction admits its control storage in the convenience form.
@@ -146,6 +166,8 @@ public:
 
 private:
     struct Impl;
+    struct FrozenContext;
+    struct FrozenComposition;
     std::shared_ptr<FarVolumeMemoryPool> memory_;
     FarVolumeMemoryLease control_;
     std::shared_ptr<Impl> impl_;
