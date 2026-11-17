@@ -107,7 +107,14 @@ struct PersistenceStatus {
 
 class GameSession {
 public:
+    // Dormant caller contract for tests; never configured, serialized or hashed.
+    struct AuthorityProfileOptions {
+        // Slice I will bind this predicate to its negotiated authority revision.
+        bool residency_free_eviction = false;
+    };
+
     GameSession();
+    explicit GameSession(const AuthorityProfileOptions& authority_profile);
     ~GameSession();
 
     // Initialize a new world with the given parameters. Refusal before adoption
@@ -680,6 +687,7 @@ public:
     std::filesystem::path GetSaveRootPath() const;
 
 private:
+    const AuthorityProfileOptions m_authorityProfile;
     void DisableFarWorldAuthorityProducer();
     std::unique_ptr<World::FarWorldAuthorityProducer> m_farWorldAuthorityProducer;
     bool m_farWorldSourceNeedsRefresh = false;
