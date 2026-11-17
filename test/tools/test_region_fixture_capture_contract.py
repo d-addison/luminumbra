@@ -21,13 +21,15 @@ class RegionFixtureCaptureContract(unittest.TestCase):
     def test_publication_regressions_are_unconditional_and_registered(self):
         native = source("test/common/RegionFixtureCapture_test.cpp")
         publication = source("test/support/RegionFixtureCapturePublication.h")
-        for text in (native, publication):
+        capture = source("test/support/RegionFixtureCapture.h")
+        for text in (native, publication, capture):
             self.assertNotRegex(text, r"GTEST_SKIP|DISABLED_|getenv|RequestedCapture")
             self.assertNotIn("LUMINUMBRA_REGION_FIXTURE_CAPTURE", text)
         self.assertEqual(re.findall(r"TEST\(RegionFixtureCapture, (\w+)\)", native), [
             "PublicationRefusesExistingDestinationAndCleansStaging",
             "PublicationCreatesNewDestinationAndCleansStaging",
-            "PublicationFailuresLeaveNoStagingOrDestination"])
+            "PublicationFailuresLeaveNoStagingOrDestination",
+            "WorldCaptureMatchesSavedMembersAndIndependentHashes"])
         cmake = re.sub(r"#[^\n]*", "", source("test/CMakeLists.txt"))
         executables = re.findall(r"add_executable\(\s*(\w+)\s+([^)]*)\)", cmake)
         self.assertEqual([name for name, files in executables
@@ -35,6 +37,11 @@ class RegionFixtureCaptureContract(unittest.TestCase):
         roster = re.search(r"set\(LUMINUMBRA_GTEST_TARGETS\s+([^)]*)\)", cmake)[1]
         self.assertIn("common_tests", roster.split())
         self.assertIn("gtest_discover_tests(${_lum_gtest_target}", cmake)
+        executable = source("test/tools/RegionFixtureCapture.cpp")
+        for caller in (native, executable):
+            self.assertIn("CaptureRegionFixture(root, session, loaded, plant)", caller)
+        self.assertIn("session.SaveWorldStateTo(save)", capture)
+        self.assertIn("loaded.LoadWorldStateFrom(save)", capture)
 
     def test_capture_executable_is_built_separately_and_never_discovered(self):
         cmake = re.sub(r"#[^\n]*", "", source("test/CMakeLists.txt"))
@@ -75,6 +82,7 @@ class RegionFixtureCaptureContract(unittest.TestCase):
 
     def test_capture_admission_platform_branches_and_inventory(self):
         native = source("test/tools/RegionFixtureCapture.cpp")
+        capture = source("test/support/RegionFixtureCapture.h")
         for condition, message in (
                 ("!RequestedCapture(destination)",
                  "set LUMINUMBRA_REGION_FIXTURE_CAPTURE to request a capture"),
@@ -96,7 +104,7 @@ class RegionFixtureCaptureContract(unittest.TestCase):
                        'std::getenv("LUMINUMBRA_REGION_FIXTURE_CAPTURE")'):
             self.assertIn(reader, native)
         for member in ("plant-entities.json", "r.0.0.lmr", "snapshot.json", "world-manifest.json"):
-            self.assertIn('"chunks/region/' + member + '"', native)
+            self.assertIn('"chunks/region/' + member + '"', capture)
         self.assertIn('"devel-off", Capture(false)', native)
         self.assertIn('"devel-off-plant-edit", Capture(true)', native)
         world = source("test/support/RegionFixtureWorld.h")
