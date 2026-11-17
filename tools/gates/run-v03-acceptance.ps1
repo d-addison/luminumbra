@@ -409,7 +409,12 @@ try {
             -TimeoutSeconds $TimeoutSeconds
         $audioState = $null
         try {
-            $audioState = ConvertFrom-Json -InputObject ([System.IO.File]::ReadAllText((Join-Path $audioArtifact "last-known-runtime.json"), [System.Text.Encoding]::UTF8))
+            $audioText = [System.IO.File]::ReadAllText((Join-Path $audioArtifact "last-known-runtime.json"), [System.Text.Encoding]::UTF8)
+            # ConvertFrom-Json unwraps a one-element array, so require an object root first.
+            if (-not $audioText.TrimStart().StartsWith("{")) {
+                throw "runtime snapshot root is not a JSON object"
+            }
+            $audioState = ConvertFrom-Json -InputObject $audioText
         } catch {
             $audioProblems += ("{0}: cannot read runtime snapshot: {1}" -f $session.name, $_.Exception.Message)
         }

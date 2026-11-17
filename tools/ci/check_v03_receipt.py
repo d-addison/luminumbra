@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import sys
 from pathlib import Path, PureWindowsPath
 
@@ -81,8 +80,9 @@ def _audio_volumes(value, path: str) -> dict:
         if channel not in value:
             raise AudioEvidenceError(f"{path}.{channel}: missing key")
         level = value[channel]
-        if (type(level) not in (int, float) or not 0 < level <= 1
-                or not math.isfinite(level)):
+        # The chained range comparison also rejects NaN, infinities and huge JSON integers,
+        # without converting an integer to float (math.isfinite would overflow on 10**400).
+        if type(level) not in (int, float) or not 0 < level <= 1:
             raise AudioEvidenceError(f"{path}.{channel}: expected finite nonzero level in (0, 1]")
     return {channel: value[channel] for channel in ("master", "music", "sfx")}
 
