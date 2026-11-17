@@ -19,6 +19,13 @@ ROOT = Path(__file__).resolve().parents[2]
 MAX_BYTES = 256 * 1024
 SIZE = 128
 CHANNELS = SIZE * SIZE * 3
+# Exact two-scene catalogue; adding a fixture requires matching capture and tests.
+FIXTURES = [
+    {'name': name, 'reference': f'references/{name}.ppm', 'mask': [0, 0, SIZE, SIZE]}
+    for name in ('material', 'tree-cutout')]
+INPUTS = {'res/shaders/static_asset.vert', 'res/shaders/static_asset.frag',
+          'res/shaders/tree_impostor.vert', 'res/shaders/tree_impostor.frag',
+          'test/rendering/shader_scene_render_test.cpp'}
 
 
 def read_file(path, bound=MAX_BYTES):
@@ -70,6 +77,17 @@ def metrics(actual, reference, mask):
     return math.fsum(errors) / len(errors), errors[math.ceil(len(errors) * .99) - 1]
 
 
+def tree_cutout_error(actual):
+    """Exact fixed-atlas categories, independent of quantized reference pixels."""
+    if len(actual) != CHANNELS or not all(math.isfinite(value) for value in actual):
+        raise ValueError('invalid cutout samples')
+    # One bounded 128-square pass; zero/0.499 discard, 0.5/1 survive.
+    return max(abs(actual[(y * SIZE + x) * 3 + channel] -
+                   ((.0625, .125, .1875) if (x // 32 + y // 32) % 4 < 2
+                    else (.25, .5, .75))[channel])
+               for y in range(SIZE) for x in range(SIZE) for channel in range(3))
+
+
 def local_file(root, name):
     if (not isinstance(name, str) or '\\' in name or ':' in name
             or not name or PurePosixPath(name).is_absolute()
@@ -84,36 +102,41 @@ def local_file(root, name):
 def load_manifest(path, root=ROOT, verify_inputs=True):
     manifest = json.loads(read_file(path))
     if (not isinstance(manifest, dict) or type(manifest.get('schema')) is not int
-            or manifest['schema'] != 1 or manifest.get('encoding') != 'linear_rgb_bottom_first'
+            or manifest['schema'] != 2 or manifest.get('encoding') != 'linear_rgb_bottom_first'
             or manifest.get('size') != [SIZE, SIZE] or manifest.get('defines') != []
-            or manifest.get('fixtures') != [{'name': 'material', 'reference': 'references/material.ppm',
-                                            'mask': [0, 0, SIZE, SIZE]}]):
+            or manifest.get('fixtures') != FIXTURES):
         raise ValueError('unknown scene inventory or encoding')
-    if any(type(value) is not int for value in manifest['size'] + manifest['fixtures'][0]['mask']):
+    dimensions = manifest['size'] + [value for fixture in manifest['fixtures']
+                                     for value in fixture['mask']]
+    if any(type(value) is not int for value in dimensions):
         raise ValueError('scene dimensions and mask must be integers')
-    expected = {'res/shaders/static_asset.vert', 'res/shaders/static_asset.frag',
-                'test/rendering/shader_scene_render_test.cpp'}
-    if not isinstance(manifest.get('inputs'), dict) or set(manifest['inputs']) != expected:
+    if not isinstance(manifest.get('inputs'), dict) or set(manifest['inputs']) != INPUTS:
         raise ValueError('incomplete shader/fixture input inventory')
     if verify_inputs:
         for name, expected_hash in manifest['inputs'].items():
             if digest(read_file(local_file(root, name)).replace(b'\r\n', b'\n')) != expected_hash:
                 raise ValueError(f'{name}: input hash changed; review regeneration')
-    reference = read_file(local_file(path.parent, 'references/material.ppm'))
-    if digest(reference) != manifest.get('reference_sha256'):
-        raise ValueError('reference hash mismatch')
-    rgb(reference, False)
+    hashes = manifest.get('reference_sha256')
+    if not isinstance(hashes, dict) or set(hashes) != {f['name'] for f in FIXTURES}:
+        raise ValueError('incomplete reference hash inventory')
+    references = {}
+    for fixture in FIXTURES:
+        reference = read_file(local_file(path.parent, fixture['reference']))
+        if digest(reference) != hashes[fixture['name']]:
+            raise ValueError('reference hash mismatch')
+        rgb(reference, False)
+        references[fixture['name']] = reference
     metadata = manifest.get('reference_capture', {})
     if (not isinstance(metadata, dict) or set(metadata) != {'renderer', 'version', 'origin'}
             or not all(isinstance(value, str) and value for value in metadata.values())
             or metadata['origin'] not in ('analytical', 'llvmpipe')
             or (metadata['origin'] == 'llvmpipe' and 'llvmpipe' not in metadata['renderer'])):
         raise ValueError('missing reference renderer/version/origin')
-    return manifest, reference
+    return manifest, references
 
 
 def run(args):
-    manifest, reference = load_manifest(args.manifest, verify_inputs=args.command != 'regenerate')
+    manifest, references = load_manifest(args.manifest, verify_inputs=args.command != 'regenerate')
     captured_inputs = {
         name: digest(read_file(args.capture / PurePosixPath(name).name).replace(b'\r\n', b'\n'))
         for name in manifest['inputs'] if name.startswith('res/shaders/')}
@@ -126,28 +149,38 @@ def run(args):
                        for name in manifest['inputs']})
     if captured_inputs != current_inputs:
         raise ValueError('capture inputs differ from the current shader/fixture sources; rebuild and recapture')
-    actual_data = read_file(args.capture / 'material.pfm')
-    actual = rgb(actual_data, True)
+    actuals = {fixture['name']: rgb(read_file(args.capture / (fixture['name'] + '.pfm')), True)
+               for fixture in FIXTURES}
+    cutout_error = tree_cutout_error(actuals['tree-cutout'])
     renderer = read_file(args.capture / 'renderer.txt', 1024).decode('utf-8').strip()
     version = read_file(args.capture / 'version.txt', 1024).decode('utf-8').strip()
     if 'llvmpipe' not in renderer or not version or '\x00' in renderer + version:
         raise ValueError('missing actual llvmpipe renderer/version evidence')
+    print(f'tree-cutout: maximum categorical RGB error={cutout_error:.8f} (<=0.000001)')
+    if cutout_error > .000001:
+        raise ValueError('tree cutout/background invariant failed')
     if args.command == 'compare':
-        mean, percentile = metrics(actual, rgb(reference, False), manifest['fixtures'][0]['mask'])
-        print(f'material: linear RGB MAE={mean:.8f} (<=0.005), p99={percentile:.8f} (<=0.02)')
-        return int(mean > .005 or percentile > .02)
+        failed = False
+        for fixture in FIXTURES:
+            name = fixture['name']
+            mean, percentile = metrics(actuals[name], rgb(references[name], False), fixture['mask'])
+            print(f'{name}: linear RGB MAE={mean:.8f} (<=0.005), p99={percentile:.8f} (<=0.02)')
+            failed |= mean > .005 or percentile > .02
+        return int(failed)
     if args.output is None:
         raise ValueError('regenerate requires a fresh --output candidate directory')
-    payload = b'P6\n128 128\n255\n' + bytes(round(value * 255) for value in actual)
+    payloads = {name: b'P6\n128 128\n255\n' + bytes(round(value * 255) for value in actual)
+                for name, actual in actuals.items()}
     manifest['inputs'] = captured_inputs
-    manifest['reference_sha256'] = digest(payload)
+    manifest['reference_sha256'] = {name: digest(payload) for name, payload in payloads.items()}
     manifest['reference_capture'] = {'renderer': renderer, 'version': version, 'origin': 'llvmpipe'}
     encoded = (json.dumps(manifest, indent=2, sort_keys=True) + '\n').encode('utf-8')
     # All refusals above precede publication. The new directory owns every write;
     # a failed I/O leaves an unpublished candidate, never an updated baseline.
     args.output.mkdir(exist_ok=False)
     (args.output / 'references').mkdir()
-    (args.output / 'references/material.ppm').write_bytes(payload)
+    for fixture in FIXTURES:
+        (args.output / fixture['reference']).write_bytes(payloads[fixture['name']])
     (args.output / 'scenes.json').write_bytes(encoded)
     print(f'Review reference candidates in {args.output}; refresh inventories when applying.')
     return 0

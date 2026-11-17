@@ -32,12 +32,13 @@ struct LightningBoltGeometry {
 };
 
 // Project the generated world geometry without re-anchoring or reshaping it in
-// screen space. Default generated bolts have 33 channel points and at most three
-// four-point branches. ComposeLiveStrikes applies the fixed upload budget next.
+// screen space. Perspective clip.w is positive view depth, independent of the
+// chosen near/far planes and depth convention. Default generated bolts have 33 channel points and
+// at most three four-point branches. ComposeLiveStrikes applies the fixed upload budget next.
 inline ProjectedLiveStrike ProjectLightningBolt(const LightningBoltGeometry& bolt,
                                                 const glm::mat4& view_projection,
                                                 float pulse) {
-    const auto project = [&](const glm::vec3& point) {
+    const auto project = [&](const glm::vec3& point) -> ProjectedBoltPoint {
         const glm::vec4 clip = view_projection * glm::vec4(point, 1.0f);
         if (!std::isfinite(clip.w) || !(clip.w > 0.0f)) {
             return kLiveBoltPenUp;
@@ -46,10 +47,14 @@ inline ProjectedLiveStrike ProjectLightningBolt(const LightningBoltGeometry& bol
         if (!std::isfinite(ndc.x) || !std::isfinite(ndc.y)) {
             return kLiveBoltPenUp;
         }
-        return ndc;
+        const float inverse_depth = 1.0f / clip.w;
+        if (!std::isfinite(inverse_depth)) {
+            return kLiveBoltPenUp;
+        }
+        return {ndc, inverse_depth};
     };
     const auto project_stroke = [&](const std::vector<glm::vec3>& stroke) {
-        std::vector<glm::vec2> points;
+        std::vector<ProjectedBoltPoint> points;
         points.reserve(stroke.size());
         for (const auto& point : stroke) {
             points.push_back(project(point));

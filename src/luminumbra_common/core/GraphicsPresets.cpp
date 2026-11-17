@@ -51,6 +51,7 @@ constexpr GraphicsValues kUltraRevision1{
     .gpu_sky_lut = true,
     .exposure_meter = false,
     .live_menu_preview = true,
+    .terrain_near_refinement = false,
 };
 
 // Immutable revision-1 visuals, also used by revision 3.
@@ -119,7 +120,8 @@ auto GraphicsValueMembers(const GraphicsValues& values) {
                     values.taau,
                     values.gpu_sky_lut,
                     values.exposure_meter,
-                    values.live_menu_preview);
+                    values.live_menu_preview,
+                    values.terrain_near_refinement);
 }
 
 bool ApplyGraphicsOverrides(const GraphicsOverrides& overrides,
@@ -129,6 +131,11 @@ bool ApplyGraphicsOverrides(const GraphicsOverrides& overrides,
         if (key == "grass_enabled") {
             if (const auto* enabled = std::get_if<bool>(&value)) {
                 values.grass_enabled = *enabled;
+                continue;
+            }
+        } else if (key == "terrain_near_refinement") {
+            if (const auto* enabled = std::get_if<bool>(&value)) {
+                values.terrain_near_refinement = *enabled;
                 continue;
             }
         } else if (key == "ui_blur") {
