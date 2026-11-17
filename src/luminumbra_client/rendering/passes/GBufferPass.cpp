@@ -393,20 +393,32 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
     // normal pass bindings without capture-only driver queries or restore binds.
     const bool diagnostic_capture = GBufferDiagnosticCapture::Current() != nullptr;
     GLint previous_vao = 0, previous_draw_fbo = 0, previous_read_fbo = 0;
+    GLuint previous_gbuffer_fbo = 0;
     GLboolean previous_cull = GL_FALSE;
     if (diagnostic_capture) {
+        previous_gbuffer_fbo = m_gbuffer.fbo_id;
         glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &previous_vao);
         glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous_draw_fbo);
         glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read_fbo);
         previous_cull = glIsEnabled(GL_CULL_FACE);
     }
-    ReplayRollback restore_gl([=]() noexcept {
+    ReplayRollback restore_gl([=, this]() noexcept {
         if (!diagnostic_capture) {
             return;
         }
         glBindVertexArray(static_cast<GLuint>(previous_vao));
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(previous_draw_fbo));
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(previous_read_fbo));
+        // Authored submissions can recreate the targets. Restore the caller's
+        // logical G-buffer binding rather than its deleted framebuffer name.
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER,
+                          previous_gbuffer_fbo != 0 &&
+                                  static_cast<GLuint>(previous_draw_fbo) == previous_gbuffer_fbo
+                              ? m_gbuffer.fbo_id
+                              : static_cast<GLuint>(previous_draw_fbo));
+        glBindFramebuffer(GL_READ_FRAMEBUFFER,
+                          previous_gbuffer_fbo != 0 &&
+                                  static_cast<GLuint>(previous_read_fbo) == previous_gbuffer_fbo
+                              ? m_gbuffer.fbo_id
+                              : static_cast<GLuint>(previous_read_fbo));
         if (previous_cull) {
             glEnable(GL_CULL_FACE);
         } else {

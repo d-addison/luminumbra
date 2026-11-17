@@ -10,14 +10,19 @@
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 #include <glad/glad.h>
+#include <glm/gtc/type_ptr.hpp>
 
 #include <gtest/gtest.h>
+#include <luminumbra/rendering/RenderView.h>
+#include <luminumbra/rendering/StaticScene.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -185,13 +190,12 @@ TEST(DiagnosticAttribution, RefusalNeverThrowsAndEveryPassExitRestoresCallerBind
     Contains(pass, "glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &previous_vao)");
     Contains(pass, "glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous_draw_fbo)");
     Contains(pass, "glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read_fbo)");
-    Contains(pass, "ReplayRollback restore_gl([=]() noexcept");
+    Contains(pass, "ReplayRollback restore_gl([=, this]() noexcept");
     const auto restore = Body(pass, "ReplayRollback restore_gl(");
     Contains(restore, "glBindVertexArray(static_cast<GLuint>(previous_vao))");
-    Contains(restore,
-             "glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(previous_draw_fbo))");
-    Contains(restore,
-             "glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(previous_read_fbo))");
+    Contains(restore, "static_cast<GLuint>(previous_draw_fbo) == previous_gbuffer_fbo");
+    Contains(restore, "static_cast<GLuint>(previous_read_fbo) == previous_gbuffer_fbo");
+    EXPECT_EQ(Count(restore, "? m_gbuffer.fbo_id"), 2u);
     Contains(restore, "glEnable(GL_CULL_FACE)");
     Contains(restore, "glDisable(GL_CULL_FACE)");
     EXPECT_LT(pass.find("ReplayRollback restore_gl("),
@@ -297,18 +301,21 @@ using namespace Luminumbra::Rendering;
 // Forward every call to the context and restore each entry before leaving scope.
 class PassStateProbe {
 public:
-    PassStateProbe() {
+    explicit PassStateProbe(GLuint retired_fbo = 0)
+        : retired_fbo_(retired_fbo) {
         Active() = this;
         glGetIntegerv = GetInteger;
         glIsEnabled = IsEnabled;
         glBindVertexArray = BindVertexArray;
         glBindFramebuffer = BindFramebuffer;
+        glGenFramebuffers = GenFramebuffers;
     }
     ~PassStateProbe() {
         glGetIntegerv = previous_get_integer_;
         glIsEnabled = previous_is_enabled_;
         glBindVertexArray = previous_bind_vao_;
         glBindFramebuffer = previous_bind_fbo_;
+        glGenFramebuffers = previous_gen_fbos_;
         Active() = nullptr;
     }
     PassStateProbe(const PassStateProbe&) = delete;
@@ -318,6 +325,20 @@ public:
     unsigned combined_fbo_binds = 0, draw_fbo_binds = 0, read_fbo_binds = 0;
 
 private:
+    static void APIENTRY GenFramebuffers(GLsizei count, GLuint* framebuffers) {
+        auto& probe = *Active();
+        probe.previous_gen_fbos_(count, framebuffers);
+        // Force recreation to use a different name even on drivers that reuse
+        // the just-deleted name. All allocations and deletions reach real GL.
+        for (GLsizei index = 0; index < count; ++index) {
+            if (framebuffers[index] == probe.retired_fbo_ && probe.retired_fbo_ != 0) {
+                GLuint replacement = 0;
+                probe.previous_gen_fbos_(1, &replacement);
+                glDeleteFramebuffers(1, &framebuffers[index]);
+                framebuffers[index] = replacement;
+            }
+        }
+    }
     static PassStateProbe*& Active() {
         static PassStateProbe* probe = nullptr;
         return probe;
@@ -352,6 +373,8 @@ private:
     decltype(glIsEnabled) previous_is_enabled_ = glIsEnabled;
     decltype(glBindVertexArray) previous_bind_vao_ = glBindVertexArray;
     decltype(glBindFramebuffer) previous_bind_fbo_ = glBindFramebuffer;
+    decltype(glGenFramebuffers) previous_gen_fbos_ = glGenFramebuffers;
+    GLuint retired_fbo_ = 0;
 };
 
 class AttributionContext {
@@ -442,7 +465,8 @@ protected:
         }
         ASSERT_TRUE(table_.complete_coverage());
     }
-    Mesh* AddMesh(const std::string& path = "test/diagnostic_leaf") {
+    Mesh* AddMesh(const std::string& path = "test/diagnostic_leaf",
+                  const glm::vec3& position = glm::vec3(0.0f)) {
         auto mesh = MeshLoader::CreateFromArrays({{{-1, -1, -5}, {0, 0, 1}, {0, 0}},
                                                   {{1, -1, -5}, {0, 0, 1}, {1, 0}},
                                                   {{0, 1, -5}, {0, 0, 1}, {.5f, 1}}},
@@ -450,7 +474,7 @@ protected:
         auto* result = mesh.get();
         pass_.register_cached_mesh(path, std::move(mesh));
         const auto entity = entities_.create();
-        entities_.emplace<Luminumbra::Components::TransformComponent>(entity);
+        entities_.emplace<Luminumbra::Components::TransformComponent>(entity).position = position;
         entities_.emplace<Luminumbra::Components::StaticMeshComponent>(entity).meshPath = path;
         return result;
     }
@@ -629,6 +653,134 @@ TEST_F(DiagnosticAttributionGl, ExceptionalProducerRestoresCallerGlState) {
             ExpectEntryState(cull);
         }
     }
+}
+
+TEST_F(DiagnosticAttributionGl, AuthoredUpgradeRestoresLiveCallerFramebuffers) {
+    auto mesh = std::make_shared<StaticMesh>();
+    mesh->identity = "diagnostic-authored-triangle";
+    mesh->vertices = {{{-1, -1, -5}, {0, 0, 1}, {0, 0}},
+                      {{1, -1, -5}, {0, 0, 1}, {1, 0}},
+                      {{0, 1, -5}, {0, 0, 1}, {.5f, 1}}};
+    mesh->indices = {0, 1, 2};
+    auto material = std::make_shared<StaticMaterial>();
+    material->identity = "diagnostic-authored-material";
+    auto snapshot = std::make_shared<StaticDrawSnapshot>();
+    StaticDraw draw;
+    draw.key = {"instance", "node", 0};
+    draw.mesh = mesh;
+    draw.material = material;
+    draw.normal = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    snapshot->draws.push_back(draw);
+    input_.authored_draws = snapshot;
+    RenderViewDescription description;
+    description.width = 32;
+    description.height = 32;
+    const auto projection = glm::perspectiveRH_ZO(
+        glm::radians(45.0), 1.0, description.far_plane, description.near_plane);
+    std::copy_n(glm::value_ptr(projection), 16, description.projection.begin());
+    const auto view = RenderView::Validate(description);
+    input_.authored_view = &view;
+
+    // External, draw-only, read-only, both, default, and initially absent targets.
+    // Each of these six states exercises success and failures before/after upgrade.
+    for (unsigned bindings = 0; bindings < 6; ++bindings) {
+        for (unsigned failure = 0; failure < 3; ++failure) {
+            SCOPED_TRACE(testing::Message() << bindings << ":" << failure);
+            pass_.destroy_gbuffer(resources_);
+            if (bindings != 5) {
+                pass_.init_gbuffer(resources_, 32, 32);
+            }
+            const GLuint old_fbo = pass_.gbuffer().fbo_id;
+            SetEntryState(true);
+            const GLuint draw_fbo = bindings >= 4 ? 0 : (bindings & 1u) ? old_fbo : entry_fbos_[0];
+            const GLuint read_fbo = bindings >= 4 ? 0 : (bindings & 2u) ? old_fbo : entry_fbos_[1];
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, draw_fbo);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, read_fbo);
+            ASSERT_EQ(glGetError(), GL_NO_ERROR);
+            input_.authored_temporal_enabled = failure == 2;
+            input_.submit_terrain_chunks = [failure](const glm::vec4(&)[6]) {
+                if (failure == 1) {
+                    throw std::runtime_error("producer failure after upgrade");
+                }
+                return TerrainSubmitStats{};
+            };
+            table_.clear();
+            GBufferDiagnosticCapture capture(table_);
+            PassStateProbe probe(old_fbo);
+            if (failure == 2) {
+                EXPECT_THROW(pass_.execute(ctx_, entities_, input_), std::invalid_argument);
+                EXPECT_EQ(pass_.gbuffer().fbo_id, old_fbo);
+            } else {
+                if (failure == 1) {
+                    EXPECT_THROW(pass_.execute(ctx_, entities_, input_), std::runtime_error);
+                } else {
+                    EXPECT_EQ(pass_.execute(ctx_, entities_, input_).authored_draws, 1u);
+                }
+                ASSERT_NE(pass_.gbuffer().fbo_id, old_fbo);
+                ASSERT_NE(pass_.gbuffer().authored_texture, 0u);
+            }
+            const auto expected = [&](GLuint binding) {
+                return old_fbo != 0 && binding == old_fbo ? pass_.gbuffer().fbo_id : binding;
+            };
+            for (const GLenum target :
+                 {GLenum{GL_DRAW_FRAMEBUFFER_BINDING}, GLenum{GL_READ_FRAMEBUFFER_BINDING}}) {
+                GLint current = 0;
+                glGetIntegerv(target, &current);
+                EXPECT_EQ(static_cast<GLuint>(current),
+                          expected(target == GL_DRAW_FRAMEBUFFER_BINDING ? draw_fbo : read_fbo));
+                if (current != 0) {
+                    EXPECT_EQ(glIsFramebuffer(static_cast<GLuint>(current)), GL_TRUE);
+                }
+            }
+            EXPECT_EQ(glGetError(), GL_NO_ERROR);
+        }
+    }
+}
+
+TEST_F(DiagnosticAttributionGl, SuccessfulInstancesRecordDistinctIdentitiesAndResolvedLods) {
+    const std::string base = "test/diagnostic_leaf.lmesh";
+    ASSERT_NE(AddMesh(base), nullptr);
+    ASSERT_NE(AddMesh(base, {1, 0, 0}), nullptr);
+    ASSERT_NE(AddMesh(base, {0, 0, -200}), nullptr);
+    pass_.register_cached_mesh("test/diagnostic_leaf.lod1.lmesh",
+                               MeshLoader::CreateFromArrays({{{-1, -1, -5}, {0, 0, 1}, {0, 0}},
+                                                             {{1, -1, -5}, {0, 0, 1}, {1, 0}},
+                                                             {{0, 1, -5}, {0, 0, 1}, {.5f, 1}}},
+                                                            {0, 1, 2}));
+    GBufferDiagnosticCapture capture(table_);
+    SetEntryState(false);
+    GLuint query = 0;
+    glGenQueries(1, &query);
+    glBeginQuery(GL_PRIMITIVES_GENERATED, query);
+    EXPECT_NO_THROW(pass_.execute(ctx_, entities_, input_));
+    glEndQuery(GL_PRIMITIVES_GENERATED);
+    GLuint primitives = 0;
+    glGetQueryObjectuiv(query, GL_QUERY_RESULT, &primitives);
+    glDeleteQueries(1, &query);
+    EXPECT_EQ(primitives, 3u);
+    EXPECT_FALSE(capture.refused());
+    EXPECT_TRUE(table_.complete_coverage());
+    const auto document = nlohmann::json::parse(table_.json());
+    ASSERT_EQ(document.at("draws").size(), 3u);
+    ASSERT_EQ(document.at("meshes").size(), 2u);
+    std::array<unsigned, 2> lod_counts{};
+    for (std::uint32_t id = 1; id <= 3; ++id) {
+        const auto* identity = table_.resolve(id);
+        ASSERT_NE(identity, nullptr);
+        EXPECT_TRUE(ValidDiagnosticId(*identity));
+        EXPECT_EQ((*identity)[0], id);
+        ASSERT_LE((*identity)[2], 1u);
+        ++lod_counts[(*identity)[2]];
+        const auto& recorded = document.at("draws").at(id - 1);
+        EXPECT_EQ(recorded.at("lod"), (*identity)[2]);
+        EXPECT_EQ(recorded.at("shader_variant"), "instanced_static_mesh");
+        const auto& resolved_mesh = document.at("meshes").at((*identity)[1] - 1);
+        EXPECT_EQ(resolved_mesh.at("path"),
+                  (*identity)[2] == 0 ? base : "test/diagnostic_leaf.lod1.lmesh");
+    }
+    EXPECT_EQ(lod_counts, (std::array<unsigned, 2>{2, 1}));
+    EXPECT_EQ(table_.resolve(4), nullptr);
+    ExpectEntryState(false);
 }
 
 void DiagnosticAttributionGl::ExpectInvalidMetadata(bool excessive_path) {
