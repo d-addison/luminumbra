@@ -79,6 +79,11 @@ uniform vec3  u_cloudSunDir;          // sun TRAVEL direction (== u_sunDirection
 
 out vec4 FragColor;
 
+#ifdef LUMIN_DIAG_IDS
+layout (location = 6) out uvec4 gDiagnosticIds;
+uniform uvec4 u_diagnosticIds;
+#endif
+
 const float PI = 3.14159265359;
 const float SUN_IRRADIANCE_SCALE = PI; // matches lighting_pass.frag
 const vec3  LUMA = vec3(0.2126, 0.7152, 0.0722);
@@ -268,4 +273,7 @@ void main() {
     color = max(color, vec3(3.5 / 255.0));
 
     FragColor = vec4(color, alpha);
+#ifdef LUMIN_DIAG_IDS
+    gDiagnosticIds = u_diagnosticIds;
+#endif
 }
