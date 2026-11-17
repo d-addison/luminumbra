@@ -1085,7 +1085,7 @@ bool FarLodSystem::build_result_current(const BuildResult& result) const {
            result.region_authority_revision == result.sdf_snapshot->region_authority_revision &&
            result.region_authority_revision ==
                m_world->far_lod_region_authority_revision(result.rx, result.rz) &&
-           m_world->is_far_lod_sdf_snapshot_current(*result.sdf_snapshot);
+           m_world->is_far_lod_sdf_snapshot_current(*result.sdf_snapshot, true);
 }
 
 void FarLodSystem::queue_completed_saves() {
