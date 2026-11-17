@@ -198,6 +198,23 @@ TEST(DiagnosticAttribution, RefusalNeverThrowsAndEveryPassExitRestoresCallerBind
               pass.find("glBindFramebuffer(GL_FRAMEBUFFER, m_gbuffer.fbo_id)"));
 }
 
+TEST(DiagnosticAttribution, InactivePassGuardsAllSnapshotAndRestoreWork) {
+    const auto pass = Body(Read(kPass), "GBufferDrawStats GBufferPass::execute(");
+    Contains(pass,
+             "const bool diagnostic_capture = GBufferDiagnosticCapture::Current() != nullptr;");
+    const auto snapshot = Body(pass, "if (diagnostic_capture)");
+    EXPECT_EQ(Count(snapshot, "glGetIntegerv("), 3u);
+    EXPECT_EQ(Count(snapshot, "glIsEnabled("), 1u);
+    EXPECT_EQ(Count(pass, "glGetIntegerv("), 3u);
+    EXPECT_EQ(Count(pass, "glIsEnabled("), 1u);
+    const auto restore = Body(pass, "ReplayRollback restore_gl(");
+    Contains(restore, "if (!diagnostic_capture) {\n            return;\n        }");
+    EXPECT_LT(restore.find("return;"), restore.find("glBindVertexArray("));
+    EXPECT_LT(restore.find("return;"), restore.find("glBindFramebuffer("));
+    Contains(pass,
+             "if (!diagnostic_capture) {\n        glBindFramebuffer(GL_FRAMEBUFFER, 0);\n    }");
+}
+
 TEST(DiagnosticAttribution, StaticInstancesSubmitOnceEachWithTheResolvedLod) {
     const auto pass = Body(Read(kPass), "void GBufferPass::geometry_pass_static_meshes(");
     Contains(pass, "batch.drawPath == LodMeshPath(batch.basePath, level)");
@@ -275,6 +292,67 @@ TEST(DiagnosticAttribution, ProducerScopeNeverAttachesOrClaimsCompleteCoverage) 
 
 namespace {
 using namespace Luminumbra::Rendering;
+
+// Use the existing GLAD entry-point hook pattern to observe the real pass.
+// Forward every call to the context and restore each entry before leaving scope.
+class PassStateProbe {
+public:
+    PassStateProbe() {
+        Active() = this;
+        glGetIntegerv = GetInteger;
+        glIsEnabled = IsEnabled;
+        glBindVertexArray = BindVertexArray;
+        glBindFramebuffer = BindFramebuffer;
+    }
+    ~PassStateProbe() {
+        glGetIntegerv = previous_get_integer_;
+        glIsEnabled = previous_is_enabled_;
+        glBindVertexArray = previous_bind_vao_;
+        glBindFramebuffer = previous_bind_fbo_;
+        Active() = nullptr;
+    }
+    PassStateProbe(const PassStateProbe&) = delete;
+    PassStateProbe& operator=(const PassStateProbe&) = delete;
+
+    unsigned integer_queries = 0, enabled_queries = 0, vao_binds = 0;
+    unsigned combined_fbo_binds = 0, draw_fbo_binds = 0, read_fbo_binds = 0;
+
+private:
+    static PassStateProbe*& Active() {
+        static PassStateProbe* probe = nullptr;
+        return probe;
+    }
+    static void APIENTRY GetInteger(GLenum name, GLint* value) {
+        auto& probe = *Active();
+        ++probe.integer_queries;
+        probe.previous_get_integer_(name, value);
+    }
+    static GLboolean APIENTRY IsEnabled(GLenum name) {
+        auto& probe = *Active();
+        ++probe.enabled_queries;
+        return probe.previous_is_enabled_(name);
+    }
+    static void APIENTRY BindVertexArray(GLuint vao) {
+        auto& probe = *Active();
+        ++probe.vao_binds;
+        probe.previous_bind_vao_(vao);
+    }
+    static void APIENTRY BindFramebuffer(GLenum target, GLuint fbo) {
+        auto& probe = *Active();
+        if (target == GL_FRAMEBUFFER) {
+            ++probe.combined_fbo_binds;
+        } else if (target == GL_DRAW_FRAMEBUFFER) {
+            ++probe.draw_fbo_binds;
+        } else if (target == GL_READ_FRAMEBUFFER) {
+            ++probe.read_fbo_binds;
+        }
+        probe.previous_bind_fbo_(target, fbo);
+    }
+    decltype(glGetIntegerv) previous_get_integer_ = glGetIntegerv;
+    decltype(glIsEnabled) previous_is_enabled_ = glIsEnabled;
+    decltype(glBindVertexArray) previous_bind_vao_ = glBindVertexArray;
+    decltype(glBindFramebuffer) previous_bind_fbo_ = glBindFramebuffer;
+};
 
 class AttributionContext {
 public:
@@ -481,17 +559,75 @@ TEST_F(DiagnosticAttributionGl, ExhaustedDoubleSidedSubmissionRestoresCallerGlSt
     }
 }
 
+TEST_F(DiagnosticAttributionGl, InactivePassDoesNoSnapshotOrRestoreOnNormalAndExceptionalExits) {
+    // Suppress producers so their pre-existing state work cannot hide pass work.
+    isolation_.layer_mask = 0;
+    for (const bool replay : {false, true}) {
+        ctx_.frozen_replay = replay;
+        SetEntryState(true);
+        PassStateProbe probe;
+        EXPECT_NO_THROW(pass_.execute(ctx_, entities_, input_));
+        EXPECT_EQ(probe.integer_queries, 0u);
+        EXPECT_EQ(probe.enabled_queries, 0u);
+        EXPECT_EQ(probe.vao_binds, 0u);
+        EXPECT_EQ(probe.combined_fbo_binds, 2u); // Pass target, then normal unbind.
+        EXPECT_EQ(probe.draw_fbo_binds, 0u);
+        EXPECT_EQ(probe.read_fbo_binds, 0u);
+    }
+    isolation_.layer_mask = Luminumbra::Client::ScenarioHarness::IsolationLayer::Terrain;
+    input_.submit_terrain_chunks = [](const glm::vec4(&)[6]) -> TerrainSubmitStats {
+        throw std::runtime_error("producer failure");
+    };
+    for (const bool replay : {false, true}) {
+        ctx_.frozen_replay = replay;
+        PassStateProbe probe;
+        EXPECT_THROW(pass_.execute(ctx_, entities_, input_), std::runtime_error);
+        EXPECT_EQ(probe.integer_queries, 0u);
+        EXPECT_EQ(probe.enabled_queries, 0u);
+        EXPECT_EQ(probe.vao_binds, 0u);
+        EXPECT_EQ(probe.combined_fbo_binds, 1u); // Devel also leaves the target on throw.
+        EXPECT_EQ(probe.draw_fbo_binds, 0u);
+        EXPECT_EQ(probe.read_fbo_binds, 0u);
+    }
+}
+
+TEST_F(DiagnosticAttributionGl, ActiveEmptyPassSnapshotsOnceAndRestoresOnEveryDispatch) {
+    isolation_.layer_mask = 0;
+    for (const bool replay : {false, true}) {
+        ctx_.frozen_replay = replay;
+        for (const bool cull : {false, true}) {
+            GBufferDiagnosticCapture capture(table_);
+            SetEntryState(cull);
+            {
+                PassStateProbe probe;
+                EXPECT_NO_THROW(pass_.execute(ctx_, entities_, input_));
+                EXPECT_EQ(probe.integer_queries, 3u);
+                EXPECT_EQ(probe.enabled_queries, 1u);
+                EXPECT_EQ(probe.vao_binds, 1u);
+                EXPECT_EQ(probe.combined_fbo_binds, 1u);
+                EXPECT_EQ(probe.draw_fbo_binds, 1u);
+                EXPECT_EQ(probe.read_fbo_binds, 1u);
+            }
+            ExpectEntryState(cull);
+        }
+    }
+}
+
 TEST_F(DiagnosticAttributionGl, ExceptionalProducerRestoresCallerGlState) {
+    GBufferDiagnosticCapture capture(table_);
     input_.submit_terrain_chunks = [](const glm::vec4(&)[6]) -> TerrainSubmitStats {
         glDisable(GL_CULL_FACE);
         glBindVertexArray(0);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         throw std::runtime_error("producer failure");
     };
-    for (const bool cull : {false, true}) {
-        SetEntryState(cull);
-        EXPECT_THROW(pass_.execute(ctx_, entities_, input_), std::runtime_error);
-        ExpectEntryState(cull);
+    for (const bool replay : {false, true}) {
+        ctx_.frozen_replay = replay;
+        for (const bool cull : {false, true}) {
+            SetEntryState(cull);
+            EXPECT_THROW(pass_.execute(ctx_, entities_, input_), std::runtime_error);
+            ExpectEntryState(cull);
+        }
     }
 }
 

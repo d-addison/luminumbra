@@ -389,14 +389,21 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
                                       entt::registry& registry,
                                       const GBufferPassInput& input) {
     LUMIN_PROFILE_ZONE_N("GL GBufferPass.execute");
-    // Save once per pass, before any binding or cull change. All producer exits,
-    // including exceptions from callbacks, restore the caller's exact bindings.
+    // Only diagnostic captures save caller state. Ordinary frames retain the
+    // normal pass bindings without capture-only driver queries or restore binds.
+    const bool diagnostic_capture = GBufferDiagnosticCapture::Current() != nullptr;
     GLint previous_vao = 0, previous_draw_fbo = 0, previous_read_fbo = 0;
-    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &previous_vao);
-    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous_draw_fbo);
-    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read_fbo);
-    const GLboolean previous_cull = glIsEnabled(GL_CULL_FACE);
+    GLboolean previous_cull = GL_FALSE;
+    if (diagnostic_capture) {
+        glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &previous_vao);
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous_draw_fbo);
+        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read_fbo);
+        previous_cull = glIsEnabled(GL_CULL_FACE);
+    }
     ReplayRollback restore_gl([=]() noexcept {
+        if (!diagnostic_capture) {
+            return;
+        }
         glBindVertexArray(static_cast<GLuint>(previous_vao));
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(previous_draw_fbo));
         glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(previous_read_fbo));
@@ -501,6 +508,9 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
         geometry_pass_skinned_meshes(ctx, input, registry, camera, fp, stats);
     }
 
+    if (!diagnostic_capture) {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
     return stats;
 }
 
