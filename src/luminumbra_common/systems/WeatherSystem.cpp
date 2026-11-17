@@ -264,7 +264,11 @@ void WeatherSystem::UpdateSchedule(std::uint64_t tick, const Vec3& anchor) {
                                       0.5f + UnitFloat(salt ^ 2) * 0.5f,
                                       static_cast<std::uint32_t>(salt)});
         // Repeated updates at the strike tick replace the single bounded event.
-        m_scheduledPresentationStrikes = m_scheduledStrikes;
+        if (!m_scheduledPresentationCompletedThrough ||
+            tick > *m_scheduledPresentationCompletedThrough) {
+            m_scheduledPresentationStrikes = m_scheduledStrikes;
+            m_scheduledPresentationStrikes.front().presentation_retained = true;
+        }
     }
 }
 
@@ -804,6 +808,11 @@ void WeatherSystem::AdoptRegionalWeather(std::uint64_t tick,
                                          std::vector<StrikeEvent> strikes,
                                          bool identity_ordered,
                                          bool restoring) {
+    if (restoring) {
+        m_scheduledPresentationStrikes.clear();
+        m_scheduledPresentationConsumed = false;
+        m_scheduledPresentationCompletedThrough = tick;
+    }
     m_regionalWeatherKeyed = identity_ordered;
     m_regionalStormIndex.clear();
     m_regionalStorms.clear();
@@ -1002,6 +1011,7 @@ void WeatherSystem::RestoreAtTick(std::uint64_t tick,
     m_hasUpdatedOrRestored = true;
     m_scheduledPresentationStrikes.clear();
     m_scheduledPresentationConsumed = false;
+    m_scheduledPresentationCompletedThrough = tick;
     if (m_schedule && !m_regional_sample) {
         UpdateFromClock(tick, region_anchor, wind);
         return;

@@ -3507,6 +3507,15 @@ void GameSession::RestoreAmbientFieldsAtTick(std::uint64_t tick) {
     m_scentRecenterPending = false;
     RestoreRegionalScent();
     BindRegionalFieldQueries();
+    if (!m_activeRegionsEnabled && !m_weatherSchedule) {
+        // Legacy schedule-free loads start with constructor ambient fields, including
+        // aether without wind advection. Match a fresh load without changing its hashes.
+        m_windFieldSystem =
+            std::make_unique<Systems::WindFieldSystem>(static_cast<int>(m_numericSeed));
+        m_aetherFieldSystem =
+            std::make_unique<Systems::AetherFieldSystem>(static_cast<int>(m_numericSeed));
+        return;
+    }
     if (m_regionalFieldsBound)
         ProjectRegionalWeather(tick, true);
     if (m_weatherSystem && m_windFieldSystem)
@@ -3959,8 +3968,7 @@ bool GameSession::PrepareWorldMetadataTo(const fs::path& save_dir,
         metadata_json["container_version"] = Persistence::WorldSaveService::kIndexedMetadataVersion;
     }
     if (m_weatherSchedule) {
-        metadata_json["container_version"] =
-            Persistence::WorldSaveService::kScheduledMetadataVersion;
+        metadata_json["container_version"] = Persistence::kScheduledWeatherMetadataVersion;
         metadata_json["weatherSchedule"] = m_weatherSchedule->canonical_bytes();
         metadata_json["weatherScheduleTick"] = GetSimulationTickCount();
     }
@@ -4482,7 +4490,7 @@ bool GameSession::ReadPreparedWorldState(
             return false;
         }
     }
-    if (!Persistence::WorldSaveService::read_weather_schedule(
+    if (!Persistence::ReadWeatherSchedule(
             save_dir, state.weather_schedule, state.weather_schedule_tick, &errors, stop)) {
         error = errors.empty() ? "Corrupt weather schedule." : errors.front();
         // Preserve legacy damaged-snapshot invalidation, while new schedule/version
@@ -4702,8 +4710,7 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
     if (!saved.ledger && replace_weather) {
         m_ambientFieldAnchor = m_metadata.spawnPoint;
         m_simulationClock.reset(m_weatherSchedule ? saved.weather_schedule_tick : 0);
-        if (m_weatherSchedule)
-            RestoreAmbientFieldsAtTick(saved.weather_schedule_tick);
+        RestoreAmbientFieldsAtTick(GetSimulationTickCount());
     }
     if (m_energyFieldState && saved.energy)
         *m_energyFieldState = std::move(*saved.energy);

@@ -35,11 +35,14 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -119,6 +122,8 @@ struct StrikeEvent {
     float world_z = 0.0f;          // strike ground position Z (world metres)
     float magnitude = 0.0f;        // [0, 1] strike strength (drives pulse/thunder)
     std::uint32_t storm_salt = 0;  // originating storm cell's seed_salt (provenance)
+    // Presentation copies only; excluded from authority, hashes and persistence.
+    bool presentation_retained = false;
 };
 
 // Replicated weather snapshot at a world position -- what the render overlay +
@@ -303,6 +308,7 @@ private:
     std::vector<StrikeEvent> m_scheduledStrikes;
     std::vector<StrikeEvent> m_scheduledPresentationStrikes; // bounded to one declared event
     mutable bool m_scheduledPresentationConsumed = false;
+    std::optional<std::uint64_t> m_scheduledPresentationCompletedThrough;
     bool m_hasUpdatedOrRestored = false; // setup guard only; never saved or hashed
     Vec3 m_scheduleAnchor{};
     void UpdateSchedule(std::uint64_t tick, const Vec3& anchor);
@@ -380,3 +386,16 @@ private:
 };
 
 } // namespace Luminumbra::Systems
+
+namespace Luminumbra::Persistence {
+
+// Schedule-bearing metadata only; region payloads retain their existing version.
+inline constexpr std::uint16_t kScheduledWeatherMetadataVersion = 4;
+// Stages both outputs; malformed or unsupported envelopes leave them unchanged.
+bool ReadWeatherSchedule(const std::filesystem::path& save_dir,
+                         std::shared_ptr<const Systems::WeatherSchedule>& schedule,
+                         std::uint64_t& tick,
+                         std::vector<std::string>* errors = nullptr,
+                         const std::stop_token& stop = {});
+
+} // namespace Luminumbra::Persistence

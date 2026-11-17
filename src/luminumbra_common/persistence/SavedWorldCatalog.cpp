@@ -6,6 +6,7 @@
 #include "WorldPersistenceRoundtrip.h"
 #include "WorldSaveService.h"
 #include "core/FilesystemPath.h"
+#include "systems/WeatherSystem.h"
 #include "world/TerrainPresetLoader.h"
 #include "world/WorldClock.h"
 
@@ -193,7 +194,7 @@ SavedWorld InspectSavedWorld(const fs::path& root,
             json.at("container_version").is_number_integer() &&
             (json.at("container_version") == WorldSaveService::kContainerVersion ||
              json.at("container_version") == WorldSaveService::kIndexedMetadataVersion ||
-             json.at("container_version") == WorldSaveService::kScheduledMetadataVersion);
+             json.at("container_version") == kScheduledWeatherMetadataVersion);
         if (!current_container && !WorldSaveService::validate_save(save, &errors, stop)) {
             result.error = errors.empty() ? "Corrupt world save." : errors.front();
             return result;
@@ -201,8 +202,8 @@ SavedWorld InspectSavedWorld(const fs::path& root,
         // Admit the envelope even when payload validation is deferred to preparation.
         std::shared_ptr<const Systems::WeatherSchedule> weather_schedule;
         std::uint64_t weather_tick = 0;
-        if (current_container && !WorldSaveService::read_weather_schedule(
-                                     save, weather_schedule, weather_tick, &errors, stop)) {
+        if (current_container &&
+            !ReadWeatherSchedule(save, weather_schedule, weather_tick, &errors, stop)) {
             result.error = errors.empty() ? "Corrupt weather schedule metadata." : errors.front();
             return result;
         }

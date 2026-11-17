@@ -3609,14 +3609,14 @@ std::string CheckMetadataValue(const nlohmann::json& metadata,
         return "corrupt world metadata container version";
     if (version != WorldSaveService::kContainerVersion &&
         version != WorldSaveService::kIndexedMetadataVersion &&
-        version != WorldSaveService::kScheduledMetadataVersion) {
+        version != kScheduledWeatherMetadataVersion) {
         if (version >= 0 && version < WorldSaveService::kContainerVersion)
             return WorldSaveService::kObsoleteWorldMessage;
-        if (version > WorldSaveService::kScheduledMetadataVersion)
+        if (version > kScheduledWeatherMetadataVersion)
             return "unsupported future world metadata container version " + version.dump();
         return "corrupt world metadata container version";
     }
-    const bool scheduled = version == WorldSaveService::kScheduledMetadataVersion;
+    const bool scheduled = version == kScheduledWeatherMetadataVersion;
     if (metadata.contains("weatherSchedule") != scheduled ||
         metadata.contains("weatherScheduleTick") != scheduled)
         return "corrupt world metadata: weather schedule version mismatch";
@@ -4415,7 +4415,7 @@ bool WorldSaveService::finalize_indexed_envelope(const std::filesystem::path& sa
             return false;
         }
         const auto metadata_version = metadata.contains("weatherSchedule")
-                                          ? kScheduledMetadataVersion
+                                          ? kScheduledWeatherMetadataVersion
                                           : kIndexedMetadataVersion;
         if (metadata.at("container_version") != metadata_version ||
             !metadata.contains("snapshotFormat")) {
@@ -4512,7 +4512,7 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
     }
     if (scope.engaged()) {
         metadata["container_version"] = metadata.contains("weatherSchedule")
-                                            ? kScheduledMetadataVersion
+                                            ? kScheduledWeatherMetadataVersion
                                             : kIndexedMetadataVersion;
         metadata["snapshotFormat"] = 1;
     }
@@ -4664,12 +4664,11 @@ bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes
     return true;
 }
 
-bool WorldSaveService::read_weather_schedule(
-    const std::filesystem::path& save_dir,
-    std::shared_ptr<const Systems::WeatherSchedule>& schedule,
-    std::uint64_t& tick,
-    std::vector<std::string>* errors,
-    const std::stop_token& stop) {
+bool ReadWeatherSchedule(const std::filesystem::path& save_dir,
+                         std::shared_ptr<const Systems::WeatherSchedule>& schedule,
+                         std::uint64_t& tick,
+                         std::vector<std::string>* errors,
+                         const std::stop_token& stop) {
     nlohmann::json metadata;
     bool missing = false;
     SavedJsonFailure failure = SavedJsonFailure::None;
