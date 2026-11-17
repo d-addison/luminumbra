@@ -360,7 +360,7 @@ protected:
             } else if (kind == 23)
                 json.erase("container_version"); // mixed old metadata and current chunks
             else if (kind == 24)
-                json["container_version"] = 4;
+                json["container_version"] = Persistence::kScheduledWeatherMetadataVersion + 1;
             else if (kind == 25)
                 json["container_version"] = "2";
             else if (kind == 27)
@@ -4620,7 +4620,7 @@ TEST_F(WorldOpenRefusal, ScheduleAdmissionIsAtomicAcrossReadersAndWriters) {
         EXPECT_EQ(anchor, Vec3(0.0f, height, 0.0f));
     }
     std::vector<nlohmann::json> cases;
-    for (const auto version : {2, 3, 5}) {
+    for (const auto version : {1, 2, 3, P::kScheduledWeatherMetadataVersion + 1}) {
         auto bad = valid;
         bad["container_version"] = version;
         cases.push_back(bad);
@@ -4769,6 +4769,113 @@ TEST_F(WorldOpenRefusal, ScheduleAdmissionIsAtomicAcrossReadersAndWriters) {
     EXPECT_EQ(session.WorldRevision(), revision);
 }
 
+TEST(WeatherScheduleTest, ScheduledUpdatesNeverExposeProceduralStormsOrPerturbWind) {
+    const auto script = ShortWeatherScript();
+    const Vec3 anchor(96.0f, 18.0f, -192.0f);
+    const Systems::StormCell storm{.center_world = Vec2(anchor.x, anchor.z),
+                                   .velocity = Vec2(25.0f),
+                                   .intensity = 1.0f,
+                                   .spawn_tick = 0,
+                                   .lifetime_ticks = 240,
+                                   .seed_salt = 1};
+    for (const bool regional : {false, true}) {
+        for (const bool keyed : {false, true}) {
+            SCOPED_TRACE(testing::Message() << regional << '/' << keyed);
+            Systems::WeatherSystem weather(1337);
+            Systems::WindFieldSystem wind(1337), reference_wind(1337);
+            if (regional) {
+                weather.BindRegionalBackend([](const Vec3&) { return Systems::WeatherSample{}; },
+                                            [] { return std::string("regional-weather"); });
+            }
+            ASSERT_TRUE(weather.SetSchedule(script));
+            EXPECT_TRUE(weather.StormCells().empty());
+            // Regional projection and compatibility adoption must not leak procedural cells.
+            weather.AdoptRegionalWeather(5, anchor, {storm}, {}, keyed);
+            weather.PutRegionalStorm(storm);
+            EXPECT_TRUE(weather.StormCells().empty());
+            EXPECT_EQ(weather.active_storm_count(), 0);
+            EXPECT_EQ(weather.storm_candidates_at(anchor), 0u);
+            wind.InjectStormPerturbation({Vec2(anchor.x, anchor.z), 96.0f, Vec2(25.0f), 1.0f});
+            weather.UpdateFromClock(6, anchor, wind);
+            reference_wind.Update(6, anchor);
+            EXPECT_EQ(wind.ComputeWindSubHash(), reference_wind.ComputeWindSubHash());
+            weather.Update(7, anchor, &wind);
+            EXPECT_TRUE(weather.StormCells().empty());
+            weather.RestoreAtTick(8, anchor, wind);
+            EXPECT_TRUE(weather.StormCells().empty());
+            reference_wind.Update(8, anchor);
+            EXPECT_EQ(wind.ComputeWindSubHash(), reference_wind.ComputeWindSubHash());
+        }
+    }
+}
+
+TEST(WeatherScheduleTest, RestoresAndCopiesKeepStrikeDeliveryAndPresentationSeparate) {
+    for (const bool regional : {false, true}) {
+        for (const bool adopted : {false, true}) {
+            for (const bool has_strike : {false, true}) {
+                for (const std::uint64_t restore_tick : {6u, 7u, 8u, 9u, 10u}) {
+                    SCOPED_TRACE(testing::Message() << regional << '/' << adopted << '/'
+                                                    << has_strike << '/' << restore_tick);
+                    auto script = ShortWeatherScript();
+                    if (!has_strike) {
+                        script.strike_tick.reset();
+                    }
+                    Systems::WeatherSystem weather(1337);
+                    Systems::WindFieldSystem wind(1337);
+                    if (regional) {
+                        weather.BindRegionalBackend(
+                            [](const Vec3&) { return Systems::WeatherSample{}; },
+                            [] { return std::string("regional-weather"); });
+                    }
+                    ASSERT_TRUE(weather.SetSchedule(script));
+                    weather.Update(7, Vec3(0.0f), &wind);
+                    const auto hash_at_strike = weather.ComputeWeatherSubHash();
+                    if (adopted) {
+                        weather.AdoptRegionalWeather(
+                            restore_tick, Vec3(0.0f), {}, {}, regional, true);
+                    } else {
+                        weather.RestoreAtTick(restore_tick, Vec3(0.0f), wind);
+                    }
+                    EXPECT_TRUE(weather.StrikesThisTick().empty());
+                    EXPECT_TRUE(weather.StrikeSchedule().empty());
+                    EXPECT_EQ(weather.live_strike_count(), 0);
+                    if (restore_tick == 7) {
+                        EXPECT_EQ(weather.ComputeWeatherSubHash(), hash_at_strike);
+                    }
+                    auto copied = weather;
+                    auto moved = std::move(copied);
+                    Systems::WeatherSystem assigned(1337), move_assigned(1337);
+                    assigned = weather;
+                    move_assigned = std::move(assigned);
+                    for (auto* system : {&weather, &moved, &move_assigned}) {
+                        // Repeated access/update at the restored tick cannot redeliver.
+                        system->Update(restore_tick, Vec3(0.0f), &wind);
+                        EXPECT_TRUE(system->StrikesThisTick().empty());
+                        EXPECT_TRUE(system->StrikeSchedule().empty());
+                        if (restore_tick == 6) {
+                            system->Update(7, Vec3(0.0f), &wind);
+                            EXPECT_EQ(system->StrikesThisTick().size(), has_strike ? 1u : 0u);
+                            auto presented = *system;
+                            auto moved_presentation = std::move(presented);
+                            assigned = *system;
+                            move_assigned = std::move(assigned);
+                            EXPECT_EQ(moved_presentation.StrikeSchedule().size(),
+                                      has_strike ? 1u : 0u);
+                            EXPECT_EQ(move_assigned.StrikeSchedule().size(), has_strike ? 1u : 0u);
+                        }
+                        system->Update(8, Vec3(0.0f), &wind);
+                        EXPECT_TRUE(system->StrikesThisTick().empty());
+                        EXPECT_EQ(system->StrikeSchedule().size(),
+                                  restore_tick == 6 && has_strike ? 1u : 0u);
+                        system->Update(10, Vec3(0.0f), &wind);
+                        EXPECT_TRUE(system->StrikeSchedule().empty());
+                    }
+                }
+            }
+        }
+    }
+}
+
 TEST_F(WorldOpenRefusal, ScheduleClockWithoutCalendarDoesNotRewindAnExistingLedger) {
     const auto input = root / "schedule-ledger";
     const auto script = ShortWeatherScript();
@@ -4806,14 +4913,16 @@ void ExpectScriptWeather(const Systems::WeatherSystem& weather,
     EXPECT_EQ(weather.SampleAt(Vec3(0.0f)).precip_intensity, expected.precip_intensity);
     EXPECT_EQ(weather.SampleAt(Vec3(0.0f)).storm_intensity, expected.storm_intensity);
     const bool due = script.strike_tick && tick == *script.strike_tick;
-    EXPECT_EQ(weather.StrikesThisTick().size(), due ? 1u : 0u);
+    EXPECT_EQ(weather.StrikesThisTick().size(), due && !restored ? 1u : 0u);
     EXPECT_EQ(weather.StrikeSchedule().size(), due && !restored ? 1u : 0u);
-    EXPECT_EQ(weather.live_strike_count(), due ? 1 : 0);
+    EXPECT_EQ(weather.live_strike_count(), due && !restored ? 1 : 0);
 }
 
 void ExpectRestoredStrike(const GameSession& target,
                           const WeatherScript& script,
                           const std::string& hash,
+                          const std::string& wind_hash,
+                          const std::string& aether_hash,
                           const Vec3& anchor,
                           const Systems::StrikeEvent& strike) {
     const auto* restored = target.GetWeatherSystem();
@@ -4821,7 +4930,18 @@ void ExpectRestoredStrike(const GameSession& target,
     ASSERT_NO_FATAL_FAILURE(ExpectScriptWeather(*restored, script, 7, true));
     EXPECT_EQ(restored->ScheduleAnchor(), anchor);
     EXPECT_EQ(restored->ComputeWeatherSubHash(), hash);
-    const auto rebuilt = restored->StrikesThisTick();
+    ASSERT_NE(target.GetWindFieldSystem(), nullptr);
+    ASSERT_NE(target.GetAetherFieldSystem(), nullptr);
+    EXPECT_EQ(target.GetWindFieldSystem()->last_tick(), 7u);
+    EXPECT_EQ(target.GetAetherFieldSystem()->last_tick(), 7u);
+    EXPECT_EQ(target.GetWindFieldSystem()->ComputeWindSubHash(), wind_hash);
+    EXPECT_EQ(target.GetAetherFieldSystem()->ComputeAetherSubHash(), aether_hash);
+    // Rewinding to before delivery must reproduce the original coordinates.
+    auto replay = *restored;
+    Systems::WindFieldSystem wind(1337);
+    replay.RestoreAtTick(6, anchor, wind);
+    replay.Update(7, anchor, &wind);
+    const auto rebuilt = replay.StrikesThisTick();
     ASSERT_EQ(rebuilt.size(), 1u);
     EXPECT_EQ(rebuilt.front().world_x, strike.world_x);
     EXPECT_EQ(rebuilt.front().world_z, strike.world_z);
@@ -4849,10 +4969,10 @@ void ExpectScheduledCatchUp(GameSession& target, const fs::path& before_strike, 
             GameSession::PrepareWorldState(target.CaptureWorldPreparationOptions(), before_strike);
         ASSERT_TRUE(target.AdoptPreparedWorld(prepared)) << target.GetWorldOpenError();
     }
-    ASSERT_EQ(target.GetSimulationTickCount(), 4u);
+    ASSERT_EQ(target.GetSimulationTickCount(), 6u);
     target.SetReplicatedSimulationAnchors({});
     // One render frame catches up across tick 7 and polls weather at tick 8.
-    ASSERT_EQ(target.TickSimulation(target.GetSimulationClock().fixed_dt() * 4), 4u);
+    ASSERT_EQ(target.TickSimulation(target.GetSimulationClock().fixed_dt() * 2), 2u);
     ASSERT_FALSE(target.GetRegionSchedulerFault());
     const auto* caught_up = target.GetWeatherSystem();
     ASSERT_NE(caught_up, nullptr);
@@ -4888,7 +5008,7 @@ TEST_P(WeatherAnchorSaveTest, SavedStrikeAnchorSurvivesRespawnChangeAcrossLoadBa
     for (int index = 0; index < 7; ++index) {
         ASSERT_EQ(source.TickSimulation(source.GetSimulationClock().fixed_dt()), 1u);
         ASSERT_FALSE(source.GetRegionSchedulerFault());
-        if (index == 3) {
+        if (index == 5) {
             ASSERT_TRUE(source.SaveWorldStateTo(before_strike, nullptr, true));
         }
     }
@@ -4898,6 +5018,8 @@ TEST_P(WeatherAnchorSaveTest, SavedStrikeAnchorSurvivesRespawnChangeAcrossLoadBa
     const auto strikes = weather->StrikesThisTick();
     ASSERT_EQ(strikes.size(), 1u);
     const auto hash = weather->ComputeWeatherSubHash();
+    const auto wind_hash = source.GetWindFieldSystem()->ComputeWindSubHash();
+    const auto aether_hash = source.GetAetherFieldSystem()->ComputeAetherSubHash();
     const auto anchor = weather->ScheduleAnchor();
     ASSERT_NE(anchor, respawn);
     // Normal exit updates respawn after the final simulation tick.
@@ -4918,6 +5040,8 @@ TEST_P(WeatherAnchorSaveTest, SavedStrikeAnchorSurvivesRespawnChangeAcrossLoadBa
     } else {
         ASSERT_TRUE(target.CreateTransientWorld("Anchor adoption", "1337", "default"));
         target.SetSpawnPoint(respawn);
+        // Adoption must replace live ambient fields as well as constructor defaults.
+        ASSERT_EQ(target.TickSimulation(target.GetSimulationClock().fixed_dt() * 2), 2u);
         if (backend == 1) {
             ASSERT_TRUE(target.LoadWorldStateFrom(source.GetWorldSaveDir()))
                 << target.GetWorldOpenError();
@@ -4927,11 +5051,49 @@ TEST_P(WeatherAnchorSaveTest, SavedStrikeAnchorSurvivesRespawnChangeAcrossLoadBa
             ASSERT_TRUE(target.AdoptPreparedWorld(prepared)) << target.GetWorldOpenError();
         }
     }
-    ASSERT_NO_FATAL_FAILURE(ExpectRestoredStrike(target, script, hash, anchor, strikes.front()));
+    ASSERT_NO_FATAL_FAILURE(ExpectRestoredStrike(
+        target, script, hash, wind_hash, aether_hash, anchor, strikes.front()));
     ASSERT_NO_FATAL_FAILURE(ExpectCompletedPresentationSuppressed(target));
     if (backend != 0) {
         ASSERT_NO_FATAL_FAILURE(ExpectScheduledCatchUp(target, before_strike, backend));
     }
+}
+
+TEST_P(WeatherAnchorSaveTest, InitialScheduledAmbientHashesSurviveEveryLoadBackend) {
+    const auto [regional_mode, backend] = GetParam();
+    GameSession source, target;
+    for (auto* session : {&source, &target}) {
+        session->SetRootPath(RootString());
+        session->SetJobSystem(&jobs);
+        session->SetActiveRegionsEnabled(regional_mode != 0);
+    }
+    ASSERT_TRUE(source.SetWeatherSchedule(ShortWeatherScript()));
+    ASSERT_TRUE(source.CreateWorld("Initial scheduled fields", "1337", "default"));
+    ASSERT_EQ(source.GetSimulationTickCount(), 0u);
+    ASSERT_TRUE(source.SaveWorld());
+    if (backend == 0) {
+        ASSERT_TRUE(target.LoadWorld(source.GetMetadata().worldId)) << target.GetWorldOpenError();
+    } else {
+        ASSERT_TRUE(target.CreateTransientWorld("Initial field adoption", "1337", "default"));
+        ASSERT_EQ(target.TickSimulation(target.GetSimulationClock().fixed_dt() * 2), 2u);
+        if (backend == 1) {
+            ASSERT_TRUE(target.LoadWorldStateFrom(source.GetWorldSaveDir()))
+                << target.GetWorldOpenError();
+        } else {
+            const auto prepared = GameSession::PrepareWorldState(
+                target.CaptureWorldPreparationOptions(), source.GetWorldSaveDir());
+            ASSERT_TRUE(target.AdoptPreparedWorld(prepared)) << target.GetWorldOpenError();
+        }
+    }
+    EXPECT_EQ(target.GetSimulationTickCount(), 0u);
+    EXPECT_EQ(target.GetWindFieldSystem()->last_tick(), 0u);
+    EXPECT_EQ(target.GetAetherFieldSystem()->last_tick(), 0u);
+    EXPECT_EQ(target.GetWeatherSystem()->ComputeWeatherSubHash(),
+              source.GetWeatherSystem()->ComputeWeatherSubHash());
+    EXPECT_EQ(target.GetWindFieldSystem()->ComputeWindSubHash(),
+              source.GetWindFieldSystem()->ComputeWindSubHash());
+    EXPECT_EQ(target.GetAetherFieldSystem()->ComputeAetherSubHash(),
+              source.GetAetherFieldSystem()->ComputeAetherSubHash());
 }
 
 TEST_F(WorldOpenRefusal, ScheduledMetadataRoundTripsBothClockBackendsAndLegacyBytesStayExact) {
@@ -4991,7 +5153,24 @@ TEST_F(WorldOpenRefusal, ScheduledMetadataRoundTripsBothClockBackendsAndLegacyBy
     }
     const std::string legacy = "{\"container_version\":2,\"extension\":\"retained\"}\n";
     const auto output = root / "legacy-metadata";
+    fs::create_directories(output);
     ASSERT_TRUE(WorldSaveService::save_metadata(legacy, output));
     EXPECT_EQ(Read(output / "world_info.json"), legacy);
+    const std::string obsolete = "{\"container_version\":1,\"extension\":\"retained\"}\n";
+    const auto obsolete_output = root / "obsolete-metadata";
+    fs::create_directories(obsolete_output);
+    ASSERT_TRUE(WorldSaveService::save_metadata(obsolete, obsolete_output));
+    EXPECT_EQ(Read(obsolete_output / "world_info.json"), obsolete);
+    const nlohmann::json indexed_metadata = {
+        {"container_version", WorldSaveService::kIndexedMetadataVersion},
+        {"snapshotFormat", 1},
+        {"extension", "retained"}};
+    const auto indexed_bytes = indexed_metadata.dump(4) + "\n";
+    const auto indexed_output = root / "indexed-metadata";
+    fs::create_directories(indexed_output);
+    ASSERT_TRUE(WorldSaveService::save_metadata(indexed_bytes, indexed_output));
+    EXPECT_EQ(Read(indexed_output / "world_info.json"), indexed_bytes);
+    ASSERT_TRUE(WorldSaveService::save_metadata(indexed_bytes, indexed_output));
+    EXPECT_EQ(Read(indexed_output / "world_info.json"), indexed_bytes);
 }
 } // namespace

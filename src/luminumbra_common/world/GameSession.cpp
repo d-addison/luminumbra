@@ -3521,8 +3521,12 @@ void GameSession::RestoreAmbientFieldsAtTick(std::uint64_t tick) {
         ProjectRegionalWeather(tick, true);
     if (m_weatherSystem && m_windFieldSystem)
         m_weatherSystem->RestoreAtTick(tick, m_ambientFieldAnchor, *m_windFieldSystem);
-    if (m_aetherFieldSystem)
-        m_aetherFieldSystem->Update(tick, m_ambientFieldAnchor, m_windFieldSystem.get());
+    if (m_aetherFieldSystem) {
+        // Nonregional tick zero is the constructor's emission-only initial state.
+        const bool initial_schedule = !m_activeRegionsEnabled && m_weatherSchedule && tick == 0;
+        m_aetherFieldSystem->Update(
+            tick, m_ambientFieldAnchor, initial_schedule ? nullptr : m_windFieldSystem.get());
+    }
 }
 
 namespace {
@@ -4737,8 +4741,12 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
     }
     if (!saved.ledger && replace_weather) {
         m_simulationClock.reset(m_weatherSchedule ? saved.weather_schedule_tick : 0);
+        if (m_weatherSchedule) {
+            m_ambientFieldAnchor = saved.weather_schedule_anchor;
+            RestoreAmbientFieldsAtTick(saved.weather_schedule_tick);
+        }
     }
-    if (m_weatherSchedule && m_weatherSystem && m_windFieldSystem) {
+    if (saved.ledger && m_weatherSchedule && m_weatherSystem && m_windFieldSystem) {
         // The respawn and ambient anchors may have changed since weather's saved tick.
         m_weatherSystem->RestoreAtTick(
             saved.weather_schedule_tick, saved.weather_schedule_anchor, *m_windFieldSystem);

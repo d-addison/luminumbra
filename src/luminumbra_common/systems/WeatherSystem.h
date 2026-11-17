@@ -262,6 +262,9 @@ public:
     // tick). Consumed by  (strike schedule) +  (precip emitters).
     [[nodiscard]] const std::vector<StormCell>& StormCells() const;
     [[nodiscard]] int active_storm_count() const noexcept {
+        if (m_schedule) {
+            return 0;
+        }
         return static_cast<int>(m_regionalWeatherKeyed ? m_regionalStorms.size()
                                                        : m_storm_cells.size());
     }

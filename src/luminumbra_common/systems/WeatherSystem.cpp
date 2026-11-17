@@ -237,6 +237,8 @@ bool WeatherSystem::SetSchedule(const WeatherSchedule& schedule) {
         return false;
     m_schedule = schedule;
     m_scheduleBytes = schedule.canonical_bytes();
+    m_storm_cells.clear();
+    m_strikes.clear();
     m_scheduledStrikes.reserve(1);
     m_scheduledPresentations.reserve(1);
     UpdateSchedule(0, Vec3(0.0f));
@@ -264,10 +266,11 @@ void WeatherSystem::UpdateSchedule(std::uint64_t tick, const Vec3& anchor) {
                              anchor.z + (UnitFloat(salt ^ 1) * 2.0f - 1.0f) * 32.0f,
                              0.5f + UnitFloat(salt ^ 2) * 0.5f,
                              static_cast<std::uint32_t>(salt)};
-    if (tick == strike_tick)
+    const bool undelivered =
+        !m_scheduledDeliveredThrough || strike_tick > *m_scheduledDeliveredThrough;
+    if (tick == strike_tick && undelivered)
         m_scheduledStrikes.push_back(strike);
-    if ((!m_scheduledDeliveredThrough || strike_tick > *m_scheduledDeliveredThrough) &&
-        m_scheduledPresentations.empty())
+    if (undelivered && m_scheduledPresentations.empty())
         m_scheduledPresentations.push_back(strike);
 }
 
@@ -367,6 +370,11 @@ WeatherSystem::WeatherSystem(const WeatherSystem& other)
     , m_scratch_pressure(other.m_scratch_pressure)
     , m_scratch_temperature(other.m_scratch_temperature)
     , m_scratch_humidity(other.m_scratch_humidity) {
+    if (m_schedule) {
+        // Empty vector copies need the same one-event bound as initial installation.
+        m_scheduledStrikes.reserve(1);
+        m_scheduledPresentations.reserve(1);
+    }
     if (other.m_sessionBinding.session) {
         SelectRegionalBackend(false);
     }
@@ -925,6 +933,10 @@ void WeatherSystem::AdoptRegionalWeather(std::uint64_t tick,
     m_regionalStrikesDeliveredThrough = restoring ? std::optional(tick) : std::nullopt;
     m_hiddenRegionalStrikes = 0;
     m_regionalStormCacheValid = m_regionalStrikeCacheValid = false;
+    if (m_schedule && restoring) {
+        m_scheduledDeliveredThrough = tick;
+        m_scheduledPresentations.clear();
+    }
     if (identity_ordered) {
         for (const auto& storm : storms) {
             PutRegionalStorm(storm);
@@ -938,13 +950,14 @@ void WeatherSystem::AdoptRegionalWeather(std::uint64_t tick,
         RebuildRegionalStormIndex();
     }
     RefreshRegionalWeather(tick, anchor);
-    if (m_schedule && restoring) {
-        m_scheduledDeliveredThrough = tick;
-        m_scheduledPresentations.clear();
-    }
 }
 
 const std::vector<StormCell>& WeatherSystem::StormCells() const {
+    if (m_schedule) {
+        // A schedule declares weather directly, without procedural storm cells.
+        static const std::vector<StormCell> empty;
+        return empty;
+    }
     if (!m_regionalWeatherKeyed) {
         return m_storm_cells;
     }
@@ -1028,6 +1041,9 @@ const WeatherSystem::StormEntries* WeatherSystem::RegionalStormEntries(const Vec
 }
 
 std::size_t WeatherSystem::storm_candidates_at(const Vec3& world_pos) const {
+    if (m_schedule) {
+        return 0;
+    }
     if (!HasRegionalBackend()) {
         return m_storm_cells.size();
     }
@@ -1096,6 +1112,12 @@ void WeatherSystem::UpdateFromClock(std::uint64_t tick,
                                     const Vec3& region_anchor,
                                     WindFieldSystem& wind) {
     m_hasUpdatedOrRestored = true;
+    if (m_schedule) {
+        wind.ClearStormPerturbations();
+        wind.Update(tick, region_anchor);
+        Update(tick, region_anchor, &wind);
+        return;
+    }
     if (HasRegionalBackend()) {
         m_last_tick = tick;
         wind.Update(tick, region_anchor);
@@ -1117,9 +1139,9 @@ void WeatherSystem::RestoreAtTick(std::uint64_t tick,
                                   WindFieldSystem& wind) {
     m_hasUpdatedOrRestored = true;
     if (m_schedule) {
-        UpdateFromClock(tick, region_anchor, wind);
         m_scheduledDeliveredThrough = tick;
         m_scheduledPresentations.clear();
+        UpdateFromClock(tick, region_anchor, wind);
         return;
     }
     if (HasRegionalBackend()) {

@@ -209,10 +209,11 @@ TEST(LiveStrikeTracker, RestoredCompletedPresentationStaysHiddenAfterTrackerRese
                     weather.RestoreAtTick(saved_tick, Vec3(8.0f), wind);
                 }
                 EXPECT_TRUE(weather.StrikeSchedule().empty());
-                EXPECT_EQ(weather.StrikesThisTick().size(), saved_tick == 7 ? 1u : 0u);
+                EXPECT_TRUE(weather.StrikesThisTick().empty());
                 // Repeating the same restored tick must not reveal it again.
                 weather.UpdateFromClock(saved_tick, Vec3(8.0f), wind);
                 EXPECT_TRUE(weather.StrikeSchedule().empty());
+                EXPECT_TRUE(weather.StrikesThisTick().empty());
                 tracker.Clear();
                 std::size_t consumed = 0;
                 for (std::uint64_t tick = saved_tick + 1; tick <= 11; ++tick) {
@@ -227,6 +228,7 @@ TEST(LiveStrikeTracker, RestoredCompletedPresentationStaysHiddenAfterTrackerRese
                 weather.RestoreAtTick(4, Vec3(8.0f), wind);
                 weather.UpdateFromClock(7, Vec3(8.0f), wind);
                 ASSERT_EQ(weather.StrikeSchedule().size(), 1u);
+                EXPECT_EQ(weather.StrikesThisTick().size(), 1u);
             }
         }
     }

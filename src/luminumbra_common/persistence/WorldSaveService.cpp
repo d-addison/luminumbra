@@ -3686,7 +3686,7 @@ std::string CheckMetadataValue(const nlohmann::json& metadata,
 std::string CheckMetadataVersionInput(const nlohmann::json& metadata) {
     if (metadata.contains("weatherSchedule") || metadata.contains("weatherScheduleTick") ||
         metadata.contains("weatherScheduleAnchor") ||
-        (metadata.contains("container_version") &&
+        (metadata.contains("container_version") && metadata.at("container_version") != 1 &&
          metadata.at("container_version") != WorldSaveService::kContainerVersion &&
          metadata.at("container_version") != WorldSaveService::kIndexedMetadataVersion))
         return CheckMetadataValue(metadata);
