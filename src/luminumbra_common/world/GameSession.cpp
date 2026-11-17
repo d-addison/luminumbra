@@ -734,6 +734,7 @@ void GameSession::ApplyWaterResolutionWiring() {
     if (!m_worldSystem) {
         return;
     }
+    m_waterSystem->SetRegionalScheduling(m_activeRegionsEnabled);
     m_worldSystem->SetWaterSimResolution(static_cast<int>(m_waterHighResEnabled
                                                               ? Systems::WaterDetailLevel::High
                                                               : Systems::WaterDetailLevel::Medium));
@@ -1527,6 +1528,18 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             }
             if (m_regionFault)
                 return i + 1;
+            if (m_activeRegionsEnabled && m_waterSystem) {
+                const auto& local = m_activeRegionLedger.local_anchor();
+                const auto anchors =
+                    m_replicatedSimulationAnchors
+                        ? std::span<const Vec3>(*m_replicatedSimulationAnchors)
+                        : (local ? std::span<const Vec3>(&*local, 1) : std::span<const Vec3>{});
+                m_waterSystem->UpdateRegionalFromSimulation(m_registry,
+                                                            anchors,
+                                                            m_activeRegionLedger,
+                                                            m_regionSchedule,
+                                                            m_regionCompletedWork);
+            }
             if (m_activeRegionsEnabled) {
                 PublishRegionCompletedWork(
                     field_candidate, scheduled_energy, defer_water_authority);

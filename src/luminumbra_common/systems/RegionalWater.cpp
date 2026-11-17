@@ -10,10 +10,57 @@
 #include <limits>
 #include <map>
 #include <stdexcept>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 
 namespace Luminumbra::Systems::RegionalWater {
+Columns SelectColumns(std::span<const Vec3> anchors,
+                      std::span<const Vec3> sources,
+                      const world::ActiveRegionLedger& ledger) {
+    if (anchors.size() > kMaxSimulationAnchors || sources.size() > kMaxSimulationSources) {
+        throw std::invalid_argument("Regional water simulation input cap exceeded");
+    }
+    Columns columns;
+    const auto append = [&](int x, int z) {
+        if (x < Chunk::kPackedMinXz || x > Chunk::kPackedMaxXz || z < Chunk::kPackedMinXz ||
+            z > Chunk::kPackedMaxXz) {
+            return;
+        }
+        const auto owner = world::ActiveRegionLedger::region_at(
+            {static_cast<float>(x * CHUNK_SIZE_X), 0.0f, static_cast<float>(z * CHUNK_SIZE_Z)});
+        const auto found = ledger.records().find(owner);
+        if (found != ledger.records().end() && found->second.state != world::RegionState::Frozen) {
+            columns.ids[columns.size++] = Chunk::calculate_id({x, 0, z});
+        }
+    };
+    for (const auto& anchor : anchors) {
+        ++columns.inputs_visited;
+        if (!world::ActiveRegionLedger::valid_anchor(anchor)) {
+            continue;
+        }
+        const auto centre = SHIELD_WorldSystem::world_to_chunk_coords({anchor.x, 0.0f, anchor.z});
+        for (int dz = -1; dz <= 1; ++dz) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                append(centre.x + dx, centre.z + dz);
+            }
+        }
+    }
+    for (const auto& source : sources) {
+        ++columns.inputs_visited;
+        if (!world::ActiveRegionLedger::valid_anchor(source)) {
+            throw std::invalid_argument("Invalid regional water source position");
+        }
+        const auto coords = SHIELD_WorldSystem::world_to_chunk_coords({source.x, 0.0f, source.z});
+        append(coords.x, coords.z);
+    }
+    const auto end = columns.ids.begin() + static_cast<std::ptrdiff_t>(columns.size);
+    std::sort(columns.ids.begin(), end);
+    columns.size =
+        static_cast<std::size_t>(std::unique(columns.ids.begin(), end) - columns.ids.begin());
+    return columns;
+}
+
 namespace {
 using world::ActiveRegionLedger;
 using world::RegionKey;
@@ -934,6 +981,79 @@ void Transaction::Rollback() noexcept {
 } // namespace Luminumbra::Systems::RegionalWater
 
 namespace Luminumbra::Systems {
+void WaterSystem::UpdateRegionalFromSimulation(entt::registry& registry,
+                                               std::span<const Vec3> anchors,
+                                               world::ActiveRegionLedger& ledger,
+                                               const world::RegionSchedule& schedule,
+                                               std::vector<world::RegionWork>& completed) {
+    if (!m_regional_scheduling || m_boot_paused) {
+        return;
+    }
+    if (!m_shield_system || m_shield_system->durable_read_failed() ||
+        schedule.tick != ledger.tick() || !RegionalWater::LegalResolution(m_sim_resolution) ||
+        (m_last_regional_tick && schedule.tick <= *m_last_regional_tick) ||
+        m_rain_mm_per_tick < 0 || m_evap_mm_per_tick < 0 || m_weather_rain_scale_mm < 0) {
+        throw std::invalid_argument("Regional water simulation context refused");
+    }
+    std::array<Vec3, RegionalWater::kMaxSimulationSources> sources{};
+    std::size_t source_count = 0;
+    const auto view = registry.view<const Components::TransformComponent,
+                                    const Components::FlowingWaterSourceComponent>();
+    for (const auto entity : view) {
+        if (source_count == sources.size()) {
+            throw std::invalid_argument("Regional water simulation source cap exceeded");
+        }
+        const auto position = view.get<const Components::TransformComponent>(entity).position;
+        const RegionalWater::SourceInput input{
+            .id = static_cast<std::uint64_t>(entt::to_integral(entity)),
+            .position = position,
+            .physical = view.get<const Components::FlowingWaterSourceComponent>(entity)};
+        static_cast<void>(RegionalWater::SourceAmount(input, m_sim_resolution));
+        sources[source_count++] = position;
+    }
+    const auto columns =
+        RegionalWater::SelectColumns(anchors, {sources.data(), source_count}, ledger);
+    if (completed.size() > world::ActiveRegionLedger::kMaxRegions - columns.size) {
+        throw std::invalid_argument("Regional water completed work cap exceeded");
+    }
+    // Reserve the bounded append before stepping; never copy other consumers' work.
+    completed.reserve(completed.size() + columns.size);
+    m_simulation_water_completed.clear();
+    // At most 832 lookups and handles; no world scan or growing admission container.
+    std::array<std::shared_ptr<Chunk>, std::tuple_size_v<decltype(columns.ids)>> participants{};
+    auto& water_schedule = *m_simulation_water_schedule;
+    water_schedule.tick = schedule.tick;
+    water_schedule.due.clear();
+    try {
+        for (std::size_t i = 0; i < columns.size; ++i) {
+            const auto coords = Chunk::decode_id(columns.ids[i]);
+            const auto owner =
+                world::ActiveRegionLedger::region_at({static_cast<float>(coords.x * CHUNK_SIZE_X),
+                                                      0.0f,
+                                                      static_cast<float>(coords.z * CHUNK_SIZE_Z)});
+            const auto& record = ledger.records().at(owner);
+            if (record.last_ticked == schedule.tick) {
+                water_schedule.due.push_back(owner);
+            }
+            participants[i] = m_shield_system->resolve_water_column(coords);
+        }
+        std::sort(water_schedule.due.begin(), water_schedule.due.end());
+        water_schedule.due.erase(std::unique(water_schedule.due.begin(), water_schedule.due.end()),
+                                 water_schedule.due.end());
+        UpdateRegional(registry,
+                       {participants.data(), columns.size},
+                       ledger,
+                       water_schedule,
+                       m_simulation_water_completed);
+    } catch (...) {
+        m_shield_system->discard_unclaimed_water_columns({participants.data(), columns.size});
+        throw;
+    }
+    m_shield_system->discard_unclaimed_water_columns({participants.data(), columns.size});
+    completed.insert(
+        completed.end(), m_simulation_water_completed.begin(), m_simulation_water_completed.end());
+}
+
 void WaterSystem::UpdateRegional(entt::registry& registry,
                                  std::span<const std::shared_ptr<Chunk>> resident,
                                  world::ActiveRegionLedger& ledger,

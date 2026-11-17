@@ -9,6 +9,7 @@
 #include "../core/WaterSeedInputs.h"
 #include "../world/ActiveRegionLedger.h"
 #include "../world/Chunk.h"
+#include "RegionalWater.h"
 #include "SHIELD_WorldSystem.h"
 #include "WeatherSystem.h" // Weather-driven per-cell rain.
 #include <algorithm>
@@ -855,6 +856,20 @@ WaterScheduling::Selection WaterScheduling::SelectPriorityWindow(std::vector<Can
     }
     result.next_cursor = (cursor + visited) % total;
     return result;
+}
+
+WaterSystem::~WaterSystem() = default;
+
+void WaterSystem::SetRegionalScheduling(bool enabled) {
+    if (enabled && !m_simulation_water_schedule) {
+        auto schedule = std::make_unique<world::RegionSchedule>();
+        schedule->due.reserve(9 * RegionalWater::kMaxSimulationAnchors +
+                              RegionalWater::kMaxSimulationSources);
+        m_simulation_water_completed.reserve(9 * RegionalWater::kMaxSimulationAnchors +
+                                             RegionalWater::kMaxSimulationSources);
+        m_simulation_water_schedule = std::move(schedule);
+    }
+    m_regional_scheduling = enabled;
 }
 
 WaterSystem::WaterSystem(JobSystem* job_system, SHIELD_WorldSystem* shield_system)

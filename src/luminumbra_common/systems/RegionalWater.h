@@ -4,6 +4,7 @@
 #include "../world/WaterShare.h"
 #include "WaterSystem.h"
 
+#include <array>
 #include <compare>
 #include <cstddef>
 #include <cstdint>
@@ -19,6 +20,22 @@ namespace Luminumbra::Systems::RegionalWater {
 // non-loading participation snapshot, never a world-store scan or durable lookup.
 inline constexpr std::size_t kMaxResidents = std::size_t{1} << 20;
 inline constexpr std::size_t kMaxSources = std::size_t{1} << 20;
+// Admission scratch is inline: at most 64 simulation anchors with a 3x3 ring,
+// plus 256 explicit sources. Duplicate columns coalesce by packed Y=0 identity.
+inline constexpr std::size_t kMaxSimulationAnchors = 64;
+inline constexpr std::size_t kMaxSimulationSources = 256;
+struct Columns {
+    std::array<ChunkID, 9 * kMaxSimulationAnchors + kMaxSimulationSources> ids{};
+    std::size_t size = 0;
+    std::size_t inputs_visited = 0;
+};
+// Pure, bounded admission from simulation inputs. Unknown/frozen owners are sealed.
+// Invalid anchors are ignored exactly as by the ledger; invalid sources refuse.
+// Neither residency nor asynchronous preparation is an input.
+[[nodiscard]] Columns SelectColumns(std::span<const Vec3> anchors,
+                                    std::span<const Vec3> sources,
+                                    const world::ActiveRegionLedger& ledger);
+
 struct Resident {
     ChunkID id = 0;
     bool initialized = true;
