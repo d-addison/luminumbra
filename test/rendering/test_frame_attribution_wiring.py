@@ -639,6 +639,20 @@ class FrameAttributionWiring(unittest.TestCase):
                          r"//[^\n]*? if \(g_app.capture.timelapse_creatures\) "
                          r"DrawCreatureNameplates\(")
 
+    def test_timelapse_day_drift_overrides_live_clock_by_frame_order(self):
+        # Writer order: live clock, time-lapse drift, then scenario pins, so the drift beats the
+        # live clock while a scenario's fixed time of day still beats the drift.
+        main = self.main
+        live = main.index("renderPipeline.set_time_of_day_hold(false);")
+        start = main.index("if (g_app.capture.timelapse_frames > 0 &&\n", live)
+        drift = compact(block(main[start:], "if (g_app.capture.timelapse_frames > 0 &&"))
+        self.assertEqual(drift, "renderPipeline.set_time_of_day(g_app.capture.timelapse_tod);")
+        self.assertIn("g_app.capture.timelapse_daystep > 0.0f",
+                      main[start:main.index("renderPipeline.set_time_of_day(g_app.capture"
+                                            ".timelapse_tod);", start)])
+        pins = main.index("scenario_runner->onPreRenderCapturePins();", live)
+        self.assertLess(start, pins)
+
     def test_capture_day_phase_uses_calendar_without_frame_drift(self):
         update = block(read(CLIENT / "rendering/RenderPipeline.cpp"),
                        "void RenderPipeline::update_time_of_day(")
