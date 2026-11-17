@@ -1,4 +1,5 @@
 #include "../fixtures/TerrainFixtureParams.h"
+#include "../support/GameSessionTestWorld.h"
 #include "luminumbra/core/Types.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/core/JobSystem.h"
@@ -7,6 +8,7 @@
 #include "luminumbra_common/core/WaterSeedInputs.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
+#include "luminumbra_common/systems/RegionalWater.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
@@ -3008,4 +3010,125 @@ TEST(WaterSeedInputs, AdmittedWakeAndStepClaimOnlyWaterOwnership) {
     }
 }
 
+} // namespace
+
+namespace {
+TEST(WaterSeedInputs, SessionRegionalParticipantsIgnoreCameraStreamingAndWorkerReadiness) {
+    const TestSupport::HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    world::GameSession left, right;
+    for (auto* session : {&left, &right}) {
+        session->SetJobSystem(&jobs);
+        session->SetRootPath(root.root_string());
+        session->SetActiveRegionsEnabled(true);
+        session->SetWeatherRainEnabled(false);
+        ASSERT_TRUE(session->CreateTransientWorld("Water participants", "777", "default"));
+        session->SetReplicatedSimulationAnchors({Vec3(24, 0, 24)});
+        const auto source = session->GetRegistry().create();
+        session->GetRegistry().emplace<Components::TransformComponent>(source).position =
+            Vec3(24, -100, 24);
+        session->GetRegistry().emplace<Components::FlowingWaterSourceComponent>(source).flow_rate =
+            1.0f;
+    }
+    // Model opposite owner-thread publication orders without timing or worker sleeps.
+    // The ready peer has coarser renderer data; the other still has Loading placeholders.
+    std::unordered_map<ChunkID, std::shared_ptr<Chunk>> left_streamed, right_streamed;
+    for (int index = 0; index < 3; ++index) {
+        auto pending = std::make_shared<Chunk>(IVec3(index, 0, 1));
+        ASSERT_TRUE(left.GetWorldSystem()->adopt_streamed_chunk(pending));
+        pending->set_state(ChunkState::Loading);
+        auto poison = std::make_shared<HighWaterSeedInputs>();
+        poison->terrain.fill(10000.0f);
+        pending->stage_water_seed_inputs(poison);
+        left_streamed.emplace(pending->get_id(), pending);
+        auto ready = std::make_shared<Chunk>(IVec3(2 - index, 0, 2));
+        right.GetWorldSystem()->GenerateChunkData(*ready, 4);
+        ready->set_state(ChunkState::Idle);
+        ASSERT_TRUE(right.GetWorldSystem()->adopt_streamed_chunk(ready));
+        auto payload = std::make_shared<HighWaterSeedInputs>();
+        {
+            const auto scope = right.GetWorldSystem()->acquire_worldgen_sample_scope();
+            ComputeHighWaterSeedInputs(*payload, ready->get_coords(), *right.GetWorldSystem());
+        }
+        ready->stage_water_seed_inputs(payload);
+        right_streamed.emplace(ready->get_id(), ready);
+    }
+    // Different renderer subsets also include an unrelated, pristine column.
+    const auto unrelated = std::make_shared<Chunk>(IVec3(100, 0, 100));
+    ASSERT_TRUE(right.GetWorldSystem()->adopt_streamed_chunk(unrelated));
+    right_streamed.emplace(unrelated->get_id(), unrelated);
+    for (auto* session : {&left, &right}) {
+        const auto camera = session->GetRegistry().create();
+        session->GetRegistry().emplace<Components::TransformComponent>(camera).position =
+            session == &left ? Vec3(24, 200, 24) : Vec3(-65536, 500, 65536);
+        session->GetWaterSystem()->set_camera_entity(camera);
+    }
+    for (int tick = 0; tick < 4; ++tick) {
+        SCOPED_TRACE(tick);
+        left.GetWaterSystem()->update(left.GetRegistry(), left_streamed);
+        right.GetWaterSystem()->update(right.GetRegistry(), right_streamed);
+        ASSERT_EQ(left.TickSimulation(SECONDS_PER_TICK), 1u);
+        ASSERT_EQ(right.TickSimulation(SECONDS_PER_TICK), 1u);
+        ASSERT_FALSE(left.GetRegionSchedulerFault().has_value());
+        ASSERT_FALSE(right.GetRegionSchedulerFault().has_value());
+        EXPECT_EQ(left.GetActiveRegionLedger().encode(), right.GetActiveRegionLedger().encode());
+        EXPECT_EQ(left.ComputeChunkStateHash(), right.ComputeChunkStateHash());
+        EXPECT_EQ(left.GetWaterSystem()->regional_work(), right.GetWaterSystem()->regional_work());
+        EXPECT_EQ(left.GetWaterSystem()->regional_work().residents_visited, 9u);
+        EXPECT_LE(left.GetWaterSystem()->regional_work().total_cells, 4096u);
+        WorldStreamingState a, b;
+        for (int z = 0; z < 3; ++z) {
+            for (int x = 0; x < 3; ++x) {
+                const auto first = left.GetWorldSystem()->find_authoritative_chunk({x, 0, z});
+                const auto second = right.GetWorldSystem()->find_authoritative_chunk({x, 0, z});
+                if (!first || !second) {
+                    for (const auto& unclaimed : {first, second}) {
+                        if (unclaimed) {
+                            EXPECT_FALSE(unclaimed->has_water_authority());
+                            EXPECT_FALSE(unclaimed->has_water_sim.load());
+                        }
+                    }
+                    continue;
+                }
+                ASSERT_NE(first, nullptr);
+                ASSERT_NE(second, nullptr);
+                EXPECT_EQ(first->water_depth_mm, second->water_depth_mm);
+                EXPECT_EQ(first->water_bed_mm, second->water_bed_mm);
+                EXPECT_EQ(first->water_edge_flux, second->water_edge_flux);
+                ASSERT_EQ(first->water_level_data.size(), second->water_level_data.size());
+                for (std::size_t cell = 0; cell < first->water_level_data.size(); ++cell) {
+                    EXPECT_EQ(std::bit_cast<std::uint32_t>(first->water_level_data[cell]),
+                              std::bit_cast<std::uint32_t>(second->water_level_data[cell]));
+                }
+                a.insert_chunk(first);
+                b.insert_chunk(second);
+            }
+        }
+        EXPECT_EQ(Persistence::ComputeWorldStreamingStateSubHashes(a).water,
+                  Persistence::ComputeWorldStreamingStateSubHashes(b).water);
+    }
+    EXPECT_GT(left.GetWaterSystem()->debug_source_injected_mm(), 0);
+}
+
+TEST(WaterSeedInputs, ExplicitRegionalOffRetainsLegacyHashAndSaveBytes) {
+    SeedFixture implicit(2), explicit_off(2);
+    explicit_off.water().SetRegionalScheduling(false);
+    for (int tick = 0; tick < 4; ++tick) {
+        implicit.tick();
+        explicit_off.tick();
+        ExpectSameWater(implicit, explicit_off);
+        WorldStreamingState a, b;
+        for (const auto& [id, chunk] : implicit.chunks()) {
+            a.insert_chunk(chunk);
+            b.insert_chunk(explicit_off.chunks().at(id));
+        }
+        EXPECT_EQ(Persistence::ComputeWorldStreamingStateHash(a),
+                  Persistence::ComputeWorldStreamingStateHash(b));
+        for (const auto& [id, chunk] : implicit.chunks()) {
+            EXPECT_EQ(Persistence::SerializeChunkRecordPayloadJson(*chunk),
+                      Persistence::SerializeChunkRecordPayloadJson(*explicit_off.chunks().at(id)));
+        }
+    }
+}
 } // namespace

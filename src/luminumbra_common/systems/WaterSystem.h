@@ -121,6 +121,7 @@ enum class WaterDetailLevel {
 class WaterSystem {
 public:
     WaterSystem(JobSystem* job_system, SHIELD_WorldSystem* shield_system);
+    ~WaterSystem();
 
     /**
 
@@ -154,9 +155,7 @@ public:
     // Explicit owner-thread execution; the caller supplies only participating residents.
     // Disabled by default. Streaming updates bind queries only while enabled; fixed-tick
     // session integration is separate. Refusal preserves every published output.
-    void SetRegionalScheduling(bool enabled) {
-        m_regional_scheduling = enabled;
-    }
+    void SetRegionalScheduling(bool enabled);
     struct RegionalWork {
         std::uint64_t global_windows = 0, border_windows = 0, allocated_windows = 0;
         std::uint64_t preparation_cells = 0, water_cells = 0, total_cells = 0;
@@ -171,6 +170,12 @@ public:
     [[nodiscard]] const RegionalWork& regional_work() const {
         return m_regional_work;
     }
+    // Fixed-tick production entry. Anchors are session simulation anchors, never camera anchors.
+    void UpdateRegionalFromSimulation(entt::registry& registry,
+                                      std::span<const Vec3> anchors,
+                                      world::ActiveRegionLedger& ledger,
+                                      const world::RegionSchedule& schedule,
+                                      std::vector<world::RegionWork>& completed);
     void UpdateRegional(entt::registry& registry,
                         std::span<const std::shared_ptr<Chunk>> resident,
                         world::ActiveRegionLedger& ledger,
@@ -399,6 +404,9 @@ private:
                           std::span<const float> terrain,
                           const HighWaterSeedInputs* inputs) const;
 
+    // Admission schedule storage is allocated once when regional scheduling is enabled.
+    std::unique_ptr<world::RegionSchedule> m_simulation_water_schedule;
+    std::vector<world::RegionWork> m_simulation_water_completed;
     bool m_regional_scheduling = false;
     std::optional<std::uint64_t> m_last_regional_tick;
     RegionalWork m_regional_work;

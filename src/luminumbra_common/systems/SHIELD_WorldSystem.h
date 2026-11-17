@@ -1063,6 +1063,12 @@ public:
     }
     // Resident chunk, else parked chunk, else nullptr.
     std::shared_ptr<::Luminumbra::Chunk> find_authoritative_chunk(const IVec3& coords) const;
+    // Owner-thread regional admission. A water column has exactly one owner, at Y=0.
+    // Generated render caches never seed authority; committed water is preserved or refused.
+    std::shared_ptr<::Luminumbra::Chunk> resolve_water_column(const IVec3& coords);
+    // Release only the supplied, still-unclaimed parked candidates (at most 832).
+    void discard_unclaimed_water_columns(
+        std::span<const std::shared_ptr<::Luminumbra::Chunk>> candidates);
     // Resident chunks plus parked chunks (parked ones sorted by id). No duplicates.
     std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_authoritative_chunks() const;
     std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_parked_chunks() const;
