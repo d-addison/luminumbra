@@ -170,26 +170,6 @@ struct FrozenRecord {
 auto RecordKey(const FrozenRecord& record) {
     return std::tuple(record.layer, record.coords.x, record.coords.z, record.coords.y);
 }
-bool ValidRecord(const FrozenRecord& record) {
-    constexpr std::size_t samples =
-        std::size_t{CHUNK_SIZE_X + 1} * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
-    return !record.terrain || (record.sdf.size() == samples &&
-                               (record.material.empty() || record.material.size() == samples) &&
-                               std::all_of(record.sdf.begin(), record.sdf.end(), [](float value) {
-                                   return std::isfinite(value);
-                               }));
-}
-bool ValidWater(const FrozenRecord& record) {
-    if (record.resolution != 4 && record.resolution != 8 && record.resolution != 16 &&
-        record.resolution != 32) {
-        return false;
-    }
-    const auto cells = std::size_t(record.resolution) * std::size_t(record.resolution);
-    return record.bed.size() == cells && record.depth.size() == cells &&
-           std::all_of(record.depth.begin(), record.depth.end(), [](std::int32_t value) {
-               return value >= 0;
-           });
-}
 FarVolumeSample Node(const FrozenRecord& record, const FarVolumePosition& p) {
     const auto index = static_cast<std::size_t>(
         p.x - std::int64_t(record.coords.x) * CHUNK_SIZE_X +
@@ -199,50 +179,6 @@ FarVolumeSample Node(const FrozenRecord& record, const FarVolumePosition& p) {
     const auto density = record.sdf[index];
     return {density == 0 ? 0.0f : density,
             record.material.empty() ? std::uint8_t{0} : record.material[index]};
-}
-bool SharedNodesAgree(std::span<const FrozenRecord> records, const FrozenRecord& record) {
-    // At most 26 neighbours per record; each intersection has at most 17x17
-    // lod-0 nodes. Validate even nodes skipped by the requested far-tier lattice.
-    for (int dz = -1; dz <= 1; ++dz) {
-        for (int dy = -1; dy <= 1; ++dy) {
-            for (int dx = -1; dx <= 1; ++dx) {
-                const auto key = std::tuple(record.layer,
-                                            std::int64_t(record.coords.x) + dx,
-                                            std::int64_t(record.coords.z) + dz,
-                                            std::int64_t(record.coords.y) + dy);
-                if (key <= RecordKey(record)) {
-                    continue;
-                }
-                const auto found = std::lower_bound(records.begin(),
-                                                    records.end(),
-                                                    key,
-                                                    [](const auto& candidate, const auto& value) {
-                                                        return RecordKey(candidate) < value;
-                                                    });
-                if (found == records.end() || RecordKey(*found) != key || !found->terrain) {
-                    continue;
-                }
-                const FarVolumePosition lo{
-                    std::int64_t(std::max(record.coords.x, found->coords.x)) * CHUNK_SIZE_X,
-                    std::int64_t(std::max(record.coords.y, found->coords.y)) * CHUNK_SIZE_Y,
-                    std::int64_t(std::max(record.coords.z, found->coords.z)) * CHUNK_SIZE_Z};
-                const FarVolumePosition hi{
-                    (std::int64_t(std::min(record.coords.x, found->coords.x)) + 1) * CHUNK_SIZE_X,
-                    (std::int64_t(std::min(record.coords.y, found->coords.y)) + 1) * CHUNK_SIZE_Y,
-                    (std::int64_t(std::min(record.coords.z, found->coords.z)) + 1) * CHUNK_SIZE_Z};
-                for (auto z = lo.z; z <= hi.z; ++z) {
-                    for (auto y = lo.y; y <= hi.y; ++y) {
-                        for (auto x = lo.x; x <= hi.x; ++x) {
-                            if (Node(record, {x, y, z}) != Node(*found, {x, y, z})) {
-                                return false;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    return true;
 }
 FarFrozenOverride<FarVolumeSample> TerrainAt(std::span<const FrozenRecord> records,
                                              unsigned layer,
@@ -439,6 +375,7 @@ struct FarWorldAuthorityProducer::Impl {
     // bounded by copy_bytes; committed arrays and parser scratch by read limits.
     // The successor retains only the fixed wanted descriptors, never source data.
     std::shared_ptr<SourceCapture> active, serving;
+    std::shared_ptr<FrozenComposition> frozen;
     std::uint64_t serial = 0;
     std::uint32_t age = 0;
     Error error = Error::None;
@@ -826,6 +763,474 @@ std::string_view FarWorldAuthorityProducer::capture_read_error() const {
     return {impl_->read_error.data(), impl_->read_error_size};
 }
 
+struct FarWorldAuthorityProducer::FrozenContext {
+    FrozenContext(const std::shared_ptr<Impl>& implementation,
+                  const Systems::SHIELD_WorldSystem& sampling_world,
+                  const std::shared_ptr<const Systems::SHIELD_WorldSystem>& owner,
+                  const FarVolumeRequest& capture_request,
+                  const FrozenPolicy& capture_policy,
+                  const FarFrozenCaptureLimits& capture_limits,
+                  const std::shared_ptr<FarVolumeMemoryPool>& capture_pool)
+        : producer(implementation)
+        , source(implementation->serving)
+        , world(&sampling_world)
+        , world_owner(owner)
+        , request(capture_request)
+        , policy(capture_policy)
+        , limits(capture_limits)
+        , pool(capture_pool)
+        , work({capture_limits.max_height_samples,
+                capture_limits.max_density_samples,
+                capture_limits.max_water_samples},
+               capture_limits.work,
+               capture_limits.deadline,
+               source->deadline,
+               FrozenContext::Current,
+               this) {
+        frozen.pristine.field_identity = policy.pristine_identity;
+        frozen.pristine.caves = policy.caves;
+        frozen.pristine.numeric = policy.numeric;
+        frozen.durable = {source->committed.generation, FarEditedImageState::Committed};
+        frozen.content_identity = policy.pristine_identity;
+        frozen.use = FarFrozenUse::SessionRender;
+        frozen.session_water_resolution = policy.water_resolution;
+        world_source.Start(*world, frozen);
+    }
+    std::weak_ptr<Impl> producer;
+    std::shared_ptr<const SourceCapture> source;
+    const Systems::SHIELD_WorldSystem* world;
+    std::shared_ptr<const Systems::SHIELD_WorldSystem> world_owner;
+    FarVolumeRequest request;
+    FrozenPolicy policy;
+    FarFrozenCaptureLimits limits;
+    std::shared_ptr<FarVolumeMemoryPool> pool;
+    FarFrozenCaptureWork work;
+    FarFrozenWorldSource world_source;
+    FarFrozenCaptureSource frozen;
+    FarFrozenRegion region;
+    // Fixed scratch bound: two published owners per slot and 512 committed records.
+    std::array<FrozenRecord, 3u * kSlots> storage{};
+    std::array<const FrozenRecord*, 3u * kSlots> water_storage{};
+    std::size_t count = 0, water_count = 0;
+    bool water_failed = false, work_failed = false;
+    std::span<FrozenRecord> records() {
+        return {storage.data(), count};
+    }
+    std::span<const FrozenRecord* const> water_records() const {
+        return {water_storage.data(), water_count};
+    }
+    static bool Current(const void* context) noexcept {
+        const auto& value = *static_cast<const FrozenContext*>(context);
+        const auto impl = value.producer.lock();
+        return impl && impl->source_ready && !impl->paused && impl->error == Error::None &&
+               impl->serving == value.source && value.world_source.current();
+    }
+    void Bind() {
+        world_source.Bind(frozen);
+        frozen.committed = [this](std::uint8_t, const FarVolumePosition& p) {
+            return TerrainAt(records(), 2, p);
+        };
+        frozen.parked = [this](std::uint8_t, const FarVolumePosition& p) {
+            return TerrainAt(records(), 1, p);
+        };
+        frozen.live = [this](std::uint8_t, const FarVolumePosition& p) {
+            return TerrainAt(records(), 0, p);
+        };
+        frozen.water = [this](std::int64_t x,
+                              std::int64_t z) -> std::optional<FarFrozenWaterSample> {
+            const auto value = WaterAt(water_records(), 2, x, z);
+            const auto result =
+                value.presence == FarFrozenPresence::Present
+                    ? std::optional{value.sample}
+                    : BaseWater(*world, policy.water_resolution, x, z, work, work_failed);
+            water_failed = water_failed || (!result && !work_failed);
+            return result;
+        };
+        frozen.parked_water = [this](std::int64_t x, std::int64_t z) {
+            return WaterAt(water_records(), 1, x, z);
+        };
+        frozen.live_water = [this](std::int64_t x, std::int64_t z) {
+            return WaterAt(water_records(), 0, x, z);
+        };
+    }
+};
+struct FarWorldAuthorityProducer::FrozenComposition {
+    std::shared_ptr<FrozenContext> context;
+    FarFrozenObservation::Capture observation;
+    enum class Phase {
+        Records,
+        Sort,
+        Header,
+        Terrain,
+        Water,
+        Shared,
+        Duplicates,
+        Identity,
+        Capture
+    };
+    Phase phase = Phase::Records;
+    std::size_t cursor = 0, scalar = 0, neighbour = 0;
+    FarVolumePosition lo{}, hi{}, node{};
+    const FrozenRecord* other = nullptr;
+    FrozenResult Start(const std::shared_ptr<Impl>& impl,
+                       const Systems::SHIELD_WorldSystem& world,
+                       const std::shared_ptr<const Systems::SHIELD_WorldSystem>& owner,
+                       const FarVolumeRequest& request,
+                       const FrozenPolicy& policy,
+                       const FarFrozenCaptureLimits& limits,
+                       const std::shared_ptr<FarVolumeMemoryPool>& pool) {
+        const auto* source = impl->serving.get();
+        if (impl->error != Error::None) {
+            return {impl->error, FarFrozenCaptureError::None};
+        }
+        if (!source || !impl->source_ready || impl->paused ||
+            source->committed.membership == Save::AuthorityMembership::Unavailable) {
+            return {Error::AuthorityUnavailable, FarFrozenCaptureError::None};
+        }
+        if (source->deadline.expired() || limits.deadline.expired()) {
+            return {Error::None, FarFrozenCaptureError::DeadlineExceeded};
+        }
+        if (policy.water_resolution != 4 && policy.water_resolution != 8 &&
+            policy.water_resolution != 16 && policy.water_resolution != 32) {
+            return {Error::WaterUnavailable, FarFrozenCaptureError::None};
+        }
+        const auto tier = FarTierAt(request.key.tier);
+        if (!tier ||
+            request.key.x <= -kFarVolumeExactCoordinateLimitMeters / tier->tile_edge_meters ||
+            request.key.x >= kFarVolumeExactCoordinateLimitMeters / tier->tile_edge_meters ||
+            request.key.z <= -kFarVolumeExactCoordinateLimitMeters / tier->tile_edge_meters ||
+            request.key.z >= kFarVolumeExactCoordinateLimitMeters / tier->tile_edge_meters) {
+            return {Error::None, FarFrozenCaptureError::InvalidRegion};
+        }
+        const auto edge = std::int64_t(tier->tile_edge_meters),
+                   step = std::int64_t(tier->sample_spacing_meters);
+        const auto& window = source->window;
+        // Lower shared lattice contributors must also have been copied at the source boundary.
+        if (Floor(request.key.x * edge - step - 1, CHUNK_SIZE_X) < window.min_chunk_x ||
+            Floor((request.key.x + 1) * edge + step, CHUNK_SIZE_X) > window.max_chunk_x ||
+            Floor(request.key.z * edge - step - 1, CHUNK_SIZE_Z) < window.min_chunk_z ||
+            Floor((request.key.z + 1) * edge + step, CHUNK_SIZE_Z) > window.max_chunk_z) {
+            return {Error::InvalidWindow, FarFrozenCaptureError::None};
+        }
+        if (source->published.size() > 2u * kSlots || source->committed.chunks.size() > kSlots) {
+            return {Error::None, FarFrozenCaptureError::WorkLimit};
+        }
+
+        try {
+            const auto scope = world.acquire_worldgen_sample_scope();
+            context = std::allocate_shared<FrozenContext>(
+                FarVolumePoolAllocator<FrozenContext>(impl->state->limits.memory),
+                impl,
+                world,
+                owner,
+                request,
+                policy,
+                limits,
+                pool);
+        } catch (const std::bad_alloc&) {
+            return {Error::AllocationFailure, FarFrozenCaptureError::None};
+        } catch (...) {
+            return {Error::None, FarFrozenCaptureError::Unavailable};
+        }
+        return {};
+    }
+    FrozenResult SharedStep() {
+        auto& c = *context;
+        if (cursor == c.count) {
+            phase = Phase::Duplicates;
+            cursor = 1;
+            return {};
+        }
+        const auto& record = c.storage[cursor];
+        if (!record.terrain || (!other && neighbour == 27)) {
+            ++cursor;
+            neighbour = 0;
+            other = nullptr;
+            return {};
+        }
+        if (!other) {
+            const auto dx = static_cast<int>(neighbour % 3) - 1;
+            const auto dy = static_cast<int>((neighbour / 3) % 3) - 1;
+            const auto dz = static_cast<int>(neighbour / 9) - 1;
+            const auto key = std::tuple(record.layer,
+                                        std::int64_t(record.coords.x) + dx,
+                                        std::int64_t(record.coords.z) + dz,
+                                        std::int64_t(record.coords.y) + dy);
+            ++neighbour;
+            if (key <= RecordKey(record)) {
+                return {};
+            }
+            const auto records = c.records();
+            const auto found = std::lower_bound(
+                records.begin(), records.end(), key, [](const auto& candidate, const auto& value) {
+                    return RecordKey(candidate) < value;
+                });
+            if (found == records.end() || RecordKey(*found) != key || !found->terrain) {
+                return {};
+            }
+            other = &*found;
+            lo = {std::int64_t(std::max(record.coords.x, other->coords.x)) * CHUNK_SIZE_X,
+                  std::int64_t(std::max(record.coords.y, other->coords.y)) * CHUNK_SIZE_Y,
+                  std::int64_t(std::max(record.coords.z, other->coords.z)) * CHUNK_SIZE_Z};
+            hi = {(std::int64_t(std::min(record.coords.x, other->coords.x)) + 1) * CHUNK_SIZE_X,
+                  (std::int64_t(std::min(record.coords.y, other->coords.y)) + 1) * CHUNK_SIZE_Y,
+                  (std::int64_t(std::min(record.coords.z, other->coords.z)) + 1) * CHUNK_SIZE_Z};
+            node = lo;
+            return {};
+        }
+        if (Node(record, node) != Node(*other, node)) {
+            return {Error::AuthorityUnavailable, FarFrozenCaptureError::None};
+        }
+        if (++node.x > hi.x) {
+            node.x = lo.x;
+            if (++node.y > hi.y) {
+                node.y = lo.y;
+                if (++node.z > hi.z) {
+                    other = nullptr;
+                }
+            }
+        }
+        return {};
+    }
+    FrozenResult Step() {
+        auto& c = *context;
+        const auto before = [](const auto& a, const auto& b) {
+            return RecordKey(a) < RecordKey(b);
+        };
+        switch (phase) {
+            case Phase::Records: {
+                const auto published = c.source->published.size();
+                if (cursor == published + c.source->committed.chunks.size()) {
+                    phase = Phase::Sort;
+                    cursor = c.count;
+                    break;
+                }
+                if (cursor < published) {
+                    const auto& image = c.source->published[cursor];
+                    c.storage[c.count++] = {image.coords,
+                                            image.parked ? 1u : 0u,
+                                            image.terrain_authority,
+                                            image.water_authority ? image.water_resolution : 0,
+                                            image.sdf,
+                                            image.material,
+                                            image.bed,
+                                            image.depth};
+                } else {
+                    const auto& chunk = c.source->committed.chunks[cursor - published];
+                    if (!chunk) {
+                        return {Error::AuthorityUnavailable, FarFrozenCaptureError::None};
+                    }
+                    c.storage[c.count++] = {
+                        chunk->get_coords(),
+                        2,
+                        chunk->has_terrain_authority(),
+                        chunk->has_water_authority() ? chunk->current_water_resolution.load() : 0,
+                        chunk->sdf_data,
+                        chunk->material_data,
+                        chunk->water_bed_mm,
+                        chunk->water_depth_mm};
+                }
+                ++cursor;
+                std::push_heap(c.storage.begin(),
+                               c.storage.begin() + static_cast<std::ptrdiff_t>(c.count),
+                               before);
+                break;
+            }
+            case Phase::Sort:
+                if (cursor == 0) {
+                    phase = Phase::Header;
+                    break;
+                }
+                std::pop_heap(c.storage.begin(),
+                              c.storage.begin() + static_cast<std::ptrdiff_t>(cursor),
+                              before);
+                --cursor;
+                break;
+            case Phase::Header: {
+                if (cursor == c.count) {
+                    phase = Phase::Shared;
+                    cursor = 0;
+                    break;
+                }
+                const auto& record = c.storage[cursor];
+                constexpr std::size_t samples =
+                    std::size_t{CHUNK_SIZE_X + 1} * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+                if ((cursor != 0 && RecordKey(c.storage[cursor - 1]) == RecordKey(record)) ||
+                    (record.terrain &&
+                     (record.sdf.size() != samples ||
+                      (!record.material.empty() && record.material.size() != samples)))) {
+                    return {Error::AuthorityUnavailable, FarFrozenCaptureError::None};
+                }
+                scalar = 0;
+                phase = Phase::Terrain;
+                break;
+            }
+            case Phase::Terrain: {
+                const auto& record = c.storage[cursor];
+                if (record.terrain && scalar < record.sdf.size()) {
+                    if (!std::isfinite(record.sdf[scalar++])) {
+                        return {Error::AuthorityUnavailable, FarFrozenCaptureError::None};
+                    }
+                    break;
+                }
+                if (record.resolution != 0) {
+                    if (record.resolution != 4 && record.resolution != 8 &&
+                        record.resolution != 16 && record.resolution != 32) {
+                        return {Error::WaterUnavailable, FarFrozenCaptureError::None};
+                    }
+                    const auto cells =
+                        std::size_t(record.resolution) * std::size_t(record.resolution);
+                    if (record.bed.size() != cells || record.depth.size() != cells) {
+                        return {Error::WaterUnavailable, FarFrozenCaptureError::None};
+                    }
+                    c.water_storage[c.water_count++] = &record;
+                }
+                phase = Phase::Water;
+                scalar = 0;
+                break;
+            }
+            case Phase::Water: {
+                const auto& record = c.storage[cursor];
+                if (record.resolution != 0 && scalar < record.depth.size()) {
+                    if (record.depth[scalar++] < 0) {
+                        return {Error::WaterUnavailable, FarFrozenCaptureError::None};
+                    }
+                    break;
+                }
+                ++cursor;
+                phase = Phase::Header;
+                break;
+            }
+            case Phase::Shared:
+                return SharedStep();
+            case Phase::Duplicates: {
+                if (cursor < c.water_count) {
+                    const auto& a = *c.water_storage[cursor - 1];
+                    const auto& b = *c.water_storage[cursor++];
+                    if (a.layer == b.layer && a.coords.x == b.coords.x &&
+                        a.coords.z == b.coords.z) {
+                        return {Error::WaterUnavailable, FarFrozenCaptureError::None};
+                    }
+                } else {
+                    phase = Phase::Identity;
+                }
+                break;
+            }
+            case Phase::Identity: {
+                const auto result = c.world_source.Pump(1);
+                if (result.error != FarFrozenCaptureError::None) {
+                    return {Error::None, result.error};
+                }
+                if (result.complete) {
+                    c.Bind();
+                    const auto tier = FarTierAt(c.request.key.tier);
+                    if (!tier) {
+                        return {Error::None, FarFrozenCaptureError::InvalidRegion};
+                    }
+                    if (c.request.span.min_y >= c.request.span.max_y ||
+                        c.request.span.min_y % tier->brick_edge_meters ||
+                        c.request.span.max_y % tier->brick_edge_meters) {
+                        return {Error::None, FarFrozenCaptureError::InvalidRegion};
+                    }
+                    if (c.request.field_identity != c.frozen.content_identity) {
+                        return {Error::None, FarFrozenCaptureError::IdentityMismatch};
+                    }
+                    const auto edge = std::int64_t(tier->tile_edge_meters);
+                    c.region = {
+                        static_cast<std::uint8_t>(c.request.key.tier),
+                        {{c.request.key.x * edge, c.request.span.min_y, c.request.key.z * edge},
+                         {(c.request.key.x + 1) * edge,
+                          c.request.span.max_y,
+                          (c.request.key.z + 1) * edge}}};
+                    const auto impl = c.producer.lock();
+                    if (!impl) {
+                        return {Error::AuthorityUnavailable, FarFrozenCaptureError::None};
+                    }
+                    auto input = std::allocate_shared<FarFrozenCaptureInput>(
+                        FarVolumePoolAllocator<FarFrozenCaptureInput>(impl->state->limits.memory));
+                    // Borrow stable callback objects from the retained context, never their
+                    // targets.
+                    input->source.pristine = c.frozen.pristine;
+                    input->source.durable = c.frozen.durable;
+                    input->source.content_identity = c.frozen.content_identity;
+                    input->source.use = c.frozen.use;
+                    input->source.session_water_resolution = c.frozen.session_water_resolution;
+                    input->source.committed = std::cref(c.frozen.committed);
+                    input->source.parked = std::cref(c.frozen.parked);
+                    input->source.live = std::cref(c.frozen.live);
+                    input->source.water = std::cref(c.frozen.water);
+                    input->source.parked_water = std::cref(c.frozen.parked_water);
+                    input->source.live_water = std::cref(c.frozen.live_water);
+                    input->regions = {&c.region, 1};
+                    input->owner = context;
+                    input->current = FrozenContext::Current;
+                    auto bounded = c.limits;
+                    bounded.work = &c.work;
+                    observation.Start(input, bounded, c.pool);
+                    phase = Phase::Capture;
+                }
+                break;
+            }
+            case Phase::Capture:
+                break;
+        }
+        return {};
+    }
+    FrozenPump Pump(std::uint64_t budget, std::shared_ptr<const FarFrozenObservation>& output) {
+        FrozenPump result;
+        if (!context) {
+            result.result.source = Error::AuthorityUnavailable;
+            return result;
+        }
+        try {
+            const auto scope = context->world->acquire_worldgen_sample_scope();
+            while (result.work < budget) {
+                if (!FrozenContext::Current(context.get())) {
+                    const auto impl = context->producer.lock();
+                    result.result =
+                        !impl || !impl->source_ready || impl->paused ||
+                                impl->serving != context->source || impl->error != Error::None
+                            ? FrozenResult{Error::AuthorityUnavailable, FarFrozenCaptureError::None}
+                            : FrozenResult{Error::None, FarFrozenCaptureError::IdentityMismatch};
+                    break;
+                }
+                if (!context->work.CheckDeadline()) {
+                    result.result.capture = FarFrozenCaptureError::DeadlineExceeded;
+                    break;
+                }
+                ++result.work;
+                if (phase == Phase::Capture) {
+                    const auto captured = observation.Pump(1, output);
+                    result.complete = captured.complete;
+                    result.result.capture = captured.error;
+                    if (captured.error == FarFrozenCaptureError::DeadlineExceeded ||
+                        context->work.deadline_exceeded()) {
+                        result.result.capture = FarFrozenCaptureError::DeadlineExceeded;
+                    } else if (context->work_failed) {
+                        result.result.capture = FarFrozenCaptureError::WorkLimit;
+                    } else if (context->water_failed) {
+                        result.result.source = Error::WaterUnavailable;
+                    }
+                } else {
+                    result.result = Step();
+                }
+                if (!result.result.ok() || result.complete) {
+                    break;
+                }
+            }
+        } catch (const std::bad_alloc&) {
+            result.result.source = Error::AllocationFailure;
+        } catch (...) {
+            result.result.capture = FarFrozenCaptureError::Unavailable;
+        }
+        if (!result.result.ok() || result.complete) {
+            observation.Cancel();
+            context.reset();
+        }
+        return result;
+    }
+};
+
 FarWorldAuthorityProducer::FrozenResult FarWorldAuthorityProducer::compose_frozen(
     const Systems::SHIELD_WorldSystem& world,
     const FarVolumeRequest& request,
@@ -833,157 +1238,57 @@ FarWorldAuthorityProducer::FrozenResult FarWorldAuthorityProducer::compose_froze
     const FarFrozenCaptureLimits& limits,
     const std::shared_ptr<FarVolumeMemoryPool>& pool,
     std::shared_ptr<const FarFrozenObservation>& output) const {
-    const auto* source = capture();
-    if (impl_->error != Error::None) {
-        return {impl_->error, FarFrozenCaptureError::None};
+    FrozenComposition composition;
+    const auto start = composition.Start(impl_, world, {}, request, policy, limits, pool);
+    if (!start.ok()) {
+        return start;
     }
-    if (!source || !impl_->source_ready || impl_->paused ||
-        source->committed.membership == Save::AuthorityMembership::Unavailable) {
+    for (;;) {
+        const auto result = composition.Pump(std::numeric_limits<std::uint64_t>::max(), output);
+        if (!result.result.ok() || result.complete) {
+            return result.result;
+        }
+    }
+}
+FarWorldAuthorityProducer::FrozenResult FarWorldAuthorityProducer::start_frozen(
+    const std::shared_ptr<const Systems::SHIELD_WorldSystem>& world,
+    const FarVolumeRequest& request,
+    const FrozenPolicy& policy,
+    const FarFrozenCaptureLimits& limits,
+    const std::shared_ptr<FarVolumeMemoryPool>& pool) {
+    cancel_frozen();
+    if (!world) {
         return {Error::AuthorityUnavailable, FarFrozenCaptureError::None};
     }
-    if (source->deadline.expired() || limits.deadline.expired()) {
-        return {Error::None, FarFrozenCaptureError::DeadlineExceeded};
-    }
-    if (policy.water_resolution != 4 && policy.water_resolution != 8 &&
-        policy.water_resolution != 16 && policy.water_resolution != 32) {
-        return {Error::WaterUnavailable, FarFrozenCaptureError::None};
-    }
-    const auto tier = FarTierAt(request.key.tier);
-    if (!tier || request.key.x <= -kFarVolumeExactCoordinateLimitMeters / tier->tile_edge_meters ||
-        request.key.x >= kFarVolumeExactCoordinateLimitMeters / tier->tile_edge_meters ||
-        request.key.z <= -kFarVolumeExactCoordinateLimitMeters / tier->tile_edge_meters ||
-        request.key.z >= kFarVolumeExactCoordinateLimitMeters / tier->tile_edge_meters) {
-        return {Error::None, FarFrozenCaptureError::InvalidRegion};
-    }
-    const auto edge = std::int64_t(tier->tile_edge_meters),
-               step = std::int64_t(tier->sample_spacing_meters);
-    const auto& window = source->window;
-    // Lower shared lattice contributors must also have been copied at the source boundary.
-    if (Floor(request.key.x * edge - step - 1, CHUNK_SIZE_X) < window.min_chunk_x ||
-        Floor((request.key.x + 1) * edge + step, CHUNK_SIZE_X) > window.max_chunk_x ||
-        Floor(request.key.z * edge - step - 1, CHUNK_SIZE_Z) < window.min_chunk_z ||
-        Floor((request.key.z + 1) * edge + step, CHUNK_SIZE_Z) > window.max_chunk_z) {
-        return {Error::InvalidWindow, FarFrozenCaptureError::None};
-    }
-    if (source->published.size() > 2u * kSlots || source->committed.chunks.size() > kSlots) {
-        return {Error::None, FarFrozenCaptureError::WorkLimit};
-    }
-    // Fixed scratch: two published owners per index slot plus 512 committed records.
-    FarVolumeMemoryLease scratch(*impl_->state->limits.memory);
-    if (!scratch.TryCharge(sizeof(std::array<FrozenRecord, 3u * kSlots>) +
-                           sizeof(std::array<const FrozenRecord*, 3u * kSlots>))) {
+    try {
+        auto composition = std::allocate_shared<FrozenComposition>(
+            FarVolumePoolAllocator<FrozenComposition>(memory_));
+        const auto result = composition->Start(impl_, *world, world, request, policy, limits, pool);
+        if (result.ok()) {
+            impl_->frozen = std::move(composition);
+        }
+        return result;
+    } catch (const std::bad_alloc&) {
         return {Error::AllocationFailure, FarFrozenCaptureError::None};
     }
-    std::array<FrozenRecord, 3u * kSlots> storage{};
-    std::array<const FrozenRecord*, 3u * kSlots> water_storage{};
-    std::size_t count = 0, water_count = 0;
-    for (const auto& image : source->published) {
-        storage[count++] = {image.coords,
-                            image.parked ? 1u : 0u,
-                            image.terrain_authority,
-                            image.water_authority ? image.water_resolution : 0,
-                            image.sdf,
-                            image.material,
-                            image.bed,
-                            image.depth};
-    }
-    for (const auto& chunk : source->committed.chunks) {
-        if (!chunk) {
-            return {Error::AuthorityUnavailable, FarFrozenCaptureError::None};
-        }
-        storage[count++] = {chunk->get_coords(),
-                            2,
-                            chunk->has_terrain_authority(),
-                            chunk->has_water_authority() ? chunk->current_water_resolution.load()
-                                                         : 0,
-                            chunk->sdf_data,
-                            chunk->material_data,
-                            chunk->water_bed_mm,
-                            chunk->water_depth_mm};
-    }
-    const std::span<FrozenRecord> records(storage.data(), count);
-    std::sort(records.begin(), records.end(), [](const auto& a, const auto& b) {
-        return RecordKey(a) < RecordKey(b);
-    });
-    for (std::size_t i = 0; i < count; ++i) {
-        const auto& record = records[i];
-        if (!ValidRecord(record) || (i != 0 && RecordKey(records[i - 1]) == RecordKey(record))) {
-            return {Error::AuthorityUnavailable, FarFrozenCaptureError::None};
-        }
-        if (record.resolution != 0) {
-            if (!ValidWater(record)) {
-                return {Error::WaterUnavailable, FarFrozenCaptureError::None};
-            }
-            water_storage[water_count++] = &record;
-        }
-    }
-    const std::span<const FrozenRecord* const> water_records(water_storage.data(), water_count);
-    for (const auto& record : records) {
-        if (record.terrain && !SharedNodesAgree(records, record)) {
-            return {Error::AuthorityUnavailable, FarFrozenCaptureError::None};
-        }
-    }
-    for (std::size_t i = 1; i < water_count; ++i) {
-        const auto& a = *water_records[i - 1];
-        const auto& b = *water_records[i];
-        if (a.layer == b.layer && a.coords.x == b.coords.x && a.coords.z == b.coords.z) {
-            return {Error::WaterUnavailable, FarFrozenCaptureError::None};
-        }
-    }
-    const auto committed = [&records](std::uint8_t, const FarVolumePosition& p) {
-        return TerrainAt(records, 2, p);
-    };
-    const auto parked = [&records](std::uint8_t, const FarVolumePosition& p) {
-        return TerrainAt(records, 1, p);
-    };
-    const auto live = [&records](std::uint8_t, const FarVolumePosition& p) {
-        return TerrainAt(records, 0, p);
-    };
-    FarFrozenCaptureWork local_work(
-        {limits.max_height_samples, limits.max_density_samples, limits.max_water_samples},
-        limits.work,
-        limits.deadline,
-        source->deadline);
-    auto bounded = limits;
-    bounded.work = &local_work;
-    bool water_failed = false, work_failed = false;
-    const auto water = [&](std::int64_t x, std::int64_t z) -> std::optional<FarFrozenWaterSample> {
-        const auto value = WaterAt(water_records, 2, x, z);
-        const auto result =
-            value.presence == FarFrozenPresence::Present
-                ? std::optional{value.sample}
-                : BaseWater(world, policy.water_resolution, x, z, *bounded.work, work_failed);
-        water_failed = water_failed || (!result && !work_failed);
-        return result;
-    };
-    const auto parked_water = [&water_records](std::int64_t x, std::int64_t z) {
-        return WaterAt(water_records, 1, x, z);
-    };
-    const auto live_water = [&water_records](std::int64_t x, std::int64_t z) {
-        return WaterAt(water_records, 0, x, z);
-    };
-    FarFrozenCaptureSource frozen;
-    frozen.pristine.field_identity = policy.pristine_identity;
-    frozen.pristine.caves = policy.caves;
-    frozen.pristine.numeric = policy.numeric;
-    frozen.durable = {source->committed.generation, FarEditedImageState::Committed};
-    frozen.content_identity = policy.pristine_identity;
-    frozen.use = FarFrozenUse::SessionRender;
-    frozen.session_water_resolution = policy.water_resolution;
-    frozen.committed = std::cref(committed);
-    frozen.parked = std::cref(parked);
-    frozen.live = std::cref(live);
-    frozen.water = std::cref(water);
-    frozen.parked_water = std::cref(parked_water);
-    frozen.live_water = std::cref(live_water);
-    const auto error =
-        CaptureWorldFarVolumeObservation(world, request, frozen, bounded, pool, output);
-    if (error == FarFrozenCaptureError::DeadlineExceeded || local_work.deadline_exceeded()) {
-        return {Error::None, FarFrozenCaptureError::DeadlineExceeded};
-    }
-    if (work_failed) {
-        return {Error::None, FarFrozenCaptureError::WorkLimit};
-    }
-    return {water_failed ? Error::WaterUnavailable : Error::None, error};
 }
+FarWorldAuthorityProducer::FrozenPump
+FarWorldAuthorityProducer::pump_frozen(std::uint64_t budget,
+                                       std::shared_ptr<const FarFrozenObservation>& output) {
+    if (!impl_->frozen) {
+        return {{Error::AuthorityUnavailable, FarFrozenCaptureError::None}, 0, false};
+    }
+    const auto result = impl_->frozen->Pump(budget, output);
+    if (!result.result.ok() || result.complete) {
+        cancel_frozen();
+    }
+    return result;
+}
+void FarWorldAuthorityProducer::cancel_frozen() {
+    impl_->frozen.reset();
+}
+bool FarWorldAuthorityProducer::frozen_active() const {
+    return impl_->frozen != nullptr;
+}
+
 } // namespace Luminumbra::World

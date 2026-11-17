@@ -1,3 +1,4 @@
+#include "../fixtures/TerrainFixtureParams.h"
 #include "luminumbra/core/Types.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
@@ -22,6 +23,7 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -1007,3 +1009,332 @@ TEST(FarFrozenObservation, ProductionCaptureLeavesSimulationStateUnchangedAndSur
     EXPECT_EQ(frozen->WaterCapability(0), FarFrozenWaterCapability::Wet);
     EXPECT_EQ(frozen->WaterSample(0, 0, 0), (std::optional<FarFrozenWaterSample>{{true, -0.75f}}));
 }
+
+namespace {
+struct RetainedObservationSource {
+    std::array<FarFrozenRegion, 2> regions{
+        {{1, {{8, 0, 0}, {8, 0, 0}}}, {1, {{0, 0, 0}, {0, 0, 0}}}}};
+    bool current = true, retire_on_height = false;
+    unsigned failure = 0;
+    std::uint64_t callbacks = 0, retired_reads = 0, retire_at = 0;
+    void Read() {
+        ++callbacks;
+        retired_reads += current ? 0u : 1u;
+        if (callbacks == retire_at) {
+            current = false;
+        }
+    }
+    static bool Current(const void* context) noexcept {
+        return static_cast<const RetainedObservationSource*>(context)->current;
+    }
+};
+std::shared_ptr<FarFrozenCaptureInput>
+RetainedInput(const std::shared_ptr<RetainedObservationSource>& owner) {
+    auto input = std::make_shared<FarFrozenCaptureInput>();
+    input->source = Source();
+    input->source.use = FarFrozenUse::SessionRender;
+    input->regions = owner->regions;
+    input->owner = owner;
+    input->current = RetainedObservationSource::Current;
+    input->source.pristine.height = [source = owner.get()](std::int64_t,
+                                                           std::int64_t) -> std::optional<float> {
+        source->Read();
+        if (source->retire_on_height) {
+            source->current = false;
+        }
+        if (source->failure == 1) {
+            return {};
+        }
+        if (source->failure == 2) {
+            return std::numeric_limits<float>::infinity();
+        }
+        if (source->failure == 3) {
+            throw std::runtime_error("unavailable observation");
+        }
+        return 0.25f;
+    };
+    input->source.pristine.density =
+        [source = owner.get()](const FarVolumePosition& p, float h, std::uint32_t, FarCaveMode) {
+            source->Read();
+            return FarVolumeSample{float(p.y) - h, 3};
+        };
+    input->source.committed = input->source.parked =
+        input->source.live = [source = owner.get()](std::uint8_t, const FarVolumePosition&) {
+            source->Read();
+            return FarFrozenOverride<FarVolumeSample>{};
+        };
+    input->source.water = [source = owner.get()](std::int64_t, std::int64_t) {
+        source->Read();
+        return FarFrozenWaterSample{false, 0};
+    };
+    input->source.live_water = input->source.parked_water = [source = owner.get()](std::int64_t,
+                                                                                   std::int64_t) {
+        source->Read();
+        if (source->failure == 4) {
+            return FarFrozenOverride<FarFrozenWaterSample>{FarFrozenPresence::Unavailable, {}};
+        }
+        if (source->failure == 5) {
+            return FarFrozenOverride<FarFrozenWaterSample>{static_cast<FarFrozenPresence>(255), {}};
+        }
+        return FarFrozenOverride<FarFrozenWaterSample>{};
+    };
+    return input;
+}
+void ExpectSameObservation(const FarFrozenObservation& actual,
+                           const FarFrozenObservation& expected) {
+    EXPECT_EQ(actual.content_identity(), expected.content_identity());
+    EXPECT_EQ(actual.payload_bytes(), expected.payload_bytes());
+    ASSERT_EQ(actual.region_count(), expected.region_count());
+    for (std::size_t i = 0; i < actual.region_count(); ++i) {
+        const auto region = actual.Region(i);
+        ASSERT_TRUE(region.has_value());
+        if (!region.has_value()) {
+            return;
+        }
+        const auto tier = FarTierAt(region->tier);
+        ASSERT_TRUE(tier.has_value());
+        if (!tier.has_value()) {
+            return;
+        }
+        const auto step = std::int64_t(tier->sample_spacing_meters);
+        EXPECT_EQ(actual.WaterBound(i), expected.WaterBound(i));
+        for (auto z = region->support.min.z - step; z <= region->support.max.z + step; z += step) {
+            for (auto x = region->support.min.x - step; x <= region->support.max.x + step;
+                 x += step) {
+                EXPECT_EQ(actual.Height(region->tier, x, z), expected.Height(region->tier, x, z));
+                EXPECT_EQ(actual.WaterSample(i, x, z), expected.WaterSample(i, x, z));
+                for (auto y = region->support.min.y - step; y <= region->support.max.y + step;
+                     y += step) {
+                    for (const bool pristine : {false, true}) {
+                        EXPECT_EQ(actual.Sample(region->tier, {x, y, z}, pristine),
+                                  expected.Sample(region->tier, {x, y, z}, pristine));
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST(FarFrozenObservation, RetainedPumpsBoundCallbacksAndMatchEverySynchronousSample) {
+    for (const auto use :
+         {FarFrozenUse::Committed, FarFrozenUse::Preview, FarFrozenUse::SessionRender}) {
+        for (const std::uint64_t budget : {1u, 7u, 64u}) {
+            auto owner = std::make_shared<RetainedObservationSource>();
+            auto input = RetainedInput(owner);
+            input->source.use = use;
+            std::shared_ptr<const FarFrozenObservation> expected;
+            ASSERT_EQ(CaptureFarFrozenObservation(
+                          input->regions, input->source, Limits(), Pool(), expected),
+                      Error::None);
+            auto pool = Pool();
+            FarFrozenObservation::Capture capture;
+            capture.Start(input, Limits(), pool);
+            const std::weak_ptr<const FarFrozenCaptureInput> retained = input;
+            input.reset();
+            auto output = expected;
+            EXPECT_EQ(capture.Pump(0, output).work, 0u);
+            EXPECT_EQ(output, expected);
+            bool complete = false, yielded = false;
+            for (unsigned pump = 0; pump < 1024 && !complete; ++pump) {
+                const auto before = owner->callbacks;
+                const auto result = capture.Pump(budget, output);
+                ASSERT_EQ(result.error, Error::None);
+                EXPECT_LE(result.work, budget);
+                EXPECT_LE(owner->callbacks - before, 6 * result.work);
+                complete = result.complete;
+                if (!complete) {
+                    yielded = true;
+                    EXPECT_EQ(output, expected);
+                }
+            }
+            ASSERT_TRUE(complete);
+            EXPECT_TRUE(yielded);
+            EXPECT_FALSE(capture.active());
+            EXPECT_TRUE(retained.expired());
+            EXPECT_EQ(owner->retired_reads, 0u);
+            ExpectSameObservation(*output, *expected);
+        }
+    }
+}
+
+TEST(FarFrozenObservation, CancelAndReplacementReleaseAllPartialOwnershipAndCharges) {
+    FarFrozenObservation::Capture capture;
+    auto pool = Pool();
+    std::shared_ptr<const FarFrozenObservation> output;
+    std::weak_ptr<RetainedObservationSource> lifetime;
+    {
+        auto owner = std::make_shared<RetainedObservationSource>();
+        lifetime = owner;
+        capture.Start(RetainedInput(owner), Limits(), pool);
+    }
+    const auto result = capture.Pump(12, output);
+    ASSERT_EQ(result.error, Error::None);
+    EXPECT_FALSE(result.complete);
+    EXPECT_FALSE(output);
+    EXPECT_GT(pool->used(), 0u);
+    EXPECT_FALSE(lifetime.expired());
+    capture.Cancel();
+    EXPECT_FALSE(capture.active());
+    EXPECT_TRUE(lifetime.expired());
+    EXPECT_EQ(pool->used(), 0u);
+    auto owner = std::make_shared<RetainedObservationSource>();
+    capture.Start(RetainedInput(owner), Limits(), pool);
+    EXPECT_FALSE(capture.Pump(12, output).complete);
+    capture.Start(RetainedInput(owner), Limits(), pool);
+    EXPECT_EQ(pool->used(), 0u);
+    const auto completed = capture.Pump(1024, output);
+    EXPECT_EQ(completed.error, Error::None);
+    EXPECT_TRUE(completed.complete);
+    EXPECT_FALSE(capture.active());
+    EXPECT_TRUE(output);
+}
+
+TEST(FarFrozenObservation, MidCaptureRefusalsDiscardAndRestartWithoutPublishing) {
+    for (unsigned failure = 1; failure <= 5; ++failure) {
+        auto owner = std::make_shared<RetainedObservationSource>();
+        auto input = RetainedInput(owner);
+        auto pool = Pool();
+        FarFrozenObservation::Capture capture;
+        std::shared_ptr<const FarFrozenObservation> output;
+        capture.Start(input, Limits(), pool);
+        ASSERT_EQ(capture.Pump(12, output).error, Error::None);
+        owner->failure = failure;
+        const auto refused = capture.Pump(64, output);
+        EXPECT_EQ(refused.error,
+                  failure == 2   ? Error::NonFiniteSample
+                  : failure == 5 ? Error::InvalidSource
+                                 : Error::Unavailable);
+        EXPECT_FALSE(output);
+        EXPECT_FALSE(capture.active());
+        EXPECT_EQ(pool->used(), 0u);
+        owner->failure = 0;
+        capture.Start(input, Limits(), pool);
+        const auto completed = capture.Pump(1024, output);
+        EXPECT_EQ(completed.error, Error::None);
+        EXPECT_TRUE(completed.complete);
+    }
+}
+
+TEST(FarFrozenObservation, ChangedSourcesAreFencedBetweenPumpsAndBetweenCallbacks) {
+    for (const bool during_callback : {false, true}) {
+        auto owner = std::make_shared<RetainedObservationSource>();
+        auto input = RetainedInput(owner);
+        auto pool = Pool();
+        FarFrozenObservation::Capture capture;
+        std::shared_ptr<const FarFrozenObservation> output;
+        capture.Start(input, Limits(), pool);
+        ASSERT_EQ(capture.Pump(8, output).error, Error::None);
+        const auto before = owner->callbacks;
+        owner->retire_on_height = during_callback;
+        owner->current = during_callback;
+        const auto refused = capture.Pump(64, output);
+        EXPECT_EQ(refused.error, Error::IdentityMismatch);
+        EXPECT_EQ(owner->callbacks - before, during_callback ? 1u : 0u);
+        EXPECT_EQ(owner->retired_reads, 0u);
+        EXPECT_FALSE(output);
+        EXPECT_FALSE(capture.active());
+        EXPECT_EQ(pool->used(), 0u);
+        owner->current = true;
+        owner->retire_on_height = false;
+        capture.Start(input, Limits(), pool);
+        EXPECT_TRUE(capture.Pump(1024, output).complete);
+    }
+}
+
+TEST(FarFrozenObservation, EveryLayerFencesRetirementBeforeTheFollowingCallback) {
+    // Nine columns precede density in each region: four callbacks per column.
+    for (const std::uint64_t retire_at : {1u, 2u, 3u, 4u, 37u, 38u, 39u, 40u}) {
+        auto owner = std::make_shared<RetainedObservationSource>();
+        owner->retire_at = retire_at;
+        auto input = RetainedInput(owner);
+        auto pool = Pool();
+        FarFrozenObservation::Capture capture;
+        std::shared_ptr<const FarFrozenObservation> output;
+        capture.Start(input, Limits(), pool);
+        const auto result = capture.Pump(1024, output);
+        EXPECT_EQ(result.error, Error::IdentityMismatch);
+        EXPECT_EQ(owner->callbacks, retire_at);
+        EXPECT_EQ(owner->retired_reads, 0u);
+        EXPECT_FALSE(output);
+        EXPECT_FALSE(capture.active());
+        EXPECT_EQ(pool->used(), 0u);
+    }
+}
+
+TEST(FarFrozenObservation, MissingRetainedInputsRefuseWithoutSourceReads) {
+    auto owner = std::make_shared<RetainedObservationSource>();
+    for (unsigned missing = 0; missing < 3; ++missing) {
+        auto input = RetainedInput(owner);
+        if (missing == 0) {
+            input.reset();
+        } else if (missing == 1) {
+            input->owner.reset();
+        } else {
+            input->current = nullptr;
+        }
+        FarFrozenObservation::Capture capture;
+        std::shared_ptr<const FarFrozenObservation> output;
+        auto pool = Pool();
+        capture.Start(input, Limits(), pool);
+        EXPECT_EQ(capture.Pump(1, output).error,
+                  missing == 0 ? Error::InvalidSource : Error::IdentityMismatch);
+        EXPECT_FALSE(capture.active());
+        EXPECT_FALSE(output);
+        EXPECT_EQ(pool->used(), 0u);
+        EXPECT_EQ(owner->callbacks, 0u);
+    }
+}
+
+TEST(FarFrozenObservation, WorldIdentityPumpsSplineAndDependencyBytesAndRejectsGeneratorChanges) {
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.caves_enabled = false;
+    auto dependencies = std::make_shared<WorldgenDependencySnapshot>();
+    dependencies->manifest = {{}, {"", std::string(129, 'x'), "\xc3\xa9"}};
+    params.worldgen_dependencies = dependencies;
+    params.continental_spline.clear();
+    for (int i = 0; i < 65; ++i) {
+        params.continental_spline.push_back(
+            {static_cast<float>(i) / 32 - 1, static_cast<float>(i)});
+    }
+    auto world =
+        std::make_shared<Luminumbra::Systems::SHIELD_WorldSystem>(nullptr, nullptr, params, 1337);
+    auto source = Source();
+    source.use = FarFrozenUse::SessionRender;
+    source.session_water_resolution = 4;
+    source.pristine.field_identity =
+        WorldFarVolumeIdentity(*world, source.pristine.caves, source.pristine.numeric, 4);
+    FarFrozenWorldSource cursor;
+    cursor.Start(*world, source);
+    bool complete = false;
+    std::uint64_t work = 0;
+    for (unsigned pump = 0; pump < 256 && !complete; ++pump) {
+        const auto result = cursor.Pump(1);
+        ASSERT_EQ(result.error, Error::None);
+        EXPECT_LE(result.work, 1u);
+        work += result.work;
+        complete = result.complete;
+    }
+    EXPECT_TRUE(complete);
+    EXPECT_GE(work, 65u + 129u / 8u);
+    for (unsigned invalid = 0; invalid < 5; ++invalid) {
+        auto rejected = source;
+        if (invalid == 0) {
+            rejected.pristine.field_identity = 0;
+        } else if (invalid == 1) {
+            rejected.pristine.caves = static_cast<FarCaveMode>(255);
+        } else if (invalid == 2) {
+            rejected.pristine.numeric = static_cast<FarVolumeNumericProfile>(255);
+        } else if (invalid == 3) {
+            rejected.session_water_resolution = 1;
+        } else {
+            rejected.pristine.field_identity ^= 1;
+        }
+        cursor.Start(*world, rejected);
+        EXPECT_EQ(cursor.Pump(256).error, Error::IdentityMismatch);
+    }
+    cursor.Start(*world, source);
+    EXPECT_FALSE(cursor.Pump(1).complete);
+    world->set_seed(2);
+    EXPECT_EQ(cursor.Pump(1).error, Error::IdentityMismatch);
+}
+} // namespace
