@@ -419,7 +419,6 @@ public:
         if (!windows.elapsed.empty() && unowned != m_owners.end()) {
             candidates.insert(unowned->second.begin(), unowned->second.end());
         }
-        entt::registry selected;
         std::vector<entt::entity> ordered;
         for (const auto entity : candidates) {
             ++m_visits;
@@ -439,31 +438,13 @@ public:
                 ordered.push_back(entity);
             }
         }
-        // Match the previous participant-pool order exactly: the first pool
-        // containing an entity wins, with reverse dense-index order within it.
-        luminumbra::foliage::stage_detail::Participants([&]<typename T> {
-            std::vector<entt::entity> pool;
-            for (const auto entity : ordered) {
-                ++m_visits;
-                if (!selected.valid(entity) && m_original.all_of<T>(entity)) {
-                    pool.push_back(entity);
-                }
+        auto selected = luminumbra::foliage::stage_detail::CopySelectedFoliage(m_original, ordered);
+        for (const auto entity : ordered) {
+            ++m_visits;
+            if (m_original.all_of<Comp::CreatureComponent>(entity)) {
+                Changed(m_original, entity);
             }
-            const auto* storage = std::as_const(m_original).storage<T>();
-            std::sort(pool.begin(), pool.end(), [storage](auto left, auto right) {
-                return storage->index(left) > storage->index(right);
-            });
-            for (const auto entity : pool) {
-                if (selected.create(entity) != entity) {
-                    throw std::runtime_error("Foliage handle refused");
-                }
-                luminumbra::foliage::stage_detail::CopyFoliage(
-                    m_original, entity, selected, entity);
-                if (m_original.all_of<Comp::CreatureComponent>(entity)) {
-                    Changed(m_original, entity);
-                }
-            }
-        });
+        }
         m_selected = ordered.size();
         return selected;
     }
@@ -547,6 +528,8 @@ struct GameSession::FoliageStep {
     std::uint32_t advanced_steps = 0;
     std::uint64_t staged_pages = 0, preparation_pages = 0;
     bool active = false, blocked = false, prepared = false, advanced = false;
+    // Runtime-only fence for scheduled work that has not reached live foliage.
+    bool incomplete = false;
     // At most one deadline and stale marker per retained participating owner.
     std::map<std::uint64_t, std::set<RegionKey>> input_deadlines;
     std::map<RegionKey, std::uint64_t> owner_deadlines;
@@ -605,7 +588,8 @@ struct GameSession::FoliageStep {
     }
     static bool PersistencePending(const GameSession& session) {
         const auto* step = session.m_foliageStep.get();
-        return step && (step->blocked || step->prepared || !step->stale_inputs.empty());
+        return step &&
+               (step->incomplete || step->blocked || step->prepared || !step->stale_inputs.empty());
     }
     static bool LoadPending(const GameSession& session) {
         // A fault stops replay permanently. A validated replacement is the
@@ -1165,6 +1149,16 @@ struct GameSession::FoliageStep {
         return {owners.begin(), owners.end()};
     }
     void RestoreUnpublishedTicks(GameSession& session) const noexcept {
+        // Early consumers can refuse before Begin populates windows. The scheduler
+        // has already advanced these owners, but their foliage is still committed.
+        if (incomplete) {
+            for (const auto key : session.m_regionSchedule.due) {
+                const auto prior = committed_ticks.find(key);
+                if (prior != committed_ticks.end()) {
+                    session.m_activeRegionLedger.set_foliage_tick(key, prior->second);
+                }
+            }
+        }
         for (const auto& [key, elapsed] : windows.elapsed) {
             const auto prior = committed_ticks.find(key);
             if (prior != committed_ticks.end()) {
@@ -1273,12 +1267,14 @@ struct GameSession::FoliageStep {
                 RemoveDeadline(key);
             }
         }
+        incomplete = false;
         UpdateFarmingGate(session);
     }
     struct Guard {
         GameSession& session;
         ~Guard() {
-            if (auto* step = session.m_foliageStep.get(); step && step->prepared) {
+            if (auto* step = session.m_foliageStep.get();
+                step && (step->incomplete || step->prepared)) {
                 step->blocked = true;
                 step->registry.Abort();
                 step->active = false;
@@ -1780,6 +1776,12 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             if (m_activeRegionsEnabled)
                 m_regionCompletedWork.clear();
             FoliageStep::Initialize(*this);
+            if (m_activeRegionsEnabled) {
+                // From scheduling through publication, saved stamps must
+                // never claim foliage work that has not reached the live fields.
+                m_foliageStep->incomplete = true;
+            }
+            const FoliageStep::Guard foliage_guard{*this};
             RunRegionScheduler(current_tick);
             if (m_regionFault)
                 return i + 1;
@@ -1788,7 +1790,6 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 if (m_regionFault)
                     return i + 1;
             }
-            const FoliageStep::Guard foliage_guard{*this};
             const auto creature_gate =
                 m_activeRegionsEnabled
                     ? RegionConsumerGate(m_registry, m_regionSchedule.due, m_consumerGateScratch)
@@ -4000,7 +4001,7 @@ void GameSession::LatchRegionFault(std::uint64_t tick, const std::string& messag
         if (m_foliageStep->published_tick != m_worldClock.tick()) {
             m_foliageStep->RestoreUnpublishedTicks(*this);
         }
-        if (m_foliageStep->prepared || m_foliageStep->active) {
+        if (m_foliageStep->incomplete || m_foliageStep->prepared || m_foliageStep->active) {
             m_foliageStep->blocked = true;
         }
         m_foliageStep->registry.Abort();
