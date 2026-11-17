@@ -2213,6 +2213,10 @@ int main(int argc, char* argv[]) {
     // can be applied immediately. Never hashed; missing overlay -> struct defaults.
     g_systemConfig = luminumbra::core::SystemConfig::LoadFromRuntimeRoot(
         root_dir, luminumbra::core::SystemConfig::DefaultUserOverlayPath());
+    runtime_state_recorder.bind_audio_acceptance(audioManager,
+                                                 g_systemConfig,
+                                                 g_uiManager,
+                                                 HasCommandLineFlag(argc, argv, "--enable-audio"));
     if (scenario_config.systems_config_override) {
         // Retain player settings and their load report, including Recovery save protection.
         g_systemConfig.ReplaceSystemsFrom(*scenario_config.systems_config_override);
@@ -3740,6 +3744,8 @@ int main(int argc, char* argv[]) {
 
     SetGameState(window, gameStateManager, GameState::MAIN_MENU);
     audioManager->PlayMusic("music_main_menu");
+    // Ordinary menu startup also needs a backend observation, without a scenario/world.
+    runtime_state_recorder.capture("audio_startup", &jobSystem, gameSession.get(), nullptr, 0, {});
     if (g_uiManager) {
         // --ui-screenshot: open the requested screen directly in menu state instead of the menu.
         const std::string boot_doc = g_app.capture.ui_screenshot_screen.empty()
@@ -4907,6 +4913,14 @@ int main(int argc, char* argv[]) {
 
         if (g_uiManager) {
             g_uiManager->Update();
+            if (runtime_state_recorder.audio_controls_changed()) {
+                runtime_state_recorder.capture("audio_controls_observed",
+                                               &jobSystem,
+                                               gameSession.get(),
+                                               nullptr,
+                                               scenario_frame_count,
+                                               last_readiness_report);
+            }
             if ((world_entry.state() == WorldEntryState::Failed ||
                  world_entry.state() == WorldEntryState::Cancelled) &&
                 !world_entry_error.empty()) {
