@@ -231,7 +231,6 @@ add_executable(common_tests
     rendering/FarWorldReplay_test.cpp
     rendering/FarWorldDiagnostics_test.cpp
     rendering/FarWorldRenderer_test.cpp
-    rendering/FarWorldLegacyIsolation_test.cpp
     rendering/FarWorldOwnership_test.cpp
     rendering/FarWorldDepthBias_test.cpp
     rendering/FarWorldFog_test.cpp
@@ -605,6 +604,7 @@ endif()
 add_executable(render_smoke_test
     rendering/diagnostic_attribution_test.cpp
     rendering/render_smoke_test.cpp
+    rendering/FarWorldLegacyIsolation_test.cpp
     rendering/FarWorldShadow_test.cpp
     rendering/FarWorldFogGl_test.cpp
     rendering/FarWorldWaterGl_test.cpp
