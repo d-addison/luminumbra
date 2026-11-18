@@ -22,7 +22,10 @@ struct RegionWork;
 } // namespace Luminumbra::world
 namespace Luminumbra::Systems {
 class SHIELD_WorldSystem;
+namespace RegionalWater {
+struct Plan;
 }
+} // namespace Luminumbra::Systems
 namespace Luminumbra::Systems {
 class WeatherSystem;
 } // namespace Luminumbra::Systems
@@ -156,6 +159,8 @@ public:
     // Disabled by default. Streaming updates bind queries only while enabled; fixed-tick
     // session integration is separate. Refusal preserves every published output.
     void SetRegionalScheduling(bool enabled);
+    // Adoption starts a new execution timeline; repeated ticks still refuse within it.
+    void ResetRegionalTimeline();
     struct RegionalWork {
         std::uint64_t global_windows = 0, border_windows = 0, allocated_windows = 0;
         std::uint64_t preparation_cells = 0, water_cells = 0, total_cells = 0;
@@ -403,6 +408,13 @@ private:
     void seed_chunk_water(Chunk* chunk,
                           std::span<const float> terrain,
                           const HighWaterSeedInputs* inputs) const;
+
+    void ExecuteRegionalPlan(const RegionalWater::Plan& plan,
+                             std::span<const std::shared_ptr<Chunk>> participants,
+                             world::ActiveRegionLedger& ledger,
+                             std::uint64_t tick,
+                             std::vector<world::RegionWork>& completed,
+                             std::size_t source_count);
 
     // Admission schedule storage is allocated once when regional scheduling is enabled.
     std::unique_ptr<world::RegionSchedule> m_simulation_water_schedule;

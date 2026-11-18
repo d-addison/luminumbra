@@ -100,6 +100,19 @@ class RegionAuthorityWiring(unittest.TestCase):
             expected = 1 if rel == "test/CMakeLists.txt" else 0
             self.assertEqual(text.count(seam_name), expected, rel)
 
+    def test_regional_water_is_dormant_until_authority_profile_opt_in(self):
+        session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(
+            encoding="utf-8")
+        for name, operation in (
+                ("void GameSession::ApplyWaterResolutionWiring(", "SetRegionalScheduling"),
+                ("std::uint32_t GameSession::TickSimulation(", "UpdateRegionalFromSimulation"),
+                ("void GameSession::RestoreWorldClock(", "ResetRegionalTimeline"),
+                ("void GameSession::AdoptWorldStateFrom(", "clear_world")):
+            with self.subTest(name=name):
+                body = function(session, name)
+                self.assertIn("m_activeRegionsEnabled && m_authorityProfile.regional_water", body)
+                self.assertIn(operation, body)
+
     def test_default_eviction_preserves_legacy_residency_probe(self):
         session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(
             encoding="utf-8")
@@ -113,13 +126,14 @@ class RegionAuthorityWiring(unittest.TestCase):
         header = (ROOT / "src/luminumbra_common/world/GameSession.h").read_text(
             encoding="utf-8")
         self.assertEqual(function(header, "struct AuthorityProfileOptions"),
-                         "bool residency_free_eviction = false;")
+                         "bool residency_free_eviction = false; bool regional_water = false;")
         self.assertIn("const AuthorityProfileOptions m_authorityProfile;", header)
         self.assertIn(": GameSession(AuthorityProfileOptions{}, AuthorityProfileTag{}) {}", session)
         self.assertIn(": m_authorityProfile(authority_profile)", session)
-        # Construction and the single probe gate are its only production uses.
-        # In particular, preparation, config, hashes and save writers cannot read it.
-        self.assertEqual(session.count("m_authorityProfile"), 2)
+        # Construction, eviction and four dormant water gates are the only uses.
+        # Config, hashes and save writers cannot read this dormant profile.
+        self.assertEqual(session.count("m_authorityProfile"), 6)
+        self.assertEqual(session.count("m_authorityProfile.regional_water"), 4)
         self.assertEqual(session.count("residency_free_eviction"), 1)
         native = (ROOT / "test/common/GameSessionHeadlessWorld_test.cpp").read_text(
             encoding="utf-8")

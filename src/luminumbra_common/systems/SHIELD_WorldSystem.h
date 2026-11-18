@@ -1066,9 +1066,29 @@ public:
     // Owner-thread regional admission. A water column has exactly one owner, at Y=0.
     // Generated render caches never seed authority; committed water is preserved or refused.
     std::shared_ptr<::Luminumbra::Chunk> resolve_water_column(const IVec3& coords);
+    // Reads canonical authority without generating terrain or consulting renderer readiness.
+    std::shared_ptr<Chunk> inspect_water_column(const IVec3& coords) const;
+    // Reserve equally for resident and absent participants before terrain generation.
+    // False requests saving and leaves reservations unchanged (bounded backpressure).
+    bool reserve_water_columns(std::span<const ChunkID> ids);
+    // Maximum simultaneous unsaved columns, independent of resident storage.
+    [[nodiscard]] std::size_t water_column_capacity() const;
+    // A fixed 128 KiB charge covers full terrain plus a 32x32 water grid;
+    // using a fixed charge keeps admission identical across supported ABIs.
+    static constexpr std::size_t kWaterColumnReservationBytes = 128 * 1024;
+    static_assert(sizeof(Chunk) + std::size_t{17} * 17 * 17 * (sizeof(float) + sizeof(u8)) +
+                      std::size_t{17} * 17 * sizeof(float) +
+                      std::size_t{32} * 32 *
+                          (5 * sizeof(std::int32_t) + 3 * sizeof(float) + sizeof(Vec2)) <=
+                  kWaterColumnReservationBytes);
+    // Exact count of full terrain generations performed by water admission.
+    std::uint64_t water_columns_generated() const {
+        return m_water_columns_generated;
+    }
     // Release only the supplied, still-unclaimed parked candidates (at most 832).
     void discard_unclaimed_water_columns(
-        std::span<const std::shared_ptr<::Luminumbra::Chunk>> candidates);
+        std::span<const std::shared_ptr<::Luminumbra::Chunk>> candidates,
+        std::span<const ChunkID> reservations = {});
     // Resident chunks plus parked chunks (parked ones sorted by id). No duplicates.
     std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_authoritative_chunks() const;
     std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_parked_chunks() const;
@@ -1116,12 +1136,7 @@ public:
 
     bool restore_authoritative_chunk(const IVec3& coords);
     void release_clean_parked_chunks();
-    void note_persistence_outcome(bool ok) {
-        if (m_evictions_suspended != !ok) {
-            m_evictions_suspended = !ok;
-            ++m_dirty_generation;
-        }
-    }
+    void note_persistence_outcome(bool ok);
 
 private:
     struct StreamingState {
@@ -1276,6 +1291,11 @@ private:
     bool m_evictions_suspended = false;
     std::shared_ptr<Chunk> read_committed_chunk(const IVec3& coords) const;
     std::size_t m_parked_bytes = 0;
+    // Unsaved water reservations are independent of renderer residency. At most
+    // kMaxWaterReservations entries, additionally bounded by the parking byte limit.
+    static constexpr std::size_t kMaxWaterReservations = 4096;
+    std::set<ChunkID> m_water_column_reservations;
+    std::uint64_t m_water_columns_generated = 0;
     bool m_durable_residency = false;
     std::shared_ptr<World::FarWorldAuthorityChanges> m_far_world_changes;
     std::shared_ptr<ChunkWaterChanges> m_water_changes = std::make_shared<ChunkWaterChanges>();

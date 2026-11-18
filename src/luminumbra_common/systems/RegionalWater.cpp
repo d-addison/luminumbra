@@ -981,6 +981,33 @@ void Transaction::Rollback() noexcept {
 } // namespace Luminumbra::Systems::RegionalWater
 
 namespace Luminumbra::Systems {
+WaterSystem::~WaterSystem() = default;
+
+void WaterSystem::ResetRegionalTimeline() {
+    m_last_regional_tick.reset();
+    m_regional_work = {};
+    m_simulation_water_completed.clear();
+    m_mesh_invalidations.clear();
+    m_active_chunks = nullptr;
+    m_cells_stepped_last_update = 0;
+    m_grid_candidates_visited_last_update = 0;
+    m_debug_sources_seen = 0;
+    m_debug_source_injected_mm = 0;
+    m_water_activity_cache.clear();
+}
+
+void WaterSystem::SetRegionalScheduling(bool enabled) {
+    if (enabled && !m_simulation_water_schedule) {
+        auto schedule = std::make_unique<world::RegionSchedule>();
+        schedule->due.reserve(9 * RegionalWater::kMaxSimulationAnchors +
+                              RegionalWater::kMaxSimulationSources);
+        m_simulation_water_completed.reserve(9 * RegionalWater::kMaxSimulationAnchors +
+                                             RegionalWater::kMaxSimulationSources);
+        m_simulation_water_schedule = std::move(schedule);
+    }
+    m_regional_scheduling = enabled;
+}
+
 void WaterSystem::UpdateRegionalFromSimulation(entt::registry& registry,
                                                std::span<const Vec3> anchors,
                                                world::ActiveRegionLedger& ledger,
@@ -989,14 +1016,18 @@ void WaterSystem::UpdateRegionalFromSimulation(entt::registry& registry,
     if (!m_regional_scheduling || m_boot_paused) {
         return;
     }
-    if (!m_shield_system || m_shield_system->durable_read_failed() ||
-        schedule.tick != ledger.tick() || !RegionalWater::LegalResolution(m_sim_resolution) ||
+    if (!m_shield_system || !m_shield_system->durable_residency() ||
+        m_shield_system->durable_read_failed() || schedule.tick != ledger.tick() ||
+        !RegionalWater::LegalResolution(m_sim_resolution) ||
         (m_last_regional_tick && schedule.tick <= *m_last_regional_tick) ||
         m_rain_mm_per_tick < 0 || m_evap_mm_per_tick < 0 || m_weather_rain_scale_mm < 0) {
         throw std::invalid_argument("Regional water simulation context refused");
     }
+    const Persistence::WorldSaveService::SaveOwnership ownership;
     std::array<Vec3, RegionalWater::kMaxSimulationSources> sources{};
     std::size_t source_count = 0;
+    std::vector<RegionalWater::SourceInput> source_inputs;
+    source_inputs.reserve(RegionalWater::kMaxSimulationSources);
     const auto view = registry.view<const Components::TransformComponent,
                                     const Components::FlowingWaterSourceComponent>();
     for (const auto entity : view) {
@@ -1010,6 +1041,7 @@ void WaterSystem::UpdateRegionalFromSimulation(entt::registry& registry,
             .physical = view.get<const Components::FlowingWaterSourceComponent>(entity)};
         static_cast<void>(RegionalWater::SourceAmount(input, m_sim_resolution));
         sources[source_count++] = position;
+        source_inputs.push_back(input);
     }
     const auto columns =
         RegionalWater::SelectColumns(anchors, {sources.data(), source_count}, ledger);
@@ -1024,32 +1056,92 @@ void WaterSystem::UpdateRegionalFromSimulation(entt::registry& registry,
     auto& water_schedule = *m_simulation_water_schedule;
     water_schedule.tick = schedule.tick;
     water_schedule.due.clear();
-    try {
-        for (std::size_t i = 0; i < columns.size; ++i) {
-            const auto coords = Chunk::decode_id(columns.ids[i]);
-            const auto owner =
-                world::ActiveRegionLedger::region_at({static_cast<float>(coords.x * CHUNK_SIZE_X),
-                                                      0.0f,
-                                                      static_cast<float>(coords.z * CHUNK_SIZE_Z)});
-            const auto& record = ledger.records().at(owner);
-            if (record.last_ticked == schedule.tick) {
-                water_schedule.due.push_back(owner);
-            }
-            participants[i] = m_shield_system->resolve_water_column(coords);
+    std::vector<RegionalWater::Resident> residents;
+    residents.reserve(columns.size);
+    for (std::size_t i = 0; i < columns.size; ++i) {
+        const auto coords = Chunk::decode_id(columns.ids[i]);
+        const auto owner =
+            world::ActiveRegionLedger::region_at({static_cast<float>(coords.x * CHUNK_SIZE_X),
+                                                  0.0f,
+                                                  static_cast<float>(coords.z * CHUNK_SIZE_Z)});
+        if (ledger.records().at(owner).last_ticked == schedule.tick) {
+            water_schedule.due.push_back(owner);
         }
-        std::sort(water_schedule.due.begin(), water_schedule.due.end());
-        water_schedule.due.erase(std::unique(water_schedule.due.begin(), water_schedule.due.end()),
-                                 water_schedule.due.end());
-        UpdateRegional(registry,
-                       {participants.data(), columns.size},
-                       ledger,
-                       water_schedule,
-                       m_simulation_water_completed);
+        // Fund against the worst-case preparation cost without reading terrain or
+        // renderer caches. Only the funded set may load committed payloads below.
+        residents.push_back({.id = columns.ids[i],
+                             .initialized = false,
+                             .resolution = 8,
+                             .awake = true,
+                             .preparation_ready = true,
+                             .available = true});
+    }
+    std::sort(water_schedule.due.begin(), water_schedule.due.end());
+    water_schedule.due.erase(std::unique(water_schedule.due.begin(), water_schedule.due.end()),
+                             water_schedule.due.end());
+    const bool raining = m_rain_mm_per_tick > 0 || (m_weather_rain && m_weather_rain_scale_mm > 0);
+    const auto resolution = static_cast<std::uint64_t>(m_sim_resolution);
+    const auto capacity = m_shield_system->water_column_capacity();
+    // The fixed reservation cap (4096) and legal resolution (<=32) bound this product.
+    const auto storage_budget = capacity * (2 * resolution * resolution + 4 * resolution);
+    const auto budget =
+        capacity == 0 ? std::uint64_t{4096} : std::min(std::uint64_t{4096}, storage_budget);
+    auto plan = RegionalWater::Build(
+        residents, source_inputs, ledger, water_schedule, {m_sim_resolution, budget, raining});
+    if (!m_shield_system->reserve_water_columns(plan.participants)) {
+        // Defer the sorted funded set together, including both endpoints of seams.
+        // No cursor, debt, water or completed work is published under pressure.
+        plan = RegionalWater::Build({}, {}, ledger, water_schedule, {m_sim_resolution, 0, raining});
+    }
+    const auto funded = plan.participants;
+    try {
+        // Each participant is paid for before terrain resolution: at most
+        // floor(4096 / (2*r*r + 4*r)) columns (seven at r=16).
+        for (auto& resident : residents) {
+            resident.available = false;
+        }
+        for (std::size_t i = 0; i < funded.size(); ++i) {
+            participants[i] = m_shield_system->resolve_water_column(Chunk::decode_id(funded[i]));
+            if (!participants[i]) {
+                throw std::invalid_argument("Reserved regional water column unavailable");
+            }
+            const auto found = std::lower_bound(
+                residents.begin(), residents.end(), funded[i], [](const auto& entry, ChunkID id) {
+                    return entry.id < id;
+                });
+            if (found == residents.end() || found->id != funded[i]) {
+                throw std::invalid_argument("Missing funded regional water candidate");
+            }
+            auto& resident = *found;
+            resident.initialized = participants[i]->has_water_sim.load();
+            resident.resolution = participants[i]->current_water_resolution.load();
+            resident.awake = !participants[i]->is_water_sleeping.load();
+            resident.available = true;
+        }
+        // Reconcile sleeping/resized saved grids and seam eligibility only inside
+        // the funded set. This pass cannot admit another payload or exceed its grant.
+        plan = RegionalWater::Build(
+            residents, source_inputs, ledger, water_schedule, {m_sim_resolution, budget, raining});
+        std::array<std::shared_ptr<Chunk>, std::tuple_size_v<decltype(columns.ids)>> execution{};
+        for (std::size_t i = 0; i < plan.participants.size(); ++i) {
+            const auto found = std::lower_bound(funded.begin(), funded.end(), plan.participants[i]);
+            if (found == funded.end() || *found != plan.participants[i]) {
+                throw std::invalid_argument("Unfunded regional water participant");
+            }
+            execution[i] = participants[static_cast<std::size_t>(found - funded.begin())];
+        }
+        ExecuteRegionalPlan(plan,
+                            {execution.data(), plan.participants.size()},
+                            ledger,
+                            schedule.tick,
+                            m_simulation_water_completed,
+                            source_count);
     } catch (...) {
-        m_shield_system->discard_unclaimed_water_columns({participants.data(), columns.size});
+        m_shield_system->discard_unclaimed_water_columns({participants.data(), columns.size},
+                                                         funded);
         throw;
     }
-    m_shield_system->discard_unclaimed_water_columns({participants.data(), columns.size});
+    m_shield_system->discard_unclaimed_water_columns({participants.data(), columns.size}, funded);
     completed.insert(
         completed.end(), m_simulation_water_completed.begin(), m_simulation_water_completed.end());
 }
@@ -1119,8 +1211,17 @@ void WaterSystem::UpdateRegional(entt::registry& registry,
         }
         participants.push_back(*found);
     }
+    ExecuteRegionalPlan(plan, participants, ledger, schedule.tick, completed, sources.size());
+}
+
+void WaterSystem::ExecuteRegionalPlan(const RegionalWater::Plan& plan,
+                                      std::span<const std::shared_ptr<Chunk>> participants,
+                                      world::ActiveRegionLedger& ledger,
+                                      std::uint64_t tick,
+                                      std::vector<world::RegionWork>& completed,
+                                      std::size_t source_count) {
     RegionalWater::Transaction stage;
-    stage.Begin(ledger, schedule.tick, participants, plan.regions);
+    stage.Begin(ledger, tick, participants, plan.regions);
     RegionalWork result;
     result.global_windows = plan.global_windows;
     result.border_windows = plan.border_windows;
@@ -1186,8 +1287,8 @@ void WaterSystem::UpdateRegional(entt::registry& registry,
     if (result.volume_before_qmm + result.preparation_volume_qmm + result.source_volume_qmm !=
             result.volume_after_qmm + result.sink_volume_qmm ||
         injected > std::numeric_limits<std::int64_t>::max() - m_debug_source_injected_mm ||
-        sources.size() > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() -
-                                                    m_debug_sources_seen) ||
+        source_count > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() -
+                                                  m_debug_sources_seen) ||
         contributions.size() > world::ActiveRegionLedger::kMaxRegions - completed.size()) {
         throw std::invalid_argument("Regional water publication accounting refused");
     }
@@ -1202,7 +1303,7 @@ void WaterSystem::UpdateRegional(entt::registry& registry,
     // Every allocation/refusal precedes this tail: only swaps and scalar writes remain.
     completed.swap(next_completed);
     m_debug_source_injected_mm += injected;
-    m_debug_sources_seen += static_cast<std::int64_t>(sources.size());
+    m_debug_sources_seen += static_cast<std::int64_t>(source_count);
     m_dbg_last_source_mm = result.source_mm;
     m_dbg_last_sink_mm = result.sink_mm;
     m_dbg_mass_ok = true;
@@ -1214,6 +1315,6 @@ void WaterSystem::UpdateRegional(entt::registry& registry,
     m_dbg_cells_simmed = static_cast<std::size_t>(result.water_cells);
     m_cells_stepped_last_update = static_cast<std::size_t>(result.water_cells);
     std::swap(m_regional_work, result);
-    m_last_regional_tick = schedule.tick;
+    m_last_regional_tick = tick;
 }
 } // namespace Luminumbra::Systems

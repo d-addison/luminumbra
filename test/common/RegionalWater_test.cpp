@@ -3683,6 +3683,7 @@ TEST(RegionalWaterAdmission, DisabledAndInvalidPhysicalInputsDoNotAdmitColumns) 
         registry, anchors, ledger, ExecutionSchedule(0, {{0, 0}}), completed);
     EXPECT_TRUE(shield.snapshot_authoritative_chunks().empty());
     EXPECT_THROW(shield.resolve_water_column({0, 0, 0}), std::invalid_argument);
+    EXPECT_THROW(shield.inspect_water_column({0, 0, 0}), std::invalid_argument);
     shield.set_durable_residency(true);
     water.SetRegionalScheduling(true);
     EXPECT_THROW(water.UpdateRegionalFromSimulation(
@@ -3703,7 +3704,7 @@ TEST(RegionalWaterAdmission, StorageAndLegacyRefusalsPreserveExistingAuthority) 
     shield.SetWaterSystem(&water);
     shield.set_durable_residency(true);
     shield.set_parked_bytes_limit(1);
-    EXPECT_THROW(shield.resolve_water_column({0, 0, 0}), std::length_error);
+    EXPECT_EQ(shield.resolve_water_column({0, 0, 0}), nullptr);
     EXPECT_TRUE(shield.snapshot_authoritative_chunks().empty());
     EXPECT_EQ(shield.parking_status().parked_bytes, 0u);
     auto legacy = std::make_shared<Chunk>(IVec3(1, 0, 0));
@@ -3714,6 +3715,9 @@ TEST(RegionalWaterAdmission, StorageAndLegacyRefusalsPreserveExistingAuthority) 
     EXPECT_EQ(Persistence::SerializeChunkAuthoritySnapshotJson(*legacy), before);
     EXPECT_THROW(shield.resolve_water_column({Chunk::kPackedMaxXz + 1, 0, 0}),
                  std::invalid_argument);
+    EXPECT_THROW(shield.inspect_water_column({Chunk::kPackedMaxXz + 1, 0, 0}),
+                 std::invalid_argument);
+    EXPECT_THROW(shield.inspect_water_column({0, 1, 0}), std::invalid_argument);
     EXPECT_EQ(shield.find_authoritative_chunk({1, 0, 0}), legacy);
 }
 
@@ -3828,5 +3832,188 @@ TEST(RegionalWaterAdmission, UnclaimedCleanupChecksIdentityAndPreservesPublished
     EXPECT_EQ(shield.parking_status().parked_bytes, retained_bytes);
     EXPECT_EQ(TransactionBytes(*claimed), incomplete);
     EXPECT_TRUE(completed.empty());
+}
+} // namespace
+
+namespace {
+TEST(RegionalWaterAdmission, TerrainGenerationIsFundedBeforeResolvingSixtyFourAnchors) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 777);
+    WaterSystem water(nullptr, &shield);
+    shield.SetWaterSystem(&water);
+    shield.set_durable_residency(true);
+    water.SetRegionalScheduling(true);
+    water.SetSimResolution(16);
+    auto ledger = PlanningLedger({{0, 0}});
+    std::array<Vec3, Planning::kMaxSimulationAnchors> anchors{};
+    for (std::size_t i = 0; i < anchors.size(); ++i) {
+        anchors[i] =
+            Vec3(static_cast<float>(24 + 64 * (i % 8)), 0, static_cast<float>(24 + 64 * (i / 8)));
+    }
+    const auto schedule = ExecutionSchedule(0, {{0, 0}});
+    entt::registry registry;
+    std::vector<world::RegionWork> completed;
+    water.UpdateRegionalFromSimulation(registry, anchors, ledger, schedule, completed);
+    constexpr std::uint64_t funded_bound = 4096 / (2 * 16 * 16 + 4 * 16);
+    EXPECT_EQ(water.regional_work().residents_visited, 9 * anchors.size());
+    EXPECT_GT(shield.water_columns_generated(), 0u);
+    EXPECT_LE(shield.water_columns_generated(), funded_bound);
+    EXPECT_EQ(shield.water_columns_generated(), water.regional_work().participants_visited);
+    EXPECT_LE(water.regional_work().total_cells, 4096u);
+}
+
+TEST(RegionalWaterExecution, RestoredTimelineRetainsDuplicateAndBackwardTickProtection) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 777);
+    WaterSystem water(nullptr, &shield);
+    water.SetRegionalScheduling(true);
+    auto ledger = PlanningLedger({});
+    entt::registry registry;
+    std::vector<world::RegionWork> completed;
+    water.UpdateRegional(registry, {}, ledger, ExecutionSchedule(0, {}), completed);
+    EXPECT_THROW(water.UpdateRegional(registry, {}, ledger, ExecutionSchedule(0, {}), completed),
+                 std::invalid_argument);
+    static_cast<void>(ledger.schedule(WorldClock(2)));
+    water.UpdateRegional(registry, {}, ledger, ExecutionSchedule(2, {}), completed);
+    ledger.restore_clock(WorldClock(1));
+    EXPECT_THROW(water.UpdateRegional(registry, {}, ledger, ExecutionSchedule(1, {}), completed),
+                 std::invalid_argument);
+    water.ResetRegionalTimeline();
+    EXPECT_NO_THROW(
+        water.UpdateRegional(registry, {}, ledger, ExecutionSchedule(1, {}), completed));
+    EXPECT_THROW(water.UpdateRegional(registry, {}, ledger, ExecutionSchedule(1, {}), completed),
+                 std::invalid_argument);
+}
+
+TEST(RegionalWaterAdmission, SavedTerrainReadsAreFundedBeforeResolvingSixtyFourAnchors) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 777);
+    WaterSystem water(nullptr, &shield);
+    shield.SetWaterSystem(&water);
+    shield.set_durable_residency(true);
+    water.SetRegionalScheduling(true);
+    water.SetSimResolution(16);
+    auto ledger = PlanningLedger({{0, 0}});
+    std::array<Vec3, Planning::kMaxSimulationAnchors> anchors{};
+    for (std::size_t i = 0; i < anchors.size(); ++i) {
+        anchors[i] =
+            Vec3(static_cast<float>(24 + 64 * (i % 8)), 0, static_cast<float>(24 + 64 * (i / 8)));
+    }
+    const auto columns = Planning::SelectColumns(anchors, {}, ledger);
+    std::vector<IVec3> committed;
+    for (std::size_t i = 0; i < columns.size; ++i) {
+        committed.push_back(Chunk::decode_id(columns.ids[i]));
+    }
+    shield.remember_durable_chunks(committed);
+    std::uint64_t reads = 0;
+    shield.set_durable_chunk_loader(
+        [&](const IVec3& coords) {
+            ++reads;
+            auto chunk = TransactionChunkAt(coords, 1000, 16);
+            chunk->heightmap_data.assign(289, 1.0f);
+            chunk->set_state(ChunkState::Idle);
+            chunk->set_water_authority();
+            return chunk;
+        },
+        {});
+    entt::registry registry;
+    std::vector<world::RegionWork> completed;
+    water.UpdateRegionalFromSimulation(
+        registry, anchors, ledger, ExecutionSchedule(0, {{0, 0}}), completed);
+    constexpr std::uint64_t funded_bound = 4096 / (2 * 16 * 16 + 4 * 16);
+    EXPECT_GT(reads, 0u);
+    EXPECT_LE(reads, funded_bound);
+    EXPECT_EQ(shield.water_columns_generated(), 0u);
+    EXPECT_EQ(water.regional_work().residents_visited, 9 * anchors.size());
+    EXPECT_LE(water.regional_work().total_cells, 4096u);
+}
+} // namespace
+
+namespace {
+TEST(RegionalWaterAdmission, ReservationsAreBoundedAtomicAndReleasedOnlyAfterCommittedSave) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 777);
+    WaterSystem water(nullptr, &shield);
+    shield.SetWaterSystem(&water);
+    shield.set_durable_residency(true);
+    shield.set_parked_bytes_limit(SHIELD_WorldSystem::kWaterColumnReservationBytes);
+    const auto first_id = Chunk::calculate_id({0, 0, 0});
+    const auto next_id = Chunk::calculate_id({1, 0, 0});
+    const std::array duplicate{first_id, first_id};
+    const std::array next{next_id};
+    const std::array invalid{Chunk::calculate_id({0, 1, 0})};
+    const std::vector<ChunkID> oversized(833, first_id);
+    EXPECT_THROW(shield.reserve_water_columns(oversized), std::invalid_argument);
+    EXPECT_THROW(shield.reserve_water_columns(invalid), std::invalid_argument);
+    EXPECT_TRUE(shield.reserve_water_columns({}));
+    ASSERT_TRUE(shield.reserve_water_columns(duplicate));
+    EXPECT_FALSE(shield.reserve_water_columns(next));
+    auto chunk = shield.resolve_water_column({0, 0, 0});
+    ASSERT_NE(chunk, nullptr);
+    water.InitializeGeneratedWater(*chunk);
+    chunk->set_water_authority();
+    chunk->mark_water_state_dirty();
+    shield.note_persistence_outcome(false);
+    EXPECT_FALSE(shield.reserve_water_columns(next));
+    shield.note_persistence_outcome(true);
+    EXPECT_FALSE(shield.reserve_water_columns(next)); // Not committed yet.
+    shield.remember_durable_chunks({{0, 0, 0}});
+    shield.note_persistence_outcome(true);
+    EXPECT_FALSE(shield.reserve_water_columns(next)); // Changed since serialization.
+    chunk->clear_water_state_dirty();
+    chunk->clear_voxel_data_dirty();
+    shield.note_persistence_outcome(true);
+    EXPECT_TRUE(shield.reserve_water_columns(next));
+    // Rollback also releases a reservation whose terrain resolution never completed.
+    shield.discard_unclaimed_water_columns({}, next);
+    const std::array first{first_id};
+    EXPECT_TRUE(shield.reserve_water_columns(first));
+    EXPECT_EQ(shield.find_authoritative_chunk({0, 0, 0}), chunk);
+}
+} // namespace
+
+namespace {
+TEST(RegionalWaterAdmission, OneColumnCapacityFundsOneParticipantWithoutFaultOrExtraTerrain) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 777);
+    WaterSystem water(nullptr, &shield);
+    shield.SetWaterSystem(&water);
+    shield.set_durable_residency(true);
+    shield.set_parked_bytes_limit(SHIELD_WorldSystem::kWaterColumnReservationBytes);
+    water.SetRegionalScheduling(true);
+    water.SetSimResolution(16);
+    auto ledger = PlanningLedger({{0, 0}});
+    entt::registry registry;
+    std::vector<world::RegionWork> completed;
+    const std::array anchors{Vec3(24, 0, 24)};
+    EXPECT_EQ(shield.water_column_capacity(), 1u);
+    water.UpdateRegionalFromSimulation(
+        registry, anchors, ledger, ExecutionSchedule(0, {{0, 0}}), completed);
+    EXPECT_EQ(water.regional_work().visits.size(), 1u);
+    EXPECT_EQ(shield.water_columns_generated(), 1u);
+    EXPECT_LE(water.regional_work().total_cells, 2u * 16 * 16 + 4 * 16);
+}
+} // namespace
+
+namespace {
+TEST(RegionalWaterAdmission, FullParkingKeepsReservedWaterLiveWithoutRaisingTheLimit) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 777);
+    WaterSystem water(nullptr, &shield);
+    shield.SetWaterSystem(&water);
+    shield.set_durable_residency(true);
+    shield.set_parked_bytes_limit(SHIELD_WorldSystem::kWaterColumnReservationBytes);
+    water.SetSimResolution(16);
+    for (int x = 0; x < 2; ++x) {
+        const auto chunk = shield.resolve_water_column({x, 0, 0});
+        ASSERT_NE(chunk, nullptr);
+        water.InitializeGeneratedWater(*chunk);
+        chunk->set_water_authority();
+        chunk->clear_water_state_dirty();
+        chunk->clear_voxel_data_dirty();
+        shield.remember_durable_chunks({{x, 0, 0}});
+        shield.note_persistence_outcome(true);
+    }
+    const auto parked_before = shield.parking_status().parked_bytes;
+    const auto third = shield.resolve_water_column({2, 0, 0});
+    ASSERT_NE(third, nullptr);
+    EXPECT_EQ(shield.find_streamed_chunk({2, 0, 0}), third);
+    EXPECT_EQ(shield.parking_status().parked_bytes, parked_before);
+    EXPECT_LE(parked_before, SHIELD_WorldSystem::kWaterColumnReservationBytes);
+    EXPECT_EQ(shield.snapshot_parked_chunks().size(), 2u);
 }
 } // namespace

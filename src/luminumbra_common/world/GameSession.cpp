@@ -734,7 +734,8 @@ void GameSession::ApplyWaterResolutionWiring() {
     if (!m_worldSystem) {
         return;
     }
-    m_waterSystem->SetRegionalScheduling(m_activeRegionsEnabled);
+    m_waterSystem->SetRegionalScheduling(m_activeRegionsEnabled &&
+                                         m_authorityProfile.regional_water);
     m_worldSystem->SetWaterSimResolution(static_cast<int>(m_waterHighResEnabled
                                                               ? Systems::WaterDetailLevel::High
                                                               : Systems::WaterDetailLevel::Medium));
@@ -1514,7 +1515,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             }
             if (m_regionFault)
                 return i + 1;
-            if (m_activeRegionsEnabled && m_waterSystem) {
+            if (m_activeRegionsEnabled && m_authorityProfile.regional_water && m_waterSystem) {
                 const auto& local = m_activeRegionLedger.local_anchor();
                 const auto anchors =
                     m_replicatedSimulationAnchors
@@ -3489,6 +3490,9 @@ GroundNotifications GameSession::CaptureGroundNotifications() const {
 void GameSession::RestoreWorldClock(const WorldClock& clock) {
     m_worldClock = clock;
     m_simulationClock.reset(clock.tick());
+    if (m_activeRegionsEnabled && m_authorityProfile.regional_water && m_waterSystem) {
+        m_waterSystem->ResetRegionalTimeline();
+    }
     if (m_energyFieldState)
         m_energyFieldState->ResetEmptyAtTick(clock.tick());
     RestoreAmbientFieldsAtTick(clock.tick());
@@ -4637,6 +4641,9 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
     DisableFarWorldAuthorityProducer();
     // All refusing readers have passed; publish the staged state together.
     m_lastLoadedChunkCount = 0;
+    if (m_activeRegionsEnabled && m_authorityProfile.regional_water) {
+        m_worldSystem->clear_world(m_physicsSystem.get());
+    }
     m_fieldPages = std::move(saved.field_pages);
     m_renderCalendar = saved.render_calendar;
     if (saved.ledger) {

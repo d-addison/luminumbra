@@ -6745,6 +6745,8 @@ void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
     invalidate_renderable_chunks();
     m_streaming_state.chunks.clear();
     m_parked.clear();
+    m_water_column_reservations.clear();
+    m_water_columns_generated = 0;
     m_parked_columns.clear();
     m_durable_chunks.clear();
     m_digest_members.clear();
@@ -7076,6 +7078,81 @@ SHIELD_WorldSystem::find_authoritative_chunk(const IVec3& coords) const {
     return parked != m_parked.end() ? parked->second.chunk : read_committed_chunk(coords);
 }
 
+std::shared_ptr<Chunk> SHIELD_WorldSystem::inspect_water_column(const IVec3& coords) const {
+    if (!m_durable_residency || !m_water_system || coords.y != 0 ||
+        coords.x < Chunk::kPackedMinXz || coords.x > Chunk::kPackedMaxXz ||
+        coords.z < Chunk::kPackedMinXz || coords.z > Chunk::kPackedMaxXz || m_durable_read_failed) {
+        throw std::invalid_argument("Regional water column inspection refused");
+    }
+    const auto chunk = find_authoritative_chunk(coords);
+    // Never read arrays owned by generation workers. Pristine caches have no
+    // simulation meaning, including any water grids seeded by the renderer.
+    if (chunk && chunk->get_state() != ChunkState::Loading && chunk->needs_authority()) {
+        return chunk;
+    }
+    return read_committed_chunk(coords);
+}
+
+std::size_t SHIELD_WorldSystem::water_column_capacity() const {
+    return m_parked_bytes_limit == 0
+               ? kMaxWaterReservations
+               : std::min(kMaxWaterReservations,
+                          m_parked_bytes_limit / kWaterColumnReservationBytes);
+}
+
+bool SHIELD_WorldSystem::reserve_water_columns(std::span<const ChunkID> ids) {
+    if (ids.size() > 832) {
+        throw std::invalid_argument("Regional water reservation cap exceeded");
+    }
+    if (ids.empty()) {
+        return true;
+    }
+    const auto limit = water_column_capacity();
+    std::set<ChunkID> additions;
+    for (const auto id : ids) {
+        const auto coords = Chunk::decode_id(id);
+        if (coords.y != 0 || Chunk::calculate_id(coords) != id) {
+            throw std::invalid_argument("Invalid regional water reservation identity");
+        }
+        if (!m_water_column_reservations.contains(id)) {
+            additions.insert(id);
+        }
+    }
+    if (m_water_column_reservations.size() > limit ||
+        additions.size() > limit - m_water_column_reservations.size()) {
+        m_persistence_save_requested = true;
+        return false;
+    }
+    // Nodes are allocated privately before publishing any reservation.
+    m_water_column_reservations.merge(additions);
+    return true;
+}
+
+void SHIELD_WorldSystem::note_persistence_outcome(bool ok) {
+    if (m_evictions_suspended != !ok) {
+        m_evictions_suspended = !ok;
+        ++m_dirty_generation;
+    }
+    if (!ok) {
+        return;
+    }
+    // A save boundary may release only clean, committed reservations. A chunk
+    // modified during serialization retains its reservation on both residency paths.
+    for (auto it = m_water_column_reservations.begin(); it != m_water_column_reservations.end();) {
+        const auto live = m_streaming_state.chunks.find(*it);
+        const auto parked = m_parked.find(*it);
+        const auto chunk = live != m_streaming_state.chunks.end() ? live->second
+                           : parked != m_parked.end()             ? parked->second.chunk
+                                                                  : nullptr;
+        if (m_durable_chunks.contains(*it) &&
+            (!chunk || (!chunk->is_voxel_data_dirty() && !chunk->is_water_state_dirty()))) {
+            it = m_water_column_reservations.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 std::shared_ptr<Chunk> SHIELD_WorldSystem::resolve_water_column(const IVec3& coords) {
     if (!m_durable_residency || !m_water_system || coords.y != 0 ||
         coords.x < Chunk::kPackedMinXz || coords.x > Chunk::kPackedMaxXz ||
@@ -7086,31 +7163,48 @@ std::shared_ptr<Chunk> SHIELD_WorldSystem::resolve_water_column(const IVec3& coo
     auto chunk = find_authoritative_chunk(coords);
     // A generation worker owns Loading storage. Do not inspect its arrays or readiness.
     if (chunk && chunk->get_state() == ChunkState::Loading) {
-        chunk = read_committed_chunk(coords);
+        chunk = inspect_water_column(coords);
     } else if (chunk && !chunk->needs_authority() && m_durable_chunks.contains(id)) {
         // An idle renderer cache cannot shadow a saved column either.
-        chunk = read_committed_chunk(coords);
+        chunk = inspect_water_column(coords);
     }
     if (m_durable_read_failed) {
         throw std::invalid_argument("Regional water committed column unavailable");
     }
+    if (chunk && chunk->has_water_authority() && !chunk->has_complete_water_state()) {
+        throw std::invalid_argument("Incomplete regional water column authority");
+    }
+    if (chunk && !chunk->has_water_authority() &&
+        chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited) {
+        // Legacy edited terrain must be migrated, never regenerated over saved data.
+        throw std::invalid_argument("Regional water column requires legacy migration");
+    }
+    const bool previously_reserved = m_water_column_reservations.contains(id);
+    const std::array ids{id};
+    if (!reserve_water_columns(ids)) {
+        return nullptr;
+    }
+    struct ReservationRollback {
+        std::set<ChunkID>& reservations;
+        ChunkID id;
+        bool keep;
+        ~ReservationRollback() {
+            if (!keep) {
+                reservations.erase(id);
+            }
+        }
+    } reservation{m_water_column_reservations, id, previously_reserved};
     const Persistence::WorldSaveService::SaveOwnership ownership;
     const auto live = m_streaming_state.chunks.find(id);
     const auto parked_owner = m_parked.find(id);
     const bool retained = (live != m_streaming_state.chunks.end() && live->second == chunk) ||
                           (parked_owner != m_parked.end() && parked_owner->second.chunk == chunk);
     if (chunk && chunk->has_water_authority()) {
-        if (!chunk->has_complete_water_state()) {
-            throw std::invalid_argument("Incomplete regional water column authority");
-        }
         if (retained) {
+            reservation.keep = true;
             return chunk;
         }
     } else {
-        if (chunk && chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited) {
-            // Legacy edited terrain needs complete migration, never regeneration over saved data.
-            throw std::invalid_argument("Regional water column requires legacy migration");
-        }
         // Full generated terrain is canonical. Reuse only an empty water grid;
         // any renderer-seeded grid is discarded before budgeted preparation.
         if (chunk && retained && !chunk->has_water_sim.load() && chunk->water_revision() == 0 &&
@@ -7123,12 +7217,14 @@ std::shared_ptr<Chunk> SHIELD_WorldSystem::resolve_water_column(const IVec3& coo
             chunk->water_level_data.empty() && chunk->water_flow_data.empty() &&
             chunk->water_sim_terrain_height.empty() && chunk->water_rest_level.empty() &&
             chunk->water_src_mm.empty()) {
+            reservation.keep = true;
             return chunk;
         }
         chunk = std::make_shared<Chunk>(coords);
         {
             const auto scope = acquire_worldgen_sample_scope();
             GenerateChunkData(*chunk);
+            ++m_water_columns_generated;
         }
         chunk->set_state(ChunkState::Idle);
         // Regional preparation and publication alone initialize/claim water.
@@ -7159,10 +7255,28 @@ std::shared_ptr<Chunk> SHIELD_WorldSystem::resolve_water_column(const IVec3& coo
             throw std::length_error("Regional water column storage size overflow");
         }
         const auto bytes = present_bytes + future_bytes;
-        if (bytes > std::numeric_limits<std::size_t>::max() - retained_bytes ||
-            (m_parked_bytes_limit > 0 && (retained_bytes > m_parked_bytes_limit ||
-                                          bytes > m_parked_bytes_limit - retained_bytes))) {
-            throw std::length_error("Regional water column storage cap exceeded");
+        if (bytes > std::numeric_limits<std::size_t>::max() - retained_bytes) {
+            throw std::length_error("Regional water column storage size overflow");
+        }
+        if (m_parked_bytes_limit > 0 && (retained_bytes > m_parked_bytes_limit ||
+                                         bytes > m_parked_bytes_limit - retained_bytes)) {
+            // Residency affects only the cache location. The same fixed reservation
+            // was charged above on both paths; never exceed the parked-byte limit.
+            // Like deferred ordinary eviction, keep this bounded water owner live
+            // until saving can release parking space.
+            m_streaming_state.chunks.emplace(id, chunk);
+            if (parked != m_parked.end()) {
+                note_digest_chunk(parked->second.chunk, true, false);
+                m_parked.erase(parked);
+                m_parked_bytes = retained_bytes;
+            }
+            m_activation_index.insert(chunk);
+            m_activation_index.content_changed(coords);
+            note_digest_chunk(chunk, false, true);
+            invalidate_renderable_chunks();
+            ++m_dirty_generation;
+            reservation.keep = true;
+            return chunk;
         }
         chunk->normalize_for_park();
         if (parked != m_parked.end()) {
@@ -7172,12 +7286,13 @@ std::shared_ptr<Chunk> SHIELD_WorldSystem::resolve_water_column(const IVec3& coo
         note_digest_chunk(chunk, true, true);
         m_parked_bytes = retained_bytes + bytes;
     }
+    reservation.keep = true;
     return chunk;
 }
 
 void SHIELD_WorldSystem::discard_unclaimed_water_columns(
-    std::span<const std::shared_ptr<Chunk>> candidates) {
-    if (candidates.size() > 832) {
+    std::span<const std::shared_ptr<Chunk>> candidates, std::span<const ChunkID> reservations) {
+    if (candidates.size() > 832 || reservations.size() > 832) {
         throw std::invalid_argument("Regional water candidate cleanup cap exceeded");
     }
     const Persistence::WorldSaveService::SaveOwnership ownership;
@@ -7187,10 +7302,27 @@ void SHIELD_WorldSystem::discard_unclaimed_water_columns(
             continue;
         }
         const auto parked = m_parked.find(chunk->get_id());
+        const auto live = m_streaming_state.chunks.find(chunk->get_id());
+        if ((parked != m_parked.end() && parked->second.chunk == chunk) ||
+            (live != m_streaming_state.chunks.end() && live->second == chunk)) {
+            m_water_column_reservations.erase(chunk->get_id());
+        }
         if (parked != m_parked.end() && parked->second.chunk == chunk) {
             m_parked_bytes -= parked->second.bytes;
             note_digest_chunk(chunk, true, false);
             m_parked.erase(parked);
+        }
+    }
+    // A resolution failure may leave reservations without any prepared handle.
+    // Consult only retained ownership: no disk reads or generation in rollback.
+    for (const auto id : reservations) {
+        const auto live = m_streaming_state.chunks.find(id);
+        const auto parked = m_parked.find(id);
+        const auto chunk = live != m_streaming_state.chunks.end() ? live->second
+                           : parked != m_parked.end()             ? parked->second.chunk
+                                                                  : nullptr;
+        if (!chunk || (chunk->get_state() != ChunkState::Loading && !chunk->needs_authority())) {
+            m_water_column_reservations.erase(id);
         }
     }
 }
