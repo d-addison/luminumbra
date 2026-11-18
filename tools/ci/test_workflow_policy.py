@@ -4018,7 +4018,8 @@ class WorkflowBaseEditPolicyTests(unittest.TestCase):
             pr_path.write_text(json.dumps(self.base_event()["pull_request"]), encoding="utf-8")
             for action in sorted(base_match.CI_EVENTS):
                 event_path.write_text(json.dumps(self.base_event(action)), encoding="utf-8")
-                with self.subTest(action=action), patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(event_path)}), \
+                with self.subTest(action=action), patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(event_path),
+                                                     "GITHUB_RUN_ATTEMPT": "1"}), \
                         patch.object(base_match, "fetch_runs", return_value={"total_count": 0,
                                      "workflow_runs": []}) as runs, \
                         patch.object(base_match, "fetch_pull", return_value=self.base_event()["pull_request"]) as live, \
