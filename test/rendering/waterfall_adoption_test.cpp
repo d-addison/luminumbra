@@ -783,7 +783,7 @@ TEST_F(WaterfallLiveness, AdoptionPublishesSharedFactorsAndReplacementClearsThem
     EXPECT_EQ(pass.roar_source(glm::vec3(0)).site, nullptr);
 }
 
-TEST(WaterfallLiveness, RoarSkipsRetiredSitesAndScalesTheNearestLiveGain) {
+TEST(WaterfallRoar, SkipsRetiredSitesAndScalesTheNearestLiveGain) {
     std::array<Luminumbra::Rendering::WaterfallSite, 3> sites{};
     sites[0].crest.x = 1.0f; // Drained crest or excavated support: factor zero.
     sites[1].crest.x = 10.0f;
@@ -801,7 +801,7 @@ TEST(WaterfallLiveness, RoarSkipsRetiredSitesAndScalesTheNearestLiveGain) {
     EXPECT_FLOAT_EQ(retired.gain(0.8f), 0.0f);
 }
 
-TEST(WaterfallLiveness, RoarHandlesEmptyPartialInvalidBoundaryAndTiedSites) {
+TEST(WaterfallRoar, HandlesEmptyPartialInvalidBoundaryAndTiedSites) {
     std::array<Luminumbra::Rendering::WaterfallSite, 2> sites{};
     sites[0].crest.x = 400.0f;
     sites[1].crest.x = 401.0f;
