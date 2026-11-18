@@ -4247,6 +4247,7 @@ TEST(WaterSeedInputs, RefusedLegacyWaterMigrationPreservesLiveWorldAndLegacyOpen
         session->SetRootPath(root.root_string());
     }
     regional.SetActiveRegionsEnabled(true);
+    legacy.SetActiveRegionsEnabled(false);
     ASSERT_TRUE(regional.CreateTransientWorld("Water refusal", "777", "default"));
     ASSERT_TRUE(legacy.CreateTransientWorld("Legacy water", "777", "default"));
     const auto live = std::make_shared<Chunk>(IVec3(0, 0, 0));

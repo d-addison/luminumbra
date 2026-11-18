@@ -555,6 +555,7 @@ void VerifyColdWaterMigration(bool indexed) {
     }
     SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
     WaterSystem water(nullptr, &shield);
+    shield.SetWaterSystem(&water);
     shield.set_durable_residency(true);
     shield.remember_durable_chunks(inventory);
     shield.set_durable_chunk_loader(
@@ -598,6 +599,19 @@ TEST(RegionalWaterMigration, ConflictsAndIncompleteRecordsRefuseWithoutChangingL
         ASSERT_TRUE(saved.service.load_world(legacy, saved.path(), errors));
         const auto hash = saved.service.world_hash(legacy);
         const auto bytes = saved.bytes();
+        EXPECT_TRUE(WaterPersistence::WorldSaveService::has_world_save(saved.path()));
+        EXPECT_TRUE(WaterPersistence::WorldSaveService::has_chunk_snapshot(saved.path()));
+        EXPECT_TRUE(WaterPersistence::WorldSaveService::validate_save(saved.path(), &errors));
+        EXPECT_TRUE(WaterPersistence::WorldSaveService::inspect_save(saved.path(), &errors));
+        {
+            WaterPersistence::WorldSaveService::SaveFactsScope facts(saved.path());
+            EXPECT_TRUE(facts.validate(&errors));
+            EXPECT_TRUE(WaterPersistence::WorldSaveService::has_world_save(saved.path()));
+            EXPECT_TRUE(WaterPersistence::WorldSaveService::has_chunk_snapshot(saved.path()));
+            EXPECT_TRUE(WaterPersistence::WorldSaveService::validate_save(saved.path(), &errors));
+        }
+        EXPECT_TRUE(errors.empty());
+        EXPECT_EQ(saved.bytes(), bytes);
         WorldStreamingState refused;
         std::vector<IVec3> inventory;
         const std::unordered_set<ChunkID> retain_none;
