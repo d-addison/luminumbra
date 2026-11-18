@@ -270,6 +270,10 @@ struct GameSession::LoadedWorldState {
     WorldStreamingState chunks;
     std::vector<IVec3> durable_inventory;
     WorldClock clock;
+    std::shared_ptr<const Systems::WeatherSchedule> weather_schedule;
+    std::unique_ptr<Systems::WeatherSystem> weather_system;
+    std::uint64_t weather_schedule_tick = 0;
+    Vec3 weather_schedule_anchor{};
     std::size_t water_sim_cursor = 0;
     std::optional<Vec3> ambient_anchor;
     std::optional<WorldCalendar> render_calendar;
@@ -285,6 +289,19 @@ struct GameSession::LoadedWorldState {
 };
 
 namespace {
+std::unique_ptr<Systems::WeatherSystem> PrepareWeatherSystem(
+    int seed, const std::shared_ptr<const Systems::WeatherSchedule>& schedule, std::string& error) {
+    auto weather = std::make_unique<Systems::WeatherSystem>(seed);
+    if (schedule && !weather->SetSchedule(*schedule)) {
+        error = "Weather schedule installation refused: invalid schedule or setup already locked.";
+        LUMINUMBRA_CORE_ERROR("World open refused: {}", error);
+        return nullptr;
+    }
+    // The session owns the schedule identity; nothing installs one after setup.
+    weather->LockSchedule();
+    return weather;
+}
+
 bool FoliageOwnsRegion(const FoliageFieldPages& channel, RegionKey owner) {
     if (owner.x < -32768 || owner.x > 32767 || owner.z < -32768 || owner.z > 32767) {
         return false;
@@ -1482,6 +1499,7 @@ GameSession::WorldPreparationOptions GameSession::CaptureWorldPreparationOptions
                                  : std::vector<IVec3>{},
             .ledger_config = m_activeRegionLedger.config(),
             .scheduler_override = m_regionSchedulerOverride,
+            .weather_schedule = m_weatherSchedule,
             .energy_anchor = m_metadata.spawnPoint,
             .simulation_tick = GetSimulationTickCount(),
             .world_revision = WorldRevision(),
@@ -1525,10 +1543,22 @@ bool GameSession::AdoptPreparedWorld(const std::shared_ptr<WorldPreparation>& pr
         options.aether_state != m_aetherStateEnabled ||
         options.ledger_config != m_activeRegionLedger.config() ||
         options.scheduler_override != m_regionSchedulerOverride ||
+        options.weather_schedule != m_weatherSchedule ||
         (prepared->state_only &&
          (!m_worldUsable || !m_worldSystem || options.world_revision != WorldRevision()))) {
         m_worldOpenError = "World preparation no longer matches session configuration.";
         return false;
+    }
+    // Install before any durable creation writes or publication of replacement state.
+    const auto& schedule = prepared->create ? m_weatherSchedule : prepared->loaded.weather_schedule;
+    if (prepared->create || m_weatherSchedule || schedule) {
+        const int seed = prepared->create ? static_cast<int>(prepared->metadata.resolvedSeed)
+                                          : (prepared->state_only ? static_cast<int>(m_numericSeed)
+                                                                  : prepared->world_seed);
+        prepared->loaded.weather_system = PrepareWeatherSystem(seed, schedule, m_worldOpenError);
+        if (!prepared->loaded.weather_system) {
+            return false;
+        }
     }
     // Consuming a prepared result twice must never replace live state twice.
     prepared->ready = false;
@@ -1680,7 +1710,16 @@ std::string GameSession::SystemConfigIdentity() const {
 }
 
 std::string GameSession::LegacyRevision3SystemConfigIdentity() const {
+    if (m_weatherSchedule)
+        return SystemConfigIdentity();
     return EffectiveIdentityValues().ComputeLegacyRevision3Identity();
+}
+
+bool GameSession::SetWeatherSchedule(const Systems::WeatherSchedule& schedule) {
+    if (m_worldSystem || !schedule.valid())
+        return false;
+    m_weatherSchedule = std::make_shared<const Systems::WeatherSchedule>(schedule);
+    return true;
 }
 
 std::string GameSession::SystemConfigIdentity(const WorldCalendar& calendar) const {
@@ -1690,7 +1729,11 @@ std::string GameSession::SystemConfigIdentity(const WorldCalendar& calendar) con
     values.daylight_numerator = calendar.daylightNumerator;
     values.daylight_denominator = calendar.daylightDenominator;
     values.lunar_cycle_days = calendar.lunarCycleDays;
-    return values.ComputeIdentity();
+    const auto identity = values.ComputeIdentity();
+    return m_weatherSchedule
+               ? std::string(Systems::WeatherSchedule::kIdentityPrefix) +
+                     Persistence::StableChecksum(identity + m_weatherSchedule->canonical_bytes())
+               : identity;
 }
 
 luminumbra::core::SimulationIdentityValues GameSession::EffectiveIdentityValues() const {
@@ -2944,7 +2987,7 @@ bool GameSession::AdoptCreatedWorld(WorldPreparation& prepared,
     // 5.  : the deterministic weather core. Pure function of the world
     //    seed (uses seed+12 for its pressure/climate noise + storm schedule);
     //    updated per tick AFTER wind (advects storm cells by the wind grid).
-    m_weatherSystem = std::make_unique<Systems::WeatherSystem>(world_seed);
+    m_weatherSystem = std::move(prepared.loaded.weather_system);
     LUMINUMBRA_CORE_INFO("Weather system initialized.");
 
     // 6.: the deterministic Aether scalar field. Pure function of the
@@ -3186,6 +3229,7 @@ bool GameSession::AdoptLoadedWorld(WorldPreparation& prepared) {
     // fields at the saved absolute tick in LoadWorldStateFrom, before any tick.
     m_windFieldSystem = std::make_unique<Systems::WindFieldSystem>(world_seed);
     m_weatherSystem = std::make_unique<Systems::WeatherSystem>(world_seed);
+    m_weatherSystem->LockSchedule(); // schedules install only through PrepareWeatherSystem
     m_aetherFieldSystem = std::make_unique<Systems::AetherFieldSystem>(world_seed);
 
     // unlike the re-derivable trio above, the stateful
@@ -4587,8 +4631,12 @@ void GameSession::RestoreAmbientFieldsAtTick(std::uint64_t tick) {
         ProjectRegionalWeather(tick, true);
     if (m_weatherSystem && m_windFieldSystem)
         m_weatherSystem->RestoreAtTick(tick, m_ambientFieldAnchor, *m_windFieldSystem);
-    if (m_aetherFieldSystem)
-        m_aetherFieldSystem->Update(tick, m_ambientFieldAnchor, m_windFieldSystem.get());
+    if (m_aetherFieldSystem) {
+        // Nonregional tick zero is the constructor's emission-only initial state.
+        const bool initial_schedule = !m_activeRegionsEnabled && m_weatherSchedule && tick == 0;
+        m_aetherFieldSystem->Update(
+            tick, m_ambientFieldAnchor, initial_schedule ? nullptr : m_windFieldSystem.get());
+    }
 }
 
 namespace {
@@ -4849,7 +4897,7 @@ bool GameSession::SaveWorld() {
 }
 
 bool GameSession::ReconcileWorldStateMetadataTo(const fs::path& save_dir) {
-    if (m_activeRegionsEnabled || m_renderCalendar.has_value())
+    if (m_activeRegionsEnabled || m_renderCalendar.has_value() || m_weatherSchedule)
         return SaveWorldMetadataTo(save_dir);
     std::string bytes;
     if (!PrepareWorldMetadataTo(save_dir, false, bytes))
@@ -4970,7 +5018,7 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir,
 bool GameSession::PrepareWorldMetadataTo(const fs::path& save_dir,
                                          bool full_metadata,
                                          std::string& bytes) const {
-    if (!full_metadata && !m_activeRegionsEnabled && !m_renderCalendar) {
+    if (!full_metadata && !m_activeRegionsEnabled && !m_renderCalendar && !m_weatherSchedule) {
         nlohmann::json metadata;
         bool missing = false;
         if (!Persistence::ReadSavedJson(save_dir / "world_info.json",
@@ -4987,6 +5035,18 @@ bool GameSession::PrepareWorldMetadataTo(const fs::path& save_dir,
         if (missing)
             metadata = {{"container_version", Persistence::WorldSaveService::kContainerVersion}};
         metadata.erase("renderCalendar");
+        // Partial writes preserve unrelated legacy metadata, but must not
+        // reinstall a schedule removed by snapshot adoption.
+        metadata.erase("weatherSchedule");
+        metadata.erase("weatherScheduleTick");
+        metadata.erase("weatherScheduleAnchor");
+        if (metadata.contains("container_version") &&
+            metadata.at("container_version") == Persistence::kScheduledWeatherMetadataVersion) {
+            metadata["container_version"] =
+                metadata.contains("snapshotFormat")
+                    ? Persistence::WorldSaveService::kIndexedMetadataVersion
+                    : Persistence::WorldSaveService::kContainerVersion;
+        }
         metadata["waterSimCursor"] = cursor;
         if (!Persistence::BoundedJsonDump(
                 metadata, Persistence::SavedInputLimits::kMetadataBytes, bytes, 4) ||
@@ -5033,6 +5093,13 @@ bool GameSession::PrepareWorldMetadataTo(const fs::path& save_dir,
         // inside a snapshot transaction, so the marker and the index always appear together.
         metadata_json["snapshotFormat"] = 1;
         metadata_json["container_version"] = Persistence::WorldSaveService::kIndexedMetadataVersion;
+    }
+    if (m_weatherSchedule) {
+        metadata_json["container_version"] = Persistence::kScheduledWeatherMetadataVersion;
+        metadata_json["weatherSchedule"] = m_weatherSchedule->canonical_bytes();
+        metadata_json["weatherScheduleTick"] = GetSimulationTickCount();
+        const auto& anchor = m_weatherSystem->ScheduleAnchor();
+        metadata_json["weatherScheduleAnchor"] = {anchor.x, anchor.y, anchor.z};
     }
     if (!Persistence::AdmitMetadata(metadata_json) ||
         !Persistence::BoundedJsonDump(
@@ -5507,6 +5574,13 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         }
         return false;
     }
+    if (m_weatherSchedule || state.weather_schedule) {
+        state.weather_system = PrepareWeatherSystem(
+            static_cast<int>(m_numericSeed), state.weather_schedule, m_worldOpenError);
+        if (!state.weather_system) {
+            return false;
+        }
+    }
     AdoptWorldStateFrom(save_dir, state);
     return true;
 }
@@ -5561,6 +5635,21 @@ bool GameSession::ReadPreparedWorldState(
             error = errors.empty() ? "Saved-world recovery failed." : errors.front();
             return false;
         }
+    }
+    if (!Persistence::ReadWeatherSchedule(save_dir,
+                                          state.weather_schedule,
+                                          state.weather_schedule_tick,
+                                          &errors,
+                                          stop,
+                                          &state.weather_schedule_anchor)) {
+        error = errors.empty() ? "Corrupt weather schedule." : errors.front();
+        // Preserve legacy damaged-snapshot invalidation, including an unscheduled session
+        // refusing a future metadata container version. Schedule admission failures leave
+        // the live session intact.
+        state.input_refused = options.weather_schedule ||
+                              error.find("weather schedule") != std::string::npos ||
+                              error.starts_with("Saved-input admission refused:");
+        return false;
     }
     if (!Persistence::WorldSaveService::load_plant_entities(
             state.plants, save_dir, &errors, stop) ||
@@ -5621,6 +5710,11 @@ bool GameSession::ReadPreparedWorldState(
         // Presentation-only saves recorded the calendar but no simulation tick.
         if (state.render_calendar)
             state.clock = WorldClock(0, *state.render_calendar);
+        // A legacy scheduled save has an absolute tick even without a regional clock.
+        // Seed migration before loading either an absent or an older ledger and
+        // its energy cadence. Admission already checked any explicit clock agrees.
+        if (state.weather_schedule)
+            state.clock.set_tick(state.weather_schedule_tick);
         state.ledger.emplace(options.ledger_config);
         if (!Persistence::WorldSaveService::load_active_regions(
                 *state.ledger, save_dir, &errors, state.clock, stop)) {
@@ -5708,9 +5802,13 @@ bool GameSession::ReadPreparedWorldState(
         if (cancelled())
             return false;
         const Persistence::SavedInputFile input(save_dir / "aether_state.efs");
-        const auto tick_base = options.active_regions
-                                   ? state.clock.tick()
-                                   : (resetting_clock ? std::uint64_t{0} : options.simulation_tick);
+        const auto tick_base =
+            options.active_regions
+                ? state.clock.tick()
+                : (state.weather_schedule
+                       ? state.weather_schedule_tick
+                       : (resetting_clock || options.weather_schedule ? std::uint64_t{0}
+                                                                      : options.simulation_tick));
         // Only the synchronous snapshot wrapper supplies existing energy. Worker
         // preparation passes nullptr and never reads a live session object.
         // Regional absence always denotes the default two channels.
@@ -5782,6 +5880,13 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
     m_lastLoadedChunkCount = 0;
     m_fieldPages = std::move(saved.field_pages);
     m_renderCalendar = saved.render_calendar;
+    const bool replace_weather = m_weatherSchedule || saved.weather_schedule;
+    m_weatherSchedule = std::move(saved.weather_schedule);
+    if (replace_weather) {
+        // Installation passed before publication; restoration may move backwards in time.
+        m_weatherSystem = std::move(saved.weather_system);
+        ApplyWeatherRainWiring();
+    }
     if (saved.ledger) {
         m_ambientFieldAnchor = saved.ambient_anchor.value_or(m_metadata.spawnPoint);
         // Interrupted pairs may have an older ledger. Rebase without scheduling.
@@ -5801,6 +5906,24 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
         m_regionFault.reset();
         m_replicatedSimulationAnchors.reset();
         RestoreWorldClock(saved.clock);
+    }
+    if (!saved.ledger && replace_weather) {
+        m_simulationClock.reset(m_weatherSchedule ? saved.weather_schedule_tick : 0);
+        if (m_weatherSchedule) {
+            m_ambientFieldAnchor = saved.weather_schedule_anchor;
+            RestoreAmbientFieldsAtTick(saved.weather_schedule_tick);
+        } else {
+            // Match a fresh legacy load: all three ambient constructors seed tick
+            // zero at the origin, with emission-only aether and no wind advection.
+            const int world_seed = static_cast<int>(m_numericSeed);
+            m_windFieldSystem = std::make_unique<Systems::WindFieldSystem>(world_seed);
+            m_aetherFieldSystem = std::make_unique<Systems::AetherFieldSystem>(world_seed);
+        }
+    }
+    if (saved.ledger && m_weatherSchedule && m_weatherSystem && m_windFieldSystem) {
+        // The respawn and ambient anchors may have changed since weather's saved tick.
+        m_weatherSystem->RestoreAtTick(
+            saved.weather_schedule_tick, saved.weather_schedule_anchor, *m_windFieldSystem);
     }
     if (m_energyFieldState && saved.energy)
         *m_energyFieldState = std::move(*saved.energy);
