@@ -42,6 +42,7 @@ PYTHON_TESTS = (
     "test/tools/test_region_fixture_capture_contract.py",
 
     "tools/ci/test_terrain_shader_contract.py",
+    "tools/ci/test_terrain_winding_contract.py",
     "tools/ci/test_cache_retention.py",
     "tools/ci/test_check_acceptance_matrix.py",
     "tools/ci/test_check_docs.py",
@@ -251,6 +252,8 @@ def needs_python(path: str) -> bool:
     # so CI infrastructure changes run the Python plan as well as native lanes.
     return (path.endswith(".py") or path.startswith(CI_PREFIXES) or path in RMLUI_CALLER_INPUTS
             or path == "res/shaders/g_buffer.frag"
+            or path.startswith("src/luminumbra_common/world/MarchingCubes")
+            or path == "src/luminumbra_common/world/FarVolumeMesher.cpp"
             or path == "vendor/rmlui/rmlui-6.1-source.json"
             or path == "cmake/rmlui_source.cmake" or path.startswith("cmake/patches/rmlui-"))
 

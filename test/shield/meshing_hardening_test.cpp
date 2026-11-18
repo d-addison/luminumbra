@@ -24,6 +24,7 @@
 #include "gtest/gtest.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -687,6 +688,56 @@ TEST(MeshingHardening, FlatSurfaceWindingAndNormalsConsistentlyUp) {
         const Vec3 fn = glm::cross(v1.position - v0.position, v2.position - v0.position);
         EXPECT_GT(fn.y, 0.0f) << "flat-surface triangle " << (i / 3)
                               << " has inverted (downward) winding";
+    }
+}
+
+TEST(MeshingHardening, UnequalDisconnectedSurfacesKeepOutwardWindingAndLocalNormals) {
+    SHIELD_WorldSystem world(nullptr, nullptr, MakeFlatSurfaceParams(), 1337);
+    // Opposite solid corners (case 65) and opposite cavities (case 190).
+    // Unequal amplitudes make the cell-average gradient face into one component.
+    for (const int step : {1, 2, 4}) {
+        for (const auto amplitudes : {std::array<float, 2>{1.0f, 10.0f}, {10.0f, 1.0f}}) {
+            for (const float polarity : {1.0f, -1.0f}) {
+                Chunk chunk(IVec3(0));
+                constexpr int side = CHUNK_SIZE_X + 1;
+                chunk.sdf_data.assign(static_cast<std::size_t>(side * side * side), polarity);
+                for (std::size_t component = 0; component < amplitudes.size(); ++component) {
+                    const int coordinate = static_cast<int>(component + 1) * step;
+                    const auto index =
+                        static_cast<std::size_t>(coordinate * (1 + side + side * side));
+                    chunk.sdf_data[index] = -polarity * amplitudes[component];
+                }
+                World::MarchingCubes::PolygoniseTerrain(world, chunk, 0.0f, step);
+                ASSERT_EQ(chunk.mesh_indices.size(), 48u);
+                const auto density = [&](const Vec3& position) {
+                    const auto tent = [&](float center) {
+                        const Vec3 weight =
+                            glm::max(Vec3(0.0f), Vec3(1.0f) - glm::abs(position - Vec3(center)));
+                        return weight.x * weight.y * weight.z;
+                    };
+                    return polarity * (1.0f - (1.0f + amplitudes[0]) * tent(1.0f) -
+                                       (1.0f + amplitudes[1]) * tent(2.0f));
+                };
+                for (std::size_t i = 0; i < chunk.mesh_indices.size(); i += 3) {
+                    const Vec3 a = chunk.mesh_vertices[chunk.mesh_indices[i]].position /
+                                   static_cast<float>(step);
+                    const Vec3 b = chunk.mesh_vertices[chunk.mesh_indices[i + 1]].position /
+                                   static_cast<float>(step);
+                    const Vec3 c = chunk.mesh_vertices[chunk.mesh_indices[i + 2]].position /
+                                   static_cast<float>(step);
+                    const Vec3 face = glm::cross(b - a, c - a);
+                    ASSERT_GT(glm::dot(face, face), 0.0f);
+                    const Vec3 center = (a + b + c) / 3.0f;
+                    const Vec3 offset = glm::normalize(face) * 0.001f;
+                    EXPECT_GT(density(center + offset), density(center - offset));
+                }
+                for (const auto& vertex : chunk.mesh_vertices) {
+                    const Vec3 position = vertex.position / static_cast<float>(step);
+                    const Vec3 offset = vertex.normal * 0.001f;
+                    EXPECT_GT(density(position + offset), density(position - offset));
+                }
+            }
+        }
     }
 }
 
