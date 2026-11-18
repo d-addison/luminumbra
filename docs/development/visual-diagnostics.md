@@ -63,8 +63,11 @@ explicit unsupported coverage.
 
 Incomplete-FBO rollback, normal and exceptional scope exit, capture destruction,
 and G-buffer recreation or registry deletion detach first, restore draw buffers,
-color mask and caller draw-framebuffer binding, then release the lease. Recreation
-and exceptions invalidate coverage. `complete()` requires a successful capture,
+color mask and caller draw-framebuffer binding, then release the lease. A
+framebuffer that any registry path (replacement, direct or bulk deletion) retires
+while attached is detected at detachment: the capture leaves the retired or reused
+name untouched, restores the color mask and caller binding, and fails. Recreation,
+retirement and exceptions invalidate coverage. `complete()` requires a successful capture,
 completed detachment, a released lease and a complete draw table without refusals;
 it covers only the deferred pass, not later contributors or bundle publication.
 Capture scopes cannot nest or reuse a nonempty draw table; an empty live-terrain

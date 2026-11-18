@@ -374,6 +374,20 @@ TEST(DiagnosticAttribution, ResizeAndRegistryTeardownDetachBeforeReleasingTheAtt
            "attachment_lease.reset()");
     Before(detach, "static_cast<GLuint>(saved_framebuffer)", "attachment_lease.reset()");
     EXPECT_EQ(Count(targets + Read(kPass), "attachment_lease.reset()"), 1u);
+    // Registry replacement or direct deletion can retire the attached framebuffer
+    // without DestroyGBufferTargets; detach must not touch a deleted or reused name.
+    Before(detach,
+           "glIsFramebuffer(state_->framebuffer)",
+           "glBindFramebuffer(GL_DRAW_FRAMEBUFFER, state_->framebuffer)");
+    Before(detach,
+           "GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME",
+           "GL_COLOR_ATTACHMENT6, GL_TEXTURE_2D, 0, 0");
+    Contains(detach, "static_cast<GLuint>(object_name) == state_->attachment_lease.texture()");
+    Before(
+        detach, "if (attached) {", "glDrawBuffers(state_->buffer_count, state_->buffers.data())");
+    Before(detach, "if (!attached) {", "gbuffer_retired_during_capture");
+    Before(detach, "gbuffer_retired_during_capture", "attachment_lease.reset()");
+    Contains(detach, "state_->failed = true;");
     const auto retire = Body(targets, "void GBufferDiagnosticCapture::before_destroy(");
     Contains(retire, "state_->framebuffer && state_->framebuffer == gbuffer.fbo_id");
     Before(retire, "detach_target();", "state_->failed = true;");
@@ -701,6 +715,33 @@ TEST_F(DiagnosticAttributionGl, WritersRequireAttachmentAndCompletionRequiresLea
     EXPECT_TRUE(targets_.reset());
     EXPECT_FALSE(capture.attach(pass_.gbuffer(), {32, 32}));
     EXPECT_FALSE(capture.complete());
+    ExpectEntryState(false);
+}
+
+TEST_F(DiagnosticAttributionGl, RegistryRetirementWhileAttachedFailsWithoutTouchingReusedNames) {
+    GBufferDiagnosticCapture capture(targets_, table_);
+    ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+    capture.write(*capture.variant(pass_.instanced_static_mesh_shader().get(), false),
+                  Submission());
+    // Retire the attached framebuffer through the registry, not DestroyGBufferTargets,
+    // then create a framebuffer that may reuse the retired name.
+    resources_.destroy_owned("gbuffer_fbo");
+    GLuint foreign = 0;
+    glGenFramebuffers(1, &foreign);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, foreign);
+    GLint foreign_buffer = 0;
+    glGetIntegerv(GL_DRAW_BUFFER1, &foreign_buffer);
+    SetEntryState(false);
+
+    capture.detach();
+    ExpectEntryState(false);
+    EXPECT_FALSE(capture.complete());
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, foreign);
+    GLint after = 0;
+    glGetIntegerv(GL_DRAW_BUFFER1, &after);
+    EXPECT_EQ(after, foreign_buffer);
+    glDeleteFramebuffers(1, &foreign);
+    SetEntryState(false);
     ExpectEntryState(false);
 }
 
