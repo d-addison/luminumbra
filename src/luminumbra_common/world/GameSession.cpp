@@ -293,6 +293,8 @@ std::unique_ptr<Systems::WeatherSystem> PrepareWeatherSystem(
         LUMINUMBRA_CORE_ERROR("World open refused: {}", error);
         return nullptr;
     }
+    // The session owns the schedule identity; nothing installs one after setup.
+    weather->LockSchedule();
     return weather;
 }
 } // namespace
@@ -2154,6 +2156,7 @@ bool GameSession::AdoptLoadedWorld(WorldPreparation& prepared) {
     // fields at the saved absolute tick in LoadWorldStateFrom, before any tick.
     m_windFieldSystem = std::make_unique<Systems::WindFieldSystem>(world_seed);
     m_weatherSystem = std::make_unique<Systems::WeatherSystem>(world_seed);
+    m_weatherSystem->LockSchedule(); // schedules install only through PrepareWeatherSystem
     m_aetherFieldSystem = std::make_unique<Systems::AetherFieldSystem>(world_seed);
 
     // unlike the re-derivable trio above, the stateful

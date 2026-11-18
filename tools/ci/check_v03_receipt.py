@@ -12,6 +12,9 @@ The root must also resolve within the receipt directory and contain no ".."
 components using either separator. Traversal and symlink escapes are rejected.
 Passing net_soak sections require nonempty required_tests
 and discovered_tests lists; skipped_tests must be a nonnegative integer.
+Passing audio_off sections require runtime_snapshots with ordinary, no_audio and
+no_audio_reversed runs, each {exit_code, timed_out, state}. The state must contain
+the producer's luminumbra.audio_acceptance.v1 observations; see audio-release-policy.md.
 Each required section yields one
 check whose id is the section name. Sections not in REQUIRED_SECTIONS yield an "unknown_section:<name>"
 check that is always unevaluated, so they never make the overall verdict pass.
@@ -51,6 +54,141 @@ EXIT_CODES = {PASS: EXIT_PASS, FAIL: EXIT_FAIL, UNEVALUATED: EXIT_UNEVALUATED}
 
 class InputError(Exception):
     """Invalid input: unreadable file, not JSON, wrong schema or sections shape."""
+
+
+class AudioEvidenceError(Exception):
+    """A runtime observation cannot qualify amended audio acceptance."""
+
+
+def _audio_match(actual, expected, path: str) -> None:
+    # Only traverse the fixed v1 contract, never arbitrary receipt subtrees.
+    if isinstance(expected, dict):
+        if not isinstance(actual, dict):
+            raise AudioEvidenceError(f"{path}: expected object")
+        for key, value in expected.items():
+            if key not in actual:
+                raise AudioEvidenceError(f"{path}.{key}: missing key")
+            _audio_match(actual[key], value, f"{path}.{key}")
+    elif type(actual) is not type(expected) or actual != expected:
+        raise AudioEvidenceError(f"{path}: expected {expected!r} ({type(expected).__name__})")
+
+
+_AUDIO_VOLUME_KEYS = frozenset(("master", "music", "sfx"))
+# Exact key sets of the luminumbra.audio_acceptance.v1 objects (AudioAcceptance.h).
+# Unknown or extra observations refuse rather than being ignored.
+_AUDIO_OBJECT_KEYS = {
+    "": frozenset(("schema", "resolution", "backend", "saved_volumes", "controls", "telemetry",
+                   "no_audio_precedence", "controls_disabled")),
+    "resolution": frozenset(("no_audio_requested", "enable_audio_requested", "requested_mode",
+                             "resolved_mode", "reason")),
+    "backend": frozenset(("playback_enabled", "engine_initialized", "device_started", "routing")),
+    "backend.routing": frozenset(("sfx", "ambient", "events", "ui")),
+    "saved_volumes": frozenset(("loaded", "in_effect", "unchanged", "playback_gains")),
+    "controls": frozenset(("observed", "present", "disabled_count", "match_playback")),
+    "telemetry": frozenset(("opt_in_requested", "enabled", "retained_requests", "opt_in_only")),
+}
+
+
+def _audio_exact_keys(value, allowed: frozenset, path: str) -> None:
+    if not isinstance(value, dict):
+        raise AudioEvidenceError(f"{path}: expected object")
+    unknown = sorted(key for key in value if key not in allowed)
+    if unknown:
+        raise AudioEvidenceError(f"{path}.{unknown[0]}: unknown key")
+
+
+def _audio_schema_keys(audio: dict, path: str) -> None:
+    for subpath, allowed in _AUDIO_OBJECT_KEYS.items():
+        value = audio
+        for part in subpath.split(".") if subpath else ():
+            value = value[part]
+        _audio_exact_keys(value, allowed, f"{path}.{subpath}" if subpath else path)
+
+
+def _audio_volumes(value, path: str) -> dict:
+    if not isinstance(value, dict):
+        raise AudioEvidenceError(f"{path}: expected observed volumes object")
+    _audio_exact_keys(value, _AUDIO_VOLUME_KEYS, path)
+    for channel in ("master", "music", "sfx"):
+        if channel not in value:
+            raise AudioEvidenceError(f"{path}.{channel}: missing key")
+        level = value[channel]
+        # The chained range comparison also rejects NaN, infinities and huge JSON integers,
+        # without converting an integer to float (math.isfinite would overflow on 10**400).
+        if type(level) not in (int, float) or not 0 < level <= 1:
+            raise AudioEvidenceError(f"{path}.{channel}: expected finite nonzero level in (0, 1]")
+    return {channel: value[channel] for channel in ("master", "music", "sfx")}
+
+
+def _audio_telemetry(value, path: str, ordinary: bool) -> None:
+    _audio_match(value, {"opt_in_only": True}, path)
+    for key in ("opt_in_requested", "enabled", "retained_requests"):
+        if key not in value:
+            raise AudioEvidenceError(f"{path}.{key}: missing key")
+    for key in ("opt_in_requested", "enabled"):
+        if type(value[key]) is not bool:
+            raise AudioEvidenceError(f"{path}.{key}: expected boolean")
+    retained = value["retained_requests"]
+    if not _is_int(retained) or retained < 0:
+        raise AudioEvidenceError(f"{path}.retained_requests: expected nonnegative integer")
+    opted_in = value["opt_in_requested"]
+    if ordinary and opted_in:
+        raise AudioEvidenceError(f"{path}.opt_in_requested: ordinary startup must not opt in")
+    if not opted_in and (value["enabled"] or retained != 0):
+        raise AudioEvidenceError(f"{path}: telemetry or retained requests without opt-in")
+
+
+def _check_audio(section: dict) -> None:
+    snapshots = section.get("runtime_snapshots")
+    if not isinstance(snapshots, dict):
+        raise AudioEvidenceError(
+            "missing or malformed runtime_snapshots; stale default-off-only evidence cannot qualify")
+    saved = None
+    # Three sessions: ordinary startup and explicit suppression in both flag orders.
+    for role in ("ordinary", "no_audio", "no_audio_reversed"):
+        if role not in snapshots:
+            raise AudioEvidenceError(f"runtime_snapshots.{role}: missing key")
+        run = snapshots[role]
+        path = f"runtime_snapshots.{role}"
+        _audio_match(run, {"exit_code": 0, "timed_out": False, "state": {
+            "schema": "luminumbra.runtime_state.v1", "audio_acceptance": {}}}, path)
+        audio = run["state"]["audio_acceptance"]
+        path += ".state.audio_acceptance"
+        playback = role == "ordinary"
+        _audio_match(audio, {
+            "schema": "luminumbra.audio_acceptance.v1",
+            "resolution": {"no_audio_requested": not playback,
+                           "enable_audio_requested": not playback,
+                           "requested_mode": "device" if playback else "null",
+                           "resolved_mode": "device" if playback else "null",
+                           "reason": "default" if playback else "flag"},
+            "backend": {"playback_enabled": playback, "engine_initialized": playback,
+                        "device_started": playback,
+                        "routing": {key: playback for key in ("sfx", "ambient", "events", "ui")}},
+            "saved_volumes": {"unchanged": True},
+            "controls": {"observed": True, "present": 3,
+                         "disabled_count": 0 if playback else 3, "match_playback": True},
+            "telemetry": {},
+            "no_audio_precedence": None if playback else True,
+            "controls_disabled": not playback,
+        }, path)
+        _audio_schema_keys(audio, path)
+        volumes = audio["saved_volumes"]
+        for key in ("loaded", "in_effect", "playback_gains"):
+            if key not in volumes:
+                raise AudioEvidenceError(f"{path}.saved_volumes.{key}: missing key")
+        loaded = _audio_volumes(volumes["loaded"], f"{path}.saved_volumes.loaded")
+        current = _audio_volumes(volumes["in_effect"], f"{path}.saved_volumes.in_effect")
+        if loaded != current or (saved is not None and loaded != saved):
+            raise AudioEvidenceError(f"{path}.saved_volumes: saved volumes changed")
+        saved = loaded
+        if playback:
+            gains = _audio_volumes(volumes["playback_gains"], f"{path}.saved_volumes.playback_gains")
+            if gains != loaded:
+                raise AudioEvidenceError(f"{path}.saved_volumes.playback_gains: differs from saved volumes")
+        elif volumes["playback_gains"] is not None:
+            raise AudioEvidenceError(f"{path}.saved_volumes.playback_gains: expected explicit null")
+        _audio_telemetry(audio["telemetry"], f"{path}.telemetry", playback)
 
 
 def _result(check_id: str, verdict: str, detail: str) -> dict:
@@ -129,7 +267,13 @@ def _check_section(name: str, section, evidence_root: Path) -> dict:
             return _result(name, FAIL, "malformed evidence")
         if not evidence:
             return _result(name, UNEVALUATED, "pass without evidence")
-        return _check_evidence(name, evidence, evidence_root)
+        result = _check_evidence(name, evidence, evidence_root)
+        if result["verdict"] == PASS and name == "audio_off":
+            try:
+                _check_audio(section)
+            except AudioEvidenceError as error:
+                return _result(name, FAIL, str(error))
+        return result
     return _result(name, FAIL, f"unknown status: {status!r}")
 
 
