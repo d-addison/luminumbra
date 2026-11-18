@@ -3324,6 +3324,337 @@ TEST(AuthorityHashCapture, InvalidRegionalOrderKeysAndPartsRefuseWithoutCapture)
     }
 }
 
+void CheckSessionCheckpointPublication(const fs::path& root,
+                                       const Persistence::AuthorityHashCapture& expected_capture) {
+    Net::LockstepConfig config;
+    config.hash_cadence_ticks = 1;
+    config.system_config_identity = "config";
+    config.preset_content_hash = "content";
+    auto remote = config;
+    remote.local_client_id = 1;
+    remote.peer_client_id = 0;
+    auto [local, peer] = Net::MakeLoopbackPair();
+    Net::LockstepHooks hooks;
+    // Both publications consume exactly the same immutable session observation.
+    struct CaptureContext {
+        const Persistence::AuthorityHashCapture& capture;
+    } context{expected_capture};
+    hooks.user = &context;
+    hooks.capture_hashes = [](std::uint64_t tick, Net::HashMsg& out, void* user) {
+        const auto& capture = static_cast<const CaptureContext*>(user)->capture;
+        out = {
+            tick, capture.streamed, capture.sub.terrain, capture.sub.water, capture.sub.entities};
+    };
+    Net::LockstepSession lockstep(config, local.get(), hooks);
+    lockstep.SetDumpPath((root / "capture-agreement.lrec1").string());
+    ASSERT_TRUE(peer->SendFrame(Net::EncodeHello(Net::MakeLockstepHello(remote))));
+    ASSERT_TRUE(lockstep.Handshake());
+    ASSERT_TRUE(peer->SendFrame(Net::EncodeInput({1, 1, {}})));
+    EXPECT_EQ(lockstep.PumpTick(2).outcome, Net::TickOutcome::Advanced);
+    std::size_t published = 0;
+    std::vector<std::uint8_t> frame;
+    // Hello, the initial horizon, the next input and one hash bound the drain.
+    for (std::uint32_t i = 0; i < config.horizon_max + 3; ++i) {
+        if (!peer->TryReceiveFrame(frame)) {
+            break;
+        }
+        Net::MessageType type{};
+        ASSERT_TRUE(Net::PeekMessageType(frame, type));
+        if (type == Net::MessageType::Hash) {
+            Net::HashMsg hash;
+            ASSERT_TRUE(Net::DecodeHash(frame, hash));
+            EXPECT_EQ(hash.tick, 1u);
+            EXPECT_EQ(hash.world_hash, expected_capture.streamed);
+            EXPECT_EQ(hash.terrain, expected_capture.sub.terrain);
+            EXPECT_EQ(hash.water, expected_capture.sub.water);
+            EXPECT_EQ(hash.entities, expected_capture.sub.entities);
+            ++published;
+        }
+    }
+    EXPECT_EQ(published, 1u);
+    EXPECT_FALSE(peer->TryReceiveFrame(frame));
+    lockstep.Disconnect();
+    const auto recording = Replay::ReadReplay((root / "capture-agreement.lrec1").string());
+    ASSERT_TRUE(recording.has_value());
+    if (!recording) {
+        return;
+    }
+    EXPECT_EQ(recording->header.start_world_hash, expected_capture.streamed);
+}
+
+TEST_F(WorldOpenRefusal, SessionCaptureAndLockstepCheckpointKeepLegacyBytes) {
+    namespace P = Persistence;
+    for (const bool regions : {false, true}) {
+        Server::ServerWorldRunner runner(SnapshotRunnerConfig(RootString(), regions));
+        ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, regions));
+        auto& session = *runner.Session();
+        auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+        chunk->heightmap_data = {2.0f};
+        chunk->mark_voxel_data_dirty();
+        chunk->set_state(ChunkState::Idle);
+        ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+        const auto entities =
+            Ecs::SerializeEntityRegistrySnapshotJson(Ecs::EntityRegistrySnapshot{});
+        for (const std::size_t cursor : {std::size_t{0}, std::size_t{7}}) {
+            session.GetWorldSystem()->SetWaterSimWindowCursor(cursor);
+            const auto full = session.CaptureAuthorityHashes(entities);
+            const auto checkpoint = session.CaptureAuthorityHashes(
+                entities, P::AuthorityCaptureParts::StreamedAndSubHashes);
+            ASSERT_TRUE(full.capture.has_value());
+            ASSERT_TRUE(checkpoint.capture.has_value());
+            if (!full.capture || !checkpoint.capture) {
+                return;
+            }
+            EXPECT_EQ(full.status, P::AuthorityCaptureStatus::Ready);
+            EXPECT_EQ(checkpoint.status, P::AuthorityCaptureStatus::Ready);
+            EXPECT_EQ(full.capture->streamed, checkpoint.capture->streamed);
+            ExpectCaptureSubHashes(full.capture->sub, checkpoint.capture->sub);
+            EXPECT_EQ(session.ComputeChunkStateHash(), full.capture->chunk);
+            EXPECT_EQ(TestSupport::SessionWorldHash(session), full.capture->composite);
+            WorldStreamingState state;
+            ASSERT_TRUE(state.insert_chunk(chunk));
+            EXPECT_EQ(checkpoint.capture->streamed, WorldSaveService{}.world_hash(state, cursor));
+            const auto digest = std::stoull(P::ComputeRegionContentHash(state), nullptr, 16);
+            const auto legacy_chunk =
+                regions ? P::StableChecksum("authoritative_chunks:v2:" + std::to_string(cursor) +
+                                            ":0,0:" + std::to_string(digest) + ";")
+                        : WorldSaveService{}.world_hash(state, cursor);
+            EXPECT_EQ(full.capture->chunk, legacy_chunk);
+            const auto legacy = P::ComputeWorldStreamingStateSubHashes(state, entities, cursor);
+            EXPECT_EQ(checkpoint.capture->sub.terrain, legacy.terrain);
+            EXPECT_EQ(checkpoint.capture->sub.water, legacy.water);
+            EXPECT_EQ(checkpoint.capture->sub.entities, legacy.entities);
+
+            ASSERT_NO_FATAL_FAILURE(CheckSessionCheckpointPublication(root, *checkpoint.capture));
+        }
+    }
+}
+
+TEST_F(WorldOpenRefusal, SessionCheckpointSkipsFailedRegionalReadsAndLatchedFaultIsHashable) {
+    namespace P = Persistence;
+    JobSystem capture_jobs;
+    capture_jobs.startup(1);
+    GameSession session;
+    session.SetJobSystem(&capture_jobs);
+    session.SetRootPath(RootString());
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+    auto& world = *session.GetWorldSystem();
+    world.clear_world(session.GetPhysicsSystem());
+    world.remember_durable_chunks({IVec3(0, 0, 0)});
+    const auto original = session.CaptureAuthorityHashes();
+    ASSERT_EQ(original.status, P::AuthorityCaptureStatus::Ready);
+    const auto region = WorldSaveService::region_file_path(save, 0, 0);
+    const auto bytes = Read(region);
+    for (const bool missing : {false, true}) {
+        SCOPED_TRACE(missing);
+        if (missing) {
+            ASSERT_TRUE(fs::remove(region));
+        } else {
+            Write(region, "partial");
+        }
+        const auto disk = DiskBytes(save);
+        const auto inputs = world.region_digest_input_items();
+        const auto checkpoint =
+            session.CaptureAuthorityHashes({}, P::AuthorityCaptureParts::StreamedAndSubHashes);
+        EXPECT_EQ(checkpoint.status, P::AuthorityCaptureStatus::Ready);
+        EXPECT_TRUE(checkpoint.capture.has_value());
+        EXPECT_EQ(world.region_digest_input_items(), inputs);
+        const auto full = session.CaptureAuthorityHashes();
+        EXPECT_EQ(full.status, P::AuthorityCaptureStatus::PreparationRefused);
+        EXPECT_FALSE(full.capture.has_value());
+        EXPECT_TRUE(session.ComputeChunkStateHash().empty());
+        EXPECT_TRUE(session.GetRegionSchedulerFault().has_value());
+        EXPECT_EQ(DiskBytes(save), disk);
+        Write(region, bytes);
+        // Recovery deliberately leaves the scheduler fault latched.
+        EXPECT_EQ(session.CaptureAuthorityHashes().status, P::AuthorityCaptureStatus::Ready);
+        EXPECT_TRUE(session.GetRegionSchedulerFault().has_value());
+    }
+    capture_jobs.shutdown();
+    const auto unavailable = session.CaptureAuthorityHashes();
+    EXPECT_EQ(unavailable.status, P::AuthorityCaptureStatus::PreparationRefused);
+    EXPECT_FALSE(unavailable.capture.has_value());
+    EXPECT_EQ(
+        session.CaptureAuthorityHashes({}, P::AuthorityCaptureParts::StreamedAndSubHashes).status,
+        P::AuthorityCaptureStatus::Ready);
+    capture_jobs.startup(1);
+    EXPECT_EQ(session.CaptureAuthorityHashes().status, P::AuthorityCaptureStatus::Ready);
+}
+
+TEST_F(WorldOpenRefusal, SessionCaptureRefusesIncompleteParkedOwnerAtEveryActivationPhase) {
+    for (const std::uint64_t activation_phase : {0u, 1u, 2u, 3u}) {
+        Server::ServerWorldRunner runner(SnapshotRunnerConfig(RootString(), true));
+        ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, true));
+        auto& session = *runner.Session();
+        auto& world = *session.GetWorldSystem();
+        const auto interval = static_cast<std::uint64_t>(
+            world.get_last_streaming_budget_stats().update_interval_frames);
+        ASSERT_EQ(interval, 4u);
+        const auto phase = world.get_streaming_telemetry_stats().frames_observed % interval;
+        const auto padding = (activation_phase + interval - phase) % interval;
+        // At most three anchorless updates select a phase without dispatching work.
+        for (std::uint64_t frame = 0; frame < padding; ++frame) {
+            world.update(session.GetRegistry(), std::vector<Vec3>{}, nullptr, false);
+        }
+        auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+        chunk->mark_voxel_data_dirty();
+        chunk->set_state(ChunkState::Idle);
+        ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+        const auto remaining = interval - activation_phase;
+        // The next activation is at most four updates away; do not mesh this owner.
+        for (std::uint64_t frame = 0; frame < remaining; ++frame) {
+            chunk->set_state(frame + 1 == remaining ? ChunkState::Idle : ChunkState::Loading);
+            world.update(session.GetRegistry(), Vec3(32008.0f, 8.0f, 32008.0f), nullptr, false);
+            world.wait_for_streaming_jobs();
+        }
+        ASSERT_FALSE(world.find_streamed_chunk(chunk->get_coords()));
+        ASSERT_EQ(world.snapshot_parked_chunks().size(), 1u);
+        chunk->set_state(ChunkState::Loading);
+        const auto refused = session.CaptureAuthorityHashes();
+        EXPECT_EQ(refused.status, Persistence::AuthorityCaptureStatus::IncompleteOwner);
+        EXPECT_FALSE(refused.capture.has_value());
+        EXPECT_TRUE(session.ComputeChunkStateHash().empty());
+        EXPECT_EQ(world.find_authoritative_chunk(chunk->get_coords()), chunk);
+        EXPECT_EQ(chunk->get_state(), ChunkState::Loading);
+        EXPECT_EQ(session
+                      .CaptureAuthorityHashes(
+                          {}, Persistence::AuthorityCaptureParts::StreamedAndSubHashes)
+                      .status,
+                  Persistence::AuthorityCaptureStatus::Ready);
+        chunk->set_state(ChunkState::Idle);
+        EXPECT_EQ(session.CaptureAuthorityHashes().status,
+                  Persistence::AuthorityCaptureStatus::Ready);
+    }
+}
+
+TEST_F(WorldOpenRefusal, SessionCaptureRefusesMissingIncompleteAndInvalidInputs) {
+    namespace P = Persistence;
+    GameSession absent;
+    EXPECT_EQ(absent.CaptureAuthorityHashes().status, P::AuthorityCaptureStatus::MissingCursor);
+    for (const bool regions : {false, true}) {
+        Server::ServerWorldRunner runner(SnapshotRunnerConfig(RootString(), regions));
+        ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, regions));
+        auto& session = *runner.Session();
+        auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+        chunk->mark_voxel_data_dirty();
+        chunk->set_state(ChunkState::Idle);
+        ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+        chunk->set_state(ChunkState::Loading);
+        for (const auto parts : {P::AuthorityCaptureParts::All,
+                                 P::AuthorityCaptureParts::Chunk,
+                                 P::AuthorityCaptureParts::Composite,
+                                 P::AuthorityCaptureParts::SubHashes,
+                                 P::AuthorityCaptureParts::StreamedAndSubHashes}) {
+            const auto result = session.CaptureAuthorityHashes({}, parts);
+            EXPECT_EQ(result.status, P::AuthorityCaptureStatus::IncompleteOwner);
+            EXPECT_FALSE(result.capture.has_value());
+        }
+        EXPECT_TRUE(session.ComputeChunkStateHash().empty());
+        chunk->set_state(ChunkState::Idle);
+        EXPECT_EQ(session.CaptureAuthorityHashes().status, P::AuthorityCaptureStatus::Ready);
+        const auto invalid =
+            session.CaptureAuthorityHashes({}, static_cast<P::AuthorityCaptureParts>(-1));
+        EXPECT_EQ(invalid.status, P::AuthorityCaptureStatus::PreparationRefused);
+        EXPECT_FALSE(invalid.capture.has_value());
+    }
+}
+
+TEST_F(WorldOpenRefusal, LockstepRefusesBootAndTickCapturesBeforePublishingHashes) {
+    for (const std::uint64_t refuse_tick : {std::uint64_t{0}, std::uint64_t{1}}) {
+        struct CaptureFault {
+            std::uint64_t tick;
+            std::size_t calls = 0;
+            std::vector<std::uint64_t> sink_ticks;
+            std::vector<std::vector<std::uint8_t>> sink_inputs;
+            std::size_t sink_hashes = 0;
+        } fault{refuse_tick, 0, {}, {}, 0};
+        Net::LockstepConfig config;
+        config.hash_cadence_ticks = 1;
+        config.system_config_identity = "config";
+        config.preset_content_hash = "content";
+        auto remote = config;
+        remote.local_client_id = 1;
+        remote.peer_client_id = 0;
+        auto [local, peer] = Net::MakeLoopbackPair();
+        Net::LockstepHooks hooks;
+        hooks.user = &fault;
+        hooks.capture_hashes = [](std::uint64_t tick, Net::HashMsg& out, void* user) {
+            auto& capture_fault = *static_cast<CaptureFault*>(user);
+            ++capture_fault.calls;
+            out.world_hash = "partial";
+            if (tick == capture_fault.tick) {
+                throw Persistence::AuthorityCaptureRefused();
+            }
+            out.tick = tick;
+            out.world_hash = "complete";
+        };
+        hooks.collect_local_input = [](std::uint64_t, void*) {
+            return std::vector<std::uint8_t>{0x5A};
+        };
+        // A caller-owned replay sink sees every executed tick, including one whose
+        // capture is refused, without a hash.
+        hooks.record_replay_tick = [](std::uint64_t tick,
+                                      const std::vector<std::uint8_t>& merged,
+                                      const Net::HashMsg* hash,
+                                      void* user) {
+            auto& capture_fault = *static_cast<CaptureFault*>(user);
+            capture_fault.sink_ticks.push_back(tick);
+            capture_fault.sink_inputs.push_back(merged);
+            capture_fault.sink_hashes += hash != nullptr;
+        };
+        Net::LockstepSession session(config, local.get(), hooks);
+        const auto replay = root / ("capture-refusal-" + std::to_string(refuse_tick) + ".lrec1");
+        session.SetDumpPath(replay.string());
+        ASSERT_TRUE(peer->SendFrame(Net::EncodeHello(Net::MakeLockstepHello(remote))));
+        if (refuse_tick == 0) {
+            EXPECT_FALSE(session.Handshake());
+            EXPECT_FALSE(fs::exists(replay));
+            EXPECT_EQ(fault.calls, 1u);
+        } else {
+            ASSERT_TRUE(session.Handshake());
+            ASSERT_TRUE(peer->SendFrame(Net::EncodeInput({1, 1, {0xA5}})));
+            const auto result = session.PumpTick(2);
+            EXPECT_EQ(result.outcome, Net::TickOutcome::Desync);
+            EXPECT_FALSE(result.ran_hash_exchange);
+            EXPECT_EQ(fault.calls, 2u);
+            const auto recording = Replay::ReadReplay(replay.string());
+            ASSERT_TRUE(recording.has_value());
+            if (!recording) {
+                return;
+            }
+            EXPECT_FALSE(recording->truncated);
+            EXPECT_TRUE(recording->trailer_present);
+            EXPECT_EQ(recording->tick_count, 1u);
+            ASSERT_EQ(recording->inputs.size(), 1u);
+            EXPECT_EQ(recording->inputs.front().tick, 1u);
+            EXPECT_EQ(recording->inputs.front().inputs, (std::vector<std::uint8_t>{0x5A, 0xA5}));
+            EXPECT_TRUE(recording->checkpoints.empty());
+            EXPECT_EQ(fault.sink_ticks, std::vector<std::uint64_t>{1u});
+            ASSERT_EQ(fault.sink_inputs.size(), 1u);
+            EXPECT_EQ(fault.sink_inputs.front(), recording->inputs.front().inputs);
+            EXPECT_EQ(fault.sink_hashes, 0u);
+        }
+        if (refuse_tick == 0) {
+            EXPECT_TRUE(fault.sink_ticks.empty());
+        }
+        EXPECT_TRUE(session.Status().desynced);
+        EXPECT_EQ(session.Status().desync_section, "authority_capture");
+        EXPECT_EQ(session.AdmissionStatus().local_hashes, 0u);
+        // At most one Hello plus the configured initial horizon's input frames.
+        std::vector<std::uint8_t> frame;
+        for (std::uint32_t i = 0; i <= config.horizon_max + 1; ++i) {
+            if (!peer->TryReceiveFrame(frame)) {
+                break;
+            }
+            Net::MessageType type{};
+            ASSERT_TRUE(Net::PeekMessageType(frame, type));
+            EXPECT_NE(type, Net::MessageType::Hash);
+        }
+        EXPECT_FALSE(peer->TryReceiveFrame(frame));
+    }
+}
+
 TEST_F(WorldOpenRefusal, ServerWaterHashReadsLeaveOutsideTickChangesPending) {
     Server::ServerWorldRunner runner(SnapshotRunnerConfig(RootString(), false));
     ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, false));
