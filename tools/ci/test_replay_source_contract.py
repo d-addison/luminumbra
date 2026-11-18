@@ -579,15 +579,24 @@ class ReplaySourceContract(unittest.TestCase):
             "auto start_world_creation =", 1)[0]
         self.assertRegex(entry, r'if \(!horizon_ready\)\s*\{\s*refuse_world_entry\('
                          r'[^;]*;\s*return;')
-        self.assertLess(entry.index("if (!horizon_ready)"), entry.index("g_camera ="))
+        self.assertLess(entry.index("if (!horizon_ready)"),
+                        entry.index("entry_horizon_prepared = true;"))
+        self.assertNotIn("GameState::IN_GAME", entry)
+        preload = main.split("auto wait_for_world_presentation =", 1)[1].split(
+            "auto activate_loaded_world =", 1)[0]
+        self.assertLess(preload.index("g_camera ="),
+                        preload.index("PrepareInitialWaterPresentationNear("))
+        self.assertNotIn("world->update(", preload)
+        self.assertIn("return entry_presentation_gate.waiting();", preload)
         self.assertRegex(main, r'if \(!gameSession->GetWorldSystem\(\)->EnsureSurfaceReadyNear\('
                          r'[^;]*, 4, 2\)\)\s*\{[^}]*return 2;')
         horizon = main.split("auto prepare_entry_horizon =", 1)[1].split(
             "auto drain_entry =", 1)[0]
-        self.assertRegex(horizon, r'return gameSession->GetWorldSystem\(\)->'
+        self.assertRegex(horizon, r'entry_horizon_prepared = gameSession->GetWorldSystem\(\)->'
                          r'EnsureSurfaceReadyNear\([^;]*,\s*'
                          r'capture_horizon \? scenario_config.horizon_radius : 12,\s*'
-                         r'capture_horizon \? scenario_config.collision_radius : 4\);')
+                         r'capture_horizon \? scenario_config.collision_radius : 4\);\s*'
+                         r'return entry_horizon_prepared;')
         staged = main.split("case WorldEntryStage::PrepareHorizon:", 1)[1].split(
             "case WorldEntryStage::Activate:", 1)[0]
         self.assertRegex(staged, r'if \(!prepare_entry_horizon\(\)\)\s*\{\s*'
