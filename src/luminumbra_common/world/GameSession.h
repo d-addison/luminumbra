@@ -34,6 +34,8 @@
 
 namespace Luminumbra::World {
 class FarWorldAuthorityProducer;
+struct PlayerAvatar;
+struct PlayerAvatarOwnerState;
 struct FarWorldAuthorityConfig;
 } // namespace Luminumbra::World
 
@@ -334,6 +336,14 @@ public:
     Systems::PhysicsSystem* GetPhysicsSystem() {
         return m_physicsSystem.get();
     }
+
+    // Internal owner continuation; no save/hash/boot adoption until explicitly called.
+    bool CaptureAvatarOwner(const World::PlayerAvatar& avatar,
+                            std::size_t physics_index,
+                            World::PlayerAvatarOwnerState& output) const;
+    bool RestoreAvatarOwner(const World::PlayerAvatarOwnerState& state,
+                            World::PlayerAvatar& avatar,
+                            std::size_t& physics_index);
 
     // the deterministic wind field. Sim-authoritative; its cell
     // values feed the world_hash `wind` sub-hash. Constructed on world

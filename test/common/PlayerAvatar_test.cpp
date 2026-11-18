@@ -7,6 +7,9 @@
 // matches run-to-run).
 #include <gtest/gtest.h>
 
+#include "../support/GameSessionTestWorld.h"
+#include "luminumbra_common/core/JobSystem.h"
+
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -1522,5 +1525,425 @@ TEST(BodyContinuation, ReplacesRemovedBodyCachesForEmptyAndNonemptySets) {
             ExpectBodySet(expected, actual);
         }
     }
+}
+} // namespace
+
+namespace {
+using Continuation = PhysicsSystem::OwnerContinuation;
+
+template<class Physics>
+concept PublicAvatarCapture = requires(Physics& physics, PhysicsOwnerState& state) {
+    physics.capture_avatar_owner(0, state);
+};
+template<class Physics>
+concept PublicAvatarRestore =
+    requires(Physics& physics, const PhysicsOwnerState& state, std::size_t& index) {
+        physics.restore_avatar_owner(state, index);
+    };
+template<class Physics>
+concept PublicPlayerCapture =
+    requires(Physics& physics, PhysicsOwnerState& state) { physics.capture_player_owner(state); };
+template<class Physics>
+concept PublicPlayerRestore = requires(Physics& physics, const PhysicsOwnerState& state) {
+    physics.restore_player_owner(state);
+};
+static_assert(!PublicAvatarCapture<PhysicsSystem>);
+static_assert(!PublicAvatarRestore<PhysicsSystem>);
+static_assert(!PublicPlayerCapture<PhysicsSystem>);
+static_assert(!PublicPlayerRestore<PhysicsSystem>);
+
+void ExpectControllerBits(const PhysicsOwnerState& expected, const PhysicsOwnerState& actual) {
+    ASSERT_EQ(expected.size, actual.size);
+    EXPECT_TRUE(std::equal(
+        expected.bytes.begin(), expected.bytes.begin() + expected.size, actual.bytes.begin()));
+}
+
+TEST(ControllerContinuation, AvatarFallingGroundedAndFrozenResumeBitExactly) {
+    constexpr float dt = 1.0f / 30.0f;
+    for (const int capture_tick : {3, 45}) {
+        for (const bool frozen : {false, true}) {
+            PhysicsSystem source;
+            source.startup();
+            AddBodyFloor(source);
+            const auto index = source.create_avatar_character(Vec3(8.123456f, 10.0f, 8.765432f));
+            source.set_avatar_wish_velocity(index, glm::vec2(0.1234567f, 0.0765432f));
+            for (int tick = 0; tick < capture_tick; ++tick) {
+                source.update_avatars(dt);
+            }
+            ASSERT_EQ(source.is_avatar_grounded(index), capture_tick == 45);
+            source.set_avatar_frozen(index, frozen, source.get_avatar_position(index));
+            PhysicsOwnerState expected;
+            ASSERT_TRUE(Continuation(source).capture_avatar_owner(index, expected));
+            ASSERT_TRUE(ValidatePhysicsOwner(expected));
+            PhysicsSystem target;
+            target.startup();
+            AddBodyFloor(target);
+            std::size_t restored_index = 999;
+            ASSERT_TRUE(Continuation(target).restore_avatar_owner(expected, restored_index));
+            ASSERT_EQ(restored_index, 0u);
+            for (int tick = 0; tick < 20; ++tick) {
+                PhysicsOwnerState actual;
+                ASSERT_TRUE(Continuation(target).capture_avatar_owner(restored_index, actual));
+                ExpectControllerBits(expected, actual);
+                // Both the frozen capsule and subsequent resumed movement must
+                // preserve controller contacts, full precision and allocator IDs.
+                if (tick == 5 && frozen) {
+                    source.set_avatar_frozen(index, false, source.get_avatar_position(index));
+                    target.set_avatar_frozen(
+                        restored_index, false, target.get_avatar_position(restored_index));
+                    source.set_avatar_wish_velocity(index, glm::vec2(0.1234567f, 0.0f));
+                    target.set_avatar_wish_velocity(restored_index, glm::vec2(0.1234567f, 0.0f));
+                }
+                source.update_avatars(dt);
+                target.update_avatars(dt);
+                ASSERT_TRUE(Continuation(source).capture_avatar_owner(index, expected));
+            }
+        }
+    }
+}
+
+TEST(ControllerContinuation, PlayerStandingCrouchedFallingAndGroundedResumeBitExactly) {
+    constexpr float dt = 1.0f / 30.0f;
+    for (const bool crouched : {false, true}) {
+        for (const int capture_tick : {3, 45}) {
+            PhysicsSystem source;
+            source.startup();
+            AddBodyFloor(source);
+            source.create_player_controller(Vec3(8.123456f, 10.0f, 8.765432f));
+            ASSERT_TRUE(source.set_player_crouched(crouched));
+            for (int tick = 0; tick < capture_tick; ++tick) {
+                source.update_player(Vec3(0.1234567f, 0.0f, 0.0765432f), false, 5.0f, dt);
+            }
+            ASSERT_EQ(source.is_player_grounded(), capture_tick == 45);
+            PhysicsOwnerState expected;
+            ASSERT_TRUE(Continuation(source).capture_player_owner(expected));
+            PhysicsSystem target;
+            target.startup();
+            AddBodyFloor(target);
+            ASSERT_TRUE(Continuation(target).restore_player_owner(expected));
+            EXPECT_FALSE(Continuation(target).restore_player_owner(expected));
+            for (int tick = 0; tick < 20; ++tick) {
+                PhysicsOwnerState actual;
+                ASSERT_TRUE(Continuation(target).capture_player_owner(actual));
+                ExpectControllerBits(expected, actual);
+                if (tick == 5) {
+                    ASSERT_TRUE(source.set_player_crouched(!crouched));
+                    ASSERT_TRUE(target.set_player_crouched(!crouched));
+                }
+                const bool jump = tick == 10;
+                source.update_player(Vec3(0.1234567f, 0.0f, 0.0765432f), jump, 5.0f, dt);
+                target.update_player(Vec3(0.1234567f, 0.0f, 0.0765432f), jump, 5.0f, dt);
+                ASSERT_TRUE(Continuation(source).capture_player_owner(expected));
+            }
+        }
+    }
+}
+
+TEST(ControllerContinuation, RefusalsPreserveOwnersIndicesAndOutputs) {
+    PhysicsSystem source;
+    source.startup();
+    AddBodyFloor(source);
+    const auto index = source.create_avatar_character(Vec3(8, 10, 8));
+    for (int tick = 0; tick < 45; ++tick) {
+        source.update_avatars(1.0f / 30.0f);
+    }
+    PhysicsOwnerState captured;
+    ASSERT_TRUE(Continuation(source).capture_avatar_owner(index, captured));
+    PhysicsSystem target;
+    target.startup();
+    std::size_t destination = 999;
+    EXPECT_FALSE(
+        Continuation(target).restore_avatar_owner(captured, destination)); // Missing terrain.
+    AddBodyFloor(target);
+    PhysicsSystem stopped;
+    EXPECT_FALSE(Continuation(stopped).restore_avatar_owner(captured, destination));
+    EXPECT_FALSE(Continuation(stopped).restore_player_owner(captured));
+    EXPECT_FALSE(Continuation(target).restore_player_owner(captured)); // Wrong owner kind.
+    for (std::uint32_t size = 0; size < captured.size; ++size) {
+        auto truncated = captured;
+        truncated.size = size;
+        EXPECT_FALSE(Continuation(target).restore_avatar_owner(truncated, destination));
+        EXPECT_EQ(destination, 999u);
+        EXPECT_EQ(target.avatar_character_slot_count(), 0u);
+    }
+    auto malformed = captured;
+    SetPhysicsWord(malformed, 8, 9); // Unknown flags.
+    EXPECT_FALSE(Continuation(target).restore_avatar_owner(malformed, destination));
+    EXPECT_EQ(destination, 999u);
+    PhysicsOwnerState output = captured;
+    EXPECT_FALSE(Continuation(stopped).capture_avatar_owner(0, output));
+    EXPECT_FALSE(Continuation(target).capture_avatar_owner(0, output));
+    EXPECT_FALSE(Continuation(source).capture_avatar_owner(index + 1, output));
+    EXPECT_FALSE(Continuation(source).capture_player_owner(output));
+    ExpectControllerBits(captured, output);
+    ASSERT_TRUE(Continuation(target).restore_avatar_owner(captured, destination));
+    EXPECT_EQ(destination, 0u);
+    for (std::size_t slot = 1; slot < PhysicsSystem::kMaxRestoredAvatars; ++slot) {
+        target.create_avatar_character(Vec3(0, 30, 0));
+    }
+    destination = 999;
+    EXPECT_FALSE(Continuation(target).restore_avatar_owner(captured, destination));
+    EXPECT_EQ(destination, 999u);
+    EXPECT_EQ(target.avatar_character_slot_count(), PhysicsSystem::kMaxRestoredAvatars);
+    source.remove_avatar_character(index);
+    EXPECT_FALSE(Continuation(source).capture_avatar_owner(index, output));
+    ExpectControllerBits(captured, output);
+}
+} // namespace
+
+namespace {
+using Luminumbra::JobSystem;
+using Luminumbra::TestSupport::HeadlessRoot;
+using Luminumbra::TestSupport::ReadClockTestFile;
+using Luminumbra::world::GameSession;
+TEST(GameSessionHeadlessWorldTest, InternalAvatarOwnerRestoresWithoutSpawnOrPersistence) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    {
+        GameSession source;
+        source.SetJobSystem(&jobs);
+        source.SetRootPath(root.root_string());
+        source.SetActiveRegionsEnabled(false);
+        ASSERT_TRUE(source.CreateWorld("OwnerSource", "12345", "default"));
+        auto* original = source.GetPhysicsSystem();
+        ASSERT_NE(original, nullptr);
+        const auto index =
+            original->create_avatar_character(Luminumbra::Vec3(1.234567f, 40.125f, 2.765432f));
+        original->set_avatar_wish_velocity(index, glm::vec2(0.1234567f, 0.0765432f));
+        for (int tick = 0; tick < 7; ++tick) {
+            original->update_avatars(1.0f / 30.0f);
+        }
+        Luminumbra::World::PlayerAvatar avatar{.player_id = 42,
+                                               .position = original->get_avatar_position(index),
+                                               .facing = -0.1256789f,
+                                               .velocity = original->get_avatar_velocity(index)};
+        Luminumbra::World::PlayerAvatarOwnerState captured;
+        ASSERT_TRUE(source.CaptureAvatarOwner(avatar, index, captured));
+        auto invalid_avatar = avatar;
+        invalid_avatar.facing = std::numeric_limits<float>::infinity();
+        auto retained_capture = captured;
+        EXPECT_FALSE(source.CaptureAvatarOwner(invalid_avatar, index, retained_capture));
+        EXPECT_EQ(std::bit_cast<std::uint32_t>(retained_capture.avatar.facing),
+                  std::bit_cast<std::uint32_t>(captured.avatar.facing));
+        ExpectControllerBits(captured.physics, retained_capture.physics);
+        GameSession restored;
+        restored.SetJobSystem(&jobs);
+        restored.SetRootPath(root.root_string());
+        restored.SetActiveRegionsEnabled(false);
+        ASSERT_TRUE(restored.CreateWorld("OwnerRestored", "12345", "default"));
+        const auto metadata_before =
+            ReadClockTestFile(restored.GetWorldSaveDir() / "world_info.json");
+        Luminumbra::World::PlayerAvatar actual;
+        std::size_t restored_index = 123;
+        auto invalid = captured;
+        invalid.avatar.velocity.x = std::numeric_limits<float>::infinity();
+        EXPECT_FALSE(restored.RestoreAvatarOwner(invalid, actual, restored_index));
+        EXPECT_EQ(restored_index, 123u);
+        EXPECT_EQ(actual.player_id, 0u);
+        ASSERT_EQ(restored.GetPhysicsSystem()->avatar_character_slot_count(), 0u);
+        ASSERT_TRUE(restored.RestoreAvatarOwner(captured, actual, restored_index));
+        EXPECT_EQ(actual.player_id, avatar.player_id);
+        EXPECT_EQ(std::bit_cast<std::uint32_t>(actual.facing),
+                  std::bit_cast<std::uint32_t>(avatar.facing));
+        EXPECT_EQ(ReadClockTestFile(restored.GetWorldSaveDir() / "world_info.json"),
+                  metadata_before);
+        for (int tick = 0; tick < 20; ++tick) {
+            original->update_avatars(1.0f / 30.0f);
+            restored.GetPhysicsSystem()->update_avatars(1.0f / 30.0f);
+            avatar.position = original->get_avatar_position(index);
+            avatar.velocity = original->get_avatar_velocity(index);
+            actual.position = restored.GetPhysicsSystem()->get_avatar_position(restored_index);
+            actual.velocity = restored.GetPhysicsSystem()->get_avatar_velocity(restored_index);
+            Luminumbra::World::PlayerAvatarOwnerState expected_state;
+            Luminumbra::World::PlayerAvatarOwnerState actual_state;
+            ASSERT_TRUE(source.CaptureAvatarOwner(avatar, index, expected_state));
+            ASSERT_TRUE(restored.CaptureAvatarOwner(actual, restored_index, actual_state));
+            std::array<std::uint8_t, Luminumbra::World::kMaxAvatarOwnerBytes> expected_bytes{};
+            std::array<std::uint8_t, Luminumbra::World::kMaxAvatarOwnerBytes> actual_bytes{};
+            std::size_t expected_size = 0;
+            std::size_t actual_size = 0;
+            ASSERT_TRUE(Luminumbra::World::EncodeAvatarOwner(
+                expected_state, expected_bytes, expected_size));
+            ASSERT_TRUE(
+                Luminumbra::World::EncodeAvatarOwner(actual_state, actual_bytes, actual_size));
+            ASSERT_EQ(expected_size, actual_size);
+            EXPECT_EQ(expected_bytes, actual_bytes);
+        }
+        Luminumbra::World::PlayerAvatarOwnerState retained = captured;
+        EXPECT_FALSE(source.CaptureAvatarOwner(avatar, 999, retained));
+        EXPECT_EQ(retained.physics.bytes, captured.physics.bytes);
+        GameSession unopened;
+        EXPECT_FALSE(unopened.CaptureAvatarOwner(avatar, index, retained));
+        EXPECT_FALSE(unopened.RestoreAvatarOwner(captured, actual, restored_index));
+    }
+    jobs.shutdown();
+}
+
+TEST(ControllerContinuation, FrozenCapsuleAdmissionRefusesConflictsWithoutAdopting) {
+    PhysicsSystem source;
+    source.startup();
+    AddBodyFloor(source);
+    const auto slot = source.create_avatar_character(Vec3(8.0f, 10.0f, 8.0f));
+    source.set_avatar_frozen(slot, true, source.get_avatar_position(slot));
+    PhysicsOwnerState captured;
+    ASSERT_TRUE(Continuation(source).capture_avatar_owner(slot, captured));
+    BodySetState capsules;
+    ASSERT_TRUE(source.capture_body_owners(capsules));
+    PhysicsSystem target;
+    target.startup();
+    AddBodyFloor(target);
+    std::size_t index = 999;
+    auto incomplete_pool = captured;
+    SetPhysicsWord(incomplete_pool, incomplete_pool.size - 8, capsules.slot_count + 1);
+    EXPECT_FALSE(Continuation(target).restore_avatar_owner(incomplete_pool, index));
+    std::array<JPH::BodyID, 1> ids{};
+    ASSERT_TRUE(target.restore_body_owners(capsules, ids));
+    EXPECT_FALSE(Continuation(target).restore_avatar_owner(incomplete_pool, index));
+    auto displaced = captured;
+    SetPhysicsWord(displaced, 84, 0);
+    SetPhysicsWord(displaced, 88, 0x3ff00000u); // Valid float64 feet.x = 1.0.
+    EXPECT_FALSE(Continuation(target).restore_avatar_owner(displaced, index));
+    auto stale = captured;
+    SetPhysicsWord(stale, 20, JPH::BodyID(1, 2).GetIndexAndSequenceNumber());
+    EXPECT_FALSE(Continuation(target).restore_avatar_owner(stale, index));
+    EXPECT_EQ(index, 999u);
+    EXPECT_EQ(target.avatar_character_slot_count(), 0u);
+    BodySetState after;
+    ASSERT_TRUE(target.capture_body_owners(after));
+    ExpectBodySet(capsules, after);
+    ASSERT_TRUE(Continuation(target).restore_avatar_owner(captured, index));
+    EXPECT_EQ(index, 0u);
+    EXPECT_FALSE(Continuation(target).restore_avatar_owner(captured, index));
+    EXPECT_EQ(target.avatar_character_slot_count(), 1u);
+
+    PhysicsSystem conflicting;
+    conflicting.startup();
+    AddBodyFloor(conflicting);
+    const auto sphere = conflicting.create_dynamic_sphere(Vec3(20), Vec3(0), 0.3f);
+    ASSERT_EQ(sphere, ids[0]);
+    index = 999;
+    EXPECT_FALSE(Continuation(conflicting).restore_avatar_owner(captured, index));
+    EXPECT_EQ(index, 999u);
+    EXPECT_EQ(conflicting.avatar_character_slot_count(), 0u);
+
+    // A frozen owner can lack a capsule after ordinary headroom refusal.
+    auto without_capsule = captured;
+    SetPhysicsWord(without_capsule, 20, JPH::BodyID::cInvalidBodyID);
+    without_capsule.size -= 8; // This fixture has an empty free stack.
+    ASSERT_TRUE(ValidatePhysicsOwner(without_capsule));
+    PhysicsSystem no_capsule;
+    no_capsule.startup();
+    AddBodyFloor(no_capsule);
+    ASSERT_TRUE(Continuation(no_capsule).restore_avatar_owner(without_capsule, index));
+    PhysicsOwnerState actual;
+    ASSERT_TRUE(Continuation(no_capsule).capture_avatar_owner(index, actual));
+    ExpectControllerBits(without_capsule, actual);
+}
+
+TEST(ControllerContinuation, PlayerRefusalsPreserveEmptyAndOccupiedDestinations) {
+    PhysicsSystem source;
+    source.startup();
+    AddBodyFloor(source);
+    source.create_player_controller(Vec3(8, 8.1f, 8));
+    for (unsigned tick = 0; tick < 45; ++tick) {
+        source.update_player(Vec3(0), false, 5.0f, 1.0f / 30.0f);
+    }
+    PhysicsOwnerState captured;
+    ASSERT_TRUE(Continuation(source).capture_player_owner(captured));
+    PhysicsSystem target;
+    target.startup();
+    EXPECT_FALSE(Continuation(target).restore_player_owner(captured));
+    AddBodyFloor(target);
+    std::size_t index = 999;
+    EXPECT_FALSE(Continuation(target).restore_avatar_owner(captured, index));
+    for (std::uint32_t size = 0; size < captured.size; ++size) {
+        auto truncated = captured;
+        truncated.size = size;
+        EXPECT_FALSE(Continuation(target).restore_player_owner(truncated));
+    }
+    PhysicsOwnerState absent = captured;
+    EXPECT_FALSE(Continuation(target).capture_player_owner(absent));
+    ExpectControllerBits(captured, absent);
+    ASSERT_TRUE(Continuation(target).restore_player_owner(captured));
+    EXPECT_FALSE(Continuation(target).restore_player_owner(captured));
+    PhysicsOwnerState actual;
+    ASSERT_TRUE(Continuation(target).capture_player_owner(actual));
+    ExpectControllerBits(captured, actual);
+}
+} // namespace
+
+namespace {
+TEST(ControllerContinuation, FrozenAdoptionRefusalsAndMissingCapsulePreserveState) {
+    PhysicsSystem source;
+    source.startup();
+    AddBodyFloor(source);
+    const auto index = source.create_avatar_character(Vec3(8, 10, 8));
+    for (int tick = 0; tick < 45; ++tick) {
+        source.update_avatars(1.0f / 30.0f);
+    }
+    source.set_avatar_frozen(index, true, source.get_avatar_position(index));
+    PhysicsOwnerState captured;
+    ASSERT_TRUE(Continuation(source).capture_avatar_owner(index, captured));
+    BodySetState capsules;
+    ASSERT_TRUE(source.capture_body_owners(capsules));
+    ASSERT_EQ(capsules.owners.size(), 1u);
+    ASSERT_TRUE(capsules.free_slots.empty());
+    for (const int conflict : {0, 1, 2, 3}) {
+        PhysicsSystem target;
+        target.startup();
+        AddBodyFloor(target);
+        if (conflict < 2) {
+            auto body = target.create_dynamic_sphere(Vec3(20), Vec3(0), 0.3f);
+            ASSERT_FALSE(body.IsInvalid());
+            if (conflict == 1) {
+                target.destroy_body(body);
+                body = target.create_dynamic_sphere(Vec3(20), Vec3(0), 0.3f);
+                ASSERT_FALSE(body.IsInvalid());
+            }
+        } else {
+            std::array<JPH::BodyID, 1> ids{};
+            ASSERT_TRUE(target.restore_body_owners(capsules, ids));
+        }
+        auto invalid = captured;
+        if (conflict == 2) {
+            // A different exact feet position cannot adopt this static capsule.
+            SetPhysicsWord(invalid, 84, 0);
+            SetPhysicsWord(invalid, 88, 0x40220000u); // float64 9.0
+        } else if (conflict == 3) {
+            SetPhysicsWord(invalid, invalid.size - 8, capsules.slot_count + 1);
+        }
+        BodySetState before;
+        ASSERT_TRUE(target.capture_body_owners(before));
+        std::size_t restored_index = 999;
+        EXPECT_FALSE(Continuation(target).restore_avatar_owner(invalid, restored_index));
+        EXPECT_EQ(restored_index, 999u);
+        EXPECT_EQ(target.avatar_character_slot_count(), 0u);
+        BodySetState after;
+        ASSERT_TRUE(target.capture_body_owners(after));
+        ExpectBodySet(before, after);
+        if (conflict >= 2) {
+            ASSERT_TRUE(Continuation(target).restore_avatar_owner(captured, restored_index));
+            EXPECT_FALSE(Continuation(target).restore_avatar_owner(captured, restored_index));
+            EXPECT_EQ(target.avatar_character_slot_count(), 1u);
+        }
+    }
+    // Frozen controllers are also valid when capsule admission previously failed.
+    // Omit the allocator footer along with its invalid owned-body ID.
+    auto without_capsule = captured;
+    SetPhysicsWord(without_capsule, 20, JPH::BodyID::cInvalidBodyID);
+    without_capsule.size -= 8;
+    ASSERT_TRUE(ValidatePhysicsOwner(without_capsule));
+    PhysicsSystem target;
+    target.startup();
+    AddBodyFloor(target);
+    std::size_t restored_index = 999;
+    ASSERT_TRUE(Continuation(target).restore_avatar_owner(without_capsule, restored_index));
+    PhysicsOwnerState actual;
+    ASSERT_TRUE(Continuation(target).capture_avatar_owner(restored_index, actual));
+    ExpectControllerBits(without_capsule, actual);
+    const auto before = target.get_avatar_position(restored_index);
+    target.update_avatars(1.0f / 30.0f);
+    EXPECT_EQ(target.get_avatar_position(restored_index), before);
 }
 } // namespace

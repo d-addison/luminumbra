@@ -1,6 +1,8 @@
 #include "PhysicsSystem.h"
 #include "../../../include/luminumbra/core/Types.h"
 #include "../world/Chunk.h"
+#include "../world/GameSession.h"
+#include "../world/PlayerAvatar.h"
 #include "SHIELD_WorldSystem.h"
 
 #include <Jolt/Core/Factory.h>
@@ -95,10 +97,14 @@ public:
 
 class OwnerCodec {
 public:
-    explicit OwnerCodec(PhysicsSystem::BodyOwnerState& output)
-        : m_output(&output) {}
-    explicit OwnerCodec(const PhysicsSystem::BodyOwnerState& input)
-        : m_input(&input) {
+    template<class State>
+    explicit OwnerCodec(State& output)
+        : m_output(output.bytes)
+        , m_output_size(&output.size) {}
+    template<class State>
+    explicit OwnerCodec(const State& input)
+        : m_input(input.bytes)
+        , m_input_size(input.size) {
         require(input.size <= input.bytes.size());
     }
     static void require(bool condition) {
@@ -107,32 +113,32 @@ public:
         }
     }
     bool reading() const {
-        return m_input != nullptr;
+        return m_output_size == nullptr;
     }
     void finish() {
         if (reading()) {
-            require(m_cursor == m_input->size);
+            require(m_cursor == m_input_size);
         } else {
-            m_output->size = static_cast<std::uint32_t>(m_cursor);
+            *m_output_size = static_cast<std::uint32_t>(m_cursor);
         }
     }
     std::uint32_t word(std::uint32_t value = 0) {
-        const auto limit = reading() ? m_input->size : m_output->bytes.size();
+        const auto limit = reading() ? m_input_size : m_output.size();
         require(m_cursor <= limit && 4 <= limit - m_cursor);
         if (reading()) {
             value = 0;
             for (unsigned i = 0; i < 4; ++i) {
-                value |= static_cast<std::uint32_t>(m_input->bytes[m_cursor++]) << (8 * i);
+                value |= static_cast<std::uint32_t>(m_input[m_cursor++]) << (8 * i);
             }
         } else {
             for (unsigned i = 0; i < 4; ++i) {
-                m_output->bytes[m_cursor++] = static_cast<std::uint8_t>(value >> (8 * i));
+                m_output[m_cursor++] = static_cast<std::uint8_t>(value >> (8 * i));
             }
         }
         return value;
     }
     void require_words(std::uint32_t count) const {
-        const auto limit = reading() ? m_input->size : m_output->bytes.size();
+        const auto limit = reading() ? m_input_size : m_output.size();
         require(m_cursor <= limit && count <= (limit - m_cursor) / 4);
     }
     float number(float value = 0.0f) {
@@ -308,13 +314,19 @@ private:
         return sign | (1u << leading) | static_cast<std::uint32_t>(fraction >> shift);
     }
 #endif
-    const PhysicsSystem::BodyOwnerState* m_input = nullptr;
-    PhysicsSystem::BodyOwnerState* m_output = nullptr;
+    std::span<const std::uint8_t> m_input;
+    std::span<std::uint8_t> m_output;
+    std::uint32_t* m_output_size = nullptr;
+    std::size_t m_input_size = 0;
     std::size_t m_cursor = 0;
 };
 
 struct OwnerRecipe {
     std::uint32_t kind = 0;
+    std::uint32_t flags = 0;
+    glm::vec2 wish{0.0f};
+    std::uint32_t slot_count = 0;
+    std::vector<std::uint32_t> free_slots;
     std::uint32_t body = JPH::BodyID::cInvalidBodyID;
     float radius = 0.0f;
     JPH::RVec3 feet = JPH::RVec3::sZero();
@@ -322,7 +334,7 @@ struct OwnerRecipe {
     OwnerNativeStream scene;
     std::array<std::uint32_t, 4> global_bits{};
     std::size_t scene_contacts_offset = 0;
-    // At most 2*64 body-pair and 2*256 CCD references per bounded payload.
+    // Ground + 256 character contacts, or 2*64 pairs + 2*256 CCD references.
     std::array<std::uint32_t, 640> references{};
     std::size_t reference_count = 0;
     using ContactKey = std::array<std::uint32_t, 4>;
@@ -337,6 +349,39 @@ struct OwnerRecipe {
         }
     }
 };
+
+void CharacterSchema(OwnerCodec& codec, OwnerRecipe& recipe) {
+    auto& native = recipe.owner;
+    codec.integer<JPH::CharacterBase::EGroundState>(native, 3);
+    recipe.reference(codec.body_id(native));
+    codec.integer<std::uint32_t>(native, UINT32_MAX); // ground subshape
+    static_cast<void>(codec.position(native));
+    codec.normal(native, true);              // no ground contact initially has a zero normal
+    static_cast<void>(codec.vector(native)); // ground velocity
+    recipe.feet = codec.position(native);
+    codec.quaternion(native);
+    static_cast<void>(codec.vector(native));           // linear velocity
+    OwnerCodec::require(codec.scalar(native) >= 0.0f); // previous delta time
+    codec.integer<bool>(native, 1);                    // hit limit reached
+    const auto count = codec.integer<std::uint32_t>(native, kMaxOwnerContacts);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        recipe.reference(codec.body_id(native));
+        // No character-vs-character provider is installed by either controller path.
+        const auto character = codec.integer<std::uint32_t>(native, UINT32_MAX);
+        OwnerCodec::require(character == UINT32_MAX);
+        codec.integer<std::uint32_t>(native, UINT32_MAX); // subshape
+        static_cast<void>(codec.position(native));
+        static_cast<void>(codec.vector(native)); // contact velocity
+        codec.normal(native);                    // contact normal
+        codec.normal(native);                    // surface normal
+        codec.floats(native, 2);                 // distance, fraction
+        codec.integer<JPH::EMotionType>(native, 2);
+        codec.integer<bool>(native, 1); // sensor
+        codec.integer<bool>(native, 1); // collided
+        codec.integer<bool>(native, 1); // discarded
+        codec.integer<bool>(native, 1); // can push
+    }
+}
 
 void BodySchema(OwnerCodec& codec, OwnerNativeStream& native) {
     codec.integer<bool>(native, 1); // active list membership
@@ -485,6 +530,73 @@ void OwnerSchema(OwnerCodec& codec, OwnerRecipe& recipe) {
     }
 }
 
+// Controller schema is the codec slice's version 1; body snapshots retain
+// their independent version 2. Neither is a save, wire or hash format.
+void ControllerSchema(OwnerCodec& codec, OwnerRecipe& recipe) {
+#ifdef JPH_DOUBLE_PRECISION
+    constexpr std::uint32_t version = 0x00010001u;
+#else
+    constexpr std::uint32_t version = 1;
+#endif
+    OwnerCodec::require(codec.word(version) == version);
+    recipe.kind = codec.word(recipe.kind);
+    OwnerCodec::require(recipe.kind == 1u || recipe.kind == 2u);
+    recipe.flags = codec.word(recipe.flags);
+    OwnerCodec::require(recipe.kind == 1u ? recipe.flags <= 1u
+                                          : (recipe.flags == 0u || recipe.flags == 2u));
+    recipe.wish.x = codec.number(recipe.wish.x);
+    recipe.wish.y = codec.number(recipe.wish.y);
+    OwnerCodec::require((recipe.kind == 1u && recipe.flags == 0u) ||
+                        recipe.wish == glm::vec2(0.0f));
+    recipe.body = OwnerCodec::checked_body_id(codec.word(recipe.body));
+    OwnerCodec::require((recipe.kind == 1u && recipe.flags == 1u) ||
+                        recipe.body == JPH::BodyID::cInvalidBodyID);
+    CharacterSchema(codec, recipe);
+    if (recipe.body != JPH::BodyID::cInvalidBodyID) {
+        recipe.slot_count = codec.word(recipe.slot_count);
+        OwnerCodec::require(recipe.slot_count <= kPhysicsCapacity &&
+                            JPH::BodyID(recipe.body).GetIndex() < recipe.slot_count);
+        const auto count = codec.word(static_cast<std::uint32_t>(recipe.free_slots.size()));
+        OwnerCodec::require(count < recipe.slot_count);
+        codec.require_words(count);
+        if (codec.reading()) {
+            recipe.free_slots.resize(count);
+        }
+        for (auto& slot : recipe.free_slots) {
+            slot = codec.word(slot);
+        }
+    }
+    codec.finish();
+}
+
+bool ParseController(const World::PhysicsOwnerState& state, OwnerRecipe& recipe) {
+    if (!World::ValidatePhysicsOwner(state)) {
+        return false;
+    }
+    try {
+        OwnerCodec codec(state);
+        ControllerSchema(codec, recipe);
+        return true;
+    } catch (const OwnerStateRefusal&) {
+        return false;
+    }
+}
+
+bool WriteController(OwnerRecipe& recipe, World::PhysicsOwnerState& output) {
+    try {
+        World::PhysicsOwnerState staged;
+        OwnerCodec codec(staged);
+        ControllerSchema(codec, recipe);
+        if (!World::ValidatePhysicsOwner(staged)) {
+            return false;
+        }
+        output = staged;
+        return true;
+    } catch (const OwnerStateRefusal&) {
+        return false;
+    }
+}
+
 bool ParseOwner(const PhysicsSystem::BodyOwnerState& state, OwnerRecipe& recipe) {
     try {
         OwnerCodec codec(state);
@@ -605,7 +717,7 @@ UnassignedOwnerBody PrepareOwnerAllocatorScratch(JPH::BodyInterface& body_interf
 
 void RestoreOwnerFreeSlots(JPH::BodyInterface& body_interface,
                            JPH::Body* scratch,
-                           const std::vector<std::uint32_t>& free_slots) {
+                           std::span<const std::uint32_t> free_slots) {
     // Reusing one unadded body avoids allocations during commit. Cycling each
     // bounded uint8 sequence also handles generations left in the destination.
     for (const auto slot : free_slots) {
@@ -647,6 +759,38 @@ private:
     JPH::BodyID m_owner;
     const JPH::PhysicsSystem& m_system;
 };
+
+bool ReferencesExist(const OwnerRecipe& recipe, const JPH::PhysicsSystem& system) {
+    for (std::size_t i = 0; i < recipe.reference_count; ++i) {
+        const JPH::BodyLockRead lock(system.GetBodyLockInterface(),
+                                     JPH::BodyID(recipe.references[i]));
+        if (!lock.Succeeded()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+JPH::Ref<JPH::Shape> FeetCapsule(float half_height, float offset) {
+    const JPH::Ref<JPH::Shape> capsule =
+        JPH::CapsuleShapeSettings(half_height, 0.4f).Create().Get();
+    return JPH::RotatedTranslatedShapeSettings(
+               JPH::Vec3(0.0f, offset, 0.0f), JPH::Quat::sIdentity(), capsule.GetPtr())
+        .Create()
+        .Get();
+}
+
+std::unique_ptr<JPH::CharacterVirtual> PrepareController(const JPH::Ref<JPH::Shape>& shape,
+                                                         const glm::vec3& feet,
+                                                         JPH::PhysicsSystem* system) {
+    JPH::CharacterVirtualSettings settings;
+    settings.mShape = shape;
+    settings.mMass = 80.0f;
+    settings.mMaxSlopeAngle = glm::radians(50.0f);
+    settings.mSupportingVolume = JPH::Plane(JPH::Vec3::sAxisY(), -0.4f);
+    return std::make_unique<JPH::CharacterVirtual>(
+        &settings, JPH::RVec3(feet.x, feet.y, feet.z), JPH::Quat::sIdentity(), system);
+}
 
 } // namespace
 
@@ -1100,35 +1244,12 @@ void PhysicsSystem::create_player_controller(const glm::vec3& start_pos) {
     if (!m_jolt_system)
         return;
 
-    // The local controller passes feet positions. Keep both capsule bases at that
-    // origin so spawning and changing stance cannot embed the capsule in terrain.
-    const JPH::Ref<JPH::Shape> standing_capsule =
-        JPH::CapsuleShapeSettings(0.9f, 0.4f).Create().Get();
-    const JPH::Ref<JPH::Shape> crouching_capsule =
-        JPH::CapsuleShapeSettings(0.45f, 0.4f).Create().Get();
-    m_player_stand_shape = JPH::RotatedTranslatedShapeSettings(JPH::Vec3(0.0f, 1.3f, 0.0f),
-                                                               JPH::Quat::sIdentity(),
-                                                               standing_capsule.GetPtr())
-                               .Create()
-                               .Get();
-    m_player_crouch_shape = JPH::RotatedTranslatedShapeSettings(JPH::Vec3(0.0f, 0.85f, 0.0f),
-                                                                JPH::Quat::sIdentity(),
-                                                                crouching_capsule.GetPtr())
-                                .Create()
-                                .Get();
-
-    JPH::CharacterVirtualSettings settings;
-    settings.mShape = m_player_stand_shape; // Start with the standing shape
-    settings.mMass = 80.0f;
-    settings.mMaxSlopeAngle = glm::radians(50.0f);
-    // Supporting contacts are relative to the feet, and may touch the lower
-    // sphere above its bottom when standing on a walkable slope.
-    settings.mSupportingVolume = JPH::Plane(JPH::Vec3::sAxisY(), -0.4f);
-    m_player_character =
-        std::make_unique<JPH::CharacterVirtual>(&settings,
-                                                JPH::RVec3(start_pos.x, start_pos.y, start_pos.z),
-                                                JPH::Quat::sIdentity(),
-                                                m_jolt_system.get());
+    const auto standing = FeetCapsule(0.9f, 1.3f);
+    const auto crouching = FeetCapsule(0.45f, 0.85f);
+    auto character = PrepareController(standing, start_pos, m_jolt_system.get());
+    m_player_stand_shape = standing;
+    m_player_crouch_shape = crouching;
+    m_player_character = std::move(character);
     LUMINUMBRA_CORE_INFO("Player controller created.");
 }
 
@@ -1352,28 +1473,13 @@ std::size_t PhysicsSystem::create_avatar_character(const glm::vec3& start_pos) {
     if (!m_jolt_system)
         return 0;
     // Shared capsule (same dimensions as the standing player) created once.
-    if (m_avatar_shape == nullptr) {
-        const JPH::Ref<JPH::Shape> capsule = JPH::CapsuleShapeSettings(0.9f, 0.4f).Create().Get();
-        // Character positions and replicated creature transforms are feet.
-        // A centered capsule starts below the floor and may resolve through it.
-        m_avatar_shape = JPH::RotatedTranslatedShapeSettings(
-                             JPH::Vec3(0.0f, 1.3f, 0.0f), JPH::Quat::sIdentity(), capsule.GetPtr())
-                             .Create()
-                             .Get();
-    }
-    JPH::CharacterVirtualSettings settings;
-    settings.mShape = m_avatar_shape;
-    settings.mMass = 80.0f;
-    settings.mMaxSlopeAngle = glm::radians(50.0f);
-    settings.mSupportingVolume = JPH::Plane(JPH::Vec3::sAxisY(), -0.4f);
-    m_avatars.push_back({.character = std::make_unique<JPH::CharacterVirtual>(
-                             &settings,
-                             JPH::RVec3(start_pos.x, start_pos.y, start_pos.z),
-                             JPH::Quat::sIdentity(),
-                             m_jolt_system.get()),
-                         .wish = glm::vec2(0.0f),
-                         .frozen_body = JPH::BodyID(),
-                         .frozen = false});
+    const auto shape = m_avatar_shape != nullptr ? m_avatar_shape : FeetCapsule(0.9f, 1.3f);
+    AvatarState staged{.character = PrepareController(shape, start_pos, m_jolt_system.get()),
+                       .wish = glm::vec2(0.0f),
+                       .frozen_body = JPH::BodyID(),
+                       .frozen = false};
+    m_avatars.push_back(std::move(staged));
+    m_avatar_shape = shape;
     return m_avatars.size() - 1;
 }
 
@@ -1430,6 +1536,208 @@ bool PhysicsSystem::is_avatar_grounded(std::size_t index) const {
         return false;
     return m_avatars[index].character->GetGroundState() ==
            JPH::CharacterBase::EGroundState::OnGround;
+}
+
+bool PhysicsSystem::capture_avatar_owner(std::size_t index,
+                                         World::PhysicsOwnerState& output) const {
+    if (!m_jolt_system || index >= m_avatars.size() || !m_avatars[index].character) {
+        return false;
+    }
+    const auto& avatar = m_avatars[index];
+    OwnerRecipe recipe;
+    recipe.kind = 1u;
+    recipe.flags = avatar.frozen ? 1u : 0u;
+    recipe.wish = avatar.wish;
+    recipe.body = avatar.frozen_body.GetIndexAndSequenceNumber();
+    if (!avatar.frozen_body.IsInvalid()) {
+        recipe.slot_count = m_body_slots->slot_count;
+        recipe.free_slots.assign(m_body_slots->free_slots.begin(),
+                                 m_body_slots->free_slots.begin() + m_body_slots->free_count);
+    }
+    try {
+        avatar.character->SaveState(recipe.owner);
+        return WriteController(recipe, output);
+    } catch (const OwnerStateRefusal&) {
+        return false;
+    }
+}
+
+bool PhysicsSystem::restore_avatar_owner(const World::PhysicsOwnerState& state,
+                                         std::size_t& index) {
+    OwnerRecipe recipe;
+    if (!m_jolt_system || m_avatars.size() >= kMaxRestoredAvatars ||
+        !ParseController(state, recipe) || recipe.kind != 1u ||
+        !ReferencesExist(recipe, *m_jolt_system)) {
+        return false;
+    }
+    bool prepared_capsule = false;
+    JPH::BodyIDVector existing;
+    if (recipe.body != JPH::BodyID::cInvalidBodyID) {
+        const JPH::BodyID id(recipe.body);
+        m_jolt_system->GetBodies(existing);
+        for (const auto occupied : existing) {
+            if (occupied.GetIndex() == id.GetIndex() && occupied != id) {
+                return false;
+            }
+        }
+        const JPH::BodyLockRead lock(m_jolt_system->GetBodyLockInterface(), id);
+        if (lock.Succeeded()) {
+            // Jolt stores the centre of mass; GetPosition() subtracts the capsule's
+            // offset again and is not bit-exact. Compare the stored value with the
+            // same expression Jolt used to create or move the capsule at the feet.
+            if (!lock.GetBody().IsStatic() || m_avatar_shape == nullptr ||
+                lock.GetBody().GetShape() != m_avatar_shape ||
+                lock.GetBody().GetCenterOfMassPosition() !=
+                    recipe.feet + JPH::Quat::sIdentity() * m_avatar_shape->GetCenterOfMass() ||
+                lock.GetBody().GetRotation() != JPH::Quat::sIdentity()) {
+                return false;
+            }
+            for (const auto& owned : m_avatars) {
+                if (owned.frozen_body == id) {
+                    return false;
+                }
+            }
+            prepared_capsule = true;
+        }
+    }
+    if (prepared_capsule && (recipe.slot_count != m_body_slots->slot_count ||
+                             recipe.free_slots.size() != m_body_slots->free_count ||
+                             !std::equal(recipe.free_slots.begin(),
+                                         recipe.free_slots.end(),
+                                         m_body_slots->free_slots.begin()))) {
+        return false;
+    }
+    const bool needs_capsule = recipe.body != JPH::BodyID::cInvalidBodyID && !prepared_capsule;
+    BodySetState allocator;
+    if (needs_capsule) {
+        allocator.slot_count = recipe.slot_count;
+        allocator.free_slots = recipe.free_slots;
+        if (!ValidateOwnerAllocator(
+                allocator, std::span(&recipe, 1), existing, m_body_slots->slot_count)) {
+            return false;
+        }
+    }
+
+    auto scratch = PrepareOwnerAllocatorScratch(
+        *m_body_interface, needs_capsule && !recipe.free_slots.empty(), Layers::NON_MOVING);
+    if (needs_capsule && !recipe.free_slots.empty() && !scratch) {
+        return false;
+    }
+    // Shapes, controller, contacts and the unassigned capsule are staged under
+    // RAII. Broadphase preparation also rolls back before any avatar is published.
+    m_avatars.reserve(m_avatars.size() + 1);
+    const auto shape = m_avatar_shape != nullptr ? m_avatar_shape : FeetCapsule(0.9f, 1.3f);
+    AvatarState staged{.character = PrepareController(shape, glm::vec3(0.0f), m_jolt_system.get()),
+                       .wish = recipe.wish,
+                       .frozen_body = JPH::BodyID(),
+                       .frozen = recipe.flags == 1u};
+    staged.character->RestoreState(recipe.owner);
+    UnassignedOwnerBody capsule(nullptr, UnassignedOwnerBodyDeleter{m_body_interface});
+    if (needs_capsule) {
+        const JPH::BodyCreationSettings settings(shape,
+                                                 staged.character->GetPosition(),
+                                                 JPH::Quat::sIdentity(),
+                                                 JPH::EMotionType::Static,
+                                                 Layers::NON_MOVING);
+        capsule.reset(m_body_interface->CreateBodyWithoutID(settings));
+        if (!capsule) {
+            return false;
+        }
+    }
+    if (needs_capsule) {
+        JPH::BodyID id(recipe.body);
+        JPH::BodyInterface::AddState addition = nullptr;
+        try {
+            AssignRestoredOwnerBody(*m_body_interface, capsule.get(), id);
+            addition = m_body_interface->AddBodiesPrepare(&id, 1);
+            m_body_interface->AddBodiesFinalize(&id, 1, addition, JPH::EActivation::DontActivate);
+            addition = nullptr;
+        } catch (...) {
+            if (addition != nullptr) {
+                m_body_interface->AddBodiesAbort(&id, 1, addition);
+            }
+            if (!capsule->GetID().IsInvalid()) {
+                m_body_interface->UnassignBodyID(capsule->GetID());
+            }
+            // Explicit assignment can extend Jolt's pool, whose physical extent
+            // cannot shrink. Reset new slots to generation zero in ascending
+            // reuse order, making their next allocation identical to fresh slots.
+            // Then restore every previously free generation and its stack order.
+            // At most 10240 slots and 256 sequence increments per slot are used.
+            for (auto extent = std::max(m_body_slots->slot_count, id.GetIndex() + 1);
+                 extent > m_body_slots->slot_count;
+                 --extent) {
+                AssignRestoredOwnerBody(
+                    *m_body_interface, capsule.get(), JPH::BodyID(extent - 1, 0));
+                m_body_interface->UnassignBodyID(capsule->GetID());
+            }
+            RestoreOwnerFreeSlots(
+                *m_body_interface,
+                capsule.get(),
+                std::span(m_body_slots->free_slots).first(m_body_slots->free_count));
+            throw;
+        }
+        capsule.release();
+        RestoreOwnerFreeSlots(*m_body_interface, scratch.get(), recipe.free_slots);
+        m_body_slots->slot_count = recipe.slot_count;
+        m_body_slots->free_count = static_cast<std::uint32_t>(recipe.free_slots.size());
+        std::copy(
+            recipe.free_slots.begin(), recipe.free_slots.end(), m_body_slots->free_slots.begin());
+    }
+    staged.frozen_body = JPH::BodyID(recipe.body);
+    m_avatar_shape = shape;
+    const auto slot = m_avatars.size();
+    m_avatars.push_back(std::move(staged));
+    index = slot;
+    return true;
+}
+
+bool PhysicsSystem::capture_player_owner(World::PhysicsOwnerState& output) const {
+    if (!m_player_character) {
+        return false;
+    }
+    OwnerRecipe recipe;
+    recipe.kind = 2u;
+    recipe.flags = m_player_character->GetShape() == m_player_crouch_shape ? 2u : 0u;
+    try {
+        m_player_character->SaveState(recipe.owner);
+        return WriteController(recipe, output);
+    } catch (const OwnerStateRefusal&) {
+        return false;
+    }
+}
+
+bool PhysicsSystem::restore_player_owner(const World::PhysicsOwnerState& state) {
+    OwnerRecipe recipe;
+    if (!m_jolt_system || m_player_character || !ParseController(state, recipe) ||
+        recipe.kind != 2u || !ReferencesExist(recipe, *m_jolt_system)) {
+        return false;
+    }
+    const auto standing = FeetCapsule(0.9f, 1.3f);
+    const auto crouching = FeetCapsule(0.45f, 0.85f);
+    auto character = PrepareController(
+        recipe.flags == 2u ? crouching : standing, glm::vec3(0.0f), m_jolt_system.get());
+    character->RestoreState(recipe.owner);
+    m_player_stand_shape = standing;
+    m_player_crouch_shape = crouching;
+    m_player_character = std::move(character);
+    return true;
+}
+
+bool PhysicsSystem::OwnerContinuation::capture_avatar_owner(
+    std::size_t index, World::PhysicsOwnerState& output) const {
+    return m_physics.capture_avatar_owner(index, output);
+}
+bool PhysicsSystem::OwnerContinuation::restore_avatar_owner(const World::PhysicsOwnerState& state,
+                                                            std::size_t& index) {
+    return m_physics.restore_avatar_owner(state, index);
+}
+bool PhysicsSystem::OwnerContinuation::capture_player_owner(
+    World::PhysicsOwnerState& output) const {
+    return m_physics.capture_player_owner(output);
+}
+bool PhysicsSystem::OwnerContinuation::restore_player_owner(const World::PhysicsOwnerState& state) {
+    return m_physics.restore_player_owner(state);
 }
 
 bool PhysicsSystem::capture_body_owner(JPH::BodyID body, BodyOwnerState& output) const {
@@ -1611,11 +1919,7 @@ bool PhysicsSystem::restore_body_owners(const BodySetState& state, std::span<JPH
     });
     JPH::Ref<JPH::Shape> avatar_shape = m_avatar_shape;
     if (has_capsules && avatar_shape == nullptr) {
-        const JPH::Ref<JPH::Shape> capsule = JPH::CapsuleShapeSettings(0.9f, 0.4f).Create().Get();
-        avatar_shape = JPH::RotatedTranslatedShapeSettings(
-                           JPH::Vec3(0.0f, 1.3f, 0.0f), JPH::Quat::sIdentity(), capsule.GetPtr())
-                           .Create()
-                           .Get();
+        avatar_shape = FeetCapsule(0.9f, 1.3f);
     }
     std::vector<UnassignedOwnerBody> staged;
     staged.reserve(recipes.size());
@@ -2044,3 +2348,41 @@ void PhysicsSystem::BatchedPhysicsQueries::SortQueriesSpatially(
 
 } // namespace Systems
 } // namespace Luminumbra
+
+namespace Luminumbra::world {
+
+bool GameSession::CaptureAvatarOwner(const World::PlayerAvatar& avatar,
+                                     std::size_t physics_index,
+                                     World::PlayerAvatarOwnerState& output) const {
+    if (!m_physicsSystem) {
+        return false;
+    }
+    World::PlayerAvatarOwnerState staged;
+    staged.avatar = avatar;
+    if (!Systems::PhysicsSystem::OwnerContinuation(*m_physicsSystem)
+             .capture_avatar_owner(physics_index, staged.physics)) {
+        return false;
+    }
+    if (!World::ValidateAvatarOwner(staged)) {
+        return false;
+    }
+    output = staged;
+    return true;
+}
+
+bool GameSession::RestoreAvatarOwner(const World::PlayerAvatarOwnerState& state,
+                                     World::PlayerAvatar& avatar,
+                                     std::size_t& physics_index) {
+    if (!m_physicsSystem) {
+        return false;
+    }
+    if (!World::ValidateAvatarOwner(state) ||
+        !Systems::PhysicsSystem::OwnerContinuation(*m_physicsSystem)
+             .restore_avatar_owner(state.physics, physics_index)) {
+        return false;
+    }
+    avatar = state.avatar;
+    return true;
+}
+
+} // namespace Luminumbra::world

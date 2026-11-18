@@ -26,6 +26,9 @@
 namespace Luminumbra {
 
 class Chunk;
+namespace World {
+struct PhysicsOwnerState;
+}
 
 namespace Systems {
 
@@ -162,6 +165,21 @@ public:
     // extent cannot shrink below the destination's existing allocated extent.
     bool restore_body_owners(const BodySetState& state, std::span<JPH::BodyID> bodies);
 
+    // Internal owner-thread continuation adapter. These operations are separate
+    // from the public physics gameplay interface and never run during a tick.
+    class OwnerContinuation {
+    public:
+        explicit OwnerContinuation(PhysicsSystem& physics)
+            : m_physics(physics) {}
+        bool capture_avatar_owner(std::size_t index, World::PhysicsOwnerState& output) const;
+        bool restore_avatar_owner(const World::PhysicsOwnerState& state, std::size_t& index);
+        bool capture_player_owner(World::PhysicsOwnerState& output) const;
+        bool restore_player_owner(const World::PhysicsOwnerState& state);
+
+    private:
+        PhysicsSystem& m_physics;
+    };
+
     // --- Audio-Physics Integration ---
     // Non-owning world-generation seam for surface-material classification on
     // terrain raycast hits. Set once at session startup (GameSession creates
@@ -251,6 +269,10 @@ public:
     }
 
 private:
+    bool capture_avatar_owner(std::size_t index, World::PhysicsOwnerState& output) const;
+    bool restore_avatar_owner(const World::PhysicsOwnerState& state, std::size_t& index);
+    bool capture_player_owner(World::PhysicsOwnerState& output) const;
+    bool restore_player_owner(const World::PhysicsOwnerState& state);
     struct BodySlotHistory;
     std::unique_ptr<BodySlotHistory> m_body_slots;
     void record_body_allocation(JPH::BodyID id);
