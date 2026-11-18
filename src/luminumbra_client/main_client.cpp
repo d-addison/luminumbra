@@ -1207,7 +1207,8 @@ static Luminumbra::Client::WorldPresentationReadiness
 ObserveWorldPresentation(const Luminumbra::Systems::SHIELD_WorldSystem& world,
                          const Luminumbra::Rendering::RenderPipeline& pipeline,
                          const Luminumbra::Vec3& position,
-                         int radius) {
+                         int radius,
+                         bool water_prepared) {
     const auto coverage = world.get_camera_local_coverage_stats(position, radius);
     const auto& streaming = world.get_streaming_telemetry_stats();
     const auto& uploads = pipeline.get_last_mesh_upload_stats();
@@ -1224,18 +1225,18 @@ ObserveWorldPresentation(const Luminumbra::Systems::SHIELD_WorldSystem& world,
         }
     }
     const auto* foliage = pipeline.foliage();
-    return {.terrain = coverage.near_field_renderable &&
-                       coverage.ready_surface_chunks == coverage.expected_surface_chunks &&
-                       coverage.pending_lod_chunks == 0 && uploads.terrain_uploads_deferred == 0,
+    return {.terrain = Luminumbra::Client::NearTerrainPrepared(coverage.expected_surface_chunks,
+                                                               coverage.ready_surface_chunks,
+                                                               coverage.pending_lod_chunks,
+                                                               coverage.lod_unknown_chunks) &&
+                       uploads.terrain_uploads_deferred == 0,
             .horizon = horizon,
-            .water = uploads.water_uploads_deferred == 0 && streaming.quiescent(),
+            .water = Luminumbra::Client::InitialWaterPrepared(water_prepared,
+                                                              uploads.water_uploads_deferred),
             .foliage = !foliage || !foliage->enabled() ||
                        (foliage->archetype_count() > 0 && !foliage->build_pending()),
             .uploads = pipeline.render_uploads_settled(),
-            .streaming = streaming.quiescent() &&
-                         streaming.frames_observed >
-                             static_cast<std::uint64_t>(
-                                 world.get_last_streaming_budget_stats().update_interval_frames)};
+            .streaming = streaming.quiescent()};
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -2742,14 +2743,19 @@ int main(int argc, char* argv[]) {
     std::chrono::steady_clock::time_point timelapse_presentation_started_at{};
     bool entry_presentation_started = false;
     bool entry_horizon_prepared = false;
+    bool entry_water_prepared = false;
+    bool timelapse_mode_prepared = false;
     bool timelapse_presentation_ready = false;
     auto finish_world_entry = [&](bool staged_entry = false) {
         entry_presentation_gate = {};
         timelapse_presentation_gate = {};
         entry_presentation_started = false;
         entry_horizon_prepared = false;
+        entry_water_prepared = false;
+        timelapse_mode_prepared = false;
         timelapse_presentation_ready = false;
         timelapse_presentation_started_at = {};
+        scenario_ready = false;
         release_player_controller();
         g_procgen = {};
         g_app.worldDressing = {};
@@ -4045,7 +4051,21 @@ int main(int argc, char* argv[]) {
     const auto log_presentation_timeout = [](const auto& gate) {
         LUMINUMBRA_CORE_WARN("World presentation timeout: missing={}", gate.missing_parts());
     };
+    auto restore_worldgen_preview = [&]() {
+        const auto currentState = gameStateManager.GetCurrentState();
+        // The create-world view shares the foliage pass. Restore the resolved
+        // gameplay configuration on every exit, including cancellation to the
+        // menu, even when the saved settings have not changed.
+        if (worldgenPreview->active() && (currentState != GameState::MAIN_MENU || !g_uiManager ||
+                                          !g_uiManager->GetWorldCreationPreviewState().active)) {
+            if (renderPipeline.apply_graphics(resolved_graphics))
+                worldgenPreview->set_active(false);
+            else
+                LUMINUMBRA_CORE_ERROR("Could not restore graphics after world preview");
+        }
+    };
     auto wait_for_world_presentation = [&]() {
+        restore_worldgen_preview();
         if (!entry_presentation_started) {
             entry_presentation_started = true;
             entry_presentation_started_at = std::chrono::steady_clock::now();
@@ -4062,10 +4082,10 @@ int main(int argc, char* argv[]) {
         auto* world = gameSession->GetWorldSystem();
         Luminumbra::Client::WorldPresentationReadiness readiness;
         if (world && g_camera) {
-            world->update(gameSession->GetRegistry(),
-                          g_camera->Position,
-                          gameSession->GetPhysicsSystem(),
-                          /*advance_simulation=*/false);
+            if (!entry_water_prepared) {
+                entry_water_prepared = world->PrepareInitialWaterPresentationNear(
+                    g_camera->Position, presentation_radius());
+            }
             double scatter_ms = 0.0, foliage_ms = 0.0;
             UpdateFoliageScatter(g_app,
                                  root_dir,
@@ -4083,8 +4103,11 @@ int main(int argc, char* argv[]) {
             }
             renderPipeline.render_frame(
                 gameSession->GetRegistry(), *world, *g_camera, 0.0f, g_app.overlay.wireframe_mode);
-            readiness = ObserveWorldPresentation(
-                *world, renderPipeline, g_camera->Position, presentation_radius());
+            readiness = ObserveWorldPresentation(*world,
+                                                 renderPipeline,
+                                                 g_camera->Position,
+                                                 presentation_radius(),
+                                                 entry_water_prepared);
             if (legacy) {
                 legacy->set_coverage_diagnostics_enabled(diagnostics_enabled);
             }
@@ -4144,7 +4167,8 @@ int main(int argc, char* argv[]) {
         }
         if (scenario_config.active() || benchmark_v4 || runtime_boot_recorder.enabled()) {
             last_readiness_report = EvaluateReadiness(scenario_config, gameSession.get());
-            if (!last_readiness_report.ready && !entry_presentation_gate.timed_out()) {
+            if (!entry_presentation_gate.permits_entry(true, last_readiness_report.ready)) {
+                scenario_ready = false;
                 scenario_failed = true;
                 scenario_failure_reason = "world_readiness_failed";
                 runtime_state_recorder.capture("world_readiness_failed",
@@ -4756,6 +4780,31 @@ int main(int argc, char* argv[]) {
                                                     std::chrono::steady_clock::now());
                         const std::string id = gameSession->GetMetadata().worldId;
                         start_world_load(id);
+                        // Workload actions complete inside their measured frame. Loading now
+                        // includes presentation, so finish that gate before the reload-residency
+                        // loop (which requires IN_GAME) or the next simulation tick can run.
+                        for (unsigned pass = 0;
+                             pass < Luminumbra::Client::kWorldPresentationFrameDeadline &&
+                             gameStateManager.GetCurrentState() == GameState::WORLD_LOADING &&
+                             !glfwWindowShouldClose(window);
+                             ++pass) {
+                            const bool waiting = wait_for_world_presentation();
+                            benchmark_queries->checkpoint_passes();
+                            glfwPollEvents();
+                            MainLoopHeartbeat().fetch_add(1, std::memory_order_relaxed);
+                            if (glfwWindowShouldClose(window)) {
+                                break;
+                            }
+                            if (!waiting) {
+                                activate_loaded_world();
+                                break;
+                            }
+                        }
+                        if (gameStateManager.GetCurrentState() != GameState::IN_GAME ||
+                            !scenario_ready) {
+                            scenario_failed = true;
+                            scenario_failure_reason = "world_readiness_failed";
+                        }
                         if (g_uiManager)
                             g_uiManager->RequestLoadDocument("hud.rml");
                         reload_settling_pending = reload && !scenario_failed;
@@ -4946,17 +4995,7 @@ int main(int argc, char* argv[]) {
                     focused->Blur();
             }
         }
-        // The create-world view shares the foliage pass. Restore the resolved
-        // gameplay configuration on every exit, including cancellation to the
-        // menu, even when the saved settings have not changed.
-        if (worldgenPreview->active() &&
-            (gameStateManager.GetCurrentState() != GameState::MAIN_MENU || !g_uiManager ||
-             !g_uiManager->GetWorldCreationPreviewState().active)) {
-            if (renderPipeline.apply_graphics(resolved_graphics))
-                worldgenPreview->set_active(false);
-            else
-                LUMINUMBRA_CORE_ERROR("Could not restore graphics after world preview");
-        }
+        restore_worldgen_preview();
 
         if (world_entry.active()) {
             world_entry.advance(
@@ -5333,7 +5372,8 @@ int main(int argc, char* argv[]) {
                 // the bank we'll breach. Computed once; the carve happens in the capture/advance
                 // block.
                 if (g_app.capture.timelapse_drain && g_camera && gameSession &&
-                    gameSession->GetWorldSystem() && timelapse_presentation_ready) {
+                    gameSession->GetWorldSystem() &&
+                    (timelapse_mode_prepared || !timelapse_presentation_gate.waiting())) {
                     auto* ws = gameSession->GetWorldSystem();
                     if (!g_app.capture.drain_state.init) {
                         // Anchor on a real SHORELINE — deep water beside a tall DRY bank — so
@@ -5385,7 +5425,8 @@ int main(int argc, char* argv[]) {
                 // floor (where rainfall collects), deepen it into a clear closed basin, and frame
                 // it.
                 if (g_app.capture.timelapse_rain && g_camera && gameSession &&
-                    gameSession->GetWorldSystem() && timelapse_presentation_ready) {
+                    gameSession->GetWorldSystem() &&
+                    (timelapse_mode_prepared || !timelapse_presentation_gate.waiting())) {
                     auto* ws = gameSession->GetWorldSystem();
                     if (!g_app.capture.drain_state.init) {
                         ws->SetWaterHydrology(
@@ -5419,6 +5460,19 @@ int main(int argc, char* argv[]) {
                         g_camera->Yaw = glm::degrees(std::atan2(dd.z, dd.x));
                         g_camera->Pitch = glm::degrees(std::asin(std::clamp(dd.y, -1.0f, 1.0f)));
                         g_camera->updateCameraVectors();
+                    }
+                }
+                if (g_app.capture.timelapse_frames > 0 && !timelapse_mode_prepared &&
+                    !timelapse_presentation_gate.waiting()) {
+                    const bool mode_ready =
+                        (!g_app.capture.timelapse_drain && !g_app.capture.timelapse_rain) ||
+                        g_app.capture.drain_state.init;
+                    if (mode_ready) {
+                        timelapse_mode_prepared = true;
+                        timelapse_presentation_gate.restart_for_view();
+                    } else {
+                        capture_failure(g_app.capture.timelapse_dir / "timelapse.json",
+                                        "timelapse_mode_preparation_failed");
                     }
                 }
                 if (advance_frame_simulation) {
@@ -6212,6 +6266,16 @@ int main(int argc, char* argv[]) {
                     if (timelapse_legacy) {
                         timelapse_legacy->set_coverage_diagnostics_enabled(true);
                     }
+                    const bool water_prepared =
+                        timelapse_waiting &&
+                        gameSession->GetWorldSystem()->PrepareInitialWaterPresentationNear(
+                            g_camera->Position,
+                            presentation_radius(),
+                            /*initialize_capture_water=*/
+                            !scenario_config.networked_session_smoke());
+                    if (timelapse_waiting) {
+                        gameSession->GetWorldSystem()->sync_water_authority();
+                    }
                     renderPipeline.render_frame(
                         gameSession->GetRegistry(),
                         *gameSession->GetWorldSystem(),
@@ -6230,14 +6294,19 @@ int main(int argc, char* argv[]) {
                             ObserveWorldPresentation(*gameSession->GetWorldSystem(),
                                                      renderPipeline,
                                                      g_camera->Position,
-                                                     presentation_radius());
+                                                     presentation_radius(),
+                                                     water_prepared);
                         timelapse_presentation_gate.observe(readiness,
                                                             std::chrono::steady_clock::now() -
                                                                 timelapse_presentation_started_at);
                         if (timelapse_presentation_gate.timed_out()) {
                             log_presentation_timeout(timelapse_presentation_gate);
+                            capture_failure(g_app.capture.timelapse_dir / "timelapse.json",
+                                            "timelapse_presentation_timeout");
                         }
-                        timelapse_presentation_ready = !timelapse_presentation_gate.waiting();
+                        timelapse_presentation_ready =
+                            timelapse_mode_prepared &&
+                            timelapse_presentation_gate.permits_entry(true, !scenario_failed);
                     }
                     if (timelapse_legacy) {
                         timelapse_legacy->set_coverage_diagnostics_enabled(

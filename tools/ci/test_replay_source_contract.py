@@ -584,7 +584,9 @@ class ReplaySourceContract(unittest.TestCase):
         self.assertNotIn("GameState::IN_GAME", entry)
         preload = main.split("auto wait_for_world_presentation =", 1)[1].split(
             "auto activate_loaded_world =", 1)[0]
-        self.assertLess(preload.index("g_camera ="), preload.index("world->update("))
+        self.assertLess(preload.index("g_camera ="),
+                        preload.index("PrepareInitialWaterPresentationNear("))
+        self.assertNotIn("world->update(", preload)
         self.assertIn("return entry_presentation_gate.waiting();", preload)
         self.assertRegex(main, r'if \(!gameSession->GetWorldSystem\(\)->EnsureSurfaceReadyNear\('
                          r'[^;]*, 4, 2\)\)\s*\{[^}]*return 2;')

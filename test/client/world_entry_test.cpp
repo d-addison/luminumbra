@@ -19,6 +19,7 @@
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -26,6 +27,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -141,6 +143,192 @@ constexpr bool PresentationPolicyBlocksUntilReady() {
            !wall.waiting();
 }
 static_assert(PresentationPolicyBlocksUntilReady());
+
+constexpr bool PresentationFailurePolicy() {
+    WorldPresentationGate waiting;
+    if (waiting.permits_entry(false, true) || waiting.permits_entry(true, true)) {
+        return false;
+    }
+    WorldPresentationGate timeout;
+    timeout.observe({}, Luminumbra::Client::kWorldPresentationWallDeadline);
+    WorldPresentationGate ready;
+    for (unsigned frame = 0; frame < Luminumbra::Client::kWorldPresentationMinimumFrames; ++frame) {
+        ready.observe(kPresentationReady, 0s);
+    }
+    return !Luminumbra::Client::InitialWaterPrepared(false, 0) &&
+           !Luminumbra::Client::InitialWaterPrepared(false, 1) &&
+           !Luminumbra::Client::InitialWaterPrepared(true, 1) &&
+           Luminumbra::Client::InitialWaterPrepared(true, 0) &&
+           timeout.permits_entry(false, false) && timeout.permits_entry(false, true) &&
+           !timeout.permits_entry(true, false) && !timeout.permits_entry(true, true) &&
+           !ready.permits_entry(true, false) && ready.permits_entry(true, true) &&
+           Luminumbra::Client::NearTerrainPrepared(1, 1, 0, 0) &&
+           !Luminumbra::Client::NearTerrainPrepared(0, 0, 0, 0) &&
+           !Luminumbra::Client::NearTerrainPrepared(1, 0, 0, 0) &&
+           !Luminumbra::Client::NearTerrainPrepared(1, 1, 1, 0) &&
+           !Luminumbra::Client::NearTerrainPrepared(1, 1, 0, 1);
+}
+static_assert(PresentationFailurePolicy());
+
+TEST(WorldPresentation, EmptyUploadQueueAndTimeoutCannotHideReadinessFailure) {
+    EXPECT_TRUE(PresentationFailurePolicy());
+}
+
+constexpr bool PresentationViewsShareDeadline() {
+    WorldPresentationGate view;
+    view.restart_for_view();
+    for (unsigned frame = 0; frame < Luminumbra::Client::kWorldPresentationMinimumFrames; ++frame) {
+        view.observe(kPresentationReady, 0s);
+    }
+    if (view.waiting()) {
+        return false;
+    }
+    view.restart_for_view();
+    view.restart_for_view();
+    for (unsigned frame = 1; frame < Luminumbra::Client::kWorldPresentationMinimumFrames; ++frame) {
+        if (view.observe(kPresentationReady, 0s) != WorldPresentationState::Waiting) {
+            return false;
+        }
+    }
+    if (view.observe(kPresentationReady, 0s) != WorldPresentationState::Ready) {
+        return false;
+    }
+    WorldPresentationGate frames;
+    for (unsigned frame = 0; frame < Luminumbra::Client::kWorldPresentationFrameDeadline - 2;
+         ++frame) {
+        frames.observe({}, 0s);
+    }
+    auto exhausted = frames;
+    frames.observe(kPresentationReady, 0s);
+    if (frames.waiting()) {
+        return false;
+    }
+    frames.restart_for_view();
+    if (frames.observe(kPresentationReady, 0s) != WorldPresentationState::TimedOut) {
+        return false;
+    }
+    frames.restart_for_view();
+    exhausted.observe({}, 0s);
+    if (exhausted.observe(kPresentationReady, 0s) != WorldPresentationState::Ready) {
+        return false;
+    }
+    exhausted.restart_for_view();
+    WorldPresentationGate wall;
+    for (unsigned frame = 0; frame < Luminumbra::Client::kWorldPresentationMinimumFrames; ++frame) {
+        wall.observe(kPresentationReady, 0s);
+    }
+    wall.restart_for_view();
+    if (wall.observe(kPresentationReady, Luminumbra::Client::kWorldPresentationWallDeadline) !=
+        WorldPresentationState::TimedOut) {
+        return false;
+    }
+    wall.restart_for_view();
+    return frames.timed_out() && exhausted.timed_out() && wall.timed_out();
+}
+static_assert(PresentationViewsShareDeadline());
+
+TEST(WorldPresentation, FinalCameraNeedsFreshFramesWithinTheOriginalDeadline) {
+    EXPECT_TRUE(PresentationViewsShareDeadline());
+}
+
+TEST(WorldPresentation, EmptyPublishedTerrainAndWaterPreparationPreserveAuthority) {
+    const Luminumbra::TestSupport::HeadlessRoot root;
+    Luminumbra::world::GameSession session;
+    session.SetRootPath(root.root_string());
+    ASSERT_TRUE(session.CreateTransientWorld("Presentation", "1337", "default"));
+    auto* world = session.GetWorldSystem();
+    const auto spawn = session.GetMetadata().spawnPoint;
+    world->SetWaterSystem(nullptr);
+    EXPECT_FALSE(world->PrepareInitialWaterPresentationNear(spawn, 0));
+    world->SetWaterSystem(session.GetWaterSystem());
+    EXPECT_FALSE(world->PrepareInitialWaterPresentationNear(spawn, 0));
+    ASSERT_TRUE(world->EnsureSurfaceReadyNear(spawn, session.GetPhysicsSystem(), 0, 0));
+    const auto authority = Luminumbra::TestSupport::SessionWorldHash(session);
+    const auto inventory = world->snapshot_streamed_chunks();
+    ASSERT_FALSE(inventory.empty());
+    ASSERT_TRUE(world->PrepareInitialWaterPresentationNear(spawn, 0));
+    for (const auto& chunk : inventory) {
+        EXPECT_TRUE(chunk->water_mesh_generated.load());
+        EXPECT_FALSE(chunk->has_water_sim.load());
+    }
+    EXPECT_EQ(Luminumbra::TestSupport::SessionWorldHash(session), authority);
+    EXPECT_EQ(world->snapshot_streamed_chunks().size(), inventory.size());
+    EXPECT_EQ(session.GetWorldClock().tick(), 0u);
+    ASSERT_TRUE(world->PrepareInitialWaterPresentationNear(spawn, 0));
+    EXPECT_EQ(Luminumbra::TestSupport::SessionWorldHash(session), authority);
+
+    for (const auto& chunk : inventory) {
+        chunk->mesh_vertices.clear();
+        chunk->mesh_indices.clear();
+    }
+    const auto prepared = [&](const auto& coverage) {
+        return Luminumbra::Client::NearTerrainPrepared(coverage.expected_surface_chunks,
+                                                       coverage.ready_surface_chunks,
+                                                       coverage.pending_lod_chunks,
+                                                       coverage.lod_unknown_chunks);
+    };
+    EXPECT_TRUE(prepared(world->get_camera_local_coverage_stats(spawn, 0)));
+    for (const auto& chunk : inventory) {
+        chunk->set_state(Luminumbra::ChunkState::Meshing);
+    }
+    EXPECT_FALSE(prepared(world->get_camera_local_coverage_stats(spawn, 0)));
+    EXPECT_FALSE(world->PrepareInitialWaterPresentationNear(spawn, 0));
+    for (const auto& chunk : inventory) {
+        chunk->set_state(Luminumbra::ChunkState::Ready);
+    }
+    auto& first = *inventory.front();
+    const auto lod = first.current_lod.load();
+    first.current_lod.store(-1);
+    EXPECT_FALSE(world->PrepareInitialWaterPresentationNear(spawn, 0));
+    first.current_lod.store(3);
+    EXPECT_FALSE(world->PrepareInitialWaterPresentationNear(spawn, 0));
+    first.current_lod.store(lod);
+    first.pending_lod.store(0);
+    EXPECT_FALSE(world->PrepareInitialWaterPresentationNear(spawn, 0));
+    first.pending_lod.store(-1);
+    for (const int invalid_radius : {-1, 13, std::numeric_limits<int>::max()}) {
+        EXPECT_FALSE(world->PrepareInitialWaterPresentationNear(spawn, invalid_radius));
+    }
+    EXPECT_FALSE(world->PrepareInitialWaterPresentationNear(
+        Luminumbra::Vec3(std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f), 0));
+    EXPECT_FALSE(world->PrepareInitialWaterPresentationNear(
+        Luminumbra::Vec3(std::numeric_limits<float>::max(), 0.0f, 0.0f), 0));
+    ASSERT_TRUE(world->PrepareInitialWaterPresentationNear(spawn, 0, true));
+    const auto seeded = Luminumbra::TestSupport::SessionWorldHash(session);
+    for (const auto& chunk : inventory) {
+        EXPECT_TRUE(chunk->has_water_sim.load());
+        EXPECT_TRUE(chunk->water_mesh_generated.load());
+    }
+    EXPECT_EQ(session.GetWorldClock().tick(), 0u);
+    ASSERT_TRUE(world->PrepareInitialWaterPresentationNear(spawn, 0, true));
+    EXPECT_EQ(Luminumbra::TestSupport::SessionWorldHash(session), seeded);
+    // A completed dry-water mesh is ready too, without changing the saved grid.
+    for (const auto& chunk : inventory) {
+        std::fill(chunk->water_depth_mm.begin(), chunk->water_depth_mm.end(), 0);
+        chunk->water_mesh_generated.store(false);
+    }
+    ASSERT_TRUE(world->PrepareInitialWaterPresentationNear(spawn, 0));
+    for (const auto& chunk : inventory) {
+        EXPECT_TRUE(chunk->water_mesh_generated.load());
+        EXPECT_TRUE(chunk->water_mesh_vertices.empty());
+        EXPECT_TRUE(chunk->water_mesh_indices.empty());
+    }
+    // A partial saved grid refuses before replacing even the first mesh.
+    auto& partial = *inventory.back();
+    const auto version = inventory.front()->water_mesh_version.load();
+    partial.water_depth_mm.pop_back();
+    EXPECT_FALSE(world->PrepareInitialWaterPresentationNear(spawn, 0));
+    EXPECT_EQ(inventory.front()->water_mesh_version.load(), version);
+    partial.water_depth_mm.push_back(0);
+    partial.water_level_data.pop_back();
+    EXPECT_FALSE(world->PrepareInitialWaterPresentationNear(spawn, 0));
+    EXPECT_EQ(inventory.front()->water_mesh_version.load(), version);
+    partial.water_level_data.push_back(0.0f);
+    for (const int invalid_resolution : {0, 3, 33, std::numeric_limits<int>::max()}) {
+        partial.current_water_resolution.store(invalid_resolution);
+        EXPECT_FALSE(world->PrepareInitialWaterPresentationNear(spawn, 0));
+    }
+}
 
 TEST(WorldPresentation, EveryMissingPartBlocksAndNamesItsFailure) {
     constexpr std::array fields{&WorldPresentationReadiness::terrain,
@@ -1454,7 +1642,8 @@ TEST(WorldEntryWiring, PresentationWaitPrecedesBothActivationsAndCapture) {
     ASSERT_NE(preload_start, std::string::npos);
     ASSERT_NE(preload_end, std::string::npos);
     const auto preload = source.substr(preload_start, preload_end - preload_start);
-    EXPECT_NE(preload.find("/*advance_simulation=*/false"), std::string::npos);
+    EXPECT_EQ(preload.find("world->update("), std::string::npos);
+    EXPECT_NE(preload.find("PrepareInitialWaterPresentationNear("), std::string::npos);
     EXPECT_EQ(preload.find("TickSimulation("), std::string::npos);
     EXPECT_NE(preload.find("ObserveWorldPresentation("), std::string::npos);
     EXPECT_NE(source.find("!timelapse_waiting && Measurement::frame_simulation_enabled"),

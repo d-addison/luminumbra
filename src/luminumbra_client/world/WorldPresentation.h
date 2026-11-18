@@ -2,6 +2,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -11,6 +12,19 @@ namespace Luminumbra::Client {
 inline constexpr unsigned kWorldPresentationFrameDeadline = 1800;
 inline constexpr auto kWorldPresentationWallDeadline = std::chrono::seconds(120);
 inline constexpr unsigned kWorldPresentationMinimumFrames = 3;
+
+// A published empty mesh is complete. Vertex counts cannot distinguish it from
+// unfinished terrain; Ready state and a known LOD can.
+constexpr bool NearTerrainPrepared(std::size_t expected,
+                                   std::size_t ready,
+                                   std::size_t pending,
+                                   std::size_t unknown_lod) {
+    return expected > 0 && ready == expected && pending == 0 && unknown_lod == 0;
+}
+
+constexpr bool InitialWaterPrepared(bool prepared, std::size_t deferred_uploads) {
+    return prepared && deferred_uploads == 0;
+}
 
 struct WorldPresentationReadiness {
     bool terrain = false;
@@ -36,7 +50,8 @@ enum class WorldPresentationState {
 };
 
 // Clock-free policy: the owner supplies elapsed steady-clock time and one
-// observation per rendered frame. Terminal states latch until world replacement.
+// observation per rendered frame. A new view shares the original deadline;
+// timeout latches until world replacement.
 class WorldPresentationGate {
 public:
     constexpr WorldPresentationState observe(const WorldPresentationReadiness& readiness,
@@ -45,8 +60,9 @@ public:
             return m_state;
         }
         ++m_frames;
+        ++m_view_frames;
         m_missing = readiness.missing();
-        if (readiness.ready() && m_frames >= kWorldPresentationMinimumFrames) {
+        if (readiness.ready() && m_view_frames >= kWorldPresentationMinimumFrames) {
             m_state = WorldPresentationState::Ready;
         } else if (m_frames >= kWorldPresentationFrameDeadline ||
                    elapsed >= kWorldPresentationWallDeadline) {
@@ -54,11 +70,24 @@ public:
         }
         return m_state;
     }
+    constexpr void restart_for_view() {
+        if (!timed_out()) {
+            m_state = m_frames < kWorldPresentationFrameDeadline ? WorldPresentationState::Waiting
+                                                                 : WorldPresentationState::TimedOut;
+            m_view_frames = 0;
+            m_missing = 0;
+        }
+    }
     [[nodiscard]] constexpr bool waiting() const {
         return m_state == WorldPresentationState::Waiting;
     }
     [[nodiscard]] constexpr bool timed_out() const {
         return m_state == WorldPresentationState::TimedOut;
+    }
+    // Automated readiness failures survive presentation deadlines. Normal play
+    // can proceed on a presentation timeout without declaring automation ready.
+    [[nodiscard]] constexpr bool permits_entry(bool automated, bool runtime_ready) const {
+        return !waiting() && (!automated || (!timed_out() && runtime_ready));
     }
     [[nodiscard]] std::string missing_parts() const {
         constexpr std::array names{
@@ -78,6 +107,7 @@ public:
 
 private:
     unsigned m_frames = 0;
+    unsigned m_view_frames = 0;
     std::uint32_t m_missing = 0;
     WorldPresentationState m_state = WorldPresentationState::Waiting;
 };
