@@ -103,11 +103,19 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         service, _, regional = self.authority_capture_blocks()
         loop = cpp_block(regional, "for(constauto&region:regional.regions){std::uint64_tdigest=0;")
         local = cpp_block(loop, "else")
-        ordered = ("conststd::optional<PreparedRegionDigest>prepared=operation.prepare(region.key,region.inputs);",
+        ordered = ("if(region.inputs.require_index!=regional.require_index){adjusted=region.inputs;"
+                   "adjusted->require_index=regional.require_index;}",
+                   "conststd::optional<PreparedRegionDigest>prepared="
+                   "operation.prepare(region.key,adjusted?*adjusted:region.inputs);",
                    "if(!prepared.has_value()){return{AuthorityCaptureStatus::PreparationRefused,std::nullopt};}",
                    "digest=HashPreparedRegionDigest(*prepared);")
         positions = [local.index(expression) for expression in ordered]
         self.assertEqual(positions, sorted(positions))
+        # One read-ownership scope spans index admission and the whole regional loop.
+        guard = "constdetail::SnapshotReadOwnershipcapture_ownership;"
+        self.assertEqual(regional.count(guard), 1)
+        self.assertLess(regional.index(guard), regional.index("RegionDigestOperationoperation("))
+        self.assertLess(regional.index(guard), regional.index(loop))
         self.assertNotIn("prepared", loop.replace(local, ""))
         self.assertNotIn("PreparedRegionDigest", regional.replace(local, ""))
         self.assertLess(loop.index(local), loop.index("projection+="))

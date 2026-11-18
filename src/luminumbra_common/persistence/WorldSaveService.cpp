@@ -5934,6 +5934,9 @@ AuthorityCaptureResult CaptureAuthorityHashes(const WorldStreamingState& state,
             return {AuthorityCaptureStatus::IncompleteOwner, std::nullopt};
         }
     }
+    // One read-ownership scope spans index admission and every region: an indexed save cannot
+    // publish between regions, so the projection folds a single publication generation.
+    const detail::SnapshotReadOwnership capture_ownership;
     RegionDigestOperation operation(regional.save_dir, regional.require_index);
     std::string projection =
         "authoritative_chunks:v2:" + std::to_string(water_sim_cursor.value()) + ":";
@@ -5942,8 +5945,15 @@ AuthorityCaptureResult CaptureAuthorityHashes(const WorldStreamingState& state,
         if (region.frozen_digest.has_value()) {
             digest = region.frozen_digest.value();
         } else {
+            // The regional index setting is the single source of truth for every region;
+            // copy the inputs only when a region's own default disagrees with it.
+            std::optional<RegionDigestInputs> adjusted;
+            if (region.inputs.require_index != regional.require_index) {
+                adjusted = region.inputs;
+                adjusted->require_index = regional.require_index;
+            }
             const std::optional<PreparedRegionDigest> prepared =
-                operation.prepare(region.key, region.inputs);
+                operation.prepare(region.key, adjusted ? *adjusted : region.inputs);
             if (!prepared.has_value()) {
                 return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
             }
