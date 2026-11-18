@@ -3375,10 +3375,18 @@ void CheckSessionCheckpointPublication(const fs::path& root,
     // Both publications consume exactly the same immutable session observation.
     struct CaptureContext {
         const Persistence::AuthorityHashCapture& capture;
+        std::size_t boot_calls = 0;
+        std::size_t tick_calls = 0;
     } context{expected_capture};
     hooks.user = &context;
     hooks.capture_hashes = [](std::uint64_t tick, Net::HashMsg& out, void* user) {
-        const auto& capture = static_cast<const CaptureContext*>(user)->capture;
+        auto& capture_context = *static_cast<CaptureContext*>(user);
+        const auto& capture = capture_context.capture;
+        if (tick == 0) {
+            ++capture_context.boot_calls;
+        } else {
+            ++capture_context.tick_calls;
+        }
         out = {
             tick, capture.streamed, capture.sub.terrain, capture.sub.water, capture.sub.entities};
     };
@@ -3386,8 +3394,11 @@ void CheckSessionCheckpointPublication(const fs::path& root,
     lockstep.SetDumpPath((root / "capture-agreement.lrec1").string());
     ASSERT_TRUE(peer->SendFrame(Net::EncodeHello(Net::MakeLockstepHello(remote))));
     ASSERT_TRUE(lockstep.Handshake());
+    EXPECT_EQ(context.boot_calls, 1u);
+    EXPECT_TRUE(lockstep.Status().replay_error.empty()) << lockstep.Status().replay_error;
     ASSERT_TRUE(peer->SendFrame(Net::EncodeInput({1, 1, {}})));
     EXPECT_EQ(lockstep.PumpTick(2).outcome, Net::TickOutcome::Advanced);
+    EXPECT_EQ(context.tick_calls, 1u);
     std::size_t published = 0;
     std::vector<std::uint8_t> frame;
     // Hello, the initial horizon, the next input and one hash bound the drain.
@@ -3410,13 +3421,31 @@ void CheckSessionCheckpointPublication(const fs::path& root,
     }
     EXPECT_EQ(published, 1u);
     EXPECT_FALSE(peer->TryReceiveFrame(frame));
+    // Diagnostic replays are published on divergence; a clean disconnect only closes transport.
+    ASSERT_TRUE(peer->SendFrame(Net::EncodeHash({1,
+                                                 expected_capture.streamed + "-different",
+                                                 expected_capture.sub.terrain,
+                                                 expected_capture.sub.water,
+                                                 expected_capture.sub.entities})));
     lockstep.Disconnect();
+    EXPECT_TRUE(lockstep.Status().desynced);
+    EXPECT_EQ(lockstep.Status().desync_section, "world_hash");
+    EXPECT_EQ(lockstep.Status().dump_path, (root / "capture-agreement.lrec1").string());
     const auto recording = Replay::ReadReplay((root / "capture-agreement.lrec1").string());
     ASSERT_TRUE(recording.has_value());
     if (!recording) {
         return;
     }
     EXPECT_EQ(recording->header.start_world_hash, expected_capture.streamed);
+    EXPECT_FALSE(recording->truncated);
+    EXPECT_TRUE(recording->trailer_present);
+    ASSERT_EQ(recording->checkpoints.size(), 1u);
+    const auto& checkpoint = recording->checkpoints.front();
+    EXPECT_EQ(checkpoint.tick, 1u);
+    EXPECT_EQ(checkpoint.world_hash, expected_capture.streamed);
+    EXPECT_EQ(checkpoint.terrain, expected_capture.sub.terrain);
+    EXPECT_EQ(checkpoint.water, expected_capture.sub.water);
+    EXPECT_EQ(checkpoint.entities, expected_capture.sub.entities);
 }
 
 TEST_F(WorldOpenRefusal, SessionCaptureAndLockstepCheckpointKeepLegacyBytes) {
@@ -3479,6 +3508,8 @@ TEST_F(WorldOpenRefusal, SessionCheckpointSkipsFailedRegionalReadsAndLatchedFaul
     auto& world = *session.GetWorldSystem();
     world.clear_world(session.GetPhysicsSystem());
     world.remember_durable_chunks({IVec3(0, 0, 0)});
+    ASSERT_EQ(world.authority_region_keys(), (std::vector<std::pair<i32, i32>>{{0, 0}}));
+    ASSERT_EQ(world.region_digest_inputs(0, 0).durable, (std::vector<IVec3>{{0, 0, 0}}));
     const auto original = session.CaptureAuthorityHashes();
     ASSERT_EQ(original.status, P::AuthorityCaptureStatus::Ready);
     const auto region = WorldSaveService::region_file_path(save, 0, 0);
@@ -3517,6 +3548,139 @@ TEST_F(WorldOpenRefusal, SessionCheckpointSkipsFailedRegionalReadsAndLatchedFaul
         P::AuthorityCaptureStatus::Ready);
     capture_jobs.startup(1);
     EXPECT_EQ(session.CaptureAuthorityHashes().status, P::AuthorityCaptureStatus::Ready);
+}
+
+void CheckRequiredRegionalReadRefusals(const fs::path& directory,
+                                       Persistence::RegionDigestOperation& operation,
+                                       const Persistence::RegionDigestInputs& required,
+                                       const Persistence::PreparedRegionDigest& prepared) {
+    namespace P = Persistence;
+    EXPECT_THROW((void)operation.prepare({0, 0}, required), std::runtime_error);
+    for (const bool parked : {false, true}) {
+        auto resident = required;
+        (parked ? resident.parked : resident.live) = prepared.chunks;
+        EXPECT_THROW((void)operation.prepare({0, 0}, resident), std::runtime_error);
+    }
+    EXPECT_THROW((void)operation.digest({0, 0}, required), std::runtime_error);
+    EXPECT_THROW((void)WorldSaveService::region_simulation_digest(directory, {0, 0}, required),
+                 std::runtime_error);
+    const P::AuthorityRegionalInputs regional{
+        .save_dir = directory,
+        .require_index = required.require_index,
+        .regions = {{.key = {0, 0}, .inputs = required, .frozen_digest = std::nullopt}}};
+    const auto capture = P::CaptureAuthorityHashes(WorldStreamingState{}, 0, regional);
+    EXPECT_EQ(capture.status, P::AuthorityCaptureStatus::PreparationRefused);
+    EXPECT_FALSE(capture.capture.has_value());
+}
+
+void CheckRegionalReadDamage(const fs::path& directory,
+                             int damage,
+                             Persistence::RegionDigestOperation& operation,
+                             const Persistence::RegionDigestInputs& optional,
+                             const Persistence::PreparedRegionDigest& prepared) {
+    namespace P = Persistence;
+    SCOPED_TRACE(damage);
+    const auto region = WorldSaveService::region_file_path(directory, 0, 0);
+    const auto bytes = Read(region);
+    const auto digest = P::HashPreparedRegionDigest(prepared);
+    auto required = optional;
+    required.durable = {{0, 0, 0}};
+    ASSERT_TRUE(fs::remove(region));
+    if (damage == 0) {
+        Write(region, "partial");
+    } else if (damage == 2) {
+        ASSERT_TRUE(fs::create_directory(region));
+    }
+    const auto before = DiskBytes(directory);
+    // An optional absent legacy region may be cached as empty. That observation must
+    // never satisfy the following required read, including on the same operation.
+    if (!optional.require_index && damage == 1) {
+        EXPECT_TRUE(operation.prepare({0, 0}, optional).chunks.empty());
+    } else {
+        EXPECT_THROW((void)operation.prepare({0, 0}, optional), std::runtime_error);
+    }
+    ASSERT_NO_FATAL_FAILURE(
+        CheckRequiredRegionalReadRefusals(directory, operation, required, prepared));
+    EXPECT_EQ(DiskBytes(directory), before);
+    if (damage == 2) {
+        ASSERT_TRUE(fs::remove(region));
+    }
+    Write(region, bytes);
+    EXPECT_EQ(P::HashPreparedRegionDigest(operation.prepare({0, 0}, required)), digest);
+    EXPECT_EQ(operation.digest({0, 0}, required), digest);
+    const P::AuthorityRegionalInputs regional{
+        .save_dir = directory,
+        .require_index = required.require_index,
+        .regions = {{.key = {0, 0}, .inputs = required, .frozen_digest = std::nullopt}}};
+    EXPECT_EQ(P::CaptureAuthorityHashes(WorldStreamingState{}, 0, regional).status,
+              P::AuthorityCaptureStatus::Ready);
+}
+
+TEST_F(WorldOpenRefusal, RegionalPreparationWithoutSaveRootRejectsDurableParticipants) {
+    namespace P = Persistence;
+    P::RegionDigestInputs optional{.live = {},
+                                   .parked = {},
+                                   .durable = {},
+                                   .require_index = false,
+                                   .ground_object_bytes = {},
+                                   .field_page_bytes = {}};
+    P::RegionDigestOperation operation({}, false);
+    EXPECT_TRUE(operation.prepare({0, 0}, optional).chunks.empty());
+    const auto live = std::make_shared<Chunk>(IVec3(0, 0, 0));
+    live->heightmap_data = {3.0f};
+    live->mark_voxel_data_dirty();
+    live->set_state(ChunkState::Idle);
+    optional.live = {live};
+    const auto prepared = operation.prepare({0, 0}, optional);
+    ASSERT_EQ(prepared.chunks.size(), 1u);
+    EXPECT_EQ(prepared.chunks.front(), live);
+    auto required = optional;
+    required.live.clear();
+    required.durable = {{0, 0, 0}};
+    ASSERT_NO_FATAL_FAILURE(CheckRequiredRegionalReadRefusals({}, operation, required, prepared));
+    optional.durable = {{-32, 0, 0}};
+    EXPECT_EQ(operation.prepare({0, 0}, optional).chunks, prepared.chunks);
+    EXPECT_THROW((void)operation.prepare({-1, 0}, optional), std::runtime_error);
+}
+
+TEST_F(WorldOpenRefusal, RegionalPreparationDistinguishesOptionalAndRequiredDurableReads) {
+    namespace P = Persistence;
+    for (const bool indexed : {false, true}) {
+        SCOPED_TRACE(indexed);
+        const auto directory = root / (indexed ? "indexed-digest" : "legacy-digest");
+        fs::copy(save, directory, fs::copy_options::recursive);
+        if (indexed) {
+            ASSERT_TRUE(Luminumbra::Test::PublishIndexedSave(directory, [] { return true; }));
+        }
+        P::RegionDigestInputs optional{.live = {},
+                                       .parked = {},
+                                       .durable = {},
+                                       .require_index = indexed,
+                                       .ground_object_bytes = {},
+                                       .field_page_bytes = {}};
+        auto required = optional;
+        required.durable = {{0, 0, 0}};
+        P::RegionDigestOperation operation(directory, indexed);
+        const auto prepared = operation.prepare({0, 0}, required);
+        ASSERT_EQ(prepared.chunks.size(), 1u);
+        // Compatibility callers may supply a multi-region inventory. Another region's durable
+        // coordinates must not require a file for an empty region or one with only live owners.
+        const auto live = std::make_shared<Chunk>(IVec3(-32, 0, 0));
+        live->heightmap_data = {3.0f};
+        live->mark_voxel_data_dirty();
+        live->set_state(ChunkState::Idle);
+        auto mixed = required;
+        EXPECT_TRUE(operation.prepare({-1, 0}, mixed).chunks.empty());
+        mixed.live = {live};
+        const auto live_only = operation.prepare({-1, 0}, mixed);
+        ASSERT_EQ(live_only.chunks.size(), 1u);
+        EXPECT_EQ(live_only.chunks.front(), live);
+        // Three portable failures exercise both cold reads and previously cached authority.
+        for (const int damage : {0, 1, 2}) {
+            ASSERT_NO_FATAL_FAILURE(
+                CheckRegionalReadDamage(directory, damage, operation, optional, prepared));
+        }
+    }
 }
 
 TEST_F(WorldOpenRefusal, SessionCaptureRefusesIncompleteParkedOwnerAtEveryActivationPhase) {
