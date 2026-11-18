@@ -80,11 +80,13 @@ int RunRecord(const ServerCliOptions& options) {
     config.world_name = "Replay Record";
     config.autosave_interval_ticks = 0; // no autosave noise during recording
 
+    Luminumbra::Server::ThrowawaySaveDirGuard save_cleanup;
     Luminumbra::Server::ServerWorldRunner runner(std::move(config));
     if (!runner.Boot()) {
         LUMINUMBRA_CORE_ERROR("record: session failed to boot");
         return 1;
     }
+    save_cleanup.Arm(runner.Session()->GetWorldSaveDir());
 
     Luminumbra::Replay::ReplayHeader header;
     header.version = Luminumbra::Replay::kLrec1Version;
@@ -271,11 +273,13 @@ int RunReplay(const ServerCliOptions& options) {
         LUMINUMBRA_CORE_ERROR("replay: invalid preset or incompatible configuration identity");
         return 1;
     }
+    Luminumbra::Server::ThrowawaySaveDirGuard save_cleanup;
     Luminumbra::Server::ServerWorldRunner runner(std::move(*config));
     if (!runner.Boot()) {
         LUMINUMBRA_CORE_ERROR("replay: session failed to boot from header");
         return 1;
     }
+    save_cleanup.Arm(runner.Session()->GetWorldSaveDir());
 
     if (!Luminumbra::Replay::ConfigurationMatches(header,
                                                   runner.Session()->SystemConfigIdentity(),

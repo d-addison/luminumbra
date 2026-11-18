@@ -37,6 +37,7 @@ namespace {
 struct ReplayCaptureFault {
     std::size_t calls = 0;
     std::size_t refuse_call = 0;
+    std::filesystem::path save_dir;
 };
 ReplayCaptureFault& CaptureFault() {
     static ReplayCaptureFault fault;
@@ -72,6 +73,9 @@ private:
         if (++fault.calls != fault.refuse_call) {
             return;
         }
+        fault.save_dir = Session()->GetWorldSaveDir();
+        ASSERT_FALSE(fault.save_dir.empty());
+        ASSERT_TRUE(std::filesystem::is_directory(fault.save_dir));
         m_incomplete = std::make_shared<Chunk>(IVec3(100000, 0, 100000));
         m_incomplete->mark_voxel_data_dirty();
         m_incomplete->set_state(ChunkState::Idle);
@@ -149,6 +153,13 @@ protected:
         fs::remove_all(root, error);
     }
 
+    void ExpectRefusedSaveRemoved() const {
+        ASSERT_FALSE(CaptureFault().save_dir.empty());
+        EXPECT_FALSE(fs::exists(CaptureFault().save_dir));
+        // Keep the catalog parent, but leave no abandoned world entry in it.
+        EXPECT_TRUE(fs::is_empty(root / "worlds/saves"));
+    }
+
     void Rewrite(const replay::ReplayContents& contents) {
         replay::ReplayWriter writer;
         ASSERT_TRUE(writer.Open(options.replay_path, contents.header));
@@ -197,6 +208,97 @@ protected:
 };
 
 using CaptureRefusalCase = std::tuple<std::uint64_t, std::size_t, bool>;
+
+// Model Shutdown() recreating saves, including two runners sharing Heavy's snapshot.
+struct SavingRunner {
+    const fs::path& save_dir;
+    bool& saved;
+    ~SavingRunner() {
+        std::error_code error;
+        fs::create_directories(save_dir, error);
+        std::ofstream output(save_dir / "shutdown");
+        output << "saved";
+        output.close();
+        saved = !error && output.good();
+    }
+};
+
+class ThrowawaySaveCleanup : public ReplayModeAdmission,
+                             public testing::WithParamInterface<std::tuple<int, bool>> {};
+
+TEST_P(ThrowawaySaveCleanup, RemovesSavesAfterEveryRunnerOnReturnAndRefusal) {
+    const int exit_kind = std::get<0>(GetParam());
+    const bool shared = std::get<1>(GetParam());
+    const auto first_save = root / "first";
+    const auto second_save = shared ? first_save : root / "second";
+    const auto retained = root / "persistent";
+    fs::create_directories(retained);
+    bool first_saved = false;
+    bool second_saved = false;
+    const auto run = [&]() -> int {
+        Luminumbra::Server::ThrowawaySaveDirGuard first_cleanup;
+        Luminumbra::Server::ThrowawaySaveDirGuard second_cleanup;
+        const SavingRunner first{first_save, first_saved};
+        fs::create_directories(first_save); // successful boot
+        first_cleanup.Arm(first_save);
+        if (exit_kind == 3) {
+            return 1; // the second peer failed to boot; its guard stays unarmed
+        }
+        const SavingRunner second{second_save, second_saved};
+        fs::create_directories(second_save);
+        if (!shared) {
+            second_cleanup.Arm(second_save);
+        }
+        // Force the runner destructors to recreate the directories, even if a
+        // success path already removed them before returning.
+        fs::remove_all(first_save);
+        fs::remove_all(second_save);
+        if (exit_kind == 1) {
+            return 1;
+        }
+        if (exit_kind == 2) {
+            throw Luminumbra::Persistence::AuthorityCaptureRefused(
+                Luminumbra::Persistence::AuthorityCaptureStatus::IncompleteOwner);
+        }
+        return 0;
+    };
+    try {
+        EXPECT_EQ(run(), exit_kind == 3 ? 1 : exit_kind);
+    } catch (const Luminumbra::Persistence::AuthorityCaptureRefused& error) {
+        EXPECT_EQ(exit_kind, 2);
+        EXPECT_EQ(error.status(), Luminumbra::Persistence::AuthorityCaptureStatus::IncompleteOwner);
+    }
+    EXPECT_TRUE(first_saved);
+    EXPECT_EQ(second_saved, exit_kind != 3);
+    EXPECT_FALSE(fs::exists(first_save));
+    EXPECT_FALSE(fs::exists(second_save));
+    EXPECT_TRUE(fs::is_directory(retained));
+}
+
+INSTANTIATE_TEST_SUITE_P(ExitPaths,
+                         ThrowawaySaveCleanup,
+                         testing::Combine(testing::Values(0, 1, 2, 3), testing::Bool()));
+
+TEST_F(ReplayModeAdmission, ThrowawayCleanupToleratesUnarmedEmptyMissingAndRemovalError) {
+    const auto retained = root / "retained-file";
+    {
+        std::ofstream output(retained);
+        output << "retained";
+        ASSERT_TRUE(output.good());
+    }
+    {
+        const Luminumbra::Server::ThrowawaySaveDirGuard unarmed;
+        Luminumbra::Server::ThrowawaySaveDirGuard empty;
+        empty.Arm({});
+        Luminumbra::Server::ThrowawaySaveDirGuard missing;
+        missing.Arm(root / "missing");
+        Luminumbra::Server::ThrowawaySaveDirGuard failed;
+        failed.Arm(retained / "not-a-directory");
+    }
+    EXPECT_EQ(ReadReplayModeFile(retained), "retained");
+    EXPECT_FALSE(fs::exists(root / "missing"));
+}
+
 class ReplayModeCaptureRefusal : public ReplayModeAdmission,
                                  public testing::WithParamInterface<CaptureRefusalCase> {};
 
@@ -224,11 +326,12 @@ TEST_P(ReplayModeCaptureRefusal, RefusedVerifyCapturesNeverPublishDivergenceArti
         output << "retained";
         ASSERT_TRUE(output.good());
     }
-    CaptureFault() = {.calls = 0, .refuse_call = call};
+    CaptureFault() = {.calls = 0, .refuse_call = call, .save_dir = {}};
     logs.str("");
     logs.clear();
     EXPECT_EQ(RunRefusedCaptureReplay(options), 1);
     EXPECT_EQ(CaptureFault().calls, call);
+    ExpectRefusedSaveRemoved();
     EXPECT_NE(logs.str().find("authority hash capture refused"), std::string::npos) << logs.str();
     EXPECT_EQ(logs.str().find("replay DIVERGED"), std::string::npos);
     EXPECT_EQ(fs::exists(options.artifact_path), retained);
@@ -248,9 +351,10 @@ TEST_P(ReplayModeCaptureRefusal, RefusedRecordCapturesNeverPublishReplayOrRegion
             ASSERT_TRUE(output.good());
         }
     }
-    CaptureFault() = {.calls = 0, .refuse_call = call};
+    CaptureFault() = {.calls = 0, .refuse_call = call, .save_dir = {}};
     EXPECT_EQ(RunRefusedCaptureRecord(options), 1);
     EXPECT_EQ(CaptureFault().calls, call);
+    ExpectRefusedSaveRemoved();
     EXPECT_NE(logs.str().find("authority hash capture refused"), std::string::npos) << logs.str();
     for (const auto& path : {options.record_path, companion}) {
         EXPECT_EQ(fs::exists(path), retained);
@@ -277,11 +381,12 @@ TEST_P(HeavyModeCaptureRefusal, RefusedHeavyCapturesFailBeforeComparisonOrArtifa
         output << "retained";
         ASSERT_TRUE(output.good());
     }
-    CaptureFault() = {.calls = 0, .refuse_call = call};
+    CaptureFault() = {.calls = 0, .refuse_call = call, .save_dir = {}};
     logs.str("");
     logs.clear();
     EXPECT_EQ(RunRefusedCaptureHeavy(options), 1);
     EXPECT_EQ(CaptureFault().calls, call);
+    ExpectRefusedSaveRemoved();
     EXPECT_NE(logs.str().find("authority hash capture refused"), std::string::npos) << logs.str();
     EXPECT_EQ(logs.str().find("round-trip differs"), std::string::npos);
     EXPECT_EQ(logs.str().find("resim differs"), std::string::npos);

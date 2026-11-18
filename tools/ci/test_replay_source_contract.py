@@ -704,6 +704,122 @@ def capture_body(source, anchor):
     raise AssertionError("unclosed capture block: " + anchor)
 
 
+class ThrowawaySaveSourceContract(unittest.TestCase):
+    # A guard must outlive all writers of its directory, including Shutdown()
+    # from a runner destructor on an early return or function-try-block unwind.
+    sites = (
+        ("Replay", "intRunRecord(", "save_cleanup", "runner", "."),
+        ("Replay", "intRunReplay(", "save_cleanup", "runner", "."),
+        ("Heavy", "intRunHeavy(", "save_cleanup", "original", "."),
+        ("Smoke", "RunSmokeOnce(", "save_cleanup", "runner", "."),
+        ("Lockstep", "intRunLockstepLoopback(", "host_cleanup", "host_runner", "->"),
+        ("Lockstep", "intRunLockstepLoopback(", "peer_cleanup", "peer_runner", "->"),
+        ("Replicate", "intRunReplicate(", "save_cleanup", "runner", "."),
+    )
+
+    def sources(self):
+        return {mode: compact_capture_source(read_source(MODES + mode + ".cpp"))
+                for mode, *_ in self.sites}
+
+    def assert_cleanup(self, sources):
+        for mode, entry, guard, runner, access in self.sites:
+            body = capture_body(sources[mode], entry)
+            declaration = "Luminumbra::Server::ThrowawaySaveDirGuard" + guard + ";"
+            runner_declaration = ("auto" + runner + "=make_runner(" if access == "->" else
+                                  "Luminumbra::Server::ServerWorldRunner" + runner + "(")
+            self.assertIn(declaration, body)
+            self.assertLess(body.index(declaration), body.index(runner_declaration))
+            boot = "if(!" + runner + access + "Boot())"
+            arm = guard + ".Arm(" + runner + access + "Session()->GetWorldSaveDir());"
+            # Arming is the first statement after successful Boot, before any
+            # capture, snapshot, other boot, or refusal return can intervene.
+            refusal = capture_body(body, boot)
+            self.assertIn("returnresult;" if mode == "Smoke" else "return1;", refusal)
+            self.assertIn(boot + refusal + arm, body)
+            self.assertEqual(body.count(guard + ".Arm("), 1)
+            if mode == "Heavy":
+                self.assertLess(body.index(declaration), body.index(
+                    "Luminumbra::Server::ServerWorldRunnerloaded("))
+                self.assertLess(body.index(arm), body.index("original.SaveFullSnapshot();"))
+                self.assertIn("cfgLoad.world_id=world_id;", body)
+                self.assertIn("conststd::stringworld_id=original.Session()->GetMetadata().worldId;", body)
+            if mode == "Lockstep":
+                self.assertLess(body.index(declaration), body.index("autohost_runner="))
+                self.assertLess(body.index(declaration), body.index("autopeer_runner="))
+                self.assertLess(body.index("host_cleanup.Arm("), body.index("if(!peer_runner->Boot())"))
+
+    def test_every_throwaway_mode_arms_cleanup_before_capture_and_outlives_runners(self):
+        self.assert_cleanup(self.sources())
+
+    def test_each_mode_and_peer_detects_removed_late_or_unarmed_guard(self):
+        sources = self.sources()
+        for mode, entry, guard, runner, access in self.sites:
+            body = capture_body(sources[mode], entry)
+            declaration = "Luminumbra::Server::ThrowawaySaveDirGuard" + guard + ";"
+            arm = guard + ".Arm(" + runner + access + "Session()->GetWorldSaveDir());"
+            boot = "if(!" + runner + access + "Boot())"
+            boot_block = boot + capture_body(body, boot)
+            mutations = (
+                body.replace(declaration, "", 1),
+                body.replace(arm, "", 1),
+                body.replace(arm, guard + ".Arm({});", 1),
+                body.replace(declaration, "", 1).replace(arm, declaration + arm, 1),
+                body.replace(arm, "", 1).replace(boot_block, arm + boot_block, 1),
+                body.replace(boot_block, boot_block.replace(
+                    "returnresult;" if mode == "Smoke" else "return1;", ""), 1),
+            )
+            for mutation, changed_body in enumerate(mutations):
+                changed = dict(sources)
+                changed[mode] = sources[mode].replace(body, changed_body, 1)
+                with self.subTest(mode=mode, entry=entry, guard=guard, mutation=mutation):
+                    with self.assertRaises((AssertionError, ValueError)):
+                        self.assert_cleanup(changed)
+
+    def assert_guard(self, header):
+        guard = capture_body(header, "classThrowawaySaveDirGuard")
+        self.assertIn("ThrowawaySaveDirGuard(constThrowawaySaveDirGuard&)=delete;", guard)
+        self.assertIn("ThrowawaySaveDirGuard&operator=(constThrowawaySaveDirGuard&)=delete;", guard)
+        self.assertIn("m_save_dir=save_dir;", capture_body(guard, "voidArm("))
+        self.assertIn("~ThrowawaySaveDirGuard()noexcept{", guard)
+        destructor = capture_body(guard, "~ThrowawaySaveDirGuard()")
+        self.assertIn("if(!m_save_dir.empty())", destructor)
+        self.assertIn("try{std::error_codeerror;std::filesystem::remove_all(m_save_dir,error);}", destructor)
+        self.assertIn("catch(...){}", destructor)
+
+    def test_guard_removal_is_nonthrowing_and_mutation_checked(self):
+        header = compact_capture_source(read_source("src/luminumbra_server/ServerWorldRunner.h"))
+        self.assert_guard(header)
+        for token in ("std::filesystem::remove_all(m_save_dir,error);", "noexcept",
+                      "if(!m_save_dir.empty())", "catch(...){}", "m_save_dir=save_dir;"):
+            with self.subTest(token=token), self.assertRaises((AssertionError, ValueError)):
+                self.assert_guard(header.replace(token, "", 1))
+
+    def test_persistent_modes_do_not_delete_user_saves(self):
+        for mode in ("Server", "NetTcp", "NetRuntime", "NetSoak", "Gns", "Steam"):
+            source = read_source(MODES + mode + ".cpp")
+            self.assertNotIn("ThrowawaySaveDirGuard", source)
+            self.assertNotIn("remove_all(", source)
+
+    def test_registered_native_refusals_check_save_cleanup_and_destructor_order(self):
+        native = read_source("test/common/ReplayModeAdmission_test.cpp")
+        for case in ("RefusedVerifyCapturesNeverPublishDivergenceArtifacts",
+                     "RefusedRecordCapturesNeverPublishReplayOrRegionTrace",
+                     "RefusedHeavyCapturesFailBeforeComparisonOrArtifact"):
+            body = capture_body(native, case + ")")
+            self.assertIn("ExpectRefusedSaveRemoved();", body)
+        self.assertIn("ASSERT_TRUE(std::filesystem::is_directory(fault.save_dir));", native)
+        self.assertIn("EXPECT_FALSE(fs::exists(CaptureFault().save_dir));", native)
+        self.assertIn('EXPECT_TRUE(fs::is_empty(root / "worlds/saves"));', native)
+        self.assertRegex(native, r'TEST_P\(ThrowawaySaveCleanup,\s*'
+                         r'RemovesSavesAfterEveryRunnerOnReturnAndRefusal\)')
+        self.assertIn("const SavingRunner first{first_save, first_saved};", native)
+        self.assertIn("const SavingRunner second{second_save, second_saved};", native)
+        self.assertIn("testing::Combine(testing::Values(0, 1, 2, 3), testing::Bool())", native)
+        self.assertIn("ThrowawayCleanupToleratesUnarmedEmptyMissingAndRemovalError", native)
+        self.assertIn("common/ReplayModeAdmission_test.cpp", read_source("test/CMakeLists.txt"))
+        self.assertIn("tools/ci/test_replay_source_contract.py", read_source("tools/ci/ci_paths.py"))
+
+
 class AuthorityConsumerSourceContract(unittest.TestCase):
     paths = {
         "runner": "src/luminumbra_server/ServerWorldRunner.cpp",

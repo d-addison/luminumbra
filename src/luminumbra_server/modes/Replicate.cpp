@@ -27,11 +27,13 @@ int RunReplicate(const ServerCliOptions& options) {
                          options.ticks,
                          config.avatar_count);
 
+    Luminumbra::Server::ThrowawaySaveDirGuard save_cleanup;
     Luminumbra::Server::ServerWorldRunner runner(std::move(config));
     if (!runner.Boot()) {
         LUMINUMBRA_CORE_ERROR("replicate: session failed to boot");
         return 1;
     }
+    save_cleanup.Arm(runner.Session()->GetWorldSaveDir());
 
     auto pair = Luminumbra::Net::MakeLoopbackPair();
     Luminumbra::Net::ReplicationServer server;

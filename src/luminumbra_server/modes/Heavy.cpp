@@ -100,11 +100,14 @@ int RunHeavy(const ServerCliOptions& options) try {
     cfgOrig.world_name = "Heavy Original";
     cfgOrig.autosave_interval_ticks = 0; // explicit save below; no autosave noise
 
+    // Both runners and the full snapshot share this fresh world's save directory.
+    Luminumbra::Server::ThrowawaySaveDirGuard save_cleanup;
     Luminumbra::Server::ServerWorldRunner original(std::move(cfgOrig));
     if (!original.Boot()) {
         LUMINUMBRA_CORE_ERROR("heavy: original session failed to boot");
         return 1;
     }
+    save_cleanup.Arm(original.Session()->GetWorldSaveDir());
     const auto pre_save_ticks = original.RunFixedTicks(options.ticks);
 
     // Persist the COMPLETE streamed-chunk set (a never-edited world has no dirty

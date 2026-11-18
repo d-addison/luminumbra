@@ -81,12 +81,20 @@ int RunLockstepLoopback(const ServerCliOptions& options) try {
         cfg.autosave_interval_ticks = 0;
         return std::make_unique<Luminumbra::Server::ServerWorldRunner>(std::move(cfg));
     };
+    Luminumbra::Server::ThrowawaySaveDirGuard host_cleanup;
+    Luminumbra::Server::ThrowawaySaveDirGuard peer_cleanup;
     auto host_runner = make_runner("Lockstep Host");
     auto peer_runner = make_runner("Lockstep Peer");
-    if (!host_runner->Boot() || !peer_runner->Boot()) {
+    if (!host_runner->Boot()) {
         LUMINUMBRA_CORE_ERROR("lockstep: a peer session failed to boot");
         return 1;
     }
+    host_cleanup.Arm(host_runner->Session()->GetWorldSaveDir());
+    if (!peer_runner->Boot()) {
+        LUMINUMBRA_CORE_ERROR("lockstep: a peer session failed to boot");
+        return 1;
+    }
+    peer_cleanup.Arm(peer_runner->Session()->GetWorldSaveDir());
 
     const std::uint64_t seed_num = std::strtoull(options.seed.c_str(), nullptr, 10);
 

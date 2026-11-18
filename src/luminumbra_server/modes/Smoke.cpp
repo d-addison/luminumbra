@@ -18,10 +18,12 @@ SmokeRunResult RunSmokeOnce(const ServerCliOptions& options, const char* run_lab
     config.world_id.clear(); // determinism runs always boot fresh worlds
     config.world_name = std::string("Headless Smoke ") + run_label;
 
+    Luminumbra::Server::ThrowawaySaveDirGuard save_cleanup;
     Luminumbra::Server::ServerWorldRunner runner(std::move(config));
     if (!runner.Boot()) {
         return result;
     }
+    save_cleanup.Arm(runner.Session()->GetWorldSaveDir());
 
     // gate-populated-world-replay: capture the creature count BEFORE the run so
     // the gate can assert non-vacuity (start != end => the ecology actually
