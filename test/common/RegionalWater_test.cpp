@@ -555,6 +555,9 @@ void VerifyColdWaterMigration(bool indexed) {
     }
     SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
     WaterSystem water(nullptr, &shield);
+    // Regional scheduling defers resizing to funded preparation, so the restored
+    // owner keeps its saved grid exactly.
+    water.SetRegionalScheduling(true);
     shield.SetWaterSystem(&water);
     shield.set_durable_residency(true);
     shield.remember_durable_chunks(inventory);

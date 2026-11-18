@@ -3258,7 +3258,9 @@ void ExpectCanonicalDurableColumn(int cache_kind, int failure) {
     fixture.world.remember_durable_chunks({IVec3(0)});
     // A bare Loading placeholder carries no authority: committed data supersedes
     // it exactly as if the column were absent, and its storage is never read.
-    if (failure != 0) {
+    // A water-only committed column (failure 4) with complete authority is a
+    // valid durable read, as legacy migration writes water-only Y=0 owners.
+    if (failure != 0 && failure != 4) {
         EXPECT_THROW(fixture.world.resolve_water_column({0, 0, 0}), std::invalid_argument);
         if (failure < 5) {
             EXPECT_THROW(fixture.world.resolve_water_column({0, 0, 0}), std::invalid_argument);
