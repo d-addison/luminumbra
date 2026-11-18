@@ -888,7 +888,7 @@ struct GameSession::FoliageStep {
         auto selected = participants.Select(step.windows, admission);
         // Admission is shared by every creation/load path through the sealed
         // registry selection. No live page is inserted before publication.
-        const auto admit = [&](entt::entity entity, bool soil, bool activate) {
+        const auto admit = [&](entt::entity entity, bool soil) {
             const auto* transform = selected.try_get<const Components::TransformComponent>(entity);
             if (!transform || !ActiveRegionLedger::valid_anchor(transform->position)) {
                 return;
@@ -903,23 +903,23 @@ struct GameSession::FoliageStep {
                 step.StageOwner(session, owner);
             }
             const auto& record = ledger.records().at(owner);
-            step.field_owners.insert(owner);
-            if (activate && !luminumbra::foliage::ActivateFoliagePage(step.pages, cell, soil)) {
+            if (!luminumbra::foliage::ActivateFoliagePage(step.pages, cell, soil)) {
                 throw std::runtime_error("Foliage page admission refused");
             }
+            step.field_owners.insert(owner);
             if (!soil) {
                 step.border_owners[record.cadence_shift].insert(owner);
             }
         };
-        for (const auto entity : selected.view<const Components::PlantTag>()) {
-            admit(
-                entity,
-                true,
-                selected.all_of<Components::SoilFeederComponent, Components::PlantGrowthComponent>(
-                    entity));
+        // Plant-only history follows the surviving publication roster below;
+        // only activated pages leave a persistent field-owner entry.
+        for (const auto entity : selected.view<const Components::PlantTag,
+                                               const Components::SoilFeederComponent,
+                                               const Components::PlantGrowthComponent>()) {
+            admit(entity, true);
         }
         for (const auto entity : selected.view<const Components::WaterSourceComponent>()) {
-            admit(entity, false, true);
+            admit(entity, false);
         }
         step.field_windows.clear();
         for (const auto& [key, elapsed] : step.windows.elapsed) {

@@ -1,7 +1,9 @@
+#include "../support/GameSessionTestWorld.h"
 #include "../support/PersistenceFileOps.h"
 #include "../support/SessionEnergyTick.h"
 #include "../support/WorldgenTestData.h"
 #include "luminumbra_client/world/WorldEntry.h"
+#include "luminumbra_client/world/WorldPresentation.h"
 #include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/fields/EnergyFieldState.h"
@@ -17,12 +19,15 @@
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -86,6 +91,349 @@ void Advance(WorldEntry<Request>& entry, Runner& runner) {
     entry.advance(
         [&](WorldEntryStage stage, const Request& request) { return runner.run(stage, request); },
         [&] { return runner.drain(); });
+}
+
+using Luminumbra::Client::WorldPresentationGate;
+using Luminumbra::Client::WorldPresentationReadiness;
+using Luminumbra::Client::WorldPresentationState;
+using namespace std::chrono_literals;
+
+constexpr WorldPresentationReadiness kPresentationReady{.terrain = true,
+                                                        .horizon = true,
+                                                        .water = true,
+                                                        .foliage = true,
+                                                        .uploads = true,
+                                                        .streaming = true};
+
+// Compile-time oracle also exercises the real policy in syntax-only validation.
+// Entering immediately makes this assertion fail without running native code.
+constexpr bool PresentationPolicyBlocksUntilReady() {
+    constexpr std::array fields{&WorldPresentationReadiness::terrain,
+                                &WorldPresentationReadiness::horizon,
+                                &WorldPresentationReadiness::water,
+                                &WorldPresentationReadiness::foliage,
+                                &WorldPresentationReadiness::uploads,
+                                &WorldPresentationReadiness::streaming};
+    for (const auto field : fields) {
+        auto readiness = kPresentationReady;
+        readiness.*field = false;
+        WorldPresentationGate gate;
+        for (unsigned frame = 0; frame < 12; ++frame) {
+            if (gate.observe(readiness, 0s) != WorldPresentationState::Waiting || !gate.waiting()) {
+                return false;
+            }
+        }
+        if (gate.observe(kPresentationReady, 0s) != WorldPresentationState::Ready ||
+            gate.waiting()) {
+            return false;
+        }
+    }
+    WorldPresentationGate frames;
+    for (unsigned frame = 1; frame < Luminumbra::Client::kWorldPresentationFrameDeadline; ++frame) {
+        if (frames.observe({}, 0s) != WorldPresentationState::Waiting) {
+            return false;
+        }
+    }
+    WorldPresentationGate wall;
+    return frames.observe({}, 0s) == WorldPresentationState::TimedOut && !frames.waiting() &&
+           wall.observe({}, Luminumbra::Client::kWorldPresentationWallDeadline - 1ns) ==
+               WorldPresentationState::Waiting &&
+           wall.observe({}, Luminumbra::Client::kWorldPresentationWallDeadline) ==
+               WorldPresentationState::TimedOut &&
+           !wall.waiting();
+}
+static_assert(PresentationPolicyBlocksUntilReady());
+
+constexpr bool PresentationFailurePolicy() {
+    WorldPresentationGate waiting;
+    if (waiting.permits_entry(false, true) || waiting.permits_entry(true, true)) {
+        return false;
+    }
+    WorldPresentationGate timeout;
+    timeout.observe({}, Luminumbra::Client::kWorldPresentationWallDeadline);
+    WorldPresentationGate ready;
+    for (unsigned frame = 0; frame < Luminumbra::Client::kWorldPresentationMinimumFrames; ++frame) {
+        ready.observe(kPresentationReady, 0s);
+    }
+    return !Luminumbra::Client::InitialWaterPrepared(false, 0) &&
+           !Luminumbra::Client::InitialWaterPrepared(false, 1) &&
+           !Luminumbra::Client::InitialWaterPrepared(true, 1) &&
+           Luminumbra::Client::InitialWaterPrepared(true, 0) &&
+           timeout.permits_entry(false, false) && timeout.permits_entry(false, true) &&
+           !timeout.permits_entry(true, false) && !timeout.permits_entry(true, true) &&
+           !ready.permits_entry(true, false) && ready.permits_entry(true, true) &&
+           Luminumbra::Client::NearTerrainPrepared(1, 1, 0, 0) &&
+           !Luminumbra::Client::NearTerrainPrepared(0, 0, 0, 0) &&
+           !Luminumbra::Client::NearTerrainPrepared(1, 0, 0, 0) &&
+           !Luminumbra::Client::NearTerrainPrepared(1, 1, 1, 0) &&
+           !Luminumbra::Client::NearTerrainPrepared(1, 1, 0, 1);
+}
+static_assert(PresentationFailurePolicy());
+
+TEST(WorldPresentation, EmptyUploadQueueAndTimeoutCannotHideReadinessFailure) {
+    EXPECT_TRUE(PresentationFailurePolicy());
+}
+
+constexpr bool PresentationViewsShareDeadline() {
+    WorldPresentationGate view;
+    view.restart_for_view();
+    for (unsigned frame = 0; frame < Luminumbra::Client::kWorldPresentationMinimumFrames; ++frame) {
+        view.observe(kPresentationReady, 0s);
+    }
+    if (view.waiting()) {
+        return false;
+    }
+    view.restart_for_view();
+    view.restart_for_view();
+    for (unsigned frame = 1; frame < Luminumbra::Client::kWorldPresentationMinimumFrames; ++frame) {
+        if (view.observe(kPresentationReady, 0s) != WorldPresentationState::Waiting) {
+            return false;
+        }
+    }
+    if (view.observe(kPresentationReady, 0s) != WorldPresentationState::Ready) {
+        return false;
+    }
+    WorldPresentationGate frames;
+    for (unsigned frame = 0; frame < Luminumbra::Client::kWorldPresentationFrameDeadline - 2;
+         ++frame) {
+        frames.observe({}, 0s);
+    }
+    auto exhausted = frames;
+    frames.observe(kPresentationReady, 0s);
+    if (frames.waiting()) {
+        return false;
+    }
+    frames.restart_for_view();
+    if (frames.observe(kPresentationReady, 0s) != WorldPresentationState::TimedOut) {
+        return false;
+    }
+    frames.restart_for_view();
+    exhausted.observe({}, 0s);
+    if (exhausted.observe(kPresentationReady, 0s) != WorldPresentationState::Ready) {
+        return false;
+    }
+    exhausted.restart_for_view();
+    WorldPresentationGate wall;
+    for (unsigned frame = 0; frame < Luminumbra::Client::kWorldPresentationMinimumFrames; ++frame) {
+        wall.observe(kPresentationReady, 0s);
+    }
+    wall.restart_for_view();
+    if (wall.observe(kPresentationReady, Luminumbra::Client::kWorldPresentationWallDeadline) !=
+        WorldPresentationState::TimedOut) {
+        return false;
+    }
+    wall.restart_for_view();
+    return frames.timed_out() && exhausted.timed_out() && wall.timed_out();
+}
+static_assert(PresentationViewsShareDeadline());
+
+TEST(WorldPresentation, FinalCameraNeedsFreshFramesWithinTheOriginalDeadline) {
+    EXPECT_TRUE(PresentationViewsShareDeadline());
+}
+
+TEST(WorldPresentation, EmptyPublishedTerrainAndWaterPreparationPreserveAuthority) {
+    const Luminumbra::TestSupport::HeadlessRoot root;
+    Luminumbra::JobSystem jobs; // outlives the session; its destructor shuts the workers down
+    jobs.startup(1);
+    Luminumbra::world::GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    ASSERT_TRUE(session.CreateTransientWorld("Presentation", "1337", "default"));
+    auto* world = session.GetWorldSystem();
+    const auto spawn = session.GetMetadata().spawnPoint;
+    world->SetWaterSystem(nullptr);
+    EXPECT_FALSE(world->PrepareInitialWaterPresentationNear(spawn, 0));
+    world->SetWaterSystem(session.GetWaterSystem());
+    EXPECT_FALSE(world->PrepareInitialWaterPresentationNear(spawn, 0));
+    ASSERT_TRUE(world->EnsureSurfaceReadyNear(spawn, session.GetPhysicsSystem(), 0, 0));
+    const auto authority = Luminumbra::TestSupport::SessionWorldHash(session);
+    const auto inventory = world->snapshot_streamed_chunks();
+    ASSERT_FALSE(inventory.empty());
+    ASSERT_TRUE(world->PrepareInitialWaterPresentationNear(spawn, 0));
+    for (const auto& chunk : inventory) {
+        EXPECT_TRUE(chunk->water_mesh_generated.load());
+        EXPECT_FALSE(chunk->has_water_sim.load());
+    }
+    EXPECT_EQ(Luminumbra::TestSupport::SessionWorldHash(session), authority);
+    EXPECT_EQ(world->snapshot_streamed_chunks().size(), inventory.size());
+    EXPECT_EQ(session.GetWorldClock().tick(), 0u);
+    ASSERT_TRUE(world->PrepareInitialWaterPresentationNear(spawn, 0));
+    EXPECT_EQ(Luminumbra::TestSupport::SessionWorldHash(session), authority);
+
+    for (const auto& chunk : inventory) {
+        chunk->mesh_vertices.clear();
+        chunk->mesh_indices.clear();
+    }
+    const auto prepared = [&](const auto& coverage) {
+        return Luminumbra::Client::NearTerrainPrepared(coverage.expected_surface_chunks,
+                                                       coverage.ready_surface_chunks,
+                                                       coverage.pending_lod_chunks,
+                                                       coverage.lod_unknown_chunks);
+    };
+    EXPECT_TRUE(prepared(world->get_camera_local_coverage_stats(spawn, 0)));
+    for (const auto& chunk : inventory) {
+        chunk->set_state(Luminumbra::ChunkState::Meshing);
+    }
+    EXPECT_FALSE(prepared(world->get_camera_local_coverage_stats(spawn, 0)));
+    EXPECT_FALSE(world->PrepareInitialWaterPresentationNear(spawn, 0));
+    for (const auto& chunk : inventory) {
+        chunk->set_state(Luminumbra::ChunkState::Ready);
+    }
+    auto& first = *inventory.front();
+    const auto lod = first.current_lod.load();
+    first.current_lod.store(-1);
+    EXPECT_FALSE(world->PrepareInitialWaterPresentationNear(spawn, 0));
+    first.current_lod.store(3);
+    EXPECT_FALSE(world->PrepareInitialWaterPresentationNear(spawn, 0));
+    first.current_lod.store(lod);
+    first.pending_lod.store(0);
+    EXPECT_FALSE(world->PrepareInitialWaterPresentationNear(spawn, 0));
+    first.pending_lod.store(-1);
+    for (const int invalid_radius : {-1, 13, std::numeric_limits<int>::max()}) {
+        EXPECT_FALSE(world->PrepareInitialWaterPresentationNear(spawn, invalid_radius));
+    }
+    EXPECT_FALSE(world->PrepareInitialWaterPresentationNear(
+        Luminumbra::Vec3(std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f), 0));
+    EXPECT_FALSE(world->PrepareInitialWaterPresentationNear(
+        Luminumbra::Vec3(std::numeric_limits<float>::max(), 0.0f, 0.0f), 0));
+    ASSERT_TRUE(world->PrepareInitialWaterPresentationNear(spawn, 0, true));
+    const auto seeded = Luminumbra::TestSupport::SessionWorldHash(session);
+    for (const auto& chunk : inventory) {
+        EXPECT_TRUE(chunk->has_water_sim.load());
+        EXPECT_TRUE(chunk->water_mesh_generated.load());
+    }
+    EXPECT_EQ(session.GetWorldClock().tick(), 0u);
+    ASSERT_TRUE(world->PrepareInitialWaterPresentationNear(spawn, 0, true));
+    EXPECT_EQ(Luminumbra::TestSupport::SessionWorldHash(session), seeded);
+    // A completed dry-water mesh is ready too, without changing the saved grid.
+    for (const auto& chunk : inventory) {
+        std::fill(chunk->water_depth_mm.begin(), chunk->water_depth_mm.end(), 0);
+        chunk->water_mesh_generated.store(false);
+    }
+    ASSERT_TRUE(world->PrepareInitialWaterPresentationNear(spawn, 0));
+    for (const auto& chunk : inventory) {
+        EXPECT_TRUE(chunk->water_mesh_generated.load());
+        EXPECT_TRUE(chunk->water_mesh_vertices.empty());
+        EXPECT_TRUE(chunk->water_mesh_indices.empty());
+    }
+    // A partial saved grid refuses before replacing even the first mesh.
+    auto& partial = *inventory.back();
+    const auto version = inventory.front()->water_mesh_version.load();
+    partial.water_depth_mm.pop_back();
+    EXPECT_FALSE(world->PrepareInitialWaterPresentationNear(spawn, 0));
+    EXPECT_EQ(inventory.front()->water_mesh_version.load(), version);
+    partial.water_depth_mm.push_back(0);
+    partial.water_level_data.pop_back();
+    EXPECT_FALSE(world->PrepareInitialWaterPresentationNear(spawn, 0));
+    EXPECT_EQ(inventory.front()->water_mesh_version.load(), version);
+    partial.water_level_data.push_back(0.0f);
+    for (const int invalid_resolution : {0, 3, 33, std::numeric_limits<int>::max()}) {
+        partial.current_water_resolution.store(invalid_resolution);
+        EXPECT_FALSE(world->PrepareInitialWaterPresentationNear(spawn, 0));
+    }
+}
+
+TEST(WorldPresentation, EveryMissingPartBlocksAndNamesItsFailure) {
+    constexpr std::array fields{&WorldPresentationReadiness::terrain,
+                                &WorldPresentationReadiness::horizon,
+                                &WorldPresentationReadiness::water,
+                                &WorldPresentationReadiness::foliage,
+                                &WorldPresentationReadiness::uploads,
+                                &WorldPresentationReadiness::streaming};
+    constexpr std::array names{"terrain", "horizon", "water", "foliage", "uploads", "streaming"};
+    EXPECT_TRUE(kPresentationReady.ready());
+    EXPECT_FALSE(WorldPresentationReadiness{}.ready());
+    for (std::size_t part = 0; part < fields.size(); ++part) {
+        auto readiness = kPresentationReady;
+        readiness.*fields[part] = false;
+        EXPECT_FALSE(readiness.ready());
+        WorldPresentationGate gate;
+        for (unsigned frame = 0; frame < 12; ++frame) {
+            EXPECT_EQ(gate.observe(readiness, 0s), WorldPresentationState::Waiting);
+            EXPECT_TRUE(gate.waiting());
+        }
+        EXPECT_EQ(gate.missing_parts(), names[part]);
+        EXPECT_EQ(gate.observe(kPresentationReady, 0s), WorldPresentationState::Ready);
+        EXPECT_FALSE(gate.waiting());
+        // New arrivals after entry cannot pause an already running simulation.
+        EXPECT_EQ(gate.observe({}, 0s), WorldPresentationState::Ready);
+    }
+}
+
+TEST(WorldPresentation, MinimumFramesAndBothDeadlineBoundariesAreDeterministic) {
+    WorldPresentationGate minimum;
+    for (unsigned frame = 1; frame < Luminumbra::Client::kWorldPresentationMinimumFrames; ++frame) {
+        EXPECT_EQ(minimum.observe(kPresentationReady, 0s), WorldPresentationState::Waiting);
+    }
+    EXPECT_EQ(minimum.observe(kPresentationReady, 0s), WorldPresentationState::Ready);
+    EXPECT_FALSE(minimum.timed_out());
+    WorldPresentationGate frames;
+    for (unsigned frame = 1; frame < Luminumbra::Client::kWorldPresentationFrameDeadline; ++frame) {
+        EXPECT_EQ(frames.observe({}, 0s), WorldPresentationState::Waiting);
+    }
+    EXPECT_EQ(frames.observe({}, 0s), WorldPresentationState::TimedOut);
+    EXPECT_FALSE(frames.waiting());
+    EXPECT_EQ(frames.missing_parts(), "terrain,horizon,water,foliage,uploads,streaming");
+    EXPECT_EQ(frames.observe(kPresentationReady, 0s), WorldPresentationState::TimedOut);
+    EXPECT_EQ(frames.missing_parts(), "terrain,horizon,water,foliage,uploads,streaming");
+    WorldPresentationGate wall;
+    auto missing_water = kPresentationReady;
+    missing_water.water = false;
+    EXPECT_EQ(wall.observe(missing_water, Luminumbra::Client::kWorldPresentationWallDeadline - 1ns),
+              WorldPresentationState::Waiting);
+    EXPECT_EQ(wall.observe(missing_water, Luminumbra::Client::kWorldPresentationWallDeadline),
+              WorldPresentationState::TimedOut);
+    EXPECT_EQ(wall.missing_parts(), "water");
+    // A wall deadline before the minimum still opens the gate with a diagnostic.
+    WorldPresentationGate minimum_timeout;
+    EXPECT_EQ(minimum_timeout.observe(kPresentationReady,
+                                      Luminumbra::Client::kWorldPresentationWallDeadline),
+              WorldPresentationState::TimedOut);
+    EXPECT_EQ(minimum_timeout.missing_parts(), "minimum_frames");
+    WorldPresentationGate ready_at_deadline;
+    EXPECT_EQ(ready_at_deadline.observe({}, 0s), WorldPresentationState::Waiting);
+    EXPECT_EQ(ready_at_deadline.observe({}, 0s), WorldPresentationState::Waiting);
+    EXPECT_EQ(ready_at_deadline.observe(kPresentationReady,
+                                        Luminumbra::Client::kWorldPresentationWallDeadline),
+              WorldPresentationState::Ready);
+}
+
+TEST(WorldPresentation, WaitingKeepsTickZeroAndHashAfterTicksMatchesImmediateEntry) {
+    const Luminumbra::TestSupport::HeadlessRoot root;
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    {
+        Luminumbra::world::GameSession immediate, delayed;
+        for (auto* session : {&immediate, &delayed}) {
+            session->SetRootPath(root.root_string());
+            session->SetJobSystem(&jobs);
+            ASSERT_TRUE(session->CreateTransientWorld("Presentation", "1337", "default"));
+            session->GetWorldSystem()->debug_set_streaming_radius_cap(1);
+        }
+        const auto initial_hash = Luminumbra::TestSupport::SessionWorldHash(delayed);
+        WorldPresentationGate gate;
+        for (unsigned frame = 0; frame < 32; ++frame) {
+            EXPECT_EQ(gate.observe({}, 0s), WorldPresentationState::Waiting);
+            if (!gate.waiting()) {
+                delayed.TickSimulation(1.0 / 30.0);
+            }
+            delayed.GetWorldSystem()->update(delayed.GetRegistry(),
+                                             delayed.GetMetadata().spawnPoint,
+                                             delayed.GetPhysicsSystem(),
+                                             /*advance_simulation=*/false);
+            EXPECT_EQ(delayed.GetWorldClock().tick(), 0u);
+            EXPECT_EQ(Luminumbra::TestSupport::SessionWorldHash(delayed), initial_hash);
+        }
+        ASSERT_EQ(gate.observe(kPresentationReady, 0s), WorldPresentationState::Ready);
+        for (unsigned tick = 0; tick < 6; ++tick) {
+            immediate.TickSimulation(1.0 / 30.0);
+            delayed.TickSimulation(1.0 / 30.0);
+            EXPECT_EQ(Luminumbra::TestSupport::SessionWorldHash(delayed),
+                      Luminumbra::TestSupport::SessionWorldHash(immediate));
+        }
+        EXPECT_EQ(delayed.GetWorldClock().tick(), 6u);
+    }
+    jobs.shutdown();
 }
 
 TEST(WorldEntry, CallbackOnlyOwnsRequestUntilLoadingHasBeenPresented) {
@@ -1281,6 +1629,32 @@ std::string ReadSource(const std::filesystem::path& relative) {
 
 // main() owns the real GL/UI services. Guard its wiring here while exercising
 // the scheduling contract above without those services or a wall clock.
+TEST(WorldEntryWiring, PresentationWaitPrecedesBothActivationsAndCapture) {
+    const auto source = ReadSource("src/luminumbra_client/main_client.cpp");
+    const auto bypass_start = source.find("if (bypass_loading_ui)");
+    const auto bypass_end = source.find("// Hide the main menu UI", bypass_start);
+    ASSERT_NE(bypass_start, std::string::npos);
+    ASSERT_NE(bypass_end, std::string::npos);
+    EXPECT_EQ(source.substr(bypass_start, bypass_end - bypass_start).find("GameState::IN_GAME"),
+              std::string::npos);
+    EXPECT_NE(source.find("if (wait_for_world_presentation())"), std::string::npos);
+    EXPECT_NE(source.find("const bool waiting = wait_for_world_presentation();"),
+              std::string::npos);
+    const auto preload_start = source.find("auto wait_for_world_presentation =");
+    const auto preload_end = source.find("auto activate_loaded_world =", preload_start);
+    ASSERT_NE(preload_start, std::string::npos);
+    ASSERT_NE(preload_end, std::string::npos);
+    const auto preload = source.substr(preload_start, preload_end - preload_start);
+    EXPECT_EQ(preload.find("world->update("), std::string::npos);
+    EXPECT_NE(preload.find("PrepareInitialWaterPresentationNear("), std::string::npos);
+    EXPECT_EQ(preload.find("TickSimulation("), std::string::npos);
+    EXPECT_NE(preload.find("ObserveWorldPresentation("), std::string::npos);
+    EXPECT_NE(source.find("!timelapse_waiting && Measurement::frame_simulation_enabled"),
+              std::string::npos);
+    EXPECT_NE(source.find("if (!presentation_ready)"), std::string::npos);
+    EXPECT_EQ(source.find("kTimelapseSettleFrames"), std::string::npos);
+}
+
 TEST(WorldEntryWiring, CreateAndLoadCallbacksOnlyRecordRequests) {
     const auto source = ReadSource("src/luminumbra_client/main_client.cpp");
     const auto create = source.find("g_uiManager->SetWorldCreationCallback(");
