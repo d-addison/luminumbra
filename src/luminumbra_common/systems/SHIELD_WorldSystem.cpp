@@ -4432,7 +4432,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
             if (m_durable_residency) {
                 const auto found = m_streaming_state.chunks.find(id);
                 if (found != m_streaming_state.chunks.end() && found->second &&
-                    found->second->needs_authority()) {
+                    (found->second->needs_authority() || found->second->is_voxel_data_dirty())) {
                     const std::shared_ptr<::Luminumbra::Chunk> chunk = found->second;
                     if (!in_flight_built) {
                         build_in_flight();
@@ -7466,7 +7466,8 @@ std::shared_ptr<Chunk> SHIELD_WorldSystem::read_committed_chunk(const IVec3& coo
         RunWorkerBoundary(m_job_system, [&] { chunk = m_durable_chunk_loader(coords); });
         if (!chunk || chunk->get_id() != Chunk::calculate_id(coords) ||
             chunk->get_coords() != coords ||
-            (chunk->sdf_data.empty() && chunk->heightmap_data.empty()))
+            (chunk->sdf_data.empty() && chunk->heightmap_data.empty() &&
+             !(coords.y == 0 && chunk->has_water_authority() && chunk->has_complete_water_state())))
             throw std::runtime_error(
                 "expected durable chunk is missing, empty or has wrong identity");
         return chunk;
@@ -7708,6 +7709,24 @@ void SHIELD_WorldSystem::remember_durable_chunks(const std::vector<IVec3>& coord
     }
 }
 
+void SHIELD_WorldSystem::forget_durable_chunks(const std::vector<IVec3>& coords) {
+    for (const auto& coord : coords) {
+        const auto id = Chunk::calculate_id(coord);
+        if (m_durable_chunks.erase(id) == 0 || !m_durable_residency)
+            continue;
+        int rx = 0, rz = 0;
+        Persistence::WorldSaveService::region_coords_for_chunk(coord, rx, rz);
+        const auto region = m_digest_members.find(digest_region_id(rx, rz));
+        if (region != m_digest_members.end()) {
+            region->second.durable.erase(id);
+            if (region->second.live.empty() && region->second.parked.empty() &&
+                region->second.durable.empty())
+                m_digest_members.erase(region);
+        }
+        ++m_digest_membership_revision;
+    }
+}
+
 void SHIELD_WorldSystem::replace_durable_chunks(const std::vector<IVec3>& coords) {
     if (!m_durable_chunks.empty() && m_durable_residency) {
         for (auto region = m_digest_members.begin(); region != m_digest_members.end();) {
@@ -7744,7 +7763,8 @@ bool SHIELD_WorldSystem::restore_authoritative_chunk(const IVec3& coords) {
     const auto id = Chunk::calculate_id(coords);
     const auto resident = m_streaming_state.chunks.find(id);
     if (resident != m_streaming_state.chunks.end() && resident->second &&
-        (!resident->second->sdf_data.empty() || !resident->second->heightmap_data.empty()))
+        (!resident->second->sdf_data.empty() || !resident->second->heightmap_data.empty() ||
+         (!resident->second->needs_authority() && resident->second->is_voxel_data_dirty())))
         return true;
     const auto discard_placeholder = [&] {
         if (resident == m_streaming_state.chunks.end())
@@ -7787,8 +7807,8 @@ void SHIELD_WorldSystem::release_clean_parked_chunks() {
     const auto parked_count = m_parked.size();
     for (auto it = m_parked.begin(); it != m_parked.end();) {
         const auto& chunk = it->second.chunk;
-        if (chunk && m_durable_chunks.contains(it->first) && !chunk->is_voxel_data_dirty() &&
-            !chunk->is_water_state_dirty()) {
+        if (chunk && (m_durable_chunks.contains(it->first) || !chunk->needs_authority()) &&
+            !chunk->is_voxel_data_dirty() && !chunk->is_water_state_dirty()) {
             m_parked_bytes -= it->second.bytes;
             note_digest_chunk(it->second.chunk, true, false);
             m_admitted_water_columns.erase(it->first);

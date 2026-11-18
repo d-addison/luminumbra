@@ -1128,6 +1128,8 @@ public:
     void set_durable_chunk_loader(std::function<std::shared_ptr<Chunk>(const IVec3&)> loader,
                                   std::function<void(std::string)> fault);
     void remember_durable_chunks(const std::vector<IVec3>& coords);
+    // Commit-only retirement of records that no longer contain owned state.
+    void forget_durable_chunks(const std::vector<IVec3>& coords);
     // Adopting another snapshot replaces the committed inventory instead of extending it.
     void replace_durable_chunks(const std::vector<IVec3>& coords);
     std::vector<IVec3> durable_chunk_inventory() const;

@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
+#include "../support/UniqueTempPath.h"
 #include "luminumbra_common/components/CoreComponents.h"
+#include "luminumbra_common/persistence/SavedInputFile.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/RegionalWater.h"
@@ -12,6 +14,7 @@
 #include <array>
 #include <bit>
 #include <cstdint>
+#include <filesystem>
 #include <initializer_list>
 #include <latch>
 #include <limits>
@@ -384,6 +387,413 @@ TEST(RegionalWater, MalformedGridsAndFacesRefuseWithoutRepairOrPartialTransfer) 
     FillWater(distant, 8);
     EXPECT_FALSE(WaterKernels::StepSharedFace(owner, distant, true).applied);
     EXPECT_FALSE(WaterKernels::StepSharedFace(owner, owner, true).applied);
+}
+} // namespace
+
+namespace {
+namespace WaterPersistence = Luminumbra::Persistence;
+
+struct LegacyWaterSave {
+    TestSupport::ScopedTempFile directory{"water-migration-", ".world"};
+    WorldStreamingState original;
+    WaterPersistence::WorldSaveService service;
+
+    const std::filesystem::path& path() const {
+        return directory.Path();
+    }
+
+    std::shared_ptr<Chunk> add(const IVec3& coords, std::int32_t depth = 1000) {
+        auto chunk = original.get_or_create_chunk(coords);
+        FillWater(*chunk, 4, depth);
+        chunk->water_flow_data.assign(16, Vec2(0.25f, -0.5f));
+        chunk->water_sim_terrain_height.assign(16, 1.0f);
+        chunk->is_water_sleeping.store(true);
+        chunk->ticks_below_threshold = 120;
+        chunk->max_water_delta_last_tick = 0.125f;
+        chunk->set_state(ChunkState::Idle);
+        return chunk;
+    }
+
+    bool write(std::vector<std::string>& errors, bool indexed = false) const {
+        if (!indexed) {
+            return service.save_world(original, path(), &errors);
+        }
+        WaterPersistence::SaveTransaction transaction(
+            path(), 0, {}, &WaterPersistence::WorldSaveService::member_digest);
+        return transaction.begin(&errors) && service.save_world(original, path(), &errors) &&
+               WaterPersistence::WorldSaveService::finalize_indexed_envelope(path(), &errors) &&
+               transaction.commit(&errors);
+    }
+
+    auto bytes() const {
+        std::map<std::filesystem::path, std::string> result;
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(path())) {
+            if (entry.is_regular_file()) {
+                const WaterPersistence::SavedInputFile input(entry.path());
+                std::string payload;
+                // Fixture members are small; verify type, length and bytes on one handle.
+                EXPECT_TRUE(input.read(payload, std::size_t{16} * 1024 * 1024));
+                result.emplace(entry.path().lexically_relative(path()), std::move(payload));
+            }
+        }
+        return result;
+    }
+};
+
+void VerifyColdWaterMigration(bool indexed) {
+    SCOPED_TRACE(indexed);
+    LegacyWaterSave saved;
+    const auto first = saved.add({-40, 2, 70});
+    first->set_water_authority();
+    const auto second = saved.add({50, -3, -80}, 2000);
+    const auto duplicate = saved.add({-40, -2, 70});
+    duplicate->sdf_data.assign(17u * 17u * 17u, -2.0f);
+    duplicate->mark_sdf_loaded_or_edited();
+    const auto terrain = saved.original.get_or_create_chunk({-40, 0, 70});
+    terrain->sdf_data.assign(17u * 17u * 17u, -3.0f);
+    terrain->mark_sdf_loaded_or_edited();
+    std::vector<std::string> errors;
+    ASSERT_TRUE(saved.write(errors, indexed));
+    const auto bytes = saved.bytes();
+    WorldStreamingState migrated;
+    std::vector<IVec3> inventory;
+    const std::unordered_set<ChunkID> retain_none;
+    ASSERT_TRUE(
+        saved.service.load_world(migrated, saved.path(), errors, {}, &retain_none, &inventory));
+    ASSERT_TRUE(errors.empty());
+    EXPECT_EQ(saved.bytes(), bytes);
+    for (const auto& source : {first, second}) {
+        auto coords = source->get_coords();
+        coords.y = 0;
+        const auto owner = migrated.find_chunk(coords);
+        ASSERT_NE(owner, nullptr);
+        EXPECT_TRUE(owner->has_water_authority());
+        EXPECT_TRUE(owner->same_water_state(*source));
+        EXPECT_TRUE(owner->is_voxel_data_dirty());
+    }
+    const auto migrated_terrain = migrated.find_chunk(terrain->get_id());
+    ASSERT_NE(migrated_terrain, nullptr);
+    EXPECT_EQ(migrated_terrain->sdf_data, terrain->sdf_data);
+    EXPECT_TRUE(migrated_terrain->has_terrain_authority());
+    std::size_t owners = 0;
+    for (const auto& chunk : migrated.snapshot_chunks()) {
+        owners += chunk->has_water_authority() ? 1u : 0u;
+        if (chunk->get_coords().y != 0) {
+            EXPECT_FALSE(chunk->has_water_sim.load());
+            EXPECT_TRUE(chunk->water_depth_mm.empty());
+            EXPECT_TRUE(chunk->is_voxel_data_dirty());
+            EXPECT_EQ(chunk->has_terrain_authority(), chunk->get_id() == duplicate->get_id());
+        }
+    }
+    EXPECT_EQ(owners, 2u);
+    const auto retired_terrain = migrated.find_chunk(duplicate->get_id());
+    ASSERT_NE(retired_terrain, nullptr);
+    EXPECT_EQ(retired_terrain->sdf_data, duplicate->sdf_data);
+    EXPECT_TRUE(duplicate->same_water_state(*first));
+    const auto staged_chunks = migrated.snapshot_chunks();
+    for (const auto& source : {first, second}) {
+        int rx = 0, rz = 0;
+        WaterPersistence::WorldSaveService::region_coords_for_chunk(source->get_coords(), rx, rz);
+        EXPECT_EQ(saved.service.region_simulation_digest(saved.path(), {rx, rz}, staged_chunks),
+                  saved.service.region_simulation_digest({}, {rx, rz}, staged_chunks));
+    }
+
+    // An aborted compound save restores every payload; dirty staging can retry.
+    {
+        WaterPersistence::SaveTransaction transaction(
+            saved.path(), 0, {}, &WaterPersistence::WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(&errors));
+        ASSERT_TRUE(saved.service.save_dirty_chunks(migrated, saved.path(), &errors).saved);
+        EXPECT_FALSE(WaterPersistence::WorldSaveService::write_member_bytes(
+            saved.path(), "invalid-member", "refuse", &errors));
+    }
+    EXPECT_EQ(saved.bytes(), bytes);
+    for (const auto& chunk : migrated.snapshot_chunks()) {
+        EXPECT_TRUE(chunk->is_voxel_data_dirty());
+    }
+    errors.clear();
+    {
+        WaterPersistence::SaveTransaction transaction(
+            saved.path(), 0, {}, &WaterPersistence::WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(&errors));
+        ASSERT_TRUE(saved.service.save_dirty_chunks(migrated, saved.path(), &errors).saved);
+        ASSERT_TRUE(
+            WaterPersistence::WorldSaveService::finalize_indexed_envelope(saved.path(), &errors));
+        ASSERT_TRUE(transaction.commit(&errors));
+    }
+    WorldStreamingState reopened;
+    ASSERT_TRUE(saved.service.load_world(reopened, saved.path(), errors, {}, nullptr, &inventory));
+    EXPECT_EQ(WaterPersistence::ComputeWorldStreamingStateHash(reopened),
+              WaterPersistence::ComputeWorldStreamingStateHash(migrated));
+    const auto retired_first = reopened.find_chunk(first->get_id());
+    const auto retired_duplicate = reopened.find_chunk(duplicate->get_id());
+    ASSERT_NE(retired_first, nullptr);
+    ASSERT_NE(retired_duplicate, nullptr);
+    EXPECT_FALSE(retired_first->has_water_sim.load());
+    EXPECT_FALSE(retired_duplicate->has_water_sim.load());
+    EXPECT_TRUE(first->has_water_sim.load());
+    EXPECT_EQ(saved.original.size(), 4u);
+    const WaterPersistence::WorldSaveService::AuthorityReadLimits limits{
+        .members = 64,
+        .records = 128,
+        .headers = 256,
+        .probes = 256,
+        .compressed_member_bytes = 4u * 1024u * 1024u,
+        .compressed_total_bytes = 16u * 1024u * 1024u,
+        .decoded_member_bytes = 4u * 1024u * 1024u,
+        .decoded_total_bytes = 16u * 1024u * 1024u,
+        .control_bytes = 128u * 1024u};
+    WaterPersistence::WorldSaveService::AuthorityWindowReader reader;
+    std::string admission_error;
+    ASSERT_TRUE(reader.admit(saved.path(), limits, admission_error)) << admission_error;
+    for (const auto& source : {first, second}) {
+        const auto coords = source->get_coords();
+        const auto window = reader.read({coords.x, coords.x, coords.z, coords.z}, limits);
+        EXPECT_EQ(window.membership,
+                  WaterPersistence::WorldSaveService::AuthorityMembership::Present)
+            << window.error;
+    }
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+    WaterSystem water(nullptr, &shield);
+    shield.set_durable_residency(true);
+    shield.remember_durable_chunks(inventory);
+    shield.set_durable_chunk_loader(
+        [&](const IVec3& coords) {
+            return WaterPersistence::WorldSaveService::read_chunk(saved.path(), coords).chunk;
+        },
+        [](const std::string&) { ADD_FAILURE() << "Migrated water owner must restore"; });
+    const auto restored = shield.resolve_water_column({50, 0, -80});
+    ASSERT_NE(restored, nullptr);
+    EXPECT_TRUE(restored->same_water_state(*second));
+    EXPECT_FALSE(shield.durable_read_failed());
+}
+
+TEST(RegionalWaterMigration, AllColdRecordsAndEqualDuplicatesBecomeCanonicalOwners) {
+    VerifyColdWaterMigration(false);
+    VerifyColdWaterMigration(true);
+}
+
+TEST(RegionalWaterMigration, ConflictsAndIncompleteRecordsRefuseWithoutChangingLegacyBytes) {
+    for (int fault = 0; fault < 6; ++fault) {
+        SCOPED_TRACE(fault);
+        LegacyWaterSave saved;
+        const auto first = saved.add({0, -2, 0});
+        const auto last = saved.add({0, 3, 0});
+        if (fault == 0) {
+            ++last->water_depth_mm[0];
+        } else if (fault == 1) {
+            last->water_edge_flux.pop_back();
+        } else if (fault == 2) {
+            last->water_flow_data.clear();
+        } else if (fault == 3) {
+            last->water_sim_terrain_height.pop_back();
+        } else if (fault == 4) {
+            ++last->ticks_below_threshold;
+        } else {
+            last->is_water_sleeping.store(false);
+        }
+        std::vector<std::string> errors;
+        ASSERT_TRUE(saved.service.save_world(saved.original, saved.path(), &errors));
+        WorldStreamingState legacy;
+        ASSERT_TRUE(saved.service.load_world(legacy, saved.path(), errors));
+        const auto hash = saved.service.world_hash(legacy);
+        const auto bytes = saved.bytes();
+        WorldStreamingState refused;
+        std::vector<IVec3> inventory;
+        const std::unordered_set<ChunkID> retain_none;
+        EXPECT_FALSE(
+            saved.service.load_world(refused, saved.path(), errors, {}, &retain_none, &inventory));
+        ASSERT_FALSE(errors.empty());
+        EXPECT_TRUE(errors.back().starts_with("Saved-input admission refused:"));
+        EXPECT_TRUE(refused.empty());
+        EXPECT_TRUE(inventory.empty());
+        EXPECT_EQ(saved.bytes(), bytes);
+        EXPECT_TRUE(first->has_water_sim.load());
+        EXPECT_EQ(first->water_depth_mm[0], 1000);
+        errors.clear();
+        ASSERT_TRUE(saved.service.load_world(legacy, saved.path(), errors));
+        EXPECT_EQ(saved.service.world_hash(legacy), hash);
+        EXPECT_EQ(saved.bytes(), bytes);
+    }
+}
+
+TEST(RegionalWaterMigration, ValueEqualSignedZerosCoalesce) {
+    LegacyWaterSave saved;
+    saved.add({0, -1, 0})->max_water_delta_last_tick = -0.0f;
+    saved.add({0, 1, 0})->max_water_delta_last_tick = 0.0f;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(saved.write(errors));
+    WorldStreamingState migrated;
+    std::vector<IVec3> inventory;
+    ASSERT_TRUE(saved.service.load_world(migrated, saved.path(), errors, {}, nullptr, &inventory));
+    const auto owner = migrated.find_chunk({0, 0, 0});
+    ASSERT_NE(owner, nullptr);
+    EXPECT_TRUE(owner->has_water_authority());
+    EXPECT_EQ(owner->max_water_delta_last_tick, 0.0f);
+    for (const int y : {-1, 1}) {
+        const auto retired = migrated.find_chunk({0, y, 0});
+        ASSERT_NE(retired, nullptr);
+        EXPECT_FALSE(retired->has_water_authority());
+        EXPECT_FALSE(retired->has_water_sim.load());
+    }
+}
+
+TEST(RegionalWaterMigration, CanonicalOwnedRecordsKeepDormantAndInitializedState) {
+    for (const bool indexed : {false, true}) {
+        for (const bool initialized : {false, true}) {
+            SCOPED_TRACE(indexed);
+            SCOPED_TRACE(initialized);
+            LegacyWaterSave saved;
+            const auto owner = saved.add({0, 0, 0});
+            if (!initialized) {
+                owner->clear_water_data();
+                owner->current_water_resolution.store(0);
+            }
+            owner->set_water_authority();
+            std::vector<std::string> errors;
+            ASSERT_TRUE(saved.write(errors, indexed));
+            const auto bytes = saved.bytes();
+            WorldStreamingState loaded;
+            std::vector<IVec3> inventory;
+            const std::unordered_set<ChunkID> retain_none;
+            const auto decodes =
+                WaterPersistence::WorldSaveService::chunk_record_decode_count_for_testing();
+            ASSERT_TRUE(saved.service.load_world(
+                loaded, saved.path(), errors, {}, &retain_none, &inventory));
+            if (indexed) {
+                EXPECT_EQ(
+                    WaterPersistence::WorldSaveService::chunk_record_decode_count_for_testing(),
+                    decodes);
+            }
+            EXPECT_TRUE(loaded.empty());
+            EXPECT_EQ(inventory, (std::vector<IVec3>{{0, 0, 0}}));
+            const auto exact =
+                WaterPersistence::WorldSaveService::read_chunk(saved.path(), {0, 0, 0});
+            ASSERT_NE(exact.chunk, nullptr);
+            EXPECT_TRUE(exact.chunk->has_water_authority());
+            EXPECT_TRUE(exact.chunk->same_water_state(*owner));
+            EXPECT_EQ(saved.bytes(), bytes);
+
+            saved.add({0, 1, 0});
+            ASSERT_TRUE(saved.write(errors, indexed));
+            const auto legacy_bytes = saved.bytes();
+            EXPECT_EQ(saved.service.load_world(
+                          loaded, saved.path(), errors, {}, &retain_none, &inventory),
+                      initialized);
+            if (initialized) {
+                const auto migrated_owner = loaded.find_chunk({0, 0, 0});
+                ASSERT_NE(migrated_owner, nullptr);
+                EXPECT_TRUE(migrated_owner->same_water_state(*owner));
+            } else {
+                EXPECT_TRUE(loaded.empty());
+                ASSERT_FALSE(errors.empty());
+                EXPECT_TRUE(errors.back().starts_with("Saved-input admission refused:"));
+                errors.clear();
+                ASSERT_TRUE(saved.service.load_world(loaded, saved.path(), errors));
+                const auto legacy_source = loaded.find_chunk({0, 1, 0});
+                ASSERT_NE(legacy_source, nullptr);
+                EXPECT_TRUE(legacy_source->has_water_sim.load());
+            }
+            EXPECT_EQ(saved.bytes(), legacy_bytes);
+        }
+    }
+}
+
+TEST(RegionalWaterMigration, OwnedCanonicalLegacyPayloadsStillRefuseIncompleteGrids) {
+    for (int fault = 0; fault < 3; ++fault) {
+        SCOPED_TRACE(fault);
+        LegacyWaterSave saved;
+        const auto owner = saved.add({0, 0, 0});
+        owner->set_water_authority();
+        if (fault == 0) {
+            owner->water_flow_data.clear();
+        } else if (fault == 1) {
+            owner->water_edge_flux.pop_back();
+        } else {
+            owner->has_water_sim.store(false);
+        }
+        std::vector<std::string> errors;
+        ASSERT_TRUE(saved.write(errors));
+        const auto bytes = saved.bytes();
+        WorldStreamingState loaded;
+        ASSERT_TRUE(saved.service.load_world(loaded, saved.path(), errors));
+        const auto legacy_hash = saved.service.world_hash(loaded);
+        std::vector<IVec3> inventory;
+        const std::unordered_set<ChunkID> retain_none;
+        EXPECT_FALSE(
+            saved.service.load_world(loaded, saved.path(), errors, {}, &retain_none, &inventory));
+        EXPECT_TRUE(loaded.empty());
+        EXPECT_TRUE(inventory.empty());
+        ASSERT_FALSE(errors.empty());
+        EXPECT_TRUE(errors.back().starts_with("Saved-input admission refused:"));
+        EXPECT_EQ(saved.bytes(), bytes);
+        errors.clear();
+        ASSERT_TRUE(saved.service.load_world(loaded, saved.path(), errors));
+        EXPECT_EQ(saved.service.world_hash(loaded), legacy_hash);
+    }
+}
+
+TEST(RegionalWaterMigration, RecordCapRefusesAndFlagOffKeepsLegacyHash) {
+    LegacyWaterSave saved;
+    // Compact empty legacy records keep this cap regression small.
+    // They are valid legacy input; regional admission must stop at record 4097.
+    for (int y = 0; y < 4096; ++y) {
+        saved.original.get_or_create_chunk({0, y - 2048, 0});
+    }
+    std::vector<std::string> errors;
+    ASSERT_TRUE(saved.service.save_world(saved.original, saved.path(), &errors));
+    WorldStreamingState boundary;
+    std::vector<IVec3> inventory;
+    const std::unordered_set<ChunkID> retain_none;
+    ASSERT_TRUE(
+        saved.service.load_world(boundary, saved.path(), errors, {}, &retain_none, &inventory));
+    EXPECT_TRUE(boundary.empty());
+    EXPECT_TRUE(inventory.empty());
+    saved.original.get_or_create_chunk({0, 2048, 0});
+    ASSERT_TRUE(saved.service.save_world(saved.original, saved.path(), &errors));
+    const auto bytes = saved.bytes();
+    WorldStreamingState legacy;
+    ASSERT_TRUE(saved.service.load_world(legacy, saved.path(), errors));
+    EXPECT_EQ(saved.service.world_hash(legacy), saved.service.world_hash(saved.original));
+    WorldStreamingState refused;
+    EXPECT_FALSE(saved.service.load_world(refused, saved.path(), errors, {}, nullptr, &inventory));
+    ASSERT_FALSE(errors.empty());
+    EXPECT_NE(errors.back().find("legacy water migration cap"), std::string::npos);
+    EXPECT_TRUE(refused.empty());
+    EXPECT_EQ(saved.bytes(), bytes);
+}
+
+TEST(RegionalWaterMigration, EmptyWorldAndIncompleteColdDestinationPreserveBytes) {
+    for (const bool indexed : {false, true}) {
+        SCOPED_TRACE(indexed);
+        LegacyWaterSave saved;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(saved.write(errors, indexed));
+        WorldStreamingState loaded;
+        std::vector<IVec3> inventory;
+        const std::unordered_set<ChunkID> retain_none;
+        const auto empty_bytes = saved.bytes();
+        ASSERT_TRUE(
+            saved.service.load_world(loaded, saved.path(), errors, {}, &retain_none, &inventory));
+        EXPECT_TRUE(loaded.empty());
+        EXPECT_EQ(saved.bytes(), empty_bytes);
+        saved.add({0, 1, 0});
+        const auto partial = saved.original.get_or_create_chunk({0, 0, 0});
+        partial->water_level_data = {1.0f};
+        ASSERT_TRUE(saved.write(errors, indexed));
+        const auto bytes = saved.bytes();
+        ASSERT_TRUE(saved.service.load_world(loaded, saved.path(), errors));
+        const auto legacy_hash = saved.service.world_hash(loaded);
+        EXPECT_FALSE(
+            saved.service.load_world(loaded, saved.path(), errors, {}, &retain_none, &inventory));
+        ASSERT_FALSE(errors.empty());
+        EXPECT_TRUE(errors.back().starts_with("Saved-input admission refused:"));
+        EXPECT_TRUE(loaded.empty());
+        EXPECT_EQ(saved.bytes(), bytes);
+        errors.clear();
+        ASSERT_TRUE(saved.service.load_world(loaded, saved.path(), errors));
+        EXPECT_EQ(saved.service.world_hash(loaded), legacy_hash);
+    }
 }
 } // namespace
 
