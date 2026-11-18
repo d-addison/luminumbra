@@ -271,10 +271,12 @@ TEST(PlayerAvatar, OwnerEncodingIsExactBoundedAndTransactional) {
     malformed[11] = 0x7f; // non-finite avatar position
     EXPECT_FALSE(
         Luminumbra::World::DecodeAvatarOwner(std::span(malformed).first(written), decoded));
-    malformed = bytes;
-    malformed[40] = 2; // nested physics version
-    EXPECT_FALSE(
-        Luminumbra::World::DecodeAvatarOwner(std::span(malformed).first(written), decoded));
+    for (const std::uint8_t version : {std::uint8_t{1}, std::uint8_t{3}}) {
+        malformed = bytes;
+        malformed[40] = version; // nested physics version: previous and future
+        EXPECT_FALSE(
+            Luminumbra::World::DecodeAvatarOwner(std::span(malformed).first(written), decoded));
+    }
     EXPECT_FALSE(
         Luminumbra::World::DecodeAvatarOwner(std::span(bytes).first(written + 1), decoded));
     std::vector<std::uint8_t> oversized(bytes.size() + 1);
