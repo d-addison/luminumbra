@@ -28,6 +28,7 @@
 #endif
 
 #include "net/LockstepSession.h"
+#include "persistence/WorldSaveService.h"
 
 #include <algorithm>
 #include <array>
@@ -1255,6 +1256,9 @@ bool LockstepSession::Handshake() {
     // Disk setup and worker startup belong to handshake, never the tick path.
     // Recorder failure affects diagnostics only, not handshake or simulation.
     OpenReplayRecorder();
+    if (m_status.desynced) {
+        return false;
+    }
     // Pre-schedule the local input for ticks [1.. horizon]: delay-based lockstep sends
     // inputs `horizon` ticks ahead, so the first `horizon` ticks' local inputs are in
     // flight before the first tick runs.
@@ -1858,8 +1862,21 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
     if (hash_due) {
         HashMsg local;
         local.tick = want;
-        if (m_hooks.capture_hashes) {
-            m_hooks.capture_hashes(want, local, m_hooks.user);
+        try {
+            if (m_hooks.capture_hashes) {
+                m_hooks.capture_hashes(want, local, m_hooks.user);
+            }
+        } catch (const Persistence::AuthorityCaptureRefused&) {
+            // Preserve the executed input without publishing a refused checkpoint, in the
+            // session's own recording and in a caller-owned sink: the hook runs once per
+            // executed tick, so it still sees this tick's merged inputs (with no hash).
+            RecordReplayTick(want, recorded_inputs, nullptr);
+            if (m_hooks.record_replay_tick) {
+                m_hooks.record_replay_tick(want, merged, nullptr, m_hooks.user);
+            }
+            EmitDesyncDump(want, "authority_capture");
+            result.outcome = TickOutcome::Desync;
+            return result;
         }
         m_local_hashes[want] = std::make_shared<const HashMsg>(std::move(local));
     }
@@ -1951,6 +1968,19 @@ bool LockstepSession::OpenReplayRecorder() {
         return true;
     if (m_replay_failed)
         return false;
+    HashMsg boot;
+    try {
+        if (m_hooks.capture_hashes) {
+            m_hooks.capture_hashes(0, boot, m_hooks.user);
+        }
+    } catch (const Persistence::AuthorityCaptureRefused&) {
+        m_replay_failed = true;
+        m_status.desynced = true;
+        m_status.desync_tick = 0;
+        m_status.desync_section = "authority_capture";
+        m_status.replay_error = "authority capture refused";
+        return false;
+    }
     Luminumbra::Replay::ReplayHeader header;
     header.version = Luminumbra::Replay::kLrec1Version;
     header.system_config_identity = m_config.system_config_identity;
@@ -1962,11 +1992,7 @@ bool LockstepSession::OpenReplayRecorder() {
     header.preset_hash =
         std::strtoull(Luminumbra::Replay::Fnv1a64Hex(m_config.preset).c_str(), nullptr, 16);
     header.engine_version = std::string(luminumbra::core::GetEngineVersionString());
-    if (m_hooks.capture_hashes) {
-        HashMsg boot;
-        m_hooks.capture_hashes(0, boot, m_hooks.user);
-        header.start_world_hash = std::move(boot.world_hash);
-    }
+    header.start_world_hash = std::move(boot.world_hash);
     m_replay_open = m_replay->Open(m_dump_path, header);
     m_replay_failed = !m_replay_open;
     if (m_replay_failed) {
