@@ -1114,7 +1114,9 @@ void WaterSystem::UpdateRegionalFromSimulation(entt::registry& registry,
             world::ActiveRegionLedger::region_at({static_cast<float>(coords.x * CHUNK_SIZE_X),
                                                   0.0f,
                                                   static_cast<float>(coords.z * CHUNK_SIZE_Z)});
-        if (ledger.records().at(owner).last_ticked == schedule.tick) {
+        // Foliage may restore last_ticked while its payload is unpublished.
+        // The scheduler decision survives that rollback; planning checks phase/state.
+        if (ledger.records().at(owner).last_decision == schedule.tick) {
             water_schedule.due.push_back(owner);
         }
         // Fund against the worst-case preparation cost without reading terrain or

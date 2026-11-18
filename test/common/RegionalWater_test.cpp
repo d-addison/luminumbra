@@ -3836,6 +3836,59 @@ TEST(RegionalWaterAdmission, UnclaimedCleanupChecksIdentityAndPreservesPublished
 } // namespace
 
 namespace {
+TEST(RegionalWaterAdmission, SchedulerDecisionsSurviveUnpublishedFoliageStamps) {
+    for (const bool scheduled : {false, true}) {
+        for (const bool pressure : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << scheduled << ',' << pressure);
+            SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 777);
+            WaterSystem water(nullptr, &shield);
+            shield.SetWaterSystem(&water);
+            shield.set_durable_residency(true);
+            if (pressure) {
+                shield.set_parked_bytes_limit(1);
+            }
+            water.SetRegionalScheduling(true);
+            water.SetSimResolution(16);
+            auto ledger = PlanningLedger({scheduled ? RegionKey{0, 0} : RegionKey{1, 0}});
+            const auto schedule = ledger.schedule(WorldClock(1));
+            if (scheduled) {
+                // Foliage restores its prior publication stamp before water executes.
+                ASSERT_TRUE(ledger.set_foliage_tick({0, 0}, 0));
+            } else {
+                // A same-tick edit after scheduling does not admit a new owner.
+                ledger.mark_materialized_edit({0, 0}, WorldClock(1));
+            }
+            ledger.set_water_cursor({0, 0}, 4);
+            ASSERT_TRUE(ledger.set_water_debts({{{0, 0}, 17}}));
+            const auto before = ledger.encode();
+            entt::registry registry;
+            const auto entity = registry.create();
+            registry.emplace<Components::TransformComponent>(entity).position = Vec3(8, -100, 8);
+            registry.emplace<Components::FlowingWaterSourceComponent>(entity).flow_rate = 1.0f;
+            std::vector<world::RegionWork> completed;
+            water.UpdateRegionalFromSimulation(registry, {}, ledger, schedule, completed);
+            EXPECT_EQ(water.regional_work().residents_visited, 1u);
+            EXPECT_EQ(shield.persistence_save_requested(), scheduled && pressure);
+            if (scheduled && !pressure) {
+                EXPECT_EQ(water.regional_work().visits,
+                          std::vector<ChunkID>{Chunk::calculate_id({0, 0, 0})});
+                EXPECT_EQ(water.debug_source_injected_mm(), 33);
+                EXPECT_EQ(ledger.records().at({0, 0}).water_cursor, 0u);
+                EXPECT_EQ(ledger.water_debts(), (ActiveRegionLedger::WaterDebts{{{0, 0}, 17}}));
+                ASSERT_EQ(completed.size(), 1u);
+                EXPECT_EQ(completed[0].water_cells, 256u);
+            } else {
+                EXPECT_TRUE(water.regional_work().visits.empty());
+                EXPECT_EQ(water.debug_source_injected_mm(), 0);
+                EXPECT_EQ(ledger.encode(), before);
+                EXPECT_TRUE(completed.empty());
+                EXPECT_EQ(shield.water_columns_generated(), 0u);
+                EXPECT_TRUE(shield.snapshot_authoritative_chunks().empty());
+            }
+        }
+    }
+}
+
 TEST(RegionalWaterAdmission, EightFractionallyFundedRegionsInitializeOnDeterministicTicks) {
     std::array<std::vector<ChunkID>, 3> expected_visits;
     std::array<std::string, 3> expected_ledgers;
@@ -3858,14 +3911,15 @@ TEST(RegionalWaterAdmission, EightFractionallyFundedRegionsInitializeOnDetermini
         std::array<std::uint64_t, 8> first_ticks{};
         first_ticks.fill(WorldClock::kTickLimit);
         entt::registry registry;
-        for (std::uint64_t tick = 0; tick < 3; ++tick) {
+        for (std::uint64_t step = 0; step < 3; ++step) {
+            const auto tick = step + 1;
             SCOPED_TRACE(::testing::Message() << reverse << ',' << tick);
             const auto schedule = ledger.schedule(WorldClock(tick));
             ASSERT_EQ(schedule.due.size(), anchors.size());
             std::vector<world::RegionWork> completed;
             water.UpdateRegionalFromSimulation(registry, anchors, ledger, schedule, completed);
             const auto& visits = water.regional_work().visits;
-            EXPECT_EQ(visits.size(), tick == 0 ? 0u : 7u);
+            EXPECT_EQ(visits.size(), step == 0 ? 0u : 7u);
             EXPECT_EQ(water.regional_work().residents_visited, 72u);
             EXPECT_LE(water.regional_work().participants_visited, 7u);
             for (const auto id : visits) {
@@ -3877,16 +3931,16 @@ TEST(RegionalWaterAdmission, EightFractionallyFundedRegionsInitializeOnDetermini
                 first_ticks[owner] = std::min(first_ticks[owner], tick);
             }
             if (reverse) {
-                EXPECT_EQ(visits, expected_visits[tick]);
-                EXPECT_EQ(ledger.encode(), expected_ledgers[tick]);
+                EXPECT_EQ(visits, expected_visits[step]);
+                EXPECT_EQ(ledger.encode(), expected_ledgers[step]);
             } else {
-                expected_visits[tick] = visits;
-                expected_ledgers[tick] = ledger.encode();
+                expected_visits[step] = visits;
+                expected_ledgers[step] = ledger.encode();
             }
         }
-        // Seven windows split eight ways: nobody at tick 0, seven owners
-        // at tick 1, then the last owner wins the debt ranking at tick 2.
-        EXPECT_EQ(first_ticks, (std::array<std::uint64_t, 8>{1, 1, 1, 1, 1, 1, 1, 2}));
+        // Seven windows split eight ways: nobody at tick 1, seven owners
+        // at tick 2, then the last owner wins the debt ranking at tick 3.
+        EXPECT_EQ(first_ticks, (std::array<std::uint64_t, 8>{2, 2, 2, 2, 2, 2, 2, 3}));
     }
 }
 
@@ -3911,7 +3965,7 @@ TEST(RegionalWaterAdmission, ReconciliationPreservesTheFullColumnCursorRing) {
     std::sort(ids.begin(), ids.end());
     for (std::size_t tick = 0; tick < 2; ++tick) {
         SCOPED_TRACE(tick);
-        const auto schedule = ledger.schedule(WorldClock(tick));
+        const auto schedule = ledger.schedule(WorldClock(tick + 1));
         std::vector<world::RegionWork> completed;
         water.UpdateRegionalFromSimulation(registry, {}, ledger, schedule, completed);
         std::vector<ChunkID> expected;
@@ -3942,7 +3996,7 @@ TEST(RegionalWaterAdmission, ZeroWholeWindowTickCarriesCreditIntoTheNextGrant) {
     const std::array anchors{Vec3(24, 0, 24), Vec3(536, 0, 24)};
     entt::registry registry;
     std::vector<world::RegionWork> completed;
-    const auto first_schedule = ledger.schedule(WorldClock(0));
+    const auto first_schedule = ledger.schedule(WorldClock(1));
     water.UpdateRegionalFromSimulation(registry, anchors, ledger, first_schedule, completed);
     EXPECT_TRUE(water.regional_work().visits.empty());
     EXPECT_TRUE(completed.empty());
@@ -3955,7 +4009,7 @@ TEST(RegionalWaterAdmission, ZeroWholeWindowTickCarriesCreditIntoTheNextGrant) {
     std::string error;
     ASSERT_TRUE(ActiveRegionLedger::decode(ledger.encode(), restored, error)) << error;
     ledger = std::move(restored);
-    const auto next_schedule = ledger.schedule(WorldClock(1));
+    const auto next_schedule = ledger.schedule(WorldClock(2));
     water.UpdateRegionalFromSimulation(registry, anchors, ledger, next_schedule, completed);
     const auto columns = Planning::SelectColumns(anchors, {}, ledger);
     ASSERT_GT(columns.size, 0u);
