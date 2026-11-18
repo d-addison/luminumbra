@@ -1,11 +1,15 @@
 #include "../support/UniqueTempPath.h"
 #include "../support/WorldgenTestData.h"
+#include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/Log.h"
 #include "luminumbra_common/persistence/ReplacementOutputFile.h"
 #include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/persistence/SavedInputFile.h"
+#include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/replay/ReplayStream.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
+#include "luminumbra_server/HeavyComparison.h"
 #include "luminumbra_server/modes/ModeHelpers.h"
 #include "luminumbra_server/modes/Modes.h"
 
@@ -25,8 +29,72 @@
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <tuple>
 #include <utility>
 #include <vector>
+
+namespace {
+struct ReplayCaptureFault {
+    std::size_t calls = 0;
+    std::size_t refuse_call = 0;
+};
+ReplayCaptureFault& CaptureFault() {
+    static ReplayCaptureFault fault;
+    return fault;
+}
+} // namespace
+
+namespace Luminumbra::Server {
+// Inject an incomplete owner through public world APIs immediately before a
+// selected capture. The real runner still decides whether and how to refuse.
+class RefusedCaptureRunner : public ServerWorldRunner {
+public:
+    using ServerWorldRunner::ServerWorldRunner;
+    ~RefusedCaptureRunner() {
+        if (m_incomplete) {
+            m_incomplete->set_state(ChunkState::Idle);
+        }
+    }
+    std::string ComputeWorldHash() {
+        PrepareCapture();
+        return ServerWorldRunner::ComputeWorldHash();
+    }
+    void ComputeWorldHashAndSubHashes(std::string& hash,
+                                      Persistence::WorldStreamingStateSubHashes& sub) {
+        PrepareCapture();
+        ServerWorldRunner::ComputeWorldHashAndSubHashes(hash, sub);
+    }
+
+private:
+    std::shared_ptr<Chunk> m_incomplete;
+    void PrepareCapture() {
+        auto& fault = CaptureFault();
+        if (++fault.calls != fault.refuse_call) {
+            return;
+        }
+        m_incomplete = std::make_shared<Chunk>(IVec3(100000, 0, 100000));
+        m_incomplete->mark_voxel_data_dirty();
+        m_incomplete->set_state(ChunkState::Idle);
+        ASSERT_TRUE(Session()->GetWorldSystem()->adopt_streamed_chunk(m_incomplete));
+        m_incomplete->set_state(ChunkState::Loading);
+    }
+};
+} // namespace Luminumbra::Server
+
+// Keep production control flow and catches intact, with distinct fixture symbols
+// because the shipping Replay.cpp is also linked into this test target.
+#define ServerWorldRunner RefusedCaptureRunner
+#define RunRecord RunRefusedCaptureRecord
+#define RunReplay RunRefusedCaptureReplay
+#define RunMutateReplayFixture RunRefusedCaptureMutateReplayFixture
+#define RunHeavy RunRefusedCaptureHeavy
+#include "../../src/luminumbra_server/modes/Heavy.cpp"
+#include "../../src/luminumbra_server/modes/Replay.cpp"
+#undef RunHeavy
+#undef RunMutateReplayFixture
+#undef RunReplay
+#undef RunRecord
+#undef ServerWorldRunner
 
 namespace {
 namespace fs = std::filesystem;
@@ -75,6 +143,7 @@ protected:
     }
 
     void TearDown() override {
+        CaptureFault() = {};
         Log::GetCoreLogger() = previous_logger;
         std::error_code error;
         fs::remove_all(root, error);
@@ -126,6 +195,194 @@ protected:
         options.root = root.string();
     }
 };
+
+using CaptureRefusalCase = std::tuple<std::uint64_t, std::size_t, bool>;
+class ReplayModeCaptureRefusal : public ReplayModeAdmission,
+                                 public testing::WithParamInterface<CaptureRefusalCase> {};
+
+std::vector<CaptureRefusalCase> CaptureRefusalCases() {
+    std::vector<CaptureRefusalCase> cases;
+    // A case performs at most two boots and 31 ticks per boot. Separate native
+    // test entries keep the refusal matrix below the per-test timeout.
+    for (const std::uint64_t ticks : {0u, 1u, 30u, 31u}) {
+        const std::size_t captures = ticks == 0 ? 2u : (ticks == 31 ? 4u : 3u);
+        for (std::size_t call = 1; call <= captures; ++call) {
+            for (const bool retained : {false, true}) {
+                cases.emplace_back(ticks, call, retained);
+            }
+        }
+    }
+    return cases;
+}
+
+TEST_P(ReplayModeCaptureRefusal, RefusedVerifyCapturesNeverPublishDivergenceArtifacts) {
+    const auto [ticks, call, retained] = GetParam();
+    options.ticks = ticks;
+    ASSERT_EQ(RunRecord(options), 0);
+    if (retained) {
+        std::ofstream output(options.artifact_path);
+        output << "retained";
+        ASSERT_TRUE(output.good());
+    }
+    CaptureFault() = {.calls = 0, .refuse_call = call};
+    logs.str("");
+    logs.clear();
+    EXPECT_EQ(RunRefusedCaptureReplay(options), 1);
+    EXPECT_EQ(CaptureFault().calls, call);
+    EXPECT_NE(logs.str().find("authority hash capture refused"), std::string::npos) << logs.str();
+    EXPECT_EQ(logs.str().find("replay DIVERGED"), std::string::npos);
+    EXPECT_EQ(fs::exists(options.artifact_path), retained);
+    if (retained) {
+        EXPECT_EQ(ReadReplayModeFile(options.artifact_path), "retained");
+    }
+}
+
+TEST_P(ReplayModeCaptureRefusal, RefusedRecordCapturesNeverPublishReplayOrRegionTrace) {
+    const auto [ticks, call, retained] = GetParam();
+    options.ticks = ticks;
+    const auto companion = options.record_path + ".regions.json";
+    if (retained) {
+        for (const auto& path : {options.record_path, companion}) {
+            std::ofstream output(path);
+            output << "retained";
+            ASSERT_TRUE(output.good());
+        }
+    }
+    CaptureFault() = {.calls = 0, .refuse_call = call};
+    EXPECT_EQ(RunRefusedCaptureRecord(options), 1);
+    EXPECT_EQ(CaptureFault().calls, call);
+    EXPECT_NE(logs.str().find("authority hash capture refused"), std::string::npos) << logs.str();
+    for (const auto& path : {options.record_path, companion}) {
+        EXPECT_EQ(fs::exists(path), retained);
+        if (retained) {
+            EXPECT_EQ(ReadReplayModeFile(path), "retained");
+        }
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(CaptureBoundaries,
+                         ReplayModeCaptureRefusal,
+                         testing::ValuesIn(CaptureRefusalCases()));
+
+class HeavyModeCaptureRefusal : public ReplayModeAdmission,
+                                public testing::WithParamInterface<std::tuple<std::size_t, bool>> {
+};
+
+TEST_P(HeavyModeCaptureRefusal, RefusedHeavyCapturesFailBeforeComparisonOrArtifact) {
+    const auto [call, retained] = GetParam();
+    options.ticks = 0;
+    options.heavy_resim = 1;
+    if (retained) {
+        std::ofstream output(options.artifact_path);
+        output << "retained";
+        ASSERT_TRUE(output.good());
+    }
+    CaptureFault() = {.calls = 0, .refuse_call = call};
+    logs.str("");
+    logs.clear();
+    EXPECT_EQ(RunRefusedCaptureHeavy(options), 1);
+    EXPECT_EQ(CaptureFault().calls, call);
+    EXPECT_NE(logs.str().find("authority hash capture refused"), std::string::npos) << logs.str();
+    EXPECT_EQ(logs.str().find("round-trip differs"), std::string::npos);
+    EXPECT_EQ(logs.str().find("resim differs"), std::string::npos);
+    EXPECT_EQ(fs::exists(options.artifact_path), retained);
+    if (retained) {
+        EXPECT_EQ(ReadReplayModeFile(options.artifact_path), "retained");
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(CaptureBoundaries,
+                         HeavyModeCaptureRefusal,
+                         testing::Combine(testing::Values(std::size_t{1}, 2, 3, 4),
+                                          testing::Bool()));
+
+TEST_F(ReplayModeAdmission, SubHashCaptureSkipsRefusedRegionalPreparation) {
+    namespace P = Luminumbra::Persistence;
+    Luminumbra::JobSystem capture_jobs;
+    capture_jobs.startup(1);
+    options.systems_config_override = luminumbra::core::SystemConfig::FromJsonString(
+        R"({"sim":{"active_regions":{"enabled":true}}})");
+    Luminumbra::Server::ServerWorldRunner runner(RunnerConfigFrom(options));
+    ASSERT_TRUE(runner.Boot());
+    runner.Session()->SetJobSystem(&capture_jobs);
+    const auto expected = runner.ComputeWorldSubHashes();
+    const auto expected_hash = runner.ComputeWorldHash();
+    capture_jobs.shutdown();
+    const auto actual = runner.ComputeWorldSubHashes();
+    EXPECT_EQ(actual.terrain, expected.terrain);
+    EXPECT_EQ(actual.water, expected.water);
+    EXPECT_EQ(actual.entities, expected.entities);
+    std::string hash = "retained";
+    P::WorldStreamingStateSubHashes sub;
+    sub.water = "retained";
+    for (const bool combined : {false, true}) {
+        bool refused = false;
+        try {
+            if (combined) {
+                runner.ComputeWorldHashAndSubHashes(hash, sub);
+            } else {
+                (void)runner.ComputeWorldHash();
+            }
+        } catch (const P::AuthorityCaptureRefused& error) {
+            refused = true;
+            EXPECT_EQ(error.status(), P::AuthorityCaptureStatus::PreparationRefused);
+        }
+        EXPECT_TRUE(refused);
+        EXPECT_EQ(hash, "retained");
+        EXPECT_EQ(sub.water, "retained");
+    }
+    capture_jobs.startup(1);
+    // A latched scheduler fault alone does not make recovered authority unhashable.
+    EXPECT_EQ(runner.ComputeWorldHash(), expected_hash);
+    runner.Shutdown();
+}
+
+TEST_F(ReplayModeAdmission, RunnerCapturePreservesStatusAndCombinedOutputsOnRefusal) {
+    namespace P = Luminumbra::Persistence;
+    Luminumbra::Server::ServerWorldRunner runner(RunnerConfigFrom(options));
+    const auto expect_refusal = [&](P::AuthorityCaptureStatus expected) {
+        std::string hash = "retained";
+        P::WorldStreamingStateSubHashes sub;
+        sub.terrain = "retained";
+        for (int slot = 0; slot != 3; ++slot) {
+            bool refused = false;
+            try {
+                if (slot == 0) {
+                    (void)runner.ComputeWorldHash();
+                } else if (slot == 1) {
+                    (void)runner.ComputeWorldSubHashes();
+                } else {
+                    runner.ComputeWorldHashAndSubHashes(hash, sub);
+                }
+            } catch (const P::AuthorityCaptureRefused& error) {
+                refused = true;
+                EXPECT_EQ(error.status(), expected);
+            }
+            EXPECT_TRUE(refused);
+            EXPECT_EQ(hash, "retained");
+            EXPECT_EQ(sub.terrain, "retained");
+        }
+    };
+    expect_refusal(P::AuthorityCaptureStatus::MissingCursor);
+    ASSERT_TRUE(runner.Boot());
+    const auto hash = runner.ComputeWorldHash();
+    const auto sub = runner.ComputeWorldSubHashes();
+    std::string combined_hash;
+    P::WorldStreamingStateSubHashes combined_sub;
+    runner.ComputeWorldHashAndSubHashes(combined_hash, combined_sub);
+    EXPECT_FALSE(hash.empty());
+    EXPECT_EQ(combined_hash, hash);
+    EXPECT_EQ(combined_sub.terrain, sub.terrain);
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(100000, 0, 100000));
+    chunk->mark_voxel_data_dirty();
+    chunk->set_state(Luminumbra::ChunkState::Idle);
+    ASSERT_TRUE(runner.Session()->GetWorldSystem()->adopt_streamed_chunk(chunk));
+    chunk->set_state(Luminumbra::ChunkState::Loading);
+    expect_refusal(P::AuthorityCaptureStatus::IncompleteOwner);
+    chunk->set_state(Luminumbra::ChunkState::Idle);
+    runner.Shutdown();
+    expect_refusal(P::AuthorityCaptureStatus::MissingCursor);
+}
 
 class ReplayModeRoundtrip : public ReplayModeAdmission,
                             public testing::WithParamInterface<std::uint64_t> {};

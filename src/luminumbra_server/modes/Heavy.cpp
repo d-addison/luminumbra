@@ -2,6 +2,7 @@
 #include "ModeHelpers.h"
 #include "Modes.h"
 #include "luminumbra_common/HashCheckpoint.h"
+#include "luminumbra_common/persistence/WorldSaveService.h"
 
 using Luminumbra::Server::AuthoritativeStateEqual;
 using Luminumbra::Server::CaptureGroundObjects;
@@ -83,7 +84,7 @@ nlohmann::json HeavyHashJson(const HeavyHashes& h) {
 
 } // namespace
 
-int RunHeavy(const ServerCliOptions& options) {
+int RunHeavy(const ServerCliOptions& options) try {
     LUMINUMBRA_CORE_INFO(
         "Headless server HEAVY oracle: preset={} seed={} ticks={} resim={} radius={}/{}",
         options.preset,
@@ -137,6 +138,12 @@ int RunHeavy(const ServerCliOptions& options) {
     const std::size_t cursor_at_load =
         loaded.Session()->GetWorldSystem()->GetWaterSimWindowCursor();
 
+    // --- : resimulate M further ticks on BOTH sessions. ---
+    const auto orig_resim = original.RunFixedTicks(options.heavy_resim);
+    const auto loaded_resim = loaded.RunFixedTicks(options.heavy_resim);
+    const HeavyHashes orig_final = CaptureHashes(original);
+    const HeavyHashes loaded_final = CaptureHashes(loaded);
+
     // The loaded session, immediately after load, must match the original at
     // save on AUTHORITATIVE sim state (terrain/water/entities/ground objects). Mesh is tracked
     // informationally (see AuthoritativeStateEqual rationale).
@@ -151,12 +158,6 @@ int RunHeavy(const ServerCliOptions& options) {
     if (!roundtrip_ground_difference.empty()) {
         LUMINUMBRA_CORE_ERROR("heavy: round-trip differs in {}", roundtrip_ground_difference);
     }
-
-    // --- : resimulate M further ticks on BOTH sessions. ---
-    const auto orig_resim = original.RunFixedTicks(options.heavy_resim);
-    const auto loaded_resim = loaded.RunFixedTicks(options.heavy_resim);
-    const HeavyHashes orig_final = CaptureHashes(original);
-    const HeavyHashes loaded_final = CaptureHashes(loaded);
 
     const bool resim_ok = AuthoritativeStateEqual(orig_final, loaded_final);
     const std::string resim_scent_difference = ScentDifference(orig_final, loaded_final);
@@ -359,4 +360,8 @@ int RunHeavy(const ServerCliOptions& options) {
                          options.heavy_resim,
                          orig_final.world_hash);
     return 0;
+} catch (const Luminumbra::Persistence::AuthorityCaptureRefused& error) {
+    LUMINUMBRA_CORE_ERROR("heavy: authority hash capture refused (status={}); oracle aborted",
+                          static_cast<int>(error.status()));
+    return 1;
 }

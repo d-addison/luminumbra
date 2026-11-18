@@ -217,6 +217,8 @@ public:
 
     // Deterministic hash over the in-memory streamed-chunk snapshot and water cursor
     // (WorldSaveService::world_hash; format-independent persistence hash).
+    // All three hash entry points throw AuthorityCaptureRefused with the capture status
+    // on refusal; combined capture leaves both outputs unchanged on refusal.
     std::string ComputeWorldHash();
 
     // per-system sub-hashes over the SAME streamed-chunk snapshot, for

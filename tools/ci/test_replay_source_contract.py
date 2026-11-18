@@ -46,13 +46,17 @@ class ReplaySourceContract(unittest.TestCase):
         self.assertNotIn("FindInput(", playback)
         self.assertRegex(recording, r'if \(executed != 0 && '
                          r'\(executed % kCheckpointIntervalTicks\) != 0\)\s*\{\s*'
-                         r'writer.RecordCheckpoint\(CaptureCheckpoint\(executed, runner\)\);\s*\}'
-                         r'\s*const auto\* trace = [^;]*;'
-                         r'\s*if \(!writer.Finalize\(executed, trace\)\)')
+                         r'const auto checkpoint = CaptureCheckpoint\(executed, runner\);\s*'
+                         r'if \(!checkpoint\)\s*\{\s*return 1;\s*\}\s*'
+                         r'writer.RecordCheckpoint\(\*checkpoint\);\s*\}\s*'
+                         r'const auto final_hash = CaptureWorldHash\(executed, runner\);\s*'
+                         r'if \(!final_hash\)\s*\{\s*return 1;\s*\}\s*'
+                         r'const auto\* trace = [^;]*;\s*'
+                         r'if \(!writer.Finalize\(executed, trace\)\)')
         self.assertIn("(executed % kCheckpointIntervalTicks) == 0 || "
                       "executed == contents->tick_count", startup)
         for field in ("world_hash", "terrain", "water", "entities"):
-            self.assertIn(f"live.{field} != recorded->{field}", startup)
+            self.assertIn(f"live->{field} != recorded->{field}", startup)
         self.assertIn("terminal ? terminal->world_hash : header.start_world_hash", startup)
         tick_loop = startup.split("while (!diverged", 1)[1].split("const std::string live_end", 1)[0]
         self.assertNotIn("FindCheckpoint(", tick_loop)
@@ -81,7 +85,8 @@ class ReplaySourceContract(unittest.TestCase):
         self.assertIsNotNone(target)
         self.assertEqual(target[1].split().count(path), 1)
         native = read_source("test/" + path)
-        self.assertNotIn("#define Run", native)
+        shipping_cases = native.split("#undef ServerWorldRunner\n", 1)[-1]
+        self.assertNotIn("#define Run", shipping_cases)
         self.assertRegex(native, r'ASSERT_EQ\(RunRecord\(options\), 0\)')
         self.assertRegex(native, r'ASSERT_EQ\(RunReplay\(options\), 0\)')
         self.assertIn("testing::Values(std::uint64_t{0}, 1, 2, 29, 30, 31, 60, 90)", native)
@@ -671,6 +676,210 @@ class ReplaySourceContract(unittest.TestCase):
                          "EXPECT_FALSE(fs::exists(save_root));"):
             with self.subTest(helper=original), self.assertRaises(AssertionError):
                 self.assert_runtime_surface_owner(cmake, native.replace(original, "", 1))
+
+
+def compact_capture_source(source):
+    return re.sub(r"\s+", "", without_comments(source))
+
+
+def capture_body(source, anchor):
+    start = source.index("{", source.index(anchor))
+    depth = 0
+    for match in re.finditer(r'"(?:\\.|[^"\\])*"|[{}]', source[start:]):
+        if match[0] == "{":
+            depth += 1
+        elif match[0] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:start + match.end()]
+    raise AssertionError("unclosed capture block: " + anchor)
+
+
+class AuthorityConsumerSourceContract(unittest.TestCase):
+    paths = {
+        "runner": "src/luminumbra_server/ServerWorldRunner.cpp",
+        "header": "src/luminumbra_common/persistence/WorldSaveService.h",
+        "replay": MODES + "Replay.cpp",
+        "heavy": MODES + "Heavy.cpp",
+        "smoke": MODES + "Smoke.cpp",
+        "lockstep": MODES + "Lockstep.cpp",
+    }
+
+    def sources(self):
+        return {name: compact_capture_source(read_source(path))
+                for name, path in self.paths.items()}
+
+    def assert_ordered(self, source, *tokens):
+        positions = [source.index(token) for token in tokens]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(len(positions), len(set(positions)))
+
+    def assert_runner_contract(self, sources):
+        for name, request, publication in (
+                ("ComputeWorldHash", "{},Persistence::AuthorityCaptureParts::Composite",
+                 "returnresult.capture->composite;"),
+                ("ComputeWorldSubHashes", "entities_snapshot,Persistence::AuthorityCaptureParts::SubHashes",
+                 "returnresult.capture->sub;"),
+                ("ComputeWorldHashAndSubHashes", "entities_snapshot",
+                 "out_world_hash=result.capture->composite;out_sub=result.capture->sub;")):
+            body = capture_body(sources["runner"], "ServerWorldRunner::" + name + "(")
+            self.assert_ordered(body,
+                                "if(!m_booted||!m_session){throwPersistence::AuthorityCaptureRefused("
+                                "Persistence::AuthorityCaptureStatus::MissingCursor);}",
+                                "m_session->CaptureAuthorityHashes(" + request + ");",
+                                "if(!result.capture){throwPersistence::AuthorityCaptureRefused(result.status);}",
+                                publication)
+            self.assertNotIn("snapshot_streamed_chunks", body)
+            self.assertNotIn(".clear()", body)
+        exception = capture_body(sources["header"], "classAuthorityCaptureRefused")
+        self.assertIn(":m_status(capture_status){}", exception)
+        self.assertIn("AuthorityCaptureStatusstatus()constnoexcept{returnm_status;}", exception)
+
+    def assert_replay_contract(self, sources):
+        replay = sources["replay"]
+        for helper, call in (("CaptureWorldHash", "returnrunner.ComputeWorldHash();"),
+                             ("CaptureCheckpoint", "runner.ComputeWorldHashAndSubHashes(cp.world_hash,sub);")):
+            body = capture_body(replay, helper + "(")
+            self.assert_ordered(body, call,
+                                "catch(constLuminumbra::Persistence::AuthorityCaptureRefused&error)",
+                                "error.status()", "returnstd::nullopt;")
+        record = capture_body(replay, "intRunRecord(")
+        verify = capture_body(replay, "intRunReplay(")
+        self.assert_ordered(record, "constautostart_hash=CaptureWorldHash(0,runner);",
+                            "if(!start_hash){return1;}", "header.start_world_hash=*start_hash;",
+                            "writer.Open(")
+        for cadence in ("if((executed%kCheckpointIntervalTicks)==0)",
+                        "if(executed!=0&&(executed%kCheckpointIntervalTicks)!=0)"):
+            body = capture_body(record, cadence)
+            self.assert_ordered(body, "constautocheckpoint=CaptureCheckpoint(executed,runner);",
+                                "if(!checkpoint){return1;}", "writer.RecordCheckpoint(*checkpoint);")
+        self.assert_ordered(record, "constautofinal_hash=CaptureWorldHash(executed,runner);",
+                            "if(!final_hash){return1;}", "writer.Finalize(")
+        self.assert_ordered(verify, "constautostart_hash=CaptureWorldHash(0,runner);",
+                            "if(!start_hash){return1;}", "conststd::stringlive_start=*start_hash;",
+                            "constboolstart_match=", "if(!start_match)")
+        self.assert_ordered(verify, "constautolive=CaptureCheckpoint(executed,runner);",
+                            "if(!live){return1;}", "if(live->world_hash!=recorded->world_hash")
+        self.assert_ordered(verify, "constautoend_hash=", "CaptureWorldHash(executed,runner);",
+                            "if(!end_hash){return1;}", "conststd::stringlive_end=*end_hash;",
+                            'if(diverged){', '"luminumbra.replay_divergence.v1"')
+
+    def assert_other_modes_contract(self, sources):
+        heavy = sources["heavy"]
+        self.assertIn("intRunHeavy(constServerCliOptions&options)try{", heavy)
+        catch = capture_body(heavy, "catch(constLuminumbra::Persistence::AuthorityCaptureRefused&error)")
+        self.assert_ordered(catch, "error.status()", "return1;")
+        checked = capture_body(heavy, "intRunHeavy(")
+        self.assert_ordered(checked, "original.SaveFullSnapshot();",
+                            "constHeavyHashesorig_at_save=CaptureHashes(original);",
+                            "constHeavyHashesloaded_at_load=CaptureHashes(loaded);",
+                            "constHeavyHashesorig_final=CaptureHashes(original);",
+                            "constHeavyHashesloaded_final=CaptureHashes(loaded);",
+                            "AuthoritativeStateEqual(orig_at_save,loaded_at_load)",
+                            "AuthoritativeStateEqual(orig_final,loaded_final)", "std::ofstreamout(artifact_path)")
+        for key, entry in (("smoke", "RunSmoke"), ("lockstep", "RunLockstepLoopback")):
+            source = sources[key]
+            self.assertIn("int" + entry + "(constServerCliOptions&options)try{", source)
+            self.assertIn("catch(constLuminumbra::Persistence::AuthorityCaptureRefused&error)", source)
+            catch = capture_body(source, "catch(constLuminumbra::Persistence::AuthorityCaptureRefused&error)")
+            self.assertIn("error.status()", catch)
+            self.assertIn("return1;", catch)
+
+    def test_runner_slots_and_status_are_checked_before_publication(self):
+        self.assert_runner_contract(self.sources())
+
+    def test_replay_refusals_precede_comparisons_and_publication(self):
+        self.assert_replay_contract(self.sources())
+
+    def test_heavy_and_sibling_modes_stop_on_capture_refusal(self):
+        self.assert_other_modes_contract(self.sources())
+
+    def test_each_capture_guard_and_order_has_an_isolated_mutation(self):
+        sources = self.sources()
+        mutations = []
+        for slot in ("Composite", "SubHashes"):
+            mutations.append(("runner", "Persistence::AuthorityCaptureParts::" + slot, "All"))
+        # Each runner refusal and output publication, including every status bridge.
+        for token in ("result.status", "MissingCursor", "out_world_hash=result.capture->composite;"):
+            for occurrence in range(sources["runner"].count(token)):
+                mutations.append(("runner", token, occurrence))
+        mutations.extend(("header", token, "") for token in
+                         (":m_status(capture_status)", "returnm_status;"))
+        for token in ("if((executed%kCheckpointIntervalTicks)==0)",
+                      "if(executed!=0&&(executed%kCheckpointIntervalTicks)!=0)",
+                      "constautocheckpoint=CaptureCheckpoint(executed,runner);",
+                      "writer.RecordCheckpoint(*checkpoint);", "writer.Finalize(executed,trace)",
+                      "if(!start_hash){return1;}", "if(!checkpoint){return1;}",
+                      "if(!final_hash){return1;}", "if(!live){return1;}",
+                      "if(!end_hash){return1;}", "returnstd::nullopt;"):
+            for occurrence in range(sources["replay"].count(token)):
+                mutations.append(("replay", token, occurrence))
+        for match in re.finditer(r'if\(!(?:start_hash|checkpoint|final_hash|live|end_hash)\)\{return1;\}',
+                                 sources["replay"]):
+            changed = dict(sources)
+            changed["replay"] = (sources["replay"][:match.start()] +
+                                 match[0].replace("return1;", "") + sources["replay"][match.end():])
+            with self.subTest(refusal_return=match.start()), self.assertRaises((AssertionError, ValueError)):
+                self.assert_replay_contract(changed)
+        for key in ("heavy", "smoke", "lockstep"):
+            mutations.append((key, "catch(constLuminumbra::Persistence::AuthorityCaptureRefused&error)", ""))
+        mutations.append(("heavy", "constHeavyHashesloaded_final=CaptureHashes(loaded);", ""))
+        for key, token, replacement in mutations:
+            with self.subTest(path=self.paths[key], token=token, replacement=replacement):
+                changed = dict(sources)
+                if isinstance(replacement, int):
+                    parts = changed[key].split(token)
+                    changed[key] = token.join(parts[:replacement + 1]) + "REMOVED" + token.join(parts[replacement + 1:])
+                else:
+                    changed[key] = changed[key].replace(token, replacement, 1)
+                checker = (self.assert_runner_contract if key in ("runner", "header") else
+                           self.assert_replay_contract if key == "replay" else
+                           self.assert_other_modes_contract)
+                with self.assertRaises((AssertionError, ValueError)):
+                    checker(changed)
+        # Moving the last refused capture below comparison or publication also fails.
+        for key, capture, later in (
+                ("replay", "if(!end_hash){return1;}", 'if(diverged){'),
+                ("replay", "if(!final_hash){return1;}", "if(!writer.Finalize"),
+                ("heavy", "constHeavyHashesloaded_final=CaptureHashes(loaded);", "constboolresim_ok=")):
+            changed = dict(sources)
+            moved = changed[key].replace(capture, "", 1)
+            position = moved.index(later)
+            changed[key] = moved[:position] + later + capture + moved[position + len(later):]
+            with self.subTest(key=key, order=capture), self.assertRaises((AssertionError, ValueError)):
+                (self.assert_replay_contract if key == "replay" else self.assert_other_modes_contract)(changed)
+
+    def test_native_refusals_use_real_modes_and_registered_target(self):
+        native = read_source("test/common/ReplayModeAdmission_test.cpp")
+        for case in ("RefusedVerifyCapturesNeverPublishDivergenceArtifacts",
+                     "RefusedRecordCapturesNeverPublishReplayOrRegionTrace",
+                     "RefusedHeavyCapturesFailBeforeComparisonOrArtifact",
+                     "RunnerCapturePreservesStatusAndCombinedOutputsOnRefusal",
+                     "SubHashCaptureSkipsRefusedRegionalPreparation"):
+            self.assertRegex(native, rf'TEST_[FP]\(\w+,\s*{case}\)')
+        for mode in ("Replay", "Heavy"):
+            self.assertIn(f'#include "../../src/luminumbra_server/modes/{mode}.cpp"', native)
+        first_include = native.index('#include "../../src/luminumbra_server/modes/Heavy.cpp"')
+        last_include = native.index('#include "../../src/luminumbra_server/modes/Replay.cpp"')
+        first_case = native.index("TEST_P(")
+        for original, adapted in (("ServerWorldRunner", "RefusedCaptureRunner"),
+                                  ("RunRecord", "RunRefusedCaptureRecord"),
+                                  ("RunReplay", "RunRefusedCaptureReplay"),
+                                  ("RunMutateReplayFixture", "RunRefusedCaptureMutateReplayFixture"),
+                                  ("RunHeavy", "RunRefusedCaptureHeavy")):
+            define = f"#define {original} {adapted}\n"
+            undef = f"#undef {original}\n"
+            self.assertEqual(native.count(define), 1)
+            self.assertEqual(native.count(undef), 1)
+            self.assertLess(native.index(define), first_include)
+            self.assertLess(last_include, native.index(undef))
+            self.assertLess(native.index(undef), first_case)
+        self.assertIn("ServerWorldRunner::ComputeWorldHash()", native)
+        self.assertIn("ServerWorldRunner::ComputeWorldHashAndSubHashes(hash, sub)", native)
+        self.assertIn("m_incomplete->set_state(ChunkState::Loading)", native)
+        self.assertIn("EXPECT_EQ(fs::exists(options.artifact_path), retained)", native)
+        self.assertIn('EXPECT_EQ(ReadReplayModeFile(options.artifact_path), "retained")', native)
+        self.assertIn("common/ReplayModeAdmission_test.cpp", read_source("test/CMakeLists.txt"))
 
 
 class SessionUsabilitySourceContract(unittest.TestCase):

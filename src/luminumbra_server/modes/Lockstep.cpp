@@ -1,5 +1,6 @@
 #include "ModeHelpers.h"
 #include "Modes.h"
+#include "luminumbra_common/persistence/WorldSaveService.h"
 
 namespace fs = std::filesystem;
 
@@ -62,7 +63,7 @@ void LockstepCaptureHashes(std::uint64_t tick, Luminumbra::Net::HashMsg& out, vo
 
 } // namespace
 
-int RunLockstepLoopback(const ServerCliOptions& options) {
+int RunLockstepLoopback(const ServerCliOptions& options) try {
     LUMINUMBRA_CORE_INFO("Headless server LOCKSTEP loopback: preset={} seed={} ticks={} "
                          "delay_input={} corrupt_tick={}",
                          options.preset,
@@ -311,4 +312,8 @@ int RunLockstepLoopback(const ServerCliOptions& options) {
     }
     (void)diverged;
     return 0;
+} catch (const Luminumbra::Persistence::AuthorityCaptureRefused& error) {
+    LUMINUMBRA_CORE_ERROR("lockstep: authority hash capture refused (status={}); aborted",
+                          static_cast<int>(error.status()));
+    return 1;
 }

@@ -1,6 +1,7 @@
 #include "ModeHelpers.h"
 #include "Modes.h"
 #include "SmokeArtifact.h"
+#include "luminumbra_common/persistence/WorldSaveService.h"
 
 namespace fs = std::filesystem;
 
@@ -84,7 +85,7 @@ SmokeRunResult RunSmokeOnce(const ServerCliOptions& options, const char* run_lab
 
 } // namespace
 
-int RunSmoke(const ServerCliOptions& options) {
+int RunSmoke(const ServerCliOptions& options) try {
     LUMINUMBRA_CORE_INFO(
         "Headless server determinism smoke: preset={} seed={} ticks={} radius={}/{}",
         options.preset,
@@ -97,4 +98,8 @@ int RunSmoke(const ServerCliOptions& options) {
     const SmokeRunResult replay = RunSmokeOnce(options, "run-2");
 
     return Luminumbra::Server::WriteSmokeArtifact(options, first, replay);
+} catch (const Luminumbra::Persistence::AuthorityCaptureRefused& error) {
+    LUMINUMBRA_CORE_ERROR("smoke: authority hash capture refused (status={}); aborted",
+                          static_cast<int>(error.status()));
+    return 1;
 }
