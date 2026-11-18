@@ -15726,3 +15726,85 @@ TEST(GameSessionHeadlessWorldTest, SessionCollisionBarrierPrecedesTheFirstCreatu
     }
     EXPECT_TRUE(reference.GetPhysicsSystem()->is_avatar_grounded(0));
 }
+
+TEST(SurfaceQuery, TeleportPreparesDestinationBeforeTheLocalCharacterSteps) {
+    auto world = MakeSimulationCollisionWorld();
+    PhysicsSystem physics;
+    physics.startup();
+    physics.set_world_system(world.get());
+    physics.create_player_controller({8, 9, 8});
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}, 1));
+    const auto before = physics.simulation_collision_hash();
+    physics.set_player_position({168, 9, 8});
+    physics.update_player({}, false, 0, 1.0f / 30);
+    EXPECT_NE(physics.simulation_collision_hash(), before);
+    EXPECT_TRUE(physics.audio_raycast({168, 16, 8}, {168, 0, 8}).hit);
+    auto partial = SimulationFloorChunk({20, 0, 0}, 8);
+    partial->mark_sdf_loaded_or_edited();
+    partial->heightmap_data.resize(1);
+    ASSERT_TRUE(world->adopt_streamed_chunk(partial));
+    const glm::vec3 destination(328, 9, 8);
+    physics.set_player_position(destination);
+    physics.update_player({1, 0, 0}, false, 0, 1.0f / 30);
+    ExpectPositionBits(physics.get_player_position(), destination);
+    partial->heightmap_data.assign(17 * 17, 8);
+    physics.update_player({}, false, 0, 1.0f / 30);
+    EXPECT_TRUE(physics.audio_raycast({328, 16, 8}, {328, 0, 8}).hit);
+}
+
+TEST(SurfaceQuery, RenderPreparationRefreshesEvenWhenTheUpcomingTickDoesNotChange) {
+    auto world = MakeSimulationCollisionWorld();
+    PhysicsSystem physics;
+    physics.startup();
+    physics.set_world_system(world.get());
+    physics.create_player_controller({8, 9, 8});
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}, 1));
+    auto partial = SimulationFloorChunk({0, 0, 0}, 8);
+    partial->mark_sdf_loaded_or_edited();
+    partial->heightmap_data.resize(1);
+    ASSERT_TRUE(world->adopt_streamed_chunk(partial));
+    // A render frame begins with the default sentinel, even if no fixed tick ran.
+    EXPECT_FALSE(physics.prepare_simulation_collisions({}));
+    const auto before = physics.get_player_position();
+    physics.update_player({1, 0, 0}, false, 0, 1.0f / 30);
+    ExpectPositionBits(physics.get_player_position(), before);
+}
+
+TEST(SurfaceQuery, CollisionSamplingCachesProceduralColumnsAndPrefersCommittedHeights) {
+    auto world = MakeSimulationCollisionWorld();
+    std::array<float, 17 * 17> heights{};
+    ASSERT_TRUE(world->sample_simulation_collision(0, 0, heights));
+    EXPECT_EQ(world->simulation_collision_terrain_evaluations(), heights.size());
+    const auto procedural = heights;
+    ASSERT_TRUE(world->sample_simulation_collision(0, 0, heights));
+    EXPECT_EQ(world->simulation_collision_terrain_evaluations(), heights.size());
+    EXPECT_EQ(heights, procedural);
+    auto committed = SimulationFloorChunk({0, 0, 0}, 12);
+    committed->mark_sdf_loaded_or_edited();
+    ASSERT_TRUE(world->adopt_streamed_chunk(committed));
+    ASSERT_TRUE(world->sample_simulation_collision(0, 0, heights));
+    EXPECT_EQ(world->simulation_collision_terrain_evaluations(), heights.size());
+    EXPECT_TRUE(std::all_of(heights.begin(), heights.end(), [](float h) { return h == 12; }));
+    committed->heightmap_data.resize(1);
+    EXPECT_FALSE(world->sample_simulation_collision(0, 0, heights));
+    committed->heightmap_data.assign(17 * 17, 14);
+    ASSERT_TRUE(world->sample_simulation_collision(0, 0, heights));
+    EXPECT_EQ(heights.front(), 14);
+
+    auto cold = MakeSimulationCollisionWorld();
+    cold->remember_durable_chunks({IVec3(0, 0, 0)});
+    cold->set_durable_chunk_loader([committed](const IVec3&) { return committed; }, nullptr);
+    ASSERT_TRUE(cold->sample_simulation_collision(0, 0, heights));
+    EXPECT_EQ(cold->simulation_collision_terrain_evaluations(), 1u);
+    EXPECT_EQ(heights.front(), 14);
+    // A direct-map collision evicts old samples without growing storage.
+    ASSERT_TRUE(cold->sample_simulation_collision(128, 0, heights));
+    ASSERT_TRUE(cold->sample_simulation_collision(0, 0, heights));
+    EXPECT_EQ(cold->simulation_collision_terrain_evaluations(), 291u);
+    cold->set_seed(1234);
+    ASSERT_TRUE(cold->sample_simulation_collision(0, 0, heights));
+    EXPECT_EQ(cold->simulation_collision_terrain_evaluations(), 292u);
+    cold->set_params(cold->get_params());
+    ASSERT_TRUE(cold->sample_simulation_collision(0, 0, heights));
+    EXPECT_EQ(cold->simulation_collision_terrain_evaluations(), 293u);
+}

@@ -7054,16 +7054,24 @@ bool SHIELD_WorldSystem::sample_simulation_collision(i32 chunk_x,
         chunk_z > Chunk::kPackedMaxXz) {
         return false;
     }
-    // Scalar/grid parity is pinned by terrain tests. Scalar sampling needs no growing
-    // SIMD scratch vectors; each column always visits exactly the 17x17 lattice.
-    for (int z = 0; z <= CHUNK_SIZE_Z; ++z) {
-        for (int x = 0; x <= CHUNK_SIZE_X; ++x) {
-            heights[static_cast<std::size_t>(z) * kSide + static_cast<std::size_t>(x)] =
-                GetTerrainHeightAt(static_cast<float>(chunk_x * CHUNK_SIZE_X + x),
-                                   static_cast<float>(chunk_z * CHUNK_SIZE_Z + z));
-        }
+    const auto generation = m_water_seed_terrain_generation.load(std::memory_order_acquire);
+    const auto slot = (static_cast<u32>(chunk_x) * 31u + static_cast<u32>(chunk_z) * 17u) %
+                      m_collision_samples.size();
+    auto& cached = m_collision_samples[slot];
+    if (!cached.valid || cached.x != chunk_x || cached.z != chunk_z ||
+        cached.generation != generation || generation == std::numeric_limits<u64>::max()) {
+        cached.valid = false;
+        cached.complete = false;
+        cached.x = chunk_x;
+        cached.z = chunk_z;
+        cached.generation = generation;
+        // Only the centre is needed to locate committed authority's vertical layer.
+        ++m_collision_terrain_evaluations;
+        cached.centre =
+            GetTerrainHeightAt(static_cast<float>(chunk_x * CHUNK_SIZE_X + CHUNK_SIZE_X / 2),
+                               static_cast<float>(chunk_z * CHUNK_SIZE_Z + CHUNK_SIZE_Z / 2));
     }
-    const float centre = heights[(CHUNK_SIZE_Z / 2) * kSide + CHUNK_SIZE_X / 2];
+    const float centre = cached.centre;
     const double layer = std::floor(static_cast<double>(centre) / CHUNK_SIZE_Y);
     if (!std::isfinite(layer) || layer < Chunk::kPackedMinY || layer > Chunk::kPackedMaxY) {
         return false;
@@ -7084,12 +7092,37 @@ bool SHIELD_WorldSystem::sample_simulation_collision(i32 chunk_x,
             return false;
         }
         std::copy(chunk->heightmap_data.begin(), chunk->heightmap_data.end(), heights.begin());
+    } else {
+        if (!cached.complete) {
+            // Scalar/grid parity is pinned by terrain tests. A miss visits at most
+            // the 17x17 lattice; the already sampled centre is reused.
+            for (int z = 0; z <= CHUNK_SIZE_Z; ++z) {
+                for (int x = 0; x <= CHUNK_SIZE_X; ++x) {
+                    const auto index =
+                        static_cast<std::size_t>(z) * kSide + static_cast<std::size_t>(x);
+                    if (x == CHUNK_SIZE_X / 2 && z == CHUNK_SIZE_Z / 2) {
+                        cached.heights[index] = centre;
+                    } else {
+                        ++m_collision_terrain_evaluations;
+                        cached.heights[index] =
+                            GetTerrainHeightAt(static_cast<float>(chunk_x * CHUNK_SIZE_X + x),
+                                               static_cast<float>(chunk_z * CHUNK_SIZE_Z + z));
+                    }
+                }
+            }
+        }
+        std::copy(cached.heights.begin(), cached.heights.end(), heights.begin());
     }
-    return std::all_of(heights.begin(), heights.end(), [](float height) {
+    const bool valid = std::all_of(heights.begin(), heights.end(), [](float height) {
         constexpr float kMinHeight = static_cast<float>(Chunk::kPackedMinY) * CHUNK_SIZE_Y;
         constexpr float kMaxHeight = (static_cast<float>(Chunk::kPackedMaxY) + 1) * CHUNK_SIZE_Y;
         return std::isfinite(height) && height >= kMinHeight && height < kMaxHeight;
     });
+    cached.valid = valid;
+    if (valid && !(chunk && chunk->has_terrain_authority())) {
+        cached.complete = true;
+    }
+    return valid;
 }
 
 std::shared_ptr<Luminumbra::Chunk>

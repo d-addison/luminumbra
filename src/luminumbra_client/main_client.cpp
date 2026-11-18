@@ -5155,7 +5155,11 @@ int main(int argc, char* argv[]) {
                 if (advance_frame_simulation && !scenario_config.networked_session_smoke()) {
                     if (auto* physics = gameSession->GetPhysicsSystem()) {
                         if (!physics->prepare_simulation_collisions(
-                                {}, gameSession->GetSimulationTickCount() + 1)) {
+                                {}, std::numeric_limits<std::uint64_t>::max())) {
+                            Luminumbra::Client::PollSessionFault(
+                                *gameSession, [&] { glfwSetWindowShouldClose(window, GLFW_TRUE); });
+                            Luminumbra::Client::SaveSessionWhenDue(gameSession.get(),
+                                                                   session_persistence_allowed());
                             break; // Leave this frame's simulation unconsumed on refusal.
                         }
                     }

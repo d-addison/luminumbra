@@ -1043,6 +1043,10 @@ public:
     // edited authority when present, refuses incomplete authority instead of regenerating it.
     // Exactly (CHUNK_SIZE_X+1)*(CHUNK_SIZE_Z+1) samples; no world mutation.
     bool sample_simulation_collision(i32 chunk_x, i32 chunk_z, std::span<float> heights) const;
+    // Owner-thread diagnostic: scalar terrain evaluations performed by collision sampling.
+    u64 simulation_collision_terrain_evaluations() const {
+        return m_collision_terrain_evaluations;
+    }
     bool durable_residency() const {
         return m_durable_residency;
     }
@@ -1271,6 +1275,19 @@ private:
     std::function<std::shared_ptr<Chunk>(const IVec3&)> m_durable_chunk_loader;
     std::function<void(std::string)> m_durable_chunk_fault;
     mutable bool m_durable_read_failed = false;
+    struct CollisionSamples {
+        i32 x = 0;
+        i32 z = 0;
+        u64 generation = 0;
+        float centre = 0;
+        bool valid = false;
+        bool complete = false;
+        std::array<float, (CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Z + 1)> heights{};
+    };
+    // Direct-mapped, at most 128 procedural columns. Authority is checked on every call;
+    // cached procedural data never replaces committed/edited or malformed authority.
+    mutable std::array<CollisionSamples, 128> m_collision_samples{};
+    mutable u64 m_collision_terrain_evaluations = 0;
     bool m_evictions_suspended = false;
     std::shared_ptr<Chunk> read_committed_chunk(const IVec3& coords) const;
     std::size_t m_parked_bytes = 0;

@@ -283,6 +283,41 @@ class SimulationCollisionWiring(unittest.TestCase):
         self.assertIn("if (advanced == 0)", loop)
         self.assertIn("break;", loop.split("if (advanced == 0)", 1)[1])
 
+    def test_render_preparation_refusal_reaches_fault_and_persistence_handlers(self):
+        source = (ROOT / "src/luminumbra_client/main_client.cpp").read_text(encoding="utf-8")
+        body = source.split("case GameState::IN_GAME:", 1)[1].split("case GameState::", 1)[0]
+        refusal = function(body, "std::numeric_limits<std::uint64_t>::max()))")
+        self.assertLess(refusal.index("PollSessionFault("), refusal.index("break;"))
+        self.assertLess(refusal.index("SaveSessionWhenDue("), refusal.index("break;"))
+
+    def test_render_frames_do_not_reuse_an_upcoming_tick(self):
+        source = (ROOT / "src/luminumbra_client/main_client.cpp").read_text(encoding="utf-8")
+        body = source.split("case GameState::IN_GAME:", 1)[1].split("case GameState::", 1)[0]
+        self.assertRegex(body, r"prepare_simulation_collisions\(\s*\{\},\s*"
+                              r"std::numeric_limits<std::uint64_t>::max\(\)\)")
+
+    def test_teleport_invalidates_and_character_driver_prepares_before_stepping(self):
+        source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(encoding="utf-8")
+        teleport = function(source, "void PhysicsSystem::set_player_position(")
+        self.assertIn("m_simulation_collisions->ready = false;", teleport)
+        update = function(source, "void PhysicsSystem::update_player(")
+        self.assertLess(update.index("!prepare_simulation_collisions({})"),
+                        update.index("SetLinearVelocity("))
+        self.assertIn("return;", update[update.index("!prepare_simulation_collisions({})"):
+                                       update.index("SetLinearVelocity(")])
+
+    def test_collision_sampling_checks_authority_before_full_procedural_sampling(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        sample = function(source, "bool SHIELD_WorldSystem::sample_simulation_collision(")
+        self.assertLess(sample.index("chunk->has_terrain_authority()"),
+                        sample.index("for (int z = 0;"))
+        self.assertIn("if (!cached.complete)", sample)
+        self.assertIn("cached.generation != generation", sample)
+        self.assertIn("generation == std::numeric_limits<u64>::max()", sample)
+        self.assertIn("cached.complete = true;", sample)
+        header = SOURCE.with_suffix(".h").read_text(encoding="utf-8")
+        self.assertIn("std::array<CollisionSamples, 128>", header)
+
     def test_collision_regressions_remain_registered(self):
         cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
         for path, cases in (
@@ -292,7 +327,10 @@ class SimulationCollisionWiring(unittest.TestCase):
                 "SimulationPreparationBoundsInputsAndMissingAuthority",
                 "SimulationPreparationCanonicalizesOrderAndPreservesLegacyPath",
                 "SimulationOwnerRegistrationAndTickReuseStayBounded",
-                "SimulationPreparationVisitsOnlyLiveAvatarOwners")),
+                "SimulationPreparationVisitsOnlyLiveAvatarOwners",
+                "TeleportPreparesDestinationBeforeTheLocalCharacterSteps",
+                "RenderPreparationRefreshesEvenWhenTheUpcomingTickDoesNotChange",
+                "CollisionSamplingCachesProceduralColumnsAndPrefersCommittedHeights")),
             ("common/GameSessionHeadlessWorld_test.cpp", (
                 "SimulationCollisionsIgnoreRenderCadenceAcrossSessionTicks",
                 "LegacyColliderPreparationPreservesHashesAndSaveBytes",

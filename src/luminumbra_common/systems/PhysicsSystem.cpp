@@ -763,8 +763,13 @@ void PhysicsSystem::update_player(const glm::vec3& wish_velocity,
                                   bool wants_to_jump,
                                   float jump_force,
                                   float dt) {
-    if (!m_player_character || !m_jolt_system || !simulation_collisions_ready())
+    if (!m_player_character || !m_jolt_system)
         return;
+    // A teleport can occur inside the input driver after the host's frame barrier.
+    // Prepare its destination before any character velocity or position changes.
+    if (!simulation_collisions_ready() && !prepare_simulation_collisions({})) {
+        return;
+    }
 
     ++m_work_items.characters;
 
@@ -854,6 +859,9 @@ bool PhysicsSystem::set_player_crouched(bool is_crouched) {
 void PhysicsSystem::set_player_position(const glm::vec3& position) {
     if (m_player_character) {
         m_player_character->SetPosition(JPH::RVec3(position.x, position.y, position.z));
+        if (m_simulation_collisions) {
+            m_simulation_collisions->ready = false;
+        }
     }
 }
 

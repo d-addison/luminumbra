@@ -72,7 +72,8 @@ public:
     // Shared owner-thread barrier before rigid bodies or characters advance. Inert unless
     // region authority is enabled. A refusal publishes nothing and pauses physics until a
     // successful retry; hosts must also leave their simulation tick unconsumed.
-    // A concrete tick id reuses its successful publication across host/session consumers.
+    // A concrete tick id reuses its successful publication within one host/session step.
+    // Variable-rate render hosts use the default sentinel to start a fresh preparation.
     // Fixed one-chunk X/Z radius, 64 owners and 128 distinct columns per tick. Storage
     // and body slots are fixed; only changed heightfield shapes replace bounded storage.
     static constexpr std::size_t kSimulationOwnerBudget = 64;
