@@ -53,6 +53,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "core/Profiler.h"
 #include "core/RuntimeScenarioConfig.h"
 #include "core/ScenarioRunner.h"
+#include "core/TimelapseVista.h"
 #include "debug/DebugCamera.h" // deterministic feature locator (--debug-goto cave|doline)
 #include "debug/DeveloperConsole.h"
 #include "debug/DeveloperLogAttachment.h"
@@ -2022,20 +2023,12 @@ int main(int argc, char* argv[]) {
     g_app.capture.timelapse_fire = HasCommandLineFlag(argc, argv, "--timelapse-fire");
     g_app.capture.timelapse_dig = HasCommandLineFlag(argc, argv, "--timelapse-dig");
     g_app.capture.timelapse_vista = HasCommandLineFlag(argc, argv, "--timelapse-vista");
-    g_app.capture.timelapse_settle_frames = std::clamp(
+    g_app.capture.timelapse_settle_frames = Luminumbra::TimelapseVista::ClampSettleFrames(
         GetCommandLineIntOption(argc, argv, "--timelapse-settle", kTimelapseSettleFrames),
-        kTimelapseSettleFrames,
-        3600);
-    {
-        const std::string pan = GetCommandLineOption(argc, argv, "--timelapse-pan", "");
-        if (!pan.empty()) {
-            try {
-                const float parsed = std::stof(pan);
-                // std::stof accepts "nan"/"inf" and std::clamp keeps NaN; keep the default.
-                if (std::isfinite(parsed))
-                    g_app.capture.timelapse_pan = std::clamp(parsed, -2.0f, 2.0f);
-            } catch (...) {}
-        }
+        kTimelapseSettleFrames);
+    if (const auto pan = Luminumbra::TimelapseVista::ParsePanDegrees(
+            GetCommandLineOption(argc, argv, "--timelapse-pan", ""))) {
+        g_app.capture.timelapse_pan = *pan;
     }
     g_app.capture.timelapse_drain = HasCommandLineFlag(argc, argv, "--timelapse-drain");
     g_app.capture.timelapse_rain = HasCommandLineFlag(argc, argv, "--timelapse-rain");
@@ -5224,7 +5217,8 @@ int main(int argc, char* argv[]) {
                     // nobody runs out of frame as they spread.
                     const glm::vec3 camPos =
                         g_app.capture.timelapse_vista
-                            ? glm::vec3(sp.x + 6.0f, sp.y + 10.0f, sp.z + 8.0f) // low vista
+                            ? Luminumbra::TimelapseVista::VistaFraming(glm::vec3(sp.x, sp.y, sp.z))
+                                  .position
                         : g_app.capture.timelapse_rain
                             ? glm::vec3(sp.x + 2.0f,
                                         sp.y + 16.0f,
@@ -5240,11 +5234,10 @@ int main(int argc, char* argv[]) {
                             ? glm::vec3(sp.x, sp.y + 30.0f, sp.z + 30.0f)
                         : showcase ? glm::vec3(sp.x, sp.y + 4.0f, sp.z + 22.0f)
                                    : glm::vec3(sp.x, sp.y + 7.0f, sp.z + 20.0f);
-                    // Vista: aim far out toward the sunset side (the sun sets toward -x), a few
-                    // degrees below the horizon, so ground, sky and sun path share the frame.
                     const glm::vec3 target =
                         g_app.capture.timelapse_vista
-                            ? glm::vec3(sp.x - 120.0f, sp.y + 2.0f, sp.z - 40.0f)
+                            ? Luminumbra::TimelapseVista::VistaFraming(glm::vec3(sp.x, sp.y, sp.z))
+                                  .target
                         : g_app.capture.timelapse_rain
                             ? glm::vec3(sp.x,
                                         sp.y - 2.0f,
@@ -5259,8 +5252,8 @@ int main(int argc, char* argv[]) {
                     g_camera->Position = camPos;
                     g_camera->Yaw = glm::degrees(std::atan2(d.z, d.x));
                     if (g_app.capture.timelapse_vista) {
-                        g_camera->Yaw += g_app.capture.timelapse_pan *
-                                         static_cast<float>(g_app.capture.timelapse_captured);
+                        g_camera->Yaw += Luminumbra::TimelapseVista::PanYawOffset(
+                            g_app.capture.timelapse_pan, g_app.capture.timelapse_captured);
                     }
                     g_camera->Pitch = glm::degrees(std::asin(std::clamp(d.y, -1.0f, 1.0f)));
                     g_camera->updateCameraVectors();
@@ -5298,7 +5291,9 @@ int main(int argc, char* argv[]) {
                         }
                     }
                     // Vista keeps its horizon framing; the drain setup above still runs.
-                    if (g_app.capture.drain_state.init && !g_app.capture.timelapse_vista) {
+                    if (g_app.capture.drain_state.init &&
+                        Luminumbra::TimelapseVista::ScenarioMayFrameCamera(
+                            g_app.capture.timelapse_vista)) {
                         const glm::vec3 P(g_app.capture.drain_state.P.x,
                                           g_app.capture.drain_state.P.y,
                                           g_app.capture.drain_state.P.z);
@@ -5349,7 +5344,9 @@ int main(int argc, char* argv[]) {
                         }
                     }
                     // Vista keeps its horizon framing; rain and the basin edit still run.
-                    if (g_app.capture.drain_state.init && !g_app.capture.timelapse_vista) {
+                    if (g_app.capture.drain_state.init &&
+                        Luminumbra::TimelapseVista::ScenarioMayFrameCamera(
+                            g_app.capture.timelapse_vista)) {
                         const glm::vec3 P(g_app.capture.drain_state.P.x,
                                           g_app.capture.drain_state.P.y,
                                           g_app.capture.drain_state.P.z);
