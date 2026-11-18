@@ -2116,9 +2116,31 @@ void GenerateWaterMesh(const Systems::WaterSystem& water_system,
 
     const float cell_width_x = static_cast<float>(CHUNK_SIZE_X) / static_cast<float>(resolution);
     const float cell_width_z = static_cast<float>(CHUNK_SIZE_Z) / static_cast<float>(resolution);
+    // Admission guarantees grids only within the terrain band's vertical margins.
+    // Deep oceans / raised water can put the geometric owner outside that band.
+    // Clamp the ownership sample to its nearest margin (never the vertex heights),
+    // using the same immutable policy for every copy, including worker snapshots.
+    // No live residency/grid lookup: allocation order cannot create a second owner.
+    const auto owner_span = world_system.water_presentation_vertical_span(
+        IVec2(chunk.get_coords().x, chunk.get_coords().z));
+    const float min_owner_level = static_cast<float>(owner_span.x * CHUNK_SIZE_Y);
+    const float max_owner_level = static_cast<float>(owner_span.y * CHUNK_SIZE_Y);
 
     for (int z = 0; z < resolution; ++z) {
         for (int x = 0; x < resolution; ++x) {
+            // The cell's own (centre) grid sample chooses its vertical owner,
+            // independently of the interpolated corner heights. The half-open
+            // interval assigns an exact boundary to the chunk above it, including
+            // negative heights. Every vertical copy of a column grid makes the
+            // same choice; a sloping quad is still emitted whole by one chunk.
+            const auto cell = static_cast<std::size_t>(z * resolution + x);
+            const float surface_level = chunk.water_level_data[cell];
+            const float owner_level = std::clamp(surface_level, min_owner_level, max_owner_level);
+            const float base_y = static_cast<float>(chunk_base_pos.y);
+            if (!(std::isfinite(surface_level) && owner_level >= base_y &&
+                  owner_level < base_y + static_cast<float>(CHUNK_SIZE_Y))) {
+                continue;
+            }
             // Get the water surface heights at the four corners of this water grid cell
             float world_x0 =
                 static_cast<float>(chunk_base_pos.x) + static_cast<float>(x) * cell_width_x;

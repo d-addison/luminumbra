@@ -11,12 +11,15 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <future>
 #include <limits>
 #include <memory>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -961,6 +964,257 @@ TEST(AsyncWaterMeshing, WaterOnlySelectionTracksPublicationInBothDirections) {
         World::MarchingCubes::PolygoniseTerrain(world, *chunk, 0.0f, 1);
         EXPECT_EQ(world.renderable_chunks_view(), std::vector<Chunk*>{chunk.get()});
     }
+}
+
+TEST(AsyncWaterMeshing, WaterSurfaceCellsHaveExactlyOneVerticalOwner) {
+    for (const int resolution : {4, 8, 16, 32}) {
+        for (const int owner_y : {-2, 0, 2}) {
+            SCOPED_TRACE(resolution);
+            SCOPED_TRACE(owner_y);
+            const float boundary = static_cast<float>(owner_y * CHUNK_SIZE_Y);
+            auto params = Luminumbra::Test::SyntheticTerrainParams();
+            params.base_amplitude = 0.0f;
+            params.height_offset = boundary + 8.0f;
+            SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+            WaterSystem water(nullptr, &world);
+            const auto cells = static_cast<std::size_t>(resolution * resolution);
+            // Interior, exact boundary and its immediate neighbours exercise the
+            // half-open interval on both sides of zero. Mixed cell levels also
+            // distinguish the cell-centre sample from a corner/column average.
+            for (const bool mixed : {false, true}) {
+                SCOPED_TRACE(mixed);
+                std::vector<float> levels(cells, boundary + 6.0f);
+                std::array<std::size_t, 3> expected{};
+                for (std::size_t cell = 0; cell < cells; ++cell) {
+                    if (mixed) {
+                        switch (cell % 4u) {
+                            case 0:
+                                levels[cell] = std::nextafter(
+                                    boundary, -std::numeric_limits<float>::infinity());
+                                break;
+                            case 1:
+                                levels[cell] = boundary;
+                                break;
+                            case 2:
+                                levels[cell] = std::nextafter(
+                                    boundary, std::numeric_limits<float>::infinity());
+                                break;
+                            case 3:
+                                levels[cell] = boundary + static_cast<float>(CHUNK_SIZE_Y);
+                                break;
+                        }
+                    }
+                    const std::size_t owner = levels[cell] < boundary                  ? 0u
+                                              : levels[cell] < boundary + CHUNK_SIZE_Y ? 1u
+                                                                                       : 2u;
+                    ++expected[owner];
+                }
+                std::vector<unsigned> emitted(cells, 0u);
+                for (int offset = -1; offset <= 1; ++offset) {
+                    SCOPED_TRACE(offset);
+                    Chunk chunk(IVec3(0, owner_y + offset, 0));
+                    chunk.current_water_resolution.store(resolution);
+                    chunk.has_water_sim.store(true);
+                    chunk.water_level_data = levels;
+                    chunk.water_depth_mm.assign(cells, 2000);
+                    World::MarchingCubes::GenerateWaterMesh(water, world, chunk);
+                    ASSERT_TRUE(chunk.water_mesh_generated.load());
+                    const auto stack_index = static_cast<std::size_t>(offset + 1);
+                    EXPECT_EQ(chunk.water_mesh_vertices.size(), expected[stack_index] * 4u);
+                    EXPECT_EQ(chunk.water_mesh_indices.size(), expected[stack_index] * 6u);
+                    // Recover each emitted cell from its first vertex. Counting
+                    // per cell catches omissions and duplicates that cancel in a total.
+                    const float width =
+                        static_cast<float>(CHUNK_SIZE_X) / static_cast<float>(resolution);
+                    for (std::size_t vertex = 0; vertex < chunk.water_mesh_vertices.size();
+                         vertex += 4u) {
+                        const auto& position = chunk.water_mesh_vertices[vertex].position;
+                        const auto x = static_cast<std::size_t>(position.x / width);
+                        const auto z = static_cast<std::size_t>(position.z / width);
+                        ASSERT_LT(z * static_cast<std::size_t>(resolution) + x, cells);
+                        ++emitted[z * static_cast<std::size_t>(resolution) + x];
+                    }
+                }
+                for (const auto count : emitted) {
+                    EXPECT_EQ(count, 1u);
+                }
+            }
+        }
+    }
+}
+
+TEST(AsyncWaterMeshing, VerticalOwnershipChangesInvalidateWaterOnlySelection) {
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 8.0f;
+    SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    WaterSystem water(nullptr, &world);
+    auto chunk = std::make_shared<Chunk>(IVec3(0));
+    chunk->current_water_resolution.store(4);
+    chunk->has_water_sim.store(true);
+    chunk->water_depth_mm.assign(16u, 2000);
+    chunk->set_state(ChunkState::Ready);
+    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    ASSERT_TRUE(world.renderable_chunks_view().empty());
+    for (const float level : {6.0f,
+                              16.0f,
+                              6.0f,
+                              -0.001f,
+                              6.0f,
+                              std::numeric_limits<float>::quiet_NaN(),
+                              6.0f,
+                              std::numeric_limits<float>::infinity(),
+                              6.0f,
+                              -std::numeric_limits<float>::infinity()}) {
+        SCOPED_TRACE(level);
+        const bool owns_water = level >= 0.0f && level < CHUNK_SIZE_Y;
+        const auto before = world.renderable_view_work();
+        chunk->water_level_data.assign(16u, level);
+        World::MarchingCubes::GenerateWaterMesh(water, world, *chunk);
+        EXPECT_EQ(world.renderable_chunks_view(),
+                  owns_water ? std::vector<Chunk*>{chunk.get()} : std::vector<Chunk*>{});
+        EXPECT_EQ(world.renderable_view_work().rebuilds - before.rebuilds, 1u);
+        EXPECT_EQ(chunk->water_mesh_indices.size(), owns_water ? 96u : 0u);
+    }
+}
+
+TEST(AsyncWaterMeshing, StackedWaterOnlyPublicationTransfersVerticalOwnership) {
+    for (const bool use_workers : {false, true}) {
+        SCOPED_TRACE(use_workers);
+        JobSystem jobs;
+        if (use_workers) {
+            jobs.startup(1);
+        }
+        auto params = Luminumbra::Test::SyntheticTerrainParams();
+        params.base_amplitude = 0.0f;
+        params.height_offset = 8.0f;
+        params.caves_enabled = false;
+        SHIELD_WorldSystem world(use_workers ? &jobs : nullptr, nullptr, params, 1337);
+        WaterSystem water(use_workers ? &jobs : nullptr, &world);
+        water.SetBootPaused(true);
+        world.SetWaterSystem(&water);
+        std::vector<std::shared_ptr<Chunk>> chunks;
+        for (int y = -1; y <= 1; ++y) {
+            auto chunk = std::make_shared<Chunk>(IVec3(0, y, 0));
+            FillDugPond(world, *chunk, 4);
+            chunk->sdf_data.assign(chunk->sdf_data.size(), 1.0f);
+            chunk->water_depth_mm.assign(16u, 2000);
+            chunk->current_lod.store(0);
+            chunk->set_state(ChunkState::Ready);
+            ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+            chunks.push_back(std::move(chunk));
+        }
+        ASSERT_TRUE(world.renderable_chunks_view().empty());
+        entt::registry registry;
+        for (const float level : {6.0f, 16.0f, 6.0f}) {
+            SCOPED_TRACE(level);
+            for (const auto& chunk : chunks) {
+                chunk->water_level_data.assign(16u, level);
+                chunk->water_mesh_generated.store(false);
+                water.retain_mesh_invalidation(chunk->get_id());
+            }
+            world.update(registry, std::vector<Vec3>{}, nullptr, false);
+            world.wait_for_streaming_jobs();
+            const auto owner = level < 16.0f ? 1u : 2u;
+            EXPECT_EQ(world.renderable_chunks_view(), std::vector<Chunk*>{chunks[owner].get()});
+            for (std::size_t index = 0; index < chunks.size(); ++index) {
+                EXPECT_EQ(chunks[index]->get_state(), ChunkState::Ready);
+                EXPECT_TRUE(chunks[index]->mesh_vertices.empty());
+                EXPECT_EQ(chunks[index]->water_mesh_indices.size(), index == owner ? 96u : 0u);
+            }
+        }
+    }
+}
+
+TEST(AsyncWaterMeshing, InitialWaterPresentationKeepsAnOwnerOutsideTheGeometricWaterBand) {
+    for (const bool live_grids : {false, true}) {
+        for (const bool raised_water : {false, true}) {
+            SCOPED_TRACE(live_grids);
+            SCOPED_TRACE(raised_water);
+            auto params = Luminumbra::Test::SyntheticTerrainParams();
+            params.base_amplitude = 0.0f;
+            // Sea level's geometric y=0 owner is absent for the deep ocean.
+            // The raised-water case exercises the other end of the band.
+            params.height_offset = raised_water ? 40.0f : -40.0f;
+            params.caves_enabled = false;
+            SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+            WaterSystem water(nullptr, &world);
+            water.SetBootPaused(true);
+            world.SetWaterSystem(&water);
+            const int center_y = raised_water ? 2 : -3;
+            const int expected_y = raised_water ? 1 : -2;
+            std::vector<std::shared_ptr<Chunk>> chunks;
+            for (int y = center_y - 1; y <= center_y + 1; ++y) {
+                auto chunk = std::make_shared<Chunk>(IVec3(0, y, 0));
+                chunk->current_lod.store(0);
+                chunk->set_state(ChunkState::Ready);
+                if (live_grids || raised_water) {
+                    water.InitializeGeneratedWater(*chunk);
+                    if (raised_water) {
+                        chunk->water_level_data.assign(chunk->water_level_data.size(), -16.0f);
+                        chunk->water_depth_mm.assign(chunk->water_depth_mm.size(), 2000);
+                    }
+                }
+                ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+                chunks.push_back(std::move(chunk));
+            }
+            ASSERT_TRUE(world.renderable_chunks_view().empty());
+            ASSERT_TRUE(world.PrepareInitialWaterPresentationNear(
+                Vec3(8.0f, params.height_offset, 8.0f), 0));
+            for (const auto& chunk : chunks) {
+                const bool owns_water = chunk->get_coords().y == expected_y;
+                EXPECT_TRUE(chunk->water_mesh_generated.load());
+                EXPECT_EQ(chunk->water_mesh_indices.empty(), !owns_water);
+                EXPECT_EQ(chunk->has_water_sim.load(), live_grids || raised_water);
+                if (owns_water) {
+                    EXPECT_EQ(world.renderable_chunks_view(), std::vector<Chunk*>{chunk.get()});
+                    ASSERT_FALSE(chunk->water_mesh_vertices.empty());
+                    const float world_level = chunk->water_mesh_vertices.front().position.y +
+                                              static_cast<float>(expected_y * CHUNK_SIZE_Y);
+                    EXPECT_EQ(world_level, raised_water ? -16.0f : SEA_LEVEL);
+                }
+            }
+        }
+    }
+}
+
+TEST(AsyncWaterMeshing, SurfaceReadinessAndRuntimeSeedingKeepTheWaterOwnerSupplied) {
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = -40.0f;
+    params.caves_enabled = false;
+    SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    WaterSystem water(nullptr, &world);
+    water.SetBootPaused(true);
+    world.SetWaterSystem(&water);
+    PhysicsSystem physics;
+    physics.startup();
+    ASSERT_TRUE(world.EnsureSurfaceReadyNear(Vec3(8.0f, -40.0f, 8.0f), &physics, 0, 0));
+    std::unordered_map<ChunkID, std::shared_ptr<Chunk>> chunks;
+    for (const auto& chunk : world.snapshot_streamed_chunks()) {
+        ASSERT_FALSE(chunk->has_water_sim.load());
+        chunks.emplace(chunk->get_id(), chunk);
+    }
+    ASSERT_EQ(chunks.size(), 3u);
+    ASSERT_TRUE(world.PrepareInitialWaterPresentationNear(Vec3(8.0f, -40.0f, 8.0f), 0));
+    auto owner = world.find_streamed_chunk(IVec3(0, -2, 0));
+    ASSERT_NE(owner, nullptr);
+    ASSERT_FALSE(owner->water_mesh_indices.empty());
+    const auto indices = owner->water_mesh_indices;
+    // Runtime allocation seeds every participating y, rather than just y=0.
+    // A bounded three-chunk boot batch supplies the same fallback owner's grid.
+    water.SetBootPaused(false);
+    water.SetBootSettleMode(true);
+    entt::registry registry;
+    water.update(registry, chunks);
+    for (const auto& [id, chunk] : chunks) {
+        SCOPED_TRACE(id);
+        ASSERT_TRUE(chunk->has_water_sim.load());
+        ASSERT_FALSE(chunk->water_level_data.empty());
+        World::MarchingCubes::GenerateWaterMesh(water, world, *chunk);
+        EXPECT_EQ(chunk->water_mesh_indices.empty(), chunk != owner);
+    }
+    EXPECT_EQ(owner->water_mesh_indices, indices);
 }
 
 TEST(AsyncWaterMeshing, InitialWaterPresentationInvalidatesCachedWaterOnlySelection) {

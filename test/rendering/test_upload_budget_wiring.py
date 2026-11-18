@@ -42,6 +42,59 @@ class UploadBudgetWiring(unittest.TestCase):
         cls.header = read(RENDERING / "RenderPipeline.h")
         cls.main = read(ROOT / "src/luminumbra_client/main_client.cpp")
 
+    def test_water_surface_cells_have_one_vertical_owner(self):
+        mesher = read(ROOT / "src/luminumbra_common/world/MarchingCubes.cpp")
+        direct = body(mesher, "void GenerateWaterMesh(")
+        loop = body(direct, "for (int x = 0; x < resolution; ++x)")
+        # Evaluate the shipping rejection predicate, rather than a parallel
+        # implementation. With the old unfiltered emission every stack member
+        # accepts the cell and the per-cell owner count below is three.
+        guard = re.search(r"if \(!\((.*?)\)\) \{\s*continue;", loop, re.S)
+        predicate = (compact(guard.group(1)) if guard else "True")
+        predicate = predicate.replace("static_cast<float>(CHUNK_SIZE_Y)", "16")
+        predicate = predicate.replace("std::isfinite(surface_level)", "finite")
+        predicate = predicate.replace("&&", " and ").replace("||", " or ")
+        assignment = re.search(r"const float owner_level = (.*?);", compact(loop))
+        owner_expression = (assignment.group(1) if assignment else "surface_level")
+        owner_expression = owner_expression.replace("std::clamp", "clamp")
+
+        def accepts(level, base, span):
+            owner_level = eval(owner_expression, {"__builtins__": {}}, dict(
+                surface_level=level, min_owner_level=span[0] * 16, max_owner_level=span[1] * 16,
+                clamp=lambda value, lower, upper: min(max(value, lower), upper)))
+            return eval(predicate, {"__builtins__": {}}, dict(
+                finite=math.isfinite(level), surface_level=level,
+                owner_level=owner_level, base_y=base))
+        for boundary in (-32.0, -16.0, 0.0, 16.0, 32.0):
+            levels = (boundary + 6.0, boundary,
+                      math.nextafter(boundary, -math.inf),
+                      math.nextafter(boundary, math.inf), boundary + 16.0)
+            for level in levels:
+                owners = [offset for offset in (-1, 0, 1)
+                          if accepts(level, boundary + offset * 16,
+                                     (boundary / 16 - 1, boundary / 16 + 1))]
+                expected = -1 if level < boundary else 0 if level < boundary + 16 else 1
+                self.assertEqual(owners, [expected], (boundary, level))
+            for level in (math.nan, math.inf, -math.inf):
+                self.assertFalse(any(accepts(level, boundary + offset * 16,
+                                             (boundary / 16 - 1, boundary / 16 + 1))
+                                     for offset in (-1, 0, 1)))
+        for span, level, expected in (((-4, -2), 0.0, -2), ((1, 3), -16.0, 1)):
+            # Also include the geometric owner outside the admitted band: the
+            # fallback must remain unique even if that chunk later becomes resident.
+            self.assertEqual([y for y in range(-4, 4) if accepts(level, y * 16, span)], [expected])
+        self.assertIn("std::clamp(surface_level, min_owner_level, max_owner_level)", loop)
+        world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        span_query = body(world, "IVec2 SHIELD_WorldSystem::water_presentation_vertical_span(")
+        self.assertIn("compute_column_surface_span(column.x, column.y)", span_query)
+        self.assertIn("return {span.min_y - 1, span.max_y + 1};", span_query)
+        self.assertIn("owner_span.x * CHUNK_SIZE_Y", direct)
+        self.assertIn("owner_span.y * CHUNK_SIZE_Y", direct)
+        self.assertIn("const float surface_level = chunk.water_level_data[cell];", loop)
+        self.assertIn("static_cast<std::size_t>(z * resolution + x)", loop)
+        self.assertLess(loop.index("const float surface_level"), loop.index("SampleChunkWaterLevel("))
+        self.assertLess(loop.index(guard.group(0)), loop.index("water_vertices.push_back("))
+
     def test_renderable_owner_accepts_independent_complete_water_geometry(self):
         world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
         selection = body(world, "SHIELD_WorldSystem::renderable_chunks_view()")

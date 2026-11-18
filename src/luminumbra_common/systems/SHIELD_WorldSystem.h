@@ -721,6 +721,10 @@ public:
     bool PrepareInitialWaterPresentationNear(const Vec3& world_pos,
                                              int surface_radius,
                                              bool initialize_capture_water = false);
+    // Inclusive vertical presentation band, including admission's one-chunk margins.
+    // Pure procedural sampling: safe for meshing workers, independent of residency
+    // and live grid allocation. Water outside this band uses its nearest margin.
+    IVec2 water_presentation_vertical_span(const IVec2& column) const;
     const StreamingBudgetFrameStats& get_last_streaming_budget_stats() const {
         return m_last_streaming_budget_stats;
     }

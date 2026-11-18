@@ -4540,6 +4540,11 @@ bool SHIELD_WorldSystem::EnsureCollisionReadyNear(const Vec3& world_pos,
     return EnsureSurfaceReadyNear(world_pos, physics_system, horizontal_radius, horizontal_radius);
 }
 
+IVec2 SHIELD_WorldSystem::water_presentation_vertical_span(const IVec2& column) const {
+    const auto span = compute_column_surface_span(column.x, column.y);
+    return {span.min_y - 1, span.max_y + 1};
+}
+
 bool SHIELD_WorldSystem::PrepareInitialWaterPresentationNear(const Vec3& world_pos,
                                                              int surface_radius,
                                                              bool initialize_capture_water) {
