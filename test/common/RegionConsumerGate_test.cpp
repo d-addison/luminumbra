@@ -3044,14 +3044,16 @@ TEST(RegionConsumerGate, SessionDeniedAvatarStaysFrozenWithoutCapsuleAndRetriesO
         EXPECT_EQ(physics->audio_raycast({512.0f, 10001.3f, 10.0f}, {514.0f, 10001.3f, 10.0f}).hit,
                   tick == 3);
         if (tick == 0) {
-            // Terrain can still take a reserved slot while the avatar is refused.
-            Luminumbra::Chunk chunk({0, 0, 0});
-            chunk.heightmap_data.assign(static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
-                                            static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_Z + 1),
-                                        8.0f);
-            EXPECT_TRUE(physics->add_chunk_collision(chunk));
-            EXPECT_TRUE(physics->audio_raycast({8.0f, 10.0f, 8.0f}, {8.0f, 6.0f, 8.0f}).hit);
-            physics->remove_chunk_collision(chunk.get_id());
+            // The session-prepared terrain horizon uses reserved headroom even
+            // while the dynamic pool is full and the avatar capsule is refused.
+            auto* world = session.GetWorldSystem();
+            ASSERT_NE(world, nullptr);
+            std::array<float, (Luminumbra::CHUNK_SIZE_X + 1) * (Luminumbra::CHUNK_SIZE_Z + 1)>
+                heights{};
+            ASSERT_TRUE(world->sample_simulation_collision(0, 0, heights));
+            const float floor = heights[8u * (Luminumbra::CHUNK_SIZE_X + 1) + 8u];
+            EXPECT_GT(physics->simulation_collision_sample_count(), 0u);
+            EXPECT_TRUE(physics->audio_raycast({8, floor + 2, 8}, {8, floor - 2, 8}).hit);
         }
         // Integration remains denied even when another caller submits input.
         physics->set_avatar_wish_velocity(avatar, {9.0f, 7.0f});
