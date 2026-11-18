@@ -28,6 +28,13 @@ public:
     // (tick_count - returned + 1).. tick_count.
     std::uint32_t advance(double frame_dt);
 
+    // Return ticks from the latest advance that the caller could not execute.
+    // Keep its fractional remainder and clamp telemetry, including on first-tick refusal.
+    void return_unconsumed_ticks(std::uint32_t ticks) noexcept {
+        tick_count_ -= ticks;
+        accumulator_ += static_cast<double>(ticks) * fixed_dt_;
+    }
+
     void reset(std::uint64_t base_tick = 0);
 
     [[nodiscard]] double fixed_dt() const noexcept {
@@ -46,7 +53,7 @@ public:
         return tick_count_;
     }
 
-    // Sub-tick time currently carried toward the next tick (always < fixed_dt).
+    // Time carried toward the next tick; may include returned unconsumed ticks.
     [[nodiscard]] double accumulator() const noexcept {
         return accumulator_;
     }

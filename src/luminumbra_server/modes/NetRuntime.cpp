@@ -114,7 +114,13 @@ int RunNetHostServerMode(const ServerCliOptions& options) {
 
         const auto step = runner.RunFixedTicks(1);
         executed += step.ticks_executed;
-        if (step.ticks_executed == 0) {
+        if (step.ticks_executed == 0 && !step.region_fault) {
+            // Temporary collider pressure leaves connections and inputs intact.
+            next_tick_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(33);
+            std::this_thread::sleep_until(next_tick_time);
+            continue;
+        }
+        if (step.region_fault || step.ticks_executed == 0) {
             LUMINUMBRA_CORE_ERROR("net-host server-mode: tick {} did not advance", executed + 1);
             for (RuntimeTcpClientSlot& slot : slots) {
                 CloseRuntimeTcpSlot(slot);
