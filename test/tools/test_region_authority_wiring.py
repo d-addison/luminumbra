@@ -435,14 +435,65 @@ class SimulationCollisionWiring(unittest.TestCase):
                         refused.index("if (preparation_retries"))
         self.assertLess(refused.index("physics_budget.Finish();"),
                         refused.index("std::this_thread::sleep_for("))
-        for path in ("NetRuntime.cpp", "Replicate.cpp"):
+
+    def assert_runtime_retry_contract(self, source, entry):
+        body = function(source, "int " + entry + "(")
+        loop_guard = "while (executed < options.ticks)"
+        loop = function(body, loop_guard)
+        for declaration in ("const std::uint64_t max_preparation_retries = options.ticks;",
+                            "std::uint64_t preparation_retries = 0;"):
+            self.assertEqual(body.count(declaration), 1)
+            self.assertLess(body.index(declaration), body.index(loop_guard))
+        retry_guard = ("if (step.ticks_executed == 0 && !step.region_fault && "
+                       "preparation_retries < max_preparation_retries)")
+        self.assertIn(retry_guard, loop)
+        retry = function(loop, retry_guard)
+        self.assertEqual(loop.count("++preparation_retries;"), 1)
+        self.assertIn("++preparation_retries;", retry)
+        self.assertIn("std::this_thread::sleep_", retry)
+        self.assertTrue(retry.endswith("continue;"))
+        for forbidden in ("Close", "Shutdown", "return", "executed", "SetAvatarMove",
+                          "SendUsercmd", "BroadcastSnapshot", "PumpInbound"):
+            self.assertNotIn(forbidden, retry)
+        terminal_guard = "if (step.region_fault || step.ticks_executed == 0)"
+        self.assertIn(terminal_guard, loop)
+        terminal = function(loop, terminal_guard)
+        self.assertIn("return 1;", terminal)
+        self.assertNotIn("continue;", terminal)
+        self.assertEqual(loop.count("executed += step.ticks_executed;"), 1)
+        ordered = ("runner.RunFixedTicks(1)", "executed += step.ticks_executed;",
+                   retry_guard, terminal_guard, "server.BroadcastSnapshot(executed,")
+        for before, after in zip(ordered, ordered[1:]):
+            self.assertLess(loop.index(before), loop.index(after))
+        if entry == "RunNetHostServerMode":
+            self.assertIn("CloseRuntimeTcpSlot(slot);", terminal)
+            self.assertIn("next_tick_time = std::chrono::steady_clock::now() + "
+                          "std::chrono::milliseconds(33);", retry)
+            self.assertIn("std::this_thread::sleep_until(next_tick_time);", retry)
+        else:
+            self.assertIn("cmd.tick = executed + 1;", loop)
+            self.assertIn("std::this_thread::sleep_for(std::chrono::milliseconds(33));", retry)
+            for publication in ("get_avatar_position(", "create_dynamic_sphere(",
+                                "destroy_body(", "client.PumpInbound()"):
+                self.assertLess(loop.index(terminal_guard), loop.index(publication))
+
+    def test_runtime_and_replicate_refusals_have_run_wide_tick_budgets(self):
+        for path, entry in (("NetRuntime.cpp", "RunNetHostServerMode"),
+                            ("Replicate.cpp", "RunReplicate")):
+            with self.subTest(path=path):
+                source = (ROOT / "src/luminumbra_server/modes" / path).read_text(encoding="utf-8")
+                self.assert_runtime_retry_contract(source, entry)
+
+    def test_runtime_retry_contract_detects_missing_bounds_and_fault_guards(self):
+        for path, entry in (("NetRuntime.cpp", "RunNetHostServerMode"),
+                            ("Replicate.cpp", "RunReplicate")):
             source = (ROOT / "src/luminumbra_server/modes" / path).read_text(encoding="utf-8")
-            retry = function(source, "if (step.ticks_executed == 0 && !step.region_fault)")
-            self.assertIn("std::this_thread::sleep_", retry)
-            self.assertIn("continue;", retry)
-            self.assertNotIn("Close", retry)
-            self.assertNotIn("return 1;", retry)
-            self.assertIn("if (step.region_fault || step.ticks_executed == 0)", source)
+            for token in ("preparation_retries < max_preparation_retries",
+                          "++preparation_retries;", "!step.region_fault &&",
+                          "step.region_fault || "):
+                self.assertIn(token, source)
+                with self.subTest(path=path, token=token), self.assertRaises(AssertionError):
+                    self.assert_runtime_retry_contract(source.replace(token, "", 1), entry)
 
     def test_remaining_transports_preserve_connections_and_inputs_on_bounded_retry(self):
         for path, entry in (("Gns.cpp", "RunGnsHost"), ("Steam.cpp", "RunSteamHost"),
