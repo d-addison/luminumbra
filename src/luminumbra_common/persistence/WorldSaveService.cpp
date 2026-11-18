@@ -5826,6 +5826,153 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
     }
 }
 
+namespace {
+bool HasIncompleteAuthority(const std::vector<std::shared_ptr<Chunk>>& chunks) {
+    return std::any_of(chunks.begin(), chunks.end(), [](const auto& chunk) {
+        return chunk && chunk->has_simulation_authority() &&
+               chunk->get_state() == ChunkState::Loading;
+    });
+}
+
+bool NeedsRegionalAuthority(AuthorityCaptureParts parts) {
+    return parts == AuthorityCaptureParts::All || parts == AuthorityCaptureParts::Composite ||
+           parts == AuthorityCaptureParts::Chunk;
+}
+
+PreparedRegionDigest PrepareRegionDigest(const std::filesystem::path& save_dir,
+                                         world::RegionKey key,
+                                         const RegionDigestInputs& inputs,
+                                         const SnapshotIndex* admitted_index);
+std::uint64_t HashRegionDigestChunks(const std::vector<std::shared_ptr<Chunk>>& chunks,
+                                     const std::string& ground_object_bytes,
+                                     const std::string& field_page_bytes);
+} // namespace
+
+AuthorityCaptureResult CaptureAuthorityHashes(const WorldStreamingState& state,
+                                              std::optional<std::uint64_t> water_sim_cursor,
+                                              const std::optional<std::string>& regional_projection,
+                                              const std::string& entity_snapshot_json,
+                                              const AuthorityRuntimeHashes& runtime,
+                                              AuthorityCaptureParts parts) try {
+    if (!water_sim_cursor.has_value()) {
+        return {AuthorityCaptureStatus::MissingCursor, std::nullopt};
+    }
+    if (HasIncompleteAuthority(state.snapshot_chunks())) {
+        return {AuthorityCaptureStatus::IncompleteOwner, std::nullopt};
+    }
+    const bool want_chunk = NeedsRegionalAuthority(parts);
+    const bool want_streamed = want_chunk || parts == AuthorityCaptureParts::StreamedAndSubHashes;
+    const bool want_composite =
+        parts == AuthorityCaptureParts::All || parts == AuthorityCaptureParts::Composite;
+    const bool want_sub = parts == AuthorityCaptureParts::All ||
+                          parts == AuthorityCaptureParts::SubHashes ||
+                          parts == AuthorityCaptureParts::StreamedAndSubHashes;
+    if (!want_streamed && !want_sub) {
+        return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
+    }
+    const auto cursor = water_sim_cursor.value();
+    const std::string streamed =
+        want_streamed ? ComputeWorldStreamingStateHash(state, cursor) : std::string();
+    const std::string chunk =
+        want_chunk ? (regional_projection ? StableChecksum(*regional_projection) : streamed)
+                   : std::string();
+    WorldStreamingStateSubHashes sub;
+    if (want_sub) {
+        sub = ComputeWorldStreamingStateSubHashes(state, cursor);
+        if (!entity_snapshot_json.empty()) {
+            sub.entities = StableChecksum(entity_snapshot_json);
+        }
+        sub.wind = runtime.wind;
+        sub.weather = runtime.weather;
+        sub.aether = runtime.aether;
+        sub.aether_state = runtime.aether_state;
+    }
+    return {AuthorityCaptureStatus::Ready,
+            AuthorityHashCapture{streamed,
+                                 chunk,
+                                 want_composite ? ComposeWorldHash(chunk,
+                                                                   runtime.wind,
+                                                                   runtime.weather,
+                                                                   runtime.aether,
+                                                                   runtime.scent,
+                                                                   runtime.ecology,
+                                                                   runtime.plant)
+                                                : std::string(),
+                                 std::move(sub)}};
+} catch (const std::exception&) {
+    return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
+}
+
+AuthorityCaptureResult CaptureAuthorityHashes(const WorldStreamingState& state,
+                                              std::optional<std::uint64_t> water_sim_cursor,
+                                              const AuthorityRegionalInputs& regional,
+                                              const std::string& entity_snapshot_json,
+                                              const AuthorityRuntimeHashes& runtime,
+                                              AuthorityCaptureParts parts) try {
+    if (!water_sim_cursor.has_value()) {
+        return {AuthorityCaptureStatus::MissingCursor, std::nullopt};
+    }
+    if (!NeedsRegionalAuthority(parts)) {
+        return CaptureAuthorityHashes(
+            state, water_sim_cursor, std::nullopt, entity_snapshot_json, runtime, parts);
+    }
+    if (HasIncompleteAuthority(state.snapshot_chunks())) {
+        return {AuthorityCaptureStatus::IncompleteOwner, std::nullopt};
+    }
+    std::optional<world::RegionKey> previous;
+    // Work is bounded by the caller's participating regions and their grouped owner inputs;
+    // there is no world inventory scan. Durable decode retains at most one prepared region.
+    for (const auto& region : regional.regions) {
+        ValidateRegionDigestKey(region.key);
+        if (previous && !(previous->x < region.key.x ||
+                          (previous->x == region.key.x && previous->z < region.key.z))) {
+            return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
+        }
+        previous = region.key;
+        if (!region.frozen_digest && (HasIncompleteAuthority(region.inputs.live) ||
+                                      HasIncompleteAuthority(region.inputs.parked))) {
+            return {AuthorityCaptureStatus::IncompleteOwner, std::nullopt};
+        }
+    }
+    // One read-ownership scope spans index admission and every region: an indexed save cannot
+    // publish between regions, so the projection folds a single publication generation.
+    const detail::SnapshotReadOwnership capture_ownership;
+    RegionDigestOperation operation(regional.save_dir, regional.require_index);
+    std::string projection =
+        "authoritative_chunks:v2:" + std::to_string(water_sim_cursor.value()) + ":";
+    for (const auto& region : regional.regions) {
+        std::uint64_t digest = 0;
+        if (region.frozen_digest.has_value()) {
+            digest = region.frozen_digest.value();
+        } else {
+            // The regional index setting is the single source of truth for every region;
+            // copy the inputs only when a region's own default disagrees with it.
+            std::optional<RegionDigestInputs> adjusted;
+            if (region.inputs.require_index != regional.require_index) {
+                adjusted = region.inputs;
+                adjusted->require_index = regional.require_index;
+            }
+            const std::optional<PreparedRegionDigest> prepared =
+                operation.prepare(region.key, adjusted ? *adjusted : region.inputs);
+            if (!prepared.has_value()) {
+                return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
+            }
+            digest = HashPreparedRegionDigest(*prepared);
+        }
+        // The checked local prepared value has been released before the next owner read.
+        projection += std::to_string(region.key.x) + "," + std::to_string(region.key.z) + ":" +
+                      std::to_string(digest) + ";";
+    }
+    return CaptureAuthorityHashes(state,
+                                  water_sim_cursor,
+                                  std::optional{std::move(projection)},
+                                  entity_snapshot_json,
+                                  runtime,
+                                  parts);
+} catch (const std::exception&) {
+    return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
+}
+
 RegionDigestOperation::RegionDigestOperation(const std::filesystem::path& save_dir,
                                              bool require_index)
     : m_save_dir(save_dir)
@@ -5846,6 +5993,22 @@ RegionDigestOperation::RegionDigestOperation(const std::filesystem::path& save_d
 std::uint64_t RegionDigestOperation::digest(world::RegionKey key,
                                             const RegionDigestInputs& inputs) {
     const detail::SnapshotReadOwnership ownership;
+    const auto prepared = PrepareChunks(key, inputs);
+    return HashRegionDigestChunks(
+        prepared.chunks, inputs.ground_object_bytes, inputs.field_page_bytes);
+}
+
+PreparedRegionDigest RegionDigestOperation::prepare(world::RegionKey key,
+                                                    const RegionDigestInputs& inputs) {
+    auto prepared = PrepareChunks(key, inputs);
+    prepared.ground_object_bytes = inputs.ground_object_bytes;
+    prepared.field_page_bytes = inputs.field_page_bytes;
+    return prepared;
+}
+
+PreparedRegionDigest RegionDigestOperation::PrepareChunks(world::RegionKey key,
+                                                          const RegionDigestInputs& inputs) {
+    const detail::SnapshotReadOwnership ownership;
     const auto revision = PublicationRevision().load(std::memory_order_relaxed);
     if (!m_save_dir.empty() && revision != m_publication_revision) {
         WorldSaveService::SaveFormat format;
@@ -5858,7 +6021,7 @@ std::uint64_t RegionDigestOperation::digest(world::RegionKey key,
         m_publication_revision = revision;
     }
     m_input_items += inputs.live.size() + inputs.parked.size() + inputs.durable.size();
-    return WorldSaveService::region_simulation_digest(m_save_dir, key, inputs, &m_index);
+    return PrepareRegionDigest(m_save_dir, key, inputs, &m_index);
 }
 
 namespace {
@@ -5963,10 +6126,11 @@ bool ReadDigestAuthority(const std::filesystem::path& save_dir,
 }
 } // namespace
 
-std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::path& save_dir,
-                                                         world::RegionKey key,
-                                                         const RegionDigestInputs& inputs,
-                                                         const SnapshotIndex* admitted_index) {
+namespace {
+PreparedRegionDigest PrepareRegionDigest(const std::filesystem::path& save_dir,
+                                         world::RegionKey key,
+                                         const RegionDigestInputs& inputs,
+                                         const SnapshotIndex* admitted_index) {
     const detail::SnapshotReadOwnership ownership;
     ValidateRegionDigestKey(key);
     WorldStreamingState region;
@@ -5976,7 +6140,7 @@ std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::
         if (!chunk || !chunk->has_simulation_authority())
             return false;
         int rx = 0, rz = 0;
-        region_coords_for_chunk(chunk->get_coords(), rx, rz);
+        WorldSaveService::region_coords_for_chunk(chunk->get_coords(), rx, rz);
         return rx == key.x && rz == key.z;
     };
     for (const auto& chunk : inputs.live) {
@@ -6002,12 +6166,49 @@ std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::
                 region.insert_chunk(chunk);
         }
     }
-    std::string composed = ComputeRegionContentHash(region);
-    if (!inputs.ground_object_bytes.empty())
-        composed = StableChecksum(composed + "|ground:" + inputs.ground_object_bytes);
-    if (!inputs.field_page_bytes.empty())
-        composed = StableChecksum(composed + "|pages:" + inputs.field_page_bytes);
+    auto chunks = region.snapshot_chunks();
+    std::sort(chunks.begin(), chunks.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs->get_id() < rhs->get_id();
+    });
+    return {.chunks = std::move(chunks), .ground_object_bytes = {}, .field_page_bytes = {}};
+}
+} // namespace
+
+namespace {
+std::uint64_t HashRegionDigestChunks(const std::vector<std::shared_ptr<Chunk>>& chunks,
+                                     const std::string& ground_object_bytes,
+                                     const std::string& field_page_bytes) {
+    RegionContentHasher hasher;
+    for (const auto& chunk : chunks) {
+        hasher.append(*chunk);
+    }
+    std::ostringstream stream;
+    stream << std::hex << std::setw(16) << std::setfill('0') << hasher.value();
+    std::string composed = stream.str();
+    if (!ground_object_bytes.empty()) {
+        composed = StableChecksum(composed + "|ground:" + ground_object_bytes);
+    }
+    if (!field_page_bytes.empty()) {
+        composed = StableChecksum(composed + "|pages:" + field_page_bytes);
+    }
     return std::stoull(composed, nullptr, 16);
+}
+
+} // namespace
+
+std::uint64_t HashPreparedRegionDigest(const PreparedRegionDigest& prepared) {
+    return HashRegionDigestChunks(
+        prepared.chunks, prepared.ground_object_bytes, prepared.field_page_bytes);
+}
+
+std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::path& save_dir,
+                                                         world::RegionKey key,
+                                                         const RegionDigestInputs& inputs,
+                                                         const SnapshotIndex* admitted_index) {
+    const detail::SnapshotReadOwnership ownership;
+    const auto prepared = PrepareRegionDigest(save_dir, key, inputs, admitted_index);
+    return HashRegionDigestChunks(
+        prepared.chunks, inputs.ground_object_bytes, inputs.field_page_bytes);
 }
 
 std::uint64_t
