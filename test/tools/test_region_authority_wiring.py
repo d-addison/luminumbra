@@ -25,6 +25,111 @@ def function(source, name):
 
 
 class RegionAuthorityWiring(unittest.TestCase):
+    def test_eviction_ownership_probe_excludes_streaming_residency(self):
+        session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(
+            encoding="utf-8")
+        schedule = function(session, "void GameSession::RunRegionScheduler(")
+        enabled = function(schedule, "if (m_activeRegionsEnabled && !m_regionFault)")
+        probe = function(enabled, "[this, &owned_regions](RegionKey key)")
+        opt_in = function(probe, "if (m_authorityProfile.residency_free_eviction)")
+        self.assertEqual(opt_in, "return owned_regions->contains(key);")
+        self.assertNotIn("has_region_members", opt_in)
+        self.assertNotIn("m_worldSystem", opt_in)
+        for owner in ("m_groundObjects.owns_region(key)", "m_fieldPages.owns_region(key)",
+                      "m_energyFieldState->OwnsRegion(key)", "m_regionWork",
+                      "PlantRegionComponent", "owned_regions->contains(key)"):
+            self.assertIn(owner, probe)
+        native = (ROOT / "test/common/GameSessionHeadlessWorld_test.cpp").read_text(
+            encoding="utf-8")
+        peer = function(native, "TEST(GameSessionHeadlessWorldTest, "
+                        "IdleRetentionUsesWorkRegardlessOfStreamedResidency)")
+        self.assertIn("const GameSession::AuthorityProfileOptions profile{.residency_free_eviction = true};", peer)
+        self.assertIn("GameSession session(profile, GameSession::AuthorityProfileTestOnly{}),", peer)
+        self.assertIn("peer(profile, GameSession::AuthorityProfileTestOnly{});", peer)
+        for assertion in (
+                "EXPECT_EQ(session.GetRegionSchedule(), peer.GetRegionSchedule());",
+                "EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), "
+                "peer.GetActiveRegionLedger().canonical_bytes());",
+                "EXPECT_EQ(session.GetActiveRegionLedger().encode(), "
+                "peer.GetActiveRegionLedger().encode());",
+                "EXPECT_EQ(session.ComputeChunkStateHash(), peer.ComputeChunkStateHash());",
+                "EXPECT_EQ(SessionWorldHash(session), SessionWorldHash(peer));"):
+            self.assertGreaterEqual(peer.count(assertion), 2)
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("common/GameSessionHeadlessWorld_test.cpp", cmake)
+        self.assertIn("gtest_discover_tests(${_lum_gtest_target}", cmake)
+
+    def test_profile_opt_in_is_reachable_only_from_tests(self):
+        # Until slice I binds the option to negotiated identity, no production
+        # binary may construct a non-default profile. The opt-in constructor is
+        # declared in the header but defined only in a test-only source, so a
+        # production caller fails to link instead of relying on a nameable friend.
+        header = (ROOT / "src/luminumbra_common/world/GameSession.h").read_text(
+            encoding="utf-8")
+        tag = function(header, "struct AuthorityProfileTestOnly")
+        self.assertEqual(tag, "explicit AuthorityProfileTestOnly() = default;")
+        self.assertIn("GameSession(const AuthorityProfileOptions& authority_profile, "
+                      "AuthorityProfileTestOnly);", header)
+        self.assertIn("GameSession(const AuthorityProfileOptions& authority_profile, "
+                      "AuthorityProfileTag);", header)
+        private = header[header.index("\nprivate:\n", header.index("class GameSession {")):]
+        self.assertIn("struct AuthorityProfileTag {};", private)
+        self.assertNotIn("friend struct GameSessionAuthorityProfileTestAccess", header)
+        self.assertNotIn("AuthorityProfileTestKey", header)
+        for path in sorted((ROOT / "src").rglob("*")):
+            if path.suffix not in (".h", ".hpp", ".cpp", ".cc", ".inl"):
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            rel = path.relative_to(ROOT).as_posix()
+            if rel != "src/luminumbra_common/world/GameSession.h":
+                self.assertNotIn("AuthorityProfileTestOnly", text, rel)
+            if rel not in ("src/luminumbra_common/world/GameSession.h",
+                           "src/luminumbra_common/world/GameSession.cpp"):
+                self.assertNotIn("AuthorityProfileTag", text, rel)
+                self.assertNotIn("residency_free_eviction", text, rel)
+        # The seam source is the only definition, and only a test target compiles it.
+        seam_name = "GameSessionAuthorityProfileTestSeam.cpp"
+        seam = (ROOT / "test/common" / seam_name).read_text(encoding="utf-8")
+        self.assertIn("AuthorityProfileTestOnly /*test_only*/)", seam)
+        self.assertIn(": GameSession(authority_profile, AuthorityProfileTag{}) {}", seam)
+        for path in sorted(ROOT.rglob("CMakeLists.txt")) + sorted(ROOT.rglob("*.cmake")):
+            rel = path.relative_to(ROOT).as_posix()
+            if rel.startswith(("build/", ".git/", "vendor/", "_deps/")) or "/_deps/" in rel:
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            expected = 1 if rel == "test/CMakeLists.txt" else 0
+            self.assertEqual(text.count(seam_name), expected, rel)
+
+    def test_default_eviction_preserves_legacy_residency_probe(self):
+        session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(
+            encoding="utf-8")
+        schedule = function(session, "void GameSession::RunRegionScheduler(")
+        enabled = function(schedule, "if (m_activeRegionsEnabled && !m_regionFault)")
+        probe = function(enabled, "[this, &owned_regions](RegionKey key)")
+        self.assertTrue(probe.endswith(
+            "} return owned_regions->contains(key) || "
+            "(m_worldSystem && m_worldSystem->has_region_members(key.x, key.z));"))
+        self.assertEqual(probe.count("m_authorityProfile.residency_free_eviction"), 1)
+        header = (ROOT / "src/luminumbra_common/world/GameSession.h").read_text(
+            encoding="utf-8")
+        self.assertEqual(function(header, "struct AuthorityProfileOptions"),
+                         "bool residency_free_eviction = false;")
+        self.assertIn("const AuthorityProfileOptions m_authorityProfile;", header)
+        self.assertIn(": GameSession(AuthorityProfileOptions{}, AuthorityProfileTag{}) {}", session)
+        self.assertIn(": m_authorityProfile(authority_profile)", session)
+        # Construction and the single probe gate are its only production uses.
+        # In particular, preparation, config, hashes and save writers cannot read it.
+        self.assertEqual(session.count("m_authorityProfile"), 2)
+        self.assertEqual(session.count("residency_free_eviction"), 1)
+        native = (ROOT / "test/common/GameSessionHeadlessWorld_test.cpp").read_text(
+            encoding="utf-8")
+        default = function(native, "TEST(GameSessionHeadlessWorldTest, "
+                           "IdleRetentionMatchesWorkAndAllResidentOwnership)")
+        self.assertIn("GameSession session;", default)
+        self.assertNotIn("AuthorityProfileOptions", default)
+        self.assertIn("pending, duplicate, zero_count, resident, pristine, loading, pristine_loading", default)
+        self.assertIn("DormantEvictionProfileDoesNotAffectDisabledRegions", native)
+
     def test_far_authority_capture_is_bounded_and_regressions_are_registered(self):
         source = SOURCE.read_text(encoding="utf-8")
         capture = function(source, "SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(")
