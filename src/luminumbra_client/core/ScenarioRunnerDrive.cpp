@@ -9,6 +9,7 @@
 #include "core/ScenarioRunnerImpl.h"
 
 #include "core/Log.h"
+#include "core/scenarios/ScenarioCommon.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
@@ -230,63 +231,17 @@ bool ScenarioRunnerImpl::driveAtmosphereCamera() {
 
 bool ScenarioRunnerImpl::driveWeatherVisual() {
     if (scenario_config.weather_visual_smoke() && scenario_ready && g_camera) {
-        // SIM-DRIVEN weather overlay (one-way, ). First
-        // half of the run captures the CLEAR-SKY control (premise guard
-        // this is the dedicated weather scenario with a clear-sky
-        // control phase); the weather phase at the midpoint pushes a
-        // render state derived from the REPLICATED WeatherSystem state
-        // sampled at the camera -- the overlay uniforms come from sim
-        // precipitation / storm / advected wind, not the debug mapping.
         const double elapsed_play_seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                           scenario_play_started_at)
                 .count();
         const double duration = static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
         const bool weather_phase = (elapsed_play_seconds / duration) >= 0.5;
+        PinComparisonAtmosphere(
+            renderPipeline, root_dir / "data/common/particles", g_camera->Position, weather_phase);
+        // Match the celestial inputs across the control and rain captures too.
+        renderPipeline.set_season_tick(0);
         const auto* weather = gameSession->GetWeatherSystem();
-        Luminumbra::Rendering::WeatherRenderState wstate;
-        if (weather_phase && weather) {
-            const Luminumbra::Vec3 cam(
-                g_camera->Position.x, g_camera->Position.y, g_camera->Position.z);
-            const auto sample = weather->SampleAt(cam);
-            // Sim precipitation drives the overlay. In this dedicated
-            // scenario we floor rain to a strong, deterministic value
-            // at capture so the gate's clear-vs-weather luma drop +
-            // streak gradient measure a stable overlay (premise guard:
-            // storms run ONLY here). The wind direction/strength + the
-            // storm intensity are taken straight from sim state.
-            const float precip = std::max(sample.precip_intensity, 1.0f);
-            wstate.rain_intensity = precip;
-            wstate.snow_intensity = (sample.category == Luminumbra::Systems::WeatherCategory::Snow)
-                                        ? sample.precip_intensity
-                                        : 0.0f;
-            wstate.fog_density =
-                (sample.category == Luminumbra::Systems::WeatherCategory::Fog) ? 0.4f : 0.1f;
-            wstate.storm_intensity = sample.storm_intensity;
-            wstate.wetness = precip;
-            const float wlen =
-                std::sqrt(sample.wind.x * sample.wind.x + sample.wind.y * sample.wind.y);
-            if (wlen > 1e-4f) {
-                wstate.wind_direction = glm::vec3(sample.wind.x / wlen, 0.0f, sample.wind.y / wlen);
-                wstate.wind_strength = std::clamp(wlen / 13.0f, 0.0f, 1.0f);
-            }
-            renderPipeline.set_weather_state(wstate);
-        } else {
-            // Clear-sky control: a driven CLEAR state (overlay off).
-            renderPipeline.set_weather_state(wstate);
-        }
-
-        // Precipitation is rendered by the same world-space emitters as live play.
-        // Consume the final pin rather than the earlier live sample, including the
-        // clear control that stops emission before its baseline capture.
-        if (auto* particles = renderPipeline.particles()) {
-            const auto& frame_weather = renderPipeline.get_weather_state();
-            particles->set_precipitation(root_dir / "data/common/particles",
-                                         g_camera->Position,
-                                         frame_weather.rain_intensity,
-                                         frame_weather.snow_intensity);
-            particles->set_wind(frame_weather.wind_direction * frame_weather.wind_strength * 8.0f);
-        }
 
         // LIGHTNING. The SIM strike schedule is a pure
         // function of (seed+13, storm state, tick); we read its count for
