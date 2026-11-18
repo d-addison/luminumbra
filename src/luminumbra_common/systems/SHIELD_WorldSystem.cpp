@@ -4564,6 +4564,90 @@ bool SHIELD_WorldSystem::EnsureCollisionReadyNear(const Vec3& world_pos,
     return EnsureSurfaceReadyNear(world_pos, physics_system, horizontal_radius, horizontal_radius);
 }
 
+bool SHIELD_WorldSystem::PrepareInitialWaterPresentationNear(const Vec3& world_pos,
+                                                             int surface_radius,
+                                                             bool initialize_capture_water) {
+    if (!m_water_system || m_durable_read_failed ||
+        !World::SurfaceRadiiSupported(surface_radius, 0)) {
+        return false;
+    }
+    // Preflight the entire bounded band before publishing any mesh. Never stream here:
+    // the host and client must retain the inventory established by surface admission.
+    for (const float component : {world_pos.x, world_pos.y, world_pos.z}) {
+        if (!std::isfinite(component) ||
+            std::abs(component) >= World::kFarVolumeExactCoordinateLimitMeters - 256) {
+            return false;
+        }
+    }
+    const IVec3 center = world_to_chunk_coords(world_pos);
+    // Fixed storage: the checked surface admission bound includes vertical margins.
+    std::array<Chunk*, World::kMaxSurfaceChunks> chunks{};
+    std::size_t count = 0;
+    std::size_t capacity = 0;
+    for (int dz = -surface_radius; dz <= surface_radius; ++dz) {
+        for (int dx = -surface_radius; dx <= surface_radius; ++dx) {
+            const auto span = column_surface_span(center.x + dx, center.z + dz);
+            if (!World::AddSurfaceColumnChunks(span.min_y, span.max_y, capacity)) {
+                return false;
+            }
+            for (int y = span.min_y - 1; y <= span.max_y + 1; ++y) {
+                const auto it = m_streaming_state.chunks.find(
+                    Chunk::calculate_id(IVec3(center.x + dx, y, center.z + dz)));
+                if (it == m_streaming_state.chunks.end() || !it->second) {
+                    return false;
+                }
+                auto& chunk = *it->second;
+                if (chunk.get_state() != ChunkState::Ready || chunk.pending_lod.load() >= 0 ||
+                    chunk.current_lod.load() < 0 || chunk.current_lod.load() > 2) {
+                    return false;
+                }
+                if (chunk.has_water_sim.load()) {
+                    const int resolution = chunk.current_water_resolution.load();
+                    if (resolution < 4 || resolution > 32) {
+                        return false;
+                    }
+                    const auto cells =
+                        static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
+                    if (chunk.water_level_data.size() != cells ||
+                        chunk.water_depth_mm.size() != cells) {
+                        return false;
+                    }
+                }
+                // At most 8192 pointers, including the surface band's vertical margins.
+                chunks[count++] = &chunk;
+            }
+        }
+    }
+    for (std::size_t index = 0; index < count; ++index) {
+        auto* chunk = chunks[index];
+        if (initialize_capture_water && !chunk->has_water_sim.load()) {
+            m_water_system->InitializeGeneratedWater(*chunk);
+            chunk->mark_water_state_dirty();
+        }
+        if (chunk->water_mesh_generated.load()) {
+            continue;
+        }
+        Chunk presentation(chunk->get_coords());
+        if (chunk->has_water_sim.load()) {
+            presentation.current_water_resolution.store(chunk->current_water_resolution.load());
+            presentation.water_level_data = chunk->water_level_data;
+            presentation.water_depth_mm = chunk->water_depth_mm;
+            presentation.has_water_sim.store(true);
+        } else {
+            m_water_system->InitializeGeneratedWater(presentation);
+        }
+        World::MarchingCubes::GenerateWaterMesh(*m_water_system, *this, presentation);
+        if (!presentation.water_mesh_generated.load()) {
+            return false;
+        }
+        chunk->water_mesh_vertices = std::move(presentation.water_mesh_vertices);
+        chunk->water_mesh_indices = std::move(presentation.water_mesh_indices);
+        chunk->water_mesh_version.fetch_add(1);
+        chunk->water_mesh_generated.store(true, std::memory_order_release);
+    }
+    return true;
+}
+
 bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
                                                 PhysicsSystem* physics_system,
                                                 int surface_radius,
