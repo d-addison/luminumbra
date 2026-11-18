@@ -413,7 +413,8 @@ uint32_t ParticlePass::add_splash_emitter(const std::filesystem::path& json_path
 uint32_t ParticlePass::add_waterfall_spray(const std::filesystem::path& json_path,
                                            const glm::vec3& plunge_pos,
                                            float drop_height,
-                                           float channel_width) {
+                                           float channel_width,
+                                           std::size_t sheet_site) {
     // a waterfall spray emitter is a normal emitter anchored at the
     // plunge foot. After loading we re-shape its spawn box + emission rate to the
     // detected fall's geometry so a tall/wide fall throws a proportionally larger
@@ -425,6 +426,8 @@ uint32_t ParticlePass::add_waterfall_spray(const std::filesystem::path& json_pat
     }
     ActiveEmitter& spray = m_active_emitters.back();
     spray.waterfall_spray = true;
+    spray.waterfall_site = sheet_site;
+    spray.spawn_scale = sheet_site == kInvalidEmitter ? 1.0f : 0.0f;
     // Spawn box spans the channel width horizontally and a shallow band at the
     // plunge pool surface; clamp so the mist stays a plume, not a fog bank.
     const float half_w = std::clamp(channel_width * 0.6f, 1.5f, 8.0f);
@@ -437,6 +440,19 @@ uint32_t ParticlePass::add_waterfall_spray(const std::filesystem::path& json_pat
     spray.data.base_velocity.y = std::max(spray.data.base_velocity.y, 1.5f * intensity);
     spray.data.wind_response = std::max(spray.data.wind_response, 0.4f); // mist drifts on wind
     return id;
+}
+
+void ParticlePass::set_waterfall_live_factors(std::span<const float> live_factors) {
+    // At most kMaxEmitters, with one constant-time site lookup per bound spray.
+    for (auto& emitter : m_active_emitters) {
+        if (!emitter.waterfall_spray || emitter.waterfall_site == kInvalidEmitter) {
+            continue;
+        }
+        const float live = emitter.waterfall_site < live_factors.size()
+                               ? live_factors[emitter.waterfall_site]
+                               : 0.0f;
+        emitter.spawn_scale = std::isfinite(live) ? std::clamp(live, 0.0f, 1.0f) : 0.0f;
+    }
 }
 
 uint64_t
