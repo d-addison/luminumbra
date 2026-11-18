@@ -1071,6 +1071,18 @@ public:
     }
     // Resident chunk, else parked chunk, else nullptr.
     std::shared_ptr<::Luminumbra::Chunk> find_authoritative_chunk(const IVec3& coords) const;
+    // Owner-thread admission of one canonical Y=0 column. Generated renderer caches
+    // cannot seed authority; incomplete or legacy saved water requires migration.
+    // Returns nullptr on parking pressure, without replacing an existing owner.
+    std::shared_ptr<Chunk> resolve_water_column(const IVec3& coords);
+    // Canonical authority only: never generates or reads Loading worker storage.
+    std::shared_ptr<Chunk> inspect_water_column(const IVec3& coords) const;
+    // Release only matching, still-unclaimed parked candidates; at most 832 per call.
+    void discard_unclaimed_water_columns(std::span<const std::shared_ptr<Chunk>> candidates);
+    // Const work diagnostic: full terrain generations performed by column admission.
+    std::uint64_t water_columns_generated() const {
+        return m_water_columns_generated;
+    }
     // Resident chunks plus parked chunks (parked ones sorted by id). No duplicates.
     std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_authoritative_chunks() const;
     std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_parked_chunks() const;
@@ -1277,6 +1289,8 @@ private:
     mutable bool m_durable_read_failed = false;
     bool m_evictions_suspended = false;
     std::shared_ptr<Chunk> read_committed_chunk(const IVec3& coords) const;
+    void migrate_restored_water_column(const std::shared_ptr<Chunk>& chunk);
+    std::uint64_t m_water_columns_generated = 0;
     std::size_t m_parked_bytes = 0;
     bool m_durable_residency = false;
     std::shared_ptr<World::FarWorldAuthorityChanges> m_far_world_changes;

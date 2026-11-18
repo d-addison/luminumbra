@@ -28,6 +28,7 @@
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <numeric>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -3008,4 +3009,426 @@ TEST(WaterSeedInputs, AdmittedWakeAndStepClaimOnlyWaterOwnership) {
     }
 }
 
+} // namespace
+
+namespace {
+struct ColumnFixture {
+    SHIELD_WorldSystem world{nullptr, nullptr, SeedParams(), 777};
+    WaterSystem water{nullptr, &world};
+
+    ColumnFixture() {
+        world.SetWaterSystem(&water);
+        world.set_durable_residency(true);
+    }
+
+    std::shared_ptr<Chunk> saved_column(const IVec3& coords = IVec3(0)) {
+        auto chunk = std::make_shared<Chunk>(coords);
+        world.GenerateChunkData(*chunk);
+        water.InitializeGeneratedWater(*chunk);
+        chunk->set_water_authority();
+        chunk->set_state(ChunkState::Idle);
+        return chunk;
+    }
+};
+
+TEST(WaterSeedInputs, CanonicalColumnsIgnoreRendererWaterLodAndLoadingStorage) {
+    for (int cache_kind = 0; cache_kind < 5; ++cache_kind) {
+        SCOPED_TRACE(cache_kind);
+        ColumnFixture absent, cached;
+        auto renderer = std::make_shared<Chunk>(IVec3(0));
+        if (cache_kind != 0) {
+            cached.world.GenerateChunkData(*renderer, cache_kind == 1 ? 4 : 1);
+        }
+        if (cache_kind == 2) {
+            cached.water.InitializeGeneratedWater(*renderer);
+        }
+        if (cache_kind == 3) {
+            renderer->water_depth_mm.push_back(1234);
+            renderer->is_water_sleeping.store(true);
+        }
+        ASSERT_TRUE(cached.world.adopt_streamed_chunk(renderer));
+        if (cache_kind == 0) {
+            renderer->set_state(ChunkState::Loading);
+            auto unpublished = std::make_shared<HighWaterSeedInputs>();
+            unpublished->terrain.fill(10000.0f);
+            renderer->stage_water_seed_inputs(unpublished);
+        }
+        const auto first = absent.world.resolve_water_column({0, 0, 0});
+        const auto second = cached.world.resolve_water_column({0, 0, 0});
+        ASSERT_NE(first, nullptr);
+        ASSERT_NE(second, nullptr);
+        EXPECT_TRUE(first->same_water_state(*second));
+        EXPECT_EQ(first->sdf_data, second->sdf_data);
+        EXPECT_EQ(first->heightmap_data, second->heightmap_data);
+        EXPECT_EQ(first->material_data, second->material_data);
+        EXPECT_FALSE(second->has_water_sim.load());
+        EXPECT_FALSE(second->needs_authority());
+        EXPECT_TRUE(second->water_depth_mm.empty());
+        EXPECT_EQ(second == renderer, cache_kind == 4);
+        EXPECT_EQ(cached.world.water_columns_generated(), cache_kind == 4 ? 0u : 1u);
+        EXPECT_EQ(cached.world.resolve_water_column({0, 0, 0}), second);
+        EXPECT_EQ(absent.world.resolve_water_column({0, 0, 0}), first);
+        EXPECT_EQ(absent.world.water_columns_generated(), 1u);
+        EXPECT_EQ(absent.world.inspect_water_column({0, 0, 0}), nullptr);
+        cached.world.clear_world(nullptr);
+        EXPECT_EQ(cached.world.water_columns_generated(), 0u);
+    }
+}
+
+TEST(WaterSeedInputs, CanonicalColumnValidationAndParkingPressurePreserveOwners) {
+    ColumnFixture fixture;
+    for (const auto coords : {IVec3(0, 1, 0),
+                              IVec3(Chunk::kPackedMinXz - 1, 0, 0),
+                              IVec3(Chunk::kPackedMaxXz + 1, 0, 0),
+                              IVec3(0, 0, Chunk::kPackedMinXz - 1),
+                              IVec3(0, 0, Chunk::kPackedMaxXz + 1)}) {
+        EXPECT_THROW(fixture.world.resolve_water_column(coords), std::invalid_argument);
+        EXPECT_THROW(fixture.world.inspect_water_column(coords), std::invalid_argument);
+    }
+    fixture.world.SetWaterSystem(nullptr);
+    EXPECT_THROW(fixture.world.resolve_water_column({0, 0, 0}), std::invalid_argument);
+    fixture.world.SetWaterSystem(&fixture.water);
+    fixture.world.set_durable_residency(false);
+    EXPECT_THROW(fixture.world.resolve_water_column({0, 0, 0}), std::invalid_argument);
+    fixture.world.set_durable_residency(true);
+    EXPECT_EQ(fixture.world.water_columns_generated(), 0u);
+    fixture.world.set_parked_bytes_limit(1);
+    EXPECT_EQ(fixture.world.resolve_water_column({0, 0, 0}), nullptr);
+    EXPECT_TRUE(fixture.world.persistence_save_requested());
+    EXPECT_EQ(fixture.world.parking_status().parked_bytes, 0u);
+    EXPECT_TRUE(fixture.world.snapshot_authoritative_chunks().empty());
+    fixture.world.set_parked_bytes_limit(0);
+    const auto owner = fixture.world.resolve_water_column({0, 0, 0});
+    ASSERT_NE(owner, nullptr);
+    const auto parked_bytes = fixture.world.parking_status().parked_bytes;
+    fixture.world.set_parked_bytes_limit(parked_bytes);
+    EXPECT_EQ(fixture.world.resolve_water_column({1, 0, 0}), nullptr);
+    EXPECT_EQ(fixture.world.resolve_water_column({0, 0, 0}), owner);
+    EXPECT_EQ(fixture.world.parking_status().parked_bytes, parked_bytes);
+    EXPECT_EQ(fixture.world.parking_status().parked_count, 1u);
+}
+
+void ExpectRefusedColumnAuthority(int damage) {
+    SCOPED_TRACE(damage);
+    ColumnFixture fixture;
+    const auto chunk = fixture.saved_column();
+    switch (damage) {
+        case 0:
+            chunk->water_edge_flux.clear();
+            break;
+        case 1:
+            chunk->water_depth_mm.pop_back();
+            break;
+        case 2:
+            chunk->water_bed_mm.clear();
+            break;
+        case 3:
+            chunk->water_level_data.clear();
+            break;
+        case 4:
+            chunk->water_flow_data.clear();
+            break;
+        case 5:
+            chunk->current_water_resolution.store(3);
+            break;
+        case 6:
+            chunk->ticks_below_threshold = -1;
+            break;
+        case 7:
+            chunk->water_depth_mm.front() = -1;
+            break;
+        case 8:
+            chunk->water_sim_terrain_height.front() = std::numeric_limits<float>::infinity();
+            break;
+        case 9:
+            chunk->has_water_sim.store(false);
+            break;
+    }
+    ASSERT_TRUE(fixture.world.adopt_streamed_chunk(chunk));
+    const auto before = Persistence::SerializeChunkAuthoritySnapshotJson(*chunk);
+    EXPECT_THROW(fixture.world.resolve_water_column({0, 0, 0}), std::invalid_argument);
+    EXPECT_EQ(Persistence::SerializeChunkAuthoritySnapshotJson(*chunk), before);
+    EXPECT_EQ(fixture.world.find_streamed_chunk({0, 0, 0}), chunk);
+    EXPECT_EQ(fixture.world.water_columns_generated(), 0u);
+}
+
+void ExpectRefusedPendingColumn(int pending) {
+    SCOPED_TRACE(pending);
+    ColumnFixture legacy;
+    auto terrain = std::make_shared<Chunk>(IVec3(0));
+    legacy.world.GenerateChunkData(*terrain);
+    if (pending == 0) {
+        terrain->mark_sdf_loaded_or_edited();
+    } else {
+        legacy.water.InitializeGeneratedWater(*terrain);
+        terrain->mark_water_state_dirty();
+        if (pending == 2) {
+            terrain->clear_water_state_dirty();
+        }
+    }
+    ASSERT_TRUE(legacy.world.adopt_streamed_chunk(terrain));
+    const auto before = Persistence::SerializeChunkAuthoritySnapshotJson(*terrain);
+    EXPECT_THROW(legacy.world.resolve_water_column({0, 0, 0}), std::invalid_argument);
+    EXPECT_EQ(Persistence::SerializeChunkAuthoritySnapshotJson(*terrain), before);
+    EXPECT_EQ(legacy.world.find_streamed_chunk({0, 0, 0}), terrain);
+    EXPECT_EQ(terrain->has_water_sim.load(), pending != 0);
+    EXPECT_EQ(terrain->is_water_state_dirty(), pending == 1);
+    EXPECT_EQ(terrain->water_revision(), pending == 0 ? 0u : 1u);
+    EXPECT_EQ(legacy.world.water_columns_generated(), 0u);
+}
+
+TEST(WaterSeedInputs, CanonicalColumnsRefuseIncompleteAndLegacyAuthorityWithoutMutation) {
+    // Sweep integer grids, mirrors, resolution and persisted bookkeeping.
+    for (int damage = 0; damage < 10; ++damage) {
+        ExpectRefusedColumnAuthority(damage);
+    }
+    for (int pending = 0; pending < 3; ++pending) {
+        ExpectRefusedPendingColumn(pending);
+    }
+}
+
+void ExpectCanonicalDurableColumn(int cache_kind, int failure) {
+    SCOPED_TRACE(cache_kind);
+    SCOPED_TRACE(failure);
+    ColumnFixture fixture;
+    std::shared_ptr<Chunk> cache;
+    if (cache_kind != 0) {
+        cache = std::make_shared<Chunk>(IVec3(0));
+        if (cache_kind == 2) {
+            fixture.world.GenerateChunkData(*cache);
+            fixture.water.InitializeGeneratedWater(*cache);
+        }
+        ASSERT_TRUE(fixture.world.adopt_streamed_chunk(cache));
+        cache->set_state(cache_kind == 1 ? ChunkState::Loading : ChunkState::Idle);
+    }
+    auto saved = fixture.saved_column(failure == 3 ? IVec3(1, 0, 0) : IVec3(0));
+    if (failure == 4) {
+        saved->sdf_data.clear();
+        saved->heightmap_data.clear();
+    }
+    if (failure == 5) {
+        saved->water_edge_flux.clear();
+    }
+    if (failure == 6) {
+        saved->clear_water_data();
+        saved->mark_sdf_loaded_or_edited();
+    }
+    if (failure == 7) {
+        saved->has_water_sim.store(false);
+    }
+    const auto before = Persistence::SerializeChunkAuthoritySnapshotJson(*saved);
+    int reads = 0;
+    fixture.world.set_durable_chunk_loader(
+        [&](const IVec3&) -> std::shared_ptr<Chunk> {
+            ++reads;
+            if (failure == 1) {
+                return nullptr;
+            }
+            if (failure == 2) {
+                throw std::runtime_error("unreadable committed column");
+            }
+            return saved;
+        },
+        {});
+    fixture.world.remember_durable_chunks({IVec3(0)});
+    if (failure != 0) {
+        EXPECT_THROW(fixture.world.resolve_water_column({0, 0, 0}), std::invalid_argument);
+        if (failure < 5) {
+            EXPECT_THROW(fixture.world.resolve_water_column({0, 0, 0}), std::invalid_argument);
+        }
+        EXPECT_EQ(fixture.world.find_streamed_chunk({0, 0, 0}), cache);
+        EXPECT_EQ(Persistence::SerializeChunkAuthoritySnapshotJson(*saved), before);
+        EXPECT_EQ(fixture.world.durable_read_failed(), failure < 5);
+        EXPECT_EQ(fixture.world.parking_status().parked_count, 0u);
+    } else {
+        EXPECT_EQ(fixture.world.resolve_water_column({0, 0, 0}), saved);
+        EXPECT_EQ(fixture.world.resolve_water_column({0, 0, 0}), saved);
+        EXPECT_EQ(fixture.world.find_authoritative_chunk({0, 0, 0}), saved);
+        EXPECT_EQ(fixture.world.parking_status().parked_count, cache ? 0u : 1u);
+        EXPECT_EQ(Persistence::SerializeChunkAuthoritySnapshotJson(*saved), before);
+    }
+    EXPECT_EQ(reads, 1);
+    EXPECT_EQ(fixture.world.water_columns_generated(), 0u);
+}
+
+TEST(WaterSeedInputs, CanonicalDurableColumnsSupersedeCachesAndFailedReadsNeverRegenerate) {
+    for (int cache_kind = 0; cache_kind < 3; ++cache_kind) {
+        for (int failure = 0; failure < 8; ++failure) {
+            ExpectCanonicalDurableColumn(cache_kind, failure);
+        }
+    }
+}
+
+TEST(WaterSeedInputs, PublishedWaterOwnersPrecedeCommittedCopies) {
+    for (const bool live : {false, true}) {
+        SCOPED_TRACE(live);
+        ColumnFixture fixture;
+        const auto owner = fixture.world.resolve_water_column({0, 0, 0});
+        ASSERT_NE(owner, nullptr);
+        fixture.water.InitializeGeneratedWater(*owner);
+        owner->set_water_authority();
+        if (live) {
+            ASSERT_TRUE(fixture.world.unpark_chunk(owner->get_id()));
+        }
+        fixture.world.remember_durable_chunks({IVec3(0)});
+        int reads = 0;
+        fixture.world.set_durable_chunk_loader(
+            [&](const IVec3&) -> std::shared_ptr<Chunk> {
+                ++reads;
+                throw std::runtime_error("superseded committed copy must not be read");
+            },
+            {});
+        const auto before = Persistence::SerializeChunkAuthoritySnapshotJson(*owner);
+        EXPECT_EQ(fixture.world.inspect_water_column({0, 0, 0}), owner);
+        EXPECT_EQ(fixture.world.resolve_water_column({0, 0, 0}), owner);
+        EXPECT_EQ(Persistence::SerializeChunkAuthoritySnapshotJson(*owner), before);
+        EXPECT_EQ(reads, 0);
+        EXPECT_FALSE(fixture.world.durable_read_failed());
+    }
+}
+
+void ExpectColumnRestorationParity(int saved_resolution, int session_resolution, int state) {
+    SCOPED_TRACE(saved_resolution);
+    SCOPED_TRACE(session_resolution);
+    SCOPED_TRACE(state);
+    ColumnFixture producer, streaming, cold;
+    producer.water.SetSimResolution(saved_resolution);
+    auto saved = producer.saved_column();
+    if (state == 2) {
+        saved->clear_water_data();
+        saved->current_water_resolution.store(saved_resolution);
+    } else if (state == 3) {
+        saved->clear_water_data();
+        producer.water.InitializeGeneratedWater(*saved);
+        saved->has_water_sim.store(false);
+    } else {
+        saved->is_water_sleeping.store(state == 0);
+        saved->ticks_below_threshold = state == 0 ? 120 : 7;
+        saved->max_water_delta_last_tick = state == 0 ? 0.0f : 0.25f;
+        for (std::size_t cell = 0; cell < saved->water_depth_mm.size(); ++cell) {
+            saved->water_depth_mm[cell] = static_cast<std::int32_t>(cell) + 123;
+            saved->water_bed_mm[cell] = static_cast<std::int32_t>(cell) - 321;
+        }
+    }
+    const auto bytes = Persistence::SerializeChunkAuthoritySnapshotJson(*saved);
+    WorldStreamingState left_saved, right_saved;
+    for (auto* snapshot : {&left_saved, &right_saved}) {
+        std::vector<std::string> errors;
+        ASSERT_TRUE(Persistence::LoadWorldStreamingStateSnapshotJson(bytes, *snapshot, errors));
+        ASSERT_TRUE(errors.empty());
+    }
+    const auto left = left_saved.find_chunk(IVec3(0));
+    const auto cold_saved = right_saved.find_chunk(IVec3(0));
+    ASSERT_NE(left, nullptr);
+    ASSERT_NE(cold_saved, nullptr);
+    for (auto* fixture : {&streaming, &cold}) {
+        fixture->water.SetSimResolution(session_resolution);
+        fixture->world.remember_durable_chunks({IVec3(0)});
+    }
+    streaming.world.set_durable_chunk_loader([&](const IVec3&) { return left; }, {});
+    cold.world.set_durable_chunk_loader([&](const IVec3&) { return cold_saved; }, {});
+    ASSERT_TRUE(streaming.world.restore_authoritative_chunk({0, 0, 0}));
+    ASSERT_FALSE(streaming.world.durable_read_failed());
+    const auto right = cold.world.resolve_water_column({0, 0, 0});
+    ASSERT_NE(right, nullptr);
+    EXPECT_EQ(right, cold_saved);
+    EXPECT_EQ(left->current_water_resolution.load(),
+              state >= 2 ? saved_resolution : session_resolution);
+    EXPECT_EQ(right->current_water_resolution.load(), left->current_water_resolution.load());
+    EXPECT_EQ(right->has_water_sim.load(), state < 2);
+    if (state >= 2) {
+        EXPECT_EQ(left->water_depth_mm, saved->water_depth_mm);
+        EXPECT_EQ(left->water_bed_mm, saved->water_bed_mm);
+        EXPECT_EQ(left->water_edge_flux, saved->water_edge_flux);
+    }
+    EXPECT_EQ(right->is_water_sleeping.load(), state == 0);
+    EXPECT_TRUE(left->same_water_state(*right));
+    EXPECT_EQ(left->water_rest_level, right->water_rest_level);
+    EXPECT_EQ(left->water_src_mm, right->water_src_mm);
+    EXPECT_EQ(Persistence::SerializeChunkAuthoritySnapshotJson(*left),
+              Persistence::SerializeChunkAuthoritySnapshotJson(*right));
+    WorldStreamingState left_state, right_state;
+    ASSERT_TRUE(left_state.insert_chunk(left));
+    ASSERT_TRUE(right_state.insert_chunk(right));
+    EXPECT_EQ(Persistence::ComputeRegionContentHash(left_state),
+              Persistence::ComputeRegionContentHash(right_state));
+    EXPECT_EQ(cold.world.resolve_water_column({0, 0, 0}), right);
+    EXPECT_EQ(cold.world.water_columns_generated(), 0u);
+}
+
+TEST(WaterSeedInputs, StreamingAndColdColumnRestorationHaveIdenticalWaterAndAuthority) {
+    for (const int saved_resolution : {4, 8, 16}) {
+        for (const int session_resolution : {8, 16}) {
+            // Sleeping, awake, never-seeded and dormant-grid columns use the same bytes.
+            for (int state = 0; state < 4; ++state) {
+                ExpectColumnRestorationParity(saved_resolution, session_resolution, state);
+            }
+        }
+    }
+}
+
+TEST(WaterSeedInputs, UnclaimedColumnCleanupIsBoundedAndChecksIdentityAfterPartialFailure) {
+    ColumnFixture fixture;
+    std::array<std::shared_ptr<Chunk>, 5> columns;
+    for (int index = 0; index < 5; ++index) {
+        columns[static_cast<std::size_t>(index)] =
+            fixture.world.resolve_water_column({index, 0, 0});
+        ASSERT_NE(columns[static_cast<std::size_t>(index)], nullptr);
+    }
+    const auto stale = std::make_shared<Chunk>(IVec3(0));
+    const std::array stale_candidates{stale, std::shared_ptr<Chunk>{}};
+    fixture.world.discard_unclaimed_water_columns(stale_candidates);
+    EXPECT_EQ(fixture.world.find_authoritative_chunk({0, 0, 0}), columns[0]);
+    // Preserve each kind of claim, even if the authority bit has not been synchronized yet.
+    fixture.water.InitializeGeneratedWater(*columns[1]);
+    columns[1]->set_water_authority();
+    columns[2]->has_water_sim.store(true);
+    columns[3]->mark_water_state_dirty();
+    columns[3]->clear_water_state_dirty();
+    ASSERT_TRUE(fixture.world.unpark_chunk(columns[4]->get_id()));
+    const std::vector<std::shared_ptr<Chunk>> oversized(833);
+    const auto before = fixture.world.parking_status().parked_bytes;
+    EXPECT_THROW(fixture.world.discard_unclaimed_water_columns(oversized), std::invalid_argument);
+    EXPECT_EQ(fixture.world.parking_status().parked_bytes, before);
+    fixture.world.discard_unclaimed_water_columns({});
+    fixture.world.discard_unclaimed_water_columns(columns);
+    EXPECT_EQ(fixture.world.find_authoritative_chunk({0, 0, 0}), nullptr);
+    for (int index = 1; index < 5; ++index) {
+        EXPECT_EQ(fixture.world.find_authoritative_chunk({index, 0, 0}),
+                  columns[static_cast<std::size_t>(index)]);
+    }
+    const auto retained_bytes = fixture.world.parking_status().parked_bytes;
+    fixture.world.discard_unclaimed_water_columns(columns);
+    EXPECT_EQ(fixture.world.parking_status().parked_bytes, retained_bytes);
+    // The caller rolls back its earlier candidates when a later column refuses.
+    const auto earlier = fixture.world.resolve_water_column({0, 0, 0});
+    ASSERT_NE(earlier, nullptr);
+    columns[1]->water_edge_flux.clear();
+    const auto incomplete = Persistence::SerializeChunkAuthoritySnapshotJson(*columns[1]);
+    EXPECT_THROW(fixture.world.resolve_water_column({1, 0, 0}), std::invalid_argument);
+    const std::array partial{earlier, columns[1]};
+    fixture.world.discard_unclaimed_water_columns(partial);
+    EXPECT_EQ(fixture.world.find_authoritative_chunk({0, 0, 0}), nullptr);
+    EXPECT_EQ(fixture.world.parking_status().parked_bytes, retained_bytes);
+    EXPECT_EQ(Persistence::SerializeChunkAuthoritySnapshotJson(*columns[1]), incomplete);
+}
+
+TEST(WaterSeedInputs, ExplicitRegionalOffRetainsLegacyHashAndSaveBytes) {
+    SeedFixture implicit(2), explicit_off(2);
+    explicit_off.water().SetRegionalScheduling(false);
+    for (int tick = 0; tick < 4; ++tick) {
+        implicit.tick();
+        explicit_off.tick();
+        ExpectSameWater(implicit, explicit_off);
+        WorldStreamingState a, b;
+        for (const auto& [id, chunk] : implicit.chunks()) {
+            a.insert_chunk(chunk);
+            b.insert_chunk(explicit_off.chunks().at(id));
+            EXPECT_EQ(Persistence::SerializeChunkRecordPayloadJson(*chunk),
+                      Persistence::SerializeChunkRecordPayloadJson(*explicit_off.chunks().at(id)));
+        }
+        EXPECT_EQ(Persistence::ComputeWorldStreamingStateHash(a),
+                  Persistence::ComputeWorldStreamingStateHash(b));
+    }
+}
 } // namespace

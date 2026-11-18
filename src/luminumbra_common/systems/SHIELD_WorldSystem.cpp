@@ -6829,6 +6829,7 @@ void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
     invalidate_renderable_chunks();
     m_streaming_state.chunks.clear();
     m_parked.clear();
+    m_water_columns_generated = 0;
     m_parked_columns.clear();
     m_durable_chunks.clear();
     m_digest_members.clear();
@@ -7160,6 +7161,155 @@ SHIELD_WorldSystem::find_authoritative_chunk(const IVec3& coords) const {
     return parked != m_parked.end() ? parked->second.chunk : read_committed_chunk(coords);
 }
 
+std::shared_ptr<Chunk> SHIELD_WorldSystem::inspect_water_column(const IVec3& coords) const {
+    if (!m_durable_residency || !m_water_system || coords.y != 0 ||
+        coords.x < Chunk::kPackedMinXz || coords.x > Chunk::kPackedMaxXz ||
+        coords.z < Chunk::kPackedMinXz || coords.z > Chunk::kPackedMaxXz || m_durable_read_failed) {
+        throw std::invalid_argument("Regional water column inspection refused");
+    }
+    const auto id = Chunk::calculate_id(coords);
+    const auto live = m_streaming_state.chunks.find(id);
+    const auto parked = m_parked.find(id);
+    const auto chunk = live != m_streaming_state.chunks.end() ? live->second
+                       : parked != m_parked.end()             ? parked->second.chunk
+                                                              : nullptr;
+    // Loading arrays belong to a worker. Only published authority can supersede
+    // the committed record; renderer-seeded water has no simulation meaning.
+    if (chunk && chunk->get_state() != ChunkState::Loading && chunk->needs_authority()) {
+        return chunk;
+    }
+    return read_committed_chunk(coords);
+}
+
+void SHIELD_WorldSystem::migrate_restored_water_column(const std::shared_ptr<Chunk>& chunk) {
+    if (m_water_system) {
+        // Owner-thread, exactly one restored column (at most a 32x32 water grid).
+        // Migration preserves sleep and never seeds a column without water sim.
+        const std::unordered_map<ChunkID, std::shared_ptr<Chunk>> restored{
+            {chunk->get_id(), chunk}};
+        m_water_system->MigrateChunksToSimResolution(restored);
+    }
+}
+
+std::shared_ptr<Chunk> SHIELD_WorldSystem::resolve_water_column(const IVec3& coords) {
+    // Inspection validates the identity and gives committed authority precedence
+    // over Loading placeholders and idle renderer caches without reading their arrays.
+    auto chunk = inspect_water_column(coords);
+    if (m_durable_read_failed) {
+        throw std::invalid_argument("Regional water committed column unavailable");
+    }
+    const auto id = Chunk::calculate_id(coords);
+    const auto live = m_streaming_state.chunks.find(id);
+    const auto parked = m_parked.find(id);
+    const auto cached = live != m_streaming_state.chunks.end() ? live->second
+                        : parked != m_parked.end()             ? parked->second.chunk
+                                                               : nullptr;
+    if (!chunk && cached && cached->get_state() != ChunkState::Loading) {
+        chunk = cached;
+    }
+    if (chunk && chunk->has_water_authority() && !chunk->has_complete_water_state()) {
+        throw std::invalid_argument("Incomplete regional water column authority");
+    }
+    if (chunk && !chunk->has_water_authority() &&
+        (chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited ||
+         chunk->is_water_state_dirty() || chunk->water_revision() != 0)) {
+        throw std::invalid_argument("Regional water column requires legacy migration");
+    }
+    const bool saved_without_water =
+        chunk && m_durable_chunks.contains(id) && !chunk->has_water_sim.load();
+    if (chunk && (chunk->has_water_authority() || saved_without_water)) {
+        if (chunk == cached) {
+            return chunk;
+        }
+        migrate_restored_water_column(chunk);
+    } else {
+        // Reuse only full generated terrain with pristine, empty water storage.
+        // Discard renderer water and partial/LOD terrain before budgeted preparation.
+        if (chunk && chunk == cached && !chunk->has_water_sim.load() &&
+            chunk->water_revision() == 0 && chunk->current_water_resolution.load() == 8 &&
+            !chunk->is_water_sleeping.load() && chunk->ticks_below_threshold == 0 &&
+            chunk->water_mesh_dirty_ticks == 0 &&
+            std::bit_cast<u32>(chunk->max_water_delta_last_tick) == 0 &&
+            chunk->sdf_data.size() == kFullSdfLattice &&
+            chunk->heightmap_data.size() == kHeightmapCells && chunk->water_depth_mm.empty() &&
+            chunk->water_bed_mm.empty() && chunk->water_edge_flux.empty() &&
+            chunk->water_level_data.empty() && chunk->water_flow_data.empty() &&
+            chunk->water_sim_terrain_height.empty() && chunk->water_rest_level.empty() &&
+            chunk->water_src_mm.empty()) {
+            return chunk;
+        }
+        chunk = std::make_shared<Chunk>(coords);
+        {
+            const auto scope = acquire_worldgen_sample_scope();
+            GenerateChunkData(*chunk);
+            ++m_water_columns_generated;
+        }
+        chunk->set_state(ChunkState::Idle);
+        // Admission leaves water unseeded and unclaimed for the regional executor.
+    }
+    const Persistence::WorldSaveService::SaveOwnership ownership;
+    if (live != m_streaming_state.chunks.end()) {
+        // Jobs retain their old private handle. Publication checks handle identity.
+        live->second->invalidate_near_terrain_snapshot();
+        m_activation_index.erase(*live->second);
+        note_digest_chunk(live->second, false, false);
+        live->second = chunk;
+        m_activation_index.insert(chunk);
+        m_activation_index.content_changed(coords);
+        note_digest_chunk(chunk, false, true);
+        invalidate_renderable_chunks();
+        ++m_dirty_generation;
+    } else {
+        const auto previous_bytes = parked == m_parked.end() ? 0 : parked->second.bytes;
+        const auto retained_bytes = m_parked_bytes - previous_bytes;
+        // Include a future 32x32 grid and source scratch: at most 40 KiB.
+        constexpr std::size_t water_bytes =
+            std::size_t{32} * 32 * (5 * sizeof(std::int32_t) + 3 * sizeof(float) + sizeof(Vec2));
+        const auto present_bytes = chunk->estimated_sim_bytes();
+        const auto future_bytes = chunk->has_water_sim.load() ? 0 : water_bytes;
+        if (present_bytes > std::numeric_limits<std::size_t>::max() - future_bytes) {
+            throw std::length_error("Regional water column storage size overflow");
+        }
+        const auto bytes = present_bytes + future_bytes;
+        if (bytes > std::numeric_limits<std::size_t>::max() - retained_bytes) {
+            throw std::length_error("Regional water column storage size overflow");
+        }
+        if (m_parked_bytes_limit > 0 && (retained_bytes > m_parked_bytes_limit ||
+                                         bytes > m_parked_bytes_limit - retained_bytes)) {
+            m_persistence_save_requested = true;
+            return nullptr;
+        }
+        chunk->normalize_for_park();
+        if (parked != m_parked.end()) {
+            note_digest_chunk(parked->second.chunk, true, false);
+        }
+        m_parked.insert_or_assign(id, ParkedChunk{chunk, bytes, m_persistence_tick});
+        note_digest_chunk(chunk, true, true);
+        m_parked_bytes = retained_bytes + bytes;
+    }
+    return chunk;
+}
+
+void SHIELD_WorldSystem::discard_unclaimed_water_columns(
+    std::span<const std::shared_ptr<Chunk>> candidates) {
+    if (candidates.size() > 832) {
+        throw std::invalid_argument("Regional water candidate cleanup cap exceeded");
+    }
+    const Persistence::WorldSaveService::SaveOwnership ownership;
+    for (const auto& chunk : candidates) {
+        const auto parked = chunk ? m_parked.find(chunk->get_id()) : m_parked.end();
+        // Check identity before inspecting candidate storage: stale handles may
+        // still belong to generation workers. Never erase a live or claimed owner.
+        if (parked == m_parked.end() || parked->second.chunk != chunk || chunk->needs_authority() ||
+            chunk->has_water_sim.load() || chunk->water_revision() != 0) {
+            continue;
+        }
+        m_parked_bytes -= parked->second.bytes;
+        note_digest_chunk(chunk, true, false);
+        m_parked.erase(parked);
+    }
+}
+
 std::shared_ptr<Chunk> SHIELD_WorldSystem::read_committed_chunk(const IVec3& coords) const {
     if (!m_durable_residency || !m_durable_chunks.contains(Chunk::calculate_id(coords)) ||
         m_durable_read_failed)
@@ -7478,13 +7628,7 @@ bool SHIELD_WorldSystem::restore_authoritative_chunk(const IVec3& coords) {
         discard_placeholder();
         if (!adopt_streamed_chunk(chunk))
             throw std::runtime_error("duplicate durable chunk adoption");
-        // Water resolution is session configuration. Migrate restored truth on the owner
-        // thread before exposing it to seams/edits; matching resolutions do no work.
-        if (m_water_system) {
-            // Exactly one restored chunk; the migration cannot scan other residents.
-            const std::unordered_map<ChunkID, std::shared_ptr<Chunk>> restored{{id, chunk}};
-            m_water_system->MigrateChunksToSimResolution(restored);
-        }
+        migrate_restored_water_column(chunk);
         ++m_dirty_generation;
     } catch (const std::exception& error) {
         m_durable_read_failed = true;
