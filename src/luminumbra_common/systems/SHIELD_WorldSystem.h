@@ -1073,7 +1073,8 @@ public:
     std::shared_ptr<::Luminumbra::Chunk> find_authoritative_chunk(const IVec3& coords) const;
     // Owner-thread admission of one canonical Y=0 column. Generated renderer caches
     // cannot seed authority; incomplete or legacy saved water requires migration.
-    // Returns nullptr on parking pressure, without replacing an existing owner.
+    // Returns nullptr on parking pressure; Loading owners refuse until publication.
+    // Admitted handles remain canonical until cleanup or residency retirement.
     std::shared_ptr<Chunk> resolve_water_column(const IVec3& coords);
     // Canonical authority only: never generates or reads Loading worker storage.
     std::shared_ptr<Chunk> inspect_water_column(const IVec3& coords) const;
@@ -1290,6 +1291,9 @@ private:
     bool m_evictions_suspended = false;
     std::shared_ptr<Chunk> read_committed_chunk(const IVec3& coords) const;
     void migrate_restored_water_column(const std::shared_ptr<Chunk>& chunk);
+    // Process-local admission, independent of simulation/save authority. At most
+    // 832 outstanding candidates; residency retirement and cleanup remove entries.
+    std::unordered_set<ChunkID> m_admitted_water_columns;
     std::uint64_t m_water_columns_generated = 0;
     std::size_t m_parked_bytes = 0;
     bool m_durable_residency = false;
