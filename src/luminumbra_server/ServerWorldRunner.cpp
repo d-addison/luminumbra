@@ -272,6 +272,13 @@ bool ServerWorldRunner::Boot() {
         m_session->SetParkedBytesLimit(static_cast<std::size_t>(m_config.parked_bytes_limit));
     }
     m_session->SetFiniteHydrologyEnabled(m_config.finite_hydrology);
+    if (m_session->ActiveRegionsEnabled() &&
+        m_config.avatar_count > static_cast<int>(Systems::PhysicsSystem::kSimulationOwnerBudget)) {
+        m_bootError = "Avatar collider preparation budget exceeded";
+        m_session.reset();
+        m_jobSystem.shutdown();
+        return false;
+    }
     // A headless host has no client asset manifest; simulation assets alone are
     // validated and every voxel field uses the authoritative CPU generator.
 
@@ -364,7 +371,8 @@ bool ServerWorldRunner::Boot() {
     m_avatars.clear();
     physics_system->clear_avatar_characters();
     if (m_config.avatar_count > 0) {
-        m_avatars.reserve(static_cast<std::size_t>(m_config.avatar_count));
+        m_avatars.reserve(std::min(static_cast<std::size_t>(m_config.avatar_count),
+                                   Systems::PhysicsSystem::kSimulationOwnerBudget));
         for (int i = 0; i < m_config.avatar_count; ++i) {
             const Vec3 offset =
                 World::DeterministicAvatarSpawnOffset(static_cast<std::uint32_t>(i));
@@ -378,9 +386,16 @@ bool ServerWorldRunner::Boot() {
             avatar.position = Vec3(ax, ay, az);
             // Deterministic initial facing fanned around the circle (pure id fn).
             avatar.facing = static_cast<float>(i) * 2.39996323f;
+            // Publish the roster only after its corresponding controller exists.
+            const auto character = physics_system->create_avatar_character(avatar.position);
+            if (character == Systems::PhysicsSystem::kInvalidAvatar) {
+                m_bootError = "Avatar collider preparation budget exceeded";
+                m_avatars.clear();
+                m_session.reset();
+                m_jobSystem.shutdown();
+                return false;
+            }
             m_avatars.push_back(avatar);
-            // Create one server-authoritative physics capsule per avatar.
-            physics_system->create_avatar_character(avatar.position);
         }
         LUMINUMBRA_CORE_INFO(
             "ServerWorldRunner: spawned {} deterministic player avatar(s) (+physics characters).",

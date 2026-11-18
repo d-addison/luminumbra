@@ -300,6 +300,9 @@ void AttachMissingCreatureBodies(Luminumbra::Systems::PhysicsSystem* phys,
             continue;
         const auto& tf = view.get<const Luminumbra::Components::TransformComponent>(e);
         const std::size_t idx = phys->create_avatar_character(tf.position);
+        if (idx == Luminumbra::Systems::PhysicsSystem::kInvalidAvatar) {
+            break; // Leave it unattached for a later frame's deterministic retry.
+        }
         reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
         ++made;
     }
@@ -536,7 +539,9 @@ static void ConsumeWorldDressing(ClientAppContext& g_app,
                 if (phys) {
                     const std::size_t idx = phys->create_avatar_character(
                         glm::vec3(c.position.x, c.position.y, c.position.z));
-                    reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
+                    if (idx != Luminumbra::Systems::PhysicsSystem::kInvalidAvatar) {
+                        reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
+                    }
                 }
                 ++pend.creatures_spawned;
             }
@@ -771,7 +776,9 @@ static void ConsumeWorldDressing(ClientAppContext& g_app,
                     if (phys) {
                         const std::size_t idx =
                             phys->create_avatar_character(glm::vec3(cx, cy, cz));
-                        reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
+                        if (idx != Luminumbra::Systems::PhysicsSystem::kInvalidAvatar) {
+                            reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
+                        }
                     }
                 };
                 if (g_app.capture.timelapse_calm) {

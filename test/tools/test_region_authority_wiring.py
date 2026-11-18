@@ -441,7 +441,11 @@ class SimulationCollisionWiring(unittest.TestCase):
                 "SimulationCollisionsIgnoreRenderCadenceAcrossSessionTicks",
                 "LegacyColliderPreparationPreservesHashesAndSaveBytes",
                 "RefusedCollisionBarrierPreservesTheSessionTickAndAccumulator",
-                "SessionCollisionBarrierPrecedesTheFirstCreatureStep")),
+                "SessionCollisionBarrierPrecedesTheFirstCreatureStep",
+                "CharacterAdmissionChecksTheCombinedHorizonBeforeAllocating",
+                "ExistingOverBudgetOwnersKeepTickingAndCanShrink",
+                "RefusedCatchupPreservesPendingTicksAndFraction",
+                "OverflowBodiesWaitForTerrainAndResumeTheirVelocity")),
         ):
             self.assertIn(path, cmake)
             native = (ROOT / "test" / path).read_text(encoding="utf-8")
@@ -487,6 +491,118 @@ class SimulationCollisionWiring(unittest.TestCase):
             self.assertIn(original, source)
             with self.subTest(original=original), self.assertRaises(AssertionError):
                 self.assert_terrain_reservation_accounting(source.replace(original, replacement))
+
+    def test_character_admission_precedes_both_allocations(self):
+        source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(
+            encoding="utf-8")
+        admit = function(source, "bool PhysicsSystem::can_admit_simulation_owner(")
+        for token in ("m_live_avatar_count >= kSimulationOwnerBudget -",
+                      "horizon.add(position)", "horizon.add(get_player_position())",
+                      "horizon.add(get_avatar_position(index))",
+                      "horizon.add(get_body_position(state.dynamic_owners[i].id))"):
+            self.assertIn(token, admit)
+        for signature, check, allocation, refusal in (
+            ("bool PhysicsSystem::create_player_controller(",
+             "!can_admit_simulation_owner(start_pos, true)", "CapsuleShapeSettings(", "return false;"),
+            ("std::size_t PhysicsSystem::create_avatar_character(",
+             "!can_admit_simulation_owner(start_pos, false)", "m_avatars.push_back(",
+             "return kInvalidAvatar;"),
+        ):
+            body = function(source, signature)
+            self.assertLess(body.index(check), body.index(allocation))
+            self.assertIn(refusal, body[:body.index(allocation)])
+
+    def test_overflow_horizons_keep_existing_sessions_running(self):
+        source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(
+            encoding="utf-8")
+        prepare = function(source, "bool PhysicsSystem::prepare_simulation_collisions(")
+        existing = function(prepare, "const auto include_existing =")
+        self.assertIn("!SimulationHorizon::valid(position)", existing)
+        self.assertIn("(void)horizon.add(position);", existing)
+        self.assertIn("++state.owner_visit_count;", existing)
+        native = (ROOT / "test/common/GameSessionHeadlessWorld_test.cpp").read_text(encoding="utf-8")
+        self.assertIn("EXPECT_EQ(physics.simulation_collision_owner_visit_count(), 1u);", native)
+        self.assertIn("EXPECT_EQ(physics.simulation_collision_owner_visit_count(), 0u);", native)
+        self.assertNotIn("m_live_avatar_count >", prepare)
+        self.assertNotIn("++owner_count", prepare)
+        sphere = function(source, "JPH::BodyID PhysicsSystem::create_dynamic_sphere(")
+        self.assertNotIn("kSimulationOwnerBudget", sphere)
+        self.assertNotIn("can_admit_simulation_owner", sphere)
+        self.assertIn("std::array<DynamicOwner, 10240> dynamic_owners", source)
+        horizon = function(source, "struct SimulationHorizon")
+        self.assertIn("PhysicsSystem::kSimulationColliderBudget", horizon)
+        self.assertLess(horizon.index("staged_count == staged.size()"),
+                        horizon.index("std::move_backward("))
+
+    def test_uncovered_owners_wait_without_losing_rigid_body_velocity(self):
+        source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(
+            encoding="utf-8")
+        update = function(source, "void PhysicsSystem::update(")
+        self.assertLess(update.index("m_work_items.bodies = non_simulation_body_count();"),
+                        update.index("!simulation_collisions_ready()"))
+        for token in ("GetLinearAndAngularVelocity(", "JPH::EMotionType::Kinematic",
+                      "JPH::EMotionType::Dynamic", "owner.suspended = true;",
+                      "owner.suspended = false;"):
+            self.assertIn(token, update)
+        for signature, position in (("void PhysicsSystem::update_avatars(",
+                                     "horizon.covers(get_avatar_position(i))"),
+                                    ("void PhysicsSystem::update_player(",
+                                     "horizon.covers(get_player_position())")):
+            body = function(source, signature)
+            self.assertLess(body.index(position), body.index("++m_work_items.characters"))
+        active = function(source, "bool PhysicsSystem::body_is_active(")
+        self.assertIn("return owner.was_active;", active)
+        self.assertNotIn("for (", active)
+        destroy = function(source, "void PhysicsSystem::destroy_body(")
+        self.assertIn("state.dynamic_slots[body.GetIndex()] = 0;", destroy)
+        self.assertNotIn("for (", destroy)
+        avatars = function(source, "void PhysicsSystem::update_avatars(")
+        self.assertIn("i = m_avatar_head; i != kNoAvatar; i = m_avatars[i].next", avatars)
+        self.assertNotIn("m_avatars.size()", avatars)
+        clear = function(source, "void PhysicsSystem::clear_simulation_collisions(")
+        self.assertIn("JPH::EMotionType::Dynamic", clear)
+        self.assertIn("owner.suspended = false;", clear)
+
+    def test_refused_ticks_return_to_the_advanced_clock(self):
+        source = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(
+            encoding="utf-8")
+        tick = function(source, "std::uint32_t GameSession::TickSimulation(")
+        self.assertIn("m_simulationClock.return_unconsumed_ticks(ticks_executed - i);", tick)
+        self.assertNotIn("m_simulationClock = clock_before", tick)
+        header = (ROOT / "src/luminumbra_common/core/SimulationClock.h").read_text(
+            encoding="utf-8")
+        restore = function(header, "void return_unconsumed_ticks(")
+        self.assertIn("tick_count_ -= ticks;", restore)
+        self.assertIn("accumulator_ += static_cast<double>(ticks) * fixed_dt_;", restore)
+        self.assertNotIn("reset(", restore)
+
+    def test_creation_callers_handle_admission_refusal(self):
+        client = (ROOT / "src/luminumbra_client/main_client.cpp").read_text(encoding="utf-8")
+        self.assertEqual(client.count("create_avatar_character("), 3)
+        self.assertEqual(client.count("PhysicsSystem::kInvalidAvatar"), 3)
+        player = (ROOT / "src/luminumbra_client/player/PlayerController.cpp").read_text(
+            encoding="utf-8")
+        self.assertEqual(player.count("create_player_controller("), 3)
+        self.assertEqual(len(re.findall(r"m_hasInitializedPhysicsPlayer\s*=\s*"
+                                       r"m_physicsSystem->create_player_controller", player)), 3)
+        roster = (ROOT / "src/luminumbra_server/ServerWorldRunner.cpp").read_text(encoding="utf-8")
+        boot = function(roster, "bool ServerWorldRunner::Boot(")
+        self.assertLess(boot.index("m_config.avatar_count > static_cast<int>(Systems::PhysicsSystem::kSimulationOwnerBudget)"),
+                        boot.index("m_session->CreateWorld("))
+        guard = function(roster, "if (character == Systems::PhysicsSystem::kInvalidAvatar)")
+        for token in ("m_bootError =", "m_avatars.clear();", "m_session.reset();",
+                      "m_jobSystem.shutdown();", "return false;"):
+            self.assertIn(token, guard)
+        replicate = (ROOT / "src/luminumbra_server/modes/Replicate.cpp").read_text(encoding="utf-8")
+        self.assertIn("return 1;", function(
+            replicate, "if (ci == Luminumbra::Systems::PhysicsSystem::kInvalidAvatar)"))
+        self.assertIn("return 1;", function(replicate, "if (arrow_body.IsInvalid())"))
+        self.assertLess(replicate.index("if (arrow_body.IsInvalid())"),
+                        replicate.index("arrow_entity = registry.create();"))
+        driver = (ROOT / "src/luminumbra_client/core/scenarios/NetworkedSessionDriver.cpp").read_text(
+            encoding="utf-8")
+        self.assertNotIn("create_avatar_character(", driver)
+        self.assertNotIn("create_player_controller(", driver)
 
     def test_expected_collision_authority_cannot_be_masked_by_water_or_unknown_metadata(self):
         source = (ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp").read_text(

@@ -276,6 +276,69 @@ struct PendingPhysicsResources {
     std::unique_ptr<JPH::PhysicsSystem> physics;
     std::unique_ptr<JPH::JobSystem> jobs;
 };
+
+struct SimulationHorizon {
+    // At most 128 distinct columns, plus one candidate owner's nine columns.
+    std::array<ChunkID, PhysicsSystem::kSimulationColliderBudget> columns{};
+    std::size_t count = 0;
+
+    static bool valid(const Vec3& anchor) {
+        if (!std::isfinite(anchor.x) || !std::isfinite(anchor.y) || !std::isfinite(anchor.z)) {
+            return false;
+        }
+        const double cx = std::floor(static_cast<double>(anchor.x) / CHUNK_SIZE_X);
+        const double cz = std::floor(static_cast<double>(anchor.z) / CHUNK_SIZE_Z);
+        return cx > Chunk::kPackedMinXz && cx < Chunk::kPackedMaxXz && cz > Chunk::kPackedMinXz &&
+               cz < Chunk::kPackedMaxXz;
+    }
+
+    bool add(const Vec3& anchor) {
+        if (!valid(anchor)) {
+            return false;
+        }
+        const auto cx = static_cast<i32>(std::floor(static_cast<double>(anchor.x) / CHUNK_SIZE_X));
+        const auto cz = static_cast<i32>(std::floor(static_cast<double>(anchor.z) / CHUNK_SIZE_Z));
+        auto staged = columns;
+        auto staged_count = count;
+        for (int dz = -1; dz <= 1; ++dz) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                const auto id = Chunk::calculate_id(IVec3(cx + dx, 0, cz + dz));
+                const auto end = staged.begin() + static_cast<std::ptrdiff_t>(staged_count);
+                const auto found = std::lower_bound(staged.begin(), end, id);
+                if (found != end && *found == id) {
+                    continue;
+                }
+                if (staged_count == staged.size()) {
+                    return false;
+                }
+                std::move_backward(found, end, end + 1);
+                *found = id;
+                ++staged_count;
+            }
+        }
+        columns = staged;
+        count = staged_count;
+        return true;
+    }
+
+    bool covers(const Vec3& anchor) const {
+        if (!valid(anchor)) {
+            return false;
+        }
+        const auto cx = static_cast<i32>(std::floor(static_cast<double>(anchor.x) / CHUNK_SIZE_X));
+        const auto cz = static_cast<i32>(std::floor(static_cast<double>(anchor.z) / CHUNK_SIZE_Z));
+        const auto end = columns.begin() + static_cast<std::ptrdiff_t>(count);
+        for (int dz = -1; dz <= 1; ++dz) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                if (!std::binary_search(
+                        columns.begin(), end, Chunk::calculate_id(IVec3(cx + dx, 0, cz + dz)))) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+};
 } // namespace
 
 // --- PhysicsSystem implementation -------------------------------------------
@@ -292,11 +355,24 @@ struct PhysicsSystem::SimulationCollisions {
     std::array<Column, kSimulationColliderBudget> published{};
     std::array<Column, kSimulationColliderBudget> staged{};
     std::array<JPH::BodyID, kSimulationColliderBudget> bodies{};
-    std::array<JPH::BodyID, kSimulationOwnerBudget> dynamic_owners{};
+    // The existing Jolt pool bounds rigid-body registration, independently of
+    // character admission. No sphere capacity is borrowed from the 64 characters.
+    struct DynamicOwner {
+        JPH::BodyID id;
+        JPH::Vec3 velocity = JPH::Vec3::sZero();
+        JPH::Vec3 angular_velocity = JPH::Vec3::sZero();
+        bool suspended = false;
+        bool was_active = false;
+    };
+    std::array<DynamicOwner, 10240> dynamic_owners{};
+    // Jolt body index -> registration slot + 1; zero denotes an unregistered body.
+    std::array<std::uint32_t, 10240> dynamic_slots{};
+    SimulationHorizon horizon;
     std::size_t dynamic_count = 0;
     std::size_t body_count = 0;
     std::size_t published_count = 0;
     std::size_t sampled_count = 0;
+    std::size_t owner_visit_count = 0;
     bool ready = false;
     std::uint64_t tick = std::numeric_limits<std::uint64_t>::max();
 };
@@ -320,7 +396,6 @@ std::uint32_t PhysicsSystem::non_simulation_body_count() const {
 void PhysicsSystem::set_world_system(const SHIELD_WorldSystem* world_system) {
     if (world_system != m_world_system) {
         clear_simulation_collisions();
-        m_simulation_collisions.reset();
     }
     m_world_system = world_system;
 }
@@ -330,6 +405,19 @@ void PhysicsSystem::clear_simulation_collisions() {
         return;
     }
     auto& state = *m_simulation_collisions;
+    for (std::size_t i = 0; i < state.dynamic_count; ++i) {
+        auto& owner = state.dynamic_owners[i];
+        if (owner.suspended) {
+            m_body_interface->SetMotionType(
+                owner.id, JPH::EMotionType::Dynamic, JPH::EActivation::DontActivate);
+            m_body_interface->SetLinearAndAngularVelocity(
+                owner.id, owner.velocity, owner.angular_velocity);
+            if (owner.was_active) {
+                m_body_interface->ActivateBody(owner.id);
+            }
+            owner.suspended = false;
+        }
+    }
     for (std::size_t i = 0; i < state.body_count; ++i) {
         if (i < state.published_count) {
             m_body_interface->RemoveBody(state.bodies[i]);
@@ -340,6 +428,8 @@ void PhysicsSystem::clear_simulation_collisions() {
     state.body_count = 0;
     state.published_count = 0;
     state.sampled_count = 0;
+    state.owner_visit_count = 0;
+    state.horizon = {};
     state.ready = false;
     for (auto& column : state.published) {
         column.shape = nullptr;
@@ -351,6 +441,10 @@ void PhysicsSystem::clear_simulation_collisions() {
 
 std::size_t PhysicsSystem::simulation_collision_sample_count() const {
     return m_simulation_collisions ? m_simulation_collisions->sampled_count : 0;
+}
+
+std::size_t PhysicsSystem::simulation_collision_owner_visit_count() const {
+    return m_simulation_collisions ? m_simulation_collisions->owner_visit_count : 0;
 }
 
 std::uint64_t PhysicsSystem::simulation_collision_hash() const {
@@ -377,6 +471,35 @@ std::uint64_t PhysicsSystem::simulation_collision_hash() const {
     return hash;
 }
 
+bool PhysicsSystem::can_admit_simulation_owner(const glm::vec3& position,
+                                               bool replacing_player) const {
+    if (!simulation_collisions_enabled()) {
+        return true;
+    }
+    const bool keep_player = m_player_character && !replacing_player;
+    if (m_live_avatar_count >= kSimulationOwnerBudget - static_cast<std::size_t>(keep_player)) {
+        return false;
+    }
+    SimulationHorizon horizon;
+    if (!horizon.add(position) || (keep_player && !horizon.add(get_player_position()))) {
+        return false;
+    }
+    for (auto index = m_avatar_head; index != kNoAvatar; index = m_avatars[index].next) {
+        if (!horizon.add(get_avatar_position(index))) {
+            return false;
+        }
+    }
+    if (m_simulation_collisions) {
+        const auto& state = *m_simulation_collisions;
+        for (std::size_t i = 0; i < state.dynamic_count; ++i) {
+            if (!horizon.add(get_body_position(state.dynamic_owners[i].id))) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 bool PhysicsSystem::prepare_simulation_collisions(std::span<const Vec3> anchors,
                                                   std::uint64_t tick) try {
     if (!simulation_collisions_enabled()) {
@@ -391,70 +514,49 @@ bool PhysicsSystem::prepare_simulation_collisions(std::span<const Vec3> anchors,
     }
     state.ready = false;
     state.sampled_count = 0;
-    if (!m_body_interface || anchors.size() > kSimulationOwnerBudget ||
-        m_live_avatar_count > kSimulationOwnerBudget) {
+    state.owner_visit_count = 0;
+    if (!m_body_interface || anchors.size() > kSimulationOwnerBudget) {
         return false;
     }
-    // Bound the inputs as well as the distinct outputs: <=64 owners, <=576 candidates,
-    // <=128 sampled columns, <=289 height samples/column. No resident-world traversal.
-    std::array<ChunkID, kSimulationOwnerBudget * 9> candidates{};
-    std::size_t candidate_count = 0;
-    std::size_t owner_count = 0;
-    const auto require_anchor = [&](const Vec3& anchor) {
-        if (++owner_count > kSimulationOwnerBudget || !std::isfinite(anchor.x) ||
-            !std::isfinite(anchor.y) || !std::isfinite(anchor.z)) {
+    SimulationHorizon horizon;
+    for (const auto& anchor : anchors) {
+        ++state.owner_visit_count;
+        if (!horizon.add(anchor)) {
             return false;
         }
-        const double cx = std::floor(static_cast<double>(anchor.x) / CHUNK_SIZE_X);
-        const double cz = std::floor(static_cast<double>(anchor.z) / CHUNK_SIZE_Z);
-        // Leave a complete ring inside the packed coordinate domain before narrowing.
-        if (cx <= Chunk::kPackedMinXz || cx >= Chunk::kPackedMaxXz || cz <= Chunk::kPackedMinXz ||
-            cz >= Chunk::kPackedMaxXz) {
+    }
+    // Validate every participating position, but do not stall an existing world
+    // when movement or authority activation puts its population over budget.
+    // Complete rings are admitted in stable owner order; sampling stays <=128
+    // columns x 289 heights, with no resident-world traversal or growing scratch.
+    const auto include_existing = [&horizon, &state](const Vec3& position) {
+        ++state.owner_visit_count;
+        if (!SimulationHorizon::valid(position)) {
             return false;
         }
-        for (int dz = -1; dz <= 1; ++dz) {
-            for (int dx = -1; dx <= 1; ++dx) {
-                candidates[candidate_count++] = Chunk::calculate_id(
-                    IVec3(static_cast<i32>(cx) + dx, 0, static_cast<i32>(cz) + dz));
-            }
-        }
+        (void)horizon.add(position);
         return true;
     };
-    for (const auto& anchor : anchors) {
-        if (!require_anchor(anchor)) {
-            return false;
-        }
-    }
-    if (m_player_character && !require_anchor(get_player_position())) {
+    if (m_player_character && !include_existing(get_player_position())) {
         return false;
     }
-    // Creature controllers share this avatar table; frozen owners participate too.
     for (auto index = m_avatar_head; index != kNoAvatar; index = m_avatars[index].next) {
-        const auto position = m_avatars[index].character->GetPosition();
-        if (!require_anchor(Vec3(static_cast<float>(position.GetX()),
-                                 static_cast<float>(position.GetY()),
-                                 static_cast<float>(position.GetZ())))) {
+        if (!include_existing(get_avatar_position(index))) {
             return false;
         }
     }
     for (std::size_t i = 0; i < state.dynamic_count; ++i) {
-        if (!require_anchor(get_body_position(state.dynamic_owners[i]))) {
+        if (!include_existing(get_body_position(state.dynamic_owners[i].id))) {
             return false;
         }
     }
-    const auto candidate_end = candidates.begin() + static_cast<std::ptrdiff_t>(candidate_count);
-    std::sort(candidates.begin(), candidate_end);
-    const auto unique_end = std::unique(candidates.begin(), candidate_end);
-    const auto count = static_cast<std::size_t>(unique_end - candidates.begin());
-    if (count > kSimulationColliderBudget) {
-        return false;
-    }
+    const auto count = horizon.count;
     // Everything that can refuse happens before publication. Staged shapes have fixed
     // slots and replace old references; steady ticks allocate nothing. Changed geometry
     // holds at most two sets of 128 shapes, independent of world size or tick count.
     for (std::size_t i = 0; i < count; ++i) {
         auto& staged = state.staged[i];
-        staged.id = candidates[i];
+        staged.id = horizon.columns[i];
         const auto coords = Chunk::decode_id(staged.id);
         ++state.sampled_count;
         if (!m_world_system->sample_simulation_collision(coords.x, coords.z, staged.heights)) {
@@ -533,6 +635,7 @@ bool PhysicsSystem::prepare_simulation_collisions(std::span<const Vec3> anchors,
         staged.shape = nullptr;
     }
     state.published_count = count;
+    state.horizon = horizon;
     state.tick = tick;
     state.ready = true;
     return true;
@@ -616,9 +719,42 @@ void PhysicsSystem::shutdown() {
 
 void PhysicsSystem::update(float delta_time) {
     m_work_items = {};
-    if (!m_jolt_system || !simulation_collisions_ready())
+    if (!m_jolt_system) {
         return;
+    }
     m_work_items.bodies = non_simulation_body_count();
+    if (!simulation_collisions_ready()) {
+        return;
+    }
+    // Bodies beyond the bounded horizon wait with their velocities retained.
+    // Other owners and session lifecycle work continue, allowing later admission.
+    if (simulation_collisions_enabled() && m_simulation_collisions) {
+        auto& state = *m_simulation_collisions;
+        for (std::size_t i = 0; i < state.dynamic_count; ++i) {
+            auto& owner = state.dynamic_owners[i];
+            const bool covered = state.horizon.covers(get_body_position(owner.id));
+            if (!covered && !owner.suspended) {
+                owner.was_active = m_body_interface->IsActive(owner.id);
+                m_body_interface->GetLinearAndAngularVelocity(
+                    owner.id, owner.velocity, owner.angular_velocity);
+                m_body_interface->SetMotionType(
+                    owner.id, JPH::EMotionType::Kinematic, JPH::EActivation::DontActivate);
+                m_body_interface->SetLinearAndAngularVelocity(
+                    owner.id, JPH::Vec3::sZero(), JPH::Vec3::sZero());
+                m_body_interface->DeactivateBody(owner.id);
+                owner.suspended = true;
+            } else if (covered && owner.suspended) {
+                m_body_interface->SetMotionType(
+                    owner.id, JPH::EMotionType::Dynamic, JPH::EActivation::DontActivate);
+                m_body_interface->SetLinearAndAngularVelocity(
+                    owner.id, owner.velocity, owner.angular_velocity);
+                if (owner.was_active) {
+                    m_body_interface->ActivateBody(owner.id);
+                }
+                owner.suspended = false;
+            }
+        }
+    }
     m_jolt_system->Update(delta_time, 1, m_temp_allocator.get(), m_jolt_job_system.get());
 
     // Process batched physics queries each frame
@@ -727,9 +863,10 @@ void PhysicsSystem::remove_chunk_collision(ChunkID id) {
     m_chunk_bodies.erase(it);
 }
 
-void PhysicsSystem::create_player_controller(const glm::vec3& start_pos) {
-    if (!m_jolt_system)
-        return;
+bool PhysicsSystem::create_player_controller(const glm::vec3& start_pos) {
+    if (!m_jolt_system || !can_admit_simulation_owner(start_pos, true)) {
+        return false;
+    }
 
     // The local controller passes feet positions. Keep both capsule bases at that
     // origin so spawning and changing stance cannot embed the capsule in terrain.
@@ -764,6 +901,7 @@ void PhysicsSystem::create_player_controller(const glm::vec3& start_pos) {
         m_simulation_collisions->ready = false;
     }
     LUMINUMBRA_CORE_INFO("Player controller created.");
+    return true;
 }
 
 void PhysicsSystem::update_player(const glm::vec3& wish_velocity,
@@ -778,6 +916,10 @@ void PhysicsSystem::update_player(const glm::vec3& wish_velocity,
         return;
     }
 
+    if (simulation_collisions_enabled() && m_simulation_collisions &&
+        !m_simulation_collisions->horizon.covers(get_player_position())) {
+        return;
+    }
     ++m_work_items.characters;
 
     // Get the character's current state
@@ -895,7 +1037,8 @@ JPH::BodyID PhysicsSystem::create_dynamic_sphere(const glm::vec3& position,
         if (!m_simulation_collisions) {
             m_simulation_collisions = std::make_unique<SimulationCollisions>();
         }
-        if (m_simulation_collisions->dynamic_count == kSimulationOwnerBudget) {
+        if (m_simulation_collisions->dynamic_count ==
+            m_simulation_collisions->dynamic_owners.size()) {
             return JPH::BodyID();
         }
     }
@@ -912,7 +1055,12 @@ JPH::BodyID PhysicsSystem::create_dynamic_sphere(const glm::vec3& position,
     const JPH::BodyID id = m_body_interface->CreateAndAddBody(settings, JPH::EActivation::Activate);
     if (simulation_collisions_enabled() && !id.IsInvalid()) {
         auto& state = *m_simulation_collisions;
-        state.dynamic_owners[state.dynamic_count++] = id;
+        state.dynamic_owners[state.dynamic_count++] = {.id = id,
+                                                       .velocity = JPH::Vec3::sZero(),
+                                                       .angular_velocity = JPH::Vec3::sZero(),
+                                                       .suspended = false,
+                                                       .was_active = false};
+        state.dynamic_slots[id.GetIndex()] = static_cast<std::uint32_t>(state.dynamic_count);
         state.ready = false;
     }
     return id;
@@ -928,6 +1076,17 @@ glm::vec3 PhysicsSystem::get_body_position(JPH::BodyID body) const {
 bool PhysicsSystem::body_is_active(JPH::BodyID body) const {
     if (!m_body_interface || body.IsInvalid())
         return false;
+    if (m_simulation_collisions &&
+        body.GetIndex() < m_simulation_collisions->dynamic_slots.size()) {
+        const auto& state = *m_simulation_collisions;
+        const auto slot = state.dynamic_slots[body.GetIndex()];
+        if (slot != 0) {
+            const auto& owner = state.dynamic_owners[slot - 1];
+            if (owner.id == body && owner.suspended) {
+                return owner.was_active; // Waiting for terrain is not projectile rest.
+            }
+        }
+    }
     return m_body_interface->IsActive(body);
 }
 
@@ -938,10 +1097,15 @@ void PhysicsSystem::destroy_body(JPH::BodyID body) {
     m_body_interface->DestroyBody(body);
     if (m_simulation_collisions) {
         auto& state = *m_simulation_collisions;
-        for (std::size_t i = 0; i < state.dynamic_count; ++i) {
-            if (state.dynamic_owners[i] == body) {
-                state.dynamic_owners[i] = state.dynamic_owners[--state.dynamic_count];
-                break;
+        if (body.GetIndex() < state.dynamic_slots.size()) {
+            const auto slot = state.dynamic_slots[body.GetIndex()];
+            if (slot != 0 && state.dynamic_owners[slot - 1].id == body) {
+                state.dynamic_slots[body.GetIndex()] = 0;
+                const auto index = slot - 1;
+                state.dynamic_owners[index] = state.dynamic_owners[--state.dynamic_count];
+                if (index < state.dynamic_count) {
+                    state.dynamic_slots[state.dynamic_owners[index].id.GetIndex()] = slot;
+                }
             }
         }
     }
@@ -1026,8 +1190,9 @@ void PhysicsSystem::set_avatar_wish_velocity(std::size_t index, const glm::vec2&
 }
 
 std::size_t PhysicsSystem::create_avatar_character(const glm::vec3& start_pos) {
-    if (!m_jolt_system)
-        return 0;
+    if (!m_jolt_system || !can_admit_simulation_owner(start_pos, false)) {
+        return kInvalidAvatar;
+    }
     // Shared capsule (same dimensions as the standing player) created once.
     if (m_avatar_shape == nullptr) {
         const JPH::Ref<JPH::Shape> capsule = JPH::CapsuleShapeSettings(0.9f, 0.4f).Create().Get();
@@ -1075,10 +1240,13 @@ void PhysicsSystem::update_avatars(float dt) {
     // yet -- gravity when airborne, ground-stick when grounded (the avatars fall
     // and settle on the terrain). Mirrors update_player's vertical handling.
     const JPH::Vec3 gravity = m_jolt_system->GetGravity();
-    for (std::size_t i = 0; i < m_avatars.size(); ++i) {
+    for (auto i = m_avatar_head; i != kNoAvatar; i = m_avatars[i].next) {
         auto& character = m_avatars[i].character;
-        if (!character || m_avatars[i].frozen)
+        if (!character || m_avatars[i].frozen ||
+            (simulation_collisions_enabled() && m_simulation_collisions &&
+             !m_simulation_collisions->horizon.covers(get_avatar_position(i)))) {
             continue;
+        }
         ++m_work_items.characters;
         const glm::vec2 wish = m_avatars[i].wish;
         const JPH::Vec3 current_velocity = character->GetLinearVelocity();
