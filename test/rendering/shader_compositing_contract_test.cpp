@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "luminumbra_client/app/GroundCoverHull.h"
+#include "luminumbra_client/core/scenarios/ScenarioCommon.h"
 #include "luminumbra_client/rendering/WeatherOverlayModel.h"
 #include "luminumbra_client/rendering/WeatherRenderBridge.h"
 
@@ -416,6 +417,30 @@ TEST(WeatherFrameContract, DirectControlsReplaceStaleDrivenFieldsForBothConsumer
     }
 }
 
+TEST(WeatherFrameContract, ComparisonAtmosphereHasExplicitClearAndRainInputs) {
+    using namespace Luminumbra::Client::ScenarioHarness;
+    // Repeated and reversed phases must produce the same independent values.
+    for (const bool rain : {false, true, false, true}) {
+        const auto state = BuildComparisonAtmosphere(rain);
+        EXPECT_TRUE(state.weather.driven);
+        EXPECT_FLOAT_EQ(state.weather.rain_intensity, rain ? 1.0f : 0.0f);
+        EXPECT_FLOAT_EQ(state.weather.snow_intensity, 0.0f);
+        EXPECT_FLOAT_EQ(state.weather.fog_density, rain ? 0.1f : 0.0f);
+        EXPECT_FLOAT_EQ(state.weather.storm_intensity, rain ? 0.4f : 0.0f);
+        EXPECT_FLOAT_EQ(state.weather.wetness, rain ? 1.0f : 0.0f);
+        EXPECT_EQ(state.weather.wind_direction, glm::vec3(1, 0, 0));
+        EXPECT_FLOAT_EQ(state.weather.wind_strength, 0.0f);
+        EXPECT_TRUE(state.clouds.enabled);
+        EXPECT_TRUE(state.clouds.shadow_enabled);
+        EXPECT_FLOAT_EQ(state.clouds.coverage_amount, rain ? 0.8f : 0.0f);
+        EXPECT_FLOAT_EQ(state.clouds.biome_variation, 0.0f);
+        EXPECT_FLOAT_EQ(state.clouds.plane_height, 900.0f);
+        EXPECT_FLOAT_EQ(state.clouds.shadow_strength, rain ? 0.45f : 0.0f);
+    }
+    EXPECT_EQ(kComparisonPresentationTick, 120u);
+    EXPECT_EQ(kComparisonPresentationRate, 30u);
+}
+
 TEST(WeatherFrameContract, FinalScenarioPinsAndConsumersShareTheResolvedFrame) {
     const auto main = ReadShader("src/luminumbra_client/main_client.cpp");
     const auto live = main.find("renderPipeline.set_weather_state(weather_state);");
@@ -436,12 +461,15 @@ TEST(WeatherFrameContract, FinalScenarioPinsAndConsumersShareTheResolvedFrame) {
     }
     const auto weather_driver =
         ExtractBlock(drive, "bool ScenarioRunnerImpl::driveWeatherVisual()");
-    ExpectContains(weather_driver, "renderPipeline.get_weather_state()");
-    ExpectContains(weather_driver, "particles->set_precipitation(");
-    ExpectContains(weather_driver, "frame_weather.rain_intensity");
-    ExpectContains(weather_driver, "frame_weather.snow_intensity");
-    ExpectContains(weather_driver, "particles->set_wind(");
-    EXPECT_EQ(CountOccurrences(drive, "wstate.storm_intensity = sample.storm_intensity;"), 2u);
+    ExpectContains(weather_driver, "PinComparisonAtmosphere(");
+    const auto comparison = ReadShader("src/luminumbra_client/core/scenarios/WeatherVisual.cpp");
+    const auto comparison_pin = ExtractBlock(comparison, "void PinComparisonAtmosphere(");
+    ExpectContains(comparison_pin, "pipeline.get_weather_state()");
+    ExpectContains(comparison_pin, "particles->set_precipitation(");
+    ExpectContains(comparison_pin, "frame_weather.rain_intensity");
+    ExpectContains(comparison_pin, "frame_weather.snow_intensity");
+    ExpectContains(comparison_pin, "particles->set_wind(");
+    EXPECT_EQ(CountOccurrences(drive, "wstate.storm_intensity = sample.storm_intensity;"), 1u);
     EXPECT_EQ(drive.find("std::max(sample.storm_intensity,"), std::string::npos);
     const auto pipeline = ReadShader("src/luminumbra_client/rendering/RenderPipeline.cpp");
     const auto set_weather = ExtractBlock(pipeline, "void RenderPipeline::set_weather_state(");
@@ -589,6 +617,34 @@ TEST(ShaderCompositingContract, CloudAndAuroraGatesCoverTheFullStormSlab) {
     ExpectContains(source, "midCov = max(midCov, max(lowCov, highCov))");
     ExpectContains(source, "float stormGate = 1.0 - smoothstep(0.05, 0.35, u_stormSkyFloor)");
     ExpectContains(source, "overcastGate * stormGate");
+}
+
+TEST(ShaderCompositingContract, SkyGradesAllChannelsBeforeReservingDisplayWhiteForTheDisc) {
+    const auto source = ReadShader("res/shaders/enhanced_skybox.frag");
+    const auto main = ExtractBlock(source, "void main()");
+    const auto clouds = ExtractBlock(source, "vec3 renderClouds(");
+    ExpectContains(clouds, "dot(cloudColor, lumaWeights)");
+    ExpectContains(clouds, "dot(warmCloud, lumaWeights)");
+    const auto grade = ExtractBlock(source, "vec3 preserveSkyLuminance(");
+    ASSERT_FALSE(grade.empty());
+    ExpectContains(grade, "dot(color, lumaWeights)");
+    ExpectContains(grade, "dot(graded, lumaWeights)");
+    ExpectContains(grade, "luminance / gradedLuminance");
+    ExpectContains(grade, "(1.0 - luminance) / chroma[channel]");
+    ExpectContains(grade, "-luminance / chroma[channel]");
+    ExpectContains(main, "skyColor = preserveSkyLuminance(skyColor, graded);");
+    EXPECT_EQ(main.find("tintLuma"), std::string::npos);
+    const auto powers = main.find("graded = pow(");
+    const auto correction = main.find("skyColor = preserveSkyLuminance(");
+    const auto gamma = main.find("skyColor = min(pow(skyColor,");
+    const auto core = main.find("skyColor = mix(skyColor, vec3(1.0)");
+    ASSERT_NE(powers, std::string::npos);
+    ASSERT_NE(correction, std::string::npos);
+    ASSERT_NE(gamma, std::string::npos);
+    ASSERT_NE(core, std::string::npos);
+    EXPECT_LT(powers, correction);
+    EXPECT_LT(correction, gamma);
+    EXPECT_LT(gamma, core);
 }
 
 TEST(ShaderCompositingContract, StarsAreGatedByNightAndComposedBeforeClouds) {
