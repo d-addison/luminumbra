@@ -47,6 +47,7 @@
 #include "core/EngineVersion.h"
 #include "core/Log.h"
 #include "replay/ReplayStream.h"
+#include "systems/WeatherSystem.h"
 
 namespace Luminumbra::Net {
 namespace {
@@ -1140,6 +1141,12 @@ LockstepAdmissionStatus LockstepSession::AdmissionStatus() const {
 
 bool LockstepSession::Handshake() {
     m_receive_work = {};
+    // Schedule capture and restoration are not integrated with lockstep yet.
+    if (m_config.system_config_identity.starts_with(Systems::WeatherSchedule::kIdentityPrefix)) {
+        m_status.handshake_error = "scheduled weather is unsupported by lockstep";
+        TransportDisconnected();
+        return false;
+    }
     // Send our Hello, then drain until the peer's Hello arrives (loopback: the peer's
     // Hello must already be queued by the single-process driver). A mismatched
     // protocol/version/seed/preset/tick-rate/config identity is rejected loudly.
