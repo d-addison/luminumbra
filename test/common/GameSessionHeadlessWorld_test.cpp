@@ -59,6 +59,7 @@
 #include <utility>
 #include <vector>
 
+#include "luminumbra_client/app/CreatureBodyAttachment.h"
 #include "luminumbra_client/app/FarmSpeciesCache.h"
 #include "luminumbra_client/app/SessionExit.h"
 #include "luminumbra_client/rendering/TimeOfDayModel.h"
@@ -18501,4 +18502,194 @@ TEST(SurfaceQuery, SavedWaterOnlyCollisionSamplesRetainValidatedProceduralFallba
     world->set_durable_chunk_loader([](const IVec3&) { return std::shared_ptr<Chunk>{}; }, nullptr);
     EXPECT_FALSE(world->sample_simulation_collision(0, 0, heights));
     EXPECT_TRUE(world->durable_read_failed());
+}
+
+TEST(SurfaceQuery, RestoredSpheresInvalidatePreparationAndJoinTheNextHorizon) {
+    PhysicsSystem source;
+    source.startup();
+    ASSERT_FALSE(source.create_dynamic_sphere({8, 10000, 8}, {2, 0, 0}, 0.1f).IsInvalid());
+    PhysicsSystem::BodySetState state;
+    ASSERT_TRUE(source.capture_body_owners(state));
+    ASSERT_EQ(state.owners.size(), 1u);
+    EXPECT_FALSE(state.owners[0].suspended); // Existing records remain dynamic.
+
+    auto world = MakeSimulationCollisionWorld();
+    PhysicsSystem fresh;
+    fresh.startup();
+    fresh.set_world_system(world.get());
+    std::array<JPH::BodyID, 1> fresh_ids{};
+    ASSERT_TRUE(fresh.restore_body_owners(state, fresh_ids));
+    ASSERT_TRUE(fresh.prepare_simulation_collisions({}));
+    EXPECT_EQ(fresh.simulation_collision_owner_visit_count(), 1u);
+    EXPECT_EQ(fresh.simulation_collision_sample_count(), 9u);
+
+    PhysicsSystem target;
+    target.startup();
+    target.set_world_system(world.get());
+    ASSERT_TRUE(target.prepare_simulation_collisions({}, 7));
+    const auto empty = target.simulation_collision_hash();
+    std::array<JPH::BodyID, 1> ids{};
+    auto invalid = state;
+    --invalid.owners[0].size;
+    EXPECT_FALSE(target.restore_body_owners(invalid, ids));
+    EXPECT_TRUE(ids[0].IsInvalid());
+    ASSERT_TRUE(target.prepare_simulation_collisions({}, 7));
+    EXPECT_EQ(target.simulation_collision_hash(), empty);
+    EXPECT_EQ(target.simulation_collision_owner_visit_count(), 0u);
+
+    ASSERT_TRUE(target.restore_body_owners(state, ids));
+    const auto start = target.get_body_position(ids[0]);
+    target.update(1.0f / 30); // Commit must invalidate the previous ready barrier.
+    ExpectPositionBits(target.get_body_position(ids[0]), start);
+    ASSERT_TRUE(target.prepare_simulation_collisions({}, 7));
+    EXPECT_EQ(target.simulation_collision_owner_visit_count(), 1u);
+    EXPECT_EQ(target.simulation_collision_sample_count(), 9u);
+    EXPECT_TRUE(target.audio_raycast({8.25f, 16, 8.25f}, {8.25f, 0, 8.25f}).hit);
+    target.update(1.0f / 30);
+    EXPECT_GT(target.get_body_position(ids[0]).x, start.x);
+    target.destroy_body(ids[0]);
+    ASSERT_TRUE(target.prepare_simulation_collisions({}, 8));
+    EXPECT_EQ(target.simulation_collision_owner_visit_count(), 0u);
+    PhysicsSystem::BodySetState empty_state;
+    ASSERT_TRUE(target.capture_body_owners(empty_state));
+    ASSERT_TRUE(empty_state.owners.empty());
+    ASSERT_TRUE(target.restore_body_owners(empty_state, {}));
+    ASSERT_TRUE(target.prepare_simulation_collisions({}, 8));
+    EXPECT_EQ(target.simulation_collision_owner_visit_count(), 0u);
+    const auto replacement = target.create_dynamic_sphere(start, {}, 0.1f);
+    ASSERT_FALSE(replacement.IsInvalid());
+    ASSERT_TRUE(target.prepare_simulation_collisions({}, 9));
+    EXPECT_EQ(target.simulation_collision_owner_visit_count(), 1u);
+}
+
+TEST(SurfaceQuery, SuspendedSphereContinuationRetainsMotionAndActivity) {
+    for (const auto& [clear_authority, active] : std::array{std::pair{false, false},
+                                                            std::pair{false, true},
+                                                            std::pair{true, false},
+                                                            std::pair{true, true}}) {
+        SCOPED_TRACE(clear_authority);
+        SCOPED_TRACE(active);
+        auto source_world = MakeSimulationCollisionWorld();
+        auto target_world = MakeSimulationCollisionWorld();
+        PhysicsSystem source, target;
+        source.startup();
+        target.startup();
+        source.set_world_system(source_world.get());
+        target.set_world_system(target_world.get());
+        std::size_t source_last = 0, target_last = 0;
+        for (int index = 0; index < 14; ++index) {
+            const glm::vec3 position{8.0f + static_cast<float>(index) * 160, 10000, 8};
+            source_last = source.create_avatar_character(position);
+            target_last = target.create_avatar_character(position);
+            ASSERT_NE(source_last, PhysicsSystem::kInvalidAvatar);
+            ASSERT_NE(target_last, PhysicsSystem::kInvalidAvatar);
+        }
+        const glm::vec3 start{2248, 10000, 8};
+        const auto original = source.create_dynamic_sphere(start, {2, 3, 4}, 0.1f);
+        const auto placeholder = target.create_dynamic_sphere(start, {}, 0.1f);
+        ASSERT_FALSE(original.IsInvalid());
+        ASSERT_FALSE(placeholder.IsInvalid());
+        ASSERT_TRUE(source.prepare_simulation_collisions({}, 1));
+        ASSERT_TRUE(target.prepare_simulation_collisions({}, 1));
+        source.update(1.0f / 30);
+        PhysicsSystem::BodySetState state;
+        ASSERT_TRUE(source.capture_body_owners(state));
+        ASSERT_EQ(state.owners.size(), 1u);
+        EXPECT_TRUE(state.owners[0].suspended);
+        EXPECT_EQ(state.owners[0].retained_velocity, glm::vec3(2, 3, 4));
+        EXPECT_TRUE(state.owners[0].was_active);
+        // Exercise nonzero spin and sleeping continuation through the same public record.
+        state.owners[0].retained_angular_velocity = {1, 2, 3};
+        state.owners[0].was_active = active;
+        target.destroy_body(placeholder);
+        std::array<JPH::BodyID, 1> ids{};
+        auto invalid = state;
+        invalid.owners[0].retained_velocity.x = std::numeric_limits<float>::infinity();
+        EXPECT_FALSE(target.restore_body_owners(invalid, ids));
+        EXPECT_TRUE(ids[0].IsInvalid());
+        invalid = state;
+        invalid.owners[0].retained_angular_velocity.z = std::numeric_limits<float>::quiet_NaN();
+        EXPECT_FALSE(target.restore_body_owners(invalid, ids));
+        EXPECT_TRUE(ids[0].IsInvalid());
+        ASSERT_TRUE(target.restore_body_owners(state, ids));
+        PhysicsSystem::BodyOwnerState captured;
+        ASSERT_TRUE(target.capture_body_owner(ids[0], captured));
+        EXPECT_TRUE(captured.suspended);
+        EXPECT_EQ(captured.retained_velocity, state.owners[0].retained_velocity);
+        EXPECT_EQ(captured.retained_angular_velocity, state.owners[0].retained_angular_velocity);
+        EXPECT_EQ(captured.was_active, active);
+        EXPECT_EQ(target.body_is_active(ids[0]), active);
+        ASSERT_EQ(captured.size, state.owners[0].size);
+        ASSERT_LE(captured.size, captured.bytes.size());
+        EXPECT_TRUE(std::equal(captured.bytes.begin(),
+                               captured.bytes.begin() + captured.size,
+                               state.owners[0].bytes.begin()));
+        ASSERT_TRUE(target.prepare_simulation_collisions({}, 1));
+        target.update(1.0f / 30);
+        ExpectPositionBits(target.get_body_position(ids[0]), start);
+        if (clear_authority) {
+            target.set_world_system(nullptr);
+        } else {
+            target.remove_avatar_character(target_last);
+            ASSERT_TRUE(target.prepare_simulation_collisions({}, 2));
+        }
+        target.update(1.0f / 30);
+        ASSERT_TRUE(target.capture_body_owner(ids[0], captured));
+        EXPECT_FALSE(captured.suspended);
+        EXPECT_EQ(target.body_is_active(ids[0]), active);
+        if (active) {
+            EXPECT_GT(target.get_body_position(ids[0]).x, start.x);
+        } else {
+            ExpectPositionBits(target.get_body_position(ids[0]), start);
+        }
+    }
+}
+
+TEST(SurfaceQuery, CreatureAttachmentSkipsRefusalsWithinAnIndependentAttemptBudget) {
+    auto world = MakeSimulationCollisionWorld();
+    PhysicsSystem physics;
+    physics.startup();
+    physics.set_world_system(world.get());
+    for (int index = 0; index < 14; ++index) {
+        ASSERT_NE(
+            physics.create_avatar_character({8.0f + static_cast<float>(index) * 160, 10000, 8}),
+            PhysicsSystem::kInvalidAvatar);
+    }
+    entt::registry registry;
+    for (int index = 0; index < 3; ++index) {
+        const auto entity = registry.create();
+        registry.emplace<Luminumbra::Components::CreatureComponent>(entity);
+        registry.emplace<Luminumbra::Components::TransformComponent>(entity);
+    }
+    auto view = registry.view<const Luminumbra::Components::CreatureComponent,
+                              Luminumbra::Components::TransformComponent>();
+    std::array<entt::entity, 3> entities{};
+    std::size_t ordinal = 0;
+    for (const auto entity : view) {
+        entities[ordinal] = entity;
+        view.get<Luminumbra::Components::TransformComponent>(entity).position =
+            ordinal++ == 0 ? glm::vec3(2248, 10000, 8) : glm::vec3(8, 10000, 8);
+    }
+    using Luminumbra::Client::AttachMissingCreatureBodies;
+    using Luminumbra::Components::CreaturePhysicsComponent;
+    AttachMissingCreatureBodies(nullptr, registry);
+    AttachMissingCreatureBodies(&physics, registry, 0, 2);
+    AttachMissingCreatureBodies(&physics, registry, 1, 0);
+    AttachMissingCreatureBodies(&physics, registry, -1, 2);
+    AttachMissingCreatureBodies(&physics, registry, 1, -1);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 14u);
+    AttachMissingCreatureBodies(&physics, registry, 1, 1);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 14u);
+    EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(entities[0]));
+    AttachMissingCreatureBodies(&physics, registry, 1, 2);
+    EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(entities[0]));
+    EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(entities[1]));
+    EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(entities[2]));
+    EXPECT_EQ(physics.avatar_character_slot_count(), 15u);
+    AttachMissingCreatureBodies(&physics, registry, 1, 2);
+    EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(entities[2]));
+    EXPECT_EQ(physics.avatar_character_slot_count(), 16u);
+    registry.clear();
+    AttachMissingCreatureBodies(&physics, registry);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 16u);
 }

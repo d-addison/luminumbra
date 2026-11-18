@@ -160,6 +160,10 @@ using BodyOwnerState = PhysicsSystem::BodyOwnerState;
 using BodySetState = PhysicsSystem::BodySetState;
 
 void ExpectBodyBits(const BodyOwnerState& expected, const BodyOwnerState& actual) {
+    EXPECT_EQ(expected.suspended, actual.suspended);
+    EXPECT_EQ(expected.retained_velocity, actual.retained_velocity);
+    EXPECT_EQ(expected.retained_angular_velocity, actual.retained_angular_velocity);
+    EXPECT_EQ(expected.was_active, actual.was_active);
     ASSERT_EQ(expected.size, actual.size);
     ASSERT_LE(expected.size, expected.bytes.size());
     EXPECT_TRUE(std::equal(
@@ -814,3 +818,52 @@ TEST(BodyContinuation, ReplacesRemovedBodyCachesForEmptyAndNonemptySets) {
     }
 }
 } // namespace
+
+TEST(BodyContinuation, InvalidSuspensionMetadataRefusesBeforeCommit) {
+    PhysicsSystem source, target;
+    source.startup();
+    target.startup();
+    const auto sphere = source.create_dynamic_sphere({0, 100, 0}, {}, 0.1f);
+    ASSERT_FALSE(sphere.IsInvalid());
+    BodySetState state;
+    ASSERT_TRUE(source.capture_body_owners(state));
+    ASSERT_EQ(state.owners.size(), 1u);
+    state.owners[0].suspended = true; // An active payload cannot represent suspension.
+    std::array<JPH::BodyID, 1> ids{};
+    EXPECT_FALSE(target.restore_body_owners(state, ids));
+    EXPECT_TRUE(ids[0].IsInvalid());
+    BodySetState unchanged;
+    ASSERT_TRUE(target.capture_body_owners(unchanged));
+    EXPECT_TRUE(unchanged.owners.empty());
+    EXPECT_EQ(unchanged.slot_count, 0u);
+
+    // Suspended continuation also owns its registration before terrain is bound.
+    auto suspended = state;
+    SetBodyWord(suspended.owners[0], 16, 0); // inactive Jolt payload
+    suspended.owners[0].retained_velocity = {2, 0, 0};
+    suspended.owners[0].retained_angular_velocity = {1, 2, 3};
+    suspended.owners[0].was_active = true;
+    PhysicsSystem suspended_target;
+    suspended_target.startup();
+    std::array<JPH::BodyID, 1> suspended_ids{};
+    ASSERT_TRUE(suspended_target.restore_body_owners(suspended, suspended_ids));
+    BodyOwnerState captured;
+    ASSERT_TRUE(suspended_target.capture_body_owner(suspended_ids[0], captured));
+    ExpectBodyBits(suspended.owners[0], captured);
+    suspended_target.clear_simulation_collisions();
+    suspended_target.update(1.0f / 30);
+    EXPECT_GT(suspended_target.get_body_position(suspended_ids[0]).x, 0);
+
+    source.destroy_body(sphere);
+    const auto avatar = source.create_avatar_character({0, 100, 0});
+    ASSERT_NE(avatar, PhysicsSystem::kInvalidAvatar);
+    source.set_avatar_frozen(avatar, true, {0, 100, 0});
+    ASSERT_TRUE(source.capture_body_owners(state));
+    ASSERT_EQ(state.owners.size(), 1u);
+    state.owners[0].suspended = true; // Only spheres can carry suspended motion.
+    EXPECT_FALSE(target.restore_body_owners(state, ids));
+    EXPECT_TRUE(ids[0].IsInvalid());
+    ASSERT_TRUE(target.capture_body_owners(unchanged));
+    EXPECT_TRUE(unchanged.owners.empty());
+    EXPECT_EQ(unchanged.slot_count, 0u);
+}

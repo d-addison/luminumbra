@@ -956,6 +956,22 @@ struct SimulationHorizon {
 };
 } // namespace
 
+namespace {
+// BodyInterface's velocity setter wakes inactive bodies. Continuation must
+// retain both motion and activity, including an inactive body's retained spin.
+void SetOwnerVelocityWithoutActivation(JPH::PhysicsSystem& system,
+                                       JPH::BodyID id,
+                                       JPH::Vec3Arg velocity,
+                                       JPH::Vec3Arg angular_velocity) {
+    const JPH::BodyLockWrite lock(system.GetBodyLockInterface(), id);
+    if (lock.Succeeded()) {
+        auto& body = lock.GetBody();
+        body.SetLinearVelocityClamped(velocity);
+        body.SetAngularVelocityClamped(angular_velocity);
+    }
+}
+} // namespace
+
 // --- PhysicsSystem implementation -------------------------------------------
 // Only simulation owners enter this fixed-capacity cache. Render admission never
 // consumes its body ids, so asynchronous render order cannot reorder solver inputs.
@@ -1025,8 +1041,8 @@ void PhysicsSystem::clear_simulation_collisions() {
         if (owner.suspended) {
             m_body_interface->SetMotionType(
                 owner.id, JPH::EMotionType::Dynamic, JPH::EActivation::DontActivate);
-            m_body_interface->SetLinearAndAngularVelocity(
-                owner.id, owner.velocity, owner.angular_velocity);
+            SetOwnerVelocityWithoutActivation(
+                *m_jolt_system, owner.id, owner.velocity, owner.angular_velocity);
             if (owner.was_active) {
                 m_body_interface->ActivateBody(owner.id);
             }
@@ -1393,8 +1409,8 @@ void PhysicsSystem::update(float delta_time) {
             } else if (covered && owner.suspended) {
                 m_body_interface->SetMotionType(
                     owner.id, JPH::EMotionType::Dynamic, JPH::EActivation::DontActivate);
-                m_body_interface->SetLinearAndAngularVelocity(
-                    owner.id, owner.velocity, owner.angular_velocity);
+                SetOwnerVelocityWithoutActivation(
+                    *m_jolt_system, owner.id, owner.velocity, owner.angular_velocity);
                 if (owner.was_active) {
                     m_body_interface->ActivateBody(owner.id);
                 }
@@ -1946,6 +1962,24 @@ bool PhysicsSystem::capture_body_owner(JPH::BodyID body, BodyOwnerState& output)
     if (!m_jolt_system || body.IsInvalid() || body.GetIndex() >= kPhysicsCapacity) {
         return false;
     }
+    BodyOwnerState captured;
+    if (m_simulation_collisions) {
+        const auto& registrations = *m_simulation_collisions;
+        const auto slot = registrations.dynamic_slots[body.GetIndex()];
+        if (slot != 0) {
+            const auto& registered = registrations.dynamic_owners[slot - 1];
+            if (registered.id == body && registered.suspended) {
+                captured.suspended = true;
+                captured.retained_velocity = {registered.velocity.GetX(),
+                                              registered.velocity.GetY(),
+                                              registered.velocity.GetZ()};
+                captured.retained_angular_velocity = {registered.angular_velocity.GetX(),
+                                                      registered.angular_velocity.GetY(),
+                                                      registered.angular_velocity.GetZ()};
+                captured.was_active = registered.was_active;
+            }
+        }
+    }
     OwnerRecipe recipe;
     recipe.body = body.GetIndexAndSequenceNumber();
     try {
@@ -1955,7 +1989,8 @@ bool PhysicsSystem::capture_body_owner(JPH::BodyID body, BodyOwnerState& output)
                 return false;
             }
             const auto& owner = lock.GetBody();
-            if (owner.IsDynamic() && owner.GetShape()->GetSubType() == JPH::EShapeSubType::Sphere) {
+            if ((owner.IsDynamic() || (owner.IsKinematic() && captured.suspended)) &&
+                owner.GetShape()->GetSubType() == JPH::EShapeSubType::Sphere) {
                 recipe.kind = kSphereOwner;
                 recipe.radius = static_cast<const JPH::SphereShape*>(owner.GetShape())->GetRadius();
                 m_jolt_system->SaveBodyState(owner, recipe.owner);
@@ -1975,7 +2010,16 @@ bool PhysicsSystem::capture_body_owner(JPH::BodyID body, BodyOwnerState& output)
                                          JPH::EStateRecorderState::Contacts,
                                      &filter);
         }
-        return WriteOwner(recipe, output);
+        BodyOwnerState payload;
+        if (!WriteOwner(recipe, payload)) {
+            return false;
+        }
+        payload.suspended = captured.suspended;
+        payload.retained_velocity = captured.retained_velocity;
+        payload.retained_angular_velocity = captured.retained_angular_velocity;
+        payload.was_active = captured.was_active;
+        output = payload;
+        return true;
     } catch (const OwnerStateRefusal&) {
         return false;
     }
@@ -2044,6 +2088,22 @@ bool PhysicsSystem::restore_body_owners(const BodySetState& state, std::span<JPH
         if (!ParseOwner(states[i], recipe) ||
             (recipe.kind != kSphereOwner && recipe.kind != kFrozenBodyOwner)) {
             return false;
+        }
+        const auto& saved = states[i];
+        if (saved.suspended) {
+            const auto finite = [](const glm::vec3& value) {
+                return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+            };
+            if (recipe.kind != kSphereOwner || !finite(saved.retained_velocity) ||
+                !finite(saved.retained_angular_velocity)) {
+                return false;
+            }
+            bool active = false;
+            recipe.owner.Read(active);
+            recipe.owner.cursor = 0;
+            if (active) {
+                return false;
+            }
         }
         const JPH::BodyLockRead lock(m_jolt_system->GetBodyLockInterface(),
                                      JPH::BodyID(recipe.body));
@@ -2175,6 +2235,14 @@ bool PhysicsSystem::restore_body_owners(const BodySetState& state, std::span<JPH
     if (!state.free_slots.empty() && !scratch) {
         return false;
     }
+    const bool needs_registrations = simulation_collisions_enabled() ||
+                                     std::any_of(states.begin(),
+                                                 states.end(),
+                                                 [](const auto& saved) { return saved.suspended; });
+    std::unique_ptr<SimulationCollisions> registrations;
+    if (needs_registrations && !m_simulation_collisions) {
+        registrations = std::make_unique<SimulationCollisions>();
+    }
     // All refusals and allocations precede commit. Empty both live cache banks
     // so replay has exactly the allocator state validated above, including when
     // the world previously contained bodies that have since been removed.
@@ -2199,6 +2267,16 @@ bool PhysicsSystem::restore_body_owners(const BodySetState& state, std::span<JPH
         }
     }
     m_avatar_shape = avatar_shape;
+    if (registrations) {
+        m_simulation_collisions = std::move(registrations);
+    }
+    if (m_simulation_collisions) {
+        // Restore replaces the complete owner set. Existing live bodies were
+        // validated static above; release all previous sphere registrations.
+        m_simulation_collisions->dynamic_count = 0;
+        m_simulation_collisions->dynamic_slots.fill(0);
+        m_simulation_collisions->ready = false;
+    }
     for (std::size_t i = 0; i < recipes.size(); ++i) {
         auto* body = staged[i].get();
         AssignRestoredOwnerBody(*m_body_interface, body, JPH::BodyID(recipes[i].body));
@@ -2206,6 +2284,27 @@ bool PhysicsSystem::restore_body_owners(const BodySetState& state, std::span<JPH
         m_body_interface->AddBody(body->GetID(), JPH::EActivation::DontActivate);
         if (recipes[i].kind == kSphereOwner) {
             m_jolt_system->RestoreBodyState(*body, recipes[i].owner);
+            const auto& saved = states[i];
+            if (needs_registrations) {
+                auto& registrations_state = *m_simulation_collisions;
+                const auto id = body->GetID();
+                registrations_state.dynamic_owners[registrations_state.dynamic_count++] = {
+                    .id = id,
+                    .velocity = JPH::Vec3(saved.retained_velocity.x,
+                                          saved.retained_velocity.y,
+                                          saved.retained_velocity.z),
+                    .angular_velocity = JPH::Vec3(saved.retained_angular_velocity.x,
+                                                  saved.retained_angular_velocity.y,
+                                                  saved.retained_angular_velocity.z),
+                    .suspended = saved.suspended,
+                    .was_active = saved.was_active};
+                registrations_state.dynamic_slots[id.GetIndex()] =
+                    static_cast<std::uint32_t>(registrations_state.dynamic_count);
+                if (saved.suspended) {
+                    m_body_interface->SetMotionType(
+                        id, JPH::EMotionType::Kinematic, JPH::EActivation::DontActivate);
+                }
+            }
         }
         bodies[i] = JPH::BodyID(recipes[i].body);
     }
