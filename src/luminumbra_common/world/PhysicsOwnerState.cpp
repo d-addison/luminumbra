@@ -320,13 +320,16 @@ void OwnerSchema(OwnerReader& codec, OwnerRecipe& recipe) {
         const auto radius = codec.number();
         OwnerReader::require(radius > 0.0f);
         // Reconstruct only radii whose default mass/inertia can form a dynamic
-        // body. Finite radii alone can still underflow mass or overflow inertia.
+        // body. Finite radii alone can still underflow mass or inertia (to zero
+        // or a subnormal whose reciprocal overflows) or overflow inertia.
         const auto properties = JPH::SphereShape(radius).GetMassProperties();
         const auto inertia = properties.mInertia.GetDiagonal3();
-        OwnerReader::require(std::isfinite(properties.mMass) && properties.mMass > 0.0f &&
-                             std::isfinite(2.5f / properties.mMass) &&
-                             std::isfinite(inertia.GetX()) && std::isfinite(inertia.GetY()) &&
-                             std::isfinite(inertia.GetZ()));
+        const auto invertible = [](float value) {
+            return std::isfinite(value) && value > 0.0f && std::isfinite(1.0f / value);
+        };
+        OwnerReader::require(invertible(properties.mMass) &&
+                             std::isfinite(2.5f / properties.mMass) && invertible(inertia.GetX()) &&
+                             invertible(inertia.GetY()) && invertible(inertia.GetZ()));
         BodySchema(codec);
         SceneSchema(codec, recipe);
     } else {

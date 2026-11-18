@@ -583,7 +583,9 @@ TEST(PlayerAvatarOwnerCodec, RefusesMalformedSphereSceneAndAllocatorFields) {
         SetPhysicsWord(malformed, offset, word);
         EXPECT_FALSE(ValidatePhysicsOwner(malformed));
     }
-    for (const float radius : {1.0e-14f, 1.0e8f}) {
+    // 1e-13 underflows inertia to zero and 1e-9 leaves a subnormal inertia whose
+    // reciprocal overflows, both while mass stays invertible.
+    for (const float radius : {1.0e-14f, 1.0e-13f, 1.0e-9f, 1.0e8f}) {
         auto invalid_radius = original;
         SetPhysicsWord(invalid_radius, 12, std::bit_cast<std::uint32_t>(radius));
         EXPECT_FALSE(ValidatePhysicsOwner(invalid_radius));
