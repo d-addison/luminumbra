@@ -463,9 +463,13 @@ TEST_F(WorldAndWaterTest, DryHighAltitudeCellsStayDryAfterSimulation) {
 }
 
 TEST_F(WorldAndWaterTest, WaterMeshNormalsPointUp) {
-    Chunk chunk({0, 0, 0});
+    // Only the column's vertical owner emits a surface. The band's top margin is
+    // above the generated terrain, so a mid-chunk level there is never clipped.
+    const auto span = world_system->water_presentation_vertical_span(IVec2(0, 0));
+    Chunk chunk({0, span.y, 0});
     world_system->GenerateChunkData(chunk);
-    chunk.water_level_data.assign(WATER_SIM_RESOLUTION_X * WATER_SIM_RESOLUTION_Z, SEA_LEVEL);
+    const float level = static_cast<float>(span.y * CHUNK_SIZE_Y + CHUNK_SIZE_Y / 2);
+    chunk.water_level_data.assign(WATER_SIM_RESOLUTION_X * WATER_SIM_RESOLUTION_Z, level);
     chunk.has_water_sim.store(true);
     World::MarchingCubes::GenerateWaterMesh(*water_system, *world_system, chunk);
     ASSERT_FALSE(chunk.water_mesh_vertices.empty());

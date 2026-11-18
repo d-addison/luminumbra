@@ -2612,7 +2612,9 @@ TEST(RegionalWaterTransaction, DispatchedMeshingSnapshotSurvivesStagingAndPublis
     WaterSystem water(nullptr, &shield);
     shield.SetWaterSystem(&water);
     auto ledger = PlanningLedger({{0, 0}});
-    const std::vector chunks{TransactionChunk(0, 999000)};
+    // A surface above the presentation band belongs to the band's top margin chunk.
+    const int owner_y = shield.water_presentation_vertical_span(IVec2(0, 0)).y;
+    const std::vector chunks{TransactionChunkAt({0, owner_y, 0}, 999000)};
     chunks[0]->water_level_data.assign(64, 1000.0f);
     // Exact full terrain storage makes this an admitted mesh job, with a water
     // surface high enough that procedural shoreline clipping cannot affect it.
@@ -2626,7 +2628,10 @@ TEST(RegionalWaterTransaction, DispatchedMeshingSnapshotSurvivesStagingAndPublis
     entt::registry registry;
     TransactionMeshGate gate(jobs, shield);
     shield.begin_tick(0);
-    shield.update(registry, Vec3(8.0f), nullptr, false);
+    shield.update(registry,
+                  Vec3(8.0f, static_cast<float>(owner_y * CHUNK_SIZE_Y) + 8.0f, 8.0f),
+                  nullptr,
+                  false);
     ASSERT_EQ(chunks[0]->get_state(), ChunkState::Meshing);
     ASSERT_EQ(chunks[0]->pending_lod.load(), 0);
     ASSERT_FALSE(chunks[0]->pending_mesh_ready.load());
