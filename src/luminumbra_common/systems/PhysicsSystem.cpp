@@ -310,6 +310,13 @@ bool PhysicsSystem::simulation_collisions_ready() const {
            m_simulation_collisions->ready;
 }
 
+std::uint32_t PhysicsSystem::non_simulation_body_count() const {
+    // All private horizon slots, including unpublished reservations, belong to
+    // the terrain headroom. They must not reduce capsule admission capacity.
+    const auto terrain_slots = m_simulation_collisions ? m_simulation_collisions->body_count : 0;
+    return m_jolt_system->GetNumBodies() - static_cast<std::uint32_t>(terrain_slots);
+}
+
 void PhysicsSystem::set_world_system(const SHIELD_WorldSystem* world_system) {
     if (world_system != m_world_system) {
         clear_simulation_collisions();
@@ -611,7 +618,7 @@ void PhysicsSystem::update(float delta_time) {
     m_work_items = {};
     if (!m_jolt_system || !simulation_collisions_ready())
         return;
-    m_work_items.bodies = m_jolt_system->GetNumBodies();
+    m_work_items.bodies = non_simulation_body_count();
     m_jolt_system->Update(delta_time, 1, m_temp_allocator.get(), m_jolt_job_system.get());
 
     // Process batched physics queries each frame
@@ -997,7 +1004,7 @@ void PhysicsSystem::set_avatar_frozen(std::size_t index, bool frozen, const glm:
         // refusal and a null CreateBody leave an invalid ID for the next retry.
         const auto max_bodies = m_jolt_system->GetMaxBodies();
         if (max_bodies > kTerrainBodyHeadroom &&
-            m_jolt_system->GetNumBodies() < max_bodies - kTerrainBodyHeadroom) {
+            non_simulation_body_count() < max_bodies - kTerrainBodyHeadroom) {
             body = m_body_interface->CreateAndAddBody(settings, JPH::EActivation::DontActivate);
         }
     } else if (!frozen) {

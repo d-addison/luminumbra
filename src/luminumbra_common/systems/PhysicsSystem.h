@@ -54,7 +54,8 @@ public:
         std::uint64_t characters = 0;
     };
     // Input bodies for the latest scene update, plus character steps since it.
-    // Diagnostic only; static bodies count too. No solver/timing estimates.
+    // Diagnostic only; static bodies count too, excluding private simulation
+    // terrain slots charged to terrain headroom. No solver/timing estimates.
     [[nodiscard]] WorkItems work_items() const {
         return m_work_items;
     }
@@ -241,6 +242,7 @@ private:
     std::unique_ptr<SimulationCollisions> m_simulation_collisions;
     bool simulation_collisions_enabled() const;
     bool simulation_collisions_ready() const;
+    std::uint32_t non_simulation_body_count() const;
     WorkItems m_work_items{};
     // Independent ownership, released only after all Jolt resources.
     std::unique_ptr<JoltRuntimeLease> m_runtime_lease;

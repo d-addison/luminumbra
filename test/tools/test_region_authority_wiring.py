@@ -432,6 +432,7 @@ class SimulationCollisionWiring(unittest.TestCase):
                 "SimulationPreparationBoundsInputsAndMissingAuthority",
                 "SimulationPreparationCanonicalizesOrderAndPreservesLegacyPath",
                 "SimulationOwnerRegistrationAndTickReuseStayBounded",
+                "SimulationTerrainReservationsLeaveTheCapsuleBudgetUnchanged",
                 "SimulationPreparationVisitsOnlyLiveAvatarOwners",
                 "TeleportPreparesDestinationBeforeTheLocalCharacterSteps",
                 "RenderPreparationRefreshesEvenWhenTheUpcomingTickDoesNotChange",
@@ -462,6 +463,30 @@ class SimulationCollisionWiring(unittest.TestCase):
         for whole_world_scan in ("snapshot_streamed_chunks", "m_chunk_bodies", "GetBodies(",
                                  "m_avatars.size()", "avatar : m_avatars"):
             self.assertNotIn(whole_world_scan, prepare)
+
+    def assert_terrain_reservation_accounting(self, source):
+        count = function(source, "std::uint32_t PhysicsSystem::non_simulation_body_count(")
+        self.assertIn("m_simulation_collisions->body_count", count)
+        self.assertIn("GetNumBodies() - static_cast<std::uint32_t>(terrain_slots)", count)
+        update = function(source, "void PhysicsSystem::update(")
+        self.assertIn("m_work_items.bodies = non_simulation_body_count();", update)
+        freeze = function(source, "void PhysicsSystem::set_avatar_frozen(")
+        self.assertIn("non_simulation_body_count() < max_bodies - kTerrainBodyHeadroom", freeze)
+
+    def test_terrain_reservations_use_headroom_at_both_body_count_consumers(self):
+        source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(
+            encoding="utf-8")
+        self.assert_terrain_reservation_accounting(source)
+        for original, replacement in (
+            ("GetNumBodies() - static_cast<std::uint32_t>(terrain_slots)", "GetNumBodies()"),
+            ("m_work_items.bodies = non_simulation_body_count();",
+             "m_work_items.bodies = m_jolt_system->GetNumBodies();"),
+            ("non_simulation_body_count() < max_bodies - kTerrainBodyHeadroom",
+             "m_jolt_system->GetNumBodies() < max_bodies - kTerrainBodyHeadroom"),
+        ):
+            self.assertIn(original, source)
+            with self.subTest(original=original), self.assertRaises(AssertionError):
+                self.assert_terrain_reservation_accounting(source.replace(original, replacement))
 
     def test_expected_collision_authority_cannot_be_masked_by_water_or_unknown_metadata(self):
         source = (ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp").read_text(

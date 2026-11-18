@@ -15832,6 +15832,40 @@ TEST(SurfaceQuery, SimulationOwnerRegistrationAndTickReuseStayBounded) {
     EXPECT_EQ(physics.simulation_collision_sample_count(), 18u);
 }
 
+TEST(SurfaceQuery, SimulationTerrainReservationsLeaveTheCapsuleBudgetUnchanged) {
+    auto world = MakeSimulationCollisionWorld();
+    PhysicsSystem physics;
+    physics.startup();
+    // Populate the existing body pool before attaching regional authority.
+    // The terrain reservation must fit inside its pre-existing headroom.
+    constexpr std::size_t body_limit = 10240u - PhysicsSystem::kTerrainBodyHeadroom;
+    JPH::BodyID last;
+    for (std::size_t i = 0; i < body_limit; ++i) {
+        last = physics.create_dynamic_sphere({static_cast<float>(i) * 3.0f, 0, 0}, {}, 0.1f);
+        ASSERT_FALSE(last.IsInvalid());
+    }
+    const auto avatar = physics.create_avatar_character({8, 10000, 8});
+    physics.set_world_system(world.get());
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}));
+    EXPECT_EQ(physics.simulation_collision_sample_count(), 9u);
+    physics.update(0.0f);
+    EXPECT_EQ(physics.work_items().bodies, body_limit);
+    physics.set_avatar_frozen(avatar, true, {8, 10000, 8});
+    EXPECT_FALSE(physics.audio_raycast({7, 10001.3f, 8}, {9, 10001.3f, 8}).hit);
+    physics.destroy_body(last);
+    physics.set_avatar_frozen(avatar, true, {8, 10000, 8});
+    EXPECT_TRUE(physics.audio_raycast({7, 10001.3f, 8}, {9, 10001.3f, 8}).hit);
+    physics.update(0.0f);
+    EXPECT_EQ(physics.work_items().bodies, body_limit);
+    physics.set_avatar_frozen(avatar, false, {8, 10000, 8});
+    physics.update(0.0f);
+    EXPECT_EQ(physics.work_items().bodies, body_limit - 1);
+    physics.clear_simulation_collisions();
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}));
+    physics.update(0.0f);
+    EXPECT_EQ(physics.work_items().bodies, body_limit - 1);
+}
+
 TEST(SurfaceQuery, SimulationPreparationVisitsOnlyLiveAvatarOwners) {
     auto world = MakeSimulationCollisionWorld();
     PhysicsSystem physics;
