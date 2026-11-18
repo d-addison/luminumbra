@@ -36,6 +36,7 @@
 #include "core/Log.h"
 #include "persistence/ReplacementOutputFile.h"
 #include "persistence/SaveTransaction.h"
+#include "systems/WeatherSystem.h"
 #include "world/SurfaceWorkBudget.h"
 
 namespace Luminumbra::Replay {
@@ -383,6 +384,51 @@ bool ValidBootHeader(const ReplayHeader& header) {
            ValidBootDescriptor(*header.authority_boot, error);
 }
 
+bool HeaderEncodingValid(const ReplayHeader& header) {
+    const bool scheduled = WeatherVersion(header.version);
+    // Readers admit versions before this check. Preserve unscheduled writers'
+    // legacy version stamping while refusing schedule payload downgrades.
+    if (!ValidBootHeader(header) || scheduled != !header.weather_schedule.empty() ||
+        scheduled !=
+            header.system_config_identity.starts_with(Systems::WeatherSchedule::kIdentityPrefix)) {
+        return false;
+    }
+    if (!scheduled) {
+        return true;
+    }
+    Systems::WeatherSchedule decoded;
+    return Systems::WeatherSchedule::Decode(header.weather_schedule, decoded);
+}
+
+std::size_t HeaderStringBudget(const ReplayHeader& header) {
+    // At most 64 MiB per encoded header, independently of record storage.
+    std::size_t remaining = BoundedReplayRecorder::kSegmentBytes - 66;
+    if (HasBootDescriptor(header.version)) {
+        remaining -= 4 + BootDescriptor::kMaxEncodedBytes;
+    }
+    if (WeatherVersion(header.version)) {
+        remaining -= 4;
+    }
+    return remaining;
+}
+
+bool HeaderWithinBudget(const ReplayHeader& header) {
+    auto remaining = HeaderStringBudget(header);
+    for (const auto* part : {&header.seed_string,
+                             &header.preset,
+                             &header.start_world_hash,
+                             &header.engine_version,
+                             &header.system_config_identity,
+                             &header.preset_content_hash,
+                             &header.weather_schedule}) {
+        if (part->size() > remaining) {
+            return false;
+        }
+        remaining -= part->size();
+    }
+    return true;
+}
+
 // Header layout. The tick_count field is written as a backpatch slot and finalized
 // in-place by Finalize once the run length is known (its byte offset is fixed
 // because everything before it is fixed-width).
@@ -399,6 +445,7 @@ bool ValidBootHeader(const ReplayHeader& header) {
 //   then length-prefixed strings: seed_string, preset, start_world_hash,
 //   engine_version, system_config_identity, preset_content_hash (v3).
 //   Versions 5/6 append u32 descriptor byte length + AUBD descriptor bytes.
+//   Versions 7/8 instead append u32 schedule byte length + canonical WSC1 bytes.
 constexpr std::size_t kTickCountOffset = 10;
 
 std::unique_ptr<const Persistence::ReplayPairReadGuard>
@@ -434,6 +481,9 @@ void AppendHeader(std::vector<std::uint8_t>& out, const ReplayHeader& h) {
     PutString(out, h.engine_version);
     PutString(out, h.system_config_identity);
     PutString(out, h.preset_content_hash);
+    if (WeatherVersion(h.version)) {
+        PutString(out, h.weather_schedule);
+    }
     if (HasBootDescriptor(h.version) && h.authority_boot.has_value()) {
         std::vector<std::uint8_t> descriptor;
         std::string error;
@@ -460,12 +510,11 @@ bool ParseHeader(Reader& c, ReplayHeader& h, std::uint64_t& header_tick_count, s
     // Refuse a version mismatch LOUDLY (the header's binding contract): a future/unknown LREC1
     // version would have a different record layout, so parsing it under today's assumptions
     // would silently mis-decode into garbage. Reject instead (Factorio breaks silently; we don't).
-    if (h.version != kLrec1Version && h.version != kLrec1ElidedVersion &&
-        !HasBootDescriptor(h.version)) {
+    if (!SupportedVersion(h.version)) {
         error = "unsupported LREC1 version";
         return false;
     }
-    if (HasBootDescriptor(h.version) && reserved != 0) {
+    if ((HasBootDescriptor(h.version) || WeatherVersion(h.version)) && reserved != 0) {
         error = "nonzero LREC1 reserved byte";
         return false;
     }
@@ -495,6 +544,10 @@ bool ParseHeader(Reader& c, ReplayHeader& h, std::uint64_t& header_tick_count, s
         return false;
     if (!c.GetString(h.preset_content_hash))
         return false;
+    if (WeatherVersion(h.version) &&
+        !c.GetField(h.weather_schedule, Systems::WeatherSchedule::kMaxEncodedBytes)) {
+        return false;
+    }
     if (HasBootDescriptor(h.version)) {
         std::uint32_t length = 0;
         error = "truncated or oversized authority boot envelope";
@@ -514,7 +567,7 @@ bool ParseHeader(Reader& c, ReplayHeader& h, std::uint64_t& header_tick_count, s
         }
         h.authority_boot = std::move(boot);
     }
-    return c.ok;
+    return c.ok && HeaderEncodingValid(h);
 }
 
 // One record frame: u8 type + u64 tick + u32 payload-length + payload. The
@@ -553,7 +606,7 @@ ReplayWriter::~ReplayWriter() = default;
 bool ReplayWriter::Open(const std::string& path, const ReplayHeader& header) {
     if (!World::SurfaceRadiiSupported(header.surface_radius, header.collision_radius))
         return false;
-    if (!ValidBootHeader(header)) {
+    if (!HeaderEncodingValid(header) || !HeaderWithinBudget(header)) {
         return false;
     }
     m_replacement_guard.reset();
@@ -691,23 +744,22 @@ bool BoundedReplayRecorder::Open(const std::string& destination, const ReplayHea
                                      PathTailPrefix(m_directory),
                                      PathTailLength(m_directory),
                                      PathTail(m_directory)));
-    if (!ValidBootHeader(header)) {
-        return Refused(std::snprintf(m_open_refusal.data(),
-                                     kOpenRefusalBytes,
-                                     "authority-boot: missing, invalid or mismatched descriptor"));
+    if (!HeaderEncodingValid(header)) {
+        const char* refusal = ValidBootHeader(header)
+                                  ? "unsupported: invalid version or weather schedule"
+                                  : "authority-boot: missing, invalid or mismatched descriptor";
+        return Refused(std::snprintf(m_open_refusal.data(), kOpenRefusalBytes, "%s", refusal));
     }
     // Header allocation is bounded independently of the tick/segment budget.
-    std::size_t remaining = kSegmentBytes - 66; // fixed fields + six u32 lengths
-    if (HasBootDescriptor(header.version)) {
-        remaining -= 4 + BootDescriptor::kMaxEncodedBytes;
-    }
+    std::size_t remaining = HeaderStringBudget(header);
     std::size_t part_index = 0;
     for (const auto* part : {&header.seed_string,
                              &header.preset,
                              &header.start_world_hash,
                              &header.engine_version,
                              &header.system_config_identity,
-                             &header.preset_content_hash}) {
+                             &header.preset_content_hash,
+                             &header.weather_schedule}) {
         if (part->size() > remaining)
             return Refused(std::snprintf(m_open_refusal.data(),
                                          kOpenRefusalBytes,
@@ -922,8 +974,9 @@ bool BoundedReplayRecorder::Finalize(const std::string& destination,
         Persistence::report_snapshot_step("replay-segment-close", destination);
         std::vector<std::uint8_t> header;
         if (m_elided_tick != 0) {
-            m_header.version =
-                HasBootDescriptor(m_header.version) ? kLrec1BootElidedVersion : kLrec1ElidedVersion;
+            m_header.version = WeatherVersion(m_header.version)      ? kLrec1WeatherElidedVersion
+                               : HasBootDescriptor(m_header.version) ? kLrec1BootElidedVersion
+                                                                     : kLrec1ElidedVersion;
         }
         AppendHeader(header, m_header);
         for (std::size_t i = 0; i < 8; ++i)
@@ -1539,9 +1592,10 @@ struct ReplayCursor {
     }
 
     template<typename Field>
-    bool GetField(Field& field) {
+    bool GetField(Field& field,
+                  std::size_t max_bytes = (std::numeric_limits<std::uint32_t>::max)()) {
         std::uint32_t length = 0;
-        if (!GetU32(length) || !Remaining(length) || !budget.Field(length)) {
+        if (!GetU32(length) || length > max_bytes || !Remaining(length) || !budget.Field(length)) {
             ok = false;
             return false;
         }
@@ -1640,9 +1694,7 @@ ParseReplay(Source& source, std::uint64_t size, ReplayReadLimits limits, std::st
                 break;
             }
             contents.checkpoints.push_back(std::move(rec));
-        } else if (type == RecordType::ElidedPrefix &&
-                   (contents.header.version == kLrec1ElidedVersion ||
-                    contents.header.version == kLrec1BootElidedVersion) &&
+        } else if (type == RecordType::ElidedPrefix && ElidedVersion(contents.header.version) &&
                    contents.inputs.empty() && contents.checkpoints.empty() &&
                    contents.elided_through_tick == 0 && tick != 0 && payload_len == 8) {
             if (!payload.GetU64(contents.elided_prefix_digest)) {

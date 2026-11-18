@@ -711,10 +711,12 @@ using FoliageEdges = std::vector<std::pair<ScentCellKey, ScentCellKey>>;
 inline FoliageEdges
 FoliageBorderEdges(const FieldPageState& pages,
                    const std::map<RegionKey, ::Luminumbra::world::ActiveRegionRecord>& records,
-                   std::span<const RegionKey> owners) {
+                   std::span<const RegionKey> owners,
+                   bool discover_recipients = false) {
     FoliageEdges edges;
     // At most 2048 boundary cells per selected 512 m owner. Both endpoints
-    // must exist, as in continuous diffusion; storage caps cells at kMaxPages * 256.
+    // exist by default. Admission discovery also includes wet-to-missing edges;
+    // callers must stage endpoints before computing flux. Dry missing pages stay absent.
     for (const auto owner : owners) {
         const auto a = records.find(owner);
         if (a == records.end() || a->second.state == ::Luminumbra::world::RegionState::Frozen) {
@@ -739,8 +741,11 @@ FoliageBorderEdges(const FieldPageState& pages,
                     static_cast<std::int32_t>(z) + (along_x ? offset : (sign > 0 ? 511 : 0))};
                 const ScentCellKey next{cell.x + (along_x ? sign : 0),
                                         cell.z + (along_x ? 0 : sign)};
-                if (FoliageFieldPages::valid_cell(next) && (pages.irrigation().initialized(cell) &&
-                                                            pages.irrigation().initialized(next))) {
+                if (FoliageFieldPages::valid_cell(next) &&
+                    ((pages.irrigation().initialized(cell) &&
+                      pages.irrigation().initialized(next)) ||
+                     (discover_recipients && (pages.irrigation().sample(cell, 0) > 0 ||
+                                              pages.irrigation().sample(next, 0) > 0)))) {
                     edges.emplace_back(sign > 0 ? cell : next, sign > 0 ? next : cell);
                 }
             }
