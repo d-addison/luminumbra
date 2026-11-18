@@ -6,9 +6,12 @@
 #include <gtest/gtest.h>
 
 #include "core/BenchmarkPose.h"
+#include "core/TimelapseVista.h"
 #include "player/SaveAnchor.h"
 #include "rendering/TreeImpostorPolicy.h"
 
+#include <cmath>
+#include <limits>
 #include <optional>
 #include <string>
 
@@ -124,4 +127,68 @@ TEST(BenchmarkPose, ConstantsMatchRenderBenchmarkDefaults) {
     EXPECT_FLOAT_EQ(BP::kYaw, 35.0f);
     EXPECT_FLOAT_EQ(BP::kPitch, -6.0f);
     EXPECT_FLOAT_EQ(BP::kTimeOfDay, 0.04f);
+}
+
+namespace {
+namespace TV = Luminumbra::TimelapseVista;
+constexpr int kDefaultSettle = 45; // kTimelapseSettleFrames in ClientAppContext.h
+} // namespace
+
+TEST(TimelapseVista, SettleFramesStayWithinDefaultAndOneMinute) {
+    EXPECT_EQ(TV::ClampSettleFrames(kDefaultSettle, kDefaultSettle), kDefaultSettle);
+    EXPECT_EQ(TV::ClampSettleFrames(0, kDefaultSettle), kDefaultSettle);
+    EXPECT_EQ(TV::ClampSettleFrames(-5, kDefaultSettle), kDefaultSettle);
+    EXPECT_EQ(TV::ClampSettleFrames(600, kDefaultSettle), 600);
+    EXPECT_EQ(TV::ClampSettleFrames(TV::kMaxSettleFrames, kDefaultSettle), TV::kMaxSettleFrames);
+    EXPECT_EQ(TV::ClampSettleFrames(TV::kMaxSettleFrames + 1, kDefaultSettle),
+              TV::kMaxSettleFrames);
+    EXPECT_EQ(TV::ClampSettleFrames(std::numeric_limits<int>::max(), kDefaultSettle),
+              TV::kMaxSettleFrames);
+}
+
+TEST(TimelapseVista, PanParsesFiniteValuesAndClampsToTwoDegrees) {
+    EXPECT_EQ(TV::ParsePanDegrees("0.5"), std::optional<float>(0.5f));
+    EXPECT_EQ(TV::ParsePanDegrees("-1.25"), std::optional<float>(-1.25f));
+    EXPECT_EQ(TV::ParsePanDegrees("0"), std::optional<float>(0.0f));
+    EXPECT_EQ(TV::ParsePanDegrees("2"), std::optional<float>(TV::kMaxPanDegreesPerFrame));
+    EXPECT_EQ(TV::ParsePanDegrees("45"), std::optional<float>(TV::kMaxPanDegreesPerFrame));
+    EXPECT_EQ(TV::ParsePanDegrees("-45"), std::optional<float>(-TV::kMaxPanDegreesPerFrame));
+    EXPECT_EQ(TV::ParsePanDegrees("1e30"), std::optional<float>(TV::kMaxPanDegreesPerFrame));
+}
+
+TEST(TimelapseVista, PanRefusesEmptyGarbageAndNonFiniteInput) {
+    for (const char* text : {"", "abc", "nan", "NaN", "-nan", "inf", "-inf", "infinity", "1e999"}) {
+        SCOPED_TRACE(text);
+        EXPECT_EQ(TV::ParsePanDegrees(text), std::nullopt);
+    }
+}
+
+TEST(TimelapseVista, FramingLooksTowardTheSunsetSideJustBelowTheHorizon) {
+    const glm::vec3 spawn(100.0f, 40.0f, -20.0f);
+    const auto framing = TV::VistaFraming(spawn);
+    // Low camera: well under the 16-30 m overlooks of the rain/drain framings.
+    EXPECT_FLOAT_EQ(framing.position.y - spawn.y, 10.0f);
+    const glm::vec3 d = glm::normalize(framing.target - framing.position);
+    EXPECT_LT(d.x, -0.9f); // the sun sets toward -x
+    const float pitch = glm::degrees(std::asin(d.y));
+    EXPECT_LT(pitch, 0.0f);
+    EXPECT_GT(pitch, -10.0f);
+    // The framing follows the spawn point, not world coordinates.
+    const auto moved = TV::VistaFraming(spawn + glm::vec3(5.0f, -3.0f, 7.0f));
+    EXPECT_FLOAT_EQ(moved.position.x - framing.position.x, 5.0f);
+    EXPECT_FLOAT_EQ(moved.target.y - framing.target.y, -3.0f);
+    EXPECT_FLOAT_EQ(moved.target.z - framing.target.z, 7.0f);
+}
+
+TEST(TimelapseVista, PanAccumulatesPerCapturedFrameAndZeroKeepsTheFramingFixed) {
+    EXPECT_FLOAT_EQ(TV::PanYawOffset(0.0f, 0), 0.0f);
+    EXPECT_FLOAT_EQ(TV::PanYawOffset(0.0f, 900), 0.0f);
+    EXPECT_FLOAT_EQ(TV::PanYawOffset(0.5f, 0), 0.0f);
+    EXPECT_FLOAT_EQ(TV::PanYawOffset(0.5f, 10), 5.0f);
+    EXPECT_FLOAT_EQ(TV::PanYawOffset(-2.0f, 90), -180.0f);
+}
+
+TEST(TimelapseVista, VistaTakesPrecedenceOverScenarioFramings) {
+    EXPECT_FALSE(TV::ScenarioMayFrameCamera(true));
+    EXPECT_TRUE(TV::ScenarioMayFrameCamera(false));
 }
