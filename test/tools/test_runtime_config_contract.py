@@ -1031,7 +1031,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertIn("PreparationKeepsLegacyPrecedenceAndRegionalFolds", native)
         session = self.authority_capture_sources()[0]
         capture = cpp_block(session, "GameSession::CaptureAuthorityHashes(")
-        self.assertLess(capture.index("input.prepared=operation->prepare(key,inputs)"),
+        self.assertLess(capture.index("prepared=operation->prepare(key,inputs)"),
                         capture.index("for(constauto&input:regions)"))
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
                               .read_text(encoding="utf-8"))
@@ -1066,8 +1066,22 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         state_hash = cpp_block(session, "GameSession::CaptureAuthorityHashes(")
         self.assertIn("RunWorkerBoundary(m_jobSystem,[&]{"
                       "operation.emplace(directory,m_regionRequiresIndex);});", state_hash)
-        self.assertIn("input.prepared=operation->prepare(key,inputs)",
+        self.assertIn("prepared=operation->prepare(key,inputs)",
                       cpp_block(state_hash, "RunWorkerBoundary(m_jobSystem,[&]{if(operation)"))
+        prepared_fold = (
+            r"if\(want_chunk\)\{std::optional<Persistence::PreparedRegionDigest>prepared;"
+            r"RunWorkerBoundary\(m_jobSystem,\[&\]\{if\(operation\)\{"
+            r"prepared=operation->prepare\(key,inputs\);\}\}\);"
+            r"if\(!prepared.has_value\(\)\)\{return\{"
+            r"AuthorityCaptureStatus::PreparationRefused,std::nullopt\};\}"
+            r"input.digest=Persistence::HashPreparedRegionDigest\(\*prepared\);\}")
+        self.assertRegex(state_hash, prepared_fold)
+        for token in ("!prepared.has_value()", "AuthorityCaptureStatus::PreparationRefused",
+                      "input.digest=Persistence::HashPreparedRegionDigest(*prepared);"):
+            prepared_start = state_hash.index("if(want_chunk)")
+            with self.subTest(prepared=token), self.assertRaises(AssertionError):
+                self.assertRegex(state_hash[:prepared_start] +
+                                 state_hash[prepared_start:].replace(token, "", 1), prepared_fold)
         attach = cpp_block(session, "GameSession::EnableFarWorldAuthorityProducer(")
         self.assertIn("candidate->admit_saved_source(",
                       cpp_block(attach, "RunWorkerBoundary(m_jobSystem,"))

@@ -46,7 +46,9 @@ class ReplaySourceContract(unittest.TestCase):
         self.assertNotIn("FindInput(", playback)
         self.assertRegex(recording, r'if \(executed != 0 && '
                          r'\(executed % kCheckpointIntervalTicks\) != 0\)\s*\{\s*'
-                         r'writer.RecordCheckpoint\(CaptureCheckpoint\(executed, runner\)\);\s*\}'
+                         r'auto checkpoint = CaptureCheckpoint\(executed, runner\);\s*'
+                         r'if \(!checkpoint\)\s*\{\s*return 1;\s*\}\s*'
+                         r'writer.RecordCheckpoint\(\*checkpoint\);\s*\}'
                          r'\s*const auto\* trace = [^;]*;'
                          r'\s*if \(!writer.Finalize\(executed, trace\)\)')
         self.assertIn("(executed % kCheckpointIntervalTicks) == 0 || "
@@ -73,6 +75,12 @@ class ReplaySourceContract(unittest.TestCase):
             self.assertIn(token, source)
             with self.subTest(token=token), self.assertRaises(AssertionError):
                 self.assert_mode_admission(source.replace(token, "false", 1))
+        terminal = source.index("if (executed != 0 && (executed % kCheckpointIntervalTicks) != 0)")
+        for token in ("auto checkpoint = CaptureCheckpoint(executed, runner);",
+                      "if (!checkpoint)", "return 1;", "writer.RecordCheckpoint(*checkpoint);"):
+            self.assertIn(token, source[terminal:])
+            with self.subTest(terminal=token), self.assertRaises(AssertionError):
+                self.assert_mode_admission(source[:terminal] + source[terminal:].replace(token, "", 1))
 
     def test_mode_admission_regressions_use_registered_shipping_entry_points(self):
         path = "common/ReplayModeAdmission_test.cpp"

@@ -2527,10 +2527,11 @@ TEST_F(WorldOpenRefusal, ServerWaterHashesAreIndependentOfSaveTimingWithoutRegio
         const auto inputs = session->GetWorldSystem()->water_authority_input_items();
         const auto before = ReadServerWaterHashes(runner);
         ExpectSameServerWaterHashes(ReadServerWaterHashes(runner), before);
-        if (full_snapshot)
+        if (full_snapshot) {
             ASSERT_GT(runner.SaveFullSnapshot(), 0u);
-        else
+        } else {
             ASSERT_TRUE(session->SaveWorldState());
+        }
         ExpectSameServerWaterHashes(ReadServerWaterHashes(runner), before);
         // Hashes and saves must find the water queue already drained by the host tick.
         EXPECT_EQ(session->GetWorldSystem()->water_authority_input_items(), inputs);
@@ -2733,11 +2734,67 @@ TEST_F(WorldOpenRefusal, AuthorityCaptureConsumersSelectTheSameLegacySlots) {
     }
 }
 
+void SelectAuthorityActivationPhase(GameSession& session, int activation_phase) {
+    auto& world = *session.GetWorldSystem();
+    const auto interval =
+        static_cast<std::uint64_t>(world.get_last_streaming_budget_stats().update_interval_frames);
+    ASSERT_EQ(interval, 4u);
+    const auto phase = world.get_streaming_telemetry_stats().frames_observed % interval;
+    const auto padding =
+        (static_cast<std::uint64_t>(activation_phase) + interval - phase) % interval;
+    // At most three empty updates select a phase without dispatching any jobs.
+    for (std::uint64_t frame = 0; frame < padding; ++frame) {
+        world.update(session.GetRegistry(), std::vector<Vec3>{}, nullptr, false);
+    }
+    ASSERT_EQ(world.get_streaming_telemetry_stats().frames_observed % interval,
+              static_cast<std::uint64_t>(activation_phase));
+}
+
+void ExpectParkedAuthorityCaptureRefusal(Server::ServerWorldRunner& runner,
+                                         const std::shared_ptr<Chunk>& chunk,
+                                         std::string& published,
+                                         Persistence::WorldStreamingStateSubHashes& sub) {
+    auto& session = *runner.Session();
+    auto& world = *session.GetWorldSystem();
+    // Boot and clear_world preserve the activation phase. The next cadence is
+    // at most four updates away; keep this owner out of meshing until then.
+    const auto interval =
+        static_cast<std::uint64_t>(world.get_last_streaming_budget_stats().update_interval_frames);
+    ASSERT_EQ(interval, 4u);
+    const auto phase = world.get_streaming_telemetry_stats().frames_observed % interval;
+    for (std::uint64_t frame = 0; frame < interval - phase; ++frame) {
+        chunk->set_state(frame + 1 == interval - phase ? ChunkState::Idle : ChunkState::Loading);
+        world.update(session.GetRegistry(), Vec3(32008.0f, 8.0f, 32008.0f), nullptr, false);
+        world.wait_for_streaming_jobs();
+    }
+    ASSERT_FALSE(world.find_streamed_chunk(chunk->get_coords()));
+    ASSERT_EQ(world.find_authoritative_chunk(chunk->get_coords()), chunk);
+    ASSERT_EQ(world.snapshot_parked_chunks().size(), 1u);
+    chunk->set_state(ChunkState::Loading);
+    const auto parked = session.CaptureAuthorityHashes();
+    EXPECT_EQ(parked.status, Persistence::AuthorityCaptureStatus::IncompleteOwner);
+    EXPECT_FALSE(parked.capture.has_value());
+    EXPECT_THROW(runner.ComputeWorldHashAndSubHashes(published, sub),
+                 Persistence::AuthorityCaptureRefused);
+    EXPECT_EQ(published, "unchanged");
+    EXPECT_EQ(sub.water, "unchanged");
+    EXPECT_FALSE(world.find_streamed_chunk(chunk->get_coords()));
+    EXPECT_EQ(world.find_authoritative_chunk(chunk->get_coords()), chunk);
+    EXPECT_EQ(world.snapshot_parked_chunks().size(), 1u);
+    EXPECT_EQ(chunk->get_state(), ChunkState::Loading);
+}
+
 TEST_F(WorldOpenRefusal, AuthorityCaptureRefusesIncompleteOwnersWithoutPublishing) {
-    for (const bool regions : {false, true}) {
+    // Legacy capture plus every possible regional activation phase after boot.
+    for (const int activation_phase : {-1, 0, 1, 2, 3}) {
+        SCOPED_TRACE(activation_phase);
+        const bool regions = activation_phase >= 0;
         Server::ServerWorldRunner runner(SnapshotRunnerConfig(RootString(), regions));
         ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, regions));
         auto& session = *runner.Session();
+        if (regions) {
+            ASSERT_NO_FATAL_FAILURE(SelectAuthorityActivationPhase(session, activation_phase));
+        }
         auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
         chunk->set_state(ChunkState::Idle);
         chunk->mark_voxel_data_dirty();
@@ -2757,29 +2814,14 @@ TEST_F(WorldOpenRefusal, AuthorityCaptureRefusesIncompleteOwnersWithoutPublishin
         EXPECT_TRUE(runner.ComputeWorldHash().empty());
         EXPECT_TRUE(runner.ComputeWorldSubHashes().water.empty());
         EXPECT_EQ(chunk->get_state(), ChunkState::Loading);
+        EXPECT_EQ(session.GetWorldSystem()->find_streamed_chunk(chunk->get_coords()), chunk);
+        EXPECT_TRUE(session.GetWorldSystem()->snapshot_parked_chunks().empty());
         chunk->set_state(ChunkState::Idle);
         EXPECT_EQ(session.CaptureAuthorityHashes().status,
                   Persistence::AuthorityCaptureStatus::Ready);
         if (regions) {
-            auto& world = *session.GetWorldSystem();
-            // Four updates reach the ordinary eviction cadence. Keep this synthetic
-            // owner out of meshing until eviction runs before dispatch on the last update.
-            for (int frame = 0; frame < 4; ++frame) {
-                chunk->set_state(frame == 3 ? ChunkState::Idle : ChunkState::Loading);
-                world.update(session.GetRegistry(), Vec3(32008.0f, 8.0f, 32008.0f), nullptr, false);
-                world.wait_for_streaming_jobs();
-            }
-            ASSERT_FALSE(world.find_streamed_chunk(chunk->get_coords()));
-            ASSERT_EQ(world.find_authoritative_chunk(chunk->get_coords()), chunk);
-            ASSERT_EQ(world.snapshot_parked_chunks().size(), 1u);
-            chunk->set_state(ChunkState::Loading);
-            const auto parked = session.CaptureAuthorityHashes();
-            EXPECT_EQ(parked.status, Persistence::AuthorityCaptureStatus::IncompleteOwner);
-            EXPECT_FALSE(parked.capture.has_value());
-            EXPECT_THROW(runner.ComputeWorldHashAndSubHashes(published, sub),
-                         Persistence::AuthorityCaptureRefused);
-            EXPECT_EQ(published, "unchanged");
-            EXPECT_EQ(sub.water, "unchanged");
+            ASSERT_NO_FATAL_FAILURE(
+                ExpectParkedAuthorityCaptureRefusal(runner, chunk, published, sub));
         }
     }
 }

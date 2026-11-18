@@ -3442,7 +3442,6 @@ GameSession::CaptureAuthorityHashes(const std::string& entity_snapshot_json,
             struct RegionInput {
                 RegionKey key;
                 std::uint64_t digest;
-                std::optional<Persistence::PreparedRegionDigest> prepared;
             };
             // One entry per participating authority region, only at explicit hash capture.
             std::vector<RegionInput> regions;
@@ -3450,7 +3449,7 @@ GameSession::CaptureAuthorityHashes(const std::string& entity_snapshot_json,
             for (const auto& [rx, rz] : keys) {
                 const RegionKey key{rx, rz};
                 const auto record = m_activeRegionLedger.records().find(key);
-                RegionInput input{key, 0, std::nullopt};
+                RegionInput input{key, 0};
                 if (record != m_activeRegionLedger.records().end() &&
                     record->second.state == RegionState::Frozen && !record->second.wake_pending) {
                     input.digest = record->second.frozen_digest;
@@ -3464,20 +3463,21 @@ GameSession::CaptureAuthorityHashes(const std::string& entity_snapshot_json,
                         }
                     }
                     if (want_chunk) {
+                        std::optional<Persistence::PreparedRegionDigest> prepared;
                         RunWorkerBoundary(m_jobSystem, [&] {
                             if (operation) {
-                                input.prepared = operation->prepare(key, inputs);
+                                prepared = operation->prepare(key, inputs);
                             }
                         });
-                    }
-                    // Hash and release each prepared region at once so decoded durable chunks
-                    // stay within the cache bound. Only unpublished digests are retained.
-                    if (input.prepared) {
-                        input.digest = Persistence::HashPreparedRegionDigest(*input.prepared);
-                        input.prepared.reset();
+                        if (!prepared.has_value()) {
+                            return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
+                        }
+                        // Release decoded durable chunks at the end of this scope so they
+                        // stay within the cache bound. Only unpublished digests are retained.
+                        input.digest = Persistence::HashPreparedRegionDigest(*prepared);
                     }
                 }
-                regions.push_back(std::move(input));
+                regions.push_back(input);
             }
             // All refusals from regional reads precede the first authority hash fold.
             for (const auto& input : regions) {
