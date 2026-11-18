@@ -233,8 +233,11 @@ TEST(WorldPresentation, FinalCameraNeedsFreshFramesWithinTheOriginalDeadline) {
 
 TEST(WorldPresentation, EmptyPublishedTerrainAndWaterPreparationPreserveAuthority) {
     const Luminumbra::TestSupport::HeadlessRoot root;
+    Luminumbra::JobSystem jobs; // outlives the session; its destructor shuts the workers down
+    jobs.startup(1);
     Luminumbra::world::GameSession session;
     session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
     ASSERT_TRUE(session.CreateTransientWorld("Presentation", "1337", "default"));
     auto* world = session.GetWorldSystem();
     const auto spawn = session.GetMetadata().spawnPoint;
