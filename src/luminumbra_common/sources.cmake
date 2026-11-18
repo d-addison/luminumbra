@@ -114,6 +114,7 @@ set(COMMON_SOURCES
     #  constrained fixed-topology layer graph (compiles bit-exact to params).
     ${CMAKE_CURRENT_LIST_DIR}/world/LayerGraph.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/MarchingCubes.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/world/PhysicsOwnerState.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/PlayerAvatar.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/StructurePlacement.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/TerrainPresetLoader.cpp
