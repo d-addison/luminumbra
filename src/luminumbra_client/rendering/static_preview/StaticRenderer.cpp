@@ -188,7 +188,10 @@ StaticFrame StaticRenderer::Render(const RenderView& view,
     glDisable(GL_FRAMEBUFFER_SRGB);
     glDisable(GL_BLEND);
     glDisable(GL_DITHER);
-    glViewport(0, 0, impl.width, impl.height);
+    // RenderView bounds both dimensions to 4096 before this GLsizei conversion.
+    const auto gl_width = static_cast<GLsizei>(impl.width);
+    const auto gl_height = static_cast<GLsizei>(impl.height);
+    glViewport(0, 0, gl_width, gl_height);
     glBindFramebuffer(GL_FRAMEBUFFER, impl.gbuffer.fbo_id);
     glClearColor(0, 0, 0, 0);
     glClearDepth(0);
@@ -226,10 +229,9 @@ StaticFrame StaticRenderer::Render(const RenderView& view,
     frame.coverage8.resize(pixels);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, impl.lighting->lighting_fbo().fbo_id);
     glReadBuffer(GL_COLOR_ATTACHMENT0);
-    glReadPixels(0, 0, impl.width, impl.height, GL_RGBA, GL_UNSIGNED_BYTE, frame.rgba8.data());
+    glReadPixels(0, 0, gl_width, gl_height, GL_RGBA, GL_UNSIGNED_BYTE, frame.rgba8.data());
     glBindFramebuffer(GL_READ_FRAMEBUFFER, impl.gbuffer.fbo_id);
-    glReadPixels(
-        0, 0, impl.width, impl.height, GL_DEPTH_COMPONENT, GL_FLOAT, frame.depth32f.data());
+    glReadPixels(0, 0, gl_width, gl_height, GL_DEPTH_COMPONENT, GL_FLOAT, frame.depth32f.data());
     if (glGetError() != GL_NO_ERROR)
         throw std::runtime_error("Static frame readback failed");
     for (size_t i = 0; i < pixels; ++i) {
