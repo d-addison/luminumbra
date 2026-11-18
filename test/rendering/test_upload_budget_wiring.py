@@ -96,6 +96,67 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertLess(direct.index("notify_renderable_chunks_changed();"),
                         direct.index("const int resolution"))
 
+    def water_cell_owner_predicate(self):
+        mesher = read(ROOT / "src/luminumbra_common/world/MarchingCubes.cpp")
+        direct = body(mesher, "void GenerateWaterMesh(")
+        self.assertIn("const double chunk_min_y = "
+                      "static_cast<double>(chunk.get_coords().y) * CHUNK_SIZE_Y;", compact(direct))
+        self.assertIn("const double chunk_max_y = chunk_min_y + CHUNK_SIZE_Y;", direct)
+        self.assertIn("const float cell_surface_y = chunk.water_level_data[cell_index];", direct)
+        cells = body(body(direct, "for (int z = 0; z < resolution; ++z)"),
+                     "for (int x = 0; x < resolution; ++x)")
+        self.assertEqual(compact(body(cells, "if (!owns_surface)")), "continue;")
+        self.assertLess(cells.index("if (!owns_surface)"), cells.index("SampleChunkWaterLevel("))
+        self.assertLess(cells.index("if (!owns_surface)"), cells.index("if (have_depth)"))
+        self.assertLess(cells.index("if (!owns_surface)"), cells.index("water_vertices.push_back("))
+        predicate = re.search(r"const bool owns_surface = (.*?);", cells, re.S).group(1)
+        return compact(predicate).replace("&&", " and ").replace("||", " or ")
+
+    def test_stacked_water_cells_have_one_emission_owner(self):
+        predicate = self.water_cell_owner_predicate()
+        # Execute the shipping guard, with floor division as the independent oracle.
+        # Each of 16 cells must emit once across three stacked water-only chunks.
+        profiles = [[height] * 16 for height in
+                    (-16.0, -6.0, -0.001, 0.0, 6.0, 15.999, 16.0, 16.001)]
+        profiles.append([-6.0, 6.0, 22.0, 16.0] * 4)
+        for heights in profiles:
+            with self.subTest(heights=heights):
+                total_quads = 0
+                for cell_surface_y in heights:
+                    owners = [chunk_y for chunk_y in (-1, 0, 1) if eval(
+                        predicate, {"__builtins__": {}}, dict(
+                            cell_surface_y=cell_surface_y, chunk_min_y=chunk_y * 16,
+                            chunk_max_y=(chunk_y + 1) * 16))]
+                    self.assertEqual(owners, [math.floor(cell_surface_y / 16)])
+                    total_quads += len(owners)
+                self.assertEqual(total_quads, len(heights))
+
+    def test_water_cell_ownership_rejects_outside_and_unknown_heights(self):
+        predicate = self.water_cell_owner_predicate()
+        for cell_surface_y in (-1e38, 1e38, -math.inf, math.inf, math.nan):
+            for chunk_y in (-1, 0, 1):
+                with self.subTest(height=cell_surface_y, chunk_y=chunk_y):
+                    self.assertFalse(eval(predicate, {"__builtins__": {}}, dict(
+                        cell_surface_y=cell_surface_y, chunk_min_y=chunk_y * 16,
+                        chunk_max_y=(chunk_y + 1) * 16)))
+
+    def test_water_surface_ownership_uses_same_emitter_in_all_near_paths(self):
+        world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        self.assertIn("std::make_shared<Luminumbra::Chunk>(chunk->get_coords())", world)
+        self.assertIn("Luminumbra::World::MarchingCubes::GenerateWaterMesh( "
+                      "*m_water_system, *this, scratch);", compact(world))
+        tests = read(ROOT / "test/shield/async_water_meshing_test.cpp")
+        for name in ("StackedWaterOnlyChunksEmitOnlyContainingSurface",
+                     "StackedWaterSurfaceBoundaryHasExactlyOneOwner",
+                     "StackedSlopingWaterAssignsEachCellIndependently",
+                     "NonOwnedWaterClearsPreviouslySelectedGeometry"):
+            self.assertIn("TEST(AsyncWaterMeshing, " + name + ")", tests)
+        cmake = read(ROOT / "test/CMakeLists.txt")
+        self.assertIn("shield/async_water_meshing_test.cpp", cmake)
+        self.assertIn('add_test(NAME UploadBudgetWiringPython', cmake)
+        self.assertIn('"test/rendering/test_upload_budget_wiring.py"',
+                      read(ROOT / "tools/ci/ci_paths.py"))
+
     def test_terrain_hierarchy_and_cache_exclude_water_only_owners(self):
         hierarchy = read(RENDERING / "passes/HierarchicalCuller.cpp")
         build = body(hierarchy, "void RenderPipeline::HierarchicalCuller::BuildHierarchy(")
