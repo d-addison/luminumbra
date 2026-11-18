@@ -8,6 +8,10 @@
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/InstinctComponents.h"
 
+#include <bit>
+#include <cstdint>
+#include <stdexcept>
+
 namespace {
 using luminumbra::ai::RunScentSteeringOnTick;
 using luminumbra::ai::ScentField;
@@ -84,4 +88,20 @@ TEST(ScentSteering, IsDeterministic) {
         return r.get<LocomotionIntentComponent>(a).wish_xz.x;
     };
     EXPECT_EQ(run(), run());
+}
+
+TEST(ScentSteering, CandidateRefusesMissingIdentityBeforeAnyWishWrite) {
+    auto field = FieldWithSourceAt10x10();
+    entt::registry registry;
+    const auto first = MakeSniffer(registry, 9, 10, +1);
+    const auto second = MakeSniffer(registry, 9, 10, -1);
+    registry.emplace<Luminumbra::Components::SimulationIdentityComponent>(first, 1u);
+    registry.ctx().emplace<luminumbra::ai::SimulationTraversalContext>();
+    EXPECT_THROW(RunScentSteeringOnTick(registry, field, 0, 0, 1), std::logic_error);
+    for (const auto entity : {first, second}) {
+        const auto& wish = registry.get<LocomotionIntentComponent>(entity).wish_xz;
+        EXPECT_EQ(std::bit_cast<std::uint32_t>(wish.x), 0u);
+        EXPECT_EQ(std::bit_cast<std::uint32_t>(wish.y), 0u);
+    }
+    EXPECT_EQ(RunScentSteeringOnTick(registry, field, 0, 0, 0).considered, 0u);
 }

@@ -8,6 +8,10 @@
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/InstinctComponents.h"
 
+#include <bit>
+#include <cstdint>
+#include <stdexcept>
+
 namespace {
 using luminumbra::ai::RunScentDepositOnTick;
 using luminumbra::ai::ScentField;
@@ -65,4 +69,38 @@ TEST(ScentDeposit, MovingEmitterLaysATrail) {
     // Scent present along the walked cells (2..6 on z=2).
     for (int x = 2; x <= 6; ++x)
         EXPECT_GE(f.Sample(0, x, 2), 5.0);
+}
+
+TEST(ScentDeposit, CandidateUsesStableSourcesAndLegacyRetainsHandleOrder) {
+    entt::registry registry;
+    const auto large = MakeEmitter(registry, 0, 0, 0, 0x1p53f);
+    const auto first = MakeEmitter(registry, 0, 0, 0, 1.0f);
+    const auto second = MakeEmitter(registry, 0, 0, 0, 1.0f);
+    using Luminumbra::Components::SimulationIdentityComponent;
+    registry.emplace<SimulationIdentityComponent>(large, 3u);
+    registry.emplace<SimulationIdentityComponent>(first, 1u);
+    registry.emplace<SimulationIdentityComponent>(second, 2u);
+
+    ScentField legacy(1, 1);
+    EXPECT_EQ(RunScentDepositOnTick(registry, legacy, 0, 0, 1).emitters, 3u);
+    EXPECT_EQ(std::bit_cast<std::uint64_t>(legacy.Sample(0, 0, 0)),
+              std::bit_cast<std::uint64_t>(0x1p53));
+
+    registry.ctx().emplace<luminumbra::ai::SimulationTraversalContext>();
+    ScentField candidate(1, 1);
+    EXPECT_EQ(RunScentDepositOnTick(registry, candidate, 0, 0, 1).emitters, 3u);
+    EXPECT_EQ(std::bit_cast<std::uint64_t>(candidate.Sample(0, 0, 0)),
+              std::bit_cast<std::uint64_t>(0x1p53 + 2.0));
+}
+
+TEST(ScentDeposit, CandidateRefusesMissingIdentityBeforeAnyDeposit) {
+    entt::registry registry;
+    const auto valid = MakeEmitter(registry, 0, 0, 0, 1.0f);
+    MakeEmitter(registry, 0, 0, 0, 2.0f);
+    registry.emplace<Luminumbra::Components::SimulationIdentityComponent>(valid, 1u);
+    registry.ctx().emplace<luminumbra::ai::SimulationTraversalContext>();
+    ScentField field(1, 1);
+    EXPECT_THROW(RunScentDepositOnTick(registry, field, 0, 0, 1), std::logic_error);
+    EXPECT_EQ(field.Sample(0, 0, 0), 0.0);
+    EXPECT_EQ(RunScentDepositOnTick(registry, field, 0, 0, 0).emitters, 0u);
 }

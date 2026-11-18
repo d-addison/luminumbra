@@ -34,6 +34,7 @@
 #include "../components/DecayComponents.h"
 #include "../components/MortalComponents.h"
 #include "CreatureTickAdmission.h"
+#include "LifespanSystem.h"
 
 namespace luminumbra::ai {
 
@@ -83,10 +84,21 @@ RunDecompositionOnTick(entt::registry& reg,
     auto view = reg.view<Comp::DecayComponent>();
 
     // id-ordered participant list (deterministic traversal).
-    std::vector<entt::entity> ents(view.begin(), view.end());
-    std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
-        return entt::to_integral(a) < entt::to_integral(b);
-    });
+    auto* traversal = reg.ctx().find<SimulationTraversalContext>();
+    std::vector<entt::entity> legacy_ents;
+    if (!traversal)
+        legacy_ents.assign(view.begin(), view.end());
+    auto& ents = traversal ? traversal->BeginParticipants() : legacy_ents;
+    if (traversal) {
+        for (const auto entity : view)
+            ents.push_back(entity);
+        traversal->OrderParticipants(reg);
+        traversal->BeginDecay(ents.size());
+    } else {
+        std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
+            return entt::to_integral(a) < entt::to_integral(b);
+        });
+    }
     if (ents.empty())
         return stats; // empty roster -> pure no-op.
 
@@ -138,6 +150,11 @@ RunDecompositionOnTick(entt::registry& reg,
         if (dc.decay_ticks >= dc.decay_duration) {
             dc.fully_decomposed = 1;
             ++stats.finished;
+        }
+        if (traversal) {
+            traversal->PublishDecay({.id = reg.get<Comp::SimulationIdentityComponent>(e).id,
+                                     .released_milli = new_total - prev_total,
+                                     .finished = dc.fully_decomposed != 0});
         }
     }
 

@@ -19,6 +19,7 @@
 #include "../components/CoreComponents.h"
 #include "../components/InstinctComponents.h"
 #include "CreatureTickAdmission.h"
+#include "LifespanSystem.h"
 #include "ScentField.h"
 #include "ScentSteeringSystem.h" // WorldToCell
 
@@ -41,14 +42,20 @@ inline ScentDepositStats RunScentDepositOnTick(entt::registry& registry,
     if (cell_size <= 0.0f)
         return stats;
 
-    std::vector<entt::entity> emitters;
+    auto* traversal = registry.ctx().find<SimulationTraversalContext>();
+    std::vector<entt::entity> legacy_emitters;
+    auto& emitters = traversal ? traversal->BeginParticipants() : legacy_emitters;
     {
         auto view = registry.view<const TransformComponent, const SensableComponent>();
         for (auto e : view)
             emitters.push_back(e);
-        std::sort(emitters.begin(), emitters.end(), [](entt::entity a, entt::entity b) {
-            return entt::to_integral(a) < entt::to_integral(b);
-        });
+        if (traversal) {
+            traversal->OrderParticipants(registry);
+        } else {
+            std::sort(emitters.begin(), emitters.end(), [](entt::entity a, entt::entity b) {
+                return entt::to_integral(a) < entt::to_integral(b);
+            });
+        }
     }
 
     for (auto e : emitters) {
