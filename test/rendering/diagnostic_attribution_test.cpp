@@ -291,7 +291,9 @@ TEST(DiagnosticAttribution, BothLegacyFarWritersCarryTheActualTierAndOwner) {
 TEST(DiagnosticAttribution, CapabilityRefusalIsAnExplicitUnsupportedRecord) {
     const auto targets = (Read(kTargets) + Read(kPass));
     const auto attach = Body(targets, "bool GBufferDiagnosticCapture::attach_target(");
-    Contains(attach, "state_->framebuffer != 0 || state_->captured");
+    Contains(attach, "state_->framebuffer != 0 ||");
+    Contains(attach, "forward ? !state_->captured || state_->forward_captured : state_->captured");
+    Contains(attach, "nested_gbuffer_attachment");
     Contains(attach, "!gbuffer.fbo_id || !gbuffer.position_texture");
     Contains(attach, "max_buffers < 7");
     Contains(attach, "max_buffers > static_cast<GLint>(state_->buffers.size())");
