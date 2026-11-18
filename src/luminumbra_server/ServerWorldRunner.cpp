@@ -279,6 +279,10 @@ bool ServerWorldRunner::Boot() {
         m_jobSystem.shutdown();
         return false;
     }
+    if (m_config.weather_schedule && !m_session->SetWeatherSchedule(*m_config.weather_schedule)) {
+        m_bootError = "Invalid weather schedule";
+        return false;
+    }
     // A headless host has no client asset manifest; simulation assets alone are
     // validated and every voxel field uses the authoritative CPU generator.
 
