@@ -245,6 +245,28 @@ TEST(TerrainAnchorContract, MissingPartialNonfiniteAndOutsideSupportRemainUnknow
     EXPECT_FALSE(EditedTerrainRemovesAnchor(&chunk, {0, 0, 0}));
 }
 
+TEST(TerrainAnchorContract, AnchorChunkCoordsFloorNegativesAndRefuseUnpackable) {
+    using Luminumbra::Rendering::AnchorChunkCoords;
+    glm::ivec3 coords{7, 7, 7};
+    ASSERT_TRUE(AnchorChunkCoords({-0.5f, 15.9f, 16.0f}, coords));
+    EXPECT_EQ(coords, glm::ivec3(-1, 0, 1));
+    coords = glm::ivec3(7);
+    EXPECT_FALSE(AnchorChunkCoords({std::numeric_limits<float>::quiet_NaN(), 0, 0}, coords));
+    EXPECT_FALSE(AnchorChunkCoords({0, std::numeric_limits<float>::infinity(), 0}, coords));
+    const float beyond = static_cast<float>(Luminumbra::Chunk::kPackedMaxXz + 1) * 16.0f;
+    EXPECT_FALSE(AnchorChunkCoords({beyond, 0, 0}, coords));
+}
+
+TEST(TerrainAnchorContract, StaticPropsResolveEachAnchorChunkOncePerFrame) {
+    const auto draw = ReadShader("src/luminumbra_client/rendering/passes/GBufferPass.cpp");
+    // The per-prop path reads the per-frame slot; the streamed-chunk lookup sits
+    // behind the slot's resolved flag and references are released after the loop.
+    EXPECT_EQ(draw.find("TerrainRemovesAnchor(*ctx.world_system"), std::string::npos);
+    ExpectContains(draw, "if (!slot.resolved) {");
+    ExpectContains(draw, "ctx.world_system->find_streamed_chunk(slot.coords)");
+    ExpectContains(draw, "m_anchorChunks[index].chunk.reset();");
+}
+
 void ExpectClosedGroundCoverHull(const Luminumbra::Client::App::GroundCoverHull& hull,
                                  const glm::vec3& lo,
                                  const glm::vec3& hi) {

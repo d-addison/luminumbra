@@ -32,6 +32,7 @@
 #include <filesystem> // existence-probe LOD variants before loading (avoid load-error spam)
 #include <limits>
 #include <string>
+#include <tuple>
 #include <utility> // std::pair for the LOD-resolve helper return
 
 #include "luminumbra_common/animation/AnimationRuntime.h"
@@ -671,7 +672,10 @@ void GBufferPass::build_static_prop_cache(entt::registry& registry) {
     m_propMeshPaths.clear();
     m_resolveMemo.clear();
     m_visibleGroups.clear();
+    m_anchorChunks.clear();
+    m_resolvedAnchorSlots.clear();
     std::unordered_map<std::string, std::uint32_t> pathIntern;
+    std::map<std::tuple<int, int, int>, std::uint32_t> anchorSlots;
     auto intern = [&](const std::string& p) -> std::uint32_t {
         auto it = pathIntern.find(p);
         if (it != pathIntern.end())
@@ -733,11 +737,24 @@ void GBufferPass::build_static_prop_cache(entt::registry& registry) {
         cp.impostorLeaf = cp.impostorTree && (bp.find("leaf") != std::string::npos ||
                                               bp.find("leaves") != std::string::npos);
         cp.terrainAnchored = bp.starts_with("procgen://rock_") || bp.starts_with("procgen://bush_");
+        IVec3 anchor_coords{};
+        if (cp.terrainAnchored && AnchorChunkCoords(cp.position, anchor_coords)) {
+            const auto [slot, inserted] =
+                anchorSlots.try_emplace({anchor_coords.x, anchor_coords.y, anchor_coords.z},
+                                        static_cast<std::uint32_t>(m_anchorChunks.size()));
+            if (inserted) {
+                m_anchorChunks.push_back(
+                    {.coords = anchor_coords, .chunk = nullptr, .resolved = false});
+            }
+            cp.anchorSlot = slot->second;
+        }
         cp.baseMeshHash = fnv64(mesh_info.meshPath, 1469598103934665603ull);
         cp.pathIndex = intern(mesh_info.meshPath);
         cp.materialId = mesh_info.materialId;
         m_staticPropCache.push_back(cp);
     }
+    // The per-frame loop records each resolved slot once, so this never grows there.
+    m_resolvedAnchorSlots.reserve(m_anchorChunks.size());
     m_staticPropCachePopulation = registry.view<const Components::StaticMeshComponent>().size();
 }
 
@@ -1001,9 +1018,19 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         }
         if (culled)
             continue;
-        if (cp.terrainAnchored && ctx.world_system &&
-            TerrainRemovesAnchor(*ctx.world_system, cp.position)) {
-            continue;
+        if (cp.anchorSlot < m_anchorChunks.size() && ctx.world_system) {
+            AnchorChunkSlot& slot = m_anchorChunks[cp.anchorSlot];
+            if (!slot.resolved) {
+                slot.resolved = true;
+                m_resolvedAnchorSlots.push_back(cp.anchorSlot);
+                auto chunk = ctx.world_system->find_streamed_chunk(slot.coords);
+                if (chunk && chunk->has_terrain_authority()) {
+                    slot.chunk = std::move(chunk);
+                }
+            }
+            if (slot.chunk && EditedTerrainRemovesAnchor(slot.chunk.get(), cp.position)) {
+                continue;
+            }
         }
         // Group by a cheap uint64 (no per-instance string alloc/copy/compare).
         const std::uint64_t gkey =
@@ -1019,6 +1046,11 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         batch.mats.push_back(cp.model);
         batch.tints.push_back(cp.tint);
     }
+    for (const std::uint32_t index : m_resolvedAnchorSlots) {
+        m_anchorChunks[index].chunk.reset();
+        m_anchorChunks[index].resolved = false;
+    }
+    m_resolvedAnchorSlots.clear();
     const GLboolean cull_was_enabled = glIsEnabled(GL_CULL_FACE);
     for (const auto& kv : m_visibleGroups) {
         const InstanceBatchCached& batch = kv.second;

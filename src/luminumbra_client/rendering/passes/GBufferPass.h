@@ -13,11 +13,16 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <map>
 #include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+namespace Luminumbra {
+class Chunk;
+} // namespace Luminumbra
 
 namespace Luminumbra::Rendering {
 
@@ -176,8 +181,20 @@ private:
         bool impostorTree = false;
         bool impostorLeaf = false;
         bool terrainAnchored = false; // procedural rocks/shrubs retain their generated support
+        // Index into m_anchorChunks for terrain-anchored props, resolved at cache build.
+        std::uint32_t anchorSlot = std::numeric_limits<std::uint32_t>::max();
     };
     std::vector<CachedStaticProp> m_staticPropCache;
+    // One streamed-chunk lookup per anchor chunk per frame, shared by every prop in
+    // it. Chunks without terrain authority resolve to null and skip the SDF read.
+    // References are dropped after the prop loop, so no chunk outlives a frame here.
+    struct AnchorChunkSlot {
+        glm::ivec3 coords{0};
+        std::shared_ptr<const ::Luminumbra::Chunk> chunk;
+        bool resolved = false;
+    };
+    std::vector<AnchorChunkSlot> m_anchorChunks;
+    std::vector<std::uint32_t> m_resolvedAnchorSlots;   // capacity reserved at cache build
     std::vector<std::string> m_propMeshPaths;           // interned unique mesh paths
     std::size_t m_staticPropCachePopulation = SIZE_MAX; // invalidation signal
     void build_static_prop_cache(entt::registry& registry);

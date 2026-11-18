@@ -48,8 +48,9 @@ inline bool EditedTerrainRemovesAnchor(const Chunk* chunk, const Vec3& position)
     return density > 0.5f;
 }
 
-inline bool TerrainRemovesAnchor(const Systems::SHIELD_WorldSystem& world, const Vec3& position) {
-    IVec3 coords{};
+// Chunk that owns an anchor, or false when the position is non-finite or outside
+// the packed coordinate range (such anchors are never removed).
+inline bool AnchorChunkCoords(const Vec3& position, IVec3& coords) {
     for (int axis = 0; axis < 3; ++axis) {
         const double coordinate = std::floor(static_cast<double>(position[axis]) / CHUNK_SIZE_X);
         const int minimum = axis == 1 ? Chunk::kPackedMinY : Chunk::kPackedMinXz;
@@ -58,6 +59,14 @@ inline bool TerrainRemovesAnchor(const Systems::SHIELD_WorldSystem& world, const
             return false;
         }
         coords[axis] = static_cast<int>(coordinate);
+    }
+    return true;
+}
+
+inline bool TerrainRemovesAnchor(const Systems::SHIELD_WorldSystem& world, const Vec3& position) {
+    IVec3 coords{};
+    if (!AnchorChunkCoords(position, coords)) {
+        return false;
     }
     const auto chunk = world.find_streamed_chunk(coords);
     return EditedTerrainRemovesAnchor(chunk.get(), position);
