@@ -461,9 +461,9 @@ public:
     void SetForagingTuning(const luminumbra::ai::ForagingParams& t) {
         m_foragingTuning = t;
     }
-    void SetReproductionTuning(const luminumbra::ai::ReproductionTuning& t) {
-        m_reproductionTuning = t;
-    }
+    // Capacity/lifespan use fixed session rules until a versioned config identity admits
+    // overrides. Low-level tick callers can still use fast synthetic lifecycle tuning.
+    void SetReproductionTuning(const luminumbra::ai::ReproductionTuning& t);
     void SetCircadianAmplitude(float a) {
         m_circadianAmplitude = a;
     }

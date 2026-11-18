@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <functional>
 #include <glm/glm.hpp>
+#include <limits>
 #include <memory>
 #include <span>
 #include <unordered_map>
@@ -56,8 +57,9 @@ public:
         std::uint64_t bodies = 0;
         std::uint64_t characters = 0;
     };
-    // Input bodies for the latest scene update, plus character steps since it.
-    // Diagnostic only; static bodies count too. No solver/timing estimates.
+    // Input bodies for the latest update call, plus character steps since it.
+    // Diagnostic only; static bodies count too, excluding private simulation
+    // terrain slots charged to terrain headroom. No solver/timing estimates.
     [[nodiscard]] WorkItems work_items() const {
         return m_work_items;
     }
@@ -72,6 +74,27 @@ public:
     // False only when the body pool refuses creation; callers may retry later.
     bool add_chunk_collision(Chunk& chunk);
     void remove_chunk_collision(ChunkID chunk_id);
+    // Shared owner-thread barrier before rigid bodies or characters advance. Inert unless
+    // region authority is enabled. A refusal publishes nothing and pauses physics until a
+    // successful retry; hosts must also leave their simulation tick unconsumed.
+    // A concrete tick id reuses its successful publication within one host/session step.
+    // Variable-rate render hosts use the default sentinel to start a fresh preparation.
+    // Fixed one-chunk X/Z radius, 64 admitted character owners and 128 distinct columns.
+    // Existing overflow (including rigid bodies in the independent Jolt pool) uses the
+    // first complete horizons that fit, in owner order, so lifecycle ticks can continue.
+    // Uncovered owners wait without integration; rigid-body velocities resume on coverage.
+    // Storage and terrain body slots are fixed; only changed shapes replace storage.
+    static constexpr std::size_t kSimulationOwnerBudget = 64;
+    static constexpr std::size_t kSimulationColliderBudget = 128;
+    bool
+    prepare_simulation_collisions(std::span<const Vec3> anchors,
+                                  std::uint64_t tick = std::numeric_limits<std::uint64_t>::max());
+    void clear_simulation_collisions();
+    // Const diagnostics, never session hash/save inputs. Counts actual sampled columns.
+    std::size_t simulation_collision_sample_count() const;
+    // Positions visited by preparation; retired avatar slots must contribute no visits.
+    std::size_t simulation_collision_owner_visit_count() const;
+    std::uint64_t simulation_collision_hash() const;
 
     // ---  : dynamic rigid bodies (projectiles e.g. an arrow) ---
     // Spawns a small dynamic sphere with an initial velocity: it falls under the
@@ -87,7 +110,8 @@ public:
     void destroy_body(JPH::BodyID body);
 
     // --- Player Controller (positions are feet positions in both stances) ---
-    void create_player_controller(const glm::vec3& initial_position);
+    // Refusal preserves the existing controller. The caller may retry later.
+    bool create_player_controller(const glm::vec3& initial_position);
     void update_player(const glm::vec3& wish_velocity,
                        bool wants_to_jump,
                        float jump_force,
@@ -110,7 +134,8 @@ public:
     // reproducible. Per-avatar movement comes from the latest network usercmd;
     // avatars with no input settle against world collision under gravity.
     void clear_avatar_characters();
-    // Positions use the feet, matching creature transforms and the local player.
+    // Positions use feet. Refusal returns kInvalidAvatar without creating a slot.
+    static constexpr std::size_t kInvalidAvatar = std::numeric_limits<std::size_t>::max();
     std::size_t create_avatar_character(const glm::vec3& initial_position);
     // Leaves other avatar indices stable. Repeated removal is harmless.
     void remove_avatar_character(std::size_t index);
@@ -186,9 +211,7 @@ public:
     // physics before the world system and destroys it first, so the pointer
     // cannot dangle). Null (standalone tests) keeps the legacy Y-band
     // classification byte-identical.
-    void set_world_system(const SHIELD_WorldSystem* world_system) {
-        m_world_system = world_system;
-    }
+    void set_world_system(const SHIELD_WorldSystem* world_system);
 
     struct AudioRaycastResult {
         bool hit = false;
@@ -273,6 +296,13 @@ private:
     bool restore_avatar_owner(const World::PhysicsOwnerState& state, std::size_t& index);
     bool capture_player_owner(World::PhysicsOwnerState& output) const;
     bool restore_player_owner(const World::PhysicsOwnerState& state);
+    struct SimulationCollisions;
+    std::unique_ptr<SimulationCollisions> m_simulation_collisions;
+    bool simulation_collisions_enabled() const;
+    bool simulation_collisions_ready() const;
+    bool can_admit_simulation_owner(const glm::vec3& position, bool replacing_player) const;
+    std::uint32_t non_simulation_body_count() const;
+
     struct BodySlotHistory;
     std::unique_ptr<BodySlotHistory> m_body_slots;
     void record_body_allocation(JPH::BodyID id);
@@ -297,13 +327,19 @@ private:
     // + the shared avatar capsule shape. Stepped in index order for determinism.
     // A single, nonthrowing-movable element keeps ownership and movement state
     // together if vector growth refuses an allocation.
+    static constexpr std::size_t kNoAvatar = std::numeric_limits<std::size_t>::max();
     struct AvatarState {
         std::unique_ptr<JPH::CharacterVirtual> character;
         glm::vec2 wish{0.0f};
         JPH::BodyID frozen_body;
         bool frozen = false;
+        std::size_t previous = kNoAvatar;
+        std::size_t next = kNoAvatar;
     };
     std::vector<AvatarState> m_avatars;
+    std::size_t m_avatar_head = kNoAvatar;
+    std::size_t m_avatar_tail = kNoAvatar;
+    std::size_t m_live_avatar_count = 0;
     JPH::Ref<JPH::Shape> m_avatar_shape;
 
     // Track collision bodies for loaded chunks
