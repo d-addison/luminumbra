@@ -29,6 +29,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -1073,7 +1074,9 @@ public:
     std::shared_ptr<::Luminumbra::Chunk> find_authoritative_chunk(const IVec3& coords) const;
     // Owner-thread admission of one canonical Y=0 column. Generated renderer caches
     // cannot seed authority; incomplete or legacy saved water requires migration.
-    // Returns nullptr on reservation pressure, without replacing an existing owner.
+    // Returns nullptr on reservation or parking pressure, without replacing owners.
+    // Loading owners refuse until publication; admitted handles remain canonical
+    // until cleanup or residency retirement, independently of save reservations.
     std::shared_ptr<Chunk> resolve_water_column(const IVec3& coords);
     // Canonical authority only: never generates or reads Loading worker storage.
     std::shared_ptr<Chunk> inspect_water_column(const IVec3& coords) const;
@@ -1090,7 +1093,8 @@ public:
                       std::size_t{32} * 32 *
                           (5 * sizeof(std::int32_t) + 3 * sizeof(float) + sizeof(Vec2)) <=
                   kWaterColumnReservationBytes);
-    // Release only matching, still-unclaimed parked candidates; at most 832 per call.
+    // Release matching, still-unclaimed admissions and reservations; at most 832
+    // per span. Unclaimed live renderer caches may remain resident after cleanup.
     void discard_unclaimed_water_columns(std::span<const std::shared_ptr<Chunk>> candidates,
                                          std::span<const ChunkID> reservations = {});
     // Const work diagnostic: full terrain generations performed by column admission.
@@ -1299,10 +1303,14 @@ private:
     bool m_evictions_suspended = false;
     std::shared_ptr<Chunk> read_committed_chunk(const IVec3& coords) const;
     void migrate_restored_water_column(const std::shared_ptr<Chunk>& chunk);
-    // Unsaved water reservations are independent of renderer residency; at most
-    // 4096 fixed charges, also bounded by the configured parking byte limit.
+    // Capacity is reserved before resolution, so reserved renderer caches are
+    // not necessarily admitted. Unsaved reservations survive admission cleanup
+    // until a clean committed save; at most 4096 fixed charges, also byte-limited.
     static constexpr std::size_t kMaxWaterReservations = 4096;
     std::set<ChunkID> m_water_column_reservations;
+    // Canonical handles after successful resolution; at most 832 candidates.
+    // Cleanup and residency retirement release these independently of saving.
+    std::unordered_set<ChunkID> m_admitted_water_columns;
     std::uint64_t m_water_columns_generated = 0;
     std::size_t m_parked_bytes = 0;
     bool m_durable_residency = false;
