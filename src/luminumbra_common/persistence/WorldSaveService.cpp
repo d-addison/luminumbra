@@ -5934,6 +5934,9 @@ AuthorityCaptureResult CaptureAuthorityHashes(const WorldStreamingState& state,
             return {AuthorityCaptureStatus::IncompleteOwner, std::nullopt};
         }
     }
+    // One read-ownership scope spans index admission and every region: an indexed save cannot
+    // publish between regions, so the projection folds a single publication generation.
+    const detail::SnapshotReadOwnership capture_ownership;
     RegionDigestOperation operation(regional.save_dir, regional.require_index);
     std::string projection =
         "authoritative_chunks:v2:" + std::to_string(water_sim_cursor.value()) + ":";
