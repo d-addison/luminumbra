@@ -45,6 +45,7 @@
 #include <bit>
 #include <cstdint>
 #include <filesystem>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <stdexcept>
@@ -2576,7 +2577,7 @@ TEST(RegionConsumerGate, AvatarWithoutCapsuleCanResumeOrBeRemovedAndCleared) {
     }
 }
 
-TEST(RegionConsumerGate, AvatarSlotCountIncludesRemovalHolesUntilClear) {
+TEST(RegionConsumerGate, AvatarSlotCountReusesRemovalHolesUntilClear) {
     Luminumbra::Systems::PhysicsSystem physics;
     physics.startup();
     const glm::vec3 position(513.0f, 10000.0f, 10.0f);
@@ -2594,14 +2595,61 @@ TEST(RegionConsumerGate, AvatarSlotCountIncludesRemovalHolesUntilClear) {
     physics.update_avatars(1.0f / 30.0f);
     EXPECT_GT(physics.get_avatar_position(survivor).x, position.x);
     EXPECT_EQ(physics.work_items().characters, 1u);
-    EXPECT_EQ(physics.create_avatar_character(position), 2u);
-    EXPECT_EQ(physics.avatar_character_slot_count(), 3u);
+    EXPECT_EQ(physics.create_avatar_character(position), removed);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 2u);
     physics.remove_avatar_character(survivor);
-    physics.remove_avatar_character(2u);
-    EXPECT_EQ(physics.avatar_character_slot_count(), 3u);
+    physics.remove_avatar_character(removed);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 2u);
     physics.clear_avatar_characters();
     EXPECT_EQ(physics.avatar_character_slot_count(), 0u);
     EXPECT_EQ(physics.create_avatar_character(position), 0u);
+}
+
+TEST(RegionConsumerGate, AvatarReuseIsLowestFirstAndPreservesSurvivorStepBits) {
+    Luminumbra::Systems::PhysicsSystem physics, reference;
+    physics.startup();
+    reference.startup();
+    for (std::size_t index = 0; index < 5; ++index) {
+        const glm::vec3 position(513.0f + 10.0f * static_cast<float>(index), 10000.0f, 10.0f);
+        ASSERT_EQ(physics.create_avatar_character(position), index);
+        ASSERT_EQ(reference.create_avatar_character(position), index);
+        physics.set_avatar_wish_velocity(index, {2.0f, 1.0f});
+        reference.set_avatar_wish_velocity(index, {2.0f, 1.0f});
+    }
+    physics.update_avatars(1.0f / 30.0f);
+    reference.update_avatars(1.0f / 30.0f);
+    // Retire in non-index order, including a frozen capsule and a repeated removal.
+    for (const std::size_t index : {3u, 0u, 2u, 0u}) {
+        physics.set_avatar_frozen(index, true, physics.get_avatar_position(index));
+        physics.remove_avatar_character(index);
+        reference.remove_avatar_character(index);
+    }
+    physics.set_avatar_wish_velocity(0, {9.0f, 7.0f});
+    physics.set_avatar_frozen(0, true, {0, 0, 0});
+    for (const std::size_t index : {0u, 2u, 3u}) {
+        const glm::vec3 replacement(600.0f + 10.0f * static_cast<float>(index), 10000.0f, 10.0f);
+        ASSERT_EQ(physics.create_avatar_character(replacement), index);
+        EXPECT_EQ(PositionBits(physics.get_avatar_position(index)), PositionBits(replacement));
+        EXPECT_EQ(physics.get_avatar_velocity(index), glm::vec3(0.0f));
+    }
+    EXPECT_EQ(physics.avatar_character_slot_count(), 5u);
+    EXPECT_FALSE(physics.audio_raycast({512, 10001.3f, 10}, {514, 10001.3f, 10}).hit);
+    for (int tick = 0; tick < 4; ++tick) {
+        for (const std::size_t index : {1u, 4u}) {
+            EXPECT_EQ(PositionBits(physics.get_avatar_position(index)),
+                      PositionBits(reference.get_avatar_position(index)));
+            EXPECT_EQ(PositionBits(physics.get_avatar_velocity(index)),
+                      PositionBits(reference.get_avatar_velocity(index)));
+        }
+        physics.update_avatars(1.0f / 30.0f);
+        reference.update_avatars(1.0f / 30.0f);
+    }
+    // Clear must discard free-list entries before the next generation of slots.
+    physics.remove_avatar_character(2);
+    physics.clear_avatar_characters();
+    physics.clear_avatar_characters();
+    EXPECT_EQ(physics.create_avatar_character({1, 10000, 1}), 0u);
+    EXPECT_EQ(physics.create_avatar_character({3, 10000, 1}), 1u);
 }
 
 TEST(RegionConsumerGate, TerrainCollisionSkipsDoNotRequestRetry) {
@@ -3877,6 +3925,62 @@ TEST(RegionConsumerGate, SessionRetiresNewbornAfterCallbacksAndReleasesFrozenPhy
         ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
         ASSERT_FALSE(session.GetRegionSchedulerFault());
         EXPECT_FALSE(registry.valid(child));
+    }
+}
+
+TEST(RegionConsumerGate, SessionContinuousBreedingAndDeathReuseRetiredAvatarSlots) {
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    for (const bool regional : {false, true}) {
+        SCOPED_TRACE(regional);
+        W::GameSession session;
+        session.SetRootPath(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT).generic_string() + '/');
+        session.SetJobSystem(&jobs);
+        session.SetActiveRegionsEnabled(regional);
+        session.SetAetherStateEnabled(false);
+        ASSERT_TRUE(session.CreateTransientWorld("Avatar turnover", "985", "default"));
+        session.SetReplicatedSimulationAnchors({});
+        session.PinActiveRegion({0, 0}, true);
+        auto& registry = session.GetRegistry();
+        auto* physics = session.GetPhysicsSystem();
+        ASSERT_NE(physics, nullptr);
+        const auto mother = Creature(registry, 10.0f, true);
+        const auto father = Creature(registry, 10.0f, false);
+        const auto mother_genome = registry.get<C::CreatureGenomeComponent>(mother);
+        const auto father_genome = registry.get<C::CreatureGenomeComponent>(father);
+        const auto healthy = registry.get<C::CreatureComponent>(mother);
+        const glm::vec3 survivor_position(40, 10000, 10);
+        const auto survivor = physics->create_avatar_character(survivor_position);
+        ASSERT_EQ(survivor, 0u);
+        physics->set_avatar_frozen(survivor, true, survivor_position);
+        for (std::uint64_t cycle = 0; cycle < 128; ++cycle) {
+            SCOPED_TRACE(cycle);
+            // Reset only parent readiness to accelerate otherwise ordinary births.
+            registry.get<C::CreatureGenomeComponent>(mother) = mother_genome;
+            registry.get<C::CreatureGenomeComponent>(father) = father_genome;
+            for (const auto parent : {mother, father}) {
+                registry.get<C::CreatureComponent>(parent) = healthy;
+                registry.get<C::TransformComponent>(parent).position = {10, 10000, 10};
+            }
+            ASSERT_EQ(AI::RunMatingResolveOnTick(registry, cycle, 985).born, 1);
+            const auto born = registry.view<AI::ReproductionBorn>();
+            ASSERT_EQ(std::distance(born.begin(), born.end()), 1);
+            const auto child = *born.begin();
+            const auto position = registry.get<C::TransformComponent>(child).position;
+            const auto avatar = physics->create_avatar_character(position);
+            ASSERT_EQ(avatar, 1u);
+            registry.emplace<C::CreaturePhysicsComponent>(child, avatar);
+            physics->set_avatar_frozen(avatar, true, position);
+            registry.get<C::CreatureComponent>(child).eaten = true;
+            registry.get<C::DecayComponent>(child).decay_duration = 1;
+            ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+            ASSERT_FALSE(session.GetRegionSchedulerFault());
+            ASSERT_FALSE(registry.valid(child));
+            EXPECT_TRUE(registry.view<C::CreaturePhysicsComponent>().empty());
+            EXPECT_EQ(physics->avatar_character_slot_count(), 2u);
+            EXPECT_EQ(PositionBits(physics->get_avatar_position(survivor)),
+                      PositionBits(survivor_position));
+        }
     }
 }
 

@@ -107,7 +107,8 @@ public:
     void clear_avatar_characters();
     // Positions use the feet, matching creature transforms and the local player.
     std::size_t create_avatar_character(const glm::vec3& initial_position);
-    // Leaves other avatar indices stable. Repeated removal is harmless.
+    // Leaves other avatar indices stable. Repeated removal of a free slot is harmless.
+    // Retired indices are reused lowest-first; callers must discard removed handles.
     void remove_avatar_character(std::size_t index);
     // Frozen avatars keep zero velocity and are excluded from integration, even
     // if the body pool refuses their static capsule. Repeated freezes retry it.
@@ -124,7 +125,7 @@ public:
     // Steps every avatar character by dt: the per-avatar horizontal wish velocity
     // (gravity when airborne, ground-stick when grounded) against the world geometry.
     void update_avatars(float delta_time);
-    // Removal holes count as slots; surviving indices stay stable until clear.
+    // Removal holes count as slots; reuse bounds the scan by the peak live count.
     std::size_t avatar_character_slot_count() const {
         return m_avatars.size();
     }
@@ -248,6 +249,9 @@ private:
         bool frozen = false;
     };
     std::vector<AvatarState> m_avatars;
+    // Min-heap, at most one entry per retired slot. Capacity is reserved before
+    // publishing avatars so removal (including registry destruction) cannot allocate.
+    std::vector<std::size_t> m_free_avatar_slots;
     JPH::Ref<JPH::Shape> m_avatar_shape;
 
     // Track collision bodies for loaded chunks

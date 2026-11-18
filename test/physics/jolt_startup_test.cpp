@@ -2273,6 +2273,63 @@ void ApplicationAvatarAppendRefusal() {
     std::_Exit(0);
 }
 
+void ApplicationAvatarReuseCycles() {
+    Log::Init();
+    InitializeAllocators();
+    ApplicationPhysics physics;
+    physics.startup();
+    const glm::vec3 position(513.0F, 10000.0F, 10.0F);
+    Require(physics.create_avatar_character(position) == 0);
+    // Refuse growth of the retirement heap before publishing a second avatar.
+    Arm(1, false, false);
+    bool growth_refused = false;
+    try {
+        physics.create_avatar_character({533.0F, 10000.0F, 10.0F});
+    } catch (const std::bad_alloc&) {
+        growth_refused = true;
+    }
+    Disarm();
+    Require(growth_refused && Allocations().failures == 1 && Outstanding() == 0);
+    Require(physics.avatar_character_slot_count() == 1);
+    Require(physics.get_avatar_position(0) == position);
+    Require(physics.create_avatar_character({533.0F, 10000.0F, 10.0F}) == 1);
+    physics.remove_avatar_character(0);
+    for (int cycle = 0; cycle < 1000; ++cycle) {
+        Require(physics.create_avatar_character(position) == 0);
+        Require(physics.avatar_character_slot_count() == 2);
+        physics.set_avatar_frozen(0, true, position);
+        // Removal must never allocate, including release of a frozen capsule.
+        Arm(1, false, false);
+        physics.remove_avatar_character(0);
+        physics.remove_avatar_character(0);
+        physics.remove_avatar_character(std::numeric_limits<std::size_t>::max());
+        Require(Allocations().attempts == 0);
+        Disarm();
+        Require(physics.avatar_character_slot_count() == 2);
+    }
+    // Construction refusal must leave the lowest free slot available for retry.
+    Arm(1, false, false);
+    bool caught = false;
+    try {
+        physics.create_avatar_character(position);
+    } catch (const std::bad_alloc&) {
+        caught = true;
+    }
+    Disarm();
+    Require(caught && Allocations().failures == 1 && Outstanding() == 0);
+    Require(physics.avatar_character_slot_count() == 2);
+    Require(physics.get_avatar_position(0) == glm::vec3(0.0F));
+    Require(physics.get_avatar_position(1) == glm::vec3(533.0F, 10000.0F, 10.0F));
+    Require(physics.create_avatar_character(position) == 0);
+    Require(physics.create_avatar_character({553.0F, 10000.0F, 10.0F}) == 2);
+    physics.shutdown();
+    Require(physics.avatar_character_slot_count() == 0);
+    physics.startup();
+    Require(physics.create_avatar_character(position) == 0);
+    physics.shutdown();
+    std::_Exit(0);
+}
+
 void ApplicationLeaseStorageRefusal() {
     Log::Init();
     InitializeAllocators();
@@ -2388,6 +2445,10 @@ TEST(JoltStartup, ApplicationCandidateLoggingRollbackPreservesBothFactoryOwners)
 
 TEST(JoltStartup, ApplicationAvatarAppendFailurePreservesStateAndAllowsRetry) {
     ASSERT_EXIT(ApplicationAvatarAppendRefusal(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(JoltStartup, ApplicationAvatarThousandRetirementsStayAtPeakLiveSlotsAndRefusalAllowsRetry) {
+    ASSERT_EXIT(ApplicationAvatarReuseCycles(), ::testing::ExitedWithCode(0), "");
 }
 
 TEST(JoltStartup, ApplicationLeaseStorageFailureIsIndependentOfStartedFlag) {
