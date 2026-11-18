@@ -13,6 +13,8 @@
 #include "luminumbra_client/rendering/RenderGraph.h"
 #include "luminumbra_client/rendering/Shader.h"
 #include "luminumbra_client/rendering/ShaderSource.h"
+#include "luminumbra_client/rendering/SkyAtmosphereLut.h"
+#include "luminumbra_client/rendering/TimeOfDayModel.h"
 #include "luminumbra_client/rendering/TreeLod.h"
 #include "luminumbra_client/rendering/passes/AerialPass.h"
 #include "luminumbra_client/rendering/passes/DebugViewPass.h"
@@ -20,6 +22,7 @@
 #include "luminumbra_client/rendering/passes/GBufferPass.h"
 #include "luminumbra_client/rendering/passes/LightingPass.h"
 #include "luminumbra_client/rendering/passes/ParticlePass.h"
+#include "luminumbra_client/rendering/passes/SkyboxPass.h"
 #include "luminumbra_client/rendering/passes/SsaoPass.h"
 #include "luminumbra_client/rendering/passes/WaterPass.h"
 #include "luminumbra_common/animation/AnimationRuntime.h"
@@ -9040,4 +9043,289 @@ TEST(RenderSmokeTest, FarWorldPlaneCoherenceThroughProductionConsumers) {
         ExpectProjectionPlane(glm::make_mat4(stored_projection.data()), expected, jitter);
         EXPECT_EQ(glGetError(), GL_NO_ERROR);
     }
+}
+
+namespace {
+// All captures are fixed at 320x180: one RGB float target and fixed RGB
+// float/byte readbacks (172,800 channels each, under 1 MiB per buffer).
+// No window, atmosphere input or presentation clock varies.
+struct ControlledSkyCapture {
+    static constexpr int width = 320;
+    static constexpr int height = 180;
+    static constexpr std::size_t channels = static_cast<std::size_t>(width) * height * 3u;
+    SkyboxPass pass;
+    SkyAtmosphereLut atmosphere;
+    Camera camera;
+    Luminumbra::Client::ScenarioHarness::IsolationConfig isolation;
+    WeatherRenderState weather;
+    std::size_t draws = 0;
+    GLuint framebuffer = 0, target = 0, bright_lut = 0;
+
+    ControlledSkyCapture() {
+        const auto toward_sun = -ComputeSunGeometry(0.04f, 0.0f).direction;
+        camera.Yaw = glm::degrees(std::atan2(toward_sun.z, toward_sun.x));
+        camera.Pitch = 30.0f;
+        camera.Zoom = 90.0f;
+        camera.updateCameraVectors();
+    }
+    ~ControlledSkyCapture() {
+        pass.destroy_geometry();
+        glDeleteFramebuffers(1, &framebuffer);
+        glDeleteTextures(1, &target);
+        glDeleteTextures(1, &bright_lut);
+    }
+    void Init(bool gpu) {
+        pass.init_shader(SourceRoot());
+        ASSERT_TRUE(pass.shader()->IsValid());
+        pass.init_geometry();
+        atmosphere.set_gpu_skyview_enabled(gpu);
+        ASSERT_TRUE(atmosphere.initialize(-ComputeSunGeometry(0.04f, 0.0f).direction));
+        glGenFramebuffers(1, &framebuffer);
+        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+        glGenTextures(1, &target);
+        glBindTexture(GL_TEXTURE_2D, target);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB32F, width, height, 0, GL_RGB, GL_FLOAT, nullptr);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, target, 0);
+        ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+        glGenTextures(1, &bright_lut);
+        glBindTexture(GL_TEXTURE_2D, bright_lut);
+        // Deliberately bright, coloured radiance at the shipping exposure. This
+        // exercises the filmic curve's asymptote without changing a render flag.
+        constexpr std::array<float, 3> radiance{1.0f, 0.8f, 0.6f};
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB32F, 1, 1, 0, GL_RGB, GL_FLOAT, radiance.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_BLEND);
+        glDisable(GL_DITHER);
+        glDisable(GL_FRAMEBUFFER_SRGB);
+        glViewport(0, 0, width, height);
+    }
+    std::vector<unsigned char> Draw(float time_of_day,
+                                    float declination,
+                                    float coverage,
+                                    bool use_lut = true,
+                                    bool bright = false) {
+        const auto sun = ComputeSunGeometry(time_of_day, declination);
+        (void)atmosphere.refresh_sky_view(-sun.direction);
+        RenderContext ctx;
+        ctx.screen_width = width;
+        ctx.screen_height = height;
+        ctx.sun.direction = sun.direction;
+        ctx.sun.intensity = sun.sunIntensity;
+        ctx.sky_day_factor = sun.skyDomeDayFactor;
+        ctx.moon_direction = -sun.direction;
+        ctx.sky_lut_ready = use_lut;
+        ctx.sky_view_lut.id = bright ? bright_lut : atmosphere.sky_view_texture();
+        ctx.transmittance_lut.id = atmosphere.transmittance_texture();
+        ctx.weather_state = &weather;
+        ctx.isolation = &isolation;
+        ctx.skybox_draw_counter = &draws;
+        ctx.cloud_state.coverage_amount = coverage;
+        ctx.cloud_state.scroll_offset = glm::vec2(0);
+        ctx.time_seconds = 0;
+        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+        pass.execute(ctx, camera, false);
+        std::vector<float> pixels(channels);
+        glReadPixels(0, 0, width, height, GL_RGB, GL_FLOAT, pixels.data());
+        std::vector<unsigned char> bytes(channels);
+        for (std::size_t channel = 0; channel < channels; ++channel) {
+            const float value = pixels[channel];
+            if (!std::isfinite(value) || value < 0 || value > 1.000001f) {
+                ADD_FAILURE() << "sky channel out of gamut: " << value;
+                return {};
+            }
+            bytes[channel] =
+                static_cast<unsigned char>(std::lround(std::clamp(value, 0.f, 1.f) * 255));
+        }
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+        return bytes;
+    }
+};
+
+// Independent image oracle using the scenario's unchanged 254 luminance,
+// 0.30-height cluster radius and top-55% ROI. Keep QA scenario symbols out of
+// the shipping renderer test target, which links only luminumbra_client.
+struct ControlledSkyStats {
+    double sky_mean_luminance = 0;
+    double sky_warm_half_r_b_ratio = 0;
+    std::size_t sun_disc_pixels = 0, sun_disc_pixels_near_expected = 0;
+    double sun_disc_centroid_x = 0, sun_disc_centroid_y = 0;
+};
+
+ControlledSkyStats
+AnalyzeControlledSky(const std::vector<unsigned char>& bytes, double sun_x = 0, double sun_y = 0) {
+    constexpr int width = ControlledSkyCapture::width, height = ControlledSkyCapture::height;
+    constexpr int sky_rows = height * 55 / 100;
+    constexpr double cluster_radius = .30 * height;
+    ControlledSkyStats stats;
+    std::array<double, 2> red{}, blue{};
+    std::size_t count = 0;
+    for (int y = height - sky_rows; y < height; ++y) {
+        for (int x = width / 64; x < width - width / 64; ++x) {
+            const auto offset =
+                (static_cast<std::size_t>(y) * width + static_cast<std::size_t>(x)) * 3;
+            const double r = bytes[offset], g = bytes[offset + 1], b = bytes[offset + 2];
+            const double luminance = .2126 * r + .7152 * g + .0722 * b;
+            stats.sky_mean_luminance += luminance;
+            const std::size_t half = x < width / 2 ? 0u : 1u;
+            red[half] += r;
+            blue[half] += b;
+            ++count;
+            if (luminance >= 254) {
+                ++stats.sun_disc_pixels;
+                const double from_top = height - 1 - y;
+                stats.sun_disc_centroid_x += static_cast<double>(x) / width;
+                stats.sun_disc_centroid_y += from_top / height;
+                const double dx = x - sun_x * width, dy = from_top - sun_y * height;
+                if (dx * dx + dy * dy <= cluster_radius * cluster_radius) {
+                    ++stats.sun_disc_pixels_near_expected;
+                }
+            }
+        }
+    }
+    stats.sky_mean_luminance /= static_cast<double>(count);
+    stats.sky_warm_half_r_b_ratio =
+        std::max(red[0] / std::max(blue[0], 1.0), red[1] / std::max(blue[1], 1.0));
+    if (stats.sun_disc_pixels > 0) {
+        stats.sun_disc_centroid_x /= static_cast<double>(stats.sun_disc_pixels);
+        stats.sun_disc_centroid_y /= static_cast<double>(stats.sun_disc_pixels);
+    }
+    return stats;
+}
+
+} // namespace
+
+TEST(RenderSmokeTest, SkyDiscSeparatesBrightDomeAcrossSeasonsAndFallback) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    ControlledSkyCapture capture;
+    capture.Init(false);
+    ASSERT_FALSE(HasFatalFailure());
+    for (const float declination : {-kSeasonalTiltAmplitude, 0.f, kSeasonalTiltAmplitude}) {
+        for (const bool use_lut : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << declination << " lut=" << use_lut);
+            const auto bytes = capture.Draw(.04f, declination, 0, use_lut, true);
+            ASSERT_EQ(bytes.size(), ControlledSkyCapture::channels);
+            const auto direction = -ComputeSunGeometry(.04f, declination).direction;
+            const auto clip = capture.camera.GetProjectionMatrix(ControlledSkyCapture::width,
+                                                                 ControlledSkyCapture::height) *
+                              glm::vec4(glm::mat3(capture.camera.GetViewMatrix()) * direction, 0);
+            const double x = (static_cast<double>(clip.x / clip.w) + 1) * .5;
+            const double y = (1 - static_cast<double>(clip.y / clip.w)) * .5;
+            const bool visible = clip.w > 0 && x >= 0 && x <= 1 && y >= 0 && y <= 1;
+            const auto stats = AnalyzeControlledSky(bytes, x, y);
+            if (visible) {
+                ASSERT_GT(stats.sun_disc_pixels, 0u);
+                EXPECT_GE(static_cast<double>(stats.sun_disc_pixels_near_expected) /
+                              static_cast<double>(stats.sun_disc_pixels),
+                          0.6);
+                EXPECT_NEAR(stats.sun_disc_centroid_x, x, .02);
+                EXPECT_NEAR(stats.sun_disc_centroid_y, y, .02);
+            } else {
+                EXPECT_EQ(stats.sun_disc_pixels, 0u);
+            }
+        }
+    }
+}
+
+TEST(RenderSmokeTest, SkyControlledNoonDuskNightAndBrightCloudsRetainOrdering) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    // Both shipping LUT backends feed the same skybox shader and pass. Each
+    // backend has 18 bounded captures (three seasons, two coverages, three times).
+    for (const bool gpu : {false, true}) {
+        ControlledSkyCapture capture;
+        capture.Init(gpu);
+        ASSERT_FALSE(HasFatalFailure());
+        for (const float declination : {-kSeasonalTiltAmplitude, 0.f, kSeasonalTiltAmplitude}) {
+            for (const float coverage : {0.f, 1.f}) {
+                SCOPED_TRACE(::testing::Message()
+                             << "gpu=" << gpu << " tilt=" << declination << " clouds=" << coverage);
+                std::array<ControlledSkyStats, 3> stats{};
+                constexpr std::array<float, 3> times{.04f, .22f, .45f};
+                for (std::size_t phase = 0; phase < times.size(); ++phase) {
+                    const auto bytes = capture.Draw(times[phase], declination, coverage);
+                    ASSERT_EQ(bytes.size(), ControlledSkyCapture::channels);
+                    stats[phase] = AnalyzeControlledSky(bytes);
+                }
+                EXPECT_GT(stats[0].sky_mean_luminance, stats[1].sky_mean_luminance + 3);
+                EXPECT_GT(stats[1].sky_mean_luminance, stats[2].sky_mean_luminance + 10);
+                EXPECT_LT(stats[2].sky_mean_luminance, 60);
+                EXPECT_GE(stats[1].sky_warm_half_r_b_ratio, .95);
+                EXPECT_GE(stats[1].sky_warm_half_r_b_ratio, stats[0].sky_warm_half_r_b_ratio + .05);
+            }
+        }
+    }
+}
+
+TEST(RenderSmokeTest, ShippingSkyGradePreservesColouredLuminanceAndGamut) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    FullscreenFloatProbe probe;
+    const auto source = ReadTextFile(SourceRoot() / "res/shaders/enhanced_skybox.frag");
+    const auto begin = source.find("vec3 preserveSkyLuminance(");
+    ASSERT_NE(begin, std::string::npos);
+    const auto end = source.find("void main()", begin);
+    ASSERT_NE(end, std::string::npos);
+    const auto fragment_source = std::string("#version 450 core\nout vec4 FragColor;\n") +
+                                 source.substr(begin, end - begin) + R"(
+uniform vec3 inputColor, candidateColor;
+void main() { FragColor = vec4(preserveSkyLuminance(inputColor, candidateColor), 1); }
+)";
+    const GLuint fragment = glCreateShader(GL_FRAGMENT_SHADER);
+    const char* text = fragment_source.c_str();
+    glShaderSource(fragment, 1, &text, nullptr);
+    glCompileShader(fragment);
+    GLint compiled = GL_FALSE;
+    glGetShaderiv(fragment, GL_COMPILE_STATUS, &compiled);
+    ASSERT_EQ(compiled, GL_TRUE) << GetShaderInfoLog(fragment);
+    const GLuint vertex = CompileShader(SourceRoot() / "res/shaders/ssao.vert", GL_VERTEX_SHADER);
+    ASSERT_NE(vertex, 0u);
+    const GLuint program = glCreateProgram();
+    glAttachShader(program, vertex);
+    glAttachShader(program, fragment);
+    glLinkProgram(program);
+    glDeleteShader(vertex);
+    glDeleteShader(fragment);
+    GLint linked = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    ASSERT_EQ(linked, GL_TRUE) << GetProgramInfoLog(program);
+    glUseProgram(program);
+    const std::array<glm::vec3, 10> colors{{{0, 0, 0},
+                                            {1, 1, 1},
+                                            {.5f, .5f, .5f},
+                                            {1, 0, 0},
+                                            {0, 1, 0},
+                                            {0, 0, 1},
+                                            {.9f, .7f, .3f},
+                                            {.01f, .6f, .98f},
+                                            {.999f, .998f, .995f},
+                                            {1e-6f, 2e-6f, 3e-6f}}};
+    const std::array<glm::vec3, 5> tints{
+        {{1, 1, 1}, {1, .7f, .1f}, {.01f, 1, .2f}, {0, 0, 0}, {4, .1f, 2}}};
+    const glm::vec3 weights(.2126f, .7152f, .0722f);
+    // 50 actual shipping-helper readbacks cover identity, zero candidate, black,
+    // white, primaries, coloured midtones, gamut faces and small positive values.
+    for (const auto& color : colors) {
+        for (const auto& tint : tints) {
+            const auto candidate = color * tint;
+            glUniform3fv(glGetUniformLocation(program, "inputColor"), 1, glm::value_ptr(color));
+            glUniform3fv(
+                glGetUniformLocation(program, "candidateColor"), 1, glm::value_ptr(candidate));
+            const glm::vec3 graded(probe.draw()[16]);
+            EXPECT_NEAR(glm::dot(graded, weights), glm::dot(color, weights), 3e-6f);
+            for (int channel = 0; channel < 3; ++channel) {
+                EXPECT_TRUE(std::isfinite(graded[channel]));
+                EXPECT_GE(graded[channel], 0);
+                EXPECT_LE(graded[channel], 1);
+                if (tint == glm::vec3(0) || tint == glm::vec3(1)) {
+                    EXPECT_NEAR(graded[channel], color[channel], 3e-6f);
+                }
+            }
+        }
+    }
+    glDeleteProgram(program);
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }
