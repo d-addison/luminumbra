@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -645,6 +646,10 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
     }
 
     const auto wall_start = std::chrono::steady_clock::now();
+    // Keep batch tick indices and telemetry in this invocation. Retries cannot
+    // exceed the requested tick budget, even if preparation refuses permanently.
+    const std::uint64_t max_preparation_retries = tick_count;
+    std::uint64_t preparation_retries = 0;
     while (report.ticks_executed < tick_count) {
         if (const auto& region_fault = m_session->GetRegionSchedulerFault();
             region_fault.has_value()) {
@@ -665,13 +670,20 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         // Every host gathers the same registered controllers and projectiles.
         // No host-specific spawn/camera anchor can change the horizon or its budget.
         if (!physics_system->prepare_simulation_collisions({}, budget_tick)) {
+            physics_budget.Finish();
             // Zero progress without a region fault is the retry outcome. A durable
             // read failure can latch a terminal fault during preparation itself.
             if (const auto& fault = m_session->GetRegionSchedulerFault()) {
                 report.region_fault = true;
                 report.region_fault_message = fault->message;
+                break;
             }
-            break; // Leave this tick unconsumed; the next call retries preparation.
+            if (preparation_retries < max_preparation_retries) {
+                ++preparation_retries;
+                std::this_thread::sleep_for(std::chrono::milliseconds(33));
+                continue; // No physics, input or tick state was consumed.
+            }
+            break; // Return retryable partial progress when the retry budget is spent.
         }
         physics_system->update(static_cast<float>(fixed_dt));
         //  step the server-authoritative avatar characters (gravity +

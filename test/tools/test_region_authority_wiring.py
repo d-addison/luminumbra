@@ -420,7 +420,21 @@ class SimulationCollisionWiring(unittest.TestCase):
         refused = function(body, "budget_tick))")
         self.assertIn("m_session->GetRegionSchedulerFault()", refused)
         self.assertIn("break;", refused)
-        self.assertNotIn("++", refused)
+        fault = function(refused, "if (const auto& fault =")
+        self.assertIn("report.region_fault = true;", fault)
+        self.assertIn("break;", fault)
+        self.assertNotIn("continue;", fault)
+        retry = function(refused, "if (preparation_retries < max_preparation_retries)")
+        self.assertIn("++preparation_retries;", retry)
+        self.assertIn("std::this_thread::sleep_for(std::chrono::milliseconds(33));", retry)
+        self.assertIn("continue;", retry)
+        self.assertIn("const std::uint64_t max_preparation_retries = tick_count;", body)
+        self.assertIn("std::uint64_t preparation_retries = 0;", body)
+        self.assertTrue(refused.endswith("break;"))
+        self.assertLess(refused.index("GetRegionSchedulerFault()"),
+                        refused.index("if (preparation_retries"))
+        self.assertLess(refused.index("physics_budget.Finish();"),
+                        refused.index("std::this_thread::sleep_for("))
         for path in ("NetRuntime.cpp", "Replicate.cpp"):
             source = (ROOT / "src/luminumbra_server/modes" / path).read_text(encoding="utf-8")
             retry = function(source, "if (step.ticks_executed == 0 && !step.region_fault)")
@@ -429,6 +443,106 @@ class SimulationCollisionWiring(unittest.TestCase):
             self.assertNotIn("Close", retry)
             self.assertNotIn("return 1;", retry)
             self.assertIn("if (step.region_fault || step.ticks_executed == 0)", source)
+
+    def test_remaining_transports_preserve_connections_and_inputs_on_bounded_retry(self):
+        for path, entry in (("Gns.cpp", "RunGnsHost"), ("Steam.cpp", "RunSteamHost"),
+                            ("NetTcp.cpp", "RunNetHost"), ("NetSoak.cpp", "RunNetSoak")):
+            with self.subTest(path=path):
+                source = (ROOT / "src/luminumbra_server/modes" / path).read_text(encoding="utf-8")
+                body = function(source, "int " + entry + "(")
+                self.assertIn("const std::uint64_t max_preparation_retries = options.ticks;", body)
+                self.assertIn("std::uint64_t preparation_retries = 0;", body)
+                retry_guard = ("if (step.ticks_executed == 0 && !step.region_fault && "
+                               "preparation_retries < max_preparation_retries)")
+                retry = function(body, retry_guard)
+                self.assertIn("++preparation_retries;", retry)
+                self.assertIn("std::this_thread::sleep_for(std::chrono::milliseconds(33));", retry)
+                self.assertTrue(retry.endswith("continue;"))
+                for forbidden in ("Close", "Shutdown", "return", "RecordInput", "SetAvatarMove",
+                                  "BroadcastSnapshot"):
+                    self.assertNotIn(forbidden, retry)
+                terminal_guard = "if (step.region_fault || step.ticks_executed == 0)"
+                self.assertIn("return 1;", function(body, terminal_guard))
+                self.assertLess(body.index(retry_guard), body.index(terminal_guard))
+                self.assertLess(body.index(terminal_guard), body.index("server.BroadcastSnapshot("))
+                self.assertLess(body.index("server.PumpInbound()"), body.index("runner.RunFixedTicks(1)"))
+                self.assertLess(body.index("runner.SetAvatarMove("), body.index("runner.RunFixedTicks(1)"))
+                if path == "NetSoak.cpp":
+                    self.assertIn("next_tick_time = std::chrono::steady_clock::now();", retry)
+
+    def test_replay_retries_bounded_inputs_and_records_only_consumed_ticks(self):
+        source = (ROOT / "src/luminumbra_server/modes/Replay.cpp").read_text(encoding="utf-8")
+        record = function(source, "int RunRecord(")
+        playback = function(source, "int RunReplay(")
+        for body, budget in ((record, "options.ticks"), (playback, "admitted_inputs")):
+            self.assertIn("const std::uint64_t max_preparation_retries = " + budget + ";", body)
+            self.assertIn("std::uint64_t preparation_retries = 0;", body)
+            retry_guard = ("if (step.ticks_executed == 0 && !step.region_fault && "
+                           "preparation_retries < max_preparation_retries)")
+            retry = function(body, retry_guard)
+            self.assertIn("++preparation_retries;", retry)
+            self.assertIn("std::this_thread::sleep_for(std::chrono::milliseconds(33));", retry)
+            self.assertEqual(retry.count("continue;"), 1)
+            for forbidden in ("RecordInput", "RecordCheckpoint", "Finalize", "Shutdown", "return"):
+                self.assertNotIn(forbidden, retry)
+            self.assertIn("return 1;", function(body, "if (step.region_fault)"))
+            self.assertIn("return 1;", function(body, "if (step.ticks_executed == 0)"))
+            self.assertLess(body.index("if (step.region_fault)"), body.index(retry_guard))
+            self.assertLess(body.index(retry_guard), body.index("if (step.ticks_executed == 0)"))
+        self.assertEqual(record.count("writer.RecordInput("), 1)
+        self.assertIn("writer.RecordInput(executed, empty_inputs);", record)
+        self.assertLess(record.index("if (step.ticks_executed == 0)"), record.index("writer.RecordInput("))
+        self.assertLess(record.index("writer.RecordInput("), record.index("schedule_trace.emplace_back("))
+        self.assertLess(playback.index("if (step.ticks_executed == 0)"),
+                        playback.index("schedule_trace.at("))
+
+    def test_batch_modes_capture_only_complete_fault_free_runs(self):
+        modes = ROOT / "src/luminumbra_server/modes"
+        smoke = function((modes / "Smoke.cpp").read_text(encoding="utf-8"), "SmokeRunResult RunSmokeOnce(")
+        guard = "if (result.ticks.region_fault || result.ticks.ticks_executed != options.ticks)"
+        refused = function(smoke, guard)
+        self.assertIn("runner.Shutdown(&result.shutdown_save);", refused)
+        self.assertIn("return result;", refused)
+        self.assertLess(smoke.index(guard), smoke.index("runner.ComputeWorldHash()"))
+        smoke_entry = function((modes / "Smoke.cpp").read_text(encoding="utf-8"), "int RunSmoke(")
+        for guard in ("if (!first.ok)", "if (!replay.ok)"):
+            self.assertIn("return 1;", function(smoke_entry, guard))
+            self.assertLess(smoke_entry.index(guard), smoke_entry.index("WriteSmokeArtifact("))
+        heavy = function((modes / "Heavy.cpp").read_text(encoding="utf-8"), "int RunHeavy(")
+        for report, target, publication in (
+            ("pre_save_ticks", "options.ticks", "original.SaveFullSnapshot()"),
+            ("orig_resim", "options.heavy_resim", "loaded.RunFixedTicks("),
+            ("loaded_resim", "options.heavy_resim", "const HeavyHashes orig_final"),
+        ):
+            guard = f"if ({report}.region_fault || {report}.ticks_executed != {target})"
+            self.assertIn("return 1;", function(heavy, guard))
+            self.assertLess(heavy.index(guard), heavy.index(publication))
+        server = function((modes / "Server.cpp").read_text(encoding="utf-8"), "int RunServer(")
+        self.assertIn("runner.RunFixedTicks(options.ticks)", server)
+        self.assertIn("return 3;", function(server, "if (report.region_fault)"))
+        self.assertIn("return report.ticks_executed == options.ticks ? 0 : 1;", server)
+
+    def test_mode_retry_and_completion_regressions_remain_registered(self):
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("persistence/host_scheduler_fault_test.cpp", cmake)
+        routes = (ROOT / "tools/ci/ci_paths.py").read_text(encoding="utf-8")
+        self.assertIn('"tools/ci/test_replay_source_contract.py"', routes)
+        aggregate = (ROOT / "tools/ci/test_replay_source_contract.py").read_text(encoding="utf-8")
+        self.assertIn('pattern="test_region_authority_wiring.py"', aggregate)
+        native = (ROOT / "test/persistence/host_scheduler_fault_test.cpp").read_text(encoding="utf-8")
+        for name in ("BatchPreparationRetryPreservesCompleteRunAndTraceIndices",
+                     "PermanentPreparationRefusalIsBoundedAndLeavesTheTickPending",
+                     "PreparationReadFaultIsTerminalBeforeAnyTickIsConsumed",
+                     "ServerRetriesPreparationAfterPartialProgressBeforeCompleteExit",
+                     "RecordRetriesWithoutDuplicatingUnconsumedInputs",
+                     "PermanentRecordRefusalPreservesThePublishedPair",
+                     "ReplayRetriesTheSameInputAndStopsOnExhaustionOrFault",
+                     "SmokeNeverCapturesAnIncompleteOrFaultedRun",
+                     "SmokeComparesOnlyTwoCompleteRuns",
+                     "HeavyNeverSnapshotsOrComparesAnIncompleteOrFaultedRun"):
+            self.assertIn("TEST_F(HostSchedulerFault, " + name + ")", native)
+        for mode in ("Replay", "Server", "Smoke", "Heavy"):
+            self.assertIn('modes/' + mode + '.cpp"', native)
 
     def test_headless_lockstep_prepares_both_peers_before_input_consumption(self):
         source = (ROOT / "src/luminumbra_server/modes/Lockstep.cpp").read_text(encoding="utf-8")

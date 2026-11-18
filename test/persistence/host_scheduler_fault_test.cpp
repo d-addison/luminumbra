@@ -12,12 +12,15 @@
 #include "luminumbra_common/replay/RegionScheduleTrace.h"
 #include "luminumbra_server/modes/ModeHelpers.h"
 #include "luminumbra_server/modes/Modes.h"
+#include "luminumbra_server/modes/SmokeArtifact.h"
 #include <stdexcept>
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <sstream>
@@ -122,6 +125,11 @@ void DirtyHostChunk(GameSession& session) {
     FAIL() << "Boot must supply a chunk to make recovery persistence non-vacuous";
 }
 
+struct PreparationReads;
+void InstallPreparationRefusal(Luminumbra::Server::ServerWorldRunner& runner,
+                               const std::shared_ptr<PreparationReads>& reads,
+                               bool after_first_tick);
+
 struct HostFaultObservation {
     bool inject_fault = true;
     bool explicit_shutdown = false;
@@ -133,6 +141,18 @@ struct HostFaultObservation {
     std::string expected_contents;
     std::string fault_message;
     std::string metadata_at_shutdown;
+    // Script only the mode/runner boundary; real preparation is exercised below.
+    std::uint64_t refused_calls = 0;
+    std::uint64_t refusals_remaining = 0;
+    std::uint64_t calls = 0;
+    std::uint64_t refuse_call = 0;
+    std::uint64_t hash_captures = 0;
+    std::uint64_t snapshots = 0;
+    bool permanent_refusal = false;
+    bool terminal_report = false;
+    bool complete_fault_report = false;
+    bool partial_report = false;
+    std::shared_ptr<PreparationReads> preparation;
 };
 
 // GTest runs these cases sequentially within this executable. Each fixture
@@ -146,7 +166,8 @@ HostFaultObservation*& HostObservation() {
 namespace Luminumbra::Server {
 // Compile the shipping mode bodies below against this test-only adapter. Only
 // setup, removal of injected corruption and observations wrap the real runner;
-// RunFixedTicks, fault reporting and Shutdown/save all execute production code.
+// Unscripted RunFixedTicks, fault reporting and Shutdown/save execute production
+// code. Scripted reports isolate the shipping modes' retry and completion decisions.
 class SchedulerFaultTestRunner : public ServerWorldRunner {
 public:
     using ServerWorldRunner::ServerWorldRunner;
@@ -161,10 +182,30 @@ public:
                 return false;
             DirtyHostChunk(*Session());
         }
+        if (HostObservation()->preparation) {
+            InstallPreparationRefusal(*this, HostObservation()->preparation, true);
+        }
         return !testing::Test::HasFatalFailure();
     }
 
     ServerTickReport RunFixedTicks(std::uint64_t count) {
+        auto& observation = *HostObservation();
+        ++observation.calls;
+        if (observation.permanent_refusal || observation.refusals_remaining != 0 ||
+            observation.calls == observation.refuse_call) {
+            ++observation.refused_calls;
+            if (observation.refusals_remaining != 0) {
+                --observation.refusals_remaining;
+            }
+            ServerTickReport refused;
+            refused.region_fault = observation.terminal_report;
+            if (observation.complete_fault_report) {
+                refused.ticks_executed = count;
+            } else if (observation.partial_report && count != 0) {
+                refused.ticks_executed = count - 1;
+            }
+            return refused;
+        }
         const auto report = ServerWorldRunner::RunFixedTicks(count);
         HostObservation()->ticks += report.ticks_executed;
         HostObservation()->frames += report.frames_executed;
@@ -179,12 +220,31 @@ public:
         return report;
     }
 
-    void Shutdown() {
+    std::string ComputeWorldHash() {
+        ++HostObservation()->hash_captures;
+        return ServerWorldRunner::ComputeWorldHash();
+    }
+
+    void ComputeWorldHashAndSubHashes(std::string& hash,
+                                      Persistence::WorldStreamingStateSubHashes& sub) {
+        ++HostObservation()->hash_captures;
+        ServerWorldRunner::ComputeWorldHashAndSubHashes(hash, sub);
+    }
+
+    std::size_t SaveFullSnapshot() {
+        ++HostObservation()->snapshots;
+        return ServerWorldRunner::SaveFullSnapshot();
+    }
+
+    void Shutdown(world::WorldStateSaveReport* requested_report = nullptr) {
         // Capture before the destructor can save: removing RunServer's explicit
         // Shutdown must fail even though the real runner also saves on destruction.
         HostObservation()->explicit_shutdown = true;
         world::WorldStateSaveReport report;
         ServerWorldRunner::Shutdown(&report);
+        if (requested_report) {
+            *requested_report = report;
+        }
         HostObservation()->recovery_saved = report.saved;
         HostObservation()->metadata_at_shutdown =
             ReadHostFile(HostObservation()->save_dir / "world_info.json");
@@ -201,13 +261,22 @@ public:
 #define RunReplay RunSchedulerFaultReplay
 #define RunMutateReplayFixture RunSchedulerFaultMutateReplayFixture
 #define RunServer RunSchedulerFaultServer
+#define RunSmoke RunSchedulerFaultSmoke
+#define RunHeavy RunSchedulerFaultHeavy
+#include "../../src/luminumbra_server/modes/Heavy.cpp"
 #include "../../src/luminumbra_server/modes/Replay.cpp"
 #include "../../src/luminumbra_server/modes/Server.cpp"
+#include "../../src/luminumbra_server/modes/Smoke.cpp"
+#undef RunHeavy
+#undef RunSmoke
 #undef RunServer
 #undef RunMutateReplayFixture
 #undef RunReplay
 #undef RunRecord
 #undef ServerWorldRunner
+// The existing target links Replay.cpp directly; compile smoke's production
+// artifact writer here so the included shipping mode has its normal verdict.
+#include "../../src/luminumbra_server/modes/SmokeArtifact.cpp"
 
 namespace {
 class HostSchedulerFault : public testing::Test {
@@ -278,6 +347,281 @@ protected:
         EXPECT_TRUE(saved_fields.empty());
     }
 };
+
+struct PreparationReads {
+    std::uint64_t refusals = 0;
+    std::uint64_t calls = 0;
+};
+
+// A distant registered body needs committed terrain without streaming that
+// column into the render set. An incomplete heightmap refuses preparation but
+// remains a readable, correctly identified record, so it cannot latch a fault.
+void InstallPreparationRefusal(Luminumbra::Server::ServerWorldRunner& runner,
+                               const std::shared_ptr<PreparationReads>& reads,
+                               bool after_first_tick) {
+    auto* session = runner.Session();
+    auto* world = session->GetWorldSystem();
+    auto* physics = session->GetPhysicsSystem();
+    world->set_durable_residency(true);
+    constexpr int kColumn = 10000;
+    constexpr float kCentre = static_cast<float>(kColumn * Luminumbra::CHUNK_SIZE_X + 8);
+    const float height = world->GetTerrainHeightAt(kCentre, kCentre);
+    const Luminumbra::IVec3 coords(
+        kColumn, static_cast<int>(std::floor(height / Luminumbra::CHUNK_SIZE_Y)), kColumn);
+    ASSERT_FALSE(
+        physics->create_dynamic_sphere({kCentre, height + 4, kCentre}, {}, 0.2f).IsInvalid());
+    const auto arm = [world, physics, reads, coords, height] {
+        physics->clear_simulation_collisions();
+        world->set_durable_residency(true);
+        world->remember_durable_chunks({coords});
+        world->set_durable_chunk_loader(
+            [reads, height](const Luminumbra::IVec3& requested) {
+                ++reads->calls;
+                const bool refused = reads->refusals != 0;
+                if (refused) {
+                    --reads->refusals;
+                }
+                auto chunk = std::make_shared<Luminumbra::Chunk>(requested);
+                chunk->set_state(Luminumbra::ChunkState::Meshing);
+                // One bounded collision column: either partial or the full 17x17 lattice.
+                constexpr std::size_t kSamples =
+                    (Luminumbra::CHUNK_SIZE_X + 1) * (Luminumbra::CHUNK_SIZE_Z + 1);
+                chunk->heightmap_data.assign(refused ? 1u : kSamples, height);
+                chunk->mark_sdf_loaded_or_edited();
+                return chunk;
+            },
+            nullptr);
+    };
+    if (after_first_tick) {
+        session->GetSimulationEventBus().subscribe([arm](const auto& event) {
+            if (event.tick == 1) {
+                arm();
+            }
+        });
+        session->GetSimulationEventBus().publish(1, "preparation-retry", "");
+    } else {
+        arm();
+    }
+}
+
+TEST_F(HostSchedulerFault, BatchPreparationRetryPreservesCompleteRunAndTraceIndices) {
+    for (const bool after_first_tick : {false, true}) {
+        std::string expected_hash;
+        std::vector<std::pair<std::uint64_t, std::string>> expected_trace;
+        for (const std::uint64_t refusals : {0u, 1u}) {
+            auto options = Options();
+            options.ticks = 2;
+            options.water_smoke = true;
+            options.moving = true;
+            auto reads = std::make_shared<PreparationReads>();
+            reads->refusals = refusals;
+            Luminumbra::Server::ServerWorldRunner runner(RunnerConfigFrom(options));
+            ASSERT_TRUE(runner.Boot());
+            ASSERT_NO_FATAL_FAILURE(InstallPreparationRefusal(runner, reads, after_first_tick));
+            const auto report = runner.RunFixedTicks(options.ticks);
+            ASSERT_FALSE(report.region_fault);
+            ASSERT_EQ(report.ticks_executed, options.ticks);
+            EXPECT_EQ(report.frames_executed, options.ticks);
+            EXPECT_EQ(reads->calls, refusals + 1);
+            EXPECT_EQ(runner.Session()->GetSimulationTickCount(), options.ticks);
+            ASSERT_EQ(runner.AvailabilityTrace().size(), options.ticks);
+            EXPECT_EQ(runner.AvailabilityTrace().front().first, 1u);
+            EXPECT_EQ(runner.AvailabilityTrace().back().first, options.ticks);
+            if (refusals == 0) {
+                expected_hash = runner.ComputeWorldHash();
+                expected_trace = runner.AvailabilityTrace();
+            } else {
+                EXPECT_EQ(runner.ComputeWorldHash(), expected_hash);
+                EXPECT_EQ(runner.AvailabilityTrace(), expected_trace);
+            }
+        }
+    }
+}
+
+TEST_F(HostSchedulerFault, PermanentPreparationRefusalIsBoundedAndLeavesTheTickPending) {
+    for (const bool after_first_tick : {false, true}) {
+        auto options = Options();
+        options.ticks = 2;
+        auto reads = std::make_shared<PreparationReads>();
+        reads->refusals = std::numeric_limits<std::uint64_t>::max();
+        Luminumbra::Server::ServerWorldRunner runner(RunnerConfigFrom(options));
+        ASSERT_TRUE(runner.Boot());
+        ASSERT_NO_FATAL_FAILURE(InstallPreparationRefusal(runner, reads, after_first_tick));
+        EXPECT_EQ(runner.RunFixedTicks(0).ticks_executed, 0u);
+        EXPECT_EQ(reads->calls, 0u);
+        const auto before = runner.ComputeWorldHash();
+        const auto refused = runner.RunFixedTicks(options.ticks);
+        const std::uint64_t advanced = after_first_tick ? 1u : 0u;
+        EXPECT_FALSE(refused.region_fault);
+        EXPECT_EQ(refused.ticks_executed, advanced);
+        EXPECT_EQ(refused.frames_executed, advanced);
+        EXPECT_EQ(reads->calls, options.ticks + 1);
+        EXPECT_EQ(runner.Session()->GetSimulationTickCount(), advanced);
+        EXPECT_EQ(runner.AvailabilityTrace().size(), advanced);
+        if (!after_first_tick) {
+            EXPECT_EQ(runner.ComputeWorldHash(), before);
+        }
+        reads->refusals = 0;
+        const auto resumed = runner.RunFixedTicks(options.ticks - advanced);
+        EXPECT_FALSE(resumed.region_fault);
+        EXPECT_EQ(resumed.ticks_executed, options.ticks - advanced);
+    }
+}
+
+TEST_F(HostSchedulerFault, PreparationReadFaultIsTerminalBeforeAnyTickIsConsumed) {
+    Luminumbra::Server::ServerWorldRunner runner(RunnerConfigFrom(Options()));
+    ASSERT_TRUE(runner.Boot());
+    auto* session = runner.Session();
+    auto* world = session->GetWorldSystem();
+    constexpr int kColumn = 10000;
+    constexpr float kCentre = static_cast<float>(kColumn * Luminumbra::CHUNK_SIZE_X + 8);
+    const float height = world->GetTerrainHeightAt(kCentre, kCentre);
+    const Luminumbra::IVec3 coords(
+        kColumn, static_cast<int>(std::floor(height / Luminumbra::CHUNK_SIZE_Y)), kColumn);
+    ASSERT_TRUE(world->durable_residency());
+    ASSERT_FALSE(session->GetPhysicsSystem()
+                     ->create_dynamic_sphere({kCentre, height + 4, kCentre}, {}, 0.2f)
+                     .IsInvalid());
+    // Retain GameSession's real loader and fault callback; the missing committed
+    // record must latch its terminal fault during collider preparation itself.
+    world->remember_durable_chunks({coords});
+    const auto faulted = runner.RunFixedTicks(2);
+    ASSERT_TRUE(faulted.region_fault);
+    ASSERT_TRUE(session->GetRegionSchedulerFault().has_value());
+    EXPECT_FALSE(faulted.region_fault_message.empty());
+    EXPECT_EQ(faulted.ticks_executed, 0u);
+    EXPECT_EQ(faulted.frames_executed, 0u);
+    EXPECT_EQ(session->GetSimulationTickCount(), 0u);
+    const auto latched = runner.RunFixedTicks(2);
+    EXPECT_TRUE(latched.region_fault);
+    EXPECT_EQ(latched.region_fault_message, faulted.region_fault_message);
+    EXPECT_EQ(latched.ticks_executed, 0u);
+}
+
+TEST_F(HostSchedulerFault, ServerRetriesPreparationAfterPartialProgressBeforeCompleteExit) {
+    observation.inject_fault = false;
+    observation.preparation = std::make_shared<PreparationReads>();
+    observation.preparation->refusals = 1;
+    auto server_options = Options();
+    server_options.ticks = 2;
+    EXPECT_EQ(RunSchedulerFaultServer(server_options), 0);
+    EXPECT_EQ(observation.calls, 1u);
+    EXPECT_EQ(observation.ticks, server_options.ticks);
+    EXPECT_EQ(observation.frames, server_options.ticks);
+    EXPECT_EQ(observation.availability_ticks, server_options.ticks);
+    EXPECT_EQ(observation.preparation->calls, 2u);
+    EXPECT_TRUE(observation.explicit_shutdown);
+}
+
+TEST_F(HostSchedulerFault, RecordRetriesWithoutDuplicatingUnconsumedInputs) {
+    observation.inject_fault = false;
+    observation.refusals_remaining = 1;
+    auto record_options = Options();
+    record_options.ticks = 1;
+    ASSERT_EQ(RunSchedulerFaultRecord(record_options), 0);
+    EXPECT_EQ(observation.refused_calls, 1u);
+    EXPECT_EQ(observation.ticks, 1u);
+    const auto recording = Luminumbra::Replay::ReadReplay(record_options.record_path);
+    ASSERT_TRUE(recording.has_value());
+    if (!recording.has_value()) {
+        return;
+    }
+    ASSERT_EQ(recording->inputs.size(), 1u);
+    EXPECT_EQ(recording->inputs.front().tick, 1u);
+    EXPECT_EQ(recording->tick_count, 1u);
+    Luminumbra::Replay::RegionScheduleTrace trace;
+    std::string error;
+    ASSERT_TRUE(
+        Luminumbra::Replay::ReadRegionScheduleTrace(record_options.record_path, 1, trace, error));
+    ASSERT_EQ(trace.size(), 1u);
+    EXPECT_EQ(trace.front().first, 1u);
+}
+
+TEST_F(HostSchedulerFault, PermanentRecordRefusalPreservesThePublishedPair) {
+    observation.inject_fault = false;
+    observation.permanent_refusal = true;
+    auto record_options = Options();
+    record_options.ticks = 1;
+    WriteHostFile(record_options.record_path, "previous replay");
+    WriteHostFile(record_options.record_path + ".regions.json", "previous trace");
+    EXPECT_EQ(RunSchedulerFaultRecord(record_options), 1);
+    EXPECT_EQ(observation.calls, record_options.ticks + 1);
+    EXPECT_EQ(observation.ticks, 0u);
+    EXPECT_EQ(ReadHostFile(record_options.record_path), "previous replay");
+    EXPECT_EQ(ReadHostFile(record_options.record_path + ".regions.json"), "previous trace");
+}
+
+TEST_F(HostSchedulerFault, ReplayRetriesTheSameInputAndStopsOnExhaustionOrFault) {
+    observation.inject_fault = false;
+    auto replay_options = Options();
+    replay_options.ticks = 1;
+    ASSERT_EQ(RunSchedulerFaultRecord(replay_options), 0);
+    replay_options.replay_path = replay_options.record_path;
+    for (const int outcome : {0, 1, 2}) {
+        observation = {};
+        observation.inject_fault = false;
+        observation.refusals_remaining = 1;
+        observation.permanent_refusal = outcome == 1;
+        observation.terminal_report = outcome == 2;
+        EXPECT_EQ(RunSchedulerFaultReplay(replay_options), outcome == 0 ? 0 : 1);
+        EXPECT_EQ(observation.calls, outcome == 2 ? 1u : 2u);
+        EXPECT_EQ(observation.ticks, outcome == 0 ? 1u : 0u);
+    }
+}
+
+TEST_F(HostSchedulerFault, SmokeNeverCapturesAnIncompleteOrFaultedRun) {
+    for (const int outcome : {0, 1, 2}) {
+        observation = {};
+        observation.inject_fault = false;
+        observation.permanent_refusal = true;
+        observation.terminal_report = outcome == 2;
+        observation.complete_fault_report = outcome == 2;
+        observation.partial_report = outcome == 1;
+        auto options = Options();
+        options.ticks = 2;
+        const auto result = RunSmokeOnce(options, "refused");
+        EXPECT_FALSE(result.ok);
+        EXPECT_TRUE(result.world_hash.empty());
+        EXPECT_EQ(observation.hash_captures, 0u);
+        EXPECT_TRUE(observation.explicit_shutdown);
+        EXPECT_FALSE(fs::exists(observation.save_dir));
+    }
+}
+
+TEST_F(HostSchedulerFault, HeavyNeverSnapshotsOrComparesAnIncompleteOrFaultedRun) {
+    for (const std::uint64_t refused_call : {1u, 2u, 3u}) {
+        for (const int outcome : {0, 1, 2}) {
+            observation = {};
+            observation.inject_fault = false;
+            observation.refuse_call = refused_call;
+            observation.terminal_report = outcome == 2;
+            observation.complete_fault_report = outcome == 2;
+            observation.partial_report = outcome == 1;
+            auto options = Options();
+            options.ticks = 2;
+            options.heavy_resim = 2;
+            EXPECT_EQ(RunSchedulerFaultHeavy(options), 1);
+            EXPECT_EQ(observation.calls, refused_call);
+            EXPECT_EQ(observation.snapshots, refused_call == 1 ? 0u : 1u);
+            EXPECT_EQ(observation.hash_captures, refused_call == 1 ? 0u : 2u);
+        }
+    }
+}
+
+TEST_F(HostSchedulerFault, SmokeComparesOnlyTwoCompleteRuns) {
+    for (const std::uint64_t refused_call : {1u, 2u}) {
+        observation = {};
+        observation.inject_fault = false;
+        observation.refuse_call = refused_call;
+        auto options = Options();
+        options.ticks = 1;
+        options.artifact_path = (root / "smoke.json").string();
+        WriteHostFile(options.artifact_path, "previous complete artifact");
+        EXPECT_EQ(RunSchedulerFaultSmoke(options), 1);
+        EXPECT_EQ(observation.calls, refused_call);
+        EXPECT_EQ(ReadHostFile(options.artifact_path), "previous complete artifact");
+    }
+}
 
 TEST_F(HostSchedulerFault, ServerSavesTheFaultedWorldBeforeReturningExitThree) {
     const auto options = Options();

@@ -36,6 +36,17 @@ SmokeRunResult RunSmokeOnce(const ServerCliOptions& options, const char* run_lab
     result.effective_simulation["weather_rain"] = session->WeatherRainEnabled();
 
     result.ticks = runner.RunFixedTicks(options.ticks);
+    if (result.ticks.region_fault || result.ticks.ticks_executed != options.ticks) {
+        LUMINUMBRA_CORE_ERROR(
+            "Smoke {}: incomplete run at tick {}", run_label, result.ticks.ticks_executed);
+        const fs::path incomplete_save_dir = runner.Session()->GetWorldSaveDir();
+        runner.Shutdown(&result.shutdown_save);
+        if (!incomplete_save_dir.empty()) {
+            std::error_code ec;
+            fs::remove_all(incomplete_save_dir, ec);
+        }
+        return result;
+    }
     //  avatar physics telemetry — confirm the server-authoritative avatar
     // characters SETTLED on the terrain (grounded; not fallen through the world).
     if (!runner.Avatars().empty()) {
@@ -94,7 +105,13 @@ int RunSmoke(const ServerCliOptions& options) {
         options.collision_radius);
 
     const SmokeRunResult first = RunSmokeOnce(options, "run-1");
+    if (!first.ok) {
+        return 1;
+    }
     const SmokeRunResult replay = RunSmokeOnce(options, "run-2");
+    if (!replay.ok) {
+        return 1;
+    }
 
     return Luminumbra::Server::WriteSmokeArtifact(options, first, replay);
 }
