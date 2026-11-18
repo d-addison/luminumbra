@@ -17762,6 +17762,29 @@ TEST(SurfaceQuery, SimulationPreparationRefusesWithoutPublicationAndRetryMatches
     EXPECT_EQ(physics.simulation_collision_hash(), published);
 }
 
+TEST(SurfaceQuery, SimulationCollidersAreAllocatorHistoryButNeverCapturedOwners) {
+    auto world = MakeSimulationCollisionWorld();
+    PhysicsSystem physics;
+    physics.startup();
+    physics.set_world_system(world.get());
+    const auto body = physics.create_dynamic_sphere({8.25f, 9, 8.25f}, {0, 0, 0}, 0.2f);
+    ASSERT_FALSE(body.IsInvalid());
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}));
+    ASSERT_GT(physics.simulation_collision_sample_count(), 0u);
+    // Collider slots are rebuilt from simulation inputs: they extend the slot history
+    // but are never captured as restorable owners.
+    PhysicsSystem::BodySetState state;
+    ASSERT_TRUE(physics.capture_body_owners(state));
+    ASSERT_EQ(state.owners.size(), 1u);
+    EXPECT_GT(state.slot_count, 1u);
+    EXPECT_TRUE(state.free_slots.empty());
+    physics.destroy_body(body);
+    ASSERT_TRUE(physics.capture_body_owners(state));
+    EXPECT_TRUE(state.owners.empty());
+    ASSERT_EQ(state.free_slots.size(), 1u);
+    EXPECT_EQ(state.free_slots[0], body.GetIndexAndSequenceNumber());
+}
+
 TEST(SurfaceQuery, SimulationPreparationBoundsInputsAndMissingAuthority) {
     auto world = MakeSimulationCollisionWorld();
     PhysicsSystem physics;

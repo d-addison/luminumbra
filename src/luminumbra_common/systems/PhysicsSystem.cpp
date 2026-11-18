@@ -1994,6 +1994,14 @@ bool PhysicsSystem::capture_body_owners(BodySetState& output) const {
         static_cast<void>(chunk_id);
         terrain[collision.body_id.GetIndex()] = true;
     }
+    // Simulation collider slots are rebuilt from simulation inputs like terrain,
+    // so they are allocator history but never captured owners.
+    if (m_simulation_collisions) {
+        const auto& colliders = *m_simulation_collisions;
+        for (std::size_t i = 0; i < colliders.body_count; ++i) {
+            terrain[colliders.bodies[i].GetIndex()] = true;
+        }
+    }
     const auto owner_count = static_cast<std::size_t>(
         std::count_if(existing.begin(), existing.end(), [&terrain](JPH::BodyID id) {
             return !terrain[id.GetIndex()];
