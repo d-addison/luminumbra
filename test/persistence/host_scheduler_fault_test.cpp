@@ -438,6 +438,20 @@ TEST_F(HostSchedulerFault, BatchPreparationRetryPreservesCompleteRunAndTraceIndi
     }
 }
 
+// The armed durable chunk has no region file, so a regional chunk-slot capture
+// would latch a scheduler fault. Observe resident state and runtime sub-hashes only.
+std::string ResidentStateHash(Luminumbra::Server::ServerWorldRunner& runner) {
+    const auto result = runner.Session()->CaptureAuthorityHashes(
+        {}, Luminumbra::Persistence::AuthorityCaptureParts::StreamedAndSubHashes);
+    EXPECT_EQ(result.status, Luminumbra::Persistence::AuthorityCaptureStatus::Ready);
+    if (!result.capture) {
+        return {};
+    }
+    const auto& sub = result.capture->sub;
+    return result.capture->streamed + "|" + sub.terrain + "|" + sub.mesh + "|" + sub.water + "|" +
+           sub.wind + "|" + sub.weather + "|" + sub.aether + "|" + sub.aether_state;
+}
+
 TEST_F(HostSchedulerFault, PermanentPreparationRefusalIsBoundedAndLeavesTheTickPending) {
     for (const bool after_first_tick : {false, true}) {
         auto options = Options();
@@ -449,7 +463,8 @@ TEST_F(HostSchedulerFault, PermanentPreparationRefusalIsBoundedAndLeavesTheTickP
         ASSERT_NO_FATAL_FAILURE(InstallPreparationRefusal(runner, reads, after_first_tick));
         EXPECT_EQ(runner.RunFixedTicks(0).ticks_executed, 0u);
         EXPECT_EQ(reads->calls, 0u);
-        const auto before = runner.ComputeWorldHash();
+        const auto before = ResidentStateHash(runner);
+        EXPECT_FALSE(before.empty());
         const auto refused = runner.RunFixedTicks(options.ticks);
         const std::uint64_t advanced = after_first_tick ? 1u : 0u;
         EXPECT_FALSE(refused.region_fault);
@@ -459,7 +474,7 @@ TEST_F(HostSchedulerFault, PermanentPreparationRefusalIsBoundedAndLeavesTheTickP
         EXPECT_EQ(runner.Session()->GetSimulationTickCount(), advanced);
         EXPECT_EQ(runner.AvailabilityTrace().size(), advanced);
         if (!after_first_tick) {
-            EXPECT_EQ(runner.ComputeWorldHash(), before);
+            EXPECT_EQ(ResidentStateHash(runner), before);
         }
         reads->refusals = 0;
         const auto resumed = runner.RunFixedTicks(options.ticks - advanced);
