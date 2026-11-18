@@ -486,7 +486,14 @@ bool GameSession::AdoptPreparedWorld(const std::shared_ptr<WorldPreparation>& pr
     return prepared->create ? AdoptCreatedWorld(*prepared, artifacts) : AdoptLoadedWorld(*prepared);
 }
 
-GameSession::GameSession() {
+GameSession::GameSession()
+    : GameSession(AuthorityProfileOptions{}, AuthorityProfileTag{}) {}
+
+// The public test-only opt-in constructor is deliberately NOT defined in src/
+// (see GameSession.h); its only definition is the test seam source.
+GameSession::GameSession(const AuthorityProfileOptions& authority_profile,
+                         AuthorityProfileTag /*tag*/)
+    : m_authorityProfile(authority_profile) {
     m_scriptState = std::make_unique<Luminumbra::scripting::LuaState>();
     m_registry.on_destroy<Luminumbra::Components::CreaturePhysicsComponent>()
         .connect<&RemoveCreatureAvatar>(*this);
@@ -2227,6 +2234,10 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                                     entity);
                             owned_regions->insert({owner.owner_x, owner.owner_z});
                         }
+                    }
+                    if (m_authorityProfile.residency_free_eviction) {
+                        // Anchors refresh proximity; the ledger retains durable edits.
+                        return owned_regions->contains(key);
                     }
                     return owned_regions->contains(key) ||
                            (m_worldSystem && m_worldSystem->has_region_members(key.x, key.z));
