@@ -3,7 +3,9 @@
 #include "Chunk.h"
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -54,8 +56,9 @@ public:
         std::uint64_t span_cache_hits = 0;
         std::uint64_t span_cache_misses = 0;
         std::uint64_t columns_scanned =
-            0;                           // wanted/eviction enumeration, including order restoration
-        std::uint64_t index_updates = 0; // residency, content, and wanted-priority changes
+            0; // wanted/eviction enumeration, including order restoration
+        std::uint64_t water_owner_visits = 0; // affected resident stacks on insert/erase
+        std::uint64_t index_updates = 0;      // residency, content, and wanted-priority changes
     };
     struct Column {
         int x = 0;
@@ -64,6 +67,10 @@ public:
         std::uint64_t span_version = 0;
         std::optional<SurfaceSpan> span;
         std::unordered_map<ChunkID, std::shared_ptr<Chunk>> residents;
+        std::map<int, std::shared_ptr<Chunk>> water_layers;
+        bool water_mesh_source_selected = false;
+        ChunkID water_mesh_source_id = 0;
+        u64 water_mesh_invalidation_version = 0;
     };
 
     static u64 column_key(int x, int z) {
@@ -97,6 +104,8 @@ public:
         const auto coords = chunk->get_coords();
         auto& column = ensure_column(coords.x, coords.z);
         column.residents.insert_or_assign(chunk->get_id(), chunk);
+        column.water_layers.insert_or_assign(coords.y, chunk);
+        update_water_owners(column);
         m_resident_columns.insert(column_key(coords.x, coords.z));
         m_nonresident_columns.erase(column_key(coords.x, coords.z));
         if (const auto it = m_wanted.find(chunk->get_id()); it != m_wanted.end())
@@ -110,6 +119,8 @@ public:
         const auto key = column_key(coords.x, coords.z);
         if (const auto it = m_columns.find(key); it != m_columns.end()) {
             it->second.residents.erase(chunk.get_id());
+            it->second.water_layers.erase(coords.y);
+            update_water_owners(it->second);
             if (it->second.residents.empty()) {
                 m_resident_columns.erase(key);
                 if (m_wanted_columns.contains(key)) {
@@ -124,6 +135,18 @@ public:
             add_pending(it->second);
         m_dirty_columns.insert(key);
         ++m_counters.index_updates;
+    }
+
+    // Acknowledge only after the owner thread queued the whole affected stack.
+    // Lookup and scalar writes cannot allocate or disturb residency/publication.
+    void acknowledge_water_mesh_invalidation(const Chunk& source) {
+        const auto coords = source.get_coords();
+        const auto column = m_columns.find(column_key(coords.x, coords.z));
+        if (column != m_columns.end()) {
+            column->second.water_mesh_source_selected = true;
+            column->second.water_mesh_source_id = source.get_id();
+            column->second.water_mesh_invalidation_version = source.water_mesh_invalidation_version;
+        }
     }
 
     // Accept unique candidates with priorities already merged across anchors.
@@ -200,6 +223,25 @@ public:
     }
 
 private:
+    void update_water_owners(Column& column) {
+        // One residency-change pass, bounded by this column's resident stack.
+        // Every resident is invalidated because insertion/removal can also move
+        // the shared water source, even when its own interval stays unchanged.
+        for (auto it = column.water_layers.begin(); it != column.water_layers.end(); ++it) {
+            ++m_counters.water_owner_visits;
+            auto& chunk = *it->second;
+            const auto next = std::next(it);
+            chunk.water_mesh_min_y = it == column.water_layers.begin()
+                                         ? -std::numeric_limits<double>::infinity()
+                                         : static_cast<double>(it->first) * CHUNK_SIZE_Y;
+            chunk.water_mesh_max_y = next == column.water_layers.end()
+                                         ? std::numeric_limits<double>::infinity()
+                                         : static_cast<double>(next->first) * CHUNK_SIZE_Y;
+            ++chunk.water_mesh_owner_version;
+            chunk.water_mesh_generated.store(false, std::memory_order_release);
+        }
+    }
+
     Column& ensure_column(int x, int z) {
         const auto [it, inserted] = m_columns.try_emplace(column_key(x, z));
         if (inserted) {

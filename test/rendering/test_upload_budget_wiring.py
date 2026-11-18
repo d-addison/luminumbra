@@ -159,6 +159,136 @@ class UploadBudgetWiring(unittest.TestCase):
                           "m_chunk_render_data.erase(it);"):
             self.assertIn(statement, unload)
 
+    def test_column_water_inputs_are_shared_before_owner_filtering(self):
+        world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        source = compact(body(world, "SHIELD_WorldSystem::column_water_mesh_source("))
+        self.assertIn("column->second.water_layers", source)
+        self.assertIn("resident->second.get() != &chunk", source)
+        self.assertIn("resolution > 1 && resolution <= 32", source)
+        self.assertIn("return *layer;", source)
+        self.assertIn("water_layers.find(0)", source)
+        self.assertIn("complete(*zero->second)", source)
+        dispatch = compact(body(world, "SHIELD_WorldSystem::dispatch_meshing_jobs("))
+        self.assertIn("const auto& water_source = column_water_mesh_source(*chunk);", dispatch)
+        self.assertIn("snapshot.water_mesh_inputs_captured = true;", dispatch)
+        for channel in ("water_level_data", "water_flow_data", "water_sim_terrain_height"):
+            self.assertIn("copy_mirror(water_source." + channel + ", snapshot." + channel + ");",
+                          dispatch)
+        self.assertIn("snapshot.water_depth_mm = water_source.water_depth_mm;", dispatch)
+        self.assertIn("MeshingSnapshotBytes(*chunk, terrain_mesh_required, water_source)", dispatch)
+        mesher = compact(body(read(ROOT / "src/luminumbra_common/world/MarchingCubes.cpp"),
+                              "void GenerateWaterMesh("))
+        self.assertIn("chunk.water_mesh_inputs_captured ? chunk : "
+                      "world_system.column_water_mesh_source(chunk)", mesher)
+        self.assertIn("const float surface = water_source.water_level_data[cell_index];", mesher)
+        self.assertIn("HasCompleteWaterGrid(water_source, resolution)", mesher)
+        self.assertEqual(mesher.count("SampleChunkWaterLevel(water_source,"), 4)
+        self.assertIn("water_source.water_depth_mm[", mesher)
+        self.assertNotIn("SampleChunkWaterLevel(chunk,", mesher)
+
+    def test_column_owner_filter_partitions_boundaries_and_rejects_nonfinite_samples(self):
+        mesher = body(read(ROOT / "src/luminumbra_common/world/MarchingCubes.cpp"),
+                      "void GenerateWaterMesh(")
+        predicate = re.search(r"if \((!std::isfinite\(surface\).*?)\) \{", mesher,
+                              re.S).group(1)
+        predicate = compact(predicate).replace("std::isfinite", "math.isfinite")
+        predicate = predicate.replace("chunk.water_mesh_min_y", "lower")
+        predicate = predicate.replace("chunk.water_mesh_max_y", "upper")
+        predicate = predicate.replace("!", " not ").replace("||", " or ").strip()
+        bounds = (-math.inf, -48.0, 16.0, math.inf)
+        for surface in (-1000.0, -48.001, -48.0, 0.0, 15.999, 16.0, 17.0, 1000.0,
+                        math.nan, math.inf, -math.inf):
+            owners = sum(not eval(predicate, {"__builtins__": {}, "math": math},
+                                  dict(surface=surface, lower=lower, upper=upper))
+                         for lower, upper in zip(bounds, bounds[1:]))
+            self.assertEqual(owners, int(math.isfinite(surface)), surface)
+        for corner in ("water_h00", "water_h10", "water_h01", "water_h11"):
+            self.assertIn("!std::isfinite(" + corner + ")", mesher)
+
+    def test_column_residency_and_simulation_wakes_reach_all_owners(self):
+        world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        for mutation in re.finditer(r"m_activation_index\.(insert|erase)\([^;]+;", world):
+            self.assertRegex(world[mutation.end():], r"^\s*invalidate_column_water_mesh\(")
+        wake = compact(body(world, "SHIELD_WorldSystem::invalidate_column_water_mesh("))
+        self.assertIn("column->second.water_layers", wake)
+        self.assertIn("layer->water_mesh_generated.store(false, std::memory_order_release);", wake)
+        self.assertIn("m_water_system->retain_mesh_invalidation(layer->get_id());", wake)
+        self.assertIn("++m_water_column_mesh_work.owner_visits;", wake)
+        water = read(ROOT / "src/luminumbra_common/systems/WaterSystem.cpp")
+        invalidate = body(water, "void InvalidateWaterMesh(")
+        self.assertIn("++chunk.water_mesh_invalidation_version;", invalidate)
+        self.assertIn("InvalidateWaterMesh(*to_init[i], m_mesh_invalidations);", water)
+        cadence = body(water, "bool WaterKernels::AdvanceWaterMeshCadence(")
+        self.assertIn("++chunk.water_mesh_invalidation_version;", cadence)
+        propagation = compact(body(world, "SHIELD_WorldSystem::propagate_column_water_mesh_invalidations("))
+        self.assertIn("m_water_system->mesh_invalidations()", propagation)
+        retirement = body(world, "if (resident == m_streaming_state.chunks.end() ||")
+        self.assertIn("ClearUnavailableWaterMesh(*this,", retirement)
+        self.assertIn("ClearUnavailableWaterMesh(*this, resident, m_streaming_state.chunks.end());",
+                      compact(retirement))
+        clear = body(world, "void ClearUnavailableWaterMesh(")
+        self.assertIn("if (resident == end)", clear)
+        self.assertIn("ClearPublishedWaterMesh(world_system, *resident->second);", clear)
+        self.assertIn("++resident->second->water_mesh_owner_version;", clear)
+        self.assertIn("for (const auto id : invalidations)", propagation)
+        self.assertIn("++m_water_column_mesh_work.pending_visits;", propagation)
+        self.assertIn("columns.insert(key).second", propagation)
+        self.assertLess(propagation.index("columns.insert(key).second"),
+                        propagation.index("column_water_mesh_source("))
+        self.assertIn("column->second.water_mesh_invalidation_version == "
+                      "selected.water_mesh_invalidation_version", propagation)
+        self.assertIn("column->second.water_mesh_source_id == selected.get_id()", propagation)
+        self.assertLess(propagation.index("for (auto* source : sources)"),
+                        propagation.index("invalidate_column_water_mesh(*source);"))
+        self.assertLess(wake.index("m_water_system->retain_mesh_invalidation(layer->get_id());"),
+                        wake.index("m_activation_index.acknowledge_water_mesh_invalidation(source);"))
+        self.assertIn("propagate_column_water_mesh_invalidations();", body(compact(world), "void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3>&"))
+        regional = read(ROOT / "src/luminumbra_common/systems/RegionalWater.cpp")
+        self.assertIn("copy.water_mesh_invalidation_version = original.water_mesh_invalidation_version;",
+                      body(regional, "void CaptureWater("))
+        publish = body(regional, "void PublishWater(")
+        self.assertIn("destination.water_mesh_invalidation_version = staged.water_mesh_invalidation_version;", publish)
+        self.assertIn("++grid.water_mesh_invalidation_version;", body(regional, "void Transaction::PrepareGrid("))
+        index = read(ROOT / "src/luminumbra_common/world/ActivationResidencyIndex.h")
+        self.assertIn("update_water_owners(column);", body(index, "void insert("))
+        self.assertIn("update_water_owners(it->second);", body(index, "void erase("))
+        update = compact(body(index, "void update_water_owners("))
+        self.assertIn("++m_counters.water_owner_visits;", update)
+        self.assertIn("++chunk.water_mesh_owner_version;", update)
+        self.assertNotIn("m_columns", update)
+
+    def test_column_regressions_are_registered(self):
+        native = read(ROOT / "test/shield/async_water_meshing_test.cpp")
+        for name in ("DeepSeabedResidentLayersKeepSeaLevelSurface",
+                     "ResidentOwnershipCoversBelowAboveAndGaps",
+                     "SurfaceOwnerArrivalSupersedesPendingWaterAndRemeshesColumn",
+                     "StackedWaterOnlyChunksEmitOnlyContainingSurface",
+                     "StackedWaterSurfaceBoundaryHasExactlyOneOwner",
+                     "StackedSlopingWaterAssignsEachCellIndependently",
+                     "OwnerIntervalsInvalidateOnlyTheAffectedResidentStack",
+                     "DivergedLayersUseOneColumnSampleAcrossTheBoundary",
+                     "ColumnSourceRejectsUnsupportedPartialAndUninitializedGrids",
+                     "NonFiniteColumnSamplesNeverPublishNonFiniteVertices",
+                     "PendingColumnSnapshotRejectsAChangedSourceWithUnchangedBounds",
+                     "ColumnSourcePrefersTheSimulationSourceLayerOverLowerResidents",
+                     "LegacyAndRegionalCadenceWakeRemoteOwnersOnceAndRefusalDoesNot",
+                     "DisabledColumnSourceClearsRemoteOwnerAndRejectsPendingWater"):
+            self.assertIn("TEST(AsyncWaterMeshing, " + name + ")", native)
+        self.assertIn("shield/async_water_meshing_test.cpp", read(ROOT / "test/CMakeLists.txt"))
+        self.assertIn("test/rendering/test_upload_budget_wiring.py",
+                      read(ROOT / "tools/ci/ci_paths.py"))
+
+    def test_stale_column_snapshots_cannot_publish_water(self):
+        world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        publication = compact(body(world, "bool SHIELD_WorldSystem::publish_front_meshing_batch("))
+        for field in ("water_mesh_min_y", "water_mesh_max_y", "water_mesh_owner_version"):
+            self.assertIn("chunk->" + field + " == job_chunk.scratch->" + field, publication)
+        self.assertIn("column_water_mesh_source(*chunk).get_id() == "
+                      "job_chunk.scratch->water_mesh_source_id", publication)
+        self.assertIn("const bool replaces_water = water_owner_current &&", publication)
+        self.assertIn("const auto& water_source = column_water_mesh_source(*chunk);", publication)
+        self.assertIn("water_source.water_level_data.begin()", publication)
+
     def test_water_only_regressions_use_registered_targets(self):
         cmake = read(ROOT / "test/CMakeLists.txt")
         for source in ("rendering/render_smoke_test.cpp", "shield/async_water_meshing_test.cpp",

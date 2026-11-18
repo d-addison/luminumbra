@@ -2081,9 +2081,13 @@ void GenerateWaterMesh(const Systems::WaterSystem& water_system,
             world_system.notify_renderable_chunks_changed();
         }
     };
-    const int resolution = chunk.current_water_resolution.load(std::memory_order_acquire);
+    // Scratch inputs were captured on the owner thread; workers never consult
+    // the mutable residency index. Direct meshing uses the same column source.
+    const auto& water_source =
+        chunk.water_mesh_inputs_captured ? chunk : world_system.column_water_mesh_source(chunk);
+    const int resolution = water_source.current_water_resolution.load(std::memory_order_acquire);
     // Supported water detail levels bound each mesh to 32*32 quads.
-    if (resolution <= 1 || resolution > 32 || !HasCompleteWaterGrid(chunk, resolution)) {
+    if (resolution <= 1 || resolution > 32 || !HasCompleteWaterGrid(water_source, resolution)) {
         chunk.water_mesh_vertices.clear();
         chunk.water_mesh_indices.clear();
         chunk.water_mesh_generated.store(false, std::memory_order_release);
@@ -2111,7 +2115,7 @@ void GenerateWaterMesh(const Systems::WaterSystem& water_system,
     // edit-aware, so dug/rain ponds show.
     constexpr std::int32_t kMinRenderableWaterDepthMm = 50; // 5 cm
     const bool have_depth =
-        (chunk.water_depth_mm.size() ==
+        (water_source.water_depth_mm.size() ==
          static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution));
 
     const float cell_width_x = static_cast<float>(CHUNK_SIZE_X) / static_cast<float>(resolution);
@@ -2119,6 +2123,14 @@ void GenerateWaterMesh(const Systems::WaterSystem& water_system,
 
     for (int z = 0; z < resolution; ++z) {
         for (int x = 0; x < resolution; ++x) {
+            const auto cell_index =
+                static_cast<std::size_t>(z) * static_cast<std::size_t>(resolution) +
+                static_cast<std::size_t>(x);
+            const float surface = water_source.water_level_data[cell_index];
+            if (!std::isfinite(surface) || surface < chunk.water_mesh_min_y ||
+                surface >= chunk.water_mesh_max_y) {
+                continue;
+            }
             // Get the water surface heights at the four corners of this water grid cell
             float world_x0 =
                 static_cast<float>(chunk_base_pos.x) + static_cast<float>(x) * cell_width_x;
@@ -2127,19 +2139,21 @@ void GenerateWaterMesh(const Systems::WaterSystem& water_system,
             float world_x1 = world_x0 + cell_width_x;
             float world_z1 = world_z0 + cell_width_z;
 
-            float water_h00 = SampleChunkWaterLevel(chunk, world_x0, world_z0, resolution);
-            float water_h10 = SampleChunkWaterLevel(chunk, world_x1, world_z0, resolution);
-            float water_h01 = SampleChunkWaterLevel(chunk, world_x0, world_z1, resolution);
-            float water_h11 = SampleChunkWaterLevel(chunk, world_x1, world_z1, resolution);
+            float water_h00 = SampleChunkWaterLevel(water_source, world_x0, world_z0, resolution);
+            float water_h10 = SampleChunkWaterLevel(water_source, world_x1, world_z0, resolution);
+            float water_h01 = SampleChunkWaterLevel(water_source, world_x0, world_z1, resolution);
+            float water_h11 = SampleChunkWaterLevel(water_source, world_x1, world_z1, resolution);
+
+            if (!std::isfinite(water_h00) || !std::isfinite(water_h10) ||
+                !std::isfinite(water_h01) || !std::isfinite(water_h11)) {
+                continue;
+            }
 
             // Render a quad where this cell holds standing water (edit-aware depth). Fall back to
             // the legacy worldgen-height test only if the depth array is unavailable.
             bool renderable;
             if (have_depth) {
-                renderable =
-                    chunk.water_depth_mm[static_cast<std::size_t>(z) *
-                                             static_cast<std::size_t>(resolution) +
-                                         static_cast<std::size_t>(x)] > kMinRenderableWaterDepthMm;
+                renderable = water_source.water_depth_mm[cell_index] > kMinRenderableWaterDepthMm;
             } else {
                 renderable = (water_h00 - world_system.GetTerrainHeightAt(world_x0, world_z0)) >
                              kMinRenderableWaterDepth;

@@ -822,6 +822,21 @@ public:
         m_streaming_radius_cap = cap_chunks;
     }
 
+    // Owner-thread rendering only. All residents prefer the complete Y=0
+    // grid, then the lowest complete resident grid. Worker scratch captures it
+    // before dispatch.
+    // Unindexed chunks retain their own inputs. No simulation authority is changed.
+    const Chunk& column_water_mesh_source(const Chunk& chunk) const;
+    void invalidate_column_water_mesh(const Chunk& chunk);
+    struct WaterColumnMeshWork {
+        std::uint64_t pending_visits = 0;
+        std::uint64_t owner_visits = 0;
+    };
+    // Const owner-thread diagnostic for pending-ID and affected-stack bounds.
+    const WaterColumnMeshWork& water_column_mesh_work() const {
+        return m_water_column_mesh_work;
+    }
+
     // Owner-thread cumulative diagnostics; derived indexes never enter world_hash.
     const World::ActivationResidencyIndex::Counters& activation_index_counters() const {
         return m_activation_index.counters();
@@ -1346,6 +1361,8 @@ private:
                                                        const std::array<float, 5>& heights) const;
     ColumnSurfaceSpan column_surface_span(int chunk_x, int chunk_z);
     void publish_generated_column_span(const ::Luminumbra::Chunk& chunk);
+    void propagate_column_water_mesh_invalidations();
+    WaterColumnMeshWork m_water_column_mesh_work;
     World::ActivationResidencyIndex m_activation_index;
     bool m_activation_plan_valid = false;
     int m_activation_plan_radius = -1;
