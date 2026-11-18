@@ -42,6 +42,66 @@ class UploadBudgetWiring(unittest.TestCase):
         cls.header = read(RENDERING / "RenderPipeline.h")
         cls.main = read(ROOT / "src/luminumbra_client/main_client.cpp")
 
+    def test_waterfall_sheets_retire_excavated_crest_and_landing_before_unknown_water(self):
+        source = read(RENDERING / "WaterfallDetect.cpp")
+        live = compact(body(source, "float LiveWaterFactorAt("))
+        guard = "if (TerrainRemovesAnchor(world, anchor)) { return 0.0f; }"
+        self.assertIn("if (site.terrain_anchors_known == 1)", live)
+        self.assertIn("for (const auto& anchor : site.terrain_anchors)", live)
+        self.assertIn(guard, live)
+        self.assertLess(live.index(guard), live.index("debug_water_grid_at("))
+        self.assertNotIn("GetTerrainHeightAt(", live[:live.index("debug_water_grid_at(")])
+        detect = compact(body(source, "std::vector<WaterfallSite> DetectWaterfalls("))
+        self.assertIn("site.terrain_anchors = std::array{", detect)
+        self.assertIn("site.terrain_anchors_known = 1;", detect)
+        for endpoint in ("crest", "foot"):
+            self.assertIn("world.GetTerrainHeightAt(lip.%s.x, lip.%s.z) - 0.5f" % (endpoint, endpoint), detect)
+        draw = compact(body(read(RENDERING / "passes/WaterfallPass.cpp"),
+                            "void WaterfallPass::execute("))
+        self.assertLess(draw.index("LiveWaterFactorAt("), draw.index("if (live < 0.02f)"))
+        self.assertLess(draw.index("continue;"), draw.index("glDrawArrays"))
+
+    def test_visible_rocks_and_shrubs_check_resident_support_before_batching(self):
+        source = read(RENDERING / "passes/GBufferPass.cpp")
+        cache = compact(body(source, "void GBufferPass::build_static_prop_cache("))
+        self.assertIn('cp.terrainAnchored = bp.starts_with("procgen://rock_") || '
+                      'bp.starts_with("procgen://bush_");', cache)
+        draw = compact(body(source, "void GBufferPass::geometry_pass_static_meshes("))
+        guard = "if (cp.terrainAnchored && ctx.world_system && TerrainRemovesAnchor(*ctx.world_system, cp.position)) { continue; }"
+        self.assertIn(guard, draw)
+        self.assertLess(draw.index("if (culled)"), draw.index(guard))
+        self.assertLess(draw.index(guard), draw.index("batch.mats.push_back(cp.model)"))
+        support = compact(read(RENDERING / "TerrainAnchor.h"))
+        for check in ("!chunk->has_terrain_authority()", "chunk->sdf_data.size() != volume",
+                      "!std::isfinite(sample)", "density > 0.5f",
+                      "std::floor(static_cast<double>(position[axis]) / CHUNK_SIZE_X)"):
+            self.assertIn(check, support)
+        self.assertNotIn("get_renderable_chunks", support)
+        self.assertNotIn("get_density_at(", support)
+
+    def test_near_shrubs_are_leaf_cards_and_every_bush_lod_avoids_grass_albedo(self):
+        source = read(ROOT / "src/luminumbra_client/app/ProcgenPalettes.cpp")
+        palette = compact(body(source, "void BuildProcgenBushPalette("))
+        self.assertIn("BuildBushLeafCard(center, normal, 0.24f, 0.18f)", palette)
+        for corner, uv in ((0, "0.0f, 0.0f"), (1, "1.0f, 0.0f"),
+                           (2, "1.0f, 1.0f"), (3, "0.0f, 1.0f")):
+            self.assertIn("verts.push_back({card[%d], normal, {%s}});" % (corner, uv), palette)
+        self.assertIn("{0u, 1u, 2u, 0u, 2u, 3u}", palette)
+        draw = compact(body(read(RENDERING / "passes/GBufferPass.cpp"),
+                            "void GBufferPass::geometry_pass_static_meshes("))
+        self.assertIn("const bool leafCards = isLeaf || (isBush && !isFarLod);", draw)
+        self.assertIn('shader->setInt("u_alphaTest", leafCards ? 2 : 0);', draw)
+        self.assertIn("two_sided = leafCards;", draw)
+        self.assertIn('shader->setInt("u_forceFlat", (isBush || (isLeaf && isFarLod)) ? 1 : 0);', draw)
+        # Both legacy and ladder programs use this same draw consumer.
+        self.assertIn("instanced_static_mesh_shader(input.far_selection.effective)", draw)
+        native = read(ROOT / "test/rendering/shader_compositing_contract_test.cpp")
+        for regression in ("LeafCardsAreFiniteOutwardQuadsForSideAndPolarNormals",
+                           "EditedAirRetiresDressingAndRefillRestoresItWithoutDirtyBitDependence",
+                           "TrilinearSupportUsesThePaddedXyzLatticeAtChunkEdges",
+                           "MissingPartialNonfiniteAndOutsideSupportRemainUnknown"):
+            self.assertIn(regression, native)
+
     def test_world_presentation_blocks_both_entry_paths_and_timelapse(self):
         preload = body(self.main, "auto wait_for_world_presentation =")
         self.assertNotIn("world->update(", preload)

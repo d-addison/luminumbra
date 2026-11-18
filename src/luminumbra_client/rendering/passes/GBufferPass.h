@@ -175,6 +175,7 @@ private:
         // is a tree part replaced by the LOD3 impostor; impostorLeaf = the per-tree representative.
         bool impostorTree = false;
         bool impostorLeaf = false;
+        bool terrainAnchored = false; // procedural rocks/shrubs retain their generated support
     };
     std::vector<CachedStaticProp> m_staticPropCache;
     std::vector<std::string> m_propMeshPaths;           // interned unique mesh paths

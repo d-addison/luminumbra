@@ -11,6 +11,7 @@
 #include "../FarLodSystem.h"
 #include "../PassShaderLayouts.h"      // enumerable ExpectedLayout registry
 #include "../RenderResourceRegistry.h" // /: registry-owned G-buffer
+#include "../TerrainAnchor.h"
 #include "../TreeLod.h" // tree rendering: per-instance distance LOD mesh selection (render-only)
 #include "PassGlHelpers.h"
 #include "core/IsolationConfig.h" // ctx.isolation->renders(...) needs the full type
@@ -731,6 +732,7 @@ void GBufferPass::build_static_prop_cache(entt::registry& registry) {
         cp.impostorTree = bp.find("tree") != std::string::npos;
         cp.impostorLeaf = cp.impostorTree && (bp.find("leaf") != std::string::npos ||
                                               bp.find("leaves") != std::string::npos);
+        cp.terrainAnchored = bp.starts_with("procgen://rock_") || bp.starts_with("procgen://bush_");
         cp.baseMeshHash = fnv64(mesh_info.meshPath, 1469598103934665603ull);
         cp.pathIndex = intern(mesh_info.meshPath);
         cp.materialId = mesh_info.materialId;
@@ -999,6 +1001,10 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         }
         if (culled)
             continue;
+        if (cp.terrainAnchored && ctx.world_system &&
+            TerrainRemovesAnchor(*ctx.world_system, cp.position)) {
+            continue;
+        }
         // Group by a cheap uint64 (no per-instance string alloc/copy/compare).
         const std::uint64_t gkey =
             rkey ^ (static_cast<std::uint64_t>(cp.materialId) * std::uint64_t{0x100000001B3ull});
@@ -1073,15 +1079,15 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                 // key suffix so only procgen leaves flutter.
                 const bool isLeaf = batch.basePath.size() >= 5 &&
                                     batch.basePath.rfind("_leaf") == batch.basePath.size() - 5;
-                shader->setInt("u_alphaTest", isLeaf ? 2 : 0);
-                two_sided = isLeaf;
-                shader->setFloat("u_windStrength", isLeaf ? 0.85f : 0.0f);
-                // Leaves use the dedicated cutout material at every LOD. Other
-                // foliage retains its existing distant flat-material optimization;
-                // near bushes, bark, and rigid props keep terrain texturing.
-                const bool isBush = batch.basePath.find("procgen://bush_") != std::string::npos;
+                const bool isBush = batch.basePath.starts_with("procgen://bush_");
                 const bool isFarLod = batch.drawPath.find(".lod") != std::string::npos;
-                shader->setInt("u_forceFlat", ((isLeaf || isBush) && isFarLod) ? 1 : 0);
+                const bool leafCards = isLeaf || (isBush && !isFarLod);
+                shader->setInt("u_alphaTest", leafCards ? 2 : 0);
+                two_sided = leafCards;
+                shader->setFloat("u_windStrength", isLeaf ? 0.85f : 0.0f);
+                // Shrubs are foliage at every distance, never opaque grass-textured stone.
+                // Distant shrubs keep the closed hull; only their near mesh uses leaf cards.
+                shader->setInt("u_forceFlat", (isBush || (isLeaf && isFarLod)) ? 1 : 0);
             }
         }
         if (two_sided || !cull_was_enabled)

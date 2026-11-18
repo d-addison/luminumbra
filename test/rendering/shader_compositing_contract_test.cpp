@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
 
+#include "luminumbra_client/app/BushFoliage.h"
 #include "luminumbra_client/app/GroundCoverHull.h"
 #include "luminumbra_client/core/scenarios/ScenarioCommon.h"
+#include "luminumbra_client/rendering/TerrainAnchor.h"
 #include "luminumbra_client/rendering/WeatherOverlayModel.h"
 #include "luminumbra_client/rendering/WeatherRenderBridge.h"
 
@@ -11,6 +13,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <regex>
 #include <sstream>
@@ -145,6 +148,101 @@ TEST(GroundCoverContract, CoarseRocksAndBushesKeepClosedHullsAtEveryDistance) {
     ExpectContains(upload, "face.positions[1], face.normal");
     ExpectContains(upload, "face.positions[2], face.normal");
     ExpectContains(upload, "MeshLoader::CreateFromArrays(vertices, indices)");
+}
+
+TEST(GroundCoverContract, NearBushesUseFullLeafQuadsAndNeverTerrainGrassTexturing) {
+    const auto palette = ExtractBlock(ReadShader("src/luminumbra_client/app/ProcgenPalettes.cpp"),
+                                      "void BuildProcgenBushPalette(");
+    ExpectContains(palette, "BuildBushLeafCard(center, normal, 0.24f, 0.18f)");
+    for (const char* vertex : {"card[0], normal, {0.0f, 0.0f}",
+                               "card[1], normal, {1.0f, 0.0f}",
+                               "card[2], normal, {1.0f, 1.0f}",
+                               "card[3], normal, {0.0f, 1.0f}"}) {
+        ExpectContains(palette, vertex);
+    }
+    const auto draw = ReadShader("src/luminumbra_client/rendering/passes/GBufferPass.cpp");
+    ExpectContains(draw, "const bool leafCards = isLeaf || (isBush && !isFarLod);");
+    ExpectContains(draw, "shader->setInt(\"u_alphaTest\", leafCards ? 2 : 0);");
+    ExpectContains(draw, "two_sided = leafCards;");
+    ExpectContains(draw,
+                   "shader->setInt(\"u_forceFlat\", (isBush || (isLeaf && isFarLod)) ? 1 : 0);");
+}
+
+TEST(GroundCoverContract, LeafCardsAreFiniteOutwardQuadsForSideAndPolarNormals) {
+    const glm::vec3 center(2, -3, 5);
+    for (const glm::vec3 normal : {glm::vec3(1, 0, 0),
+                                   glm::vec3(0, 1, 0),
+                                   glm::vec3(0, -1, 0),
+                                   glm::normalize(glm::vec3(1, 2, 3))}) {
+        const auto card = Luminumbra::Client::App::BuildBushLeafCard(center, normal, 0.24f, 0.18f);
+        EXPECT_NEAR(glm::length(card[1] - card[0]), 0.48f, 1e-5f);
+        EXPECT_NEAR(glm::length(card[3] - card[0]), 0.36f, 1e-5f);
+        EXPECT_LT(glm::length((card[0] + card[2]) * 0.5f - center), 1e-5f);
+        EXPECT_GT(glm::dot(glm::cross(card[1] - card[0], card[2] - card[0]), normal), 0.0f);
+        for (const auto& position : card) {
+            EXPECT_TRUE(std::isfinite(position.x));
+            EXPECT_TRUE(std::isfinite(position.y));
+            EXPECT_TRUE(std::isfinite(position.z));
+            EXPECT_NEAR(glm::dot(position - center, normal), 0.0f, 1e-5f);
+        }
+    }
+}
+
+TEST(TerrainAnchorContract, EditedAirRetiresDressingAndRefillRestoresItWithoutDirtyBitDependence) {
+    using Luminumbra::Rendering::EditedTerrainRemovesAnchor;
+    Luminumbra::Chunk chunk({-2, -1, 3});
+    constexpr std::size_t volume = 17u * 17u * 17u;
+    chunk.sdf_data.assign(volume, 2.0f);
+    const glm::vec3 position(-31.75f, -15.5f, 48.75f);
+    EXPECT_FALSE(EditedTerrainRemovesAnchor(nullptr, position));
+    EXPECT_FALSE(EditedTerrainRemovesAnchor(&chunk, position));
+    chunk.mark_voxel_data_dirty();
+    EXPECT_TRUE(EditedTerrainRemovesAnchor(&chunk, position));
+    chunk.clear_voxel_data_dirty();
+    EXPECT_TRUE(EditedTerrainRemovesAnchor(&chunk, position));
+    std::fill(chunk.sdf_data.begin(), chunk.sdf_data.end(), -2.0f);
+    EXPECT_FALSE(EditedTerrainRemovesAnchor(&chunk, position));
+    std::fill(chunk.sdf_data.begin(), chunk.sdf_data.end(), 0.5f);
+    EXPECT_FALSE(EditedTerrainRemovesAnchor(&chunk, position));
+}
+
+TEST(TerrainAnchorContract, TrilinearSupportUsesThePaddedXyzLatticeAtChunkEdges) {
+    using Luminumbra::Rendering::EditedTerrainRemovesAnchor;
+    Luminumbra::Chunk chunk({0, 0, 0});
+    chunk.sdf_data.assign(17u * 17u * 17u, -1.0f);
+    chunk.mark_voxel_data_dirty();
+    // Only corner (16,16,16) is air: an exact edge-adjacent probe must use
+    // its padded neighbour and the fractional weights, not the nearest voxel.
+    chunk.sdf_data[16u + 16u * 17u + 16u * 17u * 17u] = 3.0f;
+    EXPECT_TRUE(EditedTerrainRemovesAnchor(&chunk, {15.9f, 15.9f, 15.9f}));
+    EXPECT_FALSE(EditedTerrainRemovesAnchor(&chunk, {15.1f, 15.1f, 15.1f}));
+}
+
+TEST(TerrainAnchorContract, MissingPartialNonfiniteAndOutsideSupportRemainUnknown) {
+    using Luminumbra::Rendering::EditedTerrainRemovesAnchor;
+    Luminumbra::Chunk chunk({0, 0, 0});
+    chunk.mark_voxel_data_dirty();
+    EXPECT_FALSE(EditedTerrainRemovesAnchor(&chunk, {0, 0, 0}));
+    chunk.sdf_data.assign(17u * 17u * 17u - 1u, 2.0f);
+    EXPECT_FALSE(EditedTerrainRemovesAnchor(&chunk, {0, 0, 0}));
+    chunk.sdf_data.push_back(2.0f);
+    EXPECT_TRUE(EditedTerrainRemovesAnchor(&chunk, {0, 0, 0}));
+    for (const auto& position : {glm::vec3(-0.01f, 0, 0),
+                                 glm::vec3(16, 0, 0),
+                                 glm::vec3(0, 16, 0),
+                                 glm::vec3(0, 0, 16),
+                                 glm::vec3(std::numeric_limits<float>::infinity(), 0, 0),
+                                 glm::vec3(0, std::numeric_limits<float>::quiet_NaN(), 0)}) {
+        EXPECT_FALSE(EditedTerrainRemovesAnchor(&chunk, position));
+    }
+    for (const float invalid :
+         {std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN()}) {
+        chunk.sdf_data[0] = invalid;
+        EXPECT_FALSE(EditedTerrainRemovesAnchor(&chunk, {0.5f, 0.5f, 0.5f}));
+    }
+    chunk.sdf_data[0] = 2.0f;
+    chunk.sdf_data.push_back(2.0f);
+    EXPECT_FALSE(EditedTerrainRemovesAnchor(&chunk, {0, 0, 0}));
 }
 
 void ExpectClosedGroundCoverHull(const Luminumbra::Client::App::GroundCoverHull& hull,
