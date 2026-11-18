@@ -157,18 +157,27 @@ int RunHeavy(const ServerCliOptions& options) {
         LUMINUMBRA_CORE_ERROR("heavy: round-trip differs in {}", roundtrip_ground_difference);
     }
 
+    // An incomplete resimulation still tears both sessions down and removes the
+    // throwaway save directory before refusing.
+    const auto refuse_resim = [&](const char* which, std::uint64_t ticks) {
+        LUMINUMBRA_CORE_ERROR("heavy: incomplete {} resimulation at tick {}", which, ticks);
+        original.Shutdown();
+        loaded.Shutdown();
+        if (!save_dir.empty()) {
+            std::error_code ec;
+            fs::remove_all(save_dir, ec);
+        }
+        return 1;
+    };
+
     // --- : resimulate M further ticks on BOTH sessions. ---
     const auto orig_resim = original.RunFixedTicks(options.heavy_resim);
     if (orig_resim.region_fault || orig_resim.ticks_executed != options.heavy_resim) {
-        LUMINUMBRA_CORE_ERROR("heavy: incomplete original resimulation at tick {}",
-                              orig_resim.ticks_executed);
-        return 1;
+        return refuse_resim("original", orig_resim.ticks_executed);
     }
     const auto loaded_resim = loaded.RunFixedTicks(options.heavy_resim);
     if (loaded_resim.region_fault || loaded_resim.ticks_executed != options.heavy_resim) {
-        LUMINUMBRA_CORE_ERROR("heavy: incomplete loaded resimulation at tick {}",
-                              loaded_resim.ticks_executed);
-        return 1;
+        return refuse_resim("loaded", loaded_resim.ticks_executed);
     }
     const HeavyHashes orig_final = CaptureHashes(original);
     const HeavyHashes loaded_final = CaptureHashes(loaded);

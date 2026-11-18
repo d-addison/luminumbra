@@ -509,14 +509,20 @@ class SimulationCollisionWiring(unittest.TestCase):
             self.assertIn("return 1;", function(smoke_entry, guard))
             self.assertLess(smoke_entry.index(guard), smoke_entry.index("WriteSmokeArtifact("))
         heavy = function((modes / "Heavy.cpp").read_text(encoding="utf-8"), "int RunHeavy(")
-        for report, target, publication in (
-            ("pre_save_ticks", "options.ticks", "original.SaveFullSnapshot()"),
-            ("orig_resim", "options.heavy_resim", "loaded.RunFixedTicks("),
-            ("loaded_resim", "options.heavy_resim", "const HeavyHashes orig_final"),
+        for report, target, publication, refusal in (
+            ("pre_save_ticks", "options.ticks", "original.SaveFullSnapshot()", "return 1;"),
+            ("orig_resim", "options.heavy_resim", "loaded.RunFixedTicks(",
+             'return refuse_resim("original", orig_resim.ticks_executed);'),
+            ("loaded_resim", "options.heavy_resim", "const HeavyHashes orig_final",
+             'return refuse_resim("loaded", loaded_resim.ticks_executed);'),
         ):
             guard = f"if ({report}.region_fault || {report}.ticks_executed != {target})"
-            self.assertIn("return 1;", function(heavy, guard))
+            self.assertIn(refusal, function(heavy, guard))
             self.assertLess(heavy.index(guard), heavy.index(publication))
+        resim_refusal = function(heavy, "const auto refuse_resim = [&](")
+        for step in ("original.Shutdown();", "loaded.Shutdown();", "fs::remove_all(save_dir, ec);",
+                     "return 1;"):
+            self.assertIn(step, resim_refusal)
         server = function((modes / "Server.cpp").read_text(encoding="utf-8"), "int RunServer(")
         self.assertIn("runner.RunFixedTicks(options.ticks)", server)
         self.assertIn("return 3;", function(server, "if (report.region_fault)"))
