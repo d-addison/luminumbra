@@ -631,9 +631,9 @@ class SimulationCollisionWiring(unittest.TestCase):
             self.assertIn(token, admit)
         for signature, check, allocation, refusal in (
             ("bool PhysicsSystem::create_player_controller(",
-             "!can_admit_simulation_owner(start_pos, true)", "CapsuleShapeSettings(", "return false;"),
+             "!can_admit_simulation_owner(start_pos, true)", "FeetCapsule(", "return false;"),
             ("std::size_t PhysicsSystem::create_avatar_character(",
-             "!can_admit_simulation_owner(start_pos, false)", "m_avatars.push_back(",
+             "!can_admit_simulation_owner(start_pos, false)", "PrepareController(",
              "return kInvalidAvatar;"),
         ):
             body = function(source, signature)
