@@ -377,6 +377,12 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
     // Default config renders == true for every bit, so this is byte-stable off.
     namespace SH = Luminumbra::Client::ScenarioHarness;
     const SH::IsolationConfig& iso = *ctx.isolation;
+    // A filtered deferred producer leaves its pixels unattributed whether or not it
+    // has scene content, so isolation never certifies complete coverage.
+    if (diagnostic_capture &&
+        (!iso.renders(SH::IsolationLayer::Terrain) || !iso.renders(SH::IsolationLayer::Skinned))) {
+        GBufferDiagnosticCapture::Current()->unsupported("isolation_filtered_deferred_producer");
+    }
 
     // copy ctx.frustum_planes (a const glm::vec4* pointer) into a local
     // array so the terrain-submit callback (which takes a const glm::vec4(&)[6]

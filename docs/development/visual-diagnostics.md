@@ -65,6 +65,8 @@ unsupported coverage. Scope nesting and nonempty-table reuse are refused.
 complete deferred coverage and no sticky failure or registry refusal. Variants and
 identity writes only operate while attached. Missing or invalid base programs
 invalidate coverage, including an unavailable skinned program with an empty view.
+An isolation mask that filters the terrain or skinned layer invalidates coverage,
+whether or not the filtered layer has scene content.
 Queued tree impostors invalidate coverage before checking their program, so an
 invalid impostor program cannot bypass the unsupported record. Empty terrain and
 impostor queues add no unsupported record. Later deferred and forward contributors

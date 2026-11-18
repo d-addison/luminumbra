@@ -893,6 +893,7 @@ TEST_F(DiagnosticAttributionGl, ActiveEmptyPassSnapshotsOnceAndRestoresOnEveryDi
     for (const bool replay : {false, true}) {
         ctx_.frozen_replay = replay;
         for (const bool cull : {false, true}) {
+            table_.clear();
             GBufferDiagnosticCapture capture(targets_, table_);
             SetEntryState(cull);
             {
@@ -906,10 +907,32 @@ TEST_F(DiagnosticAttributionGl, ActiveEmptyPassSnapshotsOnceAndRestoresOnEveryDi
                 EXPECT_EQ(probe.read_fbo_binds, 1u);
             }
             ExpectEntryState(cull);
-            EXPECT_TRUE(capture.complete());
+            // The fully filtered pass never certifies coverage.
+            EXPECT_FALSE(capture.complete());
+            Contains(table_.json(), "isolation_filtered_deferred_producer");
             EXPECT_TRUE(targets_.ensure(true, {16, 16}, 7));
             ASSERT_TRUE(targets_.ensure(true, {32, 32}, 7));
         }
+    }
+}
+
+TEST_F(DiagnosticAttributionGl, FilteredDeferredLayersInvalidateCompletionEvenWhenPopulated) {
+    namespace SH = Luminumbra::Client::ScenarioHarness;
+    const auto actor = entities_.create();
+    entities_.emplace<Luminumbra::Components::TransformComponent>(actor);
+    entities_.emplace<Luminumbra::Components::SkinnedMeshComponent>(actor);
+    entities_.emplace<luminumbra::animation::AnimationPlayerComponent>(actor);
+    for (const std::uint32_t mask : {std::uint32_t{SH::IsolationLayer::Terrain},
+                                     std::uint32_t{SH::IsolationLayer::Skinned},
+                                     std::uint32_t{0}}) {
+        isolation_.layer_mask = mask;
+        table_.clear();
+        GBufferDiagnosticCapture capture(targets_, table_);
+        EXPECT_NO_THROW(pass_.execute(ctx_, entities_, input_));
+        EXPECT_FALSE(capture.complete());
+        EXPECT_FALSE(table_.complete_coverage());
+        Contains(table_.json(), "isolation_filtered_deferred_producer");
+        EXPECT_TRUE(targets_.reset());
     }
 }
 
