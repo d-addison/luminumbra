@@ -17856,15 +17856,18 @@ TEST(GameSessionHeadlessWorldTest, RefusedCatchupPreservesPendingTicksAndFractio
     });
     session.GetSimulationEventBus().publish(1, "collision-refusal", "");
     const auto dt = session.GetSimulationClock().fixed_dt();
-    ASSERT_EQ(session.TickSimulation(3.25 * dt), 1u);
+    // The session clock caps catch-up at two ticks per frame; stay within it so
+    // nothing is dropped and the refused second tick must be returned.
+    ASSERT_EQ(session.GetSimulationClock().max_catch_up_ticks(), 2u);
+    ASSERT_EQ(session.TickSimulation(2.25 * dt), 1u);
     EXPECT_EQ(session.GetSimulationTickCount(), 1u);
     EXPECT_EQ(session.GetWorldClock().tick(), 1u);
-    EXPECT_NEAR(session.GetSimulationClock().accumulator(), 2.25 * dt, 1e-15);
+    EXPECT_NEAR(session.GetSimulationClock().accumulator(), 1.25 * dt, 1e-15);
     EXPECT_EQ(session.TickSimulation(0), 0u);
-    EXPECT_NEAR(session.GetSimulationClock().accumulator(), 2.25 * dt, 1e-15);
+    EXPECT_NEAR(session.GetSimulationClock().accumulator(), 1.25 * dt, 1e-15);
     session.GetWorldSystem()->clear_world(physics);
-    EXPECT_EQ(session.TickSimulation(0), 2u);
-    EXPECT_EQ(session.GetSimulationTickCount(), 3u);
+    EXPECT_EQ(session.TickSimulation(0), 1u);
+    EXPECT_EQ(session.GetSimulationTickCount(), 2u);
     EXPECT_NEAR(session.GetSimulationClock().accumulator(), 0.25 * dt, 1e-15);
     EXPECT_EQ(session.GetSimulationClock().dropped_frame_count(), 0u);
 }
