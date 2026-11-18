@@ -144,6 +144,18 @@ namespace fs = std::filesystem;
 using Luminumbra::Systems::TerrainGenParams;
 
 namespace {
+std::span<const Luminumbra::Vec3>
+RegionalWaterAnchors(const std::optional<std::vector<Luminumbra::Vec3>>& replicated,
+                     const std::optional<Luminumbra::Vec3>& local) {
+    if (replicated) {
+        return *replicated;
+    }
+    if (local) {
+        return {&*local, 1};
+    }
+    return {};
+}
+
 constexpr float kSpawnEyeHeight = 1.95f;
 constexpr int kScentFieldCells = 128;
 constexpr int kScentFieldChannels = 4;
@@ -2625,11 +2637,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             if (m_regionFault)
                 return i + 1;
             if (m_activeRegionsEnabled && m_authorityProfile.regional_water && m_waterSystem) {
-                const auto& local = m_activeRegionLedger.local_anchor();
-                const auto anchors =
-                    m_replicatedSimulationAnchors
-                        ? std::span<const Vec3>(*m_replicatedSimulationAnchors)
-                        : (local ? std::span<const Vec3>(&*local, 1) : std::span<const Vec3>{});
+                const auto anchors = RegionalWaterAnchors(m_replicatedSimulationAnchors,
+                                                          m_activeRegionLedger.local_anchor());
                 m_waterSystem->UpdateRegionalFromSimulation(m_registry,
                                                             anchors,
                                                             m_activeRegionLedger,

@@ -400,13 +400,50 @@ void Allocate(Groups& groups,
                                 carried_debt});
     }
 }
-} // namespace
 
-Plan Build(std::span<const Resident> residents,
-           std::span<const SourceInput> sources,
-           const ActiveRegionLedger& ledger,
-           const world::RegionSchedule& schedule,
-           const Inputs& inputs) {
+void Reconcile(const Groups& groups,
+               std::vector<Entry>& entries,
+               const Plan& funding,
+               std::uint64_t windows,
+               std::uint64_t tick,
+               Plan& plan) {
+    // Funding and execution emit the same sorted due owners: preparation is
+    // ready in both simulation snapshots. Only funding sees the full rings.
+    // Never credit owners or advance a cursor against the narrowed snapshot.
+    // Simulation admission bounds this pass to 832 owners and candidates.
+    for (const auto& funded : funding.regions) {
+        const auto& group = groups.at(funded.owner);
+        const auto awarded = std::min(
+            {funded.windows, static_cast<std::uint64_t>(group.candidates.size()), windows});
+        auto selected = SelectInteriorPair(group, entries, tick, awarded);
+        // At most kMaxResidents candidates across all groups, all already funded.
+        for (const auto candidate : group.candidates) {
+            if (selected == awarded) {
+                break;
+            }
+            auto& entry = entries[candidate];
+            if (!entry.selected) {
+                entry.selected = true;
+                ++selected;
+            }
+        }
+        windows -= awarded;
+        plan.allocated_windows += awarded;
+        auto region = funded;
+        region.windows = awarded;
+        // Restoring unused grants cannot exceed funding's checked post-credit
+        // debt (<= kMaxDebt). This includes ticks without any whole-window grant.
+        region.debt += (funded.windows - awarded) * world::water_share::kQ32;
+        plan.regions.push_back(region);
+    }
+}
+
+Plan BuildPlan(std::span<const Resident> residents,
+               std::span<const SourceInput> sources,
+               const ActiveRegionLedger& ledger,
+               const world::RegionSchedule& schedule,
+               const Inputs& inputs,
+               const Plan* funding) {
     if (residents.size() > kMaxResidents || sources.size() > kMaxSources ||
         schedule.due.size() > ActiveRegionLedger::kMaxRegions ||
         !LegalResolution(inputs.resolution) || schedule.tick >= world::WorldClock::kTickLimit) {
@@ -462,7 +499,11 @@ Plan Build(std::span<const Resident> residents,
     }
     plan.border_windows = plan.global_windows - remaining;
     PlanInteriorPairs(faces, entries, groups);
-    Allocate(groups, ledger, remaining, schedule.tick, entries, plan);
+    if (funding) {
+        Reconcile(groups, entries, *funding, remaining, schedule.tick, plan);
+    } else {
+        Allocate(groups, ledger, remaining, schedule.tick, entries, plan);
+    }
     for (const auto& entry : entries) {
         if (entry.selected) {
             plan.interiors.push_back(entry.resident.id);
@@ -491,6 +532,15 @@ Plan Build(std::span<const Resident> residents,
                        static_cast<std::uint64_t>(plan.interiors.size()) * cells +
                        static_cast<std::uint64_t>(plan.faces.size()) * 2 * resolution;
     return plan;
+}
+} // namespace
+
+Plan Build(std::span<const Resident> residents,
+           std::span<const SourceInput> sources,
+           const ActiveRegionLedger& ledger,
+           const world::RegionSchedule& schedule,
+           const Inputs& inputs) {
+    return BuildPlan(residents, sources, ledger, schedule, inputs, nullptr);
 }
 
 namespace {
@@ -1120,8 +1170,12 @@ void WaterSystem::UpdateRegionalFromSimulation(entt::registry& registry,
         }
         // Reconcile sleeping/resized saved grids and seam eligibility only inside
         // the funded set. This pass cannot admit another payload or exceed its grant.
-        plan = RegionalWater::Build(
-            residents, source_inputs, ledger, water_schedule, {m_sim_resolution, budget, raining});
+        plan = RegionalWater::BuildPlan(residents,
+                                        source_inputs,
+                                        ledger,
+                                        water_schedule,
+                                        {m_sim_resolution, budget, raining},
+                                        &plan);
         std::array<std::shared_ptr<Chunk>, std::tuple_size_v<decltype(columns.ids)>> execution{};
         for (std::size_t i = 0; i < plan.participants.size(); ++i) {
             const auto found = std::lower_bound(funded.begin(), funded.end(), plan.participants[i]);

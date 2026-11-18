@@ -3836,6 +3836,320 @@ TEST(RegionalWaterAdmission, UnclaimedCleanupChecksIdentityAndPreservesPublished
 } // namespace
 
 namespace {
+TEST(RegionalWaterAdmission, EightFractionallyFundedRegionsInitializeOnDeterministicTicks) {
+    std::array<std::vector<ChunkID>, 3> expected_visits;
+    std::array<std::string, 3> expected_ledgers;
+    for (const bool reverse : {false, true}) {
+        SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 777);
+        WaterSystem water(nullptr, &shield);
+        shield.SetWaterSystem(&water);
+        shield.set_durable_residency(true);
+        water.SetRegionalScheduling(true);
+        water.SetSimResolution(16);
+        auto ledger =
+            PlanningLedger({{0, 0}, {1, 0}, {2, 0}, {3, 0}, {4, 0}, {5, 0}, {6, 0}, {7, 0}});
+        std::array<Vec3, 8> anchors{};
+        for (std::size_t i = 0; i < anchors.size(); ++i) {
+            anchors[i] = Vec3(static_cast<float>(512 * i + 24), 0, 24);
+        }
+        if (reverse) {
+            std::reverse(anchors.begin(), anchors.end());
+        }
+        std::array<std::uint64_t, 8> first_ticks{};
+        first_ticks.fill(WorldClock::kTickLimit);
+        entt::registry registry;
+        for (std::uint64_t tick = 0; tick < 3; ++tick) {
+            SCOPED_TRACE(::testing::Message() << reverse << ',' << tick);
+            const auto schedule = ledger.schedule(WorldClock(tick));
+            ASSERT_EQ(schedule.due.size(), anchors.size());
+            std::vector<world::RegionWork> completed;
+            water.UpdateRegionalFromSimulation(registry, anchors, ledger, schedule, completed);
+            const auto& visits = water.regional_work().visits;
+            EXPECT_EQ(visits.size(), tick == 0 ? 0u : 7u);
+            EXPECT_EQ(water.regional_work().residents_visited, 72u);
+            EXPECT_LE(water.regional_work().participants_visited, 7u);
+            for (const auto id : visits) {
+                const auto chunk = shield.find_authoritative_chunk(Chunk::decode_id(id));
+                ASSERT_NE(chunk, nullptr);
+                EXPECT_TRUE(chunk->has_complete_water_state());
+                const auto owner = static_cast<std::size_t>(chunk->get_coords().x / 32);
+                ASSERT_LT(owner, first_ticks.size());
+                first_ticks[owner] = std::min(first_ticks[owner], tick);
+            }
+            if (reverse) {
+                EXPECT_EQ(visits, expected_visits[tick]);
+                EXPECT_EQ(ledger.encode(), expected_ledgers[tick]);
+            } else {
+                expected_visits[tick] = visits;
+                expected_ledgers[tick] = ledger.encode();
+            }
+        }
+        // Seven windows split eight ways: nobody at tick 0, seven owners
+        // at tick 1, then the last owner wins the debt ranking at tick 2.
+        EXPECT_EQ(first_ticks, (std::array<std::uint64_t, 8>{1, 1, 1, 1, 1, 1, 1, 2}));
+    }
+}
+
+TEST(RegionalWaterAdmission, ReconciliationPreservesTheFullColumnCursorRing) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 777);
+    WaterSystem water(nullptr, &shield);
+    shield.SetWaterSystem(&water);
+    shield.set_durable_residency(true);
+    water.SetRegionalScheduling(true);
+    water.SetSimResolution(16);
+    auto ledger = PlanningLedger({{0, 0}});
+    entt::registry registry;
+    std::array<ChunkID, 9> ids{};
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+        // Isolated columns prevent pair opportunities from changing cursor service.
+        const auto entity = registry.create();
+        registry.emplace<Components::TransformComponent>(entity).position =
+            Vec3(static_cast<float>(32 * i + 8), 0, 8);
+        registry.emplace<Components::FlowingWaterSourceComponent>(entity).flow_rate = 0.0f;
+        ids[i] = Chunk::calculate_id({static_cast<int>(2 * i), 0, 0});
+    }
+    std::sort(ids.begin(), ids.end());
+    for (std::size_t tick = 0; tick < 2; ++tick) {
+        SCOPED_TRACE(tick);
+        const auto schedule = ledger.schedule(WorldClock(tick));
+        std::vector<world::RegionWork> completed;
+        water.UpdateRegionalFromSimulation(registry, {}, ledger, schedule, completed);
+        std::vector<ChunkID> expected;
+        for (std::size_t offset = 0; offset < 7; ++offset) {
+            expected.push_back(ids[(7 * tick + offset) % ids.size()]);
+        }
+        std::sort(expected.begin(), expected.end());
+        EXPECT_EQ(water.regional_work().visits, expected);
+        EXPECT_EQ(ledger.records().at({0, 0}).water_cursor, (7 * (tick + 1)) % ids.size());
+    }
+    for (const auto id : ids) {
+        const auto chunk = shield.find_authoritative_chunk(Chunk::decode_id(id));
+        ASSERT_NE(chunk, nullptr);
+        EXPECT_TRUE(chunk->has_complete_water_state());
+    }
+    EXPECT_EQ(shield.water_columns_generated(), ids.size());
+}
+
+TEST(RegionalWaterAdmission, ZeroWholeWindowTickCarriesCreditIntoTheNextGrant) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 777);
+    WaterSystem water(nullptr, &shield);
+    shield.SetWaterSystem(&water);
+    shield.set_durable_residency(true);
+    shield.set_parked_bytes_limit(SHIELD_WorldSystem::kWaterColumnReservationBytes);
+    water.SetRegionalScheduling(true);
+    water.SetSimResolution(16);
+    auto ledger = PlanningLedger({{0, 0}, {1, 0}});
+    const std::array anchors{Vec3(24, 0, 24), Vec3(536, 0, 24)};
+    entt::registry registry;
+    std::vector<world::RegionWork> completed;
+    const auto first_schedule = ledger.schedule(WorldClock(0));
+    water.UpdateRegionalFromSimulation(registry, anchors, ledger, first_schedule, completed);
+    EXPECT_TRUE(water.regional_work().visits.empty());
+    EXPECT_TRUE(completed.empty());
+    EXPECT_EQ(shield.water_columns_generated(), 0u);
+    const ActiveRegionLedger::WaterDebts half_credit{{{0, 0}, world::water_share::kQ32 / 2},
+                                                     {{1, 0}, world::water_share::kQ32 / 2}};
+    EXPECT_EQ(ledger.water_debts(), half_credit);
+    // The existing ledger encoding must retain the fractional accounting too.
+    ActiveRegionLedger restored;
+    std::string error;
+    ASSERT_TRUE(ActiveRegionLedger::decode(ledger.encode(), restored, error)) << error;
+    ledger = std::move(restored);
+    const auto next_schedule = ledger.schedule(WorldClock(1));
+    water.UpdateRegionalFromSimulation(registry, anchors, ledger, next_schedule, completed);
+    const auto columns = Planning::SelectColumns(anchors, {}, ledger);
+    ASSERT_GT(columns.size, 0u);
+    EXPECT_EQ(water.regional_work().visits, std::vector<ChunkID>{columns.ids[0]});
+    const ActiveRegionLedger::WaterDebts remaining_credit{{{1, 0}, world::water_share::kQ32}};
+    EXPECT_EQ(ledger.water_debts(), remaining_credit);
+    EXPECT_EQ(ledger.records().at({0, 0}).water_cursor, 1u);
+    EXPECT_EQ(ledger.records().at({1, 0}).water_cursor, 0u);
+    ASSERT_EQ(completed.size(), 1u);
+    EXPECT_EQ(completed[0].key, (RegionKey{0, 0}));
+    EXPECT_EQ(completed[0].water_cells, 256u);
+}
+
+TEST(RegionalWaterAdmission, SleepingFundedColumnsReturnCreditWithoutResettingTheCursor) {
+    for (const std::uint64_t saved :
+         {std::uint64_t{0}, world::water_share::kMaxDebt - 7 * world::water_share::kQ32}) {
+        for (const bool one_awake : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << saved << ',' << one_awake);
+            SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 777);
+            WaterSystem water(nullptr, &shield);
+            shield.SetWaterSystem(&water);
+            shield.set_durable_residency(true);
+            water.SetRegionalScheduling(true);
+            water.SetSimResolution(16);
+            auto ledger = PlanningLedger({{0, 0}});
+            ASSERT_TRUE(ledger.set_water_debts(
+                saved == 0 ? ActiveRegionLedger::WaterDebts{}
+                           : ActiveRegionLedger::WaterDebts{{{0, 0}, saved}}));
+            entt::registry registry;
+            std::vector<IVec3> committed;
+            for (int x = 0; x < 18; x += 2) {
+                const auto entity = registry.create();
+                registry.emplace<Components::TransformComponent>(entity).position =
+                    Vec3(static_cast<float>(16 * x + 8), 0, 8);
+                registry.emplace<Components::FlowingWaterSourceComponent>(entity).flow_rate = 0.0f;
+                committed.emplace_back(x, 0, 0);
+            }
+            shield.remember_durable_chunks(committed);
+            std::size_t reads = 0;
+            shield.set_durable_chunk_loader(
+                [&](const IVec3& coords) {
+                    ++reads;
+                    auto chunk = TransactionChunkAt(coords, 1000, 16);
+                    chunk->heightmap_data.assign(289, 1.0f);
+                    chunk->set_state(ChunkState::Idle);
+                    chunk->set_water_authority();
+                    chunk->is_water_sleeping.store(!one_awake || coords.x != 0);
+                    return chunk;
+                },
+                {});
+            std::vector<world::RegionWork> completed;
+            water.UpdateRegionalFromSimulation(
+                registry, {}, ledger, ExecutionSchedule(0, {{0, 0}}), completed);
+            EXPECT_EQ(reads, 7u);
+            const auto executed = one_awake ? std::uint64_t{1} : std::uint64_t{0};
+            EXPECT_EQ(water.regional_work().participants_visited, executed);
+            EXPECT_EQ(water.regional_work().visits.size(), executed);
+            EXPECT_EQ(completed.size(), executed);
+            EXPECT_EQ(ledger.records().at({0, 0}).water_cursor, 7u);
+            const ActiveRegionLedger::WaterDebts returned_credit{
+                {{0, 0}, saved + (7 - executed) * world::water_share::kQ32}};
+            EXPECT_EQ(ledger.water_debts(), returned_credit);
+        }
+    }
+}
+
+TEST(RegionalWaterAdmission, ReconciliationDoesNotRecreditFundedOwnersNearTheDebtCap) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 777);
+    WaterSystem water(nullptr, &shield);
+    shield.SetWaterSystem(&water);
+    shield.set_durable_residency(true);
+    water.SetRegionalScheduling(true);
+    water.SetSimResolution(16);
+    auto ledger = PlanningLedger({{0, 0}, {1, 0}});
+    // Each owner can accept its original 3.5-window share. Recrediting the
+    // funded subset as a sole owner would overflow its checked debt cap.
+    const auto saved = world::water_share::kMaxDebt - 7 * world::water_share::kQ32 / 2;
+    ASSERT_TRUE(ledger.set_water_debts({{{0, 0}, saved}, {{1, 0}, saved}}));
+    const std::array anchors{Vec3(24, 0, 24), Vec3(536, 0, 24)};
+    entt::registry registry;
+    std::vector<world::RegionWork> completed;
+    ASSERT_NO_THROW(water.UpdateRegionalFromSimulation(
+        registry, anchors, ledger, ExecutionSchedule(0, {{0, 0}, {1, 0}}), completed));
+    EXPECT_EQ(water.regional_work().visits.size(), 7u);
+    const ActiveRegionLedger::WaterDebts expected{
+        {{0, 0}, world::water_share::kMaxDebt - 7 * world::water_share::kQ32},
+        {{1, 0}, world::water_share::kMaxDebt}};
+    EXPECT_EQ(ledger.water_debts(), expected);
+    EXPECT_EQ(ledger.records().at({0, 0}).water_cursor, 7u);
+    EXPECT_EQ(ledger.records().at({1, 0}).water_cursor, 0u);
+}
+
+TEST(RegionalWaterAdmission, OddPairReconciliationPublishesTheFundingCursor) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 777);
+    WaterSystem water(nullptr, &shield);
+    shield.SetWaterSystem(&water);
+    shield.set_durable_residency(true);
+    water.SetRegionalScheduling(true);
+    water.SetSimResolution(16);
+    auto ledger = PlanningLedger({{0, 0}});
+    ledger.set_water_cursor({0, 0}, 8);
+    const auto schedule = ledger.schedule(WorldClock(1));
+    const std::array anchors{Vec3(24, 0, 24)};
+    const auto columns = Planning::SelectColumns(anchors, {}, ledger);
+    std::vector<Planning::Resident> residents;
+    for (std::size_t i = 0; i < columns.size; ++i) {
+        residents.push_back({.id = columns.ids[i], .initialized = false});
+    }
+    const auto funding = Planning::Build(residents, {}, ledger, schedule, {16, 4096, false});
+    ASSERT_EQ(funding.regions.size(), 1u);
+    entt::registry registry;
+    std::vector<world::RegionWork> completed;
+    water.UpdateRegionalFromSimulation(registry, anchors, ledger, schedule, completed);
+    EXPECT_EQ(water.regional_work().visits, funding.interiors);
+    EXPECT_EQ(ledger.records().at({0, 0}).water_cursor, funding.regions[0].next_cursor);
+    EXPECT_TRUE(ledger.water_debts().empty());
+}
+
+TEST(RegionalWaterAdmission, ReservationPressureDiscardsFundingAccounting) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 777);
+    WaterSystem water(nullptr, &shield);
+    shield.SetWaterSystem(&water);
+    shield.set_durable_residency(true);
+    shield.set_parked_bytes_limit(SHIELD_WorldSystem::kWaterColumnReservationBytes);
+    const std::array occupied{Chunk::calculate_id({100, 0, 0})};
+    ASSERT_TRUE(shield.reserve_water_columns(occupied));
+    water.SetRegionalScheduling(true);
+    water.SetSimResolution(16);
+    auto ledger = PlanningLedger({{0, 0}});
+    ledger.set_water_cursor({0, 0}, 4);
+    ASSERT_TRUE(ledger.set_water_debts({{{0, 0}, 17}}));
+    const auto before = ledger.encode();
+    const std::array anchors{Vec3(24, 0, 24)};
+    entt::registry registry;
+    std::vector<world::RegionWork> completed{{.key = {0, 0}, .water_cells = 23}};
+    const auto before_completed = CompletionBytes(completed);
+    water.UpdateRegionalFromSimulation(
+        registry, anchors, ledger, ExecutionSchedule(0, {{0, 0}}), completed);
+    EXPECT_EQ(ledger.encode(), before);
+    EXPECT_EQ(CompletionBytes(completed), before_completed);
+    EXPECT_TRUE(water.regional_work().visits.empty());
+    EXPECT_EQ(shield.water_columns_generated(), 0u);
+    EXPECT_TRUE(shield.snapshot_authoritative_chunks().empty());
+}
+
+TEST(RegionalWaterAdmission, FailedFundedPayloadResolutionDiscardsFundingAccounting) {
+    for (const bool unreadable : {false, true}) {
+        SCOPED_TRACE(unreadable);
+        SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 777);
+        WaterSystem water(nullptr, &shield);
+        shield.SetWaterSystem(&water);
+        shield.set_durable_residency(true);
+        water.SetRegionalScheduling(true);
+        water.SetSimResolution(16);
+        auto ledger = PlanningLedger({{0, 0}});
+        ledger.set_water_cursor({0, 0}, 4);
+        ASSERT_TRUE(ledger.set_water_debts({{{0, 0}, 17}}));
+        const auto before = ledger.encode();
+        const std::array anchors{Vec3(24, 0, 24)};
+        const auto columns = Planning::SelectColumns(anchors, {}, ledger);
+        std::vector<IVec3> committed;
+        for (std::size_t i = 0; i < columns.size; ++i) {
+            committed.push_back(Chunk::decode_id(columns.ids[i]));
+        }
+        shield.remember_durable_chunks(committed);
+        std::size_t reads = 0;
+        shield.set_durable_chunk_loader(
+            [&](const IVec3& coords) {
+                ++reads;
+                if (unreadable) {
+                    throw std::runtime_error("unavailable committed water");
+                }
+                auto chunk = TransactionChunkAt(coords, 1000, 16);
+                chunk->heightmap_data.assign(289, 1.0f);
+                chunk->set_state(ChunkState::Idle);
+                chunk->set_water_authority();
+                chunk->water_edge_flux.pop_back();
+                return chunk;
+            },
+            {});
+        entt::registry registry;
+        std::vector<world::RegionWork> completed{{.key = {0, 0}, .water_cells = 23}};
+        const auto before_completed = CompletionBytes(completed);
+        EXPECT_THROW(water.UpdateRegionalFromSimulation(
+                         registry, anchors, ledger, ExecutionSchedule(0, {{0, 0}}), completed),
+                     std::invalid_argument);
+        EXPECT_EQ(reads, 1u);
+        EXPECT_EQ(ledger.encode(), before);
+        EXPECT_EQ(CompletionBytes(completed), before_completed);
+        EXPECT_EQ(shield.water_columns_generated(), 0u);
+        EXPECT_TRUE(water.regional_work().visits.empty());
+    }
+}
+
 TEST(RegionalWaterAdmission, TerrainGenerationIsFundedBeforeResolvingSixtyFourAnchors) {
     SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 777);
     WaterSystem water(nullptr, &shield);
