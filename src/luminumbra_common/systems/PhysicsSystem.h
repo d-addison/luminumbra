@@ -144,6 +144,8 @@ public:
     // The body batch also accepts frozen-avatar captures to stage their capsules
     // before moving controllers adopt them (including mutually dependent contacts).
     // The destination may contain static terrain/capsules, but no dynamic bodies.
+    // All captures in a body batch must describe the same complete pool state.
+    // Its allocated slot extent must cover the destination's existing extent.
     // No existing boot, persistence, replication or hash caller uses these APIs.
     static constexpr std::size_t kMaxRestoredBodies = 128;
     static constexpr std::size_t kMaxRestoredAvatars = 4096;
@@ -247,6 +249,10 @@ public:
     }
 
 private:
+    struct BodySlotHistory;
+    std::unique_ptr<BodySlotHistory> m_body_slots;
+    void record_body_allocation(JPH::BodyID id);
+    void record_body_release(JPH::BodyID id);
     WorkItems m_work_items{};
     // Independent ownership, released only after all Jolt resources.
     std::unique_ptr<JoltRuntimeLease> m_runtime_lease;

@@ -39,7 +39,7 @@ struct PlayerAvatar {
 };
 
 // Internal continuation values, independent of the quantized diagnostic and wire
-// projections. Version 1 uses little-endian scalar fields, never struct padding.
+// projections. The payload uses little-endian scalar fields, never struct padding.
 // The physics payload is bounded to 64 KiB per owner (including contact caches).
 struct PhysicsOwnerState {
     static constexpr std::size_t kMaxBytes = 65536;

@@ -212,6 +212,25 @@ std::uint32_t OwnerWord(const PhysicsOwnerState& state, std::size_t offset) {
     return result;
 }
 
+void ReplaceOwnerAllocator(PhysicsOwnerState& state,
+                           std::uint32_t slot_count,
+                           std::span<const JPH::BodyID> free_slots,
+                           std::uint32_t old_free_count = 0) {
+    ASSERT_LE(old_free_count, 10240u);
+    ASSERT_GE(state.size, 8u + 4u * old_free_count);
+    state.size -= 8u + 4u * old_free_count;
+    const auto append = [&state](std::uint32_t word) {
+        ASSERT_LE(state.size, state.bytes.size() - 4);
+        state.size += 4;
+        SetOwnerWord(state, state.size - 4, word);
+    };
+    append(slot_count);
+    append(static_cast<std::uint32_t>(free_slots.size()));
+    for (const auto id : free_slots) {
+        append(id.GetIndexAndSequenceNumber());
+    }
+}
+
 TEST(PlayerAvatar, OwnerEncodingIsExactBoundedAndTransactional) {
     PhysicsSystem physics;
     physics.startup();
@@ -430,7 +449,8 @@ TEST(PlayerAvatar, BodyContinuationPreservesSpinContactsAndSleep) {
             EXPECT_GT(std::bit_cast<float>(OwnerWord(capture, 180)), 0.0f); // sleep timer
         }
         if (capture_tick == 12) {
-            // v1: header(16), active(4), position(24), rotation(16), velocity(12), spin xyz.
+            // Sphere prefix: header(16), active(4), position(24), rotation(16), velocity(12), spin
+            // xyz.
             EXPECT_TRUE(std::bit_cast<float>(OwnerWord(capture, 72)) != 0.0f ||
                         std::bit_cast<float>(OwnerWord(capture, 80)) != 0.0f);
         }
@@ -473,7 +493,8 @@ TEST(PlayerAvatar, MalformedPhysicsCannotPublishAnOwner) {
         EXPECT_EQ(target.avatar_character_slot_count(), 0u);
     }
     for (const auto& [offset, word] :
-         std::array<std::pair<std::size_t, std::uint32_t>, 12>{{{0, 2},
+         std::array<std::pair<std::size_t, std::uint32_t>, 13>{{{0, 1},
+                                                                {0, 3},
                                                                 {4, 99},
                                                                 {8, 9},
                                                                 {12, 0x7f800000},
@@ -569,12 +590,13 @@ TEST(PlayerAvatar, BodySetRestorationRefusesBeforePublishingAnyBody) {
         EXPECT_FALSE(target.restore_body_owners(std::span(&truncated, 1), ids));
         EXPECT_TRUE(ids[0].IsInvalid());
     }
-    // v1 sphere fields: version, kind, body ID, radius, active, position, rotation.
+    // Sphere fields: version, kind, body ID, radius, active, position, rotation.
     ASSERT_GE(capture.size, 280u);
     ASSERT_GT(OwnerWord(capture, 208), 0u); // body pairs
     ASSERT_GT(OwnerWord(capture, 244), 0u); // first pair manifolds
     for (const auto& [offset, word] :
-         std::array<std::pair<std::size_t, std::uint32_t>, 19>{{{0, 2},
+         std::array<std::pair<std::size_t, std::uint32_t>, 20>{{{0, 1},
+                                                                {0, 3},
                                                                 {4, 99},
                                                                 {8, 0x80000000},
                                                                 {12, 0},
@@ -611,9 +633,9 @@ TEST(PlayerAvatar, BodySetRestorationRefusesBeforePublishingAnyBody) {
         // other precision's version refuses at the header, so a double-precision
         // capture never reaches this build's float32-exact coordinate decoder.
         const std::uint32_t this_build = OwnerWord(capture, 0);
-        EXPECT_TRUE(this_build == 1u || this_build == 0x00010001u);
+        EXPECT_TRUE(this_build == 2u || this_build == 0x00010002u);
         auto other_precision = capture;
-        SetOwnerWord(other_precision, 0, this_build == 1u ? 0x00010001u : 1u);
+        SetOwnerWord(other_precision, 0, this_build == 2u ? 0x00010002u : 2u);
         EXPECT_FALSE(target.restore_body_owners(std::span(&other_precision, 1), ids));
         EXPECT_TRUE(ids[0].IsInvalid());
     }
@@ -742,6 +764,11 @@ TEST(PlayerAvatar, RestoredBodySequencesSurviveDestructionAndNormalAllocation) {
                 const JPH::BodyID restored_id(reused ? 0u : fresh_index++,
                                               static_cast<JPH::uint8>(generation));
                 SetOwnerWord(state, id_offset, restored_id.GetIndexAndSequenceNumber());
+                std::vector<JPH::BodyID> free_slots;
+                for (JPH::uint32 slot = 0; slot < restored_id.GetIndex(); ++slot) {
+                    free_slots.emplace_back(slot, JPH::uint8{0});
+                }
+                ReplaceOwnerAllocator(state, restored_id.GetIndex() + 1, free_slots);
                 if (reused) {
                     const auto previous =
                         target.create_dynamic_sphere(Vec3(0.0f), Vec3(0.0f), 0.3f);
@@ -771,6 +798,357 @@ TEST(PlayerAvatar, RestoredBodySequencesSurviveDestructionAndNormalAllocation) {
                 target.destroy_body(next);
             }
         }
+    }
+}
+
+void CheckFreedSlotContinuation(unsigned path, unsigned free_count) {
+    SCOPED_TRACE(::testing::Message() << path << ':' << free_count);
+    PhysicsSystem source;
+    source.startup();
+    std::vector<JPH::BodyID> freed;
+    for (unsigned slot = 0; slot < free_count; ++slot) {
+        freed.push_back(source.create_dynamic_sphere(Vec3(0.0f), Vec3(0.0f), 0.3f));
+        ASSERT_EQ(freed.back(), JPH::BodyID(slot, 1));
+    }
+    // Include the last generation and uint8 wrap in captured free slots.
+    if (free_count == 3) {
+        for (const unsigned slot : {0u, 2u}) {
+            const unsigned allocations = slot == 0 ? 255u : 256u;
+            for (unsigned generation = 1; generation < allocations; ++generation) {
+                source.destroy_body(freed[slot]);
+                freed[slot] = source.create_dynamic_sphere(Vec3(0.0f), Vec3(0.0f), 0.3f);
+            }
+        }
+        ASSERT_EQ(freed[0].GetSequenceNumber(), 255u);
+        ASSERT_EQ(freed[2].GetSequenceNumber(), 0u);
+    }
+    PhysicsOwnerState state;
+    JPH::BodyID survivor;
+    std::size_t source_avatar = 999;
+    if (path == 0) {
+        survivor = source.create_dynamic_sphere(Vec3(0.0f, 40.0f, 0.0f), Vec3(0.0f), 0.3f);
+    } else {
+        source_avatar = source.create_avatar_character(Vec3(0.0f, 40.0f, 0.0f));
+        source.set_avatar_frozen(source_avatar, true, source.get_avatar_position(source_avatar));
+    }
+    // The non-index order must survive capture, not just the generations.
+    const std::array<unsigned, 3> order{0, 2, 1};
+    for (unsigned index = 0; index < free_count; ++index) {
+        source.destroy_body(freed[order[index]]);
+    }
+    if (path == 0) {
+        ASSERT_TRUE(source.capture_body_owner(survivor, state));
+    } else {
+        ASSERT_TRUE(source.capture_avatar_owner(source_avatar, state));
+        PlayerAvatarOwnerState owner{
+            .avatar = {.player_id = 7,
+                       .position = source.get_avatar_position(source_avatar),
+                       .facing = 0.0f,
+                       .velocity = source.get_avatar_velocity(source_avatar)},
+            .physics = state};
+        std::array<std::uint8_t, Luminumbra::World::kMaxAvatarOwnerBytes> encoded{};
+        std::size_t written = 0;
+        ASSERT_TRUE(Luminumbra::World::EncodeAvatarOwner(owner, encoded, written));
+        PlayerAvatarOwnerState decoded;
+        ASSERT_TRUE(
+            Luminumbra::World::DecodeAvatarOwner(std::span(encoded).first(written), decoded));
+        ExpectOwnerBits(state, decoded.physics);
+        state = decoded.physics;
+    }
+    PhysicsSystem restored;
+    restored.startup();
+    std::size_t avatar = 999;
+    std::array<JPH::BodyID, 1> ids{};
+    if (path != 1) {
+        ASSERT_TRUE(restored.restore_body_owners(std::span(&state, 1), ids));
+    }
+    if (path == 2) {
+        // Adoption must validate history too, before publishing a controller.
+        for (const unsigned mutation : {0u, 1u, 2u}) {
+            auto invalid = state;
+            const auto tail = state.size - 8 - 4 * free_count;
+            if (mutation == 0) {
+                SetOwnerWord(invalid, tail, free_count + 2);
+            } else if (mutation == 1) {
+                SetOwnerWord(
+                    invalid, tail + 8, JPH::BodyID(order[0], 2).GetIndexAndSequenceNumber());
+            } else {
+                SetOwnerWord(invalid, tail + 4, 0);
+                invalid.size = tail + 8;
+            }
+            ASSERT_TRUE(PhysicsSystem::validate_owner_state(invalid));
+            EXPECT_FALSE(restored.restore_avatar_owner(invalid, avatar));
+            EXPECT_EQ(avatar, 999u);
+            EXPECT_EQ(restored.avatar_character_slot_count(), 0u);
+        }
+    }
+    if (path != 0) {
+        ASSERT_TRUE(restored.restore_avatar_owner(state, avatar));
+    }
+    PhysicsOwnerState actual;
+    if (path == 0) {
+        ASSERT_TRUE(restored.capture_body_owner(ids[0], actual));
+    } else {
+        ASSERT_TRUE(restored.capture_avatar_owner(avatar, actual));
+    }
+    ExpectOwnerBits(state, actual);
+    for (unsigned index = 0; index <= free_count; ++index) {
+        const auto expected = source.create_dynamic_sphere(Vec3(0.0f), Vec3(0.0f), 0.3f);
+        const auto next = restored.create_dynamic_sphere(Vec3(0.0f), Vec3(0.0f), 0.3f);
+        EXPECT_EQ(next, expected);
+        if (index < free_count) {
+            const auto slot = order[free_count - index - 1];
+            EXPECT_EQ(
+                next,
+                JPH::BodyID(slot, static_cast<JPH::uint8>(freed[slot].GetSequenceNumber() + 1)));
+        } else {
+            EXPECT_EQ(next, JPH::BodyID(free_count + 1, 1));
+        }
+        for (const auto stale : freed) {
+            EXPECT_FALSE(source.capture_body_owner(stale, actual));
+            EXPECT_FALSE(restored.capture_body_owner(stale, actual));
+        }
+    }
+}
+
+TEST(PlayerAvatar, FreedSlotsContinueIdenticallyForSpheresAndBothCapsuleRestorePaths) {
+    for (const unsigned path : {0u, 1u, 2u}) {
+        for (const unsigned free_count : {1u, 3u}) {
+            ASSERT_NO_FATAL_FAILURE(CheckFreedSlotContinuation(path, free_count));
+        }
+    }
+}
+
+TEST(PlayerAvatar, AllocatorHistoryRefusalsLeaveOwnersOutputsAndNextAllocationUnchanged) {
+    for (const unsigned path : {0u, 1u, 2u}) {
+        PhysicsSystem source;
+        source.startup();
+        std::array<JPH::BodyID, 3> freed{};
+        for (auto& id : freed) {
+            id = source.create_dynamic_sphere(Vec3(0.0f), Vec3(0.0f), 0.3f);
+        }
+        PhysicsOwnerState state;
+        if (path == 0) {
+            const auto body = source.create_dynamic_sphere(Vec3(0.0f), Vec3(0.0f), 0.3f);
+            for (const auto id : freed) {
+                source.destroy_body(id);
+            }
+            ASSERT_TRUE(source.capture_body_owner(body, state));
+        } else {
+            const auto avatar = source.create_avatar_character(Vec3(0.0f, 40.0f, 0.0f));
+            source.set_avatar_frozen(avatar, true, source.get_avatar_position(avatar));
+            for (const auto id : freed) {
+                source.destroy_body(id);
+            }
+            ASSERT_TRUE(source.capture_avatar_owner(avatar, state));
+        }
+        const auto tail = state.size - 20;
+        PhysicsSystem target;
+        target.startup();
+        PhysicsSystem control;
+        control.startup();
+        const auto sentinel = target.create_avatar_character(Vec3(11.0f, 40.0f, 0.0f));
+        PhysicsOwnerState before;
+        ASSERT_TRUE(target.capture_avatar_owner(sentinel, before));
+        for (const auto& [offset, word] : std::array<std::pair<std::size_t, std::uint32_t>, 11>{
+                 {{tail, 0},
+                  {tail, 10241},
+                  {tail + 4, 10241},
+                  {tail + 4, 4},
+                  {tail + 4, 2},
+                  {tail + 8, 10240},
+                  {tail + 8, 4},
+                  {tail + 8, JPH::BodyID::cInvalidBodyID},
+                  {tail + 8, JPH::BodyID::cBroadPhaseBit},
+                  {tail + 8, freed[1].GetIndexAndSequenceNumber()},
+                  {tail + 8, JPH::BodyID(3, 1).GetIndexAndSequenceNumber()}}}) {
+            auto invalid = state;
+            SetOwnerWord(invalid, offset, word);
+            std::array<JPH::BodyID, 1> ids{};
+            std::size_t avatar = 999;
+            if (path == 1) {
+                EXPECT_FALSE(target.restore_avatar_owner(invalid, avatar));
+                EXPECT_EQ(avatar, 999u);
+            } else {
+                EXPECT_FALSE(target.restore_body_owners(std::span(&invalid, 1), ids));
+                EXPECT_TRUE(ids[0].IsInvalid());
+            }
+            EXPECT_EQ(target.avatar_character_slot_count(), 1u);
+            PhysicsOwnerState after;
+            ASSERT_TRUE(target.capture_avatar_owner(sentinel, after));
+            ExpectOwnerBits(before, after);
+            const auto probe = target.create_dynamic_sphere(Vec3(0.0f), Vec3(0.0f), 0.3f);
+            const auto expected = control.create_dynamic_sphere(Vec3(0.0f), Vec3(0.0f), 0.3f);
+            EXPECT_EQ(probe, expected);
+            target.destroy_body(probe);
+            control.destroy_body(expected);
+        }
+        for (std::uint32_t size = tail; size < state.size; ++size) {
+            auto partial = state;
+            partial.size = size;
+            std::size_t avatar = 999;
+            std::array<JPH::BodyID, 1> partial_ids{};
+            if (path == 1) {
+                EXPECT_FALSE(target.restore_avatar_owner(partial, avatar));
+                EXPECT_EQ(avatar, 999u);
+            } else {
+                EXPECT_FALSE(target.restore_body_owners(std::span(&partial, 1), partial_ids));
+                EXPECT_TRUE(partial_ids[0].IsInvalid());
+            }
+            EXPECT_EQ(target.avatar_character_slot_count(), 1u);
+        }
+        // A live destination slot cannot also be free in the captured pool.
+        target.set_avatar_frozen(sentinel, true, target.get_avatar_position(sentinel));
+        std::array<JPH::BodyID, 1> ids{};
+        EXPECT_FALSE(target.restore_body_owners(std::span(&state, 1), ids));
+        std::size_t avatar = 999;
+        if (path != 0) {
+            EXPECT_FALSE(target.restore_avatar_owner(state, avatar));
+            EXPECT_EQ(avatar, 999u);
+        }
+        EXPECT_TRUE(ids[0].IsInvalid());
+    }
+}
+
+TEST(PlayerAvatar, BodyBatchRequiresCompleteMatchingAllocatorHistoriesAndAcceptsCapacityBound) {
+    PhysicsSystem source;
+    source.startup();
+    const auto first = source.create_dynamic_sphere(Vec3(0.0f), Vec3(0.0f), 0.3f);
+    const auto second = source.create_dynamic_sphere(Vec3(0.0f), Vec3(0.0f), 0.3f);
+    const auto third = source.create_dynamic_sphere(Vec3(0.0f), Vec3(0.0f), 0.3f);
+    source.destroy_body(first);
+    std::array<PhysicsOwnerState, 2> states{};
+    ASSERT_TRUE(source.capture_body_owner(second, states[0]));
+    ASSERT_TRUE(source.capture_body_owner(third, states[1]));
+    PhysicsSystem target;
+    target.startup();
+    std::array<JPH::BodyID, 2> ids{};
+    EXPECT_FALSE(target.restore_body_owners(std::span(states).first(1), std::span(ids).first(1)));
+    for (const auto& [offset, word] : std::array<std::pair<std::size_t, std::uint32_t>, 2>{
+             {{states[1].size - 12, 4},
+              {states[1].size - 4, JPH::BodyID(0, 2).GetIndexAndSequenceNumber()}}}) {
+        auto invalid = states;
+        SetOwnerWord(invalid[1], offset, word);
+        ASSERT_TRUE(PhysicsSystem::validate_owner_state(invalid[1]));
+        EXPECT_FALSE(target.restore_body_owners(invalid, ids));
+        EXPECT_TRUE(ids[0].IsInvalid());
+        EXPECT_TRUE(ids[1].IsInvalid());
+    }
+    ASSERT_TRUE(target.restore_body_owners(states, ids));
+    EXPECT_EQ(target.create_dynamic_sphere(Vec3(0.0f), Vec3(0.0f), 0.3f),
+              source.create_dynamic_sphere(Vec3(0.0f), Vec3(0.0f), 0.3f));
+    auto maximum = states[0];
+    SetOwnerWord(maximum, 8, JPH::BodyID(10239, 255).GetIndexAndSequenceNumber());
+    std::vector<JPH::BodyID> free_slots;
+    free_slots.reserve(10239);
+    for (JPH::uint32 slot = 0; slot < 10239; ++slot) {
+        free_slots.emplace_back(slot, static_cast<JPH::uint8>(slot % 256));
+    }
+    ReplaceOwnerAllocator(maximum, 10240, free_slots, 1);
+    EXPECT_TRUE(PhysicsSystem::validate_owner_state(maximum));
+    auto duplicate = maximum;
+    SetOwnerWord(duplicate, duplicate.size - 4, free_slots.front().GetIndexAndSequenceNumber());
+    EXPECT_FALSE(PhysicsSystem::validate_owner_state(duplicate));
+    // A destination with a larger allocated extent cannot be shrunk by Jolt.
+    PhysicsSystem larger;
+    larger.startup();
+    std::array<JPH::BodyID, 4> removed{};
+    for (auto& id : removed) {
+        id = larger.create_dynamic_sphere(Vec3(0.0f), Vec3(0.0f), 0.3f);
+    }
+    for (const auto id : removed) {
+        larger.destroy_body(id);
+    }
+    ids = {};
+    EXPECT_FALSE(larger.restore_body_owners(states, ids));
+    EXPECT_TRUE(ids[0].IsInvalid());
+    EXPECT_TRUE(ids[1].IsInvalid());
+    EXPECT_EQ(larger.create_dynamic_sphere(Vec3(0.0f), Vec3(0.0f), 0.3f), JPH::BodyID(3, 2));
+}
+
+TEST(PlayerAvatar, TerrainReleasesShareRestoredPoolHistoryAndRestartClearsIt) {
+    PhysicsSystem source;
+    source.startup();
+    const auto floor = OwnerFloor(source);
+    const auto body = source.create_dynamic_sphere(Vec3(0.0f, 40.0f, 0.0f), Vec3(0.0f), 0.3f);
+    source.remove_chunk_collision(floor->get_id());
+    PhysicsOwnerState state;
+    ASSERT_TRUE(source.capture_body_owner(body, state));
+    PhysicsSystem restored;
+    restored.startup();
+    std::array<JPH::BodyID, 1> ids{};
+    ASSERT_TRUE(restored.restore_body_owners(std::span(&state, 1), ids));
+    ASSERT_TRUE(source.add_chunk_collision(*floor));
+    const auto restored_floor = OwnerFloor(restored);
+    PhysicsOwnerState actual;
+    ASSERT_TRUE(source.capture_body_owner(body, state));
+    ASSERT_TRUE(restored.capture_body_owner(ids[0], actual));
+    ExpectOwnerBits(state, actual);
+    source.remove_chunk_collision(floor->get_id());
+    restored.remove_chunk_collision(restored_floor->get_id());
+    const auto next = source.create_dynamic_sphere(Vec3(0.0f), Vec3(0.0f), 0.3f);
+    EXPECT_EQ(next, JPH::BodyID(0, 3));
+    EXPECT_EQ(restored.create_dynamic_sphere(Vec3(0.0f), Vec3(0.0f), 0.3f), next);
+    source.shutdown();
+    source.startup();
+    const auto fresh = source.create_dynamic_sphere(Vec3(0.0f), Vec3(0.0f), 0.3f);
+    EXPECT_EQ(fresh, JPH::BodyID(0, 1));
+    ASSERT_TRUE(source.capture_body_owner(fresh, state));
+    EXPECT_EQ(OwnerWord(state, state.size - 8), 1u);
+    EXPECT_EQ(OwnerWord(state, state.size - 4), 0u);
+}
+
+TEST(PlayerAvatar, CachedCompressedRotationsRefuseNonUnitValuesTransactionally) {
+    PhysicsSystem source;
+    source.startup();
+    const auto floor = OwnerFloor(source);
+    const auto body =
+        source.create_dynamic_sphere(Vec3(8.0f, 8.4f, 8.0f), Vec3(0.1234567f, 0.0f, 0.0f), 0.3f);
+    for (unsigned tick = 0; tick < 12; ++tick) {
+        source.update(1.0f / 30.0f);
+    }
+    PhysicsOwnerState captured;
+    ASSERT_TRUE(source.capture_body_owner(body, captured));
+    ASSERT_GT(OwnerWord(captured, 208), 0u);
+    PhysicsSystem target;
+    target.startup();
+    const auto target_floor = OwnerFloor(target);
+    std::array<JPH::BodyID, 1> ids{};
+    for (const std::size_t offset : {232u, 236u, 240u}) {
+        for (const auto word : {std::bit_cast<std::uint32_t>(2.0f),
+                                std::bit_cast<std::uint32_t>(1.0001f),
+                                0x7f7fffffu,
+                                0x7f800000u,
+                                0x7fc00000u}) {
+            auto invalid = captured;
+            for (const auto component : {232u, 236u, 240u}) {
+                SetOwnerWord(invalid, component, 0);
+            }
+            SetOwnerWord(invalid, offset, word);
+            EXPECT_FALSE(PhysicsSystem::validate_owner_state(invalid));
+            EXPECT_FALSE(target.restore_body_owners(std::span(&invalid, 1), ids));
+            EXPECT_TRUE(ids[0].IsInvalid());
+            EXPECT_FALSE(target.audio_raycast(Vec3(7.0f, 8.3f, 8.0f), Vec3(9.0f, 8.3f, 8.0f)).hit);
+        }
+    }
+    ASSERT_TRUE(target.restore_body_owners(std::span(&captured, 1), ids));
+    PhysicsOwnerState actual;
+    ASSERT_TRUE(target.capture_body_owner(ids[0], actual));
+    ExpectOwnerBits(captured, actual);
+    // Identity, a half turn, and rounding just above |xyz|^2 = 1 are legal.
+    for (const float x : {0.0f, 1.0f, 1.00002f}) {
+        auto valid = captured;
+        SetOwnerWord(valid, 232, std::bit_cast<std::uint32_t>(x));
+        SetOwnerWord(valid, 236, 0);
+        SetOwnerWord(valid, 240, 0);
+        ASSERT_TRUE(PhysicsSystem::validate_owner_state(valid));
+        PhysicsSystem rounded;
+        rounded.startup();
+        const auto rounded_floor = OwnerFloor(rounded);
+        std::array<JPH::BodyID, 1> rounded_ids{};
+        ASSERT_TRUE(rounded.restore_body_owners(std::span(&valid, 1), rounded_ids));
+        ASSERT_TRUE(rounded.capture_body_owner(rounded_ids[0], actual));
+        ExpectOwnerBits(valid, actual);
     }
 }
 
@@ -883,7 +1261,10 @@ void AddOwnerCache(PhysicsOwnerState& state,
                    std::span<const PhysicsOwnerState> capsules,
                    std::uint32_t manifold_count,
                    std::uint32_t points) {
-    // Canonical v1 sphere prefix ends immediately before the pair count.
+    // Preserve the empty allocator tail when synthesizing a larger cache.
+    ASSERT_EQ(OwnerWord(state, state.size - 4), 0u);
+    const auto slot_count = OwnerWord(state, state.size - 8);
+    // Canonical sphere prefix ends immediately before the pair count.
     state.size = 208;
     const auto append = [&state](std::uint32_t word) {
         ASSERT_LE(state.size, state.bytes.size() - 4);
@@ -916,6 +1297,8 @@ void AddOwnerCache(PhysicsOwnerState& state,
         }
     }
     append(0); // CCD count
+    append(slot_count);
+    append(0); // free slots
 }
 
 TEST(PlayerAvatar, BodySetValidatesActualCacheBytesBeforePublishingAndCanRetry) {
@@ -930,7 +1313,10 @@ TEST(PlayerAvatar, BodySetValidatesActualCacheBytesBeforePublishingAndCanRetry) 
         source.set_avatar_frozen(original, true, feet);
         const auto restored = target.create_avatar_character(feet);
         target.set_avatar_frozen(restored, true, feet);
-        ASSERT_TRUE(source.capture_avatar_owner(original, capsules[i]));
+    }
+    // All captures describe the same between-ticks pool state.
+    for (std::size_t i = 0; i < capsules.size(); ++i) {
+        ASSERT_TRUE(source.capture_avatar_owner(i, capsules[i]));
     }
     const auto body = source.create_dynamic_sphere(Vec3(0.0f), Vec3(0.0f), 0.3f);
     PhysicsOwnerState prototype;
@@ -943,6 +1329,7 @@ TEST(PlayerAvatar, BodySetValidatesActualCacheBytesBeforePublishingAndCanRetry) 
                      JPH::BodyID(static_cast<JPH::uint32>(64 + i), 1).GetIndexAndSequenceNumber());
         // 8192 pairs and 10240 manifolds fit the count checks, but their real
         // allocation headers, four-point payloads and block tails do not fit.
+        ReplaceOwnerAllocator(states[i], 192, {});
         AddOwnerCache(states[i], capsules, 80, 4);
         SetOwnerWord(states[i], 192, std::bit_cast<std::uint32_t>(0.125f));
         SetOwnerWord(states[i], 200, std::bit_cast<std::uint32_t>(-3.0f));
