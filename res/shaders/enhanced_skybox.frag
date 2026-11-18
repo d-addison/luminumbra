@@ -518,8 +518,9 @@ vec3 legacyGradient(vec3 viewDir, float dayFactor) {
 }
 
 // Preserve the input luminance, then reduce chroma along its constant-luminance
-// line until every channel fits the display gamut. Normalizing the tint alone
-// only preserves grey inputs; independently clipping channels changes luminance.
+// line until every channel fits inside the display gamut. Out-of-gamut chroma
+// rolls below the boundary instead of pinning a band to it. Normalizing the tint
+// alone only preserves grey inputs; clipping channels changes luminance.
 vec3 preserveSkyLuminance(vec3 color, vec3 graded) {
     const vec3 lumaWeights = vec3(0.2126, 0.7152, 0.0722);
     color = clamp(color, vec3(0.0), vec3(1.0));
@@ -538,6 +539,11 @@ vec3 preserveSkyLuminance(vec3 color, vec3 graded) {
         } else if (chroma[channel] < 0.0) {
             saturation = min(saturation, -luminance / chroma[channel]);
         }
+    }
+    if (saturation < 1.0) {
+        // For edge distance d and chroma c, d/c becomes d/(c + (c - d)):
+        // include the overshoot, keeping safe grades and luminance unchanged.
+        saturation /= 2.0 - saturation;
     }
     return clamp(vec3(luminance) + saturation * chroma, vec3(0.0), vec3(1.0));
 }
