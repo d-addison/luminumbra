@@ -3227,6 +3227,43 @@ TEST_F(WorldOpenRefusal, AuthorityCaptureSkipsRegionalReadsAndNeverPublishesRefu
     EXPECT_STREQ(P::AuthorityCaptureRefused{}.what(), "authority capture refused");
 }
 
+TEST_F(WorldOpenRefusal, AuthorityCaptureRegionalIndexOptOutGovernsEveryRegion) {
+    namespace P = Persistence;
+    WorldStreamingState state;
+    // A legacy save: no snapshot index until its first complete indexed save.
+    const bool had_index = P::snapshot_index_exists(save);
+    const auto index_bytes = had_index ? Read(P::snapshot_index_path(save)) : std::string();
+    if (had_index) {
+        ASSERT_TRUE(fs::remove(P::snapshot_index_path(save)));
+    }
+    const auto capture = [&](bool region_require_index) {
+        P::AuthorityRegionalInputs regional{
+            .save_dir = save, .require_index = false, .regions = {}};
+        regional.regions.push_back({.key = {0, 0},
+                                    .inputs = {.live = {},
+                                               .parked = {},
+                                               .durable = {{0, 0, 0}},
+                                               .require_index = region_require_index},
+                                    .frozen_digest = std::nullopt});
+        return P::CaptureAuthorityHashes(state, 0, regional);
+    };
+    const auto opted_out = capture(false);
+    // The per-region default (true) must not override the caller's regional opt-out.
+    const auto defaulted = capture(true);
+    if (had_index) {
+        Write(P::snapshot_index_path(save), index_bytes);
+    }
+    ASSERT_EQ(opted_out.status, P::AuthorityCaptureStatus::Ready);
+    EXPECT_EQ(defaulted.status, P::AuthorityCaptureStatus::Ready);
+    ASSERT_TRUE(opted_out.capture.has_value());
+    ASSERT_TRUE(defaulted.capture.has_value());
+    if (!opted_out.capture || !defaulted.capture) {
+        return;
+    }
+    EXPECT_EQ(defaulted.capture->chunk, opted_out.capture->chunk);
+    EXPECT_EQ(defaulted.capture->composite, opted_out.capture->composite);
+}
+
 TEST(AuthorityHashCapture, IncompleteLiveAndParkedOwnersRefuseBeforePublication) {
     namespace P = Persistence;
     const auto owner = std::make_shared<Chunk>(IVec3(0, 0, 0));
