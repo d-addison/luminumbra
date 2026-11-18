@@ -11,7 +11,9 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <future>
@@ -195,6 +197,106 @@ TEST(AsyncWaterMeshing, InlineTerrainRemeshKeepsDugPondDepth) {
 
 TEST(AsyncWaterMeshing, InlineWaterOnlyRemeshKeepsDugPondDepth) {
     CheckDugPondMesh(false, MeshRequest::WaterOnly);
+}
+
+TEST(WaterMesh, DryBedsCannotPullStandingWaterOntoBanksOrIntoExcavations) {
+    const auto params = Luminumbra::Test::SyntheticTerrainParams();
+    SHIELD_WorldSystem world(nullptr, nullptr, params, 424242);
+    WaterSystem water(nullptr, &world);
+    // Bounded matrix: five resolutions, all 16 local wet/dry patterns, both
+    // bank directions and all non-renderable depth classes. No simulation runs.
+    for (const int resolution : {2, 4, 8, 16, 32}) {
+        for (unsigned wet_mask = 0; wet_mask < 16; ++wet_mask) {
+            for (const float dry_height : {-80.0f, 80.0f}) {
+                for (const std::int32_t dry_depth : {-1, 0, 50}) {
+                    SCOPED_TRACE(::testing::Message() << resolution << '/' << wet_mask << '/'
+                                                      << dry_height << '/' << dry_depth);
+                    Chunk chunk(IVec3(-2, 1, -3));
+                    const auto cells = static_cast<std::size_t>(resolution * resolution);
+                    chunk.current_water_resolution.store(resolution);
+                    chunk.has_water_sim.store(true);
+                    chunk.water_depth_mm.assign(cells, dry_depth);
+                    chunk.water_level_data.assign(cells, dry_height);
+                    std::size_t wet_cells = 0;
+                    float lowest = std::numeric_limits<float>::max();
+                    float highest = std::numeric_limits<float>::lowest();
+                    for (int z = 0; z < resolution; ++z) {
+                        for (int x = 0; x < resolution; ++x) {
+                            const unsigned lane = static_cast<unsigned>((z % 2) * 2 + x % 2);
+                            if ((wet_mask & (1u << lane)) != 0) {
+                                const auto index = static_cast<std::size_t>(z * resolution + x);
+                                const float height = 6.0f + static_cast<float>(lane);
+                                chunk.water_level_data[index] = height;
+                                chunk.water_depth_mm[index] = lane == 0 ? 51 : 2000;
+                                lowest = std::min(lowest, height);
+                                highest = std::max(highest, height);
+                                ++wet_cells;
+                            }
+                        }
+                    }
+                    const auto levels = chunk.water_level_data;
+                    const auto depths = chunk.water_depth_mm;
+                    World::MarchingCubes::GenerateWaterMesh(water, world, chunk);
+                    ASSERT_EQ(chunk.water_mesh_vertices.size(), wet_cells * 4u);
+                    ASSERT_EQ(chunk.water_mesh_indices.size(), wet_cells * 6u);
+                    // At most 33*33 distinct corners at the maximum resolution.
+                    std::array<float, 33 * 33> corner_heights;
+                    corner_heights.fill(std::numeric_limits<float>::quiet_NaN());
+                    for (const auto& vertex : chunk.water_mesh_vertices) {
+                        const float world_y = vertex.position.y + static_cast<float>(CHUNK_SIZE_Y);
+                        EXPECT_GE(world_y, lowest - 1e-5f);
+                        EXPECT_LE(world_y, highest + 1e-5f);
+                        EXPECT_EQ(vertex.normal, Vec3(0.0f, 1.0f, 0.0f));
+                        EXPECT_EQ(vertex.material_id, static_cast<u32>(MaterialType::Water));
+                        const auto gx = static_cast<std::size_t>(
+                            std::lround(vertex.position.x * static_cast<float>(resolution) /
+                                        static_cast<float>(CHUNK_SIZE_X)));
+                        const auto gz = static_cast<std::size_t>(
+                            std::lround(vertex.position.z * static_cast<float>(resolution) /
+                                        static_cast<float>(CHUNK_SIZE_Z)));
+                        ASSERT_LE(gx, static_cast<std::size_t>(resolution));
+                        ASSERT_LE(gz, static_cast<std::size_t>(resolution));
+                        auto& shared_height = corner_heights[gz * 33u + gx];
+                        if (std::isnan(shared_height)) {
+                            shared_height = world_y;
+                        } else {
+                            EXPECT_FLOAT_EQ(world_y, shared_height);
+                        }
+                    }
+                    for (const auto index : chunk.water_mesh_indices) {
+                        EXPECT_LT(index, chunk.water_mesh_vertices.size());
+                    }
+                    EXPECT_EQ(chunk.water_level_data, levels);
+                    EXPECT_EQ(chunk.water_depth_mm, depths);
+                }
+            }
+        }
+    }
+}
+
+TEST(WaterMesh, WetGradientsAndIncompleteDepthGridsKeepBilinearHeights) {
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 0.0f;
+    SHIELD_WorldSystem world(nullptr, nullptr, params, 424242);
+    WaterSystem water(nullptr, &world);
+    // Complete, absent, truncated and oversized depth grids. Incomplete grids
+    // retain the legacy procedural cull; every corner here is above that bed.
+    for (const std::size_t depth_count : {4u, 0u, 3u, 5u}) {
+        SCOPED_TRACE(depth_count);
+        Chunk chunk(IVec3(0, 0, 0));
+        chunk.current_water_resolution.store(2);
+        chunk.has_water_sim.store(true);
+        chunk.water_depth_mm.assign(depth_count, 2000);
+        chunk.water_level_data = {6.0f, 8.0f, 10.0f, 12.0f};
+        World::MarchingCubes::GenerateWaterMesh(water, world, chunk);
+        ASSERT_EQ(chunk.water_mesh_vertices.size(), 16u);
+        ASSERT_EQ(chunk.water_mesh_indices.size(), 24u);
+        for (const auto& vertex : chunk.water_mesh_vertices) {
+            EXPECT_FLOAT_EQ(vertex.position.y,
+                            6.0f + vertex.position.x * 0.125f + vertex.position.z * 0.25f);
+        }
+    }
 }
 // Occupy the sole worker through the public queue so simulation can advance
 // deterministically after dispatch and before the meshing job reads its inputs.
