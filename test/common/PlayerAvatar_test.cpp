@@ -606,6 +606,17 @@ TEST(PlayerAvatar, BodySetRestorationRefusesBeforePublishingAnyBody) {
         EXPECT_FALSE(target.restore_body_owners(std::span(&reversed, 1), ids));
         EXPECT_TRUE(ids[0].IsInvalid());
     }
+    {
+        // Jolt precision is part of the owner version. A state stamped with the
+        // other precision's version refuses at the header, so a double-precision
+        // capture never reaches this build's float32-exact coordinate decoder.
+        const std::uint32_t this_build = OwnerWord(capture, 0);
+        EXPECT_TRUE(this_build == 1u || this_build == 0x00010001u);
+        auto other_precision = capture;
+        SetOwnerWord(other_precision, 0, this_build == 1u ? 0x00010001u : 1u);
+        EXPECT_FALSE(target.restore_body_owners(std::span(&other_precision, 1), ids));
+        EXPECT_TRUE(ids[0].IsInvalid());
+    }
     ASSERT_TRUE(target.restore_body_owners(std::span(&capture, 1), ids));
     const auto retained_id = ids[0];
     EXPECT_FALSE(target.restore_body_owners(std::span(&capture, 1), ids)); // occupied body identity

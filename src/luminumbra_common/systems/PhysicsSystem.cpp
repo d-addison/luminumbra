@@ -49,7 +49,16 @@ namespace {
 // The schemas below deliberately bridge Jolt's typed state calls rather than
 // publishing its native streams: SIMD padding, enum widths and endianness are
 // not part of the continuation format. Update the version if these schemas change.
+// Positions and sleep offsets are float64 words. Single-precision Jolt writes
+// only float32-exact positions and zero offsets, but double-precision Jolt can
+// write values a single-precision build cannot restore exactly. Jolt precision
+// is therefore part of the version: each build refuses the other's states at
+// the header instead of partway through decoding.
+#ifdef JPH_DOUBLE_PRECISION
+constexpr std::uint32_t kOwnerVersion = 0x00010001u;
+#else
 constexpr std::uint32_t kOwnerVersion = 1;
+#endif
 constexpr std::uint32_t kAvatarOwner = 1;
 constexpr std::uint32_t kPlayerOwner = 2;
 constexpr std::uint32_t kSphereOwner = 3;
@@ -197,8 +206,10 @@ public:
 #else
             component = std::bit_cast<float>(narrow_float_bits(bits));
 #endif
-            // Public owner coordinates use float32 even with float64 Jolt
-            // positions. Refuse out-of-range input before any later narrowing.
+            // Public owner coordinates stay within the float32 range even with
+            // float64 Jolt positions (whose exact values a precision-specific
+            // kOwnerVersion keeps apart). Refuse out-of-range input before any
+            // later narrowing.
             constexpr auto max_coordinate =
                 static_cast<JPH::Real>((std::numeric_limits<float>::max)());
             require(component >= -max_coordinate && component <= max_coordinate);
