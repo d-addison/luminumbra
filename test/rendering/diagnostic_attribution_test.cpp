@@ -4,6 +4,7 @@
 #include "rendering/DiagnosticDrawTable.h"
 #include "rendering/GBufferTargets.h"
 #include "rendering/Mesh.h"
+#include "rendering/RenderResourceRegistry.h"
 #include "rendering/Shader.h"
 #include "rendering/passes/GBufferPass.h"
 
@@ -39,6 +40,12 @@ std::string Read(std::string_view path) {
 
 void Contains(const std::string& source, std::string_view text) {
     EXPECT_NE(source.find(text), std::string::npos) << text;
+}
+
+void Before(const std::string& source, std::string_view first, std::string_view second) {
+    ASSERT_NE(source.find(first), std::string::npos) << first;
+    ASSERT_NE(source.find(second), std::string::npos) << second;
+    EXPECT_LT(source.find(first), source.find(second));
 }
 
 std::size_t Count(const std::string& source, std::string_view text) {
@@ -118,7 +125,7 @@ TEST(DiagnosticAttribution, DefaultShaderTextIsUnchangedWithoutTheVariant) {
 }
 
 TEST(DiagnosticAttribution, DisabledScopeDoesNotAllocateTargetsOrCompileVariants) {
-    const auto producers = Read(kPass);
+    const auto producers = Read(kTargets) + Read(kPass);
     Contains(producers, "static thread_local GBufferDiagnosticCapture* capture = nullptr;");
     const auto constructor = Body(producers, "GBufferDiagnosticCapture::GBufferDiagnosticCapture(");
     Contains(constructor, "SetCurrent(this);");
@@ -176,12 +183,12 @@ TEST(DiagnosticAttribution, DeferredVertexSiblingsSelectVariantsAndUploadInteger
     Contains(write, "!state_->refused && !state_->table.submit");
     EXPECT_EQ(write.find("throw"), std::string::npos);
     Contains(write, "diagnostic_writer_without_variant");
-    EXPECT_EQ(Read(kTargets).find("state_->table.submit"), std::string::npos);
-    EXPECT_EQ(Read(kTargets).find("DiagnosticDrawTable.h"), std::string::npos);
+    EXPECT_EQ(Read(kPass).find("state_->table.submit"), std::string::npos);
+    EXPECT_EQ(Read(kPass).find("GBufferDiagnosticCapture::write("), std::string::npos);
 }
 
 TEST(DiagnosticAttribution, RefusalNeverThrowsAndEveryPassExitRestoresCallerBindings) {
-    const auto source = Read(kPass);
+    const auto source = Read(kTargets) + Read(kPass);
     const auto unsupported = Body(source, "void GBufferDiagnosticCapture::unsupported(");
     Contains(unsupported, "state_->refused = true;");
     Contains(unsupported, "if (state_->refused)");
@@ -284,18 +291,76 @@ TEST(DiagnosticAttribution, MissingProducerMetadataCannotClaimCompleteCoverage) 
     Contains(Body(targets, "bool GBufferDiagnosticCapture::complete()"), "return false;");
 }
 
-TEST(DiagnosticAttribution, ProducerScopeNeverAttachesOrClaimsCompleteCoverage) {
+TEST(DiagnosticAttribution, ProducersDoNotInstallAttachmentsOrClaimCompleteCoverage) {
     const auto pass = Read(kPass);
     const auto header = Read("src/luminumbra_client/rendering/GBufferTargets.h");
-    for (const auto* source : {&pass, &header}) {
-        EXPECT_EQ(source->find("DiagnosticTargets"), std::string::npos);
-        EXPECT_EQ(source->find("glFramebufferTexture"), std::string::npos);
-        EXPECT_EQ(source->find("GBufferDiagnosticAttachment"), std::string::npos);
-        EXPECT_EQ(source->find("attach_target"), std::string::npos);
+    for (const auto& source :
+         {pass, Read("src/luminumbra_client/rendering/static_preview/StaticRenderer.cpp")}) {
+        EXPECT_EQ(source.find("GBufferDiagnosticAttachment"), std::string::npos);
+        EXPECT_EQ(source.find("attach_target"), std::string::npos);
     }
-    EXPECT_EQ(SourceHash(Read(kTargets)), 0x9915b3a54a41b2a9ull);
+    EXPECT_EQ(pass.find("glFramebufferTexture"), std::string::npos);
+    EXPECT_EQ(SourceHash(Body(Read(kTargets), "void CreateGBufferTargets(")),
+              0x87b070d8d24c6b19ull);
     Contains(header, "explicit GBufferDiagnosticCapture(DiagnosticDrawTable& table)");
-    Contains(Body(pass, "bool GBufferDiagnosticCapture::complete()"), "return false;");
+    Contains(Body(Read(kTargets), "bool GBufferDiagnosticCapture::complete()"), "return false;");
+}
+
+TEST(DiagnosticAttribution, LeaseProtectsAttachmentThroughRollbackAndCallerRestoration) {
+    const auto targets = Read(kTargets);
+    const auto attach = Body(targets, "bool GBufferDiagnosticCapture::attach_target(");
+    Before(attach,
+           "state_->targets->ensure(true, extent, 7)",
+           "state_->targets->acquire_attachment_lease()");
+    Before(attach, "if (!state_->attachment_lease)", "glFramebufferTexture2D(");
+    Before(Body(attach, "if (!complete)"), "detach_target();", "diagnostic_mrt_incomplete");
+    const auto detach = Body(targets, "void GBufferDiagnosticCapture::detach_target()");
+    Before(detach, "GL_COLOR_ATTACHMENT6, GL_TEXTURE_2D, 0, 0", "attachment_lease.reset()");
+    Before(detach,
+           "glDrawBuffers(state_->buffer_count, state_->buffers.data())",
+           "attachment_lease.reset()");
+    Before(detach, "static_cast<GLuint>(saved_framebuffer)", "attachment_lease.reset()");
+    EXPECT_EQ(Count(targets, "attachment_lease.reset()"), 1u);
+}
+
+TEST(DiagnosticAttribution, RetirementChecksLiveObjectAndAttachmentBeforeRestoringDrawBuffers) {
+    const auto detach = Body(Read(kTargets), "void GBufferDiagnosticCapture::detach_target()");
+    Before(detach,
+           "glIsFramebuffer(state_->framebuffer)",
+           "glBindFramebuffer(GL_DRAW_FRAMEBUFFER, state_->framebuffer)");
+    Before(detach,
+           "GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME",
+           "GL_COLOR_ATTACHMENT6, GL_TEXTURE_2D, 0, 0");
+    Contains(detach, "static_cast<GLuint>(object_name) == state_->attachment_lease.texture()");
+    const auto live = Body(detach, "if (attached)");
+    const auto owned = Body(live, "if (attached)");
+    Contains(owned, "glDrawBuffers(state_->buffer_count, state_->buffers.data())");
+    EXPECT_EQ(Count(detach, "glDrawBuffers("), 1u);
+    const auto retired = Body(detach, "if (!attached)");
+    Contains(retired, "state_->failed = true;");
+    Contains(retired, "gbuffer_retired_during_capture");
+    Before(detach, "glColorMaski(6,", "attachment_lease.reset()");
+}
+
+TEST(DiagnosticAttribution, RecreationAndBothDestructorsDetachBeforeRetiringStorage) {
+    const auto source = Read(kTargets);
+    Before(Body(source, "void DestroyGBufferTargets("),
+           "capture->before_destroy(gbuffer)",
+           "registry.destroy_owned(");
+    Before(Body(source, "void GBufferDiagnosticCapture::before_destroy("),
+           "detach_target();",
+           "gbuffer_recreated_during_capture");
+    Contains(Body(source, "void GBufferDiagnosticCapture::before_destroy("),
+             "if (state_->failure.empty())");
+    Before(Body(source, "GBufferDiagnosticCapture::~GBufferDiagnosticCapture()"),
+           "detach();",
+           "SetCurrent(nullptr)");
+    const auto scope = Body(source, "GBufferDiagnosticAttachment::~GBufferDiagnosticAttachment()");
+    Before(scope, "capture_->detach();", "std::uncaught_exceptions() > exceptions_");
+    Contains(scope, "capture_->abort();");
+    Before(Body(source, "void GBufferDiagnosticCapture::detach()"),
+           "detach_target();",
+           "unsupported(reason)");
 }
 
 namespace {
@@ -887,4 +952,468 @@ TEST_F(DiagnosticAttributionGl, InvalidIdentityRefusesWithoutReusingThePreviousI
         glGetUniformuiv(shader->Id(), location, identity.data());
         EXPECT_EQ(identity, DiagnosticId{});
     }
+}
+
+namespace {
+// Forward to real GL while observing lease ownership at the detach call itself.
+class AttachmentProbe {
+public:
+    AttachmentProbe(DiagnosticTargets& targets, GLuint framebuffer)
+        : targets_(targets)
+        , framebuffer_(framebuffer) {
+        Active() = this;
+        glFramebufferTexture2D = Attach;
+        glDrawBuffers = DrawBuffers;
+        glCheckFramebufferStatus = CheckStatus;
+        glGetIntegerv = GetInteger;
+    }
+    ~AttachmentProbe() {
+        glFramebufferTexture2D = attach_;
+        glDrawBuffers = draw_buffers_;
+        glCheckFramebufferStatus = check_status_;
+        glGetIntegerv = get_integer_;
+        Active() = nullptr;
+    }
+    AttachmentProbe(const AttachmentProbe&) = delete;
+    AttachmentProbe& operator=(const AttachmentProbe&) = delete;
+
+    bool incomplete = false;
+    bool incomplete_storage = false;
+    GLint max_buffers = 0;
+    GLint max_attachments = 0;
+    unsigned detaches = 0;
+    unsigned buffer_writes = 0;
+    bool released_before_detach = false;
+
+private:
+    static AttachmentProbe*& Active() {
+        static AttachmentProbe* probe = nullptr;
+        return probe;
+    }
+    static void APIENTRY
+    Attach(GLenum target, GLenum point, GLenum kind, GLuint texture, GLint level) {
+        auto& probe = *Active();
+        if (point == GL_COLOR_ATTACHMENT6 && texture == 0) {
+            ++probe.detaches;
+            probe.released_before_detach = probe.targets_.reset();
+        }
+        probe.attach_(target, point, kind, texture, level);
+    }
+    static void APIENTRY DrawBuffers(GLsizei count, const GLenum* buffers) {
+        auto& probe = *Active();
+        ++probe.buffer_writes;
+        probe.draw_buffers_(count, buffers);
+    }
+    static GLenum APIENTRY CheckStatus(GLenum target) {
+        auto& probe = *Active();
+        GLint bound = 0;
+        probe.get_integer_(GL_DRAW_FRAMEBUFFER_BINDING, &bound);
+        if (probe.incomplete && static_cast<GLuint>(bound) == probe.framebuffer_) {
+            return GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+        }
+        if (probe.incomplete_storage && static_cast<GLuint>(bound) != probe.framebuffer_) {
+            return GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+        }
+        return probe.check_status_(target);
+    }
+    static void APIENTRY GetInteger(GLenum name, GLint* value) {
+        auto& probe = *Active();
+        if (name == GL_MAX_DRAW_BUFFERS && probe.max_buffers != 0) {
+            *value = probe.max_buffers;
+        } else if (name == GL_MAX_COLOR_ATTACHMENTS && probe.max_attachments != 0) {
+            *value = probe.max_attachments;
+        } else {
+            probe.get_integer_(name, value);
+        }
+    }
+    DiagnosticTargets& targets_;
+    GLuint framebuffer_;
+    decltype(glFramebufferTexture2D) attach_ = glFramebufferTexture2D;
+    decltype(glDrawBuffers) draw_buffers_ = glDrawBuffers;
+    decltype(glCheckFramebufferStatus) check_status_ = glCheckFramebufferStatus;
+    decltype(glGetIntegerv) get_integer_ = glGetIntegerv;
+};
+
+class GBufferLeaseGl : public testing::Test {
+protected:
+    void SetUp() override {
+        ASSERT_TRUE(context_.ready());
+        CreateGBufferTargets(gbuffer_, registry_, 32, 32);
+        ASSERT_NE(gbuffer_.fbo_id, 0u);
+        glGetIntegerv(GL_MAX_DRAW_BUFFERS, &buffer_count_);
+        ASSERT_GE(buffer_count_, 7);
+        ASSERT_LE(buffer_count_, static_cast<GLint>(buffers_.size()));
+        buffers_[0] = GL_COLOR_ATTACHMENT4;
+        buffers_[1] = GL_COLOR_ATTACHMENT2;
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, gbuffer_.fbo_id);
+        glDrawBuffers(buffer_count_, buffers_.data());
+        glGenFramebuffers(2, caller_fbos_.data());
+        SetCallerBindings();
+        glColorMaski(6, GL_TRUE, GL_FALSE, GL_TRUE, GL_FALSE);
+    }
+    void TearDown() override {
+        if (context_.ready()) {
+            DestroyGBufferTargets(gbuffer_, registry_);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glDeleteFramebuffers(2, caller_fbos_.data());
+        }
+    }
+    void SetCallerBindings() const {
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, caller_fbos_[0]);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, caller_fbos_[1]);
+        glBindTexture(GL_TEXTURE_2D, gbuffer_.albedo_texture);
+    }
+    void ExpectCallerBindingsAndMask() const {
+        GLint binding = 0;
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &binding);
+        EXPECT_EQ(static_cast<GLuint>(binding), caller_fbos_[0]);
+        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &binding);
+        EXPECT_EQ(static_cast<GLuint>(binding), caller_fbos_[1]);
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &binding);
+        EXPECT_EQ(static_cast<GLuint>(binding), gbuffer_.albedo_texture);
+        std::array<GLboolean, 4> mask{};
+        glGetBooleani_v(GL_COLOR_WRITEMASK, 6, mask.data());
+        EXPECT_EQ(mask, (std::array<GLboolean, 4>{GL_TRUE, GL_FALSE, GL_TRUE, GL_FALSE}));
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    }
+    void ExpectDetached() const {
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, gbuffer_.fbo_id);
+        GLint type = 0;
+        glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,
+                                              GL_COLOR_ATTACHMENT6,
+                                              GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE,
+                                              &type);
+        EXPECT_EQ(type, GL_NONE);
+        for (GLint index = 0; index < buffer_count_; ++index) {
+            GLint buffer = 0;
+            glGetIntegerv(GL_DRAW_BUFFER0 + static_cast<GLenum>(index), &buffer);
+            EXPECT_EQ(static_cast<GLenum>(buffer), buffers_[static_cast<std::size_t>(index)]);
+        }
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, caller_fbos_[0]);
+    }
+    AttributionContext context_;
+    RenderResourceRegistry registry_;
+    GBuffer gbuffer_;
+    DiagnosticTargets targets_;
+    DiagnosticDrawTable table_;
+    std::array<GLuint, 2> caller_fbos_{};
+    // Match the production snapshot's explicit bound, including trailing GL_NONE.
+    std::array<GLenum, 32> buffers_{};
+    GLint buffer_count_ = 0;
+};
+} // namespace
+
+TEST_F(GBufferLeaseGl, UnboundAttachmentBlocksResizeUntilExplicitDetach) {
+    GBufferDiagnosticCapture capture(targets_, table_);
+    AttachmentProbe probe(targets_, gbuffer_.fbo_id);
+    ASSERT_TRUE(capture.attach(gbuffer_, {32, 32}));
+    const auto texture = targets_.texture();
+    EXPECT_FALSE(targets_.reset());
+    EXPECT_FALSE(targets_.ensure(true, {16, 16}, 7));
+    EXPECT_EQ(targets_.texture(), texture);
+    capture.detach();
+    EXPECT_EQ(probe.detaches, 1u);
+    EXPECT_FALSE(probe.released_before_detach);
+    EXPECT_FALSE(capture.attachment_failed());
+    ExpectCallerBindingsAndMask();
+    ExpectDetached();
+    capture.detach();
+    EXPECT_EQ(probe.detaches, 1u);
+    EXPECT_TRUE(targets_.ensure(true, {16, 16}, 7));
+    EXPECT_TRUE(targets_.reset());
+}
+
+TEST_F(GBufferLeaseGl, IncompleteFramebufferRollsBackBeforeLeaseRelease) {
+    GBufferDiagnosticCapture capture(targets_, table_);
+    AttachmentProbe probe(targets_, gbuffer_.fbo_id);
+    probe.incomplete = true;
+    EXPECT_FALSE(capture.attach(gbuffer_, {32, 32}));
+    EXPECT_TRUE(capture.attachment_failed());
+    EXPECT_EQ(probe.detaches, 1u);
+    EXPECT_FALSE(probe.released_before_detach);
+    Contains(table_.json(), "diagnostic_mrt_incomplete");
+    ExpectCallerBindingsAndMask();
+    ExpectDetached();
+    EXPECT_TRUE(targets_.reset());
+}
+
+TEST_F(GBufferLeaseGl, CaptureAndAttachmentScopesDetachDuringNormalAndExceptionalTeardown) {
+    for (const bool exceptional : {false, true}) {
+        for (const bool attachment_scope : {false, true}) {
+            table_.clear();
+            AttachmentProbe probe(targets_, gbuffer_.fbo_id);
+            if (attachment_scope) {
+                GBufferDiagnosticCapture capture(targets_, table_);
+                try {
+                    GBufferDiagnosticAttachment attachment(gbuffer_, {32, 32});
+                    EXPECT_FALSE(targets_.reset());
+                    if (exceptional) {
+                        throw std::runtime_error("attachment unwinding");
+                    }
+                } catch (const std::runtime_error&) {}
+                EXPECT_EQ(capture.attachment_failed(), exceptional);
+            } else {
+                try {
+                    GBufferDiagnosticCapture capture(targets_, table_);
+                    ASSERT_TRUE(capture.attach(gbuffer_, {32, 32}));
+                    if (exceptional) {
+                        throw std::runtime_error("capture unwinding");
+                    }
+                } catch (const std::runtime_error&) {}
+            }
+            EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
+            EXPECT_EQ(probe.detaches, 1u);
+            EXPECT_FALSE(probe.released_before_detach);
+            ExpectCallerBindingsAndMask();
+            ExpectDetached();
+            EXPECT_TRUE(targets_.reset());
+        }
+    }
+}
+
+TEST_F(GBufferLeaseGl, RecreationDetachesBeforeRegistryDeletion) {
+    GBufferDiagnosticCapture capture(targets_, table_);
+    AttachmentProbe probe(targets_, gbuffer_.fbo_id);
+    ASSERT_TRUE(capture.attach(gbuffer_, {32, 32}));
+    const auto retired = gbuffer_.fbo_id;
+    // An unrelated G-buffer must not release this lease.
+    capture.before_destroy(GBuffer{});
+    EXPECT_FALSE(targets_.reset());
+    DestroyGBufferTargets(gbuffer_, registry_);
+    EXPECT_EQ(probe.detaches, 1u);
+    EXPECT_FALSE(probe.released_before_detach);
+    EXPECT_EQ(glIsFramebuffer(retired), GL_FALSE);
+    EXPECT_TRUE(capture.attachment_failed());
+    CreateGBufferTargets(gbuffer_, registry_, 32, 32, true);
+    SetCallerBindings();
+    capture.detach();
+    Contains(table_.json(), "gbuffer_recreated_during_capture");
+    ExpectCallerBindingsAndMask();
+    EXPECT_TRUE(targets_.reset());
+}
+
+TEST_F(GBufferLeaseGl, EveryRegistryRetirementRefusesCaptureWithoutRestoringRetiredDrawBuffers) {
+    for (const unsigned operation : {0u, 1u, 2u}) {
+        SCOPED_TRACE(operation);
+        table_.clear();
+        GBufferDiagnosticCapture capture(targets_, table_);
+        ASSERT_TRUE(capture.attach(gbuffer_, {32, 32}));
+        if (operation == 0) {
+            registry_.destroy_owned("gbuffer_fbo");
+        } else if (operation == 1) {
+            registry_.destroy_all_owned();
+        } else {
+            const std::array<RenderResourceRegistry::TargetExtent, 6> extents{
+                {{"gbuffer_position", 16, 16},
+                 {"gbuffer_normal", 16, 16},
+                 {"gbuffer_albedo", 16, 16},
+                 {"gbuffer_material", 16, 16},
+                 {"gbuffer_motion", 16, 16},
+                 {"gbuffer_depth", 16, 16}}};
+            ASSERT_TRUE(registry_.replace_targets(extents));
+        }
+        // Registry operations may change bindings; detach preserves its caller's state.
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, caller_fbos_[0]);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, caller_fbos_[1]);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        {
+            AttachmentProbe probe(targets_, gbuffer_.fbo_id);
+            capture.detach();
+            EXPECT_EQ(probe.buffer_writes, 0u);
+            EXPECT_EQ(probe.detaches, 0u);
+        }
+        EXPECT_TRUE(capture.attachment_failed());
+        Contains(table_.json(), "gbuffer_retired_during_capture");
+        // These cached handles are no longer the registry's current objects.
+        gbuffer_.albedo_texture = 0;
+        ExpectCallerBindingsAndMask();
+        EXPECT_TRUE(targets_.reset());
+        DestroyGBufferTargets(gbuffer_, registry_);
+        CreateGBufferTargets(gbuffer_, registry_, 32, 32);
+        SetCallerBindings();
+    }
+}
+
+TEST_F(GBufferLeaseGl,
+       ForeignOrMissingAttachmentPreservesForeignDrawBuffersAndRestoresContextState) {
+    for (const unsigned replacement : {0u, 1u, 2u}) {
+        SCOPED_TRACE(replacement);
+        table_.clear();
+        GBufferDiagnosticCapture capture(targets_, table_);
+        ASSERT_TRUE(capture.attach(gbuffer_, {32, 32}));
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, gbuffer_.fbo_id);
+        GLuint renderbuffer = 0;
+        if (replacement == 2) {
+            glGenRenderbuffers(1, &renderbuffer);
+            glBindRenderbuffer(GL_RENDERBUFFER, renderbuffer);
+            glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, 32, 32);
+            glFramebufferRenderbuffer(
+                GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT6, GL_RENDERBUFFER, renderbuffer);
+        } else {
+            glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER,
+                                   GL_COLOR_ATTACHMENT6,
+                                   GL_TEXTURE_2D,
+                                   replacement == 1 ? gbuffer_.albedo_texture : 0,
+                                   0);
+        }
+        glDrawBuffer(GL_COLOR_ATTACHMENT1);
+        SetCallerBindings();
+        {
+            AttachmentProbe probe(targets_, gbuffer_.fbo_id);
+            capture.detach();
+            EXPECT_EQ(probe.buffer_writes, 0u);
+            EXPECT_EQ(probe.detaches, 0u);
+        }
+        EXPECT_TRUE(capture.attachment_failed());
+        Contains(table_.json(), "gbuffer_retired_during_capture");
+        ExpectCallerBindingsAndMask();
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, gbuffer_.fbo_id);
+        GLint buffer = 0, name = 0;
+        glGetIntegerv(GL_DRAW_BUFFER0, &buffer);
+        EXPECT_EQ(buffer, GL_COLOR_ATTACHMENT1);
+        if (replacement != 0) {
+            glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,
+                                                  GL_COLOR_ATTACHMENT6,
+                                                  GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,
+                                                  &name);
+            EXPECT_EQ(static_cast<GLuint>(name),
+                      replacement == 2 ? renderbuffer : gbuffer_.albedo_texture);
+        }
+        glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT6, GL_TEXTURE_2D, 0, 0);
+        glDrawBuffers(buffer_count_, buffers_.data());
+        SetCallerBindings();
+        glDeleteRenderbuffers(1, &renderbuffer);
+        EXPECT_TRUE(targets_.reset());
+    }
+}
+
+TEST_F(GBufferLeaseGl, InvalidAttachmentRequestsLeaveBindingsAndStorageUntouched) {
+    for (const unsigned refusal : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 11u}) {
+        SCOPED_TRACE(refusal);
+        table_.clear();
+        GBufferDiagnosticCapture capture(targets_, table_);
+        AttachmentProbe probe(targets_, gbuffer_.fbo_id);
+        auto gbuffer = gbuffer_;
+        GLuint empty_texture = 0;
+        DiagnosticExtent extent{32, 32};
+        if (refusal == 0) {
+            gbuffer.fbo_id = 0;
+        } else if (refusal == 1) {
+            extent.width = 0;
+        } else if (refusal == 2) {
+            extent.height = 16;
+        } else if (refusal == 3) {
+            probe.max_buffers = 6;
+        } else if (refusal == 4) {
+            probe.max_buffers = 33;
+        } else if (refusal == 5) {
+            probe.max_attachments = 6;
+        } else if (refusal == 6) {
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, gbuffer_.fbo_id);
+            glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER,
+                                   GL_COLOR_ATTACHMENT6,
+                                   GL_TEXTURE_2D,
+                                   gbuffer_.albedo_texture,
+                                   0);
+            SetCallerBindings();
+        } else if (refusal == 7) {
+            gbuffer.position_texture = 0;
+        } else if (refusal == 8) {
+            glGenFramebuffers(1, &gbuffer.fbo_id);
+            glDeleteFramebuffers(1, &gbuffer.fbo_id);
+        } else if (refusal == 9) {
+            extent.width = 16;
+        } else if (refusal == 10) {
+            probe.incomplete_storage = true;
+        } else {
+            glGenTextures(1, &empty_texture);
+            glBindTexture(GL_TEXTURE_2D, empty_texture);
+            gbuffer.position_texture = empty_texture;
+            SetCallerBindings();
+        }
+        EXPECT_FALSE(capture.attach(gbuffer, extent));
+        EXPECT_TRUE(capture.attachment_failed());
+        EXPECT_EQ(targets_.texture(), 0u);
+        EXPECT_EQ(probe.detaches, 0u);
+        ExpectCallerBindingsAndMask();
+        glDeleteTextures(1, &empty_texture);
+        if (refusal == 6) {
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, gbuffer_.fbo_id);
+            glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT6, GL_TEXTURE_2D, 0, 0);
+            SetCallerBindings();
+        }
+    }
+}
+
+TEST_F(GBufferLeaseGl, TableOnlyAndNestedAttachmentRefuseWithoutDroppingExistingLease) {
+    {
+        GBufferDiagnosticCapture capture(table_);
+        EXPECT_FALSE(capture.attach(gbuffer_, {32, 32}));
+        Contains(table_.json(), "diagnostic_target_storage_unavailable");
+    }
+    table_.clear();
+    GBufferDiagnosticCapture capture(targets_, table_);
+    ASSERT_TRUE(capture.attach(gbuffer_, {32, 32}));
+    EXPECT_FALSE(capture.attach(gbuffer_, {32, 32}));
+    EXPECT_FALSE(targets_.reset());
+    capture.detach();
+    EXPECT_FALSE(capture.attach(gbuffer_, {32, 32}));
+    Contains(table_.json(), "nested_gbuffer_attachment");
+    ExpectCallerBindingsAndMask();
+    ExpectDetached();
+    EXPECT_TRUE(targets_.reset());
+}
+
+TEST_F(GBufferLeaseGl, AuthoredAttachmentUsesSixExistingOutputsAndRestoresThem) {
+    DestroyGBufferTargets(gbuffer_, registry_);
+    CreateGBufferTargets(gbuffer_, registry_, 32, 32, true);
+    ASSERT_NE(gbuffer_.authored_texture, 0u);
+    SetCallerBindings();
+    GBufferDiagnosticCapture capture(targets_, table_);
+    ASSERT_TRUE(capture.attach(gbuffer_, {32, 32}));
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, gbuffer_.fbo_id);
+    GLint buffer = 0;
+    glGetIntegerv(GL_DRAW_BUFFER5, &buffer);
+    EXPECT_EQ(buffer, GL_COLOR_ATTACHMENT5);
+    glGetIntegerv(GL_DRAW_BUFFER6, &buffer);
+    EXPECT_EQ(buffer, GL_COLOR_ATTACHMENT6);
+    SetCallerBindings();
+    capture.detach();
+    ExpectCallerBindingsAndMask();
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, gbuffer_.fbo_id);
+    glGetIntegerv(GL_DRAW_BUFFER5, &buffer);
+    EXPECT_EQ(buffer, GL_COLOR_ATTACHMENT5);
+    glGetIntegerv(GL_DRAW_BUFFER6, &buffer);
+    EXPECT_EQ(buffer, GL_NONE);
+    SetCallerBindings();
+    EXPECT_TRUE(targets_.reset());
+}
+
+TEST_F(GBufferLeaseGl, RecreationPreservesForeignAttachmentRetirementReason) {
+    GBufferDiagnosticCapture capture(targets_, table_);
+    ASSERT_TRUE(capture.attach(gbuffer_, {32, 32}));
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, gbuffer_.fbo_id);
+    glFramebufferTexture2D(
+        GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT6, GL_TEXTURE_2D, gbuffer_.albedo_texture, 0);
+    SetCallerBindings();
+    capture.before_destroy(gbuffer_);
+    capture.detach();
+    EXPECT_TRUE(capture.attachment_failed());
+    Contains(table_.json(), "gbuffer_retired_during_capture");
+    EXPECT_EQ(table_.json().find("gbuffer_recreated_during_capture"), std::string::npos);
+    ExpectCallerBindingsAndMask();
+    EXPECT_TRUE(targets_.reset());
+}
+
+TEST_F(GBufferLeaseGl, RetirementReleasesLeaseEvenWhenRefusalCannotBeRecorded) {
+    GBufferDiagnosticCapture capture(targets_, table_);
+    ASSERT_TRUE(capture.attach(gbuffer_, {32, 32}));
+    capture.unsupported(std::string(1025, 'x'));
+    ASSERT_TRUE(capture.refused());
+    registry_.destroy_owned("gbuffer_fbo");
+    capture.detach();
+    EXPECT_TRUE(capture.attachment_failed());
+    ExpectCallerBindingsAndMask();
+    EXPECT_TRUE(targets_.reset());
 }
