@@ -1449,9 +1449,14 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("glDeleteSync(retired.completion)", destroy)
         self.assertIn("m_storage_bytes = 0", destroy)
         draw = body(self.pipeline, "void RenderPipeline::draw_chunks_mdi(")
-        self.assertIn("m_chunk_geometry_pool.mark_submitted(", draw)
-        self.assertLess(compact(draw).index("AttributedGl::Submit( glMultiDrawElementsIndirect,"),
-                        draw.index("m_chunk_geometry_pool.mark_submitted("))
+        diagnostic = compact(body(draw, "for (std::size_t draw = first;"))
+        self.assertLess(diagnostic.index("AttributedGl::Submit( glDrawElementsIndirect,"),
+                        diagnostic.index("m_chunk_geometry_pool.mark_submitted("))
+        batched = compact(draw[draw.index("} else {", draw.index("glDrawElementsIndirect,")):])
+        self.assertLess(batched.index("AttributedGl::Submit( glMultiDrawElementsIndirect,"),
+                        batched.index("m_chunk_geometry_pool.mark_submitted("))
+        self.assertEqual(diagnostic.count("m_chunk_geometry_pool.mark_submitted("), 1)
+        self.assertEqual(batched.count("m_chunk_geometry_pool.mark_submitted("), 1)
         self.assertEqual(compact(self.pipeline).count("AttributedGl::Submit( glMultiDrawElementsIndirect,"), 1)
         probe = read(ROOT / "test/rendering/render_smoke_test.cpp")
         self.assertIn("glMultiDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_INT, nullptr, 1, 0);\n"

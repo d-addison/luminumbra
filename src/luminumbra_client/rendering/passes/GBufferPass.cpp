@@ -754,9 +754,6 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
     // cull/draw/index counts; we fold them into the returned stats with the EXACT
     // current policy (terrain_visible_chunks '=', draws/indices '+=').
     const TerrainSubmitStats ts = input.submit_terrain_chunks(frustum_planes);
-    if (capture && ts.draws != 0) {
-        capture->unsupported("live_terrain_mdi_unsupported");
-    }
     stats.terrain_visible_chunks = ts.visible_chunks;
     stats.terrain_draws += ts.draws;
     stats.terrain_indices += ts.indices;

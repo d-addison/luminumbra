@@ -343,8 +343,9 @@ TEST(DiagnosticAttribution, ResizeAndIncompleteAttachmentRestoreTheEntireDrawBuf
 
 TEST(DiagnosticAttribution, MissingProducerMetadataCannotClaimCompleteCoverage) {
     const auto pass = Read(kPass);
-    Contains(pass, "live_terrain_mdi_unsupported");
-    Contains(pass, "if (capture && ts.draws != 0)");
+    const auto pipeline = Read("src/luminumbra_client/rendering/RenderPipeline.cpp");
+    Contains(pipeline, "terrain_resident_lod_unavailable");
+    Contains(pipeline, "terrain_identity_draw_limit");
     Contains(pass, "ladder_backend_identity_unavailable");
     Contains(pass, "authored_static_surface");
     Contains(pass, "tree_impostor_fragment_output_unavailable\", 3");
@@ -358,6 +359,127 @@ TEST(DiagnosticAttribution, MissingProducerMetadataCannotClaimCompleteCoverage) 
              ".provenance = DiagnosticProvenance::Unsupported");
     Contains(targets, "std::uncaught_exceptions() > exceptions_");
     Contains(Body(targets, "void GBufferDiagnosticCapture::abort()"), "state_->failed = true;");
+}
+
+TEST(DiagnosticAttribution, TerrainSubmitsOriginalCommandsInBucketOrderWithResidentMetadata) {
+    const auto draw = Body(Read("src/luminumbra_client/rendering/RenderPipeline.cpp"),
+                           "void RenderPipeline::draw_chunks_mdi(");
+    Contains(draw, "diagnostic_chunks[dst] = chunk");
+    Contains(draw, "write_cursor[a.block_index]++");
+    Contains(draw, "cmd.count = a.index_count");
+    Contains(draw, "cmd.instanceCount = 1u");
+    Contains(draw, "cmd.firstIndex = a.index_offset");
+    Contains(draw, "cmd.baseVertex = a.vertex_offset");
+    Contains(draw, "cmd.baseInstance = static_cast<GLuint>(dst)");
+    const auto attributed = Body(draw, "for (std::size_t draw = first; draw < first + count;");
+    Contains(attributed, "const auto& chunk = *diagnostic_chunks[draw]");
+    Contains(attributed, "const auto& resident = m_chunk_render_data.at(chunk.id)");
+    Contains(attributed, "\"terrain/\" + std::to_string(chunk.coords.x) + \"/\"");
+    Contains(attributed, "std::to_string(chunk.coords.y) + \"/\"");
+    Contains(attributed, "std::to_string(chunk.coords.z) + \"/version/\"");
+    Contains(attributed, "std::to_string(resident.mesh_version)");
+    Contains(attributed, ".mesh_path = {}");
+    Contains(attributed, "m_frame_far_selection.effective == FarWorldMode::Ladder");
+    Contains(attributed, "? \"terrain_mdi_ladder\"");
+    Contains(attributed, ": \"terrain_mdi\"");
+    Contains(attributed, ".chunk = {chunk.coords.x, chunk.coords.y, chunk.coords.z}");
+    Contains(attributed, ".lod = static_cast<std::uint32_t>(resident.diagnostic_lod)");
+    Contains(attributed, ".ownership = DiagnosticOwnership::Live");
+    Contains(attributed, ".pass = DiagnosticPass::GBuffer");
+    Contains(attributed, ".provenance = DiagnosticProvenance::Unknown");
+    Contains(attributed, ".generated_mesh = mesh_key");
+    Before(attributed, "diagnostic_capture->write_current(", "glDrawElementsIndirect,");
+    Contains(attributed, "draw * sizeof(DrawElementsIndirectCommand)");
+    EXPECT_EQ(Count(attributed, "glDrawElementsIndirect,"), 1u);
+    EXPECT_EQ(Count(attributed, "AttributedGl::Submit("), 1u);
+    // A later LOD refusal must not bypass retirement tracking for prior commands.
+    Before(attributed,
+           "glDrawElementsIndirect,",
+           "m_chunk_geometry_pool.mark_submitted(static_cast<u32>(b))");
+    EXPECT_EQ(Count(attributed, "mark_submitted("), 1u);
+    const auto chunks = Body(Read(kPass), "void GBufferPass::geometry_pass_chunks(");
+    Contains(chunks, "input.submit_terrain_chunks(frustum_planes)");
+    EXPECT_EQ(chunks.find("live_terrain_mdi_unsupported"), std::string::npos);
+    Contains(chunks, "stats.terrain_draws += ts.draws");
+    Contains(chunks, "stats.terrain_indices += ts.indices");
+}
+
+TEST(DiagnosticAttribution, TerrainCaptureStagesOnlyAttachedDeferredDrawsAndBoundsAllocation) {
+    const auto draw = Body(Read("src/luminumbra_client/rendering/RenderPipeline.cpp"),
+                           "void RenderPipeline::draw_chunks_mdi(");
+    const auto empty = Body(draw, "if (visible_chunks.empty() || block_count == 0)");
+    Contains(empty, "return;");
+    const auto no_draws = Body(draw, "if (running == 0)");
+    Contains(no_draws, "return;");
+    Before(draw, "if (running == 0)", "GBufferDiagnosticCapture::Current()");
+    const auto unattached =
+        Body(draw, "if (diagnostic_capture && !diagnostic_capture->deferred_attached())");
+    Contains(unattached, "diagnostic_capture = nullptr");
+    const auto staging = Body(draw, "if (diagnostic_capture)");
+    Contains(draw, "std::unique_ptr<const ChunkCullEntry*[]> diagnostic_chunks;");
+    Before(
+        draw, "diagnostic_capture = nullptr", "std::make_unique<const ChunkCullEntry*[]>(running)");
+    Before(staging, "if (running > 65536)", "std::make_unique<const ChunkCullEntry*[]>(running)");
+    const auto excess = Body(staging, "if (running > 65536)");
+    Before(excess, "unsupported(\"terrain_identity_draw_limit\")", "throw std::runtime_error(");
+    EXPECT_EQ(Count(draw, "std::make_unique<const ChunkCullEntry*[]>(running)"), 1u);
+    Contains(draw, "if (diagnostic_capture) {\n            diagnostic_chunks[dst] = chunk;");
+    // Only the diagnostic branch expands a bucket into individual commands.
+    Contains(draw, "if (diagnostic_capture) {\n            // Submit each original indirect");
+    Contains(draw,
+             "} else {\n            Luminumbra::Rendering::AttributedGl::Submit(\n"
+             "                glMultiDrawElementsIndirect,");
+    Contains(draw, "first * sizeof(DrawElementsIndirectCommand)");
+    Contains(draw, "static_cast<GLsizei>(count)");
+    Contains(draw, "static_cast<GLsizei>(sizeof(DrawElementsIndirectCommand))");
+    EXPECT_EQ(Count(draw, "glMultiDrawElementsIndirect,"), 1u);
+    EXPECT_EQ(Count(draw, "write_current("), 1u);
+    EXPECT_EQ(draw.find("glGet"), std::string::npos);
+    EXPECT_EQ(draw.find("glProgramUniform"), std::string::npos);
+}
+
+TEST(DiagnosticAttribution, TerrainSnapshotsLodInsideVersionValidationAndCommitsAfterUpload) {
+    const auto header = Read("src/luminumbra_client/rendering/RenderPipeline.h");
+    Contains(Body(header, "struct ChunkRenderData"), "int diagnostic_lod = -1;");
+    Contains(Body(header, "struct ChunkMeshPayload"), "int diagnostic_lod = -1;");
+    const auto pipeline = Read("src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const auto copy = Body(pipeline, "bool RenderPipeline::copy_terrain_mesh_payload(");
+    Before(copy, "if (version_before != chunk.mesh_version)", "payload.diagnostic_lod =");
+    Contains(copy, "payload.diagnostic_lod = chunk.source_chunk->current_lod.load(");
+    Before(copy, "payload.diagnostic_lod =", "const u32 version_after");
+    Contains(copy, "if (version_after != version_before ||");
+    const auto invalid = Body(copy, "if (version_after != version_before ||");
+    Contains(invalid, "payload.vertices.clear()");
+    Contains(invalid, "payload.indices.clear()");
+    Contains(invalid, "return false;");
+    const auto upload = Body(pipeline, "void RenderPipeline::upload_chunk_mesh(");
+    const auto failed = Body(upload, "if (new_handle == ChunkRenderData::kInvalidPoolHandle)");
+    Contains(failed, "return;");
+    EXPECT_EQ(failed.find("diagnostic_lod"), std::string::npos);
+    Before(upload,
+           "if (new_handle == ChunkRenderData::kInvalidPoolHandle)",
+           "render_data.diagnostic_lod = payload.diagnostic_lod");
+    Contains(upload,
+             "render_data.mesh_version = payload.mesh_version;\n"
+             "    render_data.refinement = payload.refinement;\n"
+             "    render_data.diagnostic_lod = payload.diagnostic_lod;");
+}
+
+TEST(DiagnosticAttribution, TerrainRefusesUnknownAndOutOfRangeResidentLodBeforeSubmission) {
+    const auto draw = Body(Read("src/luminumbra_client/rendering/RenderPipeline.cpp"),
+                           "void RenderPipeline::draw_chunks_mdi(");
+    const auto invalid =
+        Body(draw, "if (resident.diagnostic_lod < 0 || resident.diagnostic_lod > 255)");
+    Before(
+        invalid, "unsupported(\"terrain_resident_lod_unavailable\")", "throw std::runtime_error(");
+    Before(draw,
+           "if (resident.diagnostic_lod < 0 || resident.diagnostic_lod > 255)",
+           "static_cast<std::uint32_t>(resident.diagnostic_lod)");
+    Before(draw,
+           "if (resident.diagnostic_lod < 0 || resident.diagnostic_lod > 255)",
+           "glDrawElementsIndirect,");
+    // An unavailable resident LOD must never be replaced with the live chunk's newer LOD.
+    EXPECT_EQ(draw.find("current_lod"), std::string::npos);
 }
 
 TEST(DiagnosticAttribution, AttachmentStorageIsEnsuredBeforeLeaseAndLeaseBeforeAttachment) {
