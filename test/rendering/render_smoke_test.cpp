@@ -8925,12 +8925,22 @@ TEST(RenderSmokeTest, WaterOnlyOwnerSubmitsWaterAndTracksTerrainPresence) {
     scatter.extent_m = 16.0f;
     scatter.biome_id = 1;
     scatter.density = 0.5f;
+    // A null query deactivates scatter outright. The pipeline samples rendered
+    // ground, so this visibly wrong analytic surface is never the support.
+    const auto fallback = +[](void*, float, float) {
+        FoliagePass::SurfaceSample sample;
+        sample.height = 100.0f;
+        return sample;
+    };
     const auto rebuild_foliage = [&] {
         foliage.rebuild_instances(
-            {scatter}, nullptr, nullptr, camera.Position, FoliagePass::Preparation::Complete);
+            {scatter}, fallback, nullptr, camera.Position, FoliagePass::Preparation::Complete);
     };
     rebuild_foliage();
     ASSERT_FALSE(foliage.instances().empty());
+    for (const auto& blade : foliage.instances()) {
+        EXPECT_NEAR(blade.pos[1], 6.0f, 0.001f) << "support must come from the uploaded terrain";
+    }
 
     // A retained terrain GPU record must not draw once only water remains.
     chunk->mesh_vertices.clear();
