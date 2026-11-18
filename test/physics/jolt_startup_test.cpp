@@ -39,6 +39,7 @@
 #include <new>
 #include <system_error>
 #include <thread>
+#include <vector>
 
 #if defined(_WIN32)
 #include <malloc.h>
@@ -2256,6 +2257,9 @@ void ApplicationAvatarAppendRefusal() {
         } else {
             Require(caught && Allocations().failures == 1);
             Require(physics.avatar_character_slot_count() == 1 && Outstanding() == 0);
+            const auto diagnostic = physics.avatar_character_diagnostics();
+            Require(diagnostic.live_count == 1 &&
+                    diagnostic.creation_order == std::vector<std::size_t>{0});
             Require(physics.get_avatar_position(0) == position);
             Require(physics.get_avatar_velocity(0) == glm::vec3(0.0F));
             physics.update_avatars(1.0F / 30.0F);
@@ -2291,6 +2295,9 @@ void ApplicationAvatarReuseCycles() {
     Disarm();
     Require(growth_refused && Allocations().failures == 1 && Outstanding() == 0);
     Require(physics.avatar_character_slot_count() == 1);
+    const auto after_growth_refusal = physics.avatar_character_diagnostics();
+    Require(after_growth_refusal.live_count == 1 &&
+            after_growth_refusal.creation_order == std::vector<std::size_t>{0});
     Require(physics.get_avatar_position(0) == position);
     Require(physics.create_avatar_character({533.0F, 10000.0F, 10.0F}) == 1);
     physics.remove_avatar_character(0);
@@ -2320,10 +2327,18 @@ void ApplicationAvatarReuseCycles() {
     Require(physics.avatar_character_slot_count() == 2);
     Require(physics.get_avatar_position(0) == glm::vec3(0.0F));
     Require(physics.get_avatar_position(1) == glm::vec3(533.0F, 10000.0F, 10.0F));
+    const auto after_construction_refusal = physics.avatar_character_diagnostics();
+    Require(after_construction_refusal.live_count == 1 &&
+            after_construction_refusal.creation_order == std::vector<std::size_t>{1});
     Require(physics.create_avatar_character(position) == 0);
+    const auto after_reuse = physics.avatar_character_diagnostics();
+    Require(after_reuse.live_count == 2 &&
+            after_reuse.creation_order == (std::vector<std::size_t>{1, 0}));
     Require(physics.create_avatar_character({553.0F, 10000.0F, 10.0F}) == 2);
     physics.shutdown();
     Require(physics.avatar_character_slot_count() == 0);
+    const auto after_shutdown = physics.avatar_character_diagnostics();
+    Require(after_shutdown.live_count == 0 && after_shutdown.creation_order.empty());
     physics.startup();
     Require(physics.create_avatar_character(position) == 0);
     physics.shutdown();

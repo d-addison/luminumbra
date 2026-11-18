@@ -33,6 +33,7 @@
 #include "luminumbra_common/systems/PlantCoarse.h"
 #include "luminumbra_common/systems/PlantDiseaseSystem.h"
 #include "luminumbra_common/systems/PollinationSystem.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/SoilNutrientSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/GameSession.h"
@@ -48,6 +49,7 @@
 #include <iterator>
 #include <limits>
 #include <map>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -2652,6 +2654,84 @@ TEST(RegionConsumerGate, AvatarReuseIsLowestFirstAndPreservesSurvivorStepBits) {
     EXPECT_EQ(physics.create_avatar_character({3, 10000, 1}), 1u);
 }
 
+TEST(RegionConsumerGate, ReusedAvatarsJoinLiveTailAndInvalidatePreparedCollisions) {
+    using Luminumbra::Systems::PhysicsSystem;
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0;
+    params.peaks_amplitude = 0;
+    params.height_offset = 8;
+    params.continental_spline = {{{-1, 0}}, {{1, 0}}};
+    auto world =
+        std::make_unique<Luminumbra::Systems::SHIELD_WorldSystem>(nullptr, nullptr, params, 4242);
+    world->set_durable_residency(true);
+    PhysicsSystem physics;
+    physics.startup();
+    physics.set_world_system(world.get());
+    const auto expect_order = [&physics](const std::vector<std::size_t>& expected) {
+        const auto diagnostic = physics.avatar_character_diagnostics();
+        EXPECT_EQ(diagnostic.live_count, expected.size());
+        EXPECT_EQ(diagnostic.creation_order, expected);
+    };
+    expect_order({});
+    ASSERT_EQ(physics.create_avatar_character({8, 10000, 8}), 0u);
+    ASSERT_EQ(physics.create_avatar_character({168, 10000, 8}), 1u);
+    ASSERT_EQ(physics.create_avatar_character({328, 10000, 8}), 2u);
+    expect_order({0, 1, 2});
+    constexpr std::uint64_t tick = 42;
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}, tick));
+    EXPECT_EQ(physics.simulation_collision_owner_visit_count(), 3u);
+    physics.remove_avatar_character(1);
+    physics.remove_avatar_character(1);
+    physics.remove_avatar_character(PhysicsSystem::kInvalidAvatar);
+    expect_order({0, 2});
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}, tick));
+    EXPECT_EQ(physics.simulation_collision_owner_visit_count(), 2u);
+    EXPECT_EQ(physics.simulation_collision_sample_count(), 18u);
+    // Admission refusal must preserve the hole, list, count and ready publication.
+    EXPECT_EQ(physics.create_avatar_character({std::numeric_limits<float>::quiet_NaN(), 10, 8}),
+              PhysicsSystem::kInvalidAvatar);
+    expect_order({0, 2});
+    auto steps = physics.work_items().characters;
+    physics.update_avatars(1.0f / 30.0f);
+    EXPECT_EQ(physics.work_items().characters, steps + 2);
+
+    const glm::vec3 replacement(488, 10000, 8);
+    ASSERT_EQ(physics.create_avatar_character(replacement), 1u);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 3u);
+    expect_order({0, 2, 1});
+    steps = physics.work_items().characters;
+    physics.update_avatars(1.0f / 30.0f);
+    EXPECT_EQ(physics.work_items().characters, steps);
+    EXPECT_EQ(physics.get_avatar_position(1), replacement);
+    // Reusing the same tick must rebuild rather than return the cached two owners.
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}, tick));
+    EXPECT_EQ(physics.simulation_collision_owner_visit_count(), 3u);
+    EXPECT_EQ(physics.simulation_collision_sample_count(), 27u);
+    physics.update_avatars(1.0f / 30.0f);
+    EXPECT_EQ(physics.work_items().characters, steps + 3);
+
+    // Exercise both ends, then reuse into an empty list with a nonzero slot extent.
+    physics.remove_avatar_character(0);
+    expect_order({2, 1});
+    physics.remove_avatar_character(1);
+    expect_order({2});
+    physics.remove_avatar_character(2);
+    expect_order({});
+    ASSERT_EQ(physics.create_avatar_character(replacement), 0u);
+    expect_order({0});
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}, tick));
+    physics.clear_avatar_characters();
+    expect_order({});
+    EXPECT_EQ(physics.avatar_character_slot_count(), 0u);
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}, tick));
+    EXPECT_EQ(physics.simulation_collision_owner_visit_count(), 0u);
+    EXPECT_EQ(physics.simulation_collision_sample_count(), 0u);
+    physics.clear_avatar_characters();
+    ASSERT_EQ(physics.create_avatar_character(replacement), 0u);
+    ASSERT_EQ(physics.create_avatar_character({8, 10000, 8}), 1u);
+    expect_order({0, 1});
+}
+
 TEST(RegionConsumerGate, TerrainCollisionSkipsDoNotRequestRetry) {
     Luminumbra::Systems::PhysicsSystem physics;
     Luminumbra::Chunk chunk({0, 0, 0});
@@ -2952,14 +3032,16 @@ TEST(RegionConsumerGate, SessionDeniedAvatarStaysFrozenWithoutCapsuleAndRetriesO
         EXPECT_EQ(physics->audio_raycast({512.0f, 10001.3f, 10.0f}, {514.0f, 10001.3f, 10.0f}).hit,
                   tick == 3);
         if (tick == 0) {
-            // Terrain can still take a reserved slot while the avatar is refused.
-            Luminumbra::Chunk chunk({0, 0, 0});
-            chunk.heightmap_data.assign(static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
-                                            static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_Z + 1),
-                                        8.0f);
-            EXPECT_TRUE(physics->add_chunk_collision(chunk));
-            EXPECT_TRUE(physics->audio_raycast({8.0f, 10.0f, 8.0f}, {8.0f, 6.0f, 8.0f}).hit);
-            physics->remove_chunk_collision(chunk.get_id());
+            // The session-prepared terrain horizon uses reserved headroom even
+            // while the dynamic pool is full and the avatar capsule is refused.
+            auto* world = session.GetWorldSystem();
+            ASSERT_NE(world, nullptr);
+            std::array<float, (Luminumbra::CHUNK_SIZE_X + 1) * (Luminumbra::CHUNK_SIZE_Z + 1)>
+                heights{};
+            ASSERT_TRUE(world->sample_simulation_collision(0, 0, heights));
+            const float floor = heights[8u * (Luminumbra::CHUNK_SIZE_X + 1) + 8u];
+            EXPECT_GT(physics->simulation_collision_sample_count(), 0u);
+            EXPECT_TRUE(physics->audio_raycast({8, floor + 2, 8}, {8, floor - 2, 8}).hit);
         }
         // Integration remains denied even when another caller submits input.
         physics->set_avatar_wish_velocity(avatar, {9.0f, 7.0f});

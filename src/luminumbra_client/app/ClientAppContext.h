@@ -57,7 +57,7 @@ struct TimelapseDrainState {
     float surf = 0.0f;
 };
 
-// let the world stream/settle before frame 0
+// extra frames rendered after world presentation is ready, before frame 0
 inline constexpr int kTimelapseSettleFrames = 45;
 // let chunks stream + atmosphere settle
 inline constexpr int kFrameScanSettleFrames = 90;
@@ -153,7 +153,7 @@ struct CaptureModes {
     float timelapse_daystep =
         0.0f; // time-of-day advance per frame [0,1] (shade/sky drift); 0 = leave
     int timelapse_captured = 0;
-    int timelapse_settle = 0;
+    int timelapse_settle = 0;   // post-readiness settle frames rendered so far
     bool timelapse_dig = false; // progressively carve a trench mid-capture (terraform demo)
     bool timelapse_drain =
         false; //  money shot: anchor on a real river/lake, breach the bank, drain it
@@ -171,6 +171,12 @@ struct CaptureModes {
                                    // during a timelapse, so the scent trail / rest poses show
     bool timelapse_calm = false;   // calm (no-predator) grazing herd -> reproduction/evolution demo
     bool timelapse_fire = false;   // ignite a patch of combustible foliage -> sim.fire spread demo
+    // Sky showcase: a low camera near the horizon looking toward the setting sun (-x), so the sky
+    // fills the upper half of the frame. Render-only; takes precedence over the other framings.
+    bool timelapse_vista = false;
+    float timelapse_pan = 0.0f; // vista only: degrees of yaw added per captured frame (0 = fixed)
+    // Frames rendered before frame 0 so terrain, far LOD and foliage stream in.
+    int timelapse_settle_frames = kTimelapseSettleFrames;
     // --render-benchmark <path>: averages the per-pass GPU timers over
     // render_benchmark_frames settled in-world frames and writes a JSON report
     // (per-pass avg ms + total + cloud_quality) before exiting. Empty = off.
