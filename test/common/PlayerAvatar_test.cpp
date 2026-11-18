@@ -829,7 +829,8 @@ TEST(PlayerAvatarOwnerCodec, NormalsPrecisionBranchesAndBoundaryIds) {
     SetPhysicsWord(sleep_offset, 112, 0x7fefffffu);
     EXPECT_FALSE(ValidatePhysicsOwner(sleep_offset));
     auto largest_id = SphereFixture(0, 0, 0, 0).state();
-    SetPhysicsWord(largest_id, 8, 0xff0027ffu); // index 10239, sequence 255
+    // Jolt stores the sequence at bit 23; bit 31 is the broadphase bit.
+    SetPhysicsWord(largest_id, 8, 0x7f8027ffu); // index 10239, sequence 255
     EXPECT_TRUE(ValidatePhysicsOwner(largest_id));
     auto contacts = CharacterFixture(true);
     const std::vector<std::uint32_t> contact(contacts.words.begin() + 37, contacts.words.end());
