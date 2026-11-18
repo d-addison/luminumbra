@@ -382,7 +382,8 @@ EmissiveMaterialTarget FindEmissiveMaterialTarget(Luminumbra::world::GameSession
 }
 
 nlohmann::json TimeOfDayPixelStatsToJson(const TimeOfDayPixelStats& stats) {
-    return {{"width", stats.width},
+    return {{"atmosphere", stats.atmosphere},
+            {"width", stats.width},
             {"height", stats.height},
             {"frame_mean_luminance", stats.frame_mean_luminance},
             {"sky_mean_luminance", stats.sky_mean_luminance},

@@ -25,6 +25,7 @@
 #include "luminumbra_common/world/WorldStreamingState.h"
 #include "rendering/Camera.h"
 #include "rendering/LightningBolt.h"
+#include "rendering/WaterVisibility.h"
 #include "rendering/passes/FoliagePass.h"
 #include "rendering/passes/ParticlePass.h"
 // lockstep transport seam (engine-generic; ILockstepTransport +
@@ -97,6 +98,9 @@ struct SweepCell {
     double cloud_coverage = 0.0;
     std::uint64_t water_like_pixels = 0;
     double water_like_ratio = 0.0;
+    std::uint64_t visible_water_pixels = 0;
+    bool water_mask_valid = false;
+    std::string water_mask_file;
 };
 
 // Whole-frame mean luminance + a water-like pixel count (teal/blue, the same
@@ -139,6 +143,19 @@ void MeasureSweepFrame(const std::vector<unsigned char>& pixels,
     out_non_black = (static_cast<double>(non_black_px) / static_cast<double>(total)) > 0.02;
     out_water_pixels = water_px;
     out_water_ratio = static_cast<double>(water_px) / static_cast<double>(total);
+}
+
+bool WriteSweepWaterMask(const std::filesystem::path& path,
+                         const Luminumbra::Rendering::WaterVisibilityMask& mask) {
+    if (!mask.valid()) {
+        return false;
+    }
+    // At most kMaxPixels RGB triples, checked by mask.valid().
+    std::vector<unsigned char> rgb(mask.pixels.size() * 3u);
+    for (std::size_t i = 0; i < mask.pixels.size(); ++i) {
+        std::fill_n(rgb.begin() + static_cast<std::ptrdiff_t>(i * 3u), 3, mask.pixels[i]);
+    }
+    return WritePixelBufferPpm(path, mask.width, mask.height, rgb);
 }
 
 // Builds the per-chunk foliage scatter over the visible live ring (mirrors the
@@ -271,28 +288,22 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
     const float eye_y = std::max(land_terrain_h, Luminumbra::SEA_LEVEL) + 2.5f;
     const Luminumbra::Vec3 anchor(land.x, eye_y, land.z);
 
-    // Keep the water focus inside the anchor's live ring. The spawn-centred
-    // water search can select a distant ocean hidden behind intervening land.
-    // At most 169 height queries, once per sweep.
-    WaterVisualCameraTarget water_target;
-    float nearest_water_distance_sq = std::numeric_limits<float>::max();
-    for (int dz = -96; dz <= 96; dz += 16) {
-        for (int dx = -96; dx <= 96; dx += 16) {
-            const float x = anchor.x + static_cast<float>(dx);
-            const float z = anchor.z + static_cast<float>(dz);
-            const float height = world_system->GetTerrainHeightAt(x, z);
-            const float distance_sq = static_cast<float>(dx * dx + dz * dz);
-            if (height < Luminumbra::SEA_LEVEL - 0.5f && distance_sq < nearest_water_distance_sq) {
-                nearest_water_distance_sq = distance_sq;
-                water_target.found = true;
-                water_target.focus = Luminumbra::Vec3(x, Luminumbra::SEA_LEVEL + 0.1f, z);
-            }
-        }
-    }
+    // Resolve a local open patch and sample the sight lines from a dedicated
+    // water eye. GPU evidence below validates actual resident geometry as well.
+    const auto water_target = FindWaterVisibilityTarget(
+        glm::vec3(anchor), Luminumbra::SEA_LEVEL, [world_system](float x, float z) {
+            return world_system->GetTerrainHeightAt(x, z);
+        });
     if (!water_target.found) {
-        LUMINUMBRA_CORE_ERROR("world_visual_sweep: no water target in the anchor's live ring.");
+        LUMINUMBRA_CORE_ERROR("world_visual_sweep: no unobstructed local water target.");
         return false;
     }
+    struct WaterCaptureScope {
+        RenderPipeline* pipeline;
+        ~WaterCaptureScope() {
+            pipeline->set_water_visibility_capture_enabled(false);
+        }
+    } water_capture_scope{pipeline};
 
     // --- foliage scatter (drives the down-daytime cells) -------------------
     bool foliage_ready = false;
@@ -347,10 +358,9 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
 
     // Apply the camera framing for an angle at the anchor.
     const auto apply_angle = [&](const SweepAngle& a) {
+        pipeline->set_water_visibility_capture_enabled(a.aim_at_water);
         if (a.aim_at_water && water_target.found) {
-            // Keep the shared anchor; aim down at the resolved water focus so the
-            // water/shore cell frames the open water + shoreline.
-            camera->Position = anchor;
+            camera->Position = water_target.eye;
             camera->Zoom = 70.0f;
             AimCameraAt(camera, water_target.focus);
         } else {
@@ -396,9 +406,9 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
         return ok;
     };
 
-    // One-time WARMUP: stream the fixed-anchor world to readiness + warm the sky
-    // LUT before the matrix so per-cell settle can stay small. The anchor position
-    // never changes across the matrix, so this geometry is reused by every cell.
+    // One-time WARMUP: stream the land anchor's ring to readiness + warm the
+    // sky LUT so per-cell settle can stay small. The dedicated water eye and
+    // checked patch stay inside this ring; every cell reuses its geometry.
     pipeline->set_time_of_day(0.0f);
     camera->Position = anchor;
     AimCameraAt(camera, water_target.focus);
@@ -433,6 +443,29 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
     if (!streaming_ready) {
         LUMINUMBRA_CORE_ERROR("world_visual_sweep: anchor residency timed out (water indices={}).",
                               water_indices_drawn);
+        return false;
+    }
+    // Validate the selected terrain patch against the actual depth-tested draw,
+    // with a fixed three-frame budget. Refuse instead of falling back to sky hue.
+    camera->Position = water_target.eye;
+    camera->Zoom = 70.0f;
+    AimCameraAt(camera, water_target.focus);
+    pipeline->set_water_visibility_capture_enabled(true);
+    const bool target_rendered = render_settled(3);
+    const bool target_mask_written = WriteSweepWaterMask(
+        sweep_dir / "water-target-validation.water-mask.ppm", pipeline->water_visibility_mask());
+    if (!target_rendered || !target_mask_written ||
+        pipeline->water_visibility_mask().visible_pixels_in_target() == 0) {
+        LUMINUMBRA_CORE_ERROR(
+            "world_visual_sweep: verified water target has no visible water or capture failed "
+            "(eye={},{},{} focus={},{},{} mask_written={}).",
+            water_target.eye.x,
+            water_target.eye.y,
+            water_target.eye.z,
+            water_target.focus.x,
+            water_target.focus.y,
+            water_target.focus.z,
+            target_mask_written);
         return false;
     }
     // Residency may have changed completely since spawn. Build scatter from the
@@ -581,6 +614,13 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
                                           cell.non_black,
                                           cell.water_like_pixels,
                                           cell.water_like_ratio);
+                        if (cell.water_aimed) {
+                            const auto& mask = pipeline->water_visibility_mask();
+                            cell.visible_water_pixels = mask.visible_pixels_in_target();
+                            cell.water_mask_file = cell.file + ".water-mask.ppm";
+                            cell.water_mask_valid =
+                                WriteSweepWaterMask(deps.artifact_dir / cell.water_mask_file, mask);
+                        }
                         cell.produced =
                             WritePixelBufferPpm(deps.artifact_dir / cell.file, fb_w, fb_h, pixels);
                     }
@@ -597,7 +637,7 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
     //   * foliage_draws > 0 in the down-pitched DAYTIME cells,
     //   * particle_draws > 0 AND lightning active in the STORM cells,
     //   * cloud coverage > 0 in the up-pitched STORM cells,
-    //   * water-like pixels present in the water-aimed DAYTIME cells.
+    //   * depth-tested water pixels in the target region of every water-aimed cell.
     std::vector<std::string> failures;
     std::size_t produced = 0, non_black = 0;
     for (const SweepCell& c : cells) {
@@ -623,8 +663,11 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
         if (c.pitched_up && c.storm && c.cloud_coverage <= 0.0) {
             failures.push_back("no_clouds:" + c.file);
         }
-        if (c.water_aimed && c.daytime && c.water_like_pixels == 0) {
+        if (c.water_aimed && c.visible_water_pixels == 0) {
             failures.push_back("no_water:" + c.file);
+        }
+        if (c.water_aimed && !c.water_mask_valid) {
+            failures.push_back("missing_water_mask:" + c.file);
         }
         if (c.water_aimed && (c.water_draws == 0 || c.water_indices_drawn == 0)) {
             failures.push_back("no_water_geometry:" + c.file);
@@ -637,6 +680,9 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
     manifest["world_preset"] = "archipelago";
     manifest["anchor"] = Vec3ToJson(anchor);
     manifest["water_target_found"] = water_target.found;
+    manifest["water_eye"] = Vec3ToJson(water_target.eye);
+    manifest["water_focus"] = Vec3ToJson(water_target.focus);
+    manifest["water_target_region"] = "central_half_each_axis";
     manifest["warmup_water_indices_drawn"] = water_indices_drawn;
     manifest["foliage_scatter_loaded"] = foliage_ready;
     manifest["matrix"] = {
@@ -670,6 +716,9 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
             {"cloud_coverage", c.cloud_coverage},
             {"water_like_pixels", c.water_like_pixels},
             {"water_like_ratio", c.water_like_ratio},
+            {"visible_water_pixels", c.visible_water_pixels},
+            {"water_mask_valid", c.water_mask_valid},
+            {"water_mask_file", c.water_mask_file},
             {"pitched_down", c.pitched_down},
             {"pitched_up", c.pitched_up},
             {"water_aimed", c.water_aimed},
@@ -682,8 +731,8 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
     const bool passed = failures.empty() && produced == cells.size();
     manifest["passed"] = passed;
 
-    std::ofstream out(deps.artifact_dir / "world-visual-sweep-manifest.json");
-    out << std::setw(2) << manifest << '\n';
+    const bool manifest_written = WriteCaptureText(
+        deps.artifact_dir / "world-visual-sweep-manifest.json", manifest.dump(2) + "\n");
 
     LUMINUMBRA_CORE_INFO(
         "world_visual_sweep: {} cells, {} produced, {} non-black, {} failures (passed={})",
@@ -692,7 +741,7 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
         non_black,
         failures.size(),
         passed);
-    return passed;
+    return passed && manifest_written;
 }
 
 } // namespace Luminumbra::Client::ScenarioHarness
