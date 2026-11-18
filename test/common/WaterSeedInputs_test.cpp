@@ -3255,16 +3255,8 @@ void ExpectCanonicalDurableColumn(int cache_kind, int failure) {
         },
         {});
     fixture.world.remember_durable_chunks({IVec3(0)});
-    if (cache_kind == 1) {
-        // Worker ownership takes precedence even over unreadable committed data.
-        EXPECT_THROW(fixture.world.resolve_water_column({0, 0, 0}), std::invalid_argument);
-        EXPECT_EQ(fixture.world.find_streamed_chunk({0, 0, 0}), cache);
-        EXPECT_EQ(cache->get_state(), ChunkState::Loading);
-        EXPECT_EQ(reads, 0);
-        EXPECT_FALSE(fixture.world.durable_read_failed());
-        EXPECT_EQ(fixture.world.water_columns_generated(), 0u);
-        cache->set_state(ChunkState::Idle);
-    }
+    // A bare Loading placeholder carries no authority: committed data supersedes
+    // it exactly as if the column were absent, and its storage is never read.
     if (failure != 0) {
         EXPECT_THROW(fixture.world.resolve_water_column({0, 0, 0}), std::invalid_argument);
         if (failure < 5) {
@@ -3283,6 +3275,10 @@ void ExpectCanonicalDurableColumn(int cache_kind, int failure) {
     }
     EXPECT_EQ(reads, 1);
     EXPECT_EQ(fixture.world.water_columns_generated(), 0u);
+    if (cache_kind == 1) {
+        EXPECT_EQ(cache->get_state(), ChunkState::Loading);
+        EXPECT_TRUE(cache->sdf_data.empty());
+    }
 }
 
 TEST(WaterSeedInputs, CanonicalDurableColumnsSupersedeCachesAndFailedReadsNeverRegenerate) {
