@@ -3061,12 +3061,9 @@ TEST(WaterSeedInputs, CanonicalColumnsIgnoreRendererWaterLodAndLoadingStorage) {
             renderer->stage_water_seed_inputs(unpublished);
         }
         if (cache_kind == 0) {
-            EXPECT_THROW(cached.world.resolve_water_column({0, 0, 0}), std::invalid_argument);
-            EXPECT_THROW(cached.world.inspect_water_column({0, 0, 0}), std::invalid_argument);
-            EXPECT_EQ(cached.world.find_streamed_chunk({0, 0, 0}), renderer);
+            // A bare Loading placeholder is neither read nor treated as authority.
+            EXPECT_EQ(cached.world.inspect_water_column({0, 0, 0}), nullptr);
             EXPECT_EQ(cached.world.water_columns_generated(), 0u);
-            EXPECT_EQ(renderer->get_state(), ChunkState::Loading);
-            renderer->set_state(ChunkState::Idle);
         }
         const auto first = absent.world.resolve_water_column({0, 0, 0});
         const auto second = cached.world.resolve_water_column({0, 0, 0});
@@ -3081,6 +3078,12 @@ TEST(WaterSeedInputs, CanonicalColumnsIgnoreRendererWaterLodAndLoadingStorage) {
         EXPECT_TRUE(second->water_depth_mm.empty());
         EXPECT_EQ(second == renderer, cache_kind == 4);
         EXPECT_EQ(cached.world.water_columns_generated(), cache_kind == 4 ? 0u : 1u);
+        if (cache_kind == 0) {
+            // Generation supersedes the placeholder without touching worker storage.
+            EXPECT_EQ(cached.world.find_streamed_chunk({0, 0, 0}), second);
+            EXPECT_EQ(renderer->get_state(), ChunkState::Loading);
+            EXPECT_TRUE(renderer->sdf_data.empty());
+        }
         EXPECT_EQ(cached.world.resolve_water_column({0, 0, 0}), second);
         EXPECT_EQ(absent.world.resolve_water_column({0, 0, 0}), first);
         EXPECT_EQ(absent.world.water_columns_generated(), 1u);

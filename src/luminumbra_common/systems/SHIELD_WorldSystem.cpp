@@ -7177,10 +7177,15 @@ std::shared_ptr<Chunk> SHIELD_WorldSystem::inspect_water_column(const IVec3& coo
     const auto chunk = live != m_streaming_state.chunks.end() ? live->second
                        : parked != m_parked.end()             ? parked->second.chunk
                                                               : nullptr;
-    // Loading arrays belong to a worker. Refuse before reading their storage or
-    // decoding a replacement; completion must publish this same handle first.
+    // Loading arrays belong to a worker. An admitted or authority-bearing owner
+    // refuses before its storage is read or replaced. A bare generation
+    // placeholder has no simulation meaning: committed authority, else regional
+    // generation, supersedes it, so streaming readiness never changes the result.
     if (chunk && chunk->get_state() == ChunkState::Loading) {
-        throw std::invalid_argument("Regional water column is still loading");
+        if (m_admitted_water_columns.contains(id) || chunk->needs_authority()) {
+            throw std::invalid_argument("Regional water column is still loading");
+        }
+        return read_committed_chunk(coords);
     }
     if (chunk && (m_admitted_water_columns.contains(id) || chunk->needs_authority())) {
         return chunk;
@@ -7275,7 +7280,7 @@ std::shared_ptr<Chunk> SHIELD_WorldSystem::resolve_water_column(const IVec3& coo
     const auto cached = live != m_streaming_state.chunks.end() ? live->second
                         : parked != m_parked.end()             ? parked->second.chunk
                                                                : nullptr;
-    if (!chunk && cached) {
+    if (!chunk && cached && cached->get_state() != ChunkState::Loading) {
         chunk = cached;
     }
     if (chunk && chunk->has_water_authority()) {
