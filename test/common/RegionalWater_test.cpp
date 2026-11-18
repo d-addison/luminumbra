@@ -4386,6 +4386,9 @@ TEST(RegionalWaterAdmission, ReservationsAreBoundedAtomicAndReleasedOnlyAfterCom
     water.InitializeGeneratedWater(*chunk);
     chunk->set_water_authority();
     chunk->mark_water_state_dirty();
+    const std::array candidates{chunk};
+    shield.discard_unclaimed_water_columns(candidates);
+    EXPECT_FALSE(shield.reserve_water_columns(next)); // Admission cleanup cannot release authority.
     shield.note_persistence_outcome(false);
     EXPECT_FALSE(shield.reserve_water_columns(next));
     shield.note_persistence_outcome(true);
@@ -4424,7 +4427,7 @@ TEST(RegionalWaterAdmission, OneColumnCapacityFundsOneParticipantWithoutFaultOrE
     EXPECT_LE(water.regional_work().total_cells, 2u * 16 * 16 + 4 * 16);
 }
 
-TEST(RegionalWaterAdmission, FullParkingKeepsReservedWaterLiveWithoutRaisingTheLimit) {
+TEST(RegionalWaterAdmission, FullParkingRefusesBeforeGenerationAndRollsBackOnlyNewReservations) {
     SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 777);
     WaterSystem water(nullptr, &shield);
     shield.SetWaterSystem(&water);
@@ -4442,12 +4445,23 @@ TEST(RegionalWaterAdmission, FullParkingKeepsReservedWaterLiveWithoutRaisingTheL
         shield.note_persistence_outcome(true);
     }
     const auto parked_before = shield.parking_status().parked_bytes;
-    const auto third = shield.resolve_water_column({2, 0, 0});
-    ASSERT_NE(third, nullptr);
-    EXPECT_EQ(shield.find_streamed_chunk({2, 0, 0}), third);
+    const auto generated_before = shield.water_columns_generated();
+    for (int retry = 0; retry < 3; ++retry) {
+        EXPECT_EQ(shield.resolve_water_column({2, 0, 0}), nullptr);
+        EXPECT_EQ(shield.water_columns_generated(), generated_before);
+    }
+    EXPECT_EQ(shield.find_streamed_chunk({2, 0, 0}), nullptr);
+    EXPECT_TRUE(shield.persistence_save_requested());
     EXPECT_EQ(shield.parking_status().parked_bytes, parked_before);
     EXPECT_LE(parked_before, SHIELD_WorldSystem::kWaterColumnReservationBytes);
     EXPECT_EQ(shield.snapshot_parked_chunks().size(), 2u);
+    const std::array reserved{Chunk::calculate_id({3, 0, 0})};
+    ASSERT_TRUE(shield.reserve_water_columns(reserved)); // Refusal did not leak the third id.
+    EXPECT_EQ(shield.resolve_water_column({3, 0, 0}), nullptr);
+    const std::array another{Chunk::calculate_id({4, 0, 0})};
+    EXPECT_FALSE(shield.reserve_water_columns(another)); // An earlier reservation is retained.
+    shield.discard_unclaimed_water_columns({}, reserved);
+    EXPECT_TRUE(shield.reserve_water_columns(another));
 }
 
 TEST(RegionalWaterAdmission, ReservationPressureIsIndependentOfResidentCandidates) {
