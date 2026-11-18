@@ -99,9 +99,8 @@ class UploadBudgetWiring(unittest.TestCase):
     def water_cell_owner_predicate(self):
         mesher = read(ROOT / "src/luminumbra_common/world/MarchingCubes.cpp")
         direct = body(mesher, "void GenerateWaterMesh(")
-        self.assertIn("const double chunk_min_y = "
-                      "static_cast<double>(chunk.get_coords().y) * CHUNK_SIZE_Y;", compact(direct))
-        self.assertIn("const double chunk_max_y = chunk_min_y + CHUNK_SIZE_Y;", direct)
+        self.assertIn("const double chunk_min_y = chunk.water_mesh_min_y;", direct)
+        self.assertIn("const double chunk_max_y = chunk.water_mesh_max_y;", direct)
         self.assertIn("const float cell_surface_y = chunk.water_level_data[cell_index];", direct)
         cells = body(body(direct, "for (int z = 0; z < resolution; ++z)"),
                      "for (int x = 0; x < resolution; ++x)")
@@ -110,10 +109,75 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertLess(cells.index("if (!owns_surface)"), cells.index("if (have_depth)"))
         self.assertLess(cells.index("if (!owns_surface)"), cells.index("water_vertices.push_back("))
         predicate = re.search(r"const bool owns_surface = (.*?);", cells, re.S).group(1)
-        return compact(predicate).replace("&&", " and ").replace("||", " or ")
+        return compact(predicate).replace("std::isfinite", "finite").replace(
+            "&&", " and ").replace("||", " or ")
+
+    def water_owners(self, layers, height):
+        predicate = self.water_cell_owner_predicate()
+        ordered = sorted(layers)
+        return [layer for index, layer in enumerate(ordered) if eval(
+            predicate, {"__builtins__": {}}, dict(
+                finite=math.isfinite, cell_surface_y=height,
+                chunk_min_y=layer * 16 if index else -math.inf,
+                chunk_max_y=ordered[index + 1] * 16 if index + 1 < len(ordered) else math.inf))]
+
+    def test_deep_seabed_residents_keep_the_full_sea_level_surface(self):
+        self.assertEqual(self.water_owners([-5, -4, -3], 0.0), [-3])
+        self.assertEqual(sum(len(self.water_owners([-5, -4, -3], 0.0))
+                             for _ in range(64)), 64)
+
+    def test_residency_change_moves_surface_without_duplicates_or_gaps(self):
+        for layers, owner in (([-5, -4, -3], -3), ([-5, -4, -3, 0], 0),
+                              ([-5, -4, -3], -3), ([-5], -5), ([], None)):
+            self.assertEqual(self.water_owners(layers, 0.0), [] if owner is None else [owner])
+
+    def test_resident_intervals_cover_gaps_and_extreme_finite_heights(self):
+        for layers in ([-5], [-5, -3, 1], [1, -5, -3], [0, 1], [-1, 0]):
+            for height in (-1e38, -1000, -80, -64, -48, -0.001, 0, 16, 1000, 1e38):
+                with self.subTest(layers=layers, height=height):
+                    below = [layer for layer in layers if layer * 16 <= height]
+                    expected = max(below) if below else min(layers)
+                    self.assertEqual(self.water_owners(layers, height), [expected])
+
+    def test_residency_updates_intervals_and_invalidates_every_sibling_path(self):
+        world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        update = body(world, "void UpdateColumnWaterMeshOwnership(")
+        self.assertIn("column == index.columns().end()", update)
+        self.assertEqual(update.count("for ("), 1)
+        self.assertIn("resident_y < coords.y && (!below || resident_y > below->get_coords().y)", update)
+        self.assertIn("resident_y > coords.y && (!above || resident_y < above->get_coords().y)", update)
+        self.assertIn("set_interval(changed, below ? base_y(changed) : -infinity, "
+                      "above ? base_y(*above) : infinity);", compact(update).replace("set_interval( ", "set_interval("))
+        self.assertIn("set_interval(*below, below->water_mesh_min_y, inserted ? base_y(changed) : "
+                      "(above ? base_y(*above) : infinity));", compact(update).replace("set_interval( ", "set_interval("))
+        self.assertIn("set_interval(*above, (inserted || below) ? base_y(*above) : -infinity, "
+                      "above->water_mesh_max_y);", compact(update).replace("set_interval( ", "set_interval("))
+        invalidation = body(update, "const auto set_interval =")
+        for statement in ("chunk.water_mesh_generated.store(false, std::memory_order_release);",
+                          "water->retain_mesh_invalidation(chunk.get_id());"):
+            self.assertIn(statement, invalidation)
+        mutations = list(re.finditer(r"m_activation_index\.(insert|erase)\(([^;]+)\);", world))
+        self.assertEqual(len(mutations), 9)
+        for mutation in mutations:
+            inserted = mutation[1] == "insert"
+            chunk = "*" + mutation[2] if inserted else mutation[2]
+            expected = "UpdateColumnWaterMeshOwnership(m_activation_index, " + chunk + ", " + (
+                "true" if inserted else "false") + ", m_water_system);"
+            self.assertTrue(re.sub(r"\(\s+", "(", compact(world[mutation.end():])).startswith(expected), mutation[0])
+        publication = body(world, "bool SHIELD_WorldSystem::publish_front_meshing_batch(")
+        freshness = re.search(r"const bool water_owner_current =\s*(.*?);", publication, re.S).group(1)
+        replacement = re.search(r"const bool replaces_water =\s*(.*?);", publication, re.S).group(1)
+        published = re.search(r"const bool published =\s*(.*?);", publication, re.S).group(1)
+        self.assertIn("water_owner_current &&", replacement)
+        self.assertNotIn("water_owner_current", published)
+        dispatch = body(world, "SHIELD_WorldSystem::dispatch_meshing_jobs(")
+        for bound in ("min", "max"):
+            self.assertIn("chunk->water_mesh_" + bound + "_y == job_chunk.scratch->water_mesh_" + bound + "_y", freshness)
+            capture = "snapshot.water_mesh_" + bound + "_y = chunk->water_mesh_" + bound + "_y;"
+            self.assertIn(capture, dispatch)
+            self.assertLess(dispatch.index(capture), dispatch.index("lane_jobs.emplace_back("))
 
     def test_stacked_water_cells_have_one_emission_owner(self):
-        predicate = self.water_cell_owner_predicate()
         # Execute the shipping guard, with floor division as the independent oracle.
         # Each of 16 cells must emit once across three stacked water-only chunks.
         profiles = [[height] * 16 for height in
@@ -123,22 +187,16 @@ class UploadBudgetWiring(unittest.TestCase):
             with self.subTest(heights=heights):
                 total_quads = 0
                 for cell_surface_y in heights:
-                    owners = [chunk_y for chunk_y in (-1, 0, 1) if eval(
-                        predicate, {"__builtins__": {}}, dict(
-                            cell_surface_y=cell_surface_y, chunk_min_y=chunk_y * 16,
-                            chunk_max_y=(chunk_y + 1) * 16))]
+                    owners = self.water_owners([-1, 0, 1], cell_surface_y)
                     self.assertEqual(owners, [math.floor(cell_surface_y / 16)])
                     total_quads += len(owners)
                 self.assertEqual(total_quads, len(heights))
 
-    def test_water_cell_ownership_rejects_outside_and_unknown_heights(self):
-        predicate = self.water_cell_owner_predicate()
-        for cell_surface_y in (-1e38, 1e38, -math.inf, math.inf, math.nan):
-            for chunk_y in (-1, 0, 1):
-                with self.subTest(height=cell_surface_y, chunk_y=chunk_y):
-                    self.assertFalse(eval(predicate, {"__builtins__": {}}, dict(
-                        cell_surface_y=cell_surface_y, chunk_min_y=chunk_y * 16,
-                        chunk_max_y=(chunk_y + 1) * 16)))
+    def test_water_cell_ownership_rejects_unknown_heights(self):
+        for height in (-math.inf, math.inf, math.nan):
+            for layers in ([-5], [-5, -4, -3], [-1, 0, 1], []):
+                with self.subTest(height=height, layers=layers):
+                    self.assertEqual(self.water_owners(layers, height), [])
 
     def test_water_surface_ownership_uses_same_emitter_in_all_near_paths(self):
         world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
@@ -149,7 +207,10 @@ class UploadBudgetWiring(unittest.TestCase):
         for name in ("StackedWaterOnlyChunksEmitOnlyContainingSurface",
                      "StackedWaterSurfaceBoundaryHasExactlyOneOwner",
                      "StackedSlopingWaterAssignsEachCellIndependently",
-                     "NonOwnedWaterClearsPreviouslySelectedGeometry"):
+                     "NonOwnedWaterClearsPreviouslySelectedGeometry",
+                     "DeepSeabedResidentLayersKeepSeaLevelSurface",
+                     "ResidentOwnershipCoversBelowAboveAndGaps",
+                     "SurfaceOwnerArrivalSupersedesPendingWaterAndRemeshesColumn"):
             self.assertIn("TEST(AsyncWaterMeshing, " + name + ")", tests)
         cmake = read(ROOT / "test/CMakeLists.txt")
         self.assertIn("shield/async_water_meshing_test.cpp", cmake)

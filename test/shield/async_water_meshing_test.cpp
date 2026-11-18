@@ -973,17 +973,21 @@ TEST(AsyncWaterMeshing, WaterOnlyCompletionDoesNotRequireTerrainGeometryOrCurren
     }
 }
 
-void CheckStackedWaterSurface(const std::vector<float>& levels, DepthGrid depth_grid) {
+void CheckStackedWaterSurface(const std::vector<float>& levels,
+                              DepthGrid depth_grid,
+                              const std::vector<int>& layers = {-1, 0, 1},
+                              bool all_wet = false) {
     constexpr int kResolution = 4;
     constexpr std::size_t kCells = kResolution * kResolution;
     ASSERT_EQ(levels.size(), kCells);
+    ASSERT_FALSE(layers.empty());
     auto params = Luminumbra::Test::SyntheticTerrainParams();
     params.base_amplitude = 0.0f;
     params.height_offset = -64.0f;
     params.caves_enabled = false;
     SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
     const WaterSystem water(nullptr, &world);
-    const auto prepare = [depth_grid, &levels](Chunk& chunk) {
+    const auto prepare = [depth_grid, &levels, all_wet](Chunk& chunk) {
         chunk.current_water_resolution.store(kResolution);
         chunk.has_water_sim.store(true);
         chunk.water_level_data = levels;
@@ -991,7 +995,7 @@ void CheckStackedWaterSurface(const std::vector<float>& levels, DepthGrid depth_
         for (std::size_t index = 0; index < kCells; ++index) {
             // Dry, threshold, just wet, and deep cells retain the depth contract.
             constexpr std::int32_t kDepths[] = {0, 50, 51, 2000};
-            chunk.water_depth_mm[index] = kDepths[index % 4u];
+            chunk.water_depth_mm[index] = all_wet ? 2000 : kDepths[index % 4u];
         }
         if (depth_grid == DepthGrid::Missing) {
             chunk.water_depth_mm.clear();
@@ -1005,12 +1009,13 @@ void CheckStackedWaterSurface(const std::vector<float>& levels, DepthGrid depth_
     prepare(reference);
     reference.water_level_data.assign(kCells, 6.0f);
     World::MarchingCubes::GenerateWaterMesh(water, world, reference);
-    const std::size_t single_chunk_quads = depth_grid == DepthGrid::Complete ? kCells / 2u : kCells;
+    const std::size_t single_chunk_quads =
+        depth_grid == DepthGrid::Complete && !all_wet ? kCells / 2u : kCells;
     ASSERT_EQ(reference.water_mesh_vertices.size(), single_chunk_quads * 4u);
     ASSERT_EQ(reference.water_mesh_indices.size(), single_chunk_quads * 6u);
 
     std::vector<std::shared_ptr<Chunk>> chunks;
-    for (const int chunk_y : {-1, 0, 1}) {
+    for (const int chunk_y : layers) {
         auto chunk = std::make_shared<Chunk>(IVec3(0, chunk_y, 0));
         prepare(*chunk);
         ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
@@ -1029,8 +1034,15 @@ void CheckStackedWaterSurface(const std::vector<float>& levels, DepthGrid depth_
             std::size_t expected_quads = 0;
             for (std::size_t index = 0; index < kCells; ++index) {
                 const bool wet = depth_grid != DepthGrid::Complete || saved_depth[index] > 50;
-                // Use floor division as an independent oracle, including negative Y.
-                const double owner = std::floor(static_cast<double>(levels[index]) / CHUNK_SIZE_Y);
+                // Independent resident-owner oracle, including holes and both extremes.
+                const double surface_layer =
+                    std::floor(static_cast<double>(levels[index]) / CHUNK_SIZE_Y);
+                int owner = *std::min_element(layers.begin(), layers.end());
+                for (const int layer : layers) {
+                    if (layer <= surface_layer && layer > owner) {
+                        owner = layer;
+                    }
+                }
                 if (wet && owner == chunk->get_coords().y) {
                     ++expected_quads;
                 }
@@ -1051,6 +1063,118 @@ void CheckStackedWaterSurface(const std::vector<float>& levels, DepthGrid depth_
         EXPECT_EQ(total_quads, single_chunk_quads);
         EXPECT_EQ(world.renderable_chunks_view().size(), selected_chunks);
     }
+}
+
+TEST(AsyncWaterMeshing, DeepSeabedResidentLayersKeepSeaLevelSurface) {
+    for (const auto depth_grid : {DepthGrid::Complete, DepthGrid::Missing, DepthGrid::Truncated}) {
+        CheckStackedWaterSurface(std::vector<float>(16u, 0.0f), depth_grid, {-5, -4, -3}, true);
+    }
+}
+
+TEST(AsyncWaterMeshing, ResidentOwnershipCoversBelowAboveAndGaps) {
+    for (const float height : {-1000.0f, -80.0f, -64.0f, -48.0f, -0.001f, 0.0f, 1000.0f}) {
+        SCOPED_TRACE(height);
+        CheckStackedWaterSurface(std::vector<float>(16u, height), DepthGrid::Complete, {-5, -3, 1});
+        CheckStackedWaterSurface(std::vector<float>(16u, height), DepthGrid::Complete, {1, -5, -3});
+        CheckStackedWaterSurface(std::vector<float>(16u, height), DepthGrid::Complete, {-4});
+    }
+}
+
+// Exercise the scheduler, worker snapshot and owner-thread publication, including
+// an arrival while the old owner's worker is still holding its previous interval.
+TEST(AsyncWaterMeshing, SurfaceOwnerArrivalSupersedesPendingWaterAndRemeshesColumn) {
+    JobSystem jobs;
+    jobs.startup(1);
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = -64.0f;
+    params.caves_enabled = false;
+    SHIELD_WorldSystem world(&jobs, nullptr, params, 1337);
+    WaterSystem water(&jobs, &world);
+    water.SetBootPaused(true);
+    world.SetWaterSystem(&water);
+    const auto make_chunk = [&world](int y) {
+        auto chunk = std::make_shared<Chunk>(IVec3(0, y, 0));
+        world.GenerateChunkData(*chunk);
+        chunk->current_water_resolution.store(8);
+        chunk->has_water_sim.store(true);
+        chunk->water_level_data.assign(64u, 0.0f);
+        chunk->water_depth_mm.assign(64u, 64000);
+        chunk->water_flow_data.assign(64u, Vec2(0.0f));
+        chunk->water_sim_terrain_height.assign(64u, -64.0f);
+        chunk->current_lod.store(0);
+        chunk->set_state(ChunkState::Ready);
+        return chunk;
+    };
+    std::vector<std::shared_ptr<Chunk>> chunks;
+    for (const int y : {-5, -4, -3}) {
+        auto chunk = make_chunk(y);
+        ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+        chunks.push_back(std::move(chunk));
+    }
+    entt::registry registry;
+    const auto remesh = [&] {
+        world.update(registry, std::vector<Vec3>{}, nullptr, false);
+        world.wait_for_streaming_jobs();
+    };
+    remesh();
+    ASSERT_EQ(chunks.back()->water_mesh_vertices.size(), 64u * 4u);
+    ASSERT_EQ(world.renderable_chunks_view(), std::vector<Chunk*>{chunks.back().get()});
+    auto lower = make_chunk(-6);
+    {
+        PendingMeshGate gate(jobs, world);
+        chunks.front()->water_mesh_generated.store(false);
+        water.retain_mesh_invalidation(chunks.front()->get_id());
+        world.update(registry, std::vector<Vec3>{}, nullptr, false);
+        ASSERT_EQ(chunks.front()->pending_lod.load(), 0);
+        ASSERT_TRUE(world.adopt_streamed_chunk(lower));
+        gate.finish();
+        // Moving the lowest bound stales an empty water-only result. Its
+        // readiness must survive so the retry does not rebuild terrain.
+        EXPECT_EQ(chunks.front()->get_state(), ChunkState::Ready);
+        EXPECT_FALSE(chunks.front()->water_mesh_generated.load());
+    }
+    remesh();
+    EXPECT_EQ(chunks.front()->mesh_version.load(), 0u);
+    EXPECT_TRUE(lower->water_mesh_vertices.empty());
+    EXPECT_EQ(world.renderable_chunks_view(), std::vector<Chunk*>{chunks.back().get()});
+    auto owner = make_chunk(0);
+    {
+        PendingMeshGate gate(jobs, world);
+        chunks.back()->water_mesh_generated.store(false);
+        water.retain_mesh_invalidation(chunks.back()->get_id());
+        world.update(registry, std::vector<Vec3>{}, nullptr, false);
+        ASSERT_EQ(chunks.back()->pending_lod.load(), 0);
+        const auto previous_version = chunks.back()->water_mesh_version.load();
+        ASSERT_TRUE(world.adopt_streamed_chunk(owner));
+        EXPECT_EQ(chunks.back()->water_mesh_version.load(), previous_version);
+        EXPECT_TRUE(water.mesh_invalidations().contains(chunks.back()->get_id()));
+        gate.finish();
+        // The stale result must not retire the residency-change invalidation.
+        EXPECT_FALSE(chunks.back()->water_mesh_generated.load());
+    }
+    remesh();
+    for (const auto& chunk : chunks) {
+        EXPECT_TRUE(chunk->water_mesh_vertices.empty());
+        EXPECT_TRUE(chunk->water_mesh_indices.empty());
+    }
+    ASSERT_EQ(owner->water_mesh_vertices.size(), 64u * 4u);
+    EXPECT_EQ(owner->water_mesh_indices.size(), 64u * 6u);
+    EXPECT_EQ(world.renderable_chunks_view(), std::vector<Chunk*>{owner.get()});
+
+    // Normal terrain-height activation evicts Y=0, retaining the seabed band.
+    world.debug_set_streaming_radius_cap(1);
+    const int activation_frames = world.get_last_streaming_budget_stats().update_interval_frames;
+    const float camera_y = -static_cast<float>((RENDER_DISTANCE_UP + 3) * CHUNK_SIZE_Y);
+    for (int frame = 0; frame < activation_frames; ++frame) {
+        world.update(registry, Vec3(8.0f, camera_y, 8.0f), nullptr, false);
+        world.wait_for_streaming_jobs();
+    }
+    ASSERT_FALSE(world.find_streamed_chunk(IVec3(0)));
+    remesh();
+    ASSERT_EQ(chunks.back()->water_mesh_vertices.size(), 64u * 4u);
+    EXPECT_TRUE(chunks[0]->water_mesh_vertices.empty());
+    EXPECT_TRUE(chunks[1]->water_mesh_vertices.empty());
 }
 
 TEST(AsyncWaterMeshing, StackedWaterOnlyChunksEmitOnlyContainingSurface) {
@@ -1086,6 +1210,8 @@ TEST(AsyncWaterMeshing, NonOwnedWaterClearsPreviouslySelectedGeometry) {
     chunk->water_depth_mm.assign(16u, 2000);
     chunk->set_state(ChunkState::Ready);
     ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    ASSERT_TRUE(world.adopt_streamed_chunk(std::make_shared<Chunk>(IVec3(0, -1, 0))));
+    ASSERT_TRUE(world.adopt_streamed_chunk(std::make_shared<Chunk>(IVec3(0, 1, 0))));
     for (const float surface_y : {-1.0f,
                                   static_cast<float>(CHUNK_SIZE_Y),
                                   std::numeric_limits<float>::infinity(),

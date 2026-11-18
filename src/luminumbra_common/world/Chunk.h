@@ -493,6 +493,12 @@ public:
     std::atomic<u32> mesh_version{0};
     std::atomic<u32> water_mesh_version{0};
 
+    // Render-only owner-thread interval, copied into worker scratch chunks. The lowest
+    // resident owns below the column; each other resident starts at its own base;
+    // the highest owns above it. Standalone chunks own every finite surface.
+    double water_mesh_min_y = -std::numeric_limits<double>::infinity();
+    double water_mesh_max_y = std::numeric_limits<double>::infinity();
+
     // --- Water Simulation Data ---
     std::vector<f32> water_level_data;
     std::vector<Vec2> water_flow_data;
