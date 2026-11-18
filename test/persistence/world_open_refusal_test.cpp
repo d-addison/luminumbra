@@ -4888,6 +4888,65 @@ TEST_F(WorldOpenRefusal, ScheduleAdmissionIsAtomicAcrossReadersAndWriters) {
     EXPECT_EQ(session.WorldRevision(), revision);
 }
 
+TEST_F(WorldOpenRefusal, SessionWeatherRefusesScheduleInstallationAfterEverySetupPath) {
+    const auto script = ShortWeatherScript();
+    Luminumbra::Systems::WeatherSystem standalone(1337);
+    ASSERT_TRUE(standalone.SetSchedule(script));
+    const auto expect_sealed = [&](GameSession& session) {
+        const auto* const schedule = session.GetWeatherSchedule();
+        const auto identity = session.SystemConfigIdentity();
+        const auto hash = session.GetWeatherSystem()->ComputeWeatherSubHash();
+        const auto precipitation = session.GetWeatherSystem()->PrecipitationAt(Vec3(0.0f));
+        EXPECT_FALSE(session.GetWeatherSystem()->SetSchedule(script));
+        EXPECT_EQ(session.GetWeatherSchedule(), schedule);
+        EXPECT_EQ(session.SystemConfigIdentity(), identity);
+        EXPECT_EQ(session.GetWeatherSystem()->ComputeWeatherSubHash(), hash);
+        EXPECT_EQ(session.GetWeatherSystem()->PrecipitationAt(Vec3(0.0f)), precipitation);
+    };
+    const auto configure = [&](GameSession& session) {
+        session.SetRootPath(RootString());
+        session.SetJobSystem(&jobs);
+        session.SetActiveRegionsEnabled(false);
+    };
+    GameSession unscheduled, scheduled, reopened;
+    for (auto* session : {&unscheduled, &scheduled, &reopened}) {
+        configure(*session);
+    }
+    ASSERT_TRUE(unscheduled.CreateTransientWorld("Unscheduled", "1337", "default"));
+    {
+        SCOPED_TRACE("unscheduled create");
+        expect_sealed(unscheduled);
+    }
+    ASSERT_TRUE(scheduled.SetWeatherSchedule(script));
+    ASSERT_TRUE(scheduled.CreateWorld("Sealed schedule", "1337", "default"));
+    {
+        SCOPED_TRACE("scheduled create");
+        expect_sealed(scheduled);
+    }
+    ASSERT_TRUE(scheduled.SaveWorld());
+    ASSERT_TRUE(reopened.LoadWorld(scheduled.GetMetadata().worldId))
+        << reopened.GetWorldOpenError();
+    {
+        SCOPED_TRACE("load");
+        expect_sealed(reopened);
+    }
+    for (const bool prepared : {false, true}) {
+        SCOPED_TRACE(prepared ? "adopt prepared" : "load state");
+        GameSession target;
+        configure(target);
+        ASSERT_TRUE(target.CreateTransientWorld("Sealed adoption", "1337", "default"));
+        if (prepared) {
+            const auto state = GameSession::PrepareWorldState(
+                target.CaptureWorldPreparationOptions(), scheduled.GetWorldSaveDir());
+            ASSERT_TRUE(target.AdoptPreparedWorld(state)) << target.GetWorldOpenError();
+        } else {
+            ASSERT_TRUE(target.LoadWorldStateFrom(scheduled.GetWorldSaveDir()))
+                << target.GetWorldOpenError();
+        }
+        expect_sealed(target);
+    }
+}
+
 TEST(WeatherScheduleTest, ScheduledUpdatesNeverExposeProceduralStormsOrPerturbWind) {
     const auto script = ShortWeatherScript();
     const Vec3 anchor(96.0f, 18.0f, -192.0f);

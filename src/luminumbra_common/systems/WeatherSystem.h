@@ -171,8 +171,15 @@ public:
     // registry, the deterministic runtime contract  -- appended FIRST, append only, never
     // reusing +1..+11).
     explicit WeatherSystem(int world_seed);
-    // Setup only; invalid schedules and changes after any update or restore refuse.
+    // Setup only; invalid schedules and changes after any update, restore or
+    // LockSchedule refuse.
     bool SetSchedule(const WeatherSchedule& schedule);
+    // One-way: GameSession seals installation once its own setup has applied the
+    // session schedule, so callers of GetWeatherSystem() cannot install a schedule
+    // that bypasses the session's schedule identity and save metadata.
+    void LockSchedule() {
+        m_hasUpdatedOrRestored = true;
+    }
     // Actual saved-tick anchor, independent of the player's next respawn position.
     [[nodiscard]] const Vec3& ScheduleAnchor() const {
         return m_scheduleAnchor;
