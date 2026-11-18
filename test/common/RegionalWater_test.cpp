@@ -4023,7 +4023,7 @@ TEST(RegionalWaterAdmission, ZeroWholeWindowTickCarriesCreditIntoTheNextGrant) {
     EXPECT_EQ(completed[0].water_cells, 256u);
 }
 
-TEST(RegionalWaterAdmission, SleepingFundedColumnsReturnCreditWithoutResettingTheCursor) {
+TEST(RegionalWaterAdmission, SleepingFundedColumnsBoundCreditWithoutResettingTheCursor) {
     for (const std::uint64_t saved :
          {std::uint64_t{0}, world::water_share::kMaxDebt - 7 * world::water_share::kQ32}) {
         for (const bool one_awake : {false, true}) {
@@ -4069,11 +4069,95 @@ TEST(RegionalWaterAdmission, SleepingFundedColumnsReturnCreditWithoutResettingTh
             EXPECT_EQ(water.regional_work().visits.size(), executed);
             EXPECT_EQ(completed.size(), executed);
             EXPECT_EQ(ledger.records().at({0, 0}).water_cursor, 7u);
-            const ActiveRegionLedger::WaterDebts returned_credit{
-                {{0, 0}, saved + (7 - executed) * world::water_share::kQ32}};
+            const auto carried = std::min(saved + (7 - executed) * world::water_share::kQ32,
+                                          executed * world::water_share::kQ32);
+            ActiveRegionLedger::WaterDebts returned_credit;
+            if (carried != 0) {
+                returned_credit.emplace(RegionKey{0, 0}, carried);
+            }
             EXPECT_EQ(ledger.water_debts(), returned_credit);
         }
     }
+}
+
+void CheckSleepingOwnerProgress(bool wake) {
+    SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 777);
+    WaterSystem water(nullptr, &shield);
+    shield.SetWaterSystem(&water);
+    shield.set_durable_residency(true);
+    water.SetRegionalScheduling(true);
+    water.SetSimResolution(16);
+    auto ledger = PlanningLedger({{0, 0}, {1, 0}});
+    const std::array anchors{Vec3(24, 0, 24), Vec3(536, 0, 24)};
+    const auto columns = Planning::SelectColumns(anchors, {}, ledger);
+    ASSERT_EQ(columns.size, 18u); // Two equal nine-column owners; seven funded windows.
+    std::vector<IVec3> committed;
+    std::map<ChunkID, std::shared_ptr<Chunk>> chunks;
+    for (std::size_t i = 0; i < columns.size; ++i) {
+        const auto coords = Chunk::decode_id(columns.ids[i]);
+        auto chunk = TransactionChunkAt(coords, 1000, 16);
+        chunk->heightmap_data.assign(289, 1.0f);
+        chunk->set_state(ChunkState::Idle);
+        chunk->set_water_authority();
+        chunks.emplace(columns.ids[i], chunk);
+        committed.push_back(coords);
+    }
+    shield.remember_durable_chunks(committed);
+    shield.set_durable_chunk_loader(
+        [&](const IVec3& coords) { return chunks.at(Chunk::calculate_id(coords)); }, {});
+    entt::registry registry;
+    constexpr std::uint64_t sleeping_ticks = 24;
+    std::array<std::uint64_t, 2> awake_totals{};
+    const auto ticks = wake ? 2 * sleeping_ticks : sleeping_ticks;
+    for (std::uint64_t tick = 1; tick <= ticks; ++tick) {
+        SCOPED_TRACE(::testing::Message() << wake << ',' << tick);
+        const bool sleeping = tick <= sleeping_ticks;
+        for (const auto& [id, chunk] : chunks) {
+            chunk->is_water_sleeping.store(sleeping && Chunk::decode_id(id).x < 32);
+        }
+        const auto schedule = ledger.schedule(WorldClock(tick));
+        ASSERT_EQ(schedule.due.size(), 2u);
+        std::vector<world::RegionWork> completed;
+        water.UpdateRegionalFromSimulation(registry, anchors, ledger, schedule, completed);
+        const auto& work = water.regional_work();
+        EXPECT_EQ(work.global_windows, 7u);
+        EXPECT_EQ(work.residents_visited, 18u);
+        EXPECT_LE(work.participants_visited, 7u);
+        std::array<std::uint64_t, 2> steps{};
+        for (const auto id : work.visits) {
+            const auto owner = static_cast<std::size_t>(Chunk::decode_id(id).x / 32);
+            ASSERT_LT(owner, steps.size());
+            ++steps[owner];
+        }
+        // The awake owner receives at least its three whole windows every tick,
+        // even while the first owner's funded payloads all turn out to be idle.
+        EXPECT_GE(steps[1], 3u);
+        const auto idle_debt = ledger.water_debts().find({0, 0});
+        const auto carried = idle_debt == ledger.water_debts().end() ? 0 : idle_debt->second;
+        EXPECT_LE(carried, world::water_share::kMaxDebt);
+        if (sleeping) {
+            EXPECT_EQ(steps[0], 0u);
+            EXPECT_EQ(carried, 0u);
+        } else {
+            EXPECT_GE(steps[0], 3u);
+            awake_totals[0] += steps[0];
+            awake_totals[1] += steps[1];
+        }
+    }
+    if (wake) {
+        EXPECT_GE(awake_totals[0], 3 * sleeping_ticks);
+        EXPECT_GE(awake_totals[1], 3 * sleeping_ticks);
+        EXPECT_LE(awake_totals[0], awake_totals[1] + 1);
+        EXPECT_LE(awake_totals[1], awake_totals[0] + 1);
+    }
+}
+
+TEST(RegionalWaterAdmission, SleepingOwnerCannotStarveAnAwakeOwnerAcrossTicks) {
+    CheckSleepingOwnerProgress(false);
+}
+
+TEST(RegionalWaterAdmission, WakingOwnerResumesFairProgressWithoutIdleCredit) {
+    CheckSleepingOwnerProgress(true);
 }
 
 TEST(RegionalWaterAdmission, ReconciliationDoesNotRecreditFundedOwnersNearTheDebtCap) {

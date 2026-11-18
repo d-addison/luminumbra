@@ -409,7 +409,7 @@ void Reconcile(const Groups& groups,
                Plan& plan) {
     // Funding and execution emit the same sorted due owners: preparation is
     // ready in both simulation snapshots. Only funding sees the full rings.
-    // Never credit owners or advance a cursor against the narrowed snapshot.
+    // Never recredit owners or advance a cursor against the narrowed snapshot.
     // Simulation admission bounds this pass to 832 owners and candidates.
     for (const auto& funded : funding.regions) {
         const auto& group = groups.at(funded.owner);
@@ -432,8 +432,17 @@ void Reconcile(const Groups& groups,
         auto region = funded;
         region.windows = awarded;
         // Restoring unused grants cannot exceed funding's checked post-credit
-        // debt (<= kMaxDebt). This includes ticks without any whole-window grant.
+        // debt (<= kMaxDebt).
         region.debt += (funded.windows - awarded) * world::water_share::kQ32;
+        const auto demand = static_cast<std::uint64_t>(group.candidates.size());
+        if (demand < funded.windows) {
+            // Resolved idle grants must not keep earning credit and outrank
+            // executable owners forever. Keep at most one window per executable
+            // candidate (<= kMaxResidents, so this Q32 product fits uint64_t).
+            // Without a grant, demand is still unknown: retain fractional credit
+            // and saved debt until a later funded snapshot can execute it.
+            region.debt = std::min(region.debt, demand * world::water_share::kQ32);
+        }
         plan.regions.push_back(region);
     }
 }
