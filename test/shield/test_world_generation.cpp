@@ -403,9 +403,12 @@ TEST_F(WorldGenerationTest, LOD_MeshingPreservesUpwardTriangleWindingOnHorizonta
 // =====================================================================================
 
 TEST_F(WorldAndWaterTest, WaterMeshIsGeneratedForSubmergedChunk) {
-    Chunk chunk({0, 0, 0});
+    // The column's vertical owner (the band's top margin, above the terrain) emits.
+    const auto span = world_system->water_presentation_vertical_span(IVec2(0, 0));
+    Chunk chunk({0, span.y, 0});
     world_system->GenerateChunkData(chunk);
-    chunk.water_level_data.assign(WATER_SIM_RESOLUTION_X * WATER_SIM_RESOLUTION_Z, SEA_LEVEL);
+    const float level = static_cast<float>(span.y * CHUNK_SIZE_Y + CHUNK_SIZE_Y / 2);
+    chunk.water_level_data.assign(WATER_SIM_RESOLUTION_X * WATER_SIM_RESOLUTION_Z, level);
     chunk.has_water_sim.store(true);
     World::MarchingCubes::GenerateWaterMesh(*water_system, *world_system, chunk);
     ASSERT_FALSE(chunk.water_mesh_vertices.empty());

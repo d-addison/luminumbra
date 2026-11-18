@@ -2647,8 +2647,10 @@ TEST(RegionalWaterTransaction, DispatchedMeshingSnapshotSurvivesStagingAndPublis
     EXPECT_TRUE(chunks[0]->pending_mesh_ready.load());
     EXPECT_FALSE(chunks[0]->pending_mesh_failed.load());
     ASSERT_EQ(chunks[0]->pending_water_mesh_vertices.size(), 64u * 4u);
+    // Vertices are chunk-local to the owner chunk.
+    const float local_level = 1000.0f - static_cast<float>(owner_y * CHUNK_SIZE_Y);
     for (const auto& vertex : chunks[0]->pending_water_mesh_vertices) {
-        EXPECT_EQ(vertex.position.y, 1000.0f);
+        EXPECT_EQ(vertex.position.y, local_level);
     }
 }
 
