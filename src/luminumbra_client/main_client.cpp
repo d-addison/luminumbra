@@ -53,6 +53,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "core/Profiler.h"
 #include "core/RuntimeScenarioConfig.h"
 #include "core/ScenarioRunner.h"
+#include "core/TimelapseVista.h"
 #include "debug/DebugCamera.h" // deterministic feature locator (--debug-goto cave|doline)
 #include "debug/DeveloperConsole.h"
 #include "debug/DeveloperLogAttachment.h"
@@ -846,7 +847,7 @@ static bool CaptureTimelapseFrame(ClientAppContext& g_app,
     // --timelapse: dump the rendered frame, then fast-forward sim-time (+ the day clock)
     // for the next one. Pair with --no-ui so no overlay is baked into the frame.
     if (g_app.capture.timelapse_frames > 0 && currentState == GameState::IN_GAME && gameSession) {
-        if (g_app.capture.timelapse_settle < kTimelapseSettleFrames) {
+        if (g_app.capture.timelapse_settle < g_app.capture.timelapse_settle_frames) {
             renderPipeline.set_time_of_day(
                 g_app.capture.timelapse_tod); // settle at the start time-of-day
             ++g_app.capture.timelapse_settle; // let the world stream/settle before frame 0
@@ -2021,6 +2022,14 @@ int main(int argc, char* argv[]) {
         g_app.capture.timelapse_creatures = true; // calm mode is a creature scenario
     g_app.capture.timelapse_fire = HasCommandLineFlag(argc, argv, "--timelapse-fire");
     g_app.capture.timelapse_dig = HasCommandLineFlag(argc, argv, "--timelapse-dig");
+    g_app.capture.timelapse_vista = HasCommandLineFlag(argc, argv, "--timelapse-vista");
+    g_app.capture.timelapse_settle_frames = Luminumbra::TimelapseVista::ClampSettleFrames(
+        GetCommandLineIntOption(argc, argv, "--timelapse-settle", kTimelapseSettleFrames),
+        kTimelapseSettleFrames);
+    if (const auto pan = Luminumbra::TimelapseVista::ParsePanDegrees(
+            GetCommandLineOption(argc, argv, "--timelapse-pan", ""))) {
+        g_app.capture.timelapse_pan = *pan;
+    }
     g_app.capture.timelapse_drain = HasCommandLineFlag(argc, argv, "--timelapse-drain");
     g_app.capture.timelapse_rain = HasCommandLineFlag(argc, argv, "--timelapse-rain");
     g_app.capture.timelapse_rain_mm =
@@ -5221,7 +5230,10 @@ int main(int argc, char* argv[]) {
                     // toward the nearest prey) reads as clear motion across the ground, and
                     // nobody runs out of frame as they spread.
                     const glm::vec3 camPos =
-                        g_app.capture.timelapse_rain
+                        g_app.capture.timelapse_vista
+                            ? Luminumbra::TimelapseVista::VistaFraming(glm::vec3(sp.x, sp.y, sp.z))
+                                  .position
+                        : g_app.capture.timelapse_rain
                             ? glm::vec3(sp.x + 2.0f,
                                         sp.y + 16.0f,
                                         sp.z + 26.0f) // elevated overlook for rain pooling
@@ -5237,7 +5249,10 @@ int main(int argc, char* argv[]) {
                         : showcase ? glm::vec3(sp.x, sp.y + 4.0f, sp.z + 22.0f)
                                    : glm::vec3(sp.x, sp.y + 7.0f, sp.z + 20.0f);
                     const glm::vec3 target =
-                        g_app.capture.timelapse_rain
+                        g_app.capture.timelapse_vista
+                            ? Luminumbra::TimelapseVista::VistaFraming(glm::vec3(sp.x, sp.y, sp.z))
+                                  .target
+                        : g_app.capture.timelapse_rain
                             ? glm::vec3(sp.x,
                                         sp.y - 2.0f,
                                         sp.z) // look down over the filling valley
@@ -5250,6 +5265,10 @@ int main(int argc, char* argv[]) {
                     const glm::vec3 d = glm::normalize(target - camPos);
                     g_camera->Position = camPos;
                     g_camera->Yaw = glm::degrees(std::atan2(d.z, d.x));
+                    if (g_app.capture.timelapse_vista) {
+                        g_camera->Yaw += Luminumbra::TimelapseVista::PanYawOffset(
+                            g_app.capture.timelapse_pan, g_app.capture.timelapse_captured);
+                    }
                     g_camera->Pitch = glm::degrees(std::asin(std::clamp(d.y, -1.0f, 1.0f)));
                     g_camera->updateCameraVectors();
                 }
@@ -5259,7 +5278,7 @@ int main(int argc, char* argv[]) {
                 // block.
                 if (g_app.capture.timelapse_drain && g_camera && gameSession &&
                     gameSession->GetWorldSystem() &&
-                    g_app.capture.timelapse_settle >= kTimelapseSettleFrames) {
+                    g_app.capture.timelapse_settle >= g_app.capture.timelapse_settle_frames) {
                     auto* ws = gameSession->GetWorldSystem();
                     if (!g_app.capture.drain_state.init) {
                         // Anchor on a real SHORELINE — deep water beside a tall DRY bank — so
@@ -5285,7 +5304,10 @@ int main(int argc, char* argv[]) {
                                 tlz);
                         }
                     }
-                    if (g_app.capture.drain_state.init) {
+                    // Vista keeps its horizon framing; the drain setup above still runs.
+                    if (g_app.capture.drain_state.init &&
+                        Luminumbra::TimelapseVista::ScenarioMayFrameCamera(
+                            g_app.capture.timelapse_vista)) {
                         const glm::vec3 P(g_app.capture.drain_state.P.x,
                                           g_app.capture.drain_state.P.y,
                                           g_app.capture.drain_state.P.z);
@@ -5312,7 +5334,7 @@ int main(int argc, char* argv[]) {
                 // it.
                 if (g_app.capture.timelapse_rain && g_camera && gameSession &&
                     gameSession->GetWorldSystem() &&
-                    g_app.capture.timelapse_settle >= kTimelapseSettleFrames) {
+                    g_app.capture.timelapse_settle >= g_app.capture.timelapse_settle_frames) {
                     auto* ws = gameSession->GetWorldSystem();
                     if (!g_app.capture.drain_state.init) {
                         ws->SetWaterHydrology(
@@ -5335,7 +5357,10 @@ int main(int argc, char* argv[]) {
                                                  bed);
                         }
                     }
-                    if (g_app.capture.drain_state.init) {
+                    // Vista keeps its horizon framing; rain and the basin edit still run.
+                    if (g_app.capture.drain_state.init &&
+                        Luminumbra::TimelapseVista::ScenarioMayFrameCamera(
+                            g_app.capture.timelapse_vista)) {
                         const glm::vec3 P(g_app.capture.drain_state.P.x,
                                           g_app.capture.drain_state.P.y,
                                           g_app.capture.drain_state.P.z);
