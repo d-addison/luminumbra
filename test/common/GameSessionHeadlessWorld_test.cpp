@@ -5123,6 +5123,38 @@ TEST(GameSessionHeadlessWorldTest, QueuedRegionWorkRefusesSaveUntilTickCompletes
     EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(session));
 }
 
+TEST(GameSessionHeadlessWorldTest, DormantEvictionProfileDoesNotAffectDisabledRegions) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    GameSession candidate(GameSession::AuthorityProfileOptions{.residency_free_eviction = true},
+                          GameSession::AuthorityProfileTestOnly{});
+    for (auto* current : {&session, &candidate}) {
+        current->SetRootPath(root.root_string());
+        current->SetJobSystem(&jobs);
+        current->SetActiveRegionsEnabled(false);
+        ASSERT_TRUE(current->CreateTransientWorld("Disabled regions", "1337", "default"));
+    }
+    EXPECT_EQ(SessionWorldHash(session), SessionWorldHash(candidate));
+    const auto dt = session.GetSimulationClock().fixed_dt();
+    for (int tick = 0; tick < 2; ++tick) {
+        for (auto* current : {&session, &candidate}) {
+            current->RecordActiveRegionWork({{40, -40}, 1, 0, 0, 0});
+            ASSERT_EQ(current->TickSimulation(dt), 1u);
+            ASSERT_FALSE(current->GetRegionSchedulerFault());
+            EXPECT_TRUE(current->GetActiveRegionLedger().records().empty());
+        }
+        EXPECT_EQ(session.GetRegionSchedule(), candidate.GetRegionSchedule());
+        EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(),
+                  candidate.GetActiveRegionLedger().canonical_bytes());
+        EXPECT_EQ(session.GetActiveRegionLedger().encode(),
+                  candidate.GetActiveRegionLedger().encode());
+        EXPECT_EQ(session.ComputeChunkStateHash(), candidate.ComputeChunkStateHash());
+        EXPECT_EQ(SessionWorldHash(session), SessionWorldHash(candidate));
+    }
+}
+
 TEST(GameSessionHeadlessWorldTest, IdleRetentionMatchesWorkAndAllResidentOwnership) {
     using Luminumbra::world::ActiveRegionLedger;
     using Luminumbra::world::RegionKey;
@@ -5222,6 +5254,171 @@ TEST(GameSessionHeadlessWorldTest, IdleRetentionMatchesWorkAndAllResidentOwnersh
     EXPECT_EQ(session.GetActiveRegionLedger().encode(), expected.encode());
     ASSERT_EQ(session.GetActiveRegionLedger().records().size(), 4u);
     for (const auto key : {resident, pristine, loading, pristine_loading}) {
+        EXPECT_TRUE(session.GetActiveRegionLedger().records().contains(key));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, IdleRetentionUsesWorkRegardlessOfStreamedResidency) {
+    using Luminumbra::world::ActiveRegionLedger;
+    using Luminumbra::world::RegionKey;
+    using Luminumbra::world::RegionWork;
+    using Luminumbra::world::WorldClock;
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    const GameSession::AuthorityProfileOptions profile{.residency_free_eviction = true};
+    GameSession session(profile, GameSession::AuthorityProfileTestOnly{}),
+        peer(profile, GameSession::AuthorityProfileTestOnly{});
+    for (auto* current : {&session, &peer}) {
+        current->SetRootPath(root.root_string());
+        current->SetJobSystem(&jobs);
+        current->SetActiveRegionsEnabled(true);
+    }
+    ASSERT_TRUE(session.CreateWorld("Idle retention", "1337", "default"));
+    ASSERT_TRUE(session.SaveWorldState());
+
+    const RegionKey pending{40, -40}, duplicate{41, -40}, zero_count{42, -40};
+    const RegionKey resident{43, -40}, pristine{44, -40}, unowned{45, -40};
+    const RegionKey loading{46, -40}, pristine_loading{47, -40};
+    const RegionKey edited{48, -40}, plant_owner{49, -40};
+    const std::array keys{pending,
+                          duplicate,
+                          zero_count,
+                          resident,
+                          pristine,
+                          unowned,
+                          loading,
+                          pristine_loading,
+                          edited,
+                          plant_owner};
+    ActiveRegionLedger staged;
+    staged.set_local_anchor(session.GetMetadata().spawnPoint);
+    for (const auto key : keys) {
+        staged.pin(key, true, WorldClock{});
+        staged.pin(key, false, WorldClock{});
+    }
+    staged.mark_edited(edited, WorldClock{});
+    staged.mark_edited(resident, WorldClock{});
+    staged.mark_edited(loading, WorldClock{});
+    std::uint64_t plant_id = 0;
+    ASSERT_TRUE(staged.allocate_persistent_id(plant_id));
+    // Stage just before retention without advancing thousands of simulation ticks.
+    const WorldClock before_idle(ActiveRegionLedger::kIdleEvictionTicks - 1);
+    staged.schedule(before_idle, std::span<const Luminumbra::Vec3>{});
+    const auto save = session.GetWorldSaveDir();
+    auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    before_idle.write_metadata(metadata);
+    ASSERT_TRUE(
+        P::WorldSaveService::save_metadata_and_active_regions(metadata.dump(), staged, save));
+    ASSERT_TRUE(session.LoadWorldStateFrom(save)) << session.GetWorldOpenError();
+    ASSERT_TRUE(peer.LoadWorld(session.GetMetadata().worldId)) << peer.GetWorldOpenError();
+    for (auto* current : {&session, &peer}) {
+        ASSERT_EQ(current->GetActiveRegionLedger().records().size(), keys.size());
+        current->SetReplicatedSimulationAnchors({});
+        // A dormant runtime plant owns its region even without pending growth work.
+        auto& registry = current->GetRegistry();
+        const auto plant = registry.create();
+        registry.emplace<Luminumbra::Components::PlantTag>(plant);
+        registry.emplace<Luminumbra::Components::PlantRegionComponent>(
+            plant,
+            Luminumbra::Components::PlantRegionComponent{
+                plant_id, plant_owner.x, plant_owner.z, 0});
+        registry.emplace<Luminumbra::Components::SimulationIdentityComponent>(plant, plant_id);
+    }
+
+    for (const auto key : {resident, pristine, loading, pristine_loading}) {
+        auto chunk =
+            std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(key.x * 32, 0, key.z * 32));
+        chunk->set_state(key == loading || key == pristine_loading ? Luminumbra::ChunkState::Loading
+                                                                   : Luminumbra::ChunkState::Idle);
+        chunk->heightmap_data = {8.0f};
+        if (key == resident || key == loading)
+            chunk->mark_voxel_data_dirty();
+        ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+        // Adoption settles populated Loading chunks; explicitly exercise an in-flight resident.
+        if (key == loading || key == pristine_loading)
+            chunk->set_state(Luminumbra::ChunkState::Loading);
+        // Both peers have the same chunk authority, including its lifecycle state.
+        // Only this session has the extra pristine residents and Loading cache.
+        if (key == resident || key == loading) {
+            auto copy = std::make_shared<Luminumbra::Chunk>(chunk->get_coords());
+            copy->set_state(Luminumbra::ChunkState::Idle);
+            copy->heightmap_data = chunk->heightmap_data;
+            copy->mark_voxel_data_dirty();
+            ASSERT_TRUE(peer.GetWorldSystem()->adopt_streamed_chunk(copy));
+            copy->set_state(chunk->get_state());
+        }
+        // Only genuine edit history retains these records, independent of chunk lifecycle.
+        ASSERT_EQ(session.GetActiveRegionLedger().records().at(key).edited,
+                  key == resident || key == loading);
+    }
+    const std::array work{RegionWork{pending, 3, 0, 0, 0},
+                          RegionWork{duplicate, 1, 0, 0, 0},
+                          RegionWork{duplicate, 2, 0, 0, 0},
+                          RegionWork{zero_count, 0, 0, 0, 0},
+                          RegionWork{zero_count, 0, 0, 0, 0}};
+    for (auto* current : {&session, &peer}) {
+        for (const auto& entry : work)
+            current->RecordActiveRegionWork(entry);
+    }
+    EXPECT_EQ(SessionWorldHash(session), SessionWorldHash(peer));
+    auto expected = session.GetActiveRegionLedger();
+    const std::array owned_keys{pending, duplicate, zero_count, plant_owner};
+    const auto expected_schedule = expected.schedule(
+        WorldClock(ActiveRegionLedger::kIdleEvictionTicks),
+        std::span<const Luminumbra::Vec3>{},
+        work,
+        {},
+        [&owned_keys](RegionKey key) {
+            return std::find(owned_keys.begin(), owned_keys.end(), key) != owned_keys.end();
+        });
+    const auto dt = session.GetSimulationClock().fixed_dt();
+    for (auto* current : {&session, &peer}) {
+        ASSERT_EQ(current->TickSimulation(dt), 1u);
+        ASSERT_FALSE(current->GetRegionSchedulerFault());
+    }
+    EXPECT_EQ(session.GetRegionSchedule(), peer.GetRegionSchedule());
+    EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(),
+              peer.GetActiveRegionLedger().canonical_bytes());
+    EXPECT_EQ(session.GetActiveRegionLedger().encode(), peer.GetActiveRegionLedger().encode());
+    EXPECT_EQ(session.ComputeChunkStateHash(), peer.ComputeChunkStateHash());
+    EXPECT_EQ(SessionWorldHash(session), SessionWorldHash(peer));
+    EXPECT_EQ(session.GetRegionSchedule(), expected_schedule);
+    EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), expected.canonical_bytes());
+    EXPECT_EQ(session.GetActiveRegionLedger().encode(), expected.encode());
+    ASSERT_EQ(session.GetActiveRegionLedger().records().size(), owned_keys.size() + 3);
+    for (const auto key : owned_keys) {
+        EXPECT_TRUE(session.GetActiveRegionLedger().records().contains(key));
+    }
+    for (const auto key : {edited, resident, loading}) {
+        EXPECT_TRUE(session.GetActiveRegionLedger().records().contains(key));
+    }
+    for (const auto key : {pristine, unowned, pristine_loading}) {
+        EXPECT_FALSE(session.GetActiveRegionLedger().records().contains(key));
+    }
+
+    // Consumed work must stop owning records on the next scheduling call.
+    const auto next_schedule =
+        expected.schedule(WorldClock(ActiveRegionLedger::kIdleEvictionTicks + 1),
+                          std::span<const Luminumbra::Vec3>{},
+                          {},
+                          {},
+                          [plant_owner](RegionKey key) { return key == plant_owner; });
+    for (auto* current : {&session, &peer}) {
+        ASSERT_EQ(current->TickSimulation(dt), 1u);
+        ASSERT_FALSE(current->GetRegionSchedulerFault());
+    }
+    EXPECT_EQ(session.GetRegionSchedule(), peer.GetRegionSchedule());
+    EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(),
+              peer.GetActiveRegionLedger().canonical_bytes());
+    EXPECT_EQ(session.GetActiveRegionLedger().encode(), peer.GetActiveRegionLedger().encode());
+    EXPECT_EQ(session.ComputeChunkStateHash(), peer.ComputeChunkStateHash());
+    EXPECT_EQ(SessionWorldHash(session), SessionWorldHash(peer));
+    EXPECT_EQ(session.GetRegionSchedule(), next_schedule);
+    EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), expected.canonical_bytes());
+    EXPECT_EQ(session.GetActiveRegionLedger().encode(), expected.encode());
+    ASSERT_EQ(session.GetActiveRegionLedger().records().size(), 4u);
+    for (const auto key : {edited, resident, loading, plant_owner}) {
         EXPECT_TRUE(session.GetActiveRegionLedger().records().contains(key));
     }
 }

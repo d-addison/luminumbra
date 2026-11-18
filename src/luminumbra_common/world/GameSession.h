@@ -107,7 +107,24 @@ struct PersistenceStatus {
 
 class GameSession {
 public:
+    // Dormant caller contract for tests; never configured, serialized or hashed.
+    struct AuthorityProfileOptions {
+        // Slice I will bind this predicate to its negotiated authority revision.
+        bool residency_free_eviction = false;
+    };
+
+    // Selects the test-only opt-in constructor below.
+    struct AuthorityProfileTestOnly {
+        explicit AuthorityProfileTestOnly() = default;
+    };
+
     GameSession();
+    // Link boundary: this constructor is DEFINED only in
+    // test/common/GameSessionAuthorityProfileTestSeam.cpp, which is compiled into test
+    // executables and never into a src/ library. A runtime, client, server or replay
+    // binary that names it fails to link, so nothing can opt in before slice I ties
+    // the option to negotiated identity.
+    GameSession(const AuthorityProfileOptions& authority_profile, AuthorityProfileTestOnly);
     ~GameSession();
 
     // Initialize a new world with the given parameters. Refusal before adoption
@@ -688,6 +705,11 @@ public:
     std::filesystem::path GetSaveRootPath() const;
 
 private:
+    struct AuthorityProfileTag {};
+    // The single real constructor; the default and the test-only constructors delegate here.
+    GameSession(const AuthorityProfileOptions& authority_profile, AuthorityProfileTag);
+
+    const AuthorityProfileOptions m_authorityProfile;
     void DisableFarWorldAuthorityProducer();
     std::unique_ptr<World::FarWorldAuthorityProducer> m_farWorldAuthorityProducer;
     bool m_farWorldSourceNeedsRefresh = false;
