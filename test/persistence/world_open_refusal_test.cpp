@@ -2522,13 +2522,805 @@ TEST_F(WorldOpenRefusal, ServerWaterHashesAreIndependentOfSaveTimingWithoutRegio
         const auto inputs = session->GetWorldSystem()->water_authority_input_items();
         const auto before = ReadServerWaterHashes(runner);
         ExpectSameServerWaterHashes(ReadServerWaterHashes(runner), before);
-        if (full_snapshot)
+        if (full_snapshot) {
             ASSERT_GT(runner.SaveFullSnapshot(), 0u);
-        else
+        } else {
             ASSERT_TRUE(session->SaveWorldState());
+        }
         ExpectSameServerWaterHashes(ReadServerWaterHashes(runner), before);
         // Hashes and saves must find the water queue already drained by the host tick.
         EXPECT_EQ(session->GetWorldSystem()->water_authority_input_items(), inputs);
+    }
+}
+
+void ExpectCaptureSubHashes(const Persistence::WorldStreamingStateSubHashes& actual,
+                            const Persistence::WorldStreamingStateSubHashes& expected) {
+    EXPECT_EQ(actual.terrain, expected.terrain);
+    EXPECT_EQ(actual.mesh, expected.mesh);
+    EXPECT_EQ(actual.water, expected.water);
+    EXPECT_EQ(actual.entities, expected.entities);
+    EXPECT_EQ(actual.wind, expected.wind);
+    EXPECT_EQ(actual.weather, expected.weather);
+    EXPECT_EQ(actual.aether, expected.aether);
+    EXPECT_EQ(actual.aether_state, expected.aether_state);
+}
+
+TEST(AuthorityHashCapture, PreparationKeepsLegacyPrecedenceAndRegionalFolds) {
+    const auto make_owner = [](int x, float height, ChunkState lifecycle) {
+        auto chunk = std::make_shared<Chunk>(IVec3(x, 0, 0));
+        chunk->heightmap_data = {height};
+        chunk->mark_voxel_data_dirty();
+        chunk->set_state(lifecycle);
+        return chunk;
+    };
+    const auto live = make_owner(0, 1.0f, ChunkState::Idle);
+    const auto stale = make_owner(0, 9.0f, ChunkState::Idle);
+    const auto parked = make_owner(1, 2.0f, ChunkState::Idle);
+    const auto loading = make_owner(1, 8.0f, ChunkState::Loading);
+    const auto pristine = std::make_shared<Chunk>(IVec3(2, 0, 0));
+    const auto outside = make_owner(32, 7.0f, ChunkState::Idle);
+    Persistence::RegionDigestInputs inputs{.live = {nullptr, outside, pristine, loading, live},
+                                           .parked = {stale, parked},
+                                           .durable = {},
+                                           .require_index = false,
+                                           .ground_object_bytes = "ground",
+                                           .field_page_bytes = "pages"};
+    WorldStreamingState expected;
+    ASSERT_TRUE(expected.insert_chunk(live));
+    ASSERT_TRUE(expected.insert_chunk(parked));
+    auto legacy = Persistence::ComputeRegionContentHash(expected);
+    legacy = Persistence::StableChecksum(legacy + "|ground:" + inputs.ground_object_bytes);
+    legacy = Persistence::StableChecksum(legacy + "|pages:" + inputs.field_page_bytes);
+    const auto expected_digest = std::stoull(legacy, nullptr, 16);
+    Persistence::RegionDigestOperation operation({}, false);
+    const auto prepared = operation.prepare({0, 0}, inputs);
+    ASSERT_EQ(prepared.chunks.size(), 2u);
+    EXPECT_EQ(prepared.chunks[0], live);
+    EXPECT_EQ(prepared.chunks[1], parked);
+    EXPECT_EQ(Persistence::HashPreparedRegionDigest(prepared), expected_digest);
+    EXPECT_EQ(operation.digest({0, 0}, inputs), expected_digest);
+    EXPECT_EQ(WorldSaveService::region_simulation_digest({}, {0, 0}, inputs), expected_digest);
+    inputs.ground_object_bytes = "changed";
+    inputs.field_page_bytes.clear();
+    // Prepared bytes retain the observation even if the caller reuses its input buffer.
+    EXPECT_EQ(Persistence::HashPreparedRegionDigest(prepared), expected_digest);
+}
+
+void ExpectSelectedCaptureParts(const WorldStreamingState& state,
+                                std::uint64_t cursor,
+                                const std::optional<std::string>& projection,
+                                const Persistence::AuthorityRuntimeHashes& runtime,
+                                const Persistence::AuthorityHashCapture& capture) {
+    namespace P = Persistence;
+    for (const auto part : {P::AuthorityCaptureParts::Chunk,
+                            P::AuthorityCaptureParts::Composite,
+                            P::AuthorityCaptureParts::SubHashes,
+                            P::AuthorityCaptureParts::StreamedAndSubHashes}) {
+        const auto selected =
+            P::CaptureAuthorityHashes(state, cursor, projection, "entities", runtime, part);
+        ASSERT_EQ(selected.status, P::AuthorityCaptureStatus::Ready);
+        ASSERT_TRUE(selected.capture.has_value());
+        if (!selected.capture) {
+            return;
+        }
+        const bool chunk_slot =
+            part == P::AuthorityCaptureParts::Chunk || part == P::AuthorityCaptureParts::Composite;
+        const bool sub_slot = part == P::AuthorityCaptureParts::SubHashes ||
+                              part == P::AuthorityCaptureParts::StreamedAndSubHashes;
+        EXPECT_EQ(selected.capture->streamed,
+                  part == P::AuthorityCaptureParts::SubHashes ? "" : capture.streamed);
+        EXPECT_EQ(selected.capture->chunk, chunk_slot ? capture.chunk : "");
+        EXPECT_EQ(selected.capture->composite,
+                  part == P::AuthorityCaptureParts::Composite ? capture.composite : "");
+        ExpectCaptureSubHashes(selected.capture->sub,
+                               sub_slot ? capture.sub : P::WorldStreamingStateSubHashes{});
+    }
+}
+
+TEST(AuthorityHashCapture, PinsEveryLegacyOutputSlotAtZeroAndNonzeroCursor) {
+    namespace P = Persistence;
+    WorldStreamingState state;
+    const P::AuthorityRuntimeHashes runtime{.wind = "wind",
+                                            .weather = "weather",
+                                            .aether = "aether",
+                                            .scent = "scent",
+                                            .ecology = "ecology",
+                                            .plant = "plant",
+                                            .aether_state = "aether_state"};
+    struct Golden {
+        std::uint64_t cursor;
+        const char* streamed;
+        const char* regional;
+        const char* composite_off;
+        const char* composite_on;
+        const char* water;
+    };
+    const std::array goldens{Golden{0,
+                                    "6301549f9c94d118",
+                                    "29b901a491f1be19",
+                                    "d967df6330fef550",
+                                    "4fe511ab409af347",
+                                    "da9fb1d4a463ef7d"},
+                             Golden{7,
+                                    "8ca2f12decbb595c",
+                                    "29bc87a491f4d7a2",
+                                    "cb223da985a6d7be",
+                                    "d9afe0524f020fa9",
+                                    "da9fb1d4a463ef7d|waterSimCursor:v1:bd9e024ffae20e07"}};
+    for (const auto& golden : goldens) {
+        for (const bool regions : {false, true}) {
+            SCOPED_TRACE(regions);
+            SCOPED_TRACE(golden.cursor);
+            const std::optional<std::string> projection =
+                regions ? std::optional("authoritative_chunks:v2:" + std::to_string(golden.cursor) +
+                                        ":")
+                        : std::nullopt;
+            const auto result =
+                P::CaptureAuthorityHashes(state, golden.cursor, projection, "entities", runtime);
+            ASSERT_EQ(result.status, P::AuthorityCaptureStatus::Ready);
+            ASSERT_TRUE(result.capture.has_value());
+            if (!result.capture) {
+                return;
+            }
+            const auto& capture = result.capture.value();
+            EXPECT_EQ(capture.streamed, golden.streamed);
+            EXPECT_EQ(capture.streamed, P::ComputeWorldStreamingStateHash(state, golden.cursor));
+            EXPECT_EQ(capture.streamed, WorldSaveService{}.world_hash(state, golden.cursor));
+            EXPECT_EQ(capture.chunk, regions ? golden.regional : golden.streamed);
+            EXPECT_EQ(capture.composite, regions ? golden.composite_on : golden.composite_off);
+            EXPECT_EQ(capture.chunk,
+                      regions ? P::StableChecksum(projection.value_or(""))
+                              : P::ComputeWorldStreamingStateHash(state, golden.cursor));
+            EXPECT_EQ(capture.composite,
+                      P::ComposeWorldHash(capture.chunk,
+                                          runtime.wind,
+                                          runtime.weather,
+                                          runtime.aether,
+                                          runtime.scent,
+                                          runtime.ecology,
+                                          runtime.plant));
+            const P::AuthorityRegionalInputs owners{
+                .save_dir = {}, .require_index = false, .regions = {}};
+            const auto owned =
+                P::CaptureAuthorityHashes(state, golden.cursor, owners, "entities", runtime);
+            ASSERT_TRUE(owned.capture.has_value());
+            if (!owned.capture) {
+                return;
+            }
+            EXPECT_EQ(owned.capture->chunk, golden.regional);
+            EXPECT_EQ(owned.capture->composite, golden.composite_on);
+            ASSERT_NO_FATAL_FAILURE(
+                ExpectSelectedCaptureParts(state, golden.cursor, projection, runtime, capture));
+            EXPECT_EQ(capture.sub.terrain, "7584c0f6de3e387b");
+            EXPECT_EQ(capture.sub.mesh, "594db6ffa2560b29");
+            EXPECT_EQ(capture.sub.water, golden.water);
+            EXPECT_EQ(capture.sub.entities, "935d0fb07bb3822a");
+            EXPECT_EQ(capture.sub.wind, "wind");
+            EXPECT_EQ(capture.sub.weather, "weather");
+            EXPECT_EQ(capture.sub.aether, "aether");
+            EXPECT_EQ(capture.sub.aether_state, "aether_state");
+            // Independent pre-capture projections remain the sub-slot oracle.
+            const auto legacy_sub =
+                P::ComputeWorldStreamingStateSubHashes(state, "entities", golden.cursor);
+            EXPECT_EQ(capture.sub.terrain, legacy_sub.terrain);
+            EXPECT_EQ(capture.sub.mesh, legacy_sub.mesh);
+            EXPECT_EQ(capture.sub.water, legacy_sub.water);
+            EXPECT_EQ(capture.sub.entities, legacy_sub.entities);
+        }
+    }
+    const auto missing = P::CaptureAuthorityHashes(state, std::nullopt);
+    EXPECT_EQ(missing.status, P::AuthorityCaptureStatus::MissingCursor);
+    EXPECT_FALSE(missing.capture.has_value());
+}
+
+TEST(AuthorityHashCapture, RuntimeEntityCursorAndRegionalInputsSelectTheirLegacySlots) {
+    namespace P = Persistence;
+    WorldStreamingState state;
+    const P::AuthorityRuntimeHashes runtime{.wind = "wind",
+                                            .weather = "weather",
+                                            .aether = "aether",
+                                            .scent = "scent",
+                                            .ecology = "ecology",
+                                            .plant = "plant",
+                                            .aether_state = "state"};
+    const std::array members{&P::AuthorityRuntimeHashes::wind,
+                             &P::AuthorityRuntimeHashes::weather,
+                             &P::AuthorityRuntimeHashes::aether,
+                             &P::AuthorityRuntimeHashes::scent,
+                             &P::AuthorityRuntimeHashes::ecology,
+                             &P::AuthorityRuntimeHashes::plant,
+                             &P::AuthorityRuntimeHashes::aether_state};
+    for (const bool regions : {false, true}) {
+        SCOPED_TRACE(regions);
+        const std::optional<std::string> projection =
+            regions ? std::optional<std::string>{"authoritative_chunks:v2:0:"} : std::nullopt;
+        const auto baseline = P::CaptureAuthorityHashes(state, 0, projection, "entities", runtime);
+        ASSERT_TRUE(baseline.capture.has_value());
+        if (!baseline.capture) {
+            return;
+        }
+        const auto& before = baseline.capture.value();
+        for (const auto member : members) {
+            auto changed = runtime;
+            changed.*member += "changed";
+            const auto result =
+                P::CaptureAuthorityHashes(state, 0, projection, "entities", changed);
+            ASSERT_TRUE(result.capture.has_value());
+            if (!result.capture) {
+                return;
+            }
+            const auto& after = result.capture.value();
+            EXPECT_EQ(after.streamed, before.streamed);
+            EXPECT_EQ(after.chunk, before.chunk);
+            EXPECT_EQ(after.composite == before.composite,
+                      member == &P::AuthorityRuntimeHashes::aether_state);
+            auto expected = before.sub;
+            if (member == &P::AuthorityRuntimeHashes::wind) {
+                expected.wind = changed.wind;
+            } else if (member == &P::AuthorityRuntimeHashes::weather) {
+                expected.weather = changed.weather;
+            } else if (member == &P::AuthorityRuntimeHashes::aether) {
+                expected.aether = changed.aether;
+            } else if (member == &P::AuthorityRuntimeHashes::aether_state) {
+                expected.aether_state = changed.aether_state;
+            }
+            ExpectCaptureSubHashes(after.sub, expected);
+        }
+        for (const std::string& entities : {std::string{}, std::string{"changed"}}) {
+            const auto result = P::CaptureAuthorityHashes(state, 0, projection, entities, runtime);
+            ASSERT_TRUE(result.capture.has_value());
+            if (!result.capture) {
+                return;
+            }
+            EXPECT_EQ(result.capture->streamed, before.streamed);
+            EXPECT_EQ(result.capture->chunk, before.chunk);
+            EXPECT_EQ(result.capture->composite, before.composite);
+            auto expected = before.sub;
+            expected.entities = entities.empty() ? "" : P::StableChecksum(entities);
+            ExpectCaptureSubHashes(result.capture->sub, expected);
+            EXPECT_NE(result.capture->sub.entities, before.sub.entities);
+        }
+        const auto next_projection =
+            regions ? std::optional<std::string>{"authoritative_chunks:v2:1:"} : std::nullopt;
+        const auto next = P::CaptureAuthorityHashes(state, 1, next_projection, "entities", runtime);
+        ASSERT_TRUE(next.capture.has_value());
+        if (!next.capture) {
+            return;
+        }
+        EXPECT_NE(next.capture->streamed, before.streamed);
+        EXPECT_NE(next.capture->chunk, before.chunk);
+        EXPECT_NE(next.capture->composite, before.composite);
+        EXPECT_NE(next.capture->sub.water, before.sub.water);
+        EXPECT_EQ(next.capture->sub.terrain, before.sub.terrain);
+        EXPECT_EQ(next.capture->sub.mesh, before.sub.mesh);
+    }
+    P::AuthorityRegionalInputs regional{.save_dir = {}, .require_index = false, .regions = {}};
+    regional.regions.push_back({.key = {0, 0}, .inputs = {}, .frozen_digest = std::nullopt});
+    const auto baseline = P::CaptureAuthorityHashes(state, 0, regional);
+    ASSERT_TRUE(baseline.capture.has_value());
+    if (!baseline.capture) {
+        return;
+    }
+    for (int input = 0; input < 4; ++input) {
+        auto changed = regional;
+        if (input == 0) {
+            changed.regions.front().inputs.ground_object_bytes = "ground";
+        } else if (input == 1) {
+            changed.regions.front().inputs.field_page_bytes = "pages";
+        } else if (input == 2) {
+            changed.regions.front().frozen_digest = 42;
+        } else {
+            changed.regions.front().key = {1, 0};
+        }
+        const auto result = P::CaptureAuthorityHashes(state, 0, changed);
+        ASSERT_TRUE(result.capture.has_value());
+        if (!result.capture) {
+            return;
+        }
+        EXPECT_NE(result.capture->chunk, baseline.capture->chunk);
+        EXPECT_NE(result.capture->composite, baseline.capture->composite);
+        EXPECT_EQ(result.capture->streamed, baseline.capture->streamed);
+        ExpectCaptureSubHashes(result.capture->sub, baseline.capture->sub);
+    }
+}
+
+TEST(AuthorityHashCapture, ChunkInputsKeepStreamedRegionalAndDiagnosticDomains) {
+    namespace P = Persistence;
+    struct Change {
+        const char* name;
+        void (*apply)(Chunk&);
+        bool streamed;
+        bool terrain;
+        bool mesh;
+        bool water;
+        bool regional;
+    };
+    const std::array changes{
+        Change{"sdf", [](Chunk& c) { c.sdf_data = {2.0f}; }, true, true, false, false, true},
+        Change{"heightmap",
+               [](Chunk& c) { c.heightmap_data = {2.0f}; },
+               true,
+               true,
+               false,
+               false,
+               true},
+        Change{"material", [](Chunk& c) { c.material_data = {1}; }, true, true, false, false, true},
+        Change{"lifecycle",
+               [](Chunk& c) { c.set_state(ChunkState::Ready); },
+               true,
+               true,
+               false,
+               false,
+               false},
+        Change{"collision",
+               [](Chunk& c) { c.has_collision.store(true); },
+               true,
+               false,
+               false,
+               false,
+               false},
+        Change{"mesh", [](Chunk& c) { c.mesh_indices = {1}; }, false, false, true, false, false},
+        Change{"mesh version",
+               [](Chunk& c) { c.mesh_version.store(1); },
+               false,
+               false,
+               true,
+               false,
+               false},
+        Change{"water depth",
+               [](Chunk& c) { c.water_depth_mm = {2}; },
+               true,
+               false,
+               false,
+               true,
+               true},
+        Change{"water bed", [](Chunk& c) { c.water_bed_mm = {2}; }, true, false, false, true, true},
+        Change{"water flux",
+               [](Chunk& c) { c.water_edge_flux = {2}; },
+               true,
+               false,
+               false,
+               true,
+               true},
+        Change{"water initialized",
+               [](Chunk& c) { c.has_water_sim.store(true); },
+               true,
+               false,
+               false,
+               true,
+               true},
+        Change{"water resolution",
+               [](Chunk& c) { c.current_water_resolution.store(4); },
+               true,
+               false,
+               false,
+               true,
+               true},
+        Change{"water sleeping",
+               [](Chunk& c) { c.is_water_sleeping.store(true); },
+               true,
+               false,
+               false,
+               true,
+               true},
+        Change{"water delta",
+               [](Chunk& c) { c.max_water_delta_last_tick = 1.0f; },
+               true,
+               false,
+               false,
+               true,
+               true},
+        Change{"water quiet ticks",
+               [](Chunk& c) { c.ticks_below_threshold = 1; },
+               true,
+               false,
+               false,
+               true,
+               true},
+        Change{"water mesh",
+               [](Chunk& c) { c.water_mesh_generated.store(true); },
+               false,
+               false,
+               true,
+               false,
+               false},
+        Change{"mesh vertices",
+               [](Chunk& c) {
+                   c.mesh_vertices.push_back({.position = Vec3(1.0f),
+                                              .normal = Vec3(0.0f, 1.0f, 0.0f),
+                                              .material_id = 1});
+               },
+               false,
+               false,
+               true,
+               false,
+               false},
+        Change{"water mesh vertices",
+               [](Chunk& c) {
+                   c.water_mesh_vertices.push_back({.position = Vec3(1.0f),
+                                                    .normal = Vec3(0.0f, 1.0f, 0.0f),
+                                                    .material_id = 1});
+               },
+               false,
+               false,
+               true,
+               false,
+               false},
+        Change{"water mesh indices",
+               [](Chunk& c) { c.water_mesh_indices = {1}; },
+               false,
+               false,
+               true,
+               false,
+               false},
+        Change{"pending mesh vertices",
+               [](Chunk& c) {
+                   c.pending_mesh_vertices.push_back({.position = Vec3(1.0f),
+                                                      .normal = Vec3(0.0f, 1.0f, 0.0f),
+                                                      .material_id = 1});
+               },
+               false,
+               false,
+               true,
+               false,
+               false},
+        Change{"pending mesh indices",
+               [](Chunk& c) { c.pending_mesh_indices = {1}; },
+               false,
+               false,
+               true,
+               false,
+               false},
+        Change{"pending water vertices",
+               [](Chunk& c) {
+                   c.pending_water_mesh_vertices.push_back({.position = Vec3(1.0f),
+                                                            .normal = Vec3(0.0f, 1.0f, 0.0f),
+                                                            .material_id = 1});
+               },
+               false,
+               false,
+               true,
+               false,
+               false},
+        Change{"pending water indices",
+               [](Chunk& c) { c.pending_water_mesh_indices = {1}; },
+               false,
+               false,
+               true,
+               false,
+               false},
+        Change{"water mesh version",
+               [](Chunk& c) { c.water_mesh_version.store(1); },
+               false,
+               false,
+               true,
+               false,
+               false},
+        Change{"water mesh ticks",
+               [](Chunk& c) { c.water_mesh_dirty_ticks = 1; },
+               false,
+               false,
+               true,
+               false,
+               false},
+        Change{"mesh ready",
+               [](Chunk& c) { c.pending_mesh_ready.store(true); },
+               false,
+               false,
+               false,
+               false,
+               false},
+        Change{"mesh failed",
+               [](Chunk& c) { c.pending_mesh_failed.store(true); },
+               false,
+               false,
+               false,
+               false,
+               false},
+        Change{"lod", [](Chunk& c) { c.current_lod.store(1); }, false, false, false, false, false},
+        Change{"pending lod",
+               [](Chunk& c) { c.pending_lod.store(1); },
+               false,
+               false,
+               false,
+               false,
+               false},
+        Change{"water mirror",
+               [](Chunk& c) { c.water_level_data = {1.0f}; },
+               false,
+               false,
+               false,
+               false,
+               false},
+        Change{"flow mirror",
+               [](Chunk& c) { c.water_flow_data = {Vec2(1.0f, 0.0f)}; },
+               false,
+               false,
+               false,
+               false,
+               false},
+        Change{"water terrain mirror",
+               [](Chunk& c) { c.water_sim_terrain_height = {1.0f}; },
+               false,
+               false,
+               false,
+               false,
+               false},
+        Change{"water ownership",
+               [](Chunk& c) { c.mark_water_data_dirty(); },
+               true,
+               false,
+               false,
+               false,
+               false},
+        Change{"generated terrain",
+               [](Chunk& c) { c.mark_sdf_generated_current_params(); },
+               false,
+               false,
+               false,
+               false,
+               true}};
+
+    for (const auto& change : changes) {
+        SCOPED_TRACE(change.name);
+        for (const bool regions : {false, true}) {
+            WorldStreamingState state;
+            const auto chunk = state.get_or_create_chunk(IVec3(0, 0, 0));
+            chunk->set_state(ChunkState::Idle);
+            chunk->mark_voxel_data_dirty();
+            P::AuthorityRegionalInputs regional{
+                .save_dir = {}, .require_index = false, .regions = {}};
+            regional.regions.push_back({.key = {0, 0},
+                                        .inputs = {.live = {chunk}, .parked = {}, .durable = {}},
+                                        .frozen_digest = std::nullopt});
+            const auto capture = [&] {
+                return regions ? P::CaptureAuthorityHashes(state, 0, regional)
+                               : P::CaptureAuthorityHashes(state, 0);
+            };
+            const auto before = capture();
+            ASSERT_TRUE(before.capture.has_value());
+            if (!before.capture) {
+                return;
+            }
+            change.apply(*chunk);
+            const auto after = capture();
+            ASSERT_TRUE(after.capture.has_value());
+            if (!after.capture) {
+                return;
+            }
+            EXPECT_EQ(after.capture->streamed != before.capture->streamed, change.streamed);
+            EXPECT_EQ(after.capture->chunk != before.capture->chunk,
+                      regions ? change.regional : change.streamed);
+            EXPECT_EQ(after.capture->composite != before.capture->composite,
+                      regions ? change.regional : change.streamed);
+            EXPECT_EQ(after.capture->sub.terrain != before.capture->sub.terrain, change.terrain);
+            EXPECT_EQ(after.capture->sub.mesh != before.capture->sub.mesh, change.mesh);
+            EXPECT_EQ(after.capture->sub.water != before.capture->sub.water, change.water);
+            const auto legacy = P::ComputeWorldStreamingStateHash(state);
+            EXPECT_EQ(after.capture->streamed, legacy);
+            ExpectCaptureSubHashes(after.capture->sub,
+                                   P::ComputeWorldStreamingStateSubHashes(state));
+            if (regions) {
+                const auto digest = WorldSaveService::region_simulation_digest(
+                    {}, {0, 0}, regional.regions.front().inputs);
+                EXPECT_EQ(after.capture->chunk,
+                          P::StableChecksum(
+                              "authoritative_chunks:v2:0:0,0:" + std::to_string(digest) + ";"));
+            } else {
+                EXPECT_EQ(after.capture->chunk, legacy);
+            }
+        }
+    }
+}
+
+TEST(AuthorityHashCapture, ChunkIdentityFeedsEveryLegacySlot) {
+    namespace P = Persistence;
+    // Chunk coordinates and the derived chunk id feed every chunk diagnostic group.
+    WorldStreamingState original, relocated;
+    const auto left = original.get_or_create_chunk(IVec3(0, 0, 0));
+    const auto right = relocated.get_or_create_chunk(IVec3(1, 0, 0));
+    left->set_state(ChunkState::Idle);
+    right->set_state(ChunkState::Idle);
+    left->mark_voxel_data_dirty();
+    right->mark_voxel_data_dirty();
+    for (const bool regions : {false, true}) {
+        const P::AuthorityRegionalInputs left_region{
+            .save_dir = {},
+            .require_index = false,
+            .regions = {{.key = {0, 0},
+                         .inputs = {.live = {left}, .parked = {}, .durable = {}},
+                         .frozen_digest = std::nullopt}}};
+        const P::AuthorityRegionalInputs right_region{
+            .save_dir = {},
+            .require_index = false,
+            .regions = {{.key = {0, 0},
+                         .inputs = {.live = {right}, .parked = {}, .durable = {}},
+                         .frozen_digest = std::nullopt}}};
+        const auto before = regions ? P::CaptureAuthorityHashes(original, 0, left_region)
+                                    : P::CaptureAuthorityHashes(original, 0);
+        const auto after = regions ? P::CaptureAuthorityHashes(relocated, 0, right_region)
+                                   : P::CaptureAuthorityHashes(relocated, 0);
+        ASSERT_TRUE(before.capture.has_value());
+        ASSERT_TRUE(after.capture.has_value());
+        if (!before.capture || !after.capture) {
+            return;
+        }
+        EXPECT_NE(after.capture->streamed, before.capture->streamed);
+        EXPECT_NE(after.capture->chunk, before.capture->chunk);
+        EXPECT_NE(after.capture->composite, before.capture->composite);
+        EXPECT_NE(after.capture->sub.terrain, before.capture->sub.terrain);
+        EXPECT_NE(after.capture->sub.mesh, before.capture->sub.mesh);
+        EXPECT_NE(after.capture->sub.water, before.capture->sub.water);
+    }
+}
+
+TEST_F(WorldOpenRefusal, AuthorityCaptureSkipsRegionalReadsAndNeverPublishesRefusals) {
+    namespace P = Persistence;
+    WorldStreamingState state;
+    P::AuthorityRegionalInputs regional{.save_dir = save, .require_index = false, .regions = {}};
+    regional.regions.push_back(
+        {.key = {-1, 0},
+         .inputs = {.live = {}, .parked = {}, .durable = {}, .require_index = false},
+         .frozen_digest = std::nullopt});
+    regional.regions.push_back(
+        {.key = {0, 0},
+         .inputs = {.live = {}, .parked = {}, .durable = {{0, 0, 0}}, .require_index = false},
+         .frozen_digest = std::nullopt});
+    const auto baseline = P::CaptureAuthorityHashes(state, 0, regional);
+    ASSERT_EQ(baseline.status, P::AuthorityCaptureStatus::Ready);
+    ASSERT_TRUE(baseline.capture.has_value());
+    if (!baseline.capture) {
+        return;
+    }
+    Write(WorldSaveService::region_file_path(save, 0, 0), "corrupt owner");
+    const auto before = DiskBytes(root);
+    for (const auto part : {P::AuthorityCaptureParts::All,
+                            P::AuthorityCaptureParts::Chunk,
+                            P::AuthorityCaptureParts::Composite,
+                            P::AuthorityCaptureParts::SubHashes,
+                            P::AuthorityCaptureParts::StreamedAndSubHashes}) {
+        const auto reads = WorldSaveService::region_read_count_for_testing();
+        const auto missing = P::CaptureAuthorityHashes(state, std::nullopt, regional, {}, {}, part);
+        EXPECT_EQ(missing.status, P::AuthorityCaptureStatus::MissingCursor);
+        EXPECT_FALSE(missing.capture.has_value());
+        EXPECT_EQ(WorldSaveService::region_read_count_for_testing(), reads);
+        const auto result = P::CaptureAuthorityHashes(state, 0, regional, {}, {}, part);
+        const bool skip = part == P::AuthorityCaptureParts::SubHashes ||
+                          part == P::AuthorityCaptureParts::StreamedAndSubHashes;
+        EXPECT_EQ(result.status,
+                  skip ? P::AuthorityCaptureStatus::Ready
+                       : P::AuthorityCaptureStatus::PreparationRefused);
+        EXPECT_EQ(result.capture.has_value(), skip);
+        if (skip) {
+            EXPECT_EQ(WorldSaveService::region_read_count_for_testing(), reads);
+            ASSERT_TRUE(result.capture.has_value());
+            if (!result.capture) {
+                return;
+            }
+            EXPECT_EQ(result.capture->streamed,
+                      part == P::AuthorityCaptureParts::StreamedAndSubHashes
+                          ? baseline.capture->streamed
+                          : "");
+            EXPECT_TRUE(result.capture->chunk.empty());
+            EXPECT_TRUE(result.capture->composite.empty());
+            ExpectCaptureSubHashes(result.capture->sub, baseline.capture->sub);
+        }
+    }
+    // Index admission is also skipped, including for an empty region set.
+    const bool had_index = P::snapshot_index_exists(save);
+    const auto index_bytes = had_index ? Read(P::snapshot_index_path(save)) : std::string();
+    Write(P::snapshot_index_path(save), "{");
+    regional.regions.clear();
+    EXPECT_EQ(P::CaptureAuthorityHashes(
+                  state, 0, regional, {}, {}, P::AuthorityCaptureParts::StreamedAndSubHashes)
+                  .status,
+              P::AuthorityCaptureStatus::Ready);
+    const auto refused = P::CaptureAuthorityHashes(state, 0, regional);
+    EXPECT_EQ(refused.status, P::AuthorityCaptureStatus::PreparationRefused);
+    EXPECT_FALSE(refused.capture.has_value());
+    if (had_index) {
+        Write(P::snapshot_index_path(save), index_bytes);
+    } else {
+        fs::remove(P::snapshot_index_path(save));
+    }
+    EXPECT_EQ(DiskBytes(root), before);
+    EXPECT_STREQ(P::AuthorityCaptureRefused{}.what(), "authority capture refused");
+}
+
+TEST(AuthorityHashCapture, IncompleteLiveAndParkedOwnersRefuseBeforePublication) {
+    namespace P = Persistence;
+    const auto owner = std::make_shared<Chunk>(IVec3(0, 0, 0));
+    owner->mark_voxel_data_dirty();
+    owner->set_state(ChunkState::Loading);
+    WorldStreamingState empty, streamed;
+    ASSERT_TRUE(streamed.insert_chunk(owner));
+    for (const auto part : {P::AuthorityCaptureParts::All,
+                            P::AuthorityCaptureParts::Chunk,
+                            P::AuthorityCaptureParts::Composite,
+                            P::AuthorityCaptureParts::SubHashes,
+                            P::AuthorityCaptureParts::StreamedAndSubHashes}) {
+        const auto result = P::CaptureAuthorityHashes(streamed, 0, std::nullopt, {}, {}, part);
+        EXPECT_EQ(result.status, P::AuthorityCaptureStatus::IncompleteOwner);
+        EXPECT_FALSE(result.capture.has_value());
+        for (const bool parked : {false, true}) {
+            const P::AuthorityRegionalInputs regional{
+                .save_dir = {},
+                .require_index = false,
+                .regions = {{.key = {0, 0},
+                             .inputs = {.live = parked ? std::vector<std::shared_ptr<Chunk>>{}
+                                                       : std::vector{owner},
+                                        .parked = parked ? std::vector{owner}
+                                                         : std::vector<std::shared_ptr<Chunk>>{},
+                                        .durable = {}},
+                             .frozen_digest = std::nullopt}}};
+            const auto regional_result =
+                P::CaptureAuthorityHashes(empty, 0, regional, {}, {}, part);
+            const bool skip = part == P::AuthorityCaptureParts::SubHashes ||
+                              part == P::AuthorityCaptureParts::StreamedAndSubHashes;
+            EXPECT_EQ(regional_result.status,
+                      skip ? P::AuthorityCaptureStatus::Ready
+                           : P::AuthorityCaptureStatus::IncompleteOwner);
+            EXPECT_EQ(regional_result.capture.has_value(), skip);
+        }
+    }
+    EXPECT_EQ(owner->get_state(), ChunkState::Loading);
+    EXPECT_EQ(streamed.find_chunk(owner->get_coords()), owner);
+    owner->set_state(ChunkState::Idle);
+    EXPECT_EQ(P::CaptureAuthorityHashes(streamed, 0).status, P::AuthorityCaptureStatus::Ready);
+    const auto pristine = empty.get_or_create_chunk(IVec3(1, 0, 0));
+    pristine->set_state(ChunkState::Loading);
+    EXPECT_EQ(P::CaptureAuthorityHashes(empty, 0).status, P::AuthorityCaptureStatus::Ready);
+}
+
+TEST(AuthorityHashCapture, InvalidRegionalOrderKeysAndPartsRefuseWithoutCapture) {
+    namespace P = Persistence;
+    WorldStreamingState state;
+    for (const int invalid : {0, 1, 2, 3, 4, 5}) {
+        P::AuthorityRegionalInputs regional{
+            .save_dir = {},
+            .require_index = false,
+            .regions = {{.key = {0, 0}, .inputs = {}, .frozen_digest = 0},
+                        {.key = {1, 0}, .inputs = {}, .frozen_digest = 0}}};
+        if (invalid == 0) {
+            regional.regions.back().key = {0, 0};
+        } else if (invalid == 1) {
+            std::reverse(regional.regions.begin(), regional.regions.end());
+        } else if (invalid == 2) {
+            regional.regions.back().key = {std::numeric_limits<int>::max(), 0};
+        } else if (invalid == 3) {
+            regional.regions.back().key = {std::numeric_limits<int>::min(), 0};
+        } else if (invalid == 4) {
+            regional.regions.back().key = {1, std::numeric_limits<int>::max()};
+        } else {
+            regional.regions.back().key = {1, std::numeric_limits<int>::min()};
+        }
+        const auto result = P::CaptureAuthorityHashes(state, 0, regional);
+        EXPECT_EQ(result.status, P::AuthorityCaptureStatus::PreparationRefused);
+        EXPECT_FALSE(result.capture.has_value());
+    }
+    P::AuthorityRegionalInputs ordered{
+        .save_dir = {},
+        .require_index = false,
+        .regions = {{.key = {0, -1}, .inputs = {}, .frozen_digest = 0},
+                    {.key = {0, 0}, .inputs = {}, .frozen_digest = 0}}};
+    const auto valid = P::CaptureAuthorityHashes(state, 0, ordered);
+    ASSERT_TRUE(valid.capture.has_value());
+    if (!valid.capture) {
+        return;
+    }
+    EXPECT_EQ(valid.capture->chunk, P::StableChecksum("authoritative_chunks:v2:0:0,-1:0;0,0:0;"));
+    std::reverse(ordered.regions.begin(), ordered.regions.end());
+    const auto reversed = P::CaptureAuthorityHashes(state, 0, ordered);
+    EXPECT_EQ(reversed.status, P::AuthorityCaptureStatus::PreparationRefused);
+    EXPECT_FALSE(reversed.capture.has_value());
+    for (const bool owners : {false, true}) {
+        const auto invalid = static_cast<P::AuthorityCaptureParts>(-1);
+        const auto result =
+            owners
+                ? P::CaptureAuthorityHashes(state, 0, P::AuthorityRegionalInputs{}, {}, {}, invalid)
+                : P::CaptureAuthorityHashes(state, 0, std::nullopt, {}, {}, invalid);
+        EXPECT_EQ(result.status, P::AuthorityCaptureStatus::PreparationRefused);
+        EXPECT_FALSE(result.capture.has_value());
     }
 }
 
