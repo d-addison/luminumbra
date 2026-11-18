@@ -177,6 +177,9 @@ public:
         glm::vec3 retained_velocity{0.0f};
         glm::vec3 retained_angular_velocity{0.0f};
         bool was_active = false;
+        // Live terrain-registration slot + 1 (0 = unregistered). Restore keeps
+        // this order, which swap-removal and reuse make independent of payload order.
+        std::uint32_t registration_slot = 0;
     };
     struct BodySetState {
         std::vector<BodyOwnerState> owners;

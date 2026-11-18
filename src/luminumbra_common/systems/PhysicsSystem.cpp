@@ -1968,6 +1968,9 @@ bool PhysicsSystem::capture_body_owner(JPH::BodyID body, BodyOwnerState& output)
         const auto slot = registrations.dynamic_slots[body.GetIndex()];
         if (slot != 0) {
             const auto& registered = registrations.dynamic_owners[slot - 1];
+            if (registered.id == body) {
+                captured.registration_slot = slot;
+            }
             if (registered.id == body && registered.suspended) {
                 captured.suspended = true;
                 captured.retained_velocity = {registered.velocity.GetX(),
@@ -2018,6 +2021,7 @@ bool PhysicsSystem::capture_body_owner(JPH::BodyID body, BodyOwnerState& output)
         payload.retained_velocity = captured.retained_velocity;
         payload.retained_angular_velocity = captured.retained_angular_velocity;
         payload.was_active = captured.was_active;
+        payload.registration_slot = captured.registration_slot;
         output = payload;
         return true;
     } catch (const OwnerStateRefusal&) {
@@ -2235,10 +2239,33 @@ bool PhysicsSystem::restore_body_owners(const BodySetState& state, std::span<JPH
     if (!state.free_slots.empty() && !scratch) {
         return false;
     }
-    const bool needs_registrations = simulation_collisions_enabled() ||
-                                     std::any_of(states.begin(),
-                                                 states.end(),
-                                                 [](const auto& saved) { return saved.suspended; });
+    // Register every restored sphere, even while terrain collisions are off, so a
+    // later durable-residency activation covers them. Registered spheres keep
+    // their live order; unregistered ones follow in payload order. Duplicate
+    // slots refuse before commit.
+    std::vector<std::size_t> registration_order;
+    registration_order.reserve(recipes.size());
+    for (std::size_t i = 0; i < recipes.size(); ++i) {
+        if (recipes[i].kind == kSphereOwner) {
+            registration_order.push_back(i);
+        }
+    }
+    const auto registration_key = [&states](std::size_t i) {
+        const auto slot = states[i].registration_slot;
+        return slot == 0 ? std::numeric_limits<std::uint32_t>::max() : slot;
+    };
+    std::stable_sort(registration_order.begin(),
+                     registration_order.end(),
+                     [&registration_key](std::size_t a, std::size_t b) {
+                         return registration_key(a) < registration_key(b);
+                     });
+    for (std::size_t i = 1; i < registration_order.size(); ++i) {
+        const auto slot = states[registration_order[i]].registration_slot;
+        if (slot != 0 && slot == states[registration_order[i - 1]].registration_slot) {
+            return false;
+        }
+    }
+    const bool needs_registrations = simulation_collisions_enabled() || !registration_order.empty();
     std::unique_ptr<SimulationCollisions> registrations;
     if (needs_registrations && !m_simulation_collisions) {
         registrations = std::make_unique<SimulationCollisions>();
@@ -2284,29 +2311,31 @@ bool PhysicsSystem::restore_body_owners(const BodySetState& state, std::span<JPH
         m_body_interface->AddBody(body->GetID(), JPH::EActivation::DontActivate);
         if (recipes[i].kind == kSphereOwner) {
             m_jolt_system->RestoreBodyState(*body, recipes[i].owner);
-            const auto& saved = states[i];
-            if (needs_registrations) {
-                auto& registrations_state = *m_simulation_collisions;
-                const auto id = body->GetID();
-                registrations_state.dynamic_owners[registrations_state.dynamic_count++] = {
-                    .id = id,
-                    .velocity = JPH::Vec3(saved.retained_velocity.x,
-                                          saved.retained_velocity.y,
-                                          saved.retained_velocity.z),
-                    .angular_velocity = JPH::Vec3(saved.retained_angular_velocity.x,
-                                                  saved.retained_angular_velocity.y,
-                                                  saved.retained_angular_velocity.z),
-                    .suspended = saved.suspended,
-                    .was_active = saved.was_active};
-                registrations_state.dynamic_slots[id.GetIndex()] =
-                    static_cast<std::uint32_t>(registrations_state.dynamic_count);
-                if (saved.suspended) {
-                    m_body_interface->SetMotionType(
-                        id, JPH::EMotionType::Kinematic, JPH::EActivation::DontActivate);
-                }
-            }
         }
         bodies[i] = JPH::BodyID(recipes[i].body);
+    }
+    if (needs_registrations) {
+        for (const auto i : registration_order) {
+            const auto& saved = states[i];
+            auto& registrations_state = *m_simulation_collisions;
+            const auto id = bodies[i];
+            registrations_state.dynamic_owners[registrations_state.dynamic_count++] = {
+                .id = id,
+                .velocity = JPH::Vec3(saved.retained_velocity.x,
+                                      saved.retained_velocity.y,
+                                      saved.retained_velocity.z),
+                .angular_velocity = JPH::Vec3(saved.retained_angular_velocity.x,
+                                              saved.retained_angular_velocity.y,
+                                              saved.retained_angular_velocity.z),
+                .suspended = saved.suspended,
+                .was_active = saved.was_active};
+            registrations_state.dynamic_slots[id.GetIndex()] =
+                static_cast<std::uint32_t>(registrations_state.dynamic_count);
+            if (saved.suspended) {
+                m_body_interface->SetMotionType(
+                    id, JPH::EMotionType::Kinematic, JPH::EActivation::DontActivate);
+            }
+        }
     }
     RestoreOwnerFreeSlots(*m_body_interface, scratch.get(), state.free_slots);
     m_body_slots->slot_count = state.slot_count;
