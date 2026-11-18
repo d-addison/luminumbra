@@ -134,9 +134,32 @@ void GBufferDiagnosticCapture::detach_target() {
     }
     GLint saved_framebuffer = 0;
     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &saved_framebuffer);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, state_->framebuffer);
-    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT6, GL_TEXTURE_2D, 0, 0);
-    glDrawBuffers(state_->buffer_count, state_->buffers.data());
+    // Any registry path (destroy_owned, destroy_all_owned, replace_targets) can
+    // retire the attached framebuffer, and GL may reuse its name. Restore the
+    // draw-buffer state only on the object that still holds the leased attachment.
+    bool attached = glIsFramebuffer(state_->framebuffer) == GL_TRUE;
+    if (attached) {
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, state_->framebuffer);
+        GLint object_type = GL_NONE;
+        GLint object_name = 0;
+        glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,
+                                              GL_COLOR_ATTACHMENT6,
+                                              GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE,
+                                              &object_type);
+        if (object_type == GL_TEXTURE) {
+            glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,
+                                                  GL_COLOR_ATTACHMENT6,
+                                                  GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,
+                                                  &object_name);
+        }
+        attached = object_type == GL_TEXTURE &&
+                   static_cast<GLuint>(object_name) == state_->attachment_lease.texture();
+        if (attached) {
+            glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT6, GL_TEXTURE_2D, 0, 0);
+            glDrawBuffers(state_->buffer_count, state_->buffers.data());
+        }
+    }
+    // The color mask is context state, so it is restored even after retirement.
     glColorMaski(6,
                  state_->color_mask[0],
                  state_->color_mask[1],
@@ -144,6 +167,11 @@ void GBufferDiagnosticCapture::detach_target() {
                  state_->color_mask[3]);
     state_->framebuffer = 0;
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(saved_framebuffer));
+    if (!attached) {
+        // The pass drew into a retired or foreign framebuffer: never publish it.
+        state_->failed = true;
+        state_->failure = "gbuffer_retired_during_capture";
+    }
     // Keep storage protected until detachment and caller-state restoration finish.
     state_->attachment_lease.reset();
 }
