@@ -1935,6 +1935,14 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
     const std::uint64_t first_tick = m_simulationClock.tick_count() - ticks_executed + 1;
     for (std::uint32_t i = 0; i < ticks_executed; ++i) {
         const std::uint64_t current_tick = first_tick + i;
+        // Standalone session hosts also step creature controllers. Reuse a host's
+        // successful barrier for this tick; otherwise prepare before any tick writes.
+        if (m_activeRegionsEnabled && m_physicsSystem &&
+            !m_physicsSystem->prepare_simulation_collisions({}, current_tick)) {
+            m_simulationClock.return_unconsumed_ticks(ticks_executed - i);
+            SettleWaterAuthority(defer_water_authority);
+            return i; // Retry this unconsumed tick with the same simulation inputs.
+        }
         if (i != 0 && m_foliageStep) {
             // Each fixed simulation update has its own replay allowance, even
             // when several updates share one host frame.
