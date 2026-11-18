@@ -906,6 +906,207 @@ TEST(AsyncWaterMeshing, SynchronousEditPreparationRejectsCompletedTerrainSnapsho
     }
 }
 
+TEST(AsyncWaterMeshing, WaterOnlySelectionTracksPublicationInBothDirections) {
+    for (const bool use_workers : {false, true}) {
+        SCOPED_TRACE(use_workers);
+        JobSystem jobs;
+        if (use_workers) {
+            jobs.startup(1);
+        }
+        auto params = Luminumbra::Test::SyntheticTerrainParams();
+        params.base_amplitude = 0.0f;
+        params.height_offset = 8.0f;
+        params.caves_enabled = false;
+        SHIELD_WorldSystem world(use_workers ? &jobs : nullptr, nullptr, params, 1337);
+        WaterSystem water(use_workers ? &jobs : nullptr, &world);
+        water.SetBootPaused(true);
+        world.SetWaterSystem(&water);
+        auto chunk = std::make_shared<Chunk>(IVec3(0));
+        FillDugPond(world, *chunk, 8);
+        const auto terrain = chunk->sdf_data;
+        const auto wet_depth = chunk->water_depth_mm;
+        chunk->sdf_data.assign(terrain.size(), 1.0f);
+        chunk->current_lod.store(0);
+        chunk->set_state(ChunkState::Ready);
+        ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+        ASSERT_TRUE(world.renderable_chunks_view().empty());
+        entt::registry registry;
+        bool previously_wet = false;
+        for (const bool wet : {true, true, false, false, true, false}) {
+            SCOPED_TRACE(wet);
+            const auto before = world.renderable_view_work();
+            chunk->water_depth_mm = wet ? wet_depth : std::vector<std::int32_t>(64u, 0);
+            chunk->water_mesh_generated.store(false);
+            water.retain_mesh_invalidation(chunk->get_id());
+            world.update(registry, std::vector<Vec3>{}, nullptr);
+            world.wait_for_streaming_jobs();
+            ASSERT_EQ(chunk->get_state(), ChunkState::Ready);
+            ASSERT_TRUE(chunk->mesh_vertices.empty());
+            EXPECT_EQ(chunk->water_mesh_vertices.empty(), !wet);
+            EXPECT_EQ(world.renderable_chunks_view(),
+                      wet ? std::vector<Chunk*>{chunk.get()} : std::vector<Chunk*>{});
+            const auto after = world.renderable_view_work();
+            EXPECT_EQ(after.rebuilds - before.rebuilds, wet != previously_wet ? 1u : 0u);
+            EXPECT_EQ(after.allocations, before.allocations);
+            previously_wet = wet;
+        }
+        chunk->sdf_data = terrain;
+        World::MarchingCubes::PolygoniseTerrain(world, *chunk, 0.0f, 1);
+        ASSERT_FALSE(chunk->mesh_vertices.empty());
+        EXPECT_EQ(world.renderable_chunks_view(), std::vector<Chunk*>{chunk.get()});
+        chunk->water_depth_mm = wet_depth;
+        World::MarchingCubes::GenerateWaterMesh(water, world, *chunk);
+        EXPECT_EQ(world.renderable_chunks_view(), std::vector<Chunk*>{chunk.get()});
+        chunk->sdf_data.assign(terrain.size(), 1.0f);
+        World::MarchingCubes::PolygoniseTerrain(world, *chunk, 0.0f, 1);
+        EXPECT_EQ(world.renderable_chunks_view(), std::vector<Chunk*>{chunk.get()});
+    }
+}
+
+enum class DryWaterExecution : std::uint8_t {
+    Inline,
+    Worker,
+    Rejected
+};
+
+void CheckDryWaterOnlyDispatch(DryWaterExecution execution,
+                               int resolution,
+                               std::size_t surface_cells) {
+    SCOPED_TRACE(static_cast<int>(execution));
+    SCOPED_TRACE(resolution);
+    SCOPED_TRACE(surface_cells);
+    JobSystem jobs;
+    if (execution == DryWaterExecution::Worker) {
+        jobs.startup(1);
+    }
+    auto* job_system = execution == DryWaterExecution::Inline ? nullptr : &jobs;
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 8.0f;
+    params.caves_enabled = false;
+    SHIELD_WorldSystem world(job_system, nullptr, params, 1337);
+    WaterSystem water(job_system, &world);
+    water.SetBootPaused(true);
+    world.SetWaterSystem(&water);
+    auto chunk = std::make_shared<Chunk>(IVec3(0));
+    FillDugPond(world, *chunk, 8);
+    chunk->sdf_data.assign(chunk->sdf_data.size(), 1.0f);
+    chunk->water_depth_mm.assign(64u, 0);
+    chunk->water_level_data.resize(surface_cells);
+    chunk->current_water_resolution.store(resolution);
+    chunk->current_lod.store(0);
+    chunk->set_state(ChunkState::Ready);
+    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    ASSERT_TRUE(world.renderable_chunks_view().empty());
+    const auto before = world.renderable_view_work();
+    world.begin_tick(0);
+    entt::registry registry;
+    world.update(registry, std::vector<Vec3>{}, nullptr);
+    ASSERT_EQ(world.get_last_streaming_budget_stats().scheduled_meshing, 1u);
+    ASSERT_EQ(chunk->pending_lod.load(), 0);
+    world.quiesce_streaming_jobs_for_save();
+    EXPECT_EQ(chunk->get_state(), ChunkState::Ready);
+    EXPECT_TRUE(world.renderable_chunks_view().empty());
+    EXPECT_EQ(world.renderable_view_work().rebuilds, before.rebuilds);
+    EXPECT_EQ(chunk->mesh_version.load(), 0u);
+    EXPECT_EQ(chunk->water_mesh_version.load(), 0u);
+    world.activate_due(7);
+    EXPECT_EQ(chunk->get_state(), ChunkState::Ready);
+    EXPECT_EQ(chunk->pending_lod.load(), 0);
+    EXPECT_EQ(chunk->water_mesh_version.load(), 0u);
+    world.activate_due(8);
+    const bool rejected = execution == DryWaterExecution::Rejected;
+    // Refused jobs still return to Idle for the scheduler to retry.
+    EXPECT_EQ(chunk->get_state(), rejected ? ChunkState::Idle : ChunkState::Ready);
+    EXPECT_EQ(chunk->pending_lod.load(), -1);
+    EXPECT_EQ(chunk->current_lod.load(), 0);
+    EXPECT_EQ(chunk->mesh_version.load(), 0u);
+    EXPECT_EQ(chunk->water_mesh_version.load(), rejected ? 0u : 1u);
+    EXPECT_EQ(chunk->water_mesh_generated.load(),
+              !rejected && resolution == 8 && surface_cells == 64u);
+    EXPECT_TRUE(chunk->mesh_vertices.empty());
+    EXPECT_TRUE(chunk->mesh_indices.empty());
+    EXPECT_TRUE(chunk->water_mesh_vertices.empty());
+    EXPECT_TRUE(chunk->water_mesh_indices.empty());
+    EXPECT_TRUE(world.renderable_chunks_view().empty());
+    const auto after = world.renderable_view_work();
+    EXPECT_EQ(after.rebuilds - before.rebuilds, rejected ? 1u : 0u);
+    EXPECT_EQ(after.chunk_visits - before.chunk_visits, rejected ? 1u : 0u);
+    EXPECT_EQ(after.allocations, before.allocations);
+}
+
+TEST(AsyncWaterMeshing, DryWaterOnlyDispatchPreservesReadyUntilDuePublication) {
+    for (const auto execution :
+         {DryWaterExecution::Inline, DryWaterExecution::Worker, DryWaterExecution::Rejected}) {
+        for (const int resolution : {0, 8, 33}) {
+            for (const std::size_t surface_cells : {0u, 63u, 64u}) {
+                CheckDryWaterOnlyDispatch(execution, resolution, surface_cells);
+            }
+        }
+    }
+}
+
+TEST(AsyncWaterMeshing, HeightmapWaterDepartureInvalidatesReadyWaterOnlySelection) {
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 8.0f;
+    params.caves_enabled = false;
+    SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    WaterSystem water(nullptr, &world);
+    water.SetBootPaused(true);
+    world.SetWaterSystem(&water);
+    auto chunk = std::make_shared<Chunk>(IVec3(20, 0, 0));
+    FillDugPond(world, *chunk, 8);
+    chunk->sdf_data.clear();
+    chunk->current_lod.store(1);
+    World::MarchingCubes::GenerateWaterMesh(water, world, *chunk);
+    ASSERT_FALSE(chunk->water_mesh_vertices.empty());
+    chunk->set_state(ChunkState::Ready);
+    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    ASSERT_EQ(world.renderable_chunks_view(), std::vector<Chunk*>{chunk.get()});
+    entt::registry registry;
+    world.begin_tick(0);
+    world.update(registry, std::vector<Vec3>{}, nullptr, false);
+    EXPECT_EQ(chunk->get_state(), ChunkState::Ready);
+    EXPECT_EQ(chunk->current_lod.load(), 1);
+    EXPECT_TRUE(chunk->water_mesh_vertices.empty());
+    EXPECT_TRUE(chunk->water_mesh_indices.empty());
+    EXPECT_TRUE(world.renderable_chunks_view().empty());
+}
+
+TEST(AsyncWaterMeshing, DirectWaterSelectionInvalidatesForDryAndInvalidGrids) {
+    SHIELD_WorldSystem world(nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    WaterSystem water(nullptr, &world);
+    auto chunk = std::make_shared<Chunk>(IVec3(0));
+    FillDugPond(world, *chunk, 8);
+    const auto wet_depth = chunk->water_depth_mm;
+    chunk->set_state(ChunkState::Ready);
+    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    ASSERT_TRUE(world.renderable_chunks_view().empty());
+    for (const int resolution : {0, 1, 8, 33}) {
+        SCOPED_TRACE(resolution);
+        chunk->current_water_resolution.store(8);
+        chunk->water_depth_mm = wet_depth;
+        World::MarchingCubes::GenerateWaterMesh(water, world, *chunk);
+        ASSERT_EQ(world.renderable_chunks_view(), std::vector<Chunk*>{chunk.get()});
+        chunk->current_water_resolution.store(resolution);
+        chunk->water_depth_mm.assign(64u, 0);
+        World::MarchingCubes::GenerateWaterMesh(water, world, *chunk);
+        EXPECT_TRUE(world.renderable_chunks_view().empty());
+    }
+    for (const std::size_t cells : {0u, 63u}) {
+        SCOPED_TRACE(cells);
+        chunk->current_water_resolution.store(8);
+        chunk->water_level_data.assign(64u, 6.0f);
+        chunk->water_depth_mm = wet_depth;
+        World::MarchingCubes::GenerateWaterMesh(water, world, *chunk);
+        ASSERT_EQ(world.renderable_chunks_view(), std::vector<Chunk*>{chunk.get()});
+        chunk->water_level_data.resize(cells);
+        World::MarchingCubes::GenerateWaterMesh(water, world, *chunk);
+        EXPECT_TRUE(world.renderable_chunks_view().empty());
+    }
+}
+
 TEST(AsyncWaterMeshing, WaterOnlyCompletionDoesNotRequireTerrainGeometryOrCurrentLod) {
     for (const bool due_publication : {false, true}) {
         SCOPED_TRACE(due_publication);

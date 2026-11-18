@@ -2069,12 +2069,25 @@ void GenerateWaterMesh(const Systems::WaterSystem& water_system,
                        const Systems::SHIELD_WorldSystem& world_system,
                        Chunk& chunk) {
     (void)water_system;
+    // Direct water remeshing can change selection without a Ready state transition, so
+    // notify only when published water presence flips. Worker scratch chunks stay
+    // Unloaded until owner-thread publication.
+    const auto has_water = [&chunk] {
+        return !chunk.water_mesh_vertices.empty() && !chunk.water_mesh_indices.empty();
+    };
+    const bool had_water = has_water();
+    const auto notify_if_presence_changed = [&] {
+        if (chunk.get_state() == ChunkState::Ready && has_water() != had_water) {
+            world_system.notify_renderable_chunks_changed();
+        }
+    };
     const int resolution = chunk.current_water_resolution.load(std::memory_order_acquire);
     // Supported water detail levels bound each mesh to 32*32 quads.
     if (resolution <= 1 || resolution > 32 || !HasCompleteWaterGrid(chunk, resolution)) {
         chunk.water_mesh_vertices.clear();
         chunk.water_mesh_indices.clear();
         chunk.water_mesh_generated.store(false, std::memory_order_release);
+        notify_if_presence_changed();
         return;
     }
 
@@ -2166,6 +2179,7 @@ void GenerateWaterMesh(const Systems::WaterSystem& water_system,
     chunk.water_mesh_vertices = std::move(water_vertices);
     chunk.water_mesh_indices = std::move(water_indices);
     chunk.water_mesh_generated.store(true, std::memory_order_release);
+    notify_if_presence_changed();
 }
 
 } // namespace World::MarchingCubes

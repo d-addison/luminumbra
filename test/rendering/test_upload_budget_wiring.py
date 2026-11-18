@@ -42,6 +42,144 @@ class UploadBudgetWiring(unittest.TestCase):
         cls.header = read(RENDERING / "RenderPipeline.h")
         cls.main = read(ROOT / "src/luminumbra_client/main_client.cpp")
 
+    def test_renderable_owner_accepts_independent_complete_water_geometry(self):
+        world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        selection = body(world, "SHIELD_WorldSystem::renderable_chunks_view()")
+        selection = body(selection, "for (const auto& [id, chunk] : m_streaming_state.chunks)")
+        predicate = re.search(r"if \((.*?)\) \{\s*m_renderable_chunks.push_back", selection,
+                              re.S).group(1)
+        geometry = body(world, "bool HasRenderableGeometry(")
+        geometry = re.search(r"return (.*?);", geometry, re.S).group(1)
+        predicate = predicate.replace("HasRenderableGeometry(*chunk)", "(" + geometry + ")")
+        predicate = predicate.replace("chunk->get_state() == ChunkState::Ready", "ready")
+        for field in ("mesh_vertices", "mesh_indices", "water_mesh_vertices", "water_mesh_indices"):
+            predicate = re.sub(r"chunk(?:->|\.)" + field + r"\.empty\(\)", field, predicate)
+        predicate = compact(predicate).replace("&&", " and ").replace("||", " or ")
+        predicate = re.sub(r"!(?!=)", " not ", predicate).strip()
+        # Check water-only first, then all ready/empty/partial/complete combinations.
+        for bits in (25, *range(32)):
+            ready, terrain_vertices, terrain_indices, water_vertices, water_indices = (
+                bool(bits & (1 << bit)) for bit in range(5))
+            actual = eval(predicate, {"__builtins__": {}}, dict(
+                ready=ready, mesh_vertices=not terrain_vertices, mesh_indices=not terrain_indices,
+                water_mesh_vertices=not water_vertices, water_mesh_indices=not water_indices))
+            expected = ready and ((terrain_vertices and terrain_indices) or
+                                  (water_vertices and water_indices))
+            self.assertEqual(actual, expected, bits)
+
+    def test_water_geometry_changes_invalidate_selection_at_every_publication(self):
+        world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        publication = body(world, "bool SHIELD_WorldSystem::publish_front_meshing_batch(")
+        water = body(publication, "if (replaces_water && water_current &&")
+        transition = body(water, "if (chunk->water_mesh_vertices.empty() !=")
+        self.assertEqual(compact(transition), "notify_renderable_chunks_changed();")
+        self.assertIn("chunk->pending_water_mesh_vertices.empty() || "
+                      "chunk->water_mesh_indices.empty() != "
+                      "chunk->pending_water_mesh_indices.empty()", compact(water))
+        self.assertLess(water.index("notify_renderable_chunks_changed();"),
+                        water.index("chunk->water_mesh_vertices ="))
+        scheduler = body(world, "const auto collect_candidate =")
+        departure = body(scheduler, "if (!water_lod_requested && required_lod >= 0 &&")
+        self.assertIn("ClearPublishedWaterMesh(*this, *chunk_ptr);", departure)
+        removal = body(world, "void ClearPublishedWaterMesh(")
+        self.assertLess(removal.index("notify_renderable_chunks_changed();"),
+                        removal.index("chunk.water_mesh_vertices.clear();"))
+        self.assertIn("ClearPublishedWaterMesh(*this, *chunk);", world)
+        mesher = read(ROOT / "src/luminumbra_common/world/MarchingCubes.cpp")
+        direct = body(mesher, "void GenerateWaterMesh(")
+        ready = body(direct,
+                     "if (chunk.get_state() == ChunkState::Ready && has_water() != had_water)")
+        self.assertIn("world_system.notify_renderable_chunks_changed();", ready)
+        self.assertEqual(direct.count("notify_if_presence_changed();"), 2)
+        self.assertLess(direct.index("const bool had_water = has_water();"),
+                        direct.index("chunk.water_mesh_vertices.clear();"))
+        self.assertLess(direct.index("notify_renderable_chunks_changed();"),
+                        direct.index("const int resolution"))
+
+    def test_terrain_hierarchy_and_cache_exclude_water_only_owners(self):
+        hierarchy = read(RENDERING / "passes/HierarchicalCuller.cpp")
+        build = body(hierarchy, "void RenderPipeline::HierarchicalCuller::BuildHierarchy(")
+        loop = body(build, "for (const auto& chunk : chunks)")
+        self.assertEqual(compact(body(loop, "if (!chunk.has_terrain_mesh())")), "continue;")
+        self.assertLess(loop.index("if (!chunk.has_terrain_mesh())"),
+                        loop.index("chunk_refs.push_back("))
+        self.assertEqual(compact(body(build, "if (chunk_refs.empty())")),
+                         "m_root.reset(); return;")
+        cache = body(self.pipeline, "void RenderPipeline::ensure_terrain_culling_hierarchy(")
+        ids = body(cache, "for (const auto& chunk : renderable_chunks)")
+        self.assertEqual(compact(body(ids, "if (chunk.has_terrain_mesh())")),
+                         "sorted_chunk_ids.push_back(chunk.id);")
+        self.assertIn("m_terrainCullingCache.chunk_count != sorted_chunk_ids.size()", cache)
+        self.assertIn("m_terrainCullingCache.chunk_count = sorted_chunk_ids.size();", cache)
+        prepare = body(self.pipeline, "void RenderPipeline::prepare_frame(")
+        self.assertIn("if (chunk.has_terrain_mesh() && found != m_chunk_render_data.end())", prepare)
+        water = body(self.pipeline, "void RenderPipeline::execute_stage_water(")
+        self.assertIn("for (const auto& chunk : renderable_chunk_snapshots)", water)
+        self.assertIn("water_input.draw_items.push_back(", water)
+
+    def test_water_only_dispatch_preserves_ready_without_terrain_work(self):
+        world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        dispatch = body(world, "SHIELD_WorldSystem::dispatch_meshing_jobs(")
+        condition = re.search(r"if \(([^\n]+)\) \{\s*"
+                              r"set_renderable_chunk_state\(\*chunk, "
+                              r"Luminumbra::ChunkState::Meshing\);", dispatch).group(1)
+        condition = condition.replace("&&", " and ").replace("!", " not ").strip()
+        for required in (False, True):
+            for active in (False, True):
+                actual = eval(condition, {"__builtins__": {}},
+                              dict(terrain_mesh_required=required, has_active_mesh=active))
+                self.assertEqual(actual, required and not active)
+
+    def test_water_only_activity_retires_terrain_allocation_and_ground_support(self):
+        manage = body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources(")
+        activity = compact(body(manage, "for (const auto& chunk : chunks)"))
+        self.assertEqual(activity.count("active.insert(chunk.id);"), 1)
+        # Evaluate the actual admission condition for both template instantiations.
+        # The old unconditional insert must fail on a water-only terrain record.
+        match = re.search(r"if \((.*?)\) \{ active.insert\(chunk.id\); \}", activity)
+        condition = match.group(1) if match else "True"
+        condition = condition.replace("chunk.has_terrain_mesh()", "terrain")
+        condition = condition.replace("||", " or ").replace("&&", " and ")
+        for water in (False, True):
+            for terrain in (False, True):
+                actual = eval(condition, {"__builtins__": {}}, dict(Water=water, terrain=terrain))
+                self.assertEqual(actual, water or terrain, (water, terrain))
+        # Retain the existing grace periods and shared resource teardown.
+        self.assertIn("constexpr u32 inactive_ttl = Water ? 30 : 15;", manage)
+        inactive = body(manage, "for (auto& [id, data] : records)")
+        self.assertIn("if (active.contains(id))", inactive)
+        self.assertIn("if (++data.frames_since_inactive > inactive_ttl)", inactive)
+        self.assertIn("expired.push_back(id);", inactive)
+        teardown = body(manage, "for (const auto id : expired)")
+        self.assertIn("unload_chunk_resources(id);", teardown)
+        self.assertIn("unload_water_resources(id);", teardown)
+        unload = body(self.pipeline, "void RenderPipeline::unload_chunk_resources(")
+        for statement in ("m_foliage_pass->remove_ground_mesh(chunk_id);",
+                          "m_chunk_geometry_pool.free(data.pool_handle);",
+                          "m_chunk_render_data.erase(it);"):
+            self.assertIn(statement, unload)
+
+    def test_water_only_regressions_use_registered_targets(self):
+        cmake = read(ROOT / "test/CMakeLists.txt")
+        for source in ("rendering/render_smoke_test.cpp", "shield/async_water_meshing_test.cpp",
+                       "common/DeterministicWorkBudget_test.cpp"):
+            self.assertIn(source, cmake)
+        self.assertIn('add_test(NAME UploadBudgetWiringPython', cmake)
+        self.assertIn('"test/rendering/test_upload_budget_wiring.py"',
+                      read(ROOT / "tools/ci/ci_paths.py"))
+        smoke = body(read(ROOT / "test/rendering/render_smoke_test.cpp"),
+                     "TEST(RenderSmokeTest, WaterOnlyOwnerSubmitsWaterAndTracksTerrainPresence)")
+        for assertion in ("terrain_gpu_chunks, 0u", "terrain_vertex_capacity, 0u",
+                          "terrain_index_capacity, 0u", "water_gpu_chunks, 1u",
+                          "EXPECT_TRUE(foliage.instances().empty())"):
+            self.assertIn(assertion, smoke)
+        async_tests = read(ROOT / "test/shield/async_water_meshing_test.cpp")
+        for name in ("WaterOnlySelectionTracksPublicationInBothDirections",
+                     "DryWaterOnlyDispatchPreservesReadyUntilDuePublication",
+                     "HeightmapWaterDepartureInvalidatesReadyWaterOnlySelection",
+                     "DirectWaterSelectionInvalidatesForDryAndInvalidGrids"):
+            self.assertIn("TEST(AsyncWaterMeshing, " + name + ")", async_tests)
+
     def test_near_refinement_runs_only_in_admitted_terrain_uploads(self):
         manage = body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources(")
         drain = manage[manage.index("const auto adopt ="):]
