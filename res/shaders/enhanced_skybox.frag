@@ -334,7 +334,13 @@ vec3 renderClouds(vec3 viewDir, vec3 baseColor, float dayFactor) {
         vec3 warmSun = sunTransmittance(u_sunCosZenith);
         float lowSun = 1.0 - smoothstep(0.10, 0.55, u_sunCosZenith); // 0 noon -> 1 low sun
         float lit = clamp(dot(viewDir, u_sunDirection) * 0.5 + 0.5, 0.0, 1.0); // sun-facing
-        cloudColor = mix(cloudColor, cloudColor * (vec3(1.0) + warmSun * 1.6), lowSun * (0.35 + 0.65 * lit) * dayFactor);
+        vec3 warmCloud = mix(cloudColor, cloudColor * (vec3(1.0) + warmSun * 1.6),
+                             lowSun * (0.35 + 0.65 * lit) * dayFactor);
+        // Golden hour changes hue, not energy. Otherwise this second channel
+        // grade amplifies overcast dusk above noon before the display grade.
+        const vec3 lumaWeights = vec3(0.2126, 0.7152, 0.0722);
+        cloudColor = warmCloud * (dot(cloudColor, lumaWeights)
+                                 / max(dot(warmCloud, lumaWeights), 1e-6));
     }
     // Keep clouds bright through twilight (was dayFactor*1.04 -> halved at dusk).
     float cloudBright = 0.5 + 0.55 * dayFactor;
@@ -511,6 +517,31 @@ vec3 legacyGradient(vec3 viewDir, float dayFactor) {
     return mix(bottomColor, topColor, horizonBlend);
 }
 
+// Preserve the input luminance, then reduce chroma along its constant-luminance
+// line until every channel fits the display gamut. Normalizing the tint alone
+// only preserves grey inputs; independently clipping channels changes luminance.
+vec3 preserveSkyLuminance(vec3 color, vec3 graded) {
+    const vec3 lumaWeights = vec3(0.2126, 0.7152, 0.0722);
+    color = clamp(color, vec3(0.0), vec3(1.0));
+    graded = max(graded, vec3(0.0));
+    float luminance = dot(color, lumaWeights);
+    float gradedLuminance = dot(graded, lumaWeights);
+    if (gradedLuminance <= 0.0) {
+        return color;
+    }
+    vec3 chroma = graded * (luminance / gradedLuminance) - vec3(luminance);
+    float saturation = 1.0;
+    // Three channels: constant work per fragment, including black and white.
+    for (int channel = 0; channel < 3; ++channel) {
+        if (chroma[channel] > 0.0) {
+            saturation = min(saturation, (1.0 - luminance) / chroma[channel]);
+        } else if (chroma[channel] < 0.0) {
+            saturation = min(saturation, -luminance / chroma[channel]);
+        }
+    }
+    return clamp(vec3(luminance) + saturation * chroma, vec3(0.0), vec3(1.0));
+}
+
 void main()
 {
     // isolation backdrop — flat-fill the background, skip the sky dome.
@@ -543,7 +574,7 @@ void main()
     // Deepen the hue so the bright midday sky still resolves a clearly warm
     // (pale-amber) band rather than the too-blue Rayleigh dome. R stays ~1
     // (peak), G/B pushed DOWN (exponent > 1 on a sub-unit value shrinks it). At
-    // low sun the hue is already deeply red; section 7 bounds its saturation.
+    // low sun the hue is already deeply red so this saturates harmlessly.
     aerialHue = pow(clamp(aerialHue, vec3(0.0), vec3(1.0)), vec3(1.0, 1.45, 2.6));
     float aerialHorizonF = 1.0 - 0.55 * smoothstep(0.25, 1.0, max(viewDir.y, 0.0));
     float aerialTowardSun = 0.80 + 0.20 * clamp(dot(viewDir, u_sunDirection), -1.0, 1.0);
@@ -657,97 +688,44 @@ void main()
     // --- 4. CLOUDS WITH ATMOSPHERIC LIGHTING ---
     skyColor = renderClouds(viewDir, skyColor, dayFactor);
 
-    // --- 7. HDR TONEMAPPING ---
-    skyColor = skyColor * (2.51 * skyColor + 0.03) / (skyColor * (2.43 * skyColor + 0.59) + 0.14);
-
-    // POST-tonemap aerial warm grade. The bright dome lives in the ACES
-    // saturating region where a pre-tonemap chroma tint is crushed back to white,
-    // so the warm sun-path-transmittance hue is re-applied HERE where it survives.
-    // Keep the luminance-normalized result wherever it fits the display gamut;
-    // compress excess saturation so low sun cannot clip away dome/cloud detail.
+    // --- 7. HDR TONEMAPPING AND COLOR GRADE ---
+    // The filmic fit asymptotes above one. Bound its result before grading and
+    // fractional powers, including very bright LUT radiance and cloud highlights.
+    skyColor = clamp(skyColor * (2.51 * skyColor + 0.03)
+                     / (skyColor * (2.43 * skyColor + 0.59) + 0.14), 0.0, 1.0);
+    vec3 graded = skyColor;
     if (u_useSkyLut != 0) {
-        const vec3 kLumaW = vec3(0.2126, 0.7152, 0.0722); // gate luminance weights
         vec3 tint = mix(vec3(1.0), aerialHue, clamp(aerialWarm, 0.0, 1.0));
-        float tintLuma = max(dot(tint, kLumaW), 1e-4);
-        skyColor *= tint / tintLuma;
-        // Desaturate toward this pixel's luminance, preserving the physical warm
-        // channel ordering and brightness variation. Only out-of-gamut colors
-        // change. Include the overshoot in the denominator so their peak rolls
-        // BELOW 1 instead of pinning a whole red/yellow band to the gamut edge.
-        // ACES can itself exceed 1 for extreme HDR inputs; bound that luminance.
-        float gradePeak = max(skyColor.r, max(skyColor.g, skyColor.b));
-        if (gradePeak > 1.0) {
-            float gradeLuma = clamp(dot(skyColor, kLumaW), 0.0, 1.0);
-            float gradeOvershoot = gradePeak - 1.0;
-            float gradeSaturation = (1.0 - gradeLuma)
-                / max(gradePeak - gradeLuma + gradeOvershoot, 1e-4);
-            skyColor = mix(vec3(gradeLuma), skyColor, gradeSaturation);
-        }
+        graded *= tint;
 
-        // kill the SICKLY YELLOW-GREEN dawn cast.
-        // At a low-but-positive sun (dawn, sun ~27 deg up) the sky-view LUT radiance
-        // is green-dominant (G leads R and B), and the luminance-preserving warm
-        // grade above cannot fix a base whose GREEN already leads -- the bright dawn
-        // dome read yellow-green instead of a clean warm amber. A real sunrise sky
-        // is amber/orange: R >= G >= B. So clamp any GREEN EXCESS (G above R) back
-        // down toward R on the BRIGHT dome only. This is gated by:
-        //   - brightness (only the bright day/dawn dome; the dark dusk/night dome
-        //     the TimeOfDaySweep gate measures has low luma and is untouched, so the
-        //     dusk warm-half r/b band + night-dark gates are unaffected), and
-        //   - the warm-grade weight (off at deep night) so stars/aurora are clean.
-        // It only ever REMOVES an unwanted green lead; a neutral or warm (R>=G) sky
-        // is left exactly as-is, so dusk stays warm.
-        //
-        // The clamp fires ONLY when GREEN leads BOTH red AND blue -- i.e. the true
-        // sickly yellow-green dawn cast -- AND only at a LOW SUN (dawn/dusk window).
-        // At a HIGH sun the SkyboxVisual smoke (time-of-day 0.04, sun near zenith)
-        // measures a strict horizon->zenith luminance gradient; touching G per-band
-        // there perturbed that gradient's monotonicity. So a low-sun gate
-        // (u_sunCosZenith) holds the clamp fully OFF at noon and only opens it as
-        // the sun drops toward the horizon -- exactly the dawn/dusk band where the
-        // green cast appears. The dawn sun (cosZenith ~0.47) is well inside it. The
-        // blue-dominant noon dome (B >= G) is untouched on both counts.
-        float skyLuma = dot(skyColor, kLumaW);
-        // Fire on the dimmer dusk dome too (lowered from 0.35): the golden-hour dusk
-        // dome is now dimmer than noon for the luminance ordering, and the green cast
-        // lives in those mid-luma pixels — the old threshold let it survive and trip
-        // the dusk aurora-green gate. Still 0 at very low luma (deep night stars/aurora).
-        float brightDome = smoothstep(0.08, 0.40, skyLuma);
-        float lowSunGate = 1.0 - smoothstep(0.55, 0.78, u_sunCosZenith); // off at noon
-        float rb = max(skyColor.r, skyColor.b);
-        // Only a green lead over BOTH channels counts (yellow-green dawn/dusk cast).
-        // Fully remove it (1.0) so the low-sun sky is firmly warm (R >= G), never green.
-        float greenLead = max(skyColor.g - rb, 0.0);
-        skyColor.g -= greenLead * 1.0 * brightDome * lowSunGate
-                      * clamp(aerialNightFade, 0.0, 1.0);
+        // Remove a low-sun green lead before luminance/gamut correction. Keep
+        // deep-night stars and aurora, and the high-sun gradient, untouched.
+        float brightDome = smoothstep(0.08, 0.40, dot(skyColor, vec3(0.2126, 0.7152, 0.0722)));
+        float lowSunGate = 1.0 - smoothstep(0.55, 0.78, u_sunCosZenith);
+        // Ease green toward the subordinate blue as well as red so removing
+        // a green lead produces amber rather than equal-red/green yellow.
+        float warmGreen = mix(graded.r, min(graded.r, graded.b), 0.25);
+        float greenLead = max(graded.g - max(warmGreen, graded.b), 0.0);
+        graded.g -= greenLead * brightDome * lowSunGate
+                    * clamp(aerialNightFade, 0.0, 1.0);
     }
+    // Include the fantasy channel powers in the same luminance-preserving grade.
+    // Night uses unit exponents, retaining the supplied cloud/aurora palette.
+    graded = pow(graded, mix(vec3(1.0), vec3(0.9, 0.95, 1.05), dayFactor));
+    skyColor = preserveSkyLuminance(skyColor, graded);
 
-    // Color grading for fantasy atmosphere
-    // Unequal exponents turn even neutral dark clouds brown. Keep the night
-    // palette supplied by cloud ambient and the atmosphere.
-    skyColor = pow(skyColor, mix(vec3(1.0), vec3(0.9, 0.95, 1.05), dayFactor));
+    // Gamma precedes the localized white core. Reserve only the top display
+    // highlights for that core: ordinary dome, halo and clouds stop at 252/255
+    // after quantization. Midtones and the night floor retain their brightness.
+    skyColor = min(pow(skyColor, vec3(1.0/2.2)), vec3(0.99));
 
-    //  ( part B): NOON sun-disc PUNCH. At a high sun the open pale dome
-    // ALSO saturates near the tonemap ceiling, so the pre-tonemap disc/corona above
-    // never reads measurably brighter than the dome -- the brightest cluster could
-    // not localize at the sun (SkyboxVisual cluster_fraction ~0.24 vs 0.6). This
-    // forces a tight disc core toward PURE WHITE here, AFTER the ACES tonemap that
-    // asymptotically caps the dome just under 1.0, so the disc reaches a clean 1.0
-    // (255) that clears the dome ceiling -- giving the gate a genuine localized
-    // brightest spot at the true sun direction. Gated on:
-    //   * highSun (u_sunCosZenith) so DAWN/DUSK keep their soft warm disc untouched,
-    //   * dayFactor so it fades out below the horizon,
-    //   * viewDir.y so it never punches the lower/horizon band.
-    // Tight smoothstep -> a crisp, distinct disc (the desired "more localized" look)
-    // rather than the diffuse bloom. Render-only.
+    // A tight high-sun core is the sole display-white emitter in the sky.
+    // Low sun retains its warm disc and night retains its stars/moon/aurora.
     {
         float discCore = smoothstep(0.99975, 0.99997, sunDot)
                          * highSun * dayFactor * smoothstep(0.05, 0.20, viewDir.y);
         skyColor = mix(skyColor, vec3(1.0), clamp(discCore, 0.0, 1.0));
     }
-
-    // --- 8. GAMMA CORRECTION ---
-    skyColor = pow(skyColor, vec3(1.0/2.2));
 
     FragColor = vec4(skyColor, 1.0);
 }
