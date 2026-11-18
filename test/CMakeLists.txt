@@ -612,6 +612,7 @@ if(MSVC)
 endif()
 
 add_executable(render_smoke_test
+    rendering/diagnostic_attribution_test.cpp
     rendering/render_smoke_test.cpp
     rendering/FarWorldLegacyIsolation_test.cpp
     rendering/FarWorldShadow_test.cpp
@@ -632,6 +633,8 @@ target_include_directories(render_smoke_test PRIVATE
 )
 
 target_link_libraries(render_smoke_test PRIVATE
+    # The controlled comparison-atmosphere probe calls the QA weather helpers.
+    luminumbra_client_qa
     luminumbra_client
     glm::glm
     gtest_main

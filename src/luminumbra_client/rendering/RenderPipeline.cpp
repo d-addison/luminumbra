@@ -1084,6 +1084,7 @@ RenderContext RenderPipeline::make_water_context(const Camera& camera) {
     ctx.sun = m_sun;
     ctx.lit_scene =
         m_render_registry.adopt_fbo("lit_scene", m_lighting_pass->lighting_fbo().fbo_id);
+    ctx.lit_scene_depth = RenderbufferHandle{m_lighting_pass->lighting_fbo().depth_texture};
     ctx.opaque_scene = m_render_registry.adopt_texture(
         "opaque_scene", m_lighting_pass->lighting_fbo().opaque_color_texture);
     ctx.gbuffer_depth =
@@ -3360,12 +3361,22 @@ void RenderPipeline::execute_stage_water(const Camera& camera) {
             }
         }
         begin_gpu_pass_timer(GpuTimerPass::Water);
-        const WaterDrawStats water_stats = m_water_pass->execute(water_ctx, water_input, camera);
+        const WaterDrawStats water_stats = m_water_pass->execute(
+            water_ctx, water_input, camera, m_water_visibility_capture_enabled);
         m_last_render_pass_stats.water_draws += water_stats.water_draws;
         m_last_render_pass_stats.water_indices_drawn += water_stats.water_indices;
         end_gpu_pass_timer(GpuTimerPass::Water);
         glBindVertexArray(0); // Unbind after water pass
     }
+}
+
+const WaterVisibilityMask& RenderPipeline::water_visibility_mask() const {
+    if (!m_water_visibility_capture_enabled ||
+        !m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Water)) {
+        static const WaterVisibilityMask empty;
+        return empty;
+    }
+    return m_water_pass->visibility_mask();
 }
 
 void RenderPipeline::execute_stage_waterfall(const Camera& camera) {

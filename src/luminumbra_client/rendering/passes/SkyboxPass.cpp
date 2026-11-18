@@ -254,7 +254,8 @@ void SkyboxPass::execute(const RenderContext& ctx,
     // noon). The skybox shader compares dot(viewDir, u_sunDirection) against
     // ~1 to place the sun/moon discs, so it needs the toward-body directions:
     // with the old wiring the discs sat below the horizon and never rendered.
-    m_skybox_shader->setVec3("u_sunDirection", -ctx.sun.direction);
+    const glm::vec3 toward_sun = -ctx.sun.direction;
+    m_skybox_shader->setVec3("u_sunDirection", toward_sun);
     m_skybox_shader->setVec3("u_moonDirection", -ctx.moon_direction);
     m_skybox_shader->setFloat("u_sunIntensity", ctx.sun.intensity);
     // continuous day->twilight->night factor from the
@@ -279,8 +280,7 @@ void SkyboxPass::execute(const RenderContext& ctx,
     m_skybox_shader->setInt("u_useSkyLut", sky_lut_ready ? 1 : 0);
     // dot(toward-sun, up): the transmittance LUT's mu axis. up is +Y; the
     // pipeline stores the light-travel direction, so toward-sun is -direction.
-    m_skybox_shader->setFloat("u_sunCosZenith",
-                              glm::dot(-ctx.sun.direction, glm::vec3(0.0f, 1.0f, 0.0f)));
+    m_skybox_shader->setFloat("u_sunCosZenith", toward_sun.y);
     // push the wind-advected cloud-coverage state to the sky-dome.
     // The shader holds GLSL defaults, but the live scroll offset/coverage must be
     // pushed each frame or the dome clouds never drift (and never register with the
