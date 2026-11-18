@@ -3488,7 +3488,8 @@ GameSession::CaptureAuthorityHashes(const std::string& entity_snapshot_json,
             state.insert_chunk(chunk);
         }
         std::optional<std::string> projection;
-        if (m_activeRegionsEnabled) {
+        // Sub-hash captures never read regional owners or the save index.
+        if (m_activeRegionsEnabled && want_chunk) {
             const auto keys = m_worldSystem->authority_region_keys();
             const auto directory =
                 m_regionDurableDirectory.empty() ? GetWorldSaveDir() : m_regionDurableDirectory;

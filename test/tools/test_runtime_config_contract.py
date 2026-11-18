@@ -1018,6 +1018,8 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         tick = cpp_block(source, "TickResultLockstepSession::PumpTick(")
         refusal = "catch(constPersistence::AuthorityCaptureRefused&)"
         self.assertIn('RecordReplayTick(want,recorded_inputs,nullptr);'
+                      'if(m_hooks.record_replay_tick){'
+                      'm_hooks.record_replay_tick(want,merged,nullptr,m_hooks.user);}'
                       'EmitDesyncDump(want,"authority_capture");'
                       'result.outcome=TickOutcome::Desync;returnresult;',
                       cpp_block(tick, refusal))
@@ -1064,6 +1066,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertIn("digest_operation.emplace(directory,m_regionRequiresIndex)", digest)
         self.assertIn("digest_operation->digest(key,inputs)", digest)
         state_hash = cpp_block(session, "GameSession::CaptureAuthorityHashes(")
+        self.assertIn("if(m_activeRegionsEnabled&&want_chunk){", state_hash)
         self.assertIn("RunWorkerBoundary(m_jobSystem,[&]{"
                       "operation.emplace(directory,m_regionRequiresIndex);});", state_hash)
         self.assertIn("prepared=operation->prepare(key,inputs)",
