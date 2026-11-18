@@ -2030,7 +2030,10 @@ int main(int argc, char* argv[]) {
         const std::string pan = GetCommandLineOption(argc, argv, "--timelapse-pan", "");
         if (!pan.empty()) {
             try {
-                g_app.capture.timelapse_pan = std::clamp(std::stof(pan), -2.0f, 2.0f);
+                const float parsed = std::stof(pan);
+                // std::stof accepts "nan"/"inf" and std::clamp keeps NaN; keep the default.
+                if (std::isfinite(parsed))
+                    g_app.capture.timelapse_pan = std::clamp(parsed, -2.0f, 2.0f);
             } catch (...) {}
         }
     }
@@ -5294,7 +5297,8 @@ int main(int argc, char* argv[]) {
                                 tlz);
                         }
                     }
-                    if (g_app.capture.drain_state.init) {
+                    // Vista keeps its horizon framing; the drain setup above still runs.
+                    if (g_app.capture.drain_state.init && !g_app.capture.timelapse_vista) {
                         const glm::vec3 P(g_app.capture.drain_state.P.x,
                                           g_app.capture.drain_state.P.y,
                                           g_app.capture.drain_state.P.z);
@@ -5344,7 +5348,8 @@ int main(int argc, char* argv[]) {
                                                  bed);
                         }
                     }
-                    if (g_app.capture.drain_state.init) {
+                    // Vista keeps its horizon framing; rain and the basin edit still run.
+                    if (g_app.capture.drain_state.init && !g_app.capture.timelapse_vista) {
                         const glm::vec3 P(g_app.capture.drain_state.P.x,
                                           g_app.capture.drain_state.P.y,
                                           g_app.capture.drain_state.P.z);
