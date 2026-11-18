@@ -145,6 +145,18 @@ namespace fs = std::filesystem;
 using Luminumbra::Systems::TerrainGenParams;
 
 namespace {
+std::span<const Luminumbra::Vec3>
+RegionalWaterAnchors(const std::optional<std::vector<Luminumbra::Vec3>>& replicated,
+                     const std::optional<Luminumbra::Vec3>& local) {
+    if (replicated) {
+        return *replicated;
+    }
+    if (local) {
+        return {&*local, 1};
+    }
+    return {};
+}
+
 constexpr float kSpawnEyeHeight = 1.95f;
 constexpr int kScentFieldCells = 128;
 constexpr int kScentFieldChannels = 4;
@@ -1833,6 +1845,8 @@ void GameSession::ApplyWaterResolutionWiring() {
     if (!m_worldSystem) {
         return;
     }
+    m_waterSystem->SetRegionalScheduling(m_activeRegionsEnabled &&
+                                         m_authorityProfile.regional_water);
     m_worldSystem->SetWaterSimResolution(static_cast<int>(m_waterHighResEnabled
                                                               ? Systems::WaterDetailLevel::High
                                                               : Systems::WaterDetailLevel::Medium));
@@ -2623,6 +2637,15 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             }
             if (m_regionFault)
                 return i + 1;
+            if (m_activeRegionsEnabled && m_authorityProfile.regional_water && m_waterSystem) {
+                const auto anchors = RegionalWaterAnchors(m_replicatedSimulationAnchors,
+                                                          m_activeRegionLedger.local_anchor());
+                m_waterSystem->UpdateRegionalFromSimulation(m_registry,
+                                                            anchors,
+                                                            m_activeRegionLedger,
+                                                            m_regionSchedule,
+                                                            m_regionCompletedWork);
+            }
             if (m_activeRegionsEnabled) {
                 PublishRegionCompletedWork(
                     field_candidate, scheduled_energy, defer_water_authority);
@@ -4701,6 +4724,9 @@ GroundNotifications GameSession::CaptureGroundNotifications() const {
 void GameSession::RestoreWorldClock(const WorldClock& clock) {
     m_worldClock = clock;
     m_simulationClock.reset(clock.tick());
+    if (m_activeRegionsEnabled && m_authorityProfile.regional_water && m_waterSystem) {
+        m_waterSystem->ResetRegionalTimeline();
+    }
     if (m_energyFieldState)
         m_energyFieldState->ResetEmptyAtTick(clock.tick());
     RestoreAmbientFieldsAtTick(clock.tick());
@@ -5961,6 +5987,9 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
     m_registry.ctx().erase<luminumbra::foliage::FarmingReplayGate>();
     m_foliageStep.reset();
     m_lastLoadedChunkCount = 0;
+    if (m_activeRegionsEnabled && m_authorityProfile.regional_water) {
+        m_worldSystem->clear_world(m_physicsSystem.get());
+    }
     m_fieldPages = std::move(saved.field_pages);
     m_renderCalendar = saved.render_calendar;
     const bool replace_weather = m_weatherSchedule || saved.weather_schedule;
@@ -6048,7 +6077,8 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
         }
     }
 
-    // boot-time water-resolution migration: a save written at another
+    // Legacy boot-time water-resolution migration (regional water defers resizing
+    // to funded preparation): a save written at another
     // sim resolution (sim.water_high_res flipped between sessions) must converge
     // BEFORE the first live tick. Left to the live path it would resize at
     // MAX_WATER_RESIZES_PER_TICK=1 while the seam pass — which hard-gates on equal

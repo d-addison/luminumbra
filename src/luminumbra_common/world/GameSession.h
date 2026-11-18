@@ -114,6 +114,8 @@ public:
     struct AuthorityProfileOptions {
         // Slice I will bind this predicate to its negotiated authority revision.
         bool residency_free_eviction = false;
+        // Dormant until negotiated authority enables fixed-tick water ownership.
+        bool regional_water = false;
     };
 
     // Selects the test-only opt-in constructor below.

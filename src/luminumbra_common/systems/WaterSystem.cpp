@@ -861,6 +861,18 @@ WaterSystem::WaterSystem(JobSystem* job_system, SHIELD_WorldSystem* shield_syste
     : m_job_system(job_system)
     , m_shield_system(shield_system) {}
 
+void WaterSystem::ResetRegionalTimeline() {
+    m_last_regional_tick.reset();
+    m_regional_work = {};
+    m_mesh_invalidations.clear();
+    m_active_chunks = nullptr;
+    m_cells_stepped_last_update = 0;
+    m_grid_candidates_visited_last_update = 0;
+    m_debug_sources_seen = 0;
+    m_debug_source_injected_mm = 0;
+    m_water_activity_cache.clear();
+}
+
 void WaterSystem::set_camera_entity(EntityID camera_entity) {
     m_camera_entity = camera_entity;
 }
@@ -2042,6 +2054,11 @@ void WaterSystem::SetSimResolution(int cells_per_side) {
 
 std::size_t WaterSystem::MigrateChunksToSimResolution(
     const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& chunks) {
+    // Regional preparation owns resizing, including sleeping saved columns. Eager
+    // boot or streaming migration would make eligibility depend on residency.
+    if (m_regional_scheduling) {
+        return 0;
+    }
     const auto target_level = static_cast<WaterDetailLevel>(m_sim_resolution);
     std::size_t migrated = 0;
     for (const auto& entry : chunks) {

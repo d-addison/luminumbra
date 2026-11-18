@@ -4338,6 +4338,8 @@ TEST(RegionalWaterAdmission, SleepingResizedSavedColumnsHaveTheSameColdAndRestor
         if (restored) {
             ASSERT_TRUE(shield.restore_authoritative_chunk({0, 0, 0}));
         }
+        // Restoration leaves the saved grid intact until funded preparation.
+        EXPECT_EQ(chunk->current_water_resolution.load(), 4);
         auto ledger = PlanningLedger({{0, 0}});
         entt::registry registry;
         const auto entity = registry.create();
@@ -4346,8 +4348,13 @@ TEST(RegionalWaterAdmission, SleepingResizedSavedColumnsHaveTheSameColdAndRestor
         std::vector<world::RegionWork> completed;
         water.UpdateRegionalFromSimulation(
             registry, {}, ledger, ExecutionSchedule(0, {{0, 0}}), completed);
-        EXPECT_TRUE(water.regional_work().visits.empty());
-        EXPECT_TRUE(completed.empty());
+        EXPECT_EQ(water.regional_work().visits, std::vector<ChunkID>{chunk->get_id()});
+        EXPECT_EQ(water.regional_work().preparation_cells, 256u);
+        EXPECT_EQ(water.regional_work().water_cells, 256u);
+        EXPECT_EQ(water.regional_work().total_cells, 512u);
+        ASSERT_EQ(completed.size(), 1u);
+        EXPECT_EQ(completed.front().key, (RegionKey{0, 0}));
+        EXPECT_EQ(completed.front().water_cells, 256u);
         EXPECT_EQ(chunk->current_water_resolution.load(), 16);
         EXPECT_TRUE(chunk->is_water_sleeping.load());
         const auto saved = Persistence::SerializeChunkAuthoritySnapshotJson(*chunk);
