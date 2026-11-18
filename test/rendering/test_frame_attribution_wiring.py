@@ -424,9 +424,18 @@ class FrameAttributionWiring(unittest.TestCase):
         reload = self.main.index("const auto settle_workload_reload =")
         scatter = [match.start() for match in re.finditer(
             re.escape("UpdateFoliageScatter(g_app,"), self.main)]
-        self.assertEqual(len(scatter), 2)
+        self.assertEqual(len(scatter), 3)
+        preload_definition = self.main.index("auto wait_for_world_presentation =")
+        activation_definition = self.main.index("auto activate_loaded_world =")
+        preload_scatter = [position for position in scatter
+                           if preload_definition < position < activation_definition]
+        self.assertEqual(len(preload_scatter), 1)
+        # The definition precedes the loop; its staged invocation follows restoration.
+        advance = self.main.index("world_entry.advance(",
+                                  self.main.index("if (world_entry.state() == WorldEntryState::Requested)"))
+        self.assertLess(restore, advance)
         self.assertLess(restore, reload)
-        for position in scatter:
+        for position in (position for position in scatter if position not in preload_scatter):
             self.assertLess(restore, position)
         self.assertLess(restore, self.main.index("RenderMenuScreens(g_app,"))
         self.assertIn("UpdateFoliageScatter(g_app,", block(self.main,
@@ -507,8 +516,16 @@ class FrameAttributionWiring(unittest.TestCase):
 
     def test_all_foliage_update_callers_supply_photo_mode(self):
         calls = re.findall(r"UpdateFoliageScatter\(g_app,(.*?)\);", self.main, re.S)
-        self.assertEqual(len(calls), 2)
-        for call in calls:
+        self.assertEqual(len(calls), 3)
+        preload = block(self.main, 'auto wait_for_world_presentation =')
+        preload_calls = re.findall(r"UpdateFoliageScatter\(g_app,(.*?)\);", preload, re.S)
+        self.assertEqual(len(preload_calls), 1)
+        self.assertEqual(compact(preload_calls[0]),
+                         "root_dir, scenario_config, g_camera.get(), gameSession.get(), "
+                         "renderPipeline, false, scatter_ms, foliage_ms")
+        gameplay_calls = [call for call in calls if call != preload_calls[0]]
+        self.assertEqual(len(gameplay_calls), 2)
+        for call in gameplay_calls:
             self.assertEqual(compact(call),
                              "root_dir, scenario_config, g_camera.get(), gameSession.get(), "
                              "renderPipeline, g_playerController && "
@@ -518,10 +535,10 @@ class FrameAttributionWiring(unittest.TestCase):
 
     def test_capture_simulation_decision_covers_ticks_physics_and_water(self):
         main = compact(self.main)
-        self.assertIn('const bool simulate_frame = Measurement::frame_simulation_enabled('
+        self.assertIn('const bool simulate_frame = !timelapse_waiting && Measurement::frame_simulation_enabled('
                       'benchmark_v4, traversal.has_value(), measuring_v3, '
                       'g_app.hud.paused, g_app.capture.timeScale);', main)
-        self.assertIn('const bool advance_frame_simulation = !g_rb_active || simulate_frame;', main)
+        self.assertIn('const bool advance_frame_simulation = !timelapse_waiting && (!g_rb_active || simulate_frame);', main)
         session = block(self.main, 'if (!scenario_config.networked_session_smoke())')
         ticking = block(session, 'if (simulate_frame)')
         self.assertEqual(session.count('gameSession->TickSimulation('),
@@ -929,6 +946,20 @@ class FrameAttributionWiring(unittest.TestCase):
         preview = read(ROOT / "tools/static_preview/CMakeLists.txt")
         self.assertIn('"${STATIC_PREVIEW_ROOT}/src/luminumbra_client/app/FrameAttribution.cpp"',
                       preview)
+
+    def test_static_preview_compiles_the_diagnostic_id_codec_its_units_call(self):
+        # The standalone preview DLL links no client library, so every unit it compiles that
+        # submits diagnostic draws (DiagnosticDrawTable::submit -> EncodeDiagnosticId) needs the
+        # codec unit in the same target; otherwise MSVC/MSYS2 fail to link the DLL.
+        preview = read(ROOT / "tools/static_preview/CMakeLists.txt")
+        target = re.search(r"add_library\(luminumbra_render_static SHARED(.*?)\)", preview, re.S)
+        self.assertIsNotNone(target)
+        sources = re.findall(r'"\$\{STATIC_PREVIEW_ROOT\}/(src/[^"]+\.cpp)"', target.group(1))
+        callers = [source for source in sources
+                   if re.search(r'#include "(?:rendering/)?DiagnosticDrawTable\.h"|EncodeDiagnosticId\(',
+                                read(ROOT / source))]
+        self.assertIn("src/luminumbra_client/rendering/GBufferTargets.cpp", callers)
+        self.assertIn("src/luminumbra_client/rendering/DiagnosticCapture.cpp", sources)
 
     def test_program_owners_retain_the_first_use_bit_on_every_backend(self):
         for path, members in (

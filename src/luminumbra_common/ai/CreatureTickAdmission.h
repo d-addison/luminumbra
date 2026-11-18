@@ -28,6 +28,11 @@ public:
         return !m_entries.contains(entity) || m_entries.get(entity).allowed;
     }
 
+    // Called after this tick's consumers, before a captured owner is destroyed.
+    void Forget(entt::entity entity) {
+        m_entries.remove(entity);
+    }
+
     // Const diagnostic: number of creature owners visited by the latest capture.
     [[nodiscard]] std::size_t owner_visits() const {
         return m_entries.size();
