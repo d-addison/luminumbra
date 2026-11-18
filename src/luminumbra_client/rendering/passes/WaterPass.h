@@ -2,6 +2,7 @@
 
 #include "../RenderContext.h"
 #include "../RenderInputs.h"
+#include "../WaterVisibility.h"
 
 #include <filesystem>
 #include <memory>
@@ -59,8 +60,15 @@ public:
     // RenderContext seam. Draw list (WaterPassInput) is
     // built at the call site from m_water_render_data in chunk order (byte-stable);
     // returns water draw/index counts the caller folds into stats.
-    WaterDrawStats
-    execute(const RenderContext& ctx, const WaterPassInput& input, const Camera& camera);
+    WaterDrawStats execute(const RenderContext& ctx,
+                           const WaterPassInput& input,
+                           const Camera& camera,
+                           bool capture_visibility = false);
+
+    // Last execute only. Empty when disabled or capture failed; never submission evidence.
+    const WaterVisibilityMask& visibility_mask() const {
+        return m_visibility_mask;
+    }
 
     const std::unique_ptr<Shader>& shader() const {
         return m_water_shader;
@@ -93,7 +101,9 @@ public:
 
 private:
     void generate_caustics(const RenderContext& ctx);
+    void capture_visibility(const RenderContext& ctx, const WaterPassInput& input);
 
+    WaterVisibilityMask m_visibility_mask;
     std::unique_ptr<Shader> m_water_shader;
     std::unique_ptr<Shader> m_caustics_shader;
     u32 m_water_flat_normal_texture = 0;

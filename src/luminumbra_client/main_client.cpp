@@ -6109,6 +6109,14 @@ int main(int argc, char* argv[]) {
                         !g_app.capture.ui_screenshot_screen.empty() || g_app.capture.ui_thumbs != 0;
                     UpdatePhotoEnvironment(
                         g_app, g_playerController.get(), renderPipeline, photo_capture_pinned);
+                    // Time-lapse day drift: the live clock above rewrites time of day every
+                    // frame, so re-apply the capture's drifting value here (frame order,
+                    // like the scene pins). daystep 0 keeps the live clock. It runs before
+                    // the scenario pins so a scenario's fixed time of day still wins.
+                    if (g_app.capture.timelapse_frames > 0 &&
+                        g_app.capture.timelapse_daystep > 0.0f) {
+                        renderPipeline.set_time_of_day(g_app.capture.timelapse_tod);
+                    }
                     // Scenario capture render pins (fixed time-of-day for the
                     // visual smokes; the season sweep's pin schedule) run at
                     // this exact point so they override the live-tick

@@ -287,6 +287,51 @@ bool FarWorldRenderer::StageSessionTarget(const FarWorldAuthorityProducer& produ
     refusal_ = session_->AdmissionRefusal();
     return accepted;
 }
+FarHandoffAdmissionStatus FarWorldRenderer::StartSessionTarget(
+    const std::shared_ptr<FarWorldAuthorityProducer>& producer,
+    const std::shared_ptr<const Systems::SHIELD_WorldSystem>& world,
+    std::span<const FarSessionHandoffTile> tiles,
+    const FarWorldAuthorityProducer::FrozenPolicy& policy,
+    const FarFrozenCaptureLimits& limits,
+    const FarFrozenCaptureWork::Counts& samples) {
+    CheckOwner();
+    if (requested_ != FarWorldMode::Ladder || !session_ || stopping_)
+        return FarHandoffAdmissionStatus::NotApplicable;
+    const auto result =
+        session_->StartSessionTarget(producer, world, tiles, policy, limits, samples);
+    refusal_ = result == FarHandoffAdmissionStatus::Refused ? session_->AdmissionRefusal()
+               : session_->Diagnostic().state.target_serial != 0
+                   ? FarWorldRefusal::None
+                   : FarWorldRefusal::ImmutableAuthorityUnavailable;
+    return result;
+}
+FarHandoffAdmissionPump FarWorldRenderer::PumpAdmission(std::uint64_t budget) {
+    CheckOwner();
+    if (requested_ != FarWorldMode::Ladder || !session_ || stopping_)
+        return {};
+    const auto result = session_->PumpAdmission(budget);
+    if (result.status != FarHandoffAdmissionStatus::Pending &&
+        result.status != FarHandoffAdmissionStatus::Idle) {
+        refusal_ = session_->AdmissionRefusal();
+    }
+    return result;
+}
+FarHandoffAdmissionStatus FarWorldRenderer::CancelAdmission() {
+    CheckOwner();
+    if (requested_ != FarWorldMode::Ladder || !session_ || stopping_)
+        return FarHandoffAdmissionStatus::NotApplicable;
+    const auto result = session_->CancelAdmission();
+    refusal_ = session_->Diagnostic().state.target_serial != 0
+                   ? FarWorldRefusal::None
+                   : FarWorldRefusal::ImmutableAuthorityUnavailable;
+    return result;
+}
+FarHandoffAdmissionStatus FarWorldRenderer::AdmissionStatus() const {
+    CheckOwner();
+    return requested_ == FarWorldMode::Ladder && session_ && !stopping_
+               ? session_->AdmissionStatus()
+               : FarHandoffAdmissionStatus::NotApplicable;
+}
 std::size_t FarWorldRenderer::RetireIdleHistory() {
     CheckOwner();
     return requested_ == FarWorldMode::Ladder && session_ ? session_->RetireIdleHistory() : 0;

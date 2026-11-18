@@ -1411,10 +1411,44 @@ class FarVolumeAdmissionSourceContract(unittest.TestCase):
                  "void FarVolumeResidency::Reject(")):
             with self.subTest(path=path):
                 body = self.method(path, start, end)
-                self.assertIn("std::sort(incoming.begin(), incoming.end()", body)
-                self.assertIn("tier.key_index[tier.entries.size() + count++]", body)
-                self.assertLess(body.index("count == tier.entries.size()"),
-                                body.index("tier.key_index[tier.entries.size() + count++]"))
+                if path == "FarVolumeHandoff.cpp":
+                    start_body = self.method(
+                        path, "FarHandoffAdmissionStatus FarVolumeHandoff::StartTarget(",
+                        "FarHandoffAdmissionStatus FarVolumeHandoff::StartSessionTarget(")
+                    self.assertNotIn("PrepareTarget(", start_body)
+                    self.assertNotIn("std::sort(", start_body)
+                    self.assertIn("pending->scratch.resize(manifest.tiles.size())", start_body)
+                    prepare = self.method(
+                        path, "FarWorldRefusal FarVolumeHandoff::PrepareStep(",
+                        "FarWorldRefusal FarVolumeHandoff::AdmissionStep(")
+                    self.assertNotRegex(prepare, r"\b(?:for|while)\s*\(")
+                    self.assertNotIn("std::sort(", prepare)
+                    self.assertIn("pending.scratch[pending.output++]", prepare)
+                    self.assertIn("incoming[pending.cursor] = pending.scratch[pending.cursor]",
+                                  prepare)
+                    self.assertIn("pending.width >= count - pending.width ? count : 2 * pending.width",
+                                  prepare)
+                    self.assertIn("++admission_work_.key_comparisons", prepare)
+                    pump = self.method(
+                        path, "FarHandoffAdmissionPump FarVolumeHandoff::PumpAdmission(",
+                        "bool FarVolumeHandoff::StageTarget(")
+                    self.assertIn("while (result.work < budget && pending.tile < pending.count)",
+                                  pump)
+                    self.assertLess(pump.index("++result.work"),
+                                    pump.index("AdmissionStep(pending)"))
+                    self.assertNotIn("PrepareTarget(", pump)
+                    step = self.method(
+                        path, "FarWorldRefusal FarVolumeHandoff::AdmissionStep(",
+                        "FarHandoffAdmissionPump FarVolumeHandoff::PumpAdmission(")
+                    self.assertIn("return PrepareStep(pending)", step)
+                    self.assertNotIn("std::sort(", body)
+                    body = prepare + body
+                    write = "incoming[count++]"
+                else:
+                    self.assertIn("std::sort(incoming.begin(), incoming.end()", body)
+                    write = "tier.key_index[tier.entries.size() + count++]"
+                self.assertIn(write, body)
+                self.assertLess(body.index("count == tier.entries.size()"), body.index(write))
                 self.assertIn("tier.order[index] == 0", body)
                 self.assertIn("auto& cursor = next_free[number]", body)
                 self.assertIn("entry = &tier.entries[cursor++]", body)
