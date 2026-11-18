@@ -100,7 +100,12 @@ void GBufferDiagnosticCapture::abort() noexcept {
 }
 
 Shader* GBufferDiagnosticCapture::variant(Shader* shader, bool ladder) {
-    if (!state_->framebuffer || !shader || !shader->IsValid()) {
+    if (!state_->framebuffer) {
+        return shader;
+    }
+    if (!shader || !shader->IsValid()) {
+        // The draw will be skipped, so its geometry cannot count as background coverage.
+        unsupported("diagnostic_base_shader_unavailable");
         return shader;
     }
     for (const auto& entry : state_->variants) {
@@ -1276,6 +1281,14 @@ void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
                                                const Camera& camera,
                                                const glm::vec4 (&frustum_planes)[6],
                                                GBufferDrawStats& stats) {
+    namespace anim = luminumbra::animation;
+    auto view = registry.view<const Components::TransformComponent,
+                              const Components::SkinnedMeshComponent,
+                              const anim::AnimationPlayerComponent>();
+    // An empty pass draws nothing, so its program cannot affect diagnostic coverage.
+    if (view.begin() == view.end()) {
+        return;
+    }
     Shader* shader = skinned_mesh_shader(input.far_selection.effective).get();
     auto* capture = GBufferDiagnosticCapture::Current();
     FarWorldPassUniforms diagnostic_uniforms;
@@ -1289,14 +1302,6 @@ void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
                      : input.far_selection.effective == FarWorldMode::Ladder
                          ? m_skinned_ladder_uniforms
                          : m_skinned_far_uniforms;
-
-    namespace anim = luminumbra::animation;
-    auto view = registry.view<const Components::TransformComponent,
-                              const Components::SkinnedMeshComponent,
-                              const anim::AnimationPlayerComponent>();
-    if (view.begin() == view.end()) {
-        return;
-    }
     if (!UseDrawProgram(shader, stats)) {
         return;
     }

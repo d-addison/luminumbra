@@ -139,7 +139,10 @@ TEST(DiagnosticAttribution, DisabledScopeDoesNotAllocateTargetsOrCompileVariants
     EXPECT_EQ(constructor.find("ensure("), std::string::npos);
     EXPECT_EQ(constructor.find("make_unique<Shader>"), std::string::npos);
     const auto variant = Body(targets, "Shader* GBufferDiagnosticCapture::variant(");
-    Contains(variant, "if (!state_->framebuffer || !shader || !shader->IsValid())");
+    Contains(variant, "if (!state_->framebuffer) {\n        return shader;");
+    Contains(variant, "if (!shader || !shader->IsValid()) {");
+    EXPECT_LT(variant.find("!shader->IsValid()"),
+              variant.find("unsupported(\"diagnostic_base_shader_unavailable\")"));
     Contains(variant, "LUMIN_DIAG_IDS 1");
     Contains(variant, "LUMINUMBRA_FAR_WORLD_LADDER 1");
     EXPECT_LT(variant.find("if (!state_->framebuffer"), variant.find("make_unique<Shader>"));
@@ -250,6 +253,8 @@ TEST(DiagnosticAttribution, StaticInstancesSubmitOnceEachWithTheResolvedLod) {
     const auto skinned = Body(Read(kPass), "void GBufferPass::geometry_pass_skinned_meshes(");
     Contains(skinned, ".mesh_path = mesh_info.meshPath");
     EXPECT_LT(skinned.find("capture->write("), skinned.find("glDrawElements,"));
+    // An empty skinned pass returns before its program can mark coverage unsupported.
+    EXPECT_LT(skinned.find("view.begin() == view.end()"), skinned.find("capture->variant("));
 }
 
 TEST(DiagnosticAttribution, BothLegacyFarWritersCarryTheActualTierAndOwner) {
@@ -343,6 +348,7 @@ TEST(DiagnosticAttribution, MissingProducerMetadataCannotClaimCompleteCoverage) 
     Contains(targets, "Diagnostic capture requires a fresh draw table");
     Contains(targets, "diagnostic_shader_variant_limit");
     Contains(targets, "diagnostic_shader_variant_unavailable");
+    Contains(targets, "diagnostic_base_shader_unavailable");
     Contains(Body(targets, "void GBufferDiagnosticCapture::unsupported("),
              ".provenance = DiagnosticProvenance::Unsupported");
     Contains(targets, "std::uncaught_exceptions() > exceptions_");
@@ -715,6 +721,21 @@ TEST_F(DiagnosticAttributionGl, WritersRequireAttachmentAndCompletionRequiresLea
     EXPECT_TRUE(targets_.reset());
     EXPECT_FALSE(capture.attach(pass_.gbuffer(), {32, 32}));
     EXPECT_FALSE(capture.complete());
+    ExpectEntryState(false);
+}
+
+TEST_F(DiagnosticAttributionGl, UnavailableProducerProgramFailsAnAttachedCapture) {
+    GBufferDiagnosticCapture capture(targets_, table_);
+    // Detached, a missing program is the draw path's concern, not the capture's.
+    EXPECT_EQ(capture.variant(nullptr, false), nullptr);
+    ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+    capture.write(*capture.variant(pass_.instanced_static_mesh_shader().get(), false),
+                  Submission());
+    EXPECT_EQ(capture.variant(nullptr, true), nullptr);
+    capture.detach();
+    EXPECT_FALSE(capture.complete());
+    EXPECT_NE(table_.json().find("diagnostic_base_shader_unavailable"), std::string::npos);
+    SetEntryState(false);
     ExpectEntryState(false);
 }
 
