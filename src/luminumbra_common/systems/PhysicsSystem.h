@@ -13,6 +13,7 @@
 
 #include <luminumbra/core/Types.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -158,6 +159,34 @@ public:
     glm::vec3 get_avatar_velocity(std::size_t index) const;
     bool is_avatar_grounded(std::size_t index) const;
 
+    // Internal, owner-thread continuation between ticks. No persistence,
+    // replication or hash caller consumes these values. Terrain must already
+    // have identical BodyIDs, shapes and settings in the destination, which
+    // may contain static bodies but no dynamic bodies. Captured owners are
+    // restored as one complete set, before any controller adoption.
+    static constexpr std::size_t kMaxRestoredBodies = 128;
+    static constexpr std::size_t kMaxRestoredAvatars = 4096;
+    struct BodyOwnerState {
+        // Bounded scalar payload, including this body's shared contact caches.
+        static constexpr std::size_t kMaxBytes = 65536;
+        std::array<std::uint8_t, kMaxBytes> bytes{};
+        std::uint32_t size = 0;
+    };
+    struct BodySetState {
+        std::vector<BodyOwnerState> owners;
+        std::uint32_t slot_count = 0;
+        // At most 10240 freed slots, last entry reused first. IDs retain the
+        // last allocated generation, including zero after uint8 wrap. History
+        // is independent of owners so even an empty set continues allocation.
+        std::vector<std::uint32_t> free_slots;
+    };
+    // Captures a sphere or a frozen capsule; terrain is supplied separately.
+    bool capture_body_owner(JPH::BodyID body, BodyOwnerState& output) const;
+    bool capture_body_owners(BodySetState& output) const;
+    // A refusal preserves all destination state and every output ID. The slot
+    // extent cannot shrink below the destination's existing allocated extent.
+    bool restore_body_owners(const BodySetState& state, std::span<JPH::BodyID> bodies);
+
     // --- Audio-Physics Integration ---
     // Non-owning world-generation seam for surface-material classification on
     // terrain raycast hits. Set once at session startup (GameSession creates
@@ -251,6 +280,11 @@ private:
     bool simulation_collisions_ready() const;
     bool can_admit_simulation_owner(const glm::vec3& position, bool replacing_player) const;
     std::uint32_t non_simulation_body_count() const;
+
+    struct BodySlotHistory;
+    std::unique_ptr<BodySlotHistory> m_body_slots;
+    void record_body_allocation(JPH::BodyID id);
+    void record_body_release(JPH::BodyID id);
     WorkItems m_work_items{};
     // Independent ownership, released only after all Jolt resources.
     std::unique_ptr<JoltRuntimeLease> m_runtime_lease;
