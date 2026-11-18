@@ -365,6 +365,9 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
     glClearDepth(0.0);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+    GBufferDiagnosticAttachment diagnostic_attachment(m_gbuffer,
+                                                      {ctx.internal_w(), ctx.internal_h()});
+
     //  isolation/layer mode: skip the draws whose layer bit is cleared so an
     // isolated subsystem reads ALONE against the SkyboxPass backdrop. The gbuffer
     // is ALWAYS cleared first, so suppressing a sub-pass just leaves cleared pixels
@@ -1062,8 +1065,13 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     // for the whole far field (the draw-call/triangle collapse the forest_perf_budget gate
     // targets).
     if (impostorsOn && !impostorInstances.empty()) {
-        if (!UseDrawProgram(m_tree_impostor_shader.get(), stats))
+        // Queued geometry is unsupported even when its program prevents submission.
+        if (capture) {
+            capture->unsupported("tree_impostor_fragment_output_unavailable", 3);
+        }
+        if (!UseDrawProgram(m_tree_impostor_shader.get(), stats)) {
             return;
+        }
         m_tree_impostor_shader->setMat4("u_view", static_view);
         m_tree_impostor_shader->setMat4("u_proj", static_proj);
         m_tree_impostor_shader->setVec3("u_cameraPos", cameraPos);
@@ -1090,9 +1098,6 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                 impostorInstances.data() + offset);
             glBindVertexArray(m_impostorVAO);
             glDisable(GL_CULL_FACE);
-            if (capture) {
-                capture->unsupported("tree_impostor_fragment_output_unavailable", 3);
-            }
             Luminumbra::Rendering::AttributedGl::Submit(
                 glDrawArraysInstanced, GLenum{GL_TRIANGLE_STRIP}, 0, 4, count);
             glBindVertexArray(0);

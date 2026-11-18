@@ -1,7 +1,9 @@
 #include "core/IsolationConfig.h"
+#include "luminumbra_common/animation/AnimationRuntime.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "rendering/Camera.h"
 #include "rendering/DiagnosticDrawTable.h"
+#include "rendering/FarLodSystem.h"
 #include "rendering/GBufferTargets.h"
 #include "rendering/Mesh.h"
 #include "rendering/RenderResourceRegistry.h"
@@ -288,22 +290,29 @@ TEST(DiagnosticAttribution, MissingProducerMetadataCannotClaimCompleteCoverage) 
     Contains(targets, "diagnostic_shader_variant_unavailable");
     Contains(Body(targets, "void GBufferDiagnosticCapture::unsupported("),
              ".provenance = DiagnosticProvenance::Unsupported");
-    Contains(Body(targets, "bool GBufferDiagnosticCapture::complete()"), "return false;");
+    Contains(Body(targets, "bool GBufferDiagnosticCapture::complete()"),
+             "state_->table.complete_coverage()");
 }
 
-TEST(DiagnosticAttribution, ProducersDoNotInstallAttachmentsOrClaimCompleteCoverage) {
+TEST(DiagnosticAttribution, DeferredAttachmentScopeEndsBeforeCallerStateRestoration) {
     const auto pass = Read(kPass);
-    const auto header = Read("src/luminumbra_client/rendering/GBufferTargets.h");
-    for (const auto& source :
-         {pass, Read("src/luminumbra_client/rendering/static_preview/StaticRenderer.cpp")}) {
-        EXPECT_EQ(source.find("GBufferDiagnosticAttachment"), std::string::npos);
-        EXPECT_EQ(source.find("attach_target"), std::string::npos);
-    }
+    const auto execute = Body(pass, "GBufferDrawStats GBufferPass::execute(");
+    Before(execute,
+           "ReplayRollback restore_gl(",
+           "GBufferDiagnosticAttachment diagnostic_attachment(");
+    Before(execute,
+           "glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)",
+           "GBufferDiagnosticAttachment diagnostic_attachment(");
+    Before(execute, "GBufferDiagnosticAttachment diagnostic_attachment(", "geometry_pass_chunks(");
+    Before(execute,
+           "GBufferDiagnosticAttachment diagnostic_attachment(",
+           "geometry_pass_skinned_meshes(");
     EXPECT_EQ(pass.find("glFramebufferTexture"), std::string::npos);
+    EXPECT_EQ(Read("src/luminumbra_client/rendering/static_preview/StaticRenderer.cpp")
+                  .find("GBufferDiagnosticAttachment"),
+              std::string::npos);
     EXPECT_EQ(SourceHash(Body(Read(kTargets), "void CreateGBufferTargets(")),
               0x87b070d8d24c6b19ull);
-    Contains(header, "explicit GBufferDiagnosticCapture(DiagnosticDrawTable& table)");
-    Contains(Body(Read(kTargets), "bool GBufferDiagnosticCapture::complete()"), "return false;");
 }
 
 TEST(DiagnosticAttribution, LeaseProtectsAttachmentThroughRollbackAndCallerRestoration) {
@@ -487,9 +496,12 @@ protected:
         const std::filesystem::path root(LUMINUMBRA_SOURCE_ROOT);
         pass_.init_geometry_shader(root);
         pass_.init_instanced_static_mesh(root);
+        pass_.init_skinned_mesh(root);
         pass_.init_gbuffer(resources_, 32, 32);
         ASSERT_TRUE(pass_.geometry_shader()->IsValid());
         ASSERT_TRUE(pass_.instanced_static_mesh_shader()->IsValid());
+        ASSERT_TRUE(pass_.skinned_mesh_shader()->IsValid());
+        ASSERT_TRUE(targets_.ensure(true, {32, 32}, 7));
         ctx_.camera = &camera_;
         ctx_.screen_width = 32;
         ctx_.screen_height = 32;
@@ -509,6 +521,7 @@ protected:
     void TearDown() override {
         if (gl_.ready()) {
             pass_.destroy_instanced_static_mesh();
+            pass_.destroy_skinned_mesh();
             pass_.destroy_gbuffer(resources_);
             glBindVertexArray(0);
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -573,6 +586,7 @@ protected:
     AttributionContext gl_;
     RenderResourceRegistry resources_;
     GBufferPass pass_;
+    DiagnosticTargets targets_;
     DiagnosticDrawTable table_;
     Camera camera_;
     Luminumbra::Client::ScenarioHarness::IsolationConfig isolation_;
@@ -584,12 +598,196 @@ protected:
     GLuint entry_vao_ = 0;
     std::array<GLuint, 2> entry_fbos_{};
 };
+
+// Model a driver link refusal through GLAD, forwarding all other real GL work.
+class ImpostorLinkRefusal {
+public:
+    ImpostorLinkRefusal() {
+        Active() = this;
+        glGetProgramiv = GetProgram;
+    }
+    ~ImpostorLinkRefusal() {
+        glGetProgramiv = previous_;
+        Active() = nullptr;
+    }
+    ImpostorLinkRefusal(const ImpostorLinkRefusal&) = delete;
+    ImpostorLinkRefusal& operator=(const ImpostorLinkRefusal&) = delete;
+    bool refused() const {
+        return refused_;
+    }
+
+private:
+    static ImpostorLinkRefusal*& Active() {
+        static ImpostorLinkRefusal* probe = nullptr;
+        return probe;
+    }
+    static void APIENTRY GetProgram(GLuint program, GLenum name, GLint* value) {
+        auto& probe = *Active();
+        probe.previous_(program, name, value);
+        // Initialization links two geometry and two static programs before the
+        // impostor. The fixture asserts that all other required programs link.
+        if (name == GL_LINK_STATUS && ++probe.link_checks_ == 5) {
+            *value = GL_FALSE;
+            probe.refused_ = true;
+        }
+    }
+    decltype(glGetProgramiv) previous_ = glGetProgramiv;
+    unsigned link_checks_ = 0;
+    bool refused_ = false;
+};
+
+class UnavailableImpostorGl : public DiagnosticAttributionGl {
+protected:
+    void SetUp() override {
+        ASSERT_TRUE(gl_.ready());
+        ImpostorLinkRefusal refusal;
+        DiagnosticAttributionGl::SetUp();
+        ASSERT_TRUE(refusal.refused());
+    }
+};
 } // namespace
+
+TEST_F(UnavailableImpostorGl, UnavailableProducerProgramFailsAnAttachedCapture) {
+    // Confirm both the empty queue and a real queued leaf; no unsupported
+    // record from another producer may hide the missing impostor record.
+    const glm::vec3 position(200, 12, 0);
+    SubmittedLiveTerrain support;
+    support.add_origin({192, 0, 0});
+    ASSERT_TRUE(support.covers(position));
+    input_.resident_live_terrain = &support;
+    input_.tree_impostor_enabled = true;
+    input_.tree_impostor_grid = 1;
+    input_.tree_impostor_radius = 1;
+    for (const bool queued : {false, true}) {
+        if (queued) {
+            ASSERT_NE(AddMesh("game-assets/tree-small-02/diagnostic-leaf.lmesh", position),
+                      nullptr);
+        }
+        for (const auto mode : {FarWorldMode::Legacy, FarWorldMode::Ladder}) {
+            table_.clear();
+            input_.far_selection.effective = mode;
+            ctx_.far_world_ladder = mode == FarWorldMode::Ladder;
+            GBufferDiagnosticCapture capture(targets_, table_);
+            SetEntryState(false);
+            const auto stats = pass_.execute(ctx_, entities_, input_);
+            EXPECT_EQ(stats.invalid_program_refusals, queued ? 1u : 0u);
+            EXPECT_EQ(capture.complete(), !queued);
+            EXPECT_EQ(table_.complete_coverage(), !queued);
+            if (queued) {
+                Contains(table_.json(), "tree_impostor_fragment_output_unavailable");
+                const auto document = nlohmann::json::parse(table_.json());
+                ASSERT_EQ(document.at("draws").size(), 1u);
+                EXPECT_EQ(document.at("draws").front().at("lod"), 3u);
+            } else {
+                EXPECT_EQ(table_.resolve(1), nullptr);
+            }
+            ExpectEntryState(false);
+            EXPECT_TRUE(targets_.reset());
+        }
+    }
+}
+
+TEST_F(DiagnosticAttributionGl, WritersRequireAttachmentAndCompletionRequiresLeaseRelease) {
+    GBufferDiagnosticCapture capture(targets_, table_);
+    auto* base = pass_.instanced_static_mesh_shader().get();
+    const auto empty = table_.json();
+    EXPECT_EQ(capture.variant(base, false), base);
+    capture.write(*base, Submission());
+    EXPECT_EQ(table_.json(), empty);
+    EXPECT_FALSE(capture.complete());
+
+    SetEntryState(false);
+    ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+    auto* shader = capture.variant(base, false);
+    ASSERT_NE(shader, base);
+    ASSERT_TRUE(shader->IsValid());
+    capture.write(*shader, Submission());
+    EXPECT_TRUE(table_.complete_coverage());
+    EXPECT_FALSE(capture.complete());
+    EXPECT_FALSE(targets_.reset());
+    EXPECT_FALSE(targets_.ensure(false, {}));
+    EXPECT_FALSE(targets_.ensure(true, {16, 16}, 7));
+    ExpectEntryState(false);
+
+    capture.detach();
+    EXPECT_TRUE(capture.complete());
+    const auto recorded = table_.json();
+    EXPECT_EQ(capture.variant(nullptr, true), nullptr);
+    EXPECT_EQ(capture.variant(base, false), base);
+    capture.write(*shader, Submission());
+    EXPECT_EQ(table_.json(), recorded);
+    EXPECT_TRUE(capture.complete());
+    ExpectEntryState(false);
+    EXPECT_TRUE(targets_.reset());
+    EXPECT_FALSE(capture.attach(pass_.gbuffer(), {32, 32}));
+    EXPECT_FALSE(capture.complete());
+}
+
+TEST_F(DiagnosticAttributionGl, UnavailableProducerProgramFailsAnAttachedCapture) {
+    // Exercise both pointer absence and failed-link Shader objects, in both modes.
+    Shader invalid("test/missing.vert", "test/missing.frag");
+    ASSERT_FALSE(invalid.IsValid());
+    for (const bool ladder : {false, true}) {
+        for (auto* unavailable : {static_cast<Shader*>(nullptr), &invalid}) {
+            table_.clear();
+            GBufferDiagnosticCapture capture(targets_, table_);
+            EXPECT_EQ(capture.variant(unavailable, ladder), unavailable);
+            ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+            EXPECT_EQ(capture.variant(unavailable, ladder), unavailable);
+            capture.detach();
+            EXPECT_FALSE(capture.complete());
+            EXPECT_FALSE(table_.complete_coverage());
+            Contains(table_.json(), "diagnostic_base_shader_unavailable");
+            EXPECT_TRUE(targets_.reset());
+        }
+    }
+
+    // An empty skinned view must not bypass unavailable-program invalidation.
+    pass_.reset_shaders();
+    isolation_.layer_mask = Luminumbra::Client::ScenarioHarness::IsolationLayer::Skinned;
+    for (const bool empty : {true, false}) {
+        if (!empty) {
+            const auto actor = entities_.create();
+            entities_.emplace<Luminumbra::Components::TransformComponent>(actor);
+            entities_.emplace<Luminumbra::Components::SkinnedMeshComponent>(actor);
+            entities_.emplace<luminumbra::animation::AnimationPlayerComponent>(actor);
+        }
+        for (const auto mode : {FarWorldMode::Legacy, FarWorldMode::Ladder}) {
+            table_.clear();
+            input_.far_selection.effective = mode;
+            GBufferDiagnosticCapture capture(targets_, table_);
+            SetEntryState(true);
+            const auto stats = pass_.execute(ctx_, entities_, input_);
+            EXPECT_EQ(stats.invalid_program_refusals, empty ? 0u : 1u);
+            EXPECT_FALSE(capture.complete());
+            EXPECT_FALSE(table_.complete_coverage());
+            Contains(table_.json(), "diagnostic_base_shader_unavailable");
+            EXPECT_TRUE(targets_.reset());
+            ExpectEntryState(true);
+        }
+    }
+}
+
+TEST_F(DiagnosticAttributionGl, UnsupportedSubmissionRemainsIncompleteAfterTableReset) {
+    GBufferDiagnosticCapture capture(targets_, table_);
+    ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+    auto* shader = capture.variant(pass_.instanced_static_mesh_shader().get(), false);
+    ASSERT_NE(shader, pass_.instanced_static_mesh_shader().get());
+    auto submission = Submission();
+    submission.provenance = DiagnosticProvenance::Unsupported;
+    capture.write(*shader, submission);
+    capture.detach();
+    EXPECT_FALSE(capture.complete());
+    table_.clear();
+    EXPECT_TRUE(table_.complete_coverage());
+    EXPECT_FALSE(capture.complete());
+}
 
 TEST_F(DiagnosticAttributionGl, ExhaustedWriterAndUnsupportedRefuseWithoutGrowingOrThrowing) {
     for (const bool unsupported : {false, true}) {
         table_.clear();
-        GBufferDiagnosticCapture capture(table_);
+        GBufferDiagnosticCapture capture(targets_, table_);
+        ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
         Shader* shader = capture.variant(pass_.instanced_static_mesh_shader().get(), false);
         ASSERT_NE(shader, pass_.instanced_static_mesh_shader().get());
         ASSERT_TRUE(shader->IsValid());
@@ -631,7 +829,7 @@ TEST_F(DiagnosticAttributionGl, ExhaustedDoubleSidedSubmissionRestoresCallerGlSt
     ASSERT_NE(AddMesh(), nullptr);
     for (const bool cull : {false, true}) {
         table_.clear();
-        GBufferDiagnosticCapture capture(table_);
+        GBufferDiagnosticCapture capture(targets_, table_);
         FillRegistry();
         const auto full = table_.json();
         SetEntryState(cull);
@@ -686,28 +884,36 @@ TEST_F(DiagnosticAttributionGl, InactivePassDoesNoSnapshotOrRestoreOnNormalAndEx
 
 TEST_F(DiagnosticAttributionGl, ActiveEmptyPassSnapshotsOnceAndRestoresOnEveryDispatch) {
     isolation_.layer_mask = 0;
+    GLint max_buffers = 0;
+    glGetIntegerv(GL_MAX_DRAW_BUFFERS, &max_buffers);
+    ASSERT_GE(max_buffers, 7);
+    ASSERT_LE(max_buffers, 32);
+    // Reused storage: capabilities, texture/FBO bindings and the bounded MRT snapshot.
+    const auto attachment_queries = 8u + static_cast<unsigned>(max_buffers);
     for (const bool replay : {false, true}) {
         ctx_.frozen_replay = replay;
         for (const bool cull : {false, true}) {
-            GBufferDiagnosticCapture capture(table_);
+            GBufferDiagnosticCapture capture(targets_, table_);
             SetEntryState(cull);
             {
                 PassStateProbe probe;
                 EXPECT_NO_THROW(pass_.execute(ctx_, entities_, input_));
-                EXPECT_EQ(probe.integer_queries, 3u);
+                EXPECT_EQ(probe.integer_queries, 3u + attachment_queries);
                 EXPECT_EQ(probe.enabled_queries, 1u);
                 EXPECT_EQ(probe.vao_binds, 1u);
                 EXPECT_EQ(probe.combined_fbo_binds, 1u);
-                EXPECT_EQ(probe.draw_fbo_binds, 1u);
+                EXPECT_EQ(probe.draw_fbo_binds, 7u);
                 EXPECT_EQ(probe.read_fbo_binds, 1u);
             }
             ExpectEntryState(cull);
+            EXPECT_TRUE(capture.complete());
+            EXPECT_TRUE(targets_.ensure(true, {16, 16}, 7));
+            ASSERT_TRUE(targets_.ensure(true, {32, 32}, 7));
         }
     }
 }
 
 TEST_F(DiagnosticAttributionGl, ExceptionalProducerRestoresCallerGlState) {
-    GBufferDiagnosticCapture capture(table_);
     input_.submit_terrain_chunks = [](const glm::vec4(&)[6]) -> TerrainSubmitStats {
         glDisable(GL_CULL_FACE);
         glBindVertexArray(0);
@@ -717,8 +923,12 @@ TEST_F(DiagnosticAttributionGl, ExceptionalProducerRestoresCallerGlState) {
     for (const bool replay : {false, true}) {
         ctx_.frozen_replay = replay;
         for (const bool cull : {false, true}) {
+            table_.clear();
+            GBufferDiagnosticCapture capture(targets_, table_);
             SetEntryState(cull);
             EXPECT_THROW(pass_.execute(ctx_, entities_, input_), std::runtime_error);
+            EXPECT_FALSE(capture.complete());
+            EXPECT_TRUE(targets_.reset());
             ExpectEntryState(cull);
         }
     }
@@ -775,7 +985,7 @@ TEST_F(DiagnosticAttributionGl, AuthoredUpgradeRestoresLiveCallerFramebuffers) {
                 return TerrainSubmitStats{};
             };
             table_.clear();
-            GBufferDiagnosticCapture capture(table_);
+            GBufferDiagnosticCapture capture(targets_, table_);
             PassStateProbe probe(old_fbo);
             if (failure == 2) {
                 EXPECT_THROW(pass_.execute(ctx_, entities_, input_), std::invalid_argument);
@@ -817,7 +1027,7 @@ TEST_F(DiagnosticAttributionGl, SuccessfulInstancesRecordDistinctIdentitiesAndRe
                                                              {{1, -1, -5}, {0, 0, 1}, {1, 0}},
                                                              {{0, 1, -5}, {0, 0, 1}, {.5f, 1}}},
                                                             {0, 1, 2}));
-    GBufferDiagnosticCapture capture(table_);
+    GBufferDiagnosticCapture capture(targets_, table_);
     SetEntryState(false);
     GLuint query = 0;
     glGenQueries(1, &query);
@@ -861,7 +1071,7 @@ void DiagnosticAttributionGl::ExpectInvalidMetadata(bool excessive_path) {
         mesh->indexCount = static_cast<std::uint32_t>(std::numeric_limits<GLsizei>::max()) + 1u;
     }
     table_.clear();
-    GBufferDiagnosticCapture capture(table_);
+    GBufferDiagnosticCapture capture(targets_, table_);
     SetEntryState(true);
     GLuint query = 0;
     glGenQueries(1, &query);
@@ -899,7 +1109,8 @@ TEST_F(DiagnosticAttributionGl, ExcessivePathRecordsIncompleteCoverageAndStillDr
 }
 
 TEST_F(DiagnosticAttributionGl, JsonBudgetRefusalIsStickyWithoutGrowingOrThrowing) {
-    GBufferDiagnosticCapture capture(table_);
+    GBufferDiagnosticCapture capture(targets_, table_);
+    ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
     Shader* shader = capture.variant(pass_.instanced_static_mesh_shader().get(), false);
     ASSERT_NE(shader, pass_.instanced_static_mesh_shader().get());
     auto submission = Submission();
@@ -936,7 +1147,8 @@ TEST_F(DiagnosticAttributionGl, InvalidIdentityRefusesWithoutReusingThePreviousI
     malformed.shader_variant = malformed_utf8;
     for (const auto& submission : {invalid, unknown, missing, malformed}) {
         table_.clear();
-        GBufferDiagnosticCapture capture(table_);
+        GBufferDiagnosticCapture capture(targets_, table_);
+        ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
         Shader* shader = capture.variant(pass_.instanced_static_mesh_shader().get(), false);
         ASSERT_NE(shader, pass_.instanced_static_mesh_shader().get());
         capture.write(*shader, Submission());

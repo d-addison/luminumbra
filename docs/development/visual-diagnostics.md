@@ -13,8 +13,8 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | AOV serialization, integer ID encoding and point-probe JSON | Implemented as independent, GL-free codecs | `DiagnosticCapture.h/.cpp`; registered `DiagnosticCapture.*` regressions in `capture_manifest_test`; native execution pending |
 | Lazy integer target with attachment leases | Implemented as a standalone helper | `DiagnosticTargets.h`; registered `DiagnosticTargetDriver.*` regressions in `capture_manifest_test`; native execution pending |
 | Capture-local draw registry | Implemented as a standalone, GL-free helper | `DiagnosticDrawTable.h`; registered `DiagnosticDrawTable.*` regressions in `capture_manifest_test`; native execution pending |
-| Deferred attribution producers | Implemented without an ID attachment | `GBufferTargets.h` and `GBufferPass.cpp` add a render-thread producer scope, capture-local draw identities and explicit unsupported records; `g_buffer.frag` and `foliage.frag` have additive `LUMIN_DIAG_IDS` outputs; registered `DiagnosticAttribution.*` source-contract and `DiagnosticAttributionGl.*` hidden-GL regressions in `render_smoke_test`; native execution pending |
-| G-buffer ID attachment | Pending | Attachment integration must hold an `AttachmentLease` for the entire caller attachment lifetime, including rollback, resize and teardown; producer scopes currently always report incomplete coverage |
+| Deferred attribution producers | Implemented inside a leased deferred scope | `GBufferTargets.h` and `GBufferPass.cpp` add a render-thread producer scope, capture-local draw identities and explicit unsupported records; `g_buffer.frag` and `foliage.frag` have additive `LUMIN_DIAG_IDS` outputs; registered `DiagnosticAttribution.*` source-contract and `DiagnosticAttributionGl.*` hidden-GL regressions in `render_smoke_test`; native execution pending |
+| G-buffer ID attachment | Implemented for explicit deferred captures | `GBufferPass` holds an `AttachmentLease` during deferred submission; detachment and lease release precede completion, including rollback, recreation, retirement and exceptional exits; registered `GBufferLeaseGl.*` and `DiagnosticAttributionGl.*` regressions; native execution pending |
 | Exact producer coverage | Partial | Inside an explicit producer scope, file-backed static instances and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier with unsupported generated-mesh metadata. Live terrain MDI, ladder backend, authored surfaces and tree impostors explicitly invalidate coverage; procedural static meshes also remain unsupported. Later plant/decal stages are outside the scope. Foliage has a guarded shader output but no instrumented forward submission or separate contributor plane |
 | Readback and scenario opt-in | Planned | Requires scenario capture integration and completion of the unsupported producer paths |
 | Debug views and inspector | Planned | Extend `DebugViewPass` and developer console widgets |
@@ -51,19 +51,30 @@ Shader files are outside the roots classified by `public-asset-inventory.json`, 
 their guarded edits do not change that inventory.
 
 An explicitly constructed `GBufferDiagnosticCapture` accepts a fresh draw table and
-collects deferred submission identities. It neither accepts nor retains a diagnostic
-target texture, and never changes framebuffer attachments. `GBufferTargets.cpp`
-remains unchanged. `complete()` always returns false: producer records alone cannot
-qualify pixels or authorize bundle publication. G-buffer ID attachment, its lease
-lifetime, capability refusal, state restoration, resize and teardown regressions
-remain pending. Capture scopes cannot nest or reuse a nonempty draw table; an empty
-live-terrain submission adds no unsupported record.
+optional caller-owned `DiagnosticTargets`; both owners outlive the scope on its
+creating GL context thread. Construction alone performs no GL work. A table-only
+scope cannot attach or complete. `GBufferPass` attaches location six after the
+ordinary clear and holds a move-only `AttachmentLease` through deferred submission.
+Detachment restores all saved draw buffers and the integer color mask before
+releasing storage, including rollback, recreation, registry retirement and exception
+unwinding. Resize, reset and disable refuse while leased, even on an unbound FBO.
+Capability, extent and occupied-attachment refusals preserve caller state and record
+unsupported coverage. Scope nesting and nonempty-table reuse are refused.
 
-Only an explicit producer scope compiles diagnostic programs, capped at six deferred
+`complete()` requires a successful attachment, subsequent detachment, lease release,
+complete deferred coverage and no sticky failure or registry refusal. Variants and
+identity writes only operate while attached. Missing or invalid base programs
+invalidate coverage, including an unavailable skinned program with an empty view.
+Queued tree impostors invalidate coverage before checking their program, so an
+invalid impostor program cannot bypass the unsupported record. Empty terrain and
+impostor queues add no unsupported record. Later deferred and forward contributors
+remain outside this coverage; this predicate alone cannot authorize a final bundle.
+
+Only an attached scope compiles diagnostic programs, capped at six deferred
 vertex/ladder combinations. Default and ladder variants retain the existing alpha
-discard and depth output. The guarded integer output uses location six; without an
-ID attachment that output is discarded. With diagnostics disabled, removing the
-conditional blocks reproduces the base fragment shader text byte for byte.
+discard and depth output. The guarded integer output uses location six.
+With diagnostics disabled, removing the conditional blocks reproduces the base
+fragment shader text byte for byte.
 During collection, static instances are submitted once each using their existing
 attributes and base-instance offset, so repeated instances get separate ordered
 draw IDs without replay. Resolved mesh paths determine mesh LOD, including fallback
@@ -71,11 +82,13 @@ to the base mesh. The existing 65,536-entry registry limit refuses excessive cap
 submissions. A failed submission sets the scope's sticky `refused()` flag without
 appending another record or throwing. Later writes upload zero IDs and stop
 registry work; `complete()` remains false. Static metadata refusals record
-unsupported coverage and omit the invalid draw. Every pass exit restores caller
-culling, VAO and separate read/draw framebuffer bindings, including exceptional
+unsupported coverage. Unrepresentable index counts omit the draw; an unrecordable
+identity path preserves geometry without claiming attribution. Every pass exit
+restores caller culling, VAO and separate read/draw framebuffer bindings, including exceptional
 producer exits. Registered hidden-GL regressions cover the exact entry bound,
-repeated refusal, zero IDs, double-sided foliage and exceptional state restoration;
-native execution remains pending. Normal rendering keeps its batched draws and
+repeated refusal, zero IDs, double-sided foliage, detached writers, completion only
+after lease release, unavailable base/skinned/impostor programs and exceptional
+state restoration; native execution remains pending. Normal rendering keeps its batched draws and
 original attachments.
 
 Completing exact coverage requires changes beyond the deferred attachment owners:
