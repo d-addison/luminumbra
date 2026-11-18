@@ -298,26 +298,31 @@ struct SimulationHorizon {
         }
         const auto cx = static_cast<i32>(std::floor(static_cast<double>(anchor.x) / CHUNK_SIZE_X));
         const auto cz = static_cast<i32>(std::floor(static_cast<double>(anchor.z) / CHUNK_SIZE_Z));
-        auto staged = columns;
-        auto staged_count = count;
+        // Stage at most one owner's nine new columns. Duplicate owners copy no
+        // existing horizon, and a refused ring leaves the published set untouched.
+        std::array<ChunkID, 9> candidate{};
+        std::size_t candidate_count = 0;
+        const auto end = columns.begin() + static_cast<std::ptrdiff_t>(count);
         for (int dz = -1; dz <= 1; ++dz) {
             for (int dx = -1; dx <= 1; ++dx) {
                 const auto id = Chunk::calculate_id(IVec3(cx + dx, 0, cz + dz));
-                const auto end = staged.begin() + static_cast<std::ptrdiff_t>(staged_count);
-                const auto found = std::lower_bound(staged.begin(), end, id);
-                if (found != end && *found == id) {
-                    continue;
+                if (!std::binary_search(columns.begin(), end, id)) {
+                    candidate[candidate_count++] = id;
                 }
-                if (staged_count == staged.size()) {
-                    return false;
-                }
-                std::move_backward(found, end, end + 1);
-                *found = id;
-                ++staged_count;
             }
         }
-        columns = staged;
-        count = staged_count;
+        if (candidate_count > columns.size() - count) {
+            return false;
+        }
+        // The capacity check dominates every insertion; shifting is bounded by
+        // 128 columns and runs only for new columns, never per duplicate body.
+        for (std::size_t i = 0; i < candidate_count; ++i) {
+            const auto merge_end = columns.begin() + static_cast<std::ptrdiff_t>(count);
+            const auto found = std::lower_bound(columns.begin(), merge_end, candidate[i]);
+            std::move_backward(found, merge_end, merge_end + 1);
+            *found = candidate[i];
+            ++count;
+        }
         return true;
     }
 

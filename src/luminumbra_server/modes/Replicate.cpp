@@ -174,7 +174,11 @@ int RunReplicate(const ServerCliOptions& options) {
 
         const auto step = runner.RunFixedTicks(1);
         executed += step.ticks_executed;
-        if (step.ticks_executed == 0) {
+        if (step.ticks_executed == 0 && !step.region_fault) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(33));
+            continue;
+        }
+        if (step.region_fault || step.ticks_executed == 0) {
             LUMINUMBRA_CORE_ERROR("replicate: tick {} did not advance", executed + 1);
             return 1;
         }

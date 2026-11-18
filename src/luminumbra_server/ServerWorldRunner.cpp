@@ -614,6 +614,8 @@ void ServerWorldRunner::SetAvatarMove(std::uint32_t player_id, float move_x, flo
 ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
     ServerTickReport report;
     if (!m_booted || !m_session) {
+        report.region_fault = true;
+        report.region_fault_message = "Server world is not booted";
         return report;
     }
 
@@ -663,6 +665,12 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         // Every host gathers the same registered controllers and projectiles.
         // No host-specific spawn/camera anchor can change the horizon or its budget.
         if (!physics_system->prepare_simulation_collisions({}, budget_tick)) {
+            // Zero progress without a region fault is the retry outcome. A durable
+            // read failure can latch a terminal fault during preparation itself.
+            if (const auto& fault = m_session->GetRegionSchedulerFault()) {
+                report.region_fault = true;
+                report.region_fault_message = fault->message;
+            }
             break; // Leave this tick unconsumed; the next call retries preparation.
         }
         physics_system->update(static_cast<float>(fixed_dt));

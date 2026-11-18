@@ -1279,15 +1279,19 @@ private:
         i32 x = 0;
         i32 z = 0;
         u64 generation = 0;
+        u64 last_use = 0;
         float centre = 0;
+        bool saved = false;
         bool valid = false;
         bool complete = false;
         std::array<float, (CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Z + 1)> heights{};
     };
-    // Direct-mapped, at most 128 procedural columns. Authority is checked on every call;
-    // cached procedural data never replaces committed/edited or malformed authority.
+    // At most 128 columns, with bounded keyed probing and least-recently-used
+    // replacement. Resident authority is checked on every call. Saved samples
+    // are invalidated at committed inventory/loader changes and terrain revisions.
     mutable std::array<CollisionSamples, 128> m_collision_samples{};
     mutable u64 m_collision_terrain_evaluations = 0;
+    mutable u64 m_collision_sample_clock = 0;
     bool m_evictions_suspended = false;
     std::shared_ptr<Chunk> read_committed_chunk(const IVec3& coords) const;
     std::size_t m_parked_bytes = 0;

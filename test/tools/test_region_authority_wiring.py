@@ -380,6 +380,134 @@ class SimulationCollisionWiring(unittest.TestCase):
         self.assertLess(prepare, step.index("m_impl->host->PumpTick("))
         self.assertIn("return true;", step[prepare:step.index("m_impl->host->PumpTick(")])
 
+    def test_client_preflight_separates_terminal_faults_from_retryable_refusal(self):
+        source = (ROOT / "src/luminumbra_client/core/scenarios/NetworkedSessionDriver.cpp").read_text(
+            encoding="utf-8")
+        self.assert_client_preflight_outcomes(source)
+        with self.assertRaises(AssertionError):
+            self.assert_client_preflight_outcomes(source.replace("m_finished = true;", "m_finished = false;"))
+
+    def assert_client_preflight_outcomes(self, source):
+        step = function(source, "bool NetworkedSessionDriver::StepAgreedTick(")
+        self.assertIn("const bool prepared = !ctx->session->GetRegionSchedulerFault() &&", step)
+        terminal = function(step, "if (ctx->session->GetRegionSchedulerFault())")
+        for token in ('m_failure_reason = "region_preparation_fault";', "m_finished = true;", "return false;"):
+            self.assertIn(token, terminal)
+        self.assertLess(step.index("if (ctx->session->GetRegionSchedulerFault())"),
+                        step.index("if (!prepared)"))
+        self.assertEqual(function(step, "if (!prepared)"), "retry = true;")
+        self.assertEqual(function(step, "if (retry)"), "return true;")
+        self.assertLess(step.index("if (!prepared)"), step.index("m_impl->host->PumpTick("))
+
+    def test_denied_avatar_checks_session_prepared_terrain_headroom(self):
+        native = (ROOT / "test/common/RegionConsumerGate_test.cpp").read_text(encoding="utf-8")
+        body = function(native, "TEST(RegionConsumerGate, "
+                        "SessionDeniedAvatarStaysFrozenWithoutCapsuleAndRetriesOnLaterTicks)")
+        self.assertIn("session.TickSimulation(", body)
+        self.assertIn("world->sample_simulation_collision(0, 0, heights)", body)
+        self.assertIn("physics->simulation_collision_sample_count(), 0u", body)
+        self.assertIn("physics->audio_raycast({8, floor + 2, 8}, {8, floor - 2, 8}).hit", body)
+        self.assertNotIn("add_chunk_collision(", body)
+        self.assertIn("EXPECT_EQ(physics->work_items().bodies, body_limit);", body)
+
+    def test_server_retry_is_distinct_from_terminal_preparation_faults(self):
+        runner = (ROOT / "src/luminumbra_server/ServerWorldRunner.cpp").read_text(encoding="utf-8")
+        body = function(runner, "ServerTickReport ServerWorldRunner::RunFixedTicks(")
+        for guard in ("if (!m_booted || !m_session)",
+                      "budget_tick))"):
+            refused = function(body, guard)
+            self.assertIn("report.region_fault = true;", refused)
+        refused = function(body, "budget_tick))")
+        self.assertIn("m_session->GetRegionSchedulerFault()", refused)
+        self.assertIn("break;", refused)
+        self.assertNotIn("++", refused)
+        for path in ("NetRuntime.cpp", "Replicate.cpp"):
+            source = (ROOT / "src/luminumbra_server/modes" / path).read_text(encoding="utf-8")
+            retry = function(source, "if (step.ticks_executed == 0 && !step.region_fault)")
+            self.assertIn("std::this_thread::sleep_", retry)
+            self.assertIn("continue;", retry)
+            self.assertNotIn("Close", retry)
+            self.assertNotIn("return 1;", retry)
+            self.assertIn("if (step.region_fault || step.ticks_executed == 0)", source)
+
+    def test_headless_lockstep_prepares_both_peers_before_input_consumption(self):
+        source = (ROOT / "src/luminumbra_server/modes/Lockstep.cpp").read_text(encoding="utf-8")
+        body = function(source, "int RunLockstepLoopback(")
+        loop = function(body, "for (; pumps < max_pumps; ++pumps)")
+        preflight = function(loop, "peer_runner.get()})")
+        self.assertIn("session->GetRegionSchedulerFault()", preflight)
+        self.assertIn("session->GetSimulationTickCount() >= budget", preflight)
+        self.assertIn("prepare_simulation_collisions( {}, session->GetSimulationTickCount() + 1)",
+                      preflight)
+        self.assertIn("terminal = session->GetRegionSchedulerFault().has_value();", preflight)
+        refused = function(preflight, "if (!terminal)")
+        self.assertIn("retry = true;", refused)
+        self.assertTrue(refused.endswith("continue;"))
+        retry = function(loop, "if (retry)")
+        self.assertIn("std::this_thread::sleep_for(std::chrono::milliseconds(33));", retry)
+        self.assertTrue(retry.endswith("continue;"))
+        self.assertIn("return 1;", function(loop, "if (terminal)"))
+        self.assertLess(loop.index("if (retry)"), loop.index("host.PumpTick(budget)"))
+        self.assertLess(loop.index("if (retry)"), loop.index("peer.PumpTick(budget)"))
+        self.assertIn("step.ticks_executed == 1 && !step.region_fault", function(
+            source, "bool LockstepApplyStep("))
+
+    def test_collision_cache_resolves_keys_with_fixed_capacity(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        sample = function(source, "bool SHIELD_WorldSystem::sample_simulation_collision(")
+        probe = function(sample, "for (std::size_t probe = 0; probe < m_collision_samples.size(); ++probe)")
+        self.assertIn("entry.x == chunk_x && entry.z == chunk_z", probe)
+        self.assertIn("entry.last_use < oldest.last_use", probe)
+        self.assertIn("auto& cached = m_collision_samples[selected];", sample)
+        native = (ROOT / "test/common/GameSessionHeadlessWorld_test.cpp").read_text(encoding="utf-8")
+        stationary = function(native, "TEST(SurfaceQuery, DisjointStationaryCollisionHorizonsReuseEveryColumn)")
+        self.assertIn("128 * 16 + 8", stationary)
+        self.assertIn("physics.prepare_simulation_collisions({}, 2)", stationary)
+        self.assertIn("EXPECT_EQ(world->simulation_collision_terrain_evaluations(), evaluations);", stationary)
+        self.assertIn("CollisionSampleCacheRetainsCapacityAndReplacesOnlyColdColumns", native)
+
+    def test_saved_collision_cache_precedes_io_and_invalidates_at_publication(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        sample = function(source, "bool SHIELD_WorldSystem::sample_simulation_collision(")
+        self.assertNotIn("find_authoritative_chunk(", sample)
+        self.assertEqual(sample.count("read_committed_chunk(coords)"), 1)
+        reuse = function(sample, "if (cached.valid && cached.complete && cached.saved)")
+        self.assertIn("std::copy(cached.heights.begin()", reuse)
+        self.assertIn("return true;", reuse)
+        self.assertLess(sample.index("if (cached.valid && cached.complete && cached.saved)"),
+                        sample.index("read_committed_chunk(coords)"))
+        self.assertIn("cached.generation != generation", sample)
+        publish = function(sample, "if (valid && expected && !resident_terrain)")
+        for token in ("std::copy(heights.begin()", "cached.saved = true;", "cached.complete = true;"):
+            self.assertIn(token, publish)
+        for name in ("void SHIELD_WorldSystem::remember_durable_chunks(",
+                     "void SHIELD_WorldSystem::set_durable_chunk_loader(",
+                     "void SHIELD_WorldSystem::set_durable_residency(",
+                     "void SHIELD_WorldSystem::clear_world("):
+            self.assertIn("sample.valid = false;", function(source, name))
+        self.assertIn("remember_durable_chunks(coords);", function(
+            source, "void SHIELD_WorldSystem::replace_durable_chunks("))
+        session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(encoding="utf-8")
+        self.assertIn("m_worldSystem->remember_durable_chunks(covered);", session)
+        self.assertIn("transaction->defer_until_commit(std::move(committed));", session)
+        native = (ROOT / "test/common/GameSessionHeadlessWorld_test.cpp").read_text(encoding="utf-8")
+        for case in ("SavedCollisionSamplesReadOnceUntilSaveOrTerrainGenerationChanges",
+                     "SavedCollisionSamplesDoNotCacheInvalidAuthorityAndRespectReplacement",
+                     "SavedWaterOnlyCollisionSamplesRetainValidatedProceduralFallback"):
+            self.assertIn("TEST(SurfaceQuery, " + case + ")", native)
+
+    def test_horizon_stages_only_nine_columns_and_commits_after_capacity_check(self):
+        source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(encoding="utf-8")
+        body = function(function(source, "struct SimulationHorizon"), "bool add(")
+        self.assertIn("std::array<ChunkID, 9> candidate{};", body)
+        self.assertNotIn("= columns;", body)
+        self.assertNotIn("columns =", body)
+        capacity = body.index("candidate_count > columns.size() - count")
+        self.assertLess(body.index("std::binary_search(columns.begin(), end, id)"), capacity)
+        self.assertLess(capacity, body.index("std::move_backward("))
+        self.assertIn("i < candidate_count", body)
+        self.assertIn("return false;", body[:body.index("std::move_backward(")])
+
     def test_traversal_catchup_stops_on_a_refused_tick(self):
         source = (ROOT / "src/luminumbra_client/main_client.cpp").read_text(encoding="utf-8")
         loop = source.split("while (!gameSession->GetRegionSchedulerFault()", 1)[1].split(
@@ -531,7 +659,7 @@ class SimulationCollisionWiring(unittest.TestCase):
         self.assertIn("std::array<DynamicOwner, 10240> dynamic_owners", source)
         horizon = function(source, "struct SimulationHorizon")
         self.assertIn("PhysicsSystem::kSimulationColliderBudget", horizon)
-        self.assertLess(horizon.index("staged_count == staged.size()"),
+        self.assertLess(horizon.index("candidate_count > columns.size() - count"),
                         horizon.index("std::move_backward("))
 
     def test_uncovered_owners_wait_without_losing_rigid_body_velocity(self):
@@ -608,9 +736,13 @@ class SimulationCollisionWiring(unittest.TestCase):
         source = (ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp").read_text(
             encoding="utf-8")
         sample = function(source, "bool SHIELD_WorldSystem::sample_simulation_collision(")
-        self.assertIn("expected && (!chunk || !chunk->has_terrain_authority())", sample)
+        self.assertIn("const bool resident_terrain = chunk && chunk->has_terrain_authority();", sample)
+        self.assertIn("expected && !resident_terrain", sample)
         self.assertIn("expected && (!chunk || !chunk->has_simulation_authority())", sample)
-        self.assertLess(sample.index("read_committed_chunk("), sample.index("std::copy("))
+        self.assertLess(sample.index("read_committed_chunk("),
+                        sample.index("if (chunk && chunk->has_terrain_authority())"))
+        self.assertLess(sample.index("expected && (!chunk || !chunk->has_simulation_authority())"),
+                        sample.index("if (chunk && chunk->has_terrain_authority())"))
 
 
 if __name__ == "__main__":

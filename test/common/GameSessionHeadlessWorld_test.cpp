@@ -18244,14 +18244,172 @@ TEST(SurfaceQuery, CollisionSamplingCachesProceduralColumnsAndPrefersCommittedHe
     ASSERT_TRUE(cold->sample_simulation_collision(0, 0, heights));
     EXPECT_EQ(cold->simulation_collision_terrain_evaluations(), 1u);
     EXPECT_EQ(heights.front(), 14);
-    // A direct-map collision evicts old samples without growing storage.
+    // Colliding keys coexist within the fixed cache capacity.
     ASSERT_TRUE(cold->sample_simulation_collision(128, 0, heights));
     ASSERT_TRUE(cold->sample_simulation_collision(0, 0, heights));
-    EXPECT_EQ(cold->simulation_collision_terrain_evaluations(), 291u);
+    EXPECT_EQ(cold->simulation_collision_terrain_evaluations(), 290u);
     cold->set_seed(1234);
     ASSERT_TRUE(cold->sample_simulation_collision(0, 0, heights));
-    EXPECT_EQ(cold->simulation_collision_terrain_evaluations(), 292u);
+    EXPECT_EQ(cold->simulation_collision_terrain_evaluations(), 291u);
     cold->set_params(cold->get_params());
     ASSERT_TRUE(cold->sample_simulation_collision(0, 0, heights));
-    EXPECT_EQ(cold->simulation_collision_terrain_evaluations(), 293u);
+    EXPECT_EQ(cold->simulation_collision_terrain_evaluations(), 292u);
+}
+
+TEST(SurfaceQuery, DisjointStationaryCollisionHorizonsReuseEveryColumn) {
+    auto world = MakeSimulationCollisionWorld();
+    PhysicsSystem physics;
+    physics.startup();
+    physics.set_world_system(world.get());
+    ASSERT_NE(physics.create_avatar_character({8, 10000, 8}), PhysicsSystem::kInvalidAvatar);
+    ASSERT_NE(physics.create_avatar_character({128 * 16 + 8, 10000, 8}),
+              PhysicsSystem::kInvalidAvatar);
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}, 1));
+    ASSERT_EQ(physics.simulation_collision_sample_count(), 18u);
+    const auto evaluations = world->simulation_collision_terrain_evaluations();
+    EXPECT_EQ(evaluations, 18u * 17u * 17u);
+    const auto hash = physics.simulation_collision_hash();
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}, 2));
+    EXPECT_EQ(world->simulation_collision_terrain_evaluations(), evaluations);
+    EXPECT_EQ(physics.simulation_collision_hash(), hash);
+}
+
+TEST(SurfaceQuery, CollisionSampleCacheRetainsCapacityAndReplacesOnlyColdColumns) {
+    auto world = MakeSimulationCollisionWorld();
+    std::array<float, 17 * 17> heights{};
+    // All 128 keys share the original direct-map slot.
+    for (int pass = 0; pass < 2; ++pass) {
+        for (int index = 0; index < 128; ++index) {
+            ASSERT_TRUE(world->sample_simulation_collision(index * 128, 0, heights));
+        }
+        EXPECT_EQ(world->simulation_collision_terrain_evaluations(), 128u * heights.size());
+    }
+    ASSERT_TRUE(world->sample_simulation_collision(-128, 0, heights));
+    for (int index = 1; index < 128; ++index) {
+        ASSERT_TRUE(world->sample_simulation_collision(index * 128, 0, heights));
+    }
+    ASSERT_TRUE(world->sample_simulation_collision(-128, 0, heights));
+    EXPECT_EQ(world->simulation_collision_terrain_evaluations(), 129u * heights.size());
+}
+
+TEST(SurfaceQuery, SavedCollisionSamplesReadOnceUntilSaveOrTerrainGenerationChanges) {
+    auto world = MakeSimulationCollisionWorld();
+    auto committed = SimulationFloorChunk({0, 0, 0}, 12);
+    committed->mark_sdf_loaded_or_edited();
+    std::size_t reads = 0;
+    world->remember_durable_chunks({IVec3(0, 0, 0)});
+    world->set_durable_chunk_loader(
+        [&](const IVec3&) {
+            ++reads;
+            return committed;
+        },
+        nullptr);
+    std::array<float, 17 * 17> heights{};
+    for (int preparation = 0; preparation < 3; ++preparation) {
+        ASSERT_TRUE(world->sample_simulation_collision(0, 0, heights));
+        EXPECT_EQ(reads, 1u);
+        EXPECT_EQ(heights.front(), 12);
+    }
+    committed->heightmap_data.assign(heights.size(), 14);
+    // The already known id still represents a new committed save generation.
+    world->remember_durable_chunks({IVec3(0, 0, 0)});
+    ASSERT_TRUE(world->sample_simulation_collision(0, 0, heights));
+    EXPECT_EQ(reads, 2u);
+    EXPECT_EQ(heights.front(), 14);
+    world->set_params(world->get_params());
+    ASSERT_TRUE(world->sample_simulation_collision(0, 0, heights));
+    ASSERT_TRUE(world->sample_simulation_collision(0, 0, heights));
+    EXPECT_EQ(reads, 3u);
+    world->set_seed(1234);
+    ASSERT_TRUE(world->sample_simulation_collision(0, 0, heights));
+    EXPECT_EQ(reads, 4u);
+    auto resident = SimulationFloorChunk({0, 0, 0}, 15);
+    resident->mark_sdf_loaded_or_edited();
+    ASSERT_TRUE(world->adopt_streamed_chunk(resident));
+    ASSERT_TRUE(world->sample_simulation_collision(0, 0, heights));
+    EXPECT_EQ(heights.front(), 15);
+    EXPECT_EQ(reads, 4u);
+    resident->heightmap_data.resize(1);
+    EXPECT_FALSE(world->sample_simulation_collision(0, 0, heights));
+    EXPECT_EQ(reads, 4u);
+}
+
+TEST(SurfaceQuery, SavedCollisionSamplesDoNotCacheInvalidAuthorityAndRespectReplacement) {
+    for (int invalid = 0; invalid < 6; ++invalid) {
+        SCOPED_TRACE(invalid);
+        auto world = MakeSimulationCollisionWorld();
+        auto committed = SimulationFloorChunk({0, 0, 0}, 12);
+        committed->mark_sdf_loaded_or_edited();
+        std::size_t reads = 0;
+        bool fail = false;
+        world->remember_durable_chunks({IVec3(0, 0, 0)});
+        world->set_durable_chunk_loader(
+            [&](const IVec3&) -> std::shared_ptr<Chunk> {
+                ++reads;
+                if (!fail) {
+                    return committed;
+                }
+                if (invalid == 0) {
+                    throw std::runtime_error("unreadable collision authority");
+                }
+                if (invalid == 1) {
+                    return {};
+                }
+                auto bad = SimulationFloorChunk({0, 0, 0}, 12);
+                if (invalid == 2) {
+                    return bad; // Unknown authority metadata.
+                }
+                bad->mark_sdf_loaded_or_edited();
+                if (invalid == 3) {
+                    bad->heightmap_data.resize(1);
+                } else {
+                    bad->heightmap_data.front() = std::numeric_limits<float>::quiet_NaN();
+                }
+                return bad;
+            },
+            nullptr);
+        std::array<float, 17 * 17> heights{};
+        ASSERT_TRUE(world->sample_simulation_collision(0, 0, heights));
+        fail = true;
+        world->replace_durable_chunks({IVec3(0, 0, 0)});
+        EXPECT_FALSE(world->sample_simulation_collision(0, 0, heights));
+        EXPECT_EQ(reads, 2u);
+        fail = false;
+        world->replace_durable_chunks({IVec3(0, 0, 0)});
+        ASSERT_TRUE(world->sample_simulation_collision(0, 0, heights));
+        EXPECT_EQ(reads, 3u);
+        // Removing the inventory invalidates saved samples and restores generation.
+        world->replace_durable_chunks({});
+        ASSERT_TRUE(world->sample_simulation_collision(0, 0, heights));
+        EXPECT_EQ(reads, 3u);
+        EXPECT_EQ(heights.front(), world->GetTerrainHeightAt(0, 0));
+    }
+}
+
+TEST(SurfaceQuery, SavedWaterOnlyCollisionSamplesRetainValidatedProceduralFallback) {
+    auto world = MakeSimulationCollisionWorld();
+    auto water = SimulationFloorChunk({0, 0, 0}, 12);
+    water->set_water_authority();
+    std::size_t reads = 0;
+    world->remember_durable_chunks({IVec3(0, 0, 0)});
+    world->set_durable_chunk_loader(
+        [&](const IVec3&) {
+            ++reads;
+            return water;
+        },
+        nullptr);
+    std::array<float, 17 * 17> heights{};
+    for (int preparation = 0; preparation < 3; ++preparation) {
+        ASSERT_TRUE(world->sample_simulation_collision(0, 0, heights));
+        EXPECT_EQ(reads, 1u);
+        EXPECT_EQ(heights.front(), world->GetTerrainHeightAt(0, 0));
+    }
+    world->set_durable_residency(false);
+    world->set_durable_residency(true);
+    ASSERT_TRUE(world->sample_simulation_collision(0, 0, heights));
+    EXPECT_EQ(reads, 2u);
+    // Changing the reader is also a new authority source, even at the same id.
+    world->set_durable_chunk_loader([](const IVec3&) { return std::shared_ptr<Chunk>{}; }, nullptr);
+    EXPECT_FALSE(world->sample_simulation_collision(0, 0, heights));
+    EXPECT_TRUE(world->durable_read_failed());
 }

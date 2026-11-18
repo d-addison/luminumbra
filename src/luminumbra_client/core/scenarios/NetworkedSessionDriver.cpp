@@ -354,11 +354,22 @@ bool NetworkedSessionDriver::StepAgreedTick() {
     // apply_and_step(false) is terminal in lockstep. Preflight both worlds before
     // either peer consumes inputs, so resource refusal waits for the next frame.
     // The hook reuses this tick's publication and cannot spend the budget twice.
+    bool retry = false;
     for (auto* ctx : {&m_impl->host_ctx, &m_impl->client_ctx}) {
-        if (!ctx->session->GetPhysicsSystem()->prepare_simulation_collisions(
-                {}, ctx->session->GetSimulationTickCount() + 1)) {
-            return true;
+        const bool prepared = !ctx->session->GetRegionSchedulerFault() &&
+                              ctx->session->GetPhysicsSystem()->prepare_simulation_collisions(
+                                  {}, ctx->session->GetSimulationTickCount() + 1);
+        if (ctx->session->GetRegionSchedulerFault()) {
+            m_failure_reason = "region_preparation_fault";
+            m_finished = true;
+            return false;
         }
+        if (!prepared) {
+            retry = true; // Still inspect the other peer for terminal faults.
+        }
+    }
+    if (retry) {
+        return true;
     }
 
     // Pump both peers until BOTH advance one more agreed tick (or terminate). The

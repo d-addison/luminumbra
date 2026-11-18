@@ -6748,6 +6748,9 @@ void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
     m_parked.clear();
     m_parked_columns.clear();
     m_durable_chunks.clear();
+    for (auto& sample : m_collision_samples) {
+        sample.valid = false;
+    }
     m_digest_members.clear();
     ++m_digest_membership_revision;
     m_durable_read_failed = false;
@@ -7057,11 +7060,36 @@ bool SHIELD_WorldSystem::sample_simulation_collision(i32 chunk_x,
     const auto generation = m_water_seed_terrain_generation.load(std::memory_order_acquire);
     const auto slot = (static_cast<u32>(chunk_x) * 31u + static_cast<u32>(chunk_z) * 17u) %
                       m_collision_samples.size();
-    auto& cached = m_collision_samples[slot];
+    // Probe the fixed 128 slots: colliding keys coexist while capacity allows.
+    // LRU replacement retains any stationary admitted working set of <=128 columns.
+    auto selected = slot;
+    for (std::size_t probe = 0; probe < m_collision_samples.size(); ++probe) {
+        const auto index = (slot + probe) % m_collision_samples.size();
+        const auto& entry = m_collision_samples[index];
+        if (entry.valid && entry.x == chunk_x && entry.z == chunk_z) {
+            selected = index;
+            break;
+        }
+        const auto& oldest = m_collision_samples[selected];
+        if ((!entry.valid && oldest.valid) ||
+            (entry.valid == oldest.valid && entry.last_use < oldest.last_use)) {
+            selected = index;
+        }
+    }
+    if (m_collision_sample_clock == std::numeric_limits<u64>::max()) {
+        // Saturation changes replacement preference only, never sample validity.
+        for (auto& entry : m_collision_samples) {
+            entry.last_use = 0;
+        }
+        m_collision_sample_clock = 0;
+    }
+    auto& cached = m_collision_samples[selected];
+    cached.last_use = ++m_collision_sample_clock;
     if (!cached.valid || cached.x != chunk_x || cached.z != chunk_z ||
         cached.generation != generation || generation == std::numeric_limits<u64>::max()) {
         cached.valid = false;
         cached.complete = false;
+        cached.saved = false;
         cached.x = chunk_x;
         cached.z = chunk_z;
         cached.generation = generation;
@@ -7077,9 +7105,21 @@ bool SHIELD_WorldSystem::sample_simulation_collision(i32 chunk_x,
         return false;
     }
     const IVec3 coords(chunk_x, static_cast<i32>(layer), chunk_z);
-    auto chunk = find_authoritative_chunk(coords);
+    // Inspect live/parked authority without triggering synchronous saved reads.
+    auto chunk = find_streamed_chunk(coords);
+    if (!chunk) {
+        const auto parked = m_parked.find(Chunk::calculate_id(coords));
+        if (parked != m_parked.end()) {
+            chunk = parked->second.chunk;
+        }
+    }
     const bool expected = m_durable_chunks.contains(Chunk::calculate_id(coords));
-    if (expected && (!chunk || !chunk->has_terrain_authority())) {
+    const bool resident_terrain = chunk && chunk->has_terrain_authority();
+    if (expected && !resident_terrain) {
+        if (cached.valid && cached.complete && cached.saved) {
+            std::copy(cached.heights.begin(), cached.heights.end(), heights.begin());
+            return true;
+        }
         // A render or water-only placeholder cannot mask committed terrain.
         chunk = read_committed_chunk(coords);
     }
@@ -7119,7 +7159,11 @@ bool SHIELD_WorldSystem::sample_simulation_collision(i32 chunk_x,
         return std::isfinite(height) && height >= kMinHeight && height < kMaxHeight;
     });
     cached.valid = valid;
-    if (valid && !(chunk && chunk->has_terrain_authority())) {
+    if (valid && expected && !resident_terrain) {
+        std::copy(heights.begin(), heights.end(), cached.heights.begin());
+        cached.saved = true;
+        cached.complete = true;
+    } else if (valid && !(chunk && chunk->has_terrain_authority())) {
         cached.complete = true;
     }
     return valid;
@@ -7215,6 +7259,9 @@ SHIELD_WorldSystem::snapshot_authoritative_chunks() const {
 void SHIELD_WorldSystem::set_durable_chunk_loader(
     std::function<std::shared_ptr<Chunk>(const IVec3&)> loader,
     std::function<void(std::string)> fault) {
+    for (auto& sample : m_collision_samples) {
+        sample.valid = false;
+    }
     m_durable_chunk_loader = std::move(loader);
     m_durable_chunk_fault = std::move(fault);
 }
@@ -7228,6 +7275,9 @@ void SHIELD_WorldSystem::set_durable_residency(bool on) {
         return;
     wait_for_streaming_jobs();
     m_durable_residency = on;
+    for (auto& sample : m_collision_samples) {
+        sample.valid = false;
+    }
     m_digest_members.clear();
     ++m_digest_membership_revision;
     // A mode transition inventories each existing item once. Ordinary flag-off
@@ -7402,6 +7452,10 @@ std::vector<std::pair<i32, i32>> SHIELD_WorldSystem::authority_region_keys() con
 }
 
 void SHIELD_WorldSystem::remember_durable_chunks(const std::vector<IVec3>& coords) {
+    // Called after each committed save generation, even for already known ids.
+    for (auto& sample : m_collision_samples) {
+        sample.valid = false;
+    }
     for (const auto& coord : coords) {
         const auto id = Chunk::calculate_id(coord);
         if (!m_durable_chunks.emplace(id, coord).second || !m_durable_residency)
