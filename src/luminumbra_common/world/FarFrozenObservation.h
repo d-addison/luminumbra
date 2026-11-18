@@ -8,8 +8,29 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <utility>
 
 namespace Luminumbra::World {
+
+// Constant-storage coverage accumulator. Start validates coordinates/intent;
+// each Observe consumes exactly one column in row-major order. No callbacks or
+// allocation occur here. Finish preserves output until all 129x129 columns pass.
+class FarVolumeCoverageCursor {
+public:
+    FarVolumeFacadeError Start(const FarVolumeCoverageIntent&, std::uint64_t identity);
+    FarVolumeFacadeError Observe(const std::optional<float>&);
+    bool Complete() const noexcept;
+    std::pair<std::int64_t, std::int64_t> Column() const;
+    FarVolumeFacadeError Finish(FarVolumeRequest&) const;
+
+private:
+    FarVolumeCoverageIntent intent_;
+    std::uint64_t identity_ = 0;
+    std::size_t column_ = 0;
+    std::int64_t x_ = 0, z_ = 0;
+    std::uint32_t spacing_ = 0, brick_ = 0;
+    float low_ = 0, high_ = 0;
+};
 
 enum class FarFrozenUse : std::uint8_t {
     Committed,
@@ -203,6 +224,16 @@ public:
         return grids_.size();
     }
     std::optional<FarFrozenRegion> Region(std::size_t region) const;
+    // Constant-time indexed column access for resumable consumers. Coordinates
+    // are grid indices including the one-column halo; invalid indices are absent.
+    std::optional<float> RegionHeight(std::size_t region, std::size_t x, std::size_t z) const {
+        if (region >= grids_.size())
+            return {};
+        const auto& grid = grids_[region];
+        if (x >= grid.side[0] || z >= grid.side[2])
+            return {};
+        return heights_[grid.column_offset + z * grid.side[0] + x];
+    }
     std::optional<float> Height(std::uint8_t tier, std::int64_t x, std::int64_t z) const;
     std::optional<FarVolumeSample>
     Sample(std::uint8_t tier, const FarVolumePosition& p, bool pristine = false) const;

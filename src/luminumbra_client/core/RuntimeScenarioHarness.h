@@ -294,6 +294,8 @@ void WriteSkyboxVisualAnalysis(
 // streak structure (horizontal luminance gradient energy, since vertical
 // streaks create high-frequency variation across columns).
 struct WeatherPixelStats {
+    // Resolved render inputs captured with these pixels; diagnostic JSON only.
+    nlohmann::json atmosphere = nlohmann::json::object();
     int width = 0;
     int height = 0;
     std::uint64_t sky_roi_pixels = 0;
@@ -556,6 +558,8 @@ void WritePrecipitationAnalysis(
 // generic emissive-material night check with an honest fallback when no
 // emissive registry material is discoverable in a surface capture.
 struct TimeOfDayPixelStats {
+    // Resolved render inputs captured with these pixels; diagnostic JSON only.
+    nlohmann::json atmosphere = nlohmann::json::object();
     int width = 0;
     int height = 0;
     double frame_mean_luminance = 0.0;
