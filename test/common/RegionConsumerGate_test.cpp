@@ -563,6 +563,78 @@ RunMatingResolveOnTick(entt::registry& reg,
     return stats;
 }
 
+// Independent historical decay traversal for compatibility comparisons.
+inline DecompositionStats
+RunDecompositionOnTick(entt::registry& reg,
+                       std::uint64_t /*tick*/,
+                       const CreatureTickAdmission* admission = nullptr,
+                       const ::Luminumbra::world::RegionConsumerGate& gate = {}) {
+    DecompositionStats stats;
+
+    auto view = reg.view<Comp::DecayComponent>();
+
+    // id-ordered participant list (deterministic traversal).
+    std::vector<entt::entity> ents(view.begin(), view.end());
+    std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
+        return entt::to_integral(a) < entt::to_integral(b);
+    });
+    if (ents.empty())
+        return stats; // empty roster -> pure no-op.
+
+    for (auto e : ents) {
+        const bool allowed = admission && reg.all_of<Comp::CreatureComponent>(e)
+                                 ? admission->Allows(e)
+                                 : gate.Allows(e);
+        if (!allowed) {
+            continue;
+        }
+        auto& dc = view.get<Comp::DecayComponent>(e);
+
+        // Already finished: inert and stable (latched) — never advance again.
+        if (dc.fully_decomposed != 0)
+            continue;
+
+        // A degenerate duration is treated as immediate-complete on first dead tick (avoids a
+        // divide-by-zero and keeps the contract: a 0-duration corpse releases its full load at
+        // once). A live entity still must not advance.
+        if (!DecompIsDead(reg, e))
+            continue; // LIVE -> does not decay.
+
+        // The pre-tick cumulative release for this corpse (already accounted in the component).
+        const std::uint32_t prev_total = dc.nutrient_released_milli;
+
+        // Advance the decomposition clock by one tick, saturating at the duration.
+        if (dc.decay_ticks < dc.decay_duration) {
+            ++dc.decay_ticks;
+        }
+        ++stats.decaying;
+
+        // Cumulative release is EXACTLY proportional to elapsed decay (integer division), so it
+        // rises monotonically and lands on kNutrientPerCorpseMilli precisely at decay_duration.
+        std::uint32_t new_total;
+        if (dc.decay_duration == 0u || dc.decay_ticks >= dc.decay_duration) {
+            new_total = kNutrientPerCorpseMilli; // finished -> full load.
+        } else {
+            new_total = static_cast<std::uint32_t>(
+                (static_cast<std::uint64_t>(kNutrientPerCorpseMilli) * dc.decay_ticks) /
+                dc.decay_duration);
+        }
+        if (new_total < prev_total)
+            new_total = prev_total; // clamp monotonic (defensive).
+
+        dc.nutrient_released_milli = static_cast<std::uint16_t>(new_total);
+        stats.released_total += (new_total - prev_total);
+
+        // Latch full decomposition once the clock reaches the duration.
+        if (dc.decay_ticks >= dc.decay_duration) {
+            dc.fully_decomposed = 1;
+            ++stats.finished;
+        }
+    }
+
+    return stats;
+}
+
 } // namespace LegacyCreatureTickOracle
 
 namespace {
@@ -2091,6 +2163,74 @@ TEST(RegionConsumerGate, SessionDefersDecompositionAndCompletionUntilPlantOwnerI
         EXPECT_EQ(decay.nutrient_released_milli, duration == 0u ? 1000u : 500u);
         EXPECT_EQ(decay.fully_decomposed, duration == 0u ? 1u : 0u);
         EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, 1u);
+    }
+}
+
+TEST(RegionConsumerGate, DetachedDecayBorrowsOnlyUnfinishedLiveParticipants) {
+    entt::registry registry;
+    F::FoliageRegistryStage stage;
+    for (std::uint64_t tick = 0; tick < 128; ++tick) {
+        const auto corpse = Creature(registry, 10.0f, tick % 2 == 0);
+        registry.get<C::CreatureComponent>(corpse).eaten = true;
+        registry.emplace<C::DecayComponent>(corpse).decay_duration = 1;
+        const auto& participants = AI::DecompositionParticipants(registry);
+        ASSERT_EQ(participants.size(), 1u);
+        stage.Begin(registry, 1);
+        const auto stats =
+            AI::RunDecompositionOnTick(stage.registry(), tick, nullptr, {}, &participants);
+        ASSERT_EQ(stats.visited, 1u);
+        ASSERT_EQ(stats.finished, 1);
+        // A discarded candidate cannot retire or advance its live participant.
+        EXPECT_EQ(registry.get<C::DecayComponent>(corpse).fully_decomposed, 0u);
+        EXPECT_EQ(AI::DecompositionParticipants(registry).size(), 1u);
+        stage.PreparePublication(registry);
+        stage.Commit(registry);
+        EXPECT_EQ(registry.get<C::DecayComponent>(corpse).fully_decomposed, 1u);
+        EXPECT_TRUE(AI::DecompositionParticipants(registry).empty());
+        EXPECT_EQ(registry.view<C::DecayComponent>().size(), tick + 1);
+    }
+    const auto pending = registry.create();
+    registry.emplace<C::DecayComponent>(pending);
+    const auto& participants = AI::DecompositionParticipants(registry);
+    entt::registry missing_candidate;
+    const auto missing =
+        AI::RunDecompositionOnTick(missing_candidate, 200, nullptr, {}, &participants);
+    EXPECT_EQ(missing.visited, 1u);
+    EXPECT_EQ(missing.decaying, 0);
+    EXPECT_EQ(AI::DecompositionParticipants(registry).size(), 1u);
+}
+
+TEST(RegionConsumerGate, SessionCompletedDecayRosterStaysEmptyWithBothTickPaths) {
+    for (const bool regional : {false, true}) {
+        W::GameSession session;
+        session.SetActiveRegionsEnabled(regional);
+        session.SetReplicatedSimulationAnchors({});
+        session.PinActiveRegion({0, 0}, true);
+        session.GetSimBudgetTelemetry().SetEnabled(true);
+        auto& registry = session.GetRegistry();
+        for (std::uint64_t cycle = 0; cycle < 16; ++cycle) {
+            const auto corpse = Creature(registry, 10.0f);
+            registry.get<C::CreatureComponent>(corpse).eaten = true;
+            registry.emplace<C::DecayComponent>(corpse).decay_duration = 1;
+            ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+            ASSERT_FALSE(session.GetRegionSchedulerFault());
+            EXPECT_EQ(registry.get<C::DecayComponent>(corpse).fully_decomposed, 1u);
+            EXPECT_TRUE(AI::DecompositionParticipants(registry).empty());
+            EXPECT_EQ(registry.view<C::DecayComponent>().size(), cycle + 1);
+            const auto& samples =
+                session.GetSimBudgetTelemetry().SamplesByStage()[static_cast<std::size_t>(
+                    luminumbra::simulation::SimBudgetStage::Decay)];
+            ASSERT_FALSE(samples.empty());
+            EXPECT_EQ(samples.back().work, 1u);
+        }
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        const auto& samples =
+            session.GetSimBudgetTelemetry().SamplesByStage()[static_cast<std::size_t>(
+                luminumbra::simulation::SimBudgetStage::Decay)];
+        ASSERT_FALSE(samples.empty());
+        EXPECT_EQ(samples.back().work, 0u);
+        EXPECT_EQ(session.GetFoliageRegistryStageVisits() != 0u, regional);
     }
 }
 
@@ -3895,6 +4035,69 @@ std::map<std::string, std::string> RetirementSaveBytes(const std::filesystem::pa
         }
     }
     return bytes;
+}
+
+TEST(RegionConsumerGate, UnfinishedDecayMatchesLegacySnapshotsHashesAndSaves) {
+    const Luminumbra::TestSupport::ScopedTempFile temporary("unfinished_decay_", ".json");
+    const auto directory = temporary.Path().parent_path();
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    W::GameSession actual, reference;
+    for (auto* session : {&actual, &reference}) {
+        session->SetRootPath(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT).generic_string() + '/');
+        session->SetJobSystem(&jobs);
+        session->SetActiveRegionsEnabled(false);
+        session->SetAetherStateEnabled(false);
+        ASSERT_TRUE(session->CreateTransientWorld("Unfinished decay", "1004", "default"));
+        auto& registry = session->GetRegistry();
+        Plant(registry, 10.0f);
+        luminumbra::core::DeterministicRng rng(1004);
+        for (int index = 0; index < 24; ++index) {
+            const auto entity = Creature(registry, rng.next_range(1.0f, 20.0f), index % 2 == 0);
+            registry.get<C::CreatureComponent>(entity).eaten = index % 3 == 0;
+            registry.get<C::MortalComponent>(entity).dead = index % 3 == 1 ? 1 : 0;
+            auto& decay = registry.emplace<C::DecayComponent>(entity);
+            decay.decay_duration = 10000;
+            decay.decay_ticks = static_cast<std::uint32_t>(index);
+        }
+    }
+    auto& registry = actual.GetRegistry();
+    auto& legacy = reference.GetRegistry();
+    F::FoliageRegistryStage stage;
+    for (std::uint64_t tick = 0; tick < 64; ++tick) {
+        const auto expected = LegacyCreatureTickOracle::RunDecompositionOnTick(legacy, tick);
+        const auto& participants = AI::DecompositionParticipants(registry);
+        stage.Begin(registry, 1);
+        const auto stats =
+            AI::RunDecompositionOnTick(stage.registry(), tick, nullptr, {}, &participants);
+        stage.PreparePublication(registry);
+        stage.Commit(registry);
+        EXPECT_EQ(stats.decaying, expected.decaying);
+        EXPECT_EQ(stats.released_total, expected.released_total);
+        EXPECT_EQ(stats.finished, 0);
+        for (const auto entity : registry.view<C::DecayComponent>()) {
+            ASSERT_TRUE(legacy.valid(entity));
+            const auto& decay = registry.get<C::DecayComponent>(entity);
+            const auto& old = legacy.get<C::DecayComponent>(entity);
+            EXPECT_EQ(decay.decay_ticks, old.decay_ticks);
+            EXPECT_EQ(decay.decay_duration, old.decay_duration);
+            EXPECT_EQ(decay.nutrient_released_milli, old.nutrient_released_milli);
+            EXPECT_EQ(decay.fully_decomposed, old.fully_decomposed);
+            EXPECT_EQ(CreatureBytes(registry, entity), CreatureBytes(legacy, entity));
+        }
+        EXPECT_EQ(PlantBytes(registry), PlantBytes(legacy));
+        EXPECT_EQ(AI::ComputeEcologySubHash(registry), AI::ComputeEcologySubHash(legacy));
+        EXPECT_EQ(actual.ComputePlantSubHash(), reference.ComputePlantSubHash());
+        EXPECT_EQ(actual.ComputeScentSubHash(), reference.ComputeScentSubHash());
+        EXPECT_EQ(actual.ComputeChunkStateHash(), reference.ComputeChunkStateHash());
+    }
+    const auto actual_save = directory / "actual";
+    const auto legacy_save = directory / "legacy";
+    ASSERT_TRUE(actual.SaveWorldStateTo(actual_save));
+    ASSERT_TRUE(reference.SaveWorldStateTo(legacy_save));
+    const auto actual_bytes = RetirementSaveBytes(actual_save);
+    ASSERT_FALSE(actual_bytes.empty());
+    EXPECT_EQ(actual_bytes, RetirementSaveBytes(legacy_save));
 }
 
 TEST(RegionConsumerGate, RetiredCarcassCannotReturnOnLoadAndSaveBytesStayIdentical) {

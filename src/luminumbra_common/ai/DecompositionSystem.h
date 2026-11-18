@@ -24,9 +24,10 @@
 // whose entities carry none — and any world with no entities — does nothing, so the canonical
 // NetworkStateHash baseline stays byte-identical.
 
-#include <algorithm>
+#include <cstddef>
 #include <cstdint>
-#include <vector>
+#include <set>
+#include <utility>
 
 #include <entt/entt.hpp>
 
@@ -53,7 +54,67 @@ struct DecompositionStats {
     int decaying = 0;                 // dead entities that advanced their decay this tick
     std::uint32_t released_total = 0; // nutrient released THIS TICK across all corpses (milli)
     int finished = 0;                 // entities that reached full decomposition this tick
+    std::size_t visited = 0;          // runtime diagnostic: roster entries examined this tick
 };
+
+namespace decomposition_detail {
+// Runtime index only: components and entity lifetimes remain unchanged. The set
+// contains at most one handle per unfinished decay participant (EnTT entity bound).
+// Maintain ID order on admission, rather than sorting/copying history every tick.
+struct Roster {
+    std::set<entt::entity> active;
+
+    static void Track(entt::registry& reg, entt::entity entity) {
+        auto& roster = reg.ctx().get<Roster>();
+        const auto& decay = reg.get<Comp::DecayComponent>(entity);
+        if (decay.fully_decomposed == 0) {
+            roster.active.insert(entity);
+        } else {
+            roster.active.erase(entity);
+        }
+    }
+
+    static void Forget(entt::registry& reg, entt::entity entity) {
+        reg.ctx().get<Roster>().active.erase(entity);
+    }
+};
+
+inline void Prune(entt::registry& reg, Roster& roster) {
+    // Only active entries are visited, including completions published by a
+    // detached foliage stage or direct component writes since the previous tick.
+    for (auto it = roster.active.begin(); it != roster.active.end();) {
+        const auto* decay = reg.try_get<Comp::DecayComponent>(*it);
+        if (!decay || decay->fully_decomposed != 0) {
+            it = roster.active.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+} // namespace decomposition_detail
+
+// Read-only runtime roster/diagnostic. The first call indexes existing components;
+// registry signals admit later additions/patches and forget removals/recycled IDs.
+// A direct reset of a completed component must use registry.patch or replace so
+// it is admitted again. Ordinary field updates on unfinished entries need no hook.
+inline const std::set<entt::entity>& DecompositionParticipants(entt::registry& reg) {
+    using Roster = decomposition_detail::Roster;
+    auto* roster = reg.ctx().find<Roster>();
+    if (!roster) {
+        Roster initial;
+        for (const auto entity : reg.view<Comp::DecayComponent>()) {
+            if (reg.get<Comp::DecayComponent>(entity).fully_decomposed == 0) {
+                initial.active.insert(entity);
+            }
+        }
+        roster = &reg.ctx().emplace<Roster>(std::move(initial));
+        reg.on_construct<Comp::DecayComponent>().connect<&Roster::Track>();
+        reg.on_update<Comp::DecayComponent>().connect<&Roster::Track>();
+        reg.on_destroy<Comp::DecayComponent>().connect<&Roster::Forget>();
+    }
+    decomposition_detail::Prune(reg, *roster);
+    return roster->active;
+}
 
 // Is this entity dead? Death is marked by MortalComponent.dead, OR (if the entity is a
 // creature) by CreatureComponent.eaten (the carcass seam used by the brain/predation).
@@ -77,27 +138,28 @@ inline DecompositionStats
 RunDecompositionOnTick(entt::registry& reg,
                        std::uint64_t /*tick*/,
                        const CreatureTickAdmission* admission = nullptr,
-                       const ::Luminumbra::world::RegionConsumerGate& gate = {}) {
+                       const ::Luminumbra::world::RegionConsumerGate& gate = {},
+                       const std::set<entt::entity>* participants = nullptr) {
     DecompositionStats stats;
 
-    auto view = reg.view<Comp::DecayComponent>();
-
-    // id-ordered participant list (deterministic traversal).
-    std::vector<entt::entity> ents(view.begin(), view.end());
-    std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
-        return entt::to_integral(a) < entt::to_integral(b);
-    });
-    if (ents.empty())
-        return stats; // empty roster -> pure no-op.
+    // Detached stages borrow the live roster: rebuilding an index from their
+    // copied component pool would revisit every historical carcass each tick.
+    // The caller keeps the roster stable until this synchronous traversal ends.
+    const auto& ents = participants ? *participants : DecompositionParticipants(reg);
 
     for (auto e : ents) {
+        ++stats.visited;
+        auto* decay = reg.try_get<Comp::DecayComponent>(e);
+        if (!decay) {
+            continue; // A detached candidate can omit a live participant.
+        }
         const bool allowed = admission && reg.all_of<Comp::CreatureComponent>(e)
                                  ? admission->Allows(e)
                                  : gate.Allows(e);
         if (!allowed) {
             continue;
         }
-        auto& dc = view.get<Comp::DecayComponent>(e);
+        auto& dc = *decay;
 
         // Already finished: inert and stable (latched) — never advance again.
         if (dc.fully_decomposed != 0)
@@ -141,6 +203,9 @@ RunDecompositionOnTick(entt::registry& reg,
         }
     }
 
+    if (!participants) {
+        decomposition_detail::Prune(reg, reg.ctx().get<decomposition_detail::Roster>());
+    }
     return stats;
 }
 

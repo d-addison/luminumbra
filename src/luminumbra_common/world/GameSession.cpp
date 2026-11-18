@@ -1456,12 +1456,15 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         creature_admission);
                 // Decomposition: dead creatures decay + release nutrient (consumed by the soil
                 // loop).
-                budget.Next(Stage::Decay, [&] {
-                    return SimParticipantCount<TelemetryComp::DecayComponent>(living_registry);
-                });
-                if (!living_registry.view<Comp::DecayComponent>().empty())
-                    luminumbra::ai::RunDecompositionOnTick(
-                        living_registry, current_tick, creature_admission, foliage_gate);
+                const auto& decay_participants =
+                    luminumbra::ai::DecompositionParticipants(m_registry);
+                budget.Next(Stage::Decay, [&] { return decay_participants.size(); });
+                if (!decay_participants.empty())
+                    luminumbra::ai::RunDecompositionOnTick(living_registry,
+                                                           current_tick,
+                                                           creature_admission,
+                                                           foliage_gate,
+                                                           &decay_participants);
                 // Circadian: diurnal/nocturnal activity from a tick-derived day fraction.
                 budget.Next(Stage::Circadian, [&] {
                     return SimParticipantCount<TelemetryComp::CircadianComponent>(m_registry);
