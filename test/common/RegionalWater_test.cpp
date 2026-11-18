@@ -3873,13 +3873,15 @@ TEST(RegionalWaterExecution, RestoredTimelineRetainsDuplicateAndBackwardTickProt
                  std::invalid_argument);
     static_cast<void>(ledger.schedule(WorldClock(2)));
     water.UpdateRegional(registry, {}, ledger, ExecutionSchedule(2, {}), completed);
-    ledger.restore_clock(WorldClock(1));
-    EXPECT_THROW(water.UpdateRegional(registry, {}, ledger, ExecutionSchedule(1, {}), completed),
+    // A reload restores an earlier saved ledger; the ledger clock itself never moves back.
+    auto restored = PlanningLedger({});
+    static_cast<void>(restored.schedule(WorldClock(1)));
+    EXPECT_THROW(water.UpdateRegional(registry, {}, restored, ExecutionSchedule(1, {}), completed),
                  std::invalid_argument);
     water.ResetRegionalTimeline();
     EXPECT_NO_THROW(
-        water.UpdateRegional(registry, {}, ledger, ExecutionSchedule(1, {}), completed));
-    EXPECT_THROW(water.UpdateRegional(registry, {}, ledger, ExecutionSchedule(1, {}), completed),
+        water.UpdateRegional(registry, {}, restored, ExecutionSchedule(1, {}), completed));
+    EXPECT_THROW(water.UpdateRegional(registry, {}, restored, ExecutionSchedule(1, {}), completed),
                  std::invalid_argument);
 }
 
