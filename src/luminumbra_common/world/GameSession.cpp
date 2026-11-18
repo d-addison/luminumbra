@@ -486,7 +486,14 @@ bool GameSession::AdoptPreparedWorld(const std::shared_ptr<WorldPreparation>& pr
     return prepared->create ? AdoptCreatedWorld(*prepared, artifacts) : AdoptLoadedWorld(*prepared);
 }
 
-GameSession::GameSession() {
+GameSession::GameSession()
+    : GameSession(AuthorityProfileOptions{}, AuthorityProfileTag{}) {}
+
+// The public test-only opt-in constructor is deliberately NOT defined in src/
+// (see GameSession.h); its only definition is the test seam source.
+GameSession::GameSession(const AuthorityProfileOptions& authority_profile,
+                         AuthorityProfileTag /*tag*/)
+    : m_authorityProfile(authority_profile) {
     m_scriptState = std::make_unique<Luminumbra::scripting::LuaState>();
     m_registry.on_destroy<Luminumbra::Components::CreaturePhysicsComponent>()
         .connect<&RemoveCreatureAvatar>(*this);
@@ -1214,114 +1221,111 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             // growth runs AFTER weather. Integer/fixed-point + id-ordered = run==replay.
             // Temperature, light, soil, weather, and irrigation are sampled below.
             if (!foliage_registry.view<const Luminumbra::Components::PlantTag>().empty()) {
-                const luminumbra::foliage::EnvSampler plant_env =
-                    [this, foliageOriginX, foliageOriginZ, current_tick](
-                        const Luminumbra::Components::TransformComponent& tf) {
-                        luminumbra::foliage::PlantEnvSample s;
-                        const Luminumbra::Vec3 p = tf.position;
-                        // Moisture: weather precipitation (rain -> growth) + irrigation (player
-                        // watering).
-                        const float precip =
-                            m_weatherSystem ? m_weatherSystem->PrecipitationAt(p) : 0.0f;
-                        s.moisture = luminumbra::foliage::clamp01(0.30f + precip * 0.70f);
-                        // fold the freshly-updated IRRIGATION grid (milli 0..1000) into moisture —
-                        // watered cells grow better (watered-beats-dry). No grid -> unchanged.
-                        if (m_irrigationGrid) {
-                            const int moist = luminumbra::foliage::MoistureAt(*m_irrigationGrid,
-                                                                              p.x,
-                                                                              p.z,
-                                                                              foliageOriginX,
-                                                                              foliageOriginZ,
-                                                                              kFoliageFieldCell);
-                            s.moisture = luminumbra::foliage::clamp01(
-                                s.moisture + static_cast<float>(moist) / 1000.0f * 0.5f);
+                const auto plant_env = [this, foliageOriginX, foliageOriginZ, current_tick](
+                                           const Luminumbra::Components::TransformComponent& tf) {
+                    luminumbra::foliage::PlantEnvSample s;
+                    const Luminumbra::Vec3 p = tf.position;
+                    // Moisture: weather precipitation (rain -> growth) + irrigation (player
+                    // watering).
+                    const float precip =
+                        m_weatherSystem ? m_weatherSystem->PrecipitationAt(p) : 0.0f;
+                    s.moisture = luminumbra::foliage::clamp01(0.30f + precip * 0.70f);
+                    // fold the freshly-updated IRRIGATION grid (milli 0..1000) into moisture —
+                    // watered cells grow better (watered-beats-dry). No grid -> unchanged.
+                    if (m_irrigationGrid) {
+                        const int moist = luminumbra::foliage::MoistureAt(*m_irrigationGrid,
+                                                                          p.x,
+                                                                          p.z,
+                                                                          foliageOriginX,
+                                                                          foliageOriginZ,
+                                                                          kFoliageFieldCell);
+                        s.moisture = luminumbra::foliage::clamp01(
+                            s.moisture + static_cast<float>(moist) / 1000.0f * 0.5f);
+                    }
+                    // Soil + temperature from the TERRAIN: surface-material favourability
+                    // (grass/soil rich, sand/stone poor) and an altitude lapse (higher
+                    // ground is colder -> alpine vs lowland growth). The real atmospheric/
+                    // terrain coupling. (Only runs for opt-in sim plants, so the per-plant
+                    // world queries are bounded.)
+                    float soil = 0.5f, temp = 0.55f;
+                    if (m_worldSystem) {
+                        const float th = m_worldSystem->GetTerrainHeightAt(p.x, p.z);
+                        switch (m_worldSystem->SurfaceVertexMaterial(p.x, p.z, th)) {
+                            case Luminumbra::MaterialType::Grass:
+                                soil = 0.95f;
+                                break;
+                            case Luminumbra::MaterialType::Soil:
+                                soil = 0.85f;
+                                break;
+                            case Luminumbra::MaterialType::Sand:
+                                soil = 0.45f;
+                                break;
+                            case Luminumbra::MaterialType::Stone:
+                                soil = 0.30f;
+                                break;
+                            default:
+                                soil = 0.25f;
+                                break;
                         }
-                        // Soil + temperature from the TERRAIN: surface-material favourability
-                        // (grass/soil rich, sand/stone poor) and an altitude lapse (higher
-                        // ground is colder -> alpine vs lowland growth). The real atmospheric/
-                        // terrain coupling. (Only runs for opt-in sim plants, so the per-plant
-                        // world queries are bounded.)
-                        float soil = 0.5f, temp = 0.55f;
-                        if (m_worldSystem) {
-                            const float th = m_worldSystem->GetTerrainHeightAt(p.x, p.z);
-                            switch (m_worldSystem->SurfaceVertexMaterial(p.x, p.z, th)) {
-                                case Luminumbra::MaterialType::Grass:
-                                    soil = 0.95f;
-                                    break;
-                                case Luminumbra::MaterialType::Soil:
-                                    soil = 0.85f;
-                                    break;
-                                case Luminumbra::MaterialType::Sand:
-                                    soil = 0.45f;
-                                    break;
-                                case Luminumbra::MaterialType::Stone:
-                                    soil = 0.30f;
-                                    break;
-                                default:
-                                    soil = 0.25f;
-                                    break;
-                            }
-                            const float altitude = th - static_cast<float>(Luminumbra::SEA_LEVEL);
-                            temp = luminumbra::foliage::clamp01(
-                                0.60f - (altitude > 0.0f ? altitude : 0.0f) * 0.00045f);
-                        }
-                        s.soil_quality = soil;
-                        // fold the freshly-updated SOIL-NUTRIENT grid (milli 0..1000) into soil
-                        // quality. Foragers/feeders DEPLETE the cell, so a monoculture on one cell
-                        // starves itself (monoculture-starves). No grid -> unchanged terrain
-                        // quality.
-                        if (m_soilGrid) {
-                            const int nut = luminumbra::foliage::NutrientAt(*m_soilGrid,
-                                                                            p.x,
-                                                                            p.z,
-                                                                            foliageOriginX,
-                                                                            foliageOriginZ,
-                                                                            kFoliageFieldCell);
-                            // NutrientAt is milli-of-milli (kSoilBaseline == 1.0 nutrient), so
-                            // normalise by kSoilBaseline (NOT 1000) to a [0,1] fraction before
-                            // blending.
-                            const float nutFrac =
-                                static_cast<float>(nut) /
-                                static_cast<float>(luminumbra::foliage::kSoilBaseline);
-                            s.soil_quality = luminumbra::foliage::clamp01(s.soil_quality * 0.5f +
-                                                                          nutFrac * 0.5f);
-                        }
-                        s.temperature = temp;
-                        // Real day/night light from the sim clock. Triangular day
-                        // curve peaking at noon, with a twilight floor so growth slows (not halts)
-                        // at night. kTicksPerDay = 20-min day @30Hz (mirrors the circadian slot).
-                        constexpr std::uint64_t kTicksPerDay = 30ull * 60ull * 20ull;
-                        const float tod01 =
-                            m_activeRegionsEnabled
-                                ? static_cast<float>(m_worldClock.solar_phase(current_tick))
-                                : static_cast<float>(current_tick % kTicksPerDay) /
-                                      static_cast<float>(kTicksPerDay);
-                        const float noonDist = tod01 < 0.5f ? (0.5f - tod01) : (tod01 - 0.5f);
-                        const float day = 1.0f - 2.0f * noonDist; // 0 at midnight -> 1 at noon
-                        s.light = luminumbra::foliage::clamp01(0.15f + 0.85f * day);
-                        //  (season): a deterministic ANNUAL temperature swing folded onto the
-                        //  terrain
-                        // temp so growth varies across the year — colder in winter (slower growth +
-                        // cold stress), warmer in summer. Triangular (libm-free) over a year of
-                        // kSeasonDays in-game days; tick-based -> run==replay (kSeasonSeedOffset 37
-                        // reserved, no RNG). Only opt-in plant rosters run this, so the canonical
-                        // (no-plant) world is unchanged.
-                        constexpr std::uint64_t kSeasonDays = 8ull;
-                        const std::uint64_t kTicksPerYear = kTicksPerDay * kSeasonDays;
-                        const float season01 =
-                            m_activeRegionsEnabled
-                                ? static_cast<float>(m_worldClock.year_phase(current_tick))
-                                : static_cast<float>(current_tick % kTicksPerYear) /
-                                      static_cast<float>(kTicksPerYear);
-                        const float midDist =
-                            season01 < 0.5f ? (0.5f - season01) : (season01 - 0.5f);
-                        const float warmth =
-                            1.0f - 2.0f * midDist;                // 0 = midwinter -> 1 = midsummer
-                        constexpr float kSeasonAmplitude = 0.30f; // +-0.15 temperature swing
-                        s.temperature = luminumbra::foliage::clamp01(
-                            s.temperature + (warmth - 0.5f) * kSeasonAmplitude);
-                        return s;
-                    };
+                        const float altitude = th - static_cast<float>(Luminumbra::SEA_LEVEL);
+                        temp = luminumbra::foliage::clamp01(
+                            0.60f - (altitude > 0.0f ? altitude : 0.0f) * 0.00045f);
+                    }
+                    s.soil_quality = soil;
+                    // fold the freshly-updated SOIL-NUTRIENT grid (milli 0..1000) into soil
+                    // quality. Foragers/feeders DEPLETE the cell, so a monoculture on one cell
+                    // starves itself (monoculture-starves). No grid -> unchanged terrain
+                    // quality.
+                    if (m_soilGrid) {
+                        const int nut = luminumbra::foliage::NutrientAt(*m_soilGrid,
+                                                                        p.x,
+                                                                        p.z,
+                                                                        foliageOriginX,
+                                                                        foliageOriginZ,
+                                                                        kFoliageFieldCell);
+                        // NutrientAt is milli-of-milli (kSoilBaseline == 1.0 nutrient), so
+                        // normalise by kSoilBaseline (NOT 1000) to a [0,1] fraction before
+                        // blending.
+                        const float nutFrac =
+                            static_cast<float>(nut) /
+                            static_cast<float>(luminumbra::foliage::kSoilBaseline);
+                        s.soil_quality =
+                            luminumbra::foliage::clamp01(s.soil_quality * 0.5f + nutFrac * 0.5f);
+                    }
+                    s.temperature = temp;
+                    // Real day/night light from the sim clock. Triangular day
+                    // curve peaking at noon, with a twilight floor so growth slows (not halts)
+                    // at night. kTicksPerDay = 20-min day @30Hz (mirrors the circadian slot).
+                    constexpr std::uint64_t kTicksPerDay = 30ull * 60ull * 20ull;
+                    const float tod01 =
+                        m_activeRegionsEnabled
+                            ? static_cast<float>(m_worldClock.solar_phase(current_tick))
+                            : static_cast<float>(current_tick % kTicksPerDay) /
+                                  static_cast<float>(kTicksPerDay);
+                    const float noonDist = tod01 < 0.5f ? (0.5f - tod01) : (tod01 - 0.5f);
+                    const float day = 1.0f - 2.0f * noonDist; // 0 at midnight -> 1 at noon
+                    s.light = luminumbra::foliage::clamp01(0.15f + 0.85f * day);
+                    //  (season): a deterministic ANNUAL temperature swing folded onto the
+                    //  terrain
+                    // temp so growth varies across the year — colder in winter (slower growth +
+                    // cold stress), warmer in summer. Triangular (libm-free) over a year of
+                    // kSeasonDays in-game days; tick-based -> run==replay (kSeasonSeedOffset 37
+                    // reserved, no RNG). Only opt-in plant rosters run this, so the canonical
+                    // (no-plant) world is unchanged.
+                    constexpr std::uint64_t kSeasonDays = 8ull;
+                    const std::uint64_t kTicksPerYear = kTicksPerDay * kSeasonDays;
+                    const float season01 =
+                        m_activeRegionsEnabled
+                            ? static_cast<float>(m_worldClock.year_phase(current_tick))
+                            : static_cast<float>(current_tick % kTicksPerYear) /
+                                  static_cast<float>(kTicksPerYear);
+                    const float midDist = season01 < 0.5f ? (0.5f - season01) : (season01 - 0.5f);
+                    const float warmth = 1.0f - 2.0f * midDist; // 0 = midwinter -> 1 = midsummer
+                    constexpr float kSeasonAmplitude = 0.30f;   // +-0.15 temperature swing
+                    s.temperature = luminumbra::foliage::clamp01(
+                        s.temperature + (warmth - 0.5f) * kSeasonAmplitude);
+                    return s;
+                };
                 luminumbra::foliage::RunPlantGrowthSystemOnTick(
                     foliage_registry, current_tick, plant_env, foliage_gate);
             }
@@ -2231,6 +2235,10 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                             owned_regions->insert({owner.owner_x, owner.owner_z});
                         }
                     }
+                    if (m_authorityProfile.residency_free_eviction) {
+                        // Anchors refresh proximity; the ledger retains durable edits.
+                        return owned_regions->contains(key);
+                    }
                     return owned_regions->contains(key) ||
                            (m_worldSystem && m_worldSystem->has_region_members(key.x, key.z));
                 });
@@ -2508,6 +2516,51 @@ std::string GameSession::RegionalAmbientHash(std::uint8_t channels, bool weather
     return Persistence::StableChecksum(bytes);
 }
 
+std::string GameSession::ComputeRegionalWindSubHash() const {
+    return RegionalAmbientHash(3, false);
+}
+
+std::string GameSession::ComputeRegionalWeatherSubHash() const {
+    return RegionalAmbientHash(12, true);
+}
+
+std::string GameSession::ComputeRegionalAetherSubHash() const {
+    return RegionalAmbientHash(16, false);
+}
+
+Vec2 GameSession::SampleRegionalWind(const Vec3& position, Systems::WindLayer layer) const {
+    // Stored signed words are 1/1024 m/s. Higher layers use exact powers of two.
+    const float scale = layer == Systems::WindLayer::Ground ? 1.0f
+                        : layer == Systems::WindLayer::Mid  ? 2.0f
+                                                            : 4.0f;
+    return Vec2(
+        static_cast<float>(std::bit_cast<std::int16_t>(SampleRegionalChannel(0, position))) *
+            (scale / 1024.0f),
+        static_cast<float>(std::bit_cast<std::int16_t>(SampleRegionalChannel(1, position))) *
+            (scale / 1024.0f));
+}
+
+Systems::WeatherSample GameSession::SampleRegionalWeather(const Vec3& position) const {
+    Systems::WeatherSample sample;
+    const auto moisture = SampleRegionalChannel(2, position);
+    const auto front = SampleRegionalChannel(3, position);
+    sample.category = front < 13107   ? Systems::WeatherCategory::Clear
+                      : front < 26214 ? Systems::WeatherCategory::Overcast
+                      : front < 39321 ? Systems::WeatherCategory::Rain
+                      : front < 52428 ? Systems::WeatherCategory::Snow
+                                      : Systems::WeatherCategory::Fog;
+    sample.precip_intensity = sample.category == Systems::WeatherCategory::Rain ||
+                                      sample.category == Systems::WeatherCategory::Snow
+                                  ? static_cast<float>(moisture) / 65535.0f
+                                  : 0.0f;
+    sample.wind = m_windFieldSystem ? m_windFieldSystem->SampleWind(position) : Vec2(0.0f);
+    return sample;
+}
+
+float GameSession::SampleRegionalAether(const Vec3& position) const {
+    return static_cast<float>(SampleRegionalChannel(4, position)) / 65535.0f;
+}
+
 void GameSession::BindRegionalFieldQueries() {
     if (!m_windFieldSystem || !m_weatherSystem || !m_aetherFieldSystem)
         return;
@@ -2525,43 +2578,9 @@ void GameSession::BindRegionalFieldQueries() {
         return;
     }
     m_regionalFieldsBound = true;
-    m_windFieldSystem->BindRegionalBackend(
-        [this](const Vec3& position, Systems::WindLayer layer) {
-            // Stored signed words are 1/1024 m/s. Higher layers use exact powers of two.
-            const float scale = layer == Systems::WindLayer::Ground ? 1.0f
-                                : layer == Systems::WindLayer::Mid  ? 2.0f
-                                                                    : 4.0f;
-            return Vec2(static_cast<float>(
-                            std::bit_cast<std::int16_t>(SampleRegionalChannel(0, position))) *
-                            (scale / 1024.0f),
-                        static_cast<float>(
-                            std::bit_cast<std::int16_t>(SampleRegionalChannel(1, position))) *
-                            (scale / 1024.0f));
-        },
-        [this] { return RegionalAmbientHash(3, false); });
-    m_weatherSystem->BindRegionalBackend(
-        [this](const Vec3& position) {
-            Systems::WeatherSample sample;
-            const auto moisture = SampleRegionalChannel(2, position);
-            const auto front = SampleRegionalChannel(3, position);
-            sample.category = front < 13107   ? Systems::WeatherCategory::Clear
-                              : front < 26214 ? Systems::WeatherCategory::Overcast
-                              : front < 39321 ? Systems::WeatherCategory::Rain
-                              : front < 52428 ? Systems::WeatherCategory::Snow
-                                              : Systems::WeatherCategory::Fog;
-            sample.precip_intensity = sample.category == Systems::WeatherCategory::Rain ||
-                                              sample.category == Systems::WeatherCategory::Snow
-                                          ? static_cast<float>(moisture) / 65535.0f
-                                          : 0.0f;
-            sample.wind = m_windFieldSystem->SampleWind(position);
-            return sample;
-        },
-        [this] { return RegionalAmbientHash(12, true); });
-    m_aetherFieldSystem->BindRegionalBackend(
-        [this](const Vec3& position) {
-            return static_cast<float>(SampleRegionalChannel(4, position)) / 65535.0f;
-        },
-        [this] { return RegionalAmbientHash(16, false); });
+    m_windFieldSystem->BindRegionalSession(*this);
+    m_weatherSystem->BindRegionalSession(*this);
+    m_aetherFieldSystem->BindRegionalSession(*this);
 }
 
 namespace {
@@ -4052,6 +4071,14 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
         for (const auto& chunk : m_activeRegionsEnabled
                                      ? m_worldSystem->snapshot_authoritative_chunks()
                                      : m_worldSystem->snapshot_streamed_chunks()) {
+            // Incremental indexed saves regenerate unowned terrain and water. Full snapshots
+            // retain the complete resident set, including clean generated chunks.
+            // Dirty water has already acquired ownership above; keep all owned state,
+            // including calm counters, even when its depth and flux match generation.
+            if (m_activeRegionsEnabled && !full_snapshot && chunk &&
+                chunk->sdf_provenance() == ChunkSdfProvenance::GeneratedCurrentParams &&
+                !chunk->needs_authority() && !chunk->is_voxel_data_dirty())
+                continue;
             state.insert_chunk(chunk);
         }
         result.chunks_total = state.size();
@@ -4125,7 +4152,7 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
             (retarget && std::ranges::any_of(state.snapshot_chunks(), [](const auto& chunk) {
                  return chunk && chunk->needs_authority();
              }));
-        // A first chunk snapshot includes all residents. Later incremental saves
+        // A first chunk snapshot includes all selected residents. Later incremental saves
         // replace only dirty regions, even when unrelated residents exceed writer caps.
         const bool has_snapshot =
             !write_chunks || full_snapshot
@@ -4896,7 +4923,7 @@ void GameSession::InitializeScentField(const Vec3& /*anchor*/) {
     m_scentField = std::make_unique<luminumbra::ai::ScentField>(
         kScentFieldCells, kScentFieldCells, kScentFieldChannels);
     if (m_activeRegionsEnabled) {
-        m_scentField->BindDepositGate([this](int x, int z) { return ScentCellDue(x, z); });
+        m_scentField->BindSessionAdmission(*this);
         RestoreRegionalScent();
     }
     LUMINUMBRA_CORE_INFO("Scent field initialized: {}x{} cells, {} channel(s), cell_size={}",
@@ -5275,3 +5302,7 @@ std::string GameSession::ComputePlantSubHash() const {
 }
 
 } // namespace Luminumbra::world
+
+bool luminumbra::ai::ScentField::SessionCellAllowed(int x, int z) const {
+    return m_admissionSession->ScentCellDue(x, z);
+}

@@ -176,6 +176,240 @@ class MenuCaptureEvaluation:
         return "Ready" if requested else "Waiting"
 
 
+class GameplayPhotoRelease(unittest.TestCase):
+    """Trace the shipping exit boundary without running native code or GL."""
+
+    def setUp(self):
+        self.main = read(CLIENT / "main_client.cpp")
+        self.overlays = read(CLIENT / "app/DebugOverlays.cpp")
+        self.photo_header = read(CLIENT / "app/PhotoEnvironment.h")
+        self.player = True
+        self.exposure = 4.0
+        self.exposure_applied = True
+        self.hold = True
+        self.weather = "Storm"
+        self.driven = True
+        self.weather_payload = {"rain_intensity": 0.6, "storm_intensity": 0.8,
+                                "wetness": 0.9, "wind_strength": 0.4}
+        self.photo_env = True
+        self.weather_snapshot = None
+        self.photo = True
+        self.photo_ui = True
+        self.releases = 0
+
+    def restore_photo_weather(self):
+        restore = compact(block(self.photo_header, "void Restore("))
+        self.assertTrue(restore.startswith("if (!applied_) { return; }"), restore)
+        self.assertIn("if (state_.driven) { pipeline.set_weather_state(state_); } "
+                      "else { pipeline.set_weather(weather_, intensity_); } "
+                      "applied_ = false;", restore)
+        if self.weather_snapshot is None:
+            return
+        self.weather, self.driven, self.weather_payload = self.weather_snapshot
+        self.weather_snapshot = None
+
+    def release_photo_exposure(self, photo_active):
+        release = compact(block(self.photo_header, "void ReleaseIfInactive("))
+        self.assertEqual(release, "if (photo_mode_active || !applied_) { return; } "
+                         "pipeline.set_exposure_override(-1.0f); applied_ = false;")
+        if photo_active or not self.exposure_applied:
+            return
+        self.exposure = -1.0
+        self.exposure_applied = False
+
+    def leave_photo_environment(self):
+        """One gameplay frame after photo mode turned off, without a retirement."""
+        frame = self.main[self.main.index("while (!glfwWindowShouldClose(window))"):]
+        frame = block(frame, "while (!glfwWindowShouldClose(window))")
+        self.assertIn("g_app.hud.photoWeather.Restore(renderPipeline);", frame)
+        self.restore_photo_weather()
+        update = block(self.overlays, "void UpdatePhotoEnvironment(")
+        self.assertIn("app.hud.photoExposure.ReleaseIfInactive(renderPipeline, photo_active);",
+                      update)
+        self.release_photo_exposure(self.photo)
+        self.assertIn("if (!photo_active || capture_pinned) { photo = {}; }", compact(update))
+        if not self.photo:
+            self.photo_env = False
+
+    def apply_photo_weather(self, index):
+        update = compact(block(self.overlays, "void UpdatePhotoEnvironment("))
+        self.assertIn("if (selected.weather_active) { app.hud.photoWeather.Apply("
+                      "renderPipeline, selected.weather, selected.intensity); }", update)
+        apply = compact(block(self.photo_header, "void Apply(Pipeline& pipeline, "
+                              "Luminumbra::Rendering::WeatherType"))
+        self.assertIn("if (!applied_) { weather_ = pipeline.get_weather_type(); "
+                      "intensity_ = pipeline.get_weather_intensity(); "
+                      "state_ = pipeline.get_weather_state(); applied_ = true; }", apply)
+        presets = re.search(r"constexpr std::array presets = \{([^}]+)\}",
+                            self.photo_header).group(1)
+        types = [entry.strip().split("::")[-1] for entry in presets.split(",")]
+        self.assertEqual(len(types), 6)
+        if self.weather_snapshot is None:
+            self.weather_snapshot = (self.weather, self.driven, dict(self.weather_payload))
+        self.photo_env = True
+        self.weather = types[index]
+        self.driven = False
+
+    def retire(self):
+        if "auto release_player_controller =" not in self.main:
+            self.player = False
+            return
+        owner = compact(block(self.main, "auto release_player_controller ="))
+        self.assertEqual(owner, "if (g_playerController) { "
+                         "ReleasePhotoModeAndHud(g_app, renderPipeline); "
+                         "g_playerController.reset(); }")
+        if not self.player:
+            return
+        self.releases += 1
+        release = compact(re.sub(r"//[^\n]*", "",
+                                 block(self.overlays, "void ReleasePhotoModeAndHud(")))
+        if "app.hud.photoMode = {};" in release:
+            self.photo = False
+        if "app.hud.photoModeUiShown = false;" in release:
+            self.photo_ui = False
+        if "app.hud.photoEnvironment = {};" in release:
+            self.photo_env = False
+        if "app.hud.photoWeather.Restore(renderPipeline);" in release:
+            self.restore_photo_weather()
+        if "app.hud.photoExposure.ReleaseIfInactive(renderPipeline, false);" in release:
+            self.release_photo_exposure(False)
+        for method, value in re.findall(r"renderPipeline\.(set_\w+)\(([^;]*)\);", release):
+            if method == "set_time_of_day_hold":
+                self.hold = cpp_expression(value, false=False, true=True)
+            else:
+                self.fail(f"release writes an unowned renderer setting: {method}")
+        self.player = False
+
+    def assert_released(self):
+        self.assertEqual(self.exposure, -1.0, "manual exposure leaked into the menu preview")
+        self.assertFalse(self.exposure_applied)
+        self.assertFalse(self.hold)
+        self.assertEqual(self.weather, "Storm")
+        self.assertTrue(self.driven)
+        self.assertFalse(self.photo_env)
+        self.assertIsNone(self.weather_snapshot)
+        self.assertFalse(self.photo)
+        self.assertFalse(self.photo_ui)
+        self.assertFalse(self.player)
+        self.assertEqual(self.releases, 1)
+
+    def test_quit_to_menu_releases_manual_exposure_before_preview(self):
+        quit_body = block(self.main, 'else if (act == "quit")')
+        retirement = ("release_player_controller();" if "release_player_controller();" in quit_body
+                      else "g_playerController.reset();")
+        self.assertLess(quit_body.index(retirement), quit_body.index("GameState::MAIN_MENU"))
+        self.retire()
+        self.assert_released()
+
+    def test_release_preserves_weather_and_exposure_without_a_photo_override(self):
+        for engaged, driven in ((False, False), (False, True), (True, False), (True, True)):
+            with self.subTest(engaged=engaged, driven=driven):
+                self.setUp()
+                self.photo_env = engaged
+                self.driven = driven
+                self.exposure_applied = False
+                before = (self.weather, self.driven, dict(self.weather_payload), self.exposure)
+                self.retire()
+                self.assertEqual(
+                    (self.weather, self.driven, self.weather_payload, self.exposure), before)
+
+    def test_each_photo_weather_override_restores_driven_weather_on_both_exits(self):
+        for index in range(1, 6):
+            for retire_player in (False, True):
+                with self.subTest(index=index, retire_player=retire_player):
+                    self.setUp()
+                    payload = dict(self.weather_payload)
+                    self.apply_photo_weather(index)
+                    # Cycling again keeps the first live snapshot, not a photo preset.
+                    self.apply_photo_weather(5 if index != 5 else 2)
+                    if retire_player:
+                        self.retire()
+                        self.assert_released()
+                    else:
+                        self.photo = False
+                        self.leave_photo_environment()
+                    self.assertEqual((self.weather, self.driven), ("Storm", True))
+                    self.assertEqual(self.weather_payload, payload)
+                    self.assertIsNone(self.weather_snapshot)
+                    self.assertFalse(self.photo_env)
+                    self.assertEqual(self.exposure, -1.0)
+                    # Repeated exit and a fresh photo session without cycling must
+                    # not overwrite a later weather update from another owner.
+                    self.weather = "Rain"
+                    self.leave_photo_environment()
+                    self.photo_env = True
+                    self.leave_photo_environment()
+                    self.assertEqual((self.weather, self.driven), ("Rain", True))
+
+    def test_weather_pipeline_retains_payload_and_reenables_driven_classification(self):
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        direct = block(pipeline, "void RenderPipeline::set_weather(")
+        direct = compact(re.sub(r"//[^\n]*", "", direct))
+        self.assertEqual(direct, "m_weather_type = type; "
+                         "m_weather_intensity = std::clamp(intensity, 0.0f, 1.0f); "
+                         "m_weather_state.driven = false;")
+        driven = compact(block(pipeline, "void RenderPipeline::set_weather_state("))
+        self.assertIn("m_weather_state = state; m_weather_state.driven = true;", driven)
+        self.assertIn("const auto classification = ClassifyWeatherState(m_weather_state); "
+                      "m_weather_type = classification.type; "
+                      "m_weather_intensity = classification.intensity;", driven)
+
+    def test_save_refusals_preserve_photo_presentation(self):
+        quit_body = block(self.main, 'else if (act == "quit")')
+        retirement = quit_body.index("release_player_controller();" if
+                                     "release_player_controller();" in quit_body else
+                                     "g_playerController.reset();")
+        self.assertIn("return;", block(quit_body, "if (!gameSession->SaveWorld())"))
+        self.assertLess(quit_body.index("if (!gameSession->SaveWorld())"), retirement)
+        self.assertRegex(quit_body[:retirement],
+                         r"if \(!session_persistence_allowed\(\)\)\s+return;")
+        self.assertEqual((self.exposure, self.hold, self.player), (4.0, True, True))
+
+    def test_every_controller_retirement_uses_the_shared_release(self):
+        # Includes quit, benchmark quit, immediate and staged load/create,
+        # adopted-world refusal, rollback-to-menu and final shutdown.
+        self.assertEqual(self.main.count("g_playerController.reset();"), 1)
+        for marker in ("auto finish_world_replacement =", "auto refuse_world_entry =",
+                       "auto finish_world_entry =", 'else if (act == "quit")',
+                       "auto drain_entry =", "auto return_entry_to_menu =",
+                       "if (saved && main_menu)"):
+            with self.subTest(site=marker):
+                self.assertIn("release_player_controller();", block(self.main, marker))
+        replacement = block(self.main, "auto finish_world_replacement =")
+        self.assertIn("release_player_controller();", block(
+            replacement, "if (gameSession->WorldRevision() != entry_world_revision)"))
+        shutdown = self.main[self.main.index('trace_shutdown("world_save_finished")'):]
+        self.assertIn("release_player_controller();", shutdown)
+
+    def test_rollback_and_shutdown_cannot_release_a_retired_player_twice(self):
+        self.retire()
+        self.retire()
+        self.retire()
+        self.assert_released()
+
+    def test_no_player_leaves_unowned_renderer_settings_unchanged(self):
+        self.player = False
+        self.retire()
+        self.assertEqual((self.exposure, self.hold, self.weather, self.releases),
+                         (4.0, True, "Storm", 0))
+
+    def test_replacement_refusal_and_adoption(self):
+        replacement = block(self.main, "auto finish_world_replacement =")
+        condition = re.search(r"if \((.*)\)", replacement).group(1)
+        for revision, releases in ((10, 0), (11, 1)):
+            with self.subTest(revision=revision):
+                self.setUp()
+                changed = cpp_expression(condition, **{
+                    "gameSession->WorldRevision()": revision, "entry_world_revision": 10})
+                if changed and "release_player_controller();" in replacement:
+                    self.retire()
+                if releases:
+                    self.assert_released()
+                else:
+                    self.assertEqual((self.exposure, self.hold, self.player, self.releases),
+                                     (4.0, True, True, 0))
+
+
 class FrameAttributionWiring(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -404,6 +638,20 @@ class FrameAttributionWiring(unittest.TestCase):
                          r"menuPreviewState.last_menu_frame = \{\}; "
                          r"//[^\n]*? if \(g_app.capture.timelapse_creatures\) "
                          r"DrawCreatureNameplates\(")
+
+    def test_timelapse_day_drift_overrides_live_clock_by_frame_order(self):
+        # Writer order: live clock, time-lapse drift, then scenario pins, so the drift beats the
+        # live clock while a scenario's fixed time of day still beats the drift.
+        main = self.main
+        live = main.index("renderPipeline.set_time_of_day_hold(false);")
+        start = main.index("if (g_app.capture.timelapse_frames > 0 &&\n", live)
+        drift = compact(block(main[start:], "if (g_app.capture.timelapse_frames > 0 &&"))
+        self.assertEqual(drift, "renderPipeline.set_time_of_day(g_app.capture.timelapse_tod);")
+        self.assertIn("g_app.capture.timelapse_daystep > 0.0f",
+                      main[start:main.index("renderPipeline.set_time_of_day(g_app.capture"
+                                            ".timelapse_tod);", start)])
+        pins = main.index("scenario_runner->onPreRenderCapturePins();", live)
+        self.assertLess(start, pins)
 
     def test_capture_day_phase_uses_calendar_without_frame_drift(self):
         update = block(read(CLIENT / "rendering/RenderPipeline.cpp"),
@@ -2569,6 +2817,108 @@ class TerrainMaterialWiring(unittest.TestCase):
             guarded = block(settings, "if (terrain_anisotropy_supported)")
             self.assertIn("GL_TEXTURE_MAX_ANISOTROPY, terrain_anisotropy", guarded)
 
+class PhotoEnvironmentWiring(unittest.TestCase):
+    def test_exposure_release_is_independent_of_time_capture_pins_and_pause(self):
+        overlays = read(CLIENT / "app/DebugOverlays.cpp")
+        capture = compact(block(overlays, "void UpdatePhotoCapture("))
+        self.assertIn("app.hud.photoExposure.Apply( renderPipeline, "
+                      "Luminumbra::Rendering::ManualExposureMultiplier(app.hud.photoMode.lens));",
+                      capture)
+        self.assertNotIn("set_exposure_override(", capture)
+        context = block(read(CLIENT / "app/ClientAppContext.h"), "struct HudState")
+        self.assertIn("PhotoExposureOverride photoExposure;", context)
+        update = block(overlays, "void UpdatePhotoEnvironment(")
+        release = "app.hud.photoExposure.ReleaseIfInactive(renderPipeline, photo_active);"
+        self.assertIn(release, update)
+        self.assertNotIn("if (", update.split(release, 1)[0])
+        self.assertLess(update.index(release), update.index("if (!photo_active || capture_pinned)"))
+        self.assertNotIn("set_exposure_override(", update)
+        self.assertNotIn("photoExposure =", update)
+        self.assertIn("const bool photo_active = playerController && "
+                      "playerController->photo_mode_active();", compact(update))
+        hud = compact(block(overlays, "void UpdatePhotoModeAndHud("))
+        self.assertIn("app.hud.photoMode.active = playerController->photo_mode_active();", hud)
+        self.assertNotIn("capture_pinned", hud)
+        exposure = block(read(CLIENT / "app/PhotoEnvironment.h"), "class PhotoExposureOverride")
+        self.assertIn("bool applied_ = false;", exposure)
+        self.assertNotIn("time_active", exposure)
+        apply = block(exposure, "void Apply(")
+        self.assertIn("pipeline.set_exposure_override(multiplier);", apply)
+        self.assertIn("applied_ = true;", apply)
+        release_body = block(exposure, "void ReleaseIfInactive(")
+        guard = re.search(r"if\s*\(([^()]*)\)", release_body).group(1)
+        self.assertIn("return;", block(release_body, "if ("))
+        self.assertIn("pipeline.set_exposure_override(-1.0f);", release_body)
+        self.assertIn("applied_ = false;", release_body)
+        for active in (False, True):
+            for applied in (False, True):
+                with self.subTest(active=active, applied=applied):
+                    self.assertEqual(cpp_expression(guard, photo_mode_active=active, applied_=applied),
+                                     active or not applied)
+
+    def test_photo_selection_follows_live_defaults_and_precedes_pins_and_render(self):
+        main = read(CLIENT / "main_client.cpp")
+        release = main.index("renderPipeline.set_time_of_day_hold(false);")
+        weather_release = main.index("g_app.hud.photoWeather.Restore(renderPipeline);")
+        loop = block(main, "while (!glfwWindowShouldClose(window))")
+        before_restore = loop.split("g_app.hud.photoWeather.Restore(renderPipeline);", 1)[0]
+        self.assertNotIn("if (", before_restore)
+        self.assertLess(weather_release, main.index("GameState currentState ="))
+        self.assertLess(weather_release, main.index("RenderMenuScreens("))
+        weather_writer_guard = "if (g_systemConfig.enabled(luminumbra::core::SysKey::RenderLiveWeather))"
+        self.assertLess(weather_release, main.index(weather_writer_guard))
+        self.assertNotIn("photoWeather.Restore", block(main, weather_writer_guard))
+        photo = main.index("UpdatePhotoEnvironment(")
+        for live in ("renderPipeline.set_world_clock(gameSession->GetWorldClock());",
+                     "renderPipeline.set_time_of_day_tick(sim_tick);",
+                     "renderPipeline.set_weather_state(weather_state);"):
+            self.assertLess(release, main.index(live))
+            self.assertLess(weather_release, main.index(live))
+            self.assertLess(main.index(live), photo)
+        for pin in ("scenario_runner->onPreRenderCapturePins();",
+                    "renderPipeline.set_time_of_day(Luminumbra::BenchmarkPose::kTimeOfDay);",
+                    "renderPipeline.set_weather(wt, g_app.capture.scene_weather_intensity);",
+                    "scenario_runner->onPreRenderFoliage()"):
+            self.assertLess(photo, main.index(pin))
+        self.assertLess(photo, main.index("renderPipeline.render_frame(", photo))
+
+    def test_photo_capture_has_no_late_environment_writers(self):
+        overlays = read(CLIENT / "app/DebugOverlays.cpp")
+        capture = block(overlays, "void UpdatePhotoCapture(")
+        for setter in ("set_weather(", "set_time_of_day(", "set_time_of_day_hold(",
+                       "consume_tod_nudge()", "consume_weather_cycle()"):
+            self.assertNotIn(setter, capture)
+        update = block(overlays, "void UpdatePhotoEnvironment(")
+        self.assertIn("SelectPhotoEnvironment(live, photo, photo_active, capture_pinned)", update)
+        self.assertIn("renderPipeline.set_time_of_day(selected.time_of_day);",
+                      block(update, "if (selected.time_active)"))
+        self.assertIn("app.hud.photoWeather.Apply(renderPipeline, selected.weather, selected.intensity);",
+                      block(update, "if (selected.weather_active)"))
+
+    def test_weather_snapshot_survives_photo_selection_reset(self):
+        context = block(read(CLIENT / "app/ClientAppContext.h"), "struct HudState")
+        self.assertIn("PhotoWeatherOverride photoWeather;", context)
+        update = block(read(CLIENT / "app/DebugOverlays.cpp"), "void UpdatePhotoEnvironment(")
+        self.assertIn("photo = {};", update)
+        self.assertNotIn("photoWeather =", update)
+
+    def test_all_capture_modes_disable_photo_overrides(self):
+        main = compact(read(CLIENT / "main_client.cpp"))
+        guard = re.search(r"const bool photo_capture_pinned = ([^;]+);", main).group(1)
+        flags = ("scenario_config.active()", "g_rb_active", "g_app.capture.timelapse_frames",
+                 "g_app.capture.scene_active", "g_app.capture.frame_scan_active",
+                 "g_app.capture.render_parity_active", "g_app.capture.survey_active",
+                 "g_app.capture.bake_impostor_path.empty()",
+                 "g_app.capture.ui_screenshot_screen.empty()", "g_app.capture.ui_thumbs")
+        defaults = {flag: flag.endswith(".empty()") for flag in flags}
+        self.assertFalse(cpp_expression(guard, **defaults))
+        for flag in flags:
+            with self.subTest(flag=flag):
+                inputs = dict(defaults)
+                inputs[flag] = not inputs[flag]
+                self.assertTrue(cpp_expression(guard, **inputs))
+
+
 class WorldVisualSweepWiring(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -2660,30 +3010,146 @@ class WorldVisualSweepWiring(unittest.TestCase):
         for field in ("water_draws", "water_indices_drawn"):
             self.assertIn(f"cell.{field} = stats.{field};", self.sweep)
             self.assertIn(f'{{"{field}", c.{field}}}', self.sweep)
-        # Retain the existing daytime pixel-presence check as well.
-        self.assertIn("c.water_aimed && c.daytime && c.water_like_pixels == 0", self.sweep)
+        # Presence is depth-tested and colour independent; submission remains required.
+        self.assertIn("c.water_aimed && c.visible_water_pixels == 0", self.sweep)
+        self.assertIn("c.water_aimed && !c.water_mask_valid", self.sweep)
         self.assertIn('manifest["warmup_water_indices_drawn"] = water_indices_drawn;', self.sweep)
 
     def test_water_target_is_local_and_absence_refuses_the_sweep(self):
         self.assertNotIn("FindWaterVisualCameraTarget(game_session)", self.sweep)
         self.assertIn("std::max(land_terrain_h, Luminumbra::SEA_LEVEL) + 2.5f", self.sweep)
-        search = block(self.sweep, "for (int dz = -96;")
+        helper = read(CLIENT / "rendering/WaterVisibility.h")
+        search = block(helper, "FindWaterVisibilityTarget(")
+        self.assertIn("for (int dz = -96; dz <= 96; dz += 16)", search)
         self.assertIn("for (int dx = -96; dx <= 96; dx += 16)", search)
-        self.assertIn("anchor.x + static_cast<float>(dx)", search)
-        self.assertIn("anchor.z + static_cast<float>(dz)", search)
-        expression = re.search(r"if \((height <[^{}]+)\) \{", search).group(1)
-        expression = expression.replace("Luminumbra::SEA_LEVEL", "sea").replace("0.5f", "0.5")
-        for height, distance, nearest, expected in ((-1, 256, 1024, True),
-                                                   (-0.5, 256, 1024, False),
-                                                   (2, 256, 1024, False),
-                                                   (-1, 1024, 256, False),
-                                                   (-1, 256, 256, False)):
-            self.assertEqual(cpp_expression(expression, height=height, sea=0,
-                                            distance_sq=distance,
-                                            nearest_water_distance_sq=nearest), expected)
+        self.assertIn("for (int step = 0; step <= 32 && clear; ++step)", search)
+        self.assertIn("h < sea_level - 0.5f", search)
+        self.assertIn("h < point.y - 0.5f", search)
+        self.assertIn("std::isfinite(h)", search)
+        self.assertIn("result = {.found = true, .eye = eye, .focus = focus};", search)
+        self.assertIn("FindWaterVisibilityTarget(", self.sweep)
+        self.assertIn("camera->Position = water_target.eye;", self.sweep)
+        verify = block(self.sweep, "if (!target_rendered || !target_mask_written")
+        self.assertIn("return false;", verify)
+        self.assertIn("pipeline->water_visibility_mask());", self.sweep)
+        self.assertIn("const bool target_rendered = render_settled(3);", self.sweep)
+        self.assertIn("pipeline->water_visibility_mask().visible_pixels_in_target() == 0", self.sweep)
         self.assertIn("return false;", block(self.sweep, "if (!water_target.found)"))
         self.assertLess(self.sweep.index("if (!water_target.found)"),
                         self.sweep.index("// --- run the matrix"))
+
+    def test_water_presence_refuses_empty_target_even_with_geometry_or_sky_hue(self):
+        condition = re.search(r"if \((c.water_aimed && c.visible_water_pixels[^)]+)\)",
+                              self.sweep).group(1)
+        for aimed, visible, expected in ((True, 0, True), (True, 1, False),
+                                         (False, 0, False), (False, 1, False)):
+            self.assertEqual(cpp_expression(condition, **{
+                "c.water_aimed": aimed, "c.visible_water_pixels": visible}), expected)
+        invalid = block(self.sweep, "if (c.water_aimed && !c.water_mask_valid)")
+        self.assertIn('failures.push_back("missing_water_mask:" + c.file);', invalid)
+        self.assertIn("WriteSweepWaterMask(deps.artifact_dir / cell.water_mask_file, mask)",
+                      compact(self.sweep))
+        self.assertIn("return passed && manifest_written;", self.sweep)
+
+    def test_water_target_rejects_every_invalid_patch_and_sight_line(self):
+        search = block(read(CLIENT / "rendering/WaterVisibility.h"), "FindWaterVisibilityTarget(")
+        assignments = re.findall(r"clear = (std::isfinite[^;]+);", search)
+        self.assertEqual(len(assignments), 2)
+        for expression, limit in zip(assignments, (0.0, 10.0)):
+            expression = expression.replace("std::isfinite(h)", "finite").replace("0.5f", "0.5")
+            for height, finite in ((limit - 1, True), (limit - 0.5, True),
+                                   (limit, True), (limit - 1, False)):
+                self.assertEqual(cpp_expression(expression, finite=finite, h=height,
+                                                sea_level=limit, **{"point.y": limit}),
+                                 finite and height < limit - 0.5)
+        selected = re.search(r"if \(([^()]+)\) \{\s*nearest = distance;", search).group(1)
+        for clear in (False, True):
+            self.assertEqual(cpp_expression(selected, clear=clear), clear)
+        self.assertIn("WaterVisibilityTarget result;", search)
+        self.assertIn("return result;", search)
+        self.assertIn("bool found = false;", read(CLIENT / "rendering/WaterVisibility.h"))
+
+    def test_water_visibility_uses_surviving_alpha_not_blue_or_warm_rgb(self):
+        helper = read(CLIENT / "rendering/WaterVisibility.h")
+        conversion = block(helper, "static WaterVisibilityMask FromRgba(")
+        predicate = re.search(r"result.pixels\[i\] = (.*?) \? 255 : 0;", conversion).group(1)
+        for label, rgb, alpha, expected in (
+                ("blue water", (20, 100, 200), 150, True),
+                ("warm water", (220, 90, 20), 150, True),
+                ("blue sky", (20, 100, 200), 0, False),
+                ("occluded water", (0, 0, 0), 0, False)):
+            with self.subTest(label=label):
+                self.assertEqual(cpp_expression(predicate, alpha=alpha,
+                                                r=rgb[0], g=rgb[1], b=rgb[2]), expected)
+        self.assertIn("rgba[i * 4u + 3u]", conversion)
+        self.assertIn("rgba.size() != count * 4u", conversion)
+        roi = block(helper, "std::uint64_t visible_pixels_in_target() const")
+        self.assertIn("if (!valid())", roi)
+        self.assertIn("y = height / 4; y < height - height / 4", roi)
+        self.assertIn("x = width / 4; x < width - width / 4", roi)
+        self.assertIn("WaterVisibilityMask::FromRgba(width, height, rgba)",
+                      read(CLIENT / "rendering/passes/WaterPass.cpp"))
+
+    def test_water_mask_sizes_refuse_both_invalid_axes_before_arithmetic(self):
+        helper = read(CLIENT / "rendering/WaterVisibility.h")
+        expression = re.search(r"return ([^;]+);", block(helper, "static bool valid_size(")).group(1)
+        for axis in ("w", "h"):
+            expression = expression.replace(f"static_cast<std::size_t>({axis})", axis)
+        for w, h, expected in ((0, 8, False), (8, 0, False), (-1, 8, False),
+                                (8, -1, False), (3, 8, False), (8, 3, False),
+                                (4, 4, True), (4096, 4096, True),
+                                (4097, 8, False), (8, 4097, False)):
+            with self.subTest(w=w, h=h):
+                self.assertEqual(cpp_expression(expression, w=w, h=h, kMaxPixels=4096 * 4096),
+                                 expected)
+
+    def test_water_draw_and_visibility_replay_refuse_unrepresentable_counts(self):
+        source = read(CLIENT / "rendering/passes/WaterPass.cpp")
+        guard = block(source, "GLsizei WaterElementCount(")
+        condition = re.search(r"if \((.*?)\) \{", guard).group(1)
+        condition = condition.replace("static_cast<u32>(std::numeric_limits<GLsizei>::max())", "limit")
+        for count in (0, 1, 2147483647, 2147483648, 4294967295):
+            self.assertEqual(cpp_expression(condition, count=count, limit=2147483647),
+                             count > 2147483647)
+        self.assertIn("return 0;", guard)
+        self.assertEqual(source.count("WaterElementCount(item.element_count)"), 2)
+        self.assertIn("continue;", block(block(source, "WaterPass::execute("), "if (count == 0)"))
+        self.assertIn("continue;", block(block(source, "void WaterPass::capture_visibility("),
+                                         "if (elements == 0)"))
+
+    def test_water_visibility_replays_shipping_shader_and_exact_depth_only_when_requested(self):
+        source = read(CLIENT / "rendering/passes/WaterPass.cpp")
+        execute = block(source, "WaterPass::execute(")
+        self.assertIn("m_visibility_mask = {};", execute)
+        self.assertIn("glEnable(GL_DEPTH_TEST)", execute)
+        self.assertIn("glDepthFunc(GL_GREATER)", execute)
+        self.assertIn("glDepthMask(GL_FALSE)", execute)
+        self.assertIn("capture_visibility(ctx, input);",
+                      block(execute, "if (capture_visibility_requested)"))
+        capture = block(source, "void WaterPass::capture_visibility(")
+        self.assertIn("ctx.frozen_replay", capture)
+        self.assertIn("ctx.lit_scene_depth.id == 0", capture)
+        self.assertIn("glFramebufferRenderbuffer( GL_FRAMEBUFFER", compact(capture))
+        self.assertIn("ctx.lit_scene_depth.id", capture)
+        self.assertNotIn("glDisable(GL_DEPTH_TEST)", capture)
+        self.assertNotIn("glDepthMask(GL_TRUE)", capture)
+        self.assertNotIn("glUseProgram", capture)
+        self.assertIn("for (const auto& item : input.draw_items)", capture)
+        self.assertIn("glDrawElements", capture)
+        self.assertIn("glGetError() == GL_NO_ERROR", capture)
+        self.assertIn("glClearTexImage(color, 0, GL_RGBA, GL_FLOAT, zero)", capture)
+        self.assertIn("glReadPixels", capture)
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        water = block(pipeline, "void RenderPipeline::execute_stage_water(")
+        self.assertIn("water_ctx, water_input, camera, m_water_visibility_capture_enabled", compact(water))
+        self.assertIn("ctx.lit_scene_depth = RenderbufferHandle", block(
+            pipeline, "RenderContext RenderPipeline::make_water_context("))
+        gate = read(ROOT / "tools/gates/validate-engine-frontier.ps1")
+        water_gate = gate.split("$waterCells =", 1)[1].split("# No rain", 1)[0]
+        self.assertIn("$cell.visible_water_pixels -lt 1", water_gate)
+        self.assertIn("$cell.water_mask_valid", water_gate)
+        self.assertIn("Assert-PpmArtifact -Path $cell.water_mask_file", water_gate)
+        self.assertNotIn("$cell.water_like_pixels", water_gate)
 
     def test_rain_pool_is_reset_for_every_cell_not_just_clear_weather(self):
         weather = block(self.sweep, "const auto apply_weather =")

@@ -33,6 +33,8 @@ public:
     // An aborted frame is never eligible for publication, even if its table is empty.
     void abort() noexcept;
     bool complete() const;
+    // Sticky submission refusal, separate from unsupported producer coverage.
+    bool refused() const;
     Shader* variant(Shader* shader, bool ladder);
     void write(const Shader& shader, const DiagnosticSubmission& submission);
     void unsupported(std::string_view producer,
@@ -55,6 +57,7 @@ private:
         int buffer_count = 0;
         bool failed = false;
         bool captured = false;
+        bool refused = false;
         struct Variant {
             std::string vertex;
             std::string fragment;

@@ -1,13 +1,16 @@
+#include "../fixtures/TerrainFixtureParams.h"
 #include "TerrainCullingTestPeer.h"
 #include "luminumbra_client/core/IsolationConfig.h"
 #include "luminumbra_client/rendering/Camera.h"
 #include "luminumbra_client/rendering/EnvironmentBrdfLut.gen.h"
+#include "luminumbra_client/rendering/FarLodSystem.h"
 #include "luminumbra_client/rendering/FarVolumeGlBackend.h"
 #include "luminumbra_client/rendering/FarWorldDepthBias.h"
 #include "luminumbra_client/rendering/Mesh.h"
 #include "luminumbra_client/rendering/RenderGraph.h"
 #include "luminumbra_client/rendering/Shader.h"
 #include "luminumbra_client/rendering/ShaderSource.h"
+#include "luminumbra_client/rendering/TreeLod.h"
 #include "luminumbra_client/rendering/passes/AerialPass.h"
 #include "luminumbra_client/rendering/passes/DebugViewPass.h"
 #include "luminumbra_client/rendering/passes/FarWorldPassUniforms.h"
@@ -19,6 +22,8 @@
 #include "luminumbra_common/animation/AnimationRuntime.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/core/FilesystemPath.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/world/Chunk.h"
 #include "gtest/gtest.h"
 #include <glm/gtc/type_ptr.hpp>
 #include <nlohmann/json.hpp>
@@ -61,6 +66,331 @@ namespace {
 #ifndef LUMINUMBRA_TEST_ARTIFACT_DIR
 #define LUMINUMBRA_TEST_ARTIFACT_DIR "."
 #endif
+
+TEST(RenderSmokeTest, StaticPropCollectionPreservesSubmittedLiveTerrainAtEveryLod) {
+    using namespace Luminumbra;
+    using namespace Luminumbra::Rendering;
+    SubmittedLiveTerrain live;
+    const FarWorldSelection suppressed{.requested = FarWorldMode::Legacy,
+                                       .effective = FarWorldMode::Legacy,
+                                       .refusal = FarWorldRefusal::None,
+                                       .advance = false,
+                                       .submit = false};
+    for (const float distance : {65.0f,
+                                 100.0f,
+                                 175.99f,
+                                 176.0f,
+                                 191.99f,
+                                 192.0f,
+                                 192.01f,
+                                 200.0f,
+                                 383.99f,
+                                 384.0f,
+                                 384.01f,
+                                 639.99f,
+                                 640.0f}) {
+        for (const float sign : {-1.0f, 1.0f}) {
+            const glm::vec3 position(sign * distance, 12.0f, -1.0f);
+            const glm::vec3 origin(std::floor(position.x / CHUNK_SIZE_X) * CHUNK_SIZE_X,
+                                   0.0f,
+                                   -static_cast<float>(CHUNK_SIZE_Z));
+            const bool candidate = SelectTreeLod(distance, AuthoredTreeLodConfig(true)) == 3;
+            ASSERT_TRUE(candidate);
+            EXPECT_FALSE(live.covers(position));
+            EXPECT_EQ(SelectStaticPropSubmission({}, candidate, live.covers(position), false),
+                      StaticPropSubmission::Refused);
+            live.add_origin(origin);
+            live.add_origin(origin);
+            ASSERT_TRUE(live.covers(position));
+            EXPECT_EQ(
+                SelectStaticPropSubmission(suppressed, candidate, live.covers(position), false),
+                StaticPropSubmission::Impostor);
+            EXPECT_EQ(SelectStaticPropSubmission(suppressed, false, live.covers(position), false),
+                      StaticPropSubmission::Mesh);
+            EXPECT_FALSE(live.covers(position + glm::vec3(0, 0, CHUNK_SIZE_Z)));
+            live.clear();
+            EXPECT_FALSE(live.covers(position));
+        }
+    }
+    // Preview support follows the submitted slice, independent of the orbit camera.
+    const glm::vec3 anchor(1000.0f, 200.0f, 0.0f);
+    live.add_origin({992.0f, 192.0f, 0.0f});
+    EXPECT_TRUE(live.covers(anchor));
+    EXPECT_FALSE(live.covers(glm::vec3(0.0f)));
+    for (const float invalid : {std::numeric_limits<float>::infinity(),
+                                std::numeric_limits<float>::quiet_NaN(),
+                                std::numeric_limits<float>::max()}) {
+        EXPECT_FALSE(live.covers({invalid, 0, 0}));
+        EXPECT_FALSE(live.covers({0, invalid, 0}));
+        EXPECT_FALSE(live.covers({0, 0, invalid}));
+        live.add_origin({invalid, 0, 0});
+    }
+    EXPECT_FALSE(live.covers(glm::vec3(0.0f)));
+    live.clear();
+    EXPECT_FALSE(live.covers(anchor));
+}
+
+TEST(RenderSmokeTest, SubmittedLiveTerrainRejectsMissingAndInvalidChunksAtBoundaries) {
+    using namespace Luminumbra::Rendering;
+    SubmittedLiveTerrain live;
+    live.add_origin({192, -16, -16});
+    EXPECT_TRUE(live.covers({200, -1, -1}));
+    EXPECT_TRUE(live.covers({200, 0, -1}));
+    EXPECT_FALSE(live.covers({200, 1, -1}));
+    EXPECT_FALSE(live.covers({200, -17, -1}));
+    EXPECT_FALSE(live.covers({191.99f, -1, -1}));
+    EXPECT_FALSE(live.covers({208, -1, -1}));
+    EXPECT_FALSE(live.covers({200, -1, 0}));
+    live.clear();
+    for (const glm::vec3 invalid : {glm::vec3(std::numeric_limits<float>::infinity(), 0, 0),
+                                    glm::vec3(0, std::numeric_limits<float>::quiet_NaN(), 0),
+                                    glm::vec3(0, 0, std::numeric_limits<float>::max()),
+                                    glm::vec3(0, std::numeric_limits<float>::max(), 0)}) {
+        live.add_origin(invalid);
+        EXPECT_FALSE(live.covers(invalid));
+    }
+    EXPECT_FALSE(live.covers({0, 0, 0}));
+    live.add_origin({0, -33554432.0f, 0});
+    EXPECT_TRUE(live.covers({0, -33554432.0f, 0}));
+    EXPECT_FALSE(live.covers({16, -33554432.0f, 0}));
+    live.clear();
+    EXPECT_FALSE(live.covers({0, -33554432.0f, 0}));
+    live.add_origin({0, 33554416.0f, 0});
+    EXPECT_TRUE(live.covers({0, 33554432.0f, 0}));
+    EXPECT_FALSE(live.covers({0, 33554436.0f, 0}));
+    FarLodSystem far;
+    far.submitted_live_terrain().add_origin({0, 0, 0});
+    ASSERT_TRUE(far.submitted_live_terrain().covers({0, 1, 0}));
+    far.prepare_world_swap();
+    EXPECT_FALSE(far.submitted_live_terrain().covers({0, 1, 0}));
+}
+
+TEST(RenderSmokeTest, SubmittedLiveTerrainBulkFramesRetainCapacityAndReplaceCoverage) {
+    using namespace Luminumbra::Rendering;
+    SubmittedLiveTerrain live;
+    const std::array<glm::vec4, 6> origins{{{32, 0, 0, 1},
+                                            {-16, -16, 0, 1},
+                                            {0, 0, 0, 1},
+                                            {32, 0, 0, 1},
+                                            {std::numeric_limits<float>::infinity(), 0, 0, 1},
+                                            {0, std::numeric_limits<float>::max(), 0, 1}}};
+    live.assign_origins(origins);
+    const auto capacity = live.submission_capacity();
+    ASSERT_GE(capacity, origins.size());
+    // Repeated, reversed, shrinking, empty and invalid-only frames all reuse storage.
+    for (int frame = 0; frame < 8; ++frame) {
+        live.clear();
+        EXPECT_EQ(live.submission_capacity(), capacity);
+        live.assign_origins(origins);
+        EXPECT_TRUE(live.covers({32, 1, 0}));
+        EXPECT_TRUE(live.covers({-1, 0, 0}));
+        EXPECT_TRUE(live.covers({0, 1, 0}));
+        EXPECT_FALSE(live.covers({16, 1, 0}));
+        live.remove_chunk(Luminumbra::Chunk::calculate_id({1, 0, 0}));
+        EXPECT_TRUE(live.covers({32, 1, 0}));
+        live.remove_chunk(Luminumbra::Chunk::calculate_id({2, 0, 0}));
+        EXPECT_FALSE(live.covers({32, 1, 0}));
+        EXPECT_TRUE(live.covers({0, 1, 0}));
+        EXPECT_TRUE(live.covers({-1, 0, 0}));
+        live.remove_chunk(Luminumbra::Chunk::calculate_id({2, 0, 0}));
+        auto reversed = origins;
+        std::reverse(reversed.begin(), reversed.end());
+        live.assign_origins(reversed);
+        EXPECT_TRUE(live.covers({32, 1, 0}));
+        live.assign_origins(std::span<const glm::vec4>(origins).subspan(4));
+        EXPECT_FALSE(live.covers({0, 1, 0}));
+        live.assign_origins({});
+        EXPECT_FALSE(live.covers({-1, 0, 0}));
+        EXPECT_EQ(live.submission_capacity(), capacity);
+    }
+    // Incremental residency and bulk submission can both be queried and retired.
+    live.add_origin({16, 0, 0});
+    EXPECT_TRUE(live.covers({16, 1, 0}));
+    live.assign_origins(origins);
+    EXPECT_FALSE(live.covers({16, 1, 0}));
+}
+
+TEST(RenderSmokeTest, StaticPropCollectionKeepsFarSupportAfterLiveSubmissionDisappears) {
+    using namespace Luminumbra::Rendering;
+    SubmittedLiveTerrain live;
+    const glm::vec3 position(200, 12, 0);
+    live.add_origin({192, 0, 0});
+    EXPECT_EQ(SelectStaticPropSubmission({}, true, live.covers(position), false),
+              StaticPropSubmission::Impostor);
+    live.clear();
+    EXPECT_EQ(SelectStaticPropSubmission({}, true, live.covers(position), true),
+              StaticPropSubmission::Impostor);
+    EXPECT_EQ(SelectStaticPropSubmission({}, true, live.covers(position), false),
+              StaticPropSubmission::Refused);
+}
+
+TEST(RenderSmokeTest, VisibleCanopyKeepsResidentSupportWhenGroundIsFrustumCulled) {
+    using namespace Luminumbra;
+    using namespace Luminumbra::Rendering;
+    const glm::vec3 root(100, 12, 0);
+    const IVec3 ground(6, 0, 0);
+    const IVec3 canopy(6, 3, 0);
+    // An upward view can include the canopy above y=32 but exclude its ground.
+    glm::vec4 planes[6];
+    std::fill_n(planes, 6, glm::vec4(0, 0, 0, 1));
+    planes[0] = glm::vec4(0, 1, 0, -32);
+    const auto visible = TerrainCullingTestPeer::Cull({ground, canopy}, planes);
+    ASSERT_FALSE(visible.contains(Chunk::calculate_id(ground)));
+    ASSERT_TRUE(visible.contains(Chunk::calculate_id(canopy)));
+
+    FarLodSystem far;
+    auto& resident = far.resident_live_terrain();
+    auto& submitted = far.submitted_live_terrain();
+    resident.add_origin({96, 0, 0});
+    submitted.add_origin({96, 0, 0});
+    ASSERT_TRUE(submitted.covers(root));
+    submitted.clear(); // No ground draw in the upward view.
+    ASSERT_FALSE(submitted.covers(root));
+    ASSERT_TRUE(resident.covers(root));
+    ASSERT_EQ(SelectTreeLod(glm::length(root), AuthoredTreeLodConfig(true)), 3);
+    EXPECT_EQ(SelectStaticPropSubmission({}, true, resident.covers(root), false),
+              StaticPropSubmission::Impostor);
+    resident.remove_chunk(Chunk::calculate_id(ground));
+    EXPECT_FALSE(resident.covers(root));
+    EXPECT_EQ(SelectStaticPropSubmission({}, true, resident.covers(root), false),
+              StaticPropSubmission::Refused);
+}
+
+TEST(RenderSmokeTest, AuthoredTreeBandUsesResidentLiveTerrainWithoutFarSupport) {
+    using namespace Luminumbra;
+    using namespace Luminumbra::Rendering;
+    FarLodSystem far;
+    far.set_enabled(true);
+    const auto refused = SelectFarWorld(
+        FarWorldMode::Ladder, FarWorldPurpose::World, FarWorldRefusal::BackendUnavailable);
+    for (const float distance : {65.0f, 100.0f, 175.99f, 176.0f, 200.0f, 384.0f, 640.0f}) {
+        for (const float sign : {-1.0f, 1.0f}) {
+            SCOPED_TRACE(::testing::Message() << distance << " sign " << sign);
+            const glm::vec3 root(sign * distance, 0, 0);
+            // A root on a top face must also find the resident chunk below it.
+            const IVec3 coords(static_cast<int>(std::floor(root.x / CHUNK_SIZE_X)), -1, 0);
+            auto& resident = far.resident_live_terrain();
+            resident.add_origin(glm::vec3(coords) *
+                                glm::vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z));
+            far.submitted_live_terrain().clear();
+            ASSERT_FALSE(far.submitted_live_terrain().covers(root));
+            ASSERT_FALSE(far.terrain_resident_at(root));
+            ASSERT_TRUE(resident.covers(root));
+            const bool candidate = SelectTreeLod(distance, AuthoredTreeLodConfig(true)) == 3;
+            ASSERT_TRUE(candidate);
+            for (auto selection : {FarWorldSelection{}, refused}) {
+                for (const bool submit : {false, true}) {
+                    selection.submit = submit;
+                    EXPECT_EQ(SelectStaticPropSubmission(
+                                  selection, candidate, resident.covers(root), false),
+                              StaticPropSubmission::Impostor);
+                    resident.remove_chunk(Chunk::calculate_id(coords));
+                    EXPECT_FALSE(resident.covers(root));
+                    EXPECT_EQ(SelectStaticPropSubmission(
+                                  selection, candidate, resident.covers(root), false),
+                              StaticPropSubmission::Refused);
+                    resident.add_origin(glm::vec3(coords) *
+                                        glm::vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z));
+                }
+            }
+            resident.clear();
+        }
+    }
+}
+
+TEST(RenderSmokeTest, ResidentLiveTerrainRetirementDoesNotRetainStaleSupport) {
+    using namespace Luminumbra;
+    using namespace Luminumbra::Rendering;
+    FarLodSystem far;
+    auto& resident = far.resident_live_terrain();
+    resident.add_origin({96, 0, 0});
+    resident.add_origin({96, 0, 0}); // Replacement keeps one ownership entry.
+    resident.add_origin({112, 0, 0});
+    resident.remove_chunk(Chunk::calculate_id({6, 0, 0}));
+    resident.remove_chunk(Chunk::calculate_id({6, 0, 0})); // Missing removal is harmless.
+    EXPECT_FALSE(resident.covers({100, 12, 0}));
+    EXPECT_TRUE(resident.covers({116, 12, 0}));
+    far.set_enabled(false);
+    EXPECT_TRUE(resident.covers({116, 12, 0}));
+    for (const float invalid : {std::numeric_limits<float>::quiet_NaN(),
+                                std::numeric_limits<float>::infinity(),
+                                std::numeric_limits<float>::max()}) {
+        resident.add_origin({invalid, 0, 0});
+        EXPECT_FALSE(resident.covers({invalid, 0, 0}));
+    }
+    far.prepare_world_swap();
+    EXPECT_TRUE(resident.covers({116, 12, 0})); // The drain retains live GPU allocations.
+    far.shutdown();
+    EXPECT_FALSE(resident.covers({116, 12, 0}));
+}
+
+TEST(RenderSmokeTest, StaticPropCollectionGatesOnlyFarImpostorsAndKeepsMeshFallback) {
+    using namespace Luminumbra::Rendering;
+    GBufferPass pass;
+    const auto legacy =
+        SelectFarWorld(FarWorldMode::Legacy, FarWorldPurpose::World, FarWorldRefusal::None);
+    const auto ladder =
+        SelectFarWorld(FarWorldMode::Ladder, FarWorldPurpose::World, FarWorldRefusal::None);
+    const auto refused = SelectFarWorld(
+        FarWorldMode::Ladder, FarWorldPurpose::World, FarWorldRefusal::BackendUnavailable);
+    const auto shader_refused = pass.SelectFarWorldRenderer(ladder);
+    ASSERT_EQ(refused.requested, FarWorldMode::Ladder);
+    ASSERT_EQ(refused.effective, FarWorldMode::Legacy);
+    ASSERT_EQ(shader_refused.effective, FarWorldMode::Legacy);
+    ASSERT_EQ(shader_refused.refusal, FarWorldRefusal::ShaderProgramUnavailable);
+    ASSERT_TRUE(refused.submit);
+    ASSERT_TRUE(shader_refused.submit);
+    for (auto selection : {legacy, ladder, refused, shader_refused}) {
+        for (const bool submit : {false, true}) {
+            selection.submit = submit;
+            for (const bool resident : {false, true}) {
+                EXPECT_EQ(SelectStaticPropSubmission(selection, true, true, resident),
+                          StaticPropSubmission::Impostor);
+                EXPECT_EQ(SelectStaticPropSubmission(selection, false, true, resident),
+                          StaticPropSubmission::Mesh);
+                EXPECT_EQ(SelectStaticPropSubmission(selection, false, false, resident),
+                          StaticPropSubmission::Mesh);
+                const bool far_allowed = submit && resident;
+                EXPECT_EQ(SelectStaticPropSubmission(selection, true, false, resident),
+                          far_allowed ? StaticPropSubmission::Impostor
+                                      : StaticPropSubmission::Refused);
+            }
+        }
+    }
+}
+
+TEST(RenderSmokeTest, LadderImpostorsRequireConfirmedTerrainCoverage) {
+    using namespace Luminumbra;
+    using namespace Luminumbra::Rendering;
+    auto ladder =
+        SelectFarWorld(FarWorldMode::Ladder, FarWorldPurpose::World, FarWorldRefusal::None);
+    ASSERT_EQ(ladder.effective, FarWorldMode::Ladder);
+    FarLodSystem far;
+    const glm::vec3 root(200, 12, 0);
+    // No submitted chunks, no resident live chunks, and unknown Ladder coverage.
+    EXPECT_FALSE(far.submitted_live_terrain().covers(root));
+    EXPECT_FALSE(far.resident_live_terrain().covers(root));
+    EXPECT_EQ(SelectStaticPropSubmission(ladder, true, false, false),
+              StaticPropSubmission::Refused);
+    // Confirmed selected-backend far coverage can support an impostor.
+    EXPECT_EQ(SelectStaticPropSubmission(ladder, true, false, true),
+              StaticPropSubmission::Impostor);
+    far.resident_live_terrain().add_origin({192, 0, 0});
+    for (const bool submit : {false, true}) {
+        ladder.submit = submit;
+        EXPECT_EQ(SelectStaticPropSubmission(
+                      ladder, true, far.resident_live_terrain().covers(root), false),
+                  StaticPropSubmission::Impostor);
+        EXPECT_EQ(SelectStaticPropSubmission(ladder, true, false, true),
+                  submit ? StaticPropSubmission::Impostor : StaticPropSubmission::Refused);
+        EXPECT_EQ(SelectStaticPropSubmission(ladder, false, false, false),
+                  StaticPropSubmission::Mesh);
+    }
+    far.resident_live_terrain().remove_chunk(Chunk::calculate_id({12, 0, 0}));
+    EXPECT_EQ(
+        SelectStaticPropSubmission(ladder, true, far.resident_live_terrain().covers(root), false),
+        StaticPropSubmission::Refused);
+}
 
 struct ShaderProgramSpec {
     const char* name;
@@ -414,6 +744,8 @@ GLuint LinkProgram(const ShaderProgramSpec& spec) {
 }
 
 std::vector<ShaderProgramSpec> PipelineProgramSpecs() {
+    // Also consumed by the offline GLSL linker. Keep entries literal so additions
+    // cannot escape its exhaustive registry parser and permutation coverage check.
     return {
         {"basic", "basic.vert", "basic.frag"},
         {"g_buffer", "g_buffer.vert", "g_buffer.frag"},
@@ -443,6 +775,22 @@ std::vector<ShaderProgramSpec> PipelineProgramSpecs() {
         {"ssao_bilateral_upsample", "ssao.vert", "ssao_bilateral_upsample.frag"},
         // Fidelity: screen-space crepuscular rays (god rays).
         {"god_rays", "ssao.vert", "god_rays.frag"},
+        {"tree_impostor", "tree_impostor.vert", "tree_impostor.frag"},
+        {"static_asset", "static_asset.vert", "static_asset.frag"},
+        {"shadow_tint", "shadow_tint.vert", "shadow_tint.frag"},
+        {"plant_procgen", "plant_procgen.vert", "plant_procgen.frag"},
+        {"waterfall", "basic.vert", "waterfall.frag"},
+        {"caustics_generator", "lighting_pass.vert", "caustics_generator.frag"},
+        {"taau_resolve", "ssao.vert", "taau_resolve.frag"},
+        {"glass_oit", "glass_oit.vert", "glass_oit.frag"},
+        {"glass_oit_resolve", "volumetric_lighting.vert", "glass_oit_resolve.frag"},
+        {"aerial_perspective", "ssao.vert", "volumetric_lighting.frag"},
+        {"lightning_overlay", "lightning_overlay.vert", "lightning_overlay.frag"},
+        {"weather_overlay", "ssao.vert", "weather_system.frag"},
+        {"debug_view", "fullscreen_tri.vert", "debug_view.frag"},
+        {"scent_decal", "fullscreen_tri.vert", "scent_decal.frag"},
+        // The live particle path omits geometry; retain both registered pipelines.
+        {"magical_particles_billboards", "magical_particles.vert", "magical_particles.frag"},
     };
 }
 
@@ -2365,6 +2713,61 @@ private:
     GLuint target = 0, fbo = 0, vao = 0, vbo = 0;
     std::array<GLuint, 6> inputs{};
 };
+void CompileCanopyProbeProgram(GLuint& program) {
+    std::string source, positions, diagnostic;
+    ASSERT_TRUE(
+        ReadShaderSource(SourceRoot() / "res/shaders/lighting_pass.frag", source, diagnostic))
+        << diagnostic;
+    ASSERT_TRUE(ReadShaderSource(
+        SourceRoot() / "res/shaders/far_world_position.glsl", positions, diagnostic))
+        << diagnostic;
+    const auto begin = source.find("float computeSkyVisibility(");
+    ASSERT_NE(begin, std::string::npos);
+    const auto end = source.find("void main()", begin);
+    ASSERT_NE(end, std::string::npos);
+    // Compile the shipping march and position decoder with controlled geometry.
+    std::string fragmentSource = R"(#version 450 core
+out vec4 FragColor;
+uniform sampler2D gPosition, u_sceneDepth;
+uniform mat4 u_inverseView, u_projection;
+uniform float u_caveSkyMaxDist, u_caveThickness, u_caveAmbientFloor;
+uniform int u_caveSkySteps;
+uniform vec3 probePosition;
+#define farWorldPosition decodePosition
+)" + positions + R"(
+#undef farWorldPosition
+int positionTaps = 0;
+bool farWorldPosition(sampler2D storedPosition, sampler2D floatDepth, vec2 uv,
+                      inout vec3 position) {
+    ++positionTaps;
+    return decodePosition(storedPosition, floatDepth, uv, position);
+}
+)" + source.substr(begin, end - begin) +
+                                 R"(
+void main() {
+    float visibility = computeSkyVisibility(probePosition, vec3(0, 1, 0));
+    FragColor = vec4(visibility, float(positionTaps), 0, 1);
+})";
+    const GLuint fragment = glCreateShader(GL_FRAGMENT_SHADER);
+    const char* fragmentText = fragmentSource.c_str();
+    glShaderSource(fragment, 1, &fragmentText, nullptr);
+    glCompileShader(fragment);
+    GLint compiled = GL_FALSE;
+    glGetShaderiv(fragment, GL_COMPILE_STATUS, &compiled);
+    ASSERT_EQ(compiled, GL_TRUE) << GetShaderInfoLog(fragment);
+    const GLuint vertex = CompileShader(SourceRoot() / "res/shaders/ssao.vert", GL_VERTEX_SHADER);
+    ASSERT_NE(vertex, 0u);
+    program = glCreateProgram();
+    glAttachShader(program, vertex);
+    glAttachShader(program, fragment);
+    glLinkProgram(program);
+    glDeleteShader(vertex);
+    glDeleteShader(fragment);
+    GLint linked = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    ASSERT_EQ(linked, GL_TRUE) << GetProgramInfoLog(program);
+}
+
 void ExpectCanopyRoomCrossings(GLuint program,
                                FullscreenFloatProbe& probe,
                                const glm::mat4& projection) {
@@ -2424,61 +2827,154 @@ void ExpectCanopyRoomCrossings(GLuint program,
 }
 } // namespace
 
+TEST(RenderSmokeTest, CanopySkyVisibilityRecoversCeilingAfterEmptyCoarseSample) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    GLuint program = 0;
+    ASSERT_NO_FATAL_FAILURE(CompileCanopyProbeProgram(program));
+    FullscreenFloatProbe probe;
+    glUseProgram(program);
+    glUniform1i(glGetUniformLocation(program, "gPosition"), 0);
+    glUniform1i(glGetUniformLocation(program, "u_sceneDepth"), 1);
+    SetMat4Identity(program, "u_inverseView");
+    const auto projection =
+        Luminumbra::Rendering::ReversedZPerspective(glm::radians(60.0f), 1.0f, 0.1f, 3200.0f);
+    const auto inverseProjection = glm::inverse(projection);
+    glUniformMatrix4fv(
+        glGetUniformLocation(program, "u_projection"), 1, GL_FALSE, &projection[0][0]);
+    glUniformMatrix4fv(glGetUniformLocation(program, "u_gbufferInverseProjection"),
+                       1,
+                       GL_FALSE,
+                       &inverseProjection[0][0]);
+    glUniform3f(glGetUniformLocation(program, "probePosition"), 0, -3, -12);
+    glUniform1f(glGetUniformLocation(program, "u_caveSkyMaxDist"), 24);
+    glUniform1f(glGetUniformLocation(program, "u_caveAmbientFloor"), 0.06f);
+    glUniform1f(glGetUniformLocation(program, "u_caveThickness"), 1.5f);
+    glUniform1i(glGetUniformLocation(program, "u_caveSkySteps"), 8);
+    // A finite y=2 roof, z in [-60,-2.5]. The first coarse ray point at
+    // y=0.05 projects beyond its far edge; the next two gaps exceed 1.5 m.
+    // Fixed 4096-row buffers bound storage and resolve the refined crossing.
+    constexpr int rows = 4096;
+    std::vector<glm::vec4> positions(rows, glm::vec4(0));
+    std::vector<glm::vec4> depths(rows, glm::vec4(0));
+    for (int row = 0; row < rows; ++row) {
+        const float ndcY = 2 * (static_cast<float>(row) + 0.5f) / rows - 1;
+        if (ndcY <= 0) {
+            continue;
+        }
+        const glm::vec4 position(0, 2, -2 * projection[1][1] / ndcY, 1);
+        if (position.z < -60 || position.z > -2.5f) {
+            continue;
+        }
+        const glm::vec4 clip = projection * position;
+        positions[static_cast<std::size_t>(row)] = position;
+        depths[static_cast<std::size_t>(row)] = glm::vec4(clip.z / clip.w);
+    }
+    for (int ladder : {0, 1}) {
+        SCOPED_TRACE(ladder);
+        glUniform1i(glGetUniformLocation(program, "u_farWorldLadder"), ladder);
+        probe.texture(0, positions, rows);
+        probe.texture(1, depths, rows);
+        for (int steps : {8, 16}) {
+            glUniform1i(glGetUniformLocation(program, "u_caveSkySteps"), steps);
+            const auto ceiling = probe.draw()[16];
+            EXPECT_LT(ceiling.r, 0.4f) << "empty coarse taps must not hide the real ceiling";
+            EXPECT_GT(ceiling.g, 3);
+            EXPECT_LE(ceiling.g, 40);
+        }
+        probe.texture(0, std::vector<glm::vec4>(rows, glm::vec4(0)), rows);
+        EXPECT_FLOAT_EQ(probe.draw()[16].r, 1) << "empty recovery cannot invent geometry";
+        if (ladder != 0) {
+            probe.texture(0, positions, rows);
+            probe.texture(1, std::vector<glm::vec4>(rows, glm::vec4(0)), rows);
+            EXPECT_FLOAT_EQ(probe.draw()[16].r, 1) << "stale positions need valid depth";
+        }
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteProgram(program);
+}
+
+TEST(RenderSmokeTest, CanopyEmptyRecoveryRetainsCoarseHitAcrossForegroundThenSky) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    GLuint program = 0;
+    ASSERT_NO_FATAL_FAILURE(CompileCanopyProbeProgram(program));
+    FullscreenFloatProbe probe;
+    glUseProgram(program);
+    glUniform1i(glGetUniformLocation(program, "gPosition"), 0);
+    glUniform1i(glGetUniformLocation(program, "u_sceneDepth"), 1);
+    SetMat4Identity(program, "u_inverseView");
+    const auto projection =
+        Luminumbra::Rendering::ReversedZPerspective(glm::radians(60.0f), 1.0f, 0.1f, 3200.0f);
+    const auto inverseProjection = glm::inverse(projection);
+    glUniformMatrix4fv(
+        glGetUniformLocation(program, "u_projection"), 1, GL_FALSE, &projection[0][0]);
+    glUniformMatrix4fv(glGetUniformLocation(program, "u_gbufferInverseProjection"),
+                       1,
+                       GL_FALSE,
+                       &inverseProjection[0][0]);
+    glUniform3f(glGetUniformLocation(program, "probePosition"), 0, -3.05f, -12);
+    glUniform1f(glGetUniformLocation(program, "u_caveSkyMaxDist"), 24);
+    glUniform1f(glGetUniformLocation(program, "u_caveAmbientFloor"), 0.06f);
+    glUniform1f(glGetUniformLocation(program, "u_caveThickness"), 1.5f);
+    glUniform1i(glGetUniformLocation(program, "u_caveSkySteps"), 8);
+    // Fixed 4096-row textures isolate the 6 m coarse hit and 4.5 m midpoint.
+    // Exercise empty recovery and ordinary refinement with an open 3 m tap.
+    constexpr int rows = 4096;
+    for (bool openPrevious : {false, true}) {
+        SCOPED_TRACE(openPrevious);
+        std::vector<glm::vec4> positions(rows, glm::vec4(0));
+        std::vector<glm::vec4> depths(rows, glm::vec4(0));
+        glm::vec3 coarsePosition(0);
+        for (float distance : {3.0f, 6.0f, 4.5f}) {
+            if (distance == 3 && !openPrevious) {
+                continue;
+            }
+            const glm::vec3 point(0, distance - 3, -12);
+            const float gap = distance == 3 ? 0.0f : distance == 6 ? 0.8f : 8.0f;
+            const glm::vec3 position = point * (1 - gap / glm::length(point));
+            const glm::vec4 clip = projection * glm::vec4(position, 1);
+            const auto row = static_cast<std::size_t>((0.5f + 0.5f * clip.y / clip.w) * rows);
+            ASSERT_LT(row, positions.size());
+            positions[row] = glm::vec4(position, 1);
+            depths[row] = glm::vec4(clip.z / clip.w);
+            if (distance == 6) {
+                coarsePosition = position;
+            }
+        }
+        // Evaluate the base formula independently using the uploaded coarse hit.
+        const float gap = glm::length(glm::vec3(0, 3, -12)) - glm::length(coarsePosition);
+        const float ramp = (gap - 0.75f) / 0.75f;
+        const float baseOcclusion = (1 - glm::length(coarsePosition - glm::vec3(0, -3, -12)) / 24) *
+                                    (1 - ramp * ramp * (3 - 2 * ramp));
+        ASSERT_GT(baseOcclusion, 0.7f);
+        for (int ladder : {0, 1}) {
+            SCOPED_TRACE(ladder);
+            glUniform1i(glGetUniformLocation(program, "u_farWorldLadder"), ladder);
+            probe.texture(0, positions, rows);
+            probe.texture(1, depths, rows);
+            const auto result = probe.draw()[16];
+            EXPECT_GE((1 - result.r) / 0.94f, baseOcclusion - 0.000001f);
+            EXPECT_NEAR(result.r, 1 - 0.94f * baseOcclusion, 0.000001f);
+            EXPECT_FLOAT_EQ(result.g, openPrevious ? 5 : 11)
+                << "three coarse reads plus two ordinary or eight empty-recovery reads";
+            EXPECT_LE(result.g, 40);
+            if (ladder != 0) {
+                probe.texture(1, std::vector<glm::vec4>(rows, glm::vec4(0)), rows);
+                EXPECT_FLOAT_EQ(probe.draw()[16].r, 1)
+                    << "coarse preservation still requires valid Ladder depth";
+            }
+        }
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteProgram(program);
+}
+
 TEST(RenderSmokeTest, CanopySkyVisibilityRejectsForegroundAndRetainsRealCeilings) {
     HiddenGlContext context;
     ASSERT_TRUE(context.ready()) << context.error();
-    std::string source, positions, diagnostic;
-    ASSERT_TRUE(
-        ReadShaderSource(SourceRoot() / "res/shaders/lighting_pass.frag", source, diagnostic))
-        << diagnostic;
-    ASSERT_TRUE(ReadShaderSource(
-        SourceRoot() / "res/shaders/far_world_position.glsl", positions, diagnostic))
-        << diagnostic;
-    const auto begin = source.find("float computeSkyVisibility(");
-    ASSERT_NE(begin, std::string::npos);
-    const auto end = source.find("void main()", begin);
-    ASSERT_NE(end, std::string::npos);
-    // Compile the shipping march and position decoder with controlled geometry.
-    std::string fragmentSource = R"(#version 450 core
-out vec4 FragColor;
-uniform sampler2D gPosition, u_sceneDepth;
-uniform mat4 u_inverseView, u_projection;
-uniform float u_caveSkyMaxDist, u_caveThickness, u_caveAmbientFloor;
-uniform int u_caveSkySteps;
-uniform vec3 probePosition;
-#define farWorldPosition decodePosition
-)" + positions + R"(
-#undef farWorldPosition
-int positionTaps = 0;
-bool farWorldPosition(sampler2D storedPosition, sampler2D floatDepth, vec2 uv,
-                      inout vec3 position) {
-    ++positionTaps;
-    return decodePosition(storedPosition, floatDepth, uv, position);
-}
-)" + source.substr(begin, end - begin) +
-                                 R"(
-void main() {
-    float visibility = computeSkyVisibility(probePosition, vec3(0, 1, 0));
-    FragColor = vec4(visibility, float(positionTaps), 0, 1);
-})";
-    const GLuint fragment = glCreateShader(GL_FRAGMENT_SHADER);
-    const char* fragmentText = fragmentSource.c_str();
-    glShaderSource(fragment, 1, &fragmentText, nullptr);
-    glCompileShader(fragment);
-    GLint compiled = GL_FALSE;
-    glGetShaderiv(fragment, GL_COMPILE_STATUS, &compiled);
-    ASSERT_EQ(compiled, GL_TRUE) << GetShaderInfoLog(fragment);
-    const GLuint vertex = CompileShader(SourceRoot() / "res/shaders/ssao.vert", GL_VERTEX_SHADER);
-    ASSERT_NE(vertex, 0u);
-    const GLuint program = glCreateProgram();
-    glAttachShader(program, vertex);
-    glAttachShader(program, fragment);
-    glLinkProgram(program);
-    glDeleteShader(vertex);
-    glDeleteShader(fragment);
-    GLint linked = GL_FALSE;
-    glGetProgramiv(program, GL_LINK_STATUS, &linked);
-    ASSERT_EQ(linked, GL_TRUE) << GetProgramInfoLog(program);
+    GLuint program = 0;
+    ASSERT_NO_FATAL_FAILURE(CompileCanopyProbeProgram(program));
     FullscreenFloatProbe probe;
     glUseProgram(program);
     glUniform1i(glGetUniformLocation(program, "gPosition"), 0);
@@ -2921,6 +3417,419 @@ FragColor = vec4(shadow, shadow, shadow, 1); })";
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
     for (GLuint program : programs)
         glDeleteProgram(program);
+}
+
+// A reduced-resolution G-buffer silhouette moves between depth texels across
+// subpixel jitter phases. Check both sides of the unjittered channel and glow.
+void ExpectLightningJitteredSilhouettes(
+    Luminumbra::Rendering::Shader& shader,
+    FullscreenFloatProbe& probe,
+    const glm::mat4& projection,
+    float occluder_depth,
+    const std::array<glm::vec4, FullscreenFloatProbe::width>& flash_pixels,
+    const std::array<glm::vec4, FullscreenFloatProbe::width>& sky_pixels) {
+    std::array<glm::vec4, FullscreenFloatProbe::width> first_phase{};
+    for (int phase = 0; phase < 2; ++phase) {
+        const glm::vec2 jitter =
+            phase == 0 ? glm::vec2(0.025f, -0.015f) : glm::vec2(-0.025f, 0.015f);
+        auto jittered_projection = projection;
+        jittered_projection[2][0] += jitter.x;
+        jittered_projection[2][1] += jitter.y;
+        shader.setMat4("u_gbufferInverseProjection", glm::inverse(jittered_projection));
+        shader.setVec2("u_jitter_ndc", jitter);
+        // Fixed 24-texel storage models a 75-percent internal render scale.
+        std::vector<glm::vec4> silhouette_depth(24, glm::vec4(0));
+        for (std::size_t texel = 0; texel < silhouette_depth.size(); ++texel) {
+            const float raster_uv = (static_cast<float>(texel) + 0.5f) / 24.0f;
+            const float unjittered_uv = raster_uv + jitter.x * 0.5f;
+            if (unjittered_uv < 0.56f) {
+                silhouette_depth[texel] = glm::vec4(occluder_depth);
+            }
+        }
+        probe.texture(1, silhouette_depth);
+        const auto pixels = probe.draw();
+        EXPECT_FLOAT_EQ(pixels[17].r, flash_pixels[17].r);
+        EXPECT_FLOAT_EQ(pixels[18].r, sky_pixels[18].r);
+        if (phase == 0) {
+            first_phase = pixels;
+        } else {
+            for (std::size_t pixel = 0; pixel < pixels.size(); ++pixel) {
+                EXPECT_FLOAT_EQ(pixels[pixel].r, first_phase[pixel].r);
+                EXPECT_FLOAT_EQ(pixels[pixel].g, first_phase[pixel].g);
+                EXPECT_FLOAT_EQ(pixels[pixel].b, first_phase[pixel].b);
+            }
+        }
+        // Also cross a horizontal silhouette: the single output row's ray
+        // stays behind terrain while its depth row changes with Y jitter.
+        for (std::size_t texel = 0; texel < silhouette_depth.size(); ++texel) {
+            const float raster_uv = (static_cast<float>(texel) + 0.5f) / 24.0f;
+            silhouette_depth[texel] =
+                glm::vec4(raster_uv + jitter.y * 0.5f < 0.515f ? occluder_depth : 0.0f);
+        }
+        probe.texture(1, silhouette_depth, 24);
+        const auto horizontal_pixels = probe.draw();
+        for (std::size_t pixel = 0; pixel < horizontal_pixels.size(); ++pixel) {
+            EXPECT_FLOAT_EQ(horizontal_pixels[pixel].r, flash_pixels[pixel].r);
+            EXPECT_FLOAT_EQ(horizontal_pixels[pixel].g, flash_pixels[pixel].g);
+            EXPECT_FLOAT_EQ(horizontal_pixels[pixel].b, flash_pixels[pixel].b);
+        }
+    }
+    shader.setVec2("u_jitter_ndc", {0, 0});
+    shader.setMat4("u_gbufferInverseProjection", glm::inverse(projection));
+}
+
+TEST(RenderSmokeTest, LightningChannelAndGlowRespectReversedSceneDepthAndRidges) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    const auto vertex = (SourceRoot() / "res/shaders/lightning_overlay.vert").string();
+    const auto fragment = (SourceRoot() / "res/shaders/lightning_overlay.frag").string();
+    Luminumbra::Rendering::Shader shader(vertex.c_str(), fragment.c_str());
+    ASSERT_TRUE(shader.IsValid());
+    FullscreenFloatProbe probe;
+    shader.use();
+    shader.setInt("u_scene", 0);
+    shader.setInt("u_sceneDepth", 1);
+    shader.setVec2("u_jitter_ndc", {0, 0});
+    shader.setInt("u_active", 1);
+    shader.setFloat("u_pulse", 1);
+    shader.setFloat("u_aspect", 1);
+    shader.setFloat("u_boltWidth", 0.010f);
+    shader.setFloat("u_boltGlow", 0.034f);
+    // Keep a localized world flash present: occlusion must affect only geometry.
+    shader.setInt("u_flashCount", 1);
+    shader.setVec2("u_flashNdc[0]", {0, 0});
+    shader.setFloat("u_flashPulse[0]", 0.2f);
+    shader.setInt("u_flashOnscreen[0]", 1);
+    probe.texture(0, {glm::vec4(0.1f, 0.1f, 0.1f, 1)});
+    const auto bolt = [&](float y, float inverse_depth) {
+        shader.setInt("u_boltCount", 2);
+        shader.setVec2("u_bolt[0]", {-0.9f, y});
+        shader.setVec2("u_bolt[1]", {0.9f, y});
+        shader.setFloat("u_boltInverseDepth[0]", inverse_depth);
+        shader.setFloat("u_boltInverseDepth[1]", inverse_depth);
+    };
+    for (float far_plane : {3200.0f, 17408.0f}) {
+        auto projection =
+            Luminumbra::Rendering::ReversedZPerspective(glm::radians(70.0f), 1.0f, 0.1f, far_plane);
+        shader.setMat4("u_gbufferInverseProjection", glm::inverse(projection));
+        const auto depth_at = [&](float distance) {
+            const glm::vec4 clip = projection * glm::vec4(0, 0, -distance, 1);
+            return clip.z / clip.w;
+        };
+        bolt(0, 0.01f);                   // channel 100 m away
+        probe.texture(1, {glm::vec4(0)}); // cleared sky never occludes
+        const auto sky_pixels = probe.draw();
+        const auto sky = sky_pixels[16];
+        EXPECT_GT(sky.r, 3.2f);
+        for (float distance : {100.0f, 200.0f, 14000.0f}) {
+            if (distance < far_plane) {
+                probe.texture(1, {glm::vec4(depth_at(distance))});
+                EXPECT_NEAR(probe.draw()[16].r, sky.r, 0.0001f);
+            }
+        }
+        shader.setInt("u_boltCount", 0);
+        const auto flash_pixels = probe.draw();
+        const auto flash_only = flash_pixels[16];
+        EXPECT_GT(flash_only.r, 0.1f);
+        EXPECT_NEAR(sky.r, flash_only.r + 3.46112f, 0.0001f);
+        EXPECT_FLOAT_EQ(sky_pixels.front().r, flash_pixels.front().r);
+        EXPECT_FLOAT_EQ(sky_pixels.back().r, flash_pixels.back().r);
+        bolt(0, 0.01f);
+        probe.texture(1, {glm::vec4(depth_at(25))}); // opaque cave wall / hill
+        EXPECT_NEAR(probe.draw()[16].r, flash_only.r, 0.0001f);
+        probe.texture(1, {glm::vec4(depth_at(99.5f))}); // near-contact ridge: soft edge
+        const auto ridge = probe.draw()[16];
+        EXPECT_GT(ridge.r, flash_only.r + 0.5f);
+        EXPECT_LT(ridge.r, sky.r - 0.5f);
+        // The tight glow, as well as the core, is suppressed below the ridge;
+        // the sky on its other side retains exactly the unobstructed response.
+        bolt(0.015f, 0.01f);
+        probe.texture(1, {glm::vec4(0)});
+        const auto sky_glow = probe.draw();
+        EXPECT_GT(sky_glow[16].r, flash_only.r + 0.01f);
+        std::vector<glm::vec4> ridge_depth(FullscreenFloatProbe::width, glm::vec4(0));
+        std::fill_n(ridge_depth.begin(), FullscreenFloatProbe::width / 2, glm::vec4(depth_at(25)));
+        probe.texture(1, ridge_depth);
+        const auto ridge_glow = probe.draw();
+        EXPECT_NEAR(ridge_glow[15].r, flash_only.r, 0.0001f);
+        EXPECT_FLOAT_EQ(ridge_glow[16].r, sky_glow[16].r);
+        bolt(0, 0.01f);
+        ExpectLightningJitteredSilhouettes(
+            shader, probe, projection, depth_at(25), flash_pixels, sky_pixels);
+        // A hidden closest segment must not erase an overlapping visible one.
+        bolt(0, 0.01f);
+        shader.setInt("u_boltCount", 5);
+        shader.setVec2("u_bolt[2]", {-3, -3});
+        shader.setFloat("u_boltInverseDepth[2]", 0);
+        shader.setVec2("u_bolt[3]", {-0.9f, 0});
+        shader.setVec2("u_bolt[4]", {0.9f, 0});
+        shader.setFloat("u_boltInverseDepth[3]", 0.1f);
+        shader.setFloat("u_boltInverseDepth[4]", 0.1f);
+        probe.texture(1, {glm::vec4(depth_at(25))});
+        EXPECT_NEAR(probe.draw()[16].r, sky.r, 0.0001f);
+        for (float invalid : {0.0f,
+                              -1.0f,
+                              std::numeric_limits<float>::infinity(),
+                              std::numeric_limits<float>::quiet_NaN()}) {
+            bolt(0, invalid);
+            probe.texture(1, {glm::vec4(0)});
+            EXPECT_NEAR(probe.draw()[16].r, flash_only.r, 0.0001f);
+        }
+        for (float invalid : {-1.0f,
+                              2.0f,
+                              std::numeric_limits<float>::infinity(),
+                              std::numeric_limits<float>::quiet_NaN()}) {
+            bolt(0, 0.01f);
+            probe.texture(1, {glm::vec4(invalid)});
+            EXPECT_NEAR(probe.draw()[16].r, sky.r, 0.0001f);
+        }
+        // Collapsed or subpixel strokes use the nearer endpoint in either order.
+        for (float span : {0.0f, 0.00001f}) {
+            for (float first_depth : {0.01f, 0.1f}) {
+                bolt(0, first_depth);
+                shader.setVec2("u_bolt[0]", {0.03125f - span, 0});
+                shader.setVec2("u_bolt[1]", {0.03125f + span, 0});
+                shader.setFloat("u_boltInverseDepth[1]", first_depth == 0.01f ? 0.1f : 0.01f);
+                probe.texture(1, {glm::vec4(depth_at(25))});
+                EXPECT_NEAR(probe.draw()[16].r, sky.r, 0.0001f);
+            }
+        }
+        // A zero or sub-core glow radius still has a core, with no inverted halo.
+        for (float radius : {-0.01f, 0.0f, 0.0005f, 0.001f}) {
+            shader.setFloat("u_boltGlow", radius);
+            bolt(0, 0.01f);
+            probe.texture(1, {glm::vec4(depth_at(25))});
+            EXPECT_NEAR(probe.draw()[16].r, flash_only.r, 0.0001f);
+            probe.texture(1, {glm::vec4(0)});
+            const auto core_only = probe.draw();
+            EXPECT_NEAR(core_only[16].r, flash_only.r + 3.17312f, 0.0001f);
+            EXPECT_FLOAT_EQ(core_only.front().r, flash_pixels.front().r);
+        }
+        shader.setFloat("u_boltGlow", 0.034f);
+        // Unavailable or malformed reconstruction must not manufacture an occluder.
+        std::array<glm::mat4, 5> invalid_inverse{
+            glm::mat4(0), glm::mat4(1), glm::mat4(-1), glm::mat4(1), glm::mat4(1)};
+        invalid_inverse[3][0][0] = std::numeric_limits<float>::quiet_NaN();
+        invalid_inverse[4][2][2] = -std::numeric_limits<float>::min();
+        probe.texture(1, {glm::vec4(depth_at(25))});
+        for (const auto& inverse : invalid_inverse) {
+            shader.setMat4("u_gbufferInverseProjection", inverse);
+            EXPECT_NEAR(probe.draw()[16].r, sky.r, 0.0001f);
+        }
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, LightningOverlayUploadsCurrentProjectionJitter) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    FullscreenFloatProbe probe;
+    probe.texture(1, {glm::vec4(0)});
+    // Exercise the production upload too: make_lighting_context supplies the
+    // jittered depth contract but leaves its generic taau_jitter_ndc at zero.
+    GLint quad = 0;
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &quad);
+    glActiveTexture(GL_TEXTURE1);
+    GLint depth_texture = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &depth_texture);
+    Luminumbra::Rendering::RenderResourceRegistry registry;
+    Luminumbra::Rendering::LightingPass lighting;
+    lighting.init_shader(SourceRoot());
+    lighting.init_lighting_fbo(registry, FullscreenFloatProbe::width, 1);
+    Luminumbra::Rendering::LightningRenderState lightning;
+    lightning.active = true;
+    lightning.pulse_intensity = 1;
+    Luminumbra::Rendering::RenderContext ctx;
+    ctx.screen_width = FullscreenFloatProbe::width;
+    ctx.screen_height = 1;
+    ctx.lightning_state = &lightning;
+    ctx.screen_quad_vao = static_cast<GLuint>(quad);
+    ctx.gbuffer_depth.id = static_cast<GLuint>(depth_texture);
+    for (bool ladder : {false, true}) {
+        const auto projection = Luminumbra::Rendering::ReversedZPerspective(
+            glm::radians(70.0f), 1.0f, 0.1f, ladder ? 17408.0f : 3200.0f);
+        for (const glm::vec2 jitter :
+             {glm::vec2(0), glm::vec2(0.025f, -0.015f), glm::vec2(-0.025f, 0.015f)}) {
+            ctx.set_gbuffer_depth_contract(ladder, projection, jitter);
+            lighting.execute_lightning_overlay(ctx);
+            GLint program = 0;
+            glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+            const auto overlay = static_cast<GLuint>(program);
+            const GLint location = glGetUniformLocation(overlay, "u_jitter_ndc");
+            ASSERT_GE(location, 0);
+            glm::vec2 uploaded(0);
+            glGetUniformfv(overlay, location, &uploaded.x);
+            EXPECT_EQ(uploaded, jitter);
+        }
+    }
+    lighting.destroy_lighting_fbo(registry);
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, WaterVisibilityAcceptsBlueAndWarmSurvivorsOnlyInTargetRegion) {
+    using Luminumbra::Rendering::WaterVisibilityMask;
+    for (const auto& rgb :
+         {std::array<unsigned char, 3>{20, 100, 200}, std::array<unsigned char, 3>{220, 90, 20}}) {
+        std::vector<unsigned char> rgba(8u * 8u * 4u, 0);
+        const std::size_t center = (4u * 8u + 4u) * 4u;
+        std::copy(rgb.begin(), rgb.end(), rgba.begin() + static_cast<std::ptrdiff_t>(center));
+        rgba[center + 3u] = 150;
+        const auto visible = WaterVisibilityMask::FromRgba(8, 8, rgba);
+        ASSERT_TRUE(visible.valid());
+        EXPECT_EQ(visible.visible_pixels_in_target(), 1u);
+        rgba[center + 3u] = 0; // no surviving water, even with a blue background
+        EXPECT_EQ(WaterVisibilityMask::FromRgba(8, 8, rgba).visible_pixels_in_target(), 0u);
+        rgba[3] = 150; // water outside the intended region is insufficient
+        EXPECT_EQ(WaterVisibilityMask::FromRgba(8, 8, rgba).visible_pixels_in_target(), 0u);
+    }
+    EXPECT_FALSE(WaterVisibilityMask::FromRgba(0, 8, {}).valid());
+    EXPECT_FALSE(WaterVisibilityMask::FromRgba(-1, 8, {}).valid());
+    EXPECT_FALSE(WaterVisibilityMask::FromRgba(4097, 8, {}).valid());
+    EXPECT_FALSE(WaterVisibilityMask::FromRgba(8, 8, std::vector<unsigned char>(255)).valid());
+    EXPECT_FALSE(WaterVisibilityMask::FromRgba(8, 8, std::vector<unsigned char>(257)).valid());
+    EXPECT_EQ(WaterVisibilityMask{}.visible_pixels_in_target(), 0u);
+}
+
+TEST(RenderSmokeTest, WaterTargetSearchIsBoundedAndRefusesDryObstructedOrUnknownTerrain) {
+    using Luminumbra::Rendering::FindWaterVisibilityTarget;
+    int queries = 0;
+    const auto open = FindWaterVisibilityTarget(glm::vec3(0), 0.0f, [&](float, float) {
+        ++queries;
+        return -2.0f;
+    });
+    ASSERT_TRUE(open.found);
+    EXPECT_EQ(open.focus, glm::vec3(0, 0.1f, 0));
+    EXPECT_EQ(open.eye, open.focus + glm::vec3(0, 12, 16));
+    EXPECT_LE(queries, 169 * (25 + 9 * 33));
+    for (const float height : {1.0f,
+                               -0.5f,
+                               std::numeric_limits<float>::quiet_NaN(),
+                               std::numeric_limits<float>::infinity()}) {
+        queries = 0;
+        const auto absent = FindWaterVisibilityTarget(glm::vec3(0), 0.0f, [&](float, float) {
+            ++queries;
+            return height;
+        });
+        EXPECT_FALSE(absent.found);
+        EXPECT_LE(queries, 169 * (25 + 9 * 33));
+    }
+    // Every grid point is submerged, but each sight line crosses a narrow ridge
+    // between those points. A nearest-height-only search would accept this.
+    const auto ridged = FindWaterVisibilityTarget(glm::vec3(0), 0.0f, [](float, float z) {
+        const float phase = z - 8.0f * std::floor(z / 8.0f);
+        return phase > 3.0f && phase < 5.0f ? 30.0f : -2.0f;
+    });
+    EXPECT_FALSE(ridged.found);
+    queries = 0;
+    const auto invalid = FindWaterVisibilityTarget(
+        glm::vec3(std::numeric_limits<float>::infinity()), 0.0f, [&](float, float) {
+            ++queries;
+            return -2.0f;
+        });
+    EXPECT_FALSE(invalid.found);
+    EXPECT_EQ(queries, 0);
+}
+
+TEST(RenderSmokeTest, WaterVisibilityReplayRejectsSubmittedOccludedWaterAndEmptyBlueSky) {
+    using namespace Luminumbra::Rendering;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
+    RenderResourceRegistry resources;
+    LightingPass lighting;
+    GBufferPass gbuffer;
+    WaterPass water;
+    lighting.init_lighting_fbo(resources, 64, 64);
+    gbuffer.init_gbuffer(resources, 64, 64);
+    water.init_shader(SourceRoot());
+    water.init_water_fallback_textures(resources);
+    ASSERT_TRUE(water.shader()->IsValid());
+    GLuint vao = 0, vbo = 0, ebo = 0;
+    const std::array<float, 12> vertices{-40, 0, -40, 40, 0, -40, 40, 0, 40, -40, 0, 40};
+    const std::array<unsigned int, 6> indices{0, 1, 2, 0, 2, 3};
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &vbo);
+    glGenBuffers(1, &ebo);
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+    glVertexAttrib3f(1, 0, 1, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices.data(), GL_STATIC_DRAW);
+    Camera camera({0, 12, 16}, {0, 1, 0}, -90, -36.87f);
+    RenderContext ctx;
+    ctx.screen_width = 64;
+    ctx.screen_height = 64;
+    ctx.screen_quad_vao = vao;
+    ctx.lit_scene = FboHandle{lighting.lighting_fbo().fbo_id, true};
+    ctx.lit_scene_depth = RenderbufferHandle{lighting.lighting_fbo().depth_texture};
+    ctx.opaque_scene = TextureHandle{lighting.lighting_fbo().opaque_color_texture};
+    ctx.gbuffer_depth = TextureHandle{gbuffer.gbuffer().depth_texture};
+    ctx.sun.direction = glm::normalize(glm::vec3(0, -1, -1));
+    ctx.sun.color = glm::vec3(1);
+    ctx.sun.intensity = 1;
+    WaterPassInput input;
+    input.draw_items.push_back({glm::mat4(1), vao, 6});
+    const glm::vec4 sky(0.1f, 0.4f, 0.9f, 1.0f);
+    glClearTexImage(ctx.opaque_scene.id, 0, GL_RGBA, GL_FLOAT, &sky[0]);
+    const auto draw = [&](double depth, bool capture, bool empty, double sampled_depth = 0.0) {
+        glViewport(0, 0, 64, 64);
+        glBindFramebuffer(GL_FRAMEBUFFER, gbuffer.gbuffer().fbo_id);
+        glDepthMask(GL_TRUE);
+        glClearDepth(sampled_depth);
+        glClear(GL_DEPTH_BUFFER_BIT);
+        glBindFramebuffer(GL_FRAMEBUFFER, ctx.lit_scene.id);
+        glClearDepth(depth);
+        glClearColor(0.1f, 0.4f, 0.9f, 1); // blue sky must never enter the mask
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        return water.execute(ctx, empty ? WaterPassInput{} : input, camera, capture);
+    };
+    for (const bool ladder : {false, true}) {
+        ctx.set_gbuffer_depth_contract(ladder, camera.GetProjectionMatrix(64, 64), {});
+        const auto visible = draw(0, true, false);
+        EXPECT_EQ(visible.water_draws, 1u);
+        ASSERT_TRUE(water.visibility_mask().valid());
+        EXPECT_GT(water.visibility_mask().visible_pixels_in_target(), 0u);
+        const auto occluded = draw(1, true, false);
+        EXPECT_EQ(occluded.water_draws, 1u);
+        EXPECT_EQ(occluded.water_indices, 6u);
+        ASSERT_TRUE(water.visibility_mask().valid());
+        EXPECT_EQ(water.visibility_mask().visible_pixels_in_target(), 0u);
+        draw(0, true, true);
+        EXPECT_EQ(water.visibility_mask().visible_pixels_in_target(), 0u);
+        draw(0, true, false, 1); // shader discard, even though attachment depth permits it
+        EXPECT_EQ(water.visibility_mask().visible_pixels_in_target(), 0u);
+        draw(0, false, false);
+        EXPECT_FALSE(water.visibility_mask().valid());
+        ctx.frozen_replay = true;
+        draw(0, true, false);
+        EXPECT_FALSE(water.visibility_mask().valid());
+        ctx.frozen_replay = false;
+    }
+    for (const auto invalid : {0u, std::numeric_limits<Luminumbra::u32>::max()}) {
+        input.draw_items[0].element_count = invalid;
+        const auto refused = draw(0, true, false);
+        EXPECT_EQ(refused.water_draws, 0u);
+        EXPECT_EQ(refused.water_indices, 0u);
+        EXPECT_EQ(water.visibility_mask().visible_pixels_in_target(), 0u);
+    }
+    input.draw_items[0].element_count = 6;
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    ctx.internal_width = 4097;
+    draw(0, true, false);
+    EXPECT_FALSE(water.visibility_mask().valid());
+    ctx.internal_width = 0;
+    ctx.lit_scene_depth = {};
+    draw(0, true, false);
+    EXPECT_FALSE(water.visibility_mask().valid());
+    glDeleteBuffers(1, &ebo);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    water.destroy_water_fallback_textures(resources);
+    lighting.destroy_lighting_fbo(resources);
+    gbuffer.destroy_gbuffer(resources);
 }
 
 TEST(RenderSmokeTest, WaterCausticsRetainPatternInNormalizedTarget) {
@@ -5064,7 +5973,7 @@ TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
          "result.authority_revision == result.sdf_snapshot->authority_revision &&",
          "result.region_authority_revision == result.sdf_snapshot->region_authority_revision &&",
          "m_world->far_lod_region_authority_revision(result.rx, result.rz) &&",
-         "m_world->is_far_lod_sdf_snapshot_current(*result.sdf_snapshot);",
+         "m_world->is_far_lod_sdf_snapshot_current(*result.sdf_snapshot, true);",
          "if (!build_result_current(result) || result.authority_build_failed ||",
          "result.mesh.vertices.empty() || result.mesh.indices.empty())",
          "++m_stats.builds_failed_total;",
@@ -5096,6 +6005,11 @@ TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
                                  "SHIELD_WorldSystem::find_streamed_chunk(");
     expect_ordered(current,
                    {"snapshot.params_hash != World::ComputeTerrainParamsHash(m_params, m_seed) ||",
+                    "if (region_scoped)",
+                    "home_x % kRegionSpan != 0 || home_z % kRegionSpan != 0 ||",
+                    "snapshot.region_authority_revision !=",
+                    "far_lod_region_authority_revision(home_x / kRegionSpan, home_z / kRegionSpan)",
+                    "return false;",
                     "snapshot.authority_revision !=",
                     "m_far_lod_authority_revision.load(std::memory_order_acquire)",
                     "return false;",
@@ -6839,6 +7753,237 @@ struct ReloadShaderSources {
         fs::remove_all(directory, error);
     }
 };
+
+// Observe real driver submissions through the public pass, restoring GL entry points.
+struct TreeSubmissionCapture {
+    struct Counts {
+        std::size_t mesh_draws = 0, impostor_draws = 0;
+        GLsizei mesh_indices = 0;
+        PFNGLDRAWELEMENTSINSTANCEDPROC elements = nullptr;
+        PFNGLDRAWARRAYSINSTANCEDPROC arrays = nullptr;
+    };
+    static Counts& Current() {
+        static Counts counts;
+        return counts;
+    }
+    static void APIENTRY
+    DrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instances) {
+        auto& state = Current();
+        if (!state.elements) {
+            ADD_FAILURE() << "Missing indexed draw entry point";
+            return;
+        }
+        ++state.mesh_draws;
+        state.mesh_indices = count;
+        state.elements(mode, count, type, indices, instances);
+    }
+    static void APIENTRY DrawArrays(GLenum mode, GLint first, GLsizei count, GLsizei instances) {
+        auto& state = Current();
+        if (!state.arrays) {
+            ADD_FAILURE() << "Missing array draw entry point";
+            return;
+        }
+        ++state.impostor_draws;
+        state.arrays(mode, first, count, instances);
+    }
+    TreeSubmissionCapture() {
+        auto& capture = Current();
+        capture = {.mesh_draws = 0,
+                   .impostor_draws = 0,
+                   .mesh_indices = 0,
+                   .elements = glDrawElementsInstanced,
+                   .arrays = glDrawArraysInstanced};
+        glad_glDrawElementsInstanced = DrawElements;
+        glad_glDrawArraysInstanced = DrawArrays;
+    }
+    ~TreeSubmissionCapture() {
+        glDrawElementsInstanced = Current().elements;
+        glDrawArraysInstanced = Current().arrays;
+    }
+};
+
+TEST(RenderSmokeTest, RefusedTreeImpostorsSubmitAvailableMeshLods) {
+    using namespace Luminumbra::Rendering;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    ReloadShaderSources sources;
+    RenderResourceRegistry resources;
+    GBufferPass pass;
+    pass.init_geometry_shader(SourceRoot());
+    pass.init_instanced_static_mesh(SourceRoot());
+    pass.init_skinned_mesh(SourceRoot());
+    pass.init_gbuffer(resources, 32, 32);
+    struct Cleanup {
+        GBufferPass& pass;
+        RenderResourceRegistry& resources;
+        ~Cleanup() {
+            pass.destroy_instanced_static_mesh();
+            pass.destroy_skinned_mesh();
+            pass.destroy_gbuffer(resources);
+        }
+    } cleanup{pass, resources};
+    Camera camera({0, 0, 0});
+    Luminumbra::Client::ScenarioHarness::IsolationConfig isolation;
+    glm::vec4 planes[6];
+    std::fill_n(planes, 6, glm::vec4(0, 0, 0, 1));
+    RenderContext ctx;
+    ctx.camera = &camera;
+    ctx.screen_width = 32;
+    ctx.screen_height = 32;
+    ctx.isolation = &isolation;
+    ctx.frustum_planes = planes;
+    GBufferPassInput input;
+    input.root_path = sources.directory;
+    input.submit_terrain_chunks = [](const glm::vec4(&)[6]) {
+        return TerrainSubmitStats{};
+    };
+    input.submit_ladder = [](const FarWorldPrepareDraw&) {
+        return FarWorldSubmitStats{};
+    };
+    input.static_model_tex = [](const std::string&) -> const StaticModelTex* {
+        return nullptr;
+    };
+    input.tree_impostor_enabled = true;
+    input.tree_impostor_grid = 1;
+    input.tree_impostor_radius = 1;
+    const glm::vec3 root(200, 12, 0);
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = root.y;
+    params.caves_enabled = false;
+    params.island_mask_enabled = false;
+    Luminumbra::Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    FarLodSystem far;
+    far.attach_job_system(&jobs);
+    struct FarCleanup {
+        FarLodSystem& far;
+        Luminumbra::JobSystem& jobs;
+        ~FarCleanup() {
+            far.shutdown();
+            jobs.shutdown();
+        }
+    } far_cleanup{far, jobs};
+    far.set_horizon(FarLodSystem::kF1OuterRangeMeters, FarLodSystem::kF1OuterRangeMeters + 50.0f);
+    for (int frame = 0; frame < 12; ++frame) {
+        far.update(world, camera.Position);
+        jobs.wait(jobs.dispatch_batch({[] {
+        }}));
+    }
+    ASSERT_TRUE(far.terrain_resident_at(root));
+    SubmittedLiveTerrain support;
+    entt::registry entities;
+    TreeSubmissionCapture submissions;
+    auto& capture = TreeSubmissionCapture::Current();
+    // Empty, sparse and complete sets; missing, partial and wrong-type higher LODs.
+    for (const int highest_lod : {-1, 0, 1, 2}) {
+        SCOPED_TRACE(highest_lod);
+        for (const char* part : {"leaf", "bark", "trunk"}) {
+            const std::string base = "game-assets/tree-small-02/residency-" +
+                                     std::to_string(highest_lod) + "-" + part + ".lmesh";
+            fs::create_directories((sources.directory / base).parent_path());
+            if (highest_lod == 0) {
+                std::ofstream partial(sources.directory / LodMeshPath(base, 2), std::ios::binary);
+                partial << "LM";
+            }
+            if (highest_lod == 1) {
+                fs::create_directories(sources.directory / LodMeshPath(base, 2));
+            }
+            for (int mesh_lod = 0; mesh_lod <= highest_lod; ++mesh_lod) {
+                const std::vector<std::uint32_t> indices(
+                    static_cast<std::size_t>(3 * (mesh_lod + 1)), 0);
+                auto mesh = MeshLoader::CreateFromArrays({{{-1, -1, -5}, {0, 0, 1}, {0, 0}},
+                                                          {{1, -1, -5}, {0, 0, 1}, {1, 0}},
+                                                          {{0, 1, -5}, {0, 0, 1}, {.5f, 1}}},
+                                                         indices);
+                ASSERT_NE(mesh, nullptr);
+                pass.register_cached_mesh(LodMeshPath(base, mesh_lod), std::move(mesh));
+            }
+            const auto entity = entities.create();
+            entities.emplace<Luminumbra::Components::TransformComponent>(entity).position = root;
+            entities.emplace<Luminumbra::Components::StaticMeshComponent>(entity).meshPath = base;
+        }
+        // Cold far-supported ON frame goes directly to frozen OFF. No mesh-support
+        // warm-up is allowed, even for empty or malformed fallback chains.
+        input.far_selection =
+            SelectFarWorld(FarWorldMode::Legacy, FarWorldPurpose::World, FarWorldRefusal::None);
+        input.legacy_far = &far;
+        ctx.far_world_ladder = false;
+        input.resident_live_terrain = nullptr;
+        input.submitted_live_terrain = nullptr;
+        ctx.frozen_replay = false;
+        capture.mesh_draws = 0;
+        capture.impostor_draws = 0;
+        ASSERT_NO_THROW((void)pass.execute(ctx, entities, input));
+        EXPECT_EQ(capture.mesh_draws, 0u);
+        EXPECT_EQ(capture.impostor_draws, 1u);
+        input.far_selection.submit = false;
+        ctx.frozen_replay = true;
+        capture.mesh_draws = 0;
+        capture.impostor_draws = 0;
+        ASSERT_NO_THROW((void)pass.execute(ctx, entities, input));
+        EXPECT_EQ(capture.mesh_draws, highest_lod >= 0 ? 3u : 0u);
+        EXPECT_EQ(capture.impostor_draws, 0u);
+        if (highest_lod >= 0) {
+            EXPECT_EQ(capture.mesh_indices, 3 * (highest_lod + 1));
+        }
+        ctx.frozen_replay = false;
+        input.legacy_far = nullptr;
+        for (const auto mode : {FarWorldMode::Legacy, FarWorldMode::Ladder}) {
+            input.far_selection =
+                SelectFarWorld(mode, FarWorldPurpose::World, FarWorldRefusal::None);
+            ASSERT_TRUE(pass.instanced_static_mesh_shader(mode)->IsValid());
+            ctx.far_world_ladder = mode == FarWorldMode::Ladder;
+            // Null, empty and retired support all require meshes. Confirmed support
+            // uses one leaf representative, folding in bark and trunk, in either mode.
+            for (const int support_state : {0, 1, 2, 3, 4}) {
+                support.clear();
+                input.resident_live_terrain = nullptr;
+                input.submitted_live_terrain = nullptr;
+                if (support_state != 0) {
+                    input.resident_live_terrain = &support;
+                }
+                if (support_state >= 2) {
+                    support.add_origin({192, 0, 0});
+                }
+                if (support_state == 3) {
+                    input.resident_live_terrain = nullptr;
+                    input.submitted_live_terrain = &support;
+                }
+                if (support_state == 4) {
+                    support.clear();
+                }
+                const bool confirmed = support_state == 2 || support_state == 3;
+                for (const bool submit : {false, true}) {
+                    input.far_selection.submit = submit;
+                    // Warm normally, then verify frozen reuse without loading meshes.
+                    for (const bool replay : {false, true}) {
+                        ctx.frozen_replay = replay;
+                        capture.mesh_draws = 0;
+                        capture.impostor_draws = 0;
+                        const auto stats = pass.execute(ctx, entities, input);
+                        EXPECT_EQ(stats.invalid_program_refusals, 0u);
+                        EXPECT_EQ(capture.mesh_draws, !confirmed && highest_lod >= 0 ? 3u : 0u);
+                        EXPECT_EQ(capture.impostor_draws, confirmed ? 1u : 0u);
+                        if (!confirmed && highest_lod >= 0) {
+                            EXPECT_EQ(capture.mesh_indices, 3 * (highest_lod + 1));
+                            glm::mat4 model(0);
+                            glBindBuffer(GL_ARRAY_BUFFER, pass.instance_matrix_vbo());
+                            glGetBufferSubData(
+                                GL_ARRAY_BUFFER, 0, sizeof(model), glm::value_ptr(model));
+                            EXPECT_EQ(glm::vec3(model[3]), root);
+                        }
+                    }
+                }
+            }
+        }
+        ctx.frozen_replay = false;
+        entities.clear();
+        (void)pass.execute(ctx, entities, input); // Invalidate the population cache.
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
 
 void CheckDirectFarWorldReload(bool prepare_first) {
     ReloadShaderSources sources;

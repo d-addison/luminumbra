@@ -674,6 +674,200 @@ class ReplaySourceContract(unittest.TestCase):
 
 
 class SessionUsabilitySourceContract(unittest.TestCase):
+    def assert_concrete_ecology_admission(self, source):
+        self.assertRegex(source, r"const auto plant_env\s*=\s*\[")
+        self.assertNotRegex(source, r"\bEnvSampler\b")
+        self.assertRegex(
+            source,
+            r"RunPlantGrowthSystemOnTick\(\s*foliage_registry, current_tick, plant_env, foliage_gate\)")
+        initialize = self.function(source, "InitializeScentField")
+        self.assertIn("m_scentField->BindSessionAdmission(*this);", initialize)
+        self.assertNotIn("BindDepositGate", initialize)
+        admission = self.function(source, "SessionCellAllowed", "luminumbra::ai::ScentField::")
+        self.assertIn("return m_admissionSession->ScentCellDue(x, z);", admission)
+
+    def test_shipping_plant_and_scent_admission_use_concrete_dispatch(self):
+        self.assert_concrete_ecology_admission(
+            read_source("src/luminumbra_common/world/GameSession.cpp"))
+        header = read_source("src/luminumbra_common/ai/ScentField.h")
+        self.assertIn("const ::Luminumbra::world::GameSession* m_admissionSession", header)
+        admission = self.function(header, "SimulationCellAllowed", "")
+        self.assertRegex(admission, r"if \(m_admissionSession\)\s*\{\s*"
+                         r"return SessionCellAllowed\(x, z\);\s*\}")
+        deposit = self.function(header, "Deposit", "")
+        self.assertIn("!SimulationCellAllowed(x, z)", deposit)
+        self.assertNotIn("m_deposit_gate", deposit)
+
+    def test_concrete_ecology_guard_rejects_erased_shipping_regressions(self):
+        source = read_source("src/luminumbra_common/world/GameSession.cpp")
+        for before, after in (
+            ("const auto plant_env", "const luminumbra::foliage::EnvSampler plant_env"),
+            ("m_scentField->BindSessionAdmission(*this);",
+             "m_scentField->BindDepositGate([this](int x, int z) { return ScentCellDue(x, z); });"),
+            ("return m_admissionSession->ScentCellDue(x, z);", "return m_deposit_gate(x, z);"),
+        ):
+            with self.subTest(regression=after):
+                self.assertIn(before, source)
+                with self.assertRaises(AssertionError):
+                    self.assert_concrete_ecology_admission(source.replace(before, after, 1))
+
+    def assert_concrete_regional_samplers(self, source):
+        binding = self.function(source, "BindRegionalFieldQueries")
+        self.assertNotIn("[this]", binding)
+        for system in ("windFieldSystem", "weatherSystem", "aetherFieldSystem"):
+            self.assertEqual(binding.count(f"m_{system}->BindRegionalSession(*this);"), 1)
+            # Only the empty compatibility call is allowed, to clear legacy sessions.
+            self.assertEqual(binding.count(f"m_{system}->BindRegionalBackend("), 1)
+            self.assertIn(f"m_{system}->BindRegionalBackend({{}}, {{}});", binding)
+
+    def test_shipping_regional_samplers_use_concrete_dispatch(self):
+        self.assert_concrete_regional_samplers(
+            read_source("src/luminumbra_common/world/GameSession.cpp"))
+        for system, sample in (("WindFieldSystem", "Wind"),
+                               ("WeatherSystem", "Weather"),
+                               ("AetherFieldSystem", "Aether")):
+            source = read_source(f"src/luminumbra_common/systems/{system}.cpp")
+            binding = self.function(source, "BindRegionalSession", system + "::")
+            self.assertIn("m_sessionBinding.session = &session;", binding)
+            self.assertIn("m_regional_sample = {};", binding)
+            sampler = self.function(source, "SampleRegional", system + "::")
+            self.assertRegex(sampler, r"if \(m_sessionBinding.session\)\s*\{\s*return "
+                             + rf"m_sessionBinding.session->SampleRegional{sample}\(")
+
+    def assert_regional_self_assignment(self, header, source, system):
+        binding = header.split("struct SessionBinding {", 1)[1].split("SessionBinding m_sessionBinding", 1)[0]
+        self.assertRegex(binding, r"operator=\(const SessionBinding& other\) noexcept\s*\{\s*"
+                         r"if \(this != &other\)\s*\{\s*session = nullptr;\s*\}\s*return \*this;")
+        move = self.function(source, "operator=", system + "::")
+        self.assertRegex(move, r"\{\s*if \(this == &other\)\s*\{\s*return \*this;\s*\}")
+        # The guarded move must retain the full default memberwise assignment contract.
+        members = set(re.findall(r"\bm_\w+\b", header))
+        assignments = set(re.findall(r"\b(m_\w+) = (?:std::move\()?other\.\1\)?;", move))
+        self.assertEqual(assignments, members)
+
+    def test_regional_self_assignment_guards_and_registered_regressions(self):
+        native = read_source("test/common/GameSessionHeadlessWorld_test.cpp")
+        cmake = read_source("test/CMakeLists.txt")
+        self.assertIn("common/GameSessionHeadlessWorld_test.cpp", cmake)
+        self.assertIn("gtest_discover_tests(${_lum_gtest_target}", cmake)
+        helper = self.function(native, "CheckRegionalSamplerSelfAssignment", "")
+        for operation in ("system = alias;", "system = std::move(alias);"):
+            self.assertIn(operation, helper)
+        self.assertIn("ASSERT_NE(legacy_sample, expected_sample)", helper)
+        self.assertIn("ASSERT_NE(legacy_hash, expected_hash)", helper)
+        for system, name in (("WindFieldSystem", "Wind"), ("WeatherSystem", "Weather"),
+                             ("AetherFieldSystem", "Aether")):
+            with self.subTest(system=system):
+                header = read_source(f"src/luminumbra_common/systems/{system}.h")
+                source = read_source(f"src/luminumbra_common/systems/{system}.cpp")
+                self.assert_regional_self_assignment(header, source, system)
+                self.assertRegex(native, r"TEST\(GameSessionHeadlessWorldTest,\s*"
+                                 + f"Regional{name}SelfAssignmentPreservesSessionBinding" + r"\)")
+
+    def assert_weather_detachment(self, header, source, native):
+        members = set(re.findall(r"\bm_\w+\b", header))
+        normalize = (r"if \(other\.m_sessionBinding\.session\)\s*\{\s*"
+                     r"SelectRegionalBackend\(false\);")
+        for parameter in ("const WeatherSystem&", "WeatherSystem&&"):
+            signature = f"WeatherSystem::WeatherSystem({parameter} other)"
+            self.assertIn(signature, source)
+            constructor = source.split(signature, 1)[1]
+            constructor = constructor.split("\n}", 1)[0]
+            initialized = set(re.findall(
+                r"\b(m_\w+)\((?:std::move\()?other\.\1\)?\)", constructor))
+            self.assertEqual(initialized, members)
+            self.assertRegex(constructor, normalize)
+        move = self.function(source, "operator=", "WeatherSystem::")
+        self.assertRegex(move, r"if \(other\.m_sessionBinding\.session\)\s*\{\s*"
+                         r"WeatherSystem detached\(std::move\(other\)\);\s*"
+                         r"return \*this = std::move\(detached\);")
+        copy_source = source.split(
+            "WeatherSystem& WeatherSystem::operator=(const WeatherSystem& other)", 1)[1]
+        copy = copy_source.split("\n}", 1)[0]
+        self.assertRegex(copy, r"if \(this == &other\)\s*\{\s*return \*this;")
+        self.assertIn("return *this = WeatherSystem(other);", copy)
+        clear = self.function(source, "SelectRegionalBackend", "WeatherSystem::")
+        for projection in ("m_storm_cells = StormCells();", "m_strikes = StrikeSchedule();"):
+            self.assertLess(clear.index(projection), clear.index("m_regionalWeatherKeyed = false;"))
+        for member in ("m_regionalStorms", "m_regionalStrikes", "m_regionalStormIndex",
+                       "m_regionalStormCache", "m_regionalStrikeCache"):
+            self.assertIn(member + ".clear();", clear)
+        self.assertIn("m_regionalStrikesDeliveredThrough.reset();", clear)
+        self.assertIn("m_hiddenRegionalStrikes = 0;", clear)
+        factory = self.function(native, "DetachRegionalWeather", "")
+        for operation in ("return WeatherSystem(source);", "return WeatherSystem(std::move(source));",
+                          "destination = source;", "destination = std::move(source);"):
+            self.assertIn(operation, factory)
+        helper = self.function(native, "CheckDetachedRegionalWeatherCase", "")
+        for operation in ("detached.Update(302, Vec3(0), nullptr);",
+                          "source.RevealRegionalStrikeSchedule();"):
+            self.assertIn(operation, helper)
+        for name, arguments in (("CopyConstruction", "false, false"),
+                                ("MoveConstruction", "true, false"),
+                                ("CopyAssignment", "false, true"),
+                                ("MoveAssignment", "true, true")):
+            regression = re.search(
+                r"TEST\(GameSessionHeadlessWorldTest,\s*RegionalWeather" + name
+                + r"NormalizesDetachedStorage\)\s*\{([^}]+)\}", native)
+            self.assertIsNotNone(regression)
+            self.assertIn("CheckDetachedRegionalWeather<" + arguments + ">()", regression[1])
+
+    def test_weather_detachment_preserves_members_and_registers_all_operations(self):
+        self.assert_weather_detachment(
+            read_source("src/luminumbra_common/systems/WeatherSystem.h"),
+            read_source("src/luminumbra_common/systems/WeatherSystem.cpp"),
+            read_source("test/common/GameSessionHeadlessWorld_test.cpp"))
+
+    def test_weather_detachment_guard_rejects_each_lost_normalization(self):
+        header = read_source("src/luminumbra_common/systems/WeatherSystem.h")
+        source = read_source("src/luminumbra_common/systems/WeatherSystem.cpp")
+        native = read_source("test/common/GameSessionHeadlessWorld_test.cpp")
+        for signature in ("WeatherSystem::WeatherSystem(const WeatherSystem& other)",
+                          "WeatherSystem::WeatherSystem(WeatherSystem&& other)",
+                          "WeatherSystem& WeatherSystem::operator=(WeatherSystem&& other)",
+                          "WeatherSystem& WeatherSystem::operator=(const WeatherSystem& other)"):
+            with self.subTest(operation=signature):
+                start = source.index(signature)
+                end = source.index("\n}", start)
+                body = source[start:end]
+                if "const WeatherSystem&" in signature and "operator=" in signature:
+                    mutated = body.replace("return *this = WeatherSystem(other);", "return *this;")
+                elif "operator=" in signature:
+                    mutated = re.sub(r"WeatherSystem detached\(std::move\(other\)\);\s*"
+                                     r"return \*this = std::move\(detached\);", "", body)
+                else:
+                    mutated = body.replace("SelectRegionalBackend(false);", "")
+                self.assertNotEqual(mutated, body)
+                with self.assertRaises(AssertionError):
+                    self.assert_weather_detachment(header, source[:start] + mutated + source[end:], native)
+
+    def test_regional_hash_interface_has_fixed_inputs(self):
+        header = read_source("src/luminumbra_common/world/GameSession.h")
+        source = read_source("src/luminumbra_common/world/GameSession.cpp")
+        declaration = "std::string RegionalAmbientHash(std::uint8_t channels, bool weather) const;"
+        self.assertEqual(header.count(declaration), 1)
+        self.assertGreater(header.index(declaration), header.rindex("\nprivate:"))
+        for system, name, inputs in (("WindFieldSystem", "Wind", "3, false"),
+                                     ("WeatherSystem", "Weather", "12, true"),
+                                     ("AetherFieldSystem", "Aether", "16, false")):
+            with self.subTest(system=system):
+                projection = self.function(source, f"ComputeRegional{name}SubHash")
+                self.assertRegex(projection, r"\{\s*return RegionalAmbientHash\("
+                                 + re.escape(inputs) + r"\);\s*\}")
+                sampler = read_source(f"src/luminumbra_common/systems/{system}.cpp")
+                self.assertNotIn("->RegionalAmbientHash(", sampler)
+                self.assertIn(f"->ComputeRegional{name}SubHash()", sampler)
+
+    def test_concrete_regional_guard_rejects_each_erased_binding(self):
+        source = read_source("src/luminumbra_common/world/GameSession.cpp")
+        for system in ("windFieldSystem", "weatherSystem", "aetherFieldSystem"):
+            before = f"m_{system}->BindRegionalSession(*this);"
+            after = f"m_{system}->BindRegionalBackend([this](const auto& p) {{ return p; }}, {{}});"
+            with self.subTest(system=system):
+                self.assertIn(before, source)
+                with self.assertRaises(AssertionError):
+                    self.assert_concrete_regional_samplers(source.replace(before, after, 1))
+
     def test_serialization_reuse_covers_every_canonical_chunk_input(self):
         source = read_source("src/luminumbra_common/persistence/WorldPersistenceRoundtrip.cpp")
         serialized = (self.function(source, "ChunkToJson", "") +
@@ -768,12 +962,27 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn("::read(m_descriptor, &trailing, 1)", admission)
         self.assertIn("::ReadFile(m_handle, &trailing, 1, &received, nullptr) && received == 0",
                       admission)
-        world = self.function(source, "load_world", "WorldSaveService::")
+        world = self.function(source, "load_world_impl", "WorldSaveService::")
         self.assertIn("load_plant_entities(plants, save_dir, &errors, stop)", world)
         session = self.function(read_source("src/luminumbra_common/world/GameSession.cpp"),
                                 "ReadPreparedWorldState")
         self.assertRegex(session, r"WorldSaveService::load_plant_entities\(\s*state.plants, "
                          r"save_dir, &errors, stop\)")
+
+    def test_catalog_inspection_keeps_complete_validation_for_load_and_writers(self):
+        source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        load = self.function(source, "load_world", "WorldSaveService::")
+        inspect = self.function(source, "inspect_save", "WorldSaveService::")
+        validate = self.function(source, "validate_save", "WorldSaveService::")
+        self.assertRegex(load, r"return load_world_impl\([\s\S]*,\s*false\);")
+        self.assertRegex(inspect, r"load_world_impl\([\s\S]*nullptr,\s*nullptr,\s*true,\s*payloads_verified\);")
+        self.assertIn(".load_world(", validate)
+        self.assertNotIn("load_world_impl", validate)
+        world = self.function(source, "load_world_impl", "WorldSaveService::")
+        skip = world.index("if (catalog_only && indexed && !retain)")
+        self.assertLess(world.index("ReadRegionFile(path, records, &errors, stop)"), skip)
+        self.assertLess(world.index("retain_chunks->contains(record.id)"), skip)
+        self.assertLess(skip, world.index("AdmitChunkRecord(record,"))
 
     def test_native_saved_input_holds_publication_until_after_close(self):
         source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
@@ -919,6 +1128,43 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                         metadata_admission.index("BoundedJsonDump("))
         pair = self.function(source, "save_metadata_and_active_regions", "WorldSaveService::")
         self.assertLess(pair.index("admit_metadata_bytes(bytes"), pair.index("save_active_regions("))
+
+    def test_clean_generated_chunk_omission_is_incremental_only(self):
+        session = read_source("src/luminumbra_common/world/GameSession.cpp")
+        save = self.function(session, "SaveWorldStateToImpl")
+        selection = save.split("WorldStreamingState state;", 1)[1].split(
+            "result.chunks_total = state.size();", 1)[0]
+        self.assertRegex(
+            selection,
+            r"if\s*\(m_activeRegionsEnabled\s*&&\s*!full_snapshot\s*&&\s*chunk\s*&&\s*"
+            r"chunk->sdf_provenance\(\)\s*==\s*ChunkSdfProvenance::GeneratedCurrentParams\s*&&\s*"
+            r"!chunk->needs_authority\(\)\s*&&\s*!chunk->is_voxel_data_dirty\(\)\)\s*"
+            r"continue;\s*state.insert_chunk\(chunk\);")
+        self.assertLess(save.index("m_worldSystem->sync_water_authority();"),
+                        save.index("WorldStreamingState state;"))
+        regression = read_source("test/common/GameSessionHeadlessWorld_test.cpp")
+        for name in ("FirstEnabledChunkSaveIncludesCleanResidentRegions",
+                     "IndexedFullSnapshotsIncludeCleanGeneratedWater",
+                     "IndexedFullSnapshotsAdmitEmptyAndRejectMalformedCleanWater"):
+            self.assertIn("TEST(GameSessionHeadlessWorldTest, " + name + ")", regression)
+
+    def test_water_mutation_roundtrip_matches_saved_resolution_before_adoption(self):
+        regression = read_source("test/common/GameSessionHeadlessWorld_test.cpp")
+        body = regression.split(
+            "TEST(GameSessionHeadlessWorldTest, GenuineWaterChangesAfterCleanInitializationPersistAndRoundTrip)",
+            1)[1].split("\nTEST(", 1)[0]
+        self.assertIn("mutation < 5", body)
+        self.assertIn("water->ResizeSimulationGrid(*chunk, Luminumbra::Systems::WaterDetailLevel::High)",
+                      body)
+        self.assertIn("if (mutation != 4)", body)
+        self.assertRegex(
+            body,
+            r"EnableSnapshotSession\(reopened, root, jobs\);\s*"
+            r"reopened.SetWaterHighResEnabled\(mutation == 4\);\s*"
+            r'ASSERT_TRUE\(reopened.CreateWorld\("Water mutation reload", "1337", "default"\)\);\s*'
+            r"ASSERT_TRUE\(reopened.LoadWorldStateFrom\(session.GetWorldSaveDir\(\)\)\);")
+        self.assertIn("EXPECT_TRUE(adopted->same_water_state(*chunk));", body)
+        self.assertIn("EXPECT_EQ(reopened.ComputeChunkStateHash(), before_save);", body)
 
     def test_saved_json_depth_is_admitted_before_parsing_and_component_copying(self):
         admission = read_source("src/luminumbra_common/persistence/SavedJsonAdmission.h")

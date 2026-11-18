@@ -290,4 +290,4 @@ class LocalRecipeRecovery(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    source.run_tests()

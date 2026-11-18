@@ -42,6 +42,534 @@ class UploadBudgetWiring(unittest.TestCase):
         cls.header = read(RENDERING / "RenderPipeline.h")
         cls.main = read(ROOT / "src/luminumbra_client/main_client.cpp")
 
+    def test_near_refinement_runs_only_in_admitted_terrain_uploads(self):
+        manage = body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources(")
+        drain = manage[manage.index("const auto adopt ="):]
+        self.assertIn("copy_terrain_mesh_payload(candidate.chunk, payload)", compact(drain))
+        self.assertLess(drain.index("if (!copied)"),
+                        drain.index("m_near_terrain_refinement.prepare("))
+        self.assertLess(drain.index("m_near_terrain_refinement.prepare("),
+                        drain.index("upload_chunk_mesh(candidate.chunk, payload)"))
+        water = body(drain, "if constexpr (Water)")
+        self.assertNotIn("m_near_terrain_refinement", water)
+        self.assertIn("payload.vertices, payload.indices, elapsed()", compact(drain))
+        self.assertIn("NearTerrainUploadResult::Deferred", drain)
+        self.assertIn("payload.refinement.set(result == NearTerrainUploadResult::Deferred ? nullptr", compact(drain))
+
+    def test_live_refinement_copies_exact_owner_lattice_after_admission_and_validation(self):
+        policy = read(RENDERING / "NearTerrainRefinement.h")
+        prepare = body(policy, "prepare(")
+        self.assertIn("chunk.sdf_data.size() == World::kNearTerrainDensityCount", prepare)
+        self.assertIn("const std::vector<float> density_copy", prepare)
+        self.assertIn("? chunk.sdf_data", prepare)
+        self.assertNotIn("std::move(chunk.sdf_data)", prepare)
+        self.assertIn("std::span<const float>(density_copy)", prepare)
+        self.assertLess(prepare.index("observe(chunk, version, evidence, distance_squared)"),
+                        prepare.index("const std::vector<float> density_copy"))
+        self.assertLess(prepare.index("elapsed_ms >= kTerrainUploadLimits.milliseconds"),
+                        prepare.index("const std::vector<float> density_copy"))
+        self.assertLess(prepare.index("const std::vector<float> density_copy"),
+                        prepare.index("RefineNearTerrain("))
+        native = read(ROOT / "test/rendering/NearTerrainRefinement_test.cpp")
+        for regression in ("LiveEligibilityCopiesItsLatticeWithoutMovingAuthority",
+                           "LiveLatticeRefusesMissingPartialOversizedAndInvalidSamples"):
+            self.assertIn("TEST(NearTerrainUpload, " + regression + ")", native)
+
+    def test_saturated_deadline_preserves_baselines_and_separately_schedules_refinement(self):
+        manage = body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources(")
+        self.assertIn("const auto adopt =", manage)
+        adopt = body(manage, "const auto adopt =")
+        deferred = body(adopt, "if (candidate.refinement_only && result == NearTerrainUploadResult::Deferred)")
+        self.assertEqual(compact(deferred), "return false;")
+        self.assertIn("payload.refinement.set(result == NearTerrainUploadResult::Deferred ? nullptr",
+                      compact(adopt))
+        self.assertLess(adopt.index("payload.refinement.set("),
+                        adopt.index("upload_chunk_mesh(candidate.chunk, payload)"))
+        self.assertIn("auto& destination = refinement_only ? refinement_candidates : candidates", manage)
+        self.assertIn("drain_terrain_uploads(queue, m_near_terrain_upload_queue, cost, adopt, elapsed)",
+                      compact(manage))
+        policy = read(RENDERING / "NearTerrainRefinement.h")
+        scheduler = body(policy, "UploadWorkStats drain_terrain_uploads(")
+        self.assertEqual(scheduler.count("UploadBudget budget("), 1)
+        self.assertLess(scheduler.index("drain(baseline, false)"),
+                        scheduler.index("drain(refinement, true)"))
+        for guard in ("!std::isfinite(elapsed_ms)", "elapsed_ms < 0",
+                      "elapsed_ms >= kTerrainUploadLimits.milliseconds",
+                      "bytes > kTerrainUploadLimits.bytes - used.bytes"):
+            self.assertIn(guard, scheduler)
+        prepare = body(policy, "prepare(")
+        self.assertLess(prepare.index("!m_entries[found->second].refined"),
+                        prepare.index("elapsed_ms >= kTerrainUploadLimits.milliseconds"))
+        for signature in ("void RenderPipeline::clear_all_chunk_data()",
+                          "void RenderPipeline::cleanup_gpu_resources()"):
+            self.assertIn("m_near_terrain_upload_queue.clear()", body(self.pipeline, signature))
+        native = read(ROOT / "test/rendering/NearTerrainRefinement_test.cpp")
+        for regression in ("SaturatedDeadlineStillUploadsBaselineMeshes",
+                           "CachedRefusalsRemainImmediateAfterTheDeadline",
+                           "OptionalReplacementsShareLimitsAndNeverClaimProgressAllowance",
+                           "OptionalFailureRotatesWithoutRepeatingAndCanResume",
+                           "DeadlineAfterOptionalCopyPreservesResidentAndRetries"):
+            self.assertIn("TEST(NearTerrainUpload, " + regression + ")", native)
+
+    def test_near_refinement_cost_reserves_expansion_before_payload_copy(self):
+        manage = body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources(")
+        self.assertLess(manage.index("NearTerrainRefinementCache::upload_cost("),
+                        manage.index("const auto adopt ="))
+        policy = read(RENDERING / "NearTerrainRefinement.h")
+        cost = body(policy, "static std::size_t upload_cost(")
+        self.assertIn("vertices > kNearTerrainMaxInputVertices", cost)
+        self.assertIn("indices / 3 > kNearTerrainMaxInputTriangles", cost)
+        self.assertIn("indices % 3 != 0", cost)
+        self.assertIn("mesh_upload_bytes(", cost)
+        self.assertIn("original_bytes + refined_bytes", cost)
+        prepare = body(policy, "prepare(")
+        self.assertLess(prepare.index("elapsed_ms >= kTerrainUploadLimits.milliseconds"),
+                        prepare.index("RefineNearTerrain("))
+        self.assertIn("NearTerrainUploadResult::Deferred", prepare)
+
+    def test_near_refinement_cache_keys_bounds_and_lifecycle(self):
+        policy = read(RENDERING / "NearTerrainRefinement.h")
+        self.assertIn("kCapacity = 64", policy)
+        self.assertIn("std::array<Entry, kCapacity>", policy)
+        observe = body(policy, "observe(")
+        self.assertIn("evidence->eligible(chunk, version, distance_squared)", compact(observe))
+        self.assertIn("entry.version != version || entry.evidence != current", observe)
+        prepare = body(policy, "prepare(")
+        self.assertLess(prepare.index("m_index.find(chunk.get_id())"),
+                        prepare.index("RefineNearTerrain("))
+        self.assertIn("forget(*m_entries[m_next].id)", prepare)
+        self.assertLess(prepare.index("m_index.emplace("),
+                        prepare.index("forget(*m_entries[m_next].id)"))
+        for signature in ("void RenderPipeline::clear_all_chunk_data()",
+                          "void RenderPipeline::cleanup_gpu_resources()"):
+            self.assertIn("m_near_terrain_refinement.clear()", body(self.pipeline, signature))
+        self.assertIn("m_near_terrain_refinement.forget(chunk_id)",
+                      body(self.pipeline, "void RenderPipeline::unload_chunk_resources("))
+
+    def test_near_refinement_resident_stamp_detects_evidence_and_range_changes(self):
+        manage = body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources(")
+        self.assertLess(manage.index("m_near_terrain_refinement.observe("),
+                        manage.index("if (!is_new && !is_stale)"))
+        self.assertIn("!resident->second.refinement.matches(evidence)", manage)
+        self.assertIn("is_stale = is_stale || refinement_changed", manage)
+        upload = body(self.pipeline, "void RenderPipeline::upload_chunk_mesh(")
+        self.assertLess(upload.index("if (new_handle == ChunkRenderData::kInvalidPoolHandle)"),
+                        upload.index("render_data.refinement = payload.refinement"))
+        self.assertIn("payload.vertices, payload.indices", upload)
+
+    def test_same_version_republished_refinement_uses_required_queue(self):
+        manage = body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources(")
+        # A resident request includes both refined output and cached refusals.
+        # Changed eligible evidence must retire either through required work;
+        # the first upgrade from an unrefined baseline remains optional.
+        self.assertIn("retire_refined = found != records.end() && found->second.refinement.requested",
+                      compact(manage))
+        classification = re.search(r"const bool refinement_only\s*=\s*(.*?);", manage, re.S)
+        self.assertIsNotNone(classification)
+        self.assertEqual(compact(classification.group(1)),
+                         "!Water && !is_new && !is_stale && refinement_requested && !retire_refined")
+        self.assertLess(manage.index("is_stale = is_stale || refinement_changed"),
+                        manage.index("if (!is_new && !is_stale)"))
+        self.assertIn("auto& destination = refinement_only ? refinement_candidates : candidates",
+                      manage)
+        self.assertIn("refresh_uploads( queue, candidates,", compact(manage))
+        self.assertIn("drain_terrain_uploads(queue, m_near_terrain_upload_queue, cost, adopt, elapsed)",
+                      compact(manage))
+
+    def test_last_deferred_baseline_enqueues_refinement_before_settled_accounting(self):
+        manage = body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources(")
+        adopt = body(manage, "const auto adopt =")
+        terrain = body(adopt, "else {")
+        guard = ("if (result == NearTerrainUploadResult::Deferred && "
+                 "failures == stats.terrain_upload_failures)")
+        self.assertIn(guard, compact(terrain))
+        enqueue = body(terrain, "if (result == NearTerrainUploadResult::Deferred &&")
+        for statement in ("auto refinement = candidate;", "refinement.is_new = false;",
+                          "refinement.is_stale = true;", "refinement.refinement_only = true;",
+                          "m_near_terrain_upload_queue.refresh(candidate.chunk.id, refinement);"):
+            self.assertIn(statement, enqueue)
+        # Failed copies/uploads retain required work; optional deferrals retain
+        # their queue entry; completed/refused requests never enqueue a retry.
+        self.assertLess(adopt.index("if (!copied)"), adopt.index(guard.split(" &&")[0]))
+        self.assertLess(terrain.index("if (candidate.refinement_only &&"), terrain.index("auto refinement ="))
+        self.assertLess(terrain.index("upload_chunk_mesh(candidate.chunk, payload)"),
+                        terrain.index("auto refinement ="))
+        accounting = "queue.size() + (Water ? 0 : m_near_terrain_upload_queue.size()) + invalid_payloads"
+        self.assertIn(accounting, compact(manage))
+        self.assertLess(manage.index("m_near_terrain_upload_queue.refresh(candidate.chunk.id, refinement)"),
+                        manage.index(accounting))
+        settled = body(self.header, "bool render_uploads_settled() const")
+        self.assertIn("m_last_mesh_upload_stats.terrain_uploads_deferred == 0", settled)
+
+    def test_near_refinement_retired_or_emptied_mesh_releases_displaced_surface(self):
+        manage = body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources(")
+        residents = body(manage, "for (auto& [id, data] : records)")
+        self.assertIn("m_near_terrain_refinement.forget(id)", residents)
+        self.assertIn("found->second.refinement.requested", manage)
+        self.assertIn("(!Water && !retire_refined)", manage)
+        drain = manage[manage.index("const auto adopt ="):]
+        self.assertIn("unload_chunk_resources(candidate.chunk.id)", drain)
+        copy = body(self.pipeline, "bool RenderPipeline::copy_terrain_mesh_payload(")
+        self.assertIn("(chunk.terrain_vertex_count == 0) != (chunk.terrain_index_count == 0)", copy)
+        self.assertIn("payload.vertices.empty() != payload.indices.empty()", copy)
+        self.assertNotIn("!chunk.has_terrain_mesh()", copy)
+
+    def test_near_refinement_setting_is_off_persistent_and_applied_transactionally(self):
+        presets = ROOT / "src/luminumbra_common/core"
+        self.assertIn("bool terrain_near_refinement = false;", read(presets / "GraphicsPresets.h"))
+        source = read(presets / "GraphicsPresets.cpp")
+        self.assertIn(".terrain_near_refinement = false,", source)
+        self.assertIn('key == "terrain_near_refinement"', source)
+        self.assertIn("values.terrain_near_refinement = *enabled", source)
+        self.assertIn("values.terrain_near_refinement);", source)
+        apply = body(self.pipeline, "bool RenderPipeline::apply_graphics(")
+        self.assertLess(apply.index("if (!resize_graphics_targets("),
+                        apply.index("m_near_terrain_refinement.set_enabled("))
+        self.assertIn("resolved.values.terrain_near_refinement", apply)
+        native = read(ROOT / "test/rendering/NearTerrainRefinement_test.cpp")
+        self.assertIn("SettingDefaultsAndPersistenceRoundTrip", native)
+        self.assertIn("config.SaveUserOverlay(file.Path().string())", native)
+        self.assertIn('SystemConfig::LoadLayered("", file.Path().string())', native)
+
+    def test_near_refinement_ui_toggle_uses_boolean_graphics_listing(self):
+        import xml.etree.ElementTree as ET
+        markup = ET.parse(ROOT / "data/ui/settings.rml").getroot()
+        controls = {item.get("id"): item for item in markup.iter() if item.get("id")}
+        control = controls["graphics_terrain_near_refinement"]
+        self.assertEqual(control.get("data-key"), "terrain_near_refinement")
+        self.assertIn("graphics-control", control.get("class"))
+        self.assertEqual([option.get("value") for option in control], ["on", "off"])
+        self.assertIn("graphics_terrain_near_refinement_session", controls)
+        ui = read(ROOT / "src/luminumbra_client/ui/Rml_UIManager.cpp")
+        self.assertIn('edit.key == "grass_enabled" || edit.key == "terrain_near_refinement"', ui)
+        self.assertIn('document->GetElementById("graphics_terrain_near_refinement")', ui)
+        self.assertIn('values.terrain_near_refinement ? "on" : "off"', ui)
+
+    def test_far_render_integration_uses_region_freshness_and_keeps_strict_default(self):
+        legacy = read(RENDERING / "FarLodSystem.cpp")
+        current = body(legacy, "bool FarLodSystem::build_result_current(")
+        self.assertIn("is_far_lod_sdf_snapshot_current(*result.sdf_snapshot, true)", current)
+        self.assertIn("far_lod_region_authority_revision(result.rx, result.rz)", current)
+        world_header = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.h")
+        self.assertIn("bool region_scoped = false", world_header)
+        world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        validation = body(world, "bool SHIELD_WorldSystem::is_far_lod_sdf_snapshot_current(")
+        regional = body(validation, "if (region_scoped)")
+        self.assertIn("snapshot.region_authority_revision", regional)
+        self.assertIn("far_lod_region_authority_revision(", regional)
+        self.assertNotIn("m_far_lod_authority_revision.load", regional)
+        self.assertIn("} else if (snapshot.authority_revision !=", validation)
+        for retained in ("m_durable_read_failed", "snapshot.params_hash",
+                         "HasPublishedFarLodSdf", "published_sdfs == captured_resident_sdfs"):
+            self.assertIn(retained, validation)
+
+    def test_impostor_collection_requires_submitted_resident_terrain_at_each_tree(self):
+        gbuffer = read(RENDERING / "passes/GBufferPass.cpp")
+        collect = body(gbuffer, "for (const CachedStaticProp& cp : m_staticPropCache)")
+        self.assertIn("if (impostorsOn && authoredTree && lod == 3 && cp.impostorTree) {", collect)
+        self.assertIn("impostor_candidate = true;", collect)
+        self.assertIn("input.submitted_live_terrain->covers(cp.position)", collect)
+        self.assertNotIn("kFarClipInnerRadiusMeters", collect)
+        self.assertNotIn("live_terrain_owns_at", collect)
+        self.assertIn("impostor_candidate && !live_terrain_owned &&", collect)
+        self.assertIn("input.legacy_far->terrain_resident_at(cp.position)", collect)
+        decision = ("SelectStaticPropSubmission( input.far_selection, impostor_candidate, "
+                    "live_terrain_owned, far_terrain_resident)")
+        self.assertIn(decision, compact(collect))
+        guard = "if (submission == StaticPropSubmission::Refused)"
+        fallback = body(collect, guard)
+        self.assertIn("lod = 2;", fallback)
+        self.assertNotIn("continue;", fallback)
+        self.assertNotIn("return", fallback)
+        tree = body(collect, "if (submission == StaticPropSubmission::Impostor)")
+        self.assertIn("impostorInstances.push_back", tree)
+        self.assertTrue(compact(tree).endswith("continue; // all LOD3 tree parts are folded into the billboard"))
+        self.assertLess(collect.index(decision.split("(")[0]), collect.index(guard))
+        self.assertLess(collect.index(guard), collect.index("impostorInstances.push_back"))
+        self.assertLess(collect.index("impostorInstances.push_back"), collect.index("const auto rit = resolve_lod(cp, authoredTree, lod)"))
+        legacy = read(RENDERING / "FarLodSystem.cpp")
+        policy = compact(body(legacy, "StaticPropSubmission SelectStaticPropSubmission("))
+        self.assertLess(policy.index("if (!impostor_candidate)"), policy.index("if (live_terrain_owned)"))
+        self.assertLess(policy.index("if (live_terrain_owned)"), policy.index("if (!selection.submit"))
+        self.assertEqual(compact(body(policy, "if (live_terrain_owned)")),
+                         "return StaticPropSubmission::Impostor;")
+        self.assertTrue(policy.endswith("return StaticPropSubmission::Impostor;"))
+        self.assertIn("if (!selection.submit || !far_terrain_resident)", policy)
+        query = body(legacy, "bool FarLodSystem::terrain_resident_at(")
+        self.assertEqual(query.count("m_residents.find("), 1)
+        self.assertNotIn("for (", query)
+        for retained in ("!m_enabled", "std::isfinite", "m_outer_clip_m",
+                         "inner_clipped", "m_preview_mode", "m_preview_inner_radius",
+                         "found->second.element_count != 0"):
+            self.assertIn(retained, query)
+
+    def test_refused_impostors_resolve_farthest_available_mesh_through_ordinary_batch(self):
+        collect = body(read(RENDERING / "passes/GBufferPass.cpp"),
+                       "for (const CachedStaticProp& cp : m_staticPropCache)")
+        resolver = body(read(RENDERING / "passes/GBufferPass.cpp"), "auto resolve_lod =")
+        memo = body(resolver, "if (rit == m_resolveMemo.end())")
+        self.assertIn("resolve_mesh(candidatePath, candidatePath)", memo)
+        self.assertIn("for (int mesh_lod = lod - 1; !resolved.first && mesh_lod >= 0; --mesh_lod)", memo)
+        self.assertIn("resolve_mesh(fallbackPath, fallbackPath)", memo)
+        self.assertIn("LodMeshPath(basePath, mesh_lod)", memo)
+        self.assertIn("if (authoredTree)", memo)
+        self.assertIn("m_resolveMemo", memo)
+        for retained in ("cp.model * glm::vec4(glm::vec3(mesh->boundingSphere), 1.0f)",
+                         "batch.materialId = cp.materialId", "batch.mats.push_back(cp.model)",
+                         "batch.tints.push_back(cp.tint)"):
+            self.assertIn(retained, collect)
+        tests = read(ROOT / "test/rendering/render_smoke_test.cpp")
+        regression = body(tests, "TEST(RenderSmokeTest, RefusedTreeImpostorsSubmitAvailableMeshLods)")
+        for required in ("FarWorldMode::Legacy", "FarWorldMode::Ladder", "highest_lod",
+                         "capture.mesh_draws", "capture.impostor_draws", "support.clear()",
+                         "input.resident_live_terrain = &support", "input.submitted_live_terrain = &support",
+                         "fs::create_directories", 'partial << "LM"', "ctx.frozen_replay = replay"):
+            self.assertIn(required, regression)
+
+    def test_cold_far_supported_frame_prepares_frozen_mesh_fallback(self):
+        source = read(RENDERING / "passes/GBufferPass.cpp")
+        collect = body(source, "for (const CachedStaticProp& cp : m_staticPropCache)")
+        self.assertIn("if (impostor_candidate && !ctx.frozen_replay)", collect)
+        warm = body(collect, "if (impostor_candidate && !ctx.frozen_replay)")
+        self.assertIn("resolve_lod(cp, authoredTree, 2)", warm)
+        self.assertLess(collect.index("if (impostor_candidate && !ctx.frozen_replay)"),
+                        collect.index("if (submission == StaticPropSubmission::Impostor)"))
+        resolver = body(source, "auto resolve_lod =")
+        self.assertIn("m_resolveMemo.find(rkey)", resolver)
+        self.assertIn("m_resolveMemo", body(resolver, "if (rit == m_resolveMemo.end())"))
+        self.assertIn("const auto rit = resolve_lod(cp, authoredTree, lod);", collect)
+        regression = body(read(ROOT / "test/rendering/render_smoke_test.cpp"),
+                          "TEST(RenderSmokeTest, RefusedTreeImpostorsSubmitAvailableMeshLods)")
+        cold = regression[regression.index("input.legacy_far = &far;"):
+                          regression.index("input.legacy_far = nullptr;")]
+        self.assertIn("ASSERT_TRUE(far.terrain_resident_at(root))", regression)
+        self.assertEqual(cold.count("pass.execute(ctx, entities, input)"), 2)
+        self.assertLess(cold.index("ctx.frozen_replay = false"), cold.index("pass.execute"))
+        self.assertLess(cold.index("pass.execute"), cold.index("input.far_selection.submit = false"))
+        self.assertLess(cold.index("input.far_selection.submit = false"), cold.index("ctx.frozen_replay = true"))
+        for assertion in ("EXPECT_EQ(capture.impostor_draws, 1u)",
+                          "EXPECT_EQ(capture.impostor_draws, 0u)",
+                          "EXPECT_EQ(capture.mesh_draws, highest_lod >= 0 ? 3u : 0u)",
+                          "EXPECT_EQ(capture.mesh_indices, 3 * (highest_lod + 1))"):
+            self.assertIn(assertion, cold)
+
+    def test_preview_support_and_draw_skip_camera_outer_clip_together(self):
+        source = read(RENDERING / "FarLodSystem.cpp")
+        query = compact(body(source, "bool FarLodSystem::terrain_resident_at("))
+        self.assertIn("!m_preview_mode && (!std::isfinite(distance) || distance > m_outer_clip_m)", query)
+        draw = body(source, "void FarLodSystem::draw_gbuffer(")
+        preview = body(draw, "if (m_preview_mode)")
+        for uniform in ("u_farClipFarRadius", "u_farClipNearRadius", "u_farClipInnerRadius"):
+            self.assertIn('geometry_shader.setFloat("' + uniform + '", 0.0f)', preview)
+        regression = body(read(ROOT / "test/rendering/far_lod_worker_test.cpp"),
+                          "TEST(FarLodWorker, ElevatedCameraSeesTerrainInsideItsOwnRegion)")
+        for assertion in ("ASSERT_GT(glm::length(preview_tree - camera), far.outer_clip_m())",
+                          "EXPECT_FALSE(far.terrain_resident_at(preview_tree))",
+                          "far.set_preview_anchor(preview_tree, 0.0f)",
+                          "EXPECT_TRUE(far.terrain_resident_at(preview_tree))",
+                          "far.set_preview_anchor(preview_tree, 1.0f)",
+                          "far.set_enabled(false)", "far.clear_preview_anchor()"):
+            self.assertIn(assertion, regression)
+
+    def test_bulk_submitted_coverage_reuses_storage_and_binary_searches(self):
+        source = read(RENDERING / "FarLodSystem.cpp")
+        bulk = body(source, "void SubmittedLiveTerrain::assign_origins(")
+        self.assertIn("m_submitted_chunks.reserve(origins.size())", bulk)
+        self.assertIn("live_chunk_key(glm::vec3(origin), key)", bulk)
+        self.assertIn("m_submitted_chunks.emplace_back(key, true)", bulk)
+        self.assertIn("std::sort(m_submitted_chunks.begin(), m_submitted_chunks.end())", bulk)
+        self.assertIn("std::unique(m_submitted_chunks.begin(), m_submitted_chunks.end())", bulk)
+        self.assertNotIn("m_chunks.insert", bulk)
+        clear = body(source, "void SubmittedLiveTerrain::clear(")
+        self.assertIn("m_submitted_chunks.clear()", clear)
+        for forbidden in ("shrink_to_fit", "swap", "reserve", "resize"):
+            self.assertNotIn(forbidden, clear)
+        query = body(source, "bool SubmittedLiveTerrain::covers(")
+        self.assertIn("index < m_submitted_chunks.size() && m_submitted_chunks[index].second", compact(query))
+        search = body(source, "std::size_t SubmittedLiveTerrain::submitted_index(")
+        self.assertIn("std::lower_bound", search)
+        self.assertIn("found->first == chunk_id", search)
+        frame = body(self.pipeline, "void RenderPipeline::execute_stage_gbuffer(")
+        self.assertNotIn("live.add_origin", frame)
+        self.assertIn("live.assign_origins(std::span<const glm::vec4>(m_mdi_origin_scratch.data(), draws))", compact(frame))
+        regression = body(read(ROOT / "test/rendering/render_smoke_test.cpp"),
+                          "TEST(RenderSmokeTest, SubmittedLiveTerrainBulkFramesRetainCapacityAndReplaceCoverage)")
+        for assertion in ("live.assign_origins({})", "std::reverse", "subspan(4)",
+                          "EXPECT_EQ(live.submission_capacity(), capacity)",
+                          "live.remove_chunk", "EXPECT_FALSE(live.covers({32, 1, 0}))"):
+            self.assertIn(assertion, regression)
+
+    def assert_live_submission_wiring(self):
+        source = read(RENDERING / "FarLodSystem.cpp")
+        self.assertTrue("bool SubmittedLiveTerrain::covers(" in source,
+                        "live support must be derived from this frame's submitted chunks")
+        query = body(source, "bool SubmittedLiveTerrain::covers(")
+        self.assertIn("if (live_chunk_key(position, key) && contains(key))", query)
+        self.assertIn("std::nextafter", query)
+        self.assertIn("live_chunk_key(below, key) && contains(key)", query)
+        self.assertNotIn("for (", query)
+        self.assertNotIn("while (", query)
+        key = body(source, "bool live_chunk_key(")
+        for axis in ("x", "y", "z"):
+            self.assertIn("std::isfinite(position." + axis + ")", key)
+        self.assertIn("Chunk::calculate_id", key)
+        for bound in ("kPackedMinXz", "kPackedMaxXz", "kPackedMinY", "kPackedMaxY"):
+            self.assertIn(bound, key)
+        add = body(source, "void SubmittedLiveTerrain::add_origin(")
+        self.assertIn("if (live_chunk_key(origin, key))", add)
+        self.assertIn("m_chunks.insert(key)", add)
+        self.assertEqual(compact(body(source, "void SubmittedLiveTerrain::clear(")),
+                         "m_chunks.clear(); m_submitted_chunks.clear();")
+        submit = body(self.pipeline, "SubmitTerrainChunksFn RenderPipeline::make_terrain_submitter(")
+        self.assertNotIn("m_farlod", submit)
+        frame = body(self.pipeline, "void RenderPipeline::execute_stage_gbuffer(")
+        for branch in (submit, frame):
+            self.assertIn("m_hierarchicalCuller.CullHierarchical(", branch)
+            self.assertIn("draw_chunks_mdi(visible_chunks, draws, indices)", branch)
+            self.assertIn("m_terrain_coverage_visible.insert(chunk->id)", branch)
+            self.assertIn("TerrainSubmitStats{visible_chunks.size(), draws, indices}", branch)
+        self.assertLess(frame.index("draw_chunks_mdi(visible_chunks, draws, indices)"), frame.index("live.assign_origins("))
+        self.assertIn("live.assign_origins(std::span<const glm::vec4>(m_mdi_origin_scratch.data(), draws))", compact(frame))
+        self.assertLess(frame.index("live.clear();"), frame.index("live.assign_origins("))
+        self.assertLess(frame.index("live.clear();"), frame.index("m_gbuffer_pass->execute("))
+        self.assertIn("gbuffer_input.submitted_live_terrain = &live", frame)
+        collect = body(read(RENDERING / "passes/GBufferPass.cpp"),
+                       "for (const CachedStaticProp& cp : m_staticPropCache)")
+        self.assertIn("input.submitted_live_terrain && input.submitted_live_terrain->covers(cp.position)", compact(collect))
+        self.assertNotIn("kFarClipInnerRadiusMeters", collect)
+        return source
+
+    def test_live_submitted_tree_at_200_metres_survives_cold_far_streaming(self):
+        self.assert_live_submission_wiring()
+        tests = read(ROOT / "test/rendering/render_smoke_test.cpp")
+        self.assertIn("200.0f", body(tests, "TEST(RenderSmokeTest, StaticPropCollectionPreservesSubmittedLiveTerrainAtEveryLod)"))
+
+    def test_tree_without_live_or_far_support_is_refused_even_inside_old_ring(self):
+        source = self.assert_live_submission_wiring()
+        policy = body(source, "StaticPropSubmission SelectStaticPropSubmission(")
+        self.assertIn("!far_terrain_resident", policy)
+        self.assertIn("return StaticPropSubmission::Refused;", policy)
+
+    def test_far_only_support_survives_live_submission_loss(self):
+        self.assert_live_submission_wiring()
+        tests = read(ROOT / "test/rendering/render_smoke_test.cpp")
+        transition = body(tests, "TEST(RenderSmokeTest, StaticPropCollectionKeepsFarSupportAfterLiveSubmissionDisappears)")
+        for retained in ("live.clear()", "live.covers(position), true", "StaticPropSubmission::Impostor",
+                         "live.covers(position), false", "StaticPropSubmission::Refused"):
+            self.assertIn(retained, transition)
+
+    def test_submitted_live_coverage_includes_192_384_640_lod_bands(self):
+        self.assert_live_submission_wiring()
+        tests = read(ROOT / "test/rendering/render_smoke_test.cpp")
+        bands = body(tests, "TEST(RenderSmokeTest, StaticPropCollectionPreservesSubmittedLiveTerrainAtEveryLod)")
+        for boundary in ("191.99f", "192.0f", "192.01f", "383.99f", "384.0f", "384.01f", "639.99f", "640.0f"):
+            self.assertIn(boundary, bands)
+
+    def assert_resident_live_support_wiring(self):
+        frame = body(self.pipeline, "void RenderPipeline::execute_stage_gbuffer(")
+        self.assertIn("gbuffer_input.resident_live_terrain = &m_farlod->resident_live_terrain();", frame)
+        self.assertNotIn("resident_live_terrain().clear()", frame)
+        self.assertNotIn("resident_live_terrain().add_origin(", frame)
+        collect = body(read(RENDERING / "passes/GBufferPass.cpp"),
+                       "for (const CachedStaticProp& cp : m_staticPropCache)")
+        ownership = compact(collect[collect.index("const bool live_terrain_owned"):
+                                    collect.index("const bool far_terrain_resident")])
+        self.assertIn("impostor_candidate &&", ownership)
+        self.assertIn("|| (input.resident_live_terrain && input.resident_live_terrain->covers(cp.position))", ownership)
+        for forbidden in ("selection", "distance", "dist <", "legacy_far", "for (", "while ("):
+            self.assertNotIn(forbidden, ownership)
+        inputs = read(RENDERING / "RenderInputs.h")
+        self.assertIn("const SubmittedLiveTerrain* resident_live_terrain = nullptr;", inputs)
+
+    def test_culled_ground_keeps_visible_canopy_support(self):
+        self.assert_resident_live_support_wiring()
+        tests = read(ROOT / "test/rendering/render_smoke_test.cpp")
+        regression = body(tests, "TEST(RenderSmokeTest, VisibleCanopyKeepsResidentSupportWhenGroundIsFrustumCulled)")
+        for required in ("TerrainCullingTestPeer::Cull({ground, canopy}, planes)",
+                         "ASSERT_FALSE(visible.contains(Chunk::calculate_id(ground)))",
+                         "ASSERT_TRUE(visible.contains(Chunk::calculate_id(canopy)))",
+                         "submitted.clear()", "ASSERT_FALSE(submitted.covers(root))",
+                         "ASSERT_TRUE(resident.covers(root))", "StaticPropSubmission::Impostor"):
+            self.assertIn(required, regression)
+
+    def test_authored_tree_band_keeps_resident_live_support_when_far_refuses(self):
+        self.assert_resident_live_support_wiring()
+        tests = read(ROOT / "test/rendering/render_smoke_test.cpp")
+        regression = body(tests, "TEST(RenderSmokeTest, AuthoredTreeBandUsesResidentLiveTerrainWithoutFarSupport)")
+        for required in ("65.0f", "100.0f", "175.99f", "176.0f", "640.0f",
+                         "AuthoredTreeLodConfig(true)", "ASSERT_FALSE(far.terrain_resident_at(root))",
+                         "ASSERT_TRUE(resident.covers(root))", "StaticPropSubmission::Impostor",
+                         "StaticPropSubmission::Refused", "FarWorldRefusal::BackendUnavailable"):
+            self.assertIn(required, regression)
+
+    def test_live_residency_follows_successful_uploads_and_all_retirement_paths(self):
+        upload = body(self.pipeline, "void RenderPipeline::upload_chunk_mesh(")
+        publish = "m_farlod->resident_live_terrain().add_origin("
+        self.assertEqual(upload.count(publish), 1)
+        self.assertLess(upload.index("if (!payload.has_mesh())"), upload.index(publish))
+        failure = body(upload, "if (new_handle == ChunkRenderData::kInvalidPoolHandle)")
+        self.assertNotIn("resident_live_terrain", failure)
+        self.assertIn("return;", failure)
+        self.assertLess(upload.index("render_data.element_count = index_count;"), upload.index(publish))
+        self.assertLess(upload.index("render_data.pool_handle = new_handle;"), upload.index(publish))
+        self.assertNotIn("resident_live_terrain", body(self.pipeline, "void RenderPipeline::upload_water_mesh("))
+        unload = body(self.pipeline, "void RenderPipeline::unload_chunk_resources(")
+        self.assertIn("resident_live_terrain().remove_chunk(chunk_id)", unload)
+        self.assertIn("submitted_live_terrain().remove_chunk(chunk_id)", unload)
+        clear = body(self.pipeline, "void RenderPipeline::clear_all_chunk_data(")
+        self.assertIn("resident_live_terrain().clear()", clear)
+        self.assertIn("submitted_live_terrain().clear()", clear)
+        far = read(RENDERING / "FarLodSystem.cpp")
+        swap = body(far, "void FarLodSystem::prepare_world_swap(")
+        self.assertNotIn("m_resident_live_terrain.clear()", swap)
+        shutdown = body(far, "void FarLodSystem::shutdown(")
+        self.assertIn("prepare_world_swap();", shutdown)
+        self.assertIn("m_resident_live_terrain.clear()", shutdown)
+        self.assertIn("m_farlod->shutdown();", body(self.pipeline, "void RenderPipeline::cleanup_gpu_resources("))
+        removal = body(far, "void SubmittedLiveTerrain::remove_chunk(")
+        self.assertIn("m_chunks.erase(chunk_id);", removal)
+        self.assertIn("submitted_index(chunk_id)", removal)
+        self.assertIn("m_submitted_chunks[index].second = false", removal)
+        self.assertNotIn("m_submitted_chunks.erase", removal)
+
+    def test_missing_live_and_far_terrain_still_refuses_tree(self):
+        self.assert_resident_live_support_wiring()
+        tests = read(ROOT / "test/rendering/render_smoke_test.cpp")
+        regression = body(tests, "TEST(RenderSmokeTest, VisibleCanopyKeepsResidentSupportWhenGroundIsFrustumCulled)")
+        self.assertLess(regression.index("resident.remove_chunk("),
+                        regression.index("StaticPropSubmission::Refused"))
+        self.assertIn("EXPECT_FALSE(resident.covers(root))", regression)
+        policy = body(read(RENDERING / "FarLodSystem.cpp"), "StaticPropSubmission SelectStaticPropSubmission(")
+        self.assertIn("if (!selection.submit || !far_terrain_resident)", policy)
+        self.assertIn("return StaticPropSubmission::Refused;", policy)
+
+    def test_ladder_impostors_refuse_missing_or_unknown_terrain_coverage(self):
+        source = read(RENDERING / "FarLodSystem.cpp")
+        self.assertIn("StaticPropSubmission SelectStaticPropSubmission(", source)
+        policy = compact(body(source,
+                              "StaticPropSubmission SelectStaticPropSubmission("))
+        self.assertIn("if (!selection.submit || !far_terrain_resident)", policy)
+        self.assertNotIn("selection.effective", policy)
+        self.assertLess(policy.index("if (live_terrain_owned)"),
+                        policy.index("if (!selection.submit || !far_terrain_resident)"))
+        collect = body(read(RENDERING / "passes/GBufferPass.cpp"),
+                       "for (const CachedStaticProp& cp : m_staticPropCache)")
+        far_support = compact(collect[collect.index("const bool far_terrain_resident"):
+                                      collect.index("const auto submission")])
+        self.assertIn("input.far_selection.effective == FarWorldMode::Legacy", far_support)
+        self.assertIn("input.legacy_far &&", far_support)
+        self.assertIn("input.legacy_far->terrain_resident_at(cp.position)", far_support)
+        pipeline = read(RENDERING / "RenderPipeline.cpp")
+        self.assertIn("gbuffer_input.legacy_far = legacy_far_compatibility();", pipeline)
+        tests = read(ROOT / "test/rendering/render_smoke_test.cpp")
+        regression = body(tests, "TEST(RenderSmokeTest, LadderImpostorsRequireConfirmedTerrainCoverage)")
+        for required in ("ASSERT_EQ(ladder.effective, FarWorldMode::Ladder)",
+                         "ladder, true, false, false", "ladder, true, false, true",
+                         "far.resident_live_terrain().covers(root), false",
+                         "StaticPropSubmission::Impostor", "StaticPropSubmission::Refused",
+                         "resident_live_terrain().remove_chunk("):
+            self.assertIn(required, regression)
+
     def test_near_terrain_eligibility_publishes_with_matching_mesh_version(self):
         world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
         self.assertIn("CaptureNearTerrainMeshEvidence(", world)
@@ -314,7 +842,8 @@ class UploadBudgetWiring(unittest.TestCase):
         cleanup = body(self.main, "auto finish_world_replacement =")
         guard = "if (gameSession->WorldRevision() != entry_world_revision)"
         self.assertIn(guard, cleanup)
-        self.assertEqual(compact(cleanup.split(guard, 1)[1]), "prepare_world_entry();")
+        self.assertEqual(compact(cleanup.split(guard, 1)[1]),
+                         "{ release_player_controller(); prepare_world_entry(); }")
         # Both outcomes use the same revision predicate: refusal before adoption
         # preserves state; success and a failure after adoption both retire it.
         expression = re.search(r"if \((.*)\)", cleanup).group(1)
@@ -835,7 +1364,9 @@ class UploadBudgetWiring(unittest.TestCase):
 
     def test_empty_water_replacements_are_adopted_through_the_budget(self):
         integrate = body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources(")
-        self.assertIn("!Water || found == records.end() || found->second.element_count == 0", integrate)
+        self.assertIn("(!Water && !retire_refined) || found == records.end() ||", compact(integrate))
+        self.assertIn("found->second.element_count == 0", integrate)
+        self.assertIn("bool retire_refined = false", integrate)
         self.assertIn("!chunk.water_metadata_valid", integrate)
         self.assertIn("if (payload.has_mesh())", integrate)
         self.assertIn("unload_water_resources(candidate.chunk.id)", integrate)

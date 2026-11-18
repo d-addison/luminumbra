@@ -70,6 +70,9 @@ void GBufferDiagnosticCapture::unsupported(std::string_view producer,
                                            std::uint32_t lod,
                                            DiagnosticOwnership ownership) {
     state_->failed = true;
+    if (state_->refused) {
+        return;
+    }
     DiagnosticId unused{};
     if (!state_->table.submit({.mesh_path = {},
                                .shader_variant = producer,
@@ -79,12 +82,16 @@ void GBufferDiagnosticCapture::unsupported(std::string_view producer,
                                .pass = DiagnosticPass::GBuffer,
                                .provenance = DiagnosticProvenance::Unsupported},
                               unused)) {
-        throw std::runtime_error("Diagnostic unsupported record exceeds registry bounds");
+        state_->refused = true;
     }
 }
 
+bool GBufferDiagnosticCapture::refused() const {
+    return state_->refused;
+}
+
 bool GBufferDiagnosticCapture::complete() const {
-    return state_->captured && !state_->framebuffer && !state_->failed &&
+    return state_->captured && !state_->framebuffer && !state_->failed && !state_->refused &&
            !state_->attachment_lease && state_->table.complete_coverage();
 }
 
@@ -137,10 +144,12 @@ void GBufferDiagnosticCapture::write(const Shader& shader, const DiagnosticSubmi
         if (submission.provenance == DiagnosticProvenance::Unsupported) {
             state_->failed = true;
         }
-        if (!state_->table.submit(submission, id)) {
-            unsupported("diagnostic_identity_refused", submission.lod, submission.ownership);
-            throw std::runtime_error("Diagnostic identity submission refused");
+        if (!state_->refused && !state_->table.submit(submission, id)) {
+            state_->refused = true;
+            state_->failed = true;
         }
+        // Refused draws carry no identity, never the previous draw's ID. Once
+        // refused, do no more registry work or allocation for this capture.
         glProgramUniform4uiv(shader.Id(), entry.identity, 1, id.data());
         return;
     }
@@ -427,6 +436,42 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
                                       entt::registry& registry,
                                       const GBufferPassInput& input) {
     LUMIN_PROFILE_ZONE_N("GL GBufferPass.execute");
+    // Only diagnostic captures save caller state. Ordinary frames retain the
+    // normal pass bindings without capture-only driver queries or restore binds.
+    const bool diagnostic_capture = GBufferDiagnosticCapture::Current() != nullptr;
+    GLint previous_vao = 0, previous_draw_fbo = 0, previous_read_fbo = 0;
+    GLuint previous_gbuffer_fbo = 0;
+    GLboolean previous_cull = GL_FALSE;
+    if (diagnostic_capture) {
+        previous_gbuffer_fbo = m_gbuffer.fbo_id;
+        glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &previous_vao);
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous_draw_fbo);
+        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read_fbo);
+        previous_cull = glIsEnabled(GL_CULL_FACE);
+    }
+    ReplayRollback restore_gl([=, this]() noexcept {
+        if (!diagnostic_capture) {
+            return;
+        }
+        glBindVertexArray(static_cast<GLuint>(previous_vao));
+        // Authored submissions can recreate the targets. Restore the caller's
+        // logical G-buffer binding rather than its deleted framebuffer name.
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER,
+                          previous_gbuffer_fbo != 0 &&
+                                  static_cast<GLuint>(previous_draw_fbo) == previous_gbuffer_fbo
+                              ? m_gbuffer.fbo_id
+                              : static_cast<GLuint>(previous_draw_fbo));
+        glBindFramebuffer(GL_READ_FRAMEBUFFER,
+                          previous_gbuffer_fbo != 0 &&
+                                  static_cast<GLuint>(previous_read_fbo) == previous_gbuffer_fbo
+                              ? m_gbuffer.fbo_id
+                              : static_cast<GLuint>(previous_read_fbo));
+        if (previous_cull) {
+            glEnable(GL_CULL_FACE);
+        } else {
+            glDisable(GL_CULL_FACE);
+        }
+    });
     // ON already populated persistent mesh caches. Keep reused per-dispatch
     // scratch exactly as ON left it, including when a later stage throws.
     auto restore = [this,
@@ -525,7 +570,9 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
         geometry_pass_skinned_meshes(ctx, input, registry, camera, fp, stats);
     }
 
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (!diagnostic_capture) {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
     return stats;
 }
 
@@ -849,8 +896,8 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     // instance picks a LOD bucket from its camera distance (SelectTreeLod) and the
     // group is keyed by the RESOLVED LOD mesh path so distant trees draw a coarser
     // variant; texture/material lookup uses the BASE path so LOD never loses the
-    // bark/leaf textures.. Missing LOD variant -> LOD0 fallback, so a
-    // world with no LOD variants is byte-identical to the pre-LOD renderer.
+    // bark/leaf textures. Authored trees try lower mesh LODs in descending order;
+    // other props retain the LOD0 fallback when their selected variant is missing.
     const glm::vec3 cameraPos = camera.Position;
     const bool impostorsOn = input.tree_impostor_enabled;
     TreeLodConfig kTreeLodCfg; // data-driven defaults; render.tree_lod.* may override later.
@@ -884,6 +931,30 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         }
         return {nullptr, basePath};
     };
+    auto resolve_lod = [&](const CachedStaticProp& cp, bool authoredTree, int lod) {
+        const std::uint64_t rkey = cp.baseMeshHash ^ (static_cast<std::uint64_t>(lod) *
+                                                      std::uint64_t{0x9E3779B97F4A7C15ull});
+        auto rit = m_resolveMemo.find(rkey);
+        if (rit == m_resolveMemo.end()) {
+            const std::string& basePath = m_propMeshPaths[cp.pathIndex];
+            const std::string candidatePath = LodMeshPath(basePath, lod);
+            auto resolved = resolve_mesh(candidatePath, candidatePath);
+            // At most kTreeLodCount probes for authored trees, only on a memo miss.
+            // Cache failed loads too; steady frames do no new probing or allocation.
+            if (authoredTree) {
+                for (int mesh_lod = lod - 1; !resolved.first && mesh_lod >= 0; --mesh_lod) {
+                    const std::string fallbackPath = LodMeshPath(basePath, mesh_lod);
+                    resolved = resolve_mesh(fallbackPath, fallbackPath);
+                }
+            } else if (!resolved.first) {
+                resolved = resolve_mesh(basePath, basePath);
+            }
+            rit = m_resolveMemo
+                      .emplace(rkey, std::make_pair(resolved.first, std::move(resolved.second)))
+                      .first;
+        }
+        return rit;
+    };
     // Reuse the per-group buffers across frames: keep capacity, clear contents,
     // mark inactive. A group's mesh/drawPath/basePath/material are fixed by its key
     // (rkey encodes baseMeshHash+lod), so the metadata is set once and kept.
@@ -912,8 +983,36 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         if (cp.impostorTree && !authoredTree) {
             lod = std::min(lod, 2);
         }
-        if (impostorsOn && authoredTree && lod == 3 &&
-            cp.impostorTree) {     // a tree part -> impostor replaces it at LOD3
+        bool impostor_candidate = false;
+        if (impostorsOn && authoredTree && lod == 3 && cp.impostorTree) {
+            impostor_candidate = true; // a tree part -> impostor replaces it at LOD3
+        }
+        // A paired far-OFF replay may need meshes even when this frame uses an
+        // impostor. Resolve every eligible part before freezing, including failed
+        // probes, so replay only consumes the same memoized fallback chain.
+        if (impostor_candidate && !ctx.frozen_replay) {
+            (void)resolve_lod(cp, authoredTree, 2);
+        }
+        // Submitted chunks are resident too; culling the ground must not remove
+        // support while its canopy is still visible (including the authored LOD3 band).
+        const bool live_terrain_owned =
+            impostor_candidate &&
+            ((input.submitted_live_terrain && input.submitted_live_terrain->covers(cp.position)) ||
+             (input.resident_live_terrain && input.resident_live_terrain->covers(cp.position)));
+        // Ladder exposes no per-position coverage here; unknown support refuses.
+        // Never substitute the inactive Legacy owner for selected Ladder terrain.
+        const bool far_terrain_resident =
+            impostor_candidate && !live_terrain_owned && input.far_selection.submit &&
+            input.far_selection.effective == FarWorldMode::Legacy && input.legacy_far &&
+            input.legacy_far->terrain_resident_at(cp.position);
+        const auto submission = SelectStaticPropSubmission(
+            input.far_selection, impostor_candidate, live_terrain_owned, far_terrain_resident);
+        if (submission == StaticPropSubmission::Refused) {
+            // Refusing the billboard must not remove its leaf, bark or trunk parts.
+            // Rejoin ordinary mesh batching with the same transform/material/attribution.
+            lod = 2;
+        }
+        if (submission == StaticPropSubmission::Impostor) {
             if (cp.impostorLeaf) { // the per-tree representative; bark/trunk are folded into the
                                    // billboard
                 const glm::vec3 c =
@@ -933,17 +1032,8 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             }
             continue; // all LOD3 tree parts are folded into the billboard
         }
-        const std::uint64_t rkey = cp.baseMeshHash ^ (static_cast<std::uint64_t>(lod) *
-                                                      std::uint64_t{0x9E3779B97F4A7C15ull});
-        auto rit = m_resolveMemo.find(rkey);
-        if (rit == m_resolveMemo.end()) {
-            const std::string& basePath = m_propMeshPaths[cp.pathIndex];
-            const std::string candidatePath = LodMeshPath(basePath, lod);
-            auto resolved = resolve_mesh(candidatePath, basePath);
-            rit = m_resolveMemo
-                      .emplace(rkey, std::make_pair(resolved.first, std::move(resolved.second)))
-                      .first;
-        }
+        const auto rit = resolve_lod(cp, authoredTree, lod);
+        const std::uint64_t rkey = rit->first;
         Mesh* mesh = rit->second.first;
         if (!mesh)
             continue;
@@ -961,7 +1051,7 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             continue;
         // Group by a cheap uint64 (no per-instance string alloc/copy/compare).
         const std::uint64_t gkey =
-            rkey ^ (static_cast<std::uint64_t>(cp.materialId) * 0x100000001B3ull);
+            rkey ^ (static_cast<std::uint64_t>(cp.materialId) * std::uint64_t{0x100000001B3ull});
         auto& batch = m_visibleGroups[gkey];
         if (batch.mesh == nullptr) { // first ever sighting fixes the group metadata
             batch.mesh = mesh;
@@ -982,6 +1072,19 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         Mesh* mesh = batch.mesh;
         if (!mesh || matrices.empty())
             continue;
+        // Set when the mesh identity cannot be recorded: the draw is still submitted,
+        // carrying an unsupported (path-less) identity so the scene is unchanged.
+        bool identity_path_unrecordable = false;
+        if (capture) {
+            if (mesh->indexCount >
+                static_cast<std::uint32_t>(std::numeric_limits<GLsizei>::max())) {
+                capture->unsupported("diagnostic_static_mesh_index_count");
+                continue;
+            }
+            // Bound temporary LOD-path copies to the registry's 1,024-byte UTF-8 limit.
+            identity_path_unrecordable =
+                batch.basePath.size() > 1024 || batch.drawPath.size() > 1024;
+        }
         shader->setInt("u_materialId", static_cast<int>(batch.materialId));
         bool two_sided = false;
         //  static-model UV texture lane: if this mesh has registered bark/leaf
@@ -1047,7 +1150,7 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                             static_cast<GLsizeiptr>(static_cast<std::size_t>(instance_count) *
                                                     sizeof(glm::mat4)),
                             matrices.data() + offset);
-            for (GLuint i = 0; i < 4; i++) {
+            for (GLuint i = 0; i < 4; ++i) {
                 glEnableVertexAttribArray(3 + i);
                 glVertexAttribPointer(3 + i,
                                       4,
@@ -1068,37 +1171,30 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             glVertexAttribPointer(7, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)nullptr);
             glVertexAttribDivisor(7, 1);
             if (capture) {
-                if (mesh->indexCount >
-                    static_cast<std::uint32_t>(std::numeric_limits<GLsizei>::max())) {
-                    capture->unsupported("diagnostic_static_mesh_index_count");
-                    throw std::runtime_error("Diagnostic static mesh index count exceeds GLsizei");
-                }
-                // Bound temporary LOD-path copies to the registry's UTF-8 path limit.
-                if (batch.basePath.size() > 1024 || batch.drawPath.size() > 1024) {
-                    capture->unsupported("static_mesh_identity_path_limit");
-                    throw std::runtime_error("Diagnostic static mesh path exceeds registry bounds");
-                }
                 std::uint32_t resolved_lod = 0;
-                for (int level = 1; level < kTreeLodCount; ++level) {
+                for (int level = 1; !identity_path_unrecordable && level < kTreeLodCount; ++level) {
                     if (batch.drawPath == LodMeshPath(batch.basePath, level)) {
                         resolved_lod = static_cast<std::uint32_t>(level);
                         break;
                     }
                 }
                 const bool generated = batch.drawPath.starts_with("procgen://");
+                const bool unattributed = generated || identity_path_unrecordable;
+                const std::string_view variant =
+                    identity_path_unrecordable ? "static_mesh_identity_path_limit"
+                    : input.far_selection.effective == FarWorldMode::Ladder
+                        ? "instanced_static_mesh_ladder"
+                        : "instanced_static_mesh";
                 for (GLsizei instance = 0; instance < instance_count; ++instance) {
-                    capture->write(
-                        *shader,
-                        {.mesh_path = generated ? std::string_view{} : batch.drawPath,
-                         .shader_variant = input.far_selection.effective == FarWorldMode::Ladder
-                                               ? "instanced_static_mesh_ladder"
-                                               : "instanced_static_mesh",
-                         .chunk = {},
-                         .lod = resolved_lod,
-                         .ownership = DiagnosticOwnership::Live,
-                         .pass = DiagnosticPass::GBuffer,
-                         .provenance = generated ? DiagnosticProvenance::Unsupported
-                                                 : DiagnosticProvenance::Mesh});
+                    capture->write(*shader,
+                                   {.mesh_path = unattributed ? std::string_view{} : batch.drawPath,
+                                    .shader_variant = variant,
+                                    .chunk = {},
+                                    .lod = resolved_lod,
+                                    .ownership = DiagnosticOwnership::Live,
+                                    .pass = DiagnosticPass::GBuffer,
+                                    .provenance = unattributed ? DiagnosticProvenance::Unsupported
+                                                               : DiagnosticProvenance::Mesh});
                     Luminumbra::Rendering::AttributedGl::Submit(
                         glDrawElementsInstancedBaseInstance,
                         GLenum{GL_TRIANGLES},

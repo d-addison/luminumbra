@@ -287,6 +287,10 @@ bool FarWorldRenderer::StageSessionTarget(const FarWorldAuthorityProducer& produ
     refusal_ = session_->AdmissionRefusal();
     return accepted;
 }
+std::size_t FarWorldRenderer::RetireIdleHistory() {
+    CheckOwner();
+    return requested_ == FarWorldMode::Ladder && session_ ? session_->RetireIdleHistory() : 0;
+}
 const FarWorldHandoffDiagnosticSnapshot* FarWorldRenderer::SessionDiagnostic() const {
     CheckOwner();
     return session_ ? &session_->Diagnostic() : nullptr;
@@ -318,7 +322,13 @@ FarWorldSelection FarWorldRenderer::Selection(FarWorldPurpose purpose,
     if (prerequisite == FarWorldRefusal::None &&
         !(session_ ? session_->BackendAvailable() : driver_ && driver_->ValidContext()))
         prerequisite = FarWorldRefusal::BackendUnavailable;
-    return SelectFarWorld(requested_, purpose, prerequisite, enabled);
+    auto selection = SelectFarWorld(requested_, purpose, prerequisite, enabled);
+    // Explicit Legacy still reports admission failures from a bound session.
+    // Preview purposes retain their own selection refusals.
+    if (session_ && purpose == FarWorldPurpose::World) {
+        selection.refusal = prerequisite;
+    }
+    return selection;
 }
 
 FarWorldCavePolicy FarWorldRenderer::CavePolicy(const FarWorldSelection& selection) const noexcept {

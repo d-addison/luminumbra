@@ -199,6 +199,7 @@ add_executable(common_tests
     common/StationDiscovery_test.cpp
     common/Crc32_test.cpp
     rendering/shader_compositing_contract_test.cpp
+    rendering/photo_environment_test.cpp
     common/AnimationRuntime_test.cpp
     common/AnimationClipFormat_test.cpp
     common/BiomeReverb_test.cpp
@@ -230,7 +231,6 @@ add_executable(common_tests
     rendering/FarWorldReplay_test.cpp
     rendering/FarWorldDiagnostics_test.cpp
     rendering/FarWorldRenderer_test.cpp
-    rendering/FarWorldLegacyIsolation_test.cpp
     rendering/FarWorldOwnership_test.cpp
     rendering/FarWorldDepthBias_test.cpp
     rendering/FarWorldFog_test.cpp
@@ -261,7 +261,10 @@ add_executable(common_tests
     # Snapshot cursor restoration and destination refusal cases are discovered
     # by common_tests for both active-region settings.
     common/GameSessionHeadlessWorld_test.cpp
+    # Sole definition of the test-only GameSession authority-profile constructor.
+    common/GameSessionAuthorityProfileTestSeam.cpp
     common/GameSessionPlantPersistence_test.cpp
+    common/RegionFixtureCapture_test.cpp
     # Incremental cursor layout and staged-load refusal regressions use the same discovery.
     persistence/world_state_commit_test.cpp
     common/SimBudgetTelemetry_test.cpp
@@ -387,6 +390,13 @@ target_link_libraries(common_tests PRIVATE
     luminumbra_save_fixture_support
 )
 
+# Explicit capture tool: built by default, never registered with CTest discovery.
+add_executable(region_fixture_capture tools/RegionFixtureCapture.cpp)
+target_include_directories(region_fixture_capture PRIVATE ../src)
+target_compile_definitions(region_fixture_capture PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+target_link_libraries(region_fixture_capture PRIVATE gtest luminumbra_common)
+luminumbra_configure_first_party_target(region_fixture_capture)
+
 # Frozen-water rendering exercises the client bridge and mesh implementation.
 add_executable(far_frozen_water_mesh_test rendering/FarFrozenWaterMesh_test.cpp)
 target_link_libraries(far_frozen_water_mesh_test PRIVATE gtest_main luminumbra_client)
@@ -441,13 +451,25 @@ luminumbra_configure_first_party_target(rendering_defaults_test)
 add_executable(capture_manifest_test
     rendering/capture_manifest_test.cpp
     rendering/diagnostic_capture_test.cpp
-    rendering/diagnostic_attribution_test.cpp
+    rendering/temporal_audit_test.cpp
+    ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp
+    ../src/luminumbra_client/rendering/TemporalAudit.cpp
     ../src/luminumbra_client/rendering/CaptureManifest.cpp
     ../src/luminumbra_client/rendering/DiagnosticCapture.cpp)
 target_include_directories(capture_manifest_test PRIVATE ../src ../src/luminumbra_client)
-target_link_libraries(capture_manifest_test PRIVATE gtest_main nlohmann_json::nlohmann_json glad)
-target_compile_definitions(capture_manifest_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+target_link_libraries(capture_manifest_test PRIVATE gtest_main nlohmann_json::nlohmann_json luminumbra_common glad)
 luminumbra_configure_first_party_target(capture_manifest_test)
+
+# GL-free feature selection, runtime resolution and capability manifest contracts.
+add_executable(capture_feature_profile_test
+    rendering/capture_feature_profile_test.cpp
+    ../src/luminumbra_client/rendering/CaptureFeatureProfile.cpp
+    ../src/luminumbra_client/rendering/TemporalAudit.cpp
+    ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp)
+target_include_directories(capture_feature_profile_test PRIVATE ../src ../src/luminumbra_client)
+target_link_libraries(capture_feature_profile_test PRIVATE
+    gtest_main luminumbra_common nlohmann_json glm)
+luminumbra_configure_first_party_target(capture_feature_profile_test)
 
 #  far-field impostors: the hemi-octahedral view<->tile mapping math (GL-free,
 # the shared source of truth for the atlas bake + the impostor shader).
@@ -590,7 +612,9 @@ if(MSVC)
 endif()
 
 add_executable(render_smoke_test
+    rendering/diagnostic_attribution_test.cpp
     rendering/render_smoke_test.cpp
+    rendering/FarWorldLegacyIsolation_test.cpp
     rendering/FarWorldShadow_test.cpp
     rendering/FarWorldFogGl_test.cpp
     rendering/FarWorldWaterGl_test.cpp
@@ -1962,6 +1986,10 @@ target_link_libraries(audio_disabled_test PRIVATE
     glm
 )
 
+# Shared GL-free dependency for the standalone launch-parser consumers.
+target_sources(runtime_surface_options_test PRIVATE ../src/luminumbra_client/rendering/TemporalAudit.cpp)
+target_sources(audio_disabled_test PRIVATE ../src/luminumbra_client/rendering/TemporalAudit.cpp)
+
 #  capture-native update the baseline: resolution-relative gate-threshold scaling unit
 # tests (core/CaptureScale.h is dependency-free, so this needs no GL/common libs).
 add_executable(capture_scale_test
@@ -2115,6 +2143,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     tree_lod_test
     rendering_defaults_test
     capture_manifest_test
+    capture_feature_profile_test
     # the hemi-octa mapping test was built but never
     # registered — the atlas-bake/shader shared source of truth had zero
     # executing coverage. GL-free pure math, safe in the default lane.
@@ -2312,6 +2341,8 @@ set_tests_properties(ShieldRtSpike PROPERTIES
 
 # Simulation telemetry captures require the standard-library Python validator.
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME RegionFixtureCaptureContract
+    COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/test/tools/test_region_fixture_capture_contract.py")
 add_test(NAME RegionFixtureRegeneratorContract
     COMMAND "${Python3_EXECUTABLE}" -I -B "${CMAKE_SOURCE_DIR}/test/tools/test_regenerate_region_fixtures.py")
 
@@ -2776,6 +2807,38 @@ add_test(NAME ReplaySourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
 add_test(NAME RenderRunnerEvidencePython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_runner_evidence.py)
 set_tests_properties(RenderRunnerEvidencePython PROPERTIES TIMEOUT 60)
 add_test(NAME RenderSceneMatrixPython COMMAND "${Python3_EXECUTABLE}" -B ${CMAKE_SOURCE_DIR}/tools/rendering/acceptance/test_scene_matrix.py)
+
+# Opt-in advisory scenes do not enter required native test plans.
+option(LUMINUMBRA_SHADER_SCENES "Register software shader reference scenes" OFF)
+if(LUMINUMBRA_SHADER_SCENES)
+    add_executable(shader_scene_render_test rendering/shader_scene_render_test.cpp)
+    # Re-run configuration when the fixture changes so its embedded hash stays current.
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/test/rendering/shader_scene_render_test.cpp")
+    file(READ "${CMAKE_SOURCE_DIR}/test/rendering/shader_scene_render_test.cpp" _shader_scene_source)
+    string(REPLACE "\r\n" "\n" _shader_scene_source "${_shader_scene_source}")
+    string(SHA256 _shader_scene_hash "${_shader_scene_source}")
+    target_compile_definitions(shader_scene_render_test PRIVATE
+        LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+        LUMINUMBRA_SHADER_SCENE_INPUT_HASH="${_shader_scene_hash}")
+    target_link_libraries(shader_scene_render_test PRIVATE gtest_main glfw glad)
+    if(WIN32)
+        target_link_libraries(shader_scene_render_test PRIVATE opengl32)
+    elseif(APPLE)
+        target_link_libraries(shader_scene_render_test PRIVATE ${OPENGL_LIBRARIES})
+    else()
+        target_link_libraries(shader_scene_render_test PRIVATE OpenGL::GL)
+    endif()
+    luminumbra_configure_first_party_target(shader_scene_render_test)
+    add_test(NAME ShaderSceneSoftwareGl COMMAND "${Python3_EXECUTABLE}" -I -B
+        "${CMAKE_SOURCE_DIR}/tools/static_preview/run_software_gl.py"
+        --binary "$<TARGET_FILE:shader_scene_render_test>" --profile shader-scenes
+        --output-parent "${CMAKE_BINARY_DIR}/shader-scene-capture")
+    set_tests_properties(ShaderSceneSoftwareGl PROPERTIES TIMEOUT 180
+        RESOURCE_LOCK luminumbra_gl_context)
+endif()
+add_test(NAME ShaderScenesPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/tools/gates/test_shader_scenes.py")
 
 # Ordinary test lanes need no downloaded game art. Generate valid synthetic
 # meshes/materials and their manifest solely for the isolated runner roots.
