@@ -57,7 +57,7 @@ struct TimelapseDrainState {
     float surf = 0.0f;
 };
 
-// let the world stream/settle before frame 0
+// extra frames rendered after world presentation is ready, before frame 0
 inline constexpr int kTimelapseSettleFrames = 45;
 // let chunks stream + atmosphere settle
 inline constexpr int kFrameScanSettleFrames = 90;
@@ -153,7 +153,7 @@ struct CaptureModes {
     float timelapse_daystep =
         0.0f; // time-of-day advance per frame [0,1] (shade/sky drift); 0 = leave
     int timelapse_captured = 0;
-    int timelapse_settle = 0;
+    int timelapse_settle = 0;   // post-readiness settle frames rendered so far
     bool timelapse_dig = false; // progressively carve a trench mid-capture (terraform demo)
     bool timelapse_drain =
         false; //  money shot: anchor on a real river/lake, breach the bank, drain it

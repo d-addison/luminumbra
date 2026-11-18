@@ -713,6 +713,14 @@ public:
                                 int surface_radius,
                                 int collision_radius,
                                 int render_lod0_radius = -1);
+    // Entry/capture only, after terrain publication: mesh water in the existing surface band.
+    // Fresh grids are temporary presentation inputs; authority, inventory and tick stay intact.
+    // Refuses missing/unfinished terrain or partial saved grids. Bounded as surface admission.
+    // Offline time-lapse modes may also seed live grids for their rain/drain setup;
+    // this opt-in never steps water and must not be used for lockstep presentation.
+    bool PrepareInitialWaterPresentationNear(const Vec3& world_pos,
+                                             int surface_radius,
+                                             bool initialize_capture_water = false);
     const StreamingBudgetFrameStats& get_last_streaming_budget_stats() const {
         return m_last_streaming_budget_stats;
     }
