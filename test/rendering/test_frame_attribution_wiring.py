@@ -930,6 +930,20 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn('"${STATIC_PREVIEW_ROOT}/src/luminumbra_client/app/FrameAttribution.cpp"',
                       preview)
 
+    def test_static_preview_compiles_the_diagnostic_id_codec_its_units_call(self):
+        # The standalone preview DLL links no client library, so every unit it compiles that
+        # submits diagnostic draws (DiagnosticDrawTable::submit -> EncodeDiagnosticId) needs the
+        # codec unit in the same target; otherwise MSVC/MSYS2 fail to link the DLL.
+        preview = read(ROOT / "tools/static_preview/CMakeLists.txt")
+        target = re.search(r"add_library\(luminumbra_render_static SHARED(.*?)\)", preview, re.S)
+        self.assertIsNotNone(target)
+        sources = re.findall(r'"\$\{STATIC_PREVIEW_ROOT\}/(src/[^"]+\.cpp)"', target.group(1))
+        callers = [source for source in sources
+                   if re.search(r'#include "(?:rendering/)?DiagnosticDrawTable\.h"|EncodeDiagnosticId\(',
+                                read(ROOT / source))]
+        self.assertIn("src/luminumbra_client/rendering/GBufferTargets.cpp", callers)
+        self.assertIn("src/luminumbra_client/rendering/DiagnosticCapture.cpp", sources)
+
     def test_program_owners_retain_the_first_use_bit_on_every_backend(self):
         for path, members in (
             ("rendering/Shader.h", ("m_id",)),
