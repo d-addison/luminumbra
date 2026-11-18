@@ -8,7 +8,8 @@
 //
 // A SCAVENGER is a creature carrying BOTH a CreatureComponent and a ScavengerComponent (the
 // presence of the latter is the per-entity opt-in gate). A CARCASS is any creature that is
-// DEAD: CreatureComponent.eaten==1 OR (a MortalComponent is present AND its dead==1). A
+// DEAD: CreatureComponent.eaten==1 OR (a MortalComponent is present AND its dead==1), and
+// has not finished decomposing (a DecayComponent with fully_decomposed!=0 leaves no food). A
 // scavenger is only interested when it is HUNGRY (hunger above a threshold) and is itself
 // alive (a dead scavenger doesn't scavenge).
 //
@@ -42,6 +43,7 @@
 
 #include "../components/CoreComponents.h"
 #include "../components/CreatureComponents.h"
+#include "../components/DecayComponents.h"
 #include "../components/MortalComponents.h"
 #include "../components/ScavengerComponent.h"
 #include "../core/DeterministicMath.h"
@@ -126,6 +128,10 @@ inline ScavengingStats RunScavengingOnTick(entt::registry& reg,
             const auto& cr = cview.get<Comp::CreatureComponent>(e);
             const auto* mortal = reg.try_get<Comp::MortalComponent>(e);
             if (!ScavengeIsCarcass(cr, mortal))
+                continue;
+            // Fully decomposed remains are gone: no longer food, nothing to path to.
+            const auto* decay = reg.try_get<Comp::DecayComponent>(e);
+            if (decay != nullptr && decay->fully_decomposed != 0)
                 continue;
             const auto& tf = cview.get<Comp::TransformComponent>(e);
             carcasses.push_back({tf.position.x, tf.position.z});

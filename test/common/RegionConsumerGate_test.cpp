@@ -4,6 +4,7 @@
 #include "luminumbra_common/ai/CreatureBrainSystem.h"
 #include "luminumbra_common/ai/CreatureReproductionSystem.h"
 #include "luminumbra_common/ai/DecompositionSystem.h"
+#include "luminumbra_common/ai/EcologyHash.h"
 #include "luminumbra_common/ai/HerdAlarmSystem.h"
 #include "luminumbra_common/ai/InstinctLocomotionSystem.h"
 #include "luminumbra_common/ai/InstinctSystem.h"
@@ -21,6 +22,8 @@
 #include "luminumbra_common/components/ThirstComponents.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/persistence/PlantPersistence.h"
+#include "luminumbra_common/persistence/SavedInputFile.h"
+#include "luminumbra_common/persistence/SavedInputLimits.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/CropLifecycleSystem.h"
 #include "luminumbra_common/systems/FireSpreadSystem.h"
@@ -43,6 +46,8 @@
 #include <cstdint>
 #include <filesystem>
 #include <limits>
+#include <map>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -532,6 +537,10 @@ RunMatingResolveOnTick(entt::registry& reg,
         cr.hunger = 0.5f;
         cr.stamina = 1.0f;
         cr.move_speed = b.genome.move_speed;
+        // Lifecycle participation is required for newborns; keep the independent
+        // brute-force partner selection above as the full-rate oracle.
+        reg.emplace<Comp::MortalComponent>(child).lifespan_ticks = tuning.lifespan_ticks;
+        reg.emplace<Comp::DecayComponent>(child).decay_duration = 900u;
         auto& gn = reg.emplace<Comp::CreatureGenomeComponent>(child);
         gn.move_speed = b.genome.move_speed;
         gn.vigilance = b.genome.vigilance;
@@ -1784,6 +1793,34 @@ TEST(RegionConsumerGate, EmptyAndInvalidCreatureOwnersAreDeniedBeforeCoreWork) {
         EXPECT_EQ(registry.get<C::MortalComponent>(invalid).age_ticks, 0u);
         EXPECT_FLOAT_EQ(registry.get<C::CreatureComponent>(invalid).wish_x, 0.0f);
     }
+}
+
+TEST(RegionConsumerGate, SessionRefusesUnversionedLifecycleOverridesBeforeChangingTuning) {
+    W::GameSession session;
+    ASSERT_NO_THROW(session.ApplySystemConfig(luminumbra::core::SystemConfig::Defaults()));
+    const auto before = session.SystemConfigIdentity();
+    AI::ReproductionTuning defaults;
+    EXPECT_NO_THROW(session.SetReproductionTuning(defaults));
+    EXPECT_EQ(session.SystemConfigIdentity(), before);
+    for (const bool capacity : {false, true}) {
+        for (const std::uint32_t value : {0u, 1u, std::numeric_limits<std::uint32_t>::max()}) {
+            auto tuning = defaults;
+            tuning.maturity_ticks = 1; // a partial assignment would change the existing identity
+            if (capacity) {
+                tuning.species_capacity = value;
+            } else {
+                tuning.lifespan_ticks = value;
+            }
+            EXPECT_THROW(session.SetReproductionTuning(tuning), std::invalid_argument);
+            EXPECT_EQ(session.SystemConfigIdentity(), before);
+        }
+    }
+    // Existing identified tuning remains writable and contributes to the same identity slots.
+    defaults.maturity_ticks = 1;
+    EXPECT_NO_THROW(session.SetReproductionTuning(defaults));
+    EXPECT_NE(session.SystemConfigIdentity(), before);
+    EXPECT_NO_THROW(session.ApplySystemConfig(luminumbra::core::SystemConfig::Defaults()));
+    EXPECT_EQ(session.SystemConfigIdentity(), before);
 }
 
 TEST(RegionConsumerGate, InactiveCreaturePipelineMatchesIndependentFullRateOracle) {
@@ -3787,6 +3824,138 @@ TEST(RegionConsumerGate, ResourceApplyHelpersRejectIdleCellsEvenWithAccumulatedA
         F::ApplyDepositDiffuseDrain(empty_water, deposit, gate);
         EXPECT_EQ(F::ApplyConsumptionAndRegen(empty_soil, demand, gate), 0);
     }
+}
+
+TEST(RegionConsumerGate, SessionRetiresNewbornAfterCallbacksAndReleasesFrozenPhysics) {
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    for (const bool regional : {false, true}) {
+        SCOPED_TRACE(regional);
+        W::GameSession session;
+        session.SetRootPath(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT).generic_string() + '/');
+        session.SetJobSystem(&jobs);
+        session.SetActiveRegionsEnabled(regional);
+        session.SetAetherStateEnabled(false);
+        ASSERT_TRUE(session.CreateTransientWorld("Newborn retirement", "985", "default"));
+        session.SetReplicatedSimulationAnchors({});
+        session.PinActiveRegion({0, 0}, true);
+        auto& registry = session.GetRegistry();
+        const auto mother = Creature(registry, 10.0f, true);
+        const auto father = Creature(registry, 10.0f, false);
+        ASSERT_EQ(AI::RunMatingResolveOnTick(registry, 0, 985).born, 1);
+        const auto born = registry.view<AI::ReproductionBorn>();
+        ASSERT_FALSE(born.empty());
+        const auto child = *born.begin();
+        registry.remove<C::CreatureGenomeComponent>(mother);
+        registry.remove<C::CreatureGenomeComponent>(father);
+        registry.get<C::CreatureComponent>(child).eaten = true;
+        registry.get<C::DecayComponent>(child).decay_duration = 1;
+        const Luminumbra::Vec3 position(10.0f, 10000.0f, 10.0f);
+        registry.get<C::TransformComponent>(child).position = position;
+        auto* physics = session.GetPhysicsSystem();
+        ASSERT_NE(physics, nullptr);
+        const auto avatar = physics->create_avatar_character(position);
+        registry.emplace<C::CreaturePhysicsComponent>(child, avatar);
+        physics->set_avatar_frozen(avatar, true, position);
+        EXPECT_TRUE(physics->audio_raycast({9, 10001.3f, 10}, {11, 10001.3f, 10}).hit);
+        int observed = 0;
+        auto& events = session.GetSimulationEventBus();
+        events.subscribe([&](const auto&) {
+            ++observed;
+            ASSERT_TRUE(registry.valid(child));
+            const auto& decay = registry.get<C::DecayComponent>(child);
+            EXPECT_EQ(decay.fully_decomposed, 1u);
+            EXPECT_EQ(decay.nutrient_released_milli, AI::kNutrientPerCorpseMilli);
+            EXPECT_FALSE(AI::ComputeEcologySubHash(registry).empty());
+        });
+        events.publish(1, "retirement", "");
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        EXPECT_EQ(observed, 1);
+        EXPECT_FALSE(registry.valid(child));
+        EXPECT_FALSE(physics->audio_raycast({9, 10001.3f, 10}, {11, 10001.3f, 10}).hit);
+        EXPECT_EQ(physics->get_avatar_position(avatar), glm::vec3(0.0f));
+        EXPECT_EQ(AI::RunScavengingOnTick(registry, 2).carcasses, 0);
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        EXPECT_FALSE(registry.valid(child));
+    }
+}
+
+std::map<std::string, std::string> RetirementSaveBytes(const std::filesystem::path& root) {
+    std::map<std::string, std::string> bytes;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(root)) {
+        if (entry.is_regular_file()) {
+            const Luminumbra::Persistence::SavedInputFile input(entry.path());
+            std::string payload;
+            // This fixture writes a single plant and small state records. The
+            // reader verifies type/length and reads bytes from the same handle.
+            EXPECT_TRUE(
+                input.read(payload, Luminumbra::Persistence::SavedInputLimits::kPlantFileBytes));
+            bytes.emplace(entry.path().lexically_relative(root).generic_string(),
+                          std::move(payload));
+        }
+    }
+    return bytes;
+}
+
+TEST(RegionConsumerGate, RetiredCarcassCannotReturnOnLoadAndSaveBytesStayIdentical) {
+    const Luminumbra::TestSupport::ScopedTempFile temporary("carcass_save_", ".json");
+    const auto directory = temporary.Path().parent_path();
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    W::GameSession cleaned, retained, loaded_first, loaded_second;
+    for (auto* session : {&cleaned, &retained, &loaded_first, &loaded_second}) {
+        session->SetRootPath(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT).generic_string() + '/');
+        session->SetJobSystem(&jobs);
+        session->SetActiveRegionsEnabled(false);
+        session->SetAetherStateEnabled(false);
+        ASSERT_TRUE(session->CreateTransientWorld("Carcass save", "985", "default"));
+    }
+    for (auto* session : {&cleaned, &retained}) {
+        auto& registry = session->GetRegistry();
+        // Keep the legacy plant handle identical to a fresh load (creatures are transient).
+        Plant(registry, 10.0f);
+        const auto mother = Creature(registry, 10.0f, true);
+        const auto father = Creature(registry, 10.0f, false);
+        ASSERT_EQ(AI::RunMatingResolveOnTick(registry, 0, 985).born, 1);
+        const auto child = *registry.view<AI::ReproductionBorn>().begin();
+        // Retained is the historical control: identical components and inputs,
+        // with cleanup ownership removed. Creature state is not a save member.
+        if (session == &retained) {
+            registry.remove<AI::ReproductionBorn>(child);
+        }
+        registry.remove<C::CreatureGenomeComponent>(mother);
+        registry.remove<C::CreatureGenomeComponent>(father);
+        registry.get<C::CreatureComponent>(child).eaten = true;
+        registry.get<C::DecayComponent>(child).decay_duration = 0;
+        ASSERT_EQ(session->TickSimulation(session->GetSimulationClock().fixed_dt()), 1u);
+        EXPECT_EQ(registry.valid(child), session == &retained);
+    }
+    const auto clean_save = directory / "clean";
+    const auto retained_save = directory / "retained";
+    ASSERT_TRUE(cleaned.SaveWorldStateTo(clean_save));
+    ASSERT_TRUE(retained.SaveWorldStateTo(retained_save));
+    const auto expected_bytes = RetirementSaveBytes(clean_save);
+    ASSERT_FALSE(expected_bytes.empty());
+    EXPECT_EQ(expected_bytes, RetirementSaveBytes(retained_save));
+    // Loading into the cleaned session cannot recreate its removed entity, either.
+    ASSERT_TRUE(cleaned.LoadWorldStateFrom(clean_save));
+    EXPECT_TRUE(cleaned.GetRegistry().view<C::DecayComponent>().empty());
+    for (auto* session : {&loaded_first, &loaded_second}) {
+        ASSERT_TRUE(session->LoadWorldStateFrom(clean_save));
+        EXPECT_TRUE(session->GetRegistry().view<C::CreatureComponent>().empty());
+        EXPECT_TRUE(session->GetRegistry().view<C::DecayComponent>().empty());
+        EXPECT_TRUE(session->GetRegistry().view<AI::ReproductionBorn>().empty());
+    }
+    EXPECT_EQ(loaded_first.ComputePlantSubHash(), loaded_second.ComputePlantSubHash());
+    EXPECT_EQ(loaded_first.ComputeChunkStateHash(), loaded_second.ComputeChunkStateHash());
+    const auto first_save = directory / "loaded-first";
+    const auto second_save = directory / "loaded-second";
+    ASSERT_TRUE(loaded_first.SaveWorldStateTo(first_save));
+    ASSERT_TRUE(loaded_second.SaveWorldStateTo(second_save));
+    EXPECT_EQ(expected_bytes, RetirementSaveBytes(first_save));
+    EXPECT_EQ(RetirementSaveBytes(first_save), RetirementSaveBytes(second_save));
 }
 
 TEST(RegionConsumerGate, SessionLegacyResourceFieldsAndDecayRemainFullRate) {
