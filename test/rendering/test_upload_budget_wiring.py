@@ -180,6 +180,127 @@ class UploadBudgetWiring(unittest.TestCase):
                      "DirectWaterSelectionInvalidatesForDryAndInvalidGrids"):
             self.assertIn("TEST(AsyncWaterMeshing, " + name + ")", async_tests)
 
+    def test_world_presentation_blocks_both_entry_paths_and_timelapse(self):
+        preload = body(self.main, "auto wait_for_world_presentation =")
+        self.assertNotIn("world->update(", preload)
+        self.assertIn("PrepareInitialWaterPresentationNear(", preload)
+        self.assertNotIn("TickSimulation(", preload)
+        self.assertIn("ObserveWorldPresentation(", preload)
+        self.assertIn("return entry_presentation_gate.waiting();", preload)
+        staged = body(self.main, "auto run_entry_stage =")
+        activation = staged.split("case WorldEntryStage::Activate:", 1)[1].split(
+            "case WorldEntryStage::Count:", 1)[0]
+        self.assertRegex(compact(activation), r"if \(wait_for_world_presentation\(\)\) \{ "
+                         r"return WorldEntryResult::Pending; \} activate_loaded_world\(\);")
+        loading = self.main.split("case GameState::WORLD_LOADING:", 1)[1].split(
+            "case GameState::IN_GAME:", 1)[0]
+        self.assertIn("const bool waiting = wait_for_world_presentation();", loading)
+        self.assertRegex(compact(loading), r"if \(waiting\) \{ .*?DrawLoadingOverlay\(.*?"
+                         r"\} else \{ activate_loaded_world\(\);")
+        bypass = body(self.main, "if (bypass_loading_ui)")
+        self.assertNotIn("GameState::IN_GAME", bypass)
+        self.assertNotIn("kTimelapseSettleFrames", self.main)
+        self.assertIn("const bool simulate_frame = !timelapse_waiting &&", compact(self.main))
+        self.assertIn("scenario_drive = scenario_runner && !timelapse_waiting ?", compact(self.main))
+        for hook in ("onPreRenderWorldSweep();", "onPostRenderCapture(deltaTime);"):
+            self.assertRegex(compact(self.main), r"if \(scenario_runner && !timelapse_waiting\) \{ "
+                             + re.escape("scenario_runner->" + hook))
+        capture = body(self.main, "static bool CaptureTimelapseFrame(")
+        self.assertIn("if (!presentation_ready)", capture)
+        observation = body(self.main, "ObserveWorldPresentation(")
+        self.assertNotIn("coverage.near_field_renderable", observation)
+        for signal in ("NearTerrainPrepared(coverage.expected_surface_chunks", "coverage.ready_surface_chunks",
+                       "coverage.pending_lod_chunks", "diagnostic.missing == 0",
+                       "diagnostic.stale == 0", "diagnostic.pending == 0",
+                       "far.coverage_settled", "InitialWaterPrepared(water_prepared,",
+                       "uploads.water_uploads_deferred",
+                       "foliage->build_pending()", "pipeline.render_uploads_settled()",
+                       "streaming.quiescent()"):
+            self.assertIn(signal, observation)
+
+    def test_initial_water_requires_preparation_and_automated_readiness_survives_timeout(self):
+        policy = read(ROOT / "src/luminumbra_client/world/WorldPresentation.h")
+        water = body(policy, "constexpr bool InitialWaterPrepared(")
+        self.assertEqual(compact(water), "return prepared && deferred_uploads == 0;")
+        decision = body(policy, "constexpr bool permits_entry(")
+        self.assertEqual(compact(decision),
+                         "return !waiting() && (!automated || (!timed_out() && runtime_ready));")
+        activation = body(self.main, "auto activate_loaded_world =")
+        self.assertIn("EvaluateReadiness(scenario_config, gameSession.get())", activation)
+        self.assertIn("if (!entry_presentation_gate.permits_entry(true, last_readiness_report.ready))",
+                      activation)
+        self.assertNotIn("entry_presentation_gate.timed_out()", activation)
+        self.assertIn("scenario_ready = false;", activation)
+        self.assertIn("scenario_ready = false;", body(self.main, "auto finish_world_entry ="))
+        preload = body(self.main, "auto wait_for_world_presentation =")
+        self.assertLess(preload.index("PrepareInitialWaterPresentationNear("),
+                        preload.index("renderPipeline.render_frame("))
+        common = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        prepare = body(common, "bool SHIELD_WorldSystem::PrepareInitialWaterPresentationNear(")
+        self.assertNotIn("update_chunk_activation(", prepare)
+        self.assertNotIn("TickSimulation(", prepare)
+        self.assertIn("InitializeGeneratedWater(presentation)", prepare)
+        self.assertIn("GenerateWaterMesh(*m_water_system, *this, presentation)", prepare)
+        self.assertIn("chunk->water_mesh_generated.store(true", prepare)
+
+    def test_preview_restore_keeps_guard_and_precedes_every_foliage_consumer(self):
+        restore = body(self.main, "auto restore_worldgen_preview =")
+        self.assertIn("currentState != GameState::MAIN_MENU || !g_uiManager ||", restore)
+        self.assertIn("!g_uiManager->GetWorldCreationPreviewState().active", restore)
+        self.assertIn("renderPipeline.apply_graphics(resolved_graphics)", restore)
+        self.assertIn("worldgenPreview->set_active(false)", restore)
+        self.assertLess(self.main.index("if (worldgenPreview->active() &&"),
+                        self.main.index("UpdateFoliageScatter(g_app,"))
+        preload = body(self.main, "auto wait_for_world_presentation =")
+        self.assertLess(preload.index("restore_worldgen_preview()"),
+                        preload.index("UpdateFoliageScatter(g_app,"))
+        self.assertLess(self.main.index("restore_worldgen_preview();",
+                                       self.main.index("while (!glfwWindowShouldClose")),
+                        self.main.index("RenderMenuScreens(g_app,"))
+
+    def test_workload_load_finishes_presentation_before_residency_requires_in_game(self):
+        load = body(self.main, "[&](bool reload)")
+        self.assertLess(load.index("start_world_load(id)"),
+                        load.index("wait_for_world_presentation()"))
+        self.assertLess(load.index("wait_for_world_presentation()"),
+                        load.index("activate_loaded_world()"))
+        self.assertLess(load.index("activate_loaded_world()"),
+                        load.index("reload_settling_pending ="))
+        self.assertIn("pass < Luminumbra::Client::kWorldPresentationFrameDeadline", load)
+        self.assertIn("gameStateManager.GetCurrentState() == GameState::WORLD_LOADING", load)
+        self.assertIn("gameStateManager.GetCurrentState() != GameState::IN_GAME", load)
+        self.assertIn("!scenario_ready", load)
+        self.assertIn("scenario_failed = true;", load)
+        self.assertIn("!glfwWindowShouldClose(window)", load)
+        self.assertIn("benchmark_queries->checkpoint_passes()", load)
+        self.assertLess(load.index("benchmark_queries->checkpoint_passes()"),
+                        load.index("activate_loaded_world()"))
+        self.assertLess(load.index("if (glfwWindowShouldClose(window))"),
+                        load.index("activate_loaded_world()"))
+        self.assertIn("glfwPollEvents()", load)
+        self.assertIn("MainLoopHeartbeat().fetch_add", load)
+
+    def test_timelapse_mode_and_final_camera_settle_before_first_capture(self):
+        setup = self.main.index("const bool mode_ready =")
+        self.assertLess(self.main.index("ws->debug_find_shoreline("), setup)
+        self.assertLess(self.main.index("ws->debug_lowest_land_pos("), setup)
+        reset = self.main.index("timelapse_presentation_gate.restart_for_view();", setup)
+        self.assertLess(setup, reset)
+        self.assertNotIn("timelapse_presentation_started_at = {};", self.main[setup:reset + 100])
+        water = self.main.index("const bool water_prepared =", reset)
+        render = self.main.index("renderPipeline.render_frame(", water)
+        observe = self.main.index("timelapse_presentation_gate.observe(", render)
+        allow = self.main.index("timelapse_presentation_ready =", observe)
+        self.assertLess(reset, render)
+        self.assertLess(render, observe)
+        self.assertLess(observe, allow)
+        self.assertIn("timelapse_mode_prepared &&", self.main[allow:allow + 250])
+        self.assertIn("timelapse_mode_preparation_failed", self.main)
+        self.assertIn("timelapse_presentation_timeout", self.main)
+        self.assertLess(self.main.index("PrepareInitialWaterPresentationNear(", reset), render)
+        self.assertIn("timelapse_mode_prepared || !timelapse_presentation_gate.waiting()",
+                      compact(self.main))
+
     def test_near_refinement_runs_only_in_admitted_terrain_uploads(self):
         manage = body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources(")
         drain = manage[manage.index("const auto adopt ="):]

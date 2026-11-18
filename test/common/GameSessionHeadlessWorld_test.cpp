@@ -16401,6 +16401,72 @@ TEST(GameSessionHeadlessWorldTest, FoliagePlantOnlyPublicationRenewsReducedPersi
     }
 }
 
+TEST(GameSessionHeadlessWorldTest, EmptyPlantOnlyOwnerRetiresWhileAnotherOwnerPublishes) {
+    for (const bool persistent : {false, true}) {
+        SCOPED_TRACE(persistent);
+        const HeadlessRoot root;
+        JobSystem jobs;
+        jobs.startup(1);
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        const auto owner = LongCadenceOwner();
+        auto ledger = ScheduledFieldLedger(
+            33,
+            {{owner, RegionState::Reduced}, {kFieldOwner, RegionState::Active}},
+            {std::numeric_limits<std::uint64_t>::max(), 10000, 6});
+        std::uint64_t id = 0;
+        ASSERT_TRUE(ledger.allocate_persistent_id(id));
+        ASSERT_NO_FATAL_FAILURE(LoadScheduledFieldFixture(session, root, jobs, ledger, {}));
+        ASSERT_TRUE(session.ActiveRegionsEnabled());
+        auto& registry = session.GetRegistry();
+        const auto plant = ClockTestPlant(
+            registry,
+            {static_cast<float>(owner.x * 512 + 8), 0, static_cast<float>(owner.z * 512 + 8)});
+        if (persistent) {
+            registry.emplace<C::PlantRegionComponent>(
+                plant, id, owner.x, owner.z, std::uint64_t{33});
+        }
+        const auto incomplete = registry.create();
+        registry.emplace<C::PlantTag>(incomplete);
+        registry.emplace<C::SoilFeederComponent>(incomplete);
+        registry.emplace<C::TransformComponent>(incomplete) =
+            registry.get<C::TransformComponent>(plant);
+        const auto survivor = ClockTestPlant(registry, {8, 0, 8});
+        TickOnce(session);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        ASSERT_EQ(session.GetWorldClock().tick(), 34u);
+        ASSERT_EQ(registry.get<C::PlantGrowthComponent>(plant).last_tick, 34u);
+        ASSERT_EQ(session.GetFoliageRegistryPublications(), 1u);
+        EXPECT_FALSE(registry.all_of<C::PlantGrowthComponent>(incomplete));
+        EXPECT_TRUE(session.GetFieldPages().soil().empty());
+        EXPECT_TRUE(session.GetFieldPages().irrigation().empty());
+        registry.destroy(incomplete);
+        registry.destroy(plant);
+        // The empty Reduced owner is next due at 98. It must not renew a
+        // phantom field deadline at 130 while the Active survivor publishes.
+        for (std::uint64_t tick = 35; tick <= 131; ++tick) {
+            TickOnce(session);
+            ASSERT_FALSE(session.GetRegionSchedulerFault());
+            ASSERT_EQ(session.GetWorldClock().tick(), tick);
+            ASSERT_EQ(registry.get<C::PlantGrowthComponent>(survivor).last_tick, tick);
+            if (tick == 98 || tick >= 129) {
+                EXPECT_TRUE(Foliage::FarmingActionsAllowed(registry));
+                EXPECT_TRUE(Foliage::FarmingActionsAllowed(registry, survivor));
+                ASSERT_TRUE(session.SaveWorld());
+            }
+        }
+        EXPECT_EQ(session.GetActiveRegionLedger().records().size(), 2u);
+        EXPECT_EQ(session.GetActiveRegionLedger().records().at(owner).state, RegionState::Reduced);
+        EXPECT_EQ(registry.view<C::PlantTag>().size(), 1u);
+        EXPECT_TRUE(session.GetFieldPages().soil().empty());
+        EXPECT_TRUE(session.GetFieldPages().irrigation().empty());
+        EXPECT_EQ(session.GetFoliageRegistryPublications(), 98u);
+        const auto loadable = GameSession::PrepareWorldState(
+            session.CaptureWorldPreparationOptions(), session.GetWorldSaveDir());
+        EXPECT_TRUE(GameSession::WorldPreparationError(*loadable).empty());
+    }
+}
+
 TEST(GameSessionHeadlessWorldTest, FoliagePersistenceDeadlineVisitsExcludeDormantPlants) {
     for (const int dormant : {0, 64}) {
         const HeadlessRoot root;
