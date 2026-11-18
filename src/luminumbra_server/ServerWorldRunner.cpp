@@ -215,6 +215,13 @@ bool ServerWorldRunner::Boot() {
         m_session->SetParkedBytesLimit(static_cast<std::size_t>(m_config.parked_bytes_limit));
     }
     m_session->SetFiniteHydrologyEnabled(m_config.finite_hydrology);
+    if (m_session->ActiveRegionsEnabled() &&
+        m_config.avatar_count > static_cast<int>(Systems::PhysicsSystem::kSimulationOwnerBudget)) {
+        m_bootError = "Avatar collider preparation budget exceeded";
+        m_session.reset();
+        m_jobSystem.shutdown();
+        return false;
+    }
     if (m_config.weather_schedule && !m_session->SetWeatherSchedule(*m_config.weather_schedule)) {
         m_bootError = "Invalid weather schedule";
         return false;
@@ -311,7 +318,8 @@ bool ServerWorldRunner::Boot() {
     m_avatars.clear();
     physics_system->clear_avatar_characters();
     if (m_config.avatar_count > 0) {
-        m_avatars.reserve(static_cast<std::size_t>(m_config.avatar_count));
+        m_avatars.reserve(std::min(static_cast<std::size_t>(m_config.avatar_count),
+                                   Systems::PhysicsSystem::kSimulationOwnerBudget));
         for (int i = 0; i < m_config.avatar_count; ++i) {
             const Vec3 offset =
                 World::DeterministicAvatarSpawnOffset(static_cast<std::uint32_t>(i));
@@ -325,9 +333,16 @@ bool ServerWorldRunner::Boot() {
             avatar.position = Vec3(ax, ay, az);
             // Deterministic initial facing fanned around the circle (pure id fn).
             avatar.facing = static_cast<float>(i) * 2.39996323f;
+            // Publish the roster only after its corresponding controller exists.
+            const auto character = physics_system->create_avatar_character(avatar.position);
+            if (character == Systems::PhysicsSystem::kInvalidAvatar) {
+                m_bootError = "Avatar collider preparation budget exceeded";
+                m_avatars.clear();
+                m_session.reset();
+                m_jobSystem.shutdown();
+                return false;
+            }
             m_avatars.push_back(avatar);
-            // Create one server-authoritative physics capsule per avatar.
-            physics_system->create_avatar_character(avatar.position);
         }
         LUMINUMBRA_CORE_INFO(
             "ServerWorldRunner: spawned {} deterministic player avatar(s) (+physics characters).",
@@ -542,6 +557,8 @@ void ServerWorldRunner::SetAvatarMove(std::uint32_t player_id, float move_x, flo
 ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
     ServerTickReport report;
     if (!m_booted || !m_session) {
+        report.region_fault = true;
+        report.region_fault_message = "Server world is not booted";
         return report;
     }
 
@@ -588,6 +605,17 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         const std::uint64_t budget_tick = m_session->GetSimulationTickCount() + 1;
         luminumbra::simulation::SimBudgetTelemetry::TickScope physics_budget(budget, budget_tick);
         physics_budget.Next(BudgetStage::ServerPhysics, [] { return 1u; });
+        // Every host gathers the same registered controllers and projectiles.
+        // No host-specific spawn/camera anchor can change the horizon or its budget.
+        if (!physics_system->prepare_simulation_collisions({}, budget_tick)) {
+            // Zero progress without a region fault is the retry outcome. A durable
+            // read failure can latch a terminal fault during preparation itself.
+            if (const auto& fault = m_session->GetRegionSchedulerFault()) {
+                report.region_fault = true;
+                report.region_fault_message = fault->message;
+            }
+            break; // Leave this tick unconsumed; the next call retries preparation.
+        }
         physics_system->update(static_cast<float>(fixed_dt));
         //  step the server-authoritative avatar characters (gravity +
         // world collision; deterministic index order) and read their settled
