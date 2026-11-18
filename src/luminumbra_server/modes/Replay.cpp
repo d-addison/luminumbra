@@ -85,6 +85,12 @@ int RunRecord(const ServerCliOptions& options) {
     header.collision_radius = static_cast<std::uint32_t>(options.collision_radius);
     header.engine_version = std::string(luminumbra::core::GetEngineVersionString());
     header.start_world_hash = runner.ComputeWorldHash();
+    if (header.start_world_hash.empty()) {
+        // A refused boot capture has no start hash to verify playback against: abort
+        // before the writer opens, so no replay or region trace is published.
+        LUMINUMBRA_CORE_ERROR("record: authority hash capture refused at boot; recording aborted");
+        return 1;
+    }
     header.system_config_identity = runner.Session()->SystemConfigIdentity();
     header.preset_content_hash = runner.Session()->PresetContentHash();
 

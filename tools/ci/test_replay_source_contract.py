@@ -44,6 +44,12 @@ class ReplaySourceContract(unittest.TestCase):
         self.assertIn("missing authenticated terminal checkpoint", admission)
         self.assertIn("older positive recordings without one cannot be replayed", admission)
         self.assertNotIn("FindInput(", playback)
+        # A refused boot capture leaves no start hash: recording aborts before the
+        # writer opens, so no replay or region trace is published without one.
+        self.assertRegex(recording, r'header.start_world_hash = runner.ComputeWorldHash\(\);\s*'
+                         r'if \(header.start_world_hash.empty\(\)\)\s*\{[^{}]*return 1;\s*\}')
+        self.assertLess(recording.index("header.start_world_hash.empty()"),
+                        recording.index("writer.Open("))
         self.assertRegex(recording, r'if \(executed != 0 && '
                          r'\(executed % kCheckpointIntervalTicks\) != 0\)\s*\{\s*'
                          r'auto checkpoint = CaptureCheckpoint\(executed, runner\);\s*'
@@ -81,6 +87,18 @@ class ReplaySourceContract(unittest.TestCase):
             self.assertIn(token, source[terminal:])
             with self.subTest(terminal=token), self.assertRaises(AssertionError):
                 self.assert_mode_admission(source[:terminal] + source[terminal:].replace(token, "", 1))
+        hashed = "header.start_world_hash = runner.ComputeWorldHash();"
+        start = source.index(hashed) + len(hashed)
+        end = source.index("    header.system_config_identity", start)
+        guard = source[start:end]
+        for token in ("if (header.start_world_hash.empty())", "return 1;"):
+            self.assertIn(token, guard)
+            with self.subTest(boot=token), self.assertRaises(AssertionError):
+                self.assert_mode_admission(source[:start] + guard.replace(token, "", 1) + source[end:])
+        late = source[:start] + "\n" + source[end:]
+        anchor = "    const std::vector<std::uint8_t> empty_inputs;"
+        with self.subTest(boot="guard after writer open"), self.assertRaises(AssertionError):
+            self.assert_mode_admission(late.replace(anchor, guard.lstrip("\n") + anchor, 1))
 
     def test_mode_admission_regressions_use_registered_shipping_entry_points(self):
         path = "common/ReplayModeAdmission_test.cpp"

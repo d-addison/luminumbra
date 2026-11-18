@@ -2880,7 +2880,10 @@ TEST_F(WorldOpenRefusal, LockstepRefusesBootAndTickCapturesBeforePublishingHashe
         struct CaptureFault {
             std::uint64_t tick;
             std::size_t calls = 0;
-        } fault{refuse_tick, 0};
+            std::vector<std::uint64_t> sink_ticks;
+            std::vector<std::vector<std::uint8_t>> sink_inputs;
+            std::size_t sink_hashes = 0;
+        } fault{refuse_tick, 0, {}, {}, 0};
         Net::LockstepConfig config;
         config.hash_cadence_ticks = 1;
         config.system_config_identity = "config";
@@ -2900,6 +2903,17 @@ TEST_F(WorldOpenRefusal, LockstepRefusesBootAndTickCapturesBeforePublishingHashe
             }
             out.tick = tick;
             out.world_hash = "complete";
+        };
+        // A caller-owned replay sink sees every executed tick, including one whose
+        // capture is refused, without a hash.
+        hooks.record_replay_tick = [](std::uint64_t tick,
+                                      const std::vector<std::uint8_t>& merged,
+                                      const Net::HashMsg* hash,
+                                      void* user) {
+            auto& capture_fault = *static_cast<CaptureFault*>(user);
+            capture_fault.sink_ticks.push_back(tick);
+            capture_fault.sink_inputs.push_back(merged);
+            capture_fault.sink_hashes += hash != nullptr;
         };
         Net::LockstepSession session(config, local.get(), hooks);
         const auto replay = root / ("capture-refusal-" + std::to_string(refuse_tick) + ".lrec1");
@@ -2928,6 +2942,13 @@ TEST_F(WorldOpenRefusal, LockstepRefusesBootAndTickCapturesBeforePublishingHashe
             EXPECT_EQ(recording->inputs.front().tick, 1u);
             EXPECT_EQ(recording->inputs.front().inputs, std::vector<std::uint8_t>{0xA5});
             EXPECT_TRUE(recording->checkpoints.empty());
+            EXPECT_EQ(fault.sink_ticks, std::vector<std::uint64_t>{1u});
+            ASSERT_EQ(fault.sink_inputs.size(), 1u);
+            EXPECT_EQ(fault.sink_inputs.front(), recording->inputs.front().inputs);
+            EXPECT_EQ(fault.sink_hashes, 0u);
+        }
+        if (refuse_tick == 0) {
+            EXPECT_TRUE(fault.sink_ticks.empty());
         }
         EXPECT_TRUE(session.Status().desynced);
         EXPECT_EQ(session.Status().desync_section, "authority_capture");

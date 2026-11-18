@@ -1860,8 +1860,13 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
                 m_hooks.capture_hashes(want, local, m_hooks.user);
             }
         } catch (const Persistence::AuthorityCaptureRefused&) {
-            // Preserve the executed input without publishing a refused checkpoint.
+            // Preserve the executed input without publishing a refused checkpoint, in the
+            // session's own recording and in a caller-owned sink: the hook runs once per
+            // executed tick, so it still sees this tick's merged inputs (with no hash).
             RecordReplayTick(want, recorded_inputs, nullptr);
+            if (m_hooks.record_replay_tick) {
+                m_hooks.record_replay_tick(want, merged, nullptr, m_hooks.user);
+            }
             EmitDesyncDump(want, "authority_capture");
             result.outcome = TickOutcome::Desync;
             return result;
