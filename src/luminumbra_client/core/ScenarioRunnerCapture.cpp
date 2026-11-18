@@ -717,7 +717,7 @@ void ScenarioRunnerImpl::captureSkyboxVisual(std::chrono::steady_clock::time_poi
                 const bool sun_on_screen = ProjectDirectionToScreen(*g_camera,
                                                                     screenshot_width,
                                                                     screenshot_height,
-                                                                    TowardSunDirection(0.04f),
+                                                                    -renderPipeline.sun_direction(),
                                                                     sun_screen_x,
                                                                     sun_screen_y);
                 const SkyboxPixelStats skybox_stats = AnalyzeSkyboxPixels(frame_pixels,
