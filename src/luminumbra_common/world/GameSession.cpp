@@ -305,6 +305,11 @@ std::uint64_t FoliageInputPriorTick(const ActiveRegionRecord& record) {
     const auto prior = luminumbra::foliage::FoliagePriorTick(record);
     return record.frozen_at == 0 ? std::max(prior, record.first_active) : prior;
 }
+bool FoliageHistoryExpired(const ActiveRegionRecord& record, std::uint64_t tick) {
+    const auto prior = FoliageInputPriorTick(record);
+    return record.state != RegionState::Frozen && prior <= tick &&
+           tick - prior >= luminumbra::foliage::FoliageWindowReplay::kStepBudget;
+}
 // Runtime-only owner membership. Signals queue topology/ownership changes; mutable
 // payloads are read when selecting. Membership is bounded by EnTT's entity mask;
 // the queue records changed components only, never a per-tick roster copy.
@@ -537,6 +542,7 @@ struct GameSession::FoliageStep {
     // Prepared deadline nodes follow the same kMaxRegions bound and transfer at commit.
     std::map<std::uint64_t, std::set<RegionKey>> publication_deadlines;
     std::map<RegionKey, std::uint64_t> publication_owner_deadlines;
+    std::uint64_t persistence_owner_visits = 0;
 
     void RemoveDeadline(RegionKey key) {
         const auto found = owner_deadlines.find(key);
@@ -586,17 +592,66 @@ struct GameSession::FoliageStep {
         }
         UpdateFarmingGate(session);
     }
-    static bool PersistencePending(const GameSession& session) {
+    static bool IndexedPersistencePending(const GameSession& session) {
         const auto* step = session.m_foliageStep.get();
-        // A fault permanently stops replay. Its detached work can be discarded
-        // once rollback proved that every saved stamp describes live foliage.
-        return step &&
-               (step->incomplete || (!session.m_regionFault && (step->blocked || step->prepared ||
-                                                                !step->stale_inputs.empty())));
+        // Rollback proves stamp ownership, not load admission. A fault can
+        // precede RefreshInputGate on the very tick that history expires.
+        return step && (step->incomplete || !step->stale_inputs.empty() ||
+                        (!step->input_deadlines.empty() &&
+                         step->input_deadlines.begin()->first <= session.m_worldClock.tick()) ||
+                        (!session.m_regionFault && (step->blocked || step->prepared)));
+    }
+    static bool PersistencePending(const GameSession& session) {
+        if (!session.m_activeRegionsEnabled) {
+            return false;
+        }
+        const auto* step = session.m_foliageStep.get();
+        if ((step && step->incomplete) ||
+            (!session.m_regionFault && IndexedPersistencePending(session))) {
+            return true;
+        }
+        // Save boundaries only: a fault can precede indexing a thaw, and
+        // plants can be created between ticks. Check exactly the persisted
+        // field/plant owners against the loader's rule before any save effects.
+        // At most two kMaxPages channels and entity_mask + 1 plant handles.
+        const auto expired = [&](RegionKey key) {
+            const auto& records = session.m_activeRegionLedger.records();
+            const auto found = records.find(key);
+            return found != records.end() &&
+                   FoliageHistoryExpired(found->second, session.m_worldClock.tick());
+        };
+        for (const bool soil : {true, false}) {
+            const auto& channel =
+                soil ? session.m_fieldPages.soil() : session.m_fieldPages.irrigation();
+            for (const auto& [key, page] : channel.pages()) {
+                if (expired(FieldPageState::region_of_scent_cell({key.x * 16, key.z * 16}))) {
+                    return true;
+                }
+            }
+        }
+        for (const auto entity : session.m_registry.view<const Components::PlantTag,
+                                                         const Components::PlantGrowthComponent,
+                                                         const Components::PlantGenomeComponent,
+                                                         const Components::TransformComponent>()) {
+            const auto* owner =
+                session.m_registry.try_get<const Components::PlantRegionComponent>(entity);
+            const auto& position =
+                session.m_registry.get<const Components::TransformComponent>(entity).position;
+            if (owner) {
+                if (expired({owner->owner_x, owner->owner_z})) {
+                    return true;
+                }
+            } else if (ActiveRegionLedger::valid_anchor(position) &&
+                       expired(ActiveRegionLedger::region_at(position))) {
+                return true;
+            }
+        }
+        return false;
     }
     static bool LoadPending(const GameSession& session) {
         // A validated replacement can recover even an unrestorable fault.
-        return !session.m_regionFault && PersistencePending(session);
+        // Async adoption can be polled each frame; consult only the O(1) index.
+        return !session.m_regionFault && IndexedPersistencePending(session);
     }
 
     void IndexOwner(RegionKey key, const ActiveRegionRecord& record) {
@@ -1270,15 +1325,37 @@ struct GameSession::FoliageStep {
         publication_owner_deadlines.clear();
         const auto deadline =
             session.m_worldClock.tick() + luminumbra::foliage::FoliageWindowReplay::kStepBudget;
-        for (const auto& [key, elapsed] : windows.elapsed) {
-            if (field_owners.contains(key)) {
+        const auto retain = [&](RegionKey key) {
+            if (windows.elapsed.contains(key)) {
                 publication_deadlines[deadline].insert(key);
                 publication_owner_deadlines.emplace(key, deadline);
+            }
+        };
+        for (const auto& [key, elapsed] : windows.elapsed) {
+            if (field_owners.contains(key)) {
+                retain(key);
+            }
+        }
+        // Only the selected candidate roster is visited, bounded by the entity
+        // mask. Persisted plant ownership takes precedence over its position,
+        // exactly as in bootstrap, selection, and load admission.
+        for (const auto entity : registry.registry().view<const Components::PlantTag>()) {
+            ++persistence_owner_visits;
+            const auto* owner =
+                registry.registry().try_get<const Components::PlantRegionComponent>(entity);
+            const auto* transform =
+                registry.registry().try_get<const Components::TransformComponent>(entity);
+            if (owner) {
+                retain({owner->owner_x, owner->owner_z});
+            } else if (transform && ActiveRegionLedger::valid_anchor(transform->position)) {
+                retain(ActiveRegionLedger::region_at(transform->position));
             }
         }
     }
     void PublishInputDeadlines() noexcept {
-        for (const auto& [key, deadline] : publication_owner_deadlines) {
+        // Drop obsolete windows too, including a now-empty owner's last plant.
+        // Prepared replacement nodes transfer without allocating at commit.
+        for (const auto& [key, elapsed] : windows.elapsed) {
             RemoveDeadline(key);
         }
         owner_deadlines.merge(publication_owner_deadlines);
@@ -1298,7 +1375,6 @@ struct GameSession::FoliageStep {
             session.m_activeRegionLedger.acknowledge_resume(key, token);
             pending.erase(key);
         }
-        PublishInputDeadlines();
         CommitTicks(session);
         published_tick = session.m_worldClock.tick();
         active = false;
@@ -1307,13 +1383,11 @@ struct GameSession::FoliageStep {
         UpdateFarmingGate(session);
     }
     void CommitTicks(GameSession& session) noexcept {
+        PublishInputDeadlines();
         for (const auto& [key, elapsed] : windows.elapsed) {
             last_ticks.find(key)->second = session.m_worldClock.tick();
             committed_ticks.find(key)->second = session.m_worldClock.tick();
             session.m_activeRegionLedger.set_foliage_tick(key, session.m_worldClock.tick());
-            if (!field_owners.contains(key)) {
-                RemoveDeadline(key);
-            }
         }
         incomplete = false;
         UpdateFarmingGate(session);
@@ -1345,6 +1419,9 @@ std::uint64_t GameSession::GetFoliageRegistryStageVisits() const {
 }
 std::uint64_t GameSession::GetFoliageRegistryPublications() const {
     return m_foliageStep ? m_foliageStep->registry.publications() : 0;
+}
+std::uint64_t GameSession::GetFoliagePersistenceOwnerVisits() const {
+    return m_foliageStep ? m_foliageStep->persistence_owner_visits : 0;
 }
 std::size_t GameSession::GetFoliageHistorySize() const {
     return m_foliageStep ? m_foliageStep->last_ticks.size() : 0;
@@ -5562,10 +5639,7 @@ bool GameSession::ReadPreparedWorldState(
             if (found == history_records.end() || found->second.state == RegionState::Frozen) {
                 return true;
             }
-            const auto prior = FoliageInputPriorTick(found->second);
-            if (prior <= state.clock.tick() &&
-                state.clock.tick() - prior >=
-                    luminumbra::foliage::FoliageWindowReplay::kStepBudget) {
+            if (FoliageHistoryExpired(found->second, state.clock.tick())) {
                 state.input_refused = true;
                 error = "Pending foliage history cannot be loaded.";
                 return false;

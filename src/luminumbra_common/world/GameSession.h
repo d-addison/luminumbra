@@ -557,6 +557,8 @@ public:
     [[nodiscard]] std::uint64_t GetFoliageSelectionVisits() const;
     [[nodiscard]] std::uint64_t GetFoliageRegistryStageVisits() const;
     [[nodiscard]] std::uint64_t GetFoliageRegistryPublications() const;
+    // Plant-owner visits while preparing persistence deadlines, including rejected owners.
+    [[nodiscard]] std::uint64_t GetFoliagePersistenceOwnerVisits() const;
     // Runtime-only diagnostics; neither encoded nor hashed.
     [[nodiscard]] std::size_t GetFoliageHistorySize() const;
     [[nodiscard]] std::uint32_t GetFoliageReplayRemainingSteps() const;
