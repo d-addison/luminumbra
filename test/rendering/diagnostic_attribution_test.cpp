@@ -1,4 +1,5 @@
 #include "core/IsolationConfig.h"
+#include "luminumbra_client/app/BushFoliage.h"
 #include "luminumbra_common/animation/AnimationRuntime.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "rendering/Camera.h"
@@ -21,6 +22,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -125,12 +127,57 @@ bool SubmitGenerated(Luminumbra::Rendering::DiagnosticDrawTable& table,
 }
 } // namespace
 
+TEST(GroundCoverContract, NearBushesUseFullLeafQuadsAndNeverTerrainGrassTexturing) {
+    const auto palette = Body(Read("src/luminumbra_client/app/ProcgenPalettes.cpp"),
+                              "void BuildProcgenBushPalette(");
+    Contains(palette, "BuildBushLeafCard(center, normal, 0.24f, 0.18f)");
+    for (const char* vertex : {"card[0], normal, {0.0f, 0.0f}",
+                               "card[1], normal, {1.0f, 0.0f}",
+                               "card[2], normal, {1.0f, 1.0f}",
+                               "card[3], normal, {0.0f, 1.0f}"}) {
+        Contains(palette, vertex);
+    }
+    const auto draw = Read("src/luminumbra_client/rendering/passes/GBufferPass.cpp");
+    Contains(draw, "const bool leafCards = isLeaf || (isBush && !isFarLod);");
+    Contains(draw, "shader->setInt(\"u_alphaTest\", leafCards ? 2 : 0);");
+    Contains(draw, "two_sided = leafCards;");
+    // Near bush cards are leaves, so they keep the leaf wind strength.
+    Contains(draw, "shader->setFloat(\"u_windStrength\", leafCards ? 0.85f : 0.0f);");
+    Contains(draw, "shader->setInt(\"u_forceFlat\", (isBush || (isLeaf && isFarLod)) ? 1 : 0);");
+    // Far closed hulls use leaf reflectance instead of the grass material albedo.
+    Contains(draw, "shader->setInt(\"u_leafSurface\", isBush ? 1 : 0);");
+    const auto frag = Read("res/shaders/g_buffer.frag");
+    Contains(frag, "uniform int u_leafSurface = 0;");
+    Contains(frag, "if (proceduralLeaf || u_leafSurface == 1) {");
+}
+
+TEST(GroundCoverContract, LeafCardsAreFiniteOutwardQuadsForSideAndPolarNormals) {
+    const glm::vec3 center(2, -3, 5);
+    for (const glm::vec3 normal : {glm::vec3(1, 0, 0),
+                                   glm::vec3(0, 1, 0),
+                                   glm::vec3(0, -1, 0),
+                                   glm::normalize(glm::vec3(1, 2, 3))}) {
+        const auto card = Luminumbra::Client::App::BuildBushLeafCard(center, normal, 0.24f, 0.18f);
+        EXPECT_NEAR(glm::length(card[1] - card[0]), 0.48f, 1e-5f);
+        EXPECT_NEAR(glm::length(card[3] - card[0]), 0.36f, 1e-5f);
+        EXPECT_LT(glm::length((card[0] + card[2]) * 0.5f - center), 1e-5f);
+        EXPECT_GT(glm::dot(glm::cross(card[1] - card[0], card[2] - card[0]), normal), 0.0f);
+        for (const auto& position : card) {
+            EXPECT_TRUE(std::isfinite(position.x));
+            EXPECT_TRUE(std::isfinite(position.y));
+            EXPECT_TRUE(std::isfinite(position.z));
+            EXPECT_NEAR(glm::dot(position - center, normal), 0.0f, 1e-5f);
+        }
+    }
+}
+
 TEST(DiagnosticAttribution, DefaultShaderTextIsUnchangedWithoutTheVariant) {
     // Re-pinned for issue #1071's leaf reflectance on closed distant shrub hulls.
     EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(Read("res/shaders/g_buffer.frag"))),
               0x9032c0573230e766ull);
     EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(Read("res/shaders/foliage.frag"))),
               0xd5876c01db56f7ecull);
+    EXPECT_EQ(SourceHash(Read("res/shaders/instanced_mesh.vert")), 0xdcd35add9296eabaull);
     const auto create = Body((Read(kTargets) + Read(kPass)), "void CreateGBufferTargets(");
     Contains(create, "GL_COLOR_ATTACHMENT4");
     Contains(create, "if (authored)");

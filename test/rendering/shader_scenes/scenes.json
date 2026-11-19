@@ -1,4 +1,39 @@
 {
+  "analytical": {
+    "background": [
+      0.0625,
+      0.125,
+      0.1875
+    ],
+    "grass": [
+      0.2,
+      0.6,
+      0.15
+    ],
+    "leaf": [
+      0.1,
+      0.24,
+      0.045
+    ],
+    "max_error": 1e-06,
+    "name": "shrub-leaf",
+    "normal": "shrub-normal",
+    "object_normal": [
+      1,
+      1,
+      1
+    ],
+    "panels": [
+      "default",
+      "hull",
+      "front-card",
+      "back-card"
+    ],
+    "scale_y": [
+      2,
+      1
+    ]
+  },
   "defines": [],
   "diagnostics": [
     {
@@ -55,12 +90,13 @@
     "res/shaders/enhanced_skybox.frag": "dcbd2b15fdca9acfb4b8d4fe01029f0e91727556bce842c9d058362f6c07ee27",
     "res/shaders/g_buffer.frag": "ca0f34d04792d59d7d1b1c36cec27f426e27976e28f1e1b882d875ef428a6904",
     "res/shaders/g_buffer.vert": "209c1c0801801209e669e60dcadfa7085e8e44780f9e2c7599a7d48a5fe2abed",
+    "res/shaders/instanced_mesh.vert": "83198486e34bcb2d2ad4dcd5271efc9b4fd5deab5842768a8a85eac76d245d9c",
     "res/shaders/static_asset.frag": "1d2262e2c9d905e69560c8879c1a5f88c283a6fa3e38ddeb46c06306f91a7512",
     "res/shaders/static_asset.vert": "3c6ca3b3154e0f28bbecd1c5fa2048b09e6623a1a58823b64d6a01e5f78e475d",
     "res/shaders/tree_impostor.frag": "25391749ee76bcbf3804cbacd7746426bf97926e7e1b0dc07ca8b90306e74764",
     "res/shaders/tree_impostor.vert": "6e69ff1391d2d6dd6ef93d7c72c3c387cc4009b3bccf317e5c050018f2e1d796",
     "src/luminumbra_client/rendering/SkyAtmosphereLut.ipp": "50fe51e78e3ba33c36e4bad2248a57d09c0289ed730142c0aa447e4bc6567930",
-    "test/rendering/shader_scene_render_test.cpp": "78a4134ec9e0951b8429bde5d88cbeda4bd82f8b415eea2a93b8be2e4ce1522d"
+    "test/rendering/shader_scene_render_test.cpp": "7877052a433ece685ae2453d48238b2a104f390e3c9156b78f7b98a36b4b6d6b"
   },
   "reference_capture": {
     "material": {

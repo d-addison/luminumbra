@@ -26,7 +26,12 @@ FIXTURES = [
 # Dusk has a measured discontinuity: capture/report only, never an accepted baseline.
 DIAGNOSTICS = [{'name': 'dusk-sky', 'metric': 'max_adjacent_column_mean_luminance_step',
                 'pending_tolerance': .005, 'tracking_issue': 918}]
-INPUTS = {'res/shaders/static_asset.vert', 'res/shaders/static_asset.frag',
+# Exact analytical references for the shrub fixture; no captured baseline.
+ANALYTICAL = {'name': 'shrub-leaf', 'normal': 'shrub-normal',
+              'scale_y': [2, 1], 'panels': ['default', 'hull', 'front-card', 'back-card'],
+              'background': [.0625, .125, .1875], 'grass': [.2, .6, .15],
+              'leaf': [.10, .24, .045], 'object_normal': [1, 1, 1], 'max_error': .000001}
+INPUTS = {'res/shaders/instanced_mesh.vert', 'res/shaders/static_asset.vert', 'res/shaders/static_asset.frag',
           'res/shaders/tree_impostor.vert', 'res/shaders/tree_impostor.frag',
           'res/shaders/enhanced_skybox.frag', 'res/shaders/g_buffer.vert', 'res/shaders/g_buffer.frag',
           'src/luminumbra_client/rendering/SkyAtmosphereLut.ipp',
@@ -97,6 +102,39 @@ def scene_samples(actual):
     if (len(actual) != CHANNELS or
             not all(math.isfinite(value) and 0 <= value <= 1 for value in actual)):
         raise ValueError('invalid scene samples')
+
+
+def shrub_reference(normals=False):
+    """Eight fixed 32x64 panels; inverse transpose gives (1, 1/scaleY, 1)."""
+    expected = []
+    for y in range(SIZE):
+        scale = ANALYTICAL['scale_y'][y // 64]
+        divisor = 2 + 1 / scale
+        nx, ny = .5 + .5 / divisor, .5 + .5 / scale / divisor
+        for x in range(SIZE):
+            panel = x // 32
+            u, v = (x % 32 + .5) / 32, (y % 64 + .5) / 64
+            leaf_x = (2 * u - 1) * (1 + .10 * math.sin(v * 22))
+            discarded = panel >= 2 and leaf_x ** 2 + (2 * v - 1) ** 2 > 1
+            if discarded:
+                expected.extend(ANALYTICAL['background'])
+            elif normals:
+                expected.extend((ny - .5, nx - .5, 0) if panel == 3 else (nx, ny, 0))
+            else:
+                expected.extend(ANALYTICAL['grass'] if panel == 0 else ANALYTICAL['leaf'])
+    return expected
+
+
+def check_shrub_scene(albedo, normals):
+    # Both bounded full-image checks run before candidate publication. Normal
+    # attachment values test lighting inputs without a separate light shader.
+    for name, actual, reference in (('shrub-leaf', albedo, shrub_reference()),
+                                    ('shrub-normal', normals, shrub_reference(True))):
+        scene_samples(actual)
+        error = max(abs(a - b) for a, b in zip(actual, reference))
+        print(f'{name}: maximum analytical RGB error={error:.8f} (<=0.000001)')
+        if error > ANALYTICAL['max_error']:
+            raise ValueError(f'{name}: shrub reflectance/cutout/normal invariant failed')
 
 
 def luminance(actual):
@@ -180,7 +218,8 @@ def load_manifest(path, root=ROOT, verify_inputs=True):
             or manifest['schema'] != 3 or manifest.get('encoding') != 'linear_rgb_bottom_first'
             or manifest.get('size') != [SIZE, SIZE] or manifest.get('defines') != []
             or manifest.get('fixtures') != FIXTURES
-            or manifest.get('diagnostics') != DIAGNOSTICS):
+            or manifest.get('diagnostics') != DIAGNOSTICS
+            or manifest.get('analytical') != ANALYTICAL):
         raise ValueError('unknown scene inventory or encoding')
     dimensions = manifest['size'] + [value for fixture in manifest['fixtures']
                                      for value in fixture['mask']]
@@ -230,6 +269,8 @@ def run(args):
         raise ValueError('capture inputs differ from the current shader/fixture sources; rebuild and recapture')
     actuals = {fixture['name']: rgb(read_file(args.capture / (fixture['name'] + '.pfm')), True)
                for fixture in FIXTURES}
+    check_shrub_scene(rgb(read_file(args.capture / 'shrub-leaf.pfm'), True),
+                      rgb(read_file(args.capture / 'shrub-normal.pfm'), True))
     dusk = rgb(read_file(args.capture / 'dusk-sky.pfm'), True)
     cutout_error = tree_cutout_error(actuals['tree-cutout'])
     renderer = read_file(args.capture / 'renderer.txt', 1024).decode('utf-8').strip()

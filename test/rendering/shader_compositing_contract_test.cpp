@@ -1,6 +1,5 @@
 #include <gtest/gtest.h>
 
-#include "luminumbra_client/app/BushFoliage.h"
 #include "luminumbra_client/app/GroundCoverHull.h"
 #include "luminumbra_client/core/scenarios/ScenarioCommon.h"
 #include "luminumbra_client/rendering/TerrainAnchor.h"
@@ -148,51 +147,6 @@ TEST(GroundCoverContract, CoarseRocksAndBushesKeepClosedHullsAtEveryDistance) {
     ExpectContains(upload, "face.positions[1], face.normal");
     ExpectContains(upload, "face.positions[2], face.normal");
     ExpectContains(upload, "MeshLoader::CreateFromArrays(vertices, indices)");
-}
-
-TEST(GroundCoverContract, NearBushesUseFullLeafQuadsAndNeverTerrainGrassTexturing) {
-    const auto palette = ExtractBlock(ReadShader("src/luminumbra_client/app/ProcgenPalettes.cpp"),
-                                      "void BuildProcgenBushPalette(");
-    ExpectContains(palette, "BuildBushLeafCard(center, normal, 0.24f, 0.18f)");
-    for (const char* vertex : {"card[0], normal, {0.0f, 0.0f}",
-                               "card[1], normal, {1.0f, 0.0f}",
-                               "card[2], normal, {1.0f, 1.0f}",
-                               "card[3], normal, {0.0f, 1.0f}"}) {
-        ExpectContains(palette, vertex);
-    }
-    const auto draw = ReadShader("src/luminumbra_client/rendering/passes/GBufferPass.cpp");
-    ExpectContains(draw, "const bool leafCards = isLeaf || (isBush && !isFarLod);");
-    ExpectContains(draw, "shader->setInt(\"u_alphaTest\", leafCards ? 2 : 0);");
-    ExpectContains(draw, "two_sided = leafCards;");
-    // Near bush cards are leaves, so they keep the leaf wind strength.
-    ExpectContains(draw, "shader->setFloat(\"u_windStrength\", leafCards ? 0.85f : 0.0f);");
-    ExpectContains(draw,
-                   "shader->setInt(\"u_forceFlat\", (isBush || (isLeaf && isFarLod)) ? 1 : 0);");
-    // Far closed hulls use leaf reflectance instead of the grass material albedo.
-    ExpectContains(draw, "shader->setInt(\"u_leafSurface\", isBush ? 1 : 0);");
-    const auto frag = ReadShader("res/shaders/g_buffer.frag");
-    ExpectContains(frag, "uniform int u_leafSurface = 0;");
-    ExpectContains(frag, "if (proceduralLeaf || u_leafSurface == 1) {");
-}
-
-TEST(GroundCoverContract, LeafCardsAreFiniteOutwardQuadsForSideAndPolarNormals) {
-    const glm::vec3 center(2, -3, 5);
-    for (const glm::vec3 normal : {glm::vec3(1, 0, 0),
-                                   glm::vec3(0, 1, 0),
-                                   glm::vec3(0, -1, 0),
-                                   glm::normalize(glm::vec3(1, 2, 3))}) {
-        const auto card = Luminumbra::Client::App::BuildBushLeafCard(center, normal, 0.24f, 0.18f);
-        EXPECT_NEAR(glm::length(card[1] - card[0]), 0.48f, 1e-5f);
-        EXPECT_NEAR(glm::length(card[3] - card[0]), 0.36f, 1e-5f);
-        EXPECT_LT(glm::length((card[0] + card[2]) * 0.5f - center), 1e-5f);
-        EXPECT_GT(glm::dot(glm::cross(card[1] - card[0], card[2] - card[0]), normal), 0.0f);
-        for (const auto& position : card) {
-            EXPECT_TRUE(std::isfinite(position.x));
-            EXPECT_TRUE(std::isfinite(position.y));
-            EXPECT_TRUE(std::isfinite(position.z));
-            EXPECT_NEAR(glm::dot(position - center, normal), 0.0f, 1e-5f);
-        }
-    }
 }
 
 TEST(TerrainAnchorContract, EditedAirRetiresDressingAndRefillRestoresItWithoutDirtyBitDependence) {
