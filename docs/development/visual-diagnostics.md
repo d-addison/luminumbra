@@ -12,10 +12,10 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | --- | --- | --- |
 | AOV serialization, integer ID encoding and point-probe JSON | Implemented as independent, GL-free codecs | `DiagnosticCapture.h/.cpp`; registered `DiagnosticCapture.*` regressions in `capture_manifest_test`; native execution pending |
 | Lazy integer target with attachment leases | Implemented as a standalone helper | `DiagnosticTargets.h`; registered `DiagnosticTargetDriver.*` regressions in `capture_manifest_test`; native execution pending |
-| Capture-local draw registry | Implemented as a standalone, GL-free helper | `DiagnosticDrawTable.h`; registered `DiagnosticDrawTable.*` regressions in `capture_manifest_test`; native execution pending |
+| Capture-local draw registry | Implemented with separate asset and generated-geometry identities | `DiagnosticDrawTable.h`; registered `DiagnosticDrawTable.*` regressions in `capture_manifest_test` and generated-key `DiagnosticAttribution.*` regressions in `render_smoke_test`; native execution pending |
 | Deferred attribution producers | Implemented inside a leased deferred scope | `GBufferTargets.h` and `GBufferPass.cpp` add a render-thread producer scope, capture-local draw identities and explicit unsupported records; `g_buffer.frag` and `foliage.frag` have additive `LUMIN_DIAG_IDS` outputs; registered `DiagnosticAttribution.*` source-contract and `DiagnosticAttributionGl.*` hidden-GL regressions in `render_smoke_test`; native execution pending |
 | G-buffer ID attachment | Implemented for explicit deferred captures | `GBufferPass` holds an `AttachmentLease` during deferred submission; detachment and lease release precede completion, including rollback, recreation, retirement and exceptional exits; registered `GBufferLeaseGl.*` and `DiagnosticAttributionGl.*` regressions; native execution pending |
-| Exact producer coverage | Partial | Inside an explicit producer scope, file-backed static instances and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier with unsupported generated-mesh metadata. Live terrain MDI, ladder backend, authored surfaces and tree impostors explicitly invalidate coverage; procedural static meshes also remain unsupported. Later plant/decal stages are outside the scope. Foliage has a guarded shader output but no instrumented forward submission or separate contributor plane |
+| Exact producer coverage | Partial | Inside an explicit producer scope, file-backed static instances and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier with unsupported generated-mesh metadata. Live terrain MDI, ladder backend, authored surfaces and tree impostors explicitly invalidate coverage; procedural static meshes also remain unsupported. Later plant/decal stages are outside the scope. Foliage has a guarded shader output but no instrumented forward submission; the separate contributor attachment API is unused |
 | Readback and scenario opt-in | Planned | Requires scenario capture integration and completion of the unsupported producer paths |
 | Debug views and inspector | Planned | Extend `DebugViewPass` and developer console widgets |
 | Linux shader compilation and software-GL reference scenes | Partial | Fast Linux steps and material, cutout, night and terrain fixtures registered; bounded sky/terrain shader replays checked under llvmpipe; native scene target execution pending; dusk continuity diagnostic pending issue #918; no required-check or ruleset changes |
@@ -51,7 +51,8 @@ Shader files are outside the roots classified by `public-asset-inventory.json`, 
 their guarded edits do not change that inventory.
 
 An explicitly constructed `GBufferDiagnosticCapture` accepts a fresh draw table and
-optional caller-owned `DiagnosticTargets`; both owners outlive the scope on its
+optional caller-owned `DiagnosticTargets` and distinct forward target storage; all
+owners outlive the scope on its
 creating GL context thread. Construction alone performs no GL work. A table-only
 scope cannot attach or complete. `GBufferPass` attaches location six after the
 ordinary clear and holds a move-only `AttachmentLease` through deferred submission.
@@ -72,11 +73,29 @@ invalid impostor program cannot bypass the unsupported record. Empty terrain and
 impostor queues add no unsupported record. Later deferred and forward contributors
 remain outside this coverage; this predicate alone cannot authorize a final bundle.
 
-Only an attached scope compiles diagnostic programs, capped at six deferred
-vertex/ladder combinations. Default and ladder variants retain the existing alpha
+The contributor API can attach a distinct forward target after deferred detachment.
+It leases the selected storage through the same rollback and release path, preserves
+the forward framebuffer's original draw buffers, and enables only the additional
+identity output. The caller keeps that framebuffer alive through detachment. Missing
+or aliased storage, nested or repeated attachment, invalid extents and mismatched
+contributor passes refuse coverage. Current-program writes use the attached
+variant; a pass mismatch uploads zero IDs without throwing. No shipping
+forward producer invokes this API yet.
+
+Generated geometry can supply an exact bounded key instead of an asset path. The
+registry separates the two namespaces and emits a `generated` mesh member while
+retaining unknown provenance; ambiguous or invalid keys refuse without mutation.
+Registered source contracts cover the contributor API and feedback-variant bounds;
+hidden-GL regressions cover its leases, writers and refusals, with native execution
+pending.
+
+Only an attached scope compiles diagnostic programs, capped at six
+combinations, including separate feedback signatures (at most three names of
+64 bytes each). Default and ladder variants retain the existing alpha
 discard and depth output. The guarded integer output uses location six.
 With diagnostics disabled, removing the conditional blocks reproduces the base
 fragment shader text byte for byte.
+
 During collection, static instances are submitted once each using their existing
 attributes and base-instance offset, so repeated instances get separate ordered
 draw IDs without replay. Resolved mesh paths determine mesh LOD, including fallback
