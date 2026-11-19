@@ -17,12 +17,52 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | G-buffer ID attachment | Implemented for explicit deferred captures | `GBufferPass` holds an `AttachmentLease` during deferred submission; detachment and lease release precede completion, including rollback, recreation, retirement and exceptional exits; registered `GBufferLeaseGl.*` and `DiagnosticAttributionGl.*` regressions; native execution pending |
 | Exact producer coverage | Partial | Inside an explicit producer scope, file-backed static instances and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier with unsupported generated-mesh metadata. Live terrain MDI, ladder backend, authored surfaces and tree impostors explicitly invalidate coverage; procedural static meshes also remain unsupported. Later plant/decal stages are outside the scope. Foliage has a guarded shader output but no instrumented forward submission; the separate contributor attachment API is unused |
 | Bundle transactions and opt-in admission | GL-free core implemented; runtime integration pending | `DiagnosticCapture.h/.cpp` resolves options, streams normalized planes, joins draw records, enforces staging budgets and publishes completion last using identity-checked ownership. `diagnostic_bundle_test` covers public transports and filesystem refusal/rollback; native execution pending. Runtime setup refuses enabled diagnostics before output until the completed-frame adapter is integrated |
+| Dusk wedge attribution (issue #873) | Capture wiring and regression implemented; native execution pending | Fixed audit land pose, paired pre-present final/depth and available lighting sources; `FarWorldFogGl.DuskAuditFogIsContinuousAcrossDistanceAndHeightBoundaries`; no producer correction or visual approval |
 | Debug views and inspector | Planned | Extend `DebugViewPass` and developer console widgets |
 | Linux shader compilation and software-GL reference scenes | Partial | Fast Linux steps and material, cutout, night and terrain fixtures registered; bounded sky/terrain shader replays checked under llvmpipe; native scene target execution pending; dusk continuity diagnostic pending issue #918; no required-check or ruleset changes |
 | Bundle validity and image checks | Implemented for schema 1 and reader-only schema 2 | `check-diagnostic-capture.py` and registered `DiagnosticCapturePython` synthetic regressions validate bundles without a renderer. ROI coverage, validity, weather and edge metrics plus worst-pixel SVG crops are implemented; shipped ROIs are advisory |
 | Capture feature profile and capability manifest | Implemented as GL-free setup logic; app wiring pending | `CaptureFeatureProfile.h/.cpp`; strict `--capture-feature-profile=none\|all_features` runtime selection; registered `CaptureFeatureProfile.*` regressions; native execution pending |
 | Temporal audit plans and admission | Implemented as GL-free planning only; runtime execution refused | `TemporalAudit.h/.cpp`, `RuntimeScenarioConfig.h/.cpp`; registered `TemporalAudit.*` regressions in `capture_manifest_test`; native execution pending |
 | Temporal sequences and non-vacuous evidence (E1–E3) | Planned; gap inventory below describes current capture code | Exact-tick site execution, temporal metrics, shared producer policy and non-vacuous feature evidence require implementation; existing captures do not establish this coverage |
+
+For issue #873, `world_visual_sweep` fixes the land eye at
+`(168, 10.0505952835083, -40)`. The dusk pin is `0.25`, horizon pitch is 0°
+and vertical FOV is 75°; yaw000 and yaw240 retain the sweep's summer/winter and
+clear/storm weather pins and cloud offsets. The last settled frame writes
+`sweep/<season>__dusk__<yaw>__<weather>.attribution/` before present. The scenario
+flag enables coverage diagnostics for this run and restores the caller's mode
+on exit. An attribution failure fails that cell and the sweep. The main manifest
+links each directory and records the weather phase; each immutable directory
+publishes `manifest.json` last, after all image writes succeed.
+
+The paired `color.ppm` and raw `depth.pfm` share a rendered frame. Existing
+position, normal, material and albedo planes remain available. `lighting_sources`
+adds the lit/opaque composites, sky-view and transmittance LUTs, SSAO, all shadow
+depth/tint cascade layers, and available integrated froxel RGB/transmittance
+slices. Sources with no allocated texture are explicitly unavailable. These are
+raw inputs and composites, not additive lighting terms. A private replay of the
+unchanged aerial program and uploaded uniforms produces `aerial-inscatter-0.pfm`
+and `aerial-opacity-0.pfm`; it does not advance or rerender the scene. The receipt
+records lighting/fog uniforms, ambient color, volumetric quality, weather, cloud
+offset, camera matrices and jitter. Canopy visibility has no standalone target;
+its controls are in the lighting uniforms. Each texture read is bounded to 16M
+pixels and 64 layers, staged one plane at a time; float planes are bottom-up.
+
+The analytic aerial shader does not read shadow cascades. Its distance/height
+falloffs are continuous; cleared depth bypasses fog, so a terrain coverage edge
+can look like a haze edge. Deferred lighting selects cascades by view depth, and
+optional froxel injection samples their depth/tint; those paths can project a
+view-dependent shadow boundary. The production-shader GL fixture isolates aerial
+fog at both audited yaws, legacy/ladder distances and aerosol/valley height
+boundaries, with nonzero opacity and nonconstant filtered sky input. Native
+execution and mutation evidence remain pending; no shader correction is claimed.
+A native review must locate the wedge in paired final/depth first, then compare
+fog opacity/color, cascade layers and matrices, sky LUT, SSAO and canopy controls.
+A clear-depth edge implicates coverage; a continuous fog term over discontinuous
+lit terrain implicates lighting; a froxel edge requires volumetrics to be active.
+A sky/terrain seam needs comparison with the sky source at the same sightline.
+Retain both yaws, both weather states and the exact pose receipts before assigning
+a producer or approving a correction.
 
 The GL-free bundle writer can publish supplied immutable completed-frame planes.
 Runtime scenario capture does not yet supply those planes or enable diagnostics.

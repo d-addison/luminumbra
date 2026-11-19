@@ -2991,7 +2991,9 @@ class WorldVisualSweepWiring(unittest.TestCase):
                       self.capture)
         self.assertIn("settle_uploads(", callback)
         self.assertIn("UploadPresentation::Settled", callback)
-        self.assertIn("deps.render_and_read(pixels, fb_w, fb_h, false)", self.sweep)
+        self.assertIn("deps.render_and_read(pixels, fb_w, fb_h, false, "
+                      "i + 1 == settle_frames ? attribution_dir : std::filesystem::path{})",
+                      compact(self.sweep))
 
     def test_warmup_requires_complete_terrain_lod0_and_water(self):
         terrain = re.search(r"const bool terrain_ready =\s*([^;]+);", self.sweep)
@@ -3017,8 +3019,8 @@ class WorldVisualSweepWiring(unittest.TestCase):
         loop = block(self.sweep, "while (!streaming_ready")
         self.assertIn("get_camera_local_coverage_stats(anchor, 12)", loop)
         self.assertIn("get_camera_local_coverage_stats(anchor, 3)", loop)
-        self.assertIn("deps.render_and_read(pixels, fb_w, fb_h, true)", loop)
-        self.assertIn("return false;", block(loop, "if (!deps.render_and_read("))
+        self.assertIn("deps.render_and_read(pixels, fb_w, fb_h, true, std::filesystem::path())", loop)
+        self.assertIn("return false;", block(loop, "if (!deps.render_and_read(pixels, fb_w, fb_h, true, std::filesystem::path())"))
         water = block(loop, "if (terrain_ready)")
         self.assertIn("get_last_render_pass_stats()", water)
         self.assertIn("water_indices_drawn = stats.water_indices_drawn;", water)
@@ -3067,7 +3069,7 @@ class WorldVisualSweepWiring(unittest.TestCase):
 
     def test_water_target_is_local_and_absence_refuses_the_sweep(self):
         self.assertNotIn("FindWaterVisualCameraTarget(game_session)", self.sweep)
-        self.assertIn("std::max(land_terrain_h, Luminumbra::SEA_LEVEL) + 2.5f", self.sweep)
+        self.assertIn("anchor(168.0f, 10.0505952835083f, -40.0f)", self.sweep)
         helper = read(CLIENT / "rendering/WaterVisibility.h")
         search = block(helper, "FindWaterVisibilityTarget(")
         self.assertIn("for (int dz = -96; dz <= 96; dz += 16)", search)
@@ -3082,7 +3084,7 @@ class WorldVisualSweepWiring(unittest.TestCase):
         verify = block(self.sweep, "if (!target_rendered || !target_mask_written")
         self.assertIn("return false;", verify)
         self.assertIn("pipeline->water_visibility_mask());", self.sweep)
-        self.assertIn("const bool target_rendered = render_settled(3);", self.sweep)
+        self.assertIn("const bool target_rendered = render_settled(3, {});", self.sweep)
         self.assertIn("pipeline->water_visibility_mask().visible_pixels_in_target() == 0", self.sweep)
         self.assertIn("return false;", block(self.sweep, "if (!water_target.found)"))
         self.assertLess(self.sweep.index("if (!water_target.found)"),

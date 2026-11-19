@@ -2826,6 +2826,80 @@ class SkyLutContinuity(unittest.TestCase):
                 self.assertEqual(abs(old_left - old_right), 1.0)
 
 
+class DuskAttributionWiring(unittest.TestCase):
+    def test_audit_pose_and_only_last_settled_frame_request_attribution(self):
+        sweep = read(ROOT / "src/luminumbra_client/core/scenarios/WorldVisualSweep.cpp")
+        self.assertIn("anchor(168.0f, 10.0505952835083f, -40.0f)", sweep)
+        for token in ('{"dusk", 0.25f}', '{"yaw000", 0.0f, 0.0f, false',
+                      '{"yaw240", 240.0f, 0.0f, false', 'camera->Zoom = 75.0f;',
+                      'const int settle = storm ? 5 : 3;', 'apply_weather(storm, phase_clock,'):
+            self.assertIn(token, sweep)
+        settled = compact(body(sweep, "const auto render_settled ="))
+        self.assertIn("i + 1 == settle_frames ? attribution_dir : std::filesystem::path{}", settled)
+        self.assertIn("if (!ok)", settled)
+        selection = re.search(r"const bool dusk_attribution = (.*?);", compact(sweep)).group(1)
+        self.assertEqual(selection, "tod.time_of_day == 0.25f && "
+                         "(a.yaw_degrees == 0.0f || a.yaw_degrees == 240.0f) && !a.aim_at_water")
+        self.assertIn('failures.push_back("missing_attribution:" + c.file)', sweep)
+        self.assertIn('cell.attribution_complete = dusk_attribution && ok;', sweep)
+        self.assertIn('pipeline->set_terrain_coverage_diagnostics_enabled(enabled, bypass)', sweep)
+        self.assertIn('pipeline->set_terrain_coverage_diagnostics_enabled(true)', sweep)
+        for key in ("attribution_directory", "attribution_complete", "cloud_phase",
+                    "horizon_fov_degrees", "horizon_pitch_degrees"):
+            self.assertIn('"' + key + '"', sweep)
+
+    def test_matching_capture_precedes_present_and_propagates_failure(self):
+        source = read(ROOT / "src/luminumbra_client/core/ScenarioRunnerCapture.cpp")
+        hook = body(source, "void ScenarioRunnerImpl::onPreRenderWorldSweep()")
+        readback = hook.index("glReadPixels(")
+        self.assertIn("!renderPipeline.capture_terrain_coverage(attribution_dir)", hook)
+        attribution = hook.index("!renderPipeline.capture_terrain_coverage(attribution_dir)")
+        present = hook.index("glfwSwapBuffers(window)")
+        self.assertLess(readback, attribution)
+        self.assertLess(attribution, present)
+        refusal = body(hook, "if (!attribution_dir.empty() &&")
+        self.assertIn("return false;", refusal)
+        self.assertIn("settle_uploads(", hook[:readback])
+
+    def test_sources_are_bounded_and_completion_follows_every_readback(self):
+        source = read(RENDERING / "TerrainCoverageCapture.cpp")
+        capture = body(source, "bool RenderPipeline::capture_terrain_coverage(")
+        for name in ("lit-scene", "opaque-scene", "sky-view", "transmittance", "ambient-ssao",
+                     "shadow-depth", "shadow-tint", "fog-inscatter", "fog-transmittance"):
+            self.assertIn('"' + name + '"', capture)
+        for key in ("lighting_uniforms", "fog_uniforms", "ambient_color", "clouds", "weather",
+                    "volumetric_quality", "unavailable_terms", "lighting_source_scope"):
+            self.assertIn('"' + key + '"', capture)
+        self.assertLess(capture.index("CaptureFog("), capture.index('receipt["complete"] = true'))
+        self.assertLess(capture.index('receipt["complete"] = true'), capture.index("receipt.dump(2)"))
+        self.assertLess(capture.index("max_pixels / m_internal_height"), capture.index("create_directory("))
+        texture = compact(body(source, "bool CaptureTexture("))
+        for guard in ("texture == 0", "width <= 0", "height <= 0", "layers < 1", "layers > 64",
+                      "max_pixels / static_cast<std::size_t>(height)", "channels != 1",
+                      "glGetError() != GL_NO_ERROR", "!WriteFloatPlane("):
+            self.assertIn(guard, texture)
+        self.assertLess(texture.index("max_pixels /"), texture.index("std::vector<float> values(count)"))
+        for field in ("GL_PACK_IMAGE_HEIGHT", "GL_PACK_SKIP_IMAGES", "GL_PIXEL_PACK_BUFFER_BINDING",
+                      "GL_PACK_SWAP_BYTES"):
+            self.assertIn(field, source)
+        replay = body(source, "bool CaptureFog(")
+        self.assertIn('"aerial-inscatter"', replay)
+        self.assertIn('"aerial-opacity"', replay)
+        self.assertIn("glCheckNamedFramebufferStatus(", replay)
+        self.assertNotIn("setFloat(", replay)
+        self.assertNotIn("render_frame(", replay)
+        for state in ("GL_DRAW_FRAMEBUFFER_BINDING", "GL_CURRENT_PROGRAM", "GL_VERTEX_ARRAY_BINDING",
+                      "GL_VIEWPORT", "GL_COLOR_WRITEMASK", "GL_POLYGON_MODE", "GL_ACTIVE_TEXTURE"):
+            self.assertIn(state, body(source, "struct FogReadback"))
+        native = read(ROOT / "test/rendering/FarWorldFogGl_test.cpp")
+        fixture = body(native, "TEST_F(FarWorldFogGl, DuskAuditFogIsContinuousAcrossDistanceAndHeightBoundaries)")
+        for pin in ("ComputeSunGeometry(.25f, kSeasonalTiltAmplitude)", "{0.0f, 240.0f}",
+                    "{false, true}", "Near(samples[0], samples[1], .002f)",
+                    "EXPECT_GT(samples[0].a, .01f)"):
+            self.assertIn(pin, fixture)
+        self.assertIn("rendering/FarWorldFogGl_test.cpp", read(ROOT / "test/CMakeLists.txt"))
+
+
 class SkyAppearanceWiring(unittest.TestCase):
     def test_ambient_tag_is_confined_to_render_instances(self):
         particles = read(RENDERING / "passes/ParticlePass.cpp")
