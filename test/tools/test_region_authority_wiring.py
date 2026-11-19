@@ -514,18 +514,17 @@ class SimulationCollisionWiring(unittest.TestCase):
         heavy = function((modes / "Heavy.cpp").read_text(encoding="utf-8"), "int RunHeavy(")
         for report, target, publication, refusal in (
             ("pre_save_ticks", "options.ticks", "original.SaveFullSnapshot()", "return 1;"),
-            ("orig_resim", "options.heavy_resim", "loaded.RunFixedTicks(",
-             'return refuse_resim("original", orig_resim.ticks_executed);'),
-            ("loaded_resim", "options.heavy_resim", "const HeavyHashes orig_final",
-             'return refuse_resim("loaded", loaded_resim.ticks_executed);'),
+            ("orig_resim", "options.heavy_resim", "loaded.RunFixedTicks(", "return 1;"),
+            ("loaded_resim", "options.heavy_resim", "const HeavyHashes orig_final", "return 1;"),
         ):
             guard = f"if ({report}.region_fault || {report}.ticks_executed != {target})"
             self.assertIn(refusal, function(heavy, guard))
             self.assertLess(heavy.index(guard), heavy.index(publication))
-        resim_refusal = function(heavy, "const auto refuse_resim = [&](")
-        for step in ("original.Shutdown();", "loaded.Shutdown();", "fs::remove_all(save_dir, ec);",
-                     "return 1;"):
-            self.assertIn(step, resim_refusal)
+        # Every refusal after boot unwinds the runners before the guard removes the world.
+        self.assertLess(heavy.index("ThrowawaySaveDirGuard save_cleanup;"),
+                        heavy.index("ServerWorldRunner original("))
+        self.assertLess(heavy.index("save_cleanup.Arm(original.Session()->GetWorldSaveDir());"),
+                        heavy.index("original.RunFixedTicks(options.ticks)"))
         server = function((modes / "Server.cpp").read_text(encoding="utf-8"), "int RunServer(")
         self.assertIn("runner.RunFixedTicks(options.ticks)", server)
         self.assertIn("return 3;", function(server, "if (report.region_fault)"))
