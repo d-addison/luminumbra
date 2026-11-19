@@ -59,6 +59,7 @@
 #include <utility>
 #include <vector>
 
+#include "luminumbra_client/app/CreatureBodyAttachment.h"
 #include "luminumbra_client/app/FarmSpeciesCache.h"
 #include "luminumbra_client/app/SessionExit.h"
 #include "luminumbra_client/rendering/TimeOfDayModel.h"
@@ -17997,6 +17998,186 @@ TEST(SurfaceQuery, CharacterAdmissionChecksTheCombinedHorizonBeforeAllocating) {
     EXPECT_NE(physics.create_avatar_character({2248, 10, 8}), PhysicsSystem::kInvalidAvatar);
 }
 
+namespace {
+class CreatureAttachmentTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        physics.startup();
+        physics.set_world_system(world.get());
+    }
+
+    entt::entity AddCreature(const glm::vec3& position = {8, 10000, 8}) {
+        const auto entity = registry.create();
+        registry.emplace<Luminumbra::Components::CreatureComponent>(entity);
+        registry.emplace<Luminumbra::Components::TransformComponent>(entity).position = position;
+        return entity;
+    }
+
+    void FillHorizon() {
+        for (int index = 0; index < 14; ++index) {
+            ASSERT_NE(
+                physics.create_avatar_character({8.0f + static_cast<float>(index) * 160, 10000, 8}),
+                PhysicsSystem::kInvalidAvatar);
+        }
+    }
+
+    std::unique_ptr<SHIELD_WorldSystem> world = MakeSimulationCollisionWorld();
+    PhysicsSystem physics;
+    entt::registry registry;
+    Luminumbra::Client::CreatureBodyAttachmentCursor cursor;
+};
+
+using Luminumbra::Client::AttachMissingCreatureBodies;
+using Luminumbra::Components::CreaturePhysicsComponent;
+} // namespace
+
+TEST_F(CreatureAttachmentTest, CreatureAttachmentSkipsRefusalsWithinAnIndependentAttemptBudget) {
+    FillHorizon();
+    const auto refused = AddCreature({2248, 10000, 8});
+    const auto also_refused = AddCreature({2248, 10000, 8});
+    const auto first = AddCreature();
+    const auto second = AddCreature();
+    AttachMissingCreatureBodies(&physics, registry, cursor, 1, 1);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 14u);
+    EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(refused));
+    EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(first));
+    EXPECT_EQ(cursor.next, 1u);
+    AttachMissingCreatureBodies(&physics, registry, cursor, 1, 2);
+    EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(first));
+    EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(also_refused));
+    EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(second));
+    EXPECT_EQ(physics.avatar_character_slot_count(), 15u);
+    AttachMissingCreatureBodies(&physics, registry, cursor, 1, 2);
+    EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(second));
+    EXPECT_EQ(physics.avatar_character_slot_count(), 16u);
+    EXPECT_EQ(cursor.next, 0u);
+    registry.get<Luminumbra::Components::TransformComponent>(refused).position = {8, 10000, 8};
+    AttachMissingCreatureBodies(&physics, registry, cursor, 1, 1);
+    EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(refused));
+}
+
+TEST_F(CreatureAttachmentTest,
+       CreatureAttachmentEventuallyPassesMoreThanSixteenPersistentRefusals) {
+    FillHorizon();
+    std::array<entt::entity, 33> refused{};
+    for (auto& entity : refused) {
+        entity = AddCreature({2248, 10000, 8});
+    }
+    const auto admissible = AddCreature();
+    for (std::size_t call = 1; call <= 2; ++call) {
+        AttachMissingCreatureBodies(&physics, registry, cursor);
+        EXPECT_EQ(cursor.next, call * 16);
+        EXPECT_EQ(physics.avatar_character_slot_count(), 14u);
+        EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(admissible));
+    }
+    AttachMissingCreatureBodies(&physics, registry, cursor);
+    EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(admissible));
+    EXPECT_EQ(physics.avatar_character_slot_count(), 15u);
+    for (const auto entity : refused) {
+        EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(entity));
+    }
+}
+
+TEST_F(CreatureAttachmentTest, CreatureAttachmentDisabledBoundsAndNullPhysicsDoNoWork) {
+    const auto entity = AddCreature();
+    cursor.next = 5;
+    AttachMissingCreatureBodies(nullptr, registry, cursor);
+    AttachMissingCreatureBodies(&physics, registry, cursor, 0, 2);
+    AttachMissingCreatureBodies(&physics, registry, cursor, -1, 2);
+    AttachMissingCreatureBodies(&physics, registry, cursor, 1, 0);
+    AttachMissingCreatureBodies(&physics, registry, cursor, 1, -1);
+    EXPECT_EQ(cursor.next, 5u);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 0u);
+    EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(entity));
+    AttachMissingCreatureBodies(&physics, registry, cursor);
+    EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(entity));
+}
+
+TEST_F(CreatureAttachmentTest, CreatureAttachmentCursorSurvivesDestructionAndEntityReuse) {
+    const auto first = AddCreature();
+    const auto destroyed = AddCreature();
+    const auto middle = AddCreature();
+    const auto swapped = AddCreature();
+    AttachMissingCreatureBodies(&physics, registry, cursor, 1, 1);
+    ASSERT_TRUE(registry.all_of<CreaturePhysicsComponent>(first));
+    ASSERT_EQ(cursor.next, 1u);
+    registry.destroy(destroyed);
+    AttachMissingCreatureBodies(&physics, registry, cursor, 1, 1);
+    EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(swapped));
+    const auto reused = AddCreature();
+    ASSERT_EQ(entt::to_entity(reused), entt::to_entity(destroyed));
+    ASSERT_NE(reused, destroyed);
+    AttachMissingCreatureBodies(&physics, registry, cursor, 1, 1);
+    EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(middle));
+    AttachMissingCreatureBodies(&physics, registry, cursor, 1, 1);
+    EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(reused));
+    EXPECT_EQ(cursor.next, 0u);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 4u);
+}
+
+TEST_F(CreatureAttachmentTest, CreatureAttachmentBoundsScanningAndWrapsPastSkippedSlots) {
+    const auto missing_transform = registry.create();
+    registry.emplace<Luminumbra::Components::CreatureComponent>(missing_transform);
+    const auto attached = AddCreature();
+    const auto body = physics.create_avatar_character({8, 10000, 8});
+    ASSERT_NE(body, PhysicsSystem::kInvalidAvatar);
+    registry.emplace<CreaturePhysicsComponent>(attached, body);
+    for (int index = 0; index < 15; ++index) {
+        const auto entity = registry.create();
+        registry.emplace<Luminumbra::Components::CreatureComponent>(entity);
+    }
+    const auto admissible = AddCreature();
+    AttachMissingCreatureBodies(&physics, registry, cursor);
+    EXPECT_EQ(cursor.next, 16u);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 1u);
+    EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(admissible));
+    AttachMissingCreatureBodies(&physics, registry, cursor);
+    EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(admissible));
+    EXPECT_EQ(physics.avatar_character_slot_count(), 2u);
+    EXPECT_EQ(registry.get<CreaturePhysicsComponent>(attached).avatar_index, body);
+    EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(missing_transform));
+}
+
+TEST_F(CreatureAttachmentTest, CreatureAttachmentCursorResetsAfterShrinkAndClear) {
+    const auto first = AddCreature();
+    const auto second = AddCreature();
+    const auto tail = AddCreature();
+    AttachMissingCreatureBodies(&physics, registry, cursor, 2);
+    ASSERT_EQ(cursor.next, 2u);
+    registry.destroy(first);
+    registry.destroy(second);
+    AttachMissingCreatureBodies(&physics, registry, cursor, 1, 1);
+    EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(tail));
+    EXPECT_EQ(cursor.next, 0u);
+    AddCreature();
+    AttachMissingCreatureBodies(&physics, registry, cursor, 1, 1);
+    ASSERT_EQ(cursor.next, 1u);
+    registry.clear();
+    AttachMissingCreatureBodies(&physics, registry, cursor);
+    EXPECT_EQ(cursor.next, 0u);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 3u);
+    const auto newborn = AddCreature();
+    AttachMissingCreatureBodies(&physics, registry, cursor);
+    EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(newborn));
+}
+
+TEST_F(CreatureAttachmentTest, CreatureAttachmentDefaultCreationBudgetIsFour) {
+    std::array<entt::entity, 6> entities{};
+    for (auto& entity : entities) {
+        entity = AddCreature();
+    }
+    AttachMissingCreatureBodies(&physics, registry, cursor);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 4u);
+    EXPECT_EQ(cursor.next, 4u);
+    EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(entities[4]));
+    EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(entities[5]));
+    AttachMissingCreatureBodies(&physics, registry, cursor);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 6u);
+    for (const auto entity : entities) {
+        EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(entity));
+    }
+}
+
 TEST(SurfaceQuery, OverflowBodiesWaitForTerrainAndResumeTheirVelocity) {
     auto world = MakeSimulationCollisionWorld();
     PhysicsSystem physics;
@@ -18135,7 +18316,13 @@ TEST(SurfaceQuery, SimulationTerrainReservationsLeaveTheCapsuleBudgetUnchanged) 
     const auto avatar = physics.create_avatar_character({8, 10000, 8});
     physics.set_world_system(world.get());
     ASSERT_TRUE(physics.prepare_simulation_collisions({}));
-    EXPECT_EQ(physics.simulation_collision_sample_count(), 9u);
+    // Spheres created before authority are registered owners too, so the
+    // horizon covers whole 3x3 owner footprints, the avatar's included.
+    // One sample per admitted column, bounded by the fixed collider budget.
+    EXPECT_GE(physics.simulation_collision_sample_count(), 9u);
+    EXPECT_LE(physics.simulation_collision_sample_count(),
+              PhysicsSystem::kSimulationColliderBudget);
+    EXPECT_EQ(physics.simulation_collision_sample_count() % 9u, 0u);
     physics.update(0.0f);
     EXPECT_EQ(physics.work_items().bodies, body_limit);
     physics.set_avatar_frozen(avatar, true, {8, 10000, 8});
@@ -18501,4 +18688,151 @@ TEST(SurfaceQuery, SavedWaterOnlyCollisionSamplesRetainValidatedProceduralFallba
     world->set_durable_chunk_loader([](const IVec3&) { return std::shared_ptr<Chunk>{}; }, nullptr);
     EXPECT_FALSE(world->sample_simulation_collision(0, 0, heights));
     EXPECT_TRUE(world->durable_read_failed());
+}
+
+TEST(SurfaceQuery, RestoredSpheresInvalidatePreparationAndJoinTheNextHorizon) {
+    PhysicsSystem source;
+    source.startup();
+    ASSERT_FALSE(source.create_dynamic_sphere({8, 10000, 8}, {2, 0, 0}, 0.1f).IsInvalid());
+    PhysicsSystem::BodySetState state;
+    ASSERT_TRUE(source.capture_body_owners(state));
+    ASSERT_EQ(state.owners.size(), 1u);
+    EXPECT_FALSE(state.owners[0].suspended); // Existing records remain dynamic.
+
+    auto world = MakeSimulationCollisionWorld();
+    PhysicsSystem fresh;
+    fresh.startup();
+    fresh.set_world_system(world.get());
+    std::array<JPH::BodyID, 1> fresh_ids{};
+    ASSERT_TRUE(fresh.restore_body_owners(state, fresh_ids));
+    ASSERT_TRUE(fresh.prepare_simulation_collisions({}));
+    EXPECT_EQ(fresh.simulation_collision_owner_visit_count(), 1u);
+    EXPECT_EQ(fresh.simulation_collision_sample_count(), 9u);
+    // The original created its sphere while authority was off. After activation
+    // it must cover the same owner as the restored continuation.
+    source.set_world_system(world.get());
+    ASSERT_TRUE(source.prepare_simulation_collisions({}));
+    EXPECT_EQ(source.simulation_collision_owner_visit_count(), 1u);
+    EXPECT_EQ(source.simulation_collision_sample_count(), 9u);
+
+    PhysicsSystem target;
+    target.startup();
+    target.set_world_system(world.get());
+    ASSERT_TRUE(target.prepare_simulation_collisions({}, 7));
+    const auto empty = target.simulation_collision_hash();
+    std::array<JPH::BodyID, 1> ids{};
+    auto invalid = state;
+    --invalid.owners[0].size;
+    EXPECT_FALSE(target.restore_body_owners(invalid, ids));
+    EXPECT_TRUE(ids[0].IsInvalid());
+    ASSERT_TRUE(target.prepare_simulation_collisions({}, 7));
+    EXPECT_EQ(target.simulation_collision_hash(), empty);
+    EXPECT_EQ(target.simulation_collision_owner_visit_count(), 0u);
+
+    ASSERT_TRUE(target.restore_body_owners(state, ids));
+    const auto start = target.get_body_position(ids[0]);
+    target.update(1.0f / 30); // Commit must invalidate the previous ready barrier.
+    ExpectPositionBits(target.get_body_position(ids[0]), start);
+    ASSERT_TRUE(target.prepare_simulation_collisions({}, 7));
+    EXPECT_EQ(target.simulation_collision_owner_visit_count(), 1u);
+    EXPECT_EQ(target.simulation_collision_sample_count(), 9u);
+    EXPECT_TRUE(target.audio_raycast({8.25f, 16, 8.25f}, {8.25f, 0, 8.25f}).hit);
+    target.update(1.0f / 30);
+    EXPECT_GT(target.get_body_position(ids[0]).x, start.x);
+    target.destroy_body(ids[0]);
+    ASSERT_TRUE(target.prepare_simulation_collisions({}, 8));
+    EXPECT_EQ(target.simulation_collision_owner_visit_count(), 0u);
+    PhysicsSystem::BodySetState empty_state;
+    ASSERT_TRUE(target.capture_body_owners(empty_state));
+    ASSERT_TRUE(empty_state.owners.empty());
+    ASSERT_TRUE(target.restore_body_owners(empty_state, {}));
+    ASSERT_TRUE(target.prepare_simulation_collisions({}, 8));
+    EXPECT_EQ(target.simulation_collision_owner_visit_count(), 0u);
+    const auto replacement = target.create_dynamic_sphere(start, {}, 0.1f);
+    ASSERT_FALSE(replacement.IsInvalid());
+    ASSERT_TRUE(target.prepare_simulation_collisions({}, 9));
+    EXPECT_EQ(target.simulation_collision_owner_visit_count(), 1u);
+}
+
+TEST(SurfaceQuery, SuspendedSphereContinuationRetainsMotionAndActivity) {
+    for (const auto& [clear_authority, active] : std::array{std::pair{false, false},
+                                                            std::pair{false, true},
+                                                            std::pair{true, false},
+                                                            std::pair{true, true}}) {
+        SCOPED_TRACE(clear_authority);
+        SCOPED_TRACE(active);
+        auto source_world = MakeSimulationCollisionWorld();
+        auto target_world = MakeSimulationCollisionWorld();
+        PhysicsSystem source, target;
+        source.startup();
+        target.startup();
+        source.set_world_system(source_world.get());
+        target.set_world_system(target_world.get());
+        std::size_t source_last = 0, target_last = 0;
+        for (int index = 0; index < 14; ++index) {
+            const glm::vec3 position{8.0f + static_cast<float>(index) * 160, 10000, 8};
+            source_last = source.create_avatar_character(position);
+            target_last = target.create_avatar_character(position);
+            ASSERT_NE(source_last, PhysicsSystem::kInvalidAvatar);
+            ASSERT_NE(target_last, PhysicsSystem::kInvalidAvatar);
+        }
+        const glm::vec3 start{2248, 10000, 8};
+        const auto original = source.create_dynamic_sphere(start, {2, 3, 4}, 0.1f);
+        const auto placeholder = target.create_dynamic_sphere(start, {}, 0.1f);
+        ASSERT_FALSE(original.IsInvalid());
+        ASSERT_FALSE(placeholder.IsInvalid());
+        ASSERT_TRUE(source.prepare_simulation_collisions({}, 1));
+        ASSERT_TRUE(target.prepare_simulation_collisions({}, 1));
+        source.update(1.0f / 30);
+        PhysicsSystem::BodySetState state;
+        ASSERT_TRUE(source.capture_body_owners(state));
+        ASSERT_EQ(state.owners.size(), 1u);
+        EXPECT_TRUE(state.owners[0].suspended);
+        EXPECT_EQ(state.owners[0].retained_velocity, glm::vec3(2, 3, 4));
+        EXPECT_TRUE(state.owners[0].was_active);
+        // Exercise nonzero spin and sleeping continuation through the same public record.
+        state.owners[0].retained_angular_velocity = {1, 2, 3};
+        state.owners[0].was_active = active;
+        target.destroy_body(placeholder);
+        std::array<JPH::BodyID, 1> ids{};
+        auto invalid = state;
+        invalid.owners[0].retained_velocity.x = std::numeric_limits<float>::infinity();
+        EXPECT_FALSE(target.restore_body_owners(invalid, ids));
+        EXPECT_TRUE(ids[0].IsInvalid());
+        invalid = state;
+        invalid.owners[0].retained_angular_velocity.z = std::numeric_limits<float>::quiet_NaN();
+        EXPECT_FALSE(target.restore_body_owners(invalid, ids));
+        EXPECT_TRUE(ids[0].IsInvalid());
+        ASSERT_TRUE(target.restore_body_owners(state, ids));
+        PhysicsSystem::BodyOwnerState captured;
+        ASSERT_TRUE(target.capture_body_owner(ids[0], captured));
+        EXPECT_TRUE(captured.suspended);
+        EXPECT_EQ(captured.retained_velocity, state.owners[0].retained_velocity);
+        EXPECT_EQ(captured.retained_angular_velocity, state.owners[0].retained_angular_velocity);
+        EXPECT_EQ(captured.was_active, active);
+        EXPECT_EQ(target.body_is_active(ids[0]), active);
+        ASSERT_EQ(captured.size, state.owners[0].size);
+        ASSERT_LE(captured.size, captured.bytes.size());
+        EXPECT_TRUE(std::equal(captured.bytes.begin(),
+                               captured.bytes.begin() + captured.size,
+                               state.owners[0].bytes.begin()));
+        ASSERT_TRUE(target.prepare_simulation_collisions({}, 1));
+        target.update(1.0f / 30);
+        ExpectPositionBits(target.get_body_position(ids[0]), start);
+        if (clear_authority) {
+            target.set_world_system(nullptr);
+        } else {
+            target.remove_avatar_character(target_last);
+            ASSERT_TRUE(target.prepare_simulation_collisions({}, 2));
+        }
+        target.update(1.0f / 30);
+        ASSERT_TRUE(target.capture_body_owner(ids[0], captured));
+        EXPECT_FALSE(captured.suspended);
+        EXPECT_EQ(target.body_is_active(ids[0]), active);
+        if (active) {
+            EXPECT_GT(target.get_body_position(ids[0]).x, start.x);
+        } else {
+            ExpectPositionBits(target.get_body_position(ids[0]), start);
+        }
+    }
 }
