@@ -24,10 +24,12 @@
 // whose entities carry none — and any world with no entities — does nothing, so the canonical
 // NetworkStateHash baseline stays byte-identical.
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <set>
 #include <utility>
+#include <vector>
 
 #include <entt/entt.hpp>
 
@@ -130,24 +132,15 @@ inline const std::set<entt::entity>& DecompositionParticipants(entt::registry& r
     return false;
 }
 
-// RunDecompositionOnTick: advance the decomposition clock + nutrient release for every dead
-// participant. id-ordered, pure-integer, deterministic. `tick` is accepted for signature
-// parity with the other sim systems (it is NOT consumed — decomposition is tick-count driven,
-// not absolute-tick driven, so re-running from a snapshot reproduces exactly).
-inline DecompositionStats
-RunDecompositionOnTick(entt::registry& reg,
-                       std::uint64_t /*tick*/,
-                       const CreatureTickAdmission* admission = nullptr,
-                       const ::Luminumbra::world::RegionConsumerGate& gate = {},
-                       const std::set<entt::entity>* participants = nullptr) {
-    DecompositionStats stats;
-
-    // Detached stages borrow the live roster: rebuilding an index from their
-    // copied component pool would revisit every historical carcass each tick.
-    // The caller keeps the roster stable until this synchronous traversal ends.
-    const auto& ents = participants ? *participants : DecompositionParticipants(reg);
-
-    for (auto e : ents) {
+namespace decomposition_detail {
+// One ID-ordered traversal shared by the live and detached entry points.
+template<typename Participants>
+inline void AdvanceParticipants(entt::registry& reg,
+                                const Participants& ents,
+                                const CreatureTickAdmission* admission,
+                                const ::Luminumbra::world::RegionConsumerGate& gate,
+                                DecompositionStats& stats) {
+    for (const auto e : ents) {
         ++stats.visited;
         auto* decay = reg.try_get<Comp::DecayComponent>(e);
         if (!decay) {
@@ -202,10 +195,59 @@ RunDecompositionOnTick(entt::registry& reg,
             ++stats.finished;
         }
     }
+}
+} // namespace decomposition_detail
+
+// RunDecompositionOnTick: advance the decomposition clock + nutrient release for every dead
+// participant. id-ordered, pure-integer, deterministic. `tick` is accepted for signature
+// parity with the other sim systems (it is NOT consumed — decomposition is tick-count driven,
+// not absolute-tick driven, so re-running from a snapshot reproduces exactly).
+inline DecompositionStats
+RunDecompositionOnTick(entt::registry& reg,
+                       std::uint64_t /*tick*/,
+                       const CreatureTickAdmission* admission = nullptr,
+                       const ::Luminumbra::world::RegionConsumerGate& gate = {},
+                       const std::set<entt::entity>* participants = nullptr) {
+    DecompositionStats stats;
+
+    // Detached stages borrow the live roster: rebuilding an index from their
+    // copied component pool would revisit every historical carcass each tick.
+    // The caller keeps the roster stable until this synchronous traversal ends.
+    const auto& ents = participants ? *participants : DecompositionParticipants(reg);
+
+    decomposition_detail::AdvanceParticipants(reg, ents, admission, gate, stats);
 
     if (!participants) {
         decomposition_detail::Prune(reg, reg.ctx().get<decomposition_detail::Roster>());
     }
+    return stats;
+}
+
+// Detached regional stages copy only staged entities. Traverse the smaller of
+// the live unfinished roster and the staged decay pool, so per-tick work stays
+// bounded by both the region scope and the unfinished count. Both candidate
+// lists are ID ordered and select the same unfinished staged handles.
+inline DecompositionStats
+RunDetachedDecompositionOnTick(entt::registry& detached,
+                               std::uint64_t tick,
+                               const CreatureTickAdmission* admission,
+                               const ::Luminumbra::world::RegionConsumerGate& gate,
+                               const std::set<entt::entity>& live,
+                               std::vector<entt::entity>& scratch) {
+    const auto staged = detached.view<Comp::DecayComponent>();
+    if (live.size() <= staged.size()) {
+        return RunDecompositionOnTick(detached, tick, admission, gate, &live);
+    }
+    scratch.clear();
+    for (const auto entity : staged) {
+        if (staged.get<Comp::DecayComponent>(entity).fully_decomposed == 0 &&
+            live.contains(entity)) {
+            scratch.push_back(entity);
+        }
+    }
+    std::sort(scratch.begin(), scratch.end());
+    DecompositionStats stats;
+    decomposition_detail::AdvanceParticipants(detached, scratch, admission, gate, stats);
     return stats;
 }
 

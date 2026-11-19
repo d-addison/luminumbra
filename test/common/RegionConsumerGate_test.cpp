@@ -2198,6 +2198,28 @@ TEST(RegionConsumerGate, DetachedDecayBorrowsOnlyUnfinishedLiveParticipants) {
     EXPECT_EQ(missing.visited, 1u);
     EXPECT_EQ(missing.decaying, 0);
     EXPECT_EQ(AI::DecompositionParticipants(registry).size(), 1u);
+
+    // A staged pool smaller than the live roster bounds the detached traversal
+    // to the staged unfinished handles, never every live carcass.
+    for (int i = 0; i < 63; ++i) {
+        registry.emplace<C::DecayComponent>(registry.create());
+    }
+    ASSERT_EQ(AI::DecompositionParticipants(registry).size(), 64u);
+    entt::registry staged;
+    ASSERT_EQ(staged.create(pending), pending);
+    staged.emplace<C::DecayComponent>(pending);
+    std::vector<entt::entity> scratch;
+    const auto bounded = AI::RunDetachedDecompositionOnTick(
+        staged, 201, nullptr, {}, AI::DecompositionParticipants(registry), scratch);
+    EXPECT_EQ(bounded.visited, 1u);
+    EXPECT_EQ(scratch, std::vector<entt::entity>{pending});
+    // A larger staged pool (finished history) traverses the live roster instead.
+    for (int i = 0; i < 128; ++i) {
+        staged.emplace<C::DecayComponent>(staged.create()).fully_decomposed = 1;
+    }
+    const auto roster = AI::RunDetachedDecompositionOnTick(
+        staged, 202, nullptr, {}, AI::DecompositionParticipants(registry), scratch);
+    EXPECT_EQ(roster.visited, 64u);
 }
 
 TEST(RegionConsumerGate, SessionCompletedDecayRosterStaysEmptyWithBothTickPaths) {
