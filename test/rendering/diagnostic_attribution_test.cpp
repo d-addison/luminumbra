@@ -128,7 +128,7 @@ bool SubmitGenerated(Luminumbra::Rendering::DiagnosticDrawTable& table,
 TEST(DiagnosticAttribution, DefaultShaderTextIsUnchangedWithoutTheVariant) {
     // Re-pinned for issue #1071's leaf reflectance on closed distant shrub hulls.
     EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(Read("res/shaders/g_buffer.frag"))),
-              0x54ac5a94422f2571ull);
+              0x9032c0573230e766ull);
     EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(Read("res/shaders/foliage.frag"))),
               0xd5876c01db56f7ecull);
     const auto create = Body((Read(kTargets) + Read(kPass)), "void CreateGBufferTargets(");

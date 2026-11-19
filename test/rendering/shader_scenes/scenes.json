@@ -53,7 +53,7 @@
   ],
   "inputs": {
     "res/shaders/enhanced_skybox.frag": "dcbd2b15fdca9acfb4b8d4fe01029f0e91727556bce842c9d058362f6c07ee27",
-    "res/shaders/g_buffer.frag": "f3757fb47f2a0ee24a65f5f196839030d54404c4e8d143eb15460da6f2b5563e",
+    "res/shaders/g_buffer.frag": "ca0f34d04792d59d7d1b1c36cec27f426e27976e28f1e1b882d875ef428a6904",
     "res/shaders/g_buffer.vert": "209c1c0801801209e669e60dcadfa7085e8e44780f9e2c7599a7d48a5fe2abed",
     "res/shaders/static_asset.frag": "1d2262e2c9d905e69560c8879c1a5f88c283a6fa3e38ddeb46c06306f91a7512",
     "res/shaders/static_asset.vert": "3c6ca3b3154e0f28bbecd1c5fa2048b09e6623a1a58823b64d6a01e5f78e475d",

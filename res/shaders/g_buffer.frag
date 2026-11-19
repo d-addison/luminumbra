@@ -568,8 +568,12 @@ void main()
         albedo = vec3(0.10, 0.24, 0.045);
         roughness = 0.85;
         metallic = 0.0;
-        if (!gl_FrontFacing) worldN = -worldN;
-        textured = true; // rotate the two-sided world normal into view space below
+        if (proceduralLeaf) {
+            if (!gl_FrontFacing) worldN = -worldN;
+            textured = true; // rotate the two-sided world normal into view space below
+        }
+        // Closed distant shrub hulls keep the inverse-transposed view-space
+        // normal: their instances are scaled nonuniformly.
     } else if (u_skinnedAlbedoLayer >= 0) {
         // UV-mapped skinned/creature texturing. Samples the skinned
         // texture array by the mesh UVs; optionally perturbs the normal by a
