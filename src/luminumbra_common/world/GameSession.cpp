@@ -2579,22 +2579,13 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 const auto& decay_participants = luminumbra::ai::DecompositionParticipants(
                     foliage_step ? m_registry : living_registry);
                 budget.Next(Stage::Decay, [&] { return decay_participants.size(); });
-                if (!decay_participants.empty() && foliage_step) {
-                    // Bounded by the staged decay pool as well as the live roster.
-                    std::vector<entt::entity> staged_decay;
-                    luminumbra::ai::RunDetachedDecompositionOnTick(living_registry,
-                                                                   current_tick,
-                                                                   creature_admission,
-                                                                   foliage_gate,
-                                                                   decay_participants,
-                                                                   staged_decay);
-                } else if (!decay_participants.empty()) {
-                    luminumbra::ai::RunDecompositionOnTick(living_registry,
-                                                           current_tick,
-                                                           creature_admission,
-                                                           foliage_gate,
-                                                           &decay_participants);
-                }
+                // A detached stage is bounded by its staged decay pool as well as the live roster.
+                luminumbra::ai::RunDecompositionStage(living_registry,
+                                                      current_tick,
+                                                      creature_admission,
+                                                      foliage_gate,
+                                                      decay_participants,
+                                                      foliage_step);
                 // Circadian: diurnal/nocturnal activity from a tick-derived day fraction.
                 budget.Next(Stage::Circadian, [&] {
                     return SimParticipantCount<TelemetryComp::CircadianComponent>(m_registry);

@@ -251,4 +251,24 @@ RunDetachedDecompositionOnTick(entt::registry& detached,
     return stats;
 }
 
+// One session decay stage. `participants` is the live roster. A detached stage
+// borrows it and is bounded by its staged decay pool; the live stage passes it
+// as its own roster. An empty roster does no work.
+inline DecompositionStats RunDecompositionStage(entt::registry& reg,
+                                                std::uint64_t tick,
+                                                const CreatureTickAdmission* admission,
+                                                const ::Luminumbra::world::RegionConsumerGate& gate,
+                                                const std::set<entt::entity>& participants,
+                                                bool detached) {
+    if (participants.empty()) {
+        return {};
+    }
+    if (detached) {
+        std::vector<entt::entity> staged_decay;
+        return RunDetachedDecompositionOnTick(
+            reg, tick, admission, gate, participants, staged_decay);
+    }
+    return RunDecompositionOnTick(reg, tick, admission, gate, &participants);
+}
+
 } // namespace luminumbra::ai
