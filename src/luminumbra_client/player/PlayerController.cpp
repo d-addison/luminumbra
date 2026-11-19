@@ -26,8 +26,7 @@ PlayerController::PlayerController(GLFWwindow* window,
         if (restored_walking_feet)
             m_camera->Position = Player::SavedSpawnAnchorForFeet(m_position, m_standingHeight);
         if (m_physicsSystem) {
-            m_physicsSystem->create_player_controller(m_position);
-            m_hasInitializedPhysicsPlayer = true;
+            m_hasInitializedPhysicsPlayer = m_physicsSystem->create_player_controller(m_position);
         }
     }
 }
@@ -196,8 +195,13 @@ void PlayerController::ProcessKeyInput(int key, int action) {
                 // If this is the first time entering walking mode, create the physics body.
                 if (!m_hasInitializedPhysicsPlayer) {
                     LUMINUMBRA_CORE_INFO("Creating physics player controller for the first time.");
-                    m_physicsSystem->create_player_controller(m_position);
-                    m_hasInitializedPhysicsPlayer = true;
+                    m_hasInitializedPhysicsPlayer =
+                        m_physicsSystem->create_player_controller(m_position);
+                    if (!m_hasInitializedPhysicsPlayer) {
+                        m_mode = MovementMode::Noclip;
+                        m_position = m_camera->Position;
+                        return;
+                    }
                 } else {
                     // Otherwise, just teleport the existing body.
                     m_physicsSystem->set_player_position(m_position);
@@ -288,6 +292,14 @@ void PlayerController::UpdateWalking(float deltaTime,
     if (!m_physicsSystem) {
         m_velocity = glm::vec3(0.0f);
         return;
+    }
+
+    if (!m_hasInitializedPhysicsPlayer) {
+        m_hasInitializedPhysicsPlayer = m_physicsSystem->create_player_controller(m_position);
+        if (!m_hasInitializedPhysicsPlayer) {
+            m_velocity = glm::vec3(0.0f);
+            return;
+        }
     }
 
     // Crouching is a toggle. Check if the player wants to change state.

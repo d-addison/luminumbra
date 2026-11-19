@@ -1047,6 +1047,14 @@ public:
         bool save_requested = false;
     };
     void set_durable_residency(bool on);
+    // Canonical collision lattice, independent of render LOD/residency. Uses committed or
+    // edited authority when present, refuses incomplete authority instead of regenerating it.
+    // Exactly (CHUNK_SIZE_X+1)*(CHUNK_SIZE_Z+1) samples; no world mutation.
+    bool sample_simulation_collision(i32 chunk_x, i32 chunk_z, std::span<float> heights) const;
+    // Owner-thread diagnostic: scalar terrain evaluations performed by collision sampling.
+    u64 simulation_collision_terrain_evaluations() const {
+        return m_collision_terrain_evaluations;
+    }
     bool durable_residency() const {
         return m_durable_residency;
     }
@@ -1288,6 +1296,23 @@ private:
     std::function<std::shared_ptr<Chunk>(const IVec3&)> m_durable_chunk_loader;
     std::function<void(std::string)> m_durable_chunk_fault;
     mutable bool m_durable_read_failed = false;
+    struct CollisionSamples {
+        i32 x = 0;
+        i32 z = 0;
+        u64 generation = 0;
+        u64 last_use = 0;
+        float centre = 0;
+        bool saved = false;
+        bool valid = false;
+        bool complete = false;
+        std::array<float, (CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Z + 1)> heights{};
+    };
+    // At most 128 columns, with bounded keyed probing and least-recently-used
+    // replacement. Resident authority is checked on every call. Saved samples
+    // are invalidated at committed inventory/loader changes and terrain revisions.
+    mutable std::array<CollisionSamples, 128> m_collision_samples{};
+    mutable u64 m_collision_terrain_evaluations = 0;
+    mutable u64 m_collision_sample_clock = 0;
     bool m_evictions_suspended = false;
     std::shared_ptr<Chunk> read_committed_chunk(const IVec3& coords) const;
     void migrate_restored_water_column(const std::shared_ptr<Chunk>& chunk);
