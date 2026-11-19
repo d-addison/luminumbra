@@ -1,5 +1,6 @@
 #pragma once
 
+#include "audio/AudioAcceptance.h"
 #include "audio/IAudioManager.h"
 
 #include <chrono>
@@ -51,6 +52,20 @@ public:
 
     bool IsPlaybackEnabled() const override {
         return false;
+    }
+
+    AudioBackendState AcceptanceState() const {
+        return {.mode = "null",
+                .playback_enabled = IsPlaybackEnabled(),
+                .engine_initialized = false,
+                .device_started = false,
+                .sfx_routed = false,
+                .ambient_routed = false,
+                .events_routed = false,
+                .ui_routed = false,
+                .playback_volumes = std::nullopt,
+                .telemetry_enabled = !m_telemetry_path.empty(),
+                .retained_requests = RecordedRequestCount()};
     }
 
     // Runtime diagnostics: ordinary disabled playback retains no request history.

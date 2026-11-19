@@ -6,6 +6,22 @@
 
 namespace Luminumbra::Rendering {
 
+enum class FarHandoffAdmissionStatus {
+    NotApplicable,
+    Idle,
+    Pending,
+    Complete,
+    Refused
+};
+struct FarHandoffAdmissionPump {
+    FarHandoffAdmissionStatus status = FarHandoffAdmissionStatus::NotApplicable;
+    // One preparation step, column observation, header, region or final span check.
+    // Atomic publication uses the existing bounded descriptor/index commit.
+    std::uint64_t work = 0;
+    // Actual indexed height reads in this pump, excluding source capture.
+    std::uint64_t height_observations = 0;
+};
+
 struct FarHandoffTileInput {
     FarVolumeWantedRequest wanted;
     std::shared_ptr<const World::FarFrozenObservation> observation;
@@ -66,7 +82,7 @@ using FarHandoffObservationVisitor = void (*)(void*,
 // Owner-thread companion; the fixture residency controller is independent.
 // One queue/result allowance and memory domain per tier serves both generations.
 // entry_slots bounds the serving/target union, every manifest and key history.
-// Idle history survives range removal until space is needed for another key;
+// Idle history survives range removal until explicit retirement or slot reuse;
 // descriptor reuse starts a new residency for that safely retired key. Global
 // epoch/publication/generation checks survive every descriptor reuse.
 // Capture inputs in this domain: use shared pool aliases whose owner outlives
@@ -91,6 +107,25 @@ public:
     FarVolumeHandoff(const FarVolumeHandoff&) = delete;
     FarVolumeHandoff& operator=(const FarVolumeHandoff&) = delete;
     bool StageTarget(const FarHandoffManifest&);
+    // Retains inputs privately, bounded by the preallocated descriptor capacity
+    // (512 for session capture). Starting replaces any pending attempt.
+    // Start only retains capacity-bounded inputs. Pump budgets cover descriptor
+    // preparation, sorting, coverage validation and every height observation.
+    // A session owns the producer's frozen cursor exclusively until terminal.
+    // Optional work/deadline contexts must outlive the pending transaction.
+    FarHandoffAdmissionStatus StartTarget(const FarHandoffManifest&);
+    FarHandoffAdmissionStatus
+    StartSessionTarget(const std::shared_ptr<World::FarWorldAuthorityProducer>&,
+                       const std::shared_ptr<const Systems::SHIELD_WorldSystem>&,
+                       std::uint64_t world_epoch,
+                       std::span<const FarSessionHandoffTile>,
+                       const World::FarWorldAuthorityProducer::FrozenPolicy&,
+                       const World::FarFrozenCaptureLimits&,
+                       const World::FarFrozenCaptureWork::Counts&,
+                       const std::shared_ptr<World::FarVolumeTierMemory>&);
+    FarHandoffAdmissionPump PumpAdmission(std::uint64_t budget);
+    FarHandoffAdmissionStatus CancelAdmission();
+    FarHandoffAdmissionStatus AdmissionStatus() const;
     // Inactive synchronous publication seam. Compose every tile from one owned
     // source serial in the handoff's owning pools, then admit the whole manifest.
     // Any failure preserves both cohorts; AdmissionRefusal describes the attempt.
@@ -115,6 +150,18 @@ public:
                                       const FarVolumeFrameLimits&,
                                       const FarVolumeUploadBackend&);
     bool TryPromote();
+    // Retire every key absent from both serving and target, including its retained
+    // identity/span constraints. Owner-thread only; no allocation, waits or GPU
+    // changes. One pass over at most sum(entry_slots) indexed descriptors.
+    // After this call a complete observation visit contains every retained key:
+    // the consumer may erase its history for absent keys before staging again.
+    // Returning keys start fresh; global epoch/publication/generation checks stay.
+    // Pending admission pins history; complete diagnostics include idle keys
+    // until that attempt completes, refuses or is cancelled.
+    std::size_t RetireIdleHistory();
+    // Canonical admitted target coverage for diagnostics, including before build.
+    // Pending candidates remain private and are never returned by this query.
+    std::optional<World::FarVolumeRequest> TargetCoverageRequest(const World::FarTileKey&) const;
     std::optional<FarHandoffTileObservation> Observe(const World::FarTileKey&) const;
     bool CoarseMayYield(const World::FarTileKey&, FarHandoffCoverageView) const;
     std::size_t VisitServingDraws(FarVolumeDrawVisitor, void*);
@@ -159,21 +206,31 @@ private:
         std::size_t completion_slots;
         World::FarVolumeAuthorityLimits authority_limits;
     };
+    Tier& GetTier(std::size_t);
     class Guard;
     void CheckOwner() const;
     Entry* Find(const World::FarTileKey&, FarVolumeAdmissionWork* = nullptr);
     const Entry* Find(const World::FarTileKey&, FarVolumeAdmissionWork* = nullptr) const;
     const FarVolumeUploadedTile* Pair(const Entry&, FarHandoffCoverageView) const;
     bool Covers(const Entry&, FarHandoffCoverageView) const;
-    bool StageTarget(const FarHandoffManifest&, World::FarFrozenCaptureWork*);
+    struct Admission;
+    FarHandoffAdmissionStatus
+    StartTarget(const FarHandoffManifest&, World::FarFrozenCaptureWork*, bool capture = false);
+    bool ValidateManifest(const FarHandoffManifest&);
+    FarWorldRefusal PrepareStep(Admission&);
+    bool CommitTarget(const Admission&);
     FarWorldRefusal ValidateInput(const FarHandoffManifest&,
                                   const FarHandoffTileInput&,
-                                  const Tier&,
-                                  World::FarVolumeRequest&,
                                   bool duplicate,
-                                  const Entry* old,
-                                  World::FarFrozenCaptureWork*,
-                                  bool& sampling_refused) const;
+                                  const Entry* old) const;
+    FarWorldRefusal ValidateResolved(const FarHandoffTileInput&,
+                                     const World::FarVolumeRequest&,
+                                     bool support,
+                                     const Entry* old) const;
+    FarWorldRefusal AdmissionStep(Admission&);
+    void ReleaseAdmission();
+    std::unique_ptr<Admission> admission_;
+    FarHandoffAdmissionStatus admission_status_ = FarHandoffAdmissionStatus::Idle;
     FarHandoffTileObservation ObserveEntry(const Entry&) const;
     void Reject(Entry&, FarVolumeFrameResult&);
     World::FarVolumeTierMemory& memory_;

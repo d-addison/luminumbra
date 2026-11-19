@@ -1,6 +1,7 @@
 #pragma once
 
 #include "FarVolumeGpuBackend.h"
+#include "FarVolumeHandoff.h"
 #include "FarVolumeResidency.h"
 #include "FarWorldCaveSelection.h"
 #include "FarWorldDiagnostics.h"
@@ -84,12 +85,31 @@ public:
                                 World::FarCaveMode caves,
                                 World::FarVolumeNumericProfile numeric,
                                 const FarWorldExperimentalLimits& limits);
+    // Owner-thread bounded capture and admission retains producer/world owners.
+    // Optional limit callback contexts must outlive the pending attempt.
+    FarHandoffAdmissionStatus
+    StartSessionTarget(const std::shared_ptr<World::FarWorldAuthorityProducer>&,
+                       const std::shared_ptr<const Systems::SHIELD_WorldSystem>&,
+                       std::span<const FarSessionHandoffTile>,
+                       const World::FarWorldAuthorityProducer::FrozenPolicy&,
+                       const World::FarFrozenCaptureLimits&,
+                       const World::FarFrozenCaptureWork::Counts&);
+    FarHandoffAdmissionPump PumpAdmission(std::uint64_t budget);
+    FarHandoffAdmissionStatus CancelAdmission();
+    FarHandoffAdmissionStatus AdmissionStatus() const;
     bool StageSessionTarget(const World::FarWorldAuthorityProducer& producer,
                             const Systems::SHIELD_WorldSystem& world,
                             std::span<const FarSessionHandoffTile> tiles,
                             const World::FarWorldAuthorityProducer::FrozenPolicy& policy,
                             const World::FarFrozenCaptureLimits& limits,
                             const World::FarFrozenCaptureWork::Counts& transaction_samples);
+    // Explicit owner-thread retirement of idle session handoff history. Returns
+    // the retired count; unbound sessions and requested Legacy are no-ops.
+    // Retire first, then prune consumer history only against a captured, complete
+    // SessionDiagnostic() snapshot. Never stage between retirement and pruning.
+    // Pending admission pins history; complete diagnostics include idle keys
+    // until that attempt completes, refuses or is cancelled.
+    std::size_t RetireIdleHistory();
     // Value diagnostics only; the pointer lasts until the binding drains.
     const FarWorldHandoffDiagnosticSnapshot* SessionDiagnostic() const;
     FarWorldSelection Selection(FarWorldPurpose purpose, bool enabled = true) const noexcept;

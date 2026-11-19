@@ -34,6 +34,10 @@
 
 #include "../fields/ScalarFieldDiffusion.h"
 
+namespace Luminumbra::world {
+class GameSession;
+}
+
 namespace luminumbra::ai {
 
 class ScentField {
@@ -42,10 +46,21 @@ public:
     using EdgeGate = std::function<bool(int, int, int, int)>;
     // Shared eligibility for deposits, foraging and steering. An empty gate allows
     // every cell, including out-of-grid queries used by the existing consumers.
+    // Compatibility callbacks own their captures; shipping sessions bind directly below.
     void BindDepositGate(const CellGate& gate) {
         m_deposit_gate = gate;
+        m_admissionSession = nullptr;
+    }
+    // Borrow the live session query, including cache invalidation and fault checks.
+    // The session must outlive this field and any copies with this binding.
+    void BindSessionAdmission(const ::Luminumbra::world::GameSession& session) {
+        m_deposit_gate = nullptr;
+        m_admissionSession = &session;
     }
     [[nodiscard]] bool SimulationCellAllowed(int x, int z) const {
+        if (m_admissionSession) {
+            return SessionCellAllowed(x, z);
+        }
         return !m_deposit_gate || m_deposit_gate(x, z);
     }
     void RestoreCell(int ch, int x, int z, double value) {
@@ -82,7 +97,7 @@ public:
     // Lay scent: an agent deposits `amount` of species `ch` at its cell (trail-
     // laying / scent-marking). Out-of-bounds or unknown channel is a no-op.
     void Deposit(int ch, int x, int z, double amount) {
-        if (!valid(ch, x, z) || amount == 0.0 || (m_deposit_gate && !m_deposit_gate(x, z)))
+        if (!valid(ch, x, z) || amount == 0.0 || !SimulationCellAllowed(x, z))
             return;
         m_ch[static_cast<std::size_t>(ch)].add_impulse(
             static_cast<std::size_t>(x), static_cast<std::size_t>(z), amount);
@@ -351,6 +366,8 @@ private:
         }
     }
     CellGate m_deposit_gate;
+    const ::Luminumbra::world::GameSession* m_admissionSession = nullptr;
+    [[nodiscard]] bool SessionCellAllowed(int x, int z) const;
     // One channel-sized snapshot, shared by sequential advection and smoothing passes.
     std::vector<double> m_scratch;
     [[nodiscard]] bool valid(int ch, int x, int z) const {

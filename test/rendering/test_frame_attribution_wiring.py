@@ -3,6 +3,7 @@
 from pathlib import Path
 import ast
 import json
+import math
 import re
 import unittest
 
@@ -175,6 +176,240 @@ class MenuCaptureEvaluation:
         return "Ready" if requested else "Waiting"
 
 
+class GameplayPhotoRelease(unittest.TestCase):
+    """Trace the shipping exit boundary without running native code or GL."""
+
+    def setUp(self):
+        self.main = read(CLIENT / "main_client.cpp")
+        self.overlays = read(CLIENT / "app/DebugOverlays.cpp")
+        self.photo_header = read(CLIENT / "app/PhotoEnvironment.h")
+        self.player = True
+        self.exposure = 4.0
+        self.exposure_applied = True
+        self.hold = True
+        self.weather = "Storm"
+        self.driven = True
+        self.weather_payload = {"rain_intensity": 0.6, "storm_intensity": 0.8,
+                                "wetness": 0.9, "wind_strength": 0.4}
+        self.photo_env = True
+        self.weather_snapshot = None
+        self.photo = True
+        self.photo_ui = True
+        self.releases = 0
+
+    def restore_photo_weather(self):
+        restore = compact(block(self.photo_header, "void Restore("))
+        self.assertTrue(restore.startswith("if (!applied_) { return; }"), restore)
+        self.assertIn("if (state_.driven) { pipeline.set_weather_state(state_); } "
+                      "else { pipeline.set_weather(weather_, intensity_); } "
+                      "applied_ = false;", restore)
+        if self.weather_snapshot is None:
+            return
+        self.weather, self.driven, self.weather_payload = self.weather_snapshot
+        self.weather_snapshot = None
+
+    def release_photo_exposure(self, photo_active):
+        release = compact(block(self.photo_header, "void ReleaseIfInactive("))
+        self.assertEqual(release, "if (photo_mode_active || !applied_) { return; } "
+                         "pipeline.set_exposure_override(-1.0f); applied_ = false;")
+        if photo_active or not self.exposure_applied:
+            return
+        self.exposure = -1.0
+        self.exposure_applied = False
+
+    def leave_photo_environment(self):
+        """One gameplay frame after photo mode turned off, without a retirement."""
+        frame = self.main[self.main.index("while (!glfwWindowShouldClose(window))"):]
+        frame = block(frame, "while (!glfwWindowShouldClose(window))")
+        self.assertIn("g_app.hud.photoWeather.Restore(renderPipeline);", frame)
+        self.restore_photo_weather()
+        update = block(self.overlays, "void UpdatePhotoEnvironment(")
+        self.assertIn("app.hud.photoExposure.ReleaseIfInactive(renderPipeline, photo_active);",
+                      update)
+        self.release_photo_exposure(self.photo)
+        self.assertIn("if (!photo_active || capture_pinned) { photo = {}; }", compact(update))
+        if not self.photo:
+            self.photo_env = False
+
+    def apply_photo_weather(self, index):
+        update = compact(block(self.overlays, "void UpdatePhotoEnvironment("))
+        self.assertIn("if (selected.weather_active) { app.hud.photoWeather.Apply("
+                      "renderPipeline, selected.weather, selected.intensity); }", update)
+        apply = compact(block(self.photo_header, "void Apply(Pipeline& pipeline, "
+                              "Luminumbra::Rendering::WeatherType"))
+        self.assertIn("if (!applied_) { weather_ = pipeline.get_weather_type(); "
+                      "intensity_ = pipeline.get_weather_intensity(); "
+                      "state_ = pipeline.get_weather_state(); applied_ = true; }", apply)
+        presets = re.search(r"constexpr std::array presets = \{([^}]+)\}",
+                            self.photo_header).group(1)
+        types = [entry.strip().split("::")[-1] for entry in presets.split(",")]
+        self.assertEqual(len(types), 6)
+        if self.weather_snapshot is None:
+            self.weather_snapshot = (self.weather, self.driven, dict(self.weather_payload))
+        self.photo_env = True
+        self.weather = types[index]
+        self.driven = False
+
+    def retire(self):
+        if "auto release_player_controller =" not in self.main:
+            self.player = False
+            return
+        owner = compact(block(self.main, "auto release_player_controller ="))
+        self.assertEqual(owner, "if (g_playerController) { "
+                         "ReleasePhotoModeAndHud(g_app, renderPipeline); "
+                         "g_playerController.reset(); }")
+        if not self.player:
+            return
+        self.releases += 1
+        release = compact(re.sub(r"//[^\n]*", "",
+                                 block(self.overlays, "void ReleasePhotoModeAndHud(")))
+        if "app.hud.photoMode = {};" in release:
+            self.photo = False
+        if "app.hud.photoModeUiShown = false;" in release:
+            self.photo_ui = False
+        if "app.hud.photoEnvironment = {};" in release:
+            self.photo_env = False
+        if "app.hud.photoWeather.Restore(renderPipeline);" in release:
+            self.restore_photo_weather()
+        if "app.hud.photoExposure.ReleaseIfInactive(renderPipeline, false);" in release:
+            self.release_photo_exposure(False)
+        for method, value in re.findall(r"renderPipeline\.(set_\w+)\(([^;]*)\);", release):
+            if method == "set_time_of_day_hold":
+                self.hold = cpp_expression(value, false=False, true=True)
+            else:
+                self.fail(f"release writes an unowned renderer setting: {method}")
+        self.player = False
+
+    def assert_released(self):
+        self.assertEqual(self.exposure, -1.0, "manual exposure leaked into the menu preview")
+        self.assertFalse(self.exposure_applied)
+        self.assertFalse(self.hold)
+        self.assertEqual(self.weather, "Storm")
+        self.assertTrue(self.driven)
+        self.assertFalse(self.photo_env)
+        self.assertIsNone(self.weather_snapshot)
+        self.assertFalse(self.photo)
+        self.assertFalse(self.photo_ui)
+        self.assertFalse(self.player)
+        self.assertEqual(self.releases, 1)
+
+    def test_quit_to_menu_releases_manual_exposure_before_preview(self):
+        quit_body = block(self.main, 'else if (act == "quit")')
+        retirement = ("release_player_controller();" if "release_player_controller();" in quit_body
+                      else "g_playerController.reset();")
+        self.assertLess(quit_body.index(retirement), quit_body.index("GameState::MAIN_MENU"))
+        self.retire()
+        self.assert_released()
+
+    def test_release_preserves_weather_and_exposure_without_a_photo_override(self):
+        for engaged, driven in ((False, False), (False, True), (True, False), (True, True)):
+            with self.subTest(engaged=engaged, driven=driven):
+                self.setUp()
+                self.photo_env = engaged
+                self.driven = driven
+                self.exposure_applied = False
+                before = (self.weather, self.driven, dict(self.weather_payload), self.exposure)
+                self.retire()
+                self.assertEqual(
+                    (self.weather, self.driven, self.weather_payload, self.exposure), before)
+
+    def test_each_photo_weather_override_restores_driven_weather_on_both_exits(self):
+        for index in range(1, 6):
+            for retire_player in (False, True):
+                with self.subTest(index=index, retire_player=retire_player):
+                    self.setUp()
+                    payload = dict(self.weather_payload)
+                    self.apply_photo_weather(index)
+                    # Cycling again keeps the first live snapshot, not a photo preset.
+                    self.apply_photo_weather(5 if index != 5 else 2)
+                    if retire_player:
+                        self.retire()
+                        self.assert_released()
+                    else:
+                        self.photo = False
+                        self.leave_photo_environment()
+                    self.assertEqual((self.weather, self.driven), ("Storm", True))
+                    self.assertEqual(self.weather_payload, payload)
+                    self.assertIsNone(self.weather_snapshot)
+                    self.assertFalse(self.photo_env)
+                    self.assertEqual(self.exposure, -1.0)
+                    # Repeated exit and a fresh photo session without cycling must
+                    # not overwrite a later weather update from another owner.
+                    self.weather = "Rain"
+                    self.leave_photo_environment()
+                    self.photo_env = True
+                    self.leave_photo_environment()
+                    self.assertEqual((self.weather, self.driven), ("Rain", True))
+
+    def test_weather_pipeline_retains_payload_and_reenables_driven_classification(self):
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        direct = block(pipeline, "void RenderPipeline::set_weather(")
+        direct = compact(re.sub(r"//[^\n]*", "", direct))
+        self.assertEqual(direct, "m_weather_type = type; "
+                         "m_weather_intensity = std::clamp(intensity, 0.0f, 1.0f); "
+                         "m_weather_state.driven = false;")
+        driven = compact(block(pipeline, "void RenderPipeline::set_weather_state("))
+        self.assertIn("m_weather_state = state; m_weather_state.driven = true;", driven)
+        self.assertIn("const auto classification = ClassifyWeatherState(m_weather_state); "
+                      "m_weather_type = classification.type; "
+                      "m_weather_intensity = classification.intensity;", driven)
+
+    def test_save_refusals_preserve_photo_presentation(self):
+        quit_body = block(self.main, 'else if (act == "quit")')
+        retirement = quit_body.index("release_player_controller();" if
+                                     "release_player_controller();" in quit_body else
+                                     "g_playerController.reset();")
+        self.assertIn("return;", block(quit_body, "if (!gameSession->SaveWorld())"))
+        self.assertLess(quit_body.index("if (!gameSession->SaveWorld())"), retirement)
+        self.assertRegex(quit_body[:retirement],
+                         r"if \(!session_persistence_allowed\(\)\)\s+return;")
+        self.assertEqual((self.exposure, self.hold, self.player), (4.0, True, True))
+
+    def test_every_controller_retirement_uses_the_shared_release(self):
+        # Includes quit, benchmark quit, immediate and staged load/create,
+        # adopted-world refusal, rollback-to-menu and final shutdown.
+        self.assertEqual(self.main.count("g_playerController.reset();"), 1)
+        for marker in ("auto finish_world_replacement =", "auto refuse_world_entry =",
+                       "auto finish_world_entry =", 'else if (act == "quit")',
+                       "auto drain_entry =", "auto return_entry_to_menu =",
+                       "if (saved && main_menu)"):
+            with self.subTest(site=marker):
+                self.assertIn("release_player_controller();", block(self.main, marker))
+        replacement = block(self.main, "auto finish_world_replacement =")
+        self.assertIn("release_player_controller();", block(
+            replacement, "if (gameSession->WorldRevision() != entry_world_revision)"))
+        shutdown = self.main[self.main.index('trace_shutdown("world_save_finished")'):]
+        self.assertIn("release_player_controller();", shutdown)
+
+    def test_rollback_and_shutdown_cannot_release_a_retired_player_twice(self):
+        self.retire()
+        self.retire()
+        self.retire()
+        self.assert_released()
+
+    def test_no_player_leaves_unowned_renderer_settings_unchanged(self):
+        self.player = False
+        self.retire()
+        self.assertEqual((self.exposure, self.hold, self.weather, self.releases),
+                         (4.0, True, "Storm", 0))
+
+    def test_replacement_refusal_and_adoption(self):
+        replacement = block(self.main, "auto finish_world_replacement =")
+        condition = re.search(r"if \((.*)\)", replacement).group(1)
+        for revision, releases in ((10, 0), (11, 1)):
+            with self.subTest(revision=revision):
+                self.setUp()
+                changed = cpp_expression(condition, **{
+                    "gameSession->WorldRevision()": revision, "entry_world_revision": 10})
+                if changed and "release_player_controller();" in replacement:
+                    self.retire()
+                if releases:
+                    self.assert_released()
+                else:
+                    self.assertEqual((self.exposure, self.hold, self.player, self.releases),
+                                     (4.0, True, True, 0))
+
+
 class FrameAttributionWiring(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -189,9 +424,18 @@ class FrameAttributionWiring(unittest.TestCase):
         reload = self.main.index("const auto settle_workload_reload =")
         scatter = [match.start() for match in re.finditer(
             re.escape("UpdateFoliageScatter(g_app,"), self.main)]
-        self.assertEqual(len(scatter), 2)
+        self.assertEqual(len(scatter), 3)
+        preload_definition = self.main.index("auto wait_for_world_presentation =")
+        activation_definition = self.main.index("auto activate_loaded_world =")
+        preload_scatter = [position for position in scatter
+                           if preload_definition < position < activation_definition]
+        self.assertEqual(len(preload_scatter), 1)
+        # The definition precedes the loop; its staged invocation follows restoration.
+        advance = self.main.index("world_entry.advance(",
+                                  self.main.index("if (world_entry.state() == WorldEntryState::Requested)"))
+        self.assertLess(restore, advance)
         self.assertLess(restore, reload)
-        for position in scatter:
+        for position in (position for position in scatter if position not in preload_scatter):
             self.assertLess(restore, position)
         self.assertLess(restore, self.main.index("RenderMenuScreens(g_app,"))
         self.assertIn("UpdateFoliageScatter(g_app,", block(self.main,
@@ -272,8 +516,16 @@ class FrameAttributionWiring(unittest.TestCase):
 
     def test_all_foliage_update_callers_supply_photo_mode(self):
         calls = re.findall(r"UpdateFoliageScatter\(g_app,(.*?)\);", self.main, re.S)
-        self.assertEqual(len(calls), 2)
-        for call in calls:
+        self.assertEqual(len(calls), 3)
+        preload = block(self.main, 'auto wait_for_world_presentation =')
+        preload_calls = re.findall(r"UpdateFoliageScatter\(g_app,(.*?)\);", preload, re.S)
+        self.assertEqual(len(preload_calls), 1)
+        self.assertEqual(compact(preload_calls[0]),
+                         "root_dir, scenario_config, g_camera.get(), gameSession.get(), "
+                         "renderPipeline, false, scatter_ms, foliage_ms")
+        gameplay_calls = [call for call in calls if call != preload_calls[0]]
+        self.assertEqual(len(gameplay_calls), 2)
+        for call in gameplay_calls:
             self.assertEqual(compact(call),
                              "root_dir, scenario_config, g_camera.get(), gameSession.get(), "
                              "renderPipeline, g_playerController && "
@@ -283,10 +535,10 @@ class FrameAttributionWiring(unittest.TestCase):
 
     def test_capture_simulation_decision_covers_ticks_physics_and_water(self):
         main = compact(self.main)
-        self.assertIn('const bool simulate_frame = Measurement::frame_simulation_enabled('
+        self.assertIn('const bool simulate_frame = !timelapse_waiting && Measurement::frame_simulation_enabled('
                       'benchmark_v4, traversal.has_value(), measuring_v3, '
                       'g_app.hud.paused, g_app.capture.timeScale);', main)
-        self.assertIn('const bool advance_frame_simulation = !g_rb_active || simulate_frame;', main)
+        self.assertIn('const bool advance_frame_simulation = !timelapse_waiting && (!g_rb_active || simulate_frame);', main)
         session = block(self.main, 'if (!scenario_config.networked_session_smoke())')
         ticking = block(session, 'if (simulate_frame)')
         self.assertEqual(session.count('gameSession->TickSimulation('),
@@ -403,6 +655,20 @@ class FrameAttributionWiring(unittest.TestCase):
                          r"menuPreviewState.last_menu_frame = \{\}; "
                          r"//[^\n]*? if \(g_app.capture.timelapse_creatures\) "
                          r"DrawCreatureNameplates\(")
+
+    def test_timelapse_day_drift_overrides_live_clock_by_frame_order(self):
+        # Writer order: live clock, time-lapse drift, then scenario pins, so the drift beats the
+        # live clock while a scenario's fixed time of day still beats the drift.
+        main = self.main
+        live = main.index("renderPipeline.set_time_of_day_hold(false);")
+        start = main.index("if (g_app.capture.timelapse_frames > 0 &&\n", live)
+        drift = compact(block(main[start:], "if (g_app.capture.timelapse_frames > 0 &&"))
+        self.assertEqual(drift, "renderPipeline.set_time_of_day(g_app.capture.timelapse_tod);")
+        self.assertIn("g_app.capture.timelapse_daystep > 0.0f",
+                      main[start:main.index("renderPipeline.set_time_of_day(g_app.capture"
+                                            ".timelapse_tod);", start)])
+        pins = main.index("scenario_runner->onPreRenderCapturePins();", live)
+        self.assertLess(start, pins)
 
     def test_capture_day_phase_uses_calendar_without_frame_drift(self):
         update = block(read(CLIENT / "rendering/RenderPipeline.cpp"),
@@ -680,6 +946,20 @@ class FrameAttributionWiring(unittest.TestCase):
         preview = read(ROOT / "tools/static_preview/CMakeLists.txt")
         self.assertIn('"${STATIC_PREVIEW_ROOT}/src/luminumbra_client/app/FrameAttribution.cpp"',
                       preview)
+
+    def test_static_preview_compiles_the_diagnostic_id_codec_its_units_call(self):
+        # The standalone preview DLL links no client library, so every unit it compiles that
+        # submits diagnostic draws (DiagnosticDrawTable::submit -> EncodeDiagnosticId) needs the
+        # codec unit in the same target; otherwise MSVC/MSYS2 fail to link the DLL.
+        preview = read(ROOT / "tools/static_preview/CMakeLists.txt")
+        target = re.search(r"add_library\(luminumbra_render_static SHARED(.*?)\)", preview, re.S)
+        self.assertIsNotNone(target)
+        sources = re.findall(r'"\$\{STATIC_PREVIEW_ROOT\}/(src/[^"]+\.cpp)"', target.group(1))
+        callers = [source for source in sources
+                   if re.search(r'#include "(?:rendering/)?DiagnosticDrawTable\.h"|EncodeDiagnosticId\(',
+                                read(ROOT / source))]
+        self.assertIn("src/luminumbra_client/rendering/GBufferTargets.cpp", callers)
+        self.assertIn("src/luminumbra_client/rendering/DiagnosticCapture.cpp", sources)
 
     def test_program_owners_retain_the_first_use_bit_on_every_backend(self):
         for path, members in (
@@ -1994,6 +2274,477 @@ class FrameAttributionWiring(unittest.TestCase):
                                          requested in (2, 4, 8, 16) and resolution == requested)
 
 
+class SkySunProjectionWiring(unittest.TestCase):
+    def test_capture_projects_the_resolved_rendered_direction(self):
+        source = read(CLIENT / "core/ScenarioRunnerCapture.cpp")
+        projection = re.search(r"const bool sun_on_screen = ProjectDirectionToScreen\((.*?);",
+                               source, re.S)
+        self.assertIsNotNone(projection)
+        self.assertIn("-renderPipeline.sun_direction()", projection[1])
+        self.assertNotIn("TowardSunDirection(", projection[1])
+        sky_pass = read(CLIENT / "rendering/passes/SkyboxPass.cpp")
+        self.assertIn("const glm::vec3 toward_sun = -ctx.sun.direction;", sky_pass)
+        self.assertIn('setVec3("u_sunDirection", toward_sun)', sky_pass)
+        self.assertIn('setFloat("u_sunCosZenith", toward_sun.y)', compact(sky_pass))
+        aiming = block(read(CLIENT / "core/scenarios/SkyboxVisual.cpp"),
+                       "Luminumbra::Vec3 TowardSunDirection(")
+        self.assertIn("ComputeSunGeometry(time_of_day, 0.0f)", aiming)
+        self.assertNotIn("std::sin", aiming)
+        self.assertNotIn("std::cos", aiming)
+
+
+class CloudRenderingWiring(unittest.TestCase):
+    """Exercise scalar shader policy and its shipping pass bindings without GL."""
+
+    @staticmethod
+    def scalar(expression, **values):
+        def smoothstep(lo, hi, value):
+            t = max(0.0, min(1.0, (value - lo) / (hi - lo)))
+            return t * t * (3.0 - 2.0 * t)
+
+        tree = ast.parse(compact(expression), mode="eval")
+        allowed = (ast.Expression, ast.Call, ast.Name, ast.Load, ast.Constant,
+                   ast.BinOp, ast.Add, ast.Sub, ast.Mult, ast.Div, ast.UnaryOp, ast.USub)
+        if any(not isinstance(node, allowed) for node in ast.walk(tree)):
+            raise AssertionError("Unsupported cloud scalar expression")
+        values.update(smoothstep=smoothstep, mix=lambda a, b, t: a * (1.0 - t) + b * t)
+        return eval(compile(tree, "<cloud scalar>", "eval"), {"__builtins__": {}}, values)
+
+    def test_cloud_horizon_is_continuous_for_clear_and_storm(self):
+        source = read(ROOT / "res/shaders/enhanced_skybox.frag")
+        fade = block(source, "float cloudHorizonFade(")
+        expression = re.search(r"return (.*?);", fade, re.S).group(1)
+        march = block(source, "vec3 renderClouds(")
+        self.assertIn("if (viewDir.y <= 0.0) return baseColor;", march)
+        self.assertIn("cloudHorizonFade(viewDir.y, structureWeight)", march)
+        for structure in (0.0, 0.5, 1.0):
+            def sample(elevation):
+                return self.scalar(expression, elevation=elevation, structureWeight=structure)
+            self.assertEqual(sample(-0.01), 0.0)
+            self.assertEqual(sample(0.0), 0.0)
+            self.assertLess(sample(0.00001), 1e-6)
+            self.assertLess(abs(sample(0.020001) - sample(0.019999)), 0.0001)
+            self.assertEqual(sample(1.0), 1.0)
+
+    def test_cloud_volume_has_independent_height_and_advects_both_scales(self):
+        source = read(ROOT / "res/shaders/enhanced_skybox.frag")
+        noise = compact(block(source, "float cloudNoise3D("))
+        self.assertIn("vec3 cell = floor(p)", noise)
+        self.assertEqual(noise.count("hash("), 8)
+        self.assertEqual(noise.count("f.x)"), 4)
+        self.assertEqual(noise.count("f.z)"), 2)
+        self.assertIn("return mix(a, b, f.y)", noise)
+        density = block(source, "float cloudDensity(")
+        self.assertIn("advected = p + vec3(u_cloudScrollOffset.x, 0.0, u_cloudScrollOffset.y)", density)
+        self.assertIn("cloudNoise3D(advected * (1.0 / 430.0))", density)
+        self.assertIn("cloudNoise3D(advected * (1.0 / 120.0))", density)
+        self.assertNotIn("vec2(p.y", density)
+        profile = re.search(r"float profile = (.*?);", density, re.S).group(1)
+        base = re.search(r"float base = (.*?);", density, re.S).group(1)
+        for shape in (0.0, 0.5, 1.0):
+            height = self.scalar(base, shape=shape)
+            for hf in (-0.1, 0.0, 1.0, 1.1):
+                self.assertEqual(self.scalar(profile, base=height, hf=hf), 0.0)
+            self.assertGreater(self.scalar(profile, base=height, hf=0.49), 0.99)
+        march = compact(block(source, "vec3 renderClouds("))
+        self.assertIn("float jitter = hash(gl_FragCoord.xy)", march)
+        self.assertIn("float lightDt = (cloudSlabTop() - cloudSlabBottom()) / float(kLightSteps)", march)
+        self.assertIn("kSteps = 28", march)
+        self.assertIn("kLightSteps = 5", march)
+
+    def test_cloud_opacity_is_applied_once_and_empty_volume_preserves_sky(self):
+        source = read(ROOT / "res/shaders/enhanced_skybox.frag")
+        march = compact(block(source, "vec3 renderClouds("))
+        self.assertIn("vec3 stepColor = sunTerm + ambient;", march)
+        self.assertIn("scatter += transmittance * stepColor * (1.0 - stepExt)", march)
+        self.assertIn("vec3 cloudColor = scatter / max(1.0 - transmittance, 1e-4)", march)
+        self.assertIn("return mix(baseColor, cloudColor, alpha)", march)
+        self.assertIn("float alpha = clamp((1.0 - transmittance) * horizonFade, 0.0, 1.0)", march)
+
+    def test_night_clouds_receive_no_sunlight_or_warm_power_grade(self):
+        source = read(ROOT / "res/shaders/enhanced_skybox.frag")
+        march = block(source, "vec3 renderClouds(")
+        expression = re.search(r"float sunlight = (.*?);", march, re.S).group(1)
+        for elevation in (-1.0, -0.1, -0.08):
+            self.assertEqual(self.scalar(expression, u_sunCosZenith=elevation), 0.0)
+        for elevation in (0.06, 0.5, 1.0):
+            self.assertEqual(self.scalar(expression, u_sunCosZenith=elevation), 1.0)
+        self.assertIn("sunTransmittance(u_sunCosZenith) * (2.4 * sunlight)", march)
+        self.assertIn("mix(vec3(0.025, 0.028, 0.035), vec3(0.42, 0.47, 0.58), dayFactor)", march)
+        self.assertNotIn("cloudColor * 0.12", march)
+        self.assertIn("pow(graded, mix(vec3(1.0), vec3(0.9, 0.95, 1.05), dayFactor))", source)
+
+    def test_taau_sky_bypass_precedes_history_and_sharpen_in_live_and_replay(self):
+        shader = read(ROOT / "res/shaders/taau_resolve.frag")
+        main = block(shader, "void main()")
+        early = block(main, "if (u_history_valid == 0 || skyDepth <= 0.0)")
+        self.assertIn("FragColor = vec4(curr, 1.0)", early)
+        self.assertIn("return;", early)
+        self.assertLess(main.index("texture(u_sceneDepth"), main.index("texture(u_history"))
+        self.assertLess(main.index("texture(u_sceneDepth"), main.index("vec3 mean"))
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        context = compact(block(pipeline, "RenderContext RenderPipeline::make_taau_context()"))
+        self.assertRegex(context, r'ctx\.gbuffer_depth = m_render_registry\.adopt_texture\(\s*'
+                                  r'"gbuffer_depth", m_gbuffer_pass->gbuffer\(\)\.depth_texture\)')
+        stage = block(pipeline, "void RenderPipeline::execute_stage_taau_resolve(")
+        self.assertIn("make_taau_context()", stage)
+        self.assertIn("m_far_world_paired ? &m_far_world_pair_taau : nullptr", stage)
+        execute = compact(block(read(CLIENT / "rendering/passes/TaauPass.cpp"), "void TaauPass::execute("))
+        self.assertIn("glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_depth.id)", execute)
+        self.assertIn('m_shader->setInt("u_sceneDepth", 3)', execute)
+
+    def test_taau_only_interior_sky_bypasses_accumulation(self):
+        main = block(read(ROOT / "res/shaders/taau_resolve.frag"), "void main()")
+        self.assertIn("if (skyDepth <= 0.0)", main)
+        scan = block(main, "if (skyDepth <= 0.0)")
+        self.assertIn("float skyDepth = texture(u_sceneDepth, TexCoords).r;", main)
+        rows = block(scan, "for (int dy = -1; dy <= 1; ++dy)")
+        samples = compact(block(rows, "for (int dx = -1; dx <= 1; ++dx)"))
+        self.assertEqual(samples,
+                         "vec2 depthUV = clamp(TexCoords + vec2(float(dx), float(dy)) * u_texel, "
+                         "vec2(0.0), vec2(1.0)); "
+                         "skyDepth = max(skyDepth, texture(u_sceneDepth, depthUV).r);")
+        bypass = re.search(r"if \((u_history_valid == 0 \|\| [^\n]+)\)", main).group(1)
+        early = block(main, "if (" + bypass + ")")
+        self.assertEqual(compact(early), "FragColor = vec4(curr, 1.0); return;")
+        self.assertLess(main.index(scan), main.index(early))
+        # Evaluate the production bypass after the pinned max-depth reduction.
+        # Cover every neighbour (including diagonals), tiny positive depths, and
+        # border replication for a one-texel image and all four image corners.
+        grids = [("interior", [[0.0] * 3 for _ in range(3)], 1, 1, True),
+                 ("one sky texel", [[0.0]], 0, 0, True),
+                 ("one geometry texel", [[1.0]], 0, 0, False)]
+        for y in range(3):
+            for x in range(3):
+                for depth in (1e-7, 1.0):
+                    grid = [[0.0] * 3 for _ in range(3)]
+                    grid[y][x] = depth
+                    grids.append((f"geometry {x},{y} depth {depth}", grid, 1, 1, False))
+        for x, y in ((0, 0), (2, 0), (0, 2), (2, 2)):
+            clear = [[0.0] * 3 for _ in range(3)]
+            edge = [[0.0] * 3 for _ in range(3)]
+            edge[1][1] = 0.5
+            grids.extend((("clear corner", clear, x, y, True),
+                          ("edge corner", edge, x, y, False)))
+        for name, grid, x, y, interior in grids:
+            for valid in (0, 1):
+                with self.subTest(case=name, history_valid=valid):
+                    depths = [grid[max(0, min(len(grid) - 1, y + dy))]
+                                  [max(0, min(len(grid[0]) - 1, x + dx))]
+                              for dy in range(-1, 2) for dx in range(-1, 2)]
+                    skipped = cpp_expression(bypass, u_history_valid=valid, skyDepth=max(depths))
+                    self.assertEqual(skipped, not valid or interior)
+        # Once the bypass falls through, in-bounds edge history must reach both
+        # the existing clamp and blend without another unconditional early exit.
+        accumulation = main[main.index(early) + len(early) + 1:]
+        offscreen = re.search(r"if \((histUV.x < .*?)\)\s*\{", accumulation).group(1)
+        self.assertFalse(cpp_expression(offscreen, **{"histUV.x": 0.5, "histUV.y": 0.5}))
+        for x, y in ((-0.01, 0.5), (1.01, 0.5), (0.5, -0.01), (0.5, 1.01)):
+            self.assertTrue(cpp_expression(offscreen, **{"histUV.x": x, "histUV.y": y}))
+        offscreen_body = block(accumulation, "if (" + offscreen + ")")
+        self.assertEqual(accumulation.count("return;"), offscreen_body.count("return;"))
+        self.assertLess(accumulation.index("hist = clamp(hist, nmin, nmax);"),
+                        accumulation.index("vec3 resolved = mix(curr, hist, blend);"))
+
+    def test_taau_copy_uses_screen_source_and_internal_destination(self):
+        execute = block(read(CLIENT / "rendering/passes/TaauPass.cpp"), "void TaauPass::execute(")
+        copies = re.findall(r"glBlitFramebuffer\((.*?)\);", execute, re.S)
+        self.assertEqual(len(copies), 1)
+        arguments = [compact(arg) for arg in copies[0].split(",")]
+        self.assertEqual(arguments[8:], ["GL_COLOR_BUFFER_BIT", "GL_NEAREST"])
+        self.assertIn("glViewport(0, 0, ctx.screen_width, ctx.screen_height);", execute)
+        self.assertIn("glBindFramebuffer(GL_READ_FRAMEBUFFER, resolve_fbo);", execute)
+        self.assertIn("glBindFramebuffer(GL_DRAW_FRAMEBUFFER, lit_fbo);", execute)
+        for width, height, internal_w, internal_h in (
+                (1920, 1080, 960, 540), (1919, 1079, 960, 540),
+                (1920, 1080, 1920, 1080), (1, 1, 1, 1), (1920, 1080, 0, 0)):
+            with self.subTest(screen=(width, height), internal=(internal_w, internal_h)):
+                dest_w, dest_h = internal_w or width, internal_h or height
+                values = {"ctx.screen_width": width, "ctx.screen_height": height,
+                          "ctx.internal_w()": dest_w, "ctx.internal_h()": dest_h}
+                rectangle = [cpp_expression(arg, **values) for arg in arguments[:8]]
+                self.assertEqual(rectangle, [0, 0, width, height, 0, 0, dest_w, dest_h])
+
+class StormLightningWiring(unittest.TestCase):
+    def test_every_scenario_projects_world_geometry_without_screen_remapping(self):
+        sweep = read(CLIENT / "core/scenarios/WorldVisualSweep.cpp")
+        drive = read(CLIENT / "core/ScenarioRunnerDrive.cpp")
+        callers = (sweep, block(drive, "bool ScenarioRunnerImpl::driveWeatherVisual()"),
+                   block(drive, "bool ScenarioRunnerImpl::drivePrecipitation()"))
+        for caller in callers:
+            with self.subTest(caller=caller[:80]):
+                self.assertIn("ProjectLightningBolt(", caller)
+                self.assertIn("ComposeLiveStrikes(", caller)
+                self.assertIn("kMaxBoltSegmentPoints", caller)
+                self.assertIn("LiveBoltViewMargin(", caller)
+                self.assertNotIn("map_point", caller)
+                self.assertNotIn("cloud_darkness", caller)
+                self.assertNotIn("cloud_anchor_ndc", caller)
+        weather = block(sweep, "const auto apply_weather")
+        self.assertIn("glm::vec3(anchor) + glm::vec3(150.0f, 0.0f, 0.0f)", weather)
+        self.assertNotIn("camera->Front", weather)
+        self.assertNotIn("camera->Position) +", weather)
+        self.assertIn("cstate.coverage_amount = 0.85f", weather)
+        for caller in callers[1:]:
+            self.assertIn("gameSession->GetMetadata().spawnPoint", caller)
+            self.assertIn("TowardSunDirection(0.04f)", caller)
+            self.assertIn("GetProjectionMatrix(std::max(1, width), std::max(1, height))", caller)
+        self.assertIn("world ? world->GetTerrainHeightAt(strike_xz.x, strike_xz.z) : spawn.y",
+                      compact(callers[1]))
+        for caller in (weather, callers[2]):
+            self.assertIn("std::abs(projected.strike_ndc.x) <= 1.0f", caller)
+            self.assertIn("std::abs(projected.strike_ndc.y) <= 1.0f", caller)
+            self.assertIn("ground_on_screen ?", caller)
+            guard = re.search(r"const bool ground_on_screen =\s*(.*?);", caller, re.S)[1]
+            guard = guard.replace("Luminumbra::Rendering::", "").replace("1.0f", "1.0")
+            for x in (-1.1, -1.0, 0.0, 1.0, 1.1):
+                for y in (-1.1, -1.0, 0.0, 1.0, 1.1):
+                    with self.subTest(x=x, y=y):
+                        visible = cpp_expression(guard, **{
+                            "IsLiveBoltPenUp(projected.strike_ndc)": False,
+                            "std::abs(projected.strike_ndc.x)": abs(x),
+                            "std::abs(projected.strike_ndc.y)": abs(y)})
+                        self.assertEqual(visible, abs(x) <= 1.0 and abs(y) <= 1.0)
+            self.assertFalse(cpp_expression(guard, **{
+                "IsLiveBoltPenUp(projected.strike_ndc)": True,
+                "std::abs(projected.strike_ndc.x)": 3.0,
+                "std::abs(projected.strike_ndc.y)": 3.0}))
+
+    def test_projection_preserves_offscreen_coordinates_and_breaks_invalid_strokes(self):
+        source = read(CLIENT / "rendering/LightningBolt.h")
+        self.assertIn("inline ProjectedLiveStrike ProjectLightningBolt(", source)
+        project = block(source, "inline ProjectedLiveStrike ProjectLightningBolt(")
+        self.assertIn("view_projection * glm::vec4(point, 1.0f)", project)
+        self.assertIn("const glm::vec2 ndc(clip.x / clip.w, clip.y / clip.w);", project)
+        self.assertNotIn("clamp", project)
+        live = block(read(CLIENT / "main_client.cpp"), "const auto project =")
+        for projection, sentinel_return in (
+                (project, "return kLiveBoltPenUp;"),
+                (live, "return Luminumbra::Rendering::kLiveBoltPenUp;")):
+            predicate = re.search(r"if \(([^\n]+)\) \{", projection)
+            self.assertIsNotNone(predicate)
+            self.assertIn("!std::isfinite(clip.w)", predicate[1])
+            for w, accepted in ((-1, False), (0, False), (float("nan"), False),
+                                (float("inf"), False), (-float("inf"), False),
+                                (0.001, True), (10, True)):
+                with self.subTest(w=w):
+                    expression = predicate[1].replace("0.0f", "0.0").replace(
+                        "std::isfinite(clip.w)", "true" if math.isfinite(w) else "false")
+                    self.assertEqual(not cpp_expression(expression, true=True, false=False,
+                                                        **{"clip.w": w}), accepted)
+            invalid = block(projection, "if (!std::isfinite(ndc.x)")
+            self.assertIn(sentinel_return, invalid)
+            predicate = re.search(r"if \((!std::isfinite\(ndc.x\)[^\n]+)\) \{", projection)[1]
+            for x in (0.0, 2.0, float("nan"), float("inf")):
+                for y in (0.0, -2.0, float("nan"), -float("inf")):
+                    with self.subTest(x=x, y=y):
+                        expression = predicate.replace(
+                            "std::isfinite(ndc.x)", "true" if math.isfinite(x) else "false").replace(
+                            "std::isfinite(ndc.y)", "true" if math.isfinite(y) else "false")
+                        self.assertEqual(cpp_expression(expression, true=True, false=False),
+                                         not (math.isfinite(x) and math.isfinite(y)))
+        self.assertIn("project_stroke(bolt.main_channel)", project)
+        self.assertIn("project_stroke(branch)", project)
+        self.assertIn("project(bolt.ground_point)", project)
+
+    def test_flash_has_finite_support_and_scales_with_scene_luminance(self):
+        shader = read(ROOT / "res/shaders/lightning_overlay.frag")
+        self.assertIn("float flashResponse(", shader)
+        response = block(shader, "float flashResponse(")
+        expression = re.search(r"return\s+([^;]+);", response)[1]
+
+        def clamp(value, low, high):
+            return max(low, min(high, value))
+
+        def smoothstep(low, high, value):
+            fraction = clamp((value - low) / (high - low), 0.0, 1.0)
+            return fraction * fraction * (3.0 - 2.0 * fraction)
+
+        tree = ast.parse(expression, mode="eval")
+        allowed = (ast.Expression, ast.BinOp, ast.Add, ast.Sub, ast.Mult, ast.Call,
+                   ast.Name, ast.Load, ast.Constant)
+        self.assertTrue(all(isinstance(node, allowed) for node in ast.walk(tree)))
+        self.assertTrue(all(node.func.id in ("smoothstep", "clamp")
+                            for node in ast.walk(tree) if isinstance(node, ast.Call)))
+        code = compile(tree, "<shader flash response>", "eval")
+
+        def evaluate(distance, luma):
+            return eval(code, {"__builtins__": {}}, dict(
+                smoothstep=smoothstep, clamp=clamp,
+                distanceToStrike=distance, sceneLuma=luma))
+
+        for distance in (0.0, 0.8, 1.6, 4.0):
+            for luma in (0.0, 0.001, 0.01, 0.1, 1.0):
+                with self.subTest(distance=distance, luma=luma):
+                    value = evaluate(distance, luma)
+                    self.assertTrue(math.isfinite(value))
+                    self.assertGreaterEqual(value, 0.0)
+                    self.assertLessEqual(value, 1.0)
+                    if distance >= 1.6 or luma == 0.0:
+                        self.assertEqual(value, 0.0)
+        self.assertAlmostEqual(evaluate(0.8, 0.01), 10 * evaluate(0.8, 0.001))
+        self.assertGreater(evaluate(0.0, 0.1), evaluate(0.8, 0.1))
+        main = block(shader, "void main()")
+        self.assertIn("length((ndc - centre) * vec2(u_aspect, 1.0))", main)
+        self.assertIn("dot(color, vec3(0.2126, 0.7152, 0.0722))", main)
+        self.assertIn("flashResponse(distanceToStrike, sceneLuma)", main)
+        self.assertIn("flash = max(flash, u_flashPulse[i] * response);", main)
+        self.assertIn("color += u_color * flash;", main)
+        self.assertIn("if (u_active == 1 && u_pulse > 0.0)", main)
+        self.assertNotIn("u_cloud", shader)
+        self.assertNotIn("fbm(", shader)
+        lighting = read(CLIENT / "rendering/passes/LightingPass.cpp")
+        self.assertNotIn('setVec2("u_cloudNdc"', lighting)
+        self.assertNotIn('setFloat("u_cloudDark"', lighting)
+
+    def test_offscreen_strongest_strike_keeps_a_bounded_scene_flash(self):
+        shader = read(ROOT / "res/shaders/lightning_overlay.frag")
+        self.assertIn("float offscreenFlashFloor(", shader)
+
+        def clamp(value, low, high):
+            return max(low, min(high, value))
+
+        def smoothstep(low, high, value):
+            fraction = clamp((value - low) / (high - low), 0.0, 1.0)
+            return fraction * fraction * (3.0 - 2.0 * fraction)
+
+        def compiled(signature):
+            expression = re.search(r"return\s+([^;]+);", block(shader, signature))[1]
+            tree = ast.parse(expression, mode="eval")
+            allowed = (ast.Expression, ast.BinOp, ast.Add, ast.Sub, ast.Mult, ast.Call,
+                       ast.Name, ast.Load, ast.Constant)
+            self.assertTrue(all(isinstance(node, allowed) for node in ast.walk(tree)))
+            return compile(tree, "<shader " + signature + ">", "eval")
+
+        response = compiled("float flashResponse(")
+        floor = compiled("float offscreenFlashFloor(")
+        names = dict(smoothstep=smoothstep, clamp=clamp)
+
+        def flash(strike_ndc, pixel_ndc, luma, aspect=1.777):
+            distance = math.hypot((pixel_ndc[0] - strike_ndc[0]) * aspect,
+                                  pixel_ndc[1] - strike_ndc[1])
+            extent = max(abs(strike_ndc[0]), abs(strike_ndc[1]))
+            local = eval(response, {"__builtins__": {}},
+                         dict(names, distanceToStrike=distance, sceneLuma=luma))
+            ambient = eval(floor, {"__builtins__": {}},
+                           dict(names, strikeExtent=extent, sceneLuma=luma))
+            if strike_ndc == (-3.0, -3.0):
+                local = 0.0
+            if extent <= 1.0:
+                ambient = 0.0
+            return max(local, ambient)
+
+        pen_up = (-3.0, -3.0)
+        visible_bolt = (0.6, 0.2)
+        for luma in (0.001, 0.05, 0.5):
+            with self.subTest(luma=luma):
+                self.assertGreater(flash(pen_up, visible_bolt, luma), 0.0)
+                self.assertGreater(flash(pen_up, (-0.9, 0.9), luma), 0.0)
+                self.assertLessEqual(flash(pen_up, visible_bolt, luma), 0.35)
+                self.assertGreater(flash((5.0, 0.0), (-1.0, 0.0), luma), 0.0)
+        for extent in (0.0, 0.5, 1.0):
+            with self.subTest(extent=extent):
+                self.assertEqual(eval(floor, {"__builtins__": {}},
+                                      dict(names, strikeExtent=extent, sceneLuma=1.0)), 0.0)
+        self.assertEqual(flash(pen_up, visible_bolt, 0.0), 0.0)
+        previous = 0.0
+        for step in range(0, 41):
+            extent = 0.9 + step * 0.01
+            value = eval(floor, {"__builtins__": {}},
+                         dict(names, strikeExtent=extent, sceneLuma=1.0))
+            self.assertGreaterEqual(value, previous)
+            self.assertLessEqual(value - previous, 0.05)
+            previous = value
+        main = block(shader, "void main()")
+        self.assertIn("max(abs(centre.x), abs(centre.y))", main)
+        offscreen = block(main, "if (u_flashOnscreen[i] == 0)")
+        self.assertIn("offscreenFlashFloor(strikeExtent, sceneLuma)", offscreen)
+        local = block(main, "if (!all(equal(centre, kLiveBoltPenUp)))")
+        self.assertIn("response = flashResponse(distanceToStrike, sceneLuma);", local)
+        self.assertNotIn("flashResponse(", offscreen)
+        self.assertNotIn("offscreenFlashFloor(", local)
+        self.assertEqual(main.count("offscreenFlashFloor("), 1)
+        self.assertIn("if (i >= u_flashCount) break;", main)
+        self.assertIn("for (int i = 0; i < MAX_STRIKE_FLASHES; ++i)", main)
+        update = re.search(r"flash = (max\(flash, u_flashPulse\[i\] \* response\));", main)[1]
+        update = update.replace("u_flashPulse[i]", "pulse")
+        code = compile(ast.parse(update, mode="eval"), "<shader flash max>", "eval")
+
+        def combined(strikes, pixel, luma, aspect=1.777):
+            value = 0.0
+            for centre, pulse in strikes:
+                value = eval(code, {"__builtins__": {}}, dict(
+                    max=max, flash=value, pulse=pulse,
+                    response=flash(centre, pixel, luma, aspect)))
+            return value
+
+        # A visible weaker strike retains its full localized response, even when
+        # a stronger behind-camera strike contributes the offscreen floor.
+        strikes = ((pen_up, 0.9), (visible_bolt, 0.4))
+        self.assertEqual(combined(strikes, visible_bolt, 0.5), 0.4)
+        self.assertEqual(combined(tuple(reversed(strikes)), visible_bolt, 0.5), 0.4)
+        self.assertAlmostEqual(combined(strikes, (-0.9, 0.9), 0.5), 0.9 * 0.35)
+        # A behind-camera sentinel receives only the bounded floor.
+        self.assertEqual(flash(pen_up, (-1.0, -1.0), 1.0, 0.01), 0.35)
+        # Two onscreen centres each win at their own pixel; overlapping flashes use
+        # a max rather than a sum. The old strongest-only result is zero on the left.
+        pair = (((-0.8, 0.0), 0.2), ((0.8, 0.0), 0.4))
+        self.assertEqual(combined(pair, (-0.8, 0.0), 0.5), 0.2)
+        self.assertEqual(combined(pair, (0.8, 0.0), 0.5), 0.4)
+        self.assertEqual(combined(((visible_bolt, 0.4),) * 2, visible_bolt, 0.5), 0.4)
+        self.assertEqual(combined((), visible_bolt, 0.5), 0.0)
+        self.assertEqual(combined(strikes, visible_bolt, 0.0), 0.0)
+        for centre in ((0.0, 0.0), (-1.0, 1.0), (1.0, -1.0)):
+            for pixel in ((0.0, 0.0), (-0.9, 0.9), (0.7, -0.4)):
+                for luma in (0.0, 0.001, 0.1, 1.0):
+                    for pulse in (0.0, 0.42, 3.0):
+                        with self.subTest(centre=centre, pixel=pixel, luma=luma, pulse=pulse):
+                            distance = math.hypot((pixel[0] - centre[0]) * 1.777,
+                                                  pixel[1] - centre[1])
+                            previous = pulse * eval(response, {"__builtins__": {}},
+                                                    dict(names, distanceToStrike=distance,
+                                                         sceneLuma=luma))
+                            self.assertEqual(combined(((centre, pulse),), pixel, luma), previous)
+
+    def test_flash_list_is_carried_by_every_producer_and_uniform_upload(self):
+        header = read(CLIENT / "rendering/LiveStrikeFlash.h")
+        cap = re.search(r"kMaxLiveStrikeFlashes = (\d+);", header)[1]
+        shader = read(ROOT / "res/shaders/lightning_overlay.frag")
+        self.assertIn("#define MAX_STRIKE_FLASHES " + cap, shader)
+        for uniform in ("u_flashNdc", "u_flashPulse", "u_flashOnscreen"):
+            self.assertIn(uniform + "[MAX_STRIKE_FLASHES]", shader)
+        frame = read(CLIENT / "rendering/RenderFrameTypes.h")
+        self.assertIn("LiveStrikeFlashList flashes;", frame)
+        lighting = read(CLIENT / "rendering/passes/LightingPass.cpp")
+        self.assertIn("std::min(lit.flashes.count, kMaxLiveStrikeFlashes)", lighting)
+        self.assertIn('setInt("u_flashCount", static_cast<int>(flash_count))', lighting)
+        self.assertIn("for (std::size_t i = 0; i < flash_count; ++i)", lighting)
+        self.assertIn("const auto& flash = lit.flashes.entries[i];", lighting)
+        for uniform, value in (("u_flashNdc", "flash.strike_ndc"),
+                               ("u_flashPulse", "flash.pulse"),
+                               ("u_flashOnscreen", "flash.onscreen ? 1 : 0")):
+            self.assertIn('("' + uniform + '" + suffix, ' + value + ')', lighting)
+        for path in ("core/ScenarioRunnerDrive.cpp", "core/scenarios/WorldVisualSweep.cpp"):
+            source = read(CLIENT / path)
+            self.assertEqual(source.count("lstate.flashes = composed.flashes;"),
+                             source.count("ComposeLiveStrikes("))
+        live = read(CLIENT / "main_client.cpp")
+        self.assertIn("g_app.weather.liveBolt.flashes = composed.flashes;", live)
+        self.assertIn("Luminumbra::Rendering::SelectLiveStrikeFlashCandidates( pulses)", compact(live))
+        self.assertIn("for (const std::size_t index : flash_selected)", live)
+        self.assertIn("std::sort(frame_indices.begin(), frame_indices.end());", live)
+        self.assertIn("for (const std::size_t index : frame_indices)", live)
+        self.assertNotIn("pulses[strongest]", live)
+
+    def test_storm_does_not_add_a_night_visibility_floor(self):
+        weather = read(ROOT / "res/shaders/weather_system.frag")
+        sky = read(ROOT / "res/shaders/enhanced_skybox.frag")
+        self.assertNotIn("floorLift", weather)
+        self.assertNotIn("stormMurk", sky)
+        self.assertNotIn("nightStormFloor", sky)
+        self.assertIn("finalColor *= dim;", weather)
+        self.assertIn("u_stormSkyFloor", sky)  # still gates stars under overcast
+
 class TerrainMaterialWiring(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -2041,7 +2792,10 @@ class TerrainMaterialWiring(unittest.TestCase):
         self.assertIn("worldN = normalize(worldN);", blend)
         surface = block(self.fragment, "void terrainSurface(")
         self.assertIn("float matIndex = float(materialId) / 255.0;", surface)
-        self.assertIn("albedo = baseAlbedo * albedoScale * albedoTint;", surface)
+        self.assertIn("baseAlbedo *= albedoScale * albedoTint;", surface)
+        self.assertLess(surface.index("baseAlbedo *= albedoScale * albedoTint;"),
+                        surface.index("baseAlbedo = mix(baseAlbedo, rockAlbedo, rockW);"))
+        self.assertIn("albedo = baseAlbedo;", surface)
         # No new coverage path can change the material-ID attachment or water ownership.
         self.assertIn("float material_id_normalized = float(fs_in.MaterialID) / 255.0;", main)
         self.assertIn("farLiveOwns(local, fs_in.MaterialID)", main)
@@ -2112,6 +2866,108 @@ class TerrainMaterialWiring(unittest.TestCase):
             settings = after_bind.split("glBindTexture(GL_TEXTURE_2D_ARRAY,", 1)[0]
             guarded = block(settings, "if (terrain_anisotropy_supported)")
             self.assertIn("GL_TEXTURE_MAX_ANISOTROPY, terrain_anisotropy", guarded)
+
+class PhotoEnvironmentWiring(unittest.TestCase):
+    def test_exposure_release_is_independent_of_time_capture_pins_and_pause(self):
+        overlays = read(CLIENT / "app/DebugOverlays.cpp")
+        capture = compact(block(overlays, "void UpdatePhotoCapture("))
+        self.assertIn("app.hud.photoExposure.Apply( renderPipeline, "
+                      "Luminumbra::Rendering::ManualExposureMultiplier(app.hud.photoMode.lens));",
+                      capture)
+        self.assertNotIn("set_exposure_override(", capture)
+        context = block(read(CLIENT / "app/ClientAppContext.h"), "struct HudState")
+        self.assertIn("PhotoExposureOverride photoExposure;", context)
+        update = block(overlays, "void UpdatePhotoEnvironment(")
+        release = "app.hud.photoExposure.ReleaseIfInactive(renderPipeline, photo_active);"
+        self.assertIn(release, update)
+        self.assertNotIn("if (", update.split(release, 1)[0])
+        self.assertLess(update.index(release), update.index("if (!photo_active || capture_pinned)"))
+        self.assertNotIn("set_exposure_override(", update)
+        self.assertNotIn("photoExposure =", update)
+        self.assertIn("const bool photo_active = playerController && "
+                      "playerController->photo_mode_active();", compact(update))
+        hud = compact(block(overlays, "void UpdatePhotoModeAndHud("))
+        self.assertIn("app.hud.photoMode.active = playerController->photo_mode_active();", hud)
+        self.assertNotIn("capture_pinned", hud)
+        exposure = block(read(CLIENT / "app/PhotoEnvironment.h"), "class PhotoExposureOverride")
+        self.assertIn("bool applied_ = false;", exposure)
+        self.assertNotIn("time_active", exposure)
+        apply = block(exposure, "void Apply(")
+        self.assertIn("pipeline.set_exposure_override(multiplier);", apply)
+        self.assertIn("applied_ = true;", apply)
+        release_body = block(exposure, "void ReleaseIfInactive(")
+        guard = re.search(r"if\s*\(([^()]*)\)", release_body).group(1)
+        self.assertIn("return;", block(release_body, "if ("))
+        self.assertIn("pipeline.set_exposure_override(-1.0f);", release_body)
+        self.assertIn("applied_ = false;", release_body)
+        for active in (False, True):
+            for applied in (False, True):
+                with self.subTest(active=active, applied=applied):
+                    self.assertEqual(cpp_expression(guard, photo_mode_active=active, applied_=applied),
+                                     active or not applied)
+
+    def test_photo_selection_follows_live_defaults_and_precedes_pins_and_render(self):
+        main = read(CLIENT / "main_client.cpp")
+        release = main.index("renderPipeline.set_time_of_day_hold(false);")
+        weather_release = main.index("g_app.hud.photoWeather.Restore(renderPipeline);")
+        loop = block(main, "while (!glfwWindowShouldClose(window))")
+        before_restore = loop.split("g_app.hud.photoWeather.Restore(renderPipeline);", 1)[0]
+        self.assertNotIn("if (", before_restore)
+        self.assertLess(weather_release, main.index("GameState currentState ="))
+        self.assertLess(weather_release, main.index("RenderMenuScreens("))
+        weather_writer_guard = "if (g_systemConfig.enabled(luminumbra::core::SysKey::RenderLiveWeather))"
+        self.assertLess(weather_release, main.index(weather_writer_guard))
+        self.assertNotIn("photoWeather.Restore", block(main, weather_writer_guard))
+        photo = main.index("UpdatePhotoEnvironment(")
+        for live in ("renderPipeline.set_world_clock(gameSession->GetWorldClock());",
+                     "renderPipeline.set_time_of_day_tick(sim_tick);",
+                     "renderPipeline.set_weather_state(weather_state);"):
+            self.assertLess(release, main.index(live))
+            self.assertLess(weather_release, main.index(live))
+            self.assertLess(main.index(live), photo)
+        for pin in ("scenario_runner->onPreRenderCapturePins();",
+                    "renderPipeline.set_time_of_day(Luminumbra::BenchmarkPose::kTimeOfDay);",
+                    "renderPipeline.set_weather(wt, g_app.capture.scene_weather_intensity);",
+                    "scenario_runner->onPreRenderFoliage()"):
+            self.assertLess(photo, main.index(pin))
+        self.assertLess(photo, main.index("renderPipeline.render_frame(", photo))
+
+    def test_photo_capture_has_no_late_environment_writers(self):
+        overlays = read(CLIENT / "app/DebugOverlays.cpp")
+        capture = block(overlays, "void UpdatePhotoCapture(")
+        for setter in ("set_weather(", "set_time_of_day(", "set_time_of_day_hold(",
+                       "consume_tod_nudge()", "consume_weather_cycle()"):
+            self.assertNotIn(setter, capture)
+        update = block(overlays, "void UpdatePhotoEnvironment(")
+        self.assertIn("SelectPhotoEnvironment(live, photo, photo_active, capture_pinned)", update)
+        self.assertIn("renderPipeline.set_time_of_day(selected.time_of_day);",
+                      block(update, "if (selected.time_active)"))
+        self.assertIn("app.hud.photoWeather.Apply(renderPipeline, selected.weather, selected.intensity);",
+                      block(update, "if (selected.weather_active)"))
+
+    def test_weather_snapshot_survives_photo_selection_reset(self):
+        context = block(read(CLIENT / "app/ClientAppContext.h"), "struct HudState")
+        self.assertIn("PhotoWeatherOverride photoWeather;", context)
+        update = block(read(CLIENT / "app/DebugOverlays.cpp"), "void UpdatePhotoEnvironment(")
+        self.assertIn("photo = {};", update)
+        self.assertNotIn("photoWeather =", update)
+
+    def test_all_capture_modes_disable_photo_overrides(self):
+        main = compact(read(CLIENT / "main_client.cpp"))
+        guard = re.search(r"const bool photo_capture_pinned = ([^;]+);", main).group(1)
+        flags = ("scenario_config.active()", "g_rb_active", "g_app.capture.timelapse_frames",
+                 "g_app.capture.scene_active", "g_app.capture.frame_scan_active",
+                 "g_app.capture.render_parity_active", "g_app.capture.survey_active",
+                 "g_app.capture.bake_impostor_path.empty()",
+                 "g_app.capture.ui_screenshot_screen.empty()", "g_app.capture.ui_thumbs")
+        defaults = {flag: flag.endswith(".empty()") for flag in flags}
+        self.assertFalse(cpp_expression(guard, **defaults))
+        for flag in flags:
+            with self.subTest(flag=flag):
+                inputs = dict(defaults)
+                inputs[flag] = not inputs[flag]
+                self.assertTrue(cpp_expression(guard, **inputs))
+
 
 class WorldVisualSweepWiring(unittest.TestCase):
     @classmethod
@@ -2204,30 +3060,146 @@ class WorldVisualSweepWiring(unittest.TestCase):
         for field in ("water_draws", "water_indices_drawn"):
             self.assertIn(f"cell.{field} = stats.{field};", self.sweep)
             self.assertIn(f'{{"{field}", c.{field}}}', self.sweep)
-        # Retain the existing daytime pixel-presence check as well.
-        self.assertIn("c.water_aimed && c.daytime && c.water_like_pixels == 0", self.sweep)
+        # Presence is depth-tested and colour independent; submission remains required.
+        self.assertIn("c.water_aimed && c.visible_water_pixels == 0", self.sweep)
+        self.assertIn("c.water_aimed && !c.water_mask_valid", self.sweep)
         self.assertIn('manifest["warmup_water_indices_drawn"] = water_indices_drawn;', self.sweep)
 
     def test_water_target_is_local_and_absence_refuses_the_sweep(self):
         self.assertNotIn("FindWaterVisualCameraTarget(game_session)", self.sweep)
         self.assertIn("std::max(land_terrain_h, Luminumbra::SEA_LEVEL) + 2.5f", self.sweep)
-        search = block(self.sweep, "for (int dz = -96;")
+        helper = read(CLIENT / "rendering/WaterVisibility.h")
+        search = block(helper, "FindWaterVisibilityTarget(")
+        self.assertIn("for (int dz = -96; dz <= 96; dz += 16)", search)
         self.assertIn("for (int dx = -96; dx <= 96; dx += 16)", search)
-        self.assertIn("anchor.x + static_cast<float>(dx)", search)
-        self.assertIn("anchor.z + static_cast<float>(dz)", search)
-        expression = re.search(r"if \((height <[^{}]+)\) \{", search).group(1)
-        expression = expression.replace("Luminumbra::SEA_LEVEL", "sea").replace("0.5f", "0.5")
-        for height, distance, nearest, expected in ((-1, 256, 1024, True),
-                                                   (-0.5, 256, 1024, False),
-                                                   (2, 256, 1024, False),
-                                                   (-1, 1024, 256, False),
-                                                   (-1, 256, 256, False)):
-            self.assertEqual(cpp_expression(expression, height=height, sea=0,
-                                            distance_sq=distance,
-                                            nearest_water_distance_sq=nearest), expected)
+        self.assertIn("for (int step = 0; step <= 32 && clear; ++step)", search)
+        self.assertIn("h < sea_level - 0.5f", search)
+        self.assertIn("h < point.y - 0.5f", search)
+        self.assertIn("std::isfinite(h)", search)
+        self.assertIn("result = {.found = true, .eye = eye, .focus = focus};", search)
+        self.assertIn("FindWaterVisibilityTarget(", self.sweep)
+        self.assertIn("camera->Position = water_target.eye;", self.sweep)
+        verify = block(self.sweep, "if (!target_rendered || !target_mask_written")
+        self.assertIn("return false;", verify)
+        self.assertIn("pipeline->water_visibility_mask());", self.sweep)
+        self.assertIn("const bool target_rendered = render_settled(3);", self.sweep)
+        self.assertIn("pipeline->water_visibility_mask().visible_pixels_in_target() == 0", self.sweep)
         self.assertIn("return false;", block(self.sweep, "if (!water_target.found)"))
         self.assertLess(self.sweep.index("if (!water_target.found)"),
                         self.sweep.index("// --- run the matrix"))
+
+    def test_water_presence_refuses_empty_target_even_with_geometry_or_sky_hue(self):
+        condition = re.search(r"if \((c.water_aimed && c.visible_water_pixels[^)]+)\)",
+                              self.sweep).group(1)
+        for aimed, visible, expected in ((True, 0, True), (True, 1, False),
+                                         (False, 0, False), (False, 1, False)):
+            self.assertEqual(cpp_expression(condition, **{
+                "c.water_aimed": aimed, "c.visible_water_pixels": visible}), expected)
+        invalid = block(self.sweep, "if (c.water_aimed && !c.water_mask_valid)")
+        self.assertIn('failures.push_back("missing_water_mask:" + c.file);', invalid)
+        self.assertIn("WriteSweepWaterMask(deps.artifact_dir / cell.water_mask_file, mask)",
+                      compact(self.sweep))
+        self.assertIn("return passed && manifest_written;", self.sweep)
+
+    def test_water_target_rejects_every_invalid_patch_and_sight_line(self):
+        search = block(read(CLIENT / "rendering/WaterVisibility.h"), "FindWaterVisibilityTarget(")
+        assignments = re.findall(r"clear = (std::isfinite[^;]+);", search)
+        self.assertEqual(len(assignments), 2)
+        for expression, limit in zip(assignments, (0.0, 10.0)):
+            expression = expression.replace("std::isfinite(h)", "finite").replace("0.5f", "0.5")
+            for height, finite in ((limit - 1, True), (limit - 0.5, True),
+                                   (limit, True), (limit - 1, False)):
+                self.assertEqual(cpp_expression(expression, finite=finite, h=height,
+                                                sea_level=limit, **{"point.y": limit}),
+                                 finite and height < limit - 0.5)
+        selected = re.search(r"if \(([^()]+)\) \{\s*nearest = distance;", search).group(1)
+        for clear in (False, True):
+            self.assertEqual(cpp_expression(selected, clear=clear), clear)
+        self.assertIn("WaterVisibilityTarget result;", search)
+        self.assertIn("return result;", search)
+        self.assertIn("bool found = false;", read(CLIENT / "rendering/WaterVisibility.h"))
+
+    def test_water_visibility_uses_surviving_alpha_not_blue_or_warm_rgb(self):
+        helper = read(CLIENT / "rendering/WaterVisibility.h")
+        conversion = block(helper, "static WaterVisibilityMask FromRgba(")
+        predicate = re.search(r"result.pixels\[i\] = (.*?) \? 255 : 0;", conversion).group(1)
+        for label, rgb, alpha, expected in (
+                ("blue water", (20, 100, 200), 150, True),
+                ("warm water", (220, 90, 20), 150, True),
+                ("blue sky", (20, 100, 200), 0, False),
+                ("occluded water", (0, 0, 0), 0, False)):
+            with self.subTest(label=label):
+                self.assertEqual(cpp_expression(predicate, alpha=alpha,
+                                                r=rgb[0], g=rgb[1], b=rgb[2]), expected)
+        self.assertIn("rgba[i * 4u + 3u]", conversion)
+        self.assertIn("rgba.size() != count * 4u", conversion)
+        roi = block(helper, "std::uint64_t visible_pixels_in_target() const")
+        self.assertIn("if (!valid())", roi)
+        self.assertIn("y = height / 4; y < height - height / 4", roi)
+        self.assertIn("x = width / 4; x < width - width / 4", roi)
+        self.assertIn("WaterVisibilityMask::FromRgba(width, height, rgba)",
+                      read(CLIENT / "rendering/passes/WaterPass.cpp"))
+
+    def test_water_mask_sizes_refuse_both_invalid_axes_before_arithmetic(self):
+        helper = read(CLIENT / "rendering/WaterVisibility.h")
+        expression = re.search(r"return ([^;]+);", block(helper, "static bool valid_size(")).group(1)
+        for axis in ("w", "h"):
+            expression = expression.replace(f"static_cast<std::size_t>({axis})", axis)
+        for w, h, expected in ((0, 8, False), (8, 0, False), (-1, 8, False),
+                                (8, -1, False), (3, 8, False), (8, 3, False),
+                                (4, 4, True), (4096, 4096, True),
+                                (4097, 8, False), (8, 4097, False)):
+            with self.subTest(w=w, h=h):
+                self.assertEqual(cpp_expression(expression, w=w, h=h, kMaxPixels=4096 * 4096),
+                                 expected)
+
+    def test_water_draw_and_visibility_replay_refuse_unrepresentable_counts(self):
+        source = read(CLIENT / "rendering/passes/WaterPass.cpp")
+        guard = block(source, "GLsizei WaterElementCount(")
+        condition = re.search(r"if \((.*?)\) \{", guard).group(1)
+        condition = condition.replace("static_cast<u32>(std::numeric_limits<GLsizei>::max())", "limit")
+        for count in (0, 1, 2147483647, 2147483648, 4294967295):
+            self.assertEqual(cpp_expression(condition, count=count, limit=2147483647),
+                             count > 2147483647)
+        self.assertIn("return 0;", guard)
+        self.assertEqual(source.count("WaterElementCount(item.element_count)"), 2)
+        self.assertIn("continue;", block(block(source, "WaterPass::execute("), "if (count == 0)"))
+        self.assertIn("continue;", block(block(source, "void WaterPass::capture_visibility("),
+                                         "if (elements == 0)"))
+
+    def test_water_visibility_replays_shipping_shader_and_exact_depth_only_when_requested(self):
+        source = read(CLIENT / "rendering/passes/WaterPass.cpp")
+        execute = block(source, "WaterPass::execute(")
+        self.assertIn("m_visibility_mask = {};", execute)
+        self.assertIn("glEnable(GL_DEPTH_TEST)", execute)
+        self.assertIn("glDepthFunc(GL_GREATER)", execute)
+        self.assertIn("glDepthMask(GL_FALSE)", execute)
+        self.assertIn("capture_visibility(ctx, input);",
+                      block(execute, "if (capture_visibility_requested)"))
+        capture = block(source, "void WaterPass::capture_visibility(")
+        self.assertIn("ctx.frozen_replay", capture)
+        self.assertIn("ctx.lit_scene_depth.id == 0", capture)
+        self.assertIn("glFramebufferRenderbuffer( GL_FRAMEBUFFER", compact(capture))
+        self.assertIn("ctx.lit_scene_depth.id", capture)
+        self.assertNotIn("glDisable(GL_DEPTH_TEST)", capture)
+        self.assertNotIn("glDepthMask(GL_TRUE)", capture)
+        self.assertNotIn("glUseProgram", capture)
+        self.assertIn("for (const auto& item : input.draw_items)", capture)
+        self.assertIn("glDrawElements", capture)
+        self.assertIn("glGetError() == GL_NO_ERROR", capture)
+        self.assertIn("glClearTexImage(color, 0, GL_RGBA, GL_FLOAT, zero)", capture)
+        self.assertIn("glReadPixels", capture)
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        water = block(pipeline, "void RenderPipeline::execute_stage_water(")
+        self.assertIn("water_ctx, water_input, camera, m_water_visibility_capture_enabled", compact(water))
+        self.assertIn("ctx.lit_scene_depth = RenderbufferHandle", block(
+            pipeline, "RenderContext RenderPipeline::make_water_context("))
+        gate = read(ROOT / "tools/gates/validate-engine-frontier.ps1")
+        water_gate = gate.split("$waterCells =", 1)[1].split("# No rain", 1)[0]
+        self.assertIn("$cell.visible_water_pixels -lt 1", water_gate)
+        self.assertIn("$cell.water_mask_valid", water_gate)
+        self.assertIn("Assert-PpmArtifact -Path $cell.water_mask_file", water_gate)
+        self.assertNotIn("$cell.water_like_pixels", water_gate)
 
     def test_rain_pool_is_reset_for_every_cell_not_just_clear_weather(self):
         weather = block(self.sweep, "const auto apply_weather =")
@@ -2264,6 +3236,514 @@ class WorldVisualSweepWiring(unittest.TestCase):
                                       (2**31-1, 2**31-1, 2**64-1, False),
                                       (2**31-1, 2**31-1, 2**63-1, True)):
                 self.assertEqual(cpp_expression(guard, **{width: w, height: h, size: n}), refused)
+
+
+class TreeImpostorCoverageWiringTest(unittest.TestCase):
+    def test_both_bake_consumers_validate_before_publishing(self):
+        source = read(CLIENT / "rendering/ImpostorBake.cpp")
+        render = block(source, "RenderAtlas(const std::string&")
+        self.assertEqual(len(re.findall(r"glGetTextureImage\(\s*out\.albedo", render)), 1)
+        self.assertEqual(len(re.findall(r"glGetTextureImage\(\s*out\.albedo", source)), 1)
+        self.assertIn("MeasureImpostorCoverage(out.rgba, atlas, atlas, n)", compact(render))
+        self.assertIn("out.ok = out.alpha_coverage.usable();", render)
+        refusal = block(render, "if (!out.ok)")
+        for required in ("LUMINUMBRA_CORE_ERROR", "kTreeImpostorAtlasName",
+                         "out.alpha_coverage.coverage", "glDeleteTextures(1, &out.albedo)",
+                         "glDeleteTextures(1, &out.normal)", "out.albedo = out.normal = 0;"):
+            self.assertIn(required, refusal)
+        for marker in ("ImpostorBakeResult BakeTreeImpostorAtlas(",
+                       "ImpostorAtlasTextures BakeTreeImpostorAtlasToTextures("):
+            consumer = block(source, marker)
+            self.assertIn("RenderAtlas(rootDir, rp, grid)", consumer)
+            self.assertIn("if (!ra.ok)", consumer)
+            self.assertNotIn("glGetTexImage", consumer)
+        runtime = block(source, "ImpostorAtlasTextures BakeTreeImpostorAtlasToTextures(")
+        self.assertLess(runtime.index("out.alpha_coverage = ra.alpha_coverage;"),
+                        runtime.index("if (!ra.ok)"))
+        export = block(source, "ImpostorBakeResult BakeTreeImpostorAtlas(")
+        self.assertLess(export.index("if (!ra.ok)"), export.index("WritePpm("))
+        self.assertIn("ra.alpha_coverage.cells[k]", export)
+
+    def test_refusal_reaches_draw_and_mesh_fallback_without_blocking_entry(self):
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        header = read(CLIENT / "rendering/RenderPipeline.h")
+        self.assertIn("m_treeImpostorCoverage = ia.alpha_coverage;", pipeline)
+        enable = block(pipeline, "if (ia.drawable())")
+        self.assertIn("m_treeImpostorsEnabled = true;", enable)
+        enabled = block(header, "bool tree_impostor_enabled() const")
+        self.assertIn("m_treeImpostorsEnabled && m_treeImpostorCoverage.usable()", enabled)
+        self.assertIn("gbuffer_input.tree_impostor_enabled = tree_impostor_enabled();", pipeline)
+        gate = block(read(CLIENT / "main_client.cpp"), "auto game_content_error =")
+        self.assertIn("!renderPipeline.tree_impostor_coverage().refused()", gate)
+        draw = compact(read(CLIENT / "rendering/passes/GBufferPass.cpp"))
+        self.assertIn("const bool impostorsOn = input.tree_impostor_enabled;", draw)
+        self.assertIn("if (impostorsOn && authoredTree && lod == 3 && cp.impostorTree)", draw)
+        self.assertIn("if (cp.impostorTree && !authoredTree) { lod = std::min(lod, 2); }", draw)
+        self.assertIn("AuthoredTreeLodConfig(impostorsOn)", draw)
+        self.assertIn("if (impostorsOn && !impostorInstances.empty())", draw)
+        lod = read(CLIENT / "rendering/TreeLod.h")
+        self.assertIn("impostors ? 65.0f : std::numeric_limits<float>::infinity()", lod)
+        self.assertIn('TreeImpostorsRequested(Core::ReadEnvironment("LUMIN_TREE_IMPOSTORS"))',
+                      compact(pipeline))
+
+    def test_live_capture_serializes_measured_coverage_and_refusal(self):
+        live = compact(read(CLIENT / "rendering/CaptureManifestLive.cpp"))
+        self.assertIn("const auto& atlas = pipeline.tree_impostor_coverage();", live)
+        for key, value in (("atlas", "std::string(kTreeImpostorAtlasName)"),
+                           ("alpha_coverage", "atlas.coverage"),
+                           ("alpha_refused", "atlas.refused()"),
+                           ("alpha_status", "std::string(atlas.status())"),
+                           ("alpha_min_cell", "atlas.min_cell"),
+                           ("alpha_max_cell", "atlas.max_cell"),
+                           ("alpha_cell_count", "std::uint64_t(atlas.cell_count)")):
+            self.assertIn('input.render_settings.emplace("tree_impostor_' + key + '", ' +
+                          value + ');', live)
+        # The manifest has a fixed 128-setting budget; full cell values stay in bake JSON.
+        settings = re.findall(r'\{"[a-z0-9_]+",|render_settings\.emplace\("', live)
+        self.assertLessEqual(len(settings), 128)
+        manifest = read(CLIENT / "rendering/CaptureManifest.cpp")
+        self.assertIn("input.render_settings", manifest)
+        cmake = read(ROOT / "test/CMakeLists.txt")
+        self.assertRegex(cmake, r"add_executable\(octa_impostor_test\s+rendering/octa_impostor_test.cpp")
+
+    def test_readback_restores_transfer_state_and_uses_bounded_dsa(self):
+        source = read(CLIENT / "rendering/ImpostorBake.cpp")
+        guard = block(source, "struct BakeGlState")
+        for name in ("GL_PACK_ALIGNMENT", "GL_PACK_ROW_LENGTH", "GL_PACK_SKIP_ROWS",
+                     "GL_PACK_SKIP_PIXELS", "GL_PACK_IMAGE_HEIGHT", "GL_PACK_SKIP_IMAGES",
+                     "GL_PACK_SWAP_BYTES", "GL_PACK_LSB_FIRST"):
+            self.assertIn(name, guard)
+        self.assertIn("glPixelStorei(pack_names[i], pack_values[i]);", guard)
+        self.assertIn("glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);", guard)
+        self.assertIn("glBindBuffer(GL_PIXEL_PACK_BUFFER, static_cast<GLuint>(pack_buffer));", guard)
+        render = compact(block(source, "RenderAtlas(const std::string&"))
+        self.assertLess(render.index("kImpostorMaxAtlasSide / n"), render.index("const int atlas = n * tile"))
+        self.assertIn("const BakeGlState gl_state;", render)
+        self.assertIn("static_cast<GLsizei>(bytes), out.rgba.data()", render)
+
+
+class ComparisonAtmosphereWiring(unittest.TestCase):
+    def test_comparison_pins_follow_live_defaults_for_both_scenarios(self):
+        main = read(CLIENT / "main_client.cpp")
+        hook = main.index("scenario_runner->onPreRenderCapturePins();")
+        self.assertLess(main.index("renderPipeline.set_cloud_state("), hook)
+        self.assertLess(main.index("renderPipeline.set_weather_state(weather_state);"), hook)
+        drive = read(CLIENT / "core/ScenarioRunnerDrive.cpp")
+        weather = re.sub(r"\(\s+", "(", compact(block(drive, "bool ScenarioRunnerImpl::driveWeatherVisual()")))
+        self.assertIn('PinComparisonAtmosphere(renderPipeline, root_dir / "data/common/particles", '
+                      'g_camera->Position, weather_phase);', weather)
+        self.assertIn("renderPipeline.set_season_tick(0);", weather)
+        self.assertNotIn("SampleAt(", weather)
+        capture = read(CLIENT / "core/ScenarioRunnerCapture.cpp")
+        pins = block(capture, "void ScenarioRunnerImpl::onPreRenderCapturePins()")
+        self.assertIn("(void)driveWeatherVisual();", pins)
+        sweep = re.sub(r"\(\s+", "(", compact(block(pins, "scenario_config.timeofday_sweep_smoke()")))
+        self.assertIn('PinComparisonAtmosphere(renderPipeline, root_dir / "data/common/particles", '
+                      'g_camera->Position, false);', sweep)
+        self.assertLess(sweep.index("PinComparisonAtmosphere("), sweep.index("set_season_tick("))
+
+    def test_complete_atmosphere_and_presentation_replace_live_inputs(self):
+        source = read(CLIENT / "core/scenarios/WeatherVisual.cpp")
+        pin = compact(block(source, "void PinComparisonAtmosphere("))
+        for call in ("pipeline.set_weather_state(state.weather);",
+                     "pipeline.set_cloud_state(state.clouds);",
+                     "pipeline.set_lightning_state({});",
+                     "pipeline.set_time_of_day_hold(true);",
+                     "presentation_clock.set_capture_tick(kComparisonPresentationTick, "
+                     "kComparisonPresentationRate);",
+                     "particles->set_precipitation(particle_data_root, camera_position, "
+                     "frame_weather.rain_intensity, frame_weather.snow_intensity);",
+                     "particles->set_wind(frame_weather.wind_direction * "
+                     "frame_weather.wind_strength * 8.0f);"):
+            self.assertIn(call, pin)
+        builder = compact(block(read(CLIENT / "core/scenarios/ScenarioCommon.h"),
+                                "BuildComparisonAtmosphere(bool rain)"))
+        for assignment in ("state.weather.driven = true;",
+                           "state.weather.rain_intensity = rain ? 1.0f : 0.0f;",
+                           "state.weather.fog_density = rain ? 0.1f : 0.0f;",
+                           "state.weather.storm_intensity = rain ? 0.4f : 0.0f;",
+                           "state.weather.wetness = rain ? 1.0f : 0.0f;",
+                           "state.weather.wind_strength = 0.0f;",
+                           "state.clouds.enabled = true;",
+                           "state.clouds.shadow_enabled = true;",
+                           "state.clouds.coverage_amount = rain ? 0.8f : 0.0f;",
+                           "state.clouds.shadow_strength = rain ? 0.45f : 0.0f;"):
+            self.assertIn(assignment, builder)
+        # set_cloud_state preserves old scroll; only the enabled per-frame
+        # advance actually resolves it from the fixed presentation clock.
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        advance = block(pipeline, "void RenderPipeline::advance_cloud_phase(")
+        self.assertIn("presentation_clock.capture_seconds()", advance)
+        self.assertIn("m_cloud_phase = static_cast<float>(*seconds);", advance)
+        self.assertIn("m_cloud_state.scroll_offset = wind_xz * (m_cloud_phase * speed);", advance)
+
+    def test_actual_inputs_are_snapshotted_with_every_comparison_capture(self):
+        capture = read(CLIENT / "core/ScenarioRunnerCapture.cpp")
+        for function in ("captureWeatherVisual(", "captureTimeOfDaySweep("):
+            body = block(capture, "void ScenarioRunnerImpl::" + function)
+            assignment = "stats.atmosphere = ResolvedAtmosphereToJson(renderPipeline);"
+            self.assertIn(assignment, body)
+            self.assertLess(body.index("glReadPixels("), body.index(assignment))
+            self.assertLess(body.index(assignment), body.index("WritePixelBufferPpm("))
+        for file, function in (("WeatherVisual.cpp", "WeatherPixelStatsToJson("),
+                               ("TimeOfDaySeasonSweep.cpp", "TimeOfDayPixelStatsToJson(")):
+            writer = block(read(CLIENT / "core/scenarios" / file), function)
+            self.assertIn('{"atmosphere", stats.atmosphere}', writer)
+        snapshot = block(read(CLIENT / "core/scenarios/WeatherVisual.cpp"),
+                         "ResolvedAtmosphereToJson(")
+        for field in ("driven", "rain_intensity", "snow_intensity", "fog_density",
+                      "storm_intensity", "wetness", "wind_direction", "wind_strength"):
+            self.assertIn("weather." + field, snapshot)
+        for field in ("enabled", "shadow_enabled", "coverage_amount", "biome_variation",
+                      "plane_height", "shadow_strength", "scroll_offset", "sun_travel_dir"):
+            self.assertIn("clouds." + field, snapshot)
+        self.assertIn("pipeline.get_time_of_day()", snapshot)
+        self.assertIn("pipeline.get_season_tick()", snapshot)
+        self.assertIn("presentation_clock.capture_seconds()", snapshot)
+        self.assertIn("particles->wind_velocity()", snapshot)
+
+
+class DeferredDiagnosticLeaseWiring(unittest.TestCase):
+    """Evaluate capture admission and guard every skipped deferred producer."""
+
+    def setUp(self):
+        self.targets = read(CLIENT / "rendering/GBufferTargets.cpp")
+        self.passes = read(CLIENT / "rendering/passes/GBufferPass.cpp")
+
+    def test_completion_requires_all_six_conditions(self):
+        import itertools
+
+        body = block(self.targets, "bool GBufferDiagnosticCapture::complete()")
+        expression = re.fullmatch(r"\s*return\s+(.*?);\s*", body, re.S).group(1)
+        for captured, framebuffer, lease, failed, refused, coverage in itertools.product(
+                (False, True), repeat=6):
+            with self.subTest(captured=captured, framebuffer=framebuffer, lease=lease,
+                              failed=failed, refused=refused, coverage=coverage):
+                actual = cpp_expression(expression, **{
+                    "state_->captured": captured, "state_->framebuffer": framebuffer,
+                    "state_->attachment_lease": lease, "state_->failed": failed,
+                    "state_->refused": refused, "state_->table.complete_coverage()": coverage,
+                    "true": True, "false": False})
+                self.assertEqual(actual, captured and not framebuffer and not lease
+                                 and not failed and not refused and coverage)
+
+    def test_attachment_wraps_deferred_submission(self):
+        execute = block(self.passes, "GBufferDrawStats GBufferPass::execute(")
+        attachment = execute.index("GBufferDiagnosticAttachment diagnostic_attachment(")
+        self.assertLess(execute.index("ReplayRollback restore_gl("), attachment)
+        self.assertLess(execute.index("glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)"),
+                        attachment)
+        for producer in ("geometry_pass_chunks(", "geometry_pass_static_meshes(",
+                         "geometry_pass_skinned_meshes("):
+            self.assertLess(attachment, execute.index(producer))
+        # No extra block can release the attachment before the last producer.
+        prefix = execute[:attachment]
+        masked = re.sub(r"//[^\n]*|/\*.*?\*/|\"(?:\\.|[^\"\\])*\"",
+                        "", prefix, flags=re.S)
+        self.assertEqual(masked.count("{"), masked.count("}"))
+
+    def test_unavailable_base_program_invalidates_before_return(self):
+        variant = block(self.targets, "Shader* GBufferDiagnosticCapture::variant(")
+        unavailable = block(variant, "if (!shader || !shader->IsValid())")
+        self.assertLess(unavailable.index('unsupported("diagnostic_base_shader_unavailable",'),
+                        unavailable.index("return shader;"))
+        for producer in ("geometry_pass_chunks(", "geometry_pass_static_meshes(",
+                         "geometry_pass_skinned_meshes("):
+            body = block(self.passes, "void GBufferPass::" + producer)
+            self.assertLess(body.index("capture->variant("), body.index("UseDrawProgram("))
+        skinned = block(self.passes, "void GBufferPass::geometry_pass_skinned_meshes(")
+        self.assertLess(skinned.index("capture->variant("),
+                        skinned.index("if (view.begin() == view.end())"))
+
+    def test_queued_impostor_is_invalidated_before_program_refusal(self):
+        static = block(self.passes, "void GBufferPass::geometry_pass_static_meshes(")
+        queued = block(static, "if (impostorsOn && !impostorInstances.empty())")
+        record = queued.index('capture->unsupported("tree_impostor_fragment_output_unavailable", 3)')
+        self.assertLess(record, queued.index("if (!UseDrawProgram("))
+        self.assertIn("return;", block(queued, "if (!UseDrawProgram("))
+        self.assertIn('capture->unsupported("tree_impostor_fragment_output_unavailable", 3)',
+                      block(queued, "if (capture)"))
+
+    def test_detached_writers_and_variants_do_no_work(self):
+        for signature, work, returned in (
+                ("Shader* GBufferDiagnosticCapture::variant(", "if (!shader", "return shader;"),
+                ("void GBufferDiagnosticCapture::write(", "for (const auto& entry", "return;")):
+            body = block(self.targets, signature)
+            guard = "if (!state_->framebuffer)"
+            self.assertLess(body.index(guard), body.index(work))
+            self.assertIn(returned, block(body, guard))
+
+    def test_unsupported_submission_failure_is_sticky(self):
+        writer = block(self.targets, "void GBufferDiagnosticCapture::write(")
+        unsupported = block(writer, "if (submission.provenance == DiagnosticProvenance::Unsupported)")
+        self.assertIn("state_->failed = true;", unsupported)
+        self.assertLess(writer.index("submission.provenance"),
+                        writer.index("state_->table.submit(submission, id)"))
+
+
+class LaterDiagnosticSubmissionWiring(unittest.TestCase):
+    """Guard original submissions, disabled rendering and continuation refusals."""
+
+    def setUp(self):
+        self.source = read(CLIENT / "rendering/GBufferTargets.cpp")
+        self.attach = block(self.source, "bool GBufferDiagnosticCapture::attach_target(")
+
+    @staticmethod
+    def without_diagnostics(source):
+        while "#ifdef LUMIN_DIAG_IDS\n" in source:
+            start = source.index("#ifdef LUMIN_DIAG_IDS\n")
+            end = source.index("#endif\n", start)
+            alternate = source.find("#else\n", start, end)
+            if alternate >= 0:
+                source = source[:start] + source[alternate + 6:end] + source[end + 7:]
+            else:
+                # Identity declarations introduce one separator absent from the base.
+                if source[start - 2:start] == "\n\n":
+                    start -= 1
+                source = source[:start] + source[end + 7:]
+        return source
+
+    def test_plant_and_decal_keep_shipping_shaders_when_disabled(self):
+        import hashlib
+        for name, expected in (
+                ("plant_procgen", "5de3e367b62a29914f16b3014f84979b104765db67b97766cacf3c5fd5d4a3ed"),
+                ("scent_decal", "00536af5f2a9d77d493e4ebbe4accfd3bf0301d9882e9c36a5cba1a75d4d755e")):
+            path = f"res/shaders/{name}.frag"
+            source = read(ROOT / path)
+            self.assertEqual(hashlib.sha256(self.without_diagnostics(source).encode()).hexdigest(),
+                             expected)
+            self.assertIn("layout (location = 6) out uvec4 gDiagnosticIds;", source)
+            self.assertIn("gDiagnosticIds = u_diagnosticIds;", source)
+
+    def test_disabled_submissions_preserve_original_uniforms_and_draw_arguments(self):
+        branch = "if (auto* capture = GBufferDiagnosticCapture::Current())"
+        for name, expected in (("PlantProcgenPass", 0x17bde0693dc08760),
+                               ("GroundDecalPass", 0x46646c0093fc3f8a)):
+            source = read(CLIENT / f"rendering/passes/{name}.cpp")
+            draw = "{" + block(source, f"void {name}::execute(") + "}"
+            for stage in range(2):
+                inner = block(draw, branch)
+                begin = (draw.index("    Shader* draw_shader = m_shader.get();")
+                         if stage == 0 else draw.index("    " + branch))
+                end = draw.index(inner, draw.index(branch)) + len(inner) + (3 if stage == 0 else 2)
+                draw = draw[:begin] + draw[end:]
+            draw = re.sub(r'    if \(draw_shader != m_shader.get\(\)\) \{\n.*?\n    \}\n',
+                          '    m_shader->setMat4("projection", projection);\n', draw, flags=re.S)
+            draw = draw.replace("draw_shader->", "m_shader->")
+            digest = 14695981039346656037
+            for byte in draw.encode():
+                digest = ((digest ^ byte) * 1099511628211) & ((1 << 64) - 1)
+            self.assertEqual(digest, expected)
+
+    def test_plant_attributes_one_original_uploaded_batch(self):
+        draw = block(read(CLIENT / "rendering/passes/PlantProcgenPass.cpp"),
+                     "void PlantProcgenPass::execute(")
+        for early in ("if (!m_enabled || !m_has_geometry || m_index_count == 0)",
+                      "if (!m_shader || !m_shader->IsValid() || m_vao == 0)"):
+            self.assertLess(draw.index(early), draw.index("GBufferDiagnosticAttachment"))
+            self.assertIn("return;", block(draw, early))
+        setup = block(draw, "if (auto* capture = GBufferDiagnosticCapture::Current())")
+        for text in ("GL_DRAW_FRAMEBUFFER_BINDING", "GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME",
+                     "target.position_texture = static_cast<GLuint>(position_texture)",
+                     "diagnostic_attachment.emplace(target,", "capture->variant(draw_shader, false)"):
+            self.assertIn(text, setup)
+        identity = draw[draw.index("const std::string mesh_key"):]
+        for text in ("std::to_string(m_signature)", "std::to_string(m_index_count)",
+                     '.shader_variant = "plant_procgen"', ".pass = DiagnosticPass::GBuffer",
+                     ".generated_mesh = mesh_key"):
+            self.assertIn(text, identity)
+        self.assertLess(identity.index("capture->write("), identity.index("Submit(glDrawElements,"))
+        self.assertEqual(draw.count("Submit(glDrawElements,"), 1)
+
+    def test_decal_uses_forward_storage_and_discards_noncontributors(self):
+        draw = block(read(CLIENT / "rendering/passes/GroundDecalPass.cpp"),
+                     "void GroundDecalPass::execute(")
+        self.assertIn("diagnostic_attachment.emplace(static_cast<GLuint>(framebuffer),", draw)
+        self.assertIn("ctx.gbuffer_position.id", draw)
+        self.assertIn('capture->variant(draw_shader, false)', draw)
+        self.assertIn(".pass = DiagnosticPass::Forward", draw)
+        self.assertIn('.generated_mesh = "scent-decal/fullscreen-triangle"', draw)
+        self.assertLess(draw.index("capture->write_current("), draw.index("Submit(glDrawArrays,"))
+        self.assertEqual(draw.count("Submit(glDrawArrays,"), 1)
+        shader = read(ROOT / "res/shaders/scent_decal.frag")
+        guarded = re.findall(r"#ifdef LUMIN_DIAG_IDS\n(.*?)#else\n", shader, re.S)
+        self.assertEqual(len(guarded), 4)
+        for fragment in guarded:
+            self.assertIn("discard;", fragment)
+        for condition in ("!farWorldPosition(gPosition, gDepth, TexCoords, viewPos)",
+                          "dot(viewPos, viewPos) < 1e-8", "intensity <= 0.0025"):
+            self.assertIn(f"if ({condition}) {{ discard; }}", shader)
+        self.assertLess(shader.rindex("discard;"), shader.index("gDiagnosticIds ="))
+
+    def test_continuations_preserve_ids_and_original_color_routing(self):
+        self.assertIn("const bool already_captured = forward ? state_->forward_captured : state_->captured",
+                      self.attach)
+        clear = block(self.attach, "if (!already_captured)")
+        self.assertIn("glClearTexImage(", clear)
+        self.assertIn("state_->attachment_lease.texture()", clear)
+        self.assertEqual(self.attach.count("glClearTexImage("), 1)
+        self.assertLess(self.attach.index("if (!complete)"),
+                        self.attach.index("if (!already_captured)"))
+        routing = block(self.attach, "if (forward || already_captured)")
+        for text in ("auto forward_buffers = state_->buffers", "forward_buffers[6] = GL_COLOR_ATTACHMENT6",
+                     "glDrawBuffers(state_->buffer_count, forward_buffers.data())"):
+            self.assertIn(text, routing)
+
+    def test_extent_refusal_precedes_storage_mutation_for_both_planes(self):
+        condition = re.search(r"if \((already_captured &&.*?)\) \{", self.attach, re.S).group(1)
+        for captured in (False, True):
+            for width, height in ((0, 0), (16, 32), (32, 16), (32, 32), (33, 32)):
+                self.assertEqual(cpp_expression(condition, **{
+                    "already_captured": captured, "targets.extent().width": 32,
+                    "targets.extent().height": 32, "extent.width": width, "extent.height": height}),
+                    captured and (width != 32 or height != 32))
+        refusal = block(self.attach, "if (already_captured &&")
+        self.assertIn('state_->failure = "diagnostic_continuation_extent_mismatch";', refusal)
+        self.assertIn("return false;", refusal)
+        self.assertLess(self.attach.index("diagnostic_continuation_extent_mismatch"),
+                        self.attach.index("targets.ensure("))
+        self.assertLess(self.attach.index("targets.ensure("),
+                        self.attach.index("targets.acquire_attachment_lease()"))
+
+    def test_forward_fallback_keeps_metadata_and_stops_after_refusal(self):
+        forward = block(self.source, "bool GBufferDiagnosticCapture::attach_forward(")
+        missing = block(forward, "if (!state_->forward_targets)")
+        self.assertIn("abort();", missing)
+        self.assertIn("return false;", missing)
+        self.assertNotIn("unsupported(", missing)
+        writer = block(self.source, "void GBufferDiagnosticCapture::write_current(")
+        contributor = block(writer, "const auto record_contributor = [&]")
+        self.assertIn("abort();", contributor)
+        self.assertIn("return;", block(contributor, "if (state_->refused)"))
+        self.assertLess(contributor.index("if (state_->refused)"),
+                        contributor.index("const std::string label"))
+        condition = re.search(r"if \((submission.shader_variant.empty\(\).*?)\) \{",
+                              contributor, re.S).group(1)
+        for size in (0, 1, 1007, 1008, 1024, 1025):
+            self.assertEqual(cpp_expression(condition, **{
+                "submission.shader_variant.empty()": size == 0,
+                "submission.shader_variant.size()": size, "suffix.size()": 17}),
+                size == 0 or size > 1007)
+        self.assertIn('suffix = ":contributor_only"', contributor)
+        self.assertIn('"diagnostic_contributor_label_limit"', contributor)
+        self.assertLess(contributor.index("1024 - suffix.size()"),
+                        contributor.index("const std::string label"))
+        self.assertIn("auto contributor = submission;", contributor)
+        self.assertIn("contributor.shader_variant = label;", contributor)
+        refused = block(contributor, "if (!state_->table.submit(contributor, id))")
+        self.assertIn('"diagnostic_contributor_identity_refused"', refused)
+        self.assertIn("state_->refused = true;", refused)
+        self.assertNotIn("throw", contributor)
+        self.assertEqual(writer.count("record_contributor();"), 2)
+        detached = block(writer, "if (!state_->framebuffer)")
+        self.assertIn("record_contributor();", block(detached,
+                      "if (submission.pass == DiagnosticPass::Forward)"))
+        self.assertLess(writer.index("write(*entry.shader, submission)"),
+                        writer.rindex("record_contributor();"))
+
+
+class DiagnosticContributorWiring(unittest.TestCase):
+    """Evaluate bounded admission and guard the shared deferred/contributor path."""
+
+    def setUp(self):
+        self.source = read(CLIENT / "rendering/GBufferTargets.cpp")
+        self.attach = block(self.source, "bool GBufferDiagnosticCapture::attach_target(")
+
+    def test_selected_storage_is_ensured_and_leased_before_attachment(self):
+        self.assertIn("auto& targets = forward ? *state_->forward_targets : *state_->targets",
+                      self.attach)
+        ensure = self.attach.index("targets.ensure(true, extent, 7)")
+        lease = self.attach.index("state_->attachment_lease = targets.acquire_attachment_lease()")
+        self.assertLess(ensure, lease)
+        self.assertLess(lease, self.attach.index("glFramebufferTexture2D("))
+        forward = block(self.source, "bool GBufferDiagnosticCapture::attach_forward(")
+        self.assertLess(forward.index("if (!state_->forward_targets)"),
+                        forward.index("attach_target(target, extent, true)"))
+        constructor = block(self.source,
+                            "GBufferDiagnosticCapture::GBufferDiagnosticCapture(DiagnosticTargets&")
+        self.assertLess(constructor.index("forward_targets == &targets"),
+                        constructor.index("SetCurrent(this)"))
+        self.assertIn("throw std::invalid_argument", block(constructor,
+                      "if (forward_targets == &targets)"))
+        forward_buffers = block(self.attach, "if (forward || already_captured)")
+        self.assertIn("auto forward_buffers = state_->buffers", forward_buffers)
+        self.assertIn("forward_buffers[6] = GL_COLOR_ATTACHMENT6", forward_buffers)
+        self.assertIn("glDrawBuffers(state_->buffer_count, forward_buffers.data())", forward_buffers)
+        self.assertEqual(self.attach.count("state_->attachment_lease.texture()"), 2)
+
+    def test_attachment_order_allows_continuations_and_refuses_nested_or_early_forward_calls(self):
+        condition = re.search(r"if \((.*?)\) \{", self.attach, re.S).group(1)
+        match = re.fullmatch(r"(.*?)\(forward \? (.*?) : (.*?)\)", condition, re.S)
+        self.assertIsNotNone(match)
+        for attached in (False, True):
+            for captured in (False, True):
+                for forward_captured in (False, True):
+                    for forward in (False, True):
+                        selected = match.group(2 if forward else 3)
+                        actual = cpp_expression(match.group(1) + "(" + selected + ")", **{
+                            "state_->framebuffer": int(attached), "state_->captured": captured,
+                            "state_->forward_captured": forward_captured})
+                        expected = attached or (not captured if forward else forward_captured)
+                        self.assertEqual(actual, expected)
+        self.assertIn("state_->forward_captured = true", self.attach)
+
+    def test_forward_and_deferred_writers_gate_submission_and_clear_rejected_ids(self):
+        writer = block(self.source, "void GBufferDiagnosticCapture::write(")
+        self.assertIn("submission.pass == (state_->forward ? DiagnosticPass::Forward : DiagnosticPass::GBuffer)",
+                      compact(writer))
+        mismatch = block(writer, "if (!matching_pass)")
+        self.assertIn('unsupported("diagnostic_contributor_pass_mismatch",', mismatch)
+        self.assertNotIn("return;", mismatch)
+        self.assertIn("matching_pass && !state_->refused && !state_->table.submit(submission, id)",
+                      writer)
+        self.assertLess(writer.index("DiagnosticId id{}"), writer.index("glProgramUniform4uiv("))
+        self.assertIn("id.data()", writer)
+        current = block(self.source, "void GBufferDiagnosticCapture::write_current(")
+        self.assertIn("return;", block(current, "if (!state_->framebuffer)"))
+        self.assertIn("glGetIntegerv(GL_CURRENT_PROGRAM, &program)", current)
+        self.assertIn("entry.shader->Id() == static_cast<GLuint>(program)", current)
+        self.assertIn("write(*entry.shader, submission)", current)
+        self.assertIn('"diagnostic_writer_without_variant"', current)
+
+    def test_feedback_bounds_precede_comparison_and_compilation(self):
+        variant = block(self.source, "Shader* GBufferDiagnosticCapture::variant(")
+        count = re.search(r"if \((feedback_varyings.size\(\) > \d+) \|\|", variant).group(1)
+        name = re.search(r"return (name.size\(\) > \d+);", variant).group(1)
+        for size in (0, 1, 3, 4, 65536):
+            self.assertEqual(cpp_expression(count, **{"feedback_varyings.size()": size}), size > 3)
+        for size in (0, 1, 63, 64, 65, 1024):
+            self.assertEqual(cpp_expression(name, **{"name.size()": size}), size > 64)
+        cache = variant.index("for (const auto& entry")
+        self.assertLess(variant.index(count), cache)
+        self.assertLess(cache, variant.index("if (state_->variants.size() == 6)"))
+        self.assertLess(variant.index(count), variant.index("std::make_unique<Shader>"))
+        self.assertIn("entry.feedback_varyings == feedback_varyings", variant)
+        self.assertIn("shader->FragmentPath().c_str(), feedback_varyings, defines", variant)
+
+    def test_variant_and_detachment_failures_record_the_active_pass(self):
+        variant = block(self.source, "Shader* GBufferDiagnosticCapture::variant(")
+        for marker in ("if (!shader || !shader->IsValid())",
+                       "if (state_->variants.size() == 6)", "if (identity < 0)"):
+            self.assertIn("state_->forward ? DiagnosticPass::Forward : DiagnosticPass::GBuffer",
+                          block(variant, marker))
+        detach = block(self.source, "void GBufferDiagnosticCapture::detach()")
+        self.assertIn("state_->forward ? DiagnosticPass::Forward : DiagnosticPass::GBuffer",
+                      block(detach, "if (!state_->failure.empty())"))
+
+    def test_generated_key_bounds_and_namespaces_precede_registry_mutation(self):
+        table = read(CLIENT / "rendering/DiagnosticDrawTable.h")
+        submit = block(table, "bool submit(")
+        length = re.search(r"submission.generated_mesh.size\(\) > \d+", submit).group()
+        for size in (0, 1, 1023, 1024, 1025, 65536):
+            self.assertEqual(cpp_expression(length, **{"submission.generated_mesh.size()": size}),
+                             size > 1024)
+        for text in ("!submission.mesh_path.empty() || !valid_path(submission.generated_mesh)",
+                     "submission.mesh_path.empty() && submission.generated_mesh.empty()",
+                     'submission.generated_mesh.empty() ? ":asset:" : ":generated:"',
+                     'mesh["generated"] = submission.generated_mesh'):
+            self.assertIn(text, submit)
+        for check in (length, "mesh_json = mesh.dump()", "added > max_json_bytes - json_bytes_"):
+            self.assertLess(submit.index(check), submit.index("mesh_ids_.emplace("))
 
 
 if __name__ == "__main__":
