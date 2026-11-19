@@ -41,6 +41,7 @@
 #include <memory>
 #include <nlohmann/json_fwd.hpp>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -635,6 +636,8 @@ public:
     }
     void end_diagnostic_capture();
     bool capture_diagnostics(const std::filesystem::path& capture);
+    // Empty means the completed frame can be published. No output or GL work.
+    std::string_view diagnostic_capture_refusal() const;
     bool diagnostic_capture_destination_available(const std::filesystem::path& capture) const;
     bool capture_diagnostics_enabled() const {
         return m_capture_diagnostics.enabled;
@@ -666,7 +669,8 @@ public:
             return write_capture();
         }
         try {
-            if (diagnostic_capture_destination_available(path) &&
+            if (diagnostic_capture_refusal().empty() &&
+                diagnostic_capture_destination_available(path) &&
                 WithCaptureManifest(path, observe(), write_capture)) {
                 return capture_diagnostics(path);
             }

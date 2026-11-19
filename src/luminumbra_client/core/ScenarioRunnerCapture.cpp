@@ -20,6 +20,7 @@
 #include "nlohmann/json.hpp"
 #include "rendering/Camera.h"
 #include "rendering/FarLodSystem.h"
+#include "rendering/PixelIo.h"
 #include "rendering/UploadBudget.h"
 #include "rendering/passes/WaterPass.h"
 
@@ -103,6 +104,64 @@ constexpr double kAtmosMotionFrameIntervalS = 1.0 / 60.0;
 } // namespace
 
 namespace Luminumbra::Client::ScenarioHarness {
+
+Rendering::CaptureManifestInput ScenarioRunnerImpl::scenarioCaptureManifest() const {
+    auto input = renderPipeline.diagnostic_capture_manifest();
+    input.simulation_tick = gameSession->GetSimulationTickCount();
+    input.world_seed = gameSession->GetMetadata().seed;
+    input.asset_hash = {gameSession->PresetContentHash(),
+                        "session_preset_content_identity_unavailable"};
+    input.asset_hash_scope = "terrain_preset_and_resolved_dependency_content_identity";
+    input.render_settings["scenario"] = scenario_config.scenario;
+    return input;
+}
+
+bool ScenarioRunnerImpl::refuseScenarioCapture(std::string_view reason) {
+    scenario_failed = true;
+    scenario_failure_reason = "capture_diagnostics_" + std::string(reason);
+    LUMINUMBRA_CORE_ERROR("Scenario capture refused: {}", scenario_failure_reason);
+    glfwSetWindowShouldClose(window, true);
+    return false;
+}
+
+bool ScenarioRunnerImpl::scenarioCaptureReady(int width, int height) {
+    if (!renderPipeline.capture_diagnostics_enabled()) {
+        return true;
+    }
+    const auto reason = renderPipeline.diagnostic_capture_refusal();
+    if (!reason.empty()) {
+        return refuseScenarioCapture(reason);
+    }
+    if (width <= 0 || height <= 0 ||
+        static_cast<unsigned int>(width) != renderPipeline.screen_width() ||
+        static_cast<unsigned int>(height) != renderPipeline.screen_height()) {
+        return refuseScenarioCapture("capture_extent_mismatch");
+    }
+    return true;
+}
+
+bool ScenarioRunnerImpl::writeScenarioPixels(const std::filesystem::path& path,
+                                             int width,
+                                             int height,
+                                             const std::vector<unsigned char>& pixels) {
+    std::size_t bytes = 0;
+    if (renderPipeline.capture_diagnostics_enabled() &&
+        (!Rendering::CapturePixelBytes(width, height, 3, bytes) || pixels.size() != bytes)) {
+        return refuseScenarioCapture("capture_pixel_size_mismatch");
+    }
+    return writeScenarioCapture(
+        path, width, height, [&] { return WritePixelBufferPpm(path, width, height, pixels); });
+}
+
+bool ScenarioRunnerImpl::writeScenarioBackbuffer(const std::filesystem::path& path,
+                                                 int width,
+                                                 int height,
+                                                 ScreenshotPixelStats* out_stats,
+                                                 LodHolePixelStats* out_lod_hole_stats) {
+    return writeScenarioCapture(path, width, height, [&] {
+        return WriteBackbufferPpm(path, width, height, out_stats, out_lod_hole_stats);
+    });
+}
 
 void ScenarioRunnerImpl::onPreRenderWorldSweep() {
     //  run the entire deterministic capture matrix
@@ -280,6 +339,15 @@ void ScenarioRunnerImpl::onPostRenderCapture(float deltaTime) {
     // active scenario runs and main() calls this hook inside the IN_GAME
     // render branch, so the guard is met by construction. The capture blocks
     // run in their exact original order.
+    Rendering::RenderPipeline::CaptureCleanup diagnostic_cleanup(renderPipeline);
+    if (renderPipeline.capture_diagnostics_enabled()) {
+        int width = 0;
+        int height = 0;
+        glfwGetFramebufferSize(window, &width, &height);
+        if (!scenarioCaptureReady(width, height)) {
+            return;
+        }
+    }
     ++scenario_frame_count;
     const auto now = std::chrono::steady_clock::now();
     captureWindowModeStress();
@@ -309,6 +377,9 @@ void ScenarioRunnerImpl::onPostRenderCapture(float deltaTime) {
     captureRemoteAvatarArtifact();
     captureShowcaseVideo(now);
     captureCreatureSlice(now);
+    if (renderPipeline.capture_diagnostics_enabled() && scenario_failed) {
+        return;
+    }
     if (now - last_runtime_state_write >= std::chrono::seconds(1)) {
         last_readiness_report = EvaluateReadiness(scenario_config, gameSession.get());
         runtime_state_recorder.capture("running",
@@ -389,10 +460,11 @@ void ScenarioRunnerImpl::captureWindowModeStress() {
             window_mode_stress_capture.height = static_cast<int>(renderPipeline.screen_height());
             window_mode_stress_capture.file = "window-mode-stress-final.ppm";
             ScreenshotPixelStats final_stats;
-            if (WriteBackbufferPpm(scenario_config.artifact_dir / window_mode_stress_capture.file,
-                                   window_mode_stress_capture.width,
-                                   window_mode_stress_capture.height,
-                                   &final_stats)) {
+            if (writeScenarioBackbuffer(scenario_config.artifact_dir /
+                                            window_mode_stress_capture.file,
+                                        window_mode_stress_capture.width,
+                                        window_mode_stress_capture.height,
+                                        &final_stats)) {
                 window_mode_stress_capture.pixels = final_stats;
             }
             window_mode_stress_complete = true;
@@ -420,11 +492,11 @@ void ScenarioRunnerImpl::captureLodSeamArrival(std::chrono::steady_clock::time_p
             const std::string relative_path =
                 std::string("screenshots/lod-seam-") + names[i] + ".ppm";
             LodHolePixelStats hole_stats;
-            if (WriteBackbufferPpm(scenario_config.artifact_dir / relative_path,
-                                   screenshot_width,
-                                   screenshot_height,
-                                   nullptr,
-                                   &hole_stats)) {
+            if (writeScenarioBackbuffer(scenario_config.artifact_dir / relative_path,
+                                        screenshot_width,
+                                        screenshot_height,
+                                        nullptr,
+                                        &hole_stats)) {
                 lod_seam_visual_captures.push_back({names[i], relative_path, hole_stats});
                 WriteLodSeamArrivalAnalysis(scenario_config.artifact_dir,
                                             elapsed_play_seconds,
@@ -454,11 +526,11 @@ void ScenarioRunnerImpl::captureLodGround(std::chrono::steady_clock::time_point 
             const std::string relative_path =
                 std::string("screenshots/lod-ground-") + names[i] + ".ppm";
             LodHolePixelStats hole_stats;
-            if (WriteBackbufferPpm(scenario_config.artifact_dir / relative_path,
-                                   screenshot_width,
-                                   screenshot_height,
-                                   nullptr,
-                                   &hole_stats)) {
+            if (writeScenarioBackbuffer(scenario_config.artifact_dir / relative_path,
+                                        screenshot_width,
+                                        screenshot_height,
+                                        nullptr,
+                                        &hole_stats)) {
                 lod_ground_screenshot_files.push_back(relative_path);
                 lod_ground_visual_captures.push_back({names[i], relative_path, hole_stats});
                 WriteLodGroundScreenshotIndex(scenario_config.artifact_dir,
@@ -516,7 +588,7 @@ void ScenarioRunnerImpl::captureWaterVisual(std::chrono::steady_clock::time_poin
                              GL_UNSIGNED_BYTE,
                              frame_pixels.data());
 
-                if (WritePixelBufferPpm(scenario_config.artifact_dir /
+                if (writeScenarioPixels(scenario_config.artifact_dir /
                                             "screenshots/water-visual.ppm",
                                         screenshot_width,
                                         screenshot_height,
@@ -613,7 +685,7 @@ void ScenarioRunnerImpl::captureWaterVisual(std::chrono::steady_clock::time_poin
                     screenshot_height,
                     Luminumbra::Rendering::WaterPass::approximate_sky_reflection_color(1.0f));
                 const std::string reflection_path = "screenshots/water-reflection.ppm";
-                if (WritePixelBufferPpm(scenario_config.artifact_dir / reflection_path,
+                if (writeScenarioPixels(scenario_config.artifact_dir / reflection_path,
                                         screenshot_width,
                                         screenshot_height,
                                         frame_pixels)) {
@@ -670,12 +742,12 @@ void ScenarioRunnerImpl::captureMaterialVisual(std::chrono::steady_clock::time_p
                 const std::vector<unsigned char> heatmap_pixels =
                     BuildMaterialHeatmap(frame_pixels, screenshot_width, screenshot_height);
                 const bool wrote_screenshot =
-                    WritePixelBufferPpm(scenario_config.artifact_dir / screenshot_path,
+                    writeScenarioPixels(scenario_config.artifact_dir / screenshot_path,
                                         screenshot_width,
                                         screenshot_height,
                                         frame_pixels);
                 const bool wrote_heatmap =
-                    WritePixelBufferPpm(scenario_config.artifact_dir / heatmap_path,
+                    writeScenarioPixels(scenario_config.artifact_dir / heatmap_path,
                                         screenshot_width,
                                         screenshot_height,
                                         heatmap_pixels);
@@ -733,7 +805,7 @@ void ScenarioRunnerImpl::captureSkyboxVisual(std::chrono::steady_clock::time_poi
                                                                           sun_screen_y,
                                                                           sun_on_screen);
                 const std::string screenshot_path = "screenshots/skybox-visual.ppm";
-                if (WritePixelBufferPpm(scenario_config.artifact_dir / screenshot_path,
+                if (writeScenarioPixels(scenario_config.artifact_dir / screenshot_path,
                                         screenshot_width,
                                         screenshot_height,
                                         frame_pixels)) {
@@ -784,7 +856,7 @@ void ScenarioRunnerImpl::captureWeatherVisual(std::chrono::steady_clock::time_po
                 stats.atmosphere = ResolvedAtmosphereToJson(renderPipeline);
                 if (capture_baseline) {
                     const std::string baseline_path = "screenshots/weather-baseline.ppm";
-                    if (WritePixelBufferPpm(scenario_config.artifact_dir / baseline_path,
+                    if (writeScenarioPixels(scenario_config.artifact_dir / baseline_path,
                                             screenshot_width,
                                             screenshot_height,
                                             frame_pixels)) {
@@ -793,7 +865,7 @@ void ScenarioRunnerImpl::captureWeatherVisual(std::chrono::steady_clock::time_po
                     }
                 } else {
                     const std::string weather_path = "screenshots/weather-visual.ppm";
-                    if (WritePixelBufferPpm(scenario_config.artifact_dir / weather_path,
+                    if (writeScenarioPixels(scenario_config.artifact_dir / weather_path,
                                             screenshot_width,
                                             screenshot_height,
                                             frame_pixels)) {
@@ -846,14 +918,14 @@ void ScenarioRunnerImpl::captureLightningStrike(std::chrono::steady_clock::time_
                     Luminumbra::Client::ScenarioHarness::AnalyzeStrikePixels(frame_pixels, sw, sh);
                 if (capture_neighbor) {
                     const std::string neighbor_path = "screenshots/lightning-neighbor.ppm";
-                    if (WritePixelBufferPpm(
+                    if (writeScenarioPixels(
                             scenario_config.artifact_dir / neighbor_path, sw, sh, frame_pixels)) {
                         lightning_neighbor_captured = true;
                         lightning_neighbor_stats = stats;
                     }
                 } else {
                     const std::string strike_path = "screenshots/lightning-strike.ppm";
-                    if (WritePixelBufferPpm(
+                    if (writeScenarioPixels(
                             scenario_config.artifact_dir / strike_path, sw, sh, frame_pixels)) {
                         lightning_strike_capture_written = true;
                         Luminumbra::Client::ScenarioHarness::WriteStrikeVisualAnalysis(
@@ -915,7 +987,7 @@ void ScenarioRunnerImpl::captureCloudShadow(std::chrono::steady_clock::time_poin
                         frame_pixels, screenshot_width, screenshot_height);
                 if (capture_t0) {
                     const std::string t0_path = "screenshots/cloud-shadow-t0.ppm";
-                    if (WritePixelBufferPpm(scenario_config.artifact_dir / t0_path,
+                    if (writeScenarioPixels(scenario_config.artifact_dir / t0_path,
                                             screenshot_width,
                                             screenshot_height,
                                             frame_pixels)) {
@@ -925,7 +997,7 @@ void ScenarioRunnerImpl::captureCloudShadow(std::chrono::steady_clock::time_poin
                     }
                 } else {
                     const std::string t1_path = "screenshots/cloud-shadow-t1.ppm";
-                    if (WritePixelBufferPpm(scenario_config.artifact_dir / t1_path,
+                    if (writeScenarioPixels(scenario_config.artifact_dir / t1_path,
                                             screenshot_width,
                                             screenshot_height,
                                             frame_pixels)) {
@@ -1034,7 +1106,7 @@ void ScenarioRunnerImpl::captureParticleDeterminism(std::chrono::steady_clock::t
                                  GL_UNSIGNED_BYTE,
                                  frame_pixels.data());
                     const std::string screenshot_path = "screenshots/particle-determinism.ppm";
-                    if (WritePixelBufferPpm(scenario_config.artifact_dir / screenshot_path,
+                    if (writeScenarioPixels(scenario_config.artifact_dir / screenshot_path,
                                             screenshot_width,
                                             screenshot_height,
                                             frame_pixels)) {
@@ -1076,7 +1148,7 @@ void ScenarioRunnerImpl::captureAtmosMotion(std::chrono::steady_clock::time_poin
                 char name[32];
                 std::snprintf(
                     name, sizeof(name), "motion/frame_%03d.ppm", atmos_motion_frame_index);
-                if (WritePixelBufferPpm(scenario_config.artifact_dir / name, mw, mh, mpx)) {
+                if (writeScenarioPixels(scenario_config.artifact_dir / name, mw, mh, mpx)) {
                     ++atmos_motion_frame_index;
                     atmos_motion_last_capture_s = motion_now_s;
                 }
@@ -1154,7 +1226,7 @@ void ScenarioRunnerImpl::captureFoliageVisual(std::chrono::steady_clock::time_po
             glPixelStorei(GL_PACK_ALIGNMENT, 1);
             glReadPixels(
                 0, 0, sample.width, sample.height, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
-            sample.sampled = WritePixelBufferPpm(scenario_config.artifact_dir / sample.screenshot,
+            sample.sampled = writeScenarioPixels(scenario_config.artifact_dir / sample.screenshot,
                                                  sample.width,
                                                  sample.height,
                                                  pixels);
@@ -1285,7 +1357,7 @@ void ScenarioRunnerImpl::capturePrecipitation(std::chrono::steady_clock::time_po
                     AnalyzePrecipPixels(frame_pixels, screenshot_width, screenshot_height);
                 if (capture_calm) {
                     const std::string calm_path = "screenshots/precip-calm.ppm";
-                    if (WritePixelBufferPpm(scenario_config.artifact_dir / calm_path,
+                    if (writeScenarioPixels(scenario_config.artifact_dir / calm_path,
                                             screenshot_width,
                                             screenshot_height,
                                             frame_pixels)) {
@@ -1295,7 +1367,7 @@ void ScenarioRunnerImpl::capturePrecipitation(std::chrono::steady_clock::time_po
                     }
                 } else {
                     const std::string windy_path = "screenshots/precip-windy.ppm";
-                    if (WritePixelBufferPpm(scenario_config.artifact_dir / windy_path,
+                    if (writeScenarioPixels(scenario_config.artifact_dir / windy_path,
                                             screenshot_width,
                                             screenshot_height,
                                             frame_pixels)) {
@@ -1382,7 +1454,7 @@ void ScenarioRunnerImpl::captureTimeOfDaySweep(std::chrono::steady_clock::time_p
                 stats.atmosphere = ResolvedAtmosphereToJson(renderPipeline);
                 if (phase_capture_ready) {
                     const SeasonCapturePlan& plan = TimeOfDaySweepCapturePlanAt(capture_index);
-                    if (WritePixelBufferPpm(scenario_config.artifact_dir / plan.file,
+                    if (writeScenarioPixels(scenario_config.artifact_dir / plan.file,
                                             screenshot_width,
                                             screenshot_height,
                                             frame_pixels)) {
@@ -1404,7 +1476,7 @@ void ScenarioRunnerImpl::captureTimeOfDaySweep(std::chrono::steady_clock::time_p
                     }
                 } else {
                     const std::string emissive_path = "screenshots/timeofday-night-emissive.ppm";
-                    if (WritePixelBufferPpm(scenario_config.artifact_dir / emissive_path,
+                    if (writeScenarioPixels(scenario_config.artifact_dir / emissive_path,
                                             screenshot_width,
                                             screenshot_height,
                                             frame_pixels)) {
@@ -1530,7 +1602,7 @@ void ScenarioRunnerImpl::capturePlayerView(std::chrono::steady_clock::time_point
 
                 const std::string relative_path =
                     "screenshots/player-view-" + player_view_stations[station_index].name + ".ppm";
-                if (WritePixelBufferPpm(scenario_config.artifact_dir / relative_path,
+                if (writeScenarioPixels(scenario_config.artifact_dir / relative_path,
                                         screenshot_width,
                                         screenshot_height,
                                         frame_pixels)) {
@@ -1783,7 +1855,7 @@ void ScenarioRunnerImpl::captureFarLodHorizon(std::chrono::steady_clock::time_po
                     const std::string relative_path = "screenshots/farlod-horizon-" +
                                                       farlod_horizon_stations[station_index].name +
                                                       ".ppm";
-                    if (WritePixelBufferPpm(scenario_config.artifact_dir / relative_path,
+                    if (writeScenarioPixels(scenario_config.artifact_dir / relative_path,
                                             screenshot_width,
                                             screenshot_height,
                                             frame_pixels)) {
@@ -1845,7 +1917,7 @@ void ScenarioRunnerImpl::captureSkinnedMeshVisual(std::chrono::steady_clock::tim
                 capture.skinned_indices_drawn = render_pass_stats.skinned_indices_drawn;
                 const std::string relative_path = want_capture_a ? "screenshots/skinned-mesh-a.ppm"
                                                                  : "screenshots/skinned-mesh-b.ppm";
-                if (WritePixelBufferPpm(scenario_config.artifact_dir / relative_path,
+                if (writeScenarioPixels(scenario_config.artifact_dir / relative_path,
                                         screenshot_width,
                                         screenshot_height,
                                         frame_pixels)) {
@@ -2054,7 +2126,7 @@ void ScenarioRunnerImpl::captureShowcaseVideo(std::chrono::steady_clock::time_po
                 glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, vpx.data());
                 char vname[40];
                 std::snprintf(vname, sizeof(vname), "motion/frame_%03d.ppm", showcase_video_frame);
-                if (WritePixelBufferPpm(scenario_config.artifact_dir / vname, vw, vh, vpx)) {
+                if (writeScenarioPixels(scenario_config.artifact_dir / vname, vw, vh, vpx)) {
                     ++showcase_video_frame;
                     showcase_video_last_s = vnow;
                 }
@@ -2153,9 +2225,9 @@ void ScenarioRunnerImpl::captureCreatureSlice(std::chrono::steady_clock::time_po
                 const std::string relative_path = want_before
                                                       ? "screenshots/creature-slice-before.ppm"
                                                       : "screenshots/creature-slice-after.ppm";
-                if (WriteBackbufferPpm(scenario_config.artifact_dir / relative_path,
-                                       screenshot_width,
-                                       screenshot_height)) {
+                if (writeScenarioBackbuffer(scenario_config.artifact_dir / relative_path,
+                                            screenshot_width,
+                                            screenshot_height)) {
                     capture.file = relative_path;
                     if (want_before) {
                         creature_slice_before = capture;

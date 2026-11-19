@@ -445,12 +445,31 @@ CaptureManifestInput RenderPipeline::diagnostic_capture_manifest() const {
     return input;
 }
 
+std::string_view RenderPipeline::diagnostic_capture_refusal() const {
+    if (!m_capture_diagnostics.enabled) {
+        return {};
+    }
+    if (!m_diagnostic_capture || !m_frame_prepared.valid) {
+        return "completed_frame_unavailable";
+    }
+    if (!m_diagnostic_capture->ready()) {
+        return "producer_coverage_incomplete";
+    }
+    if (m_capture_diagnostics.probe) {
+        const auto& coordinates = m_capture_diagnostics.probe.value();
+        if (coordinates[0] >= m_internal_width || coordinates[1] >= m_internal_height) {
+            return "probe_out_of_bounds";
+        }
+    }
+    return {};
+}
+
 bool RenderPipeline::capture_diagnostics(const std::filesystem::path& capture) {
     if (!m_capture_diagnostics.enabled) {
         return true;
     }
-    auto ending = std::move(m_diagnostic_capture);
-    if (!ending || !m_frame_prepared.valid) {
+    if (!diagnostic_capture_refusal().empty()) {
+        end_diagnostic_capture();
         return false;
     }
     DiagnosticBundleFrame frame;
@@ -461,7 +480,7 @@ bool RenderPipeline::capture_diagnostics(const std::filesystem::path& capture) {
     frame.capture_filename = Filesystem::GenericUtf8PathString(capture.filename());
     frame.manifest_filename =
         Filesystem::GenericUtf8PathString(CaptureManifestPath(capture).filename());
-    return ending->finish(capture, m_capture_diagnostics, frame, gbuffer());
+    return m_diagnostic_capture->finish(capture, m_capture_diagnostics, frame, gbuffer());
 }
 
 void RenderPipeline::register_procgen_mesh(const std::string& key, std::unique_ptr<Mesh> mesh) {

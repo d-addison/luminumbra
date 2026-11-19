@@ -319,6 +319,187 @@ TEST_F(DiagnosticBundleTest, RuntimeAdmissionRetainsResolvedCaptureOptions) {
     EXPECT_FALSE(std::filesystem::exists(directory / "must-not-exist"));
 }
 
+TEST_F(DiagnosticBundleTest, RuntimeAdmissionRoutesSpecializedTimedAndMotionScenarios) {
+    for (const auto* scenario : {"lod_seam_arrival_smoke",
+                                 "lod_ground_smoke",
+                                 "skybox_visual_smoke",
+                                 "cloud_shadow_smoke",
+                                 "timeofday_sweep_smoke",
+                                 "player_view_smoke",
+                                 "skinned_mesh_visual_smoke",
+                                 "creature_slice_smoke"}) {
+        SCOPED_TRACE(scenario);
+        std::array<std::string, 5> text{"client",
+                                        "--capture-diagnostics",
+                                        "--capture-probe=0,1",
+                                        std::string("--scenario=") + scenario,
+                                        "--hidden-window"};
+        std::array<char*, 5> arguments{};
+        for (std::size_t i = 0; i < text.size(); ++i) {
+            arguments[i] = text[i].data();
+        }
+        const auto resolved = Luminumbra::Client::ScenarioHarness::ParseRuntimePathOptions(
+            static_cast<int>(arguments.size()), arguments.data());
+        EXPECT_TRUE(resolved.diagnostics.enabled);
+        EXPECT_EQ(resolved.diagnostics.probe, (std::array<std::uint32_t, 2>{0, 1}));
+        EXPECT_TRUE(std::filesystem::is_empty(directory));
+    }
+}
+
+TEST_F(DiagnosticBundleTest, RuntimeAdmissionNamesUnsupportedProducersBeforeAnyOutput) {
+    for (const auto* unsupported : {"--scenario=window_mode_stress_smoke",
+                                    "--scenario=material_visual_smoke",
+                                    "--scenario=farlod_horizon_smoke",
+                                    "--scenario=water_visual_smoke",
+                                    "--scenario=weather_visual_smoke",
+                                    "--scenario=particle_emitter_determinism_smoke",
+                                    "--scenario=foliage_visual_smoke",
+                                    "--scenario=precipitation_smoke",
+                                    "--scenario=unknown",
+                                    "--render-parity-ssao=parity",
+                                    "--bake-tree-impostor=atlas.ppm",
+                                    "--survey=survey",
+                                    "--ui-screenshot=menu",
+                                    "--ui-thumbs=1",
+                                    "--scene-config=scene.json",
+                                    "--timelapse",
+                                    "--timelapse-frames=1"}) {
+        SCOPED_TRACE(unsupported);
+        const auto option = std::string_view(unsupported);
+        std::array<std::string, 6> text{
+            "client",
+            "--capture-diagnostics",
+            unsupported,
+            option.starts_with("--scenario=") ? "--hidden-window" : "--scenario=lod_ground_smoke",
+            "--save-root",
+            (directory / "save").string()};
+        std::array<char*, 6> arguments{};
+        for (std::size_t i = 0; i < text.size(); ++i) {
+            arguments[i] = text[i].data();
+        }
+        try {
+            (void)Luminumbra::Client::ScenarioHarness::ParseRuntimePathOptions(
+                static_cast<int>(arguments.size()), arguments.data());
+            FAIL() << "unsupported producer admitted";
+        } catch (const std::invalid_argument& error) {
+            const auto name = option.starts_with("--scenario=")
+                                  ? option.substr(11)
+                                  : option.substr(0, option.find('='));
+            EXPECT_NE(std::string(error.what()).find(name), std::string::npos);
+        }
+        EXPECT_TRUE(std::filesystem::is_empty(directory));
+    }
+}
+
+TEST_F(DiagnosticBundleTest, RuntimeAdmissionNamesConflictingCaptureDriversBeforeOutput) {
+    for (const auto* driver : {"--frame-scan=view.json", "--render-benchmark=2"}) {
+        std::array<std::string, 6> text{"client",
+                                        "--capture-diagnostics",
+                                        "--scenario=lod_ground_smoke",
+                                        driver,
+                                        "--save-root",
+                                        (directory / "save").string()};
+        std::array<char*, 6> arguments{};
+        for (std::size_t i = 0; i < text.size(); ++i) {
+            arguments[i] = text[i].data();
+        }
+        try {
+            (void)Luminumbra::Client::ScenarioHarness::ParseRuntimePathOptions(
+                static_cast<int>(arguments.size()), arguments.data());
+            FAIL() << "conflicting capture drivers admitted";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_NE(std::string(error.what()).find("multiple capture drivers"),
+                      std::string::npos);
+        }
+        EXPECT_TRUE(std::filesystem::is_empty(directory));
+    }
+}
+
+TEST(DiagnosticBundleWiring, EveryScenarioWriterUsesTheCompletedFrameAdapter) {
+    const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
+    const auto source = ReadFile(root / "src/luminumbra_client/core/ScenarioRunnerCapture.cpp");
+    const auto header = ReadFile(root / "src/luminumbra_client/core/ScenarioRunnerImpl.h");
+    // Each family must route every image, including secondary and motion images.
+    const std::array<std::pair<std::string_view, std::size_t>, 18> families{
+        {{"captureWindowModeStress", 1},
+         {"captureLodSeamArrival", 1},
+         {"captureLodGround", 1},
+         {"captureWaterVisual", 2},
+         {"captureMaterialVisual", 2},
+         {"captureSkyboxVisual", 1},
+         {"captureWeatherVisual", 2},
+         {"captureLightningStrike", 2},
+         {"captureCloudShadow", 2},
+         {"captureParticleDeterminism", 1},
+         {"captureAtmosMotion", 1},
+         {"captureFoliageVisual", 1},
+         {"capturePrecipitation", 2},
+         {"captureTimeOfDaySweep", 2},
+         {"capturePlayerView", 1},
+         {"captureFarLodHorizon", 1},
+         {"captureSkinnedMeshVisual", 1},
+         {"captureCreatureSlice", 1}}};
+    for (const auto& [family, expected] : families) {
+        SCOPED_TRACE(family);
+        const auto begin = source.find("void ScenarioRunnerImpl::" + std::string(family) + "(");
+        ASSERT_NE(begin, std::string::npos);
+        const auto end = source.find("\nvoid ScenarioRunnerImpl::", begin + 1);
+        const auto body = source.substr(begin, end - begin);
+        EXPECT_EQ(body.find("WritePixelBufferPpm("), std::string::npos);
+        EXPECT_EQ(body.find("WriteBackbufferPpm("), std::string::npos);
+        const std::regex writer(R"(writeScenario(Pixels|Backbuffer)\()");
+        EXPECT_EQ(
+            static_cast<std::size_t>(std::distance(
+                std::sregex_iterator(body.begin(), body.end(), writer), std::sregex_iterator())),
+            expected);
+    }
+    const auto showcase =
+        source.substr(source.find("void ScenarioRunnerImpl::captureShowcaseVideo("));
+    EXPECT_NE(showcase.find("writeScenarioPixels(scenario_config.artifact_dir / vname"),
+              std::string::npos);
+    const auto post_begin = source.find("void ScenarioRunnerImpl::onPostRenderCapture(");
+    ASSERT_NE(post_begin, std::string::npos);
+    const auto post_end = source.find("\nvoid ScenarioRunnerImpl::", post_begin + 1);
+    const auto post = source.substr(post_begin, post_end - post_begin);
+    EXPECT_NE(post.find("RenderPipeline::CaptureCleanup diagnostic_cleanup(renderPipeline);"),
+              std::string::npos);
+    EXPECT_NE(header.find("renderPipeline.with_diagnostic_capture("), std::string::npos);
+    EXPECT_LT(header.find("scenarioCaptureReady(width, height)"),
+              header.find("with_diagnostic_capture("));
+    EXPECT_NE(post.find("scenarioCaptureReady(width, height)"), std::string::npos);
+    EXPECT_LT(post.find("scenarioCaptureReady(width, height)"),
+              post.find("++scenario_frame_count"));
+    EXPECT_NE(source.find("input.simulation_tick = gameSession->GetSimulationTickCount()"),
+              std::string::npos);
+    EXPECT_NE(source.find("input.world_seed = gameSession->GetMetadata().seed"), std::string::npos);
+    EXPECT_NE(source.find("gameSession->PresetContentHash()"), std::string::npos);
+}
+
+TEST(DiagnosticBundleWiring, CompletedFrameAdmissionAndRetentionPrecedeOutput) {
+    const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
+    const auto pipeline_header =
+        ReadFile(root / "src/luminumbra_client/rendering/RenderPipeline.h");
+    const auto pipeline = ReadFile(root / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const auto readback = ReadFile(root / "src/luminumbra_client/rendering/DiagnosticReadback.h");
+    const auto runner = ReadFile(root / "src/luminumbra_client/core/ScenarioRunnerCapture.cpp");
+    const auto runner_header = ReadFile(root / "src/luminumbra_client/core/ScenarioRunnerImpl.h");
+    EXPECT_LT(pipeline_header.find("diagnostic_capture_refusal().empty() &&"),
+              pipeline_header.find("WithCaptureManifest(path, observe(), write_capture)"));
+    EXPECT_NE(readback.find("return scope_ ? scope_->complete() : identity_complete_;"),
+              std::string::npos);
+    const auto begin = pipeline.find("bool RenderPipeline::capture_diagnostics(");
+    ASSERT_NE(begin, std::string::npos);
+    const auto end = pipeline.find("\nvoid RenderPipeline::", begin);
+    const auto body = pipeline.substr(begin, end - begin);
+    EXPECT_EQ(body.find("std::move(m_diagnostic_capture)"), std::string::npos);
+    EXPECT_NE(body.find("m_diagnostic_capture->finish("), std::string::npos);
+    EXPECT_NE(runner.find("capture_extent_mismatch"), std::string::npos);
+    EXPECT_LT(runner_header.find("scenarioCaptureReady(width, height)"),
+              runner_header.find("renderPipeline.with_diagnostic_capture("));
+    EXPECT_LT(runner.find("CapturePixelBytes(width, height, 3, bytes)"),
+              runner.find("return writeScenarioCapture("));
+}
+
 TEST(DiagnosticBundleWiring, SharedAdapterOwnsEveryAdmittedCapturePath) {
     const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
     const auto pipeline = ReadFile(root / "src/luminumbra_client/rendering/RenderPipeline.cpp");
@@ -334,7 +515,8 @@ TEST(DiagnosticBundleWiring, SharedAdapterOwnsEveryAdmittedCapturePath) {
     EXPECT_NE(pipeline.find("m_capture_waterfall_geometry = "
                             "!m_waterfall_pass->waterfall_sites(world).empty()"),
               std::string::npos);
-    EXPECT_NE(pipeline.find("ending->finish(capture, m_capture_diagnostics, frame, gbuffer())"),
+    EXPECT_NE(pipeline.find(
+                  "m_diagnostic_capture->finish(capture, m_capture_diagnostics, frame, gbuffer())"),
               std::string::npos);
     EXPECT_NE(main.find("renderPipeline.set_capture_diagnostics(path_options.diagnostics)"),
               std::string::npos);

@@ -210,16 +210,55 @@ RuntimePathOptions ParseRuntimePathOptions(int argc, char* argv[]) {
                                             "; parity redispatches require separate captures");
             }
         }
+        for (const auto* producer : {"--render-parity-ssao",
+                                     "--bake-tree-impostor",
+                                     "--survey",
+                                     "--ui-screenshot",
+                                     "--ui-thumbs",
+                                     "--scene-config",
+                                     "--timelapse",
+                                     "--timelapse-frames"}) {
+            if (HasCommandLineOption(argc, argv, producer)) {
+                throw std::invalid_argument(std::string("capture diagnostics refuse ") + producer +
+                                            "; completed-frame adapter unavailable");
+            }
+        }
         const auto scenario = GetCommandLineOption(argc, argv, "--scenario", "");
+        if (!scenario.empty() && (HasCommandLineOption(argc, argv, "--frame-scan") ||
+                                  HasCommandLineOption(argc, argv, "--render-benchmark"))) {
+            throw std::invalid_argument("capture diagnostics refuse multiple capture drivers");
+        }
+        // These producers transform pixels, resize/redispatch targets or require forward
+        // contributors that the completed-frame adapter cannot yet attribute.
+        // Admission must precede save-root and scenario artifact creation.
+        for (const auto* unsupported : {"window_mode_stress_smoke",
+                                        "material_visual_smoke",
+                                        "farlod_horizon_smoke",
+                                        "water_visual_smoke",
+                                        "weather_visual_smoke",
+                                        "particle_emitter_determinism_smoke",
+                                        "foliage_visual_smoke",
+                                        "precipitation_smoke"}) {
+            if (scenario == unsupported) {
+                throw std::invalid_argument(std::string("capture diagnostics refuse ") +
+                                            unsupported +
+                                            "; producer or extent coverage unavailable");
+            }
+        }
+        const bool scenario_capture =
+            scenario == "world_visual_sweep" || scenario == "lod_seam_arrival_smoke" ||
+            scenario == "lod_ground_smoke" || scenario == "skybox_visual_smoke" ||
+            scenario == "cloud_shadow_smoke" || scenario == "timeofday_sweep_smoke" ||
+            scenario == "player_view_smoke" || scenario == "skinned_mesh_visual_smoke" ||
+            scenario == "creature_slice_smoke";
         const bool benchmark =
             !GetCommandLineOption(argc, argv, "--render-benchmark", "").empty() &&
             !GetCommandLineOption(argc, argv, "--render-benchmark-screenshot", "").empty();
-        if ((!scenario.empty() && scenario != "world_visual_sweep") ||
+        if ((!scenario.empty() && !scenario_capture) ||
             (scenario.empty() && GetCommandLineOption(argc, argv, "--frame-scan", "").empty() &&
              !benchmark)) {
-            throw std::invalid_argument(
-                "capture diagnostics require world_visual_sweep, --frame-scan "
-                "or --render-benchmark with --render-benchmark-screenshot");
+            throw std::invalid_argument("capture diagnostics refuse unsupported capture mode: " +
+                                        scenario);
         }
     }
     int surface_radius = 0;
