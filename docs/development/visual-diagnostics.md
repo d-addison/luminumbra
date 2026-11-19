@@ -19,7 +19,7 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | Bundle transactions and opt-in admission | GL-free core implemented; runtime integration pending | `DiagnosticCapture.h/.cpp` resolves options, streams normalized planes, joins draw records, enforces staging budgets and publishes completion last using identity-checked ownership. `diagnostic_bundle_test` covers public transports and filesystem refusal/rollback; native execution pending. Runtime setup refuses enabled diagnostics before output until the completed-frame adapter is integrated |
 | Debug views and inspector | Planned | Extend `DebugViewPass` and developer console widgets |
 | Linux shader compilation and software-GL reference scenes | Partial | Fast Linux steps and material, cutout, night and terrain fixtures registered; bounded sky/terrain shader replays checked under llvmpipe; native scene target execution pending; dusk continuity diagnostic pending issue #918; no required-check or ruleset changes |
-| Automated image checks | Planned | Bundle-aware checks alongside existing render-health gates |
+| Bundle validity checks | Implemented for schema 1 | `check-diagnostic-capture.py` and registered `DiagnosticCapturePython` synthetic regressions validate bundles without a renderer. Qualified image metrics remain planned |
 | Capture feature profile and capability manifest | Implemented as GL-free setup logic; app wiring pending | `CaptureFeatureProfile.h/.cpp`; strict `--capture-feature-profile=none\|all_features` runtime selection; registered `CaptureFeatureProfile.*` regressions; native execution pending |
 | Temporal audit plans and admission | Implemented as GL-free planning only; runtime execution refused | `TemporalAudit.h/.cpp`, `RuntimeScenarioConfig.h/.cpp`; registered `TemporalAudit.*` regressions in `capture_manifest_test`; native execution pending |
 | Temporal sequences and non-vacuous evidence (E1–E3) | Planned; gap inventory below describes current capture code | Exact-tick site execution, temporal metrics, shared producer policy and non-vacuous feature evidence require implementation; existing captures do not establish this coverage |
@@ -207,6 +207,31 @@ the existing completed capture manifest. All sweep callbacks, standalone benchma
 headless, timed-scenario and motion captures must use that adapter. No producer
 coverage is inferred by the transaction core. This split keeps the GL-free changes
 within the delivery file budget; no runtime capture success is claimed yet.
+
+Validate one bundle directory, a completion JSON, or a recursive capture tree with
+`python3 -I -B tools/gates/check-diagnostic-capture.py PATH`. Exit 0 means valid,
+1 reports an invalid bundle, and 2 means usage or operating-system I/O failure.
+The reader refuses unknown schemas, incomplete publication, mismatched file lists,
+PFM/ID sizes or dimensions, unresolved identities, implicit unsupported producers
+and probes that disagree with any plane at the same top-left pixel. It reports
+nonfinite sample counts per plane as invalid diagnostic findings; the wire format
+still preserves those values. Explicit unsupported forward records are valid for
+the labeled deferred-only surface; unsupported deferred coverage is refused.
+
+Schema 1 lists member names, without stored size fields. Binary sizes are checked
+exactly against dimensions before scanning; table/probe JSON is bounded to
+16 MiB, completion to 16 MiB plus 64 KiB for its envelope, and capture manifests
+to 1 MiB. Plane scans
+use at most 4 KiB chunks. JSON integer tokens are capped at 128 characters before
+conversion, including on older Python versions. Tree discovery stops at 100,000 entries and refuses
+descendant links; a selected root alias is allowed. Reads use verified regular-file
+handles on both POSIX and Windows. Completion must be the final file-list member
+and cannot be older than any payload. Equal timestamps are allowed for coarse
+filesystems; timestamps and schema-1 names cannot prove historical write order or
+content integrity after a deliberate rewrite. No checksum or size field is invented.
+`diff-render-health.ps1 -CapturePath PATH` optionally invokes this reader when
+`PATH.diagnostics.json` exists. Without that sidecar the existing comparison stays
+unchanged. No required CI check or runtime capture adapter is added.
 
 ## B: views and inspector
 
