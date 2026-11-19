@@ -564,7 +564,7 @@ class MetricIntegration(unittest.TestCase):
             with contextlib.redirect_stdout(output):
                 self.assertEqual(checker.main([str(root)]), 0)
             records = [json.loads(line) for line in output.getvalue().splitlines() if line.startswith('{')]
-            self.assertEqual(len(records), 9)
+            self.assertEqual(len(records), 19)
             self.assertTrue(all(r['qualification'] == 'advisory' for r in records))
             weather = [r for r in records if r['metric']['kind'] == 'weather']
             self.assertEqual(len(weather), 3)
