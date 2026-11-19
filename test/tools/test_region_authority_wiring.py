@@ -25,6 +25,60 @@ def function(source, name):
 
 
 class RegionAuthorityWiring(unittest.TestCase):
+    def test_water_reconciliation_carries_absent_zero_grants_and_refuses_positive_grants(self):
+        source = (ROOT / "src/luminumbra_common/systems/RegionalWater.cpp").read_text(
+            encoding="utf-8")
+        reconcile = function(source, "void Reconcile(")
+        self.assertIn("const auto found = groups.find(funded.owner);", reconcile)
+        missing = function(reconcile, "if (found == groups.end())")
+        self.assertEqual(function(missing, "if (funded.windows != 0)"), "Refuse();")
+        self.assertTrue(missing.endswith("plan.regions.push_back(funded); continue;"))
+        self.assertNotIn(".at(", reconcile)
+        self.assertLess(reconcile.index("if (found == groups.end())"),
+                        reconcile.index("const auto& group = found->second;"))
+        native = (ROOT / "test/common/RegionalWater_test.cpp").read_text(encoding="utf-8")
+        regression = function(native, "TEST(RegionalWaterAdmission, "
+                              "ZeroWindowOwnersRetainFundingAccountingAndReceiveLaterService)")
+        for token in ("{1u, 2u}", "tick <= 16", "ASSERT_NO_THROW(",
+                      "region.next_cursor", "region.debt", "region.cadence_shift",
+                      "region.cadence_phase", "std::all_of(served.begin()",
+                      "std::all_of(deferred.begin()"):
+            self.assertIn(token, regression)
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("common/RegionalWater_test.cpp", cmake)
+        self.assertIn("gtest_discover_tests(${_lum_gtest_target}", cmake)
+
+    def test_water_reconciliation_selects_funded_interior_keys_including_pairs(self):
+        source = (ROOT / "src/luminumbra_common/systems/RegionalWater.cpp").read_text(
+            encoding="utf-8")
+        reconcile = function(source, "void Reconcile(")
+        self.assertNotIn("SelectInteriorPair(", reconcile)
+        self.assertIn("std::uint64_t awarded = 0;", reconcile)
+        selection = function(reconcile, "if (std::binary_search(")
+        self.assertEqual(selection, "entry.selected = true; ++awarded;")
+        self.assertIn("funding.interiors.begin(), funding.interiors.end(), entry.resident.id)",
+                      reconcile)
+        self.assertIn("region.windows = awarded;", reconcile)
+        self.assertIn("region.debt += (funded.windows - awarded) * world::water_share::kQ32;",
+                      reconcile)
+        build = function(source, "Plan BuildPlan(")
+        self.assertIn("plan.interiors.push_back(entry.resident.id);", build)
+        native = (ROOT / "test/common/RegionalWater_test.cpp").read_text(encoding="utf-8")
+        regression = function(native, "TEST(RegionalWaterAdmission, "
+                              "BorderParticipantsCannotDisplaceFundedInteriorIdentities)")
+        for token in ("{31, 32, 34}", "tick <= 16", "3 * kPlanningCapacity",
+                      "EXPECT_EQ(water.regional_work().visits, funding.interiors);",
+                      "EXPECT_GT(Mass(*chunks.at(target)), before);",
+                      "EXPECT_GT(target_steps, 0u);"):
+            self.assertIn(token, regression)
+        idle = function(native, "TEST(RegionalWaterAdmission, "
+                        "IdleFundedInteriorCannotBeReplacedByAnAwakeBorderParticipant)")
+        for token in ("chunk->is_water_sleeping.store(x == 34);",
+                      "EXPECT_TRUE(water.regional_work().visits.empty());",
+                      "EXPECT_EQ(water.regional_work().allocated_windows, 0u);",
+                      "EXPECT_EQ(ledger.water_debts().at({1, 0}),"):
+            self.assertIn(token, idle)
+
     def test_eviction_ownership_probe_excludes_streaming_residency(self):
         session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(
             encoding="utf-8")

@@ -445,26 +445,36 @@ void Reconcile(const Groups& groups,
                std::vector<Entry>& entries,
                const Plan& funding,
                std::uint64_t windows,
-               std::uint64_t tick,
                Plan& plan) {
-    // Funding and execution emit the same sorted due owners: preparation is
-    // ready in both simulation snapshots. Only funding sees the full rings.
+    // Only funding sees the full rings; execution may have no admitted group
+    // for an owner that received no windows.
     // Never recredit owners or advance a cursor against the narrowed snapshot.
     // Simulation admission bounds this pass to 832 owners and candidates.
     for (const auto& funded : funding.regions) {
-        const auto& group = groups.at(funded.owner);
-        const auto awarded = std::min(
+        const auto found = groups.find(funded.owner);
+        if (found == groups.end()) {
+            if (funded.windows != 0) {
+                Refuse();
+            }
+            plan.regions.push_back(funded);
+            continue;
+        }
+        const auto& group = found->second;
+        const auto limit = std::min(
             {funded.windows, static_cast<std::uint64_t>(group.candidates.size()), windows});
-        auto selected = SelectInteriorPair(group, entries, tick, awarded);
-        // At most kMaxResidents candidates across all groups, all already funded.
+        std::uint64_t awarded = 0;
+        // At most kMaxResidents candidates across all groups. The canonical
+        // funding identities include pair endpoints; border-only participants
+        // cannot replace a funded interior, even if it resolves to an idle grid.
         for (const auto candidate : group.candidates) {
-            if (selected == awarded) {
+            if (awarded == limit) {
                 break;
             }
             auto& entry = entries[candidate];
-            if (!entry.selected) {
+            if (std::binary_search(
+                    funding.interiors.begin(), funding.interiors.end(), entry.resident.id)) {
                 entry.selected = true;
-                ++selected;
+                ++awarded;
             }
         }
         windows -= awarded;
@@ -554,7 +564,7 @@ Plan BuildPlan(std::span<const Resident> residents,
     plan.border_windows = plan.global_windows - remaining;
     PlanInteriorPairs(faces, entries, groups);
     if (funding) {
-        Reconcile(groups, entries, *funding, remaining, schedule.tick, plan);
+        Reconcile(groups, entries, *funding, remaining, plan);
     } else {
         Allocate(groups, ledger, remaining, schedule.tick, entries, plan, funding_columns);
     }
