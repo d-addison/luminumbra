@@ -51,7 +51,7 @@ jobs:
               'tidy-cache-', 'fast-deps-v1-',
           )
           BUDGET = 9_500_000_000
-          RECENCY_GRACE = timedelta(hours=6)
+          RECENCY_GRACE = timedelta(hours=1)
 
           def warning(message):
               message = str(message).replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
@@ -66,11 +66,10 @@ jobs:
                   trigger_sha and cache['key'].endswith('-' + trigger_sha))
 
           def is_recent(cache, now):
-              timestamps = [cache['created_at']]
-              if cache.get('last_accessed_at'):
-                  timestamps.append(cache['last_accessed_at'])
-              latest = max(datetime.fromisoformat(t.replace('Z', '+00:00')) for t in timestamps)
-              return latest >= now - RECENCY_GRACE
+              # Creation time only: every pull-request restore refreshes access
+              # time through the lane prefix, which kept every generation recent.
+              created = datetime.fromisoformat(cache['created_at'].replace('Z', '+00:00'))
+              return created >= now - RECENCY_GRACE
 
           def retention_group(cache):
               prefix = next((p for p in PREFIXES if cache['key'].startswith(p)), None)
@@ -95,7 +94,7 @@ jobs:
                       newest.setdefault(group, cache['id'])
               protected_ids = set(newest.values())
               # Delayed cleanup must preserve its triggering SHA as well as live
-              # heads. Recent saves/accesses protect queued reruns and active runs.
+              # heads. Saves from the last hour protect queued reruns.
               protected_ids.update(c['id'] for c in caches
                                    if is_protected(c, heads, trigger_sha) or is_recent(c, now))
               protected = [c for c in caches if c['id'] in protected_ids]

@@ -94,12 +94,20 @@ class CacheRetentionTests(unittest.TestCase):
         self.assertTrue(all(not self.is_within_grace(c["created_at"]) for c in caches))
         self.assertEqual(self.obsolete(caches, {"refs/heads/devel": "head"}), [])
 
-    def test_older_recently_accessed_cache_keeps_newer_expired_generation_in_same_shard(self):
+    def test_recent_access_alone_does_not_protect_an_older_generation(self):
+        # Pull-request restores refresh access time; only creation counts.
         caches = [self.cache(1, "tidy-cache-Linux-shard1of3-old"),
                   self.cache(2, "tidy-cache-Linux-shard1of3-new")]
-        caches[0]["last_accessed_at"] = (NOW - timedelta(hours=1)).isoformat()
-        self.assertFalse(self.is_within_grace(caches[1]["created_at"]))
-        self.assertEqual(self.obsolete(caches), [])
+        caches[0]["last_accessed_at"] = (NOW - timedelta(minutes=5)).isoformat()
+        self.assertFalse(self.is_within_grace(caches[0]["created_at"]))
+        self.assertEqual(self.obsolete(caches), [1])
+        # A recent save is protected by creation; three generations then keep
+        # the newest and the recent save, retiring only the expired middle one.
+        caches.append(self.cache(3, "tidy-cache-Linux-shard1of3-newest"))
+        self.assertEqual(self.obsolete(caches), [2, 1])
+        caches[2]["created_at"] = (NOW - timedelta(minutes=1)).isoformat()
+        caches[0]["created_at"] = (NOW - timedelta(minutes=5)).isoformat()
+        self.assertEqual(self.obsolete(caches), [2])
 
     def test_budget_pressure_keeps_single_generation_groups(self):
         for size, unmanaged_size in ((1_000_000_000, self.budget - 2_000_000_000),
@@ -155,27 +163,28 @@ class CacheRetentionTests(unittest.TestCase):
         caches[1]["last_accessed_at"] = "2026-10-14T00:00:00Z"
         self.assertEqual(self.obsolete(caches), [2])
 
-    def test_six_hour_grace_uses_later_creation_or_access_and_includes_boundary(self):
-        self.assertEqual(self.grace, timedelta(hours=6))
+    def test_one_hour_grace_uses_creation_time_only_and_includes_boundary(self):
+        self.assertEqual(self.grace, timedelta(hours=1))
         caches = [self.cache(i, "tidy-cache-Linux-shard1of3-old") for i in range(1, 7)]
         cutoff = NOW - self.grace
         caches[0]["created_at"] = cutoff.isoformat()
         caches[1]["last_accessed_at"] = (cutoff + timedelta(seconds=1)).isoformat()
-        caches[2]["created_at"] = (NOW - timedelta(hours=1)).isoformat()
+        caches[2]["created_at"] = (NOW - timedelta(minutes=30)).isoformat()
         caches[2]["last_accessed_at"] = (cutoff - timedelta(days=1)).isoformat()
         caches[3]["created_at"] = (cutoff - timedelta(seconds=1)).isoformat()
         caches[3]["last_accessed_at"] = caches[3]["created_at"]
         caches[4]["last_accessed_at"] = None
         caches[5]["created_at"] = (NOW + timedelta(seconds=1)).isoformat()
         removed = self.obsolete(caches)
-        self.assertEqual(removed, [4, 5])
+        # Cache 2 was only accessed inside the window, so it is retired too.
+        self.assertEqual(removed, [4, 5, 2])
         retained = [c for c in caches if c["id"] not in removed]
         self.assertEqual(self.obsolete(retained), [])
 
     def test_recent_unmanaged_and_newest_managed_caches_survive_excess_budget(self):
         caches = [self.cache(1, "package-cache", size=5_000_000_000),
                   self.cache(2, "tidy-cache-Linux-shard1of3-old", size=self.budget - 4_000_000_000)]
-        caches[0]["last_accessed_at"] = NOW.isoformat()
+        caches[0]["created_at"] = NOW.isoformat()
         with contextlib.redirect_stdout(io.StringIO()) as log:
             self.assertEqual(self.obsolete(caches), [])
         self.assertIn("10500000000 bytes", log.getvalue())
@@ -252,15 +261,22 @@ class CacheRetentionTests(unittest.TestCase):
 
     def test_head_b_cleanup_preserves_recent_a_for_queued_rerun_or_concurrent_save(self):
         refs = json.dumps([{"ref": "refs/heads/devel", "object": {"sha": "B"}}])
-        for timestamp in ("created_at", "last_accessed_at"):
+        accessed = [self.cache(1, "tidy-cache-Linux-shard1of3-A"),
+                    self.cache(2, "tidy-cache-Linux-shard1of3-B"),
+                    self.cache(3, "tidy-cache-Linux-shard1of3-older")]
+        accessed[2]["created_at"] = "2026-10-12T00:00:00Z"
+        accessed[0]["last_accessed_at"] = (NOW - timedelta(minutes=30)).isoformat()
+        # A recent restore of A alone does not protect it.
+        self.assertEqual(self.obsolete(accessed, {"refs/heads/devel": "B"}, "B"), [1, 3])
+        for timestamp in ("created_at",):
             with self.subTest(timestamp=timestamp):
                 caches = [self.cache(1, "tidy-cache-Linux-shard1of3-A"),
                           self.cache(2, "tidy-cache-Linux-shard1of3-B"),
                           self.cache(3, "tidy-cache-Linux-shard1of3-older")]
                 caches[2]["created_at"] = "2026-10-12T00:00:00Z"
-                # A is no longer a live/triggering head. Its recent creation or
-                # access still protects it, including an A save newer than B's.
-                caches[0][timestamp] = (NOW - timedelta(hours=1)).isoformat()
+                # A is no longer a live/triggering head. Its recent creation
+                # still protects it, including an A save newer than B's.
+                caches[0][timestamp] = (NOW - timedelta(minutes=30)).isoformat()
                 with patch.dict(os.environ, {"GH_REPO": "owner/repo", "TRIGGER_SHA": "B"}), \
                         patch("subprocess.check_output", side_effect=[
                             json.dumps([{"actions_caches": caches}]), refs, refs,
@@ -371,7 +387,7 @@ class CacheRetentionTests(unittest.TestCase):
     def test_malformed_input_is_logged_and_skips_cleanup(self):
         refs = json.dumps([{"ref": "refs/heads/devel", "object": {"sha": "head"}}])
         malformed_timestamp = self.cache(1, "tidy-cache-Linux-shard1of3-old")
-        malformed_timestamp["last_accessed_at"] = "invalid date"
+        malformed_timestamp["created_at"] = "invalid date"
         for listing, error in (("not JSON", "JSONDecodeError"),
                                (json.dumps([{}]), "KeyError"),
                                (json.dumps([{"actions_caches": None}]), "TypeError"),
@@ -407,7 +423,7 @@ class CacheRetentionTests(unittest.TestCase):
     def test_compiler_cache_caps_match_each_lane(self):
         for workflow, job, cap in (
             ("ci", "linux", "400M"),
-            ("asan", "asan-shard", "600M"),
+            ("asan", "asan-shard", "1200M"),
             ("ci", "diligent-rhi", "250M"),
             ("windows-build", "windows-msvc", "1200M"),
             ("windows-build", "windows-ucrt64", "1200M"),
@@ -418,25 +434,22 @@ class CacheRetentionTests(unittest.TestCase):
                 self.assertEqual(body.split("CCACHE_MAXSIZE: ", 1)[1].splitlines()[0], cap)
 
     def test_compiler_caps_retire_old_generations_only_when_reserved_caches_fit_budget(self):
+        # The five hosted lanes; daily Windows keeps its caches on the runner's disk.
         sizes = {
             "linux-x64-gcc-ccache-": 400_000_000,
-            "linux-x64-gcc-asan-ccache-": 600_000_000,
+            "linux-x64-gcc-asan-ccache-": 1_200_000_000,
             "diligent-rhi-linux-x64-gcc-ccache-": 250_000_000,
-            "windows-x64-msvc-ccache-": 1_500_000_000,
-            "windows-x64-ucrt64-gcc-ccache-": 1_500_000_000,
             "perf-linux-x64-gcc-ccache-": 250_000_000,
             "perf-paired-linux-x64-gcc-": 250_000_000,
         }
         self.assertEqual(self.budget, 9_500_000_000)
         generation_size = sum(sizes.values())
-        self.assertEqual(generation_size, 4_750_000_000)
-        self.assertEqual(self.budget - generation_size, 4_750_000_000)
-        self.assertEqual(2 * generation_size, 9_500_000_000)
-        self.assertEqual(self.budget, 2 * generation_size)
-        self.assertEqual(10_000_000_000 - 2 * generation_size, 500_000_000)
+        self.assertEqual(generation_size, 2_350_000_000)
+        self.assertEqual(2 * generation_size, 4_700_000_000)
+        self.assertEqual(self.budget - 2 * generation_size, 4_800_000_000)
         for refs in (("refs/heads/devel",), ("refs/heads/main", "refs/heads/devel")):
             with self.subTest(refs=refs):
-                # Seven lanes, at most two branches and two generations each.
+                # Five lanes, at most two branches and two generations each.
                 caches = []
                 old_ids = []
                 for ref in refs:
@@ -456,9 +469,12 @@ class CacheRetentionTests(unittest.TestCase):
                         self.assertEqual(retained_size, len(refs) * generation_size)
                         if len(refs) == 2:
                             self.assertEqual(retained_size, 2 * generation_size)
-                            self.assertEqual(retained_size, self.budget)
-                            # One extra protected or recent cache exceeds the
-                            # exact-fit budget, even by a single byte. No deletes.
+                            self.assertLess(retained_size, self.budget)
+                            # A recent package cache fills the rest of the budget
+                            # exactly; one extra protected or recent cache then
+                            # exceeds it, even by a single byte. No deletes.
+                            filler = self.cache(28, "package-filler", size=self.budget - retained_size)
+                            filler["created_at"] = NOW.isoformat()
                             for protection in ("head", "grace"):
                                 for extra_size in (1, 250_000_000):
                                     with self.subTest(protection=protection, extra_size=extra_size):
@@ -469,7 +485,7 @@ class CacheRetentionTests(unittest.TestCase):
                                         else:
                                             extra["created_at"] = NOW.isoformat()
                                         with contextlib.redirect_stdout(io.StringIO()) as warning_log:
-                                            self.assertEqual(self.obsolete(listing + [extra], heads), [])
+                                            self.assertEqual(self.obsolete(listing + [filler, extra], heads), [])
                                         self.assertEqual(
                                             warning_log.getvalue(),
                                             "::warning::Newest, protected and grace-window caches use "
@@ -504,7 +520,7 @@ class CacheRetentionTests(unittest.TestCase):
         restore = shard.split("      - name: Restore compiler cache\n", 1)[1].split("      - name:", 1)[0]
         self.assertNotIn("matrix.shard", restore)
         self.assertIn("            linux-x64-gcc-asan-ccache-\n", restore)
-        self.assertIn("CCACHE_MAXSIZE: 600M", shard)
+        self.assertIn("CCACHE_MAXSIZE: 1200M", shard)
         for name in ("Clean compiler cache before saving", "Save compiler cache"):
             step = shard.split(f"      - name: {name}\n", 1)[1].split("      - name:", 1)[0]
             condition = step.splitlines()[0].strip()
