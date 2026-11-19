@@ -139,6 +139,9 @@ int RunReplicate(const ServerCliOptions& options) {
     bool arrow_despawn_signalled = false;
 
     std::uint64_t executed = 0;
+    // Refusals share the requested tick budget; permanent pressure reaches the stall path.
+    const std::uint64_t max_preparation_retries = options.ticks;
+    std::uint64_t preparation_retries = 0;
     while (executed < options.ticks) {
         // Client -> server: full +X movement input for its avatar this tick.
         Luminumbra::Net::UsercmdMsg cmd;
@@ -176,7 +179,9 @@ int RunReplicate(const ServerCliOptions& options) {
 
         const auto step = runner.RunFixedTicks(1);
         executed += step.ticks_executed;
-        if (step.ticks_executed == 0 && !step.region_fault) {
+        if (step.ticks_executed == 0 && !step.region_fault &&
+            preparation_retries < max_preparation_retries) {
+            ++preparation_retries;
             std::this_thread::sleep_for(std::chrono::milliseconds(33));
             continue;
         }
