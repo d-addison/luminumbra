@@ -15,7 +15,7 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | Capture-local draw registry | Implemented with separate asset and generated-geometry identities | `DiagnosticDrawTable.h`; registered `DiagnosticDrawTable.*` regressions in `capture_manifest_test` and generated-key `DiagnosticAttribution.*` regressions in `render_smoke_test`; native execution pending |
 | Deferred attribution producers | Implemented inside a leased deferred scope | `GBufferTargets.h` and `GBufferPass.cpp` add a render-thread producer scope, capture-local draw identities and explicit unsupported records; `g_buffer.frag` and `foliage.frag` have additive `LUMIN_DIAG_IDS` outputs; registered `DiagnosticAttribution.*` source-contract and `DiagnosticAttributionGl.*` hidden-GL regressions in `render_smoke_test`; native execution pending |
 | G-buffer ID attachment | Implemented for explicit deferred captures | `GBufferPass` holds an `AttachmentLease` during deferred submission; detachment and lease release precede completion, including rollback, recreation, retirement and exceptional exits; registered `GBufferLeaseGl.*` and `DiagnosticAttributionGl.*` regressions; native execution pending |
-| Exact producer coverage | Partial | Inside an explicit producer scope, file-backed static instances and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier with unsupported generated-mesh metadata. Live terrain MDI produces one identity per original command in pool-bucket order, using resident upload LOD and mesh version. The ladder backend, authored surfaces and tree impostors explicitly invalidate coverage; procedural static meshes also remain unsupported. Later plant/decal stages are outside the scope. Foliage has a guarded shader output but no instrumented forward submission; the separate contributor attachment API is unused |
+| Exact producer coverage | Partial | Inside an explicit producer scope, file-backed static instances and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier with unsupported generated-mesh metadata. Live terrain MDI, ladder backend, authored surfaces and tree impostors explicitly invalidate coverage; procedural static meshes also remain unsupported. Later plant/decal stages are outside the scope. Foliage has a guarded shader output but no instrumented forward submission; the separate contributor attachment API is unused |
 | Bundle transactions and opt-in admission | GL-free core implemented; runtime integration pending | `DiagnosticCapture.h/.cpp` resolves options, streams normalized planes, joins draw records, enforces staging budgets and publishes completion last using identity-checked ownership. `diagnostic_bundle_test` covers public transports and filesystem refusal/rollback; native execution pending. Runtime setup refuses enabled diagnostics before output until the completed-frame adapter is integrated |
 | Debug views and inspector | Planned | Extend `DebugViewPass` and developer console widgets |
 | Linux shader compilation and software-GL reference scenes | Partial | Fast Linux steps and material, cutout, night and terrain fixtures registered; bounded sky/terrain shader replays checked under llvmpipe; native scene target execution pending; dusk continuity diagnostic pending issue #918; no required-check or ruleset changes |
@@ -78,25 +78,6 @@ invalid impostor program cannot bypass the unsupported record. Empty terrain and
 impostor queues add no unsupported record. Later deferred and forward contributors
 remain outside this coverage; this predicate alone cannot authorize a final bundle.
 
-Live terrain attribution uses the original indirect commands and origin indices,
-with one current-program identity write before each command in pool-bucket order.
-Each consumed command marks its pool block submitted before the next identity can
-refuse, retaining retirement fencing on partial failure.
-Generated keys include chunk coordinates and the resident mesh version. Resident
-LOD is snapshotted inside mesh-version validation and committed with refinement
-metadata only after a successful upload, so retained stale geometry keeps its
-previous identity metadata. Diagnostic staging is capped at 65,536 resident
-identity records; excessive draw counts or resident LOD outside 0–255
-record unsupported coverage and end the capture's terrain coverage; the
-remaining draws render with zero identity through the ordinary multi-draw, so
-the frame completes. Empty submissions add no
-records. Unattached scopes and shadow rendering retain the original batched
-submission. With diagnostics off, there is no diagnostic staging allocation, GL
-state query or identity uniform write. Registered terrain source contracts and
-hidden-context GL regressions cover command/identity alignment across buckets,
-resident LOD boundaries and zero identities after refusal in both shader variants;
-native execution remains pending.
-
 The contributor API can attach a distinct forward target after deferred detachment.
 It leases the selected storage through the same rollback and release path, preserves
 the forward framebuffer's original draw buffers, and enables only the additional
@@ -137,7 +118,8 @@ state restoration; native execution remains pending. Normal rendering keeps its 
 original attachments.
 
 Completing exact coverage requires changes beyond the deferred attachment owners:
-the ladder submission metadata/backend, `StaticDrawPass`, `PlantProcgenPass`, `GroundDecalPass`,
+the live MDI origin/identity transport in `RenderPipeline.cpp`, the ladder submission
+metadata/backend, `StaticDrawPass`, `PlantProcgenPass`, `GroundDecalPass`,
 `FoliagePass` and `tree_impostor.frag`. A foliage
 identity belongs to a separate forward contributor plane because its color blends
 with the already lit scene. None of these gaps is represented as a guessed mesh or
