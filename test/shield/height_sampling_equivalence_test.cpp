@@ -26,13 +26,14 @@ using Luminumbra::IVec3;
 using Luminumbra::Vec3;
 using Luminumbra::Systems::SHIELD_WorldSystem;
 
-constexpr std::array<const char*, 8> kShippingPresets{"amplified",
+constexpr std::array<const char*, 9> kShippingPresets{"amplified",
                                                       "archipelago",
                                                       "cave_dense",
                                                       "caverns",
                                                       "default",
                                                       "flat_lands",
                                                       "mountains",
+                                                      "mountains_band_limited",
                                                       "temperate_forest"};
 
 std::filesystem::path PresetPath(const char* name) {

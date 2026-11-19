@@ -26,7 +26,10 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace Luminumbra::Systems {
@@ -37,6 +40,46 @@ struct FarLodSdfSnapshot;
 namespace Luminumbra::Rendering {
 
 class Shader;
+struct FarWorldSelection;
+
+// Coverage of nonempty live chunks submitted to GPU storage or a draw pass.
+// The caller owns the lifetime: resident chunks survive frame visibility changes.
+// Storage is bounded by the largest live GPU chunk set or submitted pass seen.
+class SubmittedLiveTerrain {
+public:
+    void clear();
+    void add_origin(const glm::vec3& origin);
+    // Bulk frame replacement: sort once, retain capacity, then O(log n) queries.
+    // Incremental resident updates use add_origin/remove_chunk instead.
+    void assign_origins(std::span<const glm::vec4> origins);
+    // Const diagnostic for verifying bulk-frame storage reuse.
+    std::size_t submission_capacity() const {
+        return m_submitted_chunks.capacity();
+    }
+    void remove_chunk(u64 chunk_id);
+    bool covers(const glm::vec3& position) const;
+
+private:
+    std::unordered_set<u64> m_chunks;
+    // Bounded by the successful live draw commands in the largest submitted frame.
+    // Sorted key/active pairs let retirement invalidate in place without shifting entries.
+    std::vector<std::pair<u64, bool>> m_submitted_chunks;
+    std::size_t submitted_index(u64 chunk_id) const;
+};
+
+enum class StaticPropSubmission {
+    Mesh,
+    Impostor,
+    Refused
+};
+
+// Live geometry keeps its existing representation regardless of far availability.
+// Impostor candidates without live support require confirmed resident far terrain
+// for either selection. Unknown coverage must be passed as false.
+StaticPropSubmission SelectStaticPropSubmission(const FarWorldSelection& selection,
+                                                bool impostor_candidate,
+                                                bool live_terrain_owned,
+                                                bool far_terrain_resident) noexcept;
 
 struct FarLodWorkerBuildOutcome {
     bool ok = false;
@@ -251,6 +294,20 @@ public:
     // once per rendered frame from RenderPipeline::render_frame.
     void update(const Systems::SHIELD_WorldSystem& world_system, const glm::vec3& camera_position);
 
+    SubmittedLiveTerrain& submitted_live_terrain() {
+        return m_submitted_live_terrain;
+    }
+
+    // Updated only on successful live uploads and resource retirement, even when
+    // far rendering is disabled. Never cleared by frustum or distance culling.
+    SubmittedLiveTerrain& resident_live_terrain() {
+        return m_resident_live_terrain;
+    }
+
+    // Render-thread residency query for far props. One region lookup; excludes
+    // the clipped live slice, empty terrain and positions outside the draw band.
+    bool terrain_resident_at(const glm::vec3& position) const;
+
     // Draws resident far-region meshes with the ALREADY BOUND terrain
     // geometry shader (VoxelVertex layout is identical). Region-AABB frustum
     // culling; depth-biased so overlapping live chunks win. Returns draw and
@@ -272,6 +329,8 @@ public:
     }
 
 private:
+    SubmittedLiveTerrain m_submitted_live_terrain;
+    SubmittedLiveTerrain m_resident_live_terrain;
     struct ResidentRegion {
         std::array<u64, 4> diagnostic_generation{};
         bool terrain_has_sdf = false;

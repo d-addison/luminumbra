@@ -25,6 +25,7 @@ in VS_OUT {
     vec2  texCoord;
     vec4  color;
     flat float atlasLayer;
+    flat uint ambientMote;
     float distanceToCamera;
     float viewDepth;
     vec3  worldPos;
@@ -35,6 +36,7 @@ out VS_OUT {
     vec2  texCoord;
     vec4  color;
     flat float atlasLayer;
+    flat uint ambientMote;
     float distanceToCamera;
     float viewDepth;
     vec3  worldPos;
@@ -49,6 +51,7 @@ void emit_corner(vec4 centre, vec2 corner) {
     gs_out.texCoord = corner * 0.5 + 0.5;
     gs_out.color = gs_in[0].color;
     gs_out.atlasLayer = gs_in[0].atlasLayer;
+    gs_out.ambientMote = gs_in[0].ambientMote;
     gs_out.distanceToCamera = gs_in[0].distanceToCamera;
     gs_out.viewDepth = gs_in[0].viewDepth;
     gs_out.worldPos = gs_in[0].worldPos;

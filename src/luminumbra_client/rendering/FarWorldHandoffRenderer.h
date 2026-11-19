@@ -23,6 +23,25 @@ public:
     // Owning aliases permit frozen capture to retain this exact memory domain.
     std::shared_ptr<World::FarVolumeMemoryPool> MemoryPool(std::size_t tier) const;
     bool StageTarget(const FarHandoffManifest&);
+    FarHandoffAdmissionStatus StartTarget(const FarHandoffManifest&);
+    // Retire idle handoff constraints before pruning consumer history against a
+    // complete Diagnostic().tiles snapshot. Do not stage between retire and prune.
+    // Serving/target keys and the current staging refusal remain unchanged.
+    // Pending admission pins history; complete diagnostics include idle keys
+    // until that attempt completes, refuses or is cancelled.
+    std::size_t RetireIdleHistory();
+    // Owner-thread bounded capture and admission retains producer/world owners.
+    // Optional limit callback contexts must outlive the pending attempt.
+    FarHandoffAdmissionStatus
+    StartSessionTarget(const std::shared_ptr<World::FarWorldAuthorityProducer>&,
+                       const std::shared_ptr<const Systems::SHIELD_WorldSystem>&,
+                       std::span<const FarSessionHandoffTile>,
+                       const World::FarWorldAuthorityProducer::FrozenPolicy&,
+                       const World::FarFrozenCaptureLimits&,
+                       const World::FarFrozenCaptureWork::Counts&);
+    FarHandoffAdmissionPump PumpAdmission(std::uint64_t budget);
+    FarHandoffAdmissionStatus CancelAdmission();
+    FarHandoffAdmissionStatus AdmissionStatus() const;
     bool StageSessionTarget(const World::FarWorldAuthorityProducer&,
                             const Systems::SHIELD_WorldSystem&,
                             std::span<const FarSessionHandoffTile>,
@@ -61,6 +80,7 @@ private:
     bool submitting_ = false, mutating_ = false;
     FarWorldRefusal admission_refusal_ = FarWorldRefusal::None;
     World::FarWorldAuthorityProducer::FrozenResult capture_failure_;
+    FarHandoffAdmissionStatus admission_status_ = FarHandoffAdmissionStatus::NotApplicable;
     std::uint64_t world_epoch_ = 0;
     World::FarCaveMode caves_ = World::FarCaveMode::BandLimited;
     World::FarVolumeNumericProfile numeric_ = World::FarVolumeNumericProfile::RawFloat;

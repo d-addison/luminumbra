@@ -1,5 +1,6 @@
 #include "ui/Rml_UIManager.h"
 #include "app/FrameAttribution.h"
+#include "audio/AudioAcceptance.h"
 #include "audio/IAudioManager.h"
 #include "luminumbra_common/core/CaptureContentPaths.h"
 #include "luminumbra_common/core/FramePacing.h"
@@ -552,6 +553,8 @@ void Rml_UIManager::PopulateWorlds(Rml::ElementDocument* document,
                 if (std::strftime(date, sizeof(date), "%Y-%m-%d %H:%M", time))
                     description += " · created " + std::string(date);
             }
+            if (!world.payloads_verified)
+                description += " · payloads unverified; checked when opened";
         } else {
             description = world.error;
         }
@@ -1122,6 +1125,28 @@ void Rml_UIManager::SetBackdropBlurQuality(luminumbra::core::UiBlurQuality quali
     }
 }
 
+AudioControlState Rml_UIManager::AudioControlsState() const {
+    if (!m_context) {
+        return {};
+    }
+    auto* document = m_context->GetDocument("settings");
+    if (!document) {
+        return {};
+    }
+    AudioControlState state;
+    // Fixed bound: the three shipped volume controls, never the document tree.
+    for (const char* id : {"setting_audio_master", "setting_audio_sfx", "setting_audio_music"}) {
+        if (const auto* control =
+                dynamic_cast<Rml::ElementFormControl*>(document->GetElementById(id))) {
+            ++state.present;
+            if (control->HasAttribute("disabled")) {
+                ++state.disabled;
+            }
+        }
+    }
+    return state;
+}
+
 void Rml_UIManager::RefreshGraphicsSettings() {
     if (m_context) {
         for (int i = 0; i < m_context->GetNumDocuments(); ++i) {
@@ -1397,6 +1422,8 @@ void Rml_UIManager::PopulateGraphicsForm(Rml::ElementDocument* document) {
                     std::to_string(values.volumetric_quality));
     SetControlValue(document->GetElementById("graphics_grass_enabled"),
                     values.grass_enabled ? "on" : "off");
+    SetControlValue(document->GetElementById("graphics_terrain_near_refinement"),
+                    values.terrain_near_refinement ? "on" : "off");
     SetControlValue(document->GetElementById("graphics_ui_blur"),
                     values.ui_blur == luminumbra::core::UiBlurQuality::Off    ? "off"
                     : values.ui_blur == luminumbra::core::UiBlurQuality::Half ? "half"
@@ -1556,7 +1583,7 @@ void Rml_UIManager::BindSettingsListeners(Rml::ElementDocument* document) {
                 const auto text = ReadFormControlValue(target, "");
                 if (edit.key == "ui_blur") {
                     edit.value = text;
-                } else if (edit.key == "grass_enabled") {
+                } else if (edit.key == "grass_enabled" || edit.key == "terrain_near_refinement") {
                     if (text != "on" && text != "off")
                         return;
                     edit.value = text == "on";

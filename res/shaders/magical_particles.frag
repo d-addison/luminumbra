@@ -18,6 +18,7 @@ in VS_OUT {
     vec2  texCoord;
     vec4  color;
     flat float atlasLayer;
+    flat uint ambientMote;
     float distanceToCamera;
     float viewDepth;
     vec3  worldPos;
@@ -80,6 +81,7 @@ void main() {
     bool isStreak = fs_in.streakAspect > 1.5;
     bool isRain = abs(fs_in.atlasLayer - 1.0) < 0.25 || isStreak;
     bool isSnow = abs(fs_in.atlasLayer - 2.0) < 0.25;
+    bool isAmbientMote = fs_in.ambientMote != 0u;
     // rain-impact FOAM is tagged with a dedicated atlas
     // layer sentinel (precip_splash.json atlas_layer = 4) so it renders as a clean
     // whitish foam burst rather than a scene-tinted emissive sprite. All other
@@ -112,7 +114,14 @@ void main() {
     }
 
     vec4 finalColor = fs_in.color;
-    if (isRain || isSnow) {
+    if (isAmbientMote) {
+        // Dust scatters local light rather than emitting it. Clear reversed-Z
+        // depth is sky: suppress that backdrop so dust cannot resemble stars.
+        float skyFade = sceneDepthRaw > 0.0 ? 1.0 : 0.0;
+        float distanceFade = 1.0 - smoothstep(4.0, 24.0, fs_in.distanceToCamera);
+        finalColor.rgb *= clamp(lit, vec3(0.0), vec3(1.0));
+        finalColor.a *= shape * softFade * skyFade * distanceFade;
+    } else if (isRain || isSnow) {
         // Precipitation scatters scene light; it is not a magical emitter.
         float illumination = clamp(dot(lit, vec3(0.2126, 0.7152, 0.0722)), 0.04, 1.0);
         finalColor.rgb = (isSnow ? fs_in.color.rgb : vec3(0.82, 0.90, 1.0)) * illumination;

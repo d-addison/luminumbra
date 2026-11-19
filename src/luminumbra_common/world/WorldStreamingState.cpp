@@ -52,7 +52,13 @@ bool WorldStreamingState::insert_chunk(ChunkPtr chunk) {
 bool WorldStreamingState::erase_chunk(ChunkID id) {
     LUMIN_PROFILE_LOCK(
         std::unique_lock<std::shared_mutex>, lock, m_chunks_mutex, "World chunks lock wait");
-    return m_chunks.erase(id) > 0;
+    const auto it = m_chunks.find(id);
+    if (it == m_chunks.end()) {
+        return false;
+    }
+    it->second->invalidate_near_terrain_snapshot();
+    m_chunks.erase(it);
+    return true;
 }
 
 bool WorldStreamingState::erase_chunk(const IVec3& coords) {
@@ -62,6 +68,12 @@ bool WorldStreamingState::erase_chunk(const IVec3& coords) {
 void WorldStreamingState::clear() {
     LUMIN_PROFILE_LOCK(
         std::unique_lock<std::shared_mutex>, lock, m_chunks_mutex, "World chunks lock wait");
+    // Retirement must invalidate retained owners before releasing membership.
+    // Explicit clearing visits each current resident once; this is never tick work.
+    for (const auto& [id, chunk] : m_chunks) {
+        (void)id;
+        chunk->invalidate_near_terrain_snapshot();
+    }
     m_chunks.clear();
 }
 

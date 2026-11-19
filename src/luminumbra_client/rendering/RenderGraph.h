@@ -300,7 +300,7 @@ inline RenderGraph BuildLuminumbraFrameGraph(bool authored_static = false) {
     g.add({"luminance_meter", {"lighting.color"}, {"exposure.meter"}, {}, true});
     // 8 / 8b: particles then lightning composite over the lit target.
     g.add({"particles", {"lighting.depth"}, {"lighting.color"}, {}, true});
-    g.add({"lightning_overlay", {"lighting.color"}, {"lighting.color"}, {}, true});
+    g.add({"lightning_overlay", {"lighting.color", "gbuffer.depth"}, {"lighting.color"}, {}, true});
     // 9: final blit of the lit color to the swapchain (or offscreen preview target).
     g.add({"final_blit", {"lighting.color"}, {"swapchain.color"}, {}, false});
     // Debug-view override (default-OFF) re-writes the swapchain with a single G-buffer channel.
