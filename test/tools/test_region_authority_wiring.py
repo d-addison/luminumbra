@@ -629,16 +629,20 @@ class SimulationCollisionWiring(unittest.TestCase):
                       "horizon.add(get_avatar_position(index))",
                       "horizon.add(get_body_position(state.dynamic_owners[i].id))"):
             self.assertIn(token, admit)
-        for signature, check, allocation, refusal in (
+        for signature, check, refusal in (
             ("bool PhysicsSystem::create_player_controller(",
-             "!can_admit_simulation_owner(start_pos, true)", "FeetCapsule(", "return false;"),
+             "!can_admit_simulation_owner(start_pos, true)", "return false;"),
             ("std::size_t PhysicsSystem::create_avatar_character(",
-             "!can_admit_simulation_owner(start_pos, false)", "PrepareController(",
-             "return kInvalidAvatar;"),
+             "!can_admit_simulation_owner(start_pos, false)", "return kInvalidAvatar;"),
         ):
             body = function(source, signature)
-            self.assertLess(body.index(check), body.index(allocation))
-            self.assertIn(refusal, body[:body.index(allocation)])
+            # Admission precedes both the capsule shape and the controller allocation.
+            allocations = [body.index(token) for token in ("FeetCapsule(", "PrepareController(")
+                           if token in body]
+            self.assertTrue(allocations)
+            first = min(allocations)
+            self.assertLess(body.index(check), first)
+            self.assertIn(refusal, body[:first])
 
     def test_overflow_horizons_keep_existing_sessions_running(self):
         source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(

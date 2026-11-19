@@ -2181,6 +2181,9 @@ bool PhysicsSystem::restore_avatar_owner(const World::PhysicsOwnerState& state,
     // Shapes, controller, contacts and the unassigned capsule are staged under
     // RAII. Broadphase preparation also rolls back before any avatar is published.
     m_avatars.reserve(m_avatars.size() + 1);
+    // Removal must stay allocation-free: reserve its retirement slot for every
+    // appended avatar before publication, as create_avatar_character does.
+    m_free_avatar_slots.reserve(m_avatars.size() + 1);
     const auto shape = m_avatar_shape != nullptr ? m_avatar_shape : FeetCapsule(0.9f, 1.3f);
     AvatarState staged{.character = PrepareController(shape, glm::vec3(0.0f), m_jolt_system.get()),
                        .wish = recipe.wish,

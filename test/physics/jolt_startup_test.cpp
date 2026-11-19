@@ -17,6 +17,7 @@
 
 #include <gtest/gtest.h>
 
+#include "../fixtures/OwnerContinuationTestAccess.h"
 #include "luminumbra_common/core/Log.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/world/Chunk.h"
@@ -2485,7 +2486,9 @@ TEST(JoltStartup, ApplicationDefaultAllocatorsRemainCompatibleWithStaticStorage)
 #endif
 
 namespace {
-using OwnerAccess = ApplicationPhysics::OwnerContinuation;
+ApplicationPhysics::OwnerContinuation OwnerAccess(ApplicationPhysics& physics) {
+    return Luminumbra::Systems::OwnerContinuationTestAccess::Make(physics);
+}
 using ControllerOwner = Luminumbra::World::PhysicsOwnerState;
 
 template<class Physics>
@@ -2536,7 +2539,7 @@ void ControllerRestoreAllocationSweep(int mode) {
         ControllerFloor(source);
         const bool player = mode >= 3;
         const bool frozen = mode == 1 || mode == 2;
-        OwnerAccess source_owner(source);
+        auto source_owner = OwnerAccess(source);
         if (player) {
             source.create_player_controller({8.0f, 8.1f, 8.0f});
             Require(source.set_player_crouched(mode == 4));
@@ -2569,7 +2572,7 @@ void ControllerRestoreAllocationSweep(int mode) {
                 ApplicationPhysics target;
                 target.startup();
                 ControllerFloor(target);
-                OwnerAccess target_owner(target);
+                auto target_owner = OwnerAccess(target);
                 if (mode == 2) {
                     std::array<JPH::BodyID, 1> ids{};
                     Require(target.restore_body_owners(body_set, ids));

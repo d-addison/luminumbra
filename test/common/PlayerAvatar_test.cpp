@@ -18,9 +18,11 @@
 #include <limits>
 #include <span>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
+#include "../fixtures/OwnerContinuationTestAccess.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/ecs/EntitySnapshot.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
@@ -1539,7 +1541,11 @@ TEST(BodyContinuation, ReplacesRemovedBodyCachesForEmptyAndNonemptySets) {
 } // namespace
 
 namespace {
-using Continuation = PhysicsSystem::OwnerContinuation;
+PhysicsSystem::OwnerContinuation Continuation(PhysicsSystem& physics) {
+    return Luminumbra::Systems::OwnerContinuationTestAccess::Make(physics);
+}
+// The adapter bypasses session validation, so only the session and test access build it.
+static_assert(!std::is_constructible_v<PhysicsSystem::OwnerContinuation, PhysicsSystem&>);
 
 template<class Physics>
 concept PublicAvatarCapture = requires(Physics& physics, PhysicsOwnerState& state) {

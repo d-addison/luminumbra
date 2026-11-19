@@ -30,8 +30,13 @@ class Chunk;
 namespace World {
 struct PhysicsOwnerState;
 }
+namespace world {
+class GameSession;
+}
 
 namespace Systems {
+
+struct OwnerContinuationTestAccess;
 
 class SHIELD_WorldSystem;
 class JoltRuntimeLease;
@@ -199,16 +204,19 @@ public:
 
     // Internal owner-thread continuation adapter. These operations are separate
     // from the public physics gameplay interface and never run during a tick.
+    // Only the session (which validates owners first) and test access construct it.
     class OwnerContinuation {
     public:
-        explicit OwnerContinuation(PhysicsSystem& physics)
-            : m_physics(physics) {}
         bool capture_avatar_owner(std::size_t index, World::PhysicsOwnerState& output) const;
         bool restore_avatar_owner(const World::PhysicsOwnerState& state, std::size_t& index);
         bool capture_player_owner(World::PhysicsOwnerState& output) const;
         bool restore_player_owner(const World::PhysicsOwnerState& state);
 
     private:
+        friend class ::Luminumbra::world::GameSession;
+        friend struct ::Luminumbra::Systems::OwnerContinuationTestAccess;
+        explicit OwnerContinuation(PhysicsSystem& physics)
+            : m_physics(physics) {}
         PhysicsSystem& m_physics;
     };
 
