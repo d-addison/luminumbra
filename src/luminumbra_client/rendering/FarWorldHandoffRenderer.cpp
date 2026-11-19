@@ -114,6 +114,7 @@ bool FarWorldHandoffRenderer::Bind(JobSystem& jobs,
         Drain();
         return false;
     }
+    admission_status_ = FarHandoffAdmissionStatus::Idle;
     world_epoch_ = epoch;
     caves_ = caves;
     numeric_ = numeric;
@@ -130,6 +131,9 @@ bool FarWorldHandoffRenderer::StageTarget(const FarHandoffManifest& manifest) {
     Guard const guard(*this);
     admission_refusal_ = FarWorldRefusal::None;
     capture_failure_ = {};
+    admission_status_ = FarHandoffAdmissionStatus::Refused;
+    if (handoff_)
+        handoff_->CancelAdmission();
     if (!handoff_ || manifest.world_epoch != world_epoch_ || manifest.numeric != numeric_) {
         admission_refusal_ = FarWorldRefusal::InvalidRequests;
         return false;
@@ -145,7 +149,94 @@ bool FarWorldHandoffRenderer::StageTarget(const FarHandoffManifest& manifest) {
     }
     const auto upload = diagnostic_.upload;
     CaptureFarWorldHandoffDiagnostic(*handoff_, frame_.value_or(0), upload, diagnostic_);
+    admission_status_ = FarHandoffAdmissionStatus::Complete;
     return true;
+}
+FarHandoffAdmissionStatus FarWorldHandoffRenderer::StartTarget(const FarHandoffManifest& manifest) {
+    Guard const guard(*this);
+    capture_failure_ = {};
+    admission_refusal_ = FarWorldRefusal::None;
+    if (!handoff_)
+        return admission_status_ = FarHandoffAdmissionStatus::NotApplicable;
+    handoff_->CancelAdmission();
+    if (manifest.world_epoch != world_epoch_ || manifest.numeric != numeric_) {
+        admission_refusal_ = FarWorldRefusal::InvalidRequests;
+        return admission_status_ = FarHandoffAdmissionStatus::Refused;
+    }
+    if (manifest.caves != caves_) {
+        admission_refusal_ = FarWorldRefusal::CavePolicyMismatch;
+        return admission_status_ = FarHandoffAdmissionStatus::Refused;
+    }
+    admission_status_ = handoff_->StartTarget(manifest);
+    admission_refusal_ = handoff_->AdmissionRefusal();
+    return admission_status_;
+}
+FarHandoffAdmissionStatus FarWorldHandoffRenderer::StartSessionTarget(
+    const std::shared_ptr<World::FarWorldAuthorityProducer>& producer,
+    const std::shared_ptr<const Systems::SHIELD_WorldSystem>& world,
+    std::span<const FarSessionHandoffTile> tiles,
+    const World::FarWorldAuthorityProducer::FrozenPolicy& policy,
+    const World::FarFrozenCaptureLimits& limits,
+    const World::FarFrozenCaptureWork::Counts& samples) {
+    Guard const guard(*this);
+    capture_failure_ = {};
+    admission_refusal_ = FarWorldRefusal::None;
+    if (!handoff_)
+        return admission_status_ = FarHandoffAdmissionStatus::NotApplicable;
+    handoff_->CancelAdmission();
+    if (policy.numeric != numeric_) {
+        admission_refusal_ = FarWorldRefusal::InvalidRequests;
+        return admission_status_ = FarHandoffAdmissionStatus::Refused;
+    }
+    if (policy.caves != caves_) {
+        admission_refusal_ = FarWorldRefusal::CavePolicyMismatch;
+        return admission_status_ = FarHandoffAdmissionStatus::Refused;
+    }
+    const auto result = handoff_->StartSessionTarget(
+        producer, world, world_epoch_, tiles, policy, limits, samples, memory_);
+    admission_refusal_ = handoff_->AdmissionRefusal();
+    capture_failure_ = handoff_->SessionCaptureFailure();
+    return admission_status_ = result;
+}
+FarHandoffAdmissionPump FarWorldHandoffRenderer::PumpAdmission(std::uint64_t budget) {
+    Guard const guard(*this);
+    if (!handoff_)
+        return {};
+    if (admission_status_ != FarHandoffAdmissionStatus::Pending)
+        return {admission_status_, 0, 0};
+    Unbind();
+    const auto result = handoff_->PumpAdmission(budget);
+    admission_refusal_ = handoff_->AdmissionRefusal();
+    capture_failure_ = handoff_->SessionCaptureFailure();
+    if (result.status != FarHandoffAdmissionStatus::Pending) {
+        const auto upload = diagnostic_.upload;
+        CaptureFarWorldHandoffDiagnostic(*handoff_, frame_.value_or(0), upload, diagnostic_);
+    }
+    admission_status_ = result.status;
+    return result;
+}
+FarHandoffAdmissionStatus FarWorldHandoffRenderer::CancelAdmission() {
+    Guard const guard(*this);
+    if (handoff_) {
+        handoff_->CancelAdmission();
+        admission_status_ = FarHandoffAdmissionStatus::Idle;
+        const auto upload = diagnostic_.upload;
+        CaptureFarWorldHandoffDiagnostic(*handoff_, frame_.value_or(0), upload, diagnostic_);
+    }
+    return handoff_ ? admission_status_ : FarHandoffAdmissionStatus::NotApplicable;
+}
+FarHandoffAdmissionStatus FarWorldHandoffRenderer::AdmissionStatus() const {
+    CheckOwner();
+    return handoff_ ? admission_status_ : FarHandoffAdmissionStatus::NotApplicable;
+}
+std::size_t FarWorldHandoffRenderer::RetireIdleHistory() {
+    Guard const guard(*this);
+    if (!handoff_)
+        return 0;
+    const auto retired = handoff_->RetireIdleHistory();
+    const auto upload = diagnostic_.upload;
+    CaptureFarWorldHandoffDiagnostic(*handoff_, frame_.value_or(0), upload, diagnostic_);
+    return retired;
 }
 bool FarWorldHandoffRenderer::StageSessionTarget(
     const World::FarWorldAuthorityProducer& producer,
@@ -156,6 +247,9 @@ bool FarWorldHandoffRenderer::StageSessionTarget(
     const World::FarFrozenCaptureWork::Counts& samples) {
     Guard const guard(*this);
     capture_failure_ = {};
+    admission_status_ = FarHandoffAdmissionStatus::Refused;
+    if (handoff_)
+        handoff_->CancelAdmission();
     if (!handoff_ || policy.numeric != numeric_) {
         admission_refusal_ = FarWorldRefusal::InvalidRequests;
         return false;
@@ -165,8 +259,11 @@ bool FarWorldHandoffRenderer::StageSessionTarget(
         return false;
     }
     const auto status = producer.capture_status();
+    // A completed serial may make progress under continuous publication, but
+    // restaging an older target must never qualify a pending source request.
     if (status.error == World::FarWorldAuthorityProducer::Error::None &&
-        (status.active || status.queued || status.paused)) {
+        (status.paused ||
+         (!status.latest_ready && status.serving_serial <= handoff_->State().target_serial))) {
         admission_refusal_ = FarWorldRefusal::AdmissionFailed;
         return false;
     }
@@ -179,6 +276,8 @@ bool FarWorldHandoffRenderer::StageSessionTarget(
         const auto upload = diagnostic_.upload;
         CaptureFarWorldHandoffDiagnostic(*handoff_, frame_.value_or(0), upload, diagnostic_);
     }
+    admission_status_ =
+        accepted ? FarHandoffAdmissionStatus::Complete : FarHandoffAdmissionStatus::Refused;
     return accepted;
 }
 FarWorldRefusal FarWorldHandoffRenderer::AdmissionRefusal() const {
@@ -360,6 +459,7 @@ void FarWorldHandoffRenderer::Drain() {
     charge_.reset();
     memory_.reset();
     frame_.reset();
+    admission_status_ = FarHandoffAdmissionStatus::NotApplicable;
     world_epoch_ = 0;
     admission_refusal_ = FarWorldRefusal::None;
     capture_failure_ = {};

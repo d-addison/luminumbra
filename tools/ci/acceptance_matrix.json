@@ -5,7 +5,7 @@
     {
       "id": "render.visual-diagnostic-codecs",
       "source": "docs/development/visual-diagnostics.md#implementation-inventory",
-      "statement": "Independent GL-free diagnostic codecs serialize linear albedo, signed view normals, raw hardware depth and integral material IDs as little-endian PFM, exact RGBA32UI draw/mesh/LOD/ownership/pass identities as a versioned binary image, and schema-1 top-left JSON point probes. Exact sizes, bounded dimensions and identity/material metadata are validated before stream writes; nonfinite floating samples survive in AOVs and become explicit null channels in probes. Registered regressions cover encoding, orientation, invalid input, nonfinite values and partial stream failures. Standalone header-only helpers add lazy RGBA32UI targets with capability and dimension refusal, transactional resize and caller binding restoration, and a submission-ordered capture-local draw/mesh registry bounded to 65,536 entries each and 16 MiB escaped JSON with generic UTF-8 asset paths and explicit unsupported coverage. Registered modeled-driver and registry regressions cover lifecycle, refusal, IDs, metadata, bounds and reset; native execution remains pending. Completed-frame GL readback and scenario integration remain pending. The design also specifies debug views, a pixel inspector, every-PR Linux shader compilation, path-gated llvmpipe scenes and capture image checks; these layers are planned and do not yet change runtime rendering or CI checks.",
+      "statement": "Independent GL-free diagnostic codecs serialize linear albedo, signed view normals, raw hardware depth and integral material IDs as little-endian PFM, exact RGBA32UI draw/mesh/LOD/ownership/pass identities as a versioned binary image, and schema-1 top-left JSON point probes. Exact sizes, bounded dimensions and identity/material metadata are validated before stream writes; nonfinite floating samples survive in AOVs and become explicit null channels in probes. Registered regressions cover encoding, orientation, invalid input, nonfinite values and partial stream failures. A standalone header-only helper adds a submission-ordered capture-local draw/mesh registry bounded to 65,536 entries each and 16 MiB escaped JSON with generic UTF-8 asset paths and explicit unsupported coverage. Registered registry regressions cover refusal, IDs, metadata, bounds and reset. A second standalone helper adds lazy RGBA32UI targets with capability and dimension refusal, transactional resize and caller binding restoration. Move-only attachment leases protect caller attachments on bound and unbound framebuffers: resize, reset and disable refuse while leased, and owner destruction with live leases terminates before deletion. Registered modeled-driver regressions cover lifecycle, refusal, attachment retention, moves and release. Deferred attribution producers are implemented through an explicit render-thread scope, guarded integer shader outputs and capture-local submission identities, including actual legacy far terrain/water tiers. A scoped G-buffer ID attachment ensures storage before acquiring an AttachmentLease and retains it through deferred submission until detachment and caller-state restoration, including incomplete-FBO rollback, recreation, registry retirement, capture destruction and exceptional teardown. Capability, extent and occupied-attachment refusal preserve caller state and record unsupported coverage. Completion requires successful attachment, detachment, lease release and complete deferred coverage without sticky failure or refusal. Missing base programs, unavailable skinned programs even with empty views, and queued tree impostors with invalid programs invalidate coverage. Registered DiagnosticAttribution and GBufferLeaseGl source-contract and hidden-GL regressions cover attachment scope, full state restoration, lease ordering, detached writers and unavailable programs. The existing Python attribution wiring suite evaluates all completion-predicate states and guards producer refusal ordering. Registry exhaustion sets a sticky capture refusal without throwing or growing the table; later writes upload zero IDs. Registered DiagnosticAttributionGl hidden-GL regressions cover bounded exhaustion, repeated refusal, invalid static metadata with skipped unrepresentable index counts and preserved geometry for unrecordable identity paths, and caller culling, VAO and framebuffer restoration on normal and exceptional exits; live MDI, ladder backend, authored surfaces, tree impostors and later contributors remain incomplete. Native execution, completed-frame GL readback and scenario integration remain pending. Every-PR Linux shader compilation and path-gated llvmpipe scene tooling are registered. The scene catalogue pins material, tree-impostor cutout, night-sky and terrain-blend references with per-reference origins, source identities, full-image MAE/p99 thresholds and independent cutout, stellar horizon/radial and terrain coverage invariants. Bounded sky/terrain shader replays ran under llvmpipe; native scene target execution remains pending. Dusk azimuth continuity is measured without an accepted baseline, with its proposed threshold pending issue #918. Debug views, a pixel inspector and capture image checks remain planned.",
       "status": "partial",
       "evidence": [
         {
@@ -22,8 +22,81 @@
         },
         {
           "kind": "ctest",
+          "ref": "DiagnosticAttribution.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DiagnosticAttributionGl.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "UnavailableImpostorGl.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GBufferLeaseGl.*"
+        },
+        {
+          "kind": "script",
+          "ref": "test/rendering/test_frame_attribution_wiring.py"
+        },
+        {
+          "kind": "ctest",
           "ref": "DiagnosticCaptureIntegration.*",
           "planned": "Add and run GPU attribution and scenario capture bundle regressions; owner: maintainers"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development/visual-diagnostics.md"
+        },
+        {
+          "kind": "script",
+          "ref": "tools/gates/test_shader_scenes.py"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ShaderScene.*",
+          "planned": "Run the registered opt-in material, tree-impostor, night, dusk and terrain scene target under llvmpipe; owner: maintainers"
+        }
+      ],
+      "requirements": []
+    },
+    {
+      "id": "render.capture-feature-capabilities",
+      "source": "docs/development/visual-diagnostics.md#e3-all-features-profile-and-non-vacuous-evidence",
+      "statement": "GL-free capture feature resolution names 31 producer/settings features, records requested/effective state and forced, suppressed or unavailable reasons, and serializes a versioned capability manifest with resolved asset/config identities or unavailable reasons. Strict runtime all_features selection is validated by both launch parsers before save-root creation. Unimplemented adapters default to unsupported across all eight capture modes; disabled requested settings refuse support and missing identities prevent aggregate support. Explicit final forced/suppressed observations take precedence over baseline producer controls; resolved isolation masks and sky backdrops still suppress forced enabled settings while preserving explicit suppression reasons. Registered regressions cover selections, catalog completeness, explicit subsets, every missing or suppressed feature, actual system and graphics gates, terrain cave/structure and static-plant isolation, skinned creature isolation, vegetation requiring both terrain and foliage consumers, missing-adapter and explicit-subset isolation refusals, independent ungated stages, tuning-default semantics, malformed metadata/enums, exact bounds, snapshot ownership and stream write/flush failures. Native execution, app/scenario producer policy, admission/publication wiring and per-frame presence evidence remain pending; selection and capability do not certify an all-features capture.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "CaptureFeatureProfile.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "CaptureFeaturePolicy.*",
+          "planned": "Implement and qualify shared app/scenario policy and feature presence in later slices; owner: maintainers"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development/visual-diagnostics.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
+      "id": "render.temporal-audit-plan",
+      "source": "docs/development/visual-diagnostics.md#e1-fixed-camera-time-lapse-audit-runs",
+      "statement": "GL-free temporal admission plans inclusive day/night, 120-second clear-storm-clear and three-day schedules using exact simulation ticks, ceiling sparse cadence, rational 60 Hz bursts, deduplicated overlaps, explicit final-tick steady/night holds and bounded warmup/readiness/settling. Plans cap recorded frames at 4096 and simulation advancement at 10 million ticks, bound presentation work, and refuse invalid calendars, rates, spans, clock bounds, budgets and malformed or duplicate CLI options with reasons. The O(1) advancement query refuses invalid indices and clock faults. Both shipping startup parsers refuse temporal execution before save-root or world/output creation; planning alone cannot advertise runtime or all-features support. Registered regressions cover acceptance, tick schedules, rational cadence, limits and refusal paths; native execution, weather input, site/sequence driving, capability checks, run/output-byte budgets and assembly remain pending.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "TemporalAudit.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "TemporalAuditSequence.*",
+          "planned": "Add weather and site/sequence execution regressions before runtime support; owner: maintainers"
         },
         {
           "kind": "doc",
@@ -83,6 +156,27 @@
         {
           "kind": "script",
           "ref": "tools/ci/test_ui_layout_contract.py"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/visual-regression.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
+      "id": "render.visual-lint",
+      "source": "docs/visual-regression.md#world-sweep-review-sheets",
+      "statement": "The offline PNG checker emits deterministic JSON and a human summary for sentinel clusters, below-horizon sky candidates, gradient banding, opaque rectangles, unchanged matched weather captures and optional baseline histogram drift. Bounded inputs and synthetic regressions cover diagnostics and input refusals; heuristic findings do not establish rendering causes or visual approval.",
+      "status": "covered",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "VisualLintCaptures"
+        },
+        {
+          "kind": "script",
+          "ref": "tools/gates/test_visual_lint.py"
         },
         {
           "kind": "doc",
@@ -535,7 +629,7 @@
     {
       "id": "render.frame-scan-schema",
       "source": "docs/render-benchmark.md#continuous-cpu-attribution-issue-387",
-      "statement": "Frame scans declare luminumbra.frame_scan.v2 for nullable foliage.instances: integers include known zero, null means unknown, and instance_capacity is never a substitute count. The source wiring regression checks the shared writer used by direct captures and scene surveys, including the schema and known/unknown serialization branches; it does not execute the renderer. Registered rendering regressions check that ordinary and frozen generation rollover, delayed readback, empty and inactive builds, and resource recreation cannot publish a previous generation's count. Readback re-enabling retries a cleared snapshot, and disabled frozen rebuilds do not submit readbacks. The frame-attribution CSV preserves all 72 existing column indices, including dirty_columns at index 62, and appends worker_dispatched, worker_completed, worker_stale_rejected and worker_queue_age_frames at indices 72\u201375, for 76 fields total. The source wiring regression pins the complete header order and final row field against the documented schema; native direct and buffered row regressions remain pending execution.",
+      "statement": "Frame scans declare luminumbra.frame_scan.v2 for nullable foliage.instances: integers include known zero, null means unknown, and instance_capacity is never a substitute count. The source wiring regression checks the shared writer used by direct captures and scene surveys, including the schema and known/unknown serialization branches; it does not execute the renderer. Registered rendering regressions check that ordinary and frozen generation rollover, delayed readback, empty and inactive builds, and resource recreation cannot publish a previous generation's count. Readback re-enabling retries a cleared snapshot, and disabled frozen rebuilds do not submit readbacks. The frame-attribution CSV preserves all 72 existing column indices, including dirty_columns at index 62, and appends worker_dispatched, worker_completed, worker_stale_rejected and worker_queue_age_frames at indices 72–75, for 76 fields total. The source wiring regression pins the complete header order and final row field against the documented schema; native direct and buffered row regressions remain pending execution.",
       "status": "covered",
       "evidence": [
         {
@@ -3980,7 +4074,7 @@
     {
       "id": "contract.dw.scope.01",
       "source": "docs/distant-world.md#scope",
-      "statement": "Acceptance obligations: - The view radius is **16 km from the camera** and the world has **no fixed edge**: terrain streams procedurally in every direction. / The addressable extent is set by the packed chunk identity (`Chunk.h`, \u00b12^20 chunks of 16 m, about \u00b116,777 km on each horizontal axis; / coordinates are masked, never range checked). / World positions are 32-bit floats. / By owner decision (September 8, 2026) the contract requires qualification within 32 km of the world origin, where positions keep sub-centimetre precision; / the camera-relative (floating-origin) precision work that would qualify the full addressable extent is deliberately residual scope, not an open contract gap.",
+      "statement": "Acceptance obligations: - The view radius is **16 km from the camera** and the world has **no fixed edge**: terrain streams procedurally in every direction. / The addressable extent is set by the packed chunk identity (`Chunk.h`, ±2^20 chunks of 16 m, about ±16,777 km on each horizontal axis; / coordinates are masked, never range checked). / World positions are 32-bit floats. / By owner decision (September 8, 2026) the contract requires qualification within 32 km of the world origin, where positions keep sub-centimetre precision; / the camera-relative (floating-origin) precision work that would qualify the full addressable extent is deliberately residual scope, not an open contract gap.",
       "status": "planned",
       "requirements": [
         "dw.scope.001",
@@ -4082,7 +4176,7 @@
     {
       "id": "contract.dw.tiers.01",
       "source": "docs/distant-world.md#tier-ladder",
-      "statement": "Acceptance obligations: Far terrain is a ladder of five nested, world-origin-aligned volumetric tiers. / Each tier stores sparse 5\u00d75\u00d75 signed-distance bricks and is polygonised per tile with Marching Cubes; / a brick record exists where the field crosses zero. / Multi-tier residency and draw ownership are new machinery with an explicit arrival-state rule: the coarser tier is always resident and drawn beneath the finer one with a one-brick overlap; / a finer tile replaces the coarser surface inside its band only once it is built and uploaded, and until then the coarser surface stays visible, so a missing or late tile is never a hole; / ownership at the live edge is decided against the live chunks that are actually meshed and uploaded (including cave ceilings and floors), replacing today's camera-region skip;",
+      "statement": "Acceptance obligations: Far terrain is a ladder of five nested, world-origin-aligned volumetric tiers. / Each tier stores sparse 5×5×5 signed-distance bricks and is polygonised per tile with Marching Cubes; / a brick record exists where the field crosses zero. / Multi-tier residency and draw ownership are new machinery with an explicit arrival-state rule: the coarser tier is always resident and drawn beneath the finer one with a one-brick overlap; / a finer tile replaces the coarser surface inside its band only once it is built and uploaded, and until then the coarser surface stays visible, so a missing or late tile is never a hole; / ownership at the live edge is decided against the live chunks that are actually meshed and uploaded (including cave ceilings and floors), replacing today's camera-region skip;",
       "status": "planned",
       "requirements": [
         "dw.tiers.001",
@@ -4474,7 +4568,7 @@
     {
       "id": "contract.dw.policy.04",
       "source": "docs/distant-world.md#per-system-distant-policy",
-      "statement": "Acceptance obligations: no catch-up (this deliberately replaces the energy field's catch-up rule) | / | Existing energy layer (`aether_state.efs`) | Unchanged | Under active regions its window policy is replaced by region activation with the same no-catch-up rule; / its serializer never mutates state, the per-owner cadence and active-age metadata live in the ledger record (the EFS1 payload is unchanged), frozen pages hash as their stored bytes, and an all-zero layer writes no record while the snapshot index records the record as intentionally absent | Frozen pages kept | / | Scent and foraging | Spawn-anchored near facility; / the scent grid is historical state and is persisted with the page records so near consumers resume continuously | Not simulated at distance; / distant creatures do not use scent | \u2014 |",
+      "statement": "Acceptance obligations: no catch-up (this deliberately replaces the energy field's catch-up rule) | / | Existing energy layer (`aether_state.efs`) | Unchanged | Under active regions its window policy is replaced by region activation with the same no-catch-up rule; / its serializer never mutates state, the per-owner cadence and active-age metadata live in the ledger record (the EFS1 payload is unchanged), frozen pages hash as their stored bytes, and an all-zero layer writes no record while the snapshot index records the record as intentionally absent | Frozen pages kept | / | Scent and foraging | Spawn-anchored near facility; / the scent grid is historical state and is persisted with the page records so near consumers resume continuously | Not simulated at distance; / distant creatures do not use scent | — |",
       "status": "planned",
       "requirements": [
         "dw.policy.019",
@@ -4495,7 +4589,7 @@
     {
       "id": "contract.dw.policy.05",
       "source": "docs/distant-world.md#per-system-distant-policy",
-      "statement": "Acceptance obligations: | Ground objects | Settle, persist, despawn | Despawn deadlines are active-age counters, advancing only while the owning region is due | Nothing advances | / | Scheduled game events | Not implemented | Deferred to a later milestone | \u2014 | / Authority is server-only on the deterministic fixed tick with per-region seeded random streams; / clients render coarse results only, and delivering coarse state to remote clients is outside v0.3 (host-local evidence). / Distant water simulates only where its millimetre arrays are resident; / a simulation-only residency class is not part of this contract and would be a separate decision.",
+      "statement": "Acceptance obligations: | Ground objects | Settle, persist, despawn | Despawn deadlines are active-age counters, advancing only while the owning region is due | Nothing advances | / | Scheduled game events | Not implemented | Deferred to a later milestone | — | / Authority is server-only on the deterministic fixed tick with per-region seeded random streams; / clients render coarse results only, and delivering coarse state to remote clients is outside v0.3 (host-local evidence). / Distant water simulates only where its millimetre arrays are resident; / a simulation-only residency class is not part of this contract and would be a separate decision.",
       "status": "planned",
       "requirements": [
         "dw.policy.025",
@@ -4745,7 +4839,7 @@
     {
       "id": "contract.dw.perf.01",
       "source": "docs/distant-world.md#performance-measurement-contract",
-      "statement": "Acceptance obligations: Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840\u00d71600 and 3440\u00d71440. / Both profiles must meet the release floor on every workload; / the Performance profile exists to report the 120 fps target. / | Quality | 1.0 | p99 frame time at most 16.67 ms | p50 against 8.33 ms | / | Performance | 0.67 | p99 frame time at most 16.67 ms | p50 and p99 against 8.33 ms | / Workloads are settled fixed views (400 warm-up, 240 measured frames) and 60 s scripted traversals (surface flight, cave walk, edited-world tour) with pinned seeds, preset and content revisions, camera paths and speeds, expected simulation ticks and cold-cache state.",
+      "statement": "Acceptance obligations: Two named profiles are qualified on the primary machine (RTX 5070 Ti) at native output on both 3840×1600 and 3440×1440. / Both profiles must meet the release floor on every workload; / the Performance profile exists to report the 120 fps target. / | Quality | 1.0 | p99 frame time at most 16.67 ms | p50 against 8.33 ms | / | Performance | 0.67 | p99 frame time at most 16.67 ms | p50 and p99 against 8.33 ms | / Workloads are settled fixed views (400 warm-up, 240 measured frames) and 60 s scripted traversals (surface flight, cave walk, edited-world tour) with pinned seeds, preset and content revisions, camera paths and speeds, expected simulation ticks and cold-cache state.",
       "status": "planned",
       "requirements": [
         "dw.perf.001",
@@ -8196,6 +8290,50 @@
         }
       ],
       "requirements": []
+    },
+    {
+      "id": "worldgen.band-limited-preset",
+      "source": "issue #876",
+      "statement": "The additional mountains_band_limited preset uses four octaves, base amplitude 66.6666667 and authored continental, erosion and peaks splines with all other mountains generation parameters preserved. Python pins the canonical preset checksum and content hash with an empty dependency manifest; registered loader coverage checks parsed controls, new-world resolution, saved JSON identity and a distinct dependency-inclusive identity from mountains. The frozen revision-6 catalog remains separate. Binary packages include the preset through the worlds directory install. UI selection, generated height pins and native qualification remain pending.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "FrozenTerrainPresetsContract"
+        },
+        {
+          "kind": "script",
+          "ref": "tools/test_frozen_terrain_presets.py"
+        },
+        {
+          "kind": "ctest",
+          "ref": "TerrainPresetLoaderTest.BandLimitedMountainsPreservesResolvedContent",
+          "planned": "Run registered loader regression; generated height pins and native qualification remain pending; owner: maintainers"
+        },
+        {
+          "kind": "ctest",
+          "ref": "TerrainPresetLoaderTest.AllShippedPresetsLoadWithoutErrorsOrWarnings"
+        },
+        {
+          "kind": "script",
+          "ref": "CMakeLists.txt"
+        }
+      ],
+      "requirements": []
+    },
+    {
+      "id": "terrain.resolution-options",
+      "source": "issue #876",
+      "statement": "Terrain resolution design compares an opt-in band-limited new-world preset and a half-metre authoritative grid, including parameter sources, identity and save compatibility, resource costs, consumer audit and bounded delivery slices. Implementation, measured candidate facet reduction and native performance qualification remain pending.",
+      "status": "planned",
+      "requirements": [],
+      "evidence": [
+        {
+          "kind": "doc",
+          "ref": "docs/development/terrain-resolution-options.md",
+          "planned": "Qualify captured-pose terrain, existing-world continuation, grid admission and High/Ultra performance before activation; owner: terrain"
+        }
+      ]
     }
   ]
 }
