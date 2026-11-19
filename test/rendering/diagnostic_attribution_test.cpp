@@ -351,6 +351,8 @@ TEST(DiagnosticAttribution, MissingProducerMetadataCannotClaimCompleteCoverage) 
     Contains(pipeline, "terrain_resident_lod_unavailable");
     Contains(pipeline, "terrain_identity_draw_limit");
     Contains(pass, "ladder_backend_identity_unavailable");
+    // Ladder far draws never inherit the last live chunk's identity.
+    Before(pass, "capture->clear_current_identity();", "ladder_backend_identity_unavailable");
     Contains(pass, "authored_static_surface");
     Contains(pass, "tree_impostor_fragment_output_unavailable\", 3");
     Contains(pass, "DiagnosticProvenance::Unsupported");
@@ -417,9 +419,17 @@ TEST(DiagnosticAttribution, TerrainSubmitsOriginalCommandsInBucketOrderWithResid
     Contains(attributed, "draw * command_stride");
     EXPECT_EQ(Count(attributed, "glDrawElementsIndirect,"), 1u);
     EXPECT_EQ(Count(attributed, "AttributedGl::Submit("), 2u);
-    // Both the per-command and fallback draws retain retirement tracking.
-    Before(attributed, "glDrawElementsIndirect,", "pool.mark_submitted(bucket)");
-    EXPECT_EQ(Count(attributed, "mark_submitted("), 2u);
+    // A full identity table stops per-command draws before the refused command.
+    Before(attributed, "capture->refused()", "glDrawElementsIndirect,");
+    ASSERT_NE(attributed.find("capture->refused()"), std::string::npos);
+    const auto refusal = attributed.substr(attributed.find("capture->refused()"));
+    Before(refusal, "capture->clear_current_identity();", "break;");
+    Before(refusal, "break;", "glDrawElementsIndirect,");
+    // One guarded retirement per bucket covers both the per-command and batched draws.
+    Before(attributed, "pool.mark_submitted(bucket)", "glDrawElementsIndirect,");
+    EXPECT_EQ(Count(attributed, "mark_submitted("), 1u);
+    EXPECT_EQ(Count(attributed, "retirement.submitted = true;"), 2u);
+    Before(attributed, "glDrawElementsIndirect,", "retirement.submitted = true;");
     Contains(draw, "SubmitDiagnosticTerrainBucket(");
     const auto chunks = Body(Read(kPass), "void GBufferPass::geometry_pass_chunks(");
     Contains(chunks, "input.submit_terrain_chunks(frustum_planes)");
@@ -802,7 +812,7 @@ protected:
         EXPECT_EQ(glGetError(), GL_NO_ERROR);
     }
     void ExpectInvalidMetadata(bool excessive_path);
-    void ExpectTerrainBuckets(int refused_lod);
+    void ExpectTerrainBuckets(int refused_lod, bool table_full = false);
     // Context is destroyed last, after cached meshes and shaders release their GL objects.
     AttributionContext gl_;
     RenderResourceRegistry resources_;
@@ -884,7 +894,7 @@ private:
     std::array<GLuint, 2> buffers_{};
 };
 
-void DiagnosticAttributionGl::ExpectTerrainBuckets(int refused_lod) {
+void DiagnosticAttributionGl::ExpectTerrainBuckets(int refused_lod, bool table_full) {
     TerrainBucketGeometry geometry;
     ASSERT_TRUE(geometry.initialize());
     const std::array<DiagnosticTerrainDraw, 4> original{
@@ -895,11 +905,17 @@ void DiagnosticAttributionGl::ExpectTerrainBuckets(int refused_lod) {
     for (const bool ladder : {false, true}) {
         table_.clear();
         auto draws = original;
-        const bool refusal = refused_lod < 0 || refused_lod > 255;
-        if (refusal) {
+        const bool lod_refusal = refused_lod < 0 || refused_lod > 255;
+        const bool refusal = lod_refusal || table_full;
+        if (lod_refusal) {
             draws[1].lod = refused_lod;
         }
         GBufferDiagnosticCapture capture(targets_, table_);
+        if (table_full) {
+            // The first terrain command finds the identity table already full.
+            ASSERT_NO_FATAL_FAILURE(FillRegistry());
+        }
+        const auto initial = table_.json();
         ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
         auto* shader = capture.variant(pass_.geometry_shader().get(), ladder);
         ASSERT_NE(shader, nullptr);
@@ -930,7 +946,7 @@ void DiagnosticAttributionGl::ExpectTerrainBuckets(int refused_lod) {
         const bool was_submitted = geometry.pools[0].blocks()[0].submitted;
         SubmitDiagnosticTerrainBucket(active, {}, 1, geometry.stride, ladder, geometry.pools[0], 0);
         EXPECT_EQ(geometry.pools[0].blocks()[0].submitted, was_submitted);
-        EXPECT_EQ(table_.resolve(1), nullptr);
+        EXPECT_EQ(table_.json(), initial);
         for (std::size_t bucket = 0; bucket < 2; ++bucket) {
             geometry.bind(bucket);
             SubmitDiagnosticTerrainBucket(
@@ -961,7 +977,7 @@ void DiagnosticAttributionGl::ExpectTerrainBuckets(int refused_lod) {
             }
             const auto draw = (pixel % 32) / 8;
             ++covered[draw];
-            if (refusal && draw != 0) {
+            if (table_full || (refusal && draw != 0)) {
                 EXPECT_EQ(ids[pixel], DiagnosticId{});
                 continue;
             }
@@ -986,7 +1002,11 @@ void DiagnosticAttributionGl::ExpectTerrainBuckets(int refused_lod) {
         capture.detach();
         EXPECT_EQ(capture.complete(), !refusal);
         EXPECT_EQ(capture.attachment_failed(), refusal);
-        EXPECT_EQ(table_.complete_coverage(), !refusal);
+        EXPECT_EQ(capture.refused(), table_full);
+        EXPECT_EQ(table_.complete_coverage(), !lod_refusal);
+        if (table_full) {
+            EXPECT_EQ(table_.json(), initial);
+        }
         EXPECT_EQ(glGetError(), GL_NO_ERROR);
     }
 }
@@ -1001,6 +1021,60 @@ TEST_F(DiagnosticAttributionGl, TerrainRefusedLodClearsIdentityForRemainingBucke
         SCOPED_TRACE(lod);
         ASSERT_NO_FATAL_FAILURE(ExpectTerrainBuckets(lod));
     }
+}
+
+TEST_F(DiagnosticAttributionGl, TerrainTableFullRefusalBatchesEveryRemainingCommand) {
+    // A refused identity write ends per-command terrain submission: the capture
+    // is dropped for later buckets and every command still rasterizes without IDs.
+    ExpectTerrainBuckets(0, true);
+}
+
+TEST_F(DiagnosticAttributionGl, LadderFarDrawsDoNotInheritTheLastLiveTerrainIdentity) {
+    input_.far_selection.effective = FarWorldMode::Ladder;
+    ctx_.far_world_ladder = true;
+    const auto current_identity = [] {
+        GLint program = 0;
+        glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+        DiagnosticId id{};
+        const auto location = glGetUniformLocation(static_cast<GLuint>(program), "u_diagnosticIds");
+        if (program != 0 && location >= 0) {
+            glGetUniformuiv(static_cast<GLuint>(program), location, id.data());
+        }
+        return id;
+    };
+    DiagnosticId live{};
+    std::vector<DiagnosticId> ladder_ids;
+    input_.submit_terrain_chunks = [&](const glm::vec4(&)[6]) {
+        // The last live chunk leaves its identity on the shared terrain program.
+        if (auto* capture = GBufferDiagnosticCapture::Current()) {
+            capture->write_current(Submission());
+        }
+        live = current_identity();
+        return TerrainSubmitStats{};
+    };
+    input_.submit_ladder = [&](const FarWorldPrepareDraw& prepare) {
+        FarWorldSubmitStats stats;
+        for (int command = 0; command < 2; ++command) {
+            if (prepare(FarWorldDrawCommand{})) {
+                ladder_ids.push_back(current_identity());
+                ++stats.draws;
+            }
+        }
+        return stats;
+    };
+    table_.clear();
+    GBufferDiagnosticCapture capture(targets_, table_);
+    SetEntryState(false);
+    EXPECT_NO_THROW(pass_.execute(ctx_, entities_, input_));
+    EXPECT_NE(live, DiagnosticId{});
+    ASSERT_EQ(ladder_ids.size(), 2u);
+    for (const auto& id : ladder_ids) {
+        EXPECT_EQ(id, DiagnosticId{});
+    }
+    EXPECT_FALSE(capture.complete());
+    Contains(table_.json(), "ladder_backend_identity_unavailable");
+    ExpectEntryState(false);
+    EXPECT_TRUE(targets_.reset());
 }
 
 TEST_F(DiagnosticAttributionGl, ClearIdentityOnlyChangesTheBoundCaptureVariant) {

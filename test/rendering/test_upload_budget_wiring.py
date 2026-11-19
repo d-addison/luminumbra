@@ -1868,7 +1868,11 @@ class UploadBudgetWiring(unittest.TestCase):
                         refusal.index("capture->clear_current_identity();"))
         self.assertLess(refusal.index("capture->clear_current_identity();"),
                         refusal.index("capture = nullptr;"))
-        self.assertEqual(attributed.count("break;"), 1)
+        # A table-full refusal clears, drops the capture and leaves the loop the same way.
+        table_full = compact(body(attributed, "if (capture->refused())"))
+        self.assertTrue(table_full.endswith(
+            "capture->clear_current_identity(); capture = nullptr; break;"), table_full)
+        self.assertEqual(attributed.count("break;"), 2)
         draw = body(self.pipeline, "void RenderPipeline::draw_chunks_mdi(")
         excess = compact(body(draw, "if (diagnostic_capture && running > 65536)"))
         self.assertLess(excess.index("clear_current_identity();"),
@@ -1932,13 +1936,20 @@ class UploadBudgetWiring(unittest.TestCase):
         attributed = body(self.pipeline, "void SubmitDiagnosticTerrainBucket(")
         diagnostic = compact(body(attributed, "for (std::size_t draw = first;"))
         self.assertLess(diagnostic.index("AttributedGl::Submit( glDrawElementsIndirect,"),
-                        diagnostic.index("pool.mark_submitted("))
+                        diagnostic.index("retirement.submitted = true;"))
+        # A table-full refusal leaves the loop before its command is drawn individually.
+        self.assertLess(diagnostic.index("capture->refused()"),
+                        diagnostic.index("AttributedGl::Submit( glDrawElementsIndirect,"))
         # Undiagnosed draws, and the rest of a bucket after a diagnostic refusal, share one multi-draw.
         batched = compact(body(attributed, "if (mdi_first < first + count)"))
         self.assertLess(batched.index("AttributedGl::Submit( glMultiDrawElementsIndirect,"),
-                        batched.index("pool.mark_submitted("))
-        self.assertEqual(diagnostic.count("pool.mark_submitted("), 1)
-        self.assertEqual(batched.count("pool.mark_submitted("), 1)
+                        batched.index("retirement.submitted = true;"))
+        self.assertNotIn("pool.mark_submitted(", diagnostic)
+        self.assertNotIn("pool.mark_submitted(", batched)
+        # One fence-tracked retirement per bucket, also on an exception after a draw.
+        retire = compact(body(attributed, "~BucketRetirement()"))
+        self.assertIn("if (submitted) { pool.mark_submitted(bucket); }", retire)
+        self.assertEqual(compact(attributed).count("pool.mark_submitted("), 1)
         self.assertEqual(compact(self.pipeline).count("AttributedGl::Submit( glMultiDrawElementsIndirect,"), 2)
         shipping = compact(body(draw, "if (mdi_first < first + count)"))
         self.assertLess(shipping.index("glMultiDrawElementsIndirect,"),

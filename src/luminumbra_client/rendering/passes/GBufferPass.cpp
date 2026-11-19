@@ -543,6 +543,8 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
         input.submit_ladder,
         [&uniforms, capture](const FarWorldDrawCommand& command) {
             if (capture) {
+                // The shared terrain program still holds the last live chunk's ID.
+                capture->clear_current_identity();
                 capture->unsupported(
                     "ladder_backend_identity_unavailable", 0, DiagnosticOwnership::LadderFar);
             }

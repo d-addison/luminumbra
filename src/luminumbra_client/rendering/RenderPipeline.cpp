@@ -2069,6 +2069,18 @@ void SubmitDiagnosticTerrainBucket(GBufferDiagnosticCapture*& capture,
                                    u32 bucket) {
     const std::size_t count = draws.size();
     std::size_t mdi_first = first;
+    // One retirement per bucket covers its individual and batched draws, and
+    // still covers consumed draws if an identity write throws.
+    struct BucketRetirement {
+        ChunkGeometryPool& pool;
+        u32 bucket;
+        bool submitted = false;
+        ~BucketRetirement() {
+            if (submitted) {
+                pool.mark_submitted(bucket);
+            }
+        }
+    } retirement{pool, bucket};
     if (capture) {
         // Submit each original indirect command once, preserving its index,
         // base vertex and base instance, in the same pool-bucket order.
@@ -2095,13 +2107,19 @@ void SubmitDiagnosticTerrainBucket(GBufferDiagnosticCapture*& capture,
                  .pass = DiagnosticPass::GBuffer,
                  .provenance = DiagnosticProvenance::Unknown,
                  .generated_mesh = mesh_key});
+            if (capture->refused()) {
+                // A full identity table ends coverage: this command and every later
+                // terrain command return to batched multi-draws without identities.
+                capture->clear_current_identity();
+                capture = nullptr;
+                break;
+            }
             Luminumbra::Rendering::AttributedGl::Submit(
                 glDrawElementsIndirect,
                 GLenum{GL_TRIANGLES},
                 GLenum{GL_UNSIGNED_INT},
                 reinterpret_cast<const void*>(draw * command_stride));
-            // A later identity may refuse; retirement must cover draws already consumed.
-            pool.mark_submitted(bucket);
+            retirement.submitted = true;
         }
     }
     if (mdi_first < first + count) {
@@ -2112,7 +2130,7 @@ void SubmitDiagnosticTerrainBucket(GBufferDiagnosticCapture*& capture,
             reinterpret_cast<const void*>(mdi_first * command_stride),
             static_cast<GLsizei>(first + count - mdi_first),
             static_cast<GLsizei>(command_stride));
-        pool.mark_submitted(bucket);
+        retirement.submitted = true;
     }
 }
 
