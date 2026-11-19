@@ -967,6 +967,46 @@ TEST(AsyncWaterMeshing, WaterOnlySelectionTracksPublicationInBothDirections) {
     }
 }
 
+TEST(AsyncWaterMeshing, InitialWaterPresentationInvalidatesCachedWaterOnlySelection) {
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 8.0f;
+    params.caves_enabled = false;
+    SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    WaterSystem water(nullptr, &world);
+    water.SetBootPaused(true);
+    world.SetWaterSystem(&water);
+    // The flat 8 m surface puts column (0, 0) in chunk y = 0, so the preflight
+    // band is y = -1..1. The dry margins are already published (water skipped).
+    auto pond = std::make_shared<Chunk>(IVec3(0));
+    FillDugPond(world, *pond, 8);
+    pond->sdf_data.assign(pond->sdf_data.size(), 1.0f);
+    pond->current_lod.store(0);
+    pond->set_state(ChunkState::Ready);
+    ASSERT_TRUE(world.adopt_streamed_chunk(pond));
+    for (const int y : {-1, 1}) {
+        auto margin = std::make_shared<Chunk>(IVec3(0, y, 0));
+        world.GenerateChunkData(*margin);
+        margin->current_lod.store(0);
+        margin->water_mesh_generated.store(true);
+        margin->set_state(ChunkState::Ready);
+        ASSERT_TRUE(world.adopt_streamed_chunk(margin));
+    }
+    // Cache the empty selection before the direct publication.
+    ASSERT_TRUE(world.renderable_chunks_view().empty());
+    const auto before = world.renderable_view_work();
+    ASSERT_TRUE(world.PrepareInitialWaterPresentationNear(Vec3(8.0f, 8.0f, 8.0f), 0));
+    ASSERT_TRUE(pond->mesh_vertices.empty());
+    ASSERT_FALSE(pond->water_mesh_vertices.empty());
+    EXPECT_EQ(world.renderable_chunks_view(), std::vector<Chunk*>{pond.get()});
+    EXPECT_EQ(world.renderable_view_work().rebuilds - before.rebuilds, 1u);
+    // A second preparation skips published water and must not churn the view.
+    const auto settled = world.renderable_view_work();
+    ASSERT_TRUE(world.PrepareInitialWaterPresentationNear(Vec3(8.0f, 8.0f, 8.0f), 0));
+    EXPECT_EQ(world.renderable_chunks_view(), std::vector<Chunk*>{pond.get()});
+    EXPECT_EQ(world.renderable_view_work().rebuilds, settled.rebuilds);
+}
+
 enum class DryWaterExecution : std::uint8_t {
     Inline,
     Worker,

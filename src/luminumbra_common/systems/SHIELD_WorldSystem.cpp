@@ -4640,6 +4640,15 @@ bool SHIELD_WorldSystem::PrepareInitialWaterPresentationNear(const Vec3& world_p
         if (!presentation.water_mesh_generated.load()) {
             return false;
         }
+        // The scratch chunk is Unloaded, so the mesher did not notify. Water presence
+        // selects water-only owners, so a flip must invalidate the cached view.
+        const bool had_water =
+            !chunk->water_mesh_vertices.empty() && !chunk->water_mesh_indices.empty();
+        const bool has_water =
+            !presentation.water_mesh_vertices.empty() && !presentation.water_mesh_indices.empty();
+        if (had_water != has_water) {
+            notify_renderable_chunks_changed();
+        }
         chunk->water_mesh_vertices = std::move(presentation.water_mesh_vertices);
         chunk->water_mesh_indices = std::move(presentation.water_mesh_indices);
         chunk->water_mesh_version.fetch_add(1);
