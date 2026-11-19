@@ -70,6 +70,41 @@ using world::RegionState;
     throw std::invalid_argument("Regional water planning input refused");
 }
 
+world::RegionSchedule FilterSchedule(const Columns& columns,
+                                     const world::RegionSchedule& schedule) {
+    // Each selected column has one owner: <= 9*64+256 = 832 owners, independent
+    // of ledger size. Only this bounded set is allocated or passed to planning.
+    std::map<RegionKey, bool> owners;
+    for (std::size_t i = 0; i < columns.size; ++i) {
+        const auto coords = Chunk::decode_id(columns.ids[i]);
+        const auto owner =
+            ActiveRegionLedger::region_at({static_cast<float>(coords.x * CHUNK_SIZE_X),
+                                           0.0f,
+                                           static_cast<float>(coords.z * CHUNK_SIZE_Z)});
+        owners.emplace(owner, false);
+    }
+    // Due keys are in scheduler priority order, not owner order. Inspect the
+    // supplied schedule (<= kMaxRegions), without copying it or scanning records.
+    for (const auto owner : schedule.due) {
+        const auto found = owners.find(owner);
+        if (found != owners.end()) {
+            if (found->second) {
+                Refuse();
+            }
+            found->second = true;
+        }
+    }
+    world::RegionSchedule filtered;
+    filtered.tick = schedule.tick;
+    filtered.due.reserve(owners.size());
+    for (const auto& [owner, due] : owners) {
+        if (due) {
+            filtered.due.push_back(owner);
+        }
+    }
+    return filtered;
+}
+
 bool LegalResolution(int resolution) {
     return resolution == 4 || resolution == 8 || resolution == 16 || resolution == 32;
 }
@@ -462,19 +497,19 @@ void Reconcile(const Groups& groups,
         const auto& group = found->second;
         const auto limit = std::min(
             {funded.windows, static_cast<std::uint64_t>(group.candidates.size()), windows});
-        std::uint64_t awarded = 0;
+        std::uint64_t awarded = 0, demand = 0;
         // At most kMaxResidents candidates across all groups. The canonical
         // funding identities include pair endpoints; border-only participants
         // cannot replace a funded interior, even if it resolves to an idle grid.
         for (const auto candidate : group.candidates) {
-            if (awarded == limit) {
-                break;
-            }
             auto& entry = entries[candidate];
             if (std::binary_search(
                     funding.interiors.begin(), funding.interiors.end(), entry.resident.id)) {
-                entry.selected = true;
-                ++awarded;
+                ++demand;
+                if (awarded < limit) {
+                    entry.selected = true;
+                    ++awarded;
+                }
             }
         }
         windows -= awarded;
@@ -484,7 +519,6 @@ void Reconcile(const Groups& groups,
         // Restoring unused grants cannot exceed funding's checked post-credit
         // debt (<= kMaxDebt).
         region.debt += (funded.windows - awarded) * world::water_share::kQ32;
-        const auto demand = static_cast<std::uint64_t>(group.candidates.size());
         if (demand < funded.windows) {
             // Resolved idle grants must not keep earning credit and outrank
             // executable owners forever. Keep at most one window per executable
@@ -1109,7 +1143,7 @@ void WaterSystem::UpdateRegionalFromSimulation(entt::registry& registry,
     }
     if (!m_shield_system || !m_shield_system->durable_residency() ||
         m_shield_system->durable_read_failed() || schedule.tick != ledger.tick() ||
-        schedule.due.size() > RegionalWater::kMaxSimulationColumns ||
+        schedule.due.size() > world::ActiveRegionLedger::kMaxRegions ||
         !RegionalWater::LegalResolution(m_sim_resolution) ||
         (m_last_regional_tick && schedule.tick <= *m_last_regional_tick) ||
         m_rain_mm_per_tick < 0 || m_evap_mm_per_tick < 0 || m_weather_rain_scale_mm < 0) {
@@ -1140,6 +1174,7 @@ void WaterSystem::UpdateRegionalFromSimulation(entt::registry& registry,
     }
     const auto columns =
         RegionalWater::SelectColumns(anchors, {sources.data(), source_count}, ledger);
+    const auto selected_schedule = RegionalWater::FilterSchedule(columns, schedule);
     if (completed.size() > world::ActiveRegionLedger::kMaxRegions - columns.size) {
         throw std::invalid_argument("Regional water completed work cap exceeded");
     }
@@ -1168,7 +1203,7 @@ void WaterSystem::UpdateRegionalFromSimulation(entt::registry& registry,
     auto plan = RegionalWater::BuildPlan(residents,
                                          source_inputs,
                                          ledger,
-                                         schedule,
+                                         selected_schedule,
                                          {m_sim_resolution, budget, raining},
                                          nullptr,
                                          true);
@@ -1206,8 +1241,12 @@ void WaterSystem::UpdateRegionalFromSimulation(entt::registry& registry,
         }
         // Reconcile sleeping/resized saved grids and seam eligibility only inside
         // the funded set. This pass cannot admit another payload or exceed its grant.
-        plan = RegionalWater::BuildPlan(
-            residents, source_inputs, ledger, schedule, {m_sim_resolution, budget, raining}, &plan);
+        plan = RegionalWater::BuildPlan(residents,
+                                        source_inputs,
+                                        ledger,
+                                        selected_schedule,
+                                        {m_sim_resolution, budget, raining},
+                                        &plan);
         std::array<std::shared_ptr<Chunk>, std::tuple_size_v<decltype(columns.ids)>> execution{};
         for (std::size_t i = 0; i < plan.participants.size(); ++i) {
             const auto found = std::lower_bound(funded.begin(), funded.end(), plan.participants[i]);

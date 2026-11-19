@@ -53,9 +53,10 @@ class RegionAuthorityWiring(unittest.TestCase):
             encoding="utf-8")
         reconcile = function(source, "void Reconcile(")
         self.assertNotIn("SelectInteriorPair(", reconcile)
-        self.assertIn("std::uint64_t awarded = 0;", reconcile)
+        self.assertIn("std::uint64_t awarded = 0, demand = 0;", reconcile)
         selection = function(reconcile, "if (std::binary_search(")
-        self.assertEqual(selection, "entry.selected = true; ++awarded;")
+        self.assertEqual(selection, "++demand; if (awarded < limit) { "
+                         "entry.selected = true; ++awarded; }")
         self.assertIn("funding.interiors.begin(), funding.interiors.end(), entry.resident.id)",
                       reconcile)
         self.assertIn("region.windows = awarded;", reconcile)
@@ -76,8 +77,73 @@ class RegionAuthorityWiring(unittest.TestCase):
         for token in ("chunk->is_water_sleeping.store(x == 34);",
                       "EXPECT_TRUE(water.regional_work().visits.empty());",
                       "EXPECT_EQ(water.regional_work().allocated_windows, 0u);",
-                      "EXPECT_EQ(ledger.water_debts().at({1, 0}),"):
+                      "EXPECT_FALSE(ledger.water_debts().contains({1, 0}));"):
             self.assertIn(token, idle)
+
+    def test_sleeping_refunds_cap_demand_to_eligible_funded_interior_identities(self):
+        source = (ROOT / "src/luminumbra_common/systems/RegionalWater.cpp").read_text(
+            encoding="utf-8")
+        reconcile = function(source, "void Reconcile(")
+        candidates = function(reconcile, "for (const auto candidate : group.candidates)")
+        self.assertNotIn("break;", candidates)
+        self.assertEqual(candidates.count("++demand;"), 1)
+        eligible = function(candidates, "if (std::binary_search(")
+        self.assertTrue(eligible.startswith("++demand;"))
+        self.assertNotIn("demand = static_cast<std::uint64_t>(group.candidates.size())", reconcile)
+        self.assertIn("funding.interiors.begin(), funding.interiors.end(), entry.resident.id)",
+                      candidates)
+        self.assertEqual(function(reconcile, "if (demand < funded.windows)"),
+                         "region.debt = std::min(region.debt, demand * world::water_share::kQ32);")
+        native = (ROOT / "test/common/RegionalWater_test.cpp").read_text(encoding="utf-8")
+        regression = function(native, "TEST(RegionalWaterAdmission, "
+                              "SleepingInteriorRefundsExcludeBorderOnlyDemandAndCannotStarveSources)")
+        for token in ("{31, 32, 34, 36}", "tick <= 32", "ledger.schedule(WorldClock(tick))",
+                      "UpdateRegionalFromSimulation(", "completed, 480)", "work.visits",
+                      "EXPECT_EQ(carried, 0u);", "EXPECT_LE(carried, world::water_share::kQ32);",
+                      "if (tick == 8)", "EXPECT_GT(first_steps, 0u);",
+                      "EXPECT_GT(work.source_mm, 0);", "EXPECT_GT(refunds, 0u);"):
+            self.assertIn(token, regression)
+        self.assertNotIn("Planning::Build(", regression)
+
+    def test_simulation_filters_large_due_schedules_before_both_planning_passes(self):
+        source = (ROOT / "src/luminumbra_common/systems/RegionalWater.cpp").read_text(
+            encoding="utf-8")
+        update = function(source, "void WaterSystem::UpdateRegionalFromSimulation(")
+        self.assertIn("schedule.due.size() > world::ActiveRegionLedger::kMaxRegions", update)
+        self.assertNotIn("schedule.due.size() > RegionalWater::kMaxSimulationColumns", update)
+        self.assertIn("const auto selected_schedule = RegionalWater::FilterSchedule(columns, schedule);",
+                      update)
+        planning = update[update.index("auto plan = RegionalWater::BuildPlan("):]
+        self.assertEqual(planning.count("RegionalWater::BuildPlan("), 2)
+        self.assertEqual(planning.count("selected_schedule,"), 2)
+        filtered = function(source, "world::RegionSchedule FilterSchedule(")
+        self.assertIn("std::map<RegionKey, bool> owners;", filtered)
+        self.assertIn("i < columns.size", filtered)
+        self.assertIn("owners.emplace(owner, false);", filtered)
+        self.assertIn("const auto found = owners.find(owner);", filtered)
+        self.assertEqual(function(filtered, "if (found->second)"), "Refuse();")
+        self.assertIn("filtered.due.reserve(owners.size());", filtered)
+        self.assertIn("for (const auto& [owner, due] : owners)", filtered)
+        self.assertIn("filtered.due.push_back(owner);", function(filtered, "if (due)"))
+        self.assertNotIn("= schedule;", filtered)
+        self.assertNotIn("schedule.due.begin()", filtered)
+        native = (ROOT / "test/common/RegionalWater_test.cpp").read_text(encoding="utf-8")
+        regression = function(native, "TEST(RegionalWaterAdmission, "
+                              "LargeLedgerSchedulesFundOnlySelectedDueOwnersInCanonicalOrder)")
+        for token in ("{false, true}", "{0u, 1u, 2u, 3u}", "x < 1024",
+                      "ledger.schedule(WorldClock(1))", "std::erase(schedule.due, RegionKey{2, 0});",
+                      "ASSERT_GT(schedule.due.size(), Planning::kMaxSimulationColumns);",
+                      "ASSERT_NO_THROW(water.UpdateRegionalFromSimulation(",
+                      "EXPECT_EQ(work.visits.size(), due_count);",
+                      "EXPECT_EQ(work.allocated_windows, due_count);",
+                      "EXPECT_EQ(work.participants_visited, due_count);",
+                      "ledger.records().at({x, 0}).water_cursor",
+                      "EXPECT_EQ(ledger.encode(), expected_ledgers[selection]);"):
+            self.assertIn(token, regression)
+        invalid = function(native, "TEST(RegionalWaterAdmission, "
+                           "InvalidContextRefusesBeforeReadingOrPublishing)")
+        self.assertIn("schedule.due.resize(ActiveRegionLedger::kMaxRegions + 1);", invalid)
+        self.assertIn("schedule.due.push_back({0, 0});", invalid)
 
     def test_eviction_ownership_probe_excludes_streaming_residency(self):
         session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(
