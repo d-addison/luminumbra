@@ -39,7 +39,9 @@ struct FarWorldAuthorityConfig;
 
 namespace Luminumbra::Persistence {
 class CreatedWorldArtifacts;
-}
+struct AuthorityCaptureResult;
+enum class AuthorityCaptureParts;
+} // namespace Luminumbra::Persistence
 
 namespace luminumbra::fields {
 class EnergyFieldState; //  (): the stateful energy layer
@@ -69,6 +71,7 @@ enum class WindLayer : int;
 struct WeatherSample;
 class WindFieldSystem;
 class WeatherSystem;
+struct WeatherSchedule;
 class AetherFieldSystem;
 } // namespace Systems
 } // namespace Luminumbra
@@ -185,6 +188,7 @@ public:
         std::vector<IVec3> wanted_chunks;
         RegionSchedulerConfig ledger_config;
         std::optional<RegionSchedulerConfig> scheduler_override;
+        std::shared_ptr<const Systems::WeatherSchedule> weather_schedule;
         Vec3 energy_anchor{};
         std::uint64_t simulation_tick = 0;
         std::uint64_t world_revision = 0;
@@ -355,6 +359,11 @@ public:
     const Systems::WeatherSystem* GetWeatherSystem() const {
         return m_weatherSystem.get();
     }
+    // Pre-world setup: copies validated input, so callers cannot mutate session identity.
+    bool SetWeatherSchedule(const Systems::WeatherSchedule& schedule);
+    [[nodiscard]] const Systems::WeatherSchedule* GetWeatherSchedule() const {
+        return m_weatherSchedule.get();
+    }
 
     // the deterministic Aether scalar field. Sim-authoritative; its
     // cell values feed the world_hash `aether` sub-hash. Constructed on world
@@ -442,9 +451,9 @@ public:
     void SetForagingTuning(const luminumbra::ai::ForagingParams& t) {
         m_foragingTuning = t;
     }
-    void SetReproductionTuning(const luminumbra::ai::ReproductionTuning& t) {
-        m_reproductionTuning = t;
-    }
+    // Capacity/lifespan use fixed session rules until a versioned config identity admits
+    // overrides. Low-level tick callers can still use fast synthetic lifecycle tuning.
+    void SetReproductionTuning(const luminumbra::ai::ReproductionTuning& t);
     void SetCircadianAmplitude(float a) {
         m_circadianAmplitude = a;
     }
@@ -571,8 +580,16 @@ public:
         return m_fieldPages;
     }
     // Observational foliage preparation/publication counts; excluded from identity and saves.
+    [[nodiscard]] std::uint64_t GetFoliageSelectionVisits() const;
     [[nodiscard]] std::uint64_t GetFoliageRegistryStageVisits() const;
     [[nodiscard]] std::uint64_t GetFoliageRegistryPublications() const;
+    // Plant-owner visits while preparing persistence deadlines, including rejected owners.
+    [[nodiscard]] std::uint64_t GetFoliagePersistenceOwnerVisits() const;
+    // Runtime-only diagnostics; neither encoded nor hashed.
+    [[nodiscard]] std::size_t GetFoliageHistorySize() const;
+    [[nodiscard]] std::uint32_t GetFoliageReplayRemainingSteps() const;
+    [[nodiscard]] std::uint64_t GetFoliageReplayCellVisits() const;
+    [[nodiscard]] std::uint64_t GetFoliageReplayPreparationPages() const;
     // Read-only diagnostics of the live legacy foliage grids.
     [[nodiscard]] const luminumbra::foliage::SoilGrid* GetFoliageSoilGrid() const;
     [[nodiscard]] const luminumbra::foliage::IrrigationGrid* GetFoliageIrrigationGrid() const;
@@ -648,6 +665,13 @@ public:
     // Enabled chunk slot hashes authoritative truth across residency/save history. The default
     // path retains the existing streamed-state projection and wire/checkpoint slots.
     [[nodiscard]] std::string ComputeChunkStateHash();
+    // Owner-thread checked observation. Failure publishes no legacy output slots.
+    // The one-argument form captures every slot.
+    [[nodiscard]] Persistence::AuthorityCaptureResult
+    CaptureAuthorityHashes(const std::string& entity_snapshot_json = {});
+    [[nodiscard]] Persistence::AuthorityCaptureResult
+    CaptureAuthorityHashes(const std::string& entity_snapshot_json,
+                           Persistence::AuthorityCaptureParts parts);
     [[nodiscard]] bool IsSimulationTickBoundary() const {
         return !m_activeRegionsEnabled || (!m_simulationBatchInProgress && m_regionWork.empty());
     }
@@ -846,6 +870,7 @@ private:
     std::unique_ptr<Systems::WaterSystem> m_waterSystem;
     std::unique_ptr<Systems::WindFieldSystem> m_windFieldSystem;
     std::unique_ptr<Systems::WeatherSystem> m_weatherSystem;
+    std::shared_ptr<const Systems::WeatherSchedule> m_weatherSchedule;
     std::unique_ptr<Systems::AetherFieldSystem> m_aetherFieldSystem;
     // The stateful energy layer. Null unless
     // sim.aether_state was enabled BEFORE CreateWorld/LoadWorld (explicit OFF —
