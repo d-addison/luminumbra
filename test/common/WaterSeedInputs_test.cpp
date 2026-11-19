@@ -3474,7 +3474,8 @@ TEST(WaterSeedInputs, AdmissionCapRefusesBeforeGenerationAndCleanupReleasesParke
     fixture.world.set_parked_bytes_limit(833 * SHIELD_WorldSystem::kWaterColumnReservationBytes);
     const std::array last_slot{Chunk::calculate_id({833, 0, 0})};
     ASSERT_TRUE(fixture.world.reserve_water_columns(last_slot));
-    EXPECT_EQ(fixture.world.water_columns_generated(), 0u);
+    // Funding generates nothing: only the earlier parked admission was generated.
+    EXPECT_EQ(fixture.world.water_columns_generated(), 1u);
     fixture.world.discard_unclaimed_water_columns({}, last_slot);
     fixture.world.discard_unclaimed_water_columns(candidates);
     // Only the parked candidate is released; live admissions keep their handles.
