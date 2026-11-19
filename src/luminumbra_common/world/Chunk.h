@@ -493,6 +493,16 @@ public:
     std::atomic<u32> mesh_version{0};
     std::atomic<u32> water_mesh_version{0};
 
+    // Render-only owner-thread bounds; worker scratch captures these with the
+    // shared column source. Standalone chunks own every finite surface.
+    double water_mesh_min_y = -std::numeric_limits<double>::infinity();
+    double water_mesh_max_y = std::numeric_limits<double>::infinity();
+    bool water_mesh_inputs_captured = false;
+    u64 water_mesh_owner_version = 0;
+    ChunkID water_mesh_source_id = 0;
+    // Cadence stamps are render-only, including when regional water stages them.
+    u64 water_mesh_invalidation_version = 0;
+
     // --- Water Simulation Data ---
     std::vector<f32> water_level_data;
     std::vector<Vec2> water_flow_data;
