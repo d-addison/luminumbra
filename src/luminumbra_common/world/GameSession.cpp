@@ -2574,8 +2574,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         creature_admission);
                 // Decomposition: dead creatures decay + release nutrient (consumed by the soil
                 // loop).
-                const auto& decay_participants =
-                    luminumbra::ai::DecompositionParticipants(living_registry);
+                // A detached stage is cleared and re-copied each tick. Borrow the live
+                // roster (same handles) so the copy's signals never churn index nodes.
+                const auto& decay_participants = luminumbra::ai::DecompositionParticipants(
+                    foliage_step ? m_registry : living_registry);
                 budget.Next(Stage::Decay, [&] { return decay_participants.size(); });
                 if (!decay_participants.empty())
                     luminumbra::ai::RunDecompositionOnTick(living_registry,
