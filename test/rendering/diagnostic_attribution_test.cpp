@@ -6,6 +6,7 @@
 #include "rendering/FarLodSystem.h"
 #include "rendering/GBufferTargets.h"
 #include "rendering/Mesh.h"
+#include "rendering/RenderPipeline.h"
 #include "rendering/RenderResourceRegistry.h"
 #include "rendering/Shader.h"
 #include "rendering/passes/GBufferPass.h"
@@ -388,39 +389,38 @@ TEST(DiagnosticAttribution, DeferredAttachmentScopeEndsBeforeCallerStateRestorat
 TEST(DiagnosticAttribution, TerrainSubmitsOriginalCommandsInBucketOrderWithResidentMetadata) {
     const auto draw = Body(Read("src/luminumbra_client/rendering/RenderPipeline.cpp"),
                            "void RenderPipeline::draw_chunks_mdi(");
-    Contains(draw, "diagnostic_chunks[dst] = chunk");
+    Contains(draw, ".lod = rd.diagnostic_lod");
+    Contains(draw, ".mesh_version = rd.mesh_version");
     Contains(draw, "write_cursor[a.block_index]++");
     Contains(draw, "cmd.count = a.index_count");
     Contains(draw, "cmd.instanceCount = 1u");
     Contains(draw, "cmd.firstIndex = a.index_offset");
     Contains(draw, "cmd.baseVertex = a.vertex_offset");
     Contains(draw, "cmd.baseInstance = static_cast<GLuint>(dst)");
-    const auto attributed = Body(draw, "for (std::size_t draw = first; draw < first + count;");
-    Contains(attributed, "const auto& chunk = *diagnostic_chunks[draw]");
-    Contains(attributed, "const auto& resident = m_chunk_render_data.at(chunk.id)");
-    Contains(attributed, "\"terrain/\" + std::to_string(chunk.coords.x) + \"/\"");
-    Contains(attributed, "std::to_string(chunk.coords.y) + \"/\"");
-    Contains(attributed, "std::to_string(chunk.coords.z) + \"/version/\"");
+    const auto attributed = Body(Read("src/luminumbra_client/rendering/RenderPipeline.cpp"),
+                                 "void SubmitDiagnosticTerrainBucket(");
+    Contains(attributed, "const auto& resident = draws[draw - first]");
+    Contains(attributed, "std::to_string(resident.chunk[0])");
+    Contains(attributed, "std::to_string(resident.chunk[1])");
+    Contains(attributed, "std::to_string(resident.chunk[2])");
     Contains(attributed, "std::to_string(resident.mesh_version)");
     Contains(attributed, ".mesh_path = {}");
-    Contains(attributed, "m_frame_far_selection.effective == FarWorldMode::Ladder");
-    Contains(attributed, "? \"terrain_mdi_ladder\"");
-    Contains(attributed, ": \"terrain_mdi\"");
-    Contains(attributed, ".chunk = {chunk.coords.x, chunk.coords.y, chunk.coords.z}");
-    Contains(attributed, ".lod = static_cast<std::uint32_t>(resident.diagnostic_lod)");
+    Contains(attributed, "ladder ? \"terrain_mdi_ladder\" : \"terrain_mdi\"");
+    Contains(attributed, ".chunk = {resident.chunk[0], resident.chunk[1], resident.chunk[2]}");
+    Contains(attributed, ".lod = static_cast<std::uint32_t>(resident.lod)");
     Contains(attributed, ".ownership = DiagnosticOwnership::Live");
     Contains(attributed, ".pass = DiagnosticPass::GBuffer");
     Contains(attributed, ".provenance = DiagnosticProvenance::Unknown");
     Contains(attributed, ".generated_mesh = mesh_key");
-    Before(attributed, "diagnostic_capture->write_current(", "glDrawElementsIndirect,");
-    Contains(attributed, "draw * sizeof(DrawElementsIndirectCommand)");
+    Before(attributed, "capture->write_current(", "glDrawElementsIndirect,");
+    Before(attributed, "capture->clear_current_identity();", "capture = nullptr;");
+    Contains(attributed, "draw * command_stride");
     EXPECT_EQ(Count(attributed, "glDrawElementsIndirect,"), 1u);
-    EXPECT_EQ(Count(attributed, "AttributedGl::Submit("), 1u);
-    // A later LOD refusal must not bypass retirement tracking for prior commands.
-    Before(attributed,
-           "glDrawElementsIndirect,",
-           "m_chunk_geometry_pool.mark_submitted(static_cast<u32>(b))");
-    EXPECT_EQ(Count(attributed, "mark_submitted("), 1u);
+    EXPECT_EQ(Count(attributed, "AttributedGl::Submit("), 2u);
+    // Both the per-command and fallback draws retain retirement tracking.
+    Before(attributed, "glDrawElementsIndirect,", "pool.mark_submitted(bucket)");
+    EXPECT_EQ(Count(attributed, "mark_submitted("), 2u);
+    Contains(draw, "SubmitDiagnosticTerrainBucket(");
     const auto chunks = Body(Read(kPass), "void GBufferPass::geometry_pass_chunks(");
     Contains(chunks, "input.submit_terrain_chunks(frustum_planes)");
     EXPECT_EQ(chunks.find("live_terrain_mdi_unsupported"), std::string::npos);
@@ -439,20 +439,20 @@ TEST(DiagnosticAttribution, TerrainCaptureStagesOnlyAttachedDeferredDrawsAndBoun
     const auto unattached =
         Body(draw, "if (diagnostic_capture && !diagnostic_capture->deferred_attached())");
     Contains(unattached, "diagnostic_capture = nullptr");
-    Contains(draw, "std::unique_ptr<const ChunkCullEntry*[]> diagnostic_chunks;");
+    Contains(draw, "std::unique_ptr<DiagnosticTerrainDraw[]> diagnostic_chunks;");
     Before(
-        draw, "diagnostic_capture = nullptr", "std::make_unique<const ChunkCullEntry*[]>(running)");
+        draw, "diagnostic_capture = nullptr", "std::make_unique<DiagnosticTerrainDraw[]>(running)");
     Before(draw,
            "if (diagnostic_capture && running > 65536)",
-           "std::make_unique<const ChunkCullEntry*[]>(running)");
+           "std::make_unique<DiagnosticTerrainDraw[]>(running)");
     // An excessive draw count ends coverage without aborting the frame.
     const auto excess = Body(draw, "if (diagnostic_capture && running > 65536)");
     Before(excess, "unsupported(\"terrain_identity_draw_limit\")", "diagnostic_capture = nullptr;");
     EXPECT_EQ(excess.find("throw"), std::string::npos);
-    EXPECT_EQ(Count(draw, "std::make_unique<const ChunkCullEntry*[]>(running)"), 1u);
-    Contains(draw, "if (diagnostic_capture) {\n            diagnostic_chunks[dst] = chunk;");
+    EXPECT_EQ(Count(draw, "std::make_unique<DiagnosticTerrainDraw[]>(running)"), 1u);
+    Contains(draw, "if (diagnostic_capture) {\n            diagnostic_chunks[dst] =");
     // Only the diagnostic branch expands a bucket into individual commands.
-    Contains(draw, "if (diagnostic_capture) {\n            // Submit each original indirect");
+    Contains(draw, "if (diagnostic_chunks) {\n            SubmitDiagnosticTerrainBucket(");
     // Undiagnosed draws, including the rest of a bucket after a refusal, share one multi-draw.
     Contains(draw,
              "if (mdi_first < first + count) {\n            "
@@ -460,10 +460,12 @@ TEST(DiagnosticAttribution, TerrainCaptureStagesOnlyAttachedDeferredDrawsAndBoun
              "                glMultiDrawElementsIndirect,");
     Contains(draw, "mdi_first * sizeof(DrawElementsIndirectCommand)");
     Contains(draw, "static_cast<GLsizei>(first + count - mdi_first)");
-    Contains(draw, "++draw, mdi_first = draw)");
+    Contains(Body(Read("src/luminumbra_client/rendering/RenderPipeline.cpp"),
+                  "void SubmitDiagnosticTerrainBucket("),
+             "++draw, mdi_first = draw)");
     Contains(draw, "static_cast<GLsizei>(sizeof(DrawElementsIndirectCommand))");
     EXPECT_EQ(Count(draw, "glMultiDrawElementsIndirect,"), 1u);
-    EXPECT_EQ(Count(draw, "write_current("), 1u);
+    EXPECT_EQ(Count(draw, "write_current("), 0u);
     EXPECT_EQ(draw.find("glGet"), std::string::npos);
     EXPECT_EQ(draw.find("glProgramUniform"), std::string::npos);
 }
@@ -797,6 +799,7 @@ protected:
         EXPECT_EQ(glGetError(), GL_NO_ERROR);
     }
     void ExpectInvalidMetadata(bool excessive_path);
+    void ExpectTerrainBuckets(int refused_lod);
     // Context is destroyed last, after cached meshes and shaders release their GL objects.
     AttributionContext gl_;
     RenderResourceRegistry resources_;
@@ -813,6 +816,217 @@ protected:
     GLuint entry_vao_ = 0;
     std::array<GLuint, 2> entry_fbos_{};
 };
+
+// Two independent pool blocks exercise bucket changes without filling a large
+// block merely to force growth. Each has two resident allocations; commands and
+// origins share one buffer just as in RenderPipeline.
+class TerrainBucketGeometry {
+public:
+    ~TerrainBucketGeometry() {
+        glBindVertexArray(0);
+        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
+        glDeleteBuffers(2, buffers_.data());
+        for (auto& pool : pools) {
+            pool.destroy();
+        }
+    }
+    TerrainBucketGeometry() = default;
+    TerrainBucketGeometry(const TerrainBucketGeometry&) = delete;
+    TerrainBucketGeometry& operator=(const TerrainBucketGeometry&) = delete;
+    bool initialize() {
+        struct Command {
+            GLuint count, instance_count, first_index, base_vertex, base_instance;
+        };
+        static_assert(sizeof(Command) == 5 * sizeof(GLuint));
+        stride = sizeof(Command);
+        // Slot zero is deliberately unused; command offsets must remain absolute.
+        std::array<Command, 5> commands{};
+        const std::array<GLuint, 4> origin_slots{3, 1, 4, 2};
+        std::array<glm::vec4, 5> origins{};
+        const std::array<Luminumbra::VoxelVertex, 3> vertices{{{{-0.2f, -0.6f, 0.5f}, {0, 0, 1}, 1},
+                                                               {{0.2f, -0.6f, 0.5f}, {0, 0, 1}, 1},
+                                                               {{0.0f, 0.6f, 0.5f}, {0, 0, 1}, 1}}};
+        const std::array<Luminumbra::u32, 3> indices{0, 1, 2};
+        for (std::size_t draw = 0; draw < 4; ++draw) {
+            auto& pool = pools[draw / 2];
+            const auto handle = pool.allocate(vertices.data(), 3, indices.data(), 3, "terrain");
+            if (handle == ChunkGeometryPool::kInvalid) {
+                return false;
+            }
+            const auto& allocation = pool.allocation(handle);
+            commands[draw + 1] = {allocation.index_count,
+                                  1,
+                                  allocation.index_offset,
+                                  allocation.vertex_offset,
+                                  origin_slots[draw]};
+            origins[origin_slots[draw]] = {static_cast<float>(draw) * 0.5f - 0.75f, 0, 0, 0};
+        }
+        glGenBuffers(2, buffers_.data());
+        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, buffers_[0]);
+        glBufferData(GL_DRAW_INDIRECT_BUFFER, sizeof(commands), commands.data(), GL_STATIC_DRAW);
+        glBindBuffer(GL_ARRAY_BUFFER, buffers_[1]);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(origins), origins.data(), GL_STATIC_DRAW);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        return true;
+    }
+    void bind(std::size_t bucket) const {
+        glBindVertexArray(pools[bucket].blocks()[0].vao);
+        glBindVertexBuffer(1, buffers_[1], 0, sizeof(glm::vec4));
+        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, buffers_[0]);
+    }
+    std::array<ChunkGeometryPool, 2> pools;
+    std::size_t stride = 0;
+
+private:
+    std::array<GLuint, 2> buffers_{};
+};
+
+void DiagnosticAttributionGl::ExpectTerrainBuckets(int refused_lod) {
+    TerrainBucketGeometry geometry;
+    ASSERT_TRUE(geometry.initialize());
+    const std::array<DiagnosticTerrainDraw, 4> original{
+        {{.chunk = {7, -2, 3}, .lod = 0, .mesh_version = 31},
+         {.chunk = {-4, 1, 5}, .lod = 255, .mesh_version = 17},
+         {.chunk = {2, 0, -8}, .lod = 2, .mesh_version = 9},
+         {.chunk = {1, 3, 6}, .lod = 4, .mesh_version = 23}}};
+    for (const bool ladder : {false, true}) {
+        table_.clear();
+        auto draws = original;
+        const bool refusal = refused_lod < 0 || refused_lod > 255;
+        if (refusal) {
+            draws[1].lod = refused_lod;
+        }
+        GBufferDiagnosticCapture capture(targets_, table_);
+        ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+        auto* shader = capture.variant(pass_.geometry_shader().get(), ladder);
+        ASSERT_NE(shader, nullptr);
+        ASSERT_NE(shader, pass_.geometry_shader().get());
+        ASSERT_TRUE(shader->IsValid());
+        shader->use();
+        shader->setMat4("view", glm::mat4(1));
+        shader->setMat4("projection", glm::mat4(1));
+        shader->setMat3("u_normalViewMatrix", glm::mat3(1));
+        shader->setInt("u_useInstanceOrigin", 1);
+        shader->setInt("u_forceFlat", 1);
+        shader->setInt("u_materialLUT", 0);
+        shader->setInt("u_terrainTextures", 1);
+        shader->setInt("u_terrainNormals", 2);
+        shader->setInt("u_terrainRoughness", 3);
+        shader->setInt("u_skinnedTextures", 4);
+        glBindFramebuffer(GL_FRAMEBUFFER, pass_.gbuffer().fbo_id);
+        glViewport(0, 0, 32, 32);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_SCISSOR_TEST);
+        glDisable(GL_BLEND);
+        glDisable(GL_CLIP_DISTANCE0);
+        glClear(GL_COLOR_BUFFER_BIT);
+        auto* active = &capture;
+        // An empty bucket consumes no commands, records or retirement state.
+        geometry.bind(0);
+        const bool was_submitted = geometry.pools[0].blocks()[0].submitted;
+        SubmitDiagnosticTerrainBucket(active, {}, 1, geometry.stride, ladder, geometry.pools[0], 0);
+        EXPECT_EQ(geometry.pools[0].blocks()[0].submitted, was_submitted);
+        EXPECT_EQ(table_.resolve(1), nullptr);
+        for (std::size_t bucket = 0; bucket < 2; ++bucket) {
+            geometry.bind(bucket);
+            SubmitDiagnosticTerrainBucket(
+                active,
+                std::span<const DiagnosticTerrainDraw>(draws).subspan(bucket * 2, 2),
+                bucket * 2 + 1,
+                geometry.stride,
+                ladder,
+                geometry.pools[bucket],
+                0);
+            EXPECT_TRUE(geometry.pools[bucket].blocks()[0].submitted);
+        }
+        EXPECT_EQ(active == nullptr, refusal);
+        // The position plane proves fallback geometry actually rasterized. Zero
+        // IDs alone could otherwise pass if a command was accidentally dropped.
+        std::array<DiagnosticId, 32 * 32> ids{};
+        std::array<std::array<float, 3>, 32 * 32> positions{};
+        glReadBuffer(GL_COLOR_ATTACHMENT6);
+        glReadPixels(0, 0, 32, 32, GL_RGBA_INTEGER, GL_UNSIGNED_INT, ids.data());
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glReadPixels(0, 0, 32, 32, GL_RGB, GL_FLOAT, positions.data());
+        const auto document = nlohmann::json::parse(table_.json());
+        std::array<unsigned, 4> covered{};
+        for (std::size_t pixel = 0; pixel < ids.size(); ++pixel) {
+            if (positions[pixel][2] != 0.5f) {
+                EXPECT_EQ(ids[pixel], DiagnosticId{});
+                continue;
+            }
+            const auto draw = (pixel % 32) / 8;
+            ++covered[draw];
+            if (refusal && draw != 0) {
+                EXPECT_EQ(ids[pixel], DiagnosticId{});
+                continue;
+            }
+            const auto* resolved = table_.resolve(static_cast<std::uint32_t>(draw + 1));
+            ASSERT_NE(resolved, nullptr);
+            EXPECT_EQ(ids[pixel], *resolved);
+            EXPECT_EQ(ids[pixel][0], draw + 1);
+            EXPECT_EQ(ids[pixel][2], static_cast<std::uint32_t>(original[draw].lod));
+            EXPECT_EQ(document["draws"][draw]["chunk"], original[draw].chunk);
+            EXPECT_EQ(document["draws"][draw]["lod"], original[draw].lod);
+            EXPECT_EQ(document["draws"][draw]["shader_variant"],
+                      ladder ? "terrain_mdi_ladder" : "terrain_mdi");
+            const auto& chunk = original[draw].chunk;
+            const auto key = "terrain/" + std::to_string(chunk[0]) + "/" +
+                             std::to_string(chunk[1]) + "/" + std::to_string(chunk[2]) +
+                             "/version/" + std::to_string(original[draw].mesh_version);
+            EXPECT_EQ(document["meshes"][ids[pixel][1] - 1]["generated"], key);
+        }
+        for (const auto pixels : covered) {
+            EXPECT_GT(pixels, 0u);
+        }
+        capture.detach();
+        EXPECT_EQ(capture.complete(), !refusal);
+        EXPECT_EQ(capture.attachment_failed(), refusal);
+        EXPECT_EQ(table_.complete_coverage(), !refusal);
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    }
+}
+
+TEST_F(DiagnosticAttributionGl, TerrainIndirectIdentitiesFollowPoolBucketOrder) {
+    ExpectTerrainBuckets(0);
+}
+
+TEST_F(DiagnosticAttributionGl, TerrainRefusedLodClearsIdentityForRemainingBuckets) {
+    for (const int lod :
+         {-1, 256, std::numeric_limits<int>::min(), std::numeric_limits<int>::max()}) {
+        SCOPED_TRACE(lod);
+        ASSERT_NO_FATAL_FAILURE(ExpectTerrainBuckets(lod));
+    }
+}
+
+TEST_F(DiagnosticAttributionGl, ClearIdentityOnlyChangesTheBoundCaptureVariant) {
+    GBufferDiagnosticCapture capture(targets_, table_);
+    capture.clear_current_identity(); // Unattached is also a no-op.
+    ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+    auto* shader = capture.variant(pass_.geometry_shader().get(), false);
+    ASSERT_NE(shader, nullptr);
+    ASSERT_NE(shader, pass_.geometry_shader().get());
+    shader->use();
+    capture.write_current(Submission());
+    const auto location = glGetUniformLocation(shader->Id(), "u_diagnosticIds");
+    ASSERT_GE(location, 0);
+    DiagnosticId before{};
+    glGetUniformuiv(shader->Id(), location, before.data());
+    ASSERT_NE(before, DiagnosticId{});
+    pass_.geometry_shader()->use();
+    capture.clear_current_identity();
+    glUseProgram(0);
+    capture.clear_current_identity();
+    DiagnosticId after{};
+    glGetUniformuiv(shader->Id(), location, after.data());
+    EXPECT_EQ(after, before);
+    shader->use();
+    capture.clear_current_identity();
+    glGetUniformuiv(shader->Id(), location, after.data());
+    EXPECT_EQ(after, DiagnosticId{});
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
 
 // Model a driver link refusal through GLAD, forwarding all other real GL work.
 class ImpostorLinkRefusal {

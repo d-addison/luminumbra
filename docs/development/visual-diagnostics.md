@@ -85,15 +85,17 @@ refuse, retaining retirement fencing on partial failure.
 Generated keys include chunk coordinates and the resident mesh version. Resident
 LOD is snapshotted inside mesh-version validation and committed with refinement
 metadata only after a successful upload, so retained stale geometry keeps its
-previous identity metadata. Diagnostic staging is capped at 65,536 pointers
-(512 KiB on 64-bit hosts); excessive draw counts or resident LOD outside 0–255
+previous identity metadata. Diagnostic staging is capped at 65,536 resident
+identity records; excessive draw counts or resident LOD outside 0–255
 record unsupported coverage and end the capture's terrain coverage; the
-remaining draws still render through the ordinary multi-draw, so the frame
-completes. Empty submissions add no
+remaining draws render with zero identity through the ordinary multi-draw, so
+the frame completes. Empty submissions add no
 records. Unattached scopes and shadow rendering retain the original batched
 submission. With diagnostics off, there is no diagnostic staging allocation, GL
-state query or identity uniform write. Registered terrain source contracts cover
-these paths; native execution remains pending.
+state query or identity uniform write. Registered terrain source contracts and
+hidden-context GL regressions cover command/identity alignment across buckets,
+resident LOD boundaries and zero identities after refusal in both shader variants;
+native execution remains pending.
 
 The contributor API can attach a distinct forward target after deferred detachment.
 It leases the selected storage through the same rollback and release path, preserves

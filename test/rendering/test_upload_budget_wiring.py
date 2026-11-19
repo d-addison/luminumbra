@@ -1800,6 +1800,30 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertLess(allocation.index("block_index == kInvalid)\n            return kInvalid"),
                         allocation.index("std::memcpy("))
 
+    def test_terrain_diagnostic_refusal_clears_before_batched_fallback(self):
+        attributed = body(self.pipeline, "void SubmitDiagnosticTerrainBucket(")
+        refusal = compact(body(attributed, "if (resident.lod < 0 || resident.lod > 255)"))
+        self.assertLess(refusal.index('unsupported("terrain_resident_lod_unavailable")'),
+                        refusal.index("capture->clear_current_identity();"))
+        self.assertLess(refusal.index("capture->clear_current_identity();"),
+                        refusal.index("capture = nullptr;"))
+        self.assertEqual(attributed.count("break;"), 1)
+        draw = body(self.pipeline, "void RenderPipeline::draw_chunks_mdi(")
+        excess = compact(body(draw, "if (diagnostic_capture && running > 65536)"))
+        self.assertLess(excess.index("clear_current_identity();"),
+                        excess.index("diagnostic_capture = nullptr;"))
+        staged = body(draw, "if (diagnostic_chunks)")
+        self.assertIn("SubmitDiagnosticTerrainBucket(", staged)
+        self.assertIn("continue;", staged)
+
+    def test_terrain_diagnostic_identity_precedes_each_indirect_command(self):
+        attributed = body(self.pipeline, "void SubmitDiagnosticTerrainBucket(")
+        loop = compact(body(attributed, "for (std::size_t draw = first;"))
+        self.assertLess(loop.index("capture->write_current("),
+                        loop.index("AttributedGl::Submit( glDrawElementsIndirect,"))
+        self.assertIn(".lod = static_cast<std::uint32_t>(resident.lod)", loop)
+        self.assertIn("const auto& resident = draws[draw - first]", loop)
+
     def test_terrain_retirement_covers_every_submission_and_never_overwrites(self):
         pool = read(RENDERING / "passes/ChunkGeometryPool.cpp")
         pool_header = read(RENDERING / "passes/ChunkGeometryPool.h")
@@ -1844,16 +1868,20 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("glDeleteSync(retired.completion)", destroy)
         self.assertIn("m_storage_bytes = 0", destroy)
         draw = body(self.pipeline, "void RenderPipeline::draw_chunks_mdi(")
-        diagnostic = compact(body(draw, "for (std::size_t draw = first;"))
+        attributed = body(self.pipeline, "void SubmitDiagnosticTerrainBucket(")
+        diagnostic = compact(body(attributed, "for (std::size_t draw = first;"))
         self.assertLess(diagnostic.index("AttributedGl::Submit( glDrawElementsIndirect,"),
-                        diagnostic.index("m_chunk_geometry_pool.mark_submitted("))
+                        diagnostic.index("pool.mark_submitted("))
         # Undiagnosed draws, and the rest of a bucket after a diagnostic refusal, share one multi-draw.
-        batched = compact(draw[draw.index("if (mdi_first < first + count) {", draw.index("glDrawElementsIndirect,")):])
+        batched = compact(body(attributed, "if (mdi_first < first + count)"))
         self.assertLess(batched.index("AttributedGl::Submit( glMultiDrawElementsIndirect,"),
-                        batched.index("m_chunk_geometry_pool.mark_submitted("))
-        self.assertEqual(diagnostic.count("m_chunk_geometry_pool.mark_submitted("), 1)
-        self.assertEqual(batched.count("m_chunk_geometry_pool.mark_submitted("), 1)
-        self.assertEqual(compact(self.pipeline).count("AttributedGl::Submit( glMultiDrawElementsIndirect,"), 1)
+                        batched.index("pool.mark_submitted("))
+        self.assertEqual(diagnostic.count("pool.mark_submitted("), 1)
+        self.assertEqual(batched.count("pool.mark_submitted("), 1)
+        self.assertEqual(compact(self.pipeline).count("AttributedGl::Submit( glMultiDrawElementsIndirect,"), 2)
+        shipping = compact(body(draw, "if (mdi_first < first + count)"))
+        self.assertLess(shipping.index("glMultiDrawElementsIndirect,"),
+                        shipping.index("m_chunk_geometry_pool.mark_submitted("))
         probe = read(ROOT / "test/rendering/render_smoke_test.cpp")
         self.assertIn("glMultiDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_INT, nullptr, 1, 0);\n"
                       "        pool_.mark_submitted(allocation.block_index);", probe)

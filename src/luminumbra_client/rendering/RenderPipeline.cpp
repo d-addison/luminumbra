@@ -2060,6 +2060,62 @@ void RenderPipeline::ensure_mdi_capacity(MdiFrameBuffers& frame, std::size_t com
     frame.command_capacity = new_capacity;
 }
 
+void SubmitDiagnosticTerrainBucket(GBufferDiagnosticCapture*& capture,
+                                   std::span<const DiagnosticTerrainDraw> draws,
+                                   std::size_t first,
+                                   std::size_t command_stride,
+                                   bool ladder,
+                                   ChunkGeometryPool& pool,
+                                   u32 bucket) {
+    const std::size_t count = draws.size();
+    std::size_t mdi_first = first;
+    if (capture) {
+        // Submit each original indirect command once, preserving its index,
+        // base vertex and base instance, in the same pool-bucket order.
+        for (std::size_t draw = first; draw < first + count; ++draw, mdi_first = draw) {
+            const auto& resident = draws[draw - first];
+            if (resident.lod < 0 || resident.lod > 255) {
+                // Coverage ends (the capture is marked failed); the remaining
+                // draws of this and later buckets render without identities.
+                capture->unsupported("terrain_resident_lod_unavailable");
+                capture->clear_current_identity();
+                capture = nullptr;
+                break;
+            }
+            const std::string mesh_key = "terrain/" + std::to_string(resident.chunk[0]) + "/" +
+                                         std::to_string(resident.chunk[1]) + "/" +
+                                         std::to_string(resident.chunk[2]) + "/version/" +
+                                         std::to_string(resident.mesh_version);
+            capture->write_current(
+                {.mesh_path = {},
+                 .shader_variant = ladder ? "terrain_mdi_ladder" : "terrain_mdi",
+                 .chunk = {resident.chunk[0], resident.chunk[1], resident.chunk[2]},
+                 .lod = static_cast<std::uint32_t>(resident.lod),
+                 .ownership = DiagnosticOwnership::Live,
+                 .pass = DiagnosticPass::GBuffer,
+                 .provenance = DiagnosticProvenance::Unknown,
+                 .generated_mesh = mesh_key});
+            Luminumbra::Rendering::AttributedGl::Submit(
+                glDrawElementsIndirect,
+                GLenum{GL_TRIANGLES},
+                GLenum{GL_UNSIGNED_INT},
+                reinterpret_cast<const void*>(draw * command_stride));
+            // A later identity may refuse; retirement must cover draws already consumed.
+            pool.mark_submitted(bucket);
+        }
+    }
+    if (mdi_first < first + count) {
+        Luminumbra::Rendering::AttributedGl::Submit(
+            glMultiDrawElementsIndirect,
+            GLenum{GL_TRIANGLES},
+            GLenum{GL_UNSIGNED_INT},
+            reinterpret_cast<const void*>(mdi_first * command_stride),
+            static_cast<GLsizei>(first + count - mdi_first),
+            static_cast<GLsizei>(command_stride));
+        pool.mark_submitted(bucket);
+    }
+}
+
 void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& visible_chunks,
                                      std::size_t& out_draws,
                                      std::size_t& out_indices) {
@@ -2100,17 +2156,18 @@ void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& v
     if (diagnostic_capture && !diagnostic_capture->deferred_attached()) {
         diagnostic_capture = nullptr; // The shared shadow submitter has no identity attachment.
     }
-    // Capture staging is bounded by the registry's 65,536 draws (512 KiB of
-    // pointers on 64-bit hosts). Normal rendering allocates no diagnostic staging.
+    // Capture staging is bounded by the registry's 65,536 resident records.
+    // Normal rendering allocates no diagnostic staging.
     // A null array owner also avoids debug iterator-proxy allocation while disabled.
-    std::unique_ptr<const ChunkCullEntry*[]> diagnostic_chunks;
+    std::unique_ptr<DiagnosticTerrainDraw[]> diagnostic_chunks;
     if (diagnostic_capture && running > 65536) {
         // Coverage ends here; the frame still renders through ordinary MDI.
         diagnostic_capture->unsupported("terrain_identity_draw_limit");
+        diagnostic_capture->clear_current_identity();
         diagnostic_capture = nullptr;
     }
     if (diagnostic_capture) {
-        diagnostic_chunks = std::make_unique<const ChunkCullEntry*[]>(running);
+        diagnostic_chunks = std::make_unique<DiagnosticTerrainDraw[]>(running);
     }
     m_mdi_command_scratch.resize(running);
     m_mdi_origin_scratch.resize(running);
@@ -2133,7 +2190,9 @@ void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& v
         cmd.baseVertex = a.vertex_offset;
         cmd.baseInstance = static_cast<GLuint>(dst); // origins[baseInstance]
         if (diagnostic_capture) {
-            diagnostic_chunks[dst] = chunk;
+            diagnostic_chunks[dst] = {.chunk = {chunk->coords.x, chunk->coords.y, chunk->coords.z},
+                                      .lod = rd.diagnostic_lod,
+                                      .mesh_version = rd.mesh_version};
         }
 
         const glm::ivec3 cc = chunk->coords;
@@ -2178,45 +2237,18 @@ void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& v
         PreserveReplayObject(ReplayObjectKind::VertexArray, blocks[b].vao);
         glBindVertexBuffer(1, frame.origin_buffer, 0, sizeof(glm::vec4));
         glBindBuffer(GL_DRAW_INDIRECT_BUFFER, frame.indirect_buffer);
+        if (diagnostic_chunks) {
+            SubmitDiagnosticTerrainBucket(diagnostic_capture,
+                                          {diagnostic_chunks.get() + first, count},
+                                          first,
+                                          sizeof(DrawElementsIndirectCommand),
+                                          m_frame_far_selection.effective == FarWorldMode::Ladder,
+                                          m_chunk_geometry_pool,
+                                          static_cast<u32>(b));
+            continue;
+        }
         // Draws from mdi_first onward go through one ordinary multi-draw.
         std::size_t mdi_first = first;
-        if (diagnostic_capture) {
-            // Submit each original indirect command once, preserving its index,
-            // base vertex and base instance, in the same pool-bucket order.
-            for (std::size_t draw = first; draw < first + count; ++draw, mdi_first = draw) {
-                const auto& chunk = *diagnostic_chunks[draw];
-                const auto& resident = m_chunk_render_data.at(chunk.id);
-                if (resident.diagnostic_lod < 0 || resident.diagnostic_lod > 255) {
-                    // Coverage ends (the capture is marked failed); the remaining
-                    // draws of this and later buckets render without identities.
-                    diagnostic_capture->unsupported("terrain_resident_lod_unavailable");
-                    diagnostic_capture = nullptr;
-                    break;
-                }
-                const std::string mesh_key = "terrain/" + std::to_string(chunk.coords.x) + "/" +
-                                             std::to_string(chunk.coords.y) + "/" +
-                                             std::to_string(chunk.coords.z) + "/version/" +
-                                             std::to_string(resident.mesh_version);
-                diagnostic_capture->write_current(
-                    {.mesh_path = {},
-                     .shader_variant = m_frame_far_selection.effective == FarWorldMode::Ladder
-                                           ? "terrain_mdi_ladder"
-                                           : "terrain_mdi",
-                     .chunk = {chunk.coords.x, chunk.coords.y, chunk.coords.z},
-                     .lod = static_cast<std::uint32_t>(resident.diagnostic_lod),
-                     .ownership = DiagnosticOwnership::Live,
-                     .pass = DiagnosticPass::GBuffer,
-                     .provenance = DiagnosticProvenance::Unknown,
-                     .generated_mesh = mesh_key});
-                Luminumbra::Rendering::AttributedGl::Submit(
-                    glDrawElementsIndirect,
-                    GLenum{GL_TRIANGLES},
-                    GLenum{GL_UNSIGNED_INT},
-                    reinterpret_cast<const void*>(draw * sizeof(DrawElementsIndirectCommand)));
-                // A later identity may refuse; retirement must cover draws already consumed.
-                m_chunk_geometry_pool.mark_submitted(static_cast<u32>(b));
-            }
-        }
         if (mdi_first < first + count) {
             Luminumbra::Rendering::AttributedGl::Submit(
                 glMultiDrawElementsIndirect,
