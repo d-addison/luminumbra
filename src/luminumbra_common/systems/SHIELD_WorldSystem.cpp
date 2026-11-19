@@ -649,9 +649,6 @@ bool HasRenderableGeometry(const Chunk& chunk) {
 void ClearPublishedWaterMesh(const SHIELD_WorldSystem& world_system, Chunk& chunk) {
     if (!chunk.water_mesh_vertices.empty() || !chunk.water_mesh_indices.empty()) {
         world_system.notify_renderable_chunks_changed();
-        // Publish the empty replacement: upload discovery keys on this version, and a
-        // terrain-renderable owner would otherwise keep drawing its old water.
-        chunk.water_mesh_version.fetch_add(1);
     }
     chunk.water_mesh_vertices.clear();
     chunk.water_mesh_indices.clear();
@@ -667,8 +664,16 @@ void ClearUnavailableWaterMesh(const SHIELD_WorldSystem& world_system,
     }
     // The last source can disappear while a remote owner still holds geometry
     // or a pending snapshot. Retain terrain readiness when rejecting that water.
-    ClearPublishedWaterMesh(world_system, *resident->second);
-    ++resident->second->water_mesh_owner_version;
+    Chunk& owner = *resident->second;
+    const bool had_geometry =
+        !owner.water_mesh_vertices.empty() || !owner.water_mesh_indices.empty();
+    ClearPublishedWaterMesh(world_system, owner);
+    if (had_geometry) {
+        // Publish the empty replacement: upload discovery keys on this version, and a
+        // terrain-renderable owner would otherwise keep drawing its old water.
+        owner.water_mesh_version.fetch_add(1);
+    }
+    ++owner.water_mesh_owner_version;
 }
 
 bool replace_chunk_collision(PhysicsSystem& physics_system, Luminumbra::Chunk& chunk) {
@@ -6909,10 +6914,12 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
         if (current_owner && chunk->current_lod.load(std::memory_order_acquire) < 0) {
             m_last_pass_drained = false;
         }
-        const bool published =
-            mesh_ready && !mesh_failed && current_owner &&
-            ((job_chunk.terrain_mesh_required && terrain_current) ||
-             (water_current && (!job_chunk.terrain_mesh_required || terrain_current)));
+        // A changed water owner already published its empty replacement and
+        // advanced the version; the rejected water-only job is still settled.
+        const bool published = mesh_ready && !mesh_failed && current_owner &&
+                               ((job_chunk.terrain_mesh_required && terrain_current) ||
+                                ((water_current || !water_owner_current) &&
+                                 (!job_chunk.terrain_mesh_required || terrain_current)));
         if (published || HasRenderableGeometry(*chunk)) {
             set_renderable_chunk_state(*chunk, Luminumbra::ChunkState::Ready);
         } else {
