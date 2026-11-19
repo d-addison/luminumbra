@@ -7391,11 +7391,31 @@ void SHIELD_WorldSystem::note_persistence_outcome(bool ok) {
 }
 
 std::shared_ptr<Chunk> SHIELD_WorldSystem::resolve_water_column(const IVec3& coords) {
+    // Validate identity without inspecting residency or committed payloads.
+    if (coords.y != 0 || coords.x < Chunk::kPackedMinXz || coords.x > Chunk::kPackedMaxXz ||
+        coords.z < Chunk::kPackedMinXz || coords.z > Chunk::kPackedMaxXz) {
+        throw std::invalid_argument("Regional water column identity refused");
+    }
+    const auto id = Chunk::calculate_id(coords);
+    const bool previously_reserved = m_water_column_reservations.contains(id);
+    const std::array ids{id};
+    if (!reserve_water_columns(ids)) {
+        return nullptr;
+    }
+    struct ReservationRollback {
+        std::set<ChunkID>& reservations;
+        ChunkID id;
+        bool keep;
+        ~ReservationRollback() {
+            if (!keep) {
+                reservations.erase(id);
+            }
+        }
+    } reservation{m_water_column_reservations, id, previously_reserved};
     auto chunk = inspect_water_column(coords);
     if (m_durable_read_failed) {
         throw std::invalid_argument("Regional water committed column unavailable");
     }
-    const auto id = Chunk::calculate_id(coords);
     const auto live = m_streaming_state.chunks.find(id);
     const auto parked = m_parked.find(id);
     const auto cached = live != m_streaming_state.chunks.end() ? live->second
@@ -7418,21 +7438,6 @@ std::shared_ptr<Chunk> SHIELD_WorldSystem::resolve_water_column(const IVec3& coo
          chunk->is_water_state_dirty() || chunk->water_revision() != 0)) {
         throw std::invalid_argument("Regional water column requires legacy migration");
     }
-    const bool previously_reserved = m_water_column_reservations.contains(id);
-    const std::array ids{id};
-    if (!reserve_water_columns(ids)) {
-        return nullptr;
-    }
-    struct ReservationRollback {
-        std::set<ChunkID>& reservations;
-        ChunkID id;
-        bool keep;
-        ~ReservationRollback() {
-            if (!keep) {
-                reservations.erase(id);
-            }
-        }
-    } reservation{m_water_column_reservations, id, previously_reserved};
     // Revalidate claimed state, but never replace a handle already admitted to
     // the executor, even before its first simulation step publishes authority.
     if (chunk && chunk == cached &&
