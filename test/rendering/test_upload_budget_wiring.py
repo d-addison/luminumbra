@@ -67,9 +67,15 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn('cp.terrainAnchored = bp.starts_with("procgen://rock_") || '
                       'bp.starts_with("procgen://bush_");', cache)
         draw = compact(body(source, "void GBufferPass::geometry_pass_static_meshes("))
-        guard = "if (cp.terrainAnchored && ctx.world_system && TerrainRemovesAnchor(*ctx.world_system, cp.position)) { continue; }"
-        self.assertIn(guard, draw)
-        self.assertLess(draw.index("if (culled)"), draw.index(guard))
+        self.assertIn("cp.anchorSlot = slot->second;", cache)
+        # Each anchor chunk resolves once per frame; edited support drops the prop.
+        lookup = "if (cp.anchorSlot < m_anchorChunks.size() && ctx.world_system) {"
+        resolve = "auto chunk = ctx.world_system->find_streamed_chunk(slot.coords); if (chunk && chunk->has_terrain_authority()) {"
+        guard = "if (slot.chunk && EditedTerrainRemovesAnchor(slot.chunk.get(), cp.position)) { continue; }"
+        for needle in (lookup, "if (!slot.resolved) { slot.resolved = true;", resolve, guard):
+            self.assertIn(needle, draw)
+        self.assertLess(draw.index("if (culled)"), draw.index(lookup))
+        self.assertLess(draw.index(lookup), draw.index(guard))
         self.assertLess(draw.index(guard), draw.index("batch.mats.push_back(cp.model)"))
         support = compact(read(RENDERING / "TerrainAnchor.h"))
         for check in ("!chunk->has_terrain_authority()", "chunk->sdf_data.size() != volume",
