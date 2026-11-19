@@ -480,6 +480,8 @@ add_executable(diagnostic_bundle_test
     ../src/luminumbra_client/rendering/TemporalAudit.cpp)
 target_include_directories(diagnostic_bundle_test PRIVATE ../src ../src/luminumbra_client)
 target_link_libraries(diagnostic_bundle_test PRIVATE gtest_main luminumbra_common nlohmann_json glm)
+# Bundle tests may read checked-in sources relative to the checkout.
+target_compile_definitions(diagnostic_bundle_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
 luminumbra_configure_first_party_target(diagnostic_bundle_test)
 
 #  far-field impostors: the hemi-octahedral view<->tile mapping math (GL-free,
