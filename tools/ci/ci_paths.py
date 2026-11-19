@@ -16,6 +16,7 @@ PYTHON_TESTS = (
     "tools/gates/test_shader_scenes.py",
     "tools/test_frozen_terrain_presets.py",
     "test/tools/test_regenerate_region_fixtures.py",
+    "tools/gates/test_diagnostic_capture.py",
 
     "tools/ci/test_compile_shaders.py",
     "tools/ci/test_ui_layout_contract.py",
@@ -92,6 +93,7 @@ PYTHON_MODULES = {
     "tools/gates/shader-scenes.py",
     "tools/gates/visual_lint.py",
     "tools/regenerate_region_fixtures.py",
+    "tools/gates/check-diagnostic-capture.py",
 
     "tools/ci/compile_shaders.py",
     "tools/ci/rmlui_source.py",
@@ -171,6 +173,7 @@ CI_ENTRYPOINTS = (
     set(PYTHON_TESTS)
     | {command[0] for command in PYTHON_SELF_CHECKS.values()}
     | {
+        "tools/gates/check-diagnostic-capture.py",
         "tools/assets/acquire.py", "tools/blender/authoring/probes/run.py",
         "tools/gates/shader-scenes.py",
         "tools/check_runtime_data_manifest.py", "tools/check_sdf_contract_doc.py",
