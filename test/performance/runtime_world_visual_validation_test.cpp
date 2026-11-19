@@ -1257,7 +1257,7 @@ TEST_F(NetworkedSessionDriverPreparationTest, PreparationRecoveryAdvancesAgreedT
         ExpectRetry(0);
     }
     ResumePreparation();
-    for (std::uint64_t tick = 1; tick <= config.budget_ticks; ++tick) {
+    for (std::uint64_t tick = 1; tick < config.budget_ticks; ++tick) {
         SCOPED_TRACE(tick);
         ASSERT_TRUE(driver.StepAgreedTick()) << driver.failure_reason();
         EXPECT_EQ(driver.agreed_ticks(), tick);
@@ -1265,9 +1265,15 @@ TEST_F(NetworkedSessionDriverPreparationTest, PreparationRecoveryAdvancesAgreedT
         EXPECT_FALSE(driver.desynced());
         EXPECT_TRUE(driver.failure_reason().empty());
     }
+    // The pump that agrees the final budgeted tick also finishes both peers, so
+    // that step reports termination; the retries spent did not shorten the run.
     EXPECT_FALSE(driver.StepAgreedTick());
     EXPECT_TRUE(driver.finished());
+    EXPECT_FALSE(driver.desynced());
     EXPECT_TRUE(driver.failure_reason().empty());
+    EXPECT_EQ(driver.agreed_ticks(), config.budget_ticks);
+    EXPECT_EQ(client.GetSimulationTickCount(), config.budget_ticks);
+    EXPECT_FALSE(driver.StepAgreedTick());
     EXPECT_EQ(driver.agreed_ticks(), config.budget_ticks);
 }
 
