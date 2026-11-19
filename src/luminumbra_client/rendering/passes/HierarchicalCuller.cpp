@@ -16,6 +16,9 @@ void RenderPipeline::HierarchicalCuller::BuildHierarchy(
     std::vector<ChunkCullEntry> chunk_refs;
     chunk_refs.reserve(chunks.size());
     for (const auto& chunk : chunks) {
+        if (!chunk.has_terrain_mesh()) {
+            continue;
+        }
         glm::vec3 chunk_min(static_cast<float>(chunk.coords.x * CHUNK_SIZE_X),
                             static_cast<float>(chunk.coords.y * CHUNK_SIZE_Y),
                             static_cast<float>(chunk.coords.z * CHUNK_SIZE_Z));
@@ -23,7 +26,12 @@ void RenderPipeline::HierarchicalCuller::BuildHierarchy(
         chunk_refs.push_back(ChunkCullEntry{chunk.id, chunk.coords, AABB(chunk_min, chunk_max)});
     }
 
-    // Calculate root bounding box from all chunks
+    if (chunk_refs.empty()) {
+        m_root.reset();
+        return;
+    }
+
+    // Calculate root bounding box from terrain chunks only.
     glm::vec3 min(std::numeric_limits<float>::max());
     glm::vec3 max(std::numeric_limits<float>::lowest());
 
