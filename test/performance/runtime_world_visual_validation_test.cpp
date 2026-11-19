@@ -1,4 +1,5 @@
 #include "../fixtures/TerrainFixtureParams.h"
+#include "../support/GameSessionTestWorld.h"
 #include "../support/UniqueTempPath.h"
 #include "gtest/gtest.h"
 
@@ -469,7 +470,10 @@ void WritePpm(const fs::path& path, int width, int height, const std::vector<uns
     output << "P6\n" << width << " " << height << "\n255\n";
     for (int y = height - 1; y >= 0; --y) {
         for (int x = 0; x < width; ++x) {
-            const std::size_t pixel = (static_cast<std::size_t>(y) * width + x) * 4u;
+            const std::size_t pixel =
+                (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
+                 static_cast<std::size_t>(x)) *
+                4u;
             const unsigned char rgb[3] = {rgba[pixel], rgba[pixel + 1u], rgba[pixel + 2u]};
             output.write(reinterpret_cast<const char*>(rgb), 3);
         }
@@ -1084,6 +1088,43 @@ TEST(RuntimeWorldVisualValidationTest, JoinReadinessKeepsCollisionBudgetNearFiel
     EXPECT_EQ(horizon.collision_chunks, 81u);
     EXPECT_GE(horizon.mesh_chunks, 600u);
     EXPECT_GT(horizon.mesh_chunks, horizon.collision_chunks);
+}
+
+TEST(NetworkedSessionDriverTest, PresentationPreloadPreservesBothStartingAuthorityHashes) {
+    const TestSupport::HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    world::GameSession client;
+    client.SetJobSystem(&jobs);
+    client.SetRootPath(root.root_string());
+    client.ApplySystemConfig(
+        luminumbra::core::SystemConfig::LoadFromRuntimeRoot(root.root_string()));
+    ASSERT_TRUE(client.CreateWorld("Presentation", "424242", "default"));
+    ASSERT_TRUE(client.LoadWorldState());
+    auto* world_system = client.GetWorldSystem();
+    ASSERT_TRUE(world_system->EnsureSurfaceReadyNear(
+        client.GetMetadata().spawnPoint, client.GetPhysicsSystem(), 0, 0));
+    const auto before = TestSupport::SessionWorldHash(client);
+    ASSERT_TRUE(
+        world_system->PrepareInitialWaterPresentationNear(client.GetMetadata().spawnPoint, 0));
+    EXPECT_EQ(TestSupport::SessionWorldHash(client), before);
+    Client::ScenarioHarness::NetworkedSessionDriver::Config config;
+    config.root_path = root.root_string();
+    config.surface_radius = 0;
+    config.collision_radius = 0;
+    config.budget_ticks = 0;
+    Client::ScenarioHarness::NetworkedSessionDriver driver;
+    ASSERT_TRUE(driver.Begin(&client, config)) << driver.failure_reason();
+    EXPECT_EQ(driver.agreed_ticks(), 0u);
+    const TestSupport::ScopedTempFile artifact_file("networked-session-presentation", ".json");
+    const auto artifact_dir = artifact_file.Path().parent_path();
+    EXPECT_TRUE(driver.WriteArtifact(artifact_dir, 0.0));
+    std::ifstream input(artifact_dir / "networked-session-analysis.json");
+    ASSERT_TRUE(input.is_open());
+    nlohmann::json artifact;
+    input >> artifact;
+    EXPECT_TRUE(artifact.at("end_hashes_equal").get<bool>());
+    EXPECT_EQ(client.GetWorldClock().tick(), 0u);
 }
 
 TEST(NetworkedSessionDriverTest, MissingOrFailedSessionsCannotAdvertiseCleanDisconnect) {

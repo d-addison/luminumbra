@@ -13,8 +13,8 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | AOV serialization, integer ID encoding and point-probe JSON | Implemented as independent, GL-free codecs | `DiagnosticCapture.h/.cpp`; registered `DiagnosticCapture.*` regressions in `capture_manifest_test`; native execution pending |
 | Lazy integer target with attachment leases | Implemented as a standalone helper | `DiagnosticTargets.h`; registered `DiagnosticTargetDriver.*` regressions in `capture_manifest_test`; native execution pending |
 | Capture-local draw registry | Implemented as a standalone, GL-free helper | `DiagnosticDrawTable.h`; registered `DiagnosticDrawTable.*` regressions in `capture_manifest_test`; native execution pending |
-| Deferred attribution producers | Implemented with a scoped ID attachment | `GBufferTargets.h` and `GBufferPass.cpp` add a render-thread producer scope, capture-local draw identities and explicit unsupported records; `g_buffer.frag` and `foliage.frag` have additive `LUMIN_DIAG_IDS` outputs; registered `DiagnosticAttribution.*` source-contract and `DiagnosticAttributionGl.*` hidden-GL regressions in `render_smoke_test`; native execution pending |
-| G-buffer ID attachment | Implemented with a move-only lease | Storage is ensured before lease acquisition; attachment, incomplete-FBO rollback, recreation and teardown retain the lease until detachment and caller-state restoration. Registered `DiagnosticAttribution.*` source contracts cover ordering and unbound resize protection; `DiagnosticAttributionGl.*` hidden-GL regressions in `render_smoke_test` exercise attached writers, refusal and caller-state restoration; native execution pending |
+| Deferred attribution producers | Implemented inside a leased deferred scope | `GBufferTargets.h` and `GBufferPass.cpp` add a render-thread producer scope, capture-local draw identities and explicit unsupported records; `g_buffer.frag` and `foliage.frag` have additive `LUMIN_DIAG_IDS` outputs; registered `DiagnosticAttribution.*` source-contract and `DiagnosticAttributionGl.*` hidden-GL regressions in `render_smoke_test`; native execution pending |
+| G-buffer ID attachment | Implemented for explicit deferred captures | `GBufferPass` holds an `AttachmentLease` during deferred submission; detachment and lease release precede completion, including rollback, recreation, retirement and exceptional exits; registered `GBufferLeaseGl.*` and `DiagnosticAttributionGl.*` regressions; native execution pending |
 | Exact producer coverage | Partial | Inside an explicit producer scope, file-backed static instances and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier with unsupported generated-mesh metadata. Live terrain MDI, ladder backend, authored surfaces and tree impostors explicitly invalidate coverage; procedural static meshes also remain unsupported. Later plant/decal stages are outside the scope. Foliage has a guarded shader output but no instrumented forward submission or separate contributor plane |
 | Bundle transactions and opt-in admission | GL-free core implemented; runtime integration pending | `DiagnosticCapture.h/.cpp` resolves options, streams normalized planes, joins draw records, enforces staging budgets and publishes completion last using identity-checked ownership. `diagnostic_bundle_test` covers public transports and filesystem refusal/rollback; native execution pending. Runtime setup refuses enabled diagnostics before output until the completed-frame adapter is integrated |
 | Debug views and inspector | Planned | Extend `DebugViewPass` and developer console widgets |
@@ -55,44 +55,47 @@ The acceptance matrix records this partial state. No new runtime asset is added.
 Shader files are outside the roots classified by `public-asset-inventory.json`, so
 their guarded edits do not change that inventory.
 
-An explicitly constructed `GBufferDiagnosticCapture` accepts target storage and a
-fresh draw table; both must outlive the scope on the creating context's thread.
-Construction performs no GL work. `GBufferPass` creates an attachment scope around
-deferred submission. It checks dimensions, integer-target capabilities and the
-availability of attachment six, snapshots all draw buffers (at most 32) and the
-indexed color mask, ensures storage, then acquires a move-only `AttachmentLease`
-before attaching the ID texture. The lease protects the attachment even while the
-G-buffer is unbound, so target resize, reset and disable refuse without changing
-storage or caller bindings. Refused attachment preserves caller state and records
-explicit unsupported coverage.
+An explicitly constructed `GBufferDiagnosticCapture` accepts a fresh draw table and
+optional caller-owned `DiagnosticTargets`; both owners outlive the scope on its
+creating GL context thread. Construction alone performs no GL work. A table-only
+scope cannot attach or complete. `GBufferPass` attaches location six after the
+ordinary clear and holds a move-only `AttachmentLease` through deferred submission.
+Detachment restores all saved draw buffers and the integer color mask before
+releasing storage, including rollback, recreation, registry retirement and exception
+unwinding. Resize, reset and disable refuse while leased, even on an unbound FBO.
+Capability, extent and occupied-attachment refusals preserve caller state and record
+unsupported coverage. Scope nesting and nonempty-table reuse are refused.
 
-Incomplete-FBO rollback, normal and exceptional scope exit, capture destruction,
-and G-buffer recreation or registry deletion detach first, restore draw buffers,
-color mask and caller draw-framebuffer binding, then release the lease. Recreation
-and exceptions invalidate coverage. `complete()` requires a successful capture,
-completed detachment, a released lease and a complete draw table without refusals;
-it covers only the deferred pass, not later contributors or bundle publication.
-Capture scopes cannot nest or reuse a nonempty draw table; an empty live-terrain
-submission adds no unsupported record.
+`complete()` requires a successful attachment, subsequent detachment, lease release,
+complete deferred coverage and no sticky failure or registry refusal. Variants and
+identity writes only operate while attached. Missing or invalid base programs
+invalidate coverage, including an unavailable skinned program with an empty view.
+An isolation mask that filters the terrain or skinned layer invalidates coverage,
+whether or not the filtered layer has scene content.
+Queued tree impostors invalidate coverage before checking their program, so an
+invalid impostor program cannot bypass the unsupported record. Empty terrain and
+impostor queues add no unsupported record. Later deferred and forward contributors
+remain outside this coverage; this predicate alone cannot authorize a final bundle.
 
-Only an attached capture scope compiles diagnostic programs, capped at six deferred
+Only an attached scope compiles diagnostic programs, capped at six deferred
 vertex/ladder combinations. Default and ladder variants retain the existing alpha
-discard and depth output. The guarded integer output uses location six. With
-diagnostics disabled, removing the conditional blocks reproduces the base fragment
-shader text byte for byte; no target allocation or attachment operation runs.
+discard and depth output. The guarded integer output uses location six.
+With diagnostics disabled, removing the conditional blocks reproduces the base
+fragment shader text byte for byte.
 During collection, static instances are submitted once each using their existing
 attributes and base-instance offset, so repeated instances get separate ordered
 draw IDs without replay. Resolved mesh paths determine mesh LOD, including fallback
 to the base mesh. The existing 65,536-entry registry limit refuses excessive capture
 submissions. A failed submission sets the scope's sticky `refused()` flag without
 appending another record or throwing. Later writes upload zero IDs and stop
-registry work; `complete()` remains false. Unrepresentable static index counts
-record unsupported coverage and omit the invalid draw. Unrecordable identity paths
-record unsupported coverage while drawing the original geometry. Every pass exit
-restores caller culling, VAO and separate read/draw framebuffer bindings, including
-exceptional producer exits. Registered hidden-GL regressions cover the exact entry bound,
-repeated refusal, zero IDs, double-sided foliage and exceptional state restoration;
-native execution remains pending. Normal rendering keeps its batched draws and
+registry work; `complete()` remains false. Static metadata refusals record
+unsupported coverage. Unrepresentable index counts omit the draw; an unrecordable
+identity path preserves geometry without claiming attribution. Every pass exit
+restores caller culling, VAO and separate read/draw framebuffer bindings, including exceptional
+producer exits. Registered hidden-GL regressions cover the exact entry bound,
+repeated refusal, zero IDs, double-sided foliage, detached writers, completion only
+after lease release, unavailable base/skinned/impostor programs and exceptional
+state restoration; native execution remains pending. Normal rendering keeps its batched draws and
 original attachments.
 
 Completing exact coverage requires changes beyond the deferred attachment owners:
