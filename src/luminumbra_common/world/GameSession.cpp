@@ -2163,7 +2163,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                     // 2e-phys: TRUE-PHYSICS locomotion bridge. Creatures carrying a
                     // CreaturePhysicsComponent are driven by the deterministic Jolt avatar
                     // controller (the same one player/networked avatars use): push the brain's
-                    // wish velocity in, step the avatars once at the fixed dt (index-ordered =
+                    // wish velocity in, step the avatars once at the fixed dt (creation-ordered =
                     // deterministic same-binary, mirrors ServerWorldRunner), and read the
                     // terrain-resolved position (gravity/collision/slopes) back into the
                     // transform. Gated on a physics system + at least one physics creature, so
