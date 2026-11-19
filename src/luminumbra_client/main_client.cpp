@@ -1226,10 +1226,11 @@ ObserveWorldPresentation(const Luminumbra::Systems::SHIELD_WorldSystem& world,
     const auto coverage = world.get_camera_local_coverage_stats(position, radius);
     const auto& streaming = world.get_streaming_telemetry_stats();
     const auto& uploads = pipeline.get_last_mesh_upload_stats();
-    const auto far = pipeline.far_world_reporting_state();
-    bool horizon = far.coverage_settled;
-    if (far.selection.effective == Luminumbra::Rendering::FarWorldMode::Legacy) {
-        if (!far.selection.advance) {
+    // Not `far`: <windows.h> defines `far` (and `near`) as empty macros.
+    const auto far_world = pipeline.far_world_reporting_state();
+    bool horizon = far_world.coverage_settled;
+    if (far_world.selection.effective == Luminumbra::Rendering::FarWorldMode::Legacy) {
+        if (!far_world.selection.advance) {
             horizon = true; // Explicitly disabled optional far terrain.
         } else if (const auto* legacy = pipeline.legacy_far_compatibility()) {
             const auto& diagnostic = legacy->coverage_diagnostics();
