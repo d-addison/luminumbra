@@ -67,7 +67,7 @@ class RegionAuthorityWiring(unittest.TestCase):
         regression = function(native, "TEST(RegionalWaterAdmission, "
                               "BorderParticipantsCannotDisplaceFundedInteriorIdentities)")
         for token in ("{31, 32, 34}", "tick <= 16", "3 * kPlanningCapacity",
-                      "EXPECT_EQ(water.regional_work().visits, funding.interiors);",
+                      "EXPECT_NE(std::find(columns.begin(), columns.end(), visit), columns.end());",
                       "EXPECT_GT(Mass(*chunks.at(target)), before);",
                       "EXPECT_GT(target_steps, 0u);"):
             self.assertIn(token, regression)
