@@ -28,7 +28,6 @@
 #include <algorithm>
 #include <chrono> // CPU submit cost of the static-prop pass
 #include <cstddef>
-#include <exception>
 #include <filesystem> // existence-probe LOD variants before loading (avoid load-error spam)
 #include <limits>
 #include <string>
@@ -37,247 +36,6 @@
 #include "luminumbra_common/animation/AnimationRuntime.h"
 
 namespace Luminumbra::Rendering {
-
-GBufferDiagnosticCapture::State::State(DiagnosticTargets& target_storage,
-                                       DiagnosticDrawTable& draw_table)
-    : targets(target_storage)
-    , table(draw_table) {}
-
-GBufferDiagnosticCapture::State::~State() = default;
-
-GBufferDiagnosticCapture::GBufferDiagnosticCapture(DiagnosticTargets& targets,
-                                                   DiagnosticDrawTable& table,
-                                                   DiagnosticTargets* forward_targets) {
-    if (Current()) {
-        throw std::logic_error("Diagnostic capture scopes cannot nest");
-    }
-    if (table.resolve(1)) {
-        throw std::invalid_argument("Diagnostic capture requires a fresh draw table");
-    }
-    if (forward_targets == &targets) {
-        throw std::invalid_argument("Forward identities require distinct storage");
-    }
-    state_ = std::make_unique<State>(targets, table);
-    state_->forward_targets = forward_targets;
-    SetCurrent(this);
-}
-
-GBufferDiagnosticCapture::~GBufferDiagnosticCapture() {
-    try {
-        detach();
-    } catch (...) {
-        abort();
-    }
-    SetCurrent(nullptr);
-}
-
-void GBufferDiagnosticCapture::unsupported(std::string_view producer,
-                                           std::uint32_t lod,
-                                           DiagnosticOwnership ownership,
-                                           DiagnosticPass pass) {
-    state_->failed = true;
-    if (state_->refused) {
-        return;
-    }
-    DiagnosticId unused{};
-    if (!state_->table.submit({.mesh_path = {},
-                               .shader_variant = producer,
-                               .chunk = {},
-                               .lod = lod,
-                               .ownership = ownership,
-                               .pass = pass,
-                               .provenance = DiagnosticProvenance::Unsupported},
-                              unused)) {
-        state_->refused = true;
-    }
-}
-
-bool GBufferDiagnosticCapture::refused() const {
-    return state_->refused;
-}
-
-bool GBufferDiagnosticCapture::complete() const {
-    return state_->captured && !state_->framebuffer && !state_->failed && !state_->refused &&
-           !state_->attachment_lease && state_->table.complete_coverage();
-}
-
-void GBufferDiagnosticCapture::abort() noexcept {
-    state_->failed = true;
-}
-
-Shader* GBufferDiagnosticCapture::variant(Shader* shader,
-                                          bool ladder,
-                                          const std::vector<std::string>& feedback_varyings) {
-    if (!state_->framebuffer || !shader || !shader->IsValid()) {
-        return shader;
-    }
-    for (const auto& entry : state_->variants) {
-        if (entry.vertex == shader->VertexPath() && entry.fragment == shader->FragmentPath() &&
-            entry.ladder == ladder && entry.feedback_varyings == feedback_varyings) {
-            return entry.shader.get();
-        }
-    }
-    // At most six programs and three 64-byte feedback names per program.
-    if (state_->variants.size() == 6 || feedback_varyings.size() > 3 ||
-        std::any_of(feedback_varyings.begin(), feedback_varyings.end(), [](const auto& name) {
-            return name.size() > 64;
-        })) {
-        unsupported("diagnostic_shader_variant_limit",
-                    0,
-                    DiagnosticOwnership::Live,
-                    state_->forward ? DiagnosticPass::Forward : DiagnosticPass::GBuffer);
-        return shader;
-    }
-    std::vector<std::string> defines{"LUMIN_DIAG_IDS 1"};
-    if (ladder) {
-        defines.emplace_back("LUMINUMBRA_FAR_WORLD_LADDER 1");
-    }
-    auto diagnostic = std::make_unique<Shader>(
-        shader->VertexPath().c_str(), shader->FragmentPath().c_str(), feedback_varyings, defines);
-    const GLint identity =
-        diagnostic->IsValid() ? glGetUniformLocation(diagnostic->Id(), "u_diagnosticIds") : -1;
-    if (identity < 0) {
-        unsupported("diagnostic_shader_variant_unavailable",
-                    0,
-                    DiagnosticOwnership::Live,
-                    state_->forward ? DiagnosticPass::Forward : DiagnosticPass::GBuffer);
-        return shader;
-    }
-    state_->variants.push_back({shader->VertexPath(),
-                                shader->FragmentPath(),
-                                ladder,
-                                feedback_varyings,
-                                std::move(diagnostic),
-                                identity});
-    return state_->variants.back().shader.get();
-}
-
-void GBufferDiagnosticCapture::write(const Shader& shader, const DiagnosticSubmission& submission) {
-    if (!state_->framebuffer) {
-        return;
-    }
-    const bool matching_pass =
-        submission.pass == (state_->forward ? DiagnosticPass::Forward : DiagnosticPass::GBuffer);
-    if (!matching_pass) {
-        unsupported("diagnostic_contributor_pass_mismatch",
-                    submission.lod,
-                    submission.ownership,
-                    submission.pass);
-    }
-    for (const auto& entry : state_->variants) {
-        if (entry.shader.get() != &shader) {
-            continue;
-        }
-        DiagnosticId id{};
-        if (submission.provenance == DiagnosticProvenance::Unsupported) {
-            state_->failed = true;
-        }
-        if (matching_pass && !state_->refused && !state_->table.submit(submission, id)) {
-            state_->refused = true;
-            state_->failed = true;
-        }
-        // Refused draws carry no identity, never the previous draw's ID. Once
-        // refused, do no more registry work or allocation for this capture.
-        glProgramUniform4uiv(shader.Id(), entry.identity, 1, id.data());
-        return;
-    }
-    unsupported(
-        "diagnostic_writer_without_variant", submission.lod, submission.ownership, submission.pass);
-}
-
-void GBufferDiagnosticCapture::write_current(const DiagnosticSubmission& submission) {
-    if (!state_->framebuffer) {
-        return;
-    }
-    GLint program = 0;
-    glGetIntegerv(GL_CURRENT_PROGRAM, &program);
-    for (const auto& entry : state_->variants) {
-        if (entry.shader->Id() == static_cast<GLuint>(program)) {
-            write(*entry.shader, submission);
-            return;
-        }
-    }
-    unsupported(
-        "diagnostic_writer_without_variant", submission.lod, submission.ownership, submission.pass);
-}
-
-bool GBufferDiagnosticCapture::deferred_attached() const {
-    return state_->framebuffer != 0 && !state_->forward;
-}
-
-bool GBufferDiagnosticCapture::attach_forward(std::uint32_t framebuffer,
-                                              std::uint32_t color_texture,
-                                              const DiagnosticExtent& extent) {
-    if (!state_->forward_targets) {
-        unsupported("foliage_forward_contributor_target_unavailable",
-                    0,
-                    DiagnosticOwnership::Live,
-                    DiagnosticPass::Forward);
-        return false;
-    }
-    GBuffer target{};
-    target.fbo_id = framebuffer;
-    target.position_texture = color_texture;
-    if (!attach_target(target, extent, true)) {
-        const auto reason = std::exchange(state_->failure, {});
-        unsupported(reason, 0, DiagnosticOwnership::Live, DiagnosticPass::Forward);
-        return false;
-    }
-    return true;
-}
-
-GBufferDiagnosticAttachment::GBufferDiagnosticAttachment(const GBuffer& gbuffer,
-                                                         const DiagnosticExtent& extent)
-    : capture_(GBufferDiagnosticCapture::Current()) {
-    if (capture_) {
-        exceptions_ = std::uncaught_exceptions();
-    }
-    if (capture_ && !capture_->attach(gbuffer, extent)) {
-        capture_ = nullptr;
-    }
-}
-
-GBufferDiagnosticAttachment::GBufferDiagnosticAttachment(std::uint32_t framebuffer,
-                                                         std::uint32_t color_texture,
-                                                         const DiagnosticExtent& extent)
-    : capture_(GBufferDiagnosticCapture::Current()) {
-    if (capture_) {
-        exceptions_ = std::uncaught_exceptions();
-        if (!capture_->attach_forward(framebuffer, color_texture, extent)) {
-            capture_ = nullptr;
-        }
-    }
-}
-
-GBufferDiagnosticAttachment::~GBufferDiagnosticAttachment() {
-    if (capture_) {
-        try {
-            capture_->detach();
-        } catch (...) {
-            capture_->abort();
-        }
-        if (std::uncaught_exceptions() > exceptions_) {
-            capture_->abort();
-        }
-    }
-}
-
-bool GBufferDiagnosticCapture::attach(const GBuffer& gbuffer, const DiagnosticExtent& extent) {
-    if (!attach_target(gbuffer, extent)) {
-        const auto reason = std::exchange(state_->failure, {});
-        unsupported(reason);
-        return false;
-    }
-    return true;
-}
-
-void GBufferDiagnosticCapture::detach() {
-    detach_target();
-    if (!state_->failure.empty()) {
-        const auto reason = std::exchange(state_->failure, {});
-        unsupported(reason);
-    }
-}
 
 // capacity of the shared per-(mesh,material) instance-matrix VBO. The draw
 // path clamps uploads + draw counts to this so a group larger than capacity can
@@ -619,6 +377,12 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
     // Default config renders == true for every bit, so this is byte-stable off.
     namespace SH = Luminumbra::Client::ScenarioHarness;
     const SH::IsolationConfig& iso = *ctx.isolation;
+    // A filtered deferred producer leaves its pixels unattributed whether or not it
+    // has scene content, so isolation never certifies complete coverage.
+    if (diagnostic_capture &&
+        (!iso.renders(SH::IsolationLayer::Terrain) || !iso.renders(SH::IsolationLayer::Skinned))) {
+        GBufferDiagnosticCapture::Current()->unsupported("isolation_filtered_deferred_producer");
+    }
 
     // copy ctx.frustum_planes (a const glm::vec4* pointer) into a local
     // array so the terrain-submit callback (which takes a const glm::vec4(&)[6]
@@ -1307,8 +1071,13 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     // for the whole far field (the draw-call/triangle collapse the forest_perf_budget gate
     // targets).
     if (impostorsOn && !impostorInstances.empty()) {
-        if (!UseDrawProgram(m_tree_impostor_shader.get(), stats))
+        // Queued geometry is unsupported even when its program prevents submission.
+        if (capture) {
+            capture->unsupported("tree_impostor_fragment_output_unavailable", 3);
+        }
+        if (!UseDrawProgram(m_tree_impostor_shader.get(), stats)) {
             return;
+        }
         m_tree_impostor_shader->setMat4("u_view", static_view);
         m_tree_impostor_shader->setMat4("u_proj", static_proj);
         m_tree_impostor_shader->setVec3("u_cameraPos", cameraPos);
@@ -1335,9 +1104,6 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                 impostorInstances.data() + offset);
             glBindVertexArray(m_impostorVAO);
             glDisable(GL_CULL_FACE);
-            if (capture) {
-                capture->unsupported("tree_impostor_fragment_output_unavailable", 3);
-            }
             Luminumbra::Rendering::AttributedGl::Submit(
                 glDrawArraysInstanced, GLenum{GL_TRIANGLE_STRIP}, 0, 4, count);
             glBindVertexArray(0);

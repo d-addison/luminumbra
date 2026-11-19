@@ -24,9 +24,12 @@
 // REPRODUCTION CLAIMS +16. Recorded here and at the GameSession wire site.
 
 #include "CreatureTickAdmission.h"
+#include "DecompositionSystem.h"
+#include "MateSpatialIndex.h"
 
 #include <algorithm>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include <entt/entity/registry.hpp>
@@ -38,7 +41,9 @@
 
 #include "../components/CoreComponents.h"
 #include "../components/CreatureComponents.h"
+#include "../components/DecayComponents.h"
 #include "../components/InstinctComponents.h" // PerceptionComponent ( sensory phenotype)
+#include "../components/MortalComponents.h"
 #include "../core/DeterministicMath.h"
 #include "../core/DeterministicRng.h"
 
@@ -48,6 +53,106 @@ namespace Comp = ::Luminumbra::Components;
 namespace dm = ::Luminumbra::DeterministicMath;
 
 inline constexpr std::uint64_t kReproSeedOffset = 16ull;
+
+// Runtime ownership only: deliberately absent from snapshots, saves, wire and hashes.
+// Replay recreates this tag by re-simulating births. Ambient/founder carcasses retain
+// their historical lifetime, including their entity IDs in the ecology hash.
+struct ReproductionBorn {};
+
+struct NewbornCarcassCleanupStats {
+    std::size_t visited = 0;
+    std::size_t reference_visits = 0;
+    std::size_t removed = 0;
+};
+
+// Call once at the tick publication boundary, after consumers and staged foliage
+// commit. No consumer may retain a registry view/reference across that boundary.
+inline NewbornCarcassCleanupStats CleanupNewbornCarcasses(entt::registry& reg) {
+    NewbornCarcassCleanupStats stats;
+    const auto born = reg.view<ReproductionBorn, Comp::DecayComponent>();
+    if (born.begin() == born.end()) {
+        return stats;
+    }
+    struct Scratch {
+        struct Retiring {};
+        // At most one handle per reproduction-born entity (EnTT entity-mask bound).
+        // Capacity is reused; unrelated world entities are never staged or visited.
+        std::vector<entt::entity> finished;
+        entt::storage<Retiring> membership;
+    };
+    auto* scratch = reg.ctx().find<Scratch>();
+    if (!scratch) {
+        scratch = &reg.ctx().emplace<Scratch>();
+    }
+    auto& finished = scratch->finished;
+    finished.clear();
+    scratch->membership.clear();
+    for (const auto entity : born) {
+        ++stats.visited;
+        const auto& decay = born.get<Comp::DecayComponent>(entity);
+        if (decay.fully_decomposed != 0 &&
+            decay.nutrient_released_milli == kNutrientPerCorpseMilli && DecompIsDead(reg, entity)) {
+            finished.push_back(entity);
+            scratch->membership.emplace(entity);
+        }
+    }
+    if (finished.empty()) {
+        return stats;
+    }
+    std::sort(finished.begin(), finished.end(), [](entt::entity left, entt::entity right) {
+        return entt::to_integral(left) < entt::to_integral(right);
+    });
+    const auto retiring = [&](entt::entity entity) {
+        return scratch->membership.contains(entity);
+    };
+    // Sweep only reference-bearing component pools, once per nonempty retirement
+    // batch. Nested work is bounded by their stored actions/children, with no copies.
+    for (const auto entity : reg.view<Comp::SensesComponent>()) {
+        ++stats.reference_visits;
+        auto& senses = reg.get<Comp::SensesComponent>(entity);
+        for (auto* target :
+             {&senses.nearest_food_source, &senses.nearest_water_source, &senses.nearest_threat}) {
+            if (retiring(*target)) {
+                *target = entt::null;
+            }
+        }
+    }
+    for (const auto entity : reg.view<Comp::ActionPlanComponent>()) {
+        ++stats.reference_visits;
+        for (auto& action : reg.get<Comp::ActionPlanComponent>(entity).plan) {
+            ++stats.reference_visits;
+            if (retiring(action.target)) {
+                action.target = entt::null;
+            }
+        }
+    }
+    for (const auto entity : reg.view<Comp::HierarchyComponent>()) {
+        ++stats.reference_visits;
+        auto& hierarchy = reg.get<Comp::HierarchyComponent>(entity);
+        if (retiring(hierarchy.parent)) {
+            hierarchy.parent = entt::null;
+        }
+        std::erase_if(hierarchy.children, [&](entt::entity child) {
+            ++stats.reference_visits;
+            return retiring(child);
+        });
+    }
+    auto* admission = reg.ctx().find<CreatureTickAdmission>();
+    for (const auto entity : finished) {
+        if (admission) {
+            admission->Forget(entity);
+        }
+        // The session's on_destroy hook releases the avatar and frozen collision
+        // body while the entity and all other components still exist. Render and
+        // mate indexes are rebuilt from live views; codex stores species IDs only.
+        reg.remove<Comp::CreaturePhysicsComponent>(entity);
+        reg.destroy(entity);
+        ++stats.removed;
+    }
+    finished.clear();
+    scratch->membership.clear();
+    return stats;
+}
 
 // Eligibility: mature, healthy, well-fed, off cooldown, alive (and prey — predators don't
 // breed in this slice; the heritable population being selected on is the prey).
@@ -65,9 +170,14 @@ struct CreatureReproductionStats {
     int courting = 0; // ready females currently adjacent to a ready male
     // Const result diagnostic: identity lookups in the admitted ordering pass.
     std::size_t identity_visits = 0;
+    // Const diagnostic: spatial candidates examined (both sexes in seeking, males in resolve).
+    std::size_t mate_candidate_visits = 0;
+    // Const diagnostic: creature entries visited by the capacity census (zero without ready
+    // females).
+    std::size_t population_visits = 0;
 };
 
-// Full-control tuning (defaults == the k* constants -> byte-identical). From SystemConfig
+// Full-control tuning. Existing scalar fields resolve from SystemConfig
 // sim.reproduction. Tick fields are integer; the float-valued config params are cast on resolve.
 struct ReproductionTuning {
     std::uint32_t maturity_ticks = kReproMaturityTicks;
@@ -77,6 +187,10 @@ struct ReproductionTuning {
     float mate_seek_radius = kMateSeekRadius;
     float courtship_radius = kCourtshipRadius;
     float spawn_radius = kReproSpawnRadius;
+    // Fixed shipping defaults, also available to synthetic herds through this tuning API.
+    // No additional config/hash slots: 48 is four times the default initial herd of 12.
+    std::uint32_t species_capacity = 48;
+    std::uint32_t lifespan_ticks = 108000; // matches the ambient spawn lifespan floor
 };
 
 // Ready to mate? (prey, alive, mature, off cooldown, well-fed, healthy)
@@ -93,10 +207,12 @@ struct ReproductionTuning {
 // threat (survival beats courtship). When already within courtship range they hold still
 // (wish 0) so they stay together and court. id-ordered; reads a pre snapshot (order-stable).
 // `stable_identity` selects the dormant candidate contract, independently of region admission.
-inline void RunMateSeekingOnTick(entt::registry& reg,
-                                 const ReproductionTuning& tuning = {},
-                                 const CreatureTickAdmission* admission = nullptr,
-                                 bool stable_identity = false) {
+inline CreatureReproductionStats
+RunMateSeekingOnTick(entt::registry& reg,
+                     const ReproductionTuning& tuning = {},
+                     const CreatureTickAdmission* admission = nullptr,
+                     bool stable_identity = false) {
+    CreatureReproductionStats stats;
     auto view = reg.view<Comp::CreatureComponent,
                          Comp::CreatureGenomeComponent,
                          Comp::TransformComponent>();
@@ -113,7 +229,7 @@ inline void RunMateSeekingOnTick(entt::registry& reg,
             ents.push_back(entity);
         }
     }
-    OrderCreatureParticipants(reg, ents, stable_identity);
+    stats.identity_visits = OrderCreatureParticipants(reg, ents, stable_identity);
     std::vector<M> snap;
     snap.reserve(ents.size());
     for (auto e : ents) {
@@ -127,6 +243,12 @@ inline void RunMateSeekingOnTick(entt::registry& reg,
                         IsReadyToMate(cr, gn, tuning),
                         cr.species_id});
     }
+    MateSpatialIndex mates(tuning.mate_seek_radius);
+    for (std::size_t i = 0; i < snap.size(); ++i) {
+        if (snap[i].ready) {
+            mates.Insert(i, snap[i].x, snap[i].z);
+        }
+    }
     for (std::size_t i = 0; i < ents.size(); ++i) {
         const M& self = snap[i];
         if (!self.ready)
@@ -135,21 +257,23 @@ inline void RunMateSeekingOnTick(entt::registry& reg,
         if (cr.last_action == static_cast<int>(CreatureAction::Flee))
             continue; // survival first
         float best = tuning.mate_seek_radius, mx = 0.0f, mz = 0.0f;
-        bool found = false;
-        for (const M& o : snap) {
-            if (o.e == self.e || !o.ready || o.female == self.female ||
-                o.species_id != self.species_id)
-                continue;
+        std::size_t best_index = snap.size();
+        mates.Visit(self.x, self.z, [&](std::size_t candidate) {
+            ++stats.mate_candidate_visits;
+            const M& o = snap[candidate];
+            if (o.e == self.e || o.female == self.female || o.species_id != self.species_id) {
+                return;
+            }
             const float dx = o.x - self.x, dz = o.z - self.z;
             const float d = dm::Sqrt(dx * dx + dz * dz);
-            if (d < best) {
+            if (d < best || (best_index != snap.size() && d == best && candidate < best_index)) {
                 best = d;
+                best_index = candidate;
                 mx = o.x;
                 mz = o.z;
-                found = true;
             }
-        }
-        if (!found)
+        });
+        if (best_index == snap.size())
             continue;
         const float dx = mx - self.x, dz = mz - self.z;
         const float d = dm::Sqrt(dx * dx + dz * dz);
@@ -162,6 +286,7 @@ inline void RunMateSeekingOnTick(entt::registry& reg,
             cr.wish_z = 0.0f;
         }
     }
+    return stats;
 }
 
 // PHASE B (run AFTER the physics bridge): advance age/cooldown, accumulate courtship for ready
@@ -190,6 +315,48 @@ RunMatingResolveOnTick(entt::registry& reg,
     }
     const bool stable_identity = identity_ledger != nullptr;
     stats.identity_visits = OrderCreatureParticipants(reg, ents, stable_identity);
+    if (ents.empty()) {
+        return stats; // no genomes: no counting, indexing or allocation
+    }
+    struct PopulationCensus {
+        // At most one pair per admitted species; built only on ticks with a ready female.
+        std::vector<std::pair<std::uint16_t, std::size_t>> counts;
+
+        auto Find(std::uint16_t species_id) {
+            return std::lower_bound(
+                counts.begin(), counts.end(), species_id, [](const auto& entry, std::uint16_t key) {
+                    return entry.first < key;
+                });
+        }
+
+        std::size_t Count(std::uint16_t species_id) {
+            const auto entry = Find(species_id);
+            return entry != counts.end() && entry->first == species_id ? entry->second : 0;
+        }
+
+        // One sort groups the whole census: O(n log n) however many species IDs appear.
+        void Build(std::vector<std::uint16_t>& species) {
+            std::sort(species.begin(), species.end());
+            for (const auto species_id : species) {
+                if (!counts.empty() && counts.back().first == species_id) {
+                    ++counts.back().second;
+                } else {
+                    counts.emplace_back(species_id, 1);
+                }
+            }
+        }
+
+        void Increment(std::uint16_t species_id) {
+            const auto entry = Find(species_id);
+            if (entry != counts.end() && entry->first == species_id) {
+                ++entry->second;
+            } else {
+                counts.insert(entry, {species_id, 1});
+            }
+        }
+    };
+    PopulationCensus live_counts;
+    bool census_taken = false;
     // Stage only participating parents. Refused birth batches leave even age/cooldown
     // untouched. The legacy lane continues writing directly to its existing components.
     std::vector<Comp::CreatureGenomeComponent> staged_genomes;
@@ -233,6 +400,11 @@ RunMatingResolveOnTick(entt::registry& reg,
         }
     }
 
+    MateSpatialIndex mates(tuning.courtship_radius);
+    for (std::size_t index = 0; index < males.size(); ++index) {
+        mates.Insert(index, males[index].x, males[index].z);
+    }
+
     struct Birth {
         CreatureGenome genome;
         float x, y, z;
@@ -252,20 +424,43 @@ RunMatingResolveOnTick(entt::registry& reg,
         if (!gn.female || !IsReadyToMate(cr, gn, tuning)) {
             continue;
         }
+        if (!census_taken) {
+            census_taken = true;
+            // Only genome age/cooldown changed since entry; census eligibility and
+            // admission are unchanged. Include creatures without genomes/transforms.
+            const auto creatures = reg.view<Comp::CreatureComponent>();
+            std::vector<std::uint16_t> live_species;
+            live_species.reserve(creatures.size());
+            for (const auto entity : creatures) {
+                ++stats.population_visits;
+                const auto& creature = reg.get<Comp::CreatureComponent>(entity);
+                const auto* mortal = reg.try_get<Comp::MortalComponent>(entity);
+                if ((!admission || admission->Allows(entity)) && !creature.eaten &&
+                    (!mortal || mortal->dead == 0)) {
+                    live_species.push_back(creature.species_id);
+                }
+            }
+            live_counts.Build(live_species);
+        }
+        if (live_counts.Count(cr.species_id) >= tuning.species_capacity) {
+            continue; // refuse before courtship/male bookkeeping; earlier IDs reserve first
+        }
         const auto& tf = view.get<Comp::TransformComponent>(e);
-        int best = -1;
+        std::size_t best = males.size();
         float bestDist = tuning.courtship_radius;
-        for (std::size_t m = 0; m < males.size(); ++m) {
-            if (male_used[m] || males[m].species_id != cr.species_id)
-                continue;
+        mates.Visit(tf.position.x, tf.position.z, [&](std::size_t m) {
+            ++stats.mate_candidate_visits;
+            if (male_used[m] || males[m].species_id != cr.species_id) {
+                return;
+            }
             const float dx = males[m].x - tf.position.x, dz = males[m].z - tf.position.z;
             const float d = dm::Sqrt(dx * dx + dz * dz);
-            if (d < bestDist) {
+            if (d < bestDist || (best != males.size() && d == bestDist && m < best)) {
                 bestDist = d;
-                best = static_cast<int>(m);
+                best = m;
             }
-        }
-        if (best < 0) {
+        });
+        if (best == males.size()) {
             gn.courting_ticks = 0;
             continue;
         } // no mate adjacent -> reset
@@ -275,9 +470,9 @@ RunMatingResolveOnTick(entt::registry& reg,
             continue; // still courting
 
         // Courtship complete -> a baby. Consume this male for the tick.
-        const auto male_index = males[static_cast<std::size_t>(best)].parent_index;
+        const auto male_index = males[best].parent_index;
         const entt::entity maleE = ents[male_index];
-        male_used[static_cast<std::size_t>(best)] = true;
+        male_used[best] = true;
         auto& mgn = genome_at(male_index);
 
         CreatureGenome fG;
@@ -323,6 +518,7 @@ RunMatingResolveOnTick(entt::registry& reg,
         b.female = childFemale;
         b.species_id = cr.species_id; // offspring inherit the mother's codex species identity
         births.push_back(b);
+        live_counts.Increment(cr.species_id);
 
         gn.courting_ticks = 0;
         gn.reproduce_cooldown = tuning.cooldown_ticks;
@@ -350,6 +546,7 @@ RunMatingResolveOnTick(entt::registry& reg,
     // One child per completed female courtship: ascending mother ID, child ordinal zero.
     for (const Birth& b : births) {
         const auto child = reg.create();
+        reg.emplace<ReproductionBorn>(child);
         if (stable_identity)
             reg.emplace<Comp::SimulationIdentityComponent>(child, b.identity);
         auto& tf = reg.emplace<Comp::TransformComponent>(child);
@@ -364,6 +561,10 @@ RunMatingResolveOnTick(entt::registry& reg,
         cr.hunger = 0.5f;
         cr.stamina = 1.0f;
         cr.move_speed = b.genome.move_speed;
+
+        reg.emplace<Comp::MortalComponent>(child).lifespan_ticks = tuning.lifespan_ticks;
+        // Reuse the ambient carcass/scavenger/decomposition flow for every newborn.
+        reg.emplace<Comp::DecayComponent>(child).decay_duration = 900u;
 
         auto& gn = reg.emplace<Comp::CreatureGenomeComponent>(child);
         gn.move_speed = b.genome.move_speed;

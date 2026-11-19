@@ -14,7 +14,8 @@ namespace Luminumbra::Rendering {
 // Render-only consumption history; never feeds back into simulation state.
 class LiveStrikeTracker {
 public:
-    static constexpr std::uint64_t kGraceTicks = 2;
+    static constexpr std::uint64_t kGraceTicks =
+        Systems::WeatherSystem::kStrikePresentationGraceTicks;
     static constexpr std::size_t kWindowTicks = kGraceTicks + 1;
     // Each tick bucket holds at most the global regional strike limit, which also covers
     // the smaller legacy schedule. Only consumed strikes allocate nodes; there are three buckets.

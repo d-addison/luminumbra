@@ -4,6 +4,7 @@
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
 
+#include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/PlantComponents.h"
 #include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/simulation/SimBudgetTelemetry.h"
@@ -235,6 +236,17 @@ TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
         ASSERT_EQ(runner.CreatureCount(), 8u);
         ASSERT_FALSE(
             runner.Session()->GetRegistry().view<Luminumbra::Components::PlantTag>().empty());
+        // This fixture has no avatars, so the runner supplies no activation
+        // anchors. Pin plant owners to exercise actual scheduled growth work.
+        for (const auto plant :
+             runner.Session()->GetRegistry().view<Luminumbra::Components::PlantTag>()) {
+            const auto& position = runner.Session()
+                                       ->GetRegistry()
+                                       .get<Luminumbra::Components::TransformComponent>(plant)
+                                       .position;
+            runner.Session()->PinActiveRegion(
+                Luminumbra::world::ActiveRegionLedger::region_at(position), true);
+        }
         const auto report = runner.RunFixedTicks(ticks);
         ASSERT_EQ(report.ticks_executed, ticks);
         const std::string hash = runner.ComputeWorldHash();
