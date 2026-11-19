@@ -207,20 +207,72 @@ Vec3 VertexInterp(f32 isolevel, Vec3 p1, Vec3 p2, f32 valp1, f32 valp2) {
     return p1 + mu * (p2 - p1);
 }
 
-Vec3 EstimateDensityGradient(const GridCell& gridcell, const Vec3& position) {
-    // Different surface components in one cell can face opposite directions.
-    // Differentiate the trilinear field at this vertex, rather than assigning
-    // the cell-centre gradient to every component. Cells have positive, equal
-    // axis extents at every supported stride; normalization removes that scale.
-    const Vec3 t = (position - gridcell.p[0]) / (gridcell.p[6] - gridcell.p[0]);
+// Corner and edge numbering match PolygoniseTerrain: corner bits (x, y, z) are
+// 0 (000), 1 (100), 2 (101), 3 (001), 4 (010), 5 (110), 6 (111), 7 (011).
+struct EdgeGradientStencil {
+    u8 axis;          // the coordinate that varies along the edge
+    u8 lo, hi;        // edge corners, low to high along `axis`
+    u8 across[2];     // the other two coordinates, ascending
+    u8 pair[2][2][2]; // [across][edge end][low, high corner along `across`]
+};
+
+constexpr std::array<EdgeGradientStencil, 12> kEdgeGradientStencils = [] {
+    constexpr u8 kAxis[12] = {0u, 2u, 0u, 2u, 0u, 2u, 0u, 2u, 1u, 1u, 1u, 1u};
+    constexpr u8 kLowCorner[12] = {0u, 1u, 3u, 0u, 4u, 5u, 7u, 4u, 0u, 1u, 2u, 3u};
+    constexpr u8 kBits[8][3] = {
+        {0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1}, {0, 1, 0}, {1, 1, 0}, {1, 1, 1}, {0, 1, 1}};
+    std::array<EdgeGradientStencil, 12> stencils{};
+    for (int e = 0; e < 12; ++e) {
+        auto& stencil = stencils[e];
+        stencil.axis = kAxis[e];
+        const auto corner = [&](int along, int other, int side) {
+            u8 b[3] = {kBits[kLowCorner[e]][0], kBits[kLowCorner[e]][1], kBits[kLowCorner[e]][2]};
+            b[stencil.axis] = static_cast<u8>(along);
+            if (other >= 0) {
+                b[other] = static_cast<u8>(side);
+            }
+            return static_cast<u8>(b[1] * 4 + (b[2] != 0 ? (b[0] != 0 ? 2 : 3) : b[0]));
+        };
+        stencil.lo = corner(0, -1, 0);
+        stencil.hi = corner(1, -1, 0);
+        int k = 0;
+        for (int d = 0; d < 3; ++d) {
+            if (d == stencil.axis) {
+                continue;
+            }
+            stencil.across[k] = static_cast<u8>(d);
+            for (int end = 0; end < 2; ++end) {
+                stencil.pair[k][end][0] = corner(end, d, 0);
+                stencil.pair[k][end][1] = corner(end, d, 1);
+            }
+            ++k;
+        }
+    }
+    return stencils;
+}();
+
+// Different surface components in one cell can face opposite directions, so
+// each vertex takes the trilinear field's gradient at its own position rather
+// than the cell-centre gradient. On an edge both cross coordinates are exactly
+// 0 or 1: the derivative along the edge is that edge's difference, and each
+// cross derivative interpolates two parallel differences along the edge. That
+// equals the full trilinear derivative for one division and two mixes. Cells
+// have positive, equal axis extents at every supported stride; normalization
+// removes that scale.
+Vec3 EdgeDensityGradient(const GridCell& gridcell, int edge, const Vec3& position) {
+    const auto& stencil = kEdgeGradientStencils[static_cast<std::size_t>(edge)];
     const auto& v = gridcell.val;
-    const f32 dx = glm::mix(
-        glm::mix(v[1] - v[0], v[2] - v[3], t.z), glm::mix(v[5] - v[4], v[6] - v[7], t.z), t.y);
-    const f32 dy = glm::mix(
-        glm::mix(v[4] - v[0], v[5] - v[1], t.x), glm::mix(v[7] - v[3], v[6] - v[2], t.x), t.z);
-    const f32 dz = glm::mix(
-        glm::mix(v[3] - v[0], v[2] - v[1], t.x), glm::mix(v[7] - v[4], v[6] - v[5], t.x), t.y);
-    return Vec3(dx, dy, dz);
+    const int axis = stencil.axis;
+    const f32 t =
+        (position[axis] - gridcell.p[0][axis]) / (gridcell.p[6][axis] - gridcell.p[0][axis]);
+    Vec3 gradient;
+    gradient[axis] = v[stencil.hi] - v[stencil.lo];
+    for (int k = 0; k < 2; ++k) {
+        const auto& pair = stencil.pair[k];
+        gradient[stencil.across[k]] =
+            glm::mix(v[pair[0][1]] - v[pair[0][0]], v[pair[1][1]] - v[pair[1][0]], t);
+    }
+    return gradient;
 }
 
 // Determines terrain material based on world position and height.
@@ -1879,7 +1931,7 @@ void PolygoniseTerrain(const Systems::SHIELD_WorldSystem& world_system,
                 for (int e = 0; e < 12; ++e) {
                     if (edge_mask & (1u << e)) {
                         const Vec3 density_gradient =
-                            EstimateDensityGradient(gridcell, vertices[vert_indices[e]].position);
+                            EdgeDensityGradient(gridcell, e, vertices[vert_indices[e]].position);
                         const Vec3 grad_n =
                             (glm::dot(density_gradient, density_gradient) > 1.0e-12f)
                                 ? glm::normalize(density_gradient)
