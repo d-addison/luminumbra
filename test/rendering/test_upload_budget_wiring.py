@@ -90,8 +90,66 @@ class UploadBudgetWiring(unittest.TestCase):
             self.assertIn("world.GetTerrainHeightAt(lip.%s.x, lip.%s.z) - 0.5f" % (endpoint, endpoint), detect)
         draw = compact(body(read(RENDERING / "passes/WaterfallPass.cpp"),
                             "void WaterfallPass::execute("))
-        self.assertLess(draw.index("LiveWaterFactorAt("), draw.index("if (live < 0.02f)"))
+        self.assertLess(draw.index("const float live = m_live_factors[i];"),
+                        draw.index("if (live < 0.02f)"))
+        update = compact(body(read(RENDERING / "passes/WaterfallPass.cpp"),
+                              "void WaterfallPass::update_liveness("))
+        self.assertIn("Rendering::LiveWaterFactorAt(world, m_sheet_sites[i])", update)
         self.assertLess(draw.index("continue;"), draw.index("glDrawArrays"))
+
+    def test_waterfall_spray_reuses_prepared_site_liveness_before_particle_motion(self):
+        source = read(RENDERING / "passes/WaterfallPass.cpp")
+        update = compact(body(source, "void WaterfallPass::update_liveness("))
+        self.assertEqual(source.count("Rendering::LiveWaterFactorAt("), 1)
+        self.assertIn("for (std::size_t i = 0; i < m_sheet_sites.size(); ++i)", update)
+        self.assertIn("m_live_factors[i] = std::isfinite(live) ? std::clamp(live, 0.0f, 1.0f) : 0.0f;", update)
+        self.assertIn("particle_pass->set_waterfall_live_factors(m_live_factors);", update)
+        for allocation in ("push_back", "resize", "reserve", "assign", "new "):
+            self.assertNotIn(allocation, update)
+        prepare = body(self.pipeline, "void RenderPipeline::prepare_frame(")
+        self.assertLess(prepare.index("m_waterfall_pass->update_liveness(world_system, m_particle_pass.get());"),
+                        prepare.index("m_particle_pass->update(deltaTime);"))
+        adopt = compact(body(source, "bool WaterfallPass::adopt_next("))
+        self.assertIn("const auto site_index = m_adopted_spray++;", adopt)
+        self.assertIn("site.width, site_index);", adopt)
+        particles = read(RENDERING / "passes/ParticlePass.cpp")
+        add = compact(body(particles, "uint32_t ParticlePass::add_waterfall_spray("))
+        self.assertIn("spray.waterfall_site = sheet_site;", add)
+        self.assertIn("spray.spawn_scale = sheet_site == kInvalidEmitter ? 1.0f : 0.0f;", add)
+        scale = compact(body(particles, "void ParticlePass::set_waterfall_live_factors("))
+        self.assertIn("for (auto& emitter : m_active_emitters)", scale)
+        self.assertIn("!emitter.waterfall_spray || emitter.waterfall_site == kInvalidEmitter", scale)
+        self.assertIn("emitter.waterfall_site < live_factors.size() ? live_factors[emitter.waterfall_site] : 0.0f", scale)
+        self.assertIn("emitter.spawn_scale = std::isfinite(live) ? std::clamp(live, 0.0f, 1.0f) : 0.0f;", scale)
+        self.assertNotIn("spawn_rate =", scale)
+        self.assertNotIn("m_particles", scale)
+        spawn = compact(body(particles, "void ParticlePass::spawn_from_emitter("))
+        self.assertIn("emitter.data.spawn_rate * emitter.spawn_scale", spawn)
+
+    def test_waterfall_roar_consumes_live_selection_gain_and_repositions_on_handoff(self):
+        audio = read(ROOT / "src/luminumbra_client/app/FrameAudio.cpp")
+        living = compact(body(audio, "void UpdateLivingWorldAudio("))
+        self.assertIn("const auto source = renderPipeline.waterfall_roar_source(pc);", living)
+        self.assertIn("const auto* best = source.site;", living)
+        self.assertIn('SetAmbientVolume("waterfall_roar", source.gain(roar.volume));', living)
+        self.assertIn("if (!roarOn || roarPosition != best->crest)", living)
+        handoff = compact(body(living, "if (!roarOn || roarPosition != best->crest)"))
+        self.assertIn('PlayAmbientLoop( "waterfall_roar", best->crest, 400.0f);', handoff)
+        self.assertIn("roarPosition = best->crest;", handoff)
+        self.assertIn('else if (roarOn) { audioManager->StopAmbientLoop("waterfall_roar"); roarOn = false; }', living)
+        self.assertNotIn("waterfall_sites(", living)
+        self.assertNotIn("LiveWaterFactorAt(", audio)
+        forward = compact(body(self.header, "WaterfallPass::RoarSource waterfall_roar_source("))
+        self.assertEqual(forward, "return m_waterfall_pass->roar_source(listener);")
+        header = read(RENDERING / "passes/WaterfallPass.h")
+        self.assertIn("return SelectRoarSource(m_sheet_sites, m_live_factors, listener);", header)
+        self.assertIn("return base_gain * live_factor;", header)
+        select = compact(body(read(RENDERING / "passes/WaterfallPass.cpp"),
+                              "WaterfallPass::RoarSource WaterfallPass::SelectRoarSource("))
+        self.assertIn("if (!std::isfinite(live) || live <= 0.0f) { continue; }", select)
+        self.assertIn("std::min(sites.size(), live_factors.size())", select)
+        self.assertIn(".live_factor = std::min(live, 1.0f)", select)
+        self.assertNotIn("world", select.replace("no world queries", ""))
 
     def test_visible_rocks_and_shrubs_check_resident_support_before_batching(self):
         source = read(RENDERING / "passes/GBufferPass.cpp")
