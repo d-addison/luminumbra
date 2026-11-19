@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../ai/DecompositionSystem.h"
 #include "../components/AlarmComponents.h"
 #include "../components/CombustionComponents.h"
 #include "../components/CoreComponents.h"
@@ -345,6 +346,7 @@ public:
         if (!m_prepared || m_committed) {
             return;
         }
+        auto* decay_roster = original.ctx().find<ai::decomposition_detail::Roster>();
         // Preparation reserved every dense slot, payload page and sparse page.
         // Publish births before deaths so reserved handle order stays unchanged.
         for (std::size_t index = 0; index < m_newPlants.size(); ++index) {
@@ -367,6 +369,13 @@ public:
                 if constexpr (!std::is_empty_v<T>) {
                     if (const auto* value = m_registry.try_get<const T>(entity)) {
                         original.get<T>(entity) = *value;
+                        if constexpr (std::is_same_v<T, stage_detail::C::DecayComponent>) {
+                            // Retire completed live roster entries only after publication,
+                            // within this already bounded retained-entity walk.
+                            if (decay_roster && value->fully_decomposed != 0) {
+                                decay_roster->active.erase(entity);
+                            }
+                        }
                     }
                 }
             });

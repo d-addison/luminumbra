@@ -465,7 +465,8 @@ class ShaderScenesTests(unittest.TestCase):
             for name in ('../outside', '/absolute', 'C:/drive', 'a\\b', '', './small', 'x//small'):
                 with self.subTest(name=name), self.assertRaises(ValueError):
                     scene.local_file(root, name)
-            self.assertEqual(scene.local_file(root, 'small'), target)
+            # Windows TEMP can be an 8.3 short path; local_file returns the resolved one.
+            self.assertEqual(scene.local_file(root, 'small'), target.resolve())
             with patch.object(scene.os, 'open', side_effect=PermissionError('denied')):
                 with self.assertRaises(PermissionError):
                     scene.read_file(target)
