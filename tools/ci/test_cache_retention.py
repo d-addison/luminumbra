@@ -15,6 +15,8 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 NOW = datetime(2026, 10, 14, 12, tzinfo=timezone.utc)
+# One empty response per active-run status query.
+IDLE_RUNS = [json.dumps({"workflow_runs": []})] * 5
 
 
 class FrozenDatetime(datetime):
@@ -34,7 +36,7 @@ class CacheRetentionTests(unittest.TestCase):
         policy = ast.Module(body=[node for node in tree.body
                                   if isinstance(node, (ast.Assign, ast.FunctionDef, ast.ImportFrom))
                                   and (isinstance(node, (ast.FunctionDef, ast.ImportFrom))
-                                       or node.targets[0].id in {"PREFIXES", "BUDGET", "RECENCY_GRACE"})], type_ignores=[])
+                                       or node.targets[0].id in {"PREFIXES", "BUDGET", "RECENCY_GRACE", "ACTIVE_STATUSES"})], type_ignores=[])
         namespace = {}
         exec(compile(policy, str(ROOT / ".github/workflows/cache-cleanup.yml"), "exec"), namespace)
         cls.obsolete = staticmethod(partial(namespace["obsolete_caches"], now=NOW))
@@ -251,7 +253,7 @@ class CacheRetentionTests(unittest.TestCase):
             with self.subTest(event=event):
                 with patch.dict(os.environ, {"GH_REPO": "owner/repo", "TRIGGER_SHA": "A"}), \
                         patch("subprocess.check_output", side_effect=[
-                            json.dumps([{"actions_caches": caches}]), refs, refs,
+                            json.dumps([{"actions_caches": caches}]), *IDLE_RUNS, refs, refs,
                         ]), patch("subprocess.run") as delete:
                     exec(compile(self.body, "cache-cleanup", "exec"), {})
                 delete.assert_called_once_with(
@@ -279,11 +281,54 @@ class CacheRetentionTests(unittest.TestCase):
                 caches[0][timestamp] = (NOW - timedelta(minutes=30)).isoformat()
                 with patch.dict(os.environ, {"GH_REPO": "owner/repo", "TRIGGER_SHA": "B"}), \
                         patch("subprocess.check_output", side_effect=[
-                            json.dumps([{"actions_caches": caches}]), refs, refs,
+                            json.dumps([{"actions_caches": caches}]), *IDLE_RUNS, refs, refs,
                         ]), patch("subprocess.run") as delete:
                     exec(compile(self.body, "cache-cleanup", "exec"), {})
                 delete.assert_called_once_with(
                     ["gh", "cache", "delete", "3", "--repo", "owner/repo"], check=True)
+
+    def test_queued_or_running_rerun_sha_keeps_its_older_generation(self):
+        caches = [self.cache(1, "tidy-cache-Linux-shard1of3-A"),
+                  self.cache(2, "tidy-cache-Linux-shard1of3-B")]
+        heads = {"refs/heads/devel": "B"}
+        # A is outside the grace window and not a head: only an active run keeps it.
+        self.assertEqual(self.obsolete(caches, heads, "B"), [1])
+        self.assertEqual(self.obsolete(caches, heads, "B", active_shas={"A"}), [])
+        self.assertEqual(self.obsolete(caches, heads, "B", active_shas={"", "Z"}), [1])
+
+    def test_cleanup_queries_every_active_status_and_protects_rerun_caches(self):
+        self.assertEqual(len(IDLE_RUNS), 5)
+        refs = json.dumps([{"ref": "refs/heads/devel", "object": {"sha": "B"}}])
+        caches = [self.cache(1, "tidy-cache-Linux-shard1of3-A"),
+                  self.cache(2, "tidy-cache-Linux-shard1of3-B"),
+                  self.cache(3, "tidy-cache-Linux-shard1of3-older")]
+        caches[2]["created_at"] = "2026-10-12T00:00:00Z"
+        for position in range(len(IDLE_RUNS)):
+            with self.subTest(position=position):
+                runs = list(IDLE_RUNS)
+                runs[position] = json.dumps({"workflow_runs": [{"head_sha": "A"}]})
+                with patch.dict(os.environ, {"GH_REPO": "owner/repo", "TRIGGER_SHA": "B"}), \
+                        patch("subprocess.check_output", side_effect=[
+                            json.dumps([{"actions_caches": caches}]), *runs, refs, refs,
+                        ]) as api, patch("subprocess.run") as delete:
+                    exec(compile(self.body, "cache-cleanup", "exec"), {})
+                delete.assert_called_once_with(
+                    ["gh", "cache", "delete", "3", "--repo", "owner/repo"], check=True)
+                statuses = [call.args[0][2].split("status=")[1].split("&")[0]
+                            for call in api.call_args_list[1:1 + len(IDLE_RUNS)]]
+                self.assertEqual(statuses, ["requested", "pending", "waiting", "queued", "in_progress"])
+
+    def test_active_run_api_error_skips_all_deletion(self):
+        caches = [self.cache(1, "tidy-cache-Linux-shard1of3-A"),
+                  self.cache(2, "tidy-cache-Linux-shard1of3-B")]
+        with patch.dict(os.environ, {"GH_REPO": "owner/repo", "TRIGGER_SHA": "B"}), \
+                patch("subprocess.check_output", side_effect=[
+                    json.dumps([{"actions_caches": caches}]), IDLE_RUNS[0],
+                    subprocess.CalledProcessError(1, ["gh", "api"]),
+                ]), patch("subprocess.run") as delete, contextlib.redirect_stdout(io.StringIO()) as log:
+            exec(compile(self.body, "cache-cleanup", "exec"), {})
+        delete.assert_not_called()
+        self.assertIn("::warning::Cache cleanup API/auth error", log.getvalue())
 
     def test_combined_head_trigger_and_recent_caches_exceed_budget_without_deletion(self):
         caches = [self.cache(1, "tidy-cache-Linux-shard1of3-B", size=2_000_000_000),
@@ -298,7 +343,7 @@ class CacheRetentionTests(unittest.TestCase):
         refs = json.dumps([{"ref": "refs/heads/devel", "object": {"sha": "B"}}])
         with patch.dict(os.environ, {"GH_REPO": "owner/repo", "TRIGGER_SHA": "A"}), \
                 patch("subprocess.check_output", side_effect=[
-                    json.dumps([{"actions_caches": caches}]), refs,
+                    json.dumps([{"actions_caches": caches}]), *IDLE_RUNS, refs,
                 ]), patch("subprocess.run") as delete, \
                 contextlib.redirect_stdout(io.StringIO()) as log:
             exec(compile(self.body, "cache-cleanup", "exec"), {})
@@ -313,18 +358,18 @@ class CacheRetentionTests(unittest.TestCase):
             return json.dumps([{"ref": "refs/heads/devel", "object": {"sha": sha}}])
         with patch.dict(os.environ, {"GH_REPO": "owner/repo"}), \
                 patch("subprocess.check_output", side_effect=[
-                    json.dumps([{"actions_caches": caches}]), refs("oldhead"), refs("nexthead"),
+                    json.dumps([{"actions_caches": caches}]), *IDLE_RUNS, refs("oldhead"), refs("nexthead"),
                 ]) as api, patch("subprocess.run") as delete:
             exec(compile(self.body, "cache-cleanup", "exec"), {})
         delete.assert_not_called()
-        self.assertEqual(api.call_count, 3)
+        self.assertEqual(api.call_count, 3 + len(IDLE_RUNS))
 
     def test_deletes_obsolete_cache_by_id_so_same_key_replacements_survive(self):
         caches = [self.cache(1, "tidy-cache-Linux-shard1of3-old"), self.cache(2, "tidy-cache-Linux-shard1of3-head")]
         refs = json.dumps([{"ref": "refs/heads/devel", "object": {"sha": "head"}}])
         with patch.dict(os.environ, {"GH_REPO": "owner/repo"}), \
                 patch("subprocess.check_output", side_effect=[
-                    json.dumps([{"actions_caches": caches}]), refs, refs,
+                    json.dumps([{"actions_caches": caches}]), *IDLE_RUNS, refs, refs,
                 ]), patch("subprocess.run") as delete:
             exec(compile(self.body, "cache-cleanup", "exec"), {})
         delete.assert_called_once_with(["gh", "cache", "delete", "1", "--repo", "owner/repo"], check=True)
@@ -336,7 +381,7 @@ class CacheRetentionTests(unittest.TestCase):
         refs = json.dumps([{"ref": "refs/heads/devel", "object": {"sha": "head"}}])
         with patch.dict(os.environ, {"GH_REPO": "owner/repo"}), \
                 patch("subprocess.check_output", side_effect=[
-                    json.dumps([{"actions_caches": caches}]), refs,
+                    json.dumps([{"actions_caches": caches}]), *IDLE_RUNS, refs,
                 ]), patch("subprocess.run") as delete, \
                 contextlib.redirect_stdout(io.StringIO()) as log:
             exec(compile(self.body, "cache-cleanup", "exec"), {})
@@ -353,7 +398,7 @@ class CacheRetentionTests(unittest.TestCase):
                 refs = json.dumps([{"ref": "refs/heads/devel", "object": {"sha": "head"}}])
                 with patch.dict(os.environ, {"GH_REPO": "owner/repo"}), \
                         patch("subprocess.check_output", side_effect=[
-                            json.dumps([{"actions_caches": caches}]), refs, refs, refs,
+                            json.dumps([{"actions_caches": caches}]), *IDLE_RUNS, refs, refs, refs,
                         ]), patch("subprocess.run", side_effect=[
                             subprocess.CalledProcessError(status, ["gh", "cache", "delete", "2"]),
                             None,
@@ -368,7 +413,7 @@ class CacheRetentionTests(unittest.TestCase):
         refs = json.dumps([{"ref": "refs/heads/devel", "object": {"sha": "head"}}])
         with patch.dict(os.environ, {"GH_REPO": "owner/repo"}), \
                 patch("subprocess.check_output", side_effect=[
-                    json.dumps([{"actions_caches": caches}]), refs,
+                    json.dumps([{"actions_caches": caches}]), *IDLE_RUNS, refs,
                     subprocess.CalledProcessError(1, ["gh", "api"]),
                 ]), patch("subprocess.run") as delete, \
                 contextlib.redirect_stdout(io.StringIO()) as log:
@@ -395,7 +440,7 @@ class CacheRetentionTests(unittest.TestCase):
                                (json.dumps([{"actions_caches": [malformed_timestamp]}]), "ValueError")):
             with self.subTest(error=error, listing=listing):
                 with patch.dict(os.environ, {"GH_REPO": "owner/repo"}), \
-                        patch("subprocess.check_output", side_effect=[listing, refs]), \
+                        patch("subprocess.check_output", side_effect=[listing, *IDLE_RUNS, refs]), \
                         patch("subprocess.run") as delete, contextlib.redirect_stdout(io.StringIO()) as log:
                     exec(compile(self.body, "cache-cleanup", "exec"), {})
                 delete.assert_not_called()

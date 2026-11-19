@@ -115,9 +115,12 @@ configuration changes and SHA keys, protecting both live branch heads' keys and
 the triggering SHA (`workflow_run.head_sha`)
 even when cleanup is delayed until the branch advances. The named `RECENCY_GRACE`
 constant in `cache-cleanup.yml` is one hour: caches created within that window are
-never deleted, preserving caches for queued reruns and concurrent saves. Access time
-is ignored, because every pull-request restore refreshes it through the lane prefix;
-counting it kept every generation of a frequently pushed branch inside the window. It also
+never deleted, preserving concurrent saves. Access time is ignored, because every
+pull-request restore refreshes it through the lane prefix; counting it kept every
+generation of a frequently pushed branch inside the window. Instead, cleanup lists
+requested, pending, waiting, queued and in-progress workflow runs and keeps every
+cache whose key ends in one of their SHAs, so queued or running reruns of older
+pushes keep their caches. If that listing fails, cleanup deletes nothing. It also
 targets 9.5 GB total repository cache storage, including package and other caches,
 when reserved caches fit that budget. Both branches' newest compiler generations
 at the hosted caps total 4.7 GB, leaving cleanup room to retire obsolete generations outside
