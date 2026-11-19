@@ -2942,6 +2942,8 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
         m_taau_jitter_ndc = glm::vec2(0.0f);
     }
 
+    m_waterfall_pass->update_liveness(world_system, m_particle_pass.get());
+
     // particle MOTION advances in prepare (once per frame), so the
     // dispatch below only draws — running dispatch twice must not double-advance
     // motion. Guarded identically to the particles stage's execute.
