@@ -317,7 +317,7 @@ class RegionAuthorityWiring(unittest.TestCase):
         self.assertIn("TEST(StreamingHardening, WaterAuthoritySurvivesTerrainBackfill)", native_promotion)
         mesher = (ROOT / "src/luminumbra_common/world/MarchingCubes.cpp").read_text(encoding="utf-8")
         water = function(mesher, "void GenerateWaterMesh(")
-        self.assertIn("resolution <= 1 || resolution > 32 || !HasCompleteWaterGrid(chunk, resolution)", water)
+        self.assertIn("resolution <= 1 || resolution > 32 || !HasCompleteWaterGrid(water_source, resolution)", water)
         self.assertLess(water.index("resolution <= 1"), water.index("water_vertices.reserve"))
         native = (ROOT / "test/shield/async_water_meshing_test.cpp").read_text(encoding="utf-8")
         for case in ("DueSnapshotsRetainVoxelInvalidationAndIndependentWater",
