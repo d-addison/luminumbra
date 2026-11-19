@@ -1592,14 +1592,21 @@ TEST(BodyContinuation, RestoreKeepsLiveRegistrationOrderAndRegistersWhileTerrain
     for (int i = 0; i < 3; ++i) {
         ASSERT_FALSE(source.create_dynamic_sphere({float(i), 100, 0}, {}, 0.1f).IsInvalid());
     }
-    BodySetState unregistered;
-    ASSERT_TRUE(source.capture_body_owners(unregistered));
-    ASSERT_EQ(unregistered.owners.size(), 3u);
-    for (const auto& owner : unregistered.owners) {
-        EXPECT_EQ(owner.registration_slot, 0u);
+    // Live creation registers spheres with terrain collisions off, in creation
+    // order, exactly as restore does.
+    BodySetState live;
+    ASSERT_TRUE(source.capture_body_owners(live));
+    ASSERT_EQ(live.owners.size(), 3u);
+    for (std::uint32_t i = 0; i < 3; ++i) {
+        EXPECT_EQ(live.owners[i].registration_slot, i + 1);
+    }
+    auto unregistered = live;
+    for (auto& owner : unregistered.owners) {
+        owner.registration_slot = 0;
     }
 
-    // Restore registers spheres even with terrain collisions off, in payload order.
+    // Restore registers unregistered payloads even with terrain collisions off,
+    // in payload order, matching the live original.
     PhysicsSystem first;
     first.startup();
     std::array<JPH::BodyID, 3> first_ids{};

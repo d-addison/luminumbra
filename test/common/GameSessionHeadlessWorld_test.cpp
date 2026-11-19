@@ -18136,7 +18136,10 @@ TEST(SurfaceQuery, SimulationTerrainReservationsLeaveTheCapsuleBudgetUnchanged) 
     const auto avatar = physics.create_avatar_character({8, 10000, 8});
     physics.set_world_system(world.get());
     ASSERT_TRUE(physics.prepare_simulation_collisions({}));
-    EXPECT_EQ(physics.simulation_collision_sample_count(), 9u);
+    // Spheres created before authority are registered owners too, so the
+    // horizon covers whole 3x3 owner footprints, the avatar's included.
+    EXPECT_GE(physics.simulation_collision_sample_count(), 9u);
+    EXPECT_EQ(physics.simulation_collision_sample_count() % 9u, 0u);
     physics.update(0.0f);
     EXPECT_EQ(physics.work_items().bodies, body_limit);
     physics.set_avatar_frozen(avatar, true, {8, 10000, 8});
