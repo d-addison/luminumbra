@@ -439,22 +439,28 @@ TEST(DiagnosticAttribution, TerrainCaptureStagesOnlyAttachedDeferredDrawsAndBoun
     const auto unattached =
         Body(draw, "if (diagnostic_capture && !diagnostic_capture->deferred_attached())");
     Contains(unattached, "diagnostic_capture = nullptr");
-    const auto staging = Body(draw, "if (diagnostic_capture)");
     Contains(draw, "std::unique_ptr<const ChunkCullEntry*[]> diagnostic_chunks;");
     Before(
         draw, "diagnostic_capture = nullptr", "std::make_unique<const ChunkCullEntry*[]>(running)");
-    Before(staging, "if (running > 65536)", "std::make_unique<const ChunkCullEntry*[]>(running)");
-    const auto excess = Body(staging, "if (running > 65536)");
-    Before(excess, "unsupported(\"terrain_identity_draw_limit\")", "throw std::runtime_error(");
+    Before(draw,
+           "if (diagnostic_capture && running > 65536)",
+           "std::make_unique<const ChunkCullEntry*[]>(running)");
+    // An excessive draw count ends coverage without aborting the frame.
+    const auto excess = Body(draw, "if (diagnostic_capture && running > 65536)");
+    Before(excess, "unsupported(\"terrain_identity_draw_limit\")", "diagnostic_capture = nullptr;");
+    EXPECT_EQ(excess.find("throw"), std::string::npos);
     EXPECT_EQ(Count(draw, "std::make_unique<const ChunkCullEntry*[]>(running)"), 1u);
     Contains(draw, "if (diagnostic_capture) {\n            diagnostic_chunks[dst] = chunk;");
     // Only the diagnostic branch expands a bucket into individual commands.
     Contains(draw, "if (diagnostic_capture) {\n            // Submit each original indirect");
+    // Undiagnosed draws, including the rest of a bucket after a refusal, share one multi-draw.
     Contains(draw,
-             "} else {\n            Luminumbra::Rendering::AttributedGl::Submit(\n"
+             "if (mdi_first < first + count) {\n            "
+             "Luminumbra::Rendering::AttributedGl::Submit(\n"
              "                glMultiDrawElementsIndirect,");
-    Contains(draw, "first * sizeof(DrawElementsIndirectCommand)");
-    Contains(draw, "static_cast<GLsizei>(count)");
+    Contains(draw, "mdi_first * sizeof(DrawElementsIndirectCommand)");
+    Contains(draw, "static_cast<GLsizei>(first + count - mdi_first)");
+    Contains(draw, "++draw, mdi_first = draw)");
     Contains(draw, "static_cast<GLsizei>(sizeof(DrawElementsIndirectCommand))");
     EXPECT_EQ(Count(draw, "glMultiDrawElementsIndirect,"), 1u);
     EXPECT_EQ(Count(draw, "write_current("), 1u);
@@ -494,8 +500,12 @@ TEST(DiagnosticAttribution, TerrainRefusesUnknownAndOutOfRangeResidentLodBeforeS
                            "void RenderPipeline::draw_chunks_mdi(");
     const auto invalid =
         Body(draw, "if (resident.diagnostic_lod < 0 || resident.diagnostic_lod > 255)");
-    Before(
-        invalid, "unsupported(\"terrain_resident_lod_unavailable\")", "throw std::runtime_error(");
+    // A refusal ends coverage and falls back to ordinary submission instead of throwing.
+    Before(invalid,
+           "unsupported(\"terrain_resident_lod_unavailable\")",
+           "diagnostic_capture = nullptr;");
+    Before(invalid, "diagnostic_capture = nullptr;", "break;");
+    EXPECT_EQ(invalid.find("throw"), std::string::npos);
     Before(draw,
            "if (resident.diagnostic_lod < 0 || resident.diagnostic_lod > 255)",
            "static_cast<std::uint32_t>(resident.diagnostic_lod)");

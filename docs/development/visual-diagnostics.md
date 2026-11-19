@@ -82,7 +82,9 @@ LOD is snapshotted inside mesh-version validation and committed with refinement
 metadata only after a successful upload, so retained stale geometry keeps its
 previous identity metadata. Diagnostic staging is capped at 65,536 pointers
 (512 KiB on 64-bit hosts); excessive draw counts or resident LOD outside 0–255
-record unsupported coverage and abort the submission. Empty submissions add no
+record unsupported coverage and end the capture's terrain coverage; the
+remaining draws still render through the ordinary multi-draw, so the frame
+completes. Empty submissions add no
 records. Unattached scopes and shadow rendering retain the original batched
 submission. With diagnostics off, there is no diagnostic staging allocation, GL
 state query or identity uniform write. Registered terrain source contracts cover
