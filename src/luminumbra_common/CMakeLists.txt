@@ -77,7 +77,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         set_source_files_properties(world/GameSession.cpp PROPERTIES COMPILE_OPTIONS "-O1")
     endif()
 elseif(MSVC)
-    # The same roster exceeds the default COFF section limit (C1128) under MSVC.
+    # The same roster exceeds the default COFF section limit under MSVC (error C1128).
     set_source_files_properties(world/GameSession.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
 endif()
 
