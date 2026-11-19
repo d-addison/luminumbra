@@ -1,6 +1,5 @@
 #include "app/ProcgenPalettes.h"
 
-#include "app/BushFoliage.h"
 #include "app/GroundCoverHull.h"
 
 #include "core/Log.h"
@@ -733,9 +732,9 @@ void BuildProcgenRockPalette(ProcgenPlantState& state, Luminumbra::Rendering::Re
 // registered into the SAME instanced static-mesh cache as the trees/rocks and
 // scattered as cheap instances on flatter, vegetated ground (the opposite niche
 // to the scree rocks). Each entry is a CLUSTER of 2-3 squashed, deformed
-// lobes covered with leaf cards, using the procedural cutout material via
+// icospheres (overlapping lobes read as a leafy shrub), green leaf material via
 // the instanced g_buffer path (no new art).  (never hashed, no
-// world_hash impact). Uses the same LOD cache registration as the rocks and the
+// world_hash impact) — mirrors BuildProcgenRockPalette exactly, including the
 // unsigned-only position hash (signed int*prime overflow is release-only UB that
 // miscompiles to a NaN-normal stall — see memory procgen-hash-signed-overflow-ub).
 constexpr int kBushPaletteSize = 6;
@@ -756,6 +755,10 @@ void BuildProcgenBushPalette(ProcgenPlantState& state, Luminumbra::Rendering::Re
                                {t, 0, 1},
                                {-t, 0, -1},
                                {-t, 0, 1}};
+    const int faces[20][3] = {{0, 11, 5}, {0, 5, 1},  {0, 1, 7},   {0, 7, 10}, {0, 10, 11},
+                              {1, 5, 9},  {5, 11, 4}, {11, 10, 2}, {10, 7, 6}, {7, 1, 8},
+                              {3, 9, 4},  {3, 4, 2},  {3, 2, 6},   {3, 6, 8},  {3, 8, 9},
+                              {4, 9, 5},  {2, 4, 11}, {6, 2, 10},  {8, 6, 7},  {9, 8, 1}};
     auto h01 = [](int a, int b) {
         std::uint32_t ua = static_cast<std::uint32_t>(static_cast<std::int64_t>(a)) * 73856093u;
         std::uint32_t ub = static_cast<std::uint32_t>(static_cast<std::int64_t>(b)) * 19349663u;
@@ -770,11 +773,10 @@ void BuildProcgenBushPalette(ProcgenPlantState& state, Luminumbra::Rendering::Re
     for (int p = 0; p < kBushPaletteSize; ++p) {
         std::vector<V> verts;
         std::vector<std::uint32_t> idx;
-        // At most three lobes, twelve cards per lobe, four vertices/six indices per card.
-        verts.reserve(144);
-        idx.reserve(216);
+        verts.reserve(180);
+        idx.reserve(180);
         glm::vec3 lo(1.0e9f), hi(-1.0e9f); // cluster AABB for the LOD hull
-        // 2-3 overlapping lobes per bush, with leaves along the icosahedral directions.
+        // 2-3 overlapping lobes per bush; each a squashed, deformed icosphere.
         const int lobes = 2 + static_cast<int>(h01(p, 41) * 2.0f); // 2..3
         for (int l = 0; l < lobes; ++l) {
             // lobe centre offset (low + spread out so the cluster reads as a mound).
@@ -785,23 +787,28 @@ void BuildProcgenBushPalette(ProcgenPlantState& state, Luminumbra::Rendering::Re
             const glm::vec3 lobeScale(0.40f + 0.30f * h01(p * 7 + l, 14),
                                       0.26f + 0.22f * h01(p * 7 + l, 15),
                                       0.40f + 0.30f * h01(p * 7 + l, 16));
+            glm::vec3 dv[12];
             for (int i = 0; i < 12; ++i) {
-                const glm::vec3 normal = glm::normalize(ico[i]);
-                const float radius = 0.78f + 0.42f * h01((p * 7 + l) * 13 + i, 7);
-                const glm::vec3 center = centre + normal * radius * lobeScale * 0.7f;
-                const auto card = BuildBushLeafCard(center, normal, 0.24f, 0.18f);
-                const auto first = static_cast<std::uint32_t>(verts.size());
-                verts.push_back({card[0], normal, {0.0f, 0.0f}});
-                verts.push_back({card[1], normal, {1.0f, 0.0f}});
-                verts.push_back({card[2], normal, {1.0f, 1.0f}});
-                verts.push_back({card[3], normal, {0.0f, 1.0f}});
-                for (const auto& position : card) {
-                    lo = glm::min(lo, position);
-                    hi = glm::max(hi, position);
-                }
-                for (const std::uint32_t corner : {0u, 1u, 2u, 0u, 2u, 3u}) {
-                    idx.push_back(first + corner);
-                }
+                const glm::vec3 n = glm::normalize(ico[i]);
+                const float r = 0.78f + 0.42f * h01((p * 7 + l) * 13 + i, 7); // leafy roughness
+                dv[i] = centre + n * r * lobeScale;
+                lo = glm::min(lo, dv[i]);
+                hi = glm::max(hi, dv[i]);
+            }
+            for (int f = 0; f < 20; ++f) {
+                const glm::vec3 a = dv[faces[f][0]], b = dv[faces[f][1]], c = dv[faces[f][2]];
+                const glm::vec3 cr = glm::cross(b - a, c - a);
+                const float crLen = glm::length(cr);
+                const glm::vec3 nrm =
+                    (crLen > 1e-6f) ? (cr / crLen)
+                                    : glm::normalize(a - centre + glm::vec3(0.0f, 1e-3f, 0.0f));
+                const std::uint32_t k = static_cast<std::uint32_t>(verts.size());
+                verts.push_back({a, nrm, {0.0f, 0.0f}});
+                verts.push_back({b, nrm, {1.0f, 0.0f}});
+                verts.push_back({c, nrm, {0.0f, 1.0f}});
+                idx.push_back(k);
+                idx.push_back(k + 1);
+                idx.push_back(k + 2);
             }
         }
         const std::string base = "procgen://bush_" + std::to_string(p);
