@@ -92,6 +92,8 @@ struct TerrainCullingTestPeer {
             RenderPipeline::ChunkMeshSnapshot snapshot;
             snapshot.id = Chunk::calculate_id(coords);
             snapshot.coords = coords;
+            snapshot.terrain_vertex_count = 3;
+            snapshot.terrain_index_count = 3;
             snapshots.push_back(snapshot);
         }
         RenderPipeline::HierarchicalCuller culler;

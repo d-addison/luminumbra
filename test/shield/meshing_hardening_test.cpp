@@ -1107,11 +1107,25 @@ void ExpectWaterMeshRetirement(SHIELD_WorldSystem& world,
         {chunk->get_id(), chunk}};
     water.update(registry, participants); // re-seed at the session grid
     ASSERT_TRUE(chunk->has_water_sim.load());
-    chunk->current_lod.store(1);
+    // Every resident layer renders this column's grid, so the whole stack is coarse.
+    std::vector<std::shared_ptr<Chunk>> column;
+    for (int y = -8; y <= 8; ++y) {
+        const auto coords = chunk->get_coords();
+        if (auto layer = world.find_streamed_chunk(IVec3(coords.x, y, coords.z))) {
+            column.push_back(std::move(layer));
+        }
+    }
+    ASSERT_FALSE(column.empty());
+    for (const auto& layer : column) {
+        ASSERT_EQ(layer->current_lod.load(), 0);
+        layer->current_lod.store(1);
+    }
     world.update(registry, anchor, nullptr, false);
     EXPECT_TRUE(water.mesh_invalidations().empty());
     EXPECT_EQ(world.activation_index_counters().span_cache_hits, hits);
-    chunk->current_lod.store(0);
+    for (const auto& layer : column) {
+        layer->current_lod.store(0);
+    }
 
     auto absent = std::make_shared<Chunk>(IVec3(64, 0, 0));
     const std::unordered_map<ChunkID, std::shared_ptr<Chunk>> nonresidents = {
@@ -1241,9 +1255,18 @@ TEST(StreamingHardening, SettledWaterSimulationWakesMeshingWithoutStreamingChang
     ASSERT_LT(chunk->water_level_data.front(), 12.0f);
     ASSERT_EQ(world.debug_dirty_generation(), generation);
     ASSERT_EQ(world.get_runtime_chunk_stats().total_chunks, count);
+    // Every resident layer of the column renders from the one column water
+    // source, so a source invalidation wakes exactly that column's stack.
+    std::size_t column_layers = 0;
+    for (int y = -8; y <= 8; ++y) {
+        if (world.find_streamed_chunk(IVec3(0, y, 0))) {
+            ++column_layers;
+        }
+    }
+    ASSERT_GE(column_layers, 1u);
     world.update(registry, anchor, nullptr, false);
     const auto& stats = world.get_last_streaming_budget_stats();
-    EXPECT_EQ(stats.submitted_meshing, 1u);
+    EXPECT_EQ(stats.submitted_meshing, column_layers);
     EXPECT_LE(stats.submitted_meshing, static_cast<std::size_t>(stats.meshing_budget));
     EXPECT_LE(world.last_meshing_snapshot_bytes(), SHIELD_WorldSystem::kMeshingSnapshotByteBudget);
     world.wait_for_streaming_jobs();
@@ -1253,16 +1276,18 @@ TEST(StreamingHardening, SettledWaterSimulationWakesMeshingWithoutStreamingChang
     EXPECT_EQ(chunk->mesh_version.load(), terrain_version);
 
     // Flow can invalidate on different ticks in different chunks. Across repeated
-    // wakes and their publication retries, at most two span lookups per indexed
-    // chunk are allowed (LOD and candidate priority). A full resident scan also
-    // looks up every unrelated ready chunk and exceeds this bound.
+    // wakes and their publication retries, at most two span lookups per woken
+    // column layer are allowed (LOD and candidate priority). A full resident scan
+    // also looks up every unrelated ready column and exceeds this bound.
     for (int tick = 0; tick < 64; ++tick) {
         water.update(registry, participants);
         const auto pending = water.mesh_invalidations().size();
         const auto hits = world.activation_index_counters().span_cache_hits;
         world.update(registry, anchor, nullptr, false);
-        EXPECT_LE(world.activation_index_counters().span_cache_hits - hits, 2u * pending);
-        EXPECT_LE(world.get_last_streaming_budget_stats().meshing_candidates, pending);
+        EXPECT_LE(world.activation_index_counters().span_cache_hits - hits,
+                  2u * pending * column_layers);
+        EXPECT_LE(world.get_last_streaming_budget_stats().meshing_candidates,
+                  pending * column_layers);
         EXPECT_EQ(world.debug_dirty_generation(), generation);
         world.wait_for_streaming_jobs();
     }
@@ -1279,7 +1304,7 @@ TEST(StreamingHardening, SettledWaterSimulationWakesMeshingWithoutStreamingChang
     {
         PausedMeshWorker paused(jobs);
         world.update(registry, anchor, nullptr, false);
-        ASSERT_EQ(world.get_last_streaming_budget_stats().submitted_meshing, 1u);
+        ASSERT_EQ(world.get_last_streaming_budget_stats().submitted_meshing, column_layers);
         ASSERT_EQ(chunk->pending_lod.load(), 0);
         water.update(registry, participants);
         const auto hits = world.activation_index_counters().span_cache_hits;
@@ -1293,8 +1318,8 @@ TEST(StreamingHardening, SettledWaterSimulationWakesMeshingWithoutStreamingChang
     ASSERT_FALSE(chunk->water_mesh_generated.load());
     const auto retry_hits = world.activation_index_counters().span_cache_hits;
     world.update(registry, anchor, nullptr, false);
-    EXPECT_LE(world.activation_index_counters().span_cache_hits - retry_hits, 2u);
-    EXPECT_EQ(world.get_last_streaming_budget_stats().submitted_meshing, 1u);
+    EXPECT_LE(world.activation_index_counters().span_cache_hits - retry_hits, 2u * column_layers);
+    EXPECT_EQ(world.get_last_streaming_budget_stats().submitted_meshing, column_layers);
     world.wait_for_streaming_jobs();
     EXPECT_TRUE(chunk->water_mesh_generated.load());
     ASSERT_TRUE(SettleStreaming(world, registry, anchor));
