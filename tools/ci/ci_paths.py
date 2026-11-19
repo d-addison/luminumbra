@@ -16,6 +16,7 @@ PYTHON_TESTS = (
     "tools/gates/test_shader_scenes.py",
     "tools/test_frozen_terrain_presets.py",
     "test/tools/test_regenerate_region_fixtures.py",
+    "tools/gates/test_diagnostic_rois.py",
     "tools/gates/test_diagnostic_capture.py",
 
     "tools/ci/test_compile_shaders.py",
@@ -257,6 +258,7 @@ def needs_python(path: str) -> bool:
             or path in {"res/shaders/g_buffer.frag",
                         "src/luminumbra_common/world/MarchingCubes.cpp",
                         "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp"}
+            or path == "tools/gates/baselines/diagnostic-rois.json"
             or path == "vendor/rmlui/rmlui-6.1-source.json"
             or path == "cmake/rmlui_source.cmake" or path.startswith("cmake/patches/rmlui-"))
 
