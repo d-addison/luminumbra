@@ -41,6 +41,8 @@ See [world format compatibility](engine-guide.md).
   complete-state updates and installed-host acceptance, with remaining Blender work.
 - [SHIELD signed-distance-field contract](shield/sdf-contract.md) defines the
   terrain sampling and meshing invariants.
+- [Terrain resolution options](development/terrain-resolution-options.md) compares
+  a new-world band-limited preset with a versioned half-metre authoritative grid.
 - [Distant world and distant simulation contract](distant-world.md) defines
   the 16 km volumetric far representation, persistent active regions, the
   per-system distant policy, format additions and the performance contract.

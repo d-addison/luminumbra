@@ -5,6 +5,7 @@
 #include <glad/glad.h>
 
 #include "core/Log.h"
+#include "core/PresentationClock.h"
 #include "core/RuntimeScenarioHarness.h"
 #include "core/scenarios/ScenarioCommon.h"
 #include "luminumbra_common/ai/CreatureSpeciesRegistry.h" //  species base_color -> creature tint
@@ -50,6 +51,66 @@
 #include <system_error>
 
 namespace Luminumbra::Client::ScenarioHarness {
+
+void PinComparisonAtmosphere(Luminumbra::Rendering::RenderPipeline& pipeline,
+                             const std::filesystem::path& particle_data_root,
+                             const glm::vec3& camera_position,
+                             bool rain) {
+    const auto state = BuildComparisonAtmosphere(rain);
+    presentation_clock.set_capture_tick(kComparisonPresentationTick, kComparisonPresentationRate);
+    pipeline.set_time_of_day_hold(true);
+    pipeline.set_weather_state(state.weather);
+    pipeline.set_cloud_state(state.clouds);
+    pipeline.set_lightning_state({});
+    if (auto* particles = pipeline.particles()) {
+        const auto& frame_weather = pipeline.get_weather_state();
+        particles->set_precipitation(particle_data_root,
+                                     camera_position,
+                                     frame_weather.rain_intensity,
+                                     frame_weather.snow_intensity);
+        particles->set_wind(frame_weather.wind_direction * frame_weather.wind_strength * 8.0f);
+    }
+}
+
+nlohmann::json ResolvedAtmosphereToJson(const Luminumbra::Rendering::RenderPipeline& pipeline) {
+    const auto& weather = pipeline.get_weather_state();
+    const auto& clouds = pipeline.get_cloud_state();
+    const auto& seconds = presentation_clock.capture_seconds();
+    const auto* particles = pipeline.particles();
+    const auto vector3 = [](const glm::vec3& value) {
+        return nlohmann::json::array({value.x, value.y, value.z});
+    };
+    return {{"weather",
+             {{"driven", weather.driven},
+              {"type", static_cast<int>(pipeline.get_weather_type())},
+              {"intensity", pipeline.get_weather_intensity()},
+              {"rain_intensity", weather.rain_intensity},
+              {"snow_intensity", weather.snow_intensity},
+              {"fog_density", weather.fog_density},
+              {"storm_intensity", weather.storm_intensity},
+              {"wetness", weather.wetness},
+              {"wind_direction", vector3(weather.wind_direction)},
+              {"wind_strength", weather.wind_strength}}},
+            {"clouds",
+             {{"enabled", clouds.enabled},
+              {"shadow_enabled", clouds.shadow_enabled},
+              {"coverage_amount", clouds.coverage_amount},
+              {"biome_variation", clouds.biome_variation},
+              {"plane_height", clouds.plane_height},
+              {"shadow_strength", clouds.shadow_strength},
+              {"scroll_offset", {clouds.scroll_offset.x, clouds.scroll_offset.y}},
+              {"sun_travel_dir", vector3(clouds.sun_travel_dir)}}},
+            {"presentation_seconds", seconds ? nlohmann::json(*seconds) : nlohmann::json(nullptr)},
+            {"time_of_day", pipeline.get_time_of_day()},
+            {"season_tick", pipeline.get_season_tick()},
+            {"lightning_active", pipeline.get_lightning_state().active},
+            {"particles",
+             {{"available", particles != nullptr},
+              {"wind_velocity",
+               particles ? vector3(particles->wind_velocity()) : nlohmann::json(nullptr)},
+              {"live_count", particles ? particles->live_particle_count() : 0u},
+              {"frame_instance_count", particles ? particles->frame_instance_count() : 0u}}}};
+}
 
 // --- Weather visual smoke ---
 
@@ -114,7 +175,8 @@ AnalyzeWeatherPixels(const std::vector<unsigned char>& pixels, int width, int he
 }
 
 nlohmann::json WeatherPixelStatsToJson(const WeatherPixelStats& stats) {
-    return {{"width", stats.width},
+    return {{"atmosphere", stats.atmosphere},
+            {"width", stats.width},
             {"height", stats.height},
             {"sky_roi_pixels", stats.sky_roi_pixels},
             {"sky_mean_luminance", stats.sky_mean_luminance},

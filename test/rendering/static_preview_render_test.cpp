@@ -108,7 +108,7 @@ bool RendererMatches(bool native,
     return true;
 }
 size_t Coverage(const StaticFrame& frame) {
-    return std::count(frame.coverage8.begin(), frame.coverage8.end(), 1);
+    return static_cast<size_t>(std::count(frame.coverage8.begin(), frame.coverage8.end(), 1));
 }
 std::uint64_t Sum(const StaticFrame& frame, size_t channel) {
     std::uint64_t result = 0;

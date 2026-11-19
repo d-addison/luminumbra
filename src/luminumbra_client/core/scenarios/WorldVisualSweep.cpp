@@ -25,6 +25,7 @@
 #include "luminumbra_common/world/WorldStreamingState.h"
 #include "rendering/Camera.h"
 #include "rendering/LightningBolt.h"
+#include "rendering/WaterVisibility.h"
 #include "rendering/passes/FoliagePass.h"
 #include "rendering/passes/ParticlePass.h"
 // lockstep transport seam (engine-generic; ILockstepTransport +
@@ -97,6 +98,9 @@ struct SweepCell {
     double cloud_coverage = 0.0;
     std::uint64_t water_like_pixels = 0;
     double water_like_ratio = 0.0;
+    std::uint64_t visible_water_pixels = 0;
+    bool water_mask_valid = false;
+    std::string water_mask_file;
 };
 
 // Whole-frame mean luminance + a water-like pixel count (teal/blue, the same
@@ -139,6 +143,19 @@ void MeasureSweepFrame(const std::vector<unsigned char>& pixels,
     out_non_black = (static_cast<double>(non_black_px) / static_cast<double>(total)) > 0.02;
     out_water_pixels = water_px;
     out_water_ratio = static_cast<double>(water_px) / static_cast<double>(total);
+}
+
+bool WriteSweepWaterMask(const std::filesystem::path& path,
+                         const Luminumbra::Rendering::WaterVisibilityMask& mask) {
+    if (!mask.valid()) {
+        return false;
+    }
+    // At most kMaxPixels RGB triples, checked by mask.valid().
+    std::vector<unsigned char> rgb(mask.pixels.size() * 3u);
+    for (std::size_t i = 0; i < mask.pixels.size(); ++i) {
+        std::fill_n(rgb.begin() + static_cast<std::ptrdiff_t>(i * 3u), 3, mask.pixels[i]);
+    }
+    return WritePixelBufferPpm(path, mask.width, mask.height, rgb);
 }
 
 // Builds the per-chunk foliage scatter over the visible live ring (mirrors the
@@ -271,28 +288,22 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
     const float eye_y = std::max(land_terrain_h, Luminumbra::SEA_LEVEL) + 2.5f;
     const Luminumbra::Vec3 anchor(land.x, eye_y, land.z);
 
-    // Keep the water focus inside the anchor's live ring. The spawn-centred
-    // water search can select a distant ocean hidden behind intervening land.
-    // At most 169 height queries, once per sweep.
-    WaterVisualCameraTarget water_target;
-    float nearest_water_distance_sq = std::numeric_limits<float>::max();
-    for (int dz = -96; dz <= 96; dz += 16) {
-        for (int dx = -96; dx <= 96; dx += 16) {
-            const float x = anchor.x + static_cast<float>(dx);
-            const float z = anchor.z + static_cast<float>(dz);
-            const float height = world_system->GetTerrainHeightAt(x, z);
-            const float distance_sq = static_cast<float>(dx * dx + dz * dz);
-            if (height < Luminumbra::SEA_LEVEL - 0.5f && distance_sq < nearest_water_distance_sq) {
-                nearest_water_distance_sq = distance_sq;
-                water_target.found = true;
-                water_target.focus = Luminumbra::Vec3(x, Luminumbra::SEA_LEVEL + 0.1f, z);
-            }
-        }
-    }
+    // Resolve a local open patch and sample the sight lines from a dedicated
+    // water eye. GPU evidence below validates actual resident geometry as well.
+    const auto water_target = FindWaterVisibilityTarget(
+        glm::vec3(anchor), Luminumbra::SEA_LEVEL, [world_system](float x, float z) {
+            return world_system->GetTerrainHeightAt(x, z);
+        });
     if (!water_target.found) {
-        LUMINUMBRA_CORE_ERROR("world_visual_sweep: no water target in the anchor's live ring.");
+        LUMINUMBRA_CORE_ERROR("world_visual_sweep: no unobstructed local water target.");
         return false;
     }
+    struct WaterCaptureScope {
+        RenderPipeline* pipeline;
+        ~WaterCaptureScope() {
+            pipeline->set_water_visibility_capture_enabled(false);
+        }
+    } water_capture_scope{pipeline};
 
     // --- foliage scatter (drives the down-daytime cells) -------------------
     bool foliage_ready = false;
@@ -347,10 +358,9 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
 
     // Apply the camera framing for an angle at the anchor.
     const auto apply_angle = [&](const SweepAngle& a) {
+        pipeline->set_water_visibility_capture_enabled(a.aim_at_water);
         if (a.aim_at_water && water_target.found) {
-            // Keep the shared anchor; aim down at the resolved water focus so the
-            // water/shore cell frames the open water + shoreline.
-            camera->Position = anchor;
+            camera->Position = water_target.eye;
             camera->Zoom = 70.0f;
             AimCameraAt(camera, water_target.focus);
         } else {
@@ -396,9 +406,9 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
         return ok;
     };
 
-    // One-time WARMUP: stream the fixed-anchor world to readiness + warm the sky
-    // LUT before the matrix so per-cell settle can stay small. The anchor position
-    // never changes across the matrix, so this geometry is reused by every cell.
+    // One-time WARMUP: stream the land anchor's ring to readiness + warm the
+    // sky LUT so per-cell settle can stay small. The dedicated water eye and
+    // checked patch stay inside this ring; every cell reuses its geometry.
     pipeline->set_time_of_day(0.0f);
     camera->Position = anchor;
     AimCameraAt(camera, water_target.focus);
@@ -435,18 +445,38 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
                               water_indices_drawn);
         return false;
     }
+    // Validate the selected terrain patch against the actual depth-tested draw,
+    // with a fixed three-frame budget. Refuse instead of falling back to sky hue.
+    camera->Position = water_target.eye;
+    camera->Zoom = 70.0f;
+    AimCameraAt(camera, water_target.focus);
+    pipeline->set_water_visibility_capture_enabled(true);
+    const bool target_rendered = render_settled(3);
+    const bool target_mask_written = WriteSweepWaterMask(
+        sweep_dir / "water-target-validation.water-mask.ppm", pipeline->water_visibility_mask());
+    if (!target_rendered || !target_mask_written ||
+        pipeline->water_visibility_mask().visible_pixels_in_target() == 0) {
+        LUMINUMBRA_CORE_ERROR(
+            "world_visual_sweep: verified water target has no visible water or capture failed "
+            "(eye={},{},{} focus={},{},{} mask_written={}).",
+            water_target.eye.x,
+            water_target.eye.y,
+            water_target.eye.z,
+            water_target.focus.x,
+            water_target.focus.y,
+            water_target.focus.z,
+            target_mask_written);
+        return false;
+    }
     // Residency may have changed completely since spawn. Build scatter from the
     // settled anchor's chunks, then reuse it throughout the fixed-anchor matrix.
     chunk_scatter = BuildSweepFoliageScatter(world_system);
 
     // Drive the renderer state for a weather condition, returning whether
     // lightning is active + cloud coverage so the manifest can record them.
-    const auto apply_weather = [&](bool storm,
-                                   double elapsed_phase,
-                                   bool& out_lightning,
-                                   double& out_cloud_cov) {
-        out_lightning = false;
-        out_cloud_cov = 0.0;
+    const auto apply_weather = [&](bool storm, double phase, bool& lightning, double& cloud_cov) {
+        lightning = false;
+        cloud_cov = 0.0;
         WeatherRenderState wstate;
         CloudRenderState cstate;
         LightningRenderState lstate; // default inactive
@@ -468,8 +498,8 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
             cstate.coverage_amount = 0.85f;
             cstate.plane_height = 900.0f;
             cstate.shadow_strength = 0.6f;
-            cstate.scroll_offset = glm::vec2(static_cast<float>(elapsed_phase) * 22.0f, 0.0f);
-            out_cloud_cov = cstate.coverage_amount;
+            cstate.scroll_offset = glm::vec2(static_cast<float>(phase) * 22.0f, 0.0f);
+            cloud_cov = cstate.coverage_amount;
 
             // Rain particles at the camera, with the same fill time in every cell.
             if (particles != nullptr) {
@@ -477,109 +507,33 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
                                        glm::vec3(camera->Position));
                 particles->set_wind(glm::vec3(4.0f, 0.0f, 1.0f));
             }
-            // Periodic lightning: fire a deterministic bolt on the storm cells.
-            //  (defect 3): a stronger pulse so the strike
-            // clearly READS over the dark night-storm dome (the old 0.18 pulse was
-            // nearly invisible once the storm dimmed the already-dark night frame).
+            // Keep one strike fixed in the world across every yaw and pitch.
+            // Only its true projection may enter or leave the viewport.
             lstate.active = true;
             lstate.pulse_intensity = 0.42f;
             lstate.bolt_width_ndc = 0.010f;
             lstate.bolt_glow_ndc = 0.034f;
-            lstate.cloud_darkness = 0.5f;
-            const glm::vec3 fwd = glm::normalize(glm::vec3(camera->Front.x, 0.0f, camera->Front.z));
-            // TOUCHDOWN. The strike terminus is a REAL
-            // ground point ahead of the camera -- the terrain height at (x,z), not the
-            // camera's eye level. The bolt's bottom is that ground point so the channel
-            // spans cloud -> terrain and ends ON the surface rather than dangling in
-            // mid-air at the horizon. The strike is placed near enough that the
-            // touchdown projects inside the frame for the horizon/down framings.
-            const glm::vec3 strike_xz = glm::vec3(camera->Position) + fwd * 150.0f;
+            const glm::vec3 strike_xz = glm::vec3(anchor) + glm::vec3(150.0f, 0.0f, 0.0f);
             const float ground_y = world_system->GetTerrainHeightAt(strike_xz.x, strike_xz.z);
-            const glm::vec3 strike_ground(strike_xz.x, ground_y, strike_xz.z);
-            const LightningBoltGeometry bolt = BuildLightningBolt(strike_ground.x,
-                                                                  strike_ground.y,
-                                                                  strike_ground.z,
-                                                                  /*magnitude=*/0.9f,
-                                                                  /*strike_seed=*/0x5A5A1357ull);
-            // PROJECT the bolt through the ACTUAL render camera (perspective-correct,
-            // distance-aware) so the cloud-base top and the terrain terminus land at
-            // their true screen positions. The old code projected each world point as
-            // a DIRECTION to infinity (ProjectDirectionToScreen), which ignored range
-            // and collapsed the descending channel onto the horizon line -- the bolt
-            // appeared to stop in mid-air well above the ground. We project real world
-            // positions and lay the seeded jagged channel along the screen line from
-            // the cloud base down to the projected touchdown.
-            const int proj_w = fb_w > 0 ? fb_w : 1280;
-            const int proj_h = fb_h > 0 ? fb_h : 720;
+            const auto bolt =
+                BuildLightningBolt(strike_xz.x, ground_y, strike_xz.z, 0.9f, 0x5A5A1357ull);
+            const int proj_w = std::max(1, fb_w);
+            const int proj_h = std::max(1, fb_h);
             const glm::mat4 viewproj =
                 camera->GetProjectionMatrix(proj_w, proj_h) * camera->GetViewMatrix();
-            const glm::vec3 bolt_top = bolt.main_channel.front();
-            const glm::vec3 bolt_bottom = bolt.main_channel.back();
-            const float span_y = std::max(1e-3f, bolt_top.y - bolt_bottom.y);
-            const auto project = [&](const glm::vec3& wp, bool& ok) -> glm::vec2 {
-                const glm::vec4 clip = viewproj * glm::vec4(wp, 1.0f);
-                ok = clip.w > 1e-4f;
-                if (!ok)
-                    return glm::vec2(0.0f);
-                return glm::vec2(clip.x / clip.w, clip.y / clip.w);
-            };
-            bool top_ok = false, bot_ok = false;
-            glm::vec2 top_ndc = project(bolt_top, top_ok);
-            glm::vec2 bot_ndc = project(bolt_bottom, bot_ok);
-            // Anchor the bolt TOP just below the top edge so the dark storm-cloud deck
-            // is visible above the origin. The BOTTOM goes onto the projected ground
-            // terminus, clamped just inside the frame so the touchdown stays visible
-            // even when the camera pitch projects the ground point low or (looking up)
-            // off the bottom edge.
-            const float top_ndc_y = top_ok ? std::min(top_ndc.y, 0.74f) : 0.74f;
-            // Whether the real ground terminus is genuinely on-screen (in front of the
-            // camera and within the frame). This gates the ground-impact flash so it is
-            // anchored at the actual touchdown -- never a hovering disc at frame centre.
-            const bool ground_on_screen = bot_ok && bot_ndc.x >= -1.0f && bot_ndc.x <= 1.0f &&
-                                          bot_ndc.y >= -1.0f && bot_ndc.y <= 1.0f;
-            const float ground_ndc_y = bot_ok ? std::clamp(bot_ndc.y, -0.96f, 0.55f) : -0.92f;
-            const float column_ndc_x = bot_ok ? std::clamp(bot_ndc.x, -0.85f, 0.85f) : 0.0f;
-            const float kLateralToNdc = 1.0f / 260.0f; // modest sideways jag
-            const auto map_point = [&](const glm::vec3& wp) -> glm::vec2 {
-                const float hf = std::clamp((wp.y - bolt_bottom.y) / span_y, 0.0f, 1.0f);
-                const float ndc_y = ground_ndc_y + (top_ndc_y - ground_ndc_y) * hf;
-                const float base_x = bolt_bottom.x + (bolt_top.x - bolt_bottom.x) * hf;
-                const float base_z = bolt_bottom.z + (bolt_top.z - bolt_bottom.z) * hf;
-                const float lateral = (wp.x - base_x) + (wp.z - base_z);
-                const float ndc_x =
-                    column_ndc_x + std::clamp(lateral * kLateralToNdc, -0.14f, 0.14f);
-                return glm::vec2(ndc_x, ndc_y);
-            };
-            const auto push_stroke = [&](const std::vector<glm::vec3>& stroke) {
-                if (!lstate.bolt_points_ndc.empty()) {
-                    lstate.bolt_points_ndc.emplace_back(-3.0f, -3.0f); // pen-up
-                }
-                for (const glm::vec3& wp : stroke) {
-                    lstate.bolt_points_ndc.push_back(map_point(wp));
-                }
-            };
-            push_stroke(bolt.main_channel);
-            for (const auto& br : bolt.branches) {
-                push_stroke(br);
-            }
-            // Flash centre + dark-cloud anchor at the strike column.
-            lstate.strike_ndc = glm::vec2(column_ndc_x, ground_ndc_y);
-            lstate.cloud_anchor_ndc = glm::vec2(column_ndc_x, top_ndc_y);
-            // GROUND-IMPACT bloom ONLY when the real
-            // touchdown is on-screen, anchored AT the projected terminus (the bolt's
-            // bottom). The previous code left u_groundNdc at its default (0, -1) while
-            // forcing u_groundFlash > 0, which painted a hard bright disc at the bottom
-            // centre of every storm frame -- the "floating UFO/saucer" artifact. By
-            // anchoring the bloom to the actual touchdown and disabling it whenever the
-            // strike point is off-screen (camera pitched up so the ground is below the
-            // frame), the impact reads as ground illumination at the strike and the
-            // floating disc is gone.
-            lstate.ground_ndc = glm::vec2(column_ndc_x, ground_ndc_y);
-            // tamer impact bloom. 0.55 over the bright storm
-            // water clipped to a blown-out floating white smear. Drop it to a dim
-            // contact glow; the shader bloom is also tightened + dimmed above.
+            const auto projected = ProjectLightningBolt(bolt, viewproj, lstate.pulse_intensity);
+            const auto margin = LiveBoltViewMargin(
+                lstate.bolt_width_ndc, lstate.bolt_glow_ndc, static_cast<float>(proj_w) / proj_h);
+            auto composed =
+                ComposeLiveStrikes(std::span(&projected, 1), kMaxBoltSegmentPoints, margin);
+            lstate.bolt_points_ndc = std::move(composed.points);
+            lstate.flashes = composed.flashes;
+            lstate.ground_ndc = projected.strike_ndc;
+            const bool ground_on_screen = !IsLiveBoltPenUp(projected.strike_ndc) &&
+                                          std::abs(projected.strike_ndc.x) <= 1.0f &&
+                                          std::abs(projected.strike_ndc.y) <= 1.0f;
             lstate.ground_flash = ground_on_screen ? 0.30f : 0.0f;
-            out_lightning = true;
+            lightning = true;
         } else {
             // Clear: overlay off, rain off, but a FAIR-WEATHER cloud deck that
             // still casts soft drifting shadows on the terrain (user: "make sure
@@ -590,8 +544,8 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
             cstate.coverage_amount = 0.50f;
             cstate.plane_height = 1100.0f;
             cstate.shadow_strength = 0.75f; // pronounced cast shadows (bolder look)
-            cstate.scroll_offset = glm::vec2(static_cast<float>(elapsed_phase) * 14.0f, 0.0f);
-            out_cloud_cov = cstate.coverage_amount;
+            cstate.scroll_offset = glm::vec2(static_cast<float>(phase) * 14.0f, 0.0f);
+            cloud_cov = cstate.coverage_amount;
             // Clear cells also reset the rain wind.
             if (particles != nullptr) {
                 particles->set_wind(glm::vec3(0.0f));
@@ -660,6 +614,13 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
                                           cell.non_black,
                                           cell.water_like_pixels,
                                           cell.water_like_ratio);
+                        if (cell.water_aimed) {
+                            const auto& mask = pipeline->water_visibility_mask();
+                            cell.visible_water_pixels = mask.visible_pixels_in_target();
+                            cell.water_mask_file = cell.file + ".water-mask.ppm";
+                            cell.water_mask_valid =
+                                WriteSweepWaterMask(deps.artifact_dir / cell.water_mask_file, mask);
+                        }
                         const auto capture_path = deps.artifact_dir / cell.file;
                         cell.produced = pipeline->with_diagnostic_capture(
                             capture_path,
@@ -689,7 +650,7 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
     //   * foliage_draws > 0 in the down-pitched DAYTIME cells,
     //   * particle_draws > 0 AND lightning active in the STORM cells,
     //   * cloud coverage > 0 in the up-pitched STORM cells,
-    //   * water-like pixels present in the water-aimed DAYTIME cells.
+    //   * depth-tested water pixels in the target region of every water-aimed cell.
     std::vector<std::string> failures;
     std::size_t produced = 0, non_black = 0;
     for (const SweepCell& c : cells) {
@@ -715,8 +676,11 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
         if (c.pitched_up && c.storm && c.cloud_coverage <= 0.0) {
             failures.push_back("no_clouds:" + c.file);
         }
-        if (c.water_aimed && c.daytime && c.water_like_pixels == 0) {
+        if (c.water_aimed && c.visible_water_pixels == 0) {
             failures.push_back("no_water:" + c.file);
+        }
+        if (c.water_aimed && !c.water_mask_valid) {
+            failures.push_back("missing_water_mask:" + c.file);
         }
         if (c.water_aimed && (c.water_draws == 0 || c.water_indices_drawn == 0)) {
             failures.push_back("no_water_geometry:" + c.file);
@@ -729,6 +693,9 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
     manifest["world_preset"] = "archipelago";
     manifest["anchor"] = Vec3ToJson(anchor);
     manifest["water_target_found"] = water_target.found;
+    manifest["water_eye"] = Vec3ToJson(water_target.eye);
+    manifest["water_focus"] = Vec3ToJson(water_target.focus);
+    manifest["water_target_region"] = "central_half_each_axis";
     manifest["warmup_water_indices_drawn"] = water_indices_drawn;
     manifest["foliage_scatter_loaded"] = foliage_ready;
     manifest["matrix"] = {
@@ -762,6 +729,9 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
             {"cloud_coverage", c.cloud_coverage},
             {"water_like_pixels", c.water_like_pixels},
             {"water_like_ratio", c.water_like_ratio},
+            {"visible_water_pixels", c.visible_water_pixels},
+            {"water_mask_valid", c.water_mask_valid},
+            {"water_mask_file", c.water_mask_file},
             {"pitched_down", c.pitched_down},
             {"pitched_up", c.pitched_up},
             {"water_aimed", c.water_aimed},
@@ -774,8 +744,8 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
     const bool passed = failures.empty() && produced == cells.size();
     manifest["passed"] = passed;
 
-    std::ofstream out(deps.artifact_dir / "world-visual-sweep-manifest.json");
-    out << std::setw(2) << manifest << '\n';
+    const bool manifest_written = WriteCaptureText(
+        deps.artifact_dir / "world-visual-sweep-manifest.json", manifest.dump(2) + "\n");
 
     LUMINUMBRA_CORE_INFO(
         "world_visual_sweep: {} cells, {} produced, {} non-black, {} failures (passed={})",
@@ -784,7 +754,7 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
         non_black,
         failures.size(),
         passed);
-    return passed;
+    return passed && manifest_written;
 }
 
 } // namespace Luminumbra::Client::ScenarioHarness

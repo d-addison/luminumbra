@@ -129,7 +129,7 @@ public:
     FarVolumeBuildQueue(const FarVolumeBuildQueue&) = delete;
     FarVolumeBuildQueue& operator=(const FarVolumeBuildQueue&) = delete;
 
-    // Equal identity freezes intent and numeric/cave semantics. Replacement
+    // Equal live identity freezes intent and numeric/cave semantics. Replacement
     // cancels old work, then starts the latest only after its handle is reaped.
     FarVolumeSubmitStatus Submit(const FarVolumeQueueRequest& request);
     // Reap completed handles, then start at most max_dispatches Normal jobs.
@@ -144,6 +144,8 @@ public:
     // Constant-time admission check; call after Pump(0) to reap finished work.
     std::size_t ResultCapacity(std::size_t retained_results = 0) const;
     void Cancel(const World::FarTileKey& key);
+    // End the key's contract immediately; returning work may use fresh intent.
+    // Cancelled worker storage stays reserved until its handle is reaped.
     void Forget(const World::FarTileKey& key);
     // Visit each descriptor once for a transactional owner's retirement pass.
     // The nonthrowing predicate borrows a key; it must not mutate/reenter this

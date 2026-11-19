@@ -5,6 +5,7 @@
 #include "luminumbra_common/core/SystemConfig.h"
 #include "nlohmann/json.hpp"
 #include "rendering/DiagnosticCapture.h"
+#include "rendering/TemporalAudit.h"
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
@@ -243,6 +244,13 @@ struct RuntimeScenarioConfig {
     bool requires_pinned_capture() const {
         return active();
     }
+
+    // Capture feature selection only; producer policy is resolved separately.
+    enum class FeatureProfile {
+        None,
+        AllFeatures
+    };
+    FeatureProfile capture_feature_profile = FeatureProfile::None;
 };
 
 RuntimeScenarioConfig
@@ -279,4 +287,16 @@ struct GLDebugRuntimeStats {
 
 GLDebugRuntimeStats CurrentGLDebugRuntimeStats();
 
+// Strict, side-effect-free admission shared by both launch parsers.
+RuntimeScenarioConfig::FeatureProfile ParseCaptureFeatureProfile(int argc, char* argv[]);
+
+} // namespace Luminumbra::Client::ScenarioHarness
+
+// Temporal plan admission is independent of runtime execution capability.
+namespace Luminumbra::Client::ScenarioHarness {
+// Returns absent only when no temporal options were supplied. Invalid plans
+// throw invalid_argument with a reason. No world or output is created.
+std::optional<Rendering::TemporalAuditPlan> ParseTemporalAuditPlanOptions(int argc, char* argv[]);
+// Shipping startup refuses execution until the tick driver is available.
+void RefuseUnsupportedTemporalAuditExecution(int argc, char* argv[]);
 } // namespace Luminumbra::Client::ScenarioHarness

@@ -6,10 +6,12 @@
 // snapshotted (regression review). The byte-equal and seed-derivation guarantees
 // asserted here are exactly what the ParticleEmitterDeterminism gate relies on.
 
+#include "../support/UniqueTempPath.h"
 #include "rendering/passes/ParticlePass.h"
 
 #include <glad/glad.h>
 #include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <array>
@@ -75,12 +77,18 @@ protected:
     static void GLAPIENTRY GenerateNames(GLsizei count, GLuint* names) {
         std::fill_n(names, count, 0u); // No GPU objects; labels/deletion are no-ops.
     }
-    static void* GLAPIENTRY MapInstances(GLenum, GLintptr offset, GLsizeiptr bytes, GLbitfield) {
+    struct MappedStorage {
+        std::array<ParticlePass::InstanceRecord, ParticlePass::kMaxInstances> records{};
+    };
+    static MappedStorage& Mapping() {
         // One bounded CPU mapping suffices: update writes only one ring per call.
-        static std::array<ParticlePass::InstanceRecord, ParticlePass::kMaxInstances> records{};
+        static MappedStorage storage;
+        return storage;
+    }
+    static void* GLAPIENTRY MapInstances(GLenum, GLintptr offset, GLsizeiptr bytes, GLbitfield) {
         EXPECT_EQ(offset, 0);
-        EXPECT_EQ(bytes, static_cast<GLsizeiptr>(sizeof(records)));
-        return records.data();
+        EXPECT_EQ(bytes, static_cast<GLsizeiptr>(sizeof(MappedStorage)));
+        return Mapping().records.data();
     }
 
     ParticlePass pass;
@@ -121,6 +129,42 @@ void ExpectParticleStates(const ParticlePass& pass,
 }
 
 } // namespace
+
+TEST_F(ParticleLiveTest, AmbientFlagPreservesEveryAuthoredLayer) {
+    constexpr std::array<uint16_t, 6> layers{0, 1, 2, 3, 4, 65535};
+    const Luminumbra::TestSupport::ScopedTempFile fixture("particle-layers-", ".json");
+    std::ifstream input(FixtureEmitter());
+    ASSERT_TRUE(input);
+    nlohmann::json authored;
+    input >> authored;
+    for (const auto layer : layers) {
+        authored["atlas_layer"] = layer;
+        std::ofstream output(fixture.Path());
+        output << authored.dump();
+        output.close();
+        ASSERT_TRUE(output);
+        ASSERT_NE(pass.add_emitter(fixture.Path(), glm::vec3(0.0f)), ParticlePass::kInvalidEmitter);
+    }
+    pass.update_ambient_motes(SourceRoot(), glm::vec3(0.0f));
+    pass.rebuild_emitter_descriptors(777u, 10u);
+    for (int frame = 0; frame < 4; ++frame) {
+        pass.update(0.125f); // Exercise every ring and its reuse with mixed emitters.
+        const auto states = pass.live_particle_states();
+        ASSERT_EQ(states.size(), pass.frame_instance_count());
+        std::array<std::size_t, layers.size() + 1> seen{};
+        for (std::size_t index = 0; index < states.size(); ++index) {
+            const auto emitter = states[index].emitter_index;
+            ASSERT_LT(emitter, seen.size());
+            ++seen[emitter];
+            const bool ambient = emitter == layers.size();
+            EXPECT_EQ(Mapping().records[index].atlas_layer, ambient ? 0 : layers[emitter]);
+            EXPECT_EQ(Mapping().records[index].rotation == -128, ambient);
+        }
+        for (const auto count : seen) {
+            EXPECT_GT(count, 0u);
+        }
+    }
+}
 
 // Instance record stays a fixed 24-byte POD (pinned stride, documented design).
 TEST(ParticleDeterminism, InstanceRecordIs24Bytes) {
