@@ -7603,9 +7603,12 @@ std::shared_ptr<Chunk> SHIELD_WorldSystem::resolve_water_column(const IVec3& coo
     if (live != m_streaming_state.chunks.end()) {
         live->second->invalidate_near_terrain_snapshot();
         m_activation_index.erase(*live->second);
+        invalidate_column_water_mesh(*live->second);
         note_digest_chunk(live->second, false, false);
         live->second = chunk;
+        // The replacement can change the column's water source for every owner.
         m_activation_index.insert(chunk);
+        invalidate_column_water_mesh(*chunk);
         m_activation_index.content_changed(coords);
         note_digest_chunk(chunk, false, true);
         invalidate_renderable_chunks();

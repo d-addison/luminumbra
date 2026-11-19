@@ -228,8 +228,14 @@ class UploadBudgetWiring(unittest.TestCase):
                       compact(retirement))
         clear = body(world, "void ClearUnavailableWaterMesh(")
         self.assertIn("if (resident == end)", clear)
-        self.assertIn("ClearPublishedWaterMesh(world_system, *resident->second);", clear)
-        self.assertIn("++resident->second->water_mesh_owner_version;", clear)
+        self.assertIn("Chunk& owner = *resident->second;", clear)
+        self.assertIn("ClearPublishedWaterMesh(world_system, owner);", clear)
+        # Clearing published geometry publishes the empty replacement's version.
+        self.assertLess(clear.index("const bool had_geometry"),
+                        clear.index("ClearPublishedWaterMesh(world_system, owner);"))
+        self.assertIn("if (had_geometry) {", compact(clear))
+        self.assertIn("owner.water_mesh_version.fetch_add(1);", clear)
+        self.assertIn("++owner.water_mesh_owner_version;", clear)
         self.assertIn("for (const auto id : invalidations)", propagation)
         self.assertIn("++m_water_column_mesh_work.pending_visits;", propagation)
         self.assertIn("columns.insert(key).second", propagation)
