@@ -1056,11 +1056,25 @@ void ExpectWaterMeshRetirement(SHIELD_WorldSystem& world,
         {chunk->get_id(), chunk}};
     water.update(registry, participants); // re-seed at the session grid
     ASSERT_TRUE(chunk->has_water_sim.load());
-    chunk->current_lod.store(1);
+    // Every resident layer renders this column's grid, so the whole stack is coarse.
+    std::vector<std::shared_ptr<Chunk>> column;
+    for (int y = -8; y <= 8; ++y) {
+        const auto coords = chunk->get_coords();
+        if (auto layer = world.find_streamed_chunk(IVec3(coords.x, y, coords.z))) {
+            column.push_back(std::move(layer));
+        }
+    }
+    ASSERT_FALSE(column.empty());
+    for (const auto& layer : column) {
+        ASSERT_EQ(layer->current_lod.load(), 0);
+        layer->current_lod.store(1);
+    }
     world.update(registry, anchor, nullptr, false);
     EXPECT_TRUE(water.mesh_invalidations().empty());
     EXPECT_EQ(world.activation_index_counters().span_cache_hits, hits);
-    chunk->current_lod.store(0);
+    for (const auto& layer : column) {
+        layer->current_lod.store(0);
+    }
 
     auto absent = std::make_shared<Chunk>(IVec3(64, 0, 0));
     const std::unordered_map<ChunkID, std::shared_ptr<Chunk>> nonresidents = {
