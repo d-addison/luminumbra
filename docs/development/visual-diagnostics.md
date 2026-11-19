@@ -16,18 +16,23 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | Deferred attribution producers | Implemented inside a leased deferred scope | `GBufferTargets.h` and `GBufferPass.cpp` add a render-thread producer scope, capture-local draw identities and explicit unsupported records; `g_buffer.frag` and `foliage.frag` have additive `LUMIN_DIAG_IDS` outputs; registered `DiagnosticAttribution.*` source-contract and `DiagnosticAttributionGl.*` hidden-GL regressions in `render_smoke_test`; native execution pending |
 | G-buffer ID attachment | Implemented for explicit deferred captures | `GBufferPass` holds an `AttachmentLease` during deferred submission; detachment and lease release precede completion, including rollback, recreation, retirement and exceptional exits; registered `GBufferLeaseGl.*` and `DiagnosticAttributionGl.*` regressions; native execution pending |
 | Exact producer coverage | Partial | Inside an explicit producer scope, file-backed static instances and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier with unsupported generated-mesh metadata. Live terrain MDI, ladder backend, authored surfaces and tree impostors explicitly invalidate coverage; procedural static meshes also remain unsupported. Later plant/decal stages are outside the scope. Foliage has a guarded shader output but no instrumented forward submission; the separate contributor attachment API is unused |
-| Readback and scenario opt-in | Planned | Requires scenario capture integration and completion of the unsupported producer paths |
+| Bundle transactions and opt-in admission | GL-free core implemented; runtime integration pending | `DiagnosticCapture.h/.cpp` resolves options, streams normalized planes, joins draw records, enforces staging budgets and publishes completion last using identity-checked ownership. `diagnostic_bundle_test` covers public transports and filesystem refusal/rollback; native execution pending. Runtime setup refuses enabled diagnostics before output until the completed-frame adapter is integrated |
 | Debug views and inspector | Planned | Extend `DebugViewPass` and developer console widgets |
 | Linux shader compilation and software-GL reference scenes | Partial | Fast Linux steps and material, cutout, night and terrain fixtures registered; bounded sky/terrain shader replays checked under llvmpipe; native scene target execution pending; dusk continuity diagnostic pending issue #918; no required-check or ruleset changes |
-| Automated image checks | Planned | Bundle-aware checks alongside existing render-health gates |
+| Bundle validity checks | Implemented for schema 1 | `check-diagnostic-capture.py` and registered `DiagnosticCapturePython` synthetic regressions validate bundles without a renderer. Qualified image metrics remain planned |
 | Capture feature profile and capability manifest | Implemented as GL-free setup logic; app wiring pending | `CaptureFeatureProfile.h/.cpp`; strict `--capture-feature-profile=none\|all_features` runtime selection; registered `CaptureFeatureProfile.*` regressions; native execution pending |
 | Temporal audit plans and admission | Implemented as GL-free planning only; runtime execution refused | `TemporalAudit.h/.cpp`, `RuntimeScenarioConfig.h/.cpp`; registered `TemporalAudit.*` regressions in `capture_manifest_test`; native execution pending |
 | Temporal sequences and non-vacuous evidence (E1–E3) | Planned; gap inventory below describes current capture code | Exact-tick site execution, temporal metrics, shared producer policy and non-vacuous feature evidence require implementation; existing captures do not establish this coverage |
 
-The codecs and standalone helpers do not create scenario bundles or enable a runtime
-flag. The capture test target uses modeled GL entry points for target lifecycle tests;
+The GL-free bundle writer can publish supplied immutable completed-frame planes.
+Runtime scenario capture does not yet supply those planes or enable diagnostics.
+The capture test target uses modeled GL entry points for target lifecycle tests;
 rendering submits attribution only inside an explicitly constructed
-`GBufferDiagnosticCapture`. No runtime option constructs that scope yet. The client
+`GBufferDiagnosticCapture`. No runtime option constructs that scope yet.
+Diagnostic options are admitted once
+in `ParseRuntimePathOptions`, before save-root creation: malformed input is refused,
+and enabled diagnostics receive an explicit unavailable-adapter error. The pure
+resolver accepts valid CLI/environment options for the pending adapter. The client
 source manifest includes the codecs.
 
 `DiagnosticTargets` owns a lazy RGBA32UI texture and standalone framebuffer, capped
@@ -181,9 +186,15 @@ Both codecs cap dimensions at 16,384 and total pixels at 16,777,216, validate ex
 span sizes before writing and use only 4 KiB scratch storage. Material/ID refusal
 validates the entire bounded plane before writing. Work is O(pixels), at most two
 plane traversals; probes are O(1). The caller owns stable completed-frame buffers
-until serialization finishes. The future adapter should stream one plane at a time
-and cap aggregate CPU/GPU staging at 512 MiB before allocation; refuse a bundle
-that cannot fit. Do not allocate all full-resolution planes speculatively.
+until serialization finishes. The bundle core streams one plane at a time and
+caps aggregate CPU/GPU staging
+at 512 MiB before image allocation. Callers must account for all retained GPU and
+source/output CPU staging, including the draw registry; the core additionally
+reserves one largest plane, 4 KiB codec scratch and 64 MiB bounded serialization
+workspace. It preflights each source plane before reservation, then reads each
+again during serialization; the completed-frame source must remain immutable.
+No full multi-plane frame is allocated. The GL adapter must check capabilities
+and this budget before allocating diagnostic GPU storage.
 
 `BuildDiagnosticProbe` emits the following schema (numeric enums match the ID):
 
@@ -199,7 +210,7 @@ coordinates, material IDs or encoded identities return an empty string. The call
 must join draw/mesh IDs to the bundle's tables; unresolved entries are errors.
 Probe values must come from the exact same pixel and frame as the serialized AOVs.
 
-Publishing is planned as a complete new bundle transaction: validate all inputs and
+The GL-free writer implements a complete new bundle transaction: validate inputs and
 budgets first, reserve a fresh destination without replacing an existing bundle,
 write payloads, check stream/flush/close failures, and publish completion metadata
 last. Partial bytes after I/O failure are unpublished; clean up only artifacts this
@@ -207,6 +218,39 @@ transaction owns, verifying identity on removal. Codecs take streams and perform
 no path checks, opens, deletes or publication themselves. No asynchronous worker
 may sample live mutable draw tables. PNG success alone cannot mark diagnostics
 complete. Unsupported contributors must be declared in metadata.
+
+The remaining scenario integration must keep one capture scope around the exact
+completed frame, account for later deferred writes and forward contributors,
+restore GL readback/pack state, decode the actual G-buffer attachments and link
+the existing completed capture manifest. All sweep callbacks, standalone benchmark,
+headless, timed-scenario and motion captures must use that adapter. No producer
+coverage is inferred by the transaction core. This split keeps the GL-free changes
+within the delivery file budget; no runtime capture success is claimed yet.
+
+Validate one bundle directory, a completion JSON, or a recursive capture tree with
+`python3 -I -B tools/gates/check-diagnostic-capture.py PATH`. Exit 0 means valid,
+1 reports an invalid bundle, and 2 means usage or operating-system I/O failure.
+The reader refuses unknown schemas, incomplete publication, mismatched file lists,
+PFM/ID sizes or dimensions, unresolved identities, implicit unsupported producers
+and probes that disagree with any plane at the same top-left pixel. It reports
+nonfinite sample counts per plane as invalid diagnostic findings; the wire format
+still preserves those values. Explicit unsupported forward records are valid for
+the labeled deferred-only surface; unsupported deferred coverage is refused.
+
+Schema 1 lists member names, without stored size fields. Binary sizes are checked
+exactly against dimensions before scanning; table/probe JSON is bounded to
+16 MiB, completion to 16 MiB plus 64 KiB for its envelope, and capture manifests
+to 1 MiB. Plane scans
+use at most 4 KiB chunks. JSON integer tokens are capped at 128 characters before
+conversion, including on older Python versions. Tree discovery stops at 100,000 entries and refuses
+descendant links; a selected root alias is allowed. Reads use verified regular-file
+handles on both POSIX and Windows. Completion must be the final file-list member
+and cannot be older than any payload. Equal timestamps are allowed for coarse
+filesystems; timestamps and schema-1 names cannot prove historical write order or
+content integrity after a deliberate rewrite. No checksum or size field is invented.
+`diff-render-health.ps1 -CapturePath PATH` optionally invokes this reader when
+`PATH.diagnostics.json` exists. Without that sidecar the existing comparison stays
+unchanged. No required CI check or runtime capture adapter is added.
 
 ## B: views and inspector
 

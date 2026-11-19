@@ -72,6 +72,67 @@ class UploadBudgetWiring(unittest.TestCase):
                            "NearBushesUseFullLeafQuadsAndNeverTerrainGrassTexturing"):
             self.assertIn(regression, native)
 
+    def test_waterfall_sheets_retire_excavated_crest_and_landing_before_unknown_water(self):
+        source = read(RENDERING / "WaterfallDetect.cpp")
+        live = compact(body(source, "float LiveWaterFactorAt("))
+        guard = "if (TerrainRemovesAnchor(world, anchor)) { return 0.0f; }"
+        self.assertIn("if (site.terrain_anchors_known == 1)", live)
+        self.assertIn("for (const auto& anchor : site.terrain_anchors)", live)
+        self.assertIn(guard, live)
+        self.assertLess(live.index(guard), live.index("debug_water_grid_at("))
+        self.assertNotIn("GetTerrainHeightAt(", live[:live.index("debug_water_grid_at(")])
+        detect = compact(body(source, "std::vector<WaterfallSite> DetectWaterfalls("))
+        self.assertIn("site.terrain_anchors = std::array{", detect)
+        self.assertIn("site.terrain_anchors_known = 1;", detect)
+        for endpoint in ("crest", "foot"):
+            self.assertIn("world.GetTerrainHeightAt(lip.%s.x, lip.%s.z) - 0.5f" % (endpoint, endpoint), detect)
+        draw = compact(body(read(RENDERING / "passes/WaterfallPass.cpp"),
+                            "void WaterfallPass::execute("))
+        self.assertLess(draw.index("LiveWaterFactorAt("), draw.index("if (live < 0.02f)"))
+        self.assertLess(draw.index("continue;"), draw.index("glDrawArrays"))
+
+    def test_visible_rocks_and_shrubs_check_resident_support_before_batching(self):
+        source = read(RENDERING / "passes/GBufferPass.cpp")
+        cache = compact(body(source, "void GBufferPass::build_static_prop_cache("))
+        self.assertIn('cp.terrainAnchored = bp.starts_with("procgen://rock_") || '
+                      'bp.starts_with("procgen://bush_");', cache)
+        draw = compact(body(source, "void GBufferPass::geometry_pass_static_meshes("))
+        self.assertIn("cp.anchorSlot = slot->second;", cache)
+        # Each anchor chunk resolves once per frame; edited support drops the prop.
+        lookup = "if (cp.anchorSlot < m_anchorChunks.size() && ctx.world_system) {"
+        resolve = "auto chunk = ctx.world_system->find_streamed_chunk(slot.coords); if (chunk && chunk->has_terrain_authority()) {"
+        guard = "if (cp.supportRemoved) { continue; }"
+        # Support is re-evaluated only when the slot's chunk, revision or SDF storage changes.
+        changed = ("if (!same_owner || slot.supportRevision != revision || slot.supportSdf != sdf) {")
+        reeval = ("if (cp.supportGeneration != slot.supportGeneration) { cp.supportRemoved = "
+                  "EditedTerrainRemovesAnchor(slot.chunk.get(), cp.position); "
+                  "cp.supportGeneration = slot.supportGeneration; }")
+        for needle in (lookup, "if (!slot.resolved) { slot.resolved = true;", resolve, guard,
+                       "const auto revision = slot.chunk->voxel_revision();",
+                       "const float* const sdf = slot.chunk->sdf_data.data();",
+                       "!slot.supportOwner.owner_before(slot.chunk) && !slot.chunk.owner_before(slot.supportOwner);",
+                       changed, reeval):
+            self.assertIn(needle, draw)
+        self.assertLess(draw.index(resolve), draw.index(changed))
+        self.assertLess(draw.index(changed), draw.index(reeval))
+        self.assertLess(draw.index(reeval), draw.index(guard))
+        self.assertEqual(draw.count("EditedTerrainRemovesAnchor("), 1)
+        header = compact(read(RENDERING / "passes/GBufferPass.h"))
+        for field in ("mutable std::uint32_t supportGeneration = 0; mutable bool supportRemoved = false;",
+                      "std::weak_ptr<const ::Luminumbra::Chunk> supportOwner;",
+                      "std::uint32_t supportGeneration = 1;"):
+            self.assertIn(field, header)
+        self.assertLess(draw.index("if (culled)"), draw.index(lookup))
+        self.assertLess(draw.index(lookup), draw.index(guard))
+        self.assertLess(draw.index(guard), draw.index("batch.mats.push_back(cp.model)"))
+        support = compact(read(RENDERING / "TerrainAnchor.h"))
+        for check in ("!chunk->has_terrain_authority()", "chunk->sdf_data.size() != volume",
+                      "!std::isfinite(sample)", "density > 0.5f",
+                      "std::floor(static_cast<double>(position[axis]) / CHUNK_SIZE_X)"):
+            self.assertIn(check, support)
+        self.assertNotIn("get_renderable_chunks", support)
+        self.assertNotIn("get_density_at(", support)
+
     def test_renderable_owner_accepts_independent_complete_water_geometry(self):
         world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
         selection = body(world, "SHIELD_WorldSystem::renderable_chunks_view()")

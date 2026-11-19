@@ -1,4 +1,5 @@
 #include "WaterfallDetect.h"
+#include "TerrainAnchor.h"
 
 #include <algorithm>
 #include <cmath>
@@ -308,6 +309,12 @@ std::vector<WaterfallSite> DetectWaterfalls(const Luminumbra::Systems::SHIELD_Wo
         site.flow_dir = lip.flow;
         site.steepness = lip.steepness;
         site.lake_outlet = lip.lake_outlet;
+        site.terrain_anchors = std::array{
+            Vec3(lip.crest.x,
+                 world.GetTerrainHeightAt(lip.crest.x, lip.crest.z) - 0.5f,
+                 lip.crest.z),
+            Vec3(lip.foot.x, world.GetTerrainHeightAt(lip.foot.x, lip.foot.z) - 0.5f, lip.foot.z)};
+        site.terrain_anchors_known = 1;
         sites.push_back(site);
     }
 
@@ -399,6 +406,16 @@ WaterfallSiteCache::sites_for(const Luminumbra::Systems::SHIELD_WorldSystem& wor
 float LiveWaterFactorAt(const Luminumbra::Systems::SHIELD_WorldSystem& world,
                         const WaterfallSite& site,
                         float full_depth) {
+    // Geometry is baked at world entry. A water-epoch cache re-key does not
+    // replace those vertices. Retire dressing whose generated bank or landing
+    // has since been excavated, even if the upstream column is still wet.
+    if (site.terrain_anchors_known == 1) {
+        for (const auto& anchor : site.terrain_anchors) {
+            if (TerrainRemovesAnchor(world, anchor)) {
+                return 0.0f;
+            }
+        }
+    }
     // "Unknown" (no streamed grid at the crest) must read NEUTRAL, not
     // extinguished — distant sites keep their authored sheets.
     if (!world.debug_water_grid_at(site.crest.x, site.crest.z)) {
