@@ -404,6 +404,20 @@ void InstallPreparationRefusal(Luminumbra::Server::ServerWorldRunner& runner,
     }
 }
 
+// The armed durable chunk has no region file, so a regional chunk-slot capture
+// would latch a scheduler fault. Observe resident state and runtime sub-hashes only.
+std::string ResidentStateHash(Luminumbra::Server::ServerWorldRunner& runner) {
+    const auto result = runner.Session()->CaptureAuthorityHashes(
+        {}, Luminumbra::Persistence::AuthorityCaptureParts::StreamedAndSubHashes);
+    EXPECT_EQ(result.status, Luminumbra::Persistence::AuthorityCaptureStatus::Ready);
+    if (!result.capture) {
+        return {};
+    }
+    const auto& sub = result.capture->sub;
+    return result.capture->streamed + "|" + sub.terrain + "|" + sub.mesh + "|" + sub.water + "|" +
+           sub.wind + "|" + sub.weather + "|" + sub.aether + "|" + sub.aether_state;
+}
+
 TEST_F(HostSchedulerFault, BatchPreparationRetryPreservesCompleteRunAndTraceIndices) {
     for (const bool after_first_tick : {false, true}) {
         std::string expected_hash;
@@ -428,28 +442,15 @@ TEST_F(HostSchedulerFault, BatchPreparationRetryPreservesCompleteRunAndTraceIndi
             EXPECT_EQ(runner.AvailabilityTrace().front().first, 1u);
             EXPECT_EQ(runner.AvailabilityTrace().back().first, options.ticks);
             if (refusals == 0) {
-                expected_hash = runner.ComputeWorldHash();
+                expected_hash = ResidentStateHash(runner);
+                EXPECT_FALSE(expected_hash.empty());
                 expected_trace = runner.AvailabilityTrace();
             } else {
-                EXPECT_EQ(runner.ComputeWorldHash(), expected_hash);
+                EXPECT_EQ(ResidentStateHash(runner), expected_hash);
                 EXPECT_EQ(runner.AvailabilityTrace(), expected_trace);
             }
         }
     }
-}
-
-// The armed durable chunk has no region file, so a regional chunk-slot capture
-// would latch a scheduler fault. Observe resident state and runtime sub-hashes only.
-std::string ResidentStateHash(Luminumbra::Server::ServerWorldRunner& runner) {
-    const auto result = runner.Session()->CaptureAuthorityHashes(
-        {}, Luminumbra::Persistence::AuthorityCaptureParts::StreamedAndSubHashes);
-    EXPECT_EQ(result.status, Luminumbra::Persistence::AuthorityCaptureStatus::Ready);
-    if (!result.capture) {
-        return {};
-    }
-    const auto& sub = result.capture->sub;
-    return result.capture->streamed + "|" + sub.terrain + "|" + sub.mesh + "|" + sub.water + "|" +
-           sub.wind + "|" + sub.weather + "|" + sub.aether + "|" + sub.aether_state;
 }
 
 TEST_F(HostSchedulerFault, PermanentPreparationRefusalIsBoundedAndLeavesTheTickPending) {
