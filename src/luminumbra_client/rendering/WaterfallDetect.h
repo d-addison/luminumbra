@@ -2,6 +2,7 @@
 
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 
+#include <array>
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
@@ -63,6 +64,13 @@ struct WaterfallSite {
     // true = perched-lake/tarn OUTLET (a rim dropoff where the lake spills over).
     // Diagnostic only (NOT hashed) — both kinds bake the same sheet dressing.
     bool lake_outlet = false;
+    // Original terrain support for baked dressing, below the generated crest
+    // and landing. Not part of the site hash or any simulation/save format.
+    // Synthetic sites may omit support; unknown support never removes dressing.
+    std::array<glm::vec3, 2> terrain_anchors{};
+    // Fixed-width presence word avoids optional's indeterminate payload/padding
+    // in the existing byte-equality diagnostic. Only 0 (unknown) and 1 are produced.
+    std::uint32_t terrain_anchors_known = 0;
 };
 
 // Fixed detection parameters (PINNED — changing these changes the site set and
@@ -128,7 +136,8 @@ uint64_t HashWaterfallSites(const std::vector<WaterfallSite>& sites);
 // crest
 // >= full_depth), 0 = upstream dammed/drained (the sheet extinguishes). Returns
 // 1 (neutral) when the crest's chunk carries no live grid — an UNSTREAMED site
-// is unknown, not extinguished. Pure; render-only.
+// is unknown, not extinguished. Resident edited SDFs retire the baked sheet
+// when either generated bank/landing anchor was removed. Pure; render-only.
 float LiveWaterFactorAt(const Luminumbra::Systems::SHIELD_WorldSystem& world,
                         const WaterfallSite& site,
                         float full_depth = 0.25f);

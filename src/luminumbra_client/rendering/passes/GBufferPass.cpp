@@ -11,6 +11,7 @@
 #include "../FarLodSystem.h"
 #include "../PassShaderLayouts.h"      // enumerable ExpectedLayout registry
 #include "../RenderResourceRegistry.h" // /: registry-owned G-buffer
+#include "../TerrainAnchor.h"
 #include "../TreeLod.h" // tree rendering: per-instance distance LOD mesh selection (render-only)
 #include "PassGlHelpers.h"
 #include "core/IsolationConfig.h" // ctx.isolation->renders(...) needs the full type
@@ -31,6 +32,7 @@
 #include <filesystem> // existence-probe LOD variants before loading (avoid load-error spam)
 #include <limits>
 #include <string>
+#include <tuple>
 #include <utility> // std::pair for the LOD-resolve helper return
 
 #include "luminumbra_common/animation/AnimationRuntime.h"
@@ -566,7 +568,10 @@ void GBufferPass::build_static_prop_cache(entt::registry& registry) {
     m_propMeshPaths.clear();
     m_resolveMemo.clear();
     m_visibleGroups.clear();
+    m_anchorChunks.clear();
+    m_resolvedAnchorSlots.clear();
     std::unordered_map<std::string, std::uint32_t> pathIntern;
+    std::map<std::tuple<int, int, int>, std::uint32_t> anchorSlots;
     auto intern = [&](const std::string& p) -> std::uint32_t {
         auto it = pathIntern.find(p);
         if (it != pathIntern.end())
@@ -627,11 +632,25 @@ void GBufferPass::build_static_prop_cache(entt::registry& registry) {
         cp.impostorTree = bp.find("tree") != std::string::npos;
         cp.impostorLeaf = cp.impostorTree && (bp.find("leaf") != std::string::npos ||
                                               bp.find("leaves") != std::string::npos);
+        cp.terrainAnchored = bp.starts_with("procgen://rock_") || bp.starts_with("procgen://bush_");
+        IVec3 anchor_coords{};
+        if (cp.terrainAnchored && AnchorChunkCoords(cp.position, anchor_coords)) {
+            const auto [slot, inserted] =
+                anchorSlots.try_emplace({anchor_coords.x, anchor_coords.y, anchor_coords.z},
+                                        static_cast<std::uint32_t>(m_anchorChunks.size()));
+            if (inserted) {
+                m_anchorChunks.push_back(
+                    {.coords = anchor_coords, .chunk = nullptr, .resolved = false});
+            }
+            cp.anchorSlot = slot->second;
+        }
         cp.baseMeshHash = fnv64(mesh_info.meshPath, 1469598103934665603ull);
         cp.pathIndex = intern(mesh_info.meshPath);
         cp.materialId = mesh_info.materialId;
         m_staticPropCache.push_back(cp);
     }
+    // The per-frame loop records each resolved slot once, so this never grows there.
+    m_resolvedAnchorSlots.reserve(m_anchorChunks.size());
     m_staticPropCachePopulation = registry.view<const Components::StaticMeshComponent>().size();
 }
 
@@ -895,6 +914,42 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         }
         if (culled)
             continue;
+        if (cp.anchorSlot < m_anchorChunks.size() && ctx.world_system) {
+            AnchorChunkSlot& slot = m_anchorChunks[cp.anchorSlot];
+            if (!slot.resolved) {
+                slot.resolved = true;
+                m_resolvedAnchorSlots.push_back(cp.anchorSlot);
+                auto chunk = ctx.world_system->find_streamed_chunk(slot.coords);
+                if (chunk && chunk->has_terrain_authority()) {
+                    slot.chunk = std::move(chunk);
+                    // Support answers stay valid while the same resident chunk keeps
+                    // its voxel revision and SDF storage; any change re-evaluates.
+                    const bool same_owner = !slot.supportOwner.owner_before(slot.chunk) &&
+                                            !slot.chunk.owner_before(slot.supportOwner);
+                    const auto revision = slot.chunk->voxel_revision();
+                    const float* const sdf = slot.chunk->sdf_data.data();
+                    if (!same_owner || slot.supportRevision != revision || slot.supportSdf != sdf) {
+                        slot.supportOwner = slot.chunk;
+                        slot.supportRevision = revision;
+                        slot.supportSdf = sdf;
+                        slot.supportGeneration =
+                            slot.supportGeneration == std::numeric_limits<std::uint32_t>::max()
+                                ? 1u
+                                : slot.supportGeneration + 1u;
+                    }
+                }
+            }
+            if (slot.chunk) {
+                // At most eight lattice reads per prop per support change, not per frame.
+                if (cp.supportGeneration != slot.supportGeneration) {
+                    cp.supportRemoved = EditedTerrainRemovesAnchor(slot.chunk.get(), cp.position);
+                    cp.supportGeneration = slot.supportGeneration;
+                }
+                if (cp.supportRemoved) {
+                    continue;
+                }
+            }
+        }
         // Group by a cheap uint64 (no per-instance string alloc/copy/compare).
         const std::uint64_t gkey =
             rkey ^ (static_cast<std::uint64_t>(cp.materialId) * std::uint64_t{0x100000001B3ull});
@@ -909,6 +964,11 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         batch.mats.push_back(cp.model);
         batch.tints.push_back(cp.tint);
     }
+    for (const std::uint32_t index : m_resolvedAnchorSlots) {
+        m_anchorChunks[index].chunk.reset();
+        m_anchorChunks[index].resolved = false;
+    }
+    m_resolvedAnchorSlots.clear();
     const GLboolean cull_was_enabled = glIsEnabled(GL_CULL_FACE);
     for (const auto& kv : m_visibleGroups) {
         const InstanceBatchCached& batch = kv.second;
