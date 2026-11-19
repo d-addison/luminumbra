@@ -119,17 +119,29 @@ class TerrainWindingContract(unittest.TestCase):
 
     def test_live_normals_sample_each_vertex_instead_of_the_cell_center(self):
         compact = re.sub(r"\s+", " ", self.mesher)
-        self.assertIn("EstimateDensityGradient(gridcell, vertices[vert_indices[e]].position)",
+        self.assertIn("EdgeDensityGradient(gridcell, e, vertices[vert_indices[e]].position)",
                       compact)
-        self.assertIn("(position - gridcell.p[0]) / (gridcell.p[6] - gridcell.p[0])", compact)
-        # Each derivative interpolates its four parallel edge differences.
-        for axis, pairs in (("x", ((1, 0), (2, 3), (5, 4), (6, 7))),
-                            ("y", ((4, 0), (5, 1), (7, 3), (6, 2))),
-                            ("z", ((3, 0), (2, 1), (7, 4), (6, 5)))):
-            expression = re.search(rf"const f32 d{axis} = (.*?);", compact)
-            self.assertIsNotNone(expression)
-            for a, b in pairs:
-                self.assertIn(f"v[{a}] - v[{b}]", expression[1])
+        self.assertIn("(position[axis] - gridcell.p[0][axis]) / "
+                      "(gridcell.p[6][axis] - gridcell.p[0][axis])", compact)
+
+        def table(name):
+            found = re.search(rf"{name}\[[0-9]+\](?:\[3\])? = \{{(.*?)\}};", compact)
+            self.assertIsNotNone(found, name)
+            return [int(n) for n in re.findall(r"\d+", found[1])]
+
+        # The edge stencil must use the live mesher's corner and edge numbering:
+        # otherwise each vertex would differentiate along the wrong cell edge.
+        offsets = re.search(r"const IVec3 corner_offsets\[8\] = \{(.*?)\}};", compact)
+        self.assertIsNotNone(offsets)
+        self.assertEqual(table("kBits"), [int(n) for n in re.findall(r"\d+", offsets[1])])
+        self.assertEqual(table("kLowCorner"), table("kEdgeAnchorCorner"))
+        self.assertEqual(table("kAxis"), table("kEdgeAxis"))
+        # Along the edge: its own difference. Across it: two parallel
+        # differences, interpolated by the edge parameter.
+        self.assertIn("gradient[axis] = v[stencil.hi] - v[stencil.lo];", compact)
+        self.assertIn("glm::mix(v[pair[0][1]] - v[pair[0][0]], v[pair[1][1]] - v[pair[1][0]], t)",
+                      compact)
+        self.assertNotIn("EstimateDensityGradient", compact)
 
     def test_contract_is_registered_and_runs_when_mesher_inputs_change(self):
         spec = importlib.util.spec_from_file_location("terrain_paths", ROOT / "tools/ci/ci_paths.py")
