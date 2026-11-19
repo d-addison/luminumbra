@@ -1847,7 +1847,8 @@ class UploadBudgetWiring(unittest.TestCase):
         diagnostic = compact(body(draw, "for (std::size_t draw = first;"))
         self.assertLess(diagnostic.index("AttributedGl::Submit( glDrawElementsIndirect,"),
                         diagnostic.index("m_chunk_geometry_pool.mark_submitted("))
-        batched = compact(draw[draw.index("} else {", draw.index("glDrawElementsIndirect,")):])
+        # Undiagnosed draws, and the rest of a bucket after a diagnostic refusal, share one multi-draw.
+        batched = compact(draw[draw.index("if (mdi_first < first + count) {", draw.index("glDrawElementsIndirect,")):])
         self.assertLess(batched.index("AttributedGl::Submit( glMultiDrawElementsIndirect,"),
                         batched.index("m_chunk_geometry_pool.mark_submitted("))
         self.assertEqual(diagnostic.count("m_chunk_geometry_pool.mark_submitted("), 1)
