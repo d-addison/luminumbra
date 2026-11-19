@@ -57,7 +57,12 @@ class WaterMeshContract(unittest.TestCase):
         self.assertIn("auto& snapshot = *scratch_owner;", world)
         self.assertIn("auto& scratch = *scratch_owner;", world)
         self.assertIn("*m_water_system, *this, scratch);", world)
-        self.assertIn("presentation.water_depth_mm = chunk->water_depth_mm;", world)
+        # Initial presentation captures the same column source and owner interval.
+        for capture in ("presentation.water_depth_mm = water_source.water_depth_mm;",
+                        "presentation.water_mesh_min_y = chunk->water_mesh_min_y;",
+                        "presentation.water_mesh_max_y = chunk->water_mesh_max_y;",
+                        "presentation.water_mesh_inputs_captured = true;"):
+            self.assertIn(capture, world)
 
     def test_native_and_source_regressions_are_registered(self):
         native = source("test/shield/async_water_meshing_test.cpp")

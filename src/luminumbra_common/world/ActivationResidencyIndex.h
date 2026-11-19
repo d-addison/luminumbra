@@ -225,6 +225,8 @@ public:
 private:
     void update_water_owners(Column& column) {
         // One residency-change pass, bounded by this column's resident stack.
+        // Layer Y owns the half-open band [Y, nextY) * CHUNK_SIZE_Y (lowest open
+        // below, highest open above), so adjacent owners never share a level.
         // Every resident is invalidated because insertion/removal can also move
         // the shared water source, even when its own interval stays unchanged.
         for (auto it = column.water_layers.begin(); it != column.water_layers.end(); ++it) {

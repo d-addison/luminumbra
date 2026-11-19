@@ -1108,6 +1108,41 @@ TEST(AsyncWaterMeshing, InitialWaterPresentationInvalidatesCachedWaterOnlySelect
     EXPECT_EQ(world.renderable_view_work().rebuilds, settled.rebuilds);
 }
 
+TEST(AsyncWaterMeshing, InitialWaterPresentationUsesOwnerIntervalsAndTheColumnSource) {
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 8.0f;
+    params.caves_enabled = false;
+    SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    WaterSystem water(nullptr, &world);
+    water.SetBootPaused(true);
+    world.SetWaterSystem(&water);
+    // The preflight band is y = -1..1. Every layer carries a complete grid, and
+    // the upper margin's grid is stale: only the Y=0 source's 12 m surface is real.
+    std::vector<std::shared_ptr<Chunk>> layers;
+    for (const int y : {-1, 0, 1}) {
+        auto layer = std::make_shared<Chunk>(IVec3(0, y, 0));
+        world.GenerateChunkData(*layer);
+        layer->current_lod.store(0);
+        layer->current_water_resolution.store(4);
+        layer->has_water_sim.store(true);
+        layer->water_level_data.assign(16u, y == 1 ? 40.0f : 12.0f);
+        layer->water_depth_mm.assign(16u, 2000);
+        layer->set_state(ChunkState::Ready);
+        ASSERT_TRUE(world.adopt_streamed_chunk(layer));
+        layers.push_back(std::move(layer));
+    }
+    ASSERT_TRUE(world.PrepareInitialWaterPresentationNear(Vec3(8.0f, 8.0f, 8.0f), 0));
+    // Exactly one owner emits the column surface; margins never duplicate it.
+    EXPECT_TRUE(layers[0]->water_mesh_indices.empty());
+    EXPECT_EQ(layers[1]->water_mesh_vertices.size(), 64u);
+    EXPECT_EQ(layers[1]->water_mesh_indices.size(), 96u);
+    EXPECT_TRUE(layers[2]->water_mesh_indices.empty());
+    for (const auto& layer : layers) {
+        EXPECT_TRUE(layer->water_mesh_generated.load());
+    }
+}
+
 enum class DryWaterExecution : std::uint8_t {
     Inline,
     Worker,
@@ -3472,6 +3507,8 @@ TEST(AsyncWaterMeshing, DisabledColumnSourceClearsRemoteOwnerAndRejectsPendingWa
         world.wait_for_streaming_jobs();
         ASSERT_EQ(owner->water_mesh_indices.size(), 96u);
         ASSERT_EQ(world.renderable_chunks_view(), std::vector<Chunk*>{owner.get()});
+        // Clearing published water must advance the version upload discovery reads.
+        const auto published_version = owner->water_mesh_version.load();
         const auto disable = [&] {
             source->has_water_sim.store(false);
             source->current_water_resolution.store(0);
@@ -3498,6 +3535,7 @@ TEST(AsyncWaterMeshing, DisabledColumnSourceClearsRemoteOwnerAndRejectsPendingWa
         EXPECT_FALSE(owner->water_mesh_generated.load());
         EXPECT_TRUE(world.renderable_chunks_view().empty());
         EXPECT_EQ(owner->get_state(), ChunkState::Ready);
+        EXPECT_GT(owner->water_mesh_version.load(), published_version);
     }
 }
 

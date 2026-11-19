@@ -649,6 +649,9 @@ bool HasRenderableGeometry(const Chunk& chunk) {
 void ClearPublishedWaterMesh(const SHIELD_WorldSystem& world_system, Chunk& chunk) {
     if (!chunk.water_mesh_vertices.empty() || !chunk.water_mesh_indices.empty()) {
         world_system.notify_renderable_chunks_changed();
+        // Publish the empty replacement: upload discovery keys on this version, and a
+        // terrain-renderable owner would otherwise keep drawing its old water.
+        chunk.water_mesh_version.fetch_add(1);
     }
     chunk.water_mesh_vertices.clear();
     chunk.water_mesh_indices.clear();
@@ -4627,11 +4630,19 @@ bool SHIELD_WorldSystem::PrepareInitialWaterPresentationNear(const Vec3& world_p
         if (chunk->water_mesh_generated.load()) {
             continue;
         }
+        // Capture inputs exactly like the asynchronous snapshot: the resident's
+        // vertical ownership interval and the column's selected water source, so
+        // stacked layers never each emit the column's whole surface.
         Chunk presentation(chunk->get_coords());
-        if (chunk->has_water_sim.load()) {
-            presentation.current_water_resolution.store(chunk->current_water_resolution.load());
-            presentation.water_level_data = chunk->water_level_data;
-            presentation.water_depth_mm = chunk->water_depth_mm;
+        const auto& water_source = column_water_mesh_source(*chunk);
+        presentation.water_mesh_min_y = chunk->water_mesh_min_y;
+        presentation.water_mesh_max_y = chunk->water_mesh_max_y;
+        presentation.water_mesh_inputs_captured = true;
+        if (water_source.has_water_sim.load()) {
+            presentation.current_water_resolution.store(
+                water_source.current_water_resolution.load());
+            presentation.water_level_data = water_source.water_level_data;
+            presentation.water_depth_mm = water_source.water_depth_mm;
             presentation.has_water_sim.store(true);
         } else {
             m_water_system->InitializeGeneratedWater(presentation);
