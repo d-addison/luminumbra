@@ -94,9 +94,18 @@ enum class AuthorityCaptureStatus {
 // Bridges the legacy void hash callbacks. The checked API itself returns status.
 class AuthorityCaptureRefused final : public std::exception {
 public:
+    explicit AuthorityCaptureRefused(
+        AuthorityCaptureStatus capture_status = AuthorityCaptureStatus::PreparationRefused) noexcept
+        : m_status(capture_status) {}
+    AuthorityCaptureStatus status() const noexcept {
+        return m_status;
+    }
     const char* what() const noexcept override {
         return "authority capture refused";
     }
+
+private:
+    AuthorityCaptureStatus m_status;
 };
 // Which slots a consumer reads. Skipped slots stay empty; every requested slot is computed
 // from the same observation as a full capture. Single-slot consumers avoid re-serializing
