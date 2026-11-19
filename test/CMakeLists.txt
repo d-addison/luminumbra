@@ -2802,6 +2802,9 @@ add_test(NAME FramePacingSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_frame_pacing_contract.py)
 add_test(NAME GraphicsUiSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_graphics_ui_contract.py)
+# Win32 headers turn far/near/interface/... into macros; Windows-only build breaks.
+add_test(NAME Win32MacroIdentifierContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/test/tools/test_win32_macro_identifiers.py)
 add_test(NAME RenderCrashCapturePython COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/perf/test_render_crash_capture.py)
 set_tests_properties(RenderCrashCapturePython PROPERTIES TIMEOUT 30)
