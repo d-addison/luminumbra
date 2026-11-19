@@ -18135,7 +18135,13 @@ TEST(SurfaceQuery, SimulationTerrainReservationsLeaveTheCapsuleBudgetUnchanged) 
     const auto avatar = physics.create_avatar_character({8, 10000, 8});
     physics.set_world_system(world.get());
     ASSERT_TRUE(physics.prepare_simulation_collisions({}));
-    EXPECT_EQ(physics.simulation_collision_sample_count(), 9u);
+    // Spheres created before authority are registered owners too, so the
+    // horizon covers whole 3x3 owner footprints, the avatar's included.
+    // One sample per admitted column, bounded by the fixed collider budget.
+    EXPECT_GE(physics.simulation_collision_sample_count(), 9u);
+    EXPECT_LE(physics.simulation_collision_sample_count(),
+              PhysicsSystem::kSimulationColliderBudget);
+    EXPECT_EQ(physics.simulation_collision_sample_count() % 9u, 0u);
     physics.update(0.0f);
     EXPECT_EQ(physics.work_items().bodies, body_limit);
     physics.set_avatar_frozen(avatar, true, {8, 10000, 8});
@@ -18501,4 +18507,151 @@ TEST(SurfaceQuery, SavedWaterOnlyCollisionSamplesRetainValidatedProceduralFallba
     world->set_durable_chunk_loader([](const IVec3&) { return std::shared_ptr<Chunk>{}; }, nullptr);
     EXPECT_FALSE(world->sample_simulation_collision(0, 0, heights));
     EXPECT_TRUE(world->durable_read_failed());
+}
+
+TEST(SurfaceQuery, RestoredSpheresInvalidatePreparationAndJoinTheNextHorizon) {
+    PhysicsSystem source;
+    source.startup();
+    ASSERT_FALSE(source.create_dynamic_sphere({8, 10000, 8}, {2, 0, 0}, 0.1f).IsInvalid());
+    PhysicsSystem::BodySetState state;
+    ASSERT_TRUE(source.capture_body_owners(state));
+    ASSERT_EQ(state.owners.size(), 1u);
+    EXPECT_FALSE(state.owners[0].suspended); // Existing records remain dynamic.
+
+    auto world = MakeSimulationCollisionWorld();
+    PhysicsSystem fresh;
+    fresh.startup();
+    fresh.set_world_system(world.get());
+    std::array<JPH::BodyID, 1> fresh_ids{};
+    ASSERT_TRUE(fresh.restore_body_owners(state, fresh_ids));
+    ASSERT_TRUE(fresh.prepare_simulation_collisions({}));
+    EXPECT_EQ(fresh.simulation_collision_owner_visit_count(), 1u);
+    EXPECT_EQ(fresh.simulation_collision_sample_count(), 9u);
+    // The original created its sphere while authority was off. After activation
+    // it must cover the same owner as the restored continuation.
+    source.set_world_system(world.get());
+    ASSERT_TRUE(source.prepare_simulation_collisions({}));
+    EXPECT_EQ(source.simulation_collision_owner_visit_count(), 1u);
+    EXPECT_EQ(source.simulation_collision_sample_count(), 9u);
+
+    PhysicsSystem target;
+    target.startup();
+    target.set_world_system(world.get());
+    ASSERT_TRUE(target.prepare_simulation_collisions({}, 7));
+    const auto empty = target.simulation_collision_hash();
+    std::array<JPH::BodyID, 1> ids{};
+    auto invalid = state;
+    --invalid.owners[0].size;
+    EXPECT_FALSE(target.restore_body_owners(invalid, ids));
+    EXPECT_TRUE(ids[0].IsInvalid());
+    ASSERT_TRUE(target.prepare_simulation_collisions({}, 7));
+    EXPECT_EQ(target.simulation_collision_hash(), empty);
+    EXPECT_EQ(target.simulation_collision_owner_visit_count(), 0u);
+
+    ASSERT_TRUE(target.restore_body_owners(state, ids));
+    const auto start = target.get_body_position(ids[0]);
+    target.update(1.0f / 30); // Commit must invalidate the previous ready barrier.
+    ExpectPositionBits(target.get_body_position(ids[0]), start);
+    ASSERT_TRUE(target.prepare_simulation_collisions({}, 7));
+    EXPECT_EQ(target.simulation_collision_owner_visit_count(), 1u);
+    EXPECT_EQ(target.simulation_collision_sample_count(), 9u);
+    EXPECT_TRUE(target.audio_raycast({8.25f, 16, 8.25f}, {8.25f, 0, 8.25f}).hit);
+    target.update(1.0f / 30);
+    EXPECT_GT(target.get_body_position(ids[0]).x, start.x);
+    target.destroy_body(ids[0]);
+    ASSERT_TRUE(target.prepare_simulation_collisions({}, 8));
+    EXPECT_EQ(target.simulation_collision_owner_visit_count(), 0u);
+    PhysicsSystem::BodySetState empty_state;
+    ASSERT_TRUE(target.capture_body_owners(empty_state));
+    ASSERT_TRUE(empty_state.owners.empty());
+    ASSERT_TRUE(target.restore_body_owners(empty_state, {}));
+    ASSERT_TRUE(target.prepare_simulation_collisions({}, 8));
+    EXPECT_EQ(target.simulation_collision_owner_visit_count(), 0u);
+    const auto replacement = target.create_dynamic_sphere(start, {}, 0.1f);
+    ASSERT_FALSE(replacement.IsInvalid());
+    ASSERT_TRUE(target.prepare_simulation_collisions({}, 9));
+    EXPECT_EQ(target.simulation_collision_owner_visit_count(), 1u);
+}
+
+TEST(SurfaceQuery, SuspendedSphereContinuationRetainsMotionAndActivity) {
+    for (const auto& [clear_authority, active] : std::array{std::pair{false, false},
+                                                            std::pair{false, true},
+                                                            std::pair{true, false},
+                                                            std::pair{true, true}}) {
+        SCOPED_TRACE(clear_authority);
+        SCOPED_TRACE(active);
+        auto source_world = MakeSimulationCollisionWorld();
+        auto target_world = MakeSimulationCollisionWorld();
+        PhysicsSystem source, target;
+        source.startup();
+        target.startup();
+        source.set_world_system(source_world.get());
+        target.set_world_system(target_world.get());
+        std::size_t source_last = 0, target_last = 0;
+        for (int index = 0; index < 14; ++index) {
+            const glm::vec3 position{8.0f + static_cast<float>(index) * 160, 10000, 8};
+            source_last = source.create_avatar_character(position);
+            target_last = target.create_avatar_character(position);
+            ASSERT_NE(source_last, PhysicsSystem::kInvalidAvatar);
+            ASSERT_NE(target_last, PhysicsSystem::kInvalidAvatar);
+        }
+        const glm::vec3 start{2248, 10000, 8};
+        const auto original = source.create_dynamic_sphere(start, {2, 3, 4}, 0.1f);
+        const auto placeholder = target.create_dynamic_sphere(start, {}, 0.1f);
+        ASSERT_FALSE(original.IsInvalid());
+        ASSERT_FALSE(placeholder.IsInvalid());
+        ASSERT_TRUE(source.prepare_simulation_collisions({}, 1));
+        ASSERT_TRUE(target.prepare_simulation_collisions({}, 1));
+        source.update(1.0f / 30);
+        PhysicsSystem::BodySetState state;
+        ASSERT_TRUE(source.capture_body_owners(state));
+        ASSERT_EQ(state.owners.size(), 1u);
+        EXPECT_TRUE(state.owners[0].suspended);
+        EXPECT_EQ(state.owners[0].retained_velocity, glm::vec3(2, 3, 4));
+        EXPECT_TRUE(state.owners[0].was_active);
+        // Exercise nonzero spin and sleeping continuation through the same public record.
+        state.owners[0].retained_angular_velocity = {1, 2, 3};
+        state.owners[0].was_active = active;
+        target.destroy_body(placeholder);
+        std::array<JPH::BodyID, 1> ids{};
+        auto invalid = state;
+        invalid.owners[0].retained_velocity.x = std::numeric_limits<float>::infinity();
+        EXPECT_FALSE(target.restore_body_owners(invalid, ids));
+        EXPECT_TRUE(ids[0].IsInvalid());
+        invalid = state;
+        invalid.owners[0].retained_angular_velocity.z = std::numeric_limits<float>::quiet_NaN();
+        EXPECT_FALSE(target.restore_body_owners(invalid, ids));
+        EXPECT_TRUE(ids[0].IsInvalid());
+        ASSERT_TRUE(target.restore_body_owners(state, ids));
+        PhysicsSystem::BodyOwnerState captured;
+        ASSERT_TRUE(target.capture_body_owner(ids[0], captured));
+        EXPECT_TRUE(captured.suspended);
+        EXPECT_EQ(captured.retained_velocity, state.owners[0].retained_velocity);
+        EXPECT_EQ(captured.retained_angular_velocity, state.owners[0].retained_angular_velocity);
+        EXPECT_EQ(captured.was_active, active);
+        EXPECT_EQ(target.body_is_active(ids[0]), active);
+        ASSERT_EQ(captured.size, state.owners[0].size);
+        ASSERT_LE(captured.size, captured.bytes.size());
+        EXPECT_TRUE(std::equal(captured.bytes.begin(),
+                               captured.bytes.begin() + captured.size,
+                               state.owners[0].bytes.begin()));
+        ASSERT_TRUE(target.prepare_simulation_collisions({}, 1));
+        target.update(1.0f / 30);
+        ExpectPositionBits(target.get_body_position(ids[0]), start);
+        if (clear_authority) {
+            target.set_world_system(nullptr);
+        } else {
+            target.remove_avatar_character(target_last);
+            ASSERT_TRUE(target.prepare_simulation_collisions({}, 2));
+        }
+        target.update(1.0f / 30);
+        ASSERT_TRUE(target.capture_body_owner(ids[0], captured));
+        EXPECT_FALSE(captured.suspended);
+        EXPECT_EQ(target.body_is_active(ids[0]), active);
+        if (active) {
+            EXPECT_GT(target.get_body_position(ids[0]).x, start.x);
+        } else {
+            ExpectPositionBits(target.get_body_position(ids[0]), start);
+        }
+    }
 }

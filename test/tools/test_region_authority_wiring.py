@@ -317,7 +317,7 @@ class RegionAuthorityWiring(unittest.TestCase):
         self.assertIn("TEST(StreamingHardening, WaterAuthoritySurvivesTerrainBackfill)", native_promotion)
         mesher = (ROOT / "src/luminumbra_common/world/MarchingCubes.cpp").read_text(encoding="utf-8")
         water = function(mesher, "void GenerateWaterMesh(")
-        self.assertIn("resolution <= 1 || resolution > 32 || !HasCompleteWaterGrid(chunk, resolution)", water)
+        self.assertIn("resolution <= 1 || resolution > 32 || !HasCompleteWaterGrid(water_source, resolution)", water)
         self.assertLess(water.index("resolution <= 1"), water.index("water_vertices.reserve"))
         native = (ROOT / "test/shield/async_water_meshing_test.cpp").read_text(encoding="utf-8")
         for case in ("DueSnapshotsRetainVoxelInvalidationAndIndependentWater",
@@ -746,7 +746,9 @@ class SimulationCollisionWiring(unittest.TestCase):
                 "CharacterAdmissionChecksTheCombinedHorizonBeforeAllocating",
                 "ExistingOverBudgetOwnersKeepTickingAndCanShrink",
                 "RefusedCatchupPreservesPendingTicksAndFraction",
-                "OverflowBodiesWaitForTerrainAndResumeTheirVelocity")),
+                "OverflowBodiesWaitForTerrainAndResumeTheirVelocity",
+                "RestoredSpheresInvalidatePreparationAndJoinTheNextHorizon",
+                "SuspendedSphereContinuationRetainsMotionAndActivity")),
         ):
             self.assertIn(path, cmake)
             native = (ROOT / "test" / path).read_text(encoding="utf-8")
@@ -935,6 +937,12 @@ class SimulationCollisionWiring(unittest.TestCase):
         clear = function(source, "void PhysicsSystem::clear_simulation_collisions(")
         self.assertIn("JPH::EMotionType::Dynamic", clear)
         self.assertIn("owner.suspended = false;", clear)
+        for resume in (clear, update):
+            self.assertIn("SetOwnerVelocityWithoutActivation(", resume)
+        velocity = function(source, "void SetOwnerVelocityWithoutActivation(")
+        self.assertIn("body.SetLinearVelocityClamped(velocity);", velocity)
+        self.assertIn("body.SetAngularVelocityClamped(angular_velocity);", velocity)
+        self.assertNotIn("ActivateBody", velocity)
 
     def test_refused_ticks_return_to_the_advanced_clock(self):
         source = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(
@@ -976,6 +984,62 @@ class SimulationCollisionWiring(unittest.TestCase):
             encoding="utf-8")
         self.assertNotIn("create_avatar_character(", driver)
         self.assertNotIn("create_player_controller(", driver)
+
+    def test_restored_spheres_register_only_at_commit_and_invalidate_preparation(self):
+        source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(
+            encoding="utf-8")
+        restore = function(source, "bool PhysicsSystem::restore_body_owners(")
+        commit = restore.index("OwnerNativeStream empty;")
+        for token in ("m_simulation_collisions = std::move(registrations);",
+                      "m_simulation_collisions->dynamic_count = 0;",
+                      "m_simulation_collisions->dynamic_slots.fill(0);",
+                      "m_simulation_collisions->ready = false;",
+                      "registrations_state.dynamic_owners[registrations_state.dynamic_count++]",
+                      "registrations_state.dynamic_slots[id.GetIndex()] ="):
+            self.assertIn(token, restore)
+            self.assertGreater(restore.index(token), commit)
+        self.assertLess(restore.index("std::make_unique<SimulationCollisions>()"), commit)
+        self.assertNotIn("return false;", restore[commit:])
+        native = (ROOT / "test/common/GameSessionHeadlessWorld_test.cpp").read_text(
+            encoding="utf-8")
+        case = function(native, "TEST(SurfaceQuery, RestoredSpheresInvalidatePreparationAndJoinTheNextHorizon)")
+        for token in ("EXPECT_FALSE(target.restore_body_owners(invalid, ids));",
+                      "EXPECT_EQ(target.simulation_collision_owner_visit_count(), 1u);",
+                      "EXPECT_EQ(target.simulation_collision_sample_count(), 9u);",
+                      "target.update(1.0f / 30);", "target.destroy_body(ids[0]);"):
+            self.assertIn(token, case)
+
+    def test_suspended_sphere_continuation_preserves_the_existing_codec(self):
+        source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(
+            encoding="utf-8")
+        capture = function(source, "bool PhysicsSystem::capture_body_owner(")
+        for token in ("owner.IsKinematic() && captured.suspended",
+                      "captured.suspended = true;",
+                      "captured.was_active = registered.was_active;",
+                      "payload.retained_velocity = captured.retained_velocity;",
+                      "payload.retained_angular_velocity = captured.retained_angular_velocity;",
+                      "payload.suspended = captured.suspended;",
+                      "payload.was_active = captured.was_active;"):
+            self.assertIn(token, capture)
+        restore = function(source, "bool PhysicsSystem::restore_body_owners(")
+        for token in ("!finite(saved.retained_velocity)", "!finite(saved.retained_angular_velocity)",
+                      "if (active)", ".suspended = saved.suspended,", ".was_active = saved.was_active",
+                      "saved.retained_velocity.x", "saved.retained_angular_velocity.x",
+                      "if (saved.suspended)", "JPH::EMotionType::Kinematic"):
+            self.assertIn(token, restore)
+        schema = function(source, "void OwnerSchema(")
+        self.assertNotIn("suspended", schema)
+        self.assertIn("constexpr std::uint32_t kOwnerVersion = 2;", source)
+        native = (ROOT / "test/common/GameSessionHeadlessWorld_test.cpp").read_text(
+            encoding="utf-8")
+        case = function(native, "TEST(SurfaceQuery, SuspendedSphereContinuationRetainsMotionAndActivity)")
+        for token in ("std::pair{false, false}", "std::pair{false, true}",
+                      "std::pair{true, false}", "std::pair{true, true}",
+                      "EXPECT_TRUE(captured.suspended);",
+                      "EXPECT_EQ(captured.was_active, active);",
+                      "EXPECT_EQ(captured.retained_velocity, state.owners[0].retained_velocity);",
+                      "EXPECT_EQ(captured.retained_angular_velocity, state.owners[0].retained_angular_velocity);"):
+            self.assertIn(token, case)
 
     def test_expected_collision_authority_cannot_be_masked_by_water_or_unknown_metadata(self):
         source = (ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp").read_text(

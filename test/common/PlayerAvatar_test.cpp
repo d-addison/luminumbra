@@ -878,6 +878,10 @@ using BodyOwnerState = PhysicsSystem::BodyOwnerState;
 using BodySetState = PhysicsSystem::BodySetState;
 
 void ExpectBodyBits(const BodyOwnerState& expected, const BodyOwnerState& actual) {
+    EXPECT_EQ(expected.suspended, actual.suspended);
+    EXPECT_EQ(expected.retained_velocity, actual.retained_velocity);
+    EXPECT_EQ(expected.retained_angular_velocity, actual.retained_angular_velocity);
+    EXPECT_EQ(expected.was_active, actual.was_active);
     ASSERT_EQ(expected.size, actual.size);
     ASSERT_LE(expected.size, expected.bytes.size());
     EXPECT_TRUE(std::equal(
@@ -1391,6 +1395,8 @@ TEST(BodyContinuation, ContactCacheChecksRealCapacityBeforePublicationAndAllowsR
         AddBodyCache(state.owners[i], before.owners, 80, 4);
         SetBodyWord(state.owners[i], 192, std::bit_cast<std::uint32_t>(0.125f));
         SetBodyWord(state.owners[i], 200, std::bit_cast<std::uint32_t>(-3.0f));
+        // Copies of one live sphere would share its registration; give each its own.
+        state.owners[i].registration_slot = static_cast<std::uint32_t>(i + 1);
     }
     EXPECT_FALSE(target.restore_body_owners(state, ids));
     EXPECT_TRUE(std::all_of(ids.begin(), ids.end(), [](JPH::BodyID id) { return id.IsInvalid(); }));
@@ -2101,3 +2107,132 @@ TEST(ControllerContinuation, FrozenAdoptionRefusalsAndMissingCapsulePreserveStat
     EXPECT_EQ(target.get_avatar_position(restored_index), before);
 }
 } // namespace
+
+TEST(BodyContinuation, InvalidSuspensionMetadataRefusesBeforeCommit) {
+    PhysicsSystem source, target;
+    source.startup();
+    target.startup();
+    const auto sphere = source.create_dynamic_sphere({0, 100, 0}, {}, 0.1f);
+    ASSERT_FALSE(sphere.IsInvalid());
+    BodySetState state;
+    ASSERT_TRUE(source.capture_body_owners(state));
+    ASSERT_EQ(state.owners.size(), 1u);
+    state.owners[0].suspended = true; // An active payload cannot represent suspension.
+    std::array<JPH::BodyID, 1> ids{};
+    EXPECT_FALSE(target.restore_body_owners(state, ids));
+    EXPECT_TRUE(ids[0].IsInvalid());
+    BodySetState unchanged;
+    ASSERT_TRUE(target.capture_body_owners(unchanged));
+    EXPECT_TRUE(unchanged.owners.empty());
+    EXPECT_EQ(unchanged.slot_count, 0u);
+
+    // Suspended continuation also owns its registration before terrain is bound.
+    auto suspended = state;
+    SetBodyWord(suspended.owners[0], 16, 0); // inactive Jolt payload
+    suspended.owners[0].retained_velocity = {2, 0, 0};
+    suspended.owners[0].retained_angular_velocity = {1, 2, 3};
+    suspended.owners[0].was_active = true;
+    PhysicsSystem suspended_target;
+    suspended_target.startup();
+    std::array<JPH::BodyID, 1> suspended_ids{};
+    ASSERT_TRUE(suspended_target.restore_body_owners(suspended, suspended_ids));
+    BodyOwnerState captured;
+    ASSERT_TRUE(suspended_target.capture_body_owner(suspended_ids[0], captured));
+    ExpectBodyBits(suspended.owners[0], captured);
+    suspended_target.clear_simulation_collisions();
+    suspended_target.update(1.0f / 30);
+    EXPECT_GT(suspended_target.get_body_position(suspended_ids[0]).x, 0);
+
+    source.destroy_body(sphere);
+    const auto avatar = source.create_avatar_character({0, 100, 0});
+    ASSERT_NE(avatar, PhysicsSystem::kInvalidAvatar);
+    source.set_avatar_frozen(avatar, true, {0, 100, 0});
+    ASSERT_TRUE(source.capture_body_owners(state));
+    ASSERT_EQ(state.owners.size(), 1u);
+    state.owners[0].suspended = true; // Only spheres can carry suspended motion.
+    EXPECT_FALSE(target.restore_body_owners(state, ids));
+    EXPECT_TRUE(ids[0].IsInvalid());
+    ASSERT_TRUE(target.capture_body_owners(unchanged));
+    EXPECT_TRUE(unchanged.owners.empty());
+    EXPECT_EQ(unchanged.slot_count, 0u);
+}
+
+TEST(BodyContinuation, RestoreKeepsLiveRegistrationOrderAndRegistersWhileTerrainIsOff) {
+    PhysicsSystem source;
+    source.startup();
+    for (int i = 0; i < 3; ++i) {
+        ASSERT_FALSE(source.create_dynamic_sphere({float(i), 100, 0}, {}, 0.1f).IsInvalid());
+    }
+    // Live creation registers spheres with terrain collisions off, in creation
+    // order, exactly as restore does.
+    BodySetState live;
+    ASSERT_TRUE(source.capture_body_owners(live));
+    ASSERT_EQ(live.owners.size(), 3u);
+    for (std::uint32_t i = 0; i < 3; ++i) {
+        EXPECT_EQ(live.owners[i].registration_slot, i + 1);
+    }
+    auto unregistered = live;
+    for (auto& owner : unregistered.owners) {
+        owner.registration_slot = 0;
+    }
+
+    // Restore registers unregistered payloads even with terrain collisions off,
+    // in payload order, matching the live original.
+    PhysicsSystem first;
+    first.startup();
+    std::array<JPH::BodyID, 3> first_ids{};
+    ASSERT_TRUE(first.restore_body_owners(unregistered, first_ids));
+    for (std::uint32_t i = 0; i < 3; ++i) {
+        BodyOwnerState owner;
+        ASSERT_TRUE(first.capture_body_owner(first_ids[i], owner));
+        EXPECT_EQ(owner.registration_slot, i + 1);
+    }
+
+    // Swap-removal moves the last registration into the freed slot.
+    first.destroy_body(first_ids[0]);
+    BodyOwnerState second_owner, third_owner;
+    ASSERT_TRUE(first.capture_body_owner(first_ids[1], second_owner));
+    ASSERT_TRUE(first.capture_body_owner(first_ids[2], third_owner));
+    ASSERT_EQ(second_owner.registration_slot, 2u);
+    ASSERT_EQ(third_owner.registration_slot, 1u);
+    BodySetState reordered;
+    ASSERT_TRUE(first.capture_body_owners(reordered));
+    ASSERT_EQ(reordered.owners.size(), 2u);
+
+    // The live order survives restore, independently of payload order.
+    PhysicsSystem second;
+    second.startup();
+    std::array<JPH::BodyID, 2> second_ids{};
+    ASSERT_TRUE(second.restore_body_owners(reordered, second_ids));
+    for (std::size_t i = 0; i < 2; ++i) {
+        BodyOwnerState owner;
+        ASSERT_TRUE(second.capture_body_owner(second_ids[i], owner));
+        EXPECT_EQ(owner.registration_slot, reordered.owners[i].registration_slot);
+    }
+
+    // Duplicate registration slots refuse before any body is created.
+    auto duplicate = reordered;
+    duplicate.owners[1].registration_slot = duplicate.owners[0].registration_slot;
+    PhysicsSystem refused;
+    refused.startup();
+    std::array<JPH::BodyID, 2> refused_ids{};
+    EXPECT_FALSE(refused.restore_body_owners(duplicate, refused_ids));
+    EXPECT_TRUE(refused_ids[0].IsInvalid());
+    BodySetState unchanged;
+    ASSERT_TRUE(refused.capture_body_owners(unchanged));
+    EXPECT_TRUE(unchanged.owners.empty());
+
+    // Slots beyond the registration table refuse, including the sentinel's sort key.
+    for (const std::uint32_t slot : {10241u, std::numeric_limits<std::uint32_t>::max()}) {
+        auto out_of_range = reordered;
+        out_of_range.owners[1].registration_slot = slot;
+        PhysicsSystem bounded;
+        bounded.startup();
+        std::array<JPH::BodyID, 2> bounded_ids{};
+        EXPECT_FALSE(bounded.restore_body_owners(out_of_range, bounded_ids));
+        EXPECT_TRUE(bounded_ids[0].IsInvalid());
+        BodySetState empty;
+        ASSERT_TRUE(bounded.capture_body_owners(empty));
+        EXPECT_TRUE(empty.owners.empty());
+    }
+}
