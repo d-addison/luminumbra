@@ -128,8 +128,8 @@ public:
     // CharacterVirtual (capsule) so players collide with the world (and, once
     // props exist, with dynamic props -- the Garry's-Mod model). ADDITIVE: this
     // is a SEPARATE set from the singleton m_player_character the local client
-    // uses, so the client path is untouched. Avatars are stepped in INDEX order
-    // (player_id order) on the calling thread -> deterministic same-binary, so
+    // uses, so the client path is untouched. Avatars are stepped in creation order
+    // on the calling thread, including reused slots appended at the tail, so
     // the avatar positions that fold into the `entities` sub-hash are run==replay
     // reproducible. Per-avatar movement comes from the latest network usercmd;
     // avatars with no input settle against world collision under gravity.
@@ -137,7 +137,8 @@ public:
     // Positions use feet. Refusal returns kInvalidAvatar without creating a slot.
     static constexpr std::size_t kInvalidAvatar = std::numeric_limits<std::size_t>::max();
     std::size_t create_avatar_character(const glm::vec3& initial_position);
-    // Leaves other avatar indices stable. Repeated removal is harmless.
+    // Leaves other avatar indices stable. Repeated removal of a free slot is harmless.
+    // Retired indices are reused lowest-first; callers must discard removed handles.
     void remove_avatar_character(std::size_t index);
     // Frozen avatars keep zero velocity and are excluded from integration, even
     // if the body pool refuses their static capsule. Repeated freezes retry it.
@@ -154,10 +155,16 @@ public:
     // Steps every avatar character by dt: the per-avatar horizontal wish velocity
     // (gravity when airborne, ground-stick when grounded) against the world geometry.
     void update_avatars(float delta_time);
-    // Removal holes count as slots; surviving indices stay stable until clear.
+    // Removal holes count as slots; reuse bounds storage by the peak live count.
     std::size_t avatar_character_slot_count() const {
         return m_avatars.size();
     }
+    struct AvatarCharacterDiagnostics {
+        std::size_t live_count = 0;
+        std::vector<std::size_t> creation_order;
+    };
+    // Const owner-thread diagnostic: copies only live indices, never hash/save inputs.
+    [[nodiscard]] AvatarCharacterDiagnostics avatar_character_diagnostics() const;
     glm::vec3 get_avatar_position(std::size_t index) const;
     glm::vec3 get_avatar_velocity(std::size_t index) const;
     bool is_avatar_grounded(std::size_t index) const;
@@ -324,7 +331,8 @@ private:
     JPH::Ref<JPH::Shape> m_player_crouch_shape;
 
     // Server-authoritative avatar characters (one per connected player)
-    // + the shared avatar capsule shape. Stepped in index order for determinism.
+    // + the shared avatar capsule shape. The live list preserves creation order;
+    // slot indices remain stable handles and are independent of traversal order.
     // A single, nonthrowing-movable element keeps ownership and movement state
     // together if vector growth refuses an allocation.
     static constexpr std::size_t kNoAvatar = std::numeric_limits<std::size_t>::max();
@@ -337,6 +345,9 @@ private:
         std::size_t next = kNoAvatar;
     };
     std::vector<AvatarState> m_avatars;
+    // Min-heap, at most one entry per retired slot. Capacity is reserved before
+    // publishing avatars so removal (including registry destruction) cannot allocate.
+    std::vector<std::size_t> m_free_avatar_slots;
     std::size_t m_avatar_head = kNoAvatar;
     std::size_t m_avatar_tail = kNoAvatar;
     std::size_t m_live_avatar_count = 0;

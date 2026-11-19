@@ -675,7 +675,7 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         }
         physics_system->update(static_cast<float>(fixed_dt));
         //  step the server-authoritative avatar characters (gravity +
-        // world collision; deterministic index order) and read their settled
+        // world collision; deterministic creation order) and read their settled
         // transforms back into m_avatars, so the streaming anchors + the
         // `entities` sub-hash reflect the physics-authoritative positions.
         if (!m_avatars.empty()) {
