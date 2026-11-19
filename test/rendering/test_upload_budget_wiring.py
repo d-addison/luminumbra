@@ -42,6 +42,36 @@ class UploadBudgetWiring(unittest.TestCase):
         cls.header = read(RENDERING / "RenderPipeline.h")
         cls.main = read(ROOT / "src/luminumbra_client/main_client.cpp")
 
+    def test_near_shrubs_are_leaf_cards_and_every_bush_lod_avoids_grass_albedo(self):
+        source = read(ROOT / "src/luminumbra_client/app/ProcgenPalettes.cpp")
+        palette = compact(body(source, "void BuildProcgenBushPalette("))
+        self.assertIn("BuildBushLeafCard(center, normal, 0.24f, 0.18f)", palette)
+        for corner, uv in ((0, "0.0f, 0.0f"), (1, "1.0f, 0.0f"),
+                           (2, "1.0f, 1.0f"), (3, "0.0f, 1.0f")):
+            self.assertIn("verts.push_back({card[%d], normal, {%s}});" % (corner, uv), palette)
+        self.assertIn("{0u, 1u, 2u, 0u, 2u, 3u}", palette)
+        draw = compact(body(read(RENDERING / "passes/GBufferPass.cpp"),
+                            "void GBufferPass::geometry_pass_static_meshes("))
+        self.assertIn('const bool isBush = batch.basePath.starts_with("procgen://bush_");', draw)
+        self.assertIn("const bool leafCards = isLeaf || (isBush && !isFarLod);", draw)
+        self.assertIn('shader->setInt("u_alphaTest", leafCards ? 2 : 0);', draw)
+        self.assertIn("two_sided = leafCards;", draw)
+        self.assertIn('shader->setInt("u_forceFlat", (isBush || (isLeaf && isFarLod)) ? 1 : 0);', draw)
+        # Closed far hulls keep the leaf reflectance; every other draw resets it.
+        self.assertIn('shader->setInt("u_leafSurface", isBush ? 1 : 0);', draw)
+        self.assertIn('shader->setInt("u_forceFlat", 0); shader->setInt("u_leafSurface", 0);', draw)
+        frag = compact(read(ROOT / "res/shaders/g_buffer.frag"))
+        self.assertIn("uniform int u_leafSurface = 0;", frag)
+        self.assertIn("if (proceduralLeaf || u_leafSurface == 1) {", frag)
+        # The card silhouette test stays keyed to alpha-tested cards only.
+        self.assertIn("bool proceduralLeaf = u_alphaTest == 2;", frag)
+        # Both legacy and ladder programs use this same draw consumer.
+        self.assertIn("instanced_static_mesh_shader(input.far_selection.effective)", draw)
+        native = read(ROOT / "test/rendering/shader_compositing_contract_test.cpp")
+        for regression in ("LeafCardsAreFiniteOutwardQuadsForSideAndPolarNormals",
+                           "NearBushesUseFullLeafQuadsAndNeverTerrainGrassTexturing"):
+            self.assertIn(regression, native)
+
     def test_world_presentation_blocks_both_entry_paths_and_timelapse(self):
         preload = body(self.main, "auto wait_for_world_presentation =")
         self.assertNotIn("world->update(", preload)
