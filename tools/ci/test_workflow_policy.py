@@ -1207,7 +1207,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         fast = jobs(self.workflows["ci.yml"])["fast-compile"]
         self.assertEqual(value(fast, "name", 4), "Fast compile / GCC + clang-tidy")
         self.assertEqual(value(fast, "runs-on", 4), "ubuntu-24.04")
-        self.assertEqual(value(fast, "timeout-minutes", 4), "20")
+        self.assertEqual(value(fast, "timeout-minutes", 4), "35")
         self.assertEqual(value(fast, "if", 4), ci_event_condition())
         self.assertIsNone(value(fast, "needs", 4))
         self.assertNotIn("draft", fast)
@@ -1221,7 +1221,16 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         for step in (install, compile_shaders):
             self.assertIsNone(value(step, "if", 8))
             self.assertIsNone(value(step, "continue-on-error", 8))
-        self.assertIn("sudo apt-get install -y --no-install-recommends glslang-tools", install)
+        self.assertEqual(value(install, "run", 8).splitlines(), [
+            "sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 "
+            "-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update",
+            "sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends glslang-tools",
+        ])
+        # The always-run shader step refreshes the index once for the whole lane.
+        dependencies = value(named["Install fast validation dependencies"], "run", 8)
+        self.assertNotIn("apt-get update", dependencies)
+        self.assertTrue(dependencies.startswith("sudo apt-get -o Acquire::Retries=3 install -y"))
+        self.assertLess(steps(fast).index(install), steps(fast).index(named["Install fast validation dependencies"]))
         self.assertEqual(value(compile_shaders, "run", 8).splitlines(), [
             "python3 -I -B tools/ci/test_compile_shaders.py --validator glslangValidator",
             "python3 -I -B tools/ci/compile_shaders.py",
