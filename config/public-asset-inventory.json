@@ -1359,6 +1359,13 @@
       "source": "Luminumbra documentation assets"
     },
     {
+      "bytes": 470,
+      "license": "MIT",
+      "path": "test/fixtures/OwnerContinuationTestAccess.h",
+      "sha256": "e1d17c8fe6730b46adb4ff4d4de4fb5cc08180b1f8c625257300e300e938bdea",
+      "source": "Luminumbra test fixtures"
+    },
+    {
       "bytes": 756,
       "license": "MIT",
       "path": "test/fixtures/TerrainFixtureParams.h",
