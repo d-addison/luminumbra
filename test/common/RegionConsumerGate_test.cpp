@@ -33,20 +33,24 @@
 #include "luminumbra_common/systems/PlantCoarse.h"
 #include "luminumbra_common/systems/PlantDiseaseSystem.h"
 #include "luminumbra_common/systems/PollinationSystem.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/SoilNutrientSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/MarchingCubes.h"
 
 #include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <array>
 #include <bit>
 #include <cstdint>
 #include <filesystem>
+#include <iterator>
 #include <limits>
 #include <map>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -2576,7 +2580,7 @@ TEST(RegionConsumerGate, AvatarWithoutCapsuleCanResumeOrBeRemovedAndCleared) {
     }
 }
 
-TEST(RegionConsumerGate, AvatarSlotCountIncludesRemovalHolesUntilClear) {
+TEST(RegionConsumerGate, AvatarSlotCountReusesRemovalHolesUntilClear) {
     Luminumbra::Systems::PhysicsSystem physics;
     physics.startup();
     const glm::vec3 position(513.0f, 10000.0f, 10.0f);
@@ -2594,14 +2598,139 @@ TEST(RegionConsumerGate, AvatarSlotCountIncludesRemovalHolesUntilClear) {
     physics.update_avatars(1.0f / 30.0f);
     EXPECT_GT(physics.get_avatar_position(survivor).x, position.x);
     EXPECT_EQ(physics.work_items().characters, 1u);
-    EXPECT_EQ(physics.create_avatar_character(position), 2u);
-    EXPECT_EQ(physics.avatar_character_slot_count(), 3u);
+    EXPECT_EQ(physics.create_avatar_character(position), removed);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 2u);
     physics.remove_avatar_character(survivor);
-    physics.remove_avatar_character(2u);
-    EXPECT_EQ(physics.avatar_character_slot_count(), 3u);
+    physics.remove_avatar_character(removed);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 2u);
     physics.clear_avatar_characters();
     EXPECT_EQ(physics.avatar_character_slot_count(), 0u);
     EXPECT_EQ(physics.create_avatar_character(position), 0u);
+}
+
+TEST(RegionConsumerGate, AvatarReuseIsLowestFirstAndPreservesSurvivorStepBits) {
+    Luminumbra::Systems::PhysicsSystem physics, reference;
+    physics.startup();
+    reference.startup();
+    for (std::size_t index = 0; index < 5; ++index) {
+        const glm::vec3 position(513.0f + 10.0f * static_cast<float>(index), 10000.0f, 10.0f);
+        ASSERT_EQ(physics.create_avatar_character(position), index);
+        ASSERT_EQ(reference.create_avatar_character(position), index);
+        physics.set_avatar_wish_velocity(index, {2.0f, 1.0f});
+        reference.set_avatar_wish_velocity(index, {2.0f, 1.0f});
+    }
+    physics.update_avatars(1.0f / 30.0f);
+    reference.update_avatars(1.0f / 30.0f);
+    // Retire in non-index order, including a frozen capsule and a repeated removal.
+    for (const std::size_t index : {3u, 0u, 2u, 0u}) {
+        physics.set_avatar_frozen(index, true, physics.get_avatar_position(index));
+        physics.remove_avatar_character(index);
+        reference.remove_avatar_character(index);
+    }
+    physics.set_avatar_wish_velocity(0, {9.0f, 7.0f});
+    physics.set_avatar_frozen(0, true, {0, 0, 0});
+    for (const std::size_t index : {0u, 2u, 3u}) {
+        const glm::vec3 replacement(600.0f + 10.0f * static_cast<float>(index), 10000.0f, 10.0f);
+        ASSERT_EQ(physics.create_avatar_character(replacement), index);
+        EXPECT_EQ(PositionBits(physics.get_avatar_position(index)), PositionBits(replacement));
+        EXPECT_EQ(physics.get_avatar_velocity(index), glm::vec3(0.0f));
+    }
+    EXPECT_EQ(physics.avatar_character_slot_count(), 5u);
+    EXPECT_FALSE(physics.audio_raycast({512, 10001.3f, 10}, {514, 10001.3f, 10}).hit);
+    for (int tick = 0; tick < 4; ++tick) {
+        for (const std::size_t index : {1u, 4u}) {
+            EXPECT_EQ(PositionBits(physics.get_avatar_position(index)),
+                      PositionBits(reference.get_avatar_position(index)));
+            EXPECT_EQ(PositionBits(physics.get_avatar_velocity(index)),
+                      PositionBits(reference.get_avatar_velocity(index)));
+        }
+        physics.update_avatars(1.0f / 30.0f);
+        reference.update_avatars(1.0f / 30.0f);
+    }
+    // Clear must discard free-list entries before the next generation of slots.
+    physics.remove_avatar_character(2);
+    physics.clear_avatar_characters();
+    physics.clear_avatar_characters();
+    EXPECT_EQ(physics.create_avatar_character({1, 10000, 1}), 0u);
+    EXPECT_EQ(physics.create_avatar_character({3, 10000, 1}), 1u);
+}
+
+TEST(RegionConsumerGate, ReusedAvatarsJoinLiveTailAndInvalidatePreparedCollisions) {
+    using Luminumbra::Systems::PhysicsSystem;
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0;
+    params.peaks_amplitude = 0;
+    params.height_offset = 8;
+    params.continental_spline = {{{-1, 0}}, {{1, 0}}};
+    auto world =
+        std::make_unique<Luminumbra::Systems::SHIELD_WorldSystem>(nullptr, nullptr, params, 4242);
+    world->set_durable_residency(true);
+    PhysicsSystem physics;
+    physics.startup();
+    physics.set_world_system(world.get());
+    const auto expect_order = [&physics](const std::vector<std::size_t>& expected) {
+        const auto diagnostic = physics.avatar_character_diagnostics();
+        EXPECT_EQ(diagnostic.live_count, expected.size());
+        EXPECT_EQ(diagnostic.creation_order, expected);
+    };
+    expect_order({});
+    ASSERT_EQ(physics.create_avatar_character({8, 10000, 8}), 0u);
+    ASSERT_EQ(physics.create_avatar_character({168, 10000, 8}), 1u);
+    ASSERT_EQ(physics.create_avatar_character({328, 10000, 8}), 2u);
+    expect_order({0, 1, 2});
+    constexpr std::uint64_t tick = 42;
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}, tick));
+    EXPECT_EQ(physics.simulation_collision_owner_visit_count(), 3u);
+    physics.remove_avatar_character(1);
+    physics.remove_avatar_character(1);
+    physics.remove_avatar_character(PhysicsSystem::kInvalidAvatar);
+    expect_order({0, 2});
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}, tick));
+    EXPECT_EQ(physics.simulation_collision_owner_visit_count(), 2u);
+    EXPECT_EQ(physics.simulation_collision_sample_count(), 18u);
+    // Admission refusal must preserve the hole, list, count and ready publication.
+    EXPECT_EQ(physics.create_avatar_character({std::numeric_limits<float>::quiet_NaN(), 10, 8}),
+              PhysicsSystem::kInvalidAvatar);
+    expect_order({0, 2});
+    auto steps = physics.work_items().characters;
+    physics.update_avatars(1.0f / 30.0f);
+    EXPECT_EQ(physics.work_items().characters, steps + 2);
+
+    const glm::vec3 replacement(488, 10000, 8);
+    ASSERT_EQ(physics.create_avatar_character(replacement), 1u);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 3u);
+    expect_order({0, 2, 1});
+    steps = physics.work_items().characters;
+    physics.update_avatars(1.0f / 30.0f);
+    EXPECT_EQ(physics.work_items().characters, steps);
+    EXPECT_EQ(physics.get_avatar_position(1), replacement);
+    // Reusing the same tick must rebuild rather than return the cached two owners.
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}, tick));
+    EXPECT_EQ(physics.simulation_collision_owner_visit_count(), 3u);
+    EXPECT_EQ(physics.simulation_collision_sample_count(), 27u);
+    physics.update_avatars(1.0f / 30.0f);
+    EXPECT_EQ(physics.work_items().characters, steps + 3);
+
+    // Exercise both ends, then reuse into an empty list with a nonzero slot extent.
+    physics.remove_avatar_character(0);
+    expect_order({2, 1});
+    physics.remove_avatar_character(1);
+    expect_order({2});
+    physics.remove_avatar_character(2);
+    expect_order({});
+    ASSERT_EQ(physics.create_avatar_character(replacement), 0u);
+    expect_order({0});
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}, tick));
+    physics.clear_avatar_characters();
+    expect_order({});
+    EXPECT_EQ(physics.avatar_character_slot_count(), 0u);
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}, tick));
+    EXPECT_EQ(physics.simulation_collision_owner_visit_count(), 0u);
+    EXPECT_EQ(physics.simulation_collision_sample_count(), 0u);
+    physics.clear_avatar_characters();
+    ASSERT_EQ(physics.create_avatar_character(replacement), 0u);
+    ASSERT_EQ(physics.create_avatar_character({8, 10000, 8}), 1u);
+    expect_order({0, 1});
 }
 
 TEST(RegionConsumerGate, TerrainCollisionSkipsDoNotRequestRetry) {
@@ -3882,6 +4011,62 @@ TEST(RegionConsumerGate, SessionRetiresNewbornAfterCallbacksAndReleasesFrozenPhy
     }
 }
 
+TEST(RegionConsumerGate, SessionContinuousBreedingAndDeathReuseRetiredAvatarSlots) {
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    for (const bool regional : {false, true}) {
+        SCOPED_TRACE(regional);
+        W::GameSession session;
+        session.SetRootPath(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT).generic_string() + '/');
+        session.SetJobSystem(&jobs);
+        session.SetActiveRegionsEnabled(regional);
+        session.SetAetherStateEnabled(false);
+        ASSERT_TRUE(session.CreateTransientWorld("Avatar turnover", "985", "default"));
+        session.SetReplicatedSimulationAnchors({});
+        session.PinActiveRegion({0, 0}, true);
+        auto& registry = session.GetRegistry();
+        auto* physics = session.GetPhysicsSystem();
+        ASSERT_NE(physics, nullptr);
+        const auto mother = Creature(registry, 10.0f, true);
+        const auto father = Creature(registry, 10.0f, false);
+        const auto mother_genome = registry.get<C::CreatureGenomeComponent>(mother);
+        const auto father_genome = registry.get<C::CreatureGenomeComponent>(father);
+        const auto healthy = registry.get<C::CreatureComponent>(mother);
+        const glm::vec3 survivor_position(40, 10000, 10);
+        const auto survivor = physics->create_avatar_character(survivor_position);
+        ASSERT_EQ(survivor, 0u);
+        physics->set_avatar_frozen(survivor, true, survivor_position);
+        for (std::uint64_t cycle = 0; cycle < 128; ++cycle) {
+            SCOPED_TRACE(cycle);
+            // Reset only parent readiness to accelerate otherwise ordinary births.
+            registry.get<C::CreatureGenomeComponent>(mother) = mother_genome;
+            registry.get<C::CreatureGenomeComponent>(father) = father_genome;
+            for (const auto parent : {mother, father}) {
+                registry.get<C::CreatureComponent>(parent) = healthy;
+                registry.get<C::TransformComponent>(parent).position = {10, 10000, 10};
+            }
+            ASSERT_EQ(AI::RunMatingResolveOnTick(registry, cycle, 985).born, 1);
+            const auto born = registry.view<AI::ReproductionBorn>();
+            ASSERT_EQ(std::distance(born.begin(), born.end()), 1);
+            const auto child = *born.begin();
+            const auto position = registry.get<C::TransformComponent>(child).position;
+            const auto avatar = physics->create_avatar_character(position);
+            ASSERT_EQ(avatar, 1u);
+            registry.emplace<C::CreaturePhysicsComponent>(child, avatar);
+            physics->set_avatar_frozen(avatar, true, position);
+            registry.get<C::CreatureComponent>(child).eaten = true;
+            registry.get<C::DecayComponent>(child).decay_duration = 1;
+            ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+            ASSERT_FALSE(session.GetRegionSchedulerFault());
+            ASSERT_FALSE(registry.valid(child));
+            EXPECT_TRUE(registry.view<C::CreaturePhysicsComponent>().empty());
+            EXPECT_EQ(physics->avatar_character_slot_count(), 2u);
+            EXPECT_EQ(PositionBits(physics->get_avatar_position(survivor)),
+                      PositionBits(survivor_position));
+        }
+    }
+}
+
 std::map<std::string, std::string> RetirementSaveBytes(const std::filesystem::path& root) {
     std::map<std::string, std::string> bytes;
     for (const auto& entry : std::filesystem::recursive_directory_iterator(root)) {
@@ -3892,8 +4077,16 @@ std::map<std::string, std::string> RetirementSaveBytes(const std::filesystem::pa
             // reader verifies type/length and reads bytes from the same handle.
             EXPECT_TRUE(
                 input.read(payload, Luminumbra::Persistence::SavedInputLimits::kPlantFileBytes));
-            bytes.emplace(entry.path().lexically_relative(root).generic_string(),
-                          std::move(payload));
+            const auto relative = entry.path().lexically_relative(root).generic_string();
+            if (relative == "world_info.json") {
+                // Each session stamps its own wall-clock creation second; sessions
+                // created across a second boundary must still compare equal.
+                auto info = nlohmann::json::parse(payload);
+                EXPECT_TRUE(info.contains("creationTime"));
+                info.erase("creationTime");
+                payload = info.dump(4);
+            }
+            bytes.emplace(relative, std::move(payload));
         }
     }
     return bytes;
