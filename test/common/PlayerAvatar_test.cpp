@@ -1467,13 +1467,20 @@ TEST(BodyContinuation, AvatarSlotCapAndStoppedSystemsPreserveOutputs) {
     EXPECT_FALSE(source.restore_body_owners({}, {}));
     source.startup();
     for (std::size_t i = 0; i < PhysicsSystem::kMaxRestoredAvatars; ++i) {
-        const auto index = source.create_avatar_character(Vec3(0.0f));
-        source.remove_avatar_character(index);
+        ASSERT_EQ(source.create_avatar_character(Vec3(0.0f)), i);
+    }
+    // Retire only after reaching the cap: immediate retirement reuses slot zero.
+    for (std::size_t i = 0; i < PhysicsSystem::kMaxRestoredAvatars; ++i) {
+        source.remove_avatar_character(i);
     }
     ASSERT_TRUE(source.capture_body_owners(state));
     EXPECT_TRUE(source.restore_body_owners(state, {}));
     const auto before = state;
+    for (std::size_t i = 0; i < PhysicsSystem::kMaxRestoredAvatars; ++i) {
+        ASSERT_EQ(source.create_avatar_character(Vec3(0.0f)), i);
+    }
     const auto extra = source.create_avatar_character(Vec3(0.0f));
+    ASSERT_EQ(extra, PhysicsSystem::kMaxRestoredAvatars);
     source.remove_avatar_character(extra);
     EXPECT_FALSE(source.capture_body_owners(state));
     ExpectBodySet(before, state);
