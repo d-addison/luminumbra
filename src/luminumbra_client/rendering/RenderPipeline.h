@@ -1052,6 +1052,10 @@ public:
     WaterfallSiteCache& waterfall_cache() {
         return m_waterfall_pass->waterfall_cache();
     }
+    // Last prepared frame's sheet liveness; audio never re-queries the world.
+    WaterfallPass::RoarSource waterfall_roar_source(const glm::vec3& listener) const {
+        return m_waterfall_pass->roar_source(listener);
+    }
 
     // build the live waterfall DRESSING for `world` (call once
     // after the world is entered). Queries waterfall_sites(world), bakes one
