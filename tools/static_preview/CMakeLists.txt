@@ -12,6 +12,7 @@ add_library(luminumbra_render_static SHARED
     "${STATIC_PREVIEW_ROOT}/src/luminumbra_client/rendering/passes/StaticDrawPass.cpp"
     "${STATIC_PREVIEW_ROOT}/src/luminumbra_client/rendering/passes/LightingPass.cpp"
     "${STATIC_PREVIEW_ROOT}/src/luminumbra_client/rendering/GBufferTargets.cpp"
+    "${STATIC_PREVIEW_ROOT}/src/luminumbra_client/rendering/DiagnosticCapture.cpp"
     "${STATIC_PREVIEW_ROOT}/src/luminumbra_client/rendering/Shader.cpp"
     "${STATIC_PREVIEW_ROOT}/src/luminumbra_client/app/FrameAttribution.cpp"
     "${STATIC_PREVIEW_ROOT}/src/luminumbra_client/rendering/ShaderReflection.cpp"
