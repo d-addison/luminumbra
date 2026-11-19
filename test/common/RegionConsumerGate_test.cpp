@@ -51,6 +51,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -2171,7 +2172,14 @@ TEST(RegionConsumerGate, SessionDefersDecompositionAndCompletionUntilPlantOwnerI
 }
 
 TEST(RegionConsumerGate, DetachedDecayBorrowsOnlyUnfinishedLiveParticipants) {
+    struct DecayUpdates {
+        std::size_t count = 0;
+        void Observe(entt::registry&, entt::entity) {
+            ++count;
+        }
+    } updates;
     entt::registry registry;
+    registry.on_update<C::DecayComponent>().connect<&DecayUpdates::Observe>(updates);
     F::FoliageRegistryStage stage;
     for (std::uint64_t tick = 0; tick < 128; ++tick) {
         const auto corpse = Creature(registry, 10.0f, tick % 2 == 0);
@@ -2189,6 +2197,8 @@ TEST(RegionConsumerGate, DetachedDecayBorrowsOnlyUnfinishedLiveParticipants) {
         EXPECT_EQ(AI::DecompositionParticipants(registry).size(), 1u);
         stage.PreparePublication(registry);
         stage.Commit(registry);
+        // Publication must not queue unrelated component-update consumers.
+        EXPECT_EQ(updates.count, 0u);
         EXPECT_EQ(registry.get<C::DecayComponent>(corpse).fully_decomposed, 1u);
         EXPECT_TRUE(AI::DecompositionParticipants(registry).empty());
         EXPECT_EQ(registry.view<C::DecayComponent>().size(), tick + 1);
@@ -2224,6 +2234,94 @@ TEST(RegionConsumerGate, DetachedDecayBorrowsOnlyUnfinishedLiveParticipants) {
     const auto roster = AI::RunDetachedDecompositionOnTick(
         staged, 202, nullptr, {}, AI::DecompositionParticipants(registry), scratch);
     EXPECT_EQ(roster.visited, 64u);
+}
+
+TEST(RegionConsumerGate, DetachedDecayDoesNotPruneLivingRosterBeforeBoundedTraversal) {
+    entt::registry registry;
+    constexpr std::size_t living_count = 4096;
+    constexpr std::size_t staged_count = 3;
+    std::array<entt::entity, staged_count> selected{};
+    entt::entity outside = entt::null;
+    // Initialize once so subsequent entries use ordinary signal admission.
+    ASSERT_TRUE(AI::DecompositionParticipants(registry).empty());
+    for (std::size_t index = 0; index < living_count; ++index) {
+        const auto entity = registry.create();
+        registry.emplace<C::DecayComponent>(entity);
+        if (index == 0) {
+            outside = entity;
+        }
+        if (index >= living_count - staged_count) {
+            selected[index - (living_count - staged_count)] = entity;
+        }
+    }
+    ASSERT_EQ(AI::DecompositionParticipants(registry).size(), living_count);
+    // A direct completion outside the staged pool is a scan sentinel: an eager
+    // prune removes it even though this regional tick must never examine it.
+    registry.get<C::DecayComponent>(outside).fully_decomposed = 1;
+    entt::registry detached;
+    std::vector<entt::entity> scratch;
+    for (const auto entity : selected) {
+        ASSERT_EQ(detached.create(entity), entity);
+        detached.emplace<C::DecayComponent>(entity);
+    }
+    for (std::uint64_t tick = 0; tick < 8; ++tick) {
+        const auto& participants = AI::DecompositionParticipants(registry);
+        ASSERT_EQ(participants.size(), living_count);
+        ASSERT_TRUE(participants.contains(outside));
+        const auto stats =
+            AI::RunDetachedDecompositionOnTick(detached, tick, nullptr, {}, participants, scratch);
+        EXPECT_EQ(stats.visited, staged_count);
+        EXPECT_EQ(stats.decaying, 0);
+        EXPECT_EQ(scratch, (std::vector<entt::entity>{selected.begin(), selected.end()}));
+        EXPECT_EQ(participants.size(), living_count);
+    }
+    detached.clear();
+    const auto empty = AI::RunDetachedDecompositionOnTick(
+        detached, 8, nullptr, {}, AI::DecompositionParticipants(registry), scratch);
+    EXPECT_EQ(empty.visited, 0u);
+    EXPECT_TRUE(scratch.empty());
+    EXPECT_EQ(AI::DecompositionParticipants(registry).size(), living_count);
+    // The owning live traversal eventually visits and retires the sentinel.
+    const auto live = AI::RunDecompositionOnTick(registry, 9);
+    EXPECT_EQ(live.visited, living_count);
+    EXPECT_EQ(live.decaying, 0);
+    EXPECT_EQ(AI::DecompositionParticipants(registry).size(), living_count - 1);
+    EXPECT_FALSE(AI::DecompositionParticipants(registry).contains(outside));
+}
+
+TEST(RegionConsumerGate, LiveDecayRetiresInOrderWithOwnedAndBorrowedRoster) {
+    for (const bool borrowed : {false, true}) {
+        entt::registry registry;
+        std::array<entt::entity, 6> entities{};
+        for (auto& entity : entities) {
+            entity = Creature(registry, 10.0f);
+            registry.get<C::MortalComponent>(entity).dead = 1;
+            registry.emplace<C::DecayComponent>(entity).decay_duration = 2;
+        }
+        const auto& participants = AI::DecompositionParticipants(registry);
+        ASSERT_EQ(participants.size(), entities.size());
+        // Retire a direct completion even when its region is not due; consecutive
+        // zero/one-duration completions must not skip their unfinished successor.
+        registry.get<C::DecayComponent>(entities[0]).fully_decomposed = 1;
+        registry.get<C::TransformComponent>(entities[0]).position.x = 513.0f;
+        registry.get<C::DecayComponent>(entities[1]).decay_duration = 0;
+        registry.get<C::DecayComponent>(entities[2]).decay_duration = 1;
+        registry.get<C::TransformComponent>(entities[4]).position.x = 513.0f;
+        registry.get<C::MortalComponent>(entities[5]).dead = 0;
+        const std::array<RegionKey, 1> due{{{0, 0}}};
+        const RegionConsumerGate gate(registry, due);
+        const auto stats = AI::RunDecompositionOnTick(
+            registry, 1, nullptr, gate, borrowed ? &participants : nullptr);
+        EXPECT_EQ(stats.visited, entities.size());
+        EXPECT_EQ(stats.decaying, 3);
+        EXPECT_EQ(stats.finished, 2);
+        EXPECT_EQ(stats.released_total, 2500u);
+        EXPECT_EQ(participants, (std::set<entt::entity>{entities[3], entities[4], entities[5]}));
+        EXPECT_EQ(registry.get<C::DecayComponent>(entities[3]).decay_ticks, 1u);
+        EXPECT_EQ(registry.get<C::DecayComponent>(entities[4]).decay_ticks, 0u);
+        EXPECT_EQ(registry.get<C::DecayComponent>(entities[5]).decay_ticks, 0u);
+        EXPECT_EQ(registry.get<C::DecayComponent>(entities[0]).fully_decomposed, 1u);
+    }
 }
 
 TEST(RegionConsumerGate, SessionCompletedDecayRosterStaysEmptyWithBothTickPaths) {
