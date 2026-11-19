@@ -173,6 +173,8 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
         } else if (std::strcmp(arg, "--seed") == 0) {
             if (const char* v = next_value(i)) {
 #if defined(_WIN32)
+                // The narrow value only proves presence; the seed is re-read as UTF-16.
+                static_cast<void>(v);
                 const auto utf8_seed =
                     Luminumbra::world::WorldSeedFromWindowsCommandLine(GetCommandLineW(), argc, i);
                 if (!utf8_seed) {
