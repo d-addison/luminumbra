@@ -1,6 +1,7 @@
 """Source and interval contracts for the shipping terrain G-buffer shader."""
 
 import importlib.util
+import math
 from pathlib import Path
 import re
 import unittest
@@ -21,7 +22,7 @@ class TerrainShaderContract(unittest.TestCase):
         self.main = self.shader.split("void main()", 1)[1]
         self.terrain = self.shader.split("void terrainSurface(", 1)[1].split("void main()", 1)[0]
 
-    def test_projection_and_slope_use_the_face_before_normal_mapping_or_discard(self):
+    def test_projection_uses_face_and_slope_uses_smooth_normal_before_normal_mapping(self):
         # Collapsed relative derivatives retain a finite interpolated normal;
         # back-facing winding is aligned to the authored surface orientation.
         self.assertIn("extent > 1e-20 ? face * inversesqrt(extent) : smoothNormal", self.shader)
@@ -31,13 +32,67 @@ class TerrainShaderContract(unittest.TestCase):
         self.assertLess(self.main.index(call), self.main.index("discard;"))
         self.assertIn("vec3 weights = triplanar_weights(u_macroRockOverlay == 1 ? surfaceN : worldN);",
                       self.terrain)
-        self.assertIn("float geomSlope = surfaceN.y;", self.terrain)
+        self.assertIn("float geomSlope = worldN.y;", self.terrain)
         self.assertLess(self.terrain.index("float geomSlope"),
                         self.terrain.index("triplanar_normal("))
         for channel in ("albedo", "normal", "roughness"):
             self.assertIn(f"triplanar_{channel}(worldPos, "
                           + ("worldN, " if channel == "normal" else "") + "weights,",
                           self.terrain)
+
+    def test_rock_coverage_is_continuous_across_faces_and_within_edited_triangles(self):
+        # Evaluate the shipping slope selection and smoothstep interval. Shared
+        # edge normals can agree while the adjacent MC face slopes differ; a
+        # face-based selector then defeats the interpolated material coverage.
+        selector = re.search(r"float geomSlope = (worldN|surfaceN)\.y;", self.terrain)
+        self.assertIsNotNone(selector)
+        blend = re.search(r"float rockW = 1.0 - smoothstep\(([\d.]+) \+ jitter, "
+                          r"([\d.]+) \+ jitter, geomSlope\);", self.terrain)
+        self.assertIsNotNone(blend)
+        low, high = float(blend[1]), float(blend[2])
+        self.assertLess(low, high)
+
+        def coverage(normal, face_slope, jitter):
+            length = math.sqrt(sum(component * component for component in normal))
+            slope = normal[1] / length if selector[1] == "worldN" else face_slope
+            t = min(1, max(0, (slope - low - jitter) / (high - low)))
+            return 1 - t * t * (3 - 2 * t)
+
+        # Both natural-material paths must pass the original normalized normal,
+        # never a previously mapped lane. Projection still uses the face normal.
+        self.assertIn("vec3 worldN = normalize(fs_in.WorldNormal);", self.main)
+        self.assertIn("vec3 geomN = worldN;", self.main)
+        self.assertIn("vec3 laneN = geomN;", self.main)
+        self.assertIn("surfaceN, laneN,", self.main)
+        self.assertIn("surfaceN, worldN,", self.main)
+        self.assertLess(self.terrain.index("float geomSlope"),
+                        self.terrain.index("triplanar_normal("))
+        vertex = source("res/shaders/g_buffer.vert")
+        self.assertIn("vec3 WorldNormal;", vertex)
+        self.assertNotIn("flat vec3 WorldNormal;", vertex)
+
+        shared = (math.sqrt(1 - 0.65 ** 2), 0.65, 0)
+        for jitter in (-0.09, 0, 0.09):
+            with self.subTest(jitter=jitter):
+                steep_face = coverage(shared, 0.1, jitter)
+                gentle_face = coverage(shared, 0.99, jitter)
+                self.assertAlmostEqual(steep_face, gentle_face)
+                self.assertGreater(steep_face, 0)
+                self.assertLess(steep_face, 1)
+                self.assertEqual(coverage((1, 0, 0), 0.65, jitter), 1)
+                self.assertEqual(coverage((0, 1, 0), 0.65, jitter), 0)
+                self.assertEqual(coverage((0, -1, 0), 0.65, jitter), 1)
+                # Perspective interpolation changes barycentric weights, but
+                # the normalized interpolant must remain continuous for each.
+                samples = [coverage((1 - i / 64, i / 64, 0), 0.65, jitter)
+                           for i in range(65)]
+                self.assertEqual(samples[0], 1)
+                self.assertEqual(samples[-1], 0)
+                for previous, current in zip(samples, samples[1:]):
+                    self.assertGreaterEqual(previous, current)
+                    # |d normalize(1-t,t)/dt| <= 2 and smoothstep's
+                    # derivative <= 1.5, giving this analytic per-step bound.
+                    self.assertLessEqual(previous - current, 3 / ((high - low) * 64))
 
     def test_face_derivatives_use_view_relative_positions_and_return_world_normals(self):
         helper = re.search(r"vec3 terrain_surface_normal\(vec3 viewPos, vec3 smoothNormal\) "
