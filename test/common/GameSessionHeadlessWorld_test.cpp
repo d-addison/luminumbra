@@ -59,7 +59,6 @@
 #include <utility>
 #include <vector>
 
-#include "luminumbra_client/app/CreatureBodyAttachment.h"
 #include "luminumbra_client/app/FarmSpeciesCache.h"
 #include "luminumbra_client/app/SessionExit.h"
 #include "luminumbra_client/rendering/TimeOfDayModel.h"
@@ -18655,53 +18654,4 @@ TEST(SurfaceQuery, SuspendedSphereContinuationRetainsMotionAndActivity) {
             ExpectPositionBits(target.get_body_position(ids[0]), start);
         }
     }
-}
-
-TEST(SurfaceQuery, CreatureAttachmentSkipsRefusalsWithinAnIndependentAttemptBudget) {
-    auto world = MakeSimulationCollisionWorld();
-    PhysicsSystem physics;
-    physics.startup();
-    physics.set_world_system(world.get());
-    for (int index = 0; index < 14; ++index) {
-        ASSERT_NE(
-            physics.create_avatar_character({8.0f + static_cast<float>(index) * 160, 10000, 8}),
-            PhysicsSystem::kInvalidAvatar);
-    }
-    entt::registry registry;
-    for (int index = 0; index < 3; ++index) {
-        const auto entity = registry.create();
-        registry.emplace<Luminumbra::Components::CreatureComponent>(entity);
-        registry.emplace<Luminumbra::Components::TransformComponent>(entity);
-    }
-    auto view = registry.view<const Luminumbra::Components::CreatureComponent,
-                              Luminumbra::Components::TransformComponent>();
-    std::array<entt::entity, 3> entities{};
-    std::size_t ordinal = 0;
-    for (const auto entity : view) {
-        entities[ordinal] = entity;
-        view.get<Luminumbra::Components::TransformComponent>(entity).position =
-            ordinal++ == 0 ? glm::vec3(2248, 10000, 8) : glm::vec3(8, 10000, 8);
-    }
-    using Luminumbra::Client::AttachMissingCreatureBodies;
-    using Luminumbra::Components::CreaturePhysicsComponent;
-    AttachMissingCreatureBodies(nullptr, registry);
-    AttachMissingCreatureBodies(&physics, registry, 0, 2);
-    AttachMissingCreatureBodies(&physics, registry, 1, 0);
-    AttachMissingCreatureBodies(&physics, registry, -1, 2);
-    AttachMissingCreatureBodies(&physics, registry, 1, -1);
-    EXPECT_EQ(physics.avatar_character_slot_count(), 14u);
-    AttachMissingCreatureBodies(&physics, registry, 1, 1);
-    EXPECT_EQ(physics.avatar_character_slot_count(), 14u);
-    EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(entities[0]));
-    AttachMissingCreatureBodies(&physics, registry, 1, 2);
-    EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(entities[0]));
-    EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(entities[1]));
-    EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(entities[2]));
-    EXPECT_EQ(physics.avatar_character_slot_count(), 15u);
-    AttachMissingCreatureBodies(&physics, registry, 1, 2);
-    EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(entities[2]));
-    EXPECT_EQ(physics.avatar_character_slot_count(), 16u);
-    registry.clear();
-    AttachMissingCreatureBodies(&physics, registry);
-    EXPECT_EQ(physics.avatar_character_slot_count(), 16u);
 }

@@ -748,8 +748,7 @@ class SimulationCollisionWiring(unittest.TestCase):
                 "RefusedCatchupPreservesPendingTicksAndFraction",
                 "OverflowBodiesWaitForTerrainAndResumeTheirVelocity",
                 "RestoredSpheresInvalidatePreparationAndJoinTheNextHorizon",
-                "SuspendedSphereContinuationRetainsMotionAndActivity",
-                "CreatureAttachmentSkipsRefusalsWithinAnIndependentAttemptBudget")),
+                "SuspendedSphereContinuationRetainsMotionAndActivity")),
         ):
             self.assertIn(path, cmake)
             native = (ROOT / "test" / path).read_text(encoding="utf-8")
@@ -888,12 +887,8 @@ class SimulationCollisionWiring(unittest.TestCase):
 
     def test_creation_callers_handle_admission_refusal(self):
         client = (ROOT / "src/luminumbra_client/main_client.cpp").read_text(encoding="utf-8")
-        attachment = (ROOT / "src/luminumbra_client/app/CreatureBodyAttachment.h").read_text(
-            encoding="utf-8")
-        self.assertEqual(client.count("create_avatar_character(") +
-                         attachment.count("create_avatar_character("), 3)
-        self.assertEqual(client.count("PhysicsSystem::kInvalidAvatar") +
-                         attachment.count("PhysicsSystem::kInvalidAvatar"), 3)
+        self.assertEqual(client.count("create_avatar_character("), 3)
+        self.assertEqual(client.count("PhysicsSystem::kInvalidAvatar"), 3)
         player = (ROOT / "src/luminumbra_client/player/PlayerController.cpp").read_text(
             encoding="utf-8")
         self.assertEqual(player.count("create_player_controller("), 3)
@@ -972,25 +967,6 @@ class SimulationCollisionWiring(unittest.TestCase):
                       "EXPECT_EQ(captured.was_active, active);",
                       "EXPECT_EQ(captured.retained_velocity, state.owners[0].retained_velocity);",
                       "EXPECT_EQ(captured.retained_angular_velocity, state.owners[0].retained_angular_velocity);"):
-            self.assertIn(token, case)
-
-    def test_creature_attachment_continues_after_refusal_with_bounded_attempts(self):
-        source = (ROOT / "src/luminumbra_client/app/CreatureBodyAttachment.h").read_text(
-            encoding="utf-8")
-        attach = function(source, "inline void AttachMissingCreatureBodies(")
-        refusal = function(attach, "if (idx == Systems::PhysicsSystem::kInvalidAvatar)")
-        self.assertIn("continue;", refusal)
-        self.assertNotIn("break;", refusal)
-        self.assertIn("attempted >= maxAttemptsPerFrame", attach)
-        self.assertIn("made >= maxPerFrame", attach)
-        self.assertLess(attach.index("++attempted;"), attach.index("create_avatar_character("))
-        native = (ROOT / "test/common/GameSessionHeadlessWorld_test.cpp").read_text(
-            encoding="utf-8")
-        case = function(native, "TEST(SurfaceQuery, CreatureAttachmentSkipsRefusalsWithinAnIndependentAttemptBudget)")
-        for token in ("AttachMissingCreatureBodies(&physics, registry, 1, 1);",
-                      "AttachMissingCreatureBodies(&physics, registry, 1, 2);",
-                      "EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(entities[1]));",
-                      "EXPECT_EQ(physics.avatar_character_slot_count(), 14u);"):
             self.assertIn(token, case)
 
     def test_expected_collision_authority_cannot_be_masked_by_water_or_unknown_metadata(self):
