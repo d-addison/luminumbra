@@ -879,8 +879,12 @@ class SimulationCollisionWiring(unittest.TestCase):
 
     def test_creation_callers_handle_admission_refusal(self):
         client = (ROOT / "src/luminumbra_client/main_client.cpp").read_text(encoding="utf-8")
-        self.assertEqual(client.count("create_avatar_character("), 3)
-        self.assertEqual(client.count("PhysicsSystem::kInvalidAvatar"), 3)
+        attachment = (ROOT / "src/luminumbra_client/app/CreatureBodyAttachment.h").read_text(
+            encoding="utf-8")
+        self.assertEqual(client.count("create_avatar_character("), 2)
+        self.assertEqual(client.count("PhysicsSystem::kInvalidAvatar"), 2)
+        self.assertEqual(attachment.count("create_avatar_character("), 1)
+        self.assertEqual(attachment.count("PhysicsSystem::kInvalidAvatar"), 1)
         player = (ROOT / "src/luminumbra_client/player/PlayerController.cpp").read_text(
             encoding="utf-8")
         self.assertEqual(player.count("create_player_controller("), 3)
@@ -904,6 +908,115 @@ class SimulationCollisionWiring(unittest.TestCase):
             encoding="utf-8")
         self.assertNotIn("create_avatar_character(", driver)
         self.assertNotIn("create_player_controller(", driver)
+
+    def attachment_source_and_body(self):
+        source = (ROOT / "src/luminumbra_client/app/CreatureBodyAttachment.h").read_text(
+            encoding="utf-8")
+        return source, function(source, "inline void AttachMissingCreatureBodies(")
+
+    def attachment_regression(self, name):
+        native = (ROOT / "test/common/GameSessionHeadlessWorld_test.cpp").read_text(
+            encoding="utf-8")
+        native = re.sub(r"(TEST_F\(CreatureAttachmentTest,)\s+", r"\1 ", native)
+        return function(native, "TEST_F(CreatureAttachmentTest, " + name + ")")
+
+    def test_creature_attachment_continues_after_refusal_with_bounded_attempts(self):
+        source, attach = self.attachment_source_and_body()
+        refusal = function(attach, "if (idx == Systems::PhysicsSystem::kInvalidAvatar)")
+        self.assertIn("continue;", refusal)
+        self.assertNotIn("break;", refusal)
+        self.assertIn("int maxPerFrame = 4", source)
+        self.assertIn("int maxAttemptsPerFrame = 16", source)
+        self.assertIn("made >= maxPerFrame", attach)
+        self.assertIn("attempted >= maxAttemptsPerFrame", attach)
+        self.assertLess(attach.index("++attempted;"), attach.index("create_avatar_character("))
+        self.assertLess(attach.index("create_avatar_character("),
+                        attach.index("reg.emplace<Components::CreaturePhysicsComponent>"))
+        case = self.attachment_regression(
+            "CreatureAttachmentSkipsRefusalsWithinAnIndependentAttemptBudget")
+        for token in ("AttachMissingCreatureBodies(&physics, registry, cursor, 1, 1);",
+                      "AttachMissingCreatureBodies(&physics, registry, cursor, 1, 2);",
+                      "EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(first));",
+                      "EXPECT_EQ(physics.avatar_character_slot_count(), 14u);",
+                      "EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(refused));"):
+            self.assertIn(token, case)
+        cap = self.attachment_regression("CreatureAttachmentDefaultCreationBudgetIsFour")
+        self.assertIn("std::array<entt::entity, 6>", cap)
+        self.assertIn("EXPECT_EQ(physics.avatar_character_slot_count(), 4u);", cap)
+        self.assertIn("EXPECT_EQ(physics.avatar_character_slot_count(), 6u);", cap)
+
+    def test_creature_attachment_cursor_advances_and_wraps_with_bounded_scan(self):
+        _, attach = self.attachment_source_and_body()
+        for token in ("const auto& creatures = reg.storage<Components::CreatureComponent>();",
+                      "const auto count = creatures.size();", "visited < count",
+                      "visited < static_cast<std::size_t>(maxAttemptsPerFrame)",
+                      "const auto entity = creatures.data()[cursor.next];", "++cursor.next;",
+                      "reg.all_of<Components::CreaturePhysicsComponent>(entity)",
+                      "!reg.all_of<Components::TransformComponent>(entity)"):
+            self.assertIn(token, attach)
+        self.assertEqual(function(attach, "if (cursor.next == count)"), "cursor.next = 0;")
+        self.assertLess(attach.index("++cursor.next;"), attach.index("reg.all_of<"))
+        self.assertLess(attach.index("++cursor.next;"), attach.index("create_avatar_character("))
+        case = self.attachment_regression(
+            "CreatureAttachmentEventuallyPassesMoreThanSixteenPersistentRefusals")
+        for token in ("std::array<entt::entity, 33>", "call <= 2",
+                      "EXPECT_EQ(cursor.next, call * 16);",
+                      "EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(admissible));",
+                      "EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(entity));"):
+            self.assertIn(token, case)
+        skipped = self.attachment_regression("CreatureAttachmentBoundsScanningAndWrapsPastSkippedSlots")
+        for token in ("EXPECT_EQ(cursor.next, 16u);", "index < 15",
+                      "EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(admissible));",
+                      "EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(admissible));",
+                      "EXPECT_EQ(registry.get<CreaturePhysicsComponent>(attached).avatar_index, body);"):
+            self.assertIn(token, skipped)
+        # No whole-registry view construction or search to rediscover the cursor.
+        for token in ("reg.view<", "std::find", "static "):
+            self.assertNotIn(token, attach)
+
+    def test_creature_attachment_invalid_bounds_and_null_physics_are_no_ops(self):
+        _, attach = self.attachment_source_and_body()
+        guard = "if (!phys || maxPerFrame <= 0 || maxAttemptsPerFrame <= 0)"
+        self.assertEqual(function(attach, guard), "return;")
+        self.assertLess(attach.index(guard), attach.index("reg.storage<"))
+        self.assertLess(attach.index(guard), attach.index("cursor.next"))
+        case = self.attachment_regression("CreatureAttachmentDisabledBoundsAndNullPhysicsDoNoWork")
+        for call in ("nullptr, registry, cursor", "&physics, registry, cursor, 0, 2",
+                     "&physics, registry, cursor, -1, 2", "&physics, registry, cursor, 1, 0",
+                     "&physics, registry, cursor, 1, -1"):
+            self.assertIn("AttachMissingCreatureBodies(" + call + ");", case)
+        self.assertIn("EXPECT_EQ(cursor.next, 5u);", case)
+        self.assertIn("EXPECT_EQ(physics.avatar_character_slot_count(), 0u);", case)
+
+    def test_creature_attachment_cursor_handles_destroyed_and_reused_entities(self):
+        source, attach = self.attachment_source_and_body()
+        self.assertEqual(function(source, "struct CreatureBodyAttachmentCursor"),
+                         "std::size_t next = 0;")
+        self.assertIn("CreatureBodyAttachmentCursor& cursor", source)
+        self.assertEqual(function(attach, "if (cursor.next >= count)"), "cursor.next = 0;")
+        self.assertLess(attach.index("if (cursor.next >= count)"),
+                        attach.index("creatures.data()[cursor.next]"))
+        case = self.attachment_regression("CreatureAttachmentCursorSurvivesDestructionAndEntityReuse")
+        for token in ("registry.destroy(destroyed);", "ASSERT_NE(reused, destroyed);",
+                      "ASSERT_EQ(entt::to_entity(reused), entt::to_entity(destroyed));",
+                      "EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(swapped));",
+                      "EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(reused));"):
+            self.assertIn(token, case)
+        shrink = self.attachment_regression("CreatureAttachmentCursorResetsAfterShrinkAndClear")
+        for token in ("ASSERT_EQ(cursor.next, 2u);", "registry.destroy(first);",
+                      "registry.destroy(second);", "registry.clear();",
+                      "EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(tail));",
+                      "EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(newborn));"):
+            self.assertIn(token, shrink)
+        client = (ROOT / "src/luminumbra_client/main_client.cpp").read_text(encoding="utf-8")
+        runtime = function(client, "struct ClientRuntimeState")
+        self.assertIn("Luminumbra::Client::CreatureBodyAttachmentCursor creatureBodyAttachmentCursor;", runtime)
+        self.assertIn("Luminumbra::Client::AttachMissingCreatureBodies( gameSession->GetPhysicsSystem(), "
+                      "gameSession->GetRegistry(), runtime.creatureBodyAttachmentCursor);",
+                      re.sub(r"\s+", " ", client))
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("common/GameSessionHeadlessWorld_test.cpp", cmake)
+        self.assertIn("gtest_discover_tests(${_lum_gtest_target}", cmake)
 
     def test_expected_collision_authority_cannot_be_masked_by_water_or_unknown_metadata(self):
         source = (ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp").read_text(
