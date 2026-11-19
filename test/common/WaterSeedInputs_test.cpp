@@ -3330,8 +3330,16 @@ TEST(WaterSeedInputs, FreshCommittedDecodesNeverReplaceAdmittedUnclaimedHandles)
             fixture.world.discard_unclaimed_water_columns(candidates);
             const auto next = fixture.world.resolve_water_column({0, 0, 0});
             ASSERT_NE(next, nullptr);
-            EXPECT_NE(next, first); // explicit retirement permits a new decode
-            EXPECT_EQ(reads, committed ? 2 : 1);
+            if (live) {
+                // Cleanup releases only parked candidates: the live handle stays canonical.
+                EXPECT_EQ(next, first);
+                EXPECT_EQ(fixture.world.inspect_water_column({0, 0, 0}), first);
+                EXPECT_EQ(fixture.world.find_authoritative_chunk({0, 0, 0}), first);
+                EXPECT_EQ(reads, committed ? 1 : 0);
+            } else {
+                EXPECT_NE(next, first); // explicit parked retirement permits a new decode
+                EXPECT_EQ(reads, committed ? 2 : 1);
+            }
         }
     }
 }
@@ -3401,13 +3409,14 @@ TEST(WaterSeedInputs, LoadingAdmittedAndPublishedHandlesRefuseWithoutReadingStor
     }
 }
 
-TEST(WaterSeedInputs, AdmissionCapRefusesBeforeGenerationAndCleanupReleasesCapacity) {
+TEST(WaterSeedInputs, AdmissionCapRefusesBeforeGenerationAndCleanupReleasesParkedCapacity) {
     ColumnFixture fixture;
     std::vector<std::shared_ptr<Chunk>> candidates;
     candidates.reserve(832);
-    // Full pristine caches exercise the real 832-column cap without generating
-    // terrain hundreds of times. At most 832 fixed 17^3 lattices are retained.
-    for (int x = 0; x < 832; ++x) {
+    // Full pristine live caches plus one generated parked admission exercise the
+    // real 832-column cap while generating terrain only twice. At most 832 fixed
+    // 17^3 lattices are retained.
+    for (int x = 0; x < 831; ++x) {
         auto chunk = std::make_shared<Chunk>(IVec3(x, 0, 0));
         chunk->sdf_data.resize(17u * 17u * 17u);
         chunk->heightmap_data.resize(17u * 17u);
@@ -3416,15 +3425,23 @@ TEST(WaterSeedInputs, AdmissionCapRefusesBeforeGenerationAndCleanupReleasesCapac
         ASSERT_EQ(fixture.world.resolve_water_column(chunk->get_coords()), chunk);
         candidates.push_back(chunk);
     }
+    const auto parked = fixture.world.resolve_water_column({831, 0, 0});
+    ASSERT_NE(parked, nullptr);
+    ASSERT_EQ(fixture.world.parking_status().parked_count, 1u);
+    candidates.push_back(parked);
     EXPECT_THROW(fixture.world.resolve_water_column({832, 0, 0}), std::invalid_argument);
-    EXPECT_EQ(fixture.world.water_columns_generated(), 0u);
+    EXPECT_EQ(fixture.world.water_columns_generated(), 1u);
     EXPECT_EQ(fixture.world.resolve_water_column({0, 0, 0}), candidates.front());
     const std::array stale{std::make_shared<Chunk>(IVec3(0)), std::shared_ptr<Chunk>{}};
     fixture.world.discard_unclaimed_water_columns(stale);
     EXPECT_THROW(fixture.world.resolve_water_column({832, 0, 0}), std::invalid_argument);
     fixture.world.discard_unclaimed_water_columns(candidates);
+    // Only the parked candidate is released; live admissions keep their handles.
+    EXPECT_EQ(fixture.world.parking_status().parked_count, 0u);
+    EXPECT_EQ(fixture.world.resolve_water_column({0, 0, 0}), candidates.front());
     EXPECT_NE(fixture.world.resolve_water_column({832, 0, 0}), nullptr);
-    EXPECT_EQ(fixture.world.water_columns_generated(), 1u);
+    EXPECT_EQ(fixture.world.water_columns_generated(), 2u);
+    EXPECT_THROW(fixture.world.resolve_water_column({833, 0, 0}), std::invalid_argument);
     fixture.world.clear_world(nullptr);
     EXPECT_NE(fixture.world.resolve_water_column({0, 0, 0}), nullptr);
 }

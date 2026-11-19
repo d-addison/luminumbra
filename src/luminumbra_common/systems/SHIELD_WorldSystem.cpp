@@ -7321,21 +7321,25 @@ void SHIELD_WorldSystem::discard_unclaimed_water_columns(
         if (chunk && chunk->get_state() == ChunkState::Loading) {
             continue;
         }
-        if (chunk &&
-            ((parked != m_parked.end() && parked->second.chunk == chunk) ||
-             (live != m_streaming_state.chunks.end() && live->second == chunk)) &&
-            (chunk->needs_authority() ||
-             (!chunk->has_water_sim.load() && chunk->water_revision() == 0))) {
-            // Published authority retains identity without this marker. An
-            // initialized but not yet published candidate still needs admission.
+        // Check identity before inspecting candidate storage: stale handles may
+        // still belong to generation workers.
+        const bool parked_owner =
+            chunk && parked != m_parked.end() && parked->second.chunk == chunk;
+        const bool live_owner =
+            chunk && live != m_streaming_state.chunks.end() && live->second == chunk;
+        if ((parked_owner || live_owner) && chunk->needs_authority()) {
+            // Published authority retains identity without this marker.
             m_admitted_water_columns.erase(chunk->get_id());
         }
-        // Check identity before inspecting candidate storage: stale handles may
-        // still belong to generation workers. Never erase a live or claimed owner.
-        if (parked == m_parked.end() || parked->second.chunk != chunk || chunk->needs_authority() ||
-            chunk->has_water_sim.load() || chunk->water_revision() != 0) {
+        // Never erase a live or claimed owner. A live unclaimed admission keeps
+        // its marker until the chunk leaves residency, so a later inspection
+        // cannot decode a committed record over the canonical live handle. An
+        // initialized but not yet published candidate still needs admission.
+        if (!parked_owner || chunk->needs_authority() || chunk->has_water_sim.load() ||
+            chunk->water_revision() != 0) {
             continue;
         }
+        m_admitted_water_columns.erase(chunk->get_id());
         m_parked_bytes -= parked->second.bytes;
         note_digest_chunk(chunk, true, false);
         m_parked.erase(parked);
