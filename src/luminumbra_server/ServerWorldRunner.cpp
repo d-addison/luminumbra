@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -588,6 +589,10 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
     }
 
     const auto wall_start = std::chrono::steady_clock::now();
+    // Keep batch tick indices and telemetry in this invocation. Retries cannot
+    // exceed the requested tick budget, even if preparation refuses permanently.
+    const std::uint64_t max_preparation_retries = tick_count;
+    std::uint64_t preparation_retries = 0;
     while (report.ticks_executed < tick_count) {
         if (const auto& region_fault = m_session->GetRegionSchedulerFault();
             region_fault.has_value()) {
@@ -603,8 +608,9 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         auto& budget = m_session->GetSimBudgetTelemetry();
         const auto snapshots_before = budget.Enabled() ? world_system->snapshot_copies() : 0;
         const std::uint64_t budget_tick = m_session->GetSimulationTickCount() + 1;
-        luminumbra::simulation::SimBudgetTelemetry::TickScope physics_budget(budget, budget_tick);
-        physics_budget.Next(BudgetStage::ServerPhysics, [] { return 1u; });
+        // A refused preparation consumes no tick, so it records no ServerPhysics
+        // sample: completed-tick work traces stay identical across retries.
+        const auto physics_start = std::chrono::steady_clock::now();
         // Every host gathers the same registered controllers and projectiles.
         // No host-specific spawn/camera anchor can change the horizon or its budget.
         if (!physics_system->prepare_simulation_collisions({}, budget_tick)) {
@@ -613,8 +619,14 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
             if (const auto& fault = m_session->GetRegionSchedulerFault()) {
                 report.region_fault = true;
                 report.region_fault_message = fault->message;
+                break;
             }
-            break; // Leave this tick unconsumed; the next call retries preparation.
+            if (preparation_retries < max_preparation_retries) {
+                ++preparation_retries;
+                std::this_thread::sleep_for(std::chrono::milliseconds(33));
+                continue; // No physics, input or tick state was consumed.
+            }
+            break; // Return retryable partial progress when the retry budget is spent.
         }
         physics_system->update(static_cast<float>(fixed_dt));
         //  step the server-authoritative avatar characters (gravity +
@@ -628,7 +640,12 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
                 m_avatars[i].velocity = physics_system->get_avatar_velocity(i);
             }
         }
-        physics_budget.Finish();
+        budget.Record(BudgetStage::ServerPhysics,
+                      budget_tick,
+                      1u,
+                      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                                physics_start)
+                          .count());
         if (m_session->ActiveRegionsEnabled()) {
             std::vector<Vec3> anchors;
             for (const auto& avatar : m_avatars)
