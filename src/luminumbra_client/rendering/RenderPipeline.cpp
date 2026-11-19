@@ -63,6 +63,7 @@
 #include <array>
 #include <bit>
 #include <cassert>
+#include <charconv>
 #include <chrono> // CPU per-phase submit cost
 #include <cmath>
 #include <cstdint>
@@ -2094,10 +2095,27 @@ void SubmitDiagnosticTerrainBucket(GBufferDiagnosticCapture*& capture,
                 capture = nullptr;
                 break;
             }
-            const std::string mesh_key = "terrain/" + std::to_string(resident.chunk[0]) + "/" +
-                                         std::to_string(resident.chunk[1]) + "/" +
-                                         std::to_string(resident.chunk[2]) + "/version/" +
-                                         std::to_string(resident.mesh_version);
+            // At most 94 bytes: three signed int32 coordinates, uint32 version,
+            // uint64 generation and fixed separators. Reserve once;
+            // format the generation on the stack to avoid another draw allocation.
+            std::string mesh_key;
+            mesh_key.reserve(94);
+            mesh_key += "terrain/";
+            mesh_key += std::to_string(resident.chunk[0]);
+            mesh_key += '/';
+            mesh_key += std::to_string(resident.chunk[1]);
+            mesh_key += '/';
+            mesh_key += std::to_string(resident.chunk[2]);
+            mesh_key += "/version/";
+            mesh_key += std::to_string(resident.mesh_version);
+            mesh_key += "/generation/";
+            std::array<char, 20> generation{}; // uint64 has at most 20 decimal digits.
+            const auto* generation_end = std::to_chars(generation.data(),
+                                                       generation.data() + generation.size(),
+                                                       resident.geometry_generation)
+                                             .ptr;
+            mesh_key.append(generation.data(),
+                            static_cast<std::size_t>(generation_end - generation.data()));
             capture->write_current(
                 {.mesh_path = {},
                  .shader_variant = ladder ? "terrain_mdi_ladder" : "terrain_mdi",
@@ -2210,7 +2228,8 @@ void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& v
         if (diagnostic_capture) {
             diagnostic_chunks[dst] = {.chunk = {chunk->coords.x, chunk->coords.y, chunk->coords.z},
                                       .lod = rd.diagnostic_lod,
-                                      .mesh_version = rd.mesh_version};
+                                      .mesh_version = rd.mesh_version,
+                                      .geometry_generation = a.geometry_generation};
         }
 
         const glm::ivec3 cc = chunk->coords;

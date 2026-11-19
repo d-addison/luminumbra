@@ -132,6 +132,7 @@ struct DiagnosticTerrainDraw {
     std::array<std::int32_t, 3> chunk{};
     int lod = -1;
     std::uint32_t mesh_version = 0;
+    std::uint64_t geometry_generation = 0;
 };
 
 // Capture-only submission of one pool bucket, including its unattributed tail.

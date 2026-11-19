@@ -393,6 +393,7 @@ TEST(DiagnosticAttribution, TerrainSubmitsOriginalCommandsInBucketOrderWithResid
                            "void RenderPipeline::draw_chunks_mdi(");
     Contains(draw, ".lod = rd.diagnostic_lod");
     Contains(draw, ".mesh_version = rd.mesh_version");
+    Contains(draw, ".geometry_generation = a.geometry_generation");
     Contains(draw, "write_cursor[a.block_index]++");
     Contains(draw, "cmd.count = a.index_count");
     Contains(draw, "cmd.instanceCount = 1u");
@@ -406,6 +407,7 @@ TEST(DiagnosticAttribution, TerrainSubmitsOriginalCommandsInBucketOrderWithResid
     Contains(attributed, "std::to_string(resident.chunk[1])");
     Contains(attributed, "std::to_string(resident.chunk[2])");
     Contains(attributed, "std::to_string(resident.mesh_version)");
+    Contains(attributed, "resident.geometry_generation)");
     Contains(attributed, ".mesh_path = {}");
     Contains(attributed, "ladder ? \"terrain_mdi_ladder\" : \"terrain_mdi\"");
     Contains(attributed, ".chunk = {resident.chunk[0], resident.chunk[1], resident.chunk[2]}");
@@ -834,6 +836,11 @@ protected:
 // block merely to force growth. Each has two resident allocations; commands and
 // origins share one buffer just as in RenderPipeline.
 class TerrainBucketGeometry {
+    struct Command {
+        GLuint count, instance_count, first_index, base_vertex, base_instance;
+    };
+    static_assert(sizeof(Command) == 5 * sizeof(GLuint));
+
 public:
     ~TerrainBucketGeometry() {
         glBindVertexArray(0);
@@ -847,10 +854,6 @@ public:
     TerrainBucketGeometry(const TerrainBucketGeometry&) = delete;
     TerrainBucketGeometry& operator=(const TerrainBucketGeometry&) = delete;
     bool initialize() {
-        struct Command {
-            GLuint count, instance_count, first_index, base_vertex, base_instance;
-        };
-        static_assert(sizeof(Command) == 5 * sizeof(GLuint));
         stride = sizeof(Command);
         // Slot zero is deliberately unused; command offsets must remain absolute.
         std::array<Command, 5> commands{};
@@ -866,6 +869,10 @@ public:
             if (handle == ChunkGeometryPool::kInvalid) {
                 return false;
             }
+            if (draw == 0) {
+                first_handle = handle;
+            }
+            generations[draw] = pool.allocation(handle).geometry_generation;
             const auto& allocation = pool.allocation(handle);
             commands[draw + 1] = {allocation.index_count,
                                   1,
@@ -887,7 +894,16 @@ public:
         glBindVertexBuffer(1, buffers_[1], 0, sizeof(glm::vec4));
         glBindBuffer(GL_DRAW_INDIRECT_BUFFER, buffers_[0]);
     }
+    void rewrite_first(Luminumbra::u32 handle) const {
+        const auto& allocation = pools[0].allocation(handle);
+        const Command command{
+            allocation.index_count, 1, allocation.index_offset, allocation.vertex_offset, 3};
+        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, buffers_[0]);
+        glBufferSubData(GL_DRAW_INDIRECT_BUFFER, sizeof(Command), sizeof(command), &command);
+    }
     std::array<ChunkGeometryPool, 2> pools;
+    std::array<std::uint64_t, 4> generations{};
+    Luminumbra::u32 first_handle = ChunkGeometryPool::kInvalid;
     std::size_t stride = 0;
 
 private:
@@ -902,9 +918,13 @@ void DiagnosticAttributionGl::ExpectTerrainBuckets(int refused_lod, bool table_f
          {.chunk = {-4, 1, 5}, .lod = 255, .mesh_version = 17},
          {.chunk = {2, 0, -8}, .lod = 2, .mesh_version = 9},
          {.chunk = {1, 3, 6}, .lod = 4, .mesh_version = 23}}};
+    auto resident = original;
+    for (std::size_t draw = 0; draw < resident.size(); ++draw) {
+        resident[draw].geometry_generation = geometry.generations[draw];
+    }
     for (const bool ladder : {false, true}) {
         table_.clear();
-        auto draws = original;
+        auto draws = resident;
         const bool lod_refusal = refused_lod < 0 || refused_lod > 255;
         const bool refusal = lod_refusal || table_full;
         if (lod_refusal) {
@@ -993,7 +1013,8 @@ void DiagnosticAttributionGl::ExpectTerrainBuckets(int refused_lod, bool table_f
             const auto& chunk = original[draw].chunk;
             const auto key = "terrain/" + std::to_string(chunk[0]) + "/" +
                              std::to_string(chunk[1]) + "/" + std::to_string(chunk[2]) +
-                             "/version/" + std::to_string(original[draw].mesh_version);
+                             "/version/" + std::to_string(original[draw].mesh_version) +
+                             "/generation/" + std::to_string(resident[draw].geometry_generation);
             EXPECT_EQ(document["meshes"][ids[pixel][1] - 1]["generated"], key);
         }
         for (const auto pixels : covered) {
@@ -1013,6 +1034,90 @@ void DiagnosticAttributionGl::ExpectTerrainBuckets(int refused_lod, bool table_f
 
 TEST_F(DiagnosticAttributionGl, TerrainIndirectIdentitiesFollowPoolBucketOrder) {
     ExpectTerrainBuckets(0);
+}
+
+TEST_F(DiagnosticAttributionGl, TerrainGeometryIdentityTracksUploadsAcrossEvictionAndRedraw) {
+    TerrainBucketGeometry geometry;
+    ASSERT_TRUE(geometry.initialize());
+    auto& pool = geometry.pools[0];
+    auto handle = geometry.first_handle;
+    std::array<Luminumbra::VoxelVertex, 3> vertices{{{{-0.2f, -0.6f, 0.5f}, {0, 0, 1}, 1},
+                                                     {{0.2f, -0.6f, 0.5f}, {0, 0, 1}, 1},
+                                                     {{0.0f, 0.6f, 0.5f}, {0, 0, 1}, 1}}};
+    const std::array<Luminumbra::u32, 3> indices{0, 1, 2};
+    GBufferDiagnosticCapture capture(targets_, table_);
+    ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+    auto* shader = capture.variant(pass_.geometry_shader().get(), false);
+    ASSERT_NE(shader, nullptr);
+    ASSERT_NE(shader, pass_.geometry_shader().get());
+    ASSERT_TRUE(shader->IsValid());
+    shader->use();
+    shader->setMat4("view", glm::mat4(1));
+    shader->setMat4("projection", glm::mat4(1));
+    shader->setMat3("u_normalViewMatrix", glm::mat3(1));
+    shader->setInt("u_useInstanceOrigin", 1);
+    shader->setInt("u_forceFlat", 1);
+    shader->setInt("u_materialLUT", 0);
+    shader->setInt("u_terrainTextures", 1);
+    shader->setInt("u_terrainNormals", 2);
+    shader->setInt("u_terrainRoughness", 3);
+    shader->setInt("u_skinnedTextures", 4);
+    glBindFramebuffer(GL_FRAMEBUFFER, pass_.gbuffer().fbo_id);
+    glViewport(0, 0, 32, 32);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    auto* active = &capture;
+    std::string previous_key;
+    // One capture spans initial residency, eviction/recreation, staged update,
+    // world clear and final pool destruction/recreation. Every mesh version repeats.
+    for (unsigned operation = 0; operation < 5; ++operation) {
+        SCOPED_TRACE(operation);
+        if (operation != 0) {
+            vertices[0].position.x -= 0.01f;
+            if (operation == 2) {
+                handle = pool.update(handle, vertices.data(), 3, indices.data(), 3, "terrain");
+            } else {
+                if (operation == 1) {
+                    pool.free(handle);
+                } else if (operation == 3) {
+                    pool.clear();
+                } else {
+                    pool.destroy();
+                }
+                handle = pool.allocate(vertices.data(), 3, indices.data(), 3, "terrain");
+            }
+            ASSERT_NE(handle, ChunkGeometryPool::kInvalid);
+            geometry.rewrite_first(handle);
+        }
+        const auto generation = pool.allocation(handle).geometry_generation;
+        ASSERT_NE(generation, 0u);
+        // A refused upload must preserve the resident's diagnostic identity too.
+        EXPECT_EQ(pool.update(handle, nullptr, 3, indices.data(), 3, "terrain"),
+                  ChunkGeometryPool::kInvalid);
+        EXPECT_EQ(pool.allocation(handle).geometry_generation, generation);
+        const std::array<DiagnosticTerrainDraw, 1> draw{{{.chunk = {7, -2, 3},
+                                                          .lod = 0,
+                                                          .mesh_version = 31,
+                                                          .geometry_generation = generation}}};
+        for (unsigned repeat = 0; repeat < 2; ++repeat) {
+            geometry.bind(0);
+            SubmitDiagnosticTerrainBucket(active, draw, 1, geometry.stride, false, pool, 0);
+            ASSERT_NE(active, nullptr);
+        }
+        const auto document = nlohmann::json::parse(table_.json());
+        ASSERT_EQ(document["draws"].size(), (operation + 1) * 2);
+        ASSERT_EQ(document["meshes"].size(), operation + 1);
+        const auto first = document["draws"][operation * 2]["mesh"];
+        const auto repeated = document["draws"][operation * 2 + 1]["mesh"];
+        EXPECT_EQ(first, repeated);
+        const auto key = document["meshes"][operation]["generated"].get<std::string>();
+        EXPECT_EQ(key, "terrain/7/-2/3/version/31/generation/" + std::to_string(generation));
+        EXPECT_NE(key, previous_key);
+        previous_key = key;
+    }
+    capture.detach();
+    EXPECT_TRUE(capture.complete());
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }
 
 TEST_F(DiagnosticAttributionGl, TerrainRefusedLodClearsIdentityForRemainingBuckets) {

@@ -1947,6 +1947,52 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn(".lod = static_cast<std::uint32_t>(resident.lod)", loop)
         self.assertIn("const auto& resident = draws[draw - first]", loop)
 
+    def test_terrain_generated_mesh_key_includes_resident_geometry_generation(self):
+        draw = body(self.pipeline, "void RenderPipeline::draw_chunks_mdi(")
+        self.assertIn(".geometry_generation = a.geometry_generation", draw)
+        attributed = body(self.pipeline, "void SubmitDiagnosticTerrainBucket(")
+        key = compact(attributed[attributed.index("std::string mesh_key;"):
+                                 attributed.index("capture->write_current(")])
+        self.assertEqual(key,
+                         'std::string mesh_key; mesh_key.reserve(94); mesh_key += "terrain/"; '
+                         "mesh_key += std::to_string(resident.chunk[0]); mesh_key += '/'; "
+                         "mesh_key += std::to_string(resident.chunk[1]); mesh_key += '/'; "
+                         'mesh_key += std::to_string(resident.chunk[2]); mesh_key += "/version/"; '
+                         'mesh_key += std::to_string(resident.mesh_version); '
+                         'mesh_key += "/generation/"; '
+                         'std::array<char, 20> generation{}; // uint64 has at most 20 decimal digits. '
+                         'const auto* generation_end = std::to_chars(generation.data(), '
+                         'generation.data() + generation.size(), resident.geometry_generation) .ptr; '
+                         'mesh_key.append(generation.data(), '
+                         'static_cast<std::size_t>(generation_end - generation.data()));')
+        regression = read(ROOT / "test/rendering/diagnostic_attribution_test.cpp")
+        self.assertIn("TerrainGeometryIdentityTracksUploadsAcrossEvictionAndRedraw", regression)
+
+    def test_terrain_geometry_generation_covers_both_upload_paths_and_never_resets(self):
+        pool = read(RENDERING / "passes/ChunkGeometryPool.cpp")
+        self.assertIn("u64 next_geometry_generation()", pool)
+        sequence = compact(body(pool, "u64 next_geometry_generation()"))
+        self.assertIn("static u64 generation = 0;", sequence)
+        self.assertIn("if (generation == std::numeric_limits<u64>::max()) { return 0; }",
+                      sequence)
+        self.assertTrue(sequence.endswith("return ++generation;"), sequence)
+        self.assertEqual(pool.count("next_geometry_generation();"), 2)
+        for signature in ("u32 ChunkGeometryPool::allocate_with_reclaim(",
+                          "u32 ChunkGeometryPool::reuse_completed("):
+            upload = compact(body(pool, signature))
+            self.assertIn("const u64 geometry_generation = next_geometry_generation();", upload)
+            self.assertIn("if (geometry_generation == 0) { return kInvalid; }", upload)
+            self.assertLess(upload.index("if (geometry_generation == 0)"),
+                            upload.index("std::memcpy("))
+            self.assertIn("alloc.geometry_generation = geometry_generation;", upload)
+            self.assertLess(upload.rindex("std::memcpy("),
+                            upload.index("alloc.geometry_generation = geometry_generation;"))
+        for signature in ("void ChunkGeometryPool::free(", "void ChunkGeometryPool::clear()",
+                          "void ChunkGeometryPool::destroy()"):
+            self.assertNotIn("generation", body(pool, signature))
+        header = read(RENDERING / "passes/ChunkGeometryPool.h")
+        self.assertIn("u64 geometry_generation = 0;", header)
+
     def test_terrain_retirement_covers_every_submission_and_never_overwrites(self):
         pool = read(RENDERING / "passes/ChunkGeometryPool.cpp")
         pool_header = read(RENDERING / "passes/ChunkGeometryPool.h")

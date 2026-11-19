@@ -638,8 +638,10 @@ void GBufferPass::build_static_prop_cache(entt::registry& registry) {
                 anchorSlots.try_emplace({anchor_coords.x, anchor_coords.y, anchor_coords.z},
                                         static_cast<std::uint32_t>(m_anchorChunks.size()));
             if (inserted) {
-                m_anchorChunks.push_back(
-                    {.coords = anchor_coords, .chunk = nullptr, .resolved = false});
+                m_anchorChunks.push_back({.coords = anchor_coords,
+                                          .chunk = nullptr,
+                                          .resolved = false,
+                                          .supportOwner = {}});
             }
             cp.anchorSlot = slot->second;
         }
