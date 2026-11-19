@@ -344,6 +344,7 @@ public:
     // Internal owner continuation; no save/hash/boot adoption until explicitly called.
     // Supply not-yet-restored frozen captures to reserve their body slots. Finish
     // the roster before stepping or allocating other bodies (owner-thread exclusion).
+    // Restore requires the player ID to equal the next physics roster slot.
     bool CaptureAvatarOwner(const World::PlayerAvatar& avatar,
                             std::size_t physics_index,
                             World::PlayerAvatarOwnerState& output) const;

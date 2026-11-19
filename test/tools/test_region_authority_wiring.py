@@ -955,6 +955,73 @@ class SimulationCollisionWiring(unittest.TestCase):
         self.assertIn("common/PlayerAvatar_test.cpp", cmake)
         self.assertIn("gtest_discover_tests(${_lum_gtest_target}", cmake)
 
+    def test_live_avatar_restore_derives_pending_allocator_before_reference_admission(self):
+        source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(
+            encoding="utf-8")
+        restore = function(source, "bool PhysicsSystem::restore_avatar_owner(")
+        self.assertNotIn("if (!remaining_frozen.empty() && "
+                         "recipe.body == JPH::BodyID::cInvalidBodyID)", restore)
+        topology = function(restore, "if (recipe.body == JPH::BodyID::cInvalidBodyID && reserved.empty())")
+        self.assertIn("recipe.slot_count = reservation.slot_count;", topology)
+        self.assertIn("recipe.free_slots = reservation.free_slots;", topology)
+        self.assertLess(restore.index("ParseController(pending, reservation)"),
+                        restore.index("recipe.slot_count = reservation.slot_count;"))
+        for comparison in ("reservation.slot_count != recipe.slot_count",
+                           "reservation.free_slots != recipe.free_slots"):
+            self.assertLess(restore.index("recipe.free_slots = reservation.free_slots;"),
+                            restore.index(comparison))
+            self.assertLess(restore.index(comparison), restore.index("reserved.push_back("))
+        existing = function(restore, "if (recipe.body != JPH::BodyID::cInvalidBodyID || !reserved.empty())")
+        self.assertIn("m_jolt_system->GetBodies(existing);", existing)
+        self.assertIn("needs_capsule ? std::span(&recipe, 1) : std::span<const OwnerRecipe>{}", restore)
+        self.assertLess(restore.index("ValidateOwnerAllocator("), restore.index("ReferencesExist("))
+        self.assertLess(restore.index("ReferencesExist("), restore.index("PrepareOwnerAllocatorScratch("))
+        native = (ROOT / "test/common/PlayerAvatar_test.cpp").read_text(encoding="utf-8")
+        regression = function(native, "TEST(ControllerContinuation, "
+                              "MixedRosterContactsRestoreInPlayerOrderWithExactReservations)")
+        for token in ("for (const auto& [free_slot, frozen_without_capsule] :",
+                      "std::pair{false, false}", "std::pair{false, true}",
+                      "std::pair{true, false}", "std::pair{true, true}",
+                      "source.set_avatar_frozen(1, true,", "source.update_avatars(dt)",
+                      "ASSERT_TRUE(source.is_avatar_grounded(0))",
+                      "ASSERT_EQ(word(captured[0], 20), JPH::BodyID::cInvalidBodyID)",
+                      "ASSERT_TRUE(ValidatePhysicsOwner(current))",
+                      "EXPECT_FALSE(target_world.restore_avatar_owner(",
+                      "std::span(pending).first(pending_count)", "EXPECT_EQ(index, 999u)",
+                      "EXPECT_EQ(target.avatar_character_slot_count(), 0u)",
+                      "ExpectBodySet(before, after)", "std::span(captured).subspan(slot + 1)",
+                      "ExpectControllerBits(captured[slot], restored)", "ExpectBodySet(expected, actual)"):
+            self.assertIn(token, regression)
+        self.assertNotIn("source.set_avatar_frozen(0, true,", regression)
+
+    def test_session_avatar_restore_enforces_player_slot_before_publication(self):
+        source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(
+            encoding="utf-8")
+        restore = function(source, "bool GameSession::RestoreAvatarOwner(")
+        self.assertIn("if (!m_physicsSystem ||", restore)
+        admission = function(restore, "if (!m_physicsSystem ||")
+        self.assertIn("state.avatar.player_id != m_physicsSystem->avatar_character_slot_count()",
+                      restore)
+        self.assertEqual(admission, "return false;")
+        self.assertLess(restore.index("state.avatar.player_id !="),
+                        restore.index(".restore_avatar_owner("))
+        self.assertLess(restore.index("state.avatar.player_id !="), restore.index("avatar = state.avatar"))
+        native = (ROOT / "test/common/PlayerAvatar_test.cpp").read_text(encoding="utf-8")
+        regression = function(native, "TEST(GameSessionHeadlessWorldTest, "
+                              "AvatarRestoreRefusesOutOfOrderAndMisalignedRosterSlots)")
+        for token in ("jobs.startup(1)", "session.SetJobSystem(&jobs)",
+                      "for (const int failure : {0, 1, 2, 3})",
+                      "target->create_avatar_character(Vec3(16, 40, 8))",
+                      "ValidateAvatarOwner(invalid)",
+                      "ASSERT_TRUE(session.RestoreAvatarOwner(captured, restored, restored_index))",
+                      "EXPECT_FALSE(session.RestoreAvatarOwner(invalid, output, index))",
+                      "EXPECT_EQ(index, 999u)", "EXPECT_EQ(output.player_id, 77u)",
+                      "EXPECT_EQ(output.position, Vec3(1))", "EXPECT_EQ(output.facing, 2)",
+                      "EXPECT_EQ(output.velocity, Vec3(3))",
+                      "EXPECT_EQ(target->avatar_character_slot_count(), slots)",
+                      "ExpectBodySet(before, after)", "ExpectControllerBits(previous, retained.physics)"):
+            self.assertIn(token, regression)
+
     def test_avatar_restore_checks_simulation_bounds_before_staging(self):
         source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(
             encoding="utf-8")

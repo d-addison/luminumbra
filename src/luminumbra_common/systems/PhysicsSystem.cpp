@@ -2159,9 +2159,6 @@ bool PhysicsSystem::restore_avatar_owner(
         remaining_frozen.size() >= kMaxRestoredAvatars - m_avatars.size()) {
         return false;
     }
-    if (!remaining_frozen.empty() && recipe.body == JPH::BodyID::cInvalidBodyID) {
-        return false;
-    }
     // The codec carries a global allocator, but each controller owns one slot.
     // At most 4095 remaining captures, each bounded to 64 KiB,
     // may explain slots absent from the destination. Never infer reservations
@@ -2172,20 +2169,30 @@ bool PhysicsSystem::restore_avatar_owner(
         OwnerRecipe reservation;
         if (!ParseController(pending, reservation) || reservation.kind != 1u ||
             reservation.flags != 1u || reservation.body == JPH::BodyID::cInvalidBodyID ||
-            reservation.slot_count != recipe.slot_count ||
-            reservation.free_slots != recipe.free_slots ||
             !SimulationHorizon::valid(Vec3(static_cast<float>(reservation.feet.GetX()),
                                            static_cast<float>(reservation.feet.GetY()),
                                            static_cast<float>(reservation.feet.GetZ())))) {
+            return false;
+        }
+        // Live controllers have no allocator trailer. The first pending capsule
+        // supplies it; all other captures must describe that same exact topology.
+        if (recipe.body == JPH::BodyID::cInvalidBodyID && reserved.empty()) {
+            recipe.slot_count = reservation.slot_count;
+            recipe.free_slots = reservation.free_slots;
+        }
+        if (reservation.slot_count != recipe.slot_count ||
+            reservation.free_slots != recipe.free_slots) {
             return false;
         }
         reserved.push_back(reservation.body);
     }
     bool prepared_capsule = false;
     JPH::BodyIDVector existing;
+    if (recipe.body != JPH::BodyID::cInvalidBodyID || !reserved.empty()) {
+        m_jolt_system->GetBodies(existing);
+    }
     if (recipe.body != JPH::BodyID::cInvalidBodyID) {
         const JPH::BodyID id(recipe.body);
-        m_jolt_system->GetBodies(existing);
         for (const auto occupied : existing) {
             if (occupied.GetIndex() == id.GetIndex() && occupied != id) {
                 return false;
@@ -2224,8 +2231,8 @@ bool PhysicsSystem::restore_avatar_owner(
         allocator.slot_count = recipe.slot_count;
         allocator.free_slots = recipe.free_slots;
         if (!ValidateOwnerAllocator(allocator,
-                                    prepared_capsule ? std::span<const OwnerRecipe>{}
-                                                     : std::span(&recipe, 1),
+                                    needs_capsule ? std::span(&recipe, 1)
+                                                  : std::span<const OwnerRecipe>{},
                                     existing,
                                     m_body_slots->slot_count,
                                     reserved)) {
@@ -3099,7 +3106,8 @@ bool GameSession::RestoreAvatarOwner(const World::PlayerAvatarOwnerState& state,
                                      World::PlayerAvatar& avatar,
                                      std::size_t& physics_index,
                                      std::span<const World::PhysicsOwnerState> remaining_frozen) {
-    if (!m_physicsSystem) {
+    if (!m_physicsSystem ||
+        state.avatar.player_id != m_physicsSystem->avatar_character_slot_count()) {
         return false;
     }
     if (!World::ValidateAvatarOwner(state) ||
