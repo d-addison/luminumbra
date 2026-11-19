@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -634,5 +635,193 @@ TEST(WaterfallAdoption, FailedAmbientCreationCanRetryAfterMissingDataOrFullPass)
     particles.rebuild_emitter_descriptors(123, 2);
     ASSERT_EQ(particles.emitter_descriptors().size(), 1u);
     EXPECT_EQ(particles.emitter_descriptors().front().origin_region[0], 200000);
+}
+class WaterfallLiveness : public testing::Test {
+protected:
+    void SetUp() override {
+        particles.init_buffers();
+    }
+    void TearDown() override {
+        particles.destroy_buffers();
+    }
+    std::size_t Count(uint32_t emitter_index) const {
+        const auto states = particles.live_particle_states();
+        return static_cast<std::size_t>(
+            std::count_if(states.begin(), states.end(), [emitter_index](const auto& particle) {
+                return particle.emitter_index == emitter_index;
+            }));
+    }
+    const std::filesystem::path spray = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) /
+                                        "data/common/particles/waterfall_spray.json";
+    UploadCapture capture;
+    ParticlePass particles;
+};
+
+TEST_F(WaterfallLiveness, SprayUsesSiteFactorsAndRetiredParticlesFinishTheirLifetime) {
+    ASSERT_NE(particles.add_waterfall_spray(spray, glm::vec3(0), 8, 4, 1),
+              ParticlePass::kInvalidEmitter);
+    ASSERT_NE(particles.add_waterfall_spray(spray, glm::vec3(20), 8, 4, 0),
+              ParticlePass::kInvalidEmitter);
+    particles.rebuild_emitter_descriptors(123, 0);
+    const auto descriptor_hash = particles.emitter_descriptor_hash();
+    // 80 particles/s: full and half live spawn ten and five per eighth-second.
+    particles.set_waterfall_live_factors(std::array{0.5f, 1.0f});
+    particles.update(0.125f);
+    EXPECT_EQ(Count(0), 10u);
+    EXPECT_EQ(Count(1), 5u);
+    particles.set_waterfall_live_factors(std::array{0.0f, 1.0f});
+    particles.update(0.125f);
+    EXPECT_EQ(Count(0), 20u);
+    EXPECT_EQ(Count(1), 5u);
+    particles.set_waterfall_live_factors(std::array{0.0f, 0.0f});
+    particles.update(0.125f);
+    EXPECT_EQ(Count(0), 20u);
+    EXPECT_EQ(Count(1), 5u);
+    for (const auto& particle : particles.live_particle_states()) {
+        EXPECT_GE(particle.age, 0.25f);
+        EXPECT_FLOAT_EQ(particle.lifetime, 1.3f);
+    }
+    particles.update(1.3f);
+    EXPECT_TRUE(particles.live_particle_states().empty());
+    particles.set_waterfall_live_factors(std::array{0.5f, 1.0f});
+    particles.update(0.125f);
+    particles.set_waterfall_live_factors(std::array{0.5f, 1.0f});
+    particles.update(0.125f);
+    EXPECT_EQ(Count(0), 20u);
+    EXPECT_EQ(Count(1), 10u); // Scaling does not compound across frames.
+    particles.rebuild_emitter_descriptors(123, 0);
+    EXPECT_EQ(particles.emitter_descriptor_hash(), descriptor_hash);
+}
+
+TEST_F(WaterfallLiveness, MissingInvalidAndUnpreparedSitesAreSilentAndStandaloneSprayIsUnchanged) {
+    const std::array factors{0.0f,
+                             0.5f,
+                             1.0f,
+                             2.0f,
+                             -1.0f,
+                             std::numeric_limits<float>::quiet_NaN(),
+                             std::numeric_limits<float>::infinity()};
+    const std::array<std::size_t, 7> expected{0, 5, 10, 10, 0, 0, 0};
+    for (std::size_t i = 0; i < factors.size(); ++i) {
+        SCOPED_TRACE(i);
+        particles.clear_emitters();
+        ASSERT_NE(particles.add_waterfall_spray(spray, glm::vec3(0), 8, 4, 0),
+                  ParticlePass::kInvalidEmitter);
+        ASSERT_NE(particles.add_waterfall_spray(spray, glm::vec3(20), 8, 4, 9),
+                  ParticlePass::kInvalidEmitter);
+        ASSERT_NE(particles.add_waterfall_spray(spray, glm::vec3(40), 8, 4),
+                  ParticlePass::kInvalidEmitter);
+        particles.update(0.125f);
+        EXPECT_EQ(Count(0), 0u);
+        EXPECT_EQ(Count(1), 0u);
+        EXPECT_EQ(Count(2), 10u);
+        particles.set_waterfall_live_factors(std::span(&factors[i], 1));
+        particles.update(0.125f);
+        EXPECT_EQ(Count(0), expected[i]);
+        EXPECT_EQ(Count(1), 0u);
+        EXPECT_EQ(Count(2), 20u);
+        particles.set_waterfall_live_factors({});
+        particles.update(0.125f);
+        EXPECT_EQ(Count(0), expected[i]);
+        EXPECT_EQ(Count(1), 0u);
+        EXPECT_EQ(Count(2), 30u);
+    }
+}
+
+TEST_F(WaterfallLiveness, SiteBindingSurvivesReplacementCompactionAndFailedEmitterCreation) {
+    ASSERT_NE(particles.add_waterfall_spray(spray, glm::vec3(0), 8, 4, 0),
+              ParticlePass::kInvalidEmitter);
+    ASSERT_NE(particles.add_splash_emitter(spray.parent_path() / "precip_splash.json"),
+              ParticlePass::kInvalidEmitter);
+    particles.clear_waterfall_spray(); // Retained template moves from index 1 to 0.
+    particles.clear_waterfall_spray();
+    ASSERT_EQ(particles.add_waterfall_spray(spray / "missing.json", glm::vec3(0), 8, 4, 0),
+              ParticlePass::kInvalidEmitter);
+    ASSERT_NE(particles.add_waterfall_spray(spray, glm::vec3(20), 8, 4, 1),
+              ParticlePass::kInvalidEmitter);
+    particles.set_waterfall_live_factors(std::array{1.0f, 0.5f});
+    particles.update(0.125f);
+    EXPECT_EQ(Count(0), 0u);
+    EXPECT_EQ(Count(1), 5u);
+    particles.clear_waterfall_spray();
+    particles.set_waterfall_live_factors({});
+    particles.update(0.125f);
+    EXPECT_TRUE(particles.live_particle_states().empty());
+}
+
+TEST_F(WaterfallLiveness, AdoptionPublishesSharedFactorsAndReplacementClearsThem) {
+    WaterfallPass pass;
+    const Luminumbra::Systems::SHIELD_WorldSystem world(
+        nullptr, nullptr, Luminumbra::Systems::TerrainGenParams{}, 123);
+    const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
+    auto geometry = Geometry(2);
+    geometry.sites[0].crest.x = 10.0f;
+    geometry.sites[1].crest.x = 20.0f;
+    pass.begin_adoption(std::move(geometry));
+    EXPECT_FALSE(pass.adopt_next(&particles, root));
+    pass.update_liveness(world, &particles); // Incomplete adoption stays silent.
+    EXPECT_EQ(pass.roar_source(glm::vec3(0)).site, nullptr);
+    particles.update(0.125f);
+    EXPECT_EQ(Count(0), 0u);
+    EXPECT_TRUE(pass.adopt_next(&particles, root));
+    pass.update_liveness(world, &particles); // Unknown/unstreamed sites retain factor one.
+    const auto source = pass.roar_source(glm::vec3(0));
+    ASSERT_NE(source.site, nullptr);
+    EXPECT_FLOAT_EQ(source.site->crest.x, 10.0f);
+    EXPECT_FLOAT_EQ(source.gain(0.8f), 0.8f);
+    particles.update(0.125f);
+    EXPECT_EQ(Count(0), 5u); // Synthetic zero-drop sites retain the minimum intensity.
+    EXPECT_EQ(Count(1), 5u);
+    pass.update_liveness(world, nullptr); // Audio/sheets also work without particles.
+    pass.begin_adoption(Geometry(0));
+    EXPECT_EQ(pass.roar_source(glm::vec3(0)).site, nullptr);
+    EXPECT_TRUE(pass.adopt_next(&particles, root));
+    pass.update_liveness(world, &particles);
+    EXPECT_FALSE(particles.has_emitters());
+    EXPECT_TRUE(particles.live_particle_states().empty());
+    pass.destroy_geometry();
+    EXPECT_EQ(pass.roar_source(glm::vec3(0)).site, nullptr);
+}
+
+TEST(WaterfallRoar, SkipsRetiredSitesAndScalesTheNearestLiveGain) {
+    std::array<Luminumbra::Rendering::WaterfallSite, 3> sites{};
+    sites[0].crest.x = 1.0f; // Drained crest or excavated support: factor zero.
+    sites[1].crest.x = 10.0f;
+    sites[2].crest.x = 20.0f;
+    const auto selected =
+        WaterfallPass::SelectRoarSource(sites, std::array{0.0f, 0.25f, 1.0f}, glm::vec3(0));
+    EXPECT_EQ(selected.site, &sites[1]);
+    EXPECT_FLOAT_EQ(selected.gain(0.8f), 0.2f);
+    EXPECT_EQ(
+        WaterfallPass::SelectRoarSource(sites, std::array{0.0f, 0.0f, 1.0f}, glm::vec3(0)).site,
+        &sites[2]);
+    const auto retired =
+        WaterfallPass::SelectRoarSource(sites, std::array{0.0f, 0.0f, 0.0f}, glm::vec3(0));
+    EXPECT_EQ(retired.site, nullptr);
+    EXPECT_FLOAT_EQ(retired.gain(0.8f), 0.0f);
+}
+
+TEST(WaterfallRoar, HandlesEmptyPartialInvalidBoundaryAndTiedSites) {
+    std::array<Luminumbra::Rendering::WaterfallSite, 2> sites{};
+    sites[0].crest.x = 400.0f;
+    sites[1].crest.x = 401.0f;
+    EXPECT_EQ(WaterfallPass::SelectRoarSource({}, {}, glm::vec3(0)).site, nullptr);
+    EXPECT_EQ(WaterfallPass::SelectRoarSource(sites, {}, glm::vec3(0)).site, nullptr);
+    EXPECT_EQ(WaterfallPass::SelectRoarSource(sites, std::array{1.0f, 1.0f}, glm::vec3(0)).site,
+              nullptr);
+    sites[0].crest.x = 10.0f;
+    sites[1].crest.x = -10.0f;
+    EXPECT_EQ(WaterfallPass::SelectRoarSource(sites, std::array{1.0f, 1.0f}, glm::vec3(0)).site,
+              &sites[0]); // Stable site order breaks ties.
+    EXPECT_EQ(WaterfallPass::SelectRoarSource(sites, std::array{0.0f}, glm::vec3(0)).site, nullptr);
+    for (float invalid :
+         {-1.0f, std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()}) {
+        EXPECT_EQ(
+            WaterfallPass::SelectRoarSource(sites, std::array{invalid, 1.0f}, glm::vec3(0)).site,
+            &sites[1]);
+    }
+    const auto clamped = WaterfallPass::SelectRoarSource(sites, std::array{2.0f}, glm::vec3(0));
+    EXPECT_EQ(clamped.site, &sites[0]);
+    EXPECT_FLOAT_EQ(clamped.gain(0.8f), 0.8f);
 }
 } // namespace

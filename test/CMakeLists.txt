@@ -2134,6 +2134,12 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME JoltStartupPatchContract COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/tools/ci/test_jolt_startup.py")
 set_tests_properties(JoltStartupPatchContract PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+add_test(NAME DiagnosticCapturePython COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/tools/gates/test_diagnostic_capture.py")
+set_tests_properties(DiagnosticCapturePython PROPERTIES LABELS "tools" TIMEOUT 60)
+add_test(NAME DiagnosticRoisPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/tools/gates/test_diagnostic_rois.py")
+set_tests_properties(DiagnosticRoisPython PROPERTIES LABELS "tools" TIMEOUT 60)
 
 set(LUMINUMBRA_GTEST_TARGETS
     upload_budget_test
