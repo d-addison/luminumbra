@@ -69,6 +69,9 @@ int RunNetHostServerMode(const ServerCliOptions& options) {
     server.SetAoiChunkRadius(/*chunk_radius=*/3, /*chunk_size_mm=*/Luminumbra::CHUNK_SIZE_X * 1000);
 
     std::uint64_t executed = 0;
+    // Refusals share the requested tick budget; permanent pressure reaches the stall path.
+    const std::uint64_t max_preparation_retries = options.ticks;
+    std::uint64_t preparation_retries = 0;
     std::uint32_t accepted_count = 0;
     std::uint32_t left_count = 0;
     auto next_tick_time = std::chrono::steady_clock::now();
@@ -114,7 +117,9 @@ int RunNetHostServerMode(const ServerCliOptions& options) {
 
         const auto step = runner.RunFixedTicks(1);
         executed += step.ticks_executed;
-        if (step.ticks_executed == 0 && !step.region_fault) {
+        if (step.ticks_executed == 0 && !step.region_fault &&
+            preparation_retries < max_preparation_retries) {
+            ++preparation_retries;
             // Temporary collider pressure leaves connections and inputs intact.
             next_tick_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(33);
             std::this_thread::sleep_until(next_tick_time);
