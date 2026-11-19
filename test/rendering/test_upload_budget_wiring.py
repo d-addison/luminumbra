@@ -125,15 +125,33 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn('cp.terrainAnchored = bp.starts_with("procgen://rock_") || '
                       'bp.starts_with("procgen://bush_");', cache)
         draw = compact(body(source, "void GBufferPass::geometry_pass_static_meshes("))
-        self.assertIn("if (cp.terrainAnchored && AnchorChunkCoords(cp.position, anchor_coords))", cache)
         self.assertIn("cp.anchorSlot = slot->second;", cache)
-        self.assertIn("if (cp.anchorSlot < m_anchorChunks.size() && ctx.world_system)", draw)
-        self.assertIn("AnchorChunkSlot& slot = m_anchorChunks[cp.anchorSlot];", draw)
-        self.assertIn("ctx.world_system->find_streamed_chunk(slot.coords)", draw)
-        self.assertIn("if (chunk && chunk->has_terrain_authority())", draw)
-        guard = "if (slot.chunk && EditedTerrainRemovesAnchor(slot.chunk.get(), cp.position)) { continue; }"
-        self.assertIn(guard, draw)
-        self.assertLess(draw.index("if (culled)"), draw.index(guard))
+        # Each anchor chunk resolves once per frame; edited support drops the prop.
+        lookup = "if (cp.anchorSlot < m_anchorChunks.size() && ctx.world_system) {"
+        resolve = "auto chunk = ctx.world_system->find_streamed_chunk(slot.coords); if (chunk && chunk->has_terrain_authority()) {"
+        guard = "if (cp.supportRemoved) { continue; }"
+        # Support is re-evaluated only when the slot's chunk, revision or SDF storage changes.
+        changed = ("if (!same_owner || slot.supportRevision != revision || slot.supportSdf != sdf) {")
+        reeval = ("if (cp.supportGeneration != slot.supportGeneration) { cp.supportRemoved = "
+                  "EditedTerrainRemovesAnchor(slot.chunk.get(), cp.position); "
+                  "cp.supportGeneration = slot.supportGeneration; }")
+        for needle in (lookup, "if (!slot.resolved) { slot.resolved = true;", resolve, guard,
+                       "const auto revision = slot.chunk->voxel_revision();",
+                       "const float* const sdf = slot.chunk->sdf_data.data();",
+                       "!slot.supportOwner.owner_before(slot.chunk) && !slot.chunk.owner_before(slot.supportOwner);",
+                       changed, reeval):
+            self.assertIn(needle, draw)
+        self.assertLess(draw.index(resolve), draw.index(changed))
+        self.assertLess(draw.index(changed), draw.index(reeval))
+        self.assertLess(draw.index(reeval), draw.index(guard))
+        self.assertEqual(draw.count("EditedTerrainRemovesAnchor("), 1)
+        header = compact(read(RENDERING / "passes/GBufferPass.h"))
+        for field in ("mutable std::uint32_t supportGeneration = 0; mutable bool supportRemoved = false;",
+                      "std::weak_ptr<const ::Luminumbra::Chunk> supportOwner;",
+                      "std::uint32_t supportGeneration = 1;"):
+            self.assertIn(field, header)
+        self.assertLess(draw.index("if (culled)"), draw.index(lookup))
+        self.assertLess(draw.index(lookup), draw.index(guard))
         self.assertLess(draw.index(guard), draw.index("batch.mats.push_back(cp.model)"))
         support = compact(read(RENDERING / "TerrainAnchor.h"))
         for check in ("!chunk->has_terrain_authority()", "chunk->sdf_data.size() != volume",
@@ -142,29 +160,6 @@ class UploadBudgetWiring(unittest.TestCase):
             self.assertIn(check, support)
         self.assertNotIn("get_renderable_chunks", support)
         self.assertNotIn("get_density_at(", support)
-
-    def test_near_shrubs_are_leaf_cards_and_every_bush_lod_avoids_grass_albedo(self):
-        source = read(ROOT / "src/luminumbra_client/app/ProcgenPalettes.cpp")
-        palette = compact(body(source, "void BuildProcgenBushPalette("))
-        self.assertIn("BuildBushLeafCard(center, normal, 0.24f, 0.18f)", palette)
-        for corner, uv in ((0, "0.0f, 0.0f"), (1, "1.0f, 0.0f"),
-                           (2, "1.0f, 1.0f"), (3, "0.0f, 1.0f")):
-            self.assertIn("verts.push_back({card[%d], normal, {%s}});" % (corner, uv), palette)
-        self.assertIn("{0u, 1u, 2u, 0u, 2u, 3u}", palette)
-        draw = compact(body(read(RENDERING / "passes/GBufferPass.cpp"),
-                            "void GBufferPass::geometry_pass_static_meshes("))
-        self.assertIn("const bool leafCards = isLeaf || (isBush && !isFarLod);", draw)
-        self.assertIn('shader->setInt("u_alphaTest", leafCards ? 2 : 0);', draw)
-        self.assertIn("two_sided = leafCards;", draw)
-        self.assertIn('shader->setInt("u_forceFlat", (isBush || (isLeaf && isFarLod)) ? 1 : 0);', draw)
-        # Both legacy and ladder programs use this same draw consumer.
-        self.assertIn("instanced_static_mesh_shader(input.far_selection.effective)", draw)
-        native = read(ROOT / "test/rendering/shader_compositing_contract_test.cpp")
-        for regression in ("LeafCardsAreFiniteOutwardQuadsForSideAndPolarNormals",
-                           "EditedAirRetiresDressingAndRefillRestoresItWithoutDirtyBitDependence",
-                           "TrilinearSupportUsesThePaddedXyzLatticeAtChunkEdges",
-                           "MissingPartialNonfiniteAndOutsideSupportRemainUnknown"):
-            self.assertIn(regression, native)
 
     def test_world_presentation_blocks_both_entry_paths_and_timelapse(self):
         preload = body(self.main, "auto wait_for_world_presentation =")

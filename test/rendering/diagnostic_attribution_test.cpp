@@ -1,7 +1,9 @@
 #include "core/IsolationConfig.h"
+#include "luminumbra_common/animation/AnimationRuntime.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "rendering/Camera.h"
 #include "rendering/DiagnosticDrawTable.h"
+#include "rendering/FarLodSystem.h"
 #include "rendering/GBufferTargets.h"
 #include "rendering/Mesh.h"
 #include "rendering/RenderResourceRegistry.h"
@@ -110,11 +112,23 @@ std::uint64_t SourceHash(const std::string& source) {
 
 const std::string kTargets = "src/luminumbra_client/rendering/GBufferTargets.cpp";
 const std::string kPass = "src/luminumbra_client/rendering/passes/GBufferPass.cpp";
+template<typename Submission>
+bool SubmitGenerated(Luminumbra::Rendering::DiagnosticDrawTable& table,
+                     Submission submission,
+                     std::string_view key,
+                     Luminumbra::Rendering::DiagnosticId& id) {
+    if constexpr (requires { submission.generated_mesh; }) {
+        submission.generated_mesh = key;
+        return table.submit(submission, id);
+    }
+    return false;
+}
 } // namespace
 
 TEST(DiagnosticAttribution, DefaultShaderTextIsUnchangedWithoutTheVariant) {
+    // Re-pinned for #872's interpolated-normal slope-rock coverage (#1045).
     EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(Read("res/shaders/g_buffer.frag"))),
-              0x4587e216df428316ull);
+              0xb68526b1edfc1436ull);
     EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(Read("res/shaders/foliage.frag"))),
               0xd5876c01db56f7ecull);
     const auto create = Body((Read(kTargets) + Read(kPass)), "void CreateGBufferTargets(");
@@ -273,6 +287,63 @@ TEST(DiagnosticAttribution, BothLegacyFarWritersCarryTheActualTierAndOwner) {
     EXPECT_FALSE(table.complete_coverage());
 }
 
+TEST(DiagnosticAttribution, CapabilityRefusalIsAnExplicitUnsupportedRecord) {
+    const auto targets = (Read(kTargets) + Read(kPass));
+    const auto attach = Body(targets, "bool GBufferDiagnosticCapture::attach_target(");
+    Contains(attach, "state_->framebuffer != 0 ||");
+    Contains(attach, "forward ? !state_->captured || state_->forward_captured : state_->captured");
+    Contains(attach, "nested_gbuffer_attachment");
+    Contains(attach, "!gbuffer.fbo_id || !gbuffer.position_texture");
+    Contains(attach, "max_buffers < 7");
+    Contains(attach, "max_buffers > static_cast<GLint>(state_->buffers.size())");
+    Contains(attach, "max_attachments < 7");
+    Contains(attach, "diagnostic_mrt_capability");
+    Contains(attach, "diagnostic_attachment_lease_unavailable");
+    Contains(attach, "diagnostic_integer_target_unsupported");
+    Contains(attach, "diagnostic_attachment_occupied");
+    Contains(attach, "diagnostic_mrt_incomplete");
+    Contains(Body(targets, "bool GBufferDiagnosticCapture::attach("), "unsupported(reason)");
+    EXPECT_LT(attach.find("attachment_type != GL_NONE"), attach.find("targets.ensure("));
+    const auto refusal = Body(targets, "void GBufferDiagnosticCapture::unsupported(");
+    Contains(refusal, "state_->failed = true");
+    Contains(refusal, ".provenance = DiagnosticProvenance::Unsupported");
+    Contains(refusal, "state_->table.submit(");
+    Contains(refusal, "state_->refused = true;");
+    EXPECT_EQ(refusal.find("throw"), std::string::npos);
+    const auto complete = Body(targets, "bool GBufferDiagnosticCapture::complete()");
+    Contains(complete, "state_->captured && !state_->framebuffer");
+    Contains(complete, "!state_->attachment_lease");
+    Contains(complete, "!state_->failed");
+    Contains(complete, "!state_->refused");
+    Contains(complete, "state_->table.complete_coverage()");
+}
+
+TEST(DiagnosticAttribution, ResizeAndIncompleteAttachmentRestoreTheEntireDrawBufferState) {
+    const auto targets = (Read(kTargets) + Read(kPass));
+    const auto attach = Body(targets, "bool GBufferDiagnosticCapture::attach_target(");
+    Contains(attach, "width <= 0 || height <= 0");
+    Contains(attach, "static_cast<std::uint32_t>(width) != extent.width");
+    Contains(attach, "static_cast<std::uint32_t>(height) != extent.height");
+    Contains(attach, "diagnostic_gbuffer_extent_mismatch");
+    Contains(attach, "targets.ensure(true, extent, 7)");
+    Contains(attach, "GL_DRAW_BUFFER0 + static_cast<GLenum>(index)");
+    Contains(attach, "glGetBooleani_v(GL_COLOR_WRITEMASK, 6, state_->color_mask.data())");
+    Contains(attach, "glColorMaski(6, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE)");
+    Contains(attach, "if (!complete) {\n        detach_target();");
+    EXPECT_LT(attach.find("GL_DRAW_BUFFER0"), attach.find("glFramebufferTexture2D("));
+    const auto detach = Body(targets, "void GBufferDiagnosticCapture::detach_target()");
+    Contains(detach, "GL_COLOR_ATTACHMENT6, GL_TEXTURE_2D, 0, 0");
+    Contains(detach, "glDrawBuffers(state_->buffer_count, state_->buffers.data())");
+    Contains(detach, "glColorMaski(6,");
+    Contains(detach, "static_cast<GLuint>(saved_framebuffer)");
+    const auto retire = Body(targets, "void GBufferDiagnosticCapture::before_destroy(");
+    Contains(retire, "state_->framebuffer == gbuffer.fbo_id");
+    EXPECT_LT(retire.find("detach_target();"), retire.find("gbuffer_recreated_during_capture"));
+    const auto destroy = Body(targets, "void DestroyGBufferTargets(");
+    EXPECT_LT(destroy.find("capture->before_destroy(gbuffer)"),
+              destroy.find("registry.destroy_owned"));
+}
+
 TEST(DiagnosticAttribution, MissingProducerMetadataCannotClaimCompleteCoverage) {
     const auto pass = Read(kPass);
     Contains(pass, "live_terrain_mdi_unsupported");
@@ -288,30 +359,51 @@ TEST(DiagnosticAttribution, MissingProducerMetadataCannotClaimCompleteCoverage) 
     Contains(targets, "diagnostic_shader_variant_unavailable");
     Contains(Body(targets, "void GBufferDiagnosticCapture::unsupported("),
              ".provenance = DiagnosticProvenance::Unsupported");
-    Contains(Body(targets, "bool GBufferDiagnosticCapture::complete()"), "return false;");
+    Contains(Body(targets, "bool GBufferDiagnosticCapture::complete()"),
+             "state_->table.complete_coverage()");
 }
 
-TEST(DiagnosticAttribution, ProducersDoNotInstallAttachmentsOrClaimCompleteCoverage) {
+TEST(DiagnosticAttribution, DeferredAttachmentScopeEndsBeforeCallerStateRestoration) {
     const auto pass = Read(kPass);
-    const auto header = Read("src/luminumbra_client/rendering/GBufferTargets.h");
-    for (const auto& source :
-         {pass, Read("src/luminumbra_client/rendering/static_preview/StaticRenderer.cpp")}) {
-        EXPECT_EQ(source.find("GBufferDiagnosticAttachment"), std::string::npos);
-        EXPECT_EQ(source.find("attach_target"), std::string::npos);
-    }
+    const auto execute = Body(pass, "GBufferDrawStats GBufferPass::execute(");
+    Before(execute,
+           "ReplayRollback restore_gl(",
+           "GBufferDiagnosticAttachment diagnostic_attachment(");
+    Before(execute,
+           "glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)",
+           "GBufferDiagnosticAttachment diagnostic_attachment(");
+    Before(execute, "GBufferDiagnosticAttachment diagnostic_attachment(", "geometry_pass_chunks(");
+    Before(execute,
+           "GBufferDiagnosticAttachment diagnostic_attachment(",
+           "geometry_pass_skinned_meshes(");
     EXPECT_EQ(pass.find("glFramebufferTexture"), std::string::npos);
+    EXPECT_EQ(Read("src/luminumbra_client/rendering/static_preview/StaticRenderer.cpp")
+                  .find("GBufferDiagnosticAttachment"),
+              std::string::npos);
     EXPECT_EQ(SourceHash(Body(Read(kTargets), "void CreateGBufferTargets(")),
               0x87b070d8d24c6b19ull);
-    Contains(header, "explicit GBufferDiagnosticCapture(DiagnosticDrawTable& table)");
-    Contains(Body(Read(kTargets), "bool GBufferDiagnosticCapture::complete()"), "return false;");
+}
+
+TEST(DiagnosticAttribution, AttachmentStorageIsEnsuredBeforeLeaseAndLeaseBeforeAttachment) {
+    const auto header = Read("src/luminumbra_client/rendering/GBufferTargets.h");
+    Contains(header, "DiagnosticTargets::AttachmentLease attachment_lease;");
+    const auto attach = Body(Read(kTargets), "bool GBufferDiagnosticCapture::attach_target(");
+    Before(attach,
+           "targets.ensure(true, extent, 7)",
+           "state_->attachment_lease = targets.acquire_attachment_lease()");
+    Before(attach,
+           "state_->attachment_lease = targets.acquire_attachment_lease()",
+           "if (!state_->attachment_lease)");
+    Before(attach, "if (!state_->attachment_lease)", "glFramebufferTexture2D(");
+    Contains(attach, "state_->attachment_lease.texture()");
+    Contains(attach, "diagnostic_attachment_lease_unavailable");
+    EXPECT_EQ(attach.find("attachment_lease.reset()"), std::string::npos);
 }
 
 TEST(DiagnosticAttribution, LeaseProtectsAttachmentThroughRollbackAndCallerRestoration) {
     const auto targets = Read(kTargets);
     const auto attach = Body(targets, "bool GBufferDiagnosticCapture::attach_target(");
-    Before(attach,
-           "state_->targets->ensure(true, extent, 7)",
-           "state_->targets->acquire_attachment_lease()");
+    Before(attach, "targets.ensure(true, extent, 7)", "targets.acquire_attachment_lease()");
     Before(attach, "if (!state_->attachment_lease)", "glFramebufferTexture2D(");
     Before(Body(attach, "if (!complete)"), "detach_target();", "diagnostic_mrt_incomplete");
     const auto detach = Body(targets, "void GBufferDiagnosticCapture::detach_target()");
@@ -360,7 +452,7 @@ TEST(DiagnosticAttribution, RecreationAndBothDestructorsDetachBeforeRetiringStor
     Contains(scope, "capture_->abort();");
     Before(Body(source, "void GBufferDiagnosticCapture::detach()"),
            "detach_target();",
-           "unsupported(reason)");
+           "unsupported(reason,");
 }
 
 namespace {
@@ -487,9 +579,12 @@ protected:
         const std::filesystem::path root(LUMINUMBRA_SOURCE_ROOT);
         pass_.init_geometry_shader(root);
         pass_.init_instanced_static_mesh(root);
+        pass_.init_skinned_mesh(root);
         pass_.init_gbuffer(resources_, 32, 32);
         ASSERT_TRUE(pass_.geometry_shader()->IsValid());
         ASSERT_TRUE(pass_.instanced_static_mesh_shader()->IsValid());
+        ASSERT_TRUE(pass_.skinned_mesh_shader()->IsValid());
+        ASSERT_TRUE(targets_.ensure(true, {32, 32}, 7));
         ctx_.camera = &camera_;
         ctx_.screen_width = 32;
         ctx_.screen_height = 32;
@@ -509,6 +604,7 @@ protected:
     void TearDown() override {
         if (gl_.ready()) {
             pass_.destroy_instanced_static_mesh();
+            pass_.destroy_skinned_mesh();
             pass_.destroy_gbuffer(resources_);
             glBindVertexArray(0);
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -573,6 +669,7 @@ protected:
     AttributionContext gl_;
     RenderResourceRegistry resources_;
     GBufferPass pass_;
+    DiagnosticTargets targets_;
     DiagnosticDrawTable table_;
     Camera camera_;
     Luminumbra::Client::ScenarioHarness::IsolationConfig isolation_;
@@ -584,12 +681,196 @@ protected:
     GLuint entry_vao_ = 0;
     std::array<GLuint, 2> entry_fbos_{};
 };
+
+// Model a driver link refusal through GLAD, forwarding all other real GL work.
+class ImpostorLinkRefusal {
+public:
+    ImpostorLinkRefusal() {
+        Active() = this;
+        glGetProgramiv = GetProgram;
+    }
+    ~ImpostorLinkRefusal() {
+        glGetProgramiv = previous_;
+        Active() = nullptr;
+    }
+    ImpostorLinkRefusal(const ImpostorLinkRefusal&) = delete;
+    ImpostorLinkRefusal& operator=(const ImpostorLinkRefusal&) = delete;
+    bool refused() const {
+        return refused_;
+    }
+
+private:
+    static ImpostorLinkRefusal*& Active() {
+        static ImpostorLinkRefusal* probe = nullptr;
+        return probe;
+    }
+    static void APIENTRY GetProgram(GLuint program, GLenum name, GLint* value) {
+        auto& probe = *Active();
+        probe.previous_(program, name, value);
+        // Initialization links two geometry and two static programs before the
+        // impostor. The fixture asserts that all other required programs link.
+        if (name == GL_LINK_STATUS && ++probe.link_checks_ == 5) {
+            *value = GL_FALSE;
+            probe.refused_ = true;
+        }
+    }
+    decltype(glGetProgramiv) previous_ = glGetProgramiv;
+    unsigned link_checks_ = 0;
+    bool refused_ = false;
+};
+
+class UnavailableImpostorGl : public DiagnosticAttributionGl {
+protected:
+    void SetUp() override {
+        ASSERT_TRUE(gl_.ready());
+        ImpostorLinkRefusal refusal;
+        DiagnosticAttributionGl::SetUp();
+        ASSERT_TRUE(refusal.refused());
+    }
+};
 } // namespace
+
+TEST_F(UnavailableImpostorGl, UnavailableProducerProgramFailsAnAttachedCapture) {
+    // Confirm both the empty queue and a real queued leaf; no unsupported
+    // record from another producer may hide the missing impostor record.
+    const glm::vec3 position(200, 12, 0);
+    SubmittedLiveTerrain support;
+    support.add_origin({192, 0, 0});
+    ASSERT_TRUE(support.covers(position));
+    input_.resident_live_terrain = &support;
+    input_.tree_impostor_enabled = true;
+    input_.tree_impostor_grid = 1;
+    input_.tree_impostor_radius = 1;
+    for (const bool queued : {false, true}) {
+        if (queued) {
+            ASSERT_NE(AddMesh("game-assets/tree-small-02/diagnostic-leaf.lmesh", position),
+                      nullptr);
+        }
+        for (const auto mode : {FarWorldMode::Legacy, FarWorldMode::Ladder}) {
+            table_.clear();
+            input_.far_selection.effective = mode;
+            ctx_.far_world_ladder = mode == FarWorldMode::Ladder;
+            GBufferDiagnosticCapture capture(targets_, table_);
+            SetEntryState(false);
+            const auto stats = pass_.execute(ctx_, entities_, input_);
+            EXPECT_EQ(stats.invalid_program_refusals, queued ? 1u : 0u);
+            EXPECT_EQ(capture.complete(), !queued);
+            EXPECT_EQ(table_.complete_coverage(), !queued);
+            if (queued) {
+                Contains(table_.json(), "tree_impostor_fragment_output_unavailable");
+                const auto document = nlohmann::json::parse(table_.json());
+                ASSERT_EQ(document.at("draws").size(), 1u);
+                EXPECT_EQ(document.at("draws").front().at("lod"), 3u);
+            } else {
+                EXPECT_EQ(table_.resolve(1), nullptr);
+            }
+            ExpectEntryState(false);
+            EXPECT_TRUE(targets_.reset());
+        }
+    }
+}
+
+TEST_F(DiagnosticAttributionGl, WritersRequireAttachmentAndCompletionRequiresLeaseRelease) {
+    GBufferDiagnosticCapture capture(targets_, table_);
+    auto* base = pass_.instanced_static_mesh_shader().get();
+    const auto empty = table_.json();
+    EXPECT_EQ(capture.variant(base, false), base);
+    capture.write(*base, Submission());
+    EXPECT_EQ(table_.json(), empty);
+    EXPECT_FALSE(capture.complete());
+
+    SetEntryState(false);
+    ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+    auto* shader = capture.variant(base, false);
+    ASSERT_NE(shader, base);
+    ASSERT_TRUE(shader->IsValid());
+    capture.write(*shader, Submission());
+    EXPECT_TRUE(table_.complete_coverage());
+    EXPECT_FALSE(capture.complete());
+    EXPECT_FALSE(targets_.reset());
+    EXPECT_FALSE(targets_.ensure(false, {}));
+    EXPECT_FALSE(targets_.ensure(true, {16, 16}, 7));
+    ExpectEntryState(false);
+
+    capture.detach();
+    EXPECT_TRUE(capture.complete());
+    const auto recorded = table_.json();
+    EXPECT_EQ(capture.variant(nullptr, true), nullptr);
+    EXPECT_EQ(capture.variant(base, false), base);
+    capture.write(*shader, Submission());
+    EXPECT_EQ(table_.json(), recorded);
+    EXPECT_TRUE(capture.complete());
+    ExpectEntryState(false);
+    EXPECT_TRUE(targets_.reset());
+    EXPECT_FALSE(capture.attach(pass_.gbuffer(), {32, 32}));
+    EXPECT_FALSE(capture.complete());
+}
+
+TEST_F(DiagnosticAttributionGl, UnavailableProducerProgramFailsAnAttachedCapture) {
+    // Exercise both pointer absence and failed-link Shader objects, in both modes.
+    Shader invalid("test/missing.vert", "test/missing.frag");
+    ASSERT_FALSE(invalid.IsValid());
+    for (const bool ladder : {false, true}) {
+        for (auto* unavailable : {static_cast<Shader*>(nullptr), &invalid}) {
+            table_.clear();
+            GBufferDiagnosticCapture capture(targets_, table_);
+            EXPECT_EQ(capture.variant(unavailable, ladder), unavailable);
+            ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+            EXPECT_EQ(capture.variant(unavailable, ladder), unavailable);
+            capture.detach();
+            EXPECT_FALSE(capture.complete());
+            EXPECT_FALSE(table_.complete_coverage());
+            Contains(table_.json(), "diagnostic_base_shader_unavailable");
+            EXPECT_TRUE(targets_.reset());
+        }
+    }
+
+    // An empty skinned view must not bypass unavailable-program invalidation.
+    pass_.reset_shaders();
+    isolation_.layer_mask = Luminumbra::Client::ScenarioHarness::IsolationLayer::Skinned;
+    for (const bool empty : {true, false}) {
+        if (!empty) {
+            const auto actor = entities_.create();
+            entities_.emplace<Luminumbra::Components::TransformComponent>(actor);
+            entities_.emplace<Luminumbra::Components::SkinnedMeshComponent>(actor);
+            entities_.emplace<luminumbra::animation::AnimationPlayerComponent>(actor);
+        }
+        for (const auto mode : {FarWorldMode::Legacy, FarWorldMode::Ladder}) {
+            table_.clear();
+            input_.far_selection.effective = mode;
+            GBufferDiagnosticCapture capture(targets_, table_);
+            SetEntryState(true);
+            const auto stats = pass_.execute(ctx_, entities_, input_);
+            EXPECT_EQ(stats.invalid_program_refusals, empty ? 0u : 1u);
+            EXPECT_FALSE(capture.complete());
+            EXPECT_FALSE(table_.complete_coverage());
+            Contains(table_.json(), "diagnostic_base_shader_unavailable");
+            EXPECT_TRUE(targets_.reset());
+            ExpectEntryState(true);
+        }
+    }
+}
+
+TEST_F(DiagnosticAttributionGl, UnsupportedSubmissionRemainsIncompleteAfterTableReset) {
+    GBufferDiagnosticCapture capture(targets_, table_);
+    ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+    auto* shader = capture.variant(pass_.instanced_static_mesh_shader().get(), false);
+    ASSERT_NE(shader, pass_.instanced_static_mesh_shader().get());
+    auto submission = Submission();
+    submission.provenance = DiagnosticProvenance::Unsupported;
+    capture.write(*shader, submission);
+    capture.detach();
+    EXPECT_FALSE(capture.complete());
+    table_.clear();
+    EXPECT_TRUE(table_.complete_coverage());
+    EXPECT_FALSE(capture.complete());
+}
 
 TEST_F(DiagnosticAttributionGl, ExhaustedWriterAndUnsupportedRefuseWithoutGrowingOrThrowing) {
     for (const bool unsupported : {false, true}) {
         table_.clear();
-        GBufferDiagnosticCapture capture(table_);
+        GBufferDiagnosticCapture capture(targets_, table_);
+        ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
         Shader* shader = capture.variant(pass_.instanced_static_mesh_shader().get(), false);
         ASSERT_NE(shader, pass_.instanced_static_mesh_shader().get());
         ASSERT_TRUE(shader->IsValid());
@@ -631,7 +912,7 @@ TEST_F(DiagnosticAttributionGl, ExhaustedDoubleSidedSubmissionRestoresCallerGlSt
     ASSERT_NE(AddMesh(), nullptr);
     for (const bool cull : {false, true}) {
         table_.clear();
-        GBufferDiagnosticCapture capture(table_);
+        GBufferDiagnosticCapture capture(targets_, table_);
         FillRegistry();
         const auto full = table_.json();
         SetEntryState(cull);
@@ -686,28 +967,59 @@ TEST_F(DiagnosticAttributionGl, InactivePassDoesNoSnapshotOrRestoreOnNormalAndEx
 
 TEST_F(DiagnosticAttributionGl, ActiveEmptyPassSnapshotsOnceAndRestoresOnEveryDispatch) {
     isolation_.layer_mask = 0;
+    GLint max_buffers = 0;
+    glGetIntegerv(GL_MAX_DRAW_BUFFERS, &max_buffers);
+    ASSERT_GE(max_buffers, 7);
+    ASSERT_LE(max_buffers, 32);
+    // Reused storage: capabilities, texture/FBO bindings and the bounded MRT snapshot.
+    const auto attachment_queries = 8u + static_cast<unsigned>(max_buffers);
     for (const bool replay : {false, true}) {
         ctx_.frozen_replay = replay;
         for (const bool cull : {false, true}) {
-            GBufferDiagnosticCapture capture(table_);
+            table_.clear();
+            GBufferDiagnosticCapture capture(targets_, table_);
             SetEntryState(cull);
             {
                 PassStateProbe probe;
                 EXPECT_NO_THROW(pass_.execute(ctx_, entities_, input_));
-                EXPECT_EQ(probe.integer_queries, 3u);
+                EXPECT_EQ(probe.integer_queries, 3u + attachment_queries);
                 EXPECT_EQ(probe.enabled_queries, 1u);
                 EXPECT_EQ(probe.vao_binds, 1u);
                 EXPECT_EQ(probe.combined_fbo_binds, 1u);
-                EXPECT_EQ(probe.draw_fbo_binds, 1u);
+                EXPECT_EQ(probe.draw_fbo_binds, 7u);
                 EXPECT_EQ(probe.read_fbo_binds, 1u);
             }
             ExpectEntryState(cull);
+            // The fully filtered pass never certifies coverage.
+            EXPECT_FALSE(capture.complete());
+            Contains(table_.json(), "isolation_filtered_deferred_producer");
+            EXPECT_TRUE(targets_.ensure(true, {16, 16}, 7));
+            ASSERT_TRUE(targets_.ensure(true, {32, 32}, 7));
         }
     }
 }
 
+TEST_F(DiagnosticAttributionGl, FilteredDeferredLayersInvalidateCompletionEvenWhenPopulated) {
+    namespace SH = Luminumbra::Client::ScenarioHarness;
+    const auto actor = entities_.create();
+    entities_.emplace<Luminumbra::Components::TransformComponent>(actor);
+    entities_.emplace<Luminumbra::Components::SkinnedMeshComponent>(actor);
+    entities_.emplace<luminumbra::animation::AnimationPlayerComponent>(actor);
+    for (const std::uint32_t mask : {std::uint32_t{SH::IsolationLayer::Terrain},
+                                     std::uint32_t{SH::IsolationLayer::Skinned},
+                                     std::uint32_t{0}}) {
+        isolation_.layer_mask = mask;
+        table_.clear();
+        GBufferDiagnosticCapture capture(targets_, table_);
+        EXPECT_NO_THROW(pass_.execute(ctx_, entities_, input_));
+        EXPECT_FALSE(capture.complete());
+        EXPECT_FALSE(table_.complete_coverage());
+        Contains(table_.json(), "isolation_filtered_deferred_producer");
+        EXPECT_TRUE(targets_.reset());
+    }
+}
+
 TEST_F(DiagnosticAttributionGl, ExceptionalProducerRestoresCallerGlState) {
-    GBufferDiagnosticCapture capture(table_);
     input_.submit_terrain_chunks = [](const glm::vec4(&)[6]) -> TerrainSubmitStats {
         glDisable(GL_CULL_FACE);
         glBindVertexArray(0);
@@ -717,8 +1029,12 @@ TEST_F(DiagnosticAttributionGl, ExceptionalProducerRestoresCallerGlState) {
     for (const bool replay : {false, true}) {
         ctx_.frozen_replay = replay;
         for (const bool cull : {false, true}) {
+            table_.clear();
+            GBufferDiagnosticCapture capture(targets_, table_);
             SetEntryState(cull);
             EXPECT_THROW(pass_.execute(ctx_, entities_, input_), std::runtime_error);
+            EXPECT_FALSE(capture.complete());
+            EXPECT_TRUE(targets_.reset());
             ExpectEntryState(cull);
         }
     }
@@ -775,7 +1091,7 @@ TEST_F(DiagnosticAttributionGl, AuthoredUpgradeRestoresLiveCallerFramebuffers) {
                 return TerrainSubmitStats{};
             };
             table_.clear();
-            GBufferDiagnosticCapture capture(table_);
+            GBufferDiagnosticCapture capture(targets_, table_);
             PassStateProbe probe(old_fbo);
             if (failure == 2) {
                 EXPECT_THROW(pass_.execute(ctx_, entities_, input_), std::invalid_argument);
@@ -817,7 +1133,7 @@ TEST_F(DiagnosticAttributionGl, SuccessfulInstancesRecordDistinctIdentitiesAndRe
                                                              {{1, -1, -5}, {0, 0, 1}, {1, 0}},
                                                              {{0, 1, -5}, {0, 0, 1}, {.5f, 1}}},
                                                             {0, 1, 2}));
-    GBufferDiagnosticCapture capture(table_);
+    GBufferDiagnosticCapture capture(targets_, table_);
     SetEntryState(false);
     GLuint query = 0;
     glGenQueries(1, &query);
@@ -861,7 +1177,7 @@ void DiagnosticAttributionGl::ExpectInvalidMetadata(bool excessive_path) {
         mesh->indexCount = static_cast<std::uint32_t>(std::numeric_limits<GLsizei>::max()) + 1u;
     }
     table_.clear();
-    GBufferDiagnosticCapture capture(table_);
+    GBufferDiagnosticCapture capture(targets_, table_);
     SetEntryState(true);
     GLuint query = 0;
     glGenQueries(1, &query);
@@ -899,7 +1215,8 @@ TEST_F(DiagnosticAttributionGl, ExcessivePathRecordsIncompleteCoverageAndStillDr
 }
 
 TEST_F(DiagnosticAttributionGl, JsonBudgetRefusalIsStickyWithoutGrowingOrThrowing) {
-    GBufferDiagnosticCapture capture(table_);
+    GBufferDiagnosticCapture capture(targets_, table_);
+    ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
     Shader* shader = capture.variant(pass_.instanced_static_mesh_shader().get(), false);
     ASSERT_NE(shader, pass_.instanced_static_mesh_shader().get());
     auto submission = Submission();
@@ -936,7 +1253,8 @@ TEST_F(DiagnosticAttributionGl, InvalidIdentityRefusesWithoutReusingThePreviousI
     malformed.shader_variant = malformed_utf8;
     for (const auto& submission : {invalid, unknown, missing, malformed}) {
         table_.clear();
-        GBufferDiagnosticCapture capture(table_);
+        GBufferDiagnosticCapture capture(targets_, table_);
+        ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
         Shader* shader = capture.variant(pass_.instanced_static_mesh_shader().get(), false);
         ASSERT_NE(shader, pass_.instanced_static_mesh_shader().get());
         capture.write(*shader, Submission());
@@ -1416,4 +1734,356 @@ TEST_F(GBufferLeaseGl, RetirementReleasesLeaseEvenWhenRefusalCannotBeRecorded) {
     EXPECT_TRUE(capture.attachment_failed());
     ExpectCallerBindingsAndMask();
     EXPECT_TRUE(targets_.reset());
+}
+
+TEST(DiagnosticAttribution, GeneratedMeshKeysAreExactBoundedAndSeparateFromAssetPaths) {
+    using namespace Luminumbra::Rendering;
+    DiagnosticDrawTable table;
+    DiagnosticSubmission generated{.mesh_path = {},
+                                   .shader_variant = "terrain_mdi",
+                                   .chunk = {-2, 1, 3},
+                                   .lod = 2,
+                                   .ownership = DiagnosticOwnership::Live,
+                                   .pass = DiagnosticPass::GBuffer,
+                                   .provenance = DiagnosticProvenance::Unknown};
+    DiagnosticId first{}, repeated{}, changed{}, asset{};
+    ASSERT_TRUE(SubmitGenerated(table, generated, "terrain/-2/1/3/version/7", first));
+    ASSERT_TRUE(SubmitGenerated(table, generated, "terrain/-2/1/3/version/7", repeated));
+    ASSERT_TRUE(SubmitGenerated(table, generated, "terrain/-2/1/3/version/8", changed));
+    generated.mesh_path = "terrain/-2/1/3/version/7";
+    ASSERT_TRUE(table.submit(generated, asset));
+    EXPECT_NE(first[0], repeated[0]);
+    EXPECT_EQ(first[1], repeated[1]);
+    EXPECT_NE(first[1], changed[1]);
+    EXPECT_NE(first[1], asset[1]);
+    EXPECT_EQ(first[2], 2u);
+    EXPECT_EQ(first[3], 257u);
+    const auto meshes = nlohmann::json::parse(table.json());
+    EXPECT_EQ(meshes["meshes"][0]["path"], "");
+    EXPECT_EQ(meshes["meshes"][0]["generated"], "terrain/-2/1/3/version/7");
+    EXPECT_EQ(meshes["meshes"][0]["provenance"], DiagnosticProvenance::Unknown);
+    EXPECT_TRUE(table.complete_coverage());
+    const auto before = table.json();
+    DiagnosticId refused{11, 12, 13, 14};
+    const auto sentinel = refused;
+    // Ambiguous asset/generated input, invalid keys, UTF-8 and LOD all refuse atomically.
+    EXPECT_FALSE(SubmitGenerated(table, generated, "terrain/valid", refused));
+    generated.mesh_path = {};
+    for (const auto& key : {std::string{},
+                            std::string("../escape"),
+                            std::string("/absolute"),
+                            std::string("a\\b"),
+                            std::string(1025, 'x'),
+                            std::string("\xff")}) {
+        EXPECT_FALSE(SubmitGenerated(table, generated, key, refused));
+    }
+    generated.lod = 256;
+    EXPECT_FALSE(SubmitGenerated(table, generated, "terrain/valid", refused));
+    EXPECT_EQ(table.json(), before);
+    EXPECT_EQ(refused, sentinel);
+    generated.lod = 0;
+    generated.pass = DiagnosticPass::Forward;
+    ASSERT_TRUE(SubmitGenerated(table, generated, std::string(1024, 'x'), refused));
+    EXPECT_EQ(refused[2], 0u);
+    EXPECT_EQ(refused[3], 513u);
+}
+
+TEST(DiagnosticAttribution, ForwardAttachmentUsesTheSelectedLeaseAndPreservesDeferredStorage) {
+    const auto source = Read(kTargets) + Read(kPass);
+    Contains(source, "forward_targets == &targets");
+    const auto attach = Body(source, "bool GBufferDiagnosticCapture::attach_target(");
+    Contains(attach, "forward ? !state_->captured || state_->forward_captured");
+    Contains(attach, "auto& targets = forward ? *state_->forward_targets : *state_->targets");
+    Before(attach, "targets.ensure(true, extent, 7)", "targets.acquire_attachment_lease()");
+    Before(attach, "targets.acquire_attachment_lease()", "glFramebufferTexture2D(");
+    Contains(attach, "state_->attachment_lease = targets.acquire_attachment_lease()");
+    EXPECT_EQ(Count(attach, "state_->attachment_lease.texture()"), 2u);
+    Contains(attach, "auto forward_buffers = state_->buffers");
+    Contains(attach, "forward_buffers[6] = GL_COLOR_ATTACHMENT6");
+    Contains(attach, "glDrawBuffers(state_->buffer_count, forward_buffers.data())");
+    Contains(attach, "state_->forward_captured = true");
+    const auto forward = Body(source, "bool GBufferDiagnosticCapture::attach_forward(");
+    Contains(forward, "if (!state_->forward_targets)");
+    Contains(forward, "foliage_forward_contributor_target_unavailable");
+    Contains(forward, "attach_target(target, extent, true)");
+    Contains(forward, "unsupported(reason, 0, DiagnosticOwnership::Live, DiagnosticPass::Forward)");
+    Contains(Body(source, "bool GBufferDiagnosticCapture::deferred_attached()"),
+             "state_->framebuffer != 0 && !state_->forward");
+    const auto scope =
+        Body(source, "GBufferDiagnosticAttachment::GBufferDiagnosticAttachment(std::uint32_t");
+    Contains(scope, "if (capture_)");
+    Contains(scope, "exceptions_ = std::uncaught_exceptions()");
+    Contains(scope, "capture_->attach_forward(framebuffer, color_texture, extent)");
+    Contains(scope, "capture_ = nullptr");
+}
+
+TEST(DiagnosticAttribution, CurrentWriterAndFeedbackVariantsAreGuardedAndBounded) {
+    const auto source = Read(kTargets);
+    const auto current = Body(source, "void GBufferDiagnosticCapture::write_current(");
+    Before(current, "if (!state_->framebuffer)", "glGetIntegerv(");
+    Contains(current, "entry.shader->Id() == static_cast<GLuint>(program)");
+    Contains(current, "write(*entry.shader, submission)");
+    Contains(current, "diagnostic_writer_without_variant");
+    const auto write = Body(source, "void GBufferDiagnosticCapture::write(");
+    Contains(write, "submission.pass == (state_->forward ? DiagnosticPass::Forward");
+    Contains(write, "diagnostic_contributor_pass_mismatch");
+    Contains(write, "matching_pass && !state_->refused && !state_->table.submit");
+    Before(write, "DiagnosticId id{}", "glProgramUniform4uiv(");
+    EXPECT_EQ(write.find("throw"), std::string::npos);
+    const auto variant = Body(source, "Shader* GBufferDiagnosticCapture::variant(");
+    Contains(variant, "state_->variants.size() == 6");
+    Contains(variant, "feedback_varyings.size() > 3");
+    Contains(variant, "name.size() > 64");
+    Contains(variant, "entry.feedback_varyings == feedback_varyings");
+    Contains(variant, "shader->FragmentPath().c_str(), feedback_varyings, defines");
+}
+
+TEST_F(DiagnosticAttributionGl, ForwardLeaseProtectsOnlyItsOwnStorageAndRestoresState) {
+    DiagnosticTargets forward;
+    GBufferDiagnosticCapture capture(targets_, table_, &forward);
+    ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+    EXPECT_TRUE(capture.deferred_attached());
+    capture.detach();
+    const auto deferred_texture = targets_.texture();
+    const DiagnosticId sentinel{9, 8, 7, 6};
+    glClearTexImage(deferred_texture, 0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, sentinel.data());
+    SetEntryState(true);
+    ASSERT_TRUE(
+        capture.attach_forward(pass_.gbuffer().fbo_id, pass_.gbuffer().position_texture, {32, 32}));
+    ExpectEntryState(true);
+    EXPECT_FALSE(capture.deferred_attached());
+    const auto forward_texture = forward.texture();
+    EXPECT_NE(forward_texture, deferred_texture);
+    EXPECT_FALSE(forward.reset());
+    EXPECT_FALSE(forward.ensure(false, {}));
+    EXPECT_FALSE(forward.ensure(true, {16, 16}, 7));
+    EXPECT_EQ(forward.texture(), forward_texture);
+    DiagnosticId retained{};
+    glGetTextureSubImage(deferred_texture,
+                         0,
+                         0,
+                         0,
+                         0,
+                         1,
+                         1,
+                         1,
+                         GL_RGBA_INTEGER,
+                         GL_UNSIGNED_INT,
+                         static_cast<GLsizei>(sizeof(retained)),
+                         retained.data());
+    EXPECT_EQ(retained, sentinel);
+    EXPECT_TRUE(targets_.ensure(true, {16, 16}, 7));
+    EXPECT_FALSE(capture.complete());
+    capture.detach();
+    ExpectEntryState(true);
+    EXPECT_TRUE(capture.complete());
+    EXPECT_TRUE(forward.reset());
+}
+
+TEST_F(DiagnosticAttributionGl, CurrentWriterClearsMismatchedIdsAndRefusesUnknownPrograms) {
+    DiagnosticTargets forward;
+    GBufferDiagnosticCapture capture(targets_, table_, &forward);
+    auto* base = pass_.instanced_static_mesh_shader().get();
+    const auto empty = table_.json();
+    capture.write_current(Submission());
+    EXPECT_EQ(table_.json(), empty);
+    ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+    auto* shader = capture.variant(base, false);
+    ASSERT_NE(shader, base);
+    shader->use();
+    capture.write_current(Submission());
+    DiagnosticId identity{};
+    const auto location = glGetUniformLocation(shader->Id(), "u_diagnosticIds");
+    glGetUniformuiv(shader->Id(), location, identity.data());
+    EXPECT_NE(identity, DiagnosticId{});
+    capture.detach();
+    ASSERT_TRUE(
+        capture.attach_forward(pass_.gbuffer().fbo_id, pass_.gbuffer().position_texture, {32, 32}));
+    // The same cached program retains a previous ID until the refused write clears it.
+    EXPECT_NO_THROW(capture.write_current(Submission()));
+    glGetUniformuiv(shader->Id(), location, identity.data());
+    EXPECT_EQ(identity, DiagnosticId{});
+    EXPECT_FALSE(capture.complete());
+    auto submission = Submission();
+    submission.pass = DiagnosticPass::Forward;
+    capture.write_current(submission);
+    glGetUniformuiv(shader->Id(), location, identity.data());
+    EXPECT_EQ(identity[3], 513u);
+    base->use();
+    capture.write_current(submission);
+    capture.detach();
+    const auto document = nlohmann::json::parse(table_.json());
+    EXPECT_EQ(document.at("draws").back().at("shader_variant"),
+              "diagnostic_writer_without_variant");
+    EXPECT_EQ(document.at("draws").back().at("pass"), DiagnosticPass::Forward);
+    EXPECT_FALSE(capture.complete());
+    EXPECT_TRUE(forward.reset());
+    glUseProgram(0);
+}
+
+TEST_F(DiagnosticAttributionGl, ForwardAttachmentRefusalsLeaveNoLeaseOrCallerStateChange) {
+    DiagnosticTargets forward;
+    EXPECT_THROW((GBufferDiagnosticCapture(targets_, table_, &targets_)), std::invalid_argument);
+    // Each refused case starts with a fresh scope and draw table.
+    for (unsigned failure = 0; failure < 7; ++failure) {
+        table_.clear();
+        GBufferDiagnosticCapture capture(targets_, table_, failure == 0 ? nullptr : &forward);
+        if (failure != 1) {
+            ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+            if (failure != 2) {
+                capture.detach();
+            }
+        }
+        const auto framebuffer = pass_.gbuffer().fbo_id;
+        const auto texture = pass_.gbuffer().position_texture;
+        if (failure == 3) {
+            ASSERT_TRUE(capture.attach_forward(framebuffer, texture, {32, 32}));
+            capture.detach();
+        }
+        if (failure == 6) {
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
+            glFramebufferTexture2D(
+                GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT6, GL_TEXTURE_2D, texture, 0);
+        }
+        SetEntryState(false);
+        EXPECT_FALSE(capture.attach_forward(failure == 4 ? 0 : framebuffer,
+                                            texture,
+                                            failure == 5 ? DiagnosticExtent{16, 32}
+                                                         : DiagnosticExtent{32, 32}));
+        ExpectEntryState(false);
+        EXPECT_FALSE(capture.complete());
+        capture.detach();
+        EXPECT_TRUE(forward.reset());
+        if (failure == 6) {
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
+            glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT6, GL_TEXTURE_2D, 0, 0);
+        }
+    }
+}
+
+TEST_F(DiagnosticAttributionGl, FeedbackSignatureBoundsRefuseBeforeCompilation) {
+    for (const auto& names : {std::vector<std::string>(4, "gl_Position"),
+                              std::vector<std::string>{std::string(65, 'x')}}) {
+        table_.clear();
+        GBufferDiagnosticCapture capture(targets_, table_);
+        ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+        auto* base = pass_.instanced_static_mesh_shader().get();
+        EXPECT_EQ(capture.variant(base, false, names), base);
+        const auto document = nlohmann::json::parse(table_.json());
+        EXPECT_EQ(document.at("draws").back().at("shader_variant"),
+                  "diagnostic_shader_variant_limit");
+        capture.detach();
+        EXPECT_FALSE(capture.complete());
+    }
+}
+
+TEST_F(DiagnosticAttributionGl,
+       ForwardAttachmentScopeReleasesDuringExceptionAndCaptureDestruction) {
+    DiagnosticTargets forward;
+    for (const bool exceptional : {false, true}) {
+        table_.clear();
+        {
+            GBufferDiagnosticCapture capture(targets_, table_, &forward);
+            ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+            capture.detach();
+            SetEntryState(true);
+            if (exceptional) {
+                EXPECT_THROW(
+                    {
+                        GBufferDiagnosticAttachment attachment(
+                            pass_.gbuffer().fbo_id, pass_.gbuffer().position_texture, {32, 32});
+                        EXPECT_FALSE(forward.reset());
+                        throw std::runtime_error("contributor failure");
+                    },
+                    std::runtime_error);
+                EXPECT_FALSE(capture.complete());
+                EXPECT_TRUE(forward.reset());
+            } else {
+                ASSERT_TRUE(capture.attach_forward(
+                    pass_.gbuffer().fbo_id, pass_.gbuffer().position_texture, {32, 32}));
+                EXPECT_FALSE(forward.reset());
+            }
+        }
+        ExpectEntryState(true);
+        EXPECT_TRUE(forward.reset());
+    }
+}
+
+TEST(DiagnosticAttribution, GeneratedMeshRegistrationValidatesBeforeMutatingTheRegistry) {
+    const auto table = Read("src/luminumbra_client/rendering/DiagnosticDrawTable.h");
+    Contains(table, "std::string_view generated_mesh{}");
+    Contains(table, "submission.generated_mesh.size() > 1024");
+    Contains(table, "!submission.mesh_path.empty() || !valid_path(submission.generated_mesh)");
+    Contains(table, "submission.mesh_path.empty() && submission.generated_mesh.empty()");
+    Contains(table, "submission.generated_mesh.empty() ? \":asset:\" : \":generated:\"");
+    Contains(table, "mesh[\"generated\"] = submission.generated_mesh");
+    Before(table, "mesh_json = mesh.dump()", "mesh_ids_.emplace(");
+    Before(table, "added > max_json_bytes - json_bytes_", "mesh_ids_.emplace(");
+}
+
+TEST_F(DiagnosticAttributionGl, FeedbackSignaturesSelectDistinctCachedPrograms) {
+    DiagnosticTargets forward;
+    GBufferDiagnosticCapture capture(targets_, table_, &forward);
+    ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+    auto* base = pass_.instanced_static_mesh_shader().get();
+    auto* plain = capture.variant(base, false);
+    auto* feedback = capture.variant(base, false, {"gl_Position"});
+    ASSERT_NE(plain, base);
+    ASSERT_NE(feedback, base);
+    EXPECT_NE(plain, feedback);
+    EXPECT_EQ(capture.variant(base, false, {"gl_Position"}), feedback);
+    EXPECT_EQ(capture.variant(base, false), plain);
+    capture.detach();
+    ASSERT_TRUE(
+        capture.attach_forward(pass_.gbuffer().fbo_id, pass_.gbuffer().position_texture, {32, 32}));
+    EXPECT_EQ(capture.variant(base, false, {"missing_output"}), base);
+    const auto document = nlohmann::json::parse(table_.json());
+    EXPECT_EQ(document.at("draws").back().at("shader_variant"),
+              "diagnostic_shader_variant_unavailable");
+    EXPECT_EQ(document.at("draws").back().at("pass"), DiagnosticPass::Forward);
+    EXPECT_EQ(capture.variant(nullptr, false), nullptr);
+    const auto unavailable = nlohmann::json::parse(table_.json());
+    EXPECT_EQ(unavailable.at("draws").back().at("shader_variant"),
+              "diagnostic_base_shader_unavailable");
+    EXPECT_EQ(unavailable.at("draws").back().at("pass"), DiagnosticPass::Forward);
+    capture.detach();
+    EXPECT_FALSE(capture.complete());
+}
+
+TEST_F(GBufferLeaseGl, ForwardRollbackRetainsSelectedLeaseUntilCallerRestoration) {
+    DiagnosticTargets forward;
+    GBufferDiagnosticCapture capture(targets_, table_, &forward);
+    ASSERT_TRUE(capture.attach(gbuffer_, {32, 32}));
+    capture.detach();
+    AttachmentProbe probe(forward, gbuffer_.fbo_id);
+    probe.incomplete = true;
+    EXPECT_FALSE(capture.attach_forward(gbuffer_.fbo_id, gbuffer_.position_texture, {32, 32}));
+    EXPECT_TRUE(capture.attachment_failed());
+    EXPECT_EQ(probe.detaches, 1u);
+    EXPECT_FALSE(probe.released_before_detach);
+    Contains(table_.json(), "diagnostic_mrt_incomplete");
+    ExpectCallerBindingsAndMask();
+    ExpectDetached();
+    EXPECT_TRUE(forward.reset());
+}
+
+TEST_F(GBufferLeaseGl, ForwardRegistryRetirementReleasesSelectedLeaseAndKeepsFailureSticky) {
+    DiagnosticTargets forward;
+    GBufferDiagnosticCapture capture(targets_, table_, &forward);
+    ASSERT_TRUE(capture.attach(gbuffer_, {32, 32}));
+    capture.detach();
+    ASSERT_TRUE(capture.attach_forward(gbuffer_.fbo_id, gbuffer_.position_texture, {32, 32}));
+    AttachmentProbe probe(forward, gbuffer_.fbo_id);
+    registry_.destroy_owned("gbuffer_fbo");
+    capture.detach();
+    EXPECT_EQ(probe.detaches, 0u);
+    EXPECT_EQ(probe.buffer_writes, 0u);
+    EXPECT_TRUE(capture.attachment_failed());
+    Contains(table_.json(), "gbuffer_retired_during_capture");
+    ExpectCallerBindingsAndMask();
+    EXPECT_TRUE(forward.reset());
+    EXPECT_EQ(nlohmann::json::parse(table_.json()).at("draws").back().at("pass"),
+              DiagnosticPass::Forward);
+    table_.clear();
+    EXPECT_FALSE(capture.complete());
 }

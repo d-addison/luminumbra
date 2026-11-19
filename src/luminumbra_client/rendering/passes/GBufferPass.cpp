@@ -367,6 +367,9 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
     glClearDepth(0.0);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+    GBufferDiagnosticAttachment diagnostic_attachment(m_gbuffer,
+                                                      {ctx.internal_w(), ctx.internal_h()});
+
     //  isolation/layer mode: skip the draws whose layer bit is cleared so an
     // isolated subsystem reads ALONE against the SkyboxPass backdrop. The gbuffer
     // is ALWAYS cleared first, so suppressing a sub-pass just leaves cleared pixels
@@ -376,6 +379,12 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
     // Default config renders == true for every bit, so this is byte-stable off.
     namespace SH = Luminumbra::Client::ScenarioHarness;
     const SH::IsolationConfig& iso = *ctx.isolation;
+    // A filtered deferred producer leaves its pixels unattributed whether or not it
+    // has scene content, so isolation never certifies complete coverage.
+    if (diagnostic_capture &&
+        (!iso.renders(SH::IsolationLayer::Terrain) || !iso.renders(SH::IsolationLayer::Skinned))) {
+        GBufferDiagnosticCapture::Current()->unsupported("isolation_filtered_deferred_producer");
+    }
 
     // copy ctx.frustum_planes (a const glm::vec4* pointer) into a local
     // array so the terrain-submit callback (which takes a const glm::vec4(&)[6]
@@ -913,10 +922,32 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                 auto chunk = ctx.world_system->find_streamed_chunk(slot.coords);
                 if (chunk && chunk->has_terrain_authority()) {
                     slot.chunk = std::move(chunk);
+                    // Support answers stay valid while the same resident chunk keeps
+                    // its voxel revision and SDF storage; any change re-evaluates.
+                    const bool same_owner = !slot.supportOwner.owner_before(slot.chunk) &&
+                                            !slot.chunk.owner_before(slot.supportOwner);
+                    const auto revision = slot.chunk->voxel_revision();
+                    const float* const sdf = slot.chunk->sdf_data.data();
+                    if (!same_owner || slot.supportRevision != revision || slot.supportSdf != sdf) {
+                        slot.supportOwner = slot.chunk;
+                        slot.supportRevision = revision;
+                        slot.supportSdf = sdf;
+                        slot.supportGeneration =
+                            slot.supportGeneration == std::numeric_limits<std::uint32_t>::max()
+                                ? 1u
+                                : slot.supportGeneration + 1u;
+                    }
                 }
             }
-            if (slot.chunk && EditedTerrainRemovesAnchor(slot.chunk.get(), cp.position)) {
-                continue;
+            if (slot.chunk) {
+                // At most eight lattice reads per prop per support change, not per frame.
+                if (cp.supportGeneration != slot.supportGeneration) {
+                    cp.supportRemoved = EditedTerrainRemovesAnchor(slot.chunk.get(), cp.position);
+                    cp.supportGeneration = slot.supportGeneration;
+                }
+                if (cp.supportRemoved) {
+                    continue;
+                }
             }
         }
         // Group by a cheap uint64 (no per-instance string alloc/copy/compare).
@@ -998,15 +1029,15 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                 // key suffix so only procgen leaves flutter.
                 const bool isLeaf = batch.basePath.size() >= 5 &&
                                     batch.basePath.rfind("_leaf") == batch.basePath.size() - 5;
-                const bool isBush = batch.basePath.starts_with("procgen://bush_");
-                const bool isFarLod = batch.drawPath.find(".lod") != std::string::npos;
-                const bool leafCards = isLeaf || (isBush && !isFarLod);
-                shader->setInt("u_alphaTest", leafCards ? 2 : 0);
-                two_sided = leafCards;
+                shader->setInt("u_alphaTest", isLeaf ? 2 : 0);
+                two_sided = isLeaf;
                 shader->setFloat("u_windStrength", isLeaf ? 0.85f : 0.0f);
-                // Shrubs are foliage at every distance, never opaque grass-textured stone.
-                // Distant shrubs keep the closed hull; only their near mesh uses leaf cards.
-                shader->setInt("u_forceFlat", (isBush || (isLeaf && isFarLod)) ? 1 : 0);
+                // Leaves use the dedicated cutout material at every LOD. Other
+                // foliage retains its existing distant flat-material optimization;
+                // near bushes, bark, and rigid props keep terrain texturing.
+                const bool isBush = batch.basePath.find("procgen://bush_") != std::string::npos;
+                const bool isFarLod = batch.drawPath.find(".lod") != std::string::npos;
+                shader->setInt("u_forceFlat", ((isLeaf || isBush) && isFarLod) ? 1 : 0);
             }
         }
         if (two_sided || !cull_was_enabled)
@@ -1100,8 +1131,13 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     // for the whole far field (the draw-call/triangle collapse the forest_perf_budget gate
     // targets).
     if (impostorsOn && !impostorInstances.empty()) {
-        if (!UseDrawProgram(m_tree_impostor_shader.get(), stats))
+        // Queued geometry is unsupported even when its program prevents submission.
+        if (capture) {
+            capture->unsupported("tree_impostor_fragment_output_unavailable", 3);
+        }
+        if (!UseDrawProgram(m_tree_impostor_shader.get(), stats)) {
             return;
+        }
         m_tree_impostor_shader->setMat4("u_view", static_view);
         m_tree_impostor_shader->setMat4("u_proj", static_proj);
         m_tree_impostor_shader->setVec3("u_cameraPos", cameraPos);
@@ -1128,9 +1164,6 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                 impostorInstances.data() + offset);
             glBindVertexArray(m_impostorVAO);
             glDisable(GL_CULL_FACE);
-            if (capture) {
-                capture->unsupported("tree_impostor_fragment_output_unavailable", 3);
-            }
             Luminumbra::Rendering::AttributedGl::Submit(
                 glDrawArraysInstanced, GLenum{GL_TRIANGLE_STRIP}, 0, 4, count);
             glBindVertexArray(0);

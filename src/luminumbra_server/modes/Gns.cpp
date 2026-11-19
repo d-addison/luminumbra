@@ -124,6 +124,9 @@ int RunGnsHost(const ServerCliOptions& options) {
     }
 
     std::uint64_t executed = 0;
+    // Refusals share the requested tick budget; permanent pressure reaches the stall path.
+    const std::uint64_t max_preparation_retries = options.ticks;
+    std::uint64_t preparation_retries = 0;
     bool all_clients_connected = true;
     while (executed < options.ticks) {
         Luminumbra::Net::GnsLink::RunCallbacks();
@@ -137,7 +140,13 @@ int RunGnsHost(const ServerCliOptions& options) {
         }
         const auto step = runner.RunFixedTicks(1);
         executed += step.ticks_executed;
-        if (step.ticks_executed == 0) {
+        if (step.ticks_executed == 0 && !step.region_fault &&
+            preparation_retries < max_preparation_retries) {
+            ++preparation_retries;
+            std::this_thread::sleep_for(std::chrono::milliseconds(33));
+            continue;
+        }
+        if (step.region_fault || step.ticks_executed == 0) {
             LUMINUMBRA_CORE_ERROR("gns-host: tick stalled");
             for (auto& transport : transports) {
                 transport->Close();
