@@ -109,6 +109,11 @@ int RunHeavy(const ServerCliOptions& options) try {
     }
     save_cleanup.Arm(original.Session()->GetWorldSaveDir());
     const auto pre_save_ticks = original.RunFixedTicks(options.ticks);
+    if (pre_save_ticks.region_fault || pre_save_ticks.ticks_executed != options.ticks) {
+        LUMINUMBRA_CORE_ERROR("heavy: incomplete run before snapshot at tick {}",
+                              pre_save_ticks.ticks_executed);
+        return 1; // save_cleanup removes the throwaway world after runner shutdown.
+    }
 
     // Persist the COMPLETE streamed-chunk set (a never-edited world has no dirty
     // chunks, so the dirty-gated GameSession::SaveWorldState would write
@@ -143,7 +148,17 @@ int RunHeavy(const ServerCliOptions& options) try {
 
     // --- : resimulate M further ticks on BOTH sessions. ---
     const auto orig_resim = original.RunFixedTicks(options.heavy_resim);
+    if (orig_resim.region_fault || orig_resim.ticks_executed != options.heavy_resim) {
+        LUMINUMBRA_CORE_ERROR("heavy: incomplete original resimulation at tick {}",
+                              orig_resim.ticks_executed);
+        return 1;
+    }
     const auto loaded_resim = loaded.RunFixedTicks(options.heavy_resim);
+    if (loaded_resim.region_fault || loaded_resim.ticks_executed != options.heavy_resim) {
+        LUMINUMBRA_CORE_ERROR("heavy: incomplete loaded resimulation at tick {}",
+                              loaded_resim.ticks_executed);
+        return 1;
+    }
     const HeavyHashes orig_final = CaptureHashes(original);
     const HeavyHashes loaded_final = CaptureHashes(loaded);
 

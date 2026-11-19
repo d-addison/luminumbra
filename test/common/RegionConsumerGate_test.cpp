@@ -40,6 +40,7 @@
 #include "luminumbra_common/world/MarchingCubes.h"
 
 #include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <array>
@@ -4238,8 +4239,16 @@ std::map<std::string, std::string> RetirementSaveBytes(const std::filesystem::pa
             // reader verifies type/length and reads bytes from the same handle.
             EXPECT_TRUE(
                 input.read(payload, Luminumbra::Persistence::SavedInputLimits::kPlantFileBytes));
-            bytes.emplace(entry.path().lexically_relative(root).generic_string(),
-                          std::move(payload));
+            const auto relative = entry.path().lexically_relative(root).generic_string();
+            if (relative == "world_info.json") {
+                // Each session stamps its own wall-clock creation second; sessions
+                // created across a second boundary must still compare equal.
+                auto info = nlohmann::json::parse(payload);
+                EXPECT_TRUE(info.contains("creationTime"));
+                info.erase("creationTime");
+                payload = info.dump(4);
+            }
+            bytes.emplace(relative, std::move(payload));
         }
     }
     return bytes;

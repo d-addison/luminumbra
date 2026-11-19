@@ -125,9 +125,10 @@ int RunRecord(const ServerCliOptions& options) {
     // the smoke's after-the-fact ComputeWorldHash observes.
     const std::vector<std::uint8_t> empty_inputs; // no player inputs in headless
     std::uint64_t executed = 0;
+    // At most one retry per requested input, across the whole run.
+    const std::uint64_t max_preparation_retries = options.ticks;
+    std::uint64_t preparation_retries = 0;
     while (executed < options.ticks) {
-        // The input set for the tick ABOUT to run.  will populate this.
-        writer.RecordInput(executed + 1, empty_inputs);
         const auto step = runner.RunFixedTicks(1);
         executed += step.ticks_executed;
         if (step.region_fault) {
@@ -137,10 +138,18 @@ int RunRecord(const ServerCliOptions& options) {
                 step.region_fault_message);
             return 1;
         }
+        if (step.ticks_executed == 0 && !step.region_fault &&
+            preparation_retries < max_preparation_retries) {
+            ++preparation_retries;
+            std::this_thread::sleep_for(std::chrono::milliseconds(33));
+            continue;
+        }
         if (step.ticks_executed == 0) {
             LUMINUMBRA_CORE_ERROR("record: tick {} did not advance", executed + 1);
             return 1;
         }
+        // Publish this input once, only after the simulation consumed its tick.
+        writer.RecordInput(executed, empty_inputs);
         if (runner.Session()->ActiveRegionsEnabled())
             schedule_trace.emplace_back(executed, runner.Session()->GetRegionSchedule().digest);
         if ((executed % kCheckpointIntervalTicks) == 0) {
@@ -323,6 +332,9 @@ int RunReplay(const ServerCliOptions& options) {
     std::uint64_t checkpoints_verified = 0;
 
     std::uint64_t executed = 0;
+    // Bound retries by admitted inputs, never an unauthenticated trailer.
+    const std::uint64_t max_preparation_retries = admitted_inputs;
+    std::uint64_t preparation_retries = 0;
     // Recordings keep checkpoints in recorded order. A stable tick index keeps
     // the first recorded checkpoint for a tick and visits each one at most once.
     std::vector<const Luminumbra::Replay::CheckpointRecord*> checkpoint_order;
@@ -353,6 +365,12 @@ int RunReplay(const ServerCliOptions& options) {
                                   step.region_fault_message);
             runner.Shutdown();
             return 1;
+        }
+        if (step.ticks_executed == 0 && !step.region_fault &&
+            preparation_retries < max_preparation_retries) {
+            ++preparation_retries;
+            std::this_thread::sleep_for(std::chrono::milliseconds(33));
+            continue;
         }
         if (step.ticks_executed == 0) {
             LUMINUMBRA_CORE_ERROR("replay: tick {} did not advance", next_tick);
