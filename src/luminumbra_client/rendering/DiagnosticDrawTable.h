@@ -34,6 +34,9 @@ struct DiagnosticSubmission {
     DiagnosticOwnership ownership = DiagnosticOwnership::Live;
     DiagnosticPass pass = DiagnosticPass::GBuffer;
     DiagnosticProvenance provenance = DiagnosticProvenance::Unknown;
+    // Generated geometry has no repository asset path. Its bounded, capture-local
+    // key identifies the actual resident mesh; unknown meshing provenance stays unknown.
+    std::string_view generated_mesh{};
 };
 
 // Capture-local, render-thread registry. Clear only between completed captures;
@@ -50,7 +53,10 @@ public:
             submission.shader_variant.empty() || submission.shader_variant.size() > 1024 ||
             static_cast<unsigned int>(submission.provenance) >
                 static_cast<unsigned int>(DiagnosticProvenance::Unsupported) ||
-            (!unsupported && submission.mesh_path.empty()) ||
+            submission.generated_mesh.size() > 1024 ||
+            (!submission.generated_mesh.empty() &&
+             (!submission.mesh_path.empty() || !valid_path(submission.generated_mesh))) ||
+            (!unsupported && submission.mesh_path.empty() && submission.generated_mesh.empty()) ||
             (!submission.mesh_path.empty() && !valid_path(submission.mesh_path))) {
             return false;
         }
@@ -64,8 +70,11 @@ public:
             return false;
         }
         // Prefix distinguishes different provenance for the same resolved asset.
-        const std::string key = std::to_string(static_cast<unsigned int>(submission.provenance)) +
-                                ":" + std::string(submission.mesh_path);
+        const std::string key =
+            std::to_string(static_cast<unsigned int>(submission.provenance)) +
+            (submission.generated_mesh.empty() ? ":asset:" : ":generated:") +
+            std::string(submission.generated_mesh.empty() ? submission.mesh_path
+                                                          : submission.generated_mesh);
         const auto found = mesh_ids_.find(key);
         const bool new_mesh = found == mesh_ids_.end();
         if (new_mesh && meshes_.size() == max_entries) {
@@ -77,10 +86,13 @@ public:
         try {
             // dump also refuses malformed UTF-8, before changing registry state.
             if (new_mesh) {
-                mesh_json = nlohmann::json{{"id", encoded[1]},
-                                           {"path", submission.mesh_path},
-                                           {"provenance", submission.provenance}}
-                                .dump();
+                nlohmann::json mesh{{"id", encoded[1]},
+                                    {"path", submission.mesh_path},
+                                    {"provenance", submission.provenance}};
+                if (!submission.generated_mesh.empty()) {
+                    mesh["generated"] = submission.generated_mesh;
+                }
+                mesh_json = mesh.dump();
             }
             draw_json = nlohmann::json{{"id", encoded[0]},
                                        {"mesh", encoded[1]},

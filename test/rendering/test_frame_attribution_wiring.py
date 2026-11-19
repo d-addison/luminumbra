@@ -3445,7 +3445,7 @@ class DeferredDiagnosticLeaseWiring(unittest.TestCase):
     def test_unavailable_base_program_invalidates_before_return(self):
         variant = block(self.targets, "Shader* GBufferDiagnosticCapture::variant(")
         unavailable = block(variant, "if (!shader || !shader->IsValid())")
-        self.assertLess(unavailable.index('unsupported("diagnostic_base_shader_unavailable")'),
+        self.assertLess(unavailable.index('unsupported("diagnostic_base_shader_unavailable",'),
                         unavailable.index("return shader;"))
         for producer in ("geometry_pass_chunks(", "geometry_pass_static_meshes(",
                          "geometry_pass_skinned_meshes("):
@@ -3479,6 +3479,111 @@ class DeferredDiagnosticLeaseWiring(unittest.TestCase):
         self.assertIn("state_->failed = true;", unsupported)
         self.assertLess(writer.index("submission.provenance"),
                         writer.index("state_->table.submit(submission, id)"))
+
+
+class DiagnosticContributorWiring(unittest.TestCase):
+    """Evaluate bounded admission and guard the shared deferred/contributor path."""
+
+    def setUp(self):
+        self.source = read(CLIENT / "rendering/GBufferTargets.cpp")
+        self.attach = block(self.source, "bool GBufferDiagnosticCapture::attach_target(")
+
+    def test_selected_storage_is_ensured_and_leased_before_attachment(self):
+        self.assertIn("auto& targets = forward ? *state_->forward_targets : *state_->targets",
+                      self.attach)
+        ensure = self.attach.index("targets.ensure(true, extent, 7)")
+        lease = self.attach.index("state_->attachment_lease = targets.acquire_attachment_lease()")
+        self.assertLess(ensure, lease)
+        self.assertLess(lease, self.attach.index("glFramebufferTexture2D("))
+        forward = block(self.source, "bool GBufferDiagnosticCapture::attach_forward(")
+        self.assertLess(forward.index("if (!state_->forward_targets)"),
+                        forward.index("attach_target(target, extent, true)"))
+        constructor = block(self.source,
+                            "GBufferDiagnosticCapture::GBufferDiagnosticCapture(DiagnosticTargets&")
+        self.assertLess(constructor.index("forward_targets == &targets"),
+                        constructor.index("SetCurrent(this)"))
+        self.assertIn("throw std::invalid_argument", block(constructor,
+                      "if (forward_targets == &targets)"))
+        forward_buffers = block(self.attach, "if (forward)")
+        self.assertIn("auto forward_buffers = state_->buffers", forward_buffers)
+        self.assertIn("forward_buffers[6] = GL_COLOR_ATTACHMENT6", forward_buffers)
+        self.assertIn("glDrawBuffers(state_->buffer_count, forward_buffers.data())", forward_buffers)
+        self.assertEqual(self.attach.count("state_->attachment_lease.texture()"), 2)
+
+    def test_attachment_order_refuses_nested_repeated_and_early_forward_calls(self):
+        condition = re.search(r"if \((.*?)\) \{", self.attach, re.S).group(1)
+        match = re.fullmatch(r"(.*?)\(forward \? (.*?) : (.*?)\)", condition, re.S)
+        self.assertIsNotNone(match)
+        for attached in (False, True):
+            for captured in (False, True):
+                for forward_captured in (False, True):
+                    for forward in (False, True):
+                        selected = match.group(2 if forward else 3)
+                        actual = cpp_expression(match.group(1) + "(" + selected + ")", **{
+                            "state_->framebuffer": int(attached), "state_->captured": captured,
+                            "state_->forward_captured": forward_captured})
+                        expected = attached or ((not captured or forward_captured)
+                                                if forward else captured)
+                        self.assertEqual(actual, expected)
+        self.assertIn("state_->forward_captured = true", self.attach)
+
+    def test_forward_and_deferred_writers_gate_submission_and_clear_rejected_ids(self):
+        writer = block(self.source, "void GBufferDiagnosticCapture::write(")
+        self.assertIn("submission.pass == (state_->forward ? DiagnosticPass::Forward : DiagnosticPass::GBuffer)",
+                      compact(writer))
+        mismatch = block(writer, "if (!matching_pass)")
+        self.assertIn('unsupported("diagnostic_contributor_pass_mismatch",', mismatch)
+        self.assertNotIn("return;", mismatch)
+        self.assertIn("matching_pass && !state_->refused && !state_->table.submit(submission, id)",
+                      writer)
+        self.assertLess(writer.index("DiagnosticId id{}"), writer.index("glProgramUniform4uiv("))
+        self.assertIn("id.data()", writer)
+        current = block(self.source, "void GBufferDiagnosticCapture::write_current(")
+        self.assertIn("return;", block(current, "if (!state_->framebuffer)"))
+        self.assertIn("glGetIntegerv(GL_CURRENT_PROGRAM, &program)", current)
+        self.assertIn("entry.shader->Id() == static_cast<GLuint>(program)", current)
+        self.assertIn("write(*entry.shader, submission)", current)
+        self.assertIn('"diagnostic_writer_without_variant"', current)
+
+    def test_feedback_bounds_precede_comparison_and_compilation(self):
+        variant = block(self.source, "Shader* GBufferDiagnosticCapture::variant(")
+        count = re.search(r"if \((feedback_varyings.size\(\) > \d+) \|\|", variant).group(1)
+        name = re.search(r"return (name.size\(\) > \d+);", variant).group(1)
+        for size in (0, 1, 3, 4, 65536):
+            self.assertEqual(cpp_expression(count, **{"feedback_varyings.size()": size}), size > 3)
+        for size in (0, 1, 63, 64, 65, 1024):
+            self.assertEqual(cpp_expression(name, **{"name.size()": size}), size > 64)
+        cache = variant.index("for (const auto& entry")
+        self.assertLess(variant.index(count), cache)
+        self.assertLess(cache, variant.index("if (state_->variants.size() == 6)"))
+        self.assertLess(variant.index(count), variant.index("std::make_unique<Shader>"))
+        self.assertIn("entry.feedback_varyings == feedback_varyings", variant)
+        self.assertIn("shader->FragmentPath().c_str(), feedback_varyings, defines", variant)
+
+    def test_variant_and_detachment_failures_record_the_active_pass(self):
+        variant = block(self.source, "Shader* GBufferDiagnosticCapture::variant(")
+        for marker in ("if (!shader || !shader->IsValid())",
+                       "if (state_->variants.size() == 6)", "if (identity < 0)"):
+            self.assertIn("state_->forward ? DiagnosticPass::Forward : DiagnosticPass::GBuffer",
+                          block(variant, marker))
+        detach = block(self.source, "void GBufferDiagnosticCapture::detach()")
+        self.assertIn("state_->forward ? DiagnosticPass::Forward : DiagnosticPass::GBuffer",
+                      block(detach, "if (!state_->failure.empty())"))
+
+    def test_generated_key_bounds_and_namespaces_precede_registry_mutation(self):
+        table = read(CLIENT / "rendering/DiagnosticDrawTable.h")
+        submit = block(table, "bool submit(")
+        length = re.search(r"submission.generated_mesh.size\(\) > \d+", submit).group()
+        for size in (0, 1, 1023, 1024, 1025, 65536):
+            self.assertEqual(cpp_expression(length, **{"submission.generated_mesh.size()": size}),
+                             size > 1024)
+        for text in ("!submission.mesh_path.empty() || !valid_path(submission.generated_mesh)",
+                     "submission.mesh_path.empty() && submission.generated_mesh.empty()",
+                     'submission.generated_mesh.empty() ? ":asset:" : ":generated:"',
+                     'mesh["generated"] = submission.generated_mesh'):
+            self.assertIn(text, submit)
+        for check in (length, "mesh_json = mesh.dump()", "added > max_json_bytes - json_bytes_"):
+            self.assertLess(submit.index(check), submit.index("mesh_ids_.emplace("))
 
 
 if __name__ == "__main__":
