@@ -921,6 +921,40 @@ class SimulationCollisionWiring(unittest.TestCase):
         server_test = (ROOT / "test/persistence/world_open_refusal_test.cpp").read_text(encoding="utf-8")
         self.assertIn("ServerFrozenRosterRestoresSequentiallyAndContinues", server_test)
 
+    def test_avatar_contact_references_accept_only_validated_exact_reservations(self):
+        source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(
+            encoding="utf-8")
+        restore = function(source, "bool PhysicsSystem::restore_avatar_owner(")
+        check = "if (!ReferencesExist(recipe, *m_jolt_system, reserved)) { return false; }"
+        self.assertIn(check, restore)
+        for admission in ("ParseController(pending, reservation)",
+                          "reserved.push_back(reservation.body)", "ValidateOwnerAllocator("):
+            self.assertLess(restore.index(admission), restore.index(check))
+        self.assertLess(restore.index(check), restore.index("PrepareOwnerAllocatorScratch("))
+        references = function(source, "bool ReferencesExist(")
+        self.assertIn("if (std::find(reserved.begin(), reserved.end(), recipe.references[i]) "
+                      "!= reserved.end()) { continue; }", references)
+        self.assertIn("JPH::BodyID(recipe.references[i])", references)
+        self.assertIn("if (!lock.Succeeded()) { return false; }", references)
+        self.assertNotIn("GetIndex()", references)
+        native = (ROOT / "test/common/PlayerAvatar_test.cpp").read_text(encoding="utf-8")
+        regression = function(native, "TEST(ControllerContinuation, "
+                              "FrozenContactsResolveLaterCapsulesAndRefuseUnreservedGenerations)")
+        for token in ("source.set_avatar_frozen(1, true,", "source.update_avatars(dt)",
+                      "ASSERT_TRUE(source.is_avatar_grounded(0))",
+                      "source.set_avatar_frozen(0, true,", "ASSERT_TRUE(ValidatePhysicsOwner(stale))",
+                      "EXPECT_FALSE(target_world.restore_avatar_owner(captured[0], index, "
+                      "std::span(&stale, 1)))", "EXPECT_EQ(index, 999u)",
+                      "EXPECT_EQ(target.avatar_character_slot_count(), 0u)",
+                      "ExpectBodySet(before, after)", "std::span(captured).subspan(slot + 1)",
+                      "ASSERT_TRUE(target.capture_body_owner(JPH::BodyID(word(restored, 28)), "
+                      "restored_capsule))", "ExpectControllerBits(expected, restored)",
+                      "EXPECT_EQ(word(restored, 28), capsule)"):
+            self.assertIn(token, regression)
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("common/PlayerAvatar_test.cpp", cmake)
+        self.assertIn("gtest_discover_tests(${_lum_gtest_target}", cmake)
+
     def test_avatar_restore_checks_simulation_bounds_before_staging(self):
         source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(
             encoding="utf-8")

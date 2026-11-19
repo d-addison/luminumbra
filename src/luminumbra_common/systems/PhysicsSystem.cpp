@@ -768,8 +768,14 @@ private:
     const JPH::PhysicsSystem& m_system;
 };
 
-bool ReferencesExist(const OwnerRecipe& recipe, const JPH::PhysicsSystem& system) {
+bool ReferencesExist(const OwnerRecipe& recipe,
+                     const JPH::PhysicsSystem& system,
+                     std::span<const std::uint32_t> reserved) {
+    // At most 257 controller references and 4095 validated capsule reservations.
     for (std::size_t i = 0; i < recipe.reference_count; ++i) {
+        if (std::find(reserved.begin(), reserved.end(), recipe.references[i]) != reserved.end()) {
+            continue;
+        }
         const JPH::BodyLockRead lock(system.GetBodyLockInterface(),
                                      JPH::BodyID(recipe.references[i]));
         if (!lock.Succeeded()) {
@@ -2150,8 +2156,7 @@ bool PhysicsSystem::restore_avatar_owner(
         !SimulationHorizon::valid(Vec3(static_cast<float>(recipe.feet.GetX()),
                                        static_cast<float>(recipe.feet.GetY()),
                                        static_cast<float>(recipe.feet.GetZ()))) ||
-        remaining_frozen.size() >= kMaxRestoredAvatars - m_avatars.size() ||
-        !ReferencesExist(recipe, *m_jolt_system)) {
+        remaining_frozen.size() >= kMaxRestoredAvatars - m_avatars.size()) {
         return false;
     }
     if (!remaining_frozen.empty() && recipe.body == JPH::BodyID::cInvalidBodyID) {
@@ -2226,6 +2231,12 @@ bool PhysicsSystem::restore_avatar_owner(
                                     reserved)) {
             return false;
         }
+    }
+
+    // Later frozen owners may supply contact bodies, but only after their exact
+    // IDs and the complete allocator topology have passed admission.
+    if (!ReferencesExist(recipe, *m_jolt_system, reserved)) {
+        return false;
     }
 
     auto scratch = PrepareOwnerAllocatorScratch(

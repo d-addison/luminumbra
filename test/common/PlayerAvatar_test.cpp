@@ -1884,6 +1884,85 @@ TEST(ControllerContinuation, FrozenRosterRestoresSequentiallyAndContinuesBitExac
     }
 }
 
+TEST(ControllerContinuation, FrozenContactsResolveLaterCapsulesAndRefuseUnreservedGenerations) {
+    constexpr float dt = 1.0f / 30.0f;
+    Luminumbra::TestSupport::AvatarContinuationWorld source_world;
+    auto& source = source_world.physics();
+    AddBodyFloor(source);
+    ASSERT_EQ(source.create_avatar_character(Vec3(8, 16, 8)), 0u);
+    ASSERT_EQ(source.create_avatar_character(Vec3(8, 10, 8)), 1u);
+    source.set_avatar_frozen(1, true, source.get_avatar_position(1));
+    for (int tick = 0; tick < 45; ++tick) {
+        source.update_avatars(dt);
+    }
+    ASSERT_TRUE(source.is_avatar_grounded(0));
+    source.set_avatar_frozen(0, true, source.get_avatar_position(0));
+    std::array<PhysicsOwnerState, 2> captured{};
+    for (std::size_t slot = 0; slot < captured.size(); ++slot) {
+        ASSERT_TRUE(source_world.capture_avatar_owner(slot, captured[slot]));
+    }
+    const auto word = [](const PhysicsOwnerState& state, std::size_t offset) {
+        std::uint32_t result = 0;
+        for (unsigned shift = 0; shift < 32; shift += 8) {
+            result |= static_cast<std::uint32_t>(state.bytes[offset++]) << shift;
+        }
+        return result;
+    };
+    // Pin both the ground body and an active contact to player 1's capsule.
+    ASSERT_GE(captured[0].size, 152u);
+    const auto capsule = word(captured[1], 20);
+    ASSERT_NE(capsule, JPH::BodyID::cInvalidBodyID);
+    ASSERT_EQ(word(captured[0], 28), capsule);
+    ASSERT_GT(word(captured[0], 144), 0u);
+    ASSERT_EQ(word(captured[0], 148), capsule);
+    Luminumbra::TestSupport::AvatarContinuationWorld target_world;
+    auto& target = target_world.physics();
+    AddBodyFloor(target);
+    BodySetState before;
+    ASSERT_TRUE(target.capture_body_owners(before));
+    auto stale = captured[1];
+    const JPH::BodyID original(capsule);
+    SetPhysicsWord(
+        stale,
+        20,
+        JPH::BodyID(original.GetIndex(), static_cast<JPH::uint8>(original.GetSequenceNumber() + 1))
+            .GetIndexAndSequenceNumber());
+    ASSERT_TRUE(ValidatePhysicsOwner(stale));
+    std::size_t index = 999;
+    // Reserving the same slot with another generation cannot satisfy this contact.
+    EXPECT_FALSE(target_world.restore_avatar_owner(captured[0], index, std::span(&stale, 1)));
+    EXPECT_EQ(index, 999u);
+    EXPECT_EQ(target.avatar_character_slot_count(), 0u);
+    BodySetState after;
+    ASSERT_TRUE(target.capture_body_owners(after));
+    ExpectBodySet(before, after);
+    // The server requires player-ID order, so player 1 is still only reserved
+    // when player 0's contacts are restored.
+    for (std::size_t slot = 0; slot < captured.size(); ++slot) {
+        ASSERT_TRUE(target_world.restore_avatar_owner(
+            captured[slot], index, std::span(captured).subspan(slot + 1)));
+        EXPECT_EQ(index, slot);
+    }
+    PhysicsOwnerState restored;
+    ASSERT_TRUE(target_world.capture_avatar_owner(0, restored));
+    ExpectControllerBits(captured[0], restored);
+    BodyOwnerState restored_capsule;
+    ASSERT_TRUE(target.capture_body_owner(JPH::BodyID(word(restored, 28)), restored_capsule));
+    EXPECT_EQ(BodyWord(restored_capsule, 8), capsule);
+    source.set_avatar_frozen(0, false, source.get_avatar_position(0));
+    target.set_avatar_frozen(0, false, target.get_avatar_position(0));
+    for (int tick = 0; tick < 12; ++tick) {
+        source.update_avatars(dt);
+        target.update_avatars(dt);
+        PhysicsOwnerState expected;
+        ASSERT_TRUE(source_world.capture_avatar_owner(0, expected));
+        ASSERT_TRUE(target_world.capture_avatar_owner(0, restored));
+        ExpectControllerBits(expected, restored);
+        EXPECT_EQ(word(restored, 28), capsule);
+        EXPECT_TRUE(target.is_avatar_grounded(0));
+    }
+}
+
 TEST(ControllerContinuation, FrozenReservationsRefuseMalformedAndConflictingCaptures) {
     Luminumbra::TestSupport::AvatarContinuationWorld source_world;
     auto& source = source_world.physics();
