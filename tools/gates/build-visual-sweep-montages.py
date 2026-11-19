@@ -2,13 +2,15 @@
 """Build fixed-layout world-sweep contact sheets, retaining failed capture slots."""
 import argparse
 import hashlib
+import html
 import io
 import itertools
 import json
+import math
+import runpy
 from pathlib import Path
 import sys
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 ANGLES = ("yaw000", "yaw120", "yaw240", "down35", "up25", "water")
 TIMES = ("dawn", "noon", "dusk", "night")
@@ -74,6 +76,9 @@ def save_grid(path, tiles, columns, title):
 
 
 def build_review(artifact_dir):
+    # Imported only for the existing optional PNG workflow.
+    global Image, ImageDraw, ImageFont, ImageOps
+    from PIL import Image, ImageDraw, ImageFont, ImageOps
     root = Path(artifact_dir).resolve()
     source = (root / "world-visual-sweep-manifest.json").read_bytes()
     manifest = json.loads(source)
@@ -174,10 +179,68 @@ def build_review(artifact_dir):
     return report
 
 
+def diagnostic_montage(completion, output, rois=None):
+    """Write a stdlib SVG with <=32 labeled, <=33x33 raw-albedo crops.
+
+    Values are linear albedo clamped to [0,1] for display; magenta is nonfinite.
+    Measurement always uses raw channels; the display is not a final-color claim.
+    """
+    checker = runpy.run_path(str(Path(__file__).with_name('check-diagnostic-capture.py')))
+    completion = Path(completion).resolve()
+    config = checker['load_rois'](rois or checker['DEFAULT_ROIS'])
+    bundles = checker['discover'](completion)
+    if len(bundles) != 1:
+        raise ValueError('Select exactly one diagnostic bundle for a montage.')
+    records, crops = [], []
+    findings = checker['validate'](*bundles[0], rois=config, metrics=records, crops=crops)
+    # Finish validation before creating any output. Exclusive creation preserves
+    # an earlier review. The selected output directory is developer-owned.
+    by_result = {id(crop['result']): crop for crop in crops}
+    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="1600" font-family="monospace" font-size="12" height="{max(1, len(records))*210}">',
+             '<rect width="100%" height="100%" fill="#101014"/>']
+    for index, record in enumerate(records):
+        y = index * 210
+        metric = record['metric']
+        selector = f" {metric['field']}={metric['value']}" if metric['kind'] == 'coverage' else ''
+        label = (f"{record['roi']} / {metric['kind']} / {metric['channel']}{selector} "
+                 f"{record['qualification']} {record['status']} value={record['value']}")
+        if 'minimum' in record:
+            label += f" range=[{record['minimum']}, {record['maximum']}]"
+        parts.append(f'<text x="8" y="{y+18}" fill="white">{html.escape(label)}</text>')
+        parts.append(f'<text x="8" y="{y+38}" fill="white">worst pixel: {record["worst_pixel"]}; raw albedo crop</text>')
+        crop = by_result.get(id(record))
+        if crop is None:
+            continue
+        for row_index, row in enumerate(crop['pixels']):
+            for column, pixel in enumerate(row):
+                rgb = ([255, 0, 255] if not all(math.isfinite(v) for v in pixel) else
+                       [round(max(0, min(1, v))*255) for v in pixel])
+                color = '#' + ''.join(f'{v:02x}' for v in rgb)
+                parts.append(f'<rect x="{8+column*5}" y="{y+42+row_index*5}" width="5" height="5" fill="{color}"/>')
+        x, py = record['worst_pixel']
+        parts.append(f'<rect x="{8+(x-crop["box"][0])*5}" y="{y+42+(py-crop["box"][1])*5}" '
+                     'width="5" height="5" fill="none" stroke="yellow"/>')
+    parts.append('</svg>')
+    with Path(output).open('x', encoding='utf-8', newline='\n') as stream:
+        stream.write('\n'.join(parts) + '\n')
+    return findings
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("artifact_dir", nargs="?", default=".")
+    parser.add_argument('--diagnostics', type=Path, help='One completion JSON; emit raw-albedo worst-pixel SVG.')
+    parser.add_argument('--rois', type=Path)
+    parser.add_argument('--output', type=Path)
     args = parser.parse_args(argv)
+    if args.diagnostics is not None:
+        if args.output is None:
+            parser.error('--diagnostics requires --output')
+        try:
+            return int(bool(diagnostic_montage(args.diagnostics, args.output, args.rois)))
+        except (OSError, ValueError, RuntimeError) as error:
+            print(f'Cannot build diagnostic montage: {error}', file=sys.stderr)
+            return 2
     try:
         result = build_review(args.artifact_dir)
     except (OSError, ValueError, Image.DecompressionBombError) as error:
