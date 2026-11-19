@@ -498,24 +498,27 @@ TEST(DiagnosticAttribution, TerrainSnapshotsLodInsideVersionValidationAndCommits
 }
 
 TEST(DiagnosticAttribution, TerrainRefusesUnknownAndOutOfRangeResidentLodBeforeSubmission) {
-    const auto draw = Body(Read("src/luminumbra_client/rendering/RenderPipeline.cpp"),
-                           "void RenderPipeline::draw_chunks_mdi(");
-    const auto invalid =
-        Body(draw, "if (resident.diagnostic_lod < 0 || resident.diagnostic_lod > 255)");
-    // A refusal ends coverage and falls back to ordinary submission instead of throwing.
+    const auto source = Read("src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const auto draw = Body(source, "void RenderPipeline::draw_chunks_mdi(");
+    const auto submit = Body(source, "void SubmitDiagnosticTerrainBucket(");
+    // The resident LOD is staged with each command; the bucket submitter checks it.
+    Contains(draw, ".lod = rd.diagnostic_lod");
+    const auto invalid = Body(submit, "if (resident.lod < 0 || resident.lod > 255)");
+    // A refusal ends coverage, clears the bound identity and falls back to ordinary
+    // submission instead of throwing.
     Before(invalid,
            "unsupported(\"terrain_resident_lod_unavailable\")",
-           "diagnostic_capture = nullptr;");
-    Before(invalid, "diagnostic_capture = nullptr;", "break;");
+           "capture->clear_current_identity();");
+    Before(invalid, "capture->clear_current_identity();", "capture = nullptr;");
+    Before(invalid, "capture = nullptr;", "break;");
     EXPECT_EQ(invalid.find("throw"), std::string::npos);
-    Before(draw,
-           "if (resident.diagnostic_lod < 0 || resident.diagnostic_lod > 255)",
-           "static_cast<std::uint32_t>(resident.diagnostic_lod)");
-    Before(draw,
-           "if (resident.diagnostic_lod < 0 || resident.diagnostic_lod > 255)",
-           "glDrawElementsIndirect,");
+    Before(submit,
+           "if (resident.lod < 0 || resident.lod > 255)",
+           "static_cast<std::uint32_t>(resident.lod)");
+    Before(submit, "if (resident.lod < 0 || resident.lod > 255)", "glDrawElementsIndirect,");
     // An unavailable resident LOD must never be replaced with the live chunk's newer LOD.
     EXPECT_EQ(draw.find("current_lod"), std::string::npos);
+    EXPECT_EQ(submit.find("current_lod"), std::string::npos);
 }
 
 TEST(DiagnosticAttribution, AttachmentStorageIsEnsuredBeforeLeaseAndLeaseBeforeAttachment) {
