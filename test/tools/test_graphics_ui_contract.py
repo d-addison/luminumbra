@@ -26,20 +26,30 @@ def rules(path):
 
 
 class GraphicsUiContract(unittest.TestCase):
-    def test_approved_presets_reuse_revision_one_and_preserve_saved_revisions(self):
+    def test_refinement_presets_reuse_approved_visuals_and_preserve_saved_revisions(self):
         header = compact_cpp(ROOT / "src/luminumbra_common/core/GraphicsPresets.h")
         resolver = compact_cpp(ROOT / "src/luminumbra_common/core/GraphicsPresets.cpp")
         loader = compact_cpp(ROOT / "src/luminumbra_common/core/SystemConfig.cpp")
-        self.assertIn("kGraphicsPresetRevision=3;", header)
+        self.assertIn("kGraphicsPresetRevision=4;", header)
         self.assertIn("constexprstd::arraykRevision2{kUltraRevision1,kUltraRevision1,"
                       "kUltraRevision1,kUltraRevision1};", resolver)
-        self.assertIn("settings.preset_revision==2?kRevision2[index]:kRevision1[index]", resolver)
-        self.assertIn("settings.preset_revision=preset==GraphicsPreset::Ultra?2:"
-                      "kGraphicsPresetRevision;", resolver)
+        self.assertIn("settings.preset_revision==kGraphicsPresetRevision?kRevision4[index]:"
+                      "settings.preset_revision==2?kRevision2[index]:kRevision1[index]", resolver)
+        self.assertIn("autovalues=kRevision1;values[2].terrain_near_refinement=true;"
+                      "values[3].terrain_near_refinement=true;returnvalues;", resolver)
+        self.assertIn("settings.preset_revision=kGraphicsPresetRevision;", resolver)
+        self.assertIn('values.terrain_near_refinement=*enabled;', resolver)
+        ordered = ["ResolvedGraphicsresolved{.values=base,",
+                   "ApplyGraphicsOverrides(settings.overrides,resolved.values,error)",
+                   "ApplyGraphicsOverrides(session_overrides,resolved.values,error)",
+                   "result=std::move(resolved);"]
+        positions = [resolver.index(fragment) for fragment in ordered]
+        self.assertEqual(positions, sorted(positions))
         self.assertIn("settings.preset_revision!=1&&settings.preset_revision!=2&&"
-                      "settings.preset_revision!=kGraphicsPresetRevision", resolver)
+                      "settings.preset_revision!=3&&settings.preset_revision!=kGraphicsPresetRevision", resolver)
         self.assertIn('parsed.preset_revision=graphics["preset_revision"].get<std::uint32_t>();', loader)
         self.assertIn('(graphics["preset_revision"]!=1&&graphics["preset_revision"]!=2&&'
+                      'graphics["preset_revision"]!=3&&'
                       'graphics["preset_revision"]!=kGraphicsPresetRevision)', loader)
 
     def test_frame_pacing_choices_reach_resolved_graphics_and_persistence(self):
