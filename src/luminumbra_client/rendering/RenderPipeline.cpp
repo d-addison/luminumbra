@@ -2887,7 +2887,7 @@ void RenderPipeline::prepare_camera_projection(const Camera& camera) {
 }
 
 void RenderPipeline::dispatch_stages(const Camera& camera) {
-    const auto diagnostic_frame =
+    auto diagnostic_frame =
         m_debug_view_pass && DebugViewPass::controls().enabled && DebugViewPass::controls().refresh
             ? m_debug_view_pass->begin_frame(make_debug_view_context(camera))
             : nullptr;
@@ -2944,6 +2944,10 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
         assert(fn && "frame-graph node has no executor table entry");
         if (fn)
             (this->*fn)(camera);
+        if (diagnostic_frame && node == "gbuffer") {
+            // Gather the deferred snapshot before plants or decals change its AOVs.
+            DebugViewPass::end_frame(diagnostic_frame, make_debug_view_context(camera));
+        }
     }
 }
 

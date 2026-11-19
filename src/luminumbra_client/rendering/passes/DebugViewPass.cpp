@@ -9,6 +9,7 @@
 #include <array>
 #include <exception>
 #include <limits>
+#include <optional>
 #include <vector>
 
 #include "../Camera.h"            // near/far planes for Depth-mode linearization
@@ -54,17 +55,39 @@ nlohmann::json JoinRecord(const nlohmann::json& table, const DiagnosticId& id) {
     return {{"draw", draw}, {"mesh", mesh}};
 }
 
+struct InspectorStorageBinding {
+    GLint storage = 0;
+    GLint indexed_storage = 0;
+    GLint64 storage_start = 0;
+    GLint64 storage_size = 0;
+    InspectorStorageBinding() {
+        glGetIntegerv(GL_SHADER_STORAGE_BUFFER_BINDING, &storage);
+        glGetIntegeri_v(GL_SHADER_STORAGE_BUFFER_BINDING, 7, &indexed_storage);
+        glGetInteger64i_v(GL_SHADER_STORAGE_BUFFER_START, 7, &storage_start);
+        glGetInteger64i_v(GL_SHADER_STORAGE_BUFFER_SIZE, 7, &storage_size);
+    }
+    ~InspectorStorageBinding() {
+        if (indexed_storage != 0 && storage_size > 0) {
+            glBindBufferRange(GL_SHADER_STORAGE_BUFFER,
+                              7,
+                              static_cast<GLuint>(indexed_storage),
+                              static_cast<GLintptr>(storage_start),
+                              static_cast<GLsizeiptr>(storage_size));
+        } else {
+            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, static_cast<GLuint>(indexed_storage));
+        }
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, static_cast<GLuint>(storage));
+    }
+};
+
 // Snapshot operations affect six texture units and one SSBO binding only.
 struct InspectorBindings {
+    InspectorStorageBinding storage_binding;
     GLint framebuffer = 0;
     std::array<GLint, 4> viewport{};
     GLint program = 0;
     GLint vao = 0;
     GLint active = 0;
-    GLint storage = 0;
-    GLint indexed_storage = 0;
-    GLint64 storage_start = 0;
-    GLint64 storage_size = 0;
     GLint texture_buffer = 0;
     std::array<GLint, 6> textures{};
     std::array<GLint, 2> polygon{};
@@ -77,10 +100,6 @@ struct InspectorBindings {
         glGetIntegerv(GL_CURRENT_PROGRAM, &program);
         glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vao);
         glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
-        glGetIntegerv(GL_SHADER_STORAGE_BUFFER_BINDING, &storage);
-        glGetIntegeri_v(GL_SHADER_STORAGE_BUFFER_BINDING, 7, &indexed_storage);
-        glGetInteger64i_v(GL_SHADER_STORAGE_BUFFER_START, 7, &storage_start);
-        glGetInteger64i_v(GL_SHADER_STORAGE_BUFFER_SIZE, 7, &storage_size);
         glGetIntegerv(GL_TEXTURE_BUFFER_BINDING, &texture_buffer);
         glGetIntegerv(GL_POLYGON_MODE, polygon.data());
         for (std::size_t index = 0; index < textures.size(); ++index) {
@@ -97,16 +116,6 @@ struct InspectorBindings {
         glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
         AttributedGl::UseProgram(glUseProgram, static_cast<GLuint>(program));
         glBindVertexArray(static_cast<GLuint>(vao));
-        if (indexed_storage != 0 && storage_size > 0) {
-            glBindBufferRange(GL_SHADER_STORAGE_BUFFER,
-                              7,
-                              static_cast<GLuint>(indexed_storage),
-                              static_cast<GLintptr>(storage_start),
-                              static_cast<GLsizeiptr>(storage_size));
-        } else {
-            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, static_cast<GLuint>(indexed_storage));
-        }
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, static_cast<GLuint>(storage));
         glBindBuffer(GL_TEXTURE_BUFFER, static_cast<GLuint>(texture_buffer));
         for (std::size_t index = 0; index < textures.size(); ++index) {
             glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(index));
@@ -156,20 +165,28 @@ struct DebugViewPass::Snapshot {
 
 class DebugViewPass::Frame {
 public:
-    Frame(DebugViewPass& pass, const RenderContext& ctx)
+    explicit Frame(DebugViewPass& pass)
         : pass_(pass)
-        , ctx_(ctx)
-        , exceptions_(std::uncaught_exceptions())
         , capture_(std::make_unique<GBufferDiagnosticCapture>(pass.m_snapshot->targets,
                                                               pass.m_snapshot->draws)) {}
     ~Frame() {
+        if (capture_) {
+            controls().status = controls().result = "Snapshot aborted";
+        }
+    }
+    void finish(const RenderContext& ctx) {
+        if (!capture_) {
+            return;
+        }
+        const bool complete = capture_->complete();
         capture_.reset();
-        if (std::uncaught_exceptions() != exceptions_) {
-            controls().status = "Snapshot aborted";
+        if (!complete) {
+            controls().status = controls().result =
+                "Snapshot refused: incomplete or unsupported coverage";
             return;
         }
         try {
-            pass_.finish_frame(ctx_);
+            pass_.finish_frame(ctx);
         } catch (const std::exception&) {
             controls().status = "Snapshot unavailable";
             pass_.m_snapshot->ready = false;
@@ -178,8 +195,6 @@ public:
 
 private:
     DebugViewPass& pass_;
-    RenderContext ctx_;
-    int exceptions_;
     std::unique_ptr<GBufferDiagnosticCapture> capture_;
 };
 
@@ -221,6 +236,7 @@ std::shared_ptr<DebugViewPass::Frame> DebugViewPass::begin_frame(const RenderCon
     if (!m_snapshot) {
         m_snapshot = std::make_unique<Snapshot>();
     }
+    m_snapshot->ready = false;
     if (!m_snapshot->shader) {
         m_snapshot->shader =
             std::make_unique<Shader>(m_shader->VertexPath().c_str(),
@@ -244,6 +260,28 @@ std::shared_ptr<DebugViewPass::Frame> DebugViewPass::begin_frame(const RenderCon
             }
         }
     }
+    {
+        InspectorStorageBinding bindings;
+        if (m_snapshot->sample_buffer == 0) {
+            glGenBuffers(1, &m_snapshot->sample_buffer);
+            if (m_snapshot->sample_buffer == 0) {
+                control.status = control.result = "Inspector storage unavailable";
+                return {};
+            }
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_snapshot->sample_buffer);
+            // One bounded 48-byte record is required even with inspection closed.
+            const InspectorPixel empty{};
+            glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(InspectorPixel), &empty, GL_STREAM_READ);
+        }
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_snapshot->sample_buffer);
+        GLint64 sample_bytes = 0;
+        glGetBufferParameteri64v(GL_SHADER_STORAGE_BUFFER, GL_BUFFER_SIZE, &sample_bytes);
+        if (sample_bytes != sizeof(InspectorPixel)) {
+            m_snapshot->reset_sample();
+            control.status = control.result = "Inspector storage unavailable";
+            return {};
+        }
+    }
     if (control.extent.width != 0 &&
         (control.extent.width != ctx.internal_w() || control.extent.height != ctx.internal_h())) {
         control.x = -1;
@@ -256,10 +294,19 @@ std::shared_ptr<DebugViewPass::Frame> DebugViewPass::begin_frame(const RenderCon
         m_snapshot->view[index] = view[column][row];
         m_snapshot->projection[index] = ctx.gbuffer_projection[column][row];
     }
-    m_snapshot->ready = false;
+    if (!m_snapshot->targets.reset()) {
+        control.status = control.result = "Identity attachment still leased";
+        return {};
+    }
     m_snapshot->draws.clear();
-    m_snapshot->targets.reset();
-    return std::make_shared<Frame>(*this, ctx);
+    return std::make_shared<Frame>(*this);
+}
+
+void DebugViewPass::end_frame(std::shared_ptr<Frame>& frame, const RenderContext& ctx) {
+    if (frame) {
+        frame->finish(ctx);
+        frame.reset();
+    }
 }
 
 void DebugViewPass::read_inspector_pixel(GLuint buffer, InspectorPixel& pixel) {
@@ -357,8 +404,7 @@ void DebugViewPass::finish_frame(const RenderContext& ctx) {
         control.result = "No selected pixel (coordinates are top-left render texels)";
         return;
     }
-    if (m_snapshot->sample_buffer == 0) {
-        glGenBuffers(1, &m_snapshot->sample_buffer);
+    if (m_snapshot->sample_fbo == 0) {
         glGenFramebuffers(1, &m_snapshot->sample_fbo);
         glGenTextures(1, &m_snapshot->sample_texture);
         if (m_snapshot->sample_buffer == 0 || m_snapshot->sample_fbo == 0 ||
@@ -367,9 +413,6 @@ void DebugViewPass::finish_frame(const RenderContext& ctx) {
             control.result = "Inspector storage unavailable";
             return;
         }
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_snapshot->sample_buffer);
-        const InspectorPixel empty{};
-        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(InspectorPixel), &empty, GL_STREAM_READ);
         glActiveTexture(GL_TEXTURE4);
         glBindTexture(GL_TEXTURE_2D, m_snapshot->sample_texture);
         glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 1, 1);
@@ -481,13 +524,19 @@ void DebugViewPass::execute(const RenderContext& ctx) {
     if (mode() == Mode::None)
         return;
     const bool identity_view = controls().enabled && mode() >= DrawId;
+    if (identity_view && (!m_snapshot || m_snapshot->sample_buffer == 0)) {
+        return;
+    }
     Shader* shader = identity_view && m_snapshot && m_snapshot->shader ? m_snapshot->shader.get()
                                                                        : m_shader.get();
     if (!shader || !shader->IsValid() || m_vao == 0)
         return;
 
     std::array<GLint, 2> polygon_mode{};
+    std::optional<InspectorStorageBinding> storage_binding;
     if (identity_view) {
+        storage_binding.emplace();
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, m_snapshot->sample_buffer);
         glGetIntegerv(GL_POLYGON_MODE, polygon_mode.data());
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
     }

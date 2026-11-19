@@ -31,6 +31,18 @@ std::string Source(std::string_view path) {
     return result.str();
 }
 
+std::string SourceSection(std::string_view path, std::string_view first, std::string_view last) {
+    const auto source = Source(path);
+    const auto begin = source.find(first);
+    const auto end = source.find(last, begin);
+    EXPECT_NE(begin, std::string::npos);
+    EXPECT_NE(end, std::string::npos);
+    if (begin == std::string::npos || end == std::string::npos) {
+        return {};
+    }
+    return source.substr(begin, end - begin);
+}
+
 class DiagnosticInspectorGl : public ::testing::Test {
 protected:
     void SetUp() override {
@@ -200,6 +212,129 @@ TEST(DiagnosticInspector, SinglePixelGatherHasNoPlaneReadbackAndChecksBoundsBefo
                              "texelFetch(gDepth, pixel, 0)"}) {
         EXPECT_NE(shader.find(text), std::string::npos) << text;
     }
+}
+
+TEST(DiagnosticInspector, IdentityDrawRequiresOwnedInspectorStorage) {
+    const auto draw = SourceSection("src/luminumbra_client/rendering/passes/DebugViewPass.cpp",
+                                    "void DebugViewPass::execute(",
+                                    "void DebugViewPass::bind_sources(");
+    EXPECT_NE(draw.find("identity_view && (!m_snapshot || m_snapshot->sample_buffer == 0)"),
+              std::string::npos);
+    EXPECT_EQ(draw.find("inspector_open"), std::string::npos);
+    EXPECT_LT(
+        draw.find("storage_binding.emplace();"),
+        draw.find("glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, m_snapshot->sample_buffer)"));
+    EXPECT_LT(draw.find("glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, m_snapshot->sample_buffer)"),
+              draw.find("AttributedGl::Submit("));
+    const auto storage = SourceSection("src/luminumbra_client/rendering/passes/DebugViewPass.cpp",
+                                       "struct InspectorStorageBinding",
+                                       "struct InspectorBindings");
+    EXPECT_NE(storage.find("glBindBufferRange(GL_SHADER_STORAGE_BUFFER,"), std::string::npos);
+    EXPECT_NE(
+        storage.find(
+            "glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, static_cast<GLuint>(indexed_storage))"),
+        std::string::npos);
+    EXPECT_NE(storage.find("glBindBuffer(GL_SHADER_STORAGE_BUFFER, static_cast<GLuint>(storage))"),
+              std::string::npos);
+}
+
+TEST(DiagnosticInspector, InspectorStorageRefusesMissingPartialAndOversizedStores) {
+    const auto begin =
+        SourceSection("src/luminumbra_client/rendering/passes/DebugViewPass.cpp",
+                      "std::shared_ptr<DebugViewPass::Frame> DebugViewPass::begin_frame(",
+                      "void DebugViewPass::end_frame(");
+    EXPECT_NE(begin.find("glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(InspectorPixel), &empty, "
+                         "GL_STREAM_READ)"),
+              std::string::npos);
+    EXPECT_NE(begin.find("if (m_snapshot->sample_buffer == 0) {\n                control.status"),
+              std::string::npos);
+    EXPECT_LT(begin.find("if (sample_bytes != sizeof(InspectorPixel))"),
+              begin.find("return std::make_shared<Frame>"));
+    EXPECT_LT(begin.find("m_snapshot->ready = false;"), begin.find("glGenBuffers("));
+    EXPECT_LT(begin.find("if (!m_snapshot->targets.reset())"),
+              begin.find("m_snapshot->draws.clear();"));
+    EXPECT_NE(begin.find("Identity attachment still leased"), std::string::npos);
+    EXPECT_EQ(begin.find("inspector_open"), std::string::npos);
+}
+
+TEST(DiagnosticInspector, IncompleteAndUnsupportedCapturesRefusePublication) {
+    const auto frame = SourceSection("src/luminumbra_client/rendering/passes/DebugViewPass.cpp",
+                                     "class DebugViewPass::Frame",
+                                     "std::string DebugViewPass::join(");
+    EXPECT_LT(frame.find("const bool complete = capture_->complete();"),
+              frame.find("capture_.reset();"));
+    EXPECT_LT(frame.find("if (!complete)"), frame.find("pass_.finish_frame(ctx);"));
+    EXPECT_NE(frame.find("controls().status = controls().result ="), std::string::npos);
+    EXPECT_NE(frame.find("Snapshot refused: incomplete or unsupported coverage"),
+              std::string::npos);
+    EXPECT_LT(frame.find("return;"), frame.find("pass_.finish_frame(ctx);"));
+    const auto coverage = SourceSection("src/luminumbra_client/rendering/GBufferTargets.cpp",
+                                        "bool GBufferDiagnosticCapture::complete() const",
+                                        "Shader* GBufferDiagnosticCapture::variant(");
+    EXPECT_NE(
+        coverage.find("state_->captured && !state_->framebuffer && !state_->attachment_lease"),
+        std::string::npos);
+    EXPECT_NE(
+        coverage.find("!state_->failed && !state_->refused && state_->table.complete_coverage()"),
+        std::string::npos);
+}
+
+TEST(DiagnosticInspector, DeferredSnapshotFinishesBeforeUninstrumentedWriters) {
+    const auto dispatch = SourceSection("src/luminumbra_client/rendering/RenderPipeline.cpp",
+                                        "void RenderPipeline::dispatch_stages(",
+                                        "RenderPipeline::stage_executor_table()");
+    EXPECT_NE(dispatch.find("if (diagnostic_frame && node == \"gbuffer\")"), std::string::npos);
+    EXPECT_LT(dispatch.find("(this->*fn)(camera);"), dispatch.find("DebugViewPass::end_frame("));
+    const auto stages = SourceSection("src/luminumbra_client/rendering/RenderPipeline.cpp",
+                                      "RenderPipeline::stage_executor_table()",
+                                      "void RenderPipeline::execute_stage_shadow(");
+    EXPECT_LT(stages.find("{\"gbuffer\","), stages.find("{\"plant_procgen\","));
+    EXPECT_LT(stages.find("{\"gbuffer\","), stages.find("{\"ground_decals\","));
+    const auto frame = SourceSection(
+        "src/luminumbra_client/rendering/passes/DebugViewPass.cpp", "~Frame()", "void finish(");
+    EXPECT_EQ(frame.find("finish_frame("), std::string::npos);
+    EXPECT_NE(frame.find("Snapshot aborted"), std::string::npos);
+}
+
+TEST(DiagnosticInspector, FinalizationResolvesCurrentGBufferAttachments) {
+    const auto dispatch = SourceSection("src/luminumbra_client/rendering/RenderPipeline.cpp",
+                                        "void RenderPipeline::dispatch_stages(",
+                                        "RenderPipeline::stage_executor_table()");
+    EXPECT_LT(dispatch.find("(this->*fn)(camera);"),
+              dispatch.find(
+                  "DebugViewPass::end_frame(diagnostic_frame, make_debug_view_context(camera))"));
+    const auto frame = SourceSection("src/luminumbra_client/rendering/passes/DebugViewPass.cpp",
+                                     "class DebugViewPass::Frame",
+                                     "std::string DebugViewPass::join(");
+    EXPECT_EQ(frame.find("ctx_"), std::string::npos);
+    EXPECT_NE(frame.find("pass_.finish_frame(ctx);"), std::string::npos);
+    const auto context = SourceSection("src/luminumbra_client/rendering/RenderPipeline.cpp",
+                                       "RenderContext RenderPipeline::make_debug_view_context(",
+                                       "RenderContext RenderPipeline::make_ground_decal_context(");
+    EXPECT_NE(context.find("const GBuffer& gb = m_gbuffer_pass->gbuffer();"), std::string::npos);
+    EXPECT_NE(context.find("gb.position_texture"), std::string::npos);
+    EXPECT_NE(context.find("gb.normal_texture"), std::string::npos);
+    EXPECT_NE(context.find("gb.albedo_texture"), std::string::npos);
+    EXPECT_NE(context.find("gb.depth_texture"), std::string::npos);
+}
+
+TEST(DiagnosticInspector, EmptyRepeatedAndAbandonedFramesCannotPublish) {
+    const auto end = SourceSection("src/luminumbra_client/rendering/passes/DebugViewPass.cpp",
+                                   "void DebugViewPass::end_frame(",
+                                   "void DebugViewPass::read_inspector_pixel(");
+    EXPECT_LT(end.find("if (frame)"), end.find("frame->finish(ctx);"));
+    EXPECT_LT(end.find("frame->finish(ctx);"), end.find("frame.reset();"));
+    const auto finish = SourceSection("src/luminumbra_client/rendering/passes/DebugViewPass.cpp",
+                                      "void finish(",
+                                      "std::string DebugViewPass::join(");
+    EXPECT_LT(finish.find("if (!capture_)"), finish.find("capture_->complete()"));
+    EXPECT_LT(finish.find("return;"), finish.find("capture_->complete()"));
+    const auto abandoned = SourceSection(
+        "src/luminumbra_client/rendering/passes/DebugViewPass.cpp", "~Frame()", "void finish(");
+    EXPECT_NE(abandoned.find("if (capture_)"), std::string::npos);
+    EXPECT_NE(abandoned.find("controls().status = controls().result = \"Snapshot aborted\""),
+              std::string::npos);
+    EXPECT_EQ(abandoned.find("finish_frame("), std::string::npos);
 }
 
 TEST_F(DiagnosticInspectorGl, FixedReadbackCopiesOneRecordAndRestoresCallerBinding) {
