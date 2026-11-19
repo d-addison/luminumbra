@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -565,6 +566,88 @@ TEST(WorldDurableResidency, RegionDigestExcludesWaterMirrorsAndDirtyBookkeeping)
     EXPECT_NE(P::WorldSaveService::region_simulation_digest({}, {0, 0}, inputs), digest);
 }
 
+std::shared_ptr<Chunk> FlowingRegionChunk(const IVec3& coords) {
+    auto chunk = std::make_shared<Chunk>(coords);
+    chunk->set_state(ChunkState::Idle);
+    // Fixed fixture bounds: a 17^3 terrain lattice and a 16^2 water grid.
+    chunk->sdf_data.assign(std::size_t{17} * 17 * 17, 1.0f);
+    chunk->heightmap_data.assign(std::size_t{17} * 17, 0.0f);
+    chunk->material_data.assign(std::size_t{17} * 17 * 17, 2);
+    constexpr std::size_t cells = std::size_t{16} * 16;
+    chunk->has_water_sim.store(true);
+    chunk->current_water_resolution.store(16);
+    chunk->water_depth_mm.assign(cells, 1000);
+    chunk->water_depth_mm[15] = 4000;
+    chunk->water_bed_mm.assign(cells, 0);
+    chunk->water_edge_flux.assign(2 * cells, 7);
+    chunk->water_level_data.assign(cells, 1.0f);
+    chunk->water_flow_data.assign(cells, Luminumbra::Vec2(0.0f));
+    chunk->water_sim_terrain_height.assign(cells, 0.0f);
+    chunk->water_rest_level.assign(cells, 0.0f);
+    chunk->is_water_sleeping.store(false);
+    chunk->max_water_delta_last_tick = 0.25f;
+    chunk->ticks_below_threshold = 2;
+    chunk->mark_voxel_data_dirty();
+    return chunk;
+}
+
+TEST(ActiveRegions, IncrementalRegionDigestPreservesCanonicalJsonBytes) {
+    namespace P = Luminumbra::Persistence;
+    Luminumbra::WorldStreamingState state;
+    const auto verify = [&state] {
+        const auto snapshot =
+            nlohmann::json::parse(P::SerializeWorldStreamingStateSnapshotJson(state));
+        auto contents = nlohmann::json::array();
+        for (const auto& chunk : snapshot.at("chunks")) {
+            nlohmann::json content;
+            for (const auto* field : {"chunk_id",
+                                      "coords",
+                                      "sdf_data",
+                                      "heightmap_data",
+                                      "material_data",
+                                      "water_depth_mm",
+                                      "water_bed_mm",
+                                      "water_edge_flux",
+                                      "has_water_sim",
+                                      "current_water_resolution",
+                                      "is_water_sleeping",
+                                      "max_water_delta_last_tick",
+                                      "ticks_below_threshold"})
+                content[field] = chunk.at(field);
+            contents.push_back(std::move(content));
+        }
+        const nlohmann::json canonical = {{"hash_scope", "region_content_v2"},
+                                          {"chunks", contents}};
+        EXPECT_EQ(P::ComputeRegionContentHash(state), P::StableChecksum(canonical.dump(4) + "\n"));
+    };
+    verify();
+    state.insert_chunk(FlowingRegionChunk({32, 0, 0}));
+    verify();
+    state.insert_chunk(FlowingRegionChunk({31, 0, 0}));
+    verify();
+}
+
+TEST(WorldDurableResidency, EvictionSnapshotExcludesWorkerStagingAndPreservesAuthority) {
+    namespace P = Luminumbra::Persistence;
+    auto chunk = FlowingRegionChunk({0, 0, 0});
+    chunk->pending_mesh_indices = {0, 1, 2};
+    chunk->pending_water_mesh_indices = {2, 1, 0};
+    Luminumbra::WorldStreamingState state;
+    state.insert_chunk(chunk);
+    const auto full = nlohmann::json::parse(P::SerializeWorldStreamingStateSnapshotJson(state));
+    const auto authority = nlohmann::json::parse(P::SerializeChunkAuthoritySnapshotJson(*chunk));
+    EXPECT_FALSE(full.at("chunks").at(0).at("pending_mesh_indices").empty());
+    EXPECT_TRUE(authority.at("chunks").at(0).at("pending_mesh_indices").empty());
+    EXPECT_TRUE(authority.at("chunks").at(0).at("pending_water_mesh_indices").empty());
+    Luminumbra::WorldStreamingState loaded;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(P::LoadWorldStreamingStateSnapshotJson(authority.dump(), loaded, errors));
+    const auto restored = loaded.find_chunk(chunk->get_id());
+    ASSERT_NE(restored, nullptr);
+    // This one-region fixture uses the complete terrain/water authority projection.
+    EXPECT_EQ(P::ComputeRegionContentHash(state), P::ComputeRegionContentHash(loaded));
+}
+
 TEST(WorldDurableResidency, GeneratedWaterAuthoritySurvivesLodPromotionAndPersistence) {
     namespace P = Luminumbra::Persistence;
     const auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
@@ -987,6 +1070,47 @@ TEST(WorldDurableResidency, SessionSavesAndReloadsParkedEditedChunk) {
     const auto loaded = reloaded.GetWorldSystem()->find_streamed_chunk(coords);
     ASSERT_TRUE(loaded);
     EXPECT_EQ(HashVec(loaded->sdf_data), recorded_hash);
+}
+
+TEST(WorldDurableResidency, DeterministicWaterInitializationAndRefreshKeepAuthority) {
+    Luminumbra::Systems::TerrainGenParams params{};
+    params.rivers_enabled = false;
+    SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    Luminumbra::Systems::WaterSystem water(nullptr, &world);
+    water.SetSimResolution(8);
+    water.SetHydrology(true, 0, 0);
+    entt::registry registry;
+    const auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+    chunk->set_state(ChunkState::Idle);
+    chunk->heightmap_data.assign(17u * 17u, 10000.0f);
+    chunk->mark_sdf_generated_current_params();
+    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    const std::unordered_map<Luminumbra::ChunkID, std::shared_ptr<Chunk>> chunks{
+        {chunk->get_id(), chunk}};
+    const auto inputs = world.water_authority_input_items();
+    for (std::uint32_t tick = 0; tick < 3u; ++tick) {
+        SCOPED_TRACE(tick);
+        if (tick == 1) {
+            // Historical grids may omit momentum; repairing it changes hashed state.
+            chunk->water_edge_flux.clear();
+        }
+        if (tick == 2) {
+            chunk->water_level_data.assign(64, -1.0f);
+        }
+        water.update(registry, chunks, true);
+        ASSERT_TRUE(chunk->has_complete_water_state());
+        EXPECT_EQ(chunk->water_depth_mm, std::vector<std::int32_t>(64, 0));
+        EXPECT_EQ(chunk->water_edge_flux, std::vector<std::int32_t>(128, 0));
+        EXPECT_EQ(chunk->ticks_below_threshold, tick + 1);
+        EXPECT_EQ(chunk->water_revision(), tick == 2 ? 5u : 2u * (tick + 1u));
+        EXPECT_TRUE(chunk->is_water_state_dirty());
+        EXPECT_TRUE(chunk->is_voxel_data_dirty());
+        world.sync_water_authority();
+        EXPECT_TRUE(chunk->needs_authority());
+        EXPECT_TRUE(chunk->has_water_authority());
+        EXPECT_FALSE(chunk->is_water_state_dirty());
+        EXPECT_EQ(world.water_authority_input_items(), inputs + tick + 1u);
+    }
 }
 
 TEST(WorldDurableResidency, ReloadRestartsUnsavedWaterBesidePersistedSleepCounter) {

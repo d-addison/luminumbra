@@ -129,6 +129,10 @@ bool NetSessionApplyStep(std::uint64_t /*tick*/,
     // then quiesce so the next scheduler decision observes the identical settled
     // state on both peers. The streaming anchor is the spawn point -- NOT the
     // client camera -- so render-side look can never alter the hashed world.
+    if (!physics_system->prepare_simulation_collisions(
+            {}, ctx->session->GetSimulationTickCount() + 1)) {
+        return false; // No physics or session tick is consumed on refusal.
+    }
     physics_system->update(static_cast<float>(ctx->fixed_dt));
     const std::uint32_t ran =
         ctx->session->TickSimulation(ctx->fixed_dt, /*defer_water_authority=*/true);
@@ -157,32 +161,21 @@ bool NetSessionApplyStep(std::uint64_t /*tick*/,
 // revisiting the fold decision.
 void NetSessionCaptureHashes(std::uint64_t tick, Luminumbra::Net::HashMsg& out, void* user) {
     auto* ctx = static_cast<NetSessionPeerContext*>(user);
-    out.tick = tick;
     if (!ctx || !ctx->session || !ctx->session->GetWorldSystem()) {
-        return;
+        throw Luminumbra::Persistence::AuthorityCaptureRefused();
     }
-    auto* world_system = ctx->session->GetWorldSystem();
-    world_system->wait_for_streaming_jobs();
-
-    Luminumbra::WorldStreamingState state;
-    for (const auto& chunk : world_system->snapshot_streamed_chunks()) {
-        state.insert_chunk(chunk);
-    }
-    const Luminumbra::Persistence::WorldSaveService service;
-    out.world_hash = service.world_hash(state, world_system->GetWaterSimWindowCursor());
-
-    // Terrain/water authority only here (no streamed game entities), so the
-    // entities sub-hash is the stable checksum of the EMPTY canonical ECS
-    // snapshot -- present (not blank) so an entity-bearing world reports an
-    // entity-section divergence rather than a silent gap. Same as the server.
     const std::string empty_entities = Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
         Luminumbra::Ecs::EntityRegistrySnapshot{});
-    const Luminumbra::Persistence::WorldStreamingStateSubHashes sub =
-        Luminumbra::Persistence::ComputeWorldStreamingStateSubHashes(
-            state, empty_entities, world_system->GetWaterSimWindowCursor());
-    out.terrain = sub.terrain;
-    out.water = sub.water;
-    out.entities = sub.entities;
+    const auto result = ctx->session->CaptureAuthorityHashes(
+        empty_entities, Luminumbra::Persistence::AuthorityCaptureParts::StreamedAndSubHashes);
+    if (!result.capture) {
+        throw Luminumbra::Persistence::AuthorityCaptureRefused();
+    }
+    out.tick = tick;
+    out.world_hash = result.capture->streamed;
+    out.terrain = result.capture->sub.terrain;
+    out.water = result.capture->sub.water;
+    out.entities = result.capture->sub.entities;
 }
 
 } // namespace
@@ -347,6 +340,26 @@ bool NetworkedSessionDriver::StepAgreedTick() {
         return false;
     }
     const std::uint64_t budget = m_impl->config.budget_ticks;
+    // apply_and_step(false) is terminal in lockstep. Preflight both worlds before
+    // either peer consumes inputs, so resource refusal waits for the next frame.
+    // The hook reuses this tick's publication and cannot spend the budget twice.
+    bool retry = false;
+    for (auto* ctx : {&m_impl->host_ctx, &m_impl->client_ctx}) {
+        const bool prepared = !ctx->session->GetRegionSchedulerFault() &&
+                              ctx->session->GetPhysicsSystem()->prepare_simulation_collisions(
+                                  {}, ctx->session->GetSimulationTickCount() + 1);
+        if (ctx->session->GetRegionSchedulerFault()) {
+            m_failure_reason = "region_preparation_fault";
+            m_finished = true;
+            return false;
+        }
+        if (!prepared) {
+            retry = true; // Still inspect the other peer for terminal faults.
+        }
+    }
+    if (retry) {
+        return true;
+    }
 
     // Pump both peers until BOTH advance one more agreed tick (or terminate). The
     // loopback is in-process, so a bounded pump count is enough; a runaway is
@@ -432,11 +445,19 @@ bool NetworkedSessionDriver::WriteArtifact(const std::filesystem::path& artifact
     if (m_impl->host_session && m_impl->host_session->GetWorldSystem() &&
         m_impl->client_ctx.session && m_impl->client_ctx.session->GetWorldSystem()) {
         Luminumbra::Net::HashMsg hm;
-        NetSessionCaptureHashes(m_agreed_ticks, hm, &m_impl->host_ctx);
-        host_hash = hm.world_hash;
+        try {
+            NetSessionCaptureHashes(m_agreed_ticks, hm, &m_impl->host_ctx);
+            host_hash = hm.world_hash;
+        } catch (const Luminumbra::Persistence::AuthorityCaptureRefused&) {
+            host_hash.clear();
+        }
         Luminumbra::Net::HashMsg cm;
-        NetSessionCaptureHashes(m_agreed_ticks, cm, &m_impl->client_ctx);
-        client_hash = cm.world_hash;
+        try {
+            NetSessionCaptureHashes(m_agreed_ticks, cm, &m_impl->client_ctx);
+            client_hash = cm.world_hash;
+        } catch (const Luminumbra::Persistence::AuthorityCaptureRefused&) {
+            client_hash.clear();
+        }
     }
     m_impl->last_world_hash = host_hash;
 

@@ -457,6 +457,8 @@ bool HasCompleteWaterGrid(const Chunk& chunk, int resolution) {
     return chunk.water_level_data.size() >= cell_count;
 }
 
+constexpr std::int32_t kMinRenderableWaterDepthMm = 50; // 5 cm, shared by sampling and culling
+
 float SampleChunkWaterLevel(const Chunk& chunk, float world_x, float world_z, int resolution) {
     const Vec3 base_pos = Vec3(chunk.get_coords() * IVec3(CHUNK_SIZE_X, 0, CHUNK_SIZE_Z));
     const float local_x = world_x - base_pos.x;
@@ -483,7 +485,39 @@ float SampleChunkWaterLevel(const Chunk& chunk, float world_x, float world_z, in
 
     const float h_z0 = glm::mix(h00, h10, tx);
     const float h_z1 = glm::mix(h01, h11, tx);
-    return glm::mix(h_z0, h_z1, tz);
+    const float legacy_height = glm::mix(h_z0, h_z1, tz);
+    const auto cells = static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
+    if (chunk.water_depth_mm.size() != cells) {
+        return legacy_height;
+    }
+
+    // A dry cell's level is its BED height, not a water surface. Interpolating
+    // that height into a wet cell stretches the surface up a dry bank (or down
+    // an empty excavation), producing translucent triangles over land. Keep the
+    // bilinear footprint, but normalize only the standing-water contributions.
+    // Exactly four samples per corner; this changes render geometry only.
+    const std::array<std::size_t, 4> samples = {
+        static_cast<std::size_t>(z0 * resolution + x0),
+        static_cast<std::size_t>(z0 * resolution + x0 + 1),
+        static_cast<std::size_t>((z0 + 1) * resolution + x0),
+        static_cast<std::size_t>((z0 + 1) * resolution + x0 + 1)};
+    const std::array<float, 4> weights = {
+        (1.0f - tx) * (1.0f - tz), tx * (1.0f - tz), (1.0f - tx) * tz, tx * tz};
+    float surface_sum = 0.0f;
+    float weight_sum = 0.0f;
+    bool all_wet = true;
+    for (std::size_t corner = 0; corner < samples.size(); ++corner) {
+        const auto index = samples[corner];
+        if (chunk.water_depth_mm[index] > kMinRenderableWaterDepthMm) {
+            surface_sum += chunk.water_level_data[index] * weights[corner];
+            weight_sum += weights[corner];
+        } else {
+            all_wet = false;
+        }
+    }
+    // Preserve fully wet and legacy interpolation. A zero-weight footprint is
+    // dry and is culled by GenerateWaterMesh before its heights can be emitted.
+    return all_wet || weight_sum == 0.0f ? legacy_height : surface_sum / weight_sum;
 }
 
 u32 FallbackTransitionMaterial(const Chunk& chunk, TerrainTransitionFace face) {
@@ -2096,7 +2130,6 @@ void GenerateWaterMesh(const Systems::WaterSystem& water_system,
     // runtime digs, so water filling a CARVED basin (its surface below the original worldgen
     // height) was wrongly judged "underground" and never rendered. The per-cell depth is
     // edit-aware, so dug/rain ponds show.
-    constexpr std::int32_t kMinRenderableWaterDepthMm = 50; // 5 cm
     const bool have_depth =
         (chunk.water_depth_mm.size() ==
          static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution));

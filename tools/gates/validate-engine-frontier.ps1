@@ -3204,7 +3204,7 @@ function Test-TimeOfDaySweep {
 #   * foliage_draws > 0 in the down-pitched DAYTIME clear cells,
 #   * particle_draws > 0 AND lightning active in every STORM cell,
 #   * cloud coverage > 0 in the up-pitched STORM cells,
-#   * water-like pixels present in the water-aimed DAYTIME cells,
+#   * depth-tested water pixels present in the target region of every water-aimed cell,
 #   * NO rain leaking into clear cells (particle_draws == 0).
 # the scenario drives the existing one-way bridges and never writes
 # world_hash. The gate also assembles the labelled montages for review.
@@ -3288,12 +3288,13 @@ function Test-WorldVisualSweep {
         }
     }
 
-    $waterCells = @($cells | Where-Object { $_.water_aimed -and $_.daytime })
-    if ($waterCells.Count -lt 1) { throw "world_visual_sweep has no water-aimed daytime cells" }
+    $waterCells = @($cells | Where-Object { $_.water_aimed })
+    if ($waterCells.Count -lt 1) { throw "world_visual_sweep has no water-aimed cells" }
     foreach ($cell in $waterCells) {
-        if ([int64]$cell.water_like_pixels -lt 1) {
-            throw "world_visual_sweep water-aimed cell shows no water: $($cell.file)"
+        if (-not $cell.water_mask_valid -or [int64]$cell.visible_water_pixels -lt 1) {
+            throw "world_visual_sweep water-aimed cell shows no depth-tested water in target region: $($cell.file)"
         }
+        Assert-PpmArtifact -Path $cell.water_mask_file -ArtifactDir $visualDir -Name "WorldVisualSweep water mask"
     }
 
     # No rain may leak into clear cells (clean clear-vs-storm separation).

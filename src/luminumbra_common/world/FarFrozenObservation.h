@@ -3,9 +3,34 @@
 #include "FarEditedBake.h"
 #include "FarVolume.h"
 
+#include <array>
+#include <cstdint>
 #include <memory>
+#include <optional>
+#include <span>
+#include <utility>
 
 namespace Luminumbra::World {
+
+// Constant-storage coverage accumulator. Start validates coordinates/intent;
+// each Observe consumes exactly one column in row-major order. No callbacks or
+// allocation occur here. Finish preserves output until all 129x129 columns pass.
+class FarVolumeCoverageCursor {
+public:
+    FarVolumeFacadeError Start(const FarVolumeCoverageIntent&, std::uint64_t identity);
+    FarVolumeFacadeError Observe(const std::optional<float>&);
+    bool Complete() const noexcept;
+    std::pair<std::int64_t, std::int64_t> Column() const;
+    FarVolumeFacadeError Finish(FarVolumeRequest&) const;
+
+private:
+    FarVolumeCoverageIntent intent_;
+    std::uint64_t identity_ = 0;
+    std::size_t column_ = 0;
+    std::int64_t x_ = 0, z_ = 0;
+    std::uint32_t spacing_ = 0, brick_ = 0;
+    float low_ = 0, high_ = 0;
+};
 
 enum class FarFrozenUse : std::uint8_t {
     Committed,
@@ -47,7 +72,8 @@ using FarFrozenWaterOverride =
     std::function<FarFrozenOverride<FarFrozenWaterSample>(std::int64_t, std::int64_t)>;
 
 // Capture-only callbacks. The host holds its owner-thread publication boundary
-// throughout capture. None of these callbacks or their reachable data is retained.
+// during each pump. Synchronous capture borrows callbacks; resumable capture
+// retains their complete input owner. Immutable images retain no callbacks.
 // The committed layer must come from eligible immutable producer images, including
 // disk-only records (prepared images are bake-only). Each layer uses one coordinate
 // resolver for shared boundaries and reports conflicting authority as unavailable.
@@ -78,7 +104,7 @@ struct FarFrozenRegion {
     FarEditedFootprint support;
 };
 // Optional owner-supplied monotone clock and absolute transaction expiry. The
-// clock/context must outlive synchronous capture and any retained source image.
+// clock/context must outlive synchronous capture and any retained source or cursor.
 // A null clock leaves the existing frame and operation allowances in force.
 struct FarFrozenCaptureDeadline {
     std::uint64_t (*now)(const void*) noexcept = nullptr;
@@ -88,7 +114,7 @@ struct FarFrozenCaptureDeadline {
         return now && now(context) >= expires_at;
     }
 };
-// Synchronous transaction accounting. Charge immediately before each callback,
+// Transaction accounting. Charge immediately before each callback,
 // including callbacks nested in a source adapter. Never retained by an image.
 class FarFrozenCaptureWork {
 public:
@@ -98,11 +124,15 @@ public:
     explicit FarFrozenCaptureWork(const Counts& limits,
                                   FarFrozenCaptureWork* transaction = nullptr,
                                   const FarFrozenCaptureDeadline& deadline = {},
-                                  const FarFrozenCaptureDeadline& source_deadline = {})
+                                  const FarFrozenCaptureDeadline& source_deadline = {},
+                                  bool (*current)(const void*) noexcept = nullptr,
+                                  const void* source_context = nullptr)
         : limits_(limits)
         , transaction_(transaction)
         , deadline_(deadline)
-        , source_deadline_(source_deadline) {}
+        , source_deadline_(source_deadline)
+        , current_(current)
+        , source_context_(source_context) {}
     FarFrozenCaptureWork(const FarFrozenCaptureWork&) = delete;
     FarFrozenCaptureWork& operator=(const FarFrozenCaptureWork&) = delete;
     bool ChargeHeight();
@@ -111,6 +141,9 @@ public:
     bool CheckDeadline();
     bool deadline_exceeded() const {
         return deadline_exceeded_ || (transaction_ && transaction_->deadline_exceeded());
+    }
+    bool source_changed() const {
+        return source_changed_ || (transaction_ && transaction_->source_changed());
     }
     Counts counts() const {
         return counts_;
@@ -121,7 +154,9 @@ private:
     Counts counts_;
     FarFrozenCaptureWork* transaction_;
     FarFrozenCaptureDeadline deadline_, source_deadline_;
-    bool deadline_exceeded_ = false;
+    bool (*current_)(const void*) noexcept = nullptr;
+    const void* source_context_ = nullptr;
+    bool deadline_exceeded_ = false, source_changed_ = false;
 };
 struct FarFrozenCaptureLimits {
     // Required finite caps; zero admits no work. Counts include rectangular halos
@@ -131,7 +166,7 @@ struct FarFrozenCaptureLimits {
     // Image, shared ownership control block, and exact vector capacities.
     std::uint64_t max_bytes = 0;
     // Optional shared transaction across images, with its own explicit caps.
-    // Per-image sample caps still apply; no callback or counter is retained.
+    // Per-image caps still apply; immutable images retain no callbacks or counters.
     FarFrozenCaptureWork* work = nullptr;
     FarFrozenCaptureDeadline deadline{};
 };
@@ -153,6 +188,7 @@ class FarFrozenObservation final : public std::enable_shared_from_this<FarFrozen
     struct CaptureToken {};
 
 public:
+    class Capture;
     FarFrozenObservation(CaptureToken,
                          std::shared_ptr<FarVolumeMemoryPool> pool,
                          const FarFrozenCaptureSource& source);
@@ -188,6 +224,16 @@ public:
         return grids_.size();
     }
     std::optional<FarFrozenRegion> Region(std::size_t region) const;
+    // Constant-time indexed column access for resumable consumers. Coordinates
+    // are grid indices including the one-column halo; invalid indices are absent.
+    std::optional<float> RegionHeight(std::size_t region, std::size_t x, std::size_t z) const {
+        if (region >= grids_.size())
+            return {};
+        const auto& grid = grids_[region];
+        if (x >= grid.side[0] || z >= grid.side[2])
+            return {};
+        return heights_[grid.column_offset + z * grid.side[0] + x];
+    }
     std::optional<float> Height(std::uint8_t tier, std::int64_t x, std::int64_t z) const;
     std::optional<FarVolumeSample>
     Sample(std::uint8_t tier, const FarVolumePosition& p, bool pristine = false) const;
@@ -225,6 +271,105 @@ private:
     std::vector<float> heights_;
     std::vector<FarVolumeSample> pristine_, composed_;
     std::vector<FarFrozenWaterSample> water_;
+};
+
+// Every pump counts validation records, columns, density nodes and fingerprint
+// records. A sampling unit invokes at most six source callbacks (including the
+// world base-water adapter); a fingerprint unit folds at most seven scalars.
+// A heap unit does at most 2 * numeric_limits<size_t>::digits comparisons.
+// Allocation reserves empty buffers once; no pump initializes world-sized arrays.
+struct FarFrozenCapturePump {
+    FarFrozenCaptureError error = FarFrozenCaptureError::None;
+    std::uint64_t work = 0;
+    bool complete = false;
+};
+struct FarFrozenCaptureInput {
+    FarFrozenCaptureSource source;
+    std::span<const FarFrozenRegion> regions;
+    // Owns every callback dependency and the regions for the entire capture.
+    // Owner-thread callers must fence mutation during Pump. Check current before
+    // reading any dependency and after every unit, including final publication.
+    std::shared_ptr<const void> owner;
+    bool (*current)(const void*) noexcept = nullptr;
+};
+
+class FarFrozenObservation::Capture final {
+public:
+    Capture() = default;
+    Capture(const Capture&) = delete;
+    Capture& operator=(const Capture&) = delete;
+    // Start retains input without traversing it. limits.work and deadline clock
+    // contexts, if supplied, must also be owned by input or outlive this cursor.
+    // Callbacks must not reenter Start, Pump or Cancel on this cursor.
+    void Start(const std::shared_ptr<const FarFrozenCaptureInput>& input,
+               const FarFrozenCaptureLimits& limits,
+               const std::shared_ptr<FarVolumeMemoryPool>& pool);
+    FarFrozenCapturePump Pump(std::uint64_t budget,
+                              std::shared_ptr<const FarFrozenObservation>& output);
+    void Cancel();
+    bool active() const noexcept {
+        return source_ != nullptr;
+    }
+
+private:
+    friend FarFrozenCaptureError
+    CaptureFarFrozenObservation(std::span<const FarFrozenRegion>,
+                                const FarFrozenCaptureSource&,
+                                const FarFrozenCaptureLimits&,
+                                const std::shared_ptr<FarVolumeMemoryPool>&,
+                                std::shared_ptr<const FarFrozenObservation>&);
+    void StartBorrowed(std::span<const FarFrozenRegion> regions,
+                       const FarFrozenCaptureSource& source,
+                       const FarFrozenCaptureLimits& limits,
+                       const std::shared_ptr<FarVolumeMemoryPool>& pool);
+    FarFrozenCaptureError Step();
+    FarFrozenCaptureError Column();
+    FarFrozenCaptureError Density();
+    void HashStep();
+    enum class Phase {
+        Source,
+        Validate,
+        Allocate,
+        Grids,
+        Sort,
+        Sample,
+        Hash,
+        Publish
+    };
+    std::shared_ptr<const FarFrozenCaptureInput> input_;
+    const FarFrozenCaptureSource* source_ = nullptr;
+    std::span<const FarFrozenRegion> regions_;
+    FarFrozenCaptureLimits limits_{};
+    std::shared_ptr<FarVolumeMemoryPool> pool_;
+    std::shared_ptr<FarFrozenObservation> image_;
+    std::optional<FarFrozenCaptureWork> work_;
+    Phase phase_ = Phase::Source;
+    bool session_edits_ = false, density_phase_ = false;
+    std::uint64_t columns_ = 0, samples_ = 0, water_samples_ = 0, bytes_ = 0;
+    std::uint64_t terrain_calls_ = 0, water_calls_ = 0, fingerprint_ = 0;
+    std::size_t cursor_ = 0, grid_ = 0, hash_phase_ = 0;
+};
+
+// Owner-thread world adapter used by retained producer composition. The caller
+// owns the world and holds acquire_worldgen_sample_scope during Start/Pump/Bind.
+// Generator revision checks are O(1); spline points and dependency bytes are
+// fingerprinted with cursors (at most eight string bytes per unit).
+class FarFrozenWorldSource final {
+public:
+    void Start(const Systems::SHIELD_WorldSystem& world, const FarFrozenCaptureSource& source);
+    FarFrozenCapturePump Pump(std::uint64_t budget);
+    bool current() const noexcept;
+    void Bind(FarFrozenCaptureSource& source) const;
+
+private:
+    const Systems::SHIELD_WorldSystem* world_ = nullptr;
+    std::uint64_t generation_ = 0, expected_ = 0, identity_ = 0;
+    FarCaveMode caves_ = FarCaveMode::BandLimited;
+    FarVolumeNumericProfile numeric_ = FarVolumeNumericProfile::RawFloat;
+    int resolution_ = 0;
+    std::size_t phase_ = 0, cursor_ = 0, record_ = 0, field_ = 0;
+    bool session_ = false;
+    FarFrozenCaptureError Step();
 };
 
 // Transactional admission and capture. A pool is required and is retained by the

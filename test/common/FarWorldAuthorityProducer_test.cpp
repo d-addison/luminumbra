@@ -7,6 +7,7 @@
 #include "luminumbra_common/world/WorldStreamingState.h"
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -1263,14 +1264,14 @@ protected:
     World::FarFrozenCaptureLimits limits{1, 100'000, 2'000'000, 200'000, 32u * 1024u * 1024u};
     std::shared_ptr<World::FarVolumeMemoryPool> pool =
         std::make_shared<World::FarVolumeMemoryPool>(64u * 1024u * 1024u);
-    std::unique_ptr<Systems::SHIELD_WorldSystem> world;
+    std::shared_ptr<Systems::SHIELD_WorldSystem> world;
     Producer::FrozenPolicy policy;
     void SetUp() override {
         auto params = Luminumbra::Test::SyntheticTerrainParams();
         params.caves_enabled = false;
         params.base_amplitude = params.peaks_amplitude = 0;
         params.continental_spline = {{-1, 0}, {1, 0}};
-        world = std::make_unique<Systems::SHIELD_WorldSystem>(nullptr, nullptr, params, 1337);
+        world = std::make_shared<Systems::SHIELD_WorldSystem>(nullptr, nullptr, params, 1337);
         policy = {World::WorldFarVolumeIdentity(*world,
                                                 World::FarCaveMode::BandLimited,
                                                 World::FarVolumeNumericProfile::RawFloat,
@@ -1946,4 +1947,238 @@ TEST(FarFrozenObservation, SamplingDeadlineChecksEveryLayerAndPreservesAcceptedI
     }
 }
 
+} // namespace
+
+namespace {
+TEST_F(FarWorldFrozenComposeTest, RetainedCompositionYieldsAndBoundsEverySamplingPump) {
+    WorldStreamingState disk;
+    auto edited = Edited({0, 0, 0}, 3);
+    edited->set_water_authority();
+    edited->current_water_resolution.store(4);
+    edited->water_bed_mm.assign(16, 1000);
+    edited->water_depth_mm.assign(16, 2000);
+    producer.changes()->membership(edited, false, true);
+    ASSERT_NO_FATAL_FAILURE(Capture(disk));
+    std::shared_ptr<const World::FarFrozenObservation> expected;
+    ASSERT_TRUE(Compose(expected).ok());
+    World::FarFrozenCaptureWork charged({100'000, 2'000'000, 200'000});
+    auto bounded = limits;
+    bounded.work = &charged;
+    ASSERT_TRUE(producer.start_frozen(world, Request(), policy, bounded, pool).ok());
+    auto output = expected;
+    const auto zero = producer.pump_frozen(0, output);
+    EXPECT_EQ(zero.work, 0u);
+    EXPECT_FALSE(zero.complete);
+    EXPECT_EQ(output, expected);
+    bool complete = false, yielded = false;
+    std::uint64_t total = 0;
+    for (unsigned pump = 0; pump < 4096 && !complete; ++pump) {
+        const auto before = charged.counts();
+        const auto result = producer.pump_frozen(257, output);
+        const auto after = charged.counts();
+        ASSERT_TRUE(result.result.ok());
+        EXPECT_LE(result.work, 257u);
+        EXPECT_LE(after.height - before.height + after.density - before.density + after.water -
+                      before.water,
+                  6 * result.work);
+        total += result.work;
+        complete = result.complete;
+        if (!complete) {
+            yielded = true;
+            EXPECT_EQ(output, expected);
+        }
+    }
+    ASSERT_TRUE(complete);
+    EXPECT_TRUE(yielded);
+    EXPECT_FALSE(producer.frozen_active());
+    EXPECT_EQ(output->content_identity(), expected->content_identity());
+    EXPECT_EQ(output->payload_bytes(), expected->payload_bytes());
+    EXPECT_EQ(output->Sample(1, {4, 4, 4}), expected->Sample(1, {4, 4, 4}));
+    EXPECT_EQ(output->WaterSample(0, 0, 0), expected->WaterSample(0, 0, 0));
+    EXPECT_EQ(output->WaterBound(0), expected->WaterBound(0));
+    // Sampling and hashing each retain progress. This minimum includes every
+    // height, density, pristine/composed fingerprint and water fingerprint record.
+    const std::uint64_t side = 131, columns = side * side, samples = columns * 11;
+    EXPECT_GE(total, columns * 3 + samples * 3);
+}
+
+TEST_F(FarWorldFrozenComposeTest, CancelReleasesValidationSamplingAndFingerprintState) {
+    WorldStreamingState disk;
+    ASSERT_NO_FATAL_FAILURE(Capture(disk));
+    const auto source_bytes = source_memory->used();
+    std::shared_ptr<const World::FarFrozenObservation> output;
+    for (const std::uint64_t work : {0u, 1u, 64u, 250'000u}) {
+        ASSERT_TRUE(producer.start_frozen(world, Request(), policy, limits, pool).ok());
+        const auto result = producer.pump_frozen(work, output);
+        ASSERT_TRUE(result.result.ok());
+        EXPECT_FALSE(result.complete);
+        EXPECT_FALSE(output);
+        producer.cancel_frozen();
+        EXPECT_FALSE(producer.frozen_active());
+        EXPECT_EQ(source_memory->used(), source_bytes);
+        EXPECT_EQ(pool->used(), 0u);
+    }
+    const std::weak_ptr<const Systems::SHIELD_WorldSystem> lifetime = world;
+    ASSERT_TRUE(producer.start_frozen(world, Request(), policy, limits, pool).ok());
+    world.reset();
+    EXPECT_FALSE(lifetime.expired());
+    EXPECT_TRUE(producer.pump_frozen(64, output).result.ok());
+    producer.cancel_frozen();
+    EXPECT_TRUE(lifetime.expired());
+    EXPECT_EQ(source_memory->used(), source_bytes);
+    EXPECT_EQ(pool->used(), 0u);
+}
+
+TEST_F(FarWorldFrozenComposeTest, ChangedOrRetiredSourcesRefuseBeforeMoreReadsAndCanRestart) {
+    WorldStreamingState disk;
+    ASSERT_NO_FATAL_FAILURE(Capture(disk));
+    std::shared_ptr<const World::FarFrozenObservation> expected;
+    ASSERT_TRUE(Compose(expected).ok());
+    const auto frozen_bytes = pool->used();
+    for (unsigned change = 0; change < 3; ++change) {
+        World::FarFrozenCaptureWork work({100'000, 2'000'000, 200'000});
+        auto bounded = limits;
+        bounded.work = &work;
+        ASSERT_TRUE(producer.start_frozen(world, Request(), policy, bounded, pool).ok());
+        auto output = expected;
+        ASSERT_TRUE(producer.pump_frozen(64, output).result.ok());
+        const auto before = work.counts();
+        if (change == 0) {
+            producer.invalidate_source();
+        } else if (change == 1) {
+            world->set_seed(2);
+        } else {
+            const std::array<Save::AuthorityWindow, 1> windows{{{-34, 66, -34, 34}}};
+            ASSERT_TRUE(producer.request_capture(windows));
+            producer.pump_capture();
+            producer.pump_capture();
+        }
+        const auto refused = producer.pump_frozen(64, output);
+        EXPECT_EQ(refused.result.source,
+                  change == 1 ? Producer::Error::None : Producer::Error::AuthorityUnavailable);
+        EXPECT_EQ(refused.result.capture,
+                  change == 1 ? World::FarFrozenCaptureError::IdentityMismatch
+                              : World::FarFrozenCaptureError::None);
+        EXPECT_FALSE(producer.frozen_active());
+        EXPECT_EQ(output, expected);
+        EXPECT_EQ(work.counts().height, before.height);
+        EXPECT_EQ(work.counts().density, before.density);
+        EXPECT_EQ(work.counts().water, before.water);
+        EXPECT_EQ(pool->used(), frozen_bytes);
+        world->set_seed(1337);
+        ASSERT_NO_FATAL_FAILURE(Capture(disk));
+    }
+    ASSERT_TRUE(producer.start_frozen(world, Request(), policy, limits, pool).ok());
+    std::shared_ptr<const World::FarFrozenObservation> restarted;
+    const auto result = producer.pump_frozen(1'000'000, restarted);
+    EXPECT_TRUE(result.result.ok());
+    ASSERT_TRUE(result.complete);
+    EXPECT_EQ(restarted->content_identity(), expected->content_identity());
+}
+
+TEST_F(FarWorldFrozenComposeTest, RetainedCopiesIgnoreSubsequentLiveEditsAndRetirement) {
+    WorldStreamingState disk;
+    auto chunk = Edited({0, 0, 0}, 3);
+    producer.changes()->membership(chunk, false, true);
+    ASSERT_NO_FATAL_FAILURE(Capture(disk));
+    std::shared_ptr<const World::FarFrozenObservation> expected;
+    ASSERT_TRUE(Compose(expected).ok());
+    ASSERT_TRUE(producer.start_frozen(world, Request(), policy, limits, pool).ok());
+    std::shared_ptr<const World::FarFrozenObservation> output;
+    ASSERT_TRUE(producer.pump_frozen(16, output).result.ok());
+    chunk->sdf_data.assign(chunk->sdf_data.size(), 99);
+    chunk->mark_voxel_data_dirty();
+    producer.changes()->membership(chunk, false, false);
+    chunk.reset();
+    const auto result = producer.pump_frozen(1'000'000, output);
+    EXPECT_TRUE(result.result.ok());
+    ASSERT_TRUE(result.complete);
+    EXPECT_EQ(output->content_identity(), expected->content_identity());
+    EXPECT_EQ(output->Sample(1, {4, 4, 4}), expected->Sample(1, {4, 4, 4}));
+}
+
+TEST_F(FarWorldFrozenComposeTest, EverySharedNeighbourConflictRefusesAcrossValidationYields) {
+    WorldStreamingState disk;
+    ASSERT_NO_FATAL_FAILURE(Capture(disk));
+    const auto center = Edited({0, 0, 0});
+    producer.changes()->membership(center, false, true);
+    for (int dz = -1; dz <= 1; ++dz) {
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                if (dx == 0 && dy == 0 && dz == 0) {
+                    continue;
+                }
+                SCOPED_TRACE((testing::Message() << dx << ',' << dy << ',' << dz));
+                auto neighbour = Edited({dx, dy, dz});
+                const auto x = dx == 0 ? 1 : std::max(0, dx) * CHUNK_SIZE_X - dx * CHUNK_SIZE_X;
+                const auto y = dy == 0 ? 1 : std::max(0, dy) * CHUNK_SIZE_Y - dy * CHUNK_SIZE_Y;
+                const auto z = dz == 0 ? 1 : std::max(0, dz) * CHUNK_SIZE_Z - dz * CHUNK_SIZE_Z;
+                const auto index =
+                    static_cast<std::size_t>(x + (CHUNK_SIZE_X + 1) * (y + (CHUNK_SIZE_Y + 1) * z));
+                neighbour->sdf_data[index] = 2;
+                producer.changes()->membership(neighbour, false, true);
+                producer.pump_capture();
+                producer.pump_capture();
+                ASSERT_TRUE(producer.start_frozen(world, Request(), policy, limits, pool).ok());
+                std::shared_ptr<const World::FarFrozenObservation> output;
+                const auto first = producer.pump_frozen(17, output);
+                ASSERT_TRUE(first.result.ok());
+                EXPECT_FALSE(first.complete);
+                Producer::FrozenPump refused;
+                for (unsigned pump = 0; pump < 1024 && producer.frozen_active(); ++pump) {
+                    refused = producer.pump_frozen(31, output);
+                    EXPECT_LE(refused.work, 31u);
+                }
+                EXPECT_EQ(refused.result.source, Producer::Error::AuthorityUnavailable);
+                EXPECT_FALSE(producer.frozen_active());
+                EXPECT_FALSE(output);
+                EXPECT_EQ(pool->used(), 0u);
+                producer.changes()->membership(neighbour, false, false);
+            }
+        }
+    }
+}
+} // namespace
+
+namespace {
+TEST_F(FarWorldFrozenComposeTest, RetainedCompositionDeadlineAndAllocationRefusalsReleaseState) {
+    WorldStreamingState disk;
+    ASSERT_NO_FATAL_FAILURE(Capture(disk));
+    const auto source_bytes = source_memory->used();
+    std::shared_ptr<const World::FarFrozenObservation> output;
+    std::uint64_t ticks = 0;
+    auto bounded = limits;
+    bounded.deadline = {
+        [](const void* context) noexcept { return *static_cast<const std::uint64_t*>(context); },
+        &ticks,
+        1};
+    ASSERT_TRUE(producer.start_frozen(world, Request(), policy, bounded, pool).ok());
+    ASSERT_TRUE(producer.pump_frozen(64, output).result.ok());
+    ticks = 1;
+    EXPECT_EQ(producer.pump_frozen(64, output).result.capture,
+              World::FarFrozenCaptureError::DeadlineExceeded);
+    EXPECT_FALSE(output);
+    EXPECT_FALSE(producer.frozen_active());
+    EXPECT_EQ(pool->used(), 0u);
+    EXPECT_EQ(source_memory->used(), source_bytes);
+    source_memory->RefuseAttemptsFrom(source_memory->attempts());
+    EXPECT_EQ(producer.start_frozen(world, Request(), policy, limits, pool).source,
+              Producer::Error::AllocationFailure);
+    EXPECT_FALSE(producer.frozen_active());
+    EXPECT_EQ(source_memory->used(), source_bytes);
+    source_memory->RefuseAttemptsFrom(std::numeric_limits<std::uint64_t>::max());
+    ASSERT_TRUE(producer.start_frozen(world, Request(), policy, limits, pool).ok());
+    source_memory->RefuseAttemptsFrom(source_memory->attempts());
+    EXPECT_EQ(producer.pump_frozen(128, output).result.source, Producer::Error::AllocationFailure);
+    EXPECT_FALSE(output);
+    EXPECT_FALSE(producer.frozen_active());
+    EXPECT_EQ(source_memory->used(), source_bytes);
+    EXPECT_EQ(pool->used(), 0u);
+    source_memory->RefuseAttemptsFrom(std::numeric_limits<std::uint64_t>::max());
+    EXPECT_EQ(producer.start_frozen({}, Request(), policy, limits, pool).source,
+              Producer::Error::AuthorityUnavailable);
+    EXPECT_FALSE(producer.frozen_active());
+    EXPECT_EQ(producer.pump_frozen(1, output).result.source, Producer::Error::AuthorityUnavailable);
+    EXPECT_EQ(source_memory->used(), source_bytes);
+}
 } // namespace

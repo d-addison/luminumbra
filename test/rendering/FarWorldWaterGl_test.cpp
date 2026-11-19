@@ -11,6 +11,7 @@
 #include "luminumbra_client/rendering/passes/FarWorldPassUniforms.h"
 #include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/game/PhotoMode.h"
+#include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 
 #include "../support/UniqueTempPath.h"
@@ -2475,6 +2476,150 @@ private:
     const RenderPipeline& pipeline_;
     unsigned failures_ = 0;
 };
+
+TEST_F(FarWorldWaterGl, PeakDiagnosticsObserveCentreDepthAndStableMeshInputs) {
+    RenderPipeline pipeline;
+    EXPECT_EQ(pipeline.terrain_peak_diagnostics({0, 0, 0}).at("status"), "no_prepared_frame");
+    ASSERT_TRUE(pipeline.startup(9, 9, LUMINUMBRA_SOURCE_ROOT));
+    pipeline.set_taau_enabled(false);
+    pipeline.set_far_lod_enabled(false);
+    Systems::TerrainGenParams params;
+    params.biomes_enabled = params.structures_enabled = params.hydro_enabled = false;
+    params.caves_enabled = params.surface_breaks_enabled = params.island_mask_enabled = false;
+    params.cliffs_enabled = params.rivers_enabled = params.lakes_enabled = false;
+    params.base_amplitude = 0;
+    params.height_offset = 4.5f;
+    Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 424242);
+    entt::registry registry;
+    Camera camera({8, 8, 8}, {0, 1, 0}, -90, -89);
+    pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
+    EXPECT_EQ(pipeline.terrain_peak_diagnostics({8, 4.5f, 8}).at("status"), "background");
+    Systems::PhysicsSystem physics;
+    physics.startup();
+    ASSERT_TRUE(world.EnsureSurfaceReadyNear({8, 8, 8}, &physics, 3, 0));
+    for (const int column : {0, 1, 3}) {
+        SCOPED_TRACE(column);
+        camera.Position.x = static_cast<float>(column * CHUNK_SIZE_X + 8);
+        const glm::vec3 target(camera.Position.x, 4.5f, 8);
+        // The admitted radius contains at most 147 chunks; 64 upload passes
+        // exceed the unchanged eight-adoption budget without changing it.
+        for (int attempt = 0; attempt < 64; ++attempt) {
+            pipeline.render_frame(
+                registry, world, camera, 0.0f, false, UploadPresentation::Settled);
+            if (pipeline.render_uploads_settled()) {
+                break;
+            }
+        }
+        ASSERT_TRUE(pipeline.render_uploads_settled());
+        const auto diagnostic = pipeline.terrain_peak_diagnostics(target);
+        ASSERT_EQ(diagnostic.at("status"), "observed");
+        for (const auto* location : {"centre", "target"}) {
+            const auto& point = diagnostic.at(location);
+            EXPECT_EQ(point.at("chunk"), (nlohmann::json{column, 0, 0}));
+            EXPECT_EQ(point.at("lod"), column == 0 ? 0 : (column == 1 ? 1 : 2));
+            EXPECT_EQ(point.at("sample_step_m"), column == 0 ? 1 : (column == 1 ? 2 : 4));
+            EXPECT_EQ(point.at("mesh_path"), column == 0 ? "sdf" : "heightfield");
+            EXPECT_EQ(point.at("mesh_metadata_status"), "current");
+            EXPECT_EQ(point.at("terrain_owner"), "live");
+            EXPECT_EQ(point.at("live_upload_current"), true);
+        }
+        EXPECT_NEAR(diagnostic.at("centre").at("position").at(1).get<double>(), 4.5, 1e-3);
+    }
+}
+
+TEST_F(FarWorldWaterGl, PeakDiagnosticsDoNotGuessPendingUnknownOrInvalidMeshPaths) {
+    RenderPipeline pipeline;
+    ASSERT_TRUE(pipeline.startup(9, 9, LUMINUMBRA_SOURCE_ROOT));
+    pipeline.set_taau_enabled(false);
+    pipeline.set_far_lod_enabled(false);
+    Systems::TerrainGenParams params;
+    params.biomes_enabled = params.structures_enabled = params.hydro_enabled = false;
+    params.caves_enabled = params.surface_breaks_enabled = params.island_mask_enabled = false;
+    params.cliffs_enabled = params.rivers_enabled = params.lakes_enabled = false;
+    params.base_amplitude = 0;
+    params.height_offset = 4.5f;
+    Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 424242);
+    Systems::PhysicsSystem physics;
+    physics.startup();
+    ASSERT_TRUE(world.EnsureSurfaceReadyNear({8, 8, 8}, &physics, 0, 0));
+    entt::registry registry;
+    Camera camera({8, 8, 8}, {0, 1, 0}, -90, -89);
+    pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
+    Chunk* source = nullptr;
+    for (auto* chunk : world.get_renderable_chunks()) {
+        if (chunk->get_coords() == IVec3(0, 0, 0)) {
+            source = chunk;
+        }
+    }
+    ASSERT_NE(source, nullptr);
+    const glm::vec3 target(8, 4.5f, 8);
+    source->pending_lod.store(1);
+    auto diagnostic = pipeline.terrain_peak_diagnostics(target);
+    EXPECT_EQ(diagnostic.at("target").at("mesh_path"), "unknown");
+    EXPECT_EQ(diagnostic.at("target").at("mesh_metadata_status"), "mesh_publication_pending");
+    source->pending_lod.store(-1);
+    source->current_lod.store(-1);
+    diagnostic = pipeline.terrain_peak_diagnostics(target);
+    EXPECT_EQ(diagnostic.at("target").at("mesh_metadata_status"), "unknown_lod");
+    source->current_lod.store(0);
+    ASSERT_FALSE(source->sdf_data.empty());
+    const auto density = source->sdf_data.back();
+    source->sdf_data.pop_back();
+    diagnostic = pipeline.terrain_peak_diagnostics(target);
+    EXPECT_EQ(diagnostic.at("target").at("mesh_path"), "unknown");
+    EXPECT_EQ(diagnostic.at("target").at("mesh_metadata_status"), "invalid_lattice");
+    source->sdf_data.push_back(density);
+    source->mesh_version.fetch_add(1);
+    diagnostic = pipeline.terrain_peak_diagnostics(target);
+    EXPECT_EQ(diagnostic.at("target").at("mesh_metadata_status"), "mesh_version_unavailable");
+    source->mesh_version.fetch_sub(1);
+    diagnostic = pipeline.terrain_peak_diagnostics({std::numeric_limits<float>::quiet_NaN(), 0, 0});
+    EXPECT_EQ(diagnostic.at("target").at("mesh_metadata_status"), "invalid_position");
+    diagnostic = pipeline.terrain_peak_diagnostics({10000, 0, 10000});
+    EXPECT_EQ(diagnostic.at("target").at("mesh_metadata_status"), "no_snapshot");
+    EXPECT_EQ(diagnostic.at("target").at("terrain_owner"), "unresolved");
+    pipeline.set_far_lod_preview_anchor({0, 0, 0}, 16);
+    EXPECT_EQ(pipeline.terrain_peak_diagnostics(target).at("status"),
+              "preview_ownership_unavailable");
+    pipeline.clear_far_lod_preview_anchor();
+
+    GLuint pack_buffer = 0;
+    glGenBuffers(1, &pack_buffer);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, pack_buffer);
+    glBufferData(GL_PIXEL_PACK_BUFFER, 64, nullptr, GL_STREAM_READ);
+    glPixelStorei(GL_PACK_ROW_LENGTH, 7);
+    glPixelStorei(GL_PACK_SKIP_ROWS, 2);
+    glPixelStorei(GL_PACK_SKIP_PIXELS, 1);
+    diagnostic = pipeline.terrain_peak_diagnostics(target);
+    EXPECT_EQ(diagnostic.at("status"), "observed");
+    GLint state = 0;
+    glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &state);
+    EXPECT_EQ(static_cast<GLuint>(state), pack_buffer);
+    glGetIntegerv(GL_PACK_ROW_LENGTH, &state);
+    EXPECT_EQ(state, 7);
+    glGetIntegerv(GL_PACK_SKIP_ROWS, &state);
+    EXPECT_EQ(state, 2);
+    glGetIntegerv(GL_PACK_SKIP_PIXELS, &state);
+    EXPECT_EQ(state, 1);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    glDeleteBuffers(1, &pack_buffer);
+    glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_PACK_SKIP_ROWS, 0);
+    glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
+    {
+        PhotoReadbackError failure;
+        diagnostic = pipeline.terrain_peak_diagnostics(target);
+        EXPECT_EQ(failure.failures(), 1u);
+        EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_INVALID_ENUM));
+    }
+    // A refused read leaves the diagnostic's NaN sentinel intact.
+    const auto original_read = glad_glReadPixels;
+    glad_glReadPixels = [](GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void*) {
+    };
+    diagnostic = pipeline.terrain_peak_diagnostics(target);
+    glad_glReadPixels = original_read;
+    EXPECT_EQ(diagnostic.at("status"), "invalid_depth");
+}
 
 TEST_F(FarWorldWaterGl, FrameRenderErrorsStillRefuseEveryCapture) {
     RenderPipeline pipeline;

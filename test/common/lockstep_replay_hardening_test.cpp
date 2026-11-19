@@ -692,7 +692,7 @@ TEST(ReplayRoundtripHardening, FutureVersionStreamIsRefused) {
     {
         replay::ReplayWriter w;
         replay::ReplayHeader h = RichHeader();
-        h.version = static_cast<std::uint16_t>(replay::kLrec1ElidedVersion + 1); // future
+        h.version = (std::numeric_limits<std::uint16_t>::max)(); // unallocated version
         ASSERT_TRUE(w.Open(path.string(), h));
         w.RecordInput(1, {});
         ASSERT_TRUE(w.Finalize(1));

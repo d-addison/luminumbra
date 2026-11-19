@@ -25,6 +25,7 @@
 #include "luminumbra_common/world/WorldStreamingState.h"
 #include "rendering/Camera.h"
 #include "rendering/LightningBolt.h"
+#include "rendering/TimeOfDayModel.h"
 #include "rendering/passes/FoliagePass.h"
 #include "rendering/passes/ParticlePass.h"
 // lockstep transport seam (engine-generic; ILockstepTransport +
@@ -54,12 +55,9 @@ namespace Luminumbra::Client::ScenarioHarness {
 // --- Skybox visual smoke ---
 
 Luminumbra::Vec3 TowardSunDirection(float time_of_day) {
-    // Mirrors RenderPipeline::update_time_of_day: the pipeline stores the
-    // light-travel direction; the toward-sun direction is its negation.
-    const float sun_angle_rad = time_of_day * 2.0f * glm::pi<float>();
-    const glm::vec3 light_direction =
-        glm::normalize(glm::vec3(std::sin(sun_angle_rad), -std::cos(sun_angle_rad), -0.2f));
-    return -light_direction;
+    // Camera aiming uses a neutral season; capture projection uses the resolved
+    // rendered direction, including seasonal declination, from RenderPipeline.
+    return -Luminumbra::Rendering::ComputeSunGeometry(time_of_day, 0.0f).direction;
 }
 
 void ApplySkyboxVisualCamera(Luminumbra::world::GameSession* game_session,
