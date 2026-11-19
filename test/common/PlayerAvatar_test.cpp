@@ -1388,6 +1388,8 @@ TEST(BodyContinuation, ContactCacheChecksRealCapacityBeforePublicationAndAllowsR
         AddBodyCache(state.owners[i], before.owners, 80, 4);
         SetBodyWord(state.owners[i], 192, std::bit_cast<std::uint32_t>(0.125f));
         SetBodyWord(state.owners[i], 200, std::bit_cast<std::uint32_t>(-3.0f));
+        // Copies of one live sphere would share its registration; give each its own.
+        state.owners[i].registration_slot = static_cast<std::uint32_t>(i + 1);
     }
     EXPECT_FALSE(target.restore_body_owners(state, ids));
     EXPECT_TRUE(std::all_of(ids.begin(), ids.end(), [](JPH::BodyID id) { return id.IsInvalid(); }));
@@ -1650,4 +1652,18 @@ TEST(BodyContinuation, RestoreKeepsLiveRegistrationOrderAndRegistersWhileTerrain
     BodySetState unchanged;
     ASSERT_TRUE(refused.capture_body_owners(unchanged));
     EXPECT_TRUE(unchanged.owners.empty());
+
+    // Slots beyond the registration table refuse, including the sentinel's sort key.
+    for (const std::uint32_t slot : {10241u, std::numeric_limits<std::uint32_t>::max()}) {
+        auto out_of_range = reordered;
+        out_of_range.owners[1].registration_slot = slot;
+        PhysicsSystem bounded;
+        bounded.startup();
+        std::array<JPH::BodyID, 2> bounded_ids{};
+        EXPECT_FALSE(bounded.restore_body_owners(out_of_range, bounded_ids));
+        EXPECT_TRUE(bounded_ids[0].IsInvalid());
+        BodySetState empty;
+        ASSERT_TRUE(bounded.capture_body_owners(empty));
+        EXPECT_TRUE(empty.owners.empty());
+    }
 }

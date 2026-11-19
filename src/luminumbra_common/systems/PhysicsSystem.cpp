@@ -2287,11 +2287,18 @@ bool PhysicsSystem::restore_body_owners(const BodySetState& state, std::span<JPH
     }
     // Register every restored sphere, even while terrain collisions are off, so a
     // later durable-residency activation covers them. Registered spheres keep
-    // their live order; unregistered ones follow in payload order. Duplicate
-    // slots refuse before commit.
+    // their live order; unregistered ones follow in payload order. Duplicate,
+    // out-of-range and non-sphere slots refuse before commit, so the zero
+    // sentinel's sort key can never tie with a registered slot.
+    constexpr auto kRegistrationCapacity =
+        std::tuple_size_v<decltype(SimulationCollisions::dynamic_owners)>;
     std::vector<std::size_t> registration_order;
     registration_order.reserve(recipes.size());
     for (std::size_t i = 0; i < recipes.size(); ++i) {
+        const auto slot = states[i].registration_slot;
+        if (slot > kRegistrationCapacity || (slot != 0 && recipes[i].kind != kSphereOwner)) {
+            return false;
+        }
         if (recipes[i].kind == kSphereOwner) {
             registration_order.push_back(i);
         }

@@ -18138,7 +18138,10 @@ TEST(SurfaceQuery, SimulationTerrainReservationsLeaveTheCapsuleBudgetUnchanged) 
     ASSERT_TRUE(physics.prepare_simulation_collisions({}));
     // Spheres created before authority are registered owners too, so the
     // horizon covers whole 3x3 owner footprints, the avatar's included.
+    // One sample per admitted column, bounded by the fixed collider budget.
     EXPECT_GE(physics.simulation_collision_sample_count(), 9u);
+    EXPECT_LE(physics.simulation_collision_sample_count(),
+              PhysicsSystem::kSimulationColliderBudget);
     EXPECT_EQ(physics.simulation_collision_sample_count() % 9u, 0u);
     physics.update(0.0f);
     EXPECT_EQ(physics.work_items().bodies, body_limit);
