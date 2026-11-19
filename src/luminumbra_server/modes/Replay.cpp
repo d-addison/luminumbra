@@ -1,10 +1,12 @@
 #include "ModeHelpers.h"
 #include "Modes.h"
 #include "luminumbra_common/persistence/ReplacementOutputFile.h"
+#include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/replay/RegionScheduleTrace.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
 
 #include <algorithm>
+#include <optional>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -33,16 +35,35 @@ constexpr std::uint64_t kCheckpointIntervalTicks = 30; // one second at 30 Hz
 
 // Captures a checkpoint record at the given tick from a booted runner. Uses the
 // single-snapshot combined hash path (one settled-state read per checkpoint).
-Luminumbra::Replay::CheckpointRecord
+std::optional<Luminumbra::Replay::CheckpointRecord>
 CaptureCheckpoint(std::uint64_t tick, Luminumbra::Server::ServerWorldRunner& runner) {
     Luminumbra::Replay::CheckpointRecord cp;
     cp.tick = tick;
     Luminumbra::Persistence::WorldStreamingStateSubHashes sub;
-    runner.ComputeWorldHashAndSubHashes(cp.world_hash, sub);
+    try {
+        runner.ComputeWorldHashAndSubHashes(cp.world_hash, sub);
+    } catch (const Luminumbra::Persistence::AuthorityCaptureRefused& error) {
+        LUMINUMBRA_CORE_ERROR("replay: authority hash capture refused at tick {} (status={})",
+                              tick,
+                              static_cast<int>(error.status()));
+        return std::nullopt;
+    }
     cp.terrain = sub.terrain;
     cp.water = sub.water;
     cp.entities = sub.entities;
     return cp;
+}
+
+std::optional<std::string> CaptureWorldHash(std::uint64_t tick,
+                                            Luminumbra::Server::ServerWorldRunner& runner) {
+    try {
+        return runner.ComputeWorldHash();
+    } catch (const Luminumbra::Persistence::AuthorityCaptureRefused& error) {
+        LUMINUMBRA_CORE_ERROR("replay: authority hash capture refused at tick {} (status={})",
+                              tick,
+                              static_cast<int>(error.status()));
+        return std::nullopt;
+    }
 }
 
 } // namespace
@@ -59,11 +80,13 @@ int RunRecord(const ServerCliOptions& options) {
     config.world_name = "Replay Record";
     config.autosave_interval_ticks = 0; // no autosave noise during recording
 
+    Luminumbra::Server::ThrowawaySaveDirGuard save_cleanup;
     Luminumbra::Server::ServerWorldRunner runner(std::move(config));
     if (!runner.Boot()) {
         LUMINUMBRA_CORE_ERROR("record: session failed to boot");
         return 1;
     }
+    save_cleanup.Arm(runner.Session()->GetWorldSaveDir());
 
     Luminumbra::Replay::ReplayHeader header;
     header.version = Luminumbra::Replay::kLrec1Version;
@@ -77,7 +100,11 @@ int RunRecord(const ServerCliOptions& options) {
     header.surface_radius = static_cast<std::uint32_t>(options.surface_radius);
     header.collision_radius = static_cast<std::uint32_t>(options.collision_radius);
     header.engine_version = std::string(luminumbra::core::GetEngineVersionString());
-    header.start_world_hash = runner.ComputeWorldHash();
+    const auto start_hash = CaptureWorldHash(0, runner);
+    if (!start_hash) {
+        return 1;
+    }
+    header.start_world_hash = *start_hash;
     header.system_config_identity = runner.Session()->SystemConfigIdentity();
     header.preset_content_hash = runner.Session()->PresetContentHash();
     if (const auto* schedule = runner.Session()->GetWeatherSchedule()) {
@@ -126,16 +153,28 @@ int RunRecord(const ServerCliOptions& options) {
         if (runner.Session()->ActiveRegionsEnabled())
             schedule_trace.emplace_back(executed, runner.Session()->GetRegionSchedule().digest);
         if ((executed % kCheckpointIntervalTicks) == 0) {
-            writer.RecordCheckpoint(CaptureCheckpoint(executed, runner));
+            const auto checkpoint = CaptureCheckpoint(executed, runner);
+            if (!checkpoint) {
+                return 1;
+            }
+            writer.RecordCheckpoint(*checkpoint);
         }
     }
 
     // Authenticate positive off-cadence runs without changing the bytes
     // or checkpoint cadence of existing 30/90-tick recordings.
     if (executed != 0 && (executed % kCheckpointIntervalTicks) != 0) {
-        writer.RecordCheckpoint(CaptureCheckpoint(executed, runner));
+        const auto checkpoint = CaptureCheckpoint(executed, runner);
+        if (!checkpoint) {
+            return 1;
+        }
+        writer.RecordCheckpoint(*checkpoint);
     }
 
+    const auto final_hash = CaptureWorldHash(executed, runner);
+    if (!final_hash) {
+        return 1;
+    }
     const auto* trace = runner.Session()->ActiveRegionsEnabled() ? &schedule_trace : nullptr;
     if (!writer.Finalize(executed, trace)) {
         LUMINUMBRA_CORE_ERROR("record: failed to finalize replay pair '{}': {}",
@@ -146,7 +185,6 @@ int RunRecord(const ServerCliOptions& options) {
         return 1;
     }
 
-    const std::string final_hash = runner.ComputeWorldHash();
     const fs::path save_dir = runner.Session()->GetWorldSaveDir();
     runner.Shutdown();
     if (!save_dir.empty()) {
@@ -160,7 +198,7 @@ int RunRecord(const ServerCliOptions& options) {
         executed,
         writer.InputRecordCount(),
         writer.CheckpointRecordCount(),
-        final_hash);
+        *final_hash);
     return 0;
 }
 
@@ -244,11 +282,13 @@ int RunReplay(const ServerCliOptions& options) {
         LUMINUMBRA_CORE_ERROR("replay: invalid preset or incompatible configuration identity");
         return 1;
     }
+    Luminumbra::Server::ThrowawaySaveDirGuard save_cleanup;
     Luminumbra::Server::ServerWorldRunner runner(std::move(*config));
     if (!runner.Boot()) {
         LUMINUMBRA_CORE_ERROR("replay: session failed to boot from header");
         return 1;
     }
+    save_cleanup.Arm(runner.Session()->GetWorldSaveDir());
 
     if (!Luminumbra::Replay::ConfigurationMatches(header,
                                                   runner.Session()->SystemConfigIdentity(),
@@ -276,7 +316,11 @@ int RunReplay(const ServerCliOptions& options) {
 
     // The post-boot hash must match the recorded start_world_hash, else the boot
     // parameters or worldgen drifted before tick 1 (a tick-0 divergence).
-    const std::string live_start = runner.ComputeWorldHash();
+    const auto start_hash = CaptureWorldHash(0, runner);
+    if (!start_hash) {
+        return 1;
+    }
+    const std::string live_start = *start_hash;
     const bool start_match = (live_start == header.start_world_hash);
 
     // Drive the recorded ticks. At each checkpoint, compare live vs recorded.
@@ -359,19 +403,22 @@ int RunReplay(const ServerCliOptions& options) {
                 return 1;
             }
             const auto live = CaptureCheckpoint(executed, runner);
+            if (!live) {
+                return 1;
+            }
             // Compare top-level hash, then localize via authoritative sub-hashes.
-            if (live.world_hash != recorded->world_hash || live.terrain != recorded->terrain ||
-                live.water != recorded->water || live.entities != recorded->entities) {
+            if (live->world_hash != recorded->world_hash || live->terrain != recorded->terrain ||
+                live->water != recorded->water || live->entities != recorded->entities) {
                 diverged = true;
                 divergence_tick = executed;
                 expected_hash = recorded->world_hash;
-                actual_hash = live.world_hash;
-                if (live.terrain != recorded->terrain) {
+                actual_hash = live->world_hash;
+                if (live->terrain != recorded->terrain) {
                     divergence_section = "terrain";
-                } else if (live.water != recorded->water) {
+                } else if (live->water != recorded->water) {
                     divergence_section =
-                        Luminumbra::WaterHashDifferenceSection(live.water, recorded->water);
-                } else if (live.entities != recorded->entities) {
+                        Luminumbra::WaterHashDifferenceSection(live->water, recorded->water);
+                } else if (live->entities != recorded->entities) {
                     divergence_section = "entities";
                 } else {
                     // Authoritative sub-hashes all match but the top-level hash
@@ -385,7 +432,12 @@ int RunReplay(const ServerCliOptions& options) {
         }
     }
 
-    const std::string live_end = diverged ? actual_hash : runner.ComputeWorldHash();
+    const auto end_hash =
+        diverged ? std::optional<std::string>(actual_hash) : CaptureWorldHash(executed, runner);
+    if (!end_hash) {
+        return 1;
+    }
+    const std::string live_end = *end_hash;
     // Zero ticks are authenticated by the existing boot hash; positive
     // runs must have verified the terminal checkpoint, including off cadence.
     const bool end_hash_match =

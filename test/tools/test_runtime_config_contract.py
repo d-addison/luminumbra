@@ -145,6 +145,77 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertIn("persistence/world_open_refusal_test.cpp", cmake)
         self.assertIn("gtest_discover_tests(${_lum_gtest_target}", cmake)
 
+    def test_session_checked_capture_routes_legacy_slot_and_skips_unrequested_owners(self):
+        session = compact_cpp((ROOT / "src/luminumbra_common/world/GameSession.cpp")
+                              .read_text(encoding="utf-8"))
+        chunk = cpp_block(session, "GameSession::ComputeChunkStateHash(")
+        self.assertIn("CaptureAuthorityHashes({},Persistence::AuthorityCaptureParts::Chunk)", chunk)
+        self.assertIn("returnresult.capture?result.capture->chunk:std::string();", chunk)
+        capture = cpp_block(session, "GameSession::CaptureAuthorityHashes(")
+        self.assertIn("constboolwant_chunk=parts==AuthorityCaptureParts::All||"
+                      "parts==AuthorityCaptureParts::Composite||parts==AuthorityCaptureParts::Chunk;",
+                      capture)
+        regional = cpp_block(capture, "if(m_activeRegionsEnabled&&want_chunk)")
+        for work in ("authority_region_keys()", "operation.emplace(", "region_digest_inputs(",
+                     "operation->prepare("):
+            self.assertIn(work, regional)
+            self.assertNotIn(work, capture.replace(regional, ""))
+        self.assertNotIn("m_regionFault", capture)
+        self.assertIn("if(!m_worldUsable||!IsSimulationTickBoundary())", capture)
+        self.assertIn("returnPersistence::CaptureAuthorityHashes("
+                      "state,cursor,projection,entity_snapshot_json,runtime,parts);", capture)
+        self.assertIn("LatchRegionFault(m_worldClock.tick(),error.what());"
+                      "return{AuthorityCaptureStatus::PreparationRefused,std::nullopt};", capture)
+
+    def test_network_checkpoint_uses_checked_streamed_capture_before_publication(self):
+        driver = compact_cpp((ROOT / "src/luminumbra_client/core/scenarios/NetworkedSessionDriver.cpp")
+                             .read_text(encoding="utf-8"))
+        capture = cpp_block(driver, "voidNetSessionCaptureHashes(")
+        request = "ctx->session->CaptureAuthorityHashes(empty_entities," \
+                  "Luminumbra::Persistence::AuthorityCaptureParts::StreamedAndSubHashes)"
+        self.assertIn(request, capture)
+        refusal = cpp_block(capture, "if(!result.capture)")
+        self.assertIn("throwLuminumbra::Persistence::AuthorityCaptureRefused();", refusal)
+        self.assertLess(capture.index("if(!result.capture)"), capture.index("out."))
+        for output, slot in (("world_hash", "streamed"), ("terrain", "sub.terrain"),
+                             ("water", "sub.water"), ("entities", "sub.entities")):
+            self.assertIn("out." + output + "=result.capture->" + slot + ";", capture)
+        self.assertNotIn("snapshot_streamed_chunks", capture)
+        artifact = cpp_block(driver, "NetworkedSessionDriver::WriteArtifact(")
+        self.assertEqual(artifact.count("catch(constLuminumbra::Persistence::AuthorityCaptureRefused&)"), 2)
+
+    def test_lockstep_refusal_records_merged_input_before_halting_without_hash_publication(self):
+        lockstep = compact_cpp((ROOT / "src/luminumbra_common/net/LockstepSession.cpp")
+                               .read_text(encoding="utf-8"))
+        handshake = cpp_block(lockstep, "LockstepSession::Handshake(")
+        self.assertIn("OpenReplayRecorder();if(m_status.desynced){returnfalse;}", handshake)
+        boot = cpp_block(lockstep, "LockstepSession::OpenReplayRecorder(")
+        self.assertLess(boot.index("m_hooks.capture_hashes(0,boot,m_hooks.user)"),
+                        boot.index("m_replay->Open("))
+        boot_refusal = cpp_block(boot, "catch(constPersistence::AuthorityCaptureRefused&)")
+        self.assertIn("m_status.desynced=true;", boot_refusal)
+        self.assertIn("returnfalse;", boot_refusal)
+        tick = cpp_block(lockstep, "LockstepSession::PumpTick(")
+        refused = cpp_block(tick, "catch(constPersistence::AuthorityCaptureRefused&)")
+        order = ("RecordReplayTick(want,recorded_inputs,nullptr);",
+                 "m_hooks.record_replay_tick(want,merged,nullptr,m_hooks.user);",
+                 'EmitDesyncDump(want,"authority_capture");', "returnresult;")
+        positions = [refused.index(value) for value in order]
+        self.assertEqual(positions, sorted(positions))
+        self.assertLess(tick.index(refused), tick.index("m_local_hashes[want]="))
+
+    def test_session_and_lockstep_capture_regressions_are_registered(self):
+        native = (ROOT / "test/persistence/world_open_refusal_test.cpp").read_text(encoding="utf-8")
+        for name in ("SessionCaptureAndLockstepCheckpointKeepLegacyBytes",
+                     "SessionCheckpointSkipsFailedRegionalReadsAndLatchedFaultIsHashable",
+                     "SessionCaptureRefusesIncompleteParkedOwnerAtEveryActivationPhase",
+                     "SessionCaptureRefusesMissingIncompleteAndInvalidInputs",
+                     "LockstepRefusesBootAndTickCapturesBeforePublishingHashes"):
+            self.assertIn("TEST_F(WorldOpenRefusal, " + name + ")", native)
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("persistence/world_open_refusal_test.cpp", cmake)
+        self.assertIn("gtest_discover_tests(${_lum_gtest_target}", cmake)
+
     # Real UI/GL3 destruction needs a graphics context unavailable to the Python
     # CI job. Pin the production ownership and refusal order here instead.
     def test_pipeline_failure_destroys_ui_and_pass_owners_before_context(self):
@@ -1053,10 +1124,10 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         digest = cpp_block(schedule, "RunWorkerBoundary(m_jobSystem,")
         self.assertIn("digest_operation.emplace(directory,m_regionRequiresIndex)", digest)
         self.assertIn("digest_operation->digest(key,inputs)", digest)
-        state_hash = cpp_block(session, "GameSession::ComputeChunkStateHash(")
+        state_hash = cpp_block(session, "GameSession::CaptureAuthorityHashes(")
         self.assertIn("RunWorkerBoundary(m_jobSystem,[&]{"
                       "operation.emplace(directory,m_regionRequiresIndex);});", state_hash)
-        self.assertIn("digest=operation->digest(key,inputs)",
+        self.assertIn("prepared=operation->prepare(key,inputs)",
                       cpp_block(state_hash, "RunWorkerBoundary(m_jobSystem,[&]{if(operation)"))
         attach = cpp_block(session, "GameSession::EnableFarWorldAuthorityProducer(")
         self.assertIn("candidate->admit_saved_source(",

@@ -2,6 +2,7 @@
 #include "ModeHelpers.h"
 #include "Modes.h"
 #include "luminumbra_common/HashCheckpoint.h"
+#include "luminumbra_common/persistence/WorldSaveService.h"
 
 using Luminumbra::Server::AuthoritativeStateEqual;
 using Luminumbra::Server::CaptureGroundObjects;
@@ -83,7 +84,7 @@ nlohmann::json HeavyHashJson(const HeavyHashes& h) {
 
 } // namespace
 
-int RunHeavy(const ServerCliOptions& options) {
+int RunHeavy(const ServerCliOptions& options) try {
     LUMINUMBRA_CORE_INFO(
         "Headless server HEAVY oracle: preset={} seed={} ticks={} resim={} radius={}/{}",
         options.preset,
@@ -99,16 +100,19 @@ int RunHeavy(const ServerCliOptions& options) {
     cfgOrig.world_name = "Heavy Original";
     cfgOrig.autosave_interval_ticks = 0; // explicit save below; no autosave noise
 
+    // Both runners and the full snapshot share this fresh world's save directory.
+    Luminumbra::Server::ThrowawaySaveDirGuard save_cleanup;
     Luminumbra::Server::ServerWorldRunner original(std::move(cfgOrig));
     if (!original.Boot()) {
         LUMINUMBRA_CORE_ERROR("heavy: original session failed to boot");
         return 1;
     }
+    save_cleanup.Arm(original.Session()->GetWorldSaveDir());
     const auto pre_save_ticks = original.RunFixedTicks(options.ticks);
     if (pre_save_ticks.region_fault || pre_save_ticks.ticks_executed != options.ticks) {
         LUMINUMBRA_CORE_ERROR("heavy: incomplete run before snapshot at tick {}",
                               pre_save_ticks.ticks_executed);
-        return 1;
+        return 1; // save_cleanup removes the throwaway world after runner shutdown.
     }
 
     // Persist the COMPLETE streamed-chunk set (a never-edited world has no dirty
@@ -142,21 +146,6 @@ int RunHeavy(const ServerCliOptions& options) {
     const std::size_t cursor_at_load =
         loaded.Session()->GetWorldSystem()->GetWaterSimWindowCursor();
 
-    // The loaded session, immediately after load, must match the original at
-    // save on AUTHORITATIVE sim state (terrain/water/entities/ground objects). Mesh is tracked
-    // informationally (see AuthoritativeStateEqual rationale).
-    const bool roundtrip_ok = AuthoritativeStateEqual(orig_at_save, loaded_at_load);
-    const std::string roundtrip_scent_difference = ScentDifference(orig_at_save, loaded_at_load);
-    if (!roundtrip_scent_difference.empty()) {
-        LUMINUMBRA_CORE_ERROR("heavy: saved scent differs in {}", roundtrip_scent_difference);
-    }
-    const bool roundtrip_mesh_match = MeshEqual(orig_at_save, loaded_at_load);
-    const std::string roundtrip_ground_difference =
-        GroundObjectDifference(orig_at_save, loaded_at_load);
-    if (!roundtrip_ground_difference.empty()) {
-        LUMINUMBRA_CORE_ERROR("heavy: round-trip differs in {}", roundtrip_ground_difference);
-    }
-
     // --- : resimulate M further ticks on BOTH sessions. ---
     const auto orig_resim = original.RunFixedTicks(options.heavy_resim);
     if (orig_resim.region_fault || orig_resim.ticks_executed != options.heavy_resim) {
@@ -172,6 +161,21 @@ int RunHeavy(const ServerCliOptions& options) {
     }
     const HeavyHashes orig_final = CaptureHashes(original);
     const HeavyHashes loaded_final = CaptureHashes(loaded);
+
+    // The loaded session, immediately after load, must match the original at
+    // save on AUTHORITATIVE sim state (terrain/water/entities/ground objects). Mesh is tracked
+    // informationally (see AuthoritativeStateEqual rationale).
+    const bool roundtrip_ok = AuthoritativeStateEqual(orig_at_save, loaded_at_load);
+    const std::string roundtrip_scent_difference = ScentDifference(orig_at_save, loaded_at_load);
+    if (!roundtrip_scent_difference.empty()) {
+        LUMINUMBRA_CORE_ERROR("heavy: saved scent differs in {}", roundtrip_scent_difference);
+    }
+    const bool roundtrip_mesh_match = MeshEqual(orig_at_save, loaded_at_load);
+    const std::string roundtrip_ground_difference =
+        GroundObjectDifference(orig_at_save, loaded_at_load);
+    if (!roundtrip_ground_difference.empty()) {
+        LUMINUMBRA_CORE_ERROR("heavy: round-trip differs in {}", roundtrip_ground_difference);
+    }
 
     const bool resim_ok = AuthoritativeStateEqual(orig_final, loaded_final);
     const std::string resim_scent_difference = ScentDifference(orig_final, loaded_final);
@@ -374,4 +378,8 @@ int RunHeavy(const ServerCliOptions& options) {
                          options.heavy_resim,
                          orig_final.world_hash);
     return 0;
+} catch (const Luminumbra::Persistence::AuthorityCaptureRefused& error) {
+    LUMINUMBRA_CORE_ERROR("heavy: authority hash capture refused (status={}); oracle aborted",
+                          static_cast<int>(error.status()));
+    return 1;
 }

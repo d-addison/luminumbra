@@ -6065,17 +6065,29 @@ struct DigestAuthorityCache {
         std::array<std::uint64_t, 5> membership;
         std::vector<std::shared_ptr<Chunk>> chunks;
         std::size_t bytes = 0;
+        bool require_region = false;
     };
     std::uint64_t revision = 0;
     std::size_t bytes = 0;
     std::map<std::filesystem::path, Entry> regions;
 };
 
+bool ReadAuthoritativeRegionChunks(const std::filesystem::path& region_file,
+                                   int min_chunk_x,
+                                   int max_chunk_x,
+                                   int min_chunk_z,
+                                   int max_chunk_z,
+                                   std::vector<std::shared_ptr<Chunk>>& out_chunks,
+                                   std::vector<std::string>* errors,
+                                   const SnapshotIndex* admitted_index,
+                                   bool missing_allowed);
+
 bool ReadDigestAuthority(const std::filesystem::path& save_dir,
                          const world::RegionKey& key,
                          std::vector<std::shared_ptr<Chunk>>& chunks,
                          std::vector<std::string>* errors,
-                         const SnapshotIndex* admitted_index) {
+                         const SnapshotIndex* admitted_index,
+                         bool require_region) {
     static thread_local DigestAuthorityCache cache;
     constexpr std::size_t kMaxRegions = 16;
     constexpr std::size_t kMaxBytes = std::size_t{256} * 1024 * 1024;
@@ -6090,7 +6102,8 @@ bool ReadDigestAuthority(const std::filesystem::path& save_dir,
     const auto membership = DigestMembership(admitted_index, key);
     if (const auto found = cache.regions.find(path); found != cache.regions.end()) {
         if (versioned && found->second.versions == versions &&
-            found->second.membership == membership) {
+            found->second.membership == membership &&
+            found->second.require_region == require_region) {
             chunks = found->second.chunks;
             return true;
         }
@@ -6098,14 +6111,15 @@ bool ReadDigestAuthority(const std::filesystem::path& save_dir,
         cache.regions.erase(found);
     }
     constexpr auto span = WorldSaveService::kRegionChunkSpan;
-    if (!WorldSaveService::read_authoritative_region_chunks(path,
-                                                            key.x * span,
-                                                            key.x * span + span - 1,
-                                                            key.z * span,
-                                                            key.z * span + span - 1,
-                                                            chunks,
-                                                            errors,
-                                                            admitted_index))
+    if (!ReadAuthoritativeRegionChunks(path,
+                                       key.x * span,
+                                       key.x * span + span - 1,
+                                       key.z * span,
+                                       key.z * span + span - 1,
+                                       chunks,
+                                       errors,
+                                       admitted_index,
+                                       !require_region))
         return false;
     DigestVersions after{};
     if (!versioned || !ReadDigestVersions(save_dir, path, after) || versions != after)
@@ -6121,7 +6135,8 @@ bool ReadDigestAuthority(const std::filesystem::path& save_dir,
         cache.regions.erase(cache.regions.begin());
     }
     cache.bytes += bytes;
-    cache.regions.emplace(path, DigestAuthorityCache::Entry{versions, membership, chunks, bytes});
+    cache.regions.emplace(
+        path, DigestAuthorityCache::Entry{versions, membership, chunks, bytes, require_region});
     return true;
 }
 } // namespace
@@ -6133,6 +6148,16 @@ PreparedRegionDigest PrepareRegionDigest(const std::filesystem::path& save_dir,
                                          const SnapshotIndex* admitted_index) {
     const detail::SnapshotReadOwnership ownership;
     ValidateRegionDigestKey(key);
+    // A known durable participant must be read even for legacy saves without an index.
+    // Regions with only live or parked owners may legitimately have no file yet.
+    const bool require_region =
+        std::any_of(inputs.durable.begin(), inputs.durable.end(), [&key](const IVec3& coords) {
+            int rx = 0, rz = 0;
+            WorldSaveService::region_coords_for_chunk(coords, rx, rz);
+            return rx == key.x && rz == key.z;
+        });
+    if (require_region && save_dir.empty())
+        throw std::runtime_error("Cannot read durable region records without a save directory");
     WorldStreamingState region;
     // Filtering precedes insertion: a live pristine or Loading chunk must not shadow a durable
     // edited record with the same id. insert_chunk preserves the first record per id.
@@ -6157,7 +6182,8 @@ PreparedRegionDigest PrepareRegionDigest(const std::filesystem::path& save_dir,
             throw std::runtime_error("inconsistent snapshot: index missing");
         std::vector<std::shared_ptr<Chunk>> durable_chunks;
         std::vector<std::string> errors;
-        if (!ReadDigestAuthority(save_dir, key, durable_chunks, &errors, admitted_index))
+        if (!ReadDigestAuthority(
+                save_dir, key, durable_chunks, &errors, admitted_index, require_region))
             throw std::runtime_error(errors.empty() ? "Cannot read durable region records"
                                                     : errors.front());
         for (const auto& chunk : durable_chunks) {
@@ -6463,15 +6489,16 @@ bool WorldSaveService::read_region_chunks(const std::filesystem::path& region_fi
     return true;
 }
 
-bool WorldSaveService::read_authoritative_region_chunks(
-    const std::filesystem::path& region_file,
-    int min_chunk_x,
-    int max_chunk_x,
-    int min_chunk_z,
-    int max_chunk_z,
-    std::vector<std::shared_ptr<Chunk>>& out_chunks,
-    std::vector<std::string>* errors,
-    const SnapshotIndex* admitted_index) {
+namespace {
+bool ReadAuthoritativeRegionChunks(const std::filesystem::path& region_file,
+                                   int min_chunk_x,
+                                   int max_chunk_x,
+                                   int min_chunk_z,
+                                   int max_chunk_z,
+                                   std::vector<std::shared_ptr<Chunk>>& out_chunks,
+                                   std::vector<std::string>* errors,
+                                   const SnapshotIndex* admitted_index,
+                                   bool missing_allowed) {
     const detail::SnapshotReadOwnership ownership;
     out_chunks.clear();
     if (min_chunk_x > max_chunk_x || min_chunk_z > max_chunk_z) {
@@ -6480,7 +6507,7 @@ bool WorldSaveService::read_authoritative_region_chunks(
     }
     bool strict_water = false;
     std::vector<RegionRecord> raw_records;
-    if (!ReadRegionFile(region_file, raw_records, errors, {}, true) ||
+    if (!ReadRegionFile(region_file, raw_records, errors, {}, missing_allowed) ||
         !VerifyRegionMembership(region_file, raw_records, errors, admitted_index, &strict_water)) {
         return false;
     }
@@ -6525,6 +6552,27 @@ bool WorldSaveService::read_authoritative_region_chunks(
                   return lhs->get_id() < rhs->get_id();
               });
     return true;
+}
+} // namespace
+
+bool WorldSaveService::read_authoritative_region_chunks(
+    const std::filesystem::path& region_file,
+    int min_chunk_x,
+    int max_chunk_x,
+    int min_chunk_z,
+    int max_chunk_z,
+    std::vector<std::shared_ptr<Chunk>>& out_chunks,
+    std::vector<std::string>* errors,
+    const SnapshotIndex* admitted_index) {
+    return ReadAuthoritativeRegionChunks(region_file,
+                                         min_chunk_x,
+                                         max_chunk_x,
+                                         min_chunk_z,
+                                         max_chunk_z,
+                                         out_chunks,
+                                         errors,
+                                         admitted_index,
+                                         true);
 }
 
 bool WorldSaveService::upsert_container_records(const std::filesystem::path& region_file,

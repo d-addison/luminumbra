@@ -31,16 +31,12 @@
 #include "luminumbra_common/ecs/EntitySnapshot.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
-#include "luminumbra_common/systems/AetherFieldSystem.h"
 #include "luminumbra_common/systems/FarmingSystem.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WaterSystem.h" // water-smoke telemetry reads
-#include "luminumbra_common/systems/WeatherSystem.h"
-#include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/SurfaceWorkBudget.h"
-#include "luminumbra_common/world/WorldStreamingState.h"
 
 namespace Luminumbra::Server {
 
@@ -72,59 +68,6 @@ Vec3 FindWetAnchor(const Systems::SHIELD_WorldSystem& world, const Vec3& spawn) 
         }
     }
     return Vec3(spawn.x, world.GetTerrainHeightAt(spawn.x, spawn.z) + 2.0f, spawn.z);
-}
-
-//   world_hash hash revision: the wind sub-hash from the session's wind
-// field, or empty when no wind field exists (defensive; the headless runner
-// always constructs one on world create/load).
-std::string WindSubHash(world::GameSession* session) {
-    if (!session) {
-        return {};
-    }
-    const Systems::WindFieldSystem* wind = session->GetWindFieldSystem();
-    return wind ? wind->ComputeWindSubHash() : std::string();
-}
-
-//   world_hash hash revision: the weather sub-hash from the session's
-// weather core, or empty when none exists (defensive; the headless runner always
-// constructs one on world create/load).
-std::string WeatherSubHash(world::GameSession* session) {
-    if (!session) {
-        return {};
-    }
-    const Systems::WeatherSystem* weather = session->GetWeatherSystem();
-    return weather ? weather->ComputeWeatherSubHash() : std::string();
-}
-
-//  world_hash bump #4: the aether sub-hash from the session's Aether
-// scalar field, or empty when none exists (defensive; the headless runner always
-// constructs one on world create/load).
-//
-//  (, -3): when the STATEFUL energy layer is active and
-// nonzero, its aether_state:v1: sub-hash folds into THIS EXISTING slot (the
-// composite becomes StableChecksum(rederivable + "|state:" + state)) rather
-// than adding an 8th ComposeWorldHash term — a new term literal would move the
-// canonical composite even while empty (the |plants: precedent), violating the
-// zero-re-pin contract. Default OFF -> the state hash is empty -> this function
-// returns the re-derivable value byte-identically. Activation (the owner-menu
-// bump) moves this slot with NO further code change.
-std::string AetherSubHash(world::GameSession* session) {
-    if (!session) {
-        return {};
-    }
-    const Systems::AetherFieldSystem* aether = session->GetAetherFieldSystem();
-    std::string rederivable = aether ? aether->ComputeAetherSubHash() : std::string();
-    const std::string state = session->ComputeAetherStateSubHash();
-    if (state.empty()) {
-        return rederivable;
-    }
-    return Persistence::StableChecksum(rederivable + "|state:" + state);
-}
-
-// scent/stigmergy sub-hash from the session-owned ecology
-// field. Empty when no entity has opted into scent emission/sensing.
-std::string ScentSubHash(world::GameSession* session) {
-    return session ? session->ComputeScentSubHash() : std::string();
 }
 
 // gate-populated-world-replay: spawn the deterministic KINEMATIC creature
@@ -665,12 +608,12 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         auto& budget = m_session->GetSimBudgetTelemetry();
         const auto snapshots_before = budget.Enabled() ? world_system->snapshot_copies() : 0;
         const std::uint64_t budget_tick = m_session->GetSimulationTickCount() + 1;
-        luminumbra::simulation::SimBudgetTelemetry::TickScope physics_budget(budget, budget_tick);
-        physics_budget.Next(BudgetStage::ServerPhysics, [] { return 1u; });
+        // A refused preparation consumes no tick, so it records no ServerPhysics
+        // sample: completed-tick work traces stay identical across retries.
+        const auto physics_start = std::chrono::steady_clock::now();
         // Every host gathers the same registered controllers and projectiles.
         // No host-specific spawn/camera anchor can change the horizon or its budget.
         if (!physics_system->prepare_simulation_collisions({}, budget_tick)) {
-            physics_budget.Finish();
             // Zero progress without a region fault is the retry outcome. A durable
             // read failure can latch a terminal fault during preparation itself.
             if (const auto& fault = m_session->GetRegionSchedulerFault()) {
@@ -687,7 +630,7 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         }
         physics_system->update(static_cast<float>(fixed_dt));
         //  step the server-authoritative avatar characters (gravity +
-        // world collision; deterministic index order) and read their settled
+        // world collision; deterministic creation order) and read their settled
         // transforms back into m_avatars, so the streaming anchors + the
         // `entities` sub-hash reflect the physics-authoritative positions.
         if (!m_avatars.empty()) {
@@ -697,7 +640,12 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
                 m_avatars[i].velocity = physics_system->get_avatar_velocity(i);
             }
         }
-        physics_budget.Finish();
+        budget.Record(BudgetStage::ServerPhysics,
+                      budget_tick,
+                      1u,
+                      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                                physics_start)
+                          .count());
         if (m_session->ActiveRegionsEnabled()) {
             std::vector<Vec3> anchors;
             for (const auto& avatar : m_avatars)
@@ -1026,131 +974,47 @@ std::string ServerWorldRunner::ComputeAvailabilityDigest() {
 }
 
 std::string ServerWorldRunner::ComputeWorldHash() {
-    // Boot and RunFixedTicks settle water authority before all three hash entry points.
-    if (!m_booted || !m_session || !m_session->GetWorldSystem()) {
-        return {};
+    if (!m_booted || !m_session) {
+        throw Persistence::AuthorityCaptureRefused(
+            Persistence::AuthorityCaptureStatus::MissingCursor);
     }
-
-    auto* world_system = m_session->GetWorldSystem();
-    world_system->wait_for_streaming_jobs();
-
-    WorldStreamingState state;
-    for (const auto& chunk : world_system->snapshot_streamed_chunks()) {
-        state.insert_chunk(chunk);
+    const auto result =
+        m_session->CaptureAuthorityHashes({}, Persistence::AuthorityCaptureParts::Composite);
+    if (!result.capture) {
+        throw Persistence::AuthorityCaptureRefused(result.status);
     }
-
-    Persistence::WorldSaveService service;
-    // Fold the cursor-bound chunk hash and the session's runtime sub-hashes
-    // using the shared append-only order.
-    return Persistence::ComposeWorldHash(
-        m_session->ActiveRegionsEnabled()
-            ? m_session->ComputeChunkStateHash()
-            : service.world_hash(state, world_system->GetWaterSimWindowCursor()),
-        WindSubHash(m_session.get()),
-        WeatherSubHash(m_session.get()),
-        AetherSubHash(m_session.get()),
-        ScentSubHash(m_session.get()),
-        ComputeEcologySubHash(),
-        m_session->ComputePlantSubHash()); //  plant fold (empty-neutral)
+    return result.capture->composite;
 }
 
 Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHashes() {
-    // per-system sub-hashes over the SAME streamed-chunk snapshot the
-    // top-level world_hash is built from, including the same water cursor.
-    Persistence::WorldStreamingStateSubHashes empty;
-    if (!m_booted || !m_session || !m_session->GetWorldSystem()) {
-        return empty;
+    if (!m_booted || !m_session) {
+        throw Persistence::AuthorityCaptureRefused(
+            Persistence::AuthorityCaptureStatus::MissingCursor);
     }
-
-    auto* world_system = m_session->GetWorldSystem();
-    world_system->wait_for_streaming_jobs();
-
-    WorldStreamingState state;
-    for (const auto& chunk : world_system->snapshot_streamed_chunks()) {
-        state.insert_chunk(chunk);
-    }
-
-    // The entities sub-hash is the stable checksum of the canonical ECS snapshot.
-    //  that snapshot now carries the deterministic player avatars (empty
-    // when avatar_count == 0 -> byte-identical to the zero-avatar terrain/water-only
-    // lane, so the default world_hash/entities sub-hash is unchanged).
     const std::string entities_snapshot =
         Ecs::SerializeEntityRegistrySnapshotJson(World::BuildAvatarEntitySnapshot(m_avatars));
-    Persistence::WorldStreamingStateSubHashes sub =
-        Persistence::ComputeWorldStreamingStateSubHashes(
-            state, entities_snapshot, world_system->GetWaterSimWindowCursor());
-    // the wind sub-hash slot, supplied from the session's wind
-    // field (not chunk-derived). Present + stable for the WindFieldDeterminism
-    // gate and the desync-localization oracle.
-    sub.wind = WindSubHash(m_session.get());
-    // the weather sub-hash slot, supplied from the session's weather
-    // core (not chunk-derived). Present + stable for the WeatherVisual state-hash
-    // assertion and the desync-localization oracle.
-    sub.weather = WeatherSubHash(m_session.get());
-    // the aether sub-hash slot, supplied from the session's Aether
-    // scalar field (not chunk-derived). Present + stable for the
-    // AetherFieldDeterminism gate and the desync-localization oracle.
-    sub.aether = AetherSubHash(m_session.get());
-    // the STATE-ONLY stateful-layer sub-hash — the heavy
-    // oracle's authoritative-compare slot when sim.aether_state is ON.
-    // Always empty on the default (OFF) world.
-    sub.aether_state = m_session ? m_session->ComputeAetherStateSubHash() : std::string();
-    return sub;
+    const auto result = m_session->CaptureAuthorityHashes(
+        entities_snapshot, Persistence::AuthorityCaptureParts::SubHashes);
+    if (!result.capture) {
+        throw Persistence::AuthorityCaptureRefused(result.status);
+    }
+    return result.capture->sub;
 }
 
 void ServerWorldRunner::ComputeWorldHashAndSubHashes(
     std::string& out_world_hash, Persistence::WorldStreamingStateSubHashes& out_sub) {
-    // single quiesce + single chunk snapshot feeding BOTH hashes. This
-    // is the recorder/replayer's mid-run checkpoint capture; minimizing the
-    // settled-state reads keeps the capture window tight. The produced values are
-    // byte-identical to ComputeWorldHash and ComputeWorldSubHashes called
-    // separately (same WorldSaveService::world_hash + same projection).
-    out_world_hash.clear();
-    out_sub = Persistence::WorldStreamingStateSubHashes{};
-    if (!m_booted || !m_session || !m_session->GetWorldSystem()) {
-        return;
+    if (!m_booted || !m_session) {
+        throw Persistence::AuthorityCaptureRefused(
+            Persistence::AuthorityCaptureStatus::MissingCursor);
     }
-
-    auto* world_system = m_session->GetWorldSystem();
-    world_system->wait_for_streaming_jobs();
-
-    WorldStreamingState state;
-    for (const auto& chunk : world_system->snapshot_streamed_chunks()) {
-        state.insert_chunk(chunk);
-    }
-
-    const std::string wind_hash = WindSubHash(m_session.get());
-    const std::string weather_hash = WeatherSubHash(m_session.get());
-    const std::string aether_hash = AetherSubHash(m_session.get());
-    const std::string scent_hash = ScentSubHash(m_session.get());
-    const std::string ecology_hash = ComputeEcologySubHash();
-    const std::string plant_hash = m_session->ComputePlantSubHash(); //  empty-neutral
-
-    Persistence::WorldSaveService service;
-    //   +   +  + gate-populated-world-replay +
-    // hash revisionS: composite world_hash (chunk + wind + weather + aether + scents + ecology +
-    // plants).
-    out_world_hash = Persistence::ComposeWorldHash(
-        m_session->ActiveRegionsEnabled()
-            ? m_session->ComputeChunkStateHash()
-            : service.world_hash(state, world_system->GetWaterSimWindowCursor()),
-        wind_hash,
-        weather_hash,
-        aether_hash,
-        scent_hash,
-        ecology_hash,
-        plant_hash);
-
     const std::string entities_snapshot =
         Ecs::SerializeEntityRegistrySnapshotJson(World::BuildAvatarEntitySnapshot(m_avatars));
-    out_sub = Persistence::ComputeWorldStreamingStateSubHashes(
-        state, entities_snapshot, world_system->GetWaterSimWindowCursor());
-    out_sub.wind = wind_hash;
-    out_sub.weather = weather_hash;
-    out_sub.aether = aether_hash;
-    // state-only slot for LREC1 checkpoint localization
-    // (always empty on the default OFF world).
-    out_sub.aether_state = m_session->ComputeAetherStateSubHash();
+    const auto result = m_session->CaptureAuthorityHashes(entities_snapshot);
+    if (!result.capture) {
+        throw Persistence::AuthorityCaptureRefused(result.status);
+    }
+    out_world_hash = result.capture->composite;
+    out_sub = result.capture->sub;
 }
 
 std::size_t ServerWorldRunner::SaveFullSnapshot() {
