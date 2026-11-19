@@ -13,9 +13,11 @@
 // HeadlessServerTick gate asserts that equality.
 
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
+#include <system_error>
 
 #include <vector>
 
@@ -32,6 +34,33 @@ namespace Luminumbra::Server {
 inline constexpr std::uint64_t kDefaultActiveRegionsAutosaveTicks = 9000;
 // A failed scheduled autosave is retried after this many ticks, not at the next interval.
 inline constexpr std::uint64_t kAutosaveRetryTicks = 30;
+
+// Only arm with a throwaway world's own save directory after successful Boot().
+// Declare before every runner sharing that directory: Shutdown() can recreate it.
+class ThrowawaySaveDirGuard {
+public:
+    ThrowawaySaveDirGuard() = default;
+    ThrowawaySaveDirGuard(const ThrowawaySaveDirGuard&) = delete;
+    ThrowawaySaveDirGuard& operator=(const ThrowawaySaveDirGuard&) = delete;
+
+    void Arm(const std::filesystem::path& save_dir) {
+        m_save_dir = save_dir;
+    }
+
+    ~ThrowawaySaveDirGuard() noexcept {
+        if (!m_save_dir.empty()) {
+            try {
+                std::error_code error;
+                std::filesystem::remove_all(m_save_dir, error);
+            } catch (...) {
+                // Even allocation failure during best-effort removal must not escape unwinding.
+            }
+        }
+    }
+
+private:
+    std::filesystem::path m_save_dir;
+};
 
 struct ServerWorldRunnerConfig {
     // Runtime root with trailing separator (GameSession concatenates paths).
@@ -218,6 +247,8 @@ public:
 
     // Deterministic hash over the in-memory streamed-chunk snapshot and water cursor
     // (WorldSaveService::world_hash; format-independent persistence hash).
+    // All three hash entry points throw AuthorityCaptureRefused with the capture status
+    // on refusal; combined capture leaves both outputs unchanged on refusal.
     std::string ComputeWorldHash();
 
     // per-system sub-hashes over the SAME streamed-chunk snapshot, for
