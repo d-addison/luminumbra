@@ -496,6 +496,7 @@ void CaptureWater(const Chunk& original, Chunk& copy) {
     copy.max_water_delta_last_tick = original.max_water_delta_last_tick;
     copy.ticks_below_threshold = original.ticks_below_threshold;
     copy.water_mesh_dirty_ticks = original.water_mesh_dirty_ticks;
+    copy.water_mesh_invalidation_version = original.water_mesh_invalidation_version;
 }
 
 void PublishWater(Chunk& destination, Chunk& staged, bool changed) noexcept {
@@ -514,6 +515,7 @@ void PublishWater(Chunk& destination, Chunk& staged, bool changed) noexcept {
     destination.max_water_delta_last_tick = staged.max_water_delta_last_tick;
     destination.ticks_below_threshold = staged.ticks_below_threshold;
     destination.water_mesh_dirty_ticks = staged.water_mesh_dirty_ticks;
+    destination.water_mesh_invalidation_version = staged.water_mesh_invalidation_version;
     if (changed) {
         destination.publish_water_state();
     }
@@ -807,6 +809,7 @@ void Transaction::PrepareGrid(ChunkID id, SHIELD_WorldSystem& shield, int resolu
         grid.current_water_resolution.store(resolution);
         grid.water_mesh_generated.store(false);
         grid.water_mesh_dirty_ticks = 0;
+        ++grid.water_mesh_invalidation_version;
         ValidateStageGrid(grid);
         m_expectedVolume += Volume(grid) - before;
         entry.mesh_invalidated = true;
