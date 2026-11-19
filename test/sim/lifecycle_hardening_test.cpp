@@ -1012,4 +1012,107 @@ TEST(LifecycleHardening, DeathThenDecompositionHandoff) {
     EXPECT_GT(dc.nutrient_released_milli, 0u);
 }
 
+TEST(LifecycleHardening, NewbornMortalityAndExistingCarcassHandoff) {
+    namespace AI = luminumbra::ai;
+    for (const std::uint32_t lifespan : {0u, 1u, 5u}) {
+        for (const bool starving : {false, true}) {
+            entt::registry registry;
+            spawnFertile(registry, 0, 0, true);
+            spawnFertile(registry, 0, 0, false);
+            AI::ReproductionTuning tuning;
+            tuning.courtship_ticks = 1;
+            tuning.lifespan_ticks = lifespan;
+            ASSERT_EQ(AI::RunMatingResolveOnTick(registry, 1, 985, tuning).born, 1);
+            entt::entity child = entt::null;
+            for (const auto entity : registry.view<Comp::CreatureGenomeComponent>()) {
+                if (registry.get<Comp::CreatureGenomeComponent>(entity).generation == 1) {
+                    child = entity;
+                }
+            }
+            ASSERT_TRUE(child != entt::null);
+            ASSERT_TRUE((registry.all_of<Comp::MortalComponent, Comp::DecayComponent>(child)));
+            EXPECT_EQ(registry.get<Comp::MortalComponent>(child).lifespan_ticks, lifespan);
+            if (starving) {
+                registry.get<Comp::CreatureComponent>(child).hunger = 1.0f;
+            }
+            const auto death_tick = starving ? 1u : std::max(1u, lifespan);
+            for (std::uint32_t tick = 1; tick <= death_tick; ++tick) {
+                const auto result = AI::RunLifespanOnTick(registry, tick);
+                EXPECT_EQ(result.died, tick == death_tick ? 1 : 0);
+                EXPECT_EQ(registry.get<Comp::CreatureComponent>(child).eaten, tick == death_tick);
+            }
+            EXPECT_EQ(registry.get<Comp::MortalComponent>(child).dead, 1u);
+            EXPECT_EQ(AI::RunLifespanOnTick(registry, death_tick + 1).died, 0);
+            EXPECT_EQ(AI::RunDecompositionOnTick(registry, death_tick).decaying, 1);
+            EXPECT_GT(registry.get<Comp::DecayComponent>(child).nutrient_released_milli, 0u);
+        }
+    }
+}
+
+TEST(LifecycleHardening, SpeciesCapacityHoldsForThousandsOfTicksAndReopensAfterDeaths) {
+    namespace AI = luminumbra::ai;
+    entt::registry registry;
+    AI::ReproductionTuning tuning;
+    tuning.maturity_ticks = 2;
+    tuning.cooldown_ticks = 3;
+    tuning.courtship_ticks = 1;
+    tuning.spawn_radius = 0;
+    tuning.species_capacity = 24;
+    tuning.lifespan_ticks = 80;
+    for (std::uint16_t species_id = 0; species_id < 2; ++species_id) {
+        for (int i = 0; i < 6; ++i) {
+            const auto entity = spawnFertile(registry, 0, 0, (i % 2) == 0);
+            registry.get<Comp::CreatureComponent>(entity).species_id = species_id;
+            // Long-lived founders keep both sexes available throughout the run.
+            registry.emplace<Comp::MortalComponent>(entity).lifespan_ticks = 12000;
+        }
+    }
+    std::array<bool, 2> reached{};
+    std::array<bool, 2> died_after_cap{};
+    std::array<bool, 2> resumed{};
+    // Two species, 24 live each, lifespan 80 and decay 900: at most 13
+    // overlapping cohorts of 48, including the current live cohort (624 total).
+    constexpr std::size_t retained_bound = 48u * 13u;
+    for (std::uint64_t tick = 0; tick < 4000; ++tick) {
+        for (const auto entity : registry.view<Comp::CreatureComponent>()) {
+            registry.get<Comp::CreatureComponent>(entity).hunger = 0;
+        }
+        AI::RunMatingResolveOnTick(registry, tick, 985, tuning);
+        std::array<std::size_t, 2> counts{};
+        for (const auto entity : registry.view<Comp::CreatureComponent>()) {
+            const auto& creature = registry.get<Comp::CreatureComponent>(entity);
+            if (!creature.eaten) {
+                ++counts[creature.species_id];
+                if (registry.get<Comp::CreatureGenomeComponent>(entity).age_ticks == 0 &&
+                    died_after_cap[creature.species_id]) {
+                    resumed[creature.species_id] = true;
+                }
+            }
+        }
+        for (std::size_t species_id = 0; species_id < counts.size(); ++species_id) {
+            ASSERT_LE(counts[species_id], tuning.species_capacity) << "tick " << tick;
+            reached[species_id] =
+                reached[species_id] || counts[species_id] == tuning.species_capacity;
+        }
+        AI::RunLifespanOnTick(registry, tick);
+        for (const auto entity : registry.view<Comp::CreatureComponent, Comp::MortalComponent>()) {
+            const auto& creature = registry.get<Comp::CreatureComponent>(entity);
+            const auto& mortal = registry.get<Comp::MortalComponent>(entity);
+            if (mortal.dead && reached[creature.species_id]) {
+                died_after_cap[creature.species_id] = true;
+            }
+        }
+        AI::RunDecompositionOnTick(registry, tick);
+        const auto cleanup = AI::CleanupNewbornCarcasses(registry);
+        ASSERT_LE(registry.storage<entt::entity>().free_list(), retained_bound) << tick;
+        ASSERT_LE(registry.view<Comp::DecayComponent>().size(), retained_bound) << tick;
+        ASSERT_LE(cleanup.visited, retained_bound + 48u) << tick;
+    }
+    for (std::size_t species_id = 0; species_id < reached.size(); ++species_id) {
+        EXPECT_TRUE(reached[species_id]);
+        EXPECT_TRUE(died_after_cap[species_id]);
+        EXPECT_TRUE(resumed[species_id]);
+    }
+}
+
 } // namespace

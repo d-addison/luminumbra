@@ -11,6 +11,8 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <initializer_list>
+#include <limits>
 #include <span>
 #include <string>
 #include <utility>
@@ -155,6 +157,715 @@ TEST(PlayerAvatar, SnapshotIsDeterministicOrderedAndNonEmpty) {
 } // namespace
 
 namespace {
+using Luminumbra::World::DecodeAvatarOwner;
+using Luminumbra::World::EncodeAvatarOwner;
+using Luminumbra::World::PhysicsOwnerState;
+using Luminumbra::World::PlayerAvatarOwnerState;
+using Luminumbra::World::ValidateAvatarOwner;
+using Luminumbra::World::ValidatePhysicsOwner;
+
+#ifdef JPH_DOUBLE_PRECISION
+constexpr std::uint32_t kFixtureVersion = 0x00010001u;
+#else
+constexpr std::uint32_t kFixtureVersion = 1;
+#endif
+constexpr std::uint32_t kFixtureBody = 0x01000000u;
+
+// Fixtures use scalar words, independently of the production reader's layout.
+void SetPhysicsWord(PhysicsOwnerState& state, std::size_t offset, std::uint32_t word) {
+    ASSERT_LE(offset + 4, state.bytes.size());
+    for (unsigned byte = 0; byte < 4; ++byte) {
+        state.bytes[offset + byte] = static_cast<std::uint8_t>(word >> (8 * byte));
+    }
+}
+
+struct OwnerFixture {
+    std::vector<std::uint32_t> words;
+    void append(std::initializer_list<std::uint32_t> values) {
+        words.insert(words.end(), values);
+    }
+    void zeros(std::size_t count) {
+        words.insert(words.end(), count, 0);
+    }
+    PhysicsOwnerState state() const {
+        PhysicsOwnerState result;
+        for (std::size_t i = 0; i < words.size(); ++i) {
+            SetPhysicsWord(result, 4 * i, words[i]);
+        }
+        result.size = static_cast<std::uint32_t>(4 * words.size());
+        return result;
+    }
+};
+
+OwnerFixture CharacterFixture(bool contact = false) {
+    OwnerFixture fixture;
+    fixture.append({kFixtureVersion, 1, 0, 0, 0, UINT32_MAX, 3, UINT32_MAX, UINT32_MAX});
+    fixture.zeros(18);                      // ground position, normal, velocity, and feet position
+    fixture.append({0, 0, 0, 0x3f800000u}); // identity quaternion
+    fixture.zeros(5);                       // velocity, previous delta, hit limit
+    fixture.append({contact ? 1u : 0u});
+    if (contact) {
+        fixture.append({kFixtureBody + 1, UINT32_MAX, 0});
+        fixture.zeros(9);                                       // position and velocity
+        fixture.append({0, 0x3f800000u, 0, 0, 0x3f800000u, 0}); // normals
+        fixture.append({0, 0, 2, 0, 1, 0, 1}); // distance, fraction, motion and flags
+    }
+    return fixture;
+}
+
+OwnerFixture SphereFixture(std::uint32_t pairs = 1,
+                           std::uint32_t manifolds = 1,
+                           std::uint32_t points = 1,
+                           std::uint32_t ccd = 1,
+                           std::uint32_t free_slots = 0) {
+    OwnerFixture fixture;
+    fixture.append({kFixtureVersion, 3, kFixtureBody, 0x3f000000u, 1});
+    fixture.zeros(6); // position
+    fixture.append({0, 0, 0, 0x3f800000u});
+    fixture.zeros(32); // velocity, spin, force, torque, sleep offsets/spheres/timer/flag
+    fixture.append({5, 0, 0, 0xc1200000u, 0, pairs}); // scene flags, delta, gravity
+    for (std::uint32_t pair = 0; pair < pairs; ++pair) {
+        fixture.append({kFixtureBody, kFixtureBody + pair + 1});
+        fixture.zeros(6); // relative position and compressed rotation
+        fixture.append({manifolds});
+        for (std::uint32_t manifold = 0; manifold < manifolds; ++manifold) {
+            fixture.append(
+                {kFixtureBody, manifold, kFixtureBody + pair + 1, 0, points, 0, 0x3f800000u, 0});
+            fixture.zeros(9 * points);
+        }
+    }
+    fixture.append({ccd});
+    for (std::uint32_t i = 0; i < ccd; ++i) {
+        fixture.append({kFixtureBody, 1000 + i, kFixtureBody + 1, 0});
+    }
+    fixture.append({10240, free_slots});
+    for (std::uint32_t i = 0; i < free_slots; ++i) {
+        fixture.append({kFixtureBody + pairs + 1 + i});
+    }
+    return fixture;
+}
+
+void ExpectAvatarUnchanged(const PlayerAvatarOwnerState& expected,
+                           const PlayerAvatarOwnerState& actual) {
+    EXPECT_EQ(expected.avatar.player_id, actual.avatar.player_id);
+    for (int axis = 0; axis < 3; ++axis) {
+        EXPECT_EQ(std::bit_cast<std::uint32_t>(expected.avatar.position[axis]),
+                  std::bit_cast<std::uint32_t>(actual.avatar.position[axis]));
+        EXPECT_EQ(std::bit_cast<std::uint32_t>(expected.avatar.velocity[axis]),
+                  std::bit_cast<std::uint32_t>(actual.avatar.velocity[axis]));
+    }
+    EXPECT_EQ(std::bit_cast<std::uint32_t>(expected.avatar.facing),
+              std::bit_cast<std::uint32_t>(actual.avatar.facing));
+    EXPECT_EQ(expected.physics.size, actual.physics.size);
+    EXPECT_EQ(expected.physics.bytes, actual.physics.bytes);
+}
+
+std::vector<std::uint8_t> RawAvatarBytes(const PlayerAvatarOwnerState& state) {
+    // Deliberately bypass Encode: malformed bytes must reach Decode unchanged.
+    OwnerFixture header;
+    header.append({1, state.avatar.player_id});
+    for (const auto scalar : {state.avatar.position.x,
+                              state.avatar.position.y,
+                              state.avatar.position.z,
+                              state.avatar.facing,
+                              state.avatar.velocity.x,
+                              state.avatar.velocity.y,
+                              state.avatar.velocity.z}) {
+        header.append({std::bit_cast<std::uint32_t>(scalar)});
+    }
+    header.append({state.physics.size});
+    const auto prefix = header.state();
+    std::vector<std::uint8_t> bytes(prefix.bytes.begin(), prefix.bytes.begin() + prefix.size);
+    const auto count = std::min<std::size_t>(state.physics.size, state.physics.bytes.size());
+    bytes.insert(bytes.end(), state.physics.bytes.begin(), state.physics.bytes.begin() + count);
+    return bytes;
+}
+
+void ExpectAvatarRefused(const PlayerAvatarOwnerState& malformed) {
+    EXPECT_FALSE(ValidateAvatarOwner(malformed));
+    std::array<std::uint8_t, Luminumbra::World::kMaxAvatarOwnerBytes> bytes;
+    bytes.fill(0xa5);
+    const auto retained_bytes = bytes;
+    std::size_t written = 123;
+    EXPECT_FALSE(EncodeAvatarOwner(malformed, bytes, written));
+    EXPECT_EQ(written, 123u);
+    EXPECT_EQ(bytes, retained_bytes);
+    PlayerAvatarOwnerState decoded;
+    decoded.avatar.player_id = 77;
+    decoded.physics.bytes.fill(0x5a);
+    decoded.physics.size = 7;
+    const auto retained = decoded;
+    EXPECT_FALSE(DecodeAvatarOwner(RawAvatarBytes(malformed), decoded));
+    ExpectAvatarUnchanged(retained, decoded);
+}
+
+TEST(PlayerAvatarOwnerCodec, VersionOneLittleEndianGoldenAndRoundTrip) {
+    PlayerAvatarOwnerState original;
+    original.avatar.player_id = 0x12345678u;
+    original.avatar.facing = -0.0f;
+    original.physics = CharacterFixture().state();
+    ASSERT_EQ(original.physics.size, 148u);
+    std::array<std::uint8_t, 188> golden{};
+    golden[0] = 1;
+    golden[4] = 0x78;
+    golden[5] = 0x56;
+    golden[6] = 0x34;
+    golden[7] = 0x12;
+    golden[23] = 0x80; // yaw sign bit
+    golden[36] = 148;
+    golden[40] = 1;
+#ifdef JPH_DOUBLE_PRECISION
+    golden[42] = 1;
+#endif
+    golden[44] = 1; // avatar kind
+    for (const auto start : {60u, 68u, 72u}) {
+        std::fill_n(golden.begin() + start, 4, 0xff);
+    }
+    golden[64] = 3; // unsupported ground
+    golden[162] = 0x80;
+    golden[163] = 0x3f; // quaternion w = 1
+    std::array<std::uint8_t, 188> bytes{};
+    std::size_t written = 0;
+    ASSERT_TRUE(EncodeAvatarOwner(original, bytes, written));
+    EXPECT_EQ(written, golden.size());
+    EXPECT_EQ(bytes, golden);
+    PlayerAvatarOwnerState decoded;
+    ASSERT_TRUE(DecodeAvatarOwner(golden, decoded));
+    ExpectAvatarUnchanged(original, decoded);
+    ASSERT_TRUE(EncodeAvatarOwner(decoded, bytes, written));
+    EXPECT_EQ(bytes, golden);
+}
+
+TEST(PlayerAvatarOwnerCodec, ExactPositionsVelocitiesAndSignedSubnormalsRoundTrip) {
+    for (const auto bits :
+         {0u, 0x80000000u, 1u, 0x80000001u, 0x007fffffu, 0x00800000u, 0x3f9e0651u, 0x7f7fffffu}) {
+        PlayerAvatarOwnerState original;
+        original.physics = CharacterFixture(true).state();
+        const auto value = std::bit_cast<float>(bits);
+        original.avatar.position.x = value;
+        original.avatar.velocity.z = value;
+        const auto wide = std::bit_cast<std::uint64_t>(static_cast<double>(value));
+        SetPhysicsWord(original.physics, 84, static_cast<std::uint32_t>(wide));
+        SetPhysicsWord(original.physics, 88, static_cast<std::uint32_t>(wide >> 32));
+        SetPhysicsWord(original.physics, 132, bits);
+        std::array<std::uint8_t, Luminumbra::World::kMaxAvatarOwnerBytes> bytes{};
+        std::size_t written = 0;
+        ASSERT_TRUE(EncodeAvatarOwner(original, bytes, written)) << bits;
+        PlayerAvatarOwnerState decoded;
+        ASSERT_TRUE(DecodeAvatarOwner(std::span(bytes).first(written), decoded));
+        ExpectAvatarUnchanged(original, decoded);
+    }
+}
+
+TEST(PlayerAvatarOwnerCodec, RefusesEveryTruncationOversizeAndHeaderWithoutPublishing) {
+    PlayerAvatarOwnerState original;
+    original.physics = CharacterFixture(true).state();
+    for (std::uint32_t size = 0; size < original.physics.size; ++size) {
+        auto malformed = original;
+        malformed.physics.size = size;
+        ExpectAvatarRefused(malformed);
+    }
+    original.physics.size = PhysicsOwnerState::kMaxBytes + 1;
+    ExpectAvatarRefused(original);
+    original.physics = CharacterFixture().state();
+    auto bytes = RawAvatarBytes(original);
+    PlayerAvatarOwnerState decoded;
+    decoded.avatar.player_id = 99;
+    const auto retained = decoded;
+    for (std::size_t size = 0; size < bytes.size(); ++size) {
+        EXPECT_FALSE(DecodeAvatarOwner(std::span(bytes).first(size), decoded));
+        ExpectAvatarUnchanged(retained, decoded);
+    }
+    for (const auto version : {0u, 2u, UINT32_MAX}) {
+        bytes[0] = static_cast<std::uint8_t>(version);
+        EXPECT_FALSE(DecodeAvatarOwner(bytes, decoded));
+        ExpectAvatarUnchanged(retained, decoded);
+    }
+    bytes = RawAvatarBytes(original);
+    bytes.push_back(0);
+    EXPECT_FALSE(DecodeAvatarOwner(bytes, decoded));
+    bytes.resize(Luminumbra::World::kMaxAvatarOwnerBytes + 1);
+    EXPECT_FALSE(DecodeAvatarOwner(bytes, decoded));
+    ExpectAvatarUnchanged(retained, decoded);
+    std::array<std::uint8_t, 188> output{};
+    output.fill(0xa5);
+    const auto retained_output = output;
+    for (const auto size : {0u, 39u, 40u, 187u}) {
+        std::size_t written = 123;
+        EXPECT_FALSE(EncodeAvatarOwner(original, std::span(output).first(size), written));
+        EXPECT_EQ(written, 123u);
+        EXPECT_EQ(output, retained_output);
+    }
+}
+
+TEST(PlayerAvatarOwnerCodec, RefusesEveryAvatarScalarAndProjectionMismatch) {
+    for (std::size_t scalar = 0; scalar < 7; ++scalar) {
+        for (const auto invalid : {0x7f800000u, 0xff800000u, 0x7fc00000u}) {
+            PlayerAvatarOwnerState malformed;
+            malformed.physics = CharacterFixture().state();
+            std::array<float*, 7> fields{&malformed.avatar.position.x,
+                                         &malformed.avatar.position.y,
+                                         &malformed.avatar.position.z,
+                                         &malformed.avatar.facing,
+                                         &malformed.avatar.velocity.x,
+                                         &malformed.avatar.velocity.y,
+                                         &malformed.avatar.velocity.z};
+            *fields[scalar] = std::bit_cast<float>(invalid);
+            ExpectAvatarRefused(malformed);
+        }
+    }
+    for (int axis = 0; axis < 3; ++axis) {
+        PlayerAvatarOwnerState malformed;
+        malformed.physics = CharacterFixture().state();
+        malformed.avatar.position[axis] = 1.0f;
+        ExpectAvatarRefused(malformed);
+        malformed.avatar.position[axis] = 0.0f;
+        malformed.avatar.velocity[axis] = -0.0f; // mismatch includes the sign of zero
+        ExpectAvatarRefused(malformed);
+    }
+}
+
+TEST(PlayerAvatarOwnerCodec, RefusesMalformedCharacterFieldsAndCrossPrecision) {
+    const auto original = CharacterFixture(true).state();
+    const std::vector<std::pair<std::size_t, std::uint32_t>> invalid_words{
+        {0, 0},
+        {0, 2},
+        {0, kFixtureVersion ^ 0x00010000u},
+        {4, 0},
+        {4, 4},
+        {8, 2},
+        {12, 0x7f800000u},
+        {16, 0x7fc00000u},
+        {20, 0x80000000u},
+        {20, kFixtureBody},
+        {24, 4},
+        {28, 0x80000000u},
+        {28, 10240},
+        {40, 0x7ff00000u},
+        {60, 0x40000000u},
+        {72, 0x7f800000u},
+        {88, 0x7ff00000u},
+        {108, 0x3b800000u},
+        {120, 0},
+        {124, 0x7fc00000u},
+        {136, 0xbf800000u},
+        {140, 2},
+        {144, 257},
+        {148, UINT32_MAX},
+        {148, 0x80000000u},
+        {152, 0},
+        {164, 0x7ff00000u},
+        {184, 0x7f800000u},
+        {196, 0x40000000u},
+        {208, 0x40000000u},
+        {220, 0x7f800000u},
+        {224, 0x7fc00000u},
+        {228, 3},
+        {232, 2},
+        {236, 2},
+        {240, 2},
+        {244, 2}};
+    ASSERT_TRUE(ValidatePhysicsOwner(original));
+    for (const auto& [offset, word] : invalid_words) {
+        SCOPED_TRACE(offset);
+        PlayerAvatarOwnerState malformed;
+        malformed.physics = original;
+        SetPhysicsWord(malformed.physics, offset, word);
+        EXPECT_FALSE(ValidatePhysicsOwner(malformed.physics));
+        ExpectAvatarRefused(malformed);
+    }
+    auto trailing = original;
+    trailing.size += 4;
+    EXPECT_FALSE(ValidatePhysicsOwner(trailing));
+    for (const auto offset : {36u, 84u, 160u}) {
+        auto malformed = original;
+        SetPhysicsWord(malformed, offset + 4, 0x7fefffffu); // exceeds float range
+        EXPECT_FALSE(ValidatePhysicsOwner(malformed));
+#ifndef JPH_DOUBLE_PRECISION
+        malformed = original;
+        SetPhysicsWord(malformed, offset, 1); // finite, not float32-exact
+        SetPhysicsWord(malformed, offset + 4, 0x3ff00000u);
+        EXPECT_FALSE(ValidatePhysicsOwner(malformed));
+#endif
+    }
+}
+
+TEST(PlayerAvatarOwnerCodec, ChecksBothControllerKindsAndFrozenFlags) {
+    auto moving = CharacterFixture().state();
+    SetPhysicsWord(moving, 12, 0x3f800000u);
+    EXPECT_TRUE(ValidatePhysicsOwner(moving));
+    auto frozen = CharacterFixture().state();
+    SetPhysicsWord(frozen, 8, 1);
+    EXPECT_TRUE(ValidatePhysicsOwner(frozen)); // frozen, no capsule
+    frozen.size += 8;
+    SetPhysicsWord(frozen, 20, kFixtureBody);
+    SetPhysicsWord(frozen, 148, 1);
+    SetPhysicsWord(frozen, 152, 0);
+    EXPECT_TRUE(ValidatePhysicsOwner(frozen));
+    SetPhysicsWord(frozen, 12, 0x3f800000u);
+    EXPECT_FALSE(ValidatePhysicsOwner(frozen));
+    for (const auto flag : {0u, 2u}) {
+        auto local = CharacterFixture().state();
+        SetPhysicsWord(local, 4, 2);
+        SetPhysicsWord(local, 8, flag);
+        ASSERT_TRUE(ValidatePhysicsOwner(local));
+        PlayerAvatarOwnerState wrong_kind;
+        wrong_kind.physics = local;
+        ExpectAvatarRefused(wrong_kind);
+        SetPhysicsWord(local, 12, 0x3f800000u);
+        EXPECT_FALSE(ValidatePhysicsOwner(local));
+        local = CharacterFixture().state();
+        SetPhysicsWord(local, 4, 2);
+        SetPhysicsWord(local, 8, flag);
+        SetPhysicsWord(local, 20, kFixtureBody);
+        EXPECT_FALSE(ValidatePhysicsOwner(local));
+    }
+    auto local = CharacterFixture().state();
+    SetPhysicsWord(local, 4, 2);
+    SetPhysicsWord(local, 8, 1);
+    EXPECT_FALSE(ValidatePhysicsOwner(local));
+}
+
+TEST(PlayerAvatarOwnerCodec, RefusesMalformedSphereSceneAndAllocatorFields) {
+    const auto original = SphereFixture().state();
+    ASSERT_EQ(original.size, 344u);
+    ASSERT_TRUE(ValidatePhysicsOwner(original));
+    for (std::uint32_t size = 0; size < original.size; ++size) {
+        auto truncated = original;
+        truncated.size = size;
+        EXPECT_FALSE(ValidatePhysicsOwner(truncated));
+    }
+    const std::vector<std::pair<std::size_t, std::uint32_t>> invalid_words{{8, UINT32_MAX},
+                                                                           {8, 0x80000000u},
+                                                                           {8, 10240},
+                                                                           {12, 0},
+                                                                           {12, 1},
+                                                                           {12, 0x7f7fffffu},
+                                                                           {12, 0x7f800000u},
+                                                                           {12, 0xbf800000u},
+                                                                           {16, 2},
+                                                                           {24, 0x7ff00000u},
+                                                                           {44, 0x3b800000u},
+                                                                           {56, 0},
+                                                                           {60, 0x7f800000u},
+                                                                           {108, 0x7ff00000u},
+                                                                           {144, 0xbf800000u},
+                                                                           {160, 0xbf800000u},
+                                                                           {176, 0xbf800000u},
+                                                                           {180, 0xbf800000u},
+                                                                           {184, 2},
+                                                                           {188, 15},
+                                                                           {192, 0xbf800000u},
+                                                                           {196, 0x7f800000u},
+                                                                           {208, 65},
+                                                                           {212, kFixtureBody + 2},
+                                                                           {216, kFixtureBody},
+                                                                           {220, 0x7f800000u},
+                                                                           {244, 257},
+                                                                           {248, kFixtureBody + 1},
+                                                                           {256, kFixtureBody + 2},
+                                                                           {264, 0},
+                                                                           {264, 5},
+                                                                           {268, 0x40000000u},
+                                                                           {280, 0x7fc00000u},
+                                                                           {316, 257},
+                                                                           {320, kFixtureBody + 2},
+                                                                           {328, UINT32_MAX},
+                                                                           {336, 0},
+                                                                           {336, 10241},
+                                                                           {340, 10240}};
+    for (const auto& [offset, word] : invalid_words) {
+        SCOPED_TRACE(offset);
+        auto malformed = original;
+        SetPhysicsWord(malformed, offset, word);
+        EXPECT_FALSE(ValidatePhysicsOwner(malformed));
+    }
+    // 1e-13 underflows inertia to zero and 1e-9 leaves a subnormal inertia whose
+    // reciprocal overflows, both while mass stays invertible.
+    for (const float radius : {1.0e-14f, 1.0e-13f, 1.0e-9f, 1.0e8f}) {
+        auto invalid_radius = original;
+        SetPhysicsWord(invalid_radius, 12, std::bit_cast<std::uint32_t>(radius));
+        EXPECT_FALSE(ValidatePhysicsOwner(invalid_radius));
+    }
+    auto empty = SphereFixture(0, 0, 0, 0).state();
+    EXPECT_TRUE(ValidatePhysicsOwner(empty));
+    empty.size += 4;
+    EXPECT_FALSE(ValidatePhysicsOwner(empty));
+}
+
+TEST(PlayerAvatarOwnerCodec, RejectsEveryNonUnitQuaternionAndCachedRotation) {
+    for (const auto component : {0u, 4u, 8u, 12u}) {
+        for (const auto word : {0x40000000u, 0x3b800000u, 0x7f7fffffu, 0x7f800000u, 0x7fc00000u}) {
+            auto character = CharacterFixture().state();
+            SetPhysicsWord(character, 108 + component, word);
+            EXPECT_FALSE(ValidatePhysicsOwner(character));
+            PlayerAvatarOwnerState malformed;
+            malformed.physics = character;
+            ExpectAvatarRefused(malformed);
+            auto sphere = SphereFixture().state();
+            SetPhysicsWord(sphere, 44 + component, word);
+            EXPECT_FALSE(ValidatePhysicsOwner(sphere));
+        }
+    }
+    for (const auto component : {232u, 236u, 240u}) {
+        for (const float value : {2.0f,
+                                  1.0001f,
+                                  (std::numeric_limits<float>::max)(),
+                                  std::numeric_limits<float>::infinity(),
+                                  std::numeric_limits<float>::quiet_NaN()}) {
+            auto malformed = SphereFixture().state();
+            SetPhysicsWord(malformed, component, std::bit_cast<std::uint32_t>(value));
+            EXPECT_FALSE(ValidatePhysicsOwner(malformed));
+        }
+    }
+    for (const float x : {0.0f, 1.0f, 1.00002f}) {
+        auto valid = SphereFixture().state();
+        SetPhysicsWord(valid, 232, std::bit_cast<std::uint32_t>(x));
+        EXPECT_TRUE(ValidatePhysicsOwner(valid));
+    }
+    auto half_turn = CharacterFixture().state();
+    SetPhysicsWord(half_turn, 108, 0x3f800000u);
+    SetPhysicsWord(half_turn, 120, 0);
+    EXPECT_TRUE(ValidatePhysicsOwner(half_turn));
+}
+
+TEST(PlayerAvatarOwnerCodec, RejectsDuplicateUnorderedAndMismatchedTopology) {
+    auto duplicate_ccd = SphereFixture(1, 1, 1, 2).state();
+    ASSERT_TRUE(ValidatePhysicsOwner(duplicate_ccd));
+    SetPhysicsWord(duplicate_ccd, 340, 1000); // second CCD key duplicates the first
+    EXPECT_FALSE(ValidatePhysicsOwner(duplicate_ccd));
+    auto duplicate_manifold = SphereFixture(1, 2).state();
+    ASSERT_TRUE(ValidatePhysicsOwner(duplicate_manifold));
+    SetPhysicsWord(duplicate_manifold, 320, 0); // second manifold's first subshape
+    EXPECT_FALSE(ValidatePhysicsOwner(duplicate_manifold));
+    auto cross_cache_duplicate = SphereFixture().state();
+    SetPhysicsWord(cross_cache_duplicate, 324, 0);
+    EXPECT_FALSE(ValidatePhysicsOwner(cross_cache_duplicate));
+    auto unordered = SphereFixture(2, 0, 0, 0).state();
+    ASSERT_TRUE(ValidatePhysicsOwner(unordered));
+    SetPhysicsWord(unordered, 216, kFixtureBody + 2);
+    SetPhysicsWord(unordered, 252, kFixtureBody + 1);
+    EXPECT_FALSE(ValidatePhysicsOwner(unordered));
+    auto unrelated = SphereFixture().state();
+    SetPhysicsWord(unrelated, 212, kFixtureBody + 1);
+    SetPhysicsWord(unrelated, 216, kFixtureBody + 2);
+    EXPECT_FALSE(ValidatePhysicsOwner(unrelated));
+    for (const auto word : {kFixtureBody, kFixtureBody + 10240, UINT32_MAX}) {
+        auto invalid_slot = SphereFixture(0, 0, 0, 0, 1).state();
+        SetPhysicsWord(invalid_slot, 224, word);
+        EXPECT_FALSE(ValidatePhysicsOwner(invalid_slot));
+    }
+    auto duplicate_slot = SphereFixture(0, 0, 0, 0, 2).state();
+    ASSERT_TRUE(ValidatePhysicsOwner(duplicate_slot));
+    SetPhysicsWord(duplicate_slot, 228, 0x02000001u); // same slot, different sequence
+    EXPECT_FALSE(ValidatePhysicsOwner(duplicate_slot));
+}
+
+TEST(PlayerAvatarOwnerCodec, AcceptsExact64KiBBoundAndRefusesExcessContactCounts) {
+    auto maximum = SphereFixture(1, 139, 4, 0, 10203).state();
+    ASSERT_EQ(maximum.size, PhysicsOwnerState::kMaxBytes);
+    EXPECT_TRUE(ValidatePhysicsOwner(maximum));
+    maximum.size += 1;
+    EXPECT_FALSE(ValidatePhysicsOwner(maximum));
+    auto contacts = SphereFixture(2, 128, 1, 0).state();
+    ASSERT_TRUE(ValidatePhysicsOwner(contacts));
+    // Include the complete excess records: without the count limit, parsing
+    // must succeed instead of refusing later because the payload is truncated.
+    const auto excess_manifolds = SphereFixture(2, 129, 1, 0).state();
+    EXPECT_FALSE(ValidatePhysicsOwner(excess_manifolds));
+    const auto full_cache = SphereFixture(64, 4, 1, 256).state();
+    EXPECT_TRUE(ValidatePhysicsOwner(full_cache));
+    const auto excess_pairs = SphereFixture(65, 0, 0, 0).state();
+    EXPECT_FALSE(ValidatePhysicsOwner(excess_pairs));
+    const auto ccd = SphereFixture(0, 0, 0, 256).state();
+    ASSERT_TRUE(ValidatePhysicsOwner(ccd));
+    const auto excess_ccd = SphereFixture(0, 0, 0, 257).state();
+    EXPECT_FALSE(ValidatePhysicsOwner(excess_ccd));
+}
+TEST(PlayerAvatarOwnerCodec, EveryPhysicsScalarRefusesNonFiniteValues) {
+    const auto character = CharacterFixture(true).state();
+    const auto sphere = SphereFixture().state();
+    // All float32 fields, including each vector component and contact impulse.
+    const std::vector<std::pair<std::size_t, std::size_t>> character_ranges{
+        {12, 20}, {60, 84}, {108, 140}, {184, 228}};
+    const std::vector<std::pair<std::size_t, std::size_t>> sphere_ranges{
+        {12, 16}, {44, 108}, {132, 184}, {192, 208}, {220, 244}, {268, 316}};
+    for (const auto& [begin, end] : character_ranges) {
+        for (auto offset = begin; offset < end; offset += 4) {
+            for (const auto bits : {0x7f800000u, 0xff800000u, 0x7fc00000u}) {
+                SCOPED_TRACE(offset);
+                PlayerAvatarOwnerState malformed;
+                malformed.physics = character;
+                SetPhysicsWord(malformed.physics, offset, bits);
+                ExpectAvatarRefused(malformed);
+            }
+        }
+    }
+    for (const auto& [begin, end] : sphere_ranges) {
+        for (auto offset = begin; offset < end; offset += 4) {
+            for (const auto bits : {0x7f800000u, 0xff800000u, 0x7fc00000u}) {
+                SCOPED_TRACE(offset);
+                auto malformed = sphere;
+                SetPhysicsWord(malformed, offset, bits);
+                EXPECT_FALSE(ValidatePhysicsOwner(malformed));
+            }
+        }
+    }
+    for (const auto offset : {36u, 44u, 52u, 84u, 92u, 100u, 160u, 168u, 176u}) {
+        for (const auto high : {0x7ff00000u, 0xfff00000u, 0x7ff80000u}) {
+            PlayerAvatarOwnerState malformed;
+            malformed.physics = character;
+            SetPhysicsWord(malformed.physics, offset + 4, high);
+            ExpectAvatarRefused(malformed);
+        }
+    }
+    for (const auto offset : {20u, 28u, 36u, 108u, 116u, 124u}) {
+        for (const auto high : {0x7ff00000u, 0xfff00000u, 0x7ff80000u}) {
+            auto malformed = sphere;
+            SetPhysicsWord(malformed, offset + 4, high);
+            EXPECT_FALSE(ValidatePhysicsOwner(malformed));
+        }
+    }
+}
+
+TEST(PlayerAvatarOwnerCodec, LocalAllocatorReferencesMustNameAllocatedSlots) {
+    auto sphere = SphereFixture().state();
+    SetPhysicsWord(sphere, 336, 1); // pair and CCD reference slot 1 outside the extent
+    EXPECT_FALSE(ValidatePhysicsOwner(sphere));
+    sphere = SphereFixture(1, 1, 1, 1, 1).state();
+    SetPhysicsWord(sphere, 344, kFixtureBody + 1); // live contact slot cannot be free
+    EXPECT_FALSE(ValidatePhysicsOwner(sphere));
+    auto frozen = CharacterFixture(true).state();
+    SetPhysicsWord(frozen, 8, 1);
+    SetPhysicsWord(frozen, 20, kFixtureBody);
+    frozen.size += 8;
+    SetPhysicsWord(frozen, 248, 1);
+    SetPhysicsWord(frozen, 252, 0);
+    EXPECT_FALSE(ValidatePhysicsOwner(frozen)); // character contact outside extent
+    SetPhysicsWord(frozen, 248, 2);
+    EXPECT_TRUE(ValidatePhysicsOwner(frozen));
+    SetPhysicsWord(frozen, 28, 0x02000000u); // owner's slot, mismatched sequence
+    EXPECT_FALSE(ValidatePhysicsOwner(frozen));
+    auto conflicting_pairs = SphereFixture(2, 0, 0, 0).state();
+    SetPhysicsWord(conflicting_pairs, 252, 0x02000001u);
+    EXPECT_FALSE(ValidatePhysicsOwner(conflicting_pairs)); // slot 1, two sequences
+    PlayerAvatarOwnerState conflicting_ground;
+    conflicting_ground.physics = CharacterFixture(true).state();
+    SetPhysicsWord(conflicting_ground.physics, 24, 0);
+    SetPhysicsWord(conflicting_ground.physics, 28, 0x02000001u);
+    SetPhysicsWord(conflicting_ground.physics, 64, 0x3f800000u);
+    EXPECT_FALSE(ValidatePhysicsOwner(conflicting_ground.physics));
+    ExpectAvatarRefused(conflicting_ground);
+}
+
+TEST(PlayerAvatarOwnerCodec, OrderedCacheListsAndAllAvatarModesRoundTrip) {
+    for (const bool contact : {false, true}) {
+        for (const bool capsule : {false, true}) {
+            PlayerAvatarOwnerState original;
+            original.physics = CharacterFixture(contact).state();
+            if (capsule) {
+                SetPhysicsWord(original.physics, 8, 1);
+                SetPhysicsWord(original.physics, 20, kFixtureBody);
+                const auto tail = original.physics.size;
+                original.physics.size += 8;
+                SetPhysicsWord(original.physics, tail, 2);
+                SetPhysicsWord(original.physics, tail + 4, 0);
+            }
+            std::array<std::uint8_t, Luminumbra::World::kMaxAvatarOwnerBytes> bytes{};
+            std::size_t written = 0;
+            ASSERT_TRUE(EncodeAvatarOwner(original, bytes, written));
+            PlayerAvatarOwnerState decoded;
+            ASSERT_TRUE(DecodeAvatarOwner(std::span(bytes).first(written), decoded));
+            ExpectAvatarUnchanged(original, decoded);
+        }
+    }
+    auto manifolds = SphereFixture(1, 2).state();
+    SetPhysicsWord(manifolds, 252, 2);
+    SetPhysicsWord(manifolds, 320, 1);
+    EXPECT_FALSE(ValidatePhysicsOwner(manifolds));
+    auto ccd = SphereFixture(1, 0, 0, 2).state();
+    SetPhysicsWord(ccd, 256, 1001);
+    SetPhysicsWord(ccd, 272, 1000);
+    EXPECT_FALSE(ValidatePhysicsOwner(ccd));
+    auto duplicate_pairs = SphereFixture(2, 0, 0, 0).state();
+    SetPhysicsWord(duplicate_pairs, 252, kFixtureBody + 1);
+    EXPECT_FALSE(ValidatePhysicsOwner(duplicate_pairs));
+}
+
+TEST(PlayerAvatarOwnerCodec, NormalsPrecisionBranchesAndBoundaryIds) {
+    for (const auto begin : {60u, 196u, 208u}) {
+        for (const auto axis : {0u, 4u, 8u}) {
+            auto invalid = CharacterFixture(true).state();
+            SetPhysicsWord(invalid, begin + axis, 0x40000000u);
+            EXPECT_FALSE(ValidatePhysicsOwner(invalid));
+        }
+    }
+    for (const auto begin : {196u, 208u}) {
+        auto invalid = CharacterFixture(true).state();
+        SetPhysicsWord(invalid, begin + 4, 0);
+        EXPECT_FALSE(ValidatePhysicsOwner(invalid));
+    }
+    for (const auto bits : {std::uint64_t{1},
+                            std::uint64_t{0x3690000000000001},
+                            std::uint64_t{0x3680000000000000},
+                            std::uint64_t{0x3ff0000000000001}}) {
+        auto position = CharacterFixture().state();
+        SetPhysicsWord(position, 84, static_cast<std::uint32_t>(bits));
+        SetPhysicsWord(position, 88, static_cast<std::uint32_t>(bits >> 32));
+#ifdef JPH_DOUBLE_PRECISION
+        EXPECT_TRUE(ValidatePhysicsOwner(position));
+#else
+        EXPECT_FALSE(ValidatePhysicsOwner(position));
+#endif
+    }
+    auto sleep_offset = SphereFixture().state();
+    SetPhysicsWord(sleep_offset, 112, 0x3ff00000u);
+#ifdef JPH_DOUBLE_PRECISION
+    EXPECT_TRUE(ValidatePhysicsOwner(sleep_offset));
+#else
+    EXPECT_FALSE(ValidatePhysicsOwner(sleep_offset));
+#endif
+    SetPhysicsWord(sleep_offset, 112, 0x7fefffffu);
+    EXPECT_FALSE(ValidatePhysicsOwner(sleep_offset));
+    auto largest_id = SphereFixture(0, 0, 0, 0).state();
+    // Jolt stores the sequence at bit 23; bit 31 is the broadphase bit.
+    SetPhysicsWord(largest_id, 8, 0x7f8027ffu); // index 10239, sequence 255
+    EXPECT_TRUE(ValidatePhysicsOwner(largest_id));
+    auto contacts = CharacterFixture(true);
+    const std::vector<std::uint32_t> contact(contacts.words.begin() + 37, contacts.words.end());
+    for (int i = 1; i < 256; ++i) {
+        contacts.words.insert(contacts.words.end(), contact.begin(), contact.end());
+    }
+    contacts.words[36] = 256;
+    EXPECT_TRUE(ValidatePhysicsOwner(contacts.state()));
+    contacts.words.insert(contacts.words.end(), contact.begin(), contact.end());
+    contacts.words[36] = 257;
+    EXPECT_FALSE(ValidatePhysicsOwner(contacts.state()));
+    for (const auto id : {0u, UINT32_MAX}) {
+        PlayerAvatarOwnerState owner;
+        owner.avatar.player_id = id;
+        owner.physics = CharacterFixture().state();
+        EXPECT_TRUE(ValidateAvatarOwner(owner));
+    }
+    PlayerAvatarOwnerState owner;
+    owner.physics = CharacterFixture().state();
+    auto bytes = RawAvatarBytes(owner);
+    PlayerAvatarOwnerState output;
+    output.avatar.player_id = 99;
+    const auto retained = output;
+    bytes[2] = 1; // all outer version bits participate in validation
+    EXPECT_FALSE(DecodeAvatarOwner(bytes, output));
+    ExpectAvatarUnchanged(retained, output);
+    bytes = RawAvatarBytes(owner);
+    for (const auto size : {0u, 147u, 149u, UINT32_MAX}) {
+        for (unsigned i = 0; i < 4; ++i) {
+            bytes[36 + i] = static_cast<std::uint8_t>(size >> (8 * i));
+        }
+        EXPECT_FALSE(DecodeAvatarOwner(bytes, output));
+        ExpectAvatarUnchanged(retained, output);
+    }
+}
+
 using Luminumbra::Systems::PhysicsSystem;
 using BodyOwnerState = PhysicsSystem::BodyOwnerState;
 using BodySetState = PhysicsSystem::BodySetState;
@@ -756,13 +1467,20 @@ TEST(BodyContinuation, AvatarSlotCapAndStoppedSystemsPreserveOutputs) {
     EXPECT_FALSE(source.restore_body_owners({}, {}));
     source.startup();
     for (std::size_t i = 0; i < PhysicsSystem::kMaxRestoredAvatars; ++i) {
-        const auto index = source.create_avatar_character(Vec3(0.0f));
-        source.remove_avatar_character(index);
+        ASSERT_EQ(source.create_avatar_character(Vec3(0.0f)), i);
+    }
+    // Retire only after reaching the cap: immediate retirement reuses slot zero.
+    for (std::size_t i = 0; i < PhysicsSystem::kMaxRestoredAvatars; ++i) {
+        source.remove_avatar_character(i);
     }
     ASSERT_TRUE(source.capture_body_owners(state));
     EXPECT_TRUE(source.restore_body_owners(state, {}));
     const auto before = state;
+    for (std::size_t i = 0; i < PhysicsSystem::kMaxRestoredAvatars; ++i) {
+        ASSERT_EQ(source.create_avatar_character(Vec3(0.0f)), i);
+    }
     const auto extra = source.create_avatar_character(Vec3(0.0f));
+    ASSERT_EQ(extra, PhysicsSystem::kMaxRestoredAvatars);
     source.remove_avatar_character(extra);
     EXPECT_FALSE(source.capture_body_owners(state));
     ExpectBodySet(before, state);
