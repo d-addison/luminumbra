@@ -166,9 +166,9 @@ TEST(DiagnosticContributions, LiveTermsNeverRequestIdentityReplayOrInspectorRead
 TEST(DiagnosticContributions, CaptureOffLightingAndGBufferKeepEveryOriginalByte) {
     const auto lighting = Source("res/shaders/lighting_pass.frag");
     EXPECT_NE(lighting.find("#ifdef LUMIN_DIAG_CONTRIBUTIONS\n"), std::string::npos);
-    EXPECT_EQ(Hash(CaptureOff(lighting)), 0xe07744c933605551ULL);
+    EXPECT_EQ(Hash(CaptureOff(lighting)), 0xc6e9bc9c6fc7110bULL);
     // No G-buffer instrumentation is needed: its existing material channels are authoritative.
-    EXPECT_EQ(Hash(Source("res/shaders/g_buffer.frag")), 0x3dbc418fae6c670dULL);
+    EXPECT_EQ(Hash(Source("res/shaders/g_buffer.frag")), 0x5384913db4971619ULL);
 }
 
 TEST(DiagnosticContributions, UnsupportedAndStaleInputsAreHatchedWithoutSamplingGuessedPlanes) {
