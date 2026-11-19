@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <glm/glm.hpp>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -241,7 +242,13 @@ public:
     uint32_t add_waterfall_spray(const std::filesystem::path& json_path,
                                  const glm::vec3& plunge_pos,
                                  float drop_height,
-                                 float channel_width);
+                                 float channel_width,
+                                 std::size_t sheet_site = kInvalidEmitter);
+
+    // Site identity travels with the emitter through spray compaction. Unbound
+    // standalone emitters retain their authored intensity; missing bound sites
+    // stop spawning. Existing particles retain their remaining lifetime.
+    void set_waterfall_live_factors(std::span<const float> live_factors);
 
     // per-frame WIND velocity (world-space; horizontal XZ carried in
     // x/z, y usually 0) sampled by the client from the  wind field / replicated
@@ -294,6 +301,7 @@ private:
         uint64_t rng_state = 0;         // xorshift state, render-only
         float spawn_scale = 1.0f;       // live presentation intensity, not authored data
         bool waterfall_spray = false;
+        std::size_t waterfall_site = kInvalidEmitter;
     };
 
     // Render-only particle (motion state lives here, NEVER snapshotted).
