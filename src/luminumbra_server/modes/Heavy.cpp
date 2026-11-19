@@ -108,6 +108,14 @@ int RunHeavy(const ServerCliOptions& options) {
     if (pre_save_ticks.region_fault || pre_save_ticks.ticks_executed != options.ticks) {
         LUMINUMBRA_CORE_ERROR("heavy: incomplete run before snapshot at tick {}",
                               pre_save_ticks.ticks_executed);
+        // Boot already persisted this throwaway world: shut down, then remove it.
+        const fs::path refused_dir =
+            original.Session() ? original.Session()->GetWorldSaveDir() : fs::path{};
+        original.Shutdown();
+        if (!refused_dir.empty()) {
+            std::error_code ec;
+            fs::remove_all(refused_dir, ec);
+        }
         return 1;
     }
 

@@ -433,8 +433,11 @@ class SimulationCollisionWiring(unittest.TestCase):
         self.assertTrue(refused.endswith("break;"))
         self.assertLess(refused.index("GetRegionSchedulerFault()"),
                         refused.index("if (preparation_retries"))
-        self.assertLess(refused.index("physics_budget.Finish();"),
-                        refused.index("std::this_thread::sleep_for("))
+        # Refused attempts record no ServerPhysics sample; only completed ticks do.
+        self.assertNotIn("Record(", refused)
+        self.assertNotIn("TickScope physics_budget", body)
+        self.assertLess(body.index("physics_system->update_avatars("),
+                        body.index("budget.Record(BudgetStage::ServerPhysics,"))
         for path in ("NetRuntime.cpp", "Replicate.cpp"):
             source = (ROOT / "src/luminumbra_server/modes" / path).read_text(encoding="utf-8")
             retry = function(source, "if (step.ticks_executed == 0 && !step.region_fault)")
