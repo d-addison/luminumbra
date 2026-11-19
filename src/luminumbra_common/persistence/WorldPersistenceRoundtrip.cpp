@@ -747,6 +747,18 @@ void RequireWaterFloat(const nlohmann::json& value) {
         throw std::invalid_argument("Saved water finite float range refused");
 }
 
+bool WaterGridShapeValid(
+    int resolution, bool simulating, std::size_t depths, std::size_t beds, std::size_t fluxes) {
+    // Resolution is validated by the caller before this bounded multiplication.
+    const bool active = simulating && resolution != 0;
+    const auto cells = static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
+    const bool no_integers = depths == 0u && beds == 0u && fluxes == 0u;
+    const bool flux_valid = fluxes == 0u || fluxes == 2u * depths;
+    const bool complete_integers = depths == beds && flux_valid && (!active || depths == cells);
+    const bool initializing = !simulating && beds == 0u && flux_valid;
+    return no_integers || complete_integers || initializing;
+}
+
 void RequireWaterArrays(const nlohmann::json& value, bool encoded) try {
     const auto& state = value.contains("water_state") ? value.at("water_state") : value;
     const auto& resolution_json = state.at("current_water_resolution");
@@ -806,15 +818,8 @@ void RequireWaterArrays(const nlohmann::json& value, bool encoded) try {
     }
     // Empty arrays retain historical defaults. Dormant grids and render mirrors are
     // independent of the resolution stamp; populated active integer grids must fill it.
-    const bool active = state.at("has_water_sim").get<bool>() && resolution != 0;
-    const auto cells = static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
-    const bool no_integers = counts[0] == 0u && counts[1] == 0u && counts[2] == 0u;
-    const bool flux_valid = counts[2] == 0u || counts[2] == 2u * counts[0];
-    const bool complete_integers =
-        counts[0] == counts[1] && flux_valid && (!active || counts[0] == cells);
-    const bool initializing =
-        !state.at("has_water_sim").get<bool>() && counts[1] == 0u && flux_valid;
-    if (!no_integers && !complete_integers && !initializing)
+    if (!WaterGridShapeValid(
+            resolution, state.at("has_water_sim").get<bool>(), counts[0], counts[1], counts[2]))
         throw std::invalid_argument("Saved water grid shape refused");
 } catch (const nlohmann::json::exception&) {
     throw std::invalid_argument("Saved water structure refused");
@@ -1353,6 +1358,38 @@ bool ValidateChunkFormatObject(const nlohmann::json& chunk, std::vector<std::str
 }
 
 } // namespace
+
+bool HasValidWaterPersistenceState(const Chunk& chunk) {
+    const int resolution = chunk.current_water_resolution.load();
+    if (resolution < 0 || resolution > 32 ||
+        (resolution != 0 && (resolution < 2 || 32 % resolution != 0)) ||
+        chunk.ticks_below_threshold < 0 || !std::isfinite(chunk.max_water_delta_last_tick)) {
+        return false;
+    }
+    // Reject sizes before visiting cells. Persistence bounds every grid/mirror
+    // to 32x32 cells, and momentum to twice that; no storage is allocated here.
+    if (chunk.water_depth_mm.size() > 1024u || chunk.water_bed_mm.size() > 1024u ||
+        chunk.water_edge_flux.size() > 2048u || chunk.water_level_data.size() > 1024u ||
+        chunk.water_flow_data.size() > 1024u || chunk.water_sim_terrain_height.size() > 1024u ||
+        !WaterGridShapeValid(resolution,
+                             chunk.has_water_sim.load(),
+                             chunk.water_depth_mm.size(),
+                             chunk.water_bed_mm.size(),
+                             chunk.water_edge_flux.size()) ||
+        !WaterDepthValid(chunk)) {
+        return false;
+    }
+    for (const auto* mirror : {&chunk.water_level_data, &chunk.water_sim_terrain_height}) {
+        if (!std::all_of(
+                mirror->begin(), mirror->end(), [](float value) { return std::isfinite(value); })) {
+            return false;
+        }
+    }
+    return std::all_of(
+        chunk.water_flow_data.begin(), chunk.water_flow_data.end(), [](const Vec2& value) {
+            return std::isfinite(value.x) && std::isfinite(value.y);
+        });
+}
 
 const char* WorldPersistenceRoundtripSchema() {
     return kRoundtripSchema;
