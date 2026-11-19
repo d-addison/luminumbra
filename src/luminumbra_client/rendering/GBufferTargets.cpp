@@ -90,12 +90,16 @@ bool GBufferDiagnosticCapture::refused() const {
 }
 
 bool GBufferDiagnosticCapture::complete() const {
-    // Producer identities alone cannot qualify pixels without a leased ID attachment.
-    return false;
+    return state_->captured && !state_->framebuffer && !state_->attachment_lease &&
+           !state_->failed && !state_->refused && state_->table.complete_coverage();
 }
 
 Shader* GBufferDiagnosticCapture::variant(Shader* shader, bool ladder) {
+    if (!state_->framebuffer) {
+        return shader;
+    }
     if (!shader || !shader->IsValid()) {
+        unsupported("diagnostic_base_shader_unavailable");
         return shader;
     }
     for (const auto& entry : state_->variants) {
@@ -128,11 +132,17 @@ Shader* GBufferDiagnosticCapture::variant(Shader* shader, bool ladder) {
 }
 
 void GBufferDiagnosticCapture::write(const Shader& shader, const DiagnosticSubmission& submission) {
+    if (!state_->framebuffer) {
+        return;
+    }
     for (const auto& entry : state_->variants) {
         if (entry.shader.get() != &shader) {
             continue;
         }
         DiagnosticId id{};
+        if (submission.provenance == DiagnosticProvenance::Unsupported) {
+            state_->failed = true;
+        }
         if (!state_->refused && !state_->table.submit(submission, id)) {
             state_->refused = true;
         }

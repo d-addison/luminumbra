@@ -29,7 +29,7 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <map>
+#include <utility>
 #include <vector>
 
 #include <entt/entity/registry.hpp>
@@ -172,7 +172,8 @@ struct CreatureReproductionStats {
     std::size_t identity_visits = 0;
     // Const diagnostic: spatial candidates examined (both sexes in seeking, males in resolve).
     std::size_t mate_candidate_visits = 0;
-    // Const diagnostic: creature entries visited by the capacity census (zero without genomes).
+    // Const diagnostic: creature entries visited by the capacity census (zero without ready
+    // females).
     std::size_t population_visits = 0;
 };
 
@@ -317,18 +318,45 @@ RunMatingResolveOnTick(entt::registry& reg,
     if (ents.empty()) {
         return stats; // no genomes: no counting, indexing or allocation
     }
-    // Count all admitted living creatures, including those without genomes/transforms.
-    // Species keys are uint16; storage is bounded by the admitted species count.
-    std::map<std::uint16_t, std::size_t> live_counts;
-    for (const auto entity : reg.view<Comp::CreatureComponent>()) {
-        ++stats.population_visits;
-        const auto& creature = reg.get<Comp::CreatureComponent>(entity);
-        const auto* mortal = reg.try_get<Comp::MortalComponent>(entity);
-        if ((!admission || admission->Allows(entity)) && !creature.eaten &&
-            (!mortal || mortal->dead == 0)) {
-            ++live_counts[creature.species_id];
+    struct PopulationCensus {
+        // At most one pair per admitted species; built only on ticks with a ready female.
+        std::vector<std::pair<std::uint16_t, std::size_t>> counts;
+
+        auto Find(std::uint16_t species_id) {
+            return std::lower_bound(
+                counts.begin(), counts.end(), species_id, [](const auto& entry, std::uint16_t key) {
+                    return entry.first < key;
+                });
         }
-    }
+
+        std::size_t Count(std::uint16_t species_id) {
+            const auto entry = Find(species_id);
+            return entry != counts.end() && entry->first == species_id ? entry->second : 0;
+        }
+
+        // One sort groups the whole census: O(n log n) however many species IDs appear.
+        void Build(std::vector<std::uint16_t>& species) {
+            std::sort(species.begin(), species.end());
+            for (const auto species_id : species) {
+                if (!counts.empty() && counts.back().first == species_id) {
+                    ++counts.back().second;
+                } else {
+                    counts.emplace_back(species_id, 1);
+                }
+            }
+        }
+
+        void Increment(std::uint16_t species_id) {
+            const auto entry = Find(species_id);
+            if (entry != counts.end() && entry->first == species_id) {
+                ++entry->second;
+            } else {
+                counts.insert(entry, {species_id, 1});
+            }
+        }
+    };
+    PopulationCensus live_counts;
+    bool census_taken = false;
     // Stage only participating parents. Refused birth batches leave even age/cooldown
     // untouched. The legacy lane continues writing directly to its existing components.
     std::vector<Comp::CreatureGenomeComponent> staged_genomes;
@@ -396,7 +424,25 @@ RunMatingResolveOnTick(entt::registry& reg,
         if (!gn.female || !IsReadyToMate(cr, gn, tuning)) {
             continue;
         }
-        if (live_counts[cr.species_id] >= tuning.species_capacity) {
+        if (!census_taken) {
+            census_taken = true;
+            // Only genome age/cooldown changed since entry; census eligibility and
+            // admission are unchanged. Include creatures without genomes/transforms.
+            const auto creatures = reg.view<Comp::CreatureComponent>();
+            std::vector<std::uint16_t> live_species;
+            live_species.reserve(creatures.size());
+            for (const auto entity : creatures) {
+                ++stats.population_visits;
+                const auto& creature = reg.get<Comp::CreatureComponent>(entity);
+                const auto* mortal = reg.try_get<Comp::MortalComponent>(entity);
+                if ((!admission || admission->Allows(entity)) && !creature.eaten &&
+                    (!mortal || mortal->dead == 0)) {
+                    live_species.push_back(creature.species_id);
+                }
+            }
+            live_counts.Build(live_species);
+        }
+        if (live_counts.Count(cr.species_id) >= tuning.species_capacity) {
             continue; // refuse before courtship/male bookkeeping; earlier IDs reserve first
         }
         const auto& tf = view.get<Comp::TransformComponent>(e);
@@ -472,7 +518,7 @@ RunMatingResolveOnTick(entt::registry& reg,
         b.female = childFemale;
         b.species_id = cr.species_id; // offspring inherit the mother's codex species identity
         births.push_back(b);
-        ++live_counts[cr.species_id];
+        live_counts.Increment(cr.species_id);
 
         gn.courting_ticks = 0;
         gn.reproduce_cooldown = tuning.cooldown_ticks;

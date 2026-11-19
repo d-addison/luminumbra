@@ -16,9 +16,10 @@ class Shader;
 
 // Render-thread attribution scope; keep the creating GL context current until
 // destruction. The table and optional target owner must outlive this scope.
-// Explicit attachment leases storage until detachment, including on exceptions.
-// Producers do not attach automatically; complete() remains false until producer
-// integration and coverage are supplied. Construction performs no GL work.
+// GBufferPass leases storage during deferred submission, including on exceptions.
+// Completion requires detachment, lease release and complete deferred coverage.
+// Later contributors need their own coverage before bundle publication.
+// Construction performs no GL work; table-only scopes cannot attach or complete.
 class GBufferDiagnosticCapture {
 public:
     explicit GBufferDiagnosticCapture(DiagnosticDrawTable& table);

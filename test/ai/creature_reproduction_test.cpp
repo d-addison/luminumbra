@@ -553,7 +553,10 @@ TEST(CreatureReproduction, CapacityRefusesLaterIdsAndCountsOnlyAdmittedLivingSpe
     AI::ReproductionTuning tuning;
     tuning.courtship_ticks = 1;
     tuning.species_capacity = 6;
-    EXPECT_EQ(RunMatingResolveOnTick(registry, 1, 0, tuning, nullptr, &admission).born, 2);
+    const auto population = creatureCount(registry);
+    const auto below_cap = RunMatingResolveOnTick(registry, 1, 0, tuning, nullptr, &admission);
+    EXPECT_EQ(below_cap.born, 2);
+    EXPECT_EQ(below_cap.population_visits, population);
     EXPECT_EQ(registry.get<Comp::CreatureGenomeComponent>(first).reproduce_cooldown,
               tuning.cooldown_ticks);
     EXPECT_EQ(registry.get<Comp::CreatureGenomeComponent>(male).reproduce_cooldown,
@@ -564,12 +567,113 @@ TEST(CreatureReproduction, CapacityRefusesLaterIdsAndCountsOnlyAdmittedLivingSpe
     EXPECT_EQ(registry.get<Comp::CreatureGenomeComponent>(blocked).age_ticks, 120u);
     // Move the male off cooldown: the full species still refuses without consuming him.
     registry.get<Comp::CreatureGenomeComponent>(male).reproduce_cooldown = 0;
-    EXPECT_EQ(RunMatingResolveOnTick(registry, 2, 0, tuning, nullptr, &admission).born, 0);
+    const auto at_cap = RunMatingResolveOnTick(registry, 2, 0, tuning, nullptr, &admission);
+    EXPECT_EQ(at_cap.born, 0);
+    EXPECT_EQ(at_cap.population_visits, population + 2u);
     EXPECT_EQ(registry.get<Comp::CreatureGenomeComponent>(male).reproduce_cooldown, 0u);
     for (const std::uint32_t capacity : {0u, 1u}) {
         tuning.species_capacity = capacity;
         EXPECT_EQ(RunMatingResolveOnTick(registry, 3, 0, tuning).born, 0);
     }
+}
+
+TEST(CreatureReproduction, NoReadyFemalesSkipCapacityCensusWithGenomeParticipants) {
+    namespace AI = luminumbra::ai;
+    for (const bool stable_identity : {false, true}) {
+        entt::registry registry;
+        spawnMate(registry, 0, 0, false); // a ready male alone must not trigger the census
+        const auto immature = spawnMate(registry, 0, 0, true, false);
+        const auto cooling = spawnMate(registry, 0, 0, true);
+        registry.get<Comp::CreatureGenomeComponent>(cooling).reproduce_cooldown = 2;
+        const auto eaten = spawnMate(registry, 0, 0, true);
+        registry.get<Comp::CreatureComponent>(eaten).eaten = true;
+        const auto predator = spawnMate(registry, 0, 0, true);
+        registry.get<Comp::CreatureComponent>(predator).is_predator = true;
+        const auto hungry = spawnMate(registry, 0, 0, true);
+        registry.get<Comp::CreatureComponent>(hungry).hunger = 1;
+        const auto tired = spawnMate(registry, 0, 0, true);
+        registry.get<Comp::CreatureComponent>(tired).stamina = 0;
+        // Unrelated creatures have neither genomes nor transforms, but an eager
+        // capacity census would still visit every one of them.
+        for (int i = 0; i < 128; ++i) {
+            registry.emplace<Comp::CreatureComponent>(registry.create());
+        }
+        std::uint64_t identity = 1;
+        for (const auto entity : registry.view<Comp::CreatureGenomeComponent>()) {
+            registry.emplace<Comp::SimulationIdentityComponent>(entity, identity++);
+        }
+        Luminumbra::world::ActiveRegionLedger ledger;
+        ASSERT_TRUE(ledger.reserve_persistent_ids(identity));
+        AI::ReproductionTuning tuning;
+        tuning.courtship_ticks = 1;
+        const auto stats = RunMatingResolveOnTick(
+            registry, 1, 985, tuning, nullptr, nullptr, stable_identity ? &ledger : nullptr);
+        EXPECT_EQ(stats.population_visits, 0u);
+        EXPECT_EQ(stats.born, 0);
+        EXPECT_EQ(stats.courting, 0);
+        EXPECT_EQ(registry.get<Comp::CreatureGenomeComponent>(immature).age_ticks, 1u);
+        EXPECT_EQ(registry.get<Comp::CreatureGenomeComponent>(cooling).reproduce_cooldown, 1u);
+    }
+}
+
+TEST(CreatureReproduction, LazyCensusRebuildsWhenBookkeepingMakesFemaleReady) {
+    namespace AI = luminumbra::ai;
+    for (const bool stable_identity : {false, true}) {
+        entt::registry registry;
+        const auto mother = spawnMate(registry, 0, 0, true);
+        const auto father = spawnMate(registry, 0, 0, false);
+        registry.emplace<Comp::SimulationIdentityComponent>(mother, std::uint64_t{1});
+        registry.emplace<Comp::SimulationIdentityComponent>(father, std::uint64_t{2});
+        registry.get<Comp::CreatureGenomeComponent>(mother).age_ticks = AI::kReproMaturityTicks - 2;
+        registry.get<Comp::CreatureGenomeComponent>(mother).reproduce_cooldown = 2;
+        Luminumbra::world::ActiveRegionLedger ledger;
+        ASSERT_TRUE(ledger.reserve_persistent_ids(3));
+        AI::ReproductionTuning tuning;
+        tuning.courtship_ticks = 1;
+        tuning.species_capacity = 3;
+        const auto resolve = [&](std::uint64_t tick) {
+            return RunMatingResolveOnTick(
+                registry, tick, 985, tuning, nullptr, nullptr, stable_identity ? &ledger : nullptr);
+        };
+        const auto immature = resolve(1);
+        EXPECT_EQ(immature.population_visits, 0u);
+        EXPECT_EQ(immature.born, 0);
+        const auto ready = resolve(2);
+        EXPECT_EQ(ready.population_visits, 2u);
+        ASSERT_EQ(ready.born, 1);
+        const auto cooling = resolve(3);
+        EXPECT_EQ(cooling.population_visits, 0u);
+        EXPECT_EQ(cooling.born, 0);
+        // Reuse the buffer after the idle tick, with changed population membership.
+        for (const auto entity : registry.view<AI::ReproductionBorn>()) {
+            registry.get<Comp::CreatureComponent>(entity).eaten = true;
+        }
+        registry.get<Comp::CreatureGenomeComponent>(mother).reproduce_cooldown = 1;
+        registry.get<Comp::CreatureGenomeComponent>(father).reproduce_cooldown = 1;
+        const auto reopened = resolve(4);
+        EXPECT_EQ(reopened.population_visits, 3u);
+        EXPECT_EQ(reopened.born, 1);
+    }
+}
+
+TEST(CreatureReproduction, MissingCensusSpeciesStartsAtZeroAndReservesBirths) {
+    namespace AI = luminumbra::ai;
+    entt::registry registry;
+    for (const bool female : {true, true, false, false}) {
+        const auto entity = spawnMate(registry, 0, 0, female);
+        registry.get<Comp::CreatureComponent>(entity).species_id =
+            std::numeric_limits<std::uint16_t>::max();
+        // Mortality alone excludes a census entry; readiness historically checks
+        // eaten instead. Preserve that distinction even for an empty census.
+        registry.emplace<Comp::MortalComponent>(entity).dead = 1;
+    }
+    AI::ReproductionTuning tuning;
+    tuning.courtship_ticks = 1;
+    tuning.species_capacity = 1;
+    const auto stats = RunMatingResolveOnTick(registry, 1, 985, tuning);
+    EXPECT_EQ(stats.population_visits, 4u);
+    EXPECT_EQ(stats.born, 1);
+    EXPECT_EQ(stats.courting, 1);
 }
 
 TEST(CreatureReproduction, NoGenomesPreserveHashAndDoNoCandidateWork) {
