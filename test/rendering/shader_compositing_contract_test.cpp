@@ -166,6 +166,11 @@ TEST(GroundCoverContract, NearBushesUseFullLeafQuadsAndNeverTerrainGrassTexturin
     ExpectContains(draw, "two_sided = leafCards;");
     ExpectContains(draw,
                    "shader->setInt(\"u_forceFlat\", (isBush || (isLeaf && isFarLod)) ? 1 : 0);");
+    // Far closed hulls use leaf reflectance instead of the grass material albedo.
+    ExpectContains(draw, "shader->setInt(\"u_leafSurface\", isBush ? 1 : 0);");
+    const auto frag = ReadShader("res/shaders/g_buffer.frag");
+    ExpectContains(frag, "uniform int u_leafSurface = 0;");
+    ExpectContains(frag, "if (proceduralLeaf || u_leafSurface == 1) {");
 }
 
 TEST(GroundCoverContract, LeafCardsAreFiniteOutwardQuadsForSideAndPolarNormals) {

@@ -913,10 +913,32 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                 auto chunk = ctx.world_system->find_streamed_chunk(slot.coords);
                 if (chunk && chunk->has_terrain_authority()) {
                     slot.chunk = std::move(chunk);
+                    // Support answers stay valid while the same resident chunk keeps
+                    // its voxel revision and SDF storage; any change re-evaluates.
+                    const bool same_owner = !slot.supportOwner.owner_before(slot.chunk) &&
+                                            !slot.chunk.owner_before(slot.supportOwner);
+                    const auto revision = slot.chunk->voxel_revision();
+                    const float* const sdf = slot.chunk->sdf_data.data();
+                    if (!same_owner || slot.supportRevision != revision || slot.supportSdf != sdf) {
+                        slot.supportOwner = slot.chunk;
+                        slot.supportRevision = revision;
+                        slot.supportSdf = sdf;
+                        slot.supportGeneration =
+                            slot.supportGeneration == std::numeric_limits<std::uint32_t>::max()
+                                ? 1u
+                                : slot.supportGeneration + 1u;
+                    }
                 }
             }
-            if (slot.chunk && EditedTerrainRemovesAnchor(slot.chunk.get(), cp.position)) {
-                continue;
+            if (slot.chunk) {
+                // At most eight lattice reads per prop per support change, not per frame.
+                if (cp.supportGeneration != slot.supportGeneration) {
+                    cp.supportRemoved = EditedTerrainRemovesAnchor(slot.chunk.get(), cp.position);
+                    cp.supportGeneration = slot.supportGeneration;
+                }
+                if (cp.supportRemoved) {
+                    continue;
+                }
             }
         }
         // Group by a cheap uint64 (no per-instance string alloc/copy/compare).
@@ -983,6 +1005,7 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                 // textured tree parts sway in the wind (rigid props stay at 0).
                 shader->setFloat("u_windStrength", 1.0f);
                 shader->setInt("u_forceFlat", 0);
+                shader->setInt("u_leafSurface", 0);
             } else {
                 glBindTexture(GL_TEXTURE_2D_ARRAY,
                               ctx.skinned_textures.id ? ctx.skinned_textures.id
@@ -1007,6 +1030,8 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                 // Shrubs are foliage at every distance, never opaque grass-textured stone.
                 // Distant shrubs keep the closed hull; only their near mesh uses leaf cards.
                 shader->setInt("u_forceFlat", (isBush || (isLeaf && isFarLod)) ? 1 : 0);
+                // Near cards and distant hulls share the leaf reflectance, not grass.
+                shader->setInt("u_leafSurface", isBush ? 1 : 0);
             }
         }
         if (two_sided || !cull_was_enabled)

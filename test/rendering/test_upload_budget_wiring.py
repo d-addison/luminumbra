@@ -71,9 +71,27 @@ class UploadBudgetWiring(unittest.TestCase):
         # Each anchor chunk resolves once per frame; edited support drops the prop.
         lookup = "if (cp.anchorSlot < m_anchorChunks.size() && ctx.world_system) {"
         resolve = "auto chunk = ctx.world_system->find_streamed_chunk(slot.coords); if (chunk && chunk->has_terrain_authority()) {"
-        guard = "if (slot.chunk && EditedTerrainRemovesAnchor(slot.chunk.get(), cp.position)) { continue; }"
-        for needle in (lookup, "if (!slot.resolved) { slot.resolved = true;", resolve, guard):
+        guard = "if (cp.supportRemoved) { continue; }"
+        # Support is re-evaluated only when the slot's chunk, revision or SDF storage changes.
+        changed = ("if (!same_owner || slot.supportRevision != revision || slot.supportSdf != sdf) {")
+        reeval = ("if (cp.supportGeneration != slot.supportGeneration) { cp.supportRemoved = "
+                  "EditedTerrainRemovesAnchor(slot.chunk.get(), cp.position); "
+                  "cp.supportGeneration = slot.supportGeneration; }")
+        for needle in (lookup, "if (!slot.resolved) { slot.resolved = true;", resolve, guard,
+                       "const auto revision = slot.chunk->voxel_revision();",
+                       "const float* const sdf = slot.chunk->sdf_data.data();",
+                       "!slot.supportOwner.owner_before(slot.chunk) && !slot.chunk.owner_before(slot.supportOwner);",
+                       changed, reeval):
             self.assertIn(needle, draw)
+        self.assertLess(draw.index(resolve), draw.index(changed))
+        self.assertLess(draw.index(changed), draw.index(reeval))
+        self.assertLess(draw.index(reeval), draw.index(guard))
+        self.assertEqual(draw.count("EditedTerrainRemovesAnchor("), 1)
+        header = compact(read(RENDERING / "passes/GBufferPass.h"))
+        for field in ("mutable std::uint32_t supportGeneration = 0; mutable bool supportRemoved = false;",
+                      "std::weak_ptr<const ::Luminumbra::Chunk> supportOwner;",
+                      "std::uint32_t supportGeneration = 1;"):
+            self.assertIn(field, header)
         self.assertLess(draw.index("if (culled)"), draw.index(lookup))
         self.assertLess(draw.index(lookup), draw.index(guard))
         self.assertLess(draw.index(guard), draw.index("batch.mats.push_back(cp.model)"))
@@ -99,6 +117,14 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn('shader->setInt("u_alphaTest", leafCards ? 2 : 0);', draw)
         self.assertIn("two_sided = leafCards;", draw)
         self.assertIn('shader->setInt("u_forceFlat", (isBush || (isLeaf && isFarLod)) ? 1 : 0);', draw)
+        # Closed far hulls keep the leaf reflectance; every other draw resets it.
+        self.assertIn('shader->setInt("u_leafSurface", isBush ? 1 : 0);', draw)
+        self.assertIn('shader->setInt("u_forceFlat", 0); shader->setInt("u_leafSurface", 0);', draw)
+        frag = compact(read(ROOT / "res/shaders/g_buffer.frag"))
+        self.assertIn("uniform int u_leafSurface = 0;", frag)
+        self.assertIn("if (proceduralLeaf || u_leafSurface == 1) {", frag)
+        # The card silhouette test stays keyed to alpha-tested cards only.
+        self.assertIn("bool proceduralLeaf = u_alphaTest == 2;", frag)
         # Both legacy and ladder programs use this same draw consumer.
         self.assertIn("instanced_static_mesh_shader(input.far_selection.effective)", draw)
         native = read(ROOT / "test/rendering/shader_compositing_contract_test.cpp")

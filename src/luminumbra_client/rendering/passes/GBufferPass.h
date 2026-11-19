@@ -183,6 +183,10 @@ private:
         bool terrainAnchored = false; // procedural rocks/shrubs retain their generated support
         // Index into m_anchorChunks for terrain-anchored props, resolved at cache build.
         std::uint32_t anchorSlot = std::numeric_limits<std::uint32_t>::max();
+        // Draw-time memo of the support answer for the slot generation it was
+        // evaluated at (0 = never); it never changes what the prop is.
+        mutable std::uint32_t supportGeneration = 0;
+        mutable bool supportRemoved = false;
     };
     std::vector<CachedStaticProp> m_staticPropCache;
     // One streamed-chunk lookup per anchor chunk per frame, shared by every prop in
@@ -192,6 +196,12 @@ private:
         glm::ivec3 coords{0};
         std::shared_ptr<const ::Luminumbra::Chunk> chunk;
         bool resolved = false;
+        // Identity of the chunk the cached prop answers came from. A weak owner
+        // never extends a chunk's lifetime and cannot alias a later allocation.
+        std::weak_ptr<const ::Luminumbra::Chunk> supportOwner;
+        std::uint32_t supportRevision = 0;
+        const float* supportSdf = nullptr;
+        std::uint32_t supportGeneration = 1; // never 0, so new props evaluate once
     };
     std::vector<AnchorChunkSlot> m_anchorChunks;
     std::vector<std::uint32_t> m_resolvedAnchorSlots;   // capacity reserved at cache build
