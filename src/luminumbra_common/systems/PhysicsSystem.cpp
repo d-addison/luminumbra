@@ -38,6 +38,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 
 using namespace JPH;
 
@@ -1780,10 +1781,17 @@ void PhysicsSystem::destroy_body(JPH::BodyID body) {
 
 // ---  : server-authoritative avatar characters ---
 void PhysicsSystem::clear_avatar_characters() {
-    for (std::size_t index = 0; index < m_avatars.size(); ++index) {
-        remove_avatar_character(index);
+    for (const auto& avatar : m_avatars) {
+        destroy_body(avatar.frozen_body);
     }
     m_avatars.clear();
+    m_free_avatar_slots.clear();
+    m_avatar_head = kNoAvatar;
+    m_avatar_tail = kNoAvatar;
+    m_live_avatar_count = 0;
+    if (m_simulation_collisions) {
+        m_simulation_collisions->ready = false;
+    }
 }
 
 void PhysicsSystem::remove_avatar_character(std::size_t index) {
@@ -1805,6 +1813,9 @@ void PhysicsSystem::remove_avatar_character(std::size_t index) {
     --m_live_avatar_count;
     destroy_body(m_avatars[index].frozen_body);
     m_avatars[index] = AvatarState{};
+    m_free_avatar_slots.push_back(index);
+    std::push_heap(
+        m_free_avatar_slots.begin(), m_free_avatar_slots.end(), std::greater<std::size_t>{});
     if (m_simulation_collisions) {
         m_simulation_collisions->ready = false;
     }
@@ -1852,7 +1863,7 @@ void PhysicsSystem::set_avatar_frozen(std::size_t index, bool frozen, const glm:
 }
 
 void PhysicsSystem::set_avatar_wish_velocity(std::size_t index, const glm::vec2& wish_xz) {
-    if (index < m_avatars.size()) {
+    if (index < m_avatars.size() && m_avatars[index].character) {
         m_avatars[index].wish = m_avatars[index].frozen ? glm::vec2(0.0f) : wish_xz;
     }
 }
@@ -1876,17 +1887,43 @@ std::size_t PhysicsSystem::create_avatar_character(const glm::vec3& start_pos) {
     settings.mMass = 80.0f;
     settings.mMaxSlopeAngle = glm::radians(50.0f);
     settings.mSupportingVolume = JPH::Plane(JPH::Vec3::sAxisY(), -0.4f);
-    m_avatars.push_back({.character = std::make_unique<JPH::CharacterVirtual>(
-                             &settings,
-                             JPH::RVec3(start_pos.x, start_pos.y, start_pos.z),
-                             JPH::Quat::sIdentity(),
-                             m_jolt_system.get()),
-                         .wish = glm::vec2(0.0f),
-                         .frozen_body = JPH::BodyID(),
-                         .frozen = false,
-                         .previous = m_avatar_tail,
-                         .next = kNoAvatar});
-    const auto index = m_avatars.size() - 1;
+    std::vector<std::size_t> retirement_storage;
+    if (m_free_avatar_slots.empty() && m_free_avatar_slots.capacity() <= m_avatars.size()) {
+        // Stage geometric growth so a refused character/append retains no new
+        // storage. Cap before addition to avoid size overflow.
+        const auto capacity = m_free_avatar_slots.capacity();
+        const auto maximum = m_free_avatar_slots.max_size();
+        if (m_avatars.size() == maximum) {
+            throw std::length_error("Avatar slot capacity exhausted");
+        }
+        retirement_storage.reserve(
+            std::max(m_avatars.size() + 1, capacity + std::min(capacity, maximum - capacity)));
+    }
+    AvatarState avatar{.character = std::make_unique<JPH::CharacterVirtual>(
+                           &settings,
+                           JPH::RVec3(start_pos.x, start_pos.y, start_pos.z),
+                           JPH::Quat::sIdentity(),
+                           m_jolt_system.get()),
+                       .wish = glm::vec2(0.0f),
+                       .frozen_body = JPH::BodyID(),
+                       .frozen = false,
+                       .previous = m_avatar_tail,
+                       .next = kNoAvatar};
+    auto index = m_avatars.size();
+    if (!m_free_avatar_slots.empty()) {
+        index = m_free_avatar_slots.front();
+        m_avatars[index] = std::move(avatar);
+        std::pop_heap(
+            m_free_avatar_slots.begin(), m_free_avatar_slots.end(), std::greater<std::size_t>{});
+        m_free_avatar_slots.pop_back();
+    } else {
+        m_avatars.push_back(std::move(avatar));
+        if (retirement_storage.capacity() != 0) {
+            m_free_avatar_slots.swap(retirement_storage);
+        }
+    }
+    // Publish both append and reuse only after every throwing operation succeeds.
+    // Admission, collision preparation and stepping all use this creation order.
     if (m_avatar_tail != kNoAvatar) {
         m_avatars[m_avatar_tail].next = index;
     } else {
@@ -1900,13 +1937,22 @@ std::size_t PhysicsSystem::create_avatar_character(const glm::vec3& start_pos) {
     return index;
 }
 
+PhysicsSystem::AvatarCharacterDiagnostics PhysicsSystem::avatar_character_diagnostics() const {
+    AvatarCharacterDiagnostics result{.live_count = m_live_avatar_count, .creation_order = {}};
+    // Explicit diagnostics only: at most the peak live slot count, never a tick pass.
+    result.creation_order.reserve(m_live_avatar_count);
+    for (auto index = m_avatar_head; index != kNoAvatar; index = m_avatars[index].next) {
+        result.creation_order.push_back(index);
+    }
+    return result;
+}
+
 void PhysicsSystem::update_avatars(float dt) {
     if (!m_jolt_system || !simulation_collisions_ready())
         return;
-    // Step every avatar IN INDEX (player_id) ORDER so the per-character collide-
-    // and-slide sequence is deterministic same-binary. : no horizontal input
-    // yet -- gravity when airborne, ground-stick when grounded (the avatars fall
-    // and settle on the terrain). Mirrors update_player's vertical handling.
+    // Step the live list in creation order, including reused slots at the tail,
+    // so collide-and-slide remains deterministic for the same lifecycle history.
+    // Gravity and ground-stick mirror update_player's vertical handling.
     const JPH::Vec3 gravity = m_jolt_system->GetGravity();
     for (auto i = m_avatar_head; i != kNoAvatar; i = m_avatars[i].next) {
         auto& character = m_avatars[i].character;
