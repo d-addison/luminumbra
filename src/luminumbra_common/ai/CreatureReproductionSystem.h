@@ -334,6 +334,18 @@ RunMatingResolveOnTick(entt::registry& reg,
             return entry != counts.end() && entry->first == species_id ? entry->second : 0;
         }
 
+        // One sort groups the whole census: O(n log n) however many species IDs appear.
+        void Build(std::vector<std::uint16_t>& species) {
+            std::sort(species.begin(), species.end());
+            for (const auto species_id : species) {
+                if (!counts.empty() && counts.back().first == species_id) {
+                    ++counts.back().second;
+                } else {
+                    counts.emplace_back(species_id, 1);
+                }
+            }
+        }
+
         void Increment(std::uint16_t species_id) {
             const auto entry = Find(species_id);
             if (entry != counts.end() && entry->first == species_id) {
@@ -416,15 +428,19 @@ RunMatingResolveOnTick(entt::registry& reg,
             census_taken = true;
             // Only genome age/cooldown changed since entry; census eligibility and
             // admission are unchanged. Include creatures without genomes/transforms.
-            for (const auto entity : reg.view<Comp::CreatureComponent>()) {
+            const auto creatures = reg.view<Comp::CreatureComponent>();
+            std::vector<std::uint16_t> live_species;
+            live_species.reserve(creatures.size());
+            for (const auto entity : creatures) {
                 ++stats.population_visits;
                 const auto& creature = reg.get<Comp::CreatureComponent>(entity);
                 const auto* mortal = reg.try_get<Comp::MortalComponent>(entity);
                 if ((!admission || admission->Allows(entity)) && !creature.eaten &&
                     (!mortal || mortal->dead == 0)) {
-                    live_counts.Increment(creature.species_id);
+                    live_species.push_back(creature.species_id);
                 }
             }
+            live_counts.Build(live_species);
         }
         if (live_counts.Count(cr.species_id) >= tuning.species_capacity) {
             continue; // refuse before courtship/male bookkeeping; earlier IDs reserve first
