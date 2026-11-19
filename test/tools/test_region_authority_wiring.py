@@ -433,8 +433,11 @@ class SimulationCollisionWiring(unittest.TestCase):
         self.assertTrue(refused.endswith("break;"))
         self.assertLess(refused.index("GetRegionSchedulerFault()"),
                         refused.index("if (preparation_retries"))
-        self.assertLess(refused.index("physics_budget.Finish();"),
-                        refused.index("std::this_thread::sleep_for("))
+        # Refused attempts record no ServerPhysics sample; only completed ticks do.
+        self.assertNotIn("Record(", refused)
+        self.assertNotIn("TickScope physics_budget", body)
+        self.assertLess(body.index("physics_system->update_avatars("),
+                        body.index("budget.Record(BudgetStage::ServerPhysics,"))
 
     def assert_runtime_retry_contract(self, source, entry):
         body = function(source, "int " + entry + "(")
@@ -560,14 +563,19 @@ class SimulationCollisionWiring(unittest.TestCase):
             self.assertIn("return 1;", function(smoke_entry, guard))
             self.assertLess(smoke_entry.index(guard), smoke_entry.index("WriteSmokeArtifact("))
         heavy = function((modes / "Heavy.cpp").read_text(encoding="utf-8"), "int RunHeavy(")
-        for report, target, publication in (
-            ("pre_save_ticks", "options.ticks", "original.SaveFullSnapshot()"),
-            ("orig_resim", "options.heavy_resim", "loaded.RunFixedTicks("),
-            ("loaded_resim", "options.heavy_resim", "const HeavyHashes orig_final"),
+        for report, target, publication, refusal in (
+            ("pre_save_ticks", "options.ticks", "original.SaveFullSnapshot()", "return 1;"),
+            ("orig_resim", "options.heavy_resim", "loaded.RunFixedTicks(", "return 1;"),
+            ("loaded_resim", "options.heavy_resim", "const HeavyHashes orig_final", "return 1;"),
         ):
             guard = f"if ({report}.region_fault || {report}.ticks_executed != {target})"
-            self.assertIn("return 1;", function(heavy, guard))
+            self.assertIn(refusal, function(heavy, guard))
             self.assertLess(heavy.index(guard), heavy.index(publication))
+        # Every refusal after boot unwinds the runners before the guard removes the world.
+        self.assertLess(heavy.index("ThrowawaySaveDirGuard save_cleanup;"),
+                        heavy.index("ServerWorldRunner original("))
+        self.assertLess(heavy.index("save_cleanup.Arm(original.Session()->GetWorldSaveDir());"),
+                        heavy.index("original.RunFixedTicks(options.ticks)"))
         server = function((modes / "Server.cpp").read_text(encoding="utf-8"), "int RunServer(")
         self.assertIn("runner.RunFixedTicks(options.ticks)", server)
         self.assertIn("return 3;", function(server, "if (report.region_fault)"))
