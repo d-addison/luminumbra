@@ -664,11 +664,13 @@ void AssignRestoredOwnerBody(JPH::BodyInterface& body_interface, JPH::Body* body
 }
 
 // Validate the complete pool topology before allocating or publishing any owner.
-// At most 10240 slots, 128 recipes and 10240 existing bodies are examined.
+// At most 10240 slots, 128 body recipes, 4095 controller reservations and
+// 10240 existing bodies are examined.
 bool ValidateOwnerAllocator(const PhysicsSystem::BodySetState& state,
                             std::span<const OwnerRecipe> recipes,
                             const JPH::BodyIDVector& existing,
-                            std::uint32_t destination_slots) {
+                            std::uint32_t destination_slots,
+                            std::span<const std::uint32_t> reserved) {
     if (state.slot_count > kPhysicsCapacity || destination_slots > state.slot_count ||
         state.free_slots.size() > state.slot_count) {
         return false; // Jolt cannot shrink its already allocated slot array.
@@ -694,6 +696,11 @@ bool ValidateOwnerAllocator(const PhysicsSystem::BodySetState& state,
     }
     for (const auto& recipe : recipes) {
         if (!mark(recipe.body)) {
+            return false;
+        }
+    }
+    for (const auto id : reserved) {
+        if (!mark(id)) {
             return false;
         }
     }
@@ -2117,13 +2124,41 @@ bool PhysicsSystem::capture_avatar_owner(std::size_t index,
     }
 }
 
-bool PhysicsSystem::restore_avatar_owner(const World::PhysicsOwnerState& state,
-                                         std::size_t& index) {
+bool PhysicsSystem::restore_avatar_owner(
+    const World::PhysicsOwnerState& state,
+    std::size_t& index,
+    std::span<const World::PhysicsOwnerState> remaining_frozen) {
     OwnerRecipe recipe;
     if (!m_jolt_system || m_avatars.size() >= kMaxRestoredAvatars ||
         !ParseController(state, recipe) || recipe.kind != 1u ||
+        !SimulationHorizon::valid(Vec3(static_cast<float>(recipe.feet.GetX()),
+                                       static_cast<float>(recipe.feet.GetY()),
+                                       static_cast<float>(recipe.feet.GetZ()))) ||
+        remaining_frozen.size() >= kMaxRestoredAvatars - m_avatars.size() ||
         !ReferencesExist(recipe, *m_jolt_system)) {
         return false;
+    }
+    if (!remaining_frozen.empty() && recipe.body == JPH::BodyID::cInvalidBodyID) {
+        return false;
+    }
+    // The codec carries a global allocator, but each controller owns one slot.
+    // At most 4095 remaining captures, each bounded to 64 KiB,
+    // may explain slots absent from the destination. Never infer reservations
+    // from unexplained holes: malformed, duplicate and conflicting IDs refuse.
+    std::vector<std::uint32_t> reserved;
+    reserved.reserve(remaining_frozen.size());
+    for (const auto& pending : remaining_frozen) {
+        OwnerRecipe reservation;
+        if (!ParseController(pending, reservation) || reservation.kind != 1u ||
+            reservation.flags != 1u || reservation.body == JPH::BodyID::cInvalidBodyID ||
+            reservation.slot_count != recipe.slot_count ||
+            reservation.free_slots != recipe.free_slots ||
+            !SimulationHorizon::valid(Vec3(static_cast<float>(reservation.feet.GetX()),
+                                           static_cast<float>(reservation.feet.GetY()),
+                                           static_cast<float>(reservation.feet.GetZ())))) {
+            return false;
+        }
+        reserved.push_back(reservation.body);
     }
     bool prepared_capsule = false;
     JPH::BodyIDVector existing;
@@ -2164,11 +2199,15 @@ bool PhysicsSystem::restore_avatar_owner(const World::PhysicsOwnerState& state,
     }
     const bool needs_capsule = recipe.body != JPH::BodyID::cInvalidBodyID && !prepared_capsule;
     BodySetState allocator;
-    if (needs_capsule) {
+    if (needs_capsule || !reserved.empty()) {
         allocator.slot_count = recipe.slot_count;
         allocator.free_slots = recipe.free_slots;
-        if (!ValidateOwnerAllocator(
-                allocator, std::span(&recipe, 1), existing, m_body_slots->slot_count)) {
+        if (!ValidateOwnerAllocator(allocator,
+                                    prepared_capsule ? std::span<const OwnerRecipe>{}
+                                                     : std::span(&recipe, 1),
+                                    existing,
+                                    m_body_slots->slot_count,
+                                    reserved)) {
             return false;
         }
     }
@@ -2262,57 +2301,16 @@ bool PhysicsSystem::restore_avatar_owner(const World::PhysicsOwnerState& state,
     return true;
 }
 
-bool PhysicsSystem::capture_player_owner(World::PhysicsOwnerState& output) const {
-    if (!m_player_character) {
-        return false;
-    }
-    OwnerRecipe recipe;
-    recipe.kind = 2u;
-    recipe.flags = m_player_character->GetShape() == m_player_crouch_shape ? 2u : 0u;
-    try {
-        m_player_character->SaveState(recipe.owner);
-        return WriteController(recipe, output);
-    } catch (const OwnerStateRefusal&) {
-        return false;
-    }
-}
-
-bool PhysicsSystem::restore_player_owner(const World::PhysicsOwnerState& state) {
-    OwnerRecipe recipe;
-    if (!m_jolt_system || m_player_character || !ParseController(state, recipe) ||
-        recipe.kind != 2u || !ReferencesExist(recipe, *m_jolt_system)) {
-        return false;
-    }
-    const auto standing = FeetCapsule(0.9f, 1.3f);
-    const auto crouching = FeetCapsule(0.45f, 0.85f);
-    auto character = PrepareController(
-        recipe.flags == 2u ? crouching : standing, glm::vec3(0.0f), m_jolt_system.get());
-    character->RestoreState(recipe.owner);
-    m_player_stand_shape = standing;
-    m_player_crouch_shape = crouching;
-    m_player_character = std::move(character);
-    if (m_simulation_collisions) {
-        m_simulation_collisions->ready = false;
-    }
-    return true;
-}
-
 bool PhysicsSystem::OwnerContinuation::capture_avatar_owner(
     std::size_t index, World::PhysicsOwnerState& output) const {
     return m_physics.capture_avatar_owner(index, output);
 }
-bool PhysicsSystem::OwnerContinuation::restore_avatar_owner(const World::PhysicsOwnerState& state,
-                                                            std::size_t& index) {
-    return m_physics.restore_avatar_owner(state, index);
+bool PhysicsSystem::OwnerContinuation::restore_avatar_owner(
+    const World::PhysicsOwnerState& state,
+    std::size_t& index,
+    std::span<const World::PhysicsOwnerState> remaining_frozen) {
+    return m_physics.restore_avatar_owner(state, index, remaining_frozen);
 }
-bool PhysicsSystem::OwnerContinuation::capture_player_owner(
-    World::PhysicsOwnerState& output) const {
-    return m_physics.capture_player_owner(output);
-}
-bool PhysicsSystem::OwnerContinuation::restore_player_owner(const World::PhysicsOwnerState& state) {
-    return m_physics.restore_player_owner(state);
-}
-
 bool PhysicsSystem::capture_body_owner(JPH::BodyID body, BodyOwnerState& output) const {
     if (!m_jolt_system || body.IsInvalid() || body.GetIndex() >= kPhysicsCapacity) {
         return false;
@@ -2470,7 +2468,7 @@ bool PhysicsSystem::restore_body_owners(const BodySetState& state, std::span<JPH
             }
         }
     }
-    if (!ValidateOwnerAllocator(state, recipes, existing, m_body_slots->slot_count)) {
+    if (!ValidateOwnerAllocator(state, recipes, existing, m_body_slots->slot_count, {})) {
         return false;
     }
     std::vector<OwnerRecipe::ContactKey> pairs;
@@ -2953,13 +2951,14 @@ bool GameSession::CaptureAvatarOwner(const World::PlayerAvatar& avatar,
 
 bool GameSession::RestoreAvatarOwner(const World::PlayerAvatarOwnerState& state,
                                      World::PlayerAvatar& avatar,
-                                     std::size_t& physics_index) {
+                                     std::size_t& physics_index,
+                                     std::span<const World::PhysicsOwnerState> remaining_frozen) {
     if (!m_physicsSystem) {
         return false;
     }
     if (!World::ValidateAvatarOwner(state) ||
         !Systems::PhysicsSystem::OwnerContinuation(*m_physicsSystem)
-             .restore_avatar_owner(state.physics, physics_index)) {
+             .restore_avatar_owner(state.physics, physics_index, remaining_frozen)) {
         return false;
     }
     avatar = state.avatar;

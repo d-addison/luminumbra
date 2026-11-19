@@ -6737,4 +6737,76 @@ TEST_F(WorldOpenRefusal, ServerOwnerContinuationRestoresInPlayerOrderAndContinue
     EXPECT_EQ(target.Avatars().size(), 1u);
     EXPECT_EQ(target.Session()->GetPhysicsSystem()->avatar_character_slot_count(), 2u);
 }
+TEST_F(WorldOpenRefusal, ServerFrozenRosterRestoresSequentiallyAndContinues) {
+    Write(root / "data/common/systems.json",
+          R"({"sim":{"active_regions":{"enabled":false},"water_high_res":{"enabled":false}}})");
+    Server::ServerWorldRunnerConfig source_config;
+    source_config.root_path = RootString();
+    source_config.world_id = "fixture";
+    source_config.surface_radius = 0;
+    source_config.collision_radius = 0;
+    source_config.test_streaming_radius_cap = 1;
+    source_config.autosave_interval_ticks = 0;
+    source_config.finite_hydrology = false;
+    source_config.avatar_count = 0;
+    Server::ServerWorldRunner source(source_config);
+    ASSERT_TRUE(source.Boot()) << source.GetBootError();
+    auto* original = source.Session()->GetPhysicsSystem();
+    ASSERT_NE(original, nullptr);
+    std::vector<World::PlayerAvatarOwnerState> captured(3);
+    std::vector<World::PhysicsOwnerState> physics(3);
+    // Seed controllers through the session bridge while keeping both zero-avatar
+    // boot terrain sets identical. This setup is complete before the capture.
+    for (std::size_t slot = 0; slot < captured.size(); ++slot) {
+        World::PlayerAvatar avatar;
+        avatar.player_id = static_cast<std::uint32_t>(slot);
+        avatar.position = source.Session()->GetMetadata().spawnPoint +
+                          Vec3(0, 20.0f + 8.0f * static_cast<float>(slot), 0);
+        ASSERT_EQ(original->create_avatar_character(avatar.position), slot);
+        ASSERT_TRUE(source.Session()->CaptureAvatarOwner(avatar, slot, captured[slot]));
+    }
+    original->clear_avatar_characters();
+    for (const auto& owner : captured) {
+        ASSERT_TRUE(source.RestoreAvatarOwner(owner));
+    }
+    for (std::size_t slot = 0; slot < captured.size(); ++slot) {
+        original->set_avatar_frozen(slot, true, original->get_avatar_position(slot));
+    }
+    for (std::size_t slot = 0; slot < captured.size(); ++slot) {
+        ASSERT_TRUE(source.CaptureAvatarOwner(slot, captured[slot]));
+        physics[slot] = captured[slot].physics;
+    }
+    auto target_config = source_config;
+    target_config.avatar_count = 0;
+    Server::ServerWorldRunner target(target_config);
+    ASSERT_TRUE(target.Boot()) << target.GetBootError();
+    for (std::size_t slot = 0; slot < captured.size(); ++slot) {
+        ASSERT_TRUE(
+            target.RestoreAvatarOwner(captured[slot], std::span(physics).subspan(slot + 1)));
+        EXPECT_EQ(target.Avatars().size(), slot + 1);
+    }
+    for (unsigned tick = 0; tick < 6; ++tick) {
+        for (std::size_t slot = 0; slot < captured.size(); ++slot) {
+            World::PlayerAvatarOwnerState expected;
+            World::PlayerAvatarOwnerState actual;
+            ASSERT_TRUE(source.CaptureAvatarOwner(slot, expected));
+            ASSERT_TRUE(target.CaptureAvatarOwner(slot, actual));
+            std::array<std::uint8_t, World::kMaxAvatarOwnerBytes> expected_bytes{};
+            std::array<std::uint8_t, World::kMaxAvatarOwnerBytes> actual_bytes{};
+            std::size_t expected_size = 0;
+            std::size_t actual_size = 0;
+            ASSERT_TRUE(World::EncodeAvatarOwner(expected, expected_bytes, expected_size));
+            ASSERT_TRUE(World::EncodeAvatarOwner(actual, actual_bytes, actual_size));
+            EXPECT_EQ(expected_size, actual_size);
+            EXPECT_EQ(expected_bytes, actual_bytes);
+            if (tick == 2) {
+                original->set_avatar_frozen(slot, false, original->get_avatar_position(slot));
+                auto* restored = target.Session()->GetPhysicsSystem();
+                restored->set_avatar_frozen(slot, false, restored->get_avatar_position(slot));
+            }
+        }
+        ASSERT_EQ(source.RunFixedTicks(1).ticks_executed, 1u);
+        ASSERT_EQ(target.RunFixedTicks(1).ticks_executed, 1u);
+    }
+}
 } // namespace

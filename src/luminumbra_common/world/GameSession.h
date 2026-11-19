@@ -28,6 +28,7 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <span>
 #include <stop_token>
 #include <string>
 #include <vector>
@@ -36,6 +37,7 @@ namespace Luminumbra::World {
 class FarWorldAuthorityProducer;
 struct PlayerAvatar;
 struct PlayerAvatarOwnerState;
+struct PhysicsOwnerState;
 struct FarWorldAuthorityConfig;
 } // namespace Luminumbra::World
 
@@ -340,12 +342,15 @@ public:
     }
 
     // Internal owner continuation; no save/hash/boot adoption until explicitly called.
+    // Supply not-yet-restored frozen captures to reserve their body slots. Finish
+    // the roster before stepping or allocating other bodies (owner-thread exclusion).
     bool CaptureAvatarOwner(const World::PlayerAvatar& avatar,
                             std::size_t physics_index,
                             World::PlayerAvatarOwnerState& output) const;
     bool RestoreAvatarOwner(const World::PlayerAvatarOwnerState& state,
                             World::PlayerAvatar& avatar,
-                            std::size_t& physics_index);
+                            std::size_t& physics_index,
+                            std::span<const World::PhysicsOwnerState> remaining_frozen = {});
 
     // the deterministic wind field. Sim-authoritative; its cell
     // values feed the world_hash `wind` sub-hash. Constructed on world

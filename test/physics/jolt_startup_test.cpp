@@ -17,7 +17,7 @@
 
 #include <gtest/gtest.h>
 
-#include "../fixtures/OwnerContinuationTestAccess.h"
+#include "../fixtures/AvatarContinuationWorld.h"
 #include "luminumbra_common/core/Log.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/world/Chunk.h"
@@ -2486,9 +2486,7 @@ TEST(JoltStartup, ApplicationDefaultAllocatorsRemainCompatibleWithStaticStorage)
 #endif
 
 namespace {
-ApplicationPhysics::OwnerContinuation OwnerAccess(ApplicationPhysics& physics) {
-    return Luminumbra::Systems::OwnerContinuationTestAccess::Make(physics);
-}
+
 using ControllerOwner = Luminumbra::World::PhysicsOwnerState;
 
 template<class Physics>
@@ -2528,30 +2526,20 @@ void RequireBodySetEqual(const ApplicationPhysics::BodySetState& before,
     }
 }
 
-// Modes: moving avatar, newly allocated frozen capsule, adopted frozen capsule,
-// standing player, crouching player. Every real allocation ordinal is refused.
+// Modes: moving avatar, newly allocated frozen capsule, adopted frozen capsule.
+// Every real allocation ordinal is refused.
 void ControllerRestoreAllocationSweep(int mode) {
     Log::Init();
     InitializeAllocators();
     {
-        ApplicationPhysics source;
-        source.startup();
+        Luminumbra::TestSupport::AvatarContinuationWorld source_world;
+        auto& source = source_world.physics();
         ControllerFloor(source);
-        const bool player = mode >= 3;
         const bool frozen = mode == 1 || mode == 2;
-        auto source_owner = OwnerAccess(source);
-        if (player) {
-            source.create_player_controller({8.0f, 8.1f, 8.0f});
-            Require(source.set_player_crouched(mode == 4));
-        } else {
-            Require(source.create_avatar_character({8.0f, 8.1f, 8.0f}) == 0);
-        }
+        auto& source_owner = source_world;
+        Require(source.create_avatar_character({8.0f, 8.1f, 8.0f}) == 0);
         for (unsigned tick = 0; tick < 45; ++tick) {
-            if (player) {
-                source.update_player({0, 0, 0}, false, 6.0f, 1.0f / 30.0f);
-            } else {
-                source.update_avatars(1.0f / 30.0f);
-            }
+            source.update_avatars(1.0f / 30.0f);
         }
         if (frozen) {
             const auto hole = source.create_dynamic_sphere({20, 20, 20}, {0, 0, 0}, 0.3f);
@@ -2560,8 +2548,7 @@ void ControllerRestoreAllocationSweep(int mode) {
             source.destroy_body(hole); // Exercise scratch allocation and free-slot order.
         }
         ControllerOwner captured;
-        Require(player ? source_owner.capture_player_owner(captured)
-                       : source_owner.capture_avatar_owner(0, captured));
+        Require(source_owner.capture_avatar_owner(0, captured));
         // Character contacts are at word 36 in the established scalar schema.
         Require(ControllerWord(captured, 144) > 0);
         ApplicationPhysics::BodySetState body_set;
@@ -2569,10 +2556,10 @@ void ControllerRestoreAllocationSweep(int mode) {
         std::size_t measured = 0;
         for (std::size_t ordinal = 0; ordinal <= measured; ++ordinal) {
             {
-                ApplicationPhysics target;
-                target.startup();
+                Luminumbra::TestSupport::AvatarContinuationWorld target_world;
+                auto& target = target_world.physics();
                 ControllerFloor(target);
-                auto target_owner = OwnerAccess(target);
+                auto& target_owner = target_world;
                 if (mode == 2) {
                     std::array<JPH::BodyID, 1> ids{};
                     Require(target.restore_body_owners(body_set, ids));
@@ -2584,8 +2571,7 @@ void ControllerRestoreAllocationSweep(int mode) {
                 bool caught = false;
                 Arm(ordinal, false, false);
                 try {
-                    restored = player ? target_owner.restore_player_owner(captured)
-                                      : target_owner.restore_avatar_owner(captured, index);
+                    restored = target_owner.restore_avatar_owner(captured, index);
                 } catch (const std::bad_alloc&) {
                     caught = true;
                 }
@@ -2598,28 +2584,22 @@ void ControllerRestoreAllocationSweep(int mode) {
                     Require(caught && !restored && Allocations().failures == 1);
                     Require(index == 777 && target.avatar_character_slot_count() == 0);
                     ControllerOwner absent;
-                    Require(!target_owner.capture_player_owner(absent));
                     Require(!target_owner.capture_avatar_owner(0, absent));
                     ApplicationPhysics::BodySetState after;
                     Require(target.capture_body_owners(after));
                     RequireBodySetEqual(before, after);
                     // Retry on the same destination. A premature append makes
-                    // this yield index 1; premature player publication refuses.
-                    Require(player ? target_owner.restore_player_owner(captured)
-                                   : target_owner.restore_avatar_owner(captured, index));
+                    // this yield index 1.
+                    Require(target_owner.restore_avatar_owner(captured, index));
                 }
-                Require(target.avatar_character_slot_count() == (player ? 0u : 1u));
-                if (!player) {
-                    Require(index == 0);
-                }
+                Require(target.avatar_character_slot_count() == 1u);
+                Require(index == 0);
                 ControllerOwner actual;
-                Require(player ? target_owner.capture_player_owner(actual)
-                               : target_owner.capture_avatar_owner(0, actual));
+                Require(target_owner.capture_avatar_owner(0, actual));
                 RequireOwnerEqual(captured, actual);
-                if (player || frozen) {
-                    Require(!(player ? target_owner.restore_player_owner(captured)
-                                     : target_owner.restore_avatar_owner(captured, index)));
-                    Require(target.avatar_character_slot_count() == (player ? 0u : 1u));
+                if (frozen) {
+                    Require(!target_owner.restore_avatar_owner(captured, index));
+                    Require(target.avatar_character_slot_count() == 1u);
                 }
             }
             Require(Outstanding() == 0);
@@ -2632,7 +2612,7 @@ void ControllerRestoreAllocationSweep(int mode) {
 } // namespace
 
 TEST(JoltStartup, ControllerAllocationFailuresPublishNothingAndRetryExactlyOnce) {
-    for (int mode = 0; mode < 5; ++mode) {
+    for (int mode = 0; mode < 3; ++mode) {
         ASSERT_EXIT(ControllerRestoreAllocationSweep(mode), ::testing::ExitedWithCode(0), "");
     }
 }
@@ -2641,8 +2621,8 @@ namespace {
 void ControllerFailedInsertionPreservesNextBody(bool has_free_slot) {
     Log::Init();
     InitializeAllocators();
-    ApplicationPhysics source;
-    source.startup();
+    Luminumbra::TestSupport::AvatarContinuationWorld source_world;
+    auto& source = source_world.physics();
     ControllerFloor(source);
     source.create_avatar_character({8, 10, 8});
     std::array<JPH::BodyID, 4> holes{};
@@ -2655,9 +2635,8 @@ void ControllerFailedInsertionPreservesNextBody(bool has_free_slot) {
         source.destroy_body(hole);
     }
     ControllerOwner captured;
-    Require(OwnerAccess(source).capture_avatar_owner(0, captured));
+    Require(source_world.capture_avatar_owner(0, captured));
     const auto prepare = [has_free_slot](ApplicationPhysics& physics) {
-        physics.startup();
         ControllerFloor(physics);
         if (has_free_slot) {
             const auto hole = physics.create_dynamic_sphere({20, 20, 20}, {0, 0, 0}, 0.3f);
@@ -2665,22 +2644,25 @@ void ControllerFailedInsertionPreservesNextBody(bool has_free_slot) {
             physics.destroy_body(hole);
         }
     };
-    ApplicationPhysics measured;
+    Luminumbra::TestSupport::AvatarContinuationWorld measured_world;
+    auto& measured = measured_world.physics();
     prepare(measured);
     std::size_t index = 777;
     Arm(0, false, false);
-    const bool succeeded = OwnerAccess(measured).restore_avatar_owner(captured, index);
+    const bool succeeded = measured_world.restore_avatar_owner(captured, index);
     const auto attempts = Allocations().attempts.load();
     Disarm();
     Require(succeeded && attempts > 0);
-    ApplicationPhysics target;
+    Luminumbra::TestSupport::AvatarContinuationWorld target_world;
+    auto& target = target_world.physics();
     prepare(target);
-    ApplicationPhysics baseline;
+    Luminumbra::TestSupport::AvatarContinuationWorld baseline_world;
+    auto& baseline = baseline_world.physics();
     prepare(baseline);
     bool caught = false;
     Arm(attempts, false, false); // The final allocation prepares broadphase insertion.
     try {
-        static_cast<void>(OwnerAccess(target).restore_avatar_owner(captured, index));
+        static_cast<void>(target_world.restore_avatar_owner(captured, index));
     } catch (const std::bad_alloc&) {
         caught = true;
     }

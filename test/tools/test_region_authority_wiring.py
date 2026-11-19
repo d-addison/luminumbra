@@ -793,9 +793,7 @@ class SimulationCollisionWiring(unittest.TestCase):
             with self.subTest(original=original), self.assertRaises(AssertionError):
                 self.assert_terrain_reservation_accounting(source.replace(original, replacement))
 
-    def test_character_admission_precedes_both_allocations(self):
-        source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(
-            encoding="utf-8")
+    def assert_character_admission_precedes_both_allocations(self, source):
         admit = function(source, "bool PhysicsSystem::can_admit_simulation_owner(")
         for token in ("m_live_avatar_count >= kSimulationOwnerBudget -",
                       "horizon.add(position)", "horizon.add(get_player_position())",
@@ -810,12 +808,82 @@ class SimulationCollisionWiring(unittest.TestCase):
         ):
             body = function(source, signature)
             # Admission precedes both the capsule shape and the controller allocation.
-            allocations = [body.index(token) for token in ("FeetCapsule(", "PrepareController(")
-                           if token in body]
-            self.assertTrue(allocations)
-            first = min(allocations)
-            self.assertLess(body.index(check), first)
-            self.assertIn(refusal, body[:first])
+            for allocation in ("FeetCapsule(", "PrepareController("):
+                self.assertIn(allocation, body)
+                self.assertLess(body.index(check), body.index(allocation))
+                self.assertIn(refusal, body[:body.index(allocation)])
+
+    def test_character_admission_precedes_both_allocations(self):
+        source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(
+            encoding="utf-8")
+        self.assert_character_admission_precedes_both_allocations(source)
+        for allocation in ("FeetCapsule(", "PrepareController("):
+            with self.subTest(missing=allocation), self.assertRaises(AssertionError):
+                self.assert_character_admission_precedes_both_allocations(
+                    source.replace(allocation, "MissingAllocation("))
+            for signature in ("bool PhysicsSystem::create_player_controller(",
+                              "std::size_t PhysicsSystem::create_avatar_character("):
+                start = source.index("{", source.index(signature)) + 1
+                early = source[:start] + allocation + ");" + source[start:]
+                with self.subTest(early=allocation, signature=signature), self.assertRaises(AssertionError):
+                    self.assert_character_admission_precedes_both_allocations(early)
+
+    def test_avatar_restore_accounts_for_remaining_frozen_captures(self):
+        source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(
+            encoding="utf-8")
+        restore = function(source, "bool PhysicsSystem::restore_avatar_owner(")
+        for token in ("remaining_frozen.size() >= kMaxRestoredAvatars - m_avatars.size()",
+                      "ParseController(pending, reservation)", "reservation.flags != 1u",
+                      "reservation.body == JPH::BodyID::cInvalidBodyID",
+                      "reservation.slot_count != recipe.slot_count",
+                      "reservation.free_slots != recipe.free_slots",
+                      "reserved.push_back(reservation.body);"):
+            self.assertIn(token, restore)
+            self.assertLess(restore.index(token), restore.index("PrepareOwnerAllocatorScratch("))
+        self.assertRegex(restore, r"ValidateOwnerAllocator\(allocator,.*m_body_slots->slot_count, reserved\)")
+        allocator = function(source, "bool ValidateOwnerAllocator(")
+        reserved = function(allocator, "for (const auto id : reserved)")
+        self.assertIn("if (!mark(id)) { return false; }", reserved)
+        self.assertIn("std::all_of(", allocator)
+        for signature in ("bool PhysicsSystem::OwnerContinuation::restore_avatar_owner(",
+                          "bool GameSession::RestoreAvatarOwner("):
+            self.assertIn("remaining_frozen)", function(source, signature))
+        runner = (ROOT / "src/luminumbra_server/ServerWorldRunner.h").read_text(encoding="utf-8")
+        self.assertIn("RestoreAvatarOwner(state, avatar, index, remaining_frozen)", runner)
+        native = (ROOT / "test/common/PlayerAvatar_test.cpp").read_text(encoding="utf-8")
+        for name in ("FrozenRosterRestoresSequentiallyAndContinuesBitExactly",
+                     "FrozenReservationsRefuseMalformedAndConflictingCaptures"):
+            self.assertIn(name, native)
+        self.assertIn("std::span(captured).subspan(slot + 1)", native)
+        server_test = (ROOT / "test/persistence/world_open_refusal_test.cpp").read_text(encoding="utf-8")
+        self.assertIn("ServerFrozenRosterRestoresSequentiallyAndContinues", server_test)
+
+    def test_avatar_restore_checks_simulation_bounds_before_staging(self):
+        source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(
+            encoding="utf-8")
+        restore = function(source, "bool PhysicsSystem::restore_avatar_owner(")
+        admission = function(restore, "if (!m_jolt_system")
+        self.assertIn("return false;", admission)
+        self.assertIn("recipe.feet.GetX()", restore)
+        check = restore.index("!SimulationHorizon::valid(")
+        self.assertLess(check, restore.index("PrepareOwnerAllocatorScratch("))
+        self.assertLess(restore.index("recipe.feet.GetX()"), restore.index("return false;"))
+        native = (ROOT / "test/common/PlayerAvatar_test.cpp").read_text(encoding="utf-8")
+        regression = function(native, "TEST(GameSessionHeadlessWorldTest, "
+                              "OutOfBoundsAvatarRestorePublishesNothingAndTicksContinue)")
+        for token in ("jobs.startup(1)", "session.SetJobSystem(&jobs)",
+                      "set_durable_residency(true)", "session.SetActiveRegionsEnabled(true)",
+                      "ValidateAvatarOwner(invalid)",
+                      "EXPECT_FALSE(session.RestoreAvatarOwner(invalid, output, index))",
+                      "EXPECT_EQ(target->avatar_character_slot_count(), 0u)",
+                      "session.TickSimulation("):
+            self.assertIn(token, regression)
+
+    def test_continuation_has_no_player_api_or_test_access_hook(self):
+        header = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.h").read_text(encoding="utf-8")
+        source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(encoding="utf-8")
+        for token in ("capture_player_owner", "restore_player_owner", "OwnerContinuationTestAccess"):
+            self.assertNotIn(token, header + source)
 
     def test_overflow_horizons_keep_existing_sessions_running(self):
         source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(

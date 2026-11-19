@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <system_error>
 
@@ -300,13 +301,15 @@ public:
     }
 
     // Internal continuation entry points for a caller that restores owners in
-    // player-ID order instead of using the existing Boot spawn path.
+    // player-ID order instead of using the existing Boot spawn path. Supply the
+    // remaining frozen captures and finish the roster before stepping or spawning.
     bool CaptureAvatarOwner(std::size_t index, World::PlayerAvatarOwnerState& output) const {
         return m_session && index < m_avatars.size() &&
                m_session->CaptureAvatarOwner(m_avatars[index], index, output);
     }
 
-    bool RestoreAvatarOwner(const World::PlayerAvatarOwnerState& state) {
+    bool RestoreAvatarOwner(const World::PlayerAvatarOwnerState& state,
+                            std::span<const World::PhysicsOwnerState> remaining_frozen = {}) {
         if (!m_session || state.avatar.player_id != m_avatars.size()) {
             return false;
         }
@@ -318,7 +321,7 @@ public:
         m_avatars.reserve(m_avatars.size() + 1);
         World::PlayerAvatar avatar;
         std::size_t index = 0;
-        if (!m_session->RestoreAvatarOwner(state, avatar, index)) {
+        if (!m_session->RestoreAvatarOwner(state, avatar, index, remaining_frozen)) {
             return false;
         }
         m_avatars.push_back(avatar);
