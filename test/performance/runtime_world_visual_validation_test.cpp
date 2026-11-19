@@ -11,11 +11,13 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <string>
@@ -1125,6 +1127,170 @@ TEST(NetworkedSessionDriverTest, PresentationPreloadPreservesBothStartingAuthori
     input >> artifact;
     EXPECT_TRUE(artifact.at("end_hashes_equal").get<bool>());
     EXPECT_EQ(client.GetWorldClock().tick(), 0u);
+}
+
+namespace {
+
+class NetworkedSessionDriverPreparationTest : public testing::Test {
+protected:
+    void SetUp() override {
+        jobs.startup(1);
+        client.SetJobSystem(&jobs);
+        client.SetRootPath(root.root_string());
+        config.root_path = root.root_string();
+        const auto systems = luminumbra::core::SystemConfig::Defaults();
+        config.systems_config_override = systems;
+        client.ApplySystemConfig(systems);
+        ASSERT_TRUE(client.CreateWorld("Preparation retries", "424242", "default"));
+        ASSERT_TRUE(client.LoadWorldState());
+        config.surface_radius = 0;
+        config.collision_radius = 0;
+        config.budget_ticks = 3;
+        config.hash_cadence_ticks = 1;
+        ASSERT_TRUE(client.GetWorldSystem()->EnsureSurfaceReadyNear(
+            client.GetMetadata().spawnPoint, client.GetPhysicsSystem(), 0, 0));
+
+        auto params = Luminumbra::Test::SyntheticTerrainParams();
+        params.base_amplitude = 0;
+        params.peaks_amplitude = 0;
+        params.height_offset = 8;
+        params.continental_spline = {{{-1, 0}}, {{1, 0}}};
+        refusal_world = std::make_unique<SHIELD_WorldSystem>(nullptr, nullptr, params, 4242);
+        refusal_world->set_durable_residency(true);
+        auto partial = std::make_shared<Chunk>(IVec3(0, 0, 0));
+        partial->heightmap_data.assign(1, 8.0f);
+        partial->mark_sdf_loaded_or_edited();
+        ASSERT_TRUE(refusal_world->adopt_streamed_chunk(partial));
+    }
+
+    void TearDown() override {
+        ResumePreparation();
+    }
+
+    void RefusePreparation() {
+        auto* physics = client.GetPhysicsSystem();
+        // Use the existing incomplete-authority refusal, without editing either
+        // session's terrain or identity. Restore the binding before any tick runs.
+        physics->set_world_system(refusal_world.get());
+        refusal_avatar = physics->create_avatar_character({8.25f, 8.25f, 8.25f});
+        ASSERT_NE(refusal_avatar, PhysicsSystem::kInvalidAvatar);
+        ASSERT_FALSE(
+            physics->prepare_simulation_collisions({}, client.GetSimulationTickCount() + 1));
+        ASSERT_GT(physics->simulation_collision_sample_count(), 0u);
+        ASSERT_FALSE(client.GetRegionSchedulerFault());
+    }
+
+    void ResumePreparation() {
+        if (auto* physics = client.GetPhysicsSystem()) {
+            if (refusal_avatar != PhysicsSystem::kInvalidAvatar) {
+                physics->remove_avatar_character(refusal_avatar);
+                refusal_avatar = PhysicsSystem::kInvalidAvatar;
+            }
+            physics->set_world_system(client.GetWorldSystem());
+        }
+    }
+
+    void ExpectRetry(std::uint64_t tick) {
+        const auto collision_hash = client.GetPhysicsSystem()->simulation_collision_hash();
+        const auto world_hash = TestSupport::SessionWorldHash(client);
+        EXPECT_TRUE(driver.StepAgreedTick()) << driver.failure_reason();
+        EXPECT_FALSE(driver.finished());
+        EXPECT_FALSE(driver.desynced());
+        EXPECT_TRUE(driver.failure_reason().empty());
+        EXPECT_EQ(driver.agreed_ticks(), tick);
+        EXPECT_EQ(client.GetSimulationTickCount(), tick);
+        EXPECT_EQ(client.GetWorldClock().tick(), tick);
+        EXPECT_EQ(TestSupport::SessionWorldHash(client), world_hash);
+        EXPECT_EQ(client.GetPhysicsSystem()->simulation_collision_hash(), collision_hash);
+    }
+
+    TestSupport::HeadlessRoot root;
+    JobSystem jobs;
+    // The borrowed collision source outlives the session, including failed setup.
+    std::unique_ptr<SHIELD_WorldSystem> refusal_world;
+    world::GameSession client;
+    Client::ScenarioHarness::NetworkedSessionDriver::Config config;
+    Client::ScenarioHarness::NetworkedSessionDriver driver;
+    std::size_t refusal_avatar = PhysicsSystem::kInvalidAvatar;
+};
+
+} // namespace
+
+TEST_F(NetworkedSessionDriverPreparationTest,
+       PermanentPreparationRefusalIsBoundedAndLeavesTheTickPending) {
+    ASSERT_TRUE(driver.Begin(&client, config)) << driver.failure_reason();
+    ASSERT_NO_FATAL_FAILURE(RefusePreparation());
+    // Exactly budget_ticks retries plus one terminal attempt; never wait on
+    // finished(), so removing the production bound cannot hang this test.
+    for (std::uint64_t attempt = 0; attempt < config.budget_ticks; ++attempt) {
+        SCOPED_TRACE(attempt);
+        ExpectRetry(0);
+    }
+    EXPECT_FALSE(driver.StepAgreedTick());
+    EXPECT_TRUE(driver.finished());
+    EXPECT_FALSE(driver.desynced());
+    EXPECT_EQ(driver.failure_reason(), "region_preparation_stalled_at_tick_0");
+    EXPECT_EQ(driver.agreed_ticks(), 0u);
+    EXPECT_EQ(client.GetSimulationTickCount(), 0u);
+    EXPECT_EQ(client.GetWorldClock().tick(), 0u);
+    ResumePreparation();
+    EXPECT_FALSE(driver.StepAgreedTick());
+    EXPECT_EQ(driver.agreed_ticks(), 0u);
+    EXPECT_EQ(driver.failure_reason(), "region_preparation_stalled_at_tick_0");
+}
+
+TEST_F(NetworkedSessionDriverPreparationTest, ZeroBudgetRefusalTerminatesWithoutRetry) {
+    config.budget_ticks = 0;
+    ASSERT_TRUE(driver.Begin(&client, config)) << driver.failure_reason();
+    ASSERT_NO_FATAL_FAILURE(RefusePreparation());
+    EXPECT_FALSE(driver.StepAgreedTick());
+    EXPECT_TRUE(driver.finished());
+    EXPECT_EQ(driver.failure_reason(), "region_preparation_stalled_at_tick_0");
+    EXPECT_EQ(driver.agreed_ticks(), 0u);
+    EXPECT_EQ(client.GetSimulationTickCount(), 0u);
+}
+
+TEST_F(NetworkedSessionDriverPreparationTest, PreparationRecoveryAdvancesAgreedTicksNormally) {
+    ASSERT_TRUE(driver.Begin(&client, config)) << driver.failure_reason();
+    ASSERT_NO_FATAL_FAILURE(RefusePreparation());
+    for (std::uint64_t attempt = 0; attempt < config.budget_ticks - 1; ++attempt) {
+        ExpectRetry(0);
+    }
+    ResumePreparation();
+    for (std::uint64_t tick = 1; tick <= config.budget_ticks; ++tick) {
+        SCOPED_TRACE(tick);
+        ASSERT_TRUE(driver.StepAgreedTick()) << driver.failure_reason();
+        EXPECT_EQ(driver.agreed_ticks(), tick);
+        EXPECT_EQ(client.GetSimulationTickCount(), tick);
+        EXPECT_FALSE(driver.desynced());
+        EXPECT_TRUE(driver.failure_reason().empty());
+    }
+    EXPECT_FALSE(driver.StepAgreedTick());
+    EXPECT_TRUE(driver.finished());
+    EXPECT_TRUE(driver.failure_reason().empty());
+    EXPECT_EQ(driver.agreed_ticks(), config.budget_ticks);
+}
+
+TEST_F(NetworkedSessionDriverPreparationTest, SuccessfulTicksDoNotResetThePreparationRetryBudget) {
+    ASSERT_TRUE(driver.Begin(&client, config)) << driver.failure_reason();
+    ASSERT_NO_FATAL_FAILURE(RefusePreparation());
+    ExpectRetry(0);
+    ExpectRetry(0);
+    ResumePreparation();
+    ASSERT_TRUE(driver.StepAgreedTick()) << driver.failure_reason();
+    ASSERT_EQ(driver.agreed_ticks(), 1u);
+    ASSERT_NO_FATAL_FAILURE(RefusePreparation());
+    ExpectRetry(1);
+    ResumePreparation();
+    ASSERT_TRUE(driver.StepAgreedTick()) << driver.failure_reason();
+    ASSERT_EQ(driver.agreed_ticks(), 2u);
+    ASSERT_NO_FATAL_FAILURE(RefusePreparation());
+    EXPECT_FALSE(driver.StepAgreedTick());
+    EXPECT_TRUE(driver.finished());
+    EXPECT_FALSE(driver.desynced());
+    EXPECT_EQ(driver.failure_reason(), "region_preparation_stalled_at_tick_2");
+    EXPECT_EQ(driver.agreed_ticks(), 2u);
+    EXPECT_EQ(client.GetSimulationTickCount(), 2u);
 }
 
 TEST(NetworkedSessionDriverTest, MissingOrFailedSessionsCannotAdvertiseCleanDisconnect) {
