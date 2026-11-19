@@ -115,9 +115,9 @@ const std::string kPass = "src/luminumbra_client/rendering/passes/GBufferPass.cp
 } // namespace
 
 TEST(DiagnosticAttribution, DefaultShaderTextIsUnchangedWithoutTheVariant) {
-    // Re-pinned for #872's interpolated-normal slope-rock coverage (#1045).
+    // Re-pinned for #877's opt-in leaf surface on closed distant shrub hulls.
     EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(Read("res/shaders/g_buffer.frag"))),
-              0xb68526b1edfc1436ull);
+              0x54ac5a94422f2571ull);
     EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(Read("res/shaders/foliage.frag"))),
               0xd5876c01db56f7ecull);
     const auto create = Body((Read(kTargets) + Read(kPass)), "void CreateGBufferTargets(");
