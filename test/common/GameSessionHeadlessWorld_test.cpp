@@ -18522,6 +18522,12 @@ TEST(SurfaceQuery, RestoredSpheresInvalidatePreparationAndJoinTheNextHorizon) {
     ASSERT_TRUE(fresh.prepare_simulation_collisions({}));
     EXPECT_EQ(fresh.simulation_collision_owner_visit_count(), 1u);
     EXPECT_EQ(fresh.simulation_collision_sample_count(), 9u);
+    // The original created its sphere while authority was off. After activation
+    // it must cover the same owner as the restored continuation.
+    source.set_world_system(world.get());
+    ASSERT_TRUE(source.prepare_simulation_collisions({}));
+    EXPECT_EQ(source.simulation_collision_owner_visit_count(), 1u);
+    EXPECT_EQ(source.simulation_collision_sample_count(), 9u);
 
     PhysicsSystem target;
     target.startup();

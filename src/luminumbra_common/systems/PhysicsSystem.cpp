@@ -1698,14 +1698,14 @@ JPH::BodyID PhysicsSystem::create_dynamic_sphere(const glm::vec3& position,
                                                  float radius) {
     if (!m_body_interface)
         return JPH::BodyID();
-    if (simulation_collisions_enabled()) {
-        if (!m_simulation_collisions) {
-            m_simulation_collisions = std::make_unique<SimulationCollisions>();
-        }
-        if (m_simulation_collisions->dynamic_count ==
-            m_simulation_collisions->dynamic_owners.size()) {
-            return JPH::BodyID();
-        }
+    // Register every sphere, even while terrain collisions are off, matching
+    // restore: a later durable-residency activation covers the same owners in
+    // the same order on an original and a restored continuation.
+    if (!m_simulation_collisions) {
+        m_simulation_collisions = std::make_unique<SimulationCollisions>();
+    }
+    if (m_simulation_collisions->dynamic_count == m_simulation_collisions->dynamic_owners.size()) {
+        return JPH::BodyID();
     }
     JPH::BodyCreationSettings settings(new JPH::SphereShape(radius),
                                        JPH::RVec3(position.x, position.y, position.z),
@@ -1718,7 +1718,7 @@ JPH::BodyID PhysicsSystem::create_dynamic_sphere(const glm::vec3& position,
     // through thin geometry at speed.
     settings.mMotionQuality = JPH::EMotionQuality::LinearCast;
     const JPH::BodyID id = m_body_interface->CreateAndAddBody(settings, JPH::EActivation::Activate);
-    if (simulation_collisions_enabled() && !id.IsInvalid()) {
+    if (!id.IsInvalid()) {
         auto& state = *m_simulation_collisions;
         state.dynamic_owners[state.dynamic_count++] = {.id = id,
                                                        .velocity = JPH::Vec3::sZero(),
