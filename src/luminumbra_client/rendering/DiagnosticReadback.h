@@ -1,5 +1,6 @@
 #pragma once
 
+#include "CaptureManifest.h"
 #include "DiagnosticDrawTable.h"
 #include "DiagnosticTargets.h"
 #include "GBufferTargets.h"
@@ -11,6 +12,58 @@
 #include <utility>
 
 namespace Luminumbra::Rendering {
+
+// Validate the whole capture before its image or manifest can be replaced.
+// symlink_status treats even dangling links as occupied. Publication still uses
+// the bundle writer's exclusive creates; this admission check never owns files.
+inline bool DiagnosticCaptureDestinationAvailable(const std::filesystem::path& capture,
+                                                  const DiagnosticCaptureOptions& options) {
+    if (!options.enabled) {
+        return true;
+    }
+    if (capture.empty() || capture.filename().empty()) {
+        return false;
+    }
+    const auto vacant = [](const std::filesystem::path& path) {
+        std::error_code error;
+        const auto status = std::filesystem::symlink_status(path, error);
+        return status.type() == std::filesystem::file_type::not_found &&
+               (!error || error == std::errc::no_such_file_or_directory);
+    };
+    auto manifest = CaptureManifestPath(capture);
+    if (!vacant(capture) || !vacant(manifest)) {
+        return false;
+    }
+    manifest += ".tmp";
+    if (!vacant(manifest)) {
+        return false;
+    }
+    // Eight fixed bundle/staging names and at most one optional probe.
+    for (const auto* suffix : {".albedo.pfm",
+                               ".normal.pfm",
+                               ".depth.pfm",
+                               ".material.pfm",
+                               ".ids.bin",
+                               ".draws.json",
+                               ".diagnostics.json",
+                               ".diagnostics.json.pending"}) {
+        auto member = capture;
+        member += suffix;
+        if (!vacant(member)) {
+            return false;
+        }
+    }
+    if (options.probe) {
+        const auto& coordinates = options.probe.value();
+        auto probe = capture;
+        probe += ".probe-" + std::to_string(coordinates[0]) + "-" + std::to_string(coordinates[1]) +
+                 ".json";
+        if (!vacant(probe)) {
+            return false;
+        }
+    }
+    return true;
+}
 
 // Admission includes the identity target, the core's largest plane and workspace,
 // retained RGB capture pixels, one 64 KiB decode row and a conservative 128 MiB

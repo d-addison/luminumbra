@@ -629,8 +629,13 @@ public:
     const GBuffer& gbuffer() const;
     // Explicit developer capture setup only; options are resolved once at admission.
     void set_capture_diagnostics(const DiagnosticCaptureOptions& options);
+    // Owner-thread instrumentation gate; capture options remain resolved at admission.
+    void set_diagnostic_capture_armed(bool armed) {
+        m_diagnostic_capture_armed = armed;
+    }
     void end_diagnostic_capture();
     bool capture_diagnostics(const std::filesystem::path& capture);
+    bool diagnostic_capture_destination_available(const std::filesystem::path& capture) const;
     bool capture_diagnostics_enabled() const {
         return m_capture_diagnostics.enabled;
     }
@@ -661,7 +666,8 @@ public:
             return write_capture();
         }
         try {
-            if (WithCaptureManifest(path, observe(), write_capture)) {
+            if (diagnostic_capture_destination_available(path) &&
+                WithCaptureManifest(path, observe(), write_capture)) {
                 return capture_diagnostics(path);
             }
         } catch (...) {
@@ -1335,6 +1341,7 @@ private:
     bool m_todTickDriven = false;
 
     DiagnosticCaptureOptions m_capture_diagnostics;
+    bool m_diagnostic_capture_armed = true;
     std::unique_ptr<DiagnosticFrameCapture> m_diagnostic_capture;
     bool m_capture_waterfall_geometry = false;
     u32 m_screen_width = 0;

@@ -424,6 +424,11 @@ void RenderPipeline::end_diagnostic_capture() {
     m_diagnostic_capture.reset();
 }
 
+bool RenderPipeline::diagnostic_capture_destination_available(
+    const std::filesystem::path& capture) const {
+    return DiagnosticCaptureDestinationAvailable(capture, m_capture_diagnostics);
+}
+
 CaptureManifestInput RenderPipeline::diagnostic_capture_manifest() const {
     CaptureManifestInput input;
     input.build_id = {std::string(luminumbra::core::GetEngineVersionString()),
@@ -2568,7 +2573,8 @@ void RenderPipeline::render_frame(entt::registry& registry,
     m_far_world_pair_jitter = m_taau_jitter_ndc;
     m_far_world_pair_mdi_cursor = m_mdi_frame_cursor;
     std::unique_ptr<DiagnosticFrameCapture> diagnostic_frame;
-    if (m_capture_diagnostics.enabled && purpose == FarWorldPurpose::World) {
+    if (m_capture_diagnostics.enabled && m_diagnostic_capture_armed &&
+        purpose == FarWorldPurpose::World) {
         std::size_t retained = 0;
         // The current manifest contract describes unjittered output-sized planes.
         // Refuse scaled/jittered captures rather than mislabel their pixel camera.

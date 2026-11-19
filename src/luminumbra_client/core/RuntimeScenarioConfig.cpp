@@ -204,6 +204,12 @@ RuntimePathOptions ParseRuntimePathOptions(int argc, char* argv[]) {
         diagnostic_environment ? std::optional<std::string_view>(*diagnostic_environment)
                                : std::nullopt);
     if (diagnostics.enabled) {
+        for (const auto* parity : {"--render-parity-frame", "--upscale-seam-parity"}) {
+            if (!GetCommandLineOption(argc, argv, parity, "").empty()) {
+                throw std::invalid_argument(std::string("capture diagnostics refuse ") + parity +
+                                            "; parity redispatches require separate captures");
+            }
+        }
         const auto scenario = GetCommandLineOption(argc, argv, "--scenario", "");
         const bool benchmark =
             !GetCommandLineOption(argc, argv, "--render-benchmark", "").empty() &&

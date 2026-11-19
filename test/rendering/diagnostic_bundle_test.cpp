@@ -15,6 +15,7 @@
 #include <iterator>
 #include <limits>
 #include <optional>
+#include <regex>
 #include <sstream>
 #include <stdexcept>
 #include <streambuf>
@@ -350,6 +351,105 @@ TEST(DiagnosticBundleWiring, SharedAdapterOwnsEveryAdmittedCapturePath) {
         header.find("if (!m_capture_diagnostics.enabled) {\n            return write_capture();"),
         std::string::npos);
     EXPECT_EQ(pipeline.find("ReadEnvironment(\"LUMIN_CAPTURE_DIAGNOSTICS\")"), std::string::npos);
+}
+
+TEST(DiagnosticBundleWiring, DestinationAdmissionPrecedesEveryCaptureWriter) {
+    const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
+    const auto header = ReadFile(root / "src/luminumbra_client/rendering/RenderPipeline.h");
+    const auto pipeline = ReadFile(root / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const auto main = ReadFile(root / "src/luminumbra_client/main_client.cpp");
+    const auto readback = ReadFile(root / "src/luminumbra_client/rendering/DiagnosticReadback.h");
+    EXPECT_NE(header.find("diagnostic_capture_destination_available(path) &&"), std::string::npos);
+    EXPECT_LT(header.find("diagnostic_capture_destination_available(path) &&"),
+              header.find("WithCaptureManifest(path, observe(), write_capture)"));
+    EXPECT_NE(pipeline.find(
+                  "return DiagnosticCaptureDestinationAvailable(capture, m_capture_diagnostics);"),
+              std::string::npos);
+    const std::regex scan_writer(
+        R"(destination_available =\s*renderPipeline.diagnostic_capture_destination_available\(\s*diagnostic_image\);\s*bool capture_finished =\s*destination_available &&\s*Luminumbra::Rendering::WithCaptureManifest\()");
+    EXPECT_TRUE(std::regex_search(main, scan_writer));
+    const std::regex scan_refusal(
+        R"(if \(!destination_available\) \{\s*exit_code = 2;\s*LUMINUMBRA_CORE_ERROR\(\s*"Frame-scan destination occupied or inaccessible: \{\}",\s*diagnostic_image.string\(\)\);\s*\} else if \(!capture_finished\)\s*capture_failure)");
+    const std::regex benchmark_refusal(
+        R"(if \(!destination_available\) \{\s*exit_code = 2;\s*LUMINUMBRA_CORE_ERROR\("Benchmark capture destination occupied or inaccessible: \{\}",\s*screenshot.string\(\)\);\s*\} else if \(!screenshot_complete\)\s*capture_failure)");
+    EXPECT_TRUE(std::regex_search(main, scan_refusal));
+    EXPECT_TRUE(std::regex_search(main, benchmark_refusal));
+    EXPECT_NE(readback.find("if (!vacant(capture) || !vacant(manifest))"), std::string::npos);
+    EXPECT_NE(readback.find("std::filesystem::symlink_status(path, error)"), std::string::npos);
+    EXPECT_NE(readback.find("status.type() == std::filesystem::file_type::not_found"),
+              std::string::npos);
+    EXPECT_NE(readback.find("if (!vacant(member))"), std::string::npos);
+    EXPECT_NE(readback.find("if (!vacant(probe))"), std::string::npos);
+    for (const auto* suffix : {".albedo.pfm",
+                               ".normal.pfm",
+                               ".depth.pfm",
+                               ".material.pfm",
+                               ".ids.bin",
+                               ".draws.json",
+                               ".diagnostics.json",
+                               ".diagnostics.json.pending",
+                               ".probe-",
+                               ".tmp"}) {
+        EXPECT_NE(readback.find(suffix), std::string::npos) << suffix;
+    }
+}
+
+TEST(DiagnosticBundleWiring, BenchmarkArmsOnlyTheUnmeasuredCaptureFrame) {
+    const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
+    const auto main = ReadFile(root / "src/luminumbra_client/main_client.cpp");
+    const auto pipeline = ReadFile(root / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const std::regex startup(
+        R"(renderPipeline.set_capture_diagnostics\(path_options.diagnostics\);\s*renderPipeline.set_diagnostic_capture_armed\(g_app.capture.render_benchmark_path.empty\(\)\);)");
+    const std::regex capture_frame(
+        R"(renderPipeline.set_diagnostic_capture_armed\(\s*!g_rb_active \|\|\s*g_app.benchmark.measuredFrames == g_app.capture.render_benchmark_frames\);\s*renderPipeline.render_frame\()");
+    EXPECT_TRUE(std::regex_search(main, startup));
+    EXPECT_TRUE(std::regex_search(main, capture_frame));
+    EXPECT_NE(pipeline.find("m_capture_diagnostics.enabled && m_diagnostic_capture_armed &&"),
+              std::string::npos);
+}
+
+TEST(DiagnosticBundleWiring, ParityRefusalPrecedesPathOutput) {
+    const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
+    const auto config = ReadFile(root / "src/luminumbra_client/core/RuntimeScenarioConfig.cpp");
+    const auto main = ReadFile(root / "src/luminumbra_client/main_client.cpp");
+    EXPECT_NE(
+        config.find(
+            "for (const auto* parity : {\"--render-parity-frame\", \"--upscale-seam-parity\"})"),
+        std::string::npos);
+    EXPECT_NE(config.find("if (!GetCommandLineOption(argc, argv, parity, \"\").empty())"),
+              std::string::npos);
+    EXPECT_NE(
+        config.find(
+            "throw std::invalid_argument(std::string(\"capture diagnostics refuse \") + parity +"),
+        std::string::npos);
+    EXPECT_LT(config.find("capture diagnostics refuse"),
+              config.find("options.diagnostics = diagnostics;"));
+    EXPECT_NE(main.find("path_options = ParseRuntimePathOptions(argc, argv);"), std::string::npos);
+    EXPECT_NE(main.find("catch (const std::exception& error)"), std::string::npos);
+}
+
+TEST_F(DiagnosticBundleTest, RuntimeAdmissionRefusesRedispatchParityBeforeOutput) {
+    for (const auto* parity : {"--render-parity-frame", "--upscale-seam-parity"}) {
+        std::array<std::string, 7> text{"client",
+                                        "--capture-diagnostics",
+                                        "--frame-scan=view.json",
+                                        parity,
+                                        (directory / "parity").string(),
+                                        "--save-root",
+                                        (directory / "must-not-exist").string()};
+        std::array<char*, 7> arguments{};
+        for (std::size_t i = 0; i < text.size(); ++i) {
+            arguments[i] = text[i].data();
+        }
+        try {
+            (void)Luminumbra::Client::ScenarioHarness::ParseRuntimePathOptions(
+                static_cast<int>(arguments.size()), arguments.data());
+            FAIL() << "diagnostics admitted redispatch parity";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_NE(std::string(error.what()).find(parity), std::string::npos);
+        }
+        EXPECT_TRUE(std::filesystem::is_empty(directory));
+    }
 }
 
 TEST_F(DiagnosticBundleTest, StreamsTopFirstIdsAndSamePixelAovsAndProbe) {

@@ -1,4 +1,5 @@
 #include "../fixtures/TerrainFixtureParams.h"
+#include "../support/UniqueTempPath.h"
 #include "TerrainCullingTestPeer.h"
 #include "luminumbra_client/core/IsolationConfig.h"
 #include "luminumbra_client/core/PresentationClock.h"
@@ -9673,4 +9674,126 @@ TEST(RenderSmokeTest, DiagnosticAdmissionBudgetAndScopeRefusalAreSafe) {
     EXPECT_TRUE(called);
     EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, DiagnosticRetryAndPartialDestinationsPreserveEveryByte) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("diagnostic-retry-", ".ppm");
+    const auto capture = temporary.Path();
+    const auto directory = capture.parent_path();
+    RenderPipeline pipeline;
+    const DiagnosticCaptureOptions options{.enabled = true,
+                                           .probe = std::array<std::uint32_t, 2>{1, 0}};
+    pipeline.set_capture_diagnostics(options);
+    CaptureManifestInput input;
+    input.width = 2;
+    input.height = 2;
+    input.build_id.value = "capture-test";
+    input.asset_hash.unavailable = "test";
+    input.shader_hash.unavailable = "test";
+    input.world_hash.unavailable = "test";
+    class BackgroundSource final : public DiagnosticBundleSource {
+    public:
+        bool read_aov(DiagnosticAov, std::span<float> samples) override {
+            std::fill(samples.begin(), samples.end(), 0.0f);
+            return true;
+        }
+        bool read_ids(std::span<DiagnosticId> ids) override {
+            std::fill(ids.begin(), ids.end(), DiagnosticId{});
+            return true;
+        }
+    } source;
+    DiagnosticBundleFrame frame;
+    frame.extent = {2, 2};
+    frame.identity_complete = true;
+    frame.capture_filename = Luminumbra::Filesystem::GenericUtf8PathString(capture.filename());
+    frame.manifest_filename =
+        Luminumbra::Filesystem::GenericUtf8PathString(CaptureManifestPath(capture).filename());
+    DiagnosticDrawTable draws;
+    ASSERT_TRUE(pipeline.diagnostic_capture_destination_available(capture));
+    ASSERT_TRUE(WithCaptureManifest(capture, input, [&] {
+        std::ofstream image(capture, std::ios::binary);
+        image << "original capture";
+        image.close();
+        return !image.fail();
+    }));
+    ASSERT_TRUE(WriteDiagnosticBundle(capture, options, frame, draws, source));
+    const auto snapshot = [&] {
+        std::map<fs::path, std::string> bytes;
+        for (const auto& entry : fs::directory_iterator(directory)) {
+            bytes.emplace(entry.path(), ReadTextFile(entry.path()));
+        }
+        return bytes;
+    };
+    const auto original = snapshot();
+    ASSERT_EQ(original.size(), 10U);
+    bool observed = false, written = false;
+    const auto retry = [&] {
+        return pipeline.with_diagnostic_capture(
+            capture,
+            [&] {
+                observed = true;
+                return input;
+            },
+            [&] {
+                written = true;
+                std::ofstream image(capture, std::ios::binary);
+                image << "replacement";
+                return image.good();
+            });
+    };
+    EXPECT_FALSE(retry());
+    EXPECT_FALSE(observed);
+    EXPECT_FALSE(written);
+    EXPECT_EQ(snapshot(), original);
+    for (const auto& [path, bytes] : original) {
+        (void)bytes;
+        fs::remove(path);
+    }
+    // Every individual partial member must block before either callback runs.
+    auto partial = original;
+    auto pending = capture;
+    pending += ".diagnostics.json.pending";
+    partial.emplace(pending, "partial");
+    auto manifest_temporary = CaptureManifestPath(capture);
+    manifest_temporary += ".tmp";
+    partial.emplace(manifest_temporary, "partial");
+    for (const auto& [path, bytes] : partial) {
+        {
+            std::ofstream file(path, std::ios::binary);
+            file << bytes;
+        }
+        EXPECT_FALSE(retry()) << path;
+        EXPECT_FALSE(observed);
+        EXPECT_FALSE(written);
+        EXPECT_EQ(snapshot(), (std::map<fs::path, std::string>{{path, bytes}}));
+        fs::remove(path);
+        fs::create_directory(path);
+        EXPECT_FALSE(pipeline.diagnostic_capture_destination_available(capture));
+        fs::remove(path);
+        std::error_code error;
+        fs::create_symlink(directory / "missing", path, error);
+        if (!error) {
+            EXPECT_FALSE(pipeline.diagnostic_capture_destination_available(capture));
+            fs::remove(path);
+        } else {
+            EXPECT_TRUE(pipeline.diagnostic_capture_destination_available(capture));
+        }
+    }
+    EXPECT_TRUE(pipeline.diagnostic_capture_destination_available(capture));
+    EXPECT_FALSE(pipeline.diagnostic_capture_destination_available({}));
+    const auto blocked_parent = directory / "not-a-directory";
+    { std::ofstream file(blocked_parent); }
+    EXPECT_FALSE(pipeline.with_diagnostic_capture(
+        blocked_parent / "view.ppm",
+        [&] { return input; },
+        [] {
+            ADD_FAILURE() << "capture wrote through a non-directory parent";
+            return true;
+        }));
+    pipeline.set_capture_diagnostics({.enabled = true, .probe = std::nullopt});
+    EXPECT_TRUE(pipeline.diagnostic_capture_destination_available(capture));
+    pipeline.set_capture_diagnostics({});
+    EXPECT_TRUE(pipeline.diagnostic_capture_destination_available({}));
 }
