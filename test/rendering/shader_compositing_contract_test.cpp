@@ -164,6 +164,8 @@ TEST(GroundCoverContract, NearBushesUseFullLeafQuadsAndNeverTerrainGrassTexturin
     ExpectContains(draw, "const bool leafCards = isLeaf || (isBush && !isFarLod);");
     ExpectContains(draw, "shader->setInt(\"u_alphaTest\", leafCards ? 2 : 0);");
     ExpectContains(draw, "two_sided = leafCards;");
+    // Near bush cards are leaves, so they keep the leaf wind strength.
+    ExpectContains(draw, "shader->setFloat(\"u_windStrength\", leafCards ? 0.85f : 0.0f);");
     ExpectContains(draw,
                    "shader->setInt(\"u_forceFlat\", (isBush || (isLeaf && isFarLod)) ? 1 : 0);");
     // Far closed hulls use leaf reflectance instead of the grass material albedo.

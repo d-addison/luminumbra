@@ -56,6 +56,8 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("const bool leafCards = isLeaf || (isBush && !isFarLod);", draw)
         self.assertIn('shader->setInt("u_alphaTest", leafCards ? 2 : 0);', draw)
         self.assertIn("two_sided = leafCards;", draw)
+        self.assertIn('shader->setFloat("u_windStrength", leafCards ? 0.85f : 0.0f);', draw)
+        self.assertNotIn('isLeaf ? 0.85f', draw)
         self.assertIn('shader->setInt("u_forceFlat", (isBush || (isLeaf && isFarLod)) ? 1 : 0);', draw)
         # Closed far hulls keep the leaf reflectance; every other draw resets it.
         self.assertIn('shader->setInt("u_leafSurface", isBush ? 1 : 0);', draw)

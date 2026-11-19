@@ -1035,7 +1035,8 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                 const bool leafCards = isLeaf || (isBush && !isFarLod);
                 shader->setInt("u_alphaTest", leafCards ? 2 : 0);
                 two_sided = leafCards;
-                shader->setFloat("u_windStrength", isLeaf ? 0.85f : 0.0f);
+                // Near bush leaf cards sway like procgen leaves; far hulls and bark stay rigid.
+                shader->setFloat("u_windStrength", leafCards ? 0.85f : 0.0f);
                 // Shrubs are foliage at every distance, never opaque grass-textured stone.
                 // Distant shrubs keep the closed hull; only their near mesh uses leaf cards.
                 shader->setInt("u_forceFlat", (isBush || (isLeaf && isFarLod)) ? 1 : 0);
