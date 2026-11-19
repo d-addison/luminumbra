@@ -38,6 +38,184 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         cls.runner = compact_cpp((ROOT / "src/luminumbra_server/ServerWorldRunner.cpp").read_text(encoding="utf-8"))
         cls.admission = compact_cpp((ROOT / "src/luminumbra_server/modes/ModeHelpers.cpp").read_text(encoding="utf-8"))
 
+    def authority_capture_blocks(self):
+        service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
+                              .read_text(encoding="utf-8"))
+        prefix = ("AuthorityCaptureResultCaptureAuthorityHashes(constWorldStreamingState&state,"
+                  "std::optional<std::uint64_t>water_sim_cursor,")
+        return (service,
+                cpp_block(service, prefix + "conststd::optional<std::string>&regional_projection"),
+                cpp_block(service, prefix + "constAuthorityRegionalInputs&regional"))
+
+    def test_authority_capture_slots_keep_legacy_domains(self):
+        service, capture, _ = self.authority_capture_blocks()
+        regional = cpp_block(service, "boolNeedsRegionalAuthority(")
+        self.assertEqual(regional, "{returnparts==AuthorityCaptureParts::All||"
+                         "parts==AuthorityCaptureParts::Composite||"
+                         "parts==AuthorityCaptureParts::Chunk;}")
+        for expression in (
+                "want_streamed?ComputeWorldStreamingStateHash(state,cursor):std::string()",
+                "want_chunk?(regional_projection?StableChecksum(*regional_projection):streamed):std::string()",
+                "sub=ComputeWorldStreamingStateSubHashes(state,cursor);",
+                "sub.entities=StableChecksum(entity_snapshot_json);",
+                "ComposeWorldHash(chunk,runtime.wind,runtime.weather,runtime.aether,"
+                "runtime.scent,runtime.ecology,runtime.plant)"):
+            self.assertIn(expression, capture)
+        self.assertIn("parts==AuthorityCaptureParts::StreamedAndSubHashes", capture)
+        for field in ("wind", "weather", "aether", "aether_state"):
+            self.assertIn("sub." + field + "=runtime." + field + ";", capture)
+        header = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.h")
+                             .read_text(encoding="utf-8"))
+        self.assertEqual(cpp_block(header, "structAuthorityHashCapture"),
+                         "{conststd::stringstreamed;conststd::stringchunk;"
+                         "conststd::stringcomposite;constWorldStreamingStateSubHashessub;}")
+
+    def test_authority_capture_refuses_before_publishing(self):
+        service, capture, regional = self.authority_capture_blocks()
+        for body in (capture, regional):
+            self.assertIn("if(!water_sim_cursor.has_value()){return{"
+                          "AuthorityCaptureStatus::MissingCursor,std::nullopt};}", body)
+            self.assertIn("if(HasIncompleteAuthority(state.snapshot_chunks())){return{"
+                          "AuthorityCaptureStatus::IncompleteOwner,std::nullopt};}", body)
+            self.assertLess(body.index("AuthorityCaptureStatus::MissingCursor"),
+                            body.index("HasIncompleteAuthority("))
+        self.assertIn("if(!want_streamed&&!want_sub){return{"
+                      "AuthorityCaptureStatus::PreparationRefused,std::nullopt};}", capture)
+        self.assertIn("HasIncompleteAuthority(region.inputs.live)||"
+                      "HasIncompleteAuthority(region.inputs.parked)", regional)
+        self.assertLess(regional.index("HasIncompleteAuthority(region.inputs.parked)"),
+                        regional.index("RegionDigestOperationoperation("))
+        self.assertEqual(service.count("catch(conststd::exception&){return{"
+                                       "AuthorityCaptureStatus::PreparationRefused,std::nullopt};}"), 2)
+        incomplete = cpp_block(service, "boolHasIncompleteAuthority(")
+        self.assertIn("chunk&&chunk->has_simulation_authority()&&"
+                      "chunk->get_state()==ChunkState::Loading", incomplete)
+
+    def test_authority_capture_skips_regional_preparation(self):
+        _, _, regional = self.authority_capture_blocks()
+        skip = cpp_block(regional, "if(!NeedsRegionalAuthority(parts))")
+        self.assertEqual(skip, "{returnCaptureAuthorityHashes(state,water_sim_cursor,std::nullopt,"
+                         "entity_snapshot_json,runtime,parts);}")
+        self.assertLess(regional.index(skip), regional.index("regional.regions"))
+        self.assertLess(regional.index(skip), regional.index("RegionDigestOperationoperation("))
+
+    def test_authority_capture_prepared_region_is_checked_and_released_in_loop(self):
+        service, _, regional = self.authority_capture_blocks()
+        loop = cpp_block(regional, "for(constauto&region:regional.regions){std::uint64_tdigest=0;")
+        local = cpp_block(loop, "else")
+        ordered = ("if(region.inputs.require_index!=regional.require_index){adjusted=region.inputs;"
+                   "adjusted->require_index=regional.require_index;}",
+                   "conststd::optional<PreparedRegionDigest>prepared="
+                   "operation.prepare(region.key,adjusted?*adjusted:region.inputs);",
+                   "if(!prepared.has_value()){return{AuthorityCaptureStatus::PreparationRefused,std::nullopt};}",
+                   "digest=HashPreparedRegionDigest(*prepared);")
+        positions = [local.index(expression) for expression in ordered]
+        self.assertEqual(positions, sorted(positions))
+        # One read-ownership scope spans index admission and the whole regional loop.
+        guard = "constdetail::SnapshotReadOwnershipcapture_ownership;"
+        self.assertEqual(regional.count(guard), 1)
+        self.assertLess(regional.index(guard), regional.index("RegionDigestOperationoperation("))
+        self.assertLess(regional.index(guard), regional.index(loop))
+        self.assertNotIn("prepared", loop.replace(local, ""))
+        self.assertNotIn("PreparedRegionDigest", regional.replace(local, ""))
+        self.assertLess(loop.index(local), loop.index("projection+="))
+        for container in ("vector<PreparedRegionDigest", "vector<std::optional<PreparedRegionDigest"):
+            self.assertNotIn(container, service)
+        prepare = cpp_block(service, "PreparedRegionDigestRegionDigestOperation::prepare(")
+        for field in ("ground_object_bytes", "field_page_bytes"):
+            self.assertIn("prepared." + field + "=inputs." + field + ";", prepare)
+        self.assertIn("returnPrepareRegionDigest(m_save_dir,key,inputs,&m_index);",
+                      cpp_block(service, "PreparedRegionDigestRegionDigestOperation::PrepareChunks("))
+
+    def test_authority_capture_regressions_are_registered(self):
+        native = (ROOT / "test/persistence/world_open_refusal_test.cpp").read_text(encoding="utf-8")
+        for name in ("PreparationKeepsLegacyPrecedenceAndRegionalFolds",
+                     "PinsEveryLegacyOutputSlotAtZeroAndNonzeroCursor",
+                     "RuntimeEntityCursorAndRegionalInputsSelectTheirLegacySlots",
+                     "ChunkInputsKeepStreamedRegionalAndDiagnosticDomains",
+                     "ChunkIdentityFeedsEveryLegacySlot",
+                     "IncompleteLiveAndParkedOwnersRefuseBeforePublication",
+                     "InvalidRegionalOrderKeysAndPartsRefuseWithoutCapture"):
+            self.assertIn("TEST(AuthorityHashCapture, " + name + ")", native)
+        self.assertIn("TEST_F(WorldOpenRefusal, "
+                      "AuthorityCaptureSkipsRegionalReadsAndNeverPublishesRefusals)", native)
+        for golden in ("da9fb1d4a463ef7d", "29b901a491f1be19"):
+            self.assertIn('"' + golden + '"', native)
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("persistence/world_open_refusal_test.cpp", cmake)
+        self.assertIn("gtest_discover_tests(${_lum_gtest_target}", cmake)
+
+    def test_session_checked_capture_routes_legacy_slot_and_skips_unrequested_owners(self):
+        session = compact_cpp((ROOT / "src/luminumbra_common/world/GameSession.cpp")
+                              .read_text(encoding="utf-8"))
+        chunk = cpp_block(session, "GameSession::ComputeChunkStateHash(")
+        self.assertIn("CaptureAuthorityHashes({},Persistence::AuthorityCaptureParts::Chunk)", chunk)
+        self.assertIn("returnresult.capture?result.capture->chunk:std::string();", chunk)
+        capture = cpp_block(session, "GameSession::CaptureAuthorityHashes(")
+        self.assertIn("constboolwant_chunk=parts==AuthorityCaptureParts::All||"
+                      "parts==AuthorityCaptureParts::Composite||parts==AuthorityCaptureParts::Chunk;",
+                      capture)
+        regional = cpp_block(capture, "if(m_activeRegionsEnabled&&want_chunk)")
+        for work in ("authority_region_keys()", "operation.emplace(", "region_digest_inputs(",
+                     "operation->prepare("):
+            self.assertIn(work, regional)
+            self.assertNotIn(work, capture.replace(regional, ""))
+        self.assertNotIn("m_regionFault", capture)
+        self.assertIn("if(!m_worldUsable||!IsSimulationTickBoundary())", capture)
+        self.assertIn("returnPersistence::CaptureAuthorityHashes("
+                      "state,cursor,projection,entity_snapshot_json,runtime,parts);", capture)
+        self.assertIn("LatchRegionFault(m_worldClock.tick(),error.what());"
+                      "return{AuthorityCaptureStatus::PreparationRefused,std::nullopt};", capture)
+
+    def test_network_checkpoint_uses_checked_streamed_capture_before_publication(self):
+        driver = compact_cpp((ROOT / "src/luminumbra_client/core/scenarios/NetworkedSessionDriver.cpp")
+                             .read_text(encoding="utf-8"))
+        capture = cpp_block(driver, "voidNetSessionCaptureHashes(")
+        request = "ctx->session->CaptureAuthorityHashes(empty_entities," \
+                  "Luminumbra::Persistence::AuthorityCaptureParts::StreamedAndSubHashes)"
+        self.assertIn(request, capture)
+        refusal = cpp_block(capture, "if(!result.capture)")
+        self.assertIn("throwLuminumbra::Persistence::AuthorityCaptureRefused();", refusal)
+        self.assertLess(capture.index("if(!result.capture)"), capture.index("out."))
+        for output, slot in (("world_hash", "streamed"), ("terrain", "sub.terrain"),
+                             ("water", "sub.water"), ("entities", "sub.entities")):
+            self.assertIn("out." + output + "=result.capture->" + slot + ";", capture)
+        self.assertNotIn("snapshot_streamed_chunks", capture)
+        artifact = cpp_block(driver, "NetworkedSessionDriver::WriteArtifact(")
+        self.assertEqual(artifact.count("catch(constLuminumbra::Persistence::AuthorityCaptureRefused&)"), 2)
+
+    def test_lockstep_refusal_records_merged_input_before_halting_without_hash_publication(self):
+        lockstep = compact_cpp((ROOT / "src/luminumbra_common/net/LockstepSession.cpp")
+                               .read_text(encoding="utf-8"))
+        handshake = cpp_block(lockstep, "LockstepSession::Handshake(")
+        self.assertIn("OpenReplayRecorder();if(m_status.desynced){returnfalse;}", handshake)
+        boot = cpp_block(lockstep, "LockstepSession::OpenReplayRecorder(")
+        self.assertLess(boot.index("m_hooks.capture_hashes(0,boot,m_hooks.user)"),
+                        boot.index("m_replay->Open("))
+        boot_refusal = cpp_block(boot, "catch(constPersistence::AuthorityCaptureRefused&)")
+        self.assertIn("m_status.desynced=true;", boot_refusal)
+        self.assertIn("returnfalse;", boot_refusal)
+        tick = cpp_block(lockstep, "LockstepSession::PumpTick(")
+        refused = cpp_block(tick, "catch(constPersistence::AuthorityCaptureRefused&)")
+        order = ("RecordReplayTick(want,recorded_inputs,nullptr);",
+                 "m_hooks.record_replay_tick(want,merged,nullptr,m_hooks.user);",
+                 'EmitDesyncDump(want,"authority_capture");', "returnresult;")
+        positions = [refused.index(value) for value in order]
+        self.assertEqual(positions, sorted(positions))
+        self.assertLess(tick.index(refused), tick.index("m_local_hashes[want]="))
+
+    def test_session_and_lockstep_capture_regressions_are_registered(self):
+        native = (ROOT / "test/persistence/world_open_refusal_test.cpp").read_text(encoding="utf-8")
+        for name in ("SessionCaptureAndLockstepCheckpointKeepLegacyBytes",
+                     "SessionCheckpointSkipsFailedRegionalReadsAndLatchedFaultIsHashable",
+                     "SessionCaptureRefusesIncompleteParkedOwnerAtEveryActivationPhase",
+                     "SessionCaptureRefusesMissingIncompleteAndInvalidInputs",
+                     "LockstepRefusesBootAndTickCapturesBeforePublishingHashes"):
+            self.assertIn("TEST_F(WorldOpenRefusal, " + name + ")", native)
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("persistence/world_open_refusal_test.cpp", cmake)
+        self.assertIn("gtest_discover_tests(${_lum_gtest_target}", cmake)
+
     # Real UI/GL3 destruction needs a graphics context unavailable to the Python
     # CI job. Pin the production ownership and refusal order here instead.
     def test_pipeline_failure_destroys_ui_and_pass_owners_before_context(self):
@@ -946,10 +1124,10 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         digest = cpp_block(schedule, "RunWorkerBoundary(m_jobSystem,")
         self.assertIn("digest_operation.emplace(directory,m_regionRequiresIndex)", digest)
         self.assertIn("digest_operation->digest(key,inputs)", digest)
-        state_hash = cpp_block(session, "GameSession::ComputeChunkStateHash(")
+        state_hash = cpp_block(session, "GameSession::CaptureAuthorityHashes(")
         self.assertIn("RunWorkerBoundary(m_jobSystem,[&]{"
                       "operation.emplace(directory,m_regionRequiresIndex);});", state_hash)
-        self.assertIn("digest=operation->digest(key,inputs)",
+        self.assertIn("prepared=operation->prepare(key,inputs)",
                       cpp_block(state_hash, "RunWorkerBoundary(m_jobSystem,[&]{if(operation)"))
         attach = cpp_block(session, "GameSession::EnableFarWorldAuthorityProducer(")
         self.assertIn("candidate->admit_saved_source(",

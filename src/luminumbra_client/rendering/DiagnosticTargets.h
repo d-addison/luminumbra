@@ -4,27 +4,85 @@
 
 #include <glad/glad.h>
 
+#include <cassert>
+#include <cstddef>
 #include <cstdint>
+#include <exception>
+#include <limits>
+#include <utility>
 
 namespace Luminumbra::Rendering {
 
-// Render-thread owner; destruction requires the creating GL context. Standalone
-// storage for later MRT integration: never modifies a caller's framebuffer.
+// Render-thread owner; every operation and lease release requires the creating
+// context's thread. Before attaching texture() to ANY caller framebuffer, acquire
+// a lease and keep it until every attachment it protects has been detached.
+// The owner must outlive its leases. Destruction with live leases asserts in debug
+// builds and terminates in all builds, before deleting any GL storage.
 class DiagnosticTargets {
 public:
     DiagnosticTargets() = default;
     DiagnosticTargets(const DiagnosticTargets&) = delete;
     DiagnosticTargets& operator=(const DiagnosticTargets&) = delete;
+    class AttachmentLease {
+    public:
+        AttachmentLease() = default;
+        // An empty target or saturated count returns an empty lease, without GL.
+        explicit AttachmentLease(DiagnosticTargets& owner) {
+            if (owner.texture_ != 0 && owner.leases_ != std::numeric_limits<std::size_t>::max()) {
+                ++owner.leases_;
+                owner_ = &owner;
+            }
+        }
+        AttachmentLease(const AttachmentLease&) = delete;
+        AttachmentLease& operator=(const AttachmentLease&) = delete;
+        AttachmentLease(AttachmentLease&& other) noexcept
+            : owner_(std::exchange(other.owner_, nullptr)) {}
+        AttachmentLease& operator=(AttachmentLease&& other) noexcept {
+            if (this != &other) {
+                reset();
+                owner_ = std::exchange(other.owner_, nullptr);
+            }
+            return *this;
+        }
+        ~AttachmentLease() {
+            reset();
+        }
+        explicit operator bool() const {
+            return owner_ != nullptr;
+        }
+        GLuint texture() const {
+            return owner_ != nullptr ? owner_->texture_ : 0;
+        }
+        // Detach protected caller attachments BEFORE release, including before
+        // move-assignment over a live lease. Repeated release is harmless.
+        void reset() {
+            if (owner_ != nullptr) {
+                --owner_->leases_;
+                owner_ = nullptr;
+            }
+        }
+
+    private:
+        DiagnosticTargets* owner_ = nullptr;
+    };
+
+    [[nodiscard]] AttachmentLease acquire_attachment_lease() {
+        return AttachmentLease{*this};
+    }
     ~DiagnosticTargets() {
-        reset();
+        if (leases_ != 0) {
+            assert(leases_ == 0 &&
+                   "detach and release diagnostic attachment leases before owner destruction");
+            std::terminate();
+        }
+        destroy(texture_, framebuffer_);
     }
 
     // Off performs no GL calls when already empty. Refusal retains old storage.
     // At most 16M RGBA32UI pixels (256 MiB); transactional resize peaks at 512 MiB.
     bool ensure(bool enabled, const DiagnosticExtent& extent, std::uint32_t draw_buffers = 1) {
         if (!enabled) {
-            reset();
-            return true;
+            return reset();
         }
         constexpr std::uint32_t max_pixels = 16777216;
         if (extent.width == 0 || extent.height == 0 || extent.width > 16384 ||
@@ -54,6 +112,11 @@ public:
         }
         if (texture_ != 0 && extent_.width == extent.width && extent_.height == extent.height) {
             return true;
+        }
+        // A lease protects attachments on bound AND unbound caller framebuffers.
+        // Reuse above is safe; every storage replacement below requires zero leases.
+        if (leases_ != 0) {
+            return false;
         }
         BindingGuard guard;
         // Retiring a bound owned object would invalidate the caller's binding.
@@ -98,12 +161,17 @@ public:
         return true;
     }
 
-    // End ownership after consumers finish; GL unbinds any deleted owned handles.
-    void reset() {
+    // Refusal leaves all handles, extents, bindings and attachments unchanged.
+    // After leases finish, GL unbinds any deleted owned handles as before.
+    [[nodiscard]] bool reset() {
+        if (leases_ != 0) {
+            return false;
+        }
         destroy(texture_, framebuffer_);
         texture_ = 0;
         framebuffer_ = 0;
         extent_ = {};
+        return true;
     }
     GLuint texture() const {
         return texture_;
@@ -180,6 +248,7 @@ private:
             glDeleteTextures(1, &texture);
         }
     }
+    std::size_t leases_ = 0;
     GLuint texture_ = 0;
     GLuint framebuffer_ = 0;
     DiagnosticExtent extent_{};

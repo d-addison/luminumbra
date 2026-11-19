@@ -6,6 +6,7 @@
 #include "WorldPersistenceRoundtrip.h"
 #include "WorldSaveService.h"
 #include "core/FilesystemPath.h"
+#include "systems/WeatherSystem.h"
 #include "world/TerrainPresetLoader.h"
 #include "world/WorldClock.h"
 
@@ -15,6 +16,7 @@
 #include <cstdint>
 #include <ctime>
 #include <filesystem>
+#include <memory>
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
 #include <stop_token>
@@ -191,9 +193,18 @@ SavedWorld InspectSavedWorld(const fs::path& root,
             json.is_object() && json.contains("container_version") &&
             json.at("container_version").is_number_integer() &&
             (json.at("container_version") == WorldSaveService::kContainerVersion ||
-             json.at("container_version") == WorldSaveService::kIndexedMetadataVersion);
+             json.at("container_version") == WorldSaveService::kIndexedMetadataVersion ||
+             json.at("container_version") == kScheduledWeatherMetadataVersion);
         if (!current_container && !WorldSaveService::validate_save(save, &errors, stop)) {
             result.error = errors.empty() ? "Corrupt world save." : errors.front();
+            return result;
+        }
+        // Admit the envelope even when payload validation is deferred to preparation.
+        std::shared_ptr<const Systems::WeatherSchedule> weather_schedule;
+        std::uint64_t weather_tick = 0;
+        if (current_container &&
+            !ReadWeatherSchedule(save, weather_schedule, weather_tick, &errors, stop)) {
+            result.error = errors.empty() ? "Corrupt weather schedule metadata." : errors.front();
             return result;
         }
         result.metadata.name = json.value("name", "Unnamed World");
@@ -239,8 +250,11 @@ SavedWorld InspectSavedWorld(const fs::path& root,
                 result.error = "Saved-world validation cancelled.";
             return result;
         }
-        if (current_container && validation == SavedWorldValidation::Complete &&
-            !WorldSaveService::validate_save(save, &errors, stop)) {
+        const bool needs_validation = validation != SavedWorldValidation::DeferredToPreparation;
+        if (current_container && needs_validation &&
+            !(validation == SavedWorldValidation::Catalog
+                  ? WorldSaveService::inspect_save(save, &errors, stop, &result.payloads_verified)
+                  : WorldSaveService::validate_save(save, &errors, stop))) {
             result.error = errors.empty() ? "Corrupt world save." : errors.front();
             return result;
         }
@@ -248,6 +262,8 @@ SavedWorld InspectSavedWorld(const fs::path& root,
             result.error = "Saved-world validation cancelled.";
             return result;
         }
+        if (validation == SavedWorldValidation::Complete || !current_container)
+            result.payloads_verified = true;
         result.error.clear();
     } catch (const nlohmann::json::exception& e) {
         result.error = std::string("Corrupt world metadata: ") + e.what();
@@ -284,7 +300,8 @@ SavedWorldCatalog EnumerateSavedWorlds(const fs::path& root,
                     InspectSavedWorld(root,
                                       runtime_root,
                                       Filesystem::GenericUtf8PathString(entry.path().filename()),
-                                      stop));
+                                      stop,
+                                      SavedWorldValidation::Catalog));
         }
         if (stop.stop_requested()) {
             result.worlds.clear();

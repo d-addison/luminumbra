@@ -23,6 +23,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <entt/entt.hpp>
+#include <span>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
@@ -90,8 +91,24 @@ inline void CopyFoliage(const entt::registry& from,
                         entt::entity target) {
     Components([&]<typename T> { Copy<T>(from, source, to, target); });
 }
+// Selection is in ascending handle order, just like Begin's retained roster.
+// EnTT views and each() then visit every component pool in descending handle order,
+// independently of the live pools' insertion, deletion and recycling history.
+inline entt::registry CopySelectedFoliage(const entt::registry& original,
+                                          std::span<const entt::entity> ordered) {
+    entt::registry selected;
+    // The caller supplies only participating handles, bounded by EnTT's entity mask.
+    for (const auto entity : ordered) {
+        if (selected.create(entity) != entity) {
+            throw std::runtime_error("Foliage handle refused");
+        }
+        CopyFoliage(original, entity, selected, entity);
+    }
+    return selected;
+}
 } // namespace stage_detail
-// Candidate storage; the owner keeps live pools stable and free of mutation listeners.
+// Candidate storage; the owner keeps live pools stable. Publication listeners
+// must reserve their storage beforehand and must not throw.
 // Retained handles stay stable; births acquire live handles after consumers succeed.
 class FoliageRegistryStage {
 public:
@@ -318,6 +335,11 @@ public:
             TrimIndex(detached.storage, size);
         });
         m_prepared = true;
+    }
+    // Reserved live handles after PreparePublication, before Commit or Abort.
+    // Incremental consumers can reserve their notification storage before publication.
+    [[nodiscard]] std::span<const entt::entity> birth_handles() const {
+        return m_births;
     }
     void Commit(entt::registry& original) noexcept {
         if (!m_prepared || m_committed) {

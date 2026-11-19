@@ -1,5 +1,6 @@
 #pragma once
 
+#include "audio/AudioAcceptance.h"
 #include "audio/IAudioManager.h"
 #include "audio/MixerModel.h"
 #include <array>
@@ -116,6 +117,29 @@ public:
     void Shutdown() override;
     bool IsPlaybackEnabled() const override {
         return m_engine != nullptr;
+    }
+
+    // Const diagnostic reads the live engine/device and routing nodes, not launch flags.
+    AudioBackendState AcceptanceState() const {
+        auto* device = m_engine ? ma_engine_get_device(m_engine.get()) : nullptr;
+        return {.mode = "device",
+                .playback_enabled = IsPlaybackEnabled(),
+                .engine_initialized = m_engine != nullptr,
+                .device_started = device && ma_device_is_started(device) == MA_TRUE,
+                .sfx_routed = m_sfxGroup != nullptr,
+                .ambient_routed = m_ambientGroup != nullptr,
+                .events_routed = m_eventsGroup != nullptr,
+                .ui_routed = m_uiGroup != nullptr,
+                .playback_volumes =
+                    m_engine && m_sfxGroup
+                        ? std::optional<AudioVolumes>({ma_engine_get_volume(m_engine.get()),
+                                                       // Music-bus setting as applied; voice gain
+                                                       // also folds bank volume and ducking.
+                                                       m_musicVolume,
+                                                       ma_sound_group_get_volume(m_sfxGroup.get())})
+                        : std::nullopt,
+                .telemetry_enabled = false,
+                .retained_requests = 0};
     }
 
     bool LoadBank(const std::string& bankPath) override;

@@ -644,7 +644,7 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
         PassGl::label_gl_object(GL_PROGRAM,
                                 m_lightning_overlay_shader ? m_lightning_overlay_shader->Id() : 0u,
                                 "shader.lightning_overlay");
-        // validate the overlay's one sampler (u_scene) against the registry.
+        // Validate the overlay color and reversed-Z depth samplers.
         if (m_lightning_overlay_shader && m_lightning_overlay_shader->IsValid()) {
             if (const ExpectedLayout* layout = FindPassExpectedLayout("lightning_overlay")) {
                 m_lightning_overlay_shader->ValidateLayout(*layout);
@@ -696,25 +696,42 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, m_lightning_scene_copy);
     m_lightning_overlay_shader->setInt("u_scene", 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_depth.id);
+    glActiveTexture(GL_TEXTURE0);
+    m_lightning_overlay_shader->setInt("u_sceneDepth", 1);
+    m_lightning_overlay_shader->setMat4("u_gbufferInverseProjection",
+                                        ctx.gbuffer_inverse_projection);
+    // Both selected symmetric perspective projections carry the current frame's
+    // jitter in column 2. The lighting context does not populate taau_jitter_ndc.
+    m_lightning_overlay_shader->setVec2("u_jitter_ndc", glm::vec2(ctx.gbuffer_projection[2]));
     m_lightning_overlay_shader->setInt("u_active", 1);
     m_lightning_overlay_shader->setFloat("u_pulse", lit.pulse_intensity);
     m_lightning_overlay_shader->setVec3("u_color", lit.pulse_color);
-    m_lightning_overlay_shader->setVec2("u_strikeNdc", lit.strike_ndc);
+    const std::size_t flash_count = std::min(lit.flashes.count, kMaxLiveStrikeFlashes);
+    m_lightning_overlay_shader->setInt("u_flashCount", static_cast<int>(flash_count));
+    for (std::size_t i = 0; i < flash_count; ++i) {
+        const auto& flash = lit.flashes.entries[i];
+        const std::string suffix = "[" + std::to_string(i) + "]";
+        m_lightning_overlay_shader->setVec2("u_flashNdc" + suffix, flash.strike_ndc);
+        m_lightning_overlay_shader->setFloat("u_flashPulse" + suffix, flash.pulse);
+        m_lightning_overlay_shader->setInt("u_flashOnscreen" + suffix, flash.onscreen ? 1 : 0);
+    }
     m_lightning_overlay_shader->setFloat("u_boltWidth", lit.bolt_width_ndc);
     m_lightning_overlay_shader->setFloat("u_boltGlow", lit.bolt_glow_ndc);
     m_lightning_overlay_shader->setVec2("u_groundNdc", lit.ground_ndc);
     m_lightning_overlay_shader->setFloat("u_groundFlash", lit.ground_flash);
-    //  dark storm-cloud mass the bolt emerges from.
-    m_lightning_overlay_shader->setVec2("u_cloudNdc", lit.cloud_anchor_ndc);
-    m_lightning_overlay_shader->setFloat("u_cloudDark", lit.cloud_darkness);
     m_lightning_overlay_shader->setFloat(
         "u_aspect", static_cast<float>(w) / std::max(1.0f, static_cast<float>(h)));
-    const int point_count =
-        std::min<int>(static_cast<int>(lit.bolt_points_ndc.size()), kMaxBoltSegmentPoints);
+    const int point_count = static_cast<int>(
+        std::min(lit.bolt_points_ndc.size(), static_cast<std::size_t>(kMaxBoltSegmentPoints)));
     m_lightning_overlay_shader->setInt("u_boltCount", point_count);
     for (int i = 0; i < point_count; ++i) {
         m_lightning_overlay_shader->setVec2("u_bolt[" + std::to_string(i) + "]",
                                             lit.bolt_points_ndc[static_cast<std::size_t>(i)]);
+        m_lightning_overlay_shader->setFloat(
+            "u_boltInverseDepth[" + std::to_string(i) + "]",
+            lit.bolt_points_ndc[static_cast<std::size_t>(i)].inverse_depth);
     }
 
     glBindVertexArray(ctx.screen_quad_vao);

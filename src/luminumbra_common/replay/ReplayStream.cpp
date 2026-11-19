@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -21,7 +22,9 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -33,6 +36,7 @@
 #include "core/Log.h"
 #include "persistence/ReplacementOutputFile.h"
 #include "persistence/SaveTransaction.h"
+#include "systems/WeatherSystem.h"
 #include "world/SurfaceWorkBudget.h"
 
 namespace Luminumbra::Replay {
@@ -158,7 +162,272 @@ struct Cursor {
         pos += 8;
         return true;
     }
+    bool GetBytes(void* destination, std::size_t bytes) {
+        if (!Remaining(bytes)) {
+            ok = false;
+            return false;
+        }
+        if (bytes != 0) {
+            std::memcpy(destination, data + pos, bytes);
+        }
+        pos += bytes;
+        return true;
+    }
 };
+
+using BootDescriptor = world::AuthorityBootDescriptor;
+constexpr std::array<std::uint8_t, 4> kBootMagic{'A', 'U', 'B', 'D'};
+
+bool ValidBootDescriptor(const BootDescriptor& boot, std::string& error) {
+    if (boot.system_config_identity.empty() ||
+        boot.system_config_identity.size() > BootDescriptor::kIdentityBytes) {
+        error = "authority boot identity length is outside [1,256]";
+        return false;
+    }
+    if (boot.authority_rules_revision == 0 || boot.seed_conversion_version > 1 ||
+        boot.region_hold_ticks == 0 || boot.region_reduced_shift == 0 ||
+        boot.region_reduced_shift > 16 || boot.avatar_count > BootDescriptor::kMaxAvatars) {
+        error = "invalid authority boot revision, seed conversion, scheduler or avatar count";
+        return false;
+    }
+    if (boot.day_length_ticks == 0 || boot.day_length_ticks >= (std::uint32_t{1} << 31) ||
+        boot.days_per_year == 0 || boot.days_per_year > 366 || boot.daylight_numerator == 0 ||
+        boot.daylight_numerator >= boot.daylight_denominator || boot.daylight_denominator > 65535 ||
+        std::gcd(boot.daylight_numerator, boot.daylight_denominator) != 1 ||
+        boot.lunar_cycle_days == 0 || boot.lunar_cycle_days > 366) {
+        error = "invalid authority boot calendar";
+        return false;
+    }
+    for (const auto gate : boot.system_gates) {
+        if (gate > 1) {
+            error = "invalid authority boot system gate";
+            return false;
+        }
+    }
+    for (std::size_t index = 0; index < BootDescriptor::kSystemParamCount; ++index) {
+        if ((boot.scalar_bits[index] & UINT64_C(0x7ff0000000000000)) ==
+            UINT64_C(0x7ff0000000000000)) {
+            error = "non-finite authority boot scalar";
+            return false;
+        }
+        for (const auto component : boot.vector_bits[index]) {
+            if ((component & 0x7f800000u) == 0x7f800000u) {
+                error = "non-finite authority boot vector";
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool EncodeBootDescriptor(const BootDescriptor& boot,
+                          std::vector<std::uint8_t>& output,
+                          std::string& error) {
+    error.clear();
+    if (!ValidBootDescriptor(boot, error)) {
+        return false;
+    }
+    // Fixed slot counts and the validated identity cap bound this allocation.
+    std::vector<std::uint8_t> bytes;
+    bytes.reserve(BootDescriptor::kMaxEncodedBytes);
+    bytes.insert(bytes.end(), kBootMagic.begin(), kBootMagic.end());
+    PutU16(bytes, BootDescriptor::kVersion);
+    PutU32(bytes, boot.authority_rules_revision);
+    PutU32(bytes, boot.resolved_world_seed);
+    PutU32(bytes, boot.seed_conversion_version);
+    PutString(bytes, boot.system_config_identity);
+    PutU16(bytes, BootDescriptor::kSystemGateCount);
+    bytes.insert(bytes.end(), boot.system_gates.begin(), boot.system_gates.end());
+    PutU16(bytes, BootDescriptor::kSystemParamCount);
+    for (const auto bits : boot.scalar_bits) {
+        PutU64(bytes, bits);
+    }
+    for (const auto& vector : boot.vector_bits) {
+        for (const auto bits : vector) {
+            PutU32(bytes, bits);
+        }
+    }
+    PutU8(bytes, static_cast<std::uint8_t>(boot.finite_hydrology));
+    PutU32(bytes, std::bit_cast<std::uint32_t>(boot.weather_rain_scale_mm));
+    PutU64(bytes, boot.region_work_limit);
+    PutU32(bytes, boot.region_hold_ticks);
+    PutU8(bytes, boot.region_reduced_shift);
+    PutU32(bytes, boot.day_length_ticks);
+    PutU32(bytes, boot.days_per_year);
+    PutU32(bytes, boot.daylight_numerator);
+    PutU32(bytes, boot.daylight_denominator);
+    PutU32(bytes, boot.lunar_cycle_days);
+    PutU64(bytes, boot.parked_bytes_limit);
+    PutU32(bytes, boot.avatar_count);
+    PutU8(bytes, static_cast<std::uint8_t>(boot.ecology_roster));
+    PutU8(bytes, static_cast<std::uint8_t>(boot.planted_roster));
+    PutU8(bytes, static_cast<std::uint8_t>(boot.moving_anchor));
+    PutU8(bytes, static_cast<std::uint8_t>(boot.water_smoke));
+    output.swap(bytes);
+    return true;
+}
+
+bool DecodeBootDescriptor(std::span<const std::uint8_t> bytes,
+                          BootDescriptor& output,
+                          std::string& error) {
+    error = "truncated authority boot descriptor";
+    if (bytes.size() > BootDescriptor::kMaxEncodedBytes) {
+        error = "oversized authority boot descriptor";
+        return false;
+    }
+    Cursor cursor{bytes.data(), bytes.size(), 0, true};
+    std::array<std::uint8_t, kBootMagic.size()> magic{};
+    std::uint16_t version = 0;
+    if (!cursor.GetBytes(magic.data(), magic.size()) || !cursor.GetU16(version)) {
+        return false;
+    }
+    if (magic != kBootMagic || version != BootDescriptor::kVersion) {
+        error = "bad authority boot magic or unsupported descriptor version";
+        return false;
+    }
+    BootDescriptor boot;
+    std::uint32_t identity_bytes = 0;
+    if (!cursor.GetU32(boot.authority_rules_revision) || !cursor.GetU32(boot.resolved_world_seed) ||
+        !cursor.GetU32(boot.seed_conversion_version) || !cursor.GetU32(identity_bytes)) {
+        return false;
+    }
+    if (identity_bytes > BootDescriptor::kIdentityBytes) {
+        error = "oversized authority boot identity";
+        return false;
+    }
+    if (!cursor.Remaining(identity_bytes)) {
+        return false;
+    }
+    boot.system_config_identity.resize(identity_bytes);
+    if (!cursor.GetBytes(boot.system_config_identity.data(), identity_bytes)) {
+        return false;
+    }
+    std::uint16_t count = 0;
+    if (!cursor.GetU16(count)) {
+        return false;
+    }
+    if (count != BootDescriptor::kSystemGateCount) {
+        error = "unsupported authority boot gate count";
+        return false;
+    }
+    for (auto& gate : boot.system_gates) {
+        if (!cursor.GetU8(gate)) {
+            return false;
+        }
+    }
+    if (!cursor.GetU16(count)) {
+        return false;
+    }
+    if (count != BootDescriptor::kSystemParamCount) {
+        error = "unsupported authority boot parameter count";
+        return false;
+    }
+    for (auto& bits : boot.scalar_bits) {
+        if (!cursor.GetU64(bits)) {
+            return false;
+        }
+    }
+    for (auto& vector : boot.vector_bits) {
+        for (auto& bits : vector) {
+            if (!cursor.GetU32(bits)) {
+                return false;
+            }
+        }
+    }
+    const auto boolean = [&cursor, &error](bool& value) {
+        std::uint8_t byte = 0;
+        if (!cursor.GetU8(byte)) {
+            return false;
+        }
+        if (byte > 1) {
+            error = "invalid authority boot boolean";
+            return false;
+        }
+        value = byte != 0;
+        return true;
+    };
+    std::uint32_t rain_bits = 0;
+    if (!boolean(boot.finite_hydrology) || !cursor.GetU32(rain_bits) ||
+        !cursor.GetU64(boot.region_work_limit) || !cursor.GetU32(boot.region_hold_ticks) ||
+        !cursor.GetU8(boot.region_reduced_shift) || !cursor.GetU32(boot.day_length_ticks) ||
+        !cursor.GetU32(boot.days_per_year) || !cursor.GetU32(boot.daylight_numerator) ||
+        !cursor.GetU32(boot.daylight_denominator) || !cursor.GetU32(boot.lunar_cycle_days) ||
+        !cursor.GetU64(boot.parked_bytes_limit) || !cursor.GetU32(boot.avatar_count) ||
+        !boolean(boot.ecology_roster) || !boolean(boot.planted_roster) ||
+        !boolean(boot.moving_anchor) || !boolean(boot.water_smoke)) {
+        return false;
+    }
+    boot.weather_rain_scale_mm = std::bit_cast<std::int32_t>(rain_bits);
+    if (cursor.pos != cursor.size) {
+        error = "trailing authority boot descriptor bytes";
+        return false;
+    }
+    if (!ValidBootDescriptor(boot, error)) {
+        return false;
+    }
+    output = std::move(boot);
+    error.clear();
+    return true;
+}
+
+bool HasBootDescriptor(std::uint16_t version) {
+    return version == kLrec1BootVersion || version == kLrec1BootElidedVersion;
+}
+
+bool ValidBootHeader(const ReplayHeader& header) {
+    if (!HasBootDescriptor(header.version)) {
+        return !header.authority_boot.has_value();
+    }
+    std::string error;
+    return header.authority_boot.has_value() &&
+           header.authority_boot->system_config_identity == header.system_config_identity &&
+           ValidBootDescriptor(*header.authority_boot, error);
+}
+
+bool HeaderEncodingValid(const ReplayHeader& header) {
+    const bool scheduled = WeatherVersion(header.version);
+    // Readers admit versions before this check. Preserve unscheduled writers'
+    // legacy version stamping while refusing schedule payload downgrades.
+    if (!ValidBootHeader(header) || scheduled != !header.weather_schedule.empty() ||
+        scheduled !=
+            header.system_config_identity.starts_with(Systems::WeatherSchedule::kIdentityPrefix)) {
+        return false;
+    }
+    if (!scheduled) {
+        return true;
+    }
+    Systems::WeatherSchedule decoded;
+    return Systems::WeatherSchedule::Decode(header.weather_schedule, decoded);
+}
+
+std::size_t HeaderStringBudget(const ReplayHeader& header) {
+    // At most 64 MiB per encoded header, independently of record storage.
+    std::size_t remaining = BoundedReplayRecorder::kSegmentBytes - 66;
+    if (HasBootDescriptor(header.version)) {
+        remaining -= 4 + BootDescriptor::kMaxEncodedBytes;
+    }
+    if (WeatherVersion(header.version)) {
+        remaining -= 4;
+    }
+    return remaining;
+}
+
+bool HeaderWithinBudget(const ReplayHeader& header) {
+    auto remaining = HeaderStringBudget(header);
+    for (const auto* part : {&header.seed_string,
+                             &header.preset,
+                             &header.start_world_hash,
+                             &header.engine_version,
+                             &header.system_config_identity,
+                             &header.preset_content_hash,
+                             &header.weather_schedule}) {
+        if (part->size() > remaining) {
+            return false;
+        }
+        remaining -= part->size();
+    }
+    return true;
+}
 
 // Header layout. The tick_count field is written as a backpatch slot and finalized
 // in-place by Finalize once the run length is known (its byte offset is fixed
@@ -175,6 +444,8 @@ struct Cursor {
 //   [38..41] collision_radius u32
 //   then length-prefixed strings: seed_string, preset, start_world_hash,
 //   engine_version, system_config_identity, preset_content_hash (v3).
+//   Versions 5/6 append u32 descriptor byte length + AUBD descriptor bytes.
+//   Versions 7/8 instead append u32 schedule byte length + canonical WSC1 bytes.
 constexpr std::size_t kTickCountOffset = 10;
 
 std::unique_ptr<const Persistence::ReplayPairReadGuard>
@@ -210,10 +481,22 @@ void AppendHeader(std::vector<std::uint8_t>& out, const ReplayHeader& h) {
     PutString(out, h.engine_version);
     PutString(out, h.system_config_identity);
     PutString(out, h.preset_content_hash);
+    if (WeatherVersion(h.version)) {
+        PutString(out, h.weather_schedule);
+    }
+    if (HasBootDescriptor(h.version) && h.authority_boot.has_value()) {
+        std::vector<std::uint8_t> descriptor;
+        std::string error;
+        if (!EncodeBootDescriptor(*h.authority_boot, descriptor, error)) {
+            throw std::invalid_argument(error);
+        }
+        PutBlob(out, descriptor);
+    }
 }
 
 template<typename Reader>
-bool ParseHeader(Reader& c, ReplayHeader& h) {
+bool ParseHeader(Reader& c, ReplayHeader& h, std::uint64_t& header_tick_count, std::string& error) {
+    error = "invalid or truncated LREC1 header";
     char magic[sizeof(kLrec1Magic)] = {0};
     if (!c.GetBytes(magic, sizeof(magic)))
         return false;
@@ -227,11 +510,16 @@ bool ParseHeader(Reader& c, ReplayHeader& h) {
     // Refuse a version mismatch LOUDLY (the header's binding contract): a future/unknown LREC1
     // version would have a different record layout, so parsing it under today's assumptions
     // would silently mis-decode into garbage. Reject instead (Factorio breaks silently; we don't).
-    if (h.version != kLrec1Version && h.version != kLrec1ElidedVersion)
+    if (!SupportedVersion(h.version)) {
+        error = "unsupported LREC1 version";
         return false;
+    }
+    if ((HasBootDescriptor(h.version) || WeatherVersion(h.version)) && reserved != 0) {
+        error = "nonzero LREC1 reserved byte";
+        return false;
+    }
     if (!c.GetU16(h.tick_rate_hz))
         return false;
-    std::uint64_t header_tick_count = 0; // read separately (also in trailer)
     if (!c.GetU64(header_tick_count))
         return false;
     if (!c.GetU64(h.seed))
@@ -256,7 +544,30 @@ bool ParseHeader(Reader& c, ReplayHeader& h) {
         return false;
     if (!c.GetString(h.preset_content_hash))
         return false;
-    return c.ok;
+    if (WeatherVersion(h.version) &&
+        !c.GetField(h.weather_schedule, Systems::WeatherSchedule::kMaxEncodedBytes)) {
+        return false;
+    }
+    if (HasBootDescriptor(h.version)) {
+        std::uint32_t length = 0;
+        error = "truncated or oversized authority boot envelope";
+        // Fixed stack scratch; check the encoded length before any allocation.
+        std::array<std::uint8_t, BootDescriptor::kMaxEncodedBytes> bytes{};
+        if (!c.GetU32(length) || length > bytes.size() || !c.budget.Field(length) ||
+            !c.GetBytes(bytes.data(), length)) {
+            return false;
+        }
+        BootDescriptor boot;
+        if (!DecodeBootDescriptor({bytes.data(), length}, boot, error)) {
+            return false;
+        }
+        if (boot.system_config_identity != h.system_config_identity) {
+            error = "authority boot identity disagrees with replay header";
+            return false;
+        }
+        h.authority_boot = std::move(boot);
+    }
+    return c.ok && HeaderEncodingValid(h);
 }
 
 // One record frame: u8 type + u64 tick + u32 payload-length + payload. The
@@ -295,6 +606,9 @@ ReplayWriter::~ReplayWriter() = default;
 bool ReplayWriter::Open(const std::string& path, const ReplayHeader& header) {
     if (!World::SurfaceRadiiSupported(header.surface_radius, header.collision_radius))
         return false;
+    if (!HeaderEncodingValid(header) || !HeaderWithinBudget(header)) {
+        return false;
+    }
     m_replacement_guard.reset();
     m_path = path;
     m_buffer.clear();
@@ -430,15 +744,22 @@ bool BoundedReplayRecorder::Open(const std::string& destination, const ReplayHea
                                      PathTailPrefix(m_directory),
                                      PathTailLength(m_directory),
                                      PathTail(m_directory)));
+    if (!HeaderEncodingValid(header)) {
+        const char* refusal = ValidBootHeader(header)
+                                  ? "unsupported: invalid version or weather schedule"
+                                  : "authority-boot: missing, invalid or mismatched descriptor";
+        return Refused(std::snprintf(m_open_refusal.data(), kOpenRefusalBytes, "%s", refusal));
+    }
     // Header allocation is bounded independently of the tick/segment budget.
-    std::size_t remaining = kSegmentBytes - 66; // fixed fields + six u32 lengths
+    std::size_t remaining = HeaderStringBudget(header);
     std::size_t part_index = 0;
     for (const auto* part : {&header.seed_string,
                              &header.preset,
                              &header.start_world_hash,
                              &header.engine_version,
                              &header.system_config_identity,
-                             &header.preset_content_hash}) {
+                             &header.preset_content_hash,
+                             &header.weather_schedule}) {
         if (part->size() > remaining)
             return Refused(std::snprintf(m_open_refusal.data(),
                                          kOpenRefusalBytes,
@@ -652,8 +973,11 @@ bool BoundedReplayRecorder::Finalize(const std::string& destination,
         }
         Persistence::report_snapshot_step("replay-segment-close", destination);
         std::vector<std::uint8_t> header;
-        if (m_elided_tick != 0)
-            m_header.version = kLrec1ElidedVersion;
+        if (m_elided_tick != 0) {
+            m_header.version = WeatherVersion(m_header.version)      ? kLrec1WeatherElidedVersion
+                               : HasBootDescriptor(m_header.version) ? kLrec1BootElidedVersion
+                                                                     : kLrec1ElidedVersion;
+        }
         AppendHeader(header, m_header);
         for (std::size_t i = 0; i < 8; ++i)
             header[kTickCountOffset + i] =
@@ -1268,9 +1592,10 @@ struct ReplayCursor {
     }
 
     template<typename Field>
-    bool GetField(Field& field) {
+    bool GetField(Field& field,
+                  std::size_t max_bytes = (std::numeric_limits<std::uint32_t>::max)()) {
         std::uint32_t length = 0;
-        if (!GetU32(length) || !Remaining(length) || !budget.Field(length)) {
+        if (!GetU32(length) || length > max_bytes || !Remaining(length) || !budget.Field(length)) {
             ok = false;
             return false;
         }
@@ -1301,16 +1626,20 @@ struct ReplayCursor {
 
 template<typename Source>
 std::optional<ReplayContents>
-ParseReplay(Source& source, std::uint64_t size, ReplayReadLimits limits) {
+ParseReplay(Source& source, std::uint64_t size, ReplayReadLimits limits, std::string& error) {
+    error = "cannot seek replay input";
     if (!source.seek(0)) {
         return std::nullopt;
     }
     ReadBudget budget{limits, 0, false};
     ReplayCursor<Source> c{source, budget, size, 0, true};
     ReplayContents contents;
-    if (!ParseHeader(c, contents.header)) {
+    std::uint64_t header_tick_count = 0;
+    if (!ParseHeader(c, contents.header, header_tick_count, error)) {
         return std::nullopt;
     }
+    error = "malformed or truncated replay records/trailer";
+    const bool strict = HasBootDescriptor(contents.header.version);
 
     // Work is bounded by the admitted field bytes plus constant framing per
     // admitted record. Opaque extension bytes are skipped, never buffered.
@@ -1343,6 +1672,7 @@ ParseReplay(Source& source, std::uint64_t size, ReplayReadLimits limits) {
             break;
         }
         if (budget.records == limits.records) {
+            error = "replay record count exceeds admission limit";
             return std::nullopt;
         }
         ++budget.records;
@@ -1364,10 +1694,9 @@ ParseReplay(Source& source, std::uint64_t size, ReplayReadLimits limits) {
                 break;
             }
             contents.checkpoints.push_back(std::move(rec));
-        } else if (type == RecordType::ElidedPrefix &&
-                   contents.header.version == kLrec1ElidedVersion && contents.inputs.empty() &&
-                   contents.checkpoints.empty() && contents.elided_through_tick == 0 && tick != 0 &&
-                   payload_len == 8) {
+        } else if (type == RecordType::ElidedPrefix && ElidedVersion(contents.header.version) &&
+                   contents.inputs.empty() && contents.checkpoints.empty() &&
+                   contents.elided_through_tick == 0 && tick != 0 && payload_len == 8) {
             if (!payload.GetU64(contents.elided_prefix_digest)) {
                 break;
             }
@@ -1376,16 +1705,24 @@ ParseReplay(Source& source, std::uint64_t size, ReplayReadLimits limits) {
             break;
         }
         c.pos = payload.pos;
+        if (strict && c.pos != payload_end) {
+            return std::nullopt;
+        }
         if (!c.SkipTo(payload_end)) {
             break;
         }
     }
     if (budget.failed) {
+        error = "replay field budget or input read failed";
         return std::nullopt;
     }
     if (!contents.trailer_present) {
         contents.truncated = true;
     }
+    if (strict && (contents.truncated || contents.tick_count != header_tick_count)) {
+        return std::nullopt;
+    }
+    error.clear();
     return contents;
 }
 
@@ -1396,24 +1733,40 @@ std::optional<ReplayContents> ReadReplay(const std::string& path) {
 }
 
 std::optional<ReplayContents> ReadReplay(const std::string& path, ReplayReadLimits limits) {
+    std::string error;
+    return ReadReplay(path, limits, error);
+}
+
+std::optional<ReplayContents>
+ReadReplay(const std::string& path, ReplayReadLimits limits, std::string& error) {
     try {
+        error = "cannot open replay input";
         Filesystem::ReplacementSafeInputFile source;
         if (!source.open(fs::path(path))) {
             return std::nullopt;
         }
-        std::error_code error;
-        const auto size = source.size(error);
-        if (error) {
+        std::error_code size_error;
+        const auto size = source.size(size_error);
+        if (size_error) {
+            error = "cannot measure replay input";
             return std::nullopt;
         }
-        return ParseReplay(source, size, limits);
+        return ParseReplay(source, size, limits, error);
     } catch (const std::exception&) {
+        // Keep the staged diagnostic without allocating during allocation failure.
         return std::nullopt;
     }
 }
 
 std::optional<ReplayContents> ReadReplay(std::istream& input, ReplayReadLimits limits) {
+    std::string error;
+    return ReadReplay(input, limits, error);
+}
+
+std::optional<ReplayContents>
+ReadReplay(std::istream& input, ReplayReadLimits limits, std::string& error) {
     try {
+        error = "cannot seek or measure replay input";
         if (!input.seekg(0, std::ios::end)) {
             return std::nullopt;
         }
@@ -1422,7 +1775,7 @@ std::optional<ReplayContents> ReadReplay(std::istream& input, ReplayReadLimits l
             return std::nullopt;
         }
         StreamReplaySource source{input};
-        return ParseReplay(source, static_cast<std::uint64_t>(end), limits);
+        return ParseReplay(source, static_cast<std::uint64_t>(end), limits, error);
     } catch (const std::exception&) {
         return std::nullopt;
     }
@@ -1445,3 +1798,21 @@ const CheckpointRecord* FindCheckpoint(const ReplayContents& contents, std::uint
 }
 
 } // namespace Luminumbra::Replay
+
+namespace Luminumbra::world {
+
+// Share the explicit LE primitives with the replay envelope; neither codec
+// depends on native struct layout or publishes a partially decoded descriptor.
+bool EncodeAuthorityBootDescriptor(const AuthorityBootDescriptor& descriptor,
+                                   std::vector<std::uint8_t>& output,
+                                   std::string& error) {
+    return Replay::EncodeBootDescriptor(descriptor, output, error);
+}
+
+bool DecodeAuthorityBootDescriptor(std::span<const std::uint8_t> bytes,
+                                   AuthorityBootDescriptor& output,
+                                   std::string& error) {
+    return Replay::DecodeBootDescriptor(bytes, output, error);
+}
+
+} // namespace Luminumbra::world

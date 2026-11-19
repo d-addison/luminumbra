@@ -9,6 +9,7 @@
 #include "luminumbra_common/components/PlantComponents.h"
 #include "luminumbra_common/components/SoilComponents.h"
 #include "luminumbra_common/core/DeterministicRng.h"
+#include "luminumbra_common/persistence/PlantPersistence.h"
 #include "luminumbra_common/systems/FarmingSystem.h"
 #include "luminumbra_common/systems/IrrigationSystem.h"
 #include "luminumbra_common/systems/PlantGrowthSystem.h"
@@ -173,6 +174,54 @@ TEST(PlantGrowth, NoncopyableSamplerPreservesAdmissionOrderAndState) {
         EXPECT_EQ(growth.last_tick, admitted ? 5u : 0u);
         EXPECT_EQ(growth.tended, admitted ? 19u : 20u);
         EXPECT_EQ(identity.region_stamp, admitted ? 5u : 0u);
+    }
+}
+
+TEST(PlantGrowth, ConcreteEnvironmentMatchesErasedGrowthAndSaveBytesAcrossRegionSchedules) {
+    entt::registry concrete;
+    entt::registry erased;
+    for (auto* registry : {&concrete, &erased}) {
+        SpawnPlants(*registry, 16, 2024);
+        for (const auto entity : registry->view<C::PlantGrowthComponent>()) {
+            const auto index = static_cast<std::uint32_t>(entt::to_integral(entity));
+            auto& growth = registry->get<C::PlantGrowthComponent>(entity);
+            growth.tended = 20;
+            growth.growth_points = 995;
+            registry->emplace<C::PlantHealthComponent>(entity).infection =
+                static_cast<std::uint16_t>((index % 3) * 500);
+            registry->emplace<C::PlantRegionComponent>(
+                entity,
+                C::PlantRegionComponent{.persistent_id = index + 1,
+                                        .owner_x = static_cast<std::int32_t>(index % 2),
+                                        .owner_z = 0,
+                                        .region_stamp = 0});
+        }
+    }
+    const auto sample = [](const C::TransformComponent& transform) {
+        return EnvAt(transform);
+    };
+    const F::EnvSampler reference = sample;
+    for (std::uint64_t tick = 1; tick <= 64; ++tick) {
+        SCOPED_TRACE(tick);
+        std::vector<Luminumbra::world::RegionKey> due;
+        if (tick % 4 != 0) {
+            due.push_back({0, 0});
+        }
+        if (tick % 4 == 2) {
+            due.push_back({1, 0});
+        }
+        const Luminumbra::world::RegionConsumerGate concrete_gate(concrete, due);
+        const Luminumbra::world::RegionConsumerGate erased_gate(erased, due);
+        const auto actual = F::RunPlantGrowthSystemOnTick(concrete, tick, sample, concrete_gate);
+        const auto expected = F::RunPlantGrowthSystemOnTick(erased, tick, reference, erased_gate);
+        EXPECT_EQ(actual.updated, expected.updated);
+        EXPECT_EQ(actual.updated, static_cast<int>(due.size() * 8));
+        EXPECT_EQ(actual.advanced, expected.advanced);
+        EXPECT_EQ(PlantStateDigest(concrete), PlantStateDigest(erased));
+        EXPECT_EQ(Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
+                      F::BuildPlantEntitySnapshot(concrete, true)),
+                  Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
+                      F::BuildPlantEntitySnapshot(erased, true)));
     }
 }
 
