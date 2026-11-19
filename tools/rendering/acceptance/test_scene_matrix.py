@@ -27,6 +27,39 @@ sys.dont_write_bytecode = True  # never leave bytecode in the source tree
 sys.path.insert(0, str(HERE))
 import scene_matrix as sm  # noqa: E402
 
+# Independent identity oracle: changing a checked-in fixture must be intentional.
+CANONICAL_CAMERAS = {
+    "elevated": {"pos": [8, 56, 8], "yaw": 35, "pitch": -6, "fov": 110},
+    "ground": {"pos": [8, 19.1, 8], "yaw": 35, "pitch": -6, "fov": 110},
+    "high": {"pos": [8, 112, 8], "yaw": 35, "pitch": -6, "fov": 110},
+    "cave_air": {"pos": [8.469266, -46.070644, 11.695518], "yaw": 0, "pitch": 0, "fov": 110},
+}
+BASE_WEATHER = {"type": "none", "intensity": 0.0}
+WEATHER_VARIANTS = {
+    "clear": BASE_WEATHER,
+    **{kind: {"type": kind, "intensity": 1.0} for kind in ("rain", "snow", "storm")},
+}
+ISOLATION_VARIANTS = {
+    "no-aerial": [t for t in sm.FULL_LAYERS if t != "aerial"],
+    "no-particles": [t for t in sm.FULL_LAYERS if t != "particles"],
+    "no-water": [t for t in sm.FULL_LAYERS if t != "water"],
+    "terrain-only": ["terrain"],
+}
+EXPECTED_NAMES = {
+    sid + suffix for sid in CANONICAL_CAMERAS
+    for suffix in ("", *("." + vid for vid in WEATHER_VARIANTS),
+                   *("." + vid for vid in ISOLATION_VARIANTS if sid == "elevated"))
+}
+EXPECTED_TRANSITIONS = [
+    {"id": "surface-camera", "kind": "camera",
+     "endpoints": ["ground", "elevated", "high", "elevated", "ground"]},
+    {"id": "cave-camera", "kind": "camera", "endpoints": ["ground", "cave_air", "ground"]},
+    {"id": "near-far-lod", "kind": "lod", "endpoints": ["elevated", "high", "elevated"]},
+    *[{"id": sid + "-weather", "kind": "weather",
+       "endpoints": [sid, sid + ".rain", sid + ".snow", sid + ".storm", sid + ".clear"]}
+      for sid in CANONICAL_CAMERAS],
+]
+
 QUOTED_FLAG = re.compile(r'"(--[a-z0-9-]+)"')
 
 
@@ -98,13 +131,30 @@ class MatrixSchemaTests(unittest.TestCase):
         self.assertEqual(camera, {"pos": [8, 56, 8], "yaw": 35, "pitch": -6, "fov": 110})
         self.assertEqual(elevated["scene"]["time_of_day"], 0.04)
 
-    def test_all_scenes_use_fov_110_and_unresolved_pose_is_null(self):
-        for scene in _load_matrix()["scenes"]:
-            self.assertEqual(scene["scene"]["camera"]["fov"], 110, scene["id"])
-            if scene["pose_source"] == "recorded-evidence":
-                self.assertIsNone(scene["scene"]["camera"]["pos"], scene["id"])
-                self.assertIsNone(scene["scene"]["camera"]["yaw"], scene["id"])
-                self.assertIsNone(scene["scene"]["camera"]["pitch"], scene["id"])
+    def test_all_required_scenes_resolve_completely(self):
+        data = _load_matrix()
+        sm.validate_matrix(data)
+        entries, unresolved = sm.plan_entries(data)
+        self.assertEqual(unresolved, [])
+        self.assertEqual({entry["name"] for entry in entries}, EXPECTED_NAMES)
+        for scene in data["scenes"]:
+            self.assertEqual(scene["pose_source"], "explicit", scene["id"])
+            self.assertEqual(scene["scene"]["camera"], CANONICAL_CAMERAS[scene["id"]])
+            self.assertEqual(scene["scene"]["time_of_day"], 0.04)
+            self.assertEqual(scene["scene"]["weather"], BASE_WEATHER)
+        self.assertEqual(data["transitions"], EXPECTED_TRANSITIONS)
+
+    def test_qualification_workloads_use_the_same_authored_poses(self):
+        path = REPO_ROOT / "tools/perf/qualification/matrix.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        workloads = {w["id"]: w for w in data["workloads"]}
+        self.assertEqual(data["time_of_day"], 0.04)
+        for sid, wid in (("ground", "ground-settled"), ("high", "high-altitude-settled"),
+                         ("cave_air", "cave-air-settled")):
+            camera = CANONICAL_CAMERAS[sid]
+            self.assertEqual(workloads[wid]["pose"],
+                             dict(zip(("x", "y", "z"), camera["pos"]),
+                                  yaw=camera["yaw"], pitch=camera["pitch"]))
 
     def test_variants_use_only_accepted_layer_tokens(self):
         accepted = _isolation_literals()
@@ -153,7 +203,7 @@ class MatrixSchemaTests(unittest.TestCase):
 
     def test_rejects_recorded_scene_with_pose_and_explicit_without_pose(self):
         data = _load_matrix()
-        data["scenes"][1]["scene"]["camera"]["pos"] = [1, 2, 3]
+        data["scenes"][1]["pose_source"] = "recorded-evidence"
         with self.assertRaises(sm.MatrixError):
             sm.validate_matrix(data)
         data = _load_matrix()
@@ -165,6 +215,22 @@ class MatrixSchemaTests(unittest.TestCase):
         data = _load_matrix()
         data["scenes"][0]["variants"][1]["weather"]["type"] = "hail"
         with self.assertRaises(sm.MatrixError):
+            sm.validate_matrix(data)
+
+    def test_weather_identity_must_be_complete_in_bases_and_variants(self):
+        for value in ({}, {"type": "rain"}, {"intensity": 1.0},
+                      {"type": "rain", "intensity": 1.0, "unknown": 1}, [], None):
+            for variant in (False, True):
+                with self.subTest(value=value, variant=variant):
+                    data = _load_matrix()
+                    target = (data["scenes"][0]["variants"][0] if variant
+                              else data["scenes"][0]["scene"])
+                    target["weather"] = value
+                    with self.assertRaisesRegex(sm.MatrixError, "scene elevated.*weather"):
+                        sm.validate_matrix(data)
+        data = _load_matrix()
+        del data["scenes"][0]["scene"]["weather"]
+        with self.assertRaisesRegex(sm.MatrixError, "scene elevated.*weather"):
             sm.validate_matrix(data)
 
 
@@ -198,26 +264,55 @@ class GeneratorTests(unittest.TestCase):
         self.out = Path(self._tmp.name) / "out"
 
     def _emit_real(self):
-        code, err = _run(["--matrix", str(MATRIX_PATH), "--out", str(self.out), "--allow-unresolved"])
+        code, err = _run(["--matrix", str(MATRIX_PATH), "--out", str(self.out)])
         self.assertEqual(code, 0, err)
         return sorted(p.name for p in self.out.glob("*.scene.json"))
 
-    def test_resolved_outputs_written_and_unresolved_skipped(self):
-        names = self._emit_real()
-        self.assertEqual(
-            names,
-            sorted(
-                [
-                    "elevated.scene.json",
-                    "elevated.clear.scene.json",
-                    "elevated.storm.scene.json",
-                    "elevated.no-aerial.scene.json",
-                    "elevated.no-particles.scene.json",
-                    "elevated.no-water.scene.json",
-                    "elevated.terrain-only.scene.json",
-                ]
-            ),
-        )
+    def test_all_required_recipes_emit_exact_requested_identities(self):
+        self.assertEqual(self._emit_real(), sorted(name + ".scene.json" for name in EXPECTED_NAMES))
+        manifest = json.loads((self.out / "recipes.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["schema"], "luminumbra.scene_recipes.v1")
+        self.assertEqual(manifest["transitions"], EXPECTED_TRANSITIONS)
+        self.assertEqual(len(manifest["recipes"]), len(EXPECTED_NAMES))
+        self.assertEqual({r["name"] for r in manifest["recipes"]}, EXPECTED_NAMES)
+        lines = [shlex.split(line) for line in (self.out / "commands.txt").read_text(
+            encoding="utf-8").splitlines() if line and not line.startswith("#")]
+        for recipe in manifest["recipes"]:
+            sid, _, vid = recipe["name"].partition(".")
+            camera = CANONICAL_CAMERAS[sid]
+            weather = WEATHER_VARIANTS.get(vid, BASE_WEATHER)
+            path = self.out / (recipe["name"] + ".scene.json")
+            self.assertEqual(recipe, {
+                "name": recipe["name"], "scene": sid, "variant": vid or "base",
+                "preset": "default", "seed": 424242, "camera": camera,
+                "time_of_day": 0.04, "weather": weather,
+                "layers": ISOLATION_VARIANTS.get(vid), "scene_config": path.as_posix(),
+            })
+            config = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(config, {
+                "camera": camera, "time_of_day": 0.04, "weather": weather,
+                "screenshot": str(self.out / (recipe["name"] + ".ppm")),
+            })
+            clients = [argv for argv in lines if "--scene-config" in argv
+                       and argv[argv.index("--scene-config") + 1] == path.as_posix()]
+            self.assertEqual(len(clients), 2)
+            for argv in clients:
+                self.assertEqual(argv[argv.index("--world-preset") + 1], "default")
+                if recipe["layers"] is None:
+                    self.assertNotIn("--isolation-layers", argv)
+                else:
+                    self.assertEqual(argv[argv.index("--isolation-layers") + 1],
+                                     ",".join(recipe["layers"]))
+            report = self.out / (recipe["name"] + ".render_benchmark.json")
+            validators = [argv for argv in lines if len(argv) > 2
+                          and argv[1] == sm.VALIDATOR and argv[2] == report.as_posix()]
+            self.assertEqual(len(validators), 1)
+            argv = validators[0]
+            pos_index = argv.index("--position")
+            self.assertEqual([float(v) for v in argv[pos_index + 1:pos_index + 4]], camera["pos"])
+            for flag, expected in (("--yaw", camera["yaw"]), ("--pitch", camera["pitch"]),
+                                   ("--fov", 110), ("--tod", 0.04)):
+                self.assertEqual(float(argv[argv.index(flag) + 1]), expected)
         self.assertTrue((self.out / "commands.txt").is_file())
 
     def test_elevated_config_contents(self):
@@ -227,7 +322,7 @@ class GeneratorTests(unittest.TestCase):
             config["camera"], {"pos": [8, 56, 8], "yaw": 35, "pitch": -6, "fov": 110}
         )
         self.assertEqual(config["time_of_day"], 0.04)
-        self.assertNotIn("weather", config)
+        self.assertEqual(config["weather"], BASE_WEATHER)
         self.assertTrue(Path(config["screenshot"]).is_absolute())
         self.assertEqual(Path(config["screenshot"]).name, "elevated.ppm")
 
@@ -236,7 +331,7 @@ class GeneratorTests(unittest.TestCase):
         storm = json.loads((self.out / "elevated.storm.scene.json").read_text(encoding="utf-8"))
         self.assertEqual(storm["weather"], {"type": "storm", "intensity": 1.0})
         terrain = json.loads((self.out / "elevated.terrain-only.scene.json").read_text(encoding="utf-8"))
-        self.assertNotIn("weather", terrain)
+        self.assertEqual(terrain["weather"], BASE_WEATHER)
         commands = (self.out / "commands.txt").read_text(encoding="utf-8")
         self.assertIn("--isolation-layers terrain", commands)
         no_aerial = ",".join(t for t in sm.FULL_LAYERS if t != "aerial")
@@ -255,7 +350,7 @@ class GeneratorTests(unittest.TestCase):
         self._emit_real()
         lines = (self.out / "commands.txt").read_text(encoding="utf-8").splitlines()
         marks = [line for line in lines if "NEEDS-NATIVE-RUN" in line]
-        self.assertEqual(len(marks), 2 * 7)
+        self.assertEqual(len(marks), 2 * len(EXPECTED_NAMES))
         for line in marks:
             self.assertTrue(line.startswith("#"), line)
 
@@ -266,33 +361,125 @@ class GeneratorTests(unittest.TestCase):
             for line in (self.out / "commands.txt").read_text(encoding="utf-8").splitlines()
             if line and not line.startswith("#")
         ]
-        self.assertEqual(len(commands), 3 * 7)
+        self.assertEqual(len(commands), 3 * len(EXPECTED_NAMES))
         benchmark = [c for c in commands if "--render-benchmark" in c]
-        self.assertEqual(len(benchmark), 7)
+        self.assertEqual(len(benchmark), len(EXPECTED_NAMES))
         validators = [c for c in commands
                       if shlex.split(c)[:2] == [Path(sys.executable).as_posix(), sm.VALIDATOR]]
-        self.assertEqual(len(validators), 7)
+        self.assertEqual(len(validators), len(EXPECTED_NAMES))
         for line in validators:
             self.assertIn("--require-settled", line)
-            self.assertIn("--position 8 56 8", line)
 
     def test_no_world_seed_flag_emitted(self):
         self._emit_real()
         self.assertNotIn("--world-seed", (self.out / "commands.txt").read_text(encoding="utf-8"))
 
-    def test_unresolved_without_flag_exits_2(self):
-        code, err = _run(["--matrix", str(MATRIX_PATH), "--out", str(self.out)])
-        self.assertEqual(code, 2)
-        for scene_id in ("ground", "high", "cave_air"):
-            self.assertIn(scene_id, err)
-        self.assertFalse((self.out / "commands.txt").exists())
+    def test_each_unresolved_required_pose_names_scene_before_writing(self):
+        for sid in CANONICAL_CAMERAS:
+            with self.subTest(scene=sid):
+                data = _load_matrix()
+                scene = next(s for s in data["scenes"] if s["id"] == sid)
+                scene["pose_source"] = "recorded-evidence"
+                scene["scene"]["camera"].update(pos=None, yaw=None, pitch=None)
+                scene["scene"]["time_of_day"] = None
+                data["scenes"] = [scene]
+                data["transitions"] = []
+                matrix = Path(self._tmp.name) / "unresolved.json"
+                matrix.write_text(json.dumps(data), encoding="utf-8")
+                code, err = _run(["--matrix", str(matrix), "--out", str(self.out)])
+                self.assertEqual(code, sm.EXIT_UNRESOLVED, err)
+                self.assertIn(sid, err)
+                self.assertFalse(self.out.exists())
+                # Explicitly requested partial output is empty, never a substituted pose.
+                code, err = _run(["--matrix", str(matrix), "--out", str(self.out),
+                                  "--allow-unresolved"])
+                self.assertEqual(code, 0, err)
+                self.assertEqual(list(self.out.glob("*.scene.json")), [])
+                self.assertEqual(json.loads((self.out / "recipes.json").read_text(
+                    encoding="utf-8"))["recipes"], [])
+                for path in self.out.iterdir():
+                    path.unlink()
+                self.out.rmdir()
+
+    def test_each_null_required_identity_names_scene_before_writing(self):
+        fields = (("camera", "pos"), ("camera", "yaw"), ("camera", "pitch"),
+                  ("camera", "fov"), ("time_of_day",), ("weather",),
+                  ("weather", "type"), ("weather", "intensity"),
+                  *(("camera", "pos", axis) for axis in range(3)))
+        for sid in CANONICAL_CAMERAS:
+            for field in fields:
+                with self.subTest(scene=sid, field=field):
+                    data = _load_matrix()
+                    node = next(s for s in data["scenes"] if s["id"] == sid)["scene"]
+                    for key in field[:-1]:
+                        node = node[key]
+                    node[field[-1]] = None
+                    matrix = Path(self._tmp.name) / "null-identity.json"
+                    matrix.write_text(json.dumps(data), encoding="utf-8")
+                    code, err = _run(["--matrix", str(matrix), "--out", str(self.out)])
+                    self.assertEqual(code, sm.EXIT_INVALID, err)
+                    self.assertIn(f"scene {sid}", err)
+                    self.assertFalse(self.out.exists())
+
+    def test_bad_transitions_are_refused_before_writing(self):
+        invalid = [None, {}, {"id": None, "kind": "camera", "endpoints": ["ground", "high"]},
+                   {"id": "bad", "kind": "unknown", "endpoints": ["ground", "high"]},
+                   {"id": "bad", "kind": "camera", "endpoints": None},
+                   {"id": "bad", "kind": "camera", "endpoints": []},
+                   {"id": "bad", "kind": "camera", "endpoints": ["ground"]},
+                   {"id": "bad", "kind": "camera", "endpoints": ["ground", "missing"]},
+                   {"id": "bad", "kind": "camera", "endpoints": ["ground", None]}]
+        for transition in invalid:
+            with self.subTest(transition=transition):
+                data = _load_matrix()
+                data["transitions"] = [transition]
+                matrix = Path(self._tmp.name) / "bad-transition.json"
+                matrix.write_text(json.dumps(data), encoding="utf-8")
+                code, err = _run(["--matrix", str(matrix), "--out", str(self.out)])
+                self.assertEqual(code, sm.EXIT_INVALID, err)
+                self.assertIn("transition", err)
+                self.assertFalse(self.out.exists())
+        data = _load_matrix()
+        for transitions in (None, [data["transitions"][0]] * 2):
+            data["transitions"] = transitions
+            with self.assertRaises(sm.MatrixError):
+                sm.validate_matrix(data)
+
+    def test_refusals_preserve_existing_output(self):
+        self.out.mkdir()
+        sentinel = self.out / "recipes.json"
+        sentinel.write_bytes(b"prior evidence\n")
+        bad = _load_matrix()
+        bad["scenes"][1]["scene"]["camera"]["yaw"] = None
+        partial = Path(self._tmp.name) / "partial.json"
+        partial.write_text("{", encoding="utf-8")
+        invalid = Path(self._tmp.name) / "invalid.json"
+        invalid.write_text(json.dumps(bad), encoding="utf-8")
+        missing = Path(self._tmp.name) / "missing.json"
+        for path in (missing, partial, invalid):
+            with self.subTest(path=path.name):
+                code, err = _run(["--matrix", str(path), "--out", str(self.out)])
+                self.assertEqual(code, sm.EXIT_INVALID, err)
+                self.assertEqual(list(self.out.iterdir()), [sentinel])
+                self.assertEqual(sentinel.read_bytes(), b"prior evidence\n")
+
+    def test_legacy_matrix_without_transitions_emits_no_transition_claim(self):
+        data = _load_matrix()
+        del data["transitions"]
+        matrix = Path(self._tmp.name) / "legacy.json"
+        matrix.write_text(json.dumps(data), encoding="utf-8")
+        code, err = _run(["--matrix", str(matrix), "--out", str(self.out)])
+        self.assertEqual(code, 0, err)
+        manifest = json.loads((self.out / "recipes.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["transitions"], [])
+        self.assertEqual({r["name"] for r in manifest["recipes"]}, EXPECTED_NAMES)
 
     def test_unknown_layer_token_is_rejected_by_generator(self):
         data = _load_matrix()
         data["scenes"][0]["variants"][0]["layers"] = ["terrain", "nope"]
         matrix = Path(self._tmp.name) / "bad.json"
         matrix.write_text(json.dumps(data), encoding="utf-8")
-        code, err = _run(["--matrix", str(matrix), "--out", str(self.out), "--allow-unresolved"])
+        code, err = _run(["--matrix", str(matrix), "--out", str(self.out)])
         self.assertEqual(code, 1)
         self.assertIn("nope", err)
         self.assertFalse((self.out / "commands.txt").exists())
@@ -315,7 +502,7 @@ class GeneratorTests(unittest.TestCase):
         commands = [shlex.split(line) for line in text.splitlines()
                     if line and not line.startswith("#")]
         clients = [argv for argv in commands if "--scene-config" in argv]
-        self.assertEqual(len(clients), 14)
+        self.assertEqual(len(clients), 2 * len(EXPECTED_NAMES))
         for argv in clients:
             self.assertEqual(argv[0], (build_dir / "bin" / sm.CLIENT_BINARY).as_posix())
             self.assertTrue(Path(argv[argv.index("--scene-config") + 1]).is_absolute())
@@ -328,7 +515,7 @@ class EngineContractTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.out = Path(self._tmp.name) / "out"
-        code, err = _run(["--matrix", str(MATRIX_PATH), "--out", str(self.out), "--allow-unresolved"])
+        code, err = _run(["--matrix", str(MATRIX_PATH), "--out", str(self.out)])
         self.assertEqual(code, 0, err)
 
     def _command_lines(self):
@@ -365,6 +552,11 @@ class EngineContractTests(unittest.TestCase):
             config = json.loads(path.read_text(encoding="utf-8"))
             for key in _json_keys(config):
                 self.assertIn(key, literals, f"{path.name}: {key}")
+
+    def test_seed_and_weather_identities_match_client_inputs(self):
+        text = (SRC / "main_client.cpp").read_text(encoding="utf-8")
+        self.assertIn('traversal ? std::to_string(traversal->seed) : "424242"', text)
+        self.assertTrue(set(sm.WEATHER_TYPES) <= _scene_config_literals())
 
     def test_isolation_tokens_are_accepted_by_isolation_config(self):
         accepted = _isolation_literals()

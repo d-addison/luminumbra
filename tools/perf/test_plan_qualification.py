@@ -136,14 +136,26 @@ class CommittedMatrixTests(MatrixTestBase):
                                    'forest-settled.performance.3840x1600',
                                    'forest-settled.performance.3440x1440'])
 
-    def test_committed_fixed_views_are_pose_unrecorded(self):
+    def test_committed_fixed_views_bind_authored_poses_or_remain_unrecorded(self):
         cells = qm.cells(committed())
         fixed = [cell for cell in cells if cell['kind'] == 'fixed_view']
         self.assertEqual(len(fixed), 24)
+        authored = {
+            'ground-settled': {'x': 8.0, 'y': 19.1, 'z': 8.0, 'yaw': 35.0, 'pitch': -6.0},
+            'high-altitude-settled': {'x': 8.0, 'y': 112.0, 'z': 8.0, 'yaw': 35.0, 'pitch': -6.0},
+            'cave-air-settled': {'x': 8.469266, 'y': -46.070644, 'z': 11.695518,
+                                 'yaw': 0.0, 'pitch': 0.0},
+        }
         for cell in fixed:
             with self.subTest(cell=cell['id']):
-                self.assertEqual(qm.readiness(cell, ROOT),
-                                 ('unevaluated', 'pose-unrecorded'))
+                if cell['workload'] in authored:
+                    self.assertEqual(cell['pose'], authored[cell['workload']])
+                    self.assertEqual(qm.readiness(cell, ROOT), ('ready', None))
+                    self.assertIn('needs native confirmation', cell['pose_provenance'])
+                else:
+                    self.assertIsNone(cell['pose'])
+                    self.assertEqual(qm.readiness(cell, ROOT),
+                                     ('unevaluated', 'pose-unrecorded'))
 
     def test_surface_flight_ready_and_blocked_traversals(self):
         cells = qm.cells(committed())
@@ -912,7 +924,7 @@ class PlannerCliTests(MatrixTestBase):
         self.assertFalse(plan['partial'])
         self.assertEqual(plan['cell_count'], 36)
         self.assertEqual(len(plan['cells']), 36)
-        self.assertEqual(plan['summary'], {'ready': 4, 'unevaluated': 32})
+        self.assertEqual(plan['summary'], {'ready': 16, 'unevaluated': 20})
         ready = [cell for cell in plan['cells'] if cell['state'] == 'ready']
         self.assertTrue(all(cell['command'] and cell['checker_command'] for cell in ready))
         unevaluated = [cell for cell in plan['cells'] if cell['state'] != 'ready']
