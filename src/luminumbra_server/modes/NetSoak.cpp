@@ -85,6 +85,9 @@ int RunNetSoak(const ServerCliOptions& options) {
     }
 
     std::uint64_t executed = 0;
+    // Refusals share the requested tick budget; permanent pressure reaches the stall path.
+    const std::uint64_t max_preparation_retries = options.ticks;
+    std::uint64_t preparation_retries = 0;
     std::uint32_t accept_events = 0; // total accepts (>= joins, counts reconnects)
     std::uint32_t leave_events = 0;  // total clean leaves observed
     std::uint32_t peak_connected = 0;
@@ -142,7 +145,14 @@ int RunNetSoak(const ServerCliOptions& options) {
 
         const auto step = runner.RunFixedTicks(1);
         executed += step.ticks_executed;
-        if (step.ticks_executed == 0) {
+        if (step.ticks_executed == 0 && !step.region_fault &&
+            preparation_retries < max_preparation_retries) {
+            ++preparation_retries;
+            std::this_thread::sleep_for(std::chrono::milliseconds(33));
+            next_tick_time = std::chrono::steady_clock::now();
+            continue;
+        }
+        if (step.region_fault || step.ticks_executed == 0) {
             LUMINUMBRA_CORE_ERROR("net-soak: tick {} did not advance", executed + 1);
             for (RuntimeTcpClientSlot& slot : slots)
                 CloseRuntimeTcpSlot(slot);

@@ -301,6 +301,9 @@ void AttachMissingCreatureBodies(Luminumbra::Systems::PhysicsSystem* phys,
             continue;
         const auto& tf = view.get<const Luminumbra::Components::TransformComponent>(e);
         const std::size_t idx = phys->create_avatar_character(tf.position);
+        if (idx == Luminumbra::Systems::PhysicsSystem::kInvalidAvatar) {
+            break; // Leave it unattached for a later frame's deterministic retry.
+        }
         reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
         ++made;
     }
@@ -537,7 +540,9 @@ static void ConsumeWorldDressing(ClientAppContext& g_app,
                 if (phys) {
                     const std::size_t idx = phys->create_avatar_character(
                         glm::vec3(c.position.x, c.position.y, c.position.z));
-                    reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
+                    if (idx != Luminumbra::Systems::PhysicsSystem::kInvalidAvatar) {
+                        reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
+                    }
                 }
                 ++pend.creatures_spawned;
             }
@@ -772,7 +777,9 @@ static void ConsumeWorldDressing(ClientAppContext& g_app,
                     if (phys) {
                         const std::size_t idx =
                             phys->create_avatar_character(glm::vec3(cx, cy, cz));
-                        reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
+                        if (idx != Luminumbra::Systems::PhysicsSystem::kInvalidAvatar) {
+                            reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
+                        }
                     }
                 };
                 if (g_app.capture.timelapse_calm) {
@@ -5292,6 +5299,20 @@ int main(int argc, char* argv[]) {
             }
 
             case GameState::IN_GAME:
+                // Prepare before the local character driver as well as the rigid-body
+                // step below. Render camera/streaming inputs never enter this horizon.
+                if (advance_frame_simulation && !scenario_config.networked_session_smoke()) {
+                    if (auto* physics = gameSession->GetPhysicsSystem()) {
+                        if (!physics->prepare_simulation_collisions(
+                                {}, std::numeric_limits<std::uint64_t>::max())) {
+                            Luminumbra::Client::PollSessionFault(
+                                *gameSession, [&] { glfwSetWindowShouldClose(window, GLFW_TRUE); });
+                            Luminumbra::Client::SaveSessionWhenDue(gameSession.get(),
+                                                                   session_persistence_allowed());
+                            break; // Leave this frame's simulation unconsumed on refusal.
+                        }
+                    }
+                }
                 // Scenario driving (the persistence phase + the per-scenario
                 // camera/scene drivers) runs behind the ScenarioRunner seam.
                 // kBreakCase preserves the persistence phase's original
@@ -5535,9 +5556,14 @@ int main(int argc, char* argv[]) {
                         } else if (traversal) {
                             while (!gameSession->GetRegionSchedulerFault() &&
                                    traversal_ticks <
-                                       static_cast<std::uint64_t>(traversal_target_tick))
-                                traversal_ticks +=
+                                       static_cast<std::uint64_t>(traversal_target_tick)) {
+                                const auto advanced =
                                     gameSession->TickSimulation(1.0 / traversal->tickRate);
+                                if (advanced == 0) {
+                                    break; // A refused collider barrier retries next frame.
+                                }
+                                traversal_ticks += advanced;
+                            }
                         } else if (g_app.capture.timeScale == 1.0f) {
                             gameSession->TickSimulation(static_cast<double>(
                                 deltaTime)); // byte-identical default (gates run here)

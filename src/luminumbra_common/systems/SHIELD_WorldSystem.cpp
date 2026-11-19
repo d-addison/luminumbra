@@ -6824,6 +6824,7 @@ void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
     m_pending_water_changes.clear();
 
     if (physics_system) {
+        physics_system->clear_simulation_collisions();
         for (const auto& [id, chunk] : m_streaming_state.chunks) {
             physics_system->remove_chunk_collision(id);
         }
@@ -6836,6 +6837,9 @@ void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
     m_water_columns_generated = 0;
     m_parked_columns.clear();
     m_durable_chunks.clear();
+    for (auto& sample : m_collision_samples) {
+        sample.valid = false;
+    }
     m_digest_members.clear();
     ++m_digest_membership_revision;
     m_durable_read_failed = false;
@@ -7132,6 +7136,128 @@ bool SHIELD_WorldSystem::is_far_lod_sdf_snapshot_current(const FarLodSdfSnapshot
     return published_sdfs == captured_resident_sdfs;
 }
 
+bool SHIELD_WorldSystem::sample_simulation_collision(i32 chunk_x,
+                                                     i32 chunk_z,
+                                                     std::span<float> heights) const {
+    constexpr std::size_t kSide = CHUNK_SIZE_X + 1;
+    static_assert(CHUNK_SIZE_X == CHUNK_SIZE_Z);
+    if (m_durable_read_failed || heights.size() != kSide * kSide || chunk_x < Chunk::kPackedMinXz ||
+        chunk_x > Chunk::kPackedMaxXz || chunk_z < Chunk::kPackedMinXz ||
+        chunk_z > Chunk::kPackedMaxXz) {
+        return false;
+    }
+    const auto generation = m_water_seed_terrain_generation.load(std::memory_order_acquire);
+    const auto slot = (static_cast<u32>(chunk_x) * 31u + static_cast<u32>(chunk_z) * 17u) %
+                      m_collision_samples.size();
+    // Probe the fixed 128 slots: colliding keys coexist while capacity allows.
+    // LRU replacement retains any stationary admitted working set of <=128 columns.
+    auto selected = slot;
+    for (std::size_t probe = 0; probe < m_collision_samples.size(); ++probe) {
+        const auto index = (slot + probe) % m_collision_samples.size();
+        const auto& entry = m_collision_samples[index];
+        if (entry.valid && entry.x == chunk_x && entry.z == chunk_z) {
+            selected = index;
+            break;
+        }
+        const auto& oldest = m_collision_samples[selected];
+        if ((!entry.valid && oldest.valid) ||
+            (entry.valid == oldest.valid && entry.last_use < oldest.last_use)) {
+            selected = index;
+        }
+    }
+    if (m_collision_sample_clock == std::numeric_limits<u64>::max()) {
+        // Saturation changes replacement preference only, never sample validity.
+        for (auto& entry : m_collision_samples) {
+            entry.last_use = 0;
+        }
+        m_collision_sample_clock = 0;
+    }
+    auto& cached = m_collision_samples[selected];
+    cached.last_use = ++m_collision_sample_clock;
+    if (!cached.valid || cached.x != chunk_x || cached.z != chunk_z ||
+        cached.generation != generation || generation == std::numeric_limits<u64>::max()) {
+        cached.valid = false;
+        cached.complete = false;
+        cached.saved = false;
+        cached.x = chunk_x;
+        cached.z = chunk_z;
+        cached.generation = generation;
+        // Only the centre is needed to locate committed authority's vertical layer.
+        ++m_collision_terrain_evaluations;
+        cached.centre =
+            GetTerrainHeightAt(static_cast<float>(chunk_x * CHUNK_SIZE_X + CHUNK_SIZE_X / 2),
+                               static_cast<float>(chunk_z * CHUNK_SIZE_Z + CHUNK_SIZE_Z / 2));
+    }
+    const float centre = cached.centre;
+    const double layer = std::floor(static_cast<double>(centre) / CHUNK_SIZE_Y);
+    if (!std::isfinite(layer) || layer < Chunk::kPackedMinY || layer > Chunk::kPackedMaxY) {
+        return false;
+    }
+    const IVec3 coords(chunk_x, static_cast<i32>(layer), chunk_z);
+    // Inspect live/parked authority without triggering synchronous saved reads.
+    auto chunk = find_streamed_chunk(coords);
+    if (!chunk) {
+        const auto parked = m_parked.find(Chunk::calculate_id(coords));
+        if (parked != m_parked.end()) {
+            chunk = parked->second.chunk;
+        }
+    }
+    const bool expected = m_durable_chunks.contains(Chunk::calculate_id(coords));
+    const bool resident_terrain = chunk && chunk->has_terrain_authority();
+    if (expected && !resident_terrain) {
+        if (cached.valid && cached.complete && cached.saved) {
+            std::copy(cached.heights.begin(), cached.heights.end(), heights.begin());
+            return true;
+        }
+        // A render or water-only placeholder cannot mask committed terrain.
+        chunk = read_committed_chunk(coords);
+    }
+    if (m_durable_read_failed || (expected && (!chunk || !chunk->has_simulation_authority()))) {
+        // A required committed record needs known authority metadata.
+        return false;
+    }
+    if (chunk && chunk->has_terrain_authority()) {
+        if (chunk->heightmap_data.size() != heights.size()) {
+            return false;
+        }
+        std::copy(chunk->heightmap_data.begin(), chunk->heightmap_data.end(), heights.begin());
+    } else {
+        if (!cached.complete) {
+            // Scalar/grid parity is pinned by terrain tests. A miss visits at most
+            // the 17x17 lattice; the already sampled centre is reused.
+            for (int z = 0; z <= CHUNK_SIZE_Z; ++z) {
+                for (int x = 0; x <= CHUNK_SIZE_X; ++x) {
+                    const auto index =
+                        static_cast<std::size_t>(z) * kSide + static_cast<std::size_t>(x);
+                    if (x == CHUNK_SIZE_X / 2 && z == CHUNK_SIZE_Z / 2) {
+                        cached.heights[index] = centre;
+                    } else {
+                        ++m_collision_terrain_evaluations;
+                        cached.heights[index] =
+                            GetTerrainHeightAt(static_cast<float>(chunk_x * CHUNK_SIZE_X + x),
+                                               static_cast<float>(chunk_z * CHUNK_SIZE_Z + z));
+                    }
+                }
+            }
+        }
+        std::copy(cached.heights.begin(), cached.heights.end(), heights.begin());
+    }
+    const bool valid = std::all_of(heights.begin(), heights.end(), [](float height) {
+        constexpr float kMinHeight = static_cast<float>(Chunk::kPackedMinY) * CHUNK_SIZE_Y;
+        constexpr float kMaxHeight = (static_cast<float>(Chunk::kPackedMaxY) + 1) * CHUNK_SIZE_Y;
+        return std::isfinite(height) && height >= kMinHeight && height < kMaxHeight;
+    });
+    cached.valid = valid;
+    if (valid && expected && !resident_terrain) {
+        std::copy(heights.begin(), heights.end(), cached.heights.begin());
+        cached.saved = true;
+        cached.complete = true;
+    } else if (valid && !(chunk && chunk->has_terrain_authority())) {
+        cached.complete = true;
+    }
+    return valid;
+}
+
 std::shared_ptr<Luminumbra::Chunk>
 SHIELD_WorldSystem::find_streamed_chunk(const IVec3& coords) const {
     const auto it = m_streaming_state.chunks.find(Chunk::calculate_id(coords));
@@ -7417,22 +7543,27 @@ void SHIELD_WorldSystem::discard_unclaimed_water_columns(
         if (!retained || chunk->get_state() == ChunkState::Loading) {
             continue;
         }
-        if (chunk->needs_authority() ||
-            (!chunk->has_water_sim.load() && chunk->water_revision() == 0)) {
-            // Published authority retains identity without this marker. An
-            // initialized but not yet published candidate still needs admission.
+        if (chunk->needs_authority()) {
+            // Published authority retains identity without this marker.
             m_admitted_water_columns.erase(chunk->get_id());
         }
+        // Never erase a claimed owner. An initialized but not yet published
+        // candidate still needs admission.
         if (chunk->needs_authority() || chunk->has_water_sim.load() ||
             chunk->water_revision() != 0) {
             continue;
         }
         m_water_column_reservations.erase(chunk->get_id());
-        if (parked != m_parked.end() && parked->second.chunk == chunk) {
-            m_parked_bytes -= parked->second.bytes;
-            note_digest_chunk(chunk, true, false);
-            m_parked.erase(parked);
+        // A live unclaimed admission keeps its marker until the chunk leaves
+        // residency, so a later inspection cannot decode a committed record over
+        // the canonical live handle.
+        if (parked == m_parked.end() || parked->second.chunk != chunk) {
+            continue;
         }
+        m_admitted_water_columns.erase(chunk->get_id());
+        m_parked_bytes -= parked->second.bytes;
+        note_digest_chunk(chunk, true, false);
+        m_parked.erase(parked);
     }
     // Resolution can fail before returning a handle. Inspect only retained owners,
     // never worker arrays, disk records or terrain, for these <=832 reservations.
@@ -7505,6 +7636,9 @@ SHIELD_WorldSystem::snapshot_authoritative_chunks() const {
 void SHIELD_WorldSystem::set_durable_chunk_loader(
     std::function<std::shared_ptr<Chunk>(const IVec3&)> loader,
     std::function<void(std::string)> fault) {
+    for (auto& sample : m_collision_samples) {
+        sample.valid = false;
+    }
     m_durable_chunk_loader = std::move(loader);
     m_durable_chunk_fault = std::move(fault);
 }
@@ -7518,6 +7652,9 @@ void SHIELD_WorldSystem::set_durable_residency(bool on) {
         return;
     wait_for_streaming_jobs();
     m_durable_residency = on;
+    for (auto& sample : m_collision_samples) {
+        sample.valid = false;
+    }
     m_digest_members.clear();
     ++m_digest_membership_revision;
     // A mode transition inventories each existing item once. Ordinary flag-off
@@ -7692,6 +7829,10 @@ std::vector<std::pair<i32, i32>> SHIELD_WorldSystem::authority_region_keys() con
 }
 
 void SHIELD_WorldSystem::remember_durable_chunks(const std::vector<IVec3>& coords) {
+    // Called after each committed save generation, even for already known ids.
+    for (auto& sample : m_collision_samples) {
+        sample.valid = false;
+    }
     for (const auto& coord : coords) {
         const auto id = Chunk::calculate_id(coord);
         if (!m_durable_chunks.emplace(id, coord).second || !m_durable_residency)

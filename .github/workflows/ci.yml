@@ -615,7 +615,7 @@ jobs:
     # Advisory during warning and duration calibration; never a required gate.
     name: Fast compile / GCC + clang-tidy
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 35
     env:
       CCACHE_DIR: ${{ github.workspace }}/scratch/fast-ccache
       CCACHE_MAXSIZE: 250M
@@ -645,9 +645,11 @@ jobs:
       - name: Validate shader scene contracts
         run: python3 -I -B tools/gates/test_shader_scenes.py
       - name: Install offline shader compiler
+        # Slow Ubuntu mirrors stretch apt to 10-17 minutes; bound the index refresh
+        # and retry fetches. This refresh also serves the dependency step below.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends glslang-tools
+          sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends glslang-tools
       - name: Validate shader compiler contracts and all shader permutations
         run: |
           python3 -I -B tools/ci/test_compile_shaders.py --validator glslangValidator
@@ -655,8 +657,7 @@ jobs:
       - name: Install fast validation dependencies
         if: (steps.route.outputs.native != 'false' || steps.shader-scenes.outputs.needs_shader_scenes == 'true')
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
             build-essential ccache clang-18 clang-tidy-18 cmake extra-cmake-modules \
             libfreetype6-dev libgl1-mesa-dev libglu1-mesa-dev libwayland-dev \
             libxkbcommon-dev ninja-build pkg-config python3-numpy python3-pil \
