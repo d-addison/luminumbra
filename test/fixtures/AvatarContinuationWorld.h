@@ -39,6 +39,14 @@ public:
         return *session.GetPhysicsSystem();
     }
 
+    bool capture_player_owner(World::PhysicsOwnerState& output) {
+        return session.CapturePlayerOwner(output);
+    }
+
+    bool restore_player_owner(const World::PhysicsOwnerState& state) {
+        return session.RestorePlayerOwner(state);
+    }
+
     bool capture_avatar_owner(std::size_t index, World::PhysicsOwnerState& output) {
         if (!session.GetPhysicsSystem()) {
             return false;

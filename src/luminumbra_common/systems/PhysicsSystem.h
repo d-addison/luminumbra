@@ -206,6 +206,8 @@ public:
     // Only the session, which validates owners first, constructs it.
     class OwnerContinuation {
     public:
+        bool capture_player_owner(World::PhysicsOwnerState& output) const;
+        bool restore_player_owner(const World::PhysicsOwnerState& state);
         bool capture_avatar_owner(std::size_t index, World::PhysicsOwnerState& output) const;
         bool restore_avatar_owner(const World::PhysicsOwnerState& state,
                                   std::size_t& index,
@@ -305,6 +307,8 @@ public:
     }
 
 private:
+    bool capture_player_owner(World::PhysicsOwnerState& output) const;
+    bool restore_player_owner(const World::PhysicsOwnerState& state);
     bool capture_avatar_owner(std::size_t index, World::PhysicsOwnerState& output) const;
     bool restore_avatar_owner(const World::PhysicsOwnerState& state,
                               std::size_t& index,
