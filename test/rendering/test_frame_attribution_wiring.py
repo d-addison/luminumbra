@@ -947,6 +947,20 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn('"${STATIC_PREVIEW_ROOT}/src/luminumbra_client/app/FrameAttribution.cpp"',
                       preview)
 
+    def test_static_preview_compiles_the_diagnostic_id_codec_its_units_call(self):
+        # The standalone preview DLL links no client library, so every unit it compiles that
+        # submits diagnostic draws (DiagnosticDrawTable::submit -> EncodeDiagnosticId) needs the
+        # codec unit in the same target; otherwise MSVC/MSYS2 fail to link the DLL.
+        preview = read(ROOT / "tools/static_preview/CMakeLists.txt")
+        target = re.search(r"add_library\(luminumbra_render_static SHARED(.*?)\)", preview, re.S)
+        self.assertIsNotNone(target)
+        sources = re.findall(r'"\$\{STATIC_PREVIEW_ROOT\}/(src/[^"]+\.cpp)"', target.group(1))
+        callers = [source for source in sources
+                   if re.search(r'#include "(?:rendering/)?DiagnosticDrawTable\.h"|EncodeDiagnosticId\(',
+                                read(ROOT / source))]
+        self.assertIn("src/luminumbra_client/rendering/GBufferTargets.cpp", callers)
+        self.assertIn("src/luminumbra_client/rendering/DiagnosticCapture.cpp", sources)
+
     def test_program_owners_retain_the_first_use_bit_on_every_backend(self):
         for path, members in (
             ("rendering/Shader.h", ("m_id",)),
@@ -3387,6 +3401,84 @@ class ComparisonAtmosphereWiring(unittest.TestCase):
         self.assertIn("pipeline.get_season_tick()", snapshot)
         self.assertIn("presentation_clock.capture_seconds()", snapshot)
         self.assertIn("particles->wind_velocity()", snapshot)
+
+
+class DeferredDiagnosticLeaseWiring(unittest.TestCase):
+    """Evaluate capture admission and guard every skipped deferred producer."""
+
+    def setUp(self):
+        self.targets = read(CLIENT / "rendering/GBufferTargets.cpp")
+        self.passes = read(CLIENT / "rendering/passes/GBufferPass.cpp")
+
+    def test_completion_requires_all_six_conditions(self):
+        import itertools
+
+        body = block(self.targets, "bool GBufferDiagnosticCapture::complete()")
+        expression = re.fullmatch(r"\s*return\s+(.*?);\s*", body, re.S).group(1)
+        for captured, framebuffer, lease, failed, refused, coverage in itertools.product(
+                (False, True), repeat=6):
+            with self.subTest(captured=captured, framebuffer=framebuffer, lease=lease,
+                              failed=failed, refused=refused, coverage=coverage):
+                actual = cpp_expression(expression, **{
+                    "state_->captured": captured, "state_->framebuffer": framebuffer,
+                    "state_->attachment_lease": lease, "state_->failed": failed,
+                    "state_->refused": refused, "state_->table.complete_coverage()": coverage,
+                    "true": True, "false": False})
+                self.assertEqual(actual, captured and not framebuffer and not lease
+                                 and not failed and not refused and coverage)
+
+    def test_attachment_wraps_deferred_submission(self):
+        execute = block(self.passes, "GBufferDrawStats GBufferPass::execute(")
+        attachment = execute.index("GBufferDiagnosticAttachment diagnostic_attachment(")
+        self.assertLess(execute.index("ReplayRollback restore_gl("), attachment)
+        self.assertLess(execute.index("glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)"),
+                        attachment)
+        for producer in ("geometry_pass_chunks(", "geometry_pass_static_meshes(",
+                         "geometry_pass_skinned_meshes("):
+            self.assertLess(attachment, execute.index(producer))
+        # No extra block can release the attachment before the last producer.
+        prefix = execute[:attachment]
+        masked = re.sub(r"//[^\n]*|/\*.*?\*/|\"(?:\\.|[^\"\\])*\"",
+                        "", prefix, flags=re.S)
+        self.assertEqual(masked.count("{"), masked.count("}"))
+
+    def test_unavailable_base_program_invalidates_before_return(self):
+        variant = block(self.targets, "Shader* GBufferDiagnosticCapture::variant(")
+        unavailable = block(variant, "if (!shader || !shader->IsValid())")
+        self.assertLess(unavailable.index('unsupported("diagnostic_base_shader_unavailable")'),
+                        unavailable.index("return shader;"))
+        for producer in ("geometry_pass_chunks(", "geometry_pass_static_meshes(",
+                         "geometry_pass_skinned_meshes("):
+            body = block(self.passes, "void GBufferPass::" + producer)
+            self.assertLess(body.index("capture->variant("), body.index("UseDrawProgram("))
+        skinned = block(self.passes, "void GBufferPass::geometry_pass_skinned_meshes(")
+        self.assertLess(skinned.index("capture->variant("),
+                        skinned.index("if (view.begin() == view.end())"))
+
+    def test_queued_impostor_is_invalidated_before_program_refusal(self):
+        static = block(self.passes, "void GBufferPass::geometry_pass_static_meshes(")
+        queued = block(static, "if (impostorsOn && !impostorInstances.empty())")
+        record = queued.index('capture->unsupported("tree_impostor_fragment_output_unavailable", 3)')
+        self.assertLess(record, queued.index("if (!UseDrawProgram("))
+        self.assertIn("return;", block(queued, "if (!UseDrawProgram("))
+        self.assertIn('capture->unsupported("tree_impostor_fragment_output_unavailable", 3)',
+                      block(queued, "if (capture)"))
+
+    def test_detached_writers_and_variants_do_no_work(self):
+        for signature, work, returned in (
+                ("Shader* GBufferDiagnosticCapture::variant(", "if (!shader", "return shader;"),
+                ("void GBufferDiagnosticCapture::write(", "for (const auto& entry", "return;")):
+            body = block(self.targets, signature)
+            guard = "if (!state_->framebuffer)"
+            self.assertLess(body.index(guard), body.index(work))
+            self.assertIn(returned, block(body, guard))
+
+    def test_unsupported_submission_failure_is_sticky(self):
+        writer = block(self.targets, "void GBufferDiagnosticCapture::write(")
+        unsupported = block(writer, "if (submission.provenance == DiagnosticProvenance::Unsupported)")
+        self.assertIn("state_->failed = true;", unsupported)
+        self.assertLess(writer.index("submission.provenance"),
+                        writer.index("state_->table.submit(submission, id)"))
 
 
 if __name__ == "__main__":

@@ -37,119 +37,6 @@
 
 namespace Luminumbra::Rendering {
 
-namespace {
-GBufferDiagnosticCapture*& ActiveCapture() {
-    static thread_local GBufferDiagnosticCapture* capture = nullptr;
-    return capture;
-}
-} // namespace
-
-GBufferDiagnosticCapture* GBufferDiagnosticCapture::Current() {
-    return ActiveCapture();
-}
-
-void GBufferDiagnosticCapture::SetCurrent(GBufferDiagnosticCapture* capture) {
-    ActiveCapture() = capture;
-}
-
-GBufferDiagnosticCapture::State::State(DiagnosticDrawTable& draw_table)
-    : table(draw_table) {}
-
-GBufferDiagnosticCapture::State::~State() = default;
-
-GBufferDiagnosticCapture::GBufferDiagnosticCapture(DiagnosticDrawTable& table) {
-    if (Current()) {
-        throw std::logic_error("Diagnostic capture scopes cannot nest");
-    }
-    if (table.resolve(1)) {
-        throw std::invalid_argument("Diagnostic capture requires a fresh draw table");
-    }
-    state_ = std::make_unique<State>(table);
-    SetCurrent(this);
-}
-
-GBufferDiagnosticCapture::~GBufferDiagnosticCapture() {
-    SetCurrent(nullptr);
-}
-
-void GBufferDiagnosticCapture::unsupported(std::string_view producer,
-                                           std::uint32_t lod,
-                                           DiagnosticOwnership ownership) {
-    if (state_->refused) {
-        return;
-    }
-    DiagnosticId unused{};
-    if (!state_->table.submit({.mesh_path = {},
-                               .shader_variant = producer,
-                               .chunk = {},
-                               .lod = lod,
-                               .ownership = ownership,
-                               .pass = DiagnosticPass::GBuffer,
-                               .provenance = DiagnosticProvenance::Unsupported},
-                              unused)) {
-        state_->refused = true;
-    }
-}
-
-bool GBufferDiagnosticCapture::refused() const {
-    return state_->refused;
-}
-
-bool GBufferDiagnosticCapture::complete() const {
-    // Producer identities alone cannot qualify pixels without a leased ID attachment.
-    return false;
-}
-
-Shader* GBufferDiagnosticCapture::variant(Shader* shader, bool ladder) {
-    if (!shader || !shader->IsValid()) {
-        return shader;
-    }
-    for (const auto& entry : state_->variants) {
-        if (entry.vertex == shader->VertexPath() && entry.fragment == shader->FragmentPath() &&
-            entry.ladder == ladder) {
-            return entry.shader.get();
-        }
-    }
-    if (state_->variants.size() == 6) {
-        unsupported("diagnostic_shader_variant_limit");
-        return shader;
-    }
-    std::vector<std::string> defines{"LUMIN_DIAG_IDS 1"};
-    if (ladder) {
-        defines.emplace_back("LUMINUMBRA_FAR_WORLD_LADDER 1");
-    }
-    auto diagnostic = std::make_unique<Shader>(shader->VertexPath().c_str(),
-                                               shader->FragmentPath().c_str(),
-                                               std::vector<std::string>{},
-                                               defines);
-    const GLint identity =
-        diagnostic->IsValid() ? glGetUniformLocation(diagnostic->Id(), "u_diagnosticIds") : -1;
-    if (identity < 0) {
-        unsupported("diagnostic_shader_variant_unavailable");
-        return shader;
-    }
-    state_->variants.push_back(
-        {shader->VertexPath(), shader->FragmentPath(), ladder, std::move(diagnostic), identity});
-    return state_->variants.back().shader.get();
-}
-
-void GBufferDiagnosticCapture::write(const Shader& shader, const DiagnosticSubmission& submission) {
-    for (const auto& entry : state_->variants) {
-        if (entry.shader.get() != &shader) {
-            continue;
-        }
-        DiagnosticId id{};
-        if (!state_->refused && !state_->table.submit(submission, id)) {
-            state_->refused = true;
-        }
-        // Refused draws carry no identity, never the previous draw's ID. Once
-        // refused, do no more registry work or allocation for this capture.
-        glProgramUniform4uiv(shader.Id(), entry.identity, 1, id.data());
-        return;
-    }
-    unsupported("diagnostic_writer_without_variant", submission.lod, submission.ownership);
-}
-
 // capacity of the shared per-(mesh,material) instance-matrix VBO. The draw
 // path clamps uploads + draw counts to this so a group larger than capacity can
 // never run glBufferSubData past the buffer end (GL_INVALID_VALUE -> garbage /
@@ -478,6 +365,9 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
     glClearDepth(0.0);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+    GBufferDiagnosticAttachment diagnostic_attachment(m_gbuffer,
+                                                      {ctx.internal_w(), ctx.internal_h()});
+
     //  isolation/layer mode: skip the draws whose layer bit is cleared so an
     // isolated subsystem reads ALONE against the SkyboxPass backdrop. The gbuffer
     // is ALWAYS cleared first, so suppressing a sub-pass just leaves cleared pixels
@@ -487,6 +377,12 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
     // Default config renders == true for every bit, so this is byte-stable off.
     namespace SH = Luminumbra::Client::ScenarioHarness;
     const SH::IsolationConfig& iso = *ctx.isolation;
+    // A filtered deferred producer leaves its pixels unattributed whether or not it
+    // has scene content, so isolation never certifies complete coverage.
+    if (diagnostic_capture &&
+        (!iso.renders(SH::IsolationLayer::Terrain) || !iso.renders(SH::IsolationLayer::Skinned))) {
+        GBufferDiagnosticCapture::Current()->unsupported("isolation_filtered_deferred_producer");
+    }
 
     // copy ctx.frustum_planes (a const glm::vec4* pointer) into a local
     // array so the terrain-submit callback (which takes a const glm::vec4(&)[6]
@@ -1175,8 +1071,13 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     // for the whole far field (the draw-call/triangle collapse the forest_perf_budget gate
     // targets).
     if (impostorsOn && !impostorInstances.empty()) {
-        if (!UseDrawProgram(m_tree_impostor_shader.get(), stats))
+        // Queued geometry is unsupported even when its program prevents submission.
+        if (capture) {
+            capture->unsupported("tree_impostor_fragment_output_unavailable", 3);
+        }
+        if (!UseDrawProgram(m_tree_impostor_shader.get(), stats)) {
             return;
+        }
         m_tree_impostor_shader->setMat4("u_view", static_view);
         m_tree_impostor_shader->setMat4("u_proj", static_proj);
         m_tree_impostor_shader->setVec3("u_cameraPos", cameraPos);
@@ -1203,9 +1104,6 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                 impostorInstances.data() + offset);
             glBindVertexArray(m_impostorVAO);
             glDisable(GL_CULL_FACE);
-            if (capture) {
-                capture->unsupported("tree_impostor_fragment_output_unavailable", 3);
-            }
             Luminumbra::Rendering::AttributedGl::Submit(
                 glDrawArraysInstanced, GLenum{GL_TRIANGLE_STRIP}, 0, 4, count);
             glBindVertexArray(0);

@@ -366,7 +366,11 @@ void terrainSurface(uint materialId, vec3 worldPos, vec3 dx, vec3 dy, vec3 surfa
     float tiling = max(texInfo.b * 64.0, 0.0625);
     float scale = 1.0 / tiling; // repeats per world unit
     vec3 weights = triplanar_weights(u_macroRockOverlay == 1 ? surfaceN : worldN);
-    float geomSlope = surfaceN.y; // up-facing-ness (1 flat, 0 vertical), pre normal-map
+    // Coverage follows the interpolated terrain normal before normal mapping.
+    // A derivative face normal is constant per triangle: using it for slope
+    // reintroduces hard rock/sand edges even with blended material lanes.
+    // Keep that face normal for cliff projection above (avoids stretched texels).
+    float geomSlope = worldN.y; // up-facing-ness (1 flat, 0 vertical), pre normal-map
     vec3 baseAlbedo = triplanar_albedo(worldPos, weights, texLayer, scale, dx, dy);
     vec3 baseN      = triplanar_normal(worldPos, worldN, weights, normLayer, scale, dx, dy);
     // terrain PBR roughness-map: per-texel roughness from the AmbientCG roughness map
