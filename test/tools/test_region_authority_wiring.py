@@ -396,8 +396,69 @@ class SimulationCollisionWiring(unittest.TestCase):
         self.assertLess(step.index("if (ctx->session->GetRegionSchedulerFault())"),
                         step.index("if (!prepared)"))
         self.assertEqual(function(step, "if (!prepared)"), "retry = true;")
-        self.assertEqual(function(step, "if (retry)"), "return true;")
+        retry = function(step, "if (retry)")
+        self.assertTrue(retry.endswith("m_finished = true; return false;"))
+        self.assertLess(step.index("if (ctx->session->GetRegionSchedulerFault())"),
+                        step.index("if (retry)"))
         self.assertLess(step.index("if (!prepared)"), step.index("m_impl->host->PumpTick("))
+
+    def assert_client_preparation_retry_bound(self, source):
+        impl = function(source, "struct NetworkedSessionDriver::Impl")
+        self.assertIn("std::uint64_t preparation_retries = 0;", impl)
+        step = function(source, "bool NetworkedSessionDriver::StepAgreedTick(")
+        self.assertIn("const std::uint64_t budget = m_impl->config.budget_ticks;", step)
+        retry = function(step, "if (retry)")
+        guard = "if (m_impl->preparation_retries < max_preparation_retries)"
+        self.assertIn(guard, retry)
+        self.assertEqual(function(retry, guard), "++m_impl->preparation_retries; return true;")
+        self.assertEqual(retry, "const std::uint64_t max_preparation_retries = budget; "
+                         + guard + " { ++m_impl->preparation_retries; return true; } "
+                         'm_failure_reason = "region_preparation_stalled_at_tick_" + '
+                         "std::to_string(m_agreed_ticks); m_finished = true; return false;")
+        # One initialization and one guarded increment: progress cannot reset the
+        # run-wide allowance, and even UINT64_MAX cannot wrap the counter.
+        self.assertEqual(source.count("preparation_retries ="), 2)
+        self.assertEqual(source.count("++m_impl->preparation_retries;"), 1)
+        self.assertEqual(source.count("m_impl->preparation_retries"), 2)
+        self.assertTrue(step.startswith(
+            "if (m_finished || m_desynced || !m_impl->host || !m_impl->client) { return false; }"))
+        preflight = function(step, "&m_impl->client_ctx})")
+        self.assertIn("&m_impl->host_ctx, &m_impl->client_ctx", step)
+        self.assertTrue(step[step.index(preflight) + len(preflight):].startswith(" } if (retry)"))
+        before_pump = step[:step.index("m_impl->host->PumpTick(")]
+        for advance in ("PumpTick(", "m_agreed_ticks =", "++m_agreed_ticks", "TickSimulation(",
+                        "NetSessionCollectInput(", "NetSessionApplyStep("):
+            self.assertNotIn(advance, before_pump)
+        for peer in ("host", "client"):
+            self.assertLess(step.index("if (retry)"), step.index(f"m_impl->{peer}->PumpTick("))
+        self.assert_client_preflight_outcomes(source)
+
+    def test_client_preparation_refusals_have_a_run_wide_tick_budget(self):
+        source = (ROOT / "src/luminumbra_client/core/scenarios/NetworkedSessionDriver.cpp").read_text(
+            encoding="utf-8")
+        self.assert_client_preparation_retry_bound(source)
+
+    def test_client_preparation_retry_bound_mutations_are_detected(self):
+        source = (ROOT / "src/luminumbra_client/core/scenarios/NetworkedSessionDriver.cpp").read_text(
+            encoding="utf-8")
+        mutations = (
+            ("missing bound", "if (retry) {", "if (retry) { return true; } if (false) {"),
+            ("unbounded retry", "m_impl->preparation_retries < max_preparation_retries", "true"),
+            ("off by one", "m_impl->preparation_retries < max_preparation_retries",
+             "m_impl->preparation_retries <= max_preparation_retries"),
+            ("missing increment", "++m_impl->preparation_retries;", ""),
+            ("counter reset", "++m_impl->preparation_retries;", "m_impl->preparation_retries = 0;"),
+            ("changed allowance", "max_preparation_retries = budget;",
+             "max_preparation_retries = budget + 1;"),
+            ("missing reason", '"region_preparation_stalled_at_tick_"', '""'),
+            ("not terminal", "m_finished = true;", "m_finished = false;"),
+            ("keeps spinning", "m_finished = true;\n        return false;",
+             "m_finished = true;\n        return true;"),
+        )
+        for name, old, new in mutations:
+            self.assertIn(old, source, name)
+            with self.subTest(mutation=name), self.assertRaises(AssertionError):
+                self.assert_client_preparation_retry_bound(source.replace(old, new))
 
     def test_denied_avatar_checks_session_prepared_terrain_headroom(self):
         native = (ROOT / "test/common/RegionConsumerGate_test.cpp").read_text(encoding="utf-8")
