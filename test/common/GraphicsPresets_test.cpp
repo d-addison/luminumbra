@@ -115,8 +115,7 @@ TEST(GraphicsPresets, SharedClassifierPresetsPreserveDisplayNamesAndSettingsKeys
         EXPECT_EQ(saved["user"]["graphics"]["detection"]["recommended_preset"], row.key);
         const auto loaded = SystemConfig::LoadLayered("", file.Path().string());
         EXPECT_EQ(loaded.user().graphics.base_preset, row.preset);
-        EXPECT_EQ(loaded.user().graphics.preset_revision,
-                  row.preset == GraphicsPreset::Ultra ? 2u : 3u);
+        EXPECT_EQ(loaded.user().graphics.preset_revision, kGraphicsPresetRevision);
         EXPECT_FALSE(loaded.settings_load_report().needs_first_launch_detection);
         EXPECT_FALSE(loaded.user().vsync);
         EXPECT_EQ(loaded.user().frame_cap, 165);
@@ -229,10 +228,13 @@ TEST(GraphicsPresets, RevisionOneAndNewSelectionsResolveTheApprovedTable) {
         EXPECT_FALSE(resolved.custom);
         ASSERT_TRUE(SelectGraphicsPreset(settings, row.preset));
         ASSERT_TRUE(ResolveGraphics(settings, {}, resolved, error)) << error;
-        EXPECT_EQ(settings.preset_revision, row.preset == GraphicsPreset::Ultra ? 2u : 3u);
+        EXPECT_EQ(settings.preset_revision, kGraphicsPresetRevision);
+        expected.terrain_near_refinement =
+            row.preset == GraphicsPreset::High || row.preset == GraphicsPreset::Ultra;
         EXPECT_EQ(resolved.values, expected);
         EXPECT_FALSE(resolved.custom);
         settings.preset_revision = 3;
+        expected.terrain_near_refinement = false;
         ASSERT_TRUE(ResolveGraphics(settings, {}, resolved, error)) << error;
         EXPECT_EQ(resolved.values, expected);
     }
@@ -251,7 +253,7 @@ TEST(GraphicsPresets, NewSelectionsApplyApprovedVisualsAndPreserveIndependentFra
                 settings.preset_revision = 1;
                 settings.overrides["render_scale"] = 0.5;
                 ASSERT_TRUE(SelectGraphicsPreset(settings, preset));
-                EXPECT_EQ(settings.preset_revision, preset == GraphicsPreset::Ultra ? 2u : 3u);
+                EXPECT_EQ(settings.preset_revision, kGraphicsPresetRevision);
                 EXPECT_TRUE(settings.overrides.empty());
                 config.user().vsync = vsync;
                 config.user().frame_cap = cap;
@@ -264,6 +266,8 @@ TEST(GraphicsPresets, NewSelectionsApplyApprovedVisualsAndPreserveIndependentFra
                 revision_one.preset_revision = 1;
                 ResolvedGraphics expected;
                 ASSERT_TRUE(ResolveGraphics(revision_one, {}, expected, error));
+                expected.values.terrain_near_refinement =
+                    preset == GraphicsPreset::High || preset == GraphicsPreset::Ultra;
                 EXPECT_EQ(resolved.values, expected.values);
                 EXPECT_EQ(resolved.frame_pacing.vsync, vsync);
                 EXPECT_EQ(resolved.frame_pacing.frame_cap, cap);
@@ -271,8 +275,7 @@ TEST(GraphicsPresets, NewSelectionsApplyApprovedVisualsAndPreserveIndependentFra
                 ASSERT_TRUE(config.SaveUserOverlay(file.Path()));
                 const auto loaded = SystemConfig::LoadLayered({}, file.Path());
                 EXPECT_EQ(loaded.settings_load_report().state, SettingsLoadState::Loaded);
-                EXPECT_EQ(loaded.user().graphics.preset_revision,
-                          preset == GraphicsPreset::Ultra ? 2u : 3u);
+                EXPECT_EQ(loaded.user().graphics.preset_revision, kGraphicsPresetRevision);
                 EXPECT_EQ(loaded.user().graphics.base_preset, preset);
                 EXPECT_EQ(loaded.user().vsync, vsync);
                 EXPECT_EQ(loaded.user().frame_cap, cap);
@@ -283,7 +286,7 @@ TEST(GraphicsPresets, NewSelectionsApplyApprovedVisualsAndPreserveIndependentFra
 
 TEST(GraphicsPresets, SavedRevisionsRetainValuesAndBytesUntilExplicitReselection) {
     const ScopedTempFile file("graphics_", ".json");
-    for (const auto revision : {1u, 2u}) {
+    for (const auto revision : {1u, 2u, 3u}) {
         for (const auto preset : {GraphicsPreset::Low,
                                   GraphicsPreset::Medium,
                                   GraphicsPreset::High,
@@ -320,8 +323,7 @@ TEST(GraphicsPresets, SavedRevisionsRetainValuesAndBytesUntilExplicitReselection
             EXPECT_EQ(ReadText(file.Path()), bytes);
 
             ASSERT_TRUE(SelectGraphicsPreset(loaded.user().graphics, preset));
-            EXPECT_EQ(loaded.user().graphics.preset_revision,
-                      preset == GraphicsPreset::Ultra ? 2u : 3u);
+            EXPECT_EQ(loaded.user().graphics.preset_revision, kGraphicsPresetRevision);
             EXPECT_TRUE(loaded.user().graphics.overrides.empty());
             EXPECT_FALSE(loaded.user().vsync);
             EXPECT_EQ(loaded.user().frame_cap, 144);
@@ -330,13 +332,14 @@ TEST(GraphicsPresets, SavedRevisionsRetainValuesAndBytesUntilExplicitReselection
             revision_one.preset_revision = 1;
             ResolvedGraphics expected;
             ASSERT_TRUE(ResolveGraphics(revision_one, {}, expected, error));
+            expected.values.terrain_near_refinement =
+                preset == GraphicsPreset::High || preset == GraphicsPreset::Ultra;
             ResolvedGraphics selected;
             ASSERT_TRUE(ResolveGraphics(loaded.user().graphics, {}, selected, error));
             EXPECT_EQ(selected.values, expected.values);
             ASSERT_TRUE(loaded.SaveUserOverlay(file.Path()));
             const auto reloaded = SystemConfig::LoadLayered({}, file.Path());
-            EXPECT_EQ(reloaded.user().graphics.preset_revision,
-                      preset == GraphicsPreset::Ultra ? 2u : 3u);
+            EXPECT_EQ(reloaded.user().graphics.preset_revision, kGraphicsPresetRevision);
         }
     }
 
@@ -348,10 +351,12 @@ TEST(GraphicsPresets, SavedRevisionsRetainValuesAndBytesUntilExplicitReselection
     ResolvedGraphics resolved;
     std::string error;
     ASSERT_TRUE(ResolveGraphics(config.user().graphics, {}, resolved, error));
-    EXPECT_EQ(resolved.values, GraphicsValues{});
-    EXPECT_EQ(resolved.preset_revision, 2u);
+    GraphicsValues refined;
+    refined.terrain_near_refinement = true;
+    EXPECT_EQ(resolved.values, refined);
+    EXPECT_EQ(resolved.preset_revision, kGraphicsPresetRevision);
     ASSERT_TRUE(config.SaveUserOverlay(file.Path()));
-    EXPECT_EQ(ReadText(file.Path()), bytes);
+    EXPECT_NE(ReadText(file.Path()), bytes);
 }
 
 TEST(GraphicsPresets, InvalidFramePacingLeavesResolvedResultUnchanged) {
@@ -604,7 +609,7 @@ TEST(GraphicsPresets, SystemsOverridesPreserveRecoveryAndRefuseSavingOriginal) {
     const std::string documents[]{
         "{broken",
         R"({"settings_schema_version":2,"user":{}})",
-        R"({"settings_schema_version":1,"user":{"graphics":{"base_preset":"ultra","preset_revision":4,"overrides":{}}}})",
+        R"({"settings_schema_version":1,"user":{"graphics":{"base_preset":"ultra","preset_revision":5,"overrides":{}}}})",
     };
     for (const bool reload_existing : {false, true}) {
         SCOPED_TRACE(reload_existing);
@@ -809,7 +814,7 @@ TEST(GraphicsPresets, InvalidVersionedGraphicsPreserveWholeOverlayTransaction) {
         invalid["user"]["graphics"]["base_preset"] = value;
         assert_recovery(invalid);
     }
-    for (const auto& value : nlohmann::json::parse(R"([null,0,4,1.0,4294967297,-1])")) {
+    for (const auto& value : nlohmann::json::parse(R"([null,0,5,1.0,4294967297,-1])")) {
         auto invalid = document;
         invalid["user"]["graphics"]["preset_revision"] = value;
         assert_recovery(invalid);
