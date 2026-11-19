@@ -49,7 +49,8 @@ namespace Systems {
 
 namespace {
 // These internal body snapshots bridge Jolt's typed state calls. They never
-// enter persistence, replication or hashing. Scalar encoding excludes SIMD
+// enter wire or hash inputs; optional persistence wraps them in its own envelope.
+// Scalar encoding excludes SIMD
 // padding, enum widths and host endianness from diagnostic comparisons.
 // Positions and sleep offsets are float64 words. Single-precision Jolt writes
 // only float32-exact positions and zero offsets, but double-precision Jolt can
@@ -531,8 +532,8 @@ void OwnerSchema(OwnerCodec& codec, OwnerRecipe& recipe) {
     }
 }
 
-// Controller schema is the codec slice's version 1; body snapshots retain
-// their independent version 2. Neither is a save, wire or hash format.
+// Controller scalar schema is version 1; body snapshots retain independent
+// version 2. Persistence wraps these payloads; wire and hash inputs are unchanged.
 void ControllerSchema(OwnerCodec& codec, OwnerRecipe& recipe) {
 #ifdef JPH_DOUBLE_PRECISION
     constexpr std::uint32_t version = 0x00010001u;
@@ -1455,6 +1456,94 @@ void PhysicsSystem::record_body_release(JPH::BodyID id) {
     m_body_slots->free_slots[m_body_slots->free_count++] = id.GetIndexAndSequenceNumber();
 }
 
+bool PhysicsSystem::capture_simulation_terrain(SimulationTerrainState& output) const {
+    SimulationTerrainState staged;
+    if (m_simulation_collisions) {
+        const auto& state = *m_simulation_collisions;
+        staged.bodies.reserve(state.body_count);
+        staged.columns.reserve(state.published_count);
+        for (std::size_t i = 0; i < state.body_count; ++i) {
+            staged.bodies.push_back(state.bodies[i].GetIndexAndSequenceNumber());
+        }
+        for (std::size_t i = 0; i < state.published_count; ++i) {
+            staged.columns.push_back(
+                {.id = state.published[i].id, .heights = state.published[i].heights});
+        }
+    }
+    output = std::move(staged);
+    return true;
+}
+
+bool PhysicsSystem::restore_simulation_terrain(const SimulationTerrainState& input) {
+    if (!m_body_interface || m_simulation_collisions ||
+        input.bodies.size() > kSimulationColliderBudget ||
+        input.columns.size() > input.bodies.size()) {
+        return false;
+    }
+    if (input.bodies.empty()) {
+        return true;
+    }
+    auto state = std::make_unique<SimulationCollisions>();
+    state->placeholder = new JPH::SphereShape(0.01f);
+    // Cold isolated-world restore: all sizes are bounded to 128 before allocation.
+    // The destination is discarded on any failure; no live world observes staging.
+    for (std::size_t i = 0; i < input.columns.size(); ++i) {
+        const auto& column = input.columns[i];
+        const auto coords = Chunk::decode_id(column.id);
+        if (coords.y != 0 || Chunk::calculate_id(coords) != column.id ||
+            (i != 0 && input.columns[i - 1].id >= column.id) ||
+            !std::all_of(column.heights.begin(), column.heights.end(), [](float height) {
+                return std::isfinite(height) && height >= -16777216.0f && height < 16777216.0f;
+            })) {
+            return false;
+        }
+        JPH::HeightFieldShapeSettings settings(column.heights.data(),
+                                               JPH::Vec3::sZero(),
+                                               JPH::Vec3::sReplicate(1.0f),
+                                               CHUNK_SIZE_X + 1);
+        settings.mBlockSize = 2;
+        const auto shape = settings.Create();
+        if (shape.HasError() || !shape.Get()) {
+            return false;
+        }
+        state->published[i] = {.id = column.id, .heights = column.heights, .shape = shape.Get()};
+    }
+    for (std::size_t i = 0; i < input.bodies.size(); ++i) {
+        const JPH::BodyID id(input.bodies[i]);
+        if (id.IsInvalid() || id.GetIndex() >= kPhysicsCapacity ||
+            (input.bodies[i] & JPH::BodyID::cBroadPhaseBit) != 0) {
+            return false;
+        }
+        const bool published = i < input.columns.size();
+        JPH::RVec3 position = JPH::RVec3::sZero();
+        if (published) {
+            const auto coords = Chunk::decode_id(input.columns[i].id);
+            position = JPH::RVec3(static_cast<float>(coords.x) * CHUNK_SIZE_X,
+                                  0.0f,
+                                  static_cast<float>(coords.z) * CHUNK_SIZE_Z);
+        }
+        const JPH::BodyCreationSettings settings(published ? state->published[i].shape.GetPtr()
+                                                           : state->placeholder.GetPtr(),
+                                                 position,
+                                                 JPH::Quat::sIdentity(),
+                                                 JPH::EMotionType::Static,
+                                                 Layers::NON_MOVING);
+        auto* body = m_body_interface->CreateBodyWithID(id, settings);
+        if (!body) {
+            return false;
+        }
+        m_body_slots->slot_count = std::max(m_body_slots->slot_count, id.GetIndex() + 1);
+        if (published) {
+            m_body_interface->AddBody(id, JPH::EActivation::DontActivate);
+        }
+        state->bodies[i] = id;
+        ++state->body_count;
+    }
+    state->published_count = input.columns.size();
+    m_simulation_collisions = std::move(state);
+    return true;
+}
+
 PhysicsSystem::PhysicsSystem() = default;
 PhysicsSystem::~PhysicsSystem() {
     shutdown();
@@ -1576,7 +1665,39 @@ void PhysicsSystem::update(float delta_time) {
     m_batched_queries.ProcessBatch(this);
 }
 
+std::optional<JPH::BodyID> PhysicsSystem::chunk_collision_body(ChunkID chunk_id) const {
+    const auto found = m_chunk_bodies.find(chunk_id);
+    if (found == m_chunk_bodies.end()) {
+        return std::nullopt;
+    }
+    return found->second.body_id;
+}
+
 bool PhysicsSystem::add_chunk_collision(Chunk& chunk) {
+    if (simulation_collisions_enabled()) {
+        return true;
+    }
+    return add_chunk_collision(chunk, JPH::BodyID());
+}
+
+bool PhysicsSystem::capture_chunk_collision_owners(
+    std::vector<std::pair<ChunkID, JPH::BodyID>>& output) const {
+    if (m_chunk_bodies.size() > kTerrainBodyHeadroom) {
+        return false;
+    }
+    std::vector<std::pair<ChunkID, JPH::BodyID>> candidate;
+    candidate.reserve(m_chunk_bodies.size());
+    for (const auto& [chunk_id, collision] : m_chunk_bodies) {
+        candidate.emplace_back(chunk_id, collision.body_id);
+    }
+    std::sort(candidate.begin(), candidate.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.first < rhs.first;
+    });
+    output = std::move(candidate);
+    return true;
+}
+
+bool PhysicsSystem::add_chunk_collision(Chunk& chunk, JPH::BodyID restored_id) {
     if (simulation_collisions_enabled()) {
         return true; // Render/warm-up/edit calls cannot mutate simulation's private bodies.
     }
@@ -1653,13 +1774,19 @@ bool PhysicsSystem::add_chunk_collision(Chunk& chunk) {
                                             JPH::Quat::sIdentity(),
                                             JPH::EMotionType::Static,
                                             Layers::NON_MOVING);
-    JPH::Body* body = m_body_interface->CreateBody(body_settings);
+    JPH::Body* body = restored_id.IsInvalid()
+                          ? m_body_interface->CreateBody(body_settings)
+                          : m_body_interface->CreateBodyWithID(restored_id, body_settings);
     if (body == nullptr) {
         LUMINUMBRA_CORE_WARN(
             "Body pool refused chunk collision for chunk ({},{},{})", cc.x, cc.y, cc.z);
         return false;
     }
-    record_body_allocation(body->GetID());
+    if (restored_id.IsInvalid()) {
+        record_body_allocation(body->GetID());
+    } else {
+        m_body_slots->slot_count = std::max(m_body_slots->slot_count, restored_id.GetIndex() + 1);
+    }
     m_body_interface->AddBody(body->GetID(), JPH::EActivation::DontActivate);
     m_chunk_bodies[chunk.get_id()] = ChunkCollisionData{body->GetID()};
     return true;

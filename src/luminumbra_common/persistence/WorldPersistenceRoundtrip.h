@@ -1,6 +1,8 @@
 #pragma once
 
 #include "ecs/EntitySnapshot.h"
+#include "systems/PhysicsSystem.h"
+#include "world/PlayerAvatar.h"
 #include "world/WorldStreamingState.h"
 
 #include <cstddef>
@@ -12,6 +14,45 @@
 #include <vector>
 
 namespace Luminumbra::Persistence {
+
+// Explicit-save work only: 128 bodies, 4096 avatars and 1 MiB aggregate C2 payload.
+// The 1536 KiB envelope shares the existing 2 MiB metadata admission budget.
+// Larger captures refuse before any writer; no legacy compatibility limit changes.
+inline constexpr std::size_t kOwnerContinuationPayloadBytes = 1024u * 1024u;
+inline constexpr std::size_t kOwnerContinuationRecordBytes = 1536u * 1024u;
+struct TerrainOwnerContinuation {
+    ChunkID chunk_id = 0;
+    std::uint32_t body_id = 0;
+};
+struct PhysicsOwnerContinuation {
+    std::uint32_t owner_id = 0;
+    Vec3 anchor{};
+    Systems::PhysicsSystem::BodyOwnerState state;
+};
+struct ControllerOwnerContinuation {
+    std::uint32_t owner_id = 0;
+    Vec3 anchor{};
+    World::PhysicsOwnerState state;
+};
+struct OwnerContinuation {
+    std::uint32_t world_seed = 0;
+    std::string preset_identity;
+    std::uint64_t simulation_tick = 0;
+    std::uint64_t stream_tick = 0;
+    bool moving_anchor = false;
+    bool water_smoke = false;
+    Vec3 origin{};
+    Vec3 anchor{};
+    std::vector<World::PlayerAvatarOwnerState> avatars;
+    std::vector<PhysicsOwnerContinuation> bodies;
+    std::optional<ControllerOwnerContinuation> player;
+    std::uint32_t slot_count = 0;
+    std::vector<std::uint32_t> free_slots;
+    Systems::PhysicsSystem::SimulationTerrainState simulation_terrain;
+    std::vector<TerrainOwnerContinuation> terrain;
+};
+bool EncodeOwnerContinuation(const OwnerContinuation& record, std::string& bytes);
+bool DecodeOwnerContinuation(const std::string& bytes, OwnerContinuation& record);
 
 struct WorldPersistenceRoundtripCheck {
     std::string name;
