@@ -88,8 +88,61 @@ TEST_F(GraphicsPresetStartup, FirstLaunchDetectsAndPersistsThenReloadKeepsTheSel
     ExpectSameGraphics(reloaded.user().graphics, config.user().graphics);
 }
 
+TEST_F(GraphicsPresetStartup, DetectedHighAndUltraPersistRefinementAndSavedOffSurvivesStartup) {
+    for (const auto processors : {15u, 16u}) {
+        const GraphicsHardwareInputs inputs{.vendor = "NVIDIA",
+                                            .renderer = "NVIDIA GeForce RTX 5070 Ti",
+                                            .version = "4.6",
+                                            .logicalProcessorCount = processors,
+                                            .dedicatedVideoMemoryBytes = 8ULL * 1024 * 1024 * 1024,
+                                            .framebufferWidth = 1920,
+                                            .framebufferHeight = 1080};
+        const auto preset = processors == 15u ? GraphicsPreset::High : GraphicsPreset::Ultra;
+        SCOPED_TRACE(GraphicsPresetName(preset));
+        // Each case starts with a missing primary, exercising automatic detection.
+        std::filesystem::remove(overlay.Path());
+        auto config = Load();
+        ASSERT_TRUE(config.settings_load_report().needs_first_launch_detection);
+        std::string error;
+        ASSERT_TRUE(SelectStartupGraphicsPreset(config, false, inputs, error)) << error;
+        EXPECT_EQ(config.user().graphics.base_preset, preset);
+        EXPECT_EQ(config.user().graphics.preset_revision, kGraphicsPresetRevision);
+        ResolvedGraphics resolved;
+        ASSERT_TRUE(ResolveGraphics(config.user().graphics, {}, resolved, error)) << error;
+        EXPECT_TRUE(resolved.values.terrain_near_refinement);
+        ASSERT_TRUE(config.SaveUserOverlay(overlay.Path()));
+        auto reloaded = Load();
+        ASSERT_EQ(reloaded.settings_load_report().state, SettingsLoadState::Loaded);
+        ASSERT_NO_FATAL_FAILURE(Start(reloaded));
+        ExpectSameGraphics(reloaded.user().graphics, config.user().graphics);
+        ASSERT_TRUE(ResolveGraphics(reloaded.user().graphics, {}, resolved, error)) << error;
+        EXPECT_TRUE(resolved.values.terrain_near_refinement);
+
+        // Both explicit choices persist under every supported saved revision.
+        for (const auto revision : {1u, 2u, 3u, kGraphicsPresetRevision}) {
+            for (const bool enabled : {false, true}) {
+                SCOPED_TRACE(revision);
+                SCOPED_TRACE(enabled);
+                config.user().graphics.preset_revision = revision;
+                config.user().graphics.overrides["terrain_near_refinement"] = enabled;
+                ASSERT_TRUE(config.SaveUserOverlay(overlay.Path()));
+                const auto bytes = Read(overlay.Path());
+                reloaded = Load();
+                ASSERT_EQ(reloaded.settings_load_report().state, SettingsLoadState::Loaded);
+                ASSERT_NO_FATAL_FAILURE(Start(reloaded));
+                ExpectSameGraphics(reloaded.user().graphics, config.user().graphics);
+                ASSERT_TRUE(ResolveGraphics(reloaded.user().graphics, {}, resolved, error))
+                    << error;
+                EXPECT_EQ(resolved.values.terrain_near_refinement, enabled);
+                ASSERT_TRUE(reloaded.SaveUserOverlay(overlay.Path()));
+                EXPECT_EQ(Read(overlay.Path()), bytes);
+            }
+        }
+    }
+}
+
 TEST_F(GraphicsPresetStartup, NormalStartPreservesSavedRevisionOverridesAndDetection) {
-    for (const auto revision : {1U, kGraphicsPresetRevision}) {
+    for (const auto revision : {1U, 2U, 3U, kGraphicsPresetRevision}) {
         SCOPED_TRACE(revision);
         SystemConfig saved;
         auto& graphics = saved.user().graphics;
