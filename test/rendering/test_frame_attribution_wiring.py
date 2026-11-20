@@ -3483,6 +3483,167 @@ class DeferredDiagnosticLeaseWiring(unittest.TestCase):
                         writer.index("state_->table.submit(submission, id)"))
 
 
+class LaterDiagnosticSubmissionWiring(unittest.TestCase):
+    """Guard original submissions, disabled rendering and continuation refusals."""
+
+    def setUp(self):
+        self.source = read(CLIENT / "rendering/GBufferTargets.cpp")
+        self.attach = block(self.source, "bool GBufferDiagnosticCapture::attach_target(")
+
+    @staticmethod
+    def without_diagnostics(source):
+        while "#ifdef LUMIN_DIAG_IDS\n" in source:
+            start = source.index("#ifdef LUMIN_DIAG_IDS\n")
+            end = source.index("#endif\n", start)
+            alternate = source.find("#else\n", start, end)
+            if alternate >= 0:
+                source = source[:start] + source[alternate + 6:end] + source[end + 7:]
+            else:
+                # Identity declarations introduce one separator absent from the base.
+                if source[start - 2:start] == "\n\n":
+                    start -= 1
+                source = source[:start] + source[end + 7:]
+        return source
+
+    def test_plant_and_decal_keep_shipping_shaders_when_disabled(self):
+        import hashlib
+        for name, expected in (
+                ("plant_procgen", "5de3e367b62a29914f16b3014f84979b104765db67b97766cacf3c5fd5d4a3ed"),
+                ("scent_decal", "00536af5f2a9d77d493e4ebbe4accfd3bf0301d9882e9c36a5cba1a75d4d755e")):
+            path = f"res/shaders/{name}.frag"
+            source = read(ROOT / path)
+            self.assertEqual(hashlib.sha256(self.without_diagnostics(source).encode()).hexdigest(),
+                             expected)
+            self.assertIn("layout (location = 6) out uvec4 gDiagnosticIds;", source)
+            self.assertIn("gDiagnosticIds = u_diagnosticIds;", source)
+
+    def test_disabled_submissions_preserve_original_uniforms_and_draw_arguments(self):
+        branch = "if (auto* capture = GBufferDiagnosticCapture::Current())"
+        for name, expected in (("PlantProcgenPass", 0x17bde0693dc08760),
+                               ("GroundDecalPass", 0x46646c0093fc3f8a)):
+            source = read(CLIENT / f"rendering/passes/{name}.cpp")
+            draw = "{" + block(source, f"void {name}::execute(") + "}"
+            for stage in range(2):
+                inner = block(draw, branch)
+                begin = (draw.index("    Shader* draw_shader = m_shader.get();")
+                         if stage == 0 else draw.index("    " + branch))
+                end = draw.index(inner, draw.index(branch)) + len(inner) + (3 if stage == 0 else 2)
+                draw = draw[:begin] + draw[end:]
+            draw = re.sub(r'    if \(draw_shader != m_shader.get\(\)\) \{\n.*?\n    \}\n',
+                          '    m_shader->setMat4("projection", projection);\n', draw, flags=re.S)
+            draw = draw.replace("draw_shader->", "m_shader->")
+            digest = 14695981039346656037
+            for byte in draw.encode():
+                digest = ((digest ^ byte) * 1099511628211) & ((1 << 64) - 1)
+            self.assertEqual(digest, expected)
+
+    def test_plant_attributes_one_original_uploaded_batch(self):
+        draw = block(read(CLIENT / "rendering/passes/PlantProcgenPass.cpp"),
+                     "void PlantProcgenPass::execute(")
+        for early in ("if (!m_enabled || !m_has_geometry || m_index_count == 0)",
+                      "if (!m_shader || !m_shader->IsValid() || m_vao == 0)"):
+            self.assertLess(draw.index(early), draw.index("GBufferDiagnosticAttachment"))
+            self.assertIn("return;", block(draw, early))
+        setup = block(draw, "if (auto* capture = GBufferDiagnosticCapture::Current())")
+        for text in ("GL_DRAW_FRAMEBUFFER_BINDING", "GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME",
+                     "target.position_texture = static_cast<GLuint>(position_texture)",
+                     "diagnostic_attachment.emplace(target,", "capture->variant(draw_shader, false)"):
+            self.assertIn(text, setup)
+        identity = draw[draw.index("const std::string mesh_key"):]
+        for text in ("std::to_string(m_signature)", "std::to_string(m_index_count)",
+                     '.shader_variant = "plant_procgen"', ".pass = DiagnosticPass::GBuffer",
+                     ".generated_mesh = mesh_key"):
+            self.assertIn(text, identity)
+        self.assertLess(identity.index("capture->write("), identity.index("Submit(glDrawElements,"))
+        self.assertEqual(draw.count("Submit(glDrawElements,"), 1)
+
+    def test_decal_uses_forward_storage_and_discards_noncontributors(self):
+        draw = block(read(CLIENT / "rendering/passes/GroundDecalPass.cpp"),
+                     "void GroundDecalPass::execute(")
+        self.assertIn("diagnostic_attachment.emplace(static_cast<GLuint>(framebuffer),", draw)
+        self.assertIn("ctx.gbuffer_position.id", draw)
+        self.assertIn('capture->variant(draw_shader, false)', draw)
+        self.assertIn(".pass = DiagnosticPass::Forward", draw)
+        self.assertIn('.generated_mesh = "scent-decal/fullscreen-triangle"', draw)
+        self.assertLess(draw.index("capture->write_current("), draw.index("Submit(glDrawArrays,"))
+        self.assertEqual(draw.count("Submit(glDrawArrays,"), 1)
+        shader = read(ROOT / "res/shaders/scent_decal.frag")
+        guarded = re.findall(r"#ifdef LUMIN_DIAG_IDS\n(.*?)#else\n", shader, re.S)
+        self.assertEqual(len(guarded), 4)
+        for fragment in guarded:
+            self.assertIn("discard;", fragment)
+        for condition in ("!farWorldPosition(gPosition, gDepth, TexCoords, viewPos)",
+                          "dot(viewPos, viewPos) < 1e-8", "intensity <= 0.0025"):
+            self.assertIn(f"if ({condition}) {{ discard; }}", shader)
+        self.assertLess(shader.rindex("discard;"), shader.index("gDiagnosticIds ="))
+
+    def test_continuations_preserve_ids_and_original_color_routing(self):
+        self.assertIn("const bool already_captured = forward ? state_->forward_captured : state_->captured",
+                      self.attach)
+        clear = block(self.attach, "if (!already_captured)")
+        self.assertIn("glClearTexImage(", clear)
+        self.assertIn("state_->attachment_lease.texture()", clear)
+        self.assertEqual(self.attach.count("glClearTexImage("), 1)
+        self.assertLess(self.attach.index("if (!complete)"),
+                        self.attach.index("if (!already_captured)"))
+        routing = block(self.attach, "if (forward || already_captured)")
+        for text in ("auto forward_buffers = state_->buffers", "forward_buffers[6] = GL_COLOR_ATTACHMENT6",
+                     "glDrawBuffers(state_->buffer_count, forward_buffers.data())"):
+            self.assertIn(text, routing)
+
+    def test_extent_refusal_precedes_storage_mutation_for_both_planes(self):
+        condition = re.search(r"if \((already_captured &&.*?)\) \{", self.attach, re.S).group(1)
+        for captured in (False, True):
+            for width, height in ((0, 0), (16, 32), (32, 16), (32, 32), (33, 32)):
+                self.assertEqual(cpp_expression(condition, **{
+                    "already_captured": captured, "targets.extent().width": 32,
+                    "targets.extent().height": 32, "extent.width": width, "extent.height": height}),
+                    captured and (width != 32 or height != 32))
+        refusal = block(self.attach, "if (already_captured &&")
+        self.assertIn('state_->failure = "diagnostic_continuation_extent_mismatch";', refusal)
+        self.assertIn("return false;", refusal)
+        self.assertLess(self.attach.index("diagnostic_continuation_extent_mismatch"),
+                        self.attach.index("targets.ensure("))
+        self.assertLess(self.attach.index("targets.ensure("),
+                        self.attach.index("targets.acquire_attachment_lease()"))
+
+    def test_forward_fallback_keeps_metadata_and_stops_after_refusal(self):
+        forward = block(self.source, "bool GBufferDiagnosticCapture::attach_forward(")
+        missing = block(forward, "if (!state_->forward_targets)")
+        self.assertIn("abort();", missing)
+        self.assertIn("return false;", missing)
+        self.assertNotIn("unsupported(", missing)
+        writer = block(self.source, "void GBufferDiagnosticCapture::write_current(")
+        contributor = block(writer, "const auto record_contributor = [&]")
+        self.assertIn("abort();", contributor)
+        self.assertIn("return;", block(contributor, "if (state_->refused)"))
+        self.assertLess(contributor.index("if (state_->refused)"),
+                        contributor.index("const std::string label"))
+        condition = re.search(r"if \((submission.shader_variant.empty\(\).*?)\) \{",
+                              contributor, re.S).group(1)
+        for size in (0, 1, 1007, 1008, 1024, 1025):
+            self.assertEqual(cpp_expression(condition, **{
+                "submission.shader_variant.empty()": size == 0,
+                "submission.shader_variant.size()": size, "suffix.size()": 17}),
+                size == 0 or size > 1007)
+        self.assertIn('suffix = ":contributor_only"', contributor)
+        self.assertIn('"diagnostic_contributor_label_limit"', contributor)
+        self.assertLess(contributor.index("1024 - suffix.size()"),
+                        contributor.index("const std::string label"))
+        self.assertIn("auto contributor = submission;", contributor)
+        self.assertIn("contributor.shader_variant = label;", contributor)
+        refused = block(contributor, "if (!state_->table.submit(contributor, id))")
+        self.assertIn('"diagnostic_contributor_identity_refused"', refused)
+        self.assertIn("state_->refused = true;", refused)
+        self.assertNotIn("throw", contributor)
+        self.assertEqual(writer.count("record_contributor();"), 2)
+        detached = block(writer, "if (!state_->framebuffer)")
+        self.assertIn("record_contributor();", block(detached,
+                      "if (submission.pass == DiagnosticPass::Forward)"))
+        self.assertLess(writer.index("write(*entry.shader, submission)"),
+                        writer.rindex("record_contributor();"))
+
+
 class TerrainCaptureResourceWiring(unittest.TestCase):
     """Evaluate capture resource wiring and scalar guards; no native GL execution."""
 
@@ -3761,13 +3922,13 @@ class DiagnosticContributorWiring(unittest.TestCase):
                         constructor.index("SetCurrent(this)"))
         self.assertIn("throw std::invalid_argument", block(constructor,
                       "if (forward_targets == &targets)"))
-        forward_buffers = block(self.attach, "if (forward)")
+        forward_buffers = block(self.attach, "if (forward || already_captured)")
         self.assertIn("auto forward_buffers = state_->buffers", forward_buffers)
         self.assertIn("forward_buffers[6] = GL_COLOR_ATTACHMENT6", forward_buffers)
         self.assertIn("glDrawBuffers(state_->buffer_count, forward_buffers.data())", forward_buffers)
         self.assertEqual(self.attach.count("state_->attachment_lease.texture()"), 2)
 
-    def test_attachment_order_refuses_nested_repeated_and_early_forward_calls(self):
+    def test_attachment_order_allows_continuations_and_refuses_nested_or_early_forward_calls(self):
         condition = re.search(r"if \((.*?)\) \{", self.attach, re.S).group(1)
         match = re.fullmatch(r"(.*?)\(forward \? (.*?) : (.*?)\)", condition, re.S)
         self.assertIsNotNone(match)
@@ -3779,8 +3940,7 @@ class DiagnosticContributorWiring(unittest.TestCase):
                         actual = cpp_expression(match.group(1) + "(" + selected + ")", **{
                             "state_->framebuffer": int(attached), "state_->captured": captured,
                             "state_->forward_captured": forward_captured})
-                        expected = attached or ((not captured or forward_captured)
-                                                if forward else captured)
+                        expected = attached or (not captured if forward else forward_captured)
                         self.assertEqual(actual, expected)
         self.assertIn("state_->forward_captured = true", self.attach)
 
