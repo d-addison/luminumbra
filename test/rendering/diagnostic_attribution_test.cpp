@@ -1183,7 +1183,6 @@ TEST_F(DiagnosticAttributionGl, TerrainTableFullRefusalBatchesEveryRemainingComm
 }
 
 TEST_F(DiagnosticAttributionGl, LadderFarDrawsDoNotInheritTheLastLiveTerrainIdentity) {
-    input_.far_selection.effective = FarWorldMode::Ladder;
     ctx_.far_world_ladder = true;
     const auto current_identity = [] {
         GLint program = 0;
@@ -1197,7 +1196,9 @@ TEST_F(DiagnosticAttributionGl, LadderFarDrawsDoNotInheritTheLastLiveTerrainIden
     };
     DiagnosticId live{};
     std::vector<DiagnosticId> ladder_ids;
-    input_.submit_terrain_chunks = [&](const glm::vec4(&)[6]) {
+    auto input = input_;
+    input.far_selection.effective = FarWorldMode::Ladder;
+    input.submit_terrain_chunks = [&](const glm::vec4(&)[6]) {
         // The last live chunk leaves its identity on the shared terrain program.
         if (auto* capture = GBufferDiagnosticCapture::Current()) {
             capture->write_current(Submission());
@@ -1205,7 +1206,7 @@ TEST_F(DiagnosticAttributionGl, LadderFarDrawsDoNotInheritTheLastLiveTerrainIden
         live = current_identity();
         return TerrainSubmitStats{};
     };
-    input_.submit_ladder = [&](const FarWorldPrepareDraw& prepare) {
+    input.submit_ladder = [&](const FarWorldPrepareDraw& prepare) {
         FarWorldSubmitStats stats;
         for (int tile = 0; tile < 2; ++tile) {
             FarWorldDrawCommand command;
@@ -1230,7 +1231,7 @@ TEST_F(DiagnosticAttributionGl, LadderFarDrawsDoNotInheritTheLastLiveTerrainIden
     table_.clear();
     GBufferDiagnosticCapture capture(targets_, table_);
     SetEntryState(false);
-    EXPECT_NO_THROW(pass_.execute(ctx_, entities_, input_));
+    EXPECT_NO_THROW(pass_.execute(ctx_, entities_, input));
     EXPECT_NE(live, DiagnosticId{});
     ASSERT_EQ(ladder_ids.size(), 2u);
     for (const auto& id : ladder_ids) {
@@ -1361,10 +1362,11 @@ TEST_F(UnavailableImpostorGl, UnavailableProducerProgramFailsAnAttachedCapture) 
     SubmittedLiveTerrain support;
     support.add_origin({192, 0, 0});
     ASSERT_TRUE(support.covers(position));
-    input_.resident_live_terrain = &support;
-    input_.tree_impostor_enabled = true;
-    input_.tree_impostor_grid = 1;
-    input_.tree_impostor_radius = 1;
+    auto input = input_;
+    input.resident_live_terrain = &support;
+    input.tree_impostor_enabled = true;
+    input.tree_impostor_grid = 1;
+    input.tree_impostor_radius = 1;
     for (const bool queued : {false, true}) {
         if (queued) {
             ASSERT_NE(AddMesh("game-assets/tree-small-02/diagnostic-leaf.lmesh", position),
@@ -1372,11 +1374,11 @@ TEST_F(UnavailableImpostorGl, UnavailableProducerProgramFailsAnAttachedCapture) 
         }
         for (const auto mode : {FarWorldMode::Legacy, FarWorldMode::Ladder}) {
             table_.clear();
-            input_.far_selection.effective = mode;
+            input.far_selection.effective = mode;
             ctx_.far_world_ladder = mode == FarWorldMode::Ladder;
             GBufferDiagnosticCapture capture(targets_, table_);
             SetEntryState(false);
-            const auto stats = pass_.execute(ctx_, entities_, input_);
+            const auto stats = pass_.execute(ctx_, entities_, input);
             EXPECT_EQ(stats.invalid_program_refusals, queued ? 1u : 0u);
             EXPECT_EQ(capture.complete(), !queued);
             EXPECT_EQ(table_.complete_coverage(), !queued);
@@ -1675,7 +1677,9 @@ TEST_F(DiagnosticAttributionGl, AuthoredIdentityBoundsPreserveDrawsAndRefuseOnly
         glm::radians(45.0), 1.0, description.far_plane, description.near_plane);
     std::copy_n(glm::value_ptr(projection), 16, description.projection.begin());
     const auto view = RenderView::Validate(description);
-    input_.authored_view = &view;
+    // Borrowed test data outlives this local input, including on fatal assertions.
+    auto input = input_;
+    input.authored_view = &view;
     for (const std::size_t length : {1u, 508u, 509u, 1024u, 1025u}) {
         SCOPED_TRACE(length);
         auto mesh = std::make_shared<StaticMesh>();
@@ -1691,13 +1695,13 @@ TEST_F(DiagnosticAttributionGl, AuthoredIdentityBoundsPreserveDrawsAndRefuseOnly
         draw.material = material;
         draw.normal = {1, 0, 0, 0, 1, 0, 0, 0, 1};
         snapshot->draws.push_back(draw);
-        input_.authored_draws = snapshot;
+        input.authored_draws = snapshot;
         SetEntryState(false);
         // The same immutable snapshot draws successfully with capture disabled.
-        EXPECT_EQ(pass_.execute(ctx_, entities_, input_).authored_draws, 1u);
+        EXPECT_EQ(pass_.execute(ctx_, entities_, input).authored_draws, 1u);
         table_.clear();
         GBufferDiagnosticCapture capture(targets_, table_);
-        EXPECT_EQ(pass_.execute(ctx_, entities_, input_).authored_draws, 1u);
+        EXPECT_EQ(pass_.execute(ctx_, entities_, input).authored_draws, 1u);
         const bool supported = length <= 508;
         EXPECT_EQ(capture.complete(), supported);
         EXPECT_EQ(capture.attachment_failed(), !supported);
@@ -1740,7 +1744,6 @@ TEST_F(DiagnosticAttributionGl, AuthoredUpgradeRestoresLiveCallerFramebuffers) {
     draw.material = material;
     draw.normal = {1, 0, 0, 0, 1, 0, 0, 0, 1};
     snapshot->draws.push_back(draw);
-    input_.authored_draws = snapshot;
     RenderViewDescription description;
     description.width = 32;
     description.height = 32;
@@ -1749,7 +1752,9 @@ TEST_F(DiagnosticAttributionGl, AuthoredUpgradeRestoresLiveCallerFramebuffers) {
         glm::radians(45.0), 1.0, description.far_plane, description.near_plane);
     std::copy_n(glm::value_ptr(projection), 16, description.projection.begin());
     const auto view = RenderView::Validate(description);
-    input_.authored_view = &view;
+    auto input = input_;
+    input.authored_draws = snapshot;
+    input.authored_view = &view;
 
     // External, draw-only, read-only, both, default, and initially absent targets.
     // Each of these six states exercises success and failures before/after upgrade.
@@ -1767,8 +1772,8 @@ TEST_F(DiagnosticAttributionGl, AuthoredUpgradeRestoresLiveCallerFramebuffers) {
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, draw_fbo);
             glBindFramebuffer(GL_READ_FRAMEBUFFER, read_fbo);
             ASSERT_EQ(glGetError(), GL_NO_ERROR);
-            input_.authored_temporal_enabled = failure == 2;
-            input_.submit_terrain_chunks = [failure](const glm::vec4(&)[6]) {
+            input.authored_temporal_enabled = failure == 2;
+            input.submit_terrain_chunks = [failure](const glm::vec4(&)[6]) {
                 if (failure == 1) {
                     throw std::runtime_error("producer failure after upgrade");
                 }
@@ -1778,13 +1783,13 @@ TEST_F(DiagnosticAttributionGl, AuthoredUpgradeRestoresLiveCallerFramebuffers) {
             GBufferDiagnosticCapture capture(targets_, table_);
             PassStateProbe probe(old_fbo);
             if (failure == 2) {
-                EXPECT_THROW(pass_.execute(ctx_, entities_, input_), std::invalid_argument);
+                EXPECT_THROW(pass_.execute(ctx_, entities_, input), std::invalid_argument);
                 EXPECT_EQ(pass_.gbuffer().fbo_id, old_fbo);
             } else {
                 if (failure == 1) {
-                    EXPECT_THROW(pass_.execute(ctx_, entities_, input_), std::runtime_error);
+                    EXPECT_THROW(pass_.execute(ctx_, entities_, input), std::runtime_error);
                 } else {
-                    EXPECT_EQ(pass_.execute(ctx_, entities_, input_).authored_draws, 1u);
+                    EXPECT_EQ(pass_.execute(ctx_, entities_, input).authored_draws, 1u);
                 }
                 ASSERT_NE(pass_.gbuffer().fbo_id, old_fbo);
                 ASSERT_NE(pass_.gbuffer().authored_texture, 0u);

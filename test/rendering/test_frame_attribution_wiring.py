@@ -3624,6 +3624,45 @@ class TerrainCaptureResourceWiring(unittest.TestCase):
         self.assertLess(hook.index("renderPipeline.render_frame("), hook.index("capture_terrain_coverage("))
 
 
+class DiagnosticFixtureLifetimeWiring(unittest.TestCase):
+    """Keep test-body borrows out of the longer-lived GL fixture input."""
+
+    def assert_local_borrow(self, suite, name, owners, bindings):
+        source = read(ROOT / "test/rendering/diagnostic_attribution_test.cpp")
+        body = block(source, f"TEST_F({suite}, {name})")
+        local_input = "auto input = input_;"
+        self.assertIn(local_input, body)
+        # The fixture input may only be read to initialize the local copy.
+        self.assertEqual(len(re.findall(r"\binput_\b", body)), 1)
+        for owner in owners:
+            self.assertLess(body.index(owner), body.index(local_input))
+        for binding in bindings:
+            self.assertLess(body.index(local_input), body.index(binding))
+            self.assertLess(body.index(binding), body.index("pass_.execute("))
+        self.assertIn("pass_.execute(ctx_, entities_, input)", body)
+
+    def test_authored_view_borrows_end_before_the_local_view(self):
+        for name in ("AuthoredIdentityBoundsPreserveDrawsAndRefuseOnlyCapture",
+                     "AuthoredUpgradeRestoresLiveCallerFramebuffers"):
+            with self.subTest(name=name):
+                self.assert_local_borrow(
+                    "DiagnosticAttributionGl", name,
+                    ("const auto view = RenderView::Validate(description);",),
+                    ("input.authored_view = &view;",))
+
+    def test_resident_terrain_borrow_ends_before_local_support(self):
+        self.assert_local_borrow(
+            "UnavailableImpostorGl", "UnavailableProducerProgramFailsAnAttachedCapture",
+            ("SubmittedLiveTerrain support;",), ("input.resident_live_terrain = &support;",))
+
+    def test_ladder_callbacks_end_before_local_observations(self):
+        self.assert_local_borrow(
+            "DiagnosticAttributionGl", "LadderFarDrawsDoNotInheritTheLastLiveTerrainIdentity",
+            ("const auto current_identity =", "DiagnosticId live{};",
+             "std::vector<DiagnosticId> ladder_ids;"),
+            ("input.submit_terrain_chunks = [&]", "input.submit_ladder = [&]"))
+
+
 class DiagnosticCaptureRefusalWiring(unittest.TestCase):
     """Guard capture-only refusals without executing native code or GL."""
 
