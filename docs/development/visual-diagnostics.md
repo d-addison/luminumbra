@@ -702,7 +702,7 @@ oversized payloads, occupied destinations/staging, cancellation and reservation
 failure before filesystem writes. Native execution and mutation runs remain pending.
 
 The planning parser remains independently callable. Both startup parsers now admit
-`--scenario=temporal_audit` with a plan, `--capture-diagnostics=1`, site `spawn` and
+`--scenario=temporal_audit` with a plan, `--capture-diagnostics`, site `spawn` and
 ROI `full-frame` (the defaults for `--temporal-site` and `--temporal-roi`). Execution
 requires a fresh seed-424242 default world at tick zero and the canonical 30 Hz,
 162000-tick calendar (dawn 27000, dusk 135000). Alternate worlds, cameras, calendars,

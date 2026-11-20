@@ -604,7 +604,7 @@ TEST(TemporalAudit, FixedSiteRuntimeAdmissionChecksEveryInputBeforeStartupWrites
     const auto save_root = directory / "save";
     const auto artifacts = directory / "artifacts";
     auto valid = Arguments();
-    valid.insert(valid.end(), {"--scenario=temporal_audit", "--capture-diagnostics=1"});
+    valid.insert(valid.end(), {"--scenario=temporal_audit", "--capture-diagnostics"});
     // A blanket startup refusal cannot satisfy the negative cases below.
     EXPECT_NO_THROW(WithArguments(valid, [](int argc, char* argv[]) {
         (void)Harness::ParseRuntimePathOptions(argc, argv);
@@ -713,7 +713,7 @@ TEST(TemporalAudit, FixedSiteRuntimeAdmitsExactA4ReservationAndRefusesOneByteLes
         auto arguments = Arguments(span);
         arguments.insert(arguments.end(),
                          {"--scenario=temporal_audit",
-                          "--capture-diagnostics=1",
+                          "--capture-diagnostics",
                           "--temporal-site=spawn",
                           "--temporal-roi=full-frame"});
         const auto config = WithArguments(arguments, [](int argc, char* argv[]) {
@@ -757,7 +757,7 @@ TEST(TemporalAudit, FixedSiteRuntimeAdmitsExactA4ReservationAndRefusesOneByteLes
 }
 TEST(TemporalAudit, RuntimeWeatherUsesExistingVersionedScheduleAndExactBoundaries) {
     auto arguments = Arguments("weather-cycle");
-    arguments.insert(arguments.end(), {"--scenario=temporal_audit", "--capture-diagnostics=1"});
+    arguments.insert(arguments.end(), {"--scenario=temporal_audit", "--capture-diagnostics"});
     const auto config = WithArguments(arguments, [](int argc, char* argv[]) {
         return Harness::ParseRuntimeScenarioConfig(argc, argv, {});
     });

@@ -3212,7 +3212,7 @@ function Test-FixedSiteTemporalAudit {
         throw "Temporal output already exists; choose a fresh runtime output tree"
     }
     Invoke-Checked -FilePath $exe -ArgumentList @(
-        "--scenario=temporal_audit", "--capture-diagnostics=1",
+        "--scenario=temporal_audit", "--capture-diagnostics",
         "--temporal-audit-plan=weather-cycle", "--temporal-start-tick=0",
         "--temporal-tick-rate=30", "--temporal-day-ticks=162000",
         "--temporal-dawn-tick=27000", "--temporal-dusk-tick=135000",
