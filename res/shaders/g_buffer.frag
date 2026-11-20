@@ -90,6 +90,8 @@ uniform int u_macroRockOverlay = 0;
 // but was the single largest G-buffer cost in the forest. The flat grass base colour × Tint
 // reads the same at the densities this draws. Terrain/bark/rock keep triplanar (set to 0).
 uniform int u_forceFlat = 0;
+// 1: procedural leaf reflectance without the card silhouette (closed distant shrub hulls).
+uniform int u_leafSurface = 0;
 
 //  far-LOD: view-space radius (meters) inside which far-region mesh
 // fragments are discarded - the live chunk ring owns that space (live wins;
@@ -560,14 +562,18 @@ void main()
     float coverage = dot(fs_in.GroundWeights, vec4(1.0)) + fs_in.DeepslateWeight;
     bool naturalCoverage = coverage > 0.999 && fs_in.MaterialID >= 1u && fs_in.MaterialID <= 5u;
     bool textured = false;
-    if (proceduralLeaf) {
+    if (proceduralLeaf || u_leafSurface == 1) {
         // The same leaf reflectance at every mesh LOD avoids a bright green
         // distance band. Keep ground textures and their normal maps off leaves.
         albedo = vec3(0.10, 0.24, 0.045);
         roughness = 0.85;
         metallic = 0.0;
-        if (!gl_FrontFacing) worldN = -worldN;
-        textured = true; // rotate the two-sided world normal into view space below
+        if (proceduralLeaf) {
+            if (!gl_FrontFacing) worldN = -worldN;
+            textured = true; // rotate the two-sided world normal into view space below
+        }
+        // Closed distant shrub hulls keep the inverse-transposed view-space
+        // normal: their instances are scaled nonuniformly.
     } else if (u_skinnedAlbedoLayer >= 0) {
         // UV-mapped skinned/creature texturing. Samples the skinned
         // texture array by the mesh UVs; optionally perturbs the normal by a
