@@ -13,6 +13,8 @@
 
 #include <luminumbra/core/Types.h>
 
+#include "../world/PlayerAvatar.h"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -20,8 +22,11 @@
 #include <glm/glm.hpp>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <span>
+#include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace Luminumbra {
@@ -76,7 +81,27 @@ public:
     static constexpr std::uint32_t kTerrainBodyHeadroom = 8192;
     // False only when the body pool refuses creation; callers may retry later.
     bool add_chunk_collision(Chunk& chunk);
+    bool add_chunk_collision(Chunk& chunk, JPH::BodyID restored_id);
+    // Const continuation diagnostic. Missing means this chunk has no terrain body.
+    std::optional<JPH::BodyID> chunk_collision_body(ChunkID chunk_id) const;
+    // Explicit-save capture only; refuses above the 8192-terrain-owner bound
+    // before allocating. Output is sorted by chunk ID and unchanged on refusal.
+    bool capture_chunk_collision_owners(std::vector<std::pair<ChunkID, JPH::BodyID>>& output) const;
     void remove_chunk_collision(ChunkID chunk_id);
+    // Explicit continuation only. At most 128 private terrain bodies and sampled
+    // columns; unused bodies retain their reserved IDs outside the broadphase.
+    struct SimulationTerrainState {
+        struct Column {
+            ChunkID id = 0;
+            std::array<float, (CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Z + 1)> heights{};
+        };
+        std::vector<std::uint32_t> bodies;
+        std::vector<Column> columns;
+    };
+    bool capture_simulation_terrain(SimulationTerrainState& output) const;
+    // Destination must be isolated and contain no simulation terrain yet.
+    bool restore_simulation_terrain(const SimulationTerrainState& state);
+
     // Shared owner-thread barrier before rigid bodies or characters advance. Inert unless
     // region authority is enabled. A refusal publishes nothing and pauses physics until a
     // successful retry; hosts must also leave their simulation tick unconsumed.
@@ -121,6 +146,9 @@ public:
                        float delta_time);
     void set_player_position(const glm::vec3& position);
     glm::vec3 get_player_position() const;
+    bool has_player_controller() const {
+        return m_player_character != nullptr;
+    }
     bool is_player_grounded() const;
     // Returns false when collision prevents changing shape; the old stance remains.
     bool set_player_crouched(bool is_crouched);
@@ -172,9 +200,9 @@ public:
     glm::vec3 get_avatar_velocity(std::size_t index) const;
     bool is_avatar_grounded(std::size_t index) const;
 
-    // Internal, owner-thread continuation between ticks. No persistence,
-    // replication or hash caller consumes these values. Terrain must already
-    // have identical BodyIDs, shapes and settings in the destination, which
+    // Internal, owner-thread continuation between ticks. The optional saved
+    // continuation envelope retains these values without changing hash inputs.
+    // Terrain must already have identical BodyIDs, shapes and settings in the destination, which
     // may contain static bodies but no dynamic bodies. Captured owners are
     // restored as one complete set, before any controller adoption.
     static constexpr std::size_t kMaxRestoredBodies = 128;
@@ -184,7 +212,7 @@ public:
         static constexpr std::size_t kMaxBytes = 65536;
         std::array<std::uint8_t, kMaxBytes> bytes{};
         std::uint32_t size = 0;
-        // In-memory continuation only; the versioned scalar payload is unchanged.
+        // Envelope metadata; the independent versioned scalar payload is unchanged.
         // Defaulted fields keep existing dynamic-sphere/capsule records compatible.
         bool suspended = false;
         glm::vec3 retained_velocity{0.0f};
@@ -221,6 +249,12 @@ public:
         bool restore_avatar_owner(const World::PhysicsOwnerState& state,
                                   std::size_t& index,
                                   std::span<const World::PhysicsOwnerState> remaining_frozen = {});
+
+        // Complete isolated continuation adoption without clearing restored terrain
+        // or resuming suspended bodies. Only GameSession constructs this adapter.
+        void attach_world_system(const SHIELD_WorldSystem* world) {
+            m_physics.m_world_system = world;
+        }
 
     private:
         friend class ::Luminumbra::world::GameSession;
@@ -387,3 +421,46 @@ private:
 
 } // namespace Systems
 } // namespace Luminumbra
+
+namespace Luminumbra::Persistence {
+
+// Explicit-save work only: 128 bodies, 4096 avatars and 1 MiB aggregate C2 payload.
+// The 1536 KiB envelope shares the existing 2 MiB metadata admission budget.
+// Larger captures refuse before any writer; no legacy compatibility limit changes.
+inline constexpr std::size_t kOwnerContinuationPayloadBytes = 1024u * 1024u;
+inline constexpr std::size_t kOwnerContinuationRecordBytes = 1536u * 1024u;
+struct TerrainOwnerContinuation {
+    ChunkID chunk_id = 0;
+    std::uint32_t body_id = 0;
+};
+struct PhysicsOwnerContinuation {
+    std::uint32_t owner_id = 0;
+    Vec3 anchor{};
+    Systems::PhysicsSystem::BodyOwnerState state;
+};
+struct ControllerOwnerContinuation {
+    std::uint32_t owner_id = 0;
+    Vec3 anchor{};
+    World::PhysicsOwnerState state;
+};
+struct OwnerContinuation {
+    std::uint32_t world_seed = 0;
+    std::string preset_identity;
+    std::uint64_t simulation_tick = 0;
+    std::uint64_t stream_tick = 0;
+    bool moving_anchor = false;
+    bool water_smoke = false;
+    Vec3 origin{};
+    Vec3 anchor{};
+    std::vector<World::PlayerAvatarOwnerState> avatars;
+    std::vector<PhysicsOwnerContinuation> bodies;
+    std::optional<ControllerOwnerContinuation> player;
+    std::uint32_t slot_count = 0;
+    std::vector<std::uint32_t> free_slots;
+    Systems::PhysicsSystem::SimulationTerrainState simulation_terrain;
+    std::vector<TerrainOwnerContinuation> terrain;
+};
+bool EncodeOwnerContinuation(const OwnerContinuation& record, std::string& bytes);
+bool DecodeOwnerContinuation(const std::string& bytes, OwnerContinuation& record);
+
+} // namespace Luminumbra::Persistence

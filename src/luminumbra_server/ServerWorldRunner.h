@@ -204,6 +204,8 @@ struct ServerTickReport {
 class ServerWorldRunner {
 public:
     explicit ServerWorldRunner(ServerWorldRunnerConfig config);
+    ServerWorldRunner(ServerWorldRunnerConfig config,
+                      const world::OwnerContinuationOptions& options);
     ~ServerWorldRunner();
 
     ServerWorldRunner(const ServerWorldRunner&) = delete;
@@ -300,6 +302,14 @@ public:
         return m_avatars;
     }
 
+    // Boot diagnostic: restored owners never increment the spawn-path counter.
+    std::size_t SpawnedAvatarCount() const {
+        return m_spawnedAvatarCount;
+    }
+    // Number of owner anchors gathered at the last fixed tick; excludes world residency.
+    std::size_t OwnerAnchorVisitCount() const {
+        return m_ownerAnchorVisits;
+    }
     // Internal continuation entry points for a caller that restores owners in
     // player-ID order instead of using the existing Boot spawn path. Supply the
     // remaining frozen captures and finish the roster before stepping or spawning.
@@ -356,6 +366,13 @@ public:
 private:
     std::string m_bootError;
     ServerWorldRunnerConfig m_config;
+    world::OwnerContinuationOptions m_continuationOptions;
+    std::uint64_t m_ownerStreamTick = 0;
+    std::size_t m_spawnedAvatarCount = 0;
+    std::size_t m_ownerAnchorVisits = 0;
+    Vec3 m_ownerOrigin{};
+    Vec3 m_ownerAnchor{};
+    std::vector<Vec3> m_ownerStreamingAnchors;
     Luminumbra::JobSystem m_jobSystem;
     std::unique_ptr<world::GameSession> m_session;
     std::vector<World::PlayerAvatar> m_avatars; // Deterministic player avatars.
