@@ -1,5 +1,7 @@
 #include "../support/UniqueTempPath.h"
 #include "core/RuntimeScenarioConfig.h"
+#include "luminumbra_common/ai/CreatureBrainSystem.h"
+#include "luminumbra_common/systems/WeatherSystem.h"
 #include "rendering/TemporalAudit.h"
 
 #include <gtest/gtest.h>
@@ -9,9 +11,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -580,10 +584,11 @@ TEST(TemporalAudit, BothRuntimeEntryPathsRefuseBeforeCreatingOutputsWithExplicit
                     });
                     FAIL() << "runtime execution must refuse";
                 } catch (const std::invalid_argument& error) {
-                    EXPECT_EQ(std::string(error.what()),
-                              invalid
-                                  ? "unknown temporal span"
-                                  : "temporal audit execution unsupported: plan admission only");
+                    EXPECT_EQ(
+                        std::string(error.what()),
+                        invalid
+                            ? "unknown temporal span"
+                            : "temporal execution requires --scenario=temporal_audit and a plan");
                 }
                 EXPECT_FALSE(std::filesystem::exists(save_root));
             }
@@ -593,4 +598,397 @@ TEST(TemporalAudit, BothRuntimeEntryPathsRefuseBeforeCreatingOutputsWithExplicit
     std::filesystem::remove_all(directory, error);
     EXPECT_FALSE(error);
 }
+
+TEST(TemporalAudit, FixedSiteRuntimeAdmissionChecksEveryInputBeforeStartupWrites) {
+    const auto directory = Luminumbra::TestSupport::CreateUniqueTempDirectory("temporal-runtime-");
+    const auto save_root = directory / "save";
+    const auto artifacts = directory / "artifacts";
+    auto valid = Arguments();
+    valid.insert(valid.end(), {"--scenario=temporal_audit", "--capture-diagnostics=1"});
+    // A blanket startup refusal cannot satisfy the negative cases below.
+    EXPECT_NO_THROW(WithArguments(valid, [](int argc, char* argv[]) {
+        (void)Harness::ParseRuntimePathOptions(argc, argv);
+        (void)Harness::ParseRuntimeScenarioConfig(argc, argv, {});
+    }));
+    EXPECT_TRUE(std::filesystem::is_empty(directory));
+    valid.insert(valid.end(),
+                 {"--save-root", save_root.string(), "--runtime-artifact-dir", artifacts.string()});
+    const std::vector<std::string> refusals{"--temporal-site=unknown",
+                                            "--temporal-roi=near-ground",
+                                            "--temporal-roi=",
+                                            "--temporal-output-bytes=0",
+                                            "--temporal-output-bytes=1",
+                                            "--temporal-output-bytes=18446744073709551615",
+                                            "--temporal-output-bytes=1e38",
+                                            "--load-world=previous",
+                                            "--systems-config=override",
+                                            "--preset-json=override",
+                                            "--world-preset=mountains",
+                                            "--cam-pos=1,2,3",
+                                            "--cam-dir=0,1,0",
+                                            "--debug-goto=spawn",
+                                            "--scene-config=scene",
+                                            "--timelapse=out",
+                                            "--frame-scan=out",
+                                            "--render-benchmark=out",
+                                            "--timed-run=1",
+                                            "--isolation-layers=terrain",
+                                            "--traversal=path",
+                                            "--capture-size=3840x1600",
+                                            "--cam-yaw=1",
+                                            "--cam-pitch=1",
+                                            "--render-parity-frame=out",
+                                            "--upscale-seam-parity=out",
+                                            "--render-parity-ssao=out",
+                                            "--bake-tree-impostor=out",
+                                            "--render-benchmark-schema=v4",
+                                            "--render-benchmark-aovs=out",
+                                            "--render-benchmark-aovs-bypass-camera-region-guard",
+                                            "--render-benchmark-screenshot=out",
+                                            "--debug-glass-pane",
+                                            "--timelapse-grow",
+                                            "--timelapse-simgrow",
+                                            "--timelapse-season",
+                                            "--timelapse-creatures",
+                                            "--timelapse-living",
+                                            "--timelapse-calm",
+                                            "--timelapse-fire",
+                                            "--timelapse-dig",
+                                            "--timelapse-vista",
+                                            "--timelapse-drain",
+                                            "--timelapse-rain",
+                                            "--timelapse-ticks=1",
+                                            "--timelapse-tod=0",
+                                            "--timelapse-dir=out",
+                                            "--debug-view=normal",
+                                            "--capture-feature-profile=all_features",
+                                            "--temporal-site=",
+                                            "--capture-probe=3840,0",
+                                            "--capture-probe=0,1600"};
+    for (const bool paths : {false, true}) {
+        for (const auto& refusal : refusals) {
+            SCOPED_TRACE(refusal);
+            auto arguments = valid;
+            arguments.push_back(refusal);
+            EXPECT_THROW(WithArguments(arguments,
+                                       [paths](int argc, char* argv[]) {
+                                           if (paths) {
+                                               (void)Harness::ParseRuntimePathOptions(argc, argv);
+                                           } else {
+                                               (void)Harness::ParseRuntimeScenarioConfig(
+                                                   argc, argv, {});
+                                           }
+                                       }),
+                         std::invalid_argument);
+            EXPECT_TRUE(std::filesystem::is_empty(directory));
+        }
+        for (const auto& replacement : {std::pair{2U, "--temporal-start-tick=1"},
+                                        std::pair{3U, "--temporal-tick-rate=7"},
+                                        std::pair{4U, "--temporal-day-ticks=162001"},
+                                        std::pair{5U, "--temporal-dawn-tick=27001"},
+                                        std::pair{6U, "--temporal-dusk-tick=135001"},
+                                        std::pair{8U, "--capture-diagnostics=0"}}) {
+            auto arguments = valid;
+            arguments[replacement.first] = replacement.second;
+            EXPECT_THROW(WithArguments(arguments,
+                                       [paths](int argc, char* argv[]) {
+                                           if (paths) {
+                                               (void)Harness::ParseRuntimePathOptions(argc, argv);
+                                           } else {
+                                               (void)Harness::ParseRuntimeScenarioConfig(
+                                                   argc, argv, {});
+                                           }
+                                       }),
+                         std::invalid_argument);
+            EXPECT_TRUE(std::filesystem::is_empty(directory));
+        }
+    }
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    EXPECT_FALSE(error);
+}
+
+TEST(TemporalAudit, FixedSiteRuntimeAdmitsExactA4ReservationAndRefusesOneByteLess) {
+    for (const auto* span : {"day-night", "weather-cycle"}) {
+        auto arguments = Arguments(span);
+        arguments.insert(arguments.end(),
+                         {"--scenario=temporal_audit",
+                          "--capture-diagnostics=1",
+                          "--temporal-site=spawn",
+                          "--temporal-roi=full-frame"});
+        const auto config = WithArguments(arguments, [](int argc, char* argv[]) {
+            return Harness::ParseRuntimeScenarioConfig(argc, argv, {});
+        });
+        const auto paths = WithArguments(arguments, [](int argc, char* argv[]) {
+            return Harness::ParseRuntimePathOptions(argc, argv);
+        });
+        EXPECT_TRUE(paths.diagnostics.enabled);
+        ASSERT_TRUE(config.temporal_audit);
+        if (!config.temporal_audit) {
+            return;
+        }
+        EXPECT_TRUE(config.auto_create_world);
+        EXPECT_TRUE(config.auto_enter_world);
+        EXPECT_EQ(config.timed_run_seconds, 0);
+        const auto& audit = *config.temporal_audit;
+        const auto exact =
+            audit.budget.frame_bytes * audit.plan.frames.size() + audit.budget.manifest_bytes;
+        arguments.push_back("--temporal-output-bytes=" + std::to_string(exact));
+        EXPECT_NO_THROW(WithArguments(arguments, [](int argc, char* argv[]) {
+            (void)Harness::ParseTemporalAuditRuntimeOptions(argc, argv);
+        }));
+        arguments.back() = "--temporal-output-bytes=" + std::to_string(exact - 1);
+        EXPECT_THROW(WithArguments(arguments,
+                                   [](int argc, char* argv[]) {
+                                       (void)Harness::ParseTemporalAuditRuntimeOptions(argc, argv);
+                                   }),
+                     std::invalid_argument);
+        arguments.pop_back();
+        arguments.push_back("--capture-probe=3839,1599");
+        EXPECT_NO_THROW(WithArguments(arguments, [](int argc, char* argv[]) {
+            (void)Harness::ParseTemporalAuditRuntimeOptions(argc, argv);
+        }));
+    }
+    WithArguments({"client"}, [](int argc, char* argv[]) {
+        const auto config = Harness::ParseRuntimeScenarioConfig(argc, argv, {});
+        EXPECT_FALSE(config.temporal_audit);
+        EXPECT_EQ(config.temporal_presentation_delta, 0);
+    });
+}
+TEST(TemporalAudit, RuntimeWeatherUsesExistingVersionedScheduleAndExactBoundaries) {
+    auto arguments = Arguments("weather-cycle");
+    arguments.insert(arguments.end(), {"--scenario=temporal_audit", "--capture-diagnostics=1"});
+    const auto config = WithArguments(arguments, [](int argc, char* argv[]) {
+        return Harness::ParseRuntimeScenarioConfig(argc, argv, {});
+    });
+    ASSERT_TRUE(config.temporal_audit);
+    if (!config.temporal_audit) {
+        return;
+    }
+    const auto& audit = *config.temporal_audit;
+    const auto schedule = Harness::BuildTemporalAuditWeatherSchedule(audit);
+    ASSERT_TRUE(schedule.valid());
+    EXPECT_EQ(schedule.strike_tick, 1800U);
+    EXPECT_EQ(schedule.phases.size(), 5U);
+    for (const auto tick : {0U, 599U, 600U, 3600U, 3601U}) {
+        EXPECT_EQ(schedule.Sample(tick).precip_intensity, 0.0f);
+    }
+    EXPECT_GT(schedule.Sample(601).precip_intensity, 0.0f);
+    EXPECT_LT(schedule.Sample(1499).precip_intensity, 1.0f);
+    EXPECT_EQ(schedule.Sample(1500).precip_intensity, 1.0f);
+    EXPECT_EQ(schedule.Sample(2699).storm_intensity, 1.0f);
+    EXPECT_EQ(schedule.Sample(2700).storm_intensity, 1.0f);
+    EXPECT_LT(schedule.Sample(2701).storm_intensity, 1.0f);
+    Luminumbra::Systems::WeatherSchedule decoded;
+    ASSERT_TRUE(Luminumbra::Systems::WeatherSchedule::Decode(schedule.canonical_bytes(), decoded));
+    EXPECT_EQ(decoded, schedule);
+    for (unsigned invalid = 0; invalid < 5; ++invalid) {
+        auto rejected = audit;
+        if (invalid == 0) {
+            rejected.plan.request.span = TemporalAuditSpan::DayNight;
+        } else if (invalid == 1) {
+            rejected.plan.request.start_tick = 1;
+        } else if (invalid == 2) {
+            rejected.plan.request.ticks_per_second = 7;
+        } else {
+            rejected.plan.request.strike_tick = invalid == 3 ? 1499 : 2700;
+        }
+        EXPECT_THROW(Harness::BuildTemporalAuditWeatherSchedule(rejected), std::invalid_argument);
+    }
+}
+using Action = TemporalSequenceAction;
+namespace Comp = Luminumbra::Components;
+TemporalAuditPlan RuntimeTestPlan() {
+    auto request = Request();
+    request.start_tick = 17;
+    request.ticks_per_day = 120;
+    request.dawn_tick = 30;
+    request.dusk_tick = 90;
+    auto admitted = BuildTemporalAuditPlan(request);
+    EXPECT_TRUE(admitted.plan);
+    return admitted.plan ? *admitted.plan : TemporalAuditPlan{};
+}
+TemporalSequenceBudget RuntimeTestBudget(const TemporalAuditPlan& plan) {
+    return {.frame_bytes = 1024,
+            .manifest_bytes = 4096,
+            .output_bytes = static_cast<std::uint64_t>(plan.frames.size()) * 1024 + 4096};
+}
+TemporalSequenceBudget RuntimeFileBudget(const TemporalAuditPlan& plan) {
+    return {.frame_bytes = 1024,
+            .manifest_bytes = 16U * 1024U * 1024U,
+            .output_bytes =
+                static_cast<std::uint64_t>(plan.frames.size()) * 1024 + 16U * 1024U * 1024U};
+}
+void RuntimeAccept(TemporalAuditSequence& sequence,
+                   const TemporalSequenceStep& command,
+                   bool ready = true) {
+    const bool output = command.action == Action::Capture || command.action == Action::Publish;
+    sequence.acknowledge(command.simulation_tick, true, ready, output ? command.byte_limit : 0);
+}
+void RuntimeReach(TemporalAuditSequence& sequence, Action action, std::uint64_t& tick) {
+    // Short fixture calendar: fewer than 20000 protocol steps to any state.
+    for (unsigned attempt = 0; attempt < 20000; ++attempt) {
+        const auto command = sequence.next(tick);
+        if (command.action == action) {
+            return;
+        }
+        ASSERT_NE(command.action, Action::Refused) << sequence.refusal();
+        ASSERT_NE(command.action, Action::Complete);
+        tick = command.simulation_tick;
+        RuntimeAccept(sequence, command);
+    }
+    FAIL() << "runtime fixture did not reach requested state";
+}
+struct RuntimeDirectory {
+    std::filesystem::path path =
+        Luminumbra::TestSupport::CreateUniqueTempDirectory("temporal-runtime-");
+    ~RuntimeDirectory() {
+        std::error_code error;
+        std::filesystem::remove_all(path, error);
+    }
+};
+bool RuntimeWrite(const std::filesystem::path& path, std::string_view bytes) {
+    std::ofstream output(path, std::ios::binary);
+    output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    output.close();
+    return static_cast<bool>(output);
+}
+
+TEST(TemporalAudit, RuntimeCreatureTicksStayLiveAndMatchOrdinaryTicking) {
+    const auto plan = RuntimeTestPlan();
+    entt::registry sequence_registry;
+    entt::registry ordinary_registry;
+    const auto spawn = [](entt::registry& registry) {
+        const auto entity = registry.create();
+        registry.emplace<Comp::TransformComponent>(entity);
+        registry.emplace<Comp::CreatureComponent>(entity).hunger = 0.5f;
+        return entity;
+    };
+    const auto subject = spawn(sequence_registry);
+    const auto reference = spawn(ordinary_registry);
+    TemporalAuditSequence sequence(plan, RuntimeTestBudget(plan));
+    auto tick = plan.request.start_tick;
+    std::uint64_t creature_ticks = 0;
+    unsigned moving_samples = 0;
+    float previous_energy = 1.0f;
+    for (unsigned attempt = 0; attempt < 20000 && !sequence.complete(); ++attempt) {
+        const auto command = Luminumbra::Client::ScenarioHarness::DriveTemporalAuditTicks(
+            sequence,
+            [&] { return tick; },
+            [&] {
+                const auto stats =
+                    luminumbra::ai::RunCreatureBrainSystemOnTick(sequence_registry, 1.0f / 30.0f);
+                EXPECT_EQ(stats.updated, 1);
+                ++creature_ticks;
+                ++tick;
+                return true;
+            });
+        ASSERT_NE(command.action, Action::Refused) << sequence.refusal();
+        ASSERT_NE(command.action, Action::AdvanceTick);
+        if (command.action == Action::Capture) {
+            const auto energy = sequence_registry.get<Comp::CreatureComponent>(subject).energy;
+            if (energy != previous_energy) {
+                ++moving_samples;
+            }
+            previous_energy = energy;
+        }
+        tick = command.simulation_tick;
+        RuntimeAccept(sequence, command);
+    }
+    ASSERT_TRUE(sequence.complete());
+    EXPECT_EQ(creature_ticks, plan.end_tick - plan.request.start_tick);
+    EXPECT_GT(moving_samples, 1U);
+    for (auto index = plan.request.start_tick; index < plan.end_tick; ++index) {
+        luminumbra::ai::RunCreatureBrainSystemOnTick(ordinary_registry, 1.0f / 30.0f);
+    }
+    const auto& actual = sequence_registry.get<Comp::CreatureComponent>(subject);
+    const auto& expected = ordinary_registry.get<Comp::CreatureComponent>(reference);
+    EXPECT_EQ(actual.energy, expected.energy);
+    EXPECT_EQ(actual.hunger, expected.hunger);
+    EXPECT_EQ(actual.stamina, expected.stamina);
+    EXPECT_EQ(actual.last_action, expected.last_action);
+    EXPECT_EQ(sequence_registry.get<Comp::TransformComponent>(subject).position,
+              ordinary_registry.get<Comp::TransformComponent>(reference).position);
+}
+
+TEST(TemporalAudit, RuntimeTickDriverFreezesRetriesAndMatchesEveryPlannedCapture) {
+    const auto plan = RuntimeTestPlan();
+    TemporalAuditSequence sequence(plan, RuntimeTestBudget(plan));
+    auto tick = plan.request.start_tick;
+    std::uint64_t calls = 0;
+    std::size_t captures = 0;
+    for (unsigned attempt = 0; attempt < 20000 && !sequence.complete(); ++attempt) {
+        const auto command = Luminumbra::Client::ScenarioHarness::DriveTemporalAuditTicks(
+            sequence,
+            [&] { return tick; },
+            [&] {
+                ++calls;
+                ++tick;
+                return true;
+            });
+        ASSERT_NE(command.action, Action::Refused) << sequence.refusal();
+        ASSERT_NE(command.action, Action::AdvanceTick);
+        if (command.action == Action::InitialReadiness || command.action == Action::Readiness) {
+            EXPECT_EQ(command.presentation_delta_seconds, 0);
+            const auto before = calls;
+            RuntimeAccept(sequence, command, false);
+            const auto retry = Luminumbra::Client::ScenarioHarness::DriveTemporalAuditTicks(
+                sequence,
+                [&] { return tick; },
+                [&] {
+                    ++calls;
+                    ++tick;
+                    return true;
+                });
+            EXPECT_EQ(retry, command);
+            EXPECT_EQ(calls, before);
+        }
+        if (command.action == Action::Capture) {
+            ASSERT_LT(captures, plan.frames.size());
+            EXPECT_EQ(tick, plan.frames[captures].target_tick);
+            EXPECT_EQ(command.sub_tick_60, plan.frames[captures].sub_tick_60);
+            ++captures;
+        }
+        RuntimeAccept(sequence, command);
+    }
+    EXPECT_TRUE(sequence.complete());
+    EXPECT_EQ(captures, plan.frames.size());
+    EXPECT_EQ(calls, plan.end_tick - plan.request.start_tick);
+}
+
+TEST(TemporalAudit, RuntimeTickFailureOrCancellationAfterWrittenFrameCannotPublish) {
+    const RuntimeDirectory directory;
+    const auto plan = RuntimeTestPlan();
+    // Cancellation, explicit barrier failure, a stalled clock, and an overshoot
+    // must all preserve the written first frame without publishing completion.
+    for (unsigned fault = 0; fault < 4; ++fault) {
+        TemporalAuditSequence sequence(plan, RuntimeFileBudget(plan));
+        auto tick = plan.request.start_tick;
+        RuntimeReach(sequence, Action::Capture, tick);
+        const std::vector<std::string> names{"frame-0.ppm"};
+        ASSERT_TRUE(RuntimeWrite(directory.path / names.front(), "abc"));
+        ASSERT_TRUE(sequence.acknowledgeCaptureFiles(tick, directory.path, names));
+        ASSERT_EQ(sequence.captured_frames(), 1U);
+        if (fault == 0) {
+            sequence.refuse();
+        } else {
+            RuntimeReach(sequence, Action::AdvanceTick, tick);
+            const auto failed = Luminumbra::Client::ScenarioHarness::DriveTemporalAuditTicks(
+                sequence,
+                [&] { return tick; },
+                [&] {
+                    if (fault == 3) {
+                        tick += 2;
+                    }
+                    return fault != 1;
+                });
+            EXPECT_EQ(failed.action, Action::Refused);
+        }
+        EXPECT_TRUE(sequence.completionManifest().empty());
+        EXPECT_FALSE(sequence.publishCompletionManifest(directory.path / "sequence.json"));
+        EXPECT_FALSE(std::filesystem::exists(directory.path / "sequence.json"));
+        EXPECT_FALSE(std::filesystem::exists(directory.path / "sequence.json.tmp"));
+    }
+}
+
 } // namespace
