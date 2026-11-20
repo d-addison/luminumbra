@@ -140,7 +140,7 @@
     "res/shaders/g_buffer.vert": "209c1c0801801209e669e60dcadfa7085e8e44780f9e2c7599a7d48a5fe2abed",
     "res/shaders/grass_compact_prefix.comp": "43bcf2b6c883f958cab97d9b88c911701edd1ff1416e0290ef427228b406e677",
     "res/shaders/instanced_mesh.vert": "83198486e34bcb2d2ad4dcd5271efc9b4fd5deab5842768a8a85eac76d245d9c",
-    "res/shaders/lighting_pass.frag": "ee6584835366c2c5e68d7dcdde0e69a00a2c9fcb2908a1f2537bc62ca0410aac",
+    "res/shaders/lighting_pass.frag": "a247e3a920f043f65d1909a425d25efafbaf15ca54153f7b9e1d8cfacd2f8937",
     "res/shaders/magical_particles.frag": "dcb928e1b40f30b5cfcf32796a675a12b38bee756deb9e988ddf2862c0ae3c8c",
     "res/shaders/ssao.vert": "f5c6db443362910b98714dd5dcfb5bc1c54e4e23e4a87f1cfc043f07ee01777c",
     "res/shaders/static_asset.frag": "38945ff338541c021f1b4d736648794cc556ce09183d520d76a28e7843e08d2c",
