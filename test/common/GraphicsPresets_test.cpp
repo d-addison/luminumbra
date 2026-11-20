@@ -111,8 +111,10 @@ TEST(GraphicsPresets, SharedClassifierPresetsPreserveDisplayNamesAndSettingsKeys
         config.user().frame_cap = 165;
         ASSERT_TRUE(config.SaveUserOverlay(file.Path().string()));
         const auto saved = nlohmann::json::parse(ReadText(file.Path()));
-        EXPECT_EQ(saved["user"]["graphics"]["base_preset"], row.key);
-        EXPECT_EQ(saved["user"]["graphics"]["detection"]["recommended_preset"], row.key);
+        // MSVC finds json == string_view ambiguous; compare as strings.
+        EXPECT_EQ(saved["user"]["graphics"]["base_preset"].get<std::string>(), row.key);
+        EXPECT_EQ(saved["user"]["graphics"]["detection"]["recommended_preset"].get<std::string>(),
+                  row.key);
         const auto loaded = SystemConfig::LoadLayered("", file.Path().string());
         EXPECT_EQ(loaded.user().graphics.base_preset, row.preset);
         EXPECT_EQ(loaded.user().graphics.preset_revision, kGraphicsPresetRevision);

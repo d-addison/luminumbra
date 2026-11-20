@@ -467,7 +467,7 @@ class UploadBudgetWiring(unittest.TestCase):
         for signal in ("NearTerrainPrepared(coverage.expected_surface_chunks", "coverage.ready_surface_chunks",
                        "coverage.pending_lod_chunks", "diagnostic.missing == 0",
                        "diagnostic.stale == 0", "diagnostic.pending == 0",
-                       "far.coverage_settled", "InitialWaterPrepared(water_prepared,",
+                       "far_world.coverage_settled", "InitialWaterPrepared(water_prepared,",
                        "uploads.water_uploads_deferred",
                        "foliage->build_pending()", "pipeline.render_uploads_settled()",
                        "streaming.quiescent()"):
