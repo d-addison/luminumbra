@@ -9636,6 +9636,7 @@ TEST(RenderSmokeTest, DiagnosticAdmissionBudgetAndScopeRefusalAreSafe) {
         EXPECT_FALSE(DiagnosticFrameCapture::Admitted(extent, retained));
         EXPECT_EQ(retained, 123U);
         DiagnosticFrameCapture refused(extent);
+        EXPECT_FALSE(refused.ready());
         EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
     }
     HiddenGlContext context;
@@ -9646,6 +9647,7 @@ TEST(RenderSmokeTest, DiagnosticAdmissionBudgetAndScopeRefusalAreSafe) {
     {
         DiagnosticFrameCapture capture({1, 2});
         EXPECT_NE(GBufferDiagnosticCapture::Current(), nullptr);
+        EXPECT_FALSE(capture.ready());
         DiagnosticBundleFrame frame;
         frame.extent = {1, 2};
         EXPECT_FALSE(capture.finish({}, {.enabled = true, .probe = std::nullopt}, frame, {}));
@@ -9796,4 +9798,169 @@ TEST(RenderSmokeTest, DiagnosticRetryAndPartialDestinationsPreserveEveryByte) {
     EXPECT_TRUE(pipeline.diagnostic_capture_destination_available(capture));
     pipeline.set_capture_diagnostics({});
     EXPECT_TRUE(pipeline.diagnostic_capture_destination_available({}));
+}
+
+TEST(RenderSmokeTest, DiagnosticDestinationReservationExcludesOverlappingWritersAndCleansUp) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("diagnostic-reservation-", ".ppm");
+    const auto capture = temporary.Path();
+    auto marker = CaptureManifestPath(capture);
+    marker += ".lck";
+    auto manifest_temporary = CaptureManifestPath(capture);
+    manifest_temporary += ".tmp";
+    EXPECT_EQ(marker.filename().native().size(), manifest_temporary.filename().native().size());
+    RenderPipeline first, second;
+    first.set_capture_diagnostics({.enabled = true, .probe = std::nullopt});
+    second.set_capture_diagnostics({.enabled = true, .probe = std::nullopt});
+    {
+        const RenderPipeline::CaptureDestinationReservation owner(first, capture);
+        ASSERT_TRUE(owner.acquired());
+        // Both admissions happen before either payload exists. A vacancy check
+        // alone admits the delayed second writer and allows it to replace bytes.
+        const RenderPipeline::CaptureDestinationReservation contender(second, capture);
+        EXPECT_FALSE(contender.acquired());
+        auto alternate_extension = capture;
+        alternate_extension.replace_extension(".png");
+        EXPECT_FALSE(
+            RenderPipeline::CaptureDestinationReservation(second, alternate_extension).acquired());
+        const auto manifest = CaptureManifestPath(capture);
+        {
+            std::ofstream image(capture);
+            image << "first image";
+        }
+        {
+            std::ofstream metadata(manifest);
+            metadata << R"({"status":"complete"})";
+        }
+        const auto image_bytes = ReadTextFile(capture);
+        const auto manifest_bytes = ReadTextFile(manifest);
+        if (contender.acquired()) {
+            std::ofstream image(capture);
+            image << "second image";
+            std::ofstream metadata(manifest);
+            metadata << "second manifest";
+        }
+        EXPECT_EQ(ReadTextFile(capture), image_bytes);
+        EXPECT_EQ(ReadTextFile(manifest), manifest_bytes);
+        EXPECT_TRUE(fs::exists(marker));
+        fs::remove(capture);
+        fs::remove(manifest);
+    }
+    EXPECT_FALSE(fs::exists(marker));
+    {
+        const RenderPipeline::CaptureDestinationReservation retry(second, capture);
+        EXPECT_TRUE(retry.acquired());
+    }
+    EXPECT_FALSE(fs::exists(marker));
+    EXPECT_FALSE(RenderPipeline::CaptureDestinationReservation(first, {}).acquired());
+    const auto nested_capture = capture.parent_path() / "nested" / "deeper" / "view.ppm";
+    auto nested_marker = CaptureManifestPath(nested_capture);
+    nested_marker += ".lck";
+    {
+        const RenderPipeline::CaptureDestinationReservation nested(first, nested_capture);
+        EXPECT_TRUE(nested.acquired());
+        EXPECT_TRUE(fs::exists(nested_marker));
+        EXPECT_FALSE(fs::exists(nested_capture));
+    }
+    EXPECT_FALSE(fs::exists(nested_marker));
+    const auto blocked_parent = capture.parent_path() / "not-a-directory";
+    { std::ofstream blocked(blocked_parent); }
+    EXPECT_FALSE(RenderPipeline::CaptureDestinationReservation(first, blocked_parent / "view.ppm")
+                     .acquired());
+    // A pre-existing marker belongs to another writer, even if it is partial.
+    {
+        std::ofstream pending(marker);
+        pending << "occupied";
+    }
+    EXPECT_FALSE(RenderPipeline::CaptureDestinationReservation(second, capture).acquired());
+    EXPECT_EQ(ReadTextFile(marker), "occupied");
+    fs::remove(marker);
+    fs::create_directory(marker);
+    EXPECT_FALSE(RenderPipeline::CaptureDestinationReservation(second, capture).acquired());
+    EXPECT_TRUE(fs::is_directory(marker));
+    fs::remove(marker);
+    std::error_code link_error;
+    fs::create_symlink(capture.parent_path() / "missing", marker, link_error);
+    if (!link_error) {
+        EXPECT_FALSE(RenderPipeline::CaptureDestinationReservation(second, capture).acquired());
+        EXPECT_TRUE(fs::is_symlink(fs::symlink_status(marker)));
+        fs::remove(marker);
+    }
+    // Stack unwinding must retire the reservation before a retry.
+    EXPECT_THROW(
+        {
+            const RenderPipeline::CaptureDestinationReservation owner(first, capture);
+            ASSERT_TRUE(owner.acquired());
+            throw std::runtime_error("capture aborted");
+        },
+        std::runtime_error);
+    EXPECT_FALSE(fs::exists(marker));
+    // Cleanup must preserve an entry that replaced the owned marker.
+    auto displaced = marker;
+    displaced += ".displaced";
+    {
+        const RenderPipeline::CaptureDestinationReservation owner(first, capture);
+        ASSERT_TRUE(owner.acquired());
+        fs::rename(marker, displaced);
+        {
+            std::ofstream replacement(marker);
+            replacement << "replacement";
+        }
+    }
+    EXPECT_EQ(ReadTextFile(marker), "replacement");
+    fs::remove(marker);
+    fs::remove(displaced);
+    first.set_capture_diagnostics({});
+    EXPECT_TRUE(RenderPipeline::CaptureDestinationReservation(first, {}).acquired());
+}
+
+TEST(RenderSmokeTest, DiagnosticRefusalPrecedesManifestAndRetractsLateCompletion) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("diagnostic-refusal-", ".ppm");
+    const auto capture = temporary.Path();
+    const auto manifest = CaptureManifestPath(capture);
+    RenderPipeline pipeline;
+    pipeline.set_capture_diagnostics({.enabled = true, .probe = std::nullopt});
+    CaptureManifestInput input;
+    EXPECT_FALSE(pipeline.capture_diagnostics({}));
+    EXPECT_FALSE(pipeline.capture_diagnostics(capture.parent_path() / ""));
+    input.width = 2;
+    input.height = 2;
+    input.build_id.value = "capture-test";
+    input.asset_hash.unavailable = "test";
+    input.shader_hash.unavailable = "test";
+    input.world_hash.unavailable = "test";
+    bool observed = false, written = false;
+    EXPECT_FALSE(pipeline.with_diagnostic_capture(
+        capture,
+        [&] {
+            observed = true;
+            return input;
+        },
+        [&] {
+            written = true;
+            std::ofstream image(capture);
+            image << "image";
+            return image.good();
+        }));
+    EXPECT_FALSE(observed);
+    EXPECT_FALSE(written);
+    EXPECT_FALSE(fs::exists(capture));
+    EXPECT_FALSE(fs::exists(manifest));
+    // Exercise the late refusal fallback independently of early admission.
+    const RenderPipeline::CaptureDestinationReservation reservation(pipeline, capture);
+    ASSERT_TRUE(reservation.acquired());
+    ASSERT_TRUE(WithCaptureManifest(capture, input, [&] {
+        std::ofstream image(capture);
+        image << "completed image";
+        return image.good();
+    }));
+    ASSERT_EQ(nlohmann::json::parse(ReadTextFile(manifest)).at("status"), "complete");
+    EXPECT_FALSE(pipeline.capture_diagnostics(capture));
+    EXPECT_FALSE(fs::exists(manifest));
+    EXPECT_EQ(ReadTextFile(capture), "completed image");
+    EXPECT_FALSE(pipeline.capture_diagnostics(capture));
+    EXPECT_FALSE(fs::exists(manifest));
 }

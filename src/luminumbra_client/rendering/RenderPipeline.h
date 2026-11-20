@@ -658,8 +658,27 @@ public:
         m_diagnostic_capture_armed = armed;
     }
     void end_diagnostic_capture();
+    // Enabled publication requires this call's image/manifest and a held
+    // CaptureDestinationReservation; refusal retracts that owned manifest.
     bool capture_diagnostics(const std::filesystem::path& capture);
+    // Detach and validate completed-frame coverage before manifest publication.
+    bool diagnostic_capture_ready();
     bool diagnostic_capture_destination_available(const std::filesystem::path& capture) const;
+    // Owns the destination across image, manifest and bundle publication.
+    class CaptureDestinationReservation {
+    public:
+        CaptureDestinationReservation(const RenderPipeline& pipeline,
+                                      const std::filesystem::path& capture);
+        ~CaptureDestinationReservation();
+        CaptureDestinationReservation(const CaptureDestinationReservation&) = delete;
+        CaptureDestinationReservation& operator=(const CaptureDestinationReservation&) = delete;
+        bool acquired() const;
+
+    private:
+        struct State;
+        std::unique_ptr<State> state_;
+        bool disabled_ = false;
+    };
     bool capture_diagnostics_enabled() const {
         return m_capture_diagnostics.enabled;
     }
@@ -690,7 +709,8 @@ public:
             return write_capture();
         }
         try {
-            if (diagnostic_capture_destination_available(path) &&
+            const CaptureDestinationReservation reservation(*this, path);
+            if (reservation.acquired() && diagnostic_capture_ready() &&
                 WithCaptureManifest(path, observe(), write_capture)) {
                 return capture_diagnostics(path);
             }

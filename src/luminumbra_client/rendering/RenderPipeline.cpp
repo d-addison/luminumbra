@@ -33,6 +33,7 @@
 #include "luminumbra_common/core/DeterministicMath.h"
 #include "luminumbra_common/core/Environment.h"
 #include "luminumbra_common/core/GraphicsPresets.h"
+#include "luminumbra_common/persistence/CreatedWorldArtifacts.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/NearTerrainMeshSnapshot.h"
@@ -432,6 +433,110 @@ bool RenderPipeline::diagnostic_capture_destination_available(
     return DiagnosticCaptureDestinationAvailable(capture, m_capture_diagnostics);
 }
 
+struct RenderPipeline::CaptureDestinationReservation::State {
+    Persistence::CreatedWorldArtifacts journal;
+    ~State() {
+        (void)journal.rollback();
+    }
+};
+
+RenderPipeline::CaptureDestinationReservation::CaptureDestinationReservation(
+    const RenderPipeline& pipeline, const std::filesystem::path& capture)
+    : disabled_(!pipeline.capture_diagnostics_enabled()) {
+    if (disabled_ || capture.empty() || capture.filename().empty()) {
+        return;
+    }
+    auto pending = std::make_unique<State>();
+    try {
+        const auto parent =
+            capture.has_parent_path() ? capture.parent_path() : std::filesystem::path(".");
+        // Match the capture writers' output-directory preparation. Only the
+        // exclusive marker below admits payload writes into that directory.
+        std::error_code error;
+        std::filesystem::create_directories(parent, error);
+        if (error) {
+            return;
+        }
+        pending->journal.bind_existing_root(parent);
+        auto marker = std::filesystem::canonical(parent) / CaptureManifestPath(capture).filename();
+        // Match the manifest staging suffix width, preserving its filename bound.
+        marker += ".lck";
+        // CREATE_NEW on Windows and exclusive fopen on POSIX; no payload write
+        // can precede this reservation. Rollback removes only its bound identity.
+        pending->journal.write_file(marker, "");
+        if (DiagnosticCaptureDestinationAvailable(capture, pipeline.m_capture_diagnostics, true)) {
+            state_ = std::move(pending);
+        }
+    } catch (const std::exception&) {
+        // The pending journal also retires a marker created before a refusal.
+    }
+}
+
+RenderPipeline::CaptureDestinationReservation::~CaptureDestinationReservation() = default;
+
+bool RenderPipeline::CaptureDestinationReservation::acquired() const {
+    return disabled_ || state_ != nullptr;
+}
+
+bool RenderPipeline::diagnostic_capture_ready() {
+    return !m_capture_diagnostics.enabled ||
+           (m_diagnostic_capture && m_frame_prepared.valid && m_diagnostic_capture->ready());
+}
+
+namespace {
+// A late transport refusal retracts the manifest through its retained identity.
+// The destination reservation remains held until this cleanup has finished.
+class DiagnosticManifestRollback {
+public:
+    explicit DiagnosticManifestRollback(const std::filesystem::path& capture) {
+        const auto manifest = std::filesystem::absolute(CaptureManifestPath(capture));
+        journal_.bind_existing_root(manifest.parent_path());
+#if defined(_WIN32)
+        const auto file = ::CreateFileW(manifest.c_str(),
+                                        FILE_READ_ATTRIBUTES,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                        nullptr,
+                                        OPEN_EXISTING,
+                                        FILE_FLAG_OPEN_REPARSE_POINT,
+                                        nullptr);
+        if (file == INVALID_HANDLE_VALUE) {
+            throw std::runtime_error("Cannot retain capture manifest");
+        }
+#else
+        const auto file = ::open(manifest.c_str(), O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+        if (file < 0) {
+            throw std::runtime_error("Cannot retain capture manifest");
+        }
+#endif
+        try {
+            journal_.record_staged_file(manifest, file);
+        } catch (...) {
+            close_file(file);
+            throw;
+        }
+        close_file(file);
+    }
+    ~DiagnosticManifestRollback() {
+        (void)journal_.rollback();
+    }
+    DiagnosticManifestRollback(const DiagnosticManifestRollback&) = delete;
+    DiagnosticManifestRollback& operator=(const DiagnosticManifestRollback&) = delete;
+    void preserve() {
+        journal_.release();
+    }
+
+private:
+    static void close_file(Persistence::CreatedWorldArtifacts::NativeFile file) {
+#if defined(_WIN32)
+        ::CloseHandle(file);
+#else
+        ::close(file);
+#endif
+    }
+    Persistence::CreatedWorldArtifacts journal_;
+};
+} // namespace
+
 CaptureManifestInput RenderPipeline::diagnostic_capture_manifest() const {
     CaptureManifestInput input;
     input.build_id = {std::string(luminumbra::core::GetEngineVersionString()),
@@ -453,18 +558,30 @@ bool RenderPipeline::capture_diagnostics(const std::filesystem::path& capture) {
         return true;
     }
     auto ending = std::move(m_diagnostic_capture);
-    if (!ending || !m_frame_prepared.valid) {
+    if (capture.empty() || capture.filename().empty()) {
         return false;
     }
-    DiagnosticBundleFrame frame;
-    frame.extent = {m_internal_width, m_internal_height};
-    frame.frame = m_far_world_frame;
-    frame.view = m_frame_prepared.replay_camera.view;
-    frame.projection = m_frame_prepared.replay_camera.projection;
-    frame.capture_filename = Filesystem::GenericUtf8PathString(capture.filename());
-    frame.manifest_filename =
-        Filesystem::GenericUtf8PathString(CaptureManifestPath(capture).filename());
-    return ending->finish(capture, m_capture_diagnostics, frame, gbuffer());
+    try {
+        DiagnosticManifestRollback manifest_rollback(capture);
+        if (!ending || !m_frame_prepared.valid) {
+            return false;
+        }
+        DiagnosticBundleFrame frame;
+        frame.extent = {m_internal_width, m_internal_height};
+        frame.frame = m_far_world_frame;
+        frame.view = m_frame_prepared.replay_camera.view;
+        frame.projection = m_frame_prepared.replay_camera.projection;
+        frame.capture_filename = Filesystem::GenericUtf8PathString(capture.filename());
+        frame.manifest_filename =
+            Filesystem::GenericUtf8PathString(CaptureManifestPath(capture).filename());
+        const bool captured = ending->finish(capture, m_capture_diagnostics, frame, gbuffer());
+        if (captured) {
+            manifest_rollback.preserve();
+        }
+        return captured;
+    } catch (const std::exception&) {
+        return false;
+    }
 }
 
 void RenderPipeline::register_procgen_mesh(const std::string& key, std::unique_ptr<Mesh> mesh) {
