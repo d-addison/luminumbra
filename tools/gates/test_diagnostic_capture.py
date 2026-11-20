@@ -281,7 +281,8 @@ class DiagnosticCaptureTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        # Discovery returns canonical paths, including expanded Windows 8.3 names.
+        self.root = Path(self.temp.name).resolve()
         self.bundle = Bundle(self.root)
 
     def test_valid(self):
@@ -289,6 +290,25 @@ class DiagnosticCaptureTests(unittest.TestCase):
         self.assertEqual(checker.discover(self.root)[0][0], self.bundle.path(checker.SUFFIX))
         self.assertEqual(checker.discover(self.bundle.path(checker.SUFFIX))[0][0],
                          self.bundle.path(checker.SUFFIX))
+
+    def test_fixture_identity_matches_discovery_for_alias_roots(self):
+        # Model the same canonicalization as an 8.3 TEMP root on every host.
+        # The mock stays in this process and all filesystem calls use a real path.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            alias = root.parent / root.name / '..' / root.name
+            temporary = SimpleNamespace(name=str(alias), cleanup=lambda: None)
+            for method in ('test_valid', 'test_windows_reparse_directory',
+                           'test_selected_bundle_ignores_unrelated_links',
+                           'test_completion_alias_uses_resolved_long_filename'):
+                with self.subTest(method=method):
+                    case = DiagnosticCaptureTests(method)
+                    result = unittest.TestResult()
+                    with mock.patch.object(tempfile, 'TemporaryDirectory', return_value=temporary):
+                        case.run(result)
+                    self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+                    shutil.rmtree(root)
+                    root.mkdir()
 
     def test_no_probe_and_empty_tables(self):
         b = self.bundle
@@ -466,6 +486,22 @@ class DiagnosticCaptureTests(unittest.TestCase):
             with self.assertRaisesRegex(checker.Invalid, 'linked tree entry'):
                 checker.discover(self.root)
 
+    def test_native_windows_junction_refused(self):
+        if os.name == 'nt':
+            import _winapi
+            # Directory junctions need no symlink privilege on Windows.
+            with tempfile.TemporaryDirectory() as target:
+                junction = self.root / 'junction'
+                _winapi.CreateJunction(target, str(junction))
+                try:
+                    self.assertTrue(os.lstat(junction).st_file_attributes & 0x400)
+                    with self.assertRaisesRegex(checker.Invalid, 'linked tree entry'):
+                        checker.discover(self.root)
+                finally:
+                    junction.rmdir()
+        else:
+            self.test_windows_reparse_directory()
+
     def test_selected_bundle_ignores_unrelated_links(self):
         unrelated = self.root / 'other.png.depth.pfm'
         unrelated.write_bytes(b'other capture')
@@ -491,6 +527,18 @@ class DiagnosticCaptureTests(unittest.TestCase):
 
         with mock.patch.object(Path, 'resolve', resolved), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(checker.main([str(alias)]), 0)
+
+    def test_directory_alias_returns_canonical_paths(self):
+        alias = self.root / 'ROOT~1'
+        original = Path.resolve
+
+        def resolved(path, *args, **kwargs):
+            return self.root if path == alias else original(path, *args, **kwargs)
+
+        with mock.patch.object(Path, 'resolve', resolved):
+            self.assertEqual(checker.discover(alias), checker.discover(self.root))
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(checker.main([str(alias)]), 0)
 
     def test_partial_read_and_trailing_growth(self):
         with self.assertRaisesRegex(checker.Invalid, 'partial payload read'):
@@ -526,7 +574,7 @@ class DiagnosticCaptureTests(unittest.TestCase):
         source = script.read_text(encoding='utf-8')
         self.assertIn('if ($CapturePath)', source)
         self.assertIn('if (Test-Path -LiteralPath $bundlePath)', source)
-        self.assertIn('& python3 -I -B $checker $bundlePath', source)
+        self.assertIn('& python -I -B $checker $bundlePath', source)
         self.assertIn('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }', source)
         shell = shutil.which('pwsh') or shutil.which('powershell')
         if shell:
