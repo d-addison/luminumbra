@@ -123,8 +123,9 @@ bool SubmitGenerated(Luminumbra::Rendering::DiagnosticDrawTable& table,
     if constexpr (requires { submission.generated_mesh; }) {
         submission.generated_mesh = key;
         return table.submit(submission, id);
+    } else {
+        return false;
     }
-    return false;
 }
 } // namespace
 
@@ -397,10 +398,10 @@ TEST(DiagnosticAttribution, MissingProducerMetadataCannotClaimCompleteCoverage) 
     const auto pipeline = Read("src/luminumbra_client/rendering/RenderPipeline.cpp");
     Contains(pipeline, "terrain_resident_lod_unavailable");
     Contains(pipeline, "terrain_identity_draw_limit");
-    Contains(pass, "ladder_backend_identity_unavailable");
-    // Ladder far draws never inherit the last live chunk's identity.
-    Before(pass, "capture->clear_current_identity();", "ladder_backend_identity_unavailable");
-    Contains(pass, "authored_static_surface");
+    Contains(Read("src/luminumbra_client/rendering/FarVolumeGlBackend.cpp"),
+             "ladder_backend_identity_unavailable");
+    Contains(Read("src/luminumbra_client/rendering/passes/StaticDrawPass.cpp"),
+             "authored_static_surface");
     Contains(pass, "tree_impostor_fragment_output_unavailable\", 3");
     Contains(pass, "DiagnosticProvenance::Unsupported");
     const auto targets = (Read(kTargets) + Read(kPass));
@@ -1206,11 +1207,23 @@ TEST_F(DiagnosticAttributionGl, LadderFarDrawsDoNotInheritTheLastLiveTerrainIden
     };
     input_.submit_ladder = [&](const FarWorldPrepareDraw& prepare) {
         FarWorldSubmitStats stats;
-        for (int command = 0; command < 2; ++command) {
-            if (prepare(FarWorldDrawCommand{})) {
+        for (int tile = 0; tile < 2; ++tile) {
+            FarWorldDrawCommand command;
+            command.index_count = 3;
+            command.diagnostic_identity.key = {.tier = 1, .tx = tile, .tz = 0};
+            command.diagnostic_span = {-32, 64};
+            if (prepare(command)) {
+                EXPECT_TRUE(FarWorldDiagnosticDraw::Write(command.index_count));
                 ladder_ids.push_back(current_identity());
                 ++stats.draws;
             }
+        }
+        // Missing resident metadata refuses at the backend before a draw occurs.
+        FarWorldDrawCommand missing;
+        missing.index_count = 3;
+        if (prepare(missing)) {
+            EXPECT_FALSE(FarWorldDiagnosticDraw::Write(missing.index_count));
+            ++stats.refused;
         }
         return stats;
     };
@@ -1221,8 +1234,10 @@ TEST_F(DiagnosticAttributionGl, LadderFarDrawsDoNotInheritTheLastLiveTerrainIden
     EXPECT_NE(live, DiagnosticId{});
     ASSERT_EQ(ladder_ids.size(), 2u);
     for (const auto& id : ladder_ids) {
-        EXPECT_EQ(id, DiagnosticId{});
+        EXPECT_NE(id, DiagnosticId{});
+        EXPECT_NE(id, live);
     }
+    EXPECT_NE(ladder_ids.front(), ladder_ids.back());
     EXPECT_FALSE(capture.complete());
     Contains(table_.json(), "ladder_backend_identity_unavailable");
     ExpectEntryState(false);
@@ -2661,4 +2676,414 @@ TEST_F(GBufferLeaseGl, ForwardRegistryRetirementReleasesSelectedLeaseAndKeepsFai
               DiagnosticPass::Forward);
     table_.clear();
     EXPECT_FALSE(capture.complete());
+}
+
+TEST(DiagnosticAttribution, AuthoredSurfacesAttributeImmutableMeshesAtTheOriginalDraw) {
+    const auto source = Read("src/luminumbra_client/rendering/passes/StaticDrawPass.cpp");
+    const auto render = Body(source, "StaticDrawStats StaticDrawPass::Render(");
+    Contains(render, "capture && !capture->deferred_attached()");
+    Contains(render, "Shader* selected_shader = &impl.shader;");
+    Contains(render, "selected_shader = capture->variant(selected_shader, false)");
+    EXPECT_LT(render.find("if (capture)"), render.find("capture->variant("));
+    Contains(render, "const auto& identity = draw.mesh->identity");
+    Contains(render, "identity.empty() || identity.size() > (1024 - 8) / 2");
+    Contains(render, "authored_static_surface");
+    Contains(render, "throw std::runtime_error");
+    Contains(render, "mesh_key.reserve(8 + 2 * identity.size())");
+    Contains(render, "mesh_key += digits[byte >> 4]");
+    Contains(render, "mesh_key += digits[byte & 15]");
+    Contains(render, ".generated_mesh = mesh_key");
+    Contains(render, ".provenance = DiagnosticProvenance::Mesh");
+    Contains(render, ".shader_variant = \"static_asset\"");
+    Contains(render, ".lod = 0");
+    Contains(render, ".ownership = DiagnosticOwnership::Live");
+    EXPECT_LT(render.find("identity.empty()"), render.find("mesh_key.reserve("));
+    EXPECT_LT(render.find("capture->write("), render.find("glDrawElements,"));
+    EXPECT_EQ(Count(render, "glDrawElements,"), 1u);
+    const auto fragment = Read("res/shaders/static_asset.frag");
+    EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(fragment)), 0x976bbadca29ae05bull);
+    Contains(fragment,
+             "#ifdef LUMIN_DIAG_IDS\nlayout (location = 6) out uvec4 gDiagnosticIds;\n"
+             "uniform uvec4 u_diagnosticIds;\n#endif");
+    Contains(fragment, "#ifdef LUMIN_DIAG_IDS\n    gDiagnosticIds = u_diagnosticIds;\n#endif");
+    EXPECT_LT(fragment.find("discard;"), fragment.find("gDiagnosticIds ="));
+    EXPECT_EQ(Count(fragment, "gDiagnosticIds ="), 1u);
+}
+
+TEST(DiagnosticAttribution, LadderConsumesExactPreparedMetadataAtTheBackendDraw) {
+    const auto identity = Read("src/luminumbra_client/rendering/FarWorldSelection.h");
+    Contains(identity, "World::FarBuildIdentity diagnostic_identity{}");
+    Contains(identity, "std::array<std::int64_t, 2> diagnostic_span{}");
+    Contains(identity, "std::uint64_t diagnostic_water_indices = 0");
+    Contains(identity, "class FarWorldDiagnosticDraw");
+    const auto renderer = Read("src/luminumbra_client/rendering/FarWorldRenderer.cpp");
+    const auto make = Body(renderer, "bool MakeFarWorldDrawCommand(");
+    Contains(make, "candidate.diagnostic_identity = record.identity");
+    Contains(make,
+             "candidate.diagnostic_span = {record.request.span.min_y, record.request.span.max_y}");
+    Contains(make, "candidate.diagnostic_water_indices = record.water_indices");
+    Contains(renderer, "MakeFarWorldDrawCommand(");
+    Contains(Read("src/luminumbra_client/rendering/FarWorldHandoffRenderer.cpp"),
+             "MakeFarWorldDrawCommand(record,");
+    const auto pass = Read(kPass);
+    const auto chunks = Body(pass, "void GBufferPass::geometry_pass_chunks(");
+    Contains(chunks, "FarWorldDiagnosticDraw diagnostic_draw(capture)");
+    Contains(chunks, "diagnostic_draw.prepare(command)");
+    EXPECT_LT(chunks.find("if (!uniforms.Prepare(command))"),
+              chunks.find("diagnostic_draw.prepare(command)"));
+    const auto targets = Read("src/luminumbra_client/rendering/FarVolumeGlBackend.cpp");
+    const auto prepare = Body(targets, "void FarWorldDiagnosticDraw::prepare(");
+    Contains(prepare, "prepared_ = capture_ && capture_->deferred_attached()");
+    Contains(prepare, "command_ = command");
+    const auto write = Body(targets, "bool FarWorldDiagnosticDraw::Write(");
+    Contains(write, "if (!capture || !capture->deferred_attached())");
+    Contains(write, "if (!draw || draw->capture_ != capture)");
+    Contains(write, "std::exchange(draw->prepared_, false)");
+    Contains(write, "!prepared || index_count != command.index_count || index_count <= 0");
+    Contains(write, "identity.key.tier < 1 || identity.key.tier > World::kFarTierCount");
+    Contains(write, "command.diagnostic_span[0] >= command.diagnostic_span[1]");
+    Contains(write, "ladder_backend_identity_unavailable");
+    Contains(write, "catch (...)");
+    Contains(write, "capture->abort();");
+    Contains(write, ".lod = identity.key.tier");
+    Contains(write, ".ownership = DiagnosticOwnership::LadderFar");
+    Contains(write, ".chunk = command.origin_chunk");
+    Contains(write, ".generated_mesh = mesh_key");
+    for (const auto* field : {"identity.key.tx",
+                              "identity.key.tz",
+                              "identity.world_epoch",
+                              "identity.content_hash",
+                              "identity.cave_policy",
+                              "identity.bake_generation",
+                              "identity.span_generation",
+                              "command.diagnostic_span[0]",
+                              "command.diagnostic_span[1]"}) {
+        Contains(write, std::string("std::to_string(") + field + ")");
+    }
+    Contains(write, "command.diagnostic_water_indices == 0");
+    Contains(write, "? DiagnosticProvenance::Sdf");
+    Contains(write, ": DiagnosticProvenance::Unknown");
+    const auto draw = Body(Read("src/luminumbra_client/rendering/FarVolumeGlBackend.cpp"),
+                           "bool FarVolumeGlDriver::DrawIndexed(");
+    Contains(draw, "success = FarWorldDiagnosticDraw::Write(index_count)");
+    EXPECT_LT(draw.find("GBufferDiagnosticCapture::Current()"),
+              draw.find("FarWorldDiagnosticDraw::Write("));
+    EXPECT_LT(draw.find("FarWorldDiagnosticDraw::Write("), draw.find("glDrawElements,"));
+    EXPECT_LT(draw.find("glDrawElements,"), draw.find("if (saved[i].buffer"));
+    EXPECT_EQ(Count(draw, "glDrawElements,"), 1u);
+}
+
+TEST(DiagnosticAttribution, LadderBackendFailuresInvalidateCaptureOnEveryReturn) {
+    const auto draw = Body(Read("src/luminumbra_client/rendering/FarVolumeGlBackend.cpp"),
+                           "bool FarVolumeGlDriver::DrawIndexed(");
+    Contains(draw, "~DiagnosticDrawResult()");
+    Contains(draw, "!submitted && capture && capture->deferred_attached()");
+    Contains(draw, "capture->abort()");
+    Contains(draw, "if (success && diagnostic.capture)");
+    Contains(draw, "diagnostic.submitted = success && restored");
+    Contains(draw, "return diagnostic.submitted");
+    EXPECT_LT(draw.find("diagnostic{GBufferDiagnosticCapture::Current()}"),
+              draw.find("if (index_count <= 0"));
+    EXPECT_LT(draw.find("glBindBuffer(GL_SHADER_STORAGE_BUFFER, static_cast<GLuint>(generic))"),
+              draw.find("diagnostic.submitted ="));
+}
+
+TEST(DiagnosticAttribution, ProceduralStaticsRetainResolvedKeysAndFallbackLods) {
+    const auto draw = Body(Read(kPass), "void GBufferPass::geometry_pass_static_meshes(");
+    Contains(draw, "generated && !identity_path_unrecordable");
+    Contains(draw, "? \"procedural/\" + batch.drawPath.substr(10)");
+    Contains(draw, ".mesh_path = unattributed || generated ? std::string_view{}");
+    Contains(draw, ": batch.drawPath,");
+    Contains(draw, ": DiagnosticProvenance::Mesh");
+    Contains(draw, ".generated_mesh = generated_key");
+    Contains(draw, "batch.drawPath == LodMeshPath(batch.basePath, level)");
+    Contains(draw, ".lod = resolved_lod");
+    EXPECT_LT(draw.find("batch.drawPath.size() > 1024"), draw.find("batch.drawPath.substr(10)"));
+    EXPECT_EQ(draw.find("generated ? DiagnosticProvenance::Unsupported"), std::string::npos);
+    using namespace Luminumbra::Rendering;
+    DiagnosticDrawTable table;
+    DiagnosticSubmission submission{.mesh_path = {},
+                                    .shader_variant = "instanced_static_mesh",
+                                    .chunk = {},
+                                    .lod = 0,
+                                    .ownership = DiagnosticOwnership::Live,
+                                    .pass = DiagnosticPass::GBuffer,
+                                    .provenance = DiagnosticProvenance::Mesh};
+    DiagnosticId base{}, repeated{}, lod{};
+    ASSERT_TRUE(SubmitGenerated(table, submission, "procedural/tree_2_leaf", base));
+    ASSERT_TRUE(SubmitGenerated(table, submission, "procedural/tree_2_leaf", repeated));
+    submission.lod = 2;
+    ASSERT_TRUE(SubmitGenerated(table, submission, "procedural/tree_2_leaf.lod2", lod));
+    EXPECT_EQ(base[1], repeated[1]);
+    EXPECT_NE(base[0], repeated[0]);
+    EXPECT_NE(base[1], lod[1]);
+    EXPECT_EQ(base[2], 0u);
+    EXPECT_EQ(lod[2], 2u);
+    EXPECT_TRUE(table.complete_coverage());
+    const auto before = table.json();
+    EXPECT_FALSE(SubmitGenerated(table, submission, "procedural/../invalid", lod));
+    EXPECT_EQ(table.json(), before);
+}
+
+TEST(DiagnosticAttribution, LegacyTerrainAndWaterResolveResidentGenerationsSeparately) {
+    const auto source = Read("src/luminumbra_client/rendering/FarLodSystem.cpp");
+    Contains(source,
+             "outcome.terrain_has_sdf = !assembly.bricks.empty() || !tile.sdf_bricks.empty()");
+    Contains(source, "result.terrain_has_sdf = outcome.terrain_has_sdf");
+    Contains(source, "region.terrain_has_sdf = result.terrain_has_sdf");
+    Contains(source, "region.diagnostic_generation = {result.epoch,");
+    Contains(source, "result.capture_epoch,");
+    Contains(source, "result.params_hash,");
+    Contains(source, "result.region_authority_revision}");
+    const auto draw = Body(source, "void FarLodSystem::draw_gbuffer(");
+    Contains(draw, "\"legacy/terrain/\"");
+    Contains(draw, "\"legacy/water/\"");
+    Contains(draw, ".provenance = region.terrain_has_sdf");
+    Contains(draw, "? DiagnosticProvenance::Unknown");
+    Contains(draw, ": DiagnosticProvenance::Heightfield");
+    Contains(draw, ".provenance = DiagnosticProvenance::Mesh");
+    EXPECT_EQ(Count(draw, ".generated_mesh = mesh_key"), 2u);
+    EXPECT_EQ(Count(draw, ".lod = static_cast<std::uint32_t>(region.tier)"), 2u);
+    EXPECT_EQ(Count(draw, ".ownership = DiagnosticOwnership::LegacyFar"), 2u);
+    EXPECT_EQ(Count(draw, "std::to_string(region.rx)"), 2u);
+    EXPECT_EQ(Count(draw, "std::to_string(region.rz)"), 2u);
+    for (const auto* field : {"generation[0]", "generation[1]", "generation[2]", "generation[3]"}) {
+        EXPECT_EQ(Count(draw, std::string("std::to_string(") + field + ")"), 2u);
+    }
+    EXPECT_EQ(draw.find("DiagnosticProvenance::Unsupported"), std::string::npos);
+    EXPECT_EQ(Count(draw, "glDrawElements,"), 2u);
+}
+
+TEST(DiagnosticAttribution, LadderMetadataWithoutAttachmentDoesNotSubmitOrConsumeIdentities) {
+    DiagnosticDrawTable table;
+    GBufferDiagnosticCapture capture(table);
+    FarWorldDiagnosticDraw diagnostic_draw(&capture);
+    FarWorldDrawCommand command;
+    command.index_count = 3;
+    command.diagnostic_identity.key.tier = 1;
+    command.diagnostic_span = {-32, 64};
+    const auto before = table.json();
+    diagnostic_draw.prepare(command);
+    EXPECT_TRUE(FarWorldDiagnosticDraw::Write(3));
+    EXPECT_TRUE(FarWorldDiagnosticDraw::Write(0));
+    EXPECT_EQ(table.json(), before);
+    EXPECT_FALSE(capture.attachment_failed());
+    EXPECT_FALSE(capture.complete());
+}
+
+TEST_F(DiagnosticAttributionGl, LadderRefusalsConsumeMetadataAndKeepFailureSticky) {
+    for (unsigned failure = 0; failure < 9; ++failure) {
+        SCOPED_TRACE(failure);
+        table_.clear();
+        GBufferDiagnosticCapture capture(targets_, table_);
+        FarWorldDiagnosticDraw diagnostic_draw(&capture);
+        ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+        auto* shader = capture.variant(pass_.geometry_shader(FarWorldMode::Ladder).get(), true);
+        ASSERT_NE(shader, nullptr);
+        ASSERT_TRUE(shader->IsValid());
+        shader->use();
+        FarWorldDrawCommand command;
+        command.index_count = 3;
+        command.diagnostic_identity.key.tier = 1;
+        command.diagnostic_span = {-32, 64};
+        std::int32_t count = 3;
+        switch (failure) {
+            case 1:
+                count = 0;
+                command.index_count = 0;
+                break;
+            case 2:
+                count = -3;
+                command.index_count = -3;
+                break;
+            case 3:
+                count = 6;
+                break;
+            case 4:
+                command.diagnostic_identity.key.tier = 0;
+                break;
+            case 5:
+                command.diagnostic_identity.key.tier =
+                    static_cast<std::uint8_t>(Luminumbra::World::kFarTierCount + 1);
+                break;
+            case 6:
+                command.diagnostic_span = {64, 64};
+                break;
+            case 7:
+                command.diagnostic_span = {64, -32};
+                break;
+            default:
+                break;
+        }
+        if (failure != 0) {
+            diagnostic_draw.prepare(command);
+        }
+        if (failure == 8) {
+            ASSERT_TRUE(FarWorldDiagnosticDraw::Write(count));
+        }
+        EXPECT_FALSE(FarWorldDiagnosticDraw::Write(count));
+        EXPECT_FALSE(FarWorldDiagnosticDraw::Write(3));
+        capture.detach();
+        EXPECT_TRUE(capture.attachment_failed());
+        EXPECT_FALSE(capture.complete());
+        const auto document = nlohmann::json::parse(table_.json());
+        const auto& refused = document.at("draws").back();
+        EXPECT_EQ(refused.at("shader_variant"), "ladder_backend_identity_unavailable");
+        EXPECT_EQ(refused.at("ownership"), DiagnosticOwnership::LadderFar);
+        EXPECT_EQ(refused.at("pass"), DiagnosticPass::GBuffer);
+        table_.clear();
+        EXPECT_FALSE(capture.complete());
+    }
+}
+
+TEST_F(DiagnosticAttributionGl, LadderKeysSeparateEveryResidentGenerationAndMixedWater) {
+    GBufferDiagnosticCapture capture(targets_, table_);
+    FarWorldDiagnosticDraw diagnostic_draw(&capture);
+    ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+    auto* shader = capture.variant(pass_.geometry_shader(FarWorldMode::Ladder).get(), true);
+    ASSERT_NE(shader, nullptr);
+    ASSERT_TRUE(shader->IsValid());
+    shader->use();
+    FarWorldDrawCommand original;
+    original.index_count = 3;
+    original.diagnostic_identity = {.world_epoch = 1,
+                                    .content_hash = 2,
+                                    .cave_policy = 1,
+                                    .key = {.tier = 1, .tx = -4, .tz = 7},
+                                    .bake_generation = 3,
+                                    .span_generation = 4};
+    original.diagnostic_span = {-32, 64};
+    original.origin_chunk = {16, -2, 32};
+    for (unsigned field = 0; field < 12; ++field) {
+        auto command = original;
+        auto& identity = command.diagnostic_identity;
+        switch (field) {
+            case 1:
+                identity.key.tier = static_cast<std::uint8_t>(Luminumbra::World::kFarTierCount);
+                break;
+            case 2:
+                ++identity.key.tx;
+                break;
+            case 3:
+                ++identity.key.tz;
+                break;
+            case 4:
+                ++identity.world_epoch;
+                break;
+            case 5:
+                ++identity.content_hash;
+                break;
+            case 6:
+                ++identity.cave_policy;
+                break;
+            case 7:
+                ++identity.bake_generation;
+                break;
+            case 8:
+                ++identity.span_generation;
+                break;
+            case 9:
+                --command.diagnostic_span[0];
+                break;
+            case 10:
+                ++command.diagnostic_span[1];
+                break;
+            case 11:
+                command.diagnostic_water_indices = 3;
+                break;
+            default:
+                break;
+        }
+        diagnostic_draw.prepare(command);
+        EXPECT_TRUE(FarWorldDiagnosticDraw::Write(3));
+    }
+    diagnostic_draw.prepare(original);
+    EXPECT_TRUE(FarWorldDiagnosticDraw::Write(3));
+    capture.detach();
+    EXPECT_TRUE(capture.complete());
+    const auto document = nlohmann::json::parse(table_.json());
+    ASSERT_EQ(document.at("meshes").size(), 12u);
+    const auto& draws = document.at("draws");
+    ASSERT_EQ(draws.size(), 13u);
+    EXPECT_EQ(draws.front().at("mesh"), draws.back().at("mesh"));
+    EXPECT_NE(draws.front().at("id"), draws.back().at("id"));
+    EXPECT_EQ(draws.front().at("chunk"), original.origin_chunk);
+    EXPECT_EQ(draws.at(1).at("lod"), Luminumbra::World::kFarTierCount);
+    EXPECT_EQ(document.at("meshes").front().at("provenance"), DiagnosticProvenance::Sdf);
+    EXPECT_EQ(document.at("meshes").back().at("provenance"), DiagnosticProvenance::Unknown);
+    EXPECT_EQ(document.at("meshes").front().at("generated"),
+              "ladder/1/-4/7/epoch/1/content/2/caves/1/bake/3/span/4/-32/64");
+}
+
+TEST_F(DiagnosticAttributionGl, LadderUnrecognizedCurrentProgramCannotClaimCoverage) {
+    GBufferDiagnosticCapture capture(targets_, table_);
+    FarWorldDiagnosticDraw diagnostic_draw(&capture);
+    ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+    pass_.geometry_shader(FarWorldMode::Ladder)->use();
+    FarWorldDrawCommand command;
+    command.index_count = 3;
+    command.diagnostic_identity.key.tier = 1;
+    command.diagnostic_span = {-32, 64};
+    diagnostic_draw.prepare(command);
+    EXPECT_TRUE(FarWorldDiagnosticDraw::Write(3));
+    capture.detach();
+    EXPECT_TRUE(capture.attachment_failed());
+    EXPECT_FALSE(capture.complete());
+    Contains(table_.json(), "diagnostic_writer_without_variant");
+}
+
+TEST_F(DiagnosticAttributionGl, MissingAndUnrelatedLadderScopesCannotReusePreparedMetadata) {
+    for (const bool unrelated : {false, true}) {
+        table_.clear();
+        GBufferDiagnosticCapture capture(targets_, table_);
+        ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+        if (unrelated) {
+            FarWorldDiagnosticDraw diagnostic_draw(nullptr);
+            EXPECT_FALSE(FarWorldDiagnosticDraw::Write(3));
+        } else {
+            {
+                FarWorldDiagnosticDraw diagnostic_draw(&capture);
+                FarWorldDrawCommand command;
+                command.index_count = 3;
+                command.diagnostic_identity.key.tier = 1;
+                command.diagnostic_span = {-32, 64};
+                diagnostic_draw.prepare(command);
+            }
+            EXPECT_FALSE(FarWorldDiagnosticDraw::Write(3));
+        }
+        capture.detach();
+        EXPECT_TRUE(capture.attachment_failed());
+        EXPECT_FALSE(capture.complete());
+        Contains(table_.json(), "ladder_backend_identity_unavailable");
+    }
+}
+
+TEST_F(DiagnosticAttributionGl, NestedLadderSubmissionRestoresTheOuterPreparedCommand) {
+    GBufferDiagnosticCapture capture(targets_, table_);
+    ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+    auto* shader = capture.variant(pass_.geometry_shader(FarWorldMode::Ladder).get(), true);
+    ASSERT_NE(shader, nullptr);
+    ASSERT_TRUE(shader->IsValid());
+    shader->use();
+    FarWorldDrawCommand command;
+    command.index_count = 3;
+    command.diagnostic_identity.key.tier = 1;
+    command.diagnostic_span = {-32, 64};
+    FarWorldDiagnosticDraw outer(&capture);
+    outer.prepare(command);
+    {
+        FarWorldDiagnosticDraw inner(&capture);
+        command.diagnostic_identity.key.tier = 2;
+        inner.prepare(command);
+        EXPECT_TRUE(FarWorldDiagnosticDraw::Write(3));
+    }
+    EXPECT_TRUE(FarWorldDiagnosticDraw::Write(3));
+    capture.detach();
+    EXPECT_TRUE(capture.complete());
+    const auto document = nlohmann::json::parse(table_.json());
+    const auto& draws = document.at("draws");
+    ASSERT_EQ(draws.size(), 2u);
+    EXPECT_EQ(draws.front().at("lod"), 2u);
+    EXPECT_EQ(draws.back().at("lod"), 1u);
+    EXPECT_NE(draws.front().at("mesh"), draws.back().at("mesh"));
 }
