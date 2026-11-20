@@ -3164,7 +3164,8 @@ class WorldVisualSweepWiring(unittest.TestCase):
             self.assertEqual(cpp_expression(condition, count=count, limit=2147483647),
                              count > 2147483647)
         self.assertIn("return 0;", guard)
-        self.assertEqual(source.count("WaterElementCount(item.element_count)"), 2)
+        # Capture admission, the original draw and visibility replay share the conversion.
+        self.assertEqual(source.count("WaterElementCount(item.element_count)"), 3)
         self.assertIn("continue;", block(block(source, "WaterPass::execute("), "if (count == 0)"))
         self.assertIn("continue;", block(block(source, "void WaterPass::capture_visibility("),
                                          "if (elements == 0)"))
@@ -3772,6 +3773,60 @@ class LaterDiagnosticSubmissionWiring(unittest.TestCase):
                     start -= 1
                 source = source[:start] + source[end + 7:]
         return source
+
+    def test_empty_forward_passes_do_not_invalidate_scenario_capture(self):
+        owner = block(read(CLIENT / "rendering/DiagnosticReadback.h"),
+                      "explicit DiagnosticFrameCapture(")
+        self.assertIn("GBufferDiagnosticCapture>(targets_, draws_)", owner)
+        for name, sequence in (("WaterPass", "input.draw_items"),
+                               ("WaterfallPass", "m_live_factors")):
+            with self.subTest(producer=name):
+                source = read(CLIENT / f"rendering/passes/{name}.cpp")
+                draw = block(source, f"{name}::execute(")
+                setup = block(draw, "if (auto* capture = GBufferDiagnosticCapture::Current())")
+                self.assertIn("if (std::any_of(", setup)
+                predicate_body = block(setup, "if (std::any_of(")
+                gate = block(setup, "}))")
+                self.assertIn(f"{sequence}.begin(), {sequence}.end()", compact(setup))
+                self.assertIn("diagnostic_attachment.emplace(", gate)
+                self.assertIn("draw_shader = capture->variant(draw_shader, false)", gate)
+                self.assertEqual(setup.count("diagnostic_attachment.emplace("), 1)
+                self.assertIn("capture->write_current(", draw)
+                predicate = re.search(r"return (.*?);", predicate_body).group(1)
+                if name == "WaterPass":
+                    conversion = block(source, "GLsizei WaterElementCount(")
+                    refusal = re.search(r"if \((.*?)\) \{", conversion).group(1)
+                    self.assertIn("return 0;", block(conversion, "if ("))
+                    self.assertIn("return static_cast<GLsizei>(count);", conversion)
+                    self.assertIn("const GLsizei count = WaterElementCount(item.element_count);", draw)
+                    self.assertIn("continue;", block(draw, "if (count == 0)"))
+                    cases = ((), (0,), (2**32 - 1,), (0, 2**32 - 1),
+                             (0, 2**32 - 1, 3), (3, 0, 2**32 - 1), (2**31 - 1,))
+                    for counts in cases:
+                        selected = []
+                        for count in counts:
+                            invalid = cpp_expression(refusal, **{
+                                "count": count,
+                                "static_cast<u32>(std::numeric_limits<GLsizei>::max())": 2**31 - 1})
+                            converted = 0 if invalid else count
+                            selected.append(cpp_expression(predicate, **{
+                                "WaterElementCount(item.element_count)": converted}))
+                        self.assertEqual(any(selected), any(0 < count <= 2**31 - 1 for count in counts))
+                else:
+                    skip = re.search(r"if \((live .*?)\) \{", draw).group(1)
+                    self.assertIn("continue;", block(draw, "if (live < 0.02f)"))
+                    for factors in ((), (0,), (0.019,), (0.02,), (0, 1), (1, 0),
+                                    (math.nan,), (-math.inf,), (math.inf,)):
+                        selected = [cpp_expression(re.sub(r"(?<=\d)f\b", "", predicate), live=value)
+                                    for value in factors]
+                        submitted = [not cpp_expression(re.sub(r"(?<=\d)f\b", "", skip), live=value)
+                                     for value in factors]
+                        self.assertEqual(selected, submitted)
+        glass = block(read(CLIENT / "rendering/passes/GlassOitPass.cpp"),
+                      "void GlassOitPass::execute_accum(")
+        self.assertIn("return;", block(glass, "if (!input.glass_items || input.glass_items->empty()"))
+        self.assertLess(glass.index("if (!input.glass_items || input.glass_items->empty()"),
+                        glass.index("diagnostic_attachment.emplace("))
 
     def test_plant_and_decal_keep_shipping_shaders_when_disabled(self):
         import hashlib
