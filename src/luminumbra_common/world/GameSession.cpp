@@ -5234,6 +5234,9 @@ std::filesystem::path GameSession::GetWorldSaveDir() const {
 }
 
 bool GameSession::SaveWorldState(WorldStateSaveReport* report) {
+    if (report) {
+        report->work = {};
+    }
     if (FoliageStep::PersistencePending(*this)) {
         return false;
     }
@@ -5259,6 +5262,9 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
                                        WorldStateSaveReport* report,
                                        bool full_snapshot,
                                        bool write_metadata) {
+    if (report) {
+        report->work = {};
+    }
     if (!m_worldUsable || FoliageStep::PersistencePending(*this)) {
         return false;
     }
@@ -5268,6 +5274,17 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
         m_worldSystem->quiesce_streaming_jobs_for_save();
     }
     const auto save = [&]() {
+        // Capture on the executing thread, including validation, nested writers and failures.
+        // Report work independently of dirty acknowledgement or transaction success.
+        struct WorkReport {
+            WorldStateSaveReport* report;
+            Persistence::SaveWorkCounts before;
+            ~WorkReport() {
+                if (report) {
+                    report->work = Persistence::WorldSaveService::work_counts() - before;
+                }
+            }
+        } work_report{report, Persistence::WorldSaveService::work_counts()};
         const auto save_started = std::chrono::steady_clock::now();
         const auto elapsed_ms = [&save_started]() {
             return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
