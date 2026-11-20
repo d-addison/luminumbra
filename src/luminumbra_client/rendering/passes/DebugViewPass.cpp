@@ -11,6 +11,7 @@
 #include <exception>
 #include <limits>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include "../Camera.h"            // near/far planes for Depth-mode linearization
@@ -85,24 +86,32 @@ struct InspectorStorageBinding {
 struct InspectorBindings {
     InspectorStorageBinding storage_binding;
     GLint framebuffer = 0;
-    std::array<GLint, 4> viewport{};
+    std::array<GLfloat, 4> viewport{};
     GLint program = 0;
     GLint vao = 0;
     GLint active = 0;
     GLint texture_buffer = 0;
     std::array<GLint, 6> textures{};
     std::array<GLint, 2> polygon{};
-    static constexpr std::array<GLenum, 5> capabilities = {
-        GL_DEPTH_TEST, GL_BLEND, GL_SCISSOR_TEST, GL_CULL_FACE, GL_RASTERIZER_DISCARD};
+    std::array<GLboolean, 4> color_mask{};
+    static constexpr std::array<GLenum, 6> capabilities = {GL_DEPTH_TEST,
+                                                           GL_CULL_FACE,
+                                                           GL_RASTERIZER_DISCARD,
+                                                           GL_DITHER,
+                                                           GL_FRAMEBUFFER_SRGB,
+                                                           GL_COLOR_LOGIC_OP};
+    static constexpr std::array<GLenum, 2> indexed_capabilities = {GL_BLEND, GL_SCISSOR_TEST};
     std::array<GLboolean, capabilities.size()> enabled{};
+    std::array<GLboolean, indexed_capabilities.size()> indexed_enabled{};
     InspectorBindings() {
         glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &framebuffer);
-        glGetIntegerv(GL_VIEWPORT, viewport.data());
+        glGetFloati_v(GL_VIEWPORT, 0, viewport.data());
         glGetIntegerv(GL_CURRENT_PROGRAM, &program);
         glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vao);
         glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
         glGetIntegerv(GL_TEXTURE_BUFFER_BINDING, &texture_buffer);
         glGetIntegerv(GL_POLYGON_MODE, polygon.data());
+        glGetBooleani_v(GL_COLOR_WRITEMASK, 0, color_mask.data());
         for (std::size_t index = 0; index < textures.size(); ++index) {
             glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(index));
             glGetIntegerv(index == 5 ? GL_TEXTURE_BINDING_BUFFER : GL_TEXTURE_BINDING_2D,
@@ -111,10 +120,13 @@ struct InspectorBindings {
         for (std::size_t index = 0; index < capabilities.size(); ++index) {
             enabled[index] = glIsEnabled(capabilities[index]);
         }
+        for (std::size_t index = 0; index < indexed_capabilities.size(); ++index) {
+            indexed_enabled[index] = glIsEnabledi(indexed_capabilities[index], 0);
+        }
     }
     ~InspectorBindings() {
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(framebuffer));
-        glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+        glViewportIndexedf(0, viewport[0], viewport[1], viewport[2], viewport[3]);
         AttributedGl::UseProgram(glUseProgram, static_cast<GLuint>(program));
         glBindVertexArray(static_cast<GLuint>(vao));
         glBindBuffer(GL_TEXTURE_BUFFER, static_cast<GLuint>(texture_buffer));
@@ -125,6 +137,7 @@ struct InspectorBindings {
         }
         glActiveTexture(static_cast<GLenum>(active));
         glPolygonMode(GL_FRONT_AND_BACK, static_cast<GLenum>(polygon[0]));
+        glColorMaski(0, color_mask[0], color_mask[1], color_mask[2], color_mask[3]);
         for (std::size_t index = 0; index < capabilities.size(); ++index) {
             if (enabled[index] == GL_TRUE) {
                 glEnable(capabilities[index]);
@@ -132,9 +145,81 @@ struct InspectorBindings {
                 glDisable(capabilities[index]);
             }
         }
+        for (std::size_t index = 0; index < indexed_capabilities.size(); ++index) {
+            if (indexed_enabled[index] == GL_TRUE) {
+                glEnablei(indexed_capabilities[index], 0);
+            } else {
+                glDisablei(indexed_capabilities[index], 0);
+            }
+        }
     }
 };
 } // namespace
+
+bool DebugViewPass::select_pixel(Controls& control,
+                                 double window_x,
+                                 double window_y,
+                                 const Viewport& viewport) {
+    if (!control.enabled || !control.inspector_open || !control.armed || !std::isfinite(window_x) ||
+        !std::isfinite(window_y) || !std::isfinite(viewport.window_width) ||
+        !std::isfinite(viewport.window_height) || !std::isfinite(viewport.left) ||
+        !std::isfinite(viewport.top) || !std::isfinite(viewport.width) ||
+        !std::isfinite(viewport.height) || viewport.window_width <= 0 ||
+        viewport.window_height <= 0 || viewport.framebuffer.width == 0 ||
+        viewport.framebuffer.height == 0 || viewport.width <= 0 || viewport.height <= 0 ||
+        viewport.left < 0 || viewport.top < 0 ||
+        viewport.width > viewport.framebuffer.width - viewport.left ||
+        viewport.height > viewport.framebuffer.height - viewport.top || control.extent.width == 0 ||
+        control.extent.height == 0 || control.extent.width > 16384 ||
+        control.extent.height > 16384) {
+        return false;
+    }
+    const double image_x =
+        window_x * viewport.framebuffer.width / viewport.window_width - viewport.left;
+    const double image_y =
+        window_y * viewport.framebuffer.height / viewport.window_height - viewport.top;
+    if (!std::isfinite(image_x) || !std::isfinite(image_y) || image_x < 0 || image_y < 0 ||
+        image_x >= viewport.width || image_y >= viewport.height) {
+        return false;
+    }
+    control.x = static_cast<int>(std::floor(image_x / viewport.width * control.extent.width));
+    control.y = static_cast<int>(std::floor(image_y / viewport.height * control.extent.height));
+    request_inspection(control);
+    return true;
+}
+
+void DebugViewPass::invalidate_selection(Controls& control) {
+    control.x = -1;
+    control.y = -1;
+    control.frozen = false;
+    control.refresh = false;
+    control.inspect_requested = false;
+    control.frame_invalidated = true;
+    control.zoom_texture = 0;
+    control.image_texture = 0;
+    control.probe_json.clear();
+    control.result.clear();
+    control.status = "Resize invalidated selection and frozen frame; refresh to capture";
+}
+
+std::string DebugViewPass::pixel_json(const DiagnosticExtent& extent,
+                                      int x,
+                                      int y,
+                                      const InspectorPixel& pixel) {
+    std::uint32_t material = 0;
+    if (x < 0 || y < 0 || !decode_material(pixel.albedo[3], material)) {
+        return {};
+    }
+    return BuildDiagnosticProbe(
+        extent,
+        static_cast<std::uint32_t>(x),
+        static_cast<std::uint32_t>(y),
+        {.id = pixel.id,
+         .albedo = {pixel.albedo[0], pixel.albedo[1], pixel.albedo[2]},
+         .normal = {pixel.normal_depth[0], pixel.normal_depth[1], pixel.normal_depth[2]},
+         .depth = pixel.normal_depth[3],
+         .material = material});
+}
 
 struct DebugViewPass::Snapshot {
     std::unique_ptr<Shader> shader;
@@ -147,6 +232,11 @@ struct DebugViewPass::Snapshot {
     GLuint sample_fbo = 0;
     GLuint sample_texture = 0;
     bool ready = false;
+    bool images_ready = false;
+    bool inspect_requested = false;
+    bool freeze_requested = false;
+    std::array<GLuint, 3> images{}; // normal/material, albedo, hardware depth; one frame only.
+    std::uint64_t frame = 0;
     std::array<float, 16> view{};
     std::array<float, 16> projection{};
     void reset_sample() {
@@ -161,6 +251,7 @@ struct DebugViewPass::Snapshot {
         glDeleteBuffers(1, &metadata);
         glDeleteTextures(1, &metadata_texture);
         reset_sample();
+        glDeleteTextures(static_cast<GLsizei>(images.size()), images.data());
     }
 };
 
@@ -279,6 +370,8 @@ std::string_view DebugViewPass::contribution_legend(int mode) {
 void DebugViewPass::set_mode(int mode) {
     m_mode = mode;
     if (m_snapshot && !controls().enabled && !controls().wireframe) {
+        invalidate_selection(controls());
+        controls().status = "Identity diagnostics disabled";
         m_snapshot.reset();
     }
 }
@@ -579,7 +672,34 @@ std::shared_ptr<DebugViewPass::Frame> DebugViewPass::begin_frame(const RenderCon
         control.refresh = false;
         return {};
     }
-    if (!control.enabled || !control.refresh || ctx.frozen_replay) {
+    if (!control.enabled || ctx.frozen_replay) {
+        return {};
+    }
+    if (std::exchange(control.frame_invalidated, false)) {
+        m_snapshot.reset();
+    }
+    const DiagnosticExtent render{ctx.internal_w(), ctx.internal_h()};
+    const DiagnosticExtent output{ctx.screen_width, ctx.screen_height};
+    if ((control.extent.width != 0 &&
+         (control.extent.width != render.width || control.extent.height != render.height)) ||
+        (control.output.width != 0 &&
+         (control.output.width != output.width || control.output.height != output.height))) {
+        invalidate();
+    }
+    control.extent = render;
+    control.output = output;
+    if (!control.inspector_open) {
+        control.inspect_requested = false;
+        control.zoom_texture = 0;
+    }
+    if (control.frozen && m_snapshot && m_snapshot->ready && m_snapshot->images_ready) {
+        if (std::exchange(control.inspect_requested, false)) {
+            inspect_snapshot(ctx);
+        }
+        control.refresh = false;
+        return {};
+    }
+    if (!control.refresh) {
         return {};
     }
     if (contribution_mode(control.view)) {
@@ -592,7 +712,13 @@ std::shared_ptr<DebugViewPass::Frame> DebugViewPass::begin_frame(const RenderCon
         return {};
     }
     control.refresh = false;
+    const bool freeze_requested = std::exchange(control.frozen, false) && control.inspector_open;
+    // Admit once; storage, shader and coverage failures consume this request too.
+    const bool inspect_requested = std::exchange(control.inspect_requested, false);
     control.result.clear();
+    control.probe_json.clear();
+    control.zoom_texture = 0;
+    control.image_texture = 0;
     if (!m_shader || !m_shader->IsValid()) {
         control.status = "Debug shader unavailable";
         return {};
@@ -601,6 +727,9 @@ std::shared_ptr<DebugViewPass::Frame> DebugViewPass::begin_frame(const RenderCon
         m_snapshot = std::make_unique<Snapshot>();
     }
     m_snapshot->ready = false;
+    m_snapshot->images_ready = false;
+    m_snapshot->inspect_requested = inspect_requested;
+    m_snapshot->freeze_requested = freeze_requested;
     if (!m_snapshot->shader) {
         m_snapshot->shader =
             std::make_unique<Shader>(m_shader->VertexPath().c_str(),
@@ -627,11 +756,7 @@ std::shared_ptr<DebugViewPass::Frame> DebugViewPass::begin_frame(const RenderCon
     if (!prepare_inspector_storage()) {
         return {};
     }
-    if (control.extent.width != 0 &&
-        (control.extent.width != ctx.internal_w() || control.extent.height != ctx.internal_h())) {
-        control.x = -1;
-        control.y = -1;
-    }
+    m_snapshot->frame = ctx.frame_index;
     const auto view = ctx.camera ? ctx.camera->GetViewMatrix() : ctx.view;
     for (std::size_t index = 0; index < 16; ++index) {
         const auto column = static_cast<glm::length_t>(index / 4);
@@ -743,12 +868,112 @@ void DebugViewPass::finish_frame(const RenderContext& ctx) {
     m_snapshot->ready = true;
     control.status =
         "Identity snapshot; refresh to capture a new frame. Magenta hatch = zero / unsupported.";
-    if (!control.inspector_open || control.x < 0 || control.y < 0 ||
-        static_cast<std::uint32_t>(control.x) >= extent.width ||
+    if (control.inspector_open && !retain_images(ctx)) {
+        control.frozen = false;
+        control.result = "Snapshot image storage unavailable";
+        return;
+    }
+    control.frozen = m_snapshot->freeze_requested && m_snapshot->images_ready;
+    if (std::exchange(m_snapshot->inspect_requested, false)) {
+        inspect_snapshot(ctx);
+    }
+}
+
+bool DebugViewPass::retain_images(const RenderContext& ctx) {
+    const auto extent = m_snapshot->targets.extent();
+    // Three 4-byte AOVs plus 16-byte IDs: <= 448 MiB GPU at the existing
+    // 16,777,216-pixel target bound, plus bounded draw metadata. No CPU plane copy.
+    if (extent.width == 0 || extent.height == 0 || extent.width > 16384 || extent.height > 16384 ||
+        extent.width > 16777216U / extent.height) {
+        return false;
+    }
+    const std::array<GLuint, 3> sources = {
+        ctx.gbuffer_normal.id, ctx.gbuffer_albedo.id, ctx.gbuffer_depth.id};
+    const std::array<GLenum, 3> formats = {GL_RGBA8, GL_RGBA8, GL_DEPTH_COMPONENT32F};
+    InspectorBindings bindings;
+    glActiveTexture(GL_TEXTURE0);
+    // Validate all three inputs before replacing storage; only shipping G-buffer formats.
+    for (std::size_t index = 0; index < sources.size(); ++index) {
+        if (sources[index] == 0 || glIsTexture(sources[index]) != GL_TRUE) {
+            return false;
+        }
+        glBindTexture(GL_TEXTURE_2D, sources[index]);
+        GLint width = 0;
+        GLint height = 0;
+        GLint format = 0;
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width);
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &format);
+        if (width != static_cast<GLint>(extent.width) ||
+            height != static_cast<GLint>(extent.height) ||
+            static_cast<GLenum>(format) != formats[index]) {
+            return false;
+        }
+    }
+    for (std::size_t index = 0; index < sources.size(); ++index) {
+        if (m_snapshot->images[index] == 0) {
+            glGenTextures(1, &m_snapshot->images[index]);
+            if (m_snapshot->images[index] == 0) {
+                return false;
+            }
+        }
+        glBindTexture(GL_TEXTURE_2D, m_snapshot->images[index]);
+        GLint immutable = 0;
+        glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_IMMUTABLE_FORMAT, &immutable);
+        if (immutable == GL_FALSE) {
+            glTexStorage2D(GL_TEXTURE_2D,
+                           1,
+                           formats[index],
+                           static_cast<GLsizei>(extent.width),
+                           static_cast<GLsizei>(extent.height));
+        }
+        GLint width = 0;
+        GLint height = 0;
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width);
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
+        if (width != static_cast<GLint>(extent.width) ||
+            height != static_cast<GLint>(extent.height)) {
+            return false;
+        }
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+        glCopyImageSubData(sources[index],
+                           GL_TEXTURE_2D,
+                           0,
+                           0,
+                           0,
+                           0,
+                           m_snapshot->images[index],
+                           GL_TEXTURE_2D,
+                           0,
+                           0,
+                           0,
+                           0,
+                           static_cast<GLsizei>(extent.width),
+                           static_cast<GLsizei>(extent.height),
+                           1);
+    }
+    m_snapshot->images_ready = true;
+    controls().image_texture = m_snapshot->images[1];
+    return true;
+}
+
+void DebugViewPass::inspect_snapshot(const RenderContext& ctx) {
+    auto& control = controls();
+    if (!control.inspector_open || control.x < 0 || control.y < 0 || !m_snapshot ||
+        !m_snapshot->ready || !m_snapshot->images_ready) {
+        return;
+    }
+    const auto extent = m_snapshot->targets.extent();
+    if (static_cast<std::uint32_t>(control.x) >= extent.width ||
         static_cast<std::uint32_t>(control.y) >= extent.height) {
         control.result = "No selected pixel (coordinates are top-left render texels)";
         return;
     }
+    auto& shader = *m_snapshot->shader;
+    const auto& table = m_snapshot->table;
+    InspectorBindings bindings;
     if (m_snapshot->sample_fbo == 0) {
         glGenFramebuffers(1, &m_snapshot->sample_fbo);
         glGenTextures(1, &m_snapshot->sample_texture);
@@ -760,7 +985,11 @@ void DebugViewPass::finish_frame(const RenderContext& ctx) {
         }
         glActiveTexture(GL_TEXTURE4);
         glBindTexture(GL_TEXTURE_2D, m_snapshot->sample_texture);
-        glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 1, 1);
+        // Zoom is fixed at 9 x 9 nearest texels (324 bytes GPU); only its
+        // centre writes the existing 48-byte inspection record. No zoom readback.
+        glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 9, 9);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_snapshot->sample_fbo);
         glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER,
                                GL_COLOR_ATTACHMENT0,
@@ -783,14 +1012,20 @@ void DebugViewPass::finish_frame(const RenderContext& ctx) {
         control.result = "Inspector storage unavailable";
         return;
     }
-    glViewport(0, 0, 1, 1);
+    glViewportIndexedf(0, 0, 0, 9, 9);
     for (const auto capability : InspectorBindings::capabilities) {
         glDisable(capability);
     }
+    // Only draw-buffer/viewport zero participates; preserve every other indexed enable.
+    for (const auto capability : InspectorBindings::indexed_capabilities) {
+        glDisablei(capability, 0);
+    }
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     shader.use();
     bind_sources(ctx, shader);
     shader.setInt("u_inspect", 1);
+    shader.setInt("u_zoom", 1);
     shader.setInt("u_pixelX", control.x);
     shader.setInt("u_pixelY", static_cast<int>(extent.height) - 1 - control.y);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, m_snapshot->sample_buffer);
@@ -799,28 +1034,18 @@ void DebugViewPass::finish_frame(const RenderContext& ctx) {
     InspectorPixel pixel;
     read_inspector_pixel(m_snapshot->sample_buffer, pixel);
     shader.setInt("u_inspect", 0);
+    shader.setInt("u_zoom", 0);
+    control.zoom_texture = m_snapshot->sample_texture;
     const auto record = JoinRecord(table, pixel.id);
-    std::uint32_t material = 0;
-    if (!decode_material(pixel.albedo[3], material)) {
-        control.result = "Invalid material / unsupported pixel";
-        return;
-    }
-    DiagnosticSample sample{
-        .id = pixel.id,
-        .albedo = {pixel.albedo[0], pixel.albedo[1], pixel.albedo[2]},
-        .normal = {pixel.normal_depth[0], pixel.normal_depth[1], pixel.normal_depth[2]},
-        .depth = pixel.normal_depth[3],
-        .material = material};
-    const auto probe = BuildDiagnosticProbe(extent,
-                                            static_cast<std::uint32_t>(control.x),
-                                            static_cast<std::uint32_t>(control.y),
-                                            sample);
+    const auto probe = pixel_json(extent, control.x, control.y, pixel);
     if (probe.empty()) {
         control.result = "Invalid identity / unsupported pixel";
         return;
     }
+    control.probe_json = probe;
     control.result =
-        nlohmann::json{{"probe", nlohmann::json::parse(probe)},
+        nlohmann::json{{"frame", m_snapshot->frame},
+                       {"probe", nlohmann::json::parse(probe)},
                        {"record", record},
                        {"view", m_snapshot->view},
                        {"projection", m_snapshot->projection},
@@ -830,6 +1055,12 @@ void DebugViewPass::finish_frame(const RenderContext& ctx) {
                                      record.at("draw").at("supported").get<bool>()) !=
                                 ProducerKind::Unsupported}}
             .dump(2);
+}
+
+void DebugViewPass::invalidate() {
+    invalidate_selection(controls());
+    m_snapshot.reset();
+    controls().frame_invalidated = false;
 }
 
 DebugViewPass::DebugViewPass() = default;
@@ -859,7 +1090,11 @@ void DebugViewPass::init_buffers() {
 
 void DebugViewPass::destroy_buffers() {
     m_surface.reset();
-    m_snapshot.reset();
+    if (m_snapshot) {
+        invalidate_selection(controls());
+        controls().status = "Diagnostic frame released";
+        m_snapshot.reset();
+    }
     if (m_vao) {
         glDeleteVertexArrays(1, &m_vao);
         m_vao = 0;
@@ -1030,6 +1265,14 @@ void DebugViewPass::bind_sources(const RenderContext& ctx, Shader& shader) {
     }
     if (!m_snapshot || &shader != m_snapshot->shader.get()) {
         return;
+    }
+    if (m_snapshot->images_ready) {
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, m_snapshot->images[0]);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, m_snapshot->images[1]);
+        glActiveTexture(GL_TEXTURE3);
+        glBindTexture(GL_TEXTURE_2D, m_snapshot->images[2]);
     }
     const bool ready = controls().enabled && m_snapshot && m_snapshot->ready;
     shader.setInt("u_identityReady", ready ? 1 : 0);
