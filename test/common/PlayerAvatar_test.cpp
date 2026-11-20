@@ -2077,6 +2077,7 @@ TEST(ControllerContinuation, MixedRosterContactsRestoreInPlayerOrderWithExactRes
         BodySetState before;
         ASSERT_TRUE(target.capture_body_owners(before));
         for (const int failure : {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}) {
+            SCOPED_TRACE(failure);
             auto current = captured[0];
             auto pending = std::array{captured[1], captured[2]};
             std::size_t pending_count = 2;
@@ -2089,8 +2090,15 @@ TEST(ControllerContinuation, MixedRosterContactsRestoreInPlayerOrderWithExactRes
             } else if (failure == 1) {
                 SetPhysicsWord(pending[0], 20, unreserved); // Same slot, wrong generation.
             } else if (failure == 2 || failure == 8) {
-                // Both ground and active contact references require exact IDs.
-                SetPhysicsWord(current, failure == 2 ? 28 : 148, unreserved);
+                // Use the other capsule's slot so the unchanged references to
+                // the first capsule retain a consistent generation. The owner
+                // stays codec-valid, but this exact body ID is not reserved.
+                const JPH::BodyID other_capsule(word(pending[1], 20));
+                const auto unreserved_reference =
+                    JPH::BodyID(other_capsule.GetIndex(),
+                                static_cast<JPH::uint8>(other_capsule.GetSequenceNumber() + 1))
+                        .GetIndexAndSequenceNumber();
+                SetPhysicsWord(current, failure == 2 ? 28 : 148, unreserved_reference);
             } else if (failure == 3) {
                 pending[0].size = 0;
             } else if (failure == 4) {
