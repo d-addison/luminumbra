@@ -1,10 +1,12 @@
 #include "../fixtures/TerrainFixtureParams.h"
+#include "../support/UniqueTempPath.h"
 #include "TerrainCullingTestPeer.h"
 #include "luminumbra_client/core/IsolationConfig.h"
 #include "luminumbra_client/core/PresentationClock.h"
 #include "luminumbra_client/core/RuntimeScenarioHarness.h"
 #include "luminumbra_client/core/scenarios/ScenarioCommon.h"
 #include "luminumbra_client/rendering/Camera.h"
+#include "luminumbra_client/rendering/DiagnosticReadback.h"
 #include "luminumbra_client/rendering/EnvironmentBrdfLut.gen.h"
 #include "luminumbra_client/rendering/FarLodSystem.h"
 #include "luminumbra_client/rendering/FarVolumeGlBackend.h"
@@ -62,6 +64,38 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+namespace {
+class DiagnosticGlOutput final : public Luminumbra::Rendering::DiagnosticBundleOutput {
+public:
+    std::array<std::ostringstream, 8> streams;
+    bool committed = false;
+    bool reserve(std::span<const std::string> names) override {
+        return names.size() <= streams.size();
+    }
+    std::ostream* open(std::size_t index) override {
+        return &streams.at(index);
+    }
+    bool close() override {
+        return true;
+    }
+    bool commit() override {
+        committed = true;
+        return true;
+    }
+    void rollback() noexcept override {
+        committed = false;
+    }
+};
+std::uint32_t DiagnosticGlWord(const std::string& bytes, std::size_t offset) {
+    std::uint32_t result = 0;
+    for (unsigned int i = 0; i < 4; ++i) {
+        result |= static_cast<std::uint32_t>(static_cast<unsigned char>(bytes.at(offset + i)))
+                  << (i * 8U);
+    }
+    return result;
+}
+} // namespace
 
 namespace fs = std::filesystem;
 
@@ -9465,4 +9499,468 @@ void main() { FragColor = vec4(preserveSkyLuminance(inputColor, candidateColor),
     }
     glDeleteProgram(program);
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, DiagnosticReadbackDecodesAndNormalizesWhileRestoringState) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    RenderResourceRegistry resources;
+    GBuffer gbuffer;
+    CreateGBufferTargets(gbuffer, resources, 1, 2);
+    DiagnosticTargets targets;
+    ASSERT_TRUE(targets.ensure(true, {1, 2}, 7));
+    DiagnosticDrawTable draws;
+    DiagnosticId id{};
+    ASSERT_TRUE(draws.submit({.mesh_path = "models/pattern.lmesh",
+                              .shader_variant = "pattern",
+                              .chunk = {},
+                              .lod = 0,
+                              .ownership = DiagnosticOwnership::Live,
+                              .pass = DiagnosticPass::GBuffer,
+                              .provenance = DiagnosticProvenance::Mesh},
+                             id));
+    const std::array<DiagnosticId, 2> ids{DiagnosticId{}, id};
+    glBindTexture(GL_TEXTURE_2D, targets.texture());
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 2, GL_RGBA_INTEGER, GL_UNSIGNED_INT, ids.data());
+    const std::array<unsigned char, 8> normal{255, 128, 0, 17, 255, 255, 0, 251};
+    glBindTexture(GL_TEXTURE_2D, gbuffer.normal_texture);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 2, GL_RGBA, GL_UNSIGNED_BYTE, normal.data());
+    const std::array<unsigned char, 8> albedo{0, 51, 102, 255, 153, 204, 255, 255};
+    glBindTexture(GL_TEXTURE_2D, gbuffer.albedo_texture);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 2, GL_RGBA, GL_UNSIGNED_BYTE, albedo.data());
+    const std::array<float, 2> depth{.25f, .75f};
+    glBindTexture(GL_TEXTURE_2D, gbuffer.depth_texture);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 2, GL_DEPTH_COMPONENT, GL_FLOAT, depth.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+    // Preserve both source FBO read-buffer choices and an unrelated caller FBO.
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, gbuffer.fbo_id);
+    glReadBuffer(GL_COLOR_ATTACHMENT3);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, targets.framebuffer());
+    glReadBuffer(GL_NONE);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    glReadBuffer(GL_BACK);
+    GLuint pack = 0;
+    glGenBuffers(1, &pack);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, pack);
+    glBufferData(GL_PIXEL_PACK_BUFFER, 4, nullptr, GL_STREAM_READ);
+    const std::array<GLenum, 6> names{GL_PACK_ALIGNMENT,
+                                      GL_PACK_ROW_LENGTH,
+                                      GL_PACK_SKIP_ROWS,
+                                      GL_PACK_SKIP_PIXELS,
+                                      GL_PACK_SWAP_BYTES,
+                                      GL_PACK_LSB_FIRST};
+    const std::array<GLint, 6> values{8, 11, 2, 3, GL_TRUE, GL_TRUE};
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        glPixelStorei(names[i], values[i]);
+    }
+    DiagnosticGlSource source(gbuffer, targets, {1, 2});
+    std::array<float, 6> normals{};
+    ASSERT_TRUE(source.read_aov(DiagnosticAov::Normal, normals));
+    EXPECT_NEAR(normals[0], 1.0f, .001f);
+    EXPECT_NEAR(normals[1], 0.0f, .001f);
+    EXPECT_NEAR(normals[2], -1.0f / 255.0f, .001f);
+    EXPECT_EQ(normals[3], 0.0f);
+    EXPECT_EQ(normals[4], 0.0f);
+    EXPECT_EQ(normals[5], -1.0f);
+    DiagnosticBundleFrame frame;
+    frame.extent = {1, 2};
+    frame.identity_complete = true;
+    frame.capture_filename = "pattern.ppm";
+    frame.manifest_filename = "pattern.manifest.json";
+    DiagnosticGlOutput output;
+    ASSERT_TRUE(
+        WriteDiagnosticBundle({.enabled = true, .probe = std::array<std::uint32_t, 2>{0, 0}},
+                              frame,
+                              draws,
+                              source,
+                              output));
+    EXPECT_TRUE(output.committed);
+    const auto serialized = output.streams[4].str();
+    ASSERT_EQ(serialized.size(), 48U);
+    EXPECT_EQ(DiagnosticGlWord(serialized, 16), id[0]);
+    EXPECT_EQ(DiagnosticGlWord(serialized, 32), 0U);
+    const auto probe = nlohmann::json::parse(output.streams[6].str());
+    EXPECT_EQ(probe["material"], 251);
+    EXPECT_EQ(probe["depth_hardware"], .75f);
+    EXPECT_EQ(probe["normal_view"], (nlohmann::json::array({0, 0, -1})));
+    EXPECT_NEAR(probe["albedo_linear"][0].get<float>(), .6f, .00001f);
+    EXPECT_NEAR(probe["albedo_linear"][1].get<float>(), .8f, .00001f);
+    EXPECT_EQ(probe["albedo_linear"][2], 1.0f);
+    std::array<float, 1> wrong_size{};
+    EXPECT_FALSE(source.read_aov(DiagnosticAov::Normal, wrong_size));
+    EXPECT_FALSE(source.read_aov(static_cast<DiagnosticAov>(99), wrong_size));
+    GLuint incomplete = 0;
+    glGenFramebuffers(1, &incomplete);
+    GBuffer missing;
+    missing.fbo_id = incomplete;
+    DiagnosticGlSource refused(missing, targets, {1, 2});
+    std::array<float, 2> refused_depth{};
+    EXPECT_FALSE(refused.read_aov(DiagnosticAov::Depth, refused_depth));
+    EXPECT_FALSE(source.read_ids({}));
+    glDeleteFramebuffers(1, &incomplete);
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        GLint actual = 0;
+        glGetIntegerv(names[i], &actual);
+        EXPECT_EQ(actual, values[i]);
+        glPixelStorei(names[i], i == 0 ? 4 : 0);
+    }
+    GLint actual = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &actual);
+    EXPECT_EQ(actual, 0);
+    glGetIntegerv(GL_READ_BUFFER, &actual);
+    EXPECT_EQ(actual, GL_BACK);
+    glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &actual);
+    EXPECT_EQ(static_cast<GLuint>(actual), pack);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    glDeleteBuffers(1, &pack);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, gbuffer.fbo_id);
+    glGetIntegerv(GL_READ_BUFFER, &actual);
+    EXPECT_EQ(actual, GL_COLOR_ATTACHMENT3);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, targets.framebuffer());
+    glGetIntegerv(GL_READ_BUFFER, &actual);
+    EXPECT_EQ(actual, GL_NONE);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    DestroyGBufferTargets(gbuffer, resources);
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, DiagnosticAdmissionBudgetAndScopeRefusalAreSafe) {
+    // Size refusal must work before a context exists or a GL entry point is read.
+    std::size_t admitted_bytes = 0;
+    EXPECT_TRUE(DiagnosticReadbackBudget({3840, 1600}, admitted_bytes));
+    EXPECT_EQ(admitted_bytes,
+              128U * 1024U * 1024U + 65536U + 3840U * 1600U * (sizeof(DiagnosticId) + 3U));
+    std::size_t retained = 123;
+    for (const DiagnosticExtent extent :
+         {DiagnosticExtent{0, 1}, {1, 0}, {16385, 1}, {16384, 16384}, {4096, 4096}, {3200, 3000}}) {
+        EXPECT_FALSE(DiagnosticFrameCapture::Admitted(extent, retained));
+        EXPECT_EQ(retained, 123U);
+        DiagnosticFrameCapture refused(extent);
+        EXPECT_FALSE(refused.ready());
+        EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
+    }
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    ASSERT_TRUE(DiagnosticFrameCapture::Admitted({1, 2}, retained));
+    EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
+    // An unattached frame refuses and consumes its capture scope.
+    {
+        DiagnosticFrameCapture capture({1, 2});
+        EXPECT_NE(GBufferDiagnosticCapture::Current(), nullptr);
+        EXPECT_FALSE(capture.ready());
+        DiagnosticBundleFrame frame;
+        frame.extent = {1, 2};
+        EXPECT_FALSE(capture.finish({}, {.enabled = true, .probe = std::nullopt}, frame, {}));
+        EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
+    }
+    EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
+    try {
+        DiagnosticFrameCapture capture({1, 2});
+        throw std::runtime_error("capture aborted");
+    } catch (const std::runtime_error&) {
+        EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
+    }
+    RenderPipeline pipeline;
+    bool called = false;
+    EXPECT_TRUE(pipeline.capture_diagnostics({}));
+    EXPECT_TRUE(pipeline.with_diagnostic_capture(
+        {},
+        [&]() -> CaptureManifestInput {
+            ADD_FAILURE() << "disabled capture observed metadata";
+            return {};
+        },
+        [&] {
+            called = true;
+            return true;
+        }));
+    EXPECT_TRUE(called);
+    EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, DiagnosticRetryAndPartialDestinationsPreserveEveryByte) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("diagnostic-retry-", ".ppm");
+    const auto capture = temporary.Path();
+    const auto directory = capture.parent_path();
+    RenderPipeline pipeline;
+    const DiagnosticCaptureOptions options{.enabled = true,
+                                           .probe = std::array<std::uint32_t, 2>{1, 0}};
+    pipeline.set_capture_diagnostics(options);
+    CaptureManifestInput input;
+    input.width = 2;
+    input.height = 2;
+    input.build_id.value = "capture-test";
+    input.asset_hash.unavailable = "test";
+    input.shader_hash.unavailable = "test";
+    input.world_hash.unavailable = "test";
+    class BackgroundSource final : public DiagnosticBundleSource {
+    public:
+        bool read_aov(DiagnosticAov, std::span<float> samples) override {
+            std::fill(samples.begin(), samples.end(), 0.0f);
+            return true;
+        }
+        bool read_ids(std::span<DiagnosticId> ids) override {
+            std::fill(ids.begin(), ids.end(), DiagnosticId{});
+            return true;
+        }
+    } source;
+    DiagnosticBundleFrame frame;
+    frame.extent = {2, 2};
+    frame.identity_complete = true;
+    frame.capture_filename = Luminumbra::Filesystem::GenericUtf8PathString(capture.filename());
+    frame.manifest_filename =
+        Luminumbra::Filesystem::GenericUtf8PathString(CaptureManifestPath(capture).filename());
+    DiagnosticDrawTable draws;
+    ASSERT_TRUE(pipeline.diagnostic_capture_destination_available(capture));
+    ASSERT_TRUE(WithCaptureManifest(capture, input, [&] {
+        std::ofstream image(capture, std::ios::binary);
+        image << "original capture";
+        image.close();
+        return !image.fail();
+    }));
+    ASSERT_TRUE(WriteDiagnosticBundle(capture, options, frame, draws, source));
+    const auto snapshot = [&] {
+        std::map<fs::path, std::string> bytes;
+        for (const auto& entry : fs::directory_iterator(directory)) {
+            bytes.emplace(entry.path(), ReadTextFile(entry.path()));
+        }
+        return bytes;
+    };
+    const auto original = snapshot();
+    ASSERT_EQ(original.size(), 10U);
+    bool observed = false, written = false;
+    const auto retry = [&] {
+        return pipeline.with_diagnostic_capture(
+            capture,
+            [&] {
+                observed = true;
+                return input;
+            },
+            [&] {
+                written = true;
+                std::ofstream image(capture, std::ios::binary);
+                image << "replacement";
+                return image.good();
+            });
+    };
+    EXPECT_FALSE(retry());
+    EXPECT_FALSE(observed);
+    EXPECT_FALSE(written);
+    EXPECT_EQ(snapshot(), original);
+    for (const auto& [path, bytes] : original) {
+        (void)bytes;
+        fs::remove(path);
+    }
+    // Every individual partial member must block before either callback runs.
+    auto partial = original;
+    auto pending = capture;
+    pending += ".diagnostics.json.pending";
+    partial.emplace(pending, "partial");
+    auto manifest_temporary = CaptureManifestPath(capture);
+    manifest_temporary += ".tmp";
+    partial.emplace(manifest_temporary, "partial");
+    for (const auto& [path, bytes] : partial) {
+        {
+            std::ofstream file(path, std::ios::binary);
+            file << bytes;
+        }
+        EXPECT_FALSE(retry()) << path;
+        EXPECT_FALSE(observed);
+        EXPECT_FALSE(written);
+        EXPECT_EQ(snapshot(), (std::map<fs::path, std::string>{{path, bytes}}));
+        fs::remove(path);
+        fs::create_directory(path);
+        EXPECT_FALSE(pipeline.diagnostic_capture_destination_available(capture));
+        fs::remove(path);
+        std::error_code error;
+        fs::create_symlink(directory / "missing", path, error);
+        if (!error) {
+            EXPECT_FALSE(pipeline.diagnostic_capture_destination_available(capture));
+            fs::remove(path);
+        } else {
+            EXPECT_TRUE(pipeline.diagnostic_capture_destination_available(capture));
+        }
+    }
+    EXPECT_TRUE(pipeline.diagnostic_capture_destination_available(capture));
+    EXPECT_FALSE(pipeline.diagnostic_capture_destination_available({}));
+    const auto blocked_parent = directory / "not-a-directory";
+    { std::ofstream file(blocked_parent); }
+    EXPECT_FALSE(pipeline.with_diagnostic_capture(
+        blocked_parent / "view.ppm",
+        [&] { return input; },
+        [] {
+            ADD_FAILURE() << "capture wrote through a non-directory parent";
+            return true;
+        }));
+    pipeline.set_capture_diagnostics({.enabled = true, .probe = std::nullopt});
+    EXPECT_TRUE(pipeline.diagnostic_capture_destination_available(capture));
+    pipeline.set_capture_diagnostics({});
+    EXPECT_TRUE(pipeline.diagnostic_capture_destination_available({}));
+}
+
+TEST(RenderSmokeTest, DiagnosticDestinationReservationExcludesOverlappingWritersAndCleansUp) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("diagnostic-reservation-", ".ppm");
+    const auto capture = temporary.Path();
+    auto marker = CaptureManifestPath(capture);
+    marker += ".lck";
+    auto manifest_temporary = CaptureManifestPath(capture);
+    manifest_temporary += ".tmp";
+    EXPECT_EQ(marker.filename().native().size(), manifest_temporary.filename().native().size());
+    RenderPipeline first, second;
+    first.set_capture_diagnostics({.enabled = true, .probe = std::nullopt});
+    second.set_capture_diagnostics({.enabled = true, .probe = std::nullopt});
+    {
+        const RenderPipeline::CaptureDestinationReservation owner(first, capture);
+        ASSERT_TRUE(owner.acquired());
+        // Both admissions happen before either payload exists. A vacancy check
+        // alone admits the delayed second writer and allows it to replace bytes.
+        const RenderPipeline::CaptureDestinationReservation contender(second, capture);
+        EXPECT_FALSE(contender.acquired());
+        auto alternate_extension = capture;
+        alternate_extension.replace_extension(".png");
+        EXPECT_FALSE(
+            RenderPipeline::CaptureDestinationReservation(second, alternate_extension).acquired());
+        const auto manifest = CaptureManifestPath(capture);
+        {
+            std::ofstream image(capture);
+            image << "first image";
+        }
+        {
+            std::ofstream metadata(manifest);
+            metadata << R"({"status":"complete"})";
+        }
+        const auto image_bytes = ReadTextFile(capture);
+        const auto manifest_bytes = ReadTextFile(manifest);
+        if (contender.acquired()) {
+            std::ofstream image(capture);
+            image << "second image";
+            std::ofstream metadata(manifest);
+            metadata << "second manifest";
+        }
+        EXPECT_EQ(ReadTextFile(capture), image_bytes);
+        EXPECT_EQ(ReadTextFile(manifest), manifest_bytes);
+        EXPECT_TRUE(fs::exists(marker));
+        fs::remove(capture);
+        fs::remove(manifest);
+    }
+    EXPECT_FALSE(fs::exists(marker));
+    {
+        const RenderPipeline::CaptureDestinationReservation retry(second, capture);
+        EXPECT_TRUE(retry.acquired());
+    }
+    EXPECT_FALSE(fs::exists(marker));
+    EXPECT_FALSE(RenderPipeline::CaptureDestinationReservation(first, {}).acquired());
+    const auto nested_capture = capture.parent_path() / "nested" / "deeper" / "view.ppm";
+    auto nested_marker = CaptureManifestPath(nested_capture);
+    nested_marker += ".lck";
+    {
+        const RenderPipeline::CaptureDestinationReservation nested(first, nested_capture);
+        EXPECT_TRUE(nested.acquired());
+        EXPECT_TRUE(fs::exists(nested_marker));
+        EXPECT_FALSE(fs::exists(nested_capture));
+    }
+    EXPECT_FALSE(fs::exists(nested_marker));
+    const auto blocked_parent = capture.parent_path() / "not-a-directory";
+    { std::ofstream blocked(blocked_parent); }
+    EXPECT_FALSE(RenderPipeline::CaptureDestinationReservation(first, blocked_parent / "view.ppm")
+                     .acquired());
+    // A pre-existing marker belongs to another writer, even if it is partial.
+    {
+        std::ofstream pending(marker);
+        pending << "occupied";
+    }
+    EXPECT_FALSE(RenderPipeline::CaptureDestinationReservation(second, capture).acquired());
+    EXPECT_EQ(ReadTextFile(marker), "occupied");
+    fs::remove(marker);
+    fs::create_directory(marker);
+    EXPECT_FALSE(RenderPipeline::CaptureDestinationReservation(second, capture).acquired());
+    EXPECT_TRUE(fs::is_directory(marker));
+    fs::remove(marker);
+    std::error_code link_error;
+    fs::create_symlink(capture.parent_path() / "missing", marker, link_error);
+    if (!link_error) {
+        EXPECT_FALSE(RenderPipeline::CaptureDestinationReservation(second, capture).acquired());
+        EXPECT_TRUE(fs::is_symlink(fs::symlink_status(marker)));
+        fs::remove(marker);
+    }
+    // Stack unwinding must retire the reservation before a retry.
+    EXPECT_THROW(
+        {
+            const RenderPipeline::CaptureDestinationReservation owner(first, capture);
+            ASSERT_TRUE(owner.acquired());
+            throw std::runtime_error("capture aborted");
+        },
+        std::runtime_error);
+    EXPECT_FALSE(fs::exists(marker));
+    // Cleanup must preserve an entry that replaced the owned marker.
+    auto displaced = marker;
+    displaced += ".displaced";
+    {
+        const RenderPipeline::CaptureDestinationReservation owner(first, capture);
+        ASSERT_TRUE(owner.acquired());
+        fs::rename(marker, displaced);
+        {
+            std::ofstream replacement(marker);
+            replacement << "replacement";
+        }
+    }
+    EXPECT_EQ(ReadTextFile(marker), "replacement");
+    fs::remove(marker);
+    fs::remove(displaced);
+    first.set_capture_diagnostics({});
+    EXPECT_TRUE(RenderPipeline::CaptureDestinationReservation(first, {}).acquired());
+}
+
+TEST(RenderSmokeTest, DiagnosticRefusalPrecedesManifestAndRetractsLateCompletion) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("diagnostic-refusal-", ".ppm");
+    const auto capture = temporary.Path();
+    const auto manifest = CaptureManifestPath(capture);
+    RenderPipeline pipeline;
+    pipeline.set_capture_diagnostics({.enabled = true, .probe = std::nullopt});
+    CaptureManifestInput input;
+    EXPECT_FALSE(pipeline.capture_diagnostics({}));
+    EXPECT_FALSE(pipeline.capture_diagnostics(capture.parent_path() / ""));
+    input.width = 2;
+    input.height = 2;
+    input.build_id.value = "capture-test";
+    input.asset_hash.unavailable = "test";
+    input.shader_hash.unavailable = "test";
+    input.world_hash.unavailable = "test";
+    bool observed = false, written = false;
+    EXPECT_FALSE(pipeline.with_diagnostic_capture(
+        capture,
+        [&] {
+            observed = true;
+            return input;
+        },
+        [&] {
+            written = true;
+            std::ofstream image(capture);
+            image << "image";
+            return image.good();
+        }));
+    EXPECT_FALSE(observed);
+    EXPECT_FALSE(written);
+    EXPECT_FALSE(fs::exists(capture));
+    EXPECT_FALSE(fs::exists(manifest));
+    // Exercise the late refusal fallback independently of early admission.
+    const RenderPipeline::CaptureDestinationReservation reservation(pipeline, capture);
+    ASSERT_TRUE(reservation.acquired());
+    ASSERT_TRUE(WithCaptureManifest(capture, input, [&] {
+        std::ofstream image(capture);
+        image << "completed image";
+        return image.good();
+    }));
+    ASSERT_EQ(nlohmann::json::parse(ReadTextFile(manifest)).at("status"), "complete");
+    EXPECT_FALSE(pipeline.capture_diagnostics(capture));
+    EXPECT_FALSE(fs::exists(manifest));
+    EXPECT_EQ(ReadTextFile(capture), "completed image");
+    EXPECT_FALSE(pipeline.capture_diagnostics(capture));
+    EXPECT_FALSE(fs::exists(manifest));
 }
