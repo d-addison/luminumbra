@@ -402,9 +402,6 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
         // Pass 2: Render all instanced static meshes
         geometry_pass_static_meshes(ctx, input, registry, camera, fp, stats);
         if (authored) {
-            if (auto* capture = GBufferDiagnosticCapture::Current()) {
-                capture->unsupported("authored_static_surface");
-            }
             const auto authored_stats =
                 m_authored_pass->Render(*input.authored_view, input.authored_draws, m_gbuffer);
             stats.authored_draws += authored_stats.draws;
@@ -431,6 +428,7 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
                                        GBufferDrawStats& stats) {
     Shader* shader = geometry_shader(input.far_selection.effective).get();
     auto* capture = GBufferDiagnosticCapture::Current();
+    FarWorldDiagnosticDraw diagnostic_draw(capture);
     FarWorldPassUniforms diagnostic_uniforms;
     if (capture) {
         shader = capture->variant(shader, input.far_selection.effective == FarWorldMode::Ladder);
@@ -541,14 +539,14 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
             return result;
         },
         input.submit_ladder,
-        [&uniforms, capture](const FarWorldDrawCommand& command) {
-            if (capture) {
-                // The shared terrain program still holds the last live chunk's ID.
-                capture->clear_current_identity();
-                capture->unsupported(
-                    "ladder_backend_identity_unavailable", 0, DiagnosticOwnership::LadderFar);
+        [&uniforms, capture, &diagnostic_draw](const FarWorldDrawCommand& command) {
+            if (!uniforms.Prepare(command)) {
+                return false;
             }
-            return uniforms.Prepare(command);
+            if (capture) {
+                diagnostic_draw.prepare(command);
+            }
+            return true;
         });
     stats.far_region_draws += far_stats.draws;
     stats.far_indices += far_stats.indices;
@@ -1090,7 +1088,10 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                     }
                 }
                 const bool generated = batch.drawPath.starts_with("procgen://");
-                const bool unattributed = generated || identity_path_unrecordable;
+                const bool unattributed = identity_path_unrecordable;
+                const std::string generated_key = generated && !identity_path_unrecordable
+                                                      ? "procedural/" + batch.drawPath.substr(10)
+                                                      : std::string{};
                 const std::string_view variant =
                     identity_path_unrecordable ? "static_mesh_identity_path_limit"
                     : input.far_selection.effective == FarWorldMode::Ladder
@@ -1098,14 +1099,16 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                         : "instanced_static_mesh";
                 for (GLsizei instance = 0; instance < instance_count; ++instance) {
                     capture->write(*shader,
-                                   {.mesh_path = unattributed ? std::string_view{} : batch.drawPath,
+                                   {.mesh_path = unattributed || generated ? std::string_view{}
+                                                                           : batch.drawPath,
                                     .shader_variant = variant,
                                     .chunk = {},
                                     .lod = resolved_lod,
                                     .ownership = DiagnosticOwnership::Live,
                                     .pass = DiagnosticPass::GBuffer,
                                     .provenance = unattributed ? DiagnosticProvenance::Unsupported
-                                                               : DiagnosticProvenance::Mesh});
+                                                               : DiagnosticProvenance::Mesh,
+                                    .generated_mesh = generated_key});
                     Luminumbra::Rendering::AttributedGl::Submit(
                         glDrawElementsInstancedBaseInstance,
                         GLenum{GL_TRIANGLES},
