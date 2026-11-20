@@ -105,7 +105,10 @@ void WaterfallPass::execute(const RenderContext& ctx) {
     if (m_geometry_built && !m_pages.empty() && !m_sheet_sites.empty() && m_shader &&
         m_shader->IsValid()) {
         glBindFramebuffer(GL_FRAMEBUFFER, ctx.lit_scene.id);
-        glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // into internal lighting FBO
+        glViewport(0,
+                   0,
+                   static_cast<GLsizei>(ctx.internal_w()),
+                   static_cast<GLsizei>(ctx.internal_h())); // into internal lighting FBO
 
         // Save GL state we toggle so it is restored exactly afterwards.
         const GLboolean blend_was = glIsEnabled(GL_BLEND);
@@ -116,22 +119,29 @@ void WaterfallPass::execute(const RenderContext& ctx) {
         Shader* draw_shader = m_shader.get();
         std::optional<GBufferDiagnosticAttachment> diagnostic_attachment;
         if (auto* capture = GBufferDiagnosticCapture::Current()) {
-            GLint color_texture = 0;
-            GLint attachment_type = 0;
-            glGetNamedFramebufferAttachmentParameteriv(ctx.lit_scene.id,
-                                                       GL_COLOR_ATTACHMENT0,
-                                                       GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE,
-                                                       &attachment_type);
-            if (attachment_type == GL_TEXTURE) {
+            // Extinguished sheets submit nothing and need no contributor plane. Scan at most
+            // the baked site factors, only while capturing, matching the draw-loop skip.
+            if (std::any_of(m_live_factors.begin(), m_live_factors.end(), [](float live) {
+                    return !(live < 0.02f);
+                })) {
+                GLint color_texture = 0;
+                GLint attachment_type = 0;
                 glGetNamedFramebufferAttachmentParameteriv(ctx.lit_scene.id,
                                                            GL_COLOR_ATTACHMENT0,
-                                                           GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,
-                                                           &color_texture);
+                                                           GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE,
+                                                           &attachment_type);
+                if (attachment_type == GL_TEXTURE) {
+                    glGetNamedFramebufferAttachmentParameteriv(
+                        ctx.lit_scene.id,
+                        GL_COLOR_ATTACHMENT0,
+                        GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,
+                        &color_texture);
+                }
+                diagnostic_attachment.emplace(ctx.lit_scene.id,
+                                              static_cast<GLuint>(color_texture),
+                                              DiagnosticExtent{ctx.internal_w(), ctx.internal_h()});
+                draw_shader = capture->variant(draw_shader, false);
             }
-            diagnostic_attachment.emplace(ctx.lit_scene.id,
-                                          static_cast<GLuint>(color_texture),
-                                          DiagnosticExtent{ctx.internal_w(), ctx.internal_h()});
-            draw_shader = capture->variant(draw_shader, false);
         }
 
         draw_shader->use();
@@ -197,7 +207,10 @@ void WaterfallPass::execute(const RenderContext& ctx) {
             }
             // 12 verts/site: the vertical sheet (0..5) + the horizontal plunge-pool quad (6..11).
             Luminumbra::Rendering::AttributedGl::Submit(
-                glDrawArrays, GL_TRIANGLES, static_cast<GLint>((i % kSitesPerPage) * 12), 12);
+                glDrawArrays,
+                static_cast<GLenum>(GL_TRIANGLES),
+                static_cast<GLint>((i % kSitesPerPage) * 12),
+                12);
         }
         glBindVertexArray(0);
 
