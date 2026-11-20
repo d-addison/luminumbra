@@ -1771,7 +1771,7 @@ TEST(GameSessionHeadlessWorldTest, InternalAvatarOwnerRestoresWithoutSpawnOrPers
         for (int tick = 0; tick < 7; ++tick) {
             original->update_avatars(1.0f / 30.0f);
         }
-        Luminumbra::World::PlayerAvatar avatar{.player_id = 42,
+        Luminumbra::World::PlayerAvatar avatar{.player_id = 0,
                                                .position = original->get_avatar_position(index),
                                                .facing = -0.1256789f,
                                                .velocity = original->get_avatar_velocity(index)};
@@ -1837,17 +1837,15 @@ TEST(GameSessionHeadlessWorldTest, InternalAvatarOwnerRestoresWithoutSpawnOrPers
     jobs.shutdown();
 }
 
-TEST(GameSessionHeadlessWorldTest, OutOfBoundsAvatarRestorePublishesNothingAndTicksContinue) {
+TEST(GameSessionHeadlessWorldTest, AvatarRestoreRefusesOutOfOrderAndMisalignedRosterSlots) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
     GameSession session;
     session.SetJobSystem(&jobs);
     session.SetRootPath(root.root_string());
-    session.SetActiveRegionsEnabled(true);
-    ASSERT_TRUE(session.CreateTransientWorld("Bounds refusal", "12345", "default"));
-    session.GetWorldSystem()->set_durable_residency(true);
-    session.SetReplicatedSimulationAnchors({});
+    session.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(session.CreateTransientWorld("Roster refusal", "12345", "default"));
     auto* target = session.GetPhysicsSystem();
     ASSERT_NE(target, nullptr);
     Luminumbra::TestSupport::AvatarContinuationWorld source_world;
@@ -1856,17 +1854,79 @@ TEST(GameSessionHeadlessWorldTest, OutOfBoundsAvatarRestorePublishesNothingAndTi
     Luminumbra::World::PlayerAvatarOwnerState captured;
     captured.avatar.position = source.get_avatar_position(0);
     ASSERT_TRUE(source_world.capture_avatar_owner(0, captured.physics));
+    for (const int failure : {0, 1, 2, 3}) {
+        if (failure == 1) {
+            PlayerAvatar restored;
+            std::size_t restored_index = 999;
+            ASSERT_TRUE(session.RestoreAvatarOwner(captured, restored, restored_index));
+            EXPECT_EQ(restored_index, 0u);
+            EXPECT_EQ(restored.player_id, 0u);
+        } else if (failure == 3) {
+            ASSERT_EQ(target->create_avatar_character(Vec3(16, 40, 8)), 1u);
+        }
+        auto invalid = captured;
+        // Future player at an empty roster, repeated player, skipped player,
+        // then a player whose slot was already occupied outside the session.
+        invalid.avatar.player_id = failure == 0 || failure == 3 ? 1u : failure == 1 ? 0u : 2u;
+        ASSERT_TRUE(Luminumbra::World::ValidateAvatarOwner(invalid));
+        BodySetState before;
+        ASSERT_TRUE(target->capture_body_owners(before));
+        const auto slots = target->avatar_character_slot_count();
+        PhysicsOwnerState previous;
+        if (slots != 0) {
+            Luminumbra::World::PlayerAvatarOwnerState existing;
+            ASSERT_TRUE(session.CaptureAvatarOwner(captured.avatar, 0, existing));
+            previous = existing.physics;
+        }
+        PlayerAvatar output{.player_id = 77, .position = Vec3(1), .facing = 2, .velocity = Vec3(3)};
+        std::size_t index = 999;
+        EXPECT_FALSE(session.RestoreAvatarOwner(invalid, output, index));
+        EXPECT_EQ(index, 999u);
+        EXPECT_EQ(output.player_id, 77u);
+        EXPECT_EQ(output.position, Vec3(1));
+        EXPECT_EQ(output.facing, 2);
+        EXPECT_EQ(output.velocity, Vec3(3));
+        EXPECT_EQ(target->avatar_character_slot_count(), slots);
+        BodySetState after;
+        ASSERT_TRUE(target->capture_body_owners(after));
+        ExpectBodySet(before, after);
+        if (slots != 0) {
+            Luminumbra::World::PlayerAvatarOwnerState retained;
+            ASSERT_TRUE(session.CaptureAvatarOwner(captured.avatar, 0, retained));
+            ExpectControllerBits(previous, retained.physics);
+        }
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, OutOfBoundsAvatarRestorePublishesNothingAndTicksContinue) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    Luminumbra::TestSupport::AvatarContinuationWorld source_world;
+    auto& source = source_world.physics();
+    ASSERT_EQ(source.create_avatar_character(Vec3(8, 40, 8)), 0u);
+    Luminumbra::World::PlayerAvatarOwnerState captured;
+    captured.avatar.position = source.get_avatar_position(0);
+    ASSERT_TRUE(source_world.capture_avatar_owner(0, captured.physics));
     ASSERT_TRUE(Luminumbra::World::ValidateAvatarOwner(captured));
-    ASSERT_TRUE(session.ActiveRegionsEnabled());
-    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
-    BodySetState before;
-    ASSERT_TRUE(target->capture_body_owners(before));
     for (const std::size_t axis : {0u, 2u}) {
         for (const float coordinate :
              {static_cast<float>(Luminumbra::Chunk::kPackedMinXz * Luminumbra::CHUNK_SIZE_X),
               static_cast<float>(Luminumbra::Chunk::kPackedMaxXz * Luminumbra::CHUNK_SIZE_X),
               -1.0e30f,
               1.0e30f}) {
+            GameSession session;
+            session.SetJobSystem(&jobs);
+            session.SetRootPath(root.root_string());
+            session.SetActiveRegionsEnabled(true);
+            ASSERT_TRUE(session.CreateTransientWorld("Bounds refusal", "12345", "default"));
+            session.GetWorldSystem()->set_durable_residency(true);
+            session.SetReplicatedSimulationAnchors({});
+            auto* target = session.GetPhysicsSystem();
+            ASSERT_NE(target, nullptr);
+            ASSERT_TRUE(session.ActiveRegionsEnabled());
+            BodySetState before;
+            ASSERT_TRUE(target->capture_body_owners(before));
             auto invalid = captured;
             invalid.avatar.position[static_cast<int>(axis)] = coordinate;
             const auto wide = std::bit_cast<std::uint64_t>(static_cast<double>(coordinate));
@@ -1888,17 +1948,14 @@ TEST(GameSessionHeadlessWorldTest, OutOfBoundsAvatarRestorePublishesNothingAndTi
             BodySetState after;
             ASSERT_TRUE(target->capture_body_owners(after));
             ExpectBodySet(before, after);
+            ASSERT_TRUE(session.RestoreAvatarOwner(captured, output, index));
+            EXPECT_EQ(index, 0u);
+            EXPECT_EQ(target->avatar_character_slot_count(), 1u);
             const auto tick = session.GetSimulationTickCount();
             EXPECT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
             EXPECT_EQ(session.GetSimulationTickCount(), tick + 1);
         }
     }
-    PlayerAvatar output;
-    std::size_t index = 999;
-    ASSERT_TRUE(session.RestoreAvatarOwner(captured, output, index));
-    EXPECT_EQ(index, 0u);
-    EXPECT_EQ(target->avatar_character_slot_count(), 1u);
-    EXPECT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
 }
 
 TEST(GameSessionHeadlessWorldTest, OutOfBoundsPlayerRestorePublishesNothingAndTicksContinue) {
@@ -2020,6 +2077,207 @@ TEST(ControllerContinuation, FrozenRosterRestoresSequentiallyAndContinuesBitExac
             EXPECT_EQ(source.create_dynamic_sphere(Vec3(20), Vec3(0), 0.3f),
                       target.create_dynamic_sphere(Vec3(20), Vec3(0), 0.3f));
         }
+    }
+}
+
+TEST(ControllerContinuation, FrozenContactsResolveLaterCapsulesAndRefuseUnreservedGenerations) {
+    constexpr float dt = 1.0f / 30.0f;
+    Luminumbra::TestSupport::AvatarContinuationWorld source_world;
+    auto& source = source_world.physics();
+    AddBodyFloor(source);
+    ASSERT_EQ(source.create_avatar_character(Vec3(8, 16, 8)), 0u);
+    ASSERT_EQ(source.create_avatar_character(Vec3(8, 10, 8)), 1u);
+    source.set_avatar_frozen(1, true, source.get_avatar_position(1));
+    for (int tick = 0; tick < 45; ++tick) {
+        source.update_avatars(dt);
+    }
+    ASSERT_TRUE(source.is_avatar_grounded(0));
+    source.set_avatar_frozen(0, true, source.get_avatar_position(0));
+    std::array<PhysicsOwnerState, 2> captured{};
+    for (std::size_t slot = 0; slot < captured.size(); ++slot) {
+        ASSERT_TRUE(source_world.capture_avatar_owner(slot, captured[slot]));
+    }
+    const auto word = [](const PhysicsOwnerState& state, std::size_t offset) {
+        std::uint32_t result = 0;
+        for (unsigned shift = 0; shift < 32; shift += 8) {
+            result |= static_cast<std::uint32_t>(state.bytes[offset++]) << shift;
+        }
+        return result;
+    };
+    // Pin both the ground body and an active contact to player 1's capsule.
+    ASSERT_GE(captured[0].size, 152u);
+    const auto capsule = word(captured[1], 20);
+    ASSERT_NE(capsule, JPH::BodyID::cInvalidBodyID);
+    ASSERT_EQ(word(captured[0], 28), capsule);
+    ASSERT_GT(word(captured[0], 144), 0u);
+    ASSERT_EQ(word(captured[0], 148), capsule);
+    Luminumbra::TestSupport::AvatarContinuationWorld target_world;
+    auto& target = target_world.physics();
+    AddBodyFloor(target);
+    BodySetState before;
+    ASSERT_TRUE(target.capture_body_owners(before));
+    auto stale = captured[1];
+    const JPH::BodyID original(capsule);
+    SetPhysicsWord(
+        stale,
+        20,
+        JPH::BodyID(original.GetIndex(), static_cast<JPH::uint8>(original.GetSequenceNumber() + 1))
+            .GetIndexAndSequenceNumber());
+    ASSERT_TRUE(ValidatePhysicsOwner(stale));
+    std::size_t index = 999;
+    // Reserving the same slot with another generation cannot satisfy this contact.
+    EXPECT_FALSE(target_world.restore_avatar_owner(captured[0], index, std::span(&stale, 1)));
+    EXPECT_EQ(index, 999u);
+    EXPECT_EQ(target.avatar_character_slot_count(), 0u);
+    BodySetState after;
+    ASSERT_TRUE(target.capture_body_owners(after));
+    ExpectBodySet(before, after);
+    // The server requires player-ID order, so player 1 is still only reserved
+    // when player 0's contacts are restored.
+    for (std::size_t slot = 0; slot < captured.size(); ++slot) {
+        ASSERT_TRUE(target_world.restore_avatar_owner(
+            captured[slot], index, std::span(captured).subspan(slot + 1)));
+        EXPECT_EQ(index, slot);
+    }
+    PhysicsOwnerState restored;
+    ASSERT_TRUE(target_world.capture_avatar_owner(0, restored));
+    ExpectControllerBits(captured[0], restored);
+    BodyOwnerState restored_capsule;
+    ASSERT_TRUE(target.capture_body_owner(JPH::BodyID(word(restored, 28)), restored_capsule));
+    EXPECT_EQ(BodyWord(restored_capsule, 8), capsule);
+    source.set_avatar_frozen(0, false, source.get_avatar_position(0));
+    target.set_avatar_frozen(0, false, target.get_avatar_position(0));
+    for (int tick = 0; tick < 12; ++tick) {
+        source.update_avatars(dt);
+        target.update_avatars(dt);
+        PhysicsOwnerState expected;
+        ASSERT_TRUE(source_world.capture_avatar_owner(0, expected));
+        ASSERT_TRUE(target_world.capture_avatar_owner(0, restored));
+        ExpectControllerBits(expected, restored);
+        EXPECT_EQ(word(restored, 28), capsule);
+        EXPECT_TRUE(target.is_avatar_grounded(0));
+    }
+}
+
+TEST(ControllerContinuation, MixedRosterContactsRestoreInPlayerOrderWithExactReservations) {
+    constexpr float dt = 1.0f / 30.0f;
+    for (const auto& [free_slot, frozen_without_capsule] : std::array{std::pair{false, false},
+                                                                      std::pair{false, true},
+                                                                      std::pair{true, false},
+                                                                      std::pair{true, true}}) {
+        Luminumbra::TestSupport::AvatarContinuationWorld source_world;
+        auto& source = source_world.physics();
+        AddBodyFloor(source);
+        ASSERT_EQ(source.create_avatar_character(Vec3(8, 16, 8)), 0u);
+        ASSERT_EQ(source.create_avatar_character(Vec3(8, 10, 8)), 1u);
+        const auto hole =
+            free_slot ? source.create_dynamic_sphere(Vec3(20), Vec3(0), 0.3f) : JPH::BodyID();
+        source.set_avatar_frozen(1, true, source.get_avatar_position(1));
+        ASSERT_EQ(source.create_avatar_character(Vec3(16, 10, 8)), 2u);
+        source.set_avatar_frozen(2, true, source.get_avatar_position(2));
+        if (free_slot) {
+            ASSERT_FALSE(hole.IsInvalid());
+            source.destroy_body(hole);
+        }
+        for (int tick = 0; tick < 45; ++tick) {
+            source.update_avatars(dt);
+        }
+        ASSERT_TRUE(source.is_avatar_grounded(0));
+        std::array<PhysicsOwnerState, 3> captured{};
+        for (std::size_t slot = 0; slot < captured.size(); ++slot) {
+            ASSERT_TRUE(source_world.capture_avatar_owner(slot, captured[slot]));
+        }
+        if (frozen_without_capsule) {
+            // A headroom refusal can freeze a controller without a body.
+            SetPhysicsWord(captured[0], 8, 1);
+        }
+        ASSERT_TRUE(ValidatePhysicsOwner(captured[0]));
+        const auto word = [](const PhysicsOwnerState& state, std::size_t offset) {
+            std::uint32_t result = 0;
+            for (unsigned shift = 0; shift < 32; shift += 8) {
+                result |= static_cast<std::uint32_t>(state.bytes[offset++]) << shift;
+            }
+            return result;
+        };
+        ASSERT_GE(captured[0].size, 152u);
+        const JPH::BodyID capsule(word(captured[1], 20));
+        ASSERT_FALSE(capsule.IsInvalid());
+        ASSERT_EQ(word(captured[0], 20), JPH::BodyID::cInvalidBodyID);
+        ASSERT_EQ(word(captured[0], 28), capsule.GetIndexAndSequenceNumber());
+        ASSERT_GT(word(captured[0], 144), 0u);
+        ASSERT_EQ(word(captured[0], 148), capsule.GetIndexAndSequenceNumber());
+        Luminumbra::TestSupport::AvatarContinuationWorld target_world;
+        auto& target = target_world.physics();
+        AddBodyFloor(target);
+        BodySetState before;
+        ASSERT_TRUE(target.capture_body_owners(before));
+        for (const int failure : {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}) {
+            SCOPED_TRACE(failure);
+            auto current = captured[0];
+            auto pending = std::array{captured[1], captured[2]};
+            std::size_t pending_count = 2;
+            const auto unreserved =
+                JPH::BodyID(capsule.GetIndex(),
+                            static_cast<JPH::uint8>(capsule.GetSequenceNumber() + 1))
+                    .GetIndexAndSequenceNumber();
+            if (failure == 0) {
+                pending_count = 0; // Missing reservation.
+            } else if (failure == 1) {
+                SetPhysicsWord(pending[0], 20, unreserved); // Same slot, wrong generation.
+            } else if (failure == 2 || failure == 8) {
+                // Use the other capsule's slot so the unchanged references to
+                // the first capsule retain a consistent generation. The owner
+                // stays codec-valid, but this exact body ID is not reserved.
+                const JPH::BodyID other_capsule(word(pending[1], 20));
+                const auto unreserved_reference =
+                    JPH::BodyID(other_capsule.GetIndex(),
+                                static_cast<JPH::uint8>(other_capsule.GetSequenceNumber() + 1))
+                        .GetIndexAndSequenceNumber();
+                SetPhysicsWord(current, failure == 2 ? 28 : 148, unreserved_reference);
+            } else if (failure == 3) {
+                pending[0].size = 0;
+            } else if (failure == 4) {
+                --pending[0].size;
+            } else if (failure == 5) {
+                pending[0] = captured[0]; // No capsule to reserve.
+            } else if (failure == 6) {
+                pending[1] = pending[0]; // Duplicate capsule slot.
+            } else {
+                const auto trailer = pending[1].size - (free_slot ? 12u : 8u);
+                SetPhysicsWord(pending[1], trailer, word(pending[1], trailer) + 1);
+                if (failure == 9) {
+                    // Matching trailers must still explain every pool slot.
+                    SetPhysicsWord(pending[0], trailer, word(pending[0], trailer) + 1);
+                }
+            }
+            ASSERT_TRUE(ValidatePhysicsOwner(current));
+            std::size_t index = 999;
+            EXPECT_FALSE(target_world.restore_avatar_owner(
+                current, index, std::span(pending).first(pending_count)));
+            EXPECT_EQ(index, 999u);
+            EXPECT_EQ(target.avatar_character_slot_count(), 0u);
+            BodySetState after;
+            ASSERT_TRUE(target.capture_body_owners(after));
+            ExpectBodySet(before, after);
+        }
+        std::size_t index = 999;
+        for (std::size_t slot = 0; slot < captured.size(); ++slot) {
+            ASSERT_TRUE(target_world.restore_avatar_owner(
+                captured[slot], index, std::span(captured).subspan(slot + 1)));
+            EXPECT_EQ(index, slot);
+        }
+        for (std::size_t slot = 0; slot < captured.size(); ++slot) {
+            PhysicsOwnerState restored;
+            ASSERT_TRUE(target_world.capture_avatar_owner(slot, restored));
+            ExpectControllerBits(captured[slot], restored);
+        }
+        BodySetState expected;
+        BodySetState actual;
+        ASSERT_TRUE(source.capture_body_owners(expected));
+        ASSERT_TRUE(target.capture_body_owners(actual));
+        ExpectBodySet(expected, actual);
+        EXPECT_EQ(source.create_dynamic_sphere(Vec3(20), Vec3(0), 0.3f),
+                  target.create_dynamic_sphere(Vec3(20), Vec3(0), 0.3f));
     }
 }
 

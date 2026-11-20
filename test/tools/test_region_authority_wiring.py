@@ -396,8 +396,69 @@ class SimulationCollisionWiring(unittest.TestCase):
         self.assertLess(step.index("if (ctx->session->GetRegionSchedulerFault())"),
                         step.index("if (!prepared)"))
         self.assertEqual(function(step, "if (!prepared)"), "retry = true;")
-        self.assertEqual(function(step, "if (retry)"), "return true;")
+        retry = function(step, "if (retry)")
+        self.assertTrue(retry.endswith("m_finished = true; return false;"))
+        self.assertLess(step.index("if (ctx->session->GetRegionSchedulerFault())"),
+                        step.index("if (retry)"))
         self.assertLess(step.index("if (!prepared)"), step.index("m_impl->host->PumpTick("))
+
+    def assert_client_preparation_retry_bound(self, source):
+        impl = function(source, "struct NetworkedSessionDriver::Impl")
+        self.assertIn("std::uint64_t preparation_retries = 0;", impl)
+        step = function(source, "bool NetworkedSessionDriver::StepAgreedTick(")
+        self.assertIn("const std::uint64_t budget = m_impl->config.budget_ticks;", step)
+        retry = function(step, "if (retry)")
+        guard = "if (m_impl->preparation_retries < max_preparation_retries)"
+        self.assertIn(guard, retry)
+        self.assertEqual(function(retry, guard), "++m_impl->preparation_retries; return true;")
+        self.assertEqual(retry, "const std::uint64_t max_preparation_retries = budget; "
+                         + guard + " { ++m_impl->preparation_retries; return true; } "
+                         'm_failure_reason = "region_preparation_stalled_at_tick_" + '
+                         "std::to_string(m_agreed_ticks); m_finished = true; return false;")
+        # One initialization and one guarded increment: progress cannot reset the
+        # run-wide allowance, and even UINT64_MAX cannot wrap the counter.
+        self.assertEqual(source.count("preparation_retries ="), 2)
+        self.assertEqual(source.count("++m_impl->preparation_retries;"), 1)
+        self.assertEqual(source.count("m_impl->preparation_retries"), 2)
+        self.assertTrue(step.startswith(
+            "if (m_finished || m_desynced || !m_impl->host || !m_impl->client) { return false; }"))
+        preflight = function(step, "&m_impl->client_ctx})")
+        self.assertIn("&m_impl->host_ctx, &m_impl->client_ctx", step)
+        self.assertTrue(step[step.index(preflight) + len(preflight):].startswith(" } if (retry)"))
+        before_pump = step[:step.index("m_impl->host->PumpTick(")]
+        for advance in ("PumpTick(", "m_agreed_ticks =", "++m_agreed_ticks", "TickSimulation(",
+                        "NetSessionCollectInput(", "NetSessionApplyStep("):
+            self.assertNotIn(advance, before_pump)
+        for peer in ("host", "client"):
+            self.assertLess(step.index("if (retry)"), step.index(f"m_impl->{peer}->PumpTick("))
+        self.assert_client_preflight_outcomes(source)
+
+    def test_client_preparation_refusals_have_a_run_wide_tick_budget(self):
+        source = (ROOT / "src/luminumbra_client/core/scenarios/NetworkedSessionDriver.cpp").read_text(
+            encoding="utf-8")
+        self.assert_client_preparation_retry_bound(source)
+
+    def test_client_preparation_retry_bound_mutations_are_detected(self):
+        source = (ROOT / "src/luminumbra_client/core/scenarios/NetworkedSessionDriver.cpp").read_text(
+            encoding="utf-8")
+        mutations = (
+            ("missing bound", "if (retry) {", "if (retry) { return true; } if (false) {"),
+            ("unbounded retry", "m_impl->preparation_retries < max_preparation_retries", "true"),
+            ("off by one", "m_impl->preparation_retries < max_preparation_retries",
+             "m_impl->preparation_retries <= max_preparation_retries"),
+            ("missing increment", "++m_impl->preparation_retries;", ""),
+            ("counter reset", "++m_impl->preparation_retries;", "m_impl->preparation_retries = 0;"),
+            ("changed allowance", "max_preparation_retries = budget;",
+             "max_preparation_retries = budget + 1;"),
+            ("missing reason", '"region_preparation_stalled_at_tick_"', '""'),
+            ("not terminal", "m_finished = true;", "m_finished = false;"),
+            ("keeps spinning", "m_finished = true;\n        return false;",
+             "m_finished = true;\n        return true;"),
+        )
+        for name, old, new in mutations:
+            self.assertIn(old, source, name)
+            with self.subTest(mutation=name), self.assertRaises(AssertionError):
+                self.assert_client_preparation_retry_bound(source.replace(old, new))
 
     def test_denied_avatar_checks_session_prepared_terrain_headroom(self):
         native = (ROOT / "test/common/RegionConsumerGate_test.cpp").read_text(encoding="utf-8")
@@ -860,6 +921,162 @@ class SimulationCollisionWiring(unittest.TestCase):
         server_test = (ROOT / "test/persistence/world_open_refusal_test.cpp").read_text(encoding="utf-8")
         self.assertIn("ServerFrozenRosterRestoresSequentiallyAndContinues", server_test)
 
+    def test_avatar_contact_references_accept_only_validated_exact_reservations(self):
+        source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(
+            encoding="utf-8")
+        restore = function(source, "bool PhysicsSystem::restore_avatar_owner(")
+        check = "if (!ReferencesExist(recipe, *m_jolt_system, reserved)) { return false; }"
+        self.assertIn(check, restore)
+        for admission in ("ParseController(pending, reservation)",
+                          "reserved.push_back(reservation.body)", "ValidateOwnerAllocator("):
+            self.assertLess(restore.index(admission), restore.index(check))
+        self.assertLess(restore.index(check), restore.index("PrepareOwnerAllocatorScratch("))
+        references = function(source, "bool ReferencesExist(")
+        self.assertIn("if (std::find(reserved.begin(), reserved.end(), recipe.references[i]) "
+                      "!= reserved.end()) { continue; }", references)
+        self.assertIn("JPH::BodyID(recipe.references[i])", references)
+        self.assertIn("if (!lock.Succeeded()) { return false; }", references)
+        self.assertNotIn("GetIndex()", references)
+        native = (ROOT / "test/common/PlayerAvatar_test.cpp").read_text(encoding="utf-8")
+        regression = function(native, "TEST(ControllerContinuation, "
+                              "FrozenContactsResolveLaterCapsulesAndRefuseUnreservedGenerations)")
+        for token in ("source.set_avatar_frozen(1, true,", "source.update_avatars(dt)",
+                      "ASSERT_TRUE(source.is_avatar_grounded(0))",
+                      "source.set_avatar_frozen(0, true,", "ASSERT_TRUE(ValidatePhysicsOwner(stale))",
+                      "EXPECT_FALSE(target_world.restore_avatar_owner(captured[0], index, "
+                      "std::span(&stale, 1)))", "EXPECT_EQ(index, 999u)",
+                      "EXPECT_EQ(target.avatar_character_slot_count(), 0u)",
+                      "ExpectBodySet(before, after)", "std::span(captured).subspan(slot + 1)",
+                      "ASSERT_TRUE(target.capture_body_owner(JPH::BodyID(word(restored, 28)), "
+                      "restored_capsule))", "ExpectControllerBits(expected, restored)",
+                      "EXPECT_EQ(word(restored, 28), capsule)"):
+            self.assertIn(token, regression)
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("common/PlayerAvatar_test.cpp", cmake)
+        self.assertIn("gtest_discover_tests(${_lum_gtest_target}", cmake)
+
+    def test_live_avatar_restore_derives_pending_allocator_before_reference_admission(self):
+        source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(
+            encoding="utf-8")
+        restore = function(source, "bool PhysicsSystem::restore_avatar_owner(")
+        self.assertNotIn("if (!remaining_frozen.empty() && "
+                         "recipe.body == JPH::BodyID::cInvalidBodyID)", restore)
+        topology = function(restore, "if (recipe.body == JPH::BodyID::cInvalidBodyID && reserved.empty())")
+        self.assertIn("recipe.slot_count = reservation.slot_count;", topology)
+        self.assertIn("recipe.free_slots = reservation.free_slots;", topology)
+        self.assertLess(restore.index("ParseController(pending, reservation)"),
+                        restore.index("recipe.slot_count = reservation.slot_count;"))
+        for comparison in ("reservation.slot_count != recipe.slot_count",
+                           "reservation.free_slots != recipe.free_slots"):
+            self.assertLess(restore.index("recipe.free_slots = reservation.free_slots;"),
+                            restore.index(comparison))
+            self.assertLess(restore.index(comparison), restore.index("reserved.push_back("))
+        existing = function(restore, "if (recipe.body != JPH::BodyID::cInvalidBodyID || !reserved.empty())")
+        self.assertIn("m_jolt_system->GetBodies(existing);", existing)
+        self.assertIn("needs_capsule ? std::span(&recipe, 1) : std::span<const OwnerRecipe>{}", restore)
+        self.assertLess(restore.index("ValidateOwnerAllocator("), restore.index("ReferencesExist("))
+        self.assertLess(restore.index("ReferencesExist("), restore.index("PrepareOwnerAllocatorScratch("))
+        native = (ROOT / "test/common/PlayerAvatar_test.cpp").read_text(encoding="utf-8")
+        regression = function(native, "TEST(ControllerContinuation, "
+                              "MixedRosterContactsRestoreInPlayerOrderWithExactReservations)")
+        for token in ("for (const auto& [free_slot, frozen_without_capsule] :",
+                      "std::pair{false, false}", "std::pair{false, true}",
+                      "std::pair{true, false}", "std::pair{true, true}",
+                      "source.set_avatar_frozen(1, true,", "source.update_avatars(dt)",
+                      "ASSERT_TRUE(source.is_avatar_grounded(0))",
+                      "ASSERT_EQ(word(captured[0], 20), JPH::BodyID::cInvalidBodyID)",
+                      "ASSERT_TRUE(ValidatePhysicsOwner(current))",
+                      "EXPECT_FALSE(target_world.restore_avatar_owner(",
+                      "std::span(pending).first(pending_count)", "EXPECT_EQ(index, 999u)",
+                      "EXPECT_EQ(target.avatar_character_slot_count(), 0u)",
+                      "ExpectBodySet(before, after)", "std::span(captured).subspan(slot + 1)",
+                      "ExpectControllerBits(captured[slot], restored)", "ExpectBodySet(expected, actual)"):
+            self.assertIn(token, regression)
+        self.assertNotIn("source.set_avatar_frozen(0, true,", regression)
+
+    def test_session_avatar_restore_enforces_player_slot_before_publication(self):
+        source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(
+            encoding="utf-8")
+        restore = function(source, "bool GameSession::RestoreAvatarOwner(")
+        self.assertIn("if (!m_physicsSystem ||", restore)
+        admission = function(restore, "if (!m_physicsSystem ||")
+        self.assertIn("state.avatar.player_id != m_physicsSystem->avatar_character_slot_count()",
+                      restore)
+        self.assertEqual(admission, "return false;")
+        self.assertLess(restore.index("state.avatar.player_id !="),
+                        restore.index(".restore_avatar_owner("))
+        self.assertLess(restore.index("state.avatar.player_id !="), restore.index("avatar = state.avatar"))
+        native = (ROOT / "test/common/PlayerAvatar_test.cpp").read_text(encoding="utf-8")
+        regression = function(native, "TEST(GameSessionHeadlessWorldTest, "
+                              "AvatarRestoreRefusesOutOfOrderAndMisalignedRosterSlots)")
+        for token in ("jobs.startup(1)", "session.SetJobSystem(&jobs)",
+                      "for (const int failure : {0, 1, 2, 3})",
+                      "target->create_avatar_character(Vec3(16, 40, 8))",
+                      "ValidateAvatarOwner(invalid)",
+                      "ASSERT_TRUE(session.RestoreAvatarOwner(captured, restored, restored_index))",
+                      "EXPECT_FALSE(session.RestoreAvatarOwner(invalid, output, index))",
+                      "EXPECT_EQ(index, 999u)", "EXPECT_EQ(output.player_id, 77u)",
+                      "EXPECT_EQ(output.position, Vec3(1))", "EXPECT_EQ(output.facing, 2)",
+                      "EXPECT_EQ(output.velocity, Vec3(3))",
+                      "EXPECT_EQ(target->avatar_character_slot_count(), slots)",
+                      "ExpectBodySet(before, after)", "ExpectControllerBits(previous, retained.physics)"):
+            self.assertIn(token, regression)
+
+    def test_avatar_restore_refuses_after_first_tick_before_mutation(self):
+        source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(
+            encoding="utf-8")
+        restore = function(source, "bool GameSession::RestoreAvatarOwner(")
+        guard = "GetSimulationTickCount() != 0"
+        self.assertIn(guard, restore)
+        self.assertEqual(function(restore, "if (!m_physicsSystem ||"), "return false;")
+        self.assertLess(restore.index(guard), restore.index(".restore_avatar_owner("))
+        self.assertLess(restore.index(guard), restore.index("avatar = state.avatar"))
+        runner = (ROOT / "src/luminumbra_server/ServerWorldRunner.h").read_text(
+            encoding="utf-8")
+        forward = function(runner.replace("remaining_frozen = {}", "remaining_frozen"),
+                           "bool RestoreAvatarOwner(")
+        self.assertIn(guard, forward)
+        self.assertEqual(function(forward, "if (!m_session ||"), "return false;")
+        self.assertLess(forward.index(guard), forward.index("m_avatars.reserve("))
+        self.assertLess(forward.index(guard), forward.index("m_session->RestoreAvatarOwner("))
+        native = (ROOT / "test/persistence/world_open_refusal_test.cpp").read_text(
+            encoding="utf-8")
+        regression = function(native, "TEST_F(WorldOpenRefusal, "
+                              "AvatarRestoreRefusesAfterFirstTickWithoutMutation)")
+        self.assertIn("ExpectAvatarRestoreRefusedWithoutMutation(target, captured, through_runner)",
+                      regression)
+        regression += " " + function(native, "void ExpectAvatarRestoreRefusedWithoutMutation(")
+        for token in ("for (const bool regional : {false, true})",
+                      "ASSERT_EQ(target.Session()->ActiveRegionsEnabled(), regional)",
+                      "ASSERT_EQ(target.TickCount(), 0u)",
+                      "ASSERT_TRUE(target.RestoreAvatarOwner(captured))",
+                      "ASSERT_EQ(target.RunFixedTicks(1).ticks_executed, 1u)",
+                      "captured.avatar.player_id = 1", "ValidateAvatarOwner(captured)",
+                      "for (const bool through_runner : {false, true})",
+                      "EXPECT_FALSE(target.RestoreAvatarOwner(captured))",
+                      "EXPECT_FALSE(target.Session()->RestoreAvatarOwner(captured, output, index))",
+                      "EXPECT_EQ(index, 999u)", "EXPECT_EQ(output.player_id, 77u)",
+                      "EXPECT_EQ(output.position, Vec3(1))", "EXPECT_EQ(output.facing, 2)",
+                      "EXPECT_EQ(output.velocity, Vec3(3))",
+                      "EXPECT_EQ(target.Avatars().data(), roster_data)",
+                      "EXPECT_EQ(target.Avatars().capacity(), roster_capacity)",
+                      "ASSERT_EQ(target.Avatars().size(), 1u)",
+                      "EXPECT_EQ(physics->avatar_character_slot_count(), 1u)",
+                      "EXPECT_EQ(before_size, after_size)", "EXPECT_EQ(before_bytes, after_bytes)",
+                      "EXPECT_EQ(bodies_before.slot_count, bodies_after.slot_count)",
+                      "EXPECT_EQ(bodies_before.free_slots, bodies_after.free_slots)",
+                      "ASSERT_EQ(bodies_before.owners.size(), bodies_after.owners.size())",
+                      "EXPECT_EQ(before.bytes, after.bytes)",
+                      "EXPECT_EQ(before.registration_slot, after.registration_slot)",
+                      "EXPECT_EQ(target.ComputeWorldHash(), hash_before)",
+                      "EXPECT_EQ(target.TickCount(), 1u)"):
+            self.assertIn(token, regression)
+        self.assertLess(regression.index("ASSERT_TRUE(target.RestoreAvatarOwner(captured))"),
+                        regression.index("target.RunFixedTicks(1)"))
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("persistence/world_open_refusal_test.cpp", cmake)
+        self.assertIn("gtest_discover_tests(${_lum_gtest_target}", cmake)
+
     def test_avatar_restore_checks_simulation_bounds_before_staging(self):
         source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(
             encoding="utf-8")
@@ -1029,8 +1246,12 @@ class SimulationCollisionWiring(unittest.TestCase):
 
     def test_creation_callers_handle_admission_refusal(self):
         client = (ROOT / "src/luminumbra_client/main_client.cpp").read_text(encoding="utf-8")
-        self.assertEqual(client.count("create_avatar_character("), 3)
-        self.assertEqual(client.count("PhysicsSystem::kInvalidAvatar"), 3)
+        attachment = (ROOT / "src/luminumbra_client/app/CreatureBodyAttachment.h").read_text(
+            encoding="utf-8")
+        self.assertEqual(client.count("create_avatar_character("), 2)
+        self.assertEqual(client.count("PhysicsSystem::kInvalidAvatar"), 2)
+        self.assertEqual(attachment.count("create_avatar_character("), 1)
+        self.assertEqual(attachment.count("PhysicsSystem::kInvalidAvatar"), 1)
         player = (ROOT / "src/luminumbra_client/player/PlayerController.cpp").read_text(
             encoding="utf-8")
         self.assertEqual(player.count("create_player_controller("), 3)
@@ -1054,6 +1275,115 @@ class SimulationCollisionWiring(unittest.TestCase):
             encoding="utf-8")
         self.assertNotIn("create_avatar_character(", driver)
         self.assertNotIn("create_player_controller(", driver)
+
+    def attachment_source_and_body(self):
+        source = (ROOT / "src/luminumbra_client/app/CreatureBodyAttachment.h").read_text(
+            encoding="utf-8")
+        return source, function(source, "inline void AttachMissingCreatureBodies(")
+
+    def attachment_regression(self, name):
+        native = (ROOT / "test/common/GameSessionHeadlessWorld_test.cpp").read_text(
+            encoding="utf-8")
+        native = re.sub(r"(TEST_F\(CreatureAttachmentTest,)\s+", r"\1 ", native)
+        return function(native, "TEST_F(CreatureAttachmentTest, " + name + ")")
+
+    def test_creature_attachment_continues_after_refusal_with_bounded_attempts(self):
+        source, attach = self.attachment_source_and_body()
+        refusal = function(attach, "if (idx == Systems::PhysicsSystem::kInvalidAvatar)")
+        self.assertIn("continue;", refusal)
+        self.assertNotIn("break;", refusal)
+        self.assertIn("int maxPerFrame = 4", source)
+        self.assertIn("int maxAttemptsPerFrame = 16", source)
+        self.assertIn("made >= maxPerFrame", attach)
+        self.assertIn("attempted >= maxAttemptsPerFrame", attach)
+        self.assertLess(attach.index("++attempted;"), attach.index("create_avatar_character("))
+        self.assertLess(attach.index("create_avatar_character("),
+                        attach.index("reg.emplace<Components::CreaturePhysicsComponent>"))
+        case = self.attachment_regression(
+            "CreatureAttachmentSkipsRefusalsWithinAnIndependentAttemptBudget")
+        for token in ("AttachMissingCreatureBodies(&physics, registry, cursor, 1, 1);",
+                      "AttachMissingCreatureBodies(&physics, registry, cursor, 1, 2);",
+                      "EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(first));",
+                      "EXPECT_EQ(physics.avatar_character_slot_count(), 14u);",
+                      "EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(refused));"):
+            self.assertIn(token, case)
+        cap = self.attachment_regression("CreatureAttachmentDefaultCreationBudgetIsFour")
+        self.assertIn("std::array<entt::entity, 6>", cap)
+        self.assertIn("EXPECT_EQ(physics.avatar_character_slot_count(), 4u);", cap)
+        self.assertIn("EXPECT_EQ(physics.avatar_character_slot_count(), 6u);", cap)
+
+    def test_creature_attachment_cursor_advances_and_wraps_with_bounded_scan(self):
+        _, attach = self.attachment_source_and_body()
+        for token in ("const auto& creatures = reg.storage<Components::CreatureComponent>();",
+                      "const auto count = creatures.size();", "visited < count",
+                      "visited < static_cast<std::size_t>(maxAttemptsPerFrame)",
+                      "const auto entity = creatures.data()[cursor.next];", "++cursor.next;",
+                      "reg.all_of<Components::CreaturePhysicsComponent>(entity)",
+                      "!reg.all_of<Components::TransformComponent>(entity)"):
+            self.assertIn(token, attach)
+        self.assertEqual(function(attach, "if (cursor.next == count)"), "cursor.next = 0;")
+        self.assertLess(attach.index("++cursor.next;"), attach.index("reg.all_of<"))
+        self.assertLess(attach.index("++cursor.next;"), attach.index("create_avatar_character("))
+        case = self.attachment_regression(
+            "CreatureAttachmentEventuallyPassesMoreThanSixteenPersistentRefusals")
+        for token in ("std::array<entt::entity, 33>", "call <= 2",
+                      "EXPECT_EQ(cursor.next, call * 16);",
+                      "EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(admissible));",
+                      "EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(entity));"):
+            self.assertIn(token, case)
+        skipped = self.attachment_regression("CreatureAttachmentBoundsScanningAndWrapsPastSkippedSlots")
+        for token in ("EXPECT_EQ(cursor.next, 16u);", "index < 15",
+                      "EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(admissible));",
+                      "EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(admissible));",
+                      "EXPECT_EQ(registry.get<CreaturePhysicsComponent>(attached).avatar_index, body);"):
+            self.assertIn(token, skipped)
+        # No whole-registry view construction or search to rediscover the cursor.
+        for token in ("reg.view<", "std::find", "static "):
+            self.assertNotIn(token, attach)
+
+    def test_creature_attachment_invalid_bounds_and_null_physics_are_no_ops(self):
+        _, attach = self.attachment_source_and_body()
+        guard = "if (!phys || maxPerFrame <= 0 || maxAttemptsPerFrame <= 0)"
+        self.assertEqual(function(attach, guard), "return;")
+        self.assertLess(attach.index(guard), attach.index("reg.storage<"))
+        self.assertLess(attach.index(guard), attach.index("cursor.next"))
+        case = self.attachment_regression("CreatureAttachmentDisabledBoundsAndNullPhysicsDoNoWork")
+        for call in ("nullptr, registry, cursor", "&physics, registry, cursor, 0, 2",
+                     "&physics, registry, cursor, -1, 2", "&physics, registry, cursor, 1, 0",
+                     "&physics, registry, cursor, 1, -1"):
+            self.assertIn("AttachMissingCreatureBodies(" + call + ");", case)
+        self.assertIn("EXPECT_EQ(cursor.next, 5u);", case)
+        self.assertIn("EXPECT_EQ(physics.avatar_character_slot_count(), 0u);", case)
+
+    def test_creature_attachment_cursor_handles_destroyed_and_reused_entities(self):
+        source, attach = self.attachment_source_and_body()
+        self.assertEqual(function(source, "struct CreatureBodyAttachmentCursor"),
+                         "std::size_t next = 0;")
+        self.assertIn("CreatureBodyAttachmentCursor& cursor", source)
+        self.assertEqual(function(attach, "if (cursor.next >= count)"), "cursor.next = 0;")
+        self.assertLess(attach.index("if (cursor.next >= count)"),
+                        attach.index("creatures.data()[cursor.next]"))
+        case = self.attachment_regression("CreatureAttachmentCursorSurvivesDestructionAndEntityReuse")
+        for token in ("registry.destroy(destroyed);", "ASSERT_NE(reused, destroyed);",
+                      "ASSERT_EQ(entt::to_entity(reused), entt::to_entity(destroyed));",
+                      "EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(swapped));",
+                      "EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(reused));"):
+            self.assertIn(token, case)
+        shrink = self.attachment_regression("CreatureAttachmentCursorResetsAfterShrinkAndClear")
+        for token in ("ASSERT_EQ(cursor.next, 2u);", "registry.destroy(first);",
+                      "registry.destroy(second);", "registry.clear();",
+                      "EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(tail));",
+                      "EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(newborn));"):
+            self.assertIn(token, shrink)
+        client = (ROOT / "src/luminumbra_client/main_client.cpp").read_text(encoding="utf-8")
+        runtime = function(client, "struct ClientRuntimeState")
+        self.assertIn("Luminumbra::Client::CreatureBodyAttachmentCursor creatureBodyAttachmentCursor;", runtime)
+        self.assertIn("Luminumbra::Client::AttachMissingCreatureBodies( gameSession->GetPhysicsSystem(), "
+                      "gameSession->GetRegistry(), runtime.creatureBodyAttachmentCursor);",
+                      re.sub(r"\s+", " ", client))
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("common/GameSessionHeadlessWorld_test.cpp", cmake)
+        self.assertIn("gtest_discover_tests(${_lum_gtest_target}", cmake)
 
     def test_restored_spheres_register_only_at_commit_and_invalidate_preparation(self):
         source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(
