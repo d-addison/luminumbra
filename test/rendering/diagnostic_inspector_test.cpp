@@ -250,10 +250,12 @@ TEST_F(DiagnosticInspectorFrameGl, MixedCoverageStaysDisplayedAndReportsIncomple
             control.refresh = true;
             control.x = inspect_unsupported ? 1 : 0;
             control.y = 1;
+            Pass::request_inspection(control);
             ASSERT_NO_FATAL_FAILURE(BeginCapture(coverage));
             Pass::end_frame(frame_, ctx_);
             ExpectReleasedProgram();
             EXPECT_NE(control.status.find("incomplete coverage"), std::string::npos);
+            ASSERT_FALSE(control.result.empty());
             const auto result = nlohmann::json::parse(control.result);
             EXPECT_EQ(result.at("identity_complete"), false);
             EXPECT_EQ(result.at("identity_supported"), !inspect_unsupported);

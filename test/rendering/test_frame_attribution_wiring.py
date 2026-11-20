@@ -3466,7 +3466,8 @@ class DeferredDiagnosticLeaseWiring(unittest.TestCase):
         self.assertNotIn("if (!complete)", finish)
         gather = block(source, "void DebugViewPass::finish_frame(")
         self.assertIn('"Identity snapshot (incomplete coverage)"', gather)
-        self.assertIn('{"identity_complete", m_snapshot->identity_complete}', gather)
+        inspect = block(source, "void DebugViewPass::inspect_snapshot(")
+        self.assertIn('{"identity_complete", m_snapshot->identity_complete}', inspect)
         self.assertIn("m_snapshot->identity_complete && kind != ProducerKind::Unsupported", gather)
         readback = block(read(CLIENT / "rendering/DiagnosticReadback.h"),
                          "class DiagnosticFrameCapture")
