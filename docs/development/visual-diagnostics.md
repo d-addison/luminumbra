@@ -530,8 +530,9 @@ Keep `diff-render-health.ps1`, native shader-health checks and current threshold
 
 ## E: temporal audits and all-features captures
 
-Temporal plan admission is implemented, as are the profile selection and GL-free
-capability resolver described under E3; sequence execution, E2 and the rest of E3
+Temporal plan admission and offline temporal measurement, qualification machinery
+and worst-event montages are implemented, as are the profile selection and GL-free
+capability resolver described under E3; native sequence execution and the rest of E3
 remain planned. Neither adds a capture guarantee, metric enforcement or CI job.
 The inventory below distinguishes current capture behavior from the proposed
 all-features contract. Existing specialized gates remain useful and retain their
@@ -840,15 +841,15 @@ all simulation/presentation substeps, not just saved frames.
 
 ### E2: temporal metrics and qualification
 
-Implemented E2a offline measurements: `tools/gates/check-temporal-capture.py
+Implemented offline measurements and qualification machinery: `tools/gates/check-temporal-capture.py
 MANIFEST [--rois PATH]` validates the E1c version-1 plan/order contract and every
 per-frame bundle payload size/hash before comparison, using D1/D2 descriptor,
-ID/AOV and ROI readers. It prints one sorted-key JSON document; only invalid
-input returns nonzero. All five measurements remain advisory or ineligible,
-with coverage/reasons, units, actual tick cadence, unqualified baseline/threshold
-versions and at most eight events per metric (forty per sequence). Qualification,
-worst-event montage publication and native evidence producers remain pending.
-There is no all-features or production threshold claim.
+ID/AOV and ROI readers. It prints one sorted-key JSON document; invalid input and qualified threshold
+misses or unavailable results return nonzero. All shipped ROIs remain advisory,
+with coverage/reasons, units, actual tick cadence and at most eight events per
+metric (forty per sequence). Synthetic fixtures alone exercise qualification;
+no production qualification evidence or thresholds are supplied. Native evidence
+producers remain pending. There is no all-features or production threshold claim.
 
 Reader-only optional evidence lives in each hashed A4 capture manifest's
 `temporal` object, separate from the unchanged E1c sequence format. Version `1`
@@ -925,6 +926,58 @@ Cap ROIs at 64 and metric events at 40 per sequence; reuse bounded rolling
 accumulators and fixed 256-bin histograms, not retained full-resolution maps for
 every frame. Store only the current maps and selected worst-event payloads within
 the E1 output budget.
+
+Temporal baselines are optional `temporal_baselines` lists on the existing D2
+ROI objects selected by `--rois`; the shipped `diagnostic-rois.json` is unchanged.
+The shared reader keeps its D2 default of 32 ROIs/metrics and permits 64 for
+explicit temporal callers. At most 320 baseline entries fit within the same
+one-MiB configuration bound. Each entry has `metric` (one of the five metric
+names), leaf `baseline_version`, `threshold_version` and `backend`, sorted unique
+`cadence_subticks` (actual adjacent intervals in sixtieths of a tick), exact
+`span: [plan_span, start_tick, end_tick]` and inclusive nonnegative `thresholds`.
+A matching backend must be recorded consistently in every capture's `temporal`
+object; absent backend evidence cannot qualify. Entries match only their own ROI,
+metric, backend, cadence and span; duplicate contexts and malformed entries refuse.
+Bounds apply to every emitted sample's score: maximum static RGB delta, flicker
+peak-to-peak residual, pop residual, absolute lighting second-derivative residual,
+or consecutive affected seam samples, respectively. Rolling score extrema retain
+threshold misses even when an event leaves the global top eight.
+
+An entry without `qualification` stays advisory. Qualification evidence has exactly
+`repeated_runs`, `known_good`, `defective` and `review`. Two to sixteen repeated
+runs have distinct leaf `run` identifiers and identical `input_sha256` and
+`result_sha256` pairs. One to sixteen fixtures of each kind carry distinct input
+hashes, result hashes and finite nonnegative `score` values; good scores must fit
+the bounds and defective scores must miss them. All hashes are lowercase SHA-256
+hex strings. Review has a nonempty leaf `owner`, `decision: approved` and the exact
+baseline/threshold versions. Unknown, incomplete, rejected or contradictory
+evidence refuses before measurement; structural validation does not authenticate
+provenance or replace owner review. Synthetic fixture records are not production
+qualification. Results retain `status: advisory|qualified|ineligible` and separate
+`qualification` and `outcome` fields. A qualified unavailable result fails, including
+missing expected samples after earlier usable samples; it never becomes zero or
+pass. The top-level report is `fail` if any qualified result fails or is unavailable.
+
+Run `python3 -I -B tools/gates/build-visual-sweep-montages.py --temporal MANIFEST
+--rois CONFIG --output worst.svg` for a stdlib-only SVG through the existing montage
+builder. Up to forty slots show selected before/current/after raw-channel sampled
+thumbnails, raw adjacent delta and the static attribution mask, with ROI, metric,
+qualification/status/outcome, thresholds, site, camera matrix digest, tick/subtick,
+TOD/weather and sampled draw/asset/pass probes. Missing neighbors and ineligible
+results have explicit unavailable labels; unknown site/TOD/weather stays unknown.
+All retained events take priority over unavailable-only rows; the header reports
+shown/total slots. Each thumbnail is at most 9x9 sampled pixels, not a full-resolution
+map or visual approval. Flicker retains the actual residual extremum and its
+neighbors, rather than the final hold frame. Two packed frames remain the full
+resolution limit; the 256-MiB accumulator reservation includes bounded numeric summaries/indices
+for at most 1,024 active tracks and previews for only forty selected events.
+Flicker rereads at most twenty-four selected neighbor bundles through the same
+descriptor/hash reader after releasing packed maps; producer tracks retain no
+image payloads. Output is exclusively
+created only after sequence validation. Existing D2 SVG and optional PNG behavior
+is unchanged. Registered `TemporalCapturePython` and `TemporalMontagesPython`
+regressions cover synthetic qualification, one-frame defects, evidence refusal,
+determinism, tie order, bounds and labelled failure slots.
 
 ### E3: all-features profile and non-vacuous evidence
 
@@ -1060,7 +1113,7 @@ edits when parallel branches join. No new required CI checks are part of any row
 | E1c: site sequence driver | `src/luminumbra_client/main_client.cpp`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `src/luminumbra_client/core/ScenarioRunnerImpl.h`; `rendering/TemporalAudit.cpp`; `test/rendering/temporal_sequence_test.cpp`; `test/CMakeLists.txt`; `tools/gates/validate-engine-frontier.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E1b, A4, D1. GL-free protocol and optional version-1 completion-manifest transport implemented with registered sequence/readiness/phase/creature-tick and file-publication regressions. The manifest transport slice changes `rendering/TemporalAudit.h/.cpp`, `test/rendering/temporal_sequence_test.cpp`, `src/luminumbra_common/sources.cmake` (link the unchanged SHA-256 implementation) and this document (5). App/site admission, A4 reservations/runtime transport and existing frontier action wiring remain pending; native fixed-site capture is native-pending. Shipping startup still refuses execution. No all-features claim before E3. |
 | E1d: manifest-aware assembly | `tools/timelapse.py`; `tools/gates/test_temporal_assembly.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/visual-regression.md`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (8) | Implemented offline after E1c and D1: explicit `--manifest PATH` / `build(..., manifest=PATH)` locator for any filename inside or outside the frame directory, file-identity exclusion, complete/version/plan-order/hash admission, bounded payload and decoded-image work, staged encoder publication and unchanged default legacy pipeline without discovery. Invalid explicit locators refuse without fallback. Stdlib-only locator/identity/manifest/order/hash/partial-input/encoder-failure/budget/legacy-parity regressions are registered in PYTHON_TESTS and CTest; the existing generic workflow invokes the registry. Native sequence capture, metric qualification and all-features qualification remain pending. |
 | E2a: temporal measurements | `tools/gates/check-temporal-capture.py`; `tools/gates/test_temporal_capture.py`; `tools/gates/check-diagnostic-capture.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (8) | Implemented offline after E1d, D1, D2: all five advisory measurements reuse verified D1/D2 readers and the E1c plan/order contract. Registered stdlib-only fixtures cover positive/defective sequences, unknown metadata, empty masks, sample/coverage/steady-window eligibility, stable identity under pixel/ID reordering, invalid input and deterministic bounded reports. Qualification and native evidence remain pending. Avoids owned rendering files. |
-| E2b: qualification and worst events | `tools/gates/check-temporal-capture.py`; `tools/gates/test_temporal_capture.py`; `tools/gates/baselines/diagnostic-rois.json`; `tools/gates/build-visual-sweep-montages.py`; `tools/gates/test_temporal_montages.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E2a and relevant B2/C2 contributions. Register qualification-status, repeated-run, injected-defect and labelled failure-slot tests in PYTHON_TESTS/CTest. Threshold enforcement requires separately reviewed qualification evidence. Coordinate shared ROI/montage edits. |
+| E2b: qualification and worst events | `tools/gates/check-temporal-capture.py`; `tools/gates/test_temporal_capture.py`; `tools/gates/check-diagnostic-capture.py`; `tools/gates/build-visual-sweep-montages.py`; `tools/gates/test_temporal_montages.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | Implemented offline qualification machinery and labelled worst-event SVGs after E2a. Registered synthetic qualification-status, repeated-run, injected-defect, tie/cap and labelled failure-slot tests in PYTHON_TESTS/CTest. The shared ROI reader extends limits only for temporal callers; shipped baselines remain unchanged and advisory. Native evidence and production threshold qualification remain pending. |
 | E3a: profile and capability manifest | `rendering/CaptureFeatureProfile.h`; `rendering/CaptureFeatureProfile.cpp`; `src/luminumbra_client/sources.cmake`; `src/luminumbra_client/core/RuntimeScenarioConfig.h`; `src/luminumbra_client/core/RuntimeScenarioConfig.cpp`; `test/rendering/capture_feature_profile_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After A4, D1; may precede E1. Register GL-free profile/capability/unknown-feature/incompatible-option tests. Default every unimplemented adapter to unsupported. Coordinate configuration ownership. |
 | E3b: shared app and scenario policy | `src/luminumbra_client/main_client.cpp`; `src/luminumbra_client/app/ClientAppContext.h`; `src/luminumbra_client/app/CaveFlourishes.cpp`; `src/luminumbra_client/core/ScenarioRunnerDrive.cpp`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `rendering/CaptureFeatureProfile.cpp`; `test/rendering/capture_feature_policy_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `docs/visual-regression.md` (10) | After E3a and E1c. Coordinate app/scenario/cave ownership; register ordinary-play equivalence and profile tests across timelapse, scan, general scenario, TOD/weather and both headless legs, including no-ui and determinism options. Remove suppression only for admitted profile runs. |
 | E3c: sweep profile adapter | `scenarios/WorldVisualSweep.cpp`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `rendering/TemporalAudit.cpp`; `rendering/CaptureFeatureProfile.cpp`; `test/rendering/temporal_sweep_test.cpp`; `test/CMakeLists.txt`; `tools/gates/validate-engine-frontier.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E3b. Coordinate sweep ownership. Register exact-tick sweep/particle-continuity/creature tests; existing still matrix keeps its pins. Feature-incompatible camera/profile combinations refuse explicitly. |
