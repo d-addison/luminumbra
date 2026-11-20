@@ -971,6 +971,48 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         reusable = self.workflows["windows-build.yml"]
         self.assertIn("  workflow_call:", reusable)
         self.assertNotIn("actions/cache", reusable)
+        daily = (ROOT / ".github/workflows/windows-daily.yml").read_text(encoding="utf-8")
+        refresh_script = ("git ls-files -z -- 'worlds/atlas/presets-rev6/*.json' | "
+                          "git checkout-index --force -z --stdin")
+        for workflow in (reusable, daily):
+            for job_id, job in jobs(workflow).items():
+                blocks = steps(job)
+                for index, checkout in enumerate(blocks):
+                    if "uses: actions/checkout@" not in checkout:
+                        continue
+                    with self.subTest(job=job_id):
+                        refresh = blocks[index + 1]
+                        self.assertTrue(refresh.startswith("      - name: Refresh frozen preset bytes\n"))
+                        self.assertEqual(value(refresh, "shell", 8), "bash")
+                        self.assertEqual(value(refresh, "run", 8), refresh_script)
+                        self.assertIsNone(value(refresh, "if", 8))
+                        self.assertIsNone(value(refresh, "continue-on-error", 8))
+        # Materialize into a separate worktree without changing the source index.
+        # Model stale CRLF even though the tracked files now have -text attributes.
+        with tempfile.TemporaryDirectory(prefix="frozen preset bytes ") as temporary:
+            directory = Path(temporary)
+            preset_dir = directory / "worlds/atlas/presets-rev6"
+            preset_dir.mkdir(parents=True)
+            paths = sorted((ROOT / "worlds/atlas/presets-rev6").glob("*.json"))
+            for path in paths:
+                (preset_dir / path.name).write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+            sentinel = directory / "unrelated.txt"
+            sentinel.write_bytes(b"keep\r\n")
+            # --prefix redirects every output; checkout-index only reads the index.
+            materialize = value(refresh, "run", 8).replace("--force -z", '--force --prefix="$FROZEN_OUTPUT/" -z')
+            result = run_bash_script(materialize, cwd=ROOT, env=dict(os.environ, FROZEN_OUTPUT=directory.as_posix()),
+                                     capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for path in paths:
+                self.assertEqual((preset_dir / path.name).read_bytes(), path.read_bytes(), path.name)
+            self.assertEqual(sentinel.read_bytes(), b"keep\r\n")
+            for failed in ("ls-files", "checkout-index"):
+                refusal = ('git() { if [[ "$1" == "' + failed + '" ]]; then return 7; fi; '
+                           'command git "$@"; }\n')
+                result = run_bash_script(refusal + materialize, cwd=ROOT,
+                                         env=dict(os.environ, FROZEN_OUTPUT=directory.as_posix()),
+                                         capture_output=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0, failed)
         for job_id, job in jobs(reusable).items():
             if job_id == "changes":
                 for output in ("needs_cpp=true", "needs_python=true", "needs_heavy=true"):
@@ -1429,11 +1471,11 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
     def test_relocated_windows_job_definitions_are_pinned(self):
         # Retain whole-job pins after moving the full Windows coverage out of CI.
         expected = {
-            "changes": "c882d6171357b4472c24e205e1e93b2b0a2712bf4e2ed67e9ad5f4ea039cf562",
-            "windows-msvc": "d0e2abdce03da0f9a2338ba50914da691f98fda7a0905f2c027587de0ba98858",
-            "windows-ucrt64": "af838ea52445c3dec53b98dc2a2d4b8a97dd545a243490118b314f6d91e51329",
-            "windows-msvc-result": "b7ac3a695046fb6674f05e8cade0ada71e6265cf38e6c50ed9a3dc9b17cf4871",
-            "windows-ucrt64-result": "9a918a89c4b910387a63f276bfc917757c2c884147ac44dfa165994454fe3061",
+            "changes": "e543e9f9f2c8e512a6b326c0ceef15c7bdcae4c5426f869b0b23cd7d3c76a1e0",
+            "windows-msvc": "dbdbe1329dcdb794ab3bd996356fd3a856bb4dd2a0819a6e06a7db24760e7e17",
+            "windows-ucrt64": "00cb28aa05d60658a3d49dfdef4831400e0272a489609b14774d61f0ce394ad2",
+            "windows-msvc-result": "8e315948d85ec033cbbea79be9e099f0a8b02374ee1b43f301e013581190a2cb",
+            "windows-ucrt64-result": "351b929db9c9ba222f01b186d15852d16172f51bd931ba0dd925cce01429d89c",
         }
         actual = jobs(self.workflows["windows-build.yml"])
         self.assertEqual(set(actual), set(expected))
