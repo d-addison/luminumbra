@@ -99,10 +99,19 @@ class RegionAuthorityWiring(unittest.TestCase):
                               "SleepingInteriorRefundsExcludeBorderOnlyDemandAndCannotStarveSources)")
         for token in ("{31, 32, 34, 36}", "tick <= 32", "ledger.schedule(WorldClock(tick))",
                       "UpdateRegionalFromSimulation(", "completed, 480)", "work.visits",
-                      "EXPECT_EQ(carried, 0u);", "EXPECT_LE(carried, world::water_share::kQ32);",
+                      "3 * world::water_share::kQ32 / 4;",
+                      "const auto previous = ledger.water_debts().find({1, 0});",
                       "if (tick == 8)", "EXPECT_GT(first_steps, 0u);",
                       "EXPECT_GT(work.source_mm, 0);", "EXPECT_GT(refunds, 0u);"):
             self.assertIn(token, regression)
+        self.assertIn("const bool second_funded = "
+                      "ledger.records().at({1, 0}).water_cursor != cursor;", regression)
+        self.assertEqual(function(regression, "if (second_executed)"),
+                         "EXPECT_TRUE(second_funded); "
+                         "EXPECT_EQ(carried + world::water_share::kQ32, credited);")
+        self.assertEqual(function(regression, "else if (second_funded)"),
+                         "++refunds; EXPECT_EQ(carried, 0u);")
+        self.assertIn("else { EXPECT_EQ(carried, credited); }", regression)
         self.assertNotIn("Planning::Build(", regression)
 
     def test_simulation_filters_large_due_schedules_before_both_planning_passes(self):

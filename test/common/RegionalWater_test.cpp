@@ -3822,6 +3822,10 @@ TEST(RegionalWaterAdmission, SleepingInteriorRefundsExcludeBorderOnlyDemandAndCa
     for (std::uint64_t tick = 1; tick <= 32; ++tick) {
         SCOPED_TRACE(tick);
         const auto cursor = ledger.records().at({1, 0}).water_cursor;
+        const auto previous = ledger.water_debts().find({1, 0});
+        // One interior window credits the four funding candidates in a 1:3 ratio.
+        const auto credited = (previous == ledger.water_debts().end() ? 0 : previous->second) +
+                              3 * world::water_share::kQ32 / 4;
         std::vector<world::RegionWork> completed;
         ASSERT_NO_THROW(water.UpdateRegionalFromSimulation(
             registry, {}, ledger, ledger.schedule(WorldClock(tick)), completed, 480));
@@ -3830,14 +3834,22 @@ TEST(RegionalWaterAdmission, SleepingInteriorRefundsExcludeBorderOnlyDemandAndCa
         EXPECT_LE(work.visits.size(), 1u);
         const auto debt = ledger.water_debts().find({1, 0});
         const auto carried = debt == ledger.water_debts().end() ? 0 : debt->second;
-        EXPECT_LE(carried, world::water_share::kQ32);
+        // With one window and a three-column ring, every grant changes the cursor.
+        const bool second_funded = ledger.records().at({1, 0}).water_cursor != cursor;
         const bool second_executed =
             std::binary_search(work.visits.begin(), work.visits.end(), second);
-        if (ledger.records().at({1, 0}).water_cursor != cursor && !second_executed) {
+        if (second_executed) {
+            EXPECT_TRUE(second_funded);
+            EXPECT_EQ(carried + world::water_share::kQ32, credited);
+        } else if (second_funded) {
             ++refunds;
             // The only eligible endpoint is border-only on a sleeping grant.
             // No funded interior executes, so the refund cap is zero.
             EXPECT_EQ(carried, 0u);
+        } else {
+            // water_share::allocate ranks post-credit debt once, with key-order ties.
+            // Reconcile preserves ungranted credit even when it exceeds one window.
+            EXPECT_EQ(carried, credited);
         }
         if (std::binary_search(work.visits.begin(), work.visits.end(), first)) {
             ++first_steps;
