@@ -5885,7 +5885,10 @@ bool GameSession::ReadPreparedWorldState(
         if (!Persistence::ReadSavedJson(save_dir / "world_info.json",
                                         Persistence::SavedInputLimits::kMetadataBytes,
                                         metadata,
-                                        missing)) {
+                                        missing,
+                                        true,
+                                        nullptr,
+                                        stop)) {
             state.input_refused = true;
             error = "Saved-input admission refused: unreadable owner metadata.";
             return false;

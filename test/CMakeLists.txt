@@ -630,6 +630,7 @@ add_executable(render_smoke_test
     rendering/FarWorldLegacyIsolation_test.cpp
     rendering/FarWorldShadow_test.cpp
     rendering/FarWorldFogGl_test.cpp
+    rendering/TerrainCoverageCaptureGl_test.cpp
     rendering/FarWorldWaterGl_test.cpp
     rendering/SkyAtmosphereLutGl_test.cpp
     rendering/TerrainCullingTestPeer.h
@@ -776,6 +777,8 @@ endif()
 # default-OFF, so a headless flip is vacuous — this is the non-vacuous proof).
 add_executable(pass_context_test
     rendering/pass_context_test.cpp
+    rendering/diagnostic_inspector_test.cpp
+    rendering/diagnostic_contributions_test.cpp
     # Evidence reuse, stable surface slots and column-local invalidation on both backends.
     rendering/foliage_rebuild_test.cpp
     # Includes deterministic CPU/compute work budgets, idle zero and stale results.
