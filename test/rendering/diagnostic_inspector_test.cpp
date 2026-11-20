@@ -632,11 +632,28 @@ TEST_F(DiagnosticInspectorGl, ShaderGatherUsesTheRequestedTexelForEveryAov) {
     for (const auto& [mode, value] :
          std::array<std::pair<int, std::uint32_t>, 5>{{{Pass::DrawId, 9},
                                                        {Pass::MeshId, 4},
-                                                       {Pass::Lod, 2},
+                                                       {Pass::Lod, 2 + 1},
                                                        {Pass::Chunk, 7},
                                                        {Pass::MeshPath, 4}}}) {
         shader.setInt("u_mode", mode);
         check_color(hashed_color(value));
+    }
+    {
+        // LOD 0 is the common level; it must not render as black.
+        auto lod0_id = ids[1];
+        lod0_id[2] = 0;
+        metadata[18] = lod0_id;
+        glBufferSubData(GL_TEXTURE_BUFFER, 0, sizeof(metadata), metadata.data());
+        glTexSubImage2D(
+            GL_TEXTURE_2D, 0, 1, 1, 1, 1, GL_RGBA_INTEGER, GL_UNSIGNED_INT, lod0_id.data());
+        shader.setInt("u_mode", Pass::Lod);
+        const auto lod0 = hashed_color(1);
+        EXPECT_GT(lod0[0] + lod0[1] + lod0[2], 0);
+        check_color(lod0);
+        metadata[18] = ids[1];
+        glBufferSubData(GL_TEXTURE_BUFFER, 0, sizeof(metadata), metadata.data());
+        glTexSubImage2D(
+            GL_TEXTURE_2D, 0, 1, 1, 1, 1, GL_RGBA_INTEGER, GL_UNSIGNED_INT, ids[1].data());
     }
     shader.setInt("u_mode", Pass::Producer);
     const std::array<std::array<int, 3>, 6> producer_colors = {{{255, 0, 255},

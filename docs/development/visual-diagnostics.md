@@ -284,7 +284,7 @@ limit inspection to one pixel per user request and one retained frozen frame.
 In the developer console's Debug views panel, enable **Identity diagnostics**.
 Named snapshot modes are draw-id (6), mesh-id (7), lod (8), chunk (9),
 producer-owner (10) and mesh-path (11); modes 0 through 5 retain their existing
-meaning. Refresh captures one render frame's ID plane and draw table together.
+meaning. The lod view hashes `lod + 1`, so the common LOD 0 is never black. Refresh captures one render frame's ID plane and draw table together.
 The view remains frozen until the next explicit refresh; moving the camera does
 not change the retained IDs. Resizing hides an incompatible snapshot until refresh.
 The same six names are accepted by `--debug-view`; selecting one explicitly
