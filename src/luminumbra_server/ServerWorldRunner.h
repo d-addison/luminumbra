@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <system_error>
 
@@ -24,6 +25,7 @@
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
+#include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/world/ActiveRegionLedger.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/PlayerAvatar.h"
@@ -296,6 +298,35 @@ public:
     // avatar_count == 0). Read-only view for tests/telemetry.
     const std::vector<World::PlayerAvatar>& Avatars() const {
         return m_avatars;
+    }
+
+    // Internal continuation entry points for a caller that restores owners in
+    // player-ID order instead of using the existing Boot spawn path. Supply the
+    // remaining frozen captures and finish the roster before stepping or spawning.
+    bool CaptureAvatarOwner(std::size_t index, World::PlayerAvatarOwnerState& output) const {
+        return m_session && index < m_avatars.size() &&
+               m_session->CaptureAvatarOwner(m_avatars[index], index, output);
+    }
+
+    bool RestoreAvatarOwner(const World::PlayerAvatarOwnerState& state,
+                            std::span<const World::PhysicsOwnerState> remaining_frozen = {}) {
+        if (!m_session || m_session->GetSimulationTickCount() != 0 ||
+            state.avatar.player_id != m_avatars.size()) {
+            return false;
+        }
+        auto* physics = m_session->GetPhysicsSystem();
+        if (!physics || physics->avatar_character_slot_count() != m_avatars.size() ||
+            m_avatars.size() >= Systems::PhysicsSystem::kMaxRestoredAvatars) {
+            return false;
+        }
+        m_avatars.reserve(m_avatars.size() + 1);
+        World::PlayerAvatar avatar;
+        std::size_t index = 0;
+        if (!m_session->RestoreAvatarOwner(state, avatar, index, remaining_frozen)) {
+            return false;
+        }
+        m_avatars.push_back(avatar);
+        return true;
     }
 
     //  gate: the per-tick availability-set trace captured during the last
