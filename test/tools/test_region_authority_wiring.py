@@ -1119,7 +1119,7 @@ class SimulationCollisionWiring(unittest.TestCase):
         for token in ("m_player_character ||", "!ParseController(state, recipe)",
                       "recipe.kind != 2u", "!SimulationHorizon::valid(",
                       "recipe.feet.GetX()", "recipe.feet.GetY()", "recipe.feet.GetZ()",
-                      "!ReferencesExist(recipe, *m_jolt_system)", "return false;"):
+                      "!ReferencesExist(recipe, *m_jolt_system, std::span<const std::uint32_t>{})", "return false;"):
             self.assertIn(token, restore)
             for allocation in ("FeetCapsule(", "PrepareController("):
                 self.assertLess(restore.index(token), restore.index(allocation))
@@ -1138,7 +1138,7 @@ class SimulationCollisionWiring(unittest.TestCase):
         header = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.h").read_text(encoding="utf-8")
         source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(encoding="utf-8")
         self.assert_player_continuation_session_bridge(header, source)
-        for token in ("!SimulationHorizon::valid(", "!ReferencesExist(recipe, *m_jolt_system)",
+        for token in ("!SimulationHorizon::valid(", "!ReferencesExist(recipe, *m_jolt_system, std::span<const std::uint32_t>{})",
                       "character->RestoreState(recipe.owner);",
                       ".capture_player_owner(output)", ".restore_player_owner(state)"):
             with self.subTest(missing=token), self.assertRaises(AssertionError):
