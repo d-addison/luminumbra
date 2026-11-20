@@ -17,7 +17,7 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | G-buffer ID attachment | Implemented for explicit deferred captures | `GBufferPass` holds an `AttachmentLease` during deferred submission; detachment and lease release precede completion, including rollback, recreation, retirement and exceptional exits; registered `GBufferLeaseGl.*` and `DiagnosticAttributionGl.*` regressions; native execution pending |
 | Exact producer coverage | Partial | Inside an explicit producer scope, file-backed static instances and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier with unsupported generated-mesh metadata. Live terrain MDI, ladder backend, authored surfaces and tree impostors explicitly invalidate coverage; procedural static meshes also remain unsupported. Later plant/decal stages are outside the scope. Foliage has a guarded shader output but no instrumented forward submission; the separate contributor attachment API is unused |
 | Bundle transactions and opt-in admission | GL-free core implemented; runtime integration pending | `DiagnosticCapture.h/.cpp` resolves options, streams normalized planes, joins draw records, enforces staging budgets and publishes completion last using identity-checked ownership. `diagnostic_bundle_test` covers public transports and filesystem refusal/rollback; native execution pending. Runtime setup refuses enabled diagnostics before output until the completed-frame adapter is integrated |
-| ID views and single-pixel inspector | Implemented as explicit render-thread snapshots | `DebugViewPass`; developer-console debug-view panel; registered `DiagnosticInspector.*` and `DiagnosticInspectorGl.*` regressions in `pass_context_test`; native execution pending. Other B views and viewport picking remain planned |
+| ID views and single-pixel inspector | Implemented as explicit render-thread snapshots | `DebugViewPass`; developer-console debug-view panel; registered `DiagnosticInspector.*` and `DiagnosticInspectorGl.*` regressions in `pass_context_test`; native execution pending. Other B views remain planned |
 | Linux shader compilation and software-GL reference scenes | Partial | Fast Linux steps and material, cutout, night and terrain fixtures registered; bounded sky/terrain shader replays checked under llvmpipe; native scene target execution pending; dusk continuity diagnostic pending issue #918; no required-check or ruleset changes |
 | Bundle validity and image checks | Implemented for schema 1 and reader-only schema 2 | `check-diagnostic-capture.py` and registered `DiagnosticCapturePython` synthetic regressions validate bundles without a renderer. ROI coverage, validity, weather and edge metrics plus worst-pixel SVG crops are implemented; shipped ROIs are advisory |
 | Capture feature profile and capability manifest | Implemented as GL-free setup logic; app wiring pending | `CaptureFeatureProfile.h/.cpp`; strict `--capture-feature-profile=none\|all_features` runtime selection; registered `CaptureFeatureProfile.*` regressions; native execution pending |
@@ -298,23 +298,40 @@ far volume blue; live ownership has full brightness, legacy far 70% and ladder f
 and explicit magenta hatching for unknown provenance. Producer spellings outside
 the known renderer families remain unsupported. This does not expand producer coverage.
 
-Open **Single-pixel inspector**, enter top-left render-attachment coordinates and
-press **Refresh snapshot / inspect selected pixel**. The panel displays schema-1
+Open **Single-pixel inspector** and enable **Arm viewport picking**. A left click
+outside UI panels selects a top-left render-attachment texel; disarmed and
+out-of-image clicks do nothing. One helper converts GLFW window coordinates
+through framebuffer DPI and the displayed image rectangle to render coordinates.
+The panel labels render attachment and output framebuffer resolutions separately.
+Coordinates can also be entered directly with **Inspect selected pixel**. The panel displays schema-1
 probe JSON and the exact joined draw/mesh records (including path, chunk, LOD,
 owner, pass and supported status). Albedo is linear, normal is signed view-space,
 depth is raw hardware depth and material is the exact normal attachment alpha ID.
-One fragment gathers nearest, unfiltered values at that coordinate into a fixed
-48-byte buffer; one buffer readback occurs per explicit valid request while the
-inspector is open. Closing the panel closes the inspector. Closed, idle, disabled,
+The zoom displays a fixed 9 by 9 neighbourhood of linear deferred albedo with
+nearest-texel sampling and edge clamping. Only its centre fragment gathers values
+into the existing fixed 48-byte buffer; one buffer readback occurs per explicit
+valid request while the inspector is open. No zoom image is read back.
+**Copy pixel JSON** copies the schema-1 probe itself, separately from the richer
+panel record. Closing the panel closes the inspector. Closed, idle, disabled,
 invalid-coordinate and frozen-replay paths perform no inspector readback.
+
+**Freeze frame** retains one deferred albedo image, normal/material and depth
+textures together with that frame's IDs, camera and draw table. Frozen inspection
+uses only these retained attachments and metadata, even as the live camera and
+scene change. The panel previews the retained albedo image. Unfrozen inspection
+captures a new frame only on request; **Refresh snapshot / inspect selected pixel**
+releases freeze and requests a new capture. Output resizing or render-scale changes
+clear the selected pixel, pending request and frozen frame, with a visible status.
+The three retained AOVs plus IDs require at most 448 MiB GPU storage at the existing
+16,777,216-pixel target bound, plus bounded draw metadata; only one frame is retained.
 
 Snapshot registry preparation is capped by 65,536 draws and 16 MiB schema-1 JSON;
 its GPU lookup contains at most 131,074 RGBA32UI texels. No registry scan runs on
 idle frames. Targets and shader variants are created only on explicit diagnostic
 refresh, never on the default rendering path. A competing capture scope refuses
-the snapshot request until that scope releases ownership. Viewport/DPI picking,
-AOV image freezing/zoom, extra attachment selection and bundle requests are later
-view/inspector work; coordinate inspection and identity-image freezing are available here.
+the snapshot request until that scope releases ownership. Frozen inspections need
+no new producer scope. Extra attachment selection and runtime bundle requests remain
+later work; schema-1 clipboard export is available here.
 
 ## C: Linux shader lane
 
