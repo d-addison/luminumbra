@@ -118,7 +118,9 @@ public:
         static std::atomic<std::uint64_t> counter{0};
         const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
         std::string name = "lum_snaptxn_";
-#ifndef _WIN32
+#if defined(_WIN32)
+        name += std::to_string(::GetCurrentProcessId()) + "_";
+#else
         name += std::to_string(static_cast<long long>(::getpid())) + "_";
 #endif
         name += std::to_string(counter.fetch_add(1)) + "_" + std::to_string(stamp);
@@ -535,6 +537,21 @@ void ComputeFinalTree(const fs::path& baseline_dir, TreeMap& out) {
 #endif
 
 } // namespace
+
+TEST(SaveTransaction, TemporaryRootsAreProcessScopedAndDistinct) {
+    const TempSave first, second;
+#if defined(_WIN32)
+    const auto process = std::to_string(::GetCurrentProcessId());
+#else
+    const auto process = std::to_string(static_cast<long long>(::getpid()));
+#endif
+    const auto prefix = fs::path("lum_snaptxn_" + process + "_").native();
+    EXPECT_TRUE(first.path().filename().native().starts_with(prefix));
+    EXPECT_TRUE(second.path().filename().native().starts_with(prefix));
+    EXPECT_NE(first.path(), second.path());
+    EXPECT_TRUE(fs::is_directory(first.path() / "chunks/region"));
+    EXPECT_TRUE(fs::is_directory(second.path() / "chunks/region"));
+}
 
 TEST(SaveTransaction, MemberPathAllowListAcceptsOnlyKnownShapes) {
     const std::vector<std::string> accepted = {
@@ -2176,6 +2193,7 @@ namespace {
 struct WindowsInterruptionState {
     int cut = 0;
     int calls = 0;
+    int rollback_cut = 0;
     bool include_disk_events = false;
 };
 WindowsInterruptionState& WindowsInterruption() {
@@ -2188,6 +2206,19 @@ void WindowsKillHook(const char* step, const fs::path&) {
         return;
     if (++state.calls == state.cut)
         std::_Exit(7);
+}
+
+void WindowsRecordHook(const char* step, const fs::path& path) {
+    auto& state = WindowsInterruption();
+    if (!state.include_disk_events && std::string_view(step).starts_with("crash-"))
+        return;
+    ++state.calls;
+    const auto member = state.include_disk_events ? "world_info.json" : "aether_state.efs";
+    // Retain the original earliest visible replacement, before source retirement
+    // in the disk matrix, so recovery still exercises the linked staging entry.
+    const auto visible = state.include_disk_events ? "crash-publication-linked" : "after-replace";
+    if (state.rollback_cut == 0 && std::string_view(step) == visible && path.filename() == member)
+        state.rollback_cut = state.calls;
 }
 
 std::wstring WindowsTestEnv(const wchar_t* name) {
@@ -2305,117 +2336,109 @@ TEST(SaveTransaction, WindowsInterruptionChild) {
                    : 9);
 }
 
-TEST(SaveTransaction, WindowsEveryDiskTransitionPreservesCommitAndNeutralStaging) {
+namespace {
+// Each CTest entry executes at most two cuts. Together the entries retain all
+// 256 disk cuts and all 200 publication cuts, including a successful completion.
+class WindowsTransactionTransitions : public ::testing::TestWithParam<int> {};
+
+void CheckWindowsTransitions(int batch, bool disk_events, bool recovery) {
     TempSave base, final, work;
-    ASSERT_TRUE(CommitOnce(base.path(),
-                           1,
-                           {{"world_info.json", "old metadata"},
-                            {"aether_state.efs", "old energy"},
-                            {"chunks/region/world-manifest.json", "old manifest"}}));
+    if (disk_events) {
+        ASSERT_TRUE(CommitOnce(base.path(),
+                               1,
+                               {{"world_info.json", "old metadata"},
+                                {"aether_state.efs", "old energy"},
+                                {"chunks/region/world-manifest.json", "old manifest"}}));
+    } else {
+        ASSERT_TRUE(CommitOnce(base.path(),
+                               1,
+                               {{"world_info.json", "w0"},
+                                {"aether_state.efs", "e0"},
+                                {"chunks/region/active-regions.arl", "a0"}}));
+    }
     const auto baseline = Tree(base.path());
     CopyTree(base.path(), final.path());
-    ASSERT_TRUE(RunInventoryScenario(final.path()));
+    auto& state = WindowsInterruption();
+    state = {};
+    state.include_disk_events = disk_events;
+    {
+        const HookGuard hook(&WindowsRecordHook);
+        ASSERT_TRUE(disk_events ? RunInventoryScenario(final.path())
+                                : WindowsScenario(final.path()));
+    }
     const auto finished = Tree(final.path());
+    const int bound = disk_events ? 256 : 200;
+    ASSERT_LT(state.calls, bound);
+    const int rollback_cut = state.rollback_cut;
+    ASSERT_GT(rollback_cut, 0);
     bool complete = false;
-    int rollback_cut = 0;
-    for (int cut = 1; cut <= 256 && !complete; ++cut) {
+    constexpr int cuts_per_batch = 2;
+    const int first = batch * cuts_per_batch + 1;
+    const int last = std::min(first + cuts_per_batch - 1, bound);
+    for (int cut = first; cut <= last && !complete; ++cut) {
         SCOPED_TRACE(cut);
         CopyTree(base.path(), work.path());
-        const auto exit_code = WindowsTxnChild(work.path(), cut, false, true);
+        if (recovery) {
+            const auto interrupted = WindowsTxnChild(work.path(), rollback_cut, false, disk_events);
+            ASSERT_TRUE(interrupted.has_value());
+            ASSERT_EQ(interrupted.value_or(9), 7u);
+            ASSERT_TRUE(journal_pending(work.path()));
+            ASSERT_EQ(Get(snapshot_index_path(work.path())),
+                      baseline.at(kSnapshotIndexRelativePath));
+            ASSERT_EQ(Get(work.path() / (disk_events ? "world_info.json" : "aether_state.efs")),
+                      disk_events ? "new metadata" : "e1");
+        }
+        const auto exit_code = WindowsTxnChild(work.path(), cut, recovery, disk_events);
         ASSERT_TRUE(exit_code.has_value());
-        ASSERT_TRUE(exit_code.value_or(9) == 0 || exit_code.value_or(9) == 7);
-        if (rollback_cut == 0 && Get(work.path() / "world_info.json") == "new metadata" &&
-            Get(snapshot_index_path(work.path())) == baseline.at(kSnapshotIndexRelativePath))
-            rollback_cut = cut;
+        const DWORD code = exit_code.value_or(9);
+        ASSERT_TRUE(code == 0 || code == 7) << code;
         const auto neutral = UnregisteredStaging(work.path());
         std::vector<std::string> errors;
         ASSERT_NE(recover_pending_journal(work.path(), &errors), RecoveryOutcome::Failed)
             << (errors.empty() ? "" : errors.front());
-        const auto recovered = RecoveredCommittedTree(work.path(), neutral);
-        EXPECT_TRUE(recovered == baseline || recovered == finished);
-        EXPECT_EQ(recover_pending_journal(work.path(), nullptr), RecoveryOutcome::NothingToDo);
-        ASSERT_TRUE(CommitOnce(work.path(), 6, {{"world_info.json", "next"}}));
-        complete = exit_code.value_or(9) == 0;
-    }
-    ASSERT_TRUE(complete);
-    ASSERT_GT(rollback_cut, 0);
-    complete = false;
-    for (int cut = 1; cut <= 256 && !complete; ++cut) {
-        SCOPED_TRACE(cut);
-        CopyTree(base.path(), work.path());
-        const auto interrupted = WindowsTxnChild(work.path(), rollback_cut, false, true);
-        ASSERT_EQ(interrupted.value_or(9), 7u);
-        const auto exit_code = WindowsTxnChild(work.path(), cut, true, true);
-        ASSERT_TRUE(exit_code.has_value());
-        ASSERT_TRUE(exit_code.value_or(9) == 0 || exit_code.value_or(9) == 7);
-        const auto neutral = UnregisteredStaging(work.path());
-        ASSERT_NE(recover_pending_journal(work.path(), nullptr), RecoveryOutcome::Failed);
-        EXPECT_EQ(RecoveredCommittedTree(work.path(), neutral), baseline);
-        EXPECT_EQ(recover_pending_journal(work.path(), nullptr), RecoveryOutcome::NothingToDo);
-        complete = exit_code.value_or(9) == 0;
-    }
-    EXPECT_TRUE(complete);
-}
-
-TEST(SaveTransaction, WindowsKillAtEveryPublicationAndRecoveryStepIsIdempotent) {
-    TempSave base, final, work;
-    ASSERT_TRUE(CommitOnce(base.path(),
-                           1,
-                           {{"world_info.json", "w0"},
-                            {"aether_state.efs", "e0"},
-                            {"chunks/region/active-regions.arl", "a0"}}));
-    const auto baseline = Tree(base.path());
-    CopyTree(base.path(), final.path());
-    ASSERT_TRUE(WindowsScenario(final.path()));
-    const auto finished_tree = Tree(final.path());
-    bool complete = false;
-    bool have_interrupted = false;
-    int interrupted_cut = 0;
-    for (int cut = 1; cut <= 200 && !complete; ++cut) {
-        SCOPED_TRACE(cut);
-        CopyTree(base.path(), work.path());
-        const auto exit_code = WindowsTxnChild(work.path(), cut, false);
-        ASSERT_TRUE(exit_code.has_value());
-        if (!exit_code.has_value())
-            return;
-        const DWORD code = exit_code.value();
-        ASSERT_TRUE(code == 0 || code == 7) << code;
-        if (!have_interrupted && journal_pending(work.path()) &&
-            Get(work.path() / "aether_state.efs") != "e0") {
-            interrupted_cut = cut;
-            have_interrupted = true;
+        const auto recovered =
+            disk_events ? RecoveredCommittedTree(work.path(), neutral) : Tree(work.path());
+        if (disk_events && recovery) {
+            EXPECT_EQ(recovered, baseline);
+        } else {
+            EXPECT_TRUE(recovered == baseline || recovered == finished);
         }
-        std::vector<std::string> errors;
-        ASSERT_NE(recover_pending_journal(work.path(), &errors), RecoveryOutcome::Failed);
         EXPECT_EQ(recover_pending_journal(work.path(), nullptr), RecoveryOutcome::NothingToDo);
-        const auto recovered = Tree(work.path());
-        EXPECT_TRUE(recovered == baseline || recovered == finished_tree);
+        EXPECT_EQ(disk_events ? RecoveredCommittedTree(work.path(), neutral) : Tree(work.path()),
+                  recovered);
+        if (disk_events && !recovery) {
+            ASSERT_TRUE(CommitOnce(work.path(), 6, {{"world_info.json", "next"}}));
+        }
         complete = code == 0;
     }
-    ASSERT_TRUE(complete);
-    ASSERT_TRUE(have_interrupted);
-    complete = false;
-    for (int cut = 1; cut <= 200 && !complete; ++cut) {
-        SCOPED_TRACE(cut);
-        CopyTree(base.path(), work.path());
-        const auto interrupted_exit = WindowsTxnChild(work.path(), interrupted_cut, false);
-        ASSERT_TRUE(interrupted_exit.has_value());
-        ASSERT_EQ(interrupted_exit.value_or(9), 7u);
-        ASSERT_TRUE(journal_pending(work.path()));
-        const auto exit_code = WindowsTxnChild(work.path(), cut, true);
-        ASSERT_TRUE(exit_code.has_value());
-        if (!exit_code.has_value())
-            return;
-        const DWORD code = exit_code.value();
-        ASSERT_TRUE(code == 0 || code == 7) << code;
-        ASSERT_NE(recover_pending_journal(work.path(), nullptr), RecoveryOutcome::Failed);
-        EXPECT_EQ(recover_pending_journal(work.path(), nullptr), RecoveryOutcome::NothingToDo);
-        const auto recovered = Tree(work.path());
-        EXPECT_TRUE(recovered == baseline || recovered == finished_tree);
-        complete = code == 0;
-    }
-    EXPECT_TRUE(complete);
+    // Earlier batches need not reach completion; the final batch must prove
+    // that no unvisited transition lies beyond the unchanged enumeration bound.
+    if (last == bound)
+        EXPECT_TRUE(complete);
 }
+} // namespace
+
+TEST_P(WindowsTransactionTransitions, EveryDiskTransitionPreservesCommitAndNeutralStaging) {
+    CheckWindowsTransitions(GetParam(), true, false);
+}
+TEST_P(WindowsTransactionTransitions, EveryRecoveryDiskTransitionRestoresThePreviousCommit) {
+    CheckWindowsTransitions(GetParam(), true, true);
+}
+INSTANTIATE_TEST_SUITE_P(DiskCuts, WindowsTransactionTransitions, ::testing::Range(0, 128));
+
+// Publication-only cuts have a separate fixture so their original 200-cut bound
+// remains independent of the disk-event matrix.
+namespace {
+class WindowsPublicationTransitions : public ::testing::TestWithParam<int> {};
+} // namespace
+TEST_P(WindowsPublicationTransitions, KillAtEveryPublicationStepIsIdempotent) {
+    CheckWindowsTransitions(GetParam(), false, false);
+}
+TEST_P(WindowsPublicationTransitions, KillAtEveryRecoveryStepIsIdempotent) {
+    CheckWindowsTransitions(GetParam(), false, true);
+}
+INSTANTIATE_TEST_SUITE_P(PublicationCuts, WindowsPublicationTransitions, ::testing::Range(0, 100));
+
 #endif
 
 } // namespace Luminumbra::Persistence
