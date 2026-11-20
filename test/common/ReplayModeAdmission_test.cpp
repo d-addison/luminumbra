@@ -791,7 +791,9 @@ TEST_P(ReplayProducerBoot, CliAndAutomaticReconstructEquivalentAuthorityBoots) {
     ASSERT_TRUE(session.Handshake());
     ASSERT_TRUE(session.Status().replay_error.empty()) << session.Status().replay_error;
     ASSERT_TRUE(peer->SendFrame(net::EncodeInput({1, 1, {}})));
-    ASSERT_EQ(session.PumpTick(1).outcome, net::TickOutcome::Advanced);
+    ASSERT_EQ(session.PumpTick(1).outcome, net::TickOutcome::Finished);
+    EXPECT_EQ(session.Status().agreed_tick, 1u);
+    EXPECT_EQ(runner.TickCount(), 1u);
     net::HashMsg mismatch;
     hooks.capture_hashes(1, mismatch, hooks.user);
     mismatch.world_hash = "different";
@@ -873,6 +875,161 @@ TEST_P(ReplayShippingProducerBoot, ShippingLoopbackAutomaticallyCapturesTheCliBo
 }
 
 INSTANTIATE_TEST_SUITE_P(WeatherProfiles, ReplayShippingProducerBoot, testing::Bool());
+
+TEST_F(ReplayModeAdmission, ScheduledLockstepRefusesMissingOrInvalidCapturedProfileBeforeOutput) {
+    namespace net = Luminumbra::Net;
+    using Schedule = Luminumbra::Systems::WeatherSchedule;
+    using Category = Luminumbra::Systems::WeatherCategory;
+    const Schedule schedule{.phases = {{0, Category::Clear, 0, 0}}, .strike_tick = std::nullopt};
+    Luminumbra::world::GameSession identity;
+    ASSERT_TRUE(identity.SetWeatherSchedule(schedule));
+    net::LockstepConfig config;
+    config.system_config_identity = identity.SystemConfigIdentity();
+    config.preset_content_hash = "preset-content";
+    replay::ReplayHeader header;
+    header.version = replay::kLrec1WeatherVersion;
+    header.seed = replay::kResolvedSeedTag | config.seed;
+    header.preset = config.preset;
+    header.system_config_identity = config.system_config_identity;
+    header.preset_content_hash = config.preset_content_hash;
+    header.weather_schedule = schedule.canonical_bytes();
+    const std::string path = (root / "refused-automatic.lrec").string();
+    {
+        std::ofstream output(path);
+        output << "retained";
+        ASSERT_TRUE(output.good());
+    }
+    const std::array<std::uint16_t, 7> invalid_versions = {replay::kLrec1Version,
+                                                           replay::kLrec1ElidedVersion,
+                                                           replay::kLrec1BootVersion,
+                                                           replay::kLrec1BootElidedVersion,
+                                                           replay::kLrec1WeatherElidedVersion,
+                                                           0,
+                                                           9};
+    // Seven invalid families, missing capture, and ten malformed/conflicting fields.
+    for (unsigned mutation = 0; mutation < 18; ++mutation) {
+        SCOPED_TRACE(mutation);
+        auto invalid = header;
+        if (mutation < invalid_versions.size()) {
+            invalid.version = invalid_versions[mutation];
+        } else {
+            switch (mutation) {
+                case 7: // No captured header.
+                    break;
+                case 8:
+                    invalid.authority_boot.emplace();
+                    break;
+                case 9:
+                    invalid.weather_schedule.clear();
+                    break;
+                case 10:
+                    invalid.weather_schedule.pop_back();
+                    break;
+                case 11:
+                    invalid.weather_schedule.assign(Schedule::kMaxEncodedBytes + 1, '0');
+                    break;
+                case 12:
+                    invalid.seed ^= 1;
+                    break;
+                case 13:
+                    invalid.preset = "other";
+                    break;
+                case 14:
+                    invalid.tick_rate_hz = 0;
+                    break;
+                case 15:
+                    invalid.system_config_identity.clear();
+                    break;
+                case 16:
+                    invalid.preset_content_hash.clear();
+                    break;
+                default:
+                    invalid.weather_schedule.replace(0, 4, "WSC2");
+                    break;
+            }
+        }
+        config.replay_header =
+            mutation == 7 ? nullptr : std::make_shared<const replay::ReplayHeader>(invalid);
+        auto remote = config;
+        remote.local_client_id = config.peer_client_id;
+        remote.peer_client_id = config.local_client_id;
+        auto [local, peer] = net::MakeLoopbackPair();
+        ASSERT_TRUE(peer->SendFrame(net::EncodeHello(net::MakeLockstepHello(remote))));
+        std::size_t captures = 0;
+        net::LockstepHooks hooks;
+        hooks.user = &captures;
+        hooks.capture_hashes = [](std::uint64_t, net::HashMsg&, void* user) {
+            ++*static_cast<std::size_t*>(user);
+        };
+        net::LockstepSession session(config, local.get(), hooks);
+        session.SetDumpPath(path);
+        EXPECT_FALSE(session.Handshake());
+        EXPECT_FALSE(session.Status().handshaken);
+        EXPECT_EQ(session.Status().agreed_tick, 0u);
+        EXPECT_EQ(session.Status().handshake_error, "scheduled weather is unsupported by lockstep");
+        EXPECT_EQ(captures, 0u);
+        EXPECT_EQ(ReadReplayModeFile(path), "retained");
+        EXPECT_FALSE(fs::exists(path + ".incomplete"));
+    }
+    // A valid control makes this regression reject blanket weather refusals too.
+    config.replay_header = std::make_shared<const replay::ReplayHeader>(header);
+    auto remote = config;
+    remote.local_client_id = config.peer_client_id;
+    remote.peer_client_id = config.local_client_id;
+    auto [local, peer] = net::MakeLoopbackPair();
+    ASSERT_TRUE(peer->SendFrame(net::EncodeHello(net::MakeLockstepHello(remote))));
+    net::LockstepSession admitted(config, local.get(), {});
+    admitted.SetDumpPath((root / "admitted-automatic.lrec").string());
+    EXPECT_TRUE(admitted.Handshake());
+    EXPECT_TRUE(admitted.Status().handshaken);
+    EXPECT_TRUE(admitted.Status().replay_error.empty()) << admitted.Status().replay_error;
+    EXPECT_EQ(ReadReplayModeFile(path), "retained");
+}
+
+TEST_P(ReplayModeWeatherRoundtrip, ScheduledShippingLoopbackCapturesChangingWeatherBeforeTickOne) {
+    using Schedule = Luminumbra::Systems::WeatherSchedule;
+    using Category = Luminumbra::Systems::WeatherCategory;
+    const Schedule schedule{.phases = {{0, Category::Clear, 0, 0},
+                                       {2, Category::Rain, 65535, 65535},
+                                       {5, Category::Clear, 0, 0}},
+                            .strike_tick = 3};
+    options.systems_config_override = luminumbra::core::SystemConfig::FromJsonString(
+        GetParam() ? R"({"sim":{"active_regions":{"enabled":true}}})"
+                   : R"({"sim":{"active_regions":{"enabled":false}}})");
+    options.weather_schedule = std::make_shared<const Schedule>(schedule);
+    options.ticks = 30;
+    ASSERT_EQ(RunRecord(options), 0) << logs.str();
+    const auto cli = replay::ReadReplay(options.record_path);
+    ASSERT_TRUE(cli.has_value());
+    if (!cli.has_value()) {
+        return;
+    }
+    options.lockstep_corrupt_tick = 30;
+    options.lockstep_dump_path = (root / "scheduled-loopback.lrec").string();
+    ASSERT_EQ(RunRecordedLockstepLoopback(options), 0) << logs.str();
+    auto automatic = replay::ReadReplay(options.lockstep_dump_path);
+    if (!automatic.has_value()) {
+        automatic = replay::ReadReplay(options.lockstep_dump_path + ".peer");
+    }
+    ASSERT_TRUE(automatic.has_value());
+    if (!automatic.has_value()) {
+        return;
+    }
+    EXPECT_EQ(automatic->header.version, replay::kLrec1WeatherVersion);
+    EXPECT_FALSE(automatic->header.authority_boot.has_value());
+    EXPECT_EQ(automatic->header.weather_schedule, schedule.canonical_bytes());
+    EXPECT_EQ(automatic->header.start_world_hash, cli->header.start_world_hash);
+    ASSERT_EQ(automatic->checkpoints.size(), 1u);
+    ASSERT_EQ(cli->checkpoints.size(), 1u);
+    // The dump may contain the peer's deliberately corrupted checkpoint. Compare
+    // the actual authorities, whose simulations are unchanged by fault injection.
+    const auto artifact = Artifact();
+    EXPECT_EQ(artifact.at("host").at("agreed_tick"), options.ticks);
+    EXPECT_EQ(artifact.at("peer").at("agreed_tick"), options.ticks);
+    EXPECT_EQ(artifact.at("host").at("world_hash"), cli->checkpoints[0].world_hash);
+    EXPECT_EQ(artifact.at("peer").at("world_hash"), cli->checkpoints[0].world_hash);
+    EXPECT_EQ(automatic->tick_count, options.ticks);
+}
 
 TEST_F(ReplayModeAdmission, FailedAutomaticFinalizationCannotAdmitAnOlderCompleteFile) {
     options.ticks = 0;
