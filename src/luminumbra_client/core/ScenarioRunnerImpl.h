@@ -28,6 +28,7 @@
 #include <chrono>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace Luminumbra::Client::ScenarioHarness {
@@ -51,6 +52,34 @@ public:
     void onShutdown() override;
 
 private:
+    Rendering::CaptureManifestInput scenarioCaptureManifest() const;
+    bool refuseScenarioCapture(std::string_view reason);
+    bool scenarioCaptureReady(int width, int height);
+    template<class Capture>
+    bool writeScenarioCapture(const std::filesystem::path& path,
+                              int width,
+                              int height,
+                              const Capture& write_capture) {
+        if (!scenarioCaptureReady(width, height)) {
+            return false;
+        }
+        const bool written = renderPipeline.with_diagnostic_capture(
+            path, [&] { return scenarioCaptureManifest(); }, write_capture);
+        if (!written && renderPipeline.capture_diagnostics_enabled()) {
+            return refuseScenarioCapture("capture_destination_or_publication_failed");
+        }
+        return written;
+    }
+    bool writeScenarioPixels(const std::filesystem::path& path,
+                             int width,
+                             int height,
+                             const std::vector<unsigned char>& pixels);
+    bool writeScenarioBackbuffer(const std::filesystem::path& path,
+                                 int width,
+                                 int height,
+                                 ScreenshotPixelStats* out_stats = nullptr,
+                                 LodHolePixelStats* out_lod_hole_stats = nullptr);
+
     // The IN_GAME driving chain, one method per scenario branch. Each returns
     // whether its scenario guard fired (the original else-if chain semantics:
     // the dispatcher stops at the first branch that fires).
