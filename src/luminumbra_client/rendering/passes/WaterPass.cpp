@@ -15,6 +15,7 @@
 #include <limits>
 #include <string>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <limits>
@@ -207,22 +208,28 @@ WaterDrawStats WaterPass::execute(const RenderContext& ctx,
                 "water_shader_unavailable", 0, DiagnosticOwnership::Live, DiagnosticPass::Forward);
             throw std::runtime_error("Water diagnostic shader is unavailable");
         }
-        GLint color_texture = 0;
-        GLint attachment_type = 0;
-        glGetNamedFramebufferAttachmentParameteriv(ctx.lit_scene.id,
-                                                   GL_COLOR_ATTACHMENT0,
-                                                   GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE,
-                                                   &attachment_type);
-        if (attachment_type == GL_TEXTURE) {
+        // Only submitted water needs a contributor plane. Scan at most the prepared draw list,
+        // only while capturing, using the same count conversion as the draw loop.
+        if (std::any_of(input.draw_items.begin(), input.draw_items.end(), [](const auto& item) {
+                return WaterElementCount(item.element_count) != 0;
+            })) {
+            GLint color_texture = 0;
+            GLint attachment_type = 0;
             glGetNamedFramebufferAttachmentParameteriv(ctx.lit_scene.id,
                                                        GL_COLOR_ATTACHMENT0,
-                                                       GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,
-                                                       &color_texture);
+                                                       GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE,
+                                                       &attachment_type);
+            if (attachment_type == GL_TEXTURE) {
+                glGetNamedFramebufferAttachmentParameteriv(ctx.lit_scene.id,
+                                                           GL_COLOR_ATTACHMENT0,
+                                                           GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,
+                                                           &color_texture);
+            }
+            diagnostic_attachment.emplace(ctx.lit_scene.id,
+                                          static_cast<GLuint>(color_texture),
+                                          DiagnosticExtent{ctx.internal_w(), ctx.internal_h()});
+            draw_shader = capture->variant(draw_shader, false);
         }
-        diagnostic_attachment.emplace(ctx.lit_scene.id,
-                                      static_cast<GLuint>(color_texture),
-                                      DiagnosticExtent{ctx.internal_w(), ctx.internal_h()});
-        draw_shader = capture->variant(draw_shader, false);
     }
 
     // --- 2. Activate Shader and Set Uniforms ---
