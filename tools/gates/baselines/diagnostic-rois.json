@@ -23,12 +23,86 @@
     {
       "name": "dusk-sky-column-band",
       "rect": [0.45, 0.05, 0.55, 0.35],
-      "metrics": [{"kind": "edge", "channel": "albedo", "axis": "x", "thresholds": [0, 0.02]}]
+      "metrics": [
+        {"kind": "edge", "channel": "albedo", "axis": "x", "thresholds": [0, 0.02]}
+      ]
     },
     {
       "name": "terrain-blend-row-band",
       "rect": [0.1, 0.55, 0.9, 0.65],
-      "metrics": [{"kind": "edge", "channel": "albedo", "axis": "y", "thresholds": [0, 0.02]}]
+      "metrics": [
+        {"kind": "edge", "channel": "albedo", "axis": "y", "thresholds": [0, 0.02]}
+      ]
+    },
+    {
+      "name": "expected-terrain",
+      "rect": [0.15, 0.65, 0.85, 0.95],
+      "metrics": [
+        {"kind": "holes", "channel": "ids", "thresholds": [0, 0], "mask": "expected_mask"}
+      ]
+    },
+    {
+      "name": "reference-terrain-seam",
+      "rect": [0.1, 0.55, 0.9, 0.65],
+      "metrics": [
+        {"kind": "seam", "channel": "albedo", "thresholds": [0, 0.005], "p99_limit": 0.02, "mask": "expected_mask"}
+      ]
+    },
+    {
+      "name": "left-boundary-band",
+      "rect": [0, 0, 0.03, 1],
+      "metrics": [
+        {"kind": "boundary", "channel": "albedo", "axis": "x", "direction": 1, "thresholds": [0, 0.03137254901960784], "p99_limit": 0.03137254901960784, "mask": "expected_mask"}
+      ]
+    },
+    {
+      "name": "foliage-cutout",
+      "rect": [0, 0, 1, 1],
+      "metrics": [
+        {"kind": "card", "channel": "alpha", "thresholds": [0.01, 0.99], "mask": "expected_mask"}
+      ]
+    },
+    {
+      "name": "reference-sky-banding",
+      "rect": [0.45, 0.05, 0.55, 0.35],
+      "metrics": [
+        {"kind": "banding", "channel": "albedo", "axis": "y", "thresholds": [0, 0.02], "mask": "expected_mask"}
+      ]
+    },
+    {
+      "name": "reference-sky-wedge",
+      "rect": [0, 0, 1, 0.5],
+      "metrics": [
+        {"kind": "wedge", "channel": "albedo", "thresholds": [0, 0.02], "mask": "expected_mask"}
+      ]
+    },
+    {
+      "name": "dry-lod0-detail",
+      "rect": [0.15, 0.65, 0.85, 0.95],
+      "metrics": [
+        {"kind": "detail", "channel": "albedo", "axis": "x", "thresholds": [0.00392156862745098, 1], "mask": "expected_mask"}
+      ]
+    },
+    {
+      "name": "wet-ground-response",
+      "rect": [0.15, 0.65, 0.85, 0.95],
+      "metrics": [
+        {"kind": "weather_delta", "channel": "albedo", "thresholds": [0.00392156862745098, 1], "mask": "expected_mask"}
+      ]
+    },
+    {
+      "name": "triplanar-weights",
+      "rect": [0.15, 0.65, 0.85, 0.95],
+      "metrics": [
+        {"kind": "weights", "channel": "triplanar", "thresholds": [0, 0.001], "mask": "expected_mask"}
+      ]
+    },
+    {
+      "name": "excluded-star-composition",
+      "rect": [0, 0, 1, 1],
+      "metrics": [
+        {"kind": "composition", "channel": "stars", "thresholds": [0, 0], "mask": "expected_mask"}
+      ]
     }
   ]
 }
