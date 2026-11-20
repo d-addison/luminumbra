@@ -479,8 +479,11 @@ bool RenderPipeline::CaptureDestinationReservation::acquired() const {
 }
 
 bool RenderPipeline::diagnostic_capture_ready() {
-    return !m_capture_diagnostics.enabled ||
-           (m_diagnostic_capture && m_frame_prepared.valid && m_diagnostic_capture->ready());
+    if (m_capture_diagnostics.enabled && m_diagnostic_capture && m_frame_prepared.valid) {
+        // Detachment can expose a deferred producer failure. Observe only afterward.
+        (void)m_diagnostic_capture->ready();
+    }
+    return diagnostic_capture_refusal().empty();
 }
 
 namespace {
@@ -553,17 +556,37 @@ CaptureManifestInput RenderPipeline::diagnostic_capture_manifest() const {
     return input;
 }
 
+std::string_view RenderPipeline::diagnostic_capture_refusal() const {
+    if (!m_capture_diagnostics.enabled) {
+        return {};
+    }
+    if (!m_diagnostic_capture || !m_frame_prepared.valid) {
+        return "completed_frame_unavailable";
+    }
+    if (!std::as_const(*m_diagnostic_capture).ready()) {
+        return "producer_coverage_incomplete";
+    }
+    if (m_capture_diagnostics.probe) {
+        const auto& coordinates = m_capture_diagnostics.probe.value();
+        if (coordinates[0] >= m_internal_width || coordinates[1] >= m_internal_height) {
+            return "probe_out_of_bounds";
+        }
+    }
+    return {};
+}
+
 bool RenderPipeline::capture_diagnostics(const std::filesystem::path& capture) {
     if (!m_capture_diagnostics.enabled) {
         return true;
     }
-    auto ending = std::move(m_diagnostic_capture);
+    // Retain successful frames for sibling captures; release on every refusal.
+    CaptureCleanup cleanup(*this);
     if (capture.empty() || capture.filename().empty()) {
         return false;
     }
     try {
         DiagnosticManifestRollback manifest_rollback(capture);
-        if (!ending || !m_frame_prepared.valid) {
+        if (!diagnostic_capture_ready()) {
             return false;
         }
         DiagnosticBundleFrame frame;
@@ -574,9 +597,11 @@ bool RenderPipeline::capture_diagnostics(const std::filesystem::path& capture) {
         frame.capture_filename = Filesystem::GenericUtf8PathString(capture.filename());
         frame.manifest_filename =
             Filesystem::GenericUtf8PathString(CaptureManifestPath(capture).filename());
-        const bool captured = ending->finish(capture, m_capture_diagnostics, frame, gbuffer());
+        const bool captured =
+            m_diagnostic_capture->finish(capture, m_capture_diagnostics, frame, gbuffer());
         if (captured) {
             manifest_rollback.preserve();
+            cleanup.retain();
         }
         return captured;
     } catch (const std::exception&) {
@@ -963,6 +988,7 @@ RenderContext RenderPipeline::make_ssao_context(const Camera& camera) {
 // the frame camera for Depth-mode near/far linearization. Render-only; never hashed.
 RenderContext RenderPipeline::make_debug_view_context(const Camera& camera) {
     RenderContext ctx;
+    ctx.frame_index = m_far_world_frame;
     ctx.frozen_replay = m_far_world_paired;
     ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
                                    m_frame_prepared.projection,
@@ -3220,10 +3246,9 @@ void RenderPipeline::prepare_camera_projection(const Camera& camera) {
 }
 
 void RenderPipeline::dispatch_stages(const Camera& camera) {
-    auto diagnostic_frame =
-        m_debug_view_pass && DebugViewPass::controls().enabled && DebugViewPass::controls().refresh
-            ? m_debug_view_pass->begin_frame(make_debug_view_context(camera))
-            : nullptr;
+    auto diagnostic_frame = m_debug_view_pass && DebugViewPass::controls().enabled
+                                ? m_debug_view_pass->begin_frame(make_debug_view_context(camera))
+                                : nullptr;
     // the pure GPU stage sequence over the prepared frame. Each
     // execute_stage_* body moved VERBATIM from the pre-split render_frame and
     // reads only FramePrepared + pipeline members. This function must be
@@ -4076,6 +4101,9 @@ void RenderPipeline::on_resize(u32 new_width, u32 new_height) {
     if (new_width == 0 || new_height == 0 ||
         (new_width == m_screen_width && new_height == m_screen_height))
         return;
+    if (m_debug_view_pass && DebugViewPass::controls().enabled) {
+        m_debug_view_pass->invalidate();
+    }
     m_screen_width = new_width;
     m_screen_height = new_height;
     // recompute the internal (scaled) extent from the new output size.
@@ -4218,6 +4246,9 @@ bool RenderPipeline::resize_graphics_targets(float scale, u32 shadow_resolution)
             // CONTENT is now stale -- it was resolved at the previous internal scale, so its motion
             // vectors / reprojection no longer match. Invalidate it so the next resolve restarts
             // fresh instead of blending the previous scale's history after a runtime scale change.
+            if (m_debug_view_pass && DebugViewPass::controls().enabled) {
+                m_debug_view_pass->invalidate();
+            }
             m_taau_pass->invalidate_history();
             m_frustumCache.valid = false;
             ++m_resize_generation;
