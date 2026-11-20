@@ -3106,7 +3106,7 @@ bool GameSession::RestoreAvatarOwner(const World::PlayerAvatarOwnerState& state,
                                      World::PlayerAvatar& avatar,
                                      std::size_t& physics_index,
                                      std::span<const World::PhysicsOwnerState> remaining_frozen) {
-    if (!m_physicsSystem ||
+    if (!m_physicsSystem || GetSimulationTickCount() != 0 ||
         state.avatar.player_id != m_physicsSystem->avatar_character_slot_count()) {
         return false;
     }

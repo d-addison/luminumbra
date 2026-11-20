@@ -1819,15 +1819,6 @@ TEST(GameSessionHeadlessWorldTest, OutOfBoundsAvatarRestorePublishesNothingAndTi
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
-    session.SetJobSystem(&jobs);
-    session.SetRootPath(root.root_string());
-    session.SetActiveRegionsEnabled(true);
-    ASSERT_TRUE(session.CreateTransientWorld("Bounds refusal", "12345", "default"));
-    session.GetWorldSystem()->set_durable_residency(true);
-    session.SetReplicatedSimulationAnchors({});
-    auto* target = session.GetPhysicsSystem();
-    ASSERT_NE(target, nullptr);
     Luminumbra::TestSupport::AvatarContinuationWorld source_world;
     auto& source = source_world.physics();
     ASSERT_EQ(source.create_avatar_character(Vec3(8, 40, 8)), 0u);
@@ -1835,16 +1826,24 @@ TEST(GameSessionHeadlessWorldTest, OutOfBoundsAvatarRestorePublishesNothingAndTi
     captured.avatar.position = source.get_avatar_position(0);
     ASSERT_TRUE(source_world.capture_avatar_owner(0, captured.physics));
     ASSERT_TRUE(Luminumbra::World::ValidateAvatarOwner(captured));
-    ASSERT_TRUE(session.ActiveRegionsEnabled());
-    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
-    BodySetState before;
-    ASSERT_TRUE(target->capture_body_owners(before));
     for (const std::size_t axis : {0u, 2u}) {
         for (const float coordinate :
              {static_cast<float>(Luminumbra::Chunk::kPackedMinXz * Luminumbra::CHUNK_SIZE_X),
               static_cast<float>(Luminumbra::Chunk::kPackedMaxXz * Luminumbra::CHUNK_SIZE_X),
               -1.0e30f,
               1.0e30f}) {
+            GameSession session;
+            session.SetJobSystem(&jobs);
+            session.SetRootPath(root.root_string());
+            session.SetActiveRegionsEnabled(true);
+            ASSERT_TRUE(session.CreateTransientWorld("Bounds refusal", "12345", "default"));
+            session.GetWorldSystem()->set_durable_residency(true);
+            session.SetReplicatedSimulationAnchors({});
+            auto* target = session.GetPhysicsSystem();
+            ASSERT_NE(target, nullptr);
+            ASSERT_TRUE(session.ActiveRegionsEnabled());
+            BodySetState before;
+            ASSERT_TRUE(target->capture_body_owners(before));
             auto invalid = captured;
             invalid.avatar.position[static_cast<int>(axis)] = coordinate;
             const auto wide = std::bit_cast<std::uint64_t>(static_cast<double>(coordinate));
@@ -1866,17 +1865,14 @@ TEST(GameSessionHeadlessWorldTest, OutOfBoundsAvatarRestorePublishesNothingAndTi
             BodySetState after;
             ASSERT_TRUE(target->capture_body_owners(after));
             ExpectBodySet(before, after);
+            ASSERT_TRUE(session.RestoreAvatarOwner(captured, output, index));
+            EXPECT_EQ(index, 0u);
+            EXPECT_EQ(target->avatar_character_slot_count(), 1u);
             const auto tick = session.GetSimulationTickCount();
             EXPECT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
             EXPECT_EQ(session.GetSimulationTickCount(), tick + 1);
         }
     }
-    PlayerAvatar output;
-    std::size_t index = 999;
-    ASSERT_TRUE(session.RestoreAvatarOwner(captured, output, index));
-    EXPECT_EQ(index, 0u);
-    EXPECT_EQ(target->avatar_character_slot_count(), 1u);
-    EXPECT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
 }
 
 TEST(ControllerContinuation, FrozenRosterRestoresSequentiallyAndContinuesBitExactly) {

@@ -1022,6 +1022,61 @@ class SimulationCollisionWiring(unittest.TestCase):
                       "ExpectBodySet(before, after)", "ExpectControllerBits(previous, retained.physics)"):
             self.assertIn(token, regression)
 
+    def test_avatar_restore_refuses_after_first_tick_before_mutation(self):
+        source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(
+            encoding="utf-8")
+        restore = function(source, "bool GameSession::RestoreAvatarOwner(")
+        guard = "GetSimulationTickCount() != 0"
+        self.assertIn(guard, restore)
+        self.assertEqual(function(restore, "if (!m_physicsSystem ||"), "return false;")
+        self.assertLess(restore.index(guard), restore.index(".restore_avatar_owner("))
+        self.assertLess(restore.index(guard), restore.index("avatar = state.avatar"))
+        runner = (ROOT / "src/luminumbra_server/ServerWorldRunner.h").read_text(
+            encoding="utf-8")
+        forward = function(runner.replace("remaining_frozen = {}", "remaining_frozen"),
+                           "bool RestoreAvatarOwner(")
+        self.assertIn(guard, forward)
+        self.assertEqual(function(forward, "if (!m_session ||"), "return false;")
+        self.assertLess(forward.index(guard), forward.index("m_avatars.reserve("))
+        self.assertLess(forward.index(guard), forward.index("m_session->RestoreAvatarOwner("))
+        native = (ROOT / "test/persistence/world_open_refusal_test.cpp").read_text(
+            encoding="utf-8")
+        regression = function(native, "TEST_F(WorldOpenRefusal, "
+                              "AvatarRestoreRefusesAfterFirstTickWithoutMutation)")
+        self.assertIn("ExpectAvatarRestoreRefusedWithoutMutation(target, captured, through_runner)",
+                      regression)
+        regression += " " + function(native, "void ExpectAvatarRestoreRefusedWithoutMutation(")
+        for token in ("for (const bool regional : {false, true})",
+                      "ASSERT_EQ(target.Session()->ActiveRegionsEnabled(), regional)",
+                      "ASSERT_EQ(target.TickCount(), 0u)",
+                      "ASSERT_TRUE(target.RestoreAvatarOwner(captured))",
+                      "ASSERT_EQ(target.RunFixedTicks(1).ticks_executed, 1u)",
+                      "captured.avatar.player_id = 1", "ValidateAvatarOwner(captured)",
+                      "for (const bool through_runner : {false, true})",
+                      "EXPECT_FALSE(target.RestoreAvatarOwner(captured))",
+                      "EXPECT_FALSE(target.Session()->RestoreAvatarOwner(captured, output, index))",
+                      "EXPECT_EQ(index, 999u)", "EXPECT_EQ(output.player_id, 77u)",
+                      "EXPECT_EQ(output.position, Vec3(1))", "EXPECT_EQ(output.facing, 2)",
+                      "EXPECT_EQ(output.velocity, Vec3(3))",
+                      "EXPECT_EQ(target.Avatars().data(), roster_data)",
+                      "EXPECT_EQ(target.Avatars().capacity(), roster_capacity)",
+                      "ASSERT_EQ(target.Avatars().size(), 1u)",
+                      "EXPECT_EQ(physics->avatar_character_slot_count(), 1u)",
+                      "EXPECT_EQ(before_size, after_size)", "EXPECT_EQ(before_bytes, after_bytes)",
+                      "EXPECT_EQ(bodies_before.slot_count, bodies_after.slot_count)",
+                      "EXPECT_EQ(bodies_before.free_slots, bodies_after.free_slots)",
+                      "ASSERT_EQ(bodies_before.owners.size(), bodies_after.owners.size())",
+                      "EXPECT_EQ(before.bytes, after.bytes)",
+                      "EXPECT_EQ(before.registration_slot, after.registration_slot)",
+                      "EXPECT_EQ(target.ComputeWorldHash(), hash_before)",
+                      "EXPECT_EQ(target.TickCount(), 1u)"):
+            self.assertIn(token, regression)
+        self.assertLess(regression.index("ASSERT_TRUE(target.RestoreAvatarOwner(captured))"),
+                        regression.index("target.RunFixedTicks(1)"))
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("persistence/world_open_refusal_test.cpp", cmake)
+        self.assertIn("gtest_discover_tests(${_lum_gtest_target}", cmake)
+
     def test_avatar_restore_checks_simulation_bounds_before_staging(self):
         source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(
             encoding="utf-8")
