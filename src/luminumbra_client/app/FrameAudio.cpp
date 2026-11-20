@@ -211,42 +211,36 @@ void UpdateLivingWorldAudio(ClientAppContext& app,
                     audioManager->StopAmbientLoop("ambient_stream");
                     s_waterOn = false;
                 }
-                // waterfall ROAR — the nearest DETECTED waterfall
-                // site within earshot drives a positional ambient loop through the
-                // previously never-called ComputeWaterfallRoar. The
-                // detector's cached sites are the SAME set the render sheets use, so
-                // what you hear is what you see. Pure reads; client-only.
+                // The nearest live baked sheet drives the roar, using the last
+                // prepared frame's water/support factors without another survey.
                 {
-                    static bool s_roarOn = false;
-                    const auto& falls = renderPipeline.waterfall_sites(*ws2);
-                    const Luminumbra::Rendering::WaterfallSite* best = nullptr;
-                    float best_d2 = 400.0f * 400.0f;
-                    for (const auto& site : falls) {
-                        const glm::vec3 d = site.crest - pc;
-                        const float d2 = glm::dot(d, d);
-                        if (d2 < best_d2) {
-                            best_d2 = d2;
-                            best = &site;
-                        }
-                    }
+                    auto& roarOn = app.audio.waterfallRoarOn;
+                    auto& roarPosition = app.audio.waterfallRoarPosition;
+                    const auto source = renderPipeline.waterfall_roar_source(pc);
+                    const auto* best = source.site;
                     if (best != nullptr) {
                         const auto roar =
                             Luminumbra::Client::AudioPropagationSystem::ComputeWaterfallRoar(
                                 best->crest, best->drop_height, pc);
                         if (roar.audible) {
-                            if (!s_roarOn) {
+                            if (!roarOn || roarPosition != best->crest) {
+                                if (roarOn) {
+                                    audioManager->StopAmbientLoop("waterfall_roar");
+                                }
                                 audioManager->PlayAmbientLoop(
                                     "waterfall_roar", best->crest, 400.0f);
-                                s_roarOn = true;
+                                roarOn = true;
+                                roarPosition = best->crest;
                             }
-                            audioManager->SetAmbientVolume("waterfall_roar", roar.volume);
-                        } else if (s_roarOn) {
+                            audioManager->SetAmbientVolume("waterfall_roar",
+                                                           source.gain(roar.volume));
+                        } else if (roarOn) {
                             audioManager->StopAmbientLoop("waterfall_roar");
-                            s_roarOn = false;
+                            roarOn = false;
                         }
-                    } else if (s_roarOn) {
+                    } else if (roarOn) {
                         audioManager->StopAmbientLoop("waterfall_roar");
-                        s_roarOn = false;
+                        roarOn = false;
                     }
                 }
             }

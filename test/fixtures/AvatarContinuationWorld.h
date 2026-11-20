@@ -52,6 +52,7 @@ public:
             return false;
         }
         World::PlayerAvatar avatar;
+        avatar.player_id = static_cast<std::uint32_t>(index);
         avatar.position = physics().get_avatar_position(index);
         avatar.velocity = physics().get_avatar_velocity(index);
         World::PlayerAvatarOwnerState captured;
@@ -79,6 +80,10 @@ public:
         };
         World::PlayerAvatarOwnerState captured;
         captured.physics = state;
+        if (session.GetPhysicsSystem()) {
+            captured.avatar.player_id =
+                static_cast<std::uint32_t>(physics().avatar_character_slot_count());
+        }
         for (std::size_t axis = 0; axis < 3; ++axis) {
             const auto wide = static_cast<std::uint64_t>(word(84 + 8 * axis)) |
                               (static_cast<std::uint64_t>(word(88 + 8 * axis)) << 32);
