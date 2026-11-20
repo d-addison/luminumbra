@@ -2347,23 +2347,156 @@ class ParticleContributorTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(original.encode()).hexdigest(),
                          "bbbbb1094633b1c5f147d8bd5287e4522802ad4719a306297a83f178d0219b96")
 
-    def test_weather_overlay_refuses_instead_of_guessing_a_particle_identity(self):
-        draw = block(read(CLIENT / "rendering/passes/SkyboxPass.cpp"),
+class WeatherOverlayContributorTests(unittest.TestCase):
+    @staticmethod
+    def draw():
+        return block(read(CLIENT / "rendering/passes/SkyboxPass.cpp"),
                      "const glm::mat4& projection)")
+
+    @staticmethod
+    def fragment():
+        return read(ROOT / "res/shaders/weather_system.frag")
+
+    def test_original_composite_draw_writes_the_shared_contributor_plane(self):
+        draw = self.draw()
         branch = "if (auto* capture = GBufferDiagnosticCapture::Current())"
-        refusal = block(draw, branch)
-        self.assertIn('capture->unsupported("weather_overlay_contributor_uninstrumented", '
-                      '0, DiagnosticOwnership::Live, DiagnosticPass::Forward);', compact(refusal))
+        setup = block(draw, branch)
+        for required in ("GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE",
+                         "GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME",
+                         "if (attachment_type == GL_TEXTURE)",
+                         "DiagnosticExtent{ctx.internal_w(), ctx.internal_h()}",
+                         "draw_shader = capture->variant(draw_shader, false)"):
+            self.assertIn(required, setup)
+        self.assertIn("diagnostic_attachment.emplace(ctx.lit_scene.id,", setup)
         self.assertLess(draw.index("if (!m_weather_shader"), draw.index(branch))
         self.assertLess(draw.index("if (!ctx.lit_scene.id"), draw.index(branch))
-        self.assertLess(draw.index(branch), draw.index("AttributedGl::Submit("))
-        self.assertNotIn("capture->write", draw)
+        self.assertLess(draw.index("diagnostic_attachment.emplace("), draw.index("draw_shader->use()"))
+        for required in ('.shader_variant = "weather_overlay"', '.chunk = {}', '.lod = 0',
+                         '.ownership = DiagnosticOwnership::Live', '.pass = DiagnosticPass::Forward',
+                         '.provenance = DiagnosticProvenance::Mesh',
+                         '.generated_mesh = "weather-overlay/fullscreen-quad"'):
+            self.assertIn(required, draw)
+        self.assertEqual(draw.count("capture->write_current("), 1)
         self.assertEqual(draw.count("AttributedGl::Submit("), 1)
+        self.assertLess(draw.index("capture->write_current("), draw.index("AttributedGl::Submit("))
+        self.assertIn("AttributedGl::Submit(glDrawArrays, GLenum{GL_TRIANGLE_STRIP}, 0, 4)", draw)
+        self.assertNotIn("weather_overlay_contributor_uninstrumented", draw)
+        shared = read(CLIENT / "rendering/passes/GBufferPass.cpp")
+        current = block(shared, "void GBufferDiagnosticCapture::write_current(")
+        # Both absent storage and an unavailable variant refuse publication.
+        self.assertIn("record_contributor();", block(current, "if (!state_->framebuffer)"))
+        self.assertIn("record_contributor();", current[current.index("for (const auto& entry"):])
+        self.assertIn("abort();", block(current, "const auto record_contributor ="))
+        self.assertIn('constexpr std::string_view suffix = ":contributor_only";', current)
+        for reason in ("diagnostic_shader_variant_limit", "diagnostic_shader_variant_unavailable"):
+            self.assertIn(f'unsupported("{reason}"', shared)
+
+    def test_zero_alpha_preserves_identity_and_every_positive_alpha_writes(self):
+        shader = self.fragment()
+        tail = shader[shader.rindex("#ifdef LUMIN_DIAG_IDS\n") + len("#ifdef LUMIN_DIAG_IDS\n"):]
+        tail = re.sub(r"//[^\n]*", "", tail).strip()
+        # Interpret only the actual guarded shader statements, rejecting unmodeled
+        # control flow. Synthetic output alphas exercise the defensive guard;
+        # the shipping composite is opaque, as the separate byte pin verifies.
+        match = re.fullmatch(r"if\s*\(([^()]*)\)\s*\{\s*discard;\s*\}\s*"
+                             r"gDiagnosticIds = u_diagnosticIds;\s*#endif\s*}\s*", tail)
+        self.assertIsNotNone(match, "zero-alpha discard must precede the only identity write")
+        writer = (17, 4, 0, 513)
+        for prior in ((0, 0, 0, 0), (3, 2, 1, 513)):
+            for alpha in (-1.0, -0.0, 0.0, 1e-30, 0.01, 0.5, 1.0):
+                with self.subTest(prior=prior, alpha=alpha):
+                    discarded = cpp_expression(match[1], **{"FragColor.a": alpha})
+                    result = prior if discarded else writer
+                    self.assertEqual(result, prior if alpha <= 0.0 else writer)
+
+    def test_production_alpha_and_discard_logic_and_capture_off_bytes_are_pinned(self):
+        shader = self.fragment()
+        self.assertIn("layout (location = 6) out uvec4 gDiagnosticIds;", shader)
+        self.assertEqual(shader.count("gDiagnosticIds = u_diagnosticIds;"), 1)
+        self.assertEqual(shader.count("discard;"), 1)
+        self.assertIn("FragColor = vec4(finalColor, 1.0);", shader)
+        self.assertLess(shader.index("FragColor = vec4(finalColor, 1.0);"), shader.index("discard;"))
+        self.assertLess(shader.index("discard;"), shader.index("gDiagnosticIds ="))
+        self.assertIn("if (FragColor.a <= 0.0) { discard; }", shader)
+        directive = "#ifdef LUMIN_DIAG_IDS\n"
+        self.assertEqual(shader.count(directive), 3)
+        while directive in shader:
+            start = shader.index(directive)
+            end = shader.index("#endif\n", start) + len("#endif\n")
+            if "layout (location = 0)\n" not in shader[start:end] and shader[start-2:start] == "\n\n":
+                start -= 1
+            shader = shader[:start] + shader[end:]
+        self.assertNotIn("discard;", shader)
+        self.assertEqual(hashlib.sha256(shader.encode()).hexdigest(),
+                         "6cd5d7f4b265f40b95ffba4709c28ba5a040e221161481ce930bb8e2a15e5b50")
+        draw = self.draw()
+        branch = "if (auto* capture = GBufferDiagnosticCapture::Current())"
+        setup = draw.index("Shader* draw_shader = m_weather_shader.get();")
+        contents = block(draw, branch)
+        end = draw.index(contents) + len(contents) + 1
+        draw = draw[:setup] + draw[end:]
         start = draw.index(branch)
-        end = draw.index(refusal, start) + len(refusal) + 1
-        original = "{" + re.sub(r"\s+", "", draw[:start] + draw[end:]) + "}"
+        contents = block(draw, branch)
+        end = draw.index(contents, start) + len(contents) + 1
+        draw = draw[:start] + draw[end:]
+        draw = draw.replace("draw_shader->", "m_weather_shader->")
+        original = "{" + re.sub(r"\s+", "", draw) + "}"
         self.assertEqual(hashlib.sha256(original.encode()).hexdigest(),
                          "0c395afb6d2eb7d521b10a2f6600e57b6ba2b3c0a7003a35d5b4ecc8de84033e")
+
+    def test_inactive_weather_and_missing_resources_skip_before_capture_setup(self):
+        source = read(CLIENT / "rendering/passes/SkyboxPass.cpp")
+        public = block(source, "void SkyboxPass::execute_weather_overlay(const RenderContext& ctx, const Camera& camera)")
+        condition = re.search(r"if \((.*?)\) \{\s*return;", public, re.S)[1]
+        self.assertIn("execute_weather_overlay(ctx, camera, projection);", public)
+        self.assertNotIn("GBufferDiagnosticCapture", public)
+        for weather_type in (0, 1, 2):
+            for intensity in (-1.0, 0.0, 1e-30, 1.0):
+                with self.subTest(weather_type=weather_type, intensity=intensity):
+                    skipped = cpp_expression(condition.replace("0.0f", "0.0"), **{
+                        "ctx.weather_type": weather_type, "WeatherType::None": 0,
+                        "ctx.weather_intensity": intensity})
+                    self.assertEqual(skipped, weather_type == 0 or intensity <= 0.0)
+        draw = self.draw()
+        guards = re.findall(r"if \((.*?)\) \{\s*return;", draw, re.S)
+        self.assertEqual(len(guards), 2)
+        for present in (False, True):
+            for valid in (False, True):
+                skipped = cpp_expression(guards[0], **{
+                    "m_weather_shader": present, "m_weather_shader->IsValid()": valid})
+                self.assertEqual(skipped, not present or not valid)
+        for scene in (0, 1):
+            for opaque in (0, 1):
+                for quad in (0, 1):
+                    skipped = cpp_expression(guards[1], **{
+                        "ctx.lit_scene.id": scene, "ctx.opaque_scene.id": opaque,
+                        "ctx.screen_quad_vao": quad})
+                    self.assertEqual(skipped, not (scene and opaque and quad))
+        self.assertLess(draw.index(guards[1]), draw.index("GBufferDiagnosticCapture::Current()"))
+
+    def test_capture_restores_program_and_attachment_state_including_unwind(self):
+        source = read(CLIENT / "rendering/passes/SkyboxPass.cpp")
+        restore = block(source, "struct WeatherProgramRestore")
+        self.assertIn("const Shader* shader = nullptr;", restore)
+        self.assertEqual(compact(block(restore, "~WeatherProgramRestore()")),
+                         "if (shader) { AttributedGl::UseProgram(glUseProgram, shader->Id()); }")
+        draw = self.draw()
+        setup = block(draw, "if (auto* capture = GBufferDiagnosticCapture::Current())")
+        self.assertIn("diagnostic_program.shader = m_weather_shader.get();", setup)
+        self.assertLess(draw.index("WeatherProgramRestore diagnostic_program;"),
+                        draw.index("std::optional<GBufferDiagnosticAttachment> diagnostic_attachment;"))
+        targets = read(CLIENT / "rendering/GBufferTargets.cpp")
+        detach = block(targets, "void GBufferDiagnosticCapture::detach_target()")
+        for required in ("GL_COLOR_ATTACHMENT6, GL_TEXTURE_2D, 0, 0",
+                         "glDrawBuffers(state_->buffer_count, state_->buffers.data())",
+                         "glColorMaski(6,", "static_cast<GLuint>(saved_framebuffer)"):
+            self.assertIn(required, detach)
+        attach = block(targets, "bool GBufferDiagnosticCapture::attach_target(")
+        self.assertIn("detach_target();", block(attach, "if (!complete)"))
+        self.assertIn("targets.extent().width != extent.width", attach)
+        self.assertIn("targets.extent().height != extent.height", attach)
+        self.assertEqual(attach.count("glClearTexImage("), 1)
+        self.assertIn("glClearTexImage(", block(attach, "if (!already_captured)"))
 
 
 if __name__ == "__main__":

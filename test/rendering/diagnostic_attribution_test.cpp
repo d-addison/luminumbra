@@ -1008,21 +1008,67 @@ TEST(DiagnosticAttribution, ParticleBatchAttributesAllEmitterKindsAtTheOriginalD
     EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(shader, 3)), 0xbb0d97018dfba3d4ull);
 }
 
-TEST(DiagnosticAttribution, WeatherOverlayRefusesCoverageOnlyWhenItsOriginalDrawIsSubmitted) {
-    auto draw = Body(Read("src/luminumbra_client/rendering/passes/SkyboxPass.cpp"),
-                     "const glm::mat4& projection)");
-    constexpr std::string_view branch = "if (auto* capture = GBufferDiagnosticCapture::Current())";
-    const auto refusal = Body(draw, branch);
-    Contains(WithoutWhitespace(refusal),
-             "capture->unsupported(\"weather_overlay_contributor_uninstrumented\",0,"
-             "DiagnosticOwnership::Live,DiagnosticPass::Forward);");
-    EXPECT_LT(draw.find("if (!m_weather_shader"), draw.find(branch));
-    EXPECT_LT(draw.find("if (!ctx.lit_scene.id"), draw.find(branch));
-    EXPECT_LT(draw.find(branch), draw.find("AttributedGl::Submit"));
+TEST(DiagnosticAttribution, WeatherOverlayAttributesItsOriginalOpaqueCompositeDraw) {
+    const auto draw = Body(Read("src/luminumbra_client/rendering/passes/SkyboxPass.cpp"),
+                           "const glm::mat4& projection)");
+    const auto shader = Read("res/shaders/weather_system.frag");
+    ForwardSubmissionContract(draw, shader);
+    Contains(draw, "glGetNamedFramebufferAttachmentParameteriv(ctx.lit_scene.id,");
+    Contains(draw, "GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE");
+    Contains(draw, "if (attachment_type == GL_TEXTURE)");
+    Contains(draw, "GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME");
+    Contains(WithoutWhitespace(draw),
+             "diagnostic_attachment.emplace(ctx.lit_scene.id,static_cast<GLuint>(color_texture),");
+    Contains(draw, ".shader_variant = \"weather_overlay\"");
+    Contains(draw, ".generated_mesh = \"weather-overlay/fullscreen-quad\"");
+    EXPECT_LT(draw.find("if (!m_weather_shader"), draw.find("diagnostic_attachment.emplace("));
+    EXPECT_LT(draw.find("if (!ctx.lit_scene.id"), draw.find("diagnostic_attachment.emplace("));
     EXPECT_EQ(Count(draw, "glDrawArrays,"), 1u);
-    EXPECT_EQ(draw.find("capture->write"), std::string::npos);
-    ASSERT_FALSE(refusal.empty());
-    const auto start = draw.rfind('\n', draw.find(branch)) + 1;
-    draw.erase(start, draw.find(refusal) + refusal.size() - start);
-    EXPECT_EQ(SourceHash(WithoutWhitespace(draw)), 0x522af1534eb516d0ull);
+    EXPECT_EQ(draw.find("weather_overlay_contributor_uninstrumented"), std::string::npos);
+    using namespace Luminumbra::Rendering;
+    DiagnosticDrawTable table;
+    DiagnosticId id{};
+    ASSERT_TRUE(table.submit({.mesh_path = {},
+                              .shader_variant = "weather_overlay",
+                              .chunk = {},
+                              .lod = 0,
+                              .ownership = DiagnosticOwnership::Live,
+                              .pass = DiagnosticPass::Forward,
+                              .provenance = DiagnosticProvenance::Mesh,
+                              .generated_mesh = "weather-overlay/fullscreen-quad"},
+                             id));
+    EXPECT_NE(id[0], 0u);
+    EXPECT_NE(id[1], 0u);
+    EXPECT_EQ(id[2], 0u);
+    EXPECT_EQ(id[3], 513u);
+    EXPECT_TRUE(table.complete_coverage());
+}
+
+TEST(DiagnosticAttribution, WeatherOverlayZeroAlphaDiscardsBeforeWritingContributorIds) {
+    const auto shader = Read("res/shaders/weather_system.frag");
+    // The live composite is opaque and currently has no production discards.
+    // Guard the actual output alpha rather than approximating its weather effects.
+    Contains(shader, "FragColor = vec4(finalColor, 1.0);");
+    Contains(shader, "if (FragColor.a <= 0.0) { discard; }");
+    EXPECT_EQ(Count(shader, "discard;"), 1u);
+    EXPECT_EQ(Count(WithoutDiagnosticBlocks(shader, 3), "discard;"), 0u);
+    EXPECT_LT(shader.find("FragColor = vec4(finalColor, 1.0);"), shader.find("discard;"));
+    EXPECT_LT(shader.find("discard;"), shader.find("gDiagnosticIds = u_diagnosticIds;"));
+}
+
+TEST(DiagnosticAttribution, WeatherOverlayCaptureOffBytesAndCaptureProgramRestorationArePinned) {
+    const auto source = Read("src/luminumbra_client/rendering/passes/SkyboxPass.cpp");
+    const auto draw = Body(source, "const glm::mat4& projection)");
+    EXPECT_EQ(SourceHash(WithoutForwardSubmissionDiagnostics(draw, "m_weather_shader")),
+              0x522af1534eb516d0ull);
+    EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(Read("res/shaders/weather_system.frag"), 3)),
+              0xb563a3f48517e40full);
+    Contains(draw, "WeatherProgramRestore diagnostic_program;");
+    Contains(draw, "diagnostic_program.shader = m_weather_shader.get();");
+    const auto restore = Body(source, "~WeatherProgramRestore()");
+    Contains(restore,
+             "if (shader) {\n            AttributedGl::UseProgram(glUseProgram, shader->Id());");
+    // Attachment destruction precedes restoring the production program, also on unwind.
+    EXPECT_LT(draw.find("WeatherProgramRestore diagnostic_program;"),
+              draw.find("std::optional<GBufferDiagnosticAttachment> diagnostic_attachment;"));
 }

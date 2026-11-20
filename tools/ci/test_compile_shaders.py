@@ -38,7 +38,7 @@ class ShaderInventoryTests(unittest.TestCase):
         sources = shaders.inventory(ROOT / "res/shaders")
         self.assertEqual(len(sources), 63)
         units = shaders.compile_units(sources)
-        self.assertEqual(len(units), 74)
+        self.assertEqual(len(units), 75)
         self.assertEqual({unit.name for unit in units}, sources.keys() - shaders.INCLUDES - shaders.EXCLUDED)
         self.assertEqual({unit.name for unit in units if unit.defines},
                          shaders.LADDER_FILES | shaders.DIAGNOSTIC_FILES)

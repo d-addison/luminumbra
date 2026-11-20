@@ -1,6 +1,14 @@
 #version 450 core
 
+#ifdef LUMIN_DIAG_IDS
+layout (location = 0)
+#endif
 out vec4 FragColor;
+
+#ifdef LUMIN_DIAG_IDS
+layout (location = 6) out uvec4 gDiagnosticIds;
+uniform uvec4 u_diagnosticIds;
+#endif
 
 in vec2 TexCoords;
 
@@ -224,4 +232,11 @@ void main() {
     }
 
     FragColor = vec4(finalColor, 1.0);
+
+#ifdef LUMIN_DIAG_IDS
+    // Use the production output alpha after all weather composition. The current
+    // overlay is opaque; a zero-alpha output must leave earlier contributor IDs.
+    if (FragColor.a <= 0.0) { discard; }
+    gDiagnosticIds = u_diagnosticIds;
+#endif
 }
