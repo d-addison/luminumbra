@@ -1244,7 +1244,7 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertEqual(peak, "capture.terrain_peak = "
                          "renderPipeline.terrain_peak_diagnostics(capture.station.target);")
         self.assertLess(player.index("terrain_peak_diagnostics("),
-                        player.index("WritePixelBufferPpm("))
+                        player.index("writeScenarioPixels("))
         writer = read(ROOT / "src/luminumbra_client/core/scenarios/PlayerViewSmoke.cpp")
         self.assertIn('{"terrain_peak", capture.terrain_peak}', writer)
         source = read(RENDERING / "TerrainCoverageCapture.cpp")
