@@ -3666,6 +3666,23 @@ class DiagnosticFixtureLifetimeWiring(unittest.TestCase):
 class DiagnosticCaptureRefusalWiring(unittest.TestCase):
     """Guard capture-only refusals without executing native code or GL."""
 
+    def test_authored_hex_key_budget_includes_the_entire_prefix(self):
+        render = block(read(CLIENT / "rendering/passes/StaticDrawPass.cpp"),
+                       "StaticDrawStats StaticDrawPass::Render(")
+        prefix = re.search(
+            r'(?:constexpr std::string_view mesh_prefix|std::string mesh_key) = "([^"]+)";',
+            render).group(1)
+        condition = re.search(r"if \((identity.empty\(\).*?)\) \{", render).group(1)
+        for length in (0, 1, 506, 507, 508, 509, 1023, 1024, 1025, 507, 508, 1):
+            with self.subTest(length=length):
+                refused = bool(cpp_expression(condition, **{
+                    "identity.empty()": length == 0, "identity.size()": length,
+                    "mesh_prefix.size()": len(prefix)}))
+                encoded = prefix + (b"x" * length).hex()
+                self.assertEqual(refused, length == 0 or len(encoded) > 1024)
+                if not refused:
+                    self.assertLessEqual(len(encoded), 1024)
+
     def test_authored_identity_bounds_refuse_coverage_without_throwing(self):
         source = read(CLIENT / "rendering/passes/StaticDrawPass.cpp")
         render = block(source, "StaticDrawStats StaticDrawPass::Render(")
@@ -3676,8 +3693,9 @@ class DiagnosticCaptureRefusalWiring(unittest.TestCase):
         self.assertIn("capture->clear_current_identity()", refused)
         self.assertNotRegex(refused, r"\b(?:throw|return|continue)\b")
         supported = block(capture, "else")
-        self.assertIn('std::string mesh_key = "authored/"', supported)
-        self.assertIn("mesh_key.reserve(8 + 2 * identity.size())", supported)
+        self.assertIn('constexpr std::string_view mesh_prefix = "authored/"', capture)
+        self.assertIn("std::string mesh_key(mesh_prefix)", supported)
+        self.assertIn("mesh_key.reserve(mesh_prefix.size() + 2 * identity.size())", supported)
         self.assertIn("mesh_key += digits[byte >> 4]", supported)
         self.assertIn("mesh_key += digits[byte & 15]", supported)
         self.assertIn('.shader_variant = "static_asset"', supported)
@@ -3687,8 +3705,9 @@ class DiagnosticCaptureRefusalWiring(unittest.TestCase):
         for length in (0, 1, 507, 508, 509, 1023, 1024, 1025):
             with self.subTest(length=length):
                 actual = cpp_expression(condition, **{
-                    "identity.empty()": length == 0, "identity.size()": length})
-                self.assertEqual(actual, length == 0 or length > 508)
+                    "identity.empty()": length == 0, "identity.size()": length,
+                    "mesh_prefix.size()": len("authored/")})
+                self.assertEqual(actual, length == 0 or length > 507)
         self.assertLess(render.index(capture), render.index("glDrawElements,"))
         targets = read(CLIENT / "rendering/GBufferTargets.cpp")
         unsupported = block(targets, "void GBufferDiagnosticCapture::unsupported(")

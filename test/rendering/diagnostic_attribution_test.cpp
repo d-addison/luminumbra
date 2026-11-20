@@ -1680,7 +1680,8 @@ TEST_F(DiagnosticAttributionGl, AuthoredIdentityBoundsPreserveDrawsAndRefuseOnly
     // Borrowed test data outlives this local input, including on fatal assertions.
     auto input = input_;
     input.authored_view = &view;
-    for (const std::size_t length : {1u, 508u, 509u, 1024u, 1025u}) {
+    for (const std::size_t length :
+         {0u, 1u, 506u, 507u, 508u, 509u, 1023u, 1024u, 1025u, 507u, 508u, 1u}) {
         SCOPED_TRACE(length);
         auto mesh = std::make_shared<StaticMesh>();
         mesh->identity = std::string(length, 'x');
@@ -1697,12 +1698,28 @@ TEST_F(DiagnosticAttributionGl, AuthoredIdentityBoundsPreserveDrawsAndRefuseOnly
         snapshot->draws.push_back(draw);
         input.authored_draws = snapshot;
         SetEntryState(false);
+        if (length == 0) {
+            // Empty identities already violate the production mesh contract.
+            EXPECT_THROW(pass_.execute(ctx_, entities_, input), std::invalid_argument);
+            table_.clear();
+            SetEntryState(false);
+            GBufferDiagnosticCapture capture(targets_, table_);
+            EXPECT_THROW(pass_.execute(ctx_, entities_, input), std::invalid_argument);
+            EXPECT_FALSE(capture.complete());
+            EXPECT_TRUE(capture.attachment_failed());
+            EXPECT_FALSE(capture.refused());
+            EXPECT_EQ(table_.resolve(1), nullptr);
+            ExpectEntryState(false);
+            continue;
+        }
         // The same immutable snapshot draws successfully with capture disabled.
         EXPECT_EQ(pass_.execute(ctx_, entities_, input).authored_draws, 1u);
         table_.clear();
+        SetEntryState(false);
         GBufferDiagnosticCapture capture(targets_, table_);
         EXPECT_EQ(pass_.execute(ctx_, entities_, input).authored_draws, 1u);
-        const bool supported = length <= 508;
+        ExpectEntryState(false);
+        const bool supported = length <= 507;
         EXPECT_EQ(capture.complete(), supported);
         EXPECT_EQ(capture.attachment_failed(), !supported);
         EXPECT_FALSE(capture.refused());
@@ -2785,13 +2802,15 @@ TEST(DiagnosticAttribution, AuthoredSurfacesAttributeImmutableMeshesAtTheOrigina
     Contains(render, "selected_shader = capture->variant(selected_shader, false)");
     EXPECT_LT(render.find("if (capture)"), render.find("capture->variant("));
     Contains(render, "const auto& identity = draw.mesh->identity");
-    Contains(render, "identity.empty() || identity.size() > (1024 - 8) / 2");
+    Contains(render, "constexpr std::string_view mesh_prefix = \"authored/\"");
+    Contains(render, "identity.empty() || identity.size() > (1024 - mesh_prefix.size()) / 2");
     Contains(render, "authored_static_surface");
     const auto unsupported = Body(render, "if (identity.empty()");
     Contains(unsupported, "capture->unsupported(\"authored_static_surface\")");
     Contains(unsupported, "capture->clear_current_identity()");
     EXPECT_EQ(unsupported.find("throw"), std::string::npos);
-    Contains(render, "mesh_key.reserve(8 + 2 * identity.size())");
+    Contains(render, "std::string mesh_key(mesh_prefix)");
+    Contains(render, "mesh_key.reserve(mesh_prefix.size() + 2 * identity.size())");
     Contains(render, "mesh_key += digits[byte >> 4]");
     Contains(render, "mesh_key += digits[byte & 15]");
     Contains(render, ".generated_mesh = mesh_key");

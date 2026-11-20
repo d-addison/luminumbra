@@ -490,13 +490,14 @@ StaticDrawStats StaticDrawPass::Render(const RenderView& view,
         glBindVertexArray(mesh->vao);
         if (capture) {
             const auto& identity = draw.mesh->identity;
+            constexpr std::string_view mesh_prefix = "authored/";
             // Hex encoding is injective and bounded by the 1,024-byte registry key.
-            if (identity.empty() || identity.size() > (1024 - 8) / 2) {
+            if (identity.empty() || identity.size() > (1024 - mesh_prefix.size()) / 2) {
                 capture->unsupported("authored_static_surface");
                 capture->clear_current_identity();
             } else {
-                std::string mesh_key = "authored/";
-                mesh_key.reserve(8 + 2 * identity.size());
+                std::string mesh_key(mesh_prefix);
+                mesh_key.reserve(mesh_prefix.size() + 2 * identity.size());
                 constexpr std::string_view digits = "0123456789abcdef";
                 for (const char character : identity) {
                     const auto byte = static_cast<unsigned char>(character);
