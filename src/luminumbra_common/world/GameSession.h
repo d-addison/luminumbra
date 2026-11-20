@@ -123,6 +123,8 @@ public:
     struct AuthorityProfileOptions {
         // Slice I will bind this predicate to its negotiated authority revision.
         bool residency_free_eviction = false;
+        // Dormant until negotiated authority enables fixed-tick water ownership.
+        bool regional_water = false;
     };
 
     // Selects the test-only opt-in constructor below.
@@ -766,6 +768,8 @@ public:
     std::filesystem::path GetSaveRootPath() const;
 
 private:
+    // Advances opt-in regional water for one fixed tick; a no-op when it is dormant.
+    void UpdateRegionalWaterFromSimulation();
     struct AuthorityProfileTag {};
     // The single real constructor; the default and the test-only constructors delegate here.
     GameSession(const AuthorityProfileOptions& authority_profile, AuthorityProfileTag);
@@ -872,9 +876,10 @@ private:
     struct RegionalEnergyStep;
     std::unique_ptr<RegionalEnergyStep> m_regionalEnergyStep;
     [[nodiscard]] RegionalEnergyStep* AdvanceEnergy(std::uint64_t tick);
-    void PublishRegionCompletedWork(FieldPageState* fields,
-                                    RegionalEnergyStep* energy,
-                                    bool defer_water_authority);
+    void PublishRegionConsumers(FieldPageState* fields,
+                                RegionalEnergyStep* energy,
+                                bool defer_water_authority);
+    void PublishRegionCompletedWork(bool defer_water_authority);
     void BindRegionalFieldQueries();
     [[nodiscard]] FieldPageView RegionalFields() const;
     [[nodiscard]] std::string RegionalAmbientHash(std::uint8_t channels, bool weather) const;
