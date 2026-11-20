@@ -801,18 +801,18 @@ TEST(RegionalWaterMigration, WaterOnlyOwnersSurviveEntryGenerationAndIncremental
         ASSERT_TRUE(owner->sdf_data.empty());
         SHIELD_WorldSystem shield(threaded ? &jobs : nullptr, nullptr, TerrainGenParams{}, 1337);
         shield.set_durable_residency(true);
-        owner->set_state(ChunkState::Loading); // saved lifecycle, without a running job
+        owner->set_state(ChunkState::Loading); // ordinary adoption cannot publish a live backfill
         ASSERT_TRUE(shield.adopt_streamed_chunk(owner));
-        EXPECT_EQ(owner->get_state(), ChunkState::Idle);
+        EXPECT_EQ(owner->get_state(), ChunkState::Loading);
         const std::vector<IVec3> entry{{0, 0, 0}};
         const auto digest = saved.service.region_simulation_digest(
             saved.path(), {0, 0}, migrated.snapshot_chunks());
         owner->set_state(ChunkState::Loading);
         const auto retired = migrated.find_chunk({0, 2, 0});
         ASSERT_NE(retired, nullptr);
-        retired->set_state(ChunkState::Loading); // saved retirement lifecycle is stable too
+        retired->set_state(ChunkState::Loading); // retirement also cannot prove worker quiescence
         ASSERT_TRUE(shield.adopt_streamed_chunk(retired));
-        EXPECT_EQ(retired->get_state(), ChunkState::Idle);
+        EXPECT_EQ(retired->get_state(), ChunkState::Loading);
         retired->set_state(ChunkState::Loading);
         EXPECT_EQ(saved.service.region_simulation_digest(
                       saved.path(), {0, 0}, migrated.snapshot_chunks()),
@@ -1023,6 +1023,18 @@ TEST(RegionalWaterMigration, WaterCandidateCapRefusesWithoutChangingLegacyBytes)
     saved.add({0, 2048, 0});
     ASSERT_TRUE(saved.write(errors));
     const auto bytes = saved.bytes();
+    // Inventory collection promotes legacy water authority even with regional
+    // migration disabled. Compare retries against that established load contract.
+    WorldStreamingState baseline;
+    ASSERT_TRUE(saved.service.load_world(baseline, saved.path(), errors, {}, nullptr, &inventory));
+    const auto legacy_hash = saved.service.world_hash(baseline);
+    EXPECT_EQ(baseline.size(), saved.original.size());
+    for (const auto& source : saved.original.snapshot_chunks()) {
+        const auto restored = baseline.find_chunk(source->get_id());
+        ASSERT_NE(restored, nullptr);
+        EXPECT_TRUE(restored->has_water_authority());
+        EXPECT_TRUE(restored->same_water_state(*source));
+    }
     EXPECT_FALSE(saved.service.load_world(
         loaded, saved.path(), errors, {}, &retain_none, &inventory, nullptr, true));
     ASSERT_FALSE(errors.empty());
@@ -1032,7 +1044,7 @@ TEST(RegionalWaterMigration, WaterCandidateCapRefusesWithoutChangingLegacyBytes)
     EXPECT_EQ(saved.bytes(), bytes);
     errors.clear();
     ASSERT_TRUE(saved.service.load_world(loaded, saved.path(), errors, {}, nullptr, &inventory));
-    EXPECT_EQ(saved.service.world_hash(loaded), saved.service.world_hash(saved.original));
+    EXPECT_EQ(saved.service.world_hash(loaded), legacy_hash);
 }
 
 TEST(RegionalWaterMigration, EmptyWorldAndIncompleteColdDestinationPreserveBytes) {

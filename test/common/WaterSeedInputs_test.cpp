@@ -4327,6 +4327,11 @@ TEST(WaterSeedInputs, FlagOffPreparedAndDirectLoadsPreserveIndependentLegacyWate
                 chunk->water_flow_data.clear();
         }
         ASSERT_TRUE(service.save_world(original, storage.Path(), &errors));
+        // Session entry repairs absent derived mirrors at the saved resolution.
+        // Integer water and the independent layer identities must stay unchanged.
+        const auto repaired = original.find_chunk({0, 1, 0});
+        ASSERT_NE(repaired, nullptr);
+        repaired->water_flow_data.assign(repaired->water_depth_mm.size(), Vec2(0.0f));
         if (prepared) {
             const auto options = session.CaptureWorldPreparationOptions();
             EXPECT_FALSE(options.regional_water);
@@ -4437,6 +4442,7 @@ TEST(WaterSeedInputs, WaterOnlyLegacyRetirementsStayDirtyUntilCanonicalCommit) {
     const IVec3 layer(0, 2, 0);
     const auto source = original.get_or_create_chunk(layer);
     session.GetWaterSystem()->InitializeGeneratedWater(*source, std::vector<float>(64, 100.0f));
+    source->set_state(ChunkState::Loading); // persisted lifecycle has no job in this session
     const Persistence::WorldSaveService service;
     std::vector<std::string> errors;
     {
@@ -4450,6 +4456,11 @@ TEST(WaterSeedInputs, WaterOnlyLegacyRetirementsStayDirtyUntilCanonicalCommit) {
     ASSERT_TRUE(session.LoadWorldStateFrom(path)) << session.GetWorldOpenError();
     const auto retired = session.GetWorldSystem()->find_authoritative_chunk(layer);
     ASSERT_NE(retired, nullptr);
+    EXPECT_EQ(retired->get_state(), ChunkState::Idle);
+    const auto migrated = session.GetWorldSystem()->find_authoritative_chunk({0, 0, 0});
+    ASSERT_NE(migrated, nullptr);
+    EXPECT_EQ(migrated->get_state(), ChunkState::Idle);
+    EXPECT_TRUE(migrated->same_water_state(*source));
     EXPECT_TRUE(retired->is_voxel_data_dirty());
     EXPECT_FALSE(retired->has_terrain_authority());
     EXPECT_FALSE(retired->has_water_authority());

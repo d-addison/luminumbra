@@ -8303,13 +8303,11 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
     // codec's business): a save captured between generation-job completion and
     // the main-thread Loading→Idle publish (the save quiesce is deliberately
     // non-publishing) carries Loading WITH populated voxel data. The data is
-    // complete generation output, so the adoptee enters as Idle. Water-only
-    // owners and migration retirements also have stable payloads and need an
-    // Idle entry so terrain backfill can run instead of mistaking saved lifecycle
-    // for an in-flight job.
+    // complete generation output, so the adoptee enters as Idle. Water ownership
+    // or retirement alone cannot prove that a Loading chunk is quiescent.
+    // Persisted water-only chunks settle at world adoption or normalize_for_park().
     if (chunk->get_state() == Luminumbra::ChunkState::Loading &&
-        (chunk->has_water_authority() || chunk->has_pending_water_retirement() ||
-         !chunk->sdf_data.empty() || !chunk->heightmap_data.empty())) {
+        (!chunk->sdf_data.empty() || !chunk->heightmap_data.empty())) {
         set_renderable_chunk_state(*chunk, Luminumbra::ChunkState::Idle);
     }
     if (!m_parked.empty()) {

@@ -562,6 +562,21 @@ class RegionAuthorityWiring(unittest.TestCase):
         self.assertIn("resident->second->has_pending_water_retirement()", restore)
         self.assertNotIn("is_voxel_data_dirty()", restore)
 
+    def test_water_ownership_cannot_settle_live_loading_adoption(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        adopt = function(source, "bool SHIELD_WorldSystem::adopt_streamed_chunk(")
+        lifecycle = adopt[:adopt.index("if (!m_parked.empty())")]
+        self.assertNotIn("chunk->has_water_authority()", lifecycle)
+        self.assertNotIn("chunk->has_pending_water_retirement()", lifecycle)
+        restore = function(source, "bool SHIELD_WorldSystem::restore_authoritative_chunk(")
+        self.assertLess(restore.index("chunk->normalize_for_park();"),
+                        restore.index("adopt_streamed_chunk(chunk)"))
+        session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(
+            encoding="utf-8")
+        entry = function(session, "void GameSession::AdoptWorldStateFrom(")
+        self.assertLess(entry.index("chunk->set_state(has_mesh ? ChunkState::Ready : ChunkState::Idle);"),
+                        entry.index("adopt_streamed_chunk(chunk)"))
+
     def test_water_retirement_acknowledgement_is_independent_of_generation(self):
         header = (ROOT / "src/luminumbra_common/world/Chunk.h").read_text(encoding="utf-8")
         dirty = function(header, "bool is_voxel_data_dirty() const")
