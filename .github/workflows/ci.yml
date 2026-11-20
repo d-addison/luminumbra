@@ -626,10 +626,29 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      - name: Resolve the merged comparison base
+        id: compare-base
+        env:
+          CI_EVENT: ${{ github.event_name }}
+          CI_PAYLOAD_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CI_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # GitHub can build the pull-request merge commit against a newer base than
+          # the payload records. Diffing against the payload base would then select
+          # base-branch changes, so compare against the merge commit's first parent.
+          base="$CI_PAYLOAD_BASE"
+          if [ "$CI_EVENT" = pull_request ]; then
+            if [ "$(git rev-parse -q --verify 'HEAD^2' || true)" = "$CI_PR_HEAD" ]; then
+              base="$(git rev-parse 'HEAD^1')"
+            else
+              echo "::warning::checked-out commit is not the pull-request merge; using the payload base"
+            fi
+          fi
+          echo "sha=$base" >> "$GITHUB_OUTPUT"
       - name: Route explicit non-native paths or conservative validation
         id: route
         env:
-          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CI_BASE_SHA: ${{ steps.compare-base.outputs.sha }}
         run: |
           python3 -I -B tools/ci/changed_tus.py route --base-ref "${CI_BASE_SHA:-HEAD}" \
             --output "$GITHUB_OUTPUT" --summary-file "$GITHUB_STEP_SUMMARY"
@@ -639,7 +658,7 @@ jobs:
         id: shader-scenes
         env:
           CI_EVENT: ${{ github.event_name }}
-          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CI_BASE_SHA: ${{ steps.compare-base.outputs.sha }}
           CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: python3 -I -B tools/ci/ci_paths.py classify-shader-scenes
       - name: Validate shader scene contracts
@@ -732,7 +751,7 @@ jobs:
       - name: Replay selected compiles and both tidy configurations
         if: steps.route.outputs.native != 'false'
         env:
-          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CI_BASE_SHA: ${{ steps.compare-base.outputs.sha }}
           CI_FULL_SELECTION: ${{ steps.route.outputs.full }}
         run: |
           ccache --max-size 250M
