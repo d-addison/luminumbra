@@ -50,8 +50,12 @@ public:
     bool attach_forward(std::uint32_t framebuffer,
                         std::uint32_t color_texture,
                         const DiagnosticExtent& extent);
-    Shader*
-    variant(Shader* shader, bool ladder, const std::vector<std::string>& feedback_varyings = {});
+    // zero_ids preserves an uninstrumented fragment's discard/depth behaviour,
+    // but writes zero for every surviving fragment. Variant failures refuse display.
+    Shader* variant(Shader* shader,
+                    bool ladder,
+                    const std::vector<std::string>& feedback_varyings = {},
+                    bool zero_ids = false);
     void write(const Shader& shader, const DiagnosticSubmission& submission);
     void write_current(const DiagnosticSubmission& submission);
     // Refused/uncovered fallback draws must not inherit the preceding identity.
@@ -87,6 +91,7 @@ private:
             std::string vertex;
             std::string fragment;
             bool ladder;
+            bool zero_ids;
             std::vector<std::string> feedback_varyings;
             std::unique_ptr<Shader> shader;
             int identity;

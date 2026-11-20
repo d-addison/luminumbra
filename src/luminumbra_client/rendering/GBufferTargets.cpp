@@ -116,11 +116,13 @@ bool GBufferDiagnosticCapture::snapshot_ready() const {
 
 Shader* GBufferDiagnosticCapture::variant(Shader* shader,
                                           bool ladder,
-                                          const std::vector<std::string>& feedback_varyings) {
+                                          const std::vector<std::string>& feedback_varyings,
+                                          bool zero_ids) {
     if (!state_->framebuffer) {
         return shader;
     }
     if (!shader || !shader->IsValid()) {
+        abort();
         unsupported("diagnostic_base_shader_unavailable",
                     0,
                     DiagnosticOwnership::Live,
@@ -132,6 +134,7 @@ Shader* GBufferDiagnosticCapture::variant(Shader* shader,
         std::any_of(feedback_varyings.begin(), feedback_varyings.end(), [](const auto& name) {
             return name.size() > 64;
         })) {
+        abort();
         unsupported("diagnostic_shader_variant_limit",
                     0,
                     DiagnosticOwnership::Live,
@@ -140,18 +143,20 @@ Shader* GBufferDiagnosticCapture::variant(Shader* shader,
     }
     for (const auto& entry : state_->variants) {
         if (entry.vertex == shader->VertexPath() && entry.fragment == shader->FragmentPath() &&
-            entry.ladder == ladder && entry.feedback_varyings == feedback_varyings) {
+            entry.ladder == ladder && entry.zero_ids == zero_ids &&
+            entry.feedback_varyings == feedback_varyings) {
             return entry.shader.get();
         }
     }
     if (state_->variants.size() == 6) {
+        abort();
         unsupported("diagnostic_shader_variant_limit",
                     0,
                     DiagnosticOwnership::Live,
                     state_->forward ? DiagnosticPass::Forward : DiagnosticPass::GBuffer);
         return shader;
     }
-    std::vector<std::string> defines{"LUMIN_DIAG_IDS 1"};
+    std::vector<std::string> defines{zero_ids ? "LUMIN_DIAG_ZERO_IDS 1" : "LUMIN_DIAG_IDS 1"};
     if (ladder) {
         defines.emplace_back("LUMINUMBRA_FAR_WORLD_LADDER 1");
     }
@@ -159,7 +164,8 @@ Shader* GBufferDiagnosticCapture::variant(Shader* shader,
         shader->VertexPath().c_str(), shader->FragmentPath().c_str(), feedback_varyings, defines);
     const GLint identity =
         diagnostic->IsValid() ? glGetUniformLocation(diagnostic->Id(), "u_diagnosticIds") : -1;
-    if (identity < 0) {
+    if (!diagnostic->IsValid() || (!zero_ids && identity < 0)) {
+        abort();
         unsupported("diagnostic_shader_variant_unavailable",
                     0,
                     DiagnosticOwnership::Live,
@@ -169,6 +175,7 @@ Shader* GBufferDiagnosticCapture::variant(Shader* shader,
     state_->variants.push_back({shader->VertexPath(),
                                 shader->FragmentPath(),
                                 ladder,
+                                zero_ids,
                                 feedback_varyings,
                                 std::move(diagnostic),
                                 identity});
@@ -191,6 +198,11 @@ void GBufferDiagnosticCapture::write(const Shader& shader, const DiagnosticSubmi
         if (entry.shader.get() != &shader) {
             continue;
         }
+        if (entry.zero_ids) {
+            // A zero-output program cannot certify a supported identity.
+            abort();
+            return;
+        }
         DiagnosticId id{};
         if (submission.provenance == DiagnosticProvenance::Unsupported) {
             state_->failed = true;
@@ -206,6 +218,7 @@ void GBufferDiagnosticCapture::write(const Shader& shader, const DiagnosticSubmi
     }
     unsupported(
         "diagnostic_writer_without_variant", submission.lod, submission.ownership, submission.pass);
+    abort();
 }
 
 GBufferDiagnosticAttachment::GBufferDiagnosticAttachment(const GBuffer& gbuffer,
@@ -280,6 +293,7 @@ void GBufferDiagnosticCapture::write_current(const DiagnosticSubmission& submiss
     }
     unsupported(
         "diagnostic_writer_without_variant", submission.lod, submission.ownership, submission.pass);
+    abort();
 }
 
 void GBufferDiagnosticCapture::clear_current_identity() {

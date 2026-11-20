@@ -1188,24 +1188,25 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     // for the whole far field (the draw-call/triangle collapse the forest_perf_budget gate
     // targets).
     if (impostorsOn && !impostorInstances.empty()) {
+        Shader* impostor_program = m_tree_impostor_shader.get();
         // Queued geometry is unsupported even when its program prevents submission.
         if (capture) {
             capture->unsupported("tree_impostor_fragment_output_unavailable", 3);
+            impostor_program = capture->variant(impostor_program, false, {}, true);
         }
         DebugViewPass::unsupported_surface();
-        if (!UseDrawProgram(m_tree_impostor_shader.get(), stats)) {
+        if (!UseDrawProgram(impostor_program, stats)) {
             return;
         }
-        m_tree_impostor_shader->setMat4("u_view", static_view);
-        m_tree_impostor_shader->setMat4("u_proj", static_proj);
-        m_tree_impostor_shader->setVec3("u_cameraPos", cameraPos);
-        m_tree_impostor_shader->setFloat("u_radius", input.tree_impostor_radius);
-        m_tree_impostor_shader->setVec3("u_center", input.tree_impostor_center);
-        m_tree_impostor_shader->setFloat("u_grid", static_cast<float>(input.tree_impostor_grid));
-        m_tree_impostor_shader->setFloat("u_materialId",
-                                         static_cast<float>(impostorMatId) / 255.0f);
-        m_tree_impostor_shader->setInt("u_albedo", 0);
-        m_tree_impostor_shader->setInt("u_normal", 1);
+        impostor_program->setMat4("u_view", static_view);
+        impostor_program->setMat4("u_proj", static_proj);
+        impostor_program->setVec3("u_cameraPos", cameraPos);
+        impostor_program->setFloat("u_radius", input.tree_impostor_radius);
+        impostor_program->setVec3("u_center", input.tree_impostor_center);
+        impostor_program->setFloat("u_grid", static_cast<float>(input.tree_impostor_grid));
+        impostor_program->setFloat("u_materialId", static_cast<float>(impostorMatId) / 255.0f);
+        impostor_program->setInt("u_albedo", 0);
+        impostor_program->setInt("u_normal", 1);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, input.tree_impostor_albedo);
         glActiveTexture(GL_TEXTURE1);

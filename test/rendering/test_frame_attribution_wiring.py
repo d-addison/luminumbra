@@ -3518,6 +3518,52 @@ class DeferredDiagnosticLeaseWiring(unittest.TestCase):
         self.assertIn("return;", block(queued, "if (!UseDrawProgram("))
         self.assertIn('capture->unsupported("tree_impostor_fragment_output_unavailable", 3)',
                       block(queued, "if (capture)"))
+        self.assertIn("impostor_program = capture->variant(impostor_program, false, {}, true)",
+                      block(queued, "if (capture)"))
+        self.assertLess(queued.index("capture->variant("), queued.index("UseDrawProgram("))
+        self.assertIn("UseDrawProgram(impostor_program, stats)", queued)
+        uniforms = queued[queued.index("UseDrawProgram("):]
+        self.assertIn('impostor_program->setMat4("u_proj", static_proj)', uniforms)
+        self.assertNotIn("m_tree_impostor_shader->set", uniforms)
+
+    def test_uninstrumented_capture_wraps_original_fragment_and_separates_cache_modes(self):
+        shader = block(read(CLIENT / "rendering/Shader.cpp"),
+                       "AttributedGl::Program Shader::buildProgram(")
+        self.assertIn('"LUMIN_DIAG_ZERO_IDS 1"', shader)
+        rename = block(shader, "if (zero_ids && source == &fragmentCode)")
+        self.assertIn('defines.emplace_back("main lumin_diagnostic_original_main")', rename)
+        wrapper = block(shader, "if (zero_ids)")
+        self.assertIn("#undef main", wrapper)
+        self.assertIn("layout(location = 6) out uvec4", wrapper)
+        self.assertLess(wrapper.index("lumin_diagnostic_original_main();"),
+                        wrapper.index("lumin_diagnostic_zero = uvec4(0);"))
+        variant = block(self.targets, "Shader* GBufferDiagnosticCapture::variant(")
+        self.assertIn("entry.zero_ids == zero_ids", variant)
+        self.assertIn('zero_ids ? "LUMIN_DIAG_ZERO_IDS 1" : "LUMIN_DIAG_IDS 1"', variant)
+        fixture = read(ROOT / "test/rendering/diagnostic_inspector_test.cpp")
+        draw = block(fixture, "void DrawImpostor(")
+        for token in ('"tree_impostor.vert"', '"tree_impostor.frag"',
+                      "capture.variant(&original, false, {}, true)",
+                      "glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, 1)",
+                      "glReadPixels(0, 0, 2, 2, GL_RGBA_INTEGER", "DiagnosticId{}"):
+            self.assertIn(token, draw)
+        self.assertNotIn("glTextureSubImage2D", draw)
+        self.assertIn("ASSERT_NO_FATAL_FAILURE(DrawImpostor(*capture, coverage))", fixture)
+
+    def test_unsafe_program_fallbacks_refuse_snapshot_before_return(self):
+        variant = block(self.targets, "Shader* GBufferDiagnosticCapture::variant(")
+        for marker in ("if (!shader || !shader->IsValid())",
+                       "})) {",
+                       "if (state_->variants.size() == 6)",
+                       "if (!diagnostic->IsValid() || (!zero_ids && identity < 0))"):
+            failure = block(variant, marker)
+            self.assertLess(failure.index("abort();"), failure.index("return shader;"))
+        writer = block(self.targets, "void GBufferDiagnosticCapture::write(")
+        self.assertIn("abort();", block(writer, "if (entry.zero_ids)"))
+        for signature in ("void GBufferDiagnosticCapture::write(",
+                          "void GBufferDiagnosticCapture::write_current("):
+            body = block(self.targets, signature)
+            self.assertRegex(body, r'"diagnostic_writer_without_variant"[^;]*;\s*abort\(\);')
 
     def test_detached_writers_and_variants_do_no_work(self):
         for signature, work, returned in (
@@ -4238,7 +4284,8 @@ class DiagnosticContributorWiring(unittest.TestCase):
     def test_variant_and_detachment_failures_record_the_active_pass(self):
         variant = block(self.source, "Shader* GBufferDiagnosticCapture::variant(")
         for marker in ("if (!shader || !shader->IsValid())",
-                       "if (state_->variants.size() == 6)", "if (identity < 0)"):
+                       "if (state_->variants.size() == 6)",
+                       "if (!diagnostic->IsValid() || (!zero_ids && identity < 0))"):
             self.assertIn("state_->forward ? DiagnosticPass::Forward : DiagnosticPass::GBuffer",
                           block(variant, marker))
         detach = block(self.source, "void GBufferDiagnosticCapture::detach()")
