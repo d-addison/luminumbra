@@ -9955,10 +9955,10 @@ TEST(RenderSmokeTest, ScenarioCaptureRefusesUnavailableCoverageAndProbeBeforeOpe
     pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
     scope = GBufferDiagnosticCapture::Current();
     ASSERT_NE(scope, nullptr);
-    // An invalid late attachment defers its failure until detach. A GL-free
-    // observation cannot consume it; publication admission must do so first.
+    // An invalid late attachment records unsupported coverage at once. A GL-free
+    // observation reports it without consuming the scope; publication does.
     ASSERT_FALSE(scope->attach({}, {32, 32}));
-    EXPECT_TRUE(pipeline.diagnostic_capture_refusal().empty());
+    EXPECT_EQ(pipeline.diagnostic_capture_refusal(), "producer_coverage_incomplete");
     EXPECT_EQ(GBufferDiagnosticCapture::Current(), scope);
     EXPECT_FALSE(pipeline.with_diagnostic_capture(
         temporary.Path(),
