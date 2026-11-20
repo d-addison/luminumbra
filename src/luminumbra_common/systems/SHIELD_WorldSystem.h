@@ -987,8 +987,14 @@ public:
     // (due = dispatch + kActivationPipelineLatencyTicks) and drives
     // activate_due after the swap. The client never calls it (tick stays -1:
     // batches carry due_tick -1 = publish-when-drained, today's semantics).
-    void begin_tick(std::int64_t sim_tick) {
+    void begin_tick(std::int64_t sim_tick, bool continuation = false) {
         m_current_sim_tick = sim_tick;
+        if (continuation) {
+            // Continuations count one anchored update per positive simulation tick.
+            // Rebase the existing four-update activation cadence, excluding boot
+            // updates and process-local update history. No scheduler state is saved.
+            m_update_tick_counter = static_cast<int>((sim_tick % 4 + 3) % 4);
+        }
     }
     std::int64_t current_sim_tick() const {
         return m_current_sim_tick;
