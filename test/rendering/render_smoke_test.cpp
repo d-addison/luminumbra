@@ -9817,21 +9817,23 @@ TEST(RenderSmokeTest, ScenarioBundlesRetainCompletedFrameIdentityAcrossSiblingCa
         {.enabled = true, .probe = std::array<std::uint32_t, 2>{16, 16}});
     Luminumbra::Systems::SHIELD_WorldSystem world(
         nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
-    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0));
-    chunk->set_state(Luminumbra::ChunkState::Ready);
-    chunk->mesh_vertices = {
-        {{0, 6, 0}, {0, 1, 0}, 3u},
-        {{0, 6, 16}, {0, 1, 0}, 3u},
-        {{16, 6, 0}, {0, 1, 0}, 3u},
-    };
-    chunk->mesh_indices = {0u, 1u, 2u};
-    ++chunk->mesh_version;
-    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
     entt::registry registry;
-    Camera camera({8, 12, 8}, {0, 1, 0}, -90, -89);
+    // Static instances already provide capture attribution; resident terrain MDI
+    // requires separate producer support. Match the cached attribution fixture.
+    const std::string mesh_path = "test/diagnostic_triangle.lmesh";
+    pipeline.register_procgen_mesh(mesh_path,
+                                   MeshLoader::CreateFromArrays({{{-1, -1, -5}, {0, 0, 1}, {0, 0}},
+                                                                 {{1, -1, -5}, {0, 0, 1}, {1, 0}},
+                                                                 {{0, 1, -5}, {0, 0, 1}, {.5f, 1}}},
+                                                                {0, 1, 2}));
+    ASSERT_TRUE(pipeline.has_procgen_mesh(mesh_path));
+    const auto prop = registry.create();
+    registry.emplace<Luminumbra::Components::TransformComponent>(prop);
+    registry.emplace<Luminumbra::Components::StaticMeshComponent>(prop).meshPath = mesh_path;
+    Camera camera;
     pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
-    ASSERT_TRUE(pipeline.diagnostic_capture_refusal().empty());
-    ASSERT_GT(pipeline.get_last_render_pass_stats().terrain_draws, 0U);
+    ASSERT_TRUE(pipeline.diagnostic_capture_refusal().empty())
+        << pipeline.diagnostic_capture_refusal();
     std::vector<unsigned char> pixels(32U * 32U * 3U);
     glReadBuffer(GL_BACK);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
@@ -9874,6 +9876,15 @@ TEST(RenderSmokeTest, ScenarioBundlesRetainCompletedFrameIdentityAcrossSiblingCa
         const auto draws = ReadTextFile(path.string() + ".draws.json");
         const auto table = nlohmann::json::parse(draws);
         EXPECT_FALSE(table.at("draws").empty());
+        ASSERT_EQ(table.at("draws").size(), 1U);
+        ASSERT_EQ(table.at("meshes").size(), 1U);
+        EXPECT_EQ(table.at("meshes").at(0).at("path"), mesh_path);
+        EXPECT_EQ(table.at("draws").at(0).at("shader_variant"), "instanced_static_mesh");
+        const auto probe = nlohmann::json::parse(ReadTextFile(path.string() + ".probe-16-16.json"));
+        // A rasterized identity at the probe proves the attributed producer drew.
+        EXPECT_GT(probe.at("id").at(0).get<std::uint32_t>(), 0U);
+        EXPECT_EQ(probe.at("id").at(0), table.at("draws").at(0).at("id"));
+        EXPECT_EQ(probe.at("id").at(1), table.at("meshes").at(0).at("id"));
         if (first_ids.empty()) {
             first_ids = ids;
             first_draws = draws;
@@ -9882,7 +9893,8 @@ TEST(RenderSmokeTest, ScenarioBundlesRetainCompletedFrameIdentityAcrossSiblingCa
         EXPECT_EQ(ids, first_ids);
         EXPECT_EQ(draws, first_draws);
         EXPECT_EQ(metadata.at("frame"), first_frame);
-        EXPECT_TRUE(pipeline.diagnostic_capture_refusal().empty());
+        EXPECT_TRUE(pipeline.diagnostic_capture_refusal().empty())
+            << pipeline.diagnostic_capture_refusal();
     }
     pipeline.end_diagnostic_capture();
     EXPECT_EQ(pipeline.diagnostic_capture_refusal(), "completed_frame_unavailable");
