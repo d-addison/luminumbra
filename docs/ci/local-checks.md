@@ -456,8 +456,7 @@ any sources. The uncompressed bundle, including Git metadata and resolved lock,
 must fit a 500,000,000-byte save cap; an oversized bundle remains runner-local.
 PRs and manual runs only restore. The existing cleanup policy retains the newest
 source generation per branch within its unchanged 9.5 GB repository budget,
-with its existing head and six-hour recency protections. Compiler cache caps
-remain unchanged. Misses still work, and invalid restored sources fail verification.
+with its existing head and one-hour creation-recency protections. Misses still work, and invalid restored sources fail verification.
 
 The fast job has no `needs` consumers. Required GCC, full tidy, ASan, preview
 and performance jobs do not depend on it. ASan's separate `fast-lane` job runs
