@@ -232,8 +232,10 @@ TEST(DiagnosticInspector, CaptureTeardownUnbindsBeforeDeletingVariants) {
 
 TEST(DiagnosticInspector, ProducerMappingIncludesUnknownAndExplicitUnsupported) {
     using Kind = Pass::ProducerKind;
-    const std::array<std::pair<std::string_view, Kind>, 9> cases = {{
-        {"live_terrain_mdi", Kind::Terrain},
+    const std::array<std::pair<std::string_view, Kind>, 11> cases = {{
+        {"terrain_mdi", Kind::Terrain},
+        {"terrain_mdi_ladder", Kind::Terrain},
+        {"live_terrain_mdi", Kind::Unsupported},
         {"legacy_far_terrain", Kind::Terrain},
         {"tree_impostor", Kind::Impostor},
         {"foliage_ladder", Kind::Foliage},
@@ -708,6 +710,10 @@ TEST(DiagnosticInspector, JoinRefusesPartialUnknownAndOversizedMetadata) {
     EXPECT_EQ(Pass::producer("foliage_unknown", true), Pass::ProducerKind::Unsupported);
     EXPECT_EQ(Pass::producer("live_terrain_mdi_unsupported", true),
               Pass::ProducerKind::Unsupported);
+    // The classifier must recognise the spellings live terrain actually submits.
+    EXPECT_NE(Source("src/luminumbra_client/rendering/RenderPipeline.cpp")
+                  .find("ladder ? \"terrain_mdi_ladder\" : \"terrain_mdi\""),
+              std::string::npos);
 }
 
 TEST(DiagnosticInspector, EveryNamedIdentityModeIsSharedByPanelAndCommandLine) {

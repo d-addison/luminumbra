@@ -61,9 +61,9 @@ public:
         if (!supported) {
             return ProducerKind::Unsupported;
         }
-        if (variant == "live_terrain" || variant == "live_terrain_mdi" ||
-            variant == "live_terrain_mdi_ladder" || variant == "legacy_far_terrain" ||
-            variant == "legacy_far_water") {
+        // RenderPipeline submits live terrain as terrain_mdi[_ladder].
+        if (variant == "terrain_mdi" || variant == "terrain_mdi_ladder" ||
+            variant == "legacy_far_terrain" || variant == "legacy_far_water") {
             return ProducerKind::Terrain;
         }
         if (variant == "tree_impostor" || variant == "tree_impostor_ladder") {
