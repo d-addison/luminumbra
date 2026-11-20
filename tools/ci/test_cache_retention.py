@@ -16,7 +16,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 NOW = datetime(2026, 10, 14, 12, tzinfo=timezone.utc)
 # One empty response per active-run status query.
-IDLE_RUNS = [json.dumps({"workflow_runs": []})] * 5
+IDLE_RUNS = [json.dumps([{"workflow_runs": []}])] * 5
 
 
 class FrozenDatetime(datetime):
@@ -306,7 +306,7 @@ class CacheRetentionTests(unittest.TestCase):
         for position in range(len(IDLE_RUNS)):
             with self.subTest(position=position):
                 runs = list(IDLE_RUNS)
-                runs[position] = json.dumps({"workflow_runs": [{"head_sha": "A"}]})
+                runs[position] = json.dumps([{"workflow_runs": [{"head_sha": "A"}]}])
                 with patch.dict(os.environ, {"GH_REPO": "owner/repo", "TRIGGER_SHA": "B"}), \
                         patch("subprocess.check_output", side_effect=[
                             json.dumps([{"actions_caches": caches}]), *runs, refs, refs,
@@ -314,9 +314,28 @@ class CacheRetentionTests(unittest.TestCase):
                     exec(compile(self.body, "cache-cleanup", "exec"), {})
                 delete.assert_called_once_with(
                     ["gh", "cache", "delete", "3", "--repo", "owner/repo"], check=True)
-                statuses = [call.args[0][2].split("status=")[1].split("&")[0]
-                            for call in api.call_args_list[1:1 + len(IDLE_RUNS)]]
+                run_calls = [call.args[0] for call in api.call_args_list[1:1 + len(IDLE_RUNS)]]
+                for argv in run_calls:
+                    self.assertEqual(argv[:4], ["gh", "api", "--paginate", "--slurp"])
+                statuses = [argv[4].split("status=")[1].split("&")[0] for argv in run_calls]
                 self.assertEqual(statuses, ["requested", "pending", "waiting", "queued", "in_progress"])
+
+    def test_active_run_sha_on_a_later_page_keeps_its_cache(self):
+        refs = json.dumps([{"ref": "refs/heads/devel", "object": {"sha": "B"}}])
+        caches = [self.cache(1, "tidy-cache-Linux-shard1of3-A"),
+                  self.cache(2, "tidy-cache-Linux-shard1of3-B"),
+                  self.cache(3, "tidy-cache-Linux-shard1of3-older")]
+        caches[2]["created_at"] = "2026-10-12T00:00:00Z"
+        first_page = {"workflow_runs": [{"head_sha": f"busy{i}"} for i in range(100)]}
+        runs = list(IDLE_RUNS)
+        runs[3] = json.dumps([first_page, {"workflow_runs": [{"head_sha": "A"}]}])
+        with patch.dict(os.environ, {"GH_REPO": "owner/repo", "TRIGGER_SHA": "B"}), \
+                patch("subprocess.check_output", side_effect=[
+                    json.dumps([{"actions_caches": caches}]), *runs, refs, refs,
+                ]), patch("subprocess.run") as delete:
+            exec(compile(self.body, "cache-cleanup", "exec"), {})
+        delete.assert_called_once_with(
+            ["gh", "cache", "delete", "3", "--repo", "owner/repo"], check=True)
 
     def test_active_run_api_error_skips_all_deletion(self):
         caches = [self.cache(1, "tidy-cache-Linux-shard1of3-A"),

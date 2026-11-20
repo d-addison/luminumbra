@@ -133,14 +133,16 @@ jobs:
                       if ref['ref'] in ('refs/heads/main', 'refs/heads/devel')}
 
           def active_run_shas():
-              # One bounded query per active status; a listing failure aborts
-              # cleanup before any deletion.
+              # One paginated query per active status collects every page, so a
+              # backlog beyond 100 runs keeps its caches. A listing failure on any
+              # page aborts cleanup before any deletion.
               shas = set()
               for status in ACTIVE_STATUSES:
-                  runs = json.loads(subprocess.check_output([
-                      'gh', 'api', f'repos/{repository}/actions/runs?status={status}&per_page=100',
+                  pages = json.loads(subprocess.check_output([
+                      'gh', 'api', '--paginate', '--slurp',
+                      f'repos/{repository}/actions/runs?status={status}&per_page=100',
                   ], text=True))
-                  shas.update(run['head_sha'] for run in runs['workflow_runs'])
+                  shas.update(run['head_sha'] for page in pages for run in page['workflow_runs'])
               return shas
 
           def cleanup():
