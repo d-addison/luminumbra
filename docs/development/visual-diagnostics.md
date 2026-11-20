@@ -19,7 +19,7 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | Bundle transactions and opt-in admission | GL-free core implemented; runtime integration pending | `DiagnosticCapture.h/.cpp` resolves options, streams normalized planes, joins draw records, enforces staging budgets and publishes completion last using identity-checked ownership. `diagnostic_bundle_test` covers public transports and filesystem refusal/rollback; native execution pending. Runtime setup refuses enabled diagnostics before output until the completed-frame adapter is integrated |
 | ID views and single-pixel inspector | Implemented as explicit render-thread snapshots | `DebugViewPass`; developer-console debug-view panel; registered `DiagnosticInspector.*` and `DiagnosticInspectorGl.*` regressions in `pass_context_test`; native execution pending. Other B views and viewport picking remain planned |
 | Linux shader compilation and software-GL reference scenes | Partial | Fast Linux steps and material, cutout, night and terrain fixtures registered; bounded sky/terrain shader replays checked under llvmpipe; native scene target execution pending; dusk continuity diagnostic pending issue #918; no required-check or ruleset changes |
-| Bundle validity and image checks | Implemented for schema 1 and reader-only schema 2 | `check-diagnostic-capture.py` and registered `DiagnosticCapturePython` synthetic regressions validate bundles without a renderer. ROI coverage, validity, weather and edge metrics plus worst-pixel SVG crops are implemented; shipped ROIs are advisory |
+| Bundle validity and image checks | Implemented for schema 1 and reader-only schemas 2/3 | `check-diagnostic-capture.py` and registered `DiagnosticCapturePython` synthetic regressions validate bundles without a renderer. ROI coverage, validity, weather, edge and masked defect measurements plus worst-pixel SVG crops are implemented; synthetic detection is covered, while production thresholds remain advisory/unqualified |
 | Capture feature profile and capability manifest | Implemented as GL-free setup logic; app wiring pending | `CaptureFeatureProfile.h/.cpp`; strict `--capture-feature-profile=none\|all_features` runtime selection; registered `CaptureFeatureProfile.*` regressions; native execution pending |
 | Temporal audit plans and admission | Implemented as GL-free planning only; runtime execution refused | `TemporalAudit.h/.cpp`, `RuntimeScenarioConfig.h/.cpp`; registered `TemporalAudit.*` regressions in `capture_manifest_test`; native execution pending |
 | Temporal sequences and non-vacuous evidence (E1–E3) | Planned; gap inventory below describes current capture code | Exact-tick site execution, temporal metrics, shared producer policy and non-vacuous feature evidence require implementation; existing captures do not establish this coverage |
@@ -454,48 +454,97 @@ terrain blend row band; they do not establish camera or scenario qualification.
 
 Coverage reports the fraction of all ROI pixels matching an exact `field`/`value`
 class in `ids`: background (1=true, 0=false), draw, mesh, LOD, ownership or pass.
-Background retains its zero ID fields. Validity reports the fraction whose whole
+Background retains its zero ID fields. Exact material coverage uses `kind: coverage`, `channel: material`,
+`field: material` and an integral material `value` in [0,255]; a pinned expected-water
+ROI uses [0.01,1] with its scenario's actual water material ID. Missing or invalid
+material evidence never passes. Validity reports the fraction whose whole
 pixel is finite; depth additionally requires [0,1], normal components [-1,1], and
 material integral [0,255]. Albedo validity only requires finiteness. Undefined
 background AOVs are not inferred or masked. Weather reports the mean, minimum and
 maximum scalar contribution, enforcing the range against every pixel, not just
 the mean. Edge `axis: x` compares adjacent columns and `axis: y` adjacent rows,
 only inside the ROI; the value is the maximum absolute channel difference.
-Coordinates select the second pixel of that pair. No final-color weather inference,
-silhouette rejection or reference-scene error measurement is claimed.
+Coordinates select the second pixel of that pair. These original metrics do not
+infer final-color weather. The additional masked
+checks below require explicit same-frame evidence for silhouette exclusion and
+reference-scene error measurement.
 
-Schema-1 bundles remain unchanged and have no weather channel. Reader-only bundle
-schema 2 requires at least one declared scalar `precipitation`, `fog` or `cloud`
-plane, encoded as `linear_contribution_float32` in `encodings`. The corresponding
-`CAPTURE.CHANNEL.pfm` members follow draws in that order, before the optional probe
-and completion member. All other schema-1 metadata, AOV, ID, draw, probe and capture
-manifest contracts remain unchanged; nested documents retain schema 1. Dimensions,
-exact byte sizes, orientation, timestamps and nonfinite checks apply to contribution
-planes too. Unknown channels/encodings are refused. There is no schema-2 runtime
-writer yet; synthetic tests cover this contract for future instrumented producers.
-C2 software-GL fixtures are not present in this checkout and are not claimed as evidence.
+Schema-1 bundles remain unchanged and have no contribution channels. Reader-only
+schema 2 retains its precipitation/fog/cloud-only contract. Reader-only schema 3
+requires at least one of the additional evidence planes; weather is optional.
+Old readers refuse schema 3 explicitly. No save or simulation format changes. Ordered optional
+members follow draws, before the optional probe and completion: `precipitation`,
+`fog`, `cloud`, `expected_mask`, `reference`, `dry_reference`, `alpha`, `cutout`,
+`depth_written`, `triplanar`, `stars`, `transmittance`. Scalar planes use
+`linear_contribution_float32`; RGB references use `linear_rgb_float32` and XYZ
+triplanar weights use `linear_xyz_float32`. All use the existing PFM reader,
+dimension/byte-size/orientation/timestamp and nonfinite checks. Nested documents
+retain schema 1. Unknown channels/encodings are refused. No runtime writer supplies
+these planes yet; producers must declare matching frame, camera and surface data,
+including reference inputs with the same scene settings. A bundle does not prove
+reference provenance or repeated-capture qualification.
+
+Additional metric specifications require `mask: "expected_mask"`. The mask is a
+pinned binary scalar plane whose meaning is defined by each named ROI; no mask is
+guessed from final color. Unknown masks/ROIs are refused. Missing required planes,
+empty masks, or no eligible samples report `unavailable`, with null value and no
+worst pixel. Mask values outside {0,1} refuse measurement. Scenario masks exclude
+known caves/water/silhouettes, particles and unsupported surfaces and require
+residency before capture. The shipped rectangles illustrate placement only.
+
+| Kind / channel | Measurement and evidence | Advisory example |
+| --- | --- | --- |
+| `holes` / `ids` | Background fraction after eroding the expected-terrain mask and ROI boundary by two pixels in both axes; also catches a far/live gap | [0,0] |
+| `seam` / `albedo` | Linear RGB MAE and per-pixel RGB mean-error p99 against `reference`; pinned seam/shadow/light-isolation mask | MAE <= 0.005; `p99_limit: 0.02` |
+| `boundary` / `albedo` | p99 of maximum RGB residual against inward extrapolation `2*next-next_next`; `axis: x/y`, inward `direction: -1/1`; three selected pixels must have the same nonbackground IDs and depth spread <= 0.01 | p99 <= 8/255; use an explicitly pinned border band |
+| `card` / `alpha` | Alpha coverage fraction (`alpha >= cutout`) strictly inside thresholds, plus zero `depth_written` pixels below `cutout`; all three scalar planes required and range checked | coverage strictly (0.01,0.99); zero violations |
+| `banding` / `albedo` | Maximum error of adjacent RGB differences against the corresponding `reference` differences along `axis: x/y` | <= 0.02; pinned sky/gradient ROI |
+| `wedge` / `albedo` | Maximum absolute RGB error against `reference` inside a pinned expected-sky/geometry ROI; identifies unexpected wedge pixels without guessing shapes from color | <= 0.02 |
+| `detail` / `albedo` | Mean maximum RGB adjacent-pixel difference along `axis: x/y`; same nonbackground IDs, continuous depth, LOD0 and zero `precipitation` at both pixels | Example floor 1/255; existing detail gates/floors unchanged |
+| `weather_delta` / `albedo` | Mean absolute RGB difference against same-input `dry_reference` in the ground mask | >= 1/255; existing overcast/streak gates unchanged |
+| `weights` / `triplanar` | Maximum sum-to-one error or component excursion outside [0,1] | <= 0.001 |
+| `composition` / `stars` | Maximum absolute star contribution in a pinned daytime/below-horizon exclusion mask, or `transmittance` excursion outside [0,1] | zero |
+
+Seam and boundary p99 use a fixed 65,536-bin histogram, reporting `p99_upper`,
+a conservative upper bound at 1/65,536 resolution (values >= 1 use the exact
+maximum). `p99_limit` is required for both. Boundary also reports the exact maximum.
+Only the p99 bound, rather than a maximum limit on every outlier, controls boundary
+status. Reference checks measure supplied references; they do not claim that native
+Mesa scenes or production captures have been qualified. Synthetic defect fixtures
+cover isolated holes, seams, boundary bands, cards, bands, wedges, missing weather
+response, detail loss, weight and composition errors. Every injected defect fails
+exactly its metric and produces a deterministic labelled worst-pixel montage.
 
 Each metric emits a JSON record with ROI, metric specification, pixel rectangle,
 `qualification` (`qualified`/`advisory`), `status` (`pass`/`fail`/`unavailable`),
 value, sample count and worst-pixel coordinates when available. Nonfinite weather
 or edge inputs make that metric unavailable; bundle nonfinite findings still fail.
-Worst coverage/validity pixels maximize distance outside the requested interval;
-weather uses the same rule and edges use maximum difference. Ties choose top row
+Worst coverage/validity/weather/detail/response pixels maximize distance outside
+the requested interval; residual checks use the largest error. Card violation
+pixels take priority over coverage-only failures. Records include the same-pixel
+ID and joined draw/mesh metadata when available (background stays explicit).
+Ties choose top row
 then left column. At most 32 metrics and ROIs, 1 MiB configuration, 16,384 pixels per
-axis and 16,777,216 pixels per plane bound the work. Metric scans use at most two
-rows (262,144 wire bytes each for IDs, 196,608 for RGB; decoded tuples add bounded
-interpreter overhead), and each metric visits its ROI once. No simulation path changes.
+axis and 16,777,216 pixels per plane bound the work. Original metric scans use at
+most two rows; masked checks cache at most five rows
+per required channel (262,144 wire bytes per ID row, 196,608 per RGB row; decoded
+tuples add bounded interpreter overhead) and one 512 KiB histogram where needed.
+Each metric visits its ROI once; hole erosion examines at most 25 mask neighbors
+per pixel and boundary/detail comparisons at most three pixels. At most 32
+histogram scans of 65,536 bins add constant bounded work. No simulation path changes.
 
 For a labelled worst-pixel montage, run
 `python3 -I -B tools/gates/build-visual-sweep-montages.py --diagnostics CAPTURE.diagnostics.json --output worst.svg`
 with optional `--rois CONFIG`. This stdlib-only path validates one bundle before
 creating a new output, refuses an existing output and emits up to 32 labelled
 33x33 raw-albedo crops centered/clipped around worst pixels, with a yellow pixel
-outline and metric value/qualification/status. Display values clamp to [0,1];
+outline and metric value/threshold/qualification/status, p99/violation details
+and draw/asset/pass labels when available. Display values clamp to [0,1];
 nonfinite pixels are magenta. Unavailable rows carry labels without fabricated
 crops. These are raw-albedo evidence, not final-color visual approval. The existing
 PNG contact-sheet path retains its optional Pillow dependency. Registered
-`DiagnosticRoisPython` and `DiagnosticCapturePython` tests cover metrics, refusal,
+`DiagnosticChecksPython`, `DiagnosticRoisPython` and `DiagnosticCapturePython`
+tests cover metrics, isolated injected defects, refusal,
 advisory/qualified results and montage generation without native rendering.
 
 | Check | Initial threshold | False-positive control |
@@ -896,7 +945,7 @@ edits when parallel branches join. No new required CI checks are part of any row
 | C1: every-PR shader compile and link completion | `tools/ci/compile_shaders.py`; `tools/ci/test_compile_shaders.py`; `test/rendering/render_smoke_test.cpp`; `docs/development/visual-diagnostics.md` (4) | Implemented in the existing unconditional fast-job step. Compile every stage permutation, then link the native program registry and compute inventory using the same prepared sources. Refuse missing pass-layout pairs or unlinked stage/define permutations; registered interface-mismatch, matching-pair and missing-program regressions cover linking. |
 | C2: llvmpipe scenes | `tools/gates/shader-scenes.py`; `tools/gates/test_shader_scenes.py`; `test/rendering/shader_scenes/scenes.json`; `test/rendering/shader_scenes/references/material.ppm`; `test/rendering/shader_scene_render_test.cpp`; `test/CMakeLists.txt`; `tools/ci/ci_paths.py`; `.github/workflows/ci.yml`; `config/public-asset-inventory.json`; `docs/development/visual-diagnostics.md` (10) | After C1. First reference/metric/regeneration vertical path; extend the scene catalogue in later bounded changes. Avoids owned files; reference and consumer share one path gate. |
 | D1: bundle/ID/AOV validity checks | `tools/gates/check-diagnostic-capture.py`; `tools/gates/test_diagnostic_capture.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `tools/gates/diff-render-health.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (8) | After A4; parallel with B/C. Registered Python reader tests cover little endian, dimensions, partial payloads, unknown versions and nonfinite values. Avoids owned files. |
-| D2: qualified image metrics | `tools/gates/check-diagnostic-capture.py`; `tools/gates/test_diagnostic_capture.py`; `tools/gates/baselines/diagnostic-rois.json`; `tools/gates/build-visual-sweep-montages.py`; `tools/gates/test_diagnostic_rois.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After D1 and relevant C2 fixtures/B2 channels. Coverage/weather/edge metrics and labeled worst-pixel montages; qualify enforcement separately. Avoids owned files. |
+| D2: image metrics and synthetic qualification | `tools/gates/check-diagnostic-capture.py`; `tools/gates/test_diagnostic_capture.py`; `tools/gates/baselines/diagnostic-rois.json`; `tools/gates/build-visual-sweep-montages.py`; `tools/gates/test_diagnostic_checks.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After D1 and relevant C2 fixtures/B2 channels. Implemented masked holes, seam/reference and boundary residuals, cards, bands, wedges, weather/detail and composition checks with isolated synthetic defects and labeled worst-pixel montages. All shipped thresholds remain advisory/unqualified; production enforcement needs separate repeated-capture evidence. Acceptance-row state is unchanged. Avoids owned files. |
 | E1a: exact-tick plan and admission | `rendering/TemporalAudit.h`; `rendering/TemporalAudit.cpp`; `src/luminumbra_client/core/RuntimeScenarioConfig.h`; `src/luminumbra_client/core/RuntimeScenarioConfig.cpp`; `src/luminumbra_client/sources.cmake`; `test/rendering/temporal_audit_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After A4, D1. Register GL-free tick/cadence/overflow/refusal regressions in capture_manifest_test. Coordinate configuration ownership; admission alone cannot advertise runtime support. |
 | E1b: deterministic weather input | `src/luminumbra_common/systems/WeatherSystem.h`; `src/luminumbra_common/systems/WeatherSystem.cpp`; `src/luminumbra_common/world/GameSession.cpp`; `rendering/TemporalAudit.cpp`; `test/rendering/temporal_weather_test.cpp`; `test/CMakeLists.txt`; `src/luminumbra_client/core/ScenarioRunnerDrive.cpp`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E1a. Coordinate simulation owners: register fixed-tick weather/hydrology/strike and identity/replay tests before enabling script support. Exercise normal live bridge; any format migration is a prerequisite separate slice with both readers/writers, not hidden in this count. |
 | E1c: site sequence driver | `src/luminumbra_client/main_client.cpp`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `src/luminumbra_client/core/ScenarioRunnerImpl.h`; `rendering/TemporalAudit.cpp`; `test/rendering/temporal_sequence_test.cpp`; `test/CMakeLists.txt`; `tools/gates/validate-engine-frontier.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E1b, A4, D1. Coordinate app/scenario ownership. Register sequence/readiness/phase and creature-tick tests plus native fixed-site capture through existing frontier actions. No all-features claim before E3. |

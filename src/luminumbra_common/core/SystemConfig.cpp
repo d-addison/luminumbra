@@ -438,6 +438,7 @@ bool ParseGraphicsSection(const nlohmann::json& data,
             !graphics.contains("preset_revision") ||
             !graphics["preset_revision"].is_number_integer() ||
             (graphics["preset_revision"] != 1 && graphics["preset_revision"] != 2 &&
+             graphics["preset_revision"] != 3 &&
              graphics["preset_revision"] != kGraphicsPresetRevision) ||
             !graphics.contains("overrides") || !graphics["overrides"].is_object()) {
             error = "invalid graphics preset, revision or overrides";
