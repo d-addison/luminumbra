@@ -7116,6 +7116,23 @@ SHIELD_WorldSystem::snapshot_streamed_chunks() const {
     return chunks;
 }
 
+bool SHIELD_WorldSystem::capture_resident_chunk_ids(std::vector<ChunkID>& ids,
+                                                    std::size_t maximum) const {
+    if (m_streaming_state.chunks.size() > maximum) {
+        return false;
+    }
+    std::vector<ChunkID> candidate;
+    candidate.reserve(m_streaming_state.chunks.size());
+    for (const auto& [id, chunk] : m_streaming_state.chunks) {
+        if (chunk) {
+            candidate.push_back(id);
+        }
+    }
+    std::sort(candidate.begin(), candidate.end());
+    ids = std::move(candidate);
+    return true;
+}
+
 void SHIELD_WorldSystem::bump_far_lod_authority_revision(const IVec3& chunk_coords) {
     const auto floor_div = [](int value, int divisor) {
         const int quotient = value / divisor;

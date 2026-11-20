@@ -129,6 +129,12 @@ void WindFieldSystem::LocalCell(const Vec3& world_pos,
 
 void WindFieldSystem::Update(std::uint64_t tick, const Vec3& region_anchor) {
     m_last_tick = tick;
+    m_fieldAnchor = region_anchor;
+    m_appliedStormCount = m_storm_perturbations.size();
+    if (m_appliedStormCount <= m_appliedStorms.size()) {
+        std::copy(
+            m_storm_perturbations.begin(), m_storm_perturbations.end(), m_appliedStorms.begin());
+    }
     if (HasRegionalBackend()) {
         const auto wind = SampleRegional(region_anchor, WindLayer::Ground);
         const float length = std::sqrt(wind.x * wind.x + wind.y * wind.y);
@@ -253,6 +259,14 @@ void WindFieldSystem::Update(std::uint64_t tick, const Vec3& region_anchor) {
     }
 }
 
+void WindFieldSystem::RestoreContinuation(const AmbientContinuation& state) {
+    if (HasRegionalBackend() || !ValidAmbientContinuation(state)) {
+        throw std::invalid_argument("invalid wind continuation");
+    }
+    m_storm_perturbations = state.wind;
+    Update(state.tick, state.anchor);
+}
+
 void WindFieldSystem::InjectStormPerturbation(const StormPerturbation& perturbation) {
     if (perturbation.radius_m <= 0.0f || perturbation.intensity <= 0.0f)
         return;
@@ -349,6 +363,9 @@ WindFieldSystem& WindFieldSystem::operator=(WindFieldSystem&& other) noexcept {
     m_wind_seed = other.m_wind_seed;
     m_base_direction = other.m_base_direction;
     m_last_tick = other.m_last_tick;
+    m_appliedStorms = other.m_appliedStorms;
+    m_appliedStormCount = other.m_appliedStormCount;
+    m_fieldAnchor = other.m_fieldAnchor;
     return *this;
 }
 

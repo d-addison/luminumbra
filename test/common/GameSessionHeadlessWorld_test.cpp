@@ -19102,3 +19102,156 @@ TEST(GameSessionHeadlessWorldTest, SavedDormantSphereResumesWithPrivateTerrainAn
     const auto expected_id = physics->create_dynamic_sphere({8, 10000, 8}, {}, 0.1f);
     EXPECT_EQ(target->create_dynamic_sphere({8, 10000, 8}, {}, 0.1f), expected_id);
 }
+
+TEST(GameSessionHeadlessWorldTest, OwnerAmbientContinuationMatchesConstructorStormAndStrikeTicks) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession source({.owner_continuation = true});
+    source.SetJobSystem(&jobs);
+    source.SetRootPath(root.root_string());
+    source.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(source.CreateWorld("Ambient owner", "1337", "default"));
+    const auto checkpoint = [&](bool constructor_state = false) {
+        // Clearing the next-update queue must not discard the last field's inputs.
+        source.GetWindFieldSystem()->ClearStormPerturbations();
+        ASSERT_TRUE(source.SaveWorldState());
+        GameSession restored({.owner_continuation = true});
+        restored.SetJobSystem(&jobs);
+        restored.SetRootPath(root.root_string());
+        restored.SetActiveRegionsEnabled(false);
+        ASSERT_TRUE(restored.LoadWorld(source.GetMetadata().worldId))
+            << restored.GetWorldOpenError();
+        const auto* record = restored.RestoredOwnerContinuation();
+        ASSERT_NE(record, nullptr);
+        ASSERT_TRUE(record->ambient.has_value());
+        EXPECT_EQ(record->ambient->constructor_state, constructor_state);
+        EXPECT_EQ(record->ambient->strikes.size(),
+                  source.GetWeatherSystem()->StrikeSchedule().size());
+        for (int step = 0; step < 5; ++step) {
+            SCOPED_TRACE(step);
+            EXPECT_EQ(restored.GetSimulationTickCount(), source.GetSimulationTickCount());
+            EXPECT_EQ(restored.GetWindFieldSystem()->ComputeWindSubHash(),
+                      source.GetWindFieldSystem()->ComputeWindSubHash());
+            EXPECT_EQ(restored.GetWeatherSystem()->ComputeWeatherSubHash(),
+                      source.GetWeatherSystem()->ComputeWeatherSubHash());
+            EXPECT_EQ(restored.GetAetherFieldSystem()->ComputeAetherSubHash(),
+                      source.GetAetherFieldSystem()->ComputeAetherSubHash());
+            ASSERT_NO_FATAL_FAILURE(TickOnce(source));
+            ASSERT_NO_FATAL_FAILURE(TickOnce(restored));
+        }
+        // A second save/load must retain the exact envelope and constructor distinction.
+        ASSERT_TRUE(restored.SaveWorldState());
+        ASSERT_TRUE(restored.LoadWorldStateFrom(restored.GetWorldSaveDir()))
+            << restored.GetWorldOpenError();
+        EXPECT_EQ(restored.GetWeatherSystem()->ComputeWeatherSubHash(),
+                  source.GetWeatherSystem()->ComputeWeatherSubHash());
+    };
+    ASSERT_NO_FATAL_FAILURE(checkpoint(true));
+    bool storm_checked = false, strike_checked = false;
+    // At most 600 fixed ticks; the fixed seed has both a mature storm and strikes.
+    for (int attempt = 0; attempt < 600 && (!storm_checked || !strike_checked); ++attempt) {
+        ASSERT_NO_FATAL_FAILURE(TickOnce(source));
+        const auto* weather = source.GetWeatherSystem();
+        if (!storm_checked &&
+            std::any_of(weather->StormCells().begin(),
+                        weather->StormCells().end(),
+                        [](const auto& storm) { return storm.intensity > 0.5f; })) {
+            ASSERT_NO_FATAL_FAILURE(checkpoint());
+            storm_checked = true;
+        }
+        if (!strike_checked && !source.GetWeatherSystem()->StrikeSchedule().empty()) {
+            ASSERT_NO_FATAL_FAILURE(checkpoint());
+            strike_checked = true;
+        }
+    }
+    EXPECT_TRUE(storm_checked);
+    EXPECT_TRUE(strike_checked);
+}
+
+TEST(GameSessionHeadlessWorldTest, OwnerResidentContinuationKeepsPrivateTerrainAndColdInventory) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    const auto seed_water = [](Chunk& chunk) {
+        chunk.current_water_resolution.store(8);
+        chunk.water_depth_mm.assign(64, 77);
+        chunk.water_bed_mm.assign(64, 0);
+        chunk.water_edge_flux.assign(128, 0);
+        chunk.water_level_data.assign(64, 0.077f);
+        chunk.water_flow_data.assign(64, Luminumbra::Vec2(0));
+        chunk.water_sim_terrain_height.assign(64, 0);
+        chunk.water_rest_level.assign(64, 0.077f);
+        chunk.has_water_sim.store(true);
+        chunk.set_water_authority();
+        ASSERT_TRUE(chunk.has_complete_water_state());
+    };
+    for (const bool resident : {false, true}) {
+        SCOPED_TRACE(resident);
+        GameSession source({.owner_continuation = true});
+        source.SetJobSystem(&jobs);
+        source.SetRootPath(root.root_string());
+        source.SetActiveRegionsEnabled(true);
+        source.SetWaterHighResEnabled(false);
+        ASSERT_TRUE(source.CreateWorld("Resident owner", "1337", "default"));
+        auto* world = source.GetWorldSystem();
+        world->set_durable_residency(true);
+        const Luminumbra::IVec3 far_coords{320, 0, -320};
+        const Luminumbra::IVec3 parked_coords{0, 0, 0};
+        if (resident) {
+            auto floor = SimulationFloorChunk(far_coords, 8);
+            floor->set_state(Luminumbra::ChunkState::Idle);
+            floor->mark_sdf_loaded_or_edited();
+            ASSERT_NO_FATAL_FAILURE(seed_water(*floor));
+            ASSERT_TRUE(world->adopt_streamed_chunk(floor));
+            ASSERT_TRUE(source.GetPhysicsSystem()->add_chunk_collision(*floor));
+            EXPECT_FALSE(
+                source.GetPhysicsSystem()->chunk_collision_body(floor->get_id()).has_value());
+            const std::array<Luminumbra::Vec3, 1> anchors{{{5128, 9, -5112}}};
+            ASSERT_TRUE(source.GetPhysicsSystem()->prepare_simulation_collisions(anchors, 0));
+        }
+        auto parked = world->resolve_water_column(parked_coords);
+        ASSERT_NE(parked, nullptr);
+        ASSERT_NO_FATAL_FAILURE(seed_water(*parked));
+        EXPECT_EQ(world->find_streamed_chunk(parked_coords), nullptr);
+        ASSERT_FALSE(world->snapshot_parked_chunks().empty());
+        world->SetWaterSimWindowCursor(65);
+        std::vector<Luminumbra::ChunkID> ids{123};
+        if (resident) {
+            EXPECT_FALSE(world->capture_resident_chunk_ids(ids, 0));
+            EXPECT_EQ(ids, (std::vector<Luminumbra::ChunkID>{123}));
+        }
+        ASSERT_TRUE(world->capture_resident_chunk_ids(ids, 1));
+        EXPECT_EQ(ids.size(), resident ? 1u : 0u);
+        ASSERT_TRUE(source.SaveWorldState());
+        GameSession restored({.owner_continuation = true});
+        restored.SetJobSystem(&jobs);
+        restored.SetRootPath(root.root_string());
+        restored.SetActiveRegionsEnabled(true);
+        restored.SetWaterHighResEnabled(false);
+        ASSERT_TRUE(restored.LoadWorld(source.GetMetadata().worldId))
+            << restored.GetWorldOpenError();
+        auto* target = restored.GetWorldSystem();
+        const auto* continuation = restored.RestoredOwnerContinuation();
+        ASSERT_NE(continuation, nullptr);
+        EXPECT_EQ(continuation->resident_chunks, ids);
+        EXPECT_EQ(target->snapshot_streamed_chunks().size(), resident ? 1u : 0u);
+        EXPECT_EQ(target->GetWaterSimWindowCursor(), 65u);
+        EXPECT_EQ(target->find_streamed_chunk(far_coords) != nullptr, resident);
+        if (resident) {
+            const auto loaded = target->find_streamed_chunk(far_coords);
+            ASSERT_NE(loaded, nullptr);
+            EXPECT_TRUE(loaded->same_water_state(*world->find_streamed_chunk(far_coords)));
+        }
+        EXPECT_EQ(target->find_streamed_chunk(parked_coords), nullptr);
+        EXPECT_EQ(restored.GetPhysicsSystem()->simulation_collision_hash(),
+                  source.GetPhysicsSystem()->simulation_collision_hash());
+        const auto inventory = target->durable_chunk_inventory();
+        EXPECT_NE(std::find(inventory.begin(), inventory.end(), parked_coords), inventory.end());
+        ASSERT_TRUE(target->restore_authoritative_chunk(parked_coords));
+        const auto loaded_parked = target->find_authoritative_chunk(parked_coords);
+        ASSERT_NE(loaded_parked, nullptr);
+        EXPECT_EQ(loaded_parked->water_level_data, parked->water_level_data);
+        EXPECT_EQ(loaded_parked->water_flow_data, parked->water_flow_data);
+    }
+}

@@ -4255,7 +4255,7 @@ TEST_F(WorldOpenRefusal, OwnerContinuationDescriptorsRefuseBeforeEveryAdoptionPa
     changed["preset_identity"] = std::string(16, '0');
     add("foreign preset", changed);
     changed = valid;
-    changed["version"] = 2u;
+    changed["version"] = 3u;
     add("version", changed);
     invalid.emplace_back("truncated", encoded.substr(0, encoded.size() / 2));
     invalid.emplace_back("empty", "");
@@ -7742,3 +7742,298 @@ TEST_F(WorldOpenRefusal, ServerFrozenRosterRestoresSequentiallyAndContinues) {
     }
 }
 } // namespace
+
+TEST(OwnerContinuationEnvelope, VersionsRoundTripAndMalformedExtensionsLeaveOutputUnchanged) {
+    Persistence::OwnerContinuation record;
+    record.preset_identity = "0123456789abcdef";
+    record.simulation_tick = 60;
+    record.resident_chunks = {1, 2};
+    record.ambient.emplace();
+    auto& ambient = *record.ambient;
+    ambient.tick = 60;
+    ambient.constructor_state = false;
+    ambient.anchor = {8, 0, 8};
+    ambient.storms.push_back({.center_world = {3, 4},
+                              .velocity = {1, -0.0f},
+                              .intensity = 0.5f,
+                              .spawn_tick = 45,
+                              .lifetime_ticks = 240,
+                              .seed_salt = 7});
+    ambient.strikes.push_back(
+        {.strike_tick = 60, .world_x = 3, .world_z = 4, .magnitude = 0.75f, .storm_salt = 7});
+    // Equal tick/salt ties use IEEE bits, which put positive coordinates first.
+    ambient.strikes.push_back(
+        {.strike_tick = 60, .world_x = -3, .world_z = 4, .magnitude = 0.75f, .storm_salt = 7});
+    ambient.strikes.push_back(ambient.strikes.back()); // Preserve equal-key multiplicity.
+    ambient.wind.push_back(
+        {.center_world = {2, 4}, .radius_m = 96, .velocity = {1, -0.0f}, .intensity = 0.4f});
+    std::string encoded;
+    ASSERT_TRUE(Persistence::EncodeOwnerContinuation(record, encoded));
+    Persistence::OwnerContinuation decoded;
+    ASSERT_TRUE(Persistence::DecodeOwnerContinuation(encoded, decoded));
+    std::string roundtrip;
+    ASSERT_TRUE(Persistence::EncodeOwnerContinuation(decoded, roundtrip));
+    EXPECT_EQ(roundtrip, encoded);
+    const auto valid = nlohmann::json::parse(encoded);
+    EXPECT_EQ(valid.at("version"), 2u);
+    std::vector<nlohmann::json> invalid;
+    const auto mutate = [&](const auto& change) {
+        auto value = valid;
+        change(value);
+        invalid.push_back(std::move(value));
+    };
+    mutate([](auto& value) { value["version"] = 3u; });
+    mutate([](auto& value) { value.erase("resident_count"); });
+    mutate([](auto& value) { value.erase("resident_chunks"); });
+    mutate([](auto& value) { value["resident_count"] = UINT64_MAX; });
+    mutate([](auto& value) {
+        value["resident_count"] = Persistence::kOwnerContinuationResidentChunks + 1;
+    });
+    mutate([](auto& value) { value["resident_count"] = 1u; });
+    mutate([](auto& value) { value["resident_chunks"] = {1u, 1u}; });
+    mutate([](auto& value) { value["resident_chunks"] = {2u, 1u}; });
+    mutate([](auto& value) { value["resident_chunks"][0] = -1; });
+    mutate([](auto& value) { value["resident_chunks"] = "unknown"; });
+    mutate([](auto& value) { value.erase("ambient"); });
+    mutate([](auto& value) { value["ambient"] = "unknown"; });
+    mutate([](auto& value) { value["ambient"]["tick"] = 59u; });
+    mutate([](auto& value) { value["ambient"]["constructor_state"] = true; });
+    mutate([](auto& value) { value["ambient"]["constructor_state"] = 0; });
+    mutate([](auto& value) { value["ambient"]["anchor"] = {0u}; });
+    mutate([](auto& value) { value["ambient"]["anchor"][0] = UINT64_MAX; });
+    mutate([](auto& value) { value["ambient"]["storms"][0].erase(7); });
+    mutate([](auto& value) { value["ambient"]["storms"][0][5] = 61u; });
+    mutate([](auto& value) { value["ambient"]["storms"][0][6] = 1u; });
+    mutate([](auto& value) {
+        value["simulation_tick"] = value["ambient"]["tick"] = 285u;
+        for (auto& strike : value["ambient"]["strikes"])
+            strike[0] = 285u;
+    });
+    mutate(
+        [](auto& value) { value["ambient"]["storms"].push_back(value["ambient"]["storms"][0]); });
+    mutate([](auto& value) { value["ambient"]["storms"][0][7] = UINT64_MAX; });
+    mutate([](auto& value) {
+        value["ambient"]["storms"][0][0] =
+            std::bit_cast<std::uint32_t>(std::numeric_limits<float>::infinity());
+    });
+    mutate([](auto& value) { value["ambient"]["strikes"][0].erase(4); });
+    mutate([](auto& value) { value["ambient"]["strikes"][0][0] = 59u; });
+    mutate([](auto& value) {
+        std::swap(value["ambient"]["strikes"][0], value["ambient"]["strikes"][1]);
+    });
+    mutate([](auto& value) {
+        value["ambient"]["strikes"][0][3] = std::bit_cast<std::uint32_t>(2.0f);
+    });
+    mutate([](auto& value) { value["ambient"]["wind"][0].erase(5); });
+    mutate([](auto& value) { value["ambient"]["wind"][0][2] = 0u; });
+    mutate([](auto& value) { value["ambient"]["wind"][0][5] = 0u; });
+    for (const auto* field : {"storms", "strikes", "wind"}) {
+        mutate([field](auto& value) { value["ambient"][field] = nullptr; });
+        mutate([field](auto& value) {
+            const auto item = value["ambient"][field][0];
+            for (int i = 0; i < Systems::kMaxLiveStrikes + 1; ++i) {
+                value["ambient"][field].push_back(item);
+            }
+        });
+    }
+    for (const auto& value : invalid) {
+        SCOPED_TRACE(value.dump());
+        EXPECT_FALSE(Persistence::DecodeOwnerContinuation(value.dump(), decoded));
+        ASSERT_TRUE(Persistence::EncodeOwnerContinuation(decoded, roundtrip));
+        EXPECT_EQ(roundtrip, encoded);
+    }
+    record.version = 1;
+    record.resident_chunks.clear();
+    record.ambient.reset();
+    ASSERT_TRUE(Persistence::EncodeOwnerContinuation(record, encoded));
+    const auto legacy = nlohmann::json::parse(encoded);
+    EXPECT_FALSE(legacy.contains("resident_count"));
+    EXPECT_FALSE(legacy.contains("ambient"));
+    ASSERT_TRUE(Persistence::DecodeOwnerContinuation(encoded, decoded));
+    EXPECT_EQ(decoded.version, 1u);
+    ASSERT_TRUE(Persistence::EncodeOwnerContinuation(decoded, roundtrip));
+    EXPECT_EQ(roundtrip, encoded);
+}
+
+TEST_F(WorldOpenRefusal, OwnerContinuationExtensionRefusalsPreserveAllAdoptionPaths) {
+    GameSession source({.owner_continuation = true});
+    source.SetJobSystem(&jobs);
+    source.SetRootPath(RootString());
+    ASSERT_TRUE(source.LoadWorld("fixture"));
+    ASSERT_TRUE(source.SaveWorldState());
+    const auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    const auto valid = nlohmann::json::parse(metadata.at("owner_continuation").get<std::string>());
+    const auto* world = source.GetWorldSystem();
+    const auto* physics = source.GetPhysicsSystem();
+    const auto hash = source.ComputeChunkStateHash();
+    const auto revision = source.WorldRevision();
+    const auto sentinel = source.GetRegistry().create();
+    std::vector<nlohmann::json> invalid;
+    auto changed = valid;
+    changed["resident_count"] = 1u;
+    changed["resident_chunks"] = {Chunk::calculate_id({9000, 0, 9000})};
+    invalid.push_back(changed);
+    changed = valid;
+    changed["version"] = 1u;
+    changed.erase("resident_count");
+    changed.erase("resident_chunks");
+    changed.erase("ambient");
+    invalid.push_back(changed);
+    changed = valid;
+    changed["version"] = 3u;
+    invalid.push_back(changed);
+    changed = valid;
+    changed["resident_count"] = UINT64_MAX;
+    invalid.push_back(changed);
+    changed = valid;
+    changed["resident_count"] = 2u;
+    changed["resident_chunks"] = {0u, 0u};
+    invalid.push_back(changed);
+    changed = valid;
+    changed["ambient"] = {{"tick", 0u},
+                          {"anchor", {0u, 0u, 0u}},
+                          {"constructor_state", true},
+                          {"storms", nlohmann::json::array()},
+                          {"strikes", nlohmann::json::array()},
+                          {"wind", nlohmann::json::array()}};
+    invalid.push_back(changed); // Regional state must never take the ambient restore path.
+    for (const auto& value : invalid) {
+        SCOPED_TRACE(value.dump());
+        auto input = metadata;
+        input["owner_continuation"] = value.dump();
+        Write(save / "world_info.json", input.dump());
+        const auto disk = DiskBytes(root);
+        EXPECT_FALSE(source.LoadWorld("fixture"));
+        if (value.at("version") == 1u) {
+            EXPECT_NE(source.GetWorldOpenError().find("legacy owner continuation v1"),
+                      std::string::npos);
+        }
+        EXPECT_FALSE(source.LoadWorldStateFrom(save));
+        const auto prepared =
+            GameSession::PrepareWorldLoad(source.CaptureWorldPreparationOptions(), "fixture");
+        EXPECT_FALSE(source.AdoptPreparedWorld(prepared));
+        EXPECT_EQ(source.GetWorldSystem(), world);
+        EXPECT_EQ(source.GetPhysicsSystem(), physics);
+        EXPECT_EQ(source.WorldRevision(), revision);
+        EXPECT_EQ(source.ComputeChunkStateHash(), hash);
+        EXPECT_TRUE(source.GetRegistry().valid(sentinel));
+        EXPECT_EQ(DiskBytes(root), disk);
+    }
+    Write(save / "world_info.json", metadata.dump());
+}
+
+TEST_F(WorldOpenRefusal, PartialOwnerResidentPayloadRefusesBeforeWritingAndAdoption) {
+    for (const bool partial_sdf : {false, true}) {
+        SCOPED_TRACE(partial_sdf);
+        GameSession source({.owner_continuation = true});
+        source.SetJobSystem(&jobs);
+        source.SetRootPath(RootString());
+        source.SetActiveRegionsEnabled(false);
+        ASSERT_TRUE(source.CreateTransientWorld("Partial resident", "1337", "default"));
+        auto chunk = std::make_shared<Chunk>(IVec3(400, 0, -400));
+        chunk->set_state(ChunkState::Idle);
+        chunk->heightmap_data.assign(
+            static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Z + 1), 8);
+        if (partial_sdf) {
+            chunk->sdf_data = {1};
+        } else {
+            chunk->heightmap_data.resize(1);
+        }
+        ASSERT_TRUE(source.GetWorldSystem()->adopt_streamed_chunk(chunk));
+        const auto before = DiskBytes(root);
+        EXPECT_FALSE(source.SaveWorldStateTo(save, nullptr, true));
+        EXPECT_EQ(DiskBytes(root), before);
+        if (partial_sdf) {
+            chunk->sdf_data.clear();
+        } else {
+            chunk->heightmap_data.resize(
+                static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Z + 1), 8);
+        }
+        ASSERT_TRUE(source.SaveWorldStateTo(save, nullptr, true));
+        const auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+        const auto damaged = root / (partial_sdf ? "partial-sdf-owner" : "partial-height-owner");
+        Write(damaged / "world_info.json", metadata.dump());
+        // Use an unindexed legacy container with the valid v2 reference. A stale
+        // index must not hide the partial-payload branch behind a checksum refusal.
+        if (partial_sdf) {
+            chunk->sdf_data = {1};
+        } else {
+            chunk->heightmap_data.resize(1);
+        }
+        WorldStreamingState partial;
+        ASSERT_TRUE(partial.insert_chunk(chunk));
+        // A partial heightmap is a legacy payload; SDF admission already rejects a
+        // partial lattice in the shared decoder. Both must preserve the live session.
+        ASSERT_TRUE(WorldSaveService{}.save_world(partial, damaged));
+        const auto* world = source.GetWorldSystem();
+        const auto* physics = source.GetPhysicsSystem();
+        const auto revision = source.WorldRevision();
+        const auto disk = DiskBytes(root);
+        EXPECT_FALSE(source.LoadWorldStateFrom(damaged));
+        EXPECT_NE(source.GetWorldOpenError().find(partial_sdf ? "SDF lattice" : "partial resident"),
+                  std::string::npos);
+        const auto prepared =
+            GameSession::PrepareWorldState(source.CaptureWorldPreparationOptions(), damaged);
+        EXPECT_FALSE(source.AdoptPreparedWorld(prepared));
+        EXPECT_EQ(source.GetWorldSystem(), world);
+        EXPECT_EQ(source.GetPhysicsSystem(), physics);
+        EXPECT_EQ(source.WorldRevision(), revision);
+        EXPECT_EQ(DiskBytes(root), disk);
+    }
+}
+
+TEST(OwnerContinuationEnvelope, AmbientCaptureTracksAppliedInputsAndRefusesIncoherentFields) {
+    Systems::WeatherSystem weather(1337);
+    Systems::WindFieldSystem wind(1337);
+    Systems::AmbientContinuation state;
+    weather.LockSchedule();
+    ASSERT_TRUE(weather.CaptureContinuation(wind, state));
+    EXPECT_TRUE(state.constructor_state);
+    weather.Update(0, {}, &wind);
+    ASSERT_TRUE(weather.CaptureContinuation(wind, state));
+    EXPECT_FALSE(state.constructor_state);
+    wind.InjectStormPerturbation(
+        {.center_world = {1, 2}, .radius_m = 96, .velocity = {3, 4}, .intensity = 0.5f});
+    wind.Update(1, {8, 0, 8});
+    const auto original = state;
+    EXPECT_FALSE(weather.CaptureContinuation(wind, state));
+    EXPECT_EQ(state.tick, original.tick);
+    EXPECT_EQ(state.constructor_state, original.constructor_state);
+    weather.Update(1, {9, 0, 8}, &wind);
+    EXPECT_FALSE(weather.CaptureContinuation(wind, state));
+    weather.Update(1, {8, 0, 8}, &wind);
+    wind.ClearStormPerturbations();
+    const auto check = [&](const Systems::WindFieldSystem& value) {
+        ASSERT_TRUE(weather.CaptureContinuation(value, state));
+        EXPECT_FALSE(state.constructor_state);
+        ASSERT_EQ(state.wind.size(), 1u);
+        EXPECT_EQ(state.wind[0].center_world, Vec2(1, 2));
+        EXPECT_EQ(state.wind[0].velocity, Vec2(3, 4));
+    };
+    ASSERT_NO_FATAL_FAILURE(check(wind));
+    auto copied = wind;
+    ASSERT_NO_FATAL_FAILURE(check(copied));
+    auto moved = std::move(copied);
+    ASSERT_NO_FATAL_FAILURE(check(moved));
+    copied = wind;
+    ASSERT_NO_FATAL_FAILURE(check(copied));
+    moved = std::move(copied);
+    ASSERT_NO_FATAL_FAILURE(check(moved));
+    for (int i = 0; i < Systems::kMaxStormCells + 1; ++i) {
+        wind.InjectStormPerturbation(
+            {.center_world = {1, 2}, .radius_m = 96, .velocity = {3, 4}, .intensity = 0.5f});
+    }
+    wind.Update(1, {8, 0, 8});
+    EXPECT_FALSE(weather.CaptureContinuation(wind, state));
+    ASSERT_EQ(state.wind.size(), 1u);
+    Systems::WeatherSystem scheduled(1337);
+    ASSERT_TRUE(scheduled.SetSchedule(ShortWeatherScript()));
+    EXPECT_FALSE(scheduled.CaptureContinuation(wind, state));
+    EXPECT_THROW(scheduled.RestoreContinuation(state, wind), std::invalid_argument);
+    const auto weather_hash = weather.ComputeWeatherSubHash();
+    const auto wind_hash = wind.ComputeWindSubHash();
+    state.anchor.x = std::numeric_limits<float>::infinity();
+    EXPECT_THROW(weather.RestoreContinuation(state, wind), std::invalid_argument);
+    EXPECT_EQ(weather.ComputeWeatherSubHash(), weather_hash);
+    EXPECT_EQ(wind.ComputeWindSubHash(), wind_hash);
+}

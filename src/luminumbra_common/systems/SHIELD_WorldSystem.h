@@ -1023,6 +1023,8 @@ public:
     ActivationShadowReport activation_shadow_report() const;
     // Shared-ownership snapshot of every streamed chunk (save path).
     std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_streamed_chunks() const;
+    // Quiesced owner-thread save only. Refuses before allocating if over the bound.
+    bool capture_resident_chunk_ids(std::vector<ChunkID>& ids, std::size_t maximum) const;
     // Lifetime pointer entries written by snapshots and renderable-view rebuilds.
     // Const diagnostic only; relaxed atomic supports concurrent diagnostic reads.
     [[nodiscard]] std::uint64_t snapshot_copies() const {

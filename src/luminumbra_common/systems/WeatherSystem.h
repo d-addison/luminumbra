@@ -1,5 +1,7 @@
 #pragma once
 
+#include "AmbientContinuation.h"
+
 // deterministic weather core (sim-authoritative).
 //
 // MODEL (the deterministic runtime contract  Weather core ):
@@ -80,53 +82,10 @@ const char* WeatherCategoryName(WeatherCategory category) noexcept;
 inline constexpr float kWeatherCellSizeM = 24.0f;
 inline constexpr int kWeatherExtentCells = 64;
 
-// PINNED bounded-state cap (regression review / documented design): at most this many
-// storm cells are ever active. The container is fixed-capacity; a scheduled spawn
-// is dropped when full (deterministically -- the schedule itself is bounded so
-// this is belt-and-suspenders, asserted by Endurance300Storm).
-inline constexpr int kMaxStormCells = 16;
-
-// PINNED bounded-state cap: at most this many lightning strike events
-// are retained in the live schedule window at once. A strike is a transient WORLD
-// EVENT (replayable, identical on every client); the schedule is folded into the
-// `weather` world_hash sub-hash. The window is small + flat-memory so the strike
-// set never grows unbounded (Endurance300Storm asserts the bound).
-inline constexpr int kMaxLiveStrikes = 32;
-
 // PINNED storm intensity threshold for strike eligibility. A storm
 // cell only schedules strikes once its envelope intensity is at/above this; the
 // strongest storms strike most often. Keeps clear/weak weather strike-free.
 inline constexpr float kStrikeIntensityThreshold = 0.45f;
-
-// One active storm cell. Position/velocity are world-space (XZ); the cell is
-// advected every tick by the wind grid. spawn_tick/lifetime_ticks bound the
-// intensity envelope (deterministic ramp-in/decay). seed_salt makes each cell's
-// later strike-schedule an independent seeded stream.
-struct StormCell {
-    Vec2 center_world = Vec2(0.0f);
-    Vec2 velocity = Vec2(0.0f); // m/s-ish, set from wind at spawn + re-advected
-    float intensity = 0.0f;     // current [0, 1] envelope value
-    std::uint64_t spawn_tick = 0;
-    std::uint32_t lifetime_ticks = 0;
-    std::uint32_t seed_salt = 0; // per-cell RNG salt ( strike stream)
-};
-
-// One scheduled lightning STRIKE event. A strike is a deterministic
-// WORLD EVENT scheduled by storm state from the `seed+13` RNG stream -- replayable
-// and bit-identical for every client. It folds into the `weather` world_hash
-// sub-hash (it is sim-authoritative state, not a render effect). The RENDER side
-// reads the schedule one-way  to draw the bolt / inject the light pulse / spawn
-// scorch emitters / cue thunder; it writes NOTHING back.
-//
-// GameSession converts strikes due on the current tick into deterministic fire
-// ignition sources. Worlds without combustible entities remain a no-op.
-struct StrikeEvent {
-    std::uint64_t strike_tick = 0; // absolute sim tick the bolt lands on
-    float world_x = 0.0f;          // strike ground position X (world metres)
-    float world_z = 0.0f;          // strike ground position Z (world metres)
-    float magnitude = 0.0f;        // [0, 1] strike strength (drives pulse/thunder)
-    std::uint32_t storm_salt = 0;  // originating storm cell's seed_salt (provenance)
-};
 
 // Replicated weather snapshot at a world position -- what the render overlay +
 // wetness response read (one-way). POD; carries no engine handles.
@@ -249,6 +208,11 @@ public:
     // lifetime. This is the C1 bridge; regional storm persistence belongs to C4.
     // Updates wind to the same absolute tick. Does not emit simulation events.
     void RestoreAtTick(std::uint64_t tick, const Vec3& region_anchor, WindFieldSystem& wind);
+
+    // Explicit-save state only. Rebuilds fields without advancing storms or strikes.
+    [[nodiscard]] bool CaptureContinuation(const WindFieldSystem& wind,
+                                           AmbientContinuation& state) const;
+    void RestoreContinuation(const AmbientContinuation& state, WindFieldSystem& wind);
 
     void Update(std::uint64_t tick, const Vec3& region_anchor, const WindFieldSystem* wind);
 
@@ -403,6 +367,8 @@ private:
     Vec2 m_anchor_wind = Vec2(0.0f);
     WeatherCategory m_anchor_category = WeatherCategory::Clear;
     std::uint64_t m_last_tick = 0;
+    Vec3 m_fieldAnchor{};
+    bool m_constructorState = true; // emission-only tick zero, independent of schedule locking
 
     // Bounded storm-cell set (<= kMaxStormCells). Ordered by spawn (canonical).
     // Each cell's seed_salt is derived deterministically from (seed, tick-epoch)
