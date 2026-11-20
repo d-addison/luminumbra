@@ -150,6 +150,10 @@ public:
     const Persistence::OwnerContinuation* RestoredOwnerContinuation() const;
     // Runner boot reserves this storage through SetReplicatedSimulationAnchors.
     void SetOwnerContinuationSimulationAnchors(std::span<const Vec3> anchors);
+    // World reloads clear the reserved storage; the runner reserves it again before reuse.
+    bool ReplicatedSimulationAnchorsReserved(std::size_t count) const {
+        return m_replicatedSimulationAnchors && m_replicatedSimulationAnchors->capacity() >= count;
+    }
 
     ~GameSession();
 
