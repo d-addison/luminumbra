@@ -14,6 +14,7 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | Lazy integer target and capture-local draw registry | Implemented as standalone helpers | `DiagnosticTargets.h`; `DiagnosticDrawTable.h`; registered `DiagnosticTargetDriver.*` and `DiagnosticDrawTable.*` regressions in `capture_manifest_test`; native execution pending |
 | Transactional diagnostic MRT and deferred shader variants | Partially implemented | `GBufferTargets.h/.cpp` adds a render-thread capture scope, attachment-six transaction, bounded draw-buffer restoration and explicit unsupported records; `g_buffer.frag`, `static_asset.frag`, `tree_impostor.frag`, `plant_procgen.frag`, `scent_decal.frag`, `water.frag`, `glass_oit.frag`, `waterfall.frag`, `magical_particles.frag` and `foliage.frag` have guarded `LUMIN_DIAG_IDS` outputs; registered `DiagnosticAttribution.*` source-contract regressions in `capture_manifest_test`; native execution pending |
 | Exact producer coverage | Partial | Original submissions attribute live terrain MDI, file and procedural statics, skinned meshes, authored surfaces, tree impostors, Ladder and legacy far terrain/water, and uploaded plant/marker batches. Five foliage submission paths and the additive scent decal use separate contributor storage when supplied; without it, exact per-draw records carry a `:contributor_only` label and completion remains false. Water surfaces, glass panes and waterfall sheet/pool slots use the separate contributor plane at their original submissions. The original particle batch also writes this plane; the separate weather overlay writes it at its original fullscreen draw through an opt-in diagnostic variant (`weather-overlay/fullscreen-quad`) and refuses when that storage or variant is missing |
+| Forward presence evidence | Partial, capture-scope collector | Optional frame/tick-bound `DiagnosticForwardPresence` joins original submissions to integer contributor samples at forward-stage boundaries; registered counter-join and shipping-fragment hidden-GL fixtures await native execution. River-site and spray identities remain separately unsupported |
 | Readback and scenario opt-in | Planned | Requires scenario capture integration and completion of the unsupported producer paths |
 | Debug views and inspector | Planned | Extend `DebugViewPass` and developer console widgets |
 | Linux shader compilation and software-GL reference scenes | Planned | Fast Linux workflow steps; no required-check or ruleset changes |
@@ -280,6 +281,50 @@ identifies the draw/asset/pass. First integrate as additional diagnostic evidenc
 qualify new production-image thresholds on repeated captures before enforcement.
 Keep `diff-render-health.ps1`, native shader-health checks and current thresholds.
 
+### E3: all-features profile and non-vacuous evidence
+
+Forward evidence foundation: a capture adapter can supply a fresh
+`DiagnosticForwardPresence` to `GBufferDiagnosticCapture`, alongside its distinct
+forward target. Settings are explicit optional producer observations; unknown
+state remains unsupported. The collector binds one frame/tick and a full-frame
+ROI. It records submitted draws, visible draws and contributor samples separately
+for water surfaces, waterfall sheets, the shared particle batch and
+all five foliage submission paths. Enabled zero-draw features are absent;
+submitted draws with zero surviving samples are labelled occluded (including
+offscreen or shader-discarded submissions), and any surviving sample proves
+presence. Disabled settings with submitted draws refuse evidence.
+Capture splits each original waterfall slot into its two six-vertex subranges:
+the sheet retains the slot key and the pool adds `/pool`. Pool IDs remain in the
+draw table and plane but cannot satisfy sheet presence. Production keeps the
+original twelve-vertex submission; capture submits each triangle exactly once.
+
+Each attached forward stage is sampled before later stages can replace its IDs.
+Samples are last-contributor identities at that boundary, a lower bound on blended
+layers rather than final-colour coverage. A screen pixel can contribute once per
+stage; preserved earlier IDs are not counted again. Every nonzero sample joins
+the exact draw/mesh/LOD/ownership/pass tuple to the capture-local draw table.
+Malformed IDs, mismatched frame/tick/extent, incomplete planes, missing contributor
+storage or shader variants, readback failure and aborted captures invalidate
+evidence. Ordinary rendering and captures without this optional collector perform
+no new reads. Existing attachment/program limits remain unchanged.
+
+River and waterfall spray have separate unsupported rows and reasons. A generic
+water chunk has no resolved river-site identity; the original particle batch mixes
+ambient, precipitation and spray without an emitter-specific shader contributor.
+Waterfall geometry cannot satisfy either row, and final colour is never used.
+No shader bytes change. Submission joins use constant work and storage bounded to
+65,536 draws (under 2 MiB); each capture has at most 64 sampled stages, each with
+two traversals of at most 16,777,216 pixels and at most 256 MiB readback staging.
+Readback restores the pixel-pack buffer and all eight pixel-pack settings.
+
+The GL-free join cases and hidden-GL shipping-fragment fixtures cover present,
+absent, fully occluded, partially occluded, disabled and pool-only states. Source contracts
+cover original submission and stage readback wiring. Native execution and runtime
+adapter/publication integration remain pending. This stack's profile adapter does
+not yet construct a collector. This foundation makes no all-features or production
+qualification claim; river-site, emitter-category and sequence-window evidence
+remain additional work.
+
 ## Ordered delivery
 
 Each row is one reviewable change of at most ten files. Paths below are explicit;
@@ -300,6 +345,7 @@ edits when parallel branches join. No new required CI checks are part of any row
 | C2: llvmpipe scenes | `tools/gates/shader-scenes.py`; `tools/gates/test_shader_scenes.py`; `test/rendering/shader_scenes/scenes.json`; `test/rendering/shader_scenes/references/material.ppm`; `test/rendering/shader_scene_render_test.cpp`; `test/CMakeLists.txt`; `tools/ci/ci_paths.py`; `.github/workflows/ci.yml`; `config/public-asset-inventory.json`; `docs/development/visual-diagnostics.md` (10) | After C1. First reference/metric/regeneration vertical path; extend the scene catalogue in later bounded changes. Avoids owned files; reference and consumer share one path gate. |
 | D1: bundle/ID/AOV validity checks | `tools/gates/check-diagnostic-capture.py`; `tools/gates/test_diagnostic_capture.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `tools/gates/diff-render-health.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (8) | After A4; parallel with B/C. Registered Python reader tests cover little endian, dimensions, partial payloads, unknown versions and nonfinite values. Avoids owned files. |
 | D2: qualified image metrics | `tools/gates/check-diagnostic-capture.py`; `tools/gates/test_diagnostic_capture.py`; `tools/gates/baselines/diagnostic-rois.json`; `tools/gates/build-visual-sweep-montages.py`; `tools/gates/test_diagnostic_rois.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After D1 and relevant C2 fixtures/B2 channels. Coverage/weather/edge metrics and labeled worst-pixel montages; qualify enforcement separately. Avoids owned files. |
+| E3d: forward feature evidence | `rendering/DiagnosticContributions.h`; `rendering/GBufferTargets.h`; `rendering/GBufferTargets.cpp`; `rendering/passes/GBufferPass.cpp`; `rendering/passes/WaterfallPass.cpp`; `test/rendering/capture_forward_presence_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | Partial foundation using the existing shared contributor scope: separate counters and stage-boundary joins, with registered GL-free and hidden-GL fixtures; native execution pending. River-site and spray-category contributors remain unsupported. Runtime profile adapters and publication remain separate; no all-features or production qualification. |
 
 Start A, B interface design, C and D fixture design together; GPU attribution is the
 critical dependency for trustworthy production pixel claims. Forward/transparency
