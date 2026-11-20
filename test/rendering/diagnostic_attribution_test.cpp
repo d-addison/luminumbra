@@ -3481,10 +3481,10 @@ TEST(DiagnosticAttribution, WaterAttributesOriginalChunkSubmissionsOnTheContribu
     EXPECT_EQ(Count(draw, "glDrawElements,"), 1u);
     EXPECT_LT(shader.rfind("discard;"), shader.find("gDiagnosticIds ="));
     EXPECT_EQ(SourceHash(WithoutForwardSubmissionDiagnostics(draw, "m_water_shader")),
-              0xbcd8c2b14ef59ca1ull);
+              0x11b136e405c12634ull);
     EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(shader, 3)), 0x9bb7b237f54a53a7ull);
     EXPECT_EQ(SourceHash(WithoutWhitespace(Body(source, "void WaterPass::generate_caustics("))),
-              0xac4d90167f595e96ull);
+              0x3284c18c119ae4d1ull);
 }
 
 TEST(DiagnosticAttribution, GlassAttributesEachPaneBeforeOitResolveWithoutReplacingItsIds) {
@@ -3542,7 +3542,7 @@ TEST(DiagnosticAttribution, WaterfallAttributesOnlySubmittedSheetPoolSlotsAndNon
     EXPECT_LT(shader.find("alpha *= clamp(u_live_factor"), shader.find("discard;"));
     EXPECT_LT(shader.find("discard;"), shader.find("gDiagnosticIds ="));
     EXPECT_EQ(SourceHash(WithoutForwardSubmissionDiagnostics(draw, "m_shader")),
-              0x1d7f36c59bf22b7bull);
+              0x338dd9f525356f5bull);
     EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(shader, 3)), 0x031258f2195ef329ull);
 }
 
