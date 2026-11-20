@@ -27,6 +27,12 @@
 namespace Luminumbra {
 
 class Chunk;
+namespace World {
+struct PhysicsOwnerState;
+}
+namespace world {
+class GameSession;
+}
 
 namespace Systems {
 
@@ -178,6 +184,15 @@ public:
         static constexpr std::size_t kMaxBytes = 65536;
         std::array<std::uint8_t, kMaxBytes> bytes{};
         std::uint32_t size = 0;
+        // In-memory continuation only; the versioned scalar payload is unchanged.
+        // Defaulted fields keep existing dynamic-sphere/capsule records compatible.
+        bool suspended = false;
+        glm::vec3 retained_velocity{0.0f};
+        glm::vec3 retained_angular_velocity{0.0f};
+        bool was_active = false;
+        // Live terrain-registration slot + 1 (0 = unregistered). Restore keeps
+        // this order, which swap-removal and reuse make independent of payload order.
+        std::uint32_t registration_slot = 0;
     };
     struct BodySetState {
         std::vector<BodyOwnerState> owners;
@@ -193,6 +208,24 @@ public:
     // A refusal preserves all destination state and every output ID. The slot
     // extent cannot shrink below the destination's existing allocated extent.
     bool restore_body_owners(const BodySetState& state, std::span<JPH::BodyID> bodies);
+
+    // Internal owner-thread continuation adapter. These operations are separate
+    // from the public physics gameplay interface and never run during a tick.
+    // Remaining frozen captures reserve their body slots until restored in order.
+    // Only the session, which validates owners first, constructs it.
+    class OwnerContinuation {
+    public:
+        bool capture_avatar_owner(std::size_t index, World::PhysicsOwnerState& output) const;
+        bool restore_avatar_owner(const World::PhysicsOwnerState& state,
+                                  std::size_t& index,
+                                  std::span<const World::PhysicsOwnerState> remaining_frozen = {});
+
+    private:
+        friend class ::Luminumbra::world::GameSession;
+        explicit OwnerContinuation(PhysicsSystem& physics)
+            : m_physics(physics) {}
+        PhysicsSystem& m_physics;
+    };
 
     // --- Audio-Physics Integration ---
     // Non-owning world-generation seam for surface-material classification on
@@ -281,6 +314,10 @@ public:
     }
 
 private:
+    bool capture_avatar_owner(std::size_t index, World::PhysicsOwnerState& output) const;
+    bool restore_avatar_owner(const World::PhysicsOwnerState& state,
+                              std::size_t& index,
+                              std::span<const World::PhysicsOwnerState> remaining_frozen = {});
     struct SimulationCollisions;
     std::unique_ptr<SimulationCollisions> m_simulation_collisions;
     bool simulation_collisions_enabled() const;

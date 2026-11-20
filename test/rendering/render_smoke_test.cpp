@@ -19,6 +19,7 @@
 #include "luminumbra_client/rendering/passes/AerialPass.h"
 #include "luminumbra_client/rendering/passes/DebugViewPass.h"
 #include "luminumbra_client/rendering/passes/FarWorldPassUniforms.h"
+#include "luminumbra_client/rendering/passes/FoliagePass.h"
 #include "luminumbra_client/rendering/passes/GBufferPass.h"
 #include "luminumbra_client/rendering/passes/LightingPass.h"
 #include "luminumbra_client/rendering/passes/ParticlePass.h"
@@ -53,6 +54,7 @@
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -2962,7 +2964,7 @@ TEST(RenderSmokeTest, CanopyEmptyRecoveryRetainsCoarseHitAcrossForegroundThenSky
             const auto result = probe.draw()[16];
             EXPECT_GE((1 - result.r) / 0.94f, baseOcclusion - 0.000001f);
             EXPECT_NEAR(result.r, 1 - 0.94f * baseOcclusion, 0.000001f);
-            EXPECT_FLOAT_EQ(result.g, openPrevious ? 5 : 11)
+            EXPECT_FLOAT_EQ(result.g, openPrevious ? 5.0f : 11.0f)
                 << "three coarse reads plus two ordinary or eight empty-recovery reads";
             EXPECT_LE(result.g, 40);
             if (ladder != 0) {
@@ -8858,6 +8860,141 @@ void ExpectProjectionPlane(const glm::mat4& projection, float far_plane, glm::ve
     EXPECT_NEAR(far_clip.y / far_clip.w, -jitter.y, 1e-6);
 }
 } // namespace
+
+TEST(RenderSmokeTest, WaterOnlyOwnerSubmitsWaterAndTracksTerrainPresence) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    RenderPipeline pipeline;
+    pipeline.enable_static_model_content(false);
+    ASSERT_TRUE(pipeline.startup(32, 32, SourceRoot()));
+    pipeline.set_far_world_mode(FarWorldMode::Legacy);
+    pipeline.set_far_lod_enabled(false);
+    pipeline.set_taau_enabled(false);
+    Luminumbra::Systems::SHIELD_WorldSystem world(
+        nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0));
+    chunk->set_state(Luminumbra::ChunkState::Ready);
+    chunk->water_mesh_vertices = {
+        {{0, 6, 0}, {0, 1, 0}, 0u},
+        {{0, 6, 16}, {0, 1, 0}, 0u},
+        {{16, 6, 0}, {0, 1, 0}, 0u},
+    };
+    chunk->water_mesh_indices = {0u, 1u, 2u};
+    chunk->water_mesh_version.store(1u);
+    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    entt::registry registry;
+    Camera camera({8, 12, 8}, {0, 1, 0}, -90, -89);
+    const auto render = [&] {
+        pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    };
+    render();
+    EXPECT_EQ(world.renderable_chunks_view(), std::vector<Luminumbra::Chunk*>{chunk.get()});
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().snapshot_count, 1u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().water_draws, 1u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().water_indices_drawn, 3u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().terrain_draws, 0u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().shadow_draws, 0u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().culling_hierarchy_chunks, 0u);
+    EXPECT_EQ(pipeline.get_last_mesh_upload_stats().terrain_upload_candidates, 0u);
+
+    // Membership stays identical when terrain appears: its culling cache must change.
+    chunk->mesh_vertices = chunk->water_mesh_vertices;
+    for (auto& vertex : chunk->mesh_vertices) {
+        vertex.material_id = 3u;
+    }
+    const auto terrain_vertices = chunk->mesh_vertices;
+    chunk->mesh_indices = chunk->water_mesh_indices;
+    ++chunk->mesh_version;
+    world.notify_renderable_chunks_changed();
+    render();
+    EXPECT_EQ(world.renderable_chunks_view(), std::vector<Luminumbra::Chunk*>{chunk.get()});
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().water_draws, 1u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().terrain_draws, 1u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().culling_hierarchy_chunks, 1u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().culling_hierarchy_rebuilds, 1u);
+    EXPECT_EQ(pipeline.get_runtime_render_stats().terrain_gpu_chunks, 1u);
+    EXPECT_GT(pipeline.get_runtime_render_stats().terrain_vertex_capacity, 0u);
+
+    // Probe the uploaded ground through public scatter behavior. Keeping this
+    // input after terrain disappears detects stale support under the water owner.
+    auto& foliage = *pipeline.foliage();
+    foliage.destroy_compute();
+    ASSERT_TRUE(foliage.load_scatter_set(SourceRoot() / "data/common/foliage/scatter_set.json"));
+    FoliagePass::ChunkScatter scatter;
+    scatter.extent_m = 16.0f;
+    scatter.biome_id = 1;
+    scatter.density = 0.5f;
+    // A null query deactivates scatter outright. The pipeline samples rendered
+    // ground, so this visibly wrong analytic surface is never the support.
+    const auto fallback = +[](void*, float, float) {
+        FoliagePass::SurfaceSample sample;
+        sample.height = 100.0f;
+        return sample;
+    };
+    const auto rebuild_foliage = [&] {
+        foliage.rebuild_instances(
+            {scatter}, fallback, nullptr, camera.Position, FoliagePass::Preparation::Complete);
+    };
+    rebuild_foliage();
+    ASSERT_FALSE(foliage.instances().empty());
+    for (const auto& blade : foliage.instances()) {
+        EXPECT_NEAR(blade.pos[1], 6.0f, 0.001f) << "support must come from the uploaded terrain";
+    }
+
+    // A retained terrain GPU record must not draw once only water remains.
+    chunk->mesh_vertices.clear();
+    chunk->mesh_indices.clear();
+    ++chunk->mesh_version;
+    world.notify_renderable_chunks_changed();
+    render();
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().water_draws, 1u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().terrain_draws, 0u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().shadow_draws, 0u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().culling_hierarchy_chunks, 0u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().culling_hierarchy_rebuilds, 1u);
+
+    // Unrefined empty terrain is skipped by uploads, so its independent activity
+    // must expire after the existing 15-frame grace, even while water draws.
+    for (int frame = 1; frame <= 15; ++frame) {
+        SCOPED_TRACE(frame);
+        EXPECT_EQ(pipeline.get_runtime_render_stats().terrain_gpu_chunks, 1u);
+        render();
+        EXPECT_EQ(pipeline.get_last_render_pass_stats().water_draws, 1u);
+        EXPECT_EQ(pipeline.get_last_render_pass_stats().terrain_draws, 0u);
+        EXPECT_EQ(pipeline.get_last_render_pass_stats().shadow_draws, 0u);
+    }
+    EXPECT_EQ(pipeline.get_runtime_render_stats().terrain_gpu_chunks, 0u);
+    EXPECT_EQ(pipeline.get_runtime_render_stats().terrain_vertex_capacity, 0u);
+    EXPECT_EQ(pipeline.get_runtime_render_stats().terrain_index_capacity, 0u);
+    EXPECT_EQ(pipeline.get_runtime_render_stats().water_gpu_chunks, 1u);
+    rebuild_foliage();
+    EXPECT_TRUE(foliage.instances().empty());
+
+    // A later terrain replacement reuses the retired record and restores support.
+    chunk->mesh_vertices = terrain_vertices;
+    chunk->mesh_indices = chunk->water_mesh_indices;
+    ++chunk->mesh_version;
+    world.notify_renderable_chunks_changed();
+    render();
+    EXPECT_EQ(pipeline.get_runtime_render_stats().terrain_gpu_chunks, 1u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().terrain_draws, 1u);
+    rebuild_foliage();
+    EXPECT_FALSE(foliage.instances().empty());
+    chunk->mesh_vertices.clear();
+    chunk->mesh_indices.clear();
+    ++chunk->mesh_version;
+    world.notify_renderable_chunks_changed();
+    chunk->water_mesh_vertices.clear();
+    chunk->water_mesh_indices.clear();
+    ++chunk->water_mesh_version;
+    world.notify_renderable_chunks_changed();
+    render();
+    EXPECT_TRUE(world.renderable_chunks_view().empty());
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().snapshot_count, 0u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().water_draws, 0u);
+    pipeline.shutdown();
+}
 
 TEST(RenderSmokeTest, WorldSwapRetainsLegacyDiagnosticInventoryUntilShutdown) {
     HiddenGlContext context;

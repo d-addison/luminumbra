@@ -307,6 +307,7 @@ void InvalidateWaterMesh(Chunk& chunk, std::unordered_set<ChunkID>& mesh_invalid
     chunk.water_mesh_generated.store(false);
     chunk.water_mesh_dirty_ticks = 0;
     mesh_invalidations.insert(chunk.get_id());
+    ++chunk.water_mesh_invalidation_version;
 }
 
 //  integer virtual-pipes step for ONE chunk (INTERNAL edges only — cross-chunk flux
@@ -633,6 +634,7 @@ bool WaterKernels::AdvanceWaterMeshCadence(Chunk& chunk) noexcept {
     if (chunk.water_mesh_dirty_ticks >= WATER_MESH_DIRTY_TICK_INTERVAL - 1) {
         chunk.water_mesh_generated.store(false);
         chunk.water_mesh_dirty_ticks = 0;
+        ++chunk.water_mesh_invalidation_version;
         return true;
     }
     ++chunk.water_mesh_dirty_ticks;
@@ -1124,7 +1126,7 @@ void WaterSystem::initialize_water_chunks(std::span<Chunk* const> pending,
                 MarkRuntimeWaterMutation(*to_init[i], deterministic_authority);
             }
             m_water_activity_cache.erase(to_init[i]->get_id());
-            m_mesh_invalidations.insert(to_init[i]->get_id());
+            InvalidateWaterMesh(*to_init[i], m_mesh_invalidations);
         }
         if (WaterAttribution::CurrentFrame()) {
             m_dbg_water.initialization +=
@@ -2095,6 +2097,10 @@ bool WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
         if (rebuild_flow) {
             chunk.water_flow_data.assign(cells, Vec2(0.0f));
         }
+        // The rest-level mirror is optional; a stale size would make the column incomplete.
+        if (!chunk.water_rest_level.empty() && chunk.water_rest_level.size() != cells) {
+            chunk.water_rest_level.clear();
+        }
         if (rebuild_surface || rebuild_terrain || rebuild_flow) {
             // Mirror repair changes render inputs, never integer authority or save ownership.
             InvalidateWaterMesh(chunk, m_mesh_invalidations);
@@ -2107,6 +2113,7 @@ bool WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
         chunk.water_level_data.clear();
         chunk.water_flow_data.clear();
         chunk.water_sim_terrain_height.clear();
+        chunk.water_rest_level.clear();
         chunk.has_water_sim.store(false);
         InvalidateWaterMesh(chunk, m_mesh_invalidations);
         chunk.current_water_resolution.store(0);
@@ -2179,6 +2186,9 @@ bool WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
     chunk.water_level_data.resize(new_sim_size);
     chunk.water_flow_data.resize(new_sim_size);
     chunk.water_sim_terrain_height.resize(new_sim_size);
+    // The seed-time rest level belongs to the old grid. It is an optional mirror, so drop it
+    // rather than leave a mis-sized copy that makes the resized column incomplete.
+    chunk.water_rest_level.clear();
 
     // Regenerate terrain height data for new resolution
     const IVec3 c_coords = chunk.get_coords();

@@ -701,6 +701,82 @@ TEST(DecompHardening, RunEqualsReplay) {
     EXPECT_EQ(run(a), run(b));
 }
 
+TEST(DecompHardening, AmbientAndFounderRosterIsBoundedAcrossRepeatedDeaths) {
+    namespace AI = luminumbra::ai;
+    entt::registry registry;
+    EXPECT_TRUE(AI::DecompositionParticipants(registry).empty());
+    for (std::uint64_t cycle = 0; cycle < 1000; ++cycle) {
+        for (const bool founder : {false, true}) {
+            const auto entity = registry.create();
+            registry.emplace<Comp::CreatureComponent>(entity).eaten = !founder;
+            registry.emplace<Comp::MortalComponent>(entity).dead = founder ? 1 : 0;
+            if (founder) {
+                registry.emplace<Comp::CreatureGenomeComponent>(entity);
+            }
+            registry.emplace<Comp::DecayComponent>(entity).decay_duration =
+                static_cast<std::uint32_t>(cycle % 4);
+        }
+        ASSERT_EQ(AI::DecompositionParticipants(registry).size(), 2u);
+        std::uint32_t released = 0;
+        int finished = 0;
+        for (std::uint64_t step = 0; step < 3; ++step) {
+            const auto stats = AI::RunDecompositionOnTick(registry, cycle * 3 + step);
+            ASSERT_LE(stats.visited, 2u);
+            released += stats.released_total;
+            finished += stats.finished;
+        }
+        EXPECT_EQ(released, 2u * AI::kNutrientPerCorpseMilli);
+        EXPECT_EQ(finished, 2);
+        ASSERT_TRUE(AI::DecompositionParticipants(registry).empty());
+        ASSERT_EQ(registry.view<Comp::DecayComponent>().size(), 2u * (cycle + 1));
+        EXPECT_EQ(AI::RunDecompositionOnTick(registry, cycle).visited, 0u);
+    }
+    for (const auto entity : registry.view<Comp::DecayComponent>()) {
+        const auto& decay = registry.get<Comp::DecayComponent>(entity);
+        EXPECT_EQ(decay.fully_decomposed, 1u);
+        EXPECT_EQ(decay.nutrient_released_milli, AI::kNutrientPerCorpseMilli);
+    }
+}
+
+TEST(DecompHardening, RosterTracksInitialStateRemovalRecyclingAndExplicitReset) {
+    namespace AI = luminumbra::ai;
+    entt::registry registry;
+    const auto finished = registry.create();
+    registry.emplace<Comp::DecayComponent>(finished).fully_decomposed = 1;
+    const auto live = registry.create();
+    registry.emplace<Comp::DecayComponent>(live).decay_duration = 0;
+    EXPECT_EQ(AI::DecompositionParticipants(registry).size(), 1u);
+    EXPECT_EQ(AI::RunDecompositionOnTick(registry, 1).decaying, 0);
+    EXPECT_EQ(registry.get<Comp::DecayComponent>(live).fully_decomposed, 0u);
+    registry.remove<Comp::DecayComponent>(live);
+    EXPECT_TRUE(AI::DecompositionParticipants(registry).empty());
+    registry.emplace<Comp::DecayComponent>(live);
+    EXPECT_EQ(AI::DecompositionParticipants(registry).size(), 1u);
+    registry.destroy(live);
+    EXPECT_TRUE(AI::DecompositionParticipants(registry).empty());
+    const auto recycled = registry.create();
+    ASSERT_NE(recycled, live);
+    registry.emplace<Comp::MortalComponent>(recycled).dead = 1;
+    registry.emplace<Comp::DecayComponent>(recycled).decay_duration = 0;
+    EXPECT_EQ(AI::RunDecompositionOnTick(registry, 2).finished, 1);
+    EXPECT_TRUE(AI::DecompositionParticipants(registry).empty());
+    registry.patch<Comp::DecayComponent>(recycled, [](auto& decay) {
+        decay.fully_decomposed = 0;
+        decay.nutrient_released_milli = 0;
+    });
+    EXPECT_EQ(AI::DecompositionParticipants(registry).size(), 1u);
+    EXPECT_EQ(AI::RunDecompositionOnTick(registry, 3).released_total, AI::kNutrientPerCorpseMilli);
+    registry.replace<Comp::DecayComponent>(recycled, Comp::DecayComponent{});
+    EXPECT_EQ(AI::DecompositionParticipants(registry).size(), 1u);
+    registry.patch<Comp::DecayComponent>(recycled, [](auto& decay) { decay.fully_decomposed = 1; });
+    EXPECT_TRUE(AI::DecompositionParticipants(registry).empty());
+    registry.clear();
+    EXPECT_EQ(AI::RunDecompositionOnTick(registry, 4).visited, 0u);
+    const auto after_clear = registry.create();
+    registry.emplace<Comp::DecayComponent>(after_clear);
+    EXPECT_EQ(AI::DecompositionParticipants(registry).size(), 1u);
+}
+
 // ===========================================================================
 // CIRCADIAN
 // ===========================================================================

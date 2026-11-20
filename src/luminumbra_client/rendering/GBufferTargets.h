@@ -23,7 +23,11 @@ class Shader;
 class GBufferDiagnosticCapture {
 public:
     explicit GBufferDiagnosticCapture(DiagnosticDrawTable& table);
-    GBufferDiagnosticCapture(DiagnosticTargets& targets, DiagnosticDrawTable& table);
+    // An optional distinct target records forward foliage contributors, never
+    // overwriting deferred identities. Both targets and the table outlive the scope.
+    GBufferDiagnosticCapture(DiagnosticTargets& targets,
+                             DiagnosticDrawTable& table,
+                             DiagnosticTargets* forward_targets = nullptr);
     ~GBufferDiagnosticCapture();
     GBufferDiagnosticCapture(const GBufferDiagnosticCapture&) = delete;
     GBufferDiagnosticCapture& operator=(const GBufferDiagnosticCapture&) = delete;
@@ -38,11 +42,22 @@ public:
     bool attachment_failed() const noexcept;
     // Sticky submission refusal, separate from unsupported producer coverage.
     bool refused() const;
-    Shader* variant(Shader* shader, bool ladder);
+    bool deferred_attached() const;
+    // The caller keeps the forward framebuffer alive until detach (or scope exit).
+    bool attach_forward(std::uint32_t framebuffer,
+                        std::uint32_t color_texture,
+                        const DiagnosticExtent& extent);
+    Shader*
+    variant(Shader* shader, bool ladder, const std::vector<std::string>& feedback_varyings = {});
     void write(const Shader& shader, const DiagnosticSubmission& submission);
+    void write_current(const DiagnosticSubmission& submission);
+    // Refused/uncovered fallback draws must not inherit the preceding identity.
+    // No-op unless a variant owned by this capture is currently bound.
+    void clear_current_identity();
     void unsupported(std::string_view producer,
                      std::uint32_t lod = 0,
-                     DiagnosticOwnership ownership = DiagnosticOwnership::Live);
+                     DiagnosticOwnership ownership = DiagnosticOwnership::Live,
+                     DiagnosticPass pass = DiagnosticPass::GBuffer);
 
 private:
     struct State {
@@ -52,6 +67,7 @@ private:
         DiagnosticDrawTable& table;
         // The target owner outlives this scope. Detach before resetting the lease.
         DiagnosticTargets::AttachmentLease attachment_lease;
+        DiagnosticTargets* forward_targets = nullptr;
         std::uint32_t framebuffer = 0;
         // GL guarantees at least eight draw buffers; refuse contexts above this
         // bounded snapshot capacity rather than partially restoring their state.
@@ -61,19 +77,23 @@ private:
         bool failed = false;
         bool captured = false;
         bool refused = false;
+        bool forward = false;
+        bool forward_captured = false;
         struct Variant {
             std::string vertex;
             std::string fragment;
             bool ladder;
+            std::vector<std::string> feedback_varyings;
             std::unique_ptr<Shader> shader;
             int identity;
         };
-        // Three deferred vertex stages, each with default and ladder variants.
+        // Deferred and contributor variants share the six-program capture budget.
         std::vector<Variant> variants;
         std::string_view failure;
     };
     static void SetCurrent(GBufferDiagnosticCapture* capture);
-    bool attach_target(const GBuffer& gbuffer, const DiagnosticExtent& extent);
+    bool
+    attach_target(const GBuffer& gbuffer, const DiagnosticExtent& extent, bool forward = false);
     void detach_target();
     std::unique_ptr<State> state_;
 };
@@ -82,6 +102,9 @@ private:
 class GBufferDiagnosticAttachment {
 public:
     GBufferDiagnosticAttachment(const GBuffer& gbuffer, const DiagnosticExtent& extent);
+    GBufferDiagnosticAttachment(std::uint32_t framebuffer,
+                                std::uint32_t color_texture,
+                                const DiagnosticExtent& extent);
     ~GBufferDiagnosticAttachment();
     GBufferDiagnosticAttachment(const GBufferDiagnosticAttachment&) = delete;
     GBufferDiagnosticAttachment& operator=(const GBufferDiagnosticAttachment&) = delete;

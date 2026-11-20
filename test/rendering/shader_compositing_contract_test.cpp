@@ -2,6 +2,7 @@
 
 #include "luminumbra_client/app/GroundCoverHull.h"
 #include "luminumbra_client/core/scenarios/ScenarioCommon.h"
+#include "luminumbra_client/rendering/TerrainAnchor.h"
 #include "luminumbra_client/rendering/WeatherOverlayModel.h"
 #include "luminumbra_client/rendering/WeatherRenderBridge.h"
 
@@ -11,6 +12,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <regex>
 #include <sstream>
@@ -145,6 +147,85 @@ TEST(GroundCoverContract, CoarseRocksAndBushesKeepClosedHullsAtEveryDistance) {
     ExpectContains(upload, "face.positions[1], face.normal");
     ExpectContains(upload, "face.positions[2], face.normal");
     ExpectContains(upload, "MeshLoader::CreateFromArrays(vertices, indices)");
+}
+
+TEST(TerrainAnchorContract, EditedAirRetiresDressingAndRefillRestoresItWithoutDirtyBitDependence) {
+    using Luminumbra::Rendering::EditedTerrainRemovesAnchor;
+    Luminumbra::Chunk chunk({-2, -1, 3});
+    constexpr std::size_t volume = 17u * 17u * 17u;
+    chunk.sdf_data.assign(volume, 2.0f);
+    const glm::vec3 position(-31.75f, -15.5f, 48.75f);
+    EXPECT_FALSE(EditedTerrainRemovesAnchor(nullptr, position));
+    EXPECT_FALSE(EditedTerrainRemovesAnchor(&chunk, position));
+    chunk.mark_voxel_data_dirty();
+    EXPECT_TRUE(EditedTerrainRemovesAnchor(&chunk, position));
+    chunk.clear_voxel_data_dirty();
+    EXPECT_TRUE(EditedTerrainRemovesAnchor(&chunk, position));
+    std::fill(chunk.sdf_data.begin(), chunk.sdf_data.end(), -2.0f);
+    EXPECT_FALSE(EditedTerrainRemovesAnchor(&chunk, position));
+    std::fill(chunk.sdf_data.begin(), chunk.sdf_data.end(), 0.5f);
+    EXPECT_FALSE(EditedTerrainRemovesAnchor(&chunk, position));
+}
+
+TEST(TerrainAnchorContract, TrilinearSupportUsesThePaddedXyzLatticeAtChunkEdges) {
+    using Luminumbra::Rendering::EditedTerrainRemovesAnchor;
+    Luminumbra::Chunk chunk({0, 0, 0});
+    chunk.sdf_data.assign(17u * 17u * 17u, -1.0f);
+    chunk.mark_voxel_data_dirty();
+    // Only corner (16,16,16) is air: an exact edge-adjacent probe must use
+    // its padded neighbour and the fractional weights, not the nearest voxel.
+    chunk.sdf_data[16u + 16u * 17u + 16u * 17u * 17u] = 3.0f;
+    EXPECT_TRUE(EditedTerrainRemovesAnchor(&chunk, {15.9f, 15.9f, 15.9f}));
+    EXPECT_FALSE(EditedTerrainRemovesAnchor(&chunk, {15.1f, 15.1f, 15.1f}));
+}
+
+TEST(TerrainAnchorContract, MissingPartialNonfiniteAndOutsideSupportRemainUnknown) {
+    using Luminumbra::Rendering::EditedTerrainRemovesAnchor;
+    Luminumbra::Chunk chunk({0, 0, 0});
+    chunk.mark_voxel_data_dirty();
+    EXPECT_FALSE(EditedTerrainRemovesAnchor(&chunk, {0, 0, 0}));
+    chunk.sdf_data.assign(17u * 17u * 17u - 1u, 2.0f);
+    EXPECT_FALSE(EditedTerrainRemovesAnchor(&chunk, {0, 0, 0}));
+    chunk.sdf_data.push_back(2.0f);
+    EXPECT_TRUE(EditedTerrainRemovesAnchor(&chunk, {0, 0, 0}));
+    for (const auto& position : {glm::vec3(-0.01f, 0, 0),
+                                 glm::vec3(16, 0, 0),
+                                 glm::vec3(0, 16, 0),
+                                 glm::vec3(0, 0, 16),
+                                 glm::vec3(std::numeric_limits<float>::infinity(), 0, 0),
+                                 glm::vec3(0, std::numeric_limits<float>::quiet_NaN(), 0)}) {
+        EXPECT_FALSE(EditedTerrainRemovesAnchor(&chunk, position));
+    }
+    for (const float invalid :
+         {std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN()}) {
+        chunk.sdf_data[0] = invalid;
+        EXPECT_FALSE(EditedTerrainRemovesAnchor(&chunk, {0.5f, 0.5f, 0.5f}));
+    }
+    chunk.sdf_data[0] = 2.0f;
+    chunk.sdf_data.push_back(2.0f);
+    EXPECT_FALSE(EditedTerrainRemovesAnchor(&chunk, {0, 0, 0}));
+}
+
+TEST(TerrainAnchorContract, AnchorChunkCoordsFloorNegativesAndRefuseUnpackable) {
+    using Luminumbra::Rendering::AnchorChunkCoords;
+    glm::ivec3 coords{7, 7, 7};
+    ASSERT_TRUE(AnchorChunkCoords({-0.5f, 15.9f, 16.0f}, coords));
+    EXPECT_EQ(coords, glm::ivec3(-1, 0, 1));
+    coords = glm::ivec3(7);
+    EXPECT_FALSE(AnchorChunkCoords({std::numeric_limits<float>::quiet_NaN(), 0, 0}, coords));
+    EXPECT_FALSE(AnchorChunkCoords({0, std::numeric_limits<float>::infinity(), 0}, coords));
+    const float beyond = static_cast<float>(Luminumbra::Chunk::kPackedMaxXz + 1) * 16.0f;
+    EXPECT_FALSE(AnchorChunkCoords({beyond, 0, 0}, coords));
+}
+
+TEST(TerrainAnchorContract, StaticPropsResolveEachAnchorChunkOncePerFrame) {
+    const auto draw = ReadShader("src/luminumbra_client/rendering/passes/GBufferPass.cpp");
+    // The per-prop path reads the per-frame slot; the streamed-chunk lookup sits
+    // behind the slot's resolved flag and references are released after the loop.
+    EXPECT_EQ(draw.find("TerrainRemovesAnchor(*ctx.world_system"), std::string::npos);
+    ExpectContains(draw, "if (!slot.resolved) {");
+    ExpectContains(draw, "ctx.world_system->find_streamed_chunk(slot.coords)");
+    ExpectContains(draw, "m_anchorChunks[index].chunk.reset();");
 }
 
 void ExpectClosedGroundCoverHull(const Luminumbra::Client::App::GroundCoverHull& hull,

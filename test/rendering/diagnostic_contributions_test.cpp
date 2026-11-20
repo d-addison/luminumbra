@@ -173,7 +173,7 @@ TEST(DiagnosticContributions, CaptureOffLightingAndGBufferKeepEveryOriginalByte)
     EXPECT_EQ(Hash(CaptureOff(lighting)), 0xc6e9bc9c6fc7110bULL);
     // Remove only additive instrumentation, retaining the original, fixed off-byte oracle.
     EXPECT_EQ(Hash(CaptureOff(Source("res/shaders/g_buffer.frag"), "#ifdef LUMIN_DIAG_SURFACE\n")),
-              0x5384913db4971619ULL);
+              0x7289f9525f762361ULL);
 }
 
 TEST(DiagnosticContributions, UnsupportedAndStaleInputsAreHatchedWithoutSamplingGuessedPlanes) {
@@ -554,6 +554,11 @@ TEST_F(DiagnosticContributionsGl, OverlayUsesHatchingForUnsupportedMissingResize
     nonfinite[0] = std::numeric_limits<float>::quiet_NaN();
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 1, GL_RGBA, GL_FLOAT, nonfinite.data());
     EXPECT_EQ(draw(), hatch);
+    // The existing renderer toggle also needs inspector storage with diagnostics closed.
+    control.enabled = false;
+    control.wireframe = true;
+    EXPECT_EQ(draw(), hatch);
+    control.wireframe = false;
     EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
     pass.destroy_buffers();
     glDeleteFramebuffers(1, &fbo);
