@@ -479,8 +479,11 @@ bool RenderPipeline::CaptureDestinationReservation::acquired() const {
 }
 
 bool RenderPipeline::diagnostic_capture_ready() {
-    return !m_capture_diagnostics.enabled ||
-           (m_diagnostic_capture && m_frame_prepared.valid && m_diagnostic_capture->ready());
+    if (m_capture_diagnostics.enabled && m_diagnostic_capture && m_frame_prepared.valid) {
+        // Detachment can expose a deferred producer failure. Observe only afterward.
+        (void)m_diagnostic_capture->ready();
+    }
+    return diagnostic_capture_refusal().empty();
 }
 
 namespace {
@@ -553,17 +556,37 @@ CaptureManifestInput RenderPipeline::diagnostic_capture_manifest() const {
     return input;
 }
 
+std::string_view RenderPipeline::diagnostic_capture_refusal() const {
+    if (!m_capture_diagnostics.enabled) {
+        return {};
+    }
+    if (!m_diagnostic_capture || !m_frame_prepared.valid) {
+        return "completed_frame_unavailable";
+    }
+    if (!std::as_const(*m_diagnostic_capture).ready()) {
+        return "producer_coverage_incomplete";
+    }
+    if (m_capture_diagnostics.probe) {
+        const auto& coordinates = m_capture_diagnostics.probe.value();
+        if (coordinates[0] >= m_internal_width || coordinates[1] >= m_internal_height) {
+            return "probe_out_of_bounds";
+        }
+    }
+    return {};
+}
+
 bool RenderPipeline::capture_diagnostics(const std::filesystem::path& capture) {
     if (!m_capture_diagnostics.enabled) {
         return true;
     }
-    auto ending = std::move(m_diagnostic_capture);
+    // Retain successful frames for sibling captures; release on every refusal.
+    CaptureCleanup cleanup(*this);
     if (capture.empty() || capture.filename().empty()) {
         return false;
     }
     try {
         DiagnosticManifestRollback manifest_rollback(capture);
-        if (!ending || !m_frame_prepared.valid) {
+        if (!diagnostic_capture_ready()) {
             return false;
         }
         DiagnosticBundleFrame frame;
@@ -574,9 +597,11 @@ bool RenderPipeline::capture_diagnostics(const std::filesystem::path& capture) {
         frame.capture_filename = Filesystem::GenericUtf8PathString(capture.filename());
         frame.manifest_filename =
             Filesystem::GenericUtf8PathString(CaptureManifestPath(capture).filename());
-        const bool captured = ending->finish(capture, m_capture_diagnostics, frame, gbuffer());
+        const bool captured =
+            m_diagnostic_capture->finish(capture, m_capture_diagnostics, frame, gbuffer());
         if (captured) {
             manifest_rollback.preserve();
+            cleanup.retain();
         }
         return captured;
     } catch (const std::exception&) {
@@ -2327,6 +2352,14 @@ void SubmitDiagnosticTerrainBucket(GBufferDiagnosticCapture*& capture,
 void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& visible_chunks,
                                      std::size_t& out_draws,
                                      std::size_t& out_indices) {
+    // A diagnostic replay may reuse a ring slot but never advances production ownership.
+    const bool diagnostic_replay = DebugViewPass::replaying();
+    const auto saved_cursor = m_mdi_frame_cursor;
+    ReplayRollback restore_cursor([this, diagnostic_replay, saved_cursor]() noexcept {
+        if (diagnostic_replay) {
+            m_mdi_frame_cursor = saved_cursor;
+        }
+    });
     out_draws = 0;
     out_indices = 0;
     const std::size_t block_count = m_chunk_geometry_pool.block_count();
@@ -3221,7 +3254,9 @@ void RenderPipeline::prepare_camera_projection(const Camera& camera) {
 }
 
 void RenderPipeline::dispatch_stages(const Camera& camera) {
-    auto diagnostic_frame = m_debug_view_pass && DebugViewPass::controls().enabled
+    DebugViewPass::controls().wireframe = m_frame_prepared.wireframe;
+    auto diagnostic_frame = m_debug_view_pass && (DebugViewPass::geometry_requested() ||
+                                                  DebugViewPass::controls().enabled)
                                 ? m_debug_view_pass->begin_frame(make_debug_view_context(camera))
                                 : nullptr;
     // the pure GPU stage sequence over the prepared frame. Each
@@ -3236,16 +3271,10 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
 
     glEnable(GL_DEPTH_TEST);
 
-    // Configure rendering mode
-    if (m_frame_prepared.wireframe) {
-        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-        glLineWidth(2.0f);
-        glDisable(GL_CULL_FACE); // Disable culling in wireframe for debugging
-    } else {
-        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-        glEnable(GL_CULL_FACE);
-        glCullFace(GL_BACK);
-    }
+    // The wireframe toggle now adds a depth-tested mask over the shaded frame.
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
 
     // reset the frame-graph stage trace, then record each stage id as it
     // dispatches. This is render_frame's REAL dispatch order -- the golden the declarative
