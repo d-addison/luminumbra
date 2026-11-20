@@ -3624,6 +3624,120 @@ class TerrainCaptureResourceWiring(unittest.TestCase):
         self.assertLess(hook.index("renderPipeline.render_frame("), hook.index("capture_terrain_coverage("))
 
 
+class DiagnosticFixtureLifetimeWiring(unittest.TestCase):
+    """Keep test-body borrows out of the longer-lived GL fixture input."""
+
+    def assert_local_borrow(self, suite, name, owners, bindings):
+        source = read(ROOT / "test/rendering/diagnostic_attribution_test.cpp")
+        body = block(source, f"TEST_F({suite}, {name})")
+        local_input = "auto input = input_;"
+        self.assertIn(local_input, body)
+        # The fixture input may only be read to initialize the local copy.
+        self.assertEqual(len(re.findall(r"\binput_\b", body)), 1)
+        for owner in owners:
+            self.assertLess(body.index(owner), body.index(local_input))
+        for binding in bindings:
+            self.assertLess(body.index(local_input), body.index(binding))
+            self.assertLess(body.index(binding), body.index("pass_.execute("))
+        self.assertIn("pass_.execute(ctx_, entities_, input)", body)
+
+    def test_authored_view_borrows_end_before_the_local_view(self):
+        for name in ("AuthoredIdentityBoundsPreserveDrawsAndRefuseOnlyCapture",
+                     "AuthoredUpgradeRestoresLiveCallerFramebuffers"):
+            with self.subTest(name=name):
+                self.assert_local_borrow(
+                    "DiagnosticAttributionGl", name,
+                    ("const auto view = RenderView::Validate(description);",),
+                    ("input.authored_view = &view;",))
+
+    def test_resident_terrain_borrow_ends_before_local_support(self):
+        self.assert_local_borrow(
+            "UnavailableImpostorGl", "UnavailableProducerProgramFailsAnAttachedCapture",
+            ("SubmittedLiveTerrain support;",), ("input.resident_live_terrain = &support;",))
+
+    def test_ladder_callbacks_end_before_local_observations(self):
+        self.assert_local_borrow(
+            "DiagnosticAttributionGl", "LadderFarDrawsDoNotInheritTheLastLiveTerrainIdentity",
+            ("const auto current_identity =", "DiagnosticId live{};",
+             "std::vector<DiagnosticId> ladder_ids;"),
+            ("input.submit_terrain_chunks = [&]", "input.submit_ladder = [&]"))
+
+
+class DiagnosticCaptureRefusalWiring(unittest.TestCase):
+    """Guard capture-only refusals without executing native code or GL."""
+
+    def test_authored_hex_key_budget_includes_the_entire_prefix(self):
+        render = block(read(CLIENT / "rendering/passes/StaticDrawPass.cpp"),
+                       "StaticDrawStats StaticDrawPass::Render(")
+        prefix = re.search(
+            r'(?:constexpr std::string_view mesh_prefix|std::string mesh_key) = "([^"]+)";',
+            render).group(1)
+        condition = re.search(r"if \((identity.empty\(\).*?)\) \{", render).group(1)
+        for length in (0, 1, 506, 507, 508, 509, 1023, 1024, 1025, 507, 508, 1):
+            with self.subTest(length=length):
+                refused = bool(cpp_expression(condition, **{
+                    "identity.empty()": length == 0, "identity.size()": length,
+                    "mesh_prefix.size()": len(prefix)}))
+                encoded = prefix + (b"x" * length).hex()
+                self.assertEqual(refused, length == 0 or len(encoded) > 1024)
+                if not refused:
+                    self.assertLessEqual(len(encoded), 1024)
+
+    def test_authored_identity_bounds_refuse_coverage_without_throwing(self):
+        source = read(CLIENT / "rendering/passes/StaticDrawPass.cpp")
+        render = block(source, "StaticDrawStats StaticDrawPass::Render(")
+        capture = block(render[render.index("glBindVertexArray(mesh->vao)"):], "if (capture)")
+        condition = re.search(r"if \((identity.empty\(\).*?)\) \{", capture).group(1)
+        refused = block(capture, "if (identity.empty()")
+        self.assertIn('capture->unsupported("authored_static_surface")', refused)
+        self.assertIn("capture->clear_current_identity()", refused)
+        self.assertNotRegex(refused, r"\b(?:throw|return|continue)\b")
+        supported = block(capture, "else")
+        self.assertIn('constexpr std::string_view mesh_prefix = "authored/"', capture)
+        self.assertIn("std::string mesh_key(mesh_prefix)", supported)
+        self.assertIn("mesh_key.reserve(mesh_prefix.size() + 2 * identity.size())", supported)
+        self.assertIn("mesh_key += digits[byte >> 4]", supported)
+        self.assertIn("mesh_key += digits[byte & 15]", supported)
+        self.assertIn('.shader_variant = "static_asset"', supported)
+        self.assertIn(".provenance = DiagnosticProvenance::Mesh", supported)
+        self.assertIn(".generated_mesh = mesh_key", supported)
+        self.assertNotIn("reserve(", refused)
+        for length in (0, 1, 507, 508, 509, 1023, 1024, 1025):
+            with self.subTest(length=length):
+                actual = cpp_expression(condition, **{
+                    "identity.empty()": length == 0, "identity.size()": length,
+                    "mesh_prefix.size()": len("authored/")})
+                self.assertEqual(actual, length == 0 or length > 507)
+        self.assertLess(render.index(capture), render.index("glDrawElements,"))
+        targets = read(CLIENT / "rendering/GBufferTargets.cpp")
+        unsupported = block(targets, "void GBufferDiagnosticCapture::unsupported(")
+        self.assertIn("state_->failed = true", unsupported)
+        self.assertIn(".provenance = DiagnosticProvenance::Unsupported", unsupported)
+        clear = block(targets, "void GBufferDiagnosticCapture::clear_current_identity()")
+        self.assertIn("const DiagnosticId id{}", clear)
+        self.assertIn("glProgramUniform4uiv(entry.shader->Id(), entry.identity, 1, id.data())", clear)
+
+    def test_ladder_submission_refusals_invalidate_after_the_whole_submission(self):
+        source = read(CLIENT / "rendering/passes/GBufferPass.cpp")
+        chunks = block(source, "void GBufferPass::geometry_pass_chunks(")
+        guard = re.search(r"if \(([^\n]*far_stats.refused[^\n]*)\) \{", chunks)
+        self.assertIsNotNone(guard, "The complete Ladder submission must check refusals")
+        refusal = block(chunks, guard.group())
+        self.assertIn("capture->abort()", refusal)
+        self.assertLess(chunks.index("diagnostic_draw.prepare(command)"), guard.start())
+        self.assertLess(chunks.index("        });"), guard.start())
+        self.assertLess(guard.start(), chunks.index("stats.far_region_draws +="))
+        for attached in (False, True):
+            for refused in (0, 1, 2, 65536):
+                with self.subTest(attached=attached, refused=refused):
+                    self.assertEqual(bool(cpp_expression(guard.group(1), **{
+                        "capture": attached, "far_stats.refused": refused})),
+                        attached and refused != 0)
+        targets = read(CLIENT / "rendering/GBufferTargets.cpp")
+        self.assertIn("state_->failed = true", block(targets, "void GBufferDiagnosticCapture::abort()"))
+        self.assertIn("!state_->failed", block(targets, "bool GBufferDiagnosticCapture::complete()"))
+
+
 class DiagnosticContributorWiring(unittest.TestCase):
     """Evaluate bounded admission and guard the shared deferred/contributor path."""
 
