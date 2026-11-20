@@ -177,7 +177,9 @@ private:
 } // namespace
 
 TEST_F(DiagnosticInspectorFrameGl, CaptureTeardownGatherRestoreAndLaterDisplayKeepValidPrograms) {
-    // Inspection is an explicit request; a bare refresh captures without gathering.
+    // Inspection is an explicit request for a selected texel; a bare refresh only captures.
+    Pass::controls().x = 0;
+    Pass::controls().y = 0;
     Pass::request_inspection(Pass::controls());
     ASSERT_NO_FATAL_FAILURE(BeginCapture());
     Pass::end_frame(frame_, ctx_);
