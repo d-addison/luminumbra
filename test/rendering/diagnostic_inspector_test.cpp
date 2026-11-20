@@ -276,6 +276,10 @@ private:
 } // namespace
 
 TEST_F(DiagnosticInspectorContributorsGl, SnapshotRecordsPlantsAndDecalsOnSeparatePlanes) {
+    // Inspection is an explicit request for a selected texel; a bare refresh only captures.
+    Pass::controls().x = 0;
+    Pass::controls().y = 0;
+    Pass::request_inspection(Pass::controls());
     ASSERT_NO_FATAL_FAILURE(BeginCapture());
     DrawLaterStages();
     std::array<DiagnosticId, 4> surfaces{}, contributors{};
@@ -303,7 +307,10 @@ TEST_F(DiagnosticInspectorContributorsGl, RefreshWithInactiveProducersRetainsOnl
     ExpectReleasedProgram();
     plants_.set_enabled(false);
     SetScent(false);
-    Pass::controls().refresh = true;
+    // Inspection is an explicit request for a selected texel; a bare refresh only captures.
+    Pass::controls().x = 0;
+    Pass::controls().y = 0;
+    Pass::request_inspection(Pass::controls());
     ASSERT_NO_FATAL_FAILURE(BeginCapture());
     DrawLaterStages();
     std::array<DiagnosticId, 4> surfaces{}, contributors{};
