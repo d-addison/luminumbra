@@ -1359,10 +1359,10 @@
       "source": "Luminumbra documentation assets"
     },
     {
-      "bytes": 4805,
+      "bytes": 5057,
       "license": "MIT",
       "path": "test/fixtures/AvatarContinuationWorld.h",
-      "sha256": "59aa0841d234576a12ca137ddbd5c0376209f7d0b0ddaf34eec250fa84770f41",
+      "sha256": "ad3d71cc9976ce08bd526989f90cb2b4c24466dfe8ef98ff70fe4caa4c16462d",
       "source": "Luminumbra test fixtures"
     },
     {

@@ -2122,6 +2122,46 @@ bool PhysicsSystem::is_avatar_grounded(std::size_t index) const {
            JPH::CharacterBase::EGroundState::OnGround;
 }
 
+bool PhysicsSystem::capture_player_owner(World::PhysicsOwnerState& output) const {
+    if (!m_player_character) {
+        return false;
+    }
+    OwnerRecipe recipe;
+    recipe.kind = 2u;
+    recipe.flags = m_player_character->GetShape() == m_player_crouch_shape ? 2u : 0u;
+    try {
+        m_player_character->SaveState(recipe.owner);
+        return WriteController(recipe, output);
+    } catch (const OwnerStateRefusal&) {
+        return false;
+    }
+}
+
+bool PhysicsSystem::restore_player_owner(const World::PhysicsOwnerState& state) {
+    OwnerRecipe recipe;
+    if (!m_jolt_system || m_player_character || !ParseController(state, recipe) ||
+        recipe.kind != 2u ||
+        !SimulationHorizon::valid(Vec3(static_cast<float>(recipe.feet.GetX()),
+                                       static_cast<float>(recipe.feet.GetY()),
+                                       static_cast<float>(recipe.feet.GetZ()))) ||
+        !ReferencesExist(recipe, *m_jolt_system, std::span<const std::uint32_t>{})) {
+        return false;
+    }
+    // Stage both stances and all saved contacts before publishing the singleton.
+    const auto standing = FeetCapsule(0.9f, 1.3f);
+    const auto crouching = FeetCapsule(0.45f, 0.85f);
+    auto character = PrepareController(
+        recipe.flags == 2u ? crouching : standing, glm::vec3(0.0f), m_jolt_system.get());
+    character->RestoreState(recipe.owner);
+    m_player_stand_shape = standing;
+    m_player_crouch_shape = crouching;
+    m_player_character = std::move(character);
+    if (m_simulation_collisions) {
+        m_simulation_collisions->ready = false;
+    }
+    return true;
+}
+
 bool PhysicsSystem::capture_avatar_owner(std::size_t index,
                                          World::PhysicsOwnerState& output) const {
     if (!m_jolt_system || index >= m_avatars.size() || !m_avatars[index].character) {
@@ -2345,6 +2385,14 @@ bool PhysicsSystem::OwnerContinuation::restore_avatar_owner(
     std::span<const World::PhysicsOwnerState> remaining_frozen) {
     return m_physics.restore_avatar_owner(state, index, remaining_frozen);
 }
+bool PhysicsSystem::OwnerContinuation::capture_player_owner(
+    World::PhysicsOwnerState& output) const {
+    return m_physics.capture_player_owner(output);
+}
+bool PhysicsSystem::OwnerContinuation::restore_player_owner(const World::PhysicsOwnerState& state) {
+    return m_physics.restore_player_owner(state);
+}
+
 bool PhysicsSystem::capture_body_owner(JPH::BodyID body, BodyOwnerState& output) const {
     if (!m_jolt_system || body.IsInvalid() || body.GetIndex() >= kPhysicsCapacity) {
         return false;
@@ -3082,6 +3130,16 @@ void PhysicsSystem::BatchedPhysicsQueries::SortQueriesSpatially(
 } // namespace Luminumbra
 
 namespace Luminumbra::world {
+
+bool GameSession::CapturePlayerOwner(World::PhysicsOwnerState& output) const {
+    return m_physicsSystem &&
+           Systems::PhysicsSystem::OwnerContinuation(*m_physicsSystem).capture_player_owner(output);
+}
+
+bool GameSession::RestorePlayerOwner(const World::PhysicsOwnerState& state) {
+    return m_physicsSystem &&
+           Systems::PhysicsSystem::OwnerContinuation(*m_physicsSystem).restore_player_owner(state);
+}
 
 bool GameSession::CaptureAvatarOwner(const World::PlayerAvatar& avatar,
                                      std::size_t physics_index,

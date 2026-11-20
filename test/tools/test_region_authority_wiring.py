@@ -1514,11 +1514,81 @@ class SimulationCollisionWiring(unittest.TestCase):
                       "session.TickSimulation("):
             self.assertIn(token, regression)
 
-    def test_continuation_has_no_player_api_or_test_access_hook(self):
+    def assert_player_continuation_session_bridge(self, header, source):
+        self.assertNotIn("OwnerContinuationTestAccess", header + source)
+        adapter = function(header, "class OwnerContinuation")
+        self.assertIn("friend class ::Luminumbra::world::GameSession;", adapter)
+        self.assertIn("explicit OwnerContinuation(", adapter[adapter.index("private:"):])
+        private = header[header.index("private:\n    bool capture_player_owner"):]
+        for operation in ("capture", "restore"):
+            method = operation + "_player_owner"
+            self.assertIn(method, adapter)
+            self.assertIn(method, private)
+            self.assertNotIn(method, header[:header.index("class OwnerContinuation")])
+            bridge = function(source, "bool GameSession::" + operation.title() + "PlayerOwner(")
+            self.assertIn("m_physicsSystem &&", bridge)
+            self.assertIn("Systems::PhysicsSystem::OwnerContinuation(*m_physicsSystem)." + method,
+                          bridge)
+            self.assertIn("m_physics." + method,
+                          function(source, "bool PhysicsSystem::OwnerContinuation::" + method + "("))
+        restore = function(source, "bool PhysicsSystem::restore_player_owner(")
+        for token in ("m_player_character ||", "!ParseController(state, recipe)",
+                      "recipe.kind != 2u", "!SimulationHorizon::valid(",
+                      "recipe.feet.GetX()", "recipe.feet.GetY()", "recipe.feet.GetZ()",
+                      "!ReferencesExist(recipe, *m_jolt_system, std::span<const std::uint32_t>{})", "return false;"):
+            self.assertIn(token, restore)
+            for allocation in ("FeetCapsule(", "PrepareController("):
+                self.assertLess(restore.index(token), restore.index(allocation))
+        for token in ("const auto standing = FeetCapsule(",
+                      "const auto crouching = FeetCapsule(",
+                      "auto character = PrepareController(",
+                      "recipe.flags == 2u ? crouching : standing",
+                      "character->RestoreState(recipe.owner);"):
+            self.assertIn(token, restore)
+            for publication in ("m_player_stand_shape =", "m_player_crouch_shape =",
+                                "m_player_character ="):
+                self.assertLess(restore.index(token), restore.index(publication))
+        self.assertIn("m_player_character = std::move(character);", restore)
+
+    def test_player_continuation_exists_only_through_session_bridge(self):
         header = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.h").read_text(encoding="utf-8")
         source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(encoding="utf-8")
-        for token in ("capture_player_owner", "restore_player_owner", "OwnerContinuationTestAccess"):
-            self.assertNotIn(token, header + source)
+        self.assert_player_continuation_session_bridge(header, source)
+        for token in ("!SimulationHorizon::valid(", "!ReferencesExist(recipe, *m_jolt_system, std::span<const std::uint32_t>{})",
+                      "character->RestoreState(recipe.owner);",
+                      ".capture_player_owner(output)", ".restore_player_owner(state)"):
+            with self.subTest(missing=token), self.assertRaises(AssertionError):
+                self.assert_player_continuation_session_bridge(header, source.replace(token, ""))
+        with self.assertRaises(AssertionError):
+            self.assert_player_continuation_session_bridge(header + "OwnerContinuationTestAccess", source)
+        session = (ROOT / "src/luminumbra_common/world/GameSession.h").read_text(encoding="utf-8")
+        for token in ("bool CapturePlayerOwner(", "bool RestorePlayerOwner("):
+            self.assertIn(token, session)
+        runner = (ROOT / "src/luminumbra_server/ServerWorldRunner.h").read_text(encoding="utf-8")
+        self.assertNotIn("PlayerOwner(", runner)
+        native = (ROOT / "test/common/PlayerAvatar_test.cpp").read_text(encoding="utf-8")
+        for name in ("PlayerFallingGroundedAndCrouchedResumeBitExactly",
+                     "PlayerRefusalsPreserveOwnerAndCaptureOutput",
+                     "OutOfBoundsPlayerRestorePublishesNothingAndTicksContinue"):
+            self.assertIn(name, native)
+        regression = function(native, "TEST(GameSessionHeadlessWorldTest, "
+                              "OutOfBoundsPlayerRestorePublishesNothingAndTicksContinue)")
+        for token in ("jobs.startup(1)", "session.SetJobSystem(&jobs)",
+                      "set_durable_residency(true)", "session.SetActiveRegionsEnabled(true)",
+                      "ValidatePhysicsOwner(invalid)",
+                      "EXPECT_FALSE(session.RestorePlayerOwner(invalid))",
+                      "EXPECT_FALSE(session.CapturePlayerOwner(absent))",
+                      "ExpectBodySet(before, after)", "session.TickSimulation("):
+            self.assertIn(token, regression)
+        failures = (ROOT / "test/physics/jolt_startup_test.cpp").read_text(encoding="utf-8")
+        sweep = function(failures, "void ControllerRestoreAllocationSweep(")
+        for token in ("const bool player = mode >= 3", "source.set_player_crouched(mode == 4)",
+                      "target_world.restore_player_owner(captured)",
+                      "!target_world.capture_player_owner(absent)", "Require(restore())",
+                      "RequireOwnerEqual(captured, actual)"):
+            self.assertIn(token, sweep)
+        self.assertIn("mode < 5", function(failures, "TEST(JoltStartup, "
+                                         "ControllerAllocationFailuresPublishNothingAndRetryExactlyOnce)"))
 
     def test_overflow_horizons_keep_existing_sessions_running(self):
         source = (ROOT / "src/luminumbra_common/systems/PhysicsSystem.cpp").read_text(
