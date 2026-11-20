@@ -52,7 +52,10 @@ class ReplaySourceContract(unittest.TestCase):
                          r'const auto final_hash = CaptureWorldHash\(executed, runner\);\s*'
                          r'if \(!final_hash\)\s*\{\s*return 1;\s*\}\s*'
                          r'const auto\* trace = [^;]*;\s*'
-                         r'if \(!writer.Finalize\(executed, trace\)\)')
+                         r'Luminumbra::Replay::ReplayFinalization publication\(\s*'
+                         r'options.record_path, \"[^\"]*\"\);\s*'
+                         r'if \(!publication.ready\(\) \|\| !writer.Finalize\(executed, trace\)'
+                         r' \|\| !publication.Complete\(\)\)')
         self.assertIn("(executed % kCheckpointIntervalTicks) == 0 || "
                       "executed == contents->tick_count", startup)
         for field in ("world_hash", "terrain", "water", "entities"):
@@ -65,6 +68,38 @@ class ReplaySourceContract(unittest.TestCase):
     def test_replay_mode_admits_identity_inputs_and_terminal_before_startup(self):
         self.assert_mode_admission(read_source(MODES + "Replay.cpp"))
 
+    def assert_client_capture(self, driver):
+        for peer, session in (("host", "*m_impl->host_session"), ("client", "*client_session")):
+            self.assertRegex(driver, peer + r"_cfg.replay_header = std::make_shared<const\s*"
+                             r"Luminumbra::Replay::ReplayHeader>\(\s*"
+                             r"Luminumbra::Replay::CaptureReplayHeader\(\s*" + re.escape(session) +
+                             r",\s*static_cast<std::uint32_t>\(config.surface_radius\),\s*"
+                             r"static_cast<std::uint32_t>\(config.collision_radius\)\)\);")
+        self.assertIn("hooks_template.capture_hashes = &NetSessionCaptureAuthorityHashes;", driver)
+        capture = driver.split("void NetSessionCaptureAuthorityHashes(", 1)[1].split("} // namespace", 1)[0]
+        self.assertIn("AuthorityCaptureParts::All", capture)
+        self.assertLess(capture.index("if (!result.capture)"), capture.index("out.tick"))
+        self.assertIn("out.world_hash = result.capture->composite;", capture)
+        self.assertNotIn("snapshot_streamed_chunks", capture)
+
+    def test_client_replay_headers_share_authority_capture_for_both_peers(self):
+        driver = read_source("src/luminumbra_client/core/scenarios/NetworkedSessionDriver.cpp")
+        self.assert_client_capture(driver)
+        runner = read_source("src/luminumbra_server/ServerWorldRunner.cpp")
+        capture = runner.split("ServerWorldRunner::CaptureReplayHeader() const", 1)[1].split(
+            "ServerWorldRunner::ServerWorldRunner(", 1)[0]
+        self.assertIn("return Replay::CaptureReplayHeader(*m_session,", capture)
+        self.assertNotIn("header.authority_boot =", capture)
+
+    def test_client_capture_contract_detects_isolated_regressions(self):
+        driver = read_source("src/luminumbra_client/core/scenarios/NetworkedSessionDriver.cpp")
+        for token in ("host_cfg.replay_header", "client_cfg.replay_header",
+                      "hooks_template.capture_hashes = &NetSessionCaptureAuthorityHashes;",
+                      "out.world_hash = result.capture->composite;"):
+            self.assertIn(token, driver)
+            with self.subTest(token=token), self.assertRaises(AssertionError):
+                self.assert_client_capture(driver.replace(token, "removed", 1))
+
     def test_mode_admission_contract_detects_isolated_regressions(self):
         source = read_source(MODES + "Replay.cpp")
         for token in ("header.engine_version != engine_now",
@@ -73,7 +108,8 @@ class ReplaySourceContract(unittest.TestCase):
                       "contents->tick_count != 0 && terminal == nullptr",
                       "executed != 0 && (executed % kCheckpointIntervalTicks) != 0",
                       " || executed == contents->tick_count",
-                      "terminal ? terminal->world_hash : header.start_world_hash"):
+                      "terminal ? terminal->world_hash : header.start_world_hash",
+                      "!publication.ready()", "!publication.Complete()"):
             self.assertIn(token, source)
             with self.subTest(token=token), self.assertRaises(AssertionError):
                 self.assert_mode_admission(source.replace(token, "false", 1))

@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <filesystem>
@@ -31,15 +32,165 @@
 #include <utility>
 #include <vector>
 
+#include "core/EngineVersion.h"
 #include "core/FilesystemPath.h"
 #include "core/JobSystem.h"
 #include "core/Log.h"
 #include "persistence/ReplacementOutputFile.h"
 #include "persistence/SaveTransaction.h"
+#include "persistence/WorldSaveService.h"
 #include "systems/WeatherSystem.h"
+#include "world/GameSession.h"
 #include "world/SurfaceWorkBudget.h"
 
 namespace Luminumbra::Replay {
+world::AuthorityBootDescriptor CaptureReplayBoot(const world::GameSession& session,
+                                                 std::uint32_t seed,
+                                                 const world::WorldCalendar& calendar,
+                                                 world::AuthorityBootDescriptor boot) {
+    const auto values = session.EffectiveIdentityValues();
+    boot.authority_rules_revision =
+        luminumbra::core::SimulationIdentityValues::kAuthorityRulesRevision;
+    boot.resolved_world_seed = seed;
+    boot.system_config_identity = session.SystemConfigIdentity(calendar);
+    static_assert(boot.system_gates.size() == values.enabled.size());
+    static_assert(boot.scalar_bits.size() == values.scalars.size());
+    // Fixed registry slots: at most 25 gates and 46 scalar/vector settings.
+    for (std::size_t i = 0; i < boot.system_gates.size(); ++i) {
+        boot.system_gates[i] = static_cast<std::uint8_t>(values.enabled[i]);
+    }
+    for (std::size_t i = 0; i < boot.scalar_bits.size(); ++i) {
+        boot.scalar_bits[i] = std::bit_cast<std::uint64_t>(values.scalars[i]);
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            boot.vector_bits[i][axis] =
+                std::bit_cast<std::uint32_t>(values.vectors[i][static_cast<int>(axis)]);
+        }
+    }
+    boot.finite_hydrology = values.finite_hydrology_enabled;
+    boot.weather_rain_scale_mm = values.weather_rain_scale_mm;
+    boot.region_work_limit = values.region_work_limit;
+    boot.region_hold_ticks = values.region_hold_ticks;
+    boot.region_reduced_shift = values.region_reduced_shift;
+    boot.day_length_ticks = calendar.dayLengthTicks;
+    boot.days_per_year = calendar.daysPerYear;
+    boot.daylight_numerator = calendar.daylightNumerator;
+    boot.daylight_denominator = calendar.daylightDenominator;
+    boot.lunar_cycle_days = calendar.lunarCycleDays;
+    return boot;
+}
+
+ReplayHeader CaptureReplayHeader(const world::GameSession& session,
+                                 std::uint32_t surface_radius,
+                                 std::uint32_t collision_radius,
+                                 world::AuthorityBootDescriptor workload) {
+    if (session.GetSimulationTickCount() != 0 ||
+        !World::SurfaceRadiiSupported(surface_radius, collision_radius) ||
+        session.PresetContentHash().empty()) {
+        throw std::invalid_argument("Replay requires a fresh boot at tick zero");
+    }
+    ReplayHeader header;
+    header.version = kLrec1BootVersion;
+    header.seed_string = session.GetMetadata().seed;
+    header.seed = kResolvedSeedTag | session.GetMetadata().resolvedSeed;
+    header.preset = session.GetMetadata().worldType;
+    header.preset_hash = std::strtoull(Fnv1a64Hex(header.preset).c_str(), nullptr, 16);
+    header.surface_radius = surface_radius;
+    header.collision_radius = collision_radius;
+    header.engine_version = std::string(luminumbra::core::GetEngineVersionString());
+    header.system_config_identity = session.SystemConfigIdentity();
+    header.preset_content_hash = session.PresetContentHash();
+    if (const auto* schedule = session.GetWeatherSchedule()) {
+        header.version = kLrec1WeatherVersion;
+        header.weather_schedule = schedule->canonical_bytes();
+    } else {
+        header.authority_boot = CaptureReplayBoot(session,
+                                                  session.GetMetadata().resolvedSeed,
+                                                  session.GetRenderCalendar(),
+                                                  std::move(workload));
+    }
+    return header;
+}
+
+struct ReplayFinalization::State {
+    std::string destination;
+    Persistence::WorldSaveService::ArtifactIdentity marker_identity{};
+    bool prepared = false;
+    bool owns_marker = false;
+};
+
+ReplayFinalization::ReplayFinalization(const std::string& destination, const std::string& message)
+    : m_state(std::make_unique<State>()) {
+    m_state->destination = destination;
+    try {
+        const auto parent = std::filesystem::path(destination).parent_path();
+        std::error_code directory_error;
+        if (!parent.empty())
+            std::filesystem::create_directories(parent, directory_error);
+        if (directory_error)
+            return;
+        const Persistence::ReplayPairReadGuard ownership(destination);
+        if (!ownership.is_open())
+            return;
+        Persistence::WorldSaveService::ArtifactIdentity identity{};
+        bool missing = false;
+        if (!Persistence::WorldSaveService::artifact_identity(destination, identity, missing))
+            return;
+        try {
+            Persistence::ReplacementOutputFile reason(destination + ".incomplete");
+            if (reason.write(message) && reason.commit()) {
+                bool marker_missing = false;
+                m_state->owns_marker = Persistence::WorldSaveService::artifact_identity(
+                    destination + ".incomplete", m_state->marker_identity, marker_missing);
+                m_state->prepared = m_state->owns_marker && !marker_missing;
+                return;
+            }
+        } catch (const std::exception&) {
+            // Publication failure must not make the retained generation admissible.
+        }
+        std::error_code error;
+        const auto marker = std::filesystem::symlink_status(destination + ".incomplete", error);
+        if ((!error && marker.type() != std::filesystem::file_type::not_found) ||
+            (error && error != std::errc::no_such_file_or_directory)) {
+            return; // Refuse without clearing a companion this attempt does not own.
+        }
+        m_state->prepared = missing || Persistence::WorldSaveService::remove_owned_entry(
+                                           destination, identity, nullptr);
+    } catch (const std::exception&) {
+        // No payload publication is allowed unless refusal was established first.
+    }
+}
+
+ReplayFinalization::~ReplayFinalization() = default;
+
+bool ReplayFinalization::ready() const {
+    return m_state->prepared;
+}
+
+bool ReplayFinalization::Complete() {
+    if (!ready())
+        return false;
+    const auto marker = m_state->destination + ".incomplete";
+    try {
+        const Persistence::ReplayPairReadGuard ownership(m_state->destination);
+        if (!ownership.is_open())
+            return false;
+        if (m_state->owns_marker) {
+            // Recheck identity at removal; never clear another attempt's marker.
+            if (Persistence::WorldSaveService::remove_owned_entry(
+                    marker, m_state->marker_identity, nullptr))
+                return true;
+        }
+    } catch (const std::exception&) {
+        // The removal seam can also throw after the entry was removed.
+    }
+    // Removal can succeed before a directory flush reports failure. At this
+    // point the payload is complete; absence is a successful commit point.
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(marker, error);
+    return error == std::errc::no_such_file_or_directory ||
+           (!error && status.type() == std::filesystem::file_type::not_found);
+}
+
 namespace {
 
 namespace fs = std::filesystem;
@@ -1341,13 +1492,16 @@ bool QueuedReplayRecorder::State::Finalize(const std::string& destination,
     state.Stop();
     bool finalized = false;
     try {
-        if (state.failure == State::Failure::None) {
-            // Clear a stale marker before the replay commit point. A removal
-            // refusal must not follow successful replacement of the replay.
-            std::error_code ec;
-            fs::remove(destination + ".incomplete", ec);
-            finalized = !ec && state.sink->Finalize(destination, tick_count, divergence_tick);
-        }
+        const auto failed_tick =
+            state.failure == State::Failure::None ? divergence_tick : state.failure_tick;
+        const auto* cause = state.failure == State::Failure::None ? "recorder finalization failed"
+                                                                  : FailureReason();
+        const auto message =
+            "Incomplete replay at tick " + std::to_string(failed_tick) + ": " + cause + '\n';
+        ReplayFinalization publication(destination, message);
+        finalized = publication.ready() && state.failure == State::Failure::None &&
+                    state.sink->Finalize(destination, tick_count, divergence_tick) &&
+                    publication.Complete();
     } catch (const std::exception&) {
         finalized = false;
     }
@@ -1360,17 +1514,6 @@ bool QueuedReplayRecorder::State::Finalize(const std::string& destination,
         state.Fail(State::Failure::Finalization, divergence_tick);
     }
     state.Close();
-    // Never advertise a partial recording as a successful LREC1. The companion
-    // is deliberately outside the versioned format and includes an explicit cause.
-    try {
-        Persistence::ReplacementOutputFile reason(destination + ".incomplete");
-        const auto message = "Incomplete replay at tick " + std::to_string(state.failure_tick) +
-                             ": " + FailureReason() + '\n';
-        if (reason.write(message))
-            reason.commit();
-    } catch (const std::exception&) {
-        // The original failure remains authoritative if its diagnostic cannot be written.
-    }
     LUMINUMBRA_CORE_ERROR("Replay recording incomplete at tick {}: {} ({})",
                           state.failure_tick,
                           FailureReason(),
