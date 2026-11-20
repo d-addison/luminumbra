@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -29,6 +30,18 @@ std::string Source(std::string_view path) {
     std::ostringstream result;
     result << input.rdbuf();
     return result.str();
+}
+
+std::string SourceSection(std::string_view path, std::string_view first, std::string_view last) {
+    const auto source = Source(path);
+    const auto begin = source.find(first);
+    const auto end = source.find(last, begin);
+    EXPECT_NE(begin, std::string::npos);
+    EXPECT_NE(end, std::string::npos);
+    if (begin == std::string::npos || end == std::string::npos) {
+        return {};
+    }
+    return source.substr(begin, end - begin);
 }
 
 class DiagnosticInspectorGl : public ::testing::Test {
@@ -58,18 +71,179 @@ private:
     bool initialized_ = false;
     GLFWwindow* window_ = nullptr;
 };
+
+class DiagnosticInspectorFrameGl : public DiagnosticInspectorGl {
+protected:
+    void SetUp() override {
+        ASSERT_NO_FATAL_FAILURE(DiagnosticInspectorGl::SetUp());
+        graphics_ready_ = true;
+        auto& control = Pass::controls();
+        control = {};
+        control.enabled = true;
+        control.inspector_open = true;
+        control.refresh = true;
+        pass_.init_shader(LUMINUMBRA_SOURCE_ROOT);
+        pass_.init_buffers();
+        CreateGBufferTargets(gbuffer_, registry_, 2, 2);
+        ASSERT_NE(gbuffer_.fbo_id, 0U);
+        ctx_.internal_width = 2;
+        ctx_.internal_height = 2;
+        ctx_.gbuffer_position = adopt_texture(gbuffer_.position_texture);
+        ctx_.gbuffer_normal = adopt_texture(gbuffer_.normal_texture);
+        ctx_.gbuffer_albedo = adopt_texture(gbuffer_.albedo_texture);
+        ctx_.gbuffer_depth = adopt_texture(gbuffer_.depth_texture);
+        const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) / "res/shaders";
+        const auto vertex = (root / "g_buffer.vert").string();
+        const auto fragment = (root / "g_buffer.frag").string();
+        base_ = std::make_unique<Shader>(vertex.c_str(), fragment.c_str());
+        ASSERT_TRUE(base_->IsValid());
+    }
+    void TearDown() override {
+        if (graphics_ready_) {
+            frame_.reset();
+            glUseProgram(0);
+            pass_.destroy_buffers();
+            pass_.reset_shader();
+            base_.reset();
+            DestroyGBufferTargets(gbuffer_, registry_);
+            Pass::controls() = {};
+        }
+        DiagnosticInspectorGl::TearDown();
+    }
+    void BeginCapture() {
+        frame_ = pass_.begin_frame(ctx_);
+        ASSERT_TRUE(frame_);
+        auto* capture = GBufferDiagnosticCapture::Current();
+        ASSERT_NE(capture, nullptr);
+        ASSERT_TRUE(capture->attach(gbuffer_, {2, 2}));
+        auto* variant = capture->variant(base_.get(), false);
+        ASSERT_NE(variant, base_.get());
+        ASSERT_NE(variant, nullptr);
+        ASSERT_TRUE(variant->IsValid());
+        variant_program_ = variant->Id();
+        variant->use();
+        capture->write(*variant,
+                       {.mesh_path = "res/models/rock.obj",
+                        .shader_variant = "instanced_static_mesh",
+                        .chunk = {-7, 0, 19},
+                        .lod = 3,
+                        .ownership = DiagnosticOwnership::Live,
+                        .pass = DiagnosticPass::GBuffer,
+                        .provenance = DiagnosticProvenance::Mesh});
+        // Seed one bounded 2x2 capture with exact identities and known AOV values.
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, gbuffer_.fbo_id);
+        GLint identity_texture = 0;
+        glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,
+                                              GL_COLOR_ATTACHMENT6,
+                                              GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,
+                                              &identity_texture);
+        ASSERT_NE(identity_texture, 0);
+        const DiagnosticId id{1, 1, 3, 257};
+        glClearTexImage(
+            static_cast<GLuint>(identity_texture), 0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, id.data());
+        const std::array<float, 4> normal{0.5f, 0.5f, 0, 17.0f / 255};
+        const std::array<float, 4> albedo{0.2f, 0.4f, 0.6f, 1};
+        const float depth = 0.25f;
+        glClearTexImage(gbuffer_.normal_texture, 0, GL_RGBA, GL_FLOAT, normal.data());
+        glClearTexImage(gbuffer_.albedo_texture, 0, GL_RGBA, GL_FLOAT, albedo.data());
+        glClearTexImage(gbuffer_.depth_texture, 0, GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
+        capture->detach();
+        ASSERT_TRUE(capture->complete());
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        GLint current = 0;
+        glGetIntegerv(GL_CURRENT_PROGRAM, &current);
+        ASSERT_EQ(static_cast<GLuint>(current), variant_program_);
+        ASSERT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+    }
+    void ExpectReleasedProgram() const {
+        EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
+        EXPECT_EQ(glIsProgram(variant_program_), GL_FALSE);
+        GLint current = 0;
+        glGetIntegerv(GL_CURRENT_PROGRAM, &current);
+        EXPECT_TRUE(current == 0 || glIsProgram(static_cast<GLuint>(current)) == GL_TRUE);
+        EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+    }
+    Pass pass_;
+    RenderContext ctx_;
+    std::shared_ptr<Pass::Frame> frame_;
+
+private:
+    bool graphics_ready_ = false;
+    RenderResourceRegistry registry_;
+    GBuffer gbuffer_;
+    std::unique_ptr<Shader> base_;
+    GLuint variant_program_ = 0;
+};
 } // namespace
+
+TEST_F(DiagnosticInspectorFrameGl, CaptureTeardownGatherRestoreAndLaterDisplayKeepValidPrograms) {
+    ASSERT_NO_FATAL_FAILURE(BeginCapture());
+    Pass::end_frame(frame_, ctx_);
+    EXPECT_FALSE(frame_);
+    ExpectReleasedProgram();
+    const auto& control = Pass::controls();
+    ASSERT_FALSE(control.result.empty());
+    const auto result = nlohmann::json::parse(control.result);
+    EXPECT_EQ(result.at("record").at("mesh").at("path"), "res/models/rock.obj");
+    EXPECT_EQ(result.at("probe").at("material"), 17);
+    EXPECT_EQ(result.at("probe").at("depth_hardware"), 0.25f);
+    const auto captured_result = control.result;
+    EXPECT_FALSE(pass_.begin_frame(ctx_));
+    Pass::end_frame(frame_, ctx_);
+    pass_.set_mode(Pass::DrawId);
+    glViewport(0, 0, 2, 2);
+    pass_.execute(ctx_);
+    std::array<GLubyte, 4> color{};
+    glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, color.data());
+    const auto hash = Pass::hash_id(1);
+    for (std::size_t channel = 0; channel < 3; ++channel) {
+        EXPECT_NEAR(color[channel], (hash >> (channel * 8)) & 255U, 1);
+    }
+    EXPECT_EQ(control.result, captured_result);
+    ExpectReleasedProgram();
+}
+
+TEST_F(DiagnosticInspectorFrameGl, RefusedCaptureReleasesTheCurrentVariant) {
+    ASSERT_NO_FATAL_FAILURE(BeginCapture());
+    GBufferDiagnosticCapture::Current()->abort();
+    Pass::end_frame(frame_, ctx_);
+    EXPECT_FALSE(frame_);
+    EXPECT_EQ(Pass::controls().result, "Snapshot refused: incomplete or unsupported coverage");
+    ExpectReleasedProgram();
+}
+
+TEST_F(DiagnosticInspectorFrameGl, AbandonedCaptureReleasesTheCurrentVariant) {
+    ASSERT_NO_FATAL_FAILURE(BeginCapture());
+    frame_.reset();
+    EXPECT_EQ(Pass::controls().result, "Snapshot aborted");
+    ExpectReleasedProgram();
+}
+
+TEST(DiagnosticInspector, CaptureTeardownUnbindsBeforeDeletingVariants) {
+    const auto finish = SourceSection(
+        "src/luminumbra_client/rendering/passes/DebugViewPass.cpp", "void finish(", "\nprivate:");
+    const auto unbind = finish.find("AttributedGl::UseProgram(glUseProgram, 0U);");
+    ASSERT_NE(unbind, std::string::npos);
+    EXPECT_LT(unbind, finish.find("capture_.reset();"));
+    const auto abandon = SourceSection(
+        "src/luminumbra_client/rendering/passes/DebugViewPass.cpp", "~Frame()", "void finish(");
+    EXPECT_NE(abandon.find("AttributedGl::UseProgram(glUseProgram, 0U);"), std::string::npos);
+}
 
 TEST(DiagnosticInspector, ProducerMappingIncludesUnknownAndExplicitUnsupported) {
     using Kind = Pass::ProducerKind;
-    const std::array<std::pair<std::string_view, Kind>, 9> cases = {{
-        {"live_terrain_mdi", Kind::Terrain},
+    const std::array<std::pair<std::string_view, Kind>, 13> cases = {{
+        {"terrain_mdi", Kind::Terrain},
+        {"terrain_mdi_ladder", Kind::Terrain},
+        {"live_terrain_mdi", Kind::Unsupported},
         {"legacy_far_terrain", Kind::Terrain},
         {"tree_impostor", Kind::Impostor},
         {"foliage_ladder", Kind::Foliage},
         {"instanced_static_mesh", Kind::Static},
         {"skinned_mesh_ladder", Kind::Static},
+        {"static_asset", Kind::Static},
         {"far_volume", Kind::FarVolume},
+        {"g_buffer_ladder_far", Kind::FarVolume},
         {"", Kind::Unsupported},
         {"future_producer", Kind::Unsupported},
     }};
@@ -200,6 +374,129 @@ TEST(DiagnosticInspector, SinglePixelGatherHasNoPlaneReadbackAndChecksBoundsBefo
                              "texelFetch(gDepth, pixel, 0)"}) {
         EXPECT_NE(shader.find(text), std::string::npos) << text;
     }
+}
+
+TEST(DiagnosticInspector, IdentityDrawRequiresOwnedInspectorStorage) {
+    const auto draw = SourceSection("src/luminumbra_client/rendering/passes/DebugViewPass.cpp",
+                                    "void DebugViewPass::execute(",
+                                    "void DebugViewPass::bind_sources(");
+    EXPECT_NE(draw.find("identity_view && (!m_snapshot || m_snapshot->sample_buffer == 0)"),
+              std::string::npos);
+    EXPECT_EQ(draw.find("inspector_open"), std::string::npos);
+    EXPECT_LT(
+        draw.find("storage_binding.emplace();"),
+        draw.find("glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, m_snapshot->sample_buffer)"));
+    EXPECT_LT(draw.find("glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, m_snapshot->sample_buffer)"),
+              draw.find("AttributedGl::Submit("));
+    const auto storage = SourceSection("src/luminumbra_client/rendering/passes/DebugViewPass.cpp",
+                                       "struct InspectorStorageBinding",
+                                       "struct InspectorBindings");
+    EXPECT_NE(storage.find("glBindBufferRange(GL_SHADER_STORAGE_BUFFER,"), std::string::npos);
+    EXPECT_NE(
+        storage.find(
+            "glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, static_cast<GLuint>(indexed_storage))"),
+        std::string::npos);
+    EXPECT_NE(storage.find("glBindBuffer(GL_SHADER_STORAGE_BUFFER, static_cast<GLuint>(storage))"),
+              std::string::npos);
+}
+
+TEST(DiagnosticInspector, InspectorStorageRefusesMissingPartialAndOversizedStores) {
+    const auto begin =
+        SourceSection("src/luminumbra_client/rendering/passes/DebugViewPass.cpp",
+                      "std::shared_ptr<DebugViewPass::Frame> DebugViewPass::begin_frame(",
+                      "void DebugViewPass::end_frame(");
+    EXPECT_NE(begin.find("glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(InspectorPixel), &empty, "
+                         "GL_STREAM_READ)"),
+              std::string::npos);
+    EXPECT_NE(begin.find("if (m_snapshot->sample_buffer == 0) {\n                control.status"),
+              std::string::npos);
+    EXPECT_LT(begin.find("if (sample_bytes != sizeof(InspectorPixel))"),
+              begin.find("return std::make_shared<Frame>"));
+    EXPECT_LT(begin.find("m_snapshot->ready = false;"), begin.find("glGenBuffers("));
+    EXPECT_LT(begin.find("if (!m_snapshot->targets.reset())"),
+              begin.find("m_snapshot->draws.clear();"));
+    EXPECT_NE(begin.find("Identity attachment still leased"), std::string::npos);
+    EXPECT_EQ(begin.find("inspector_open"), std::string::npos);
+}
+
+TEST(DiagnosticInspector, IncompleteAndUnsupportedCapturesRefusePublication) {
+    const auto frame = SourceSection("src/luminumbra_client/rendering/passes/DebugViewPass.cpp",
+                                     "class DebugViewPass::Frame",
+                                     "std::string DebugViewPass::join(");
+    EXPECT_LT(frame.find("const bool complete = capture_->complete();"),
+              frame.find("capture_.reset();"));
+    EXPECT_LT(frame.find("if (!complete)"), frame.find("pass_.finish_frame(ctx);"));
+    EXPECT_NE(frame.find("controls().status = controls().result ="), std::string::npos);
+    EXPECT_NE(frame.find("Snapshot refused: incomplete or unsupported coverage"),
+              std::string::npos);
+    EXPECT_LT(frame.find("return;"), frame.find("pass_.finish_frame(ctx);"));
+    const auto coverage = SourceSection("src/luminumbra_client/rendering/GBufferTargets.cpp",
+                                        "bool GBufferDiagnosticCapture::complete() const",
+                                        "Shader* GBufferDiagnosticCapture::variant(");
+    EXPECT_NE(
+        coverage.find("state_->captured && !state_->framebuffer && !state_->attachment_lease"),
+        std::string::npos);
+    EXPECT_NE(
+        coverage.find("!state_->failed && !state_->refused && state_->table.complete_coverage()"),
+        std::string::npos);
+}
+
+TEST(DiagnosticInspector, DeferredSnapshotFinishesBeforeUninstrumentedWriters) {
+    const auto dispatch = SourceSection("src/luminumbra_client/rendering/RenderPipeline.cpp",
+                                        "void RenderPipeline::dispatch_stages(",
+                                        "RenderPipeline::stage_executor_table()");
+    EXPECT_NE(dispatch.find("if (diagnostic_frame && node == \"gbuffer\")"), std::string::npos);
+    EXPECT_LT(dispatch.find("(this->*fn)(camera);"), dispatch.find("DebugViewPass::end_frame("));
+    const auto stages = SourceSection("src/luminumbra_client/rendering/RenderPipeline.cpp",
+                                      "RenderPipeline::stage_executor_table()",
+                                      "void RenderPipeline::execute_stage_shadow(");
+    EXPECT_LT(stages.find("{\"gbuffer\","), stages.find("{\"plant_procgen\","));
+    EXPECT_LT(stages.find("{\"gbuffer\","), stages.find("{\"ground_decals\","));
+    const auto frame = SourceSection(
+        "src/luminumbra_client/rendering/passes/DebugViewPass.cpp", "~Frame()", "void finish(");
+    EXPECT_EQ(frame.find("finish_frame("), std::string::npos);
+    EXPECT_NE(frame.find("Snapshot aborted"), std::string::npos);
+}
+
+TEST(DiagnosticInspector, FinalizationResolvesCurrentGBufferAttachments) {
+    const auto dispatch = SourceSection("src/luminumbra_client/rendering/RenderPipeline.cpp",
+                                        "void RenderPipeline::dispatch_stages(",
+                                        "RenderPipeline::stage_executor_table()");
+    EXPECT_LT(dispatch.find("(this->*fn)(camera);"),
+              dispatch.find(
+                  "DebugViewPass::end_frame(diagnostic_frame, make_debug_view_context(camera))"));
+    const auto frame = SourceSection("src/luminumbra_client/rendering/passes/DebugViewPass.cpp",
+                                     "class DebugViewPass::Frame",
+                                     "std::string DebugViewPass::join(");
+    EXPECT_EQ(frame.find("ctx_"), std::string::npos);
+    EXPECT_NE(frame.find("pass_.finish_frame(ctx);"), std::string::npos);
+    const auto context = SourceSection("src/luminumbra_client/rendering/RenderPipeline.cpp",
+                                       "RenderContext RenderPipeline::make_debug_view_context(",
+                                       "RenderContext RenderPipeline::make_ground_decal_context(");
+    EXPECT_NE(context.find("const GBuffer& gb = m_gbuffer_pass->gbuffer();"), std::string::npos);
+    EXPECT_NE(context.find("gb.position_texture"), std::string::npos);
+    EXPECT_NE(context.find("gb.normal_texture"), std::string::npos);
+    EXPECT_NE(context.find("gb.albedo_texture"), std::string::npos);
+    EXPECT_NE(context.find("gb.depth_texture"), std::string::npos);
+}
+
+TEST(DiagnosticInspector, EmptyRepeatedAndAbandonedFramesCannotPublish) {
+    const auto end = SourceSection("src/luminumbra_client/rendering/passes/DebugViewPass.cpp",
+                                   "void DebugViewPass::end_frame(",
+                                   "void DebugViewPass::read_inspector_pixel(");
+    EXPECT_LT(end.find("if (frame)"), end.find("frame->finish(ctx);"));
+    EXPECT_LT(end.find("frame->finish(ctx);"), end.find("frame.reset();"));
+    const auto finish = SourceSection("src/luminumbra_client/rendering/passes/DebugViewPass.cpp",
+                                      "void finish(",
+                                      "std::string DebugViewPass::join(");
+    EXPECT_LT(finish.find("if (!capture_)"), finish.find("capture_->complete()"));
+    EXPECT_LT(finish.find("return;"), finish.find("capture_->complete()"));
+    const auto abandoned = SourceSection(
+        "src/luminumbra_client/rendering/passes/DebugViewPass.cpp", "~Frame()", "void finish(");
+    EXPECT_NE(abandoned.find("if (capture_)"), std::string::npos);
+    EXPECT_NE(abandoned.find("controls().status = controls().result = \"Snapshot aborted\""),
+              std::string::npos);
+    EXPECT_EQ(abandoned.find("finish_frame("), std::string::npos);
 }
 
 TEST_F(DiagnosticInspectorGl, FixedReadbackCopiesOneRecordAndRestoresCallerBinding) {
@@ -337,11 +634,28 @@ TEST_F(DiagnosticInspectorGl, ShaderGatherUsesTheRequestedTexelForEveryAov) {
     for (const auto& [mode, value] :
          std::array<std::pair<int, std::uint32_t>, 5>{{{Pass::DrawId, 9},
                                                        {Pass::MeshId, 4},
-                                                       {Pass::Lod, 2},
+                                                       {Pass::Lod, 2 + 1},
                                                        {Pass::Chunk, 7},
                                                        {Pass::MeshPath, 4}}}) {
         shader.setInt("u_mode", mode);
         check_color(hashed_color(value));
+    }
+    {
+        // LOD 0 is the common level; it must not render as black.
+        auto lod0_id = ids[1];
+        lod0_id[2] = 0;
+        metadata[18] = lod0_id;
+        glBufferSubData(GL_TEXTURE_BUFFER, 0, sizeof(metadata), metadata.data());
+        glTexSubImage2D(
+            GL_TEXTURE_2D, 0, 1, 1, 1, 1, GL_RGBA_INTEGER, GL_UNSIGNED_INT, lod0_id.data());
+        shader.setInt("u_mode", Pass::Lod);
+        const auto lod0 = hashed_color(1);
+        EXPECT_GT(lod0[0] + lod0[1] + lod0[2], 0);
+        check_color(lod0);
+        metadata[18] = ids[1];
+        glBufferSubData(GL_TEXTURE_BUFFER, 0, sizeof(metadata), metadata.data());
+        glTexSubImage2D(
+            GL_TEXTURE_2D, 0, 1, 1, 1, 1, GL_RGBA_INTEGER, GL_UNSIGNED_INT, ids[1].data());
     }
     shader.setInt("u_mode", Pass::Producer);
     const std::array<std::array<int, 3>, 6> producer_colors = {{{255, 0, 255},
@@ -415,6 +729,10 @@ TEST(DiagnosticInspector, JoinRefusesPartialUnknownAndOversizedMetadata) {
     EXPECT_EQ(Pass::producer("foliage_unknown", true), Pass::ProducerKind::Unsupported);
     EXPECT_EQ(Pass::producer("live_terrain_mdi_unsupported", true),
               Pass::ProducerKind::Unsupported);
+    // The classifier must recognise the spellings live terrain actually submits.
+    EXPECT_NE(Source("src/luminumbra_client/rendering/RenderPipeline.cpp")
+                  .find("ladder ? \"terrain_mdi_ladder\" : \"terrain_mdi\""),
+              std::string::npos);
 }
 
 TEST(DiagnosticInspector, EveryNamedIdentityModeIsSharedByPanelAndCommandLine) {

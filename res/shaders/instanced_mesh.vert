@@ -66,14 +66,15 @@ void main()
     vs_out.PrevWorldPos = windSway(undisplaced, u_prevTime);
 
     vs_out.WorldPos = vec3(worldPos);
-    vs_out.WorldNormal = normalize(mat3(aInstanceMatrix) * aNormal);
+    mat3 normalMatrix = transpose(inverse(mat3(aInstanceMatrix)));
+    vs_out.WorldNormal = normalize(normalMatrix * aNormal);
 
     // View-space position from the (wind-displaced) world position.
     vec4 viewPos = view * worldPos;
     vs_out.FragPos = vec3(viewPos);
 
-    mat3 normalMatrix = mat3(transpose(inverse(view * aInstanceMatrix)));
-    vs_out.Normal = normalize(normalMatrix * aNormal); // Also includes the fix from last time
+    // Camera views are rigid: rotate the same inverse-transposed world normal.
+    vs_out.Normal = normalize(mat3(view) * vs_out.WorldNormal);
     vs_out.UV = aUV; // Pass UVs to the static-model texture lane.
 
     vs_out.MaterialID = uint(u_materialId);

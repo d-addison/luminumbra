@@ -29,6 +29,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -830,6 +831,21 @@ public:
         m_streaming_radius_cap = cap_chunks;
     }
 
+    // Owner-thread rendering only. All residents prefer the complete Y=0
+    // grid, then the lowest complete resident grid. Worker scratch captures it
+    // before dispatch.
+    // Unindexed chunks retain their own inputs. No simulation authority is changed.
+    const Chunk& column_water_mesh_source(const Chunk& chunk) const;
+    void invalidate_column_water_mesh(const Chunk& chunk);
+    struct WaterColumnMeshWork {
+        std::uint64_t pending_visits = 0;
+        std::uint64_t owner_visits = 0;
+    };
+    // Const owner-thread diagnostic for pending-ID and affected-stack bounds.
+    const WaterColumnMeshWork& water_column_mesh_work() const {
+        return m_water_column_mesh_work;
+    }
+
     // Owner-thread cumulative diagnostics; derived indexes never enter world_hash.
     const World::ActivationResidencyIndex::Counters& activation_index_counters() const {
         return m_activation_index.counters();
@@ -1081,13 +1097,29 @@ public:
     std::shared_ptr<::Luminumbra::Chunk> find_authoritative_chunk(const IVec3& coords) const;
     // Owner-thread admission of one canonical Y=0 column. Generated renderer caches
     // cannot seed authority; incomplete or legacy saved water requires migration.
-    // Returns nullptr on parking pressure; Loading owners refuse until publication.
-    // Admitted handles remain canonical until cleanup or residency retirement.
+    // Returns nullptr on reservation or parking pressure, without replacing owners.
+    // Loading owners refuse until publication; admitted handles remain canonical
+    // until cleanup or residency retirement, independently of save reservations.
     std::shared_ptr<Chunk> resolve_water_column(const IVec3& coords);
     // Canonical authority only: never generates or reads Loading worker storage.
     std::shared_ptr<Chunk> inspect_water_column(const IVec3& coords) const;
-    // Release only matching, still-unclaimed parked candidates; at most 832 per call.
-    void discard_unclaimed_water_columns(std::span<const std::shared_ptr<Chunk>> candidates);
+    // Reserve equally for resident and absent participants before terrain generation.
+    // False requests saving and leaves reservations unchanged (bounded backpressure).
+    bool reserve_water_columns(std::span<const ChunkID> ids);
+    // Maximum simultaneous unsaved columns, independent of resident storage.
+    [[nodiscard]] std::size_t water_column_capacity() const;
+    // A fixed 128 KiB charge covers full terrain plus a 32x32 water grid;
+    // using a fixed charge keeps admission identical across supported ABIs.
+    static constexpr std::size_t kWaterColumnReservationBytes = 128 * 1024;
+    static_assert(sizeof(Chunk) + std::size_t{17} * 17 * 17 * (sizeof(float) + sizeof(u8)) +
+                      std::size_t{17} * 17 * sizeof(float) +
+                      std::size_t{32} * 32 *
+                          (5 * sizeof(std::int32_t) + 3 * sizeof(float) + sizeof(Vec2)) <=
+                  kWaterColumnReservationBytes);
+    // Retire matching unclaimed parked admissions; at most 832 per span. Live
+    // caches keep their reservations until a clean committed save or retirement.
+    void discard_unclaimed_water_columns(std::span<const std::shared_ptr<Chunk>> candidates,
+                                         std::span<const ChunkID> reservations = {});
     // Const work diagnostic: full terrain generations performed by column admission.
     std::uint64_t water_columns_generated() const {
         return m_water_columns_generated;
@@ -1139,12 +1171,7 @@ public:
 
     bool restore_authoritative_chunk(const IVec3& coords);
     void release_clean_parked_chunks();
-    void note_persistence_outcome(bool ok) {
-        if (m_evictions_suspended != !ok) {
-            m_evictions_suspended = !ok;
-            ++m_dirty_generation;
-        }
-    }
+    void note_persistence_outcome(bool ok);
 
 private:
     struct StreamingState {
@@ -1316,8 +1343,13 @@ private:
     bool m_evictions_suspended = false;
     std::shared_ptr<Chunk> read_committed_chunk(const IVec3& coords) const;
     void migrate_restored_water_column(const std::shared_ptr<Chunk>& chunk);
-    // Process-local admission, independent of simulation/save authority. At most
-    // 832 outstanding candidates; residency retirement and cleanup remove entries.
+    // Capacity is reserved before resolution, so reserved renderer caches are
+    // not necessarily admitted. Unsaved reservations survive admission cleanup
+    // until a clean committed save; at most 4096 fixed charges, also byte-limited.
+    static constexpr std::size_t kMaxWaterReservations = 4096;
+    std::set<ChunkID> m_water_column_reservations;
+    // Canonical handles after successful resolution; at most 832 candidates.
+    // Cleanup and residency retirement release these independently of saving.
     std::unordered_set<ChunkID> m_admitted_water_columns;
     std::uint64_t m_water_columns_generated = 0;
     std::size_t m_parked_bytes = 0;
@@ -1397,6 +1429,8 @@ private:
                                                        const std::array<float, 5>& heights) const;
     ColumnSurfaceSpan column_surface_span(int chunk_x, int chunk_z);
     void publish_generated_column_span(const ::Luminumbra::Chunk& chunk);
+    void propagate_column_water_mesh_invalidations();
+    WaterColumnMeshWork m_water_column_mesh_work;
     World::ActivationResidencyIndex m_activation_index;
     bool m_activation_plan_valid = false;
     int m_activation_plan_radius = -1;

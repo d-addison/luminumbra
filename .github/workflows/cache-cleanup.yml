@@ -51,7 +51,10 @@ jobs:
               'tidy-cache-', 'fast-deps-v1-',
           )
           BUDGET = 9_500_000_000
-          RECENCY_GRACE = timedelta(hours=6)
+          RECENCY_GRACE = timedelta(hours=1)
+          # Runs in these states (including reruns of older pushes) may still
+          # restore or save their SHA's caches.
+          ACTIVE_STATUSES = ('requested', 'pending', 'waiting', 'queued', 'in_progress')
 
           def warning(message):
               message = str(message).replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
@@ -61,16 +64,16 @@ jobs:
               sha = heads.get(cache['ref'])
               return bool(sha and cache['key'].endswith('-' + sha))
 
-          def is_protected(cache, heads, trigger_sha):
+          def is_protected(cache, heads, trigger_sha, active_shas=()):
               return is_current_head(cache, heads) or bool(
-                  trigger_sha and cache['key'].endswith('-' + trigger_sha))
+                  trigger_sha and cache['key'].endswith('-' + trigger_sha)) or any(
+                  cache['key'].endswith('-' + sha) for sha in active_shas if sha)
 
           def is_recent(cache, now):
-              timestamps = [cache['created_at']]
-              if cache.get('last_accessed_at'):
-                  timestamps.append(cache['last_accessed_at'])
-              latest = max(datetime.fromisoformat(t.replace('Z', '+00:00')) for t in timestamps)
-              return latest >= now - RECENCY_GRACE
+              # Creation time only: every pull-request restore refreshes access
+              # time through the lane prefix, which kept every generation recent.
+              created = datetime.fromisoformat(cache['created_at'].replace('Z', '+00:00'))
+              return created >= now - RECENCY_GRACE
 
           def retention_group(cache):
               prefix = next((p for p in PREFIXES if cache['key'].startswith(p)), None)
@@ -81,7 +84,7 @@ jobs:
                   prefix = shard[1] if shard else cache['key']
               return (cache['ref'], prefix) if prefix else None
 
-          def obsolete_caches(caches, heads=None, trigger_sha='', now=None):
+          def obsolete_caches(caches, heads=None, trigger_sha='', now=None, active_shas=()):
               heads = heads or {}
               now = now or datetime.now(timezone.utc)
               # Reserve each group's newest generation unconditionally, before
@@ -94,10 +97,11 @@ jobs:
                   if group is not None:
                       newest.setdefault(group, cache['id'])
               protected_ids = set(newest.values())
-              # Delayed cleanup must preserve its triggering SHA as well as live
-              # heads. Recent saves/accesses protect queued reruns and active runs.
+              # Delayed cleanup must preserve its triggering SHA, live heads and
+              # the SHAs of queued or running workflows (reruns included). Saves
+              # from the last hour protect runs that have just completed.
               protected_ids.update(c['id'] for c in caches
-                                   if is_protected(c, heads, trigger_sha) or is_recent(c, now))
+                                   if is_protected(c, heads, trigger_sha, active_shas) or is_recent(c, now))
               protected = [c for c in caches if c['id'] in protected_ids]
               used = sum(c['size_in_bytes'] for c in protected)
               if used > BUDGET:
@@ -128,6 +132,19 @@ jobs:
               return {ref['ref']: ref['object']['sha'] for ref in refs
                       if ref['ref'] in ('refs/heads/main', 'refs/heads/devel')}
 
+          def active_run_shas():
+              # One paginated query per active status collects every page, so a
+              # backlog beyond 100 runs keeps its caches. A listing failure on any
+              # page aborts cleanup before any deletion.
+              shas = set()
+              for status in ACTIVE_STATUSES:
+                  pages = json.loads(subprocess.check_output([
+                      'gh', 'api', '--paginate', '--slurp',
+                      f'repos/{repository}/actions/runs?status={status}&per_page=100',
+                  ], text=True))
+                  shas.update(run['head_sha'] for page in pages for run in page['workflow_runs'])
+              return shas
+
           def cleanup():
               trigger_sha = os.environ['TRIGGER_SHA']
               pages = json.loads(subprocess.check_output([
@@ -136,10 +153,11 @@ jobs:
               ], text=True))
               caches = [cache for page in pages for cache in page['actions_caches']]
               by_id = {cache['id']: cache for cache in caches}
-              for cache_id in obsolete_caches(caches, current_heads(), trigger_sha):
+              active = active_run_shas()
+              for cache_id in obsolete_caches(caches, current_heads(), trigger_sha, active_shas=active):
                   # A push may advance a branch during cleanup. Recheck before each
                   # deletion; deleting by ID cannot remove a concurrent replacement.
-                  if is_protected(by_id[cache_id], current_heads(), trigger_sha):
+                  if is_protected(by_id[cache_id], current_heads(), trigger_sha, active):
                       continue
                   try:
                       subprocess.run(['gh', 'cache', 'delete', str(cache_id), '--repo', repository], check=True)

@@ -17,6 +17,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "app/CaveFlourishes.h"
 #include "app/ClientAppContext.h"
 #include "app/CrashHandler.h"
+#include "app/CreatureBodyAttachment.h"
 #include "app/DebugOverlays.h"
 #include "app/FarmSpeciesCache.h"
 #include "app/FrameAttribution.h"
@@ -283,37 +284,11 @@ static void DrainWorldDressing(Luminumbra::JobSystem& jobs,
     worldDressing.reset();
 }
 
-//  give any creature that still lacks a Jolt body (e.g. an offspring just born in the
-// sim) a deterministic avatar character so the GameSession physics bridge drives it and it
-// COLLIDES with the terrain instead of walking through mountains. Amortized (a few per frame)
-// so a birth  spikes the frame. Render/demo-only.
-void AttachMissingCreatureBodies(Luminumbra::Systems::PhysicsSystem* phys,
-                                 entt::registry& reg,
-                                 int maxPerFrame = 4) {
-    if (!phys)
-        return;
-    int made = 0;
-    auto view = reg.view<const Luminumbra::Components::CreatureComponent,
-                         const Luminumbra::Components::TransformComponent>();
-    for (auto e : view) {
-        if (made >= maxPerFrame)
-            break;
-        if (reg.all_of<Luminumbra::Components::CreaturePhysicsComponent>(e))
-            continue;
-        const auto& tf = view.get<const Luminumbra::Components::TransformComponent>(e);
-        const std::size_t idx = phys->create_avatar_character(tf.position);
-        if (idx == Luminumbra::Systems::PhysicsSystem::kInvalidAvatar) {
-            break; // Leave it unattached for a later frame's deterministic retry.
-        }
-        reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
-        ++made;
-    }
-}
-
 struct ClientRuntimeState {
     std::unique_ptr<Luminumbra::Rendering::Camera> camera;
     std::unique_ptr<Luminumbra::Client::PlayerController> playerController;
     ClientAppContext app;
+    Luminumbra::Client::CreatureBodyAttachmentCursor creatureBodyAttachmentCursor;
     luminumbra::core::SystemConfig systemConfig;
     std::shared_ptr<WorldDressingPending> worldDressing;
     Luminumbra::JobHandle worldDressingHandle;
@@ -1227,10 +1202,11 @@ ObserveWorldPresentation(const Luminumbra::Systems::SHIELD_WorldSystem& world,
     const auto coverage = world.get_camera_local_coverage_stats(position, radius);
     const auto& streaming = world.get_streaming_telemetry_stats();
     const auto& uploads = pipeline.get_last_mesh_upload_stats();
-    const auto far = pipeline.far_world_reporting_state();
-    bool horizon = far.coverage_settled;
-    if (far.selection.effective == Luminumbra::Rendering::FarWorldMode::Legacy) {
-        if (!far.selection.advance) {
+    // Not `far`: <windows.h> defines `far` (and `near`) as empty macros.
+    const auto far_world = pipeline.far_world_reporting_state();
+    bool horizon = far_world.coverage_settled;
+    if (far_world.selection.effective == Luminumbra::Rendering::FarWorldMode::Legacy) {
+        if (!far_world.selection.advance) {
             horizon = true; // Explicitly disabled optional far terrain.
         } else if (const auto* legacy = pipeline.legacy_far_compatibility()) {
             const auto& diagnostic = legacy->coverage_diagnostics();
@@ -6197,8 +6173,10 @@ int main(int argc, char* argv[]) {
                         // Newborn offspring start bodyless; give them avatar bodies so they
                         // collide with the terrain (no more walking through mountains), then
                         // bake markers from the physics-resolved positions.
-                        AttachMissingCreatureBodies(gameSession->GetPhysicsSystem(),
-                                                    gameSession->GetRegistry());
+                        Luminumbra::Client::AttachMissingCreatureBodies(
+                            gameSession->GetPhysicsSystem(),
+                            gameSession->GetRegistry(),
+                            runtime.creatureBodyAttachmentCursor);
                         BakeCreatureMarkers(renderPipeline.plant_procgen(),
                                             gameSession->GetRegistry(),
                                             gameSession.get());
