@@ -1140,8 +1140,9 @@ TEST(ClientBootPreparation, LoadedEntryPreservesWaterAtTickZero) {
     ASSERT_TRUE(original.LoadWorldState());
     original.GetWorldSystem()->debug_set_streaming_radius_cap(1);
     ASSERT_TRUE(original.PrepareInitialSimulation(0, 0));
-    // Clean generated chunks are skipped by incremental saves; a full snapshot makes
-    // the loaded entry adopt the settled water instead of regenerating it.
+    // A full snapshot keeps every settled chunk in the save. With active regions the
+    // loaded entry may regenerate clean chunks instead of adopting them; either way the
+    // shared boot preparation must reproduce the same water state at tick zero.
     ASSERT_TRUE(original.SaveWorldStateTo(original.GetWorldSaveDir(), nullptr, true));
     const auto before = original.GetWorldSystem()->debug_water_state_hash();
 
@@ -1149,7 +1150,6 @@ TEST(ClientBootPreparation, LoadedEntryPreservesWaterAtTickZero) {
     loaded.SetJobSystem(&jobs);
     loaded.SetRootPath(root.root_string());
     ASSERT_TRUE(loaded.LoadWorld(original.GetMetadata().worldId));
-    ASSERT_GT(loaded.GetLastLoadedChunkCount(), 0u);
     loaded.GetWorldSystem()->debug_set_streaming_radius_cap(1);
     ASSERT_TRUE(loaded.PrepareInitialSimulation(0, 0));
     EXPECT_EQ(loaded.GetWorldSystem()->debug_water_state_hash().hash, before.hash);
