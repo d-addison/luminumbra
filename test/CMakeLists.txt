@@ -630,6 +630,7 @@ add_executable(render_smoke_test
     rendering/FarWorldLegacyIsolation_test.cpp
     rendering/FarWorldShadow_test.cpp
     rendering/FarWorldFogGl_test.cpp
+    rendering/TerrainCoverageCaptureGl_test.cpp
     rendering/FarWorldWaterGl_test.cpp
     rendering/SkyAtmosphereLutGl_test.cpp
     rendering/TerrainCullingTestPeer.h
