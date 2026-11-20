@@ -3535,9 +3535,9 @@ class DeferredRasterDiagnosticWiring(unittest.TestCase):
     def test_wireframe_depth_policy_and_full_restoration_are_wired(self):
         attach = block(self.debug, "void attach(")
         detach = block(self.debug, "void detach()")
-        self.assertIn("glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);", attach)
-        self.assertIn("glDepthFunc(GL_GEQUAL);", attach)
-        self.assertIn("glDepthMask(GL_FALSE);", attach)
+        self.assertIn("glPolygonMode(GL_FRONT_AND_BACK, view == Overdraw ? GL_FILL : GL_LINE);", attach)
+        self.assertIn("DebugViewPass::replay_depth_policy();", attach)
+        self.assertIn("glDepthMask(GL_FALSE);", block(self.debug, "void DebugViewPass::replay_depth_policy()"))
         self.assertLess(attach.index("std::make_unique<ReplayGlGuard>"),
                         attach.index("glPolygonMode("))
         self.assertIn('entry.shader->setInt("u_surfaceMode", view == Wireframe ? RawFinite : view);',
@@ -3568,6 +3568,69 @@ class DeferredRasterDiagnosticWiring(unittest.TestCase):
         mdi = block(pipeline, "void RenderPipeline::draw_chunks_mdi(")
         self.assertIn("ReplayRollback restore_cursor", mdi)
         self.assertIn("m_mdi_frame_cursor = saved_cursor;", block(mdi, "if (diagnostic_replay)"))
+
+    def test_overdraw_shader_pins_match_shipping_sources(self):
+        import hashlib
+
+        manifest = json.loads(read(ROOT / "test/rendering/shader_scenes/scenes.json"))
+        for name, inventory in (("g_buffer.frag", "inputs"),
+                                ("debug_view.frag", "diagnostic_shader_sha256")):
+            path = "res/shaders/" + name
+            payload = (ROOT / path).read_bytes().replace(b"\r\n", b"\n")
+            self.assertEqual(manifest[inventory][path], hashlib.sha256(payload).hexdigest())
+
+    def test_overdraw_adds_one_per_surviving_fragment_with_depth_off(self):
+        attach = block(self.debug, "void attach(")
+        additive = block(attach, "if (view == Overdraw)")
+        for statement in ("glEnablei(GL_BLEND, 6);",
+                          "glBlendFuncSeparatei(6, GL_ONE, GL_ONE, GL_ONE, GL_ONE);",
+                          "glBlendEquationSeparatei(6, GL_FUNC_ADD, GL_FUNC_ADD);"):
+            self.assertIn(statement, additive)
+        policy = block(self.debug, "void DebugViewPass::replay_depth_policy()")
+        self.assertIn("glDisable(GL_DEPTH_TEST);", block(policy,
+                      "if (controls().surface_owner->m_surface->view == Overdraw)"))
+        self.assertIn("glDepthMask(GL_FALSE);", policy)
+        self.assertIn("outputs.fill(GL_NONE)", attach)
+        self.assertIn("if (u_surfaceMode == 37) gDiagnosticSurface = vec4(1.0, 0.0, 0.0, 0.0);",
+                      self.fragment)
+        self.assertGreater(self.fragment.index("if (u_surfaceMode == 37)"),
+                           self.fragment.rindex("discard;"))
+        header = read(CLIENT / "rendering/passes/DebugViewPass.h")
+        self.assertIn("Overdraw = 37", header)
+        self.assertIn('"overdraw"', header)
+        self.assertIn("return view == Wireframe || view == Overdraw;", header)
+        self.assertIn("control.view == Overdraw ? None", header)
+
+    def test_overdraw_ramp_reserves_saturation_and_does_not_read_final_colour(self):
+        count = block(self.overlay, "if (u_mode == 37)")
+        self.assertIn("count >= 16.0 ? vec3(0.0, 1.0, 1.0)", count)
+        self.assertIn("count < 1.0 ? vec3(0.0)", count)
+        self.assertIn("(count - 1.0) / 14.0", count)
+        self.assertIn("(16.0 - count) / 15.0", count)
+        self.assertIn("texelFetch(gContribution, pixel, 0).r", count)
+        for source in ("gAlbedo", "gDepth", "gPosition", "gNormalMaterial"):
+            self.assertNotIn(source, count)
+        legend = block(self.debug, "std::string_view DebugViewPass::contribution_legend(")
+        for label in ("depth test OFF", ">=16=cyan saturation", "authored/impostor/forward/sky unavailable"):
+            self.assertIn(label, legend)
+
+    def test_overdraw_inspection_reads_one_live_top_left_pixel_and_refuses_stale_values(self):
+        count = block(self.overlay, "if (u_mode == 37)")
+        execute = block(self.debug, "void DebugViewPass::execute(")
+        self.assertIn("all(equal(ivec2(gl_FragCoord.xy), ivec2(0)))", count)
+        self.assertIn("texelFetch(gContribution, ivec2(u_pixelX, u_pixelY), 0).r", count)
+        self.assertIn("inspectorNormalDepth = vec4(selected, 0.0, 0.0, float(u_contributionReady));", count)
+        self.assertIn("static_cast<int>(ctx.internal_h()) - 1 - controls().y", execute)
+        self.assertIn("contribution_extent(ctx.internal_w(), ctx.internal_h())", execute)
+        self.assertIn("glNamedBufferSubData(m_snapshot->sample_buffer, 0, sizeof(empty), &empty);", execute)
+        self.assertIn("read_inspector_pixel(m_snapshot->sample_buffer, pixel);", execute)
+        self.assertIn("if (pixel.normal_depth[3] == 1.0f)", execute)
+        self.assertIn("Overdraw count >=16 (saturated); depth test OFF", execute)
+        self.assertIn("Overdraw count unavailable (producer, target or selected pixel)", execute)
+        self.assertIn('if (mode() != Overdraw || !controls().result.starts_with("Overdraw count "))', execute)
+        self.assertIn("controls().result.clear();", block(execute, "if (mode() != Overdraw"))
+        self.assertLess(execute.index("glNamedBufferSubData("), execute.index("AttributedGl::Submit("))
+        self.assertLess(execute.index("glMemoryBarrier("), execute.index("read_inspector_pixel("))
 
     def test_replay_refusal_matrix_precedes_every_allocation_and_gl_call(self):
         import itertools
@@ -3630,7 +3693,7 @@ class DeferredRasterDiagnosticWiring(unittest.TestCase):
         predicate = re.search(r"const bool identity_view =\s*(.*?);", execute, re.S).group(1)
         for enabled in (False, True):
             for wireframe in (False, True):
-                for mode in (0, 5, 6, 12, 30, 34, 36):
+                for mode in (0, 5, 6, 12, 30, 34, 36, 37):
                     for contribution in (False, True):
                         self.assertEqual(cpp_expression(predicate, **{
                             "controls().enabled": enabled, "controls().wireframe": wireframe,

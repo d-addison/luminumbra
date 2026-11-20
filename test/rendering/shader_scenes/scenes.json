@@ -134,9 +134,12 @@
       "reference": "references/post-edge.ppm"
     }
   ],
+  "diagnostic_shader_sha256": {
+    "res/shaders/debug_view.frag": "1cf6e11af393befe2df9fd2d74588616694b2782a826552025307668f100b75a"
+  },
   "inputs": {
     "res/shaders/enhanced_skybox.frag": "dcbd2b15fdca9acfb4b8d4fe01029f0e91727556bce842c9d058362f6c07ee27",
-    "res/shaders/g_buffer.frag": "38c27298d127b44f59b033446c8bbc8d23b4cc17d6b8d5b732909c029cc22e31",
+    "res/shaders/g_buffer.frag": "6e07692ad1d04e3fdaa79184c03d31d4d61965ea0e4c77e8de48fa98b57a227d",
     "res/shaders/g_buffer.vert": "209c1c0801801209e669e60dcadfa7085e8e44780f9e2c7599a7d48a5fe2abed",
     "res/shaders/grass_compact_prefix.comp": "43bcf2b6c883f958cab97d9b88c911701edd1ff1416e0290ef427228b406e677",
     "res/shaders/instanced_mesh.vert": "83198486e34bcb2d2ad4dcd5271efc9b4fd5deab5842768a8a85eac76d245d9c",
