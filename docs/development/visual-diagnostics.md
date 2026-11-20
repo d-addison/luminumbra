@@ -428,6 +428,13 @@ They do not populate the single-pixel inspector or capture bundles.
 | 27 | forward-plane | Unsupported: separate forward contributor plane |
 | 28 | sky-plane | Unsupported: separate sky contributor plane |
 | 29 | shadow-plane | Unsupported: separate shadow producer plane |
+| 30 | actual-mip | Maximum base filtered material LOD from actual sampler queries before discard/divergence, including anisotropy and bias; black=0, white=16 (saturated) |
+| 31 | texel-density | Maximum biased material footprint in texels/pixel; log2 display black=-8, grey=0 (one texel/pixel), white=8 |
+| 32 | triplanar-weights | Production normalized XYZ weights in RGB; yellow if any component is outside [0,1] or sum differs from one by more than 0.001 |
+| 33 | raw-finite | Black for finite raw material/G-buffer values; magenta for NaN/Inf before clamp or storage conversion |
+| 34 | shadow-cascade | Production cascade index and UV; white outside every cascade, orange outside the selected cascade |
+| 35 | shadow-footprint | Production shadow UV and log2 texel footprint, with the existing 5x5 PCF taps |
+| 36 | wireframe-shaded | Depth-tested opaque G-buffer wireframe mask over the shaded frame; no production colour or depth writes |
 
 RGB light terms use the display transfer `max(x,0)/(1+max(x,0))`; scalar material
 and visibility values display directly. Storage remains linear RGBA16F before
@@ -448,13 +455,40 @@ buffers, its colour mask and indexed blending, and detaches before later passes.
 Disabling diagnostics performs no contribution allocation or compilation; retained
 storage is released on resize, renderer teardown or shader reset. The default
 lighting source outside additive guards is byte-for-byte preserved; the G-buffer
-shader is unchanged because it already stores roughness, metallic and AO. Registered
+source outside additive surface guards is also byte-for-byte preserved. Registered
 source fingerprints enforce both contracts. Development prose, shaders and C++
 files remain outside the public asset inventory's classified roots; regeneration
 therefore leaves its classified contents unchanged.
 
-Shadow cascade footprint, sampled mip/texel density, triplanar weights, overdraw
-and a depth-tested wireframe overlay remain subsequent instrumentation work.
+Surface modes compile `LUMIN_DIAG_SURFACE` only for explicitly selected live views.
+Terrain, instanced-static and skinned programs each have legacy and ladder siblings,
+cached in six bounded slots. A frame scope adds one RGBA32F G-buffer output
+at location six; capability, collision or allocation refusal leaves it unavailable.
+Storage is capped at 16,777,216 pixels (256 MiB, transactional resize at most 512 MiB).
+The scope restores draw buffers, indexed blending and colour mask on every exit.
+Identity capture takes precedence and surface views refuse frozen replay. Unsupported
+authored or impostor draws invalidate the surface plane; depth equality additionally
+rejects later occlusion. Background, absent texture/weight inputs, stale modes and
+extent mismatch hatch magenta. Valid surface data cannot produce the magenta
+non-finite or yellow weight-violation sentinel colours. The raw checks include
+sampled material values before clamp and all shared fragment outputs before storage,
+plus raw stored G-buffer channels (including half-float overflow).
+Mip queries include sampler anisotropy and clamps and run before discard or lane
+divergence in the mip view, with at most 66 LOD queries and seven LUT fetches per fragment. Mip/density aggregate the maximum
+base filtered LOD/footprint across sampled lanes,
+projections and material arrays, including sand detail and slope rock substitution;
+the deliberate unsharp-mask blur is excluded from that scale. Weights show the last
+evaluated terrain lane (all lanes use the same geometric projection weights), while
+any evaluated lane's violation remains sticky. Registered GL-free source/catalogue
+and hidden-GL regressions cover these views; native execution remains pending.
+
+Cascade views observe the production deferred shadow selector and projection.
+The wireframe toggle and named view replay participating opaque deferred draws once,
+using reversed-Z GEQUAL with depth writes disabled. A replay guard restores raster,
+indexed blend, framebuffer and texture state on every exit. Authored and impostor
+producers remain unavailable; later opaque occlusion is rejected by the overlay.
+Live overlays retain the inspector's bounded storage binding even before an identity
+snapshot exists. Overdraw remains subsequent instrumentation work.
 No forward, atmosphere, sky or shadow producer coverage is inferred here.
 
 ## C: Linux shader lane
@@ -1145,7 +1179,7 @@ edits when parallel branches join. No new required CI checks are part of any row
 | A3: exact deferred attribution | `rendering/passes/GBufferPass.cpp`; `rendering/GBufferTargets.cpp`; `rendering/GBufferTargets.h`; `res/shaders/g_buffer.frag`; `res/shaders/foliage.frag`; `rendering/FarLodSystem.cpp`; `test/rendering/diagnostic_attribution_test.cpp`; `test/CMakeLists.txt`; `config/public-asset-inventory.json`; `docs/development/visual-diagnostics.md` (10) | After A2; coordinate owned files with minimal local hunks. Opt-in MRT shader variants mirror actual alpha/depth/LOD ownership; no approximate geometry replay. |
 | A4: scenario bundles and probes | `rendering/DiagnosticCapture.h`; `rendering/DiagnosticCapture.cpp`; `rendering/RenderPipeline.h`; `rendering/RenderPipeline.cpp`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `src/luminumbra_client/core/RuntimeScenarioConfig.cpp`; `test/rendering/diagnostic_bundle_test.cpp`; `test/CMakeLists.txt`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After A3. Shared readback/transaction adapter and once-only opt-in; coordinate owned scenario file. Extend capture_manifest_test for the GL-free adapter; use the client source manifest updated with the codecs in A2. |
 | B1: ID views and inspector | `rendering/passes/DebugViewPass.h`; `rendering/passes/DebugViewPass.cpp`; `res/shaders/debug_view.frag`; `src/luminumbra_client/debug/widgets/RenderControlWidgets.cpp`; `src/luminumbra_client/app/RegisterDeveloperWidgets.cpp`; `rendering/RenderPipeline.cpp`; `test/rendering/diagnostic_inspector_test.cpp`; `test/CMakeLists.txt`; `src/luminumbra_client/main_client.cpp`; `docs/development/visual-diagnostics.md` (10) | After A4. Named CLI/panel ID/LOD/chunk/ownership and mesh-path snapshots, single-pixel inspector; avoids listed owned files. |
-| B2: shader contribution views | `rendering/passes/DebugViewPass.h`; `rendering/passes/DebugViewPass.cpp`; `rendering/passes/LightingPass.h`; `rendering/passes/LightingPass.cpp`; `res/shaders/debug_view.frag`; `res/shaders/lighting_pass.frag`; `test/rendering/diagnostic_contributions_test.cpp`; `test/rendering/diagnostic_inspector_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md` (10) | Implemented after B1. Live deferred contribution and material views, opt-in variants and overlay state; existing G-buffer material channels reused unchanged. Fog and forward/sky/shadow planes remain separately labelled unsupported. Other catalogue instrumentation remains planned. |
+| B2: shader contribution views | `rendering/passes/DebugViewPass.h`; `rendering/passes/DebugViewPass.cpp`; `rendering/passes/LightingPass.h`; `rendering/passes/LightingPass.cpp`; `res/shaders/debug_view.frag`; `res/shaders/lighting_pass.frag`; `test/rendering/diagnostic_contributions_test.cpp`; `test/rendering/diagnostic_inspector_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md` (10) | Implemented after B1. Live deferred contribution and material views, opt-in variants and overlay state; existing G-buffer material channels reused unchanged. Fog and forward/sky/shadow planes remain separately labelled unsupported. Surface mip/density, normalized triplanar weights and raw finite sentinels use opt-in G-buffer variants; other catalogue instrumentation remains planned. |
 | C1: every-PR shader compile and link completion | `tools/ci/compile_shaders.py`; `tools/ci/test_compile_shaders.py`; `test/rendering/render_smoke_test.cpp`; `docs/development/visual-diagnostics.md` (4) | Implemented in the existing unconditional fast-job step. Compile every stage permutation, then link the native program registry and compute inventory using the same prepared sources. Refuse missing pass-layout pairs or unlinked stage/define permutations; registered interface-mismatch, matching-pair and missing-program regressions cover linking. |
 | C2: llvmpipe scenes | `tools/gates/shader-scenes.py`; `tools/gates/test_shader_scenes.py`; `test/rendering/shader_scenes/scenes.json`; `test/rendering/shader_scenes/references/`; `test/rendering/shader_scene_render_test.cpp`; `test/CMakeLists.txt`; `tools/ci/validate_assets.py`; `config/public-asset-inventory.json`; `docs/development/visual-diagnostics.md` | Implemented on the existing reference/metric/regeneration path and path gate: seven references include normal decode, both depth conventions and post edge, plus integer-exact production compute SSBO readback. Post clamp and compute binding source mutations failed surfaceless llvmpipe checks and were restored byte-exactly. Native scene execution remains pending; dusk is diagnostic only. The post/compute extension changes seven files including one reference and its asset inventory; no workflow or required-check changes. |
 | D1: bundle/ID/AOV validity checks | `tools/gates/check-diagnostic-capture.py`; `tools/gates/test_diagnostic_capture.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `tools/gates/diff-render-health.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (8) | After A4; parallel with B/C. Registered Python reader tests cover little endian, dimensions, partial payloads, unknown versions and nonfinite values. Avoids owned files. |
