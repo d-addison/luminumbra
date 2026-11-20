@@ -179,7 +179,7 @@ public:
     class Frame;
     // Null when disabled, replaying, idle, or another capture owns the producer scope.
     std::shared_ptr<Frame> begin_frame(const RenderContext& ctx);
-    // Finalize deferred coverage with current attachments before later G-buffer writers.
+    // Finalize with current attachments after plants/decals and before lighting/post.
     static void end_frame(std::shared_ptr<Frame>& frame, const RenderContext& ctx);
 
     DebugViewPass();

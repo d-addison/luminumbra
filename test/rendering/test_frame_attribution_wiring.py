@@ -4003,5 +4003,39 @@ class DiagnosticContributorWiring(unittest.TestCase):
             self.assertLess(submit.index(check), submit.index("mesh_ids_.emplace("))
 
 
+class DiagnosticSnapshotStageWiring(unittest.TestCase):
+    def test_snapshot_finishes_after_decal_submission_before_lighting_and_post(self):
+        source = read(CLIENT / "rendering/RenderPipeline.cpp")
+        dispatch = block(source, "void RenderPipeline::dispatch_stages(")
+        finish = block(dispatch, 'if (diagnostic_frame && node == "ground_decals")')
+        self.assertIn("DebugViewPass::end_frame(diagnostic_frame, make_debug_view_context(camera));",
+                      finish)
+        self.assertLess(dispatch.index("(this->*fn)(camera);"), dispatch.index(finish))
+        stages = block(source, "RenderPipeline::stage_executor_table() {")
+        names = re.findall(r'\{"([a-z_]+)", &RenderPipeline::execute_stage_', stages)
+        self.assertEqual(names[:7], ["shadow", "gbuffer", "plant_procgen", "ground_decals",
+                                     "ssao", "ssao_blur", "lighting"])
+        self.assertEqual(dispatch.count("DebugViewPass::end_frame("), 1)
+        self.assertIn("DebugViewPass::controls().enabled && DebugViewPass::controls().refresh",
+                      dispatch)
+
+    def test_snapshot_owns_distinct_lazy_contributor_storage_and_resets_both_planes(self):
+        source = read(CLIENT / "rendering/passes/DebugViewPass.cpp")
+        snapshot = block(source, "struct DebugViewPass::Snapshot")
+        self.assertIn("DiagnosticTargets targets;", snapshot)
+        self.assertIn("DiagnosticTargets contributors;", snapshot)
+        frame = compact(block(source, "class DebugViewPass::Frame"))
+        self.assertRegex(frame, r"std::make_unique<GBufferDiagnosticCapture>\(\s*"
+                         r"pass\.m_snapshot->targets, pass\.m_snapshot->draws, "
+                         r"&pass\.m_snapshot->contributors\)")
+        begin = block(source, "DebugViewPass::begin_frame(")
+        reset = "if (!m_snapshot->targets.reset() || !m_snapshot->contributors.reset())"
+        self.assertIn('control.status = control.result = "Identity attachment still leased";',
+                      block(begin, reset))
+        self.assertLess(begin.index(reset), begin.index("m_snapshot->draws.clear();"))
+        self.assertLess(begin.index("if (!control.enabled || !control.refresh || ctx.frozen_replay)"),
+                        begin.index("std::make_unique<Snapshot>()"))
+
+
 if __name__ == "__main__":
     unittest.main()

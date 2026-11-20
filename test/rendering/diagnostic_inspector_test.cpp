@@ -1,9 +1,12 @@
+#include "rendering/Camera.h"
 #include "rendering/DiagnosticDrawTable.h"
 #include "rendering/DiagnosticTargets.h"
 #include "rendering/GBufferTargets.h"
 #include "rendering/RenderContext.h"
 #include "rendering/Shader.h"
 #include "rendering/passes/DebugViewPass.h"
+#include "rendering/passes/GroundDecalPass.h"
+#include "rendering/passes/PlantProcgenPass.h"
 #include <glad/glad.h>
 
 #define GLFW_INCLUDE_NONE
@@ -138,6 +141,7 @@ protected:
                                               GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,
                                               &identity_texture);
         ASSERT_NE(identity_texture, 0);
+        surface_identity_ = static_cast<GLuint>(identity_texture);
         const DiagnosticId id{1, 1, 3, 257};
         glClearTexImage(
             static_cast<GLuint>(identity_texture), 0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, id.data());
@@ -166,15 +170,157 @@ protected:
     Pass pass_;
     RenderContext ctx_;
     std::shared_ptr<Pass::Frame> frame_;
+    GBuffer gbuffer_;
+    GLuint surface_identity_ = 0; // Borrowed from the active snapshot, including after detachment.
 
 private:
     bool graphics_ready_ = false;
     RenderResourceRegistry registry_;
-    GBuffer gbuffer_;
     std::unique_ptr<Shader> base_;
     GLuint variant_program_ = 0;
 };
+
+class DiagnosticInspectorContributorsGl : public DiagnosticInspectorFrameGl {
+protected:
+    void SetUp() override {
+        ASSERT_NO_FATAL_FAILURE(DiagnosticInspectorFrameGl::SetUp());
+        producers_ready_ = true;
+        ctx_.camera = &camera_;
+        ctx_.screen_width = 2;
+        ctx_.screen_height = 2;
+        plants_.init_shader(LUMINUMBRA_SOURCE_ROOT);
+        plants_.init_buffers();
+        plants_.set_enabled(true);
+        // One rigid quad covers the left half of the bounded 2x2 fixture.
+        plants_.set_plants({{{-4, -4, -1}, {0, 0, 1}, {0, 0}, {0.2f, 0.3f, 0.1f}},
+                            {{0, -4, -1}, {0, 0, 1}, {0, 0}, {0.2f, 0.3f, 0.1f}},
+                            {{0, 4, -1}, {0, 0, 1}, {0, 0}, {0.2f, 0.3f, 0.1f}},
+                            {{-4, 4, -1}, {0, 0, 1}, {0, 0}, {0.2f, 0.3f, 0.1f}}},
+                           {0, 1, 2, 0, 2, 3},
+                           42);
+        decals_.init_shader(LUMINUMBRA_SOURCE_ROOT);
+        decals_.init_buffers();
+        SetScent(true);
+    }
+    void TearDown() override {
+        if (producers_ready_) {
+            frame_.reset();
+            glUseProgram(0);
+            plants_.destroy_buffers();
+            plants_.reset_shader();
+            decals_.destroy_buffers();
+            decals_.reset_shader();
+        }
+        DiagnosticInspectorFrameGl::TearDown();
+    }
+    void SetScent(bool enabled) {
+        decals_.update_scent({.cells = 1,
+                              .cell_size = 8,
+                              .origin_x = -4,
+                              .origin_z = -4,
+                              .valid = true,
+                              .any_scent = enabled,
+                              .rg = {1, 0}});
+    }
+    void DrawLaterStages() {
+        glBindFramebuffer(GL_FRAMEBUFFER, gbuffer_.fbo_id);
+        glViewport(0, 0, 2, 2);
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_BLEND);
+        const std::array<float, 3> position{0, 0, -1};
+        glClearTexImage(gbuffer_.position_texture, 0, GL_RGB, GL_FLOAT, position.data());
+        const std::array<GLenum, 4> surface_buffers{
+            GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3};
+        glDrawBuffers(static_cast<GLsizei>(surface_buffers.size()), surface_buffers.data());
+        plants_.execute(ctx_, camera_);
+        const GLenum albedo_buffer = GL_COLOR_ATTACHMENT2;
+        glDrawBuffers(1, &albedo_buffer);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+        decals_.execute(ctx_);
+        glDisable(GL_BLEND);
+        glDrawBuffers(static_cast<GLsizei>(surface_buffers.size()), surface_buffers.data());
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
+    void ReadIdentities(bool forward, std::array<DiagnosticId, 4>& pixels) {
+        auto* capture = GBufferDiagnosticCapture::Current();
+        ASSERT_NE(capture, nullptr);
+        GLuint texture = surface_identity_;
+        if (forward) {
+            ASSERT_TRUE(
+                capture->attach_forward(gbuffer_.fbo_id, gbuffer_.position_texture, {2, 2}));
+            GLint contributor_texture = 0;
+            glGetNamedFramebufferAttachmentParameteriv(gbuffer_.fbo_id,
+                                                       GL_COLOR_ATTACHMENT6,
+                                                       GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,
+                                                       &contributor_texture);
+            texture = static_cast<GLuint>(contributor_texture);
+            capture->detach();
+        }
+        ASSERT_NE(texture, 0U);
+        glGetTextureImage(texture,
+                          0,
+                          GL_RGBA_INTEGER,
+                          GL_UNSIGNED_INT,
+                          static_cast<GLsizei>(sizeof(pixels)),
+                          pixels.data());
+    }
+    PlantProcgenPass plants_;
+    GroundDecalPass decals_;
+
+private:
+    Camera camera_;
+    bool producers_ready_ = false;
+};
 } // namespace
+
+TEST_F(DiagnosticInspectorContributorsGl, SnapshotRecordsPlantsAndDecalsOnSeparatePlanes) {
+    ASSERT_NO_FATAL_FAILURE(BeginCapture());
+    DrawLaterStages();
+    std::array<DiagnosticId, 4> surfaces{}, contributors{};
+    ASSERT_NO_FATAL_FAILURE(ReadIdentities(false, surfaces));
+    ASSERT_NO_FATAL_FAILURE(ReadIdentities(true, contributors));
+    const DiagnosticId plant{2, 2, 0, 257};
+    const DiagnosticId base{1, 1, 3, 257};
+    const DiagnosticId decal{3, 3, 0, 513};
+    EXPECT_EQ(surfaces, (std::array<DiagnosticId, 4>{plant, base, plant, base}));
+    for (const auto& contributor : contributors) {
+        EXPECT_EQ(contributor, decal);
+    }
+    ASSERT_TRUE(GBufferDiagnosticCapture::Current()->complete());
+    Pass::end_frame(frame_, ctx_);
+    ExpectReleasedProgram();
+    const auto record = nlohmann::json::parse(Pass::controls().result).at("record");
+    EXPECT_EQ(record.at("draw").at("shader_variant"), "plant_procgen");
+    EXPECT_EQ(record.at("mesh").at("generated"), "plants/batch/42/indices/6");
+}
+
+TEST_F(DiagnosticInspectorContributorsGl, RefreshWithInactiveProducersRetainsOnlyNewSurfaceIds) {
+    ASSERT_NO_FATAL_FAILURE(BeginCapture());
+    DrawLaterStages();
+    Pass::end_frame(frame_, ctx_);
+    ExpectReleasedProgram();
+    plants_.set_enabled(false);
+    SetScent(false);
+    Pass::controls().refresh = true;
+    ASSERT_NO_FATAL_FAILURE(BeginCapture());
+    DrawLaterStages();
+    std::array<DiagnosticId, 4> surfaces{}, contributors{};
+    ASSERT_NO_FATAL_FAILURE(ReadIdentities(false, surfaces));
+    ASSERT_NO_FATAL_FAILURE(ReadIdentities(true, contributors));
+    const DiagnosticId base{1, 1, 3, 257};
+    for (const auto& surface : surfaces) {
+        EXPECT_EQ(surface, base);
+    }
+    for (const auto& contributor : contributors) {
+        EXPECT_EQ(contributor, DiagnosticId{});
+    }
+    Pass::end_frame(frame_, ctx_);
+    ExpectReleasedProgram();
+    const auto record = nlohmann::json::parse(Pass::controls().result).at("record");
+    EXPECT_EQ(record.at("draw").at("shader_variant"), "instanced_static_mesh");
+}
 
 TEST_F(DiagnosticInspectorFrameGl, CaptureTeardownGatherRestoreAndLaterDisplayKeepValidPrograms) {
     ASSERT_NO_FATAL_FAILURE(BeginCapture());
@@ -413,7 +559,7 @@ TEST(DiagnosticInspector, InspectorStorageRefusesMissingPartialAndOversizedStore
     EXPECT_LT(begin.find("if (sample_bytes != sizeof(InspectorPixel))"),
               begin.find("return std::make_shared<Frame>"));
     EXPECT_LT(begin.find("m_snapshot->ready = false;"), begin.find("glGenBuffers("));
-    EXPECT_LT(begin.find("if (!m_snapshot->targets.reset())"),
+    EXPECT_LT(begin.find("if (!m_snapshot->targets.reset() || !m_snapshot->contributors.reset())"),
               begin.find("m_snapshot->draws.clear();"));
     EXPECT_NE(begin.find("Identity attachment still leased"), std::string::npos);
     EXPECT_EQ(begin.find("inspector_open"), std::string::npos);
@@ -441,17 +587,20 @@ TEST(DiagnosticInspector, IncompleteAndUnsupportedCapturesRefusePublication) {
         std::string::npos);
 }
 
-TEST(DiagnosticInspector, DeferredSnapshotFinishesBeforeUninstrumentedWriters) {
+TEST(DiagnosticInspector, DeferredSnapshotIncludesPlantsAndDecalsBeforeUninstrumentedWriters) {
     const auto dispatch = SourceSection("src/luminumbra_client/rendering/RenderPipeline.cpp",
                                         "void RenderPipeline::dispatch_stages(",
                                         "RenderPipeline::stage_executor_table()");
-    EXPECT_NE(dispatch.find("if (diagnostic_frame && node == \"gbuffer\")"), std::string::npos);
+    EXPECT_NE(dispatch.find("if (diagnostic_frame && node == \"ground_decals\")"),
+              std::string::npos);
     EXPECT_LT(dispatch.find("(this->*fn)(camera);"), dispatch.find("DebugViewPass::end_frame("));
     const auto stages = SourceSection("src/luminumbra_client/rendering/RenderPipeline.cpp",
                                       "RenderPipeline::stage_executor_table()",
                                       "void RenderPipeline::execute_stage_shadow(");
     EXPECT_LT(stages.find("{\"gbuffer\","), stages.find("{\"plant_procgen\","));
-    EXPECT_LT(stages.find("{\"gbuffer\","), stages.find("{\"ground_decals\","));
+    EXPECT_LT(stages.find("{\"plant_procgen\","), stages.find("{\"ground_decals\","));
+    EXPECT_LT(stages.find("{\"ground_decals\","), stages.find("{\"ssao\","));
+    EXPECT_LT(stages.find("{\"ground_decals\","), stages.find("{\"lighting\","));
     const auto frame = SourceSection(
         "src/luminumbra_client/rendering/passes/DebugViewPass.cpp", "~Frame()", "void finish(");
     EXPECT_EQ(frame.find("finish_frame("), std::string::npos);
