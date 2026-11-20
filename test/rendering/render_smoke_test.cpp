@@ -2998,7 +2998,7 @@ TEST(RenderSmokeTest, CanopyEmptyRecoveryRetainsCoarseHitAcrossForegroundThenSky
             const auto result = probe.draw()[16];
             EXPECT_GE((1 - result.r) / 0.94f, baseOcclusion - 0.000001f);
             EXPECT_NEAR(result.r, 1 - 0.94f * baseOcclusion, 0.000001f);
-            EXPECT_FLOAT_EQ(result.g, openPrevious ? 5 : 11)
+            EXPECT_FLOAT_EQ(result.g, openPrevious ? 5.0f : 11.0f)
                 << "three coarse reads plus two ordinary or eight empty-recovery reads";
             EXPECT_LE(result.g, 40);
             if (ladder != 0) {

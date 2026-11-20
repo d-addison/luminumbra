@@ -1239,9 +1239,23 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
 
     def test_fast_lane_explicit_route_dual_configure_glad_and_bounded_execution(self):
         fast = jobs(self.workflows["ci.yml"])["fast-compile"]
-        route = steps(fast)[1]
+        named = {value(step, "- name", 6): step for step in steps(fast)}
+        # Pull-request diffs use the merge commit's first parent: GitHub can merge a
+        # newer base than the payload records, which would select base-only changes.
+        compare = steps(fast)[1]
+        self.assertEqual(value(compare, "- name", 6), "Resolve the merged comparison base")
+        self.assertIn("CI_PAYLOAD_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}", compare)
+        self.assertIn("CI_PR_HEAD: ${{ github.event.pull_request.head.sha }}", compare)
+        self.assertIn("""if [ "$(git rev-parse -q --verify 'HEAD^2' || true)" = "$CI_PR_HEAD" ]; then""", compare)
+        self.assertIn('base="$(git rev-parse \'HEAD^1\')"', compare)
+        self.assertIn('echo "sha=$base" >> "$GITHUB_OUTPUT"', compare)
+        route = steps(fast)[2]
         self.assertIn("changed_tus.py route", route)
-        self.assertIn("github.event.pull_request.base.sha || github.event.before", route)
+        for name in ("Route explicit non-native paths or conservative validation",
+                     "Classify software shader scenes",
+                     "Replay selected compiles and both tidy configurations"):
+            self.assertIn("CI_BASE_SHA: ${{ steps.compare-base.outputs.sha }}", named[name])
+        self.assertNotIn("CI_BASE_SHA: ${{ github.event.pull_request.base.sha", fast)
         self.assertIn('--output "$GITHUB_OUTPUT" --summary-file "$GITHUB_STEP_SUMMARY"', route)
         self.assertIn("CI_FULL_SELECTION: ${{ steps.route.outputs.full }}", fast)
         self.assertIn('if [ "$CI_FULL_SELECTION" != false ]', fast)
@@ -1302,7 +1316,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
             if path.is_file() and any(word in path.name for word in ("ruleset", "required")):
                 self.assertNotIn("Fast compile / GCC + clang-tidy", path.read_text())
         inventory = blocks["public-tree"]
-        contracts = steps(fast)[2]
+        contracts = steps(fast)[3]
         self.assertIn("python3 -I -B tools/ci/test_changed_tus.py", contracts)
         self.assertIsNone(value(contracts, "if", 8))
         for suite in ("test_tidy_shard.py", "test_workflow_policy.py"):
