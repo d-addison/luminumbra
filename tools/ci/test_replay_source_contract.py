@@ -88,7 +88,9 @@ class ReplaySourceContract(unittest.TestCase):
         runner = read_source("src/luminumbra_server/ServerWorldRunner.cpp")
         capture = runner.split("ServerWorldRunner::CaptureReplayHeader() const", 1)[1].split(
             "ServerWorldRunner::ServerWorldRunner(", 1)[0]
-        self.assertIn("return Replay::CaptureReplayHeader(*m_session,", capture)
+        self.assertIn("auto header = Replay::CaptureReplayHeader(*m_session,", capture)
+        # Server headers keep the requested seed text; empty means a random boot.
+        self.assertIn("header.seed_string = m_config.seed;", capture)
         self.assertNotIn("header.authority_boot =", capture)
 
     def test_client_capture_contract_detects_isolated_regressions(self):
