@@ -3047,6 +3047,10 @@ TEST(WaterSeedInputs, CanonicalColumnsIgnoreRendererWaterLodAndLoadingStorage) {
             renderer->is_water_sleeping.store(true);
         }
         ASSERT_TRUE(cached.world.adopt_streamed_chunk(renderer));
+        // Funding precedes resolution. A reserved renderer handle has not yet
+        // been admitted and must still pass the normal loading/cache checks.
+        const std::array reserved{renderer->get_id()};
+        ASSERT_TRUE(cached.world.reserve_water_columns(reserved));
         if (cache_kind == 0) {
             renderer->set_state(ChunkState::Loading);
             auto unpublished = std::make_shared<HighWaterSeedInputs>();
@@ -3370,6 +3374,37 @@ TEST(WaterSeedInputs, CleanupPreservesInitializedAdmissionUntilAuthorityIsPublis
     }
 }
 
+TEST(WaterSeedInputs, CommittedSaveReleasesCapacityWithoutRetiringAdmittedHandles) {
+    for (const bool live : {false, true}) {
+        SCOPED_TRACE(live);
+        ColumnFixture fixture;
+        fixture.world.set_parked_bytes_limit(SHIELD_WorldSystem::kWaterColumnReservationBytes);
+        const auto owner = fixture.world.resolve_water_column({0, 0, 0});
+        ASSERT_NE(owner, nullptr);
+        if (live) {
+            ASSERT_TRUE(fixture.world.unpark_chunk(owner->get_id()));
+        }
+        int reads = 0;
+        fixture.world.set_durable_chunk_loader(
+            [&](const IVec3&) {
+                ++reads;
+                return fixture.saved_column();
+            },
+            {});
+        fixture.world.remember_durable_chunks({IVec3(0)});
+        owner->clear_voxel_data_dirty();
+        owner->clear_water_state_dirty();
+        fixture.world.note_persistence_outcome(true);
+        const std::array next{Chunk::calculate_id({1, 0, 0})};
+        ASSERT_TRUE(fixture.world.reserve_water_columns(next));
+        EXPECT_EQ(fixture.world.inspect_water_column({0, 0, 0}), owner);
+        fixture.world.discard_unclaimed_water_columns({}, next);
+        EXPECT_EQ(fixture.world.resolve_water_column({0, 0, 0}), owner);
+        EXPECT_EQ(reads, 0);
+        EXPECT_EQ(fixture.world.water_columns_generated(), 1u);
+    }
+}
+
 TEST(WaterSeedInputs, LoadingAdmittedAndPublishedHandlesRefuseWithoutReadingStorage) {
     for (const bool published : {false, true}) {
         for (const bool live : {false, true}) {
@@ -3435,6 +3470,13 @@ TEST(WaterSeedInputs, AdmissionCapRefusesBeforeGenerationAndCleanupReleasesParke
     const std::array stale{std::make_shared<Chunk>(IVec3(0)), std::shared_ptr<Chunk>{}};
     fixture.world.discard_unclaimed_water_columns(stale);
     EXPECT_THROW(fixture.world.resolve_water_column({832, 0, 0}), std::invalid_argument);
+    // The admission-cap exception must roll back only its own reservation.
+    fixture.world.set_parked_bytes_limit(833 * SHIELD_WorldSystem::kWaterColumnReservationBytes);
+    const std::array last_slot{Chunk::calculate_id({833, 0, 0})};
+    ASSERT_TRUE(fixture.world.reserve_water_columns(last_slot));
+    // Funding generates nothing: only the earlier parked admission was generated.
+    EXPECT_EQ(fixture.world.water_columns_generated(), 1u);
+    fixture.world.discard_unclaimed_water_columns({}, last_slot);
     fixture.world.discard_unclaimed_water_columns(candidates);
     // Only the parked candidate is released; live admissions keep their handles.
     EXPECT_EQ(fixture.world.parking_status().parked_count, 0u);
