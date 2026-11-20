@@ -113,6 +113,7 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
     // never writes world_hash.
     if (scenario_config.world_visual_sweep() && scenario_ready && !world_visual_sweep_done &&
         gameSession->GetWorldSystem() && g_camera) {
+        Luminumbra::Rendering::RenderPipeline::CaptureCleanup diagnostic_cleanup(renderPipeline);
         int sweep_fb_w = 0, sweep_fb_h = 0;
         glfwGetFramebufferSize(window, &sweep_fb_w, &sweep_fb_h);
         Luminumbra::Client::ScenarioHarness::WorldVisualSweepDeps deps;
@@ -139,6 +140,7 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
                                    int& h,
                                    bool stream_world,
                                    const std::filesystem::path& attribution_dir) -> bool {
+            Luminumbra::Rendering::RenderPipeline::CaptureCleanup frame_cleanup(renderPipeline);
             LUMIN_PROFILE_FRAME_N("Client capture");
             LUMIN_PROFILE_ZONE_N("Client capture frame");
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -168,12 +170,15 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
                             0.0f,
                             g_app.overlay.wireframe_mode,
                             Luminumbra::Rendering::UploadPresentation::Settled);
-                    }))
+                    })) {
+                renderPipeline.end_diagnostic_capture();
                 return false;
+            }
             glfwGetFramebufferSize(window, &w, &h);
             if (w <= 0 || h <= 0 ||
                 static_cast<std::size_t>(w) >
                     out_pixels.max_size() / static_cast<std::size_t>(h) / 3u) {
+                renderPipeline.end_diagnostic_capture();
                 return false;
             }
             out_pixels.assign(static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 3u, 0u);
@@ -188,6 +193,7 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
             }
             LUMIN_PROFILE_WAIT("Client present wait", glfwSwapBuffers(window));
             glfwPollEvents();
+            frame_cleanup.retain();
             return true;
         };
         const bool sweep_passed = Luminumbra::Client::ScenarioHarness::RunWorldVisualSweep(deps);
