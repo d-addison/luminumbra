@@ -7,6 +7,8 @@ top-level screenshot path) and one commands.txt listing two command blocks per
 entry: the benchmark form plus its validator line, and the plain screenshot form.
 Nothing is launched and no capture is run; the commands are NEEDS-NATIVE-RUN.
 
+recipes.json binds each config to its scene, variant, world and complete render
+identity, and records ordered camera/LOD/weather transition endpoints.
 Scenes whose pose is recorded-evidence (pos null) are unresolved. The generator
 exits 2 and lists them unless --allow-unresolved is given. There is no
 --world-seed flag: the client implies seed 424242, which is recorded in the matrix
@@ -45,7 +47,7 @@ IMPLIED_SEED = 424242
 CLIENT_BINARY = "luminumbra_client_app" + (".exe" if os.name == "nt" else "")
 VALIDATOR = "tools/perf/validate_render_capture.py"
 NAME_RE = re.compile(r"^[a-z0-9_-]+$")
-EXIT_INVALID = 1
+EXIT_INVALID = 2
 EXIT_UNRESOLVED = 2
 
 
@@ -81,11 +83,11 @@ def _layers(value, label):
 
 
 def _weather(value, label):
-    if not isinstance(value, dict) or set(value) - {"type", "intensity"}:
+    if not isinstance(value, dict) or set(value) != {"type", "intensity"}:
         raise MatrixError(f"{label}: weather takes only type and intensity")
     if value.get("type") not in WEATHER_TYPES:
         raise MatrixError(f"{label}: weather.type must be one of {WEATHER_TYPES}")
-    _number(value.get("intensity", 0.0), f"{label}.intensity", 0.0, 1.0)
+    _number(value["intensity"], f"{label}.intensity", 0.0, 1.0)
 
 
 def _validate_scene(scene):
@@ -116,8 +118,8 @@ def _validate_scene(scene):
     else:
         if camera.get("pos") is not None or camera.get("yaw") is not None or camera.get("pitch") is not None:
             raise MatrixError(f"{label}: recorded-evidence pose must be null")
-    if "weather" in body:
-        _weather(body["weather"], f"{label}.weather")
+    if source == "explicit" or "weather" in body:
+        _weather(body.get("weather"), f"{label}.weather")
     if "moon" in body:
         _number(body["moon"], f"{label}.moon")
     if "clouds" in body:
@@ -170,7 +172,33 @@ def validate_matrix(data):
     ids = [_validate_scene(scene) for scene in scenes]
     if len(set(ids)) != len(ids):
         raise MatrixError("scene ids must be unique")
+    _validate_transitions(data)
     return data
+
+
+def _validate_transitions(data):
+    transitions = data.get("transitions", [])
+    if not isinstance(transitions, list):
+        raise MatrixError("transitions must be a list")
+    names = {scene["id"] for scene in data["scenes"]}
+    names.update(f"{scene['id']}.{variant['id']}"
+                 for scene in data["scenes"] for variant in scene["variants"])
+    seen = set()
+    for transition in transitions:
+        if not isinstance(transition, dict) or set(transition) != {"id", "kind", "endpoints"}:
+            raise MatrixError("transition takes id, kind and endpoints")
+        tid = _name(transition["id"], "transition.id")
+        if tid in seen:
+            raise MatrixError(f"transition {tid}: duplicate id")
+        seen.add(tid)
+        if transition["kind"] not in ("camera", "lod", "weather"):
+            raise MatrixError(f"transition {tid}: unknown kind")
+        endpoints = transition["endpoints"]
+        if not isinstance(endpoints, list) or len(endpoints) < 2:
+            raise MatrixError(f"transition {tid}: needs at least two endpoints")
+        for name in endpoints:
+            if not isinstance(name, str) or name not in names:
+                raise MatrixError(f"transition {tid}: unknown endpoint {name!r}")
 
 
 def _is_resolved(scene):
@@ -197,7 +225,8 @@ def plan_entries(data):
         base_weather = body.get("weather")
         base_layers = scene.get("base_layers")
         entries.append(
-            {"name": scene["id"], "scene": scene, "weather": base_weather, "layers": base_layers}
+            {"name": scene["id"], "scene": scene, "variant": "base",
+             "weather": base_weather, "layers": base_layers}
         )
         for variant in scene.get("variants", []):
             weather = variant.get("weather", base_weather)
@@ -206,6 +235,7 @@ def plan_entries(data):
                 {
                     "name": f"{scene['id']}.{variant['id']}",
                     "scene": scene,
+                    "variant": variant["id"],
                     "weather": weather,
                     "layers": layers,
                 }
@@ -310,16 +340,35 @@ def emit(data, out_dir, build_dir, allow_unresolved):
     out.mkdir(parents=True, exist_ok=True)
     preset = data["world"]["preset"]
     lines = []
+    recipes = []
     for entry in entries:
         name = entry["name"]
         scene_path = out / f"{name}.scene.json"
         screenshot = out / f"{name}.ppm"
         config = scene_config(entry, str(screenshot))
+        recipes.append({
+            "name": name,
+            "scene": entry["scene"]["id"],
+            "variant": entry["variant"],
+            "preset": preset,
+            "seed": data["world"]["world_seed_implied"],
+            "camera": config["camera"],
+            "time_of_day": config["time_of_day"],
+            "weather": config["weather"],
+            "layers": entry["layers"],
+            "scene_config": scene_path.as_posix(),
+        })
         scene_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
         bench_path = out / f"{name}.render_benchmark.json"
         lines.extend(command_blocks(entry, preset, scene_path.as_posix(), bench_path.as_posix(), build_dir))
         lines.append("")
     (out / "commands.txt").write_text("\n".join(lines), encoding="utf-8")
+    names = {entry["name"] for entry in entries}
+    transitions = [transition for transition in data.get("transitions", [])
+                   if all(name in names for name in transition["endpoints"])]
+    manifest = {"schema": "luminumbra.scene_recipes.v1", "recipes": recipes,
+                "transitions": transitions}
+    (out / "recipes.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(f"wrote {len(entries)} scene configs and commands.txt to {out}")
     return 0
 

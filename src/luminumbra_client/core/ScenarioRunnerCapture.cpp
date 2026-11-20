@@ -194,8 +194,11 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
         // stream ONCE. We stream until warmup confirms residency, then skip the
         // expensive per-frame world update and just re-render — the same
         // settled geometry is reused for every subsequent cell.
-        deps.render_and_read =
-            [&](std::vector<unsigned char>& out_pixels, int& w, int& h, bool stream_world) -> bool {
+        deps.render_and_read = [&](std::vector<unsigned char>& out_pixels,
+                                   int& w,
+                                   int& h,
+                                   bool stream_world,
+                                   const std::filesystem::path& attribution_dir) -> bool {
             Luminumbra::Rendering::RenderPipeline::CaptureCleanup frame_cleanup(renderPipeline);
             LUMIN_PROFILE_FRAME_N("Client capture");
             LUMIN_PROFILE_ZONE_N("Client capture frame");
@@ -242,6 +245,11 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
             glPixelStorei(GL_PACK_ALIGNMENT, 1);
             // glReadPixels itself synchronizes; no explicit glFinish needed.
             glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, out_pixels.data());
+            // Deferred attachments still belong to the backbuffer just read.
+            if (!attribution_dir.empty() &&
+                !renderPipeline.capture_terrain_coverage(attribution_dir)) {
+                return false;
+            }
             LUMIN_PROFILE_WAIT("Client present wait", glfwSwapBuffers(window));
             glfwPollEvents();
             frame_cleanup.retain();

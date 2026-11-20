@@ -6394,9 +6394,9 @@ TEST(WorldSaveService, AuthorityWindowUsesLockedAdmittedHandleAndClosesBeforeRep
 
 TEST(WorldSaveService, AuthorityWindowRejectsInvalidBoundsAndIgnoresDerivedAuthority) {
     const TempSaveDir save("authority_window_derived");
-    const WorldSaveService::ContainerRecord far{42, 1, 1, "derived cache"};
+    const WorldSaveService::ContainerRecord derived{42, 1, 1, "derived cache"};
     ASSERT_TRUE(WorldSaveService::upsert_container_records(
-        WorldSaveService::region_file_path(save.path(), 0, 0), {far}));
+        WorldSaveService::region_file_path(save.path(), 0, 0), {derived}));
     AuthorityReader reader;
     std::string error;
     ASSERT_TRUE(reader.admit(save.path(), WindowLimits(), error)) << error;
