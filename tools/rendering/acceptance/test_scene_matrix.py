@@ -445,6 +445,48 @@ class GeneratorTests(unittest.TestCase):
             with self.assertRaises(sm.MatrixError):
                 sm.validate_matrix(data)
 
+    def test_referenced_unresolved_scenes_refuse_or_emit_complete_remaining_transitions(self):
+        for skipped in (("ground",), ("high",), ("cave_air",), ("elevated",),
+                        tuple(CANONICAL_CAMERAS)):
+            with self.subTest(skipped=skipped):
+                data = _load_matrix()
+                for scene in data["scenes"]:
+                    if scene["id"] in skipped:
+                        scene["pose_source"] = "recorded-evidence"
+                        scene["scene"]["camera"].update(pos=None, yaw=None, pitch=None)
+                        scene["scene"]["time_of_day"] = None
+                matrix = Path(self._tmp.name) / "unresolved-transitions.json"
+                matrix.write_text(json.dumps(data), encoding="utf-8")
+                out = self.out / "-".join(skipped)
+                code, err = _run(["--matrix", str(matrix), "--out", str(out)])
+                self.assertEqual(code, 2, err)
+                self.assertIn("unresolved scenes", err)
+                self.assertFalse(out.exists())
+                code, err = _run(["--matrix", str(matrix), "--out", str(out),
+                                  "--allow-unresolved"])
+                self.assertEqual(code, 0, err)
+                manifest = json.loads((out / "recipes.json").read_text(encoding="utf-8"))
+                expected = {name for name in EXPECTED_NAMES
+                            if name.partition(".")[0] not in skipped}
+                self.assertEqual({r["name"] for r in manifest["recipes"]}, expected)
+                self.assertEqual({p.name for p in out.glob("*.scene.json")},
+                                 {name + ".scene.json" for name in expected})
+                self.assertEqual(manifest["transitions"], [t for t in EXPECTED_TRANSITIONS
+                                 if all(n in expected for n in t["endpoints"])])
+                before = {p.name: p.read_bytes() for p in out.iterdir()}
+                code, err = _run(["--matrix", str(matrix), "--out", str(out)])
+                self.assertEqual(code, 2, err)
+                self.assertIn("unresolved scenes", err)
+                self.assertEqual({p.name: p.read_bytes() for p in out.iterdir()}, before)
+                # Skipping a scene never excuses an undeclared variant endpoint.
+                data["transitions"][0]["endpoints"].append(skipped[0] + ".missing")
+                matrix.write_text(json.dumps(data), encoding="utf-8")
+                code, err = _run(["--matrix", str(matrix), "--out", str(out),
+                                  "--allow-unresolved"])
+                self.assertEqual(code, 2, err)
+                self.assertIn("unknown endpoint", err)
+                self.assertEqual({p.name: p.read_bytes() for p in out.iterdir()}, before)
+
     def test_refusals_preserve_existing_output(self):
         self.out.mkdir()
         sentinel = self.out / "recipes.json"
@@ -480,7 +522,7 @@ class GeneratorTests(unittest.TestCase):
         matrix = Path(self._tmp.name) / "bad.json"
         matrix.write_text(json.dumps(data), encoding="utf-8")
         code, err = _run(["--matrix", str(matrix), "--out", str(self.out)])
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 2)
         self.assertIn("nope", err)
         self.assertFalse((self.out / "commands.txt").exists())
 

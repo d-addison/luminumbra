@@ -47,7 +47,7 @@ IMPLIED_SEED = 424242
 CLIENT_BINARY = "luminumbra_client_app" + (".exe" if os.name == "nt" else "")
 VALIDATOR = "tools/perf/validate_render_capture.py"
 NAME_RE = re.compile(r"^[a-z0-9_-]+$")
-EXIT_INVALID = 1
+EXIT_INVALID = 2
 EXIT_UNRESOLVED = 2
 
 
@@ -180,8 +180,9 @@ def _validate_transitions(data):
     transitions = data.get("transitions", [])
     if not isinstance(transitions, list):
         raise MatrixError("transitions must be a list")
-    entries, _ = plan_entries(data)
-    names = {entry["name"] for entry in entries}
+    names = {scene["id"] for scene in data["scenes"]}
+    names.update(f"{scene['id']}.{variant['id']}"
+                 for scene in data["scenes"] for variant in scene["variants"])
     seen = set()
     for transition in transitions:
         if not isinstance(transition, dict) or set(transition) != {"id", "kind", "endpoints"}:
@@ -197,7 +198,7 @@ def _validate_transitions(data):
             raise MatrixError(f"transition {tid}: needs at least two endpoints")
         for name in endpoints:
             if not isinstance(name, str) or name not in names:
-                raise MatrixError(f"transition {tid}: unresolved endpoint {name!r}")
+                raise MatrixError(f"transition {tid}: unknown endpoint {name!r}")
 
 
 def _is_resolved(scene):
@@ -362,8 +363,11 @@ def emit(data, out_dir, build_dir, allow_unresolved):
         lines.extend(command_blocks(entry, preset, scene_path.as_posix(), bench_path.as_posix(), build_dir))
         lines.append("")
     (out / "commands.txt").write_text("\n".join(lines), encoding="utf-8")
+    names = {entry["name"] for entry in entries}
+    transitions = [transition for transition in data.get("transitions", [])
+                   if all(name in names for name in transition["endpoints"])]
     manifest = {"schema": "luminumbra.scene_recipes.v1", "recipes": recipes,
-                "transitions": data.get("transitions", [])}
+                "transitions": transitions}
     (out / "recipes.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(f"wrote {len(entries)} scene configs and commands.txt to {out}")
     return 0
