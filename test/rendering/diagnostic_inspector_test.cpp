@@ -110,7 +110,13 @@ protected:
         }
         DiagnosticInspectorGl::TearDown();
     }
-    void BeginCapture() {
+    enum class Coverage {
+        Complete,
+        Unsupported,
+        Uninstrumented,
+        Unknown
+    };
+    void BeginCapture(Coverage coverage = Coverage::Complete) {
         frame_ = pass_.begin_frame(ctx_);
         ASSERT_TRUE(frame_);
         auto* capture = GBufferDiagnosticCapture::Current();
@@ -141,6 +147,31 @@ protected:
         const DiagnosticId id{1, 1, 3, 257};
         glClearTexImage(
             static_cast<GLuint>(identity_texture), 0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, id.data());
+        if (coverage != Coverage::Complete) {
+            DiagnosticId unsupported_id{};
+            if (coverage == Coverage::Uninstrumented) {
+                capture->unsupported("uninstrumented_producer");
+            } else {
+                capture->write(*variant,
+                               {.mesh_path = "res/models/unknown.obj",
+                                .shader_variant = coverage == Coverage::Unsupported
+                                                      ? "instanced_static_mesh"
+                                                      : "unknown_producer",
+                                .provenance = coverage == Coverage::Unsupported
+                                                  ? DiagnosticProvenance::Unsupported
+                                                  : DiagnosticProvenance::Mesh});
+                unsupported_id = {2, 2, 0, 257};
+            }
+            glTextureSubImage2D(static_cast<GLuint>(identity_texture),
+                                0,
+                                1,
+                                0,
+                                1,
+                                1,
+                                GL_RGBA_INTEGER,
+                                GL_UNSIGNED_INT,
+                                unsupported_id.data());
+        }
         const std::array<float, 4> normal{0.5f, 0.5f, 0, 17.0f / 255};
         const std::array<float, 4> albedo{0.2f, 0.4f, 0.6f, 1};
         const float depth = 0.25f;
@@ -148,7 +179,9 @@ protected:
         glClearTexImage(gbuffer_.albedo_texture, 0, GL_RGBA, GL_FLOAT, albedo.data());
         glClearTexImage(gbuffer_.depth_texture, 0, GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
         capture->detach();
-        ASSERT_TRUE(capture->complete());
+        ASSERT_EQ(capture->complete(),
+                  coverage == Coverage::Complete || coverage == Coverage::Unknown);
+        ASSERT_TRUE(capture->snapshot_ready());
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         GLint current = 0;
         glGetIntegerv(GL_CURRENT_PROGRAM, &current);
@@ -187,6 +220,8 @@ TEST_F(DiagnosticInspectorFrameGl, CaptureTeardownGatherRestoreAndLaterDisplayKe
     EXPECT_EQ(result.at("record").at("mesh").at("path"), "res/models/rock.obj");
     EXPECT_EQ(result.at("probe").at("material"), 17);
     EXPECT_EQ(result.at("probe").at("depth_hardware"), 0.25f);
+    EXPECT_EQ(result.at("identity_complete"), true);
+    EXPECT_EQ(control.status.find("Identity snapshot (complete coverage)"), 0U);
     const auto captured_result = control.result;
     EXPECT_FALSE(pass_.begin_frame(ctx_));
     Pass::end_frame(frame_, ctx_);
@@ -203,13 +238,78 @@ TEST_F(DiagnosticInspectorFrameGl, CaptureTeardownGatherRestoreAndLaterDisplayKe
     ExpectReleasedProgram();
 }
 
+TEST_F(DiagnosticInspectorFrameGl, MixedCoverageStaysDisplayedAndReportsIncompleteIdentity) {
+    for (const auto coverage :
+         {Coverage::Unsupported, Coverage::Uninstrumented, Coverage::Unknown}) {
+        for (const bool inspect_unsupported : {false, true}) {
+            auto& control = Pass::controls();
+            control.refresh = true;
+            control.x = inspect_unsupported ? 1 : 0;
+            control.y = 1;
+            ASSERT_NO_FATAL_FAILURE(BeginCapture(coverage));
+            Pass::end_frame(frame_, ctx_);
+            ExpectReleasedProgram();
+            EXPECT_NE(control.status.find("incomplete coverage"), std::string::npos);
+            const auto result = nlohmann::json::parse(control.result);
+            EXPECT_EQ(result.at("identity_complete"), false);
+            EXPECT_EQ(result.at("identity_supported"), !inspect_unsupported);
+            if (!inspect_unsupported) {
+                EXPECT_EQ(result.at("record").at("mesh").at("path"), "res/models/rock.obj");
+                EXPECT_EQ(result.at("probe").at("draw"), 1);
+            } else if (coverage == Coverage::Uninstrumented) {
+                EXPECT_TRUE(result.at("record").is_null());
+            } else {
+                EXPECT_EQ(result.at("record").at("draw").at("id"), 2);
+            }
+            pass_.set_mode(Pass::DrawId);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glViewport(0, 0, 8, 8);
+            pass_.execute(ctx_);
+            std::array<GLubyte, 32> colors{};
+            glReadPixels(0, 0, 8, 1, GL_RGBA, GL_UNSIGNED_BYTE, colors.data());
+            const auto hash = Pass::hash_id(1);
+            for (std::size_t channel = 0; channel < 3; ++channel) {
+                EXPECT_NEAR(colors[channel], (hash >> (channel * 8)) & 255U, 1);
+            }
+            // The unsupported texel spans both stripes of the six-pixel hatch.
+            EXPECT_EQ(colors[16], 255);
+            EXPECT_EQ(colors[17], 0);
+            EXPECT_EQ(colors[18], 255);
+            EXPECT_NEAR(colors[28], 0.15 * 255, 1);
+            EXPECT_EQ(colors[29], 0);
+            EXPECT_NEAR(colors[30], 0.15 * 255, 1);
+            EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+        }
+    }
+}
+
 TEST_F(DiagnosticInspectorFrameGl, RefusedCaptureReleasesTheCurrentVariant) {
-    ASSERT_NO_FATAL_FAILURE(BeginCapture());
+    ASSERT_NO_FATAL_FAILURE(BeginCapture(Coverage::Unsupported));
     GBufferDiagnosticCapture::Current()->abort();
     Pass::end_frame(frame_, ctx_);
     EXPECT_FALSE(frame_);
     EXPECT_EQ(Pass::controls().result, "Snapshot refused: incomplete or unsupported coverage");
     ExpectReleasedProgram();
+}
+
+TEST_F(DiagnosticInspectorFrameGl, InvalidStorageOrRefusedMetadataCannotDisplayPartialSnapshot) {
+    for (const bool storage_failure : {false, true}) {
+        Pass::controls().refresh = true;
+        ASSERT_NO_FATAL_FAILURE(BeginCapture(Coverage::Unsupported));
+        auto* capture = GBufferDiagnosticCapture::Current();
+        ASSERT_NE(capture, nullptr);
+        if (storage_failure) {
+            EXPECT_FALSE(capture->attach(GBuffer{}, {2, 2}));
+        } else {
+            capture->unsupported("");
+            EXPECT_TRUE(capture->refused());
+        }
+        EXPECT_FALSE(capture->snapshot_ready());
+        EXPECT_FALSE(capture->complete());
+        Pass::end_frame(frame_, ctx_);
+        EXPECT_EQ(Pass::controls().result, "Snapshot refused: incomplete or unsupported coverage");
+        ExpectReleasedProgram();
+    }
 }
 
 TEST_F(DiagnosticInspectorFrameGl, AbandonedCaptureReleasesTheCurrentVariant) {
@@ -419,13 +519,15 @@ TEST(DiagnosticInspector, InspectorStorageRefusesMissingPartialAndOversizedStore
     EXPECT_EQ(begin.find("inspector_open"), std::string::npos);
 }
 
-TEST(DiagnosticInspector, IncompleteAndUnsupportedCapturesRefusePublication) {
+TEST(DiagnosticInspector, DisplayReadinessIsSeparateFromPublicationCompleteness) {
     const auto frame = SourceSection("src/luminumbra_client/rendering/passes/DebugViewPass.cpp",
                                      "class DebugViewPass::Frame",
                                      "std::string DebugViewPass::join(");
-    EXPECT_LT(frame.find("const bool complete = capture_->complete();"),
+    EXPECT_LT(frame.find("const bool ready = capture_->snapshot_ready();"),
               frame.find("capture_.reset();"));
-    EXPECT_LT(frame.find("if (!complete)"), frame.find("pass_.finish_frame(ctx);"));
+    EXPECT_LT(frame.find("identity_complete = capture_->complete();"),
+              frame.find("capture_.reset();"));
+    EXPECT_LT(frame.find("if (!ready)"), frame.find("pass_.finish_frame(ctx);"));
     EXPECT_NE(frame.find("controls().status = controls().result ="), std::string::npos);
     EXPECT_NE(frame.find("Snapshot refused: incomplete or unsupported coverage"),
               std::string::npos);

@@ -76,6 +76,7 @@ bool GBufferDiagnosticCapture::attachment_failed() const noexcept {
 
 void GBufferDiagnosticCapture::abort() noexcept {
     state_->failed = true;
+    state_->snapshot_failed = true;
 }
 
 void GBufferDiagnosticCapture::unsupported(std::string_view producer,
@@ -106,6 +107,11 @@ bool GBufferDiagnosticCapture::refused() const {
 bool GBufferDiagnosticCapture::complete() const {
     return state_->captured && !state_->framebuffer && !state_->attachment_lease &&
            !state_->failed && !state_->refused && state_->table.complete_coverage();
+}
+
+bool GBufferDiagnosticCapture::snapshot_ready() const {
+    return state_->captured && !state_->framebuffer && !state_->attachment_lease &&
+           !state_->snapshot_failed && !state_->refused;
 }
 
 Shader* GBufferDiagnosticCapture::variant(Shader* shader,
@@ -308,6 +314,7 @@ bool GBufferDiagnosticCapture::attach_forward(std::uint32_t framebuffer,
     target.fbo_id = framebuffer;
     target.position_texture = color_texture;
     if (!attach_target(target, extent, true)) {
+        abort();
         const auto reason = std::exchange(state_->failure, {});
         unsupported(reason, 0, DiagnosticOwnership::Live, DiagnosticPass::Forward);
         return false;
@@ -329,6 +336,7 @@ GBufferDiagnosticAttachment::GBufferDiagnosticAttachment(std::uint32_t framebuff
 
 bool GBufferDiagnosticCapture::attach(const GBuffer& gbuffer, const DiagnosticExtent& extent) {
     if (!attach_target(gbuffer, extent)) {
+        abort();
         const auto reason = std::exchange(state_->failure, {});
         unsupported(reason);
         return false;
@@ -339,6 +347,7 @@ bool GBufferDiagnosticCapture::attach(const GBuffer& gbuffer, const DiagnosticEx
 void GBufferDiagnosticCapture::detach() {
     detach_target();
     if (!state_->failure.empty()) {
+        abort();
         const auto reason = std::exchange(state_->failure, {});
         unsupported(reason,
                     0,
@@ -509,6 +518,7 @@ void GBufferDiagnosticCapture::detach_target() {
         // The pass drew into a retired or foreign framebuffer: never publish it.
         state_->failed = true;
         state_->failure = "gbuffer_retired_during_capture";
+        state_->snapshot_failed = true;
     }
     // Keep storage protected until detachment and caller-state restoration finish.
     state_->attachment_lease.reset();
@@ -518,6 +528,7 @@ void GBufferDiagnosticCapture::before_destroy(const GBuffer& gbuffer) {
     if (state_->framebuffer && state_->framebuffer == gbuffer.fbo_id) {
         detach_target();
         state_->failed = true;
+        state_->snapshot_failed = true;
         if (state_->failure.empty()) {
             state_->failure = "gbuffer_recreated_during_capture";
         }

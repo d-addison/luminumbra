@@ -38,6 +38,9 @@ public:
     // An aborted frame is never eligible for publication, even if its table is empty.
     void abort() noexcept;
     bool complete() const;
+    // Detached storage can be displayed with unsupported records hatched. This
+    // does not certify identity coverage; publication must still use complete().
+    bool snapshot_ready() const;
     // Const diagnostic: sticky capture failure, including retirement and unwinding.
     bool attachment_failed() const noexcept;
     // Sticky submission refusal, separate from unsupported producer coverage.
@@ -75,6 +78,7 @@ private:
         std::array<std::uint8_t, 4> color_mask{};
         int buffer_count = 0;
         bool failed = false;
+        bool snapshot_failed = false;
         bool captured = false;
         bool refused = false;
         bool forward = false;

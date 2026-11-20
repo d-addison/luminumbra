@@ -3429,6 +3429,57 @@ class DeferredDiagnosticLeaseWiring(unittest.TestCase):
                 self.assertEqual(actual, captured and not framebuffer and not lease
                                  and not failed and not refused and coverage)
 
+    def test_partial_snapshot_readiness_requires_valid_detached_storage(self):
+        import itertools
+
+        body = block(self.targets, "bool GBufferDiagnosticCapture::snapshot_ready()")
+        expression = re.fullmatch(r"\s*return\s+(.*?);\s*", body, re.S).group(1)
+        for captured, framebuffer, lease, failed, refused in itertools.product(
+                (False, True), repeat=5):
+            with self.subTest(captured=captured, framebuffer=framebuffer, lease=lease,
+                              failed=failed, refused=refused):
+                actual = cpp_expression(expression, **{
+                    "state_->captured": captured, "state_->framebuffer": framebuffer,
+                    "state_->attachment_lease": lease, "state_->snapshot_failed": failed,
+                    "state_->refused": refused})
+                self.assertEqual(actual, captured and not framebuffer and not lease
+                                 and not failed and not refused)
+        # Unsupported coverage must leave this independent storage diagnostic usable.
+        self.assertNotIn("snapshot_failed", block(
+            self.targets, "void GBufferDiagnosticCapture::unsupported("))
+        for marker in ("void GBufferDiagnosticCapture::abort()",
+                       "void GBufferDiagnosticCapture::before_destroy(",
+                       "void GBufferDiagnosticCapture::detach_target()"):
+            self.assertIn("state_->snapshot_failed = true;", block(self.targets, marker))
+        for marker in ("bool GBufferDiagnosticCapture::attach(",
+                       "bool GBufferDiagnosticCapture::attach_forward(",
+                       "void GBufferDiagnosticCapture::detach()"):
+            self.assertIn("abort();", block(self.targets, marker))
+
+    def test_partial_snapshot_display_preserves_strict_publication_identity(self):
+        source = read(CLIENT / "rendering/passes/DebugViewPass.cpp")
+        finish = block(block(source, "class DebugViewPass::Frame"), "void finish(")
+        self.assertIn("const bool ready = capture_->snapshot_ready();", finish)
+        self.assertIn("identity_complete = capture_->complete();", finish)
+        self.assertLess(finish.index("snapshot_ready()"), finish.index("capture_.reset()"))
+        self.assertIn("return;", block(finish, "if (!ready)"))
+        self.assertNotIn("if (!complete)", finish)
+        gather = block(source, "void DebugViewPass::finish_frame(")
+        self.assertIn('"Identity snapshot (incomplete coverage)"', gather)
+        self.assertIn('{"identity_complete", m_snapshot->identity_complete}', gather)
+        self.assertIn("m_snapshot->identity_complete && kind != ProducerKind::Unsupported", gather)
+        readback = block(read(CLIENT / "rendering/DiagnosticReadback.h"),
+                         "class DiagnosticFrameCapture")
+        self.assertIn("return scope_->complete();", readback)
+        self.assertIn("frame.identity_complete = ending->complete();", readback)
+        self.assertNotIn("snapshot_ready()", readback)
+        bundle = read(CLIENT / "rendering/DiagnosticCapture.cpp")
+        self.assertIn("!frame.identity_complete", bundle)
+        self.assertIn("!draws.complete_deferred_coverage()", bundle)
+        shader = block(read(ROOT / "res/shaders/debug_view.frag"), "vec3 identityColor()")
+        self.assertIn("metadata.y == 0u) return unsupportedColor();", shader)
+        self.assertIn("if (u_mode == 6) return diagnosticColor(id.x);", shader)
+
     def test_attachment_wraps_deferred_submission(self):
         execute = block(self.passes, "GBufferDrawStats GBufferPass::execute(")
         attachment = execute.index("GBufferDiagnosticAttachment diagnostic_attachment(")
