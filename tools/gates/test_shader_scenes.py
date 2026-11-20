@@ -364,6 +364,154 @@ class SkyWarmGradeTests(unittest.TestCase):
                         self.assertAlmostEqual(actual, expected)
 
 
+class NormalDepthTests(unittest.TestCase):
+    def test_native_capture_validates_first_and_publishes_metadata_last(self):
+        fixture = (ROOT / 'test/rendering/shader_scene_render_test.cpp').read_text(encoding='utf-8')
+        save = fixture.split('static void Save(', 1)[1].split('\n};', 1)[0]
+        self.assertLess(save.index('ASSERT_EQ(cameraHash.size(), 64u)'), save.index('std::ofstream'))
+        self.assertLess(save.index('ASSERT_TRUE(image)'), save.index('std::ofstream identity'))
+        self.assertLess(save.index('ASSERT_TRUE(image)'), save.index('std::ofstream projectionIdentity'))
+        depth = fixture.split('void ShaderScene::DepthConventions()', 1)[1]
+        self.assertLess(depth.index('Save("reversed-z", pixels)'), depth.index('std::ofstream metadata'))
+
+    def test_references_are_classified_and_public_inventory_matches(self):
+        assets = module('scene_assets', 'tools/ci/validate_assets.py')
+        inventory = json.loads((ROOT / 'config/public-asset-inventory.json').read_bytes())
+        entries = {entry['path']: entry for entry in inventory['files']}
+        for fixture in scene.FIXTURES:
+            name = 'test/rendering/shader_scenes/' + fixture['reference']
+            payload = (ROOT / name).read_bytes()
+            self.assertTrue(name.startswith(assets.ROOTS))
+            self.assertEqual(assets.classify(name), ('MIT', 'Luminumbra shader scene references'))
+            self.assertEqual(entries[name]['sha256'], scene.digest(payload))
+            self.assertEqual(entries[name]['bytes'], len(payload))
+
+    def test_consumed_production_helpers_and_convention_selection(self):
+        # Pin the helpers actually extracted by the GL fixture. A source mutation
+        # must trip this registered device-free check before baseline comparison.
+        decoder = (ROOT / 'res/shaders/lighting_pass.frag').read_text(encoding='utf-8')
+        helper = decoder.split('vec3 decode_octahedral(', 1)[1].split('// Shadow', 1)[0]
+        self.assertEqual(' '.join(helper.split()),
+                         'vec2 encoded) { vec2 e = encoded * 2.0 - 1.0; '
+                         'vec3 v = vec3(e.xy, 1.0 - abs(e.x) - abs(e.y)); '
+                         'if (v.z < 0) v.xy = octWrap(v.xy); return normalize(v); }')
+        particle = (ROOT / 'res/shaders/magical_particles.frag').read_text(encoding='utf-8')
+        helper = particle.split('float linearize_depth(', 1)[1].split('// Radial', 1)[0]
+        self.assertEqual(' '.join(helper.split()),
+                         'float d) { return (u_nearPlane * u_farPlane) / '
+                         '(u_nearPlane + d * (u_farPlane - u_nearPlane)); }')
+        fixture = (ROOT / 'test/rendering/shader_scene_render_test.cpp').read_text(encoding='utf-8')
+        for consumed in ('Helper(encoder, "vec2 encode_octahedral(")',
+                         'Helper(decoder, "vec3 decode_octahedral(")',
+                         'Helper(source, "float linearize_depth(")', 'GL_RGBA8',
+                         'Luminumbra::Rendering::ReversedZPerspective(', 'glm::perspectiveRH_NO(',
+                         'linearize_depth(reversed_z != 0 ? raw : 1.0 - raw)',
+                         'glUniform1i(Uniform("reversed_z"), reversed ? 1 : 0)'):
+            self.assertIn(consumed, fixture)
+
+    def test_normal_axes_poles_octants_seam_and_single_pixel_failures(self):
+        actuals = scene.analytic_scenes()
+        scene.check_normal_depth(actuals, scene.DEPTH_CASES)
+        # Every axis, every octant, each sign at the seam, and dense samples.
+        for x, y in [(x, 0) for x in range(22)] + [(17, 79), (127, 127)]:
+            for mutation in ('sign', 'length', 'angle'):
+                changed = copy.deepcopy(actuals)
+                offset = (y * 128 + x) * 3
+                normal = scene.analytic_normal(x, y)
+                if mutation == 'sign':
+                    vector = tuple(-v for v in normal)
+                elif mutation == 'length':
+                    vector = tuple(.99 * v for v in normal)
+                else:
+                    # A normalized 90-degree rotation also catches direction
+                    # errors that retain unit length and can retain signs.
+                    vector = (-normal[1], normal[0], 0)
+                changed['normal-decode'][offset:offset + 3] = [.5 + .5 * v for v in vector]
+                with self.subTest(x=x, y=y, mutation=mutation), self.assertRaises(ValueError):
+                    scene.check_normal_depth(changed, scene.DEPTH_CASES)
+        for bad in ([], [math.nan] * scene.CHANNELS, [math.inf] * scene.CHANNELS,
+                    [-.1] * scene.CHANNELS, [1.1] * scene.CHANNELS):
+            with self.assertRaises(ValueError):
+                scene.normal_decode_metrics(bad)
+        changed = copy.deepcopy(actuals)
+        changed['normal-decode'][:3] = [.5] * 3
+        with self.assertRaisesRegex(ValueError, 'zero length'):
+            scene.check_normal_depth(changed, scene.DEPTH_CASES)
+
+    def test_depth_each_convention_endpoints_order_roundtrip_and_flag(self):
+        actuals = scene.analytic_scenes()
+        for y in (0, 63, 64, 127):
+            for x in (0, 1, 64, 126, 127):
+                for channel in range(3):
+                    changed = copy.deepcopy(actuals)
+                    offset = (y * 128 + x) * 3 + channel
+                    changed['reversed-z'][offset] = .5
+                    with self.subTest(y=y, x=x, channel=channel), self.assertRaises(ValueError):
+                        scene.check_normal_depth(changed, scene.DEPTH_CASES)
+        for cases in (None, [], scene.DEPTH_CASES[:1], list(reversed(scene.DEPTH_CASES)),
+                      [dict(case, reversed_z=not case['reversed_z']) for case in scene.DEPTH_CASES],
+                      [dict(case, reversed_z=int(case['reversed_z'])) for case in scene.DEPTH_CASES],
+                      [dict(case, rows=[float(row) for row in case['rows']]) for case in scene.DEPTH_CASES],
+                      [dict(case, unknown=1) for case in scene.DEPTH_CASES]):
+            with self.subTest(cases=cases), self.assertRaises(ValueError):
+                scene.check_normal_depth(actuals, cases)
+
+    def test_missing_partial_or_unknown_depth_evidence_cannot_publish(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            capture = root / 'capture'
+            capture.mkdir()
+            args = argparse.Namespace(command='regenerate', manifest=MANIFEST,
+                                      capture=capture, output=root / 'candidate')
+            for filename in ('normal-decode.pfm', 'reversed-z.pfm', 'depth-conventions.json',
+                             'lighting_pass.frag', 'magical_particles.frag', 'Camera.h',
+                             'projection-sha256.txt'):
+                for bad in (None, b'', b'partial'):
+                    ShaderScenesTests().capture(capture)
+                    if bad is None:
+                        (capture / filename).unlink()
+                    else:
+                        (capture / filename).write_bytes(bad)
+                    with self.subTest(filename=filename, bad=bad), self.assertRaises((OSError, ValueError)):
+                        scene.run(args)
+                    self.assertFalse(args.output.exists())
+            ShaderScenesTests().capture(capture)
+            (capture / 'depth-conventions.json').write_text('[{}]', encoding='utf-8')
+            for command in ('compare', 'regenerate'):
+                args.command = command
+                with self.assertRaisesRegex(ValueError, 'convention metadata'):
+                    scene.run(args)
+                self.assertFalse(args.output.exists())
+
+    def test_analytical_regeneration_preserves_other_references_and_origin(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / 'candidate'
+            args = argparse.Namespace(command='regenerate', manifest=MANIFEST, capture=None,
+                                      output=output, analytical=True)
+            self.assertEqual(scene.run(args), 0)
+            generated, references = scene.load_manifest(output / 'scenes.json')
+            original, previous = scene.load_manifest(MANIFEST)
+            for name in references:
+                if name in scene.analytic_scenes():
+                    self.assertEqual(generated['reference_capture'][name]['origin'], 'analytical')
+                    self.assertEqual(generated['reference_capture'][name]['version'], 'not captured')
+                else:
+                    self.assertEqual(references[name], previous[name])
+                    self.assertEqual(generated['reference_capture'][name], original['reference_capture'][name])
+            with self.assertRaises(FileExistsError):
+                scene.run(args)
+            for command, capture in (('compare', None), ('regenerate', Path(temporary))):
+                args.command, args.capture = command, capture
+                with self.assertRaises(ValueError):
+                    scene.run(args)
+            args.analytical, args.capture = False, None
+            with self.assertRaisesRegex(ValueError, 'capture directory required'):
+                scene.run(args)
+            args.analytical, args.output = True, None
+            with self.assertRaisesRegex(ValueError, 'fresh --output'):
+                scene.run(args)
+
+
 class ShaderScenesTests(unittest.TestCase):
     def test_near_shrubs_are_leaf_cards_and_every_bush_lod_avoids_grass_albedo(self):
         rendering = ROOT / "src/luminumbra_client/rendering"
@@ -404,6 +552,10 @@ class ShaderScenesTests(unittest.TestCase):
             (directory / Path(name).name).write_bytes((ROOT / name).read_bytes())
         fixture = (ROOT / 'test/rendering/shader_scene_render_test.cpp').read_bytes().replace(b'\r\n', b'\n')
         (directory / 'fixture-sha256.txt').write_text(scene.digest(fixture), encoding='ascii')
+        (directory / 'projection-sha256.txt').write_text(scene.digest(
+            (ROOT / 'src/luminumbra_client/rendering/Camera.h').read_bytes().replace(b'\r\n', b'\n')),
+            encoding='ascii')
+        (directory / 'depth-conventions.json').write_text(json.dumps(scene.DEPTH_CASES), encoding='utf-8')
         (directory / 'material.pfm').write_bytes(b'PF\n128 128\n-1.0\n' +
                                                struct.pack('<f', value) * scene.CHANNELS)
         (directory / 'tree-cutout.pfm').write_bytes(
@@ -411,7 +563,7 @@ class ShaderScenesTests(unittest.TestCase):
         for name, values in (('night-sky', self.night()), ('terrain-blend', self.terrain()),
                              ('dusk-sky', [.1] * scene.CHANNELS),
                              ('shrub-leaf', scene.shrub_reference()),
-                             ('shrub-normal', scene.shrub_reference(True))):
+                             ('shrub-normal', scene.shrub_reference(True)), *scene.analytic_scenes().items()):
             (directory / (name + '.pfm')).write_bytes(
                 b'PF\n128 128\n-1.0\n' + struct.pack('<' + 'f' * scene.CHANNELS, *values))
         (directory / 'renderer.txt').write_text('llvmpipe (test fixture)\n', encoding='utf-8')
@@ -443,7 +595,8 @@ class ShaderScenesTests(unittest.TestCase):
             self.assertIn(metadata['origin'], ('analytical', 'llvmpipe'))
         tree = scene.rgb(data['tree-cutout'], False)
         self.assertLessEqual(max(abs(a - b) for a, b in zip(tree, self.cutout())), .5 / 255)
-        self.assertEqual(set(data), {'material', 'tree-cutout', 'night-sky', 'terrain-blend'})
+        self.assertEqual(set(data), {'material', 'tree-cutout', 'night-sky', 'terrain-blend',
+                                     'normal-decode', 'reversed-z'})
         self.assertLessEqual(max(abs(a - b) for a, b in zip(
             scene.rgb(data['terrain-blend'], False), self.terrain())), .5 / 255)
         self.assertNotIn('dusk-sky', data)
@@ -589,6 +742,7 @@ class ShaderScenesTests(unittest.TestCase):
             self.capture(capture)
             for filename, content in (('fixture-sha256.txt', b'0' * 64),
                                       ('fixture-sha256.txt', b'unknown'),
+                                      ('projection-sha256.txt', b'0' * 64),
                                       ('static_asset.frag', b'old shader')):
                 (capture / filename).write_bytes(content)
                 with self.subTest(filename=filename), self.assertRaises(ValueError):
@@ -1007,7 +1161,8 @@ class ShaderScenesTests(unittest.TestCase):
         cmake = (ROOT / 'test/CMakeLists.txt').read_text(encoding='utf-8')
         block = cmake.split('if(LUMINUMBRA_SHADER_SCENES)', 1)[1].split('\nendif()', 1)[0]
         self.assertLess(block.index('CMAKE_CONFIGURE_DEPENDS'), block.index('string(SHA256 _shader_scene_hash'))
-        self.assertIn('"${CMAKE_SOURCE_DIR}/test/rendering/shader_scene_render_test.cpp")', block)
+        self.assertIn('"${CMAKE_SOURCE_DIR}/test/rendering/shader_scene_render_test.cpp"', block)
+        self.assertIn('LUMINUMBRA_SHADER_SCENE_CAMERA_HASH="${_shader_scene_camera_hash}"', block)
         workflow = (ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8').split('  fast-compile:', 1)[1].split('  tidy-shard:', 1)[0]
         demand = "steps.shader-scenes.outputs.needs_shader_scenes == 'true'"
         for step in ('Install fast validation dependencies', 'Restore fast dependency sources',

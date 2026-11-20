@@ -22,7 +22,11 @@ CHANNELS = SIZE * SIZE * 3
 # Exact bounded catalogue; adding a fixture requires matching capture and tests.
 FIXTURES = [
     {'name': name, 'reference': f'references/{name}.ppm', 'mask': [0, 0, SIZE, SIZE]}
-    for name in ('material', 'tree-cutout', 'night-sky', 'terrain-blend')]
+    for name in ('material', 'tree-cutout', 'night-sky', 'terrain-blend',
+                 'normal-decode', 'reversed-z')]
+DEPTH_CASES = [{'reversed_z': flag, 'near': .1, 'far': 100.,
+                'rows': [64, 128] if flag else [0, 64]}
+               for flag in (False, True)]
 # Dusk has a measured discontinuity: capture/report only, never an accepted baseline.
 DIAGNOSTICS = [{'name': 'dusk-sky', 'metric': 'max_adjacent_column_mean_luminance_step',
                 'pending_tolerance': .005, 'tracking_issue': 918}]
@@ -35,7 +39,94 @@ INPUTS = {'res/shaders/instanced_mesh.vert', 'res/shaders/static_asset.vert', 'r
           'res/shaders/tree_impostor.vert', 'res/shaders/tree_impostor.frag',
           'res/shaders/enhanced_skybox.frag', 'res/shaders/g_buffer.vert', 'res/shaders/g_buffer.frag',
           'src/luminumbra_client/rendering/SkyAtmosphereLut.ipp',
+          'res/shaders/lighting_pass.frag', 'res/shaders/magical_particles.frag',
+          'src/luminumbra_client/rendering/Camera.h',
           'test/rendering/shader_scene_render_test.cpp'}
+
+
+def analytic_normal(x, y):
+    # Row zero: six axes, eight octants, then both sides of the hemisphere seam.
+    axes = ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
+    if y == 0 and x < 6:
+        vector = axes[x]
+    elif y == 0 and x < 14:
+        vector = tuple(1 if (x - 6) & (1 << channel) else -1 for channel in range(3))
+    elif y == 0:
+        vector = (1 if x & 1 else -1, 1 if x & 2 else -1, .01 if x & 4 else -.01)
+    else:
+        vector = (2 * (x % 16) - 15, 2 * (y % 16) - 15, 2 * (x // 16 + y // 16) - 14)
+    length = math.sqrt(sum(value * value for value in vector))
+    return tuple(value / length for value in vector)
+
+
+def analytic_scenes():
+    """Independent ideal images; never presented as shader execution evidence."""
+    normals, depths = [], []
+    for y in range(SIZE):
+        for x in range(SIZE):
+            normals.extend(.5 + .5 * value for value in analytic_normal(x, y))
+            distance = .1 * 1000 ** (x / 127)
+            raw = (100 - 10 / distance) / 99.9
+            raw = 1 - raw if y >= 64 else raw
+            depths.extend((raw, distance / 100, raw))
+    return {'normal-decode': normals, 'reversed-z': depths}
+
+
+def normal_decode_metrics(actual):
+    scene_samples(actual)
+    length_error = angle = 0.
+    for y in range(SIZE):
+        for x in range(SIZE):
+            offset = (y * SIZE + x) * 3
+            decoded = tuple(2 * actual[offset + channel] - 1 for channel in range(3))
+            expected = analytic_normal(x, y)
+            length = math.sqrt(sum(value * value for value in decoded))
+            length_error = max(length_error, abs(length - 1))
+            if length == 0:
+                raise ValueError('normal decode zero length')
+            # RGBA8 quantization can displace zero components; nonzero signs,
+            # including the 0.01 seam probes, must survive in every octant.
+            if any(abs(want) > .006 and got * want <= 0
+                   for got, want in zip(decoded, expected)):
+                raise ValueError('normal decode octant/sign invariant failed')
+            cosine = sum(a * b for a, b in zip(decoded, expected)) / length
+            angle = max(angle, math.acos(min(1., max(-1., cosine))))
+    return length_error, angle
+
+
+def check_normal_depth(actuals, cases):
+    if (cases != DEPTH_CASES or any(type(case['reversed_z']) is not bool
+                                   or any(type(row) is not int for row in case['rows'])
+                                   for case in cases)):
+        raise ValueError('unknown or incomplete depth convention metadata')
+    length_error, angle = normal_decode_metrics(actuals['normal-decode'])
+    print(f'normal-decode: unit error={length_error:.8f} (<=0.000002), '
+          f'maximum angle={angle:.8f} (<=0.02 radians)')
+    if length_error > .000002 or angle > .02:
+        raise ValueError('normal decode length/angular invariant failed')
+    depth = actuals['reversed-z']
+    scene_samples(depth)
+    # Two conventions, 64 identical rows, 128 logarithmically spaced planes.
+    for case in cases:
+        near, far = case['near'], case['far']
+        for y in range(*case['rows']):
+            previous = None
+            for x in range(SIZE):
+                raw, linear, roundtrip = depth[(y * SIZE + x) * 3:(y * SIZE + x) * 3 + 3]
+                expected = near * (far / near) ** (x / 127)
+                canonical = raw if case['reversed_z'] else 1 - raw
+                decoded = near * far / (near + canonical * (far - near))
+                if (abs(decoded - expected) > .0002 * expected
+                        or abs(linear * far - expected) > .0002 * expected
+                        or abs(roundtrip - raw) > .000002):
+                    raise ValueError('depth linearisation/round-trip invariant failed')
+                if previous is not None and ((raw >= previous) if case['reversed_z'] else (raw <= previous)):
+                    raise ValueError('depth monotonic ordering invariant failed')
+                if x in (0, 127) and abs(raw - (int(case['reversed_z']) if x == 0
+                                               else int(not case['reversed_z']))) > .000002:
+                    raise ValueError('depth near/far invariant failed')
+                previous = raw
+    print('reversed-z: both conventions, ordering, endpoints and round-trip passed')
 
 
 def read_file(path, bound=MAX_BYTES):
@@ -255,6 +346,21 @@ def load_manifest(path, root=ROOT, verify_inputs=True):
 
 def run(args):
     manifest, references = load_manifest(args.manifest, verify_inputs=args.command != 'regenerate')
+    if getattr(args, 'analytical', False):
+        if args.command != 'regenerate' or args.capture is not None:
+            raise ValueError('analytical references require regenerate without --capture')
+        actuals = analytic_scenes()
+        check_normal_depth(actuals, DEPTH_CASES)
+        for name, actual in actuals.items():
+            references[name] = b'P6\n128 128\n255\n' + bytes(round(value * 255) for value in actual)
+            manifest['reference_capture'][name] = {
+                'renderer': 'analytical normals and finite perspective planes',
+                'version': 'not captured', 'origin': 'analytical'}
+        manifest['inputs'] = {name: digest(read_file(local_file(ROOT, name)).replace(b'\r\n', b'\n'))
+                              for name in INPUTS}
+        return publish_candidates(args.output, manifest, references)
+    if args.capture is None:
+        raise ValueError('capture directory required')
     captured_inputs = {
         name: digest(read_file(args.capture / PurePosixPath(name).name).replace(b'\r\n', b'\n'))
         for name in manifest['inputs'] if name != 'test/rendering/shader_scene_render_test.cpp'}
@@ -262,6 +368,9 @@ def run(args):
     if len(fixture_hash) != 64 or any(value not in '0123456789abcdef' for value in fixture_hash):
         raise ValueError('invalid compiled fixture identity')
     captured_inputs['test/rendering/shader_scene_render_test.cpp'] = fixture_hash
+    projection_hash = read_file(args.capture / 'projection-sha256.txt', 128).decode('ascii').strip()
+    if projection_hash != captured_inputs['src/luminumbra_client/rendering/Camera.h']:
+        raise ValueError('compiled projection identity differs from captured source; rebuild')
     current_inputs = (manifest['inputs'] if args.command == 'compare' else
                       {name: digest(read_file(local_file(ROOT, name)).replace(b'\r\n', b'\n'))
                        for name in manifest['inputs']})
@@ -281,6 +390,7 @@ def run(args):
     if cutout_error > .000001:
         raise ValueError('tree cutout/background invariant failed')
     check_scene_invariants(actuals)
+    check_normal_depth(actuals, json.loads(read_file(args.capture / 'depth-conventions.json', 4096)))
     print(f'dusk-sky: maximum adjacent column-mean luminance step={horizontal_step(dusk):.8f}; '
           'tolerance <=0.005 pending issue #918 (diagnostic only; no reference expectation)')
     if args.command == 'compare':
@@ -291,23 +401,27 @@ def run(args):
             print(f'{name}: linear RGB MAE={mean:.8f} (<=0.005), p99={percentile:.8f} (<=0.02)')
             failed |= mean > .005 or percentile > .02
         return int(failed)
-    if args.output is None:
-        raise ValueError('regenerate requires a fresh --output candidate directory')
     payloads = {name: b'P6\n128 128\n255\n' + bytes(round(value * 255) for value in actual)
                 for name, actual in actuals.items()}
     manifest['inputs'] = captured_inputs
-    manifest['reference_sha256'] = {name: digest(payload) for name, payload in payloads.items()}
     manifest['reference_capture'] = {name: {'renderer': renderer, 'version': version, 'origin': 'llvmpipe'}
                                      for name in actuals}
+    return publish_candidates(args.output, manifest, payloads)
+
+
+def publish_candidates(output, manifest, payloads):
+    if output is None:
+        raise ValueError('regenerate requires a fresh --output candidate directory')
+    manifest['reference_sha256'] = {name: digest(payload) for name, payload in payloads.items()}
     encoded = (json.dumps(manifest, indent=2, sort_keys=True) + '\n').encode('utf-8')
     # All refusals above precede publication. The new directory owns every write;
     # a failed I/O leaves an unpublished candidate, never an updated baseline.
-    args.output.mkdir(exist_ok=False)
-    (args.output / 'references').mkdir()
+    output.mkdir(exist_ok=False)
+    (output / 'references').mkdir()
     for fixture in FIXTURES:
-        (args.output / fixture['reference']).write_bytes(payloads[fixture['name']])
-    (args.output / 'scenes.json').write_bytes(encoded)
-    print(f'Review reference candidates in {args.output}; refresh inventories when applying.')
+        (output / fixture['reference']).write_bytes(payloads[fixture['name']])
+    (output / 'scenes.json').write_bytes(encoded)
+    print(f'Review reference candidates in {output}; refresh inventories when applying.')
     return 0
 
 
@@ -315,7 +429,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=('compare', 'regenerate'))
     parser.add_argument('--manifest', type=Path, default=ROOT / 'test/rendering/shader_scenes/scenes.json')
-    parser.add_argument('--capture', type=Path, required=True)
+    parser.add_argument('--capture', type=Path)
+    parser.add_argument('--analytical', action='store_true',
+                        help='regenerate ideal normal/depth references, preserving other references')
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
     try:

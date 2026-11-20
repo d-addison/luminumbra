@@ -3,6 +3,8 @@
 #include <glad/glad.h>
 #include <gtest/gtest.h>
 
+#include "luminumbra_client/rendering/Camera.h"
+
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -20,6 +22,9 @@
 #ifndef LUMINUMBRA_SHADER_SCENE_INPUT_HASH
 #define LUMINUMBRA_SHADER_SCENE_INPUT_HASH ""
 #endif
+#ifndef LUMINUMBRA_SHADER_SCENE_CAMERA_HASH
+#define LUMINUMBRA_SHADER_SCENE_CAMERA_HASH ""
+#endif
 
 namespace {
 constexpr int Size = 128;
@@ -36,6 +41,9 @@ protected:
     GLuint vbo = 0;
     std::array<GLuint, 6> attachments{};
     std::array<GLuint, 5> textures{};
+
+    void NormalDecode();
+    void DepthConventions();
 
     void SetUp() override {
         initialized = glfwInit() == GLFW_TRUE;
@@ -69,10 +77,16 @@ protected:
         textures.fill(0);
     }
     void ShrubLeafReflectanceCutoutAndScaledNormals();
-    void TearDown() override {
+    void ResetTargets() {
         if (glad_glDeleteProgram != nullptr && window != nullptr) {
             ReleaseDraw();
         }
+        program = framebuffer = vao = vbo = 0;
+        attachments.fill(0);
+        textures.fill(0);
+    }
+    void TearDown() override {
+        ResetTargets();
         if (window != nullptr) {
             glfwDestroyWindow(window);
         }
@@ -160,6 +174,56 @@ protected:
         const GLint location = glGetUniformLocation(program, name);
         EXPECT_GE(location, 0) << name;
         return location;
+    }
+    // Extract complete production helpers verbatim, never a mirrored GLSL body.
+    static std::string Helper(const std::string& source, const std::string& signature) {
+        const auto begin = source.find(signature);
+        if (begin == std::string::npos) {
+            ADD_FAILURE() << "Missing production helper: " << signature;
+            return {};
+        }
+        const auto body = source.find('{', begin);
+        if (body == std::string::npos) {
+            ADD_FAILURE() << "Missing helper body";
+            return {};
+        }
+        int nesting = 0;
+        // Source() already caps this traversal at 256 KiB.
+        for (auto index = body; index < source.size(); ++index) {
+            if (source[index] == '{') {
+                ++nesting;
+            } else if (source[index] == '}' && --nesting == 0) {
+                return source.substr(begin, index - begin + 1) + '\n';
+            }
+        }
+        ADD_FAILURE() << "Incomplete production helper";
+        return {};
+    }
+    void Kernel(const std::string& vertex,
+                const std::string& fragment,
+                std::size_t target,
+                GLint format) {
+        glDeleteProgram(program);
+        program = Link(CompileSource(GL_VERTEX_SHADER, vertex, "analytic geometry"),
+                       CompileSource(GL_FRAGMENT_SHADER, fragment, "production helpers"));
+        ASSERT_NE(program, 0u);
+        glUseProgram(program);
+        if (vao == 0) {
+            glGenVertexArrays(1, &vao);
+            glGenFramebuffers(1, &framebuffer);
+            glGenTextures(static_cast<GLsizei>(attachments.size()), attachments.data());
+        }
+        glBindVertexArray(vao);
+        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+        glActiveTexture(GL_TEXTURE4);
+        glBindTexture(GL_TEXTURE_2D, attachments[target]);
+        glTexImage2D(GL_TEXTURE_2D, 0, format, Size, Size, 0, GL_RGB, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glFramebufferTexture2D(
+            GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, attachments[target], 0);
+        ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+        glViewport(0, 0, Size, Size);
     }
     // Three fixed production compute kernels, at most 192*108*3 floats of
     // scratch. Their march bounds are 40, 16*20 and 30 samples per texel.
@@ -325,10 +389,8 @@ void main() {
         const std::filesystem::path directory(output);
         const std::string fixtureHash = LUMINUMBRA_SHADER_SCENE_INPUT_HASH;
         ASSERT_EQ(fixtureHash.size(), 64u) << "Build the registered scene target";
-        std::ofstream identity(directory / "fixture-sha256.txt", std::ios::binary);
-        identity << fixtureHash << '\n';
-        identity.close();
-        ASSERT_TRUE(identity);
+        const std::string cameraHash = LUMINUMBRA_SHADER_SCENE_CAMERA_HASH;
+        ASSERT_EQ(cameraHash.size(), 64u);
         std::ofstream image(directory / (std::string(name) + ".pfm"), std::ios::binary);
         image << "PF\n128 128\n-1.0\n";
         for (const float value : pixels) {
@@ -341,6 +403,14 @@ void main() {
         }
         image.close();
         ASSERT_TRUE(image);
+        std::ofstream identity(directory / "fixture-sha256.txt", std::ios::binary);
+        identity << fixtureHash << '\n';
+        identity.close();
+        ASSERT_TRUE(identity);
+        std::ofstream projectionIdentity(directory / "projection-sha256.txt", std::ios::binary);
+        projectionIdentity << cameraHash << '\n';
+        projectionIdentity.close();
+        ASSERT_TRUE(projectionIdentity);
         constexpr std::array<std::pair<const char*, GLenum>, 2> metadataFiles{
             std::pair<const char*, GLenum>{"renderer.txt", GL_RENDERER},
             std::pair<const char*, GLenum>{"version.txt", GL_VERSION}};
@@ -471,6 +541,9 @@ TEST_F(ShaderScene, MaterialLinearReferenceAndOcclusionBlend) {
     ASSERT_EQ(glGetError(), GL_NO_ERROR);
     ASSERT_FALSE(HasFailure());
     Save("material", pixels);
+    ASSERT_FALSE(HasFatalFailure());
+    ResetTargets();
+    NormalDecode();
 }
 
 TEST_F(ShaderScene, TreeImpostorAtlasCutout) {
@@ -696,6 +769,9 @@ TEST_F(ShaderScene, TerrainMaterialTransition) {
     ASSERT_FALSE(HasFatalFailure());
     ReleaseDraw();
     ShrubLeafReflectanceCutoutAndScaledNormals();
+    ASSERT_FALSE(HasFatalFailure());
+    ResetTargets();
+    DepthConventions();
 }
 
 void ShaderScene::ShrubLeafReflectanceCutoutAndScaledNormals() {
@@ -842,6 +918,170 @@ void ShaderScene::ShrubLeafReflectanceCutoutAndScaledNormals() {
 
 TEST_F(ShaderScene, NightSkyHorizonAndRadialStars) {
     Sky(false);
+}
+
+void ShaderScene::NormalDecode() {
+    const auto encoder = Source("res/shaders/g_buffer.frag");
+    const auto decoder = Source("res/shaders/lighting_pass.frag");
+    const std::string vertex = R"GLSL(#version 450 core
+layout(location=0) in vec3 analytic;
+flat out vec3 normal;
+void main() {
+    gl_Position = vec4((vec2(gl_VertexID % 128, gl_VertexID / 128) + 0.5) / 64.0 - 1.0, 0, 1);
+    gl_PointSize = 1.0;
+    normal = analytic;
+}
+)GLSL";
+    Kernel(vertex,
+           "#version 450 core\nflat in vec3 normal;\nout vec4 color;\n" +
+               Helper(encoder, "vec2 octWrap(") + Helper(encoder, "vec2 encode_octahedral(") +
+               "void main() { color = vec4(encode_octahedral(normal) * .5 + .5, 0, 0); }",
+           0,
+           GL_RGBA8);
+    ASSERT_FALSE(HasFatalFailure());
+    std::array<glm::vec3, PixelCount> normals{};
+    constexpr std::array<glm::vec3, 6> axes{
+        glm::vec3{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+    for (int y = 0; y < Size; ++y) {
+        for (int x = 0; x < Size; ++x) {
+            glm::vec3 normal{2 * (x % 16) - 15, 2 * (y % 16) - 15, 2 * (x / 16 + y / 16) - 14};
+            if (y == 0) {
+                if (x < 6) {
+                    normal = axes[static_cast<std::size_t>(x)];
+                } else if (x < 14) {
+                    for (int channel = 0; channel < 3; ++channel) {
+                        normal[channel] = ((x - 6) & (1 << channel)) != 0 ? 1.f : -1.f;
+                    }
+                } else {
+                    normal = {x & 1 ? 1.f : -1.f, x & 2 ? 1.f : -1.f, x & 4 ? .01f : -.01f};
+                }
+            }
+            normals[static_cast<std::size_t>(y * Size + x)] = glm::normalize(normal);
+        }
+    }
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(normals), normals.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), nullptr);
+    glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(PixelCount));
+    // Reattach a different output: the encoded RGBA8 texture is sampled only
+    // after detachment, so this exercises production storage without feedback.
+    Kernel(vertex,
+           "#version 450 core\nuniform sampler2D encoded;\nout vec3 color;\n" +
+               Helper(decoder, "vec2 octWrap(") + Helper(decoder, "vec3 decode_octahedral(") +
+               "void main() { color = .5 + .5 * decode_octahedral("
+               "texelFetch(encoded, ivec2(gl_FragCoord.xy), 0).xy); }",
+           1,
+           GL_RGB32F);
+    ASSERT_FALSE(HasFatalFailure());
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, attachments[0]);
+    glUniform1i(Uniform("encoded"), 0);
+    glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(PixelCount));
+    std::array<float, PixelCount * 3> pixels{};
+    glReadPixels(0, 0, Size, Size, GL_RGB, GL_FLOAT, pixels.data());
+    for (std::size_t pixel = 0; pixel < PixelCount; ++pixel) {
+        const glm::vec3 decoded =
+            glm::vec3(pixels[pixel * 3], pixels[pixel * 3 + 1], pixels[pixel * 3 + 2]) * 2.f - 1.f;
+        ASSERT_TRUE(std::isfinite(glm::length(decoded)));
+        EXPECT_NEAR(glm::length(decoded), 1.f, .000002f);
+        EXPECT_LE(
+            std::acos(std::clamp(glm::dot(glm::normalize(decoded), normals[pixel]), -1.f, 1.f)),
+            .02f);
+        for (int channel = 0; channel < 3; ++channel) {
+            if (std::abs(normals[pixel][channel]) > .006f) {
+                EXPECT_GT(decoded[channel] * normals[pixel][channel], 0);
+            }
+        }
+    }
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    ASSERT_FALSE(HasFailure());
+    Save("normal-decode", pixels);
+}
+
+void ShaderScene::DepthConventions() {
+    // Record the consumed production projection header alongside shader inputs.
+    ASSERT_FALSE(Source("src/luminumbra_client/rendering/Camera.h").empty());
+    const auto source = Source("res/shaders/magical_particles.frag");
+    const std::string vertex = R"GLSL(#version 450 core
+uniform mat4 projection;
+void main() {
+    int x = gl_VertexID % 128, y = gl_VertexID / 128;
+    float distance = 0.1 * pow(1000.0, float(x) / 127.0);
+    vec2 ndc = (vec2(x, y) + 0.5) / vec2(64, 32) - 1.0;
+    gl_Position = projection * vec4(ndc.x * distance / projection[0][0],
+                                    ndc.y * distance / projection[1][1], -distance, 1);
+    gl_PointSize = 1.0;
+}
+)GLSL";
+    Kernel(vertex,
+           "#version 450 core\nuniform float u_nearPlane, u_farPlane;\n"
+           "uniform int reversed_z;\nuniform mat4 projection;\nout vec3 color;\n" +
+               Helper(source, "float linearize_depth(") + R"GLSL(
+void main() {
+    float raw = gl_FragCoord.z;
+    float distance = linearize_depth(reversed_z != 0 ? raw : 1.0 - raw);
+    vec4 projected = projection * vec4(0, 0, -distance, 1);
+    float roundtrip = projected.z / projected.w;
+    if (reversed_z == 0) roundtrip = roundtrip * 0.5 + 0.5;
+    color = vec3(raw, distance / u_farPlane, clamp(roundtrip, 0.0, 1.0));
+}
+)GLSL",
+           0,
+           GL_RGB32F);
+    ASSERT_FALSE(HasFatalFailure());
+    glUniform1f(Uniform("u_nearPlane"), .1f);
+    glUniform1f(Uniform("u_farPlane"), 100.f);
+    glEnable(GL_DEPTH_CLAMP); // Include exact near/far planes despite float rounding.
+    for (int convention = 0; convention < 2; ++convention) {
+        const bool reversed = convention != 0;
+        const glm::mat4 projection =
+            reversed
+                ? Luminumbra::Rendering::ReversedZPerspective(glm::radians(45.f), 1.f, .1f, 100.f)
+                : glm::perspectiveRH_NO(glm::radians(45.f), 1.f, .1f, 100.f);
+        glClipControl(GL_LOWER_LEFT, reversed ? GL_ZERO_TO_ONE : GL_NEGATIVE_ONE_TO_ONE);
+        glUniformMatrix4fv(Uniform("projection"), 1, GL_FALSE, &projection[0][0]);
+        glUniform1i(Uniform("reversed_z"), reversed ? 1 : 0);
+        glViewport(0, convention * 64, Size, 64);
+        glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(PixelCount / 2));
+    }
+    glDisable(GL_DEPTH_CLAMP);
+    glClipControl(GL_LOWER_LEFT, GL_NEGATIVE_ONE_TO_ONE);
+    std::array<float, PixelCount * 3> pixels{};
+    glReadPixels(0, 0, Size, Size, GL_RGB, GL_FLOAT, pixels.data());
+    for (int y = 0; y < Size; ++y) {
+        float previous = y >= 64 ? 2.f : -1.f;
+        for (int x = 0; x < Size; ++x) {
+            const auto offset = static_cast<std::size_t>(y * Size + x) * 3;
+            const float raw = pixels[offset];
+            const float expected = .1f * std::pow(1000.f, static_cast<float>(x) / 127.f);
+            ASSERT_TRUE(std::isfinite(raw));
+            EXPECT_NEAR(pixels[offset + 1] * 100.f, expected, .0002f * expected);
+            EXPECT_NEAR(pixels[offset + 2], raw, .000002f);
+            if (y >= 64) {
+                EXPECT_LT(raw, previous);
+            } else {
+                EXPECT_GT(raw, previous);
+            }
+            if (x == 0 || x == 127) {
+                EXPECT_NEAR(raw, (x == 0) == (y >= 64) ? 1.f : 0.f, .000002f);
+            }
+            previous = raw;
+        }
+    }
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    ASSERT_FALSE(HasFailure());
+    Save("reversed-z", pixels);
+    ASSERT_FALSE(HasFatalFailure());
+    const char* output = std::getenv("LUMINUMBRA_SHADER_SCENE_OUTPUT");
+    ASSERT_NE(output, nullptr);
+    std::ofstream metadata(std::filesystem::path(output) / "depth-conventions.json",
+                           std::ios::binary);
+    metadata << R"JSON([{"reversed_z":false,"near":0.1,"far":100.0,"rows":[0,64]},
+{"reversed_z":true,"near":0.1,"far":100.0,"rows":[64,128]}])JSON";
+    metadata.close();
+    ASSERT_TRUE(metadata);
 }
 
 TEST_F(ShaderScene, DuskSkyAzimuthContinuity) {
