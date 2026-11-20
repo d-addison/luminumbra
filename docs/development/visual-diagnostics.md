@@ -13,12 +13,13 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | AOV serialization, integer ID encoding and point-probe JSON | Implemented as independent, GL-free codecs | `DiagnosticCapture.h/.cpp`; registered `DiagnosticCapture.*` regressions in `capture_manifest_test`; native execution pending |
 | Lazy integer target with attachment leases | Implemented as a standalone helper | `DiagnosticTargets.h`; registered `DiagnosticTargetDriver.*` regressions in `capture_manifest_test`; native execution pending |
 | Capture-local draw registry | Implemented with separate asset and generated-geometry identities | `DiagnosticDrawTable.h`; registered `DiagnosticDrawTable.*` regressions in `capture_manifest_test` and generated-key `DiagnosticAttribution.*` regressions in `render_smoke_test`; native execution pending |
-| Deferred attribution producers | Implemented inside a leased deferred scope | `GBufferTargets.h` and `GBufferPass.cpp` add a render-thread producer scope, capture-local draw identities and explicit unsupported records; `g_buffer.frag` and `foliage.frag` have additive `LUMIN_DIAG_IDS` outputs; registered `DiagnosticAttribution.*` source-contract and `DiagnosticAttributionGl.*` hidden-GL regressions in `render_smoke_test`; native execution pending |
+| Deferred attribution producers | Implemented inside a leased deferred scope | `GBufferTargets.h/.cpp` and `GBufferPass.cpp` add a render-thread producer scope, capture-local draw identities and explicit unsupported records; `g_buffer.frag`, `foliage.frag`, `plant_procgen.frag` and `scent_decal.frag` have guarded `LUMIN_DIAG_IDS` outputs; registered `DiagnosticAttribution.*` source-contract and `DiagnosticAttributionGl.*` hidden-GL regressions in `render_smoke_test`; native execution pending |
 | G-buffer ID attachment | Implemented for explicit deferred captures | `GBufferPass` holds an `AttachmentLease` during deferred submission; detachment and lease release precede completion, including rollback, recreation, retirement and exceptional exits; registered `GBufferLeaseGl.*` and `DiagnosticAttributionGl.*` regressions; native execution pending |
-| Exact producer coverage | Partial | Inside an explicit producer scope, file-backed static instances and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier with unsupported generated-mesh metadata. Live terrain MDI, ladder backend, authored surfaces and tree impostors explicitly invalidate coverage; procedural static meshes also remain unsupported. Later plant/decal stages are outside the scope. Foliage has a guarded shader output but no instrumented forward submission; the separate contributor attachment API is unused |
+| Exact producer coverage | Partial | Inside an explicit producer scope, file-backed static instances and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier with unsupported generated-mesh metadata. Live terrain MDI produces one identity per original command in pool-bucket order, using resident upload LOD and mesh version. The ladder backend, authored surfaces and tree impostors explicitly invalidate coverage; procedural static meshes also remain unsupported. Uploaded plant/marker batches resume deferred attribution, and additive scent decals use separate contributor storage. Missing contributor storage retains exact Forward records labeled `:contributor_only` and refuses completion. Foliage has a guarded shader output but no instrumented forward submission |
 | Bundle transactions and opt-in admission | GL-free core implemented; runtime integration pending | `DiagnosticCapture.h/.cpp` resolves options, streams normalized planes, joins draw records, enforces staging budgets and publishes completion last using identity-checked ownership. `diagnostic_bundle_test` covers public transports and filesystem refusal/rollback; native execution pending. Runtime setup refuses enabled diagnostics before output until the completed-frame adapter is integrated |
 | Dusk wedge attribution (issue #873) | Capture wiring and regression implemented; native execution pending | Fixed audit land pose, paired pre-present final/depth and available lighting sources; `FarWorldFogGl.DuskAuditFogIsContinuousAcrossDistanceAndHeightBoundaries`; no producer correction or visual approval |
 | ID views and single-pixel inspector | Implemented as explicit render-thread snapshots | `DebugViewPass`; developer-console debug-view panel; registered `DiagnosticInspector.*` and `DiagnosticInspectorGl.*` regressions in `pass_context_test`; native execution pending. Other B views and viewport picking remain planned |
+| Deferred shader contribution views | Implemented as opt-in live overlays | `DebugViewPass` and `LightingPass`; registered `DiagnosticContributions.*` and `DiagnosticContributionsGl.*` regressions in `pass_context_test`; native execution pending. Fog and separate forward/sky/shadow planes explicitly unsupported |
 | Linux shader compilation and software-GL reference scenes | Partial | Fast Linux steps and material, cutout, night, terrain, normal decode and both depth-convention fixtures registered; bounded sky/terrain shader replays checked under llvmpipe; native scene target execution pending; dusk continuity diagnostic pending issue #918; no required-check or ruleset changes |
 | Bundle validity and image checks | Implemented for schema 1 and reader-only schemas 2/3 | `check-diagnostic-capture.py` and registered `DiagnosticCapturePython` synthetic regressions validate bundles without a renderer. ROI coverage, validity, weather, edge and masked defect measurements plus worst-pixel SVG crops are implemented; synthetic detection is covered, while production thresholds remain advisory/unqualified |
 | Capture feature profile and capability manifest | Implemented as GL-free setup logic; app wiring pending | `CaptureFeatureProfile.h/.cpp`; strict `--capture-feature-profile=none\|all_features` runtime selection; registered `CaptureFeatureProfile.*` regressions; native execution pending |
@@ -108,24 +109,36 @@ Capability, extent and occupied-attachment refusals preserve caller state and re
 unsupported coverage. Scope nesting and nonempty-table reuse are refused.
 
 `complete()` requires a successful attachment, subsequent detachment, lease release,
-complete deferred coverage and no sticky failure or registry refusal. Variants and
-identity writes only operate while attached. Missing or invalid base programs
+complete deferred coverage and no sticky failure or registry refusal. Shader variants
+and pixel identity writes only operate while attached; detached Forward submissions
+retain contributor-only table entries. Missing or invalid base programs
 invalidate coverage, including an unavailable skinned program with an empty view.
 An isolation mask that filters the terrain or skinned layer invalidates coverage,
 whether or not the filtered layer has scene content.
 Queued tree impostors invalidate coverage before checking their program, so an
 invalid impostor program cannot bypass the unsupported record. Empty terrain and
-impostor queues add no unsupported record. Later deferred and forward contributors
-remain outside this coverage; this predicate alone cannot authorize a final bundle.
+impostor queues add no unsupported record. Uninstrumented forward producers remain
+outside this coverage; this predicate alone cannot authorize a final bundle.
 
 The contributor API can attach a distinct forward target after deferred detachment.
 It leases the selected storage through the same rollback and release path, preserves
 the forward framebuffer's original draw buffers, and enables only the additional
 identity output. The caller keeps that framebuffer alive through detachment. Missing
-or aliased storage, nested or repeated attachment, invalid extents and mismatched
+or aliased storage, nested attachments, invalid extents and mismatched
 contributor passes refuse coverage. Current-program writes use the attached
-variant; a pass mismatch uploads zero IDs without throwing. No shipping
-forward producer invokes this API yet.
+variant; a pass mismatch uploads zero IDs without throwing. Additive scent decals
+use this API, preserving the deferred surface owner. Empty, sky, outside-field and
+negligible decal fragments discard before writing contributor IDs. Without forward
+storage or an instrumented current program, exact per-draw Forward records append
+`:contributor_only` and invalidate completion. Invalid labels and identities refuse
+coverage without throwing; sticky registry refusal stops further table work.
+
+Plant batches resume the deferred plane without clearing earlier IDs. Forward
+continuations likewise retain earlier contributors, and both preserve original
+color routing. Continuations refuse extent changes with
+`diagnostic_continuation_extent_mismatch` before resizing storage or acquiring a
+lease. The contributor plane identifies the last contributing submission at a
+pixel; table entries retain all instrumented submissions, not every blended layer.
 
 Generated geometry can supply an exact bounded key instead of an asset path. The
 registry separates the two namespaces and emits a `generated` mesh member while
@@ -158,10 +171,9 @@ state restoration; native execution remains pending. Normal rendering keeps its 
 original attachments.
 
 Completing exact coverage requires changes beyond the deferred attachment owners:
-the live MDI origin/identity transport in `RenderPipeline.cpp`, the ladder submission
-metadata/backend, `StaticDrawPass`, `PlantProcgenPass`, `GroundDecalPass`,
-`FoliagePass` and `tree_impostor.frag`. A foliage
-identity belongs to a separate forward contributor plane because its color blends
+the ladder submission metadata/backend, `StaticDrawPass`, `FoliagePass` and
+`tree_impostor.frag`, plus water, glass, particles and waterfall forward submissions.
+A foliage identity belongs to a separate forward contributor plane because its color blends
 with the already lit scene. None of these gaps is represented as a guessed mesh or
 as successful background coverage.
 
@@ -355,6 +367,65 @@ refresh, never on the default rendering path. A competing capture scope refuses
 the snapshot request until that scope releases ownership. Viewport/DPI picking,
 AOV image freezing/zoom, extra attachment selection and bundle requests are later
 view/inspector work; coordinate inspection and identity-image freezing are available here.
+
+### Deferred contribution controls
+
+Use the existing **Identity diagnostics** switch and **Identity snapshot view**
+selector for the extended catalogue, or pass the exact name to `--debug-view`.
+F6 visits all enabled diagnostic modes after the six legacy modes; mode numbers
+0 through 11 retain their meanings. The panel status supplies the selected term's
+legend, transfer function and coverage label. Contribution overlays are live and
+read the current deferred surface, independently of the frozen identity snapshot.
+They do not populate the single-pixel inspector or capture bundles.
+
+| Mode | Name | Meaning |
+| --- | --- | --- |
+| 12 | direct-sun | Sun BRDF with actual shadow, cloud attenuation and transmission tint |
+| 13 | direct-moon | Wrapped lunar diffuse and specular, softened shadow and lunar colour transform |
+| 14 | sky-ambient | Ambient diffuse and integrated environment specular, applied AO and sky visibility |
+| 15 | shadow-factor | Sun shadow by day, softened lunar shadow when the lunar term is active; white is lit |
+| 16 | ao | Applied AO: SSAO, multiplied by material AO for authored surfaces only; studio starts at one |
+| 17 | emissive | Crystal, field, marker and authored emission before exposure |
+| 18 | fog-atmosphere | Unsupported: atmosphere/fog producer is not instrumented |
+| 19 | specular | Sun, lunar, point and environment specular with their actual factors |
+| 20 | roughness | Effective lighting roughness after clamp and snow adjustment |
+| 21 | metallic | Deferred metallic channel |
+| 22 | normal-view | Decoded signed view normal, displayed as XYZ times 0.5 plus 0.5 |
+| 23 | normal-world | Actual transformed world normal with the same encoding |
+| 24 | sky-visibility | Screen-space sky visibility; one when the feature is disabled |
+| 25 | material-ao | Material AO with the signed far-surface tag decoded |
+| 26 | lighting | Pre-albedo direct diffuse irradiance divided by PI from sun, moon and point lights, before BRDF and lunar colour transform |
+| 27 | forward-plane | Unsupported: separate forward contributor plane |
+| 28 | sky-plane | Unsupported: separate sky contributor plane |
+| 29 | shadow-plane | Unsupported: separate shadow producer plane |
+
+RGB light terms use the display transfer `max(x,0)/(1+max(x,0))`; scalar material
+and visibility values display directly. Storage remains linear RGBA16F before
+exposure, tonemapping and post. NaN is magenta and infinity cyan. Magenta hatching
+means unsupported or unavailable, including sky/background, stale mode, extent
+mismatch and frozen replay. If the overlay variant itself is unavailable, the
+existing unknown-mode magenta sentinel replaces the scene. The deferred ambient term is not a sky contributor
+plane, and the sampled shadow factor is not a shadow producer identity.
+
+Only an enabled supported contribution mode compiles `LUMIN_DIAG_CONTRIBUTIONS`
+and attaches one extra lighting output. It shades during the existing lighting
+draw, with no geometry replay or readback. The target is bounded to 16,384 per
+axis and 16,777,216 pixels (128 MiB), validated before allocation. Each active frame
+clears that bounded target to unsupported before drawing; no new world traversal
+is added. Attachment collisions, capability/extent/storage failures and invalid
+variants leave the plane unavailable. The attachment transaction restores draw
+buffers, its colour mask and indexed blending, and detaches before later passes.
+Disabling diagnostics performs no contribution allocation or compilation; retained
+storage is released on resize, renderer teardown or shader reset. The default
+lighting source outside additive guards is byte-for-byte preserved; the G-buffer
+shader is unchanged because it already stores roughness, metallic and AO. Registered
+source fingerprints enforce both contracts. Development prose, shaders and C++
+files remain outside the public asset inventory's classified roots; regeneration
+therefore leaves its classified contents unchanged.
+
+Shadow cascade footprint, sampled mip/texel density, triplanar weights, overdraw
+and a depth-tested wireframe overlay remain subsequent instrumentation work.
+No forward, atmosphere, sky or shadow producer coverage is inferred here.
 
 ## C: Linux shader lane
 
@@ -1044,7 +1115,7 @@ edits when parallel branches join. No new required CI checks are part of any row
 | A3: exact deferred attribution | `rendering/passes/GBufferPass.cpp`; `rendering/GBufferTargets.cpp`; `rendering/GBufferTargets.h`; `res/shaders/g_buffer.frag`; `res/shaders/foliage.frag`; `rendering/FarLodSystem.cpp`; `test/rendering/diagnostic_attribution_test.cpp`; `test/CMakeLists.txt`; `config/public-asset-inventory.json`; `docs/development/visual-diagnostics.md` (10) | After A2; coordinate owned files with minimal local hunks. Opt-in MRT shader variants mirror actual alpha/depth/LOD ownership; no approximate geometry replay. |
 | A4: scenario bundles and probes | `rendering/DiagnosticCapture.h`; `rendering/DiagnosticCapture.cpp`; `rendering/RenderPipeline.h`; `rendering/RenderPipeline.cpp`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `src/luminumbra_client/core/RuntimeScenarioConfig.cpp`; `test/rendering/diagnostic_bundle_test.cpp`; `test/CMakeLists.txt`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After A3. Shared readback/transaction adapter and once-only opt-in; coordinate owned scenario file. Extend capture_manifest_test for the GL-free adapter; use the client source manifest updated with the codecs in A2. |
 | B1: ID views and inspector | `rendering/passes/DebugViewPass.h`; `rendering/passes/DebugViewPass.cpp`; `res/shaders/debug_view.frag`; `src/luminumbra_client/debug/widgets/RenderControlWidgets.cpp`; `src/luminumbra_client/app/RegisterDeveloperWidgets.cpp`; `rendering/RenderPipeline.cpp`; `test/rendering/diagnostic_inspector_test.cpp`; `test/CMakeLists.txt`; `src/luminumbra_client/main_client.cpp`; `docs/development/visual-diagnostics.md` (10) | After A4. Named CLI/panel ID/LOD/chunk/ownership and mesh-path snapshots, single-pixel inspector; avoids listed owned files. |
-| B2: shader contribution views | `rendering/DiagnosticContributions.h`; `rendering/DiagnosticContributions.cpp`; `rendering/passes/DebugViewPass.cpp`; `res/shaders/debug_view.frag`; `res/shaders/lighting_pass.frag`; `res/shaders/g_buffer.frag`; `test/rendering/diagnostic_contributions_test.cpp`; `test/CMakeLists.txt`; `config/public-asset-inventory.json`; `docs/development/visual-diagnostics.md` (10) | After B1. Remaining view catalogue, instrumented opt-in variants and overlay state. Coordinate owned shaders. Forward/sky/shadow contributor planes remain separately labeled until their producers are instrumented. |
+| B2: shader contribution views | `rendering/passes/DebugViewPass.h`; `rendering/passes/DebugViewPass.cpp`; `rendering/passes/LightingPass.h`; `rendering/passes/LightingPass.cpp`; `res/shaders/debug_view.frag`; `res/shaders/lighting_pass.frag`; `test/rendering/diagnostic_contributions_test.cpp`; `test/rendering/diagnostic_inspector_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md` (10) | Implemented after B1. Live deferred contribution and material views, opt-in variants and overlay state; existing G-buffer material channels reused unchanged. Fog and forward/sky/shadow planes remain separately labelled unsupported. Other catalogue instrumentation remains planned. |
 | C1: every-PR shader compile and link completion | `tools/ci/compile_shaders.py`; `tools/ci/test_compile_shaders.py`; `test/rendering/render_smoke_test.cpp`; `docs/development/visual-diagnostics.md` (4) | Implemented in the existing unconditional fast-job step. Compile every stage permutation, then link the native program registry and compute inventory using the same prepared sources. Refuse missing pass-layout pairs or unlinked stage/define permutations; registered interface-mismatch, matching-pair and missing-program regressions cover linking. |
 | C2: llvmpipe scenes | `tools/gates/shader-scenes.py`; `tools/gates/test_shader_scenes.py`; `test/rendering/shader_scenes/scenes.json`; `test/rendering/shader_scenes/references/`; `test/rendering/shader_scene_render_test.cpp`; `test/CMakeLists.txt`; `tools/ci/validate_assets.py`; `config/public-asset-inventory.json`; `docs/development/visual-diagnostics.md` | Implemented on the existing reference/metric/regeneration path and path gate: seven references include normal decode, both depth conventions and post edge, plus integer-exact production compute SSBO readback. Post clamp and compute binding source mutations failed surfaceless llvmpipe checks and were restored byte-exactly. Native scene execution remains pending; dusk is diagnostic only. The post/compute extension changes seven files including one reference and its asset inventory; no workflow or required-check changes. |
 | D1: bundle/ID/AOV validity checks | `tools/gates/check-diagnostic-capture.py`; `tools/gates/test_diagnostic_capture.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `tools/gates/diff-render-health.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (8) | After A4; parallel with B/C. Registered Python reader tests cover little endian, dimensions, partial payloads, unknown versions and nonfinite values. Avoids owned files. |

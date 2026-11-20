@@ -188,6 +188,35 @@ class CommittedMatrixTests(MatrixTestBase):
 
 
 class CommandGoldenTests(MatrixTestBase):
+    def test_scene_bound_poses_require_native_confirmation_in_plan(self):
+        bound_ids = {'ground-settled', 'high-altitude-settled', 'cave-air-settled'}
+        for provenance in (None, 'unknown', 'native-confirmed:', 'native-confirmed: \t\n',
+                           'Native-confirmed: evidence.json', 'native-confirmed: evidence.json'):
+            with self.subTest(provenance=provenance):
+                matrix = committed()
+                for workload in matrix['workloads']:
+                    if workload['id'] in bound_ids:
+                        self.assertIsNotNone(workload['pose'])
+                        self.assertIn('pose_source', workload)
+                        if provenance is not None:
+                            workload['pose_provenance'] = provenance
+                qm.validate_matrix(matrix)
+                plan = planner.build_plan(matrix, client='client', out_dir=self.tmp,
+                                          root=ROOT, python=sys.executable)
+                confirmed = provenance == 'native-confirmed: evidence.json'
+                self.assertEqual(plan['cell_count'], 36)
+                self.assertEqual(plan['summary'], {'ready': 16, 'unevaluated': 20}
+                                 if confirmed else {'ready': 4, 'unevaluated': 32})
+                bound = [entry for entry in plan['cells'] if entry['workload'] in bound_ids]
+                self.assertEqual(len(bound), 12)
+                for entry in bound:
+                    with self.subTest(cell=entry['id']):
+                        expected = ('ready', None) if confirmed else (
+                            'unevaluated', 'pose-native-unconfirmed')
+                        self.assertEqual((entry['state'], entry['reason']), expected)
+                        self.assertEqual(entry['command'] is not None, confirmed)
+                        self.assertEqual(entry['checker_command'] is not None, confirmed)
+
     def test_pose_confirmation_controls_planner_and_both_commands(self):
         for provenance in ('needs native confirmation', 'unrecorded: evidence pending',
                            'unknown', 'native-confirmed:', 'native-confirmed: \t\n',
