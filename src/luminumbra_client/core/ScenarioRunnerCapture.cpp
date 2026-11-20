@@ -117,9 +117,11 @@ Rendering::CaptureManifestInput ScenarioRunnerImpl::scenarioCaptureManifest() co
 }
 
 bool ScenarioRunnerImpl::refuseScenarioCapture(std::string_view reason) {
-    scenario_failed = true;
-    scenario_failure_reason = "capture_diagnostics_" + std::string(reason);
-    LUMINUMBRA_CORE_ERROR("Scenario capture refused: {}", scenario_failure_reason);
+    if (!scenario_failed) {
+        scenario_failed = true;
+        scenario_failure_reason = "capture_diagnostics_" + std::string(reason);
+        LUMINUMBRA_CORE_ERROR("Scenario capture refused: {}", scenario_failure_reason);
+    }
     glfwSetWindowShouldClose(window, true);
     return false;
 }
@@ -128,9 +130,11 @@ bool ScenarioRunnerImpl::scenarioCaptureReady(int width, int height) {
     if (!renderPipeline.capture_diagnostics_enabled()) {
         return true;
     }
-    const auto reason = renderPipeline.diagnostic_capture_refusal();
-    if (!reason.empty()) {
-        return refuseScenarioCapture(reason);
+    if (scenario_failed) {
+        return false;
+    }
+    if (!renderPipeline.diagnostic_capture_ready()) {
+        return refuseScenarioCapture(renderPipeline.diagnostic_capture_refusal());
     }
     if (width <= 0 || height <= 0 ||
         static_cast<unsigned int>(width) != renderPipeline.screen_width() ||
