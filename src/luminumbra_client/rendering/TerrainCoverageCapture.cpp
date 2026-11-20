@@ -170,6 +170,7 @@ bool CaptureTexture(const std::filesystem::path& directory,
         files.push_back(file);
     }
     sources[name] = {{"status", "captured"},
+                     {"texture", texture},
                      {"dimensions", {width, height, layers}},
                      {"channels", output_channels},
                      {"files", std::move(files)}};
@@ -236,11 +237,40 @@ struct FogReadback {
     }
 };
 
+bool HasTextureStorage(GLuint texture) {
+    if (texture == 0 || glIsTexture(texture) != GL_TRUE) {
+        return false;
+    }
+    GLint width = 0, height = 0, depth = 0;
+    glGetTextureLevelParameteriv(texture, 0, GL_TEXTURE_WIDTH, &width);
+    glGetTextureLevelParameteriv(texture, 0, GL_TEXTURE_HEIGHT, &height);
+    glGetTextureLevelParameteriv(texture, 0, GL_TEXTURE_DEPTH, &depth);
+    return glGetError() == GL_NO_ERROR && width > 0 && height > 0 && depth > 0;
+}
+
 bool CaptureFog(const std::filesystem::path& directory,
                 const Shader& shader,
                 const RenderContext& context,
                 GLuint froxel,
                 Json& sources) {
+    if (context.screen_quad_vao == 0 || glIsVertexArray(context.screen_quad_vao) != GL_TRUE) {
+        return false;
+    }
+    const std::array<GLuint, 3> inputs{
+        context.gbuffer_depth.id, context.sky_view_lut.id, context.transmittance_lut.id};
+    for (const auto input : inputs) {
+        if (!HasTextureStorage(input)) {
+            return false;
+        }
+    }
+    // Use the mode already uploaded by the aerial pass, including frozen replay.
+    // A volume is required only when the fragment program will sample it.
+    GLint volumetric_mode = 0;
+    glGetUniformiv(
+        shader.Id(), glGetUniformLocation(shader.Id(), "u_volumetricMode"), &volumetric_mode);
+    if (glGetError() != GL_NO_ERROR || (volumetric_mode != 0 && !HasTextureStorage(froxel))) {
+        return false;
+    }
     FogReadback restore;
     // The caller has admitted at most 16M pixels. Private RGBA32F <= 256 MiB.
     glCreateTextures(GL_TEXTURE_2D, 1, &restore.texture);
@@ -262,8 +292,6 @@ bool CaptureFog(const std::filesystem::path& directory,
                0,
                static_cast<GLsizei>(context.internal_w()),
                static_cast<GLsizei>(context.internal_h()));
-    const std::array<GLuint, 3> inputs{
-        context.gbuffer_depth.id, context.sky_view_lut.id, context.transmittance_lut.id};
     for (std::size_t unit = 0; unit < inputs.size(); ++unit) {
         glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(unit));
         glBindTexture(GL_TEXTURE_2D, inputs[unit]);
@@ -769,8 +797,19 @@ bool RenderPipeline::capture_terrain_coverage(const std::filesystem::path& out_d
         }
         // These are source attachments, not independent additive lighting AOVs.
         // Fog is replayed separately; canopy visibility has no standalone target.
-        const auto& context = m_frame_lighting_ctx;
+        // Lighting's context contains its reads, not scene outputs or aerial LUTs.
+        // Wrap the frame owners here without changing ordinary lighting dispatch.
+        auto context = m_frame_lighting_ctx;
+        context.lit_scene_color =
+            adopt_texture(m_lighting_pass ? m_lighting_pass->lighting_fbo().color_texture : 0);
+        context.opaque_scene = adopt_texture(
+            m_lighting_pass ? m_lighting_pass->lighting_fbo().opaque_color_texture : 0);
+        context.sky_view_lut = adopt_texture(m_sky_lut.sky_view_texture());
+        context.transmittance_lut = adopt_texture(m_sky_lut.transmittance_texture());
         Json sources = Json::object();
+        // Froxel integration writes with imageStore. Texture fetch visibility
+        // alone does not cover the texture readbacks of either volume plane.
+        glMemoryBarrier(GL_TEXTURE_UPDATE_BARRIER_BIT);
         if (!CaptureTexture(out_dir, "lit-scene", context.lit_scene_color.id, GL_RGB, 3, sources) ||
             !CaptureTexture(out_dir, "opaque-scene", context.opaque_scene.id, GL_RGB, 3, sources) ||
             !CaptureTexture(out_dir, "sky-view", context.sky_view_lut.id, GL_RGB, 3, sources) ||
@@ -801,10 +840,10 @@ bool RenderPipeline::capture_terrain_coverage(const std::filesystem::path& out_d
         }
         const bool aerial_available =
             m_aerial_pass && m_aerial_pass->shader() && m_aerial_pass->shader()->IsValid() &&
-            m_sky_lut.ready() && context.screen_quad_vao != 0 &&
             m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Aerial);
         if (aerial_available) {
-            if (!CaptureFog(out_dir,
+            if (!m_sky_lut.ready() ||
+                !CaptureFog(out_dir,
                             *m_aerial_pass->shader(),
                             context,
                             m_froxel_pass ? m_froxel_pass->integrated_texture() : 0,
