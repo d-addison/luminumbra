@@ -467,7 +467,7 @@ class UploadBudgetWiring(unittest.TestCase):
         for signal in ("NearTerrainPrepared(coverage.expected_surface_chunks", "coverage.ready_surface_chunks",
                        "coverage.pending_lod_chunks", "diagnostic.missing == 0",
                        "diagnostic.stale == 0", "diagnostic.pending == 0",
-                       "far.coverage_settled", "InitialWaterPrepared(water_prepared,",
+                       "far_world.coverage_settled", "InitialWaterPrepared(water_prepared,",
                        "uploads.water_uploads_deferred",
                        "foliage->build_pending()", "pipeline.render_uploads_settled()",
                        "streaming.quiescent()"):
@@ -1919,6 +1919,80 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertLess(allocation.index("block_index == kInvalid)\n            return kInvalid"),
                         allocation.index("std::memcpy("))
 
+    def test_terrain_diagnostic_refusal_clears_before_batched_fallback(self):
+        attributed = body(self.pipeline, "void SubmitDiagnosticTerrainBucket(")
+        refusal = compact(body(attributed, "if (resident.lod < 0 || resident.lod > 255)"))
+        self.assertLess(refusal.index('unsupported("terrain_resident_lod_unavailable")'),
+                        refusal.index("capture->clear_current_identity();"))
+        self.assertLess(refusal.index("capture->clear_current_identity();"),
+                        refusal.index("capture = nullptr;"))
+        # A table-full refusal clears, drops the capture and leaves the loop the same way.
+        table_full = compact(body(attributed, "if (capture->refused())"))
+        self.assertTrue(table_full.endswith(
+            "capture->clear_current_identity(); capture = nullptr; break;"), table_full)
+        self.assertEqual(attributed.count("break;"), 2)
+        draw = body(self.pipeline, "void RenderPipeline::draw_chunks_mdi(")
+        excess = compact(body(draw, "if (diagnostic_capture && running > 65536)"))
+        self.assertLess(excess.index("clear_current_identity();"),
+                        excess.index("diagnostic_capture = nullptr;"))
+        staged = body(draw, "if (diagnostic_chunks)")
+        self.assertIn("SubmitDiagnosticTerrainBucket(", staged)
+        self.assertIn("continue;", staged)
+
+    def test_terrain_diagnostic_identity_precedes_each_indirect_command(self):
+        attributed = body(self.pipeline, "void SubmitDiagnosticTerrainBucket(")
+        loop = compact(body(attributed, "for (std::size_t draw = first;"))
+        self.assertLess(loop.index("capture->write_current("),
+                        loop.index("AttributedGl::Submit( glDrawElementsIndirect,"))
+        self.assertIn(".lod = static_cast<std::uint32_t>(resident.lod)", loop)
+        self.assertIn("const auto& resident = draws[draw - first]", loop)
+
+    def test_terrain_generated_mesh_key_includes_resident_geometry_generation(self):
+        draw = body(self.pipeline, "void RenderPipeline::draw_chunks_mdi(")
+        self.assertIn(".geometry_generation = a.geometry_generation", draw)
+        attributed = body(self.pipeline, "void SubmitDiagnosticTerrainBucket(")
+        key = compact(attributed[attributed.index("std::string mesh_key;"):
+                                 attributed.index("capture->write_current(")])
+        self.assertEqual(key,
+                         'std::string mesh_key; mesh_key.reserve(94); mesh_key += "terrain/"; '
+                         "mesh_key += std::to_string(resident.chunk[0]); mesh_key += '/'; "
+                         "mesh_key += std::to_string(resident.chunk[1]); mesh_key += '/'; "
+                         'mesh_key += std::to_string(resident.chunk[2]); mesh_key += "/version/"; '
+                         'mesh_key += std::to_string(resident.mesh_version); '
+                         'mesh_key += "/generation/"; '
+                         'std::array<char, 20> generation{}; // uint64 has at most 20 decimal digits. '
+                         'const auto* generation_end = std::to_chars(generation.data(), '
+                         'generation.data() + generation.size(), resident.geometry_generation) .ptr; '
+                         'mesh_key.append(generation.data(), '
+                         'static_cast<std::size_t>(generation_end - generation.data()));')
+        regression = read(ROOT / "test/rendering/diagnostic_attribution_test.cpp")
+        self.assertIn("TerrainGeometryIdentityTracksUploadsAcrossEvictionAndRedraw", regression)
+
+    def test_terrain_geometry_generation_covers_both_upload_paths_and_never_resets(self):
+        pool = read(RENDERING / "passes/ChunkGeometryPool.cpp")
+        self.assertIn("u64 next_geometry_generation()", pool)
+        sequence = compact(body(pool, "u64 next_geometry_generation()"))
+        self.assertIn("static u64 generation = 0;", sequence)
+        self.assertIn("if (generation == std::numeric_limits<u64>::max()) { return 0; }",
+                      sequence)
+        self.assertTrue(sequence.endswith("return ++generation;"), sequence)
+        self.assertEqual(pool.count("next_geometry_generation();"), 2)
+        for signature in ("u32 ChunkGeometryPool::allocate_with_reclaim(",
+                          "u32 ChunkGeometryPool::reuse_completed("):
+            upload = compact(body(pool, signature))
+            self.assertIn("const u64 geometry_generation = next_geometry_generation();", upload)
+            self.assertIn("if (geometry_generation == 0) { return kInvalid; }", upload)
+            self.assertLess(upload.index("if (geometry_generation == 0)"),
+                            upload.index("std::memcpy("))
+            self.assertIn("alloc.geometry_generation = geometry_generation;", upload)
+            self.assertLess(upload.rindex("std::memcpy("),
+                            upload.index("alloc.geometry_generation = geometry_generation;"))
+        for signature in ("void ChunkGeometryPool::free(", "void ChunkGeometryPool::clear()",
+                          "void ChunkGeometryPool::destroy()"):
+            self.assertNotIn("generation", body(pool, signature))
+        header = read(RENDERING / "passes/ChunkGeometryPool.h")
+        self.assertIn("u64 geometry_generation = 0;", header)
+
     def test_terrain_retirement_covers_every_submission_and_never_overwrites(self):
         pool = read(RENDERING / "passes/ChunkGeometryPool.cpp")
         pool_header = read(RENDERING / "passes/ChunkGeometryPool.h")
@@ -1963,10 +2037,27 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("glDeleteSync(retired.completion)", destroy)
         self.assertIn("m_storage_bytes = 0", destroy)
         draw = body(self.pipeline, "void RenderPipeline::draw_chunks_mdi(")
-        self.assertIn("m_chunk_geometry_pool.mark_submitted(", draw)
-        self.assertLess(compact(draw).index("AttributedGl::Submit( glMultiDrawElementsIndirect,"),
-                        draw.index("m_chunk_geometry_pool.mark_submitted("))
-        self.assertEqual(compact(self.pipeline).count("AttributedGl::Submit( glMultiDrawElementsIndirect,"), 1)
+        attributed = body(self.pipeline, "void SubmitDiagnosticTerrainBucket(")
+        diagnostic = compact(body(attributed, "for (std::size_t draw = first;"))
+        self.assertLess(diagnostic.index("AttributedGl::Submit( glDrawElementsIndirect,"),
+                        diagnostic.index("retirement.submitted = true;"))
+        # A table-full refusal leaves the loop before its command is drawn individually.
+        self.assertLess(diagnostic.index("capture->refused()"),
+                        diagnostic.index("AttributedGl::Submit( glDrawElementsIndirect,"))
+        # Undiagnosed draws, and the rest of a bucket after a diagnostic refusal, share one multi-draw.
+        batched = compact(body(attributed, "if (mdi_first < first + count)"))
+        self.assertLess(batched.index("AttributedGl::Submit( glMultiDrawElementsIndirect,"),
+                        batched.index("retirement.submitted = true;"))
+        self.assertNotIn("pool.mark_submitted(", diagnostic)
+        self.assertNotIn("pool.mark_submitted(", batched)
+        # One fence-tracked retirement per bucket, also on an exception after a draw.
+        retire = compact(body(attributed, "~BucketRetirement()"))
+        self.assertIn("if (submitted) { pool.mark_submitted(bucket); }", retire)
+        self.assertEqual(compact(attributed).count("pool.mark_submitted("), 1)
+        self.assertEqual(compact(self.pipeline).count("AttributedGl::Submit( glMultiDrawElementsIndirect,"), 2)
+        shipping = compact(body(draw, "if (mdi_first < first + count)"))
+        self.assertLess(shipping.index("glMultiDrawElementsIndirect,"),
+                        shipping.index("m_chunk_geometry_pool.mark_submitted("))
         probe = read(ROOT / "test/rendering/render_smoke_test.cpp")
         self.assertIn("glMultiDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_INT, nullptr, 1, 0);\n"
                       "        pool_.mark_submitted(allocation.block_index);", probe)
