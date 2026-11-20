@@ -65,14 +65,21 @@ protected:
         glDisable(GL_FRAMEBUFFER_SRGB);
         glDisable(GL_DEPTH_TEST);
     }
+    void ReleaseDraw() {
+        glDeleteProgram(program);
+        glDeleteFramebuffers(1, &framebuffer);
+        glDeleteVertexArrays(1, &vao);
+        glDeleteBuffers(1, &vbo);
+        glDeleteTextures(static_cast<GLsizei>(attachments.size()), attachments.data());
+        glDeleteTextures(static_cast<GLsizei>(textures.size()), textures.data());
+        program = framebuffer = vao = vbo = 0;
+        attachments.fill(0);
+        textures.fill(0);
+    }
+    void ShrubLeafReflectanceCutoutAndScaledNormals();
     void ResetTargets() {
         if (glad_glDeleteProgram != nullptr && window != nullptr) {
-            glDeleteProgram(program);
-            glDeleteFramebuffers(1, &framebuffer);
-            glDeleteVertexArrays(1, &vao);
-            glDeleteBuffers(1, &vbo);
-            glDeleteTextures(static_cast<GLsizei>(attachments.size()), attachments.data());
-            glDeleteTextures(static_cast<GLsizei>(textures.size()), textures.data());
+            ReleaseDraw();
         }
         program = framebuffer = vao = vbo = 0;
         attachments.fill(0);
@@ -760,8 +767,153 @@ TEST_F(ShaderScene, TerrainMaterialTransition) {
     ASSERT_FALSE(HasFailure());
     Save("terrain-blend", pixels);
     ASSERT_FALSE(HasFatalFailure());
+    ReleaseDraw();
+    ShrubLeafReflectanceCutoutAndScaledNormals();
+    ASSERT_FALSE(HasFatalFailure());
     ResetTargets();
     DepthConventions();
+}
+
+void ShaderScene::ShrubLeafReflectanceCutoutAndScaledNormals() {
+    const GLuint vertex = Compile(GL_VERTEX_SHADER, "instanced_mesh.vert");
+    const GLuint fragment = Compile(GL_FRAGMENT_SHADER, "g_buffer.frag");
+    ASSERT_NE(vertex, 0u);
+    ASSERT_NE(fragment, 0u);
+    program = Link(vertex, fragment);
+    ASSERT_NE(program, 0u);
+    glUseProgram(program);
+    constexpr std::array<float, 16> identity{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    constexpr std::array<float, 9> rotation{1, 0, 0, 0, 1, 0, 0, 0, 1};
+    for (const char* name : {"view", "u_prev_view_proj"}) {
+        glUniformMatrix4fv(Uniform(name), 1, GL_FALSE, identity.data());
+    }
+    glUniformMatrix3fv(Uniform("u_normalViewMatrix"), 1, GL_FALSE, rotation.data());
+    glUniform1i(Uniform("u_materialId"), 3);
+    glUniform1i(Uniform("u_forceFlat"), 1);
+    glUniform1i(Uniform("u_skinnedAlbedoLayer"), -1);
+    glUniform1i(Uniform("u_skinnedNormalLayer"), -1);
+    // Isolate the authored reflectance from world-position macro mottling.
+    glUniform1i(Uniform("u_staticSurfaceLayer"), 0);
+    glUniform1i(Uniform("u_materialLUT"), 0);
+    for (const char* name : {"u_terrainTextures",
+                             "u_terrainNormals",
+                             "u_terrainRoughness",
+                             "u_skinnedTextures",
+                             "u_staticNormals",
+                             "u_staticSurface"}) {
+        glUniform1i(Uniform(name), 1);
+    }
+    glGenTextures(static_cast<GLsizei>(textures.size()), textures.data());
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, textures[0]);
+    std::array<float, 256 * 4 * 4> lut{};
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 256, 4, 0, GL_RGBA, GL_FLOAT, lut.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, textures[1]);
+    constexpr std::array<float, 4> unused{};
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA32F, 1, 1, 1, 0, GL_RGBA, GL_FLOAT, unused.data());
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    constexpr std::array<float, 20> vertices{-1, -1, 0, 0, 0, 1, -1, 0, 1, 0,
+                                             -1, 1,  0, 0, 1, 1, 1,  0, 1, 1};
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), nullptr);
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2,
+                          2,
+                          GL_FLOAT,
+                          GL_FALSE,
+                          5 * sizeof(float),
+                          reinterpret_cast<const void*>(3 * sizeof(float)));
+    glVertexAttrib3f(1, 1, 1, 1);
+    glVertexAttrib3f(7, 1, 1, 1);
+    glGenFramebuffers(1, &framebuffer);
+    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+    glGenTextures(static_cast<GLsizei>(attachments.size()), attachments.data());
+    std::array<GLenum, 6> buffers{};
+    glActiveTexture(GL_TEXTURE2);
+    for (std::size_t index = 0; index < attachments.size(); ++index) {
+        glBindTexture(GL_TEXTURE_2D, attachments[index]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, Size, Size, 0, GL_RGBA, GL_FLOAT, nullptr);
+        buffers[index] = GL_COLOR_ATTACHMENT0 + static_cast<GLenum>(index);
+        glFramebufferTexture2D(
+            GL_FRAMEBUFFER, buffers[index], GL_TEXTURE_2D, attachments[index], 0);
+    }
+    glDrawBuffers(static_cast<GLsizei>(buffers.size()), buffers.data());
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+    constexpr std::array<float, 4> background{.0625f, .125f, .1875f, .25f};
+    for (int index = 0; index < 6; ++index) {
+        glClearBufferfv(GL_COLOR, index, background.data());
+    }
+    // Two scale rows, four panels: default grass, closed hull, front/back cards.
+    // Compensating projection keeps the same pixel-centre UVs at either scale.
+    for (int row = 0; row < 2; ++row) {
+        auto instance = identity;
+        instance[5] = row == 0 ? 2.f : 1.f;
+        auto projection = identity;
+        projection[5] = 1.f / instance[5];
+        glUniformMatrix4fv(Uniform("projection"), 1, GL_FALSE, projection.data());
+        for (GLuint column = 0; column < 4; ++column) {
+            glVertexAttrib4fv(3 + column, instance.data() + static_cast<std::size_t>(column) * 4);
+        }
+        for (int panel = 0; panel < 4; ++panel) {
+            glUniform1i(Uniform("u_leafSurface"), panel == 0 ? 0 : 1);
+            glUniform1i(Uniform("u_alphaTest"), panel >= 2 ? 2 : 0);
+            glFrontFace(panel == 3 ? GL_CW : GL_CCW);
+            glViewport(panel * 32, row * 64, 32, 64);
+            glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, 1);
+        }
+    }
+    glFrontFace(GL_CCW);
+    std::array<float, PixelCount * 3> albedo{};
+    std::array<float, PixelCount * 3> normals{};
+    glReadBuffer(GL_COLOR_ATTACHMENT2);
+    glReadPixels(0, 0, Size, Size, GL_RGB, GL_FLOAT, albedo.data());
+    glReadBuffer(GL_COLOR_ATTACHMENT1);
+    glReadPixels(0, 0, Size, Size, GL_RGB, GL_FLOAT, normals.data());
+    // Check every pixel independently of the image comparator, including the
+    // preserved background in both attachments when a card fragment discards.
+    for (int y = 0; y < Size; ++y) {
+        for (int x = 0; x < Size; ++x) {
+            const int panel = x / 32;
+            const double u = (static_cast<double>(x % 32) + .5) / 32;
+            const double v = (static_cast<double>(y % 64) + .5) / 64;
+            const double leafX = (2 * u - 1) * (1 + .10 * std::sin(v * 22));
+            const double leafY = 2 * v - 1;
+            const bool discarded = panel >= 2 && leafX * leafX + leafY * leafY > 1;
+            const std::array<float, 3> reflectance = panel == 0
+                                                         ? std::array<float, 3>{.2f, .6f, .15f}
+                                                         : std::array<float, 3>{.10f, .24f, .045f};
+            // Oct encoding cancels normalization: (1, 1/scaleY, 1) / L1.
+            const float divisor = y < 64 ? 2.5f : 3.f;
+            const float nx = .5f + .5f / divisor;
+            const float ny = .5f + .5f * (y < 64 ? .5f : 1.f) / divisor;
+            const std::array<float, 3> normal = panel == 3
+                                                    ? std::array<float, 3>{ny - .5f, nx - .5f, 0}
+                                                    : std::array<float, 3>{nx, ny, 0};
+            const auto offset =
+                (static_cast<std::size_t>(y) * Size + static_cast<std::size_t>(x)) * 3;
+            for (std::size_t channel = 0; channel < 3; ++channel) {
+                EXPECT_NEAR(albedo[offset + channel],
+                            discarded ? background[channel] : reflectance[channel],
+                            1e-6f);
+                EXPECT_NEAR(normals[offset + channel],
+                            discarded ? background[channel] : normal[channel],
+                            1e-6f);
+            }
+        }
+    }
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    ASSERT_FALSE(HasFailure());
+    Save("shrub-leaf", albedo);
+    Save("shrub-normal", normals);
 }
 
 TEST_F(ShaderScene, NightSkyHorizonAndRadialStars) {
