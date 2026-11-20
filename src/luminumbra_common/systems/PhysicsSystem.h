@@ -178,6 +178,15 @@ public:
         static constexpr std::size_t kMaxBytes = 65536;
         std::array<std::uint8_t, kMaxBytes> bytes{};
         std::uint32_t size = 0;
+        // In-memory continuation only; the versioned scalar payload is unchanged.
+        // Defaulted fields keep existing dynamic-sphere/capsule records compatible.
+        bool suspended = false;
+        glm::vec3 retained_velocity{0.0f};
+        glm::vec3 retained_angular_velocity{0.0f};
+        bool was_active = false;
+        // Live terrain-registration slot + 1 (0 = unregistered). Restore keeps
+        // this order, which swap-removal and reuse make independent of payload order.
+        std::uint32_t registration_slot = 0;
     };
     struct BodySetState {
         std::vector<BodyOwnerState> owners;

@@ -1,14 +1,20 @@
 #include "RenderPipeline.h"
 
+#include "AttributedGl.h"
 #include "Camera.h"
 #include "FarLodSystem.h"
+#include "Shader.h"
 #include "UploadBudget.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "passes/AerialPass.h"
+#include "passes/FroxelPass.h"
+#include "passes/LightingPass.h"
 
 #include <glm/gtc/type_ptr.hpp>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <fstream>
@@ -59,6 +65,7 @@ bool WriteBytePlane(const std::filesystem::path& path,
 struct ReadbackState {
     GLint fbo = 0, read_buffer = 0, gbuffer_read = 0, back_read = 0, pbo = 0;
     GLint alignment = 0, row_length = 0, skip_rows = 0, skip_pixels = 0, swap_bytes = 0;
+    GLint image_height = 0, skip_images = 0;
     GLuint gbuffer = 0;
     explicit ReadbackState(GLuint id)
         : gbuffer(id) {
@@ -70,6 +77,8 @@ struct ReadbackState {
         glGetIntegerv(GL_PACK_SKIP_ROWS, &skip_rows);
         glGetIntegerv(GL_PACK_SKIP_PIXELS, &skip_pixels);
         glGetIntegerv(GL_PACK_SWAP_BYTES, &swap_bytes);
+        glGetIntegerv(GL_PACK_IMAGE_HEIGHT, &image_height);
+        glGetIntegerv(GL_PACK_SKIP_IMAGES, &skip_images);
         glBindFramebuffer(GL_READ_FRAMEBUFFER, gbuffer);
         glGetIntegerv(GL_READ_BUFFER, &gbuffer_read);
         glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
@@ -80,6 +89,8 @@ struct ReadbackState {
         glPixelStorei(GL_PACK_SKIP_ROWS, 0);
         glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
         glPixelStorei(GL_PACK_SWAP_BYTES, GL_FALSE);
+        glPixelStorei(GL_PACK_IMAGE_HEIGHT, 0);
+        glPixelStorei(GL_PACK_SKIP_IMAGES, 0);
     }
     ~ReadbackState() {
         glBindFramebuffer(GL_READ_FRAMEBUFFER, gbuffer);
@@ -94,8 +105,271 @@ struct ReadbackState {
         glPixelStorei(GL_PACK_SKIP_ROWS, skip_rows);
         glPixelStorei(GL_PACK_SKIP_PIXELS, skip_pixels);
         glPixelStorei(GL_PACK_SWAP_BYTES, swap_bytes);
+        glPixelStorei(GL_PACK_IMAGE_HEIGHT, image_height);
+        glPixelStorei(GL_PACK_SKIP_IMAGES, skip_images);
     }
 };
+// Read existing pass inputs without rebinding textures or rerunning the scene.
+// One plane at a time: at most 16M pixels / 256 MiB and 64 volume slices.
+bool CaptureTexture(const std::filesystem::path& directory,
+                    const char* name,
+                    GLuint texture,
+                    GLenum format,
+                    int channels,
+                    Json& sources) {
+    if (texture == 0) {
+        sources[name] = {{"status", "unavailable"}};
+        return true;
+    }
+    GLint width = 0, height = 0, layers = 0;
+    glGetTextureLevelParameteriv(texture, 0, GL_TEXTURE_WIDTH, &width);
+    glGetTextureLevelParameteriv(texture, 0, GL_TEXTURE_HEIGHT, &height);
+    glGetTextureLevelParameteriv(texture, 0, GL_TEXTURE_DEPTH, &layers);
+    constexpr std::size_t max_pixels = 16u * 1024u * 1024u;
+    if (glGetError() != GL_NO_ERROR || width <= 0 || height <= 0 || layers < 1 || layers > 64 ||
+        static_cast<std::size_t>(width) > max_pixels / static_cast<std::size_t>(height)) {
+        return false;
+    }
+    if ((channels != 1 && channels != 3 && channels != 4) || (channels == 4 && format != GL_RGBA)) {
+        return false;
+    }
+    const auto count = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) *
+                       static_cast<std::size_t>(channels);
+    std::vector<float> values(count);
+    const int output_channels = format == GL_RGBA ? 1 : channels;
+    auto files = Json::array();
+    for (int layer = 0; layer < layers; ++layer) {
+        values.resize(count);
+        glGetTextureSubImage(texture,
+                             0,
+                             0,
+                             0,
+                             layer,
+                             width,
+                             height,
+                             1,
+                             format,
+                             GL_FLOAT,
+                             static_cast<GLsizei>(count * sizeof(float)),
+                             values.data());
+        if (format == GL_RGBA) {
+            const auto plane_pixels = count / 4u;
+            for (std::size_t pixel = 0; pixel < plane_pixels; ++pixel) {
+                values[pixel] = values[pixel * 4u + 3u];
+            }
+            values.resize(plane_pixels);
+        }
+        const std::string file = std::string(name) + "-" + std::to_string(layer) + ".pfm";
+        if (glGetError() != GL_NO_ERROR || !WriteFloatPlane(directory / file,
+                                                            static_cast<u32>(width),
+                                                            static_cast<u32>(height),
+                                                            output_channels,
+                                                            values)) {
+            return false;
+        }
+        files.push_back(file);
+    }
+    sources[name] = {{"status", "captured"},
+                     {"texture", texture},
+                     {"dimensions", {width, height, layers}},
+                     {"channels", output_channels},
+                     {"files", std::move(files)}};
+    return true;
+}
+
+// Replay only the existing fog fragment program into private storage, using
+// its unchanged uploaded uniforms and current-frame inputs. No scene advancement.
+struct FogReadback {
+    GLint draw_fbo = 0, program = 0, vao = 0, active = 0;
+    std::array<GLint, 4> viewport{}, texture_2d{}, texture_3d{};
+    std::array<GLboolean, 4> mask{};
+    std::array<GLint, 2> polygon_mode{};
+    static constexpr std::array<GLenum, 4> capabilities{
+        GL_DEPTH_TEST, GL_SCISSOR_TEST, GL_CULL_FACE, GL_RASTERIZER_DISCARD};
+    std::array<GLboolean, capabilities.size()> enabled{};
+    GLboolean blend = GL_FALSE;
+    GLuint texture = 0, fbo = 0;
+    FogReadback() {
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw_fbo);
+        glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+        glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vao);
+        glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
+        glGetIntegerv(GL_VIEWPORT, viewport.data());
+        glGetBooleani_v(GL_COLOR_WRITEMASK, 0, mask.data());
+        blend = glIsEnabledi(GL_BLEND, 0);
+        glDisablei(GL_BLEND, 0);
+        glGetIntegerv(GL_POLYGON_MODE, polygon_mode.data());
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        for (std::size_t unit = 0; unit < texture_2d.size(); ++unit) {
+            glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(unit));
+            glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture_2d[unit]);
+            glGetIntegerv(GL_TEXTURE_BINDING_3D, &texture_3d[unit]);
+        }
+        for (std::size_t index = 0; index < capabilities.size(); ++index) {
+            enabled[index] = glIsEnabled(capabilities[index]);
+            glDisable(capabilities[index]);
+        }
+        glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    }
+    ~FogReadback() {
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(draw_fbo));
+        AttributedGl::UseProgram(glUseProgram, static_cast<GLuint>(program));
+        glBindVertexArray(static_cast<GLuint>(vao));
+        glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+        glColorMaski(0, mask[0], mask[1], mask[2], mask[3]);
+        if (blend) {
+            glEnablei(GL_BLEND, 0);
+        }
+        glPolygonMode(GL_FRONT_AND_BACK, static_cast<GLenum>(polygon_mode[0]));
+        for (std::size_t index = 0; index < capabilities.size(); ++index) {
+            if (enabled[index]) {
+                glEnable(capabilities[index]);
+            }
+        }
+        for (std::size_t unit = 0; unit < texture_2d.size(); ++unit) {
+            glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(unit));
+            glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(texture_2d[unit]));
+            glBindTexture(GL_TEXTURE_3D, static_cast<GLuint>(texture_3d[unit]));
+        }
+        glActiveTexture(static_cast<GLenum>(active));
+        glDeleteFramebuffers(1, &fbo);
+        glDeleteTextures(1, &texture);
+    }
+};
+
+bool HasTextureStorage(GLuint texture) {
+    if (texture == 0 || glIsTexture(texture) != GL_TRUE) {
+        return false;
+    }
+    GLint width = 0, height = 0, depth = 0;
+    glGetTextureLevelParameteriv(texture, 0, GL_TEXTURE_WIDTH, &width);
+    glGetTextureLevelParameteriv(texture, 0, GL_TEXTURE_HEIGHT, &height);
+    glGetTextureLevelParameteriv(texture, 0, GL_TEXTURE_DEPTH, &depth);
+    return glGetError() == GL_NO_ERROR && width > 0 && height > 0 && depth > 0;
+}
+
+bool CaptureFog(const std::filesystem::path& directory,
+                const Shader& shader,
+                const RenderContext& context,
+                GLuint froxel,
+                Json& sources) {
+    if (context.screen_quad_vao == 0 || glIsVertexArray(context.screen_quad_vao) != GL_TRUE) {
+        return false;
+    }
+    const std::array<GLuint, 3> inputs{
+        context.gbuffer_depth.id, context.sky_view_lut.id, context.transmittance_lut.id};
+    for (const auto input : inputs) {
+        if (!HasTextureStorage(input)) {
+            return false;
+        }
+    }
+    // Use the mode already uploaded by the aerial pass, including frozen replay.
+    // A volume is required only when the fragment program will sample it.
+    GLint volumetric_mode = 0;
+    glGetUniformiv(
+        shader.Id(), glGetUniformLocation(shader.Id(), "u_volumetricMode"), &volumetric_mode);
+    if (glGetError() != GL_NO_ERROR || (volumetric_mode != 0 && !HasTextureStorage(froxel))) {
+        return false;
+    }
+    FogReadback restore;
+    // The caller has admitted at most 16M pixels. Private RGBA32F <= 256 MiB.
+    glCreateTextures(GL_TEXTURE_2D, 1, &restore.texture);
+    glTextureStorage2D(restore.texture,
+                       1,
+                       GL_RGBA32F,
+                       static_cast<GLsizei>(context.internal_w()),
+                       static_cast<GLsizei>(context.internal_h()));
+    glCreateFramebuffers(1, &restore.fbo);
+    glNamedFramebufferTexture(restore.fbo, GL_COLOR_ATTACHMENT0, restore.texture, 0);
+    glNamedFramebufferDrawBuffer(restore.fbo, GL_COLOR_ATTACHMENT0);
+    if (glGetError() != GL_NO_ERROR ||
+        glCheckNamedFramebufferStatus(restore.fbo, GL_DRAW_FRAMEBUFFER) !=
+            GL_FRAMEBUFFER_COMPLETE) {
+        return false;
+    }
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, restore.fbo);
+    glViewport(0,
+               0,
+               static_cast<GLsizei>(context.internal_w()),
+               static_cast<GLsizei>(context.internal_h()));
+    for (std::size_t unit = 0; unit < inputs.size(); ++unit) {
+        glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(unit));
+        glBindTexture(GL_TEXTURE_2D, inputs[unit]);
+    }
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_3D, froxel);
+    AttributedGl::UseProgram(glUseProgram, shader.Id());
+    glBindVertexArray(context.screen_quad_vao);
+    AttributedGl::Submit(glDrawArrays, GLenum{GL_TRIANGLE_STRIP}, 0, 4);
+    return glGetError() == GL_NO_ERROR &&
+           CaptureTexture(directory, "aerial-inscatter", restore.texture, GL_RGB, 3, sources) &&
+           CaptureTexture(directory, "aerial-opacity", restore.texture, GL_RGBA, 4, sources);
+}
+
+// Values are the uniforms already uploaded for this frame, including optional
+// canopy controls and fog defaults. Sampler values identify units, not images.
+Json CaptureUniforms(const Shader* shader) {
+    Json uniforms = Json::object();
+    if (!shader || !shader->IsValid()) {
+        return uniforms;
+    }
+    GLint count = 0;
+    glGetProgramiv(shader->Id(), GL_ACTIVE_UNIFORMS, &count);
+    // Production programs are small; refuse oversized reflection explicitly.
+    if (count < 0 || count > 512) {
+        return {{"status", "reflection_limit"}};
+    }
+    for (GLint index = 0; index < count; ++index) {
+        std::array<char, 256> name{};
+        GLsizei length = 0;
+        GLint size = 0;
+        GLenum type = 0;
+        glGetActiveUniform(shader->Id(),
+                           static_cast<GLuint>(index),
+                           static_cast<GLsizei>(name.size()),
+                           &length,
+                           &size,
+                           &type,
+                           name.data());
+        if (length <= 0 || length >= static_cast<GLsizei>(name.size() - 1) || size < 1 ||
+            size > 64) {
+            uniforms["status"] = "reflection_limit";
+            return uniforms;
+        }
+        const int components = type == GL_FLOAT_MAT4   ? 16
+                               : type == GL_FLOAT_VEC4 ? 4
+                               : type == GL_FLOAT_VEC3 ? 3
+                               : type == GL_FLOAT_VEC2 ? 2
+                               : type == GL_FLOAT      ? 1
+                                                       : 0;
+        const std::string base(name.data(), static_cast<std::size_t>(length));
+        for (GLint element = 0; element < size; ++element) {
+            std::string key = base;
+            if (size > 1) {
+                const auto bracket = key.find("[0]");
+                if (bracket == std::string::npos) {
+                    continue;
+                }
+                key.replace(bracket, 3, "[" + std::to_string(element) + "]");
+            }
+            const GLint location = glGetUniformLocation(shader->Id(), key.c_str());
+            if (location < 0) {
+                continue; // Uniform-block members have no default-block location.
+            }
+            if (components != 0) {
+                std::array<float, 16> values{};
+                glGetUniformfv(shader->Id(), location, values.data());
+                uniforms[key] = std::vector<float>(values.begin(), values.begin() + components);
+            } else if (type == GL_INT || type == GL_BOOL || type == GL_SAMPLER_2D ||
+                       type == GL_SAMPLER_3D || type == GL_SAMPLER_2D_ARRAY) {
+                GLint value = 0;
+                glGetUniformiv(shader->Id(), location, &value);
+                uniforms[key] = value;
+            }
+        }
+    }
+    return uniforms;
+}
 } // namespace
 
 nlohmann::json RenderPipeline::terrain_peak_diagnostics(const glm::vec3& target) const {
@@ -430,6 +704,11 @@ bool RenderPipeline::capture_terrain_coverage(const std::filesystem::path& out_d
     // A capture is immutable. Failure leaves no complete manifest, and reruns
     // must choose a new directory. Bound memory/I/O before any readback.
     constexpr std::size_t max_pixels = 16u * 1024u * 1024u;
+    if (m_internal_height == 0 || m_screen_height == 0 ||
+        static_cast<std::size_t>(m_internal_width) > max_pixels / m_internal_height ||
+        static_cast<std::size_t>(m_screen_width) > max_pixels / m_screen_height) {
+        return false;
+    }
     const std::size_t pixels = static_cast<std::size_t>(m_internal_width) * m_internal_height;
     const std::size_t color_pixels = static_cast<std::size_t>(m_screen_width) * m_screen_height;
     if (!m_terrain_coverage_enabled || !m_frame_prepared.valid || !render_uploads_settled() ||
@@ -516,6 +795,84 @@ bool RenderPipeline::capture_terrain_coverage(const std::filesystem::path& out_d
             for (int c = 0; c < 3; ++c)
                 normals[i * 3 + static_cast<std::size_t>(c)] = n[c];
         }
+        // These are source attachments, not independent additive lighting AOVs.
+        // Fog is replayed separately; canopy visibility has no standalone target.
+        // Lighting's context contains its reads, not scene outputs or aerial LUTs.
+        // Wrap the frame owners here without changing ordinary lighting dispatch.
+        auto context = m_frame_lighting_ctx;
+        context.lit_scene_color =
+            adopt_texture(m_lighting_pass ? m_lighting_pass->lighting_fbo().color_texture : 0);
+        context.opaque_scene = adopt_texture(
+            m_lighting_pass ? m_lighting_pass->lighting_fbo().opaque_color_texture : 0);
+        context.sky_view_lut = adopt_texture(m_sky_lut.sky_view_texture());
+        context.transmittance_lut = adopt_texture(m_sky_lut.transmittance_texture());
+        Json sources = Json::object();
+        // Froxel integration writes with imageStore. Texture fetch visibility
+        // alone does not cover the texture readbacks of either volume plane.
+        glMemoryBarrier(GL_TEXTURE_UPDATE_BARRIER_BIT);
+        if (!CaptureTexture(out_dir, "lit-scene", context.lit_scene_color.id, GL_RGB, 3, sources) ||
+            !CaptureTexture(out_dir, "opaque-scene", context.opaque_scene.id, GL_RGB, 3, sources) ||
+            !CaptureTexture(out_dir, "sky-view", context.sky_view_lut.id, GL_RGB, 3, sources) ||
+            !CaptureTexture(
+                out_dir, "transmittance", context.transmittance_lut.id, GL_RGB, 3, sources) ||
+            !CaptureTexture(out_dir, "ambient-ssao", context.ssao_blur.id, GL_RED, 1, sources) ||
+            !CaptureTexture(out_dir,
+                            "shadow-depth",
+                            context.shadow_depth_array.id,
+                            GL_DEPTH_COMPONENT,
+                            1,
+                            sources) ||
+            !CaptureTexture(
+                out_dir, "shadow-tint", context.shadow_tint_array.id, GL_RGB, 3, sources) ||
+            !CaptureTexture(out_dir,
+                            "fog-inscatter",
+                            m_froxel_pass ? m_froxel_pass->integrated_texture() : 0,
+                            GL_RGB,
+                            3,
+                            sources) ||
+            !CaptureTexture(out_dir,
+                            "fog-transmittance",
+                            m_froxel_pass ? m_froxel_pass->integrated_texture() : 0,
+                            GL_RGBA,
+                            4,
+                            sources)) {
+            return false;
+        }
+        const bool aerial_available =
+            m_aerial_pass && m_aerial_pass->shader() && m_aerial_pass->shader()->IsValid() &&
+            m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Aerial);
+        if (aerial_available) {
+            if (!m_sky_lut.ready() ||
+                !CaptureFog(out_dir,
+                            *m_aerial_pass->shader(),
+                            context,
+                            m_froxel_pass ? m_froxel_pass->integrated_texture() : 0,
+                            sources)) {
+                return false;
+            }
+        } else {
+            sources["aerial"] = {{"status", "unavailable"}};
+        }
+        receipt["lighting_sources"] = std::move(sources);
+        receipt["lighting_uniforms"] =
+            CaptureUniforms(m_lighting_pass ? m_lighting_pass->shader().get() : nullptr);
+        receipt["fog_uniforms"] =
+            CaptureUniforms(m_aerial_pass ? m_aerial_pass->shader().get() : nullptr);
+        if (receipt["lighting_uniforms"].contains("status") ||
+            receipt["fog_uniforms"].contains("status")) {
+            return false;
+        }
+        receipt["volumetric_quality"] = m_volumetric_quality;
+        receipt["ambient_color"] = Vec(context.sky_ambient_color);
+        receipt["clouds"] = {
+            {"enabled", m_cloud_state.enabled},
+            {"coverage", m_cloud_state.coverage_amount},
+            {"scroll_offset", {m_cloud_state.scroll_offset.x, m_cloud_state.scroll_offset.y}}};
+        receipt["weather"] = {{"driven", m_weather_state.driven},
+                              {"rain_intensity", m_weather_state.rain_intensity},
+                              {"fog_density", m_weather_state.fog_density}};
+        receipt["lighting_source_scope"] = "raw_pass_inputs_and_composites_not_additive_terms";
+        receipt["unavailable_terms"] = {"canopy_visibility_no_standalone_target"};
         if (!WriteFloatPlane(
                 out_dir / "normal.pfm", m_internal_width, m_internal_height, 3, normals) ||
             !WriteBytePlane(out_dir / "material.pgm", m_internal_width, m_internal_height, 1, ids))
