@@ -5160,6 +5160,36 @@ bool GameSession::PrepareWorldMetadataTo(const fs::path& save_dir,
                                          bool full_metadata,
                                          std::string& bytes,
                                          const std::string* owner_bytes) const {
+    nlohmann::json owner_metadata;
+    bool owner_metadata_missing = true;
+    if (owner_bytes) {
+        // Admit the destination before choosing a metadata writer. A transient
+        // calendar also takes the full-writer path, but must retain destination
+        // identity and extensions and budget the combined document before writes.
+        if (!Persistence::ReadSavedJson(save_dir / "world_info.json",
+                                        Persistence::SavedInputLimits::kMetadataBytes,
+                                        owner_metadata,
+                                        owner_metadata_missing) ||
+            (!owner_metadata_missing &&
+             (!owner_metadata.is_object() || !Persistence::AdmitMetadata(owner_metadata) ||
+              !ValidateWorldSeedMetadata(owner_metadata).empty()))) {
+            return false;
+        }
+        if (!owner_metadata_missing && owner_metadata.contains("seed")) {
+            const auto& seed_text = owner_metadata.at("seed").get_ref<const std::string&>();
+            // Empty legacy seed text requests randomness; it cannot identify an
+            // existing destination deterministically.
+            if (seed_text.empty()) {
+                return false;
+            }
+            const auto seed = owner_metadata.contains("seedConversionVersion")
+                                  ? owner_metadata.at("resolvedSeed").get<std::uint32_t>()
+                                  : ResolveWorldSeed(seed_text, 0);
+            if (seed != m_numericSeed) {
+                return false;
+            }
+        }
+    }
     if (!owner_bytes) {
         nlohmann::json existing;
         bool missing = false;
@@ -5171,21 +5201,19 @@ bool GameSession::PrepareWorldMetadataTo(const fs::path& save_dir,
             return false;
         }
     }
-    if (!full_metadata && !m_activeRegionsEnabled && !m_renderCalendar && !m_weatherSchedule) {
+    const bool transient_owners = owner_bytes && m_transientWorld;
+    if ((!full_metadata && !m_activeRegionsEnabled && !m_renderCalendar && !m_weatherSchedule) ||
+        transient_owners) {
         nlohmann::json metadata;
         bool missing = false;
-        if (!Persistence::ReadSavedJson(save_dir / "world_info.json",
-                                        Persistence::SavedInputLimits::kMetadataBytes,
-                                        metadata,
-                                        missing) ||
-            (!missing && (!metadata.is_object() || !Persistence::AdmitMetadata(metadata))))
-            return false;
-        if (owner_bytes && !missing && metadata.contains("seed") &&
-            (metadata.at("seed") != m_metadata.seed ||
-             metadata.value("seedConversionVersion", std::uint32_t{0}) !=
-                 m_metadata.seedConversionVersion ||
-             (m_metadata.seedConversionVersion != 0 &&
-              metadata.value("resolvedSeed", std::uint32_t{0}) != m_metadata.resolvedSeed))) {
+        if (owner_bytes) {
+            metadata = std::move(owner_metadata);
+            missing = owner_metadata_missing;
+        } else if (!Persistence::ReadSavedJson(save_dir / "world_info.json",
+                                               Persistence::SavedInputLimits::kMetadataBytes,
+                                               metadata,
+                                               missing) ||
+                   (!missing && (!metadata.is_object() || !Persistence::AdmitMetadata(metadata)))) {
             return false;
         }
         const auto cursor = m_worldSystem->GetWaterSimWindowCursor();
@@ -5196,6 +5224,9 @@ bool GameSession::PrepareWorldMetadataTo(const fs::path& save_dir,
         if (missing)
             metadata = {{"container_version", Persistence::WorldSaveService::kContainerVersion}};
         metadata.erase("renderCalendar");
+        if (transient_owners && m_renderCalendar) {
+            metadata["renderCalendar"] = WorldClock(0, *m_renderCalendar).calendar_metadata();
+        }
         // Partial writes preserve unrelated legacy metadata, but must not
         // reinstall a schedule removed by snapshot adoption.
         metadata.erase("weatherSchedule");
@@ -5211,6 +5242,13 @@ bool GameSession::PrepareWorldMetadataTo(const fs::path& save_dir,
         metadata["waterSimCursor"] = cursor;
         if (owner_bytes) {
             metadata["owner_continuation"] = *owner_bytes;
+        }
+        if (transient_owners && m_weatherSchedule) {
+            metadata["container_version"] = Persistence::kScheduledWeatherMetadataVersion;
+            metadata["weatherSchedule"] = m_weatherSchedule->canonical_bytes();
+            metadata["weatherScheduleTick"] = GetSimulationTickCount();
+            const auto& anchor = m_weatherSystem->ScheduleAnchor();
+            metadata["weatherScheduleAnchor"] = {anchor.x, anchor.y, anchor.z};
         }
         if (!Persistence::BoundedJsonDump(
                 metadata, Persistence::SavedInputLimits::kMetadataBytes, bytes, 4) ||
@@ -6241,14 +6279,13 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
             continue;
         }
 
-        // Runtime-only flags do not survive process boundaries: physics
-        // colliders and in-flight mesh jobs from the saving process do not
-        // exist here, so normalize them before the streaming systems see the
-        // chunk. Voxel data (sdf/heightmap) and meshes are kept verbatim.
-        chunk->has_collision.store(
-            m_restoredOwnerContinuation &&
-                m_physicsSystem->chunk_collision_body(chunk->get_id()).has_value(),
-            std::memory_order_release);
+        // A continuation restores physics before adoption, including satisfied
+        // collision work that required no body. Retain its saved flag: BodyID
+        // presence alone cannot reconstruct that state. Ordinary loads rebuild
+        // colliders. In-flight mesh jobs never survive either kind of load.
+        if (!m_restoredOwnerContinuation) {
+            chunk->has_collision.store(false, std::memory_order_release);
+        }
         chunk->pending_mesh_ready.store(false, std::memory_order_release);
         chunk->pending_mesh_failed.store(false, std::memory_order_release);
         chunk->pending_lod.store(-1, std::memory_order_release);

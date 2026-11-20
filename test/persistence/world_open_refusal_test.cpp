@@ -2437,16 +2437,38 @@ ServerWaterHashes ReadServerWaterHashes(Server::ServerWorldRunner& runner) {
     return hashes;
 }
 
-void ExpectSameServerSubHashes(const Persistence::WorldStreamingStateSubHashes& actual,
-                               const Persistence::WorldStreamingStateSubHashes& expected) {
+void ExpectSameServerSimulationSubHashes(
+    const Persistence::WorldStreamingStateSubHashes& actual,
+    const Persistence::WorldStreamingStateSubHashes& expected) {
     EXPECT_EQ(actual.terrain, expected.terrain);
-    EXPECT_EQ(actual.mesh, expected.mesh);
     EXPECT_EQ(actual.water, expected.water);
     EXPECT_EQ(actual.entities, expected.entities);
     EXPECT_EQ(actual.wind, expected.wind);
     EXPECT_EQ(actual.weather, expected.weather);
     EXPECT_EQ(actual.aether, expected.aether);
     EXPECT_EQ(actual.aether_state, expected.aether_state);
+}
+
+void ExpectSameServerSubHashes(const Persistence::WorldStreamingStateSubHashes& actual,
+                               const Persistence::WorldStreamingStateSubHashes& expected) {
+    ExpectSameServerSimulationSubHashes(actual, expected);
+    EXPECT_EQ(actual.mesh, expected.mesh);
+}
+
+void ExpectSameServerSimulationHashes(const ServerWaterHashes& actual,
+                                      const ServerWaterHashes& expected) {
+    EXPECT_EQ(actual.world, expected.world);
+    EXPECT_EQ(actual.chunk, expected.chunk);
+    EXPECT_EQ(actual.checkpoint, expected.checkpoint);
+    EXPECT_EQ(actual.checkpoint, actual.world);
+    EXPECT_EQ(expected.checkpoint, expected.world);
+    ExpectSameServerSimulationSubHashes(actual.sub, expected.sub);
+    ExpectSameServerSimulationSubHashes(actual.checkpoint_sub, expected.checkpoint_sub);
+    // Mesh versions and derivative geometry are diagnostic, and load invalidates
+    // their producers. Pin each run's diagnostic to its own paired capture; all
+    // simulation slots above must still match across the process boundary.
+    ExpectSameServerSubHashes(actual.checkpoint_sub, actual.sub);
+    ExpectSameServerSubHashes(expected.checkpoint_sub, expected.sub);
 }
 
 void ExpectSameServerWaterHashes(const ServerWaterHashes& actual,
@@ -4473,8 +4495,8 @@ TEST_F(WorldOpenRefusal, OwnerContinuationRunnerRestoresRosterAndRejectsConflict
             EXPECT_EQ(expected.physics.bytes, actual.physics.bytes);
             EXPECT_EQ(original.ComputeWorldSubHashes().entities,
                       restored.ComputeWorldSubHashes().entities);
-            ExpectSameServerWaterHashes(ReadServerWaterHashes(restored),
-                                        ReadServerWaterHashes(original));
+            ExpectSameServerSimulationHashes(ReadServerWaterHashes(restored),
+                                             ReadServerWaterHashes(original));
             ASSERT_EQ(original.RunFixedTicks(1).ticks_executed, 1u);
             ASSERT_EQ(restored.RunFixedTicks(1).ticks_executed, 1u);
             EXPECT_EQ(original.OwnerAnchorVisitCount(), original.Avatars().size());
@@ -4491,22 +4513,32 @@ TEST_F(WorldOpenRefusal, OwnerContinuationRunnerRestoresRosterAndRejectsConflict
 
 TEST_F(WorldOpenRefusal, OwnerContinuationDefaultOffRetainsLegacyBytesAndAuthorityHashes) {
     auto config = SnapshotRunnerConfig(RootString(), false);
-    Server::ServerWorldRunner legacy(config);
-    ASSERT_TRUE(legacy.Boot());
-    ASSERT_GT(legacy.SaveFullSnapshot(), 0u);
-    config.world_id = legacy.Session()->GetMetadata().worldId;
-    const auto directory = legacy.Session()->GetWorldSaveDir();
-    const auto expected = ReadServerWaterHashes(legacy);
-    const auto bytes = DiskBytes(directory);
+    Server::ServerWorldRunner source(config);
+    ASSERT_TRUE(source.Boot());
+    ASSERT_GT(source.SaveFullSnapshot(), 0u);
+    config.world_id = source.Session()->GetMetadata().worldId;
+    const auto directory = source.Session()->GetWorldSaveDir();
+    const auto saved_bytes = DiskBytes(directory);
     EXPECT_FALSE(
         nlohmann::json::parse(Read(directory / "world_info.json")).contains("owner_continuation"));
+    // Compare the same lifecycle on the same input. The ordinary loaded boot
+    // remeshes derivatives, so fresh-boot bytes are not a legacy resave oracle.
+    Server::ServerWorldRunner legacy(config);
+    ASSERT_TRUE(legacy.Boot());
     Server::ServerWorldRunner disabled(config, {.owner_continuation = false});
     ASSERT_TRUE(disabled.Boot());
     EXPECT_EQ(disabled.SpawnedAvatarCount(), 0u);
+    EXPECT_EQ(DiskBytes(directory), saved_bytes);
+    const auto expected = ReadServerWaterHashes(legacy);
+    EXPECT_EQ(expected.world, source.ComputeWorldHash());
+    ExpectSameServerWaterHashes(ReadServerWaterHashes(disabled), expected);
+    ASSERT_GT(legacy.SaveFullSnapshot(), 0u);
+    const auto bytes = DiskBytes(directory);
     ASSERT_GT(disabled.SaveFullSnapshot(), 0u);
     const auto actual = ReadServerWaterHashes(disabled);
     EXPECT_EQ(actual.world, expected.world);
     ExpectSameServerSubHashes(actual.sub, expected.sub);
+    ExpectSameServerWaterHashes(actual, ReadServerWaterHashes(legacy));
     EXPECT_EQ(DiskBytes(directory), bytes);
 }
 
@@ -4523,10 +4555,18 @@ TEST_F(WorldOpenRefusal, OwnerContinuationMovingAnchorResumesAcrossRunBoundaries
     ASSERT_TRUE(restored.Boot()) << restored.GetBootError();
     ASSERT_NE(restored.Session()->RestoredOwnerContinuation(), nullptr);
     EXPECT_EQ(restored.Session()->RestoredOwnerContinuation()->stream_tick, saved_ticks);
-    ExpectSameServerWaterHashes(ReadServerWaterHashes(restored), ReadServerWaterHashes(original));
+    ExpectSameServerSimulationHashes(ReadServerWaterHashes(restored),
+                                     ReadServerWaterHashes(original));
+    std::vector<std::pair<ChunkID, JPH::BodyID>> original_terrain, restored_terrain;
+    ASSERT_TRUE(
+        original.Session()->GetPhysicsSystem()->capture_chunk_collision_owners(original_terrain));
+    ASSERT_TRUE(
+        restored.Session()->GetPhysicsSystem()->capture_chunk_collision_owners(restored_terrain));
+    EXPECT_EQ(restored_terrain, original_terrain);
     ASSERT_EQ(original.RunFixedTicks(2).ticks_executed, 2u);
     ASSERT_EQ(restored.RunFixedTicks(2).ticks_executed, 2u);
-    ExpectSameServerWaterHashes(ReadServerWaterHashes(restored), ReadServerWaterHashes(original));
+    ExpectSameServerSimulationHashes(ReadServerWaterHashes(restored),
+                                     ReadServerWaterHashes(original));
     EXPECT_EQ(original.OwnerAnchorVisitCount(), 0u);
     EXPECT_EQ(restored.OwnerAnchorVisitCount(), 0u);
     ASSERT_GT(original.SaveFullSnapshot(), 0u);
@@ -4538,6 +4578,29 @@ TEST_F(WorldOpenRefusal, OwnerContinuationMovingAnchorResumesAcrossRunBoundaries
         nlohmann::json::parse(Read(restored.Session()->GetWorldSaveDir() / "world_info.json"))
             .at("owner_continuation");
     EXPECT_EQ(original_record, restored_record);
+}
+
+TEST_F(WorldOpenRefusal, OwnerContinuationRunnerRestoresEmptySnapshotWithoutWarmup) {
+    auto config = SnapshotRunnerConfig(RootString(), false);
+    Server::ServerWorldRunner original(config, {.owner_continuation = true});
+    ASSERT_TRUE(original.Boot());
+    ASSERT_EQ(original.RunFixedTicks(1).ticks_executed, 1u);
+    original.Session()->GetWorldSystem()->clear_world(original.Session()->GetPhysicsSystem());
+    ASSERT_TRUE(original.Session()->SaveWorldState());
+    const auto expected = original.Session()->ComputeChunkStateHash();
+    config.world_id = original.Session()->GetMetadata().worldId;
+    const auto bytes = DiskBytes(root);
+    Server::ServerWorldRunner restored(config, {.owner_continuation = true});
+    ASSERT_TRUE(restored.Boot()) << restored.GetBootError();
+    ASSERT_NE(restored.Session()->RestoredOwnerContinuation(), nullptr);
+    EXPECT_EQ(restored.Session()->GetLastLoadedChunkCount(), 0u);
+    EXPECT_EQ(restored.Session()->GetWorldSystem()->snapshot_streamed_chunks().size(), 0u);
+    EXPECT_EQ(restored.Session()->ComputeChunkStateHash(), expected);
+    EXPECT_EQ(restored.Session()->GetSimulationTickCount(), 1u);
+    EXPECT_EQ(restored.Session()->RestoredOwnerContinuation()->stream_tick, 1u);
+    EXPECT_EQ(restored.GetBootSettleStats().iterations, 0);
+    EXPECT_TRUE(restored.GetBootSettleStats().water_settle_skipped);
+    EXPECT_EQ(DiskBytes(root), bytes);
 }
 
 TEST_F(WorldOpenRefusal, OwnerContinuationRunnerRefusesRosterBoundsAndExhaustedClock) {
@@ -4620,7 +4683,9 @@ TEST_F(WorldOpenRefusal, OwnerContinuationMetadataFailureRollsBackAndKeepsOwners
 }
 
 TEST_F(WorldOpenRefusal, OwnerContinuationTransientSnapshotsRetainOwnersAndMetadata) {
-    const auto original_metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    auto original_metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    original_metadata["extension"] = {{"unknown", {1, 2, 3}}};
+    Write(save / "world_info.json", original_metadata.dump());
     std::vector<World::PlayerAvatar> avatars(1);
     GameSession source({.owner_continuation = true});
     source.SetJobSystem(&jobs);
@@ -4644,7 +4709,11 @@ TEST_F(WorldOpenRefusal, OwnerContinuationTransientSnapshotsRetainOwnersAndMetad
         if (destination == save) {
             EXPECT_EQ(metadata.at("name"), original_metadata.at("name"));
             EXPECT_EQ(metadata.at("creationTime"), original_metadata.at("creationTime"));
+            EXPECT_EQ(metadata.at("extension"), original_metadata.at("extension"));
+            EXPECT_EQ(metadata.at("seed"), original_metadata.at("seed"));
         }
+        EXPECT_EQ(metadata.at("renderCalendar"),
+                  world::WorldClock(0, source.GetRenderCalendar()).calendar_metadata());
         std::vector<World::PlayerAvatar> restored_avatars;
         GameSession restored({.owner_continuation = true});
         restored.SetJobSystem(&jobs);
@@ -4688,6 +4757,52 @@ TEST_F(WorldOpenRefusal, OwnerContinuationTransientSnapshotsRetainOwnersAndMetad
     const auto foreign_bytes = DiskBytes(foreign_destination);
     EXPECT_FALSE(source.SaveWorldStateTo(foreign_destination, nullptr, true));
     EXPECT_EQ(DiskBytes(foreign_destination), foreign_bytes);
+    // Admission covers both writer paths and refuses incomplete conversion
+    // metadata, partial JSON, non-object input and unreadable metadata leaves.
+    const auto invalid_destination = root / "invalid-owner-metadata";
+    for (const auto& invalid : {std::string("{\"seed\":"),
+                                std::string("[]"),
+                                std::string("{\"seed\":\"\"}"),
+                                std::string("{\"seed\":1337}"),
+                                std::string("{\"seed\":\"1337\",\"resolvedSeed\":1337}"),
+                                std::string("{\"seed\":\"1337\",\"seedConversionVersion\":1}"),
+                                std::string("{\"seed\":\"1337\",\"seedConversionVersion\":2,"
+                                            "\"resolvedSeed\":1337}"),
+                                std::string("{\"seed\":\"1337\",\"seedConversionVersion\":1,"
+                                            "\"resolvedSeed\":1338}"),
+                                std::string("{\"seed\":\"1337\",\"seedConversionVersion\":1,"
+                                            "\"resolvedSeed\":4294967296}")}) {
+        SCOPED_TRACE(invalid);
+        Write(invalid_destination / "world_info.json", invalid);
+        const auto invalid_bytes = DiskBytes(invalid_destination);
+        EXPECT_FALSE(source.SaveWorldStateTo(invalid_destination, nullptr, true));
+        EXPECT_EQ(DiskBytes(invalid_destination), invalid_bytes);
+        EXPECT_FALSE(Persistence::journal_pending(invalid_destination));
+    }
+    fs::remove(invalid_destination / "world_info.json");
+    fs::create_directory(invalid_destination / "world_info.json");
+    const auto unreadable_bytes = DiskBytes(invalid_destination);
+    EXPECT_FALSE(source.SaveWorldStateTo(invalid_destination, nullptr, true));
+    EXPECT_EQ(DiskBytes(invalid_destination), unreadable_bytes);
+    // An empty document and an explicitly versioned equivalent seed are valid;
+    // unrelated future metadata must survive either form.
+    for (const auto& compatible :
+         {nlohmann::json::object(),
+          nlohmann::json{{"seed", "1337"},
+                         {"seedConversionVersion", world::kSeedConversionVersion},
+                         {"resolvedSeed", 1337u},
+                         {"extension", {"retained"}}}}) {
+        const auto compatible_destination =
+            root /
+            (compatible.contains("seed") ? "versioned-owner-metadata" : "empty-owner-metadata");
+        Write(compatible_destination / "world_info.json", compatible.dump());
+        ASSERT_TRUE(source.SaveWorldStateTo(compatible_destination, nullptr, true));
+        const auto written =
+            nlohmann::json::parse(Read(compatible_destination / "world_info.json"));
+        for (const auto& item : compatible.items()) {
+            EXPECT_EQ(written.at(item.key()), item.value());
+        }
+    }
     // The input itself fits the existing metadata bound; adding the owner record
     // must refuse before payload publication, including for a keyless export.
     auto metadata = original_metadata;
@@ -4702,6 +4817,59 @@ TEST_F(WorldOpenRefusal, OwnerContinuationTransientSnapshotsRetainOwnersAndMetad
     const auto before = DiskBytes(destination);
     EXPECT_FALSE(source.SaveWorldStateTo(destination, nullptr, true));
     EXPECT_EQ(DiskBytes(destination), before);
+    EXPECT_FALSE(Persistence::journal_pending(destination));
+}
+
+TEST_F(WorldOpenRefusal, OwnerContinuationRetainsCollisionFlagsIndependentlyOfTerrainBodies) {
+    for (const bool body_present : {false, true}) {
+        SCOPED_TRACE(body_present);
+        GameSession source({.owner_continuation = true});
+        source.SetJobSystem(&jobs);
+        source.SetRootPath(RootString());
+        source.SetActiveRegionsEnabled(false);
+        ASSERT_TRUE(source.CreateTransientWorld("Collision flags", "1337", "default"));
+        auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+        chunk->set_state(ChunkState::Idle);
+        chunk->heightmap_data.assign(static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
+                                         (CHUNK_SIZE_Z + 1),
+                                     body_present ? 8.0f : -1.0f);
+        ASSERT_TRUE(source.GetPhysicsSystem()->add_chunk_collision(*chunk));
+        const auto body = source.GetPhysicsSystem()->chunk_collision_body(chunk->get_id());
+        ASSERT_EQ(body.has_value(), body_present);
+        // No body is needed outside the chunk's height interval. Conversely a
+        // remesh may leave collision work pending while the old body still exists.
+        chunk->has_collision.store(!body_present);
+        ASSERT_TRUE(source.GetWorldSystem()->adopt_streamed_chunk(chunk));
+        ASSERT_TRUE(source.SaveWorldStateTo(save, nullptr, true));
+        const auto expected = source.ComputeChunkStateHash();
+        GameSession restored({.owner_continuation = true});
+        restored.SetJobSystem(&jobs);
+        restored.SetRootPath(RootString());
+        restored.SetActiveRegionsEnabled(false);
+        ASSERT_TRUE(restored.CreateTransientWorld("Collision reader", "1337", "default"));
+        ASSERT_TRUE(restored.LoadWorldStateFrom(save)) << restored.GetWorldOpenError();
+        const auto loaded = restored.GetWorldSystem()->find_streamed_chunk(chunk->get_coords());
+        ASSERT_NE(loaded, nullptr);
+        EXPECT_EQ(loaded->has_collision.load(), chunk->has_collision.load());
+        EXPECT_EQ(restored.GetPhysicsSystem()->chunk_collision_body(chunk->get_id()), body);
+        EXPECT_EQ(restored.ComputeChunkStateHash(), expected);
+    }
+}
+
+TEST_F(WorldOpenRefusal, OwnerContinuationPersistentSnapshotRefusesForeignSeedBeforeWriting) {
+    GameSession source({.owner_continuation = true});
+    source.SetJobSystem(&jobs);
+    source.SetRootPath(RootString());
+    source.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(source.CreateWorld("Owner snapshot", "1337", "default"));
+    auto foreign = nlohmann::json::parse(Read(source.GetWorldSaveDir() / "world_info.json"));
+    foreign["seed"] = "1338";
+    foreign["resolvedSeed"] = 1338u;
+    const auto destination = root / "foreign-persistent-owner-snapshot";
+    Write(destination / "world_info.json", foreign.dump());
+    const auto bytes = DiskBytes(root);
+    EXPECT_FALSE(source.SaveWorldStateTo(destination, nullptr, true));
+    EXPECT_EQ(DiskBytes(root), bytes);
     EXPECT_FALSE(Persistence::journal_pending(destination));
 }
 
@@ -6232,6 +6400,43 @@ WeatherScript ShortWeatherScript() {
                        {8, WeatherKind::Rain, 65535, 65535},
                        {11, WeatherKind::Clear, 0, 0}},
             .strike_tick = 7};
+}
+
+TEST_F(WorldOpenRefusal, OwnerContinuationTransientSnapshotRetainsWeatherScheduleAndExtensions) {
+    const auto script = ShortWeatherScript();
+    GameSession source({.owner_continuation = true});
+    source.SetJobSystem(&jobs);
+    source.SetRootPath(RootString());
+    source.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(source.SetWeatherSchedule(script));
+    ASSERT_TRUE(source.CreateTransientWorld("Scheduled owner snapshot", "1337", "default"));
+    for (int tick = 0; tick < 3; ++tick) {
+        ASSERT_EQ(source.TickSimulation(source.GetSimulationClock().fixed_dt()), 1u);
+    }
+    auto original = nlohmann::json::parse(Read(save / "world_info.json"));
+    original["extension"] = {"retained"};
+    Write(save / "world_info.json", original.dump());
+    ASSERT_TRUE(source.SaveWorldStateTo(save, nullptr, true));
+    const auto written = nlohmann::json::parse(Read(save / "world_info.json"));
+    EXPECT_EQ(written.at("name"), original.at("name"));
+    EXPECT_EQ(written.at("extension"), original.at("extension"));
+    EXPECT_EQ(written.at("container_version"), P::kScheduledWeatherMetadataVersion);
+    EXPECT_EQ(written.at("weatherSchedule"), script.canonical_bytes());
+    EXPECT_EQ(written.at("weatherScheduleTick"), source.GetSimulationTickCount());
+    const auto& anchor = source.GetWeatherSystem()->ScheduleAnchor();
+    EXPECT_EQ(written.at("weatherScheduleAnchor"),
+              nlohmann::json::array({anchor.x, anchor.y, anchor.z}));
+    GameSession restored({.owner_continuation = true});
+    restored.SetJobSystem(&jobs);
+    restored.SetRootPath(RootString());
+    restored.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(restored.CreateTransientWorld("Schedule reader", "1337", "default"));
+    ASSERT_TRUE(restored.LoadWorldStateFrom(save)) << restored.GetWorldOpenError();
+    ASSERT_NE(restored.GetWeatherSchedule(), nullptr);
+    EXPECT_EQ(restored.GetWeatherSchedule()->canonical_bytes(), script.canonical_bytes());
+    EXPECT_EQ(restored.GetSimulationTickCount(), source.GetSimulationTickCount());
+    EXPECT_EQ(restored.GetWeatherSystem()->ComputeWeatherSubHash(),
+              source.GetWeatherSystem()->ComputeWeatherSubHash());
 }
 
 TEST(WeatherScheduleTest, WeatherScriptCanonicalBoundsAndFailureAtomicity) {

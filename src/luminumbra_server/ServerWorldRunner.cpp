@@ -299,7 +299,8 @@ bool ServerWorldRunner::Boot() {
     // stepping advances the loaded session past the original's saved state and the
     // water sub-hash can never round-trip. Pause BEFORE the first streaming call
     // (EnsureSurfaceReadyNear runs the water update too); unpause at the end of Boot.
-    const bool water_loaded_from_save = m_session->GetLastLoadedChunkCount() > 0;
+    const auto* continuation = m_session->RestoredOwnerContinuation();
+    const bool water_loaded_from_save = continuation || m_session->GetLastLoadedChunkCount() > 0;
     if (water_loaded_from_save) {
         world_system->SetWaterBootPaused(true);
     }
@@ -308,15 +309,16 @@ bool ServerWorldRunner::Boot() {
     // ready so the physics system can query terrain from tick 1. Meshing
     // stays on because the supported server profile keeps meshes resident.
     const Vec3 spawn_anchor = m_session->GetMetadata().spawnPoint;
-    const auto* continuation = m_session->RestoredOwnerContinuation();
     m_ownerOrigin = continuation ? continuation->origin : spawn_anchor;
     m_ownerAnchor = continuation ? continuation->anchor : spawn_anchor;
     m_ownerStreamTick = continuation ? continuation->stream_tick : 0;
+    // A continuation already restored its terrain and owners at a counted
+    // boundary. Boot-time streaming would allocate colliders ahead of the next
+    // tick and change both authority flags and the subsequent BodyID sequence.
     const bool horizon_ready =
-        world_system->EnsureSurfaceReadyNear(continuation ? m_ownerAnchor : spawn_anchor,
-                                             physics_system,
-                                             m_config.surface_radius,
-                                             m_config.collision_radius);
+        continuation ||
+        world_system->EnsureSurfaceReadyNear(
+            spawn_anchor, physics_system, m_config.surface_radius, m_config.collision_radius);
     if (!horizon_ready) {
         LUMINUMBRA_CORE_ERROR(
             "ServerWorldRunner: spawn-anchor surface horizon failed to become ready");
@@ -482,7 +484,7 @@ bool ServerWorldRunner::Boot() {
         //  settle chunk residency (count stable for several consecutive iters).
         std::size_t last_count = static_cast<std::size_t>(-1);
         int stable = 0;
-        for (int i = 0; i < 400 && stable < 8; ++i) {
+        for (int i = 0; !continuation && i < 400 && stable < 8; ++i) {
             stream_once();
             const std::size_t count = ws->snapshot_streamed_chunks().size();
             stable = (count == last_count) ? stable + 1 : 0;
@@ -505,7 +507,7 @@ bool ServerWorldRunner::Boot() {
         // LOADED worlds skip this phase entirely: their water is paused for the whole
         // Boot (see above) — the restored mid-flow state must not be advanced.
         int settle_iters = 0;
-        if (!water_loaded_from_save) {
+        if (!continuation && !water_loaded_from_save) {
             ws->SetWaterBootSettleMode(true);
             // 2a: init the full backlog (boot mode seeds ALL pending per update; the
             // loop tolerates late streamers). Bounded.
