@@ -18920,7 +18920,9 @@ TEST(GameSessionHeadlessWorldTest, HostBoundaryInputsShareAuthoritySequenceWitho
             ASSERT_FALSE(session->GetRegionSchedulerFault());
             EXPECT_EQ(session->GetPhysicsSystem()->simulation_collision_sample_count(), 9u);
             EXPECT_LE(session->GetWaterSystem()->regional_work().participants_visited, 9u);
-            EXPECT_EQ(session->GetWaterSystem()->regional_work().residents_visited, 0u);
+            // Admission visits the nine selected descriptors, independent of
+            // whether their payloads are resident, parked or still unseeded.
+            EXPECT_EQ(session->GetWaterSystem()->regional_work().residents_visited, 9u);
             // One published anchor and one registered sphere share the same nine columns.
             EXPECT_EQ(session->GetPhysicsSystem()->simulation_collision_owner_visit_count(), 2u);
         }
@@ -18954,9 +18956,18 @@ TEST(GameSessionHeadlessWorldTest, DefaultSimulationSmokeHasPositiveWetRegionSea
         const std::array anchors{*anchor};
         ASSERT_TRUE(session.SetHostSimulationAnchors(anchors));
         int wet_pairs = 0;
-        for (int tick = 0; tick < 4; ++tick) {
+        // Funding reserves border endpoints before inspecting their payloads.
+        // At resolution 16 the seven-window budget leaves one interior credit
+        // per tick. Exercise two rounds of the nine-column ring so fractional
+        // owner credit and cursor rotation can seed both sampled endpoints.
+        constexpr int columns = 9;
+        for (int tick = 0; tick < 2 * columns; ++tick) {
             ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
             ASSERT_FALSE(session.GetRegionSchedulerFault());
+            const auto& work = session.GetWaterSystem()->regional_work();
+            EXPECT_EQ(work.residents_visited, 9u);
+            EXPECT_LE(work.participants_visited, high_resolution ? 7u : 9u);
+            EXPECT_LE(work.total_cells, 4096u);
             wet_pairs = std::max(wet_pairs, session.GetWaterSystem()->dbg_seam_wet_pairs());
         }
         EXPECT_GT(wet_pairs, 0);
@@ -18966,10 +18977,13 @@ TEST(GameSessionHeadlessWorldTest, DefaultSimulationSmokeHasPositiveWetRegionSea
         EXPECT_NE(
             Luminumbra::world::ActiveRegionLedger::region_at(*anchor),
             Luminumbra::world::ActiveRegionLedger::region_at(*anchor + Luminumbra::Vec3(16, 0, 0)));
-        const auto left = session.GetWorldSystem()->resolve_water_column(left_coords);
-        const auto right = session.GetWorldSystem()->resolve_water_column(right_coords);
+        // Observe the counted run; inspection must not admit missing endpoints.
+        const auto left = session.GetWorldSystem()->find_authoritative_chunk(left_coords);
+        const auto right = session.GetWorldSystem()->find_authoritative_chunk(right_coords);
         ASSERT_NE(left, nullptr);
         ASSERT_NE(right, nullptr);
+        ASSERT_TRUE(left->has_water_authority());
+        ASSERT_TRUE(right->has_water_authority());
         ASSERT_EQ(left->water_depth_mm.size(), resolution * resolution);
         ASSERT_EQ(right->water_depth_mm.size(), resolution * resolution);
         int regional_wet_pairs = 0;
