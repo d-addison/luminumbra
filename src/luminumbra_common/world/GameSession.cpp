@@ -1422,6 +1422,13 @@ struct GameSession::FoliageStep {
         incomplete = false;
         UpdateFarmingGate(session);
     }
+    void CompleteIdleTicks(GameSession& session) noexcept {
+        if (blocked) {
+            RestoreUnpublishedTicks(session);
+        } else {
+            CommitTicks(session);
+        }
+    }
     struct Guard {
         GameSession& session;
         ~Guard() {
@@ -2673,10 +2680,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             }
             if (m_regionFault)
                 return i + 1;
-            UpdateRegionalWaterFromSimulation();
             if (m_activeRegionsEnabled) {
-                PublishRegionCompletedWork(
-                    field_candidate, scheduled_energy, defer_water_authority);
+                PublishRegionConsumers(field_candidate, scheduled_energy, defer_water_authority);
             } else {
                 SettleWaterAuthority(defer_water_authority);
             }
@@ -2687,17 +2692,17 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 // same-tick births/deaths and their writes cannot be overwritten.
                 // Foliage IDs reach the shared allocator before callback allocations.
                 deliver_events();
-                SettleWaterAuthority(defer_water_authority);
-                if (m_regionFault) {
-                    return i + 1;
+                if (!m_authorityProfile.regional_water) {
+                    SettleWaterAuthority(defer_water_authority);
                 }
             } else if (m_activeRegionsEnabled) {
-                if (m_foliageStep->blocked) {
-                    m_foliageStep->RestoreUnpublishedTicks(*this);
-                } else {
-                    m_foliageStep->CommitTicks(*this);
-                }
+                m_foliageStep->CompleteIdleTicks(*this);
             }
+            if (m_regionFault) {
+                return i + 1;
+            }
+            UpdateRegionalWaterFromSimulation();
+            PublishRegionCompletedWork(defer_water_authority);
             // All tick consumers/callbacks have finished and staged decay is live.
             // Later hash/render consumers build fresh views of the published roster.
             luminumbra::ai::CleanupNewbornCarcasses(m_registry);
@@ -3609,13 +3614,15 @@ GameSession::RegionalEnergyStep* GameSession::AdvanceEnergy(std::uint64_t tick) 
     return &step;
 }
 
-void GameSession::PublishRegionCompletedWork(FieldPageState* fields,
-                                             RegionalEnergyStep* energy,
-                                             bool defer_water_authority) {
+void GameSession::PublishRegionConsumers(FieldPageState* fields,
+                                         RegionalEnergyStep* energy,
+                                         bool defer_water_authority) {
     static_assert(std::is_nothrow_move_assignable_v<FieldPageState>);
     m_regionalFieldView = fields;
-    // Water observers still see the original registry and committed regional state.
-    SettleWaterAuthority(defer_water_authority);
+    // Preserve legacy observer ordering. Regional water settles after foliage and events.
+    if (!m_authorityProfile.regional_water) {
+        SettleWaterAuthority(defer_water_authority);
+    }
     if (m_regionFault) {
         throw std::runtime_error("Water authority settlement refused");
     }
@@ -3627,7 +3634,12 @@ void GameSession::PublishRegionCompletedWork(FieldPageState* fields,
                              : std::span<const std::pair<RegionKey, std::uint64_t>>{};
     const auto next_id =
         foliage ? foliage->registry.next_id() : m_activeRegionLedger.next_persistent_id();
-    if (!m_activeRegionLedger.prepare_energy_work(ages, m_regionCompletedWork, next_id)) {
+    // Regional water consumes the published foliage roster. Publish ages and IDs now,
+    // retaining all completed work for the single combined publication after water.
+    const auto completed = m_authorityProfile.regional_water
+                               ? std::span<const RegionWork>{}
+                               : std::span<const RegionWork>{m_regionCompletedWork};
+    if (!m_activeRegionLedger.prepare_energy_work(ages, completed, next_id)) {
         throw std::runtime_error("Regional registers refused");
     }
     if (foliage) {
@@ -3665,6 +3677,25 @@ void GameSession::PublishRegionCompletedWork(FieldPageState* fields,
         // Event callbacks can move the spawn after capture; project the committed candidate.
         RestoreRegionalScent();
     }
+    if (!m_authorityProfile.regional_water) {
+        m_regionCompletedWork.clear();
+    }
+}
+
+void GameSession::PublishRegionCompletedWork(bool defer_water_authority) {
+    if (!m_activeRegionsEnabled || !m_authorityProfile.regional_water) {
+        return;
+    }
+    // Consumers already published fields, energy ages and foliage IDs before callbacks.
+    // Publish the combined totals exactly once, including this tick's water.
+    SettleWaterAuthority(defer_water_authority);
+    if (m_regionFault) {
+        throw std::runtime_error("Water authority settlement refused");
+    }
+    if (!m_activeRegionLedger.prepare_energy_work({}, m_regionCompletedWork)) {
+        throw std::runtime_error("Regional registers refused");
+    }
+    m_activeRegionLedger.commit_energy_work();
     m_regionCompletedWork.clear();
 }
 

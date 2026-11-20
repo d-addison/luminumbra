@@ -334,6 +334,89 @@ class RegionAuthorityWiring(unittest.TestCase):
                                "if (m_activeRegionsEnabled && m_authorityProfile.regional_water")
             self.assertIn("ResetRegionalTimeline" if "Clock" in name else "clear_world", guarded)
 
+    def test_regional_water_follows_foliage_and_callbacks_before_final_work_publication(self):
+        session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(
+            encoding="utf-8")
+        tick = function(session, "std::uint32_t GameSession::TickSimulation(")
+        tail = tick[tick.index("const auto deliver_events"):]
+        idle = function(tail, "if (!foliage_step)")
+        self.assertEqual(idle, "deliver_events();")
+        active = function(tail, "if (foliage_step)")
+        self.assertLess(active.index("foliage_step->Commit(*this);"),
+                        active.index("deliver_events();"))
+        idle_ticks = function(session, "void CompleteIdleTicks(")
+        self.assertEqual(function(idle_ticks, "if (blocked)"),
+                         "RestoreUnpublishedTicks(session);")
+        self.assertIn("else { CommitTicks(session); }", idle_ticks)
+        self.assertIn("m_foliageStep->CompleteIdleTicks(*this);", tail)
+        ordered = ("if (!foliage_step)", "PublishRegionConsumers(",
+                   "m_regionalFieldView = nullptr;", "foliage_step->Commit(*this);",
+                   "UpdateRegionalWaterFromSimulation();", "PublishRegionCompletedWork(")
+        for before, after in zip(ordered, ordered[1:]):
+            self.assertLess(tail.index(before), tail.index(after))
+        self.assertIn("if (m_regionFault) { return i + 1; } "
+                      "UpdateRegionalWaterFromSimulation();", tail)
+        self.assertEqual(tail.count("PublishRegionCompletedWork("), 1)
+        consumers = function(session, "void GameSession::PublishRegionConsumers(")
+        legacy = function(consumers, "if (!m_authorityProfile.regional_water)")
+        self.assertEqual(legacy, "SettleWaterAuthority(defer_water_authority);")
+        self.assertIn("foliage->PreparePublication(*this);", consumers)
+        self.assertIn("m_fieldPages.adopt_scheduled_pages(std::move(*fields));", consumers)
+        self.assertIn("energy->transaction.commit();", consumers)
+        self.assertIn("const auto completed = m_authorityProfile.regional_water "
+                      "? std::span<const RegionWork>{} "
+                      ": std::span<const RegionWork>{m_regionCompletedWork};", consumers)
+        self.assertIn("prepare_energy_work(ages, completed, next_id)", consumers)
+        publish = function(session, "void GameSession::PublishRegionCompletedWork(")
+        self.assertEqual(function(publish, "if (!m_activeRegionsEnabled || "
+                                  "!m_authorityProfile.regional_water)"), "return;")
+        self.assertEqual(publish.count("SettleWaterAuthority(defer_water_authority);"), 1)
+        self.assertLess(publish.index("if (m_regionFault)"),
+                        publish.index("prepare_energy_work({}, m_regionCompletedWork)"))
+        self.assertLess(publish.index("m_activeRegionLedger.commit_energy_work();"),
+                        publish.index("m_regionCompletedWork.clear();"))
+        self.assertNotIn("m_regionalFieldView", publish)
+        native = (ROOT / "test/common/RegionalWater_test.cpp").read_text(encoding="utf-8")
+        case = function(native, "TEST(RegionalWaterSession, "
+                        "CallbackSourcesAffectCurrentTickWithActiveAndIdleFoliage)")
+        for token in ("{false, true}", "{&idle, &active}", "subscribe(",
+                      "emplace<Components::FlowingWaterSourceComponent>",
+                      "remove<Components::FlowingWaterSourceComponent>",
+                      "EXPECT_GT(work.source_mm, 0);", "EXPECT_EQ(work.source_mm, 0);",
+                      "idle.ComputeChunkStateHash(), active.ComputeChunkStateHash()"):
+            self.assertIn(token, case)
+        death = function(native, "TEST(RegionalWaterSession, "
+                         "StagedSourceDeathPrecedesCurrentTickWater)")
+        self.assertIn("EXPECT_FALSE(registry.valid(plant));", death)
+        self.assertIn("EXPECT_EQ(session.GetWaterSystem()->regional_work().source_mm, 0);", death)
+        fault = function(native, "TEST(RegionalWaterSession, "
+                         "CallbackFaultsStopBeforeWaterOnBothFoliagePaths)")
+        for token in ("{false, true}", "failure < 3", "throw std::runtime_error(", "throw 7;",
+                      "find_authoritative_chunk({100, 0, 100})",
+                      "EXPECT_EQ(session.GetWaterSystem()->regional_work(), before);"):
+            self.assertIn(token, fault)
+
+    def test_committed_water_loading_state_settles_on_both_fallback_paths(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        inspect = function(source, "SHIELD_WorldSystem::inspect_water_column(")
+        self.assertEqual(inspect.count("read_committed_chunk(coords)"), 1)
+        self.assertLess(inspect.index("Regional water column is still loading"),
+                        inspect.index("read_committed_chunk(coords)"))
+        guard = "if (committed && committed->get_state() == ChunkState::Loading)"
+        self.assertIn(guard, inspect)
+        normalize = function(inspect, guard)
+        self.assertEqual(normalize, "committed->set_state(ChunkState::Idle);")
+        self.assertLess(inspect.index(normalize), inspect.index("return committed;"))
+        native = (ROOT / "test/common/WaterSeedInputs_test.cpp").read_text(encoding="utf-8")
+        case = function(native, "TEST(WaterSeedInputs, "
+                        "CommittedLoadingColumnsSettleBeforeAdmissionAcrossCacheStates)")
+        for token in ("cache < 4", "ChunkState::Loading, ChunkState::Idle, ChunkState::Ready",
+                      "fixture.world.inspect_water_column(IVec3(0))",
+                      "fixture.world.resolve_water_column(IVec3(0))",
+                      "EXPECT_EQ(reads, reads_after_admission);",
+                      "EXPECT_FALSE(fixture.world.durable_read_failed());"):
+            self.assertIn(token, case)
+
     def test_regional_water_uses_simulation_anchors_and_scheduler_decisions(self):
         session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(
             encoding="utf-8")
@@ -449,10 +532,10 @@ class RegionAuthorityWiring(unittest.TestCase):
         self.assertIn("const AuthorityProfileOptions m_authorityProfile;", header)
         self.assertIn(": GameSession(AuthorityProfileOptions{}, AuthorityProfileTag{}) {}", session)
         self.assertIn(": m_authorityProfile(authority_profile)", session)
-        # Construction, eviction and four dormant water gates are the only uses.
+        # Construction, eviction and nine water execution/publication gates are the only uses.
         # Config, hashes and save writers cannot read this dormant profile.
-        self.assertEqual(session.count("m_authorityProfile"), 6)
-        self.assertEqual(session.count("m_authorityProfile.regional_water"), 4)
+        self.assertEqual(session.count("m_authorityProfile"), 11)
+        self.assertEqual(session.count("m_authorityProfile.regional_water"), 9)
         self.assertEqual(session.count("residency_free_eviction"), 1)
         native = (ROOT / "test/common/GameSessionHeadlessWorld_test.cpp").read_text(
             encoding="utf-8")
