@@ -1564,6 +1564,13 @@
     {
       "bytes": 49167,
       "license": "MIT",
+      "path": "test/rendering/shader_scenes/references/post-edge.ppm",
+      "sha256": "3cda07bc6988509ceeaa5522822948086fd78f9c5a8764ef06bfcd93ffdfcb72",
+      "source": "Luminumbra shader scene references"
+    },
+    {
+      "bytes": 49167,
+      "license": "MIT",
       "path": "test/rendering/shader_scenes/references/reversed-z.ppm",
       "sha256": "d2c0f9e1a62e750c2ea88959818e53b9e155e1ecf1516e5f1603fd9a612c1c26",
       "source": "Luminumbra shader scene references"
