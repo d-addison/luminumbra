@@ -739,6 +739,8 @@ public:
     std::filesystem::path GetSaveRootPath() const;
 
 private:
+    // Advances opt-in regional water for one fixed tick; a no-op when it is dormant.
+    void UpdateRegionalWaterFromSimulation();
     struct AuthorityProfileTag {};
     // The single real constructor; the default and the test-only constructors delegate here.
     GameSession(const AuthorityProfileOptions& authority_profile, AuthorityProfileTag);

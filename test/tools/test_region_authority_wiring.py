@@ -304,7 +304,8 @@ class RegionAuthorityWiring(unittest.TestCase):
             encoding="utf-8")
         for name, operation in (
                 ("void GameSession::ApplyWaterResolutionWiring(", "SetRegionalScheduling"),
-                ("std::uint32_t GameSession::TickSimulation(", "UpdateRegionalFromSimulation"),
+                ("void GameSession::UpdateRegionalWaterFromSimulation(",
+                 "UpdateRegionalFromSimulation"),
                 ("void GameSession::RestoreWorldClock(", "ResetRegionalTimeline"),
                 ("void GameSession::AdoptWorldStateFrom(", "clear_world")):
             with self.subTest(name=name):
@@ -315,11 +316,16 @@ class RegionAuthorityWiring(unittest.TestCase):
         self.assertIn("SetRegionalScheduling(m_activeRegionsEnabled && "
                       "m_authorityProfile.regional_water);", resolution)
         tick = function(session, "std::uint32_t GameSession::TickSimulation(")
+        helper = function(session, "void GameSession::UpdateRegionalWaterFromSimulation(")
         gate = "if (m_activeRegionsEnabled && m_authorityProfile.regional_water && m_waterSystem)"
-        water = function(tick, gate)
-        self.assertIn("UpdateRegionalFromSimulation(m_registry, anchors, m_activeRegionLedger, "
+        water = function(helper, gate)
+        self.assertTrue(helper.startswith(gate))
+        self.assertIn("UpdateRegionalFromSimulation( m_registry, anchors, m_activeRegionLedger, "
                       "m_regionSchedule, m_regionCompletedWork);", water)
-        self.assertLess(tick.index(gate), tick.index("PublishRegionCompletedWork("))
+        self.assertEqual(tick.count("UpdateRegionalWaterFromSimulation();"), 1)
+        self.assertNotIn("UpdateRegionalFromSimulation(", tick)
+        self.assertLess(tick.index("UpdateRegionalWaterFromSimulation();"),
+                        tick.index("PublishRegionCompletedWork("))
         for token in ("snapshot_", "streamed", "camera", "resident", "for (", "while ("):
             self.assertNotIn(token, water)
         for name in ("void GameSession::RestoreWorldClock(",
@@ -336,9 +342,9 @@ class RegionAuthorityWiring(unittest.TestCase):
         self.assertEqual(function(anchors, "if (local)"), "return {&*local, 1};")
         self.assertTrue(anchors.endswith("return {};"))
         self.assertLess(anchors.index("if (replicated)"), anchors.index("if (local)"))
-        tick = function(session, "std::uint32_t GameSession::TickSimulation(")
+        update = function(session, "void GameSession::UpdateRegionalWaterFromSimulation(")
         self.assertIn("RegionalWaterAnchors(m_replicatedSimulationAnchors, "
-                      "m_activeRegionLedger.local_anchor())", tick)
+                      "m_activeRegionLedger.local_anchor())", update)
         owner = function(session, "bool GameSession::ScentOwnerDue(")
         self.assertIn("record.last_decision == m_regionSchedule.tick", owner)
         self.assertNotIn("last_ticked", owner)
