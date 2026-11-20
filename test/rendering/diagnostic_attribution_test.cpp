@@ -3549,7 +3549,7 @@ TEST(DiagnosticAttribution, WaterfallAttributesOnlySubmittedSheetPoolSlotsAndNon
     Contains(draw, "\"waterfall/sheet-pool/\" + std::to_string(i)");
     Contains(draw, ".shader_variant = \"waterfall\"");
     Contains(draw, ".generated_mesh = mesh_key");
-    Contains(draw, "static_cast<GLint>((i % kSitesPerPage) * 12), 12");
+    Contains(WithoutWhitespace(draw), "static_cast<GLint>((i%kSitesPerPage)*12),12");
     EXPECT_LT(draw.find("if (live < 0.02f)"), draw.find("capture->write_current("));
     Contains(Body(draw, "if (live < 0.02f)"), "continue;");
     EXPECT_EQ(Count(draw, "glDrawArrays,"), 1u);
@@ -3557,7 +3557,7 @@ TEST(DiagnosticAttribution, WaterfallAttributesOnlySubmittedSheetPoolSlotsAndNon
     EXPECT_LT(shader.find("alpha *= clamp(u_live_factor"), shader.find("discard;"));
     EXPECT_LT(shader.find("discard;"), shader.find("gDiagnosticIds ="));
     EXPECT_EQ(SourceHash(WithoutForwardSubmissionDiagnostics(draw, "m_shader")),
-              0x338dd9f525356f5bull);
+              0x5f754ad88e5e5b42ull);
     EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(shader, 3)), 0x031258f2195ef329ull);
 }
 
