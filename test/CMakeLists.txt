@@ -474,6 +474,18 @@ target_link_libraries(capture_feature_profile_test PRIVATE
     gtest_main luminumbra_common nlohmann_json glm)
 luminumbra_configure_first_party_target(capture_feature_profile_test)
 
+# GL-free sweep pins, profile refusal and continuous exact-tick transport protocol.
+add_executable(temporal_sweep_test
+    rendering/temporal_sweep_test.cpp
+    ../src/luminumbra_client/rendering/CaptureFeatureProfile.cpp
+    ../src/luminumbra_client/rendering/DiagnosticCapture.cpp
+    ../src/luminumbra_client/rendering/TemporalAudit.cpp
+    ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp)
+target_include_directories(temporal_sweep_test PRIVATE ../src ../src/luminumbra_client)
+target_link_libraries(temporal_sweep_test PRIVATE
+    gtest_main luminumbra_common nlohmann_json glm)
+luminumbra_configure_first_party_target(temporal_sweep_test)
+
 # GL-free completed-frame bundle publication and runtime admission contracts.
 add_executable(diagnostic_bundle_test
     rendering/diagnostic_bundle_test.cpp
@@ -2173,6 +2185,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     capture_manifest_test
     diagnostic_bundle_test
     capture_feature_profile_test
+    temporal_sweep_test
     # the hemi-octa mapping test was built but never
     # registered — the atlas-bake/shader shared source of truth had zero
     # executing coverage. GL-free pure math, safe in the default lane.
