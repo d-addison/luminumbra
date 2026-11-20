@@ -9,6 +9,8 @@ using Luminumbra::Server::CaptureGroundObjects;
 using Luminumbra::Server::CaptureScentBits;
 using Luminumbra::Server::GroundObjectDifference;
 using Luminumbra::Server::HeavyHashes;
+using Luminumbra::Server::HeavyOwnerCapture;
+using Luminumbra::Server::HeavyOwnerDifference;
 using Luminumbra::Server::MeshEqual;
 using Luminumbra::Server::ScentDifference;
 
@@ -42,6 +44,27 @@ HeavyHashes CaptureHashes(Luminumbra::Server::ServerWorldRunner& runner) {
     runner.ComputeWorldHashAndSubHashes(h.world_hash, h.sub);
     h.scent_hash = runner.Session() ? runner.Session()->ComputeScentSubHash() : std::string();
     return h;
+}
+
+HeavyOwnerCapture CaptureOwners(Luminumbra::Server::ServerWorldRunner& runner, bool enabled) {
+    HeavyOwnerCapture capture;
+    if (!enabled) {
+        return capture;
+    }
+    auto* session = runner.Session();
+    std::string bytes;
+    if (!session || !session->IsSimulationTickBoundary() || !session->GetWorldSystem() ||
+        !session->CaptureOwnerContinuation(bytes) ||
+        !Luminumbra::Persistence::DecodeOwnerContinuation(bytes, capture.owners)) {
+        return capture;
+    }
+    capture.scheduler = Luminumbra::Server::CaptureHeavyOwnerScheduler(
+        session->ActiveRegionsEnabled(),
+        session->GetWorldClock(),
+        session->GetActiveRegionLedger(),
+        session->GetWorldSystem()->GetWaterSimWindowCursor());
+    capture.captured = true;
+    return capture;
 }
 
 // Equality (AuthoritativeStateEqual / MeshEqual) and the subsystem table, with the
@@ -84,7 +107,8 @@ nlohmann::json HeavyHashJson(const HeavyHashes& h) {
 
 } // namespace
 
-int RunHeavy(const ServerCliOptions& options) try {
+int RunHeavy(const ServerCliOptions& options,
+             const Luminumbra::world::OwnerContinuationOptions& profile) try {
     LUMINUMBRA_CORE_INFO(
         "Headless server HEAVY oracle: preset={} seed={} ticks={} resim={} radius={}/{}",
         options.preset,
@@ -102,7 +126,7 @@ int RunHeavy(const ServerCliOptions& options) try {
 
     // Both runners and the full snapshot share this fresh world's save directory.
     Luminumbra::Server::ThrowawaySaveDirGuard save_cleanup;
-    Luminumbra::Server::ServerWorldRunner original(std::move(cfgOrig));
+    Luminumbra::Server::ServerWorldRunner original(std::move(cfgOrig), profile);
     if (!original.Boot()) {
         LUMINUMBRA_CORE_ERROR("heavy: original session failed to boot");
         return 1;
@@ -130,6 +154,8 @@ int RunHeavy(const ServerCliOptions& options) try {
         return 1;
     }
     const HeavyHashes orig_at_save = CaptureHashes(original);
+    const HeavyOwnerCapture orig_at_save_owners =
+        CaptureOwners(original, profile.owner_continuation);
 
     // --- : LOAD a FRESH session from the saved world_id. ---
     Luminumbra::Server::ServerWorldRunnerConfig cfgLoad = RunnerConfigFrom(options);
@@ -137,12 +163,14 @@ int RunHeavy(const ServerCliOptions& options) try {
     cfgLoad.world_name = "Heavy Loaded";
     cfgLoad.autosave_interval_ticks = 0;
 
-    Luminumbra::Server::ServerWorldRunner loaded(std::move(cfgLoad));
+    Luminumbra::Server::ServerWorldRunner loaded(std::move(cfgLoad), profile);
     if (!loaded.Boot()) {
         LUMINUMBRA_CORE_ERROR("heavy: loaded session failed to boot from world_id '{}'", world_id);
         return 1;
     }
     const HeavyHashes loaded_at_load = CaptureHashes(loaded);
+    const HeavyOwnerCapture loaded_at_load_owners =
+        CaptureOwners(loaded, profile.owner_continuation);
     const std::size_t cursor_at_load =
         loaded.Session()->GetWorldSystem()->GetWaterSimWindowCursor();
 
@@ -160,12 +188,20 @@ int RunHeavy(const ServerCliOptions& options) try {
         return 1;
     }
     const HeavyHashes orig_final = CaptureHashes(original);
+    const HeavyOwnerCapture orig_final_owners = CaptureOwners(original, profile.owner_continuation);
     const HeavyHashes loaded_final = CaptureHashes(loaded);
+    const HeavyOwnerCapture loaded_final_owners = CaptureOwners(loaded, profile.owner_continuation);
 
     // The loaded session, immediately after load, must match the original at
     // save on AUTHORITATIVE sim state (terrain/water/entities/ground objects). Mesh is tracked
     // informationally (see AuthoritativeStateEqual rationale).
-    const bool roundtrip_ok = AuthoritativeStateEqual(orig_at_save, loaded_at_load);
+    const std::string roundtrip_owner_difference = HeavyOwnerDifference(
+        profile.owner_continuation, orig_at_save_owners, loaded_at_load_owners);
+    const bool roundtrip_ok =
+        AuthoritativeStateEqual(orig_at_save, loaded_at_load) && roundtrip_owner_difference.empty();
+    if (!roundtrip_owner_difference.empty()) {
+        LUMINUMBRA_CORE_ERROR("heavy: roundtrip differs in {}", roundtrip_owner_difference);
+    }
     const std::string roundtrip_scent_difference = ScentDifference(orig_at_save, loaded_at_load);
     if (!roundtrip_scent_difference.empty()) {
         LUMINUMBRA_CORE_ERROR("heavy: saved scent differs in {}", roundtrip_scent_difference);
@@ -177,7 +213,13 @@ int RunHeavy(const ServerCliOptions& options) try {
         LUMINUMBRA_CORE_ERROR("heavy: round-trip differs in {}", roundtrip_ground_difference);
     }
 
-    const bool resim_ok = AuthoritativeStateEqual(orig_final, loaded_final);
+    const std::string resim_owner_difference =
+        HeavyOwnerDifference(profile.owner_continuation, orig_final_owners, loaded_final_owners);
+    const bool resim_ok =
+        AuthoritativeStateEqual(orig_final, loaded_final) && resim_owner_difference.empty();
+    if (!resim_owner_difference.empty()) {
+        LUMINUMBRA_CORE_ERROR("heavy: resim differs in {}", resim_owner_difference);
+    }
     const std::string resim_scent_difference = ScentDifference(orig_final, loaded_final);
     if (!resim_scent_difference.empty()) {
         LUMINUMBRA_CORE_ERROR("heavy: resim scent differs in {}", resim_scent_difference);
@@ -329,6 +371,11 @@ int RunHeavy(const ServerCliOptions& options) try {
         {"passed", passed},
     };
 
+    if (profile.owner_continuation) {
+        artifact["roundtrip_owner_difference"] = roundtrip_owner_difference;
+        artifact["resim_owner_difference"] = resim_owner_difference;
+    }
+
     // Tear down both and clean up the throwaway save directory.
     original.Shutdown();
     loaded.Shutdown();
@@ -382,4 +429,8 @@ int RunHeavy(const ServerCliOptions& options) try {
     LUMINUMBRA_CORE_ERROR("heavy: authority hash capture refused (status={}); oracle aborted",
                           static_cast<int>(error.status()));
     return 1;
+}
+
+int RunHeavy(const ServerCliOptions& options) {
+    return RunHeavy(options, Luminumbra::world::OwnerContinuationOptions{});
 }

@@ -962,7 +962,10 @@ class AuthorityConsumerSourceContract(unittest.TestCase):
 
     def assert_other_modes_contract(self, sources):
         heavy = sources["heavy"]
-        self.assertIn("intRunHeavy(constServerCliOptions&options)try{", heavy)
+        self.assertIn("intRunHeavy(constServerCliOptions&options,"
+                      "constLuminumbra::world::OwnerContinuationOptions&profile)try{", heavy)
+        self.assertIn("intRunHeavy(constServerCliOptions&options){"
+                      "returnRunHeavy(options,Luminumbra::world::OwnerContinuationOptions{});}", heavy)
         catch = capture_body(heavy, "catch(constLuminumbra::Persistence::AuthorityCaptureRefused&error)")
         self.assert_ordered(catch, "error.status()", "return1;")
         checked = capture_body(heavy, "intRunHeavy(")

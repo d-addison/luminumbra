@@ -38,6 +38,8 @@ struct ReplayCaptureFault {
     std::size_t calls = 0;
     std::size_t refuse_call = 0;
     std::filesystem::path save_dir;
+    std::size_t owner_mutation_call = 0;
+    bool unbound_avatar = false;
 };
 ReplayCaptureFault& CaptureFault() {
     static ReplayCaptureFault fault;
@@ -70,7 +72,17 @@ private:
     std::shared_ptr<Chunk> m_incomplete;
     void PrepareCapture() {
         auto& fault = CaptureFault();
-        if (++fault.calls != fault.refuse_call) {
+        ++fault.calls;
+        if (fault.calls == fault.owner_mutation_call) {
+            auto* physics = Session()->GetPhysicsSystem();
+            if (fault.unbound_avatar) {
+                ASSERT_NE(physics->create_avatar_character(Session()->GetMetadata().spawnPoint),
+                          Systems::PhysicsSystem::kInvalidAvatar);
+            } else {
+                ASSERT_TRUE(physics->create_player_controller(Session()->GetMetadata().spawnPoint));
+            }
+        }
+        if (fault.calls != fault.refuse_call) {
             return;
         }
         fault.save_dir = Session()->GetWorldSaveDir();
@@ -400,6 +412,53 @@ INSTANTIATE_TEST_SUITE_P(CaptureBoundaries,
                          HeavyModeCaptureRefusal,
                          testing::Combine(testing::Values(std::size_t{1}, 2, 3, 4),
                                           testing::Bool()));
+
+TEST_F(ReplayModeAdmission, HeavyOwnerComparisonGatesBothCheckpointPairs) {
+    options.ticks = 0;
+    options.heavy_resim = 0;
+    for (const bool enabled : {false, true}) {
+        for (const std::size_t call : {std::size_t{2}, std::size_t{4}}) {
+            SCOPED_TRACE(enabled);
+            SCOPED_TRACE(call);
+            CaptureFault() = {.calls = 0,
+                              .refuse_call = 0,
+                              .save_dir = {},
+                              .owner_mutation_call = call,
+                              .unbound_avatar = false};
+            EXPECT_EQ(RunRefusedCaptureHeavy(options, {.owner_continuation = enabled}),
+                      enabled ? 1 : 0);
+            EXPECT_EQ(CaptureFault().calls, 4u);
+            const auto artifact = Artifact();
+            EXPECT_EQ(artifact.at("roundtrip_match"), !enabled || call == 4);
+            EXPECT_EQ(artifact.at("resim_match"), !enabled);
+            EXPECT_EQ(artifact.at("passed"), !enabled);
+            if (enabled) {
+                EXPECT_EQ(artifact.at("roundtrip_owner_difference"),
+                          call == 2 ? "owner.player.present" : "");
+                EXPECT_EQ(artifact.at("resim_owner_difference"), "owner.player.present");
+            } else {
+                EXPECT_FALSE(artifact.contains("roundtrip_owner_difference"));
+                EXPECT_FALSE(artifact.contains("resim_owner_difference"));
+            }
+        }
+    }
+}
+
+TEST_F(ReplayModeAdmission, HeavyRefusedOwnerCaptureFailsBothCheckpointPairs) {
+    options.ticks = 0;
+    options.heavy_resim = 0;
+    CaptureFault() = {.calls = 0,
+                      .refuse_call = 0,
+                      .save_dir = {},
+                      .owner_mutation_call = 2,
+                      .unbound_avatar = true};
+    EXPECT_EQ(RunRefusedCaptureHeavy(options, {.owner_continuation = true}), 1);
+    EXPECT_EQ(CaptureFault().calls, 4u);
+    const auto artifact = Artifact();
+    EXPECT_EQ(artifact.at("roundtrip_owner_difference"), "owner.capture_refused");
+    EXPECT_EQ(artifact.at("resim_owner_difference"), "owner.capture_refused");
+    EXPECT_EQ(artifact.at("passed"), false);
+}
 
 TEST_F(ReplayModeAdmission, SubHashCaptureSkipsRefusedRegionalPreparation) {
     namespace P = Luminumbra::Persistence;
