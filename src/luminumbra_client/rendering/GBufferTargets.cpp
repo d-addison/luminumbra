@@ -242,6 +242,21 @@ void GBufferDiagnosticCapture::write_current(const DiagnosticSubmission& submiss
         "diagnostic_writer_without_variant", submission.lod, submission.ownership, submission.pass);
 }
 
+void GBufferDiagnosticCapture::clear_current_identity() {
+    if (!state_->framebuffer) {
+        return;
+    }
+    GLint program = 0;
+    glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+    for (const auto& entry : state_->variants) {
+        if (entry.shader->Id() == static_cast<GLuint>(program)) {
+            const DiagnosticId id{};
+            glProgramUniform4uiv(entry.shader->Id(), entry.identity, 1, id.data());
+            return;
+        }
+    }
+}
+
 bool GBufferDiagnosticCapture::deferred_attached() const {
     return state_->framebuffer != 0 && !state_->forward;
 }

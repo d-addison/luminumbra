@@ -724,6 +724,54 @@ NearTerrainUploadResult Prepare(NearTerrainRefinementCache& cache,
 }
 } // namespace
 
+TEST(NearTerrainUpload, PresetSelectionsUseBudgetedRefinementAndExplicitOffPreservesPayload) {
+    using namespace luminumbra::core;
+    EXPECT_EQ(kTerrainUploadLimits.bytes, 4u * 1024u * 1024u);
+    EXPECT_EQ(kTerrainUploadLimits.count, 8u);
+    EXPECT_EQ(kTerrainUploadLimits.progress, 1u);
+    EXPECT_DOUBLE_EQ(kTerrainUploadLimits.milliseconds, 3.0);
+    EXPECT_EQ(NearTerrainRefinementCache::kCapacity, 64u);
+    EXPECT_FLOAT_EQ(kNearTerrainRadiusMeters, 32.0f);
+    for (const auto preset : {GraphicsPreset::Low,
+                              GraphicsPreset::Medium,
+                              GraphicsPreset::High,
+                              GraphicsPreset::Ultra}) {
+        SCOPED_TRACE(GraphicsPresetName(preset));
+        GraphicsSettings settings;
+        ASSERT_TRUE(SelectGraphicsPreset(settings, preset));
+        ResolvedGraphics resolved;
+        std::string error;
+        ASSERT_TRUE(ResolveGraphics(settings, {}, resolved, error)) << error;
+        const bool enabled = preset == GraphicsPreset::High || preset == GraphicsPreset::Ultra;
+        EXPECT_EQ(resolved.values.terrain_near_refinement, enabled);
+        EligibilityPatch patch;
+        patch.Publish();
+        const auto original = MakePatch().mesh;
+        auto payload = original;
+        NearTerrainRefinementCache cache;
+        cache.set_enabled(resolved.values.terrain_near_refinement);
+        EXPECT_EQ(Prepare(cache, patch, payload, 3.0),
+                  enabled ? NearTerrainUploadResult::Deferred : NearTerrainUploadResult::Unrefined);
+        ExpectIdenticalPayload(payload, original);
+        EXPECT_EQ(cache.builds(), 0u);
+        EXPECT_EQ(Prepare(cache, patch, payload),
+                  enabled ? NearTerrainUploadResult::Refined : NearTerrainUploadResult::Unrefined);
+        if (enabled) {
+            EXPECT_GT(payload.indices.size(), original.indices.size());
+        } else {
+            ExpectIdenticalPayload(payload, original);
+        }
+        settings.overrides["terrain_near_refinement"] = false;
+        ASSERT_TRUE(ResolveGraphics(settings, {}, resolved, error)) << error;
+        EXPECT_FALSE(resolved.values.terrain_near_refinement);
+        cache.set_enabled(resolved.values.terrain_near_refinement);
+        payload = original;
+        EXPECT_EQ(Prepare(cache, patch, payload), NearTerrainUploadResult::Unrefined);
+        ExpectIdenticalPayload(payload, original);
+        EXPECT_EQ(cache.size(), 0u);
+    }
+}
+
 TEST(NearTerrainUpload, DisabledPayloadIsByteIdenticalAndEnabledPayloadIsCached) {
     EligibilityPatch patch;
     const auto evidence = patch.Publish();
@@ -1203,7 +1251,10 @@ TEST(NearTerrainUpload, SettingDefaultsAndPersistenceRoundTrip) {
             settings.base_preset = preset;
             settings.preset_revision = revision;
             ASSERT_TRUE(ResolveGraphics(settings, {}, resolved, error));
-            EXPECT_FALSE(resolved.values.terrain_near_refinement);
+            const bool enabled =
+                revision == kGraphicsPresetRevision &&
+                (preset == GraphicsPreset::High || preset == GraphicsPreset::Ultra);
+            EXPECT_EQ(resolved.values.terrain_near_refinement, enabled);
         }
     }
     const Luminumbra::TestSupport::ScopedTempFile file("terrain_graphics_", ".json");

@@ -299,6 +299,8 @@ struct MouseLookState {
 // Frame-audio bookkeeping (the thunder cue queue).
 struct FrameAudioState {
     std::vector<PendingThunder> pendingThunder;
+    bool waterfallRoarOn = false;
+    glm::vec3 waterfallRoarPosition{0.0f};
 };
 
 // Live forager presentation caches and diagnostics. The environment-gated
