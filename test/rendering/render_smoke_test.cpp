@@ -26,11 +26,13 @@
 #include "luminumbra_client/rendering/passes/FarWorldPassUniforms.h"
 #include "luminumbra_client/rendering/passes/FoliagePass.h"
 #include "luminumbra_client/rendering/passes/GBufferPass.h"
+#include "luminumbra_client/rendering/passes/GlassOitPass.h"
 #include "luminumbra_client/rendering/passes/LightingPass.h"
 #include "luminumbra_client/rendering/passes/ParticlePass.h"
 #include "luminumbra_client/rendering/passes/SkyboxPass.h"
 #include "luminumbra_client/rendering/passes/SsaoPass.h"
 #include "luminumbra_client/rendering/passes/WaterPass.h"
+#include "luminumbra_client/rendering/passes/WaterfallPass.h"
 #include "luminumbra_common/animation/AnimationRuntime.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/core/FilesystemPath.h"
@@ -9848,6 +9850,129 @@ TEST(RenderSmokeTest, DiagnosticRetryAndPartialDestinationsPreserveEveryByte) {
     EXPECT_TRUE(pipeline.diagnostic_capture_destination_available(capture));
     pipeline.set_capture_diagnostics({});
     EXPECT_TRUE(pipeline.diagnostic_capture_destination_available({}));
+}
+
+TEST(RenderSmokeTest, ScenarioCaptureRequiresForwardStorageOnlyForSubmittedGeometry) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    RenderResourceRegistry resources;
+    GBufferPass gbuffer;
+    LightingPass lighting;
+    WaterPass water;
+    WaterfallPass waterfall;
+    GlassOitPass glass;
+    gbuffer.init_gbuffer(resources, 32, 32);
+    lighting.init_lighting_fbo(resources, 32, 32);
+    water.init_shader(SourceRoot());
+    water.init_water_fallback_textures(resources);
+    waterfall.init_shader(SourceRoot());
+    ASSERT_TRUE(water.shader()->IsValid());
+    ASSERT_TRUE(waterfall.shader()->IsValid());
+    // Adopted factors start at zero: baked sheets exist, but submit no geometry.
+    WaterfallPass::PreparedGeometry geometry;
+    geometry.sites.resize(1);
+    geometry.vertices.resize(72, 0.0f);
+    waterfall.begin_adoption(std::move(geometry));
+    ASSERT_TRUE(waterfall.adopt_next(nullptr, SourceRoot()));
+
+    GLuint vao = 0, vbo = 0, ebo = 0;
+    const std::array<float, 18> vertices{
+        -1, 0, -5, 1, 0, -5, 0, 1, -5, -1, 0, -5, 1, 0, -5, 0, 1, -5};
+    const std::array<unsigned int, 3> indices{0, 1, 2};
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &vbo);
+    glGenBuffers(1, &ebo);
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+    glVertexAttrib3f(1, 0, 1, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices.data(), GL_STATIC_DRAW);
+    Camera camera;
+    RenderContext ctx;
+    ctx.screen_width = 32;
+    ctx.screen_height = 32;
+    ctx.screen_quad_vao = vao;
+    ctx.camera = &camera;
+    ctx.view = camera.GetViewMatrix();
+    ctx.projection = camera.GetProjectionMatrix(32, 32);
+    ctx.lit_scene = FboHandle{lighting.lighting_fbo().fbo_id, true};
+    ctx.lit_scene_depth = RenderbufferHandle{lighting.lighting_fbo().depth_texture};
+    ctx.opaque_scene = TextureHandle{lighting.lighting_fbo().opaque_color_texture};
+    ctx.gbuffer_depth = TextureHandle{gbuffer.gbuffer().depth_texture};
+    const auto overflow_count = std::numeric_limits<Luminumbra::u32>::max();
+    for (const auto& counts :
+         std::array<std::vector<Luminumbra::u32>, 6>{{{},
+                                                      {0},
+                                                      {overflow_count},
+                                                      {0, overflow_count},
+                                                      {0, overflow_count, 3},
+                                                      {3, 0, overflow_count}}}) {
+        WaterPassInput input;
+        for (const auto count : counts) {
+            input.draw_items.push_back(
+                {.model = glm::mat4(1), .vao_id = vao, .element_count = count});
+        }
+        // Use the same deferred-only owner as scenario capture. No forward
+        // storage is available; an actual submission must still refuse.
+        DiagnosticFrameCapture frame({32, 32});
+        auto* scope = GBufferDiagnosticCapture::Current();
+        ASSERT_NE(scope, nullptr);
+        ASSERT_TRUE(scope->attach(gbuffer.gbuffer(), {32, 32}));
+        scope->detach();
+        ASSERT_TRUE(frame.ready());
+        glBindFramebuffer(GL_FRAMEBUFFER, ctx.lit_scene.id);
+        glViewport(0, 0, 32, 32);
+        const auto stats = water.execute(ctx, input, camera);
+        const bool submitted = std::find(counts.begin(), counts.end(), 3u) != counts.end();
+        EXPECT_EQ(stats.water_draws, submitted ? 1u : 0u);
+        waterfall.execute(ctx);
+        glass.execute_accum(ctx, {});
+        EXPECT_EQ(frame.ready(), !submitted);
+        EXPECT_EQ(scope->attachment_failed(), submitted);
+        if (!submitted) {
+            scope->unsupported("unattributed_forward_producer",
+                               0,
+                               DiagnosticOwnership::Live,
+                               DiagnosticPass::Forward);
+            EXPECT_FALSE(frame.ready());
+        }
+    }
+    Luminumbra::Systems::SHIELD_WorldSystem world(
+        nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    waterfall.update_liveness(world, nullptr); // Unstreamed crest is live.
+    const std::vector<GlassPaneItem> panes(1);
+    GlassOitPassInput glass_input;
+    glass_input.glass_items = &panes;
+    glass_input.glass_vao = vao;
+    glass_input.root_path = SourceRoot();
+    for (const bool draw_glass : {false, true}) {
+        DiagnosticFrameCapture frame({32, 32});
+        auto* scope = GBufferDiagnosticCapture::Current();
+        ASSERT_NE(scope, nullptr);
+        ASSERT_TRUE(scope->attach(gbuffer.gbuffer(), {32, 32}));
+        scope->detach();
+        ASSERT_TRUE(frame.ready());
+        if (draw_glass) {
+            glass.execute_accum(ctx, glass_input);
+            glass.execute_resolve(ctx, glass_input);
+        } else {
+            waterfall.execute(ctx);
+        }
+        EXPECT_FALSE(frame.ready());
+        EXPECT_TRUE(scope->attachment_failed());
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glass.destroy();
+    waterfall.destroy_geometry();
+    water.destroy_water_fallback_textures(resources);
+    lighting.destroy_lighting_fbo(resources);
+    gbuffer.destroy_gbuffer(resources);
+    glDeleteBuffers(1, &ebo);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
 }
 
 TEST(RenderSmokeTest, ScenarioBundlesRetainCompletedFrameIdentityAcrossSiblingCaptures) {
