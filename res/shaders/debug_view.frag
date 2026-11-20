@@ -94,7 +94,8 @@ vec3 identityColor() {
     if (any(notEqual(id, exactId)) || metadata.y == 0u) return unsupportedColor();
     if (u_mode == 6) return diagnosticColor(id.x);
     if (u_mode == 7) return diagnosticColor(id.y);
-    if (u_mode == 8) return diagnosticColor(id.z);
+    // LOD 0 is the common case; hash lod + 1 so it never maps to black.
+    if (u_mode == 8) return diagnosticColor(id.z + 1u);
     if (u_mode == 9) return diagnosticColor(metadata.x);
     if (u_mode == 10) {
         // Terrain, impostor, foliage, static, far volume. Owner: live / legacy / ladder.

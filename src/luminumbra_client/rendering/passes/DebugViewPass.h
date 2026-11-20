@@ -61,9 +61,9 @@ public:
         if (!supported) {
             return ProducerKind::Unsupported;
         }
-        if (variant == "live_terrain" || variant == "live_terrain_mdi" ||
-            variant == "live_terrain_mdi_ladder" || variant == "legacy_far_terrain" ||
-            variant == "legacy_far_water") {
+        // RenderPipeline submits live terrain as terrain_mdi[_ladder].
+        if (variant == "terrain_mdi" || variant == "terrain_mdi_ladder" ||
+            variant == "legacy_far_terrain" || variant == "legacy_far_water") {
             return ProducerKind::Terrain;
         }
         if (variant == "tree_impostor" || variant == "tree_impostor_ladder") {
@@ -72,11 +72,15 @@ public:
         if (variant == "foliage" || variant == "foliage_ladder") {
             return ProducerKind::Foliage;
         }
+        // StaticDrawPass submits authored and file statics as static_asset.
         if (variant == "instanced_static_mesh" || variant == "instanced_static_mesh_ladder" ||
-            variant == "skinned_mesh" || variant == "skinned_mesh_ladder") {
+            variant == "skinned_mesh" || variant == "skinned_mesh_ladder" ||
+            variant == "static_asset") {
             return ProducerKind::Static;
         }
-        if (variant == "far_volume" || variant == "far_volume_ladder") {
+        // FarVolumeGlBackend submits Ladder far volumes as g_buffer_ladder_far.
+        if (variant == "far_volume" || variant == "far_volume_ladder" ||
+            variant == "g_buffer_ladder_far") {
             return ProducerKind::FarVolume;
         }
         return ProducerKind::Unsupported;

@@ -2991,7 +2991,9 @@ class WorldVisualSweepWiring(unittest.TestCase):
                       self.capture)
         self.assertIn("settle_uploads(", callback)
         self.assertIn("UploadPresentation::Settled", callback)
-        self.assertIn("deps.render_and_read(pixels, fb_w, fb_h, false)", self.sweep)
+        self.assertIn("deps.render_and_read(pixels, fb_w, fb_h, false, "
+                      "i + 1 == settle_frames ? attribution_dir : std::filesystem::path{})",
+                      compact(self.sweep))
 
     def test_warmup_requires_complete_terrain_lod0_and_water(self):
         terrain = re.search(r"const bool terrain_ready =\s*([^;]+);", self.sweep)
@@ -3017,8 +3019,8 @@ class WorldVisualSweepWiring(unittest.TestCase):
         loop = block(self.sweep, "while (!streaming_ready")
         self.assertIn("get_camera_local_coverage_stats(anchor, 12)", loop)
         self.assertIn("get_camera_local_coverage_stats(anchor, 3)", loop)
-        self.assertIn("deps.render_and_read(pixels, fb_w, fb_h, true)", loop)
-        self.assertIn("return false;", block(loop, "if (!deps.render_and_read("))
+        self.assertIn("deps.render_and_read(pixels, fb_w, fb_h, true, std::filesystem::path())", loop)
+        self.assertIn("return false;", block(loop, "if (!deps.render_and_read(pixels, fb_w, fb_h, true, std::filesystem::path())"))
         water = block(loop, "if (terrain_ready)")
         self.assertIn("get_last_render_pass_stats()", water)
         self.assertIn("water_indices_drawn = stats.water_indices_drawn;", water)
@@ -3067,7 +3069,7 @@ class WorldVisualSweepWiring(unittest.TestCase):
 
     def test_water_target_is_local_and_absence_refuses_the_sweep(self):
         self.assertNotIn("FindWaterVisualCameraTarget(game_session)", self.sweep)
-        self.assertIn("std::max(land_terrain_h, Luminumbra::SEA_LEVEL) + 2.5f", self.sweep)
+        self.assertIn("anchor(168.0f, 10.0505952835083f, -40.0f)", self.sweep)
         helper = read(CLIENT / "rendering/WaterVisibility.h")
         search = block(helper, "FindWaterVisibilityTarget(")
         self.assertIn("for (int dz = -96; dz <= 96; dz += 16)", search)
@@ -3082,7 +3084,7 @@ class WorldVisualSweepWiring(unittest.TestCase):
         verify = block(self.sweep, "if (!target_rendered || !target_mask_written")
         self.assertIn("return false;", verify)
         self.assertIn("pipeline->water_visibility_mask());", self.sweep)
-        self.assertIn("const bool target_rendered = render_settled(3);", self.sweep)
+        self.assertIn("const bool target_rendered = render_settled(3, {});", self.sweep)
         self.assertIn("pipeline->water_visibility_mask().visible_pixels_in_target() == 0", self.sweep)
         self.assertIn("return false;", block(self.sweep, "if (!water_target.found)"))
         self.assertLess(self.sweep.index("if (!water_target.found)"),
@@ -3479,6 +3481,147 @@ class DeferredDiagnosticLeaseWiring(unittest.TestCase):
         self.assertIn("state_->failed = true;", unsupported)
         self.assertLess(writer.index("submission.provenance"),
                         writer.index("state_->table.submit(submission, id)"))
+
+
+class TerrainCaptureResourceWiring(unittest.TestCase):
+    """Evaluate capture resource wiring and scalar guards; no native GL execution."""
+
+    def setUp(self):
+        self.source = read(CLIENT / "rendering/TerrainCoverageCapture.cpp")
+        self.capture = block(self.source, "bool RenderPipeline::capture_terrain_coverage(")
+        self.replay = block(self.source, "bool CaptureFog(")
+
+    def test_allocated_frame_owners_supply_nonzero_recorded_source_handles(self):
+        # Lighting builds only its own inputs. Capture must fill these from the
+        # same owners used by the production scene and aerial consumers.
+        owners = {
+            "lit_scene_color": ("m_lighting_pass ? m_lighting_pass->lighting_fbo().color_texture : 0", 11),
+            "opaque_scene": ("m_lighting_pass ? m_lighting_pass->lighting_fbo().opaque_color_texture : 0", 12),
+            "sky_view_lut": ("m_sky_lut.sky_view_texture()", 13),
+            "transmittance_lut": ("m_sky_lut.transmittance_texture()", 14),
+        }
+        assignments = dict(re.findall(r"context\.(\w+) = adopt_texture\(\s*(.*?)\);",
+                                      compact(self.capture)))
+        for field, (expression, handle) in owners.items():
+            with self.subTest(field=field):
+                self.assertEqual(assignments.get(field), expression)
+                self.assertLess(self.capture.index(f"context.{field} ="),
+                                self.capture.index("CaptureTexture("))
+                self.assertGreater(cpp_expression(assignments[field], **{expression: handle}), 0)
+        for name, field in (("lit-scene", "lit_scene_color"), ("opaque-scene", "opaque_scene"),
+                            ("sky-view", "sky_view_lut"), ("transmittance", "transmittance_lut")):
+            self.assertIn(f'"{name}", context.{field}.id', compact(self.capture))
+        texture = block(self.source, "bool CaptureTexture(")
+        self.assertIn('{"texture", texture}', texture)
+        self.assertIn('{"status", "captured"}', texture)
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        lighting = block(pipeline, "RenderContext RenderPipeline::make_lighting_context(")
+        for field in owners:
+            self.assertNotIn(f"ctx.{field} =", lighting)
+        self.assertIn("m_frame_lighting_ctx = make_lighting_context(camera);", pipeline)
+
+    def has_storage(self, texture, allocated=True, width=8, height=8, depth=1, error=0):
+        helper = block(self.source, "bool HasTextureStorage(")
+        guard = re.search(r"if \((.*?)\) \{", compact(helper)).group(1)
+        self.assertIn("return false;", block(helper, "if ("))
+        if cpp_expression(guard, texture=texture, **{
+                "glIsTexture(texture)": int(allocated), "GL_TRUE": 1}):
+            return False
+        for dimension in ("WIDTH", "HEIGHT", "DEPTH"):
+            self.assertIn(f"glGetTextureLevelParameteriv(texture, 0, GL_TEXTURE_{dimension},", helper)
+        result = re.search(r"return (.*?);", helper[helper.index("GLint width"):], re.S).group(1)
+        return cpp_expression(result, width=width, height=height, depth=depth,
+                              **{"glGetError()": error, "GL_NO_ERROR": 0})
+
+    def test_replay_refuses_each_missing_or_unallocated_input_before_draw_and_completion(self):
+        inputs = re.search(r"const std::array<GLuint, 3> inputs\{(.*?)\};",
+                           self.replay, re.S).group(1)
+        self.assertEqual(compact(inputs), "context.gbuffer_depth.id, context.sky_view_lut.id, "
+                         "context.transmittance_lut.id")
+        loop = block(self.replay, "for (const auto input : inputs)")
+        self.assertEqual(compact(loop), "if (!HasTextureStorage(input)) { return false; }")
+        self.assertLess(self.replay.index("for (const auto input : inputs)"),
+                        self.replay.index("FogReadback restore;"))
+        self.assertLess(self.replay.index("FogReadback restore;"),
+                        self.replay.index("AttributedGl::Submit("))
+        self.assertIn("if (!m_sky_lut.ready() || !CaptureFog(", compact(self.capture))
+        refusal = block(self.capture, "if (!m_sky_lut.ready()")
+        self.assertEqual(compact(refusal), "return false;")
+        self.assertLess(self.capture.index("if (!m_sky_lut.ready()"),
+                        self.capture.index('receipt["complete"] = true'))
+        available = re.search(r"const bool aerial_available =\s*(.*?);", self.capture, re.S).group(1)
+        self.assertNotIn("m_sky_lut.ready()", available)
+        # Each required slot: zero name, generated/deleted name, or empty storage.
+        for slot in range(3):
+            for invalid in ({"texture": 0}, {"texture": 9, "allocated": False},
+                            {"texture": 9, "width": 0}, {"texture": 9, "height": 0},
+                            {"texture": 9, "depth": 0}, {"texture": 9, "error": 1282}):
+                with self.subTest(slot=slot, invalid=invalid):
+                    handles = [self.has_storage(11), self.has_storage(13), self.has_storage(14)]
+                    handles[slot] = self.has_storage(**invalid)
+                    self.assertFalse(all(handles))
+        self.assertTrue(all(self.has_storage(handle) for handle in (11, 13, 14)))
+
+    def test_volume_is_required_only_when_uploaded_shader_mode_samples_it(self):
+        self.assertIn('glGetUniformLocation(shader.Id(), "u_volumetricMode")', self.replay)
+        self.assertRegex(compact(self.replay), r"glGetUniformiv\(\s*shader.Id\(\), .*?&volumetric_mode\);")
+        guard = re.search(r"if \((glGetError\(\).*?)\) \{", compact(self.replay)).group(1)
+        self.assertEqual(compact(block(self.replay, "if (glGetError()")), "return false;")
+        self.assertLess(self.replay.index(guard), self.replay.index("FogReadback restore;"))
+        for mode in (0, 1, -1):
+            for stored in (False, True):
+                for error in (0, 1282):
+                    with self.subTest(mode=mode, stored=stored, error=error):
+                        self.assertEqual(cpp_expression(guard, volumetric_mode=mode, **{
+                            "glGetError()": error, "GL_NO_ERROR": 0,
+                            "HasTextureStorage(froxel)": stored}),
+                            error != 0 or (mode != 0 and not stored))
+
+    def test_missing_or_unallocated_quad_refuses_before_replay(self):
+        guard = re.search(r"if \((context.screen_quad_vao.*?)\) \{", compact(self.replay)).group(1)
+        self.assertEqual(compact(block(self.replay, "if (context.screen_quad_vao")), "return false;")
+        self.assertLess(self.replay.index(guard), self.replay.index("FogReadback restore;"))
+        for handle, allocated in ((0, False), (0, True), (7, False), (7, True)):
+            with self.subTest(handle=handle, allocated=allocated):
+                self.assertEqual(cpp_expression(guard, **{
+                    "context.screen_quad_vao": handle,
+                    "glIsVertexArray(context.screen_quad_vao)": int(allocated), "GL_TRUE": 1}),
+                    handle == 0 or not allocated)
+        available = re.search(r"const bool aerial_available =\s*(.*?);", self.capture, re.S).group(1)
+        self.assertNotIn("screen_quad_vao", available)
+
+    def test_optional_absence_stays_unavailable(self):
+        texture = block(self.source, "bool CaptureTexture(")
+        absent = compact(block(texture, "if (texture == 0)"))
+        self.assertEqual(absent, 'sources[name] = {{"status", "unavailable"}}; return true;')
+        self.assertLess(texture.index("if (texture == 0)"), texture.index("glGetTextureLevelParameteriv("))
+        unavailable = block(self.capture, "if (aerial_available)")
+        self.assertIn("CaptureFog(", unavailable)
+        self.assertIn('sources["aerial"] = {{"status", "unavailable"}};', self.capture)
+        available = re.search(r"const bool aerial_available =\s*(.*?);", self.capture, re.S).group(1)
+        for mask in range(16):
+            flags = [bool(mask & (1 << bit)) for bit in range(4)]
+            with self.subTest(flags=flags):
+                self.assertEqual(cpp_expression(available, **{
+                    "m_aerial_pass": flags[0], "m_aerial_pass->shader()": flags[1],
+                    "m_aerial_pass->shader()->IsValid()": flags[2],
+                    "m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Aerial)": flags[3]}),
+                    all(flags))
+
+    def test_volume_readbacks_follow_texture_update_barrier_after_image_store(self):
+        froxel = read(CLIENT / "rendering/passes/FroxelPass.cpp")
+        integrate = block(froxel, "void FroxelPass::execute_integrate(")
+        self.assertIn("GL_WRITE_ONLY, GL_RGBA16F", integrate)
+        self.assertIn("glDispatchCompute", integrate)
+        self.assertIn("glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT)", integrate)
+        barrier = self.capture.index("glMemoryBarrier(GL_TEXTURE_UPDATE_BARRIER_BIT)")
+        for name in ("fog-inscatter", "fog-transmittance"):
+            self.assertLess(barrier, self.capture.index(f'"{name}"'))
+        self.assertLess(barrier, self.capture.index("CaptureFog("))
+        # The capture hook is after the finished render, before presentation.
+        hook = block(read(CLIENT / "core/ScenarioRunnerCapture.cpp"),
+                     "void ScenarioRunnerImpl::onPreRenderWorldSweep()")
+        self.assertLess(hook.index("renderPipeline.render_frame("), hook.index("capture_terrain_coverage("))
 
 
 class DiagnosticContributorWiring(unittest.TestCase):
