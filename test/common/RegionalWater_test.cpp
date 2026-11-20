@@ -4884,6 +4884,8 @@ TEST(RegionalWaterAdmission, LiveUnclaimedCleanupCannotRecycleReservationCapacit
     for (int cleanup = 0; cleanup < 4; ++cleanup) {
         SCOPED_TRACE(cleanup);
         SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 777);
+        WaterSystem water(nullptr, &shield);
+        shield.SetWaterSystem(&water);
         shield.set_durable_residency(true);
         shield.set_parked_bytes_limit(2 * SHIELD_WorldSystem::kWaterColumnReservationBytes);
         std::array<std::shared_ptr<Chunk>, 4> chunks;
@@ -4946,6 +4948,8 @@ TEST(RegionalWaterAdmission, ParkedRetirementReleasesReservationsWithoutASaveOut
     for (const bool committed : {false, true}) {
         SCOPED_TRACE(committed);
         SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 777);
+        WaterSystem water(nullptr, &shield);
+        shield.SetWaterSystem(&water);
         shield.set_durable_residency(true);
         shield.set_parked_bytes_limit(SHIELD_WorldSystem::kWaterColumnReservationBytes);
         const auto chunk = shield.resolve_water_column({0, 0, 0});
