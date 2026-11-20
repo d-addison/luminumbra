@@ -510,6 +510,103 @@ class NormalDepthTests(unittest.TestCase):
                 scene.run(args)
 
 
+class PostComputeTests(unittest.TestCase):
+    def test_production_paths_are_consumed_and_clamped(self):
+        fixture = (ROOT / 'test/rendering/shader_scene_render_test.cpp').read_text(encoding='utf-8')
+        post = fixture.split('void ShaderScene::PostEdge()', 1)[1].split('void ShaderScene::ComputeReadback()', 1)[0]
+        for expression in ('Source("res/shaders/ssao.vert")',
+                           'Source("res/shaders/taau_resolve.frag")', 'GL_RGBA16F',
+                           'GL_REPEAT', 'glUniform1i(Uniform("u_history_valid"), 1)',
+                           'Save("post-edge-mask", mask)', '8.f / 255.f'):
+            self.assertIn(expression, post)
+        shader = (ROOT / 'res/shaders/taau_resolve.frag').read_text(encoding='utf-8')
+        self.assertIn('return clamp(uv, u_texel * 0.5, vec2(1.0) - u_texel * 0.5);', shader)
+        self.assertIn('currentUv(TexCoords + vec2(float(dx), float(dy)) * u_texel)', shader)
+        compute = fixture.split('void ShaderScene::ComputeReadback()', 1)[1]
+        for expression in ('Compile(GL_COMPUTE_SHADER, "grass_compact_prefix.comp")',
+                           'bindings{3, 5, 6}', 'glDispatchCompute(1u, 1u, 1u)',
+                           'GL_BUFFER_UPDATE_BARRIER_BIT', 'glGetBufferSubData(',
+                           'EXPECT_EQ(actual[index], expected[index])'):
+            self.assertIn(expression, compute)
+        kernel = (ROOT / 'res/shaders/grass_compact_prefix.comp').read_text(encoding='utf-8')
+        self.assertIn('layout(std430, binding = 6) writeonly buffer GroupOffsets', kernel)
+        # Helpers are reached by an already registered native case; keep the
+        # runner's exact inventory and opt-in CTest/path gate unchanged.
+        terrain = fixture.split('TEST_F(ShaderScene, TerrainMaterialTransition)', 1)[1].split(
+            'TEST_F(ShaderScene, NightSky', 1)[0]
+        self.assertIn('PostEdge();', terrain)
+        self.assertIn('ComputeReadback();', terrain)
+
+    def test_border_threshold_all_sides_and_silhouette_exclusion(self):
+        actual, mask = [.5] * scene.CHANNELS, scene.post_inputs()[1]
+        self.assertEqual(scene.post_edge_metric(actual, mask), 0)
+        for delta, passes in ((8 / 255, True), (8 / 255 + .000001, False)):
+            changed = actual.copy()
+            for y in range(128):
+                for x in (0, 127):
+                    changed[(y * 128 + x) * 3:(y * 128 + x) * 3 + 3] = [.5 + delta] * 3
+            self.assertEqual(scene.post_edge_metric(changed, mask) <= 8 / 255, passes)
+        for edge in ('left', 'right', 'bottom', 'top'):
+            changed = actual.copy()
+            for coordinate in range(128):
+                x = 0 if edge == 'left' else 127 if edge == 'right' else coordinate
+                y = 0 if edge == 'bottom' else 127 if edge == 'top' else coordinate
+                changed[(y * 128 + x) * 3:(y * 128 + x) * 3 + 3] = [.9] * 3
+            self.assertGreater(scene.post_edge_metric(changed, mask), 8 / 255)
+        changed = actual.copy()
+        for y in (47, 48, 79, 80):
+            changed[y * 128 * 3:y * 128 * 3 + 3] = [.9] * 3
+        self.assertEqual(scene.post_edge_metric(changed, mask), 0)
+        self.assertLess(scene.post_edge_metric(scene.ideal_post(), mask), 8 / 255)
+        with patch.object(scene, 'post_inputs', return_value=(actual, [0] * scene.CHANNELS)):
+            with self.assertRaisesRegex(ValueError, 'border coverage'):
+                scene.post_edge_metric(actual, [0] * scene.CHANNELS)
+        for invalid in ([], mask[:-1], mask + [0], [math.nan] + mask[1:],
+                        [math.inf] + mask[1:], [-1] + mask[1:], [2] + mask[1:],
+                        [0] * scene.CHANNELS):
+            with self.subTest(size=len(invalid)), self.assertRaises(ValueError):
+                scene.post_edge_metric(actual, invalid)
+            if invalid != [0] * scene.CHANNELS:
+                with self.assertRaises(ValueError):
+                    scene.post_edge_metric(invalid, mask)
+
+    def test_integer_exact_readback_size_endianness_and_each_word(self):
+        actual, mask = scene.ideal_post(), scene.post_inputs()[1]
+        expected = (19, 12, 13, 0, 0, 0, 0, 3, 4, 4, 11, 13, 18)
+        data = struct.pack('<13I', *expected)
+        scene.check_post_compute(actual, mask, data)
+        for invalid in (b'', data[:-1], data + b'0', struct.pack('>13I', *expected),
+                        b'\xff' * len(data)):
+            with self.assertRaisesRegex(ValueError, 'integer-exact'):
+                scene.check_post_compute(actual, mask, invalid)
+        for index in range(13):
+            changed = list(expected)
+            changed[index] += 1
+            with self.subTest(word=index), self.assertRaisesRegex(ValueError, 'integer-exact'):
+                scene.check_post_compute(actual, mask, struct.pack('<13I', *changed))
+
+    def test_failed_post_compute_evidence_refuses_publication(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            capture = root / 'capture'
+            capture.mkdir()
+            output = root / 'candidate'
+            for filename, payload in (
+                    ('post-edge-mask.pfm', b'PF\n128 128\n-1.0\n' + b'\0' * (scene.CHANNELS * 4)),
+                    ('post-edge.pfm', b'PF\n128 128\n-1.0\n' + struct.pack('<' + 'f' * scene.CHANNELS,
+                        *[.9 if x in (0, 127) or y in (0, 127) else .5
+                          for y in range(128) for x in range(128) for channel in range(3)])),
+                    ('compute-ssbo.bin', b'\xff' * 52)):
+                for command in ('compare', 'regenerate'):
+                    ShaderScenesTests().capture(capture)
+                    (capture / filename).write_bytes(payload)
+                    args = argparse.Namespace(command=command, manifest=MANIFEST,
+                                              capture=capture, output=output)
+                    with self.subTest(file=filename, command=command), self.assertRaises(ValueError):
+                        scene.run(args)
+                    self.assertFalse(output.exists())
+
+
 class ShaderScenesTests(unittest.TestCase):
     def capture(self, directory, value=.25):
         for name in sorted(scene.INPUTS - {'test/rendering/shader_scene_render_test.cpp'}):
@@ -520,6 +617,10 @@ class ShaderScenesTests(unittest.TestCase):
             (ROOT / 'src/luminumbra_client/rendering/Camera.h').read_bytes().replace(b'\r\n', b'\n')),
             encoding='ascii')
         (directory / 'depth-conventions.json').write_text(json.dumps(scene.DEPTH_CASES), encoding='utf-8')
+        (directory / 'post-edge-mask.pfm').write_bytes(
+            b'PF\n128 128\n-1.0\n' + struct.pack('<' + 'f' * scene.CHANNELS, *scene.post_inputs()[1]))
+        (directory / 'compute-ssbo.bin').write_bytes(
+            struct.pack('<13I', 19, 12, 13, 0, 0, 0, 0, 3, 4, 4, 11, 13, 18))
         (directory / 'material.pfm').write_bytes(b'PF\n128 128\n-1.0\n' +
                                                struct.pack('<f', value) * scene.CHANNELS)
         (directory / 'tree-cutout.pfm').write_bytes(
@@ -558,7 +659,7 @@ class ShaderScenesTests(unittest.TestCase):
         tree = scene.rgb(data['tree-cutout'], False)
         self.assertLessEqual(max(abs(a - b) for a, b in zip(tree, self.cutout())), .5 / 255)
         self.assertEqual(set(data), {'material', 'tree-cutout', 'night-sky', 'terrain-blend',
-                                     'normal-decode', 'reversed-z'})
+                                     'normal-decode', 'reversed-z', 'post-edge'})
         self.assertLessEqual(max(abs(a - b) for a, b in zip(
             scene.rgb(data['terrain-blend'], False), self.terrain())), .5 / 255)
         self.assertNotIn('dusk-sky', data)
@@ -873,7 +974,9 @@ class ShaderScenesTests(unittest.TestCase):
             output = root / 'candidate'
             args = argparse.Namespace(command='regenerate', manifest=MANIFEST,
                                       capture=capture, output=output)
-            for filename in ('enhanced_skybox.frag', 'SkyAtmosphereLut.ipp',
+            for filename in ('taau_resolve.frag', 'ssao.vert', 'grass_compact_prefix.comp',
+                             'post-edge.pfm', 'post-edge-mask.pfm', 'compute-ssbo.bin',
+                             'enhanced_skybox.frag', 'SkyAtmosphereLut.ipp',
                              'g_buffer.vert', 'g_buffer.frag', 'night-sky.pfm',
                              'terrain-blend.pfm', 'dusk-sky.pfm'):
                 for bad in (None, b'', b'partial'):
@@ -917,7 +1020,12 @@ class ShaderScenesTests(unittest.TestCase):
             (root / 'references').mkdir()
             for fixture in scene.FIXTURES:
                 (root / fixture['reference']).write_bytes((MANIFEST.parent / fixture['reference']).read_bytes())
-            changes = [{'diagnostics': []}]
+            changes = [{'diagnostics': []}, {'compute': []}, {'compute': None}]
+            for key, value in (('groups', []), ('groups', [0., 3, 1, 0, 7, 2, 5, 1]),
+                               ('max_instances', 13.), ('kernel', 'unknown'), ('encoding', 'uint32_be')):
+                compute = copy.deepcopy(scene.COMPUTE)
+                compute[0][key] = value
+                changes.append({'compute': compute})
             for name in ('night-sky', 'terrain-blend'):
                 for field in ('fixtures', 'reference_sha256', 'reference_capture', 'inputs'):
                     data = copy.deepcopy(original)

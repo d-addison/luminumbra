@@ -23,7 +23,10 @@ CHANNELS = SIZE * SIZE * 3
 FIXTURES = [
     {'name': name, 'reference': f'references/{name}.ppm', 'mask': [0, 0, SIZE, SIZE]}
     for name in ('material', 'tree-cutout', 'night-sky', 'terrain-blend',
-                 'normal-decode', 'reversed-z')]
+                 'normal-decode', 'reversed-z', 'post-edge')]
+COMPUTE = [{'name': 'compute-ssbo', 'kernel': 'res/shaders/grass_compact_prefix.comp',
+            'encoding': 'uint32_le', 'groups': [0, 3, 1, 0, 7, 2, 5, 1],
+            'max_instances': 13}]
 DEPTH_CASES = [{'reversed_z': flag, 'near': .1, 'far': 100.,
                 'rows': [64, 128] if flag else [0, 64]}
                for flag in (False, True)]
@@ -36,7 +39,85 @@ INPUTS = {'res/shaders/static_asset.vert', 'res/shaders/static_asset.frag',
           'src/luminumbra_client/rendering/SkyAtmosphereLut.ipp',
           'res/shaders/lighting_pass.frag', 'res/shaders/magical_particles.frag',
           'src/luminumbra_client/rendering/Camera.h',
+          'res/shaders/ssao.vert', 'res/shaders/taau_resolve.frag',
+          'res/shaders/grass_compact_prefix.comp',
           'test/rendering/shader_scene_render_test.cpp'}
+
+
+def post_inputs():
+    """Fixed dyadic color ramp, with a real silhouette touching the left border."""
+    current, mask = [], []
+    for y in range(SIZE):
+        for x in range(SIZE):
+            foreground = x < 16 and 48 <= y < 80
+            value = .875 if foreground else .125 + x / 256 + y / 1024
+            current.extend((value, value / 2, value / 4))
+            mask.extend((.75 if foreground else .25, .5 if foreground else .25, 0))
+    return current, mask
+
+
+def ideal_post():
+    # Independent arithmetic oracle for fixed valid history=white, zero motion,
+    # blend=.9 and sharpness=.4. At most 128*128*9 RGB samples.
+    current, _ = post_inputs()
+    result = []
+    for y in range(SIZE):
+        for x in range(SIZE):
+            samples = [current[(min(127, max(0, y + dy)) * SIZE
+                                + min(127, max(0, x + dx))) * 3]
+                       for dy in (-1, 0, 1) for dx in (-1, 0, 1)]
+            center = current[(y * SIZE + x) * 3]
+            resolved = .1 * center + .9 * max(samples)
+            # All colors share the same chroma; luminance factors cancel.
+            value = min(max(samples), max(min(samples),
+                        resolved + .4 * (resolved - math.fsum(samples) / 9)))
+            result.extend((value, value / 2, value / 4))
+    return result
+
+
+def post_edge_metric(actual, mask):
+    scene_samples(actual)
+    scene_samples(mask)
+    if list(mask) != post_inputs()[1]:
+        raise ValueError('unknown post-edge depth/ID mask')
+
+    def identity_at(x, y):
+        offset = (min(127, max(0, y)) * SIZE + min(127, max(0, x))) * 3
+        return mask[offset:offset + 2]
+
+    errors = []
+    # Exactly 508 border pixels, three inward samples each, and a 3x3
+    # depth/ID footprint per sample; four silhouette pixels are excluded.
+    borders = [(x, y, 1 if x == 0 else -1, 0)
+               for x in (0, 127) for y in range(SIZE)]
+    borders += [(x, y, 0, 1 if y == 0 else -1)
+                for y in (0, 127) for x in range(1, 127)]
+    for x, y, dx, dy in borders:
+        offsets = [((y + step * dy) * SIZE + x + step * dx) * 3 for step in range(3)]
+        identity = identity_at(x, y)
+        if any(identity_at(x + step * dx + ox, y + step * dy + oy) != identity
+               for step in range(3) for oy in (-1, 0, 1) for ox in (-1, 0, 1)):
+            continue
+        errors.extend(abs(actual[offsets[0] + channel]
+                          - (2 * actual[offsets[1] + channel] - actual[offsets[2] + channel]))
+                      for channel in range(3))
+    if len(errors) != 504 * 3:
+        raise ValueError('incomplete post-edge border coverage')
+    errors.sort()
+    return errors[math.ceil(len(errors) * .99) - 1]
+
+
+def check_post_compute(actual, mask, data):
+    residual = post_edge_metric(actual, mask)
+    print(f'post-edge: border residual p99={residual:.8f} (<=8/255), 504 unmasked pixels')
+    if residual > 8 / 255:
+        raise ValueError('post-edge border residual invariant failed')
+    # Integer-exact uint32 prefix sums: no floating-point reduction or atomic
+    # scheduling. Includes zero counts and the independent instance cap.
+    expected = (19, 12, 13, 0, 0, 0, 0, 3, 4, 4, 11, 13, 18)
+    if len(data) != 4 * len(expected) or struct.unpack('<13I', data) != expected:
+        raise ValueError('compute SSBO integer-exact invariant failed')
+    print('compute-ssbo: all 13 uint32 words integer-exact')
 
 
 def analytic_normal(x, y):
@@ -64,7 +145,7 @@ def analytic_scenes():
             raw = (100 - 10 / distance) / 99.9
             raw = 1 - raw if y >= 64 else raw
             depths.extend((raw, distance / 100, raw))
-    return {'normal-decode': normals, 'reversed-z': depths}
+    return {'normal-decode': normals, 'reversed-z': depths, 'post-edge': ideal_post()}
 
 
 def normal_decode_metrics(actual):
@@ -271,6 +352,7 @@ def load_manifest(path, root=ROOT, verify_inputs=True):
             or manifest['schema'] != 3 or manifest.get('encoding') != 'linear_rgb_bottom_first'
             or manifest.get('size') != [SIZE, SIZE] or manifest.get('defines') != []
             or manifest.get('fixtures') != FIXTURES
+            or json.dumps(manifest.get('compute'), sort_keys=True) != json.dumps(COMPUTE, sort_keys=True)
             or manifest.get('diagnostics') != DIAGNOSTICS):
         raise ValueError('unknown scene inventory or encoding')
     dimensions = manifest['size'] + [value for fixture in manifest['fixtures']
@@ -315,7 +397,8 @@ def run(args):
         for name, actual in actuals.items():
             references[name] = b'P6\n128 128\n255\n' + bytes(round(value * 255) for value in actual)
             manifest['reference_capture'][name] = {
-                'renderer': 'analytical normals and finite perspective planes',
+                'renderer': ('analytical fixed TAAU neighbourhood' if name == 'post-edge'
+                             else 'analytical normals and finite perspective planes'),
                 'version': 'not captured', 'origin': 'analytical'}
         manifest['inputs'] = {name: digest(read_file(local_file(ROOT, name)).replace(b'\r\n', b'\n'))
                               for name in INPUTS}
@@ -350,6 +433,9 @@ def run(args):
         raise ValueError('tree cutout/background invariant failed')
     check_scene_invariants(actuals)
     check_normal_depth(actuals, json.loads(read_file(args.capture / 'depth-conventions.json', 4096)))
+    check_post_compute(actuals['post-edge'],
+                       rgb(read_file(args.capture / 'post-edge-mask.pfm'), True),
+                       read_file(args.capture / 'compute-ssbo.bin', 52))
     print(f'dusk-sky: maximum adjacent column-mean luminance step={horizontal_step(dusk):.8f}; '
           'tolerance <=0.005 pending issue #918 (diagnostic only; no reference expectation)')
     if args.command == 'compare':
@@ -390,7 +476,7 @@ def main():
     parser.add_argument('--manifest', type=Path, default=ROOT / 'test/rendering/shader_scenes/scenes.json')
     parser.add_argument('--capture', type=Path)
     parser.add_argument('--analytical', action='store_true',
-                        help='regenerate ideal normal/depth references, preserving other references')
+                        help='regenerate ideal normal/depth/post references, preserving other references')
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
     try:
