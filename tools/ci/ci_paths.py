@@ -13,6 +13,7 @@ import sys
 # Only reviewed, test-backed files may skip native builds. New files require
 # an explicit coverage decision; directory membership never grants an exemption.
 PYTHON_TESTS = (
+    "tools/gates/test_temporal_montages.py",
     "tools/gates/test_temporal_capture.py",
     "tools/gates/test_temporal_assembly.py",
     "tools/gates/test_shader_scenes.py",
@@ -94,6 +95,7 @@ PYTHON_TESTS = (
     "tools/rendering/acceptance/test_scene_matrix.py",
 )
 PYTHON_MODULES = {
+    "tools/gates/build-visual-sweep-montages.py",
     "tools/gates/shader-scenes.py",
     "tools/gates/visual_lint.py",
     "tools/regenerate_region_fixtures.py",

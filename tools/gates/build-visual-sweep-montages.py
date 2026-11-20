@@ -179,6 +179,80 @@ def build_review(artifact_dir):
     return report
 
 
+def svg_pixels(parts, pixels, x, y, scale=5):
+    """Shared bounded raw-channel raster display for diagnostic SVGs."""
+    for row_index, row in enumerate(pixels):
+        for column, pixel in enumerate(row):
+            rgb = ([255, 0, 255] if not all(math.isfinite(v) for v in pixel) else
+                   [round(max(0, min(1, v))*255) for v in pixel])
+            color = '#' + ''.join(f'{v:02x}' for v in rgb)
+            parts.append(f'<rect x="{x+column*scale}" y="{y+row_index*scale}" width="{scale}" height="{scale}" fill="{color}"/>')
+
+
+def temporal_montage(manifest, output, rois=None):
+    """Reuse validated measurements and SVG raster display, without Pillow.
+
+    <=40 event/failure slots, five <=9x9 thumbnails per slot. Unknown or absent
+    neighbors have explicit labels; no fabricated black frame can look valid.
+    """
+    checker = runpy.run_path(str(Path(__file__).with_name('check-temporal-capture.py')))
+    report = checker['measure'](manifest, rois)
+    slots, unavailable = [], []
+    for kind in checker['METRICS']:
+        records = [r for r in report['results'] if r['metric'] == kind]
+        events = [(r, e) for r in records for e in r['events']]
+        slots.extend(sorted(events, key=lambda pair: (-pair[1]['score'], pair[1]['frame_index'], pair[1]['roi'])))
+        unavailable.extend((r, None) for r in records if r['values'] is None)
+    slots.extend(unavailable)  # Failure labels cannot displace retained worst events.
+    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="{50+min(40, len(slots))*230}" '
+             'font-family="monospace" font-size="12">', '<rect width="100%" height="100%" fill="#101014"/>',
+             f'<text x="8" y="18" fill="white">temporal {report["status"]}; raw sampled evidence; '
+             f'visual approval pending; slots={min(40, len(slots))}/{len(slots)}</text>']
+    for index, (record, event) in enumerate(slots[:40]):
+        y = 40 + index * 230
+        label = (f'{record["roi"]} / {record["metric"]} / {record["qualification"]} '
+                 f'{record["status"]} outcome={record["outcome"]} thresholds={record["thresholds"]} '
+                 f'score={event["score"] if event else None}')
+        detail = dict(result={k: v for k, v in record.items() if k != 'events'},
+                      event={k: v for k, v in event.items() if k != 'preview'} if event else None)
+        parts.append('<g><title>' + html.escape(json.dumps(detail, sort_keys=True)) + '</title>')
+        parts.append(f'<text x="8" y="{y+18}" fill="white">{html.escape(label)}</text>')
+        if event is None:
+            parts.append(f'<text x="8" y="{y+38}" fill="white">UNAVAILABLE: {html.escape(record["reason"] or "missing evidence")}</text>')
+        payload = event['preview'] if event else {}
+        current, before = payload.get('current'), payload.get('before')
+        if current:
+            camera = hashlib.sha256(json.dumps(current['camera'], sort_keys=True).encode()).hexdigest()[:16]
+            label = (f'frame={event["frame_index"]} tick={event["tick"]}+{current["sub_tick_60"]}/60 '
+                     f'site={current["site"]} camera={camera} '
+                     f'TOD={current["tod"]} weather={current["weather"]} channel={current["channel"]}')
+            parts.append(f'<text x="8" y="{y+38}" fill="white">{html.escape(label)}</text>')
+            for column, name in enumerate(('before', 'current', 'after')):
+                probe = payload[name]['probe'] if payload.get(name) else None
+                label = (f'{name} draw/asset probes: draw={probe["draw"]} '
+                         f'asset={probe["surface"]["asset"]} pass={probe["surface"]["producer_pass"]}'
+                         if probe else f'{name} draw/asset probes: UNAVAILABLE')
+                parts.append(f'<text x="8" y="{y+58+column*16}" fill="white">{html.escape(label)}</text>')
+        delta = ([[[abs(a-b) for a, b in zip(p, q)] for p, q in zip(row, old)]
+                  for row, old in zip(current['pixels'], before['pixels'])] if current and before else None)
+        mask = ([[[float(v)] * 3 for v in row] for row in current['mask']] if current else None)
+        images = [(name, payload.get(name, {}).get('pixels') if payload.get(name) else None)
+                  for name in ('before', 'current', 'after')]
+        images.extend([('raw delta', delta), ('static attribution mask', mask)])
+        for column, (name, pixels) in enumerate(images):
+            x = 8 + column * 330
+            label = name + ('' if pixels is not None else ': UNAVAILABLE')
+            parts.append(f'<text x="{x}" y="{y+111}" fill="white">{label}</text>')
+            if pixels is not None:
+                svg_pixels(parts, pixels, x, y + 118, 12)
+        parts.append('</g>')
+    parts.append('</svg>')
+    # Measurement/refusal completes before exclusive output creation.
+    with Path(output).open('x', encoding='utf-8', newline='\n') as stream:
+        stream.write('\n'.join(parts) + '\n')
+    return report
+
+
 def diagnostic_montage(completion, output, rois=None):
     """Write a stdlib SVG with <=32 labeled, <=33x33 raw-albedo crops.
 
@@ -219,12 +293,7 @@ def diagnostic_montage(completion, output, rois=None):
         crop = by_result.get(id(record))
         if crop is None:
             continue
-        for row_index, row in enumerate(crop['pixels']):
-            for column, pixel in enumerate(row):
-                rgb = ([255, 0, 255] if not all(math.isfinite(v) for v in pixel) else
-                       [round(max(0, min(1, v))*255) for v in pixel])
-                color = '#' + ''.join(f'{v:02x}' for v in rgb)
-                parts.append(f'<rect x="{8+column*5}" y="{y+42+row_index*5}" width="5" height="5" fill="{color}"/>')
+        svg_pixels(parts, crop['pixels'], 8, y + 42)
         x, py = record['worst_pixel']
         parts.append(f'<rect x="{8+(x-crop["box"][0])*5}" y="{y+42+(py-crop["box"][1])*5}" '
                      'width="5" height="5" fill="none" stroke="yellow"/>')
@@ -238,9 +307,18 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("artifact_dir", nargs="?", default=".")
     parser.add_argument('--diagnostics', type=Path, help='One completion JSON; emit raw-albedo worst-pixel SVG.')
+    parser.add_argument('--temporal', type=Path, help='Sequence manifest; emit temporal worst-event SVG.')
     parser.add_argument('--rois', type=Path)
     parser.add_argument('--output', type=Path)
     args = parser.parse_args(argv)
+    if args.temporal is not None:
+        if args.output is None or args.diagnostics is not None:
+            parser.error('--temporal requires --output and excludes --diagnostics')
+        try:
+            return int(temporal_montage(args.temporal, args.output, args.rois)['status'] == 'fail')
+        except (OSError, ValueError, RuntimeError, RecursionError, OverflowError) as error:
+            print(f'Cannot build temporal montage: {error}', file=sys.stderr)
+            return 2
     if args.diagnostics is not None:
         if args.output is None:
             parser.error('--diagnostics requires --output')

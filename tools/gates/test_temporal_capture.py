@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Synthetic manifest-bound temporal measurements; no renderer or dependencies."""
 import hashlib
+import copy
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,25 @@ from unittest import mock
 PATH = Path(__file__).with_name('check-temporal-capture.py')
 C = runpy.run_path(str(PATH))
 D = C['D']
+
+
+def synthetic_baseline(seq, kind, evidence=True):
+    """Synthetic qualification records are never copied to shipped ROIs."""
+    for frame in seq.frames:
+        frame['temporal']['backend'] = 'fixture'
+    entry = dict(metric=kind, baseline_version='fixture-v1', threshold_version='fixture-v1',
+        backend='fixture', cadence_subticks=[0 if seq.hold else 120],
+        span=[0, 100, 100 + seq.count * 2], thresholds=[0, 0 if kind == 'seam_persistence' else .01])
+    if evidence:
+        entry['qualification'] = dict(
+            repeated_runs=[dict(run=f'run-{i}', input_sha256='a'*64, result_sha256='b'*64) for i in range(2)],
+            known_good=[dict(input_sha256='c'*64, result_sha256='d'*64, score=0)],
+            defective=[dict(input_sha256='e'*64, result_sha256='f'*64, score=1)],
+            review=dict(owner='fixture-owner', decision='approved', baseline_version='fixture-v1',
+                        threshold_version='fixture-v1'))
+    seq.regions[0].setdefault('temporal_baselines', []).append(entry)
+    seq.write()
+    return entry
 
 
 class Sequence:
@@ -124,6 +144,9 @@ class Sequence:
             initial_readiness_retries=300, sample_settle_frames=3, sample_readiness_retries=60),
             frames=planned), frames=recorded)
         self.write_manifest()
+        self.write_rois()
+
+    def write_rois(self):
         self.rois.write_text(json.dumps(dict(schema=1, rois=self.regions)), encoding='utf-8')
 
     def write_manifest(self):
@@ -264,10 +287,13 @@ class TemporalCapture(unittest.TestCase):
                seq.regions[0], 0, record)
         self.assertEqual(record['status'], 'ineligible')
         current['rects'] = [(0, 0, 80, 80)]
+        current['preview_payloads'] = [dict(current=dict(pixels='unselected-image-payload'))]
         state, record = {}, C['result']('flicker', seq.regions[0])
         for i in range(120):
             fn(state, current, dict(kind=1, tick=100, control=1, hold_frame=i, index=i),
                seq.regions[0], 0, record)
+            if i == 118:
+                self.assertNotIn('unselected-image-payload', repr(state))
         self.assertEqual(record['status'], 'advisory')
         self.assertEqual(record['coverage'], .01)
 
@@ -584,6 +610,214 @@ class TemporalCapture(unittest.TestCase):
             self.assertTrue(paths['needs_python'](path))
         self.assertIn('tools/gates/check-temporal-capture.py', paths['CI_ENTRYPOINTS'])
         self.assertIn('tools/gates/test_temporal_capture.py', (root / 'test/CMakeLists.txt').read_text(encoding='utf-8'))
+
+    def test_qualified_synthetic_one_frame_defects_and_repeat_determinism(self):
+        for kind in C['METRICS']:
+            with self.subTest(metric=kind):
+                seq = Sequence(self.new_root(), 120 if kind == 'flicker' else 3, kind == 'flicker')
+                synthetic_baseline(seq, kind)
+                good = self.metric(kind, seq.measure())
+                self.assertEqual((good['status'], good['qualification'], good['outcome']),
+                                 ('qualified', 'qualified', 'pass'))
+                index = 60 if seq.hold else 1
+                seq.frames[index]['color' if kind == 'seam_persistence' else 'light'][0] = 1.
+                seq.write()
+                first = seq.measure()
+                self.assertEqual(first, seq.measure())
+                record = self.metric(kind, first)
+                self.assertEqual((record['status'], record['qualification'], record['outcome']),
+                                 ('qualified', 'qualified', 'fail'))
+                self.assertEqual(first['status'], 'fail')
+                self.assertEqual(record['baseline_version'], 'fixture-v1')
+                if kind == 'flicker':
+                    self.assertEqual(record['events'][0]['frame_index'], 60)
+                    original_validate, calls = D['validate'], []
+                    def change_before_selected_read(*args, **kwargs):
+                        calls.append(args[0])
+                        if len(calls) == seq.count + 1:
+                            path = Path(str(args[0])[:-len(D['SUFFIX'])] + '.lighting.pfm')
+                            path.write_bytes(b'partial selected frame')
+                        return original_validate(*args, **kwargs)
+                    with mock.patch.dict(D, validate=change_before_selected_read):
+                        with self.assertRaises(ValueError):
+                            seq.measure()
+                    self.assertEqual(len(calls), seq.count + 1)
+
+    def test_qualification_context_and_advisory_transitions(self):
+        entry = synthetic_baseline(self.seq, 'delta', False)
+        self.seq.regions[0]['enforce'] = True  # D2 enforcement cannot qualify temporal metrics.
+        self.seq.frames[1]['light'][0] = 1.
+        self.seq.write()
+        record = self.metric('delta')
+        self.assertEqual((record['status'], record['qualification']), ('advisory', 'advisory'))
+        self.assertIsNone(record['outcome'])
+        self.seq.regions[0]['temporal_baselines'].clear()
+        entry = synthetic_baseline(self.seq, 'delta')
+        for field, value in (('backend', 'other'), ('cadence_subticks', [60]), ('span', [1, 100, 106])):
+            saved = entry[field]
+            entry[field] = value
+            self.seq.write_rois()
+            record = self.metric('delta')
+            self.assertEqual(record['qualification'], 'advisory')
+            self.assertIsNone(record['thresholds'])
+            entry[field] = saved
+        self.seq.write_rois()
+        self.assertEqual(self.metric('delta')['outcome'], 'fail')
+        # ROI qualification never leaks to another metric or ROI.
+        self.seq.regions.append(dict(name='other', rect=[0, 0, 1, 1], metrics=self.seq.regions[0]['metrics']))
+        self.seq.write_rois()
+        report = self.seq.measure()
+        self.assertEqual(sum(r['qualification'] == 'qualified' for r in report['results']), 1)
+        self.seq.frames[1]['temporal']['backend'] = 'other'
+        self.seq.write()
+        with self.assertRaisesRegex(ValueError, 'changing temporal backend'):
+            self.seq.measure()
+
+    def test_qualified_unavailable_and_partial_evidence_fail_cli(self):
+        synthetic_baseline(self.seq, 'pops')
+        for frame in self.seq.frames:
+            frame['temporal'].pop('smooth_luminance')
+        self.seq.write()
+        record = self.metric('pops')
+        self.assertEqual((record['status'], record['qualification'], record['outcome']),
+                         ('ineligible', 'qualified', 'unavailable'))
+        self.assertIsNone(record['values'])
+        self.assertEqual(record['events'], [])
+        process = subprocess.run([sys.executable, '-I', '-B', str(PATH), str(self.seq.path),
+                                  '--rois', str(self.seq.rois)], capture_output=True, text=True)
+        self.assertEqual(process.returncode, 1, process.stderr)
+        self.assertEqual(json.loads(process.stdout)['status'], 'fail')
+        seq = Sequence(self.new_root(), 4)
+        synthetic_baseline(seq, 'pops')
+        seq.frames[-1]['temporal'].pop('smooth_luminance')
+        seq.write()
+        record = self.metric('pops', seq.measure())
+        self.assertIsNotNone(record['values'])
+        self.assertEqual(record['outcome'], 'unavailable')
+        self.assertEqual(record['unavailable_samples'], 1)
+
+    def test_invalid_qualification_evidence_and_baselines_refuse(self):
+        entry = synthetic_baseline(self.seq, 'delta')
+        original = copy.deepcopy(entry)
+        mutations = [
+            lambda e: e.update(qualification=None),
+            lambda e: e.update(unknown=True),
+            lambda e: e.update(metric='unknown'),
+            lambda e: e.update(backend='../escape'),
+            lambda e: e.update(cadence_subticks=[120, 0]),
+            lambda e: e.update(cadence_subticks=[False]),
+            lambda e: e.update(span=[0, 106, 100]),
+            lambda e: e.update(thresholds=[0, float('inf')]),
+            lambda e: e.update(qualification={}),
+            lambda e: e['qualification'].update(repeated_runs=[]),
+            lambda e: e['qualification'].update(repeated_runs=[None, None]),
+            lambda e: e['qualification'].update(repeated_runs=e['qualification']['repeated_runs'] * 9),
+            lambda e: e['qualification']['repeated_runs'][1].update(run='run-0'),
+            lambda e: e['qualification']['repeated_runs'][1].update(input_sha256='1'*64),
+            lambda e: e['qualification']['repeated_runs'][1].update(result_sha256='1'*64),
+            lambda e: e['qualification']['repeated_runs'][0].update(input_sha256='not-a-hash'),
+            lambda e: e['qualification'].update(known_good=[]),
+            lambda e: e['qualification'].update(defective=[None]),
+            lambda e: e['qualification'].update(defective=e['qualification']['defective'] * 17),
+            lambda e: e['qualification']['known_good'][0].update(score=1),
+            lambda e: e['qualification']['defective'][0].update(score=0),
+            lambda e: e['qualification']['defective'][0].update(input_sha256='c'*64),
+            lambda e: e['qualification']['review'].update(owner=''),
+            lambda e: e['qualification']['review'].update(decision='rejected'),
+            lambda e: e['qualification']['review'].update(threshold_version='other'),
+        ]
+        for index, mutate in enumerate(mutations):
+            with self.subTest(mutation=index):
+                changed = copy.deepcopy(original)
+                mutate(changed)
+                self.seq.regions[0]['temporal_baselines'] = [changed]
+                self.seq.write_rois()
+                with self.assertRaises(ValueError):
+                    self.seq.measure()
+        self.seq.regions[0]['temporal_baselines'] = [original, original]
+        self.seq.write_rois()
+        with self.assertRaisesRegex(ValueError, 'duplicate temporal baseline context'):
+            self.seq.measure()
+        for contents in ('{', '[]', '{"schema":1,"schema":1,"rois":[]}'):
+            self.seq.rois.write_text(contents, encoding='utf-8')
+            with self.assertRaises(ValueError):
+                self.seq.measure()
+        with mock.patch.dict(D['load_rois'].__globals__, open_regular=mock.Mock(side_effect=PermissionError('denied'))):
+            with self.assertRaises(PermissionError):
+                self.seq.measure()
+
+    def test_global_ties_roi_and_event_caps_and_histogram_bound(self):
+        metric = self.seq.regions[0]['metrics']
+        self.seq.regions = [dict(name=f'roi-{i:02}', rect=[0, 0, 1, 1], metrics=metric)
+                            for i in range(63, -1, -1)]
+        self.seq.write_rois()
+        original_event, seen = C['event'], {}
+        def bounded_event(record, *args, **kwargs):
+            original_event(record, *args, **kwargs)
+            seen[id(record)] = record
+            self.assertLessEqual(sum(len(r['events']) for r in seen.values()
+                                     if r['metric'] == record['metric']), 8)
+        with mock.patch.dict(C['event'].__globals__, event=bounded_event):
+            report = self.seq.measure()
+        events = [e for r in report['results'] if r['metric'] == 'delta' for e in r['events']]
+        ordered = sorted(events, key=lambda e: (-e['score'], e['frame_index'], e['roi']))
+        self.assertEqual([(e['frame_index'], e['roi']) for e in ordered], [(1, f'roi-{i:02}') for i in range(8)])
+        self.assertLessEqual(sum(len(r['events']) for r in report['results']), 40)
+        self.assertEqual(report, self.seq.measure())
+        with self.assertRaisesRegex(ValueError, 'ROI count bound'):
+            D['load_rois'](self.seq.rois)  # D2 callers retain 32.
+        self.seq.regions.append(dict(name='overflow', rect=[0, 0, 1, 1], metrics=metric))
+        self.seq.write_rois()
+        with self.assertRaisesRegex(ValueError, 'ROI count bound'):
+            self.seq.measure()
+        self.assertEqual(len(C['Histogram']().bins), 256)
+        pools, records = {}, []
+        for kind in C['METRICS']:
+            pool = pools.setdefault(kind, [])
+            for name in ('z', 'a'):
+                roi = dict(name=name)
+                record = C['result'](kind, roi)
+                record['_pool'] = pool
+                records.append(record)
+                for i in range(12, -1, -1):
+                    C['event'](record, 1, dict(index=i, tick=i), roi, {})
+                    self.assertLessEqual(len(pool), 8)  # Bound while accumulating, not only at output.
+            self.assertEqual([(e['frame_index'], e['roi']) for _, e in pool],
+                             [(i, name) for i in range(4) for name in ('a', 'z')])
+        self.assertEqual(sum(len(r['events']) for r in records), 40)
+
+    def test_shipped_baselines_have_no_temporal_qualification(self):
+        for roi in D['load_rois'](D['DEFAULT_ROIS']):
+            self.assertFalse(roi.get('enforce', False))
+            self.assertFalse(roi.get('temporal_baselines', []))
+
+    def test_baseline_budget_lower_threshold_and_unknown_labels(self):
+        entry = synthetic_baseline(self.seq, 'delta')
+        inventory = [dict(entry, cadence_subticks=[i]) for i in range(320)]
+        C['load_baselines']([dict(temporal_baselines=inventory)])
+        with self.assertRaisesRegex(ValueError, 'baseline budget'):
+            C['load_baselines']([dict(temporal_baselines=inventory + [entry])])
+        for invalid in (None, {}, True):
+            with self.assertRaisesRegex(ValueError, 'baseline list'):
+                C['load_baselines']([dict(temporal_baselines=invalid)])
+        entry['thresholds'] = [.1, .2]
+        entry['qualification']['known_good'][0]['score'] = .15
+        entry['qualification']['defective'][0]['score'] = 0
+        self.seq.write_rois()
+        self.assertEqual(self.metric('delta')['outcome'], 'fail')
+        for field in ('site', 'tod', 'weather', 'backend'):
+            for value in ([], 'bad\x01label'):
+                with self.subTest(field=field, value=value):
+                    self.seq.frames[0]['temporal'][field] = value
+                    self.seq.write()
+                    with self.assertRaises(ValueError):
+                        self.seq.measure()
+                    self.seq.frames[0]['temporal'].pop(field)
+                    if field == 'backend':
+                        self.seq.frames[0]['temporal']['backend'] = 'fixture'
+        self.seq.rois.unlink()
+        with self.assertRaises(OSError):
+            self.seq.measure()
 
 
 if __name__ == '__main__':

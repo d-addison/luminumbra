@@ -260,14 +260,15 @@ def probe(document_value, x, y, width, height, identity, samples):
             and document_value['non_finite'] == nonfinite, 'probe nonfinite flag')
 
 
-def load_rois(path):
-    """Bound configuration work to 32 metrics and 1 MiB of JSON."""
+def load_rois(path, *, temporal=False):
+    """Bound JSON to 1 MiB; D2 keeps 32 ROIs/metrics, temporal allows 64."""
+    limit = 64 if temporal else 32
     path = Path(path).absolute()
     with open_regular(path.parent, path) as stream:
         config = document(stream, 1024 * 1024)
     schema(config)
     rois = config.get('rois')
-    require(isinstance(rois, list) and len(rois) <= 32, 'ROI count bound')
+    require(isinstance(rois, list) and len(rois) <= limit, 'ROI count bound')
     names, count = set(), 0
     for roi in rois:
         require(isinstance(roi, dict) and leaf(roi.get('name'))
@@ -281,7 +282,7 @@ def load_rois(path):
         metrics = roi.get('metrics')
         require(isinstance(metrics, list) and bool(metrics), 'ROI metric list')
         count += len(metrics)
-        require(count <= 32, 'metric count bound')
+        require(count <= limit, 'metric count bound')
         for metric in metrics:
             require(isinstance(metric, dict), 'metric object')
             kind, channel = metric.get('kind'), metric.get('channel')

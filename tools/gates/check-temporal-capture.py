@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure an explicit E1c sequence. JSON is advisory; invalid input alone fails.
+"""Measure an explicit E1c sequence; only reviewed matching baselines enforce.
 
 Usage: check-temporal-capture.py MANIFEST [--rois D2_ROIS]
 Optional temporal evidence is documented in visual-diagnostics.md. Unknown or
@@ -24,6 +24,100 @@ CLASSES = ('static', 'animal', 'rain', 'wind_foliage', 'lightning', 'cloud_shado
 STAGING = 512 * 1024 * 1024
 MAX_GROUPS = 1024
 MAX_WINDOW_SAMPLES = 65536
+PREVIEW = 9  # <=81 pixels per ROI/frame; only selected event snapshots survive.
+
+
+def load_baselines(rois):
+    """Closed, bounded evidence grammar; structural validation is not provenance."""
+    count = 0
+    for roi in rois:
+        entries = roi.get('temporal_baselines', [])
+        require(isinstance(entries, list), 'temporal baseline list')
+        count += len(entries)
+        require(count <= 320, 'temporal baseline budget')
+        contexts = set()
+        for entry in entries:
+            require(isinstance(entry, dict) and set(entry) in (
+                {'metric', 'baseline_version', 'threshold_version', 'backend', 'cadence_subticks',
+                 'span', 'thresholds'},
+                {'metric', 'baseline_version', 'threshold_version', 'backend', 'cadence_subticks',
+                 'span', 'thresholds', 'qualification'}), 'temporal baseline fields')
+            require(entry['metric'] in METRICS and all(D['leaf'](entry[k]) and len(entry[k]) <= 80
+                for k in ('baseline_version', 'threshold_version', 'backend')), 'temporal baseline identity')
+            cadence, span, bounds = (entry[k] for k in ('cadence_subticks', 'span', 'thresholds'))
+            require(isinstance(cadence, list) and 0 < len(cadence) <= 4096
+                and all(D['integer'](n, 0, 600000000) for n in cadence)
+                and cadence == sorted(set(cadence)), 'temporal baseline cadence')
+            require(isinstance(span, list) and len(span) == 3 and D['integer'](span[0], 0, 2)
+                and all(D['integer'](n, 0, (1 << 64) - 1) for n in span[1:])
+                and 0 <= span[2] - span[1] <= 10000000, 'temporal baseline span')
+            require(isinstance(bounds, list) and len(bounds) == 2
+                and all(finite(n) for n in bounds) and 0 <= bounds[0] <= bounds[1],
+                'temporal baseline thresholds')
+            key = (entry['metric'], entry['backend'], tuple(cadence), tuple(span))
+            require(key not in contexts, 'duplicate temporal baseline context')
+            contexts.add(key)
+            if 'qualification' not in entry:
+                continue
+            q = entry['qualification']
+            require(isinstance(q, dict) and set(q) == {
+                'repeated_runs', 'known_good', 'defective', 'review'}, 'qualification evidence fields')
+            def digest(value):
+                return isinstance(value, str) and len(value) == 64 and all(c in '0123456789abcdef' for c in value)
+            repeats = q['repeated_runs']
+            require(isinstance(repeats, list) and 2 <= len(repeats) <= 16, 'qualification repeated runs')
+            runs, inputs, outputs = set(), set(), set()
+            for run in repeats:
+                require(isinstance(run, dict) and set(run) == {'run', 'input_sha256', 'result_sha256'}
+                    and D['leaf'](run['run']) and len(run['run']) <= 80
+                    and digest(run['input_sha256']) and digest(run['result_sha256']), 'qualification run')
+                require(run['run'] not in runs, 'qualification duplicate run')
+                runs.add(run['run'])
+                inputs.add(run['input_sha256'])
+                outputs.add(run['result_sha256'])
+            require(len(inputs) == len(outputs) == 1, 'qualification identical-input determinism')
+            sequences = set()
+            for label in ('known_good', 'defective'):
+                fixtures = q[label]
+                require(isinstance(fixtures, list) and 1 <= len(fixtures) <= 16, 'qualification fixtures')
+                for fixture in fixtures:
+                    require(isinstance(fixture, dict) and set(fixture) == {
+                        'input_sha256', 'result_sha256', 'score'} and digest(fixture['input_sha256'])
+                        and digest(fixture['result_sha256']) and finite(fixture['score'])
+                        and fixture['score'] >= 0, 'qualification fixture')
+                    require(fixture['input_sha256'] not in sequences, 'qualification duplicate fixture')
+                    sequences.add(fixture['input_sha256'])
+                    passed = bounds[0] <= fixture['score'] <= bounds[1]
+                    require(passed == (label == 'known_good'), 'qualification fixture threshold verdict')
+            review = q['review']
+            require(isinstance(review, dict) and set(review) == {
+                'owner', 'decision', 'baseline_version', 'threshold_version'}
+                and D['leaf'](review['owner']) and len(review['owner']) <= 80
+                and review['decision'] == 'approved'
+                and all(review[k] == entry[k] for k in ('baseline_version', 'threshold_version')),
+                'qualification owner review')
+
+
+def qualify(record, roi, backend, cadence, span):
+    record.update(qualification='advisory', outcome='unavailable' if record['values'] is None else None,
+                  thresholds=None)
+    for entry in roi.get('temporal_baselines', []):
+        if (entry['metric'], entry['backend'], entry['cadence_subticks'], entry['span']) != (
+                record['metric'], backend, cadence, span):
+            continue
+        record.update(baseline_version=entry['baseline_version'], threshold_version=entry['threshold_version'],
+                      thresholds=entry['thresholds'])
+        if 'qualification' not in entry:
+            break
+        record['qualification'] = 'qualified'
+        record['outcome'] = ('unavailable' if record['values'] is None or record.get('unavailable_samples') else
+            'pass' if entry['thresholds'][0] <= record['score_range'][0]
+            and record['score_range'][1] <= entry['thresholds'][1] else 'fail')
+        if record['values'] is not None:
+            record['status'] = 'qualified'
+        if record.get('unavailable_samples'):
+            record['reason'] = 'one or more expected metric samples unavailable'
+        break
 
 
 class Histogram:
@@ -74,12 +168,15 @@ def evidence(capture, table):
         return {}
     # Unknown metadata is unavailable, including unknown enum/category values.
     if not set(value) <= {'version', 'classes', 'steady_light', 'exposure', 'smooth_exposure',
-                          'smooth_luminance', 'solar_luminance', 'phase', 'labels', 'seams'}:
+                          'smooth_luminance', 'solar_luminance', 'phase', 'labels', 'seams',
+                          'backend', 'site', 'tod', 'weather'}:
         return {}
     classes = value.get('classes')
     if not isinstance(classes, dict) or len(classes) != len(table['draws']) or any(str(d['id']) not in classes
             or classes[str(d['id'])] not in CLASSES for d in table['draws']):
         return {}
+    require(all(k not in value or (D['leaf'](value[k]) and len(value[k]) <= 80)
+                for k in ('site', 'tod', 'weather')), 'temporal display labels')
     return value
 
 
@@ -155,8 +252,24 @@ def frame_data(meta, capture, table, streams, offsets, rois):
             group['rgb'] = [v / n for v in group['rgb']]
             group['depth'] /= n
             group['material'] /= n
+    previews = []
+    for region, (left, top, right, bottom) in enumerate(rects):
+        xs = [left + n * (right - left) // min(PREVIEW, right - left)
+              for n in range(min(PREVIEW, right - left))]
+        ys = [top + n * (bottom - top) // min(PREVIEW, bottom - top)
+              for n in range(min(PREVIEW, bottom - top))]
+        pixels, mask = [], []
+        for y in ys:
+            pixels.append([list(packed[(y * width + x) * 5:(y * width + x) * 5 + 3]) for x in xs])
+            mask.append([int(keys.get(draws[y * width + x]) in groups[region]
+                and usable(groups[region][keys[draws[y * width + x]]])) for x in xs])
+        draw_id = draws[ys[len(ys) // 2] * width + xs[len(xs) // 2]]
+        key = keys.get(draw_id)
+        probe = dict(draw=int(draw_id), surface=attribution(key, groups[region][key])) if key in groups[region] else None
+        previews.append(dict(pixels=pixels, mask=mask, probe=probe))
     return dict(width=width, height=height, camera=meta['camera'], channel=channel,
                 temporal=temporal, groups=groups, rects=rects, keys=keys,
+                previews=previews,
                 pixels=packed, draws=draws, seam_channels=all(c in streams for c in
                 ('expected_mask', 'reference')))
 
@@ -167,17 +280,28 @@ def result(kind, roi):
                 flicker='exposed linear luminance', pops='linear luminance; fraction',
                 lighting_continuity='linear luminance/tick; exposure/tick; per tick squared',
                 seam_persistence='samples; sim ticks; fraction')[kind], masks=list(CLASSES[1:]),
-                threshold_version=None, baseline_version=None, values=None, events=[])
+                threshold_version=None, baseline_version=None, values=None, score_range=None, events=[])
 
 
 def event(record, score, frame, roi, values):
-    record['events'].append(dict(score=score, frame_index=frame['index'], tick=frame['tick'],
-                                roi=roi['name'], **values))
-    record['events'].sort(key=lambda e: (-e['score'], e['frame_index'], e['roi']))
-    del record['events'][8:]
-    worst = record['events'][0]
-    record['values'] = {k: v for k, v in worst.items() if k not in ('score', 'frame_index', 'tick', 'roi')}
-    record['worst_sample'] = dict(index=worst['frame_index'], tick=worst['tick'])
+    candidate = dict(score=score, frame_index=frame['index'], tick=frame['tick'], roi=roi['name'], **values)
+    order = lambda e: (-e['score'], e['frame_index'], e['roi'])
+    bounds = record['score_range']
+    record['score_range'] = [min(score, bounds[0]), max(score, bounds[1])] if bounds else [score, score]
+    if '_worst' not in record or order(candidate) < record['_worst']:
+        record['_worst'] = order(candidate)
+        record['values'] = values
+        record['worst_sample'] = dict(index=frame['index'], tick=frame['tick'])
+    record['events'].append(candidate)
+    record['events'].sort(key=order)
+    # Production records share a pool: <=8 payloads/metric across all 64 ROIs,
+    # not 8 per ROI. Standalone accumulator callers have the same local bound.
+    pool = record.setdefault('_pool', [])
+    pool.append((record, candidate))
+    pool.sort(key=lambda pair: order(pair[1]))
+    if len(pool) > 8:
+        owner, removed = pool.pop()
+        owner['events'].remove(removed)
     record.update(status='advisory', reason=None)
 
 
@@ -379,6 +503,11 @@ def flicker(window, current, frame, roi, region, record):
         window['samples'] = window.get('samples', 0) + 1
         require(window['samples'] <= MAX_WINDOW_SAMPLES, 'steady window producer sample budget')
         value = luminance(group['rgb']) * meta['exposure'] - meta['smooth_luminance'] * meta['smooth_exposure']
+        # Tracks retain numeric summaries/indices only. Selected event previews
+        # are decoded through the same hash-validated reader after selection.
+        for extrema, replace in (('low', value < track['low']), ('high', value > track['high'])):
+            if replace:
+                track[extrema + '_sample'] = frame
         difference = value - track['last'] if track['last'] is not None else None
         if difference is not None and track['difference'] is not None:
             track['alternating'] += difference * track['difference'] < 0
@@ -399,7 +528,9 @@ def flicker(window, current, frame, roi, region, record):
             continue
         record['samples'] += track['n']
         record['coverage'] = max(record['coverage'], persistent_pixels / area)
-        event(record, track['high'] - track['low'], frame, roi, dict(
+        extremum = min(('low', 'high'), key=lambda name: (-abs(track[name]), track[name + '_sample']['index']))
+        selected = track[extremum + '_sample']
+        event(record, track['high'] - track['low'], selected, roi, dict(
               peak_to_peak=track['high'] - track['low'], p95_amplitude_upper=track['histogram'].percentile(.95),
               alternating_sign_differences=track['alternating'], usable_samples=track['n'],
               window_frames=120, surface=track['surface']))
@@ -475,6 +606,39 @@ def plan_metadata(document):
             and all(D['integer'](n, 0, (1 << 32) - 1) for n in settling.values()), 'plan settling')
 
 
+def label_preview(current, frame, region):
+    preview = current['previews'][region]
+    preview.update(frame_index=frame['index'], tick=frame['tick'], sub_tick_60=frame['sub_tick_60'],
+        site=current['temporal'].get('site', 'unknown'), camera=current['camera'],
+        tod=current['temporal'].get('tod', 'unknown'), weather=current['temporal'].get('weather', 'unknown'),
+        channel=current['channel'])
+    return preview
+
+
+def flicker_previews(document, ordered, root, rois, pool):
+    """At most 8 events x 3 neighbors; reread exact hashed payloads, one frame.
+
+    Only selected <=9x9 thumbnails survive. No producer track owns image data.
+    """
+    needed = {}
+    for record, selected in pool:
+        selected['preview'] = dict(before=None, current=None, after=None)
+        region = next(i for i, roi in enumerate(rois) if roi['name'] == record['roi'])
+        for delta, slot in ((-1, 'before'), (0, 'current'), (1, 'after')):
+            index = selected['frame_index'] + delta
+            if 0 <= index < len(ordered):
+                needed.setdefault(index, []).append((selected, slot, region))
+    for index, targets in sorted(needed.items()):
+        payloads, completion = ordered[index]
+        def consume(meta, capture, table, streams, offsets):
+            current = frame_data(meta, capture, table, streams, offsets, rois)
+            for selected, slot, region in targets:
+                selected['preview'][slot] = label_preview(current, document['plan']['frames'][index], region)
+        members = [p['path'] for p in payloads if p['path'].startswith(completion[:-len(D['SUFFIX'])] + '.')]
+        D['validate'](root / completion, members, root, consume=consume,
+                      payloads={p['path']: p for p in payloads})
+
+
 def measure(manifest, rois=None):
     path = Path(manifest).absolute()
     root = path.parent.resolve(strict=True)
@@ -500,12 +664,17 @@ def measure(manifest, rois=None):
     ordered = A['sequence_frames'](document, names, '*.diagnostics.json')
     require(document['plan']['end_tick'] - document['plan']['start_tick'] <= 10000000,
             'simulation tick span budget')
-    rois = D['load_rois'](rois) if rois is not None else [dict(name='full', rect=[0, 0, 1, 1], metrics=[])]
+    rois = D['load_rois'](rois, temporal=True) if rois is not None else [dict(name='full', rect=[0, 0, 1, 1], metrics=[])]
     require(bool(rois) and len(rois) <= 64, 'nonempty ROI inventory bounded to 64')
+    load_baselines(rois)
     records = [{k: result(k, roi) for k in METRICS} for roi in rois]
+    pools = {k: [] for k in METRICS}
+    for region in records:
+        for kind, record in region.items():
+            record['_pool'] = pools[kind]
     windows, histories, seams = ([{} for _ in rois], [[] for _ in rois], [{} for _ in rois])
     previous, before, seen = None, None, set()
-    channel = None
+    channel, backend = None, None
     observed = [dict.fromkeys(CLASSES + ('unsupported',), 0) for _ in rois]
     observed_pixels = [0 for _ in rois]
     for index, (payloads, completion) in enumerate(ordered):
@@ -519,11 +688,29 @@ def measure(manifest, rois=None):
         D['validate'](root / completion, members, root, consume=consume,
                       payloads={p['path']: p for p in payloads}, seen=seen)
         current = holder[0]
+        frame_backend = current['temporal'].get('backend')
+        require(frame_backend is None or (D['leaf'](frame_backend) and len(frame_backend) <= 80),
+                'temporal backend identity')
+        if index == 0:
+            backend = frame_backend
+        else:
+            require(frame_backend == backend, 'changing temporal backend')
         if previous is not None:
             require(all(current[k] == previous[k] for k in ('width', 'height', 'camera', 'channel')),
                     'changing camera/projection/dimensions/attachment roles')
         channel = current['channel']
+        current['preview_payloads'] = []
+        for region in range(len(rois)):
+            preview = label_preview(current, frame, region)
+            current['preview_payloads'].append(dict(before=previous['previews'][region] if previous else None,
+                                                   current=preview, after=None))
+        # Complete the next-neighbor slot while its validated frame is resident.
+        for pool in pools.values():
+            for _, selected in pool:
+                if selected['frame_index'] == index - 1 and 'preview' in selected:
+                    selected['preview']['after'] = current['previews'][selected['_region']]
         for region, roi in enumerate(rois):
+            sample_counts = {kind: record['samples'] for kind, record in records[region].items()}
             left, top, right, bottom = current['rects'][region]
             area = (right - left) * (bottom - top)
             observed_pixels[region] += area
@@ -543,7 +730,24 @@ def measure(manifest, rois=None):
             require(sum(len(w.get('tracks', {})) for w in windows) <= MAX_GROUPS,
                     'steady-window track budget')
             seam(seams[region], current, frame, roi, region, records[region]['seam_persistence'])
+            expected = {'delta': index > 0, 'pops': index > 0,
+                        'lighting_continuity': index >= 2,
+                        'flicker': frame['kind'] == 1 and frame['hold_frame'] == 119,
+                        'seam_persistence': True}
+            for kind, record in records[region].items():
+                if expected[kind] and record['samples'] == sample_counts[kind]:
+                    record['unavailable_samples'] = record.get('unavailable_samples', 0) + 1
+            for record in records[region].values():
+                for selected in record['events']:
+                    if 'preview' not in selected and record['metric'] != 'flicker':
+                        selected['preview'] = current['preview_payloads'][region].copy()
+                    selected['_region'] = region
         previous, before = current, frame
+    # Release packed maps before the bounded selected-frame reread, including
+    # the final consume holder; never stage a third full-resolution frame.
+    previous = current = None
+    holder.clear()
+    flicker_previews(document, ordered, root, rois, pools['flicker'])
     cadence = sorted({(b['tick'] - a['tick']) * 60 + b['sub_tick_60'] - a['sub_tick_60']
                       for a, b in zip(document['plan']['frames'], document['plan']['frames'][1:])})
     for region in range(len(rois)):
@@ -565,7 +769,17 @@ def measure(manifest, rois=None):
         record['worst_frames'] = [dict(index=e['frame_index'], tick=e['tick']) for e in record['events']]
         record['span'] = [document['plan']['start_tick'], document['plan']['end_tick']]
         record['cadence_ticks'] = [n / 60 for n in cadence]
-    return dict(schema='luminumbra.temporal_metrics.v1', status='advisory', qualified=False,
+        qualify(record, rois[next(i for i, roi in enumerate(rois) if roi['name'] == record['roi'])],
+                backend, cadence, [document['plan']['span'], *record['span']])
+        for key in list(record):
+            if key.startswith('_'):
+                del record[key]
+        for selected in record['events']:
+            selected.pop('_region', None)
+    failed = any(r['qualification'] == 'qualified' and r['outcome'] != 'pass' for r in results)
+    qualified = any(r['qualification'] == 'qualified' for r in results)
+    return dict(schema='luminumbra.temporal_metrics.v1', status='fail' if failed else 'qualified' if qualified else 'advisory',
+                qualified=qualified, backend=backend,
                 frame_count=len(ordered), channel=channel, identity_resolution='diagnostic producer',
                 results=results)
 
@@ -581,7 +795,7 @@ def main(argv=None):
         print(json.dumps(dict(status='invalid', reason=str(error)), sort_keys=True), file=sys.stderr)
         return 1
     print(json.dumps(report, sort_keys=True, allow_nan=False, separators=(',', ':')))
-    return 0
+    return int(report['status'] == 'fail')
 
 
 if __name__ == '__main__':

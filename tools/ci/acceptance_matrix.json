@@ -120,7 +120,7 @@
     {
       "id": "render.temporal-measurements",
       "source": "docs/development/visual-diagnostics.md#e2-temporal-metrics-and-qualification",
-      "statement": "Offline temporal measurements validate complete E1c version-1 plan order and every diagnostic payload size/hash through the same D1/D2 descriptors used for decoding. Linear-light evidence uses reader-only schema 4 while schemas 1-3 retain their channel grammars. Stable producer keys survive capture-local ID and pixel reordering; unknown or ambiguous identity, missing evidence and empty masks report ineligible coverage. Adjacent RGB/luminance/depth/material/ownership changes and classified motion, steady-hold flicker with thirty usable samples and sixty-four pixels covering one percent of the ROI, attributed pops, tick-normalized dusk/dawn light and exposure derivatives against recorded solar progression, and versioned world-seam persistence emit deterministic advisory JSON. Histograms and frame/producer/window budgets bound work and storage; at most eight events per metric and forty per sequence are retained. Registered stdlib-only positive/defective, eligibility, refusal, identity and determinism regressions run through the existing Python registry and CTest. Qualification, native evidence producers and worst-event montage publication remain pending; no production threshold or all-features result is claimed.",
+      "statement": "Offline temporal measurements validate complete E1c version-1 plan order and every diagnostic payload size/hash through the same D1/D2 descriptors used for decoding. Linear-light evidence uses reader-only schema 4 while schemas 1-3 retain their channel grammars. Stable producer keys survive capture-local ID and pixel reordering; unknown or ambiguous identity, missing evidence and empty masks report ineligible coverage. Adjacent RGB/luminance/depth/material/ownership changes and classified motion, steady-hold flicker with thirty usable samples and sixty-four pixels covering one percent of the ROI, attributed pops, tick-normalized dusk/dawn light and exposure derivatives against recorded solar progression, and versioned world-seam persistence emit deterministic JSON with advisory, qualified or ineligible result states. Histograms and frame/producer/window budgets bound work and storage; at most eight events per metric and forty per sequence are retained. Registered stdlib-only positive/defective, eligibility, refusal, identity and determinism regressions run through the existing Python registry and CTest. Per-ROI versioned thresholds enforce only with structurally valid identical-input repeated runs, known-good and deliberately defective fixture verdicts and owner review matching the backend, cadence and span. Qualified threshold misses and unavailable expected samples fail; absent qualification evidence remains advisory. Shipped baselines are unchanged and advisory. The existing montage builder emits bounded labelled before/current/after, delta and mask SVG slots with explicit unavailable evidence and draw/asset probes. Registered synthetic qualification and montage regressions cover one-frame defects, repeat determinism, evidence refusal, tie order and caps. Native evidence producers and production qualification remain pending; no production threshold or all-features result is claimed.",
       "status": "partial",
       "evidence": [
         {
@@ -133,12 +133,20 @@
         },
         {
           "kind": "script",
-          "ref": "tools/gates/test_temporal_montages.py",
-          "planned": "Add repeated-run qualification and labelled worst-event montage regressions before threshold enforcement; owner: maintainers"
+          "ref": "tools/gates/test_temporal_montages.py"
         },
         {
           "kind": "doc",
           "ref": "docs/development/visual-diagnostics.md"
+        },
+        {
+          "kind": "ctest",
+          "ref": "TemporalMontagesPython"
+        },
+        {
+          "kind": "ctest",
+          "ref": "TemporalAuditSite.*",
+          "planned": "Integrate native temporal evidence producers and separately review production qualification before enforcement; owner: maintainers"
         }
       ],
       "requirements": []
