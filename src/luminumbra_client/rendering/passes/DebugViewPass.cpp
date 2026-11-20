@@ -262,6 +262,7 @@ public:
                                                               pass.m_snapshot->draws)) {}
     ~Frame() {
         if (capture_) {
+            AttributedGl::UseProgram(glUseProgram, 0U);
             controls().status = controls().result = "Snapshot aborted";
         }
     }
@@ -270,6 +271,8 @@ public:
             return;
         }
         const bool complete = capture_->complete();
+        // Retire the current variant before deletion so the gather saves a valid binding.
+        AttributedGl::UseProgram(glUseProgram, 0U);
         capture_.reset();
         if (!complete) {
             controls().status = controls().result =

@@ -2141,6 +2141,9 @@ set_tests_properties(DiagnosticCapturePython PROPERTIES LABELS "tools" TIMEOUT 6
 add_test(NAME DiagnosticRoisPython COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/tools/gates/test_diagnostic_rois.py")
 set_tests_properties(DiagnosticRoisPython PROPERTIES LABELS "tools" TIMEOUT 60)
+add_test(NAME DiagnosticChecksPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/tools/gates/test_diagnostic_checks.py")
+set_tests_properties(DiagnosticChecksPython PROPERTIES LABELS "tools" TIMEOUT 60)
 
 set(LUMINUMBRA_GTEST_TARGETS
     upload_budget_test
@@ -2809,6 +2812,9 @@ add_test(NAME FramePacingSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_frame_pacing_contract.py)
 add_test(NAME GraphicsUiSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_graphics_ui_contract.py)
+# Win32 headers turn far/near/interface/... into macros; Windows-only build breaks.
+add_test(NAME Win32MacroIdentifierContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/test/tools/test_win32_macro_identifiers.py)
 add_test(NAME RenderCrashCapturePython COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/perf/test_render_crash_capture.py)
 set_tests_properties(RenderCrashCapturePython PROPERTIES TIMEOUT 30)
@@ -2839,14 +2845,20 @@ if(LUMINUMBRA_SHADER_SCENES)
     add_executable(shader_scene_render_test rendering/shader_scene_render_test.cpp)
     # Re-run configuration when the fixture changes so its embedded hash stays current.
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-        "${CMAKE_SOURCE_DIR}/test/rendering/shader_scene_render_test.cpp")
+        "${CMAKE_SOURCE_DIR}/test/rendering/shader_scene_render_test.cpp"
+        "${CMAKE_SOURCE_DIR}/src/luminumbra_client/rendering/Camera.h")
     file(READ "${CMAKE_SOURCE_DIR}/test/rendering/shader_scene_render_test.cpp" _shader_scene_source)
     string(REPLACE "\r\n" "\n" _shader_scene_source "${_shader_scene_source}")
     string(SHA256 _shader_scene_hash "${_shader_scene_source}")
+    file(READ "${CMAKE_SOURCE_DIR}/src/luminumbra_client/rendering/Camera.h" _shader_scene_camera)
+    string(REPLACE "\r\n" "\n" _shader_scene_camera "${_shader_scene_camera}")
+    string(SHA256 _shader_scene_camera_hash "${_shader_scene_camera}")
     target_compile_definitions(shader_scene_render_test PRIVATE
         LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
-        LUMINUMBRA_SHADER_SCENE_INPUT_HASH="${_shader_scene_hash}")
-    target_link_libraries(shader_scene_render_test PRIVATE gtest_main glfw glad)
+        LUMINUMBRA_SHADER_SCENE_INPUT_HASH="${_shader_scene_hash}"
+        LUMINUMBRA_SHADER_SCENE_CAMERA_HASH="${_shader_scene_camera_hash}")
+    target_include_directories(shader_scene_render_test PRIVATE ../src)
+    target_link_libraries(shader_scene_render_test PRIVATE gtest_main glfw glad glm::glm)
     if(WIN32)
         target_link_libraries(shader_scene_render_test PRIVATE opengl32)
     elseif(APPLE)

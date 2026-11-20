@@ -25,41 +25,41 @@ inline void add_far_world_reporting(nlohmann::json& report, SampleRing& ring) {
                               {"unsettled_frames", 0}};
     for (std::size_t i = 0; i < ring.size(); ++i) {
         const auto& sample = ring.at(ring.first() + i);
-        const auto& far = sample.far_world;
+        const auto& far_state = sample.far_world;
         block["frames"].push_back(
             {{"frame", sample.frame},
-             {"requested_mode", far.requested_mode},
-             {"effective_mode", far.effective_mode},
-             {"refusal", far.refusal},
-             {"submission_refusal", far.submission_refusal},
-             {"suppressed", far.suppressed},
-             {"coverage_settled", far.coverage_settled},
+             {"requested_mode", far_state.requested_mode},
+             {"effective_mode", far_state.effective_mode},
+             {"refusal", far_state.refusal},
+             {"submission_refusal", far_state.submission_refusal},
+             {"suppressed", far_state.suppressed},
+             {"coverage_settled", far_state.coverage_settled},
              {"streaming",
-              {{"generation_pending", far.generation_pending},
-               {"meshing_pending", far.meshing_pending},
-               {"generation_outstanding", far.generation_outstanding},
-               {"meshing_outstanding", far.meshing_outstanding},
-               {"terrain_uploads_pending", far.terrain_uploads_pending}}},
-             {"content_identity", std::to_string(far.content_identity)},
+              {{"generation_pending", far_state.generation_pending},
+               {"meshing_pending", far_state.meshing_pending},
+               {"generation_outstanding", far_state.generation_outstanding},
+               {"meshing_outstanding", far_state.meshing_outstanding},
+               {"terrain_uploads_pending", far_state.terrain_uploads_pending}}},
+             {"content_identity", std::to_string(far_state.content_identity)},
              {"settings",
-              {{"gns_compiled", far.gns_compiled},
-               {"active_regions", far.active_regions},
-               {"water_cells_per_side", far.water_cells_per_side},
+              {{"gns_compiled", far_state.gns_compiled},
+               {"active_regions", far_state.active_regions},
+               {"water_cells_per_side", far_state.water_cells_per_side},
                {"grass_density_scale",
-                far.grass_density_scale ? nlohmann::json(*far.grass_density_scale)
-                                        : nlohmann::json(nullptr)}}}});
+                far_state.grass_density_scale ? nlohmann::json(*far_state.grass_density_scale)
+                                              : nlohmann::json(nullptr)}}}});
         for (const auto& [field, value] :
-             {std::pair{"requested_mode", far.requested_mode},
-              std::pair{"effective_mode", far.effective_mode},
-              std::pair{"refusal", far.refusal},
-              std::pair{"submission_refusal", far.submission_refusal}}) {
+             {std::pair{"requested_mode", far_state.requested_mode},
+              std::pair{"effective_mode", far_state.effective_mode},
+              std::pair{"refusal", far_state.refusal},
+              std::pair{"submission_refusal", far_state.submission_refusal}}) {
             auto& count = summary[field][value];
             count = count.is_null() ? 1 : count.get<std::size_t>() + 1;
         }
         summary["suppressed_frames"] =
-            summary["suppressed_frames"].get<std::size_t>() + far.suppressed;
+            summary["suppressed_frames"].get<std::size_t>() + far_state.suppressed;
         summary["unsettled_frames"] =
-            summary["unsettled_frames"].get<std::size_t>() + !far_frame_settled(far);
+            summary["unsettled_frames"].get<std::size_t>() + !far_frame_settled(far_state);
     }
     block["summary"] = std::move(summary);
 }
