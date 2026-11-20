@@ -20,6 +20,7 @@
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 
+#include <array>
 #include <cstddef>
 #include <deque>
 #include <filesystem>
@@ -83,6 +84,7 @@ StaticPropSubmission SelectStaticPropSubmission(const FarWorldSelection& selecti
 struct FarLodWorkerBuildOutcome {
     bool ok = false;
     bool changed = false;
+    bool terrain_has_sdf = false;
     std::string error;
     World::FarLodTile tile;
     World::FarLodRegionMesh mesh;
@@ -330,6 +332,8 @@ private:
     SubmittedLiveTerrain m_submitted_live_terrain;
     SubmittedLiveTerrain m_resident_live_terrain;
     struct ResidentRegion {
+        std::array<u64, 4> diagnostic_generation{};
+        bool terrain_has_sdf = false;
         World::FarLodTier tier = World::FarLodTier::F1;
         int rx = 0;
         int rz = 0;
@@ -354,6 +358,7 @@ private:
     };
 
     struct BuildResult {
+        bool terrain_has_sdf = false;
         u64 queued_frame = 0;
         std::size_t upload_bytes = 0;
         bool has_edited_samples = false;

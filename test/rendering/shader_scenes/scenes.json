@@ -113,7 +113,7 @@
     "res/shaders/instanced_mesh.vert": "83198486e34bcb2d2ad4dcd5271efc9b4fd5deab5842768a8a85eac76d245d9c",
     "res/shaders/lighting_pass.frag": "ee6584835366c2c5e68d7dcdde0e69a00a2c9fcb2908a1f2537bc62ca0410aac",
     "res/shaders/magical_particles.frag": "dcb928e1b40f30b5cfcf32796a675a12b38bee756deb9e988ddf2862c0ae3c8c",
-    "res/shaders/static_asset.frag": "1d2262e2c9d905e69560c8879c1a5f88c283a6fa3e38ddeb46c06306f91a7512",
+    "res/shaders/static_asset.frag": "38945ff338541c021f1b4d736648794cc556ce09183d520d76a28e7843e08d2c",
     "res/shaders/static_asset.vert": "3c6ca3b3154e0f28bbecd1c5fa2048b09e6623a1a58823b64d6a01e5f78e475d",
     "res/shaders/tree_impostor.frag": "25391749ee76bcbf3804cbacd7746426bf97926e7e1b0dc07ca8b90306e74764",
     "res/shaders/tree_impostor.vert": "6e69ff1391d2d6dd6ef93d7c72c3c387cc4009b3bccf317e5c050018f2e1d796",
