@@ -4455,7 +4455,9 @@ class FixtureCleanupCustody(unittest.TestCase):
                         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
                         self.assertIn("UNAVAILABLE: RmlUiFixture:", result.stderr)
                         self.assertNotIn("ERROR: setUpClass", result.stderr)
-                        self.assertEqual(list(Path(directory).iterdir()), [] if state == "missing" else [original])
+                        # Windows may report the temporary directory by its 8.3 short name.
+                        self.assertEqual(list(Path(directory).resolve(strict=True).iterdir()),
+                                         [] if state == "missing" else [original])
                         if state != "missing":
                             self.assertEqual(file_identity(original), identity)
                             self.assertEqual(BorrowedSource.snapshot(original), seal)
