@@ -25,6 +25,202 @@ def function(source, name):
 
 
 class RegionAuthorityWiring(unittest.TestCase):
+    def test_off_columns_are_excluded_by_shared_admission_before_preparation(self):
+        source = (ROOT / "src/luminumbra_common/systems/RegionalWater.cpp").read_text(
+            encoding="utf-8")
+        admit = function(source, "std::vector<Entry> Admit(")
+        self.assertIn("entry.admitted = resident.available && resident.resolution != 0 &&", admit)
+        self.assertLess(admit.index("resident.initialized && !LegalResolution"),
+                        admit.index("entry.admitted ="))
+        build = function(source, "Plan BuildPlan(")
+        self.assertLess(build.index("Admit("), build.index("PlanSources("))
+        self.assertLess(build.index("Admit("), build.index("PlanCandidates("))
+        update = function(source, "void WaterSystem::UpdateRegionalFromSimulation(")
+        self.assertIn("resident.resolution = participants[i]->current_water_resolution.load();", update)
+        self.assertIn("&plan)", update)
+        direct = function(source, "void WaterSystem::UpdateRegional(")
+        self.assertIn(".resolution = chunk->current_water_resolution.load()", direct)
+        self.assertIn("RegionalWater::Build(", direct)
+        native = (ROOT / "test/common/RegionalWater_test.cpp").read_text(encoding="utf-8")
+        case = function(native, "TEST(RegionalWaterAdmission, "
+                        "OffSavedColumnsPreserveRetainedWaterAndDoNotAbortFundedNeighbors)")
+        for token in ("{0, 32}", "entry < 3", "WaterDetailLevel::Off",
+                      "restore_authoritative_chunk(", "water.UpdateRegional(registry, chunks,",
+                      "ASSERT_NO_THROW(water.UpdateRegionalFromSimulation(",
+                      "EXPECT_GT(Mass(*enabled), mass);",
+                      "EXPECT_EQ(TransactionBytes(*disabled), before);",
+                      "EXPECT_EQ(Persistence::SerializeChunkAuthoritySnapshotJson(*disabled), saved);"):
+            self.assertIn(token, case)
+        refusal = function(native, "TEST(RegionalWaterPlanning, "
+                           "OffColumnsStaySealedWhileUnseededColumnsCanPrepare)")
+        for token in ("unseeded.initialized = false;", "disabled.resolution = 0;",
+                      "disabled.initialized = true;", "EXPECT_THROW(",
+                      "EXPECT_TRUE(plan.faces.empty());"):
+            self.assertIn(token, refusal)
+
+    def test_unclaimed_cleanup_retains_reservations_for_every_resident_state(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        cleanup = function(source, "void SHIELD_WorldSystem::discard_unclaimed_water_columns(")
+        candidates = function(cleanup, "for (const auto& chunk : candidates)")
+        self.assertLess(candidates.index("if (parked == m_parked.end()"),
+                        candidates.index("m_water_column_reservations.erase("))
+        reservations = function(cleanup, "for (const auto id : reservations)")
+        self.assertIn("if (!chunk) {", reservations)
+        self.assertEqual(function(reservations, "if (!chunk)"),
+                         "m_water_column_reservations.erase(id);")
+        self.assertNotIn("needs_authority()", reservations)
+        self.assertNotIn("ChunkState::Loading", reservations)
+        for match in re.finditer(r"m_admitted_water_columns.erase\((id|it->first)\);", source):
+            # These are the live/parked retirement sites; publication uses chunk->get_id().
+            tail = source[match.end():]
+            self.assertTrue(tail.lstrip().startswith(
+                f"m_water_column_reservations.erase({match.group(1)});"))
+        native = (ROOT / "test/common/RegionalWater_test.cpp").read_text(encoding="utf-8")
+        case = function(native, "TEST(RegionalWaterAdmission, "
+                        "LiveUnclaimedCleanupCannotRecycleReservationCapacity)")
+        for token in ("cleanup < 4", "repeat < 3", "index < 2 ? chunk : nullptr",
+                      "ChunkState::Loading", "note_persistence_outcome(false)",
+                      "mark_water_state_dirty()", "clear_water_state_dirty()",
+                      "remember_durable_chunks(", "clear_world(nullptr)",
+                      "EXPECT_FALSE(shield.reserve_water_columns(next));",
+                      "EXPECT_TRUE(shield.reserve_water_columns(next));"):
+            self.assertIn(token, case)
+        retired = function(native, "TEST(RegionalWaterAdmission, "
+                           "ParkedRetirementReleasesReservationsWithoutASaveOutcome)")
+        for token in ("{false, true}", "release_clean_parked_chunks()",
+                      "discard_unclaimed_water_columns(candidates)",
+                      "EXPECT_TRUE(shield.reserve_water_columns(next));"):
+            self.assertIn(token, retired)
+
+    def test_water_reconciliation_carries_absent_zero_grants_and_refuses_positive_grants(self):
+        source = (ROOT / "src/luminumbra_common/systems/RegionalWater.cpp").read_text(
+            encoding="utf-8")
+        reconcile = function(source, "void Reconcile(")
+        self.assertIn("const auto found = groups.find(funded.owner);", reconcile)
+        missing = function(reconcile, "if (found == groups.end())")
+        self.assertEqual(function(missing, "if (funded.windows != 0)"), "Refuse();")
+        self.assertTrue(missing.endswith("plan.regions.push_back(funded); continue;"))
+        self.assertNotIn(".at(", reconcile)
+        self.assertLess(reconcile.index("if (found == groups.end())"),
+                        reconcile.index("const auto& group = found->second;"))
+        native = (ROOT / "test/common/RegionalWater_test.cpp").read_text(encoding="utf-8")
+        regression = function(native, "TEST(RegionalWaterAdmission, "
+                              "ZeroWindowOwnersRetainFundingAccountingAndReceiveLaterService)")
+        for token in ("{1u, 2u}", "tick <= 16", "ASSERT_NO_THROW(",
+                      "region.next_cursor", "region.debt", "region.cadence_shift",
+                      "region.cadence_phase", "std::all_of(served.begin()",
+                      "std::all_of(deferred.begin()"):
+            self.assertIn(token, regression)
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("common/RegionalWater_test.cpp", cmake)
+        self.assertIn("gtest_discover_tests(${_lum_gtest_target}", cmake)
+
+    def test_water_reconciliation_selects_funded_interior_keys_including_pairs(self):
+        source = (ROOT / "src/luminumbra_common/systems/RegionalWater.cpp").read_text(
+            encoding="utf-8")
+        reconcile = function(source, "void Reconcile(")
+        self.assertNotIn("SelectInteriorPair(", reconcile)
+        self.assertIn("std::uint64_t awarded = 0, demand = 0;", reconcile)
+        selection = function(reconcile, "if (std::binary_search(")
+        self.assertEqual(selection, "++demand; if (awarded < limit) { "
+                         "entry.selected = true; ++awarded; }")
+        self.assertIn("funding.interiors.begin(), funding.interiors.end(), entry.resident.id)",
+                      reconcile)
+        self.assertIn("region.windows = awarded;", reconcile)
+        self.assertIn("region.debt += (funded.windows - awarded) * world::water_share::kQ32;",
+                      reconcile)
+        build = function(source, "Plan BuildPlan(")
+        self.assertIn("plan.interiors.push_back(entry.resident.id);", build)
+        native = (ROOT / "test/common/RegionalWater_test.cpp").read_text(encoding="utf-8")
+        regression = function(native, "TEST(RegionalWaterAdmission, "
+                              "BorderParticipantsCannotDisplaceFundedInteriorIdentities)")
+        for token in ("{31, 32, 34}", "tick <= 16", "3 * kPlanningCapacity",
+                      "EXPECT_NE(std::find(columns.begin(), columns.end(), visit), columns.end());",
+                      "EXPECT_GT(Mass(*chunks.at(target)), before);",
+                      "EXPECT_GT(target_steps, 0u);"):
+            self.assertIn(token, regression)
+        idle = function(native, "TEST(RegionalWaterAdmission, "
+                        "IdleFundedInteriorCannotBeReplacedByAnAwakeBorderParticipant)")
+        for token in ("chunk->is_water_sleeping.store(x == 34);",
+                      "EXPECT_TRUE(water.regional_work().visits.empty());",
+                      "EXPECT_EQ(water.regional_work().allocated_windows, 0u);",
+                      "EXPECT_FALSE(ledger.water_debts().contains({1, 0}));"):
+            self.assertIn(token, idle)
+
+    def test_sleeping_refunds_cap_demand_to_eligible_funded_interior_identities(self):
+        source = (ROOT / "src/luminumbra_common/systems/RegionalWater.cpp").read_text(
+            encoding="utf-8")
+        reconcile = function(source, "void Reconcile(")
+        candidates = function(reconcile, "for (const auto candidate : group.candidates)")
+        self.assertNotIn("break;", candidates)
+        self.assertEqual(candidates.count("++demand;"), 1)
+        eligible = function(candidates, "if (std::binary_search(")
+        self.assertTrue(eligible.startswith("++demand;"))
+        self.assertNotIn("demand = static_cast<std::uint64_t>(group.candidates.size())", reconcile)
+        self.assertIn("funding.interiors.begin(), funding.interiors.end(), entry.resident.id)",
+                      candidates)
+        self.assertEqual(function(reconcile, "if (demand < funded.windows)"),
+                         "region.debt = std::min(region.debt, demand * world::water_share::kQ32);")
+        native = (ROOT / "test/common/RegionalWater_test.cpp").read_text(encoding="utf-8")
+        regression = function(native, "TEST(RegionalWaterAdmission, "
+                              "SleepingInteriorRefundsExcludeBorderOnlyDemandAndCannotStarveSources)")
+        for token in ("{31, 32, 34, 36}", "tick <= 32", "ledger.schedule(WorldClock(tick))",
+                      "UpdateRegionalFromSimulation(", "completed, 480)", "work.visits",
+                      "3 * world::water_share::kQ32 / 4;",
+                      "const auto previous = ledger.water_debts().find({1, 0});",
+                      "if (tick == 8)", "EXPECT_GT(first_steps, 0u);",
+                      "EXPECT_GT(work.source_mm, 0);", "EXPECT_GT(refunds, 0u);"):
+            self.assertIn(token, regression)
+        self.assertIn("const bool second_funded = "
+                      "ledger.records().at({1, 0}).water_cursor != cursor;", regression)
+        self.assertEqual(function(regression, "if (second_executed)"),
+                         "EXPECT_TRUE(second_funded); "
+                         "EXPECT_EQ(carried + world::water_share::kQ32, credited);")
+        self.assertEqual(function(regression, "else if (second_funded)"),
+                         "++refunds; EXPECT_EQ(carried, 0u);")
+        self.assertIn("else { EXPECT_EQ(carried, credited); }", regression)
+        self.assertNotIn("Planning::Build(", regression)
+
+    def test_simulation_filters_large_due_schedules_before_both_planning_passes(self):
+        source = (ROOT / "src/luminumbra_common/systems/RegionalWater.cpp").read_text(
+            encoding="utf-8")
+        update = function(source, "void WaterSystem::UpdateRegionalFromSimulation(")
+        self.assertIn("schedule.due.size() > world::ActiveRegionLedger::kMaxRegions", update)
+        self.assertNotIn("schedule.due.size() > RegionalWater::kMaxSimulationColumns", update)
+        self.assertIn("const auto selected_schedule = RegionalWater::FilterSchedule(columns, schedule);",
+                      update)
+        planning = update[update.index("auto plan = RegionalWater::BuildPlan("):]
+        self.assertEqual(planning.count("RegionalWater::BuildPlan("), 2)
+        self.assertEqual(planning.count("selected_schedule,"), 2)
+        filtered = function(source, "world::RegionSchedule FilterSchedule(")
+        self.assertIn("std::map<RegionKey, bool> owners;", filtered)
+        self.assertIn("i < columns.size", filtered)
+        self.assertIn("owners.emplace(owner, false);", filtered)
+        self.assertIn("const auto found = owners.find(owner);", filtered)
+        self.assertEqual(function(filtered, "if (found->second)"), "Refuse();")
+        self.assertIn("filtered.due.reserve(owners.size());", filtered)
+        self.assertIn("for (const auto& [owner, due] : owners)", filtered)
+        self.assertIn("filtered.due.push_back(owner);", function(filtered, "if (due)"))
+        self.assertNotIn("= schedule;", filtered)
+        self.assertNotIn("schedule.due.begin()", filtered)
+        native = (ROOT / "test/common/RegionalWater_test.cpp").read_text(encoding="utf-8")
+        regression = function(native, "TEST(RegionalWaterAdmission, "
+                              "LargeLedgerSchedulesFundOnlySelectedDueOwnersInCanonicalOrder)")
+        for token in ("{false, true}", "{0u, 1u, 2u, 3u}", "x < 1024",
+                      "ledger.schedule(WorldClock(1))", "std::erase(schedule.due, RegionKey{2, 0});",
+                      "ASSERT_GT(schedule.due.size(), Planning::kMaxSimulationColumns);",
+                      "ASSERT_NO_THROW(water.UpdateRegionalFromSimulation(",
+                      "EXPECT_EQ(work.visits.size(), due_count);",
+                      "EXPECT_EQ(work.allocated_windows, due_count);",
+                      "EXPECT_EQ(work.participants_visited, due_count);",
+                      "ledger.records().at({x, 0}).water_cursor",
+                      "EXPECT_EQ(ledger.encode(), expected_ledgers[selection]);"):
+            self.assertIn(token, regression)
+        invalid = function(native, "TEST(RegionalWaterAdmission, "
+                           "InvalidContextRefusesBeforeReadingOrPublishing)")
+        self.assertIn("schedule.due.resize(ActiveRegionLedger::kMaxRegions + 1);", invalid)
+        self.assertIn("schedule.due.push_back({0, 0});", invalid)
+
     def test_eviction_ownership_probe_excludes_streaming_residency(self):
         session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(
             encoding="utf-8")
