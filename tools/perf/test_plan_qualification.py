@@ -51,6 +51,7 @@ def with_pose(matrix):
     """Copy of the committed matrix with a recorded pose on forest-settled."""
     result = copy.deepcopy(matrix)
     result['workloads'][0]['pose'] = dict(POSE)
+    result['workloads'][0]['pose_provenance'] = 'native-confirmed: synthetic evidence'
     return result
 
 
@@ -136,14 +137,27 @@ class CommittedMatrixTests(MatrixTestBase):
                                    'forest-settled.performance.3840x1600',
                                    'forest-settled.performance.3440x1440'])
 
-    def test_committed_fixed_views_are_pose_unrecorded(self):
+    def test_committed_fixed_views_bind_authored_poses_or_remain_unrecorded(self):
         cells = qm.cells(committed())
         fixed = [cell for cell in cells if cell['kind'] == 'fixed_view']
         self.assertEqual(len(fixed), 24)
+        authored = {
+            'ground-settled': {'x': 8.0, 'y': 19.1, 'z': 8.0, 'yaw': 35.0, 'pitch': -6.0},
+            'high-altitude-settled': {'x': 8.0, 'y': 112.0, 'z': 8.0, 'yaw': 35.0, 'pitch': -6.0},
+            'cave-air-settled': {'x': 8.469266, 'y': -46.070644, 'z': 11.695518,
+                                 'yaw': 0.0, 'pitch': 0.0},
+        }
         for cell in fixed:
             with self.subTest(cell=cell['id']):
-                self.assertEqual(qm.readiness(cell, ROOT),
-                                 ('unevaluated', 'pose-unrecorded'))
+                if cell['workload'] in authored:
+                    self.assertEqual(cell['pose'], authored[cell['workload']])
+                    self.assertEqual(qm.readiness(cell, ROOT),
+                                     ('unevaluated', 'pose-native-unconfirmed'))
+                    self.assertIn('needs native confirmation', cell['pose_provenance'])
+                else:
+                    self.assertIsNone(cell['pose'])
+                    self.assertEqual(qm.readiness(cell, ROOT),
+                                     ('unevaluated', 'pose-unrecorded'))
 
     def test_surface_flight_ready_and_blocked_traversals(self):
         cells = qm.cells(committed())
@@ -174,6 +188,54 @@ class CommittedMatrixTests(MatrixTestBase):
 
 
 class CommandGoldenTests(MatrixTestBase):
+    def test_pose_confirmation_controls_planner_and_both_commands(self):
+        for provenance in ('needs native confirmation', 'unrecorded: evidence pending',
+                           'unknown', 'native-confirmed:', 'native-confirmed: \t\n',
+                           'Native-confirmed: evidence', 'native-confirmed: evidence.json'):
+            with self.subTest(provenance=provenance):
+                matrix = with_pose(committed())
+                matrix['workloads'][0]['pose_provenance'] = provenance
+                qm.validate_matrix(matrix)
+                cell = qm.cells(matrix)[0]
+                confirmed = provenance == 'native-confirmed: evidence.json'
+                expected = ('ready', None) if confirmed else (
+                    'unevaluated', 'pose-native-unconfirmed')
+                self.assertEqual(qm.readiness(cell, ROOT), expected)
+                plan = planner.build_plan(matrix, client='client', out_dir=self.tmp,
+                                          root=ROOT, python=sys.executable, only=[cell['id']])
+                entry = plan['cells'][0]
+                self.assertEqual((entry['state'], entry['reason']), expected)
+                self.assertEqual(entry['command'] is not None, confirmed)
+                self.assertEqual(entry['checker_command'] is not None, confirmed)
+                if not confirmed:
+                    with self.assertRaisesRegex(qm.MatrixError, 'pose-native-unconfirmed'):
+                        qm.build_command(cell, client='client', artifact='a.json', root=ROOT)
+                    with self.assertRaisesRegex(qm.MatrixError, 'pose-native-unconfirmed'):
+                        qm.checker_command(cell, artifact='a.json', verdict='v.json',
+                                           qualified_renderer=RENDERER, root=ROOT,
+                                           python=sys.executable)
+
+    def test_missing_pose_stays_unrecorded_even_with_confirmation(self):
+        matrix = committed()
+        matrix['workloads'][0]['pose_provenance'] = 'native-confirmed: evidence.json'
+        self.assertEqual(qm.readiness(qm.cells(matrix)[0], ROOT),
+                         ('unevaluated', 'pose-unrecorded'))
+
+    def test_missing_or_malformed_confirmation_metadata_refuses_readiness(self):
+        cell = qm.cells(with_pose(committed()))[0]
+        for provenance in (None, False, 1, {}, [], ''):
+            with self.subTest(provenance=provenance):
+                cell['pose_provenance'] = provenance
+                self.assertEqual(qm.readiness(cell, ROOT),
+                                 ('unevaluated', 'pose-native-unconfirmed'))
+                matrix = with_pose(committed())
+                matrix['workloads'][0]['pose_provenance'] = provenance
+                with self.assertRaisesRegex(qm.MatrixError, 'pose_provenance'):
+                    qm.validate_matrix(matrix)
+        del cell['pose_provenance']
+        self.assertEqual(qm.readiness(cell, ROOT),
+                         ('unevaluated', 'pose-native-unconfirmed'))
+
     def test_fixed_view_client_argv(self):
         cells = qm.cells(with_pose(committed()))
         cell = find_cell(cells, 'forest-settled.quality.3840x1600')
@@ -242,6 +304,7 @@ class CommandGoldenTests(MatrixTestBase):
         for workload in matrix['workloads']:
             if workload['kind'] == 'fixed_view':
                 workload['pose'] = dict(POSE)
+                workload['pose_provenance'] = 'native-confirmed: synthetic evidence'
         for cell in qm.cells(matrix):
             if cell['kind'] != 'fixed_view':
                 continue
