@@ -11,6 +11,7 @@
 #include "luminumbra_common/core/SystemConfig.h"
 #include "player/PlayerController.h"
 #include "rendering/Camera.h"
+#include "rendering/passes/DebugViewPass.h"
 #include "ui/Rml_UIManager.h"
 
 #include <algorithm>
@@ -30,6 +31,17 @@ namespace {
 // The bindings main_client.cpp installed on the window at setup.
 InputCallbackBindings& CallbackBindings(GLFWwindow* window) {
     return *static_cast<InputCallbackBindings*>(glfwGetWindowUserPointer(window));
+}
+
+// Arming yields the world cursor, but must not steal a menu or debugger interaction.
+bool ViewportPickingAllowed(const InputCallbackBindings& bindings) {
+    const auto& app = *bindings.app;
+    const auto& diagnostics = Rendering::DebugViewPass::controls();
+    const auto* ui = bindings.uiManager->get();
+    return DeveloperUiAllowed(app) && bindings.in_world && bindings.window_focused &&
+           !app.hud.paused && !app.hud.codexOpen && diagnostics.enabled &&
+           diagnostics.inspector_open && diagnostics.armed &&
+           (!ui || (!ui->HasInputInteraction() && !ui->DeveloperDebuggerVisible()));
 }
 
 } // namespace
@@ -61,6 +73,7 @@ void RefreshInputOwnership(GLFWwindow* window) {
     ownership.console_open = ui_enabled && b.developerConsole && b.developerConsole->IsOpen();
     ownership.interactive_panel = ui_enabled && b.developerConsole &&
                                   b.developerConsole->Widgets().HasInteractivePanel("ui.debugger");
+    ownership.interactive_panel = ownership.interactive_panel || ViewportPickingAllowed(b);
     ownership.rml_debugger = ui_enabled && ui && ui->DeveloperDebuggerVisible();
     ownership.rml_interaction = ownership.rml_debugger || app.hud.paused || app.hud.codexOpen ||
                                 (ui && ui->HasInputInteraction());
@@ -98,6 +111,34 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
     if (b.app->overlay.imgui_enabled && ImGui::GetCurrentContext())
         ImGui_ImplGlfw_MouseButtonCallback(window, button, action, mods);
     RefreshInputOwnership(window);
+    auto& diagnostics = Rendering::DebugViewPass::controls();
+    if (ViewportPickingAllowed(b) && button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS &&
+        (!ImGui::GetCurrentContext() || !ImGui::GetIO().WantCaptureMouse)) {
+        double cursor_x = 0;
+        double cursor_y = 0;
+        int window_width = 0;
+        int window_height = 0;
+        int framebuffer_width = 0;
+        int framebuffer_height = 0;
+        glfwGetCursorPos(window, &cursor_x, &cursor_y);
+        glfwGetWindowSize(window, &window_width, &window_height);
+        glfwGetFramebufferSize(window, &framebuffer_width, &framebuffer_height);
+        if (framebuffer_width > 0 && framebuffer_height > 0 &&
+            Rendering::DebugViewPass::select_pixel(
+                diagnostics,
+                cursor_x,
+                cursor_y,
+                {.window_width = static_cast<double>(window_width),
+                 .window_height = static_cast<double>(window_height),
+                 .framebuffer = {static_cast<std::uint32_t>(framebuffer_width),
+                                 static_cast<std::uint32_t>(framebuffer_height)},
+                 .left = 0,
+                 .top = 0,
+                 .width = static_cast<double>(diagnostics.output.width),
+                 .height = static_cast<double>(diagnostics.output.height)})) {
+            return;
+        }
+    }
     if (b.router && (b.router->Owner() == InputOwner::RmlUi || action == GLFW_RELEASE))
         Luminumbra::Client::Rml_UIManager::MouseButtonCallback(window, button, action, mods);
     RefreshInputOwnership(window);
@@ -332,6 +373,9 @@ void framebuffer_size_callback(GLFWwindow* window, int width, int height) {
     // depends on a fixed 1280x720 framebuffer.
     if (windowState.capture_pinned)
         return;
+    if (Rendering::DebugViewPass::controls().enabled) {
+        Rendering::DebugViewPass::invalidate_selection(Rendering::DebugViewPass::controls());
+    }
     // Debounce: record the pending size and let the main loop coalesce a burst
     // of drag events into one RenderPipeline::on_resize after the size settles.
     windowState.pending_width = width;

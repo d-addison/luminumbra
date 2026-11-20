@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 
+#include "../support/GameSessionTestWorld.h"
 #include "luminumbra_common/components/CoreComponents.h"
+#include "luminumbra_common/components/CropLifecycleComponents.h"
+#include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/RegionalWater.h"
@@ -384,6 +387,171 @@ TEST(RegionalWater, MalformedGridsAndFacesRefuseWithoutRepairOrPartialTransfer) 
     FillWater(distant, 8);
     EXPECT_FALSE(WaterKernels::StepSharedFace(owner, distant, true).applied);
     EXPECT_FALSE(WaterKernels::StepSharedFace(owner, owner, true).applied);
+}
+} // namespace
+
+namespace {
+void PrepareWaterSession(world::GameSession& session,
+                         const TestSupport::HeadlessRoot& root,
+                         JobSystem& jobs) {
+    session.SetJobSystem(&jobs);
+    session.SetRootPath(root.root_string());
+    session.SetActiveRegionsEnabled(true);
+    session.SetWeatherRainEnabled(false);
+    ASSERT_TRUE(session.CreateTransientWorld("Water events", "777", "default"));
+    // All nine anchored columns fit the existing budget at this resolution,
+    // so the source column is funded on both sides of the callback boundary.
+    session.GetWorldSystem()->SetWaterSimResolution(8);
+    session.SetReplicatedSimulationAnchors({Vec3(24, 0, 24)});
+    ASSERT_EQ(session.TickSimulation(SECONDS_PER_TICK), 1u);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    ASSERT_EQ(session.GetWaterSystem()->regional_work().visits.size(), 9u);
+}
+
+TEST(RegionalWaterSession, CallbackSourcesAffectCurrentTickWithActiveAndIdleFoliage) {
+    for (const bool remove : {false, true}) {
+        for (const bool deferred : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << remove << ',' << deferred);
+            const TestSupport::HeadlessRoot root;
+            JobSystem jobs;
+            jobs.startup(1);
+            const world::GameSession::AuthorityProfileOptions profile{.regional_water = true};
+            world::GameSession idle(profile, world::GameSession::AuthorityProfileTestOnly{});
+            world::GameSession active(profile, world::GameSession::AuthorityProfileTestOnly{});
+            for (auto* session : {&idle, &active}) {
+                ASSERT_NO_FATAL_FAILURE(PrepareWaterSession(*session, root, jobs));
+                auto& registry = session->GetRegistry();
+                if (session == &active) {
+                    TestSupport::ClockTestPlant(registry, Vec3(24, 0, 24));
+                }
+                const auto source = registry.create();
+                registry.emplace<Components::TransformComponent>(source).position =
+                    Vec3(24, -100, 24);
+                if (remove) {
+                    registry.emplace<Components::FlowingWaterSourceComponent>(source).flow_rate =
+                        1.0f;
+                }
+                int callbacks = 0;
+                session->GetSimulationEventBus().subscribe([&, session, source](const auto&) {
+                    ++callbacks;
+                    EXPECT_EQ(session->GetFoliageRegistryPublications(),
+                              session == &active ? 1u : 0u);
+                    if (remove) {
+                        session->GetRegistry().remove<Components::FlowingWaterSourceComponent>(
+                            source);
+                    } else {
+                        session->GetRegistry()
+                            .emplace<Components::FlowingWaterSourceComponent>(source)
+                            .flow_rate = 1.0f;
+                    }
+                });
+                session->GetSimulationEventBus().publish(2, "water.source", "");
+                std::vector<ChunkID> observations;
+                session->GetWorldSystem()->SetWaterAuthorityObserver([&](const IVec3& coords) {
+                    observations.push_back(Chunk::calculate_id(coords));
+                });
+                const auto inputs = session->GetWorldSystem()->water_authority_input_items();
+                ASSERT_EQ(session->TickSimulation(SECONDS_PER_TICK, deferred), 1u);
+                session->GetWorldSystem()->SetWaterAuthorityObserver({});
+                ASSERT_FALSE(session->GetRegionSchedulerFault());
+                EXPECT_EQ(callbacks, 1);
+                const auto& work = session->GetWaterSystem()->regional_work();
+                EXPECT_FALSE(work.visits.empty());
+                if (remove) {
+                    EXPECT_EQ(work.source_mm, 0);
+                } else {
+                    EXPECT_GT(work.source_mm, 0);
+                }
+                EXPECT_EQ(session->GetWorldSystem()->water_authority_input_items() - inputs,
+                          observations.size());
+                if (deferred) {
+                    EXPECT_TRUE(observations.empty());
+                }
+                std::sort(observations.begin(), observations.end());
+                EXPECT_EQ(std::adjacent_find(observations.begin(), observations.end()),
+                          observations.end());
+                std::uint64_t completed = 0;
+                for (const auto& [key, units] : session->GetActiveRegionLedger().completed_work()) {
+                    (void)key;
+                    completed += units;
+                }
+                EXPECT_GT(completed, work.water_cells);
+                if (deferred) {
+                    session->GetWorldSystem()->sync_water_authority();
+                }
+            }
+            EXPECT_EQ(idle.GetWaterSystem()->regional_work(),
+                      active.GetWaterSystem()->regional_work());
+            EXPECT_EQ(idle.ComputeChunkStateHash(), active.ComputeChunkStateHash());
+        }
+    }
+}
+
+TEST(RegionalWaterSession, StagedSourceDeathPrecedesCurrentTickWater) {
+    const TestSupport::HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    const world::GameSession::AuthorityProfileOptions profile{.regional_water = true};
+    world::GameSession session(profile, world::GameSession::AuthorityProfileTestOnly{});
+    ASSERT_NO_FATAL_FAILURE(PrepareWaterSession(session, root, jobs));
+    auto& registry = session.GetRegistry();
+    const auto plant = TestSupport::ClockTestPlant(registry, Vec3(24, 0, 24));
+    registry.get<Components::PlantGrowthComponent>(plant).stage =
+        static_cast<std::uint8_t>(Components::PlantStage::Fruiting);
+    registry.emplace<Components::CropLifecycleComponent>(plant).lifespan_ticks = 1;
+    registry.emplace<Components::FlowingWaterSourceComponent>(plant).flow_rate = 1.0f;
+    ASSERT_EQ(session.TickSimulation(SECONDS_PER_TICK), 1u);
+    ASSERT_FALSE(session.GetRegionSchedulerFault());
+    EXPECT_EQ(session.GetFoliageRegistryPublications(), 1u);
+    EXPECT_FALSE(registry.valid(plant));
+    EXPECT_FALSE(session.GetWaterSystem()->regional_work().visits.empty());
+    EXPECT_EQ(session.GetWaterSystem()->regional_work().source_mm, 0);
+}
+
+TEST(RegionalWaterSession, CallbackFaultsStopBeforeWaterOnBothFoliagePaths) {
+    for (const bool foliage : {false, true}) {
+        for (int failure = 0; failure < 3; ++failure) {
+            SCOPED_TRACE(::testing::Message() << foliage << ',' << failure);
+            const TestSupport::HeadlessRoot root;
+            JobSystem jobs;
+            jobs.startup(1);
+            const world::GameSession::AuthorityProfileOptions profile{.regional_water = true};
+            world::GameSession session(profile, world::GameSession::AuthorityProfileTestOnly{});
+            ASSERT_NO_FATAL_FAILURE(PrepareWaterSession(session, root, jobs));
+            if (foliage) {
+                TestSupport::ClockTestPlant(session.GetRegistry(), Vec3(24, 0, 24));
+            }
+            auto* shield = session.GetWorldSystem();
+            const auto before = session.GetWaterSystem()->regional_work();
+            ASSERT_FALSE(before.visits.empty());
+            const auto owner =
+                shield->find_authoritative_chunk(Chunk::decode_id(before.visits.front()));
+            ASSERT_NE(owner, nullptr);
+            const auto water_before = Snapshot(*owner);
+            shield->remember_durable_chunks({{100, 0, 100}});
+            int callbacks = 0;
+            session.GetSimulationEventBus().subscribe([&](const auto&) {
+                ++callbacks;
+                if (failure == 0) {
+                    throw std::runtime_error("water event refused");
+                }
+                if (failure == 1) {
+                    throw 7;
+                }
+                // Missing committed storage latches through the session's installed
+                // fault callback and returns normally to the event subscriber.
+                EXPECT_EQ(shield->find_authoritative_chunk({100, 0, 100}), nullptr);
+                EXPECT_TRUE(session.GetRegionSchedulerFault());
+            });
+            session.GetSimulationEventBus().publish(2, "water.fault", "");
+            ASSERT_EQ(session.TickSimulation(SECONDS_PER_TICK), 1u);
+            ASSERT_TRUE(session.GetRegionSchedulerFault());
+            EXPECT_EQ(callbacks, 1);
+            EXPECT_EQ(session.GetWaterSystem()->regional_work(), before);
+            EXPECT_EQ(Snapshot(*owner), water_before);
+            EXPECT_EQ(session.TickSimulation(SECONDS_PER_TICK), 0u);
+        }
+    }
 }
 } // namespace
 
@@ -4791,6 +4959,8 @@ TEST(RegionalWaterAdmission, SleepingResizedSavedColumnsHaveTheSameColdAndRestor
         if (restored) {
             ASSERT_TRUE(shield.restore_authoritative_chunk({0, 0, 0}));
         }
+        // Restoration leaves the saved grid intact until funded preparation.
+        EXPECT_EQ(chunk->current_water_resolution.load(), 4);
         auto ledger = PlanningLedger({{0, 0}});
         entt::registry registry;
         const auto entity = registry.create();
@@ -4799,8 +4969,13 @@ TEST(RegionalWaterAdmission, SleepingResizedSavedColumnsHaveTheSameColdAndRestor
         std::vector<world::RegionWork> completed;
         water.UpdateRegionalFromSimulation(
             registry, {}, ledger, ExecutionSchedule(0, {{0, 0}}), completed);
-        EXPECT_TRUE(water.regional_work().visits.empty());
-        EXPECT_TRUE(completed.empty());
+        EXPECT_EQ(water.regional_work().visits, std::vector<ChunkID>{chunk->get_id()});
+        EXPECT_EQ(water.regional_work().preparation_cells, 256u);
+        EXPECT_EQ(water.regional_work().water_cells, 256u);
+        EXPECT_EQ(water.regional_work().total_cells, 512u);
+        ASSERT_EQ(completed.size(), 1u);
+        EXPECT_EQ(completed.front().key, (RegionKey{0, 0}));
+        EXPECT_EQ(completed.front().water_cells, 256u);
         EXPECT_EQ(chunk->current_water_resolution.load(), 16);
         EXPECT_TRUE(chunk->is_water_sleeping.load());
         const auto saved = Persistence::SerializeChunkAuthoritySnapshotJson(*chunk);
@@ -5181,7 +5356,11 @@ TEST(RegionalWaterAdmission, InspectionRefusalsRollBackOnlyTheCallsNewReservatio
             if (refusal < 3) {
                 auto chunk = TransactionChunk(0);
                 chunk->set_state(refusal == 0 ? ChunkState::Loading : ChunkState::Idle);
-                if (refusal == 1) {
+                if (refusal == 0) {
+                    // An authority-free loading column reads its committed copy; only an
+                    // authority-bearing one must refuse while it is still loading.
+                    chunk->set_water_authority();
+                } else if (refusal == 1) {
                     chunk->set_water_authority();
                     chunk->water_edge_flux.pop_back();
                 } else if (refusal == 2) {

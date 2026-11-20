@@ -15,10 +15,10 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | Capture-local draw registry | Implemented with separate asset and generated-geometry identities | `DiagnosticDrawTable.h`; registered `DiagnosticDrawTable.*` regressions in `capture_manifest_test` and generated-key `DiagnosticAttribution.*` regressions in `render_smoke_test`; native execution pending |
 | Deferred attribution producers | Implemented inside a leased deferred scope | `GBufferTargets.h/.cpp` and `GBufferPass.cpp` add a render-thread producer scope, capture-local draw identities and explicit unsupported records; `g_buffer.frag`, `foliage.frag`, `plant_procgen.frag` and `scent_decal.frag` have guarded `LUMIN_DIAG_IDS` outputs; registered `DiagnosticAttribution.*` source-contract and `DiagnosticAttributionGl.*` hidden-GL regressions in `render_smoke_test`; native execution pending |
 | G-buffer ID attachment | Implemented for explicit deferred captures | `GBufferPass` holds an `AttachmentLease` during deferred submission; detachment and lease release precede completion, including rollback, recreation, retirement and exceptional exits; registered `GBufferLeaseGl.*` and `DiagnosticAttributionGl.*` regressions; native execution pending |
-| Exact producer coverage | Partial | Inside an explicit producer scope, file-backed static instances and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier with unsupported generated-mesh metadata. Live terrain MDI produces one identity per original command in pool-bucket order, using resident upload LOD and mesh version. The ladder backend, authored surfaces and tree impostors explicitly invalidate coverage; procedural static meshes also remain unsupported. Uploaded plant/marker batches resume deferred attribution, and additive scent decals use separate contributor storage. Missing contributor storage retains exact Forward records labeled `:contributor_only` and refuses completion. Foliage has a guarded shader output but no instrumented forward submission |
-| Bundle transactions and opt-in admission | GL-free core implemented; runtime integration pending | `DiagnosticCapture.h/.cpp` resolves options, streams normalized planes, joins draw records, enforces staging budgets and publishes completion last using identity-checked ownership. `diagnostic_bundle_test` covers public transports and filesystem refusal/rollback; native execution pending. Runtime setup refuses enabled diagnostics before output until the completed-frame adapter is integrated |
+| Exact producer coverage | Partial | Inside an explicit producer scope, file-backed static instances and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier with unsupported generated-mesh metadata. Live terrain MDI produces one identity per original command in pool-bucket order, using resident upload LOD and mesh version. The ladder backend, authored surfaces and tree impostors explicitly invalidate coverage; procedural static meshes also remain unsupported. Uploaded plant/marker batches resume deferred attribution, and additive scent decals use separate contributor storage. Missing contributor storage retains exact Forward records labeled `:contributor_only` and refuses completion. Water surfaces, glass panes and waterfall sheet/pool slots use the separate contributor plane at their original submissions through guarded `water.frag`, `glass_oit.frag` and `waterfall.frag` outputs. Foliage has a guarded shader output but no instrumented forward submission; particles remain uninstrumented |
+| Bundle transactions and opt-in admission | Implemented for the admitted capture paths | `DiagnosticCapture.h/.cpp` resolves options, streams normalized planes, joins draw records, enforces staging budgets and publishes completion last using identity-checked ownership. `diagnostic_bundle_test` covers public transports and filesystem refusal/rollback; native execution pending. Runtime admission accepts enabled diagnostics only for `world_visual_sweep`, `--frame-scan`, or `--render-benchmark` with `--render-benchmark-screenshot`; every other scenario and the parity redispatches refuse them before save-root output |
 | Dusk wedge attribution (issue #873) | Capture wiring and regression implemented; native execution pending | Fixed audit land pose, paired pre-present final/depth and available lighting sources; `FarWorldFogGl.DuskAuditFogIsContinuousAcrossDistanceAndHeightBoundaries`; no producer correction or visual approval |
-| ID views and single-pixel inspector | Implemented as explicit render-thread snapshots | `DebugViewPass`; developer-console debug-view panel; registered `DiagnosticInspector.*` and `DiagnosticInspectorGl.*` regressions in `pass_context_test`; native execution pending. Other B views and viewport picking remain planned |
+| ID views and single-pixel inspector | Implemented as explicit render-thread snapshots | `DebugViewPass`; developer-console debug-view panel; registered `DiagnosticInspector.*` and `DiagnosticInspectorGl.*` regressions in `pass_context_test`; native execution pending. Other B views remain planned |
 | Deferred shader contribution views | Implemented as opt-in live overlays | `DebugViewPass` and `LightingPass`; registered `DiagnosticContributions.*` and `DiagnosticContributionsGl.*` regressions in `pass_context_test`; native execution pending. Fog and separate forward/sky/shadow planes explicitly unsupported |
 | Linux shader compilation and software-GL reference scenes | Partial | Fast Linux steps and material, cutout, night, terrain, normal decode and both depth-convention fixtures registered; bounded sky/terrain shader replays checked under llvmpipe; native scene target execution pending; dusk continuity diagnostic pending issue #918; no required-check or ruleset changes |
 | Bundle validity and image checks | Implemented for schema 1 and reader-only schemas 2/3 | `check-diagnostic-capture.py` and registered `DiagnosticCapturePython` synthetic regressions validate bundles without a renderer. ROI coverage, validity, weather, edge and masked defect measurements plus worst-pixel SVG crops are implemented; synthetic detection is covered, while production thresholds remain advisory/unqualified |
@@ -140,6 +140,19 @@ color routing. Continuations refuse extent changes with
 lease. The contributor plane identifies the last contributing submission at a
 pixel; table entries retain all instrumented submissions, not every blended layer.
 
+Water surfaces resume the contributor plane after offscreen caustics generation;
+dry-ground discards preserve earlier IDs. Generated water keys identify the
+submitted chunk translation and index count, with Live ownership, Forward pass and
+LOD zero. Non-translation models, nonfinite/fractional/out-of-range chunk coordinates
+and float origins that can alias adjacent chunks explicitly refuse attribution.
+Glass accumulation records each original unit-pane draw on its OIT framebuffer;
+its fixed nonzero coverage always contributes after depth testing. An unavailable
+resolve shader or fullscreen quad explicitly refuses capture completion. The resolve
+keeps those pane IDs and does not substitute a fullscreen identity. Waterfall draws
+record the immutable uploaded sheet/pool slot only after the live-water skip; zero
+alpha fragments preserve earlier IDs. Glass and waterfalls use Live ownership,
+Forward pass and LOD zero; their generated geometry is not chunk-owned.
+
 Generated geometry can supply an exact bounded key instead of an asset path. The
 registry separates the two namespaces and emits a `generated` mesh member while
 retaining unknown provenance; ambiguous or invalid keys refuse without mutation.
@@ -172,7 +185,7 @@ original attachments.
 
 Completing exact coverage requires changes beyond the deferred attachment owners:
 the ladder submission metadata/backend, `StaticDrawPass`, `FoliagePass` and
-`tree_impostor.frag`, plus water, glass, particles and waterfall forward submissions.
+`tree_impostor.frag`, plus particle forward submissions.
 A foliage identity belongs to a separate forward contributor plane because its color blends
 with the already lit scene. None of these gaps is represented as a guessed mesh or
 as successful background coverage.
@@ -350,23 +363,40 @@ far volume blue; live ownership has full brightness, legacy far 70% and ladder f
 and explicit magenta hatching for unknown provenance. Producer spellings outside
 the known renderer families remain unsupported. This does not expand producer coverage.
 
-Open **Single-pixel inspector**, enter top-left render-attachment coordinates and
-press **Refresh snapshot / inspect selected pixel**. The panel displays schema-1
+Open **Single-pixel inspector** and enable **Arm viewport picking**. A left click
+outside UI panels selects a top-left render-attachment texel; disarmed and
+out-of-image clicks do nothing. One helper converts GLFW window coordinates
+through framebuffer DPI and the displayed image rectangle to render coordinates.
+The panel labels render attachment and output framebuffer resolutions separately.
+Coordinates can also be entered directly with **Inspect selected pixel**. The panel displays schema-1
 probe JSON and the exact joined draw/mesh records (including path, chunk, LOD,
 owner, pass and supported status). Albedo is linear, normal is signed view-space,
 depth is raw hardware depth and material is the exact normal attachment alpha ID.
-One fragment gathers nearest, unfiltered values at that coordinate into a fixed
-48-byte buffer; one buffer readback occurs per explicit valid request while the
-inspector is open. Closing the panel closes the inspector. Closed, idle, disabled,
+The zoom displays a fixed 9 by 9 neighbourhood of linear deferred albedo with
+nearest-texel sampling and edge clamping. Only its centre fragment gathers values
+into the existing fixed 48-byte buffer; one buffer readback occurs per explicit
+valid request while the inspector is open. No zoom image is read back.
+**Copy pixel JSON** copies the schema-1 probe itself, separately from the richer
+panel record. Closing the panel closes the inspector. Closed, idle, disabled,
 invalid-coordinate and frozen-replay paths perform no inspector readback.
+
+**Freeze frame** retains one deferred albedo image, normal/material and depth
+textures together with that frame's IDs, camera and draw table. Frozen inspection
+uses only these retained attachments and metadata, even as the live camera and
+scene change. The panel previews the retained albedo image. Unfrozen inspection
+captures a new frame only on request; **Refresh snapshot / inspect selected pixel**
+releases freeze and requests a new capture. Output resizing or render-scale changes
+clear the selected pixel, pending request and frozen frame, with a visible status.
+The three retained AOVs plus IDs require at most 448 MiB GPU storage at the existing
+16,777,216-pixel target bound, plus bounded draw metadata; only one frame is retained.
 
 Snapshot registry preparation is capped by 65,536 draws and 16 MiB schema-1 JSON;
 its GPU lookup contains at most 131,074 RGBA32UI texels. No registry scan runs on
 idle frames. Targets and shader variants are created only on explicit diagnostic
 refresh, never on the default rendering path. A competing capture scope refuses
-the snapshot request until that scope releases ownership. Viewport/DPI picking,
-AOV image freezing/zoom, extra attachment selection and bundle requests are later
-view/inspector work; coordinate inspection and identity-image freezing are available here.
+the snapshot request until that scope releases ownership. Frozen inspections need
+no new producer scope. Extra attachment selection and runtime bundle requests remain
+later work; schema-1 clipboard export is available here.
 
 ### Deferred contribution controls
 
