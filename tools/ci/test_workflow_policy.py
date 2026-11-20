@@ -972,8 +972,10 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         self.assertIn("  workflow_call:", reusable)
         self.assertNotIn("actions/cache", reusable)
         daily = (ROOT / ".github/workflows/windows-daily.yml").read_text(encoding="utf-8")
+        old_refresh = ("git ls-files -z -- 'worlds/atlas/presets-rev6/*.json' | "
+                       "git checkout-index --force -z --stdin")
         refresh_script = ("git ls-files -z -- 'worlds/atlas/presets-rev6/*.json' | "
-                          "git checkout-index --force -z --stdin")
+                          "xargs -0 rm -f --\n" + old_refresh)
         for workflow in (reusable, daily):
             for job_id, job in jobs(workflow).items():
                 blocks = steps(job)
@@ -987,32 +989,75 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
                         self.assertEqual(value(refresh, "run", 8), refresh_script)
                         self.assertIsNone(value(refresh, "if", 8))
                         self.assertIsNone(value(refresh, "continue-on-error", 8))
-        # Materialize into a separate worktree without changing the source index.
-        # Model stale CRLF even though the tracked files now have -text attributes.
+        # Reproduce stat-clean CRLF from an earlier checkout attribute. --force
+        # alone skips an entry whose cached stat still matches the working file.
         with tempfile.TemporaryDirectory(prefix="frozen preset bytes ") as temporary:
             directory = Path(temporary)
+            env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+
+            def git(*arguments):
+                result = subprocess.run(["git", *arguments], cwd=directory, env=env,
+                                        capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                return result.stdout
+
+            git("init", "-q")
+            git("config", "core.autocrlf", "false")
+            attributes = directory / ".gitattributes"
+            attributes.write_bytes(b"*.json text eol=crlf\n")
             preset_dir = directory / "worlds/atlas/presets-rev6"
             preset_dir.mkdir(parents=True)
-            paths = sorted((ROOT / "worlds/atlas/presets-rev6").glob("*.json"))
-            for path in paths:
-                (preset_dir / path.name).write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+            expected = {path.name: path.read_bytes()
+                        for path in sorted((ROOT / "worlds/atlas/presets-rev6").glob("*.json"))}
+            expected["quoted space 'name'.json"] = b'{"value": 1}\n'
+            for name, raw in expected.items():
+                (preset_dir / name).write_bytes(raw)
+            git("add", ".")
+            git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                "-c", "commit.gpgsign=false", "commit", "-qm", "Frozen presets")
+            for path in preset_dir.iterdir():
+                path.unlink()
+            git("checkout-index", "--all", "--force")
+            for path in preset_dir.iterdir():
+                # Avoid Git's racy-clean fallback, which would compare bytes.
+                os.utime(path, (1600000000, 1600000000))
+            git("add", "--renormalize", "--", "worlds/atlas/presets-rev6")
+            git("diff", "--cached", "--exit-code")
+            attributes.write_bytes(b"*.json -text\n")
             sentinel = directory / "unrelated.txt"
             sentinel.write_bytes(b"keep\r\n")
-            # --prefix redirects every output; checkout-index only reads the index.
-            materialize = value(refresh, "run", 8).replace("--force -z", '--force --prefix="$FROZEN_OUTPUT/" -z')
-            result = run_bash_script(materialize, cwd=ROOT, env=dict(os.environ, FROZEN_OUTPUT=directory.as_posix()),
+            git("diff-files", "--quiet", "--", "worlds/atlas/presets-rev6/*.json")
+            result = run_bash_script(old_refresh, cwd=directory, env=env,
                                      capture_output=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
-            for path in paths:
-                self.assertEqual((preset_dir / path.name).read_bytes(), path.read_bytes(), path.name)
+            for name, raw in expected.items():
+                self.assertEqual((preset_dir / name).read_bytes(), raw.replace(b"\n", b"\r\n"))
+            git("diff-files", "--quiet", "--", "worlds/atlas/presets-rev6/*.json")
+            result = run_bash_script(refresh_script, cwd=directory, env=env,
+                                     capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for name, raw in expected.items():
+                self.assertEqual((preset_dir / name).read_bytes(), raw, name)
             self.assertEqual(sentinel.read_bytes(), b"keep\r\n")
-            for failed in ("ls-files", "checkout-index"):
+            for failed in ("ls-files", "checkout-index", "xargs"):
                 refusal = ('git() { if [[ "$1" == "' + failed + '" ]]; then return 7; fi; '
                            'command git "$@"; }\n')
-                result = run_bash_script(refusal + materialize, cwd=ROOT,
-                                         env=dict(os.environ, FROZEN_OUTPUT=directory.as_posix()),
+                if failed == "xargs":
+                    refusal = 'xargs() { return 7; }\n'
+                result = run_bash_script(refusal + refresh_script, cwd=directory, env=env,
                                          capture_output=True, timeout=10)
                 self.assertNotEqual(result.returncode, 0, failed)
+            # Missing tracked files are restored, and an empty selection succeeds.
+            result = run_bash_script(refresh_script, cwd=directory, env=env,
+                                     capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for name, raw in expected.items():
+                self.assertEqual((preset_dir / name).read_bytes(), raw, name)
+            git("rm", "-q", "-r", "-f", "--", "worlds/atlas/presets-rev6")
+            result = run_bash_script(refresh_script, cwd=directory, env=env,
+                                     capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(sentinel.read_bytes(), b"keep\r\n")
         for job_id, job in jobs(reusable).items():
             if job_id == "changes":
                 for output in ("needs_cpp=true", "needs_python=true", "needs_heavy=true"):
@@ -1485,11 +1530,11 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
     def test_relocated_windows_job_definitions_are_pinned(self):
         # Retain whole-job pins after moving the full Windows coverage out of CI.
         expected = {
-            "changes": "e543e9f9f2c8e512a6b326c0ceef15c7bdcae4c5426f869b0b23cd7d3c76a1e0",
-            "windows-msvc": "dbdbe1329dcdb794ab3bd996356fd3a856bb4dd2a0819a6e06a7db24760e7e17",
-            "windows-ucrt64": "00cb28aa05d60658a3d49dfdef4831400e0272a489609b14774d61f0ce394ad2",
-            "windows-msvc-result": "8e315948d85ec033cbbea79be9e099f0a8b02374ee1b43f301e013581190a2cb",
-            "windows-ucrt64-result": "351b929db9c9ba222f01b186d15852d16172f51bd931ba0dd925cce01429d89c",
+            "changes": "719c7357c8f60592b41f4299e01d25ded1e320489601aef0e79a279ff43000de",
+            "windows-msvc": "b96064f047734fd564a75694ae7bfa08eb329d0896e66f612d95da83c6e78a45",
+            "windows-ucrt64": "6ac45a8cc93bea871e9557351708e6b23d0314cfa20fdea4875cfdc909610b36",
+            "windows-msvc-result": "2af91683329c582ac65a4b73b975bb19f2a83350dcd268be0c9039df2c3723b2",
+            "windows-ucrt64-result": "a8564410c6e255d3968c3a4d95ff6129dc3a5ba34cbae43f1a4a25c3bfcedd3f",
         }
         actual = jobs(self.workflows["windows-build.yml"])
         self.assertEqual(set(actual), set(expected))
