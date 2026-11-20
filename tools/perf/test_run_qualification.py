@@ -399,6 +399,7 @@ class RunnerTestBase(unittest.TestCase):
             for workload in matrix['workloads']:
                 if workload['kind'] == 'fixed_view':
                     workload['pose'] = dict(POSE)
+                    workload.pop('pose_source', None)
                     workload['pose_provenance'] = 'native-confirmed: synthetic evidence'
         path = root / 'matrix.json'
         path.write_text(json.dumps(matrix, indent=2), encoding='utf-8')
@@ -596,6 +597,20 @@ class SelectionTests(RunnerTestBase):
             code, _, error = self.run_main(self.argv('--only', SURFACE_CELL))
         self.assertEqual(code, 2)
         self.assertIn('script_sha256', error)
+        self.assertFalse(self.out.exists())
+        launch.assert_not_called()
+        checker.assert_not_called()
+
+    def test_authored_pose_identity_drift_exits_2_without_launch_or_output(self):
+        matrix = matrix_lib.load_matrix(MATRIX_PATH)
+        workload = next(item for item in matrix['workloads'] if item['id'] == 'ground-settled')
+        workload['pose_source']['sha256'] = '0' * 64
+        self.matrix_path.write_text(json.dumps(matrix), encoding='utf-8')
+        with mock.patch.object(rq.runner, 'run_process') as launch, \
+                mock.patch.object(rq.subprocess, 'run') as checker:
+            code, _, error = self.run_main(self.argv('--only', SURFACE_CELL))
+        self.assertEqual(code, 2)
+        self.assertIn('pose_source SHA-256 mismatch', error)
         self.assertFalse(self.out.exists())
         launch.assert_not_called()
         checker.assert_not_called()
@@ -798,7 +813,8 @@ class SelectionTests(RunnerTestBase):
 
     def test_mkdir_file_exists_error_is_not_reported_as_held_lock(self):
         # Windows can report an obstructing parent file as FileExistsError.
-        with mock.patch.object(Path, 'mkdir', side_effect=FileExistsError('blocked parent')), \
+        with mock.patch.object(rq, 'os', types.SimpleNamespace(**vars(os))), \
+                mock.patch.object(Path, 'mkdir', side_effect=FileExistsError('blocked parent')), \
                 mock.patch.object(rq.os, 'open') as open_file, \
                 mock.patch.object(rq, 'run_cells') as launch:
             code, _, err = self.run_main(self.argv('--only', SURFACE_CELL))
@@ -1169,6 +1185,7 @@ class CheckCommandTests(unittest.TestCase):
         for workload in matrix['workloads']:
             if workload['kind'] == 'fixed_view':
                 workload['pose'] = dict(POSE)
+                workload.pop('pose_source', None)
                 workload['pose_provenance'] = 'native-confirmed: synthetic evidence'
         self.matrix = matrix
         self.cells = {cell['id']: cell for cell in matrix_lib.cells(matrix)}
@@ -1231,7 +1248,8 @@ class SettingsResetTests(RunnerTestBase):
 class DirectoryLockTests(RunnerTestBase):
     def test_output_directory_file_is_cannot_write_before_lock_creation(self):
         self.out.write_text('not a directory', encoding='utf-8')
-        with mock.patch.object(rq.os, 'open') as open_lock:
+        with mock.patch.object(rq, 'os', types.SimpleNamespace(**vars(os))), \
+                mock.patch.object(rq.os, 'open') as open_lock:
             code, _, err = self.run_main(self.argv('--only', SURFACE_CELL))
         self.assertEqual(code, 2)
         self.assertIn('cannot write', err)
@@ -1240,7 +1258,8 @@ class DirectoryLockTests(RunnerTestBase):
         self.assertEqual(self.out.read_text(encoding='utf-8'), 'not a directory')
 
     def test_lock_creation_file_exists_error_without_lock_is_cannot_write(self):
-        with mock.patch.object(rq.os, 'open', side_effect=FileExistsError('cannot create')):
+        with mock.patch.object(rq, 'os', types.SimpleNamespace(**vars(os))), \
+                mock.patch.object(rq.os, 'open', side_effect=FileExistsError('cannot create')):
             code, _, err = self.run_main(self.argv('--only', SURFACE_CELL))
         self.assertEqual(code, 2)
         self.assertIn('cannot write', err)
@@ -1248,7 +1267,8 @@ class DirectoryLockTests(RunnerTestBase):
         self.assertFalse((self.out / rq.LOCK_NAME).exists())
 
     def test_lock_creation_permission_error_is_cannot_write(self):
-        with mock.patch.object(rq.os, 'open', side_effect=PermissionError('access denied')):
+        with mock.patch.object(rq, 'os', types.SimpleNamespace(**vars(os))), \
+                mock.patch.object(rq.os, 'open', side_effect=PermissionError('access denied')):
             code, _, err = self.run_main(self.argv('--only', SURFACE_CELL))
         self.assertEqual(code, 2)
         self.assertIn('cannot write', err)
@@ -2038,6 +2058,7 @@ class RealCheckerTests(RunnerTestBase):
         for workload in matrix['workloads']:
             if workload['kind'] == 'fixed_view':
                 workload['pose'] = dict(POSE)
+                workload.pop('pose_source', None)
                 workload['pose_provenance'] = 'native-confirmed: synthetic evidence'
         data, matrix = cls.positive_documents(matrix)
         cls.positive_fixture = cls.shared / 'positive-control.json'

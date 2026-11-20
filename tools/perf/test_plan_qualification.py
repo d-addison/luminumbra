@@ -304,6 +304,7 @@ class CommandGoldenTests(MatrixTestBase):
         for workload in matrix['workloads']:
             if workload['kind'] == 'fixed_view':
                 workload['pose'] = dict(POSE)
+                workload.pop('pose_source', None)
                 workload['pose_provenance'] = 'native-confirmed: synthetic evidence'
         for cell in qm.cells(matrix):
             if cell['kind'] != 'fixed_view':
@@ -515,6 +516,205 @@ class CheckerEvidenceTests(MatrixTestBase):
 
 
 class MatrixValidationTests(MatrixTestBase):
+    def bound_workload(self, matrix):
+        return next(workload for workload in matrix['workloads']
+                    if workload['id'] == 'ground-settled')
+
+    def source_document(self):
+        return json.loads((ROOT / qm.SCENE_MATRIX).read_bytes())
+
+    def write_source(self, matrix, document):
+        path = self.tmp / qm.SCENE_MATRIX
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = document if isinstance(document, bytes) else json.dumps(document).encode('utf-8')
+        path.write_bytes(payload)
+        try:
+            identity = json.dumps(json.loads(payload), sort_keys=True, separators=(',', ':'),
+                                  allow_nan=False).encode('utf-8')
+        except (ValueError, UnicodeError, RecursionError):
+            identity = payload  # Malformed bytes must be refused before identity comparison.
+        self.bound_workload(matrix)['pose_source']['sha256'] = hashlib.sha256(identity).hexdigest()
+        return path
+
+    def test_authored_source_identity_matches_bytes_and_cells(self):
+        matrix = committed()
+        qm.validate_matrix(matrix)
+        document = self.source_document()
+        identity = json.dumps(document, sort_keys=True, separators=(',', ':'),
+                              allow_nan=False).encode('utf-8')
+        expected = hashlib.sha256(identity).hexdigest()
+        bound = [workload for workload in matrix['workloads'] if 'pose_source' in workload]
+        self.assertEqual(len(bound), 3)
+        for workload in bound:
+            with self.subTest(workload=workload['id']):
+                source = workload['pose_source']
+                self.assertEqual(source['sha256'], expected)
+                scene = next(scene for scene in document['scenes']
+                             if scene['id'] == source['scene_id'])
+                camera = scene['scene']['camera']
+                self.assertEqual(workload['pose'], dict(zip(qm.POSE_KEYS,
+                                                           [*camera['pos'], camera['yaw'],
+                                                            camera['pitch']])))
+                workload['pose_provenance'] = 'native-confirmed: synthetic evidence'
+        qm.validate_matrix(matrix)
+        for cell in qm.cells(matrix):
+            if cell['workload'] in {workload['id'] for workload in bound}:
+                self.assertEqual(qm.readiness(cell, ROOT), ('ready', None))
+                workload = next(item for item in bound if item['id'] == cell['workload'])
+                self.assertEqual(cell['pose_source'], workload['pose_source'])
+                self.assertIsNot(cell['pose_source'], workload['pose_source'])
+
+    def test_null_poses_and_blocked_producers_never_count_as_ready(self):
+        matrix = committed()
+        for workload in matrix['workloads']:
+            if workload['kind'] == 'fixed_view':
+                workload['pose_provenance'] = 'native-confirmed: synthetic evidence'
+        for cell in qm.cells(matrix):
+            if cell['kind'] == 'fixed_view' and cell['pose'] is None:
+                self.assertEqual(qm.readiness(cell, ROOT), ('unevaluated', 'pose-unrecorded'))
+        plan = planner.build_plan(matrix, client='client', out_dir=self.tmp,
+                                  root=ROOT, python=sys.executable)
+        self.assertEqual(plan['summary'], {'ready': 16, 'unevaluated': 20})
+        for cell in plan['cells']:
+            if cell['workload'] in ('forest-settled', 'shoreline-settled',
+                                    'mountain-vista-settled', 'cave-walk', 'edited-world-tour'):
+                self.assertEqual(cell['state'], 'unevaluated')
+                self.assertIsNone(cell['command'])
+                self.assertIsNone(cell['checker_command'])
+                if cell['workload'] in ('cave-walk', 'edited-world-tour'):
+                    self.assertIn('#132', cell['reason'])
+
+    def test_missing_traversal_producer_not_ready(self):
+        matrix = committed()
+        workload = next(item for item in matrix['workloads'] if item['id'] == 'surface-flight')
+        workload['script'] = 'missing.traversal'
+        qm.validate_matrix(matrix)
+        plan = planner.build_plan(matrix, client='client', out_dir=self.tmp,
+                                  root=ROOT, python=sys.executable)
+        self.assertEqual(plan['summary'], {'ready': 0, 'unevaluated': 36})
+        for cell in plan['cells']:
+            if cell['workload'] == 'surface-flight':
+                self.assertEqual(cell['reason'], 'traversal-script-missing')
+                self.assertIsNone(cell['command'])
+        workload.update(script=None, script_sha256=None)
+        self.assert_refused(json.dumps(matrix), 'exactly one of script or blocked_by')
+
+    def test_bound_null_or_changed_pose_and_time_refused(self):
+        for label, value in (('null', None), ('changed', dict(POSE))):
+            with self.subTest(label=label):
+                matrix = committed()
+                self.bound_workload(matrix)['pose'] = value
+                self.assert_refused(json.dumps(matrix), 'pose')
+        matrix = committed()
+        document = self.source_document()
+        document['scenes'][1]['scene']['time_of_day'] = 0.5
+        self.write_source(matrix, document)
+        with mock.patch.object(qm, 'ROOT', self.tmp):
+            self.assert_refused(json.dumps(matrix), 'pose/time identity mismatch')
+
+    def test_source_identity_drift_refused_by_loader_and_commands(self):
+        matrix = committed()
+        workload = self.bound_workload(matrix)
+        workload['pose_source']['sha256'] = '0' * 64
+        self.assert_refused(json.dumps(matrix), 'SHA-256 mismatch')
+        workload['pose_provenance'] = 'native-confirmed: synthetic evidence'
+        cell = find_cell(qm.cells(matrix), 'ground-settled.quality.3840x1600')
+        self.assertEqual(qm.readiness(cell, ROOT)[0], 'unevaluated')
+        with self.assertRaisesRegex(qm.MatrixError, 'SHA-256 mismatch'):
+            qm.build_command(cell, client='client', artifact='a.json', root=ROOT)
+        with self.assertRaisesRegex(qm.MatrixError, 'SHA-256 mismatch'):
+            qm.checker_command(cell, artifact='a.json', verdict='v.json',
+                               qualified_renderer=RENDERER, root=ROOT, python=sys.executable)
+
+    def test_source_metadata_refused(self):
+        for source in (None, {}, {'scene_id': 'ground'},
+                       {'scene_id': '../ground', 'sha256': 'a' * 64},
+                       {'scene_id': 'ground', 'sha256': None},
+                       {'scene_id': 'ground', 'sha256': 'A' * 64},
+                       {'scene_id': 'ground', 'sha256': 'a' * 64, 'unknown': True}):
+            with self.subTest(source=source):
+                matrix = committed()
+                self.bound_workload(matrix)['pose_source'] = source
+                self.assert_refused(json.dumps(matrix), 'pose_source')
+
+    def test_unavailable_source_refuses_loader_and_readiness(self):
+        matrix = committed()
+        self.bound_workload(matrix)['pose_provenance'] = 'native-confirmed: synthetic evidence'
+        cell = find_cell(qm.cells(matrix), 'ground-settled.quality.3840x1600')
+        with mock.patch.object(qm, 'ROOT', self.tmp):
+            self.assert_refused(json.dumps(matrix), 'pose_source unavailable')
+        self.assertEqual(qm.readiness(cell, self.tmp)[0], 'unevaluated')
+        with mock.patch.object(qm, '_scene_bytes', side_effect=PermissionError('denied')):
+            self.assert_refused(json.dumps(matrix), 'pose_source unavailable')
+            self.assertEqual(qm.readiness(cell, ROOT)[0], 'unevaluated')
+
+    def test_source_byte_cap_and_regular_file_required(self):
+        matrix = committed()
+        self.write_source(matrix, b' ' * (qm.MAX_SCENE_BYTES + 1))
+        with mock.patch.object(qm, 'ROOT', self.tmp):
+            self.assert_refused(json.dumps(matrix), 'byte cap')
+        text = json.dumps(committed())
+        with mock.patch.object(qm.os, 'fstat', return_value=types.SimpleNamespace(st_mode=stat.S_IFIFO)):
+            self.assert_refused(text, 'regular scene document')
+
+    def test_invalid_source_documents_refused(self):
+        documents = (b'{', b'\xff', b'{"x":1,"x":2}', b'{"x":NaN}',
+                     b'[' * 2000, [], {}, {'schema': 'unknown', 'scenes': []},
+                     {'schema': 'luminumbra.scene_matrix.v1', 'scenes': None})
+        for document in documents:
+            with self.subTest(document=str(document)[:80]):
+                matrix = committed()
+                self.write_source(matrix, document)
+                with mock.patch.object(qm, 'ROOT', self.tmp):
+                    self.assert_refused(json.dumps(matrix), 'pose_source|duplicate JSON|constant')
+
+    def test_source_scene_failure_cases(self):
+        for label in ('empty', 'unknown', 'duplicate', 'unresolved', 'body', 'camera',
+                      'position', 'short-position', 'boolean', 'null-yaw', 'huge', 'infinite'):
+            with self.subTest(label=label):
+                matrix = committed()
+                document = self.source_document()
+                scene = document['scenes'][1]
+                camera = scene['scene']['camera']
+                if label == 'empty':
+                    document['scenes'] = []
+                elif label == 'unknown':
+                    self.bound_workload(matrix)['pose_source']['scene_id'] = 'unknown'
+                elif label == 'duplicate':
+                    document['scenes'].append(copy.deepcopy(scene))
+                elif label == 'unresolved':
+                    scene['pose_source'] = 'recorded-evidence'
+                elif label == 'body':
+                    scene['scene'] = None
+                elif label == 'camera':
+                    scene['scene']['camera'] = None
+                elif label == 'position':
+                    camera['pos'] = None
+                elif label == 'short-position':
+                    camera['pos'] = [1, 2]
+                elif label == 'boolean':
+                    camera['yaw'] = True
+                elif label == 'null-yaw':
+                    camera['yaw'] = None
+                elif label == 'huge':
+                    camera['yaw'] = 10 ** 400
+                else:
+                    camera['yaw'] = float('inf')
+                self.write_source(matrix, document)
+                with mock.patch.object(qm, 'ROOT', self.tmp):
+                    self.assert_refused(json.dumps(matrix), 'pose_source')
+
+    def test_source_identity_matches_across_crlf_checkout(self):
+        matrix = committed()
+        expected = self.bound_workload(matrix)['pose_source']['sha256']
+        payload = (ROOT / qm.SCENE_MATRIX).read_bytes().replace(b'\n', b'\r\n')
+        self.write_source(matrix, payload)
+        self.assertEqual(self.bound_workload(matrix)['pose_source']['sha256'], expected)
+        # Only ground is being exercised against the alternate document bytes.
+        matrix['workloads'] = [self.bound_workload(matrix)]
+        with mock.patch.object(qm, 'ROOT', self.tmp):
+            qm.validate_matrix(matrix)
+
     def test_missing_traversal_digest_refused(self):
         for workload in committed()['workloads']:
             if workload['kind'] != 'traversal':

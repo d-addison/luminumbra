@@ -21,9 +21,9 @@
  "workloads": [
   {"id": "forest-settled", "kind": "fixed_view", "pose": null,
    "pose_provenance": "unrecorded: operator records position/yaw/pitch on the qualification machine"},
-  {"id": "ground-settled", "kind": "fixed_view", "pose": {"x": 8.0, "y": 19.1, "z": 8.0, "yaw": 35.0, "pitch": -6.0}, "pose_provenance": "Re-authored 2026-11-19: issue #64 ground; see docs/v0.3-acceptance.md#canonical-acceptance-scenes; needs native confirmation"},
-  {"id": "high-altitude-settled", "kind": "fixed_view", "pose": {"x": 8.0, "y": 112.0, "z": 8.0, "yaw": 35.0, "pitch": -6.0}, "pose_provenance": "Re-authored 2026-11-19: issue #64 high; see docs/v0.3-acceptance.md#canonical-acceptance-scenes; needs native confirmation"},
-  {"id": "cave-air-settled", "kind": "fixed_view", "pose": {"x": 8.469266, "y": -46.070644, "z": 11.695518, "yaw": 0.0, "pitch": 0.0}, "pose_provenance": "Re-authored 2026-11-19: issue #64 cave_air; see docs/v0.3-acceptance.md#canonical-acceptance-scenes; needs native confirmation"},
+  {"id": "ground-settled", "kind": "fixed_view", "pose": {"x": 8.0, "y": 19.1, "z": 8.0, "yaw": 35.0, "pitch": -6.0}, "pose_provenance": "Re-authored 2026-11-19: issue #64 ground; see docs/v0.3-acceptance.md#canonical-acceptance-scenes; needs native confirmation", "pose_source": {"scene_id": "ground", "sha256": "c889ed354fbd0576eaf8100b8fa902dc166cc3f5ee0427b156f0726e61326cf1"}},
+  {"id": "high-altitude-settled", "kind": "fixed_view", "pose": {"x": 8.0, "y": 112.0, "z": 8.0, "yaw": 35.0, "pitch": -6.0}, "pose_provenance": "Re-authored 2026-11-19: issue #64 high; see docs/v0.3-acceptance.md#canonical-acceptance-scenes; needs native confirmation", "pose_source": {"scene_id": "high", "sha256": "c889ed354fbd0576eaf8100b8fa902dc166cc3f5ee0427b156f0726e61326cf1"}},
+  {"id": "cave-air-settled", "kind": "fixed_view", "pose": {"x": 8.469266, "y": -46.070644, "z": 11.695518, "yaw": 0.0, "pitch": 0.0}, "pose_provenance": "Re-authored 2026-11-19: issue #64 cave_air; see docs/v0.3-acceptance.md#canonical-acceptance-scenes; needs native confirmation", "pose_source": {"scene_id": "cave_air", "sha256": "c889ed354fbd0576eaf8100b8fa902dc166cc3f5ee0427b156f0726e61326cf1"}},
   {"id": "shoreline-settled", "kind": "fixed_view", "pose": null,
    "pose_provenance": "unrecorded: operator records position/yaw/pitch on the qualification machine"},
   {"id": "mountain-vista-settled", "kind": "fixed_view", "pose": null,
