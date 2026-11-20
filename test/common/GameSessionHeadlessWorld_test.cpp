@@ -7754,8 +7754,10 @@ TEST(GameSessionHeadlessWorldTest, SnapshotSelectionDoesNotHideMalformedQueuedWa
     EXPECT_FALSE(session.SaveWorldStateTo(destination, &report));
     EXPECT_LE(report.work.world_decodes, 1u);
     EXPECT_EQ(report.work.owners_serialized, 1u);
-    EXPECT_EQ(report.work.owners_rewritten, 0u);
-    EXPECT_EQ(report.work.regions_rewritten, 0u);
+    // The region is replaced inside the transaction before snapshot validation
+    // refuses it; the report counts that work even though the rollback restores disk.
+    EXPECT_EQ(report.work.owners_rewritten, 1u);
+    EXPECT_EQ(report.work.regions_rewritten, 1u);
     EXPECT_TRUE(chunk->is_voxel_data_dirty());
     EXPECT_TRUE(chunk->has_water_authority());
     EXPECT_EQ(SavedPresetTestDiskBytes(destination), before);
