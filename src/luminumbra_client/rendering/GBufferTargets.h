@@ -51,6 +51,9 @@ public:
     variant(Shader* shader, bool ladder, const std::vector<std::string>& feedback_varyings = {});
     void write(const Shader& shader, const DiagnosticSubmission& submission);
     void write_current(const DiagnosticSubmission& submission);
+    // Refused/uncovered fallback draws must not inherit the preceding identity.
+    // No-op unless a variant owned by this capture is currently bound.
+    void clear_current_identity();
     void unsupported(std::string_view producer,
                      std::uint32_t lod = 0,
                      DiagnosticOwnership ownership = DiagnosticOwnership::Live,

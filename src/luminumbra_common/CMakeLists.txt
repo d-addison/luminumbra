@@ -76,6 +76,9 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     else()
         set_source_files_properties(world/GameSession.cpp PROPERTIES COMPILE_OPTIONS "-O1")
     endif()
+elseif(MSVC)
+    # The same roster exceeds the default COFF section limit under MSVC (error C1128).
+    set_source_files_properties(world/GameSession.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
 endif()
 
 # LuaState.cpp is the one translation unit that includes sol2. GCC 15 diagnoses

@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <span>
 #include <vector>
 
 namespace Luminumbra::Rendering {
@@ -24,6 +25,25 @@ public:
     void reset_shader();
     void destroy_geometry();
     void execute(const RenderContext& ctx);
+
+    // Main thread, once before particle motion. Shares the existing per-site
+    // world queries between sheets, spray and audio; no frame allocations.
+    void update_liveness(const Systems::SHIELD_WorldSystem& world, ParticlePass* particle_pass);
+
+    struct RoarSource {
+        const WaterfallSite* site = nullptr;
+        float live_factor = 0.0f;
+        float gain(float base_gain) const {
+            return base_gain * live_factor;
+        }
+    };
+    // Read-only presentation selection. Missing/unprepared factors are silent.
+    static RoarSource SelectRoarSource(std::span<const WaterfallSite> sites,
+                                       std::span<const float> live_factors,
+                                       const glm::vec3& listener);
+    RoarSource roar_source(const glm::vec3& listener) const {
+        return SelectRoarSource(m_sheet_sites, m_live_factors, listener);
+    }
 
     // CPU payload in stable site order; render-only, never simulation authority.
     struct PreparedGeometry {
@@ -71,6 +91,7 @@ private:
     };
     std::vector<GeometryPage> m_pages;
     std::vector<WaterfallSite> m_sheet_sites;
+    std::vector<float> m_live_factors;
     bool m_geometry_built = false;
     std::vector<float> m_pending_vertices;
     std::size_t m_uploaded_floats = 0;
