@@ -1558,6 +1558,10 @@ int main(int argc, char* argv[]) {
     }
     g_app.overlay.imgui_enabled = g_app.capture.feature_policy.Apply({}, scenario_config.no_ui).ui;
     g_app.scenario_active = scenario_config.active();
+    if (scenario_config.temporal_audit_plan) {
+        Luminumbra::Client::presentation_clock.set_capture_tick(0, 60);
+        scenario_config.capture_heartbeat = &MainLoopHeartbeat();
+    }
     runtime_state_recorder.capture("startup_requested", nullptr, nullptr, nullptr, 0, {});
 
     if (scenario_config.forced_crash()) {
@@ -2351,6 +2355,15 @@ int main(int argc, char* argv[]) {
     gameSession->SetRootPath(root_path_str);
     gameSession->SetSaveRootPath(path_options.save_root);
     gameSession->ApplySystemConfig(g_systemConfig);
+    const bool temporal_weather_ready =
+        !scenario_config.temporal_audit_plan ||
+        scenario_config.temporal_audit_plan->request.span !=
+            Luminumbra::Rendering::TemporalAuditSpan::WeatherCycle ||
+        gameSession->SetWeatherSchedule(
+            WorldVisualSweepWeatherSchedule(*scenario_config.temporal_audit_plan));
+    if (!temporal_weather_ready) {
+        LUMINUMBRA_CORE_ERROR("Temporal sweep weather schedule refused before world creation");
+    }
     if (traversal && traversal->kind == "region_crossing")
         gameSession->SetRegionSchedulerConfig(
             {.work_limit = 0, .hold_ticks = 30, .reduced_shift = 1});
@@ -2528,6 +2541,8 @@ int main(int argc, char* argv[]) {
             LUMINUMBRA_CORE_WARN("Capture feature policy unavailable: {}", error.what());
         }
     }
+    // Reuse the normal startup refusal/teardown path, including session/jobs.
+    graphics_ready = graphics_ready && temporal_weather_ready;
     if (graphics_ready && (graphics_first_launch || graphics_detect_requested))
         graphics_state.ScheduleSave(glfwGetTime());
     const auto save_graphics = [&] {
@@ -5225,15 +5240,16 @@ int main(int argc, char* argv[]) {
 
         const bool timelapse_waiting =
             g_app.capture.timelapse_frames > 0 && !timelapse_presentation_ready;
-        const bool simulate_frame =
-            !timelapse_waiting && Measurement::frame_simulation_enabled(benchmark_v4,
-                                                                        traversal.has_value(),
-                                                                        measuring_v3,
-                                                                        g_app.hud.paused,
-                                                                        g_app.capture.timeScale);
+        const bool simulate_frame = !timelapse_waiting && !scenario_config.temporal_audit_plan &&
+                                    Measurement::frame_simulation_enabled(benchmark_v4,
+                                                                          traversal.has_value(),
+                                                                          measuring_v3,
+                                                                          g_app.hud.paused,
+                                                                          g_app.capture.timeScale);
         // Preserve the historical frame-driven behavior outside benchmark capture.
-        const bool advance_frame_simulation =
-            !timelapse_waiting && (!g_rb_active || simulate_frame);
+        const bool advance_frame_simulation = !timelapse_waiting &&
+                                              !scenario_config.temporal_audit_plan &&
+                                              (!g_rb_active || simulate_frame);
         switch (currentState) {
             case GameState::WORLD_LOADING: {
                 glClearColor(0.01f, 0.02f, 0.05f, 1.0f);
@@ -6326,6 +6342,9 @@ int main(int argc, char* argv[]) {
                     // Upload waits may omit intermediate images after required
                     // settling frames. Every measured traversal frame draws.
                     // Residency retries preserve the selected sun and cloud phase.
+                    if (scenario_config.temporal_audit_plan) {
+                        deltaTime = 0.0f;
+                    }
                     const bool settling_benchmark_uploads =
                         g_rb_active &&
                         ((!upload_warmup_complete && g_app.benchmark.warmupFrames + 1 >=

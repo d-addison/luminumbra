@@ -4,6 +4,7 @@
 #include "luminumbra_common/core/CaptureContentPaths.h"
 #include "luminumbra_common/core/Environment.h"
 #include "luminumbra_common/core/FilesystemPath.h"
+#include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/world/SurfaceWorkBudget.h"
 #include "rendering/DiagnosticCapture.h"
 #include "rendering/TemporalSweep.h"
@@ -333,6 +334,7 @@ ParseRuntimeScenarioConfig(int argc, char* argv[], const std::filesystem::path& 
     RefuseUnsupportedTemporalAuditExecution(argc, argv);
     RuntimeScenarioConfig config;
     config.capture_feature_profile = ParseCaptureFeatureProfile(argc, argv);
+    config.temporal_audit_plan = ParseTemporalAuditPlanOptions(argc, argv);
     ParseSurfaceRadiusOptions(
         argc, argv, config.horizon_radius, config.collision_radius, config.benchmark_stream_radius);
     config.scenario = ResolveRuntimeScenario(argc, argv);
@@ -612,7 +614,51 @@ std::optional<Rendering::TemporalAuditPlan> ParseTemporalAuditPlanOptions(int ar
 
 void RefuseUnsupportedTemporalAuditExecution(int argc, char* argv[]) {
     const auto plan = ParseTemporalAuditPlanOptions(argc, argv);
-    if (plan || GetCommandLineOption(argc, argv, "--scenario", "") == "temporal_audit")
+    if (!plan && GetCommandLineOption(argc, argv, "--scenario", "") != "temporal_audit") {
+        return;
+    }
+    if (!plan || ResolveRuntimeScenario(argc, argv) != "world_visual_sweep") {
         throw std::invalid_argument("temporal audit execution unsupported: plan admission only");
+    }
+    if (plan->request.start_tick != 0 || plan->request.ticks_per_second != 30) {
+        throw std::invalid_argument("temporal sweep requires a fresh world at 30 Hz");
+    }
+    // Other capture drivers can mutate the world or reframe the fixed camera.
+    // Refuse every spelling before save-root creation, including empty values.
+    for (int index = 1; index < argc; ++index) {
+        const std::string_view argument(argv[index]);
+        for (const std::string_view flag : {"--timelapse",
+                                            "--frame-scan",
+                                            "--scene-config",
+                                            "--render-benchmark",
+                                            "--survey",
+                                            "--load-world",
+                                            "--runtime-boot",
+                                            "--ui-screenshot",
+                                            "--ui-thumbs",
+                                            "--bake-tree-impostor",
+                                            "--render-parity",
+                                            "--upscale-seam-parity"}) {
+            if (argument == flag ||
+                (argument.starts_with(flag) && argument.size() > flag.size() &&
+                 (argument[flag.size()] == '=' || argument[flag.size()] == '-'))) {
+                throw std::invalid_argument("temporal sweep refuses competing capture drivers");
+            }
+        }
+    }
+}
+
+Systems::WeatherSchedule WorldVisualSweepWeatherSchedule(const Rendering::TemporalAuditPlan& plan) {
+    using Systems::WeatherCategory;
+    const auto rate = plan.request.ticks_per_second;
+    const auto start = plan.request.start_tick;
+    // Five admitted keyframes and one strike; canonical encoding, identity and
+    // persistence are owned by WeatherSchedule/GameSession, not this renderer.
+    return {.phases = {{start, WeatherCategory::Clear, 0, 0},
+                       {start + 20ULL * rate, WeatherCategory::Clear, 0, 0},
+                       {start + 50ULL * rate, WeatherCategory::Rain, 65535, 65535},
+                       {start + 90ULL * rate, WeatherCategory::Rain, 65535, 65535},
+                       {start + 120ULL * rate, WeatherCategory::Clear, 0, 0}},
+            .strike_tick = start + plan.request.strike_tick};
 }
 } // namespace Luminumbra::Client::ScenarioHarness

@@ -11,10 +11,12 @@
 #include "core/ScenarioRunnerImpl.h"
 
 #include "core/Log.h"
+#include "core/PresentationClock.h"
 #include "core/Profiler.h"
 #include "core/scenarios/ScenarioCommon.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/network/NetworkLoopbackAuthority.h"
+#include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "nlohmann/json.hpp"
@@ -22,6 +24,8 @@
 #include "rendering/FarLodSystem.h"
 #include "rendering/PixelIo.h"
 #include "rendering/UploadBudget.h"
+#include "rendering/WeatherRenderBridge.h"
+#include "rendering/passes/ParticlePass.h"
 #include "rendering/passes/WaterPass.h"
 
 #include <algorithm>
@@ -100,6 +104,250 @@ constexpr int kAtmosMotionFrameCount = 240;
 // misrepresented the true on-screen motion. Replayed at 60 fps the assembled
 // clip is a faithful 1:1 recording of the shipping rain. 90 frames ~= 1.5 s.
 constexpr double kAtmosMotionFrameIntervalS = 1.0 / 60.0;
+
+// One backend owns the entire sequence. Only the final completion directory
+// publishes success; failed payloads/manifests remain in an incomplete reservation.
+struct RuntimeWorldSweepBackend {
+    Luminumbra::world::GameSession& session;
+    Luminumbra::Rendering::RenderPipeline& pipeline;
+    Luminumbra::Rendering::Camera& camera;
+    GLFWwindow* window;
+    const std::filesystem::path& root;
+    std::filesystem::path output;
+    bool wireframe;
+    std::atomic<std::uint64_t>* heartbeat = nullptr;
+    std::vector<unsigned char> pixels{};
+    // At most kTemporalMaxFrames records, admitted before reserve().
+    std::vector<Luminumbra::Rendering::TemporalSequenceStep> captured{};
+    std::optional<Luminumbra::Rendering::TemporalSequenceStep> completed{};
+    int width = 0;
+    int height = 0;
+    std::size_t pixel_bytes = 0;
+    std::uint32_t moon_phase_milli = 0;
+    std::uint64_t presentation_frames = 0;
+
+    std::uint64_t actual_tick() const {
+        return session.GetSimulationTickCount();
+    }
+    bool begin(const Luminumbra::Rendering::TemporalAuditPlan& plan,
+               const Luminumbra::Rendering::TemporalSequenceBudget& budget) {
+        using namespace Luminumbra::Rendering;
+        if (!session.GetWorldSystem() || !session.GetPhysicsSystem() ||
+            session.GetRegionSchedulerFault() || pipeline.capture_diagnostics_enabled() ||
+            !TemporalSweepClockMatches(plan.request,
+                                       actual_tick(),
+                                       session.GetSimulationClock().tick_rate_hz(),
+                                       session.GetRenderCalendar())) {
+            return false;
+        }
+        glfwGetFramebufferSize(window, &width, &height);
+        if (width != kCapturePinnedWidth || height != kCapturePinnedHeight ||
+            !CapturePixelBytes(width, height, 3, pixel_bytes) ||
+            budget.frame_bytes < pixel_bytes + 64ULL || !weather_ready(actual_tick())) {
+            return false;
+        }
+        const auto* schedule = session.GetWeatherSchedule();
+        if (plan.request.span == TemporalAuditSpan::WeatherCycle &&
+            (schedule == nullptr || *schedule != WorldVisualSweepWeatherSchedule(plan))) {
+            return false;
+        }
+        captured.reserve(plan.frames.size());
+        moon_phase_milli = plan.request.night_moon_phase_milli;
+        std::error_code error;
+        // Exclusive reservation refuses old or incomplete runs. Nothing is removed.
+        if (!std::filesystem::create_directory(output, error) || error) {
+            return false;
+        }
+        // Fixed readiness pose, yaw000. No site/feature-presence qualification.
+        camera.Yaw = kWorldSweepAngles[0].yaw_degrees;
+        camera.Pitch = kWorldSweepAngles[0].pitch_degrees;
+        camera.updateCameraVectors();
+        return true;
+    }
+    bool advance_simulation(const Luminumbra::Rendering::TemporalSequenceStep& step) {
+        const auto before = actual_tick();
+        if (before >= Luminumbra::world::WorldClock::kTickLimit - 1 ||
+            step.simulation_tick != before + 1 || session.GetRegionSchedulerFault()) {
+            return false;
+        }
+        const auto delta = session.GetSimulationClock().fixed_dt();
+        session.SetLocalPlayerSimulationPosition(camera.Position, false);
+        session.GetPhysicsSystem()->update(static_cast<float>(delta));
+        if (session.TickSimulation(delta, true) != 1 || session.GetRegionSchedulerFault() ||
+            actual_tick() != step.simulation_tick) {
+            return false;
+        }
+        // The normal host ordering: physics, sim (including weather/creatures),
+        // streaming/water, then promotion of water authority. Exactly once/tick.
+        session.GetWorldSystem()->update(
+            session.GetRegistry(), camera.Position, session.GetPhysicsSystem());
+        session.GetWorldSystem()->sync_water_authority();
+        return true;
+    }
+    bool weather_ready(std::uint64_t tick) const {
+        const auto* weather = session.GetWeatherSystem();
+        return weather != nullptr && weather->last_tick() == tick;
+    }
+    bool apply_weather(const Luminumbra::Rendering::TemporalSequenceStep& step) {
+        using namespace Luminumbra::Rendering;
+        const auto* weather = session.GetWeatherSystem();
+        if (weather == nullptr) {
+            return false;
+        }
+        const auto sample = weather->SampleAt(camera.Position);
+        if (!std::isfinite(sample.precip_intensity) || !std::isfinite(sample.storm_intensity) ||
+            !std::isfinite(sample.wind.x) || !std::isfinite(sample.wind.y)) {
+            return false;
+        }
+        const auto state = WeatherBridge::BuildWeatherRenderState(sample);
+        pipeline.set_weather_state(state);
+        pipeline.set_cloud_state(
+            WeatherBridge::BuildCloudRenderState(sample, step.simulation_tick));
+        if (auto* particles = pipeline.particles()) {
+            particles->set_precipitation(root / "data/common/particles",
+                                         camera.Position,
+                                         state.rain_intensity,
+                                         state.snow_intensity);
+            particles->set_wind(state.wind_direction * state.wind_strength * 8.0f);
+        }
+        return true;
+    }
+    bool render_completed(const Luminumbra::Rendering::TemporalSequenceStep& step,
+                          const Luminumbra::Rendering::CaptureFeaturePolicy& /*policy*/,
+                          const Luminumbra::Rendering::WorldSweepAngle& /*angle*/,
+                          bool& ready) {
+        using namespace Luminumbra::Rendering;
+        completed.reset();
+        if (glfwWindowShouldClose(window)) {
+            return false;
+        }
+        // Admission pins 30 simulation Hz: every positive presentation delta
+        // is one 60 Hz frame. Warmup/holds count; readiness/settling hold phase.
+        if (step.presentation_delta_seconds > 0) {
+            ++presentation_frames;
+        }
+        Luminumbra::Client::presentation_clock.set_capture_tick(presentation_frames, 60);
+        const auto calendar = session.GetRenderCalendar();
+        const Luminumbra::world::WorldClock clock(step.simulation_tick, calendar);
+        pipeline.set_time_of_day_hold(true);
+        pipeline.set_render_calendar(calendar);
+        pipeline.set_season_tick(step.simulation_tick);
+        pipeline.set_time_of_day_tick(step.simulation_tick);
+        const double shifted = clock.solar_phase_from_day_phase(step.day_phase) + 0.5;
+        const auto tod = step.control == TemporalAuditControl::Noon ? 0.0f
+                         : step.control == TemporalAuditControl::Night
+                             ? 0.5f
+                             : static_cast<float>(shifted >= 1.0 ? shifted - 1.0 : shifted);
+        pipeline.set_time_of_day(tod);
+        if (step.control == TemporalAuditControl::Night) {
+            pipeline.set_moon_illumination(static_cast<float>(moon_phase_milli) / 1000.0f);
+        }
+        // Only initial residency uses frozen streaming. Readiness and settling
+        // never update water, physics, creatures or presentation phase.
+        if (step.action == TemporalSequenceAction::Warmup ||
+            step.action == TemporalSequenceAction::InitialReadiness) {
+            session.GetWorldSystem()->update(
+                session.GetRegistry(), camera.Position, session.GetPhysicsSystem(), false);
+        }
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        pipeline.render_frame(session.GetRegistry(),
+                              *session.GetWorldSystem(),
+                              camera,
+                              static_cast<float>(step.presentation_delta_seconds),
+                              wireframe);
+        int current_width = 0;
+        int current_height = 0;
+        glfwGetFramebufferSize(window, &current_width, &current_height);
+        if (current_width != width || current_height != height) {
+            return false;
+        }
+        ready = pipeline.render_uploads_settled();
+        if (step.action == TemporalSequenceAction::InitialReadiness) {
+            // Fixed 625-column camera-local query, never a whole-world scan.
+            const auto coverage =
+                session.GetWorldSystem()->get_camera_local_coverage_stats(camera.Position, 12);
+            ready = ready && coverage.near_field_renderable &&
+                    coverage.expected_surface_chunks > 0 &&
+                    coverage.ready_surface_chunks == coverage.expected_surface_chunks &&
+                    coverage.pending_lod_chunks == 0;
+        }
+        // At most the pinned RGB framebuffer, checked before allocation/readback.
+        pixels.resize(pixel_bytes);
+        glReadBuffer(GL_BACK);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
+        if (glGetError() != GL_NO_ERROR) {
+            return false;
+        }
+        LUMIN_PROFILE_WAIT("Client present wait", glfwSwapBuffers(window));
+        if (heartbeat != nullptr) {
+            heartbeat->fetch_add(1, std::memory_order_relaxed);
+        }
+        glfwPollEvents();
+        if (ready) {
+            completed = step;
+        }
+        return !glfwWindowShouldClose(window);
+    }
+    Luminumbra::Rendering::TemporalSweepOutput
+    capture(const Luminumbra::Rendering::TemporalSequenceStep& step) {
+        using namespace Luminumbra::Rendering;
+        if (!completed || completed->simulation_tick != step.simulation_tick ||
+            completed->sub_tick_60 != step.sub_tick_60 ||
+            completed->frame_index != step.frame_index || completed->control != step.control ||
+            step.frame_index != captured.size() || pixels.size() != pixel_bytes ||
+            pixel_bytes + 64ULL > step.byte_limit) {
+            return {};
+        }
+        const auto filename = "frame-" + std::to_string(step.frame_index) + ".ppm";
+        const bool written = WritePixelBufferPpm(output / filename, width, height, pixels);
+        if (!written) {
+            return {};
+        }
+        captured.push_back(step);
+        completed.reset();
+        // The PPM header is bounded to 64 bytes for positive int extents.
+        return {true, pixel_bytes + 64ULL};
+    }
+    Luminumbra::Rendering::TemporalSweepOutput
+    publish(const Luminumbra::Rendering::TemporalSequenceStep& step) {
+        // At most 4096 numeric records, fixed filenames, bounded session hashes
+        // and camera metadata; serialization is checked against the 4 MiB reserve.
+        nlohmann::json frames = nlohmann::json::array();
+        for (const auto& frame : captured) {
+            frames.push_back({{"file", "frame-" + std::to_string(frame.frame_index) + ".ppm"},
+                              {"tick", frame.simulation_tick},
+                              {"sub_tick_60", frame.sub_tick_60},
+                              {"control", static_cast<int>(frame.control)}});
+        }
+        const auto manifest =
+            nlohmann::json{{"schema", "luminumbra.temporal_sweep.v1"},
+                           {"completion", "complete directory required"},
+                           {"presence", "not_evaluated"},
+                           {"seed", session.GetMetadata().seed},
+                           {"config_identity", session.SystemConfigIdentity()},
+                           {"preset_content_identity", session.PresetContentHash()},
+                           {"camera",
+                            {camera.Position.x,
+                             camera.Position.y,
+                             camera.Position.z,
+                             camera.Yaw,
+                             camera.Pitch,
+                             camera.Zoom}},
+                           {"width", width},
+                           {"height", height},
+                           {"frames", std::move(frames)}}
+                .dump(2) +
+            "\n";
+        if (manifest.size() > step.byte_limit ||
+            !Luminumbra::Rendering::WriteCaptureText(output / "manifest.json", manifest)) {
+            return {};
+        }
+        std::error_code error;
+        const bool published = std::filesystem::create_directory(output / "complete", error);
+        return {published && !error, manifest.size()};
+    }
+};
 
 } // namespace
 
@@ -247,7 +495,35 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
             frame_cleanup.retain();
             return true;
         };
-        const bool sweep_passed = Luminumbra::Client::ScenarioHarness::RunWorldVisualSweep(deps);
+        bool sweep_passed = false;
+        if (scenario_config.temporal_audit_plan) {
+            using namespace Luminumbra::Rendering;
+            // RGB PPM only: diagnostics admission remains unavailable. Include
+            // the bounded PPM header and a 4 MiB numeric sequence manifest.
+            const TemporalSequenceBudget budget{
+                .frame_bytes =
+                    static_cast<std::uint64_t>(kCapturePinnedWidth) * kCapturePinnedHeight * 3ULL +
+                    64,
+                .manifest_bytes = 4ULL * 1024 * 1024,
+                .output_bytes = kTemporalMaxOutputBytes};
+            RuntimeWorldSweepBackend backend{.session = *gameSession,
+                                             .pipeline = renderPipeline,
+                                             .camera = *g_camera,
+                                             .window = window,
+                                             .root = root_dir,
+                                             .output =
+                                                 scenario_config.artifact_dir / "temporal-sweep",
+                                             .wireframe = g_app.overlay.wireframe_mode,
+                                             .heartbeat = scenario_config.capture_heartbeat};
+            const auto refusal =
+                RunWorldVisualTemporalSweep(*scenario_config.temporal_audit_plan, budget, backend);
+            sweep_passed = refusal.empty();
+            if (!sweep_passed) {
+                LUMINUMBRA_CORE_ERROR("Temporal sweep refused: {}", refusal);
+            }
+        } else {
+            sweep_passed = Luminumbra::Client::ScenarioHarness::RunWorldVisualSweep(deps);
+        }
         world_visual_sweep_done = true;
         if (!sweep_passed) {
             scenario_failed = true;
