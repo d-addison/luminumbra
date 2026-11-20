@@ -7,7 +7,8 @@ samples are findings (exit 1), even though the wire format preserves them.
 """
 import argparse
 from array import array
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
+import hashlib
 import json
 import math
 import os
@@ -33,9 +34,12 @@ WEATHER = ('precipitation', 'fog', 'cloud')
 EVIDENCE = dict(expected_mask=1, reference=3, dry_reference=3, alpha=1,
                 cutout=1, depth_written=1, triplanar=3, stars=1, transmittance=1)
 CONTRIBUTIONS = dict.fromkeys(WEATHER, 1) | EVIDENCE
+# Reader-only schema 4 adds linear lighting; schemas 1-3 retain their grammar.
+CHANNELS = dict(CONTRIBUTIONS, lighting=3)
 CONTRIBUTION_ENCODINGS = {c: ('linear_xyz_float32' if c == 'triplanar' else
                              'linear_rgb_float32' if n == 3 else 'linear_contribution_float32')
                           for c, n in CONTRIBUTIONS.items()}
+CHANNEL_ENCODINGS = dict(CONTRIBUTION_ENCODINGS, lighting='linear_rgb_float32')
 CHECK_CHANNELS = dict(holes='ids', seam='albedo', boundary='albedo', card='alpha',
                       banding='albedo', wedge='albedo', detail='albedo',
                       weather_delta='albedo', weights='triplanar', composition='stars')
@@ -84,13 +88,14 @@ def json_integer(text):
     return int(text)
 
 
-def document(stream, limit=MAX_JSON):
+def document(stream, limit=MAX_JSON, *, integer_only=False):
     require(0 < os.fstat(stream.fileno()).st_size <= limit, 'JSON size bound')
     data = stream.read(limit + 1)
     require(len(data) <= limit, 'JSON size bound')
     try:
         value = json.loads(data, object_pairs_hook=pairs, parse_constant=reject_constant,
-                           parse_int=json_integer)
+                           parse_int=json_integer,
+                           parse_float=reject_constant if integer_only else float)
     except Invalid:
         raise
     except (ValueError, UnicodeError, RecursionError) as error:
@@ -568,8 +573,46 @@ def image_metrics(streams, offsets, width, height, rois, crops=None):
     return results
 
 
-def validate(completion, members, tree_root=None, rois=None, metrics=None, crops=None):
+@contextmanager
+def open_unlinked(root, path):
+    """Temporal flat payloads reject links/reparse points, including in-root ones.
+
+    Compare lstat identity to the verified descriptor, on POSIX and Windows.
+    The selected root itself may use a platform alias; children are leaves.
+    """
+    supplied = os.lstat(path)
+    require(stat.S_ISREG(supplied.st_mode)
+            and not (getattr(supplied, 'st_file_attributes', 0) or 0) & 0x400,
+            'linked or nonregular payload')
+    with open_regular(root, path) as stream:
+        info = os.fstat(stream.fileno())
+        require((supplied.st_dev, supplied.st_ino) == (info.st_dev, info.st_ino),
+                'replaced payload')
+        yield stream
+
+
+def verify_payload(stream, payload, seen):
+    """Hash the descriptor later decoded by the bundle reader; <=64 KiB scratch."""
+    info = os.fstat(stream.fileno())
+    identity = info.st_dev, info.st_ino
+    require(identity not in seen, 'duplicate payload file identity')
+    seen.add(identity)
+    require(info.st_size == payload['bytes'], 'payload byte size mismatch')
+    digest, remaining = hashlib.sha256(), info.st_size
+    while remaining:
+        block = read_exact(stream, min(65536, remaining))
+        digest.update(block)
+        remaining -= len(block)
+    require(not stream.read(1), 'payload grew during read')
+    require(digest.hexdigest() == payload['sha256'], 'payload hash mismatch')
+    stream.seek(0)
+
+
+def validate(completion, members, tree_root=None, rois=None, metrics=None, crops=None,
+             *, consume=None, payloads=None, seen=None):
     """Return per-plane findings; malformed bundles raise Invalid immediately."""
+    if payloads is not None and seen is None:
+        seen = set()
     root, name = tree_root or completion.parent, completion.name
     prefix = name[:-len(SUFFIX)]
     require(leaf(prefix), 'capture filename')
@@ -578,8 +621,12 @@ def validate(completion, members, tree_root=None, rois=None, metrics=None, crops
 
         def opened(filename):
             try:
-                stream = stack.enter_context(open_regular(root, completion.parent / filename))
+                reader = open_unlinked if payloads is not None else open_regular
+                stream = stack.enter_context(reader(root, completion.parent / filename))
                 info = os.fstat(stream.fileno())
+                if payloads is not None:
+                    require(filename in payloads, 'unhashed bundle member')
+                    verify_payload(stream, payloads[filename], seen)
                 snapshots.append((stream, (info.st_size, info.st_mtime_ns, info.st_ctime_ns)))
                 return stream
             except FileNotFoundError as error:
@@ -587,15 +634,17 @@ def validate(completion, members, tree_root=None, rois=None, metrics=None, crops
 
         meta_stream = opened(name)
         meta = document(meta_stream, MAX_COMPLETION)
-        require(integer(meta.get('schema'), 1, 3), 'unknown schema version')
+        require(integer(meta.get('schema'), 1, 4), 'unknown schema version')
         encodings = meta.get('encodings')
-        allowed = CONTRIBUTIONS if meta['schema'] == 3 else WEATHER
+        allowed = CHANNELS if meta['schema'] == 4 else CONTRIBUTIONS if meta['schema'] == 3 else WEATHER
         contributions = ([c for c in allowed if isinstance(encodings, dict) and c in encodings]
                          if meta['schema'] >= 2 else [])
         require(meta['schema'] == 1 or bool(contributions), 'unknown schema version')
+        require(meta['schema'] != 4 or 'lighting' in contributions,
+                'schema 4 requires linear lighting')
         require(meta['schema'] != 3 or any(c in EVIDENCE for c in contributions),
                 'unknown schema version: schema 3 requires diagnostic evidence')
-        expected_encodings = dict(ENCODINGS, **{c: CONTRIBUTION_ENCODINGS[c] for c in contributions})
+        expected_encodings = dict(ENCODINGS, **{c: CHANNEL_ENCODINGS[c] for c in contributions})
         require(meta.get('status') == 'complete' and meta.get('identity_complete') is True,
                 'completion status')
         width, height = meta.get('width'), meta.get('height')
@@ -647,6 +696,9 @@ def validate(completion, members, tree_root=None, rois=None, metrics=None, crops
                 and all(matrix(capture_meta['camera'].get(k)) and capture_meta['camera'][k] == camera[k]
                         for k in ('view', 'projection')),
                 'capture manifest mismatch')
+        if payloads is not None:
+            require(set(payloads) == set(filenames) | {prefix, manifest},
+                    'sequence payloads differ from bundle')
         draw_table = document(streams[prefix + '.draws.json'])
         joined = tables(draw_table, meta)
         findings, samples, offsets, planes = [], {}, {}, {}
@@ -665,9 +717,9 @@ def validate(completion, members, tree_root=None, rois=None, metrics=None, crops
                   {plane: values[index] for plane, values in samples.items()})
         for channel in contributions:
             stream = streams[prefix + '.' + channel + '.pfm']
-            offsets[channel] = header(stream, width, height, CONTRIBUTIONS[channel])
+            offsets[channel] = header(stream, width, height, CHANNELS[channel])
             planes[channel] = stream
-            count, _, _ = aov(stream, offsets[channel], width, height, CONTRIBUTIONS[channel], [])
+            count, _, _ = aov(stream, offsets[channel], width, height, CHANNELS[channel], [])
             if count:
                 findings.append(f'{channel}: {count} nonfinite samples')
         planes['ids'], offsets['ids'] = streams[prefix + '.ids.bin'], 16
@@ -686,6 +738,9 @@ def validate(completion, members, tree_root=None, rois=None, metrics=None, crops
             for result in results:
                 if result['qualification'] == 'qualified' and result['status'] != 'pass':
                     findings.append(f"{result['roi']}: {result['metric']['kind']} {result['status']}")
+        if consume is not None:
+            require(not findings, '; '.join(findings))
+            consume(meta, capture_meta, draw_table, planes, offsets)
         for stream, before in snapshots:
             after = os.fstat(stream.fileno())
             require(before == (after.st_size, after.st_mtime_ns, after.st_ctime_ns),
@@ -703,7 +758,7 @@ def discover(selected):
     # The selected root may be an alias; descendant links are always refused.
     parent = parent.resolve(strict=True)
     pending, groups, entries = [parent], {}, 0
-    plane_names = '|'.join((*PLANES, *CONTRIBUTIONS))
+    plane_names = '|'.join((*PLANES, *CHANNELS))
     while pending:
         directory = pending.pop()
         with os.scandir(directory) as iterator:

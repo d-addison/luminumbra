@@ -2144,6 +2144,9 @@ set_tests_properties(DiagnosticRoisPython PROPERTIES LABELS "tools" TIMEOUT 60)
 add_test(NAME DiagnosticChecksPython COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/tools/gates/test_diagnostic_checks.py")
 set_tests_properties(DiagnosticChecksPython PROPERTIES LABELS "tools" TIMEOUT 60)
+add_test(NAME TemporalCapturePython COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/tools/gates/test_temporal_capture.py")
+set_tests_properties(TemporalCapturePython PROPERTIES LABELS "tools" TIMEOUT 60)
 
 set(LUMINUMBRA_GTEST_TARGETS
     upload_budget_test
