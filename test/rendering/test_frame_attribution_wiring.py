@@ -3471,8 +3471,9 @@ class DeferredDiagnosticLeaseWiring(unittest.TestCase):
         self.assertIn("m_snapshot->identity_complete && kind != ProducerKind::Unsupported", gather)
         readback = block(read(CLIENT / "rendering/DiagnosticReadback.h"),
                          "class DiagnosticFrameCapture")
-        self.assertIn("return scope_->complete();", readback)
-        self.assertIn("frame.identity_complete = ending->complete();", readback)
+        self.assertIn("return scope_ ? scope_->complete() : identity_complete_;", readback)
+        self.assertIn("identity_complete_ = ending->complete();", readback)
+        self.assertIn("frame.identity_complete = identity_complete_;", readback)
         self.assertNotIn("snapshot_ready()", readback)
         bundle = read(CLIENT / "rendering/DiagnosticCapture.cpp")
         self.assertIn("!frame.identity_complete", bundle)
