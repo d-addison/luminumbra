@@ -4,6 +4,7 @@
 
 #include "../DiagnosticDrawTable.h"
 #include "../DiagnosticTargets.h"
+#include "../FarWorldReplayGl.h"
 #include "../GBufferTargets.h"
 
 #include <array>
@@ -201,6 +202,17 @@ std::string_view DebugViewPass::contribution_legend(int mode) {
         return DiagnosticContributions::legend(mode);
     }
     switch (mode) {
+        case ShadowCascade:
+            return "Production cascade: 0=red, 1=green, 2=blue, 3=yellow; UV modulates tint; "
+                   "white=outside every cascade, orange=outside selected cascade; "
+                   "magenta hatch=bypassed/unavailable";
+        case ShadowFootprint:
+            return "Production shadow footprint: RG=shadow UV; B=log2(texels/pixel)/16+0.5, "
+                   "clamped [0,1]; 5x5 PCF taps at +/-2 shadow texels; "
+                   "white=outside every cascade, orange=outside selected cascade";
+        case Wireframe:
+            return "Wireframe over shaded: depth-tested (reversed-Z GEQUAL), no depth writes; "
+                   "opaque G-buffer draws only; authored/impostor producers unavailable";
         case DirectSun:
             return "Deferred direct sun: linear BRDF, shadow, cloud and transmission; RGB x/(1+x)";
         case DirectMoon:
@@ -265,6 +277,8 @@ struct DebugViewPass::SurfaceState {
     // Three vertex stages times two backends; no unbounded per-frame cache.
     std::array<Variant, 6> variants{};
     GLuint texture = 0;
+    std::unique_ptr<ReplayStateAccess> replay_access;
+    std::unique_ptr<ReplayGlGuard> replay_guard;
     DiagnosticExtent extent{};
     int view = None;
     GLuint framebuffer = 0;
@@ -347,6 +361,12 @@ struct DebugViewPass::SurfaceState {
         if (occupied != GL_NONE || !storage({ctx.internal_w(), ctx.internal_h()})) {
             return;
         }
+        if (replay_mode(view)) {
+            // Existing replay journal restores bindings, raster state and mutated objects,
+            // including every indexed blend function/mask and separate framebuffer bindings.
+            replay_access = MakeFarWorldReplayGlAccess();
+            replay_guard = std::make_unique<ReplayGlGuard>(*replay_access);
+        }
         for (GLint index = 0; index < buffer_count; ++index) {
             GLint value = GL_NONE;
             glGetIntegerv(GL_DRAW_BUFFER0 + static_cast<GLenum>(index), &value);
@@ -360,10 +380,20 @@ struct DebugViewPass::SurfaceState {
         glFramebufferTexture2D(
             GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT6, GL_TEXTURE_2D, texture, 0);
         auto outputs = buffers;
+        if (replay_mode(view)) {
+            outputs.fill(GL_NONE); // replay can never write a production colour attachment
+        }
         outputs[6] = GL_COLOR_ATTACHMENT6;
         glDrawBuffers(buffer_count, outputs.data());
         glColorMaski(6, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         glDisablei(GL_BLEND, 6);
+        if (replay_mode(view)) {
+            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+            glLineWidth(1.0f); // supported on every core-profile implementation
+            glEnable(GL_DEPTH_TEST);
+            glDepthFunc(GL_GEQUAL);
+            glDepthMask(GL_FALSE);
+        }
         supported = glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
         if (!supported) {
             detach();
@@ -387,6 +417,8 @@ struct DebugViewPass::SurfaceState {
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(previous));
         attached = false;
         ready = supported;
+        replay_guard.reset();
+        replay_access.reset();
     }
     Shader* variant(Shader* base, bool ladder) {
         if (!attached) {
@@ -415,7 +447,10 @@ struct DebugViewPass::SurfaceState {
                 }
                 if (entry.shader && entry.shader->IsValid()) {
                     entry.shader->use();
-                    entry.shader->setInt("u_surfaceMode", view);
+                    // Raw-finite already emits the actual raster depth for every surviving
+                    // fragment. Wire coverage needs only that alpha channel; keep the
+                    // shipping G-buffer source and its scene-evidence identity intact.
+                    entry.shader->setInt("u_surfaceMode", view == Wireframe ? RawFinite : view);
                     glColorMaski(6, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
                     return entry.shader.get();
                 }
@@ -428,10 +463,12 @@ struct DebugViewPass::SurfaceState {
     }
 };
 
-DebugViewPass::SurfaceFrame::SurfaceFrame(const RenderContext& ctx, const GBuffer& gbuffer) {
+DebugViewPass::SurfaceFrame::SurfaceFrame(const RenderContext& ctx,
+                                          const GBuffer& gbuffer,
+                                          bool replay) {
     auto& control = controls();
-    if (!control.enabled || !DiagnosticContributions::surface_mode(control.view) ||
-        ctx.frozen_replay || GBufferDiagnosticCapture::Current() || !control.surface_owner) {
+    if (!geometry_requested() || replay_mode(geometry_view()) != replay || ctx.frozen_replay ||
+        GBufferDiagnosticCapture::Current() || !control.surface_owner) {
         return;
     }
     if (control.surface_owner->m_surface && control.surface_owner->m_surface->attached) {
@@ -442,8 +479,23 @@ DebugViewPass::SurfaceFrame::SurfaceFrame(const RenderContext& ctx, const GBuffe
     if (!owner_->m_surface) {
         owner_->m_surface = std::make_unique<SurfaceState>();
     }
-    owner_->m_surface->view = control.view;
+    owner_->m_surface->view = geometry_view();
     owner_->m_surface->attach(ctx, gbuffer);
+}
+bool DebugViewPass::SurfaceFrame::ready() const {
+    return owner_ && owner_->m_surface && owner_->m_surface->attached;
+}
+bool DebugViewPass::replaying() {
+    const auto* owner = controls().surface_owner;
+    return owner && owner->m_surface && owner->m_surface->attached &&
+           replay_mode(owner->m_surface->view);
+}
+void DebugViewPass::replay_depth_policy() {
+    if (replaying()) {
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_GEQUAL);
+        glDepthMask(GL_FALSE);
+    }
 }
 DebugViewPass::SurfaceFrame::~SurfaceFrame() {
     if (owner_) {
@@ -455,16 +507,14 @@ DebugViewPass::SurfaceFrame::~SurfaceFrame() {
 }
 Shader* DebugViewPass::surface_variant(Shader* base, bool ladder) {
     const auto& control = controls();
-    if (control.enabled && DiagnosticContributions::surface_mode(control.view) &&
-        control.surface_owner && control.surface_owner->m_surface) {
+    if (geometry_requested() && control.surface_owner && control.surface_owner->m_surface) {
         return control.surface_owner->m_surface->variant(base, ladder);
     }
     return base;
 }
 void DebugViewPass::unsupported_surface() {
     const auto& control = controls();
-    if (control.enabled && DiagnosticContributions::surface_mode(control.view) &&
-        control.surface_owner && control.surface_owner->m_surface &&
+    if (geometry_requested() && control.surface_owner && control.surface_owner->m_surface &&
         control.surface_owner->m_surface->attached) {
         control.surface_owner->m_surface->supported = false;
         glColorMaski(6, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
@@ -477,7 +527,7 @@ std::shared_ptr<DebugViewPass::Frame> DebugViewPass::begin_frame(const RenderCon
     if (m_surface) {
         m_surface->ready = false;
     }
-    if (control.enabled && DiagnosticContributions::surface_mode(control.view)) {
+    if (geometry_requested()) {
         control.refresh = false;
         return {};
     }
@@ -774,8 +824,9 @@ void DebugViewPass::execute(const RenderContext& ctx) {
     if (mode() == Mode::None)
         return;
     const bool contribution_view =
-        controls().enabled &&
-        (contribution_mode(mode()) || DiagnosticContributions::surface_mode(mode()));
+        (controls().enabled || controls().wireframe) &&
+        (contribution_mode(mode()) || DiagnosticContributions::surface_mode(mode()) ||
+         replay_mode(mode()));
     if (contribution_view && !m_contribution_shader && m_shader) {
         m_contribution_shader =
             std::make_unique<Shader>(m_shader->VertexPath().c_str(),
@@ -795,7 +846,8 @@ void DebugViewPass::execute(const RenderContext& ctx) {
         controls().status = std::string(contribution_legend(mode()));
         controls().status +=
             overlay_available
-                ? (DiagnosticContributions::surface_mode(mode())
+                ? (replay_mode(mode()) ? "; magenta hatch=unavailable producer or replay target."
+                   : DiagnosticContributions::surface_mode(mode())
                        ? "; magenta=raw NaN/Inf; yellow=invalid weights; hatch=unavailable/sky. "
                          "G-buffer producers only; detail blur excluded from mip scale."
                        : "; magenta hatch=unsupported/unavailable/sky; magenta=NaN, cyan=Inf. "
@@ -805,14 +857,27 @@ void DebugViewPass::execute(const RenderContext& ctx) {
     if (!shader || !shader->IsValid() || m_vao == 0)
         return;
 
+    // The overlay also restores everything it touches, independently of replay.
+    std::unique_ptr<ReplayStateAccess> overlay_access;
+    std::unique_ptr<ReplayGlGuard> overlay_guard;
+    if (replay_mode(mode())) {
+        overlay_access = MakeFarWorldReplayGlAccess();
+        overlay_guard = std::make_unique<ReplayGlGuard>(*overlay_access);
+    }
     std::array<GLint, 2> polygon_mode{};
-    if (identity_view) {
+    if (identity_view || replay_mode(mode())) {
         glGetIntegerv(GL_POLYGON_MODE, polygon_mode.data());
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
     }
-    // Diagnostic overlay: never depth-test or blend; we fully replace the bound target.
+    // Fullscreen overlays read scene visibility from their source; wireframe blends a mask.
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);
+    if (mode() == Wireframe) {
+        // Transparent mask texels preserve the existing shaded image.
+        glEnablei(GL_BLEND, 0);
+        glBlendFuncSeparatei(0, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
+        glBlendEquationSeparatei(0, GL_FUNC_ADD, GL_FUNC_ADD);
+    }
 
     // Near/far come from the frame camera (ctx), used only for Depth-mode linearization.
     // Fall back to the historic defaults if a context arrives without a camera.
@@ -859,9 +924,9 @@ void DebugViewPass::bind_sources(const RenderContext& ctx, Shader& shader) {
     glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_depth.id);
     shader.setInt("gDepth", 3);
 
-    if (DiagnosticContributions::surface_mode(mode())) {
-        const bool ready = controls().enabled && !ctx.frozen_replay && m_surface &&
-                           m_surface->ready && m_surface->view == mode() &&
+    if (DiagnosticContributions::surface_mode(mode()) || replay_mode(mode())) {
+        const bool ready = (controls().enabled || controls().wireframe) && !ctx.frozen_replay &&
+                           m_surface && m_surface->ready && m_surface->view == mode() &&
                            m_surface->extent.width == ctx.internal_w() &&
                            m_surface->extent.height == ctx.internal_h();
         shader.setInt("u_contributionReady", ready ? 1 : 0);

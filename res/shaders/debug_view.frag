@@ -134,6 +134,20 @@ vec3 identityColor() {
 
 void main() {
 #ifdef LUMIN_DIAG_VIEWS
+    if (u_mode == 36) {
+        vec4 result = vec4(unsupportedColor(), 1.0);
+        if (u_contributionReady != 0) {
+            ivec2 extent = textureSize(gContribution, 0);
+            ivec2 pixel = clamp(ivec2(TexCoords * vec2(extent)), ivec2(0), extent - 1);
+            vec4 replay = texelFetch(gContribution, pixel, 0);
+            // Lines were hardware depth-tested against opaque depth. Reject later
+            // occluders too; alpha zero leaves the shaded destination untouched.
+            bool visible = replay.a > 0.0 && replay.a >= texelFetch(gDepth, pixel, 0).r;
+            result = visible ? vec4(0.05, 1.0, 0.2, 0.85) : vec4(0.0);
+        }
+        FragColor = result;
+        return;
+    }
     if (u_mode >= 30 && u_mode <= 33) {
         vec3 value = unsupportedColor();
         if (u_contributionReady != 0) {
@@ -159,7 +173,7 @@ void main() {
         FragColor = vec4(value, 1.0);
         return;
     }
-    if (u_mode >= 12 && u_mode <= 29) {
+    if ((u_mode >= 12 && u_mode <= 29) || u_mode == 34 || u_mode == 35) {
         vec3 value = unsupportedColor();
         if (u_contributionReady != 0) {
             ivec2 extent = textureSize(gContribution, 0);
@@ -172,6 +186,19 @@ void main() {
                 else if (u_mode == 12 || u_mode == 13 || u_mode == 14 ||
                          u_mode == 17 || u_mode == 19 || u_mode == 26)
                     value = max(contribution.rgb, vec3(0.0)) / (vec3(1.0) + max(contribution.rgb, vec3(0.0)));
+                else if (u_mode == 34 || u_mode == 35) {
+                    if (all(equal(contribution.rgb, vec3(-3.0)))) value = vec3(1.0);
+                    else if (all(equal(contribution.rgb, vec3(-1.0)))) value = vec3(1.0, 0.4, 0.0);
+                    else if (all(equal(contribution.rgb, vec3(-2.0)))) value = unsupportedColor();
+                    else if (u_mode == 35) value = vec3(contribution.rg,
+                        clamp(contribution.b / 16.0 + 0.5, 0.0, 1.0));
+                    else {
+                        const vec3 cascadeColors[4] = vec3[4](vec3(1,0,0), vec3(0,1,0),
+                            vec3(0,0,1), vec3(1,1,0));
+                        int selected = int(clamp(contribution.r, 0.0, 3.0));
+                        value = cascadeColors[selected] * (0.4 + 0.3 * (contribution.g + contribution.b));
+                    }
+                }
                 else value = contribution.rgb;
             }
         }

@@ -2061,6 +2061,14 @@ void RenderPipeline::ensure_mdi_capacity(MdiFrameBuffers& frame, std::size_t com
 void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& visible_chunks,
                                      std::size_t& out_draws,
                                      std::size_t& out_indices) {
+    // A diagnostic replay may reuse a ring slot but never advances production ownership.
+    const bool diagnostic_replay = DebugViewPass::replaying();
+    const auto saved_cursor = m_mdi_frame_cursor;
+    ReplayRollback restore_cursor([this, diagnostic_replay, saved_cursor]() noexcept {
+        if (diagnostic_replay) {
+            m_mdi_frame_cursor = saved_cursor;
+        }
+    });
     out_draws = 0;
     out_indices = 0;
     const std::size_t block_count = m_chunk_geometry_pool.block_count();
@@ -2885,8 +2893,11 @@ void RenderPipeline::prepare_camera_projection(const Camera& camera) {
 }
 
 void RenderPipeline::dispatch_stages(const Camera& camera) {
+    DebugViewPass::controls().wireframe = m_frame_prepared.wireframe;
     const auto diagnostic_frame =
-        m_debug_view_pass && DebugViewPass::controls().enabled && DebugViewPass::controls().refresh
+        m_debug_view_pass &&
+                (DebugViewPass::geometry_requested() ||
+                 (DebugViewPass::controls().enabled && DebugViewPass::controls().refresh))
             ? m_debug_view_pass->begin_frame(make_debug_view_context(camera))
             : nullptr;
     // the pure GPU stage sequence over the prepared frame. Each
@@ -2901,16 +2912,10 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
 
     glEnable(GL_DEPTH_TEST);
 
-    // Configure rendering mode
-    if (m_frame_prepared.wireframe) {
-        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-        glLineWidth(2.0f);
-        glDisable(GL_CULL_FACE); // Disable culling in wireframe for debugging
-    } else {
-        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-        glEnable(GL_CULL_FACE);
-        glCullFace(GL_BACK);
-    }
+    // The wireframe toggle now adds a depth-tested mask over the shaded frame.
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
 
     // reset the frame-graph stage trace, then record each stage id as it
     // dispatches. This is render_frame's REAL dispatch order -- the golden the declarative

@@ -498,7 +498,7 @@ TEST(DiagnosticInspector, CyclePreservesLegacyOffPathAndVisitsEveryEnabledView) 
     EXPECT_EQ(legacy, Pass::None);
     control.enabled = true;
     legacy = Pass::Position;
-    for (int expected = Pass::DrawId; expected <= Pass::RawFinite; ++expected) {
+    for (int expected = Pass::DrawId; expected <= Pass::Wireframe; ++expected) {
         Pass::cycle_mode(legacy);
         EXPECT_EQ(control.view, expected);
         EXPECT_EQ(legacy, Pass::None);

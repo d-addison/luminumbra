@@ -95,17 +95,20 @@ public:
         TexelDensity = 31,
         TriplanarWeights = 32,
         RawFinite = 33,
+        ShadowCascade = 34,
+        ShadowFootprint = 35,
+        Wireframe = 36,
     };
 
-    static constexpr std::array<const char*, 29> identity_mode_names = {
-        "off",          "draw-id",        "mesh-id",       "lod",
-        "chunk",        "producer-owner", "mesh-path",     "direct-sun",
-        "direct-moon",  "sky-ambient",    "shadow-factor", "ao",
-        "emissive",     "fog-atmosphere", "specular",      "roughness",
-        "metallic",     "normal-view",    "normal-world",  "sky-visibility",
-        "material-ao",  "lighting",       "forward-plane", "sky-plane",
-        "shadow-plane", "actual-mip",     "texel-density", "triplanar-weights",
-        "raw-finite"};
+    static constexpr std::array<const char*, 32> identity_mode_names = {
+        "off",          "draw-id",        "mesh-id",          "lod",
+        "chunk",        "producer-owner", "mesh-path",        "direct-sun",
+        "direct-moon",  "sky-ambient",    "shadow-factor",    "ao",
+        "emissive",     "fog-atmosphere", "specular",         "roughness",
+        "metallic",     "normal-view",    "normal-world",     "sky-visibility",
+        "material-ao",  "lighting",       "forward-plane",    "sky-plane",
+        "shadow-plane", "actual-mip",     "texel-density",    "triplanar-weights",
+        "raw-finite",   "shadow-cascade", "shadow-footprint", "wireframe-shaded"};
     static int identity_mode(std::string_view name) {
         // Shared CLI/panel catalogue; legacy modes retain their original numbers.
         for (std::size_t index = 1; index < identity_mode_names.size(); ++index) {
@@ -172,10 +175,12 @@ public:
     static void read_inspector_pixel(unsigned int buffer, InspectorPixel& pixel);
 
     static constexpr bool contribution_mode(int mode) {
-        return mode >= DirectSun && mode <= ShadowPlane;
+        return (mode >= DirectSun && mode <= ShadowPlane) || mode == ShadowCascade ||
+               mode == ShadowFootprint;
     }
     static constexpr bool supported_contribution(int mode) {
-        return contribution_mode(mode) && mode != Fog && mode < ForwardPlane;
+        return contribution_mode(mode) && mode != Fog &&
+               (mode < ForwardPlane || mode >= ShadowCascade);
     }
     static std::string_view contribution_legend(int mode);
     // RGBA16F, at most 16M pixels / 128 MiB. Validate before GPU allocation.
@@ -185,6 +190,7 @@ public:
     }
     struct Controls {
         bool enabled = false;
+        bool wireframe = false; // existing renderer toggle; independent of identity diagnostics
         bool inspector_open = false;
         bool refresh = false;
         int view = None;
@@ -203,10 +209,21 @@ public:
         static Controls control;
         return control;
     }
+    static constexpr bool replay_mode(int view) {
+        return view == Wireframe;
+    }
+    static int geometry_view() {
+        return controls().wireframe ? Wireframe : controls().view;
+    }
+    static bool geometry_requested() {
+        return controls().wireframe ||
+               (controls().enabled && (DiagnosticContributions::surface_mode(controls().view) ||
+                                       replay_mode(controls().view)));
+    }
     static void cycle_mode(int& legacy_mode) {
         auto& control = controls();
-        if (control.enabled && control.view >= DrawId && control.view <= RawFinite) {
-            control.view = control.view == RawFinite ? None : control.view + 1;
+        if (control.enabled && control.view >= DrawId && control.view <= Wireframe) {
+            control.view = control.view == Wireframe ? None : control.view + 1;
             legacy_mode = None;
         } else if (control.enabled && legacy_mode == Position) {
             control.view = DrawId;
@@ -217,11 +234,13 @@ public:
             legacy_mode = legacy_mode >= None && legacy_mode < Position ? legacy_mode + 1 : None;
         }
     }
-    // Stack scope attaches only for an explicitly selected live surface view.
+    // Stack scope attaches for an explicitly selected surface or deferred replay view.
+    // Replay routes colour only to location six and never writes opaque depth.
     // Construction with diagnostics off performs no GL calls or allocations.
     class SurfaceFrame {
     public:
-        SurfaceFrame(const RenderContext& ctx, const GBuffer& gbuffer);
+        SurfaceFrame(const RenderContext& ctx, const GBuffer& gbuffer, bool replay = false);
+        bool ready() const;
         ~SurfaceFrame();
         SurfaceFrame(const SurfaceFrame&) = delete;
         SurfaceFrame& operator=(const SurfaceFrame&) = delete;
@@ -233,6 +252,9 @@ public:
     // All six deferred vertex/backend siblings select their opt-in program here.
     static Shader* surface_variant(Shader* base, bool ladder);
     static void unsupported_surface();
+    static bool replaying();
+    // Reassert after a backend installs its own depth convention, before its draw.
+    static void replay_depth_policy();
     class Frame;
     // Null when disabled, replaying, idle, or another capture owns the producer scope.
     std::shared_ptr<Frame> begin_frame(const RenderContext& ctx);
@@ -248,10 +270,13 @@ public:
     void set_mode(int mode);
     int mode() const {
         const auto& control = controls();
-        if (m_mode >= DrawId && (!control.enabled || m_mode > RawFinite)) {
+        if (control.wireframe) {
+            return Wireframe;
+        }
+        if (m_mode >= DrawId && (!control.enabled || m_mode > Wireframe)) {
             return None;
         }
-        return control.enabled && control.view >= DrawId && control.view <= RawFinite ? control.view
+        return control.enabled && control.view >= DrawId && control.view <= Wireframe ? control.view
                                                                                       : m_mode;
     }
 
@@ -259,7 +284,7 @@ public:
     // the screen/backbuffer + sets the viewport). A no-op when mode == None.  pass
     // contract: the G-buffer attachment reads come from the RenderContext handles,
     // and the near/far planes for hardware-depth linearization (Depth mode) from ctx.camera.
-    // depth test/blend are disabled internally.
+    // Fullscreen diagnostics disable depth; wireframe alpha-composites its depth-tested mask.
     void execute(const RenderContext& ctx);
 
 private:

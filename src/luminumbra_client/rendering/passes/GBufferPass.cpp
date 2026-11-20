@@ -420,6 +420,31 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
         geometry_pass_skinned_meshes(ctx, input, registry, camera, fp, stats);
     }
 
+    if (DebugViewPass::geometry_requested() &&
+        DebugViewPass::replay_mode(DebugViewPass::geometry_view()) && !diagnostic_capture &&
+        !ctx.frozen_replay) {
+        // One opt-in replay of participating deferred draws, no clear, no production writes.
+        // Keep the normal draw statistics; diagnostics never count as scene geometry.
+        const double production_static_cpu_ms = m_last_static_prop_cpu_ms;
+        ReplayRollback restore_timing([this, production_static_cpu_ms]() noexcept {
+            m_last_static_prop_cpu_ms = production_static_cpu_ms;
+        });
+        DebugViewPass::SurfaceFrame replay(ctx, m_gbuffer, true);
+        if (replay.ready()) {
+            GBufferDrawStats replay_stats;
+            if (iso.renders(SH::IsolationLayer::Terrain)) {
+                geometry_pass_chunks(ctx, input, camera, fp, replay_stats);
+                geometry_pass_static_meshes(ctx, input, registry, camera, fp, replay_stats);
+                if (authored) {
+                    DebugViewPass::unsupported_surface();
+                }
+            }
+            if (iso.renders(SH::IsolationLayer::Skinned)) {
+                geometry_pass_skinned_meshes(ctx, input, registry, camera, fp, replay_stats);
+            }
+        }
+    }
+
     if (!diagnostic_capture) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
@@ -434,8 +459,7 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
     Shader* shader = geometry_shader(input.far_selection.effective).get();
     auto* capture = GBufferDiagnosticCapture::Current();
     FarWorldPassUniforms diagnostic_uniforms;
-    const bool surface = DiagnosticContributions::surface_mode(DebugViewPass::controls().view) &&
-                         DebugViewPass::controls().enabled;
+    const bool surface = DebugViewPass::geometry_requested();
     if (surface && !capture) {
         shader = DebugViewPass::surface_variant(
             shader, input.far_selection.effective == FarWorldMode::Ladder);
@@ -559,7 +583,11 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
                 capture->unsupported(
                     "ladder_backend_identity_unavailable", 0, DiagnosticOwnership::LadderFar);
             }
-            return uniforms.Prepare(command);
+            const bool prepared = uniforms.Prepare(command);
+            // The ladder installs GREATER + writable depth before visiting draws.
+            // Reapply the diagnostic depth policy after that installation.
+            DebugViewPass::replay_depth_policy();
+            return prepared;
         });
     stats.far_region_draws += far_stats.draws;
     stats.far_indices += far_stats.indices;
@@ -656,8 +684,7 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     Shader* shader = instanced_static_mesh_shader(input.far_selection.effective).get();
     auto* capture = GBufferDiagnosticCapture::Current();
     FarWorldPassUniforms diagnostic_uniforms;
-    const bool surface = DiagnosticContributions::surface_mode(DebugViewPass::controls().view) &&
-                         DebugViewPass::controls().enabled;
+    const bool surface = DebugViewPass::geometry_requested();
     if (surface && !capture) {
         shader = DebugViewPass::surface_variant(
             shader, input.far_selection.effective == FarWorldMode::Ladder);
@@ -1148,8 +1175,7 @@ void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
     Shader* shader = skinned_mesh_shader(input.far_selection.effective).get();
     auto* capture = GBufferDiagnosticCapture::Current();
     FarWorldPassUniforms diagnostic_uniforms;
-    const bool surface = DiagnosticContributions::surface_mode(DebugViewPass::controls().view) &&
-                         DebugViewPass::controls().enabled;
+    const bool surface = DebugViewPass::geometry_requested();
     if (surface && !capture) {
         shader = DebugViewPass::surface_variant(
             shader, input.far_selection.effective == FarWorldMode::Ladder);

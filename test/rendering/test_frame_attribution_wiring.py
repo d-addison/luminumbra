@@ -3481,5 +3481,136 @@ class DeferredDiagnosticLeaseWiring(unittest.TestCase):
                         writer.index("state_->table.submit(submission, id)"))
 
 
+class DeferredRasterDiagnosticWiring(unittest.TestCase):
+    """Read shipping shader/state paths; GL pixel execution stays in pass_context_test."""
+
+    def setUp(self):
+        self.lighting = read(ROOT / "res/shaders/lighting_pass.frag")
+        self.fragment = read(ROOT / "res/shaders/g_buffer.frag")
+        self.overlay = read(ROOT / "res/shaders/debug_view.frag")
+        self.debug = read(CLIENT / "rendering/passes/DebugViewPass.cpp")
+        self.gbuffer = read(CLIENT / "rendering/passes/GBufferPass.cpp")
+
+    def test_cascade_observation_matches_actual_selector_at_every_split(self):
+        selector = block(self.lighting, "float CalculateShadow(")
+        tint = block(self.lighting, "vec3 SampleShadowTint(")
+        increments = re.findall(r"cascadeIndex \+= \((viewDepth > u_cascadeSplits\.[xyz])\) \? 1: 0;", selector)
+        self.assertEqual(increments, re.findall(
+            r"cascadeIndex \+= \((viewDepth > u_cascadeSplits\.[xyz])\) \? 1: 0;", tint))
+        self.assertEqual(len(increments), 3)
+        self.assertIn("u_lightSpaceMatrices[cascadeIndex] * vec4(fragPos, 1.0)", selector)
+        observation = re.search(r"diagnosticCascade = vec3\(float\((.*?)\), projCoords.xy\);", selector)
+        self.assertIsNotNone(observation)
+        for depth, expected in ((0, 0), (1, 0), (1.0001, 1), (2, 1),
+                                (2.0001, 2), (3, 2), (3.0001, 3), (8, 3)):
+            with self.subTest(depth=depth):
+                selected = sum(cpp_expression(expression, **{
+                    "viewDepth": depth, "u_cascadeSplits.x": 1,
+                    "u_cascadeSplits.y": 2, "u_cascadeSplits.z": 3})
+                               for expression in increments)
+                self.assertEqual(selected, expected)
+                self.assertEqual(cpp_expression(observation.group(1), cascadeIndex=selected), selected)
+        self.assertLess(selector.index("diagnosticCascade = vec3(float("), selector.index("// 3. PCF"))
+
+    def test_shadow_uv_and_footprint_come_from_the_production_projection(self):
+        selector = block(self.lighting, "float CalculateShadow(")
+        for statement in ("diagnosticCascade = vec3(float(cascadeIndex), projCoords.xy);",
+                          "vec2 shadowSize = vec2(textureSize(u_shadowCascades, 0).xy);",
+                          "length(dFdx(projCoords.xy) * shadowSize)",
+                          "length(dFdy(projCoords.xy) * shadowSize)",
+                          "diagnosticShadowUv = vec3(projCoords.xy, log2(max(footprint, 1e-8)));",
+                          "diagnosticCascade = vec3(insideAny ? -1.0 : -3.0);"):
+            self.assertIn(statement, selector)
+        self.assertIn("candidate < 4", selector)
+        self.assertIn("light.w != 0.0 && projected.z >= 0.0 && projected.z <= 1.0", selector)
+        self.assertIn("all(greaterThanEqual(projCoords, vec3(0.0)))", selector)
+        self.assertIn("vec3 diagnosticCascade = vec3(-2.0);", self.lighting)
+        self.assertIn("u_contributionMode == 34) diagnosticValue = diagnosticCascade", self.lighting)
+        self.assertIn("u_contributionMode == 35) diagnosticValue = diagnosticShadowUv", self.lighting)
+        for sentinel in (-1, -2, -3):
+            self.assertIn(f"all(equal(contribution.rgb, vec3({sentinel}.0)))", self.overlay)
+
+    def test_wireframe_depth_policy_and_full_restoration_are_wired(self):
+        attach = block(self.debug, "void attach(")
+        detach = block(self.debug, "void detach()")
+        self.assertIn("glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);", attach)
+        self.assertIn("glDepthFunc(GL_GEQUAL);", attach)
+        self.assertIn("glDepthMask(GL_FALSE);", attach)
+        self.assertLess(attach.index("std::make_unique<ReplayGlGuard>"),
+                        attach.index("glPolygonMode("))
+        self.assertIn('entry.shader->setInt("u_surfaceMode", view == Wireframe ? RawFinite : view);',
+                      self.debug)
+        self.assertIn('gDiagnosticSurface = vec4(diagnosticValue, diagnosticRasterDepth);',
+                      self.fragment)
+        self.assertIn("replay_guard.reset();", detach)
+        self.assertLess(detach.index("glFramebufferTexture2D("), detach.index("replay_guard.reset();"))
+        policy = block(self.debug, "void DebugViewPass::replay_depth_policy()")
+        self.assertIn("glDepthFunc(GL_GEQUAL);", policy)
+        self.assertIn("glDepthMask(GL_FALSE);", policy)
+        chunks = block(self.gbuffer, "void GBufferPass::geometry_pass_chunks(")
+        self.assertLess(chunks.index("uniforms.Prepare(command)"),
+                        chunks.index("DebugViewPass::replay_depth_policy();"))
+        self.assertIn("replay.a >= texelFetch(gDepth, pixel, 0).r", self.overlay)
+        execute = block(self.debug, "void DebugViewPass::execute(")
+        self.assertIn("overlay_guard = std::make_unique<ReplayGlGuard>", execute)
+        self.assertIn("GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE", execute)
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        dispatch = block(pipeline, "void RenderPipeline::dispatch_stages(")
+        self.assertIn("DebugViewPass::controls().wireframe = m_frame_prepared.wireframe;", dispatch)
+        self.assertNotIn("GL_LINE", dispatch)
+        # Every live geometry frame invalidates its previous plane, even when an
+        # identity owner or a replay refusal prevents the current frame from drawing.
+        self.assertIn("DebugViewPass::geometry_requested() ||", dispatch)
+        self.assertLess(dispatch.index("DebugViewPass::geometry_requested() ||"),
+                        dispatch.index("m_debug_view_pass->begin_frame("))
+        mdi = block(pipeline, "void RenderPipeline::draw_chunks_mdi(")
+        self.assertIn("ReplayRollback restore_cursor", mdi)
+        self.assertIn("m_mdi_frame_cursor = saved_cursor;", block(mdi, "if (diagnostic_replay)"))
+
+    def test_replay_refusal_matrix_precedes_every_allocation_and_gl_call(self):
+        import itertools
+
+        scope = block(self.debug, "DebugViewPass::SurfaceFrame::SurfaceFrame(")
+        guard = re.search(r"if \((.*?)\) \{\s*return;", scope, re.S)
+        self.assertIsNotNone(guard)
+        for requested, selected_replay, replay, frozen, capture, owner in itertools.product(
+                (False, True), repeat=6):
+            actual = cpp_expression(guard.group(1), **{
+                "geometry_requested()": requested,
+                "replay_mode(geometry_view())": selected_replay, "replay": replay,
+                "ctx.frozen_replay": frozen, "GBufferDiagnosticCapture::Current()": capture,
+                "control.surface_owner": owner})
+            self.assertEqual(actual, not requested or selected_replay != replay
+                             or frozen or capture or not owner)
+        self.assertLess(guard.end(), scope.index("std::make_unique<SurfaceState>"))
+        self.assertLess(guard.end(), scope.index("->attach(ctx, gbuffer)"))
+        gbuffer = block(self.gbuffer, "GBufferDrawStats GBufferPass::execute(")
+        replay = block(gbuffer, "if (DebugViewPass::geometry_requested()")
+        self.assertNotIn("glClear(", replay)
+        self.assertIn("if (replay.ready())", replay)
+        self.assertIn("ReplayRollback restore_timing", replay)
+        self.assertIn("m_last_static_prop_cpu_ms = production_static_cpu_ms;", replay)
+        for producer in ("geometry_pass_chunks(", "geometry_pass_static_meshes(", "geometry_pass_skinned_meshes("):
+            self.assertEqual(replay.count(producer), 1)
+
+    def test_off_shader_bytes_keep_the_fixed_production_oracles(self):
+        def without_guard(source, guard):
+            pattern = re.compile(r"^#ifdef " + guard + r"\n(.*?)^#endif\n", re.M | re.S)
+            for match in pattern.finditer(source):
+                self.assertNotRegex(match.group(1), r"^#(?:if|else)")
+            return pattern.sub("", source)
+
+        def fingerprint(source):
+            value = 14695981039346656037
+            for byte in source.encode("utf-8"):
+                value = ((value ^ byte) * 1099511628211) & ((1 << 64) - 1)
+            return value
+
+        self.assertEqual(fingerprint(without_guard(self.lighting, "LUMIN_DIAG_CONTRIBUTIONS")),
+                         0xc6e9bc9c6fc7110b)
+        self.assertEqual(fingerprint(without_guard(self.fragment, "LUMIN_DIAG_SURFACE")),
+                         0x5384913db4971619)
+
+
 if __name__ == "__main__":
     unittest.main()
