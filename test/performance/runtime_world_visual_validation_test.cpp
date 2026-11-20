@@ -1140,7 +1140,9 @@ TEST(ClientBootPreparation, LoadedEntryPreservesWaterAtTickZero) {
     ASSERT_TRUE(original.LoadWorldState());
     original.GetWorldSystem()->debug_set_streaming_radius_cap(1);
     ASSERT_TRUE(original.PrepareInitialSimulation(0, 0));
-    ASSERT_TRUE(original.SaveWorldState());
+    // Clean generated chunks are skipped by incremental saves; a full snapshot makes
+    // the loaded entry adopt the settled water instead of regenerating it.
+    ASSERT_TRUE(original.SaveWorldStateTo(original.GetWorldSaveDir(), nullptr, true));
     const auto before = original.GetWorldSystem()->debug_water_state_hash();
 
     world::GameSession loaded;
