@@ -13,9 +13,9 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | AOV serialization, integer ID encoding and point-probe JSON | Implemented as independent, GL-free codecs | `DiagnosticCapture.h/.cpp`; registered `DiagnosticCapture.*` regressions in `capture_manifest_test`; native execution pending |
 | Lazy integer target with attachment leases | Implemented as a standalone helper | `DiagnosticTargets.h`; registered `DiagnosticTargetDriver.*` regressions in `capture_manifest_test`; native execution pending |
 | Capture-local draw registry | Implemented with separate asset and generated-geometry identities | `DiagnosticDrawTable.h`; registered `DiagnosticDrawTable.*` regressions in `capture_manifest_test` and generated-key `DiagnosticAttribution.*` regressions in `render_smoke_test`; native execution pending |
-| Deferred attribution producers | Implemented inside a leased deferred scope | `GBufferTargets.h` and `GBufferPass.cpp` add a render-thread producer scope, capture-local draw identities and explicit unsupported records; `g_buffer.frag` and `foliage.frag` have additive `LUMIN_DIAG_IDS` outputs; registered `DiagnosticAttribution.*` source-contract and `DiagnosticAttributionGl.*` hidden-GL regressions in `render_smoke_test`; native execution pending |
+| Deferred attribution producers | Implemented inside a leased deferred scope | `GBufferTargets.h/.cpp` and `GBufferPass.cpp` add a render-thread producer scope, capture-local draw identities and explicit unsupported records; `g_buffer.frag`, `foliage.frag`, `plant_procgen.frag` and `scent_decal.frag` have guarded `LUMIN_DIAG_IDS` outputs; registered `DiagnosticAttribution.*` source-contract and `DiagnosticAttributionGl.*` hidden-GL regressions in `render_smoke_test`; native execution pending |
 | G-buffer ID attachment | Implemented for explicit deferred captures | `GBufferPass` holds an `AttachmentLease` during deferred submission; detachment and lease release precede completion, including rollback, recreation, retirement and exceptional exits; registered `GBufferLeaseGl.*` and `DiagnosticAttributionGl.*` regressions; native execution pending |
-| Exact producer coverage | Partial | Inside an explicit producer scope, file-backed static instances and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier with unsupported generated-mesh metadata. Live terrain MDI, ladder backend, authored surfaces and tree impostors explicitly invalidate coverage; procedural static meshes also remain unsupported. Later plant/decal stages are outside the scope. Foliage has a guarded shader output but no instrumented forward submission; the separate contributor attachment API is unused |
+| Exact producer coverage | Partial | Inside an explicit producer scope, file-backed static instances and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier with unsupported generated-mesh metadata. Live terrain MDI produces one identity per original command in pool-bucket order, using resident upload LOD and mesh version. The ladder backend, authored surfaces and tree impostors explicitly invalidate coverage; procedural static meshes also remain unsupported. Uploaded plant/marker batches resume deferred attribution, and additive scent decals use separate contributor storage. Missing contributor storage retains exact Forward records labeled `:contributor_only` and refuses completion. Foliage has a guarded shader output but no instrumented forward submission |
 | Bundle transactions and opt-in admission | GL-free core implemented; runtime integration pending | `DiagnosticCapture.h/.cpp` resolves options, streams normalized planes, joins draw records, enforces staging budgets and publishes completion last using identity-checked ownership. `diagnostic_bundle_test` covers public transports and filesystem refusal/rollback; native execution pending. Runtime setup refuses enabled diagnostics before output until the completed-frame adapter is integrated |
 | Dusk wedge attribution (issue #873) | Capture wiring and regression implemented; native execution pending | Fixed audit land pose, paired pre-present final/depth and available lighting sources; `FarWorldFogGl.DuskAuditFogIsContinuousAcrossDistanceAndHeightBoundaries`; no producer correction or visual approval |
 | ID views and single-pixel inspector | Implemented as explicit render-thread snapshots | `DebugViewPass`; developer-console debug-view panel; registered `DiagnosticInspector.*` and `DiagnosticInspectorGl.*` regressions in `pass_context_test`; native execution pending. Other B views remain planned |
@@ -109,24 +109,36 @@ Capability, extent and occupied-attachment refusals preserve caller state and re
 unsupported coverage. Scope nesting and nonempty-table reuse are refused.
 
 `complete()` requires a successful attachment, subsequent detachment, lease release,
-complete deferred coverage and no sticky failure or registry refusal. Variants and
-identity writes only operate while attached. Missing or invalid base programs
+complete deferred coverage and no sticky failure or registry refusal. Shader variants
+and pixel identity writes only operate while attached; detached Forward submissions
+retain contributor-only table entries. Missing or invalid base programs
 invalidate coverage, including an unavailable skinned program with an empty view.
 An isolation mask that filters the terrain or skinned layer invalidates coverage,
 whether or not the filtered layer has scene content.
 Queued tree impostors invalidate coverage before checking their program, so an
 invalid impostor program cannot bypass the unsupported record. Empty terrain and
-impostor queues add no unsupported record. Later deferred and forward contributors
-remain outside this coverage; this predicate alone cannot authorize a final bundle.
+impostor queues add no unsupported record. Uninstrumented forward producers remain
+outside this coverage; this predicate alone cannot authorize a final bundle.
 
 The contributor API can attach a distinct forward target after deferred detachment.
 It leases the selected storage through the same rollback and release path, preserves
 the forward framebuffer's original draw buffers, and enables only the additional
 identity output. The caller keeps that framebuffer alive through detachment. Missing
-or aliased storage, nested or repeated attachment, invalid extents and mismatched
+or aliased storage, nested attachments, invalid extents and mismatched
 contributor passes refuse coverage. Current-program writes use the attached
-variant; a pass mismatch uploads zero IDs without throwing. No shipping
-forward producer invokes this API yet.
+variant; a pass mismatch uploads zero IDs without throwing. Additive scent decals
+use this API, preserving the deferred surface owner. Empty, sky, outside-field and
+negligible decal fragments discard before writing contributor IDs. Without forward
+storage or an instrumented current program, exact per-draw Forward records append
+`:contributor_only` and invalidate completion. Invalid labels and identities refuse
+coverage without throwing; sticky registry refusal stops further table work.
+
+Plant batches resume the deferred plane without clearing earlier IDs. Forward
+continuations likewise retain earlier contributors, and both preserve original
+color routing. Continuations refuse extent changes with
+`diagnostic_continuation_extent_mismatch` before resizing storage or acquiring a
+lease. The contributor plane identifies the last contributing submission at a
+pixel; table entries retain all instrumented submissions, not every blended layer.
 
 Generated geometry can supply an exact bounded key instead of an asset path. The
 registry separates the two namespaces and emits a `generated` mesh member while
@@ -159,10 +171,9 @@ state restoration; native execution remains pending. Normal rendering keeps its 
 original attachments.
 
 Completing exact coverage requires changes beyond the deferred attachment owners:
-the live MDI origin/identity transport in `RenderPipeline.cpp`, the ladder submission
-metadata/backend, `StaticDrawPass`, `PlantProcgenPass`, `GroundDecalPass`,
-`FoliagePass` and `tree_impostor.frag`. A foliage
-identity belongs to a separate forward contributor plane because its color blends
+the ladder submission metadata/backend, `StaticDrawPass`, `FoliagePass` and
+`tree_impostor.frag`, plus water, glass, particles and waterfall forward submissions.
+A foliage identity belongs to a separate forward contributor plane because its color blends
 with the already lit scene. None of these gaps is represented as a guessed mesh or
 as successful background coverage.
 

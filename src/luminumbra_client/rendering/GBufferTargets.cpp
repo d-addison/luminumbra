@@ -227,7 +227,37 @@ GBufferDiagnosticAttachment::~GBufferDiagnosticAttachment() {
 }
 
 void GBufferDiagnosticCapture::write_current(const DiagnosticSubmission& submission) {
+    const auto record_contributor = [&] {
+        abort(); // A table entry alone cannot describe the blended pixel.
+        if (state_->refused) {
+            return;
+        }
+        constexpr std::string_view suffix = ":contributor_only";
+        // Bound the temporary label before copying, including its coverage suffix.
+        if (submission.shader_variant.empty() ||
+            submission.shader_variant.size() > 1024 - suffix.size()) {
+            unsupported("diagnostic_contributor_label_limit",
+                        submission.lod,
+                        submission.ownership,
+                        submission.pass);
+            return;
+        }
+        const std::string label = std::string(submission.shader_variant) + std::string(suffix);
+        auto contributor = submission;
+        contributor.shader_variant = label;
+        DiagnosticId id{};
+        if (!state_->table.submit(contributor, id)) {
+            unsupported("diagnostic_contributor_identity_refused",
+                        submission.lod,
+                        submission.ownership,
+                        submission.pass);
+            state_->refused = true;
+        }
+    };
     if (!state_->framebuffer) {
+        if (submission.pass == DiagnosticPass::Forward) {
+            record_contributor();
+        }
         return;
     }
     GLint program = 0;
@@ -237,6 +267,10 @@ void GBufferDiagnosticCapture::write_current(const DiagnosticSubmission& submiss
             write(*entry.shader, submission);
             return;
         }
+    }
+    if (submission.pass == DiagnosticPass::Forward) {
+        record_contributor();
+        return;
     }
     unsupported(
         "diagnostic_writer_without_variant", submission.lod, submission.ownership, submission.pass);
@@ -265,10 +299,9 @@ bool GBufferDiagnosticCapture::attach_forward(std::uint32_t framebuffer,
                                               std::uint32_t color_texture,
                                               const DiagnosticExtent& extent) {
     if (!state_->forward_targets) {
-        unsupported("foliage_forward_contributor_target_unavailable",
-                    0,
-                    DiagnosticOwnership::Live,
-                    DiagnosticPass::Forward);
+        // Original forward submissions still register exact contributor-only records.
+        // Without pixel storage the frame remains ineligible for publication.
+        abort();
         return false;
     }
     GBuffer target{};
@@ -317,8 +350,7 @@ void GBufferDiagnosticCapture::detach() {
 bool GBufferDiagnosticCapture::attach_target(const GBuffer& gbuffer,
                                              const DiagnosticExtent& extent,
                                              bool forward) {
-    if (state_->framebuffer != 0 ||
-        (forward ? !state_->captured || state_->forward_captured : state_->captured)) {
+    if (state_->framebuffer != 0 || (forward ? !state_->captured : state_->forward_captured)) {
         state_->failure = "nested_gbuffer_attachment";
         return false;
     }
@@ -374,6 +406,13 @@ bool GBufferDiagnosticCapture::attach_target(const GBuffer& gbuffer,
     }
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(saved_framebuffer));
     auto& targets = forward ? *state_->forward_targets : *state_->targets;
+    const bool already_captured = forward ? state_->forward_captured : state_->captured;
+    // Continuations keep earlier IDs, so resizing either plane mid-frame must refuse.
+    if (already_captured &&
+        (targets.extent().width != extent.width || targets.extent().height != extent.height)) {
+        state_->failure = "diagnostic_continuation_extent_mismatch";
+        return false;
+    }
     if (!targets.ensure(true, extent, 7)) {
         state_->failure = "diagnostic_integer_target_unsupported";
         return false;
@@ -399,7 +438,7 @@ bool GBufferDiagnosticCapture::attach_target(const GBuffer& gbuffer,
                                         gbuffer.authored_texture ? GLenum{GL_COLOR_ATTACHMENT5}
                                                                  : GLenum{GL_NONE},
                                         GL_COLOR_ATTACHMENT6};
-    if (forward) {
+    if (forward || already_captured) {
         auto forward_buffers = state_->buffers;
         forward_buffers[6] = GL_COLOR_ATTACHMENT6;
         glDrawBuffers(state_->buffer_count, forward_buffers.data());
@@ -414,8 +453,10 @@ bool GBufferDiagnosticCapture::attach_target(const GBuffer& gbuffer,
         state_->failure = "diagnostic_mrt_incomplete";
         return false;
     }
-    glClearTexImage(
-        state_->attachment_lease.texture(), 0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, nullptr);
+    if (!already_captured) {
+        glClearTexImage(
+            state_->attachment_lease.texture(), 0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, nullptr);
+    }
     state_->forward = forward;
     if (forward) {
         state_->forward_captured = true;
