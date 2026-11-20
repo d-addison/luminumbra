@@ -25,6 +25,73 @@ def function(source, name):
 
 
 class RegionAuthorityWiring(unittest.TestCase):
+    def test_off_columns_are_excluded_by_shared_admission_before_preparation(self):
+        source = (ROOT / "src/luminumbra_common/systems/RegionalWater.cpp").read_text(
+            encoding="utf-8")
+        admit = function(source, "std::vector<Entry> Admit(")
+        self.assertIn("entry.admitted = resident.available && resident.resolution != 0 &&", admit)
+        self.assertLess(admit.index("resident.initialized && !LegalResolution"),
+                        admit.index("entry.admitted ="))
+        build = function(source, "Plan BuildPlan(")
+        self.assertLess(build.index("Admit("), build.index("PlanSources("))
+        self.assertLess(build.index("Admit("), build.index("PlanCandidates("))
+        update = function(source, "void WaterSystem::UpdateRegionalFromSimulation(")
+        self.assertIn("resident.resolution = participants[i]->current_water_resolution.load();", update)
+        self.assertIn("&plan)", update)
+        direct = function(source, "void WaterSystem::UpdateRegional(")
+        self.assertIn(".resolution = chunk->current_water_resolution.load()", direct)
+        self.assertIn("RegionalWater::Build(", direct)
+        native = (ROOT / "test/common/RegionalWater_test.cpp").read_text(encoding="utf-8")
+        case = function(native, "TEST(RegionalWaterAdmission, "
+                        "OffSavedColumnsPreserveRetainedWaterAndDoNotAbortFundedNeighbors)")
+        for token in ("{0, 32}", "entry < 3", "WaterDetailLevel::Off",
+                      "restore_authoritative_chunk(", "water.UpdateRegional(registry, chunks,",
+                      "ASSERT_NO_THROW(water.UpdateRegionalFromSimulation(",
+                      "EXPECT_GT(Mass(*enabled), mass);",
+                      "EXPECT_EQ(TransactionBytes(*disabled), before);",
+                      "EXPECT_EQ(Persistence::SerializeChunkAuthoritySnapshotJson(*disabled), saved);"):
+            self.assertIn(token, case)
+        refusal = function(native, "TEST(RegionalWaterPlanning, "
+                           "OffColumnsStaySealedWhileUnseededColumnsCanPrepare)")
+        for token in ("unseeded.initialized = false;", "disabled.resolution = 0;",
+                      "disabled.initialized = true;", "EXPECT_THROW(",
+                      "EXPECT_TRUE(plan.faces.empty());"):
+            self.assertIn(token, refusal)
+
+    def test_unclaimed_cleanup_retains_reservations_for_every_resident_state(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        cleanup = function(source, "void SHIELD_WorldSystem::discard_unclaimed_water_columns(")
+        candidates = function(cleanup, "for (const auto& chunk : candidates)")
+        self.assertLess(candidates.index("if (parked == m_parked.end()"),
+                        candidates.index("m_water_column_reservations.erase("))
+        reservations = function(cleanup, "for (const auto id : reservations)")
+        self.assertIn("if (!chunk) {", reservations)
+        self.assertEqual(function(reservations, "if (!chunk)"),
+                         "m_water_column_reservations.erase(id);")
+        self.assertNotIn("needs_authority()", reservations)
+        self.assertNotIn("ChunkState::Loading", reservations)
+        for match in re.finditer(r"m_admitted_water_columns.erase\((id|it->first)\);", source):
+            # These are the live/parked retirement sites; publication uses chunk->get_id().
+            tail = source[match.end():]
+            self.assertTrue(tail.lstrip().startswith(
+                f"m_water_column_reservations.erase({match.group(1)});"))
+        native = (ROOT / "test/common/RegionalWater_test.cpp").read_text(encoding="utf-8")
+        case = function(native, "TEST(RegionalWaterAdmission, "
+                        "LiveUnclaimedCleanupCannotRecycleReservationCapacity)")
+        for token in ("cleanup < 4", "repeat < 3", "index < 2 ? chunk : nullptr",
+                      "ChunkState::Loading", "note_persistence_outcome(false)",
+                      "mark_water_state_dirty()", "clear_water_state_dirty()",
+                      "remember_durable_chunks(", "clear_world(nullptr)",
+                      "EXPECT_FALSE(shield.reserve_water_columns(next));",
+                      "EXPECT_TRUE(shield.reserve_water_columns(next));"):
+            self.assertIn(token, case)
+        retired = function(native, "TEST(RegionalWaterAdmission, "
+                           "ParkedRetirementReleasesReservationsWithoutASaveOutcome)")
+        for token in ("{false, true}", "release_clean_parked_chunks()",
+                      "discard_unclaimed_water_columns(candidates)",
+                      "EXPECT_TRUE(shield.reserve_water_columns(next));"):
+            self.assertIn(token, retired)
+
     def test_water_reconciliation_carries_absent_zero_grants_and_refuses_positive_grants(self):
         source = (ROOT / "src/luminumbra_common/systems/RegionalWater.cpp").read_text(
             encoding="utf-8")

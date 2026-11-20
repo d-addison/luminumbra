@@ -4501,6 +4501,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
                         invalidate_renderable_chunks();
                         chunk->invalidate_near_terrain_snapshot();
                         m_admitted_water_columns.erase(id);
+                        m_water_column_reservations.erase(id);
                         it = m_streaming_state.chunks.erase(it);
                         shadow_note_evicted(id);
                         continue;
@@ -4550,6 +4551,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
             invalidate_renderable_chunks();
             it->second->invalidate_near_terrain_snapshot();
             m_admitted_water_columns.erase(id);
+            m_water_column_reservations.erase(id);
             it = m_streaming_state.chunks.erase(it);
             shadow_note_evicted(id);
         }
@@ -7749,13 +7751,13 @@ void SHIELD_WorldSystem::discard_unclaimed_water_columns(
             chunk->water_revision() != 0) {
             continue;
         }
-        m_water_column_reservations.erase(chunk->get_id());
         // A live unclaimed admission keeps its marker until the chunk leaves
         // residency, so a later inspection cannot decode a committed record over
         // the canonical live handle.
         if (parked == m_parked.end() || parked->second.chunk != chunk) {
             continue;
         }
+        m_water_column_reservations.erase(chunk->get_id());
         m_admitted_water_columns.erase(chunk->get_id());
         m_parked_bytes -= parked->second.bytes;
         note_digest_chunk(chunk, true, false);
@@ -7769,7 +7771,9 @@ void SHIELD_WorldSystem::discard_unclaimed_water_columns(
         const auto chunk = live != m_streaming_state.chunks.end() ? live->second
                            : parked != m_parked.end()             ? parked->second.chunk
                                                                   : nullptr;
-        if (!chunk || chunk->get_state() == ChunkState::Loading || !chunk->needs_authority()) {
+        // A retained live, loading or unclaimed owner still consumes capacity.
+        // Only retirement or a clean committed save may release its reservation.
+        if (!chunk) {
             m_water_column_reservations.erase(id);
         }
     }
@@ -8125,6 +8129,7 @@ void SHIELD_WorldSystem::release_clean_parked_chunks() {
             m_parked_bytes -= it->second.bytes;
             note_digest_chunk(it->second.chunk, true, false);
             m_admitted_water_columns.erase(it->first);
+            m_water_column_reservations.erase(it->first);
             it = m_parked.erase(it);
         } else {
             ++it;

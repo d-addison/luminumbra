@@ -180,8 +180,10 @@ std::vector<Entry> Admit(std::span<const Resident> residents,
                                            0.0f,
                                            static_cast<float>(entry.coords.z * CHUNK_SIZE_Z)});
         entry.record = FindRecord(ledger, entry.owner);
-        entry.admitted = resident.available && entry.record != nullptr &&
-                         entry.record->state != RegionState::Frozen;
+        // Resolution zero is an intentional Off stamp, including retained integer
+        // water. Neither preparation, sources, rain nor adjacent activity re-enable it.
+        entry.admitted = resident.available && resident.resolution != 0 &&
+                         entry.record != nullptr && entry.record->state != RegionState::Frozen;
         entry.preparation = !resident.initialized || resident.resolution != inputs.resolution;
         if (entry.admitted) {
             auto& group = groups[entry.owner];

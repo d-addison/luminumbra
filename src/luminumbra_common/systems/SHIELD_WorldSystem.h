@@ -1116,8 +1116,8 @@ public:
                       std::size_t{32} * 32 *
                           (5 * sizeof(std::int32_t) + 3 * sizeof(float) + sizeof(Vec2)) <=
                   kWaterColumnReservationBytes);
-    // Release matching, still-unclaimed admissions and reservations; at most 832
-    // per span. Unclaimed live renderer caches may remain resident after cleanup.
+    // Retire matching unclaimed parked admissions; at most 832 per span. Live
+    // caches keep their reservations until a clean committed save or retirement.
     void discard_unclaimed_water_columns(std::span<const std::shared_ptr<Chunk>> candidates,
                                          std::span<const ChunkID> reservations = {});
     // Const work diagnostic: full terrain generations performed by column admission.
