@@ -2526,7 +2526,7 @@ void RequireBodySetEqual(const ApplicationPhysics::BodySetState& before,
     }
 }
 
-// Modes: moving avatar, newly allocated frozen capsule, adopted frozen capsule.
+// Modes: moving avatar, new/adopted frozen capsule, standing/crouching player.
 // Every real allocation ordinal is refused.
 void ControllerRestoreAllocationSweep(int mode) {
     Log::Init();
@@ -2536,10 +2536,19 @@ void ControllerRestoreAllocationSweep(int mode) {
         auto& source = source_world.physics();
         ControllerFloor(source);
         const bool frozen = mode == 1 || mode == 2;
-        auto& source_owner = source_world;
-        Require(source.create_avatar_character({8.0f, 8.1f, 8.0f}) == 0);
+        const bool player = mode >= 3;
+        if (player) {
+            Require(source.create_player_controller({8.0f, 8.1f, 8.0f}));
+            Require(source.set_player_crouched(mode == 4));
+        } else {
+            Require(source.create_avatar_character({8.0f, 8.1f, 8.0f}) == 0);
+        }
         for (unsigned tick = 0; tick < 45; ++tick) {
-            source.update_avatars(1.0f / 30.0f);
+            if (player) {
+                source.update_player({0.1f, 0, 0.2f}, false, 5.0f, 1.0f / 30.0f);
+            } else {
+                source.update_avatars(1.0f / 30.0f);
+            }
         }
         if (frozen) {
             const auto hole = source.create_dynamic_sphere({20, 20, 20}, {0, 0, 0}, 0.3f);
@@ -2548,7 +2557,8 @@ void ControllerRestoreAllocationSweep(int mode) {
             source.destroy_body(hole); // Exercise scratch allocation and free-slot order.
         }
         ControllerOwner captured;
-        Require(source_owner.capture_avatar_owner(0, captured));
+        Require(player ? source_world.capture_player_owner(captured)
+                       : source_world.capture_avatar_owner(0, captured));
         // Character contacts are at word 36 in the established scalar schema.
         Require(ControllerWord(captured, 144) > 0);
         ApplicationPhysics::BodySetState body_set;
@@ -2559,19 +2569,22 @@ void ControllerRestoreAllocationSweep(int mode) {
                 Luminumbra::TestSupport::AvatarContinuationWorld target_world;
                 auto& target = target_world.physics();
                 ControllerFloor(target);
-                auto& target_owner = target_world;
+                std::size_t index = 777;
+                const auto restore = [&] {
+                    return player ? target_world.restore_player_owner(captured)
+                                  : target_world.restore_avatar_owner(captured, index);
+                };
                 if (mode == 2) {
                     std::array<JPH::BodyID, 1> ids{};
                     Require(target.restore_body_owners(body_set, ids));
                 }
                 ApplicationPhysics::BodySetState before;
                 Require(target.capture_body_owners(before));
-                std::size_t index = 777;
                 bool restored = false;
                 bool caught = false;
                 Arm(ordinal, false, false);
                 try {
-                    restored = target_owner.restore_avatar_owner(captured, index);
+                    restored = restore();
                 } catch (const std::bad_alloc&) {
                     caught = true;
                 }
@@ -2584,22 +2597,24 @@ void ControllerRestoreAllocationSweep(int mode) {
                     Require(caught && !restored && Allocations().failures == 1);
                     Require(index == 777 && target.avatar_character_slot_count() == 0);
                     ControllerOwner absent;
-                    Require(!target_owner.capture_avatar_owner(0, absent));
+                    Require(player ? !target_world.capture_player_owner(absent)
+                                   : !target_world.capture_avatar_owner(0, absent));
                     ApplicationPhysics::BodySetState after;
                     Require(target.capture_body_owners(after));
                     RequireBodySetEqual(before, after);
                     // Retry on the same destination. A premature append makes
                     // this yield index 1.
-                    Require(target_owner.restore_avatar_owner(captured, index));
+                    Require(restore());
                 }
-                Require(target.avatar_character_slot_count() == 1u);
-                Require(index == 0);
+                Require(target.avatar_character_slot_count() == (player ? 0u : 1u));
+                Require(index == (player ? 777u : 0u));
                 ControllerOwner actual;
-                Require(target_owner.capture_avatar_owner(0, actual));
+                Require(player ? target_world.capture_player_owner(actual)
+                               : target_world.capture_avatar_owner(0, actual));
                 RequireOwnerEqual(captured, actual);
-                if (frozen) {
-                    Require(!target_owner.restore_avatar_owner(captured, index));
-                    Require(target.avatar_character_slot_count() == 1u);
+                if (frozen || player) {
+                    Require(!restore());
+                    Require(target.avatar_character_slot_count() == (player ? 0u : 1u));
                 }
             }
             Require(Outstanding() == 0);
@@ -2612,7 +2627,7 @@ void ControllerRestoreAllocationSweep(int mode) {
 } // namespace
 
 TEST(JoltStartup, ControllerAllocationFailuresPublishNothingAndRetryExactlyOnce) {
-    for (int mode = 0; mode < 3; ++mode) {
+    for (int mode = 0; mode < 5; ++mode) {
         ASSERT_EXIT(ControllerRestoreAllocationSweep(mode), ::testing::ExitedWithCode(0), "");
     }
 }
