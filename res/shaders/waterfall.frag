@@ -16,9 +16,17 @@
 // flow on world Y (height down the fall) and the horizontal channel coordinate.
 // ===========================================================================
 
+#ifdef LUMIN_DIAG_IDS
+layout (location = 6) out uvec4 gDiagnosticIds;
+uniform uvec4 u_diagnosticIds;
+#endif
+
 in vec3 FragPos;
 in vec3 Normal;
 
+#ifdef LUMIN_DIAG_IDS
+layout (location = 0)
+#endif
 out vec4 o_frag_color;
 
 uniform float u_time;
@@ -112,4 +120,8 @@ void main() {
     alpha *= clamp(u_live_factor, 0.0, 1.0);
 
     o_frag_color = vec4(lit, alpha);
+#ifdef LUMIN_DIAG_IDS
+    if (alpha <= 0.0) { discard; }
+    gDiagnosticIds = u_diagnosticIds;
+#endif
 }
