@@ -308,6 +308,9 @@ vec3 environmentBrdf(float NdotV, vec3 F0, float roughness) {
 // (studio/far surfaces) retain -2: never pretend they sampled a cascade.
 vec3 diagnosticCascade = vec3(-2.0);
 vec3 diagnosticShadowUv = vec3(-2.0);
+vec3 diagnosticDpdx;
+vec3 diagnosticDpdy;
+bool diagnosticShadowObserved = false;
 #endif
 float CalculateShadow(vec3 fragPos, vec3 normal, vec3 lightDir, float viewDepth) {
     // 1. Determine which cascade to use in a branchless way
@@ -321,27 +324,34 @@ float CalculateShadow(vec3 fragPos, vec3 normal, vec3 lightDir, float viewDepth)
     vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
     projCoords = projCoords * 0.5 + 0.5;
 #ifdef LUMIN_DIAG_CONTRIBUTIONS
-    diagnosticCascade = vec3(float(cascadeIndex), projCoords.xy);
-    vec2 shadowSize = vec2(textureSize(u_shadowCascades, 0).xy);
-    float footprint = max(length(dFdx(projCoords.xy) * shadowSize),
-                          length(dFdy(projCoords.xy) * shadowSize));
-    diagnosticShadowUv = vec3(projCoords.xy, log2(max(footprint, 1e-8)));
-    // Observe full light-frustum coverage without changing production sampling.
-    // Production also samples before the light near plane; that still selects a
-    // real index, but the diagnostic must distinguish absence from all four frusta.
-    bool insideSelected = fragPosLightSpace.w != 0.0 &&
-        all(greaterThanEqual(projCoords, vec3(0.0))) && all(lessThanEqual(projCoords, vec3(1.0)));
-    if (!insideSelected) {
-        bool insideAny = false;
-        for (int candidate = 0; candidate < 4; ++candidate) {
-            vec4 light = u_lightSpaceMatrices[candidate] * vec4(fragPos, 1.0);
-            vec3 projected = (light.xyz / light.w) * 0.5 + 0.5;
-            insideAny = insideAny || (light.w != 0.0 && projected.z >= 0.0 && projected.z <= 1.0 &&
-                projected.x >= 0.0 && projected.x <= 1.0 &&
-                projected.y >= 0.0 && projected.y <= 1.0);
+    // The sun call observes the production cascade before the optional moon call.
+    if (!diagnosticShadowObserved) {
+        diagnosticShadowObserved = true;
+        diagnosticCascade = vec3(float(cascadeIndex), projCoords.xy);
+        vec2 shadowSize = vec2(textureSize(u_shadowCascades, 0).xy);
+        vec4 lightDx = u_lightSpaceMatrices[cascadeIndex] * vec4(fragPos + diagnosticDpdx, 1.0);
+        vec4 lightDy = u_lightSpaceMatrices[cascadeIndex] * vec4(fragPos + diagnosticDpdy, 1.0);
+        vec2 uvDx = (lightDx.xy / lightDx.w) * 0.5 + 0.5 - projCoords.xy;
+        vec2 uvDy = (lightDy.xy / lightDy.w) * 0.5 + 0.5 - projCoords.xy;
+        float footprint = max(length(uvDx * shadowSize), length(uvDy * shadowSize));
+        diagnosticShadowUv = vec3(projCoords.xy, log2(max(footprint, 1e-8)));
+        // Observe full light-frustum coverage without changing production sampling.
+        // Production also samples before the light near plane; that still selects a
+        // real index, but the diagnostic must distinguish absence from all four frusta.
+        bool insideSelected = fragPosLightSpace.w != 0.0 &&
+            all(greaterThanEqual(projCoords, vec3(0.0))) && all(lessThanEqual(projCoords, vec3(1.0)));
+        if (!insideSelected) {
+            bool insideAny = false;
+            for (int candidate = 0; candidate < 4; ++candidate) {
+                vec4 light = u_lightSpaceMatrices[candidate] * vec4(fragPos, 1.0);
+                vec3 projected = (light.xyz / light.w) * 0.5 + 0.5;
+                insideAny = insideAny || (light.w != 0.0 && projected.z >= 0.0 && projected.z <= 1.0 &&
+                    projected.x >= 0.0 && projected.x <= 1.0 &&
+                    projected.y >= 0.0 && projected.y <= 1.0);
+            }
+            diagnosticCascade = vec3(insideAny ? -1.0 : -3.0);
+            diagnosticShadowUv = diagnosticCascade;
         }
-        diagnosticCascade = vec3(insideAny ? -1.0 : -3.0);
-        diagnosticShadowUv = diagnosticCascade;
     }
 #endif
 
@@ -565,6 +575,15 @@ float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
 
 void main() {
 #ifdef LUMIN_DIAG_CONTRIBUTIONS
+    {
+        // Use the same position backend as lighting, before any receiver can return
+        // or bypass shadows. All quad lanes reach the world-position derivatives.
+        vec3 diagnosticViewPos = vec3(0.0);
+        farWorldPosition(gPosition, u_sceneDepth, TexCoords, diagnosticViewPos);
+        vec3 FragPos = vec3(u_inverseView * vec4(diagnosticViewPos, 1.0));
+        diagnosticDpdx = dFdx(FragPos);
+        diagnosticDpdy = dFdy(FragPos);
+    }
     // Alpha zero is explicit unsupported, including every early return / sky texel.
     DiagnosticContribution = vec4(0.0);
     vec3 diagnosticSun = vec3(0.0);
