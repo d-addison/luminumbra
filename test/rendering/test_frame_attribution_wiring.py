@@ -3386,7 +3386,7 @@ class ComparisonAtmosphereWiring(unittest.TestCase):
             assignment = "stats.atmosphere = ResolvedAtmosphereToJson(renderPipeline);"
             self.assertIn(assignment, body)
             self.assertLess(body.index("glReadPixels("), body.index(assignment))
-            self.assertLess(body.index(assignment), body.index("WritePixelBufferPpm("))
+            self.assertLess(body.index(assignment), body.index("writeScenarioPixels("))
         for file, function in (("WeatherVisual.cpp", "WeatherPixelStatsToJson("),
                                ("TimeOfDaySeasonSweep.cpp", "TimeOfDayPixelStatsToJson(")):
             writer = block(read(CLIENT / "core/scenarios" / file), function)
@@ -4053,6 +4053,95 @@ class DiagnosticContributorWiring(unittest.TestCase):
             self.assertIn(text, submit)
         for check in (length, "mesh_json = mesh.dump()", "added > max_json_bytes - json_bytes_"):
             self.assertLess(submit.index(check), submit.index("mesh_ids_.emplace("))
+
+
+class DiagnosticScenarioCaptureWiring(unittest.TestCase):
+    def test_every_scenario_writer_uses_the_completed_frame_adapter(self):
+        capture = read(CLIENT / "core/ScenarioRunnerCapture.cpp")
+        families = (("captureWindowModeStress", 1), ("captureLodSeamArrival", 1),
+                    ("captureLodGround", 1), ("captureWaterVisual", 2),
+                    ("captureMaterialVisual", 2), ("captureSkyboxVisual", 1),
+                    ("captureWeatherVisual", 2), ("captureLightningStrike", 2),
+                    ("captureCloudShadow", 2), ("captureParticleDeterminism", 1),
+                    ("captureAtmosMotion", 1), ("captureFoliageVisual", 1),
+                    ("capturePrecipitation", 2), ("captureTimeOfDaySweep", 2),
+                    ("capturePlayerView", 1), ("captureFarLodHorizon", 1),
+                    ("captureSkinnedMeshVisual", 1), ("captureShowcaseVideo", 1),
+                    ("captureCreatureSlice", 1))
+        for family, count in families:
+            with self.subTest(family=family):
+                body = block(capture, "void ScenarioRunnerImpl::" + family + "(")
+                self.assertNotIn("WritePixelBufferPpm(", body)
+                self.assertNotIn("WriteBackbufferPpm(", body)
+                self.assertEqual(len(re.findall(r"writeScenario(?:Pixels|Backbuffer)\(", body)), count)
+        post = block(capture, "void ScenarioRunnerImpl::onPostRenderCapture(")
+        self.assertIn("RenderPipeline::CaptureCleanup diagnostic_cleanup(renderPipeline);", post)
+        self.assertLess(post.index("scenarioCaptureReady(width, height)"),
+                        post.index("++scenario_frame_count"))
+        self.assertLess(post.index("renderPipeline.capture_diagnostics_enabled() && scenario_failed"),
+                        post.index("runtime_state_recorder.capture("))
+
+    def test_scenario_identity_is_observed_from_the_completed_frame(self):
+        capture = read(CLIENT / "core/ScenarioRunnerCapture.cpp")
+        observe = block(capture, "ScenarioRunnerImpl::scenarioCaptureManifest() const")
+        for observation in ("renderPipeline.diagnostic_capture_manifest()",
+                            "input.simulation_tick = gameSession->GetSimulationTickCount()",
+                            "input.world_seed = gameSession->GetMetadata().seed",
+                            "gameSession->PresetContentHash()",
+                            'input.render_settings["scenario"] = scenario_config.scenario'):
+            self.assertIn(observation, observe)
+        source = read(CLIENT / "rendering/RenderPipeline.cpp")
+        publish = block(source, "bool RenderPipeline::capture_diagnostics(")
+        self.assertNotIn("std::move(m_diagnostic_capture)", publish)
+        self.assertIn("m_diagnostic_capture->finish(", publish)
+        readback = read(CLIENT / "rendering/DiagnosticReadback.h")
+        self.assertIn("return scope_ ? scope_->complete() : identity_complete_;", readback)
+
+    def test_refusal_and_disabled_bypass_precede_output(self):
+        pipeline = read(CLIENT / "rendering/RenderPipeline.h")
+        publish = block(pipeline, "bool with_diagnostic_capture(")
+        self.assertLess(publish.index("diagnostic_capture_refusal().empty() &&"),
+                        publish.index("WithCaptureManifest(path, observe(), write_capture)"))
+        self.assertIn("if (!m_capture_diagnostics.enabled) { return write_capture(); }", compact(publish))
+        runner = read(CLIENT / "core/ScenarioRunnerImpl.h")
+        write = block(runner, "bool writeScenarioCapture(")
+        self.assertLess(write.index("scenarioCaptureReady(width, height)"),
+                        write.index("renderPipeline.with_diagnostic_capture("))
+        capture = read(CLIENT / "core/ScenarioRunnerCapture.cpp")
+        ready = block(capture, "bool ScenarioRunnerImpl::scenarioCaptureReady(")
+        self.assertIn("capture_extent_mismatch", ready)
+        self.assertIn("width <= 0 || height <= 0", ready)
+        self.assertLess(ready.index("diagnostic_capture_refusal()"),
+                        ready.index("return true;", ready.index("capture_extent_mismatch")))
+        pixels = block(capture, "bool ScenarioRunnerImpl::writeScenarioPixels(")
+        self.assertLess(pixels.index("CapturePixelBytes(width, height, 3, bytes)"),
+                        pixels.index("return writeScenarioCapture("))
+
+    def test_admission_covers_all_supported_and_unsupported_producers_before_paths(self):
+        config = block(read(CLIENT / "core/RuntimeScenarioConfig.cpp"),
+                       "RuntimePathOptions ParseRuntimePathOptions(")
+        admission = block(config, "if (diagnostics.enabled)")
+        supported = set(re.findall(r'scenario == "([^"]+)"', admission))
+        self.assertEqual(supported, {"world_visual_sweep",
+                                     "lod_seam_arrival_smoke", "lod_ground_smoke", "skybox_visual_smoke",
+                                     "cloud_shadow_smoke", "timeofday_sweep_smoke", "player_view_smoke",
+                                     "skinned_mesh_visual_smoke", "creature_slice_smoke"})
+        unsupported = admission[admission.index("for (const auto* unsupported :"):]
+        unsupported = unsupported[:unsupported.index("})")]
+        self.assertEqual(set(re.findall(r'"([^"]+)"', unsupported)),
+                         {"window_mode_stress_smoke", "material_visual_smoke", "farlod_horizon_smoke", "water_visual_smoke",
+                          "weather_visual_smoke", "particle_emitter_determinism_smoke",
+                          "foliage_visual_smoke", "precipitation_smoke"})
+        for producer in ("--render-parity-ssao", "--bake-tree-impostor", "--survey",
+                         "--ui-screenshot", "--ui-thumbs", "--scene-config",
+                         "--timelapse", "--timelapse-frames"):
+            self.assertIn('"' + producer + '"', admission)
+        self.assertIn("HasCommandLineOption(argc, argv, producer)", admission)
+        self.assertIn("capture diagnostics refuse multiple capture drivers", admission)
+        self.assertLess(config.index("if (diagnostics.enabled)"),
+                        config.index("options.diagnostics = diagnostics;"))
+        self.assertLess(config.index("options.diagnostics = diagnostics;"),
+                        config.index("for (const char* flag :"))
 
 
 if __name__ == "__main__":
