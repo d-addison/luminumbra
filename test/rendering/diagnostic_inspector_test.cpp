@@ -511,14 +511,21 @@ TEST(DiagnosticInspector, InspectorStorageRefusesMissingPartialAndOversizedStore
         SourceSection("src/luminumbra_client/rendering/passes/DebugViewPass.cpp",
                       "std::shared_ptr<DebugViewPass::Frame> DebugViewPass::begin_frame(",
                       "void DebugViewPass::end_frame(");
-    EXPECT_NE(begin.find("glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(InspectorPixel), &empty, "
-                         "GL_STREAM_READ)"),
+    const auto storage =
+        SourceSection("src/luminumbra_client/rendering/passes/DebugViewPass.cpp",
+                      "bool DebugViewPass::prepare_inspector_storage()",
+                      "std::shared_ptr<DebugViewPass::Frame> DebugViewPass::begin_frame(");
+    EXPECT_NE(storage.find("glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(InspectorPixel), &empty, "
+                           "GL_STREAM_READ)"),
               std::string::npos);
-    EXPECT_NE(begin.find("if (m_snapshot->sample_buffer == 0) {\n                control.status"),
+    EXPECT_NE(storage.find("if (m_snapshot->sample_buffer == 0) {\n                control.status"),
               std::string::npos);
-    EXPECT_LT(begin.find("if (sample_bytes != sizeof(InspectorPixel))"),
+    EXPECT_LT(storage.find("if (sample_bytes != sizeof(InspectorPixel))"),
+              storage.find("return true;"));
+    EXPECT_LT(begin.find("m_snapshot->ready = false;"),
+              begin.find("if (!prepare_inspector_storage())"));
+    EXPECT_LT(begin.find("if (!prepare_inspector_storage())"),
               begin.find("return std::make_shared<Frame>"));
-    EXPECT_LT(begin.find("m_snapshot->ready = false;"), begin.find("glGenBuffers("));
     EXPECT_LT(begin.find("if (!m_snapshot->targets.reset())"),
               begin.find("m_snapshot->draws.clear();"));
     EXPECT_NE(begin.find("Identity attachment still leased"), std::string::npos);
@@ -925,7 +932,7 @@ TEST(DiagnosticInspector, CyclePreservesLegacyOffPathAndVisitsEveryEnabledView) 
     EXPECT_EQ(legacy, Pass::None);
     control.enabled = true;
     legacy = Pass::Position;
-    for (int expected = Pass::DrawId; expected <= Pass::ShadowPlane; ++expected) {
+    for (int expected = Pass::DrawId; expected <= Pass::Wireframe; ++expected) {
         Pass::cycle_mode(legacy);
         EXPECT_EQ(control.view, expected);
         EXPECT_EQ(legacy, Pass::None);
