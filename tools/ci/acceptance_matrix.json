@@ -86,7 +86,7 @@
     {
       "id": "render.temporal-audit-plan",
       "source": "docs/development/visual-diagnostics.md#e1-fixed-camera-time-lapse-audit-runs",
-      "statement": "GL-free temporal admission plans inclusive day/night, 120-second clear-storm-clear and three-day schedules using exact simulation ticks, ceiling sparse cadence, rational 60 Hz bursts, deduplicated overlaps, explicit final-tick steady/night holds and bounded warmup/readiness/settling. Plans cap recorded frames at 4096 and simulation advancement at 10 million ticks, bound presentation work, and refuse invalid calendars, rates, spans, clock bounds, budgets and malformed or duplicate CLI options with reasons. The O(1) advancement query refuses invalid indices and clock faults. Both shipping startup parsers refuse temporal execution before save-root or world/output creation; planning alone cannot advertise runtime or all-features support. Registered regressions cover acceptance, tick schedules, rational cadence, limits and refusal paths; native execution, weather input, site/sequence driving, capability checks, run/output-byte budgets and assembly remain pending.",
+      "statement": "GL-free admission plans inclusive day/night, 120-second weather and three-day schedules with exact ticks, rational bursts and final-tick holds under 4096-frame and 10-million-tick ceilings. The sequence execution protocol re-admits immutable plans and checks aggregate transport-provided frame/manifest byte reservations against a caller-lowered 512 GiB ceiling before executable steps. It requests and verifies individual simulation ticks, bounds frozen warmup/readiness/settling and presentation substeps, derives calendar phase from ticks and carries explicit lighting controls. Sticky refusal and a final publication acknowledgement prevent partial captures from becoming complete in the protocol. Registered regressions cover schedules, readiness, phase, budgets, clock/transport faults and real creature-brain progression matching ordinary fixed ticking. Both shipping startup parsers still refuse temporal execution before output. Fixed-site app/simulation/A4 transport wiring, enforceable transport byte bounds, weather input, capability checks, existing-frontier native capture and assembly remain pending; no temporal or all-features runtime support is claimed.",
       "status": "partial",
       "evidence": [
         {
@@ -95,8 +95,12 @@
         },
         {
           "kind": "ctest",
-          "ref": "TemporalAuditSequence.*",
-          "planned": "Add weather and site/sequence execution regressions before runtime support; owner: maintainers"
+          "ref": "TemporalAuditSequence.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "TemporalAuditSite.*",
+          "planned": "Integrate and validate fixed-site simulation and completed-frame transport before native temporal capture; owner: maintainers"
         },
         {
           "kind": "doc",

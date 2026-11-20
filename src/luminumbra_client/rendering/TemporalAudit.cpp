@@ -199,4 +199,221 @@ std::optional<std::uint64_t> TemporalAuditTicksToFrame(const TemporalAuditPlan& 
         return std::nullopt;
     return target - current_tick;
 }
+
+TemporalAuditSequence::TemporalAuditSequence(const TemporalAuditPlan& plan,
+                                             const TemporalSequenceBudget& budget)
+    : budget_(budget) {
+    // Re-admit the entire immutable schedule, including settling/work bounds.
+    // At most 4096 frames are retained; caller-edited plans cannot raise limits.
+    auto admitted = BuildTemporalAuditPlan(plan.request);
+    if (!admitted.plan || *admitted.plan != plan) {
+        fail("sequence requires an unmodified admitted plan");
+        return;
+    }
+    if (budget.frame_bytes == 0 || budget.manifest_bytes == 0 || budget.output_bytes == 0 ||
+        budget.output_bytes > kTemporalMaxOutputBytes ||
+        budget.manifest_bytes > budget.output_bytes ||
+        plan.frames.size() > (budget.output_bytes - budget.manifest_bytes) / budget.frame_bytes) {
+        fail("sequence exceeds output budget");
+        return;
+    }
+    plan_ = std::move(*admitted.plan);
+    current_tick_ = plan_.request.start_tick;
+    stage_ = TemporalSequenceAction::Warmup;
+}
+
+void TemporalAuditSequence::fail(std::string_view reason) {
+    if (stage_ != TemporalSequenceAction::Refused || refusal_.empty()) {
+        refusal_ = reason;
+    }
+    stage_ = TemporalSequenceAction::Refused;
+    pending_.reset();
+}
+
+void TemporalAuditSequence::refuse() {
+    fail("sequence transport refused");
+}
+
+TemporalSequenceStep TemporalAuditSequence::step(TemporalSequenceAction action,
+                                                 std::uint64_t tick,
+                                                 std::uint64_t phase_60,
+                                                 double delta) const {
+    const auto& frame = plan_.frames[std::min(frame_index_, plan_.frames.size() - 1)];
+    const auto calendar_tick =
+        (plan_.request.start_tick + phase_60 / 60) % plan_.request.ticks_per_day;
+    const double day_phase =
+        (static_cast<double>(calendar_tick) + static_cast<double>(phase_60 % 60) / 60.0) /
+        static_cast<double>(plan_.request.ticks_per_day);
+    return {.action = action,
+            .simulation_tick = tick,
+            .sub_tick_60 = static_cast<std::uint32_t>(phase_60 % 60),
+            .frame_index = frame_index_,
+            .presentation_delta_seconds = delta,
+            .day_phase = day_phase,
+            .control = frame.control,
+            .byte_limit = action == TemporalSequenceAction::Capture   ? budget_.frame_bytes
+                          : action == TemporalSequenceAction::Publish ? budget_.manifest_bytes
+                                                                      : 0};
+}
+
+void TemporalAuditSequence::beginSample() {
+    attempts_ = 0;
+    stage_ = plan_.frames[frame_index_].dense ? TemporalSequenceAction::Readiness
+                                              : TemporalSequenceAction::Settle;
+}
+
+void TemporalAuditSequence::beginFrame() {
+    attempts_ = 0;
+    if (frame_index_ == plan_.frames.size()) {
+        stage_ = TemporalSequenceAction::Publish;
+        return;
+    }
+    const auto& frame = plan_.frames[frame_index_];
+    const auto target = (frame.target_tick - plan_.request.start_tick) * 60 + frame.sub_tick_60;
+    if (frame.kind == TemporalAuditFrameKind::Sequence && target == phase_60_) {
+        beginSample();
+    } else {
+        stage_ = TemporalSequenceAction::Present;
+    }
+}
+
+TemporalSequenceStep TemporalAuditSequence::next(std::uint64_t actual_tick) {
+    if (stage_ == TemporalSequenceAction::Refused) {
+        return {};
+    }
+    if (actual_tick != current_tick_) {
+        fail("sequence simulation clock changed outside schedule");
+        return {};
+    }
+    if (pending_) {
+        return *pending_;
+    }
+    auto command = step(stage_, current_tick_, phase_60_, 0);
+    if (stage_ == TemporalSequenceAction::Complete) {
+        return command;
+    }
+    if (stage_ == TemporalSequenceAction::Warmup) {
+        command.presentation_delta_seconds = 1.0 / kTemporalPresentationHz;
+    } else if (stage_ == TemporalSequenceAction::Present) {
+        const auto& frame = plan_.frames[frame_index_];
+        if (frame.kind == TemporalAuditFrameKind::Sequence) {
+            const auto target =
+                (frame.target_tick - plan_.request.start_tick) * 60 + frame.sub_tick_60;
+            next_phase_60_ = std::min(phase_60_ + plan_.request.ticks_per_second, target);
+            const auto next_tick = plan_.request.start_tick + next_phase_60_ / 60;
+            if (current_tick_ < next_tick) {
+                command = step(TemporalSequenceAction::AdvanceTick,
+                               current_tick_ + 1,
+                               (current_tick_ + 1 - plan_.request.start_tick) * 60,
+                               0);
+            } else {
+                command = step(stage_,
+                               current_tick_,
+                               next_phase_60_,
+                               static_cast<double>(next_phase_60_ - phase_60_) /
+                                   (60.0 * plan_.request.ticks_per_second));
+            }
+        } else {
+            // Each hold starts at frame zero at the final simulation tick.
+            next_phase_60_ = phase_60_;
+            command.presentation_delta_seconds =
+                frame.hold_frame == 0 ? 0.0 : 1.0 / kTemporalPresentationHz;
+        }
+    }
+    const bool render = command.action != TemporalSequenceAction::AdvanceTick &&
+                        command.action != TemporalSequenceAction::Capture &&
+                        command.action != TemporalSequenceAction::Publish;
+    if (render && render_attempts_ >= plan_.max_render_attempts) {
+        fail("sequence render budget exhausted");
+        return {};
+    }
+    pending_ = command;
+    return command;
+}
+
+void TemporalAuditSequence::acknowledge(std::uint64_t actual_tick,
+                                        bool success,
+                                        bool ready,
+                                        std::uint64_t written_bytes) {
+    if (stage_ == TemporalSequenceAction::Refused) {
+        return;
+    }
+    if (!pending_) {
+        fail("sequence acknowledgement without a pending step");
+        return;
+    }
+    const auto command = *pending_;
+    pending_.reset();
+    if (!success || actual_tick != command.simulation_tick) {
+        fail("sequence step failed or simulation tick stalled");
+        return;
+    }
+    const bool output = command.action == TemporalSequenceAction::Capture ||
+                        command.action == TemporalSequenceAction::Publish;
+    if ((output && (written_bytes == 0 || written_bytes > command.byte_limit)) ||
+        (!output && written_bytes != 0)) {
+        fail("sequence transport exceeded reservation or returned empty output");
+        return;
+    }
+    switch (command.action) {
+        case TemporalSequenceAction::AdvanceTick:
+            current_tick_ = actual_tick;
+            return;
+        case TemporalSequenceAction::Warmup:
+            ++render_attempts_;
+            if (++attempts_ == plan_.settling.warmup_frames) {
+                attempts_ = 0;
+                stage_ = TemporalSequenceAction::InitialReadiness;
+            }
+            return;
+        case TemporalSequenceAction::InitialReadiness:
+        case TemporalSequenceAction::Readiness: {
+            ++render_attempts_;
+            if (ready) {
+                if (command.action == TemporalSequenceAction::InitialReadiness) {
+                    beginFrame();
+                } else {
+                    stage_ = TemporalSequenceAction::Capture;
+                }
+            } else {
+                const auto limit = command.action == TemporalSequenceAction::InitialReadiness
+                                       ? plan_.settling.initial_readiness_retries
+                                       : plan_.settling.sample_readiness_retries;
+                if (++attempts_ == limit) {
+                    fail("sequence readiness exhausted");
+                }
+            }
+            return;
+        }
+        case TemporalSequenceAction::Present: {
+            ++render_attempts_;
+            phase_60_ = next_phase_60_;
+            const auto& frame = plan_.frames[frame_index_];
+            const auto target =
+                (frame.target_tick - plan_.request.start_tick) * 60 + frame.sub_tick_60;
+            if (frame.kind != TemporalAuditFrameKind::Sequence || phase_60_ == target) {
+                beginSample();
+            }
+            return;
+        }
+        case TemporalSequenceAction::Settle:
+            ++render_attempts_;
+            if (++attempts_ == plan_.settling.sample_settle_frames) {
+                attempts_ = 0;
+                stage_ = TemporalSequenceAction::Readiness;
+            }
+            return;
+        case TemporalSequenceAction::Capture:
+            ++frame_index_;
+            beginFrame();
+            return;
+        case TemporalSequenceAction::Publish:
+            stage_ = TemporalSequenceAction::Complete;
+            return;
+        case TemporalSequenceAction::Complete:
+        case TemporalSequenceAction::Refused:
+            fail("invalid sequence acknowledgement");
+            return;
+    }
+}
 } // namespace Luminumbra::Rendering
