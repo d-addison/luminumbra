@@ -1497,9 +1497,13 @@ struct WorldVisualSweepDeps {
     // then reads the backbuffer into `out_pixels` (RGB, bottom-up glReadPixels
     // layout) and reports the framebuffer size. stream_world runs the normal
     // streaming/water update at the camera, only during warmup.
-    // Returns false on a GL/size error.
-    std::function<bool(
-        std::vector<unsigned char>& out_pixels, int& width, int& height, bool stream_world)>
+    // A nonempty attribution_dir captures this exact frame before present.
+    // Returns false on a GL/size or attribution write error.
+    std::function<bool(std::vector<unsigned char>& out_pixels,
+                       int& width,
+                       int& height,
+                       bool stream_world,
+                       const std::filesystem::path& attribution_dir)>
         render_and_read;
     int readiness_timeout_seconds = 120;
     // Whether to also capture the winter season pass (summer is always captured).
