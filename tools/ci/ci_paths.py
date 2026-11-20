@@ -17,6 +17,7 @@ PYTHON_TESTS = (
     "tools/test_frozen_terrain_presets.py",
     "test/tools/test_regenerate_region_fixtures.py",
     "tools/gates/test_diagnostic_rois.py",
+    "tools/gates/test_diagnostic_checks.py",
     "tools/gates/test_diagnostic_capture.py",
 
     "tools/ci/test_compile_shaders.py",
@@ -29,6 +30,7 @@ PYTHON_TESTS = (
     "test/tools/test_runtime_config_contract.py",
     "test/tools/test_graphics_ui_contract.py",
     "test/tools/test_frame_pacing_contract.py",
+    "test/tools/test_win32_macro_identifiers.py",
     "test/tools/check_audio_shutdown_contract.py",
     "tools/ci/test_audio_propagation_metrics.py",
     "test/tools/check_profiler_contract.py",

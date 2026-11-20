@@ -206,6 +206,14 @@ def diagnostic_montage(completion, output, rois=None):
                  f"{record['qualification']} {record['status']} value={record['value']}")
         if 'minimum' in record:
             label += f" range=[{record['minimum']}, {record['maximum']}]"
+        label += f" thresholds={metric['thresholds']}"
+        if 'p99_upper' in record:
+            label += f" p99_upper={record['p99_upper']} limit={metric['p99_limit']}"
+        if 'violations' in record:
+            label += f" depth/alpha violations={record['violations']}"
+        if record.get('worst_probe', {}).get('draw'):
+            probe = record['worst_probe']
+            label += f" draw={probe['draw']['id']} pass={probe['draw']['pass']} asset={probe['mesh']['path']}"
         parts.append(f'<text x="8" y="{y+18}" fill="white">{html.escape(label)}</text>')
         parts.append(f'<text x="8" y="{y+38}" fill="white">worst pixel: {record["worst_pixel"]}; raw albedo crop</text>')
         crop = by_result.get(id(record))
