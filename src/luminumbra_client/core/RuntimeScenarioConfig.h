@@ -3,14 +3,19 @@
 #include "../../../include/luminumbra/core/Types.h"
 #include "core/CaptureScale.h"
 #include "luminumbra_common/core/SystemConfig.h"
+#include "luminumbra_common/world/WorldClock.h"
 #include "nlohmann/json.hpp"
 #include "rendering/DiagnosticCapture.h"
-#include "rendering/TemporalAudit.h"
+#include "rendering/TemporalSweep.h"
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
+
+namespace Luminumbra::Systems {
+struct WeatherSchedule;
+}
 
 namespace Luminumbra::Client::ScenarioHarness {
 
@@ -63,6 +68,11 @@ inline constexpr int kCapturePinnedHeight = 1600;
 
 struct RuntimeScenarioConfig {
     std::string scenario;
+    // Only the fixed-camera world sweep owns temporal simulation advancement.
+    std::optional<Rendering::TemporalAuditPlan> temporal_audit_plan;
+    // Borrowed process-lifetime atomic; synchronous capture frames must keep
+    // the optional watchdog informed without reading wall time or allocating.
+    std::atomic<std::uint64_t>* capture_heartbeat = nullptr;
     std::string systems_config_path;
     std::string preset_json_path;
     std::optional<luminumbra::core::SystemConfig> systems_config_override;
@@ -297,6 +307,84 @@ namespace Luminumbra::Client::ScenarioHarness {
 // Returns absent only when no temporal options were supplied. Invalid plans
 // throw invalid_argument with a reason. No world or output is created.
 std::optional<Rendering::TemporalAuditPlan> ParseTemporalAuditPlanOptions(int argc, char* argv[]);
-// Shipping startup refuses execution until the tick driver is available.
+// Shipping startup admits only the dedicated fresh-world temporal sweep.
 void RefuseUnsupportedTemporalAuditExecution(int argc, char* argv[]);
+// Install before world creation through GameSession's identity-bearing schedule API.
+Systems::WeatherSchedule WorldVisualSweepWeatherSchedule(const Rendering::TemporalAuditPlan& plan);
+// Public, GL-free runtime transport seam. Backends own physics, normal session
+// ticks (which include weather), streaming and completed-frame I/O. No callback
+// resets producers between samples. Static dispatch keeps per-step work O(1).
+inline constexpr bool TemporalSweepClockMatches(const Rendering::TemporalAuditRequest& request,
+                                                std::uint64_t actual_tick,
+                                                double tick_rate,
+                                                const world::WorldCalendar& calendar) {
+    if (calendar.dayLengthTicks == 0 || calendar.dayLengthTicks >= (1ULL << 31) ||
+        calendar.daylightDenominator == 0 || calendar.daylightDenominator > 65535 ||
+        calendar.daylightNumerator == 0 ||
+        calendar.daylightNumerator >= calendar.daylightDenominator) {
+        return false;
+    }
+    const std::uint64_t denominator = 2ULL * calendar.daylightDenominator;
+    const std::uint64_t dawn_numerator =
+        static_cast<std::uint64_t>(calendar.dayLengthTicks) *
+        (calendar.daylightDenominator - calendar.daylightNumerator);
+    // First integer tick at/after the resolved crossing. Products fit uint64_t
+    // under the calendar bounds above; no float-to-integer conversion.
+    const auto dawn = dawn_numerator / denominator + (dawn_numerator % denominator != 0);
+    const auto dusk_numerator =
+        static_cast<std::uint64_t>(calendar.dayLengthTicks) * calendar.daylightNumerator +
+        static_cast<std::uint64_t>(calendar.dayLengthTicks) * calendar.daylightDenominator;
+    const auto dusk = dusk_numerator / denominator + (dusk_numerator % denominator != 0);
+    return actual_tick == request.start_tick && tick_rate == request.ticks_per_second &&
+           calendar.dayLengthTicks == request.ticks_per_day && dawn == request.dawn_tick &&
+           dusk == request.dusk_tick;
+}
+
+template<typename Backend>
+class WorldVisualTemporalTransport {
+public:
+    constexpr explicit WorldVisualTemporalTransport(Backend& backend)
+        : backend_(backend) {}
+    std::uint64_t actual_tick() const {
+        return backend_.actual_tick();
+    }
+    constexpr bool advance_tick(const Rendering::TemporalSequenceStep& step) {
+        return backend_.advance_simulation(step) && backend_.weather_ready(step.simulation_tick);
+    }
+    constexpr bool render(const Rendering::TemporalSequenceStep& step,
+                          const Rendering::CaptureFeaturePolicy& policy,
+                          const Rendering::WorldSweepAngle& camera,
+                          bool& ready) {
+        return backend_.weather_ready(step.simulation_tick) && backend_.apply_weather(step) &&
+               backend_.render_completed(step, policy, camera, ready);
+    }
+    Rendering::TemporalSweepOutput capture(const Rendering::TemporalSequenceStep& step) {
+        return backend_.capture(step);
+    }
+    Rendering::TemporalSweepOutput publish(const Rendering::TemporalSequenceStep& step) {
+        return backend_.publish(step);
+    }
+
+private:
+    Backend& backend_;
+};
+
+template<typename Backend>
+std::string RunWorldVisualTemporalSweep(const Rendering::TemporalAuditPlan& plan,
+                                        const Rendering::TemporalSequenceBudget& budget,
+                                        Backend& backend) {
+    Rendering::TemporalAuditSequence admission(plan, budget);
+    if (admission.next(plan.request.start_tick).action ==
+        Rendering::TemporalSequenceAction::Refused) {
+        return std::string(admission.refusal());
+    }
+    if (!backend.begin(plan, budget)) {
+        return "sweep_runtime_admission_failed";
+    }
+    WorldVisualTemporalTransport transport(backend);
+    // This path deliberately retains legacy settings. The all-features still
+    // matrix refusal remains in both startup parsers; producer admission is separate.
+    return Rendering::RunTemporalSweep(plan, budget, nullptr, 0, transport);
+}
+
 } // namespace Luminumbra::Client::ScenarioHarness

@@ -2,6 +2,7 @@
 #include "core/RuntimeScenarioConfig.h"
 #include "luminumbra_common/ai/CreatureBrainSystem.h"
 #include "luminumbra_common/core/Environment.h"
+#include "luminumbra_common/systems/WeatherSystem.h"
 #include "rendering/TemporalSweep.h"
 
 #include <gtest/gtest.h>
@@ -421,4 +422,393 @@ TEST(TemporalSweep, LegacyLaunchAndExplicitScenarioOverrideStayAdmitted) {
     }
     std::filesystem::remove_all(directory);
 }
+
+// Exercise the same statically dispatched runtime seam used by the GL owner.
+// The creature brain is real; completed RGB transport and particles are modeled.
+struct RuntimeBackend {
+    enum class Fault {
+        None,
+        Begin,
+        Simulation,
+        WeatherTick,
+        WeatherRender,
+        Render,
+        NotReady,
+        Capture,
+        EmptyCapture,
+        Publish,
+        EmptyPublish
+    };
+    explicit RuntimeBackend(const TemporalAuditPlan& plan)
+        : subject(plan)
+        , weather_tick(plan.request.start_tick) {}
+    bool begin(const TemporalAuditPlan&, const TemporalSequenceBudget&) {
+        ++begins;
+        return fault != Fault::Begin;
+    }
+    std::uint64_t actual_tick() const {
+        return subject.tick;
+    }
+    bool advance_simulation(const TemporalSequenceStep& step) {
+        if (fault == Fault::Simulation) {
+            return false;
+        }
+        const bool success = subject.advance_tick(step);
+        if (fault != Fault::WeatherTick) {
+            weather_tick = subject.tick;
+        }
+        return success;
+    }
+    bool weather_ready(std::uint64_t tick) const {
+        return weather_tick == tick;
+    }
+    bool apply_weather(const TemporalSequenceStep& step) {
+        EXPECT_EQ(step.simulation_tick, weather_tick);
+        ++weather_samples;
+        return fault != Fault::WeatherRender;
+    }
+    bool render_completed(const TemporalSequenceStep& step,
+                          const CaptureFeaturePolicy& policy,
+                          const WorldSweepAngle& camera,
+                          bool& ready) {
+        EXPECT_TRUE(policy.UseLegacyAtmospherePins());
+        EXPECT_STREQ(camera.label, "yaw000");
+        EXPECT_EQ(step.simulation_tick, subject.tick);
+        ++subject.renders;
+        subject.particle_age += step.presentation_delta_seconds;
+        ready = fault != Fault::NotReady;
+        if (step.action == Action::InitialReadiness && subject.retries > 0) {
+            --subject.retries;
+            ready = false;
+        }
+        if (step.action == Action::Readiness || step.action == Action::Settle ||
+            step.action == Action::InitialReadiness) {
+            EXPECT_DOUBLE_EQ(step.presentation_delta_seconds, 0);
+        }
+        completed = ready ? std::optional(step) : std::nullopt;
+        return fault != Fault::Render;
+    }
+    TemporalSweepOutput capture(const TemporalSequenceStep& step) {
+        EXPECT_TRUE(completed);
+        if (completed) {
+            EXPECT_EQ(completed->simulation_tick, step.simulation_tick);
+            EXPECT_EQ(completed->sub_tick_60, step.sub_tick_60);
+            EXPECT_EQ(completed->frame_index, step.frame_index);
+            EXPECT_EQ(completed->control, step.control);
+        }
+        if (subject.captures.size() == 1 && fault == Fault::Capture) {
+            return {};
+        }
+        if (fault == Fault::EmptyCapture) {
+            return {true, 0};
+        }
+        return subject.capture(step);
+    }
+    TemporalSweepOutput publish(const TemporalSequenceStep& step) {
+        ++publish_attempts;
+        if (fault == Fault::Publish) {
+            return {};
+        }
+        if (fault == Fault::EmptyPublish) {
+            return {true, 0};
+        }
+        return subject.publish(step);
+    }
+    Transport subject;
+    std::uint64_t weather_tick;
+    unsigned begins = 0;
+    unsigned publish_attempts = 0;
+    std::uint64_t weather_samples = 0;
+    Fault fault = Fault::None;
+    std::optional<TemporalSequenceStep> completed;
+};
+
+// Compile-only mutation oracles for the runtime ordering and sticky failure gates.
+struct RuntimeWireProbe {
+    std::uint64_t tick = 0;
+    bool simulation_ok = true;
+    bool weather_ok = true;
+    bool sample_ok = true;
+    bool render_ok = true;
+    unsigned samples = 0;
+    unsigned renders = 0;
+    constexpr bool advance_simulation(const TemporalSequenceStep& step) {
+        if (simulation_ok) {
+            tick = step.simulation_tick;
+        }
+        return simulation_ok;
+    }
+    constexpr bool weather_ready(std::uint64_t expected) const {
+        return weather_ok && tick == expected;
+    }
+    constexpr bool apply_weather(const TemporalSequenceStep&) {
+        ++samples;
+        return sample_ok;
+    }
+    constexpr bool render_completed(const TemporalSequenceStep&,
+                                    const CaptureFeaturePolicy&,
+                                    const WorldSweepAngle&,
+                                    bool& ready) {
+        ++renders;
+        ready = false;
+        return render_ok;
+    }
+};
+constexpr bool RuntimeWireContract() {
+    const TemporalSequenceStep step{.action = Action::AdvanceTick, .simulation_tick = 1};
+    const CaptureFeaturePolicy policy;
+    RuntimeWireProbe backend;
+    Harness::WorldVisualTemporalTransport transport(backend);
+    bool ready = true;
+    if (!transport.advance_tick(step) || backend.tick != 1 ||
+        !transport.render(step, policy, kWorldSweepAngles[0], ready) || ready ||
+        backend.samples != 1 || backend.renders != 1) {
+        return false;
+    }
+    backend.simulation_ok = false;
+    if (transport.advance_tick(step)) {
+        return false;
+    }
+    backend.simulation_ok = true;
+    backend.weather_ok = false;
+    if (transport.advance_tick(step) ||
+        transport.render(step, policy, kWorldSweepAngles[0], ready) || backend.samples != 1 ||
+        backend.renders != 1) {
+        return false;
+    }
+    backend.weather_ok = true;
+    backend.sample_ok = false;
+    if (transport.render(step, policy, kWorldSweepAngles[0], ready) || backend.renders != 1) {
+        return false;
+    }
+    backend.sample_ok = true;
+    backend.render_ok = false;
+    return !transport.render(step, policy, kWorldSweepAngles[0], ready);
+}
+static_assert(RuntimeWireContract());
+
+constexpr auto kRuntimeClockRequest = TemporalAuditRequest{.start_tick = 0,
+                                                           .ticks_per_day = 162000,
+                                                           .ticks_per_second = 30,
+                                                           .dawn_tick = 27000,
+                                                           .dusk_tick = 135000};
+// Compile-time oracles permit mutation checking without executing native tests.
+static_assert(Harness::TemporalSweepClockMatches(kRuntimeClockRequest, 0, 30, {}));
+static_assert(!Harness::TemporalSweepClockMatches(kRuntimeClockRequest, 1, 30, {}));
+static_assert(!Harness::TemporalSweepClockMatches(kRuntimeClockRequest, 0, 7, {}));
+static_assert(!Harness::TemporalSweepClockMatches(
+    kRuntimeClockRequest, 0, 30, Luminumbra::world::WorldCalendar::Legacy()));
+
+TEST(TemporalSweepRuntime, ResolvedClockAdmissionRejectsEveryMismatch) {
+    const auto matches = [](const TemporalAuditRequest& request,
+                            const Luminumbra::world::WorldCalendar& calendar) {
+        return Harness::TemporalSweepClockMatches(request, 0, 30, calendar);
+    };
+    EXPECT_TRUE(matches(kRuntimeClockRequest, {}));
+    for (const auto field : {0, 1, 2, 3, 4}) {
+        auto request = kRuntimeClockRequest;
+        switch (field) {
+            case 0:
+                ++request.start_tick;
+                break;
+            case 1:
+                ++request.ticks_per_second;
+                break;
+            case 2:
+                ++request.ticks_per_day;
+                break;
+            case 3:
+                ++request.dawn_tick;
+                break;
+            default:
+                ++request.dusk_tick;
+                break;
+        }
+        EXPECT_FALSE(matches(request, {}));
+    }
+    for (const auto field : {0, 1, 2, 3, 4, 5}) {
+        auto calendar = Luminumbra::world::WorldCalendar{};
+        switch (field) {
+            case 0:
+                calendar.dayLengthTicks = 0;
+                break;
+            case 1:
+                calendar.dayLengthTicks = 1ULL << 31;
+                break;
+            case 2:
+                calendar.daylightDenominator = 0;
+                break;
+            case 3:
+                calendar.daylightDenominator = 65536;
+                break;
+            case 4:
+                calendar.daylightNumerator = 0;
+                break;
+            default:
+                calendar.daylightNumerator = calendar.daylightDenominator;
+                break;
+        }
+        EXPECT_FALSE(matches(kRuntimeClockRequest, calendar));
+    }
+}
+
+TEST(TemporalSweepRuntime, ExactTicksWeatherAndCompletedFramesCarryAcrossCells) {
+    for (const auto span : {TemporalAuditSpan::DayNight,
+                            TemporalAuditSpan::WeatherCycle,
+                            TemporalAuditSpan::MultiDay}) {
+        const auto plan = Plan(span, 30);
+        RuntimeBackend runtime(plan);
+        RuntimeBackend ordinary(plan);
+        runtime.subject.retries = 2;
+        ASSERT_EQ(Harness::RunWorldVisualTemporalSweep(plan, Budget(plan), runtime), "");
+        ASSERT_EQ(runtime.begins, 1U);
+        ASSERT_EQ(runtime.subject.captures.size(), plan.frames.size());
+        EXPECT_EQ(runtime.subject.ticks, plan.end_tick - plan.request.start_tick);
+        EXPECT_EQ(runtime.weather_tick, plan.end_tick);
+        EXPECT_EQ(runtime.weather_samples, runtime.subject.renders);
+        EXPECT_EQ(runtime.subject.publications, 1U);
+        for (auto tick = plan.request.start_tick; tick < plan.end_tick; ++tick) {
+            luminumbra::ai::RunCreatureBrainSystemOnTick(ordinary.subject.registry, 1.0f / 30.0f);
+        }
+        EXPECT_EQ(
+            runtime.subject.registry.get<Comp::CreatureComponent>(runtime.subject.subject).energy,
+            ordinary.subject.registry.get<Comp::CreatureComponent>(ordinary.subject.subject)
+                .energy);
+        RuntimeBackend without_retries(plan);
+        ASSERT_EQ(Harness::RunWorldVisualTemporalSweep(plan, Budget(plan), without_retries), "");
+        EXPECT_EQ(runtime.subject.ages, without_retries.subject.ages);
+        EXPECT_GT(runtime.subject.ages.back(), runtime.subject.ages.front());
+        for (std::size_t index = 0; index < plan.frames.size(); ++index) {
+            EXPECT_EQ(runtime.subject.captures[index].simulation_tick,
+                      plan.frames[index].target_tick);
+            EXPECT_EQ(runtime.subject.captures[index].sub_tick_60, plan.frames[index].sub_tick_60);
+            EXPECT_EQ(runtime.subject.captures[index].control, plan.frames[index].control);
+        }
+    }
+}
+
+TEST(TemporalSweepRuntime, EveryRuntimeFailureAndInvalidReservationStaysIncomplete) {
+    EXPECT_TRUE(RuntimeWireContract());
+    const auto plan = Plan();
+    RuntimeBackend invalid_camera(plan);
+    Harness::WorldVisualTemporalTransport invalid_camera_transport(invalid_camera);
+    EXPECT_EQ(RunTemporalSweep(
+                  plan, Budget(plan), nullptr, kWorldSweepAngles.size(), invalid_camera_transport),
+              "sweep_unknown_camera");
+    EXPECT_EQ(invalid_camera.subject.renders, 0U);
+    EXPECT_EQ(invalid_camera.publish_attempts, 0U);
+    for (const auto fault : {RuntimeBackend::Fault::Begin,
+                             RuntimeBackend::Fault::Simulation,
+                             RuntimeBackend::Fault::WeatherTick,
+                             RuntimeBackend::Fault::WeatherRender,
+                             RuntimeBackend::Fault::Render,
+                             RuntimeBackend::Fault::NotReady,
+                             RuntimeBackend::Fault::Capture,
+                             RuntimeBackend::Fault::EmptyCapture,
+                             RuntimeBackend::Fault::Publish,
+                             RuntimeBackend::Fault::EmptyPublish}) {
+        RuntimeBackend runtime(plan);
+        runtime.fault = fault;
+        EXPECT_NE(Harness::RunWorldVisualTemporalSweep(plan, Budget(plan), runtime), "");
+        EXPECT_EQ(runtime.subject.publications, 0U);
+        if (fault != RuntimeBackend::Fault::Publish &&
+            fault != RuntimeBackend::Fault::EmptyPublish) {
+            EXPECT_EQ(runtime.publish_attempts, 0U);
+        }
+        if (fault == RuntimeBackend::Fault::Capture) {
+            EXPECT_EQ(runtime.subject.captures.size(), 1U);
+        }
+    }
+    for (const bool bad_plan : {false, true}) {
+        auto altered = plan;
+        auto budget = Budget(plan);
+        if (bad_plan) {
+            altered.frames.clear();
+        } else {
+            --budget.output_bytes;
+        }
+        RuntimeBackend runtime(plan);
+        EXPECT_NE(Harness::RunWorldVisualTemporalSweep(altered, budget, runtime), "");
+        EXPECT_EQ(runtime.begins, 0U);
+        EXPECT_EQ(runtime.subject.renders, 0U);
+        EXPECT_EQ(runtime.publish_attempts, 0U);
+    }
+}
+
+TEST(TemporalSweepRuntime, BothStartupPathsAdmitOnlyTheDedicatedFreshSweep) {
+    const auto directory = Luminumbra::TestSupport::CreateUniqueTempDirectory("sweep-runtime-");
+    for (const bool environment : {false, true}) {
+        ScopedSweepEnvironment override(environment ? "1" : nullptr);
+        for (const std::string extra : {"",
+                                        "--temporal-start-tick=1",
+                                        "--temporal-tick-rate=7",
+                                        "--timelapse-frames=0",
+                                        "--frame-scan=",
+                                        "--scene-config=",
+                                        "--render-benchmark=",
+                                        "--survey",
+                                        "--load-world=existing",
+                                        "--runtime-boot-metrics",
+                                        "--ui-screenshot=",
+                                        "--ui-thumbs",
+                                        "--bake-tree-impostor=",
+                                        "--render-parity-frame=1",
+                                        "--upscale-seam-parity"}) {
+            std::vector<std::string> args{"client",
+                                          "--temporal-audit-plan=day-night",
+                                          "--temporal-start-tick=0",
+                                          "--temporal-tick-rate=30",
+                                          "--temporal-day-ticks=162000",
+                                          "--temporal-dawn-tick=27000",
+                                          "--temporal-dusk-tick=135000"};
+            if (!environment) {
+                args.emplace_back("--scenario=world_visual_sweep");
+            }
+            if (extra.starts_with("--temporal-start")) {
+                args[2] = extra;
+            } else if (extra.starts_with("--temporal-tick-rate")) {
+                args[3] = extra;
+            } else if (!extra.empty()) {
+                args.push_back(extra);
+            }
+            const auto save_root = directory / "uncreated";
+            if (!extra.empty()) {
+                args.push_back("--save-root=" + save_root.string());
+            }
+            std::vector<char*> argv;
+            for (auto& argument : args) {
+                argv.push_back(argument.data());
+            }
+            const auto argc = static_cast<int>(argv.size());
+            if (extra.empty()) {
+                EXPECT_NO_THROW((void)Harness::ParseRuntimePathOptions(argc, argv.data()));
+                const auto config =
+                    Harness::ParseRuntimeScenarioConfig(argc, argv.data(), directory);
+                ASSERT_TRUE(config.temporal_audit_plan);
+                EXPECT_TRUE(config.world_visual_sweep());
+            } else {
+                EXPECT_THROW((void)Harness::ParseRuntimePathOptions(argc, argv.data()),
+                             std::invalid_argument);
+                EXPECT_THROW(
+                    (void)Harness::ParseRuntimeScenarioConfig(argc, argv.data(), directory),
+                    std::invalid_argument);
+                EXPECT_FALSE(std::filesystem::exists(save_root));
+            }
+        }
+    }
+    const auto plan = Plan(TemporalAuditSpan::WeatherCycle, 30);
+    const auto schedule = Harness::WorldVisualSweepWeatherSchedule(plan);
+    ASSERT_TRUE(schedule.valid());
+    ASSERT_EQ(schedule.phases.size(), 5U);
+    EXPECT_EQ(schedule.phases.front().start_tick, plan.request.start_tick);
+    EXPECT_EQ(schedule.phases[1].start_tick, plan.request.start_tick + 600);
+    EXPECT_EQ(schedule.phases[2].start_tick, plan.request.start_tick + 1500);
+    EXPECT_EQ(schedule.phases[3].start_tick, plan.request.start_tick + 2700);
+    EXPECT_EQ(schedule.phases.back().start_tick, plan.end_tick);
+    EXPECT_EQ(schedule.strike_tick, plan.request.start_tick + plan.request.strike_tick);
+    EXPECT_EQ(schedule.phases[2].precipitation, 65535U);
+    EXPECT_EQ(schedule.phases.back().precipitation, 0U);
+    std::filesystem::remove_all(directory);
+}
+
 } // namespace

@@ -86,7 +86,7 @@
     {
       "id": "render.temporal-audit-plan",
       "source": "docs/development/visual-diagnostics.md#e1-fixed-camera-time-lapse-audit-runs",
-      "statement": "GL-free admission plans inclusive day/night, 120-second weather and three-day schedules with exact ticks, rational bursts and final-tick holds under 4096-frame and 10-million-tick ceilings. The sequence execution protocol re-admits immutable plans and checks aggregate transport-provided frame/manifest byte reservations against a caller-lowered 512 GiB ceiling before executable steps. It requests and verifies individual simulation ticks, bounds frozen warmup/readiness/settling and presentation substeps, derives calendar phase from ticks and carries explicit lighting controls. Sticky refusal and a final publication acknowledgement prevent partial captures from becoming complete in the protocol. Registered regressions cover schedules, readiness, phase, budgets, clock/transport faults and real creature-brain progression matching ordinary fixed ticking. Both shipping startup parsers still refuse temporal execution before output. Fixed-site app/simulation/A4 transport wiring, enforceable transport byte bounds, weather input, capability checks, existing-frontier native capture and assembly remain pending; no temporal or all-features runtime support is claimed.",
+      "statement": "GL-free admission plans inclusive day/night, 120-second weather and three-day schedules with exact ticks, rational bursts and final-tick holds under 4096-frame and 10-million-tick ceilings. The sequence execution protocol re-admits immutable plans and checks aggregate transport-provided frame/manifest byte reservations against a caller-lowered 512 GiB ceiling before executable steps. It requests and verifies individual simulation ticks, bounds frozen warmup/readiness/settling and presentation substeps, derives calendar phase from ticks and carries explicit lighting controls. Sticky refusal and a final publication acknowledgement prevent partial captures from becoming complete in the protocol. Registered regressions cover schedules, readiness, phase, budgets, clock/transport faults and real creature-brain progression matching ordinary fixed ticking. Both startup parsers admit only the dedicated fresh-world 30 Hz temporal world sweep; other modes refuse before output. The sweep supplies normal simulation/weather and bounded RGB completed-frame transport. Fixed-site qualification, A4 transport, all-features capability checks, existing-frontier native capture and assembly remain pending; no all-features presence is claimed.",
       "status": "partial",
       "evidence": [
         {
@@ -112,8 +112,8 @@
     {
       "id": "render.temporal-sweep-protocol",
       "source": "docs/development/visual-diagnostics.md#ordered-delivery",
-      "statement": "A GL-free fixed-camera sweep adapter validates feature/camera compatibility and immutable E1c plans and output budgets before transport access, passes the E3b feature policy, and keeps one transport across exact simulation ticks, rational presentation steps, frozen retries and private capture/publication. Registered regressions cover every span, creature-brain progression matching ordinary ticks, modeled particle continuity, camera/profile refusal, invalid plans/budgets/clocks, transport failures and exhausted readiness. The legacy still renderer checks its original camera/TOD/weather catalogue against the adapter pins at compile time and retains its settle counts. Both startup parsers refuse the incompatible all-features still matrix before save-root or world/output creation, including environment launches, with sweep_upward_camera_forces_empty_foliage. Native execution and shipping temporal startup, simulation/weather and completed-frame transport remain pending. This protocol does not certify temporal runtime support or all-features presence.",
-      "status": "partial",
+      "statement": "The E3c adapter is wired to the dedicated fresh-world 30 Hz temporal world sweep through a public GL-free runtime seam. One fixed camera and one backend retain creature and particle state across exact session/weather ticks, physics and streaming/water updates, rational presentation, frozen retries and completed RGB frame capture. Runtime admission checks the resolved clock/calendar. Weather-cycle inputs use the existing identity-bearing schedule installed before world creation. Bounded PPM payloads and a bounded manifest close before the final completion-directory publication; failures never publish sequence success. Both startup parsers admit only this temporal mode and reject competing capture drivers before save-root creation. The original still-matrix implementation, pins, order and all-features refusal remain unchanged. Registered TemporalSweepRuntime regressions cover admission, clock mismatches, transport continuity and failures alongside all nine E3c regressions. Native execution remains pending; no A4 bundle, fixed-site qualification, assembly support or all-features presence is claimed.",
+      "status": "covered",
       "evidence": [
         {
           "kind": "ctest",
@@ -125,12 +125,15 @@
         },
         {
           "kind": "ctest",
-          "ref": "TemporalSweepRuntime.*",
-          "planned": "Wire startup admission and simulation/weather/completed-frame transport, then run native fixed-camera sweep captures; owner: maintainers"
+          "ref": "TemporalSweepRuntime.*"
         },
         {
           "kind": "doc",
           "ref": "docs/development/visual-diagnostics.md"
+        },
+        {
+          "kind": "script",
+          "ref": "test/rendering/test_frame_attribution_wiring.py"
         }
       ],
       "requirements": []

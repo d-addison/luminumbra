@@ -88,16 +88,20 @@ struct TemporalSweepOutput {
 // shared E3b policy (including zero dt on readiness retries). Output remains
 // private to the transport until publish succeeds. Runtime GL transport and
 // startup admission are separate prerequisites, not supplied by this protocol.
+// A null profile retains legacy producer policy; it cannot admit all-features.
 // A nonempty result requires the caller to abandon its transport reservation.
 // No type-erased per-frame calls. The admitted plan bounds every operation by
 // ticks + render attempts + captures + one publication; each step is O(1).
 template<typename Transport>
 std::string RunTemporalSweep(const TemporalAuditPlan& plan,
                              const TemporalSequenceBudget& budget,
-                             const CaptureFeatureProfile& profile,
+                             const CaptureFeatureProfile* profile,
                              std::size_t camera_index,
                              Transport& transport) {
-    const auto refusal = TemporalSweepRefusal(profile, camera_index);
+    const auto refusal = profile != nullptr ? TemporalSweepRefusal(*profile, camera_index)
+                                            : (camera_index < kWorldSweepAngles.size()
+                                                   ? std::string_view{}
+                                                   : std::string_view("sweep_unknown_camera"));
     if (!refusal.empty()) {
         return std::string(refusal);
     }
@@ -106,7 +110,7 @@ std::string RunTemporalSweep(const TemporalAuditPlan& plan,
     if (sequence.next(plan.request.start_tick).action == TemporalSequenceAction::Refused) {
         return std::string(sequence.refusal());
     }
-    const auto policy = CaptureFeaturePolicy::Resolve(&profile);
+    const auto policy = CaptureFeaturePolicy::Resolve(profile);
     const auto bound =
         plan.end_tick - plan.request.start_tick + plan.max_render_attempts + plan.frames.size() + 1;
     for (std::uint64_t attempt = 0; attempt < bound; ++attempt) {
@@ -143,6 +147,16 @@ std::string RunTemporalSweep(const TemporalAuditPlan& plan,
         }
     }
     return "sweep_step_budget_exhausted";
+}
+
+// Preserve the feature-qualified adapter contract for existing callers.
+template<typename Transport>
+std::string RunTemporalSweep(const TemporalAuditPlan& plan,
+                             const TemporalSequenceBudget& budget,
+                             const CaptureFeatureProfile& profile,
+                             std::size_t camera_index,
+                             Transport& transport) {
+    return RunTemporalSweep(plan, budget, &profile, camera_index, transport);
 }
 
 } // namespace Luminumbra::Rendering
