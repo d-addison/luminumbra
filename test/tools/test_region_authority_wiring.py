@@ -1736,13 +1736,15 @@ class SimulationHostWiring(unittest.TestCase):
         self.assertIn("SimulationHostIntegrationEnabled() ? SimulationAnchors() : "
                       "std::span<const Vec3>{}", prepare)
         self.assertIn("m_physicsSystem->prepare_simulation_collisions(", prepare)
-        tick = function(session, "std::uint32_t GameSession::TickSimulation(")
+        regional_water = function(session, "void GameSession::UpdateRegionalWaterFromSimulation()")
         self.assertIn("RegionalWaterAnchors(m_replicatedSimulationAnchors, "
-                      "m_activeRegionLedger.local_anchor())", tick)
+                      "m_activeRegionLedger.local_anchor())", regional_water)
+        self.assertIn("m_waterSystem->UpdateRegionalFromSimulation(", regional_water)
+        tick = function(session, "std::uint32_t GameSession::TickSimulation(")
         self.assertLess(tick.index("PrepareSimulationCollisions(current_tick)"),
                         tick.index("StepHostPhysics()"))
         self.assertLess(tick.index("StepHostPhysics()"),
-                        tick.index("UpdateRegionalFromSimulation("))
+                        tick.index("UpdateRegionalWaterFromSimulation();"))
         fixed_step = function(session, "void GameSession::StepHostPhysics()")
         self.assertIn("SimulationHostIntegrationEnabled() && m_physicsSystem", fixed_step)
         self.assertIn("m_physicsSystem->update(fixed_dt)", fixed_step)
