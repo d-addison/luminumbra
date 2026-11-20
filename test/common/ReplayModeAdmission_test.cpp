@@ -199,6 +199,27 @@ protected:
         return nlohmann::json::parse(input);
     }
 
+    void ConfigureLegacyHeavyCheckpoints() {
+        options.ticks = 0;
+        options.heavy_resim = 0;
+        // Keep the complete dry resident set on load. Regional loads omit regenerable
+        // chunks and can regenerate them while boot-time water initialization is paused;
+        // that independently fails the heavy settle contract before owner gating matters.
+        options.systems_config_override = luminumbra::core::SystemConfig::FromJsonString(
+            R"({"sim":{"active_regions":{"enabled":false}}})");
+    }
+
+    void ExpectHeavySettleContract(const nlohmann::json& artifact) const {
+        EXPECT_EQ(artifact.at("settle_contract_ok"), true) << logs.str();
+        for (const auto* checkpoint : {"boot_settle_original", "boot_settle_loaded"}) {
+            SCOPED_TRACE(checkpoint);
+            EXPECT_EQ(artifact.at(checkpoint).at("uninited"), 0);
+            EXPECT_EQ(artifact.at(checkpoint).at("contract_ok"), true);
+        }
+        EXPECT_EQ(artifact.at("boot_settle_original").at("water_settle_skipped"), false);
+        EXPECT_EQ(artifact.at("boot_settle_loaded").at("water_settle_skipped"), true);
+    }
+
     void ExpectAdmissionRefused(const std::string& diagnostic) {
         // Refusal must precede config resolution: this runtime has no preset.
         // An existing artifact must also survive admission failures unchanged.
@@ -413,9 +434,31 @@ INSTANTIATE_TEST_SUITE_P(CaptureBoundaries,
                          testing::Combine(testing::Values(std::size_t{1}, 2, 3, 4),
                                           testing::Bool()));
 
+TEST_F(ReplayModeAdmission, HeavyOwnerComparisonAcceptsUnchangedCheckpoints) {
+    ConfigureLegacyHeavyCheckpoints();
+    for (const bool enabled : {false, true}) {
+        SCOPED_TRACE(enabled);
+        CaptureFault() = {};
+        EXPECT_EQ(RunRefusedCaptureHeavy(options, {.owner_continuation = enabled}), 0)
+            << logs.str();
+        EXPECT_EQ(CaptureFault().calls, 4u);
+        const auto artifact = Artifact();
+        ExpectHeavySettleContract(artifact);
+        EXPECT_EQ(artifact.at("roundtrip_match"), true);
+        EXPECT_EQ(artifact.at("resim_match"), true);
+        EXPECT_EQ(artifact.at("passed"), true);
+        if (enabled) {
+            EXPECT_EQ(artifact.at("roundtrip_owner_difference"), "");
+            EXPECT_EQ(artifact.at("resim_owner_difference"), "");
+        } else {
+            EXPECT_FALSE(artifact.contains("roundtrip_owner_difference"));
+            EXPECT_FALSE(artifact.contains("resim_owner_difference"));
+        }
+    }
+}
+
 TEST_F(ReplayModeAdmission, HeavyOwnerComparisonGatesBothCheckpointPairs) {
-    options.ticks = 0;
-    options.heavy_resim = 0;
+    ConfigureLegacyHeavyCheckpoints();
     for (const bool enabled : {false, true}) {
         for (const std::size_t call : {std::size_t{2}, std::size_t{4}}) {
             SCOPED_TRACE(enabled);
@@ -426,9 +469,11 @@ TEST_F(ReplayModeAdmission, HeavyOwnerComparisonGatesBothCheckpointPairs) {
                               .owner_mutation_call = call,
                               .unbound_avatar = false};
             EXPECT_EQ(RunRefusedCaptureHeavy(options, {.owner_continuation = enabled}),
-                      enabled ? 1 : 0);
+                      enabled ? 1 : 0)
+                << logs.str();
             EXPECT_EQ(CaptureFault().calls, 4u);
             const auto artifact = Artifact();
+            ExpectHeavySettleContract(artifact);
             EXPECT_EQ(artifact.at("roundtrip_match"), !enabled || call == 4);
             EXPECT_EQ(artifact.at("resim_match"), !enabled);
             EXPECT_EQ(artifact.at("passed"), !enabled);
@@ -445,8 +490,7 @@ TEST_F(ReplayModeAdmission, HeavyOwnerComparisonGatesBothCheckpointPairs) {
 }
 
 TEST_F(ReplayModeAdmission, HeavyRefusedOwnerCaptureFailsBothCheckpointPairs) {
-    options.ticks = 0;
-    options.heavy_resim = 0;
+    ConfigureLegacyHeavyCheckpoints();
     CaptureFault() = {.calls = 0,
                       .refuse_call = 0,
                       .save_dir = {},
@@ -455,6 +499,7 @@ TEST_F(ReplayModeAdmission, HeavyRefusedOwnerCaptureFailsBothCheckpointPairs) {
     EXPECT_EQ(RunRefusedCaptureHeavy(options, {.owner_continuation = true}), 1);
     EXPECT_EQ(CaptureFault().calls, 4u);
     const auto artifact = Artifact();
+    ExpectHeavySettleContract(artifact);
     EXPECT_EQ(artifact.at("roundtrip_owner_difference"), "owner.capture_refused");
     EXPECT_EQ(artifact.at("resim_owner_difference"), "owner.capture_refused");
     EXPECT_EQ(artifact.at("passed"), false);
