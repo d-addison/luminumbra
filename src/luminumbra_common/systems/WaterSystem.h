@@ -161,6 +161,8 @@ public:
     void SetRegionalScheduling(bool enabled) {
         m_regional_scheduling = enabled;
     }
+    // Adoption starts a new execution timeline; repeated ticks still refuse within it.
+    void ResetRegionalTimeline();
     struct RegionalWork {
         std::uint64_t global_windows = 0, border_windows = 0, allocated_windows = 0;
         std::uint64_t preparation_cells = 0, water_cells = 0, total_cells = 0;
@@ -309,7 +311,8 @@ public:
         return m_sim_resolution;
     }
 
-    // boot-time save-migration pass: resize EVERY loaded water chunk to the session
+    // Legacy boot-time save-migration pass; regional scheduling defers all resizing
+    // to funded preparation. Resize every loaded legacy water chunk to the session
     // resolution in one call, bypassing MAX_WATER_RESIZES_PER_TICK (that cap bounds
     // LIVE frame cost; a loaded world whose saved resolution mismatches the session
     // flag would otherwise converge at 1 chunk/tick while the seam pass — which

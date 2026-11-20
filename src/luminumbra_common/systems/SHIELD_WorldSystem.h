@@ -987,8 +987,14 @@ public:
     // (due = dispatch + kActivationPipelineLatencyTicks) and drives
     // activate_due after the swap. The client never calls it (tick stays -1:
     // batches carry due_tick -1 = publish-when-drained, today's semantics).
-    void begin_tick(std::int64_t sim_tick) {
+    void begin_tick(std::int64_t sim_tick, bool continuation = false) {
         m_current_sim_tick = sim_tick;
+        if (continuation) {
+            // Continuations count one anchored update per positive simulation tick.
+            // Rebase the existing four-update activation cadence, excluding boot
+            // updates and process-local update history. No scheduler state is saved.
+            m_update_tick_counter = static_cast<int>((sim_tick % 4 + 3) % 4);
+        }
     }
     std::int64_t current_sim_tick() const {
         return m_current_sim_tick;
@@ -1098,7 +1104,8 @@ public:
     // Owner-thread admission of one canonical Y=0 column. Generated renderer caches
     // cannot seed authority; incomplete or legacy saved water requires migration.
     // Returns nullptr on reservation or parking pressure, without replacing owners.
-    // Loading owners refuse until publication; admitted handles remain canonical
+    // Admitted or authority-bearing Loading owners refuse until publication; a bare
+    // Loading placeholder is superseded. Admitted handles remain canonical
     // until cleanup or residency retirement, independently of save reservations.
     std::shared_ptr<Chunk> resolve_water_column(const IVec3& coords);
     // Canonical authority only: never generates or reads Loading worker storage.
