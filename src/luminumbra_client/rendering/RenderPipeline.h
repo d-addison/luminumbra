@@ -32,12 +32,14 @@
 #include "passes/SsaoData.h" // SSAOData (extracted; still read here for stats)
 #include "passes/WaterfallPass.h"
 #include <array>
+#include <cstdint>
 #include <filesystem>
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <map>
 #include <memory>
 #include <nlohmann/json_fwd.hpp>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -113,6 +115,7 @@ struct ChunkRenderData {
     //  pool slice. Packs {block_index, vertex/index slot offsets}.
     static constexpr u32 kInvalidPoolHandle = 0xFFFFFFFFu;
     u32 pool_handle = kInvalidPoolHandle;
+    int diagnostic_lod = -1; // LOD of the resident upload, including retained stale geometry.
 
     void SetPresentedTerrainUpload(FarWorldLiveUpload& upload,
                                    const ChunkGeometryPool& pool) const noexcept {
@@ -122,6 +125,27 @@ struct ChunkRenderData {
         upload.valid_allocation = pool.valid_allocation(pool_handle, element_count);
     }
 };
+
+class GBufferDiagnosticCapture;
+
+struct DiagnosticTerrainDraw {
+    std::array<std::int32_t, 3> chunk{};
+    int lod = -1;
+    std::uint32_t mesh_version = 0;
+    std::uint64_t geometry_generation = 0;
+};
+
+// Capture-only submission of one pool bucket, including its unattributed tail.
+// The caller binds the bucket VAO, origin buffer and original indirect buffer.
+// draws is in command order, bounded by 65,536 records; first is its buffer index.
+// A refusal clears the current identity and disables attribution in later buckets.
+void SubmitDiagnosticTerrainBucket(GBufferDiagnosticCapture*& capture,
+                                   std::span<const DiagnosticTerrainDraw> draws,
+                                   std::size_t first,
+                                   std::size_t command_stride,
+                                   bool ladder,
+                                   ChunkGeometryPool& pool,
+                                   u32 bucket);
 
 struct WaterRenderData {
     u32 vao_id = 0;
@@ -999,6 +1023,10 @@ public:
     WaterfallSiteCache& waterfall_cache() {
         return m_waterfall_pass->waterfall_cache();
     }
+    // Last prepared frame's sheet liveness; audio never re-queries the world.
+    WaterfallPass::RoarSource waterfall_roar_source(const glm::vec3& listener) const {
+        return m_waterfall_pass->roar_source(listener);
+    }
 
     // build the live waterfall DRESSING for `world` (call once
     // after the world is entered). Queries waterfall_sites(world), bakes one
@@ -1066,6 +1094,7 @@ private:
     struct ChunkMeshPayload {
         NearTerrainUploadState refinement;
         u32 mesh_version = 0;
+        int diagnostic_lod = -1;
         std::vector<VoxelVertex> vertices;
         std::vector<u32> indices;
         std::shared_ptr<const World::NearTerrainMeshSnapshot> near_terrain_snapshot;

@@ -106,7 +106,7 @@ inline bool FoliageInstanceMatches(std::uint64_t build_generation,
 inline bool FoliagePhaseMatchesProfile(const FoliagePhaseEvidence& sample,
                                        std::uint32_t phase,
                                        float density_multiplier) {
-    const auto near = [](float a, float b) {
+    const auto close_to = [](float a, float b) {
         return std::isfinite(a) && std::isfinite(b) && std::abs(a - b) <= 0.0001f;
     };
     const float expected_wind = phase == 2 ? FoliageVisualProfile::windy_input : 0.0f;
@@ -117,15 +117,17 @@ inline bool FoliagePhaseMatchesProfile(const FoliagePhaseEvidence& sample,
                                   sample.available_frame,
                                   sample.capture_frame) &&
            std::isfinite(sample.camera[0]) && std::isfinite(sample.camera[2]) &&
-           near(sample.camera[1], sample.terrain_height_m + FoliageVisualProfile::eye_height_m) &&
-           near(sample.yaw_degrees, FoliageVisualProfile::yaw_degrees) &&
-           near(sample.pitch_degrees, FoliageVisualProfile::pitch_degrees) &&
-           near(sample.fov_degrees, FoliageVisualProfile::fov_degrees) &&
-           near(sample.time_of_day, FoliageVisualProfile::time_of_day) &&
-           near(sample.fade_start_m, FoliageVisualProfile::fade_start_m) &&
-           near(sample.fade_end_m, FoliageVisualProfile::fade_end_m) &&
-           near(sample.density_scale, FoliageVisualProfile::density_scale * density_multiplier) &&
-           near(sample.wind_input[0], expected_wind) && near(sample.wind_input[1], 0.0f) &&
+           close_to(sample.camera[1],
+                    sample.terrain_height_m + FoliageVisualProfile::eye_height_m) &&
+           close_to(sample.yaw_degrees, FoliageVisualProfile::yaw_degrees) &&
+           close_to(sample.pitch_degrees, FoliageVisualProfile::pitch_degrees) &&
+           close_to(sample.fov_degrees, FoliageVisualProfile::fov_degrees) &&
+           close_to(sample.time_of_day, FoliageVisualProfile::time_of_day) &&
+           close_to(sample.fade_start_m, FoliageVisualProfile::fade_start_m) &&
+           close_to(sample.fade_end_m, FoliageVisualProfile::fade_end_m) &&
+           close_to(sample.density_scale,
+                    FoliageVisualProfile::density_scale * density_multiplier) &&
+           close_to(sample.wind_input[0], expected_wind) && close_to(sample.wind_input[1], 0.0f) &&
            std::isfinite(sample.maximum_instance_wind) &&
            std::abs(sample.maximum_instance_wind - expected_wind) <= 0.0001 &&
            std::isfinite(sample.shader_time_seconds) && sample.shader_time_seconds >= 0.0 &&

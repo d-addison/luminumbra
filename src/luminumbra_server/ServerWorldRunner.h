@@ -310,7 +310,8 @@ public:
 
     bool RestoreAvatarOwner(const World::PlayerAvatarOwnerState& state,
                             std::span<const World::PhysicsOwnerState> remaining_frozen = {}) {
-        if (!m_session || state.avatar.player_id != m_avatars.size()) {
+        if (!m_session || m_session->GetSimulationTickCount() != 0 ||
+            state.avatar.player_id != m_avatars.size()) {
             return false;
         }
         auto* physics = m_session->GetPhysicsSystem();

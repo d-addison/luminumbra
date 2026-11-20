@@ -196,6 +196,7 @@ struct NetworkedSessionDriver::Impl {
     NetSessionPeerContext client_ctx;
 
     NetworkedSessionDriver::Config config;
+    std::uint64_t preparation_retries = 0;
 
     // Telemetry for the artifact.
     std::uint64_t hash_exchanges = 0;    // cadence ticks where hashes compared
@@ -358,7 +359,16 @@ bool NetworkedSessionDriver::StepAgreedTick() {
         }
     }
     if (retry) {
-        return true;
+        // Run-wide retries cannot exceed the requested tick budget, even when
+        // preparation refuses before the bounded pump can consume any input.
+        const std::uint64_t max_preparation_retries = budget;
+        if (m_impl->preparation_retries < max_preparation_retries) {
+            ++m_impl->preparation_retries;
+            return true;
+        }
+        m_failure_reason = "region_preparation_stalled_at_tick_" + std::to_string(m_agreed_ticks);
+        m_finished = true;
+        return false;
     }
 
     // Pump both peers until BOTH advance one more agreed tick (or terminate). The

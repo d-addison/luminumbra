@@ -59,6 +59,7 @@
 #include <utility>
 #include <vector>
 
+#include "luminumbra_client/app/CreatureBodyAttachment.h"
 #include "luminumbra_client/app/FarmSpeciesCache.h"
 #include "luminumbra_client/app/SessionExit.h"
 #include "luminumbra_client/rendering/TimeOfDayModel.h"
@@ -17995,6 +17996,186 @@ TEST(SurfaceQuery, CharacterAdmissionChecksTheCombinedHorizonBeforeAllocating) {
     EXPECT_EQ(physics.simulation_collision_hash(), hash);
     physics.remove_avatar_character(0);
     EXPECT_NE(physics.create_avatar_character({2248, 10, 8}), PhysicsSystem::kInvalidAvatar);
+}
+
+namespace {
+class CreatureAttachmentTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        physics.startup();
+        physics.set_world_system(world.get());
+    }
+
+    entt::entity AddCreature(const glm::vec3& position = {8, 10000, 8}) {
+        const auto entity = registry.create();
+        registry.emplace<Luminumbra::Components::CreatureComponent>(entity);
+        registry.emplace<Luminumbra::Components::TransformComponent>(entity).position = position;
+        return entity;
+    }
+
+    void FillHorizon() {
+        for (int index = 0; index < 14; ++index) {
+            ASSERT_NE(
+                physics.create_avatar_character({8.0f + static_cast<float>(index) * 160, 10000, 8}),
+                PhysicsSystem::kInvalidAvatar);
+        }
+    }
+
+    std::unique_ptr<SHIELD_WorldSystem> world = MakeSimulationCollisionWorld();
+    PhysicsSystem physics;
+    entt::registry registry;
+    Luminumbra::Client::CreatureBodyAttachmentCursor cursor;
+};
+
+using Luminumbra::Client::AttachMissingCreatureBodies;
+using Luminumbra::Components::CreaturePhysicsComponent;
+} // namespace
+
+TEST_F(CreatureAttachmentTest, CreatureAttachmentSkipsRefusalsWithinAnIndependentAttemptBudget) {
+    FillHorizon();
+    const auto refused = AddCreature({2248, 10000, 8});
+    const auto also_refused = AddCreature({2248, 10000, 8});
+    const auto first = AddCreature();
+    const auto second = AddCreature();
+    AttachMissingCreatureBodies(&physics, registry, cursor, 1, 1);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 14u);
+    EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(refused));
+    EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(first));
+    EXPECT_EQ(cursor.next, 1u);
+    AttachMissingCreatureBodies(&physics, registry, cursor, 1, 2);
+    EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(first));
+    EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(also_refused));
+    EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(second));
+    EXPECT_EQ(physics.avatar_character_slot_count(), 15u);
+    AttachMissingCreatureBodies(&physics, registry, cursor, 1, 2);
+    EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(second));
+    EXPECT_EQ(physics.avatar_character_slot_count(), 16u);
+    EXPECT_EQ(cursor.next, 0u);
+    registry.get<Luminumbra::Components::TransformComponent>(refused).position = {8, 10000, 8};
+    AttachMissingCreatureBodies(&physics, registry, cursor, 1, 1);
+    EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(refused));
+}
+
+TEST_F(CreatureAttachmentTest,
+       CreatureAttachmentEventuallyPassesMoreThanSixteenPersistentRefusals) {
+    FillHorizon();
+    std::array<entt::entity, 33> refused{};
+    for (auto& entity : refused) {
+        entity = AddCreature({2248, 10000, 8});
+    }
+    const auto admissible = AddCreature();
+    for (std::size_t call = 1; call <= 2; ++call) {
+        AttachMissingCreatureBodies(&physics, registry, cursor);
+        EXPECT_EQ(cursor.next, call * 16);
+        EXPECT_EQ(physics.avatar_character_slot_count(), 14u);
+        EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(admissible));
+    }
+    AttachMissingCreatureBodies(&physics, registry, cursor);
+    EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(admissible));
+    EXPECT_EQ(physics.avatar_character_slot_count(), 15u);
+    for (const auto entity : refused) {
+        EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(entity));
+    }
+}
+
+TEST_F(CreatureAttachmentTest, CreatureAttachmentDisabledBoundsAndNullPhysicsDoNoWork) {
+    const auto entity = AddCreature();
+    cursor.next = 5;
+    AttachMissingCreatureBodies(nullptr, registry, cursor);
+    AttachMissingCreatureBodies(&physics, registry, cursor, 0, 2);
+    AttachMissingCreatureBodies(&physics, registry, cursor, -1, 2);
+    AttachMissingCreatureBodies(&physics, registry, cursor, 1, 0);
+    AttachMissingCreatureBodies(&physics, registry, cursor, 1, -1);
+    EXPECT_EQ(cursor.next, 5u);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 0u);
+    EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(entity));
+    AttachMissingCreatureBodies(&physics, registry, cursor);
+    EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(entity));
+}
+
+TEST_F(CreatureAttachmentTest, CreatureAttachmentCursorSurvivesDestructionAndEntityReuse) {
+    const auto first = AddCreature();
+    const auto destroyed = AddCreature();
+    const auto middle = AddCreature();
+    const auto swapped = AddCreature();
+    AttachMissingCreatureBodies(&physics, registry, cursor, 1, 1);
+    ASSERT_TRUE(registry.all_of<CreaturePhysicsComponent>(first));
+    ASSERT_EQ(cursor.next, 1u);
+    registry.destroy(destroyed);
+    AttachMissingCreatureBodies(&physics, registry, cursor, 1, 1);
+    EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(swapped));
+    const auto reused = AddCreature();
+    ASSERT_EQ(entt::to_entity(reused), entt::to_entity(destroyed));
+    ASSERT_NE(reused, destroyed);
+    AttachMissingCreatureBodies(&physics, registry, cursor, 1, 1);
+    EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(middle));
+    AttachMissingCreatureBodies(&physics, registry, cursor, 1, 1);
+    EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(reused));
+    EXPECT_EQ(cursor.next, 0u);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 4u);
+}
+
+TEST_F(CreatureAttachmentTest, CreatureAttachmentBoundsScanningAndWrapsPastSkippedSlots) {
+    const auto missing_transform = registry.create();
+    registry.emplace<Luminumbra::Components::CreatureComponent>(missing_transform);
+    const auto attached = AddCreature();
+    const auto body = physics.create_avatar_character({8, 10000, 8});
+    ASSERT_NE(body, PhysicsSystem::kInvalidAvatar);
+    registry.emplace<CreaturePhysicsComponent>(attached, body);
+    for (int index = 0; index < 15; ++index) {
+        const auto entity = registry.create();
+        registry.emplace<Luminumbra::Components::CreatureComponent>(entity);
+    }
+    const auto admissible = AddCreature();
+    AttachMissingCreatureBodies(&physics, registry, cursor);
+    EXPECT_EQ(cursor.next, 16u);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 1u);
+    EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(admissible));
+    AttachMissingCreatureBodies(&physics, registry, cursor);
+    EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(admissible));
+    EXPECT_EQ(physics.avatar_character_slot_count(), 2u);
+    EXPECT_EQ(registry.get<CreaturePhysicsComponent>(attached).avatar_index, body);
+    EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(missing_transform));
+}
+
+TEST_F(CreatureAttachmentTest, CreatureAttachmentCursorResetsAfterShrinkAndClear) {
+    const auto first = AddCreature();
+    const auto second = AddCreature();
+    const auto tail = AddCreature();
+    AttachMissingCreatureBodies(&physics, registry, cursor, 2);
+    ASSERT_EQ(cursor.next, 2u);
+    registry.destroy(first);
+    registry.destroy(second);
+    AttachMissingCreatureBodies(&physics, registry, cursor, 1, 1);
+    EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(tail));
+    EXPECT_EQ(cursor.next, 0u);
+    AddCreature();
+    AttachMissingCreatureBodies(&physics, registry, cursor, 1, 1);
+    ASSERT_EQ(cursor.next, 1u);
+    registry.clear();
+    AttachMissingCreatureBodies(&physics, registry, cursor);
+    EXPECT_EQ(cursor.next, 0u);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 3u);
+    const auto newborn = AddCreature();
+    AttachMissingCreatureBodies(&physics, registry, cursor);
+    EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(newborn));
+}
+
+TEST_F(CreatureAttachmentTest, CreatureAttachmentDefaultCreationBudgetIsFour) {
+    std::array<entt::entity, 6> entities{};
+    for (auto& entity : entities) {
+        entity = AddCreature();
+    }
+    AttachMissingCreatureBodies(&physics, registry, cursor);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 4u);
+    EXPECT_EQ(cursor.next, 4u);
+    EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(entities[4]));
+    EXPECT_FALSE(registry.all_of<CreaturePhysicsComponent>(entities[5]));
+    AttachMissingCreatureBodies(&physics, registry, cursor);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 6u);
+    for (const auto entity : entities) {
+        EXPECT_TRUE(registry.all_of<CreaturePhysicsComponent>(entity));
+    }
 }
 
 TEST(SurfaceQuery, OverflowBodiesWaitForTerrainAndResumeTheirVelocity) {

@@ -16,6 +16,9 @@ test/fixtures/active-regions/devel-off-plant-edit/* -text
 # Fixed serializer baseline bytes; the test handles native Windows stream newlines.
 test/fixtures/smoke_artifact/devel-*.json -text
 
+# Frozen revision-6 terrain presets are checked against sha256.json byte hashes.
+worlds/atlas/presets-rev6/*.json -text
+
 # Original acceptance receipts retain byte identity across platforms.
 docs/evidence/blender-presentation-20260913/*.json -text
 
