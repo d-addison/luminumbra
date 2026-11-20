@@ -1104,7 +1104,8 @@ public:
     // Owner-thread admission of one canonical Y=0 column. Generated renderer caches
     // cannot seed authority; incomplete or legacy saved water requires migration.
     // Returns nullptr on reservation or parking pressure, without replacing owners.
-    // Loading owners refuse until publication; admitted handles remain canonical
+    // Admitted or authority-bearing Loading owners refuse until publication; a bare
+    // Loading placeholder is superseded. Admitted handles remain canonical
     // until cleanup or residency retirement, independently of save reservations.
     std::shared_ptr<Chunk> resolve_water_column(const IVec3& coords);
     // Canonical authority only: never generates or reads Loading worker storage.
