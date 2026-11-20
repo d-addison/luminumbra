@@ -51,7 +51,7 @@ EXCLUDED = frozenset({"pilot/debug_view.frag.hlsl", "pilot/ssao.frag.hlsl"})
 LADDER_FILES = frozenset({"g_buffer.vert", "g_buffer.frag", "instanced_mesh.vert", "skinned_mesh.vert"})
 LADDER_DEFINES = ("LUMINUMBRA_FAR_WORLD_LADDER 1",)
 DIAGNOSTIC_FILES = frozenset({
-    "g_buffer.frag", "static_asset.frag", "tree_impostor.frag", "plant_procgen.frag",
+    "g_buffer.frag", "static_asset.frag", "plant_procgen.frag",
     "scent_decal.frag", "foliage.frag", "water.frag", "glass_oit.frag", "waterfall.frag",
     "magical_particles.frag",
 })
