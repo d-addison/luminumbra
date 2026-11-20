@@ -30,6 +30,7 @@ layout(binding = 6) uniform sampler2D gContribution;
 uniform int u_contributionReady = 0;
 uniform int u_identityReady = 0;
 uniform int u_inspect = 0;
+uniform int u_zoom = 0;
 uniform int u_pixelX = 0;
 uniform int u_pixelY = 0;
 layout(std430, binding = 7) buffer InspectorResult {
@@ -137,14 +138,19 @@ void main() {
         return;
     }
     if (u_inspect != 0) {
-        ivec2 pixel = ivec2(u_pixelX, u_pixelY);
-        inspectorId = texelFetch(gIdentity, pixel, 0);
-        vec4 normalMaterial = texelFetch(gNormalMaterial, pixel, 0);
-        inspectorAlbedo = vec4(texelFetch(gAlbedo, pixel, 0).rgb,
-                               round(normalMaterial.a * 255.0));
-        inspectorNormalDepth = vec4(decode_octahedral(normalMaterial.xy),
-                                    texelFetch(gDepth, pixel, 0).r);
-        FragColor = vec4(0.0);
+        ivec2 offset = u_zoom != 0 ? ivec2(gl_FragCoord.xy) - ivec2(4) : ivec2(0);
+        ivec2 pixel = clamp(ivec2(u_pixelX, u_pixelY) + offset,
+                            ivec2(0), textureSize(gIdentity, 0) - 1);
+        // Only the centre invocation owns the one-record SSBO; all 81 texels display raw albedo.
+        if (u_zoom == 0 || all(equal(ivec2(gl_FragCoord.xy), ivec2(4)))) {
+            inspectorId = texelFetch(gIdentity, pixel, 0);
+            vec4 normalMaterial = texelFetch(gNormalMaterial, pixel, 0);
+            inspectorAlbedo = vec4(texelFetch(gAlbedo, pixel, 0).rgb,
+                                   round(normalMaterial.a * 255.0));
+            inspectorNormalDepth = vec4(decode_octahedral(normalMaterial.xy),
+                                        texelFetch(gDepth, pixel, 0).r);
+        }
+        FragColor = vec4(texelFetch(gAlbedo, pixel, 0).rgb, 1.0);
         return;
     }
     if (u_mode >= 6 && u_mode <= 11) {

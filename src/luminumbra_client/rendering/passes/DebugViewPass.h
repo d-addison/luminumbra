@@ -147,16 +147,56 @@ public:
         bool enabled = false;
         bool inspector_open = false;
         bool refresh = false;
+        bool armed = false;
+        bool frozen = false;
+        bool inspect_requested = false;
+        bool frame_invalidated = false; // Window resize notification precedes target recreation.
         int view = None;
-        int x = 0;
-        int y = 0;
+        int x = -1;
+        int y = -1;
         DiagnosticExtent extent{};
+        DiagnosticExtent output{};
+        unsigned int zoom_texture = 0; // Borrowed until refresh, resize or disable.
+        unsigned int image_texture = 0;
+        std::string probe_json;
         unsigned int contribution_texture = 0; // borrowed, owned by LightingPass
         DiagnosticExtent contribution_size{};
         int contribution_view = None;
         std::string result;
         std::string status;
     };
+    struct Viewport {
+        double window_width = 0;
+        double window_height = 0;
+        DiagnosticExtent framebuffer{};
+        // Rendered image rectangle, top-left framebuffer pixels (allows letterboxing).
+        double left = 0;
+        double top = 0;
+        double width = 0;
+        double height = 0;
+    };
+    // The sole window/DPI -> top-left attachment conversion. Refusals do not mutate state.
+    static bool
+    select_pixel(Controls& control, double window_x, double window_y, const Viewport& viewport);
+    // Kept GL-free and inline: the console widget also links in the standalone UI target.
+    static void request_inspection(Controls& control) {
+        if (!control.enabled || !control.inspector_open) {
+            return;
+        }
+        control.inspect_requested = true;
+        control.probe_json.clear();
+        control.result.clear();
+        control.zoom_texture = 0;
+        if (!control.frozen) {
+            control.refresh = true;
+        }
+    }
+    // Resize callers invalidate immediately, before deferred target recreation.
+    static void invalidate_selection(Controls& control);
+    void invalidate();
+    // Exact schema-1 clipboard payload; the richer UI record is separate.
+    static std::string
+    pixel_json(const DiagnosticExtent& extent, int x, int y, const InspectorPixel& pixel);
     // Render-thread UI bridge; the registry owns visibility, the pass owns GL storage.
     static Controls& controls() {
         static Controls control;
@@ -212,6 +252,8 @@ private:
     struct Snapshot;
     std::unique_ptr<Snapshot> m_snapshot;
     void finish_frame(const RenderContext& ctx);
+    bool retain_images(const RenderContext& ctx);
+    void inspect_snapshot(const RenderContext& ctx);
     void bind_sources(const RenderContext& ctx, Shader& shader);
     std::unique_ptr<Shader> m_shader;
     std::unique_ptr<Shader> m_contribution_shader;
