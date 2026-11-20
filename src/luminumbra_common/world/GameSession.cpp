@@ -5385,10 +5385,39 @@ std::filesystem::path GameSession::GetWorldSaveDir() const {
     return GetSaveRootPath() / "worlds/saves" / m_metadata.worldId;
 }
 
-bool GameSession::SaveWorldState(WorldStateSaveReport* report) {
+namespace {
+
+void ResetSaveWork(WorldStateSaveReport* report) {
     if (report) {
         report->work = {};
     }
+}
+
+// Publishes the save work performed between construction and destruction on this thread.
+class SaveWorkScope {
+public:
+    explicit SaveWorkScope(WorldStateSaveReport* report)
+        : m_report(report)
+        , m_before(Persistence::WorldSaveService::work_counts()) {}
+    SaveWorkScope(const SaveWorkScope&) = delete;
+    SaveWorkScope& operator=(const SaveWorkScope&) = delete;
+    SaveWorkScope(SaveWorkScope&&) = delete;
+    SaveWorkScope& operator=(SaveWorkScope&&) = delete;
+    ~SaveWorkScope() {
+        if (m_report) {
+            m_report->work = Persistence::WorldSaveService::work_counts() - m_before;
+        }
+    }
+
+private:
+    WorldStateSaveReport* m_report;
+    Persistence::SaveWorkCounts m_before;
+};
+
+} // namespace
+
+bool GameSession::SaveWorldState(WorldStateSaveReport* report) {
+    ResetSaveWork(report);
     if (FoliageStep::PersistencePending(*this)) {
         return false;
     }
@@ -5414,9 +5443,7 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
                                        WorldStateSaveReport* report,
                                        bool full_snapshot,
                                        bool write_metadata) {
-    if (report) {
-        report->work = {};
-    }
+    ResetSaveWork(report);
     if (!m_worldUsable || FoliageStep::PersistencePending(*this)) {
         return false;
     }
@@ -5437,15 +5464,7 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
     const auto save = [&]() {
         // Capture on the executing thread, including validation, nested writers and failures.
         // Report work independently of dirty acknowledgement or transaction success.
-        struct WorkReport {
-            WorldStateSaveReport* report;
-            Persistence::SaveWorkCounts before;
-            ~WorkReport() {
-                if (report) {
-                    report->work = Persistence::WorldSaveService::work_counts() - before;
-                }
-            }
-        } work_report{report, Persistence::WorldSaveService::work_counts()};
+        const SaveWorkScope work_report{report};
         const auto save_started = std::chrono::steady_clock::now();
         const auto elapsed_ms = [&save_started]() {
             return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
