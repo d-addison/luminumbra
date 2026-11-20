@@ -118,6 +118,42 @@ profile with non-vacuous presence evidence. These are planned capabilities;
 current still gates and `tools/timelapse.py` do not establish this coverage or
 visual approval.
 
+For offline assembly of an E1c file-transport sequence, select its manifest explicitly:
+
+```sh
+python3 -I -B tools/timelapse.py CAPTURES --manifest CAPTURES/sequence.capture -o review.gif --mp4 review.mp4
+```
+
+The `--manifest PATH` option (Python entry point: `build(..., manifest=PATH)`)
+selects a JSON document with schema `luminumbra.temporal_audit_sequence`, version 1.
+The manifest may have any filename and live inside or outside `CAPTURES`; an
+in-directory manifest is excluded from extra-frame checks by file identity.
+Missing, unreadable, nonregular, oversized or invalid explicit manifests refuse
+without falling back to legacy assembly. It requires `status: complete`,
+verifies `plan_sha256`, and joins capture records to the planned frame indices
+and ticks, retaining final-tick hold order. Each planned frame must have exactly
+one image selected by `--pattern` (default `*.ppm`). All listed payloads, including
+sidecars, must match their exact byte counts and SHA-256 hashes. Missing, extra
+or duplicate frames/payloads, invalid paths and incomplete sequences refuse;
+there is no partial-output mode. The same verified descriptors supply the bytes
+copied into private staging for decoding, so input paths are never reopened for
+encoding after hashing.
+
+Manifest assembly caps frames at 4,096, payloads at 12 per frame and 128 MiB each,
+and total payload bytes at 512 MiB before decoding or invoking ffmpeg. The selected
+manifest is capped at 16 MiB; the flat frame-directory scan permits 100,000 entries
+and does not read unrelated JSON documents.
+Decoded RGB buffers have a separate 512 MiB aggregate reservation, with at most
+16,777,216 pixels per image and dimensions at most 16,384 before and after scaling.
+GIF still uses Pillow. Requested MP4 requires ffmpeg; a missing encoder, failed
+exit or empty output refuses. Both outputs are staged until encoding succeeds;
+an encoder failure leaves existing destinations untouched and removes temporary
+video files. Without `--manifest`, the original natural-sort/Pillow path and
+optional-MP4 fallback are retained, ignoring unrelated entries without manifest
+discovery even when a sequence manifest is present. Stdlib-only registered Python
+regressions use image doubles and a child encoder; native temporal capture, temporal metrics
+and all-features qualification remain pending.
+
 ## World-sweep review sheets
 
 For offline PNG diagnostics, run `python3 -I -B tools/gates/visual_lint.py CAPTURES > report.json` (Pillow and NumPy). JSON goes to stdout and the human summary to stderr; exit 0 means no candidates, 1 means candidates, and 2 means incomplete or invalid input. The centralized threshold table bounds input sizes and analysis resolution. Checks cover sentinel-color clusters, sky below a measured or estimated horizon, repeated gradient steps, flat opaque rectangles, unchanged frames or bottom-30% ground approximations in matched weather sweeps, and histogram drift with `--baseline DIRECTORY` (matching names and dimensions required). Optional `--sidecars DIRECTORY` selects per-image `<stem>.json` or `<name>.png.json` objects with `horizon_row_from_top` (also under `pixels`), `camera.pitch`/`camera.fov` or `pitch_degrees`/`fov_degrees` in degrees; positive pitch looks up and absent FOV uses 70 degrees. Explicit `comparison_group`/`variant` strings pair other captures expected to differ. Known clear/storm sweep and weather-baseline/weather-visual names pair automatically; identical duplicate sweep exports share a variant. Reports label horizon estimates and unresolved horizons; findings are heuristic candidates for review, not pixel attribution or visual approval. Inputs remain unchanged and the checker runs only when invoked.

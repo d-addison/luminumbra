@@ -86,7 +86,7 @@
     {
       "id": "render.temporal-audit-plan",
       "source": "docs/development/visual-diagnostics.md#e1-fixed-camera-time-lapse-audit-runs",
-      "statement": "GL-free admission plans inclusive day/night, 120-second weather and three-day schedules with exact ticks, rational bursts and final-tick holds under 4096-frame and 10-million-tick ceilings. The sequence execution protocol re-admits immutable plans and checks aggregate transport-provided frame/manifest byte reservations against a caller-lowered 512 GiB ceiling before executable steps. It requests and verifies individual simulation ticks, bounds frozen warmup/readiness/settling and presentation substeps, derives calendar phase from ticks and carries explicit lighting controls. Sticky refusal and a final publication acknowledgement prevent partial captures from becoming complete in the protocol. Registered regressions cover schedules, readiness, phase, budgets, clock/transport faults and real creature-brain progression matching ordinary fixed ticking. Both shipping startup parsers still refuse temporal execution before output. Fixed-site app/simulation/A4 transport wiring, enforceable transport byte bounds, weather input, capability checks, existing-frontier native capture and assembly remain pending; no temporal or all-features runtime support is claimed.",
+      "statement": "GL-free admission plans inclusive day/night, 120-second weather and three-day schedules with exact ticks, rational bursts and final-tick holds under 4096-frame and 10-million-tick ceilings. The sequence execution protocol re-admits immutable plans and checks aggregate transport-provided frame/manifest byte reservations against a caller-lowered 512 GiB ceiling before executable steps. It requests and verifies individual simulation ticks, bounds frozen warmup/readiness/settling and presentation substeps, derives calendar phase from ticks and carries explicit lighting controls. Sticky refusal and a final publication acknowledgement prevent partial captures from becoming complete in the protocol. Registered regressions cover schedules, readiness, phase, budgets, clock/transport faults and real creature-brain progression matching ordinary fixed ticking. Offline assembly selects version-1 sequence manifests through explicit --manifest PATH (build keyword manifest), accepts any filename inside or outside the frame directory, excludes the manifest from extras by file identity, requires complete status and the canonical plan hash, orders frames by the planned indices/ticks and verifies every payload size and SHA-256 through the same descriptors used for staging. Missing, extra, duplicate or invalid inputs refuse; invalid explicit manifests never fall back. Without the option the original legacy pipeline runs without discovery. Assembly caps input at 4096 frames, 12 payloads per frame, 128 MiB per payload and 512 MiB total; decoded RGB buffers reserve a separate 512 MiB with bounded dimensions. Requested MP4 requires ffmpeg; encoder failure preserves existing outputs and removes staged video. Registered stdlib-only regressions cover order, hashes, partial input, budgets, child-encoder failure and legacy byte parity. Both shipping startup parsers still refuse temporal execution before output. Fixed-site app/simulation/A4 transport wiring, enforceable transport byte bounds, weather input, capability checks, existing-frontier native capture and temporal metrics remain pending; no temporal or all-features runtime support is claimed.",
       "status": "partial",
       "evidence": [
         {
@@ -96,6 +96,14 @@
         {
           "kind": "ctest",
           "ref": "TemporalAuditSequence.*"
+        },
+        {
+          "kind": "script",
+          "ref": "tools/gates/test_temporal_assembly.py"
+        },
+        {
+          "kind": "ctest",
+          "ref": "TemporalAssemblyPython"
         },
         {
           "kind": "ctest",
