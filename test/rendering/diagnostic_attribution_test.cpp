@@ -3563,7 +3563,7 @@ TEST(DiagnosticAttribution, ParticleBatchAttributesAllEmitterKindsAtTheOriginalD
     Contains(draw,
              "glBindVertexBuffer(0, m_instance_vbo[m_ring_cursor], 0, sizeof(InstanceRecord))");
     Contains(WithoutWhitespace(draw),
-             "AttributedGl::Submit(glDrawArraysInstanced,GL_TRIANGLE_STRIP,0,4,"
+             "AttributedGl::Submit(glDrawArraysInstanced,GLenum{GL_TRIANGLE_STRIP},0,4,"
              "static_cast<GLsizei>(m_frame_instance_count))");
     EXPECT_EQ(Count(draw, "glDrawArraysInstanced,"), 1u);
     Contains(shader, "if (shape <= 0.0)");

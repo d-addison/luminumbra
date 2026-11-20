@@ -3262,10 +3262,10 @@ class ParticleContributorTests(unittest.TestCase):
         self.assertLess(draw.index("capture->write_current("), draw.index("AttributedGl::Submit("))
         self.assertEqual(draw.count("capture->write_current("), 1)
         self.assertEqual(draw.count("AttributedGl::Submit("), 1)
-        self.assertIn("glDrawArraysInstanced,GL_TRIANGLE_STRIP,0,4,static_cast<GLsizei>(m_frame_instance_count)",
+        self.assertIn("glDrawArraysInstanced,GLenum{GL_TRIANGLE_STRIP},0,4,static_cast<GLsizei>(m_frame_instance_count)",
                       re.sub(r"\s+", "", draw))
         # Both refusal paths keep the original identity but block publication.
-        shared = read(CLIENT / "rendering/passes/GBufferPass.cpp")
+        shared = read(CLIENT / "rendering/GBufferTargets.cpp")
         current = block(shared, "void GBufferDiagnosticCapture::write_current(")
         self.assertIn("record_contributor();", block(current, "if (!state_->framebuffer)"))
         self.assertIn('constexpr std::string_view suffix = ":contributor_only";', current)
@@ -3304,7 +3304,7 @@ class ParticleContributorTests(unittest.TestCase):
                 start -= 1
             shader = shader[:start] + shader[end:]
         self.assertEqual(hashlib.sha256(shader.encode()).hexdigest(),
-                         "7150718d70c8bab5dec184cc484a84c09873d76ea0457df9e5f61c5f6f8f5fc3")
+                         "dcb928e1b40f30b5cfcf32796a675a12b38bee756deb9e988ddf2862c0ae3c8c")
         draw = block(read(CLIENT / "rendering/passes/ParticlePass.cpp"),
                      "std::size_t ParticlePass::execute(")
         branch = "if (auto* capture = GBufferDiagnosticCapture::Current())"
@@ -3319,7 +3319,7 @@ class ParticleContributorTests(unittest.TestCase):
         draw = draw.replace("draw_shader->", "m_shader->")
         original = "{" + re.sub(r"\s+", "", draw) + "}"
         self.assertEqual(hashlib.sha256(original.encode()).hexdigest(),
-                         "bbbbb1094633b1c5f147d8bd5287e4522802ad4719a306297a83f178d0219b96")
+                         "2b294f4af9fe4ae19afd27a6be23488b665e84dbbe07a4505ce820d75ae19286")
 
     def test_weather_overlay_refuses_instead_of_guessing_a_particle_identity(self):
         draw = block(read(CLIENT / "rendering/passes/SkyboxPass.cpp"),
