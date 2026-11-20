@@ -2144,7 +2144,7 @@ bool PhysicsSystem::restore_player_owner(const World::PhysicsOwnerState& state) 
         !SimulationHorizon::valid(Vec3(static_cast<float>(recipe.feet.GetX()),
                                        static_cast<float>(recipe.feet.GetY()),
                                        static_cast<float>(recipe.feet.GetZ()))) ||
-        !ReferencesExist(recipe, *m_jolt_system)) {
+        !ReferencesExist(recipe, *m_jolt_system, std::span<const std::uint32_t>{})) {
         return false;
     }
     // Stage both stances and all saved contacts before publishing the singleton.
