@@ -6675,4 +6675,235 @@ TEST_F(WorldOpenRefusal, ScheduledMetadataRoundTripsBothClockBackendsAndLegacyBy
     ASSERT_TRUE(WorldSaveService::save_metadata(indexed_bytes, indexed_output));
     EXPECT_EQ(Read(indexed_output / "world_info.json"), indexed_bytes);
 }
+TEST_F(WorldOpenRefusal, ServerOwnerContinuationRestoresInPlayerOrderAndContinues) {
+    Write(root / "data/common/systems.json",
+          R"({"sim":{"active_regions":{"enabled":false},"water_high_res":{"enabled":false}}})");
+    Server::ServerWorldRunnerConfig source_config;
+    source_config.root_path = RootString();
+    source_config.world_id = "fixture";
+    source_config.surface_radius = 0;
+    source_config.collision_radius = 0;
+    source_config.test_streaming_radius_cap = 1;
+    source_config.autosave_interval_ticks = 0;
+    source_config.finite_hydrology = false;
+    source_config.avatar_count = 1;
+    Server::ServerWorldRunner source(source_config);
+    World::PlayerAvatarOwnerState captured;
+    EXPECT_FALSE(source.CaptureAvatarOwner(0, captured));
+    EXPECT_FALSE(source.RestoreAvatarOwner(captured));
+    ASSERT_TRUE(source.Boot()) << source.GetBootError();
+    ASSERT_TRUE(source.CaptureAvatarOwner(0, captured));
+    const auto original = captured;
+    EXPECT_FALSE(source.CaptureAvatarOwner(1, captured));
+    EXPECT_EQ(captured.physics.bytes, original.physics.bytes);
+    EXPECT_EQ(captured.physics.size, original.physics.size);
+
+    auto target_config = source_config;
+    target_config.avatar_count = 0;
+    Server::ServerWorldRunner target(target_config);
+    ASSERT_TRUE(target.Boot()) << target.GetBootError();
+    auto invalid = captured;
+    invalid.avatar.player_id = 1;
+    EXPECT_FALSE(target.RestoreAvatarOwner(invalid));
+    invalid = captured;
+    invalid.avatar.velocity.x = std::numeric_limits<float>::infinity();
+    EXPECT_FALSE(target.RestoreAvatarOwner(invalid));
+    ASSERT_TRUE(target.Avatars().empty());
+    ASSERT_EQ(target.Session()->GetPhysicsSystem()->avatar_character_slot_count(), 0u);
+    ASSERT_TRUE(target.RestoreAvatarOwner(captured));
+    ASSERT_EQ(target.Avatars().size(), 1u);
+    EXPECT_FALSE(target.RestoreAvatarOwner(captured));
+    EXPECT_EQ(target.Avatars().size(), 1u);
+    for (unsigned tick = 0; tick < 3; ++tick) {
+        World::PlayerAvatarOwnerState expected;
+        World::PlayerAvatarOwnerState actual;
+        ASSERT_TRUE(source.CaptureAvatarOwner(0, expected));
+        ASSERT_TRUE(target.CaptureAvatarOwner(0, actual));
+        std::array<std::uint8_t, World::kMaxAvatarOwnerBytes> expected_bytes{};
+        std::array<std::uint8_t, World::kMaxAvatarOwnerBytes> actual_bytes{};
+        std::size_t expected_size = 0;
+        std::size_t actual_size = 0;
+        ASSERT_TRUE(World::EncodeAvatarOwner(expected, expected_bytes, expected_size));
+        ASSERT_TRUE(World::EncodeAvatarOwner(actual, actual_bytes, actual_size));
+        EXPECT_EQ(expected_size, actual_size);
+        EXPECT_EQ(expected_bytes, actual_bytes);
+        ASSERT_EQ(source.RunFixedTicks(1).ticks_executed, 1u);
+        ASSERT_EQ(target.RunFixedTicks(1).ticks_executed, 1u);
+    }
+    // A separately spawned controller cannot silently shift the player-ID slots.
+    target.Session()->GetPhysicsSystem()->create_avatar_character(Vec3(8, 40, 8));
+    captured.avatar.player_id = 1;
+    EXPECT_FALSE(target.RestoreAvatarOwner(captured));
+    EXPECT_EQ(target.Avatars().size(), 1u);
+    EXPECT_EQ(target.Session()->GetPhysicsSystem()->avatar_character_slot_count(), 2u);
+}
+void ExpectAvatarRestoreRefusedWithoutMutation(Server::ServerWorldRunner& target,
+                                               const World::PlayerAvatarOwnerState& captured,
+                                               bool through_runner) {
+    auto* physics = target.Session()->GetPhysicsSystem();
+    ASSERT_NE(physics, nullptr);
+    const auto hash_before = target.ComputeWorldHash();
+    const auto* roster_data = target.Avatars().data();
+    const auto roster_capacity = target.Avatars().capacity();
+    World::PlayerAvatarOwnerState owner_before;
+    ASSERT_TRUE(target.CaptureAvatarOwner(0, owner_before));
+    Systems::PhysicsSystem::BodySetState bodies_before;
+    ASSERT_TRUE(physics->capture_body_owners(bodies_before));
+    World::PlayerAvatar output{
+        .player_id = 77, .position = Vec3(1), .facing = 2, .velocity = Vec3(3)};
+    std::size_t index = 999;
+    if (through_runner) {
+        EXPECT_FALSE(target.RestoreAvatarOwner(captured));
+    } else {
+        EXPECT_FALSE(target.Session()->RestoreAvatarOwner(captured, output, index));
+    }
+    EXPECT_EQ(index, 999u);
+    EXPECT_EQ(output.player_id, 77u);
+    EXPECT_EQ(output.position, Vec3(1));
+    EXPECT_EQ(output.facing, 2);
+    EXPECT_EQ(output.velocity, Vec3(3));
+    EXPECT_EQ(target.Avatars().data(), roster_data);
+    EXPECT_EQ(target.Avatars().capacity(), roster_capacity);
+    ASSERT_EQ(target.Avatars().size(), 1u);
+    EXPECT_EQ(physics->avatar_character_slot_count(), 1u);
+    World::PlayerAvatarOwnerState owner_after;
+    ASSERT_TRUE(target.CaptureAvatarOwner(0, owner_after));
+    // Each owner-codec scratch buffer is bounded to kMaxAvatarOwnerBytes.
+    std::array<std::uint8_t, World::kMaxAvatarOwnerBytes> before_bytes{};
+    std::array<std::uint8_t, World::kMaxAvatarOwnerBytes> after_bytes{};
+    std::size_t before_size = 0;
+    std::size_t after_size = 0;
+    ASSERT_TRUE(World::EncodeAvatarOwner(owner_before, before_bytes, before_size));
+    ASSERT_TRUE(World::EncodeAvatarOwner(owner_after, after_bytes, after_size));
+    EXPECT_EQ(before_size, after_size);
+    EXPECT_EQ(before_bytes, after_bytes);
+    Systems::PhysicsSystem::BodySetState bodies_after;
+    ASSERT_TRUE(physics->capture_body_owners(bodies_after));
+    EXPECT_EQ(bodies_before.slot_count, bodies_after.slot_count);
+    EXPECT_EQ(bodies_before.free_slots, bodies_after.free_slots);
+    ASSERT_EQ(bodies_before.owners.size(), bodies_after.owners.size());
+    for (std::size_t slot = 0; slot < bodies_before.owners.size(); ++slot) {
+        const auto& before = bodies_before.owners[slot];
+        const auto& after = bodies_after.owners[slot];
+        EXPECT_EQ(before.size, after.size);
+        EXPECT_EQ(before.bytes, after.bytes);
+        EXPECT_EQ(before.suspended, after.suspended);
+        EXPECT_EQ(before.retained_velocity, after.retained_velocity);
+        EXPECT_EQ(before.retained_angular_velocity, after.retained_angular_velocity);
+        EXPECT_EQ(before.was_active, after.was_active);
+        EXPECT_EQ(before.registration_slot, after.registration_slot);
+    }
+    EXPECT_EQ(target.ComputeWorldHash(), hash_before);
+    EXPECT_EQ(target.TickCount(), 1u);
+}
+
+TEST_F(WorldOpenRefusal, AvatarRestoreRefusesAfterFirstTickWithoutMutation) {
+    for (const bool regional : {false, true}) {
+        Write(
+            root / "data/common/systems.json",
+            regional
+                ? R"({"sim":{"active_regions":{"enabled":true},"water_high_res":{"enabled":false}}})"
+                : R"({"sim":{"active_regions":{"enabled":false},"water_high_res":{"enabled":false}}})");
+        Server::ServerWorldRunnerConfig config;
+        config.root_path = RootString();
+        config.world_id = "fixture";
+        config.surface_radius = 0;
+        config.collision_radius = 0;
+        config.test_streaming_radius_cap = 1;
+        config.autosave_interval_ticks = 0;
+        config.finite_hydrology = false;
+        config.avatar_count = 1;
+        Server::ServerWorldRunner source(config);
+        ASSERT_TRUE(source.Boot()) << source.GetBootError();
+        World::PlayerAvatarOwnerState captured;
+        ASSERT_TRUE(source.CaptureAvatarOwner(0, captured));
+        config.avatar_count = 0;
+        Server::ServerWorldRunner target(config);
+        ASSERT_TRUE(target.Boot()) << target.GetBootError();
+        ASSERT_EQ(target.Session()->ActiveRegionsEnabled(), regional);
+        ASSERT_EQ(target.TickCount(), 0u);
+        ASSERT_TRUE(target.RestoreAvatarOwner(captured));
+        ASSERT_EQ(target.RunFixedTicks(1).ticks_executed, 1u);
+        ASSERT_EQ(target.TickCount(), 1u);
+        ASSERT_TRUE(target.CaptureAvatarOwner(0, captured));
+        captured.avatar.player_id = 1;
+        ASSERT_TRUE(World::ValidateAvatarOwner(captured));
+        for (const bool through_runner : {false, true}) {
+            ExpectAvatarRestoreRefusedWithoutMutation(target, captured, through_runner);
+        }
+    }
+}
+
+TEST_F(WorldOpenRefusal, ServerFrozenRosterRestoresSequentiallyAndContinues) {
+    Write(root / "data/common/systems.json",
+          R"({"sim":{"active_regions":{"enabled":false},"water_high_res":{"enabled":false}}})");
+    Server::ServerWorldRunnerConfig source_config;
+    source_config.root_path = RootString();
+    source_config.world_id = "fixture";
+    source_config.surface_radius = 0;
+    source_config.collision_radius = 0;
+    source_config.test_streaming_radius_cap = 1;
+    source_config.autosave_interval_ticks = 0;
+    source_config.finite_hydrology = false;
+    source_config.avatar_count = 0;
+    Server::ServerWorldRunner source(source_config);
+    ASSERT_TRUE(source.Boot()) << source.GetBootError();
+    auto* original = source.Session()->GetPhysicsSystem();
+    ASSERT_NE(original, nullptr);
+    std::vector<World::PlayerAvatarOwnerState> captured(3);
+    std::vector<World::PhysicsOwnerState> physics(3);
+    // Seed controllers through the session bridge while keeping both zero-avatar
+    // boot terrain sets identical. This setup is complete before the capture.
+    for (std::size_t slot = 0; slot < captured.size(); ++slot) {
+        World::PlayerAvatar avatar;
+        avatar.player_id = static_cast<std::uint32_t>(slot);
+        avatar.position = source.Session()->GetMetadata().spawnPoint +
+                          Vec3(0, 20.0f + 8.0f * static_cast<float>(slot), 0);
+        ASSERT_EQ(original->create_avatar_character(avatar.position), slot);
+        ASSERT_TRUE(source.Session()->CaptureAvatarOwner(avatar, slot, captured[slot]));
+    }
+    original->clear_avatar_characters();
+    for (const auto& owner : captured) {
+        ASSERT_TRUE(source.RestoreAvatarOwner(owner));
+    }
+    for (std::size_t slot = 0; slot < captured.size(); ++slot) {
+        original->set_avatar_frozen(slot, true, original->get_avatar_position(slot));
+    }
+    for (std::size_t slot = 0; slot < captured.size(); ++slot) {
+        ASSERT_TRUE(source.CaptureAvatarOwner(slot, captured[slot]));
+        physics[slot] = captured[slot].physics;
+    }
+    auto target_config = source_config;
+    target_config.avatar_count = 0;
+    Server::ServerWorldRunner target(target_config);
+    ASSERT_TRUE(target.Boot()) << target.GetBootError();
+    for (std::size_t slot = 0; slot < captured.size(); ++slot) {
+        ASSERT_TRUE(
+            target.RestoreAvatarOwner(captured[slot], std::span(physics).subspan(slot + 1)));
+        EXPECT_EQ(target.Avatars().size(), slot + 1);
+    }
+    for (unsigned tick = 0; tick < 6; ++tick) {
+        for (std::size_t slot = 0; slot < captured.size(); ++slot) {
+            World::PlayerAvatarOwnerState expected;
+            World::PlayerAvatarOwnerState actual;
+            ASSERT_TRUE(source.CaptureAvatarOwner(slot, expected));
+            ASSERT_TRUE(target.CaptureAvatarOwner(slot, actual));
+            std::array<std::uint8_t, World::kMaxAvatarOwnerBytes> expected_bytes{};
+            std::array<std::uint8_t, World::kMaxAvatarOwnerBytes> actual_bytes{};
+            std::size_t expected_size = 0;
+            std::size_t actual_size = 0;
+            ASSERT_TRUE(World::EncodeAvatarOwner(expected, expected_bytes, expected_size));
+            ASSERT_TRUE(World::EncodeAvatarOwner(actual, actual_bytes, actual_size));
+            EXPECT_EQ(expected_size, actual_size);
+            EXPECT_EQ(expected_bytes, actual_bytes);
+            if (tick == 2) {
+                original->set_avatar_frozen(slot, false, original->get_avatar_position(slot));
+                auto* restored = target.Session()->GetPhysicsSystem();
+                restored->set_avatar_frozen(slot, false, restored->get_avatar_position(slot));
+            }
+        }
+        ASSERT_EQ(source.RunFixedTicks(1).ticks_executed, 1u);
+        ASSERT_EQ(target.RunFixedTicks(1).ticks_executed, 1u);
+    }
+}
 } // namespace
