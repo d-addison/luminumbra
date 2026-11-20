@@ -1,4 +1,5 @@
 #include "GBufferPass.h"
+#include "../DiagnosticContributions.h"
 #include "../DiagnosticDrawTable.h"
 #include "../DiagnosticTargets.h"
 #include "../FarWorldReplay.h"
@@ -48,7 +49,8 @@ GBufferDiagnosticCapture::State::~State() = default;
 
 GBufferDiagnosticCapture::GBufferDiagnosticCapture(DiagnosticTargets& targets,
                                                    DiagnosticDrawTable& table,
-                                                   DiagnosticTargets* forward_targets) {
+                                                   DiagnosticTargets* forward_targets,
+                                                   DiagnosticForwardPresence* forward_presence) {
     if (Current()) {
         throw std::logic_error("Diagnostic capture scopes cannot nest");
     }
@@ -58,8 +60,15 @@ GBufferDiagnosticCapture::GBufferDiagnosticCapture(DiagnosticTargets& targets,
     if (forward_targets == &targets) {
         throw std::invalid_argument("Forward identities require distinct storage");
     }
+    if (forward_presence && !forward_presence->fresh()) {
+        throw std::invalid_argument("Forward evidence requires a fresh collector");
+    }
     state_ = std::make_unique<State>(targets, table);
     state_->forward_targets = forward_targets;
+    state_->forward_presence = forward_presence;
+    if (forward_presence && !forward_targets) {
+        abort();
+    }
     SetCurrent(this);
 }
 
@@ -77,6 +86,7 @@ void GBufferDiagnosticCapture::unsupported(std::string_view producer,
                                            DiagnosticOwnership ownership,
                                            DiagnosticPass pass) {
     state_->failed = true;
+    abort();
     DiagnosticId unused{};
     if (!state_->table.submit({.mesh_path = {},
                                .shader_variant = producer,
@@ -97,6 +107,9 @@ bool GBufferDiagnosticCapture::complete() const {
 
 void GBufferDiagnosticCapture::abort() noexcept {
     state_->failed = true;
+    if (state_->forward_presence) {
+        state_->forward_presence->unavailable();
+    }
 }
 
 Shader* GBufferDiagnosticCapture::variant(Shader* shader,
@@ -163,7 +176,7 @@ void GBufferDiagnosticCapture::write(const Shader& shader, const DiagnosticSubmi
         }
         DiagnosticId id{};
         if (submission.provenance == DiagnosticProvenance::Unsupported) {
-            state_->failed = true;
+            abort();
         }
         if (!state_->table.submit(submission, id)) {
             unsupported("diagnostic_identity_refused",
@@ -173,6 +186,9 @@ void GBufferDiagnosticCapture::write(const Shader& shader, const DiagnosticSubmi
             throw std::runtime_error("Diagnostic identity submission refused");
         }
         glProgramUniform4uiv(shader.Id(), entry.identity, 1, id.data());
+        if (state_->forward_presence && state_->forward) {
+            state_->forward_presence->submit(submission, id);
+        }
         return;
     }
     unsupported(

@@ -1,10 +1,12 @@
 #include "GBufferTargets.h"
+#include "DiagnosticContributions.h"
 #include "DiagnosticTargets.h"
 #include "RenderResourceRegistry.h"
 #include "core/Log.h"
 #include <glad/glad.h>
 
 #include <array>
+#include <vector>
 
 namespace Luminumbra::Rendering {
 namespace {
@@ -131,6 +133,7 @@ void GBufferDiagnosticCapture::detach_target() {
     if (!state_->framebuffer) {
         return;
     }
+    sample_forward_presence();
     GLint saved_framebuffer = 0;
     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &saved_framebuffer);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, state_->framebuffer);
@@ -145,10 +148,77 @@ void GBufferDiagnosticCapture::detach_target() {
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(saved_framebuffer));
 }
 
+void GBufferDiagnosticCapture::sample_forward_presence() noexcept {
+    if (!state_->forward || !state_->forward_presence) {
+        return;
+    }
+    if (state_->failed || !state_->forward_presence->can_sample() || !state_->forward_targets ||
+        !glGetTextureSubImage || glGetError() != GL_NO_ERROR) {
+        abort();
+        return;
+    }
+    try {
+        const auto extent = state_->forward_targets->extent();
+        // At most 16M RGBA32UI pixels / 256 MiB staging, checked before allocation.
+        if (extent.width == 0 || extent.height == 0 || extent.width > 16384 ||
+            extent.height > 16384 || extent.width > 16777216 / extent.height) {
+            abort();
+            return;
+        }
+        std::vector<DiagnosticId> plane(static_cast<std::size_t>(extent.width) * extent.height);
+        struct PackRestore {
+            static constexpr std::array<GLenum, 8> names() {
+                return {GL_PACK_ALIGNMENT,
+                        GL_PACK_ROW_LENGTH,
+                        GL_PACK_IMAGE_HEIGHT,
+                        GL_PACK_SKIP_PIXELS,
+                        GL_PACK_SKIP_ROWS,
+                        GL_PACK_SKIP_IMAGES,
+                        GL_PACK_SWAP_BYTES,
+                        GL_PACK_LSB_FIRST};
+            }
+            std::array<GLint, 8> values{};
+            GLint buffer = 0;
+            PackRestore() {
+                glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &buffer);
+                glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+                for (std::size_t entry = 0; entry < values.size(); ++entry) {
+                    glGetIntegerv(names()[entry], &values[entry]);
+                    glPixelStorei(names()[entry], entry == 0 ? 1 : 0);
+                }
+            }
+            ~PackRestore() {
+                for (std::size_t entry = 0; entry < values.size(); ++entry) {
+                    glPixelStorei(names()[entry], values[entry]);
+                }
+                glBindBuffer(GL_PIXEL_PACK_BUFFER, static_cast<GLuint>(buffer));
+            }
+        } restore;
+        glGetTextureSubImage(state_->forward_targets->texture(),
+                             0,
+                             0,
+                             0,
+                             0,
+                             static_cast<GLsizei>(extent.width),
+                             static_cast<GLsizei>(extent.height),
+                             1,
+                             GL_RGBA_INTEGER,
+                             GL_UNSIGNED_INT,
+                             static_cast<GLsizei>(plane.size() * sizeof(DiagnosticId)),
+                             plane.data());
+        if (glGetError() != GL_NO_ERROR ||
+            !state_->forward_presence->join_stage(state_->table, plane, extent)) {
+            abort();
+        }
+    } catch (...) {
+        abort(); // Allocation/readback refusal still restores the original attachment.
+    }
+}
+
 void GBufferDiagnosticCapture::before_destroy(const GBuffer& gbuffer) {
     if (state_->framebuffer && state_->framebuffer == gbuffer.fbo_id) {
         detach_target();
-        state_->failed = true;
+        abort();
         state_->failure = "gbuffer_recreated_during_capture";
     }
 }
