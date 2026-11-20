@@ -80,14 +80,19 @@ vec3 hash_id_color(uint id) {
 bool rawNonfinite(vec4 value) {
     return any(isnan(value)) || any(isinf(value));
 }
+// Inspects stored texel bits only. It never reconstructs a world position, so
+// it is not a position read under the far-world position contract.
+bool rawTexelNonfinite(sampler2D target, ivec2 pixel) {
+    return rawNonfinite(texelFetch(target, pixel, 0));
+}
 bool rawGBufferNonfinite(ivec2 pixel) {
-    return rawNonfinite(texelFetch(gPosition, pixel, 0)) ||
-        rawNonfinite(texelFetch(gNormalMaterial, pixel, 0)) ||
-        rawNonfinite(texelFetch(gAlbedo, pixel, 0)) ||
-        rawNonfinite(texelFetch(gDepth, pixel, 0)) ||
-        (u_rawMaterialReady != 0 && rawNonfinite(texelFetch(gRawMaterial, pixel, 0))) ||
-        (u_rawMotionReady != 0 && rawNonfinite(texelFetch(gRawMotion, pixel, 0))) ||
-        (u_rawAuthoredReady != 0 && rawNonfinite(texelFetch(gRawAuthored, pixel, 0)));
+    return rawTexelNonfinite(gPosition, pixel) ||
+        rawTexelNonfinite(gNormalMaterial, pixel) ||
+        rawTexelNonfinite(gAlbedo, pixel) ||
+        rawTexelNonfinite(gDepth, pixel) ||
+        (u_rawMaterialReady != 0 && rawTexelNonfinite(gRawMaterial, pixel)) ||
+        (u_rawMotionReady != 0 && rawTexelNonfinite(gRawMotion, pixel)) ||
+        (u_rawAuthoredReady != 0 && rawTexelNonfinite(gRawAuthored, pixel));
 }
 // Stable uint32 hash, identical to DebugViewPass::hash_id.
 uint diagnosticHash(uint value) {

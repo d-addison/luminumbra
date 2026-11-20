@@ -797,9 +797,10 @@ TEST(DiagnosticContributions,
                                 "gRawMaterial",
                                 "gRawMotion",
                                 "gRawAuthored"}) {
-        EXPECT_NE(shader.find(std::string("rawNonfinite(texelFetch(") + texture + ", pixel, 0))"),
+        EXPECT_NE(shader.find(std::string("rawTexelNonfinite(") + texture + ", pixel)"),
                   std::string::npos);
     }
+    EXPECT_NE(shader.find("return rawNonfinite(texelFetch(target, pixel, 0));"), std::string::npos);
 }
 
 template<typename Draw>
