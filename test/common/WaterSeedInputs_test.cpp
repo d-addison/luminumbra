@@ -1,4 +1,5 @@
 #include "../fixtures/TerrainFixtureParams.h"
+#include "../support/GameSessionTestWorld.h"
 #include "luminumbra/core/Types.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/core/JobSystem.h"
@@ -6,7 +7,9 @@
 #include "luminumbra_common/core/WaterComponents.h"
 #include "luminumbra_common/core/WaterSeedInputs.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
+#include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
+#include "luminumbra_common/systems/RegionalWater.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
@@ -3031,6 +3034,51 @@ struct ColumnFixture {
     }
 };
 
+TEST(WaterSeedInputs, CommittedLoadingColumnsSettleBeforeAdmissionAcrossCacheStates) {
+    for (int cache = 0; cache < 4; ++cache) {
+        for (const auto state : {ChunkState::Loading, ChunkState::Idle, ChunkState::Ready}) {
+            SCOPED_TRACE(::testing::Message() << cache << ',' << static_cast<int>(state));
+            ColumnFixture fixture;
+            auto saved = fixture.saved_column();
+            saved->set_state(state);
+            const auto depths = saved->water_depth_mm;
+            const auto beds = saved->water_bed_mm;
+            const auto flux = saved->water_edge_flux;
+            if (cache != 0) {
+                const auto placeholder = std::make_shared<Chunk>(IVec3(0));
+                ASSERT_TRUE(fixture.world.adopt_streamed_chunk(placeholder));
+                placeholder->set_state(cache == 1   ? ChunkState::Loading
+                                       : cache == 2 ? ChunkState::Idle
+                                                    : ChunkState::Ready);
+            }
+            fixture.world.remember_durable_chunks({IVec3(0)});
+            int reads = 0;
+            fixture.world.set_durable_chunk_loader(
+                [&](const IVec3&) {
+                    ++reads;
+                    return saved;
+                },
+                {});
+            const auto inspected = fixture.world.inspect_water_column(IVec3(0));
+            ASSERT_EQ(inspected, saved);
+            EXPECT_EQ(inspected->get_state(),
+                      state == ChunkState::Loading ? ChunkState::Idle : state);
+            const auto admitted = fixture.world.resolve_water_column(IVec3(0));
+            ASSERT_EQ(admitted, saved);
+            const auto reads_after_admission = reads;
+            EXPECT_EQ(fixture.world.inspect_water_column(IVec3(0)), admitted);
+            EXPECT_EQ(fixture.world.resolve_water_column(IVec3(0)), admitted);
+            EXPECT_EQ(reads, reads_after_admission);
+            EXPECT_NE(admitted->get_state(), ChunkState::Loading);
+            EXPECT_EQ(admitted->water_depth_mm, depths);
+            EXPECT_EQ(admitted->water_bed_mm, beds);
+            EXPECT_EQ(admitted->water_edge_flux, flux);
+            EXPECT_FALSE(fixture.world.durable_read_failed());
+            EXPECT_EQ(fixture.world.water_columns_generated(), 0u);
+        }
+    }
+}
+
 TEST(WaterSeedInputs, CanonicalColumnsIgnoreRendererWaterLodAndLoadingStorage) {
     for (int cache_kind = 0; cache_kind < 5; ++cache_kind) {
         SCOPED_TRACE(cache_kind);
@@ -3058,12 +3106,9 @@ TEST(WaterSeedInputs, CanonicalColumnsIgnoreRendererWaterLodAndLoadingStorage) {
             renderer->stage_water_seed_inputs(unpublished);
         }
         if (cache_kind == 0) {
-            EXPECT_THROW(cached.world.resolve_water_column({0, 0, 0}), std::invalid_argument);
-            EXPECT_THROW(cached.world.inspect_water_column({0, 0, 0}), std::invalid_argument);
-            EXPECT_EQ(cached.world.find_streamed_chunk({0, 0, 0}), renderer);
+            // A bare Loading placeholder is neither read nor treated as authority.
+            EXPECT_EQ(cached.world.inspect_water_column({0, 0, 0}), nullptr);
             EXPECT_EQ(cached.world.water_columns_generated(), 0u);
-            EXPECT_EQ(renderer->get_state(), ChunkState::Loading);
-            renderer->set_state(ChunkState::Idle);
         }
         const auto first = absent.world.resolve_water_column({0, 0, 0});
         const auto second = cached.world.resolve_water_column({0, 0, 0});
@@ -3078,6 +3123,12 @@ TEST(WaterSeedInputs, CanonicalColumnsIgnoreRendererWaterLodAndLoadingStorage) {
         EXPECT_TRUE(second->water_depth_mm.empty());
         EXPECT_EQ(second == renderer, cache_kind == 4);
         EXPECT_EQ(cached.world.water_columns_generated(), cache_kind == 4 ? 0u : 1u);
+        if (cache_kind == 0) {
+            // Generation supersedes the placeholder without touching worker storage.
+            EXPECT_EQ(cached.world.find_streamed_chunk({0, 0, 0}), second);
+            EXPECT_EQ(renderer->get_state(), ChunkState::Loading);
+            EXPECT_TRUE(renderer->sdf_data.empty());
+        }
         EXPECT_EQ(cached.world.resolve_water_column({0, 0, 0}), second);
         EXPECT_EQ(absent.world.resolve_water_column({0, 0, 0}), first);
         EXPECT_EQ(absent.world.water_columns_generated(), 1u);
@@ -3249,16 +3300,8 @@ void ExpectCanonicalDurableColumn(int cache_kind, int failure) {
         },
         {});
     fixture.world.remember_durable_chunks({IVec3(0)});
-    if (cache_kind == 1) {
-        // Worker ownership takes precedence even over unreadable committed data.
-        EXPECT_THROW(fixture.world.resolve_water_column({0, 0, 0}), std::invalid_argument);
-        EXPECT_EQ(fixture.world.find_streamed_chunk({0, 0, 0}), cache);
-        EXPECT_EQ(cache->get_state(), ChunkState::Loading);
-        EXPECT_EQ(reads, 0);
-        EXPECT_FALSE(fixture.world.durable_read_failed());
-        EXPECT_EQ(fixture.world.water_columns_generated(), 0u);
-        cache->set_state(ChunkState::Idle);
-    }
+    // A bare Loading placeholder carries no authority: committed data supersedes
+    // it exactly as if the column were absent, and its storage is never read.
     if (failure != 0) {
         EXPECT_THROW(fixture.world.resolve_water_column({0, 0, 0}), std::invalid_argument);
         if (failure < 5) {
@@ -3277,6 +3320,10 @@ void ExpectCanonicalDurableColumn(int cache_kind, int failure) {
     }
     EXPECT_EQ(reads, 1);
     EXPECT_EQ(fixture.world.water_columns_generated(), 0u);
+    if (cache_kind == 1) {
+        EXPECT_EQ(cache->get_state(), ChunkState::Loading);
+        EXPECT_TRUE(cache->sdf_data.empty());
+    }
 }
 
 TEST(WaterSeedInputs, CanonicalDurableColumnsSupersedeCachesAndFailedReadsNeverRegenerate) {
@@ -3804,4 +3851,451 @@ TEST(WaterSeedInputs, ExplicitRegionalOffRetainsLegacyHashAndSaveBytes) {
                   Persistence::ComputeWorldStreamingStateHash(b));
     }
 }
+} // namespace
+
+namespace {
+TEST(WaterSeedInputs, SessionRegionalParticipantsIgnoreCameraStreamingAndWorkerReadiness) {
+    const TestSupport::HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    const world::GameSession::AuthorityProfileOptions profile{.regional_water = true};
+    world::GameSession left(profile, world::GameSession::AuthorityProfileTestOnly{});
+    world::GameSession right(profile, world::GameSession::AuthorityProfileTestOnly{});
+    for (auto* session : {&left, &right}) {
+        session->SetJobSystem(&jobs);
+        session->SetRootPath(root.root_string());
+        session->SetActiveRegionsEnabled(true);
+        session->SetWeatherRainEnabled(false);
+        ASSERT_TRUE(session->CreateTransientWorld("Water participants", "777", "default"));
+        session->SetReplicatedSimulationAnchors({Vec3(24, 0, 24)});
+        const auto source = session->GetRegistry().create();
+        session->GetRegistry().emplace<Components::TransformComponent>(source).position =
+            Vec3(24, -100, 24);
+        session->GetRegistry().emplace<Components::FlowingWaterSourceComponent>(source).flow_rate =
+            1.0f;
+    }
+    // Model opposite owner-thread publication orders without timing or worker sleeps.
+    // The ready peer has coarser renderer data; the other still has Loading placeholders.
+    std::unordered_map<ChunkID, std::shared_ptr<Chunk>> left_streamed, right_streamed;
+    for (int index = 0; index < 3; ++index) {
+        auto pending = std::make_shared<Chunk>(IVec3(index, 0, 1));
+        ASSERT_TRUE(left.GetWorldSystem()->adopt_streamed_chunk(pending));
+        pending->set_state(ChunkState::Loading);
+        auto poison = std::make_shared<HighWaterSeedInputs>();
+        poison->terrain.fill(10000.0f);
+        pending->stage_water_seed_inputs(poison);
+        left_streamed.emplace(pending->get_id(), pending);
+        auto ready = std::make_shared<Chunk>(IVec3(2 - index, 0, 2));
+        right.GetWorldSystem()->GenerateChunkData(*ready, 4);
+        ready->set_state(ChunkState::Idle);
+        ASSERT_TRUE(right.GetWorldSystem()->adopt_streamed_chunk(ready));
+        auto payload = std::make_shared<HighWaterSeedInputs>();
+        {
+            const auto scope = right.GetWorldSystem()->acquire_worldgen_sample_scope();
+            ComputeHighWaterSeedInputs(*payload, ready->get_coords(), *right.GetWorldSystem());
+        }
+        ready->stage_water_seed_inputs(payload);
+        right_streamed.emplace(ready->get_id(), ready);
+    }
+    // Different renderer subsets also include an unrelated, pristine column.
+    const auto unrelated = std::make_shared<Chunk>(IVec3(100, 0, 100));
+    ASSERT_TRUE(right.GetWorldSystem()->adopt_streamed_chunk(unrelated));
+    right_streamed.emplace(unrelated->get_id(), unrelated);
+    for (auto* session : {&left, &right}) {
+        const auto camera = session->GetRegistry().create();
+        session->GetRegistry().emplace<Components::TransformComponent>(camera).position =
+            session == &left ? Vec3(24, 200, 24) : Vec3(-65536, 500, 65536);
+        session->GetWaterSystem()->set_camera_entity(camera);
+    }
+    for (int tick = 0; tick < 4; ++tick) {
+        SCOPED_TRACE(tick);
+        left.GetWaterSystem()->update(left.GetRegistry(), left_streamed);
+        right.GetWaterSystem()->update(right.GetRegistry(), right_streamed);
+        ASSERT_EQ(left.TickSimulation(SECONDS_PER_TICK), 1u);
+        ASSERT_EQ(right.TickSimulation(SECONDS_PER_TICK), 1u);
+        ASSERT_FALSE(left.GetRegionSchedulerFault().has_value());
+        ASSERT_FALSE(right.GetRegionSchedulerFault().has_value());
+        EXPECT_EQ(left.GetActiveRegionLedger().encode(), right.GetActiveRegionLedger().encode());
+        EXPECT_EQ(left.ComputeChunkStateHash(), right.ComputeChunkStateHash());
+        EXPECT_EQ(left.GetWaterSystem()->regional_work(), right.GetWaterSystem()->regional_work());
+        EXPECT_EQ(left.GetWaterSystem()->regional_work().residents_visited, 9u);
+        EXPECT_LE(left.GetWaterSystem()->regional_work().total_cells, 4096u);
+        WorldStreamingState a, b;
+        for (int z = 0; z < 3; ++z) {
+            for (int x = 0; x < 3; ++x) {
+                const auto first = left.GetWorldSystem()->find_authoritative_chunk({x, 0, z});
+                const auto second = right.GetWorldSystem()->find_authoritative_chunk({x, 0, z});
+                EXPECT_EQ(first && first->has_water_authority(),
+                          second && second->has_water_authority());
+                if (!first || !second) {
+                    for (const auto& unclaimed : {first, second}) {
+                        if (unclaimed) {
+                            EXPECT_FALSE(unclaimed->has_water_authority());
+                            EXPECT_FALSE(unclaimed->has_water_sim.load());
+                        }
+                    }
+                    continue;
+                }
+                ASSERT_NE(first, nullptr);
+                ASSERT_NE(second, nullptr);
+                EXPECT_EQ(first->water_depth_mm, second->water_depth_mm);
+                EXPECT_EQ(first->water_bed_mm, second->water_bed_mm);
+                EXPECT_EQ(first->water_edge_flux, second->water_edge_flux);
+                ASSERT_EQ(first->water_level_data.size(), second->water_level_data.size());
+                for (std::size_t cell = 0; cell < first->water_level_data.size(); ++cell) {
+                    EXPECT_EQ(std::bit_cast<std::uint32_t>(first->water_level_data[cell]),
+                              std::bit_cast<std::uint32_t>(second->water_level_data[cell]));
+                }
+                a.insert_chunk(first);
+                b.insert_chunk(second);
+            }
+        }
+        EXPECT_EQ(Persistence::ComputeWorldStreamingStateSubHashes(a).water,
+                  Persistence::ComputeWorldStreamingStateSubHashes(b).water);
+    }
+    EXPECT_GT(left.GetWaterSystem()->debug_source_injected_mm(), 0);
+}
+
+} // namespace
+
+namespace {
+TEST(WaterSeedInputs, DefaultAuthorityProfileKeepsLegacyWaterWithActiveRegionsOn) {
+    const TestSupport::HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    world::GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    session.SetParkedBytesLimit(1);
+    ASSERT_TRUE(session.CreateTransientWorld("Legacy regional water", "777", "default"));
+    session.SetReplicatedSimulationAnchors({Vec3(24, 0, 24)});
+    const auto chunk = std::make_shared<Chunk>(IVec3(0));
+    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    std::unordered_map<ChunkID, std::shared_ptr<Chunk>> chunks{{chunk->get_id(), chunk}};
+    session.GetWaterSystem()->SetHydrology(true, 1, 0);
+    session.GetWaterSystem()->update(session.GetRegistry(), chunks);
+    ASSERT_TRUE(chunk->has_complete_water_state());
+    session.GetWorldSystem()->sync_water_authority();
+    const auto before = Persistence::SerializeChunkRecordPayloadJson(*chunk);
+    ASSERT_EQ(session.TickSimulation(SECONDS_PER_TICK), 1u);
+    EXPECT_FALSE(session.GetRegionSchedulerFault().has_value());
+    EXPECT_EQ(session.GetWaterSystem()->regional_work().total_cells, 0u);
+    EXPECT_EQ(session.GetWorldSystem()->water_columns_generated(), 0u);
+    EXPECT_EQ(Persistence::SerializeChunkRecordPayloadJson(*chunk), before);
+}
+
+TEST(WaterSeedInputs, RegionalPressureDefersIdenticallyWithOppositeRendererResidency) {
+    const TestSupport::HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    const world::GameSession::AuthorityProfileOptions profile{.regional_water = true};
+    world::GameSession absent(profile, world::GameSession::AuthorityProfileTestOnly{});
+    world::GameSession resident(profile, world::GameSession::AuthorityProfileTestOnly{});
+    for (auto* session : {&absent, &resident}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+        session->SetActiveRegionsEnabled(true);
+        session->SetParkedBytesLimit(1);
+        ASSERT_TRUE(session->CreateTransientWorld("Water pressure", "777", "default"));
+        session->SetReplicatedSimulationAnchors({Vec3(24, 0, 24)});
+    }
+    for (int z = 0; z < 3; ++z) {
+        for (int x = 0; x < 3; ++x) {
+            const auto chunk = std::make_shared<Chunk>(IVec3(x, 0, z));
+            ASSERT_TRUE(resident.GetWorldSystem()->adopt_streamed_chunk(chunk));
+        }
+    }
+    for (int tick = 0; tick < 3; ++tick) {
+        for (auto* session : {&absent, &resident}) {
+            ASSERT_EQ(session->TickSimulation(SECONDS_PER_TICK), 1u);
+            EXPECT_FALSE(session->GetRegionSchedulerFault().has_value());
+            EXPECT_TRUE(session->GetWaterSystem()->regional_work().visits.empty());
+            EXPECT_EQ(session->GetWorldSystem()->water_columns_generated(), 0u);
+            EXPECT_TRUE(session->GetWorldSystem()->persistence_save_requested());
+        }
+        EXPECT_EQ(absent.GetWaterSystem()->regional_work(),
+                  resident.GetWaterSystem()->regional_work());
+        EXPECT_EQ(TestSupport::SessionWorldHash(absent), TestSupport::SessionWorldHash(resident));
+        EXPECT_EQ(absent.GetActiveRegionLedger().encode(),
+                  resident.GetActiveRegionLedger().encode());
+    }
+}
+
+TEST(WaterSeedInputs, RegionalWaterRewindMatchesUninterruptedSavedTimeline) {
+    const TestSupport::HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    const world::GameSession::AuthorityProfileOptions profile{.regional_water = true};
+    world::GameSession rewind(profile, world::GameSession::AuthorityProfileTestOnly{});
+    world::GameSession control(profile, world::GameSession::AuthorityProfileTestOnly{});
+    for (auto* session : {&rewind, &control}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+        session->SetActiveRegionsEnabled(true);
+    }
+    ASSERT_TRUE(rewind.CreateWorld("Water rewind", "777", "default"));
+    ASSERT_TRUE(control.CreateTransientWorld("Water control", "777", "default"));
+    rewind.SetReplicatedSimulationAnchors({Vec3(24, 0, 24)});
+    ASSERT_EQ(rewind.TickSimulation(SECONDS_PER_TICK), 1u);
+    const auto saved_tick = rewind.GetSimulationTickCount();
+    const auto snapshot = root.path() / "water-snapshot";
+    ASSERT_TRUE(rewind.SaveWorldStateTo(snapshot));
+    ASSERT_TRUE(control.LoadWorldStateFrom(snapshot));
+    for (int tick = 0; tick < 3; ++tick) {
+        ASSERT_EQ(rewind.TickSimulation(SECONDS_PER_TICK), 1u);
+    }
+    ASSERT_GT(rewind.GetSimulationTickCount(), saved_tick);
+    ASSERT_TRUE(rewind.LoadWorldStateFrom(snapshot));
+    EXPECT_EQ(rewind.GetSimulationTickCount(), saved_tick);
+    EXPECT_EQ(TestSupport::SessionWorldHash(rewind), TestSupport::SessionWorldHash(control));
+    EXPECT_EQ(rewind.GetActiveRegionLedger().encode(), control.GetActiveRegionLedger().encode());
+    for (int tick = 0; tick < 3; ++tick) {
+        for (auto* session : {&rewind, &control}) {
+            ASSERT_EQ(session->TickSimulation(SECONDS_PER_TICK), 1u);
+            ASSERT_FALSE(session->GetRegionSchedulerFault().has_value());
+        }
+        EXPECT_EQ(TestSupport::SessionWorldHash(rewind), TestSupport::SessionWorldHash(control));
+        EXPECT_EQ(rewind.ComputeChunkStateHash(), control.ComputeChunkStateHash());
+        EXPECT_EQ(rewind.GetActiveRegionLedger().encode(),
+                  control.GetActiveRegionLedger().encode());
+        EXPECT_EQ(rewind.GetWaterSystem()->regional_work(),
+                  control.GetWaterSystem()->regional_work());
+    }
+}
+
+TEST(WaterSeedInputs, RegionalSimulationAnchorsPreferReplicatedIncludingEmpty) {
+    const TestSupport::HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    const world::GameSession::AuthorityProfileOptions profile{.regional_water = true};
+    world::GameSession session(profile, world::GameSession::AuthorityProfileTestOnly{});
+    session.SetJobSystem(&jobs);
+    session.SetRootPath(root.root_string());
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateTransientWorld("Water anchors", "777", "default"));
+    // With no replicated set, use the ledger's local simulation anchor.
+    ASSERT_EQ(session.TickSimulation(SECONDS_PER_TICK), 1u);
+    ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
+    EXPECT_EQ(session.GetWaterSystem()->regional_work().residents_visited, 9u);
+    session.SetReplicatedSimulationAnchors({});
+    ASSERT_EQ(session.TickSimulation(SECONDS_PER_TICK), 1u);
+    ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
+    EXPECT_EQ(session.GetWaterSystem()->regional_work().residents_visited, 0u);
+    session.SetReplicatedSimulationAnchors({Vec3(1048, 0, 1048)});
+    ASSERT_EQ(session.TickSimulation(SECONDS_PER_TICK), 1u);
+    ASSERT_FALSE(session.GetRegionSchedulerFault().has_value());
+    EXPECT_EQ(session.GetWaterSystem()->regional_work().residents_visited, 9u);
+    ASSERT_FALSE(session.GetWaterSystem()->regional_work().visits.empty());
+    for (const auto id : session.GetWaterSystem()->regional_work().visits) {
+        const auto coords = Chunk::decode_id(id);
+        EXPECT_GE(coords.x, 64);
+        EXPECT_GE(coords.z, 64);
+    }
+}
+
+TEST(WaterSeedInputs, RegionalWaterInvalidSourcesLatchFaultBeforeAdmission) {
+    const TestSupport::HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    const world::GameSession::AuthorityProfileOptions profile{.regional_water = true};
+    for (const bool overflow : {false, true}) {
+        SCOPED_TRACE(overflow);
+        world::GameSession session(profile, world::GameSession::AuthorityProfileTestOnly{});
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(root.root_string());
+        session.SetActiveRegionsEnabled(true);
+        ASSERT_TRUE(session.CreateTransientWorld("Invalid water", "777", "default"));
+        session.SetReplicatedSimulationAnchors({});
+        const std::size_t count = overflow ? Systems::RegionalWater::kMaxSimulationSources + 1 : 1;
+        for (std::size_t index = 0; index < count; ++index) {
+            const auto source = session.GetRegistry().create();
+            session.GetRegistry().emplace<Components::TransformComponent>(source).position =
+                Vec3(24, 0, 24);
+            session.GetRegistry()
+                .emplace<Components::FlowingWaterSourceComponent>(source)
+                .flow_rate = overflow ? 1.0f : -1.0f;
+        }
+        ASSERT_EQ(session.TickSimulation(SECONDS_PER_TICK), 1u);
+        ASSERT_TRUE(session.GetRegionSchedulerFault().has_value());
+        EXPECT_EQ(session.GetWorldSystem()->water_columns_generated(), 0u);
+        EXPECT_TRUE(session.GetWorldSystem()->snapshot_authoritative_chunks().empty());
+        EXPECT_TRUE(session.GetWaterSystem()->regional_work().visits.empty());
+        const auto ledger = session.GetActiveRegionLedger().encode();
+        EXPECT_EQ(session.TickSimulation(SECONDS_PER_TICK), 0u);
+        EXPECT_EQ(session.GetActiveRegionLedger().encode(), ledger);
+    }
+}
+
+void PrepareRegionalWaterSnapshot(world::GameSession& session,
+                                  const TestSupport::HeadlessRoot& root,
+                                  const std::filesystem::path& snapshot,
+                                  const std::string& saved,
+                                  const std::vector<IVec3>& inventory,
+                                  const std::string& name) {
+    session.SetRootPath(root.root_string());
+    session.SetActiveRegionsEnabled(true);
+    session.SetWeatherRainEnabled(false);
+    // Regional saves refuse transient worlds, so each peer owns a named world.
+    ASSERT_TRUE(session.CreateWorld(name, "777", "default"));
+    ASSERT_EQ(session.GetWaterSystem()->sim_resolution(), 16);
+    session.NotifyGroundObjectEdit(Vec3(24, 0, 24));
+    WorldStreamingState state;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(Persistence::LoadWorldStreamingStateSnapshotJson(saved, state, errors));
+    ASSERT_TRUE(errors.empty());
+    for (const auto& chunk : state.snapshot_chunks()) {
+        ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    }
+    ASSERT_TRUE(session.SaveWorldStateTo(snapshot, nullptr, true));
+    ASSERT_TRUE(session.LoadWorldStateFrom(snapshot));
+    EXPECT_EQ(session.GetWorldSystem()->durable_chunk_inventory().size(), inventory.size());
+    // Keep the session's real committed reader and index, varying only residency.
+    session.GetWorldSystem()->clear_world(session.GetPhysicsSystem());
+    session.GetWorldSystem()->replace_durable_chunks(inventory);
+    session.SetReplicatedSimulationAnchors({Vec3(24, 0, 24)});
+}
+
+TEST(WaterSeedInputs, RegionalSavedResolutionParityAcrossBootStreamingAndColdResolution) {
+    const TestSupport::HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    const world::GameSession::AuthorityProfileOptions profile{.regional_water = true};
+    for (const bool sleeping : {false, true}) {
+        SCOPED_TRACE(sleeping);
+        world::GameSession streamed(profile, world::GameSession::AuthorityProfileTestOnly{});
+        world::GameSession cold(profile, world::GameSession::AuthorityProfileTestOnly{});
+        std::vector<IVec3> inventory;
+        WorldStreamingState original;
+        for (int z = 0; z < 3; ++z) {
+            for (int x = 0; x < 3; ++x) {
+                const auto chunk = std::make_shared<Chunk>(IVec3(x, 0, z));
+                chunk->heightmap_data.assign(289, 1.0f);
+                chunk->has_water_sim.store(true);
+                chunk->current_water_resolution.store(8);
+                chunk->water_bed_mm.assign(64, 1000);
+                chunk->water_depth_mm.assign(64, 2000);
+                chunk->water_edge_flux.assign(128, 0);
+                chunk->water_level_data.assign(64, 3.0f);
+                chunk->water_sim_terrain_height.assign(64, 1.0f);
+                chunk->water_flow_data.assign(64, Vec2(0));
+                chunk->is_water_sleeping.store(sleeping);
+                chunk->ticks_below_threshold = sleeping ? 120 : 0;
+                chunk->set_water_authority();
+                ASSERT_TRUE(chunk->has_complete_water_state());
+                ASSERT_TRUE(original.insert_chunk(chunk));
+                inventory.push_back(chunk->get_coords());
+            }
+        }
+        const auto saved = Persistence::SerializeWorldStreamingStateSnapshotJson(original, true);
+        for (auto* session : {&streamed, &cold}) {
+            session->SetJobSystem(&jobs);
+            const auto snapshot = root.path() / (sleeping ? "sleeping-water" : "awake-water") /
+                                  (session == &streamed ? "streamed" : "cold");
+            const std::string name = std::string(sleeping ? "Sleeping" : "Awake") + " water " +
+                                     (session == &streamed ? "streamed" : "cold");
+            ASSERT_NO_FATAL_FAILURE(
+                PrepareRegionalWaterSnapshot(*session, root, snapshot, saved, inventory, name));
+        }
+        // Exercise both eager callers. The cold peer resolves only after funding.
+        for (const auto& coords : inventory) {
+            ASSERT_TRUE(streamed.GetWorldSystem()->restore_authoritative_chunk(coords));
+            ASSERT_FALSE(streamed.GetWorldSystem()->durable_read_failed());
+        }
+        EXPECT_EQ(streamed.GetWorldSystem()->MigrateWaterSimResolution(), 0u);
+        for (const auto& coords : inventory) {
+            const auto chunk = streamed.GetWorldSystem()->find_streamed_chunk(coords);
+            ASSERT_NE(chunk, nullptr);
+            EXPECT_EQ(chunk->current_water_resolution.load(), 8);
+            EXPECT_EQ(chunk->is_water_sleeping.load(), sleeping);
+        }
+        for (int tick = 0; tick < 3; ++tick) {
+            for (auto* session : {&streamed, &cold}) {
+                ASSERT_EQ(session->TickSimulation(SECONDS_PER_TICK), 1u);
+                ASSERT_FALSE(session->GetRegionSchedulerFault().has_value());
+                ASSERT_FALSE(session->ComputeChunkStateHash().empty());
+                EXPECT_LE(session->GetWaterSystem()->regional_work().total_cells, 4096u);
+            }
+            if (tick == 0) {
+                EXPECT_GT(streamed.GetWaterSystem()->regional_work().preparation_cells, 0u);
+            }
+            EXPECT_EQ(streamed.GetWaterSystem()->regional_work(),
+                      cold.GetWaterSystem()->regional_work());
+            EXPECT_EQ(streamed.GetActiveRegionLedger().encode(),
+                      cold.GetActiveRegionLedger().encode());
+            EXPECT_EQ(streamed.ComputeChunkStateHash(), cold.ComputeChunkStateHash());
+            EXPECT_EQ(TestSupport::SessionWorldHash(streamed), TestSupport::SessionWorldHash(cold));
+            for (const auto& coords : inventory) {
+                const auto first = streamed.GetWorldSystem()->find_authoritative_chunk(coords);
+                const auto second = cold.GetWorldSystem()->find_authoritative_chunk(coords);
+                ASSERT_NE(first, nullptr);
+                ASSERT_NE(second, nullptr);
+                EXPECT_TRUE(first->same_water_state(*second));
+                EXPECT_EQ(Persistence::SerializeChunkRecordPayloadJson(*first),
+                          Persistence::SerializeChunkRecordPayloadJson(*second));
+            }
+        }
+    }
+}
+
+TEST(WaterSeedInputs, RegionalWaterProfileIsDormantWithActiveRegionsOff) {
+    const TestSupport::HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    const world::GameSession::AuthorityProfileOptions profile{.regional_water = true};
+    world::GameSession legacy;
+    world::GameSession candidate(profile, world::GameSession::AuthorityProfileTestOnly{});
+    for (auto* session : {&legacy, &candidate}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+        session->SetActiveRegionsEnabled(false);
+        ASSERT_TRUE(session->CreateWorld("Legacy water", "777", "default"));
+        session->GetWaterSystem()->SetHydrology(true, 1, 0);
+    }
+    std::unordered_map<ChunkID, std::shared_ptr<Chunk>> legacy_chunks, candidate_chunks;
+    for (auto* chunks : {&legacy_chunks, &candidate_chunks}) {
+        const auto chunk = std::make_shared<Chunk>(IVec3(0));
+        chunks->emplace(chunk->get_id(), chunk);
+    }
+    ASSERT_TRUE(legacy.GetWorldSystem()->adopt_streamed_chunk(legacy_chunks.begin()->second));
+    ASSERT_TRUE(candidate.GetWorldSystem()->adopt_streamed_chunk(candidate_chunks.begin()->second));
+    for (int tick = 0; tick < 2; ++tick) {
+        legacy.GetWaterSystem()->update(legacy.GetRegistry(), legacy_chunks);
+        candidate.GetWaterSystem()->update(candidate.GetRegistry(), candidate_chunks);
+        for (auto* session : {&legacy, &candidate}) {
+            ASSERT_EQ(session->TickSimulation(SECONDS_PER_TICK), 1u);
+            ASSERT_FALSE(session->GetRegionSchedulerFault().has_value());
+            EXPECT_EQ(session->GetWaterSystem()->regional_work().total_cells, 0u);
+        }
+        EXPECT_TRUE(legacy_chunks.begin()->second->has_complete_water_state());
+        EXPECT_TRUE(candidate_chunks.begin()->second->has_complete_water_state());
+        EXPECT_EQ(TestSupport::SessionWorldHash(legacy), TestSupport::SessionWorldHash(candidate));
+        EXPECT_EQ(Persistence::SerializeChunkRecordPayloadJson(*legacy_chunks.begin()->second),
+                  Persistence::SerializeChunkRecordPayloadJson(*candidate_chunks.begin()->second));
+    }
+    const auto legacy_save = root.path() / "legacy-water-snapshot";
+    const auto candidate_save = root.path() / "candidate-water-snapshot";
+    ASSERT_TRUE(legacy.SaveWorldStateTo(legacy_save));
+    ASSERT_TRUE(candidate.SaveWorldStateTo(candidate_save));
+    const auto saved_bytes = TestSupport::ReadClockTestFile(
+        Persistence::WorldSaveService::region_file_path(legacy_save, 0, 0));
+    ASSERT_FALSE(saved_bytes.empty());
+    EXPECT_EQ(saved_bytes,
+              TestSupport::ReadClockTestFile(
+                  Persistence::WorldSaveService::region_file_path(candidate_save, 0, 0)));
+    legacy.GetWaterSystem()->update(legacy.GetRegistry(), legacy_chunks);
+    candidate.GetWaterSystem()->update(candidate.GetRegistry(), candidate_chunks);
+    ASSERT_EQ(legacy.TickSimulation(SECONDS_PER_TICK), 1u);
+    ASSERT_EQ(candidate.TickSimulation(SECONDS_PER_TICK), 1u);
+    ASSERT_TRUE(legacy.LoadWorldStateFrom(legacy_save));
+    ASSERT_TRUE(candidate.LoadWorldStateFrom(candidate_save));
+    EXPECT_EQ(TestSupport::SessionWorldHash(legacy), TestSupport::SessionWorldHash(candidate));
+    const auto legacy_chunk = legacy.GetWorldSystem()->find_authoritative_chunk({0, 0, 0});
+    const auto candidate_chunk = candidate.GetWorldSystem()->find_authoritative_chunk({0, 0, 0});
+    ASSERT_NE(legacy_chunk, nullptr);
+    ASSERT_NE(candidate_chunk, nullptr);
+    EXPECT_EQ(Persistence::SerializeChunkRecordPayloadJson(*legacy_chunk),
+              Persistence::SerializeChunkRecordPayloadJson(*candidate_chunk));
+}
+
 } // namespace
