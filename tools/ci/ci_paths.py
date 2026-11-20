@@ -16,6 +16,9 @@ PYTHON_TESTS = (
     "tools/gates/test_shader_scenes.py",
     "tools/test_frozen_terrain_presets.py",
     "test/tools/test_regenerate_region_fixtures.py",
+    "tools/gates/test_diagnostic_rois.py",
+    "tools/gates/test_diagnostic_checks.py",
+    "tools/gates/test_diagnostic_capture.py",
 
     "tools/ci/test_compile_shaders.py",
     "tools/ci/test_ui_layout_contract.py",
@@ -27,6 +30,7 @@ PYTHON_TESTS = (
     "test/tools/test_runtime_config_contract.py",
     "test/tools/test_graphics_ui_contract.py",
     "test/tools/test_frame_pacing_contract.py",
+    "test/tools/test_win32_macro_identifiers.py",
     "test/tools/check_audio_shutdown_contract.py",
     "tools/ci/test_audio_propagation_metrics.py",
     "test/tools/check_profiler_contract.py",
@@ -92,6 +96,7 @@ PYTHON_MODULES = {
     "tools/gates/shader-scenes.py",
     "tools/gates/visual_lint.py",
     "tools/regenerate_region_fixtures.py",
+    "tools/gates/check-diagnostic-capture.py",
 
     "tools/ci/compile_shaders.py",
     "tools/ci/rmlui_source.py",
@@ -171,6 +176,7 @@ CI_ENTRYPOINTS = (
     set(PYTHON_TESTS)
     | {command[0] for command in PYTHON_SELF_CHECKS.values()}
     | {
+        "tools/gates/check-diagnostic-capture.py",
         "tools/assets/acquire.py", "tools/blender/authoring/probes/run.py",
         "tools/gates/shader-scenes.py",
         "tools/check_runtime_data_manifest.py", "tools/check_sdf_contract_doc.py",
@@ -254,6 +260,7 @@ def needs_python(path: str) -> bool:
             or path in {"res/shaders/g_buffer.frag",
                         "src/luminumbra_common/world/MarchingCubes.cpp",
                         "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp"}
+            or path == "tools/gates/baselines/diagnostic-rois.json"
             or path == "vendor/rmlui/rmlui-6.1-source.json"
             or path == "cmake/rmlui_source.cmake" or path.startswith("cmake/patches/rmlui-"))
 
