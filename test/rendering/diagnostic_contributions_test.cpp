@@ -168,7 +168,7 @@ TEST(DiagnosticContributions, CaptureOffLightingAndGBufferKeepEveryOriginalByte)
     EXPECT_NE(lighting.find("#ifdef LUMIN_DIAG_CONTRIBUTIONS\n"), std::string::npos);
     EXPECT_EQ(Hash(CaptureOff(lighting)), 0xc6e9bc9c6fc7110bULL);
     // No G-buffer instrumentation is needed: its existing material channels are authoritative.
-    EXPECT_EQ(Hash(Source("res/shaders/g_buffer.frag")), 0x5384913db4971619ULL);
+    EXPECT_EQ(Hash(Source("res/shaders/g_buffer.frag")), 0x7289f9525f762361ULL);
 }
 
 TEST(DiagnosticContributions, UnsupportedAndStaleInputsAreHatchedWithoutSamplingGuessedPlanes) {

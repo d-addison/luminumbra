@@ -588,7 +588,8 @@ void DebugViewPass::execute(const RenderContext& ctx) {
                                      std::vector<std::string>{},
                                      std::vector<std::string>{"LUMIN_DIAG_VIEWS 1"});
     }
-    const bool identity_view = controls().enabled && mode() >= DrawId;
+    // Contribution views read live lighting terms and never create an identity snapshot.
+    const bool identity_view = controls().enabled && mode() >= DrawId && !contribution_view;
     if (identity_view && (!m_snapshot || m_snapshot->sample_buffer == 0)) {
         return;
     }
@@ -638,9 +639,9 @@ void DebugViewPass::execute(const RenderContext& ctx) {
     shader->setFloat("u_far", far_plane);
 
     bind_sources(ctx, *shader);
-    if (mode() >= DrawId && (!m_snapshot || !m_snapshot->ready ||
-                             m_snapshot->targets.extent().width != ctx.internal_w() ||
-                             m_snapshot->targets.extent().height != ctx.internal_h())) {
+    if (identity_view &&
+        (!m_snapshot->ready || m_snapshot->targets.extent().width != ctx.internal_w() ||
+         m_snapshot->targets.extent().height != ctx.internal_h())) {
         shader->setInt("u_identityReady", 0);
     }
 
