@@ -758,7 +758,8 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
 
         // Supply the simulation tick to the activation queue so dispatched
         // batches receive deterministic due ticks.
-        world_system->begin_tick(static_cast<std::int64_t>(simulation_tick));
+        world_system->begin_tick(static_cast<std::int64_t>(simulation_tick),
+                                 m_continuationOptions.owner_continuation);
         // Drive activation-latency telemetry from the same tick base used by
         // the availability digest.
         // Observability only — gated on --avail-trace like the digest itself.
@@ -840,18 +841,23 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
                     std::max(report.water.seam_wet_pairs_max, water->dbg_seam_wet_pairs());
             }
         }
-        //  5b (activation queue ): THE SWAP. The per-tick full barrier
-        // is replaced by tick-keyed activation — publish exactly the batches
-        // due this tick (dispatch + K), blocking only on a due-but-unfinished
-        // batch. The activation-wait timing now measures activate_due's block time (the
-        // number the queue exists to shrink). Wall-clock, never feeds
-        // world_hash. Explicit full drains remain at boot / hash / mutate /
-        // teardown sites via wait_for_streaming_jobs.
+        // Ordinary runs publish only batches due this tick (dispatch + K).
+        // Continuations finish the current admitted work at the counted boundary,
+        // since their snapshots cannot retain process-local publication queues.
+        // This wall-clock timing never feeds world_hash.
         const auto _wait_t0 = std::chrono::steady_clock::now();
         {
             LUMIN_PROFILE_ZONE_N(
                 "streaming_activate_due"); // the p99 latency the queue exists to shrink
-            world_system->activate_due(static_cast<std::int64_t>(simulation_tick));
+            if (m_continuationOptions.owner_continuation) {
+                // A resumable tick cannot retain unpublished generation/promotion
+                // or mesh work: the save format carries chunks, not job queues.
+                // Settle only the admitted/deferred work, without another update,
+                // water step or collision pass. Saves remain non-publishing.
+                world_system->wait_for_streaming_jobs();
+            } else {
+                world_system->activate_due(static_cast<std::int64_t>(simulation_tick));
+            }
         }
         const double _wait_ms =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - _wait_t0)

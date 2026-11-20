@@ -1,4 +1,5 @@
 #include "WorldPersistenceRoundtrip.h"
+#include "../systems/PhysicsSystem.h"
 #include "../world/WorldClock.h"
 #include "SavedInputLimits.h"
 #include "SavedJsonAdmission.h"

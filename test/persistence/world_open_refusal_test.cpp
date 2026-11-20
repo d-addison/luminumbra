@@ -4549,6 +4549,7 @@ TEST_F(WorldOpenRefusal, OwnerContinuationMovingAnchorResumesAcrossRunBoundaries
     ASSERT_TRUE(original.Boot());
     constexpr std::uint64_t saved_ticks = 2u * (CHUNK_SIZE_X + 1u);
     ASSERT_EQ(original.RunFixedTicks(saved_ticks).ticks_executed, saved_ticks);
+    EXPECT_EQ(original.Session()->GetWorldSystem()->pending_publication_chunks(), 0u);
     ASSERT_GT(original.SaveFullSnapshot(), 0u);
     config.world_id = original.Session()->GetMetadata().worldId;
     Server::ServerWorldRunner restored(config, {.owner_continuation = true});
@@ -4578,6 +4579,45 @@ TEST_F(WorldOpenRefusal, OwnerContinuationMovingAnchorResumesAcrossRunBoundaries
         nlohmann::json::parse(Read(restored.Session()->GetWorldSaveDir() / "world_info.json"))
             .at("owner_continuation");
     EXPECT_EQ(original_record, restored_record);
+    // Restore at two offsets of the four-update cadence. With a process-local
+    // counter, at least one restore would activate at a different crossing tick,
+    // regardless of the fresh boot's final update phase.
+    Server::ServerWorldRunner second_restored(config, {.owner_continuation = true});
+    ASSERT_TRUE(second_restored.Boot()) << second_restored.GetBootError();
+    // Cross another residency boundary after restoring at a different update
+    // phase. Compare each process at the same cumulative tick, including when
+    // one caller batches ticks and the other returns after every tick.
+    // The moving anchor travels half a metre per streaming tick.
+    constexpr std::uint64_t more_ticks = 4u * CHUNK_SIZE_X - (saved_ticks + 2u);
+    ASSERT_EQ(original.RunFixedTicks(more_ticks).ticks_executed, more_ticks);
+    for (std::uint64_t tick = 0; tick < more_ticks; ++tick) {
+        ASSERT_EQ(restored.RunFixedTicks(1).ticks_executed, 1u);
+        EXPECT_EQ(restored.Session()->GetWorldSystem()->pending_publication_chunks(), 0u);
+    }
+    ExpectSameServerSimulationHashes(ReadServerWaterHashes(restored),
+                                     ReadServerWaterHashes(original));
+    ASSERT_EQ(second_restored.RunFixedTicks(more_ticks).ticks_executed, more_ticks);
+    ExpectSameServerSimulationHashes(ReadServerWaterHashes(second_restored),
+                                     ReadServerWaterHashes(original));
+    // Allow the crossing's generated terrain to reach its collision pass too.
+    ASSERT_EQ(original.RunFixedTicks(4).ticks_executed, 4u);
+    ASSERT_EQ(restored.RunFixedTicks(4).ticks_executed, 4u);
+    ASSERT_EQ(second_restored.RunFixedTicks(4).ticks_executed, 4u);
+    ExpectSameServerSimulationHashes(ReadServerWaterHashes(restored),
+                                     ReadServerWaterHashes(original));
+    ExpectSameServerSimulationHashes(ReadServerWaterHashes(second_restored),
+                                     ReadServerWaterHashes(original));
+    original_terrain.clear();
+    restored_terrain.clear();
+    ASSERT_TRUE(
+        original.Session()->GetPhysicsSystem()->capture_chunk_collision_owners(original_terrain));
+    ASSERT_TRUE(
+        restored.Session()->GetPhysicsSystem()->capture_chunk_collision_owners(restored_terrain));
+    EXPECT_EQ(restored_terrain, original_terrain);
+    restored_terrain.clear();
+    ASSERT_TRUE(second_restored.Session()->GetPhysicsSystem()->capture_chunk_collision_owners(
+        restored_terrain));
+    EXPECT_EQ(restored_terrain, original_terrain);
 }
 
 TEST_F(WorldOpenRefusal, OwnerContinuationRunnerRestoresEmptySnapshotWithoutWarmup) {
@@ -4760,18 +4800,22 @@ TEST_F(WorldOpenRefusal, OwnerContinuationTransientSnapshotsRetainOwnersAndMetad
     // Admission covers both writer paths and refuses incomplete conversion
     // metadata, partial JSON, non-object input and unreadable metadata leaves.
     const auto invalid_destination = root / "invalid-owner-metadata";
-    for (const auto& invalid : {std::string("{\"seed\":"),
-                                std::string("[]"),
-                                std::string("{\"seed\":\"\"}"),
-                                std::string("{\"seed\":1337}"),
-                                std::string("{\"seed\":\"1337\",\"resolvedSeed\":1337}"),
-                                std::string("{\"seed\":\"1337\",\"seedConversionVersion\":1}"),
-                                std::string("{\"seed\":\"1337\",\"seedConversionVersion\":2,"
-                                            "\"resolvedSeed\":1337}"),
-                                std::string("{\"seed\":\"1337\",\"seedConversionVersion\":1,"
-                                            "\"resolvedSeed\":1338}"),
-                                std::string("{\"seed\":\"1337\",\"seedConversionVersion\":1,"
-                                            "\"resolvedSeed\":4294967296}")}) {
+    for (const auto& invalid :
+         {std::string("{}"),
+          std::string("{\"seed\":\"1337\",\"seedConversionVersion\":1,"
+                      "\"resolvedSeed\":1337}"),
+          std::string("{\"container_version\":2,\"seed\":"),
+          std::string("[]"),
+          std::string("{\"container_version\":2,\"seed\":\"\"}"),
+          std::string("{\"container_version\":2,\"seed\":1337}"),
+          std::string("{\"container_version\":2,\"seed\":\"1337\",\"resolvedSeed\":1337}"),
+          std::string("{\"container_version\":2,\"seed\":\"1337\",\"seedConversionVersion\":1}"),
+          std::string("{\"container_version\":2,\"seed\":\"1337\",\"seedConversionVersion\":2,"
+                      "\"resolvedSeed\":1337}"),
+          std::string("{\"container_version\":2,\"seed\":\"1337\",\"seedConversionVersion\":1,"
+                      "\"resolvedSeed\":1338}"),
+          std::string("{\"container_version\":2,\"seed\":\"1337\",\"seedConversionVersion\":1,"
+                      "\"resolvedSeed\":4294967296}")}) {
         SCOPED_TRACE(invalid);
         Write(invalid_destination / "world_info.json", invalid);
         const auto invalid_bytes = DiskBytes(invalid_destination);
@@ -4784,11 +4828,12 @@ TEST_F(WorldOpenRefusal, OwnerContinuationTransientSnapshotsRetainOwnersAndMetad
     const auto unreadable_bytes = DiskBytes(invalid_destination);
     EXPECT_FALSE(source.SaveWorldStateTo(invalid_destination, nullptr, true));
     EXPECT_EQ(DiskBytes(invalid_destination), unreadable_bytes);
-    // An empty document and an explicitly versioned equivalent seed are valid;
-    // unrelated future metadata must survive either form.
+    // Existing destinations require a supported container version, including
+    // keyless metadata. Equivalent seeds and unrelated extensions survive.
     for (const auto& compatible :
-         {nlohmann::json::object(),
-          nlohmann::json{{"seed", "1337"},
+         {nlohmann::json{{"container_version", WorldSaveService::kContainerVersion}},
+          nlohmann::json{{"container_version", WorldSaveService::kContainerVersion},
+                         {"seed", "1337"},
                          {"seedConversionVersion", world::kSeedConversionVersion},
                          {"resolvedSeed", 1337u},
                          {"extension", {"retained"}}}}) {
@@ -4799,7 +4844,9 @@ TEST_F(WorldOpenRefusal, OwnerContinuationTransientSnapshotsRetainOwnersAndMetad
         ASSERT_TRUE(source.SaveWorldStateTo(compatible_destination, nullptr, true));
         const auto written =
             nlohmann::json::parse(Read(compatible_destination / "world_info.json"));
-        for (const auto& item : compatible.items()) {
+        auto expected_metadata = compatible;
+        expected_metadata["container_version"] = WorldSaveService::kIndexedMetadataVersion;
+        for (const auto& item : expected_metadata.items()) {
             EXPECT_EQ(written.at(item.key()), item.value());
         }
     }
