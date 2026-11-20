@@ -212,10 +212,13 @@ Replay::ReplayHeader ServerWorldRunner::CaptureReplayHeader() const {
         (!m_session->GetWeatherSchedule() && !m_continuationOptions.owner_continuation)) {
         throw std::invalid_argument("Replay requires a fresh boot at tick zero");
     }
-    return Replay::CaptureReplayHeader(*m_session,
-                                       static_cast<std::uint32_t>(m_config.surface_radius),
-                                       static_cast<std::uint32_t>(m_config.collision_radius),
-                                       DescribeWorkload(m_config));
+    auto header = Replay::CaptureReplayHeader(*m_session,
+                                              static_cast<std::uint32_t>(m_config.surface_radius),
+                                              static_cast<std::uint32_t>(m_config.collision_radius),
+                                              DescribeWorkload(m_config));
+    // Keep the requested seed text: an empty request records a random boot.
+    header.seed_string = m_config.seed;
+    return header;
 }
 
 ServerWorldRunner::ServerWorldRunner(ServerWorldRunnerConfig config)
