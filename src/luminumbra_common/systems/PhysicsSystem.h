@@ -27,6 +27,12 @@
 namespace Luminumbra {
 
 class Chunk;
+namespace World {
+struct PhysicsOwnerState;
+}
+namespace world {
+class GameSession;
+}
 
 namespace Systems {
 
@@ -203,6 +209,24 @@ public:
     // extent cannot shrink below the destination's existing allocated extent.
     bool restore_body_owners(const BodySetState& state, std::span<JPH::BodyID> bodies);
 
+    // Internal owner-thread continuation adapter. These operations are separate
+    // from the public physics gameplay interface and never run during a tick.
+    // Remaining frozen captures reserve their body slots until restored in order.
+    // Only the session, which validates owners first, constructs it.
+    class OwnerContinuation {
+    public:
+        bool capture_avatar_owner(std::size_t index, World::PhysicsOwnerState& output) const;
+        bool restore_avatar_owner(const World::PhysicsOwnerState& state,
+                                  std::size_t& index,
+                                  std::span<const World::PhysicsOwnerState> remaining_frozen = {});
+
+    private:
+        friend class ::Luminumbra::world::GameSession;
+        explicit OwnerContinuation(PhysicsSystem& physics)
+            : m_physics(physics) {}
+        PhysicsSystem& m_physics;
+    };
+
     // --- Audio-Physics Integration ---
     // Non-owning world-generation seam for surface-material classification on
     // terrain raycast hits. Set once at session startup (GameSession creates
@@ -290,6 +314,10 @@ public:
     }
 
 private:
+    bool capture_avatar_owner(std::size_t index, World::PhysicsOwnerState& output) const;
+    bool restore_avatar_owner(const World::PhysicsOwnerState& state,
+                              std::size_t& index,
+                              std::span<const World::PhysicsOwnerState> remaining_frozen = {});
     struct SimulationCollisions;
     std::unique_ptr<SimulationCollisions> m_simulation_collisions;
     bool simulation_collisions_enabled() const;
