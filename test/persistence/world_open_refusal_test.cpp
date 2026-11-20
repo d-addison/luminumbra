@@ -7950,11 +7950,16 @@ TEST_F(WorldOpenRefusal, PartialOwnerResidentPayloadRefusesBeforeWritingAndAdopt
                 static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Z + 1), 8);
         }
         ASSERT_TRUE(source.SaveWorldStateTo(save, nullptr, true));
-        const auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+        auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
         const auto damaged = root / (partial_sdf ? "partial-sdf-owner" : "partial-height-owner");
-        Write(damaged / "world_info.json", metadata.dump());
         // Use an unindexed legacy container with the valid v2 reference. A stale
-        // index must not hide the partial-payload branch behind a checksum refusal.
+        // index must not hide the partial-payload branch behind a checksum refusal,
+        // so drop the indexed-snapshot markers the source save wrote.
+        metadata.erase("snapshotFormat");
+        if (metadata.at("container_version") == WorldSaveService::kIndexedMetadataVersion) {
+            metadata["container_version"] = WorldSaveService::kContainerVersion;
+        }
+        Write(damaged / "world_info.json", metadata.dump());
         if (partial_sdf) {
             chunk->sdf_data = {1};
         } else {
