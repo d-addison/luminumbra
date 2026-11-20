@@ -201,7 +201,9 @@ std::shared_ptr<const World::NearTerrainMeshSnapshot> CaptureNearTerrainMeshEvid
     return evidence;
 }
 
-std::size_t MeshingSnapshotBytes(const Luminumbra::Chunk& chunk, bool terrain_required) {
+std::size_t MeshingSnapshotBytes(const Luminumbra::Chunk& chunk,
+                                 bool terrain_required,
+                                 const Luminumbra::Chunk& water_source) {
     std::size_t bytes = 0;
     if (terrain_required) {
         if (chunk.sdf_data.size() == kFullSdfLattice) {
@@ -214,14 +216,14 @@ std::size_t MeshingSnapshotBytes(const Luminumbra::Chunk& chunk, bool terrain_re
             bytes += kFullSdfLattice * sizeof(Luminumbra::u8);
         }
     }
-    const int resolution = chunk.current_water_resolution.load(std::memory_order_acquire);
+    const int resolution = water_source.current_water_resolution.load(std::memory_order_acquire);
     if (resolution > 1 && resolution <= 32) {
         const auto cells =
             static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
-        bytes += std::min(cells, chunk.water_level_data.size()) * sizeof(float);
-        bytes += std::min(cells, chunk.water_flow_data.size()) * sizeof(Luminumbra::Vec2);
-        bytes += std::min(cells, chunk.water_sim_terrain_height.size()) * sizeof(float);
-        if (chunk.water_depth_mm.size() == cells) {
+        bytes += std::min(cells, water_source.water_level_data.size()) * sizeof(float);
+        bytes += std::min(cells, water_source.water_flow_data.size()) * sizeof(Luminumbra::Vec2);
+        bytes += std::min(cells, water_source.water_sim_terrain_height.size()) * sizeof(float);
+        if (water_source.water_depth_mm.size() == cells) {
             bytes += cells * sizeof(std::int32_t);
         }
     }
@@ -642,6 +644,36 @@ u8 RequiredTransitionFaces(const World::ActivationResidencyIndex& index,
 bool HasRenderableGeometry(const Chunk& chunk) {
     return (!chunk.mesh_vertices.empty() && !chunk.mesh_indices.empty()) ||
            (!chunk.water_mesh_vertices.empty() && !chunk.water_mesh_indices.empty());
+}
+
+void ClearPublishedWaterMesh(const SHIELD_WorldSystem& world_system, Chunk& chunk) {
+    if (!chunk.water_mesh_vertices.empty() || !chunk.water_mesh_indices.empty()) {
+        world_system.notify_renderable_chunks_changed();
+    }
+    chunk.water_mesh_vertices.clear();
+    chunk.water_mesh_indices.clear();
+    chunk.water_mesh_generated.store(false, std::memory_order_release);
+}
+
+template<typename Iterator>
+void ClearUnavailableWaterMesh(const SHIELD_WorldSystem& world_system,
+                               const Iterator& resident,
+                               const Iterator& end) {
+    if (resident == end) {
+        return;
+    }
+    // The last source can disappear while a remote owner still holds geometry
+    // or a pending snapshot. Retain terrain readiness when rejecting that water.
+    Chunk& owner = *resident->second;
+    const bool had_geometry =
+        !owner.water_mesh_vertices.empty() || !owner.water_mesh_indices.empty();
+    ClearPublishedWaterMesh(world_system, owner);
+    if (had_geometry) {
+        // Publish the empty replacement: upload discovery keys on this version, and a
+        // terrain-renderable owner would otherwise keep drawing its old water.
+        owner.water_mesh_version.fetch_add(1);
+    }
+    ++owner.water_mesh_owner_version;
 }
 
 bool replace_chunk_collision(PhysicsSystem& physics_system, Luminumbra::Chunk& chunk) {
@@ -3501,6 +3533,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
     const bool generation_dirty = (m_dirty_generation != m_last_serviced_generation);
     const bool full_meshing_scan = generation_dirty || anchor_changed || count_changed ||
                                    activation_ran_this_tick || !m_last_pass_drained;
+    propagate_column_water_mesh_invalidations();
     const bool water_mesh_dirty = m_water_system && !m_water_system->mesh_invalidations().empty();
     m_last_anchor_positions = anchor_positions;
     m_last_chunk_count = m_streaming_state.chunks.size();
@@ -3584,7 +3617,8 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                     needs_meshing = true;
                     terrain_mesh_required = true;
                 } else if (water_lod_requested &&
-                           chunk_ptr->has_water_sim.load(std::memory_order_acquire) &&
+                           column_water_mesh_source(*chunk_ptr)
+                               .has_water_sim.load(std::memory_order_acquire) &&
                            !chunk_ptr->water_mesh_generated.load(std::memory_order_acquire)) {
                     // Check every terrain obligation before selecting water, even
                     // when a previous water publication still owns pending_lod.
@@ -3604,10 +3638,8 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                 // Publish its water departure independently of terrain LOD. A pending
                 // worker owns its staging buffers until completion; supersede only
                 // its water version so terrain publication remains eligible.
-                chunk_ptr->water_mesh_vertices.clear();
-                chunk_ptr->water_mesh_indices.clear();
+                ClearPublishedWaterMesh(*this, *chunk_ptr);
                 ++chunk_ptr->water_mesh_version;
-                chunk_ptr->water_mesh_generated.store(false, std::memory_order_release);
             }
 
             if (pending_lod >= 0) {
@@ -3619,7 +3651,9 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
             }
 
             if (needs_meshing) {
-                if (m_water_system && chunk_ptr->has_water_sim.load(std::memory_order_acquire) &&
+                if (m_water_system &&
+                    column_water_mesh_source(*chunk_ptr)
+                        .has_water_sim.load(std::memory_order_acquire) &&
                     !chunk_ptr->water_mesh_generated.load(std::memory_order_acquire)) {
                     m_water_system->retain_mesh_invalidation(id);
                 }
@@ -3739,7 +3773,9 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                 const ChunkID id = *it++;
                 const auto resident = m_streaming_state.chunks.find(id);
                 if (resident == m_streaming_state.chunks.end() ||
-                    !resident->second->has_water_sim.load(std::memory_order_acquire)) {
+                    !column_water_mesh_source(*resident->second)
+                         .has_water_sim.load(std::memory_order_acquire)) {
+                    ClearUnavailableWaterMesh(*this, resident, m_streaming_state.chunks.end());
                     m_water_system->acknowledge_mesh_invalidation(id);
                     continue;
                 }
@@ -4460,10 +4496,12 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
                         if (physics_system)
                             physics_system->remove_chunk_collision(id);
                         m_activation_index.erase(*chunk);
+                        invalidate_column_water_mesh(*chunk);
                         note_digest_chunk(it->second, false, false);
                         invalidate_renderable_chunks();
                         chunk->invalidate_near_terrain_snapshot();
                         m_admitted_water_columns.erase(id);
+                        m_water_column_reservations.erase(id);
                         it = m_streaming_state.chunks.erase(it);
                         shadow_note_evicted(id);
                         continue;
@@ -4497,6 +4535,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
                     note_digest_chunk(chunk, true, true);
                     m_parked_bytes += bytes;
                     m_activation_index.erase(*chunk);
+                    invalidate_column_water_mesh(*chunk);
                     note_digest_chunk(it->second, false, false);
                     invalidate_renderable_chunks();
                     it = m_streaming_state.chunks.erase(it);
@@ -4507,10 +4546,12 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
             if (physics_system)
                 physics_system->remove_chunk_collision(id);
             m_activation_index.erase(*it->second);
+            invalidate_column_water_mesh(*it->second);
             note_digest_chunk(it->second, false, false);
             invalidate_renderable_chunks();
             it->second->invalidate_near_terrain_snapshot();
             m_admitted_water_columns.erase(id);
+            m_water_column_reservations.erase(id);
             it = m_streaming_state.chunks.erase(it);
             shadow_note_evicted(id);
         }
@@ -4598,11 +4639,19 @@ bool SHIELD_WorldSystem::PrepareInitialWaterPresentationNear(const Vec3& world_p
         if (chunk->water_mesh_generated.load()) {
             continue;
         }
+        // Capture inputs exactly like the asynchronous snapshot: the resident's
+        // vertical ownership interval and the column's selected water source, so
+        // stacked layers never each emit the column's whole surface.
         Chunk presentation(chunk->get_coords());
-        if (chunk->has_water_sim.load()) {
-            presentation.current_water_resolution.store(chunk->current_water_resolution.load());
-            presentation.water_level_data = chunk->water_level_data;
-            presentation.water_depth_mm = chunk->water_depth_mm;
+        const auto& water_source = column_water_mesh_source(*chunk);
+        presentation.water_mesh_min_y = chunk->water_mesh_min_y;
+        presentation.water_mesh_max_y = chunk->water_mesh_max_y;
+        presentation.water_mesh_inputs_captured = true;
+        if (water_source.has_water_sim.load()) {
+            presentation.current_water_resolution.store(
+                water_source.current_water_resolution.load());
+            presentation.water_level_data = water_source.water_level_data;
+            presentation.water_depth_mm = water_source.water_depth_mm;
             presentation.has_water_sim.store(true);
         } else {
             m_water_system->InitializeGeneratedWater(presentation);
@@ -4610,6 +4659,15 @@ bool SHIELD_WorldSystem::PrepareInitialWaterPresentationNear(const Vec3& world_p
         World::MarchingCubes::GenerateWaterMesh(*m_water_system, *this, presentation);
         if (!presentation.water_mesh_generated.load()) {
             return false;
+        }
+        // The scratch chunk is Unloaded, so the mesher did not notify. Water presence
+        // selects water-only owners, so a flip must invalidate the cached view.
+        const bool had_water =
+            !chunk->water_mesh_vertices.empty() && !chunk->water_mesh_indices.empty();
+        const bool has_water =
+            !presentation.water_mesh_vertices.empty() && !presentation.water_mesh_indices.empty();
+        if (had_water != has_water) {
+            notify_renderable_chunks_changed();
         }
         chunk->water_mesh_vertices = std::move(presentation.water_mesh_vertices);
         chunk->water_mesh_indices = std::move(presentation.water_mesh_indices);
@@ -4740,6 +4798,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
                     invalidate_renderable_chunks();
                     it = m_streaming_state.chunks.emplace(id, std::move(chunk)).first;
                     m_activation_index.insert(it->second);
+                    invalidate_column_water_mesh(*it->second);
                     note_digest_chunk(it->second, false, true);
                 }
 
@@ -4831,9 +4890,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
             Luminumbra::World::MarchingCubes::PolygoniseTerrain(
                 *this, *chunk, 0.0f, build_chunk.step);
             chunk->applied_transition_faces.store(0, std::memory_order_release);
-            chunk->water_mesh_vertices.clear();
-            chunk->water_mesh_indices.clear();
-            chunk->water_mesh_generated.store(false, std::memory_order_release);
+            ClearPublishedWaterMesh(*this, *chunk);
             chunk->current_lod.store(build_chunk.lod);
             chunk->near_terrain_snapshot.store({}, std::memory_order_release);
             chunk->mesh_version++;
@@ -5440,6 +5497,7 @@ bool SHIELD_WorldSystem::PrepareTerrainVoxelEdit(const Vec3& world_pos, float ra
                                    .emplace(id, std::make_shared<Luminumbra::Chunk>(coords))
                                    .first;
                     m_activation_index.insert(iterator->second);
+                    invalidate_column_water_mesh(*iterator->second);
                     note_digest_chunk(iterator->second, false, true);
                     ++m_dirty_generation;
                 }
@@ -5706,6 +5764,109 @@ std::vector<Luminumbra::Chunk*> SHIELD_WorldSystem::get_renderable_chunks() {
     return snapshot;
 }
 
+const Chunk& SHIELD_WorldSystem::column_water_mesh_source(const Chunk& chunk) const {
+    const auto coords = chunk.get_coords();
+    const auto column = m_activation_index.columns().find(horizontal_chunk_key(coords.x, coords.z));
+    if (column == m_activation_index.columns().end()) {
+        return chunk;
+    }
+    const auto resident = column->second.residents.find(chunk.get_id());
+    if (resident == column->second.residents.end() || resident->second.get() != &chunk) {
+        return chunk;
+    }
+    const auto complete = [](const Chunk& layer) {
+        const int resolution = layer.current_water_resolution.load(std::memory_order_acquire);
+        return resolution > 1 && resolution <= 32 &&
+               layer.has_water_sim.load(std::memory_order_acquire) &&
+               layer.water_level_data.size() >=
+                   static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
+    };
+    // Sources in the column simulation target Y=0. Deep seabeds may never
+    // contain that layer, so use the lowest complete resident as the fallback.
+    const auto zero = column->second.water_layers.find(0);
+    if (zero != column->second.water_layers.end() && complete(*zero->second)) {
+        return *zero->second;
+    }
+    // Bounded by the affected resident stack, in increasing Y order. A partial
+    // or unsupported grid cannot mask a complete layer. No live grid is modified.
+    for (const auto& [y, layer] : column->second.water_layers) {
+        (void)y;
+        if (complete(*layer)) {
+            return *layer;
+        }
+    }
+    return chunk;
+}
+
+void SHIELD_WorldSystem::propagate_column_water_mesh_invalidations() {
+    if (!m_water_system) {
+        return;
+    }
+    const auto& invalidations = m_water_system->mesh_invalidations();
+    std::unordered_set<u64> columns;
+    std::vector<Chunk*> sources;
+    // Stage only the pending work set, bounded by its distinct resident IDs.
+    // Do not mutate that set until enumeration finishes: inserting owners can rehash it.
+    sources.reserve(invalidations.size());
+    for (const auto id : invalidations) {
+        ++m_water_column_mesh_work.pending_visits;
+        const auto resident = m_streaming_state.chunks.find(id);
+        if (resident == m_streaming_state.chunks.end()) {
+            continue;
+        }
+        const auto coords = resident->second->get_coords();
+        const auto key = horizontal_chunk_key(coords.x, coords.z);
+        if (!columns.insert(key).second) {
+            continue;
+        }
+        const auto column = m_activation_index.columns().find(key);
+        if (column == m_activation_index.columns().end()) {
+            continue;
+        }
+        const auto& selected = column_water_mesh_source(*resident->second);
+        const auto source = m_streaming_state.chunks.find(selected.get_id());
+        if (source == m_streaming_state.chunks.end() || source->second.get() != &selected) {
+            continue;
+        }
+        if (column->second.water_mesh_source_selected &&
+            column->second.water_mesh_source_id == selected.get_id() &&
+            column->second.water_mesh_invalidation_version ==
+                selected.water_mesh_invalidation_version) {
+            continue;
+        }
+        sources.push_back(source->second.get());
+    }
+    // Each affected resident stack is visited once, for both legacy and regional
+    // publication. Retried wakes with unchanged cadence never dirty satisfied owners.
+    for (auto* source : sources) {
+        invalidate_column_water_mesh(*source);
+    }
+}
+
+void SHIELD_WorldSystem::invalidate_column_water_mesh(const Chunk& chunk) {
+    const auto coords = chunk.get_coords();
+    const auto column = m_activation_index.columns().find(horizontal_chunk_key(coords.x, coords.z));
+    if (column == m_activation_index.columns().end()) {
+        return;
+    }
+    // At most this affected column's resident stack, only on residency changes
+    // or simulation mesh-invalidation cadence; never a world scan on a tick.
+    for (const auto& [y, layer] : column->second.water_layers) {
+        ++m_water_column_mesh_work.owner_visits;
+        (void)y;
+        layer->water_mesh_generated.store(false, std::memory_order_release);
+        if (m_water_system) {
+            m_water_system->retain_mesh_invalidation(layer->get_id());
+        }
+    }
+    if (!column->second.water_layers.empty()) {
+        // Residency already queued every owner. A later direct remesh may
+        // satisfy that wake before the scheduler observes the pending IDs.
+        const auto& source = column_water_mesh_source(*column->second.water_layers.begin()->second);
+        m_activation_index.acknowledge_water_mesh_invalidation(source);
+    }
+}
+
 const std::vector<Luminumbra::Chunk*>& SHIELD_WorldSystem::renderable_chunks_view() {
     // Client render-path observation: retain publication order and non-force semantics.
     publish_completed_generation_jobs(/*force=*/false);
@@ -5725,7 +5886,7 @@ const std::vector<Luminumbra::Chunk*>& SHIELD_WorldSystem::renderable_chunks_vie
     ++m_renderable_view_work.rebuilds;
     for (const auto& [id, chunk] : m_streaming_state.chunks) {
         ++m_renderable_view_work.chunk_visits;
-        if (chunk->get_state() == ChunkState::Ready && !chunk->mesh_vertices.empty()) {
+        if (chunk->get_state() == ChunkState::Ready && HasRenderableGeometry(*chunk)) {
             m_renderable_chunks.push_back(chunk.get());
         }
     }
@@ -6253,6 +6414,7 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(
         invalidate_renderable_chunks();
         m_streaming_state.chunks[chunk->get_id()] = chunk;
         m_activation_index.insert(chunk);
+        invalidate_column_water_mesh(*chunk);
         note_digest_chunk(chunk, false, true);
 
         const int target_step = request.target_step;
@@ -6376,9 +6538,10 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(std::span<const MeshingWorkItem> chunk
             break;
         }
         const std::size_t snapshot_bytes =
-            promotion_required
-                ? kMaxMeshingSnapshotBytes
-                : MeshingSnapshotBytes(*work_item.chunk, work_item.terrain_mesh_required);
+            promotion_required ? kMaxMeshingSnapshotBytes
+                               : MeshingSnapshotBytes(*work_item.chunk,
+                                                      work_item.terrain_mesh_required,
+                                                      column_water_mesh_source(*work_item.chunk));
         if (snapshot_bytes > kMeshingSnapshotByteBudget - reserved_bytes) {
             // Leave the sorted suffix untouched: no flags, versions or pending-LOD
             // reservations change. A fresh pass always fits one maximum-sized item.
@@ -6440,7 +6603,9 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(std::span<const MeshingWorkItem> chunk
         const bool has_active_mesh =
             chunk->get_state() == Luminumbra::ChunkState::Ready && HasRenderableGeometry(*chunk);
 
-        if (!has_active_mesh) {
+        // Water-only work preserves terrain readiness even when both published
+        // meshes are empty. Dry remeshes must not churn the renderable view.
+        if (terrain_mesh_required && !has_active_mesh) {
             set_renderable_chunk_state(*chunk, Luminumbra::ChunkState::Meshing);
         }
         chunk->pending_mesh_vertices.clear();
@@ -6459,8 +6624,16 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(std::span<const MeshingWorkItem> chunk
         // while batches are pending; workers must never read its live vectors.
         auto scratch_owner = std::make_shared<Luminumbra::Chunk>(chunk->get_coords());
         auto& snapshot = *scratch_owner;
-        m_last_meshing_snapshot_bytes += MeshingSnapshotBytes(*chunk, terrain_mesh_required);
-        const int resolution = chunk->current_water_resolution.load(std::memory_order_acquire);
+        const auto& water_source = column_water_mesh_source(*chunk);
+        m_last_meshing_snapshot_bytes +=
+            MeshingSnapshotBytes(*chunk, terrain_mesh_required, water_source);
+        snapshot.water_mesh_min_y = chunk->water_mesh_min_y;
+        snapshot.water_mesh_max_y = chunk->water_mesh_max_y;
+        snapshot.water_mesh_inputs_captured = true;
+        snapshot.water_mesh_owner_version = chunk->water_mesh_owner_version;
+        snapshot.water_mesh_source_id = water_source.get_id();
+        const int resolution =
+            water_source.current_water_resolution.load(std::memory_order_acquire);
         snapshot.current_water_resolution.store(resolution, std::memory_order_release);
         // Water snapshots are bounded by the maximum 32*32 simulation grid.
         // Validate before multiplying or copying, including corrupt saved metadata.
@@ -6472,15 +6645,15 @@ SHIELD_WorldSystem::dispatch_meshing_jobs(std::span<const MeshingWorkItem> chunk
                                    source.begin() +
                                        static_cast<std::ptrdiff_t>(std::min(cells, source.size())));
             };
-            copy_mirror(chunk->water_level_data, snapshot.water_level_data);
-            copy_mirror(chunk->water_flow_data, snapshot.water_flow_data);
-            copy_mirror(chunk->water_sim_terrain_height, snapshot.water_sim_terrain_height);
+            copy_mirror(water_source.water_level_data, snapshot.water_level_data);
+            copy_mirror(water_source.water_flow_data, snapshot.water_flow_data);
+            copy_mirror(water_source.water_sim_terrain_height, snapshot.water_sim_terrain_height);
             // The mesher uses depth only for an exact grid; missing, partial
             // and oversized grids all use the procedural-height fallback.
-            if (chunk->water_depth_mm.size() == cells) {
-                snapshot.water_depth_mm = chunk->water_depth_mm;
+            if (water_source.water_depth_mm.size() == cells) {
+                snapshot.water_depth_mm = water_source.water_depth_mm;
             }
-            snapshot.has_water_sim.store(chunk->has_water_sim.load(std::memory_order_acquire),
+            snapshot.has_water_sim.store(water_source.has_water_sim.load(std::memory_order_acquire),
                                          std::memory_order_release);
         }
         const u32 voxel_revision = chunk->voxel_revision();
@@ -6657,6 +6830,11 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
             chunk->mesh_version.load(std::memory_order_acquire) == job_chunk.mesh_version &&
             chunk->voxel_revision() == job_chunk.voxel_revision &&
             chunk->water_seed_edit_generation() == job_chunk.terrain_edit_generation;
+        const bool water_owner_current =
+            chunk->water_mesh_min_y == job_chunk.scratch->water_mesh_min_y &&
+            chunk->water_mesh_max_y == job_chunk.scratch->water_mesh_max_y &&
+            chunk->water_mesh_owner_version == job_chunk.scratch->water_mesh_owner_version &&
+            column_water_mesh_source(*chunk).get_id() == job_chunk.scratch->water_mesh_source_id;
         const bool water_current = chunk->water_mesh_version.load(std::memory_order_acquire) ==
                                    job_chunk.water_mesh_version;
         if (mesh_ready && !mesh_failed && current_owner) {
@@ -6685,9 +6863,16 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
             // Coarse heightmap terrain produces no water replacement. Its water
             // departure is published by the scheduler when the raw band changes.
             const bool replaces_water =
-                completed_lod == 0 || !HasAuthoritativeHeightmapOnly(*chunk);
+                water_owner_current &&
+                (completed_lod == 0 || !HasAuthoritativeHeightmapOnly(*chunk));
             if (replaces_water && water_current &&
                 (!job_chunk.terrain_mesh_required || terrain_current)) {
+                if (chunk->water_mesh_vertices.empty() !=
+                        chunk->pending_water_mesh_vertices.empty() ||
+                    chunk->water_mesh_indices.empty() !=
+                        chunk->pending_water_mesh_indices.empty()) {
+                    notify_renderable_chunks_changed();
+                }
                 chunk->water_mesh_vertices = std::move(chunk->pending_water_mesh_vertices);
                 chunk->water_mesh_indices = std::move(chunk->pending_water_mesh_indices);
                 chunk->water_mesh_version++;
@@ -6701,21 +6886,24 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
                                        ? static_cast<std::size_t>(resolution) *
                                              static_cast<std::size_t>(resolution)
                                        : 0u;
+                const auto& water_source = column_water_mesh_source(*chunk);
                 const bool water_unchanged =
-                    chunk->current_water_resolution.load(std::memory_order_acquire) == resolution &&
-                    chunk->has_water_sim.load(std::memory_order_acquire) ==
+                    water_source.current_water_resolution.load(std::memory_order_acquire) ==
+                        resolution &&
+                    water_source.has_water_sim.load(std::memory_order_acquire) ==
                         snapshot.has_water_sim.load(std::memory_order_acquire) &&
                     cells != 0u && snapshot.water_level_data.size() == cells &&
-                    chunk->water_level_data.size() >= cells &&
+                    water_source.water_level_data.size() >= cells &&
                     std::equal(snapshot.water_level_data.begin(),
                                snapshot.water_level_data.end(),
-                               chunk->water_level_data.begin()) &&
+                               water_source.water_level_data.begin()) &&
                     // Match depth availability as well as values. Unused tails
                     // and unavailable depth values cannot invalidate the mesh.
-                    (chunk->water_depth_mm.size() == cells) == !snapshot.water_depth_mm.empty() &&
+                    (water_source.water_depth_mm.size() == cells) ==
+                        !snapshot.water_depth_mm.empty() &&
                     std::equal(snapshot.water_depth_mm.begin(),
                                snapshot.water_depth_mm.end(),
-                               chunk->water_depth_mm.begin());
+                               water_source.water_depth_mm.begin());
                 chunk->water_mesh_generated.store(
                     water_unchanged &&
                         chunk->pending_water_mesh_generated.load(std::memory_order_acquire),
@@ -6730,10 +6918,12 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
         if (current_owner && chunk->current_lod.load(std::memory_order_acquire) < 0) {
             m_last_pass_drained = false;
         }
-        const bool published =
-            mesh_ready && !mesh_failed && current_owner &&
-            ((job_chunk.terrain_mesh_required && terrain_current) ||
-             (water_current && (!job_chunk.terrain_mesh_required || terrain_current)));
+        // A changed water owner already published its empty replacement and
+        // advanced the version; the rejected water-only job is still settled.
+        const bool published = mesh_ready && !mesh_failed && current_owner &&
+                               ((job_chunk.terrain_mesh_required && terrain_current) ||
+                                ((water_current || !water_owner_current) &&
+                                 (!job_chunk.terrain_mesh_required || terrain_current)));
         if (published || HasRenderableGeometry(*chunk)) {
             set_renderable_chunk_state(*chunk, Luminumbra::ChunkState::Ready);
         } else {
@@ -7396,11 +7586,31 @@ void SHIELD_WorldSystem::note_persistence_outcome(bool ok) {
 }
 
 std::shared_ptr<Chunk> SHIELD_WorldSystem::resolve_water_column(const IVec3& coords) {
+    // Validate identity without inspecting residency or committed payloads.
+    if (coords.y != 0 || coords.x < Chunk::kPackedMinXz || coords.x > Chunk::kPackedMaxXz ||
+        coords.z < Chunk::kPackedMinXz || coords.z > Chunk::kPackedMaxXz) {
+        throw std::invalid_argument("Regional water column identity refused");
+    }
+    const auto id = Chunk::calculate_id(coords);
+    const bool previously_reserved = m_water_column_reservations.contains(id);
+    const std::array ids{id};
+    if (!reserve_water_columns(ids)) {
+        return nullptr;
+    }
+    struct ReservationRollback {
+        std::set<ChunkID>& reservations;
+        ChunkID id;
+        bool keep;
+        ~ReservationRollback() {
+            if (!keep) {
+                reservations.erase(id);
+            }
+        }
+    } reservation{m_water_column_reservations, id, previously_reserved};
     auto chunk = inspect_water_column(coords);
     if (m_durable_read_failed) {
         throw std::invalid_argument("Regional water committed column unavailable");
     }
-    const auto id = Chunk::calculate_id(coords);
     const auto live = m_streaming_state.chunks.find(id);
     const auto parked = m_parked.find(id);
     const auto cached = live != m_streaming_state.chunks.end() ? live->second
@@ -7423,21 +7633,6 @@ std::shared_ptr<Chunk> SHIELD_WorldSystem::resolve_water_column(const IVec3& coo
          chunk->is_water_state_dirty() || chunk->water_revision() != 0)) {
         throw std::invalid_argument("Regional water column requires legacy migration");
     }
-    const bool previously_reserved = m_water_column_reservations.contains(id);
-    const std::array ids{id};
-    if (!reserve_water_columns(ids)) {
-        return nullptr;
-    }
-    struct ReservationRollback {
-        std::set<ChunkID>& reservations;
-        ChunkID id;
-        bool keep;
-        ~ReservationRollback() {
-            if (!keep) {
-                reservations.erase(id);
-            }
-        }
-    } reservation{m_water_column_reservations, id, previously_reserved};
     // Revalidate claimed state, but never replace a handle already admitted to
     // the executor, even before its first simulation step publishes authority.
     if (chunk && chunk == cached &&
@@ -7511,9 +7706,12 @@ std::shared_ptr<Chunk> SHIELD_WorldSystem::resolve_water_column(const IVec3& coo
     if (live != m_streaming_state.chunks.end()) {
         live->second->invalidate_near_terrain_snapshot();
         m_activation_index.erase(*live->second);
+        invalidate_column_water_mesh(*live->second);
         note_digest_chunk(live->second, false, false);
         live->second = chunk;
+        // The replacement can change the column's water source for every owner.
         m_activation_index.insert(chunk);
+        invalidate_column_water_mesh(*chunk);
         m_activation_index.content_changed(coords);
         note_digest_chunk(chunk, false, true);
         invalidate_renderable_chunks();
@@ -7558,13 +7756,13 @@ void SHIELD_WorldSystem::discard_unclaimed_water_columns(
             chunk->water_revision() != 0) {
             continue;
         }
-        m_water_column_reservations.erase(chunk->get_id());
         // A live unclaimed admission keeps its marker until the chunk leaves
         // residency, so a later inspection cannot decode a committed record over
         // the canonical live handle.
         if (parked == m_parked.end() || parked->second.chunk != chunk) {
             continue;
         }
+        m_water_column_reservations.erase(chunk->get_id());
         m_admitted_water_columns.erase(chunk->get_id());
         m_parked_bytes -= parked->second.bytes;
         note_digest_chunk(chunk, true, false);
@@ -7578,7 +7776,9 @@ void SHIELD_WorldSystem::discard_unclaimed_water_columns(
         const auto chunk = live != m_streaming_state.chunks.end() ? live->second
                            : parked != m_parked.end()             ? parked->second.chunk
                                                                   : nullptr;
-        if (!chunk || chunk->get_state() == ChunkState::Loading || !chunk->needs_authority()) {
+        // A retained live, loading or unclaimed owner still consumes capacity.
+        // Only retirement or a clean committed save may release its reservation.
+        if (!chunk) {
             m_water_column_reservations.erase(id);
         }
     }
@@ -7893,6 +8093,7 @@ bool SHIELD_WorldSystem::restore_authoritative_chunk(const IVec3& coords) {
         if (resident->second) {
             resident->second->invalidate_near_terrain_snapshot();
             m_activation_index.erase(*resident->second);
+            invalidate_column_water_mesh(*resident->second);
             note_digest_chunk(resident->second, false, false);
         }
         invalidate_renderable_chunks();
@@ -7933,6 +8134,7 @@ void SHIELD_WorldSystem::release_clean_parked_chunks() {
             m_parked_bytes -= it->second.bytes;
             note_digest_chunk(it->second.chunk, true, false);
             m_admitted_water_columns.erase(it->first);
+            m_water_column_reservations.erase(it->first);
             it = m_parked.erase(it);
         } else {
             ++it;
@@ -7961,6 +8163,7 @@ bool SHIELD_WorldSystem::unpark_chunk(ChunkID id) {
         chunk->current_lod.store(-1, std::memory_order_release);
         set_renderable_chunk_state(*chunk, Luminumbra::ChunkState::Idle);
         m_activation_index.insert(chunk);
+        invalidate_column_water_mesh(*chunk);
         note_digest_chunk(chunk, false, true);
         invalidate_renderable_chunks();
         m_streaming_state.chunks.emplace(id, chunk);
@@ -8098,6 +8301,7 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
         // externally adopted chunk (world-local generation numbers can coincide).
         chunk->stage_water_seed_inputs({});
         m_activation_index.insert(chunk);
+        invalidate_column_water_mesh(*chunk);
         m_activation_index.content_changed(chunk->get_coords());
         ++m_dirty_generation;
     }

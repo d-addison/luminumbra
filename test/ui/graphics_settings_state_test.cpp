@@ -68,13 +68,16 @@ TEST(GraphicsSettingsState, SelectingEachPresetClearsEveryOverride) {
         EXPECT_EQ(state.Settings().base_preset, preset);
         EXPECT_TRUE(state.Settings().overrides.empty());
         EXPECT_FALSE(state.Display().effective.custom);
-        EXPECT_EQ(state.Settings().preset_revision, preset == GraphicsPreset::Ultra ? 2u : 3u);
+        EXPECT_EQ(state.Settings().preset_revision, kGraphicsPresetRevision);
         GraphicsSettings legacy;
         legacy.base_preset = preset;
         legacy.preset_revision = 1;
         ResolvedGraphics expected;
         std::string error;
         ASSERT_TRUE(ResolveGraphics(legacy, {}, expected, error));
+        expected.values.terrain_near_refinement =
+            state.Settings().base_preset == GraphicsPreset::High ||
+            state.Settings().base_preset == GraphicsPreset::Ultra;
         EXPECT_EQ(state.Display().effective.values, expected.values);
     }
 }
@@ -100,14 +103,16 @@ TEST(GraphicsSettingsState, DetectionKeepsCpuTiersAndAppliesApprovedVisuals) {
         EXPECT_FALSE(state.SavePending());
         state.Applied(true, 1.0);
         EXPECT_EQ(state.Settings().base_preset, presets[index]);
-        EXPECT_EQ(state.Settings().preset_revision,
-                  presets[index] == GraphicsPreset::Ultra ? 2u : 3u);
+        EXPECT_EQ(state.Settings().preset_revision, kGraphicsPresetRevision);
         GraphicsSettings legacy;
         legacy.base_preset = presets[index];
         legacy.preset_revision = 1;
         ResolvedGraphics expected;
         std::string error;
         ASSERT_TRUE(ResolveGraphics(legacy, {}, expected, error));
+        expected.values.terrain_near_refinement =
+            state.Settings().base_preset == GraphicsPreset::High ||
+            state.Settings().base_preset == GraphicsPreset::Ultra;
         EXPECT_EQ(state.Display().effective.values, expected.values);
         EXPECT_TRUE(state.SaveDue(1.5));
         EXPECT_FALSE(state.Display().hardware.empty());

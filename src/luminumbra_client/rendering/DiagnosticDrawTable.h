@@ -34,6 +34,9 @@ struct DiagnosticSubmission {
     DiagnosticOwnership ownership = DiagnosticOwnership::Live;
     DiagnosticPass pass = DiagnosticPass::GBuffer;
     DiagnosticProvenance provenance = DiagnosticProvenance::Unknown;
+    // Generated geometry has no repository asset path. Its bounded, capture-local
+    // key identifies the actual resident mesh; unknown meshing provenance stays unknown.
+    std::string_view generated_mesh{};
 };
 
 // Capture-local, render-thread registry. Clear only between completed captures;
@@ -50,7 +53,10 @@ public:
             submission.shader_variant.empty() || submission.shader_variant.size() > 1024 ||
             static_cast<unsigned int>(submission.provenance) >
                 static_cast<unsigned int>(DiagnosticProvenance::Unsupported) ||
-            (!unsupported && submission.mesh_path.empty()) ||
+            submission.generated_mesh.size() > 1024 ||
+            (!submission.generated_mesh.empty() &&
+             (!submission.mesh_path.empty() || !valid_path(submission.generated_mesh))) ||
+            (!unsupported && submission.mesh_path.empty() && submission.generated_mesh.empty()) ||
             (!submission.mesh_path.empty() && !valid_path(submission.mesh_path))) {
             return false;
         }
@@ -64,8 +70,11 @@ public:
             return false;
         }
         // Prefix distinguishes different provenance for the same resolved asset.
-        const std::string key = std::to_string(static_cast<unsigned int>(submission.provenance)) +
-                                ":" + std::string(submission.mesh_path);
+        const std::string key =
+            std::to_string(static_cast<unsigned int>(submission.provenance)) +
+            (submission.generated_mesh.empty() ? ":asset:" : ":generated:") +
+            std::string(submission.generated_mesh.empty() ? submission.mesh_path
+                                                          : submission.generated_mesh);
         const auto found = mesh_ids_.find(key);
         const bool new_mesh = found == mesh_ids_.end();
         if (new_mesh && meshes_.size() == max_entries) {
@@ -77,10 +86,13 @@ public:
         try {
             // dump also refuses malformed UTF-8, before changing registry state.
             if (new_mesh) {
-                mesh_json = nlohmann::json{{"id", encoded[1]},
-                                           {"path", submission.mesh_path},
-                                           {"provenance", submission.provenance}}
-                                .dump();
+                nlohmann::json mesh{{"id", encoded[1]},
+                                    {"path", submission.mesh_path},
+                                    {"provenance", submission.provenance}};
+                if (!submission.generated_mesh.empty()) {
+                    mesh["generated"] = submission.generated_mesh;
+                }
+                mesh_json = mesh.dump();
             }
             draw_json = nlohmann::json{{"id", encoded[0]},
                                        {"mesh", encoded[1]},
@@ -107,7 +119,7 @@ public:
                 mesh_ids_.emplace(key, encoded[1]);
                 meshes_.push_back(std::move(mesh_json));
             }
-            draws_.push_back({encoded, std::move(draw_json)});
+            draws_.push_back({encoded, std::move(draw_json), unsupported});
         } catch (const std::exception&) {
             meshes_.resize(old_meshes);
             if (new_mesh) {
@@ -128,6 +140,16 @@ public:
     bool complete_coverage() const {
         return !unsupported_;
     }
+    // Capture-only validation, bounded by the 65,536-entry submission limit.
+    bool complete_deferred_coverage() const {
+        for (const auto& draw : draws_) {
+            if (draw.unsupported &&
+                (draw.id[3] >> 8U) == static_cast<std::uint32_t>(DiagnosticPass::GBuffer)) {
+                return false;
+            }
+        }
+        return true;
+    }
     std::string json() const {
         std::string result;
         result.reserve(json_bytes_);
@@ -142,6 +164,22 @@ public:
         }
         result += suffix;
         return result;
+    }
+    // Explicit submission records only; never infer coverage from pixel colors.
+    // The subset cannot exceed the registry's existing 16 MiB JSON bound.
+    void append_unsupported_json(std::string& result) const {
+        result += '[';
+        bool first = true;
+        for (const auto& draw : draws_) {
+            if (draw.unsupported) {
+                if (!first) {
+                    result += ',';
+                }
+                result += draw.json;
+                first = false;
+            }
+        }
+        result += ']';
     }
     void clear() {
         draws_.clear();
@@ -160,6 +198,7 @@ private:
     struct Draw {
         DiagnosticId id;
         std::string json;
+        bool unsupported = false;
     };
     static bool valid_path(std::string_view path) {
         if (path.front() == '/' || path.find_first_of("\\:") != std::string_view::npos) {

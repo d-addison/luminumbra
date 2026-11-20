@@ -39,7 +39,7 @@ class WaterMeshContract(unittest.TestCase):
     def test_sampling_and_quad_culling_use_one_strict_threshold(self):
         self.assertEqual(self.mesh.count("constexpr std::int32_t kMinRenderableWaterDepthMm"), 1)
         self.assertIn("kMinRenderableWaterDepthMm = 50;", self.mesh)
-        self.assertRegex(self.producer, r"chunk.water_depth_mm\[[^;]+ > "
+        self.assertRegex(self.producer, r"water_source.water_depth_mm\[[^;]+ > "
                          r"kMinRenderableWaterDepthMm;")
         self.assertIn("if (renderable) {", self.producer)
 
@@ -52,11 +52,17 @@ class WaterMeshContract(unittest.TestCase):
         self.assertIn("all_wet || weight_sum == 0.0f ? legacy_height", self.sampler)
         # Both inline and worker lanes copy the depth grid into their scratch chunk.
         world = source("src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
-        self.assertIn("snapshot.water_depth_mm = chunk->water_depth_mm;", world)
+        # The worker snapshot copies depth from the shared column water source.
+        self.assertIn("snapshot.water_depth_mm = water_source.water_depth_mm;", world)
         self.assertIn("auto& snapshot = *scratch_owner;", world)
         self.assertIn("auto& scratch = *scratch_owner;", world)
         self.assertIn("*m_water_system, *this, scratch);", world)
-        self.assertIn("presentation.water_depth_mm = chunk->water_depth_mm;", world)
+        # Initial presentation captures the same column source and owner interval.
+        for capture in ("presentation.water_depth_mm = water_source.water_depth_mm;",
+                        "presentation.water_mesh_min_y = chunk->water_mesh_min_y;",
+                        "presentation.water_mesh_max_y = chunk->water_mesh_max_y;",
+                        "presentation.water_mesh_inputs_captured = true;"):
+            self.assertIn(capture, world)
 
     def test_native_and_source_regressions_are_registered(self):
         native = source("test/shield/async_water_meshing_test.cpp")
