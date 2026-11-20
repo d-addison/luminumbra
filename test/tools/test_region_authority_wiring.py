@@ -445,7 +445,7 @@ class RegionAuthorityWiring(unittest.TestCase):
         header = (ROOT / "src/luminumbra_common/world/GameSession.h").read_text(
             encoding="utf-8")
         self.assertEqual(function(header, "struct AuthorityProfileOptions"),
-                         "bool residency_free_eviction = false; bool regional_water = false;")
+                         "bool residency_free_eviction = false; bool regional_water = false; bool simulation_host_integration = false;")
         self.assertIn("const AuthorityProfileOptions m_authorityProfile;", header)
         self.assertIn(": GameSession(AuthorityProfileOptions{}, AuthorityProfileTag{}) {}", session)
         self.assertIn(": m_authorityProfile(authority_profile)", session)
@@ -675,9 +675,8 @@ class SimulationCollisionWiring(unittest.TestCase):
     def assert_barrier(self, source, name, step):
         body = function(source, name) if name else source.split(
             "case GameState::IN_GAME:", 1)[1].split("case GameState::", 1)[0]
-        self.assertIn("prepare_simulation_collisions(", body)
-        self.assertRegex(body, r"prepare_simulation_collisions\(\s*\{\},")
-        prepare = body.index("prepare_simulation_collisions(")
+        self.assertIn("PrepareSimulationCollisions(", body)
+        prepare = body.index("PrepareSimulationCollisions(")
         self.assertLess(prepare, body.index(step))
         if name is None:
             self.assertLess(prepare, body.index("g_playerController->Update("))
@@ -700,15 +699,15 @@ class SimulationCollisionWiring(unittest.TestCase):
         for path, name, step in self.HOSTS:
             source = (ROOT / path).read_text(encoding="utf-8")
             with self.subTest(path=path), self.assertRaises(AssertionError):
-                self.assert_barrier(source.replace("prepare_simulation_collisions(",
+                self.assert_barrier(source.replace("PrepareSimulationCollisions(",
                                                    "removed_preparation(", 1), name, step)
 
     def test_lockstep_refusal_waits_before_consuming_either_peer_input(self):
         source = (ROOT / "src/luminumbra_client/core/scenarios/NetworkedSessionDriver.cpp").read_text(
             encoding="utf-8")
         step = function(source, "bool NetworkedSessionDriver::StepAgreedTick(")
-        prepare = step.index("prepare_simulation_collisions(")
-        self.assertRegex(step, r"prepare_simulation_collisions\(\s*\{\},")
+        prepare = step.index("PrepareSimulationCollisions(")
+        self.assertIn("SetHostSimulationAnchors({&ctx->spawn_anchor, 1})", step)
         self.assertIn("&m_impl->host_ctx, &m_impl->client_ctx", step)
         self.assertLess(prepare, step.index("m_impl->host->PumpTick("))
         self.assertIn("return true;", step[prepare:step.index("m_impl->host->PumpTick(")])
@@ -1004,7 +1003,7 @@ class SimulationCollisionWiring(unittest.TestCase):
         preflight = function(loop, "peer_runner.get()})")
         self.assertIn("session->GetRegionSchedulerFault()", preflight)
         self.assertIn("session->GetSimulationTickCount() >= budget", preflight)
-        self.assertIn("prepare_simulation_collisions( {}, session->GetSimulationTickCount() + 1)",
+        self.assertIn("PrepareSimulationCollisions(session->GetSimulationTickCount() + 1)",
                       preflight)
         self.assertIn("terminal = session->GetRegionSchedulerFault().has_value();", preflight)
         refused = function(preflight, "if (!terminal)")
@@ -1093,7 +1092,7 @@ class SimulationCollisionWiring(unittest.TestCase):
     def test_render_frames_do_not_reuse_an_upcoming_tick(self):
         source = (ROOT / "src/luminumbra_client/main_client.cpp").read_text(encoding="utf-8")
         body = source.split("case GameState::IN_GAME:", 1)[1].split("case GameState::", 1)[0]
-        self.assertRegex(body, r"prepare_simulation_collisions\(\s*\{\},\s*"
+        self.assertRegex(body, r"PrepareSimulationCollisions\(\s*"
                               r"std::numeric_limits<std::uint64_t>::max\(\)\)")
 
     def test_teleport_invalidates_and_character_driver_prepares_before_stepping(self):
@@ -1715,6 +1714,251 @@ class SimulationCollisionWiring(unittest.TestCase):
                         sample.index("if (chunk && chunk->has_terrain_authority())"))
         self.assertLess(sample.index("expected && (!chunk || !chunk->has_simulation_authority())"),
                         sample.index("if (chunk && chunk->has_terrain_authority())"))
+
+
+class SimulationHostWiring(unittest.TestCase):
+    @staticmethod
+    def read(path):
+        return (ROOT / path).read_text(encoding="utf-8")
+
+    def assert_shared_inputs(self, session, header, server, network, client):
+        gate = function(header, "bool SimulationHostIntegrationEnabled() const")
+        self.assertEqual(gate, "return m_activeRegionsEnabled && "
+                              "m_authorityProfile.simulation_host_integration;")
+        options = function(header, "struct AuthorityProfileOptions")
+        self.assertIn("bool simulation_host_integration = false;", options)
+        anchors = function(session, "GameSession::SimulationAnchors() const")
+        self.assertIn("return RegionalWaterAnchors(m_replicatedSimulationAnchors, "
+                      "m_activeRegionLedger.local_anchor());", anchors)
+        publish_inputs = function(session, "bool GameSession::SetHostSimulationAnchors(")
+        self.assertIn("m_activeRegionLedger.set_local_anchor(anchors.front())", publish_inputs)
+        prepare = function(session, "bool GameSession::PrepareSimulationCollisions(")
+        self.assertIn("SimulationHostIntegrationEnabled() ? SimulationAnchors() : "
+                      "std::span<const Vec3>{}", prepare)
+        self.assertIn("m_physicsSystem->prepare_simulation_collisions(", prepare)
+        regional_water = function(session, "void GameSession::UpdateRegionalWaterFromSimulation()")
+        self.assertIn("RegionalWaterAnchors(m_replicatedSimulationAnchors, "
+                      "m_activeRegionLedger.local_anchor())", regional_water)
+        self.assertIn("m_waterSystem->UpdateRegionalFromSimulation(", regional_water)
+        tick = function(session, "std::uint32_t GameSession::TickSimulation(")
+        self.assertLess(tick.index("PrepareSimulationCollisions(current_tick)"),
+                        tick.index("StepHostPhysics()"))
+        self.assertLess(tick.index("StepHostPhysics()"),
+                        tick.index("UpdateRegionalWaterFromSimulation();"))
+        fixed_step = function(session, "void GameSession::StepHostPhysics()")
+        self.assertIn("SimulationHostIntegrationEnabled() && m_physicsSystem", fixed_step)
+        self.assertIn("m_physicsSystem->update(fixed_dt)", fixed_step)
+        publish = function(server, "ServerTickReport ServerWorldRunner::RunFixedTicks(")
+        self.assertIn("anchors[count++] = avatar.position;", publish)
+        self.assertIn("anchors[count++] = *smoke_anchor;", publish)
+        self.assertIn("SetHostSimulationAnchors({anchors.data(), count})", publish)
+        self.assertLess(publish.index("SetHostSimulationAnchors("),
+                        publish.index("PrepareSimulationCollisions("))
+        self.assertIn("m_avatars.size() > anchors.size()", publish)
+        self.assertIn("ActiveRegionsEnabled() && !m_session->SimulationHostIntegrationEnabled()", publish)
+        for entry in ("bool NetSessionApplyStep(", "bool NetworkedSessionDriver::StepAgreedTick("):
+            step = function(network, entry)
+            self.assertIn("SetHostSimulationAnchors({&ctx->spawn_anchor, 1})", step)
+            self.assertLess(step.index("SetHostSimulationAnchors("),
+                            step.index("PrepareSimulationCollisions("))
+        # Every legacy external rigid step is excluded from the fixed-tick profile.
+        for source, name, owner in (
+                (server, "ServerTickReport ServerWorldRunner::RunFixedTicks(", "m_session"),
+                (network, "bool NetSessionApplyStep(", "ctx->session")):
+            body = function(source, name)
+            legacy = function(body, f"if (!{owner}->SimulationHostIntegrationEnabled())")
+            self.assertIn("physics_system->update(", legacy)
+        play = function(client, "int main(").split("case GameState::IN_GAME:", 1)[1].split("case GameState::", 1)[0]
+        local_preflight = function(play, "if (advance_frame_simulation && "
+                                   "!scenario_config.networked_session_smoke())")
+        self.assertIn("gameSession->PrepareSimulationCollisions(", local_preflight)
+        self.assertIn("std::numeric_limits<std::uint64_t>::max()", local_preflight)
+        self.assertLess(local_preflight.index("SetLocalPlayerSimulationPosition("),
+                        local_preflight.index("PrepareSimulationCollisions("))
+        local_physics = function(play, "if (advance_frame_simulation)")
+        local_legacy = function(local_physics, "if (!gameSession->SimulationHostIntegrationEnabled())")
+        self.assertIn("physics->update(deltaTime * g_app.capture.timeScale)", local_legacy)
+        self.assertRegex(play, r"if \(benchmark_v4 && g_camera && "
+                              r"!gameSession->SimulationHostIntegrationEnabled\(\)\) "
+                              r"gameSession->SetLocalPlayerSimulationPosition\(g_camera->Position, true\)")
+        self.assertIn("g_playerController->GetPosition()", play)
+
+    def assert_smoke(self, session, server, native):
+        diagnostic = function(session, "int GameSession::SimulationSmokeWetRegionSeamPairs(")
+        for token in ("ActiveRegionLedger::valid_anchor(anchor)",
+                      "coords.x >= Chunk::kPackedMaxXz",
+                      "left->get_state() == ChunkState::Loading",
+                      "right->get_state() == ChunkState::Loading",
+                      "!left->has_water_authority()", "!right->has_water_authority()",
+                      "!left->has_complete_water_state()", "!right->has_complete_water_state()"):
+            self.assertIn(token, diagnostic)
+        self.assertLess(diagnostic.index("coords.x >= Chunk::kPackedMaxXz"),
+                        diagnostic.index("find_authoritative_chunk("))
+        self.assertLess(diagnostic.index("!right->has_complete_water_state()"),
+                        diagnostic.index("water_depth_mm["))
+        choose = function(session, "GameSession::DefaultSimulationSmokeAnchor() const")
+        for token in ("z = -4; z <= 4", "x = -4; x <= 4", "x * 512", "z * 512 + 8",
+                      "WaterLevelAt(boundary - 8.0f, centre_z) > left + 0.25f",
+                      "WaterLevelAt(boundary + 8.0f, centre_z) > right + 0.25f",
+                      "return std::nullopt;", "row < resolution",
+                      "return Vec3(boundary - 8.0f, std::max(left, right) + 2.0f, centre_z);"):
+            self.assertIn(token, choose)
+        self.assertNotIn("snapshot_", choose)
+        self.assertNotIn("spawnPoint", choose)
+        run = function(server, "ServerTickReport ServerWorldRunner::RunFixedTicks(")
+        self.assertIn("!smoke_anchor", run)
+        self.assertIn('"Simulation smoke requires a wet region seam"', run)
+        boot = function(server, "bool ServerWorldRunner::Boot(")
+        self.assertIn("m_simulationSmokeAnchor = m_session->DefaultSimulationSmokeAnchor()", boot)
+        self.assertNotIn("DefaultSimulationSmokeAnchor()", run)
+        self.assertIn("if (count == 0 && m_config.simulation_smoke)", boot)
+        self.assertIn("if (count == 0 && smoke_anchor)", run)
+        self.assertNotIn("SimulationSmokeWetRegionSeamPairs", run)
+        smoke_entry = function(self.read("src/luminumbra_server/modes/Smoke.cpp"), "SmokeRunResult RunSmokeOnce(")
+        self.assertIn("config.simulation_smoke = true", smoke_entry)
+        guard = function(smoke_entry, "if (session->SimulationHostIntegrationEnabled()")
+        self.assertIn("result.ticks.region_fault = true", guard)
+        self.assertIn("session->SimulationSmokeWetRegionSeamPairs(*anchor) == 0", smoke_entry)
+        self.assertLess(smoke_entry.index("SimulationSmokeWetRegionSeamPairs(*anchor) == 0"),
+                        smoke_entry.index("runner.ComputeWorldHash()"))
+        self.assertIn("const auto& smoke_anchor = m_simulationSmokeAnchor", run)
+        smoke = function(native, "TEST(GameSessionHeadlessWorldTest, "
+                         "DefaultSimulationSmokeHasPositiveWetRegionSeamPairs)")
+        for token in ("session.DefaultSimulationSmokeAnchor()", "ASSERT_TRUE(anchor.has_value())",
+                      "session.SetHostSimulationAnchors(anchors)", "EXPECT_GT(wet_pairs, 0)",
+                      "EXPECT_GT(regional_wet_pairs, 0)",
+                      "for (const bool high_resolution : {false, true})",
+                      "left->water_depth_mm[row * resolution + resolution - 1] > 0",
+                      "right->water_depth_mm[row * resolution] > 0"):
+            self.assertIn(token, smoke)
+
+    def sources(self):
+        return tuple(self.read(path) for path in (
+            "src/luminumbra_common/world/GameSession.cpp",
+            "src/luminumbra_common/world/GameSession.h",
+            "src/luminumbra_server/ServerWorldRunner.cpp",
+            "src/luminumbra_client/core/scenarios/NetworkedSessionDriver.cpp",
+            "src/luminumbra_client/main_client.cpp"))
+
+    def test_all_shipping_hosts_share_simulation_inputs_at_the_tick_boundary(self):
+        self.assert_shared_inputs(*self.sources())
+
+    def test_server_lockstep_preflight_publishes_current_avatar_inputs(self):
+        source = self.read("src/luminumbra_server/modes/Lockstep.cpp")
+        body = function(source, "int RunLockstepLoopback(")
+        publish = function(body, "if (session->SimulationHostIntegrationEnabled() && "
+                           "!runner->Avatars().empty())")
+        self.assertIn("for (const auto& avatar : runner->Avatars())", publish)
+        self.assertIn("anchors[count++] = avatar.position", publish)
+        self.assertIn("session->SetHostSimulationAnchors({anchors.data(), count})", publish)
+        self.assertLess(body.index("SetHostSimulationAnchors("),
+                        body.index("PrepareSimulationCollisions("))
+        with self.assertRaises(AssertionError):
+            self.assertIn("anchors[count++] = avatar.position",
+                          publish.replace("avatar.position", "camera.position"))
+
+    def test_default_smoke_is_wet_on_both_sides_of_a_region_seam(self):
+        session, _, server, _, _ = self.sources()
+        self.assert_smoke(session, server, self.read("test/common/GameSessionHeadlessWorld_test.cpp"))
+
+    def test_camera_preparation_and_dry_smoke_mutations_are_detected(self):
+        sources = self.sources()
+        for index, old, new in (
+                (0, "SimulationHostIntegrationEnabled() ? SimulationAnchors()",
+                 "SimulationHostIntegrationEnabled() ? camera_anchors"),
+                (2, "anchors[count++] = avatar.position;", "anchors[count++] = camera.position;"),
+                (3, "SetHostSimulationAnchors({&ctx->spawn_anchor, 1})",
+                 "SetHostSimulationAnchors({&camera.position, 1})"),
+                (4, "benchmark_v4 && g_camera &&\n                            !gameSession->SimulationHostIntegrationEnabled()",
+                 "benchmark_v4 && g_camera")):
+            mutated = list(sources)
+            self.assertIn(old, mutated[index])
+            mutated[index] = mutated[index].replace(old, new)
+            with self.subTest(index=index), self.assertRaises(AssertionError):
+                self.assert_shared_inputs(*mutated)
+        session, _, server, _, _ = sources
+        native = self.read("test/common/GameSessionHeadlessWorld_test.cpp")
+        for old, new in (("EXPECT_GT(wet_pairs, 0)", "EXPECT_GE(wet_pairs, 0)"),
+                         ("EXPECT_GT(regional_wet_pairs, 0)", "EXPECT_GE(regional_wet_pairs, 0)"),
+                         ("session.SetHostSimulationAnchors(anchors)", "session.SetHostSimulationAnchors({})")):
+            self.assertIn(old, native)
+            with self.subTest(old=old), self.assertRaises(AssertionError):
+                self.assert_smoke(session, server, native.replace(old, new))
+
+    def test_avatar_step_cannot_scan_removed_owner_slots(self):
+        source = self.read("src/luminumbra_common/systems/PhysicsSystem.cpp")
+        step = function(source, "void PhysicsSystem::update_avatars(")
+        live = "for (auto i = m_avatar_head; i != kNoAvatar; i = m_avatars[i].next)"
+        self.assertIn(live, step)
+        self.assertNotIn("m_avatars.size()", step)
+        with self.assertRaises(AssertionError):
+            self.assertIn(live, step.replace(live,
+                          "for (std::size_t i = 0; i < m_avatars.size(); ++i)"))
+
+    def test_flag_off_profile_keeps_the_existing_exact_save_golden(self):
+        native = self.read("test/common/GameSessionHeadlessWorld_test.cpp")
+        golden = function(native, "TEST(GameSessionHeadlessWorldTest, "
+                          "DormantHostProfileMatchesDevelWorldHashAndExactSaveBytes)")
+        for token in (".simulation_host_integration = true", "s->SetActiveRegionsEnabled(false)",
+                      "expected.SetHostSimulationAnchors(ignored)",
+                      "expected.PrepareSimulationCollisions(1)", "ExpectSameWorldHash(session, expected)",
+                      "expected.SaveWorldStateTo(profile_save)", "EXPECT_EQ(profile_files, 2u)",
+                      "ReadClockTestFile(fixture / entry.path().filename())"):
+            self.assertIn(token, golden)
+
+    def test_native_host_regressions_are_registered_and_nonvacuous(self):
+        native = self.read("test/common/GameSessionHeadlessWorld_test.cpp")
+        for case in ("BoundaryWaterAndFreezeIgnoreCameraFramesAndRestore",
+                     "HostBoundaryInputsShareAuthoritySequenceWithoutRenderCadence",
+                     "DefaultSimulationSmokeHasPositiveWetRegionSeamPairs",
+                     "HostAnchorAdmissionRefusesInvalidInputsWithoutReplacement",
+                     "HostCollisionRefusalPreservesTheTickAndRetriesTheSameInputs",
+                     "DefaultSimulationSmokeRefusesAnEntirelyDryPreset",
+                     "SmokeSeamDiagnosticRequiresReadyCompletePairedWater",
+                     "DormantHostProfileMatchesDevelWorldHashAndExactSaveBytes"):
+            self.assertRegex(native, r"TEST\(GameSessionHeadlessWorldTest,\s*" + case + r"\)")
+        boundary = function(native, "TEST(GameSessionHeadlessWorldTest, "
+                            "BoundaryWaterAndFreezeIgnoreCameraFramesAndRestore)")
+        for token in ("moving.SaveWorldState()", "reloaded.LoadWorld(", "RegionState::Frozen",
+                      "EXPECT_NE(record.frozen_digest, 0u)", "EXPECT_NE(flowing->water_depth_mm",
+                      "EXPECT_GT(session->GetWaterSystem()->dbg_seam_wet_pairs(), 0)"):
+            self.assertIn(token, boundary)
+        parity = function(native, "TEST(GameSessionHeadlessWorldTest, "
+                          "HostBoundaryInputsShareAuthoritySequenceWithoutRenderCadence)")
+        for token in ("create_dynamic_sphere(start, {2, 0, 0}, 0.1f)",
+                      "EXPECT_GT(settled.x, start.x)", "EXPECT_LT(settled.y, start.y)",
+                      "ExpectPositionBits(local.GetPhysicsSystem()->get_body_position(bodies[2]), local_before)",
+                      "ExpectPositionBits(networked.GetPhysicsSystem()->get_body_position(bodies[1]), settled)",
+                      "ExpectPositionBits(local.GetPhysicsSystem()->get_body_position(bodies[2]), settled)"):
+            self.assertIn(token, parity)
+        cmake = self.read("test/CMakeLists.txt")
+        self.assertIn("common/GameSessionHeadlessWorld_test.cpp", cmake)
+        self.assertIn("gtest_discover_tests(${_lum_gtest_target}", cmake)
+
+    def test_boundary_fixture_survives_the_sea_sink_and_exchanges_water(self):
+        native = self.read("test/common/GameSessionHeadlessWorld_test.cpp")
+        fixture = function(native, "BoundaryFlowingChunk(const")
+        for token in ("SimulationFloorChunk(coords, 1.0f)",
+                      "water_bed_mm.assign(cells, 1000)",
+                      "water_sim_terrain_height.assign(cells, 1.0f)",
+                      "water_level_data.assign(cells, 2.0f)",
+                      "water_level_data[15] = 5.0f"):
+            self.assertIn(token, fixture)
+        boundary = function(native, "TEST(GameSessionHeadlessWorldTest, "
+                            "BoundaryWaterAndFreezeIgnoreCameraFramesAndRestore)")
+        self.assertIn("ASSERT_NO_FATAL_FAILURE(AdoptBoundaryWaterChunk(*session, coords))", boundary)
+        self.assertIn("ASSERT_NO_FATAL_FAILURE(ExpectBoundaryWaterTransfer(*session))", boundary)
+        adoption = function(native, "void AdoptBoundaryWaterChunk(")
+        for token in ("ASSERT_TRUE(chunk->has_complete_water_state())",
+                      "ASSERT_EQ(session.GetWorldSystem()->resolve_water_column(coords), chunk)",
+                      "ASSERT_TRUE(chunk->has_water_authority())",
+                      "ASSERT_GT(chunk->water_bed_mm[edge], 0)",
+                      "ASSERT_GT(chunk->water_depth_mm[edge], 0)"):
+            self.assertIn(token, adoption)
+        transfer = function(native, "void ExpectBoundaryWaterTransfer(")
+        for token in ("EXPECT_GT(left->water_edge_flux[2 * 15], 7)",
+                      "EXPECT_GT(right->water_depth_mm[0], 1000)"):
+            self.assertIn(token, transfer)
 
 
 if __name__ == "__main__":

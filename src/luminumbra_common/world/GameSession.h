@@ -120,6 +120,7 @@ public:
         bool residency_free_eviction = false;
         // Dormant until negotiated authority enables fixed-tick water ownership.
         bool regional_water = false;
+        bool simulation_host_integration = false;
     };
 
     // Selects the test-only opt-in constructor below.
@@ -662,6 +663,20 @@ public:
     void SetRegionSchedulerConfig(RegionSchedulerConfig config);
     void SetLocalPlayerSimulationPosition(const Vec3& feet, bool walking);
     void SetReplicatedSimulationAnchors(std::vector<Vec3> anchors);
+    // Dormant host wiring shares the ownership profile until negotiated activation.
+    [[nodiscard]] bool SimulationHostIntegrationEnabled() const {
+        return m_activeRegionsEnabled && m_authorityProfile.simulation_host_integration;
+    }
+    // Bounded host input publication. Refusal leaves the previous inputs intact.
+    bool SetHostSimulationAnchors(std::span<const Vec3> anchors);
+    // Called before host physics and again before session consumers; R2 reuses a
+    // successful publication for the same tick. Never accepts render anchors.
+    bool PrepareSimulationCollisions(std::uint64_t tick);
+    // Select once at host boot from fixed world-space seam candidates.
+    // Pure preset samplers only; absence refuses a dry workload.
+    [[nodiscard]] std::optional<Vec3> DefaultSimulationSmokeAnchor() const;
+    // Const diagnostic: count wet cell pairs at the selected X region seam.
+    [[nodiscard]] int SimulationSmokeWetRegionSeamPairs(const Vec3& anchor) const;
     void NotifyGroundObjectEdit(const Vec3& position);
     void PinActiveRegion(RegionKey key, bool pinned);
     void RecordActiveRegionWork(RegionWork work);
@@ -746,6 +761,8 @@ private:
     GameSession(const AuthorityProfileOptions& authority_profile, AuthorityProfileTag);
 
     const AuthorityProfileOptions m_authorityProfile;
+    [[nodiscard]] std::span<const Vec3> SimulationAnchors() const;
+    void StepHostPhysics();
     void DisableFarWorldAuthorityProducer();
     std::unique_ptr<World::FarWorldAuthorityProducer> m_farWorldAuthorityProducer;
     bool m_farWorldSourceNeedsRefresh = false;

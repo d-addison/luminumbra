@@ -1,5 +1,7 @@
 #include "ServerWorldRunner.h"
 
+#include <array>
+
 #include "ServerStreamingBudget.h"
 
 #include <algorithm>
@@ -539,6 +541,25 @@ bool ServerWorldRunner::Boot() {
     // Boot settles water outside the counted ticks. Publish its ownership before any initial
     // checkpoint or save; hash reads themselves only observe this completed boundary.
     world_system->sync_water_authority();
+    if (m_session->SimulationHostIntegrationEnabled()) {
+        std::array<Vec3, Systems::PhysicsSystem::kSimulationOwnerBudget> anchors{};
+        std::size_t count = 0;
+        for (const auto& avatar : m_avatars) {
+            anchors[count++] = avatar.position;
+        }
+        if (count == 0 && m_config.simulation_smoke) {
+            m_simulationSmokeAnchor = m_session->DefaultSimulationSmokeAnchor();
+            if (m_simulationSmokeAnchor) {
+                anchors[count++] = *m_simulationSmokeAnchor;
+            }
+            // A dry preset is refused by the counted run, after the smoke cleanup
+            // guard owns the new world directory.
+        }
+        if (!m_session->SetHostSimulationAnchors({anchors.data(), count})) {
+            m_bootError = "Simulation anchors refused";
+            return false;
+        }
+    }
     m_booted = true;
     return true;
 }
@@ -567,6 +588,14 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
     auto* physics_system = m_session->GetPhysicsSystem();
     const Vec3 spawn_anchor = m_session->GetMetadata().spawnPoint;
     const double fixed_dt = m_session->GetSimulationClock().fixed_dt();
+
+    const auto& smoke_anchor = m_simulationSmokeAnchor;
+    if (tick_count != 0 && m_session->SimulationHostIntegrationEnabled() &&
+        m_config.simulation_smoke && m_avatars.empty() && !smoke_anchor) {
+        report.region_fault = true;
+        report.region_fault_message = "Simulation smoke requires a wet region seam";
+        return report;
+    }
 
     // per-tick main-thread blocking-wait samples (ms) at the streaming barrier.
     std::vector<double> wait_samples;
@@ -613,7 +642,24 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         const auto physics_start = std::chrono::steady_clock::now();
         // Every host gathers the same registered controllers and projectiles.
         // No host-specific spawn/camera anchor can change the horizon or its budget.
-        if (!physics_system->prepare_simulation_collisions({}, budget_tick)) {
+        if (m_session->SimulationHostIntegrationEnabled()) {
+            // At most the R2 owner budget; fixed storage, retained session capacity.
+            std::array<Vec3, Systems::PhysicsSystem::kSimulationOwnerBudget> anchors{};
+            if (m_avatars.size() > anchors.size()) {
+                break;
+            }
+            std::size_t count = 0;
+            for (const auto& avatar : m_avatars) {
+                anchors[count++] = avatar.position;
+            }
+            if (count == 0 && smoke_anchor) {
+                anchors[count++] = *smoke_anchor;
+            }
+            if (!m_session->SetHostSimulationAnchors({anchors.data(), count})) {
+                break;
+            }
+        }
+        if (!m_session->PrepareSimulationCollisions(budget_tick)) {
             // Zero progress without a region fault is the retry outcome. A durable
             // read failure can latch a terminal fault during preparation itself.
             if (const auto& fault = m_session->GetRegionSchedulerFault()) {
@@ -628,12 +674,14 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
             }
             break; // Return retryable partial progress when the retry budget is spent.
         }
-        physics_system->update(static_cast<float>(fixed_dt));
+        if (!m_session->SimulationHostIntegrationEnabled()) {
+            physics_system->update(static_cast<float>(fixed_dt));
+        }
         //  step the server-authoritative avatar characters (gravity +
         // world collision; deterministic creation order) and read their settled
         // transforms back into m_avatars, so the streaming anchors + the
         // `entities` sub-hash reflect the physics-authoritative positions.
-        if (!m_avatars.empty()) {
+        if (!m_avatars.empty() && !m_session->SimulationHostIntegrationEnabled()) {
             physics_system->update_avatars(static_cast<float>(fixed_dt));
             for (std::size_t i = 0; i < m_avatars.size(); ++i) {
                 m_avatars[i].position = physics_system->get_avatar_position(i);
@@ -646,7 +694,7 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
                       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
                                                                 physics_start)
                           .count());
-        if (m_session->ActiveRegionsEnabled()) {
+        if (m_session->ActiveRegionsEnabled() && !m_session->SimulationHostIntegrationEnabled()) {
             std::vector<Vec3> anchors;
             for (const auto& avatar : m_avatars)
                 anchors.push_back(avatar.position);
@@ -654,6 +702,12 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         }
         report.ticks_executed +=
             m_session->TickSimulation(fixed_dt, /*defer_water_authority=*/true);
+        if (m_session->SimulationHostIntegrationEnabled()) {
+            for (std::size_t i = 0; i < m_avatars.size(); ++i) {
+                m_avatars[i].position = physics_system->get_avatar_position(i);
+                m_avatars[i].velocity = physics_system->get_avatar_velocity(i);
+            }
+        }
         report.frames_executed += 1;
         if (const auto& fault = m_session->GetRegionSchedulerFault()) {
             report.region_fault = true;

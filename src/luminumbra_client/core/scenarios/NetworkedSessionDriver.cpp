@@ -129,11 +129,13 @@ bool NetSessionApplyStep(std::uint64_t /*tick*/,
     // then quiesce so the next scheduler decision observes the identical settled
     // state on both peers. The streaming anchor is the spawn point -- NOT the
     // client camera -- so render-side look can never alter the hashed world.
-    if (!physics_system->prepare_simulation_collisions(
-            {}, ctx->session->GetSimulationTickCount() + 1)) {
+    if (!ctx->session->SetHostSimulationAnchors({&ctx->spawn_anchor, 1}) ||
+        !ctx->session->PrepareSimulationCollisions(ctx->session->GetSimulationTickCount() + 1)) {
         return false; // No physics or session tick is consumed on refusal.
     }
-    physics_system->update(static_cast<float>(ctx->fixed_dt));
+    if (!ctx->session->SimulationHostIntegrationEnabled()) {
+        physics_system->update(static_cast<float>(ctx->fixed_dt));
+    }
     const std::uint32_t ran =
         ctx->session->TickSimulation(ctx->fixed_dt, /*defer_water_authority=*/true);
     world_system->update(ctx->session->GetRegistry(), ctx->spawn_anchor, physics_system);
@@ -346,9 +348,10 @@ bool NetworkedSessionDriver::StepAgreedTick() {
     // The hook reuses this tick's publication and cannot spend the budget twice.
     bool retry = false;
     for (auto* ctx : {&m_impl->host_ctx, &m_impl->client_ctx}) {
-        const bool prepared = !ctx->session->GetRegionSchedulerFault() &&
-                              ctx->session->GetPhysicsSystem()->prepare_simulation_collisions(
-                                  {}, ctx->session->GetSimulationTickCount() + 1);
+        const bool prepared =
+            !ctx->session->GetRegionSchedulerFault() &&
+            ctx->session->SetHostSimulationAnchors({&ctx->spawn_anchor, 1}) &&
+            ctx->session->PrepareSimulationCollisions(ctx->session->GetSimulationTickCount() + 1);
         if (ctx->session->GetRegionSchedulerFault()) {
             m_failure_reason = "region_preparation_fault";
             m_finished = true;

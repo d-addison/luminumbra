@@ -1973,12 +1973,12 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
         const std::uint64_t current_tick = first_tick + i;
         // Standalone session hosts also step creature controllers. Reuse a host's
         // successful barrier for this tick; otherwise prepare before any tick writes.
-        if (m_activeRegionsEnabled && m_physicsSystem &&
-            !m_physicsSystem->prepare_simulation_collisions({}, current_tick)) {
+        if (!PrepareSimulationCollisions(current_tick)) {
             m_simulationClock.return_unconsumed_ticks(ticks_executed - i);
             SettleWaterAuthority(defer_water_authority);
             return i; // Retry this unconsumed tick with the same simulation inputs.
         }
+        StepHostPhysics();
         if (i != 0 && m_foliageStep) {
             // Each fixed simulation update has its own replay allowance, even
             // when several updates share one host frame.
@@ -4271,6 +4271,125 @@ void GameSession::SetLocalPlayerSimulationPosition(const Vec3& feet, bool walkin
 void GameSession::SetReplicatedSimulationAnchors(std::vector<Vec3> anchors) {
     if (m_activeRegionsEnabled)
         m_replicatedSimulationAnchors = std::move(anchors);
+}
+std::span<const Vec3> GameSession::SimulationAnchors() const {
+    return RegionalWaterAnchors(m_replicatedSimulationAnchors, m_activeRegionLedger.local_anchor());
+}
+bool GameSession::SetHostSimulationAnchors(std::span<const Vec3> anchors) {
+    if (!SimulationHostIntegrationEnabled()) {
+        return true;
+    }
+    // R2 admits at most 64 total owners. Retain capacity across host ticks;
+    // explicit empty input stays distinct from the local-player fallback.
+    if (anchors.size() > Systems::PhysicsSystem::kSimulationOwnerBudget ||
+        !std::all_of(anchors.begin(), anchors.end(), ActiveRegionLedger::valid_anchor)) {
+        return false;
+    }
+    if (!m_replicatedSimulationAnchors) {
+        std::vector<Vec3> prepared;
+        prepared.reserve(Systems::PhysicsSystem::kSimulationOwnerBudget);
+        m_replicatedSimulationAnchors.emplace(std::move(prepared));
+    } else {
+        m_replicatedSimulationAnchors->reserve(Systems::PhysicsSystem::kSimulationOwnerBudget);
+    }
+    m_replicatedSimulationAnchors->assign(anchors.begin(), anchors.end());
+    // The persisted representative must match walking input on every host.
+    // Empty replicated input keeps the last representative but suppresses it.
+    if (!anchors.empty()) {
+        m_activeRegionLedger.set_local_anchor(anchors.front());
+    }
+    return true;
+}
+void GameSession::StepHostPhysics() {
+    if (SimulationHostIntegrationEnabled() && m_physicsSystem) {
+        // Host rigid bodies use the same fixed boundary as regional consumers.
+        // Creature avatars are stepped by their admitted consumer below.
+        const auto fixed_dt = static_cast<float>(m_simulationClock.fixed_dt());
+        m_physicsSystem->update(fixed_dt);
+        const auto physics_creatures = m_registry.view<Components::CreaturePhysicsComponent,
+                                                       Components::CreatureComponent,
+                                                       Components::TransformComponent>();
+        if (physics_creatures.begin() == physics_creatures.end()) {
+            m_physicsSystem->update_avatars(fixed_dt);
+        }
+    }
+}
+bool GameSession::PrepareSimulationCollisions(std::uint64_t tick) {
+    if (!m_activeRegionsEnabled) {
+        return true;
+    }
+    return (!SimulationHostIntegrationEnabled() || !m_regionFault) &&
+           (!m_physicsSystem ||
+            m_physicsSystem->prepare_simulation_collisions(
+                SimulationHostIntegrationEnabled() ? SimulationAnchors() : std::span<const Vec3>{},
+                tick));
+}
+std::optional<Vec3> GameSession::DefaultSimulationSmokeAnchor() const {
+    if (!m_worldSystem) {
+        return std::nullopt;
+    }
+    // 81 fixed seams, <=34 paired terrain/water samples each, selected once at host boot.
+    // The returned 3x3 column footprint spans the selected 512 m region boundary.
+    const int resolution = m_waterHighResEnabled ? 16 : 8;
+    const float cell = static_cast<float>(CHUNK_SIZE_X) / static_cast<float>(resolution);
+    for (int z = -4; z <= 4; ++z) {
+        for (int x = -4; x <= 4; ++x) {
+            const float boundary = static_cast<float>(x * 512);
+            const float centre_z = static_cast<float>(z * 512 + 8);
+            const float left = m_worldSystem->GetTerrainHeightAt(boundary - 8.0f, centre_z);
+            const float right = m_worldSystem->GetTerrainHeightAt(boundary + 8.0f, centre_z);
+            if (m_worldSystem->WaterLevelAt(boundary - 8.0f, centre_z) > left + 0.25f &&
+                m_worldSystem->WaterLevelAt(boundary + 8.0f, centre_z) > right + 0.25f) {
+                for (int row = 0; row < resolution; ++row) {
+                    const float edge_z =
+                        static_cast<float>(z * 512) + (static_cast<float>(row) + 0.5f) * cell;
+                    const float edge_left =
+                        m_worldSystem->GetTerrainHeightAt(boundary - 0.5f * cell, edge_z);
+                    const float edge_right =
+                        m_worldSystem->GetTerrainHeightAt(boundary + 0.5f * cell, edge_z);
+                    if (m_worldSystem->WaterLevelAt(boundary - 0.5f * cell, edge_z) >
+                            edge_left + 0.25f &&
+                        m_worldSystem->WaterLevelAt(boundary + 0.5f * cell, edge_z) >
+                            edge_right + 0.25f) {
+                        return Vec3(boundary - 8.0f, std::max(left, right) + 2.0f, centre_z);
+                    }
+                }
+            }
+        }
+    }
+    return std::nullopt;
+}
+int GameSession::SimulationSmokeWetRegionSeamPairs(const Vec3& anchor) const {
+    if (!m_worldSystem || !ActiveRegionLedger::valid_anchor(anchor)) {
+        return 0;
+    }
+    const auto coords = Systems::SHIELD_WorldSystem::world_to_chunk_coords({anchor.x, 0, anchor.z});
+    if (coords.x >= Chunk::kPackedMaxXz || (coords.x + 1) % (512 / CHUNK_SIZE_X) != 0) {
+        return 0;
+    }
+    // Called once after a smoke batch, never per tick: two canonical lookups may
+    // read at most two committed columns. Loading storage belongs to a worker and
+    // must not be inspected. Fresh smoke grids have at most 16 rows.
+    const auto left = m_worldSystem->find_authoritative_chunk(coords);
+    const auto right = m_worldSystem->find_authoritative_chunk({coords.x + 1, 0, coords.z});
+    if (!left || !right || left->get_state() == ChunkState::Loading ||
+        right->get_state() == ChunkState::Loading || !left->has_water_authority() ||
+        !right->has_water_authority()) {
+        return 0;
+    }
+    const int resolution = left->current_water_resolution.load();
+    if ((resolution != 8 && resolution != 16) ||
+        right->current_water_resolution.load() != resolution || !left->has_complete_water_state() ||
+        !right->has_complete_water_state()) {
+        return 0;
+    }
+    const auto side = static_cast<std::size_t>(resolution);
+    int wet_pairs = 0;
+    for (std::size_t row = 0; row < side; ++row) {
+        wet_pairs += left->water_depth_mm[row * side + side - 1] > 0 &&
+                     right->water_depth_mm[row * side] > 0;
+    }
+    return wet_pairs;
 }
 void GameSession::NotifyGroundObjectEdit(const Vec3& position) {
     if (!m_activeRegionsEnabled)

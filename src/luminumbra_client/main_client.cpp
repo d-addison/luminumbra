@@ -5326,9 +5326,15 @@ int main(int argc, char* argv[]) {
                 // Prepare before the local character driver as well as the rigid-body
                 // step below. Render camera/streaming inputs never enter this horizon.
                 if (advance_frame_simulation && !scenario_config.networked_session_smoke()) {
-                    if (auto* physics = gameSession->GetPhysicsSystem()) {
-                        if (!physics->prepare_simulation_collisions(
-                                {}, std::numeric_limits<std::uint64_t>::max())) {
+                    if (gameSession->SimulationHostIntegrationEnabled() && g_playerController) {
+                        gameSession->SetLocalPlayerSimulationPosition(
+                            g_playerController->GetPosition(),
+                            g_playerController->GetMovementMode() ==
+                                Luminumbra::Client::MovementMode::Walking);
+                    }
+                    if (gameSession->GetPhysicsSystem()) {
+                        if (!gameSession->PrepareSimulationCollisions(
+                                std::numeric_limits<std::uint64_t>::max())) {
                             Luminumbra::Client::PollSessionFault(
                                 *gameSession, [&] { glfwSetWindowShouldClose(window, GLFW_TRUE); });
                             Luminumbra::Client::SaveSessionWhenDue(gameSession.get(),
@@ -5552,8 +5558,11 @@ int main(int argc, char* argv[]) {
                     }
                 }
                 if (advance_frame_simulation) {
-                    if (auto* physics = gameSession->GetPhysicsSystem())
-                        physics->update(deltaTime * g_app.capture.timeScale);
+                    if (!gameSession->SimulationHostIntegrationEnabled()) {
+                        if (auto* physics = gameSession->GetPhysicsSystem()) {
+                            physics->update(deltaTime * g_app.capture.timeScale);
+                        }
+                    }
                 }
                 // fixed 30 Hz simulation tick (SimulationClock +
                 // OrderedEventBus drain) hosted by GameSession. Render,
@@ -5566,7 +5575,8 @@ int main(int argc, char* argv[]) {
                 _rb_sim_t0 = std::chrono::steady_clock::now(); //
                 if (!scenario_config.networked_session_smoke()) {
                     if (advance_frame_simulation) {
-                        if (benchmark_v4 && g_camera)
+                        if (benchmark_v4 && g_camera &&
+                            !gameSession->SimulationHostIntegrationEnabled())
                             gameSession->SetLocalPlayerSimulationPosition(g_camera->Position, true);
                         else if (g_playerController)
                             gameSession->SetLocalPlayerSimulationPosition(
