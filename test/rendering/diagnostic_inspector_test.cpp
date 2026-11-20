@@ -232,7 +232,7 @@ TEST(DiagnosticInspector, CaptureTeardownUnbindsBeforeDeletingVariants) {
 
 TEST(DiagnosticInspector, ProducerMappingIncludesUnknownAndExplicitUnsupported) {
     using Kind = Pass::ProducerKind;
-    const std::array<std::pair<std::string_view, Kind>, 11> cases = {{
+    const std::array<std::pair<std::string_view, Kind>, 13> cases = {{
         {"terrain_mdi", Kind::Terrain},
         {"terrain_mdi_ladder", Kind::Terrain},
         {"live_terrain_mdi", Kind::Unsupported},
@@ -241,7 +241,9 @@ TEST(DiagnosticInspector, ProducerMappingIncludesUnknownAndExplicitUnsupported) 
         {"foliage_ladder", Kind::Foliage},
         {"instanced_static_mesh", Kind::Static},
         {"skinned_mesh_ladder", Kind::Static},
+        {"static_asset", Kind::Static},
         {"far_volume", Kind::FarVolume},
+        {"g_buffer_ladder_far", Kind::FarVolume},
         {"", Kind::Unsupported},
         {"future_producer", Kind::Unsupported},
     }};
