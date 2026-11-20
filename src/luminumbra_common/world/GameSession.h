@@ -216,6 +216,7 @@ public:
         std::uint64_t simulation_tick = 0;
         std::uint64_t world_revision = 0;
         bool active_regions = true;
+        bool regional_water = false;
         bool aether_state = false;
         bool job_system_available = false;
         bool transient_creation = false;

@@ -4468,7 +4468,8 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
             if (m_durable_residency) {
                 const auto found = m_streaming_state.chunks.find(id);
                 if (found != m_streaming_state.chunks.end() && found->second &&
-                    (found->second->needs_authority() || found->second->is_voxel_data_dirty())) {
+                    (found->second->needs_authority() ||
+                     found->second->has_pending_water_retirement())) {
                     const std::shared_ptr<::Luminumbra::Chunk> chunk = found->second;
                     if (!in_flight_built) {
                         build_in_flight();
@@ -6391,10 +6392,19 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(
     std::vector<Luminumbra::Job> jobs;
     for (const auto& request : chunks_to_generate) {
         const IVec3 coords = request.coords;
+        const auto in_progress = m_streaming_state.chunks.find(Chunk::calculate_id(coords));
+        if (in_progress != m_streaming_state.chunks.end() && in_progress->second &&
+            (in_progress->second->has_water_authority() ||
+             in_progress->second->has_pending_water_retirement()) &&
+            in_progress->second->get_state() == ChunkState::Loading) {
+            continue; // an in-place backfill already owns these terrain buffers
+        }
         if (m_durable_residency) {
-            if (restore_authoritative_chunk(coords)) {
-                continue; // parked authoritative data must never be replaced by a fresh chunk
-            }
+            restore_authoritative_chunk(coords);
+            if (m_durable_read_failed)
+                break; // publish any earlier admitted jobs instead of stranding Loading chunks
+            // Restored water-only owners and migration retirements still need
+            // terrain. Generate into their existing storage below.
         }
         // Chunks restored from a world save (or already generated) carry
         // populated voxel data, possibly with player edits; regeneration would
@@ -6409,7 +6419,11 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(
             continue;
         }
 
-        auto chunk = std::make_shared<Luminumbra::Chunk>(coords);
+        auto chunk = existing != m_streaming_state.chunks.end() && existing->second &&
+                             (existing->second->has_water_authority() ||
+                              existing->second->has_pending_water_retirement())
+                         ? existing->second
+                         : std::make_shared<Luminumbra::Chunk>(coords);
         set_renderable_chunk_state(*chunk, Luminumbra::ChunkState::Loading);
         invalidate_renderable_chunks();
         m_streaming_state.chunks[chunk->get_id()] = chunk;
@@ -8015,7 +8029,8 @@ std::vector<std::pair<i32, i32>> SHIELD_WorldSystem::authority_region_keys() con
             const auto qualifies = [](const auto& member) {
                 const auto& chunk = member.second;
                 return chunk && chunk->needs_authority() &&
-                       chunk->get_state() != ChunkState::Loading;
+                       (chunk->get_state() != ChunkState::Loading ||
+                        (chunk->has_water_authority() && !chunk->has_terrain_authority()));
             };
             const auto live = std::find_if(region.live.begin(), region.live.end(), qualifies);
             if (live != region.live.end()) {
@@ -8108,8 +8123,9 @@ bool SHIELD_WorldSystem::restore_authoritative_chunk(const IVec3& coords) {
     const auto id = Chunk::calculate_id(coords);
     const auto resident = m_streaming_state.chunks.find(id);
     if (resident != m_streaming_state.chunks.end() && resident->second &&
-        (!resident->second->sdf_data.empty() || !resident->second->heightmap_data.empty() ||
-         (!resident->second->needs_authority() && resident->second->is_voxel_data_dirty())))
+        (resident->second->has_water_authority() ||
+         resident->second->has_pending_water_retirement() || !resident->second->sdf_data.empty() ||
+         !resident->second->heightmap_data.empty()))
         return true;
     const auto discard_placeholder = [&] {
         if (resident == m_streaming_state.chunks.end())
@@ -8287,10 +8303,13 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
     // codec's business): a save captured between generation-job completion and
     // the main-thread Loading→Idle publish (the save quiesce is deliberately
     // non-publishing) carries Loading WITH populated voxel data. The data is
-    // complete generation output, so the adoptee enters as Idle — a
-    // stuck-Loading adoptee would never re-candidate for anything.
+    // complete generation output, so the adoptee enters as Idle. Water-only
+    // owners and migration retirements also have stable payloads and need an
+    // Idle entry so terrain backfill can run instead of mistaking saved lifecycle
+    // for an in-flight job.
     if (chunk->get_state() == Luminumbra::ChunkState::Loading &&
-        (!chunk->sdf_data.empty() || !chunk->heightmap_data.empty())) {
+        (chunk->has_water_authority() || chunk->has_pending_water_retirement() ||
+         !chunk->sdf_data.empty() || !chunk->heightmap_data.empty())) {
         set_renderable_chunk_state(*chunk, Luminumbra::ChunkState::Idle);
     }
     if (!m_parked.empty()) {

@@ -4301,12 +4301,90 @@ TEST(WaterSeedInputs, RegionalWaterProfileIsDormantWithActiveRegionsOff) {
               Persistence::SerializeChunkRecordPayloadJson(*candidate_chunk));
 }
 
+TEST(WaterSeedInputs, FlagOffPreparedAndDirectLoadsPreserveIndependentLegacyWater) {
+    const TestSupport::HeadlessRoot root;
+    const TestSupport::ScopedTempFile storage("water-world-", ".world");
+    JobSystem jobs;
+    jobs.startup(1);
+    WorldStreamingState original;
+    const Persistence::WorldSaveService service;
+    std::vector<std::string> errors;
+    for (const bool prepared : {false, true}) {
+        SCOPED_TRACE(prepared);
+        world::GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(root.root_string());
+        session.SetActiveRegionsEnabled(true);
+        ASSERT_TRUE(session.CreateTransientWorld("Legacy water", "777", "default"));
+        for (const int y : {1, 3}) {
+            const auto chunk = original.get_or_create_chunk({0, y, 0});
+            session.GetWaterSystem()->InitializeGeneratedWater(*chunk,
+                                                               std::vector<float>(64, 100.0f));
+            chunk->water_depth_mm[0] = y;
+            // Legacy per-chunk admission accepts absent render mirrors. They
+            // must not trigger the stricter regional migration admission.
+            if (y == 1)
+                chunk->water_flow_data.clear();
+        }
+        ASSERT_TRUE(service.save_world(original, storage.Path(), &errors));
+        if (prepared) {
+            const auto options = session.CaptureWorldPreparationOptions();
+            EXPECT_FALSE(options.regional_water);
+            const auto candidate = world::GameSession::PrepareWorldState(options, storage.Path());
+            ASSERT_TRUE(session.AdoptPreparedWorld(candidate)) << session.GetWorldOpenError();
+        } else {
+            ASSERT_TRUE(session.LoadWorldStateFrom(storage.Path())) << session.GetWorldOpenError();
+        }
+        for (const int y : {1, 3}) {
+            const auto chunk = session.GetWorldSystem()->find_authoritative_chunk({0, y, 0});
+            ASSERT_NE(chunk, nullptr);
+            EXPECT_TRUE(chunk->same_water_state(*original.find_chunk({0, y, 0})));
+            EXPECT_FALSE(chunk->has_pending_water_retirement());
+        }
+    }
+}
+
+TEST(WaterSeedInputs, PreparedWaterProfileMismatchRefusesBeforeLiveWorldChanges) {
+    const TestSupport::HeadlessRoot root;
+    const TestSupport::ScopedTempFile storage("water-world-", ".world");
+    JobSystem jobs;
+    jobs.startup(1);
+    for (const bool regional_water : {false, true}) {
+        SCOPED_TRACE(regional_water);
+        const world::GameSession::AuthorityProfileOptions profile{.regional_water = regional_water};
+        world::GameSession session(profile, world::GameSession::AuthorityProfileTestOnly{});
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(root.root_string());
+        session.SetActiveRegionsEnabled(true);
+        ASSERT_TRUE(session.CreateTransientWorld("Water profile", "777", "default"));
+        WorldStreamingState original;
+        const auto source = original.get_or_create_chunk({0, 1, 0});
+        session.GetWaterSystem()->InitializeGeneratedWater(*source, std::vector<float>(64, 100.0f));
+        const Persistence::WorldSaveService service;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(service.save_world(original, storage.Path(), &errors));
+        auto options = session.CaptureWorldPreparationOptions();
+        options.regional_water = !regional_water;
+        const auto candidate = world::GameSession::PrepareWorldState(options, storage.Path());
+        ASSERT_NE(candidate, nullptr);
+        ASSERT_TRUE(world::GameSession::WorldPreparationError(*candidate).empty());
+        const auto live_hash = session.ComputeChunkStateHash();
+        EXPECT_FALSE(session.AdoptPreparedWorld(candidate));
+        EXPECT_EQ(session.GetWorldOpenError(),
+                  "World preparation no longer matches session configuration.");
+        EXPECT_EQ(session.ComputeChunkStateHash(), live_hash);
+        EXPECT_EQ(session.GetWorldSystem()->find_authoritative_chunk({0, 1, 0}), nullptr);
+    }
+}
+
 TEST(WaterSeedInputs, RefusedLegacyWaterMigrationPreservesLiveWorldAndLegacyOpening) {
     const TestSupport::HeadlessRoot root;
     const TestSupport::ScopedTempFile storage("water-world-", ".world");
     JobSystem jobs;
     jobs.startup(1);
-    world::GameSession regional, legacy;
+    const world::GameSession::AuthorityProfileOptions profile{.regional_water = true};
+    world::GameSession regional(profile, world::GameSession::AuthorityProfileTestOnly{});
+    world::GameSession legacy;
     for (auto* session : {&regional, &legacy}) {
         session->SetJobSystem(&jobs);
         session->SetRootPath(root.root_string());
@@ -4348,7 +4426,8 @@ TEST(WaterSeedInputs, WaterOnlyLegacyRetirementsStayDirtyUntilCanonicalCommit) {
     const TestSupport::HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    world::GameSession session;
+    const world::GameSession::AuthorityProfileOptions profile{.regional_water = true};
+    world::GameSession session(profile, world::GameSession::AuthorityProfileTestOnly{});
     session.SetJobSystem(&jobs);
     session.SetRootPath(root.root_string());
     session.SetActiveRegionsEnabled(true);

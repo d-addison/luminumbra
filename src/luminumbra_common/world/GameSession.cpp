@@ -1526,6 +1526,7 @@ GameSession::WorldPreparationOptions GameSession::CaptureWorldPreparationOptions
             .simulation_tick = GetSimulationTickCount(),
             .world_revision = WorldRevision(),
             .active_regions = m_activeRegionsEnabled,
+            .regional_water = m_authorityProfile.regional_water,
             .aether_state = m_aetherStateEnabled,
             .job_system_available = m_jobSystem != nullptr,
             .transient_creation = false,
@@ -1568,6 +1569,7 @@ bool GameSession::AdoptPreparedWorld(const std::shared_ptr<WorldPreparation>& pr
     if (options.root_path != m_rootPath || options.configured_save_root != GetSaveRootPath() ||
         options.required_assets != m_requiredClientAssets ||
         options.active_regions != m_activeRegionsEnabled ||
+        options.regional_water != m_authorityProfile.regional_water ||
         options.aether_state != m_aetherStateEnabled ||
         options.ledger_config != m_activeRegionLedger.config() ||
         options.scheduler_override != m_regionSchedulerOverride ||
@@ -5556,7 +5558,7 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
             for (const auto& chunk : state.snapshot_chunks()) {
                 if (chunk && chunk->needs_authority())
                     covered.push_back(chunk->get_coords());
-                else if (chunk && chunk->is_voxel_data_dirty())
+                else if (chunk && chunk->has_pending_water_retirement())
                     retired.push_back(chunk->get_coords());
             }
             const auto completed_ms = elapsed_ms();
@@ -5997,7 +5999,9 @@ bool GameSession::ReadPreparedWorldState(
                            errors,
                            stop,
                            options.active_regions ? &wanted : nullptr,
-                           options.active_regions ? &state.durable_inventory : nullptr);
+                           options.active_regions ? &state.durable_inventory : nullptr,
+                           nullptr,
+                           options.active_regions && options.regional_water);
     if (!state.snapshot_present && !errors.empty()) {
         error = errors.front();
         state.input_refused = error.find("Saved-input admission refused:") == 0 ||
@@ -6348,7 +6352,7 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
     std::size_t adopted = 0;
     for (const auto& chunk : loaded.snapshot_chunks()) {
         if (!chunk || (m_activeRegionsEnabled && !m_restoredOwnerContinuation &&
-                       !chunk->needs_authority() && !chunk->is_voxel_data_dirty())) {
+                       !chunk->needs_authority() && !chunk->has_pending_water_retirement())) {
             continue;
         }
 
