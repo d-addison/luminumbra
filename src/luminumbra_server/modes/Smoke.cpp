@@ -15,6 +15,7 @@ SmokeRunResult RunSmokeOnce(const ServerCliOptions& options, const char* run_lab
     SmokeRunResult result;
 
     Luminumbra::Server::ServerWorldRunnerConfig config = RunnerConfigFrom(options);
+    config.simulation_smoke = true;
     config.world_id.clear(); // determinism runs always boot fresh worlds
     config.world_name = std::string("Headless Smoke ") + run_label;
 
@@ -39,6 +40,15 @@ SmokeRunResult RunSmokeOnce(const ServerCliOptions& options, const char* run_lab
     result.effective_simulation["weather_rain"] = session->WeatherRainEnabled();
 
     result.ticks = runner.RunFixedTicks(options.ticks);
+    if (session->SimulationHostIntegrationEnabled() && runner.Avatars().empty()) {
+        const auto& anchor = runner.SimulationSmokeAnchor();
+        if (!anchor || result.ticks.ticks_executed == 0 ||
+            session->SimulationSmokeWetRegionSeamPairs(*anchor) == 0) {
+            result.ticks.region_fault = true;
+            result.ticks.region_fault_message =
+                "Simulation smoke produced no wet region seam pairs";
+        }
+    }
     if (result.ticks.region_fault || result.ticks.ticks_executed != options.ticks) {
         LUMINUMBRA_CORE_ERROR(
             "Smoke {}: incomplete run at tick {}", run_label, result.ticks.ticks_executed);
