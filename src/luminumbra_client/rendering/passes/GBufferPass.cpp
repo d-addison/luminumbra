@@ -587,6 +587,9 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
             }
             return true;
         });
+    if (capture && far_stats.refused) {
+        capture->abort();
+    }
     stats.far_region_draws += far_stats.draws;
     stats.far_indices += far_stats.indices;
     stats.far_water_indices += far_stats.water_indices;
