@@ -1992,6 +1992,24 @@ bool LockstepSession::OpenReplayRecorder() {
     header.preset_hash =
         std::strtoull(Luminumbra::Replay::Fnv1a64Hex(m_config.preset).c_str(), nullptr, 16);
     header.engine_version = std::string(luminumbra::core::GetEngineVersionString());
+    if (m_config.replay_header) {
+        const auto& captured = *m_config.replay_header;
+        const bool complete_boot = captured.version == Replay::kLrec1BootVersion &&
+                                   captured.authority_boot &&
+                                   captured.authority_boot->resolved_world_seed == m_config.seed;
+        const bool scheduled_boot =
+            captured.version == Replay::kLrec1WeatherVersion && !captured.authority_boot;
+        if ((!complete_boot && !scheduled_boot) ||
+            captured.seed != (Replay::kResolvedSeedTag | m_config.seed) ||
+            captured.preset != m_config.preset || captured.tick_rate_hz != m_config.tick_rate_hz ||
+            !Replay::ConfigurationMatches(
+                captured, m_config.system_config_identity, m_config.preset_content_hash)) {
+            m_replay_failed = true;
+            m_status.replay_error = "replay boot conflicts with session configuration";
+            return false;
+        }
+        header = captured;
+    }
     header.start_world_hash = std::move(boot.world_hash);
     m_replay_open = m_replay->Open(m_dump_path, header);
     m_replay_failed = !m_replay_open;

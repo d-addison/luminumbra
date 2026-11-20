@@ -2,6 +2,7 @@
 #include "../support/WorldgenTestData.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/Log.h"
+#include "luminumbra_common/net/LockstepSession.h"
 #include "luminumbra_common/persistence/ReplacementOutputFile.h"
 #include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/persistence/SavedInputFile.h"
@@ -27,6 +28,7 @@
 #include <limits>
 #include <memory>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <tuple>
@@ -92,8 +94,11 @@ private:
 #define RunReplay RunRefusedCaptureReplay
 #define RunMutateReplayFixture RunRefusedCaptureMutateReplayFixture
 #define RunHeavy RunRefusedCaptureHeavy
+#define RunLockstepLoopback RunRecordedLockstepLoopback
 #include "../../src/luminumbra_server/modes/Heavy.cpp"
+#include "../../src/luminumbra_server/modes/Lockstep.cpp"
 #include "../../src/luminumbra_server/modes/Replay.cpp"
+#undef RunLockstepLoopback
 #undef RunHeavy
 #undef RunMutateReplayFixture
 #undef RunReplay
@@ -583,27 +588,490 @@ TEST_F(ReplayModeAdmission, InvalidRecordingSchedulePreservesOutputAndDoesNotCre
     EXPECT_FALSE(fs::exists(root / "worlds/saves"));
 }
 
-TEST_F(ReplayModeAdmission, BootSchemaIsOptInAndRefusedUntilPlaybackWiring) {
+TEST_F(ReplayModeAdmission, CompleteBootDescriptorRefusesConflictsBeforeWorldOrOutput) {
     options.ticks = 0;
     ASSERT_EQ(RunRecord(options), 0);
     const auto recorded = replay::ReadReplay(options.record_path);
     ASSERT_TRUE(recorded.has_value());
-    if (!recorded.has_value()) {
+    if (!recorded) {
         return;
     }
-    EXPECT_EQ(recorded->header.version, 3u);
-    EXPECT_FALSE(recorded->header.authority_boot.has_value());
-    for (const auto version : {replay::kLrec1BootVersion, replay::kLrec1BootElidedVersion}) {
+    ASSERT_TRUE(recorded->header.authority_boot.has_value());
+    if (!recorded->header.authority_boot) {
+        return;
+    }
+    EXPECT_EQ(recorded->header.version, replay::kLrec1BootVersion);
+    EXPECT_TRUE(ReplayRunnerConfigFrom(options, recorded->header).has_value());
+    for (unsigned mutation = 0; mutation < 8; ++mutation) {
+        SCOPED_TRACE(mutation);
         auto changed = *recorded;
-        changed.header.version = version;
-        Luminumbra::world::AuthorityBootDescriptor boot;
-        boot.authority_rules_revision =
-            luminumbra::core::SimulationIdentityValues::kAuthorityRulesRevision;
-        boot.system_config_identity = changed.header.system_config_identity;
-        changed.header.authority_boot = boot;
+        if (!changed.header.authority_boot) {
+            FAIL() << "Missing captured descriptor";
+            return;
+        }
+        auto& boot = *changed.header.authority_boot;
+        switch (mutation) {
+            case 0:
+                ++boot.authority_rules_revision;
+                break;
+            case 1:
+                boot.scalar_bits[0] ^= 1;
+                break;
+            case 2:
+                boot.system_gates[0] ^= 1;
+                break;
+            case 3:
+                ++boot.resolved_world_seed;
+                break;
+            case 4:
+                ++boot.day_length_ticks;
+                break;
+            case 5:
+                ++boot.seed_conversion_version;
+                break;
+            case 6:
+                changed.header.version = replay::kLrec1Version;
+                changed.header.authority_boot.reset();
+                // A descriptor cannot travel under the legacy profile. Mutate the
+                // version on disk below, after writing a valid complete stream.
+                break;
+            default:
+                changed.header.version = replay::kLrec1BootElidedVersion;
+                break;
+        }
+        if (mutation == 5) {
+            EXPECT_FALSE(ReplayRunnerConfigFrom(options, changed.header).has_value());
+            continue; // Invalid descriptor is refused by the writer as well.
+        }
+        if (mutation == 6) {
+            changed = *recorded;
+        }
         Rewrite(changed);
         ASSERT_FALSE(testing::Test::HasFatalFailure());
-        ExpectAdmissionRefused("unsupported LREC version");
+        if (mutation == 6) {
+            auto bytes = ReadReplayModeFile(options.replay_path);
+            ASSERT_GT(bytes.size(), 8u);
+            bytes[6] = static_cast<char>(replay::kLrec1Version);
+            std::ofstream output(options.replay_path, std::ios::binary | std::ios::trunc);
+            output << bytes;
+            ASSERT_TRUE(output.good());
+        }
+        logs.str("");
+        logs.clear();
+        std::ofstream(options.artifact_path) << "retained";
+        EXPECT_EQ(RunReplay(options), 1);
+        EXPECT_EQ(ReadReplayModeFile(options.artifact_path), "retained");
+        EXPECT_TRUE(fs::is_empty(root / "worlds/saves"));
+        EXPECT_EQ(logs.str().find("Water resolution wired:"), std::string::npos) << logs.str();
+    }
+}
+
+TEST_F(ReplayModeAdmission, ExplicitWorkloadConflictsRefuseBeforeBootOrOutput) {
+    options.ticks = 0;
+    ASSERT_EQ(RunRecord(options), 0);
+    const auto recorded = replay::ReadReplay(options.record_path);
+    ASSERT_TRUE(recorded.has_value());
+    if (!recorded) {
+        return;
+    }
+    const auto original = options;
+    for (unsigned mutation = 0; mutation < 7; ++mutation) {
+        SCOPED_TRACE(mutation);
+        options = original;
+        switch (mutation) {
+            case 0:
+                options.avatars = 1;
+                break;
+            case 1:
+                options.ecology_roster = true;
+                break;
+            case 2:
+                options.planted_roster = true;
+                break;
+            case 3:
+                options.moving = true;
+                break;
+            case 4:
+                options.water_smoke = true;
+                break;
+            case 5:
+                options.parked_bytes_limit = 1;
+                break;
+            default:
+                options.sim_budget_profile.emplace();
+                options.sim_budget_profile->region_scheduler =
+                    Luminumbra::world::RegionSchedulerConfig{
+                        .work_limit = 0, .hold_ticks = 1, .reduced_shift = 2};
+                break;
+        }
+        EXPECT_FALSE(ReplayRunnerConfigFrom(options, recorded->header).has_value());
+        std::ofstream(options.artifact_path) << "retained";
+        logs.str("");
+        logs.clear();
+        EXPECT_EQ(RunReplay(options), 1);
+        EXPECT_EQ(ReadReplayModeFile(options.artifact_path), "retained");
+        EXPECT_EQ(logs.str().find("Water resolution wired:"), std::string::npos);
+        EXPECT_TRUE(fs::is_empty(root / "worlds/saves"));
+    }
+}
+
+TEST_F(ReplayModeAdmission, BootDescriptionRefusesEmptySeedAndOutOfRangeRoster) {
+    auto config = RunnerConfigFrom(options);
+    config.seed.clear();
+    EXPECT_THROW(Luminumbra::Server::ServerWorldRunner::DescribeReplayBoot(config),
+                 std::invalid_argument);
+    config.seed = "424242";
+    for (const int avatars : {-1, 1025}) {
+        config.avatar_count = avatars;
+        EXPECT_THROW(Luminumbra::Server::ServerWorldRunner::DescribeReplayBoot(config),
+                     std::invalid_argument);
+    }
+    EXPECT_FALSE(fs::exists(root / "worlds/saves"));
+}
+
+class ReplayProducerBoot : public ReplayModeAdmission, public testing::WithParamInterface<bool> {};
+
+TEST_P(ReplayProducerBoot, CliAndAutomaticReconstructEquivalentAuthorityBoots) {
+    namespace net = Luminumbra::Net;
+    options.ticks = 1;
+    options.seed = "replay-seed";
+    options.avatars = 1;
+    options.moving = true;
+    options.parked_bytes_limit = 32u * 1024u * 1024u;
+    options.systems_config_override = luminumbra::core::SystemConfig::FromJsonString(
+        GetParam() ? R"({"sim":{"active_regions":{"enabled":true}}})"
+                   : R"({"sim":{"active_regions":{"enabled":false}}})");
+    ASSERT_EQ(RunRecord(options), 0) << logs.str();
+    const auto cli = replay::ReadReplay(options.record_path);
+    ASSERT_TRUE(cli.has_value());
+    if (!cli) {
+        return;
+    }
+    ASSERT_TRUE(cli->header.authority_boot.has_value());
+    Luminumbra::Server::ThrowawaySaveDirGuard cleanup;
+    Luminumbra::Server::ServerWorldRunner runner(RunnerConfigFrom(options),
+                                                 {.owner_continuation = true});
+    EXPECT_THROW(runner.CaptureReplayHeader(), std::invalid_argument);
+    ASSERT_TRUE(runner.Boot());
+    cleanup.Arm(runner.Session()->GetWorldSaveDir());
+    auto header = runner.CaptureReplayHeader();
+    EXPECT_EQ(header.authority_boot, cli->header.authority_boot);
+    EXPECT_EQ(runner.ComputeWorldHash(), cli->header.start_world_hash);
+    net::LockstepConfig config;
+    config.seed = runner.Session()->GetMetadata().resolvedSeed;
+    config.preset = options.preset;
+    config.system_config_identity = header.system_config_identity;
+    config.preset_content_hash = header.preset_content_hash;
+    config.hash_cadence_ticks = 1;
+    config.replay_header = std::make_shared<const replay::ReplayHeader>(header);
+    net::LockstepHooks hooks;
+    hooks.user = &runner;
+    hooks.apply_and_step = [](std::uint64_t, const std::vector<std::uint8_t>&, void* user) {
+        return static_cast<Luminumbra::Server::ServerWorldRunner*>(user)
+                   ->RunFixedTicks(1)
+                   .ticks_executed == 1;
+    };
+    hooks.capture_hashes = [](std::uint64_t tick, net::HashMsg& out, void* user) {
+        Luminumbra::Persistence::WorldStreamingStateSubHashes sub;
+        static_cast<Luminumbra::Server::ServerWorldRunner*>(user)->ComputeWorldHashAndSubHashes(
+            out.world_hash, sub);
+        out.tick = tick;
+        out.terrain = sub.terrain;
+        out.water = sub.water;
+        out.entities = sub.entities;
+    };
+    auto [local, peer] = net::MakeLoopbackPair();
+    net::LockstepSession session(config, local.get(), hooks);
+    const auto automatic_path = (root / "automatic.lrec").string();
+    session.SetDumpPath(automatic_path);
+    auto remote = config;
+    remote.local_client_id = 1;
+    remote.peer_client_id = 0;
+    ASSERT_TRUE(peer->SendFrame(net::EncodeHello(net::MakeLockstepHello(remote))));
+    ASSERT_TRUE(session.Handshake());
+    ASSERT_TRUE(session.Status().replay_error.empty()) << session.Status().replay_error;
+    ASSERT_TRUE(peer->SendFrame(net::EncodeInput({1, 1, {}})));
+    ASSERT_EQ(session.PumpTick(1).outcome, net::TickOutcome::Advanced);
+    net::HashMsg mismatch;
+    hooks.capture_hashes(1, mismatch, hooks.user);
+    mismatch.world_hash = "different";
+    mismatch.terrain = "different";
+    ASSERT_TRUE(peer->SendFrame(net::EncodeHash(mismatch)));
+    ASSERT_EQ(session.PumpTick(1).outcome, net::TickOutcome::Desync);
+    EXPECT_THROW(runner.CaptureReplayHeader(), std::invalid_argument);
+    const auto automatic = replay::ReadReplay(automatic_path);
+    ASSERT_TRUE(automatic.has_value());
+    if (!automatic) {
+        return;
+    }
+    EXPECT_EQ(automatic->header.version, replay::kLrec1BootVersion);
+    EXPECT_EQ(automatic->header.authority_boot, cli->header.authority_boot);
+    EXPECT_EQ(automatic->header.start_world_hash, cli->header.start_world_hash);
+    ASSERT_EQ(automatic->checkpoints.size(), 1u);
+    ASSERT_EQ(cli->checkpoints.size(), 1u);
+    EXPECT_EQ(automatic->checkpoints[0].world_hash, cli->checkpoints[0].world_hash);
+    // Reconstruction depends on the descriptor, not on remembered CLI workload flags.
+    options.avatars = 0;
+    options.moving = false;
+    options.parked_bytes_limit = Luminumbra::Server::ServerWorldRunnerConfig{}.parked_bytes_limit;
+    const auto restored_config = ReplayRunnerConfigFrom(options, automatic->header);
+    ASSERT_TRUE(restored_config.has_value());
+    if (!restored_config) {
+        return;
+    }
+    Luminumbra::Server::ThrowawaySaveDirGuard restored_cleanup;
+    Luminumbra::Server::ServerWorldRunner restored(*restored_config, {.owner_continuation = true});
+    ASSERT_TRUE(restored.Boot());
+    restored_cleanup.Arm(restored.Session()->GetWorldSaveDir());
+    EXPECT_EQ(restored.CaptureReplayHeader().authority_boot, automatic->header.authority_boot);
+    EXPECT_EQ(restored.ComputeWorldHash(), automatic->header.start_world_hash);
+    ASSERT_EQ(restored.RunFixedTicks(1).ticks_executed, 1u);
+    EXPECT_EQ(restored.ComputeWorldHash(), automatic->checkpoints[0].world_hash);
+}
+
+INSTANTIATE_TEST_SUITE_P(RegionBackends, ReplayProducerBoot, testing::Bool());
+
+class ReplayShippingProducerBoot : public ReplayModeAdmission,
+                                   public testing::WithParamInterface<bool> {};
+
+TEST_P(ReplayShippingProducerBoot, ShippingLoopbackAutomaticallyCapturesTheCliBootProfile) {
+    const bool scheduled = GetParam();
+    if (scheduled) {
+        using Schedule = Luminumbra::Systems::WeatherSchedule;
+        using Category = Luminumbra::Systems::WeatherCategory;
+        const Schedule schedule{.phases = {{0, Category::Clear, 0, 0}},
+                                .strike_tick = std::nullopt};
+        options.weather_schedule = std::make_shared<const Schedule>(schedule);
+    }
+    options.ticks = 30;
+    options.seed = "replay-seed";
+    options.avatars = 1;
+    options.systems_config_override = luminumbra::core::SystemConfig::FromJsonString(
+        R"({"sim":{"active_regions":{"enabled":false}}})");
+    ASSERT_EQ(RunRecord(options), 0) << logs.str();
+    const auto cli = replay::ReadReplay(options.record_path);
+    ASSERT_TRUE(cli.has_value());
+    if (!cli) {
+        return;
+    }
+    options.lockstep_corrupt_tick = 30;
+    options.lockstep_dump_path = (root / "loopback.lrec").string();
+    ASSERT_EQ(RunRecordedLockstepLoopback(options), 0) << logs.str();
+    auto automatic = replay::ReadReplay(options.lockstep_dump_path);
+    if (!automatic) {
+        automatic = replay::ReadReplay(options.lockstep_dump_path + ".peer");
+    }
+    ASSERT_TRUE(automatic.has_value());
+    if (!automatic) {
+        return;
+    }
+    EXPECT_EQ(automatic->header.version,
+              scheduled ? replay::kLrec1WeatherVersion : replay::kLrec1BootVersion);
+    EXPECT_EQ(automatic->header.authority_boot, cli->header.authority_boot);
+    EXPECT_EQ(automatic->header.weather_schedule, cli->header.weather_schedule);
+    EXPECT_EQ(automatic->header.start_world_hash, cli->header.start_world_hash);
+}
+
+INSTANTIATE_TEST_SUITE_P(WeatherProfiles, ReplayShippingProducerBoot, testing::Bool());
+
+TEST_F(ReplayModeAdmission, FailedAutomaticFinalizationCannotAdmitAnOlderCompleteFile) {
+    options.ticks = 0;
+    ASSERT_EQ(RunRecord(options), 0);
+    const auto recorded = replay::ReadReplay(options.record_path);
+    ASSERT_TRUE(recorded.has_value());
+    if (!recorded) {
+        return;
+    }
+    const auto original = ReadReplayModeFile(options.record_path);
+    replay::QueuedReplayRecorder recorder;
+    ASSERT_TRUE(recorder.Configure(17, 0));
+    ASSERT_TRUE(recorder.Open(options.record_path, recorded->header));
+    EXPECT_FALSE(recorder.RecordTick(
+        1, std::make_shared<const std::vector<std::uint8_t>>(1, 0), nullptr, 0));
+    EXPECT_FALSE(recorder.Finalize(options.record_path, 1, 1));
+    EXPECT_EQ(ReadReplayModeFile(options.record_path), original);
+    ASSERT_TRUE(fs::exists(options.record_path + ".incomplete"));
+    ExpectAdmissionRefused("recording finalization is incomplete");
+    // CLI cannot silently clear a different recorder's durable failure marker.
+    const auto marker = ReadReplayModeFile(options.record_path + ".incomplete");
+    EXPECT_EQ(RunRecord(options), 1);
+    EXPECT_EQ(ReadReplayModeFile(options.record_path), original);
+    EXPECT_EQ(ReadReplayModeFile(options.record_path + ".incomplete"), marker);
+}
+
+TEST_F(ReplayModeAdmission, IncompleteMarkerRefusesEmptyPartialAndWrongTypeBeforeOutput) {
+    options.ticks = 0;
+    ASSERT_EQ(RunRecord(options), 0);
+    const auto original = ReadReplayModeFile(options.record_path);
+    const auto marker = fs::path(options.record_path + ".incomplete");
+    for (unsigned kind = 0; kind < 3; ++kind) {
+        SCOPED_TRACE(kind);
+        if (kind == 2) {
+            fs::create_directory(marker);
+        } else {
+            std::ofstream output(marker);
+            output << (kind == 0 ? "" : "Incomplete replay");
+            ASSERT_TRUE(output.good());
+        }
+        ExpectAdmissionRefused("recording finalization is incomplete");
+        EXPECT_EQ(RunRecord(options), 1);
+        EXPECT_EQ(ReadReplayModeFile(options.record_path), original);
+        EXPECT_TRUE(fs::is_empty(root / "worlds/saves"));
+        fs::remove(marker);
+    }
+}
+
+TEST_F(ReplayModeAdmission, CompleteToSuffixPreservesCapturedBootProfile) {
+    options.ticks = 0;
+    ASSERT_EQ(RunRecord(options), 0);
+    const auto recorded = replay::ReadReplay(options.record_path);
+    ASSERT_TRUE(recorded.has_value());
+    if (!recorded) {
+        return;
+    }
+    ASSERT_EQ(recorded->header.version, replay::kLrec1BootVersion);
+    replay::BoundedReplayRecorder recorder;
+    ASSERT_TRUE(recorder.Configure(17, 0));
+    ASSERT_TRUE(recorder.Open(options.record_path, recorded->header));
+    // Two fixed 1024-tick segments exercise actual complete-to-suffix conversion.
+    for (std::uint64_t tick = 1; tick <= 2048; ++tick) {
+        ASSERT_TRUE(recorder.RecordTick(tick, {}, nullptr, tick));
+    }
+    ASSERT_TRUE(recorder.Finalize(options.record_path, 2048, 2048));
+    const auto suffix = replay::ReadReplay(options.record_path);
+    ASSERT_TRUE(suffix.has_value());
+    if (!suffix) {
+        return;
+    }
+    EXPECT_EQ(suffix->header.version, replay::kLrec1BootElidedVersion);
+    EXPECT_EQ(suffix->header.authority_boot, recorded->header.authority_boot);
+    EXPECT_EQ(suffix->elided_through_tick, 1024u);
+    ExpectAdmissionRefused("diagnostic suffix");
+}
+
+TEST_F(ReplayModeAdmission, StrictCompleteTruncationNeverAdmitsOrReplacesOutput) {
+    options.ticks = 1;
+    ASSERT_EQ(RunRecord(options), 0);
+    const auto complete = ReadReplayModeFile(options.record_path);
+    ASSERT_GT(complete.size(), 32u);
+    options.mutate_replay_fixture = options.record_path;
+    for (const auto size : {complete.size() - 32, complete.size() - 1, complete.size() + 1}) {
+        auto partial = complete;
+        partial.resize(size, '\0');
+        {
+            std::ofstream output(options.record_path, std::ios::binary | std::ios::trunc);
+            output << partial;
+            ASSERT_TRUE(output.good());
+        }
+        EXPECT_FALSE(replay::ReadReplay(options.record_path).has_value());
+        EXPECT_EQ(RunMutateReplayFixture(options), 1);
+        EXPECT_EQ(ReadReplayModeFile(options.record_path), partial);
+        ExpectAdmissionRefused("invalid or has an unsupported LREC1 version");
+    }
+}
+
+TEST_F(ReplayModeAdmission, EmptyOriginalSeedReconstructsTheRecordedResolvedBoot) {
+    options.seed.clear();
+    options.ticks = 0;
+    ASSERT_EQ(RunRecord(options), 0);
+    const auto recorded = replay::ReadReplay(options.record_path);
+    ASSERT_TRUE(recorded.has_value());
+    if (!recorded) {
+        return;
+    }
+    const auto config = ReplayRunnerConfigFrom(options, recorded->header);
+    ASSERT_TRUE(config.has_value());
+    if (!config) {
+        return;
+    }
+    EXPECT_FALSE(config->seed.empty());
+    ASSERT_EQ(RunReplay(options), 0) << logs.str();
+    EXPECT_EQ(Artifact().at("start_world_hash_match"), true);
+}
+
+TEST_F(ReplayModeAdmission, RecordingBudgetRefusesBeforeBootAndPreservesOutput) {
+    std::ofstream(options.record_path) << "retained";
+    for (const std::uint64_t ticks : {std::uint64_t{replay::ReplayReadLimits{}.records},
+                                      (std::numeric_limits<std::uint64_t>::max)()}) {
+        options.ticks = ticks;
+        EXPECT_EQ(RunRecord(options), 1);
+        EXPECT_FALSE(fs::exists(root / "worlds/saves"));
+        EXPECT_EQ(ReadReplayModeFile(options.record_path), "retained");
+    }
+}
+
+TEST_F(ReplayModeAdmission, InvalidRecordingRosterRefusesBeforeBootOrOutput) {
+    for (const int avatars : {-1, 1025}) {
+        SCOPED_TRACE(avatars);
+        options.avatars = avatars;
+        options.ticks = 0;
+        logs.str("");
+        EXPECT_EQ(RunRecord(options), 1);
+        EXPECT_EQ(RunRecordedLockstepLoopback(options), 1);
+        EXPECT_EQ(logs.str().find("Water resolution wired:"), std::string::npos);
+        EXPECT_FALSE(fs::exists(options.record_path));
+        EXPECT_FALSE(fs::exists(root / "worlds/saves"));
+    }
+}
+
+TEST_F(ReplayModeAdmission, AutomaticRecordingRefusesConflictingCapturedBootBeforeOutput) {
+    namespace net = Luminumbra::Net;
+    options.ticks = 0;
+    ASSERT_EQ(RunRecord(options), 0);
+    const auto recorded = replay::ReadReplay(options.record_path);
+    ASSERT_TRUE(recorded.has_value());
+    if (!recorded) {
+        return;
+    }
+    for (unsigned mutation = 0; mutation < 7; ++mutation) {
+        SCOPED_TRACE(mutation);
+        auto header = recorded->header;
+        ASSERT_TRUE(header.authority_boot.has_value());
+        if (!header.authority_boot) {
+            return;
+        }
+        switch (mutation) {
+            case 0:
+                header.version = replay::kLrec1Version;
+                break;
+            case 1:
+                header.authority_boot.reset();
+                break;
+            case 2:
+                ++header.authority_boot->resolved_world_seed;
+                break;
+            case 3:
+                header.preset = "other";
+                break;
+            case 4:
+                ++header.tick_rate_hz;
+                break;
+            case 5:
+                header.system_config_identity = "other";
+                break;
+            default:
+                ++header.seed;
+                break;
+        }
+        net::LockstepConfig config;
+        config.seed = static_cast<std::uint32_t>(recorded->header.seed);
+        config.preset = recorded->header.preset;
+        config.system_config_identity = recorded->header.system_config_identity;
+        config.preset_content_hash = recorded->header.preset_content_hash;
+        config.replay_header = std::make_shared<const replay::ReplayHeader>(header);
+        auto [local, peer] = net::MakeLoopbackPair();
+        net::LockstepSession session(config, local.get(), {});
+        const auto path = (root / "refused.lrec").string();
+        session.SetDumpPath(path);
+        auto remote = config;
+        remote.local_client_id = 1;
+        remote.peer_client_id = 0;
+        ASSERT_TRUE(peer->SendFrame(net::EncodeHello(net::MakeLockstepHello(remote))));
+        ASSERT_TRUE(session.Handshake());
+        EXPECT_EQ(session.Status().replay_error,
+                  "replay boot conflicts with session configuration");
+        EXPECT_FALSE(fs::exists(path));
+        EXPECT_EQ(session.AdmissionStatus().replay_segments, 0u);
     }
 }
 
@@ -737,6 +1205,17 @@ TEST_F(ReplayModeAdmission, FixtureMutationRefusesIncompleteStreamsWithoutReplac
     options.ticks = 1;
     options.mutate_replay_fixture = options.record_path;
     ASSERT_EQ(RunRecord(options), 0);
+    // Keep the legacy partial-result contract covered alongside strict C4 reads.
+    const auto recorded = replay::ReadReplay(options.record_path);
+    ASSERT_TRUE(recorded.has_value());
+    if (!recorded) {
+        return;
+    }
+    auto legacy = *recorded;
+    legacy.header.version = replay::kLrec1Version;
+    legacy.header.authority_boot.reset();
+    Rewrite(legacy);
+    ASSERT_FALSE(testing::Test::HasFatalFailure());
     const auto companion = options.record_path + ".regions.json";
     const auto trace_bytes = ReadReplayModeFile(companion);
     auto bytes = ReadReplayModeFile(options.record_path);
@@ -1053,8 +1532,7 @@ TEST_F(ReplayModeAdmission, UnreadableAndPartialStreamsRefuseBeforeConfiguration
             output.write(bytes.data(), static_cast<std::streamsize>(length));
             ASSERT_TRUE(output.good());
         }
-        ExpectAdmissionRefused(length < 4 ? "invalid or has an unsupported LREC1 version"
-                                          : "truncated");
+        ExpectAdmissionRefused("invalid or has an unsupported LREC1 version");
     }
 }
 } // namespace
