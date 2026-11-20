@@ -28,18 +28,24 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <span>
 #include <stop_token>
 #include <string>
 #include <vector>
 
 namespace Luminumbra::World {
 class FarWorldAuthorityProducer;
+struct PlayerAvatar;
+struct PlayerAvatarOwnerState;
+struct PhysicsOwnerState;
 struct FarWorldAuthorityConfig;
 } // namespace Luminumbra::World
 
 namespace Luminumbra::Persistence {
 class CreatedWorldArtifacts;
-}
+struct AuthorityCaptureResult;
+enum class AuthorityCaptureParts;
+} // namespace Luminumbra::Persistence
 
 namespace luminumbra::fields {
 class EnergyFieldState; //  (): the stateful energy layer
@@ -65,8 +71,11 @@ namespace Systems {
 class SHIELD_WorldSystem;
 class PhysicsSystem;
 class WaterSystem;
+enum class WindLayer : int;
+struct WeatherSample;
 class WindFieldSystem;
 class WeatherSystem;
+struct WeatherSchedule;
 class AetherFieldSystem;
 } // namespace Systems
 } // namespace Luminumbra
@@ -105,7 +114,24 @@ struct PersistenceStatus {
 
 class GameSession {
 public:
+    // Dormant caller contract for tests; never configured, serialized or hashed.
+    struct AuthorityProfileOptions {
+        // Slice I will bind this predicate to its negotiated authority revision.
+        bool residency_free_eviction = false;
+    };
+
+    // Selects the test-only opt-in constructor below.
+    struct AuthorityProfileTestOnly {
+        explicit AuthorityProfileTestOnly() = default;
+    };
+
     GameSession();
+    // Link boundary: this constructor is DEFINED only in
+    // test/common/GameSessionAuthorityProfileTestSeam.cpp, which is compiled into test
+    // executables and never into a src/ library. A runtime, client, server or replay
+    // binary that names it fails to link, so nothing can opt in before slice I ties
+    // the option to negotiated identity.
+    GameSession(const AuthorityProfileOptions& authority_profile, AuthorityProfileTestOnly);
     ~GameSession();
 
     // Initialize a new world with the given parameters. Refusal before adoption
@@ -166,6 +192,7 @@ public:
         std::vector<IVec3> wanted_chunks;
         RegionSchedulerConfig ledger_config;
         std::optional<RegionSchedulerConfig> scheduler_override;
+        std::shared_ptr<const Systems::WeatherSchedule> weather_schedule;
         Vec3 energy_anchor{};
         std::uint64_t simulation_tick = 0;
         std::uint64_t world_revision = 0;
@@ -314,6 +341,22 @@ public:
         return m_physicsSystem.get();
     }
 
+    // Internal owner continuation; no save/hash/boot adoption until explicitly called.
+    // Supply not-yet-restored frozen captures to reserve their body slots. Finish
+    // the roster before stepping or allocating other bodies (owner-thread exclusion).
+    // The singleton player carries no body allocation; restore referenced bodies
+    // and their allocator first, as for avatar continuation. Refusal changes nothing.
+    bool CapturePlayerOwner(World::PhysicsOwnerState& output) const;
+    bool RestorePlayerOwner(const World::PhysicsOwnerState& state);
+    // Restore requires the player ID to equal the next physics roster slot.
+    bool CaptureAvatarOwner(const World::PlayerAvatar& avatar,
+                            std::size_t physics_index,
+                            World::PlayerAvatarOwnerState& output) const;
+    bool RestoreAvatarOwner(const World::PlayerAvatarOwnerState& state,
+                            World::PlayerAvatar& avatar,
+                            std::size_t& physics_index,
+                            std::span<const World::PhysicsOwnerState> remaining_frozen = {});
+
     // the deterministic wind field. Sim-authoritative; its cell
     // values feed the world_hash `wind` sub-hash. Constructed on world
     // create/load (pure function of the world seed); updated per fixed tick in
@@ -335,6 +378,11 @@ public:
     }
     const Systems::WeatherSystem* GetWeatherSystem() const {
         return m_weatherSystem.get();
+    }
+    // Pre-world setup: copies validated input, so callers cannot mutate session identity.
+    bool SetWeatherSchedule(const Systems::WeatherSchedule& schedule);
+    [[nodiscard]] const Systems::WeatherSchedule* GetWeatherSchedule() const {
+        return m_weatherSchedule.get();
     }
 
     // the deterministic Aether scalar field. Sim-authoritative; its
@@ -359,6 +407,8 @@ public:
     const luminumbra::ai::ScentField* GetScentField() const {
         return m_scentField.get();
     }
+    // Live regional cell eligibility shared with the session-owned scent field.
+    [[nodiscard]] bool ScentCellDue(int x, int z) const;
     // Observational eligibility work; never persisted or included in a hash.
     [[nodiscard]] std::size_t GetScentEligibilityVisits() const {
         return m_scentDueCache.query_visits();
@@ -421,9 +471,9 @@ public:
     void SetForagingTuning(const luminumbra::ai::ForagingParams& t) {
         m_foragingTuning = t;
     }
-    void SetReproductionTuning(const luminumbra::ai::ReproductionTuning& t) {
-        m_reproductionTuning = t;
-    }
+    // Capacity/lifespan use fixed session rules until a versioned config identity admits
+    // overrides. Low-level tick callers can still use fast synthetic lifecycle tuning.
+    void SetReproductionTuning(const luminumbra::ai::ReproductionTuning& t);
     void SetCircadianAmplitude(float a) {
         m_circadianAmplitude = a;
     }
@@ -502,6 +552,15 @@ public:
     // named diagnostic for the heavy oracle's authoritative compare.
     [[nodiscard]] std::string ComputeAetherStateSubHash() const;
 
+    // Pure regional projections shared by concrete systems and reference samplers.
+    [[nodiscard]] Vec2 SampleRegionalWind(const Vec3& position, Systems::WindLayer layer) const;
+    [[nodiscard]] Systems::WeatherSample SampleRegionalWeather(const Vec3& position) const;
+    [[nodiscard]] float SampleRegionalAether(const Vec3& position) const;
+    // Fixed per-system diagnostics use the same canonical bytes as the bound samplers.
+    [[nodiscard]] std::string ComputeRegionalWindSubHash() const;
+    [[nodiscard]] std::string ComputeRegionalWeatherSubHash() const;
+    [[nodiscard]] std::string ComputeRegionalAetherSubHash() const;
+
     // Returns the per-world species-definition table, loaded at world
     // create/load from <root>/data/common/creatures/species/*.json (filename-sorted — a pure
     // function of file content, never filesystem iteration order). Each entry's behaviour
@@ -541,8 +600,16 @@ public:
         return m_fieldPages;
     }
     // Observational foliage preparation/publication counts; excluded from identity and saves.
+    [[nodiscard]] std::uint64_t GetFoliageSelectionVisits() const;
     [[nodiscard]] std::uint64_t GetFoliageRegistryStageVisits() const;
     [[nodiscard]] std::uint64_t GetFoliageRegistryPublications() const;
+    // Plant-owner visits while preparing persistence deadlines, including rejected owners.
+    [[nodiscard]] std::uint64_t GetFoliagePersistenceOwnerVisits() const;
+    // Runtime-only diagnostics; neither encoded nor hashed.
+    [[nodiscard]] std::size_t GetFoliageHistorySize() const;
+    [[nodiscard]] std::uint32_t GetFoliageReplayRemainingSteps() const;
+    [[nodiscard]] std::uint64_t GetFoliageReplayCellVisits() const;
+    [[nodiscard]] std::uint64_t GetFoliageReplayPreparationPages() const;
     // Read-only diagnostics of the live legacy foliage grids.
     [[nodiscard]] const luminumbra::foliage::SoilGrid* GetFoliageSoilGrid() const;
     [[nodiscard]] const luminumbra::foliage::IrrigationGrid* GetFoliageIrrigationGrid() const;
@@ -618,6 +685,13 @@ public:
     // Enabled chunk slot hashes authoritative truth across residency/save history. The default
     // path retains the existing streamed-state projection and wire/checkpoint slots.
     [[nodiscard]] std::string ComputeChunkStateHash();
+    // Owner-thread checked observation. Failure publishes no legacy output slots.
+    // The one-argument form captures every slot.
+    [[nodiscard]] Persistence::AuthorityCaptureResult
+    CaptureAuthorityHashes(const std::string& entity_snapshot_json = {});
+    [[nodiscard]] Persistence::AuthorityCaptureResult
+    CaptureAuthorityHashes(const std::string& entity_snapshot_json,
+                           Persistence::AuthorityCaptureParts parts);
     [[nodiscard]] bool IsSimulationTickBoundary() const {
         return !m_activeRegionsEnabled || (!m_simulationBatchInProgress && m_regionWork.empty());
     }
@@ -667,6 +741,11 @@ public:
     std::filesystem::path GetSaveRootPath() const;
 
 private:
+    struct AuthorityProfileTag {};
+    // The single real constructor; the default and the test-only constructors delegate here.
+    GameSession(const AuthorityProfileOptions& authority_profile, AuthorityProfileTag);
+
+    const AuthorityProfileOptions m_authorityProfile;
     void DisableFarWorldAuthorityProducer();
     std::unique_ptr<World::FarWorldAuthorityProducer> m_farWorldAuthorityProducer;
     bool m_farWorldSourceNeedsRefresh = false;
@@ -760,8 +839,8 @@ private:
                                     bool defer_water_authority);
     void BindRegionalFieldQueries();
     [[nodiscard]] FieldPageView RegionalFields() const;
-    [[nodiscard]] std::uint16_t SampleRegionalChannel(int channel, const Vec3& position) const;
     [[nodiscard]] std::string RegionalAmbientHash(std::uint8_t channels, bool weather) const;
+    [[nodiscard]] std::uint16_t SampleRegionalChannel(int channel, const Vec3& position) const;
     void ProjectRegionalWeather(std::uint64_t tick,
                                 bool restoring = false,
                                 const std::map<RegionKey, std::uint64_t>* work = nullptr);
@@ -811,6 +890,7 @@ private:
     std::unique_ptr<Systems::WaterSystem> m_waterSystem;
     std::unique_ptr<Systems::WindFieldSystem> m_windFieldSystem;
     std::unique_ptr<Systems::WeatherSystem> m_weatherSystem;
+    std::shared_ptr<const Systems::WeatherSchedule> m_weatherSchedule;
     std::unique_ptr<Systems::AetherFieldSystem> m_aetherFieldSystem;
     // The stateful energy layer. Null unless
     // sim.aether_state was enabled BEFORE CreateWorld/LoadWorld (explicit OFF —
@@ -866,7 +946,6 @@ private:
     [[nodiscard]] float ScentDomainOrigin(bool x_axis) const;
     [[nodiscard]] RegionKey ScentCellOwner(int x, int z) const;
     [[nodiscard]] bool ScentOwnerDue(RegionKey owner) const;
-    [[nodiscard]] bool ScentCellDue(int x, int z) const;
     [[nodiscard]] bool ScentEdgeOpen(int x, int z, int nx, int nz) const;
     void RefreshScentDueCache() const;
     void RebaseForagingCells(int dx, int dz);

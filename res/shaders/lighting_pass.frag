@@ -1,7 +1,15 @@
 #version 450 core
 #include "far_world_position.glsl"
 #include "config_constants.gen.glsl"
+#ifdef LUMIN_DIAG_CONTRIBUTIONS
+layout(location = 0)
+#endif
 out vec4 FragColor;
+#ifdef LUMIN_DIAG_CONTRIBUTIONS
+layout(location = 1) out vec4 DiagnosticContribution;
+uniform int u_contributionMode;
+vec3 diagnosticLightSpecular = vec3(0.0);
+#endif
 
 in vec2 TexCoords;
 
@@ -381,14 +389,24 @@ vec3 CalculateLightContribution(vec3 L, vec3 V, vec3 N, vec3 F0, vec3 albedo, fl
     // Optimized specular calculation
     vec3 specular = (NDF * G * F) / max(4.0 * NdotV * NdotL, 0.0001);
 
+#ifdef LUMIN_DIAG_CONTRIBUTIONS
+    diagnosticLightSpecular = specular * radiance * NdotL;
+#endif
     return (kD * albedo / PI + specular) * radiance * NdotL;
 }
 
 // Long-range sky visibility via an upward view-space ray-march against the
 // G-buffer. Returns 1.0 = fully open to the sky, -> u_caveAmbientFloor when the
-// fragment is roofed over (cave/overhang). Cheap: u_caveSkySteps depth taps.
+// fragment is roofed over (cave/overhang). At most 32 march position taps plus
+// 8 ordinary refinement and 8 independent recovery position lookups: at most
+// 48. For n = min(u_caveSkySteps, 32), the tight bound is n + 8 when n <= 2,
+// otherwise n + 16; nonpositive distance, thickness or steps perform zero reads.
+// Both refinement budgets are global to this march, independent of thickness.
 // Only called when u_caveAmbientOcclusion > 0.5 (see main); zero cost when OFF.
 float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
+    if (u_caveSkyMaxDist <= 0.0 || u_caveThickness <= 0.0 || u_caveSkySteps <= 0) {
+        return 1.0;
+    }
     // Sky direction in VIEW space (world +Y rotated by the view rotation). The
     // upper-left 3x3 of u_inverseView maps view->world; its transpose maps the
     // world up vector into view space.
@@ -396,32 +414,119 @@ float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
     vec3 skyDirView = normalize(transpose(mat3(u_inverseView)) * worldUp);
     // Start a bit off the surface along the normal to avoid self-occlusion, then
     // march toward the sky. Sample the G-buffer view-space position; if a sampled
-    // surface is CLOSER to the eye than the ray point by more than u_caveThickness,
-    // the ray is blocked.
+    // surface lies just in front of the ray point within u_caveThickness, the
+    // ray is blocked. More distant foreground geometry is unrelated to the ray.
     vec3 ro = viewPosFrag + viewNrm * 0.05;
     float occluded = 0.0;
-    float stepLen = u_caveSkyMaxDist / float(max(u_caveSkySteps, 1));
+    int steps = min(u_caveSkySteps, 32);
+    float stepLen = u_caveSkyMaxDist / float(steps);
+    // The shaded fragment supplies a known-open start without another read.
+    bool previousValid = true;
+    float previousDistance = 0.0;
+    float previousDepthGap = 0.0;
+    int refinementTaps = 0;
+    int recoveryTaps = 0;
     for (int s = 1; s <= 32; ++s) {
-        if (s > u_caveSkySteps) break;          // dynamic bound (const loop cap)
-        vec3 p = ro + skyDirView * (stepLen * float(s));
+        if (s > steps) break;
+        float distanceAlongRay = stepLen * float(s);
+        vec3 p = ro + skyDirView * distanceAlongRay;
         // Project to screen.
         vec4 clip = u_projection * vec4(p, 1.0);
         if (clip.w <= 0.0) break;               // behind eye -> stop
         vec2 uv = (clip.xy / clip.w) * 0.5 + 0.5;
         if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) break; // off-screen = treat as open
         vec3 sampPos = vec3(0.0);
-        if (!farWorldPosition(gPosition, u_sceneDepth, uv, sampPos)) continue;
+        bool valid = farWorldPosition(gPosition, u_sceneDepth, uv, sampPos);
         // gPosition is 0 where nothing was rendered (sky); skip those (open).
-        if (dot(sampPos, sampPos) < 1e-6) continue;
+        if (!valid || dot(sampPos, sampPos) < 1e-6) {
+            previousValid = false;
+            previousDistance = distanceAlongRay;
+            continue;
+        }
         // The ray point p and the stored surface sampPos share the same screen
         // pixel. If the stored surface is in FRONT of the ray sample (closer to
         // the eye) within the thickness band, a ceiling/overhang occludes this
         // upward sample.
-        float rayDepth  = length(p);
-        float surfDepth = length(sampPos);
-        if (surfDepth < rayDepth - 0.05 && (rayDepth - surfDepth) < u_caveSkyMaxDist) {
-            // Weight nearer occluders more (closer ceiling = darker).
-            occluded = max(occluded, 1.0 - float(s - 1) / float(u_caveSkySteps));
+        float depthGap = length(p) - length(sampPos);
+        bool crossing = previousValid && previousDepthGap <= 0.05 && depthGap > 0.05;
+        // An empty coarse tap supplies an open endpoint, but only overhead
+        // geometry may start recovery. Save the endpoint before advancing it.
+        bool emptyCrossing = !previousValid && depthGap > 0.05 &&
+            dot(sampPos - ro, skyDirView) > 0.0;
+        float frontDistance = previousDistance;
+        float backDistance = distanceAlongRay;
+        previousValid = true;
+        previousDistance = distanceAlongRay;
+        previousDepthGap = depthGap;
+        // Resolve every front-to-back bracket with the same fixed bisection,
+        // independent of thickness. Stopping on entry into the thickness band
+        // would make its outer edge select a different occlusion strength.
+        // Silhouettes must still supply an observed sample inside the band.
+        // Preserve every observed in-band coarse endpoint: refinement may
+        // replace it with unrelated foreground before missing data stops it.
+        if ((crossing || emptyCrossing) && depthGap < u_caveThickness) {
+            float distanceWeight = 1.0 - clamp(length(sampPos - ro) / u_caveSkyMaxDist, 0.0, 1.0);
+            float thicknessWeight = 1.0 - smoothstep(0.5 * u_caveThickness, u_caveThickness, depthGap);
+            occluded = max(occluded, distanceWeight * thicknessWeight);
+        }
+        if (crossing || emptyCrossing) {
+            bool originBracket = s == 1 || emptyCrossing;
+            for (int refinement = 0; refinement < 8; ++refinement) {
+                if (emptyCrossing ? recoveryTaps >= 8 : refinementTaps >= 8) break;
+                float midpoint = 0.5 * (frontDistance + backDistance);
+                vec3 refinedPoint = ro + skyDirView * midpoint;
+                vec4 refinedClip = u_projection * vec4(refinedPoint, 1.0);
+                if (refinedClip.w <= 0.0) break;
+                vec2 refinedUv = (refinedClip.xy / refinedClip.w) * 0.5 + 0.5;
+                if (refinedUv.x < 0.0 || refinedUv.x > 1.0 || refinedUv.y < 0.0 || refinedUv.y > 1.0) break;
+                vec3 refinedPosition = vec3(0.0);
+                if (emptyCrossing) {
+                    ++recoveryTaps;
+                } else {
+                    ++refinementTaps;
+                }
+                if (!farWorldPosition(gPosition, u_sceneDepth, refinedUv, refinedPosition) ||
+                    dot(refinedPosition, refinedPosition) < 1e-6) {
+                    // The origin is already known open even when the first
+                    // interval projects onto sky before reaching the ceiling.
+                    // Once the open side has geometry, a hole invalidates it.
+                    if (originBracket) {
+                        frontDistance = midpoint;
+                        continue;
+                    }
+                    break;
+                }
+                float refinedGap = length(refinedPoint) - length(refinedPosition);
+                // Below-origin foreground cannot replace an overhead recovery
+                // endpoint, including when viewing elevated geometry from below.
+                if (emptyCrossing && refinedGap > 0.05 &&
+                    dot(refinedPosition - ro, skyDirView) <= 0.0) {
+                    if (originBracket) {
+                        frontDistance = midpoint;
+                        continue;
+                    }
+                    break;
+                }
+                if (refinedGap <= 0.05) {
+                    frontDistance = midpoint;
+                    originBracket = false;
+                } else {
+                    backDistance = midpoint;
+                    sampPos = refinedPosition;
+                    depthGap = refinedGap;
+                }
+            }
+            // Missing data or an exhausted budget retains the last observed
+            // back-side sample; neither condition changes selection at thickness.
+        }
+        if (depthGap > 0.05 && depthGap < u_caveThickness) {
+            // A foreground silhouette is not a ceiling along this ray. Limit
+            // hits to the configured depth band, not the entire march length.
+            // Use the observed distance instead of the discrete march index so
+            // foliage cannot stamp eight constant-strength bands on the ground.
+            float distanceWeight = 1.0 - clamp(length(sampPos - ro) / u_caveSkyMaxDist, 0.0, 1.0);
+            float thicknessWeight = 1.0 - smoothstep(0.5 * u_caveThickness, u_caveThickness, depthGap);
+            occluded = max(occluded, distanceWeight * thicknessWeight);
         }
     }
     // occluded in [0,1]; map to a sky-visibility multiplier in [floor,1].
@@ -429,6 +534,15 @@ float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
 }
 
 void main() {
+#ifdef LUMIN_DIAG_CONTRIBUTIONS
+    // Alpha zero is explicit unsupported, including every early return / sky texel.
+    DiagnosticContribution = vec4(0.0);
+    vec3 diagnosticSun = vec3(0.0);
+    vec3 diagnosticMoon = vec3(0.0);
+    vec3 diagnosticLighting = vec3(0.0);
+    vec3 diagnosticSpecular = vec3(0.0);
+    float diagnosticShadow = 1.0;
+#endif
     if (u_staticStudio != 0 && texture(u_sceneDepth, TexCoords).r == 0.0) {
         FragColor = vec4(u_studioBackground, 0.0);
         return;
@@ -527,6 +641,13 @@ void main() {
     Lo += CalculateLightContribution(L_sun, V, Normal, F0, Albedo, Metallic, a2, k, sunRadiance)
           * shadow * (1.0 - cloud_shadow) * shadowTint;
 
+#ifdef LUMIN_DIAG_CONTRIBUTIONS
+    diagnosticSun = Lo;
+    diagnosticLighting = (sunRadiance / PI) * max(dot(Normal, L_sun), 0.0)
+        * shadow * (1.0 - cloud_shadow) * shadowTint;
+    diagnosticSpecular = diagnosticLightSpecular * shadow * (1.0 - cloud_shadow) * shadowTint;
+    diagnosticShadow = shadow;
+#endif
     //  moonlight (owner: "there should be some brightness from the moon"):
     // a dim cool directional fill so night terrain reads as FORMED (directional
     // N.L gives contrast/detail) rather than a flat near-black sheet. Derived
@@ -585,6 +706,15 @@ void main() {
         float moonLuma = dot(moonLit, vec3(0.2126, 0.7152, 0.0722));
         moonLit = mix(moonLit, moonLuma * vec3(0.70, 0.80, 1.05), 0.55);
         Lo += moonLit;
+#ifdef LUMIN_DIAG_CONTRIBUTIONS
+        diagnosticMoon = moonLit;
+        diagnosticLighting += (moonRadiance / PI) * moonWrap * moonShadow;
+        vec3 moonSpecularLit = moonSpecular * moonShadow;
+        float moonSpecularLuma = dot(moonSpecularLit, vec3(0.2126, 0.7152, 0.0722));
+        diagnosticSpecular += mix(moonSpecularLit,
+            moonSpecularLuma * vec3(0.70, 0.80, 1.05), 0.55);
+        diagnosticShadow = moonShadow;
+#endif
     }
 
     // Point Lights with early rejection
@@ -598,6 +728,10 @@ void main() {
             vec3 L_point = lightVec / dist; // Avoid normalize when we already have distance
             vec3 radiance = u_pointLights[i].color * u_pointLights[i].intensity * attenuation;
             Lo += CalculateLightContribution(L_point, V, Normal, F0, Albedo, Metallic, a2, k, radiance);
+#ifdef LUMIN_DIAG_CONTRIBUTIONS
+            diagnosticSpecular += diagnosticLightSpecular;
+            diagnosticLighting += (radiance / PI) * max(dot(Normal, L_point), 0.0);
+#endif
         }
     }
 
@@ -728,6 +862,31 @@ void main() {
     vec3 color = ambient + Lo + crystalGlow + aetherGlow + markerGlow
         + (authored ? authoredSurface.rgb : vec3(0.0)); // + emissive markers
 
+#ifdef LUMIN_DIAG_CONTRIBUTIONS
+    // Linear terms before exposure/grade. Material views show the values lighting uses.
+    // Direct terms include BRDF/albedo and their exact shadow/cloud/transmission factors.
+    // Fog and later forward/sky/shadow producers have no output here.
+    vec3 diagnosticValue = vec3(0.0);
+    bool diagnosticSupported = true;
+    if (u_contributionMode == 12) diagnosticValue = diagnosticSun;
+    else if (u_contributionMode == 13) diagnosticValue = diagnosticMoon;
+    else if (u_contributionMode == 14) diagnosticValue = ambient;
+    else if (u_contributionMode == 15) diagnosticValue = vec3(diagnosticShadow);
+    else if (u_contributionMode == 16) diagnosticValue = vec3(ao);
+    else if (u_contributionMode == 17) diagnosticValue = crystalGlow + aetherGlow + markerGlow
+        + (authored ? authoredSurface.rgb : vec3(0.0));
+    else if (u_contributionMode == 19) diagnosticValue = diagnosticSpecular + ambientSpecular * ao * skyVis;
+    else if (u_contributionMode == 20) diagnosticValue = vec3(Roughness);
+    else if (u_contributionMode == 21) diagnosticValue = vec3(Metallic);
+    else if (u_contributionMode == 22) diagnosticValue = viewNormal * 0.5 + 0.5;
+    else if (u_contributionMode == 23) diagnosticValue = Normal * 0.5 + 0.5;
+    else if (u_contributionMode == 24) diagnosticValue = vec3(skyVis);
+    else if (u_contributionMode == 25) diagnosticValue = vec3(materialAO);
+    else if (u_contributionMode == 26) diagnosticValue = diagnosticLighting;
+    else diagnosticSupported = false;
+    if (dot(viewPos, viewPos) >= 1e-8 && diagnosticSupported)
+        DiagnosticContribution = vec4(diagnosticValue, 1.0);
+#endif
     // the lightning light-pulse + bolt are injected by a dedicated
     // FULL-SCREEN overlay (lightning_overlay.frag) drawn AFTER the skybox, so the
     // flash composites over BOTH the lit terrain and the sky. (The lighting pass

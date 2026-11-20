@@ -1207,7 +1207,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         fast = jobs(self.workflows["ci.yml"])["fast-compile"]
         self.assertEqual(value(fast, "name", 4), "Fast compile / GCC + clang-tidy")
         self.assertEqual(value(fast, "runs-on", 4), "ubuntu-24.04")
-        self.assertEqual(value(fast, "timeout-minutes", 4), "20")
+        self.assertEqual(value(fast, "timeout-minutes", 4), "35")
         self.assertEqual(value(fast, "if", 4), ci_event_condition())
         self.assertIsNone(value(fast, "needs", 4))
         self.assertNotIn("draft", fast)
@@ -1221,7 +1221,16 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         for step in (install, compile_shaders):
             self.assertIsNone(value(step, "if", 8))
             self.assertIsNone(value(step, "continue-on-error", 8))
-        self.assertIn("sudo apt-get install -y --no-install-recommends glslang-tools", install)
+        self.assertEqual(value(install, "run", 8).splitlines(), [
+            "sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 "
+            "-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update",
+            "sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends glslang-tools",
+        ])
+        # The always-run shader step refreshes the index once for the whole lane.
+        dependencies = value(named["Install fast validation dependencies"], "run", 8)
+        self.assertNotIn("apt-get update", dependencies)
+        self.assertTrue(dependencies.startswith("sudo apt-get -o Acquire::Retries=3 install -y"))
+        self.assertLess(steps(fast).index(install), steps(fast).index(named["Install fast validation dependencies"]))
         self.assertEqual(value(compile_shaders, "run", 8).splitlines(), [
             "python3 -I -B tools/ci/test_compile_shaders.py --validator glslangValidator",
             "python3 -I -B tools/ci/compile_shaders.py",
@@ -1230,18 +1239,35 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
 
     def test_fast_lane_explicit_route_dual_configure_glad_and_bounded_execution(self):
         fast = jobs(self.workflows["ci.yml"])["fast-compile"]
-        route = steps(fast)[1]
+        named = {value(step, "- name", 6): step for step in steps(fast)}
+        # Pull-request diffs use the merge commit's first parent: GitHub can merge a
+        # newer base than the payload records, which would select base-only changes.
+        compare = steps(fast)[1]
+        self.assertEqual(value(compare, "- name", 6), "Resolve the merged comparison base")
+        self.assertIn("CI_PAYLOAD_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}", compare)
+        self.assertIn("CI_PR_HEAD: ${{ github.event.pull_request.head.sha }}", compare)
+        self.assertIn("""if [ "$(git rev-parse -q --verify 'HEAD^2' || true)" = "$CI_PR_HEAD" ]; then""", compare)
+        self.assertIn('base="$(git rev-parse \'HEAD^1\')"', compare)
+        self.assertIn('echo "sha=$base" >> "$GITHUB_OUTPUT"', compare)
+        route = steps(fast)[2]
         self.assertIn("changed_tus.py route", route)
-        self.assertIn("github.event.pull_request.base.sha || github.event.before", route)
+        for name in ("Route explicit non-native paths or conservative validation",
+                     "Classify software shader scenes",
+                     "Replay selected compiles and both tidy configurations"):
+            self.assertIn("CI_BASE_SHA: ${{ steps.compare-base.outputs.sha }}", named[name])
+        self.assertNotIn("CI_BASE_SHA: ${{ github.event.pull_request.base.sha", fast)
         self.assertIn('--output "$GITHUB_OUTPUT" --summary-file "$GITHUB_STEP_SUMMARY"', route)
         self.assertIn("CI_FULL_SELECTION: ${{ steps.route.outputs.full }}", fast)
         self.assertIn('if [ "$CI_FULL_SELECTION" != false ]', fast)
         native_steps = {value(step, "- name", 6): step for step in steps(fast)}
+        scene_or_native = ("(steps.route.outputs.native != 'false' || "
+                           "steps.shader-scenes.outputs.needs_shader_scenes == 'true')")
         for name in ("Install fast validation dependencies",
-                     "Configure GCC and Clang databases and generate headers",
-                     "Replay selected compiles and both tidy configurations"):
+                     "Configure GCC and Clang databases and generate headers"):
             step = native_steps[name]
-            self.assertEqual(value(step, "if", 8), "steps.route.outputs.native != 'false'")
+            self.assertEqual(value(step, "if", 8), scene_or_native)
+        replay = native_steps["Replay selected compiles and both tidy configurations"]
+        self.assertEqual(value(replay, "if", 8), "steps.route.outputs.native != 'false'")
         evidence = native_steps["Upload fast selection and replay evidence"]
         self.assertEqual(value(evidence, "if", 8), "always() && steps.route.outputs.native != 'false'")
         self.assertIn("uses: actions/upload-artifact@", evidence)
@@ -1290,7 +1316,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
             if path.is_file() and any(word in path.name for word in ("ruleset", "required")):
                 self.assertNotIn("Fast compile / GCC + clang-tidy", path.read_text())
         inventory = blocks["public-tree"]
-        contracts = steps(fast)[2]
+        contracts = steps(fast)[3]
         self.assertIn("python3 -I -B tools/ci/test_changed_tus.py", contracts)
         self.assertIsNone(value(contracts, "if", 8))
         for suite in ("test_tidy_shard.py", "test_workflow_policy.py"):
@@ -1301,7 +1327,9 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         named = {value(step, "- name", 6): step for step in steps(fast)}
         restore = named["Restore fast dependency sources"]
         self.assertIn("uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9", restore)
-        self.assertEqual(value(restore, "if", 8), "steps.route.outputs.native != 'false'")
+        scene_or_native = ("(steps.route.outputs.native != 'false' || "
+                           "steps.shader-scenes.outputs.needs_shader_scenes == 'true')")
+        self.assertEqual(value(restore, "if", 8), scene_or_native)
         self.assertNotIn("restore-keys:", restore)
         key = value(restore, "key", 10)
         self.assertTrue(key.startswith("fast-deps-v1-${{ runner.os }}-${{ hashFiles("))
@@ -1313,7 +1341,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         self.assertIn("steps.fast-deps.outputs.cache-hit != 'true'", value(populate, "if", 8))
         self.assertIn("offline_deps.py snapshot", value(populate, "run", 8))
         stage = named["Verify and stage isolated fast dependency sources"]
-        self.assertEqual(value(stage, "if", 8), "steps.route.outputs.native != 'false'")
+        self.assertEqual(value(stage, "if", 8), scene_or_native)
         script = value(stage, "run", 8)
         self.assertIn("offline_deps.py stage --build-local", script)
         self.assertIn("for compiler in gcc clang", script)
@@ -4013,7 +4041,8 @@ class WorkflowBaseEditPolicyTests(unittest.TestCase):
             pr_path.write_text(json.dumps(self.base_event()["pull_request"]), encoding="utf-8")
             for action in sorted(base_match.CI_EVENTS):
                 event_path.write_text(json.dumps(self.base_event(action)), encoding="utf-8")
-                with self.subTest(action=action), patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(event_path)}), \
+                with self.subTest(action=action), patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(event_path),
+                                                     "GITHUB_RUN_ATTEMPT": "1"}), \
                         patch.object(base_match, "fetch_runs", return_value={"total_count": 0,
                                      "workflow_runs": []}) as runs, \
                         patch.object(base_match, "fetch_pull", return_value=self.base_event()["pull_request"]) as live, \

@@ -1,6 +1,7 @@
 #include "ModeHelpers.h"
 #include "Modes.h"
 #include "SmokeArtifact.h"
+#include "luminumbra_common/persistence/WorldSaveService.h"
 
 namespace fs = std::filesystem;
 
@@ -17,10 +18,12 @@ SmokeRunResult RunSmokeOnce(const ServerCliOptions& options, const char* run_lab
     config.world_id.clear(); // determinism runs always boot fresh worlds
     config.world_name = std::string("Headless Smoke ") + run_label;
 
+    Luminumbra::Server::ThrowawaySaveDirGuard save_cleanup;
     Luminumbra::Server::ServerWorldRunner runner(std::move(config));
     if (!runner.Boot()) {
         return result;
     }
+    save_cleanup.Arm(runner.Session()->GetWorldSaveDir());
 
     // gate-populated-world-replay: capture the creature count BEFORE the run so
     // the gate can assert non-vacuity (start != end => the ecology actually
@@ -36,6 +39,17 @@ SmokeRunResult RunSmokeOnce(const ServerCliOptions& options, const char* run_lab
     result.effective_simulation["weather_rain"] = session->WeatherRainEnabled();
 
     result.ticks = runner.RunFixedTicks(options.ticks);
+    if (result.ticks.region_fault || result.ticks.ticks_executed != options.ticks) {
+        LUMINUMBRA_CORE_ERROR(
+            "Smoke {}: incomplete run at tick {}", run_label, result.ticks.ticks_executed);
+        const fs::path incomplete_save_dir = runner.Session()->GetWorldSaveDir();
+        runner.Shutdown(&result.shutdown_save);
+        if (!incomplete_save_dir.empty()) {
+            std::error_code ec;
+            fs::remove_all(incomplete_save_dir, ec);
+        }
+        return result;
+    }
     //  avatar physics telemetry — confirm the server-authoritative avatar
     // characters SETTLED on the terrain (grounded; not fallen through the world).
     if (!runner.Avatars().empty()) {
@@ -84,7 +98,7 @@ SmokeRunResult RunSmokeOnce(const ServerCliOptions& options, const char* run_lab
 
 } // namespace
 
-int RunSmoke(const ServerCliOptions& options) {
+int RunSmoke(const ServerCliOptions& options) try {
     LUMINUMBRA_CORE_INFO(
         "Headless server determinism smoke: preset={} seed={} ticks={} radius={}/{}",
         options.preset,
@@ -94,7 +108,17 @@ int RunSmoke(const ServerCliOptions& options) {
         options.collision_radius);
 
     const SmokeRunResult first = RunSmokeOnce(options, "run-1");
+    if (!first.ok) {
+        return 1;
+    }
     const SmokeRunResult replay = RunSmokeOnce(options, "run-2");
+    if (!replay.ok) {
+        return 1;
+    }
 
     return Luminumbra::Server::WriteSmokeArtifact(options, first, replay);
+} catch (const Luminumbra::Persistence::AuthorityCaptureRefused& error) {
+    LUMINUMBRA_CORE_ERROR("smoke: authority hash capture refused (status={}); aborted",
+                          static_cast<int>(error.status()));
+    return 1;
 }

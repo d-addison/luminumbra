@@ -4,6 +4,7 @@
 #include "ReplacementOutputFile.h"
 #include "WorldSaveEncoding.h"
 #include "core/Profiler.h"
+#include "systems/WeatherSystem.h"
 #include "world/FarVolumeMemory.h"
 
 #include "../ecs/EntitySnapshot.h" //  plant entity snapshot persistence
@@ -664,6 +665,15 @@ bool AllowPublication(const std::filesystem::path& path,
     return true;
 }
 
+bool ValidSimulationAnchorCoordinate(double value, bool horizontal) {
+    // ActiveRegionLedger's horizontal domain is [-2^24, 2^24) metres. This
+    // also leaves ample int64_t headroom for wind/aether cell origins and extents.
+    constexpr double kSimulationAnchorLimitM = 16777216.0;
+    return std::isfinite(value) && value >= -std::numeric_limits<float>::max() &&
+           value <= std::numeric_limits<float>::max() &&
+           (!horizontal || (value >= -kSimulationAnchorLimitM && value < kSimulationAnchorLimitM));
+}
+
 bool ReadAmbientAnchor(const nlohmann::json& metadata,
                        std::optional<Vec3>& anchor,
                        std::string& error) {
@@ -683,11 +693,16 @@ bool ReadAmbientAnchor(const nlohmann::json& metadata,
             error = "Corrupt world metadata: invalid ambient field anchor.";
             return false;
         }
-        point[i] = value.at(axis).get<float>();
-        if (!std::isfinite(point[i])) {
-            error = "Corrupt world metadata: ambient field anchor must be finite.";
+        const double coordinate = value.at(axis).get<double>();
+        if (!ValidSimulationAnchorCoordinate(coordinate, i != 1)) {
+            error = "Corrupt world metadata: ambient field anchor outside simulation domain.";
             return false;
         }
+        point[i] = value.at(axis).get<float>();
+    }
+    if (!world::ActiveRegionLedger::valid_anchor(point)) {
+        error = "Corrupt world metadata: ambient field anchor outside simulation domain.";
+        return false;
     }
     anchor = point;
     return true;
@@ -3593,6 +3608,23 @@ bool ReadWaterCursor(const nlohmann::json& metadata, std::size_t& cursor, std::s
     return true;
 }
 
+// The unreleased v4 envelope stores three finite floats within the simulation
+// anchor domain, before wind restoration converts horizontal coordinates to cells.
+bool ValidWeatherScheduleAnchor(const nlohmann::json& anchor) {
+    if (!anchor.is_array() || anchor.size() != 3)
+        return false;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        const auto& coordinate = anchor.at(axis);
+        if (!coordinate.is_number())
+            return false;
+        const auto value = coordinate.get<double>();
+        if (!ValidSimulationAnchorCoordinate(value, axis != 1))
+            return false;
+    }
+    return world::ActiveRegionLedger::valid_anchor(
+        Vec3(anchor.at(0).get<float>(), anchor.at(1).get<float>(), anchor.at(2).get<float>()));
+}
+
 // Metadata gate shared by load_world and member_digest. Returns an empty string when the file is
 // absent or valid, else the rejection message. Malformed JSON throws like before.
 std::string CheckMetadataValue(const nlohmann::json& metadata,
@@ -3607,12 +3639,33 @@ std::string CheckMetadataValue(const nlohmann::json& metadata,
     if (!version.is_number_integer())
         return "corrupt world metadata container version";
     if (version != WorldSaveService::kContainerVersion &&
-        version != WorldSaveService::kIndexedMetadataVersion) {
+        version != WorldSaveService::kIndexedMetadataVersion &&
+        version != kScheduledWeatherMetadataVersion) {
         if (version >= 0 && version < WorldSaveService::kContainerVersion)
             return WorldSaveService::kObsoleteWorldMessage;
-        if (version > WorldSaveService::kIndexedMetadataVersion)
+        if (version > kScheduledWeatherMetadataVersion)
             return "unsupported future world metadata container version " + version.dump();
         return "corrupt world metadata container version";
+    }
+    const bool scheduled = version == kScheduledWeatherMetadataVersion;
+    if (metadata.contains("weatherSchedule") != scheduled ||
+        metadata.contains("weatherScheduleTick") != scheduled ||
+        metadata.contains("weatherScheduleAnchor") != scheduled)
+        return "corrupt world metadata: weather schedule version mismatch";
+    if (scheduled) {
+        const auto& encoding = metadata.at("weatherSchedule");
+        const auto& tick = metadata.at("weatherScheduleTick");
+        Systems::WeatherSchedule schedule;
+        if (!ValidWeatherScheduleAnchor(metadata.at("weatherScheduleAnchor")) ||
+            !encoding.is_string() ||
+            !Systems::WeatherSchedule::Decode(encoding.get_ref<const std::string&>(), schedule) ||
+            !tick.is_number_integer() || (!tick.is_number_unsigned() && tick < 0) ||
+            tick >= world::WorldClock::kTickLimit ||
+            // Calendar-bearing saves use the regional clock. No writer emits a
+            // nonzero schedule clock without its matching simulation clock.
+            (metadata.contains("calendar") && tick != 0 && !metadata.contains("simulationTick")) ||
+            (metadata.contains("simulationTick") && metadata.at("simulationTick") != tick))
+            return "corrupt world metadata: invalid weather schedule";
     }
     if (const auto seed_error = world::ValidateWorldSeedMetadata(metadata); !seed_error.empty())
         return seed_error;
@@ -3640,6 +3693,18 @@ std::string CheckMetadataValue(const nlohmann::json& metadata,
                                ? 1
                                : 0;
     return {};
+}
+
+// Legacy direct metadata writes retain their opaque-byte contract. Admit new
+// schedule fields and explicit unsupported versions before any publication.
+std::string CheckMetadataVersionInput(const nlohmann::json& metadata) {
+    if (metadata.contains("weatherSchedule") || metadata.contains("weatherScheduleTick") ||
+        metadata.contains("weatherScheduleAnchor") ||
+        (metadata.contains("container_version") && metadata.at("container_version") != 1 &&
+         metadata.at("container_version") != WorldSaveService::kContainerVersion &&
+         metadata.at("container_version") != WorldSaveService::kIndexedMetadataVersion))
+        return CheckMetadataValue(metadata);
+    return world::ValidateWorldSeedMetadata(metadata);
 }
 
 std::string CheckMetadataFile(const std::filesystem::path& save_dir,
@@ -4254,7 +4319,7 @@ bool WorldSaveService::admit_metadata_bytes(const std::string& bytes,
             "Saved-input admission refused: world name or seed exceeds 4 KiB compatibility limit.");
         return false;
     }
-    if (const auto seed_error = world::ValidateWorldSeedMetadata(metadata); !seed_error.empty()) {
+    if (const auto seed_error = CheckMetadataVersionInput(metadata); !seed_error.empty()) {
         AddError(errors, seed_error);
         return false;
     }
@@ -4386,9 +4451,12 @@ bool WorldSaveService::finalize_indexed_envelope(const std::filesystem::path& sa
             AddError(errors, error);
             return false;
         }
-        if (metadata.at("container_version") != kIndexedMetadataVersion ||
+        const auto metadata_version = metadata.contains("weatherSchedule")
+                                          ? kScheduledWeatherMetadataVersion
+                                          : kIndexedMetadataVersion;
+        if (metadata.at("container_version") != metadata_version ||
             !metadata.contains("snapshotFormat")) {
-            metadata["container_version"] = kIndexedMetadataVersion;
+            metadata["container_version"] = metadata_version;
             metadata["snapshotFormat"] = 1;
             std::string bytes;
             if (!BoundedJsonDump(metadata, SavedInputLimits::kMetadataBytes - 1, bytes, 4, false) ||
@@ -4480,7 +4548,9 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
         metadata["renderCalendar"] = world::WorldClock(0, *calendar).calendar_metadata();
     }
     if (scope.engaged()) {
-        metadata["container_version"] = kIndexedMetadataVersion;
+        metadata["container_version"] = metadata.contains("weatherSchedule")
+                                            ? kScheduledWeatherMetadataVersion
+                                            : kIndexedMetadataVersion;
         metadata["snapshotFormat"] = 1;
     }
     const std::string output_bytes = (scope.engaged() || has_clock || has_render_calendar)
@@ -4631,6 +4701,65 @@ bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes
     return true;
 }
 
+bool ReadWeatherSchedule(const std::filesystem::path& save_dir,
+                         std::shared_ptr<const Systems::WeatherSchedule>& schedule,
+                         std::uint64_t& tick,
+                         std::vector<std::string>* errors,
+                         const std::stop_token& stop,
+                         Vec3* anchor) {
+    nlohmann::json metadata;
+    bool missing = false;
+    SavedJsonFailure failure = SavedJsonFailure::None;
+    if (!ReadSavedJson(save_dir / "world_info.json",
+                       SavedInputLimits::kMetadataBytes,
+                       metadata,
+                       missing,
+                       true,
+                       &failure,
+                       stop) ||
+        (!missing && !AdmitMetadata(metadata))) {
+        AddError(errors,
+                 failure == SavedJsonFailure::Cancelled   ? "Saved-world validation cancelled."
+                 : failure == SavedJsonFailure::Malformed ? "Corrupt world metadata: invalid JSON."
+                 : failure == SavedJsonFailure::Unreadable
+                     ? "Corrupt world metadata: unreadable or non-regular input."
+                     : "Saved-input admission refused: unreadable or oversized world metadata.");
+        return false;
+    }
+    if (!missing) {
+        const auto error = CheckMetadataValue(metadata);
+        if (!error.empty()) {
+            AddError(errors,
+                     metadata.contains("weatherSchedule") ||
+                             metadata.contains("weatherScheduleTick") ||
+                             metadata.contains("weatherScheduleAnchor")
+                         ? "Corrupt weather schedule metadata: " + error
+                         : error);
+            return false;
+        }
+    }
+    std::shared_ptr<const Systems::WeatherSchedule> decoded;
+    std::uint64_t decoded_tick = 0;
+    Vec3 decoded_anchor(0.0f);
+    if (!missing && metadata.contains("weatherSchedule")) {
+        Systems::WeatherSchedule value;
+        if (!Systems::WeatherSchedule::Decode(
+                metadata.at("weatherSchedule").get_ref<const std::string&>(), value))
+            return false;
+        decoded = std::make_shared<const Systems::WeatherSchedule>(std::move(value));
+        decoded_tick = metadata.at("weatherScheduleTick").get<std::uint64_t>();
+        const auto& coordinates = metadata.at("weatherScheduleAnchor");
+        decoded_anchor = Vec3(coordinates.at(0).get<float>(),
+                              coordinates.at(1).get<float>(),
+                              coordinates.at(2).get<float>());
+    }
+    schedule = std::move(decoded);
+    tick = decoded_tick;
+    if (anchor)
+        *anchor = decoded_anchor;
+    return true;
+}
+
 bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir,
                                            world::WorldClock& clock,
                                            bool& requires_active_regions,
@@ -4678,8 +4807,7 @@ bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir
         }
         if (missing)
             return true;
-        if (const auto seed_error = world::ValidateWorldSeedMetadata(metadata);
-            !seed_error.empty()) {
+        if (const auto seed_error = CheckMetadataVersionInput(metadata); !seed_error.empty()) {
             AddError(errors, seed_error);
             return false;
         }
@@ -5698,6 +5826,153 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
     }
 }
 
+namespace {
+bool HasIncompleteAuthority(const std::vector<std::shared_ptr<Chunk>>& chunks) {
+    return std::any_of(chunks.begin(), chunks.end(), [](const auto& chunk) {
+        return chunk && chunk->has_simulation_authority() &&
+               chunk->get_state() == ChunkState::Loading;
+    });
+}
+
+bool NeedsRegionalAuthority(AuthorityCaptureParts parts) {
+    return parts == AuthorityCaptureParts::All || parts == AuthorityCaptureParts::Composite ||
+           parts == AuthorityCaptureParts::Chunk;
+}
+
+PreparedRegionDigest PrepareRegionDigest(const std::filesystem::path& save_dir,
+                                         world::RegionKey key,
+                                         const RegionDigestInputs& inputs,
+                                         const SnapshotIndex* admitted_index);
+std::uint64_t HashRegionDigestChunks(const std::vector<std::shared_ptr<Chunk>>& chunks,
+                                     const std::string& ground_object_bytes,
+                                     const std::string& field_page_bytes);
+} // namespace
+
+AuthorityCaptureResult CaptureAuthorityHashes(const WorldStreamingState& state,
+                                              std::optional<std::uint64_t> water_sim_cursor,
+                                              const std::optional<std::string>& regional_projection,
+                                              const std::string& entity_snapshot_json,
+                                              const AuthorityRuntimeHashes& runtime,
+                                              AuthorityCaptureParts parts) try {
+    if (!water_sim_cursor.has_value()) {
+        return {AuthorityCaptureStatus::MissingCursor, std::nullopt};
+    }
+    if (HasIncompleteAuthority(state.snapshot_chunks())) {
+        return {AuthorityCaptureStatus::IncompleteOwner, std::nullopt};
+    }
+    const bool want_chunk = NeedsRegionalAuthority(parts);
+    const bool want_streamed = want_chunk || parts == AuthorityCaptureParts::StreamedAndSubHashes;
+    const bool want_composite =
+        parts == AuthorityCaptureParts::All || parts == AuthorityCaptureParts::Composite;
+    const bool want_sub = parts == AuthorityCaptureParts::All ||
+                          parts == AuthorityCaptureParts::SubHashes ||
+                          parts == AuthorityCaptureParts::StreamedAndSubHashes;
+    if (!want_streamed && !want_sub) {
+        return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
+    }
+    const auto cursor = water_sim_cursor.value();
+    const std::string streamed =
+        want_streamed ? ComputeWorldStreamingStateHash(state, cursor) : std::string();
+    const std::string chunk =
+        want_chunk ? (regional_projection ? StableChecksum(*regional_projection) : streamed)
+                   : std::string();
+    WorldStreamingStateSubHashes sub;
+    if (want_sub) {
+        sub = ComputeWorldStreamingStateSubHashes(state, cursor);
+        if (!entity_snapshot_json.empty()) {
+            sub.entities = StableChecksum(entity_snapshot_json);
+        }
+        sub.wind = runtime.wind;
+        sub.weather = runtime.weather;
+        sub.aether = runtime.aether;
+        sub.aether_state = runtime.aether_state;
+    }
+    return {AuthorityCaptureStatus::Ready,
+            AuthorityHashCapture{streamed,
+                                 chunk,
+                                 want_composite ? ComposeWorldHash(chunk,
+                                                                   runtime.wind,
+                                                                   runtime.weather,
+                                                                   runtime.aether,
+                                                                   runtime.scent,
+                                                                   runtime.ecology,
+                                                                   runtime.plant)
+                                                : std::string(),
+                                 std::move(sub)}};
+} catch (const std::exception&) {
+    return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
+}
+
+AuthorityCaptureResult CaptureAuthorityHashes(const WorldStreamingState& state,
+                                              std::optional<std::uint64_t> water_sim_cursor,
+                                              const AuthorityRegionalInputs& regional,
+                                              const std::string& entity_snapshot_json,
+                                              const AuthorityRuntimeHashes& runtime,
+                                              AuthorityCaptureParts parts) try {
+    if (!water_sim_cursor.has_value()) {
+        return {AuthorityCaptureStatus::MissingCursor, std::nullopt};
+    }
+    if (!NeedsRegionalAuthority(parts)) {
+        return CaptureAuthorityHashes(
+            state, water_sim_cursor, std::nullopt, entity_snapshot_json, runtime, parts);
+    }
+    if (HasIncompleteAuthority(state.snapshot_chunks())) {
+        return {AuthorityCaptureStatus::IncompleteOwner, std::nullopt};
+    }
+    std::optional<world::RegionKey> previous;
+    // Work is bounded by the caller's participating regions and their grouped owner inputs;
+    // there is no world inventory scan. Durable decode retains at most one prepared region.
+    for (const auto& region : regional.regions) {
+        ValidateRegionDigestKey(region.key);
+        if (previous && !(previous->x < region.key.x ||
+                          (previous->x == region.key.x && previous->z < region.key.z))) {
+            return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
+        }
+        previous = region.key;
+        if (!region.frozen_digest && (HasIncompleteAuthority(region.inputs.live) ||
+                                      HasIncompleteAuthority(region.inputs.parked))) {
+            return {AuthorityCaptureStatus::IncompleteOwner, std::nullopt};
+        }
+    }
+    // One read-ownership scope spans index admission and every region: an indexed save cannot
+    // publish between regions, so the projection folds a single publication generation.
+    const detail::SnapshotReadOwnership capture_ownership;
+    RegionDigestOperation operation(regional.save_dir, regional.require_index);
+    std::string projection =
+        "authoritative_chunks:v2:" + std::to_string(water_sim_cursor.value()) + ":";
+    for (const auto& region : regional.regions) {
+        std::uint64_t digest = 0;
+        if (region.frozen_digest.has_value()) {
+            digest = region.frozen_digest.value();
+        } else {
+            // The regional index setting is the single source of truth for every region;
+            // copy the inputs only when a region's own default disagrees with it.
+            std::optional<RegionDigestInputs> adjusted;
+            if (region.inputs.require_index != regional.require_index) {
+                adjusted = region.inputs;
+                adjusted->require_index = regional.require_index;
+            }
+            const std::optional<PreparedRegionDigest> prepared =
+                operation.prepare(region.key, adjusted ? *adjusted : region.inputs);
+            if (!prepared.has_value()) {
+                return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
+            }
+            digest = HashPreparedRegionDigest(*prepared);
+        }
+        // The checked local prepared value has been released before the next owner read.
+        projection += std::to_string(region.key.x) + "," + std::to_string(region.key.z) + ":" +
+                      std::to_string(digest) + ";";
+    }
+    return CaptureAuthorityHashes(state,
+                                  water_sim_cursor,
+                                  std::optional{std::move(projection)},
+                                  entity_snapshot_json,
+                                  runtime,
+                                  parts);
+} catch (const std::exception&) {
+    return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
+}
+
 RegionDigestOperation::RegionDigestOperation(const std::filesystem::path& save_dir,
                                              bool require_index)
     : m_save_dir(save_dir)
@@ -5718,6 +5993,22 @@ RegionDigestOperation::RegionDigestOperation(const std::filesystem::path& save_d
 std::uint64_t RegionDigestOperation::digest(world::RegionKey key,
                                             const RegionDigestInputs& inputs) {
     const detail::SnapshotReadOwnership ownership;
+    const auto prepared = PrepareChunks(key, inputs);
+    return HashRegionDigestChunks(
+        prepared.chunks, inputs.ground_object_bytes, inputs.field_page_bytes);
+}
+
+PreparedRegionDigest RegionDigestOperation::prepare(world::RegionKey key,
+                                                    const RegionDigestInputs& inputs) {
+    auto prepared = PrepareChunks(key, inputs);
+    prepared.ground_object_bytes = inputs.ground_object_bytes;
+    prepared.field_page_bytes = inputs.field_page_bytes;
+    return prepared;
+}
+
+PreparedRegionDigest RegionDigestOperation::PrepareChunks(world::RegionKey key,
+                                                          const RegionDigestInputs& inputs) {
+    const detail::SnapshotReadOwnership ownership;
     const auto revision = PublicationRevision().load(std::memory_order_relaxed);
     if (!m_save_dir.empty() && revision != m_publication_revision) {
         WorldSaveService::SaveFormat format;
@@ -5730,7 +6021,7 @@ std::uint64_t RegionDigestOperation::digest(world::RegionKey key,
         m_publication_revision = revision;
     }
     m_input_items += inputs.live.size() + inputs.parked.size() + inputs.durable.size();
-    return WorldSaveService::region_simulation_digest(m_save_dir, key, inputs, &m_index);
+    return PrepareRegionDigest(m_save_dir, key, inputs, &m_index);
 }
 
 namespace {
@@ -5774,17 +6065,29 @@ struct DigestAuthorityCache {
         std::array<std::uint64_t, 5> membership;
         std::vector<std::shared_ptr<Chunk>> chunks;
         std::size_t bytes = 0;
+        bool require_region = false;
     };
     std::uint64_t revision = 0;
     std::size_t bytes = 0;
     std::map<std::filesystem::path, Entry> regions;
 };
 
+bool ReadAuthoritativeRegionChunks(const std::filesystem::path& region_file,
+                                   int min_chunk_x,
+                                   int max_chunk_x,
+                                   int min_chunk_z,
+                                   int max_chunk_z,
+                                   std::vector<std::shared_ptr<Chunk>>& out_chunks,
+                                   std::vector<std::string>* errors,
+                                   const SnapshotIndex* admitted_index,
+                                   bool missing_allowed);
+
 bool ReadDigestAuthority(const std::filesystem::path& save_dir,
                          const world::RegionKey& key,
                          std::vector<std::shared_ptr<Chunk>>& chunks,
                          std::vector<std::string>* errors,
-                         const SnapshotIndex* admitted_index) {
+                         const SnapshotIndex* admitted_index,
+                         bool require_region) {
     static thread_local DigestAuthorityCache cache;
     constexpr std::size_t kMaxRegions = 16;
     constexpr std::size_t kMaxBytes = std::size_t{256} * 1024 * 1024;
@@ -5799,7 +6102,8 @@ bool ReadDigestAuthority(const std::filesystem::path& save_dir,
     const auto membership = DigestMembership(admitted_index, key);
     if (const auto found = cache.regions.find(path); found != cache.regions.end()) {
         if (versioned && found->second.versions == versions &&
-            found->second.membership == membership) {
+            found->second.membership == membership &&
+            found->second.require_region == require_region) {
             chunks = found->second.chunks;
             return true;
         }
@@ -5807,14 +6111,15 @@ bool ReadDigestAuthority(const std::filesystem::path& save_dir,
         cache.regions.erase(found);
     }
     constexpr auto span = WorldSaveService::kRegionChunkSpan;
-    if (!WorldSaveService::read_authoritative_region_chunks(path,
-                                                            key.x * span,
-                                                            key.x * span + span - 1,
-                                                            key.z * span,
-                                                            key.z * span + span - 1,
-                                                            chunks,
-                                                            errors,
-                                                            admitted_index))
+    if (!ReadAuthoritativeRegionChunks(path,
+                                       key.x * span,
+                                       key.x * span + span - 1,
+                                       key.z * span,
+                                       key.z * span + span - 1,
+                                       chunks,
+                                       errors,
+                                       admitted_index,
+                                       !require_region))
         return false;
     DigestVersions after{};
     if (!versioned || !ReadDigestVersions(save_dir, path, after) || versions != after)
@@ -5830,17 +6135,29 @@ bool ReadDigestAuthority(const std::filesystem::path& save_dir,
         cache.regions.erase(cache.regions.begin());
     }
     cache.bytes += bytes;
-    cache.regions.emplace(path, DigestAuthorityCache::Entry{versions, membership, chunks, bytes});
+    cache.regions.emplace(
+        path, DigestAuthorityCache::Entry{versions, membership, chunks, bytes, require_region});
     return true;
 }
 } // namespace
 
-std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::path& save_dir,
-                                                         world::RegionKey key,
-                                                         const RegionDigestInputs& inputs,
-                                                         const SnapshotIndex* admitted_index) {
+namespace {
+PreparedRegionDigest PrepareRegionDigest(const std::filesystem::path& save_dir,
+                                         world::RegionKey key,
+                                         const RegionDigestInputs& inputs,
+                                         const SnapshotIndex* admitted_index) {
     const detail::SnapshotReadOwnership ownership;
     ValidateRegionDigestKey(key);
+    // A known durable participant must be read even for legacy saves without an index.
+    // Regions with only live or parked owners may legitimately have no file yet.
+    const bool require_region =
+        std::any_of(inputs.durable.begin(), inputs.durable.end(), [&key](const IVec3& coords) {
+            int rx = 0, rz = 0;
+            WorldSaveService::region_coords_for_chunk(coords, rx, rz);
+            return rx == key.x && rz == key.z;
+        });
+    if (require_region && save_dir.empty())
+        throw std::runtime_error("Cannot read durable region records without a save directory");
     WorldStreamingState region;
     // Filtering precedes insertion: a live pristine or Loading chunk must not shadow a durable
     // edited record with the same id. insert_chunk preserves the first record per id.
@@ -5848,7 +6165,7 @@ std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::
         if (!chunk || !chunk->has_simulation_authority())
             return false;
         int rx = 0, rz = 0;
-        region_coords_for_chunk(chunk->get_coords(), rx, rz);
+        WorldSaveService::region_coords_for_chunk(chunk->get_coords(), rx, rz);
         return rx == key.x && rz == key.z;
     };
     for (const auto& chunk : inputs.live) {
@@ -5865,7 +6182,8 @@ std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::
             throw std::runtime_error("inconsistent snapshot: index missing");
         std::vector<std::shared_ptr<Chunk>> durable_chunks;
         std::vector<std::string> errors;
-        if (!ReadDigestAuthority(save_dir, key, durable_chunks, &errors, admitted_index))
+        if (!ReadDigestAuthority(
+                save_dir, key, durable_chunks, &errors, admitted_index, require_region))
             throw std::runtime_error(errors.empty() ? "Cannot read durable region records"
                                                     : errors.front());
         for (const auto& chunk : durable_chunks) {
@@ -5874,12 +6192,49 @@ std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::
                 region.insert_chunk(chunk);
         }
     }
-    std::string composed = ComputeRegionContentHash(region);
-    if (!inputs.ground_object_bytes.empty())
-        composed = StableChecksum(composed + "|ground:" + inputs.ground_object_bytes);
-    if (!inputs.field_page_bytes.empty())
-        composed = StableChecksum(composed + "|pages:" + inputs.field_page_bytes);
+    auto chunks = region.snapshot_chunks();
+    std::sort(chunks.begin(), chunks.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs->get_id() < rhs->get_id();
+    });
+    return {.chunks = std::move(chunks), .ground_object_bytes = {}, .field_page_bytes = {}};
+}
+} // namespace
+
+namespace {
+std::uint64_t HashRegionDigestChunks(const std::vector<std::shared_ptr<Chunk>>& chunks,
+                                     const std::string& ground_object_bytes,
+                                     const std::string& field_page_bytes) {
+    RegionContentHasher hasher;
+    for (const auto& chunk : chunks) {
+        hasher.append(*chunk);
+    }
+    std::ostringstream stream;
+    stream << std::hex << std::setw(16) << std::setfill('0') << hasher.value();
+    std::string composed = stream.str();
+    if (!ground_object_bytes.empty()) {
+        composed = StableChecksum(composed + "|ground:" + ground_object_bytes);
+    }
+    if (!field_page_bytes.empty()) {
+        composed = StableChecksum(composed + "|pages:" + field_page_bytes);
+    }
     return std::stoull(composed, nullptr, 16);
+}
+
+} // namespace
+
+std::uint64_t HashPreparedRegionDigest(const PreparedRegionDigest& prepared) {
+    return HashRegionDigestChunks(
+        prepared.chunks, prepared.ground_object_bytes, prepared.field_page_bytes);
+}
+
+std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::path& save_dir,
+                                                         world::RegionKey key,
+                                                         const RegionDigestInputs& inputs,
+                                                         const SnapshotIndex* admitted_index) {
+    const detail::SnapshotReadOwnership ownership;
+    const auto prepared = PrepareRegionDigest(save_dir, key, inputs, admitted_index);
+    return HashRegionDigestChunks(
+        prepared.chunks, inputs.ground_object_bytes, inputs.field_page_bytes);
 }
 
 std::uint64_t
@@ -6057,6 +6412,27 @@ bool WorldSaveService::validate_save(const std::filesystem::path& save_dir,
     return diagnostics.empty();
 }
 
+bool WorldSaveService::inspect_save(const std::filesystem::path& save_dir,
+                                    std::vector<std::string>* errors,
+                                    const std::stop_token& stop,
+                                    bool* payloads_verified) {
+    WorldStreamingState state;
+    std::vector<std::string> diagnostics;
+    const std::unordered_set<ChunkID> retain_none;
+    WorldSaveService{}.load_world_impl(state,
+                                       save_dir,
+                                       diagnostics,
+                                       stop,
+                                       &retain_none,
+                                       nullptr,
+                                       nullptr,
+                                       true,
+                                       payloads_verified);
+    for (const auto& message : diagnostics)
+        AddError(errors, message);
+    return diagnostics.empty();
+}
+
 bool WorldSaveService::read_container_records(const std::filesystem::path& region_file,
                                               std::vector<ContainerRecord>& out_records,
                                               std::vector<std::string>* errors) {
@@ -6113,15 +6489,16 @@ bool WorldSaveService::read_region_chunks(const std::filesystem::path& region_fi
     return true;
 }
 
-bool WorldSaveService::read_authoritative_region_chunks(
-    const std::filesystem::path& region_file,
-    int min_chunk_x,
-    int max_chunk_x,
-    int min_chunk_z,
-    int max_chunk_z,
-    std::vector<std::shared_ptr<Chunk>>& out_chunks,
-    std::vector<std::string>* errors,
-    const SnapshotIndex* admitted_index) {
+namespace {
+bool ReadAuthoritativeRegionChunks(const std::filesystem::path& region_file,
+                                   int min_chunk_x,
+                                   int max_chunk_x,
+                                   int min_chunk_z,
+                                   int max_chunk_z,
+                                   std::vector<std::shared_ptr<Chunk>>& out_chunks,
+                                   std::vector<std::string>* errors,
+                                   const SnapshotIndex* admitted_index,
+                                   bool missing_allowed) {
     const detail::SnapshotReadOwnership ownership;
     out_chunks.clear();
     if (min_chunk_x > max_chunk_x || min_chunk_z > max_chunk_z) {
@@ -6130,7 +6507,7 @@ bool WorldSaveService::read_authoritative_region_chunks(
     }
     bool strict_water = false;
     std::vector<RegionRecord> raw_records;
-    if (!ReadRegionFile(region_file, raw_records, errors, {}, true) ||
+    if (!ReadRegionFile(region_file, raw_records, errors, {}, missing_allowed) ||
         !VerifyRegionMembership(region_file, raw_records, errors, admitted_index, &strict_water)) {
         return false;
     }
@@ -6175,6 +6552,27 @@ bool WorldSaveService::read_authoritative_region_chunks(
                   return lhs->get_id() < rhs->get_id();
               });
     return true;
+}
+} // namespace
+
+bool WorldSaveService::read_authoritative_region_chunks(
+    const std::filesystem::path& region_file,
+    int min_chunk_x,
+    int max_chunk_x,
+    int min_chunk_z,
+    int max_chunk_z,
+    std::vector<std::shared_ptr<Chunk>>& out_chunks,
+    std::vector<std::string>* errors,
+    const SnapshotIndex* admitted_index) {
+    return ReadAuthoritativeRegionChunks(region_file,
+                                         min_chunk_x,
+                                         max_chunk_x,
+                                         min_chunk_z,
+                                         max_chunk_z,
+                                         out_chunks,
+                                         errors,
+                                         admitted_index,
+                                         true);
 }
 
 bool WorldSaveService::upsert_container_records(const std::filesystem::path& region_file,
@@ -8609,13 +9007,15 @@ WorldSaveService::chunk_save_acknowledgement(const std::vector<std::shared_ptr<C
     };
 }
 
-bool WorldSaveService::load_world(WorldStreamingState& state,
-                                  const std::filesystem::path& save_dir,
-                                  std::vector<std::string>& errors,
-                                  const std::stop_token& stop,
-                                  const std::unordered_set<ChunkID>* retain_chunks,
-                                  std::vector<IVec3>* authoritative_inventory,
-                                  std::size_t* decoded_chunk_count) const {
+bool WorldSaveService::load_world_impl(WorldStreamingState& state,
+                                       const std::filesystem::path& save_dir,
+                                       std::vector<std::string>& errors,
+                                       const std::stop_token& stop,
+                                       const std::unordered_set<ChunkID>* retain_chunks,
+                                       std::vector<IVec3>* authoritative_inventory,
+                                       std::size_t* decoded_chunk_count,
+                                       bool catalog_only,
+                                       bool* payloads_verified) const {
     const detail::SnapshotReadOwnership ownership;
     const SavedJsonReadScope json_reads;
     DecodeCounter().fetch_add(1, std::memory_order_acq_rel);
@@ -8623,6 +9023,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
     // Staging lives outside the strict region inventory. Each published file
     // uses its file lock; the snapshot gate excludes partial indexed publication only.
     state.clear();
+    if (payloads_verified)
+        *payloads_verified = false;
     if (decoded_chunk_count)
         *decoded_chunk_count = 0;
     if (authoritative_inventory)
@@ -8741,6 +9143,21 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                 if (record.lod_level == 0) {
                     // A decoded record carries its own id (DecodeChunkRecord checks it).
                     const bool retain = !retain_chunks || retain_chunks->contains(record.id);
+                    // ReadRegionFile has already admitted every header and payload length.
+                    // Catalogs need no chunk objects; the index below checks their exact bytes.
+                    // Complete validation must still admit cold payloads outside the retain set.
+                    if (catalog_only && indexed && !retain) {
+                        int chunk_rx = 0, chunk_rz = 0;
+                        region_coords_for_chunk(Chunk::decode_id(record.id), chunk_rx, chunk_rz);
+                        // O(1) work/storage per header (at most 65535 per admitted region).
+                        // An id maps to exactly one region; ReadRegionFile rejects duplicate
+                        // ids within it. Requiring that region also excludes duplicates across
+                        // regions without retaining a world-sized set of skipped ids.
+                        if (chunk_rx != rx || chunk_rz != rz)
+                            return reject("corrupt chunk region identity or duplicate id: " +
+                                          Filesystem::GenericUtf8PathString(path));
+                        continue;
+                    }
                     std::shared_ptr<Chunk> chunk;
                     ChunkRecordFacts facts;
                     if (!AdmitChunkRecord(record,
@@ -8859,12 +9276,31 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
         // must discard the staged chunks just like cancellation during a read.
         if (stop.stop_requested())
             return reject("Saved-world validation cancelled.");
+        if (payloads_verified)
+            *payloads_verified = !indexed;
         return true;
     } catch (const WorldPersistenceRefusal& failure) {
         return reject(failure.what());
     } catch (const std::exception& e) {
         return reject(std::string("corrupt or unreadable world persistence: ") + e.what());
     }
+}
+
+bool WorldSaveService::load_world(WorldStreamingState& state,
+                                  const std::filesystem::path& save_dir,
+                                  std::vector<std::string>& errors,
+                                  const std::stop_token& stop,
+                                  const std::unordered_set<ChunkID>* retain_chunks,
+                                  std::vector<IVec3>* authoritative_inventory,
+                                  std::size_t* decoded_chunk_count) const {
+    return load_world_impl(state,
+                           save_dir,
+                           errors,
+                           stop,
+                           retain_chunks,
+                           authoritative_inventory,
+                           decoded_chunk_count,
+                           false);
 }
 
 std::string WorldSaveService::world_hash(const WorldStreamingState& state,

@@ -701,6 +701,82 @@ TEST(DecompHardening, RunEqualsReplay) {
     EXPECT_EQ(run(a), run(b));
 }
 
+TEST(DecompHardening, AmbientAndFounderRosterIsBoundedAcrossRepeatedDeaths) {
+    namespace AI = luminumbra::ai;
+    entt::registry registry;
+    EXPECT_TRUE(AI::DecompositionParticipants(registry).empty());
+    for (std::uint64_t cycle = 0; cycle < 1000; ++cycle) {
+        for (const bool founder : {false, true}) {
+            const auto entity = registry.create();
+            registry.emplace<Comp::CreatureComponent>(entity).eaten = !founder;
+            registry.emplace<Comp::MortalComponent>(entity).dead = founder ? 1 : 0;
+            if (founder) {
+                registry.emplace<Comp::CreatureGenomeComponent>(entity);
+            }
+            registry.emplace<Comp::DecayComponent>(entity).decay_duration =
+                static_cast<std::uint32_t>(cycle % 4);
+        }
+        ASSERT_EQ(AI::DecompositionParticipants(registry).size(), 2u);
+        std::uint32_t released = 0;
+        int finished = 0;
+        for (std::uint64_t step = 0; step < 3; ++step) {
+            const auto stats = AI::RunDecompositionOnTick(registry, cycle * 3 + step);
+            ASSERT_LE(stats.visited, 2u);
+            released += stats.released_total;
+            finished += stats.finished;
+        }
+        EXPECT_EQ(released, 2u * AI::kNutrientPerCorpseMilli);
+        EXPECT_EQ(finished, 2);
+        ASSERT_TRUE(AI::DecompositionParticipants(registry).empty());
+        ASSERT_EQ(registry.view<Comp::DecayComponent>().size(), 2u * (cycle + 1));
+        EXPECT_EQ(AI::RunDecompositionOnTick(registry, cycle).visited, 0u);
+    }
+    for (const auto entity : registry.view<Comp::DecayComponent>()) {
+        const auto& decay = registry.get<Comp::DecayComponent>(entity);
+        EXPECT_EQ(decay.fully_decomposed, 1u);
+        EXPECT_EQ(decay.nutrient_released_milli, AI::kNutrientPerCorpseMilli);
+    }
+}
+
+TEST(DecompHardening, RosterTracksInitialStateRemovalRecyclingAndExplicitReset) {
+    namespace AI = luminumbra::ai;
+    entt::registry registry;
+    const auto finished = registry.create();
+    registry.emplace<Comp::DecayComponent>(finished).fully_decomposed = 1;
+    const auto live = registry.create();
+    registry.emplace<Comp::DecayComponent>(live).decay_duration = 0;
+    EXPECT_EQ(AI::DecompositionParticipants(registry).size(), 1u);
+    EXPECT_EQ(AI::RunDecompositionOnTick(registry, 1).decaying, 0);
+    EXPECT_EQ(registry.get<Comp::DecayComponent>(live).fully_decomposed, 0u);
+    registry.remove<Comp::DecayComponent>(live);
+    EXPECT_TRUE(AI::DecompositionParticipants(registry).empty());
+    registry.emplace<Comp::DecayComponent>(live);
+    EXPECT_EQ(AI::DecompositionParticipants(registry).size(), 1u);
+    registry.destroy(live);
+    EXPECT_TRUE(AI::DecompositionParticipants(registry).empty());
+    const auto recycled = registry.create();
+    ASSERT_NE(recycled, live);
+    registry.emplace<Comp::MortalComponent>(recycled).dead = 1;
+    registry.emplace<Comp::DecayComponent>(recycled).decay_duration = 0;
+    EXPECT_EQ(AI::RunDecompositionOnTick(registry, 2).finished, 1);
+    EXPECT_TRUE(AI::DecompositionParticipants(registry).empty());
+    registry.patch<Comp::DecayComponent>(recycled, [](auto& decay) {
+        decay.fully_decomposed = 0;
+        decay.nutrient_released_milli = 0;
+    });
+    EXPECT_EQ(AI::DecompositionParticipants(registry).size(), 1u);
+    EXPECT_EQ(AI::RunDecompositionOnTick(registry, 3).released_total, AI::kNutrientPerCorpseMilli);
+    registry.replace<Comp::DecayComponent>(recycled, Comp::DecayComponent{});
+    EXPECT_EQ(AI::DecompositionParticipants(registry).size(), 1u);
+    registry.patch<Comp::DecayComponent>(recycled, [](auto& decay) { decay.fully_decomposed = 1; });
+    EXPECT_TRUE(AI::DecompositionParticipants(registry).empty());
+    registry.clear();
+    EXPECT_EQ(AI::RunDecompositionOnTick(registry, 4).visited, 0u);
+    const auto after_clear = registry.create();
+    registry.emplace<Comp::DecayComponent>(after_clear);
+    EXPECT_EQ(AI::DecompositionParticipants(registry).size(), 1u);
+}
+
 // ===========================================================================
 // CIRCADIAN
 // ===========================================================================
@@ -1010,6 +1086,109 @@ TEST(LifecycleHardening, DeathThenDecompositionHandoff) {
     auto s = luminumbra::ai::RunDecompositionOnTick(r, 0);
     EXPECT_EQ(s.decaying, 1);
     EXPECT_GT(dc.nutrient_released_milli, 0u);
+}
+
+TEST(LifecycleHardening, NewbornMortalityAndExistingCarcassHandoff) {
+    namespace AI = luminumbra::ai;
+    for (const std::uint32_t lifespan : {0u, 1u, 5u}) {
+        for (const bool starving : {false, true}) {
+            entt::registry registry;
+            spawnFertile(registry, 0, 0, true);
+            spawnFertile(registry, 0, 0, false);
+            AI::ReproductionTuning tuning;
+            tuning.courtship_ticks = 1;
+            tuning.lifespan_ticks = lifespan;
+            ASSERT_EQ(AI::RunMatingResolveOnTick(registry, 1, 985, tuning).born, 1);
+            entt::entity child = entt::null;
+            for (const auto entity : registry.view<Comp::CreatureGenomeComponent>()) {
+                if (registry.get<Comp::CreatureGenomeComponent>(entity).generation == 1) {
+                    child = entity;
+                }
+            }
+            ASSERT_TRUE(child != entt::null);
+            ASSERT_TRUE((registry.all_of<Comp::MortalComponent, Comp::DecayComponent>(child)));
+            EXPECT_EQ(registry.get<Comp::MortalComponent>(child).lifespan_ticks, lifespan);
+            if (starving) {
+                registry.get<Comp::CreatureComponent>(child).hunger = 1.0f;
+            }
+            const auto death_tick = starving ? 1u : std::max(1u, lifespan);
+            for (std::uint32_t tick = 1; tick <= death_tick; ++tick) {
+                const auto result = AI::RunLifespanOnTick(registry, tick);
+                EXPECT_EQ(result.died, tick == death_tick ? 1 : 0);
+                EXPECT_EQ(registry.get<Comp::CreatureComponent>(child).eaten, tick == death_tick);
+            }
+            EXPECT_EQ(registry.get<Comp::MortalComponent>(child).dead, 1u);
+            EXPECT_EQ(AI::RunLifespanOnTick(registry, death_tick + 1).died, 0);
+            EXPECT_EQ(AI::RunDecompositionOnTick(registry, death_tick).decaying, 1);
+            EXPECT_GT(registry.get<Comp::DecayComponent>(child).nutrient_released_milli, 0u);
+        }
+    }
+}
+
+TEST(LifecycleHardening, SpeciesCapacityHoldsForThousandsOfTicksAndReopensAfterDeaths) {
+    namespace AI = luminumbra::ai;
+    entt::registry registry;
+    AI::ReproductionTuning tuning;
+    tuning.maturity_ticks = 2;
+    tuning.cooldown_ticks = 3;
+    tuning.courtship_ticks = 1;
+    tuning.spawn_radius = 0;
+    tuning.species_capacity = 24;
+    tuning.lifespan_ticks = 80;
+    for (std::uint16_t species_id = 0; species_id < 2; ++species_id) {
+        for (int i = 0; i < 6; ++i) {
+            const auto entity = spawnFertile(registry, 0, 0, (i % 2) == 0);
+            registry.get<Comp::CreatureComponent>(entity).species_id = species_id;
+            // Long-lived founders keep both sexes available throughout the run.
+            registry.emplace<Comp::MortalComponent>(entity).lifespan_ticks = 12000;
+        }
+    }
+    std::array<bool, 2> reached{};
+    std::array<bool, 2> died_after_cap{};
+    std::array<bool, 2> resumed{};
+    // Two species, 24 live each, lifespan 80 and decay 900: at most 13
+    // overlapping cohorts of 48, including the current live cohort (624 total).
+    constexpr std::size_t retained_bound = 48u * 13u;
+    for (std::uint64_t tick = 0; tick < 4000; ++tick) {
+        for (const auto entity : registry.view<Comp::CreatureComponent>()) {
+            registry.get<Comp::CreatureComponent>(entity).hunger = 0;
+        }
+        AI::RunMatingResolveOnTick(registry, tick, 985, tuning);
+        std::array<std::size_t, 2> counts{};
+        for (const auto entity : registry.view<Comp::CreatureComponent>()) {
+            const auto& creature = registry.get<Comp::CreatureComponent>(entity);
+            if (!creature.eaten) {
+                ++counts[creature.species_id];
+                if (registry.get<Comp::CreatureGenomeComponent>(entity).age_ticks == 0 &&
+                    died_after_cap[creature.species_id]) {
+                    resumed[creature.species_id] = true;
+                }
+            }
+        }
+        for (std::size_t species_id = 0; species_id < counts.size(); ++species_id) {
+            ASSERT_LE(counts[species_id], tuning.species_capacity) << "tick " << tick;
+            reached[species_id] =
+                reached[species_id] || counts[species_id] == tuning.species_capacity;
+        }
+        AI::RunLifespanOnTick(registry, tick);
+        for (const auto entity : registry.view<Comp::CreatureComponent, Comp::MortalComponent>()) {
+            const auto& creature = registry.get<Comp::CreatureComponent>(entity);
+            const auto& mortal = registry.get<Comp::MortalComponent>(entity);
+            if (mortal.dead && reached[creature.species_id]) {
+                died_after_cap[creature.species_id] = true;
+            }
+        }
+        AI::RunDecompositionOnTick(registry, tick);
+        const auto cleanup = AI::CleanupNewbornCarcasses(registry);
+        ASSERT_LE(registry.storage<entt::entity>().free_list(), retained_bound) << tick;
+        ASSERT_LE(registry.view<Comp::DecayComponent>().size(), retained_bound) << tick;
+        ASSERT_LE(cleanup.visited, retained_bound + 48u) << tick;
+    }
+    for (std::size_t species_id = 0; species_id < reached.size(); ++species_id) {
+        EXPECT_TRUE(reached[species_id]);
+        EXPECT_TRUE(died_after_cap[species_id]);
+        EXPECT_TRUE(resumed[species_id]);
+    }
 }
 
 } // namespace

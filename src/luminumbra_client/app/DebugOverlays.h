@@ -30,6 +30,12 @@ class SystemConfig;
 
 namespace Luminumbra::Client::App {
 
+// Consume environment input after live defaults, before scenario pins and rendering.
+void UpdatePhotoEnvironment(ClientAppContext& app,
+                            Luminumbra::Client::PlayerController* playerController,
+                            Luminumbra::Rendering::RenderPipeline& renderPipeline,
+                            bool capture_pinned);
+
 // Photo-mode capture loop + codex/objectives/farming HUD. Runs AFTER
 // render_frame against a CONST registry; it never ticks the sim or mutates
 // the registry, so determinism cannot regress. Interactive play only.
@@ -44,6 +50,10 @@ void UpdatePhotoModeAndHud(ClientAppContext& app,
                            Luminumbra::world::GameSession* gameSession,
                            Luminumbra::Rendering::RenderPipeline& renderPipeline,
                            const ScenarioHarness::RuntimeScenarioConfig& scenario_config);
+
+// Release presentation owned by the departing player before reusing the renderer.
+void ReleasePhotoModeAndHud(ClientAppContext& app,
+                            Luminumbra::Rendering::RenderPipeline& renderPipeline);
 
 // Floating creature ID nameplates for the ecology demo capture (drawn into
 // the ImGui foreground list, so they show during the timelapse too).

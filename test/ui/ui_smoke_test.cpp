@@ -42,6 +42,8 @@
 #include <unistd.h>
 #endif
 
+#include "app/RuntimeStateRecorder.h"
+#include "audio/MiniaudioManager.h"
 #include "audio/NullAudioManager.h"
 #include "core/FilesystemPath.h"
 #include "luminumbra_common/core/CaptureContentPaths.h"
@@ -50,6 +52,7 @@
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/world/KnobLayer.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
+#include "rendering/Camera.h"
 #include "ui/Rml_UIManager.h"
 #include "ui/UiLayout.h"
 #include "ui/components/common/Button.h"
@@ -1862,17 +1865,106 @@ TEST(UiSmokeTest, BackdropClassesFollowLiveQualityAndNewDocumentsWithoutCompound
     ui.Shutdown();
 }
 
+TEST(AudioAcceptanceRecorder, CapturesLiveBackendAndSavedPreferences) {
+    using namespace Luminumbra::Client;
+    struct Launch {
+        bool no_audio;
+        bool enable_audio;
+    };
+    for (const auto launch :
+         {Launch{false, false}, Launch{false, true}, Launch{true, false}, Launch{true, true}}) {
+        const Luminumbra::TestSupport::ScopedTempFile temporary("audio-runtime-state-", ".json");
+        const auto directory = temporary.Path().parent_path();
+        ScenarioHarness::RuntimeScenarioConfig config;
+        config.artifact_dir = directory;
+        config.no_audio = launch.no_audio;
+        std::unique_ptr<Luminumbra::Rendering::Camera> camera;
+        std::unique_ptr<IAudioManager> audio;
+        std::unique_ptr<Rml_UIManager> ui;
+        auto settings = luminumbra::core::SystemConfig::FromJsonString(
+            R"({"user":{"audio":{"master":0.75,"music":0.5,"sfx":0.25}}})");
+        App::RuntimeStateRecorder recorder(config, camera);
+        EXPECT_FALSE(recorder.audio_controls_changed());
+        recorder.bind_audio_acceptance(audio, settings, ui, launch.enable_audio);
+        EXPECT_FALSE(recorder.audio_controls_changed());
+        const auto read_evidence = [&] {
+            recorder.capture("audio_observed", nullptr, nullptr, nullptr, 0, {});
+            std::ifstream input(directory / "last-known-runtime.json");
+            nlohmann::json artifact;
+            input >> artifact;
+            return artifact.at("audio_acceptance");
+        };
+        EXPECT_EQ(read_evidence()["resolution"]["resolved_mode"], "uninitialized");
+        if (launch.no_audio) {
+            audio = std::make_unique<NullAudioManager>();
+            ASSERT_TRUE(audio->Init());
+        } else {
+            auto device = std::make_unique<MiniaudioManager>(".");
+            ASSERT_TRUE(device->Init([](const ma_engine_config*, ma_engine* engine) {
+                auto silent = ma_engine_config_init();
+                silent.noDevice = MA_TRUE;
+                silent.channels = 2;
+                silent.sampleRate = 48000;
+                return ma_engine_init(&silent, engine);
+            }));
+            audio = std::move(device);
+        }
+        audio->SetMasterVolume(settings.user().audio_master);
+        audio->SetMusicVolume(settings.user().audio_music);
+        audio->SetSfxVolume(settings.user().audio_sfx);
+        const auto evidence = read_evidence();
+        EXPECT_EQ(evidence["schema"], "luminumbra.audio_acceptance.v1");
+        EXPECT_EQ(evidence["resolution"]["resolved_mode"], launch.no_audio ? "null" : "device");
+        EXPECT_EQ(evidence["resolution"]["reason"], launch.no_audio ? "flag" : "default");
+        EXPECT_EQ(evidence["backend"]["playback_enabled"], !launch.no_audio);
+        EXPECT_EQ(evidence["backend"]["device_started"], false);
+        EXPECT_EQ(evidence["saved_volumes"]["loaded"]["master"], 0.75f);
+        EXPECT_EQ(evidence["saved_volumes"]["unchanged"], true);
+        EXPECT_EQ(evidence["controls"]["observed"], false);
+        EXPECT_EQ(evidence["controls_disabled"], nullptr);
+        EXPECT_EQ(evidence["telemetry"]["enabled"], false);
+        if (launch.no_audio) {
+            EXPECT_EQ(evidence["no_audio_precedence"], true);
+            EXPECT_EQ(evidence["saved_volumes"]["playback_gains"], nullptr);
+        } else {
+            EXPECT_EQ(evidence["saved_volumes"]["playback_gains"],
+                      evidence["saved_volumes"]["loaded"]);
+        }
+        settings.user().audio_master = 0.125f;
+        const auto changed = read_evidence();
+        EXPECT_EQ(changed["saved_volumes"]["unchanged"], false);
+        EXPECT_EQ(changed["saved_volumes"]["loaded"]["master"], 0.75f);
+        EXPECT_EQ(changed["saved_volumes"]["in_effect"]["master"], 0.125f);
+        audio->Shutdown();
+        audio.reset();
+        EXPECT_EQ(read_evidence()["resolution"]["resolved_mode"], "uninitialized");
+    }
+}
+
 TEST(UiSmokeTest, DisabledAudioShowsStatusAndPreservesSavedVolumes) {
     HiddenGlContext context;
     if (!context.ready()) {
         GTEST_SKIP() << context.error();
     }
-    Luminumbra::Client::NullAudioManager audio;
+    using namespace Luminumbra::Client;
+    std::unique_ptr<IAudioManager> audio_owner = std::make_unique<NullAudioManager>();
+    auto& audio = static_cast<NullAudioManager&>(*audio_owner);
     ASSERT_TRUE(audio.Init());
     audio.SetMasterVolume(1.0f);
-    Luminumbra::Client::Rml_UIManager ui(SourceRoot().string() + "/");
+    auto ui_owner = std::make_unique<Rml_UIManager>(SourceRoot().string() + "/");
+    auto& ui = *ui_owner;
+    const Luminumbra::TestSupport::ScopedTempFile temporary("audio-controls-state-", ".json");
+    ScenarioHarness::RuntimeScenarioConfig config;
+    config.artifact_dir = temporary.Path().parent_path();
+    config.no_audio = true;
+    std::unique_ptr<Luminumbra::Rendering::Camera> camera;
+    const auto settings_config = luminumbra::core::SystemConfig::Defaults();
+    App::RuntimeStateRecorder recorder(config, camera);
+    recorder.bind_audio_acceptance(audio_owner, settings_config, ui_owner, false);
+    EXPECT_FALSE(recorder.audio_controls_changed());
     ui.Init(context.window(), &audio);
     ASSERT_NE(ui.GetContext(), nullptr);
+    EXPECT_EQ(ui.AudioControlsState().present, 0u);
     int audio_set_calls = 0;
     int save_calls = 0;
     Luminumbra::Client::SettingsBridge bridge;
@@ -1889,9 +1981,34 @@ TEST(UiSmokeTest, DisabledAudioShowsStatusAndPreservesSavedVolumes) {
     ui.SetSettingsBridge(std::move(bridge));
     auto* menu = LoadDocumentAndFind(ui, "main_menu.rml", "main_menu");
     ASSERT_NE(menu, nullptr);
+    EXPECT_FALSE(recorder.audio_controls_changed());
     ClickAndUpdate(ui, menu->GetElementById("settings_btn"));
     auto* settings = FindDocumentByElementId(ui.GetContext(), "settings");
     ASSERT_NE(settings, nullptr);
+    EXPECT_TRUE(recorder.audio_controls_changed());
+    for (int frame = 0; frame < 1000; ++frame) {
+        EXPECT_FALSE(recorder.audio_controls_changed());
+    }
+    recorder.capture("audio_controls_observed", nullptr, nullptr, nullptr, 0, {});
+    {
+        std::ifstream input(config.artifact_dir / "last-known-runtime.json");
+        nlohmann::json artifact;
+        input >> artifact;
+        EXPECT_EQ(artifact["audio_acceptance"]["controls_disabled"], true);
+        EXPECT_EQ(artifact["audio_acceptance"]["controls"]["match_playback"], true);
+    }
+    const auto observed_controls = ui.AudioControlsState();
+    EXPECT_EQ(observed_controls.present, 3u);
+    EXPECT_EQ(observed_controls.disabled, 3u);
+    const auto evidence = Luminumbra::Client::BuildAudioAcceptance(
+        {.no_audio = true, .enable_audio = false, .telemetry = false},
+        Luminumbra::Client::AudioVolumes{},
+        Luminumbra::Client::AudioVolumes{},
+        audio.AcceptanceState(),
+        observed_controls);
+    EXPECT_EQ(evidence["controls"]["observed"], true);
+    EXPECT_EQ(evidence["controls"]["match_playback"], true);
+    EXPECT_EQ(evidence["controls_disabled"], true);
     auto* status = settings->GetElementById("setting_audio_status");
     ASSERT_NE(status, nullptr);
     EXPECT_NE(status->GetInnerRML().find("Audio playback disabled or unavailable."),
@@ -1912,7 +2029,16 @@ TEST(UiSmokeTest, DisabledAudioShowsStatusAndPreservesSavedVolumes) {
     EXPECT_EQ(save_calls, 1);
     EXPECT_FALSE(audio.IsPlaybackEnabled());
     EXPECT_EQ(audio.RecordedRequestCount(), 0u);
+    settings->GetElementById("setting_audio_master")->RemoveAttribute("disabled");
+    EXPECT_EQ(ui.AudioControlsState().disabled, 2u);
+    settings->GetElementById("setting_audio_music")->SetId("missing_music_control");
+    EXPECT_EQ(ui.AudioControlsState().present, 2u);
+    settings->GetElementById("setting_audio_sfx")->SetId("missing_sfx_control");
+    status->SetId("setting_audio_sfx");
+    EXPECT_EQ(ui.AudioControlsState().present, 1u);
     ui.Shutdown();
+    EXPECT_FALSE(recorder.audio_controls_changed());
+    EXPECT_EQ(ui.AudioControlsState().present, 0u);
     audio.Shutdown();
 }
 
@@ -2628,9 +2754,17 @@ TEST(UiSmokeTest, WorldSelectEmptyGuardAndHotReload) {
     // Establish a selection so reload must clear both DOM and manager state.
     Rml::Element* selected_before_reload = FirstWorldListItem(ws);
     ASSERT_NE(selected_before_reload, nullptr);
+    EXPECT_NE(
+        selected_before_reload->GetInnerRML().find("payloads unverified; checked when opened"),
+        Rml::String::npos);
     ClickAndUpdate(ui, selected_before_reload);
     EXPECT_TRUE(selected_before_reload->IsClassSet("selected"));
     // The manager tracks selection internally; reloading the doc resets it to empty.
+    ui.SetSavedWorldList([] {
+        auto catalog = SavedWorldFixture();
+        catalog.worlds.front().payloads_verified = true;
+        return catalog;
+    });
     ui.ReloadActiveDocument();
     ui.Update();
     AwaitWorldCatalog(ui);
@@ -2646,6 +2780,7 @@ TEST(UiSmokeTest, WorldSelectEmptyGuardAndHotReload) {
     // Selecting an item then loading DOES fire (proves the guard, not a dead button).
     Rml::Element* first = FirstWorldListItem(ws);
     ASSERT_NE(first, nullptr);
+    EXPECT_EQ(first->GetInnerRML().find("payloads unverified"), Rml::String::npos);
     ClickAndUpdate(ui, first);
     ClickAndUpdate(ui, ws->GetElementById("load_selected_btn"));
     EXPECT_EQ(load_calls, 1) << "load fires once a world is selected";

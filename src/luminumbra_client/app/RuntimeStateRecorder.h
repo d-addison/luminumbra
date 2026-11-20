@@ -6,6 +6,7 @@
 // the timed scenario gates poll, and the per-frame / boot-window metrics
 // recorders that feed the runtime-frames and runtime-boot artifacts.
 
+#include "audio/AudioAcceptance.h"
 #include "core/RuntimeScenarioConfig.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h" // nested RuntimeChunkStats / coverage stats
@@ -17,6 +18,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -27,6 +29,11 @@ class Camera;
 namespace Luminumbra::world {
 class GameSession;
 }
+
+namespace Luminumbra::Client {
+class IAudioManager;
+class Rml_UIManager;
+} // namespace Luminumbra::Client
 
 namespace Luminumbra::Client::App {
 
@@ -62,6 +69,16 @@ class RuntimeStateRecorder {
 public:
     RuntimeStateRecorder(RuntimeScenarioConfig config,
                          std::unique_ptr<Luminumbra::Rendering::Camera>& camera_ref);
+
+    // Owners and settings must outlive captures. Observe owners rather than raw
+    // pointees so teardown/reset is represented as unavailable, never a stale pointer.
+    void bind_audio_acceptance(const std::unique_ptr<IAudioManager>& audio,
+                               const luminumbra::core::SystemConfig& settings,
+                               const std::unique_ptr<Rml_UIManager>& ui,
+                               bool enable_audio_requested);
+
+    // O(1) on unchanged frames. Inspect the three controls only after document replacement.
+    bool audio_controls_changed();
 
     const std::filesystem::path& artifact_dir() const;
     const std::filesystem::path& crash_dir() const;
@@ -108,7 +125,15 @@ private:
                                     uint64_t frame_count,
                                     const RuntimeReadinessReport& readiness) const;
 
+    nlohmann::json audio_acceptance_json() const;
     void write_last_known() const;
+
+    const std::unique_ptr<IAudioManager>* m_audio = nullptr;
+    const luminumbra::core::SystemConfig* m_audio_settings = nullptr;
+    const std::unique_ptr<Rml_UIManager>* m_audio_ui = nullptr;
+    std::optional<AudioVolumes> m_loaded_audio_volumes;
+    bool m_enable_audio_requested = false;
+    std::uint64_t m_audio_document_generation = 0;
 
     // True once an incremental shutdown record has been written (watchdog armed), so
     // the final record adds "complete" only in that mode and is otherwise unchanged.

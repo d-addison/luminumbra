@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <limits>
 
 namespace Luminumbra::Rendering {
 
@@ -174,6 +175,11 @@ void ParticlePass::init_buffers() {
     glVertexAttribFormat(5, 1, GL_UNSIGNED_BYTE, GL_TRUE, offsetof(InstanceRecord, streak));
     glVertexAttribBinding(5, 0);
 
+    // The unused snorm8 code -128 tags radial ambient dust. Ordinary rotation
+    // uses [-127, 127], so every non-dust record keeps its original bytes.
+    glEnableVertexAttribArray(6);
+    glVertexAttribIFormat(6, 1, GL_BYTE, offsetof(InstanceRecord, rotation));
+    glVertexAttribBinding(6, 0);
     glBindVertexBuffer(0, m_instance_vbo[0], 0, sizeof(InstanceRecord));
 
     glBindVertexArray(0);
@@ -407,7 +413,8 @@ uint32_t ParticlePass::add_splash_emitter(const std::filesystem::path& json_path
 uint32_t ParticlePass::add_waterfall_spray(const std::filesystem::path& json_path,
                                            const glm::vec3& plunge_pos,
                                            float drop_height,
-                                           float channel_width) {
+                                           float channel_width,
+                                           std::size_t sheet_site) {
     // a waterfall spray emitter is a normal emitter anchored at the
     // plunge foot. After loading we re-shape its spawn box + emission rate to the
     // detected fall's geometry so a tall/wide fall throws a proportionally larger
@@ -419,6 +426,8 @@ uint32_t ParticlePass::add_waterfall_spray(const std::filesystem::path& json_pat
     }
     ActiveEmitter& spray = m_active_emitters.back();
     spray.waterfall_spray = true;
+    spray.waterfall_site = sheet_site;
+    spray.spawn_scale = sheet_site == kInvalidEmitter ? 1.0f : 0.0f;
     // Spawn box spans the channel width horizontally and a shallow band at the
     // plunge pool surface; clamp so the mist stays a plume, not a fog bank.
     const float half_w = std::clamp(channel_width * 0.6f, 1.5f, 8.0f);
@@ -431,6 +440,19 @@ uint32_t ParticlePass::add_waterfall_spray(const std::filesystem::path& json_pat
     spray.data.base_velocity.y = std::max(spray.data.base_velocity.y, 1.5f * intensity);
     spray.data.wind_response = std::max(spray.data.wind_response, 0.4f); // mist drifts on wind
     return id;
+}
+
+void ParticlePass::set_waterfall_live_factors(std::span<const float> live_factors) {
+    // At most kMaxEmitters, with one constant-time site lookup per bound spray.
+    for (auto& emitter : m_active_emitters) {
+        if (!emitter.waterfall_spray || emitter.waterfall_site == kInvalidEmitter) {
+            continue;
+        }
+        const float live = emitter.waterfall_site < live_factors.size()
+                               ? live_factors[emitter.waterfall_site]
+                               : 0.0f;
+        emitter.spawn_scale = std::isfinite(live) ? std::clamp(live, 0.0f, 1.0f) : 0.0f;
+    }
 }
 
 uint64_t
@@ -660,7 +682,10 @@ void ParticlePass::update(float dt) {
         // stage elongates the velocity-aligned quad into a streak.
         const float angle_norm =
             std::clamp(rotation * (1.0f / 3.14159265358979323846f), -1.0f, 1.0f);
-        rec.rotation = static_cast<int8_t>(std::lround(angle_norm * 127.0f));
+        // Dust has a radial mask, so its orientation does not affect scattering.
+        rec.rotation = p.emitter_index == m_ambient_emitter_index
+                           ? std::numeric_limits<int8_t>::min()
+                           : static_cast<int8_t>(std::lround(angle_norm * 127.0f));
         // The authored shutter-length aspect follows projected fall velocity.
         // Horizontal wind tilts the streak; it does not invent vertical stretch.
         float effective_aspect = emitter.data.streak_aspect;
@@ -707,7 +732,10 @@ std::size_t ParticlePass::execute(const RenderContext& ctx, const Camera& camera
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, ctx.lit_scene.id);
-    glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // particles into the internal scene
+    glViewport(0,
+               0,
+               static_cast<GLsizei>(ctx.internal_w()),
+               static_cast<GLsizei>(ctx.internal_h())); // particles into the internal scene
 
     // Transparent particles: test against scene depth but do not write depth,
     // and blend additively into the HDR lighting target.
@@ -799,7 +827,7 @@ std::size_t ParticlePass::execute(const RenderContext& ctx, const Camera& camera
     PreserveReplayObject(ReplayObjectKind::VertexArray, m_vao);
     glBindVertexBuffer(0, m_instance_vbo[m_ring_cursor], 0, sizeof(InstanceRecord));
     Luminumbra::Rendering::AttributedGl::Submit(glDrawArraysInstanced,
-                                                GL_TRIANGLE_STRIP,
+                                                GLenum{GL_TRIANGLE_STRIP},
                                                 0,
                                                 4,
                                                 static_cast<GLsizei>(m_frame_instance_count));

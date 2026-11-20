@@ -58,7 +58,9 @@ std::vector<Chunk*> ReferenceRenderableScan(const Systems::SHIELD_WorldSystem& w
     std::vector<Chunk*> reference;
     // The snapshot follows the resident unordered_map, including its rehash order.
     for (const auto& chunk : world.snapshot_streamed_chunks()) {
-        if (chunk->get_state() == ChunkState::Ready && !chunk->mesh_vertices.empty()) {
+        if (chunk->get_state() == ChunkState::Ready &&
+            ((!chunk->mesh_vertices.empty() && !chunk->mesh_indices.empty()) ||
+             (!chunk->water_mesh_vertices.empty() && !chunk->water_mesh_indices.empty()))) {
             reference.push_back(chunk.get());
         }
     }
@@ -73,6 +75,7 @@ TEST(DeterministicWorkBudget, RenderableViewReusesIdleStorageAndMatchesResidentO
         chunk->set_state(index % 3 == 0 ? ChunkState::Idle : ChunkState::Ready);
         if (index % 5 != 0) {
             chunk->mesh_vertices.resize(1);
+            chunk->mesh_indices.resize(1);
         }
         const auto before = world.renderable_view_work();
         ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
@@ -112,6 +115,42 @@ TEST(DeterministicWorkBudget, RenderableViewReusesIdleStorageAndMatchesResidentO
     EXPECT_TRUE(view.empty());
     EXPECT_EQ(world.renderable_chunks_view(), ReferenceRenderableScan(world));
     EXPECT_EQ(world.renderable_view_work().rebuilds, after.rebuilds + 1u);
+}
+
+TEST(DeterministicWorkBudget, RenderableViewRequiresReadyAndCompleteTerrainOrWater) {
+    Systems::SHIELD_WorldSystem world(nullptr, nullptr, FlatWorkBudgetTerrain(), 1337);
+    for (const auto state : {ChunkState::Unloaded,
+                             ChunkState::Loading,
+                             ChunkState::Idle,
+                             ChunkState::Meshing,
+                             ChunkState::Ready,
+                             ChunkState::Unloading}) {
+        for (unsigned geometry = 0; geometry < 16; ++geometry) {
+            SCOPED_TRACE(static_cast<int>(state));
+            SCOPED_TRACE(geometry);
+            auto chunk = std::make_shared<Chunk>(
+                IVec3(static_cast<int>(geometry), 0, static_cast<int>(state)));
+            chunk->set_state(state);
+            chunk->mesh_vertices.resize((geometry & 1u) != 0u ? 3u : 0u);
+            chunk->mesh_indices.resize((geometry & 2u) != 0u ? 3u : 0u);
+            chunk->water_mesh_vertices.resize((geometry & 4u) != 0u ? 3u : 0u);
+            chunk->water_mesh_indices.resize((geometry & 8u) != 0u ? 3u : 0u);
+            ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+            const auto& view = world.renderable_chunks_view();
+            const bool selected =
+                state == ChunkState::Ready && ((geometry & 3u) == 3u || (geometry & 12u) == 12u);
+            EXPECT_EQ(std::count(view.begin(), view.end(), chunk.get()), selected ? 1 : 0);
+            EXPECT_EQ(view, ReferenceRenderableScan(world));
+        }
+    }
+    const auto before = world.renderable_view_work();
+    for (int frame = 0; frame < 16; ++frame) {
+        (void)world.renderable_chunks_view();
+    }
+    const auto after = world.renderable_view_work();
+    EXPECT_EQ(after.chunk_visits, before.chunk_visits);
+    EXPECT_EQ(after.rebuilds, before.rebuilds);
+    EXPECT_EQ(after.allocations, before.allocations);
 }
 
 TEST(DeterministicWorkBudget, RenderableViewRefreshesReadyMeshClearAndParkedResidency) {
@@ -196,6 +235,7 @@ TEST(DeterministicWorkBudget, RenderableViewEvictionClearsPointersBeforeRebuildi
     auto chunk = std::make_shared<Chunk>(IVec3(1024, 2, 0));
     chunk->set_state(ChunkState::Ready);
     chunk->mesh_vertices.resize(1);
+    chunk->mesh_indices.resize(1);
     ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
     const auto& view = world.renderable_chunks_view();
     ASSERT_EQ(view, std::vector<Chunk*>{chunk.get()});

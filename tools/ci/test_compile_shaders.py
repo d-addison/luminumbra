@@ -277,6 +277,7 @@ class ShaderCompilerTests(unittest.TestCase):
             with patch.object(sys, "argv", ["compile_shaders.py"]), \
                     patch.object(shaders, "inventory", return_value={}), \
                     patch.object(shaders, "compile_units", return_value=[self.unit(), self.unit()]), \
+                    patch.object(shaders, "link_programs", return_value=[]), \
                     patch.object(shaders, "compile_unit", side_effect=results) as compile_one, \
                     redirect_stdout(io.StringIO()) as output, redirect_stderr(io.StringIO()) as error:
                 self.assertEqual(shaders.main(), status)
@@ -297,6 +298,206 @@ class ShaderCompilerTests(unittest.TestCase):
         cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
         self.assertIn("add_test(NAME ShaderCompilePython", cmake)
         self.assertIn("${CMAKE_SOURCE_DIR}/tools/ci/test_compile_shaders.py", cmake)
+
+
+class ShaderLinkTests(unittest.TestCase):
+    def registry(self, entries='{"fixture", "fixture.vert", "fixture.frag"}'):
+        return 'std::vector<ShaderProgramSpec> PipelineProgramSpecs() { return {' + entries + '}; }'
+
+    def units(self):
+        texts = {
+            "fixture.vert": "#version 450 core\nout vec3 color;\nvoid main() { color = vec3(1); gl_Position = vec4(0); }\n",
+            "fixture.frag": "#version 450 core\nin vec3 color;\nout vec4 pixel;\nvoid main() { pixel = vec4(color, 1); }\n",
+        }
+        return [shaders.Unit(name, name.rsplit('.', 1)[1], (), shaders.raw_source(name, text))
+                for name, text in texts.items()]
+
+    def layouts(self):
+        return '"res/shaders/fixture.vert", "res/shaders/fixture.frag"'
+
+    def test_every_registered_program_and_compiled_permutation_is_linked(self):
+        units = shaders.compile_units(shaders.inventory(ROOT / "res/shaders"))
+        registry = shaders.read_source(ROOT / "test/rendering/render_smoke_test.cpp")
+        layouts = shaders.read_source(ROOT / "src/luminumbra_client/rendering/PassShaderLayouts.cpp")
+        programs = shaders.link_programs(units, registry, layouts)
+        self.assertEqual({(unit.name, unit.defines) for program in programs for unit in program.units},
+                         {(unit.name, unit.defines) for unit in units})
+        names = {program.name for program in programs}
+        self.assertEqual(names, {name for name, _ in shaders.registry_entries(registry)} |
+                         {unit.name for unit in units if unit.stage == "comp"})
+        self.assertEqual(sum(any(unit.defines for unit in program.units) for program in programs), 3)
+        self.assertEqual(sum(any(unit.stage == "geom" for unit in program.units) for program in programs), 1)
+        self.assertEqual(sum(program.units[0].stage == "comp" for program in programs), 5)
+        for program in programs:
+            for unit in program.units:
+                self.assertTrue(any(unit is compiled for compiled in units))
+
+    def test_missing_program_stage_and_variant_are_refused(self):
+        units = self.units()
+        for entries in ('{"other", "other.vert", "other.frag"}', ''):
+            with self.subTest(entries=entries), self.assertRaises(shaders.ShaderError):
+                shaders.link_programs(units, self.registry(entries), self.layouts())
+        with self.assertRaisesRegex(shaders.ShaderError, "missing from link set.*unused.vert"):
+            shaders.link_programs([*units, shaders.Unit("unused.vert", "vert", shaders.LADDER_DEFINES,
+                                                        shaders.raw_source("unused.vert", VALID))],
+                                  self.registry(), self.layouts())
+        with self.assertRaisesRegex(shaders.ShaderError, "registered stage missing.*fixture.frag"):
+            shaders.link_programs(units[:1], self.registry(), self.layouts())
+        with self.assertRaisesRegex(shaders.ShaderError, "no compiled stages"):
+            shaders.link_programs([], self.registry(), self.layouts())
+        with self.assertRaisesRegex(shaders.ShaderError, "duplicate shader permutation"):
+            shaders.link_programs([*units, units[0]], self.registry(), self.layouts())
+        # A newly registered pair must be consumed even when all its stages were
+        # already compiled for other programs. Stage coverage alone is insufficient.
+        registry = self.registry('{"fixture", "fixture.vert", "fixture.frag"},'
+                                 '{"new_program", "fixture.vert", "fixture.frag"}')
+        self.assertEqual([program.name for program in shaders.link_programs(units, registry, self.layouts())],
+                         ["fixture", "new_program"])
+        with self.assertRaisesRegex(shaders.ShaderError, "pass layout program missing"):
+            shaders.link_programs(units, self.registry(), self.layouts() +
+                                  ', "res/shaders/new.vert", "res/shaders/fixture.frag"')
+
+    def test_registry_refuses_unknown_partial_empty_duplicate_and_computed_entries(self):
+        for registry in ("", self.registry(""), self.registry('register_program()'),
+                         self.registry('{"fixture", "fixture.vert"}'),
+                         self.registry('{"fixture", "fixture.vert", "fixture.frag", nullptr}'),
+                         self.registry('{"fixture", "../fixture.vert", "fixture.frag"}'),
+                         self.registry('{"fixture", "fixture.vert", "fixture.frag"}, garbage'),
+                         self.registry('garbage, {"fixture", "fixture.vert", "fixture.frag"}'),
+                         self.registry('{"fixture", "fixture.vert", "fixture.frag"},'
+                                       '{"fixture", "fixture.vert", "fixture.frag"}')):
+            with self.subTest(registry=registry), self.assertRaises(shaders.ShaderError):
+                shaders.registry_entries(registry)
+        registry = self.registry('// ignored\r\n{"fixture", /* comment */ "fixture.vert", "fixture.frag"},')
+        self.assertEqual(shaders.registry_entries(registry), [("fixture", ("fixture.vert", "fixture.frag"))])
+        with patch.object(shaders, "MAX_ENTRIES", 0):
+            with self.assertRaisesRegex(shaders.ShaderError, "registry entry bound"):
+                shaders.registry_entries(self.registry())
+
+    def test_derived_layout_pairs_and_unknown_layout_forms(self):
+        base = 'v.push_back({"base", "res/shaders/base.vert", "res/shaders/base.frag", {}});'
+        loop = ('const auto original = v.back(); '
+                'for (const auto& mesh : {std::pair{"mesh", "res/shaders/mesh.vert"}}) {'
+                'auto entry = original; entry.vert = mesh.second; v.push_back(std::move(entry)); }')
+        self.assertEqual(shaders.layout_pairs(base + loop),
+                         {("base.vert", "base.frag"), ("mesh.vert", "base.frag")})
+        for text in ("", '"res/shaders/unknown.vert"', base + '"res/shaders/base.vert"',
+                     loop, base + loop.replace("entry.vert = mesh.second;", ""),
+                     base + loop.replace("mesh.vert", "../mesh.vert"),
+                     base + loop.replace("entry.vert = mesh.second;", 'entry.frag = "res/shaders/base.frag";')):
+            with self.subTest(text=text), self.assertRaises(shaders.ShaderError):
+                shaders.layout_pairs(text)
+        self.assertEqual(shaders.layout_pairs(base + '// "res/shaders/ignored.vert"\n'),
+                         {("base.vert", "base.frag")})
+
+    def test_mixed_variant_reuses_only_nonvariant_stage(self):
+        units = self.units()
+        variant = shaders.Unit(units[0].name, "vert", shaders.LADDER_DEFINES, units[0].source)
+        programs = shaders.link_programs([*units, variant], self.registry(), self.layouts())
+        self.assertEqual([program.units for program in programs],
+                         [tuple(units), (variant, units[1])])
+
+    def test_matching_and_mismatched_interfaces(self):
+        units = self.units()
+        program = shaders.Program("fixture", tuple(units))
+        fragment = units[1]
+        mismatched = shaders.Unit(fragment.name, fragment.stage, (),
+                                  shaders.raw_source(fragment.name, fragment.source.text.replace(
+                                      "in vec3 color", "in vec4 color").replace("vec4(color, 1)", "color")))
+        broken = shaders.Program("fixture", (units[0], mismatched))
+        if VALIDATOR:
+            for unit in broken.units:
+                shaders.compile_unit(unit, VALIDATOR)
+            shaders.link_program(program, VALIDATOR)
+            with self.assertRaisesRegex(shaders.ShaderError, "program fixture.*link failed") as caught:
+                shaders.link_program(broken, VALIDATOR)
+            self.assertIn("color", str(caught.exception))
+        else:
+            self.check_link_invocation(program, 0, "")
+            self.check_link_invocation(broken, 3, "ERROR: color: vertex/fragment type mismatch\n")
+
+    def check_link_invocation(self, program, status, diagnostic):
+        captured = []
+
+        def validate(command, **kwargs):
+            self.assertEqual(command[:3], ["validator", "-d", "-l"])
+            self.assertFalse(kwargs.get("shell", False))
+            self.assertEqual(len(command[3:]), len(program.units))
+            for path, unit in zip(command[3:], program.units):
+                captured.append(Path(path))
+                self.assertEqual(Path(path).suffix, '.' + unit.stage)
+                self.assertEqual(Path(path).read_bytes(), unit.source.text.encode("utf-8"))
+            return subprocess.CompletedProcess(command, status, diagnostic)
+
+        with patch.object(shaders.subprocess, "run", side_effect=validate):
+            if status:
+                with self.assertRaisesRegex(shaders.ShaderError, "program fixture.*link failed") as caught:
+                    shaders.link_program(program, "validator")
+                self.assertIn(diagnostic, str(caught.exception))
+            else:
+                self.assertEqual(shaders.link_program(program, "validator"), diagnostic)
+        self.assertTrue(captured)
+        self.assertTrue(all(not path.exists() for path in captured))
+
+    def test_link_preserves_prepared_sources_compute_geometry_and_variant_diagnostics(self):
+        units = self.units()
+        units[0] = shaders.Unit(units[0].name, "vert", shaders.LADDER_DEFINES,
+                               shaders.raw_source(units[0].name, "#version 450 core\r\n#define X 1\r\n"))
+        self.check_link_invocation(shaders.Program("fixture", tuple(units)), 1, "")
+        geometry = shaders.Unit("fixture.geom", "geom", (), shaders.raw_source("fixture.geom", VALID))
+        self.check_link_invocation(shaders.Program("fixture", (*units, geometry)), 0, "WARNING: retained\n")
+        compute = shaders.Unit("fixture.comp", "comp", (), shaders.raw_source("fixture.comp", VALID))
+        self.check_link_invocation(shaders.Program("fixture", (compute,)), 0, "")
+
+    def test_link_diagnostics_map_includes_and_never_expose_temporary_paths(self):
+        units = self.units()
+        units[1] = shaders.Unit(units[1].name, "frag", shaders.LADDER_DEFINES,
+                               shaders.Source(VALID, (("included.glsl", 7),)))
+
+        def validate(command, **_kwargs):
+            return subprocess.CompletedProcess(command, 1,
+                                               f"ERROR: {command[-1]}:1: broken\n"
+                                               f"WARNING: {command[-1]}:0: unknown\n")
+
+        with patch.object(shaders.subprocess, "run", side_effect=validate):
+            with self.assertRaisesRegex(shaders.ShaderError, "program fixture.*LUMINUMBRA_FAR_WORLD_LADDER 1") as caught:
+                shaders.link_program(shaders.Program("fixture", tuple(units)), "validator")
+        diagnostic = str(caught.exception)
+        for expected in ("included.glsl:7: error: broken", "fixture.frag:0: warning: unknown",
+                         "vert=fixture.vert", "frag=fixture.frag"):
+            self.assertIn(expected, diagnostic)
+        self.assertNotIn(tempfile.gettempdir(), diagnostic)
+
+    def test_cli_runs_every_link_and_reports_all_link_failures(self):
+        program = shaders.Program("fixture", tuple(self.units()))
+        for results, status in ((["warning\n", ""], 0),
+                                ([shaders.ShaderError("first link"), shaders.ShaderError("second link")], 1)):
+            with patch.object(sys, "argv", ["compile_shaders.py"]), \
+                    patch.object(shaders, "inventory", return_value={}), \
+                    patch.object(shaders, "compile_units", return_value=[]), \
+                    patch.object(shaders, "link_programs", return_value=[program, program]), \
+                    patch.object(shaders, "link_program", side_effect=results) as link_one, \
+                    redirect_stdout(io.StringIO()) as output, redirect_stderr(io.StringIO()) as error:
+                self.assertEqual(shaders.main(), status)
+                self.assertEqual(link_one.call_count, 2)
+                if status:
+                    self.assertIn("first link", error.getvalue())
+                    self.assertIn("second link", error.getvalue())
+                else:
+                    self.assertIn("linked 2 program permutations", output.getvalue())
+                    self.assertIn("warning", output.getvalue())
+
+    def test_link_timeout_missing_validator_and_write_failure_cleanup(self):
+        program = shaders.Program("fixture", tuple(self.units()))
+        for failure in (OSError("missing validator"), subprocess.TimeoutExpired("validator", 30)):
+            with self.subTest(failure=failure), patch.object(shaders.subprocess, "run", side_effect=failure):
+                with self.assertRaises(type(failure)):
+                    shaders.link_program(program, "validator")
+        with patch.object(Path, "write_bytes", side_effect=PermissionError("denied")), \
+                patch.object(shaders.subprocess, "run") as run:
+            with self.assertRaises(PermissionError):
+                shaders.link_program(program, "validator")
+            run.assert_not_called()
 
 
 if __name__ == "__main__":

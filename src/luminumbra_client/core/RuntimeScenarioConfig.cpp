@@ -5,8 +5,11 @@
 #include "luminumbra_common/core/Environment.h"
 #include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/world/SurfaceWorkBudget.h"
+#include "rendering/DiagnosticCapture.h"
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <charconv>
 #include <cstdint>
 #include <cstdlib>
 #include <ctime>
@@ -19,6 +22,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
 
 namespace Luminumbra::Client::ScenarioHarness {
 
@@ -134,9 +138,21 @@ CapturePinMetadata(WindowMode active_window_mode, int capture_width, int capture
                           {"pinned", pinned}};
 }
 
+namespace {
+std::string ResolveRuntimeScenario(int argc, char* argv[]) {
+    auto scenario = GetCommandLineOption(argc, argv, "--scenario", "");
+    // Preserve the launch-wrapper fallback: a nonempty CLI scenario wins.
+    if (scenario.empty()) {
+        const auto sweep_env = Core::ReadEnvironment("LUMINUMBRA_VISUAL_SWEEP");
+        if (sweep_env && !sweep_env->empty() && sweep_env->front() != '0') {
+            scenario = "world_visual_sweep";
+        }
+    }
+    return scenario;
+}
+
 // Parses "WxH" (e.g. "1600x900") into width/height. Returns false (leaving the
 // outputs untouched) on any malformed/non-positive value.
-namespace {
 bool ParseResolution(const std::string& value, int& out_width, int& out_height) {
     const auto x_pos = value.find_first_of("xX");
     if (x_pos == std::string::npos || x_pos == 0 || x_pos + 1 >= value.size()) {
@@ -191,13 +207,40 @@ void ParseSurfaceRadiusOptions(int argc,
 } // namespace
 
 RuntimePathOptions ParseRuntimePathOptions(int argc, char* argv[]) {
+    (void)ParseCaptureFeatureProfile(argc, argv);
+    RefuseUnsupportedTemporalAuditExecution(argc, argv);
     // Admission precedes --save-root directory creation.
+    const auto diagnostic_environment = Core::ReadEnvironment("LUMIN_CAPTURE_DIAGNOSTICS");
+    const auto diagnostics = Rendering::ResolveDiagnosticCaptureOptions(
+        std::span<char* const>(argv + 1, static_cast<std::size_t>(std::max(0, argc - 1))),
+        diagnostic_environment ? std::optional<std::string_view>(*diagnostic_environment)
+                               : std::nullopt);
+    if (diagnostics.enabled) {
+        for (const auto* parity : {"--render-parity-frame", "--upscale-seam-parity"}) {
+            if (!GetCommandLineOption(argc, argv, parity, "").empty()) {
+                throw std::invalid_argument(std::string("capture diagnostics refuse ") + parity +
+                                            "; parity redispatches require separate captures");
+            }
+        }
+        const auto scenario = ResolveRuntimeScenario(argc, argv);
+        const bool benchmark =
+            !GetCommandLineOption(argc, argv, "--render-benchmark", "").empty() &&
+            !GetCommandLineOption(argc, argv, "--render-benchmark-screenshot", "").empty();
+        if ((!scenario.empty() && scenario != "world_visual_sweep") ||
+            (scenario.empty() && GetCommandLineOption(argc, argv, "--frame-scan", "").empty() &&
+             !benchmark)) {
+            throw std::invalid_argument(
+                "capture diagnostics require world_visual_sweep, --frame-scan "
+                "or --render-benchmark with --render-benchmark-screenshot");
+        }
+    }
     int surface_radius = 0;
     int collision_radius = 0;
     int benchmark_stream_radius = 0;
     ParseSurfaceRadiusOptions(
         argc, argv, surface_radius, collision_radius, benchmark_stream_radius);
     RuntimePathOptions options;
+    options.diagnostics = diagnostics;
     for (const char* flag : {"--runtime-root", "--save-root"}) {
         std::filesystem::path& path =
             std::string(flag) == "--runtime-root" ? options.runtime_root : options.save_root;
@@ -234,22 +277,14 @@ RuntimePathOptions ParseRuntimePathOptions(int argc, char* argv[]) {
 
 RuntimeScenarioConfig
 ParseRuntimeScenarioConfig(int argc, char* argv[], const std::filesystem::path& root_dir) {
+    RefuseUnsupportedTemporalAuditExecution(argc, argv);
     RuntimeScenarioConfig config;
+    config.capture_feature_profile = ParseCaptureFeatureProfile(argc, argv);
     ParseSurfaceRadiusOptions(
         argc, argv, config.horizon_radius, config.collision_radius, config.benchmark_stream_radius);
-    config.scenario = GetCommandLineOption(argc, argv, "--scenario", "");
+    config.scenario = ResolveRuntimeScenario(argc, argv);
     config.systems_config_path = GetCommandLineOption(argc, argv, "--systems-config", "");
     config.preset_json_path = GetCommandLineOption(argc, argv, "--preset-json", "");
-    //  the visual-sweep capture matrix can be selected with the
-    // LUMINUMBRA_VISUAL_SWEEP=1 env flag (in addition to --scenario), so existing
-    // auto/server launch wrappers can opt in without a CLI change. An explicit
-    // --scenario always wins.
-    if (config.scenario.empty()) {
-        const auto sweep_env = Core::ReadEnvironment("LUMINUMBRA_VISUAL_SWEEP");
-        if (sweep_env && !sweep_env->empty() && sweep_env->front() != '0') {
-            config.scenario = "world_visual_sweep";
-        }
-    }
     config.auto_create_world = HasCommandLineFlag(argc, argv, "--auto-create-world");
     config.auto_enter_world = HasCommandLineFlag(argc, argv, "--auto-enter-world");
     config.no_audio = HasCommandLineFlag(argc, argv, "--no-audio");
@@ -410,4 +445,121 @@ nlohmann::json IVec3ToJson(const Luminumbra::IVec3& value) {
     return {{"x", value.x}, {"y", value.y}, {"z", value.z}};
 }
 
+// Capture feature selection: keep admission independent of world/output setup.
+RuntimeScenarioConfig::FeatureProfile ParseCaptureFeatureProfile(int argc, char* argv[]) {
+    constexpr std::string_view flag = "--capture-feature-profile";
+    auto profile = RuntimeScenarioConfig::FeatureProfile::None;
+    bool seen = false;
+    for (int index = 1; index < argc; ++index) {
+        const std::string_view argument = argv[index];
+        std::string_view value;
+        if (argument == flag) {
+            if (index + 1 < argc) {
+                value = argv[++index];
+            }
+        } else if (argument.starts_with("--capture-feature-profile=")) {
+            value = argument.substr(flag.size() + 1);
+        } else {
+            continue;
+        }
+        if (seen || (value != "none" && value != "all_features")) {
+            throw std::invalid_argument(
+                "--capture-feature-profile requires one selection: none or all_features");
+        }
+        seen = true;
+        profile = value == "all_features" ? RuntimeScenarioConfig::FeatureProfile::AllFeatures
+                                          : RuntimeScenarioConfig::FeatureProfile::None;
+    }
+    return profile;
+}
+
+} // namespace Luminumbra::Client::ScenarioHarness
+
+// Temporal plan admission: shared by both startup paths and planning callers.
+namespace Luminumbra::Client::ScenarioHarness {
+std::optional<Rendering::TemporalAuditPlan> ParseTemporalAuditPlanOptions(int argc, char* argv[]) {
+    constexpr std::array<std::string_view, 10> flags = {"--temporal-audit-plan",
+                                                        "--temporal-start-tick",
+                                                        "--temporal-tick-rate",
+                                                        "--temporal-day-ticks",
+                                                        "--temporal-dawn-tick",
+                                                        "--temporal-dusk-tick",
+                                                        "--temporal-strike-tick",
+                                                        "--temporal-frame-limit",
+                                                        "--temporal-tick-limit",
+                                                        "--temporal-moon-phase-milli"};
+    std::array<bool, flags.size()> seen{};
+    std::array<std::uint64_t, flags.size()> values = {
+        0, 0, 0, 0, 0, 0, 0, Rendering::kTemporalMaxFrames, Rendering::kTemporalMaxTicks, 1000};
+    Rendering::TemporalAuditSpan span = Rendering::TemporalAuditSpan::DayNight;
+    bool any = false;
+    // O(argc * 10), with fixed storage. Check every occurrence and both forms.
+    for (int argument_index = 1; argument_index < argc; ++argument_index) {
+        const std::string_view argument(argv[argument_index]);
+        if (!argument.starts_with("--temporal-"))
+            continue;
+        any = true;
+        const auto equals = argument.find('=');
+        const auto name = argument.substr(0, equals);
+        const auto found = std::ranges::find(flags, name);
+        if (found == flags.end())
+            throw std::invalid_argument("unknown temporal plan option");
+        const auto index = static_cast<std::size_t>(found - flags.begin());
+        if (seen[index])
+            throw std::invalid_argument(std::string(name) + " may only be supplied once");
+        seen[index] = true;
+        std::string_view value;
+        if (equals != std::string_view::npos)
+            value = argument.substr(equals + 1);
+        else if (argument_index + 1 < argc)
+            value = argv[++argument_index];
+        if (value.empty())
+            throw std::invalid_argument(std::string(name) + " requires a nonempty value");
+        if (index == 0) {
+            if (value == "day-night")
+                span = Rendering::TemporalAuditSpan::DayNight;
+            else if (value == "weather-cycle")
+                span = Rendering::TemporalAuditSpan::WeatherCycle;
+            else if (value == "multi-day")
+                span = Rendering::TemporalAuditSpan::MultiDay;
+            else
+                throw std::invalid_argument("unknown temporal span");
+        } else {
+            const auto parsed =
+                std::from_chars(value.data(), value.data() + value.size(), values[index]);
+            if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size())
+                throw std::invalid_argument(std::string(name) + " requires an unsigned integer");
+        }
+    }
+    if (!any)
+        return std::nullopt;
+    for (std::size_t index = 0; index <= 5; ++index) {
+        if (!seen[index])
+            throw std::invalid_argument(std::string(flags[index]) +
+                                        " is required for plan admission");
+    }
+    if (values[2] > 1000 || values[7] > Rendering::kTemporalMaxFrames || values[9] > 1000)
+        throw std::invalid_argument("temporal rate, frame limit or moon phase exceeds range");
+    const Rendering::TemporalAuditRequest request{
+        .span = span,
+        .start_tick = values[1],
+        .ticks_per_day = values[3],
+        .ticks_per_second = static_cast<std::uint32_t>(values[2]),
+        .dawn_tick = values[4],
+        .dusk_tick = values[5],
+        .strike_tick = values[6],
+        .night_moon_phase_milli = static_cast<std::uint32_t>(values[9]),
+        .tick_limit = values[8],
+        .frame_limit = static_cast<std::size_t>(values[7])};
+    auto admission = Rendering::BuildTemporalAuditPlan(request);
+    if (!admission.plan)
+        throw std::invalid_argument("temporal plan refused: " + admission.reason);
+    return std::move(admission.plan);
+}
+
+void RefuseUnsupportedTemporalAuditExecution(int argc, char* argv[]) {
+    const auto plan = ParseTemporalAuditPlanOptions(argc, argv);
+    if (plan || GetCommandLineOption(argc, argv, "--scenario", "") == "temporal_audit")
+        throw std::invalid_argument("temporal audit execution unsupported: plan admission only");
+}
 } // namespace Luminumbra::Client::ScenarioHarness

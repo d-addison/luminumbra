@@ -43,6 +43,7 @@
 #include <vector>
 
 #include "../HashCheckpoint.h"
+#include "../world/AuthorityBootDescriptor.h"
 #include "RegionScheduleTrace.h"
 
 namespace Luminumbra::Persistence {
@@ -51,14 +52,34 @@ class ReplayPairReadGuard;
 
 namespace Luminumbra::Replay {
 
-// On-wire constants. Bump kLrec1Version on ANY incompatible layout change and
-// move the gate goldens deliberately in the same commit (determinism discipline
-// section 13: replay LREC1 is versioned).
+// On-wire constants. Allocate a new version on incompatible layout changes;
+// existing version layouts remain frozen (determinism discipline section 13).
 inline constexpr char kLrec1Magic[5] = {'L', 'R', 'E', 'C', '1'};
 inline constexpr std::uint16_t kLrec1Version = 3;
-// Version 3 remains byte-identical for complete streams. Only diagnostic
-// streams with ElidedPrefix require version 4; readers accept both layouts.
+// Legacy complete/suffix family, with frozen byte-identical layouts.
 inline constexpr std::uint16_t kLrec1ElidedVersion = 4;
+// Opt-in complete/suffix family with a bounded authority boot descriptor.
+// Unscheduled producers keep version 3 until descriptor capture is wired.
+inline constexpr std::uint16_t kLrec1BootVersion = 5;
+inline constexpr std::uint16_t kLrec1BootElidedVersion = 6;
+// Schedule-only complete/suffix family: the frozen 3/4 layout followed by a
+// u32 little-endian length and canonical WSC1 bytes after preset_content_hash.
+inline constexpr std::uint16_t kLrec1WeatherVersion = 7;
+inline constexpr std::uint16_t kLrec1WeatherElidedVersion = 8;
+[[nodiscard]] inline bool SupportedVersion(std::uint16_t version) {
+    return version >= kLrec1Version && version <= kLrec1WeatherElidedVersion;
+}
+[[nodiscard]] inline bool WeatherVersion(std::uint16_t version) {
+    return version == kLrec1WeatherVersion || version == kLrec1WeatherElidedVersion;
+}
+// Descriptor playback remains refused until descriptor application is wired.
+[[nodiscard]] inline bool PlaybackVersion(std::uint16_t version) {
+    return version == kLrec1Version || version == kLrec1ElidedVersion || WeatherVersion(version);
+}
+[[nodiscard]] inline bool ElidedVersion(std::uint16_t version) {
+    return version == kLrec1ElidedVersion || version == kLrec1BootElidedVersion ||
+           version == kLrec1WeatherElidedVersion;
+}
 inline constexpr char kLrec1Trailer[8] = {'L', 'R', 'E', 'C', 'E', 'N', 'D', '1'};
 // Upper word 1 tags a resolved uint32 seed in the existing u64 header slot.
 inline constexpr std::uint64_t kResolvedSeedTag = UINT64_C(1) << 32;
@@ -67,7 +88,7 @@ inline constexpr std::uint64_t kResolvedSeedTag = UINT64_C(1) << 32;
 enum class RecordType : std::uint8_t {
     Input = 0x01,        // per-tick input set (may be empty -- valid + compact)
     Checkpoint = 0x02,   // world_hash + authoritative sub-hashes at a tick
-    ElidedPrefix = 0x03, // version 4 diagnostic suffix: tick and digest of removed prefix
+    ElidedPrefix = 0x03, // versions 4/6/8 diagnostic suffix: tick and removed-prefix digest
 };
 
 // Session boot parameters -- everything ServerWorldRunner boots from, so a
@@ -93,13 +114,19 @@ struct ReplayHeader {
     // Canonical resolved preset plus sorted data_root-relative dependency paths
     // and exact-byte file hashes (TerrainPresetLoadResult::preset_content_hash).
     std::string preset_content_hash;
+    // Required only for versions 5/6; absent in every other version.
+    std::optional<world::AuthorityBootDescriptor> authority_boot = std::nullopt;
+    // Canonical WSC1, at most 856 bytes; present only in versions 7/8.
+    std::string weather_schedule;
 };
 
-// Required in addition to the existing start/checkpoint world-hash comparisons.
+// Playback admission, required in addition to start/checkpoint hashes.
+// The boot family stays refused until descriptor application/comparison is wired.
 [[nodiscard]] inline bool ConfigurationMatches(const ReplayHeader& header,
                                                const std::string& live_identity,
                                                const std::string& live_preset_hash) {
-    return (header.version == kLrec1Version || header.version == kLrec1ElidedVersion) &&
+    return PlaybackVersion(header.version) && !header.authority_boot.has_value() &&
+           WeatherVersion(header.version) == !header.weather_schedule.empty() &&
            !live_identity.empty() && !header.system_config_identity.empty() &&
            header.system_config_identity == live_identity && !live_preset_hash.empty() &&
            !header.preset_content_hash.empty() && header.preset_content_hash == live_preset_hash;
@@ -355,11 +382,13 @@ struct ReplayReadLimits {
     std::size_t records = 1'000'000;
 };
 
-// The one-argument ReadReplay uses the defaults above. Versions 3 and 4, opaque
+// The one-argument ReadReplay uses the defaults above. Frozen versions 3–6, opaque
 // blobs (including blobs larger than 64 MiB), sparse ticks, and field encodings
 // are unchanged. Limits do not constrain tick values or the encoded file size.
 // Admission, resource, seek, read, and allocation failures return nullopt;
-// malformed record tails retain their parsed prefix with truncated=true.
+// Malformed 3/4/7/8 record tails retain their parsed prefix with truncated=true.
+// Versions 5/6 require a valid descriptor and a complete, exact stream.
+// Versions 7/8 require a valid canonical WSC1 schedule before publishing any state.
 std::optional<ReplayContents> ReadReplay(const std::string& path);
 std::optional<ReplayContents> ReadReplay(const std::string& path, ReplayReadLimits limits);
 
@@ -367,6 +396,12 @@ std::optional<ReplayContents> ReadReplay(const std::string& path, ReplayReadLimi
 // The caller retains ownership and must prevent concurrent modification. Stream
 // exceptions are contained by the same refusal boundary as file reads.
 std::optional<ReplayContents> ReadReplay(std::istream& input, ReplayReadLimits limits = {});
+// Diagnostic overloads. Versions 5/6 reject every malformed tail atomically;
+// versions 3/4/7/8 retain parsed-prefix/truncated behaviour.
+std::optional<ReplayContents>
+ReadReplay(const std::string& path, ReplayReadLimits limits, std::string& error);
+std::optional<ReplayContents>
+ReadReplay(std::istream& input, ReplayReadLimits limits, std::string& error);
 
 // Returns the input record for `tick`, or nullptr if none was recorded. O(n)
 // scan; replay drives ticks in order so callers typically iterate `inputs`.

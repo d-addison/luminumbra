@@ -1,4 +1,6 @@
 #include "FarVolumeGlBackend.h"
+#include "DiagnosticDrawTable.h"
+#include "FarWorldSelection.h"
 #include "GBufferTargets.h"
 #include "rendering/AttributedGl.h"
 
@@ -10,10 +12,17 @@
 #include <cstddef>
 #include <exception>
 #include <limits>
+#include <string>
 #include <type_traits>
+#include <utility>
 
 namespace Luminumbra::Rendering {
 namespace {
+FarWorldDiagnosticDraw*& ActiveDiagnosticDraw() {
+    static thread_local FarWorldDiagnosticDraw* draw = nullptr;
+    return draw;
+}
+
 // g_buffer.frag reads the same VBO through a scalar std430 array.
 static_assert(sizeof(VoxelVertex) == 7 * sizeof(float));
 static_assert(offsetof(VoxelVertex, position) == 0);
@@ -214,6 +223,75 @@ void FarVolumeGlDriver::SetAttribute(FarVolumeVertexAttribute attribute,
 void FarVolumeGlDriver::EnableAttribute(FarVolumeVertexAttribute attribute) noexcept {
     glEnableVertexAttribArray(static_cast<GLuint>(attribute));
 }
+FarWorldDiagnosticDraw::FarWorldDiagnosticDraw(GBufferDiagnosticCapture* capture) noexcept
+    : capture_(capture)
+    , previous_(ActiveDiagnosticDraw()) {
+    ActiveDiagnosticDraw() = this;
+}
+
+FarWorldDiagnosticDraw::~FarWorldDiagnosticDraw() {
+    ActiveDiagnosticDraw() = previous_;
+}
+
+void FarWorldDiagnosticDraw::prepare(const FarWorldDrawCommand& command) noexcept {
+    prepared_ = capture_ && capture_->deferred_attached();
+    command_ = command;
+}
+
+bool FarWorldDiagnosticDraw::Write(std::int32_t index_count) noexcept {
+    auto* capture = GBufferDiagnosticCapture::Current();
+    if (!capture || !capture->deferred_attached()) {
+        return true;
+    }
+    try {
+        auto* draw = ActiveDiagnosticDraw();
+        if (!draw || draw->capture_ != capture) {
+            capture->unsupported("ladder_backend_identity_unavailable",
+                                 0,
+                                 DiagnosticOwnership::LadderFar,
+                                 DiagnosticPass::GBuffer);
+            return false;
+        }
+        const auto& command = draw->command_;
+        const auto& identity = command.diagnostic_identity;
+        const bool prepared = std::exchange(draw->prepared_, false);
+        if (!prepared || index_count != command.index_count || index_count <= 0 ||
+            identity.key.tier < 1 || identity.key.tier > World::kFarTierCount ||
+            command.diagnostic_span[0] >= command.diagnostic_span[1]) {
+            capture->unsupported("ladder_backend_identity_unavailable",
+                                 0,
+                                 DiagnosticOwnership::LadderFar,
+                                 DiagnosticPass::GBuffer);
+            return false;
+        }
+        // Fixed numeric fields keep the generated key below 512 bytes.
+        const std::string mesh_key = "ladder/" + std::to_string(identity.key.tier) + "/" +
+                                     std::to_string(identity.key.tx) + "/" +
+                                     std::to_string(identity.key.tz) + "/epoch/" +
+                                     std::to_string(identity.world_epoch) + "/content/" +
+                                     std::to_string(identity.content_hash) + "/caves/" +
+                                     std::to_string(identity.cave_policy) + "/bake/" +
+                                     std::to_string(identity.bake_generation) + "/span/" +
+                                     std::to_string(identity.span_generation) + "/" +
+                                     std::to_string(command.diagnostic_span[0]) + "/" +
+                                     std::to_string(command.diagnostic_span[1]);
+        capture->write_current({.mesh_path = {},
+                                .shader_variant = "g_buffer_ladder_far",
+                                .chunk = command.origin_chunk,
+                                .lod = identity.key.tier,
+                                .ownership = DiagnosticOwnership::LadderFar,
+                                .pass = DiagnosticPass::GBuffer,
+                                .provenance = command.diagnostic_water_indices == 0
+                                                  ? DiagnosticProvenance::Sdf
+                                                  : DiagnosticProvenance::Unknown,
+                                .generated_mesh = mesh_key});
+        return true;
+    } catch (...) {
+        capture->abort();
+        return false;
+    }
+}
+
 bool FarVolumeGlDriver::DrawIndexed(std::int32_t index_count) noexcept {
     struct DiagnosticDrawResult {
         GBufferDiagnosticCapture* capture;
@@ -250,7 +328,7 @@ bool FarVolumeGlDriver::DrawIndexed(std::int32_t index_count) noexcept {
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, static_cast<GLuint>(index_buffer));
     bool success = !HasError();
     if (success && diagnostic.capture) {
-        success = diagnostic.capture->write_ladder(index_count);
+        success = FarWorldDiagnosticDraw::Write(index_count);
     }
     if (success) {
         // farTileLocal SSBO addressing assumes zero index offset, zero base vertex, no

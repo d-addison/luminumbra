@@ -7,8 +7,11 @@
 #include <vector>
 
 #include "luminumbra_client/audio/IAudioManager.h"
+#include "luminumbra_client/rendering/Camera.h"
+#include "luminumbra_client/rendering/LightningBolt.h"
 #include "luminumbra_client/rendering/LiveStrikeComposer.h"
 #include "luminumbra_client/rendering/LiveStrikeTracker.h"
+#include "luminumbra_common/systems/WindFieldSystem.h"
 
 namespace {
 
@@ -17,6 +20,7 @@ using Luminumbra::Rendering::IsLiveBoltPenUp;
 using Luminumbra::Rendering::kLiveBoltPenUp;
 using Luminumbra::Rendering::LiveSegmentTouchesView;
 using Luminumbra::Rendering::LiveStrikeTracker;
+using Luminumbra::Rendering::ProjectedBoltPoint;
 using Luminumbra::Rendering::ProjectedLiveStrike;
 using Luminumbra::Rendering::SelectLiveStrikeGeometry;
 using Luminumbra::Systems::StrikeEvent;
@@ -132,8 +136,121 @@ TEST(LiveStrikeTracker, TickZeroAndMaximumTickDoNotOverflowTheWindow) {
     EXPECT_EQ(tracker.size(), 2u);
 }
 
-std::vector<glm::vec2> Stroke(glm::vec2 from, glm::vec2 to, std::size_t count) {
-    std::vector<glm::vec2> points;
+Luminumbra::Systems::WeatherSchedule PresentationWeatherSchedule() {
+    using Luminumbra::Systems::WeatherCategory;
+    return {.phases = {{0, WeatherCategory::Clear, 0, 0},
+                       {5, WeatherCategory::Rain, 65535, 65535},
+                       {11, WeatherCategory::Clear, 0, 0}},
+            .strike_tick = 7};
+}
+
+TEST(LiveStrikeTracker, ScheduledCatchUpRetainsPositionAndConsumesOnceThroughGraceWindow) {
+    using namespace Luminumbra;
+    for (const bool regional : {false, true}) {
+        for (const std::uint64_t polled_tick : {7u, 8u, 9u, 10u}) {
+            SCOPED_TRACE(testing::Message() << regional << '/' << polled_tick);
+            Systems::WeatherSystem weather(1337);
+            Systems::WindFieldSystem wind(1337);
+            ASSERT_TRUE(weather.SetSchedule(PresentationWeatherSchedule()));
+            if (regional) {
+                weather.BindRegionalBackend([](const Vec3&) { return Systems::WeatherSample{}; },
+                                            [] { return std::string("regional"); });
+            }
+            weather.RestoreAtTick(4, Vec3(8.0f), wind);
+            for (std::uint64_t tick = 5; tick <= 7; ++tick) {
+                weather.UpdateFromClock(tick, Vec3(8.0f), wind);
+            }
+            ASSERT_EQ(weather.StrikeSchedule().size(), 1u);
+            const auto strike = weather.StrikeSchedule().front();
+            for (std::uint64_t tick = 8; tick <= polled_tick; ++tick) {
+                weather.UpdateFromClock(tick, Vec3(1200.0f), wind);
+                EXPECT_TRUE(weather.StrikesThisTick().empty());
+            }
+            LiveStrikeTracker tracker;
+            tracker.AdvanceTo(polled_tick);
+            if (polled_tick <= 9) {
+                ASSERT_EQ(weather.StrikeSchedule().size(), 1u);
+                const auto& retained = weather.StrikeSchedule().front();
+                EXPECT_EQ(retained.world_x, strike.world_x);
+                EXPECT_EQ(retained.world_z, strike.world_z);
+                EXPECT_TRUE(tracker.TryConsume(retained));
+                EXPECT_FALSE(tracker.TryConsume(retained));
+            } else {
+                EXPECT_TRUE(weather.StrikeSchedule().empty());
+                EXPECT_FALSE(tracker.TryConsume(strike));
+            }
+        }
+    }
+}
+
+TEST(LiveStrikeTracker, RestoredCompletedPresentationStaysHiddenAfterTrackerReset) {
+    using namespace Luminumbra;
+    for (const bool regional : {false, true}) {
+        // Before the event, exactly on it, inside grace, and after expiry.
+        for (const std::uint64_t saved_tick : {4u, 7u, 8u, 9u, 10u}) {
+            for (const bool adopted : {false, true}) {
+                SCOPED_TRACE(testing::Message() << regional << '/' << saved_tick << '/' << adopted);
+                Systems::WeatherSystem weather(1337);
+                Systems::WindFieldSystem wind(1337);
+                ASSERT_TRUE(weather.SetSchedule(PresentationWeatherSchedule()));
+                if (regional) {
+                    weather.BindRegionalBackend(
+                        [](const Vec3&) { return Systems::WeatherSample{}; },
+                        [] { return std::string("regional"); });
+                }
+                weather.UpdateFromClock(7, Vec3(8.0f), wind);
+                ASSERT_EQ(weather.StrikeSchedule().size(), 1u);
+                LiveStrikeTracker tracker;
+                tracker.AdvanceTo(7);
+                ASSERT_TRUE(tracker.TryConsume(weather.StrikeSchedule().front()));
+                if (adopted) {
+                    weather.AdoptRegionalWeather(saved_tick, Vec3(8.0f), {}, {}, regional, true);
+                } else {
+                    weather.RestoreAtTick(saved_tick, Vec3(8.0f), wind);
+                }
+                EXPECT_TRUE(weather.StrikeSchedule().empty());
+                EXPECT_TRUE(weather.StrikesThisTick().empty());
+                // Repeating the same restored tick must not reveal it again.
+                weather.UpdateFromClock(saved_tick, Vec3(8.0f), wind);
+                EXPECT_TRUE(weather.StrikeSchedule().empty());
+                EXPECT_TRUE(weather.StrikesThisTick().empty());
+                tracker.Clear();
+                std::size_t consumed = 0;
+                for (std::uint64_t tick = saved_tick + 1; tick <= 11; ++tick) {
+                    weather.UpdateFromClock(tick, Vec3(8.0f), wind);
+                    tracker.AdvanceTo(tick);
+                    for (const auto& strike : weather.StrikeSchedule()) {
+                        consumed += tracker.TryConsume(strike) ? 1u : 0u;
+                    }
+                }
+                EXPECT_EQ(consumed, saved_tick < 7 ? 1u : 0u);
+                // A fresh restore before the event resets completed-presentation history.
+                weather.RestoreAtTick(4, Vec3(8.0f), wind);
+                weather.UpdateFromClock(7, Vec3(8.0f), wind);
+                ASSERT_EQ(weather.StrikeSchedule().size(), 1u);
+                EXPECT_EQ(weather.StrikesThisTick().size(), 1u);
+            }
+        }
+    }
+}
+
+TEST(LiveStrikeTracker, ScheduleWithoutStrikeNeverProducesAPresentation) {
+    using namespace Luminumbra;
+    auto schedule = PresentationWeatherSchedule();
+    schedule.strike_tick.reset();
+    Systems::WeatherSystem weather(1337);
+    Systems::WindFieldSystem wind(1337);
+    ASSERT_TRUE(weather.SetSchedule(schedule));
+    weather.RestoreAtTick(7, Vec3(8.0f), wind);
+    for (const std::uint64_t tick : {7u, 8u, 9u, 10u}) {
+        weather.UpdateFromClock(tick, Vec3(8.0f), wind);
+        EXPECT_TRUE(weather.StrikesThisTick().empty());
+        EXPECT_TRUE(weather.StrikeSchedule().empty());
+    }
+}
+
+std::vector<ProjectedBoltPoint> Stroke(glm::vec2 from, glm::vec2 to, std::size_t count) {
+    std::vector<ProjectedBoltPoint> points;
     for (std::size_t i = 0; i < count; ++i) {
         const float t = static_cast<float>(i) / static_cast<float>(count - 1);
         points.push_back(from + (to - from) * t);
@@ -152,7 +269,7 @@ ProjectedLiveStrike Strike(glm::vec2 origin, std::size_t branches, float pulse) 
     return strike;
 }
 
-std::size_t Strokes(const std::vector<glm::vec2>& points) {
+std::size_t Strokes(const std::vector<ProjectedBoltPoint>& points) {
     std::size_t strokes = points.empty() ? 0 : 1;
     for (const glm::vec2& point : points) {
         if (IsLiveBoltPenUp(point)) {
@@ -173,8 +290,8 @@ TEST(LiveStrikeComposer, LaterVisibleChannelSurvivesHeavilyBranchedEarlierStrike
     EXPECT_EQ(Strokes(composed.points), 3u);
     EXPECT_EQ(composed.points.front(), strikes[0].main_channel.front());
     EXPECT_EQ(composed.points[31], strikes[1].main_channel.front());
-    EXPECT_EQ(composed.points[30], kLiveBoltPenUp);
-    EXPECT_EQ(composed.points[61], kLiveBoltPenUp);
+    EXPECT_EQ(glm::vec2(composed.points[30]), kLiveBoltPenUp);
+    EXPECT_EQ(glm::vec2(composed.points[61]), kLiveBoltPenUp);
     EXPECT_EQ(composed.points[62], strikes[0].branches[0].front());
 }
 
@@ -192,7 +309,7 @@ TEST(LiveStrikeComposer, StrongestStrikeIsPlacedFirstWhenChannelsExceedTheBudget
     // Branches follow the same order, so the strongest strike keeps its fork.
     EXPECT_EQ(composed.points[62], strikes[2].branches[0].front());
     EXPECT_FLOAT_EQ(composed.pulse, 0.4f);
-    EXPECT_EQ(composed.strike_ndc, strikes[2].strike_ndc);
+    EXPECT_EQ(composed.flashes.entries[0].strike_ndc, strikes[2].strike_ndc);
 }
 
 TEST(LiveStrikeComposer, OffscreenStrikesKeepTheFlashButSpendNoPoints) {
@@ -209,7 +326,106 @@ TEST(LiveStrikeComposer, OffscreenStrikesKeepTheFlashButSpendNoPoints) {
     EXPECT_EQ(Strokes(composed.points), 3u);
     // The strongest flash comes from the offscreen strike and still lights the scene.
     EXPECT_FLOAT_EQ(composed.pulse, 0.2f);
-    EXPECT_EQ(composed.strike_ndc, offscreen.strike_ndc);
+    EXPECT_EQ(composed.flashes.entries[0].strike_ndc, offscreen.strike_ndc);
+}
+
+TEST(LiveStrikeComposer, FlashCentresAreOrderedByPulseThenInputIndex) {
+    const std::array strikes{Strike({-0.5f, 0.5f}, 0, 0.2f),
+                             Strike({0.0f, 0.5f}, 0, 0.8f),
+                             Strike({0.5f, 0.5f}, 0, 0.8f)};
+    const auto composed = ComposeLiveStrikes(strikes, 0);
+    ASSERT_EQ(composed.flashes.count, strikes.size());
+    const std::array<std::size_t, 3> expected{1, 2, 0};
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        EXPECT_EQ(composed.flashes.entries[i].strike_ndc, strikes[expected[i]].strike_ndc);
+        EXPECT_FLOAT_EQ(composed.flashes.entries[i].pulse, strikes[expected[i]].pulse);
+        EXPECT_TRUE(composed.flashes.entries[i].onscreen);
+    }
+    EXPECT_TRUE(composed.points.empty());
+}
+
+TEST(LiveStrikeComposer, FlashCapKeepsTheStrongestAndEarlierTies) {
+    constexpr auto cap = Luminumbra::Rendering::kMaxLiveStrikeFlashes;
+    std::array<ProjectedLiveStrike, cap + 2> strikes{};
+    for (std::size_t i = 0; i < strikes.size(); ++i) {
+        strikes[i].strike_ndc = {static_cast<float>(i) * 0.1f, 0.0f};
+        strikes[i].pulse = 0.2f;
+    }
+    // A late stronger strike displaces the last retained tie, not the earliest one.
+    strikes.back().pulse = 0.9f;
+    const auto composed = ComposeLiveStrikes(strikes, 0);
+    ASSERT_EQ(composed.flashes.count, cap);
+    EXPECT_EQ(composed.flashes.entries[0].strike_ndc, strikes.back().strike_ndc);
+    for (std::size_t i = 1; i < cap; ++i) {
+        EXPECT_EQ(composed.flashes.entries[i].strike_ndc, strikes[i - 1].strike_ndc);
+        EXPECT_FLOAT_EQ(composed.flashes.entries[i].pulse, 0.2f);
+    }
+}
+
+TEST(LiveStrikeComposer, FlashCandidateSelectionIsBoundedAndKeepsStableTies) {
+    using Luminumbra::Rendering::SelectLiveStrikeFlashCandidates;
+    constexpr auto cap = Luminumbra::Rendering::kMaxLiveStrikeFlashes;
+    EXPECT_TRUE(SelectLiveStrikeFlashCandidates({}).empty());
+    const std::array<float, 1> single{0.42f};
+    EXPECT_EQ(SelectLiveStrikeFlashCandidates(single), (std::vector<std::size_t>{0}));
+    std::array<float, cap + 2> pulses{};
+    pulses.fill(0.2f);
+    pulses.back() = 0.9f;
+    const auto selected = SelectLiveStrikeFlashCandidates(pulses);
+    ASSERT_EQ(selected.size(), cap);
+    for (std::size_t i = 0; i + 1 < cap; ++i) {
+        EXPECT_EQ(selected[i], i);
+    }
+    EXPECT_EQ(selected.back(), pulses.size() - 1);
+    pulses.front() = 1.0f;
+    EXPECT_EQ(SelectLiveStrikeFlashCandidates(pulses), selected);
+}
+
+TEST(LiveStrikeComposer, BehindCameraStrongestKeepsSentinelAndWeakerVisibleCentre) {
+    ProjectedLiveStrike behind;
+    behind.pulse = 0.9f;
+    const auto visible = Strike({0.6f, 0.2f}, 0, 0.4f);
+    const std::array strikes{behind, visible};
+    const auto composed = ComposeLiveStrikes(strikes, 96);
+    ASSERT_EQ(composed.flashes.count, 2u);
+    EXPECT_EQ(composed.flashes.entries[0].strike_ndc, kLiveBoltPenUp);
+    EXPECT_FALSE(composed.flashes.entries[0].onscreen);
+    EXPECT_FLOAT_EQ(composed.flashes.entries[0].pulse, behind.pulse);
+    EXPECT_EQ(composed.flashes.entries[1].strike_ndc, visible.strike_ndc);
+    EXPECT_TRUE(composed.flashes.entries[1].onscreen);
+    EXPECT_FLOAT_EQ(composed.flashes.entries[1].pulse, visible.pulse);
+    EXPECT_EQ(composed.points, visible.main_channel);
+}
+
+TEST(LiveStrikeComposer, SingleOnscreenFlashPreservesCentrePulseAndGeometry) {
+    for (const glm::vec2 centre :
+         {glm::vec2(0.0f, 0.5f), glm::vec2(-1.0f, 1.0f), glm::vec2(1.0f, 1.0f)}) {
+        const auto strike = Strike(centre, 0, 0.42f);
+        const auto composed = ComposeLiveStrikes(std::span(&strike, 1), 96);
+        ASSERT_EQ(composed.flashes.count, 1u);
+        EXPECT_EQ(composed.flashes.entries[0].strike_ndc, strike.strike_ndc);
+        EXPECT_FLOAT_EQ(composed.flashes.entries[0].pulse, strike.pulse);
+        EXPECT_TRUE(composed.flashes.entries[0].onscreen);
+        EXPECT_FLOAT_EQ(composed.pulse, strike.pulse);
+        EXPECT_EQ(composed.points, strike.main_channel);
+    }
+}
+
+TEST(LiveStrikeComposer, OffscreenCentresAreNotClampedIntoTheView) {
+    const std::array<glm::vec2, 5> centres{glm::vec2(-1.01f, 0.0f),
+                                           glm::vec2(1.01f, 0.0f),
+                                           glm::vec2(0.0f, -1.01f),
+                                           glm::vec2(0.0f, 1.01f),
+                                           kLiveBoltPenUp};
+    for (const auto centre : centres) {
+        ProjectedLiveStrike strike;
+        strike.strike_ndc = centre;
+        strike.pulse = 0.4f;
+        const auto composed = ComposeLiveStrikes(std::span(&strike, 1), 0);
+        ASSERT_EQ(composed.flashes.count, 1u);
+        EXPECT_EQ(composed.flashes.entries[0].strike_ndc, centre);
+        EXPECT_FALSE(composed.flashes.entries[0].onscreen);
+    }
 }
 
 TEST(LiveStrikeComposer, CrossingStrokeIsVisibleAndTiesKeepTheEarlierFlash) {
@@ -221,11 +437,11 @@ TEST(LiveStrikeComposer, CrossingStrokeIsVisibleAndTiesKeepTheEarlierFlash) {
     const std::vector<ProjectedLiveStrike> strikes{crossing, later};
     const auto composed = ComposeLiveStrikes(strikes, 96);
     ASSERT_EQ(composed.points.size(), 2u + 1u + 30u);
-    EXPECT_EQ(composed.points[0], glm::vec2(-1.0f, 0.0f));
-    EXPECT_EQ(composed.points[1], glm::vec2(1.0f, 0.0f));
+    EXPECT_EQ(glm::vec2(composed.points[0]), glm::vec2(-1.0f, 0.0f));
+    EXPECT_EQ(glm::vec2(composed.points[1]), glm::vec2(1.0f, 0.0f));
     EXPECT_FALSE(IsLiveBoltPenUp(composed.points[0]));
     EXPECT_FALSE(IsLiveBoltPenUp(composed.points[1]));
-    EXPECT_EQ(composed.strike_ndc, crossing.strike_ndc);
+    EXPECT_EQ(composed.flashes.entries[0].strike_ndc, crossing.strike_ndc);
 }
 
 TEST(LiveStrikeComposer, CrossingSegmentsUploadOnlyClippedRealPoints) {
@@ -267,22 +483,22 @@ TEST(LiveStrikeComposer, ClippedExcursionsAndPenUpsKeepDisconnectedPiecesSeparat
                            kLiveBoltPenUp,
                            {-2.0f, -0.5f},
                            {2.0f, -0.5f}};
-    const std::vector<glm::vec2> expected{{-1.0f, 0.0f},
-                                          {0.0f, 0.0f},
-                                          {1.0f, 0.0f},
-                                          kLiveBoltPenUp,
-                                          {1.0f, 0.5f},
-                                          {0.0f, 0.5f},
-                                          kLiveBoltPenUp,
-                                          {-1.0f, -0.5f},
-                                          {1.0f, -0.5f}};
+    const std::vector<ProjectedBoltPoint> expected{{-1.0f, 0.0f},
+                                                   {0.0f, 0.0f},
+                                                   {1.0f, 0.0f},
+                                                   kLiveBoltPenUp,
+                                                   {1.0f, 0.5f},
+                                                   {0.0f, 0.5f},
+                                                   kLiveBoltPenUp,
+                                                   {-1.0f, -0.5f},
+                                                   {1.0f, -0.5f}};
     EXPECT_EQ(ComposeLiveStrikes(std::span(&strike, 1), expected.size()).points, expected);
     // A stroke that grows beyond the budget through clipping is dropped whole.
     EXPECT_TRUE(ComposeLiveStrikes(std::span(&strike, 1), expected.size() - 1).points.empty());
     // A turn outside the view also needs a break when both segments touch the view.
     strike.main_channel = {{0.0f, 0.0f}, {2.0f, 0.0f}, {0.0f, 1.0f}};
     EXPECT_EQ(ComposeLiveStrikes(std::span(&strike, 1), 5).points,
-              (std::vector<glm::vec2>{
+              (std::vector<ProjectedBoltPoint>{
                   {0.0f, 0.0f}, {1.0f, 0.0f}, kLiveBoltPenUp, {1.0f, 0.5f}, {0.0f, 1.0f}}));
     // Overflow rolls back only this stroke, preserving earlier geometry and its flash.
     const ProjectedLiveStrike earlier = Strike({-0.5f, 0.5f}, 0, 0.2f);
@@ -306,7 +522,7 @@ TEST(LiveStrikeComposer, NonFiniteEndpointsDoNotUploadOrJoinAcrossInvalidSegment
         EXPECT_FALSE(LiveSegmentTouchesView(invalid, {0.0f, 0.0f}));
         strike.main_channel = {{-0.5f, 0.0f}, {0.0f, 0.0f}, invalid, {0.0f, 0.5f}, {0.5f, 0.5f}};
         EXPECT_EQ(ComposeLiveStrikes(std::span(&strike, 1), 96).points,
-                  (std::vector<glm::vec2>{
+                  (std::vector<ProjectedBoltPoint>{
                       {-0.5f, 0.0f}, {0.0f, 0.0f}, kLiveBoltPenUp, {0.0f, 0.5f}, {0.5f, 0.5f}}));
     }
 }
@@ -481,6 +697,7 @@ TEST(LiveStrikeComposer, EmptyInputAndTinyCapacityDrawNothing) {
     const auto empty = ComposeLiveStrikes({}, 96);
     EXPECT_TRUE(empty.points.empty());
     EXPECT_FLOAT_EQ(empty.pulse, 0.0f);
+    EXPECT_EQ(empty.flashes.count, 0u);
     const std::vector<ProjectedLiveStrike> strikes{Strike({0.0f, 0.5f}, 1, 0.3f)};
     // The 20-point branch would fit, but its 30-point channel does not.
     const auto tiny = ComposeLiveStrikes(strikes, 25);
@@ -491,3 +708,75 @@ TEST(LiveStrikeComposer, EmptyInputAndTinyCapacityDrawNothing) {
 }
 
 } // namespace
+
+TEST(LightningBoltDepth, ProjectionAndClippingPreserveReciprocalViewDepth) {
+    using namespace Luminumbra::Rendering;
+    LightningBoltGeometry bolt;
+    bolt.main_channel = {{6.0f, 5.0f, 18.0f}, {26.0f, 5.0f, 12.0f}};
+    bolt.branches = {{{10.0f, 5.0f, 16.0f}, {10.0f, 7.0f, 16.0f}}};
+    const auto view = glm::translate(glm::mat4(1), glm::vec3(-10, -5, -20));
+    bolt.ground_point = bolt.main_channel.back();
+    for (float far_plane : {3200.0f, 17408.0f}) {
+        const auto projection = ReversedZPerspective(glm::radians(90.0f), 1.0f, 0.1f, far_plane);
+        const auto strike = ProjectLightningBolt(bolt, projection * view, 0.7f);
+        ASSERT_EQ(strike.main_channel.size(), 2u);
+        EXPECT_FLOAT_EQ(strike.main_channel[0].inverse_depth, 0.5f);
+        EXPECT_FLOAT_EQ(strike.main_channel[1].inverse_depth, 0.125f);
+        EXPECT_NEAR(strike.main_channel[0].x, -2.0f, 0.00001f);
+        EXPECT_NEAR(strike.main_channel[1].x, 2.0f, 0.00001f);
+        const auto composed = ComposeLiveStrikes(std::span(&strike, 1), 96);
+        ASSERT_EQ(composed.points.size(), 5u);
+        EXPECT_NEAR(composed.points[0].inverse_depth, 0.40625f, 0.000001f);
+        EXPECT_NEAR(composed.points[1].inverse_depth, 0.21875f, 0.000001f);
+        EXPECT_TRUE(IsLiveBoltPenUp(composed.points[2]));
+        EXPECT_FLOAT_EQ(composed.points[2].inverse_depth, 0.0f);
+        EXPECT_FLOAT_EQ(composed.points[3].inverse_depth, 0.25f);
+        EXPECT_FLOAT_EQ(composed.points[4].inverse_depth, 0.25f);
+        EXPECT_FLOAT_EQ(composed.pulse, 0.7f);
+        EXPECT_EQ(composed.flashes.entries[0].strike_ndc, strike.strike_ndc);
+        EXPECT_TRUE(ComposeLiveStrikes(std::span(&strike, 1), 1).points.empty());
+    }
+}
+
+TEST(LightningBoltDepth, InvalidProjectionAndUnavailableDepthDoNotBridgeStrokes) {
+    using namespace Luminumbra::Rendering;
+    const auto projection = ReversedZPerspective(glm::radians(90.0f), 1.0f, 0.1f, 3200.0f);
+    for (float z : {0.0f,
+                    1.0f,
+                    -std::numeric_limits<float>::denorm_min(),
+                    std::numeric_limits<float>::infinity(),
+                    std::numeric_limits<float>::quiet_NaN()}) {
+        LightningBoltGeometry bolt;
+        bolt.main_channel = {{-1, 0, -2}, {0, 0, z}, {1, 0, -2}};
+        const auto strike = ProjectLightningBolt(bolt, projection, 1.0f);
+        EXPECT_TRUE(ComposeLiveStrikes(std::span(&strike, 1), 96).points.empty());
+        EXPECT_FLOAT_EQ(strike.main_channel[1].inverse_depth, 0.0f);
+    }
+    for (float depth : {0.0f,
+                        -1.0f,
+                        std::numeric_limits<float>::infinity(),
+                        std::numeric_limits<float>::quiet_NaN()}) {
+        ProjectedLiveStrike strike;
+        strike.main_channel = {ProjectedBoltPoint({-2, 0}, depth),
+                               ProjectedBoltPoint({2, 0}, 0.5f)};
+        const auto composed = ComposeLiveStrikes(std::span(&strike, 1), 2);
+        ASSERT_EQ(composed.points.size(), 2u);
+        EXPECT_FLOAT_EQ(composed.points[0].inverse_depth, 0.0f);
+        EXPECT_FLOAT_EQ(composed.points[1].inverse_depth, 0.0f);
+        strike.main_channel = {ProjectedBoltPoint({-0.8f, 0}, 0.5f),
+                               ProjectedBoltPoint({-0.4f, 0}, depth),
+                               ProjectedBoltPoint({0.4f, 0}, 0.5f),
+                               ProjectedBoltPoint({0.8f, 0}, 0.5f)};
+        const auto recovered = ComposeLiveStrikes(std::span(&strike, 1), 96);
+        ASSERT_EQ(recovered.points.size(), 6u);
+        EXPECT_TRUE(IsLiveBoltPenUp(recovered.points[3]));
+        EXPECT_FLOAT_EQ(recovered.points[4].inverse_depth, 0.5f);
+        EXPECT_FLOAT_EQ(recovered.points[5].inverse_depth, 0.5f);
+    }
+    ProjectedLiveStrike degenerate;
+    degenerate.main_channel = {ProjectedBoltPoint({0, 0}, 0.5f), ProjectedBoltPoint({0, 0}, 0.25f)};
+    const auto composed = ComposeLiveStrikes(std::span(&degenerate, 1), 2);
+    ASSERT_EQ(composed.points.size(), 2u);
+    EXPECT_FLOAT_EQ(composed.points[0].inverse_depth, 0.5f);
+    EXPECT_FLOAT_EQ(composed.points[1].inverse_depth, 0.25f);
+}
