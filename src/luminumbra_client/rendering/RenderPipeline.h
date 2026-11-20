@@ -43,6 +43,7 @@
 #include <nlohmann/json_fwd.hpp>
 #include <span>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -661,7 +662,10 @@ public:
     // Enabled publication requires this call's image/manifest and a held
     // CaptureDestinationReservation; refusal retracts that owned manifest.
     bool capture_diagnostics(const std::filesystem::path& capture);
-    // Detach and validate completed-frame coverage before manifest publication.
+    // GL-free observation: empty means no observed refusal. Publication must
+    // validate detachment through diagnostic_capture_ready() first.
+    std::string_view diagnostic_capture_refusal() const;
+    // Detach, then evaluate diagnostic_capture_refusal() before publication.
     bool diagnostic_capture_ready();
     bool diagnostic_capture_destination_available(const std::filesystem::path& capture) const;
     // Owns the destination across image, manifest and bundle publication.
@@ -711,6 +715,7 @@ public:
         try {
             const CaptureDestinationReservation reservation(*this, path);
             if (reservation.acquired() && diagnostic_capture_ready() &&
+                diagnostic_capture_refusal().empty() &&
                 WithCaptureManifest(path, observe(), write_capture)) {
                 return capture_diagnostics(path);
             }
