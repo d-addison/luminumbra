@@ -124,6 +124,12 @@ if(BUILD_TESTING)
     set_tests_properties(TerrainShaderContract
         PROPERTIES LABELS "ci;tools" TIMEOUT 30)
     add_test(
+        NAME TerrainWindingContract
+        COMMAND "${Python3_EXECUTABLE}" -I -B
+                "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_terrain_winding_contract.py")
+    set_tests_properties(TerrainWindingContract
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+    add_test(
         NAME WaterMeshContract
         COMMAND "${Python3_EXECUTABLE}" -I -B
                 "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_water_mesh_contract.py")

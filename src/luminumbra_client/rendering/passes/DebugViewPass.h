@@ -34,12 +34,36 @@ public:
         Chunk = 9,
         Producer = 10,
         MeshPath = 11,
+        DirectSun = 12,
+        DirectMoon = 13,
+        Ambient = 14,
+        ShadowFactor = 15,
+        Ao = 16,
+        Emissive = 17,
+        Fog = 18,
+        Specular = 19,
+        Roughness = 20,
+        Metallic = 21,
+        NormalView = 22,
+        NormalWorld = 23,
+        SkyVisibility = 24,
+        MaterialAo = 25,
+        Lighting = 26,
+        ForwardPlane = 27,
+        SkyPlane = 28,
+        ShadowPlane = 29,
     };
 
-    static constexpr std::array<const char*, 7> identity_mode_names = {
-        "off", "draw-id", "mesh-id", "lod", "chunk", "producer-owner", "mesh-path"};
+    static constexpr std::array<const char*, 25> identity_mode_names = {
+        "off",         "draw-id",        "mesh-id",       "lod",
+        "chunk",       "producer-owner", "mesh-path",     "direct-sun",
+        "direct-moon", "sky-ambient",    "shadow-factor", "ao",
+        "emissive",    "fog-atmosphere", "specular",      "roughness",
+        "metallic",    "normal-view",    "normal-world",  "sky-visibility",
+        "material-ao", "lighting",       "forward-plane", "sky-plane",
+        "shadow-plane"};
     static int identity_mode(std::string_view name) {
-        // Six identity modes; legacy mode parsing remains with the existing host.
+        // Shared CLI/panel catalogue; legacy modes retain their original numbers.
         for (std::size_t index = 1; index < identity_mode_names.size(); ++index) {
             if (name == identity_mode_names[index]) {
                 return DrawId + static_cast<int>(index) - 1;
@@ -107,17 +131,72 @@ public:
     // One fixed 48-byte record gathered from exactly one attachment coordinate.
     static void read_inspector_pixel(unsigned int buffer, InspectorPixel& pixel);
 
+    static constexpr bool contribution_mode(int mode) {
+        return mode >= DirectSun && mode <= ShadowPlane;
+    }
+    static constexpr bool supported_contribution(int mode) {
+        return contribution_mode(mode) && mode != Fog && mode < ForwardPlane;
+    }
+    static std::string_view contribution_legend(int mode);
+    // RGBA16F, at most 16M pixels / 128 MiB. Validate before GPU allocation.
+    static constexpr bool contribution_extent(unsigned int width, unsigned int height) {
+        return width != 0 && height != 0 && width <= 16384 && height <= 16384 &&
+               width <= 16777216U / height;
+    }
     struct Controls {
         bool enabled = false;
         bool inspector_open = false;
         bool refresh = false;
+        bool armed = false;
+        bool frozen = false;
+        bool inspect_requested = false;
+        bool frame_invalidated = false; // Window resize notification precedes target recreation.
         int view = None;
-        int x = 0;
-        int y = 0;
+        int x = -1;
+        int y = -1;
         DiagnosticExtent extent{};
+        DiagnosticExtent output{};
+        unsigned int zoom_texture = 0; // Borrowed until refresh, resize or disable.
+        unsigned int image_texture = 0;
+        std::string probe_json;
+        unsigned int contribution_texture = 0; // borrowed, owned by LightingPass
+        DiagnosticExtent contribution_size{};
+        int contribution_view = None;
         std::string result;
         std::string status;
     };
+    struct Viewport {
+        double window_width = 0;
+        double window_height = 0;
+        DiagnosticExtent framebuffer{};
+        // Rendered image rectangle, top-left framebuffer pixels (allows letterboxing).
+        double left = 0;
+        double top = 0;
+        double width = 0;
+        double height = 0;
+    };
+    // The sole window/DPI -> top-left attachment conversion. Refusals do not mutate state.
+    static bool
+    select_pixel(Controls& control, double window_x, double window_y, const Viewport& viewport);
+    // Kept GL-free and inline: the console widget also links in the standalone UI target.
+    static void request_inspection(Controls& control) {
+        if (!control.enabled || !control.inspector_open) {
+            return;
+        }
+        control.inspect_requested = true;
+        control.probe_json.clear();
+        control.result.clear();
+        control.zoom_texture = 0;
+        if (!control.frozen) {
+            control.refresh = true;
+        }
+    }
+    // Resize callers invalidate immediately, before deferred target recreation.
+    static void invalidate_selection(Controls& control);
+    void invalidate();
+    // Exact schema-1 clipboard payload; the richer UI record is separate.
+    static std::string
+    pixel_json(const DiagnosticExtent& extent, int x, int y, const InspectorPixel& pixel);
     // Render-thread UI bridge; the registry owns visibility, the pass owns GL storage.
     static Controls& controls() {
         static Controls control;
@@ -125,8 +204,8 @@ public:
     }
     static void cycle_mode(int& legacy_mode) {
         auto& control = controls();
-        if (control.enabled && control.view >= DrawId && control.view <= MeshPath) {
-            control.view = control.view == MeshPath ? None : control.view + 1;
+        if (control.enabled && control.view >= DrawId && control.view <= ShadowPlane) {
+            control.view = control.view == ShadowPlane ? None : control.view + 1;
             legacy_mode = None;
         } else if (control.enabled && legacy_mode == Position) {
             control.view = DrawId;
@@ -154,11 +233,12 @@ public:
     void set_mode(int mode);
     int mode() const {
         const auto& control = controls();
-        if (m_mode >= DrawId && (!control.enabled || m_mode > MeshPath)) {
+        if (m_mode >= DrawId && (!control.enabled || m_mode > ShadowPlane)) {
             return None;
         }
-        return control.enabled && control.view >= DrawId && control.view <= MeshPath ? control.view
-                                                                                     : m_mode;
+        return control.enabled && control.view >= DrawId && control.view <= ShadowPlane
+                   ? control.view
+                   : m_mode;
     }
 
     // Draw the debug visualization into the CURRENTLY BOUND framebuffer (the caller binds
@@ -172,8 +252,11 @@ private:
     struct Snapshot;
     std::unique_ptr<Snapshot> m_snapshot;
     void finish_frame(const RenderContext& ctx);
+    bool retain_images(const RenderContext& ctx);
+    void inspect_snapshot(const RenderContext& ctx);
     void bind_sources(const RenderContext& ctx, Shader& shader);
     std::unique_ptr<Shader> m_shader;
+    std::unique_ptr<Shader> m_contribution_shader;
     unsigned int m_vao = 0;  // empty VAO; the VS builds a fullscreen triangle
     int m_mode = Mode::None; // default-OFF (pass config, not frame state; set via set_mode)
 };

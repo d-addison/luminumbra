@@ -46,6 +46,7 @@ PYTHON_TESTS = (
     "test/tools/test_region_fixture_capture_contract.py",
 
     "tools/ci/test_terrain_shader_contract.py",
+    "tools/ci/test_terrain_winding_contract.py",
     "tools/ci/test_water_mesh_contract.py",
     "tools/ci/test_cache_retention.py",
     "tools/ci/test_check_acceptance_matrix.py",
@@ -260,6 +261,8 @@ def needs_python(path: str) -> bool:
             or path in {"res/shaders/g_buffer.frag",
                         "src/luminumbra_common/world/MarchingCubes.cpp",
                         "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp"}
+            or path.startswith("src/luminumbra_common/world/MarchingCubes")
+            or path == "src/luminumbra_common/world/FarVolumeMesher.cpp"
             or path == "tools/gates/baselines/diagnostic-rois.json"
             or path == "vendor/rmlui/rmlui-6.1-source.json"
             or path == "cmake/rmlui_source.cmake" or path.startswith("cmake/patches/rmlui-"))

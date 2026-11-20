@@ -3035,6 +3035,51 @@ struct ColumnFixture {
     }
 };
 
+TEST(WaterSeedInputs, CommittedLoadingColumnsSettleBeforeAdmissionAcrossCacheStates) {
+    for (int cache = 0; cache < 4; ++cache) {
+        for (const auto state : {ChunkState::Loading, ChunkState::Idle, ChunkState::Ready}) {
+            SCOPED_TRACE(::testing::Message() << cache << ',' << static_cast<int>(state));
+            ColumnFixture fixture;
+            auto saved = fixture.saved_column();
+            saved->set_state(state);
+            const auto depths = saved->water_depth_mm;
+            const auto beds = saved->water_bed_mm;
+            const auto flux = saved->water_edge_flux;
+            if (cache != 0) {
+                const auto placeholder = std::make_shared<Chunk>(IVec3(0));
+                ASSERT_TRUE(fixture.world.adopt_streamed_chunk(placeholder));
+                placeholder->set_state(cache == 1   ? ChunkState::Loading
+                                       : cache == 2 ? ChunkState::Idle
+                                                    : ChunkState::Ready);
+            }
+            fixture.world.remember_durable_chunks({IVec3(0)});
+            int reads = 0;
+            fixture.world.set_durable_chunk_loader(
+                [&](const IVec3&) {
+                    ++reads;
+                    return saved;
+                },
+                {});
+            const auto inspected = fixture.world.inspect_water_column(IVec3(0));
+            ASSERT_EQ(inspected, saved);
+            EXPECT_EQ(inspected->get_state(),
+                      state == ChunkState::Loading ? ChunkState::Idle : state);
+            const auto admitted = fixture.world.resolve_water_column(IVec3(0));
+            ASSERT_EQ(admitted, saved);
+            const auto reads_after_admission = reads;
+            EXPECT_EQ(fixture.world.inspect_water_column(IVec3(0)), admitted);
+            EXPECT_EQ(fixture.world.resolve_water_column(IVec3(0)), admitted);
+            EXPECT_EQ(reads, reads_after_admission);
+            EXPECT_NE(admitted->get_state(), ChunkState::Loading);
+            EXPECT_EQ(admitted->water_depth_mm, depths);
+            EXPECT_EQ(admitted->water_bed_mm, beds);
+            EXPECT_EQ(admitted->water_edge_flux, flux);
+            EXPECT_FALSE(fixture.world.durable_read_failed());
+            EXPECT_EQ(fixture.world.water_columns_generated(), 0u);
+        }
+    }
+}
+
 TEST(WaterSeedInputs, CanonicalColumnsIgnoreRendererWaterLodAndLoadingStorage) {
     for (int cache_kind = 0; cache_kind < 5; ++cache_kind) {
         SCOPED_TRACE(cache_kind);

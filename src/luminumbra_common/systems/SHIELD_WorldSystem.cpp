@@ -7501,12 +7501,16 @@ std::shared_ptr<Chunk> SHIELD_WorldSystem::inspect_water_column(const IVec3& coo
         if (m_admitted_water_columns.contains(id) || chunk->needs_authority()) {
             throw std::invalid_argument("Regional water column is still loading");
         }
-        return read_committed_chunk(coords);
-    }
-    if (chunk && (m_admitted_water_columns.contains(id) || chunk->needs_authority())) {
+    } else if (chunk && (m_admitted_water_columns.contains(id) || chunk->needs_authority())) {
         return chunk;
     }
-    return read_committed_chunk(coords);
+    auto committed = read_committed_chunk(coords);
+    // The loader has completed and its populated storage belongs to the owner.
+    // Match streamed adoption: saved generation output must not remain Loading.
+    if (committed && committed->get_state() == ChunkState::Loading) {
+        committed->set_state(ChunkState::Idle);
+    }
+    return committed;
 }
 
 void SHIELD_WorldSystem::migrate_restored_water_column(const std::shared_ptr<Chunk>& chunk) {
