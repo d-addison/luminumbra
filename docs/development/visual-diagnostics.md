@@ -12,22 +12,67 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | --- | --- | --- |
 | AOV serialization, integer ID encoding and point-probe JSON | Implemented as independent, GL-free codecs | `DiagnosticCapture.h/.cpp`; registered `DiagnosticCapture.*` regressions in `capture_manifest_test`; native execution pending |
 | Lazy integer target with attachment leases | Implemented as a standalone helper | `DiagnosticTargets.h`; registered `DiagnosticTargetDriver.*` regressions in `capture_manifest_test`; native execution pending |
-| Capture-local draw registry | Implemented as a standalone, GL-free helper | `DiagnosticDrawTable.h`; registered `DiagnosticDrawTable.*` regressions in `capture_manifest_test`; native execution pending |
+| Capture-local draw registry | Implemented with separate asset and generated-geometry identities | `DiagnosticDrawTable.h`; registered `DiagnosticDrawTable.*` regressions in `capture_manifest_test` and generated-key `DiagnosticAttribution.*` regressions in `render_smoke_test`; native execution pending |
 | Deferred attribution producers | Implemented inside a leased deferred scope | `GBufferTargets.h` and `GBufferPass.cpp` add a render-thread producer scope, capture-local draw identities and explicit unsupported records; `g_buffer.frag` and `foliage.frag` have additive `LUMIN_DIAG_IDS` outputs; registered `DiagnosticAttribution.*` source-contract and `DiagnosticAttributionGl.*` hidden-GL regressions in `render_smoke_test`; native execution pending |
 | G-buffer ID attachment | Implemented for explicit deferred captures | `GBufferPass` holds an `AttachmentLease` during deferred submission; detachment and lease release precede completion, including rollback, recreation, retirement and exceptional exits; registered `GBufferLeaseGl.*` and `DiagnosticAttributionGl.*` regressions; native execution pending |
-| Exact producer coverage | Partial | Inside an explicit producer scope, file-backed static instances and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier with unsupported generated-mesh metadata. Live terrain MDI, ladder backend, authored surfaces and tree impostors explicitly invalidate coverage; procedural static meshes also remain unsupported. Later plant/decal stages are outside the scope. Foliage has a guarded shader output but no instrumented forward submission or separate contributor plane |
-| Readback and scenario opt-in | Planned | Requires scenario capture integration and completion of the unsupported producer paths |
+| Exact producer coverage | Partial | Inside an explicit producer scope, file-backed static instances and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier with unsupported generated-mesh metadata. Live terrain MDI, ladder backend, authored surfaces and tree impostors explicitly invalidate coverage; procedural static meshes also remain unsupported. Later plant/decal stages are outside the scope. Foliage has a guarded shader output but no instrumented forward submission; the separate contributor attachment API is unused |
+| Bundle transactions and opt-in admission | GL-free core implemented; runtime integration pending | `DiagnosticCapture.h/.cpp` resolves options, streams normalized planes, joins draw records, enforces staging budgets and publishes completion last using identity-checked ownership. `diagnostic_bundle_test` covers public transports and filesystem refusal/rollback; native execution pending. Runtime setup refuses enabled diagnostics before output until the completed-frame adapter is integrated |
+| Dusk wedge attribution (issue #873) | Capture wiring and regression implemented; native execution pending | Fixed audit land pose, paired pre-present final/depth and available lighting sources; `FarWorldFogGl.DuskAuditFogIsContinuousAcrossDistanceAndHeightBoundaries`; no producer correction or visual approval |
 | Debug views and inspector | Planned | Extend `DebugViewPass` and developer console widgets |
-| Linux shader compilation and software-GL reference scenes | Partial | Fast Linux steps and material, cutout, night and terrain fixtures registered; bounded sky/terrain shader replays checked under llvmpipe; native scene target execution pending; dusk continuity diagnostic pending issue #918; no required-check or ruleset changes |
-| Automated image checks | Planned | Bundle-aware checks alongside existing render-health gates |
+| Linux shader compilation and software-GL reference scenes | Partial | Fast Linux steps and material, cutout, night, terrain, normal decode and both depth-convention fixtures registered; bounded sky/terrain shader replays checked under llvmpipe; native scene target execution pending; dusk continuity diagnostic pending issue #918; no required-check or ruleset changes |
+| Bundle validity and image checks | Implemented for schema 1 and reader-only schemas 2/3 | `check-diagnostic-capture.py` and registered `DiagnosticCapturePython` synthetic regressions validate bundles without a renderer. ROI coverage, validity, weather, edge and masked defect measurements plus worst-pixel SVG crops are implemented; synthetic detection is covered, while production thresholds remain advisory/unqualified |
 | Capture feature profile and capability manifest | Implemented as GL-free setup logic; app wiring pending | `CaptureFeatureProfile.h/.cpp`; strict `--capture-feature-profile=none\|all_features` runtime selection; registered `CaptureFeatureProfile.*` regressions; native execution pending |
 | Temporal audit plans and admission | Implemented as GL-free planning only; runtime execution refused | `TemporalAudit.h/.cpp`, `RuntimeScenarioConfig.h/.cpp`; registered `TemporalAudit.*` regressions in `capture_manifest_test`; native execution pending |
 | Temporal sequences and non-vacuous evidence (E1–E3) | Planned; gap inventory below describes current capture code | Exact-tick site execution, temporal metrics, shared producer policy and non-vacuous feature evidence require implementation; existing captures do not establish this coverage |
 
-The codecs and standalone helpers do not create scenario bundles or enable a runtime
-flag. The capture test target uses modeled GL entry points for target lifecycle tests;
+For issue #873, `world_visual_sweep` fixes the land eye at
+`(168, 10.0505952835083, -40)`. The dusk pin is `0.25`, horizon pitch is 0°
+and vertical FOV is 75°; yaw000 and yaw240 retain the sweep's summer/winter and
+clear/storm weather pins and cloud offsets. The last settled frame writes
+`sweep/<season>__dusk__<yaw>__<weather>.attribution/` before present. The scenario
+flag enables coverage diagnostics for this run and restores the caller's mode
+on exit. An attribution failure fails that cell and the sweep. The main manifest
+links each directory and records the weather phase; each immutable directory
+publishes `manifest.json` last, after all image writes succeed.
+
+The paired `color.ppm` and raw `depth.pfm` share a rendered frame. Existing
+position, normal, material and albedo planes remain available. `lighting_sources`
+adds the lit/opaque composites, sky-view and transmittance LUTs, SSAO, all shadow
+depth/tint cascade layers, and available integrated froxel RGB/transmittance
+slices. Sources with no allocated texture are explicitly unavailable. These are
+raw inputs and composites, not additive lighting terms. A private replay of the
+unchanged aerial program and uploaded uniforms produces `aerial-inscatter-0.pfm`
+and `aerial-opacity-0.pfm`; it does not advance or rerender the scene. The receipt
+records lighting/fog uniforms, ambient color, volumetric quality, weather, cloud
+offset, camera matrices and jitter. Canopy visibility has no standalone target;
+its controls are in the lighting uniforms. Each texture read is bounded to 16M
+pixels and 64 layers, staged one plane at a time; float planes are bottom-up.
+
+The analytic aerial shader does not read shadow cascades. Its distance/height
+falloffs are continuous; cleared depth bypasses fog, so a terrain coverage edge
+can look like a haze edge. Deferred lighting selects cascades by view depth, and
+optional froxel injection samples their depth/tint; those paths can project a
+view-dependent shadow boundary. The production-shader GL fixture isolates aerial
+fog at both audited yaws, legacy/ladder distances and aerosol/valley height
+boundaries, with nonzero opacity and nonconstant filtered sky input. Native
+execution and mutation evidence remain pending; no shader correction is claimed.
+A native review must locate the wedge in paired final/depth first, then compare
+fog opacity/color, cascade layers and matrices, sky LUT, SSAO and canopy controls.
+A clear-depth edge implicates coverage; a continuous fog term over discontinuous
+lit terrain implicates lighting; a froxel edge requires volumetrics to be active.
+A sky/terrain seam needs comparison with the sky source at the same sightline.
+Retain both yaws, both weather states and the exact pose receipts before assigning
+a producer or approving a correction.
+
+The GL-free bundle writer can publish supplied immutable completed-frame planes.
+Runtime scenario capture does not yet supply those planes or enable diagnostics.
+The capture test target uses modeled GL entry points for target lifecycle tests;
 rendering submits attribution only inside an explicitly constructed
-`GBufferDiagnosticCapture`. No runtime option constructs that scope yet. The client
+`GBufferDiagnosticCapture`. No runtime option constructs that scope yet.
+Diagnostic options are admitted once
+in `ParseRuntimePathOptions`, before save-root creation: malformed input is refused,
+and enabled diagnostics receive an explicit unavailable-adapter error. The pure
+resolver accepts valid CLI/environment options for the pending adapter. The client
 source manifest includes the codecs.
 
 `DiagnosticTargets` owns a lazy RGBA32UI texture and standalone framebuffer, capped
@@ -51,7 +96,8 @@ Shader files are outside the roots classified by `public-asset-inventory.json`, 
 their guarded edits do not change that inventory.
 
 An explicitly constructed `GBufferDiagnosticCapture` accepts a fresh draw table and
-optional caller-owned `DiagnosticTargets`; both owners outlive the scope on its
+optional caller-owned `DiagnosticTargets` and distinct forward target storage; all
+owners outlive the scope on its
 creating GL context thread. Construction alone performs no GL work. A table-only
 scope cannot attach or complete. `GBufferPass` attaches location six after the
 ordinary clear and holds a move-only `AttachmentLease` through deferred submission.
@@ -72,11 +118,29 @@ invalid impostor program cannot bypass the unsupported record. Empty terrain and
 impostor queues add no unsupported record. Later deferred and forward contributors
 remain outside this coverage; this predicate alone cannot authorize a final bundle.
 
-Only an attached scope compiles diagnostic programs, capped at six deferred
-vertex/ladder combinations. Default and ladder variants retain the existing alpha
+The contributor API can attach a distinct forward target after deferred detachment.
+It leases the selected storage through the same rollback and release path, preserves
+the forward framebuffer's original draw buffers, and enables only the additional
+identity output. The caller keeps that framebuffer alive through detachment. Missing
+or aliased storage, nested or repeated attachment, invalid extents and mismatched
+contributor passes refuse coverage. Current-program writes use the attached
+variant; a pass mismatch uploads zero IDs without throwing. No shipping
+forward producer invokes this API yet.
+
+Generated geometry can supply an exact bounded key instead of an asset path. The
+registry separates the two namespaces and emits a `generated` mesh member while
+retaining unknown provenance; ambiguous or invalid keys refuse without mutation.
+Registered source contracts cover the contributor API and feedback-variant bounds;
+hidden-GL regressions cover its leases, writers and refusals, with native execution
+pending.
+
+Only an attached scope compiles diagnostic programs, capped at six
+combinations, including separate feedback signatures (at most three names of
+64 bytes each). Default and ladder variants retain the existing alpha
 discard and depth output. The guarded integer output uses location six.
 With diagnostics disabled, removing the conditional blocks reproduces the base
 fragment shader text byte for byte.
+
 During collection, static instances are submitted once each using their existing
 attributes and base-instance offset, so repeated instances get separate ordered
 draw IDs without replay. Resolved mesh paths determine mesh LOD, including fallback
@@ -162,9 +226,15 @@ Both codecs cap dimensions at 16,384 and total pixels at 16,777,216, validate ex
 span sizes before writing and use only 4 KiB scratch storage. Material/ID refusal
 validates the entire bounded plane before writing. Work is O(pixels), at most two
 plane traversals; probes are O(1). The caller owns stable completed-frame buffers
-until serialization finishes. The future adapter should stream one plane at a time
-and cap aggregate CPU/GPU staging at 512 MiB before allocation; refuse a bundle
-that cannot fit. Do not allocate all full-resolution planes speculatively.
+until serialization finishes. The bundle core streams one plane at a time and
+caps aggregate CPU/GPU staging
+at 512 MiB before image allocation. Callers must account for all retained GPU and
+source/output CPU staging, including the draw registry; the core additionally
+reserves one largest plane, 4 KiB codec scratch and 64 MiB bounded serialization
+workspace. It preflights each source plane before reservation, then reads each
+again during serialization; the completed-frame source must remain immutable.
+No full multi-plane frame is allocated. The GL adapter must check capabilities
+and this budget before allocating diagnostic GPU storage.
 
 `BuildDiagnosticProbe` emits the following schema (numeric enums match the ID):
 
@@ -180,7 +250,7 @@ coordinates, material IDs or encoded identities return an empty string. The call
 must join draw/mesh IDs to the bundle's tables; unresolved entries are errors.
 Probe values must come from the exact same pixel and frame as the serialized AOVs.
 
-Publishing is planned as a complete new bundle transaction: validate all inputs and
+The GL-free writer implements a complete new bundle transaction: validate inputs and
 budgets first, reserve a fresh destination without replacing an existing bundle,
 write payloads, check stream/flush/close failures, and publish completion metadata
 last. Partial bytes after I/O failure are unpublished; clean up only artifacts this
@@ -188,6 +258,39 @@ transaction owns, verifying identity on removal. Codecs take streams and perform
 no path checks, opens, deletes or publication themselves. No asynchronous worker
 may sample live mutable draw tables. PNG success alone cannot mark diagnostics
 complete. Unsupported contributors must be declared in metadata.
+
+The remaining scenario integration must keep one capture scope around the exact
+completed frame, account for later deferred writes and forward contributors,
+restore GL readback/pack state, decode the actual G-buffer attachments and link
+the existing completed capture manifest. All sweep callbacks, standalone benchmark,
+headless, timed-scenario and motion captures must use that adapter. No producer
+coverage is inferred by the transaction core. This split keeps the GL-free changes
+within the delivery file budget; no runtime capture success is claimed yet.
+
+Validate one bundle directory, a completion JSON, or a recursive capture tree with
+`python3 -I -B tools/gates/check-diagnostic-capture.py PATH`. Exit 0 means valid,
+1 reports an invalid bundle, and 2 means usage or operating-system I/O failure.
+The reader refuses unknown schemas, incomplete publication, mismatched file lists,
+PFM/ID sizes or dimensions, unresolved identities, implicit unsupported producers
+and probes that disagree with any plane at the same top-left pixel. It reports
+nonfinite sample counts per plane as invalid diagnostic findings; the wire format
+still preserves those values. Explicit unsupported forward records are valid for
+the labeled deferred-only surface; unsupported deferred coverage is refused.
+
+Schema 1 lists member names, without stored size fields. Binary sizes are checked
+exactly against dimensions before scanning; table/probe JSON is bounded to
+16 MiB, completion to 16 MiB plus 64 KiB for its envelope, and capture manifests
+to 1 MiB. Plane scans
+use at most 4 KiB chunks. JSON integer tokens are capped at 128 characters before
+conversion, including on older Python versions. Tree discovery stops at 100,000 entries and refuses
+descendant links; a selected root alias is allowed. Reads use verified regular-file
+handles on both POSIX and Windows. Completion must be the final file-list member
+and cannot be older than any payload. Equal timestamps are allowed for coarse
+filesystems; timestamps and schema-1 names cannot prove historical write order or
+content integrity after a deliberate rewrite. No checksum or size field is invented.
+`diff-render-health.ps1 -CapturePath PATH` optionally invokes this reader when
+`PATH.diagnostics.json` exists. Without that sidecar the existing comparison stays
+unchanged. No required CI check or runtime capture adapter is added.
 
 ## B: views and inspector
 
@@ -262,15 +365,15 @@ and 8 MiB expanded source per translation unit; refuse budgets before compilatio
 
 ### Scene catalogue
 
-The schema-3 scene manifest inventories four 128x128 PPM references, all eight
+The schema-3 scene manifest inventories six 128x128 PPM references, all eleven
 consumed source files and the capture translation unit, including its fixed
 uniforms and generated textures. Each reference records its own origin: material,
-tree cutout and terrain are analytical; night is a surfaceless llvmpipe shader
+tree cutout, terrain, normal decode and depth are analytical; night is a surfaceless llvmpipe shader
 replay. Native scene target execution remains pending because the local display
 server could not bind. Images store linear RGB, bottom-first; sky samples undo
 the shader's explicit gamma after the display clamp. The existing binary PPM
-attribute covers every reference in this directory. These test assets are outside
-the runtime asset inventory.
+attribute covers every reference in this directory. The public asset inventory
+classifies these test references separately from runtime assets.
 
 | Scene | Real shader pair | Metric and tolerance |
 | --- | --- | --- |
@@ -278,6 +381,8 @@ the runtime asset inventory.
 | `tree-cutout` | `tree_impostor.vert/.frag` | Same reference thresholds; maximum RGB error against independent atlas categories <= 0.000001; the GL test checks unchanged background on all six attachments for discarded texels |
 | `night-sky` | `enhanced_skybox.frag` with fixed point directions | Same reference thresholds; maximum star RGB at/below horizon <= 0.000001; each of four stellar peaks >= 0.01 luma, above its eight-neighbour ring mean by >= 0.001 and every ring pixel by >= 0.00001 |
 | `terrain-blend` | `g_buffer.vert/.frag` | Same reference thresholds; every row has exactly 102 pixels between 10% and 90% Sand; weight backstep <= 0.000001, adjacent weight step <= 0.008, maximum RGB error against the analytical ramp <= 0.000001 |
+| `normal-decode` | Verbatim helpers from `g_buffer.frag` and `lighting_pass.frag`, with RGBA8 storage between passes | Same reference thresholds; unit-length error <= 0.000002, angular error <= 0.02 radians; preserve every nonzero component sign (magnitude > 0.006), including six axes, eight octants and both sides of the hemisphere seam |
+| `reversed-z` | Production `Camera.h` reversed-Z projection, GLM conventional projection and verbatim `magical_particles.frag` lineariser | Same reference thresholds; both conventions must order 128 plane distances monotonically, map near/far to opposite endpoints within 0.000002, recover distance within relative 0.0002 and reproject hardware depth within 0.000002 |
 | `dusk-sky` (diagnostic only) | `enhanced_skybox.frag`, production atmospheric compute kernels | Maximum adjacent column-mean luminance step across all 128 azimuth columns, including wrap; proposed <= 0.005 remains pending issue #918; no reference or passing expectation |
 
 The tree fixture selects one tile from a generated 2x2 atlas. Its 4x4 tile repeats
@@ -313,6 +418,26 @@ macro mottle and rock overlay are isolated out. The expected RGB is
 error was below 0.00000005. This qualifies the material-coverage path, not the
 terrain mesh producer or textured sand detail.
 
+Normal decode samples six axes (including both poles), all eight octants and
+positive/negative seam probes in row zero, followed by a dense integer-direction
+grid. The production encoder writes RGBA8; a separate pass samples that detached
+texture and runs the production lighting decoder. RGB stores decoded XYZ remapped
+by 0.5+0.5n. Analytical references use the ideal normals, so storage quantization
+is measured rather than baked into the oracle.
+
+Depth uses point samples of 128 frontoparallel planes spaced logarithmically
+from 0.1 to 100 metres. Rows 0..63 use conventional negative-one-to-one clip
+depth; rows 64..127 use the production reversed-Z zero-to-one projection.
+RGB stores hardware depth, recovered distance/100 and reprojected hardware depth.
+The required `depth-conventions.json` records `reversed_z`, near/far and row ranges
+for both halves. The flag selects whether raw depth or 1-raw enters the production
+reversed-depth lineariser; changing either the flag or selection fails the hard
+checks. This scene metadata is separate from runtime diagnostic bundles, whose
+existing `camera.reversed_z` field is unchanged. Both the fixture and compiled
+projection header have build-time hashes, checked against the consumed sources.
+The existing material and terrain native cases also run normal and depth checks,
+respectively, keeping the runner's exact registered case inventory intact.
+
 To compare or regenerate, first configure the existing opt-in scene target with
 `LUMINUMBRA_SHADER_SCENES=ON` and build `shader_scene_render_test`. Capture to a
 fresh directory using the existing runner (replace the example binary path with
@@ -324,20 +449,138 @@ python3 -I -B tools/gates/shader-scenes.py compare --capture build/scene-capture
 python3 -I -B tools/gates/shader-scenes.py regenerate --capture build/scene-capture --output build/scene-candidates
 ```
 
-Regeneration checks all five captures, source identities, renderer evidence and
-the cutout, night and terrain invariants before creating the candidate directory.
-It writes all four reference payloads before `scenes.json`; an I/O failure cannot publish a
+Regeneration checks all seven captures, source identities, renderer evidence,
+depth-convention metadata and every hard scene invariant before creating the candidate directory.
+It writes all six reference payloads before `scenes.json`; an I/O failure cannot publish a
 complete candidate manifest. Review and copy the candidate manifest and references
 together. Their hashes are refreshed in that manifest; rerun the scene contracts
 and acceptance/public-tree validators. Never regenerate to bless a shader defect.
 
+To reproduce the ideal normal/depth references without native execution, use
+`python3 -I -B tools/gates/shader-scenes.py regenerate --analytical --output build/scene-ideals`.
+This preserves the other four references and their origins, and records the new
+references as analytical with version `not captured`. It supplies no renderer or
+native execution evidence. Missing/partial images, stale compiled identities,
+unknown/missing conventions and single-pixel invariant failures refuse publication
+on the capture path. Native normal/depth execution and runtime bundle integration
+remain pending.
+
 ## D: capture checks
 
-These are proposed additional thresholds, not changes to existing gates or baselines.
-Require complete, matching-frame bundles before a check is eligible. Pinned masks
-and scenario expectations select meaningful regions; unknown/missing data is an
-error, never a pass. Analyze raw channels before color transforms. Apply O(pixels)
+The reader implements ROI metrics alongside the proposed thresholds below; existing
+gates and baselines are unchanged. Complete, matching-frame bundles are required
+before measurement. Missing channels or edge bands without adjacent pairs report
+`unavailable` with a null value, never zero or a pass. Analyze raw channels before color transforms. Apply O(pixels)
 bounded passes, not repeated flood fills for every pixel.
+
+`tools/gates/baselines/diagnostic-rois.json` uses schema 1 with a `rois` list.
+Each ROI has a unique `name`, a half-open normalized top-left `rect` of
+`[left, top, right, bottom]`, and `metrics`. Pixel bounds round outward using
+floor/ceil; every nonempty rectangle touches at least one pixel. Each metric has
+`kind`, `channel` and inclusive `[minimum, maximum]` `thresholds`. Optional ROI
+`enforce: true` qualifies every metric in that ROI; omitted/false is advisory.
+All shipped ROIs are advisory, so threshold misses and unavailable channels add
+no failure to current valid captures. Existing bundle validity failures still fail.
+Qualified metrics fail on a threshold miss or unavailable result. Use
+`--rois CONFIG` to select reviewed scenario-specific expectations. The shipped
+regions illustrate near-ground coverage, weather, a dusk sky column band and a
+terrain blend row band; they do not establish camera or scenario qualification.
+
+Coverage reports the fraction of all ROI pixels matching an exact `field`/`value`
+class in `ids`: background (1=true, 0=false), draw, mesh, LOD, ownership or pass.
+Background retains its zero ID fields. Exact material coverage uses `kind: coverage`, `channel: material`,
+`field: material` and an integral material `value` in [0,255]; a pinned expected-water
+ROI uses [0.01,1] with its scenario's actual water material ID. Missing or invalid
+material evidence never passes. Validity reports the fraction whose whole
+pixel is finite; depth additionally requires [0,1], normal components [-1,1], and
+material integral [0,255]. Albedo validity only requires finiteness. Undefined
+background AOVs are not inferred or masked. Weather reports the mean, minimum and
+maximum scalar contribution, enforcing the range against every pixel, not just
+the mean. Edge `axis: x` compares adjacent columns and `axis: y` adjacent rows,
+only inside the ROI; the value is the maximum absolute channel difference.
+Coordinates select the second pixel of that pair. These original metrics do not
+infer final-color weather. The additional masked
+checks below require explicit same-frame evidence for silhouette exclusion and
+reference-scene error measurement.
+
+Schema-1 bundles remain unchanged and have no contribution channels. Reader-only
+schema 2 retains its precipitation/fog/cloud-only contract. Reader-only schema 3
+requires at least one of the additional evidence planes; weather is optional.
+Old readers refuse schema 3 explicitly. No save or simulation format changes. Ordered optional
+members follow draws, before the optional probe and completion: `precipitation`,
+`fog`, `cloud`, `expected_mask`, `reference`, `dry_reference`, `alpha`, `cutout`,
+`depth_written`, `triplanar`, `stars`, `transmittance`. Scalar planes use
+`linear_contribution_float32`; RGB references use `linear_rgb_float32` and XYZ
+triplanar weights use `linear_xyz_float32`. All use the existing PFM reader,
+dimension/byte-size/orientation/timestamp and nonfinite checks. Nested documents
+retain schema 1. Unknown channels/encodings are refused. No runtime writer supplies
+these planes yet; producers must declare matching frame, camera and surface data,
+including reference inputs with the same scene settings. A bundle does not prove
+reference provenance or repeated-capture qualification.
+
+Additional metric specifications require `mask: "expected_mask"`. The mask is a
+pinned binary scalar plane whose meaning is defined by each named ROI; no mask is
+guessed from final color. Unknown masks/ROIs are refused. Missing required planes,
+empty masks, or no eligible samples report `unavailable`, with null value and no
+worst pixel. Mask values outside {0,1} refuse measurement. Scenario masks exclude
+known caves/water/silhouettes, particles and unsupported surfaces and require
+residency before capture. The shipped rectangles illustrate placement only.
+
+| Kind / channel | Measurement and evidence | Advisory example |
+| --- | --- | --- |
+| `holes` / `ids` | Background fraction after eroding the expected-terrain mask and ROI boundary by two pixels in both axes; also catches a far/live gap | [0,0] |
+| `seam` / `albedo` | Linear RGB MAE and per-pixel RGB mean-error p99 against `reference`; pinned seam/shadow/light-isolation mask | MAE <= 0.005; `p99_limit: 0.02` |
+| `boundary` / `albedo` | p99 of maximum RGB residual against inward extrapolation `2*next-next_next`; `axis: x/y`, inward `direction: -1/1`; three selected pixels must have the same nonbackground IDs and depth spread <= 0.01 | p99 <= 8/255; use an explicitly pinned border band |
+| `card` / `alpha` | Alpha coverage fraction (`alpha >= cutout`) strictly inside thresholds, plus zero `depth_written` pixels below `cutout`; all three scalar planes required and range checked | coverage strictly (0.01,0.99); zero violations |
+| `banding` / `albedo` | Maximum error of adjacent RGB differences against the corresponding `reference` differences along `axis: x/y` | <= 0.02; pinned sky/gradient ROI |
+| `wedge` / `albedo` | Maximum absolute RGB error against `reference` inside a pinned expected-sky/geometry ROI; identifies unexpected wedge pixels without guessing shapes from color | <= 0.02 |
+| `detail` / `albedo` | Mean maximum RGB adjacent-pixel difference along `axis: x/y`; same nonbackground IDs, continuous depth, LOD0 and zero `precipitation` at both pixels | Example floor 1/255; existing detail gates/floors unchanged |
+| `weather_delta` / `albedo` | Mean absolute RGB difference against same-input `dry_reference` in the ground mask | >= 1/255; existing overcast/streak gates unchanged |
+| `weights` / `triplanar` | Maximum sum-to-one error or component excursion outside [0,1] | <= 0.001 |
+| `composition` / `stars` | Maximum absolute star contribution in a pinned daytime/below-horizon exclusion mask, or `transmittance` excursion outside [0,1] | zero |
+
+Seam and boundary p99 use a fixed 65,536-bin histogram, reporting `p99_upper`,
+a conservative upper bound at 1/65,536 resolution (values >= 1 use the exact
+maximum). `p99_limit` is required for both. Boundary also reports the exact maximum.
+Only the p99 bound, rather than a maximum limit on every outlier, controls boundary
+status. Reference checks measure supplied references; they do not claim that native
+Mesa scenes or production captures have been qualified. Synthetic defect fixtures
+cover isolated holes, seams, boundary bands, cards, bands, wedges, missing weather
+response, detail loss, weight and composition errors. Every injected defect fails
+exactly its metric and produces a deterministic labelled worst-pixel montage.
+The C2 scene catalogue does not qualify these bundle weather or edge metrics.
+
+Each metric emits a JSON record with ROI, metric specification, pixel rectangle,
+`qualification` (`qualified`/`advisory`), `status` (`pass`/`fail`/`unavailable`),
+value, sample count and worst-pixel coordinates when available. Nonfinite weather
+or edge inputs make that metric unavailable; bundle nonfinite findings still fail.
+Worst coverage/validity/weather/detail/response pixels maximize distance outside
+the requested interval; residual checks use the largest error. Card violation
+pixels take priority over coverage-only failures. Records include the same-pixel
+ID and joined draw/mesh metadata when available (background stays explicit).
+Ties choose top row
+then left column. At most 32 metrics and ROIs, 1 MiB configuration, 16,384 pixels per
+axis and 16,777,216 pixels per plane bound the work. Original metric scans use at
+most two rows; masked checks cache at most five rows
+per required channel (262,144 wire bytes per ID row, 196,608 per RGB row; decoded
+tuples add bounded interpreter overhead) and one 512 KiB histogram where needed.
+Each metric visits its ROI once; hole erosion examines at most 25 mask neighbors
+per pixel and boundary/detail comparisons at most three pixels. At most 32
+histogram scans of 65,536 bins add constant bounded work. No simulation path changes.
+
+For a labelled worst-pixel montage, run
+`python3 -I -B tools/gates/build-visual-sweep-montages.py --diagnostics CAPTURE.diagnostics.json --output worst.svg`
+with optional `--rois CONFIG`. This stdlib-only path validates one bundle before
+creating a new output, refuses an existing output and emits up to 32 labelled
+33x33 raw-albedo crops centered/clipped around worst pixels, with a yellow pixel
+outline and metric value/threshold/qualification/status, p99/violation details
+and draw/asset/pass labels when available. Display values clamp to [0,1];
+nonfinite pixels are magenta. Unavailable rows carry labels without fabricated
+crops. These are raw-albedo evidence, not final-color visual approval. The existing
+PNG contact-sheet path retains its optional Pillow dependency. Registered
+`DiagnosticChecksPython`, `DiagnosticRoisPython` and `DiagnosticCapturePython`
+tests cover metrics, isolated injected defects, refusal,
+advisory/qualified results and montage generation without native rendering.
 
 | Check | Initial threshold | False-positive control |
 | --- | --- | --- |
@@ -735,9 +978,9 @@ edits when parallel branches join. No new required CI checks are part of any row
 | B1: ID views and inspector | `rendering/passes/DebugViewPass.h`; `rendering/passes/DebugViewPass.cpp`; `res/shaders/debug_view.frag`; `src/luminumbra_client/debug/widgets/RenderControlWidgets.cpp`; `src/luminumbra_client/app/RegisterDeveloperWidgets.cpp`; `rendering/RenderPipeline.cpp`; `test/rendering/diagnostic_inspector_test.cpp`; `test/CMakeLists.txt`; `config/public-asset-inventory.json`; `docs/development/visual-diagnostics.md` (10) | After A4. ID/LOD/chunk/ownership and mesh-path views, single-pixel inspector; avoids listed owned files. |
 | B2: shader contribution views | `rendering/DiagnosticContributions.h`; `rendering/DiagnosticContributions.cpp`; `rendering/passes/DebugViewPass.cpp`; `res/shaders/debug_view.frag`; `res/shaders/lighting_pass.frag`; `res/shaders/g_buffer.frag`; `test/rendering/diagnostic_contributions_test.cpp`; `test/CMakeLists.txt`; `config/public-asset-inventory.json`; `docs/development/visual-diagnostics.md` (10) | After B1. Remaining view catalogue, instrumented opt-in variants and overlay state. Coordinate owned shaders. Forward/sky/shadow contributor planes remain separately labeled until their producers are instrumented. |
 | C1: every-PR shader compile and link completion | `tools/ci/compile_shaders.py`; `tools/ci/test_compile_shaders.py`; `test/rendering/render_smoke_test.cpp`; `docs/development/visual-diagnostics.md` (4) | Implemented in the existing unconditional fast-job step. Compile every stage permutation, then link the native program registry and compute inventory using the same prepared sources. Refuse missing pass-layout pairs or unlinked stage/define permutations; registered interface-mismatch, matching-pair and missing-program regressions cover linking. |
-| C2: llvmpipe scenes | `tools/gates/shader-scenes.py`; `tools/gates/test_shader_scenes.py`; `test/rendering/shader_scenes/scenes.json`; `test/rendering/shader_scenes/references/material.ppm`; `test/rendering/shader_scene_render_test.cpp`; `test/CMakeLists.txt`; `tools/ci/ci_paths.py`; `.github/workflows/ci.yml`; `config/public-asset-inventory.json`; `docs/development/visual-diagnostics.md` (10) | After C1. First reference/metric/regeneration vertical path; extend the scene catalogue in later bounded changes. Avoids owned files; reference and consumer share one path gate. |
+| C2: llvmpipe scenes | `tools/gates/shader-scenes.py`; `tools/gates/test_shader_scenes.py`; `test/rendering/shader_scenes/scenes.json`; `test/rendering/shader_scenes/references/`; `test/rendering/shader_scene_render_test.cpp`; `test/CMakeLists.txt`; `tools/ci/validate_assets.py`; `config/public-asset-inventory.json`; `docs/development/visual-diagnostics.md` | After C1. Six references now include normal decode and both depth conventions, extending the existing reference/metric/regeneration path and path gate. Native scene execution remains pending; dusk is diagnostic only. The normal/depth extension changes ten files including two references and public asset classification; no workflow or required-check changes. |
 | D1: bundle/ID/AOV validity checks | `tools/gates/check-diagnostic-capture.py`; `tools/gates/test_diagnostic_capture.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `tools/gates/diff-render-health.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (8) | After A4; parallel with B/C. Registered Python reader tests cover little endian, dimensions, partial payloads, unknown versions and nonfinite values. Avoids owned files. |
-| D2: qualified image metrics | `tools/gates/check-diagnostic-capture.py`; `tools/gates/test_diagnostic_capture.py`; `tools/gates/baselines/diagnostic-rois.json`; `tools/gates/build-visual-sweep-montages.py`; `tools/gates/test_diagnostic_rois.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After D1 and relevant C2 fixtures/B2 channels. Coverage/weather/edge metrics and labeled worst-pixel montages; qualify enforcement separately. Avoids owned files. |
+| D2: image metrics and synthetic qualification | `tools/gates/check-diagnostic-capture.py`; `tools/gates/test_diagnostic_capture.py`; `tools/gates/baselines/diagnostic-rois.json`; `tools/gates/build-visual-sweep-montages.py`; `tools/gates/test_diagnostic_checks.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After D1 and relevant C2 fixtures/B2 channels. Implemented masked holes, seam/reference and boundary residuals, cards, bands, wedges, weather/detail and composition checks with isolated synthetic defects and labeled worst-pixel montages. All shipped thresholds remain advisory/unqualified; production enforcement needs separate repeated-capture evidence. Acceptance-row state is unchanged. Avoids owned files. |
 | E1a: exact-tick plan and admission | `rendering/TemporalAudit.h`; `rendering/TemporalAudit.cpp`; `src/luminumbra_client/core/RuntimeScenarioConfig.h`; `src/luminumbra_client/core/RuntimeScenarioConfig.cpp`; `src/luminumbra_client/sources.cmake`; `test/rendering/temporal_audit_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After A4, D1. Register GL-free tick/cadence/overflow/refusal regressions in capture_manifest_test. Coordinate configuration ownership; admission alone cannot advertise runtime support. |
 | E1b: deterministic weather input | `src/luminumbra_common/systems/WeatherSystem.h`; `src/luminumbra_common/systems/WeatherSystem.cpp`; `src/luminumbra_common/world/GameSession.cpp`; `rendering/TemporalAudit.cpp`; `test/rendering/temporal_weather_test.cpp`; `test/CMakeLists.txt`; `src/luminumbra_client/core/ScenarioRunnerDrive.cpp`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E1a. Coordinate simulation owners: register fixed-tick weather/hydrology/strike and identity/replay tests before enabling script support. Exercise normal live bridge; any format migration is a prerequisite separate slice with both readers/writers, not hidden in this count. |
 | E1c: site sequence driver | `src/luminumbra_client/main_client.cpp`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `src/luminumbra_client/core/ScenarioRunnerImpl.h`; `rendering/TemporalAudit.cpp`; `test/rendering/temporal_sequence_test.cpp`; `test/CMakeLists.txt`; `tools/gates/validate-engine-frontier.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E1b, A4, D1. Coordinate app/scenario ownership. Register sequence/readiness/phase and creature-tick tests plus native fixed-site capture through existing frontier actions. No all-features claim before E3. |

@@ -11,6 +11,7 @@
 #include "../FarLodSystem.h"
 #include "../PassShaderLayouts.h"      // enumerable ExpectedLayout registry
 #include "../RenderResourceRegistry.h" // /: registry-owned G-buffer
+#include "../TerrainAnchor.h"
 #include "../TreeLod.h" // tree rendering: per-instance distance LOD mesh selection (render-only)
 #include "PassGlHelpers.h"
 #include "core/IsolationConfig.h" // ctx.isolation->renders(...) needs the full type
@@ -31,6 +32,7 @@
 #include <filesystem> // existence-probe LOD variants before loading (avoid load-error spam)
 #include <limits>
 #include <string>
+#include <tuple>
 #include <utility> // std::pair for the LOD-resolve helper return
 
 #include "luminumbra_common/animation/AnimationRuntime.h"
@@ -400,9 +402,6 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
         // Pass 2: Render all instanced static meshes
         geometry_pass_static_meshes(ctx, input, registry, camera, fp, stats);
         if (authored) {
-            if (auto* capture = GBufferDiagnosticCapture::Current()) {
-                capture->unsupported("authored_static_surface");
-            }
             const auto authored_stats =
                 m_authored_pass->Render(*input.authored_view, input.authored_draws, m_gbuffer);
             stats.authored_draws += authored_stats.draws;
@@ -429,6 +428,7 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
                                        GBufferDrawStats& stats) {
     Shader* shader = geometry_shader(input.far_selection.effective).get();
     auto* capture = GBufferDiagnosticCapture::Current();
+    FarWorldDiagnosticDraw diagnostic_draw(capture);
     FarWorldPassUniforms diagnostic_uniforms;
     if (capture) {
         shader = capture->variant(shader, input.far_selection.effective == FarWorldMode::Ladder);
@@ -518,9 +518,6 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
     // cull/draw/index counts; we fold them into the returned stats with the EXACT
     // current policy (terrain_visible_chunks '=', draws/indices '+=').
     const TerrainSubmitStats ts = input.submit_terrain_chunks(frustum_planes);
-    if (capture && ts.draws != 0) {
-        capture->unsupported("live_terrain_mdi_unsupported");
-    }
     stats.terrain_visible_chunks = ts.visible_chunks;
     stats.terrain_draws += ts.draws;
     stats.terrain_indices += ts.indices;
@@ -542,12 +539,14 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
             return result;
         },
         input.submit_ladder,
-        [&uniforms, capture](const FarWorldDrawCommand& command) {
-            if (capture) {
-                capture->unsupported(
-                    "ladder_backend_identity_unavailable", 0, DiagnosticOwnership::LadderFar);
+        [&uniforms, capture, &diagnostic_draw](const FarWorldDrawCommand& command) {
+            if (!uniforms.Prepare(command)) {
+                return false;
             }
-            return uniforms.Prepare(command);
+            if (capture) {
+                diagnostic_draw.prepare(command);
+            }
+            return true;
         });
     stats.far_region_draws += far_stats.draws;
     stats.far_indices += far_stats.indices;
@@ -566,7 +565,10 @@ void GBufferPass::build_static_prop_cache(entt::registry& registry) {
     m_propMeshPaths.clear();
     m_resolveMemo.clear();
     m_visibleGroups.clear();
+    m_anchorChunks.clear();
+    m_resolvedAnchorSlots.clear();
     std::unordered_map<std::string, std::uint32_t> pathIntern;
+    std::map<std::tuple<int, int, int>, std::uint32_t> anchorSlots;
     auto intern = [&](const std::string& p) -> std::uint32_t {
         auto it = pathIntern.find(p);
         if (it != pathIntern.end())
@@ -627,11 +629,27 @@ void GBufferPass::build_static_prop_cache(entt::registry& registry) {
         cp.impostorTree = bp.find("tree") != std::string::npos;
         cp.impostorLeaf = cp.impostorTree && (bp.find("leaf") != std::string::npos ||
                                               bp.find("leaves") != std::string::npos);
+        cp.terrainAnchored = bp.starts_with("procgen://rock_") || bp.starts_with("procgen://bush_");
+        IVec3 anchor_coords{};
+        if (cp.terrainAnchored && AnchorChunkCoords(cp.position, anchor_coords)) {
+            const auto [slot, inserted] =
+                anchorSlots.try_emplace({anchor_coords.x, anchor_coords.y, anchor_coords.z},
+                                        static_cast<std::uint32_t>(m_anchorChunks.size()));
+            if (inserted) {
+                m_anchorChunks.push_back({.coords = anchor_coords,
+                                          .chunk = nullptr,
+                                          .resolved = false,
+                                          .supportOwner = {}});
+            }
+            cp.anchorSlot = slot->second;
+        }
         cp.baseMeshHash = fnv64(mesh_info.meshPath, 1469598103934665603ull);
         cp.pathIndex = intern(mesh_info.meshPath);
         cp.materialId = mesh_info.materialId;
         m_staticPropCache.push_back(cp);
     }
+    // The per-frame loop records each resolved slot once, so this never grows there.
+    m_resolvedAnchorSlots.reserve(m_anchorChunks.size());
     m_staticPropCachePopulation = registry.view<const Components::StaticMeshComponent>().size();
 }
 
@@ -895,6 +913,42 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         }
         if (culled)
             continue;
+        if (cp.anchorSlot < m_anchorChunks.size() && ctx.world_system) {
+            AnchorChunkSlot& slot = m_anchorChunks[cp.anchorSlot];
+            if (!slot.resolved) {
+                slot.resolved = true;
+                m_resolvedAnchorSlots.push_back(cp.anchorSlot);
+                auto chunk = ctx.world_system->find_streamed_chunk(slot.coords);
+                if (chunk && chunk->has_terrain_authority()) {
+                    slot.chunk = std::move(chunk);
+                    // Support answers stay valid while the same resident chunk keeps
+                    // its voxel revision and SDF storage; any change re-evaluates.
+                    const bool same_owner = !slot.supportOwner.owner_before(slot.chunk) &&
+                                            !slot.chunk.owner_before(slot.supportOwner);
+                    const auto revision = slot.chunk->voxel_revision();
+                    const float* const sdf = slot.chunk->sdf_data.data();
+                    if (!same_owner || slot.supportRevision != revision || slot.supportSdf != sdf) {
+                        slot.supportOwner = slot.chunk;
+                        slot.supportRevision = revision;
+                        slot.supportSdf = sdf;
+                        slot.supportGeneration =
+                            slot.supportGeneration == std::numeric_limits<std::uint32_t>::max()
+                                ? 1u
+                                : slot.supportGeneration + 1u;
+                    }
+                }
+            }
+            if (slot.chunk) {
+                // At most eight lattice reads per prop per support change, not per frame.
+                if (cp.supportGeneration != slot.supportGeneration) {
+                    cp.supportRemoved = EditedTerrainRemovesAnchor(slot.chunk.get(), cp.position);
+                    cp.supportGeneration = slot.supportGeneration;
+                }
+                if (cp.supportRemoved) {
+                    continue;
+                }
+            }
+        }
         // Group by a cheap uint64 (no per-instance string alloc/copy/compare).
         const std::uint64_t gkey =
             rkey ^ (static_cast<std::uint64_t>(cp.materialId) * std::uint64_t{0x100000001B3ull});
@@ -909,6 +963,11 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         batch.mats.push_back(cp.model);
         batch.tints.push_back(cp.tint);
     }
+    for (const std::uint32_t index : m_resolvedAnchorSlots) {
+        m_anchorChunks[index].chunk.reset();
+        m_anchorChunks[index].resolved = false;
+    }
+    m_resolvedAnchorSlots.clear();
     const GLboolean cull_was_enabled = glIsEnabled(GL_CULL_FACE);
     for (const auto& kv : m_visibleGroups) {
         const InstanceBatchCached& batch = kv.second;
@@ -954,6 +1013,7 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                 // textured tree parts sway in the wind (rigid props stay at 0).
                 shader->setFloat("u_windStrength", 1.0f);
                 shader->setInt("u_forceFlat", 0);
+                shader->setInt("u_leafSurface", 0);
             } else {
                 glBindTexture(GL_TEXTURE_2D_ARRAY,
                               ctx.skinned_textures.id ? ctx.skinned_textures.id
@@ -969,15 +1029,18 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                 // key suffix so only procgen leaves flutter.
                 const bool isLeaf = batch.basePath.size() >= 5 &&
                                     batch.basePath.rfind("_leaf") == batch.basePath.size() - 5;
-                shader->setInt("u_alphaTest", isLeaf ? 2 : 0);
-                two_sided = isLeaf;
-                shader->setFloat("u_windStrength", isLeaf ? 0.85f : 0.0f);
-                // Leaves use the dedicated cutout material at every LOD. Other
-                // foliage retains its existing distant flat-material optimization;
-                // near bushes, bark, and rigid props keep terrain texturing.
-                const bool isBush = batch.basePath.find("procgen://bush_") != std::string::npos;
+                const bool isBush = batch.basePath.starts_with("procgen://bush_");
                 const bool isFarLod = batch.drawPath.find(".lod") != std::string::npos;
-                shader->setInt("u_forceFlat", ((isLeaf || isBush) && isFarLod) ? 1 : 0);
+                const bool leafCards = isLeaf || (isBush && !isFarLod);
+                shader->setInt("u_alphaTest", leafCards ? 2 : 0);
+                two_sided = leafCards;
+                // Near bush leaf cards sway like procgen leaves; far hulls and bark stay rigid.
+                shader->setFloat("u_windStrength", leafCards ? 0.85f : 0.0f);
+                // Shrubs are foliage at every distance, never opaque grass-textured stone.
+                // Distant shrubs keep the closed hull; only their near mesh uses leaf cards.
+                shader->setInt("u_forceFlat", (isBush || (isLeaf && isFarLod)) ? 1 : 0);
+                // Near cards and distant hulls share the leaf reflectance, not grass.
+                shader->setInt("u_leafSurface", isBush ? 1 : 0);
             }
         }
         if (two_sided || !cull_was_enabled)
@@ -1025,7 +1088,10 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                     }
                 }
                 const bool generated = batch.drawPath.starts_with("procgen://");
-                const bool unattributed = generated || identity_path_unrecordable;
+                const bool unattributed = identity_path_unrecordable;
+                const std::string generated_key = generated && !identity_path_unrecordable
+                                                      ? "procedural/" + batch.drawPath.substr(10)
+                                                      : std::string{};
                 const std::string_view variant =
                     identity_path_unrecordable ? "static_mesh_identity_path_limit"
                     : input.far_selection.effective == FarWorldMode::Ladder
@@ -1033,14 +1099,16 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                         : "instanced_static_mesh";
                 for (GLsizei instance = 0; instance < instance_count; ++instance) {
                     capture->write(*shader,
-                                   {.mesh_path = unattributed ? std::string_view{} : batch.drawPath,
+                                   {.mesh_path = unattributed || generated ? std::string_view{}
+                                                                           : batch.drawPath,
                                     .shader_variant = variant,
                                     .chunk = {},
                                     .lod = resolved_lod,
                                     .ownership = DiagnosticOwnership::Live,
                                     .pass = DiagnosticPass::GBuffer,
                                     .provenance = unattributed ? DiagnosticProvenance::Unsupported
-                                                               : DiagnosticProvenance::Mesh});
+                                                               : DiagnosticProvenance::Mesh,
+                                    .generated_mesh = generated_key});
                     Luminumbra::Rendering::AttributedGl::Submit(
                         glDrawElementsInstancedBaseInstance,
                         GLenum{GL_TRIANGLES},

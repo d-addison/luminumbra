@@ -46,6 +46,8 @@ public:
         u32 index_offset = 0;  // first index (firstIndex)
         u32 index_count = 0;   // indices written (drawn element_count)
         u32 index_slot = 0;    // capacity of the reserved index slot
+        // Process-wide upload identity; independent of recycled handles/mesh versions.
+        u64 geometry_generation = 0;
         bool live = false;
     };
 

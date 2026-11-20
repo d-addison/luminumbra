@@ -2588,12 +2588,18 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         creature_admission);
                 // Decomposition: dead creatures decay + release nutrient (consumed by the soil
                 // loop).
-                budget.Next(Stage::Decay, [&] {
-                    return SimParticipantCount<TelemetryComp::DecayComponent>(foliage_registry);
-                });
-                if (!living_registry.view<Comp::DecayComponent>().empty())
-                    luminumbra::ai::RunDecompositionOnTick(
-                        living_registry, current_tick, creature_admission, foliage_gate);
+                // A detached stage is cleared and re-copied each tick. Borrow the live
+                // roster (same handles) so the copy's signals never churn index nodes.
+                const auto& decay_participants = luminumbra::ai::DecompositionParticipants(
+                    foliage_step ? m_registry : living_registry);
+                budget.Next(Stage::Decay, [&] { return decay_participants.size(); });
+                // A detached stage is bounded by its staged decay pool as well as the live roster.
+                luminumbra::ai::RunDecompositionStage(living_registry,
+                                                      current_tick,
+                                                      creature_admission,
+                                                      foliage_gate,
+                                                      decay_participants,
+                                                      foliage_step);
                 // Circadian: diurnal/nocturnal activity from a tick-derived day fraction.
                 budget.Next(Stage::Circadian, [&] {
                     return SimParticipantCount<TelemetryComp::CircadianComponent>(m_registry);

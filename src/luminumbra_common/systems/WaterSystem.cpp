@@ -307,6 +307,7 @@ void InvalidateWaterMesh(Chunk& chunk, std::unordered_set<ChunkID>& mesh_invalid
     chunk.water_mesh_generated.store(false);
     chunk.water_mesh_dirty_ticks = 0;
     mesh_invalidations.insert(chunk.get_id());
+    ++chunk.water_mesh_invalidation_version;
 }
 
 //  integer virtual-pipes step for ONE chunk (INTERNAL edges only — cross-chunk flux
@@ -633,6 +634,7 @@ bool WaterKernels::AdvanceWaterMeshCadence(Chunk& chunk) noexcept {
     if (chunk.water_mesh_dirty_ticks >= WATER_MESH_DIRTY_TICK_INTERVAL - 1) {
         chunk.water_mesh_generated.store(false);
         chunk.water_mesh_dirty_ticks = 0;
+        ++chunk.water_mesh_invalidation_version;
         return true;
     }
     ++chunk.water_mesh_dirty_ticks;
@@ -1136,7 +1138,7 @@ void WaterSystem::initialize_water_chunks(std::span<Chunk* const> pending,
                 MarkRuntimeWaterMutation(*to_init[i], deterministic_authority);
             }
             m_water_activity_cache.erase(to_init[i]->get_id());
-            m_mesh_invalidations.insert(to_init[i]->get_id());
+            InvalidateWaterMesh(*to_init[i], m_mesh_invalidations);
         }
         if (WaterAttribution::CurrentFrame()) {
             m_dbg_water.initialization +=

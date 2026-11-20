@@ -1,4 +1,5 @@
 #include "core/IsolationConfig.h"
+#include "luminumbra_client/app/BushFoliage.h"
 #include "luminumbra_common/animation/AnimationRuntime.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "rendering/Camera.h"
@@ -6,6 +7,7 @@
 #include "rendering/FarLodSystem.h"
 #include "rendering/GBufferTargets.h"
 #include "rendering/Mesh.h"
+#include "rendering/RenderPipeline.h"
 #include "rendering/RenderResourceRegistry.h"
 #include "rendering/Shader.h"
 #include "rendering/passes/GBufferPass.h"
@@ -21,6 +23,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -112,14 +115,71 @@ std::uint64_t SourceHash(const std::string& source) {
 
 const std::string kTargets = "src/luminumbra_client/rendering/GBufferTargets.cpp";
 const std::string kPass = "src/luminumbra_client/rendering/passes/GBufferPass.cpp";
+template<typename Submission>
+bool SubmitGenerated(Luminumbra::Rendering::DiagnosticDrawTable& table,
+                     Submission submission,
+                     std::string_view key,
+                     Luminumbra::Rendering::DiagnosticId& id) {
+    if constexpr (requires { submission.generated_mesh; }) {
+        submission.generated_mesh = key;
+        return table.submit(submission, id);
+    } else {
+        return false;
+    }
+}
 } // namespace
 
+TEST(GroundCoverContract, NearBushesUseFullLeafQuadsAndNeverTerrainGrassTexturing) {
+    const auto palette = Body(Read("src/luminumbra_client/app/ProcgenPalettes.cpp"),
+                              "void BuildProcgenBushPalette(");
+    Contains(palette, "BuildBushLeafCard(center, normal, 0.24f, 0.18f)");
+    for (const char* vertex : {"card[0], normal, {0.0f, 0.0f}",
+                               "card[1], normal, {1.0f, 0.0f}",
+                               "card[2], normal, {1.0f, 1.0f}",
+                               "card[3], normal, {0.0f, 1.0f}"}) {
+        Contains(palette, vertex);
+    }
+    const auto draw = Read("src/luminumbra_client/rendering/passes/GBufferPass.cpp");
+    Contains(draw, "const bool leafCards = isLeaf || (isBush && !isFarLod);");
+    Contains(draw, "shader->setInt(\"u_alphaTest\", leafCards ? 2 : 0);");
+    Contains(draw, "two_sided = leafCards;");
+    // Near bush cards are leaves, so they keep the leaf wind strength.
+    Contains(draw, "shader->setFloat(\"u_windStrength\", leafCards ? 0.85f : 0.0f);");
+    Contains(draw, "shader->setInt(\"u_forceFlat\", (isBush || (isLeaf && isFarLod)) ? 1 : 0);");
+    // Far closed hulls use leaf reflectance instead of the grass material albedo.
+    Contains(draw, "shader->setInt(\"u_leafSurface\", isBush ? 1 : 0);");
+    const auto frag = Read("res/shaders/g_buffer.frag");
+    Contains(frag, "uniform int u_leafSurface = 0;");
+    Contains(frag, "if (proceduralLeaf || u_leafSurface == 1) {");
+}
+
+TEST(GroundCoverContract, LeafCardsAreFiniteOutwardQuadsForSideAndPolarNormals) {
+    const glm::vec3 center(2, -3, 5);
+    for (const glm::vec3 normal : {glm::vec3(1, 0, 0),
+                                   glm::vec3(0, 1, 0),
+                                   glm::vec3(0, -1, 0),
+                                   glm::normalize(glm::vec3(1, 2, 3))}) {
+        const auto card = Luminumbra::Client::App::BuildBushLeafCard(center, normal, 0.24f, 0.18f);
+        EXPECT_NEAR(glm::length(card[1] - card[0]), 0.48f, 1e-5f);
+        EXPECT_NEAR(glm::length(card[3] - card[0]), 0.36f, 1e-5f);
+        EXPECT_LT(glm::length((card[0] + card[2]) * 0.5f - center), 1e-5f);
+        EXPECT_GT(glm::dot(glm::cross(card[1] - card[0], card[2] - card[0]), normal), 0.0f);
+        for (const auto& position : card) {
+            EXPECT_TRUE(std::isfinite(position.x));
+            EXPECT_TRUE(std::isfinite(position.y));
+            EXPECT_TRUE(std::isfinite(position.z));
+            EXPECT_NEAR(glm::dot(position - center, normal), 0.0f, 1e-5f);
+        }
+    }
+}
+
 TEST(DiagnosticAttribution, DefaultShaderTextIsUnchangedWithoutTheVariant) {
-    // Re-pinned for #872's interpolated-normal slope-rock coverage (#1045).
+    // Re-pinned for issue #1071's leaf reflectance on closed distant shrub hulls.
     EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(Read("res/shaders/g_buffer.frag"))),
-              0xb68526b1edfc1436ull);
+              0x9032c0573230e766ull);
     EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(Read("res/shaders/foliage.frag"))),
               0xd5876c01db56f7ecull);
+    EXPECT_EQ(SourceHash(Read("res/shaders/instanced_mesh.vert")), 0xdcd35add9296eabaull);
     const auto create = Body((Read(kTargets) + Read(kPass)), "void CreateGBufferTargets(");
     Contains(create, "GL_COLOR_ATTACHMENT4");
     Contains(create, "if (authored)");
@@ -276,12 +336,72 @@ TEST(DiagnosticAttribution, BothLegacyFarWritersCarryTheActualTierAndOwner) {
     EXPECT_FALSE(table.complete_coverage());
 }
 
+TEST(DiagnosticAttribution, CapabilityRefusalIsAnExplicitUnsupportedRecord) {
+    const auto targets = (Read(kTargets) + Read(kPass));
+    const auto attach = Body(targets, "bool GBufferDiagnosticCapture::attach_target(");
+    Contains(attach, "state_->framebuffer != 0 ||");
+    Contains(attach, "forward ? !state_->captured || state_->forward_captured : state_->captured");
+    Contains(attach, "nested_gbuffer_attachment");
+    Contains(attach, "!gbuffer.fbo_id || !gbuffer.position_texture");
+    Contains(attach, "max_buffers < 7");
+    Contains(attach, "max_buffers > static_cast<GLint>(state_->buffers.size())");
+    Contains(attach, "max_attachments < 7");
+    Contains(attach, "diagnostic_mrt_capability");
+    Contains(attach, "diagnostic_attachment_lease_unavailable");
+    Contains(attach, "diagnostic_integer_target_unsupported");
+    Contains(attach, "diagnostic_attachment_occupied");
+    Contains(attach, "diagnostic_mrt_incomplete");
+    Contains(Body(targets, "bool GBufferDiagnosticCapture::attach("), "unsupported(reason)");
+    EXPECT_LT(attach.find("attachment_type != GL_NONE"), attach.find("targets.ensure("));
+    const auto refusal = Body(targets, "void GBufferDiagnosticCapture::unsupported(");
+    Contains(refusal, "state_->failed = true");
+    Contains(refusal, ".provenance = DiagnosticProvenance::Unsupported");
+    Contains(refusal, "state_->table.submit(");
+    Contains(refusal, "state_->refused = true;");
+    EXPECT_EQ(refusal.find("throw"), std::string::npos);
+    const auto complete = Body(targets, "bool GBufferDiagnosticCapture::complete()");
+    Contains(complete, "state_->captured && !state_->framebuffer");
+    Contains(complete, "!state_->attachment_lease");
+    Contains(complete, "!state_->failed");
+    Contains(complete, "!state_->refused");
+    Contains(complete, "state_->table.complete_coverage()");
+}
+
+TEST(DiagnosticAttribution, ResizeAndIncompleteAttachmentRestoreTheEntireDrawBufferState) {
+    const auto targets = (Read(kTargets) + Read(kPass));
+    const auto attach = Body(targets, "bool GBufferDiagnosticCapture::attach_target(");
+    Contains(attach, "width <= 0 || height <= 0");
+    Contains(attach, "static_cast<std::uint32_t>(width) != extent.width");
+    Contains(attach, "static_cast<std::uint32_t>(height) != extent.height");
+    Contains(attach, "diagnostic_gbuffer_extent_mismatch");
+    Contains(attach, "targets.ensure(true, extent, 7)");
+    Contains(attach, "GL_DRAW_BUFFER0 + static_cast<GLenum>(index)");
+    Contains(attach, "glGetBooleani_v(GL_COLOR_WRITEMASK, 6, state_->color_mask.data())");
+    Contains(attach, "glColorMaski(6, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE)");
+    Contains(attach, "if (!complete) {\n        detach_target();");
+    EXPECT_LT(attach.find("GL_DRAW_BUFFER0"), attach.find("glFramebufferTexture2D("));
+    const auto detach = Body(targets, "void GBufferDiagnosticCapture::detach_target()");
+    Contains(detach, "GL_COLOR_ATTACHMENT6, GL_TEXTURE_2D, 0, 0");
+    Contains(detach, "glDrawBuffers(state_->buffer_count, state_->buffers.data())");
+    Contains(detach, "glColorMaski(6,");
+    Contains(detach, "static_cast<GLuint>(saved_framebuffer)");
+    const auto retire = Body(targets, "void GBufferDiagnosticCapture::before_destroy(");
+    Contains(retire, "state_->framebuffer == gbuffer.fbo_id");
+    EXPECT_LT(retire.find("detach_target();"), retire.find("gbuffer_recreated_during_capture"));
+    const auto destroy = Body(targets, "void DestroyGBufferTargets(");
+    EXPECT_LT(destroy.find("capture->before_destroy(gbuffer)"),
+              destroy.find("registry.destroy_owned"));
+}
+
 TEST(DiagnosticAttribution, MissingProducerMetadataCannotClaimCompleteCoverage) {
     const auto pass = Read(kPass);
-    Contains(pass, "live_terrain_mdi_unsupported");
-    Contains(pass, "if (capture && ts.draws != 0)");
-    Contains(pass, "ladder_backend_identity_unavailable");
-    Contains(pass, "authored_static_surface");
+    const auto pipeline = Read("src/luminumbra_client/rendering/RenderPipeline.cpp");
+    Contains(pipeline, "terrain_resident_lod_unavailable");
+    Contains(pipeline, "terrain_identity_draw_limit");
+    Contains(Read("src/luminumbra_client/rendering/FarVolumeGlBackend.cpp"),
+             "ladder_backend_identity_unavailable");
+    Contains(Read("src/luminumbra_client/rendering/passes/StaticDrawPass.cpp"),
+             "authored_static_surface");
     Contains(pass, "tree_impostor_fragment_output_unavailable\", 3");
     Contains(pass, "DiagnosticProvenance::Unsupported");
     const auto targets = (Read(kTargets) + Read(kPass));
@@ -316,12 +436,171 @@ TEST(DiagnosticAttribution, DeferredAttachmentScopeEndsBeforeCallerStateRestorat
               0x87b070d8d24c6b19ull);
 }
 
+TEST(DiagnosticAttribution, TerrainSubmitsOriginalCommandsInBucketOrderWithResidentMetadata) {
+    const auto draw = Body(Read("src/luminumbra_client/rendering/RenderPipeline.cpp"),
+                           "void RenderPipeline::draw_chunks_mdi(");
+    Contains(draw, ".lod = rd.diagnostic_lod");
+    Contains(draw, ".mesh_version = rd.mesh_version");
+    Contains(draw, ".geometry_generation = a.geometry_generation");
+    Contains(draw, "write_cursor[a.block_index]++");
+    Contains(draw, "cmd.count = a.index_count");
+    Contains(draw, "cmd.instanceCount = 1u");
+    Contains(draw, "cmd.firstIndex = a.index_offset");
+    Contains(draw, "cmd.baseVertex = a.vertex_offset");
+    Contains(draw, "cmd.baseInstance = static_cast<GLuint>(dst)");
+    const auto attributed = Body(Read("src/luminumbra_client/rendering/RenderPipeline.cpp"),
+                                 "void SubmitDiagnosticTerrainBucket(");
+    Contains(attributed, "const auto& resident = draws[draw - first]");
+    Contains(attributed, "std::to_string(resident.chunk[0])");
+    Contains(attributed, "std::to_string(resident.chunk[1])");
+    Contains(attributed, "std::to_string(resident.chunk[2])");
+    Contains(attributed, "std::to_string(resident.mesh_version)");
+    Contains(attributed, "resident.geometry_generation)");
+    Contains(attributed, ".mesh_path = {}");
+    Contains(attributed, "ladder ? \"terrain_mdi_ladder\" : \"terrain_mdi\"");
+    Contains(attributed, ".chunk = {resident.chunk[0], resident.chunk[1], resident.chunk[2]}");
+    Contains(attributed, ".lod = static_cast<std::uint32_t>(resident.lod)");
+    Contains(attributed, ".ownership = DiagnosticOwnership::Live");
+    Contains(attributed, ".pass = DiagnosticPass::GBuffer");
+    Contains(attributed, ".provenance = DiagnosticProvenance::Unknown");
+    Contains(attributed, ".generated_mesh = mesh_key");
+    Before(attributed, "capture->write_current(", "glDrawElementsIndirect,");
+    Before(attributed, "capture->clear_current_identity();", "capture = nullptr;");
+    Contains(attributed, "draw * command_stride");
+    EXPECT_EQ(Count(attributed, "glDrawElementsIndirect,"), 1u);
+    EXPECT_EQ(Count(attributed, "AttributedGl::Submit("), 2u);
+    // A full identity table stops per-command draws before the refused command.
+    Before(attributed, "capture->refused()", "glDrawElementsIndirect,");
+    ASSERT_NE(attributed.find("capture->refused()"), std::string::npos);
+    const auto refusal = attributed.substr(attributed.find("capture->refused()"));
+    Before(refusal, "capture->clear_current_identity();", "break;");
+    Before(refusal, "break;", "glDrawElementsIndirect,");
+    // One guarded retirement per bucket covers both the per-command and batched draws.
+    Before(attributed, "pool.mark_submitted(bucket)", "glDrawElementsIndirect,");
+    EXPECT_EQ(Count(attributed, "mark_submitted("), 1u);
+    EXPECT_EQ(Count(attributed, "retirement.submitted = true;"), 2u);
+    Before(attributed, "glDrawElementsIndirect,", "retirement.submitted = true;");
+    Contains(draw, "SubmitDiagnosticTerrainBucket(");
+    const auto chunks = Body(Read(kPass), "void GBufferPass::geometry_pass_chunks(");
+    Contains(chunks, "input.submit_terrain_chunks(frustum_planes)");
+    EXPECT_EQ(chunks.find("live_terrain_mdi_unsupported"), std::string::npos);
+    Contains(chunks, "stats.terrain_draws += ts.draws");
+    Contains(chunks, "stats.terrain_indices += ts.indices");
+}
+
+TEST(DiagnosticAttribution, TerrainCaptureStagesOnlyAttachedDeferredDrawsAndBoundsAllocation) {
+    const auto draw = Body(Read("src/luminumbra_client/rendering/RenderPipeline.cpp"),
+                           "void RenderPipeline::draw_chunks_mdi(");
+    const auto empty = Body(draw, "if (visible_chunks.empty() || block_count == 0)");
+    Contains(empty, "return;");
+    const auto no_draws = Body(draw, "if (running == 0)");
+    Contains(no_draws, "return;");
+    Before(draw, "if (running == 0)", "GBufferDiagnosticCapture::Current()");
+    const auto unattached =
+        Body(draw, "if (diagnostic_capture && !diagnostic_capture->deferred_attached())");
+    Contains(unattached, "diagnostic_capture = nullptr");
+    Contains(draw, "std::unique_ptr<DiagnosticTerrainDraw[]> diagnostic_chunks;");
+    Before(
+        draw, "diagnostic_capture = nullptr", "std::make_unique<DiagnosticTerrainDraw[]>(running)");
+    Before(draw,
+           "if (diagnostic_capture && running > 65536)",
+           "std::make_unique<DiagnosticTerrainDraw[]>(running)");
+    // An excessive draw count ends coverage without aborting the frame.
+    const auto excess = Body(draw, "if (diagnostic_capture && running > 65536)");
+    Before(excess, "unsupported(\"terrain_identity_draw_limit\")", "diagnostic_capture = nullptr;");
+    EXPECT_EQ(excess.find("throw"), std::string::npos);
+    EXPECT_EQ(Count(draw, "std::make_unique<DiagnosticTerrainDraw[]>(running)"), 1u);
+    Contains(draw, "if (diagnostic_capture) {\n            diagnostic_chunks[dst] =");
+    // Only the diagnostic branch expands a bucket into individual commands.
+    Contains(draw, "if (diagnostic_chunks) {\n            SubmitDiagnosticTerrainBucket(");
+    // Undiagnosed draws, including the rest of a bucket after a refusal, share one multi-draw.
+    Contains(draw,
+             "if (mdi_first < first + count) {\n            "
+             "Luminumbra::Rendering::AttributedGl::Submit(\n"
+             "                glMultiDrawElementsIndirect,");
+    Contains(draw, "mdi_first * sizeof(DrawElementsIndirectCommand)");
+    Contains(draw, "static_cast<GLsizei>(first + count - mdi_first)");
+    Contains(Body(Read("src/luminumbra_client/rendering/RenderPipeline.cpp"),
+                  "void SubmitDiagnosticTerrainBucket("),
+             "++draw, mdi_first = draw)");
+    Contains(draw, "static_cast<GLsizei>(sizeof(DrawElementsIndirectCommand))");
+    EXPECT_EQ(Count(draw, "glMultiDrawElementsIndirect,"), 1u);
+    EXPECT_EQ(Count(draw, "write_current("), 0u);
+    EXPECT_EQ(draw.find("glGet"), std::string::npos);
+    EXPECT_EQ(draw.find("glProgramUniform"), std::string::npos);
+}
+
+TEST(DiagnosticAttribution, TerrainSnapshotsLodInsideVersionValidationAndCommitsAfterUpload) {
+    const auto header = Read("src/luminumbra_client/rendering/RenderPipeline.h");
+    Contains(Body(header, "struct ChunkRenderData"), "int diagnostic_lod = -1;");
+    Contains(Body(header, "struct ChunkMeshPayload"), "int diagnostic_lod = -1;");
+    const auto pipeline = Read("src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const auto copy = Body(pipeline, "bool RenderPipeline::copy_terrain_mesh_payload(");
+    Before(copy, "if (version_before != chunk.mesh_version)", "payload.diagnostic_lod =");
+    Contains(copy, "payload.diagnostic_lod = chunk.source_chunk->current_lod.load(");
+    Before(copy, "payload.diagnostic_lod =", "const u32 version_after");
+    Contains(copy, "if (version_after != version_before ||");
+    const auto invalid = Body(copy, "if (version_after != version_before ||");
+    Contains(invalid, "payload.vertices.clear()");
+    Contains(invalid, "payload.indices.clear()");
+    Contains(invalid, "return false;");
+    const auto upload = Body(pipeline, "void RenderPipeline::upload_chunk_mesh(");
+    const auto failed = Body(upload, "if (new_handle == ChunkRenderData::kInvalidPoolHandle)");
+    Contains(failed, "return;");
+    EXPECT_EQ(failed.find("diagnostic_lod"), std::string::npos);
+    Before(upload,
+           "if (new_handle == ChunkRenderData::kInvalidPoolHandle)",
+           "render_data.diagnostic_lod = payload.diagnostic_lod");
+    Contains(upload,
+             "render_data.mesh_version = payload.mesh_version;\n"
+             "    render_data.refinement = payload.refinement;\n"
+             "    render_data.diagnostic_lod = payload.diagnostic_lod;");
+}
+
+TEST(DiagnosticAttribution, TerrainRefusesUnknownAndOutOfRangeResidentLodBeforeSubmission) {
+    const auto source = Read("src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const auto draw = Body(source, "void RenderPipeline::draw_chunks_mdi(");
+    const auto submit = Body(source, "void SubmitDiagnosticTerrainBucket(");
+    // The resident LOD is staged with each command; the bucket submitter checks it.
+    Contains(draw, ".lod = rd.diagnostic_lod");
+    const auto invalid = Body(submit, "if (resident.lod < 0 || resident.lod > 255)");
+    // A refusal ends coverage, clears the bound identity and falls back to ordinary
+    // submission instead of throwing.
+    Before(invalid,
+           "unsupported(\"terrain_resident_lod_unavailable\")",
+           "capture->clear_current_identity();");
+    Before(invalid, "capture->clear_current_identity();", "capture = nullptr;");
+    Before(invalid, "capture = nullptr;", "break;");
+    EXPECT_EQ(invalid.find("throw"), std::string::npos);
+    Before(submit,
+           "if (resident.lod < 0 || resident.lod > 255)",
+           "static_cast<std::uint32_t>(resident.lod)");
+    Before(submit, "if (resident.lod < 0 || resident.lod > 255)", "glDrawElementsIndirect,");
+    // An unavailable resident LOD must never be replaced with the live chunk's newer LOD.
+    EXPECT_EQ(draw.find("current_lod"), std::string::npos);
+    EXPECT_EQ(submit.find("current_lod"), std::string::npos);
+}
+
+TEST(DiagnosticAttribution, AttachmentStorageIsEnsuredBeforeLeaseAndLeaseBeforeAttachment) {
+    const auto header = Read("src/luminumbra_client/rendering/GBufferTargets.h");
+    Contains(header, "DiagnosticTargets::AttachmentLease attachment_lease;");
+    const auto attach = Body(Read(kTargets), "bool GBufferDiagnosticCapture::attach_target(");
+    Before(attach,
+           "targets.ensure(true, extent, 7)",
+           "state_->attachment_lease = targets.acquire_attachment_lease()");
+    Before(attach,
+           "state_->attachment_lease = targets.acquire_attachment_lease()",
+           "if (!state_->attachment_lease)");
+    Before(attach, "if (!state_->attachment_lease)", "glFramebufferTexture2D(");
+    Contains(attach, "state_->attachment_lease.texture()");
+    Contains(attach, "diagnostic_attachment_lease_unavailable");
+    EXPECT_EQ(attach.find("attachment_lease.reset()"), std::string::npos);
+}
+
 TEST(DiagnosticAttribution, LeaseProtectsAttachmentThroughRollbackAndCallerRestoration) {
     const auto targets = Read(kTargets);
     const auto attach = Body(targets, "bool GBufferDiagnosticCapture::attach_target(");
-    Before(attach,
-           "state_->targets->ensure(true, extent, 7)",
-           "state_->targets->acquire_attachment_lease()");
+    Before(attach, "targets.ensure(true, extent, 7)", "targets.acquire_attachment_lease()");
     Before(attach, "if (!state_->attachment_lease)", "glFramebufferTexture2D(");
     Before(Body(attach, "if (!complete)"), "detach_target();", "diagnostic_mrt_incomplete");
     const auto detach = Body(targets, "void GBufferDiagnosticCapture::detach_target()");
@@ -370,7 +649,7 @@ TEST(DiagnosticAttribution, RecreationAndBothDestructorsDetachBeforeRetiringStor
     Contains(scope, "capture_->abort();");
     Before(Body(source, "void GBufferDiagnosticCapture::detach()"),
            "detach_target();",
-           "unsupported(reason)");
+           "unsupported(reason,");
 }
 
 namespace {
@@ -583,6 +862,7 @@ protected:
         EXPECT_EQ(glGetError(), GL_NO_ERROR);
     }
     void ExpectInvalidMetadata(bool excessive_path);
+    void ExpectTerrainBuckets(int refused_lod, bool table_full = false);
     // Context is destroyed last, after cached meshes and shaders release their GL objects.
     AttributionContext gl_;
     RenderResourceRegistry resources_;
@@ -599,6 +879,398 @@ protected:
     GLuint entry_vao_ = 0;
     std::array<GLuint, 2> entry_fbos_{};
 };
+
+// Two independent pool blocks exercise bucket changes without filling a large
+// block merely to force growth. Each has two resident allocations; commands and
+// origins share one buffer just as in RenderPipeline.
+class TerrainBucketGeometry {
+    struct Command {
+        GLuint count, instance_count, first_index, base_vertex, base_instance;
+    };
+    static_assert(sizeof(Command) == 5 * sizeof(GLuint));
+
+public:
+    ~TerrainBucketGeometry() {
+        glBindVertexArray(0);
+        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
+        glDeleteBuffers(2, buffers_.data());
+        for (auto& pool : pools) {
+            pool.destroy();
+        }
+    }
+    TerrainBucketGeometry() = default;
+    TerrainBucketGeometry(const TerrainBucketGeometry&) = delete;
+    TerrainBucketGeometry& operator=(const TerrainBucketGeometry&) = delete;
+    bool initialize() {
+        stride = sizeof(Command);
+        // Slot zero is deliberately unused; command offsets must remain absolute.
+        std::array<Command, 5> commands{};
+        const std::array<GLuint, 4> origin_slots{3, 1, 4, 2};
+        std::array<glm::vec4, 5> origins{};
+        const std::array<Luminumbra::VoxelVertex, 3> vertices{{{{-0.2f, -0.6f, 0.5f}, {0, 0, 1}, 1},
+                                                               {{0.2f, -0.6f, 0.5f}, {0, 0, 1}, 1},
+                                                               {{0.0f, 0.6f, 0.5f}, {0, 0, 1}, 1}}};
+        const std::array<Luminumbra::u32, 3> indices{0, 1, 2};
+        for (std::size_t draw = 0; draw < 4; ++draw) {
+            auto& pool = pools[draw / 2];
+            const auto handle = pool.allocate(vertices.data(), 3, indices.data(), 3, "terrain");
+            if (handle == ChunkGeometryPool::kInvalid) {
+                return false;
+            }
+            if (draw == 0) {
+                first_handle = handle;
+            }
+            generations[draw] = pool.allocation(handle).geometry_generation;
+            const auto& allocation = pool.allocation(handle);
+            commands[draw + 1] = {allocation.index_count,
+                                  1,
+                                  allocation.index_offset,
+                                  allocation.vertex_offset,
+                                  origin_slots[draw]};
+            origins[origin_slots[draw]] = {static_cast<float>(draw) * 0.5f - 0.75f, 0, 0, 0};
+        }
+        glGenBuffers(2, buffers_.data());
+        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, buffers_[0]);
+        glBufferData(GL_DRAW_INDIRECT_BUFFER, sizeof(commands), commands.data(), GL_STATIC_DRAW);
+        glBindBuffer(GL_ARRAY_BUFFER, buffers_[1]);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(origins), origins.data(), GL_STATIC_DRAW);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        return true;
+    }
+    void bind(std::size_t bucket) const {
+        glBindVertexArray(pools[bucket].blocks()[0].vao);
+        glBindVertexBuffer(1, buffers_[1], 0, sizeof(glm::vec4));
+        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, buffers_[0]);
+    }
+    void rewrite_first(Luminumbra::u32 handle) const {
+        const auto& allocation = pools[0].allocation(handle);
+        const Command command{
+            allocation.index_count, 1, allocation.index_offset, allocation.vertex_offset, 3};
+        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, buffers_[0]);
+        glBufferSubData(GL_DRAW_INDIRECT_BUFFER, sizeof(Command), sizeof(command), &command);
+    }
+    std::array<ChunkGeometryPool, 2> pools;
+    std::array<std::uint64_t, 4> generations{};
+    Luminumbra::u32 first_handle = ChunkGeometryPool::kInvalid;
+    std::size_t stride = 0;
+
+private:
+    std::array<GLuint, 2> buffers_{};
+};
+
+void DiagnosticAttributionGl::ExpectTerrainBuckets(int refused_lod, bool table_full) {
+    TerrainBucketGeometry geometry;
+    ASSERT_TRUE(geometry.initialize());
+    const std::array<DiagnosticTerrainDraw, 4> original{
+        {{.chunk = {7, -2, 3}, .lod = 0, .mesh_version = 31},
+         {.chunk = {-4, 1, 5}, .lod = 255, .mesh_version = 17},
+         {.chunk = {2, 0, -8}, .lod = 2, .mesh_version = 9},
+         {.chunk = {1, 3, 6}, .lod = 4, .mesh_version = 23}}};
+    auto resident = original;
+    for (std::size_t draw = 0; draw < resident.size(); ++draw) {
+        resident[draw].geometry_generation = geometry.generations[draw];
+    }
+    for (const bool ladder : {false, true}) {
+        table_.clear();
+        auto draws = resident;
+        const bool lod_refusal = refused_lod < 0 || refused_lod > 255;
+        const bool refusal = lod_refusal || table_full;
+        if (lod_refusal) {
+            draws[1].lod = refused_lod;
+        }
+        GBufferDiagnosticCapture capture(targets_, table_);
+        if (table_full) {
+            // The first terrain command finds the identity table already full.
+            ASSERT_NO_FATAL_FAILURE(FillRegistry());
+        }
+        const auto initial = table_.json();
+        ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+        auto* shader = capture.variant(pass_.geometry_shader().get(), ladder);
+        ASSERT_NE(shader, nullptr);
+        ASSERT_NE(shader, pass_.geometry_shader().get());
+        ASSERT_TRUE(shader->IsValid());
+        shader->use();
+        shader->setMat4("view", glm::mat4(1));
+        shader->setMat4("projection", glm::mat4(1));
+        shader->setMat3("u_normalViewMatrix", glm::mat3(1));
+        shader->setInt("u_useInstanceOrigin", 1);
+        shader->setInt("u_forceFlat", 1);
+        shader->setInt("u_materialLUT", 0);
+        shader->setInt("u_terrainTextures", 1);
+        shader->setInt("u_terrainNormals", 2);
+        shader->setInt("u_terrainRoughness", 3);
+        shader->setInt("u_skinnedTextures", 4);
+        glBindFramebuffer(GL_FRAMEBUFFER, pass_.gbuffer().fbo_id);
+        glViewport(0, 0, 32, 32);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_SCISSOR_TEST);
+        glDisable(GL_BLEND);
+        glDisable(GL_CLIP_DISTANCE0);
+        glClear(GL_COLOR_BUFFER_BIT);
+        auto* active = &capture;
+        // An empty bucket consumes no commands, records or retirement state.
+        geometry.bind(0);
+        const bool was_submitted = geometry.pools[0].blocks()[0].submitted;
+        SubmitDiagnosticTerrainBucket(active, {}, 1, geometry.stride, ladder, geometry.pools[0], 0);
+        EXPECT_EQ(geometry.pools[0].blocks()[0].submitted, was_submitted);
+        EXPECT_EQ(table_.json(), initial);
+        for (std::size_t bucket = 0; bucket < 2; ++bucket) {
+            geometry.bind(bucket);
+            SubmitDiagnosticTerrainBucket(
+                active,
+                std::span<const DiagnosticTerrainDraw>(draws).subspan(bucket * 2, 2),
+                bucket * 2 + 1,
+                geometry.stride,
+                ladder,
+                geometry.pools[bucket],
+                0);
+            EXPECT_TRUE(geometry.pools[bucket].blocks()[0].submitted);
+        }
+        EXPECT_EQ(active == nullptr, refusal);
+        // The position plane proves fallback geometry actually rasterized. Zero
+        // IDs alone could otherwise pass if a command was accidentally dropped.
+        std::array<DiagnosticId, 32 * 32> ids{};
+        std::array<std::array<float, 3>, 32 * 32> positions{};
+        glReadBuffer(GL_COLOR_ATTACHMENT6);
+        glReadPixels(0, 0, 32, 32, GL_RGBA_INTEGER, GL_UNSIGNED_INT, ids.data());
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glReadPixels(0, 0, 32, 32, GL_RGB, GL_FLOAT, positions.data());
+        const auto document = nlohmann::json::parse(table_.json());
+        std::array<unsigned, 4> covered{};
+        for (std::size_t pixel = 0; pixel < ids.size(); ++pixel) {
+            if (positions[pixel][2] != 0.5f) {
+                EXPECT_EQ(ids[pixel], DiagnosticId{});
+                continue;
+            }
+            const auto draw = (pixel % 32) / 8;
+            ++covered[draw];
+            if (table_full || (refusal && draw != 0)) {
+                EXPECT_EQ(ids[pixel], DiagnosticId{});
+                continue;
+            }
+            const auto* resolved = table_.resolve(static_cast<std::uint32_t>(draw + 1));
+            ASSERT_NE(resolved, nullptr);
+            EXPECT_EQ(ids[pixel], *resolved);
+            EXPECT_EQ(ids[pixel][0], draw + 1);
+            EXPECT_EQ(ids[pixel][2], static_cast<std::uint32_t>(original[draw].lod));
+            EXPECT_EQ(document["draws"][draw]["chunk"], original[draw].chunk);
+            EXPECT_EQ(document["draws"][draw]["lod"], original[draw].lod);
+            EXPECT_EQ(document["draws"][draw]["shader_variant"],
+                      ladder ? "terrain_mdi_ladder" : "terrain_mdi");
+            const auto& chunk = original[draw].chunk;
+            const auto key = "terrain/" + std::to_string(chunk[0]) + "/" +
+                             std::to_string(chunk[1]) + "/" + std::to_string(chunk[2]) +
+                             "/version/" + std::to_string(original[draw].mesh_version) +
+                             "/generation/" + std::to_string(resident[draw].geometry_generation);
+            EXPECT_EQ(document["meshes"][ids[pixel][1] - 1]["generated"], key);
+        }
+        for (const auto pixels : covered) {
+            EXPECT_GT(pixels, 0u);
+        }
+        capture.detach();
+        EXPECT_EQ(capture.complete(), !refusal);
+        EXPECT_EQ(capture.attachment_failed(), refusal);
+        EXPECT_EQ(capture.refused(), table_full);
+        EXPECT_EQ(table_.complete_coverage(), !lod_refusal);
+        if (table_full) {
+            EXPECT_EQ(table_.json(), initial);
+        }
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    }
+}
+
+TEST_F(DiagnosticAttributionGl, TerrainIndirectIdentitiesFollowPoolBucketOrder) {
+    ExpectTerrainBuckets(0);
+}
+
+TEST_F(DiagnosticAttributionGl, TerrainGeometryIdentityTracksUploadsAcrossEvictionAndRedraw) {
+    TerrainBucketGeometry geometry;
+    ASSERT_TRUE(geometry.initialize());
+    auto& pool = geometry.pools[0];
+    auto handle = geometry.first_handle;
+    std::array<Luminumbra::VoxelVertex, 3> vertices{{{{-0.2f, -0.6f, 0.5f}, {0, 0, 1}, 1},
+                                                     {{0.2f, -0.6f, 0.5f}, {0, 0, 1}, 1},
+                                                     {{0.0f, 0.6f, 0.5f}, {0, 0, 1}, 1}}};
+    const std::array<Luminumbra::u32, 3> indices{0, 1, 2};
+    GBufferDiagnosticCapture capture(targets_, table_);
+    ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+    auto* shader = capture.variant(pass_.geometry_shader().get(), false);
+    ASSERT_NE(shader, nullptr);
+    ASSERT_NE(shader, pass_.geometry_shader().get());
+    ASSERT_TRUE(shader->IsValid());
+    shader->use();
+    shader->setMat4("view", glm::mat4(1));
+    shader->setMat4("projection", glm::mat4(1));
+    shader->setMat3("u_normalViewMatrix", glm::mat3(1));
+    shader->setInt("u_useInstanceOrigin", 1);
+    shader->setInt("u_forceFlat", 1);
+    shader->setInt("u_materialLUT", 0);
+    shader->setInt("u_terrainTextures", 1);
+    shader->setInt("u_terrainNormals", 2);
+    shader->setInt("u_terrainRoughness", 3);
+    shader->setInt("u_skinnedTextures", 4);
+    glBindFramebuffer(GL_FRAMEBUFFER, pass_.gbuffer().fbo_id);
+    glViewport(0, 0, 32, 32);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    auto* active = &capture;
+    std::string previous_key;
+    // One capture spans initial residency, eviction/recreation, staged update,
+    // world clear and final pool destruction/recreation. Every mesh version repeats.
+    for (unsigned operation = 0; operation < 5; ++operation) {
+        SCOPED_TRACE(operation);
+        if (operation != 0) {
+            vertices[0].position.x -= 0.01f;
+            if (operation == 2) {
+                handle = pool.update(handle, vertices.data(), 3, indices.data(), 3, "terrain");
+            } else {
+                if (operation == 1) {
+                    pool.free(handle);
+                } else if (operation == 3) {
+                    pool.clear();
+                } else {
+                    pool.destroy();
+                }
+                handle = pool.allocate(vertices.data(), 3, indices.data(), 3, "terrain");
+            }
+            ASSERT_NE(handle, ChunkGeometryPool::kInvalid);
+            geometry.rewrite_first(handle);
+        }
+        const auto generation = pool.allocation(handle).geometry_generation;
+        ASSERT_NE(generation, 0u);
+        // A refused upload must preserve the resident's diagnostic identity too.
+        EXPECT_EQ(pool.update(handle, nullptr, 3, indices.data(), 3, "terrain"),
+                  ChunkGeometryPool::kInvalid);
+        EXPECT_EQ(pool.allocation(handle).geometry_generation, generation);
+        const std::array<DiagnosticTerrainDraw, 1> draw{{{.chunk = {7, -2, 3},
+                                                          .lod = 0,
+                                                          .mesh_version = 31,
+                                                          .geometry_generation = generation}}};
+        for (unsigned repeat = 0; repeat < 2; ++repeat) {
+            geometry.bind(0);
+            SubmitDiagnosticTerrainBucket(active, draw, 1, geometry.stride, false, pool, 0);
+            ASSERT_NE(active, nullptr);
+        }
+        const auto document = nlohmann::json::parse(table_.json());
+        ASSERT_EQ(document["draws"].size(), (operation + 1) * 2);
+        ASSERT_EQ(document["meshes"].size(), operation + 1);
+        const auto first = document["draws"][operation * 2]["mesh"];
+        const auto repeated = document["draws"][operation * 2 + 1]["mesh"];
+        EXPECT_EQ(first, repeated);
+        const auto key = document["meshes"][operation]["generated"].get<std::string>();
+        EXPECT_EQ(key, "terrain/7/-2/3/version/31/generation/" + std::to_string(generation));
+        EXPECT_NE(key, previous_key);
+        previous_key = key;
+    }
+    capture.detach();
+    EXPECT_TRUE(capture.complete());
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST_F(DiagnosticAttributionGl, TerrainRefusedLodClearsIdentityForRemainingBuckets) {
+    for (const int lod :
+         {-1, 256, std::numeric_limits<int>::min(), std::numeric_limits<int>::max()}) {
+        SCOPED_TRACE(lod);
+        ASSERT_NO_FATAL_FAILURE(ExpectTerrainBuckets(lod));
+    }
+}
+
+TEST_F(DiagnosticAttributionGl, TerrainTableFullRefusalBatchesEveryRemainingCommand) {
+    // A refused identity write ends per-command terrain submission: the capture
+    // is dropped for later buckets and every command still rasterizes without IDs.
+    ExpectTerrainBuckets(0, true);
+}
+
+TEST_F(DiagnosticAttributionGl, LadderFarDrawsDoNotInheritTheLastLiveTerrainIdentity) {
+    input_.far_selection.effective = FarWorldMode::Ladder;
+    ctx_.far_world_ladder = true;
+    const auto current_identity = [] {
+        GLint program = 0;
+        glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+        DiagnosticId id{};
+        const auto location = glGetUniformLocation(static_cast<GLuint>(program), "u_diagnosticIds");
+        if (program != 0 && location >= 0) {
+            glGetUniformuiv(static_cast<GLuint>(program), location, id.data());
+        }
+        return id;
+    };
+    DiagnosticId live{};
+    std::vector<DiagnosticId> ladder_ids;
+    input_.submit_terrain_chunks = [&](const glm::vec4(&)[6]) {
+        // The last live chunk leaves its identity on the shared terrain program.
+        if (auto* capture = GBufferDiagnosticCapture::Current()) {
+            capture->write_current(Submission());
+        }
+        live = current_identity();
+        return TerrainSubmitStats{};
+    };
+    input_.submit_ladder = [&](const FarWorldPrepareDraw& prepare) {
+        FarWorldSubmitStats stats;
+        for (int tile = 0; tile < 2; ++tile) {
+            FarWorldDrawCommand command;
+            command.index_count = 3;
+            command.diagnostic_identity.key = {.tier = 1, .tx = tile, .tz = 0};
+            command.diagnostic_span = {-32, 64};
+            if (prepare(command)) {
+                EXPECT_TRUE(FarWorldDiagnosticDraw::Write(command.index_count));
+                ladder_ids.push_back(current_identity());
+                ++stats.draws;
+            }
+        }
+        // Missing resident metadata refuses at the backend before a draw occurs.
+        FarWorldDrawCommand missing;
+        missing.index_count = 3;
+        if (prepare(missing)) {
+            EXPECT_FALSE(FarWorldDiagnosticDraw::Write(missing.index_count));
+            ++stats.refused;
+        }
+        return stats;
+    };
+    table_.clear();
+    GBufferDiagnosticCapture capture(targets_, table_);
+    SetEntryState(false);
+    EXPECT_NO_THROW(pass_.execute(ctx_, entities_, input_));
+    EXPECT_NE(live, DiagnosticId{});
+    ASSERT_EQ(ladder_ids.size(), 2u);
+    for (const auto& id : ladder_ids) {
+        EXPECT_NE(id, DiagnosticId{});
+        EXPECT_NE(id, live);
+    }
+    EXPECT_NE(ladder_ids.front(), ladder_ids.back());
+    EXPECT_FALSE(capture.complete());
+    Contains(table_.json(), "ladder_backend_identity_unavailable");
+    ExpectEntryState(false);
+    EXPECT_TRUE(targets_.reset());
+}
+
+TEST_F(DiagnosticAttributionGl, ClearIdentityOnlyChangesTheBoundCaptureVariant) {
+    GBufferDiagnosticCapture capture(targets_, table_);
+    capture.clear_current_identity(); // Unattached is also a no-op.
+    ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+    auto* shader = capture.variant(pass_.geometry_shader().get(), false);
+    ASSERT_NE(shader, nullptr);
+    ASSERT_NE(shader, pass_.geometry_shader().get());
+    shader->use();
+    capture.write_current(Submission());
+    const auto location = glGetUniformLocation(shader->Id(), "u_diagnosticIds");
+    ASSERT_GE(location, 0);
+    DiagnosticId before{};
+    glGetUniformuiv(shader->Id(), location, before.data());
+    ASSERT_NE(before, DiagnosticId{});
+    pass_.geometry_shader()->use();
+    capture.clear_current_identity();
+    glUseProgram(0);
+    capture.clear_current_identity();
+    DiagnosticId after{};
+    glGetUniformuiv(shader->Id(), location, after.data());
+    EXPECT_EQ(after, before);
+    shader->use();
+    capture.clear_current_identity();
+    glGetUniformuiv(shader->Id(), location, after.data());
+    EXPECT_EQ(after, DiagnosticId{});
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
 
 // Model a driver link refusal through GLAD, forwarding all other real GL work.
 class ImpostorLinkRefusal {
@@ -1652,4 +2324,766 @@ TEST_F(GBufferLeaseGl, RetirementReleasesLeaseEvenWhenRefusalCannotBeRecorded) {
     EXPECT_TRUE(capture.attachment_failed());
     ExpectCallerBindingsAndMask();
     EXPECT_TRUE(targets_.reset());
+}
+
+TEST(DiagnosticAttribution, GeneratedMeshKeysAreExactBoundedAndSeparateFromAssetPaths) {
+    using namespace Luminumbra::Rendering;
+    DiagnosticDrawTable table;
+    DiagnosticSubmission generated{.mesh_path = {},
+                                   .shader_variant = "terrain_mdi",
+                                   .chunk = {-2, 1, 3},
+                                   .lod = 2,
+                                   .ownership = DiagnosticOwnership::Live,
+                                   .pass = DiagnosticPass::GBuffer,
+                                   .provenance = DiagnosticProvenance::Unknown};
+    DiagnosticId first{}, repeated{}, changed{}, asset{};
+    ASSERT_TRUE(SubmitGenerated(table, generated, "terrain/-2/1/3/version/7", first));
+    ASSERT_TRUE(SubmitGenerated(table, generated, "terrain/-2/1/3/version/7", repeated));
+    ASSERT_TRUE(SubmitGenerated(table, generated, "terrain/-2/1/3/version/8", changed));
+    generated.mesh_path = "terrain/-2/1/3/version/7";
+    ASSERT_TRUE(table.submit(generated, asset));
+    EXPECT_NE(first[0], repeated[0]);
+    EXPECT_EQ(first[1], repeated[1]);
+    EXPECT_NE(first[1], changed[1]);
+    EXPECT_NE(first[1], asset[1]);
+    EXPECT_EQ(first[2], 2u);
+    EXPECT_EQ(first[3], 257u);
+    const auto meshes = nlohmann::json::parse(table.json());
+    EXPECT_EQ(meshes["meshes"][0]["path"], "");
+    EXPECT_EQ(meshes["meshes"][0]["generated"], "terrain/-2/1/3/version/7");
+    EXPECT_EQ(meshes["meshes"][0]["provenance"], DiagnosticProvenance::Unknown);
+    EXPECT_TRUE(table.complete_coverage());
+    const auto before = table.json();
+    DiagnosticId refused{11, 12, 13, 14};
+    const auto sentinel = refused;
+    // Ambiguous asset/generated input, invalid keys, UTF-8 and LOD all refuse atomically.
+    EXPECT_FALSE(SubmitGenerated(table, generated, "terrain/valid", refused));
+    generated.mesh_path = {};
+    for (const auto& key : {std::string{},
+                            std::string("../escape"),
+                            std::string("/absolute"),
+                            std::string("a\\b"),
+                            std::string(1025, 'x'),
+                            std::string("\xff")}) {
+        EXPECT_FALSE(SubmitGenerated(table, generated, key, refused));
+    }
+    generated.lod = 256;
+    EXPECT_FALSE(SubmitGenerated(table, generated, "terrain/valid", refused));
+    EXPECT_EQ(table.json(), before);
+    EXPECT_EQ(refused, sentinel);
+    generated.lod = 0;
+    generated.pass = DiagnosticPass::Forward;
+    ASSERT_TRUE(SubmitGenerated(table, generated, std::string(1024, 'x'), refused));
+    EXPECT_EQ(refused[2], 0u);
+    EXPECT_EQ(refused[3], 513u);
+}
+
+TEST(DiagnosticAttribution, ForwardAttachmentUsesTheSelectedLeaseAndPreservesDeferredStorage) {
+    const auto source = Read(kTargets) + Read(kPass);
+    Contains(source, "forward_targets == &targets");
+    const auto attach = Body(source, "bool GBufferDiagnosticCapture::attach_target(");
+    Contains(attach, "forward ? !state_->captured || state_->forward_captured");
+    Contains(attach, "auto& targets = forward ? *state_->forward_targets : *state_->targets");
+    Before(attach, "targets.ensure(true, extent, 7)", "targets.acquire_attachment_lease()");
+    Before(attach, "targets.acquire_attachment_lease()", "glFramebufferTexture2D(");
+    Contains(attach, "state_->attachment_lease = targets.acquire_attachment_lease()");
+    EXPECT_EQ(Count(attach, "state_->attachment_lease.texture()"), 2u);
+    Contains(attach, "auto forward_buffers = state_->buffers");
+    Contains(attach, "forward_buffers[6] = GL_COLOR_ATTACHMENT6");
+    Contains(attach, "glDrawBuffers(state_->buffer_count, forward_buffers.data())");
+    Contains(attach, "state_->forward_captured = true");
+    const auto forward = Body(source, "bool GBufferDiagnosticCapture::attach_forward(");
+    Contains(forward, "if (!state_->forward_targets)");
+    Contains(forward, "foliage_forward_contributor_target_unavailable");
+    Contains(forward, "attach_target(target, extent, true)");
+    Contains(forward, "unsupported(reason, 0, DiagnosticOwnership::Live, DiagnosticPass::Forward)");
+    Contains(Body(source, "bool GBufferDiagnosticCapture::deferred_attached()"),
+             "state_->framebuffer != 0 && !state_->forward");
+    const auto scope =
+        Body(source, "GBufferDiagnosticAttachment::GBufferDiagnosticAttachment(std::uint32_t");
+    Contains(scope, "if (capture_)");
+    Contains(scope, "exceptions_ = std::uncaught_exceptions()");
+    Contains(scope, "capture_->attach_forward(framebuffer, color_texture, extent)");
+    Contains(scope, "capture_ = nullptr");
+}
+
+TEST(DiagnosticAttribution, CurrentWriterAndFeedbackVariantsAreGuardedAndBounded) {
+    const auto source = Read(kTargets);
+    const auto current = Body(source, "void GBufferDiagnosticCapture::write_current(");
+    Before(current, "if (!state_->framebuffer)", "glGetIntegerv(");
+    Contains(current, "entry.shader->Id() == static_cast<GLuint>(program)");
+    Contains(current, "write(*entry.shader, submission)");
+    Contains(current, "diagnostic_writer_without_variant");
+    const auto write = Body(source, "void GBufferDiagnosticCapture::write(");
+    Contains(write, "submission.pass == (state_->forward ? DiagnosticPass::Forward");
+    Contains(write, "diagnostic_contributor_pass_mismatch");
+    Contains(write, "matching_pass && !state_->refused && !state_->table.submit");
+    Before(write, "DiagnosticId id{}", "glProgramUniform4uiv(");
+    EXPECT_EQ(write.find("throw"), std::string::npos);
+    const auto variant = Body(source, "Shader* GBufferDiagnosticCapture::variant(");
+    Contains(variant, "state_->variants.size() == 6");
+    Contains(variant, "feedback_varyings.size() > 3");
+    Contains(variant, "name.size() > 64");
+    Contains(variant, "entry.feedback_varyings == feedback_varyings");
+    Contains(variant, "shader->FragmentPath().c_str(), feedback_varyings, defines");
+}
+
+TEST_F(DiagnosticAttributionGl, ForwardLeaseProtectsOnlyItsOwnStorageAndRestoresState) {
+    DiagnosticTargets forward;
+    GBufferDiagnosticCapture capture(targets_, table_, &forward);
+    ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+    EXPECT_TRUE(capture.deferred_attached());
+    capture.detach();
+    const auto deferred_texture = targets_.texture();
+    const DiagnosticId sentinel{9, 8, 7, 6};
+    glClearTexImage(deferred_texture, 0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, sentinel.data());
+    SetEntryState(true);
+    ASSERT_TRUE(
+        capture.attach_forward(pass_.gbuffer().fbo_id, pass_.gbuffer().position_texture, {32, 32}));
+    ExpectEntryState(true);
+    EXPECT_FALSE(capture.deferred_attached());
+    const auto forward_texture = forward.texture();
+    EXPECT_NE(forward_texture, deferred_texture);
+    EXPECT_FALSE(forward.reset());
+    EXPECT_FALSE(forward.ensure(false, {}));
+    EXPECT_FALSE(forward.ensure(true, {16, 16}, 7));
+    EXPECT_EQ(forward.texture(), forward_texture);
+    DiagnosticId retained{};
+    glGetTextureSubImage(deferred_texture,
+                         0,
+                         0,
+                         0,
+                         0,
+                         1,
+                         1,
+                         1,
+                         GL_RGBA_INTEGER,
+                         GL_UNSIGNED_INT,
+                         static_cast<GLsizei>(sizeof(retained)),
+                         retained.data());
+    EXPECT_EQ(retained, sentinel);
+    EXPECT_TRUE(targets_.ensure(true, {16, 16}, 7));
+    EXPECT_FALSE(capture.complete());
+    capture.detach();
+    ExpectEntryState(true);
+    EXPECT_TRUE(capture.complete());
+    EXPECT_TRUE(forward.reset());
+}
+
+TEST_F(DiagnosticAttributionGl, CurrentWriterClearsMismatchedIdsAndRefusesUnknownPrograms) {
+    DiagnosticTargets forward;
+    GBufferDiagnosticCapture capture(targets_, table_, &forward);
+    auto* base = pass_.instanced_static_mesh_shader().get();
+    const auto empty = table_.json();
+    capture.write_current(Submission());
+    EXPECT_EQ(table_.json(), empty);
+    ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+    auto* shader = capture.variant(base, false);
+    ASSERT_NE(shader, base);
+    shader->use();
+    capture.write_current(Submission());
+    DiagnosticId identity{};
+    const auto location = glGetUniformLocation(shader->Id(), "u_diagnosticIds");
+    glGetUniformuiv(shader->Id(), location, identity.data());
+    EXPECT_NE(identity, DiagnosticId{});
+    capture.detach();
+    ASSERT_TRUE(
+        capture.attach_forward(pass_.gbuffer().fbo_id, pass_.gbuffer().position_texture, {32, 32}));
+    // The same cached program retains a previous ID until the refused write clears it.
+    EXPECT_NO_THROW(capture.write_current(Submission()));
+    glGetUniformuiv(shader->Id(), location, identity.data());
+    EXPECT_EQ(identity, DiagnosticId{});
+    EXPECT_FALSE(capture.complete());
+    auto submission = Submission();
+    submission.pass = DiagnosticPass::Forward;
+    capture.write_current(submission);
+    glGetUniformuiv(shader->Id(), location, identity.data());
+    EXPECT_EQ(identity[3], 513u);
+    base->use();
+    capture.write_current(submission);
+    capture.detach();
+    const auto document = nlohmann::json::parse(table_.json());
+    EXPECT_EQ(document.at("draws").back().at("shader_variant"),
+              "diagnostic_writer_without_variant");
+    EXPECT_EQ(document.at("draws").back().at("pass"), DiagnosticPass::Forward);
+    EXPECT_FALSE(capture.complete());
+    EXPECT_TRUE(forward.reset());
+    glUseProgram(0);
+}
+
+TEST_F(DiagnosticAttributionGl, ForwardAttachmentRefusalsLeaveNoLeaseOrCallerStateChange) {
+    DiagnosticTargets forward;
+    EXPECT_THROW((GBufferDiagnosticCapture(targets_, table_, &targets_)), std::invalid_argument);
+    // Each refused case starts with a fresh scope and draw table.
+    for (unsigned failure = 0; failure < 7; ++failure) {
+        table_.clear();
+        GBufferDiagnosticCapture capture(targets_, table_, failure == 0 ? nullptr : &forward);
+        if (failure != 1) {
+            ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+            if (failure != 2) {
+                capture.detach();
+            }
+        }
+        const auto framebuffer = pass_.gbuffer().fbo_id;
+        const auto texture = pass_.gbuffer().position_texture;
+        if (failure == 3) {
+            ASSERT_TRUE(capture.attach_forward(framebuffer, texture, {32, 32}));
+            capture.detach();
+        }
+        if (failure == 6) {
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
+            glFramebufferTexture2D(
+                GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT6, GL_TEXTURE_2D, texture, 0);
+        }
+        SetEntryState(false);
+        EXPECT_FALSE(capture.attach_forward(failure == 4 ? 0 : framebuffer,
+                                            texture,
+                                            failure == 5 ? DiagnosticExtent{16, 32}
+                                                         : DiagnosticExtent{32, 32}));
+        ExpectEntryState(false);
+        EXPECT_FALSE(capture.complete());
+        capture.detach();
+        EXPECT_TRUE(forward.reset());
+        if (failure == 6) {
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
+            glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT6, GL_TEXTURE_2D, 0, 0);
+        }
+    }
+}
+
+TEST_F(DiagnosticAttributionGl, FeedbackSignatureBoundsRefuseBeforeCompilation) {
+    for (const auto& names : {std::vector<std::string>(4, "gl_Position"),
+                              std::vector<std::string>{std::string(65, 'x')}}) {
+        table_.clear();
+        GBufferDiagnosticCapture capture(targets_, table_);
+        ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+        auto* base = pass_.instanced_static_mesh_shader().get();
+        EXPECT_EQ(capture.variant(base, false, names), base);
+        const auto document = nlohmann::json::parse(table_.json());
+        EXPECT_EQ(document.at("draws").back().at("shader_variant"),
+                  "diagnostic_shader_variant_limit");
+        capture.detach();
+        EXPECT_FALSE(capture.complete());
+    }
+}
+
+TEST_F(DiagnosticAttributionGl,
+       ForwardAttachmentScopeReleasesDuringExceptionAndCaptureDestruction) {
+    DiagnosticTargets forward;
+    for (const bool exceptional : {false, true}) {
+        table_.clear();
+        {
+            GBufferDiagnosticCapture capture(targets_, table_, &forward);
+            ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+            capture.detach();
+            SetEntryState(true);
+            if (exceptional) {
+                EXPECT_THROW(
+                    {
+                        GBufferDiagnosticAttachment attachment(
+                            pass_.gbuffer().fbo_id, pass_.gbuffer().position_texture, {32, 32});
+                        EXPECT_FALSE(forward.reset());
+                        throw std::runtime_error("contributor failure");
+                    },
+                    std::runtime_error);
+                EXPECT_FALSE(capture.complete());
+                EXPECT_TRUE(forward.reset());
+            } else {
+                ASSERT_TRUE(capture.attach_forward(
+                    pass_.gbuffer().fbo_id, pass_.gbuffer().position_texture, {32, 32}));
+                EXPECT_FALSE(forward.reset());
+            }
+        }
+        ExpectEntryState(true);
+        EXPECT_TRUE(forward.reset());
+    }
+}
+
+TEST(DiagnosticAttribution, GeneratedMeshRegistrationValidatesBeforeMutatingTheRegistry) {
+    const auto table = Read("src/luminumbra_client/rendering/DiagnosticDrawTable.h");
+    Contains(table, "std::string_view generated_mesh{}");
+    Contains(table, "submission.generated_mesh.size() > 1024");
+    Contains(table, "!submission.mesh_path.empty() || !valid_path(submission.generated_mesh)");
+    Contains(table, "submission.mesh_path.empty() && submission.generated_mesh.empty()");
+    Contains(table, "submission.generated_mesh.empty() ? \":asset:\" : \":generated:\"");
+    Contains(table, "mesh[\"generated\"] = submission.generated_mesh");
+    Before(table, "mesh_json = mesh.dump()", "mesh_ids_.emplace(");
+    Before(table, "added > max_json_bytes - json_bytes_", "mesh_ids_.emplace(");
+}
+
+TEST_F(DiagnosticAttributionGl, FeedbackSignaturesSelectDistinctCachedPrograms) {
+    DiagnosticTargets forward;
+    GBufferDiagnosticCapture capture(targets_, table_, &forward);
+    ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+    auto* base = pass_.instanced_static_mesh_shader().get();
+    auto* plain = capture.variant(base, false);
+    auto* feedback = capture.variant(base, false, {"gl_Position"});
+    ASSERT_NE(plain, base);
+    ASSERT_NE(feedback, base);
+    EXPECT_NE(plain, feedback);
+    EXPECT_EQ(capture.variant(base, false, {"gl_Position"}), feedback);
+    EXPECT_EQ(capture.variant(base, false), plain);
+    capture.detach();
+    ASSERT_TRUE(
+        capture.attach_forward(pass_.gbuffer().fbo_id, pass_.gbuffer().position_texture, {32, 32}));
+    EXPECT_EQ(capture.variant(base, false, {"missing_output"}), base);
+    const auto document = nlohmann::json::parse(table_.json());
+    EXPECT_EQ(document.at("draws").back().at("shader_variant"),
+              "diagnostic_shader_variant_unavailable");
+    EXPECT_EQ(document.at("draws").back().at("pass"), DiagnosticPass::Forward);
+    EXPECT_EQ(capture.variant(nullptr, false), nullptr);
+    const auto unavailable = nlohmann::json::parse(table_.json());
+    EXPECT_EQ(unavailable.at("draws").back().at("shader_variant"),
+              "diagnostic_base_shader_unavailable");
+    EXPECT_EQ(unavailable.at("draws").back().at("pass"), DiagnosticPass::Forward);
+    capture.detach();
+    EXPECT_FALSE(capture.complete());
+}
+
+TEST_F(GBufferLeaseGl, ForwardRollbackRetainsSelectedLeaseUntilCallerRestoration) {
+    DiagnosticTargets forward;
+    GBufferDiagnosticCapture capture(targets_, table_, &forward);
+    ASSERT_TRUE(capture.attach(gbuffer_, {32, 32}));
+    capture.detach();
+    AttachmentProbe probe(forward, gbuffer_.fbo_id);
+    probe.incomplete = true;
+    EXPECT_FALSE(capture.attach_forward(gbuffer_.fbo_id, gbuffer_.position_texture, {32, 32}));
+    EXPECT_TRUE(capture.attachment_failed());
+    EXPECT_EQ(probe.detaches, 1u);
+    EXPECT_FALSE(probe.released_before_detach);
+    Contains(table_.json(), "diagnostic_mrt_incomplete");
+    ExpectCallerBindingsAndMask();
+    ExpectDetached();
+    EXPECT_TRUE(forward.reset());
+}
+
+TEST_F(GBufferLeaseGl, ForwardRegistryRetirementReleasesSelectedLeaseAndKeepsFailureSticky) {
+    DiagnosticTargets forward;
+    GBufferDiagnosticCapture capture(targets_, table_, &forward);
+    ASSERT_TRUE(capture.attach(gbuffer_, {32, 32}));
+    capture.detach();
+    ASSERT_TRUE(capture.attach_forward(gbuffer_.fbo_id, gbuffer_.position_texture, {32, 32}));
+    AttachmentProbe probe(forward, gbuffer_.fbo_id);
+    registry_.destroy_owned("gbuffer_fbo");
+    capture.detach();
+    EXPECT_EQ(probe.detaches, 0u);
+    EXPECT_EQ(probe.buffer_writes, 0u);
+    EXPECT_TRUE(capture.attachment_failed());
+    Contains(table_.json(), "gbuffer_retired_during_capture");
+    ExpectCallerBindingsAndMask();
+    EXPECT_TRUE(forward.reset());
+    EXPECT_EQ(nlohmann::json::parse(table_.json()).at("draws").back().at("pass"),
+              DiagnosticPass::Forward);
+    table_.clear();
+    EXPECT_FALSE(capture.complete());
+}
+
+TEST(DiagnosticAttribution, AuthoredSurfacesAttributeImmutableMeshesAtTheOriginalDraw) {
+    const auto source = Read("src/luminumbra_client/rendering/passes/StaticDrawPass.cpp");
+    const auto render = Body(source, "StaticDrawStats StaticDrawPass::Render(");
+    Contains(render, "capture && !capture->deferred_attached()");
+    Contains(render, "Shader* selected_shader = &impl.shader;");
+    Contains(render, "selected_shader = capture->variant(selected_shader, false)");
+    EXPECT_LT(render.find("if (capture)"), render.find("capture->variant("));
+    Contains(render, "const auto& identity = draw.mesh->identity");
+    Contains(render, "identity.empty() || identity.size() > (1024 - 8) / 2");
+    Contains(render, "authored_static_surface");
+    Contains(render, "throw std::runtime_error");
+    Contains(render, "mesh_key.reserve(8 + 2 * identity.size())");
+    Contains(render, "mesh_key += digits[byte >> 4]");
+    Contains(render, "mesh_key += digits[byte & 15]");
+    Contains(render, ".generated_mesh = mesh_key");
+    Contains(render, ".provenance = DiagnosticProvenance::Mesh");
+    Contains(render, ".shader_variant = \"static_asset\"");
+    Contains(render, ".lod = 0");
+    Contains(render, ".ownership = DiagnosticOwnership::Live");
+    EXPECT_LT(render.find("identity.empty()"), render.find("mesh_key.reserve("));
+    EXPECT_LT(render.find("capture->write("), render.find("glDrawElements,"));
+    EXPECT_EQ(Count(render, "glDrawElements,"), 1u);
+    const auto fragment = Read("res/shaders/static_asset.frag");
+    EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(fragment)), 0x976bbadca29ae05bull);
+    Contains(fragment,
+             "#ifdef LUMIN_DIAG_IDS\nlayout (location = 6) out uvec4 gDiagnosticIds;\n"
+             "uniform uvec4 u_diagnosticIds;\n#endif");
+    Contains(fragment, "#ifdef LUMIN_DIAG_IDS\n    gDiagnosticIds = u_diagnosticIds;\n#endif");
+    EXPECT_LT(fragment.find("discard;"), fragment.find("gDiagnosticIds ="));
+    EXPECT_EQ(Count(fragment, "gDiagnosticIds ="), 1u);
+}
+
+TEST(DiagnosticAttribution, LadderConsumesExactPreparedMetadataAtTheBackendDraw) {
+    const auto identity = Read("src/luminumbra_client/rendering/FarWorldSelection.h");
+    Contains(identity, "World::FarBuildIdentity diagnostic_identity{}");
+    Contains(identity, "std::array<std::int64_t, 2> diagnostic_span{}");
+    Contains(identity, "std::uint64_t diagnostic_water_indices = 0");
+    Contains(identity, "class FarWorldDiagnosticDraw");
+    const auto renderer = Read("src/luminumbra_client/rendering/FarWorldRenderer.cpp");
+    const auto make = Body(renderer, "bool MakeFarWorldDrawCommand(");
+    Contains(make, "candidate.diagnostic_identity = record.identity");
+    Contains(make,
+             "candidate.diagnostic_span = {record.request.span.min_y, record.request.span.max_y}");
+    Contains(make, "candidate.diagnostic_water_indices = record.water_indices");
+    Contains(renderer, "MakeFarWorldDrawCommand(");
+    Contains(Read("src/luminumbra_client/rendering/FarWorldHandoffRenderer.cpp"),
+             "MakeFarWorldDrawCommand(record,");
+    const auto pass = Read(kPass);
+    const auto chunks = Body(pass, "void GBufferPass::geometry_pass_chunks(");
+    Contains(chunks, "FarWorldDiagnosticDraw diagnostic_draw(capture)");
+    Contains(chunks, "diagnostic_draw.prepare(command)");
+    EXPECT_LT(chunks.find("if (!uniforms.Prepare(command))"),
+              chunks.find("diagnostic_draw.prepare(command)"));
+    const auto targets = Read("src/luminumbra_client/rendering/FarVolumeGlBackend.cpp");
+    const auto prepare = Body(targets, "void FarWorldDiagnosticDraw::prepare(");
+    Contains(prepare, "prepared_ = capture_ && capture_->deferred_attached()");
+    Contains(prepare, "command_ = command");
+    const auto write = Body(targets, "bool FarWorldDiagnosticDraw::Write(");
+    Contains(write, "if (!capture || !capture->deferred_attached())");
+    Contains(write, "if (!draw || draw->capture_ != capture)");
+    Contains(write, "std::exchange(draw->prepared_, false)");
+    Contains(write, "!prepared || index_count != command.index_count || index_count <= 0");
+    Contains(write, "identity.key.tier < 1 || identity.key.tier > World::kFarTierCount");
+    Contains(write, "command.diagnostic_span[0] >= command.diagnostic_span[1]");
+    Contains(write, "ladder_backend_identity_unavailable");
+    Contains(write, "catch (...)");
+    Contains(write, "capture->abort();");
+    Contains(write, ".lod = identity.key.tier");
+    Contains(write, ".ownership = DiagnosticOwnership::LadderFar");
+    Contains(write, ".chunk = command.origin_chunk");
+    Contains(write, ".generated_mesh = mesh_key");
+    for (const auto* field : {"identity.key.tx",
+                              "identity.key.tz",
+                              "identity.world_epoch",
+                              "identity.content_hash",
+                              "identity.cave_policy",
+                              "identity.bake_generation",
+                              "identity.span_generation",
+                              "command.diagnostic_span[0]",
+                              "command.diagnostic_span[1]"}) {
+        Contains(write, std::string("std::to_string(") + field + ")");
+    }
+    Contains(write, "command.diagnostic_water_indices == 0");
+    Contains(write, "? DiagnosticProvenance::Sdf");
+    Contains(write, ": DiagnosticProvenance::Unknown");
+    const auto draw = Body(Read("src/luminumbra_client/rendering/FarVolumeGlBackend.cpp"),
+                           "bool FarVolumeGlDriver::DrawIndexed(");
+    Contains(draw, "success = FarWorldDiagnosticDraw::Write(index_count)");
+    EXPECT_LT(draw.find("GBufferDiagnosticCapture::Current()"),
+              draw.find("FarWorldDiagnosticDraw::Write("));
+    EXPECT_LT(draw.find("FarWorldDiagnosticDraw::Write("), draw.find("glDrawElements,"));
+    EXPECT_LT(draw.find("glDrawElements,"), draw.find("if (saved[i].buffer"));
+    EXPECT_EQ(Count(draw, "glDrawElements,"), 1u);
+}
+
+TEST(DiagnosticAttribution, LadderBackendFailuresInvalidateCaptureOnEveryReturn) {
+    const auto draw = Body(Read("src/luminumbra_client/rendering/FarVolumeGlBackend.cpp"),
+                           "bool FarVolumeGlDriver::DrawIndexed(");
+    Contains(draw, "~DiagnosticDrawResult()");
+    Contains(draw, "!submitted && capture && capture->deferred_attached()");
+    Contains(draw, "capture->abort()");
+    Contains(draw, "if (success && diagnostic.capture)");
+    Contains(draw, "diagnostic.submitted = success && restored");
+    Contains(draw, "return diagnostic.submitted");
+    EXPECT_LT(draw.find("diagnostic{GBufferDiagnosticCapture::Current()}"),
+              draw.find("if (index_count <= 0"));
+    EXPECT_LT(draw.find("glBindBuffer(GL_SHADER_STORAGE_BUFFER, static_cast<GLuint>(generic))"),
+              draw.find("diagnostic.submitted ="));
+}
+
+TEST(DiagnosticAttribution, ProceduralStaticsRetainResolvedKeysAndFallbackLods) {
+    const auto draw = Body(Read(kPass), "void GBufferPass::geometry_pass_static_meshes(");
+    Contains(draw, "generated && !identity_path_unrecordable");
+    Contains(draw, "? \"procedural/\" + batch.drawPath.substr(10)");
+    Contains(draw, ".mesh_path = unattributed || generated ? std::string_view{}");
+    Contains(draw, ": batch.drawPath,");
+    Contains(draw, ": DiagnosticProvenance::Mesh");
+    Contains(draw, ".generated_mesh = generated_key");
+    Contains(draw, "batch.drawPath == LodMeshPath(batch.basePath, level)");
+    Contains(draw, ".lod = resolved_lod");
+    EXPECT_LT(draw.find("batch.drawPath.size() > 1024"), draw.find("batch.drawPath.substr(10)"));
+    EXPECT_EQ(draw.find("generated ? DiagnosticProvenance::Unsupported"), std::string::npos);
+    using namespace Luminumbra::Rendering;
+    DiagnosticDrawTable table;
+    DiagnosticSubmission submission{.mesh_path = {},
+                                    .shader_variant = "instanced_static_mesh",
+                                    .chunk = {},
+                                    .lod = 0,
+                                    .ownership = DiagnosticOwnership::Live,
+                                    .pass = DiagnosticPass::GBuffer,
+                                    .provenance = DiagnosticProvenance::Mesh};
+    DiagnosticId base{}, repeated{}, lod{};
+    ASSERT_TRUE(SubmitGenerated(table, submission, "procedural/tree_2_leaf", base));
+    ASSERT_TRUE(SubmitGenerated(table, submission, "procedural/tree_2_leaf", repeated));
+    submission.lod = 2;
+    ASSERT_TRUE(SubmitGenerated(table, submission, "procedural/tree_2_leaf.lod2", lod));
+    EXPECT_EQ(base[1], repeated[1]);
+    EXPECT_NE(base[0], repeated[0]);
+    EXPECT_NE(base[1], lod[1]);
+    EXPECT_EQ(base[2], 0u);
+    EXPECT_EQ(lod[2], 2u);
+    EXPECT_TRUE(table.complete_coverage());
+    const auto before = table.json();
+    EXPECT_FALSE(SubmitGenerated(table, submission, "procedural/../invalid", lod));
+    EXPECT_EQ(table.json(), before);
+}
+
+TEST(DiagnosticAttribution, LegacyTerrainAndWaterResolveResidentGenerationsSeparately) {
+    const auto source = Read("src/luminumbra_client/rendering/FarLodSystem.cpp");
+    Contains(source,
+             "outcome.terrain_has_sdf = !assembly.bricks.empty() || !tile.sdf_bricks.empty()");
+    Contains(source, "result.terrain_has_sdf = outcome.terrain_has_sdf");
+    Contains(source, "region.terrain_has_sdf = result.terrain_has_sdf");
+    Contains(source, "region.diagnostic_generation = {result.epoch,");
+    Contains(source, "result.capture_epoch,");
+    Contains(source, "result.params_hash,");
+    Contains(source, "result.region_authority_revision}");
+    const auto draw = Body(source, "void FarLodSystem::draw_gbuffer(");
+    Contains(draw, "\"legacy/terrain/\"");
+    Contains(draw, "\"legacy/water/\"");
+    Contains(draw, ".provenance = region.terrain_has_sdf");
+    Contains(draw, "? DiagnosticProvenance::Unknown");
+    Contains(draw, ": DiagnosticProvenance::Heightfield");
+    Contains(draw, ".provenance = DiagnosticProvenance::Mesh");
+    EXPECT_EQ(Count(draw, ".generated_mesh = mesh_key"), 2u);
+    EXPECT_EQ(Count(draw, ".lod = static_cast<std::uint32_t>(region.tier)"), 2u);
+    EXPECT_EQ(Count(draw, ".ownership = DiagnosticOwnership::LegacyFar"), 2u);
+    EXPECT_EQ(Count(draw, "std::to_string(region.rx)"), 2u);
+    EXPECT_EQ(Count(draw, "std::to_string(region.rz)"), 2u);
+    for (const auto* field : {"generation[0]", "generation[1]", "generation[2]", "generation[3]"}) {
+        EXPECT_EQ(Count(draw, std::string("std::to_string(") + field + ")"), 2u);
+    }
+    EXPECT_EQ(draw.find("DiagnosticProvenance::Unsupported"), std::string::npos);
+    EXPECT_EQ(Count(draw, "glDrawElements,"), 2u);
+}
+
+TEST(DiagnosticAttribution, LadderMetadataWithoutAttachmentDoesNotSubmitOrConsumeIdentities) {
+    DiagnosticDrawTable table;
+    GBufferDiagnosticCapture capture(table);
+    FarWorldDiagnosticDraw diagnostic_draw(&capture);
+    FarWorldDrawCommand command;
+    command.index_count = 3;
+    command.diagnostic_identity.key.tier = 1;
+    command.diagnostic_span = {-32, 64};
+    const auto before = table.json();
+    diagnostic_draw.prepare(command);
+    EXPECT_TRUE(FarWorldDiagnosticDraw::Write(3));
+    EXPECT_TRUE(FarWorldDiagnosticDraw::Write(0));
+    EXPECT_EQ(table.json(), before);
+    EXPECT_FALSE(capture.attachment_failed());
+    EXPECT_FALSE(capture.complete());
+}
+
+TEST_F(DiagnosticAttributionGl, LadderRefusalsConsumeMetadataAndKeepFailureSticky) {
+    for (unsigned failure = 0; failure < 9; ++failure) {
+        SCOPED_TRACE(failure);
+        table_.clear();
+        GBufferDiagnosticCapture capture(targets_, table_);
+        FarWorldDiagnosticDraw diagnostic_draw(&capture);
+        ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+        auto* shader = capture.variant(pass_.geometry_shader(FarWorldMode::Ladder).get(), true);
+        ASSERT_NE(shader, nullptr);
+        ASSERT_TRUE(shader->IsValid());
+        shader->use();
+        FarWorldDrawCommand command;
+        command.index_count = 3;
+        command.diagnostic_identity.key.tier = 1;
+        command.diagnostic_span = {-32, 64};
+        std::int32_t count = 3;
+        switch (failure) {
+            case 1:
+                count = 0;
+                command.index_count = 0;
+                break;
+            case 2:
+                count = -3;
+                command.index_count = -3;
+                break;
+            case 3:
+                count = 6;
+                break;
+            case 4:
+                command.diagnostic_identity.key.tier = 0;
+                break;
+            case 5:
+                command.diagnostic_identity.key.tier =
+                    static_cast<std::uint8_t>(Luminumbra::World::kFarTierCount + 1);
+                break;
+            case 6:
+                command.diagnostic_span = {64, 64};
+                break;
+            case 7:
+                command.diagnostic_span = {64, -32};
+                break;
+            default:
+                break;
+        }
+        if (failure != 0) {
+            diagnostic_draw.prepare(command);
+        }
+        if (failure == 8) {
+            ASSERT_TRUE(FarWorldDiagnosticDraw::Write(count));
+        }
+        EXPECT_FALSE(FarWorldDiagnosticDraw::Write(count));
+        EXPECT_FALSE(FarWorldDiagnosticDraw::Write(3));
+        capture.detach();
+        EXPECT_TRUE(capture.attachment_failed());
+        EXPECT_FALSE(capture.complete());
+        const auto document = nlohmann::json::parse(table_.json());
+        const auto& refused = document.at("draws").back();
+        EXPECT_EQ(refused.at("shader_variant"), "ladder_backend_identity_unavailable");
+        EXPECT_EQ(refused.at("ownership"), DiagnosticOwnership::LadderFar);
+        EXPECT_EQ(refused.at("pass"), DiagnosticPass::GBuffer);
+        table_.clear();
+        EXPECT_FALSE(capture.complete());
+    }
+}
+
+TEST_F(DiagnosticAttributionGl, LadderKeysSeparateEveryResidentGenerationAndMixedWater) {
+    GBufferDiagnosticCapture capture(targets_, table_);
+    FarWorldDiagnosticDraw diagnostic_draw(&capture);
+    ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+    auto* shader = capture.variant(pass_.geometry_shader(FarWorldMode::Ladder).get(), true);
+    ASSERT_NE(shader, nullptr);
+    ASSERT_TRUE(shader->IsValid());
+    shader->use();
+    FarWorldDrawCommand original;
+    original.index_count = 3;
+    original.diagnostic_identity = {.world_epoch = 1,
+                                    .content_hash = 2,
+                                    .cave_policy = 1,
+                                    .key = {.tier = 1, .tx = -4, .tz = 7},
+                                    .bake_generation = 3,
+                                    .span_generation = 4};
+    original.diagnostic_span = {-32, 64};
+    original.origin_chunk = {16, -2, 32};
+    for (unsigned field = 0; field < 12; ++field) {
+        auto command = original;
+        auto& identity = command.diagnostic_identity;
+        switch (field) {
+            case 1:
+                identity.key.tier = static_cast<std::uint8_t>(Luminumbra::World::kFarTierCount);
+                break;
+            case 2:
+                ++identity.key.tx;
+                break;
+            case 3:
+                ++identity.key.tz;
+                break;
+            case 4:
+                ++identity.world_epoch;
+                break;
+            case 5:
+                ++identity.content_hash;
+                break;
+            case 6:
+                ++identity.cave_policy;
+                break;
+            case 7:
+                ++identity.bake_generation;
+                break;
+            case 8:
+                ++identity.span_generation;
+                break;
+            case 9:
+                --command.diagnostic_span[0];
+                break;
+            case 10:
+                ++command.diagnostic_span[1];
+                break;
+            case 11:
+                command.diagnostic_water_indices = 3;
+                break;
+            default:
+                break;
+        }
+        diagnostic_draw.prepare(command);
+        EXPECT_TRUE(FarWorldDiagnosticDraw::Write(3));
+    }
+    diagnostic_draw.prepare(original);
+    EXPECT_TRUE(FarWorldDiagnosticDraw::Write(3));
+    capture.detach();
+    EXPECT_TRUE(capture.complete());
+    const auto document = nlohmann::json::parse(table_.json());
+    ASSERT_EQ(document.at("meshes").size(), 12u);
+    const auto& draws = document.at("draws");
+    ASSERT_EQ(draws.size(), 13u);
+    EXPECT_EQ(draws.front().at("mesh"), draws.back().at("mesh"));
+    EXPECT_NE(draws.front().at("id"), draws.back().at("id"));
+    EXPECT_EQ(draws.front().at("chunk"), original.origin_chunk);
+    EXPECT_EQ(draws.at(1).at("lod"), Luminumbra::World::kFarTierCount);
+    EXPECT_EQ(document.at("meshes").front().at("provenance"), DiagnosticProvenance::Sdf);
+    EXPECT_EQ(document.at("meshes").back().at("provenance"), DiagnosticProvenance::Unknown);
+    EXPECT_EQ(document.at("meshes").front().at("generated"),
+              "ladder/1/-4/7/epoch/1/content/2/caves/1/bake/3/span/4/-32/64");
+}
+
+TEST_F(DiagnosticAttributionGl, LadderUnrecognizedCurrentProgramCannotClaimCoverage) {
+    GBufferDiagnosticCapture capture(targets_, table_);
+    FarWorldDiagnosticDraw diagnostic_draw(&capture);
+    ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+    pass_.geometry_shader(FarWorldMode::Ladder)->use();
+    FarWorldDrawCommand command;
+    command.index_count = 3;
+    command.diagnostic_identity.key.tier = 1;
+    command.diagnostic_span = {-32, 64};
+    diagnostic_draw.prepare(command);
+    EXPECT_TRUE(FarWorldDiagnosticDraw::Write(3));
+    capture.detach();
+    EXPECT_TRUE(capture.attachment_failed());
+    EXPECT_FALSE(capture.complete());
+    Contains(table_.json(), "diagnostic_writer_without_variant");
+}
+
+TEST_F(DiagnosticAttributionGl, MissingAndUnrelatedLadderScopesCannotReusePreparedMetadata) {
+    for (const bool unrelated : {false, true}) {
+        table_.clear();
+        GBufferDiagnosticCapture capture(targets_, table_);
+        ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+        if (unrelated) {
+            FarWorldDiagnosticDraw diagnostic_draw(nullptr);
+            EXPECT_FALSE(FarWorldDiagnosticDraw::Write(3));
+        } else {
+            {
+                FarWorldDiagnosticDraw diagnostic_draw(&capture);
+                FarWorldDrawCommand command;
+                command.index_count = 3;
+                command.diagnostic_identity.key.tier = 1;
+                command.diagnostic_span = {-32, 64};
+                diagnostic_draw.prepare(command);
+            }
+            EXPECT_FALSE(FarWorldDiagnosticDraw::Write(3));
+        }
+        capture.detach();
+        EXPECT_TRUE(capture.attachment_failed());
+        EXPECT_FALSE(capture.complete());
+        Contains(table_.json(), "ladder_backend_identity_unavailable");
+    }
+}
+
+TEST_F(DiagnosticAttributionGl, NestedLadderSubmissionRestoresTheOuterPreparedCommand) {
+    GBufferDiagnosticCapture capture(targets_, table_);
+    ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+    auto* shader = capture.variant(pass_.geometry_shader(FarWorldMode::Ladder).get(), true);
+    ASSERT_NE(shader, nullptr);
+    ASSERT_TRUE(shader->IsValid());
+    shader->use();
+    FarWorldDrawCommand command;
+    command.index_count = 3;
+    command.diagnostic_identity.key.tier = 1;
+    command.diagnostic_span = {-32, 64};
+    FarWorldDiagnosticDraw outer(&capture);
+    outer.prepare(command);
+    {
+        FarWorldDiagnosticDraw inner(&capture);
+        command.diagnostic_identity.key.tier = 2;
+        inner.prepare(command);
+        EXPECT_TRUE(FarWorldDiagnosticDraw::Write(3));
+    }
+    EXPECT_TRUE(FarWorldDiagnosticDraw::Write(3));
+    capture.detach();
+    EXPECT_TRUE(capture.complete());
+    const auto document = nlohmann::json::parse(table_.json());
+    const auto& draws = document.at("draws");
+    ASSERT_EQ(draws.size(), 2u);
+    EXPECT_EQ(draws.front().at("lod"), 2u);
+    EXPECT_EQ(draws.back().at("lod"), 1u);
+    EXPECT_NE(draws.front().at("mesh"), draws.back().at("mesh"));
 }
