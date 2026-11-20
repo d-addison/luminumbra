@@ -29,6 +29,8 @@ def module(name, path):
 scene = module('shader_scenes', 'tools/gates/shader-scenes.py')
 paths = module('scene_paths', 'tools/ci/ci_paths.py')
 software = module('scene_software', 'tools/static_preview/run_software_gl.py')
+wiring = module('upload_wiring', 'test/rendering/test_upload_budget_wiring.py')
+read, compact, body = wiring.read, wiring.compact, wiring.body
 MANIFEST = ROOT / 'test/rendering/shader_scenes/scenes.json'
 
 
@@ -511,6 +513,40 @@ class NormalDepthTests(unittest.TestCase):
 
 
 class ShaderScenesTests(unittest.TestCase):
+    def test_near_shrubs_are_leaf_cards_and_every_bush_lod_avoids_grass_albedo(self):
+        rendering = ROOT / "src/luminumbra_client/rendering"
+        source = read(ROOT / "src/luminumbra_client/app/ProcgenPalettes.cpp")
+        palette = compact(body(source, "void BuildProcgenBushPalette("))
+        self.assertIn("BuildBushLeafCard(center, normal, 0.24f, 0.18f)", palette)
+        for corner, uv in ((0, "0.0f, 0.0f"), (1, "1.0f, 0.0f"),
+                           (2, "1.0f, 1.0f"), (3, "0.0f, 1.0f")):
+            self.assertIn("verts.push_back({card[%d], normal, {%s}});" % (corner, uv), palette)
+        self.assertIn("{0u, 1u, 2u, 0u, 2u, 3u}", palette)
+        draw = compact(body(read(rendering / "passes/GBufferPass.cpp"),
+                            "void GBufferPass::geometry_pass_static_meshes("))
+        self.assertIn('const bool isBush = batch.basePath.starts_with("procgen://bush_");', draw)
+        self.assertIn("const bool leafCards = isLeaf || (isBush && !isFarLod);", draw)
+        self.assertIn('shader->setInt("u_alphaTest", leafCards ? 2 : 0);', draw)
+        self.assertIn("two_sided = leafCards;", draw)
+        self.assertIn('shader->setFloat("u_windStrength", leafCards ? 0.85f : 0.0f);', draw)
+        self.assertNotIn('isLeaf ? 0.85f', draw)
+        self.assertIn('shader->setInt("u_forceFlat", (isBush || (isLeaf && isFarLod)) ? 1 : 0);', draw)
+        # Closed far hulls keep the leaf reflectance; every other draw resets it.
+        self.assertIn('shader->setInt("u_leafSurface", isBush ? 1 : 0);', draw)
+        self.assertIn('shader->setInt("u_forceFlat", 0); shader->setInt("u_leafSurface", 0);', draw)
+        frag = compact(read(ROOT / "res/shaders/g_buffer.frag"))
+        self.assertIn("uniform int u_leafSurface = 0;", frag)
+        self.assertIn("if (proceduralLeaf || u_leafSurface == 1) {", frag)
+        # The card silhouette test stays keyed to alpha-tested cards only.
+        self.assertIn("bool proceduralLeaf = u_alphaTest == 2;", frag)
+        # Both legacy and ladder programs use this same draw consumer.
+        self.assertIn("instanced_static_mesh_shader(input.far_selection.effective)", draw)
+        native = read(ROOT / "test/rendering/diagnostic_attribution_test.cpp")
+        for regression in ("LeafCardsAreFiniteOutwardQuadsForSideAndPolarNormals",
+                           "NearBushesUseFullLeafQuadsAndNeverTerrainGrassTexturing"):
+            self.assertIn(regression, native)
+
+
     def capture(self, directory, value=.25):
         for name in sorted(scene.INPUTS - {'test/rendering/shader_scene_render_test.cpp'}):
             (directory / Path(name).name).write_bytes((ROOT / name).read_bytes())
@@ -525,7 +561,9 @@ class ShaderScenesTests(unittest.TestCase):
         (directory / 'tree-cutout.pfm').write_bytes(
             b'PF\n128 128\n-1.0\n' + struct.pack('<' + 'f' * scene.CHANNELS, *self.cutout()))
         for name, values in (('night-sky', self.night()), ('terrain-blend', self.terrain()),
-                             ('dusk-sky', [.1] * scene.CHANNELS), *scene.analytic_scenes().items()):
+                             ('dusk-sky', [.1] * scene.CHANNELS),
+                             ('shrub-leaf', scene.shrub_reference()),
+                             ('shrub-normal', scene.shrub_reference(True)), *scene.analytic_scenes().items()):
             (directory / (name + '.pfm')).write_bytes(
                 b'PF\n128 128\n-1.0\n' + struct.pack('<' + 'f' * scene.CHANNELS, *values))
         (directory / 'renderer.txt').write_text('llvmpipe (test fixture)\n', encoding='utf-8')
@@ -563,6 +601,40 @@ class ShaderScenesTests(unittest.TestCase):
             scene.rgb(data['terrain-blend'], False), self.terrain())), .5 / 255)
         self.assertNotIn('dusk-sky', data)
         self.assertEqual(manifest['diagnostics'], scene.DIAGNOSTICS)
+        self.assertEqual(manifest['analytical'], scene.ANALYTICAL)
+
+    def test_shrub_analytical_reference_and_each_regression(self):
+        albedo, normals = scene.shrub_reference(), scene.shrub_reference(True)
+        scene.check_shrub_scene(albedo, normals)
+        for x, y, expected_albedo, expected_normal in (
+                (0, 0, (.2, .6, .15), (.7, .6, 0)),
+                (32, 0, (.10, .24, .045), (.7, .6, 0)),
+                (64, 0, (.0625, .125, .1875), (.0625, .125, .1875)),
+                (80, 32, (.10, .24, .045), (.7, .6, 0)),
+                (112, 32, (.10, .24, .045), (.1, .2, 0)),
+                (80, 96, (.10, .24, .045), (2 / 3, 2 / 3, 0))):
+            offset = (y * 128 + x) * 3
+            for actual, expected in zip(albedo[offset:offset + 3], expected_albedo):
+                self.assertAlmostEqual(actual, expected)
+            for actual, expected in zip(normals[offset:offset + 3], expected_normal):
+                self.assertAlmostEqual(actual, expected)
+        # Change exactly one pixel per class: neither image-wide MAE nor p99
+        # can conceal a lost hull reflectance, cutout or inverse transpose.
+        for x, y, normal, value in ((32, 0, False, (.2, .6, .15)),
+                                    (64, 0, False, (.10, .24, .045)),
+                                    (80, 32, True, (.625, .75, 0)),
+                                    (112, 32, True, (.25, .125, 0)),
+                                    (80, 96, True, (.7, .6, 0))):
+            changed = (normals if normal else albedo).copy()
+            offset = (y * 128 + x) * 3
+            changed[offset:offset + 3] = value
+            with self.subTest(x=x, y=y, normal=normal), self.assertRaisesRegex(ValueError, 'invariant'):
+                scene.check_shrub_scene(albedo if normal else changed, changed if normal else normals)
+        for invalid in ([], albedo[:-1], [math.nan] + albedo[1:],
+                        [math.inf] + albedo[1:], [-.1] + albedo[1:], [1.1] + albedo[1:]):
+            for normal in (False, True):
+                with self.subTest(normal=normal), self.assertRaises(ValueError):
+                    scene.check_shrub_scene(albedo if normal else invalid, invalid if normal else normals)
 
     def test_exact_thresholds_and_mask(self):
         zeros = (0.,) * scene.CHANNELS
@@ -875,7 +947,8 @@ class ShaderScenesTests(unittest.TestCase):
                                       capture=capture, output=output)
             for filename in ('enhanced_skybox.frag', 'SkyAtmosphereLut.ipp',
                              'g_buffer.vert', 'g_buffer.frag', 'night-sky.pfm',
-                             'terrain-blend.pfm', 'dusk-sky.pfm'):
+                             'terrain-blend.pfm', 'dusk-sky.pfm', 'instanced_mesh.vert',
+                             'shrub-leaf.pfm', 'shrub-normal.pfm'):
                 for bad in (None, b'', b'partial'):
                     self.capture(capture)
                     if bad is None:
@@ -917,7 +990,8 @@ class ShaderScenesTests(unittest.TestCase):
             (root / 'references').mkdir()
             for fixture in scene.FIXTURES:
                 (root / fixture['reference']).write_bytes((MANIFEST.parent / fixture['reference']).read_bytes())
-            changes = [{'diagnostics': []}]
+            changes = [{'diagnostics': []}, {'analytical': None}, {'analytical': {}},
+                       {'analytical': dict(scene.ANALYTICAL, scale_y=[1, 1])}]
             for name in ('night-sky', 'terrain-blend'):
                 for field in ('fixtures', 'reference_sha256', 'reference_capture', 'inputs'):
                     data = copy.deepcopy(original)

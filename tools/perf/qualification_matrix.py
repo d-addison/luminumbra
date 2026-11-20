@@ -274,6 +274,13 @@ def readiness(cell, root):
     if cell['kind'] == 'fixed_view':
         if cell['pose'] is None:
             return ('unevaluated', 'pose-unrecorded')
+        # Confirmation is opt-in: keep authored/unknown provenance pending. The
+        # suffix records the native evidence for the exact pose in this matrix.
+        provenance = cell.get('pose_provenance')
+        prefix = 'native-confirmed:'
+        if (not isinstance(provenance, str) or not provenance.startswith(prefix)
+                or not provenance[len(prefix):].strip()):
+            return ('unevaluated', 'pose-native-unconfirmed')
         return ('ready', None)
     if cell['blocked_by'] is not None:
         return ('unevaluated', f"blocked: {cell['blocked_by']}")
