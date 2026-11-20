@@ -1359,6 +1359,13 @@
       "source": "Luminumbra documentation assets"
     },
     {
+      "bytes": 5057,
+      "license": "MIT",
+      "path": "test/fixtures/AvatarContinuationWorld.h",
+      "sha256": "ad3d71cc9976ce08bd526989f90cb2b4c24466dfe8ef98ff70fe4caa4c16462d",
+      "source": "Luminumbra test fixtures"
+    },
+    {
       "bytes": 756,
       "license": "MIT",
       "path": "test/fixtures/TerrainFixtureParams.h",
@@ -1559,6 +1566,13 @@
       "license": "MIT",
       "path": "test/rendering/shader_scenes/references/normal-decode.ppm",
       "sha256": "b516ca7cc9bffbd12cecedcc0f0c28ee7f076b287601f4a99dd54bcae1fc4ad2",
+      "source": "Luminumbra shader scene references"
+    },
+    {
+      "bytes": 49167,
+      "license": "MIT",
+      "path": "test/rendering/shader_scenes/references/post-edge.ppm",
+      "sha256": "3cda07bc6988509ceeaa5522822948086fd78f9c5a8764ef06bfcd93ffdfcb72",
       "source": "Luminumbra shader scene references"
     },
     {

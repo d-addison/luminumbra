@@ -18,7 +18,7 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | Exact producer coverage | Partial | Inside an explicit producer scope, file-backed static instances and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier with unsupported generated-mesh metadata. Live terrain MDI produces one identity per original command in pool-bucket order, using resident upload LOD and mesh version. The ladder backend, authored surfaces and tree impostors explicitly invalidate coverage; procedural static meshes also remain unsupported. Uploaded plant/marker batches resume deferred attribution, and additive scent decals use separate contributor storage. Missing contributor storage retains exact Forward records labeled `:contributor_only` and refuses completion. Foliage has a guarded shader output but no instrumented forward submission |
 | Bundle transactions and opt-in admission | GL-free core implemented; runtime integration pending | `DiagnosticCapture.h/.cpp` resolves options, streams normalized planes, joins draw records, enforces staging budgets and publishes completion last using identity-checked ownership. `diagnostic_bundle_test` covers public transports and filesystem refusal/rollback; native execution pending. Runtime setup refuses enabled diagnostics before output until the completed-frame adapter is integrated |
 | Dusk wedge attribution (issue #873) | Capture wiring and regression implemented; native execution pending | Fixed audit land pose, paired pre-present final/depth and available lighting sources; `FarWorldFogGl.DuskAuditFogIsContinuousAcrossDistanceAndHeightBoundaries`; no producer correction or visual approval |
-| Debug views and inspector | Planned | Extend `DebugViewPass` and developer console widgets |
+| ID views and single-pixel inspector | Implemented as explicit render-thread snapshots | `DebugViewPass`; developer-console debug-view panel; registered `DiagnosticInspector.*` and `DiagnosticInspectorGl.*` regressions in `pass_context_test`; native execution pending. Other B views and viewport picking remain planned |
 | Linux shader compilation and software-GL reference scenes | Partial | Fast Linux steps and material, cutout, night, terrain, normal decode and both depth-convention fixtures registered; bounded sky/terrain shader replays checked under llvmpipe; native scene target execution pending; dusk continuity diagnostic pending issue #918; no required-check or ruleset changes |
 | Bundle validity and image checks | Implemented for schema 1 and reader-only schemas 2/3 | `check-diagnostic-capture.py` and registered `DiagnosticCapturePython` synthetic regressions validate bundles without a renderer. ROI coverage, validity, weather, edge and masked defect measurements plus worst-pixel SVG crops are implemented; synthetic detection is covered, while production thresholds remain advisory/unqualified |
 | Capture feature profile and capability manifest | Implemented as GL-free setup logic; app wiring pending | `CaptureFeatureProfile.h/.cpp`; strict `--capture-feature-profile=none\|all_features` runtime selection; registered `CaptureFeatureProfile.*` regressions; native execution pending |
@@ -68,7 +68,7 @@ The GL-free bundle writer can publish supplied immutable completed-frame planes.
 Runtime scenario capture does not yet supply those planes or enable diagnostics.
 The capture test target uses modeled GL entry points for target lifecycle tests;
 rendering submits attribution only inside an explicitly constructed
-`GBufferDiagnosticCapture`. No runtime option constructs that scope yet.
+`GBufferDiagnosticCapture`. The developer-console identity snapshot constructs that scope only on explicit refresh; scenario bundle integration remains separate.
 Diagnostic options are admitted once
 in `ParseRuntimePathOptions`, before save-root creation: malformed input is refused,
 and enabled diagnostics receive an explicit unavailable-adapter error. The pure
@@ -92,8 +92,8 @@ and owned-framebuffer refusal checks still apply to resize. Destroying the owner
 with live leases asserts in debug builds and terminates in every build before GL
 deletion. Callers must detach before releasing or move-assigning over a live lease.
 The acceptance matrix records this partial state. No new runtime asset is added.
-Shader files are outside the roots classified by `public-asset-inventory.json`, so
-their guarded edits do not change that inventory.
+Shader files and this development document are outside the roots classified by
+`public-asset-inventory.json`; regenerating it retains the existing classified assets.
 
 An explicitly constructed `GBufferDiagnosticCapture` accepts a fresh draw table and
 optional caller-owned `DiagnosticTargets` and distinct forward target storage; all
@@ -330,6 +330,43 @@ draw table together; resizing invalidates a pending selection. Copy the schema-1
 JSON or request a bundle at that point. No GPU stalls/readbacks while closed;
 limit inspection to one pixel per user request and one retained frozen frame.
 
+### ID snapshot controls
+
+In the developer console's Debug views panel, enable **Identity diagnostics**.
+Named snapshot modes are draw-id (6), mesh-id (7), lod (8), chunk (9),
+producer-owner (10) and mesh-path (11); modes 0 through 5 retain their existing
+meaning. The lod view hashes `lod + 1`, so the common LOD 0 is never black. Refresh captures one render frame's ID plane and draw table together.
+The view remains frozen until the next explicit refresh; moving the camera does
+not change the retained IDs. Resizing hides an incompatible snapshot until refresh.
+The same six names are accepted by `--debug-view`; selecting one explicitly
+enables identity diagnostics and requests one snapshot. Existing CLI modes retain
+their meaning.
+
+Magenta hatching labels zero, unresolved and unsupported identities. Producer
+colours are terrain brown, impostor cyan, foliage green, static/skinned yellow and
+far volume blue; live ownership has full brightness, legacy far 70% and ladder far
+45%. Mesh-path provenance uses hashed mesh colours, orange SDF, blue heightfield
+and explicit magenta hatching for unknown provenance. Producer spellings outside
+the known renderer families remain unsupported. This does not expand producer coverage.
+
+Open **Single-pixel inspector**, enter top-left render-attachment coordinates and
+press **Refresh snapshot / inspect selected pixel**. The panel displays schema-1
+probe JSON and the exact joined draw/mesh records (including path, chunk, LOD,
+owner, pass and supported status). Albedo is linear, normal is signed view-space,
+depth is raw hardware depth and material is the exact normal attachment alpha ID.
+One fragment gathers nearest, unfiltered values at that coordinate into a fixed
+48-byte buffer; one buffer readback occurs per explicit valid request while the
+inspector is open. Closing the panel closes the inspector. Closed, idle, disabled,
+invalid-coordinate and frozen-replay paths perform no inspector readback.
+
+Snapshot registry preparation is capped by 65,536 draws and 16 MiB schema-1 JSON;
+its GPU lookup contains at most 131,074 RGBA32UI texels. No registry scan runs on
+idle frames. Targets and shader variants are created only on explicit diagnostic
+refresh, never on the default rendering path. A competing capture scope refuses
+the snapshot request until that scope releases ownership. Viewport/DPI picking,
+AOV image freezing/zoom, extra attachment selection and bundle requests are later
+view/inspector work; coordinate inspection and identity-image freezing are available here.
+
 ## C: Linux shader lane
 
 Add steps to the fast Linux lane on GitHub-hosted public-repository runners with
@@ -376,12 +413,14 @@ and 8 MiB expanded source per translation unit; refuse budgets before compilatio
 
 ### Scene catalogue
 
-The schema-3 scene manifest inventories six 128x128 PPM references, all eleven
+The schema-3 scene manifest inventories seven 128x128 PPM references, an exact
+compute readback fixture, all fourteen
 consumed source files and the capture translation unit, including its fixed
 uniforms and generated textures. Each reference records its own origin: material,
-tree cutout, terrain, normal decode and depth are analytical; night is a surfaceless llvmpipe shader
-replay. Native scene target execution remains pending because the local display
-server could not bind. Images store linear RGB, bottom-first; sky samples undo
+tree cutout, terrain, normal decode, depth and post edge are analytical; night is a
+surfaceless llvmpipe shader replay. Native scene target execution remains pending;
+surfaceless shader replays provide separate software evidence. Images store
+linear RGB, bottom-first; sky samples undo
 the shader's explicit gamma after the display clamp. The existing binary PPM
 attribute covers every reference in this directory. The public asset inventory
 classifies these test references separately from runtime assets.
@@ -394,6 +433,8 @@ classifies these test references separately from runtime assets.
 | `terrain-blend` | `g_buffer.vert/.frag` | Same reference thresholds; every row has exactly 102 pixels between 10% and 90% Sand; weight backstep <= 0.000001, adjacent weight step <= 0.008, maximum RGB error against the analytical ramp <= 0.000001 |
 | `normal-decode` | Verbatim helpers from `g_buffer.frag` and `lighting_pass.frag`, with RGBA8 storage between passes | Same reference thresholds; unit-length error <= 0.000002, angular error <= 0.02 radians; preserve every nonzero component sign (magnitude > 0.006), including six axes, eight octants and both sides of the hemisphere seam |
 | `reversed-z` | Production `Camera.h` reversed-Z projection, GLM conventional projection and verbatim `magical_particles.frag` lineariser | Same reference thresholds; both conventions must order 128 plane distances monotonically, map near/far to opposite endpoints within 0.000002, recover distance within relative 0.0002 and reproject hardware depth within 0.000002 |
+| `post-edge` | Complete production `ssao.vert` / `taau_resolve.frag` post path | Same reference thresholds; border residual p99 <= 8/255 against two-sample local inward extrapolation; depth/ID silhouette mask leaves exactly 504 border pixels |
+| `compute-ssbo` | Production `grass_compact_prefix.comp` | Integer-exact comparison of all 13 uint32 output words; explicit little-endian readback, no image reference |
 | `dusk-sky` (diagnostic only) | `enhanced_skybox.frag`, production atmospheric compute kernels | Maximum adjacent column-mean luminance step across all 128 azimuth columns, including wrap; proposed <= 0.005 remains pending issue #918; no reference or passing expectation |
 
 The tree fixture selects one tile from a generated 2x2 atlas. Its 4x4 tile repeats
@@ -447,7 +488,33 @@ checks. This scene metadata is separate from runtime diagnostic bundles, whose
 existing `camera.reversed_z` field is unchanged. Both the fixture and compiled
 projection header have build-time hashes, checked against the consumed sources.
 The existing material and terrain native cases also run normal and depth checks,
-respectively, keeping the runner's exact registered case inventory intact.
+respectively. Terrain additionally runs post-edge and compute readback, keeping
+the runner's exact registered case inventory intact; GL 4.5 already covers compute.
+
+Post edge fixes a dyadic RGB ramp, a foreground rectangle touching the left
+border, zero motion, valid white history, blend 0.9 and sharpness 0.4. The complete
+TAAU fragment shader reads RGBA16F inputs and writes RGBA16F without projection
+jitter. Repeat-addressed inputs expose missing texel-centre clamping in the
+production 3x3 neighbourhood. The generated `post-edge-mask.pfm` records the
+same depth uploaded to the shader and the fixed surface IDs. A 3x3 depth/ID
+footprint around each border and its two inward samples excludes four pixels
+where a real silhouette crosses the border; unknown masks refuse comparison.
+The analytical reference models the fixed resolve and sharpening arithmetic,
+leaving storage rounding to the measured error. A surfaceless llvmpipe replay
+measured residual p99 0.00390625; removing `currentUv`'s clamp raised it to
+0.49218750 and failed the invariant. The mutated source was restored byte-exactly.
+
+Compute readback dispatches one workgroup of the production grass prefix kernel
+with counts `[0,3,1,0,7,2,5,1]` and instance cap 13. The expected count/draw words
+are `[19,12,13,0,0]`, followed by offsets `[0,0,3,4,4,11,13,18]` in
+`compute-ssbo.bin`. Integer addition over this bounded input cannot overflow and
+has no floating-point or atomic-order dependence, so all words are integer-exact.
+Sentinel-initialized outputs and a shader-storage/buffer-update barrier precede
+synchronous SSBO readback. A surfaceless llvmpipe replay matched all words;
+changing the offset binding from 6 to 5 failed the exact check and was restored
+byte-exactly. These replays verified renderer `llvmpipe (LLVM 20.1.2, 256 bits)`,
+GL 4.5 core, Mesa 25.2.8; they do not claim native target execution or qualify
+the D-lane runtime bundle metric.
 
 To compare or regenerate, first configure the existing opt-in scene target with
 `LUMINUMBRA_SHADER_SCENES=ON` and build `shader_scene_render_test`. Capture to a
@@ -460,20 +527,21 @@ python3 -I -B tools/gates/shader-scenes.py compare --capture build/scene-capture
 python3 -I -B tools/gates/shader-scenes.py regenerate --capture build/scene-capture --output build/scene-candidates
 ```
 
-Regeneration checks all seven captures, source identities, renderer evidence,
-depth-convention metadata and every hard scene invariant before creating the candidate directory.
-It writes all six reference payloads before `scenes.json`; an I/O failure cannot publish a
+Regeneration checks all eight scene captures, the post depth/ID mask, exact SSBO
+readback, source identities, renderer evidence, depth-convention metadata and
+every hard scene invariant before creating the candidate directory.
+It writes all seven reference payloads before `scenes.json`; an I/O failure cannot publish a
 complete candidate manifest. Review and copy the candidate manifest and references
 together. Their hashes are refreshed in that manifest; rerun the scene contracts
 and acceptance/public-tree validators. Never regenerate to bless a shader defect.
 
-To reproduce the ideal normal/depth references without native execution, use
+To reproduce the ideal normal/depth/post references without native execution, use
 `python3 -I -B tools/gates/shader-scenes.py regenerate --analytical --output build/scene-ideals`.
-This preserves the other four references and their origins, and records the new
+This preserves the other four references and their origins, and records these three
 references as analytical with version `not captured`. It supplies no renderer or
 native execution evidence. Missing/partial images, stale compiled identities,
 unknown/missing conventions and single-pixel invariant failures refuse publication
-on the capture path. Native normal/depth execution and runtime bundle integration
+on the capture path. Native normal/depth/post/compute execution and runtime bundle integration
 remain pending.
 
 ## D: capture checks
@@ -986,10 +1054,10 @@ edits when parallel branches join. No new required CI checks are part of any row
 | A2: ID targets and draw registry | `rendering/DiagnosticTargets.h`; `rendering/DiagnosticTargets.cpp`; `rendering/DiagnosticDrawTable.h`; `rendering/DiagnosticDrawTable.cpp`; `test/rendering/diagnostic_targets_test.cpp`; `test/rendering/diagnostic_draw_table_test.cpp`; `test/CMakeLists.txt`; `src/luminumbra_client/sources.cmake`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After A1. Lazy integer attachment lifecycle, bounded registry and GL-state restoration; avoids owned files. |
 | A3: exact deferred attribution | `rendering/passes/GBufferPass.cpp`; `rendering/GBufferTargets.cpp`; `rendering/GBufferTargets.h`; `res/shaders/g_buffer.frag`; `res/shaders/foliage.frag`; `rendering/FarLodSystem.cpp`; `test/rendering/diagnostic_attribution_test.cpp`; `test/CMakeLists.txt`; `config/public-asset-inventory.json`; `docs/development/visual-diagnostics.md` (10) | After A2; coordinate owned files with minimal local hunks. Opt-in MRT shader variants mirror actual alpha/depth/LOD ownership; no approximate geometry replay. |
 | A4: scenario bundles and probes | `rendering/DiagnosticCapture.h`; `rendering/DiagnosticCapture.cpp`; `rendering/RenderPipeline.h`; `rendering/RenderPipeline.cpp`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `src/luminumbra_client/core/RuntimeScenarioConfig.cpp`; `test/rendering/diagnostic_bundle_test.cpp`; `test/CMakeLists.txt`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After A3. Shared readback/transaction adapter and once-only opt-in; coordinate owned scenario file. Extend capture_manifest_test for the GL-free adapter; use the client source manifest updated with the codecs in A2. |
-| B1: ID views and inspector | `rendering/passes/DebugViewPass.h`; `rendering/passes/DebugViewPass.cpp`; `res/shaders/debug_view.frag`; `src/luminumbra_client/debug/widgets/RenderControlWidgets.cpp`; `src/luminumbra_client/app/RegisterDeveloperWidgets.cpp`; `rendering/RenderPipeline.cpp`; `test/rendering/diagnostic_inspector_test.cpp`; `test/CMakeLists.txt`; `config/public-asset-inventory.json`; `docs/development/visual-diagnostics.md` (10) | After A4. ID/LOD/chunk/ownership and mesh-path views, single-pixel inspector; avoids listed owned files. |
+| B1: ID views and inspector | `rendering/passes/DebugViewPass.h`; `rendering/passes/DebugViewPass.cpp`; `res/shaders/debug_view.frag`; `src/luminumbra_client/debug/widgets/RenderControlWidgets.cpp`; `src/luminumbra_client/app/RegisterDeveloperWidgets.cpp`; `rendering/RenderPipeline.cpp`; `test/rendering/diagnostic_inspector_test.cpp`; `test/CMakeLists.txt`; `src/luminumbra_client/main_client.cpp`; `docs/development/visual-diagnostics.md` (10) | After A4. Named CLI/panel ID/LOD/chunk/ownership and mesh-path snapshots, single-pixel inspector; avoids listed owned files. |
 | B2: shader contribution views | `rendering/DiagnosticContributions.h`; `rendering/DiagnosticContributions.cpp`; `rendering/passes/DebugViewPass.cpp`; `res/shaders/debug_view.frag`; `res/shaders/lighting_pass.frag`; `res/shaders/g_buffer.frag`; `test/rendering/diagnostic_contributions_test.cpp`; `test/CMakeLists.txt`; `config/public-asset-inventory.json`; `docs/development/visual-diagnostics.md` (10) | After B1. Remaining view catalogue, instrumented opt-in variants and overlay state. Coordinate owned shaders. Forward/sky/shadow contributor planes remain separately labeled until their producers are instrumented. |
 | C1: every-PR shader compile and link completion | `tools/ci/compile_shaders.py`; `tools/ci/test_compile_shaders.py`; `test/rendering/render_smoke_test.cpp`; `docs/development/visual-diagnostics.md` (4) | Implemented in the existing unconditional fast-job step. Compile every stage permutation, then link the native program registry and compute inventory using the same prepared sources. Refuse missing pass-layout pairs or unlinked stage/define permutations; registered interface-mismatch, matching-pair and missing-program regressions cover linking. |
-| C2: llvmpipe scenes | `tools/gates/shader-scenes.py`; `tools/gates/test_shader_scenes.py`; `test/rendering/shader_scenes/scenes.json`; `test/rendering/shader_scenes/references/`; `test/rendering/shader_scene_render_test.cpp`; `test/CMakeLists.txt`; `tools/ci/validate_assets.py`; `config/public-asset-inventory.json`; `docs/development/visual-diagnostics.md` | After C1. Six references now include normal decode and both depth conventions, extending the existing reference/metric/regeneration path and path gate. Native scene execution remains pending; dusk is diagnostic only. The normal/depth extension changes ten files including two references and public asset classification; no workflow or required-check changes. |
+| C2: llvmpipe scenes | `tools/gates/shader-scenes.py`; `tools/gates/test_shader_scenes.py`; `test/rendering/shader_scenes/scenes.json`; `test/rendering/shader_scenes/references/`; `test/rendering/shader_scene_render_test.cpp`; `test/CMakeLists.txt`; `tools/ci/validate_assets.py`; `config/public-asset-inventory.json`; `docs/development/visual-diagnostics.md` | Implemented on the existing reference/metric/regeneration path and path gate: seven references include normal decode, both depth conventions and post edge, plus integer-exact production compute SSBO readback. Post clamp and compute binding source mutations failed surfaceless llvmpipe checks and were restored byte-exactly. Native scene execution remains pending; dusk is diagnostic only. The post/compute extension changes seven files including one reference and its asset inventory; no workflow or required-check changes. |
 | D1: bundle/ID/AOV validity checks | `tools/gates/check-diagnostic-capture.py`; `tools/gates/test_diagnostic_capture.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `tools/gates/diff-render-health.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (8) | After A4; parallel with B/C. Registered Python reader tests cover little endian, dimensions, partial payloads, unknown versions and nonfinite values. Avoids owned files. |
 | D2: image metrics and synthetic qualification | `tools/gates/check-diagnostic-capture.py`; `tools/gates/test_diagnostic_capture.py`; `tools/gates/baselines/diagnostic-rois.json`; `tools/gates/build-visual-sweep-montages.py`; `tools/gates/test_diagnostic_checks.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After D1 and relevant C2 fixtures/B2 channels. Implemented masked holes, seam/reference and boundary residuals, cards, bands, wedges, weather/detail and composition checks with isolated synthetic defects and labeled worst-pixel montages. All shipped thresholds remain advisory/unqualified; production enforcement needs separate repeated-capture evidence. Acceptance-row state is unchanged. Avoids owned files. |
 | E1a: exact-tick plan and admission | `rendering/TemporalAudit.h`; `rendering/TemporalAudit.cpp`; `src/luminumbra_client/core/RuntimeScenarioConfig.h`; `src/luminumbra_client/core/RuntimeScenarioConfig.cpp`; `src/luminumbra_client/sources.cmake`; `test/rendering/temporal_audit_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After A4, D1. Register GL-free tick/cadence/overflow/refusal regressions in capture_manifest_test. Coordinate configuration ownership; admission alone cannot advertise runtime support. |
