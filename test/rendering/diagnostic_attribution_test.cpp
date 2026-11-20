@@ -82,10 +82,10 @@ std::string Body(const std::string& source, std::string_view signature) {
     return {};
 }
 
-std::string WithoutDiagnosticBlocks(std::string source) {
+std::string WithoutDiagnosticBlocks(std::string source, std::size_t expected_blocks = 2) {
     constexpr std::string_view directive = "#ifdef LUMIN_DIAG_IDS\n";
-    EXPECT_EQ(Count(source, directive), 2u);
-    for (int block = 0; block < 2; ++block) {
+    EXPECT_EQ(Count(source, directive), expected_blocks);
+    for (std::size_t block = 0; block < expected_blocks; ++block) {
         auto start = source.find(directive);
         if (start == std::string::npos) {
             return {};
@@ -95,8 +95,16 @@ std::string WithoutDiagnosticBlocks(std::string source) {
             return {};
         }
         const auto length = end + std::string_view("#endif\n").size() - start;
-        // The declaration block also introduces one blank separator line.
-        if (start >= 2 && source.substr(start - 2, 2) == "\n\n") {
+        const auto alternate = source.find("#else\n", start);
+        if (alternate < end) {
+            const auto original = source.substr(alternate + 6, end - alternate - 6);
+            source.replace(start, length, original);
+            continue;
+        }
+        // Identity blocks introduce a separator; the guarded color location is
+        // adjacent to the original color declaration and adds no separator.
+        const auto color_location = source.find("layout (location = 0)\n", start);
+        if (color_location >= end && start >= 2 && source.substr(start - 2, 2) == "\n\n") {
             source.erase(start - 1, length + 1);
         } else {
             source.erase(start, length);
@@ -111,6 +119,46 @@ std::uint64_t SourceHash(const std::string& source) {
         value = (value ^ static_cast<unsigned char>(character)) * 1099511628211ull;
     }
     return value;
+}
+
+// Remove only the two capture branches; pin every original uniform, attachment
+// operation and draw argument in the remaining execute body byte for byte.
+std::string WithoutLaterSubmissionDiagnostics(std::string source) {
+    constexpr std::string_view branch = "if (auto* capture = GBufferDiagnosticCapture::Current())";
+    const auto setup = source.find("    Shader* draw_shader = m_shader.get();\n");
+    const auto attachment = Body(source, branch);
+    EXPECT_NE(setup, std::string::npos);
+    EXPECT_FALSE(attachment.empty());
+    if (setup == std::string::npos || attachment.empty()) {
+        return {};
+    }
+    const auto attachment_end = source.find(attachment) + attachment.size();
+    source.erase(setup, attachment_end + 2 - setup);
+    const auto submission = Body(source, branch);
+    EXPECT_FALSE(submission.empty());
+    if (submission.empty()) {
+        return {};
+    }
+    const auto submission_start = source.find("    " + std::string(branch));
+    const auto submission_end = source.find(submission) + submission.size();
+    source.erase(submission_start, submission_end + 1 - submission_start);
+    // Keep the shared projection source contract on the default-program branch.
+    constexpr std::string_view projection =
+        "    if (draw_shader != m_shader.get()) {\n"
+        "        draw_shader->setMat4(\"projection\", projection);\n"
+        "    } else {\n"
+        "        m_shader->setMat4(\"projection\", projection);\n"
+        "    }\n";
+    if (const auto position = source.find(projection); position != std::string::npos) {
+        source.replace(
+            position, projection.size(), "    m_shader->setMat4(\"projection\", projection);\n");
+    }
+    constexpr std::string_view draw = "draw_shader->";
+    for (auto position = source.find(draw); position != std::string::npos;
+         position = source.find(draw, position + 10)) {
+        source.replace(position, draw.size(), "m_shader->");
+    }
+    return source;
 }
 
 const std::string kTargets = "src/luminumbra_client/rendering/GBufferTargets.cpp";
@@ -340,7 +388,7 @@ TEST(DiagnosticAttribution, CapabilityRefusalIsAnExplicitUnsupportedRecord) {
     const auto targets = (Read(kTargets) + Read(kPass));
     const auto attach = Body(targets, "bool GBufferDiagnosticCapture::attach_target(");
     Contains(attach, "state_->framebuffer != 0 ||");
-    Contains(attach, "forward ? !state_->captured || state_->forward_captured : state_->captured");
+    Contains(attach, "forward ? !state_->captured : state_->forward_captured");
     Contains(attach, "nested_gbuffer_attachment");
     Contains(attach, "!gbuffer.fbo_id || !gbuffer.position_texture");
     Contains(attach, "max_buffers < 7");
@@ -1429,6 +1477,7 @@ TEST_F(DiagnosticAttributionGl, WritersRequireAttachmentAndCompletionRequiresLea
     ExpectEntryState(false);
     EXPECT_TRUE(targets_.reset());
     EXPECT_FALSE(capture.attach(pass_.gbuffer(), {32, 32}));
+    Contains(table_.json(), "diagnostic_continuation_extent_mismatch");
     EXPECT_FALSE(capture.complete());
 }
 
@@ -2382,7 +2431,8 @@ TEST_F(GBufferLeaseGl, TableOnlyAndNestedAttachmentRefuseWithoutDroppingExisting
     EXPECT_FALSE(capture.attach(gbuffer_, {32, 32}));
     EXPECT_FALSE(targets_.reset());
     capture.detach();
-    EXPECT_FALSE(capture.attach(gbuffer_, {32, 32}));
+    ASSERT_TRUE(capture.attach(gbuffer_, {32, 32}));
+    capture.detach();
     Contains(table_.json(), "nested_gbuffer_attachment");
     ExpectCallerBindingsAndMask();
     ExpectDetached();
@@ -2498,7 +2548,7 @@ TEST(DiagnosticAttribution, ForwardAttachmentUsesTheSelectedLeaseAndPreservesDef
     const auto source = Read(kTargets) + Read(kPass);
     Contains(source, "forward_targets == &targets");
     const auto attach = Body(source, "bool GBufferDiagnosticCapture::attach_target(");
-    Contains(attach, "forward ? !state_->captured || state_->forward_captured");
+    Contains(attach, "forward ? !state_->captured : state_->forward_captured");
     Contains(attach, "auto& targets = forward ? *state_->forward_targets : *state_->targets");
     Before(attach, "targets.ensure(true, extent, 7)", "targets.acquire_attachment_lease()");
     Before(attach, "targets.acquire_attachment_lease()", "glFramebufferTexture2D(");
@@ -2510,7 +2560,8 @@ TEST(DiagnosticAttribution, ForwardAttachmentUsesTheSelectedLeaseAndPreservesDef
     Contains(attach, "state_->forward_captured = true");
     const auto forward = Body(source, "bool GBufferDiagnosticCapture::attach_forward(");
     Contains(forward, "if (!state_->forward_targets)");
-    Contains(forward, "foliage_forward_contributor_target_unavailable");
+    Contains(forward, "abort();");
+    EXPECT_EQ(forward.find("foliage_forward_contributor_target_unavailable"), std::string::npos);
     Contains(forward, "attach_target(target, extent, true)");
     Contains(forward, "unsupported(reason, 0, DiagnosticOwnership::Live, DiagnosticPass::Forward)");
     Contains(Body(source, "bool GBufferDiagnosticCapture::deferred_attached()"),
@@ -2620,7 +2671,7 @@ TEST_F(DiagnosticAttributionGl, CurrentWriterClearsMismatchedIdsAndRefusesUnknow
     capture.detach();
     const auto document = nlohmann::json::parse(table_.json());
     EXPECT_EQ(document.at("draws").back().at("shader_variant"),
-              "diagnostic_writer_without_variant");
+              "instanced_static_mesh:contributor_only");
     EXPECT_EQ(document.at("draws").back().at("pass"), DiagnosticPass::Forward);
     EXPECT_FALSE(capture.complete());
     EXPECT_TRUE(forward.reset());
@@ -2644,7 +2695,6 @@ TEST_F(DiagnosticAttributionGl, ForwardAttachmentRefusalsLeaveNoLeaseOrCallerSta
         const auto texture = pass_.gbuffer().position_texture;
         if (failure == 3) {
             ASSERT_TRUE(capture.attach_forward(framebuffer, texture, {32, 32}));
-            capture.detach();
         }
         if (failure == 6) {
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
@@ -3207,4 +3257,237 @@ TEST_F(DiagnosticAttributionGl, NestedLadderSubmissionRestoresTheOuterPreparedCo
     EXPECT_EQ(draws.front().at("lod"), 2u);
     EXPECT_EQ(draws.back().at("lod"), 1u);
     EXPECT_NE(draws.front().at("mesh"), draws.back().at("mesh"));
+}
+
+TEST(DiagnosticAttribution, PlantBatchWritesItsUploadedIdentityAtTheOriginalSubmission) {
+    const auto source = Read("src/luminumbra_client/rendering/passes/PlantProcgenPass.cpp");
+    const auto draw = Body(source, "void PlantProcgenPass::execute(");
+    Contains(draw, "if (!m_enabled || !m_has_geometry || m_index_count == 0)");
+    Contains(draw, "if (!m_shader || !m_shader->IsValid() || m_vao == 0)");
+    Contains(draw, "glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &framebuffer)");
+    Contains(draw, "GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME");
+    Contains(draw, "target.position_texture = static_cast<GLuint>(position_texture)");
+    Contains(draw, "diagnostic_attachment.emplace(target,");
+    Contains(draw, "draw_shader = capture->variant(draw_shader, false)");
+    Contains(draw, "if (draw_shader != m_shader.get())");
+    Contains(draw, "draw_shader->setMat4(\"projection\", projection)");
+    Contains(draw, "m_shader->setMat4(\"projection\", projection)");
+    Contains(draw, "std::to_string(m_signature)");
+    Contains(draw, "std::to_string(m_index_count)");
+    Contains(draw, ".shader_variant = \"plant_procgen\"");
+    Contains(draw, ".pass = DiagnosticPass::GBuffer");
+    Contains(draw, ".provenance = DiagnosticProvenance::Mesh");
+    Contains(draw, ".generated_mesh = mesh_key");
+    EXPECT_LT(draw.find("capture->write("), draw.find("Submit(glDrawElements,"));
+    EXPECT_EQ(Count(draw, "Submit(glDrawElements,"), 1u);
+    EXPECT_EQ(SourceHash(WithoutLaterSubmissionDiagnostics(draw)), 0x17bde0693dc08760ull);
+    EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(Read("res/shaders/plant_procgen.frag"))),
+              0x4a332ea36f4fc1f5ull);
+    Contains(Read("res/shaders/plant_procgen.frag"),
+             "layout (location = 6) out uvec4 gDiagnosticIds;");
+}
+
+TEST(DiagnosticAttribution, ScentDecalAttributesOnlyContributingFragmentsSeparately) {
+    const auto draw = Body(Read("src/luminumbra_client/rendering/passes/GroundDecalPass.cpp"),
+                           "void GroundDecalPass::execute(");
+    Contains(draw,
+             "!m_active || !m_shader || !m_shader->IsValid() || m_vao == 0 || m_scent_tex == 0");
+    Contains(draw, "diagnostic_attachment.emplace(static_cast<GLuint>(framebuffer),");
+    Contains(draw, "ctx.gbuffer_position.id");
+    Contains(draw, "draw_shader = capture->variant(draw_shader, false)");
+    Contains(draw, ".shader_variant = \"scent_decal\"");
+    Contains(draw, ".pass = DiagnosticPass::Forward");
+    Contains(draw, ".generated_mesh = \"scent-decal/fullscreen-triangle\"");
+    EXPECT_LT(draw.find("capture->write_current("), draw.find("Submit(glDrawArrays,"));
+    EXPECT_EQ(Count(draw, "Submit(glDrawArrays,"), 1u);
+    EXPECT_EQ(SourceHash(WithoutLaterSubmissionDiagnostics(draw)), 0x46646c0093fc3f8aull);
+    const auto shader = Read("res/shaders/scent_decal.frag");
+    EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(shader, 6)), 0xa4287f15e67f0f16ull);
+    EXPECT_EQ(Count(shader, "discard;"), 4u);
+    Contains(shader, "layout (location = 6) out uvec4 gDiagnosticIds;");
+    EXPECT_LT(shader.rfind("discard;"), shader.find("gDiagnosticIds = u_diagnosticIds;"));
+    for (const auto* condition : {"!farWorldPosition(gPosition, gDepth, TexCoords, viewPos)",
+                                  "dot(viewPos, viewPos) < 1e-8",
+                                  "intensity <= 0.0025"}) {
+        Contains(shader, std::string("if (") + condition + ") { discard; }");
+    }
+    Contains(shader,
+             "#ifdef LUMIN_DIAG_IDS\n        discard;\n#else\n        FragColor = vec4(0.0);");
+}
+
+TEST(DiagnosticAttribution, ForwardWithoutStorageRetainsEachExactContributorAndRefusesCompletion) {
+    const auto targets = Read(kTargets) + Read(kPass);
+    const auto attach = Body(targets, "bool GBufferDiagnosticCapture::attach_forward(");
+    const auto missing = Body(attach, "if (!state_->forward_targets)");
+    Contains(missing, "abort();");
+    Contains(missing, "return false;");
+    EXPECT_EQ(missing.find("unsupported("), std::string::npos);
+    const auto current = Body(targets, "void GBufferDiagnosticCapture::write_current(");
+    const auto detached = Body(current, "if (!state_->framebuffer)");
+    Contains(detached, "submission.pass == DiagnosticPass::Forward");
+    Contains(detached, "record_contributor();");
+    Contains(current, "abort();");
+    Contains(current, "\":contributor_only\"");
+    Contains(current, "submission.shader_variant.empty()");
+    Contains(current, "submission.shader_variant.size() > 1024 - suffix.size()");
+    EXPECT_LT(current.find("1024 - suffix.size()"), current.find("const std::string label"));
+    Contains(current, "auto contributor = submission;");
+    Contains(current, "contributor.shader_variant = label;");
+    Contains(current, "state_->table.submit(contributor, id)");
+    Contains(current, "diagnostic_contributor_label_limit");
+    Contains(current, "diagnostic_contributor_identity_refused");
+    EXPECT_EQ(Count(current, "record_contributor();"), 2u); // Detached and failed variant.
+    using namespace Luminumbra::Rendering;
+    DiagnosticDrawTable table;
+    DiagnosticSubmission submission{.mesh_path = {},
+                                    .shader_variant = "foliage_cpu:contributor_only",
+                                    .chunk = {},
+                                    .lod = 0,
+                                    .ownership = DiagnosticOwnership::Live,
+                                    .pass = DiagnosticPass::Forward,
+                                    .provenance = DiagnosticProvenance::Unknown,
+                                    .generated_mesh = "foliage/crossed-cards"};
+    DiagnosticId first{}, second{}, invalid{};
+    ASSERT_TRUE(table.submit(submission, first));
+    ASSERT_TRUE(table.submit(submission, second));
+    EXPECT_NE(first[0], second[0]);
+    EXPECT_EQ(first[1], second[1]);
+    EXPECT_EQ(first[2], 0u);
+    EXPECT_EQ(first[3], 513u);
+    const auto before = table.json();
+    submission.lod = 256;
+    EXPECT_FALSE(table.submit(submission, invalid));
+    EXPECT_EQ(table.json(), before);
+    submission.lod = 0;
+    submission.generated_mesh = "../invalid";
+    EXPECT_FALSE(table.submit(submission, invalid));
+    EXPECT_EQ(table.json(), before);
+}
+
+TEST(DiagnosticAttribution, LaterAttachmentsPreserveIdsBuffersAndExtentAcrossStages) {
+    const auto attach = Body(Read(kTargets), "bool GBufferDiagnosticCapture::attach_target(");
+    Contains(attach,
+             "const bool already_captured = forward ? state_->forward_captured : state_->captured");
+    Contains(attach, "targets.extent().width != extent.width");
+    Contains(attach, "targets.extent().height != extent.height");
+    Contains(attach, "diagnostic_continuation_extent_mismatch");
+    EXPECT_LT(attach.find("diagnostic_continuation_extent_mismatch"),
+              attach.find("targets.ensure("));
+    Contains(attach, "if (forward || already_captured)");
+    const auto clear = Body(attach, "if (!already_captured)");
+    Contains(clear,
+             "glClearTexImage(\n            state_->attachment_lease.texture(), 0, "
+             "GL_RGBA_INTEGER, GL_UNSIGNED_INT, nullptr)");
+    EXPECT_EQ(Count(attach, "glClearTexImage("), 1u);
+    EXPECT_LT(attach.find("if (!complete)"), attach.find("if (!already_captured)"));
+}
+
+TEST_F(DiagnosticAttributionGl, ContinuationsRetainEachPlaneAndRefuseExtentChangesBeforeLeasing) {
+    for (const bool forward_pass : {false, true}) {
+        table_.clear();
+        DiagnosticTargets forward;
+        GBufferDiagnosticCapture capture(targets_, table_, &forward);
+        ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+        if (forward_pass) {
+            capture.detach();
+            ASSERT_TRUE(capture.attach_forward(
+                pass_.gbuffer().fbo_id, pass_.gbuffer().position_texture, {32, 32}));
+        }
+        auto& selected = forward_pass ? forward : targets_;
+        const auto texture = selected.texture();
+        const DiagnosticId sentinel{9, 8, 7, 6};
+        glClearTexImage(texture, 0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, sentinel.data());
+        capture.detach();
+        SetEntryState(false);
+        if (forward_pass) {
+            ASSERT_TRUE(capture.attach_forward(
+                pass_.gbuffer().fbo_id, pass_.gbuffer().position_texture, {32, 32}));
+        } else {
+            ASSERT_TRUE(capture.attach(pass_.gbuffer(), {32, 32}));
+        }
+        EXPECT_EQ(selected.texture(), texture);
+        EXPECT_FALSE(selected.reset());
+        // The hidden fixture is fixed at 32x32: readback is bounded to 16 KiB.
+        std::array<DiagnosticId, 32 * 32> pixels{};
+        glGetTextureImage(texture,
+                          0,
+                          GL_RGBA_INTEGER,
+                          GL_UNSIGNED_INT,
+                          static_cast<GLsizei>(sizeof(pixels)),
+                          pixels.data());
+        for (const auto& pixel : pixels) {
+            EXPECT_EQ(pixel, sentinel);
+        }
+        capture.detach();
+        ExpectEntryState(false);
+
+        GLuint smaller_texture = 0;
+        glCreateTextures(GL_TEXTURE_2D, 1, &smaller_texture);
+        glTextureStorage2D(smaller_texture, 1, GL_RGBA16F, 16, 32);
+        auto smaller = pass_.gbuffer();
+        smaller.position_texture = smaller_texture;
+        if (forward_pass) {
+            EXPECT_FALSE(capture.attach_forward(smaller.fbo_id, smaller_texture, {16, 32}));
+        } else {
+            EXPECT_FALSE(capture.attach(smaller, {16, 32}));
+        }
+        EXPECT_EQ(selected.texture(), texture);
+        EXPECT_EQ(selected.extent().width, 32u);
+        EXPECT_EQ(selected.extent().height, 32u);
+        EXPECT_FALSE(capture.complete());
+        EXPECT_TRUE(selected.reset()); // Refusal did not acquire a lease.
+        ExpectEntryState(false);
+        const auto document = nlohmann::json::parse(table_.json());
+        EXPECT_EQ(document.at("draws").back().at("shader_variant"),
+                  "diagnostic_continuation_extent_mismatch");
+        EXPECT_EQ(document.at("draws").back().at("pass"),
+                  forward_pass ? DiagnosticPass::Forward : DiagnosticPass::GBuffer);
+        glDeleteTextures(1, &smaller_texture);
+    }
+}
+
+TEST(DiagnosticAttribution, DetachedForwardFallbackChecksLabelAndIdentityBoundsWithoutThrowing) {
+    using namespace Luminumbra::Rendering;
+    for (unsigned failure = 0; failure < 5; ++failure) {
+        DiagnosticDrawTable table;
+        GBufferDiagnosticCapture capture(table);
+        const std::string label(failure == 0   ? 1007
+                                : failure == 1 ? 1008
+                                : failure == 2 ? 0
+                                               : 5,
+                                'x');
+        DiagnosticSubmission submission{.mesh_path = {},
+                                        .shader_variant = label,
+                                        .chunk = {},
+                                        .lod = failure == 3 ? 256u : 0u,
+                                        .ownership = DiagnosticOwnership::Live,
+                                        .pass = DiagnosticPass::Forward,
+                                        .provenance = DiagnosticProvenance::Mesh,
+                                        .generated_mesh =
+                                            failure == 4 ? "../escape" : "decal/mesh"};
+        EXPECT_NO_THROW(capture.write_current(submission));
+        EXPECT_FALSE(capture.complete());
+        EXPECT_TRUE(capture.attachment_failed());
+        const auto document = nlohmann::json::parse(table.json());
+        if (failure == 3) {
+            // An unencodable LOD cannot be copied into an unsupported table entry.
+            EXPECT_TRUE(document.at("draws").empty());
+        } else if (failure == 0) {
+            EXPECT_EQ(document.at("draws").back().at("shader_variant"),
+                      label + ":contributor_only");
+        } else {
+            EXPECT_EQ(document.at("draws").back().at("shader_variant"),
+                      failure < 3 ? "diagnostic_contributor_label_limit"
+                                  : "diagnostic_contributor_identity_refused");
+        }
+        if (failure != 3) {
+            EXPECT_EQ(document.at("draws").back().at("pass"), DiagnosticPass::Forward);
+        }
+        if (failure >= 3) {
+            EXPECT_TRUE(capture.refused());
+            const auto refused = table.json();
+            EXPECT_NO_THROW(capture.write_current(submission));
+            EXPECT_EQ(table.json(), refused);
+        }
+    }
 }
