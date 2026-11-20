@@ -232,8 +232,8 @@ private:
     DiagnosticExtent extent_;
 };
 
-// One frame's scope and storage. Destruction ends capture on every refusal or
-// exception; finish consumes the scope even when bundle publication fails.
+// One frame's scope and storage. Publication detaches the scope but retains the
+// immutable targets/table for sibling images of this same completed frame.
 class DiagnosticFrameCapture {
 public:
     static bool Admitted(const DiagnosticExtent& extent, std::size_t& retained) {
@@ -258,12 +258,15 @@ public:
             scope_ = std::make_unique<GBufferDiagnosticCapture>(targets_, draws_);
         }
     }
+    // Observation is GL-free; publication must use the mutating overload first.
+    bool ready() const {
+        return scope_ ? scope_->complete() : identity_complete_;
+    }
     bool ready() {
-        if (!scope_) {
-            return false;
+        if (scope_) {
+            scope_->detach();
         }
-        scope_->detach();
-        return scope_->complete();
+        return std::as_const(*this).ready();
     }
     bool finish(const std::filesystem::path& path,
                 const DiagnosticCaptureOptions& options,
@@ -273,11 +276,11 @@ public:
         if (!options.enabled) {
             return true;
         }
-        if (!ending) {
-            return false;
+        if (ending) {
+            ending->detach();
+            identity_complete_ = ending->complete();
         }
-        ending->detach();
-        frame.identity_complete = ending->complete();
+        frame.identity_complete = identity_complete_;
         if (!DiagnosticReadbackBudget(frame.extent, frame.staging_bytes)) {
             return false;
         }
@@ -289,5 +292,6 @@ private:
     DiagnosticTargets targets_;
     DiagnosticDrawTable draws_;
     std::unique_ptr<GBufferDiagnosticCapture> scope_;
+    bool identity_complete_ = false;
 };
 } // namespace Luminumbra::Rendering

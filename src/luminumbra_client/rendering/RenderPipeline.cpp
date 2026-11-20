@@ -479,8 +479,11 @@ bool RenderPipeline::CaptureDestinationReservation::acquired() const {
 }
 
 bool RenderPipeline::diagnostic_capture_ready() {
-    return !m_capture_diagnostics.enabled ||
-           (m_diagnostic_capture && m_frame_prepared.valid && m_diagnostic_capture->ready());
+    if (m_capture_diagnostics.enabled && m_diagnostic_capture && m_frame_prepared.valid) {
+        // Detachment can expose a deferred producer failure. Observe only afterward.
+        (void)m_diagnostic_capture->ready();
+    }
+    return diagnostic_capture_refusal().empty();
 }
 
 namespace {
@@ -553,17 +556,37 @@ CaptureManifestInput RenderPipeline::diagnostic_capture_manifest() const {
     return input;
 }
 
+std::string_view RenderPipeline::diagnostic_capture_refusal() const {
+    if (!m_capture_diagnostics.enabled) {
+        return {};
+    }
+    if (!m_diagnostic_capture || !m_frame_prepared.valid) {
+        return "completed_frame_unavailable";
+    }
+    if (!std::as_const(*m_diagnostic_capture).ready()) {
+        return "producer_coverage_incomplete";
+    }
+    if (m_capture_diagnostics.probe) {
+        const auto& coordinates = m_capture_diagnostics.probe.value();
+        if (coordinates[0] >= m_internal_width || coordinates[1] >= m_internal_height) {
+            return "probe_out_of_bounds";
+        }
+    }
+    return {};
+}
+
 bool RenderPipeline::capture_diagnostics(const std::filesystem::path& capture) {
     if (!m_capture_diagnostics.enabled) {
         return true;
     }
-    auto ending = std::move(m_diagnostic_capture);
+    // Retain successful frames for sibling captures; release on every refusal.
+    CaptureCleanup cleanup(*this);
     if (capture.empty() || capture.filename().empty()) {
         return false;
     }
     try {
         DiagnosticManifestRollback manifest_rollback(capture);
-        if (!ending || !m_frame_prepared.valid) {
+        if (!diagnostic_capture_ready()) {
             return false;
         }
         DiagnosticBundleFrame frame;
@@ -574,9 +597,11 @@ bool RenderPipeline::capture_diagnostics(const std::filesystem::path& capture) {
         frame.capture_filename = Filesystem::GenericUtf8PathString(capture.filename());
         frame.manifest_filename =
             Filesystem::GenericUtf8PathString(CaptureManifestPath(capture).filename());
-        const bool captured = ending->finish(capture, m_capture_diagnostics, frame, gbuffer());
+        const bool captured =
+            m_diagnostic_capture->finish(capture, m_capture_diagnostics, frame, gbuffer());
         if (captured) {
             manifest_rollback.preserve();
+            cleanup.retain();
         }
         return captured;
     } catch (const std::exception&) {
