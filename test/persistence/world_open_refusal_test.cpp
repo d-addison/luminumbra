@@ -1,4 +1,5 @@
 #include "../support/CalendarMetadataCases.h"
+#include "../support/GameSessionTestWorld.h"
 #include "../support/IndexedSaveFixture.h"
 #include "../support/PersistenceFileOps.h"
 #include "../support/SessionEnergyTick.h"
@@ -7,6 +8,7 @@
 #include "luminumbra_client/app/SessionExit.h"
 #include "luminumbra_client/ui/core/UIHotReload.h"
 #include <chrono>
+#include <cmath>
 #include <gtest/gtest.h>
 #include <thread>
 
@@ -26,6 +28,7 @@
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/replay/ReplayStream.h"
 #include "luminumbra_common/systems/AetherFieldSystem.h"
+#include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
@@ -45,6 +48,7 @@
 #include <array>
 #include <atomic>
 #include <barrier>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -359,7 +363,7 @@ protected:
             } else if (kind == 23)
                 json.erase("container_version"); // mixed old metadata and current chunks
             else if (kind == 24)
-                json["container_version"] = 4;
+                json["container_version"] = Persistence::kScheduledWeatherMetadataVersion + 1;
             else if (kind == 25)
                 json["container_version"] = "2";
             else if (kind == 27)
@@ -2433,16 +2437,38 @@ ServerWaterHashes ReadServerWaterHashes(Server::ServerWorldRunner& runner) {
     return hashes;
 }
 
-void ExpectSameServerSubHashes(const Persistence::WorldStreamingStateSubHashes& actual,
-                               const Persistence::WorldStreamingStateSubHashes& expected) {
+void ExpectSameServerSimulationSubHashes(
+    const Persistence::WorldStreamingStateSubHashes& actual,
+    const Persistence::WorldStreamingStateSubHashes& expected) {
     EXPECT_EQ(actual.terrain, expected.terrain);
-    EXPECT_EQ(actual.mesh, expected.mesh);
     EXPECT_EQ(actual.water, expected.water);
     EXPECT_EQ(actual.entities, expected.entities);
     EXPECT_EQ(actual.wind, expected.wind);
     EXPECT_EQ(actual.weather, expected.weather);
     EXPECT_EQ(actual.aether, expected.aether);
     EXPECT_EQ(actual.aether_state, expected.aether_state);
+}
+
+void ExpectSameServerSubHashes(const Persistence::WorldStreamingStateSubHashes& actual,
+                               const Persistence::WorldStreamingStateSubHashes& expected) {
+    ExpectSameServerSimulationSubHashes(actual, expected);
+    EXPECT_EQ(actual.mesh, expected.mesh);
+}
+
+void ExpectSameServerSimulationHashes(const ServerWaterHashes& actual,
+                                      const ServerWaterHashes& expected) {
+    EXPECT_EQ(actual.world, expected.world);
+    EXPECT_EQ(actual.chunk, expected.chunk);
+    EXPECT_EQ(actual.checkpoint, expected.checkpoint);
+    EXPECT_EQ(actual.checkpoint, actual.world);
+    EXPECT_EQ(expected.checkpoint, expected.world);
+    ExpectSameServerSimulationSubHashes(actual.sub, expected.sub);
+    ExpectSameServerSimulationSubHashes(actual.checkpoint_sub, expected.checkpoint_sub);
+    // Mesh versions and derivative geometry are diagnostic, and load invalidates
+    // their producers. Pin each run's diagnostic to its own paired capture; all
+    // simulation slots above must still match across the process boundary.
+    ExpectSameServerSubHashes(actual.checkpoint_sub, actual.sub);
+    ExpectSameServerSubHashes(expected.checkpoint_sub, expected.sub);
 }
 
 void ExpectSameServerWaterHashes(const ServerWaterHashes& actual,
@@ -2520,13 +2546,1337 @@ TEST_F(WorldOpenRefusal, ServerWaterHashesAreIndependentOfSaveTimingWithoutRegio
         const auto inputs = session->GetWorldSystem()->water_authority_input_items();
         const auto before = ReadServerWaterHashes(runner);
         ExpectSameServerWaterHashes(ReadServerWaterHashes(runner), before);
-        if (full_snapshot)
+        if (full_snapshot) {
             ASSERT_GT(runner.SaveFullSnapshot(), 0u);
-        else
+        } else {
             ASSERT_TRUE(session->SaveWorldState());
+        }
         ExpectSameServerWaterHashes(ReadServerWaterHashes(runner), before);
         // Hashes and saves must find the water queue already drained by the host tick.
         EXPECT_EQ(session->GetWorldSystem()->water_authority_input_items(), inputs);
+    }
+}
+
+void ExpectCaptureSubHashes(const Persistence::WorldStreamingStateSubHashes& actual,
+                            const Persistence::WorldStreamingStateSubHashes& expected) {
+    EXPECT_EQ(actual.terrain, expected.terrain);
+    EXPECT_EQ(actual.mesh, expected.mesh);
+    EXPECT_EQ(actual.water, expected.water);
+    EXPECT_EQ(actual.entities, expected.entities);
+    EXPECT_EQ(actual.wind, expected.wind);
+    EXPECT_EQ(actual.weather, expected.weather);
+    EXPECT_EQ(actual.aether, expected.aether);
+    EXPECT_EQ(actual.aether_state, expected.aether_state);
+}
+
+TEST(AuthorityHashCapture, PreparationKeepsLegacyPrecedenceAndRegionalFolds) {
+    const auto make_owner = [](int x, float height, ChunkState lifecycle) {
+        auto chunk = std::make_shared<Chunk>(IVec3(x, 0, 0));
+        chunk->heightmap_data = {height};
+        chunk->mark_voxel_data_dirty();
+        chunk->set_state(lifecycle);
+        return chunk;
+    };
+    const auto live = make_owner(0, 1.0f, ChunkState::Idle);
+    const auto stale = make_owner(0, 9.0f, ChunkState::Idle);
+    const auto parked = make_owner(1, 2.0f, ChunkState::Idle);
+    const auto loading = make_owner(1, 8.0f, ChunkState::Loading);
+    const auto pristine = std::make_shared<Chunk>(IVec3(2, 0, 0));
+    const auto outside = make_owner(32, 7.0f, ChunkState::Idle);
+    Persistence::RegionDigestInputs inputs{.live = {nullptr, outside, pristine, loading, live},
+                                           .parked = {stale, parked},
+                                           .durable = {},
+                                           .require_index = false,
+                                           .ground_object_bytes = "ground",
+                                           .field_page_bytes = "pages"};
+    WorldStreamingState expected;
+    ASSERT_TRUE(expected.insert_chunk(live));
+    ASSERT_TRUE(expected.insert_chunk(parked));
+    auto legacy = Persistence::ComputeRegionContentHash(expected);
+    legacy = Persistence::StableChecksum(legacy + "|ground:" + inputs.ground_object_bytes);
+    legacy = Persistence::StableChecksum(legacy + "|pages:" + inputs.field_page_bytes);
+    const auto expected_digest = std::stoull(legacy, nullptr, 16);
+    Persistence::RegionDigestOperation operation({}, false);
+    const auto prepared = operation.prepare({0, 0}, inputs);
+    ASSERT_EQ(prepared.chunks.size(), 2u);
+    EXPECT_EQ(prepared.chunks[0], live);
+    EXPECT_EQ(prepared.chunks[1], parked);
+    EXPECT_EQ(Persistence::HashPreparedRegionDigest(prepared), expected_digest);
+    EXPECT_EQ(operation.digest({0, 0}, inputs), expected_digest);
+    EXPECT_EQ(WorldSaveService::region_simulation_digest({}, {0, 0}, inputs), expected_digest);
+    inputs.ground_object_bytes = "changed";
+    inputs.field_page_bytes.clear();
+    // Prepared bytes retain the observation even if the caller reuses its input buffer.
+    EXPECT_EQ(Persistence::HashPreparedRegionDigest(prepared), expected_digest);
+}
+
+void ExpectSelectedCaptureParts(const WorldStreamingState& state,
+                                std::uint64_t cursor,
+                                const std::optional<std::string>& projection,
+                                const Persistence::AuthorityRuntimeHashes& runtime,
+                                const Persistence::AuthorityHashCapture& capture) {
+    namespace P = Persistence;
+    for (const auto part : {P::AuthorityCaptureParts::Chunk,
+                            P::AuthorityCaptureParts::Composite,
+                            P::AuthorityCaptureParts::SubHashes,
+                            P::AuthorityCaptureParts::StreamedAndSubHashes}) {
+        const auto selected =
+            P::CaptureAuthorityHashes(state, cursor, projection, "entities", runtime, part);
+        ASSERT_EQ(selected.status, P::AuthorityCaptureStatus::Ready);
+        ASSERT_TRUE(selected.capture.has_value());
+        if (!selected.capture) {
+            return;
+        }
+        const bool chunk_slot =
+            part == P::AuthorityCaptureParts::Chunk || part == P::AuthorityCaptureParts::Composite;
+        const bool sub_slot = part == P::AuthorityCaptureParts::SubHashes ||
+                              part == P::AuthorityCaptureParts::StreamedAndSubHashes;
+        EXPECT_EQ(selected.capture->streamed,
+                  part == P::AuthorityCaptureParts::SubHashes ? "" : capture.streamed);
+        EXPECT_EQ(selected.capture->chunk, chunk_slot ? capture.chunk : "");
+        EXPECT_EQ(selected.capture->composite,
+                  part == P::AuthorityCaptureParts::Composite ? capture.composite : "");
+        ExpectCaptureSubHashes(selected.capture->sub,
+                               sub_slot ? capture.sub : P::WorldStreamingStateSubHashes{});
+    }
+}
+
+TEST(AuthorityHashCapture, PinsEveryLegacyOutputSlotAtZeroAndNonzeroCursor) {
+    namespace P = Persistence;
+    WorldStreamingState state;
+    const P::AuthorityRuntimeHashes runtime{.wind = "wind",
+                                            .weather = "weather",
+                                            .aether = "aether",
+                                            .scent = "scent",
+                                            .ecology = "ecology",
+                                            .plant = "plant",
+                                            .aether_state = "aether_state"};
+    struct Golden {
+        std::uint64_t cursor;
+        const char* streamed;
+        const char* regional;
+        const char* composite_off;
+        const char* composite_on;
+        const char* water;
+    };
+    const std::array goldens{Golden{0,
+                                    "6301549f9c94d118",
+                                    "29b901a491f1be19",
+                                    "d967df6330fef550",
+                                    "4fe511ab409af347",
+                                    "da9fb1d4a463ef7d"},
+                             Golden{7,
+                                    "8ca2f12decbb595c",
+                                    "29bc87a491f4d7a2",
+                                    "cb223da985a6d7be",
+                                    "d9afe0524f020fa9",
+                                    "da9fb1d4a463ef7d|waterSimCursor:v1:bd9e024ffae20e07"}};
+    for (const auto& golden : goldens) {
+        for (const bool regions : {false, true}) {
+            SCOPED_TRACE(regions);
+            SCOPED_TRACE(golden.cursor);
+            const std::optional<std::string> projection =
+                regions ? std::optional("authoritative_chunks:v2:" + std::to_string(golden.cursor) +
+                                        ":")
+                        : std::nullopt;
+            const auto result =
+                P::CaptureAuthorityHashes(state, golden.cursor, projection, "entities", runtime);
+            ASSERT_EQ(result.status, P::AuthorityCaptureStatus::Ready);
+            ASSERT_TRUE(result.capture.has_value());
+            if (!result.capture) {
+                return;
+            }
+            const auto& capture = result.capture.value();
+            EXPECT_EQ(capture.streamed, golden.streamed);
+            EXPECT_EQ(capture.streamed, P::ComputeWorldStreamingStateHash(state, golden.cursor));
+            EXPECT_EQ(capture.streamed, WorldSaveService{}.world_hash(state, golden.cursor));
+            EXPECT_EQ(capture.chunk, regions ? golden.regional : golden.streamed);
+            EXPECT_EQ(capture.composite, regions ? golden.composite_on : golden.composite_off);
+            EXPECT_EQ(capture.chunk,
+                      regions ? P::StableChecksum(projection.value_or(""))
+                              : P::ComputeWorldStreamingStateHash(state, golden.cursor));
+            EXPECT_EQ(capture.composite,
+                      P::ComposeWorldHash(capture.chunk,
+                                          runtime.wind,
+                                          runtime.weather,
+                                          runtime.aether,
+                                          runtime.scent,
+                                          runtime.ecology,
+                                          runtime.plant));
+            const P::AuthorityRegionalInputs owners{
+                .save_dir = {}, .require_index = false, .regions = {}};
+            const auto owned =
+                P::CaptureAuthorityHashes(state, golden.cursor, owners, "entities", runtime);
+            ASSERT_TRUE(owned.capture.has_value());
+            if (!owned.capture) {
+                return;
+            }
+            EXPECT_EQ(owned.capture->chunk, golden.regional);
+            EXPECT_EQ(owned.capture->composite, golden.composite_on);
+            ASSERT_NO_FATAL_FAILURE(
+                ExpectSelectedCaptureParts(state, golden.cursor, projection, runtime, capture));
+            EXPECT_EQ(capture.sub.terrain, "7584c0f6de3e387b");
+            EXPECT_EQ(capture.sub.mesh, "594db6ffa2560b29");
+            EXPECT_EQ(capture.sub.water, golden.water);
+            EXPECT_EQ(capture.sub.entities, "935d0fb07bb3822a");
+            EXPECT_EQ(capture.sub.wind, "wind");
+            EXPECT_EQ(capture.sub.weather, "weather");
+            EXPECT_EQ(capture.sub.aether, "aether");
+            EXPECT_EQ(capture.sub.aether_state, "aether_state");
+            // Independent pre-capture projections remain the sub-slot oracle.
+            const auto legacy_sub =
+                P::ComputeWorldStreamingStateSubHashes(state, "entities", golden.cursor);
+            EXPECT_EQ(capture.sub.terrain, legacy_sub.terrain);
+            EXPECT_EQ(capture.sub.mesh, legacy_sub.mesh);
+            EXPECT_EQ(capture.sub.water, legacy_sub.water);
+            EXPECT_EQ(capture.sub.entities, legacy_sub.entities);
+        }
+    }
+    const auto missing = P::CaptureAuthorityHashes(state, std::nullopt);
+    EXPECT_EQ(missing.status, P::AuthorityCaptureStatus::MissingCursor);
+    EXPECT_FALSE(missing.capture.has_value());
+}
+
+TEST(AuthorityHashCapture, RuntimeEntityCursorAndRegionalInputsSelectTheirLegacySlots) {
+    namespace P = Persistence;
+    WorldStreamingState state;
+    const P::AuthorityRuntimeHashes runtime{.wind = "wind",
+                                            .weather = "weather",
+                                            .aether = "aether",
+                                            .scent = "scent",
+                                            .ecology = "ecology",
+                                            .plant = "plant",
+                                            .aether_state = "state"};
+    const std::array members{&P::AuthorityRuntimeHashes::wind,
+                             &P::AuthorityRuntimeHashes::weather,
+                             &P::AuthorityRuntimeHashes::aether,
+                             &P::AuthorityRuntimeHashes::scent,
+                             &P::AuthorityRuntimeHashes::ecology,
+                             &P::AuthorityRuntimeHashes::plant,
+                             &P::AuthorityRuntimeHashes::aether_state};
+    for (const bool regions : {false, true}) {
+        SCOPED_TRACE(regions);
+        const std::optional<std::string> projection =
+            regions ? std::optional<std::string>{"authoritative_chunks:v2:0:"} : std::nullopt;
+        const auto baseline = P::CaptureAuthorityHashes(state, 0, projection, "entities", runtime);
+        ASSERT_TRUE(baseline.capture.has_value());
+        if (!baseline.capture) {
+            return;
+        }
+        const auto& before = baseline.capture.value();
+        for (const auto member : members) {
+            auto changed = runtime;
+            changed.*member += "changed";
+            const auto result =
+                P::CaptureAuthorityHashes(state, 0, projection, "entities", changed);
+            ASSERT_TRUE(result.capture.has_value());
+            if (!result.capture) {
+                return;
+            }
+            const auto& after = result.capture.value();
+            EXPECT_EQ(after.streamed, before.streamed);
+            EXPECT_EQ(after.chunk, before.chunk);
+            EXPECT_EQ(after.composite == before.composite,
+                      member == &P::AuthorityRuntimeHashes::aether_state);
+            auto expected = before.sub;
+            if (member == &P::AuthorityRuntimeHashes::wind) {
+                expected.wind = changed.wind;
+            } else if (member == &P::AuthorityRuntimeHashes::weather) {
+                expected.weather = changed.weather;
+            } else if (member == &P::AuthorityRuntimeHashes::aether) {
+                expected.aether = changed.aether;
+            } else if (member == &P::AuthorityRuntimeHashes::aether_state) {
+                expected.aether_state = changed.aether_state;
+            }
+            ExpectCaptureSubHashes(after.sub, expected);
+        }
+        for (const std::string& entities : {std::string{}, std::string{"changed"}}) {
+            const auto result = P::CaptureAuthorityHashes(state, 0, projection, entities, runtime);
+            ASSERT_TRUE(result.capture.has_value());
+            if (!result.capture) {
+                return;
+            }
+            EXPECT_EQ(result.capture->streamed, before.streamed);
+            EXPECT_EQ(result.capture->chunk, before.chunk);
+            EXPECT_EQ(result.capture->composite, before.composite);
+            auto expected = before.sub;
+            expected.entities = entities.empty() ? "" : P::StableChecksum(entities);
+            ExpectCaptureSubHashes(result.capture->sub, expected);
+            EXPECT_NE(result.capture->sub.entities, before.sub.entities);
+        }
+        const auto next_projection =
+            regions ? std::optional<std::string>{"authoritative_chunks:v2:1:"} : std::nullopt;
+        const auto next = P::CaptureAuthorityHashes(state, 1, next_projection, "entities", runtime);
+        ASSERT_TRUE(next.capture.has_value());
+        if (!next.capture) {
+            return;
+        }
+        EXPECT_NE(next.capture->streamed, before.streamed);
+        EXPECT_NE(next.capture->chunk, before.chunk);
+        EXPECT_NE(next.capture->composite, before.composite);
+        EXPECT_NE(next.capture->sub.water, before.sub.water);
+        EXPECT_EQ(next.capture->sub.terrain, before.sub.terrain);
+        EXPECT_EQ(next.capture->sub.mesh, before.sub.mesh);
+    }
+    P::AuthorityRegionalInputs regional{.save_dir = {}, .require_index = false, .regions = {}};
+    regional.regions.push_back({.key = {0, 0}, .inputs = {}, .frozen_digest = std::nullopt});
+    const auto baseline = P::CaptureAuthorityHashes(state, 0, regional);
+    ASSERT_TRUE(baseline.capture.has_value());
+    if (!baseline.capture) {
+        return;
+    }
+    for (int input = 0; input < 4; ++input) {
+        auto changed = regional;
+        if (input == 0) {
+            changed.regions.front().inputs.ground_object_bytes = "ground";
+        } else if (input == 1) {
+            changed.regions.front().inputs.field_page_bytes = "pages";
+        } else if (input == 2) {
+            changed.regions.front().frozen_digest = 42;
+        } else {
+            changed.regions.front().key = {1, 0};
+        }
+        const auto result = P::CaptureAuthorityHashes(state, 0, changed);
+        ASSERT_TRUE(result.capture.has_value());
+        if (!result.capture) {
+            return;
+        }
+        EXPECT_NE(result.capture->chunk, baseline.capture->chunk);
+        EXPECT_NE(result.capture->composite, baseline.capture->composite);
+        EXPECT_EQ(result.capture->streamed, baseline.capture->streamed);
+        ExpectCaptureSubHashes(result.capture->sub, baseline.capture->sub);
+    }
+}
+
+TEST(AuthorityHashCapture, ChunkInputsKeepStreamedRegionalAndDiagnosticDomains) {
+    namespace P = Persistence;
+    struct Change {
+        const char* name;
+        void (*apply)(Chunk&);
+        bool streamed;
+        bool terrain;
+        bool mesh;
+        bool water;
+        bool regional;
+    };
+    const std::array changes{
+        Change{"sdf", [](Chunk& c) { c.sdf_data = {2.0f}; }, true, true, false, false, true},
+        Change{"heightmap",
+               [](Chunk& c) { c.heightmap_data = {2.0f}; },
+               true,
+               true,
+               false,
+               false,
+               true},
+        Change{"material", [](Chunk& c) { c.material_data = {1}; }, true, true, false, false, true},
+        Change{"lifecycle",
+               [](Chunk& c) { c.set_state(ChunkState::Ready); },
+               true,
+               true,
+               false,
+               false,
+               false},
+        Change{"collision",
+               [](Chunk& c) { c.has_collision.store(true); },
+               true,
+               false,
+               false,
+               false,
+               false},
+        Change{"mesh", [](Chunk& c) { c.mesh_indices = {1}; }, false, false, true, false, false},
+        Change{"mesh version",
+               [](Chunk& c) { c.mesh_version.store(1); },
+               false,
+               false,
+               true,
+               false,
+               false},
+        Change{"water depth",
+               [](Chunk& c) { c.water_depth_mm = {2}; },
+               true,
+               false,
+               false,
+               true,
+               true},
+        Change{"water bed", [](Chunk& c) { c.water_bed_mm = {2}; }, true, false, false, true, true},
+        Change{"water flux",
+               [](Chunk& c) { c.water_edge_flux = {2}; },
+               true,
+               false,
+               false,
+               true,
+               true},
+        Change{"water initialized",
+               [](Chunk& c) { c.has_water_sim.store(true); },
+               true,
+               false,
+               false,
+               true,
+               true},
+        Change{"water resolution",
+               [](Chunk& c) { c.current_water_resolution.store(4); },
+               true,
+               false,
+               false,
+               true,
+               true},
+        Change{"water sleeping",
+               [](Chunk& c) { c.is_water_sleeping.store(true); },
+               true,
+               false,
+               false,
+               true,
+               true},
+        Change{"water delta",
+               [](Chunk& c) { c.max_water_delta_last_tick = 1.0f; },
+               true,
+               false,
+               false,
+               true,
+               true},
+        Change{"water quiet ticks",
+               [](Chunk& c) { c.ticks_below_threshold = 1; },
+               true,
+               false,
+               false,
+               true,
+               true},
+        Change{"water mesh",
+               [](Chunk& c) { c.water_mesh_generated.store(true); },
+               false,
+               false,
+               true,
+               false,
+               false},
+        Change{"mesh vertices",
+               [](Chunk& c) {
+                   c.mesh_vertices.push_back({.position = Vec3(1.0f),
+                                              .normal = Vec3(0.0f, 1.0f, 0.0f),
+                                              .material_id = 1});
+               },
+               false,
+               false,
+               true,
+               false,
+               false},
+        Change{"water mesh vertices",
+               [](Chunk& c) {
+                   c.water_mesh_vertices.push_back({.position = Vec3(1.0f),
+                                                    .normal = Vec3(0.0f, 1.0f, 0.0f),
+                                                    .material_id = 1});
+               },
+               false,
+               false,
+               true,
+               false,
+               false},
+        Change{"water mesh indices",
+               [](Chunk& c) { c.water_mesh_indices = {1}; },
+               false,
+               false,
+               true,
+               false,
+               false},
+        Change{"pending mesh vertices",
+               [](Chunk& c) {
+                   c.pending_mesh_vertices.push_back({.position = Vec3(1.0f),
+                                                      .normal = Vec3(0.0f, 1.0f, 0.0f),
+                                                      .material_id = 1});
+               },
+               false,
+               false,
+               true,
+               false,
+               false},
+        Change{"pending mesh indices",
+               [](Chunk& c) { c.pending_mesh_indices = {1}; },
+               false,
+               false,
+               true,
+               false,
+               false},
+        Change{"pending water vertices",
+               [](Chunk& c) {
+                   c.pending_water_mesh_vertices.push_back({.position = Vec3(1.0f),
+                                                            .normal = Vec3(0.0f, 1.0f, 0.0f),
+                                                            .material_id = 1});
+               },
+               false,
+               false,
+               true,
+               false,
+               false},
+        Change{"pending water indices",
+               [](Chunk& c) { c.pending_water_mesh_indices = {1}; },
+               false,
+               false,
+               true,
+               false,
+               false},
+        Change{"water mesh version",
+               [](Chunk& c) { c.water_mesh_version.store(1); },
+               false,
+               false,
+               true,
+               false,
+               false},
+        Change{"water mesh ticks",
+               [](Chunk& c) { c.water_mesh_dirty_ticks = 1; },
+               false,
+               false,
+               true,
+               false,
+               false},
+        Change{"mesh ready",
+               [](Chunk& c) { c.pending_mesh_ready.store(true); },
+               false,
+               false,
+               false,
+               false,
+               false},
+        Change{"mesh failed",
+               [](Chunk& c) { c.pending_mesh_failed.store(true); },
+               false,
+               false,
+               false,
+               false,
+               false},
+        Change{"lod", [](Chunk& c) { c.current_lod.store(1); }, false, false, false, false, false},
+        Change{"pending lod",
+               [](Chunk& c) { c.pending_lod.store(1); },
+               false,
+               false,
+               false,
+               false,
+               false},
+        Change{"water mirror",
+               [](Chunk& c) { c.water_level_data = {1.0f}; },
+               false,
+               false,
+               false,
+               false,
+               false},
+        Change{"flow mirror",
+               [](Chunk& c) { c.water_flow_data = {Vec2(1.0f, 0.0f)}; },
+               false,
+               false,
+               false,
+               false,
+               false},
+        Change{"water terrain mirror",
+               [](Chunk& c) { c.water_sim_terrain_height = {1.0f}; },
+               false,
+               false,
+               false,
+               false,
+               false},
+        Change{"water ownership",
+               [](Chunk& c) { c.mark_water_data_dirty(); },
+               true,
+               false,
+               false,
+               false,
+               false},
+        Change{"generated terrain",
+               [](Chunk& c) { c.mark_sdf_generated_current_params(); },
+               false,
+               false,
+               false,
+               false,
+               true}};
+
+    for (const auto& change : changes) {
+        SCOPED_TRACE(change.name);
+        for (const bool regions : {false, true}) {
+            WorldStreamingState state;
+            const auto chunk = state.get_or_create_chunk(IVec3(0, 0, 0));
+            chunk->set_state(ChunkState::Idle);
+            chunk->mark_voxel_data_dirty();
+            P::AuthorityRegionalInputs regional{
+                .save_dir = {}, .require_index = false, .regions = {}};
+            regional.regions.push_back({.key = {0, 0},
+                                        .inputs = {.live = {chunk}, .parked = {}, .durable = {}},
+                                        .frozen_digest = std::nullopt});
+            const auto capture = [&] {
+                return regions ? P::CaptureAuthorityHashes(state, 0, regional)
+                               : P::CaptureAuthorityHashes(state, 0);
+            };
+            const auto before = capture();
+            ASSERT_TRUE(before.capture.has_value());
+            if (!before.capture) {
+                return;
+            }
+            change.apply(*chunk);
+            const auto after = capture();
+            ASSERT_TRUE(after.capture.has_value());
+            if (!after.capture) {
+                return;
+            }
+            EXPECT_EQ(after.capture->streamed != before.capture->streamed, change.streamed);
+            EXPECT_EQ(after.capture->chunk != before.capture->chunk,
+                      regions ? change.regional : change.streamed);
+            EXPECT_EQ(after.capture->composite != before.capture->composite,
+                      regions ? change.regional : change.streamed);
+            EXPECT_EQ(after.capture->sub.terrain != before.capture->sub.terrain, change.terrain);
+            EXPECT_EQ(after.capture->sub.mesh != before.capture->sub.mesh, change.mesh);
+            EXPECT_EQ(after.capture->sub.water != before.capture->sub.water, change.water);
+            const auto legacy = P::ComputeWorldStreamingStateHash(state);
+            EXPECT_EQ(after.capture->streamed, legacy);
+            ExpectCaptureSubHashes(after.capture->sub,
+                                   P::ComputeWorldStreamingStateSubHashes(state));
+            if (regions) {
+                const auto digest = WorldSaveService::region_simulation_digest(
+                    {}, {0, 0}, regional.regions.front().inputs);
+                EXPECT_EQ(after.capture->chunk,
+                          P::StableChecksum(
+                              "authoritative_chunks:v2:0:0,0:" + std::to_string(digest) + ";"));
+            } else {
+                EXPECT_EQ(after.capture->chunk, legacy);
+            }
+        }
+    }
+}
+
+TEST(AuthorityHashCapture, ChunkIdentityFeedsEveryLegacySlot) {
+    namespace P = Persistence;
+    // Chunk coordinates and the derived chunk id feed every chunk diagnostic group.
+    WorldStreamingState original, relocated;
+    const auto left = original.get_or_create_chunk(IVec3(0, 0, 0));
+    const auto right = relocated.get_or_create_chunk(IVec3(1, 0, 0));
+    left->set_state(ChunkState::Idle);
+    right->set_state(ChunkState::Idle);
+    left->mark_voxel_data_dirty();
+    right->mark_voxel_data_dirty();
+    for (const bool regions : {false, true}) {
+        const P::AuthorityRegionalInputs left_region{
+            .save_dir = {},
+            .require_index = false,
+            .regions = {{.key = {0, 0},
+                         .inputs = {.live = {left}, .parked = {}, .durable = {}},
+                         .frozen_digest = std::nullopt}}};
+        const P::AuthorityRegionalInputs right_region{
+            .save_dir = {},
+            .require_index = false,
+            .regions = {{.key = {0, 0},
+                         .inputs = {.live = {right}, .parked = {}, .durable = {}},
+                         .frozen_digest = std::nullopt}}};
+        const auto before = regions ? P::CaptureAuthorityHashes(original, 0, left_region)
+                                    : P::CaptureAuthorityHashes(original, 0);
+        const auto after = regions ? P::CaptureAuthorityHashes(relocated, 0, right_region)
+                                   : P::CaptureAuthorityHashes(relocated, 0);
+        ASSERT_TRUE(before.capture.has_value());
+        ASSERT_TRUE(after.capture.has_value());
+        if (!before.capture || !after.capture) {
+            return;
+        }
+        EXPECT_NE(after.capture->streamed, before.capture->streamed);
+        EXPECT_NE(after.capture->chunk, before.capture->chunk);
+        EXPECT_NE(after.capture->composite, before.capture->composite);
+        EXPECT_NE(after.capture->sub.terrain, before.capture->sub.terrain);
+        EXPECT_NE(after.capture->sub.mesh, before.capture->sub.mesh);
+        EXPECT_NE(after.capture->sub.water, before.capture->sub.water);
+    }
+}
+
+TEST_F(WorldOpenRefusal, AuthorityCaptureSkipsRegionalReadsAndNeverPublishesRefusals) {
+    namespace P = Persistence;
+    WorldStreamingState state;
+    P::AuthorityRegionalInputs regional{.save_dir = save, .require_index = false, .regions = {}};
+    regional.regions.push_back(
+        {.key = {-1, 0},
+         .inputs = {.live = {}, .parked = {}, .durable = {}, .require_index = false},
+         .frozen_digest = std::nullopt});
+    regional.regions.push_back(
+        {.key = {0, 0},
+         .inputs = {.live = {}, .parked = {}, .durable = {{0, 0, 0}}, .require_index = false},
+         .frozen_digest = std::nullopt});
+    const auto baseline = P::CaptureAuthorityHashes(state, 0, regional);
+    ASSERT_EQ(baseline.status, P::AuthorityCaptureStatus::Ready);
+    ASSERT_TRUE(baseline.capture.has_value());
+    if (!baseline.capture) {
+        return;
+    }
+    Write(WorldSaveService::region_file_path(save, 0, 0), "corrupt owner");
+    const auto before = DiskBytes(root);
+    for (const auto part : {P::AuthorityCaptureParts::All,
+                            P::AuthorityCaptureParts::Chunk,
+                            P::AuthorityCaptureParts::Composite,
+                            P::AuthorityCaptureParts::SubHashes,
+                            P::AuthorityCaptureParts::StreamedAndSubHashes}) {
+        const auto reads = WorldSaveService::region_read_count_for_testing();
+        const auto missing = P::CaptureAuthorityHashes(state, std::nullopt, regional, {}, {}, part);
+        EXPECT_EQ(missing.status, P::AuthorityCaptureStatus::MissingCursor);
+        EXPECT_FALSE(missing.capture.has_value());
+        EXPECT_EQ(WorldSaveService::region_read_count_for_testing(), reads);
+        const auto result = P::CaptureAuthorityHashes(state, 0, regional, {}, {}, part);
+        const bool skip = part == P::AuthorityCaptureParts::SubHashes ||
+                          part == P::AuthorityCaptureParts::StreamedAndSubHashes;
+        EXPECT_EQ(result.status,
+                  skip ? P::AuthorityCaptureStatus::Ready
+                       : P::AuthorityCaptureStatus::PreparationRefused);
+        EXPECT_EQ(result.capture.has_value(), skip);
+        if (skip) {
+            EXPECT_EQ(WorldSaveService::region_read_count_for_testing(), reads);
+            ASSERT_TRUE(result.capture.has_value());
+            if (!result.capture) {
+                return;
+            }
+            EXPECT_EQ(result.capture->streamed,
+                      part == P::AuthorityCaptureParts::StreamedAndSubHashes
+                          ? baseline.capture->streamed
+                          : "");
+            EXPECT_TRUE(result.capture->chunk.empty());
+            EXPECT_TRUE(result.capture->composite.empty());
+            ExpectCaptureSubHashes(result.capture->sub, baseline.capture->sub);
+        }
+    }
+    // Index admission is also skipped, including for an empty region set.
+    const bool had_index = P::snapshot_index_exists(save);
+    const auto index_bytes = had_index ? Read(P::snapshot_index_path(save)) : std::string();
+    Write(P::snapshot_index_path(save), "{");
+    regional.regions.clear();
+    EXPECT_EQ(P::CaptureAuthorityHashes(
+                  state, 0, regional, {}, {}, P::AuthorityCaptureParts::StreamedAndSubHashes)
+                  .status,
+              P::AuthorityCaptureStatus::Ready);
+    const auto refused = P::CaptureAuthorityHashes(state, 0, regional);
+    EXPECT_EQ(refused.status, P::AuthorityCaptureStatus::PreparationRefused);
+    EXPECT_FALSE(refused.capture.has_value());
+    if (had_index) {
+        Write(P::snapshot_index_path(save), index_bytes);
+    } else {
+        fs::remove(P::snapshot_index_path(save));
+    }
+    EXPECT_EQ(DiskBytes(root), before);
+    EXPECT_STREQ(P::AuthorityCaptureRefused{}.what(), "authority capture refused");
+}
+
+TEST_F(WorldOpenRefusal, AuthorityCaptureRegionalIndexOptOutGovernsEveryRegion) {
+    namespace P = Persistence;
+    WorldStreamingState state;
+    // A legacy save: no snapshot index until its first complete indexed save.
+    const bool had_index = P::snapshot_index_exists(save);
+    const auto index_bytes = had_index ? Read(P::snapshot_index_path(save)) : std::string();
+    if (had_index) {
+        ASSERT_TRUE(fs::remove(P::snapshot_index_path(save)));
+    }
+    const auto capture = [&](bool region_require_index) {
+        P::AuthorityRegionalInputs regional{
+            .save_dir = save, .require_index = false, .regions = {}};
+        regional.regions.push_back({.key = {0, 0},
+                                    .inputs = {.live = {},
+                                               .parked = {},
+                                               .durable = {{0, 0, 0}},
+                                               .require_index = region_require_index},
+                                    .frozen_digest = std::nullopt});
+        return P::CaptureAuthorityHashes(state, 0, regional);
+    };
+    const auto opted_out = capture(false);
+    // The per-region default (true) must not override the caller's regional opt-out.
+    const auto defaulted = capture(true);
+    if (had_index) {
+        Write(P::snapshot_index_path(save), index_bytes);
+    }
+    ASSERT_EQ(opted_out.status, P::AuthorityCaptureStatus::Ready);
+    EXPECT_EQ(defaulted.status, P::AuthorityCaptureStatus::Ready);
+    ASSERT_TRUE(opted_out.capture.has_value());
+    ASSERT_TRUE(defaulted.capture.has_value());
+    if (!opted_out.capture || !defaulted.capture) {
+        return;
+    }
+    EXPECT_EQ(defaulted.capture->chunk, opted_out.capture->chunk);
+    EXPECT_EQ(defaulted.capture->composite, opted_out.capture->composite);
+}
+
+TEST(AuthorityHashCapture, IncompleteLiveAndParkedOwnersRefuseBeforePublication) {
+    namespace P = Persistence;
+    const auto owner = std::make_shared<Chunk>(IVec3(0, 0, 0));
+    owner->mark_voxel_data_dirty();
+    owner->set_state(ChunkState::Loading);
+    WorldStreamingState empty, streamed;
+    ASSERT_TRUE(streamed.insert_chunk(owner));
+    for (const auto part : {P::AuthorityCaptureParts::All,
+                            P::AuthorityCaptureParts::Chunk,
+                            P::AuthorityCaptureParts::Composite,
+                            P::AuthorityCaptureParts::SubHashes,
+                            P::AuthorityCaptureParts::StreamedAndSubHashes}) {
+        const auto result = P::CaptureAuthorityHashes(streamed, 0, std::nullopt, {}, {}, part);
+        EXPECT_EQ(result.status, P::AuthorityCaptureStatus::IncompleteOwner);
+        EXPECT_FALSE(result.capture.has_value());
+        for (const bool parked : {false, true}) {
+            const P::AuthorityRegionalInputs regional{
+                .save_dir = {},
+                .require_index = false,
+                .regions = {{.key = {0, 0},
+                             .inputs = {.live = parked ? std::vector<std::shared_ptr<Chunk>>{}
+                                                       : std::vector{owner},
+                                        .parked = parked ? std::vector{owner}
+                                                         : std::vector<std::shared_ptr<Chunk>>{},
+                                        .durable = {}},
+                             .frozen_digest = std::nullopt}}};
+            const auto regional_result =
+                P::CaptureAuthorityHashes(empty, 0, regional, {}, {}, part);
+            const bool skip = part == P::AuthorityCaptureParts::SubHashes ||
+                              part == P::AuthorityCaptureParts::StreamedAndSubHashes;
+            EXPECT_EQ(regional_result.status,
+                      skip ? P::AuthorityCaptureStatus::Ready
+                           : P::AuthorityCaptureStatus::IncompleteOwner);
+            EXPECT_EQ(regional_result.capture.has_value(), skip);
+        }
+    }
+    EXPECT_EQ(owner->get_state(), ChunkState::Loading);
+    EXPECT_EQ(streamed.find_chunk(owner->get_coords()), owner);
+    owner->set_state(ChunkState::Idle);
+    EXPECT_EQ(P::CaptureAuthorityHashes(streamed, 0).status, P::AuthorityCaptureStatus::Ready);
+    const auto pristine = empty.get_or_create_chunk(IVec3(1, 0, 0));
+    pristine->set_state(ChunkState::Loading);
+    EXPECT_EQ(P::CaptureAuthorityHashes(empty, 0).status, P::AuthorityCaptureStatus::Ready);
+}
+
+TEST(AuthorityHashCapture, InvalidRegionalOrderKeysAndPartsRefuseWithoutCapture) {
+    namespace P = Persistence;
+    WorldStreamingState state;
+    for (const int invalid : {0, 1, 2, 3, 4, 5}) {
+        P::AuthorityRegionalInputs regional{
+            .save_dir = {},
+            .require_index = false,
+            .regions = {{.key = {0, 0}, .inputs = {}, .frozen_digest = 0},
+                        {.key = {1, 0}, .inputs = {}, .frozen_digest = 0}}};
+        if (invalid == 0) {
+            regional.regions.back().key = {0, 0};
+        } else if (invalid == 1) {
+            std::reverse(regional.regions.begin(), regional.regions.end());
+        } else if (invalid == 2) {
+            regional.regions.back().key = {std::numeric_limits<int>::max(), 0};
+        } else if (invalid == 3) {
+            regional.regions.back().key = {std::numeric_limits<int>::min(), 0};
+        } else if (invalid == 4) {
+            regional.regions.back().key = {1, std::numeric_limits<int>::max()};
+        } else {
+            regional.regions.back().key = {1, std::numeric_limits<int>::min()};
+        }
+        const auto result = P::CaptureAuthorityHashes(state, 0, regional);
+        EXPECT_EQ(result.status, P::AuthorityCaptureStatus::PreparationRefused);
+        EXPECT_FALSE(result.capture.has_value());
+    }
+    P::AuthorityRegionalInputs ordered{
+        .save_dir = {},
+        .require_index = false,
+        .regions = {{.key = {0, -1}, .inputs = {}, .frozen_digest = 0},
+                    {.key = {0, 0}, .inputs = {}, .frozen_digest = 0}}};
+    const auto valid = P::CaptureAuthorityHashes(state, 0, ordered);
+    ASSERT_TRUE(valid.capture.has_value());
+    if (!valid.capture) {
+        return;
+    }
+    EXPECT_EQ(valid.capture->chunk, P::StableChecksum("authoritative_chunks:v2:0:0,-1:0;0,0:0;"));
+    std::reverse(ordered.regions.begin(), ordered.regions.end());
+    const auto reversed = P::CaptureAuthorityHashes(state, 0, ordered);
+    EXPECT_EQ(reversed.status, P::AuthorityCaptureStatus::PreparationRefused);
+    EXPECT_FALSE(reversed.capture.has_value());
+    for (const bool owners : {false, true}) {
+        const auto invalid = static_cast<P::AuthorityCaptureParts>(-1);
+        const auto result =
+            owners
+                ? P::CaptureAuthorityHashes(state, 0, P::AuthorityRegionalInputs{}, {}, {}, invalid)
+                : P::CaptureAuthorityHashes(state, 0, std::nullopt, {}, {}, invalid);
+        EXPECT_EQ(result.status, P::AuthorityCaptureStatus::PreparationRefused);
+        EXPECT_FALSE(result.capture.has_value());
+    }
+}
+
+void CheckSessionCheckpointPublication(const fs::path& root,
+                                       const Persistence::AuthorityHashCapture& expected_capture) {
+    Net::LockstepConfig config;
+    config.hash_cadence_ticks = 1;
+    config.system_config_identity = "config";
+    config.preset_content_hash = "content";
+    auto remote = config;
+    remote.local_client_id = 1;
+    remote.peer_client_id = 0;
+    auto [local, peer] = Net::MakeLoopbackPair();
+    Net::LockstepHooks hooks;
+    // Both publications consume exactly the same immutable session observation.
+    struct CaptureContext {
+        const Persistence::AuthorityHashCapture& capture;
+        std::size_t boot_calls = 0;
+        std::size_t tick_calls = 0;
+    } context{expected_capture};
+    hooks.user = &context;
+    hooks.capture_hashes = [](std::uint64_t tick, Net::HashMsg& out, void* user) {
+        auto& capture_context = *static_cast<CaptureContext*>(user);
+        const auto& capture = capture_context.capture;
+        if (tick == 0) {
+            ++capture_context.boot_calls;
+        } else {
+            ++capture_context.tick_calls;
+        }
+        out = {
+            tick, capture.streamed, capture.sub.terrain, capture.sub.water, capture.sub.entities};
+    };
+    Net::LockstepSession lockstep(config, local.get(), hooks);
+    lockstep.SetDumpPath((root / "capture-agreement.lrec1").string());
+    ASSERT_TRUE(peer->SendFrame(Net::EncodeHello(Net::MakeLockstepHello(remote))));
+    ASSERT_TRUE(lockstep.Handshake());
+    EXPECT_EQ(context.boot_calls, 1u);
+    EXPECT_TRUE(lockstep.Status().replay_error.empty()) << lockstep.Status().replay_error;
+    ASSERT_TRUE(peer->SendFrame(Net::EncodeInput({1, 1, {}})));
+    EXPECT_EQ(lockstep.PumpTick(2).outcome, Net::TickOutcome::Advanced);
+    EXPECT_EQ(context.tick_calls, 1u);
+    std::size_t published = 0;
+    std::vector<std::uint8_t> frame;
+    // Hello, the initial horizon, the next input and one hash bound the drain.
+    for (std::uint32_t i = 0; i < config.horizon_max + 3; ++i) {
+        if (!peer->TryReceiveFrame(frame)) {
+            break;
+        }
+        Net::MessageType type{};
+        ASSERT_TRUE(Net::PeekMessageType(frame, type));
+        if (type == Net::MessageType::Hash) {
+            Net::HashMsg hash;
+            ASSERT_TRUE(Net::DecodeHash(frame, hash));
+            EXPECT_EQ(hash.tick, 1u);
+            EXPECT_EQ(hash.world_hash, expected_capture.streamed);
+            EXPECT_EQ(hash.terrain, expected_capture.sub.terrain);
+            EXPECT_EQ(hash.water, expected_capture.sub.water);
+            EXPECT_EQ(hash.entities, expected_capture.sub.entities);
+            ++published;
+        }
+    }
+    EXPECT_EQ(published, 1u);
+    EXPECT_FALSE(peer->TryReceiveFrame(frame));
+    // Diagnostic replays are published on divergence; a clean disconnect only closes transport.
+    ASSERT_TRUE(peer->SendFrame(Net::EncodeHash({1,
+                                                 expected_capture.streamed + "-different",
+                                                 expected_capture.sub.terrain,
+                                                 expected_capture.sub.water,
+                                                 expected_capture.sub.entities})));
+    lockstep.Disconnect();
+    EXPECT_TRUE(lockstep.Status().desynced);
+    EXPECT_EQ(lockstep.Status().desync_section, "world_hash");
+    EXPECT_EQ(lockstep.Status().dump_path, (root / "capture-agreement.lrec1").string());
+    const auto recording = Replay::ReadReplay((root / "capture-agreement.lrec1").string());
+    ASSERT_TRUE(recording.has_value());
+    if (!recording) {
+        return;
+    }
+    EXPECT_EQ(recording->header.start_world_hash, expected_capture.streamed);
+    EXPECT_FALSE(recording->truncated);
+    EXPECT_TRUE(recording->trailer_present);
+    ASSERT_EQ(recording->checkpoints.size(), 1u);
+    const auto& checkpoint = recording->checkpoints.front();
+    EXPECT_EQ(checkpoint.tick, 1u);
+    EXPECT_EQ(checkpoint.world_hash, expected_capture.streamed);
+    EXPECT_EQ(checkpoint.terrain, expected_capture.sub.terrain);
+    EXPECT_EQ(checkpoint.water, expected_capture.sub.water);
+    EXPECT_EQ(checkpoint.entities, expected_capture.sub.entities);
+}
+
+TEST_F(WorldOpenRefusal, SessionCaptureAndLockstepCheckpointKeepLegacyBytes) {
+    namespace P = Persistence;
+    for (const bool regions : {false, true}) {
+        Server::ServerWorldRunner runner(SnapshotRunnerConfig(RootString(), regions));
+        ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, regions));
+        auto& session = *runner.Session();
+        auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+        chunk->heightmap_data = {2.0f};
+        chunk->mark_voxel_data_dirty();
+        chunk->set_state(ChunkState::Idle);
+        ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+        const auto entities =
+            Ecs::SerializeEntityRegistrySnapshotJson(Ecs::EntityRegistrySnapshot{});
+        for (const std::size_t cursor : {std::size_t{0}, std::size_t{7}}) {
+            session.GetWorldSystem()->SetWaterSimWindowCursor(cursor);
+            const auto full = session.CaptureAuthorityHashes(entities);
+            const auto checkpoint = session.CaptureAuthorityHashes(
+                entities, P::AuthorityCaptureParts::StreamedAndSubHashes);
+            ASSERT_TRUE(full.capture.has_value());
+            ASSERT_TRUE(checkpoint.capture.has_value());
+            if (!full.capture || !checkpoint.capture) {
+                return;
+            }
+            EXPECT_EQ(full.status, P::AuthorityCaptureStatus::Ready);
+            EXPECT_EQ(checkpoint.status, P::AuthorityCaptureStatus::Ready);
+            EXPECT_EQ(full.capture->streamed, checkpoint.capture->streamed);
+            ExpectCaptureSubHashes(full.capture->sub, checkpoint.capture->sub);
+            EXPECT_EQ(session.ComputeChunkStateHash(), full.capture->chunk);
+            EXPECT_EQ(TestSupport::SessionWorldHash(session), full.capture->composite);
+            WorldStreamingState state;
+            ASSERT_TRUE(state.insert_chunk(chunk));
+            EXPECT_EQ(checkpoint.capture->streamed, WorldSaveService{}.world_hash(state, cursor));
+            const auto digest = std::stoull(P::ComputeRegionContentHash(state), nullptr, 16);
+            const auto legacy_chunk =
+                regions ? P::StableChecksum("authoritative_chunks:v2:" + std::to_string(cursor) +
+                                            ":0,0:" + std::to_string(digest) + ";")
+                        : WorldSaveService{}.world_hash(state, cursor);
+            EXPECT_EQ(full.capture->chunk, legacy_chunk);
+            const auto legacy = P::ComputeWorldStreamingStateSubHashes(state, entities, cursor);
+            EXPECT_EQ(checkpoint.capture->sub.terrain, legacy.terrain);
+            EXPECT_EQ(checkpoint.capture->sub.water, legacy.water);
+            EXPECT_EQ(checkpoint.capture->sub.entities, legacy.entities);
+
+            ASSERT_NO_FATAL_FAILURE(CheckSessionCheckpointPublication(root, *checkpoint.capture));
+        }
+    }
+}
+
+TEST_F(WorldOpenRefusal, SessionCheckpointSkipsFailedRegionalReadsAndLatchedFaultIsHashable) {
+    namespace P = Persistence;
+    JobSystem capture_jobs;
+    capture_jobs.startup(1);
+    GameSession session;
+    session.SetJobSystem(&capture_jobs);
+    session.SetRootPath(RootString());
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+    auto& world = *session.GetWorldSystem();
+    world.clear_world(session.GetPhysicsSystem());
+    world.remember_durable_chunks({IVec3(0, 0, 0)});
+    ASSERT_EQ(world.authority_region_keys(), (std::vector<std::pair<i32, i32>>{{0, 0}}));
+    ASSERT_EQ(world.region_digest_inputs(0, 0).durable, (std::vector<IVec3>{{0, 0, 0}}));
+    const auto original = session.CaptureAuthorityHashes();
+    ASSERT_EQ(original.status, P::AuthorityCaptureStatus::Ready);
+    const auto region = WorldSaveService::region_file_path(save, 0, 0);
+    const auto bytes = Read(region);
+    for (const bool missing : {false, true}) {
+        SCOPED_TRACE(missing);
+        if (missing) {
+            ASSERT_TRUE(fs::remove(region));
+        } else {
+            Write(region, "partial");
+        }
+        const auto disk = DiskBytes(save);
+        const auto inputs = world.region_digest_input_items();
+        const auto checkpoint =
+            session.CaptureAuthorityHashes({}, P::AuthorityCaptureParts::StreamedAndSubHashes);
+        EXPECT_EQ(checkpoint.status, P::AuthorityCaptureStatus::Ready);
+        EXPECT_TRUE(checkpoint.capture.has_value());
+        EXPECT_EQ(world.region_digest_input_items(), inputs);
+        const auto full = session.CaptureAuthorityHashes();
+        EXPECT_EQ(full.status, P::AuthorityCaptureStatus::PreparationRefused);
+        EXPECT_FALSE(full.capture.has_value());
+        EXPECT_TRUE(session.ComputeChunkStateHash().empty());
+        EXPECT_TRUE(session.GetRegionSchedulerFault().has_value());
+        EXPECT_EQ(DiskBytes(save), disk);
+        Write(region, bytes);
+        // Recovery deliberately leaves the scheduler fault latched.
+        EXPECT_EQ(session.CaptureAuthorityHashes().status, P::AuthorityCaptureStatus::Ready);
+        EXPECT_TRUE(session.GetRegionSchedulerFault().has_value());
+    }
+    capture_jobs.shutdown();
+    const auto unavailable = session.CaptureAuthorityHashes();
+    EXPECT_EQ(unavailable.status, P::AuthorityCaptureStatus::PreparationRefused);
+    EXPECT_FALSE(unavailable.capture.has_value());
+    EXPECT_EQ(
+        session.CaptureAuthorityHashes({}, P::AuthorityCaptureParts::StreamedAndSubHashes).status,
+        P::AuthorityCaptureStatus::Ready);
+    capture_jobs.startup(1);
+    EXPECT_EQ(session.CaptureAuthorityHashes().status, P::AuthorityCaptureStatus::Ready);
+}
+
+void CheckRequiredRegionalReadRefusals(const fs::path& directory,
+                                       Persistence::RegionDigestOperation& operation,
+                                       const Persistence::RegionDigestInputs& required,
+                                       const Persistence::PreparedRegionDigest& prepared) {
+    namespace P = Persistence;
+    EXPECT_THROW((void)operation.prepare({0, 0}, required), std::runtime_error);
+    for (const bool parked : {false, true}) {
+        auto resident = required;
+        (parked ? resident.parked : resident.live) = prepared.chunks;
+        EXPECT_THROW((void)operation.prepare({0, 0}, resident), std::runtime_error);
+    }
+    EXPECT_THROW((void)operation.digest({0, 0}, required), std::runtime_error);
+    EXPECT_THROW((void)WorldSaveService::region_simulation_digest(directory, {0, 0}, required),
+                 std::runtime_error);
+    const P::AuthorityRegionalInputs regional{
+        .save_dir = directory,
+        .require_index = required.require_index,
+        .regions = {{.key = {0, 0}, .inputs = required, .frozen_digest = std::nullopt}}};
+    const auto capture = P::CaptureAuthorityHashes(WorldStreamingState{}, 0, regional);
+    EXPECT_EQ(capture.status, P::AuthorityCaptureStatus::PreparationRefused);
+    EXPECT_FALSE(capture.capture.has_value());
+}
+
+void CheckRegionalReadDamage(const fs::path& directory,
+                             int damage,
+                             Persistence::RegionDigestOperation& operation,
+                             const Persistence::RegionDigestInputs& optional,
+                             const Persistence::PreparedRegionDigest& prepared) {
+    namespace P = Persistence;
+    SCOPED_TRACE(damage);
+    const auto region = WorldSaveService::region_file_path(directory, 0, 0);
+    const auto bytes = Read(region);
+    const auto digest = P::HashPreparedRegionDigest(prepared);
+    auto required = optional;
+    required.durable = {{0, 0, 0}};
+    ASSERT_TRUE(fs::remove(region));
+    if (damage == 0) {
+        Write(region, "partial");
+    } else if (damage == 2) {
+        ASSERT_TRUE(fs::create_directory(region));
+    }
+    const auto before = DiskBytes(directory);
+    // An optional absent legacy region may be cached as empty. That observation must
+    // never satisfy the following required read, including on the same operation.
+    if (!optional.require_index && damage == 1) {
+        EXPECT_TRUE(operation.prepare({0, 0}, optional).chunks.empty());
+    } else {
+        EXPECT_THROW((void)operation.prepare({0, 0}, optional), std::runtime_error);
+    }
+    ASSERT_NO_FATAL_FAILURE(
+        CheckRequiredRegionalReadRefusals(directory, operation, required, prepared));
+    EXPECT_EQ(DiskBytes(directory), before);
+    if (damage == 2) {
+        ASSERT_TRUE(fs::remove(region));
+    }
+    Write(region, bytes);
+    EXPECT_EQ(P::HashPreparedRegionDigest(operation.prepare({0, 0}, required)), digest);
+    EXPECT_EQ(operation.digest({0, 0}, required), digest);
+    const P::AuthorityRegionalInputs regional{
+        .save_dir = directory,
+        .require_index = required.require_index,
+        .regions = {{.key = {0, 0}, .inputs = required, .frozen_digest = std::nullopt}}};
+    EXPECT_EQ(P::CaptureAuthorityHashes(WorldStreamingState{}, 0, regional).status,
+              P::AuthorityCaptureStatus::Ready);
+}
+
+TEST_F(WorldOpenRefusal, RegionalPreparationWithoutSaveRootRejectsDurableParticipants) {
+    namespace P = Persistence;
+    P::RegionDigestInputs optional{.live = {},
+                                   .parked = {},
+                                   .durable = {},
+                                   .require_index = false,
+                                   .ground_object_bytes = {},
+                                   .field_page_bytes = {}};
+    P::RegionDigestOperation operation({}, false);
+    EXPECT_TRUE(operation.prepare({0, 0}, optional).chunks.empty());
+    const auto live = std::make_shared<Chunk>(IVec3(0, 0, 0));
+    live->heightmap_data = {3.0f};
+    live->mark_voxel_data_dirty();
+    live->set_state(ChunkState::Idle);
+    optional.live = {live};
+    const auto prepared = operation.prepare({0, 0}, optional);
+    ASSERT_EQ(prepared.chunks.size(), 1u);
+    EXPECT_EQ(prepared.chunks.front(), live);
+    auto required = optional;
+    required.live.clear();
+    required.durable = {{0, 0, 0}};
+    ASSERT_NO_FATAL_FAILURE(CheckRequiredRegionalReadRefusals({}, operation, required, prepared));
+    optional.durable = {{-32, 0, 0}};
+    EXPECT_EQ(operation.prepare({0, 0}, optional).chunks, prepared.chunks);
+    EXPECT_THROW((void)operation.prepare({-1, 0}, optional), std::runtime_error);
+}
+
+TEST_F(WorldOpenRefusal, RegionalPreparationDistinguishesOptionalAndRequiredDurableReads) {
+    namespace P = Persistence;
+    for (const bool indexed : {false, true}) {
+        SCOPED_TRACE(indexed);
+        const auto directory = root / (indexed ? "indexed-digest" : "legacy-digest");
+        fs::copy(save, directory, fs::copy_options::recursive);
+        if (indexed) {
+            ASSERT_TRUE(Luminumbra::Test::PublishIndexedSave(directory, [] { return true; }));
+        }
+        P::RegionDigestInputs optional{.live = {},
+                                       .parked = {},
+                                       .durable = {},
+                                       .require_index = indexed,
+                                       .ground_object_bytes = {},
+                                       .field_page_bytes = {}};
+        auto required = optional;
+        required.durable = {{0, 0, 0}};
+        P::RegionDigestOperation operation(directory, indexed);
+        const auto prepared = operation.prepare({0, 0}, required);
+        ASSERT_EQ(prepared.chunks.size(), 1u);
+        // Compatibility callers may supply a multi-region inventory. Another region's durable
+        // coordinates must not require a file for an empty region or one with only live owners.
+        const auto live = std::make_shared<Chunk>(IVec3(-32, 0, 0));
+        live->heightmap_data = {3.0f};
+        live->mark_voxel_data_dirty();
+        live->set_state(ChunkState::Idle);
+        auto mixed = required;
+        EXPECT_TRUE(operation.prepare({-1, 0}, mixed).chunks.empty());
+        mixed.live = {live};
+        const auto live_only = operation.prepare({-1, 0}, mixed);
+        ASSERT_EQ(live_only.chunks.size(), 1u);
+        EXPECT_EQ(live_only.chunks.front(), live);
+        // Three portable failures exercise both cold reads and previously cached authority.
+        for (const int damage : {0, 1, 2}) {
+            ASSERT_NO_FATAL_FAILURE(
+                CheckRegionalReadDamage(directory, damage, operation, optional, prepared));
+        }
+    }
+}
+
+TEST_F(WorldOpenRefusal, SessionCaptureRefusesIncompleteParkedOwnerAtEveryActivationPhase) {
+    for (const std::uint64_t activation_phase : {0u, 1u, 2u, 3u}) {
+        Server::ServerWorldRunner runner(SnapshotRunnerConfig(RootString(), true));
+        ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, true));
+        auto& session = *runner.Session();
+        auto& world = *session.GetWorldSystem();
+        const auto interval = static_cast<std::uint64_t>(
+            world.get_last_streaming_budget_stats().update_interval_frames);
+        ASSERT_EQ(interval, 4u);
+        const auto phase = world.get_streaming_telemetry_stats().frames_observed % interval;
+        const auto padding = (activation_phase + interval - phase) % interval;
+        // At most three anchorless updates select a phase without dispatching work.
+        for (std::uint64_t frame = 0; frame < padding; ++frame) {
+            world.update(session.GetRegistry(), std::vector<Vec3>{}, nullptr, false);
+        }
+        auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+        chunk->mark_voxel_data_dirty();
+        chunk->set_state(ChunkState::Idle);
+        ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+        const auto remaining = interval - activation_phase;
+        // The next activation is at most four updates away; do not mesh this owner.
+        for (std::uint64_t frame = 0; frame < remaining; ++frame) {
+            chunk->set_state(frame + 1 == remaining ? ChunkState::Idle : ChunkState::Loading);
+            world.update(session.GetRegistry(), Vec3(32008.0f, 8.0f, 32008.0f), nullptr, false);
+            world.wait_for_streaming_jobs();
+        }
+        ASSERT_FALSE(world.find_streamed_chunk(chunk->get_coords()));
+        ASSERT_EQ(world.snapshot_parked_chunks().size(), 1u);
+        chunk->set_state(ChunkState::Loading);
+        const auto refused = session.CaptureAuthorityHashes();
+        EXPECT_EQ(refused.status, Persistence::AuthorityCaptureStatus::IncompleteOwner);
+        EXPECT_FALSE(refused.capture.has_value());
+        EXPECT_TRUE(session.ComputeChunkStateHash().empty());
+        EXPECT_EQ(world.find_authoritative_chunk(chunk->get_coords()), chunk);
+        EXPECT_EQ(chunk->get_state(), ChunkState::Loading);
+        EXPECT_EQ(session
+                      .CaptureAuthorityHashes(
+                          {}, Persistence::AuthorityCaptureParts::StreamedAndSubHashes)
+                      .status,
+                  Persistence::AuthorityCaptureStatus::Ready);
+        chunk->set_state(ChunkState::Idle);
+        EXPECT_EQ(session.CaptureAuthorityHashes().status,
+                  Persistence::AuthorityCaptureStatus::Ready);
+    }
+}
+
+TEST_F(WorldOpenRefusal, SessionCaptureRefusesMissingIncompleteAndInvalidInputs) {
+    namespace P = Persistence;
+    GameSession absent;
+    EXPECT_EQ(absent.CaptureAuthorityHashes().status, P::AuthorityCaptureStatus::MissingCursor);
+    for (const bool regions : {false, true}) {
+        Server::ServerWorldRunner runner(SnapshotRunnerConfig(RootString(), regions));
+        ASSERT_NO_FATAL_FAILURE(BootSnapshotRunner(runner, regions));
+        auto& session = *runner.Session();
+        auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+        chunk->mark_voxel_data_dirty();
+        chunk->set_state(ChunkState::Idle);
+        ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+        chunk->set_state(ChunkState::Loading);
+        for (const auto parts : {P::AuthorityCaptureParts::All,
+                                 P::AuthorityCaptureParts::Chunk,
+                                 P::AuthorityCaptureParts::Composite,
+                                 P::AuthorityCaptureParts::SubHashes,
+                                 P::AuthorityCaptureParts::StreamedAndSubHashes}) {
+            const auto result = session.CaptureAuthorityHashes({}, parts);
+            EXPECT_EQ(result.status, P::AuthorityCaptureStatus::IncompleteOwner);
+            EXPECT_FALSE(result.capture.has_value());
+        }
+        EXPECT_TRUE(session.ComputeChunkStateHash().empty());
+        chunk->set_state(ChunkState::Idle);
+        EXPECT_EQ(session.CaptureAuthorityHashes().status, P::AuthorityCaptureStatus::Ready);
+        const auto invalid =
+            session.CaptureAuthorityHashes({}, static_cast<P::AuthorityCaptureParts>(-1));
+        EXPECT_EQ(invalid.status, P::AuthorityCaptureStatus::PreparationRefused);
+        EXPECT_FALSE(invalid.capture.has_value());
+    }
+}
+
+TEST_F(WorldOpenRefusal, LockstepRefusesBootAndTickCapturesBeforePublishingHashes) {
+    for (const std::uint64_t refuse_tick : {std::uint64_t{0}, std::uint64_t{1}}) {
+        struct CaptureFault {
+            std::uint64_t tick;
+            std::size_t calls = 0;
+            std::vector<std::uint64_t> sink_ticks;
+            std::vector<std::vector<std::uint8_t>> sink_inputs;
+            std::size_t sink_hashes = 0;
+        } fault{refuse_tick, 0, {}, {}, 0};
+        Net::LockstepConfig config;
+        config.hash_cadence_ticks = 1;
+        config.system_config_identity = "config";
+        config.preset_content_hash = "content";
+        auto remote = config;
+        remote.local_client_id = 1;
+        remote.peer_client_id = 0;
+        auto [local, peer] = Net::MakeLoopbackPair();
+        Net::LockstepHooks hooks;
+        hooks.user = &fault;
+        hooks.capture_hashes = [](std::uint64_t tick, Net::HashMsg& out, void* user) {
+            auto& capture_fault = *static_cast<CaptureFault*>(user);
+            ++capture_fault.calls;
+            out.world_hash = "partial";
+            if (tick == capture_fault.tick) {
+                throw Persistence::AuthorityCaptureRefused();
+            }
+            out.tick = tick;
+            out.world_hash = "complete";
+        };
+        hooks.collect_local_input = [](std::uint64_t, void*) {
+            return std::vector<std::uint8_t>{0x5A};
+        };
+        // A caller-owned replay sink sees every executed tick, including one whose
+        // capture is refused, without a hash.
+        hooks.record_replay_tick = [](std::uint64_t tick,
+                                      const std::vector<std::uint8_t>& merged,
+                                      const Net::HashMsg* hash,
+                                      void* user) {
+            auto& capture_fault = *static_cast<CaptureFault*>(user);
+            capture_fault.sink_ticks.push_back(tick);
+            capture_fault.sink_inputs.push_back(merged);
+            capture_fault.sink_hashes += hash != nullptr;
+        };
+        Net::LockstepSession session(config, local.get(), hooks);
+        const auto replay = root / ("capture-refusal-" + std::to_string(refuse_tick) + ".lrec1");
+        session.SetDumpPath(replay.string());
+        ASSERT_TRUE(peer->SendFrame(Net::EncodeHello(Net::MakeLockstepHello(remote))));
+        if (refuse_tick == 0) {
+            EXPECT_FALSE(session.Handshake());
+            EXPECT_FALSE(fs::exists(replay));
+            EXPECT_EQ(fault.calls, 1u);
+        } else {
+            ASSERT_TRUE(session.Handshake());
+            ASSERT_TRUE(peer->SendFrame(Net::EncodeInput({1, 1, {0xA5}})));
+            const auto result = session.PumpTick(2);
+            EXPECT_EQ(result.outcome, Net::TickOutcome::Desync);
+            EXPECT_FALSE(result.ran_hash_exchange);
+            EXPECT_EQ(fault.calls, 2u);
+            const auto recording = Replay::ReadReplay(replay.string());
+            ASSERT_TRUE(recording.has_value());
+            if (!recording) {
+                return;
+            }
+            EXPECT_FALSE(recording->truncated);
+            EXPECT_TRUE(recording->trailer_present);
+            EXPECT_EQ(recording->tick_count, 1u);
+            ASSERT_EQ(recording->inputs.size(), 1u);
+            EXPECT_EQ(recording->inputs.front().tick, 1u);
+            EXPECT_EQ(recording->inputs.front().inputs, (std::vector<std::uint8_t>{0x5A, 0xA5}));
+            EXPECT_TRUE(recording->checkpoints.empty());
+            EXPECT_EQ(fault.sink_ticks, std::vector<std::uint64_t>{1u});
+            ASSERT_EQ(fault.sink_inputs.size(), 1u);
+            EXPECT_EQ(fault.sink_inputs.front(), recording->inputs.front().inputs);
+            EXPECT_EQ(fault.sink_hashes, 0u);
+        }
+        if (refuse_tick == 0) {
+            EXPECT_TRUE(fault.sink_ticks.empty());
+        }
+        EXPECT_TRUE(session.Status().desynced);
+        EXPECT_EQ(session.Status().desync_section, "authority_capture");
+        EXPECT_EQ(session.AdmissionStatus().local_hashes, 0u);
+        // At most one Hello plus the configured initial horizon's input frames.
+        std::vector<std::uint8_t> frame;
+        for (std::uint32_t i = 0; i <= config.horizon_max + 1; ++i) {
+            if (!peer->TryReceiveFrame(frame)) {
+                break;
+            }
+            Net::MessageType type{};
+            ASSERT_TRUE(Net::PeekMessageType(frame, type));
+            EXPECT_NE(type, Net::MessageType::Hash);
+        }
+        EXPECT_FALSE(peer->TryReceiveFrame(frame));
     }
 }
 
@@ -2831,6 +4181,780 @@ bool HoldSessionMetadata() {
     ActiveSessionSaveOverlap()->release.arrive_and_wait();
     return true;
 }
+TEST_F(WorldOpenRefusal, OwnerContinuationDescriptorsRefuseBeforeEveryAdoptionPath) {
+    GameSession source_session;
+    source_session.SetJobSystem(&jobs);
+    source_session.SetRootPath(RootString());
+    source_session.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(source_session.CreateTransientWorld("Owner source", "1337", "default"));
+    auto& source = *source_session.GetPhysicsSystem();
+    const auto index = source.create_avatar_character(Vec3(8.25f, 40.125f, 8.75f));
+    source.set_avatar_wish_velocity(index, glm::vec2(0.125f, 0.25f));
+    source.update_avatars(1.0f / 30.0f);
+    Persistence::OwnerContinuation record;
+    record.world_seed = 1337;
+    record.origin = Vec3(8, 18, 8);
+    record.anchor = source.get_avatar_position(index);
+    World::PlayerAvatarOwnerState avatar;
+    avatar.avatar.position = record.anchor;
+    avatar.avatar.velocity = source.get_avatar_velocity(index);
+    ASSERT_TRUE(source_session.CaptureAvatarOwner(avatar.avatar, index, avatar));
+    record.avatars.push_back(avatar);
+    const auto sphere = source.create_dynamic_sphere(Vec3(30, 50, 30), Vec3(0.1f, 0, 0.2f), 0.3f);
+    ASSERT_FALSE(sphere.IsInvalid());
+    Persistence::PhysicsOwnerContinuation body;
+    body.owner_id = sphere.GetIndexAndSequenceNumber();
+    body.anchor = source.get_body_position(sphere);
+    ASSERT_TRUE(source.capture_body_owner(sphere, body.state));
+    record.bodies.push_back(body);
+    source.create_player_controller(Vec3(40, 50, 40));
+    record.player.emplace();
+    record.player->anchor = source.get_player_position();
+    ASSERT_TRUE(source_session.CapturePlayerOwner(record.player->state));
+    Systems::PhysicsSystem::BodySetState allocator;
+    ASSERT_TRUE(source.capture_body_owners(allocator));
+    record.slot_count = allocator.slot_count;
+    record.free_slots = allocator.free_slots;
+    GameSession live({.owner_continuation = true});
+    live.SetRootPath(RootString());
+    live.SetJobSystem(&jobs);
+    ASSERT_TRUE(live.LoadWorld("fixture"));
+    record.preset_identity = live.CaptureWorldPreparationOptions().owner_preset_identity;
+    std::string encoded;
+    ASSERT_TRUE(Persistence::EncodeOwnerContinuation(record, encoded));
+    const auto valid = nlohmann::json::parse(encoded);
+    const auto original_metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    auto admitted_metadata = original_metadata;
+    admitted_metadata["owner_continuation"] = encoded;
+    Write(save / "world_info.json", admitted_metadata.dump());
+    {
+        GameSession admitted({.owner_continuation = true});
+        admitted.SetRootPath(RootString());
+        admitted.SetJobSystem(&jobs);
+        ASSERT_TRUE(admitted.LoadWorld("fixture")) << admitted.GetWorldOpenError();
+        ASSERT_TRUE(admitted.LoadWorldStateFrom(save)) << admitted.GetWorldOpenError();
+        const auto prepared =
+            GameSession::PrepareWorldLoad(admitted.CaptureWorldPreparationOptions(), "fixture");
+        ASSERT_TRUE(admitted.AdoptPreparedWorld(prepared)) << admitted.GetWorldOpenError();
+    }
+    Write(save / "world_info.json", original_metadata.dump());
+    const auto* world = live.GetWorldSystem();
+    const auto* physics = live.GetPhysicsSystem();
+    const auto revision = live.WorldRevision();
+    const auto id = live.GetMetadata().worldId;
+    const auto chunk_hash = live.ComputeChunkStateHash();
+    const auto sentinel = live.GetRegistry().create();
+    std::vector<std::pair<std::string, nlohmann::json>> invalid;
+    const auto add = [&](const std::string& name, const nlohmann::json& value) {
+        invalid.emplace_back(name, value.dump());
+    };
+    auto changed = valid;
+    changed["world_seed"] = 1338u;
+    add("foreign world seed", changed);
+    changed = valid;
+    changed["preset_identity"] = std::string(16, '0');
+    add("foreign preset", changed);
+    changed = valid;
+    changed["version"] = 2u;
+    add("version", changed);
+    invalid.emplace_back("truncated", encoded.substr(0, encoded.size() / 2));
+    invalid.emplace_back("empty", "");
+    invalid.emplace_back("non-string record", valid);
+    invalid.emplace_back("null record", nullptr);
+    invalid.emplace_back("oversized",
+                         std::string(Persistence::kOwnerContinuationRecordBytes + 1, ' '));
+    changed = valid;
+    changed["origin"][0] = std::bit_cast<std::uint32_t>(std::numeric_limits<float>::infinity());
+    add("non-finite origin", changed);
+    changed = valid;
+    changed["origin"][1] = std::bit_cast<std::uint32_t>(1.0e38f);
+    add("finite origin outside chunk range", changed);
+    changed = valid;
+    changed["anchor"][0] = std::bit_cast<std::uint32_t>(16777216.0f);
+    add("finite anchor outside chunk range", changed);
+    changed = valid;
+    changed["anchor"][0] = std::bit_cast<std::uint32_t>(std::numeric_limits<float>::quiet_NaN());
+    add("non-finite moving anchor", changed);
+    changed = valid;
+    changed["avatars"][0]["anchor"][0] = 0u;
+    add("avatar anchor disagreement", changed);
+    changed = valid;
+    changed["avatars"].push_back(changed["avatars"][0]);
+    changed["avatar_count"] = 2u;
+    add("duplicate id", changed);
+    changed = valid;
+    changed["avatars"][0]["id"] = 99u;
+    add("unknown id", changed);
+    changed = valid;
+    changed["avatar_count"] = 0u;
+    add("roster disagreement", changed);
+    changed = valid;
+    changed["avatar_count"] = 4097u;
+    add("avatar count bound", changed);
+    changed = valid;
+    changed["body_count"] = 129u;
+    add("body count bound", changed);
+    changed = valid;
+    changed["player"]["id"] = 1u;
+    add("unknown player owner", changed);
+    changed = valid;
+    changed["player"]["anchor"][0] =
+        std::bit_cast<std::uint32_t>(std::numeric_limits<float>::infinity());
+    add("non-finite player anchor", changed);
+    changed = valid;
+    changed["player"]["anchor"][0] = 0u;
+    add("player anchor disagreement", changed);
+    changed = valid;
+    changed["bodies"][0]["anchor"][0] = 0u;
+    add("body anchor disagreement", changed);
+    changed = valid;
+    changed["bodies"][0]["id"] = 100u;
+    add("body id disagreement", changed);
+    changed = valid;
+    changed["bodies"].push_back(changed["bodies"][0]);
+    changed["body_count"] = 2u;
+    add("duplicate body", changed);
+    changed = valid;
+    changed["bodies"][0]["state"] = "00";
+    add("truncated physics state", changed);
+    changed = valid;
+    changed["avatars"][0]["state"] = std::string(2 * (World::kMaxAvatarOwnerBytes + 1), '0');
+    add("oversized avatar payload", changed);
+    changed = valid;
+    changed["avatar_count"] = -1;
+    add("negative roster count", changed);
+    changed = valid;
+    changed["stream_tick"] = world::WorldClock::kTickLimit + 1;
+    add("stream clock bound", changed);
+    changed = valid;
+    changed["simulation_tick"] = 1u;
+    add("clock disagreement", changed);
+    changed = valid;
+    changed["moving_anchor"] = true;
+    add("moving mode disagreement", changed);
+    changed = valid;
+    changed["water_smoke"] = true;
+    add("water mode disagreement", changed);
+    changed = valid;
+    changed["avatars"][0]["state"] = "00";
+    add("truncated C2 owner", changed);
+    changed = valid;
+    changed["avatars"][0]["state"] = "xx";
+    add("invalid C2 encoding", changed);
+    changed = valid;
+    changed["avatars"][0]["state"] = "!!!!";
+    add("invalid base64 alphabet", changed);
+    changed = valid;
+    changed["avatars"][0]["state"] = "AB==";
+    add("noncanonical base64 padding", changed);
+    changed = valid;
+    changed.erase("avatar_count");
+    add("missing descriptor field", changed);
+    changed = valid;
+    changed["avatars"] = nullptr;
+    add("wrong roster type", changed);
+    changed = valid;
+    changed["anchor"] = {0u, 0u};
+    add("partial anchor", changed);
+    changed = valid;
+    changed["terrain"] = {{{"chunk_id", 0u}, {"body_id", 10240u}}};
+    add("unknown terrain id", changed);
+    changed = valid;
+    changed["terrain"] = {{{"chunk_id", UINT64_MAX}, {"body_id", 2u}}};
+    add("missing terrain owner", changed);
+    changed = valid;
+    changed["terrain"] = {{{"chunk_id", 0u}, {"body_id", 0u}}, {{"chunk_id", 1u}, {"body_id", 0u}}};
+    add("conflicting terrain slots", changed);
+    changed = valid;
+    changed["terrain"] = {{{"chunk_id", 1u}, {"body_id", 3u}}, {{"chunk_id", 0u}, {"body_id", 4u}}};
+    add("unsorted terrain", changed);
+    changed = valid;
+    changed["slot_count"] = 10241u;
+    add("allocator extent bound", changed);
+    changed = valid;
+    changed["free_slots"] = {0u};
+    add("occupied free slot", changed);
+    changed = valid;
+    changed["free_slots"] = {UINT64_MAX};
+    add("free id width", changed);
+    changed = valid;
+    changed["simulation_bodies"] = {0u};
+    add("conflicting simulation terrain", changed);
+    changed = valid;
+    changed["simulation_columns"] = {{{"id", 0u}, {"heights", nlohmann::json::array()}}};
+    add("partial simulation terrain", changed);
+    changed = valid;
+    changed["simulation_bodies"] = std::vector<std::uint32_t>(129, 0u);
+    add("simulation terrain bound", changed);
+    const auto bad_terrain = [&](std::size_t sample_count, std::uint64_t first) {
+        auto value = valid;
+        value["slot_count"] = 2u;
+        value["simulation_bodies"] = {1u};
+        auto heights = std::vector<std::uint64_t>(sample_count, 0u);
+        if (!heights.empty()) {
+            heights[0] = first;
+        }
+        value["simulation_columns"] = {{{"id", 0u}, {"heights", heights}}};
+        return value;
+    };
+    constexpr std::size_t samples = (CHUNK_SIZE_X + 1u) * (CHUNK_SIZE_Z + 1u);
+    add("partial terrain samples", bad_terrain(samples - 1, 0u));
+    add("terrain sample width", bad_terrain(samples, UINT64_MAX));
+    add("nonfinite terrain sample",
+        bad_terrain(samples, std::bit_cast<std::uint32_t>(std::numeric_limits<float>::infinity())));
+    add("terrain sample outside coordinate range",
+        bad_terrain(samples, std::bit_cast<std::uint32_t>(1.0e38f)));
+    changed = bad_terrain(samples, 0u);
+    changed["simulation_columns"][0]["id"] = UINT64_MAX;
+    add("unknown simulation terrain column", changed);
+    changed = valid;
+    changed["bodies"][0]["suspended"] = "yes";
+    add("invalid suspension flag", changed);
+    changed = valid;
+    changed["bodies"][0]["velocity"] = {0u};
+    add("partial retained velocity", changed);
+    changed = valid;
+    changed["bodies"][0]["velocity"] = {UINT64_MAX, 0u, 0u};
+    add("retained velocity width", changed);
+    changed = valid;
+    changed["bodies"][0]["velocity"] = {
+        std::bit_cast<std::uint32_t>(std::numeric_limits<float>::infinity()), 0u, 0u};
+    add("nonfinite retained velocity", changed);
+    changed = valid;
+    changed["bodies"][0]["registration_slot"] = 10241u;
+    add("registration bound", changed);
+    for (const auto& [name, bytes] : invalid) {
+        SCOPED_TRACE(name);
+        auto metadata = original_metadata;
+        metadata["owner_continuation"] = bytes;
+        Write(save / "world_info.json", metadata.dump());
+        const auto disk = DiskBytes(root);
+        EXPECT_FALSE(live.LoadWorld("fixture"));
+        EXPECT_FALSE(live.LoadWorldStateFrom(save));
+        const auto prepared =
+            GameSession::PrepareWorldLoad(live.CaptureWorldPreparationOptions(), "fixture");
+        EXPECT_FALSE(live.AdoptPreparedWorld(prepared));
+        EXPECT_EQ(live.GetWorldSystem(), world);
+        EXPECT_EQ(live.GetPhysicsSystem(), physics);
+        EXPECT_EQ(live.WorldRevision(), revision);
+        EXPECT_EQ(live.GetMetadata().worldId, id);
+        EXPECT_EQ(live.ComputeChunkStateHash(), chunk_hash);
+        EXPECT_TRUE(live.GetRegistry().valid(sentinel));
+        EXPECT_EQ(DiskBytes(root), disk);
+    }
+    Write(save / "world_info.json", admitted_metadata.dump());
+    const auto dependency = root / "data/common/biomes.json";
+    const auto dependency_bytes = Read(dependency);
+    Write(dependency, dependency_bytes + "\n");
+    const auto changed_preset =
+        world::LoadTerrainPreset(root / "worlds/atlas/presets-rev6/default.json", root / "data");
+    ASSERT_TRUE(changed_preset.ok);
+    ASSERT_NE(changed_preset.preset_content_hash, live.PresetContentHash());
+    const auto changed_disk = DiskBytes(root);
+    EXPECT_FALSE(live.LoadWorld("fixture"));
+    const auto changed_preparation =
+        GameSession::PrepareWorldLoad(live.CaptureWorldPreparationOptions(), "fixture");
+    EXPECT_FALSE(live.AdoptPreparedWorld(changed_preparation));
+    EXPECT_EQ(live.GetWorldSystem(), world);
+    EXPECT_EQ(live.GetPhysicsSystem(), physics);
+    EXPECT_EQ(live.WorldRevision(), revision);
+    EXPECT_EQ(live.ComputeChunkStateHash(), chunk_hash);
+    EXPECT_TRUE(live.GetRegistry().valid(sentinel));
+    EXPECT_EQ(DiskBytes(root), changed_disk);
+    Write(dependency, dependency_bytes);
+    Write(save / "world_info.json", original_metadata.dump());
+    EXPECT_TRUE(live.SaveWorldState());
+}
+
+TEST_F(WorldOpenRefusal, OwnerContinuationRunnerRestoresRosterAndRejectsConflictingBoot) {
+    for (const bool regions : {false, true}) {
+        SCOPED_TRACE(regions);
+        auto config = SnapshotRunnerConfig(RootString(), regions);
+        config.avatar_count = 1;
+        Server::ServerWorldRunner original(config, {.owner_continuation = true});
+        ASSERT_TRUE(original.Boot()) << original.GetBootError();
+        EXPECT_EQ(original.SpawnedAvatarCount(), 1u);
+        if (regions) {
+            const std::vector<Vec3> oversized(Systems::PhysicsSystem::kMaxRestoredAvatars + 1);
+            EXPECT_THROW(original.Session()->SetOwnerContinuationSimulationAnchors(oversized),
+                         std::logic_error);
+        }
+        original.SetAvatarMove(0, 0.125f, 0.25f);
+        ASSERT_EQ(original.RunFixedTicks(3).ticks_executed, 3u);
+        ASSERT_GT(original.SaveFullSnapshot(), 0u);
+        config.world_id = original.Session()->GetMetadata().worldId;
+        Server::ServerWorldRunner restored(config, {.owner_continuation = true});
+        ASSERT_TRUE(restored.Boot()) << restored.GetBootError();
+        EXPECT_EQ(restored.SpawnedAvatarCount(), 0u);
+        ASSERT_EQ(restored.Avatars().size(), 1u);
+        for (int tick = 0; tick < 4; ++tick) {
+            World::PlayerAvatarOwnerState expected, actual;
+            ASSERT_TRUE(original.CaptureAvatarOwner(0, expected));
+            ASSERT_TRUE(restored.CaptureAvatarOwner(0, actual));
+            EXPECT_EQ(expected.physics.size, actual.physics.size);
+            EXPECT_EQ(expected.physics.bytes, actual.physics.bytes);
+            EXPECT_EQ(original.ComputeWorldSubHashes().entities,
+                      restored.ComputeWorldSubHashes().entities);
+            ExpectSameServerSimulationHashes(ReadServerWaterHashes(restored),
+                                             ReadServerWaterHashes(original));
+            ASSERT_EQ(original.RunFixedTicks(1).ticks_executed, 1u);
+            ASSERT_EQ(restored.RunFixedTicks(1).ticks_executed, 1u);
+            EXPECT_EQ(original.OwnerAnchorVisitCount(), original.Avatars().size());
+            EXPECT_EQ(restored.OwnerAnchorVisitCount(), restored.Avatars().size());
+        }
+        ++config.avatar_count;
+        const auto before = DiskBytes(root);
+        Server::ServerWorldRunner conflict(config, {.owner_continuation = true});
+        EXPECT_FALSE(conflict.Boot());
+        EXPECT_EQ(conflict.SpawnedAvatarCount(), 0u);
+        EXPECT_EQ(DiskBytes(root), before);
+    }
+}
+
+TEST_F(WorldOpenRefusal, OwnerContinuationDefaultOffRetainsLegacyBytesAndAuthorityHashes) {
+    auto config = SnapshotRunnerConfig(RootString(), false);
+    Server::ServerWorldRunner source(config);
+    ASSERT_TRUE(source.Boot());
+    ASSERT_GT(source.SaveFullSnapshot(), 0u);
+    config.world_id = source.Session()->GetMetadata().worldId;
+    const auto directory = source.Session()->GetWorldSaveDir();
+    const auto saved_bytes = DiskBytes(directory);
+    EXPECT_FALSE(
+        nlohmann::json::parse(Read(directory / "world_info.json")).contains("owner_continuation"));
+    // Compare the same lifecycle on the same input. The ordinary loaded boot
+    // remeshes derivatives, so fresh-boot bytes are not a legacy resave oracle.
+    Server::ServerWorldRunner legacy(config);
+    ASSERT_TRUE(legacy.Boot());
+    Server::ServerWorldRunner disabled(config, {.owner_continuation = false});
+    ASSERT_TRUE(disabled.Boot());
+    EXPECT_EQ(disabled.SpawnedAvatarCount(), 0u);
+    EXPECT_EQ(DiskBytes(directory), saved_bytes);
+    const auto expected = ReadServerWaterHashes(legacy);
+    EXPECT_EQ(expected.world, source.ComputeWorldHash());
+    ExpectSameServerWaterHashes(ReadServerWaterHashes(disabled), expected);
+    ASSERT_GT(legacy.SaveFullSnapshot(), 0u);
+    const auto bytes = DiskBytes(directory);
+    ASSERT_GT(disabled.SaveFullSnapshot(), 0u);
+    const auto actual = ReadServerWaterHashes(disabled);
+    EXPECT_EQ(actual.world, expected.world);
+    ExpectSameServerSubHashes(actual.sub, expected.sub);
+    ExpectSameServerWaterHashes(actual, ReadServerWaterHashes(legacy));
+    EXPECT_EQ(DiskBytes(directory), bytes);
+}
+
+TEST_F(WorldOpenRefusal, OwnerContinuationMovingAnchorResumesAcrossRunBoundaries) {
+    auto config = SnapshotRunnerConfig(RootString(), false);
+    config.moving_anchor = true;
+    Server::ServerWorldRunner original(config, {.owner_continuation = true});
+    ASSERT_TRUE(original.Boot());
+    constexpr std::uint64_t saved_ticks = 2u * (CHUNK_SIZE_X + 1u);
+    ASSERT_EQ(original.RunFixedTicks(saved_ticks).ticks_executed, saved_ticks);
+    EXPECT_EQ(original.Session()->GetWorldSystem()->pending_publication_chunks(), 0u);
+    ASSERT_GT(original.SaveFullSnapshot(), 0u);
+    config.world_id = original.Session()->GetMetadata().worldId;
+    Server::ServerWorldRunner restored(config, {.owner_continuation = true});
+    ASSERT_TRUE(restored.Boot()) << restored.GetBootError();
+    ASSERT_NE(restored.Session()->RestoredOwnerContinuation(), nullptr);
+    EXPECT_EQ(restored.Session()->RestoredOwnerContinuation()->stream_tick, saved_ticks);
+    ExpectSameServerSimulationHashes(ReadServerWaterHashes(restored),
+                                     ReadServerWaterHashes(original));
+    std::vector<std::pair<ChunkID, JPH::BodyID>> original_terrain, restored_terrain;
+    ASSERT_TRUE(
+        original.Session()->GetPhysicsSystem()->capture_chunk_collision_owners(original_terrain));
+    ASSERT_TRUE(
+        restored.Session()->GetPhysicsSystem()->capture_chunk_collision_owners(restored_terrain));
+    EXPECT_EQ(restored_terrain, original_terrain);
+    ASSERT_EQ(original.RunFixedTicks(2).ticks_executed, 2u);
+    ASSERT_EQ(restored.RunFixedTicks(2).ticks_executed, 2u);
+    ExpectSameServerSimulationHashes(ReadServerWaterHashes(restored),
+                                     ReadServerWaterHashes(original));
+    EXPECT_EQ(original.OwnerAnchorVisitCount(), 0u);
+    EXPECT_EQ(restored.OwnerAnchorVisitCount(), 0u);
+    ASSERT_GT(original.SaveFullSnapshot(), 0u);
+    const auto original_record =
+        nlohmann::json::parse(Read(original.Session()->GetWorldSaveDir() / "world_info.json"))
+            .at("owner_continuation");
+    ASSERT_GT(restored.SaveFullSnapshot(), 0u);
+    const auto restored_record =
+        nlohmann::json::parse(Read(restored.Session()->GetWorldSaveDir() / "world_info.json"))
+            .at("owner_continuation");
+    EXPECT_EQ(original_record, restored_record);
+    // Restore at two offsets of the four-update cadence. With a process-local
+    // counter, at least one restore would activate at a different crossing tick,
+    // regardless of the fresh boot's final update phase.
+    Server::ServerWorldRunner second_restored(config, {.owner_continuation = true});
+    ASSERT_TRUE(second_restored.Boot()) << second_restored.GetBootError();
+    // Cross another residency boundary after restoring at a different update
+    // phase. Compare each process at the same cumulative tick, including when
+    // one caller batches ticks and the other returns after every tick.
+    // The moving anchor travels half a metre per streaming tick.
+    constexpr std::uint64_t more_ticks = 4u * CHUNK_SIZE_X - (saved_ticks + 2u);
+    ASSERT_EQ(original.RunFixedTicks(more_ticks).ticks_executed, more_ticks);
+    for (std::uint64_t tick = 0; tick < more_ticks; ++tick) {
+        ASSERT_EQ(restored.RunFixedTicks(1).ticks_executed, 1u);
+        EXPECT_EQ(restored.Session()->GetWorldSystem()->pending_publication_chunks(), 0u);
+    }
+    ExpectSameServerSimulationHashes(ReadServerWaterHashes(restored),
+                                     ReadServerWaterHashes(original));
+    ASSERT_EQ(second_restored.RunFixedTicks(more_ticks).ticks_executed, more_ticks);
+    ExpectSameServerSimulationHashes(ReadServerWaterHashes(second_restored),
+                                     ReadServerWaterHashes(original));
+    // Allow the crossing's generated terrain to reach its collision pass too.
+    ASSERT_EQ(original.RunFixedTicks(4).ticks_executed, 4u);
+    ASSERT_EQ(restored.RunFixedTicks(4).ticks_executed, 4u);
+    ASSERT_EQ(second_restored.RunFixedTicks(4).ticks_executed, 4u);
+    ExpectSameServerSimulationHashes(ReadServerWaterHashes(restored),
+                                     ReadServerWaterHashes(original));
+    ExpectSameServerSimulationHashes(ReadServerWaterHashes(second_restored),
+                                     ReadServerWaterHashes(original));
+    original_terrain.clear();
+    restored_terrain.clear();
+    ASSERT_TRUE(
+        original.Session()->GetPhysicsSystem()->capture_chunk_collision_owners(original_terrain));
+    ASSERT_TRUE(
+        restored.Session()->GetPhysicsSystem()->capture_chunk_collision_owners(restored_terrain));
+    EXPECT_EQ(restored_terrain, original_terrain);
+    restored_terrain.clear();
+    ASSERT_TRUE(second_restored.Session()->GetPhysicsSystem()->capture_chunk_collision_owners(
+        restored_terrain));
+    EXPECT_EQ(restored_terrain, original_terrain);
+}
+
+TEST_F(WorldOpenRefusal, OwnerContinuationRunnerRestoresEmptySnapshotWithoutWarmup) {
+    auto config = SnapshotRunnerConfig(RootString(), false);
+    Server::ServerWorldRunner original(config, {.owner_continuation = true});
+    ASSERT_TRUE(original.Boot());
+    ASSERT_EQ(original.RunFixedTicks(1).ticks_executed, 1u);
+    original.Session()->GetWorldSystem()->clear_world(original.Session()->GetPhysicsSystem());
+    ASSERT_TRUE(original.Session()->SaveWorldState());
+    const auto expected = original.Session()->ComputeChunkStateHash();
+    config.world_id = original.Session()->GetMetadata().worldId;
+    const auto bytes = DiskBytes(root);
+    Server::ServerWorldRunner restored(config, {.owner_continuation = true});
+    ASSERT_TRUE(restored.Boot()) << restored.GetBootError();
+    ASSERT_NE(restored.Session()->RestoredOwnerContinuation(), nullptr);
+    EXPECT_EQ(restored.Session()->GetLastLoadedChunkCount(), 0u);
+    EXPECT_EQ(restored.Session()->GetWorldSystem()->snapshot_streamed_chunks().size(), 0u);
+    EXPECT_EQ(restored.Session()->ComputeChunkStateHash(), expected);
+    EXPECT_EQ(restored.Session()->GetSimulationTickCount(), 1u);
+    EXPECT_EQ(restored.Session()->RestoredOwnerContinuation()->stream_tick, 1u);
+    EXPECT_EQ(restored.GetBootSettleStats().iterations, 0);
+    EXPECT_TRUE(restored.GetBootSettleStats().water_settle_skipped);
+    EXPECT_EQ(DiskBytes(root), bytes);
+}
+
+TEST_F(WorldOpenRefusal, OwnerContinuationRunnerRefusesRosterBoundsAndExhaustedClock) {
+    auto config = SnapshotRunnerConfig(RootString(), false);
+    const auto disk = DiskBytes(root);
+    for (const int count : {-1, 4097}) {
+        SCOPED_TRACE(count);
+        config.avatar_count = count;
+        Server::ServerWorldRunner invalid(config, {.owner_continuation = true});
+        EXPECT_FALSE(invalid.Boot());
+        EXPECT_EQ(invalid.Session(), nullptr);
+        EXPECT_EQ(invalid.SpawnedAvatarCount(), 0u);
+        EXPECT_EQ(DiskBytes(root), disk);
+    }
+    config.avatar_count = 0;
+    Server::ServerWorldRunner original(config, {.owner_continuation = true});
+    ASSERT_TRUE(original.Boot());
+    const auto spawn = original.Session()->GetMetadata().spawnPoint;
+    original.Session()->SetOwnerContinuationAnchor(spawn, spawn, world::WorldClock::kTickLimit);
+    ASSERT_GT(original.SaveFullSnapshot(), 0u);
+    config.world_id = original.Session()->GetMetadata().worldId;
+    Server::ServerWorldRunner restored(config, {.owner_continuation = true});
+    ASSERT_TRUE(restored.Boot()) << restored.GetBootError();
+    const auto before = DiskBytes(root);
+    const auto hashes = ReadServerWaterHashes(restored);
+    const auto report = restored.RunFixedTicks(1);
+    EXPECT_EQ(report.ticks_executed, 0u);
+    EXPECT_EQ(report.frames_executed, 0u);
+    EXPECT_TRUE(report.region_fault);
+    ExpectSameServerWaterHashes(ReadServerWaterHashes(restored), hashes);
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, OwnerContinuationRefusesStreamingPastTheCoordinateBound) {
+    auto config = SnapshotRunnerConfig(RootString(), false);
+    config.moving_anchor = true;
+    Server::ServerWorldRunner runner(config, {.owner_continuation = true});
+    ASSERT_TRUE(runner.Boot());
+    const Vec3 edge{16777215.0f, 18, 16777215.0f};
+    runner.Session()->SetOwnerContinuationAnchor(
+        edge, runner.Session()->GetMetadata().spawnPoint, 0);
+    ASSERT_GT(runner.SaveFullSnapshot(), 0u);
+    config.world_id = runner.Session()->GetMetadata().worldId;
+    // Tick zero retains the boot anchor before movement starts from its origin.
+    // The first half-metre step rounds outside the coordinate range.
+    Server::ServerWorldRunner restored(config, {.owner_continuation = true});
+    ASSERT_TRUE(restored.Boot()) << restored.GetBootError();
+    const auto before = DiskBytes(root);
+    const auto report = restored.RunFixedTicks(1);
+    EXPECT_TRUE(report.region_fault);
+    EXPECT_EQ(report.ticks_executed, 0u);
+    EXPECT_EQ(report.frames_executed, 0u);
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, OwnerContinuationMetadataFailureRollsBackAndKeepsOwnersPending) {
+    auto config = SnapshotRunnerConfig(RootString(), false);
+    config.avatar_count = 1;
+    Server::ServerWorldRunner runner(config, {.owner_continuation = true});
+    ASSERT_TRUE(runner.Boot());
+    ASSERT_GT(runner.SaveFullSnapshot(), 0u);
+    runner.SetAvatarMove(0, 0.125f, 0.25f);
+    ASSERT_EQ(runner.RunFixedTicks(2).ticks_executed, 2u);
+    const auto directory = runner.Session()->GetWorldSaveDir();
+    const auto before = DiskBytes(directory);
+    World::PlayerAvatarOwnerState owner;
+    ASSERT_TRUE(runner.CaptureAvatarOwner(0, owner));
+    SiblingWriteFailure failure;
+    failure.ArmMetadata(directory);
+    EXPECT_EQ(runner.SaveFullSnapshot(), 0u);
+    failure.Reset();
+    EXPECT_TRUE(failure.reached());
+    EXPECT_EQ(DiskBytes(directory), before);
+    World::PlayerAvatarOwnerState pending;
+    ASSERT_TRUE(runner.CaptureAvatarOwner(0, pending));
+    EXPECT_EQ(owner.physics.size, pending.physics.size);
+    EXPECT_EQ(owner.physics.bytes, pending.physics.bytes);
+    EXPECT_FALSE(Persistence::journal_pending(directory));
+    EXPECT_GT(runner.SaveFullSnapshot(), 0u);
+}
+
+TEST_F(WorldOpenRefusal, OwnerContinuationTransientSnapshotsRetainOwnersAndMetadata) {
+    auto original_metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    original_metadata["extension"] = {{"unknown", {1, 2, 3}}};
+    Write(save / "world_info.json", original_metadata.dump());
+    std::vector<World::PlayerAvatar> avatars(1);
+    GameSession source({.owner_continuation = true});
+    source.SetJobSystem(&jobs);
+    source.SetRootPath(RootString());
+    source.SetActiveRegionsEnabled(false);
+    source.ConfigureOwnerContinuation(avatars, 1, false, false);
+    ASSERT_TRUE(source.CreateTransientWorld("Owner snapshot", "1337", "default"));
+    auto* physics = source.GetPhysicsSystem();
+    const auto index = physics->create_avatar_character(Vec3(8.25f, 40.125f, 8.75f));
+    physics->set_avatar_wish_velocity(index, glm::vec2(0.125f, 0.25f));
+    physics->update_avatars(1.0f / 30.0f);
+    avatars[0].position = physics->get_avatar_position(index);
+    avatars[0].velocity = physics->get_avatar_velocity(index);
+    World::PlayerAvatarOwnerState expected;
+    ASSERT_TRUE(source.CaptureAvatarOwner(avatars[0], index, expected));
+    for (const auto& destination : {save, root / "owner-snapshot"}) {
+        SCOPED_TRACE(destination.generic_string());
+        ASSERT_TRUE(source.SaveWorldStateTo(destination, nullptr, true));
+        const auto metadata = nlohmann::json::parse(Read(destination / "world_info.json"));
+        ASSERT_TRUE(metadata.contains("owner_continuation"));
+        if (destination == save) {
+            EXPECT_EQ(metadata.at("name"), original_metadata.at("name"));
+            EXPECT_EQ(metadata.at("creationTime"), original_metadata.at("creationTime"));
+            EXPECT_EQ(metadata.at("extension"), original_metadata.at("extension"));
+            EXPECT_EQ(metadata.at("seed"), original_metadata.at("seed"));
+        }
+        EXPECT_EQ(metadata.at("renderCalendar"),
+                  world::WorldClock(0, source.GetRenderCalendar()).calendar_metadata());
+        std::vector<World::PlayerAvatar> restored_avatars;
+        GameSession restored({.owner_continuation = true});
+        restored.SetJobSystem(&jobs);
+        restored.SetRootPath(RootString());
+        restored.SetActiveRegionsEnabled(false);
+        restored.ConfigureOwnerContinuation(restored_avatars, 1, false, false);
+        ASSERT_TRUE(restored.CreateTransientWorld("Owner reader", "1337", "default"));
+        ASSERT_TRUE(restored.LoadWorldStateFrom(destination)) << restored.GetWorldOpenError();
+        ASSERT_NE(restored.RestoredOwnerContinuation(), nullptr);
+        ASSERT_EQ(restored.RestoredOwnerContinuation()->avatars.size(), 1u);
+        World::PlayerAvatarOwnerState actual;
+        ASSERT_TRUE(restored.CaptureAvatarOwner(
+            restored.RestoredOwnerContinuation()->avatars[0].avatar, 0, actual));
+        EXPECT_EQ(actual.physics.size, expected.physics.size);
+        EXPECT_EQ(actual.physics.bytes, expected.physics.bytes);
+        const auto* previous_physics = restored.GetPhysicsSystem();
+        const auto creature = restored.GetRegistry().create();
+        restored.GetRegistry().emplace<Luminumbra::Components::CreaturePhysicsComponent>(
+            creature, std::size_t{0});
+        const auto disk = DiskBytes(destination);
+        EXPECT_FALSE(restored.LoadWorldStateFrom(destination));
+        const auto prepared =
+            GameSession::PrepareWorldState(restored.CaptureWorldPreparationOptions(), destination);
+        EXPECT_FALSE(restored.AdoptPreparedWorld(prepared));
+        EXPECT_EQ(restored.GetPhysicsSystem(), previous_physics);
+        EXPECT_EQ(DiskBytes(destination), disk);
+    }
+    GameSession disabled;
+    disabled.SetJobSystem(&jobs);
+    disabled.SetRootPath(RootString());
+    disabled.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(disabled.CreateTransientWorld("Disabled owner reader", "1337", "default"));
+    const auto owner_bytes = DiskBytes(save);
+    EXPECT_FALSE(disabled.LoadWorldStateFrom(save));
+    EXPECT_FALSE(disabled.SaveWorldStateTo(save, nullptr, true));
+    EXPECT_EQ(DiskBytes(save), owner_bytes);
+    auto foreign_metadata = original_metadata;
+    foreign_metadata["seed"] = "1338";
+    const auto foreign_destination = root / "foreign-owner-snapshot";
+    Write(foreign_destination / "world_info.json", foreign_metadata.dump());
+    const auto foreign_bytes = DiskBytes(foreign_destination);
+    EXPECT_FALSE(source.SaveWorldStateTo(foreign_destination, nullptr, true));
+    EXPECT_EQ(DiskBytes(foreign_destination), foreign_bytes);
+    // Admission covers both writer paths and refuses incomplete conversion
+    // metadata, partial JSON, non-object input and unreadable metadata leaves.
+    const auto invalid_destination = root / "invalid-owner-metadata";
+    for (const auto& invalid :
+         {std::string("{}"),
+          std::string("{\"seed\":\"1337\",\"seedConversionVersion\":1,"
+                      "\"resolvedSeed\":1337}"),
+          std::string("{\"container_version\":2,\"seed\":"),
+          std::string("[]"),
+          std::string("{\"container_version\":2,\"seed\":\"\"}"),
+          std::string("{\"container_version\":2,\"seed\":1337}"),
+          std::string("{\"container_version\":2,\"seed\":\"1337\",\"resolvedSeed\":1337}"),
+          std::string("{\"container_version\":2,\"seed\":\"1337\",\"seedConversionVersion\":1}"),
+          std::string("{\"container_version\":2,\"seed\":\"1337\",\"seedConversionVersion\":2,"
+                      "\"resolvedSeed\":1337}"),
+          std::string("{\"container_version\":2,\"seed\":\"1337\",\"seedConversionVersion\":1,"
+                      "\"resolvedSeed\":1338}"),
+          std::string("{\"container_version\":2,\"seed\":\"1337\",\"seedConversionVersion\":1,"
+                      "\"resolvedSeed\":4294967296}")}) {
+        SCOPED_TRACE(invalid);
+        Write(invalid_destination / "world_info.json", invalid);
+        const auto invalid_bytes = DiskBytes(invalid_destination);
+        EXPECT_FALSE(source.SaveWorldStateTo(invalid_destination, nullptr, true));
+        EXPECT_EQ(DiskBytes(invalid_destination), invalid_bytes);
+        EXPECT_FALSE(Persistence::journal_pending(invalid_destination));
+    }
+    fs::remove(invalid_destination / "world_info.json");
+    fs::create_directory(invalid_destination / "world_info.json");
+    const auto unreadable_bytes = DiskBytes(invalid_destination);
+    EXPECT_FALSE(source.SaveWorldStateTo(invalid_destination, nullptr, true));
+    EXPECT_EQ(DiskBytes(invalid_destination), unreadable_bytes);
+    // Existing destinations require a supported container version, including
+    // keyless metadata. Equivalent seeds and unrelated extensions survive.
+    for (const auto& compatible :
+         {nlohmann::json{{"container_version", WorldSaveService::kContainerVersion}},
+          nlohmann::json{{"container_version", WorldSaveService::kContainerVersion},
+                         {"seed", "1337"},
+                         {"seedConversionVersion", world::kSeedConversionVersion},
+                         {"resolvedSeed", 1337u},
+                         {"extension", {"retained"}}}}) {
+        const auto compatible_destination =
+            root /
+            (compatible.contains("seed") ? "versioned-owner-metadata" : "empty-owner-metadata");
+        Write(compatible_destination / "world_info.json", compatible.dump());
+        ASSERT_TRUE(source.SaveWorldStateTo(compatible_destination, nullptr, true));
+        const auto written =
+            nlohmann::json::parse(Read(compatible_destination / "world_info.json"));
+        auto expected_metadata = compatible;
+        expected_metadata["container_version"] = WorldSaveService::kIndexedMetadataVersion;
+        for (const auto& item : expected_metadata.items()) {
+            EXPECT_EQ(written.at(item.key()), item.value());
+        }
+    }
+    // The input itself fits the existing metadata bound; adding the owner record
+    // must refuse before payload publication, including for a keyless export.
+    auto metadata = original_metadata;
+    metadata["extension"] = "";
+    const auto remaining = Persistence::SavedInputLimits::kMetadataBytes - metadata.dump().size();
+    metadata["extension"] = std::string(remaining - 64u, 'x');
+    const auto destination = root / "owner-metadata-bound";
+    Write(destination / "world_info.json", metadata.dump());
+    ASSERT_LE(Read(destination / "world_info.json").size(),
+              Persistence::SavedInputLimits::kMetadataBytes);
+    ASSERT_FALSE(Persistence::snapshot_index_exists(destination));
+    const auto before = DiskBytes(destination);
+    EXPECT_FALSE(source.SaveWorldStateTo(destination, nullptr, true));
+    EXPECT_EQ(DiskBytes(destination), before);
+    EXPECT_FALSE(Persistence::journal_pending(destination));
+}
+
+TEST_F(WorldOpenRefusal, OwnerContinuationRetainsCollisionFlagsIndependentlyOfTerrainBodies) {
+    for (const bool body_present : {false, true}) {
+        SCOPED_TRACE(body_present);
+        GameSession source({.owner_continuation = true});
+        source.SetJobSystem(&jobs);
+        source.SetRootPath(RootString());
+        source.SetActiveRegionsEnabled(false);
+        ASSERT_TRUE(source.CreateTransientWorld("Collision flags", "1337", "default"));
+        auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+        chunk->set_state(ChunkState::Idle);
+        chunk->heightmap_data.assign(static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
+                                         (CHUNK_SIZE_Z + 1),
+                                     body_present ? 8.0f : -1.0f);
+        ASSERT_TRUE(source.GetPhysicsSystem()->add_chunk_collision(*chunk));
+        const auto body = source.GetPhysicsSystem()->chunk_collision_body(chunk->get_id());
+        ASSERT_EQ(body.has_value(), body_present);
+        // No body is needed outside the chunk's height interval. Conversely a
+        // remesh may leave collision work pending while the old body still exists.
+        chunk->has_collision.store(!body_present);
+        ASSERT_TRUE(source.GetWorldSystem()->adopt_streamed_chunk(chunk));
+        ASSERT_TRUE(source.SaveWorldStateTo(save, nullptr, true));
+        const auto expected = source.ComputeChunkStateHash();
+        GameSession restored({.owner_continuation = true});
+        restored.SetJobSystem(&jobs);
+        restored.SetRootPath(RootString());
+        restored.SetActiveRegionsEnabled(false);
+        ASSERT_TRUE(restored.CreateTransientWorld("Collision reader", "1337", "default"));
+        ASSERT_TRUE(restored.LoadWorldStateFrom(save)) << restored.GetWorldOpenError();
+        const auto loaded = restored.GetWorldSystem()->find_streamed_chunk(chunk->get_coords());
+        ASSERT_NE(loaded, nullptr);
+        EXPECT_EQ(loaded->has_collision.load(), chunk->has_collision.load());
+        EXPECT_EQ(restored.GetPhysicsSystem()->chunk_collision_body(chunk->get_id()), body);
+        EXPECT_EQ(restored.ComputeChunkStateHash(), expected);
+    }
+}
+
+TEST_F(WorldOpenRefusal, OwnerContinuationPersistentSnapshotRefusesForeignSeedBeforeWriting) {
+    GameSession source({.owner_continuation = true});
+    source.SetJobSystem(&jobs);
+    source.SetRootPath(RootString());
+    source.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(source.CreateWorld("Owner snapshot", "1337", "default"));
+    auto foreign = nlohmann::json::parse(Read(source.GetWorldSaveDir() / "world_info.json"));
+    foreign["seed"] = "1338";
+    foreign["resolvedSeed"] = 1338u;
+    const auto destination = root / "foreign-persistent-owner-snapshot";
+    Write(destination / "world_info.json", foreign.dump());
+    const auto bytes = DiskBytes(root);
+    EXPECT_FALSE(source.SaveWorldStateTo(destination, nullptr, true));
+    EXPECT_EQ(DiskBytes(root), bytes);
+    EXPECT_FALSE(Persistence::journal_pending(destination));
+}
+
+TEST_F(WorldOpenRefusal, OwnerContinuationRefusesUnboundControllersBeforeWriting) {
+    GameSession source({.owner_continuation = true});
+    source.SetJobSystem(&jobs);
+    source.SetRootPath(RootString());
+    source.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(source.CreateTransientWorld("Unbound owners", "1337", "default"));
+    const auto before = DiskBytes(save);
+    ASSERT_NE(source.GetPhysicsSystem()->create_avatar_character({8, 40, 8}),
+              Systems::PhysicsSystem::kInvalidAvatar);
+    EXPECT_FALSE(source.SaveWorldStateTo(save, nullptr, true));
+    EXPECT_EQ(DiskBytes(save), before);
+}
+
+TEST_F(WorldOpenRefusal, OwnerContinuationPreparedRosterChangeRefusesWithoutPublication) {
+    std::vector<World::PlayerAvatar> avatars;
+    GameSession live({.owner_continuation = true});
+    live.SetJobSystem(&jobs);
+    live.SetRootPath(RootString());
+    ASSERT_TRUE(live.LoadWorld("fixture"));
+    ASSERT_TRUE(live.SaveWorldState());
+    const auto prepared =
+        GameSession::PrepareWorldLoad(live.CaptureWorldPreparationOptions(), "fixture");
+    ASSERT_TRUE(GameSession::WorldPreparationError(*prepared).empty());
+    const auto* world = live.GetWorldSystem();
+    const auto* physics = live.GetPhysicsSystem();
+    const auto revision = live.WorldRevision();
+    const auto bytes = DiskBytes(root);
+    live.ConfigureOwnerContinuation(avatars, 1, false, false);
+    EXPECT_FALSE(live.AdoptPreparedWorld(prepared));
+    EXPECT_EQ(live.GetWorldSystem(), world);
+    EXPECT_EQ(live.GetPhysicsSystem(), physics);
+    EXPECT_EQ(live.WorldRevision(), revision);
+    EXPECT_EQ(DiskBytes(root), bytes);
+}
+
 } // namespace
 
 TEST_F(WorldOpenRefusal, OverlappingSessionSaveOwnsDestinationThroughMetadataAndRefusal) {
@@ -4309,4 +6433,1312 @@ TEST_F(WorldOpenRefusal, MetadataTextWriterRefusesBeforeWorldCreationChangesAnyt
     EXPECT_EQ(DiskBytes(root), before);
 }
 
+} // namespace
+
+namespace {
+using WeatherScript = Luminumbra::Systems::WeatherSchedule;
+using WeatherKind = Luminumbra::Systems::WeatherCategory;
+namespace P = Luminumbra::Persistence;
+
+WeatherScript ShortWeatherScript() {
+    return {.phases = {{0, WeatherKind::Clear, 0, 0},
+                       {2, WeatherKind::Clear, 0, 0},
+                       {5, WeatherKind::Rain, 65535, 65535},
+                       {8, WeatherKind::Rain, 65535, 65535},
+                       {11, WeatherKind::Clear, 0, 0}},
+            .strike_tick = 7};
+}
+
+TEST_F(WorldOpenRefusal, OwnerContinuationTransientSnapshotRetainsWeatherScheduleAndExtensions) {
+    const auto script = ShortWeatherScript();
+    GameSession source({.owner_continuation = true});
+    source.SetJobSystem(&jobs);
+    source.SetRootPath(RootString());
+    source.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(source.SetWeatherSchedule(script));
+    ASSERT_TRUE(source.CreateTransientWorld("Scheduled owner snapshot", "1337", "default"));
+    for (int tick = 0; tick < 3; ++tick) {
+        ASSERT_EQ(source.TickSimulation(source.GetSimulationClock().fixed_dt()), 1u);
+    }
+    auto original = nlohmann::json::parse(Read(save / "world_info.json"));
+    original["extension"] = {"retained"};
+    Write(save / "world_info.json", original.dump());
+    ASSERT_TRUE(source.SaveWorldStateTo(save, nullptr, true));
+    const auto written = nlohmann::json::parse(Read(save / "world_info.json"));
+    EXPECT_EQ(written.at("name"), original.at("name"));
+    EXPECT_EQ(written.at("extension"), original.at("extension"));
+    EXPECT_EQ(written.at("container_version"), P::kScheduledWeatherMetadataVersion);
+    EXPECT_EQ(written.at("weatherSchedule"), script.canonical_bytes());
+    EXPECT_EQ(written.at("weatherScheduleTick"), source.GetSimulationTickCount());
+    const auto& anchor = source.GetWeatherSystem()->ScheduleAnchor();
+    EXPECT_EQ(written.at("weatherScheduleAnchor"),
+              nlohmann::json::array({anchor.x, anchor.y, anchor.z}));
+    GameSession restored({.owner_continuation = true});
+    restored.SetJobSystem(&jobs);
+    restored.SetRootPath(RootString());
+    restored.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(restored.CreateTransientWorld("Schedule reader", "1337", "default"));
+    ASSERT_TRUE(restored.LoadWorldStateFrom(save)) << restored.GetWorldOpenError();
+    ASSERT_NE(restored.GetWeatherSchedule(), nullptr);
+    EXPECT_EQ(restored.GetWeatherSchedule()->canonical_bytes(), script.canonical_bytes());
+    EXPECT_EQ(restored.GetSimulationTickCount(), source.GetSimulationTickCount());
+    EXPECT_EQ(restored.GetWeatherSystem()->ComputeWeatherSubHash(),
+              source.GetWeatherSystem()->ComputeWeatherSubHash());
+}
+
+TEST(WeatherScheduleTest, WeatherScriptCanonicalBoundsAndFailureAtomicity) {
+    const auto script = ShortWeatherScript();
+    ASSERT_TRUE(script.valid());
+    const auto bytes = script.canonical_bytes();
+    EXPECT_EQ(bytes,
+              "WSC10500000000000000000000000000"
+              "00000000000000020000000000"
+              "000000000000000502ffffffff"
+              "000000000000000802ffffffff"
+              "000000000000000b0000000000"
+              "010000000000000007");
+    WeatherScript decoded;
+    ASSERT_TRUE(WeatherScript::Decode(bytes, decoded));
+    EXPECT_EQ(decoded, script);
+    auto no_strike = script;
+    no_strike.strike_tick.reset();
+    ASSERT_TRUE(WeatherScript::Decode(no_strike.canonical_bytes(), decoded));
+    EXPECT_EQ(decoded, no_strike);
+    decoded = script;
+    std::vector<std::string> invalid = {"",
+                                        "WSC1",
+                                        bytes + "0",
+                                        "WSC2" + bytes.substr(4),
+                                        std::string(WeatherScript::kMaxEncodedBytes + 1, '0')};
+    auto invalid_encoding = bytes;
+    invalid_encoding.replace(4, 2, "21");
+    invalid.push_back(invalid_encoding);
+    invalid_encoding = bytes;
+    invalid_encoding.replace(32, 16, "0000000000000000");
+    invalid.push_back(invalid_encoding);
+    invalid_encoding = bytes;
+    invalid_encoding.replace(22, 2, "05");
+    invalid.push_back(invalid_encoding);
+    invalid_encoding = bytes;
+    invalid_encoding.replace(136, 2, "02");
+    invalid.push_back(invalid_encoding);
+    for (std::size_t size = 0; size < bytes.size(); ++size) {
+        invalid.push_back(bytes.substr(0, size));
+    }
+    for (const auto offset : {4u, 22u, 24u, 136u}) {
+        auto corrupt = bytes;
+        corrupt.at(offset) = 'G';
+        invalid.push_back(corrupt);
+    }
+    for (const auto& corrupt : invalid) {
+        EXPECT_FALSE(WeatherScript::Decode(corrupt, decoded));
+        EXPECT_EQ(decoded, script);
+    }
+    std::vector<WeatherScript> refused;
+    auto bad = script;
+    bad.phases.clear();
+    refused.push_back(bad);
+    bad = script;
+    bad.phases.resize(WeatherScript::kMaxPhases + 1);
+    refused.push_back(bad);
+    bad = script;
+    bad.phases[1].start_tick = 0;
+    refused.push_back(bad);
+    bad = script;
+    bad.phases[2].start_tick = 1;
+    refused.push_back(bad);
+    bad = script;
+    bad.phases.back().start_tick = WeatherScript::kMaxSpanTicks + 1;
+    refused.push_back(bad);
+    bad = script;
+    bad.phases.back().start_tick = std::numeric_limits<std::uint64_t>::max();
+    refused.push_back(bad);
+    bad = script;
+    bad.phases[1].category = static_cast<WeatherKind>(255);
+    refused.push_back(bad);
+    for (const auto tick :
+         {std::uint64_t{0}, std::uint64_t{12}, std::numeric_limits<std::uint64_t>::max()}) {
+        bad = script;
+        bad.strike_tick = tick;
+        refused.push_back(bad);
+    }
+    GameSession session;
+    const auto unscheduled = session.SystemConfigIdentity();
+    ASSERT_TRUE(session.SetWeatherSchedule(script));
+    const auto scheduled = session.SystemConfigIdentity();
+    EXPECT_NE(scheduled, unscheduled);
+    GameSession changed;
+    auto changed_script = script;
+    changed_script.strike_tick = 6;
+    ASSERT_TRUE(changed.SetWeatherSchedule(changed_script));
+    EXPECT_NE(changed.SystemConfigIdentity(), scheduled);
+    changed_script = script;
+    changed_script.phases[2].storm = 65534;
+    ASSERT_TRUE(changed.SetWeatherSchedule(changed_script));
+    EXPECT_NE(changed.SystemConfigIdentity(), scheduled);
+    changed_script.phases.clear();
+    EXPECT_EQ(changed.GetWeatherSchedule()->phases.size(), script.phases.size());
+    for (const auto& candidate : refused) {
+        EXPECT_FALSE(candidate.valid());
+        EXPECT_TRUE(candidate.canonical_bytes().empty());
+        EXPECT_FALSE(session.SetWeatherSchedule(candidate));
+        EXPECT_EQ(session.SystemConfigIdentity(), scheduled);
+    }
+    WeatherScript maximal;
+    for (std::uint64_t i = 0; i < WeatherScript::kMaxPhases; ++i) {
+        maximal.phases.push_back({i, WeatherKind::Clear, 0, 0});
+    }
+    maximal.phases.back().start_tick = WeatherScript::kMaxSpanTicks;
+    maximal.strike_tick = WeatherScript::kMaxSpanTicks;
+    ASSERT_TRUE(maximal.valid());
+    EXPECT_EQ(maximal.canonical_bytes().size(), WeatherScript::kMaxEncodedBytes);
+    ASSERT_TRUE(WeatherScript::Decode(maximal.canonical_bytes(), decoded));
+    EXPECT_EQ(decoded, maximal);
+}
+
+TEST(WeatherScheduleTest, InstallationSamplesBothBackendsAndLocksEveryUpdateEntry) {
+    const auto script = ShortWeatherScript();
+    EXPECT_FLOAT_EQ(script.Sample(3).precip_intensity, 21845.0f / 65535.0f);
+    EXPECT_EQ(script.Sample(5).category, WeatherKind::Rain);
+    EXPECT_EQ(script.Sample(12).precip_intensity, 0.0f);
+    for (const std::uint64_t sample_tick : {0u, 5u}) {
+        for (const bool regional : {false, true}) {
+            for (int entry = 0; entry < 8; ++entry) {
+                SCOPED_TRACE(testing::Message() << regional << '/' << entry);
+                Systems::WeatherSystem weather(1337), ordinary(1337);
+                Systems::WindFieldSystem wind(1337);
+                if (regional) {
+                    for (auto* system : {&weather, &ordinary}) {
+                        system->BindRegionalBackend(
+                            [](const Vec3&) { return Systems::WeatherSample{}; },
+                            [] { return std::string("regional-weather"); });
+                    }
+                }
+                const auto ordinary_hash = ordinary.ComputeWeatherSubHash();
+                auto invalid = script;
+                invalid.phases.clear();
+                EXPECT_FALSE(weather.SetSchedule(invalid));
+                ASSERT_TRUE(weather.SetSchedule(script));
+                const auto installed_hash = weather.ComputeWeatherSubHash();
+                EXPECT_FALSE(weather.SetSchedule(invalid));
+                EXPECT_EQ(weather.ComputeWeatherSubHash(), installed_hash);
+                EXPECT_NE(weather.ComputeWeatherSubHash(), ordinary_hash);
+                switch (entry) {
+                    case 0:
+                        weather.Update(sample_tick, Vec3(0.0f), &wind);
+                        break;
+                    case 1:
+                        weather.UpdateFromClock(sample_tick, Vec3(0.0f), wind);
+                        break;
+                    case 2:
+                        weather.RestoreAtTick(sample_tick, Vec3(0.0f), wind);
+                        break;
+                    case 3:
+                        weather.RefreshRegionalWeather(sample_tick, Vec3(0.0f));
+                        break;
+                    case 4:
+                        weather.RefreshRegionalWeather(sample_tick, Vec3(0.0f), {});
+                        break;
+                    case 5:
+                    case 6:
+                        weather.AdoptRegionalWeather(
+                            sample_tick, Vec3(0.0f), {}, {}, regional, entry == 6);
+                        break;
+                    case 7:
+                        weather.Update(sample_tick, Vec3(0.0f), nullptr);
+                        break;
+                    default:
+                        FAIL() << "uncovered entry point";
+                }
+                const auto expected = script.Sample(sample_tick);
+                EXPECT_EQ(weather.CategoryAt(Vec3(1.0f)), expected.category);
+                EXPECT_EQ(weather.PrecipitationAt(Vec3(1.0f)), expected.precip_intensity);
+                EXPECT_EQ(weather.SampleAt(Vec3(1.0f)).storm_intensity, expected.storm_intensity);
+                const auto hash = weather.ComputeWeatherSubHash();
+                EXPECT_FALSE(weather.SetSchedule(script));
+                EXPECT_EQ(weather.ComputeWeatherSubHash(), hash);
+                // The declared tick constructs its single simulation event directly.
+                weather.Update(7, Vec3(0.0f), nullptr);
+                ASSERT_EQ(weather.StrikesThisTick().size(), 1u);
+                EXPECT_EQ(weather.live_strike_count(), 1);
+                weather.Update(8, Vec3(0.0f), nullptr);
+                EXPECT_TRUE(weather.StrikesThisTick().empty());
+                EXPECT_EQ(ordinary.ComputeWeatherSubHash(), ordinary_hash);
+            }
+        }
+    }
+}
+
+TEST_F(WorldOpenRefusal, RemovedScheduleCannotReturnAfterSavingLegacySnapshot) {
+    const auto legacy_bytes = Read(save / "world_info.json");
+    ASSERT_FALSE(nlohmann::json::parse(legacy_bytes).contains("renderCalendar"));
+    for (const bool prepared : {false, true}) {
+        for (const bool full_metadata : {false, true}) {
+            SCOPED_TRACE(testing::Message() << prepared << '/' << full_metadata);
+            GameSession scheduled, reopened;
+            for (auto* session : {&scheduled, &reopened}) {
+                session->SetRootPath(RootString());
+                session->SetJobSystem(&jobs);
+                session->SetActiveRegionsEnabled(false);
+            }
+            ASSERT_TRUE(scheduled.SetWeatherSchedule(ShortWeatherScript()));
+            ASSERT_TRUE(scheduled.CreateWorld("Schedule removal", "1337", "default"));
+            ASSERT_TRUE(scheduled.SaveWorld());
+            const auto destination = scheduled.GetWorldSaveDir();
+            const auto initial = nlohmann::json::parse(Read(destination / "world_info.json"));
+            ASSERT_EQ(initial.at("container_version"), P::kScheduledWeatherMetadataVersion);
+            ASSERT_TRUE(initial.contains("weatherScheduleTick"));
+            if (prepared) {
+                const auto state = GameSession::PrepareWorldState(
+                    scheduled.CaptureWorldPreparationOptions(), save);
+                ASSERT_TRUE(scheduled.AdoptPreparedWorld(state)) << scheduled.GetWorldOpenError();
+            } else {
+                ASSERT_TRUE(scheduled.LoadWorldStateFrom(save)) << scheduled.GetWorldOpenError();
+            }
+            ASSERT_EQ(scheduled.GetWeatherSchedule(), nullptr);
+            ASSERT_TRUE(full_metadata ? scheduled.SaveWorld() : scheduled.SaveWorldState());
+            const auto metadata = nlohmann::json::parse(Read(destination / "world_info.json"));
+            EXPECT_FALSE(metadata.contains("weatherSchedule"));
+            EXPECT_FALSE(metadata.contains("weatherScheduleTick"));
+            EXPECT_FALSE(metadata.contains("weatherScheduleAnchor"));
+            EXPECT_EQ(metadata.at("container_version"),
+                      metadata.contains("snapshotFormat")
+                          ? WorldSaveService::kIndexedMetadataVersion
+                          : WorldSaveService::kContainerVersion);
+            ASSERT_TRUE(reopened.LoadWorld(scheduled.GetMetadata().worldId))
+                << reopened.GetWorldOpenError();
+            EXPECT_EQ(reopened.GetWeatherSchedule(), nullptr);
+            EXPECT_EQ(Read(save / "world_info.json"), legacy_bytes);
+        }
+    }
+}
+
+TEST_F(WorldOpenRefusal, RemovedScheduleRestoresLegacyAmbientHashesRegardlessOfHistory) {
+    GameSession legacy;
+    legacy.SetRootPath(RootString());
+    legacy.SetJobSystem(&jobs);
+    legacy.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(legacy.LoadWorld("fixture")) << legacy.GetWorldOpenError();
+    const auto expected = TestSupport::SessionWorldSubHashes(legacy);
+    const auto expected_world = TestSupport::SessionWorldHash(legacy);
+    const auto expected_wind = legacy.GetWindFieldSystem()->ComputeWindSubHash();
+    const auto expected_aether = legacy.GetAetherFieldSystem()->ComputeAetherSubHash();
+    for (const bool prepared : {false, true}) {
+        for (const int prior_ticks : {0, 11}) {
+            SCOPED_TRACE(testing::Message() << prepared << '/' << prior_ticks);
+            GameSession target;
+            target.SetRootPath(RootString());
+            target.SetJobSystem(&jobs);
+            target.SetActiveRegionsEnabled(false);
+            ASSERT_TRUE(target.SetWeatherSchedule(ShortWeatherScript()));
+            ASSERT_TRUE(target.CreateTransientWorld("Ambient reset", "1337", "default"));
+            for (int tick = 0; tick < prior_ticks; ++tick) {
+                ASSERT_EQ(target.TickSimulation(target.GetSimulationClock().fixed_dt()), 1u);
+            }
+            if (prior_ticks != 0) {
+                EXPECT_NE(target.GetWindFieldSystem()->ComputeWindSubHash(), expected_wind);
+                EXPECT_NE(target.GetAetherFieldSystem()->ComputeAetherSubHash(), expected_aether);
+            }
+            if (prepared) {
+                const auto state =
+                    GameSession::PrepareWorldState(target.CaptureWorldPreparationOptions(), save);
+                ASSERT_TRUE(target.AdoptPreparedWorld(state)) << target.GetWorldOpenError();
+            } else {
+                ASSERT_TRUE(target.LoadWorldStateFrom(save)) << target.GetWorldOpenError();
+            }
+            ASSERT_EQ(target.GetWeatherSchedule(), nullptr);
+            EXPECT_EQ(target.GetSimulationClock().tick_count(), 0u);
+            const auto actual = TestSupport::SessionWorldSubHashes(target);
+            EXPECT_EQ(actual.at("weather"), expected.at("weather"));
+            EXPECT_EQ(actual.at("wind"), expected.at("wind"));
+            EXPECT_EQ(actual.at("aether"), expected.at("aether"));
+            EXPECT_EQ(target.GetAetherFieldSystem()->ComputeAetherSubHash(), expected_aether);
+            EXPECT_EQ(TestSupport::SessionWorldHash(target), expected_world);
+        }
+    }
+}
+
+TEST_F(WorldOpenRefusal, ClockAmbientAnchorsRefuseOutOfDomainCoordinatesBeforeAdoption) {
+    const auto input = root / "ambient-input";
+    nlohmann::json metadata = {{"container_version", WorldSaveService::kContainerVersion},
+                               {"seed", "1337"}};
+    world::WorldClock(4).write_metadata(metadata);
+    GameSession live;
+    live.SetRootPath(RootString());
+    live.SetJobSystem(&jobs);
+    live.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(live.SetWeatherSchedule(ShortWeatherScript()));
+    ASSERT_TRUE(live.CreateTransientWorld("Anchor refusal", "1337", "default"));
+    live.SetReplicatedSimulationAnchors({});
+    ASSERT_EQ(live.TickSimulation(live.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_FALSE(live.GetFieldPages().has_ambient());
+    const auto before = TestSupport::SessionWorldSubHashes(live);
+    const auto before_world = TestSupport::SessionWorldHash(live);
+    for (const char* key : {"spawnPoint", "ambientFieldAnchor"}) {
+        for (const char* axis : {"x", "z"}) {
+            // The simulation domain includes -2^24 and the last float below +2^24.
+            for (const float coordinate : {-16777216.0f, 0.0f, 16777215.0f}) {
+                SCOPED_TRACE(testing::Message() << key << '/' << axis << '/' << coordinate);
+                auto valid = metadata;
+                valid[key] = {{"x", 0.0f}, {"y", 0.0f}, {"z", 0.0f}};
+                valid[key][axis] = coordinate;
+                Write(input / "world_info.json", valid.dump());
+                ASSERT_TRUE(WorldSaveService::validate_save(input));
+                world::WorldClock clock;
+                bool required = false;
+                std::optional<Vec3> anchor;
+                ASSERT_TRUE(WorldSaveService::read_clock_metadata(
+                    input, clock, required, nullptr, &anchor));
+                ASSERT_TRUE(anchor.has_value());
+                EXPECT_EQ(axis[0] == 'x' ? anchor->x : anchor->z, coordinate);
+                EXPECT_TRUE(required);
+                EXPECT_EQ(clock.tick(), 4u);
+            }
+            const auto valid_bytes = Read(input / "world_info.json");
+            for (const double coordinate :
+                 {-1e30, 1e30, -16777218.0, -16777217.0, 16777215.9, 16777216.0, 16777217.0}) {
+                SCOPED_TRACE(testing::Message() << key << '/' << axis << '/' << coordinate);
+                auto invalid = metadata;
+                invalid[key] = {{"x", 0.0f}, {"y", 0.0f}, {"z", 0.0f}};
+                invalid[key][axis] = coordinate;
+                // Writers must refuse without changing the installed metadata.
+                EXPECT_FALSE(WorldSaveService::save_metadata(invalid.dump(), input));
+                EXPECT_EQ(Read(input / "world_info.json"), valid_bytes);
+                Write(input / "world_info.json", invalid.dump());
+                const auto disk = DiskBytes(input);
+                EXPECT_FALSE(WorldSaveService::validate_save(input));
+                world::WorldClock clock;
+                bool required = false;
+                std::optional<Vec3> anchor;
+                EXPECT_FALSE(WorldSaveService::read_clock_metadata(
+                    input, clock, required, nullptr, &anchor));
+                EXPECT_FALSE(anchor.has_value());
+                const auto state =
+                    GameSession::PrepareWorldState(live.CaptureWorldPreparationOptions(), input);
+                EXPECT_FALSE(live.AdoptPreparedWorld(state));
+                EXPECT_FALSE(live.LoadWorldStateFrom(input));
+                const auto after = TestSupport::SessionWorldSubHashes(live);
+                EXPECT_EQ(after.at("weather"), before.at("weather"));
+                EXPECT_EQ(after.at("wind"), before.at("wind"));
+                EXPECT_EQ(after.at("aether"), before.at("aether"));
+                EXPECT_EQ(TestSupport::SessionWorldHash(live), before_world);
+                EXPECT_EQ(live.GetSimulationClock().tick_count(), 1u);
+                EXPECT_EQ(DiskBytes(input), disk);
+                Write(input / "world_info.json", valid_bytes);
+            }
+        }
+    }
+}
+
+TEST_F(WorldOpenRefusal, ScheduledCalendarRequiresNonzeroSimulationClockAtAdmission) {
+    auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    world::WorldClock(4).write_metadata(metadata);
+    metadata["container_version"] = P::kScheduledWeatherMetadataVersion;
+    metadata["weatherSchedule"] = ShortWeatherScript().canonical_bytes();
+    metadata["weatherScheduleTick"] = 4;
+    metadata["weatherScheduleAnchor"] = {0.0f, 0.0f, 0.0f};
+    ASSERT_TRUE(WorldSaveService::admit_metadata_bytes(metadata.dump()));
+    metadata.erase("simulationTick");
+    ASSERT_TRUE(metadata.contains("calendar"));
+    Write(save / "world_info.json", metadata.dump());
+    const auto disk = DiskBytes(root);
+    auto retained = std::make_shared<const WeatherScript>(ShortWeatherScript());
+    const auto original = retained;
+    std::uint64_t tick = 99;
+    EXPECT_FALSE(P::ReadWeatherSchedule(save, retained, tick));
+    EXPECT_EQ(retained, original);
+    EXPECT_EQ(tick, 99u);
+    EXPECT_FALSE(WorldSaveService::admit_metadata_bytes(metadata.dump()));
+    EXPECT_FALSE(WorldSaveService::save_metadata(metadata.dump(), root / "refused-clock"));
+    for (const auto mode : {P::SavedWorldValidation::Catalog,
+                            P::SavedWorldValidation::Complete,
+                            P::SavedWorldValidation::DeferredToPreparation}) {
+        const auto inspected = P::InspectSavedWorld(root, root, "fixture", {}, mode);
+        EXPECT_NE(inspected.error.find("invalid weather schedule"), std::string::npos);
+    }
+    EXPECT_EQ(DiskBytes(root), disk);
+    // Tick zero is unambiguous even if the legacy regional clock is implicit.
+    metadata["weatherScheduleTick"] = 0;
+    EXPECT_TRUE(WorldSaveService::admit_metadata_bytes(metadata.dump()));
+}
+
+TEST_F(WorldOpenRefusal, ScheduleAdmissionIsAtomicAcrossReadersAndWriters) {
+    const auto script = ShortWeatherScript();
+    const nlohmann::json valid = {{"container_version", P::kScheduledWeatherMetadataVersion},
+                                  {"weatherSchedule", script.canonical_bytes()},
+                                  {"weatherScheduleTick", 4},
+                                  {"weatherScheduleAnchor", {0.0f, 0.0f, 0.0f}}};
+    const auto input = root / "schedule-input";
+    fs::create_directory(input);
+    auto retained = std::make_shared<const WeatherScript>(script);
+    std::uint64_t tick = 99;
+    Vec3 anchor(99.0f);
+    ASSERT_TRUE(P::ReadWeatherSchedule(input, retained, tick, nullptr, {}, &anchor));
+    EXPECT_EQ(anchor, Vec3(0.0f));
+    EXPECT_EQ(retained, nullptr);
+    EXPECT_EQ(tick, 0u);
+    Write(input / "world_info.json", valid.dump());
+    ASSERT_TRUE(P::ReadWeatherSchedule(input, retained, tick));
+    ASSERT_NE(retained, nullptr);
+    EXPECT_EQ(*retained, script);
+    EXPECT_EQ(tick, 4u);
+    auto extreme = valid;
+    extreme["weatherScheduleAnchor"] = {-16777216.0f, -0.0f, 16777215.0f};
+    Write(input / "world_info.json", extreme.dump());
+    ASSERT_TRUE(P::ReadWeatherSchedule(input, retained, tick, nullptr, {}, &anchor));
+    EXPECT_EQ(anchor.x, -16777216.0f);
+    EXPECT_TRUE(std::signbit(anchor.y));
+    EXPECT_EQ(anchor.z, 16777215.0f);
+    for (const float height :
+         {-std::numeric_limits<float>::max(), std::numeric_limits<float>::max()}) {
+        extreme["weatherScheduleAnchor"] = {0.0f, height, 0.0f};
+        Write(input / "world_info.json", extreme.dump());
+        ASSERT_TRUE(P::ReadWeatherSchedule(input, retained, tick, nullptr, {}, &anchor));
+        EXPECT_EQ(anchor, Vec3(0.0f, height, 0.0f));
+    }
+    std::vector<nlohmann::json> cases;
+    for (const auto version : {1, 2, 3, P::kScheduledWeatherMetadataVersion + 1}) {
+        auto bad = valid;
+        bad["container_version"] = version;
+        cases.push_back(bad);
+    }
+    for (const auto& version :
+         {nlohmann::json(4.0), nlohmann::json("4"), nlohmann::json(nullptr)}) {
+        auto bad = valid;
+        bad["container_version"] = version;
+        cases.push_back(bad);
+    }
+    for (const auto* field :
+         {"weatherSchedule", "weatherScheduleTick", "weatherScheduleAnchor", "container_version"}) {
+        auto bad = valid;
+        bad.erase(field);
+        cases.push_back(bad);
+    }
+    for (const auto& encoding :
+         {nlohmann::json("WSC2"),
+          nlohmann::json("WSC1"),
+          nlohmann::json(0),
+          nlohmann::json(""),
+          nlohmann::json(std::string(WeatherScript::kMaxEncodedBytes + 1, '0'))}) {
+        auto bad = valid;
+        bad["weatherSchedule"] = encoding;
+        cases.push_back(bad);
+    }
+    for (const auto& bad_tick : {nlohmann::json(-1),
+                                 nlohmann::json(1.0),
+                                 nlohmann::json(1e38),
+                                 nlohmann::json(world::WorldClock::kTickLimit)}) {
+        auto bad = valid;
+        bad["weatherScheduleTick"] = bad_tick;
+        cases.push_back(bad);
+    }
+    for (const auto& bad_anchor : {nlohmann::json(nullptr),
+                                   nlohmann::json(0),
+                                   nlohmann::json("0,0,0"),
+                                   nlohmann::json::array(),
+                                   nlohmann::json::array({0, 0}),
+                                   nlohmann::json::array({0, 0, 0, 0}),
+                                   nlohmann::json::object({{"x", 0}, {"y", 0}, {"z", 0}})}) {
+        auto bad = valid;
+        bad["weatherScheduleAnchor"] = bad_anchor;
+        cases.push_back(bad);
+    }
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        for (const auto& coordinate : {nlohmann::json(nullptr),
+                                       nlohmann::json(true),
+                                       nlohmann::json("0"),
+                                       nlohmann::json(1e38 * 10),
+                                       nlohmann::json(-1e38 * 10)}) {
+            auto bad = valid;
+            bad["weatherScheduleAnchor"][axis] = coordinate;
+            cases.push_back(bad);
+        }
+    }
+    // Float-representable horizontal values must also stay inside the simulation domain.
+    for (const std::size_t axis : {0u, 2u}) {
+        for (const double coordinate :
+             {-1e38, -16777218.0, -16777217.0, 16777215.9, 16777216.0, 1e38}) {
+            auto bad = valid;
+            bad["weatherScheduleAnchor"][axis] = coordinate;
+            cases.push_back(bad);
+        }
+    }
+    for (const auto version : {2, 3}) {
+        auto bad = valid;
+        bad["container_version"] = version;
+        bad.erase("weatherSchedule");
+        bad.erase("weatherScheduleTick");
+        cases.push_back(bad);
+    }
+    auto mismatch = valid;
+    mismatch["simulationTick"] = 3;
+    cases.push_back(mismatch);
+    auto invalid_calendar = valid;
+    invalid_calendar["calendar"] = {{"dayLengthTicks", 0}};
+    cases.push_back(invalid_calendar);
+    auto absent = valid;
+    absent.erase("weatherSchedule");
+    absent.erase("weatherScheduleTick");
+    cases.push_back(absent);
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(session.SetWeatherSchedule(script));
+    ASSERT_TRUE(session.CreateTransientWorld("Live schedule", "1337", "default"));
+    auto* const world = session.GetWorldSystem();
+    const auto revision = session.WorldRevision();
+    const auto identity = session.SystemConfigIdentity();
+    const auto hash = session.GetWeatherSystem()->ComputeWeatherSubHash();
+    for (const auto& metadata : cases) {
+        SCOPED_TRACE(metadata.dump());
+        Write(input / "world_info.json", metadata.dump());
+        const auto disk = DiskBytes(root);
+        const auto original = retained;
+        anchor = Vec3(99.0f);
+        EXPECT_FALSE(P::ReadWeatherSchedule(input, retained, tick, nullptr, {}, &anchor));
+        EXPECT_EQ(anchor, Vec3(99.0f));
+        EXPECT_EQ(retained, original);
+        EXPECT_EQ(tick, 4u);
+        EXPECT_FALSE(WorldSaveService::save_metadata(metadata.dump(), root / "refused-schedule"));
+        EXPECT_FALSE(session.LoadWorldStateFrom(input));
+        const auto prepared =
+            GameSession::PrepareWorldState(session.CaptureWorldPreparationOptions(), input);
+        EXPECT_FALSE(session.AdoptPreparedWorld(prepared));
+        EXPECT_EQ(session.GetWorldSystem(), world);
+        EXPECT_EQ(session.WorldRevision(), revision);
+        EXPECT_EQ(session.SystemConfigIdentity(), identity);
+        EXPECT_EQ(session.GetWeatherSystem()->ComputeWeatherSubHash(), hash);
+        EXPECT_EQ(DiskBytes(root), disk);
+    }
+    for (const auto& bytes :
+         {std::string("{"), std::string(P::SavedInputLimits::kMetadataBytes + 1, ' ')}) {
+        Write(input / "world_info.json", bytes);
+        const auto original = retained;
+        anchor = Vec3(99.0f);
+        EXPECT_FALSE(P::ReadWeatherSchedule(input, retained, tick, nullptr, {}, &anchor));
+        EXPECT_EQ(anchor, Vec3(99.0f));
+        EXPECT_EQ(retained, original);
+        EXPECT_EQ(tick, 4u);
+        EXPECT_FALSE(session.LoadWorldStateFrom(input));
+        EXPECT_EQ(session.WorldRevision(), revision);
+    }
+    fs::remove(input / "world_info.json");
+    fs::create_directory(input / "world_info.json");
+    const auto original = retained;
+    anchor = Vec3(99.0f);
+    EXPECT_FALSE(P::ReadWeatherSchedule(input, retained, tick, nullptr, {}, &anchor));
+    EXPECT_EQ(anchor, Vec3(99.0f));
+    EXPECT_EQ(retained, original);
+    EXPECT_EQ(tick, 4u);
+    fs::remove(input / "world_info.json");
+    Write(input / "world_info.json", valid.dump());
+    std::stop_source cancellation;
+    cancellation.request_stop();
+    anchor = Vec3(99.0f);
+    EXPECT_FALSE(
+        P::ReadWeatherSchedule(input, retained, tick, nullptr, cancellation.get_token(), &anchor));
+    EXPECT_EQ(anchor, Vec3(99.0f));
+    EXPECT_EQ(retained, original);
+    EXPECT_EQ(tick, 4u);
+    const auto cancelled = GameSession::PrepareWorldState(
+        session.CaptureWorldPreparationOptions(), input, cancellation.get_token());
+    EXPECT_FALSE(session.AdoptPreparedWorld(cancelled));
+    EXPECT_EQ(session.WorldRevision(), revision);
+}
+
+TEST_F(WorldOpenRefusal, SessionWeatherRefusesScheduleInstallationAfterEverySetupPath) {
+    const auto script = ShortWeatherScript();
+    Luminumbra::Systems::WeatherSystem standalone(1337);
+    ASSERT_TRUE(standalone.SetSchedule(script));
+    const auto expect_sealed = [&](GameSession& session) {
+        const auto* const schedule = session.GetWeatherSchedule();
+        const auto identity = session.SystemConfigIdentity();
+        const auto hash = session.GetWeatherSystem()->ComputeWeatherSubHash();
+        const auto precipitation = session.GetWeatherSystem()->PrecipitationAt(Vec3(0.0f));
+        EXPECT_FALSE(session.GetWeatherSystem()->SetSchedule(script));
+        EXPECT_EQ(session.GetWeatherSchedule(), schedule);
+        EXPECT_EQ(session.SystemConfigIdentity(), identity);
+        EXPECT_EQ(session.GetWeatherSystem()->ComputeWeatherSubHash(), hash);
+        EXPECT_EQ(session.GetWeatherSystem()->PrecipitationAt(Vec3(0.0f)), precipitation);
+    };
+    const auto configure = [&](GameSession& session) {
+        session.SetRootPath(RootString());
+        session.SetJobSystem(&jobs);
+        session.SetActiveRegionsEnabled(false);
+    };
+    GameSession unscheduled, scheduled, reopened;
+    for (auto* session : {&unscheduled, &scheduled, &reopened}) {
+        configure(*session);
+    }
+    ASSERT_TRUE(unscheduled.CreateTransientWorld("Unscheduled", "1337", "default"));
+    {
+        SCOPED_TRACE("unscheduled create");
+        expect_sealed(unscheduled);
+    }
+    ASSERT_TRUE(scheduled.SetWeatherSchedule(script));
+    ASSERT_TRUE(scheduled.CreateWorld("Sealed schedule", "1337", "default"));
+    {
+        SCOPED_TRACE("scheduled create");
+        expect_sealed(scheduled);
+    }
+    ASSERT_TRUE(scheduled.SaveWorld());
+    ASSERT_TRUE(reopened.LoadWorld(scheduled.GetMetadata().worldId))
+        << reopened.GetWorldOpenError();
+    {
+        SCOPED_TRACE("load");
+        expect_sealed(reopened);
+    }
+    for (const bool prepared : {false, true}) {
+        SCOPED_TRACE(prepared ? "adopt prepared" : "load state");
+        GameSession target;
+        configure(target);
+        ASSERT_TRUE(target.CreateTransientWorld("Sealed adoption", "1337", "default"));
+        if (prepared) {
+            const auto state = GameSession::PrepareWorldState(
+                target.CaptureWorldPreparationOptions(), scheduled.GetWorldSaveDir());
+            ASSERT_TRUE(target.AdoptPreparedWorld(state)) << target.GetWorldOpenError();
+        } else {
+            ASSERT_TRUE(target.LoadWorldStateFrom(scheduled.GetWorldSaveDir()))
+                << target.GetWorldOpenError();
+        }
+        expect_sealed(target);
+    }
+}
+
+TEST(WeatherScheduleTest, ScheduledUpdatesNeverExposeProceduralStormsOrPerturbWind) {
+    const auto script = ShortWeatherScript();
+    const Vec3 anchor(96.0f, 18.0f, -192.0f);
+    const Systems::StormCell storm{.center_world = Vec2(anchor.x, anchor.z),
+                                   .velocity = Vec2(25.0f),
+                                   .intensity = 1.0f,
+                                   .spawn_tick = 0,
+                                   .lifetime_ticks = 240,
+                                   .seed_salt = 1};
+    for (const bool regional : {false, true}) {
+        for (const bool keyed : {false, true}) {
+            SCOPED_TRACE(testing::Message() << regional << '/' << keyed);
+            Systems::WeatherSystem weather(1337);
+            Systems::WindFieldSystem wind(1337), reference_wind(1337);
+            if (regional) {
+                weather.BindRegionalBackend([](const Vec3&) { return Systems::WeatherSample{}; },
+                                            [] { return std::string("regional-weather"); });
+            }
+            ASSERT_TRUE(weather.SetSchedule(script));
+            EXPECT_TRUE(weather.StormCells().empty());
+            // Regional projection and compatibility adoption must not leak procedural cells.
+            weather.AdoptRegionalWeather(5, anchor, {storm}, {}, keyed);
+            weather.PutRegionalStorm(storm);
+            EXPECT_TRUE(weather.StormCells().empty());
+            EXPECT_EQ(weather.active_storm_count(), 0);
+            EXPECT_EQ(weather.storm_candidates_at(anchor), 0u);
+            wind.InjectStormPerturbation({Vec2(anchor.x, anchor.z), 96.0f, Vec2(25.0f), 1.0f});
+            weather.UpdateFromClock(6, anchor, wind);
+            reference_wind.Update(6, anchor);
+            EXPECT_EQ(wind.ComputeWindSubHash(), reference_wind.ComputeWindSubHash());
+            weather.Update(7, anchor, &wind);
+            EXPECT_TRUE(weather.StormCells().empty());
+            weather.RestoreAtTick(8, anchor, wind);
+            EXPECT_TRUE(weather.StormCells().empty());
+            reference_wind.Update(8, anchor);
+            EXPECT_EQ(wind.ComputeWindSubHash(), reference_wind.ComputeWindSubHash());
+        }
+    }
+}
+
+TEST(WeatherScheduleTest, RestoresAndCopiesKeepStrikeDeliveryAndPresentationSeparate) {
+    for (const bool regional : {false, true}) {
+        for (const bool adopted : {false, true}) {
+            for (const bool has_strike : {false, true}) {
+                for (const std::uint64_t restore_tick : {6u, 7u, 8u, 9u, 10u}) {
+                    SCOPED_TRACE(testing::Message() << regional << '/' << adopted << '/'
+                                                    << has_strike << '/' << restore_tick);
+                    auto script = ShortWeatherScript();
+                    if (!has_strike) {
+                        script.strike_tick.reset();
+                    }
+                    Systems::WeatherSystem weather(1337);
+                    Systems::WindFieldSystem wind(1337);
+                    if (regional) {
+                        weather.BindRegionalBackend(
+                            [](const Vec3&) { return Systems::WeatherSample{}; },
+                            [] { return std::string("regional-weather"); });
+                    }
+                    ASSERT_TRUE(weather.SetSchedule(script));
+                    weather.Update(7, Vec3(0.0f), &wind);
+                    const auto hash_at_strike = weather.ComputeWeatherSubHash();
+                    if (adopted) {
+                        weather.AdoptRegionalWeather(
+                            restore_tick, Vec3(0.0f), {}, {}, regional, true);
+                    } else {
+                        weather.RestoreAtTick(restore_tick, Vec3(0.0f), wind);
+                    }
+                    EXPECT_TRUE(weather.StrikesThisTick().empty());
+                    EXPECT_TRUE(weather.StrikeSchedule().empty());
+                    EXPECT_EQ(weather.live_strike_count(), 0);
+                    if (restore_tick == 7) {
+                        EXPECT_EQ(weather.ComputeWeatherSubHash(), hash_at_strike);
+                    }
+                    auto copied = weather;
+                    auto moved = std::move(copied);
+                    Systems::WeatherSystem assigned(1337), move_assigned(1337);
+                    assigned = weather;
+                    move_assigned = std::move(assigned);
+                    for (auto* system : {&weather, &moved, &move_assigned}) {
+                        // Repeated access/update at the restored tick cannot redeliver.
+                        system->Update(restore_tick, Vec3(0.0f), &wind);
+                        EXPECT_TRUE(system->StrikesThisTick().empty());
+                        EXPECT_TRUE(system->StrikeSchedule().empty());
+                        if (restore_tick == 6) {
+                            system->Update(7, Vec3(0.0f), &wind);
+                            EXPECT_EQ(system->StrikesThisTick().size(), has_strike ? 1u : 0u);
+                            auto presented = *system;
+                            auto moved_presentation = std::move(presented);
+                            assigned = *system;
+                            move_assigned = std::move(assigned);
+                            EXPECT_EQ(moved_presentation.StrikeSchedule().size(),
+                                      has_strike ? 1u : 0u);
+                            EXPECT_EQ(move_assigned.StrikeSchedule().size(), has_strike ? 1u : 0u);
+                        }
+                        system->Update(8, Vec3(0.0f), &wind);
+                        EXPECT_TRUE(system->StrikesThisTick().empty());
+                        EXPECT_EQ(system->StrikeSchedule().size(),
+                                  restore_tick == 6 && has_strike ? 1u : 0u);
+                        system->Update(10, Vec3(0.0f), &wind);
+                        EXPECT_TRUE(system->StrikeSchedule().empty());
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_F(WorldOpenRefusal, ScheduleClockWithoutCalendarDoesNotRewindAnExistingLedger) {
+    const auto input = root / "schedule-ledger";
+    const auto script = ShortWeatherScript();
+    const nlohmann::json metadata = {{"container_version", P::kScheduledWeatherMetadataVersion},
+                                     {"weatherSchedule", script.canonical_bytes()},
+                                     {"weatherScheduleTick", 4},
+                                     {"weatherScheduleAnchor", {0.0f, 0.0f, 0.0f}}};
+    Write(input / "world_info.json", metadata.dump());
+    Write(WorldSaveService::active_regions_path(input), world::ActiveRegionLedger{}.encode());
+    for (const bool prepared : {false, true}) {
+        GameSession target;
+        target.SetRootPath(RootString());
+        target.SetJobSystem(&jobs);
+        target.SetActiveRegionsEnabled(true);
+        ASSERT_TRUE(target.CreateTransientWorld("Schedule clock", "1337", "default"));
+        if (prepared) {
+            const auto state =
+                GameSession::PrepareWorldState(target.CaptureWorldPreparationOptions(), input);
+            ASSERT_TRUE(target.AdoptPreparedWorld(state)) << target.GetWorldOpenError();
+        } else {
+            ASSERT_TRUE(target.LoadWorldStateFrom(input)) << target.GetWorldOpenError();
+        }
+        EXPECT_EQ(target.GetSimulationTickCount(), 4u);
+        EXPECT_EQ(target.GetWeatherSystem()->PrecipitationAt(Vec3(0.0f)),
+                  script.Sample(4).precip_intensity);
+    }
+}
+
+void ExpectScriptWeather(const Systems::WeatherSystem& weather,
+                         const WeatherScript& script,
+                         std::uint64_t tick,
+                         bool restored = false) {
+    const auto expected = script.Sample(tick);
+    EXPECT_EQ(weather.SampleAt(Vec3(0.0f)).category, expected.category);
+    EXPECT_EQ(weather.SampleAt(Vec3(0.0f)).precip_intensity, expected.precip_intensity);
+    EXPECT_EQ(weather.SampleAt(Vec3(0.0f)).storm_intensity, expected.storm_intensity);
+    const bool due = script.strike_tick && tick == *script.strike_tick;
+    EXPECT_EQ(weather.StrikesThisTick().size(), due && !restored ? 1u : 0u);
+    EXPECT_EQ(weather.StrikeSchedule().size(), due && !restored ? 1u : 0u);
+    EXPECT_EQ(weather.live_strike_count(), due && !restored ? 1 : 0);
+}
+
+void ExpectRestoredStrike(const GameSession& target,
+                          const WeatherScript& script,
+                          const std::string& hash,
+                          const std::string& wind_hash,
+                          const std::string& aether_hash,
+                          const Vec3& anchor,
+                          const Systems::StrikeEvent& strike) {
+    const auto* restored = target.GetWeatherSystem();
+    ASSERT_NE(restored, nullptr);
+    ASSERT_NO_FATAL_FAILURE(ExpectScriptWeather(*restored, script, 7, true));
+    EXPECT_EQ(restored->ScheduleAnchor(), anchor);
+    EXPECT_EQ(restored->ComputeWeatherSubHash(), hash);
+    ASSERT_NE(target.GetWindFieldSystem(), nullptr);
+    ASSERT_NE(target.GetAetherFieldSystem(), nullptr);
+    EXPECT_EQ(target.GetWindFieldSystem()->last_tick(), 7u);
+    EXPECT_EQ(target.GetAetherFieldSystem()->last_tick(), 7u);
+    EXPECT_EQ(target.GetWindFieldSystem()->ComputeWindSubHash(), wind_hash);
+    EXPECT_EQ(target.GetAetherFieldSystem()->ComputeAetherSubHash(), aether_hash);
+    // Rewinding to before delivery must reproduce the original coordinates.
+    auto replay = *restored;
+    Systems::WindFieldSystem wind(1337);
+    replay.RestoreAtTick(6, anchor, wind);
+    replay.Update(7, anchor, &wind);
+    const auto rebuilt = replay.StrikesThisTick();
+    ASSERT_EQ(rebuilt.size(), 1u);
+    EXPECT_EQ(rebuilt.front().world_x, strike.world_x);
+    EXPECT_EQ(rebuilt.front().world_z, strike.world_z);
+    EXPECT_EQ(rebuilt.front().storm_salt, strike.storm_salt);
+}
+
+void ExpectCompletedPresentationSuppressed(GameSession& target) {
+    const auto* restored = target.GetWeatherSystem();
+    ASSERT_NE(restored, nullptr);
+    // Completed presentation remains suppressed through the grace window.
+    target.SetReplicatedSimulationAnchors({});
+    for (int index = 0; index < 3; ++index) {
+        ASSERT_EQ(target.TickSimulation(target.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_FALSE(target.GetRegionSchedulerFault());
+        EXPECT_TRUE(restored->StrikeSchedule().empty());
+        EXPECT_TRUE(restored->StrikesThisTick().empty());
+    }
+}
+
+void ExpectScheduledCatchUp(GameSession& target, const fs::path& before_strike, int backend) {
+    if (backend == 1) {
+        ASSERT_TRUE(target.LoadWorldStateFrom(before_strike)) << target.GetWorldOpenError();
+    } else {
+        const auto prepared =
+            GameSession::PrepareWorldState(target.CaptureWorldPreparationOptions(), before_strike);
+        ASSERT_TRUE(target.AdoptPreparedWorld(prepared)) << target.GetWorldOpenError();
+    }
+    ASSERT_EQ(target.GetSimulationTickCount(), 6u);
+    target.SetReplicatedSimulationAnchors({});
+    // One render frame catches up across tick 7 and polls weather at tick 8.
+    ASSERT_EQ(target.TickSimulation(target.GetSimulationClock().fixed_dt() * 2), 2u);
+    ASSERT_FALSE(target.GetRegionSchedulerFault());
+    const auto* caught_up = target.GetWeatherSystem();
+    ASSERT_NE(caught_up, nullptr);
+    ASSERT_EQ(target.GetSimulationTickCount(), 8u);
+    EXPECT_TRUE(caught_up->StrikesThisTick().empty());
+    ASSERT_EQ(caught_up->StrikeSchedule().size(), 1u);
+    EXPECT_EQ(caught_up->StrikeSchedule().front().strike_tick, 7u);
+    ASSERT_EQ(target.TickSimulation(target.GetSimulationClock().fixed_dt()), 1u);
+    EXPECT_EQ(caught_up->StrikeSchedule().size(), 1u);
+    ASSERT_EQ(target.TickSimulation(target.GetSimulationClock().fixed_dt()), 1u);
+    EXPECT_TRUE(caught_up->StrikeSchedule().empty());
+}
+
+class WeatherAnchorSaveTest : public WorldOpenRefusal {};
+INSTANTIATE_TEST_SUITE_P(WeatherAndLoadBackends,
+                         WeatherAnchorSaveTest,
+                         testing::Combine(testing::Values(0, 1), testing::Values(0, 1, 2)));
+
+TEST_P(WeatherAnchorSaveTest, SavedStrikeAnchorSurvivesRespawnChangeAcrossLoadBackends) {
+    const auto [regional_mode, backend] = GetParam();
+    const bool regional = regional_mode != 0;
+    const auto script = ShortWeatherScript();
+    const Vec3 respawn(1200.25f, 31.0f, -937.5f);
+    GameSession source;
+    source.SetRootPath(RootString());
+    source.SetJobSystem(&jobs);
+    source.SetActiveRegionsEnabled(regional);
+    ASSERT_TRUE(source.SetWeatherSchedule(script));
+    ASSERT_TRUE(source.CreateWorld("Saved weather anchor", "1337", "default"));
+    source.SetReplicatedSimulationAnchors({});
+    const auto before_strike =
+        root / (regional ? "regional-before-strike" : "legacy-before-strike");
+    for (int index = 0; index < 7; ++index) {
+        ASSERT_EQ(source.TickSimulation(source.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_FALSE(source.GetRegionSchedulerFault());
+        if (index == 5) {
+            ASSERT_TRUE(source.SaveWorldStateTo(before_strike, nullptr, true));
+        }
+    }
+    const auto* weather = source.GetWeatherSystem();
+    ASSERT_NE(weather, nullptr);
+    ASSERT_NO_FATAL_FAILURE(ExpectScriptWeather(*weather, script, 7));
+    const auto strikes = weather->StrikesThisTick();
+    ASSERT_EQ(strikes.size(), 1u);
+    const auto hash = weather->ComputeWeatherSubHash();
+    const auto wind_hash = source.GetWindFieldSystem()->ComputeWindSubHash();
+    const auto aether_hash = source.GetAetherFieldSystem()->ComputeAetherSubHash();
+    const auto anchor = weather->ScheduleAnchor();
+    ASSERT_NE(anchor, respawn);
+    // Normal exit updates respawn after the final simulation tick.
+    source.SetSpawnPoint(respawn);
+    ASSERT_TRUE(source.SaveWorld());
+    EXPECT_EQ(weather->ComputeWeatherSubHash(), hash);
+    const auto metadata = nlohmann::json::parse(Read(source.GetWorldSaveDir() / "world_info.json"));
+    EXPECT_EQ(metadata.at("weatherScheduleAnchor"),
+              nlohmann::json::array({anchor.x, anchor.y, anchor.z}));
+    EXPECT_EQ(metadata.at("spawnPoint").at("x"), respawn.x);
+    GameSession target;
+    target.SetRootPath(RootString());
+    target.SetJobSystem(&jobs);
+    target.SetActiveRegionsEnabled(regional);
+    if (backend == 0) {
+        ASSERT_TRUE(target.LoadWorld(source.GetMetadata().worldId)) << target.GetWorldOpenError();
+        EXPECT_EQ(target.GetMetadata().spawnPoint, respawn);
+    } else {
+        ASSERT_TRUE(target.CreateTransientWorld("Anchor adoption", "1337", "default"));
+        target.SetSpawnPoint(respawn);
+        // Adoption must replace live ambient fields as well as constructor defaults.
+        ASSERT_EQ(target.TickSimulation(target.GetSimulationClock().fixed_dt() * 2), 2u);
+        if (backend == 1) {
+            ASSERT_TRUE(target.LoadWorldStateFrom(source.GetWorldSaveDir()))
+                << target.GetWorldOpenError();
+        } else {
+            const auto prepared = GameSession::PrepareWorldState(
+                target.CaptureWorldPreparationOptions(), source.GetWorldSaveDir());
+            ASSERT_TRUE(target.AdoptPreparedWorld(prepared)) << target.GetWorldOpenError();
+        }
+    }
+    ASSERT_NO_FATAL_FAILURE(ExpectRestoredStrike(
+        target, script, hash, wind_hash, aether_hash, anchor, strikes.front()));
+    ASSERT_NO_FATAL_FAILURE(ExpectCompletedPresentationSuppressed(target));
+    if (backend != 0) {
+        ASSERT_NO_FATAL_FAILURE(ExpectScheduledCatchUp(target, before_strike, backend));
+    }
+}
+
+TEST_P(WeatherAnchorSaveTest, InitialScheduledAmbientHashesSurviveEveryLoadBackend) {
+    const auto [regional_mode, backend] = GetParam();
+    GameSession source, target;
+    for (auto* session : {&source, &target}) {
+        session->SetRootPath(RootString());
+        session->SetJobSystem(&jobs);
+        session->SetActiveRegionsEnabled(regional_mode != 0);
+    }
+    ASSERT_TRUE(source.SetWeatherSchedule(ShortWeatherScript()));
+    ASSERT_TRUE(source.CreateWorld("Initial scheduled fields", "1337", "default"));
+    ASSERT_EQ(source.GetSimulationTickCount(), 0u);
+    ASSERT_TRUE(source.SaveWorld());
+    if (backend == 0) {
+        ASSERT_TRUE(target.LoadWorld(source.GetMetadata().worldId)) << target.GetWorldOpenError();
+    } else {
+        ASSERT_TRUE(target.CreateTransientWorld("Initial field adoption", "1337", "default"));
+        ASSERT_EQ(target.TickSimulation(target.GetSimulationClock().fixed_dt() * 2), 2u);
+        if (backend == 1) {
+            ASSERT_TRUE(target.LoadWorldStateFrom(source.GetWorldSaveDir()))
+                << target.GetWorldOpenError();
+        } else {
+            const auto prepared = GameSession::PrepareWorldState(
+                target.CaptureWorldPreparationOptions(), source.GetWorldSaveDir());
+            ASSERT_TRUE(target.AdoptPreparedWorld(prepared)) << target.GetWorldOpenError();
+        }
+    }
+    EXPECT_EQ(target.GetSimulationTickCount(), 0u);
+    EXPECT_EQ(target.GetWindFieldSystem()->last_tick(), 0u);
+    EXPECT_EQ(target.GetAetherFieldSystem()->last_tick(), 0u);
+    EXPECT_EQ(target.GetWeatherSystem()->ComputeWeatherSubHash(),
+              source.GetWeatherSystem()->ComputeWeatherSubHash());
+    EXPECT_EQ(target.GetWindFieldSystem()->ComputeWindSubHash(),
+              source.GetWindFieldSystem()->ComputeWindSubHash());
+    EXPECT_EQ(target.GetAetherFieldSystem()->ComputeAetherSubHash(),
+              source.GetAetherFieldSystem()->ComputeAetherSubHash());
+}
+
+TEST_F(WorldOpenRefusal, ScheduledMetadataRoundTripsBothClockBackendsAndLegacyBytesStayExact) {
+    const auto script = ShortWeatherScript();
+    for (const bool regional : {false, true}) {
+        GameSession scheduled, reopened;
+        for (auto* session : {&scheduled, &reopened}) {
+            session->SetRootPath(RootString());
+            session->SetJobSystem(&jobs);
+            session->SetActiveRegionsEnabled(regional);
+            session->SetAetherStateEnabled(true);
+        }
+        ASSERT_TRUE(scheduled.SetWeatherSchedule(script));
+        ASSERT_TRUE(scheduled.CreateWorld("Scheduled metadata", "1337", "default"));
+        EXPECT_FALSE(scheduled.SetWeatherSchedule(script));
+        scheduled.SetReplicatedSimulationAnchors({});
+        for (int index = 0; index < 4; ++index) {
+            ASSERT_EQ(scheduled.TickSimulation(scheduled.GetSimulationClock().fixed_dt()), 1u);
+            ASSERT_FALSE(scheduled.GetRegionSchedulerFault());
+        }
+        ASSERT_TRUE(scheduled.SaveWorld());
+        const auto path = scheduled.GetWorldSaveDir() / "world_info.json";
+        const auto metadata = nlohmann::json::parse(Read(path));
+        EXPECT_EQ(metadata.at("container_version"), P::kScheduledWeatherMetadataVersion);
+        EXPECT_EQ(metadata.at("weatherScheduleTick"), 4);
+        ASSERT_TRUE(reopened.LoadWorld(scheduled.GetMetadata().worldId))
+            << reopened.GetWorldOpenError();
+        ASSERT_NE(reopened.GetWeatherSchedule(), nullptr);
+        EXPECT_EQ(*reopened.GetWeatherSchedule(), script);
+        EXPECT_EQ(reopened.GetSimulationTickCount(), 4u);
+        EXPECT_EQ(reopened.SystemConfigIdentity(), scheduled.SystemConfigIdentity());
+        EXPECT_EQ(reopened.GetWeatherSystem()->PrecipitationAt(Vec3(0.0f)),
+                  script.Sample(4).precip_intensity);
+        EXPECT_EQ(reopened.GetEnergyFieldState()->next_fire_tick(),
+                  scheduled.GetEnergyFieldState()->next_fire_tick());
+        for (const bool prepared : {false, true}) {
+            GameSession target;
+            target.SetRootPath(RootString());
+            target.SetJobSystem(&jobs);
+            target.SetActiveRegionsEnabled(regional);
+            target.SetAetherStateEnabled(true);
+            ASSERT_TRUE(target.CreateTransientWorld("Schedule adoption", "1337", "default"));
+            if (prepared) {
+                const auto state = GameSession::PrepareWorldState(
+                    target.CaptureWorldPreparationOptions(), scheduled.GetWorldSaveDir());
+                ASSERT_TRUE(target.AdoptPreparedWorld(state)) << target.GetWorldOpenError();
+            } else {
+                ASSERT_TRUE(target.LoadWorldStateFrom(scheduled.GetWorldSaveDir()))
+                    << target.GetWorldOpenError();
+            }
+            ASSERT_NE(target.GetWeatherSchedule(), nullptr);
+            EXPECT_EQ(*target.GetWeatherSchedule(), script);
+            EXPECT_EQ(target.GetSimulationTickCount(), 4u);
+            EXPECT_EQ(target.GetWeatherSystem()->PrecipitationAt(Vec3(0.0f)),
+                      script.Sample(4).precip_intensity);
+        }
+    }
+    const std::string legacy = "{\"container_version\":2,\"extension\":\"retained\"}\n";
+    const auto output = root / "legacy-metadata";
+    fs::create_directories(output);
+    ASSERT_TRUE(WorldSaveService::save_metadata(legacy, output));
+    EXPECT_EQ(Read(output / "world_info.json"), legacy);
+    const std::string obsolete = "{\"container_version\":1,\"extension\":\"retained\"}\n";
+    const auto obsolete_output = root / "obsolete-metadata";
+    fs::create_directories(obsolete_output);
+    ASSERT_TRUE(WorldSaveService::save_metadata(obsolete, obsolete_output));
+    EXPECT_EQ(Read(obsolete_output / "world_info.json"), obsolete);
+    const nlohmann::json indexed_metadata = {
+        {"container_version", WorldSaveService::kIndexedMetadataVersion},
+        {"snapshotFormat", 1},
+        {"extension", "retained"}};
+    const auto indexed_bytes = indexed_metadata.dump(4) + "\n";
+    const auto indexed_output = root / "indexed-metadata";
+    fs::create_directories(indexed_output);
+    ASSERT_TRUE(WorldSaveService::save_metadata(indexed_bytes, indexed_output));
+    EXPECT_EQ(Read(indexed_output / "world_info.json"), indexed_bytes);
+    ASSERT_TRUE(WorldSaveService::save_metadata(indexed_bytes, indexed_output));
+    EXPECT_EQ(Read(indexed_output / "world_info.json"), indexed_bytes);
+}
+TEST_F(WorldOpenRefusal, ServerOwnerContinuationRestoresInPlayerOrderAndContinues) {
+    Write(root / "data/common/systems.json",
+          R"({"sim":{"active_regions":{"enabled":false},"water_high_res":{"enabled":false}}})");
+    Server::ServerWorldRunnerConfig source_config;
+    source_config.root_path = RootString();
+    source_config.world_id = "fixture";
+    source_config.surface_radius = 0;
+    source_config.collision_radius = 0;
+    source_config.test_streaming_radius_cap = 1;
+    source_config.autosave_interval_ticks = 0;
+    source_config.finite_hydrology = false;
+    source_config.avatar_count = 1;
+    Server::ServerWorldRunner source(source_config);
+    World::PlayerAvatarOwnerState captured;
+    EXPECT_FALSE(source.CaptureAvatarOwner(0, captured));
+    EXPECT_FALSE(source.RestoreAvatarOwner(captured));
+    ASSERT_TRUE(source.Boot()) << source.GetBootError();
+    ASSERT_TRUE(source.CaptureAvatarOwner(0, captured));
+    const auto original = captured;
+    EXPECT_FALSE(source.CaptureAvatarOwner(1, captured));
+    EXPECT_EQ(captured.physics.bytes, original.physics.bytes);
+    EXPECT_EQ(captured.physics.size, original.physics.size);
+
+    auto target_config = source_config;
+    target_config.avatar_count = 0;
+    Server::ServerWorldRunner target(target_config);
+    ASSERT_TRUE(target.Boot()) << target.GetBootError();
+    auto invalid = captured;
+    invalid.avatar.player_id = 1;
+    EXPECT_FALSE(target.RestoreAvatarOwner(invalid));
+    invalid = captured;
+    invalid.avatar.velocity.x = std::numeric_limits<float>::infinity();
+    EXPECT_FALSE(target.RestoreAvatarOwner(invalid));
+    ASSERT_TRUE(target.Avatars().empty());
+    ASSERT_EQ(target.Session()->GetPhysicsSystem()->avatar_character_slot_count(), 0u);
+    ASSERT_TRUE(target.RestoreAvatarOwner(captured));
+    ASSERT_EQ(target.Avatars().size(), 1u);
+    EXPECT_FALSE(target.RestoreAvatarOwner(captured));
+    EXPECT_EQ(target.Avatars().size(), 1u);
+    for (unsigned tick = 0; tick < 3; ++tick) {
+        World::PlayerAvatarOwnerState expected;
+        World::PlayerAvatarOwnerState actual;
+        ASSERT_TRUE(source.CaptureAvatarOwner(0, expected));
+        ASSERT_TRUE(target.CaptureAvatarOwner(0, actual));
+        std::array<std::uint8_t, World::kMaxAvatarOwnerBytes> expected_bytes{};
+        std::array<std::uint8_t, World::kMaxAvatarOwnerBytes> actual_bytes{};
+        std::size_t expected_size = 0;
+        std::size_t actual_size = 0;
+        ASSERT_TRUE(World::EncodeAvatarOwner(expected, expected_bytes, expected_size));
+        ASSERT_TRUE(World::EncodeAvatarOwner(actual, actual_bytes, actual_size));
+        EXPECT_EQ(expected_size, actual_size);
+        EXPECT_EQ(expected_bytes, actual_bytes);
+        ASSERT_EQ(source.RunFixedTicks(1).ticks_executed, 1u);
+        ASSERT_EQ(target.RunFixedTicks(1).ticks_executed, 1u);
+    }
+    // A separately spawned controller cannot silently shift the player-ID slots.
+    target.Session()->GetPhysicsSystem()->create_avatar_character(Vec3(8, 40, 8));
+    captured.avatar.player_id = 1;
+    EXPECT_FALSE(target.RestoreAvatarOwner(captured));
+    EXPECT_EQ(target.Avatars().size(), 1u);
+    EXPECT_EQ(target.Session()->GetPhysicsSystem()->avatar_character_slot_count(), 2u);
+}
+void ExpectAvatarRestoreRefusedWithoutMutation(Server::ServerWorldRunner& target,
+                                               const World::PlayerAvatarOwnerState& captured,
+                                               bool through_runner) {
+    auto* physics = target.Session()->GetPhysicsSystem();
+    ASSERT_NE(physics, nullptr);
+    const auto hash_before = target.ComputeWorldHash();
+    const auto* roster_data = target.Avatars().data();
+    const auto roster_capacity = target.Avatars().capacity();
+    World::PlayerAvatarOwnerState owner_before;
+    ASSERT_TRUE(target.CaptureAvatarOwner(0, owner_before));
+    Systems::PhysicsSystem::BodySetState bodies_before;
+    ASSERT_TRUE(physics->capture_body_owners(bodies_before));
+    World::PlayerAvatar output{
+        .player_id = 77, .position = Vec3(1), .facing = 2, .velocity = Vec3(3)};
+    std::size_t index = 999;
+    if (through_runner) {
+        EXPECT_FALSE(target.RestoreAvatarOwner(captured));
+    } else {
+        EXPECT_FALSE(target.Session()->RestoreAvatarOwner(captured, output, index));
+    }
+    EXPECT_EQ(index, 999u);
+    EXPECT_EQ(output.player_id, 77u);
+    EXPECT_EQ(output.position, Vec3(1));
+    EXPECT_EQ(output.facing, 2);
+    EXPECT_EQ(output.velocity, Vec3(3));
+    EXPECT_EQ(target.Avatars().data(), roster_data);
+    EXPECT_EQ(target.Avatars().capacity(), roster_capacity);
+    ASSERT_EQ(target.Avatars().size(), 1u);
+    EXPECT_EQ(physics->avatar_character_slot_count(), 1u);
+    World::PlayerAvatarOwnerState owner_after;
+    ASSERT_TRUE(target.CaptureAvatarOwner(0, owner_after));
+    // Each owner-codec scratch buffer is bounded to kMaxAvatarOwnerBytes.
+    std::array<std::uint8_t, World::kMaxAvatarOwnerBytes> before_bytes{};
+    std::array<std::uint8_t, World::kMaxAvatarOwnerBytes> after_bytes{};
+    std::size_t before_size = 0;
+    std::size_t after_size = 0;
+    ASSERT_TRUE(World::EncodeAvatarOwner(owner_before, before_bytes, before_size));
+    ASSERT_TRUE(World::EncodeAvatarOwner(owner_after, after_bytes, after_size));
+    EXPECT_EQ(before_size, after_size);
+    EXPECT_EQ(before_bytes, after_bytes);
+    Systems::PhysicsSystem::BodySetState bodies_after;
+    ASSERT_TRUE(physics->capture_body_owners(bodies_after));
+    EXPECT_EQ(bodies_before.slot_count, bodies_after.slot_count);
+    EXPECT_EQ(bodies_before.free_slots, bodies_after.free_slots);
+    ASSERT_EQ(bodies_before.owners.size(), bodies_after.owners.size());
+    for (std::size_t slot = 0; slot < bodies_before.owners.size(); ++slot) {
+        const auto& before = bodies_before.owners[slot];
+        const auto& after = bodies_after.owners[slot];
+        EXPECT_EQ(before.size, after.size);
+        EXPECT_EQ(before.bytes, after.bytes);
+        EXPECT_EQ(before.suspended, after.suspended);
+        EXPECT_EQ(before.retained_velocity, after.retained_velocity);
+        EXPECT_EQ(before.retained_angular_velocity, after.retained_angular_velocity);
+        EXPECT_EQ(before.was_active, after.was_active);
+        EXPECT_EQ(before.registration_slot, after.registration_slot);
+    }
+    EXPECT_EQ(target.ComputeWorldHash(), hash_before);
+    EXPECT_EQ(target.TickCount(), 1u);
+}
+
+TEST_F(WorldOpenRefusal, AvatarRestoreRefusesAfterFirstTickWithoutMutation) {
+    for (const bool regional : {false, true}) {
+        Write(
+            root / "data/common/systems.json",
+            regional
+                ? R"({"sim":{"active_regions":{"enabled":true},"water_high_res":{"enabled":false}}})"
+                : R"({"sim":{"active_regions":{"enabled":false},"water_high_res":{"enabled":false}}})");
+        Server::ServerWorldRunnerConfig config;
+        config.root_path = RootString();
+        config.world_id = "fixture";
+        config.surface_radius = 0;
+        config.collision_radius = 0;
+        config.test_streaming_radius_cap = 1;
+        config.autosave_interval_ticks = 0;
+        config.finite_hydrology = false;
+        config.avatar_count = 1;
+        Server::ServerWorldRunner source(config);
+        ASSERT_TRUE(source.Boot()) << source.GetBootError();
+        World::PlayerAvatarOwnerState captured;
+        ASSERT_TRUE(source.CaptureAvatarOwner(0, captured));
+        config.avatar_count = 0;
+        Server::ServerWorldRunner target(config);
+        ASSERT_TRUE(target.Boot()) << target.GetBootError();
+        ASSERT_EQ(target.Session()->ActiveRegionsEnabled(), regional);
+        ASSERT_EQ(target.TickCount(), 0u);
+        ASSERT_TRUE(target.RestoreAvatarOwner(captured));
+        ASSERT_EQ(target.RunFixedTicks(1).ticks_executed, 1u);
+        ASSERT_EQ(target.TickCount(), 1u);
+        ASSERT_TRUE(target.CaptureAvatarOwner(0, captured));
+        captured.avatar.player_id = 1;
+        ASSERT_TRUE(World::ValidateAvatarOwner(captured));
+        for (const bool through_runner : {false, true}) {
+            ExpectAvatarRestoreRefusedWithoutMutation(target, captured, through_runner);
+        }
+    }
+}
+
+TEST_F(WorldOpenRefusal, ServerFrozenRosterRestoresSequentiallyAndContinues) {
+    Write(root / "data/common/systems.json",
+          R"({"sim":{"active_regions":{"enabled":false},"water_high_res":{"enabled":false}}})");
+    Server::ServerWorldRunnerConfig source_config;
+    source_config.root_path = RootString();
+    source_config.world_id = "fixture";
+    source_config.surface_radius = 0;
+    source_config.collision_radius = 0;
+    source_config.test_streaming_radius_cap = 1;
+    source_config.autosave_interval_ticks = 0;
+    source_config.finite_hydrology = false;
+    source_config.avatar_count = 0;
+    Server::ServerWorldRunner source(source_config);
+    ASSERT_TRUE(source.Boot()) << source.GetBootError();
+    auto* original = source.Session()->GetPhysicsSystem();
+    ASSERT_NE(original, nullptr);
+    std::vector<World::PlayerAvatarOwnerState> captured(3);
+    std::vector<World::PhysicsOwnerState> physics(3);
+    // Seed controllers through the session bridge while keeping both zero-avatar
+    // boot terrain sets identical. This setup is complete before the capture.
+    for (std::size_t slot = 0; slot < captured.size(); ++slot) {
+        World::PlayerAvatar avatar;
+        avatar.player_id = static_cast<std::uint32_t>(slot);
+        avatar.position = source.Session()->GetMetadata().spawnPoint +
+                          Vec3(0, 20.0f + 8.0f * static_cast<float>(slot), 0);
+        ASSERT_EQ(original->create_avatar_character(avatar.position), slot);
+        ASSERT_TRUE(source.Session()->CaptureAvatarOwner(avatar, slot, captured[slot]));
+    }
+    original->clear_avatar_characters();
+    for (const auto& owner : captured) {
+        ASSERT_TRUE(source.RestoreAvatarOwner(owner));
+    }
+    for (std::size_t slot = 0; slot < captured.size(); ++slot) {
+        original->set_avatar_frozen(slot, true, original->get_avatar_position(slot));
+    }
+    for (std::size_t slot = 0; slot < captured.size(); ++slot) {
+        ASSERT_TRUE(source.CaptureAvatarOwner(slot, captured[slot]));
+        physics[slot] = captured[slot].physics;
+    }
+    auto target_config = source_config;
+    target_config.avatar_count = 0;
+    Server::ServerWorldRunner target(target_config);
+    ASSERT_TRUE(target.Boot()) << target.GetBootError();
+    for (std::size_t slot = 0; slot < captured.size(); ++slot) {
+        ASSERT_TRUE(
+            target.RestoreAvatarOwner(captured[slot], std::span(physics).subspan(slot + 1)));
+        EXPECT_EQ(target.Avatars().size(), slot + 1);
+    }
+    for (unsigned tick = 0; tick < 6; ++tick) {
+        for (std::size_t slot = 0; slot < captured.size(); ++slot) {
+            World::PlayerAvatarOwnerState expected;
+            World::PlayerAvatarOwnerState actual;
+            ASSERT_TRUE(source.CaptureAvatarOwner(slot, expected));
+            ASSERT_TRUE(target.CaptureAvatarOwner(slot, actual));
+            std::array<std::uint8_t, World::kMaxAvatarOwnerBytes> expected_bytes{};
+            std::array<std::uint8_t, World::kMaxAvatarOwnerBytes> actual_bytes{};
+            std::size_t expected_size = 0;
+            std::size_t actual_size = 0;
+            ASSERT_TRUE(World::EncodeAvatarOwner(expected, expected_bytes, expected_size));
+            ASSERT_TRUE(World::EncodeAvatarOwner(actual, actual_bytes, actual_size));
+            EXPECT_EQ(expected_size, actual_size);
+            EXPECT_EQ(expected_bytes, actual_bytes);
+            if (tick == 2) {
+                original->set_avatar_frozen(slot, false, original->get_avatar_position(slot));
+                auto* restored = target.Session()->GetPhysicsSystem();
+                restored->set_avatar_frozen(slot, false, restored->get_avatar_position(slot));
+            }
+        }
+        ASSERT_EQ(source.RunFixedTicks(1).ticks_executed, 1u);
+        ASSERT_EQ(target.RunFixedTicks(1).ticks_executed, 1u);
+    }
+}
 } // namespace

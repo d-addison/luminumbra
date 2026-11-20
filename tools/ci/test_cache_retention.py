@@ -15,6 +15,8 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 NOW = datetime(2026, 10, 14, 12, tzinfo=timezone.utc)
+# One empty response per active-run status query.
+IDLE_RUNS = [json.dumps([{"workflow_runs": []}])] * 5
 
 
 class FrozenDatetime(datetime):
@@ -34,7 +36,7 @@ class CacheRetentionTests(unittest.TestCase):
         policy = ast.Module(body=[node for node in tree.body
                                   if isinstance(node, (ast.Assign, ast.FunctionDef, ast.ImportFrom))
                                   and (isinstance(node, (ast.FunctionDef, ast.ImportFrom))
-                                       or node.targets[0].id in {"PREFIXES", "BUDGET", "RECENCY_GRACE"})], type_ignores=[])
+                                       or node.targets[0].id in {"PREFIXES", "BUDGET", "RECENCY_GRACE", "ACTIVE_STATUSES"})], type_ignores=[])
         namespace = {}
         exec(compile(policy, str(ROOT / ".github/workflows/cache-cleanup.yml"), "exec"), namespace)
         cls.obsolete = staticmethod(partial(namespace["obsolete_caches"], now=NOW))
@@ -94,12 +96,20 @@ class CacheRetentionTests(unittest.TestCase):
         self.assertTrue(all(not self.is_within_grace(c["created_at"]) for c in caches))
         self.assertEqual(self.obsolete(caches, {"refs/heads/devel": "head"}), [])
 
-    def test_older_recently_accessed_cache_keeps_newer_expired_generation_in_same_shard(self):
+    def test_recent_access_alone_does_not_protect_an_older_generation(self):
+        # Pull-request restores refresh access time; only creation counts.
         caches = [self.cache(1, "tidy-cache-Linux-shard1of3-old"),
                   self.cache(2, "tidy-cache-Linux-shard1of3-new")]
-        caches[0]["last_accessed_at"] = (NOW - timedelta(hours=1)).isoformat()
-        self.assertFalse(self.is_within_grace(caches[1]["created_at"]))
-        self.assertEqual(self.obsolete(caches), [])
+        caches[0]["last_accessed_at"] = (NOW - timedelta(minutes=5)).isoformat()
+        self.assertFalse(self.is_within_grace(caches[0]["created_at"]))
+        self.assertEqual(self.obsolete(caches), [1])
+        # A recent save is protected by creation; three generations then keep
+        # the newest and the recent save, retiring only the expired middle one.
+        caches.append(self.cache(3, "tidy-cache-Linux-shard1of3-newest"))
+        self.assertEqual(self.obsolete(caches), [2, 1])
+        caches[2]["created_at"] = (NOW - timedelta(minutes=1)).isoformat()
+        caches[0]["created_at"] = (NOW - timedelta(minutes=5)).isoformat()
+        self.assertEqual(self.obsolete(caches), [2])
 
     def test_budget_pressure_keeps_single_generation_groups(self):
         for size, unmanaged_size in ((1_000_000_000, self.budget - 2_000_000_000),
@@ -155,27 +165,28 @@ class CacheRetentionTests(unittest.TestCase):
         caches[1]["last_accessed_at"] = "2026-10-14T00:00:00Z"
         self.assertEqual(self.obsolete(caches), [2])
 
-    def test_six_hour_grace_uses_later_creation_or_access_and_includes_boundary(self):
-        self.assertEqual(self.grace, timedelta(hours=6))
+    def test_one_hour_grace_uses_creation_time_only_and_includes_boundary(self):
+        self.assertEqual(self.grace, timedelta(hours=1))
         caches = [self.cache(i, "tidy-cache-Linux-shard1of3-old") for i in range(1, 7)]
         cutoff = NOW - self.grace
         caches[0]["created_at"] = cutoff.isoformat()
         caches[1]["last_accessed_at"] = (cutoff + timedelta(seconds=1)).isoformat()
-        caches[2]["created_at"] = (NOW - timedelta(hours=1)).isoformat()
+        caches[2]["created_at"] = (NOW - timedelta(minutes=30)).isoformat()
         caches[2]["last_accessed_at"] = (cutoff - timedelta(days=1)).isoformat()
         caches[3]["created_at"] = (cutoff - timedelta(seconds=1)).isoformat()
         caches[3]["last_accessed_at"] = caches[3]["created_at"]
         caches[4]["last_accessed_at"] = None
         caches[5]["created_at"] = (NOW + timedelta(seconds=1)).isoformat()
         removed = self.obsolete(caches)
-        self.assertEqual(removed, [4, 5])
+        # Cache 2 was only accessed inside the window, so it is retired too.
+        self.assertEqual(removed, [4, 5, 2])
         retained = [c for c in caches if c["id"] not in removed]
         self.assertEqual(self.obsolete(retained), [])
 
     def test_recent_unmanaged_and_newest_managed_caches_survive_excess_budget(self):
         caches = [self.cache(1, "package-cache", size=5_000_000_000),
                   self.cache(2, "tidy-cache-Linux-shard1of3-old", size=self.budget - 4_000_000_000)]
-        caches[0]["last_accessed_at"] = NOW.isoformat()
+        caches[0]["created_at"] = NOW.isoformat()
         with contextlib.redirect_stdout(io.StringIO()) as log:
             self.assertEqual(self.obsolete(caches), [])
         self.assertIn("10500000000 bytes", log.getvalue())
@@ -242,7 +253,7 @@ class CacheRetentionTests(unittest.TestCase):
             with self.subTest(event=event):
                 with patch.dict(os.environ, {"GH_REPO": "owner/repo", "TRIGGER_SHA": "A"}), \
                         patch("subprocess.check_output", side_effect=[
-                            json.dumps([{"actions_caches": caches}]), refs, refs,
+                            json.dumps([{"actions_caches": caches}]), *IDLE_RUNS, refs, refs,
                         ]), patch("subprocess.run") as delete:
                     exec(compile(self.body, "cache-cleanup", "exec"), {})
                 delete.assert_called_once_with(
@@ -252,22 +263,91 @@ class CacheRetentionTests(unittest.TestCase):
 
     def test_head_b_cleanup_preserves_recent_a_for_queued_rerun_or_concurrent_save(self):
         refs = json.dumps([{"ref": "refs/heads/devel", "object": {"sha": "B"}}])
-        for timestamp in ("created_at", "last_accessed_at"):
+        accessed = [self.cache(1, "tidy-cache-Linux-shard1of3-A"),
+                    self.cache(2, "tidy-cache-Linux-shard1of3-B"),
+                    self.cache(3, "tidy-cache-Linux-shard1of3-older")]
+        accessed[2]["created_at"] = "2026-10-12T00:00:00Z"
+        accessed[0]["last_accessed_at"] = (NOW - timedelta(minutes=30)).isoformat()
+        # A recent restore of A alone does not protect it.
+        self.assertEqual(self.obsolete(accessed, {"refs/heads/devel": "B"}, "B"), [1, 3])
+        for timestamp in ("created_at",):
             with self.subTest(timestamp=timestamp):
                 caches = [self.cache(1, "tidy-cache-Linux-shard1of3-A"),
                           self.cache(2, "tidy-cache-Linux-shard1of3-B"),
                           self.cache(3, "tidy-cache-Linux-shard1of3-older")]
                 caches[2]["created_at"] = "2026-10-12T00:00:00Z"
-                # A is no longer a live/triggering head. Its recent creation or
-                # access still protects it, including an A save newer than B's.
-                caches[0][timestamp] = (NOW - timedelta(hours=1)).isoformat()
+                # A is no longer a live/triggering head. Its recent creation
+                # still protects it, including an A save newer than B's.
+                caches[0][timestamp] = (NOW - timedelta(minutes=30)).isoformat()
                 with patch.dict(os.environ, {"GH_REPO": "owner/repo", "TRIGGER_SHA": "B"}), \
                         patch("subprocess.check_output", side_effect=[
-                            json.dumps([{"actions_caches": caches}]), refs, refs,
+                            json.dumps([{"actions_caches": caches}]), *IDLE_RUNS, refs, refs,
                         ]), patch("subprocess.run") as delete:
                     exec(compile(self.body, "cache-cleanup", "exec"), {})
                 delete.assert_called_once_with(
                     ["gh", "cache", "delete", "3", "--repo", "owner/repo"], check=True)
+
+    def test_queued_or_running_rerun_sha_keeps_its_older_generation(self):
+        caches = [self.cache(1, "tidy-cache-Linux-shard1of3-A"),
+                  self.cache(2, "tidy-cache-Linux-shard1of3-B")]
+        heads = {"refs/heads/devel": "B"}
+        # A is outside the grace window and not a head: only an active run keeps it.
+        self.assertEqual(self.obsolete(caches, heads, "B"), [1])
+        self.assertEqual(self.obsolete(caches, heads, "B", active_shas={"A"}), [])
+        self.assertEqual(self.obsolete(caches, heads, "B", active_shas={"", "Z"}), [1])
+
+    def test_cleanup_queries_every_active_status_and_protects_rerun_caches(self):
+        self.assertEqual(len(IDLE_RUNS), 5)
+        refs = json.dumps([{"ref": "refs/heads/devel", "object": {"sha": "B"}}])
+        caches = [self.cache(1, "tidy-cache-Linux-shard1of3-A"),
+                  self.cache(2, "tidy-cache-Linux-shard1of3-B"),
+                  self.cache(3, "tidy-cache-Linux-shard1of3-older")]
+        caches[2]["created_at"] = "2026-10-12T00:00:00Z"
+        for position in range(len(IDLE_RUNS)):
+            with self.subTest(position=position):
+                runs = list(IDLE_RUNS)
+                runs[position] = json.dumps([{"workflow_runs": [{"head_sha": "A"}]}])
+                with patch.dict(os.environ, {"GH_REPO": "owner/repo", "TRIGGER_SHA": "B"}), \
+                        patch("subprocess.check_output", side_effect=[
+                            json.dumps([{"actions_caches": caches}]), *runs, refs, refs,
+                        ]) as api, patch("subprocess.run") as delete:
+                    exec(compile(self.body, "cache-cleanup", "exec"), {})
+                delete.assert_called_once_with(
+                    ["gh", "cache", "delete", "3", "--repo", "owner/repo"], check=True)
+                run_calls = [call.args[0] for call in api.call_args_list[1:1 + len(IDLE_RUNS)]]
+                for argv in run_calls:
+                    self.assertEqual(argv[:4], ["gh", "api", "--paginate", "--slurp"])
+                statuses = [argv[4].split("status=")[1].split("&")[0] for argv in run_calls]
+                self.assertEqual(statuses, ["requested", "pending", "waiting", "queued", "in_progress"])
+
+    def test_active_run_sha_on_a_later_page_keeps_its_cache(self):
+        refs = json.dumps([{"ref": "refs/heads/devel", "object": {"sha": "B"}}])
+        caches = [self.cache(1, "tidy-cache-Linux-shard1of3-A"),
+                  self.cache(2, "tidy-cache-Linux-shard1of3-B"),
+                  self.cache(3, "tidy-cache-Linux-shard1of3-older")]
+        caches[2]["created_at"] = "2026-10-12T00:00:00Z"
+        first_page = {"workflow_runs": [{"head_sha": f"busy{i}"} for i in range(100)]}
+        runs = list(IDLE_RUNS)
+        runs[3] = json.dumps([first_page, {"workflow_runs": [{"head_sha": "A"}]}])
+        with patch.dict(os.environ, {"GH_REPO": "owner/repo", "TRIGGER_SHA": "B"}), \
+                patch("subprocess.check_output", side_effect=[
+                    json.dumps([{"actions_caches": caches}]), *runs, refs, refs,
+                ]), patch("subprocess.run") as delete:
+            exec(compile(self.body, "cache-cleanup", "exec"), {})
+        delete.assert_called_once_with(
+            ["gh", "cache", "delete", "3", "--repo", "owner/repo"], check=True)
+
+    def test_active_run_api_error_skips_all_deletion(self):
+        caches = [self.cache(1, "tidy-cache-Linux-shard1of3-A"),
+                  self.cache(2, "tidy-cache-Linux-shard1of3-B")]
+        with patch.dict(os.environ, {"GH_REPO": "owner/repo", "TRIGGER_SHA": "B"}), \
+                patch("subprocess.check_output", side_effect=[
+                    json.dumps([{"actions_caches": caches}]), IDLE_RUNS[0],
+                    subprocess.CalledProcessError(1, ["gh", "api"]),
+                ]), patch("subprocess.run") as delete, contextlib.redirect_stdout(io.StringIO()) as log:
+            exec(compile(self.body, "cache-cleanup", "exec"), {})
+        delete.assert_not_called()
+        self.assertIn("::warning::Cache cleanup API/auth error", log.getvalue())
 
     def test_combined_head_trigger_and_recent_caches_exceed_budget_without_deletion(self):
         caches = [self.cache(1, "tidy-cache-Linux-shard1of3-B", size=2_000_000_000),
@@ -282,7 +362,7 @@ class CacheRetentionTests(unittest.TestCase):
         refs = json.dumps([{"ref": "refs/heads/devel", "object": {"sha": "B"}}])
         with patch.dict(os.environ, {"GH_REPO": "owner/repo", "TRIGGER_SHA": "A"}), \
                 patch("subprocess.check_output", side_effect=[
-                    json.dumps([{"actions_caches": caches}]), refs,
+                    json.dumps([{"actions_caches": caches}]), *IDLE_RUNS, refs,
                 ]), patch("subprocess.run") as delete, \
                 contextlib.redirect_stdout(io.StringIO()) as log:
             exec(compile(self.body, "cache-cleanup", "exec"), {})
@@ -297,18 +377,18 @@ class CacheRetentionTests(unittest.TestCase):
             return json.dumps([{"ref": "refs/heads/devel", "object": {"sha": sha}}])
         with patch.dict(os.environ, {"GH_REPO": "owner/repo"}), \
                 patch("subprocess.check_output", side_effect=[
-                    json.dumps([{"actions_caches": caches}]), refs("oldhead"), refs("nexthead"),
+                    json.dumps([{"actions_caches": caches}]), *IDLE_RUNS, refs("oldhead"), refs("nexthead"),
                 ]) as api, patch("subprocess.run") as delete:
             exec(compile(self.body, "cache-cleanup", "exec"), {})
         delete.assert_not_called()
-        self.assertEqual(api.call_count, 3)
+        self.assertEqual(api.call_count, 3 + len(IDLE_RUNS))
 
     def test_deletes_obsolete_cache_by_id_so_same_key_replacements_survive(self):
         caches = [self.cache(1, "tidy-cache-Linux-shard1of3-old"), self.cache(2, "tidy-cache-Linux-shard1of3-head")]
         refs = json.dumps([{"ref": "refs/heads/devel", "object": {"sha": "head"}}])
         with patch.dict(os.environ, {"GH_REPO": "owner/repo"}), \
                 patch("subprocess.check_output", side_effect=[
-                    json.dumps([{"actions_caches": caches}]), refs, refs,
+                    json.dumps([{"actions_caches": caches}]), *IDLE_RUNS, refs, refs,
                 ]), patch("subprocess.run") as delete:
             exec(compile(self.body, "cache-cleanup", "exec"), {})
         delete.assert_called_once_with(["gh", "cache", "delete", "1", "--repo", "owner/repo"], check=True)
@@ -320,7 +400,7 @@ class CacheRetentionTests(unittest.TestCase):
         refs = json.dumps([{"ref": "refs/heads/devel", "object": {"sha": "head"}}])
         with patch.dict(os.environ, {"GH_REPO": "owner/repo"}), \
                 patch("subprocess.check_output", side_effect=[
-                    json.dumps([{"actions_caches": caches}]), refs,
+                    json.dumps([{"actions_caches": caches}]), *IDLE_RUNS, refs,
                 ]), patch("subprocess.run") as delete, \
                 contextlib.redirect_stdout(io.StringIO()) as log:
             exec(compile(self.body, "cache-cleanup", "exec"), {})
@@ -337,7 +417,7 @@ class CacheRetentionTests(unittest.TestCase):
                 refs = json.dumps([{"ref": "refs/heads/devel", "object": {"sha": "head"}}])
                 with patch.dict(os.environ, {"GH_REPO": "owner/repo"}), \
                         patch("subprocess.check_output", side_effect=[
-                            json.dumps([{"actions_caches": caches}]), refs, refs, refs,
+                            json.dumps([{"actions_caches": caches}]), *IDLE_RUNS, refs, refs, refs,
                         ]), patch("subprocess.run", side_effect=[
                             subprocess.CalledProcessError(status, ["gh", "cache", "delete", "2"]),
                             None,
@@ -352,7 +432,7 @@ class CacheRetentionTests(unittest.TestCase):
         refs = json.dumps([{"ref": "refs/heads/devel", "object": {"sha": "head"}}])
         with patch.dict(os.environ, {"GH_REPO": "owner/repo"}), \
                 patch("subprocess.check_output", side_effect=[
-                    json.dumps([{"actions_caches": caches}]), refs,
+                    json.dumps([{"actions_caches": caches}]), *IDLE_RUNS, refs,
                     subprocess.CalledProcessError(1, ["gh", "api"]),
                 ]), patch("subprocess.run") as delete, \
                 contextlib.redirect_stdout(io.StringIO()) as log:
@@ -371,7 +451,7 @@ class CacheRetentionTests(unittest.TestCase):
     def test_malformed_input_is_logged_and_skips_cleanup(self):
         refs = json.dumps([{"ref": "refs/heads/devel", "object": {"sha": "head"}}])
         malformed_timestamp = self.cache(1, "tidy-cache-Linux-shard1of3-old")
-        malformed_timestamp["last_accessed_at"] = "invalid date"
+        malformed_timestamp["created_at"] = "invalid date"
         for listing, error in (("not JSON", "JSONDecodeError"),
                                (json.dumps([{}]), "KeyError"),
                                (json.dumps([{"actions_caches": None}]), "TypeError"),
@@ -379,7 +459,7 @@ class CacheRetentionTests(unittest.TestCase):
                                (json.dumps([{"actions_caches": [malformed_timestamp]}]), "ValueError")):
             with self.subTest(error=error, listing=listing):
                 with patch.dict(os.environ, {"GH_REPO": "owner/repo"}), \
-                        patch("subprocess.check_output", side_effect=[listing, refs]), \
+                        patch("subprocess.check_output", side_effect=[listing, *IDLE_RUNS, refs]), \
                         patch("subprocess.run") as delete, contextlib.redirect_stdout(io.StringIO()) as log:
                     exec(compile(self.body, "cache-cleanup", "exec"), {})
                 delete.assert_not_called()
@@ -407,7 +487,7 @@ class CacheRetentionTests(unittest.TestCase):
     def test_compiler_cache_caps_match_each_lane(self):
         for workflow, job, cap in (
             ("ci", "linux", "400M"),
-            ("asan", "asan-shard", "600M"),
+            ("asan", "asan-shard", "1200M"),
             ("ci", "diligent-rhi", "250M"),
             ("windows-build", "windows-msvc", "1200M"),
             ("windows-build", "windows-ucrt64", "1200M"),
@@ -418,25 +498,22 @@ class CacheRetentionTests(unittest.TestCase):
                 self.assertEqual(body.split("CCACHE_MAXSIZE: ", 1)[1].splitlines()[0], cap)
 
     def test_compiler_caps_retire_old_generations_only_when_reserved_caches_fit_budget(self):
+        # The five hosted lanes; daily Windows keeps its caches on the runner's disk.
         sizes = {
             "linux-x64-gcc-ccache-": 400_000_000,
-            "linux-x64-gcc-asan-ccache-": 600_000_000,
+            "linux-x64-gcc-asan-ccache-": 1_200_000_000,
             "diligent-rhi-linux-x64-gcc-ccache-": 250_000_000,
-            "windows-x64-msvc-ccache-": 1_500_000_000,
-            "windows-x64-ucrt64-gcc-ccache-": 1_500_000_000,
             "perf-linux-x64-gcc-ccache-": 250_000_000,
             "perf-paired-linux-x64-gcc-": 250_000_000,
         }
         self.assertEqual(self.budget, 9_500_000_000)
         generation_size = sum(sizes.values())
-        self.assertEqual(generation_size, 4_750_000_000)
-        self.assertEqual(self.budget - generation_size, 4_750_000_000)
-        self.assertEqual(2 * generation_size, 9_500_000_000)
-        self.assertEqual(self.budget, 2 * generation_size)
-        self.assertEqual(10_000_000_000 - 2 * generation_size, 500_000_000)
+        self.assertEqual(generation_size, 2_350_000_000)
+        self.assertEqual(2 * generation_size, 4_700_000_000)
+        self.assertEqual(self.budget - 2 * generation_size, 4_800_000_000)
         for refs in (("refs/heads/devel",), ("refs/heads/main", "refs/heads/devel")):
             with self.subTest(refs=refs):
-                # Seven lanes, at most two branches and two generations each.
+                # Five lanes, at most two branches and two generations each.
                 caches = []
                 old_ids = []
                 for ref in refs:
@@ -456,9 +533,12 @@ class CacheRetentionTests(unittest.TestCase):
                         self.assertEqual(retained_size, len(refs) * generation_size)
                         if len(refs) == 2:
                             self.assertEqual(retained_size, 2 * generation_size)
-                            self.assertEqual(retained_size, self.budget)
-                            # One extra protected or recent cache exceeds the
-                            # exact-fit budget, even by a single byte. No deletes.
+                            self.assertLess(retained_size, self.budget)
+                            # A recent package cache fills the rest of the budget
+                            # exactly; one extra protected or recent cache then
+                            # exceeds it, even by a single byte. No deletes.
+                            filler = self.cache(28, "package-filler", size=self.budget - retained_size)
+                            filler["created_at"] = NOW.isoformat()
                             for protection in ("head", "grace"):
                                 for extra_size in (1, 250_000_000):
                                     with self.subTest(protection=protection, extra_size=extra_size):
@@ -469,7 +549,7 @@ class CacheRetentionTests(unittest.TestCase):
                                         else:
                                             extra["created_at"] = NOW.isoformat()
                                         with contextlib.redirect_stdout(io.StringIO()) as warning_log:
-                                            self.assertEqual(self.obsolete(listing + [extra], heads), [])
+                                            self.assertEqual(self.obsolete(listing + [filler, extra], heads), [])
                                         self.assertEqual(
                                             warning_log.getvalue(),
                                             "::warning::Newest, protected and grace-window caches use "
@@ -504,7 +584,7 @@ class CacheRetentionTests(unittest.TestCase):
         restore = shard.split("      - name: Restore compiler cache\n", 1)[1].split("      - name:", 1)[0]
         self.assertNotIn("matrix.shard", restore)
         self.assertIn("            linux-x64-gcc-asan-ccache-\n", restore)
-        self.assertIn("CCACHE_MAXSIZE: 600M", shard)
+        self.assertIn("CCACHE_MAXSIZE: 1200M", shard)
         for name in ("Clean compiler cache before saving", "Save compiler cache"):
             step = shard.split(f"      - name: {name}\n", 1)[1].split("      - name:", 1)[0]
             condition = step.splitlines()[0].strip()

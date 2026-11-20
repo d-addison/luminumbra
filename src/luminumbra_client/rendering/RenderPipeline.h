@@ -2,6 +2,8 @@
 #include <luminumbra/rendering/RenderView.h>
 
 #include "BenchmarkGpuQueries.h"
+#include "CaptureManifest.h"
+#include "DiagnosticCapture.h"
 #include "luminumbra_common/core/SimulationClock.h"
 #include "luminumbra_common/world/WorldClock.h"
 #include <optional>
@@ -12,7 +14,9 @@
 #include "FrameBufferObject.h" // FrameBufferObject (extracted)
 #include "GBuffer.h"           // GBuffer (extracted)
 #include "GraphicsRuntimeConfig.h"
+#include "ImpostorCoverage.h"
 #include "Mesh.h"
+#include "NearTerrainRefinement.h"
 #include "RenderContext.h"          // pass contract (make_ssao_context returns by value)
 #include "RenderFrameTypes.h"       // light/weather/cloud PODs (extracted)
 #include "RenderInputs.h"           //  GlassPaneItem (the glass draw list member)
@@ -30,12 +34,14 @@
 #include "passes/SsaoData.h" // SSAOData (extracted; still read here for stats)
 #include "passes/WaterfallPass.h"
 #include <array>
+#include <cstdint>
 #include <filesystem>
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <map>
 #include <memory>
 #include <nlohmann/json_fwd.hpp>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -53,6 +59,7 @@ struct TerrainGenParams;
 } // namespace Luminumbra::Systems
 namespace Luminumbra::Rendering {
 struct StaticDrawSnapshot;
+class DiagnosticFrameCapture;
 
 class Shader;
 class Camera;
@@ -61,6 +68,7 @@ class GBufferPass;
 class SsaoPass;
 class LightingPass;
 class WaterPass;
+struct WaterVisibilityMask;
 class SkyboxPass;
 class ParticlePass;
 class FoliagePass;
@@ -98,6 +106,7 @@ namespace Luminumbra::Rendering {
 // pool blocks instead (see get_resource_registry_stats). pool_handle == kInvalid
 // means "not pool-resident".
 struct ChunkRenderData {
+    NearTerrainUploadState refinement;
     u32 vao_id = 0;
     u32 vbo_id = 0;
     u32 ebo_id = 0;
@@ -119,6 +128,27 @@ struct ChunkRenderData {
         upload.valid_allocation = pool.valid_allocation(pool_handle, element_count);
     }
 };
+
+class GBufferDiagnosticCapture;
+
+struct DiagnosticTerrainDraw {
+    std::array<std::int32_t, 3> chunk{};
+    int lod = -1;
+    std::uint32_t mesh_version = 0;
+    std::uint64_t geometry_generation = 0;
+};
+
+// Capture-only submission of one pool bucket, including its unattributed tail.
+// The caller binds the bucket VAO, origin buffer and original indirect buffer.
+// draws is in command order, bounded by 65,536 records; first is its buffer index.
+// A refusal clears the current identity and disables attribution in later buckets.
+void SubmitDiagnosticTerrainBucket(GBufferDiagnosticCapture*& capture,
+                                   std::span<const DiagnosticTerrainDraw> draws,
+                                   std::size_t first,
+                                   std::size_t command_stride,
+                                   bool ladder,
+                                   ChunkGeometryPool& pool,
+                                   u32 bucket);
 
 struct WaterRenderData {
     u32 vao_id = 0;
@@ -621,8 +651,84 @@ public:
     // writes sim state or feeds world_hash. Defined in the.cpp because GBufferPass
     // is forward-declared here.
     const GBuffer& gbuffer() const;
+    // Explicit developer capture setup only; options are resolved once at admission.
+    void set_capture_diagnostics(const DiagnosticCaptureOptions& options);
+    // Owner-thread instrumentation gate; capture options remain resolved at admission.
+    void set_diagnostic_capture_armed(bool armed) {
+        m_diagnostic_capture_armed = armed;
+    }
+    void end_diagnostic_capture();
+    // Enabled publication requires this call's image/manifest and a held
+    // CaptureDestinationReservation; refusal retracts that owned manifest.
+    bool capture_diagnostics(const std::filesystem::path& capture);
+    // Detach and validate completed-frame coverage before manifest publication.
+    bool diagnostic_capture_ready();
+    bool diagnostic_capture_destination_available(const std::filesystem::path& capture) const;
+    // Owns the destination across image, manifest and bundle publication.
+    class CaptureDestinationReservation {
+    public:
+        CaptureDestinationReservation(const RenderPipeline& pipeline,
+                                      const std::filesystem::path& capture);
+        ~CaptureDestinationReservation();
+        CaptureDestinationReservation(const CaptureDestinationReservation&) = delete;
+        CaptureDestinationReservation& operator=(const CaptureDestinationReservation&) = delete;
+        bool acquired() const;
+
+    private:
+        struct State;
+        std::unique_ptr<State> state_;
+        bool disabled_ = false;
+    };
+    bool capture_diagnostics_enabled() const {
+        return m_capture_diagnostics.enabled;
+    }
+    class CaptureCleanup {
+    public:
+        explicit CaptureCleanup(RenderPipeline& pipeline)
+            : pipeline_(&pipeline) {}
+        ~CaptureCleanup() {
+            if (pipeline_) {
+                pipeline_->end_diagnostic_capture();
+            }
+        }
+        CaptureCleanup(const CaptureCleanup&) = delete;
+        CaptureCleanup& operator=(const CaptureCleanup&) = delete;
+        void retain() {
+            pipeline_ = nullptr;
+        }
+
+    private:
+        RenderPipeline* pipeline_;
+    };
+    CaptureManifestInput diagnostic_capture_manifest() const;
+    template<class Observe, class Capture>
+    bool with_diagnostic_capture(const std::filesystem::path& path,
+                                 const Observe& observe,
+                                 const Capture& write_capture) {
+        if (!m_capture_diagnostics.enabled) {
+            return write_capture();
+        }
+        try {
+            const CaptureDestinationReservation reservation(*this, path);
+            if (reservation.acquired() && diagnostic_capture_ready() &&
+                WithCaptureManifest(path, observe(), write_capture)) {
+                return capture_diagnostics(path);
+            }
+        } catch (...) {
+            end_diagnostic_capture();
+            throw;
+        }
+        end_diagnostic_capture();
+        return false;
+    }
     // Read-only scene target access for attachment diagnostics and capture tests.
     const FrameBufferObject& lighting_fbo() const;
+    // Explicit owner-thread capture only. Off by default; no diagnostic GPU
+    // work/readback in ordinary frames. Evidence is from the last water stage.
+    void set_water_visibility_capture_enabled(bool enabled) {
+        m_water_visibility_capture_enabled = enabled;
+    }
+    const WaterVisibilityMask& water_visibility_mask() const;
     // SSAO parity: run the ORIGINAL pipeline-sourced SSAO+blur
     // GL sequence (golden A-leg) then the ctx-sourced SsaoPass seam (B-leg) into the
     // pass-owned blur FBO in the same frame, reading back R16F between legs, for each
@@ -633,6 +739,9 @@ public:
     void set_terrain_coverage_diagnostics_enabled(bool enabled,
                                                   bool bypass_camera_region_guard = false);
     nlohmann::json terrain_coverage_diagnostics(bool include_live_chunks = false) const;
+    // Owner-thread, after rendering and before present. Reads one depth pixel;
+    // reports terrain ownership policy, not the identity of a prop at that pixel.
+    nlohmann::json terrain_peak_diagnostics(const glm::vec3& target) const;
     bool capture_terrain_coverage(const std::filesystem::path& out_dir) const;
 
     bool capture_ssao_parity(const std::filesystem::path& out_dir, const Camera& camera);
@@ -987,6 +1096,10 @@ public:
     WaterfallSiteCache& waterfall_cache() {
         return m_waterfall_pass->waterfall_cache();
     }
+    // Last prepared frame's sheet liveness; audio never re-queries the world.
+    WaterfallPass::RoarSource waterfall_roar_source(const glm::vec3& listener) const {
+        return m_waterfall_pass->roar_source(listener);
+    }
 
     // build the live waterfall DRESSING for `world` (call once
     // after the world is entered). Queries waterfall_sites(world), bakes one
@@ -1003,7 +1116,9 @@ public:
         return m_waterfall_pass->build_geometry(world);
     }
     void begin_waterfall_adoption(WaterfallPass::PreparedGeometry geometry) {
+        const bool has_sheets = !geometry.sites.empty();
         m_waterfall_pass->begin_adoption(std::move(geometry));
+        m_capture_waterfall_geometry = has_sheets;
     }
     bool adopt_waterfalls() {
         return m_waterfall_pass->adopt_next(m_particle_pass.get(), m_root_path);
@@ -1041,6 +1156,7 @@ private:
         size_t water_vertex_count = 0;
         size_t water_index_count = 0;
         bool water_metadata_valid = true;
+        std::shared_ptr<const World::NearTerrainMeshSnapshot> near_terrain_snapshot;
 
         bool has_terrain_mesh() const {
             return terrain_vertex_count > 0 && terrain_index_count > 0;
@@ -1051,10 +1167,12 @@ private:
     };
 
     struct ChunkMeshPayload {
+        NearTerrainUploadState refinement;
         u32 mesh_version = 0;
         int diagnostic_lod = -1;
         std::vector<VoxelVertex> vertices;
         std::vector<u32> indices;
+        std::shared_ptr<const World::NearTerrainMeshSnapshot> near_terrain_snapshot;
 
         bool has_mesh() const {
             return !vertices.empty() && !indices.empty();
@@ -1067,8 +1185,11 @@ private:
         bool is_stale = false;
         float distance_sq = 0;
         std::size_t bytes = 0;
+        bool refinement_only = false;
     };
+    NearTerrainRefinementCache m_near_terrain_refinement;
     UploadQueue<MeshUploadCandidate> m_terrain_upload_queue;
+    UploadQueue<MeshUploadCandidate> m_near_terrain_upload_queue;
     UploadQueue<MeshUploadCandidate> m_water_upload_queue;
     template<bool Water>
     void manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks,
@@ -1268,6 +1389,10 @@ private:
     std::uint64_t m_dayLengthTicks = world::WorldCalendar{}.dayLengthTicks;
     bool m_todTickDriven = false;
 
+    DiagnosticCaptureOptions m_capture_diagnostics;
+    bool m_diagnostic_capture_armed = true;
+    std::unique_ptr<DiagnosticFrameCapture> m_diagnostic_capture;
+    bool m_capture_waterfall_geometry = false;
     u32 m_screen_width = 0;
     u32 m_screen_height = 0;
 
@@ -1413,6 +1538,7 @@ private:
     std::unique_ptr<SsaoPass> m_ssao_pass;
     std::unique_ptr<LightingPass> m_lighting_pass;
     std::unique_ptr<WaterPass> m_water_pass;
+    bool m_water_visibility_capture_enabled = false;
     std::unique_ptr<SkyboxPass> m_skybox_pass;
     std::unique_ptr<ParticlePass> m_particle_pass;          //
     std::unique_ptr<FoliagePass> m_foliage_pass;            //
@@ -1668,7 +1794,11 @@ public:
     // baked once at init (BakeTreeImpostorAtlasToTextures) and the GBuffer LOD3 path draws one
     // camera-facing quad per far tree sampling it. Read-only accessors for GBufferPass.
     bool tree_impostor_enabled() const {
-        return m_treeImpostorsEnabled;
+        return m_treeImpostorsEnabled && m_treeImpostorCoverage.usable();
+    }
+    // Last bake's immutable alpha diagnostic, including refused atlases.
+    const ImpostorCoverage& tree_impostor_coverage() const {
+        return m_treeImpostorCoverage;
     }
     u32 tree_impostor_albedo() const {
         return m_treeImpostorAlbedo;
@@ -1688,6 +1818,7 @@ public:
 
 private:
     bool m_treeImpostorsEnabled = false;
+    ImpostorCoverage m_treeImpostorCoverage;
     u32 m_treeImpostorAlbedo = 0;
     u32 m_treeImpostorNormal = 0;
     int m_treeImpostorGrid = 0;

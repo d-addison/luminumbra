@@ -13,15 +13,19 @@
 // HeadlessServerTick gate asserts that equality.
 
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
+#include <system_error>
 
 #include <vector>
 
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
+#include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/world/ActiveRegionLedger.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/PlayerAvatar.h"
@@ -32,6 +36,33 @@ inline constexpr std::uint64_t kDefaultActiveRegionsAutosaveTicks = 9000;
 // A failed scheduled autosave is retried after this many ticks, not at the next interval.
 inline constexpr std::uint64_t kAutosaveRetryTicks = 30;
 
+// Only arm with a throwaway world's own save directory after successful Boot().
+// Declare before every runner sharing that directory: Shutdown() can recreate it.
+class ThrowawaySaveDirGuard {
+public:
+    ThrowawaySaveDirGuard() = default;
+    ThrowawaySaveDirGuard(const ThrowawaySaveDirGuard&) = delete;
+    ThrowawaySaveDirGuard& operator=(const ThrowawaySaveDirGuard&) = delete;
+
+    void Arm(const std::filesystem::path& save_dir) {
+        m_save_dir = save_dir;
+    }
+
+    ~ThrowawaySaveDirGuard() noexcept {
+        if (!m_save_dir.empty()) {
+            try {
+                std::error_code error;
+                std::filesystem::remove_all(m_save_dir, error);
+            } catch (...) {
+                // Even allocation failure during best-effort removal must not escape unwinding.
+            }
+        }
+    }
+
+private:
+    std::filesystem::path m_save_dir;
+};
+
 struct ServerWorldRunnerConfig {
     // Runtime root with trailing separator (GameSession concatenates paths).
     std::string root_path;
@@ -41,6 +72,8 @@ struct ServerWorldRunnerConfig {
     world::TerrainPresetUse preset_use = world::TerrainPresetUse::NewWorld;
     // Playback rechecks dependencies before creating any save directory.
     std::string required_preset_content_hash;
+    // Immutable schedule applied before fresh-world creation and boot hashing.
+    std::shared_ptr<const Systems::WeatherSchedule> weather_schedule;
     std::string world_name = "Headless Server World";
     std::string seed = "424242";
     // World preset name (worlds/atlas/presets/<preset>.json).
@@ -171,6 +204,8 @@ struct ServerTickReport {
 class ServerWorldRunner {
 public:
     explicit ServerWorldRunner(ServerWorldRunnerConfig config);
+    ServerWorldRunner(ServerWorldRunnerConfig config,
+                      const world::OwnerContinuationOptions& options);
     ~ServerWorldRunner();
 
     ServerWorldRunner(const ServerWorldRunner&) = delete;
@@ -215,6 +250,8 @@ public:
 
     // Deterministic hash over the in-memory streamed-chunk snapshot and water cursor
     // (WorldSaveService::world_hash; format-independent persistence hash).
+    // All three hash entry points throw AuthorityCaptureRefused with the capture status
+    // on refusal; combined capture leaves both outputs unchanged on refusal.
     std::string ComputeWorldHash();
 
     // per-system sub-hashes over the SAME streamed-chunk snapshot, for
@@ -265,6 +302,43 @@ public:
         return m_avatars;
     }
 
+    // Boot diagnostic: restored owners never increment the spawn-path counter.
+    std::size_t SpawnedAvatarCount() const {
+        return m_spawnedAvatarCount;
+    }
+    // Number of owner anchors gathered at the last fixed tick; excludes world residency.
+    std::size_t OwnerAnchorVisitCount() const {
+        return m_ownerAnchorVisits;
+    }
+    // Internal continuation entry points for a caller that restores owners in
+    // player-ID order instead of using the existing Boot spawn path. Supply the
+    // remaining frozen captures and finish the roster before stepping or spawning.
+    bool CaptureAvatarOwner(std::size_t index, World::PlayerAvatarOwnerState& output) const {
+        return m_session && index < m_avatars.size() &&
+               m_session->CaptureAvatarOwner(m_avatars[index], index, output);
+    }
+
+    bool RestoreAvatarOwner(const World::PlayerAvatarOwnerState& state,
+                            std::span<const World::PhysicsOwnerState> remaining_frozen = {}) {
+        if (!m_session || m_session->GetSimulationTickCount() != 0 ||
+            state.avatar.player_id != m_avatars.size()) {
+            return false;
+        }
+        auto* physics = m_session->GetPhysicsSystem();
+        if (!physics || physics->avatar_character_slot_count() != m_avatars.size() ||
+            m_avatars.size() >= Systems::PhysicsSystem::kMaxRestoredAvatars) {
+            return false;
+        }
+        m_avatars.reserve(m_avatars.size() + 1);
+        World::PlayerAvatar avatar;
+        std::size_t index = 0;
+        if (!m_session->RestoreAvatarOwner(state, avatar, index, remaining_frozen)) {
+            return false;
+        }
+        m_avatars.push_back(avatar);
+        return true;
+    }
+
     //  gate: the per-tick availability-set trace captured during the last
     // RunFixedTicks when config.availability_trace was set. Each entry is
     // (tick_index, digest) where digest is a deterministic FNV-1a over the sorted
@@ -292,6 +366,13 @@ public:
 private:
     std::string m_bootError;
     ServerWorldRunnerConfig m_config;
+    world::OwnerContinuationOptions m_continuationOptions;
+    std::uint64_t m_ownerStreamTick = 0;
+    std::size_t m_spawnedAvatarCount = 0;
+    std::size_t m_ownerAnchorVisits = 0;
+    Vec3 m_ownerOrigin{};
+    Vec3 m_ownerAnchor{};
+    std::vector<Vec3> m_ownerStreamingAnchors;
     Luminumbra::JobSystem m_jobSystem;
     std::unique_ptr<world::GameSession> m_session;
     std::vector<World::PlayerAvatar> m_avatars; // Deterministic player avatars.

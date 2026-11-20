@@ -12,6 +12,7 @@
 
 #include "core/Log.h"
 #include "core/Profiler.h"
+#include "core/scenarios/ScenarioCommon.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/network/NetworkLoopbackAuthority.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
@@ -112,6 +113,7 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
     // never writes world_hash.
     if (scenario_config.world_visual_sweep() && scenario_ready && !world_visual_sweep_done &&
         gameSession->GetWorldSystem() && g_camera) {
+        Luminumbra::Rendering::RenderPipeline::CaptureCleanup diagnostic_cleanup(renderPipeline);
         int sweep_fb_w = 0, sweep_fb_h = 0;
         glfwGetFramebufferSize(window, &sweep_fb_w, &sweep_fb_h);
         Luminumbra::Client::ScenarioHarness::WorldVisualSweepDeps deps;
@@ -133,8 +135,12 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
         // stream ONCE. We stream until warmup confirms residency, then skip the
         // expensive per-frame world update and just re-render — the same
         // settled geometry is reused for every subsequent cell.
-        deps.render_and_read =
-            [&](std::vector<unsigned char>& out_pixels, int& w, int& h, bool stream_world) -> bool {
+        deps.render_and_read = [&](std::vector<unsigned char>& out_pixels,
+                                   int& w,
+                                   int& h,
+                                   bool stream_world,
+                                   const std::filesystem::path& attribution_dir) -> bool {
+            Luminumbra::Rendering::RenderPipeline::CaptureCleanup frame_cleanup(renderPipeline);
             LUMIN_PROFILE_FRAME_N("Client capture");
             LUMIN_PROFILE_ZONE_N("Client capture frame");
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -164,12 +170,15 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
                             0.0f,
                             g_app.overlay.wireframe_mode,
                             Luminumbra::Rendering::UploadPresentation::Settled);
-                    }))
+                    })) {
+                renderPipeline.end_diagnostic_capture();
                 return false;
+            }
             glfwGetFramebufferSize(window, &w, &h);
             if (w <= 0 || h <= 0 ||
                 static_cast<std::size_t>(w) >
                     out_pixels.max_size() / static_cast<std::size_t>(h) / 3u) {
+                renderPipeline.end_diagnostic_capture();
                 return false;
             }
             out_pixels.assign(static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 3u, 0u);
@@ -177,8 +186,14 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
             glPixelStorei(GL_PACK_ALIGNMENT, 1);
             // glReadPixels itself synchronizes; no explicit glFinish needed.
             glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, out_pixels.data());
+            // Deferred attachments still belong to the backbuffer just read.
+            if (!attribution_dir.empty() &&
+                !renderPipeline.capture_terrain_coverage(attribution_dir)) {
+                return false;
+            }
             LUMIN_PROFILE_WAIT("Client present wait", glfwSwapBuffers(window));
             glfwPollEvents();
+            frame_cleanup.retain();
             return true;
         };
         const bool sweep_passed = Luminumbra::Client::ScenarioHarness::RunWorldVisualSweep(deps);
@@ -207,7 +222,9 @@ void ScenarioRunnerImpl::onPreRenderCapturePins() {
         // time_of_day 0 is noon (sun elevation = cos(2*pi*t));
         // 0.04 keeps the sun near its zenith for stable captures.
         renderPipeline.set_time_of_day(0.04f);
-    } else if (scenario_config.timeofday_sweep_smoke() && scenario_ready) {
+    } else if (scenario_config.timeofday_sweep_smoke() && scenario_ready && g_camera) {
+        PinComparisonAtmosphere(
+            renderPipeline, root_dir / "data/common/particles", g_camera->Position, false);
         // SEASON SWEEP. The run is split into two
         // season halves (summer then winter); each half replays
         // the noon/dusk/night phase windows. Both the time-of-day
@@ -714,7 +731,7 @@ void ScenarioRunnerImpl::captureSkyboxVisual(std::chrono::steady_clock::time_poi
                 const bool sun_on_screen = ProjectDirectionToScreen(*g_camera,
                                                                     screenshot_width,
                                                                     screenshot_height,
-                                                                    TowardSunDirection(0.04f),
+                                                                    -renderPipeline.sun_direction(),
                                                                     sun_screen_x,
                                                                     sun_screen_y);
                 const SkyboxPixelStats skybox_stats = AnalyzeSkyboxPixels(frame_pixels,
@@ -770,8 +787,9 @@ void ScenarioRunnerImpl::captureWeatherVisual(std::chrono::steady_clock::time_po
                              GL_RGB,
                              GL_UNSIGNED_BYTE,
                              frame_pixels.data());
-                const WeatherPixelStats stats =
+                WeatherPixelStats stats =
                     AnalyzeWeatherPixels(frame_pixels, screenshot_width, screenshot_height);
+                stats.atmosphere = ResolvedAtmosphereToJson(renderPipeline);
                 if (capture_baseline) {
                     const std::string baseline_path = "screenshots/weather-baseline.ppm";
                     if (WritePixelBufferPpm(scenario_config.artifact_dir / baseline_path,
@@ -1367,8 +1385,9 @@ void ScenarioRunnerImpl::captureTimeOfDaySweep(std::chrono::steady_clock::time_p
                              GL_RGB,
                              GL_UNSIGNED_BYTE,
                              frame_pixels.data());
-                const TimeOfDayPixelStats stats =
+                TimeOfDayPixelStats stats =
                     AnalyzeTimeOfDayPixels(frame_pixels, screenshot_width, screenshot_height);
+                stats.atmosphere = ResolvedAtmosphereToJson(renderPipeline);
                 if (phase_capture_ready) {
                     const SeasonCapturePlan& plan = TimeOfDaySweepCapturePlanAt(capture_index);
                     if (WritePixelBufferPpm(scenario_config.artifact_dir / plan.file,
@@ -1503,6 +1522,10 @@ void ScenarioRunnerImpl::capturePlayerView(std::chrono::steady_clock::time_point
                 capture.station = player_view_stations[station_index];
                 capture.station.yaw_degrees = g_camera->Yaw;
                 capture.station.pitch_degrees = g_camera->Pitch;
+                if (capture.station.name == "peak") {
+                    capture.terrain_peak =
+                        renderPipeline.terrain_peak_diagnostics(capture.station.target);
+                }
                 capture.sky = AnalyzePlayerViewPixels(
                     frame_pixels, screenshot_width, screenshot_height, horizon_row_from_top);
                 capture.holes =

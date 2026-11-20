@@ -27,11 +27,13 @@ int RunReplicate(const ServerCliOptions& options) {
                          options.ticks,
                          config.avatar_count);
 
+    Luminumbra::Server::ThrowawaySaveDirGuard save_cleanup;
     Luminumbra::Server::ServerWorldRunner runner(std::move(config));
     if (!runner.Boot()) {
         LUMINUMBRA_CORE_ERROR("replicate: session failed to boot");
         return 1;
     }
+    save_cleanup.Arm(runner.Session()->GetWorldSaveDir());
 
     auto pair = Luminumbra::Net::MakeLoopbackPair();
     Luminumbra::Net::ReplicationServer server;
@@ -98,7 +100,12 @@ int RunReplicate(const ServerCliOptions& options) {
         const float bz = npc_origin.z - 4.0f;
         const float by = (world_sys ? world_sys->GetTerrainHeightAt(bx, bz) : npc_origin.y) + 1.5f;
         const std::size_t ci =
-            npc_physics ? npc_physics->create_avatar_character(Luminumbra::Vec3(bx, by, bz)) : 0u;
+            npc_physics ? npc_physics->create_avatar_character(Luminumbra::Vec3(bx, by, bz))
+                        : Luminumbra::Systems::PhysicsSystem::kInvalidAvatar;
+        if (ci == Luminumbra::Systems::PhysicsSystem::kInvalidAvatar) {
+            LUMINUMBRA_CORE_ERROR("replicate: NPC controller admission refused at {}", i);
+            return 1;
+        }
         auto e = registry.create();
         auto& tf = registry.emplace<Luminumbra::Components::TransformComponent>(e);
         tf.position = Luminumbra::Vec3(bx, by, bz);
@@ -132,6 +139,9 @@ int RunReplicate(const ServerCliOptions& options) {
     bool arrow_despawn_signalled = false;
 
     std::uint64_t executed = 0;
+    // Refusals share the requested tick budget; permanent pressure reaches the stall path.
+    const std::uint64_t max_preparation_retries = options.ticks;
+    std::uint64_t preparation_retries = 0;
     while (executed < options.ticks) {
         // Client -> server: full +X movement input for its avatar this tick.
         Luminumbra::Net::UsercmdMsg cmd;
@@ -169,7 +179,13 @@ int RunReplicate(const ServerCliOptions& options) {
 
         const auto step = runner.RunFixedTicks(1);
         executed += step.ticks_executed;
-        if (step.ticks_executed == 0) {
+        if (step.ticks_executed == 0 && !step.region_fault &&
+            preparation_retries < max_preparation_retries) {
+            ++preparation_retries;
+            std::this_thread::sleep_for(std::chrono::milliseconds(33));
+            continue;
+        }
+        if (step.region_fault || step.ticks_executed == 0) {
             LUMINUMBRA_CORE_ERROR("replicate: tick {} did not advance", executed + 1);
             return 1;
         }
@@ -196,6 +212,10 @@ int RunReplicate(const ServerCliOptions& options) {
             const Luminumbra::Vec3 spawn_pos(from.x, from.y + 1.2f, from.z);
             arrow_body = physics->create_dynamic_sphere(
                 spawn_pos, Luminumbra::Vec3(10.0f, 6.0f, 0.0f), 0.12f);
+            if (arrow_body.IsInvalid()) {
+                LUMINUMBRA_CORE_ERROR("replicate: arrow body admission refused");
+                return 1;
+            }
             arrow_entity = registry.create();
             auto& tf = registry.emplace<Luminumbra::Components::TransformComponent>(arrow_entity);
             tf.position = spawn_pos;

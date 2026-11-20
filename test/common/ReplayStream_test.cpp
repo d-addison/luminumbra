@@ -33,11 +33,13 @@
 #include <utility>
 #include <vector>
 
+#include "luminumbra_common/net/LockstepSession.h"
 #include "luminumbra_common/persistence/ReplacementOutputFile.h"
 #include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/persistence/SavedInputFile.h"
 #include "luminumbra_common/replay/RegionScheduleTrace.h"
 #include "luminumbra_common/replay/ReplayStream.h"
+#include "luminumbra_common/systems/WeatherSystem.h"
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 
@@ -45,6 +47,48 @@ namespace replay = Luminumbra::Replay;
 namespace fs = std::filesystem;
 
 namespace {
+
+using AuthorityBoot = Luminumbra::world::AuthorityBootDescriptor;
+static_assert(AuthorityBoot::kSystemGateCount ==
+              static_cast<std::size_t>(luminumbra::core::SysKey::Count));
+static_assert(AuthorityBoot::kSystemParamCount ==
+              static_cast<std::size_t>(luminumbra::core::SysParam::Count));
+
+AuthorityBoot PopulatedAuthorityBoot(const std::string& identity) {
+    AuthorityBoot boot;
+    boot.authority_rules_revision =
+        luminumbra::core::SimulationIdentityValues::kAuthorityRulesRevision;
+    boot.resolved_world_seed = 0xfedcba98u;
+    boot.seed_conversion_version = 0;
+    boot.system_config_identity = identity;
+    for (std::size_t index = 0; index < boot.system_gates.size(); ++index) {
+        boot.system_gates[index] = static_cast<std::uint8_t>(index % 2);
+    }
+    for (std::size_t index = 0; index < boot.scalar_bits.size(); ++index) {
+        boot.scalar_bits[index] = UINT64_C(0x3ff0000000000000) + index;
+        for (std::size_t component = 0; component < 3; ++component) {
+            boot.vector_bits[index][component] =
+                0x3f800000u + static_cast<std::uint32_t>(3 * index + component);
+        }
+    }
+    boot.finite_hydrology = false;
+    boot.weather_rain_scale_mm = -17;
+    boot.region_work_limit = UINT64_C(0x123456789abcdef0);
+    boot.region_hold_ticks = 9;
+    boot.region_reduced_shift = 4;
+    boot.day_length_ticks = 123456;
+    boot.days_per_year = 17;
+    boot.daylight_numerator = 3;
+    boot.daylight_denominator = 7;
+    boot.lunar_cycle_days = 19;
+    boot.parked_bytes_limit = UINT64_C(0x0102030405060708);
+    boot.avatar_count = 7;
+    boot.ecology_roster = true;
+    boot.planted_roster = true;
+    boot.moving_anchor = true;
+    boot.water_smoke = true;
+    return boot;
+}
 
 fs::path ReplayTempDir() {
     // CTest runs cases in separate processes. Reserve this process's namespace
@@ -2188,6 +2232,8 @@ TEST_F(ReplayStreamTest, OpenRefusalsNameTheFailingStepAndStayBounded) {
     auto header = MakeHeader();
     const auto oversized = replay::BoundedReplayRecorder::kSegmentBytes;
     header.preset.assign(oversized, 'p');
+    replay::ReplayWriter writer;
+    EXPECT_FALSE(writer.Open(m_path, header));
     EXPECT_FALSE(recorder.Open(m_path, header));
     EXPECT_TRUE(recorder.OpenRefusal().starts_with("header-budget: part 1 holds " +
                                                    std::to_string(oversized) + " bytes, "))
@@ -2405,6 +2451,33 @@ TEST_F(ReplayStreamTest, VersionFourHeaderPreservesIdentityAndCompleteRecordLayo
     EXPECT_EQ(contents.inputs.front().inputs, (std::vector<std::uint8_t>{0xab}));
 }
 
+TEST_F(ReplayStreamTest, UnscheduledVersionsKeepThe98ByteGolden) {
+    for (const auto version : {replay::kLrec1Version, replay::kLrec1ElidedVersion}) {
+        replay::ReplayHeader header;
+        header.version = version;
+        replay::ReplayWriter writer;
+        ASSERT_TRUE(writer.Open(m_path, header));
+        ASSERT_TRUE(writer.Finalize(0));
+        std::string expected(98, '\0');
+        expected.replace(0, 5, "LREC1");
+        expected[6] = static_cast<char>(version);
+        expected[8] = 30;
+        expected[34] = 4;
+        expected[38] = 2;
+        expected.replace(66, 8, "LRECEND1");
+        EXPECT_EQ(ReadBytes(), expected);
+        const auto parsed = replay::ReadReplay(m_path);
+        ASSERT_TRUE(parsed.has_value());
+        if (!parsed.has_value()) {
+            return;
+        }
+        EXPECT_EQ(parsed->header.version, version);
+        EXPECT_TRUE(parsed->header.weather_schedule.empty());
+        EXPECT_TRUE(parsed->trailer_present);
+        EXPECT_FALSE(parsed->truncated);
+    }
+}
+
 TEST_F(ReplayStreamTest, BoundedRecorderRotatesOnByteLimitAndRetainsMaximumTick) {
     replay::BoundedReplayRecorder recorder;
     constexpr std::size_t payload_bytes = replay::BoundedReplayRecorder::kSegmentBytes;
@@ -2428,6 +2501,466 @@ TEST_F(ReplayStreamTest, BoundedRecorderRotatesOnByteLimitAndRetainsMaximumTick)
     ASSERT_EQ(contents.inputs.size(), 1u);
     EXPECT_EQ(contents.inputs.front().tick, 3u);
     EXPECT_EQ(contents.inputs.front().inputs, inputs);
+}
+
+TEST_F(ReplayStreamTest, FrozenThreeFourEmptyStreamBytes) {
+    // Literal layout pin independent of either shipping writer or reader.
+    const std::vector<std::uint8_t> frozen{
+        'L', 'R', 'E', 'C', '1', 0,   3,   0,   30, 0, 0, 0, 0, 0, 0, 0, 0, 0, // tick count
+        0,   0,   0,   0,   0,   0,   0,   0,                                  // seed
+        0,   0,   0,   0,   0,   0,   0,   0,                                  // preset hash
+        4,   0,   0,   0,   2,   0,   0,   0,                                  // radii
+        0,   0,   0,   0,   0,   0,   0,   0, // seed string, preset
+        0,   0,   0,   0,   0,   0,   0,   0, // start hash, engine
+        0,   0,   0,   0,   0,   0,   0,   0, // config identity, content hash
+        'L', 'R', 'E', 'C', 'E', 'N', 'D', '1', 0,  0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0,   0,   0,   0,   0,   0,   0,   0,   0,  0, 0, 0, 0, 0};
+    for (const std::uint16_t version : {3, 4}) {
+        auto expected = frozen;
+        expected[6] = static_cast<std::uint8_t>(version);
+        replay::ReplayHeader header;
+        header.version = version;
+        replay::ReplayWriter writer;
+        ASSERT_TRUE(writer.Open(m_path, header));
+        ASSERT_TRUE(writer.Finalize(0));
+        const auto bytes = ReadBytes();
+        EXPECT_EQ((std::vector<std::uint8_t>{bytes.begin(), bytes.end()}), expected);
+        const auto parsed = replay::ReadReplay(m_path);
+        ASSERT_TRUE(parsed.has_value());
+        if (parsed.has_value()) {
+            EXPECT_FALSE(parsed->header.authority_boot.has_value());
+        }
+    }
+}
+
+TEST_F(ReplayStreamTest, AuthorityBootVersionsRoundtripEveryField) {
+    for (const auto version : {replay::kLrec1BootVersion, replay::kLrec1BootElidedVersion}) {
+        auto header = MakeHeader();
+        header.version = version;
+        header.authority_boot = PopulatedAuthorityBoot(header.system_config_identity);
+        replay::ReplayWriter writer;
+        ASSERT_TRUE(writer.Open(m_path, header));
+        writer.RecordInput(1, {1, 2, 3});
+        ASSERT_TRUE(writer.Finalize(1));
+        const auto parsed = replay::ReadReplay(m_path);
+        ASSERT_TRUE(parsed.has_value());
+        if (parsed.has_value()) {
+            EXPECT_EQ(parsed->header.version, version);
+            EXPECT_EQ(parsed->header.authority_boot, header.authority_boot);
+            EXPECT_FALSE(parsed->truncated);
+            ASSERT_EQ(parsed->inputs.size(), 1u);
+            EXPECT_EQ(parsed->inputs.front().inputs, (std::vector<std::uint8_t>{1, 2, 3}));
+        }
+        std::istringstream input(ReadBytes());
+        std::string error = "old error";
+        const auto streamed = replay::ReadReplay(input, {}, error);
+        ASSERT_TRUE(streamed.has_value()) << error;
+        EXPECT_TRUE(error.empty());
+        if (streamed.has_value()) {
+            EXPECT_EQ(streamed->header.authority_boot, header.authority_boot);
+        }
+    }
+}
+
+TEST_F(ReplayStreamTest, BoundedAuthorityBootPreservesFamilyAndDescriptorBytes) {
+    for (const std::uint16_t version : {3, 4, 5, 6}) {
+        for (const bool rotate : {false, true}) {
+            SCOPED_TRACE(version);
+            SCOPED_TRACE(rotate);
+            auto header = MakeHeader();
+            header.version = version;
+            const bool boot_version = version == 5 || version == 6;
+            if (boot_version) {
+                header.authority_boot = PopulatedAuthorityBoot(header.system_config_identity);
+            }
+            replay::BoundedReplayRecorder recorder;
+            ASSERT_TRUE(recorder.Configure(18, 0));
+            ASSERT_TRUE(recorder.Open(m_path, header)) << recorder.OpenRefusal();
+            const std::uint64_t ticks = rotate ? 2048 : 1;
+            for (std::uint64_t tick = 1; tick <= ticks; ++tick) {
+                ASSERT_TRUE(recorder.RecordTick(tick, {0xab}, nullptr, tick));
+            }
+            ASSERT_TRUE(recorder.Finalize(m_path, ticks, ticks));
+            const auto parsed = replay::ReadReplay(m_path);
+            ASSERT_TRUE(parsed.has_value());
+            if (!parsed.has_value()) {
+                return;
+            }
+            EXPECT_EQ(parsed->header.version, rotate ? (boot_version ? 6 : 4) : version);
+            EXPECT_EQ(parsed->elided_through_tick, rotate ? 1024u : 0u);
+            EXPECT_EQ(parsed->header.authority_boot, header.authority_boot);
+            if (boot_version && header.authority_boot.has_value() &&
+                parsed->header.authority_boot.has_value()) {
+                std::vector<std::uint8_t> before;
+                std::vector<std::uint8_t> after;
+                std::string error;
+                ASSERT_TRUE(Luminumbra::world::EncodeAuthorityBootDescriptor(
+                    *header.authority_boot, before, error));
+                ASSERT_TRUE(Luminumbra::world::EncodeAuthorityBootDescriptor(
+                    *parsed->header.authority_boot, after, error));
+                EXPECT_EQ(before, after);
+                const auto wire = ReadBytes();
+                const std::string descriptor(before.begin(), before.end());
+                EXPECT_NE(wire.find(descriptor), std::string::npos);
+                if (rotate) {
+                    // The identical descriptor cannot make an elided prefix
+                    // admissible under the complete version of its family.
+                    auto downgraded = wire;
+                    downgraded[6] = 5;
+                    std::istringstream complete(downgraded);
+                    EXPECT_FALSE(replay::ReadReplay(complete).has_value());
+                    const auto prefix = wire.size() - 32 - 1024 * 18 - 21;
+                    auto duplicate = wire;
+                    duplicate.insert(prefix, wire.substr(prefix, 21));
+                    std::istringstream repeated(duplicate);
+                    EXPECT_FALSE(replay::ReadReplay(repeated).has_value());
+                    auto zero_tick = wire;
+                    zero_tick.replace(prefix + 1, 8, 8, '\0');
+                    std::istringstream zero(zero_tick);
+                    EXPECT_FALSE(replay::ReadReplay(zero).has_value());
+                }
+            }
+        }
+    }
+}
+
+TEST(AuthorityBootDescriptor, MaximumSizeRoundtripAndLittleEndianLayout) {
+    const auto original = PopulatedAuthorityBoot(std::string(AuthorityBoot::kIdentityBytes, 'i'));
+    std::vector<std::uint8_t> bytes;
+    std::string error;
+    ASSERT_TRUE(Luminumbra::world::EncodeAuthorityBootDescriptor(original, bytes, error));
+    ASSERT_EQ(bytes.size(), AuthorityBoot::kMaxEncodedBytes);
+    const std::vector<std::uint8_t> prefix{'A',  'U',  'B',  'D', 1, 0, 8, 0, 0, 0, 0x98,
+                                           0xba, 0xdc, 0xfe, 0,   0, 0, 0, 0, 1, 0, 0};
+    EXPECT_TRUE(std::equal(prefix.begin(), prefix.end(), bytes.begin()));
+    const std::vector<std::uint8_t> suffix{8, 7, 6, 5, 4, 3, 2, 1, 7, 0, 0, 0, 1, 1, 1, 1};
+    EXPECT_TRUE(std::equal(
+        suffix.begin(), suffix.end(), bytes.end() - static_cast<std::ptrdiff_t>(suffix.size())));
+    AuthorityBoot parsed;
+    ASSERT_TRUE(Luminumbra::world::DecodeAuthorityBootDescriptor(bytes, parsed, error)) << error;
+    EXPECT_TRUE(error.empty());
+    EXPECT_EQ(parsed, original);
+}
+
+TEST(AuthorityBootDescriptor, RefusesEveryTruncationAndMalformedFieldWithoutPublishing) {
+    const auto original = PopulatedAuthorityBoot("identity");
+    std::vector<std::uint8_t> bytes;
+    std::string error;
+    ASSERT_TRUE(Luminumbra::world::EncodeAuthorityBootDescriptor(original, bytes, error));
+    auto output = PopulatedAuthorityBoot("retained");
+    const auto retained = output;
+    const auto refuse = [&](const std::vector<std::uint8_t>& malformed) {
+        EXPECT_FALSE(Luminumbra::world::DecodeAuthorityBootDescriptor(malformed, output, error));
+        EXPECT_FALSE(error.empty());
+        EXPECT_EQ(output, retained);
+    };
+    for (std::size_t length = 0; length < bytes.size(); ++length) {
+        SCOPED_TRACE(length);
+        refuse({bytes.begin(), bytes.begin() + static_cast<std::ptrdiff_t>(length)});
+    }
+    const std::size_t gates = 22 + original.system_config_identity.size();
+    const std::size_t params = gates + 2 + AuthorityBoot::kSystemGateCount;
+    const std::size_t scalars = params + 2;
+    const std::size_t vectors = scalars + 8 * AuthorityBoot::kSystemParamCount;
+    const std::size_t finite = vectors + 12 * AuthorityBoot::kSystemParamCount;
+    // Byte mutations isolate magic, version, lengths/counts, gate, NaN/Inf,
+    // boolean, scheduler, calendar and avatar-count validation.
+    for (const auto& [offset, value] :
+         std::vector<std::pair<std::size_t, std::uint8_t>>{{0, 'X'},
+                                                           {4, 2},
+                                                           {18, 0xff},
+                                                           {19, 0xff},
+                                                           {gates, 26},
+                                                           {params, 47},
+                                                           {gates + 2, 2},
+                                                           {scalars + 7, 0x7f},
+                                                           {vectors + 3, 0x7f},
+                                                           {finite, 2},
+                                                           {finite + 1 + 4 + 8 + 4, 17},
+                                                           {finite + 1 + 4 + 8 + 4 + 1 + 7, 0xff},
+                                                           {bytes.size() - 8 + 3, 0xff},
+                                                           {bytes.size() - 1, 2}}) {
+        auto changed = bytes;
+        changed[offset] = value;
+        if (offset == scalars + 7) {
+            changed[scalars + 6] = 0xf0;
+        }
+        if (offset == vectors + 3) {
+            changed[vectors + 2] = 0x80;
+        }
+        SCOPED_TRACE(offset);
+        refuse(changed);
+    }
+    auto trailing = bytes;
+    trailing.push_back(0);
+    refuse(trailing);
+    refuse(std::vector<std::uint8_t>(AuthorityBoot::kMaxEncodedBytes + 1, 0));
+}
+
+TEST(AuthorityBootDescriptor, AdmitsSupportedBoundaryValues) {
+    auto boot = PopulatedAuthorityBoot("i");
+    boot.authority_rules_revision = 1;
+    boot.resolved_world_seed = (std::numeric_limits<std::uint32_t>::max)();
+    boot.seed_conversion_version = 1;
+    boot.region_work_limit = 0;
+    boot.region_hold_ticks = 1;
+    boot.region_reduced_shift = 16;
+    boot.day_length_ticks = (std::uint32_t{1} << 31) - 1;
+    boot.days_per_year = 366;
+    boot.daylight_numerator = 65534;
+    boot.daylight_denominator = 65535;
+    boot.lunar_cycle_days = 366;
+    boot.parked_bytes_limit = (std::numeric_limits<std::uint64_t>::max)();
+    boot.avatar_count = AuthorityBoot::kMaxAvatars;
+    boot.scalar_bits.back() = UINT64_C(0x7fefffffffffffff);
+    boot.vector_bits.back().back() = 0x7f7fffffu;
+    for (const bool enabled : {false, true}) {
+        boot.system_gates.fill(static_cast<std::uint8_t>(enabled));
+        boot.finite_hydrology = enabled;
+        boot.ecology_roster = enabled;
+        boot.planted_roster = enabled;
+        boot.moving_anchor = enabled;
+        boot.water_smoke = enabled;
+        std::vector<std::uint8_t> encoded;
+        AuthorityBoot parsed;
+        std::string error;
+        ASSERT_TRUE(Luminumbra::world::EncodeAuthorityBootDescriptor(boot, encoded, error));
+        ASSERT_TRUE(Luminumbra::world::DecodeAuthorityBootDescriptor(encoded, parsed, error));
+        EXPECT_EQ(parsed, boot);
+    }
+}
+
+TEST_F(ReplayStreamTest, AuthorityBootWritersRefuseMissingInvalidAndLegacyDescriptors) {
+    auto valid = MakeHeader();
+    valid.version = replay::kLrec1BootVersion;
+    valid.authority_boot = PopulatedAuthorityBoot(valid.system_config_identity);
+    for (int mutation = 0; mutation < 26; ++mutation) {
+        SCOPED_TRACE(mutation);
+        auto header = valid;
+        ASSERT_TRUE(header.authority_boot.has_value());
+        if (!header.authority_boot.has_value()) {
+            return;
+        }
+        auto& boot = *header.authority_boot;
+        switch (mutation) {
+            case 0:
+                header.authority_boot.reset();
+                break;
+            case 1:
+                header.version = 3;
+                break;
+            case 2:
+                boot.system_config_identity = "different";
+                break;
+            case 3:
+                boot.system_config_identity.assign(AuthorityBoot::kIdentityBytes + 1, 'x');
+                break;
+            case 4:
+                boot.authority_rules_revision = 0;
+                break;
+            case 5:
+                boot.seed_conversion_version = 2;
+                break;
+            case 6:
+                boot.region_hold_ticks = 0;
+                break;
+            case 7:
+                boot.daylight_denominator = 0;
+                break;
+            case 8:
+                boot.system_gates[0] = 2;
+                break;
+            case 9:
+                boot.scalar_bits[0] = UINT64_C(0x7ff0000000000000);
+                break;
+            case 10:
+                boot.vector_bits[0][0] = 0x7f800000u;
+                break;
+            case 11:
+                boot.system_config_identity.clear();
+                break;
+            case 12:
+                boot.region_reduced_shift = 0;
+                break;
+            case 13:
+                boot.region_reduced_shift = 17;
+                break;
+            case 14:
+                boot.avatar_count = AuthorityBoot::kMaxAvatars + 1;
+                break;
+            case 15:
+                boot.day_length_ticks = 0;
+                break;
+            case 16:
+                boot.day_length_ticks = std::uint32_t{1} << 31;
+                break;
+            case 17:
+                boot.days_per_year = 0;
+                break;
+            case 18:
+                boot.days_per_year = 367;
+                break;
+            case 19:
+                boot.daylight_numerator = 0;
+                break;
+            case 20:
+                boot.daylight_numerator = boot.daylight_denominator;
+                break;
+            case 21:
+                boot.daylight_denominator = 65536;
+                break;
+            case 22:
+                boot.daylight_numerator = 2;
+                boot.daylight_denominator = 4;
+                break;
+            case 23:
+                boot.lunar_cycle_days = 0;
+                break;
+            case 24:
+                boot.lunar_cycle_days = 367;
+                break;
+            case 25:
+                header.version = 4;
+                break;
+            default:
+                FAIL() << "unhandled mutation";
+        }
+        replay::ReplayWriter writer;
+        EXPECT_FALSE(writer.Open(m_path, header));
+        EXPECT_FALSE(writer.Finalize(0));
+        replay::BoundedReplayRecorder bounded;
+        ASSERT_TRUE(bounded.Configure(18, 0));
+        EXPECT_FALSE(bounded.Open(m_path, header));
+        EXPECT_NE(bounded.OpenRefusal().find("authority-boot"), std::string_view::npos);
+        EXPECT_FALSE(fs::exists(m_path));
+        if (header.authority_boot.has_value()) {
+            std::vector<std::uint8_t> output{0xab};
+            std::string error;
+            if (mutation >= 3 && mutation != 25) {
+                EXPECT_FALSE(Luminumbra::world::EncodeAuthorityBootDescriptor(
+                    *header.authority_boot, output, error));
+                EXPECT_EQ(output, (std::vector<std::uint8_t>{0xab}));
+                EXPECT_FALSE(error.empty());
+            }
+        }
+    }
+}
+
+TEST_F(ReplayStreamTest, AuthorityBootReplayRefusesEveryTruncationAndMalformedEnvelope) {
+    for (const auto version : {replay::kLrec1BootVersion, replay::kLrec1BootElidedVersion}) {
+        auto header = MakeHeader();
+        header.version = version;
+        header.authority_boot = PopulatedAuthorityBoot(header.system_config_identity);
+        replay::ReplayWriter writer;
+        ASSERT_TRUE(writer.Open(m_path, header));
+        writer.RecordInput(1, {0xab});
+        ASSERT_TRUE(writer.Finalize(1));
+        const auto bytes = ReadBytes();
+        const auto boot = bytes.find("AUBD");
+        ASSERT_NE(boot, std::string::npos);
+        const auto refuse = [](const std::string& malformed) {
+            std::istringstream input(malformed);
+            std::string error;
+            EXPECT_FALSE(replay::ReadReplay(input, {}, error).has_value());
+            EXPECT_FALSE(error.empty());
+        };
+        for (std::size_t length = 0; length < bytes.size(); ++length) {
+            SCOPED_TRACE(length);
+            refuse(bytes.substr(0, length));
+        }
+        refuse(bytes + '\0');
+        for (const auto& [offset, value] :
+             std::vector<std::pair<std::size_t, char>>{{0, 'X'},
+                                                       {5, 1},
+                                                       {6, 127},
+                                                       {10, 2},
+                                                       {boot - 1, 127},
+                                                       {boot, 'X'},
+                                                       {boot + 4, 127},
+                                                       {boot + 22, 'X'},
+                                                       {bytes.size() - 32 - 18, 127},
+                                                       {bytes.size() - 16, 2}}) {
+            auto changed = bytes;
+            changed[offset] = value;
+            SCOPED_TRACE(offset);
+            refuse(changed);
+        }
+        auto oversized_record = bytes;
+        oversized_record[oversized_record.size() - 32 - 5] = 127;
+        refuse(oversized_record);
+        // A framed record extension is forbidden in the new family.
+        auto extension = bytes;
+        extension[extension.size() - 32 - 9] = 6; // frame payload length, formerly 5
+        extension.insert(extension.size() - 32, 1, '\0');
+        refuse(extension);
+        // A descriptor extension inside its envelope is forbidden too.
+        std::vector<std::uint8_t> descriptor;
+        std::string error;
+        ASSERT_TRUE(header.authority_boot.has_value());
+        if (!header.authority_boot.has_value()) {
+            return;
+        }
+        ASSERT_TRUE(Luminumbra::world::EncodeAuthorityBootDescriptor(
+            *header.authority_boot, descriptor, error));
+        auto extra_descriptor = bytes;
+        const auto length = static_cast<std::uint32_t>(descriptor.size() + 1);
+        for (std::size_t index = 0; index < 4; ++index) {
+            extra_descriptor[boot - 4 + index] = static_cast<char>((length >> (8 * index)) & 0xffu);
+        }
+        extra_descriptor.insert(boot + descriptor.size(), 1, '\0');
+        refuse(extra_descriptor);
+        std::istringstream limited(bytes);
+        EXPECT_FALSE(replay::ReadReplay(limited, {.field_bytes = 1, .records = 1}).has_value());
+        std::istringstream no_records(bytes);
+        EXPECT_FALSE(
+            replay::ReadReplay(no_records, {.field_bytes = 4096, .records = 0}).has_value());
+    }
+}
+
+TEST_F(ReplayStreamTest, AuthorityBootReadDiagnosticsCoverProviderAndPathFailures) {
+    auto header = MakeHeader();
+    header.version = replay::kLrec1BootVersion;
+    header.authority_boot = PopulatedAuthorityBoot(header.system_config_identity);
+    replay::ReplayWriter writer;
+    ASSERT_TRUE(writer.Open(m_path, header));
+    writer.RecordInput(1, {});
+    ASSERT_TRUE(writer.Finalize(1));
+    const auto bytes = ReadBytes();
+    for (const auto failure : {ReplayProvider::SeekFailure::End,
+                               ReplayProvider::SeekFailure::Tell,
+                               ReplayProvider::SeekFailure::Rewind}) {
+        for (const bool exceptions : {false, true}) {
+            ReplayProvider provider(bytes, bytes.size());
+            provider.seek_failure = failure;
+            std::istream input(&provider);
+            if (exceptions) {
+                input.exceptions(std::ios::failbit | std::ios::badbit);
+            }
+            std::string error;
+            EXPECT_FALSE(replay::ReadReplay(input, {}, error).has_value());
+            EXPECT_FALSE(error.empty());
+        }
+    }
+    for (const auto length : {std::size_t{0}, bytes.find("AUBD"), bytes.size() - 8}) {
+        for (const bool allocation_failure : {false, true}) {
+            ReplayProvider provider(bytes, bytes.size());
+            if (allocation_failure) {
+                provider.allocation_after = length;
+            } else {
+                provider.read_limit = length;
+            }
+            std::istream input(&provider);
+            input.exceptions(std::ios::failbit | std::ios::badbit);
+            std::string error;
+            EXPECT_FALSE(replay::ReadReplay(input, {}, error).has_value());
+            EXPECT_FALSE(error.empty());
+        }
+    }
+    for (const auto& path : {m_path + ".missing", ReplayTempDir().string()}) {
+        std::string error;
+        EXPECT_FALSE(replay::ReadReplay(path, {}, error).has_value());
+        EXPECT_FALSE(error.empty());
+    }
 }
 
 // Header fields survive a write/read round-trip exactly.
@@ -2529,6 +3062,231 @@ TEST_F(ReplayStreamTest, LegacyHeaderWithoutConfigIdentityIsRejected) {
     ASSERT_TRUE(writer.Open(m_path, header));
     ASSERT_TRUE(writer.Finalize(0));
     EXPECT_FALSE(replay::ReadReplay(m_path).has_value());
+}
+
+TEST_F(ReplayStreamTest, ScheduledLockstepRefusesEvenMatchingPeers) {
+    namespace net = Luminumbra::Net;
+    using Schedule = Luminumbra::Systems::WeatherSchedule;
+    const Schedule schedule{.phases = {{0, Luminumbra::Systems::WeatherCategory::Clear, 0, 0}},
+                            .strike_tick = std::nullopt};
+    Luminumbra::world::GameSession identity;
+    ASSERT_TRUE(identity.SetWeatherSchedule(schedule));
+    net::LockstepConfig config;
+    config.system_config_identity = identity.SystemConfigIdentity();
+    config.preset_content_hash = MakeHeader().preset_content_hash;
+    auto peer_config = config;
+    peer_config.local_client_id = config.peer_client_id;
+    peer_config.peer_client_id = config.local_client_id;
+    auto [local, peer] = net::MakeLoopbackPair();
+    ASSERT_TRUE(peer->SendFrame(net::EncodeHello(net::MakeLockstepHello(peer_config))));
+    net::LockstepSession session(config, local.get(), {});
+    session.SetDumpPath(m_path);
+    EXPECT_FALSE(session.Handshake());
+    EXPECT_FALSE(session.Status().handshaken);
+    EXPECT_EQ(session.Status().handshake_error, "scheduled weather is unsupported by lockstep");
+    EXPECT_FALSE(fs::exists(m_path));
+}
+
+TEST_F(ReplayStreamTest, ScheduledHeadersRoundtripAcrossAllRecordersAndVersions) {
+    using Schedule = Luminumbra::Systems::WeatherSchedule;
+    Schedule schedule;
+    for (std::uint64_t tick = 0; tick < Schedule::kMaxPhases; ++tick) {
+        schedule.phases.push_back({tick, Luminumbra::Systems::WeatherCategory::Rain, 65535, 65535});
+    }
+    schedule.strike_tick = 1;
+    auto header = MakeHeader();
+    header.weather_schedule = schedule.canonical_bytes();
+    ASSERT_EQ(header.weather_schedule.size(), Schedule::kMaxEncodedBytes);
+    Luminumbra::world::GameSession identity;
+    ASSERT_TRUE(identity.SetWeatherSchedule(schedule));
+    header.system_config_identity = identity.SystemConfigIdentity();
+    for (const auto version : {replay::kLrec1WeatherVersion, replay::kLrec1WeatherElidedVersion}) {
+        header.version = version;
+        replay::ReplayWriter writer;
+        ASSERT_TRUE(writer.Open(m_path, header));
+        writer.RecordInput(1, {9});
+        ASSERT_TRUE(writer.Finalize(1));
+        const auto expected = ReadBytes();
+        replay::BoundedReplayRecorder bounded;
+        ASSERT_TRUE(bounded.Configure(18, 0));
+        ASSERT_TRUE(bounded.Open(m_path, header)) << bounded.OpenRefusal();
+        ASSERT_TRUE(bounded.RecordTick(1, {9}, nullptr, 1));
+        ASSERT_TRUE(bounded.Finalize(m_path, 1, 1));
+        EXPECT_EQ(ReadBytes(), expected);
+        replay::QueuedReplayRecorder queued;
+        ASSERT_TRUE(queued.Configure(18, 0));
+        ASSERT_TRUE(queued.Open(m_path, header)) << queued.OpenRefusal();
+        ASSERT_TRUE(queued.RecordTick(1,
+                                      std::make_shared<const std::vector<std::uint8_t>>(
+                                          std::initializer_list<std::uint8_t>{9}),
+                                      nullptr,
+                                      1));
+        ASSERT_TRUE(queued.Finalize(m_path, 1, 1));
+        EXPECT_EQ(ReadBytes(), expected);
+        const auto parsed = replay::ReadReplay(m_path);
+        ASSERT_TRUE(parsed.has_value());
+        if (!parsed.has_value()) {
+            return;
+        }
+        EXPECT_EQ(parsed->header.weather_schedule, header.weather_schedule);
+        EXPECT_EQ(parsed->header.version, version);
+        EXPECT_TRUE(replay::ConfigurationMatches(
+            parsed->header, header.system_config_identity, header.preset_content_hash));
+    }
+    header.version = replay::kLrec1WeatherVersion;
+    replay::BoundedReplayRecorder suffix;
+    ASSERT_TRUE(suffix.Configure(18, 0));
+    ASSERT_TRUE(suffix.Open(m_path, header)) << suffix.OpenRefusal();
+    for (std::uint64_t tick = 1; tick <= 2048; ++tick) {
+        ASSERT_TRUE(suffix.RecordTick(tick, {9}, nullptr, tick));
+    }
+    ASSERT_TRUE(suffix.Finalize(m_path, 2048, 2048));
+    const auto parsed = replay::ReadReplay(m_path);
+    ASSERT_TRUE(parsed.has_value());
+    if (!parsed.has_value()) {
+        return;
+    }
+    EXPECT_FALSE(parsed->truncated);
+    EXPECT_TRUE(parsed->trailer_present);
+    EXPECT_EQ(parsed->header.version, replay::kLrec1WeatherElidedVersion);
+    EXPECT_EQ(parsed->header.weather_schedule, header.weather_schedule);
+    EXPECT_EQ(parsed->elided_through_tick, 1024u);
+    ASSERT_EQ(parsed->inputs.size(), 1024u);
+    EXPECT_EQ(parsed->inputs.front().tick, 1025u);
+    auto downgraded = ReadBytes();
+    downgraded[6] = static_cast<char>(replay::kLrec1WeatherVersion);
+    std::istringstream input(downgraded);
+    const auto refused_suffix = replay::ReadReplay(input);
+    ASSERT_TRUE(refused_suffix.has_value());
+    if (!refused_suffix.has_value()) {
+        return;
+    }
+    EXPECT_TRUE(refused_suffix->truncated);
+    EXPECT_EQ(refused_suffix->elided_through_tick, 0u);
+    EXPECT_EQ(refused_suffix->header.weather_schedule, header.weather_schedule);
+}
+
+TEST_F(ReplayStreamTest, ScheduledHeaderFailuresRefuseBeforePublishingOrReplacingState) {
+    for (const auto version : {replay::kLrec1WeatherVersion, replay::kLrec1WeatherElidedVersion}) {
+        SCOPED_TRACE(version);
+        using Schedule = Luminumbra::Systems::WeatherSchedule;
+        const Schedule schedule{.phases = {{0, Luminumbra::Systems::WeatherCategory::Clear, 0, 0}},
+                                .strike_tick = std::nullopt};
+        auto header = MakeHeader();
+        header.version = version;
+        header.weather_schedule = schedule.canonical_bytes();
+        Luminumbra::world::GameSession identity;
+        ASSERT_TRUE(identity.SetWeatherSchedule(schedule));
+        header.system_config_identity = identity.SystemConfigIdentity();
+        replay::ReplayWriter writer;
+        ASSERT_TRUE(writer.Open(m_path, header));
+        ASSERT_TRUE(writer.Finalize(0));
+        const auto original = ReadBytes();
+        const auto schedule_offset = original.size() - 32 - header.weather_schedule.size();
+        for (std::size_t length = 0; length < schedule_offset + header.weather_schedule.size();
+             ++length) {
+            std::istringstream input(original.substr(0, length));
+            EXPECT_FALSE(replay::ReadReplay(input).has_value()) << length;
+        }
+        std::vector<std::string> malformed;
+        auto bytes = original;
+        bytes[5] = 1;
+        malformed.push_back(bytes);
+        bytes = original;
+        bytes[schedule_offset + 3] = '2';
+        malformed.push_back(bytes);
+        for (const std::uint32_t size : {0u,
+                                         static_cast<std::uint32_t>(Schedule::kMaxEncodedBytes + 1),
+                                         (std::numeric_limits<std::uint32_t>::max)()}) {
+            bytes = original;
+            for (std::size_t index = 0; index < 4; ++index) {
+                bytes[schedule_offset - 4 + index] = static_cast<char>((size >> (8 * index)) & 255);
+            }
+            malformed.push_back(bytes);
+        }
+        for (const unsigned invalid_version : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 9u, 255u}) {
+            bytes = original;
+            bytes[6] = static_cast<char>(invalid_version);
+            malformed.push_back(bytes);
+        }
+        for (const auto& invalid : malformed) {
+            std::istringstream input(invalid);
+            EXPECT_FALSE(replay::ReadReplay(input).has_value());
+        }
+        // The oversized field fits this sparse provider and its owned-byte budget.
+        // Refuse at the length, before allocating or reading any schedule payload.
+        bytes = original;
+        PatchU32(
+            bytes, schedule_offset - 4, static_cast<std::uint32_t>(Schedule::kMaxEncodedBytes + 1));
+        ReplayProvider oversized(bytes, std::uint64_t{1} << 40);
+        std::istream oversized_input(&oversized);
+        EXPECT_FALSE(replay::ReadReplay(oversized_input).has_value());
+        EXPECT_EQ(oversized.bytes_read, schedule_offset);
+        std::istringstream budgeted(original);
+        EXPECT_FALSE(replay::ReadReplay(budgeted, {.field_bytes = 1, .records = 1}).has_value());
+        std::vector<replay::ReplayHeader> refused;
+        for (const auto& encoding : {std::string{},
+                                     std::string{"WSC2"},
+                                     std::string(Schedule::kMaxEncodedBytes + 1, '0')}) {
+            auto invalid = header;
+            invalid.weather_schedule = encoding;
+            refused.push_back(invalid);
+        }
+        auto invalid = header;
+        invalid.system_config_identity = MakeHeader().system_config_identity;
+        refused.push_back(invalid);
+        for (const std::uint16_t invalid_version : {std::uint16_t{3},
+                                                    std::uint16_t{4},
+                                                    std::uint16_t{5},
+                                                    std::uint16_t{6},
+                                                    std::uint16_t{9}}) {
+            invalid = header;
+            invalid.version = invalid_version;
+            refused.push_back(invalid);
+            if (invalid_version == replay::kLrec1BootVersion ||
+                invalid_version == replay::kLrec1BootElidedVersion) {
+                invalid.authority_boot = PopulatedAuthorityBoot(header.system_config_identity);
+                refused.push_back(invalid);
+            }
+            if (invalid_version <= replay::kLrec1BootElidedVersion) {
+                invalid.system_config_identity = MakeHeader().system_config_identity;
+                if (invalid.authority_boot.has_value()) {
+                    invalid.authority_boot = PopulatedAuthorityBoot(invalid.system_config_identity);
+                }
+                refused.push_back(invalid);
+            }
+        }
+        invalid = header;
+        invalid.version = replay::kLrec1Version;
+        invalid.weather_schedule.clear();
+        refused.push_back(invalid);
+        invalid = header;
+        invalid.authority_boot = PopulatedAuthorityBoot(header.system_config_identity);
+        refused.push_back(invalid);
+        ASSERT_TRUE(writer.Open(m_path, header));
+        writer.RecordInput(1, {});
+        for (const auto& rejected : refused) {
+            EXPECT_FALSE(writer.Open(m_path, rejected));
+            EXPECT_EQ(writer.InputRecordCount(), 1u);
+            replay::BoundedReplayRecorder bounded;
+            ASSERT_TRUE(bounded.Configure(18, 0));
+            EXPECT_FALSE(bounded.Open(m_path, rejected));
+            EXPECT_FALSE(bounded.OpenRefusal().empty());
+            EXPECT_EQ(bounded.SegmentCount(), 0u);
+            replay::QueuedReplayRecorder queued;
+            ASSERT_TRUE(queued.Configure(18, 0));
+            EXPECT_FALSE(queued.Open(m_path, rejected));
+            EXPECT_EQ(ReadBytes(), original);
+        }
+        ASSERT_TRUE(writer.Finalize(1));
+        const auto retained = replay::ReadReplay(m_path);
+        ASSERT_TRUE(retained.has_value());
+        if (!retained.has_value()) {
+            return;
+        }
+        ASSERT_EQ(retained->inputs.size(), 1u);
+        EXPECT_EQ(retained->header.weather_schedule, header.weather_schedule);
+    }
 }
 
 // Input records (including an EMPTY input set) and checkpoints round-trip with

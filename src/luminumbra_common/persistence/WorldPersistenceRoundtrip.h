@@ -108,6 +108,9 @@ std::string SerializeChunkAuthoritySnapshotJson(const Chunk& chunk, bool omit_wa
 // below accepts this form and the plain-JSON form.
 // Optional process-local proof of the integer water grid contract, captured while encoding.
 std::string SerializeChunkRecordPayloadJson(const Chunk& chunk, bool* strict_water_valid = nullptr);
+// Allocation-free validation using the saved water grid, mirror and scalar rules.
+// Dormant and Off states retain bounded arrays independently of their resolution.
+bool HasValidWaterPersistenceState(const Chunk& chunk);
 bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
                                          WorldStreamingState& out_state,
                                          std::vector<std::string>& errors,

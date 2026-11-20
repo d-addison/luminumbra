@@ -323,6 +323,56 @@ TEST(FarVolumeBuildQueue, ForgottenRunningKeyCanReturnWithSameIdentityAfterDrain
     EXPECT_EQ(queue.Pump(1), 0u);
 }
 
+TEST(FarVolumeBuildQueue, ForgottenRunningKeyAcceptsFreshIntentButRevivedLiveKeyDoesNot) {
+    for (const bool batch : {false, true}) {
+        SCOPED_TRACE(batch);
+        JobSystem jobs;
+        jobs.startup(1);
+        FarVolumeMemoryPool pool(64ULL * 1024ULL * 1024);
+        FarVolumeBuildQueue queue(jobs, pool, QueueLimits(2, 2));
+        auto barrier = std::make_shared<Barrier>();
+        ReleaseOnExit const release{barrier};
+        auto original = AirRequest();
+        original.intent.extra_span = FarVolumeCoverageSpan{-512, 512};
+        original.authority.height = [barrier](std::int64_t, std::int64_t) {
+            barrier->Enter();
+            return 0.0f;
+        };
+        ASSERT_EQ(queue.Submit(original), FarVolumeSubmitStatus::Queued);
+        ASSERT_EQ(queue.Pump(1), 1u);
+        ASSERT_TRUE(barrier->WaitEntered());
+        // Cancellation alone retains the live contract.
+        queue.Cancel(original.identity.key);
+        auto returned = original;
+        returned.intent.extra_span = FarVolumeCoverageSpan{-256, 64};
+        EXPECT_EQ(queue.Submit(returned), FarVolumeSubmitStatus::Invalid);
+        if (batch) {
+            EXPECT_EQ(queue.ForgetMatching([](const FarTileKey&) noexcept { return true; }), 2u);
+        } else {
+            queue.Forget(original.identity.key);
+        }
+        auto invalid = returned;
+        invalid.intent.extra_span = FarVolumeCoverageSpan{64, -256};
+        EXPECT_EQ(queue.Submit(invalid), FarVolumeSubmitStatus::Invalid);
+        EXPECT_EQ(queue.Stats().pending, 0u);
+        ASSERT_EQ(queue.ResultCapacity(), 1u);
+        ASSERT_EQ(queue.Submit(returned), FarVolumeSubmitStatus::Coalesced);
+        EXPECT_EQ(queue.Submit(original), FarVolumeSubmitStatus::Invalid);
+        EXPECT_EQ(queue.Submit(returned), FarVolumeSubmitStatus::Duplicate);
+        EXPECT_EQ(queue.Pump(1), 0u);
+        EXPECT_EQ(queue.Stats().pending, 1u);
+        EXPECT_FALSE(queue.TakeCompleted(returned.identity, returned.intent));
+        barrier->Release();
+        const auto result = WaitResult(queue, returned);
+        ASSERT_TRUE(result);
+        if (result) {
+            EXPECT_EQ(result->status(), FarVolumeBuildStatus::ReadyEmpty);
+            EXPECT_EQ(result->identity(), returned.identity);
+        }
+        EXPECT_EQ(queue.Stats().dispatched, 2u);
+    }
+}
+
 TEST(FarVolumeBuildQueue, EveryCurrencyFieldPreventsWrongCompletion) {
     JobSystem jobs;
     jobs.startup(1);

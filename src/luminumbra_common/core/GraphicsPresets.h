@@ -12,7 +12,7 @@
 namespace luminumbra::core {
 
 // Revisions are immutable: retain old tables when introducing a new revision.
-inline constexpr std::uint32_t kGraphicsPresetRevision = 3;
+inline constexpr std::uint32_t kGraphicsPresetRevision = 4;
 enum class GraphicsPreset : std::uint8_t {
     Low,
     Medium,
@@ -71,6 +71,7 @@ struct GraphicsValues {
     bool gpu_sky_lut = true;
     bool exposure_meter = false;
     bool live_menu_preview = true;
+    bool terrain_near_refinement = false;
 };
 
 [[nodiscard]] bool operator==(const GraphicsValues& left, const GraphicsValues& right);
@@ -92,8 +93,8 @@ struct GraphicsDetectionMetadata {
 struct GraphicsSettings {
     GraphicsOverrides overrides;
     GraphicsDetectionMetadata detection;
-    // Ultra retains revision 2 for stable saved bytes. Explicit lower-tier selections use
-    // revision 3.
+    // Unselected/legacy settings retain revision 2. Explicit selections use the current
+    // revision; loading a saved selection preserves its revision and overrides.
     std::uint32_t preset_revision = 2;
     GraphicsPreset base_preset = GraphicsPreset::Ultra;
 };
@@ -108,8 +109,8 @@ struct ResolvedGraphics {
     // Measurement overrides are resolved separately at presentation time.
     FramePacing frame_pacing{.vsync = true, .frame_cap = 0};
     GraphicsPreset base_preset = GraphicsPreset::Ultra;
-    // Ultra retains revision 2 for stable saved bytes. Explicit lower-tier selections use
-    // revision 3.
+    // Unselected/legacy settings retain revision 2. Explicit selections use the current
+    // revision; loading a saved selection preserves its revision and overrides.
     std::uint32_t preset_revision = 2;
     bool custom = false;
     // The caller can display session-only effective values; never persisted.

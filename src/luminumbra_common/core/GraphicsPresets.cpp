@@ -51,6 +51,7 @@ constexpr GraphicsValues kUltraRevision1{
     .gpu_sky_lut = true,
     .exposure_meter = false,
     .live_menu_preview = true,
+    .terrain_near_refinement = false,
 };
 
 // Immutable revision-1 visuals, also used by revision 3.
@@ -82,6 +83,15 @@ constexpr auto kRevision1 = [] {
 
 // Immutable revision-2 visuals preserve Ultra's complete shipping presentation for every tier.
 constexpr std::array kRevision2{kUltraRevision1, kUltraRevision1, kUltraRevision1, kUltraRevision1};
+
+// Revision 4 retains the approved tier visuals and enables budgeted near-terrain
+// refinement on High/Ultra. Saved revisions 1-3 retain their original payloads.
+constexpr auto kRevision4 = [] {
+    auto values = kRevision1;
+    values[2].terrain_near_refinement = true;
+    values[3].terrain_near_refinement = true;
+    return values;
+}();
 
 // Compare every resolved field without serialization or allocation.
 auto GraphicsValueMembers(const GraphicsValues& values) {
@@ -119,7 +129,8 @@ auto GraphicsValueMembers(const GraphicsValues& values) {
                     values.taau,
                     values.gpu_sky_lut,
                     values.exposure_meter,
-                    values.live_menu_preview);
+                    values.live_menu_preview,
+                    values.terrain_near_refinement);
 }
 
 bool ApplyGraphicsOverrides(const GraphicsOverrides& overrides,
@@ -129,6 +140,11 @@ bool ApplyGraphicsOverrides(const GraphicsOverrides& overrides,
         if (key == "grass_enabled") {
             if (const auto* enabled = std::get_if<bool>(&value)) {
                 values.grass_enabled = *enabled;
+                continue;
+            }
+        } else if (key == "terrain_near_refinement") {
+            if (const auto* enabled = std::get_if<bool>(&value)) {
+                values.terrain_near_refinement = *enabled;
                 continue;
             }
         } else if (key == "ui_blur") {
@@ -227,7 +243,7 @@ bool SelectGraphicsPreset(GraphicsSettings& settings, GraphicsPreset preset) {
     if (GraphicsPresetName(preset).empty())
         return false;
     settings.base_preset = preset;
-    settings.preset_revision = preset == GraphicsPreset::Ultra ? 2 : kGraphicsPresetRevision;
+    settings.preset_revision = kGraphicsPresetRevision;
     ResetGraphicsOverrides(settings);
     return true;
 }
@@ -242,7 +258,7 @@ bool ResolveGraphics(const GraphicsSettings& settings,
                      std::string& error,
                      FramePacing frame_pacing) {
     if ((settings.preset_revision != 1 && settings.preset_revision != 2 &&
-         settings.preset_revision != kGraphicsPresetRevision) ||
+         settings.preset_revision != 3 && settings.preset_revision != kGraphicsPresetRevision) ||
         GraphicsPresetName(settings.base_preset).empty()) {
         error = "unsupported graphics preset or revision";
         return false;
@@ -252,7 +268,9 @@ bool ResolveGraphics(const GraphicsSettings& settings,
         return false;
     }
     const auto index = static_cast<std::size_t>(settings.base_preset);
-    const auto& base = settings.preset_revision == 2 ? kRevision2[index] : kRevision1[index];
+    const auto& base = settings.preset_revision == kGraphicsPresetRevision ? kRevision4[index]
+                       : settings.preset_revision == 2                     ? kRevision2[index]
+                                                                           : kRevision1[index];
     ResolvedGraphics resolved{.values = base,
                               .frame_pacing = frame_pacing,
                               .base_preset = settings.base_preset,

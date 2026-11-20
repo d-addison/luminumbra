@@ -4,12 +4,14 @@
 #include "rendering/AttributedGl.h"
 
 #include "FarLodIntegrationBudget.h"
+#include "FarWorldSelection.h"
 #include "GBufferTargets.h"
 #include "Shader.h"
 #include "core/Log.h"
 #include "luminumbra_common/core/Crc32.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/FarLodStore.h"
 #include "luminumbra_common/world/MarchingCubes.h"
 #include "passes/PassGlHelpers.h"
@@ -1007,6 +1009,7 @@ void FarLodSystem::wait_for_builds() {
 void FarLodSystem::prepare_world_swap() {
     wait_for_builds();
     m_world = nullptr;
+    m_submitted_live_terrain.clear();
     ++m_epoch;
 }
 
@@ -1042,6 +1045,7 @@ void FarLodSystem::release_region(ResidentRegion& region) {
 
 void FarLodSystem::shutdown() {
     prepare_world_swap();
+    m_resident_live_terrain.clear();
     for (auto& [key, region] : m_residents) {
         (void)key;
         release_region(region);
@@ -1088,7 +1092,7 @@ bool FarLodSystem::build_result_current(const BuildResult& result) const {
            result.region_authority_revision == result.sdf_snapshot->region_authority_revision &&
            result.region_authority_revision ==
                m_world->far_lod_region_authority_revision(result.rx, result.rz) &&
-           m_world->is_far_lod_sdf_snapshot_current(*result.sdf_snapshot);
+           m_world->is_far_lod_sdf_snapshot_current(*result.sdf_snapshot, true);
 }
 
 void FarLodSystem::queue_completed_saves() {
@@ -1642,6 +1646,132 @@ FarLodSystem::region_admission(int rx, int rz, const glm::vec3& anchor) const {
             .wanted = nearest <= m_wanted_radius_m};
 }
 
+StaticPropSubmission SelectStaticPropSubmission(const FarWorldSelection& selection,
+                                                bool impostor_candidate,
+                                                bool live_terrain_owned,
+                                                bool far_terrain_resident) noexcept {
+    if (!impostor_candidate) {
+        return StaticPropSubmission::Mesh;
+    }
+    if (live_terrain_owned) {
+        return StaticPropSubmission::Impostor;
+    }
+    if (!selection.submit || !far_terrain_resident) {
+        return StaticPropSubmission::Refused;
+    }
+    return StaticPropSubmission::Impostor;
+}
+
+namespace {
+bool live_chunk_key(const glm::vec3& position, u64& key) {
+    if (!std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z)) {
+        return false;
+    }
+    const double chunk_x = std::floor(static_cast<double>(position.x) / CHUNK_SIZE_X);
+    const double chunk_y = std::floor(static_cast<double>(position.y) / CHUNK_SIZE_Y);
+    const double chunk_z = std::floor(static_cast<double>(position.z) / CHUNK_SIZE_Z);
+    if (chunk_x < Chunk::kPackedMinXz || chunk_x > Chunk::kPackedMaxXz ||
+        chunk_y < Chunk::kPackedMinY || chunk_y > Chunk::kPackedMaxY ||
+        chunk_z < Chunk::kPackedMinXz || chunk_z > Chunk::kPackedMaxXz) {
+        return false;
+    }
+    key = Chunk::calculate_id(
+        {static_cast<int>(chunk_x), static_cast<int>(chunk_y), static_cast<int>(chunk_z)});
+    return true;
+}
+} // namespace
+
+void SubmittedLiveTerrain::clear() {
+    m_chunks.clear();
+    m_submitted_chunks.clear();
+}
+
+void SubmittedLiveTerrain::assign_origins(std::span<const glm::vec4> origins) {
+    m_submitted_chunks.reserve(origins.size());
+    clear();
+    for (const auto& origin : origins) {
+        u64 key = 0;
+        if (live_chunk_key(glm::vec3(origin), key)) {
+            m_submitted_chunks.emplace_back(key, true);
+        }
+    }
+    std::sort(m_submitted_chunks.begin(), m_submitted_chunks.end());
+    m_submitted_chunks.erase(std::unique(m_submitted_chunks.begin(), m_submitted_chunks.end()),
+                             m_submitted_chunks.end());
+}
+
+void SubmittedLiveTerrain::add_origin(const glm::vec3& origin) {
+    u64 key = 0;
+    if (live_chunk_key(origin, key)) {
+        m_chunks.insert(key);
+    }
+}
+
+void SubmittedLiveTerrain::remove_chunk(u64 chunk_id) {
+    m_chunks.erase(chunk_id);
+    const auto index = submitted_index(chunk_id);
+    if (index < m_submitted_chunks.size()) {
+        m_submitted_chunks[index].second = false;
+    }
+}
+
+std::size_t SubmittedLiveTerrain::submitted_index(u64 chunk_id) const {
+    const auto found =
+        std::lower_bound(m_submitted_chunks.begin(),
+                         m_submitted_chunks.end(),
+                         chunk_id,
+                         [](const auto& chunk, u64 key) { return chunk.first < key; });
+    return found != m_submitted_chunks.end() && found->first == chunk_id
+               ? static_cast<std::size_t>(found - m_submitted_chunks.begin())
+               : m_submitted_chunks.size();
+}
+
+bool SubmittedLiveTerrain::covers(const glm::vec3& position) const {
+    const auto contains = [this](u64 chunk_id) {
+        const auto index = submitted_index(chunk_id);
+        return m_chunks.contains(chunk_id) ||
+               (index < m_submitted_chunks.size() && m_submitted_chunks[index].second);
+    };
+    u64 key = 0;
+    if (live_chunk_key(position, key) && contains(key)) {
+        return true;
+    }
+    // A root exactly on a chunk's top face is supported by the chunk below it.
+    if (std::fmod(position.y, static_cast<float>(CHUNK_SIZE_Y)) != 0.0f) {
+        return false;
+    }
+    const glm::vec3 below(position.x,
+                          std::nextafter(position.y, -std::numeric_limits<float>::infinity()),
+                          position.z);
+    return live_chunk_key(below, key) && contains(key);
+}
+
+bool FarLodSystem::terrain_resident_at(const glm::vec3& position) const {
+    if (!m_enabled || !std::isfinite(position.x) || !std::isfinite(position.y) ||
+        !std::isfinite(position.z)) {
+        return false;
+    }
+    const float distance = glm::length(position - m_last_camera_position);
+    const bool inner_clipped =
+        m_preview_mode
+            ? glm::length(glm::vec2(position.x - m_preview_anchor.x,
+                                    position.z - m_preview_anchor.z)) < m_preview_inner_radius
+            : distance < kFarClipInnerRadiusMeters;
+    if ((!m_preview_mode && (!std::isfinite(distance) || distance > m_outer_clip_m)) ||
+        inner_clipped) {
+        return false;
+    }
+    const double region_x = std::floor(static_cast<double>(position.x) / kRegionSize);
+    const double region_z = std::floor(static_cast<double>(position.z) / kRegionSize);
+    if (region_x < std::numeric_limits<int>::min() || region_x > std::numeric_limits<int>::max() ||
+        region_z < std::numeric_limits<int>::min() || region_z > std::numeric_limits<int>::max()) {
+        return false;
+    }
+    const auto found =
+        m_residents.find(region_key(static_cast<int>(region_x), static_cast<int>(region_z)));
+    return found != m_residents.end() && found->second.element_count != 0;
+}
+
 void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
                                 const glm::mat4& view,
                                 const glm::vec4 frustum_planes[6],
@@ -1678,8 +1808,11 @@ void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
     // the centre region (where the slice sits). So in preview mode disable those
     // and instead discard far fragments inside the FIXED live slice via the
     // centre-relative world-space radius (u_farPreviewInnerRadius). Live geometry
-    // still wins in the slice via the depth bias + polygon offset above.
+    // still wins in the slice via the depth bias + polygon offset above. The
+    // orbit camera can also lie beyond the resident slice's outer clip, so
+    // preview disables that camera-relative boundary as well.
     if (m_preview_mode) {
+        geometry_shader.setFloat("u_farClipFarRadius", 0.0f);
         geometry_shader.setFloat("u_farClipInnerRadius", 0.0f);
         geometry_shader.setFloat("u_farClipNearRadius", 0.0f);
         geometry_shader.setVec2("u_farPreviewCenterXZ",
@@ -1747,9 +1880,9 @@ void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
                             .generated_mesh = mesh_key});
         }
         Luminumbra::Rendering::AttributedGl::Submit(glDrawElements,
-                                                    GL_TRIANGLES,
+                                                    GLenum{GL_TRIANGLES},
                                                     static_cast<GLsizei>(region.element_count),
-                                                    GL_UNSIGNED_INT,
+                                                    GLenum{GL_UNSIGNED_INT},
                                                     nullptr);
         ++draws_out;
         indices_out += region.element_count;
@@ -1800,9 +1933,9 @@ void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
         }
         Luminumbra::Rendering::AttributedGl::Submit(
             glDrawElements,
-            GL_TRIANGLES,
+            GLenum{GL_TRIANGLES},
             static_cast<GLsizei>(region.water_element_count),
-            GL_UNSIGNED_INT,
+            GLenum{GL_UNSIGNED_INT},
             nullptr);
         ++draws_out;
         indices_out += region.water_element_count;

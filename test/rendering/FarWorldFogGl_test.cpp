@@ -1,6 +1,7 @@
 #include "luminumbra_client/rendering/Camera.h"
 #include "luminumbra_client/rendering/FarWorldDepthPosition.h"
 #include "luminumbra_client/rendering/FarWorldFog.h"
+#include "luminumbra_client/rendering/TimeOfDayModel.h"
 #include "luminumbra_client/rendering/passes/PlantProcgenPass.h"
 #include "rendering/Shader.h"
 
@@ -282,6 +283,98 @@ TEST_F(FarWorldFogGl, ProductionAerialMatchesCompleteCppCompositionAndRawRadialF
     }
 }
 
+// Isolates analytic aerial perspective from geometry coverage and cast shadows.
+// Native fixed-pose capture must attribute those separate producers if this stays smooth.
+TEST_F(FarWorldFogGl, DuskAuditFogIsContinuousAcrossDistanceAndHeightBoundaries) {
+    auto program = Production("volumetric_lighting.frag");
+    ASSERT_TRUE(program->IsValid());
+    auto& shader = *program;
+    const auto sun = ComputeSunGeometry(.25f, kSeasonalTiltAmplitude);
+    shader.setVec3("u_sunDirection", -sun.direction);
+    shader.setFloat("u_sunCosZenith", sun.upFactor);
+    shader.setFloat("u_skyDayFactor", sun.skyDomeDayFactor);
+    std::vector<glm::vec3> sky(extent * extent);
+    for (int y = 0; y < extent; ++y) {
+        for (int x = 0; x < extent; ++x) {
+            sky[static_cast<std::size_t>(y * extent + x)] =
+                glm::vec3(.003f, .002f, .001f) * (1.0f + static_cast<float>(x + y) / extent);
+        }
+    }
+    const auto lut = Input(shader, "u_skyViewLut", GL_RGB32F, GL_RGB, sky);
+    glTextureParameteri(lut, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTextureParameteri(lut, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    Input(shader,
+          "u_transmittanceLut",
+          GL_RGB32F,
+          GL_RGB,
+          std::vector<glm::vec3>(extent * extent, {.8f, .3f, .1f}));
+    shader.setInt("u_volumetricMode", 0);
+    for (const float yaw : {0.0f, 240.0f}) {
+        SCOPED_TRACE(yaw);
+        Camera camera;
+        camera.Position = {168.0f, 10.0505952835083f, -40.0f};
+        camera.Yaw = yaw;
+        camera.Pitch = 0;
+        camera.Zoom = 75;
+        camera.updateCameraVectors();
+        shader.setVec3("u_viewPos", camera.Position);
+        const auto inverse_view = glm::inverse(camera.GetViewMatrix());
+        for (const bool ladder : {false, true}) {
+            SCOPED_TRACE(ladder);
+            const float plane = ladder ? kFarPlaneMeters : kLegacyFarPlaneMeters;
+            shader.setInt("u_farWorldLadder", ladder ? 1 : 0);
+            shader.setMat4(
+                "u_inverseProjection",
+                glm::inverse(ReversedZPerspective(glm::radians(camera.Zoom), 2.4f, .1f, plane)));
+            shader.setFloat("u_aerialMaxDistance", ladder ? kFarPlaneMeters : 1600.0f);
+            for (const float density : {.00045f, .002f}) {
+                SCOPED_TRACE(density); // Clear and denser weather aerosol.
+                shader.setFloat("u_aerialDensity", density);
+                for (const float boundary : {176.0f, 1600.0f, 2000.0f, 14745.6f, 16384.0f}) {
+                    if (boundary + .02f >= plane) {
+                        continue;
+                    }
+                    SCOPED_TRACE(boundary);
+                    std::array<glm::vec4, 2> samples{};
+                    for (std::size_t side = 0; side < samples.size(); ++side) {
+                        const float distance = boundary + (side == 0 ? -.02f : .02f);
+                        Depth(shader,
+                              "gDepth",
+                              std::vector<float>(extent * extent, DepthAt(distance, plane)));
+                        shader.setMat4("u_inverseView", inverse_view);
+                        samples[side] = Draw();
+                    }
+                    Near(samples[0], samples[1], .002f);
+                    EXPECT_GT(samples[0].a, .01f); // A disabled/empty fog cannot pass.
+                }
+                // Smooth aerosol integration switches formula at |dh|=.001;
+                // valley mist clamps at its top (70 m) and bottom (18 m).
+                for (const float height : {10.300595f, 18.0f, 70.0f}) {
+                    SCOPED_TRACE(height);
+                    std::array<glm::vec4, 2> samples{};
+                    for (std::size_t side = 0; side < samples.size(); ++side) {
+                        auto inverse = inverse_view;
+                        const float target_height = height + (side == 0 ? -.002f : .002f);
+                        // Centre ray at 1600 m: a small slope places terrain at
+                        // either side of the height boundary without moving the eye.
+                        inverse[2] = glm::vec4(
+                            glm::vec3(inverse_view[2]) -
+                                glm::vec3(0, (target_height - camera.Position.y) / 1600.0f, 0),
+                            0);
+                        shader.setMat4("u_inverseView", inverse);
+                        Depth(shader,
+                              "gDepth",
+                              std::vector<float>(extent * extent, DepthAt(1600, plane)));
+                        samples[side] = Draw();
+                    }
+                    Near(samples[0], samples[1], .002f);
+                    EXPECT_GT(samples[0].a, .01f);
+                }
+            }
+        }
+    }
+}
+
 TEST_F(FarWorldFogGl, ProductionMarkerDepthRoundTripsWithSharedAerialInverseAndJitter) {
     // Execute the real writer (including its uniform upload), rather than
     // injecting synthetic depth. Registered in the existing software-GL lane.
@@ -449,8 +542,11 @@ TEST_F(FarWorldFogGl, ProductionConsumersUseDepthForFarCentersAndAllNeighbors) {
             shader.setVec3("u_pointLights[0].color", glm::vec3(1));
             shader.setFloat("u_pointLights[0].intensity", 1);
             shader.setFloat("u_pointLights[0].radius", 50);
-            shader.setFloat("u_caveSkyMaxDist", 1);
-            shader.setInt("u_caveSkySteps", 4);
+            // Keep poisoned neighbors inside both the thickness band and the
+            // distance falloff; a rejected occluder cannot validate depth reads.
+            shader.setFloat("u_caveSkyMaxDist", 2);
+            shader.setFloat("u_caveThickness", 1.5f);
+            shader.setInt("u_caveSkySteps", 8);
             shader.setFloat("u_caveAmbientFloor", .1f);
         }
         if (ssao) {
