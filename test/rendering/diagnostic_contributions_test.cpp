@@ -783,7 +783,8 @@ TEST(DiagnosticContributions,
                                  "std::uncaught_exceptions() > exceptions_",
                                  "m_surface->view == mode()",
                                  "m_surface->extent.width == ctx.internal_w()",
-                                 "m_surface->extent.height == ctx.internal_h()"}) {
+                                 "m_surface->extent.height == ctx.internal_h()",
+                                 "if (identity_view || contribution_view) {"}) {
         EXPECT_NE(pass.find(contract), std::string::npos) << contract;
     }
     const auto shader = Source("res/shaders/debug_view.frag");

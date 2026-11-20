@@ -931,7 +931,8 @@ void DebugViewPass::execute(const RenderContext& ctx) {
     }
     std::array<GLint, 2> polygon_mode{};
     std::optional<InspectorStorageBinding> storage_binding;
-    if (identity_view) {
+    if (identity_view || contribution_view) {
+        // Both programs declare InspectorResult; binding 7 must hold the validated store.
         storage_binding.emplace();
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, m_snapshot->sample_buffer);
     }
