@@ -150,7 +150,7 @@
     "res/shaders/tree_impostor.vert": "6e69ff1391d2d6dd6ef93d7c72c3c387cc4009b3bccf317e5c050018f2e1d796",
     "src/luminumbra_client/rendering/Camera.h": "eccf0f45502d6a41b96833328a5c45258cf19599eb6a23aafd76dccf1009546c",
     "src/luminumbra_client/rendering/SkyAtmosphereLut.ipp": "50fe51e78e3ba33c36e4bad2248a57d09c0289ed730142c0aa447e4bc6567930",
-    "test/rendering/shader_scene_render_test.cpp": "fe0b85639ace854906cb28907fe629fc73ce20fe1ad8bc698ecd21eb89f5c36f"
+    "test/rendering/shader_scene_render_test.cpp": "bbfd3d65d5ebdc6337ae69b11cea5177880ae4a70708e8b5352623b0aa3ded04"
   },
   "reference_capture": {
     "material": {

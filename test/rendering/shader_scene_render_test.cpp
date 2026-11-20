@@ -1199,6 +1199,9 @@ void ShaderScene::PostEdge() {
             }
         }
     }
+    // 508 border pixels minus 4. The silhouette covers left-border rows 48..79;
+    // rows 49..78 have a uniform foreground footprint and stay eligible. Only
+    // rows 47, 48, 79 and 80 see both identities in their 3x3 footprint.
     ASSERT_EQ(count, 504u * 3);
     std::sort(errors.begin(), errors.begin() + static_cast<std::ptrdiff_t>(count));
     const float residual = errors[(count * 99 + 99) / 100 - 1];
