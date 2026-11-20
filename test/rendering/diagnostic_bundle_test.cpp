@@ -76,6 +76,20 @@ std::string ReadFile(const std::filesystem::path& path) {
     return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
 }
 
+std::string ReadSourceFile(const std::filesystem::path& path) {
+    auto text = ReadFile(path);
+    // Source contracts compare logical lines; retain all non-CRLF bytes.
+    // This in-place pass is bounded by the source bytes already read.
+    std::size_t output = 0;
+    for (std::size_t input = 0; input < text.size(); ++input) {
+        if (text[input] != '\r' || input + 1 == text.size() || text[input + 1] != '\n') {
+            text[output++] = text[input];
+        }
+    }
+    text.resize(output);
+    return text;
+}
+
 std::uint32_t Word(std::string_view bytes, std::size_t offset) {
     std::uint32_t word = 0;
     for (unsigned int channel = 0; channel < 4; ++channel) {
@@ -627,12 +641,46 @@ TEST_F(DiagnosticBundleTest, RuntimeSweepEnvironmentWithoutDiagnosticsIsUnchange
     }
 }
 
+TEST_F(DiagnosticBundleTest, SourceReaderNormalizesOnlyCrLf) {
+    const auto path = directory / "source.cpp";
+    constexpr std::array<std::string_view, 7> inputs{"",
+                                                     "one\ntwo\n",
+                                                     "one\r\ntwo\r\n",
+                                                     "one\rtwo\r",
+                                                     "one\r\ntwo\nthree\r\n",
+                                                     "\r\r\nlast\r",
+                                                     "no terminator"};
+    constexpr std::array<std::string_view, 7> expected{"",
+                                                       "one\ntwo\n",
+                                                       "one\ntwo\n",
+                                                       "one\rtwo\r",
+                                                       "one\ntwo\nthree\n",
+                                                       "\r\nlast\r",
+                                                       "no terminator"};
+    for (std::size_t index = 0; index < inputs.size(); ++index) {
+        SCOPED_TRACE(index);
+        {
+            std::ofstream output(path, std::ios::binary);
+            output << inputs[index];
+            output.close();
+            ASSERT_TRUE(output.good());
+        }
+        EXPECT_EQ(ReadFile(path), inputs[index]);
+        EXPECT_EQ(ReadSourceFile(path), expected[index]);
+    }
+    EXPECT_TRUE(std::filesystem::remove_all(directory));
+    EXPECT_TRUE(ReadSourceFile(path).empty());
+}
+
 TEST(DiagnosticBundleWiring, SharedAdapterOwnsEveryAdmittedCapturePath) {
     const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
-    const auto pipeline = ReadFile(root / "src/luminumbra_client/rendering/RenderPipeline.cpp");
-    const auto main = ReadFile(root / "src/luminumbra_client/main_client.cpp");
-    const auto sweep = ReadFile(root / "src/luminumbra_client/core/scenarios/WorldVisualSweep.cpp");
-    const auto hooks = ReadFile(root / "src/luminumbra_client/core/ScenarioRunnerCapture.cpp");
+    const auto pipeline =
+        ReadSourceFile(root / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const auto main = ReadSourceFile(root / "src/luminumbra_client/main_client.cpp");
+    const auto sweep =
+        ReadSourceFile(root / "src/luminumbra_client/core/scenarios/WorldVisualSweep.cpp");
+    const auto hooks =
+        ReadSourceFile(root / "src/luminumbra_client/core/ScenarioRunnerCapture.cpp");
     EXPECT_NE(pipeline.find("DiagnosticFrameCapture::Admitted"), std::string::npos);
     EXPECT_NE(pipeline.find("scope->unsupported(\"later_deferred_contributors\")"),
               std::string::npos);
@@ -649,11 +697,11 @@ TEST(DiagnosticBundleWiring, SharedAdapterOwnsEveryAdmittedCapturePath) {
               std::string::npos);
     EXPECT_NE(main.find("capture_finished = renderPipeline.capture_diagnostics(image)"),
               std::string::npos);
-    EXPECT_NE(main.find("renderPipeline.with_diagnostic_capture("), std::string::npos);
+    EXPECT_NE(main.find("destination_reservation(renderPipeline, screenshot)"), std::string::npos);
     EXPECT_NE(sweep.find("pipeline->with_diagnostic_capture("), std::string::npos);
     EXPECT_NE(sweep.find("pipeline->end_diagnostic_capture()"), std::string::npos);
     EXPECT_NE(hooks.find("renderPipeline.end_diagnostic_capture()"), std::string::npos);
-    const auto header = ReadFile(root / "src/luminumbra_client/rendering/RenderPipeline.h");
+    const auto header = ReadSourceFile(root / "src/luminumbra_client/rendering/RenderPipeline.h");
     EXPECT_NE(header.find("const bool has_sheets = !geometry.sites.empty()"), std::string::npos);
     EXPECT_NE(header.find("m_capture_waterfall_geometry = has_sheets"), std::string::npos);
     EXPECT_NE(
@@ -664,18 +712,21 @@ TEST(DiagnosticBundleWiring, SharedAdapterOwnsEveryAdmittedCapturePath) {
 
 TEST(DiagnosticBundleWiring, DestinationAdmissionPrecedesEveryCaptureWriter) {
     const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
-    const auto header = ReadFile(root / "src/luminumbra_client/rendering/RenderPipeline.h");
-    const auto pipeline = ReadFile(root / "src/luminumbra_client/rendering/RenderPipeline.cpp");
-    const auto main = ReadFile(root / "src/luminumbra_client/main_client.cpp");
-    const auto readback = ReadFile(root / "src/luminumbra_client/rendering/DiagnosticReadback.h");
-    EXPECT_NE(header.find("diagnostic_capture_destination_available(path) &&"), std::string::npos);
-    EXPECT_LT(header.find("diagnostic_capture_destination_available(path) &&"),
+    const auto header = ReadSourceFile(root / "src/luminumbra_client/rendering/RenderPipeline.h");
+    const auto pipeline =
+        ReadSourceFile(root / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const auto main = ReadSourceFile(root / "src/luminumbra_client/main_client.cpp");
+    const auto readback =
+        ReadSourceFile(root / "src/luminumbra_client/rendering/DiagnosticReadback.h");
+    EXPECT_NE(header.find("reservation.acquired() && diagnostic_capture_ready() &&"),
+              std::string::npos);
+    EXPECT_LT(header.find("reservation.acquired() && diagnostic_capture_ready() &&"),
               header.find("WithCaptureManifest(path, observe(), write_capture)"));
     EXPECT_NE(pipeline.find(
                   "return DiagnosticCaptureDestinationAvailable(capture, m_capture_diagnostics);"),
               std::string::npos);
     const std::regex scan_writer(
-        R"(destination_available =\s*renderPipeline.diagnostic_capture_destination_available\(\s*diagnostic_image\);\s*bool capture_finished =\s*destination_available &&\s*Luminumbra::Rendering::WithCaptureManifest\()");
+        R"(destination_available =\s*destination_reservation.acquired\(\);\s*bool capture_finished =\s*destination_available &&\s*renderPipeline.diagnostic_capture_ready\(\) &&\s*Luminumbra::Rendering::WithCaptureManifest\()");
     EXPECT_TRUE(std::regex_search(main, scan_writer));
     const std::regex scan_refusal(
         R"(if \(!destination_available\) \{\s*exit_code = 2;\s*LUMINUMBRA_CORE_ERROR\(\s*"Frame-scan destination occupied or inaccessible: \{\}",\s*diagnostic_image.string\(\)\);\s*\} else if \(!capture_finished\)\s*capture_failure)");
@@ -683,6 +734,9 @@ TEST(DiagnosticBundleWiring, DestinationAdmissionPrecedesEveryCaptureWriter) {
         R"(if \(!destination_available\) \{\s*exit_code = 2;\s*LUMINUMBRA_CORE_ERROR\("Benchmark capture destination occupied or inaccessible: \{\}",\s*screenshot.string\(\)\);\s*\} else if \(!screenshot_complete\)\s*capture_failure)");
     EXPECT_TRUE(std::regex_search(main, scan_refusal));
     EXPECT_TRUE(std::regex_search(main, benchmark_refusal));
+    const std::regex benchmark_disabled(
+        R"(if \(!renderPipeline.capture_diagnostics_enabled\(\)\) \{\s*screenshot_complete = write_screenshot\(\);\s*\} else \{\s*screenshot_complete =\s*renderPipeline.diagnostic_capture_ready\(\) &&)");
+    EXPECT_TRUE(std::regex_search(main, benchmark_disabled));
     EXPECT_NE(readback.find("if (!vacant(capture) || !vacant(manifest))"), std::string::npos);
     EXPECT_NE(readback.find("std::filesystem::symlink_status(path, error)"), std::string::npos);
     EXPECT_NE(readback.find("status.type() == std::filesystem::file_type::not_found"),
@@ -703,10 +757,83 @@ TEST(DiagnosticBundleWiring, DestinationAdmissionPrecedesEveryCaptureWriter) {
     }
 }
 
+TEST(DiagnosticBundleWiring, ReservationOwnsAdmissionBeforeEveryPayload) {
+    const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
+    const auto pipeline =
+        ReadSourceFile(root / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const auto header = ReadSourceFile(root / "src/luminumbra_client/rendering/RenderPipeline.h");
+    const auto main = ReadSourceFile(root / "src/luminumbra_client/main_client.cpp");
+    const auto sweep =
+        ReadSourceFile(root / "src/luminumbra_client/core/scenarios/WorldVisualSweep.cpp");
+    const auto artifacts =
+        ReadSourceFile(root / "src/luminumbra_common/persistence/CreatedWorldArtifacts.h");
+    EXPECT_NE(pipeline.find("pending->journal.write_file(marker, \"\");"), std::string::npos);
+    EXPECT_NE(pipeline.find("marker += \".lck\";"), std::string::npos);
+    EXPECT_NE(pipeline.find("std::filesystem::create_directories(parent, error);"),
+              std::string::npos);
+    EXPECT_LT(pipeline.find("std::filesystem::create_directories(parent, error);"),
+              pipeline.find("pending->journal.bind_existing_root(parent);"));
+    EXPECT_LT(pipeline.find("pending->journal.write_file(marker, \"\");"),
+              pipeline.find("if (DiagnosticCaptureDestinationAvailable(capture,"));
+    EXPECT_NE(pipeline.find("(void)journal.rollback();"), std::string::npos);
+    EXPECT_NE(artifacts.find("CREATE_NEW,"), std::string::npos);
+    EXPECT_NE(artifacts.find("std::fopen(path.c_str(), \"wbx\")"), std::string::npos);
+    EXPECT_LT(header.find("const CaptureDestinationReservation reservation(*this, path);"),
+              header.find("WithCaptureManifest(path, observe(), write_capture)"));
+    EXPECT_NE(main.find("renderPipeline, diagnostic_image);"), std::string::npos);
+    EXPECT_NE(main.find("destination_reservation(renderPipeline, screenshot)"), std::string::npos);
+    EXPECT_NE(sweep.find("write_water_mask();"), std::string::npos);
+    EXPECT_LT(sweep.find("cell.produced = pipeline->with_diagnostic_capture("),
+              sweep.find("write_water_mask();"));
+}
+
+TEST(DiagnosticBundleWiring, DiagnosticRefusalCannotLeaveACompleteManifest) {
+    const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
+    const auto pipeline =
+        ReadSourceFile(root / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const auto header = ReadSourceFile(root / "src/luminumbra_client/rendering/RenderPipeline.h");
+    const auto main = ReadSourceFile(root / "src/luminumbra_client/main_client.cpp");
+    EXPECT_NE(header.find("reservation.acquired() && diagnostic_capture_ready() &&"),
+              std::string::npos);
+    EXPECT_NE(main.find("renderPipeline.diagnostic_capture_ready() &&"), std::string::npos);
+    EXPECT_NE(pipeline.find("DiagnosticManifestRollback manifest_rollback(capture);"),
+              std::string::npos);
+    EXPECT_LT(pipeline.find("DiagnosticManifestRollback manifest_rollback(capture);"),
+              pipeline.find("const bool captured = ending->finish("));
+    EXPECT_NE(pipeline.find("journal_.record_staged_file(manifest, file);"), std::string::npos);
+    EXPECT_NE(pipeline.find("(void)journal_.rollback();"), std::string::npos);
+    EXPECT_NE(pipeline.find("if (captured) {\n            manifest_rollback.preserve();"),
+              std::string::npos);
+}
+
+TEST(DiagnosticBundleWiring, FailureReportsReserveDiagnosticDestinations) {
+    const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
+    const auto main = ReadSourceFile(root / "src/luminumbra_client/main_client.cpp");
+    EXPECT_NE(main.find("const auto write_capture_failure_report ="), std::string::npos);
+    EXPECT_NE(
+        main.find("if (!renderPipeline.capture_diagnostics_enabled() || destination_reserved)"),
+        std::string::npos);
+    EXPECT_NE(main.find("renderPipeline, diagnostic_failure_image);"), std::string::npos);
+    EXPECT_NE(main.find("return reservation.acquired() && write_report();"), std::string::npos);
+    const std::regex failure_guarded(
+        R"(const auto capture_failure =[\s\S]*?if \(!write_capture_failure_report\(\s*report,\s*\[&\] \{\s*if \(!Luminumbra::Rendering::WriteCaptureText\(report, failure.dump\(2\))");
+    const std::regex settling_guarded(
+        R"(if \(!report.empty\(\)\) \{\s*if \(!write_capture_failure_report\(report, \[&\] \{\s*return Luminumbra::Rendering::WriteCaptureText\(report,\s*failure.dump\(2\))");
+    EXPECT_TRUE(std::regex_search(main, failure_guarded));
+    EXPECT_TRUE(std::regex_search(main, settling_guarded));
+    const std::regex scan_owned(
+        R"(capture_failure\(g_app.capture.frame_scan_path,\s*"frame_capture_incomplete",\s*true\);)");
+    const std::regex benchmark_owned(
+        R"(capture_failure\(g_app.capture.render_benchmark_screenshot \+ ".json",\s*"benchmark_screenshot_incomplete",\s*true\);)");
+    EXPECT_TRUE(std::regex_search(main, scan_owned));
+    EXPECT_TRUE(std::regex_search(main, benchmark_owned));
+}
+
 TEST(DiagnosticBundleWiring, BenchmarkArmsOnlyTheUnmeasuredCaptureFrame) {
     const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
-    const auto main = ReadFile(root / "src/luminumbra_client/main_client.cpp");
-    const auto pipeline = ReadFile(root / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const auto main = ReadSourceFile(root / "src/luminumbra_client/main_client.cpp");
+    const auto pipeline =
+        ReadSourceFile(root / "src/luminumbra_client/rendering/RenderPipeline.cpp");
     const std::regex startup(
         R"(renderPipeline.set_capture_diagnostics\(path_options.diagnostics\);\s*renderPipeline.set_diagnostic_capture_armed\(g_app.capture.render_benchmark_path.empty\(\)\);)");
     const std::regex capture_frame(
@@ -719,8 +846,9 @@ TEST(DiagnosticBundleWiring, BenchmarkArmsOnlyTheUnmeasuredCaptureFrame) {
 
 TEST(DiagnosticBundleWiring, ParityRefusalPrecedesPathOutput) {
     const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
-    const auto config = ReadFile(root / "src/luminumbra_client/core/RuntimeScenarioConfig.cpp");
-    const auto main = ReadFile(root / "src/luminumbra_client/main_client.cpp");
+    const auto config =
+        ReadSourceFile(root / "src/luminumbra_client/core/RuntimeScenarioConfig.cpp");
+    const auto main = ReadSourceFile(root / "src/luminumbra_client/main_client.cpp");
     EXPECT_NE(
         config.find(
             "for (const auto* parity : {\"--render-parity-frame\", \"--upscale-seam-parity\"})"),

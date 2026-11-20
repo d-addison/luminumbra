@@ -1,4 +1,9 @@
 #version 450 core
+
+#ifdef LUMIN_DIAG_IDS
+layout (location = 6) out uvec4 gDiagnosticIds;
+uniform uvec4 u_diagnosticIds;
+#endif
 layout (location = 5) out vec4 gAuthoredSurface; // RGB emission, A material lane
 //  render-only PROCEDURAL plant pass (behind render.plant_procgen).
 // Writes the SAME deferred G-buffer layout as g_buffer.frag so the downstream
@@ -60,4 +65,7 @@ void main()
     gNormalMaterial = vec4(encoded_normal * 0.5 + 0.5, clamp(u_markerEmissive, 0.0, 1.0), material_id_normalized);
     gAlbedoRoughness = vec4(albedo, roughness);
     gMetallicAO = vec2(0.0, 1.0);
+#ifdef LUMIN_DIAG_IDS
+    gDiagnosticIds = u_diagnosticIds;
+#endif
 }

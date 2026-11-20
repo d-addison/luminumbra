@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <system_error>
 
@@ -24,6 +25,7 @@
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
+#include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/world/ActiveRegionLedger.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/PlayerAvatar.h"
@@ -202,6 +204,8 @@ struct ServerTickReport {
 class ServerWorldRunner {
 public:
     explicit ServerWorldRunner(ServerWorldRunnerConfig config);
+    ServerWorldRunner(ServerWorldRunnerConfig config,
+                      const world::OwnerContinuationOptions& options);
     ~ServerWorldRunner();
 
     ServerWorldRunner(const ServerWorldRunner&) = delete;
@@ -298,6 +302,43 @@ public:
         return m_avatars;
     }
 
+    // Boot diagnostic: restored owners never increment the spawn-path counter.
+    std::size_t SpawnedAvatarCount() const {
+        return m_spawnedAvatarCount;
+    }
+    // Number of owner anchors gathered at the last fixed tick; excludes world residency.
+    std::size_t OwnerAnchorVisitCount() const {
+        return m_ownerAnchorVisits;
+    }
+    // Internal continuation entry points for a caller that restores owners in
+    // player-ID order instead of using the existing Boot spawn path. Supply the
+    // remaining frozen captures and finish the roster before stepping or spawning.
+    bool CaptureAvatarOwner(std::size_t index, World::PlayerAvatarOwnerState& output) const {
+        return m_session && index < m_avatars.size() &&
+               m_session->CaptureAvatarOwner(m_avatars[index], index, output);
+    }
+
+    bool RestoreAvatarOwner(const World::PlayerAvatarOwnerState& state,
+                            std::span<const World::PhysicsOwnerState> remaining_frozen = {}) {
+        if (!m_session || m_session->GetSimulationTickCount() != 0 ||
+            state.avatar.player_id != m_avatars.size()) {
+            return false;
+        }
+        auto* physics = m_session->GetPhysicsSystem();
+        if (!physics || physics->avatar_character_slot_count() != m_avatars.size() ||
+            m_avatars.size() >= Systems::PhysicsSystem::kMaxRestoredAvatars) {
+            return false;
+        }
+        m_avatars.reserve(m_avatars.size() + 1);
+        World::PlayerAvatar avatar;
+        std::size_t index = 0;
+        if (!m_session->RestoreAvatarOwner(state, avatar, index, remaining_frozen)) {
+            return false;
+        }
+        m_avatars.push_back(avatar);
+        return true;
+    }
+
     //  gate: the per-tick availability-set trace captured during the last
     // RunFixedTicks when config.availability_trace was set. Each entry is
     // (tick_index, digest) where digest is a deterministic FNV-1a over the sorted
@@ -325,6 +366,13 @@ public:
 private:
     std::string m_bootError;
     ServerWorldRunnerConfig m_config;
+    world::OwnerContinuationOptions m_continuationOptions;
+    std::uint64_t m_ownerStreamTick = 0;
+    std::size_t m_spawnedAvatarCount = 0;
+    std::size_t m_ownerAnchorVisits = 0;
+    Vec3 m_ownerOrigin{};
+    Vec3 m_ownerAnchor{};
+    std::vector<Vec3> m_ownerStreamingAnchors;
     Luminumbra::JobSystem m_jobSystem;
     std::unique_ptr<world::GameSession> m_session;
     std::vector<World::PlayerAvatar> m_avatars; // Deterministic player avatars.

@@ -402,9 +402,6 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
         // Pass 2: Render all instanced static meshes
         geometry_pass_static_meshes(ctx, input, registry, camera, fp, stats);
         if (authored) {
-            if (auto* capture = GBufferDiagnosticCapture::Current()) {
-                capture->unsupported("authored_static_surface");
-            }
             const auto authored_stats =
                 m_authored_pass->Render(*input.authored_view, input.authored_draws, m_gbuffer);
             stats.authored_draws += authored_stats.draws;
@@ -431,6 +428,7 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
                                        GBufferDrawStats& stats) {
     Shader* shader = geometry_shader(input.far_selection.effective).get();
     auto* capture = GBufferDiagnosticCapture::Current();
+    FarWorldDiagnosticDraw diagnostic_draw(capture);
     FarWorldPassUniforms diagnostic_uniforms;
     if (capture) {
         shader = capture->variant(shader, input.far_selection.effective == FarWorldMode::Ladder);
@@ -520,9 +518,6 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
     // cull/draw/index counts; we fold them into the returned stats with the EXACT
     // current policy (terrain_visible_chunks '=', draws/indices '+=').
     const TerrainSubmitStats ts = input.submit_terrain_chunks(frustum_planes);
-    if (capture && ts.draws != 0) {
-        capture->unsupported("live_terrain_mdi_unsupported");
-    }
     stats.terrain_visible_chunks = ts.visible_chunks;
     stats.terrain_draws += ts.draws;
     stats.terrain_indices += ts.indices;
@@ -544,13 +539,18 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
             return result;
         },
         input.submit_ladder,
-        [&uniforms, capture](const FarWorldDrawCommand& command) {
-            if (capture) {
-                capture->unsupported(
-                    "ladder_backend_identity_unavailable", 0, DiagnosticOwnership::LadderFar);
+        [&uniforms, capture, &diagnostic_draw](const FarWorldDrawCommand& command) {
+            if (!uniforms.Prepare(command)) {
+                return false;
             }
-            return uniforms.Prepare(command);
+            if (capture) {
+                diagnostic_draw.prepare(command);
+            }
+            return true;
         });
+    if (capture && far_stats.refused) {
+        capture->abort();
+    }
     stats.far_region_draws += far_stats.draws;
     stats.far_indices += far_stats.indices;
     stats.far_water_indices += far_stats.water_indices;
@@ -639,8 +639,10 @@ void GBufferPass::build_static_prop_cache(entt::registry& registry) {
                 anchorSlots.try_emplace({anchor_coords.x, anchor_coords.y, anchor_coords.z},
                                         static_cast<std::uint32_t>(m_anchorChunks.size()));
             if (inserted) {
-                m_anchorChunks.push_back(
-                    {.coords = anchor_coords, .chunk = nullptr, .resolved = false});
+                m_anchorChunks.push_back({.coords = anchor_coords,
+                                          .chunk = nullptr,
+                                          .resolved = false,
+                                          .supportOwner = {}});
             }
             cp.anchorSlot = slot->second;
         }
@@ -1014,6 +1016,7 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                 // textured tree parts sway in the wind (rigid props stay at 0).
                 shader->setFloat("u_windStrength", 1.0f);
                 shader->setInt("u_forceFlat", 0);
+                shader->setInt("u_leafSurface", 0);
             } else {
                 glBindTexture(GL_TEXTURE_2D_ARRAY,
                               ctx.skinned_textures.id ? ctx.skinned_textures.id
@@ -1029,15 +1032,18 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                 // key suffix so only procgen leaves flutter.
                 const bool isLeaf = batch.basePath.size() >= 5 &&
                                     batch.basePath.rfind("_leaf") == batch.basePath.size() - 5;
-                shader->setInt("u_alphaTest", isLeaf ? 2 : 0);
-                two_sided = isLeaf;
-                shader->setFloat("u_windStrength", isLeaf ? 0.85f : 0.0f);
-                // Leaves use the dedicated cutout material at every LOD. Other
-                // foliage retains its existing distant flat-material optimization;
-                // near bushes, bark, and rigid props keep terrain texturing.
-                const bool isBush = batch.basePath.find("procgen://bush_") != std::string::npos;
+                const bool isBush = batch.basePath.starts_with("procgen://bush_");
                 const bool isFarLod = batch.drawPath.find(".lod") != std::string::npos;
-                shader->setInt("u_forceFlat", ((isLeaf || isBush) && isFarLod) ? 1 : 0);
+                const bool leafCards = isLeaf || (isBush && !isFarLod);
+                shader->setInt("u_alphaTest", leafCards ? 2 : 0);
+                two_sided = leafCards;
+                // Near bush leaf cards sway like procgen leaves; far hulls and bark stay rigid.
+                shader->setFloat("u_windStrength", leafCards ? 0.85f : 0.0f);
+                // Shrubs are foliage at every distance, never opaque grass-textured stone.
+                // Distant shrubs keep the closed hull; only their near mesh uses leaf cards.
+                shader->setInt("u_forceFlat", (isBush || (isLeaf && isFarLod)) ? 1 : 0);
+                // Near cards and distant hulls share the leaf reflectance, not grass.
+                shader->setInt("u_leafSurface", isBush ? 1 : 0);
             }
         }
         if (two_sided || !cull_was_enabled)
@@ -1085,7 +1091,10 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                     }
                 }
                 const bool generated = batch.drawPath.starts_with("procgen://");
-                const bool unattributed = generated || identity_path_unrecordable;
+                const bool unattributed = identity_path_unrecordable;
+                const std::string generated_key = generated && !identity_path_unrecordable
+                                                      ? "procedural/" + batch.drawPath.substr(10)
+                                                      : std::string{};
                 const std::string_view variant =
                     identity_path_unrecordable ? "static_mesh_identity_path_limit"
                     : input.far_selection.effective == FarWorldMode::Ladder
@@ -1093,14 +1102,16 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                         : "instanced_static_mesh";
                 for (GLsizei instance = 0; instance < instance_count; ++instance) {
                     capture->write(*shader,
-                                   {.mesh_path = unattributed ? std::string_view{} : batch.drawPath,
+                                   {.mesh_path = unattributed || generated ? std::string_view{}
+                                                                           : batch.drawPath,
                                     .shader_variant = variant,
                                     .chunk = {},
                                     .lod = resolved_lod,
                                     .ownership = DiagnosticOwnership::Live,
                                     .pass = DiagnosticPass::GBuffer,
                                     .provenance = unattributed ? DiagnosticProvenance::Unsupported
-                                                               : DiagnosticProvenance::Mesh});
+                                                               : DiagnosticProvenance::Mesh,
+                                    .generated_mesh = generated_key});
                     Luminumbra::Rendering::AttributedGl::Submit(
                         glDrawElementsInstancedBaseInstance,
                         GLenum{GL_TRIANGLES},

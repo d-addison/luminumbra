@@ -28,18 +28,23 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <span>
 #include <stop_token>
 #include <string>
 #include <vector>
 
 namespace Luminumbra::World {
 class FarWorldAuthorityProducer;
+struct PlayerAvatar;
+struct PlayerAvatarOwnerState;
+struct PhysicsOwnerState;
 struct FarWorldAuthorityConfig;
 } // namespace Luminumbra::World
 
 namespace Luminumbra::Persistence {
 class CreatedWorldArtifacts;
 struct AuthorityCaptureResult;
+struct OwnerContinuation;
 enum class AuthorityCaptureParts;
 } // namespace Luminumbra::Persistence
 
@@ -82,6 +87,10 @@ struct WeatherEventState; //  (): the epoch-schedule POD (WeatherEventSystem.h)
 
 namespace Luminumbra::world {
 
+struct OwnerContinuationOptions {
+    bool owner_continuation = false;
+};
+
 struct WorldConfigValidationResult {
     bool ok = false;
     std::filesystem::path preset_path;
@@ -114,6 +123,8 @@ public:
     struct AuthorityProfileOptions {
         // Slice I will bind this predicate to its negotiated authority revision.
         bool residency_free_eviction = false;
+        // Dormant until negotiated authority enables fixed-tick water ownership.
+        bool regional_water = false;
     };
 
     // Selects the test-only opt-in constructor below.
@@ -128,6 +139,18 @@ public:
     // binary that names it fails to link, so nothing can opt in before slice I ties
     // the option to negotiated identity.
     GameSession(const AuthorityProfileOptions& authority_profile, AuthorityProfileTestOnly);
+    explicit GameSession(const OwnerContinuationOptions& options);
+    // Internal owner-thread binding. The roster outlives the session; capture occurs
+    // between ticks, before dispatching persistence work. IDs are ascending and contiguous.
+    void ConfigureOwnerContinuation(const std::vector<World::PlayerAvatar>& avatars,
+                                    std::uint32_t expected_count,
+                                    bool moving_anchor,
+                                    bool water_smoke);
+    void SetOwnerContinuationAnchor(const Vec3& origin, const Vec3& anchor, std::uint64_t tick);
+    const Persistence::OwnerContinuation* RestoredOwnerContinuation() const;
+    // Runner boot reserves this storage through SetReplicatedSimulationAnchors.
+    void SetOwnerContinuationSimulationAnchors(std::span<const Vec3> anchors);
+
     ~GameSession();
 
     // Initialize a new world with the given parameters. Refusal before adoption
@@ -196,6 +219,12 @@ public:
         bool aether_state = false;
         bool job_system_available = false;
         bool transient_creation = false;
+        bool owner_continuation = false;
+        std::uint32_t owner_world_seed = 0;
+        std::string owner_preset_identity;
+        std::optional<std::uint32_t> owner_roster_count;
+        bool owner_moving_anchor = false;
+        bool owner_water_smoke = false;
     };
     struct WorldPreparation;
     WorldPreparationOptions CaptureWorldPreparationOptions() const;
@@ -336,6 +365,22 @@ public:
     Systems::PhysicsSystem* GetPhysicsSystem() {
         return m_physicsSystem.get();
     }
+
+    // Internal owner continuation; no save/hash/boot adoption until explicitly called.
+    // Supply not-yet-restored frozen captures to reserve their body slots. Finish
+    // the roster before stepping or allocating other bodies (owner-thread exclusion).
+    // The singleton player carries no body allocation; restore referenced bodies
+    // and their allocator first, as for avatar continuation. Refusal changes nothing.
+    bool CapturePlayerOwner(World::PhysicsOwnerState& output) const;
+    bool RestorePlayerOwner(const World::PhysicsOwnerState& state);
+    // Restore requires the player ID to equal the next physics roster slot.
+    bool CaptureAvatarOwner(const World::PlayerAvatar& avatar,
+                            std::size_t physics_index,
+                            World::PlayerAvatarOwnerState& output) const;
+    bool RestoreAvatarOwner(const World::PlayerAvatarOwnerState& state,
+                            World::PlayerAvatar& avatar,
+                            std::size_t& physics_index,
+                            std::span<const World::PhysicsOwnerState> remaining_frozen = {});
 
     // the deterministic wind field. Sim-authoritative; its cell
     // values feed the world_hash `wind` sub-hash. Constructed on world
@@ -721,11 +766,24 @@ public:
     std::filesystem::path GetSaveRootPath() const;
 
 private:
+    // Advances opt-in regional water for one fixed tick; a no-op when it is dormant.
+    void UpdateRegionalWaterFromSimulation();
     struct AuthorityProfileTag {};
     // The single real constructor; the default and the test-only constructors delegate here.
     GameSession(const AuthorityProfileOptions& authority_profile, AuthorityProfileTag);
 
     const AuthorityProfileOptions m_authorityProfile;
+    bool CaptureOwnerContinuation(std::string& bytes) const;
+    OwnerContinuationOptions m_continuationOptions;
+    const std::vector<World::PlayerAvatar>* m_ownerAvatarSources = nullptr;
+    std::optional<std::uint32_t> m_ownerRosterCount;
+    bool m_ownerMovingAnchor = false;
+    bool m_ownerWaterSmoke = false;
+    Vec3 m_ownerOrigin{};
+    Vec3 m_ownerAnchor{};
+    std::uint64_t m_ownerStreamTick = 0;
+    bool m_ownerAnchorSet = false;
+    std::shared_ptr<Persistence::OwnerContinuation> m_restoredOwnerContinuation;
     void DisableFarWorldAuthorityProducer();
     std::unique_ptr<World::FarWorldAuthorityProducer> m_farWorldAuthorityProducer;
     bool m_farWorldSourceNeedsRefresh = false;
@@ -751,16 +809,19 @@ private:
     void RestoreWorldClock(const WorldClock& clock);
     void RestoreAmbientFieldsAtTick(std::uint64_t tick);
     bool SaveWorldMetadataTo(const std::filesystem::path& save_dir,
-                             Persistence::CreatedWorldArtifacts* artifacts = nullptr) const;
+                             Persistence::CreatedWorldArtifacts* artifacts = nullptr,
+                             const std::string* owner_bytes = nullptr) const;
     bool SaveWorldStateToImpl(const std::filesystem::path& save_dir,
                               WorldStateSaveReport* report,
                               bool full_snapshot,
                               bool write_metadata);
     bool PrepareWorldMetadataTo(const std::filesystem::path& save_dir,
                                 bool full_metadata,
-                                std::string& bytes) const;
+                                std::string& bytes,
+                                const std::string* owner_bytes = nullptr) const;
     friend class GameSessionGroundMetadataTest;
-    bool ReconcileWorldStateMetadataTo(const std::filesystem::path& save_dir);
+    bool ReconcileWorldStateMetadataTo(const std::filesystem::path& save_dir,
+                                       const std::string* owner_bytes = nullptr);
     struct LoadedWorldState;
     bool ReadWorldStateFrom(const std::filesystem::path& save_dir,
                             LoadedWorldState& state,
@@ -814,9 +875,10 @@ private:
     struct RegionalEnergyStep;
     std::unique_ptr<RegionalEnergyStep> m_regionalEnergyStep;
     [[nodiscard]] RegionalEnergyStep* AdvanceEnergy(std::uint64_t tick);
-    void PublishRegionCompletedWork(FieldPageState* fields,
-                                    RegionalEnergyStep* energy,
-                                    bool defer_water_authority);
+    void PublishRegionConsumers(FieldPageState* fields,
+                                RegionalEnergyStep* energy,
+                                bool defer_water_authority);
+    void PublishRegionCompletedWork(bool defer_water_authority);
     void BindRegionalFieldQueries();
     [[nodiscard]] FieldPageView RegionalFields() const;
     [[nodiscard]] std::string RegionalAmbientHash(std::uint8_t channels, bool weather) const;

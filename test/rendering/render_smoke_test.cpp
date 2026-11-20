@@ -541,6 +541,52 @@ std::string ReadTextFile(const fs::path& path) {
     return stream.str();
 }
 
+std::string ReadSourceFile(const std::filesystem::path& path) {
+    auto text = ReadTextFile(path);
+    // Source contracts compare logical lines; retain all non-CRLF bytes.
+    // This in-place pass is bounded by the source bytes already read.
+    std::size_t output = 0;
+    for (std::size_t input = 0; input < text.size(); ++input) {
+        if (text[input] != '\r' || input + 1 == text.size() || text[input + 1] != '\n') {
+            text[output++] = text[input];
+        }
+    }
+    text.resize(output);
+    return text;
+}
+
+TEST(RenderSmokeTest, SourceReaderNormalizesOnlyCrLf) {
+    const Luminumbra::TestSupport::ScopedTempFile temporary("source_lines_", ".cpp");
+    const auto& path = temporary.Path();
+    constexpr std::array<std::string_view, 7> inputs{"",
+                                                     "one\ntwo\n",
+                                                     "one\r\ntwo\r\n",
+                                                     "one\rtwo\r",
+                                                     "one\r\ntwo\nthree\r\n",
+                                                     "\r\r\nlast\r",
+                                                     "no terminator"};
+    constexpr std::array<std::string_view, 7> expected{"",
+                                                       "one\ntwo\n",
+                                                       "one\ntwo\n",
+                                                       "one\rtwo\r",
+                                                       "one\ntwo\nthree\n",
+                                                       "\r\nlast\r",
+                                                       "no terminator"};
+    for (std::size_t index = 0; index < inputs.size(); ++index) {
+        SCOPED_TRACE(index);
+        {
+            std::ofstream output(path, std::ios::binary);
+            output << inputs[index];
+            output.close();
+            ASSERT_TRUE(output.good());
+        }
+        EXPECT_EQ(ReadTextFile(path), inputs[index]);
+        EXPECT_EQ(ReadSourceFile(path), expected[index]);
+    }
+    ASSERT_TRUE(fs::remove(path));
+    EXPECT_TRUE(ReadSourceFile(path).empty());
+}
+
 bool ReadShaderSourceRecursive(const fs::path& path,
                                std::unordered_set<std::string>& include_stack,
                                std::string& source,
@@ -599,7 +645,7 @@ bool ReadShaderSource(const fs::path& path, std::string& source, std::string& di
 // scan the combined pipeline + pass sources.
 std::string ReadRenderPipelineCombinedSources() {
     std::string combined =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
     const fs::path pass_dir = SourceRoot() / "src/luminumbra_client/rendering/passes";
     if (fs::exists(pass_dir)) {
         std::vector<fs::path> pass_files;
@@ -611,7 +657,7 @@ std::string ReadRenderPipelineCombinedSources() {
         }
         std::sort(pass_files.begin(), pass_files.end());
         for (const fs::path& pass_file : pass_files) {
-            combined += ReadTextFile(pass_file);
+            combined += ReadSourceFile(pass_file);
         }
     }
     return combined;
@@ -1692,9 +1738,9 @@ TEST(RenderSmokeTest, RenderHealthGateEmitsAnalysisArtifact) {
     }
 
     const std::string header =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
     const std::string source =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
     ASSERT_FALSE(header.empty());
     ASSERT_FALSE(source.empty());
 
@@ -3002,7 +3048,7 @@ TEST(RenderSmokeTest, CanopyEmptyRecoveryRetainsCoarseHitAcrossForegroundThenSky
             const auto result = probe.draw()[16];
             EXPECT_GE((1 - result.r) / 0.94f, baseOcclusion - 0.000001f);
             EXPECT_NEAR(result.r, 1 - 0.94f * baseOcclusion, 0.000001f);
-            EXPECT_FLOAT_EQ(result.g, openPrevious ? 5 : 11)
+            EXPECT_FLOAT_EQ(result.g, openPrevious ? 5.0f : 11.0f)
                 << "three coarse reads plus two ordinary or eight empty-recovery reads";
             EXPECT_LE(result.g, 40);
             if (ladder != 0) {
@@ -5851,13 +5897,13 @@ TEST(RenderSmokeTest, RenderPipelineHotPathLogsAreCounterBacked) {
 
 TEST(RenderSmokeTest, ScheduledNightlyGateRequiresTaskSchedulerProvenance) {
     const fs::path behavior_test_path = SourceRoot() / "tools/gates/test-nightly-provenance.ps1";
-    const std::string runner = ReadTextFile(SourceRoot() / "tools/gates/run-nightly-gate.ps1");
+    const std::string runner = ReadSourceFile(SourceRoot() / "tools/gates/run-nightly-gate.ps1");
     const std::string frontier =
-        ReadTextFile(SourceRoot() / "tools/gates/validate-engine-frontier.ps1");
+        ReadSourceFile(SourceRoot() / "tools/gates/validate-engine-frontier.ps1");
     const std::string registrar =
-        ReadTextFile(SourceRoot() / "tools/gates/register-nightly-gate-task.ps1");
-    const std::string helper = ReadTextFile(SourceRoot() / "tools/gates/nightly-provenance.ps1");
-    const std::string behavior_test = ReadTextFile(behavior_test_path);
+        ReadSourceFile(SourceRoot() / "tools/gates/register-nightly-gate-task.ps1");
+    const std::string helper = ReadSourceFile(SourceRoot() / "tools/gates/nightly-provenance.ps1");
+    const std::string behavior_test = ReadSourceFile(behavior_test_path);
     ASSERT_FALSE(runner.empty());
     ASSERT_FALSE(frontier.empty());
     ASSERT_FALSE(registrar.empty());
@@ -6019,9 +6065,9 @@ TEST(RenderSmokeTest, ScheduledNightlyGateRequiresTaskSchedulerProvenance) {
 
 TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
     const std::string header =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/FarLodSystem.h");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/FarLodSystem.h");
     const std::string source =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/FarLodSystem.cpp");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/FarLodSystem.cpp");
     ASSERT_FALSE(header.empty());
     ASSERT_FALSE(source.empty());
 
@@ -6105,7 +6151,7 @@ TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
         }
     };
     const std::string world_source =
-        ReadTextFile(SourceRoot() / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp");
     ASSERT_FALSE(world_source.empty());
     const auto capture_body = section(world_source,
                                       "SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(",
@@ -6307,7 +6353,7 @@ TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
 
 TEST(RenderSmokeTest, RenderPipelineExposesPassBudgetCounters) {
     const std::string header =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
     const std::string source = ReadRenderPipelineCombinedSources();
     ASSERT_FALSE(header.empty());
     ASSERT_FALSE(source.empty());
@@ -6344,16 +6390,16 @@ TEST(RenderSmokeTest, RenderPipelineExposesPassBudgetCounters) {
 
 TEST(RenderSmokeTest, RenderFrameworkContractsEmitArtifacts) {
     const std::string header =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
     const std::string source = ReadRenderPipelineCombinedSources();
     const std::string shader_header =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/Shader.h");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/Shader.h");
     const std::string shader_source =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/Shader.cpp");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/Shader.cpp");
     const std::string capture_header =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/CaptureHooks.h");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/CaptureHooks.h");
     const std::string capture_source =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/CaptureHooks.cpp");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/CaptureHooks.cpp");
     ASSERT_FALSE(header.empty());
     ASSERT_FALSE(source.empty());
     ASSERT_FALSE(shader_header.empty());
@@ -6383,7 +6429,7 @@ TEST(RenderSmokeTest, RenderFrameworkContractsEmitArtifacts) {
     // pass into the G-buffer pass (the textured albedo and normal-mapped normal
     // are baked into the G-buffer). The contract now lives in g_buffer.frag.
     {
-        const std::string gbuffer_frag = ReadTextFile(SourceRoot() / "res/shaders/g_buffer.frag");
+        const std::string gbuffer_frag = ReadSourceFile(SourceRoot() / "res/shaders/g_buffer.frag");
         EXPECT_NE(gbuffer_frag.find("u_terrainTextures"), std::string::npos);
         EXPECT_NE(gbuffer_frag.find("u_terrainNormals"), std::string::npos);
         EXPECT_NE(gbuffer_frag.find("triplanar_albedo"), std::string::npos);
@@ -9640,6 +9686,7 @@ TEST(RenderSmokeTest, DiagnosticAdmissionBudgetAndScopeRefusalAreSafe) {
         EXPECT_FALSE(DiagnosticFrameCapture::Admitted(extent, retained));
         EXPECT_EQ(retained, 123U);
         DiagnosticFrameCapture refused(extent);
+        EXPECT_FALSE(refused.ready());
         EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
     }
     HiddenGlContext context;
@@ -9650,6 +9697,7 @@ TEST(RenderSmokeTest, DiagnosticAdmissionBudgetAndScopeRefusalAreSafe) {
     {
         DiagnosticFrameCapture capture({1, 2});
         EXPECT_NE(GBufferDiagnosticCapture::Current(), nullptr);
+        EXPECT_FALSE(capture.ready());
         DiagnosticBundleFrame frame;
         frame.extent = {1, 2};
         EXPECT_FALSE(capture.finish({}, {.enabled = true, .probe = std::nullopt}, frame, {}));
@@ -9853,6 +9901,10 @@ TEST(RenderSmokeTest, ScenarioBundlesRetainCompletedFrameIdentityAcrossSiblingCa
                              "creature_slice_smoke",
                              "showcase_motion"}) {
         SCOPED_TRACE(mode);
+        // Admission detaches before observing completion and is repeatable after
+        // finish has consumed the scope, using the retained completed identity.
+        ASSERT_TRUE(pipeline.diagnostic_capture_ready());
+        ASSERT_TRUE(pipeline.diagnostic_capture_ready());
         const auto path = directory / (std::string(mode) + ".ppm");
         ASSERT_TRUE(pipeline.with_diagnostic_capture(
             path,
@@ -9895,9 +9947,17 @@ TEST(RenderSmokeTest, ScenarioBundlesRetainCompletedFrameIdentityAcrossSiblingCa
         EXPECT_EQ(metadata.at("frame"), first_frame);
         EXPECT_TRUE(pipeline.diagnostic_capture_refusal().empty())
             << pipeline.diagnostic_capture_refusal();
+        EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
     }
     pipeline.end_diagnostic_capture();
     EXPECT_EQ(pipeline.diagnostic_capture_refusal(), "completed_frame_unavailable");
+    EXPECT_FALSE(pipeline.diagnostic_capture_ready());
+    pipeline.end_diagnostic_capture();
+    // Empty destinations must also release an admitted completed frame.
+    pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
+    ASSERT_TRUE(pipeline.diagnostic_capture_ready());
+    EXPECT_FALSE(pipeline.capture_diagnostics({}));
+    EXPECT_FALSE(pipeline.diagnostic_capture_ready());
     EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }
@@ -9938,6 +9998,26 @@ TEST(RenderSmokeTest, ScenarioCaptureRefusesUnavailableCoverageAndProbeBeforeOpe
     ASSERT_NE(scope, nullptr);
     scope->unsupported("unattributed_deferred_producer");
     refuses_without_callbacks("producer_coverage_incomplete");
+    pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
+    scope = GBufferDiagnosticCapture::Current();
+    ASSERT_NE(scope, nullptr);
+    // An invalid late attachment records unsupported coverage at once. A GL-free
+    // observation reports it without consuming the scope; publication does.
+    ASSERT_FALSE(scope->attach({}, {32, 32}));
+    EXPECT_EQ(pipeline.diagnostic_capture_refusal(), "producer_coverage_incomplete");
+    EXPECT_EQ(GBufferDiagnosticCapture::Current(), scope);
+    EXPECT_FALSE(pipeline.with_diagnostic_capture(
+        temporary.Path(),
+        []() -> CaptureManifestInput {
+            ADD_FAILURE() << "late attachment failure observed metadata";
+            return {};
+        },
+        [] {
+            ADD_FAILURE() << "late attachment failure opened capture output";
+            return true;
+        }));
+    EXPECT_TRUE(fs::is_empty(temporary.Path().parent_path()));
+    EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
     pipeline.set_capture_diagnostics(
         {.enabled = true, .probe = std::array<std::uint32_t, 2>{32, 0}});
     pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
@@ -10076,4 +10156,169 @@ TEST(RenderSmokeTest, TimedScenarioPublicHookPublishesSiblingBundlesAndKeepsLega
         EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
     }
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, DiagnosticDestinationReservationExcludesOverlappingWritersAndCleansUp) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("diagnostic-reservation-", ".ppm");
+    const auto capture = temporary.Path();
+    auto marker = CaptureManifestPath(capture);
+    marker += ".lck";
+    auto manifest_temporary = CaptureManifestPath(capture);
+    manifest_temporary += ".tmp";
+    EXPECT_EQ(marker.filename().native().size(), manifest_temporary.filename().native().size());
+    RenderPipeline first, second;
+    first.set_capture_diagnostics({.enabled = true, .probe = std::nullopt});
+    second.set_capture_diagnostics({.enabled = true, .probe = std::nullopt});
+    {
+        const RenderPipeline::CaptureDestinationReservation owner(first, capture);
+        ASSERT_TRUE(owner.acquired());
+        // Both admissions happen before either payload exists. A vacancy check
+        // alone admits the delayed second writer and allows it to replace bytes.
+        const RenderPipeline::CaptureDestinationReservation contender(second, capture);
+        EXPECT_FALSE(contender.acquired());
+        auto alternate_extension = capture;
+        alternate_extension.replace_extension(".png");
+        EXPECT_FALSE(
+            RenderPipeline::CaptureDestinationReservation(second, alternate_extension).acquired());
+        const auto manifest = CaptureManifestPath(capture);
+        {
+            std::ofstream image(capture);
+            image << "first image";
+        }
+        {
+            std::ofstream metadata(manifest);
+            metadata << R"({"status":"complete"})";
+        }
+        const auto image_bytes = ReadTextFile(capture);
+        const auto manifest_bytes = ReadTextFile(manifest);
+        if (contender.acquired()) {
+            std::ofstream image(capture);
+            image << "second image";
+            std::ofstream metadata(manifest);
+            metadata << "second manifest";
+        }
+        EXPECT_EQ(ReadTextFile(capture), image_bytes);
+        EXPECT_EQ(ReadTextFile(manifest), manifest_bytes);
+        EXPECT_TRUE(fs::exists(marker));
+        fs::remove(capture);
+        fs::remove(manifest);
+    }
+    EXPECT_FALSE(fs::exists(marker));
+    {
+        const RenderPipeline::CaptureDestinationReservation retry(second, capture);
+        EXPECT_TRUE(retry.acquired());
+    }
+    EXPECT_FALSE(fs::exists(marker));
+    EXPECT_FALSE(RenderPipeline::CaptureDestinationReservation(first, {}).acquired());
+    const auto nested_capture = capture.parent_path() / "nested" / "deeper" / "view.ppm";
+    auto nested_marker = CaptureManifestPath(nested_capture);
+    nested_marker += ".lck";
+    {
+        const RenderPipeline::CaptureDestinationReservation nested(first, nested_capture);
+        EXPECT_TRUE(nested.acquired());
+        EXPECT_TRUE(fs::exists(nested_marker));
+        EXPECT_FALSE(fs::exists(nested_capture));
+    }
+    EXPECT_FALSE(fs::exists(nested_marker));
+    const auto blocked_parent = capture.parent_path() / "not-a-directory";
+    { std::ofstream blocked(blocked_parent); }
+    EXPECT_FALSE(RenderPipeline::CaptureDestinationReservation(first, blocked_parent / "view.ppm")
+                     .acquired());
+    // A pre-existing marker belongs to another writer, even if it is partial.
+    {
+        std::ofstream pending(marker);
+        pending << "occupied";
+    }
+    EXPECT_FALSE(RenderPipeline::CaptureDestinationReservation(second, capture).acquired());
+    EXPECT_EQ(ReadTextFile(marker), "occupied");
+    fs::remove(marker);
+    fs::create_directory(marker);
+    EXPECT_FALSE(RenderPipeline::CaptureDestinationReservation(second, capture).acquired());
+    EXPECT_TRUE(fs::is_directory(marker));
+    fs::remove(marker);
+    std::error_code link_error;
+    fs::create_symlink(capture.parent_path() / "missing", marker, link_error);
+    if (!link_error) {
+        EXPECT_FALSE(RenderPipeline::CaptureDestinationReservation(second, capture).acquired());
+        EXPECT_TRUE(fs::is_symlink(fs::symlink_status(marker)));
+        fs::remove(marker);
+    }
+    // Stack unwinding must retire the reservation before a retry.
+    EXPECT_THROW(
+        {
+            const RenderPipeline::CaptureDestinationReservation owner(first, capture);
+            ASSERT_TRUE(owner.acquired());
+            throw std::runtime_error("capture aborted");
+        },
+        std::runtime_error);
+    EXPECT_FALSE(fs::exists(marker));
+    // Cleanup must preserve an entry that replaced the owned marker.
+    auto displaced = marker;
+    displaced += ".displaced";
+    {
+        const RenderPipeline::CaptureDestinationReservation owner(first, capture);
+        ASSERT_TRUE(owner.acquired());
+        fs::rename(marker, displaced);
+        {
+            std::ofstream replacement(marker);
+            replacement << "replacement";
+        }
+    }
+    EXPECT_EQ(ReadTextFile(marker), "replacement");
+    fs::remove(marker);
+    fs::remove(displaced);
+    first.set_capture_diagnostics({});
+    EXPECT_TRUE(RenderPipeline::CaptureDestinationReservation(first, {}).acquired());
+}
+
+TEST(RenderSmokeTest, DiagnosticRefusalPrecedesManifestAndRetractsLateCompletion) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("diagnostic-refusal-", ".ppm");
+    const auto capture = temporary.Path();
+    const auto manifest = CaptureManifestPath(capture);
+    RenderPipeline pipeline;
+    pipeline.set_capture_diagnostics({.enabled = true, .probe = std::nullopt});
+    CaptureManifestInput input;
+    EXPECT_FALSE(pipeline.capture_diagnostics({}));
+    EXPECT_FALSE(pipeline.capture_diagnostics(capture.parent_path() / ""));
+    input.width = 2;
+    input.height = 2;
+    input.build_id.value = "capture-test";
+    input.asset_hash.unavailable = "test";
+    input.shader_hash.unavailable = "test";
+    input.world_hash.unavailable = "test";
+    bool observed = false, written = false;
+    EXPECT_FALSE(pipeline.with_diagnostic_capture(
+        capture,
+        [&] {
+            observed = true;
+            return input;
+        },
+        [&] {
+            written = true;
+            std::ofstream image(capture);
+            image << "image";
+            return image.good();
+        }));
+    EXPECT_FALSE(observed);
+    EXPECT_FALSE(written);
+    EXPECT_FALSE(fs::exists(capture));
+    EXPECT_FALSE(fs::exists(manifest));
+    // Exercise the late refusal fallback independently of early admission.
+    const RenderPipeline::CaptureDestinationReservation reservation(pipeline, capture);
+    ASSERT_TRUE(reservation.acquired());
+    ASSERT_TRUE(WithCaptureManifest(capture, input, [&] {
+        std::ofstream image(capture);
+        image << "completed image";
+        return image.good();
+    }));
+    ASSERT_EQ(nlohmann::json::parse(ReadTextFile(manifest)).at("status"), "complete");
+    EXPECT_FALSE(pipeline.capture_diagnostics(capture));
+    EXPECT_FALSE(fs::exists(manifest));
+    EXPECT_EQ(ReadTextFile(capture), "completed image");
+    EXPECT_FALSE(pipeline.capture_diagnostics(capture));
+    EXPECT_FALSE(fs::exists(manifest));
 }

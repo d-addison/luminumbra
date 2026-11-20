@@ -1359,6 +1359,13 @@
       "source": "Luminumbra documentation assets"
     },
     {
+      "bytes": 5057,
+      "license": "MIT",
+      "path": "test/fixtures/AvatarContinuationWorld.h",
+      "sha256": "ad3d71cc9976ce08bd526989f90cb2b4c24466dfe8ef98ff70fe4caa4c16462d",
+      "source": "Luminumbra test fixtures"
+    },
+    {
       "bytes": 756,
       "license": "MIT",
       "path": "test/fixtures/TerrainFixtureParams.h",
@@ -1539,6 +1546,55 @@
       "path": "test/fixtures/smoke_artifact/provenance.json",
       "sha256": "8852adb634a60b184b13165b8fed8cf7b5cfdcba5dee446c7bbcd39728f48a41",
       "source": "Luminumbra test fixtures"
+    },
+    {
+      "bytes": 49167,
+      "license": "MIT",
+      "path": "test/rendering/shader_scenes/references/material.ppm",
+      "sha256": "a7b13d68514eae8135d6f6b4921a85157476061fee5e1e70807978daba64b855",
+      "source": "Luminumbra shader scene references"
+    },
+    {
+      "bytes": 49167,
+      "license": "MIT",
+      "path": "test/rendering/shader_scenes/references/night-sky.ppm",
+      "sha256": "b0c91db903d9f48edda3769d458eade2cdf21fc1dda7a2c670cd10fd53e0d774",
+      "source": "Luminumbra shader scene references"
+    },
+    {
+      "bytes": 49167,
+      "license": "MIT",
+      "path": "test/rendering/shader_scenes/references/normal-decode.ppm",
+      "sha256": "b516ca7cc9bffbd12cecedcc0f0c28ee7f076b287601f4a99dd54bcae1fc4ad2",
+      "source": "Luminumbra shader scene references"
+    },
+    {
+      "bytes": 49167,
+      "license": "MIT",
+      "path": "test/rendering/shader_scenes/references/post-edge.ppm",
+      "sha256": "3cda07bc6988509ceeaa5522822948086fd78f9c5a8764ef06bfcd93ffdfcb72",
+      "source": "Luminumbra shader scene references"
+    },
+    {
+      "bytes": 49167,
+      "license": "MIT",
+      "path": "test/rendering/shader_scenes/references/reversed-z.ppm",
+      "sha256": "d2c0f9e1a62e750c2ea88959818e53b9e155e1ecf1516e5f1603fd9a612c1c26",
+      "source": "Luminumbra shader scene references"
+    },
+    {
+      "bytes": 49167,
+      "license": "MIT",
+      "path": "test/rendering/shader_scenes/references/terrain-blend.ppm",
+      "sha256": "b079254cb96c67ae0eeaada25d0da87536d672d333cc8b130a43b8279a5d29c3",
+      "source": "Luminumbra shader scene references"
+    },
+    {
+      "bytes": 49167,
+      "license": "MIT",
+      "path": "test/rendering/shader_scenes/references/tree-cutout.ppm",
+      "sha256": "d2f7312235786b11c22e66a155d2f4699ab7112bd80a65e30e88558a89705e95",
+      "source": "Luminumbra shader scene references"
     },
     {
       "bytes": 1643,
