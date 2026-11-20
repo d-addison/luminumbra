@@ -493,25 +493,26 @@ StaticDrawStats StaticDrawPass::Render(const RenderView& view,
             // Hex encoding is injective and bounded by the 1,024-byte registry key.
             if (identity.empty() || identity.size() > (1024 - 8) / 2) {
                 capture->unsupported("authored_static_surface");
-                throw std::runtime_error("Authored diagnostic mesh identity exceeds bounds");
+                capture->clear_current_identity();
+            } else {
+                std::string mesh_key = "authored/";
+                mesh_key.reserve(8 + 2 * identity.size());
+                constexpr std::string_view digits = "0123456789abcdef";
+                for (const char character : identity) {
+                    const auto byte = static_cast<unsigned char>(character);
+                    mesh_key += digits[byte >> 4];
+                    mesh_key += digits[byte & 15];
+                }
+                capture->write(shader,
+                               {.mesh_path = {},
+                                .shader_variant = "static_asset",
+                                .chunk = {},
+                                .lod = 0,
+                                .ownership = DiagnosticOwnership::Live,
+                                .pass = DiagnosticPass::GBuffer,
+                                .provenance = DiagnosticProvenance::Mesh,
+                                .generated_mesh = mesh_key});
             }
-            std::string mesh_key = "authored/";
-            mesh_key.reserve(8 + 2 * identity.size());
-            constexpr std::string_view digits = "0123456789abcdef";
-            for (const char character : identity) {
-                const auto byte = static_cast<unsigned char>(character);
-                mesh_key += digits[byte >> 4];
-                mesh_key += digits[byte & 15];
-            }
-            capture->write(shader,
-                           {.mesh_path = {},
-                            .shader_variant = "static_asset",
-                            .chunk = {},
-                            .lod = 0,
-                            .ownership = DiagnosticOwnership::Live,
-                            .pass = DiagnosticPass::GBuffer,
-                            .provenance = DiagnosticProvenance::Mesh,
-                            .generated_mesh = mesh_key});
         }
         Luminumbra::Rendering::AttributedGl::Submit(
             glDrawElements, GL_TRIANGLES, mesh->count, GL_UNSIGNED_INT, nullptr);

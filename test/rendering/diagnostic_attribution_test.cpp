@@ -1272,6 +1272,40 @@ TEST_F(DiagnosticAttributionGl, ClearIdentityOnlyChangesTheBoundCaptureVariant) 
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }
 
+TEST_F(DiagnosticAttributionGl, LadderSubmissionRefusalsOutsideDrawIndexedInvalidateCapture) {
+    input_.far_selection.effective = FarWorldMode::Ladder;
+    ctx_.far_world_ladder = true;
+    // Initial error, VAO binding, and VAO restoration can all refuse outside
+    // DrawIndexed. The submission result must invalidate even an empty table.
+    for (unsigned failure = 0; failure < 4; ++failure) {
+        SCOPED_TRACE(failure);
+        table_.clear();
+        input_.submit_ladder = [failure](const FarWorldPrepareDraw& prepare) {
+            FarWorldDrawCommand command;
+            command.index_count = 3;
+            command.diagnostic_identity.key.tier = 1;
+            command.diagnostic_span = {-32, 64};
+            EXPECT_TRUE(prepare(command));
+            if (failure == 0 || failure == 3) {
+                EXPECT_TRUE(FarWorldDiagnosticDraw::Write(command.index_count));
+            }
+            return FarWorldSubmitStats{.draws = failure == 0 ? 1u : 0u,
+                                       .indices = failure == 0 ? 3u : 0u,
+                                       .refused = failure == 0 ? 0u : 1u,
+                                       .water_indices = 0};
+        };
+        SetEntryState(false);
+        GBufferDiagnosticCapture capture(targets_, table_);
+        EXPECT_NO_THROW(pass_.execute(ctx_, entities_, input_));
+        EXPECT_EQ(capture.attachment_failed(), failure != 0);
+        EXPECT_EQ(capture.complete(), failure == 0);
+        EXPECT_FALSE(capture.refused());
+        EXPECT_TRUE(table_.complete_coverage());
+        EXPECT_EQ(table_.resolve(1) != nullptr, failure == 0 || failure == 3);
+        ExpectEntryState(false);
+    }
+}
+
 // Model a driver link refusal through GLAD, forwarding all other real GL work.
 class ImpostorLinkRefusal {
 public:
@@ -1626,6 +1660,66 @@ TEST_F(DiagnosticAttributionGl, ExceptionalProducerRestoresCallerGlState) {
             EXPECT_FALSE(capture.complete());
             EXPECT_TRUE(targets_.reset());
             ExpectEntryState(cull);
+        }
+    }
+}
+
+TEST_F(DiagnosticAttributionGl, AuthoredIdentityBoundsPreserveDrawsAndRefuseOnlyCapture) {
+    auto material = std::make_shared<StaticMaterial>();
+    material->identity = "diagnostic-authored-material";
+    RenderViewDescription description;
+    description.width = 32;
+    description.height = 32;
+    description.revision = 1;
+    const auto projection = glm::perspectiveRH_ZO(
+        glm::radians(45.0), 1.0, description.far_plane, description.near_plane);
+    std::copy_n(glm::value_ptr(projection), 16, description.projection.begin());
+    const auto view = RenderView::Validate(description);
+    input_.authored_view = &view;
+    for (const std::size_t length : {1u, 508u, 509u, 1024u, 1025u}) {
+        SCOPED_TRACE(length);
+        auto mesh = std::make_shared<StaticMesh>();
+        mesh->identity = std::string(length, 'x');
+        mesh->vertices = {{{-1, -1, -5}, {0, 0, 1}, {0, 0}},
+                          {{1, -1, -5}, {0, 0, 1}, {1, 0}},
+                          {{0, 1, -5}, {0, 0, 1}, {.5f, 1}}};
+        mesh->indices = {0, 1, 2};
+        auto snapshot = std::make_shared<StaticDrawSnapshot>();
+        StaticDraw draw;
+        draw.key = {"instance", "node", 0};
+        draw.mesh = mesh;
+        draw.material = material;
+        draw.normal = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+        snapshot->draws.push_back(draw);
+        input_.authored_draws = snapshot;
+        SetEntryState(false);
+        // The same immutable snapshot draws successfully with capture disabled.
+        EXPECT_EQ(pass_.execute(ctx_, entities_, input_).authored_draws, 1u);
+        table_.clear();
+        GBufferDiagnosticCapture capture(targets_, table_);
+        EXPECT_EQ(pass_.execute(ctx_, entities_, input_).authored_draws, 1u);
+        const bool supported = length <= 508;
+        EXPECT_EQ(capture.complete(), supported);
+        EXPECT_EQ(capture.attachment_failed(), !supported);
+        EXPECT_FALSE(capture.refused());
+        EXPECT_EQ(table_.complete_coverage(), supported);
+        const auto document = nlohmann::json::parse(table_.json());
+        ASSERT_EQ(document.at("draws").size(), 1u);
+        const auto& recorded = document.at("draws").front();
+        EXPECT_EQ(recorded.at("supported"), supported);
+        EXPECT_EQ(recorded.at("shader_variant"),
+                  supported ? "static_asset" : "authored_static_surface");
+        const auto& identity = document.at("meshes").front();
+        if (supported) {
+            std::string expected = "authored/";
+            for (std::size_t byte = 0; byte < length; ++byte) {
+                expected += "78";
+            }
+            EXPECT_EQ(identity.at("generated"), expected);
+            EXPECT_EQ(identity.at("provenance"), DiagnosticProvenance::Mesh);
+        } else {
+            EXPECT_FALSE(identity.contains("generated"));
+            EXPECT_EQ(identity.at("provenance"), DiagnosticProvenance::Unsupported);
         }
     }
 }
@@ -2688,7 +2782,10 @@ TEST(DiagnosticAttribution, AuthoredSurfacesAttributeImmutableMeshesAtTheOrigina
     Contains(render, "const auto& identity = draw.mesh->identity");
     Contains(render, "identity.empty() || identity.size() > (1024 - 8) / 2");
     Contains(render, "authored_static_surface");
-    Contains(render, "throw std::runtime_error");
+    const auto unsupported = Body(render, "if (identity.empty()");
+    Contains(unsupported, "capture->unsupported(\"authored_static_surface\")");
+    Contains(unsupported, "capture->clear_current_identity()");
+    EXPECT_EQ(unsupported.find("throw"), std::string::npos);
     Contains(render, "mesh_key.reserve(8 + 2 * identity.size())");
     Contains(render, "mesh_key += digits[byte >> 4]");
     Contains(render, "mesh_key += digits[byte & 15]");
