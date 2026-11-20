@@ -5615,7 +5615,11 @@ TEST(RegionalWaterAdmission, InspectionRefusalsRollBackOnlyTheCallsNewReservatio
             if (refusal < 3) {
                 auto chunk = TransactionChunk(0);
                 chunk->set_state(refusal == 0 ? ChunkState::Loading : ChunkState::Idle);
-                if (refusal == 1) {
+                if (refusal == 0) {
+                    // An authority-free loading column reads its committed copy; only an
+                    // authority-bearing one must refuse while it is still loading.
+                    chunk->set_water_authority();
+                } else if (refusal == 1) {
                     chunk->set_water_authority();
                     chunk->water_edge_flux.pop_back();
                 } else if (refusal == 2) {

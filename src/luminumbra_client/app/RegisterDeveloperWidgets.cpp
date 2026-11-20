@@ -1,6 +1,7 @@
 #include "app/RegisterDeveloperWidgets.h"
 
 #include "debug/DeveloperConsole.h"
+#include "rendering/passes/DebugViewPass.h"
 
 namespace Luminumbra::Client::App {
 std::vector<Debug::WidgetDef> RegisterDeveloperWidgets(const DeveloperWidgetServices& services) {
@@ -18,6 +19,16 @@ std::vector<Debug::WidgetDef> RegisterDeveloperWidgets(const DeveloperWidgetServ
         }
         def.available = service->second.available;
         def.visibility_changed = service->second.visibility_changed;
+        if (def.id == "render.debug_views") {
+            def.visibility_changed = [changed = def.visibility_changed](bool visible) {
+                if (!visible) {
+                    Rendering::DebugViewPass::controls().inspector_open = false;
+                }
+                if (changed) {
+                    changed(visible);
+                }
+            };
+        }
         // Pass immutable metadata and contents to the UI host; it owns window/focus handling.
         const auto panel = def;
         def.draw = [panel,

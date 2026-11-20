@@ -138,9 +138,21 @@ CapturePinMetadata(WindowMode active_window_mode, int capture_width, int capture
                           {"pinned", pinned}};
 }
 
+namespace {
+std::string ResolveRuntimeScenario(int argc, char* argv[]) {
+    auto scenario = GetCommandLineOption(argc, argv, "--scenario", "");
+    // Preserve the launch-wrapper fallback: a nonempty CLI scenario wins.
+    if (scenario.empty()) {
+        const auto sweep_env = Core::ReadEnvironment("LUMINUMBRA_VISUAL_SWEEP");
+        if (sweep_env && !sweep_env->empty() && sweep_env->front() != '0') {
+            scenario = "world_visual_sweep";
+        }
+    }
+    return scenario;
+}
+
 // Parses "WxH" (e.g. "1600x900") into width/height. Returns false (leaving the
 // outputs untouched) on any malformed/non-positive value.
-namespace {
 bool ParseResolution(const std::string& value, int& out_width, int& out_height) {
     const auto x_pos = value.find_first_of("xX");
     if (x_pos == std::string::npos || x_pos == 0 || x_pos + 1 >= value.size()) {
@@ -204,8 +216,23 @@ RuntimePathOptions ParseRuntimePathOptions(int argc, char* argv[]) {
         diagnostic_environment ? std::optional<std::string_view>(*diagnostic_environment)
                                : std::nullopt);
     if (diagnostics.enabled) {
-        throw std::invalid_argument(
-            "capture diagnostics require the completed-frame scenario readback adapter");
+        for (const auto* parity : {"--render-parity-frame", "--upscale-seam-parity"}) {
+            if (!GetCommandLineOption(argc, argv, parity, "").empty()) {
+                throw std::invalid_argument(std::string("capture diagnostics refuse ") + parity +
+                                            "; parity redispatches require separate captures");
+            }
+        }
+        const auto scenario = ResolveRuntimeScenario(argc, argv);
+        const bool benchmark =
+            !GetCommandLineOption(argc, argv, "--render-benchmark", "").empty() &&
+            !GetCommandLineOption(argc, argv, "--render-benchmark-screenshot", "").empty();
+        if ((!scenario.empty() && scenario != "world_visual_sweep") ||
+            (scenario.empty() && GetCommandLineOption(argc, argv, "--frame-scan", "").empty() &&
+             !benchmark)) {
+            throw std::invalid_argument(
+                "capture diagnostics require world_visual_sweep, --frame-scan "
+                "or --render-benchmark with --render-benchmark-screenshot");
+        }
     }
     int surface_radius = 0;
     int collision_radius = 0;
@@ -213,6 +240,7 @@ RuntimePathOptions ParseRuntimePathOptions(int argc, char* argv[]) {
     ParseSurfaceRadiusOptions(
         argc, argv, surface_radius, collision_radius, benchmark_stream_radius);
     RuntimePathOptions options;
+    options.diagnostics = diagnostics;
     for (const char* flag : {"--runtime-root", "--save-root"}) {
         std::filesystem::path& path =
             std::string(flag) == "--runtime-root" ? options.runtime_root : options.save_root;
@@ -254,19 +282,9 @@ ParseRuntimeScenarioConfig(int argc, char* argv[], const std::filesystem::path& 
     config.capture_feature_profile = ParseCaptureFeatureProfile(argc, argv);
     ParseSurfaceRadiusOptions(
         argc, argv, config.horizon_radius, config.collision_radius, config.benchmark_stream_radius);
-    config.scenario = GetCommandLineOption(argc, argv, "--scenario", "");
+    config.scenario = ResolveRuntimeScenario(argc, argv);
     config.systems_config_path = GetCommandLineOption(argc, argv, "--systems-config", "");
     config.preset_json_path = GetCommandLineOption(argc, argv, "--preset-json", "");
-    //  the visual-sweep capture matrix can be selected with the
-    // LUMINUMBRA_VISUAL_SWEEP=1 env flag (in addition to --scenario), so existing
-    // auto/server launch wrappers can opt in without a CLI change. An explicit
-    // --scenario always wins.
-    if (config.scenario.empty()) {
-        const auto sweep_env = Core::ReadEnvironment("LUMINUMBRA_VISUAL_SWEEP");
-        if (sweep_env && !sweep_env->empty() && sweep_env->front() != '0') {
-            config.scenario = "world_visual_sweep";
-        }
-    }
     config.auto_create_world = HasCommandLineFlag(argc, argv, "--auto-create-world");
     config.auto_enter_world = HasCommandLineFlag(argc, argv, "--auto-enter-world");
     config.no_audio = HasCommandLineFlag(argc, argv, "--no-audio");

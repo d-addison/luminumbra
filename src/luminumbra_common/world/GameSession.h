@@ -35,6 +35,9 @@
 
 namespace Luminumbra::World {
 class FarWorldAuthorityProducer;
+struct PlayerAvatar;
+struct PlayerAvatarOwnerState;
+struct PhysicsOwnerState;
 struct FarWorldAuthorityConfig;
 } // namespace Luminumbra::World
 
@@ -340,6 +343,18 @@ public:
     Systems::PhysicsSystem* GetPhysicsSystem() {
         return m_physicsSystem.get();
     }
+
+    // Internal owner continuation; no save/hash/boot adoption until explicitly called.
+    // Supply not-yet-restored frozen captures to reserve their body slots. Finish
+    // the roster before stepping or allocating other bodies (owner-thread exclusion).
+    // Restore requires the player ID to equal the next physics roster slot.
+    bool CaptureAvatarOwner(const World::PlayerAvatar& avatar,
+                            std::size_t physics_index,
+                            World::PlayerAvatarOwnerState& output) const;
+    bool RestoreAvatarOwner(const World::PlayerAvatarOwnerState& state,
+                            World::PlayerAvatar& avatar,
+                            std::size_t& physics_index,
+                            std::span<const World::PhysicsOwnerState> remaining_frozen = {});
 
     // the deterministic wind field. Sim-authoritative; its cell
     // values feed the world_hash `wind` sub-hash. Constructed on world
@@ -739,6 +754,8 @@ public:
     std::filesystem::path GetSaveRootPath() const;
 
 private:
+    // Advances opt-in regional water for one fixed tick; a no-op when it is dormant.
+    void UpdateRegionalWaterFromSimulation();
     struct AuthorityProfileTag {};
     // The single real constructor; the default and the test-only constructors delegate here.
     GameSession(const AuthorityProfileOptions& authority_profile, AuthorityProfileTag);

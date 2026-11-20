@@ -17,6 +17,7 @@
 #include <ios>
 #include <string>
 #include <utility>
+#include <vector>
 
 // A standalone syntax check needs no configured binary identity.
 #ifndef LUMINUMBRA_SHADER_SCENE_INPUT_HASH
@@ -41,9 +42,12 @@ protected:
     GLuint vbo = 0;
     std::array<GLuint, 6> attachments{};
     std::array<GLuint, 5> textures{};
+    std::array<GLuint, 3> storage{};
 
     void NormalDecode();
     void DepthConventions();
+    void PostEdge();
+    void ComputeReadback();
 
     void SetUp() override {
         initialized = glfwInit() == GLFW_TRUE;
@@ -70,11 +74,13 @@ protected:
         glDeleteFramebuffers(1, &framebuffer);
         glDeleteVertexArrays(1, &vao);
         glDeleteBuffers(1, &vbo);
+        glDeleteBuffers(static_cast<GLsizei>(storage.size()), storage.data());
         glDeleteTextures(static_cast<GLsizei>(attachments.size()), attachments.data());
         glDeleteTextures(static_cast<GLsizei>(textures.size()), textures.data());
         program = framebuffer = vao = vbo = 0;
         attachments.fill(0);
         textures.fill(0);
+        storage.fill(0);
     }
     void ShrubLeafReflectanceCutoutAndScaledNormals();
     void ResetTargets() {
@@ -84,6 +90,7 @@ protected:
         program = framebuffer = vao = vbo = 0;
         attachments.fill(0);
         textures.fill(0);
+        storage.fill(0);
     }
     void TearDown() override {
         ResetTargets();
@@ -772,6 +779,12 @@ TEST_F(ShaderScene, TerrainMaterialTransition) {
     ASSERT_FALSE(HasFatalFailure());
     ResetTargets();
     DepthConventions();
+    ASSERT_FALSE(HasFatalFailure());
+    ResetTargets();
+    PostEdge();
+    ASSERT_FALSE(HasFatalFailure());
+    ResetTargets();
+    ComputeReadback();
 }
 
 void ShaderScene::ShrubLeafReflectanceCutoutAndScaledNormals() {
@@ -1082,6 +1095,172 @@ void main() {
 {"reversed_z":true,"near":0.1,"far":100.0,"rows":[64,128]}])JSON";
     metadata.close();
     ASSERT_TRUE(metadata);
+}
+
+void ShaderScene::PostEdge() {
+    // The complete production post fragment path, including its 3x3 scan.
+    // Fixed valid white history and zero motion exercise neighbours without
+    // temporal state or jitter. REPEAT inputs make the shader's clamp essential.
+    Kernel(Source("res/shaders/ssao.vert"), Source("res/shaders/taau_resolve.frag"), 0, GL_RGBA16F);
+    ASSERT_FALSE(HasFatalFailure());
+    constexpr std::array<std::array<float, 5>, 4> vertices{
+        {{-1, -1, 0, 0, 0}, {1, -1, 0, 1, 0}, {-1, 1, 0, 0, 1}, {1, 1, 0, 1, 1}}};
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), nullptr);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1,
+                          2,
+                          GL_FLOAT,
+                          GL_FALSE,
+                          5 * sizeof(float),
+                          reinterpret_cast<const void*>(3 * sizeof(float)));
+    // Four bounded 128-square RGBA16F inputs, one upload scratch and RGB mask.
+    std::vector<float> input(PixelCount * 4);
+    std::array<float, PixelCount * 3> mask{};
+    glGenTextures(static_cast<GLsizei>(textures.size()), textures.data());
+    constexpr std::array<const char*, 4> uniforms{
+        "u_current", "u_history", "u_motion", "u_sceneDepth"};
+    for (std::size_t unit = 0; unit < uniforms.size(); ++unit) {
+        for (int y = 0; y < Size; ++y) {
+            for (int x = 0; x < Size; ++x) {
+                const auto pixel = static_cast<std::size_t>(y * Size + x);
+                const bool foreground = x < 16 && y >= 48 && y < 80;
+                const float value = foreground ? .875f
+                                               : .125f + static_cast<float>(x) / 256.f +
+                                                     static_cast<float>(y) / 1024.f;
+                const float depth = foreground ? .75f : .25f;
+                mask[pixel * 3] = depth;
+                mask[pixel * 3 + 1] = foreground ? .5f : .25f;
+                for (std::size_t channel = 0; channel < 4; ++channel) {
+                    input[pixel * 4 + channel] = unit == 0
+                                                     ? value / static_cast<float>(1u << channel)
+                                                 : unit == 1 ? 1.f
+                                                 : unit == 2 ? 0.f
+                                                             : depth;
+                }
+            }
+        }
+        glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(unit));
+        glBindTexture(GL_TEXTURE_2D, textures[unit]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, Size, Size, 0, GL_RGBA, GL_FLOAT, input.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        glUniform1i(Uniform(uniforms[unit]), static_cast<GLint>(unit));
+    }
+    glUniform2f(Uniform("u_texel"), 1.f / Size, 1.f / Size);
+    glUniform1f(Uniform("u_blend"), .9f);
+    glUniform1f(Uniform("u_sharpness"), .4f);
+    glUniform1i(Uniform("u_history_valid"), 1);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    std::array<float, PixelCount * 3> pixels{};
+    glReadPixels(0, 0, Size, Size, GL_RGB, GL_FLOAT, pixels.data());
+    for (const float value : pixels) {
+        ASSERT_TRUE(std::isfinite(value));
+        ASSERT_GE(value, 0.f);
+        ASSERT_LE(value, 1.f);
+    }
+    const auto offset = [](int x, int y) {
+        return static_cast<std::size_t>(std::clamp(y, 0, Size - 1) * Size +
+                                        std::clamp(x, 0, Size - 1)) *
+               3;
+    };
+    std::array<float, Size * 4 * 3> errors{};
+    std::size_t count = 0;
+    for (int y = 0; y < Size; ++y) {
+        for (int x = 0; x < Size; ++x) {
+            if (x != 0 && x != Size - 1 && y != 0 && y != Size - 1) {
+                continue;
+            }
+            const int dx = x == 0 ? 1 : x == Size - 1 ? -1 : 0;
+            const int dy = dx != 0 ? 0 : y == 0 ? 1 : -1;
+            const auto center = offset(x, y);
+            bool silhouette = false;
+            for (int step = 0; step < 3; ++step) {
+                for (int oy = -1; oy <= 1; ++oy) {
+                    for (int ox = -1; ox <= 1; ++ox) {
+                        const auto neighbour = offset(x + step * dx + ox, y + step * dy + oy);
+                        silhouette |= mask[neighbour] != mask[center] ||
+                                      mask[neighbour + 1] != mask[center + 1];
+                    }
+                }
+            }
+            if (silhouette) {
+                continue;
+            }
+            for (std::size_t channel = 0; channel < 3; ++channel) {
+                errors[count++] = std::abs(pixels[center + channel] -
+                                           (2 * pixels[offset(x + dx, y + dy) + channel] -
+                                            pixels[offset(x + 2 * dx, y + 2 * dy) + channel]));
+            }
+        }
+    }
+    // 508 border pixels minus 4. The silhouette covers left-border rows 48..79;
+    // rows 49..78 have a uniform foreground footprint and stay eligible. Only
+    // rows 47, 48, 79 and 80 see both identities in their 3x3 footprint.
+    ASSERT_EQ(count, 504u * 3);
+    std::sort(errors.begin(), errors.begin() + static_cast<std::ptrdiff_t>(count));
+    const float residual = errors[(count * 99 + 99) / 100 - 1];
+    EXPECT_LE(residual, 8.f / 255.f);
+    RecordProperty("post_edge_border_residual_p99", std::to_string(residual));
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    ASSERT_FALSE(HasFailure());
+    Save("post-edge", pixels);
+    ASSERT_FALSE(HasFatalFailure());
+    Save("post-edge-mask", mask);
+}
+
+void ShaderScene::ComputeReadback() {
+    program = Link(Compile(GL_COMPUTE_SHADER, "grass_compact_prefix.comp"));
+    ASSERT_NE(program, 0u);
+    glUseProgram(program);
+    constexpr std::array<std::uint32_t, 8> counts{0, 3, 1, 0, 7, 2, 5, 1};
+    constexpr std::array<std::uint32_t, 13> expected{19, 12, 13, 0, 0, 0, 0, 3, 4, 4, 11, 13, 18};
+    // Three fixed buffers, at most eight uint32 words each. Sentinels detect a
+    // missing dispatch or a wrong output binding even where zero is expected.
+    std::array<std::uint32_t, 8> sentinel{};
+    sentinel.fill(0xFFFFFFFFu);
+    glGenBuffers(static_cast<GLsizei>(storage.size()), storage.data());
+    constexpr std::array<GLuint, 3> bindings{3, 5, 6};
+    for (std::size_t index = 0; index < storage.size(); ++index) {
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, storage[index]);
+        glBufferData(GL_SHADER_STORAGE_BUFFER,
+                     sizeof(counts),
+                     index == 1 ? counts.data() : sentinel.data(),
+                     GL_STATIC_COPY);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, bindings[index], storage[index]);
+    }
+    glUniform1ui(Uniform("u_group_count"), static_cast<GLuint>(counts.size()));
+    glUniform1ui(Uniform("u_max_instances"), 13u);
+    glDispatchCompute(1u, 1u, 1u);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+    std::array<std::uint32_t, 13> actual{};
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, storage[0]);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, 5 * sizeof(std::uint32_t), actual.data());
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, storage[2]);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(counts), actual.data() + 5);
+    // Integer-exact, independent of float rounding and workgroup scheduling.
+    for (std::size_t index = 0; index < actual.size(); ++index) {
+        EXPECT_EQ(actual[index], expected[index]) << "word " << index;
+    }
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    ASSERT_FALSE(HasFailure());
+    const char* output = std::getenv("LUMINUMBRA_SHADER_SCENE_OUTPUT");
+    ASSERT_NE(output, nullptr);
+    std::ofstream readback(std::filesystem::path(output) / "compute-ssbo.bin", std::ios::binary);
+    for (const auto word : actual) {
+        const std::array<char, 4> bytes{static_cast<char>(word),
+                                        static_cast<char>(word >> 8),
+                                        static_cast<char>(word >> 16),
+                                        static_cast<char>(word >> 24)};
+        readback.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    }
+    readback.close();
+    ASSERT_TRUE(readback);
 }
 
 TEST_F(ShaderScene, DuskSkyAzimuthContinuity) {

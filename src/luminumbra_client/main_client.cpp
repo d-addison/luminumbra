@@ -134,6 +134,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "rendering/UploadBudget.h"
 #include "rendering/WeatherRenderBridge.h" // Live weather bridge.
 #include "rendering/WorldLoadingVisualizer.h"
+#include "rendering/passes/DebugViewPass.h"
 #include "rendering/passes/ParticlePass.h"     //  EmitterDescriptor + accessor type
 #include "rendering/passes/PlantProcgenPass.h" //  render-only procedural plant bake (flag-gated)
 #include "rendering/passes/WaterPass.h"
@@ -1593,6 +1594,13 @@ int main(int argc, char* argv[]) {
             g_app.overlay.debug_view_mode = 4;
         else if (dv == "position")
             g_app.overlay.debug_view_mode = 5;
+        else if (const int identity_mode = Luminumbra::Rendering::DebugViewPass::identity_mode(dv);
+                 identity_mode != Luminumbra::Rendering::DebugViewPass::None) {
+            auto& diagnostics = Luminumbra::Rendering::DebugViewPass::controls();
+            diagnostics.enabled = true;
+            diagnostics.view = identity_mode;
+            diagnostics.refresh = true;
+        }
     }
     g_app.capture.render_benchmark_path =
         GetCommandLineOption(argc, argv, "--render-benchmark", "");
@@ -2442,6 +2450,8 @@ int main(int argc, char* argv[]) {
 
     render_pipeline_owner = std::make_unique<Luminumbra::Rendering::RenderPipeline>();
     auto& renderPipeline = *render_pipeline_owner;
+    renderPipeline.set_capture_diagnostics(path_options.diagnostics);
+    renderPipeline.set_diagnostic_capture_armed(g_app.capture.render_benchmark_path.empty());
     //  isolation/layer mode: parse CLI strings -> IsolationConfig (default
     // {All, Scene} when both empty = no-op). Drives the SkyboxPass backdrop override
     // + (next slice) scenario spawn-suppression.
@@ -3494,8 +3504,10 @@ int main(int argc, char* argv[]) {
             g_app.overlay.debug_view_mode = static_cast<int>(
                 std::find(modes.begin(), modes.end(), std::get<std::string>(args[0])) -
                 modes.begin());
+            Luminumbra::Rendering::DebugViewPass::controls().view =
+                Luminumbra::Rendering::DebugViewPass::None;
         } else if (name == "render debug-cycle")
-            g_app.overlay.debug_view_mode = (g_app.overlay.debug_view_mode + 1) % 6;
+            Luminumbra::Rendering::DebugViewPass::cycle_mode(g_app.overlay.debug_view_mode);
         else if (name == "render wireframe")
             g_app.overlay.wireframe_mode = std::get<bool>(args[0]);
         else if (name == "render wireframe-toggle")
@@ -4557,11 +4569,44 @@ int main(int argc, char* argv[]) {
     bool frame_scan_complete = false;
     bool survey_complete = false;
     bool scene_capture_complete = false;
-    const auto capture_failure = [&](const std::filesystem::path& report, const char* reason) {
+    const auto write_capture_failure_report = [&](const std::filesystem::path& report,
+                                                  const auto& write_report,
+                                                  bool destination_reserved = false) {
+        if (!renderPipeline.capture_diagnostics_enabled() || destination_reserved) {
+            return write_report();
+        }
+        std::filesystem::path diagnostic_failure_image;
+        if (g_app.capture.frame_scan_active &&
+            report == std::filesystem::path(g_app.capture.frame_scan_path)) {
+            diagnostic_failure_image = report;
+            diagnostic_failure_image.replace_extension(".ppm");
+        } else if (!g_app.capture.render_benchmark_screenshot.empty() &&
+                   report ==
+                       std::filesystem::path(g_app.capture.render_benchmark_screenshot + ".json")) {
+            diagnostic_failure_image =
+                std::filesystem::path(g_app.capture.render_benchmark_screenshot);
+        } else {
+            return write_report();
+        }
+        const Luminumbra::Rendering::RenderPipeline::CaptureDestinationReservation reservation(
+            renderPipeline, diagnostic_failure_image);
+        return reservation.acquired() && write_report();
+    };
+    const auto capture_failure = [&](const std::filesystem::path& report,
+                                     const char* reason,
+                                     bool destination_reserved = false) {
         exit_code = 2;
         const nlohmann::json failure{
             {"status", "failed"}, {"capture_complete", false}, {"reason", reason}};
-        if (!Luminumbra::Rendering::WriteCaptureText(report, failure.dump(2) + "\n"))
+        if (!write_capture_failure_report(
+                report,
+                [&] {
+                    if (!Luminumbra::Rendering::WriteCaptureText(report, failure.dump(2) + "\n")) {
+                        return false;
+                    }
+                    return true;
+                },
+                destination_reserved))
             LUMINUMBRA_CORE_ERROR(
                 "Capture failed ({}); cannot retain report: {}", reason, report.string());
         glfwSetWindowShouldClose(window, GLFW_TRUE);
@@ -4581,7 +4626,10 @@ int main(int argc, char* argv[]) {
                                          {"settling_frames", wait.frames()},
                                          {"uploads_pending", pending}};
             if (!report.empty()) {
-                if (!Luminumbra::Rendering::WriteCaptureText(report, failure.dump(2) + "\n"))
+                if (!write_capture_failure_report(report, [&] {
+                        return Luminumbra::Rendering::WriteCaptureText(report,
+                                                                       failure.dump(2) + "\n");
+                    }))
                     LUMINUMBRA_CORE_ERROR("Cannot retain upload failure report: {}",
                                           report.string());
             }
@@ -6329,6 +6377,9 @@ int main(int argc, char* argv[]) {
                     if (timelapse_waiting) {
                         gameSession->GetWorldSystem()->sync_water_authority();
                     }
+                    renderPipeline.set_diagnostic_capture_armed(
+                        !g_rb_active ||
+                        g_app.benchmark.measuredFrames == g_app.capture.render_benchmark_frames);
                     renderPipeline.render_frame(
                         gameSession->GetRegistry(),
                         *gameSession->GetWorldSystem(),
@@ -6504,7 +6555,18 @@ int main(int argc, char* argv[]) {
                         } else if (wait_for_uploads(scan_upload_wait,
                                                     "frame_scan",
                                                     g_app.capture.frame_scan_path)) {
-                            const bool capture_finished =
+                            Luminumbra::Rendering::RenderPipeline::CaptureCleanup
+                                diagnostic_cleanup(renderPipeline);
+                            auto diagnostic_image =
+                                std::filesystem::path(g_app.capture.frame_scan_path);
+                            diagnostic_image.replace_extension(".ppm");
+                            const Luminumbra::Rendering::RenderPipeline::
+                                CaptureDestinationReservation destination_reservation(
+                                    renderPipeline, diagnostic_image);
+                            const bool destination_available = destination_reservation.acquired();
+                            bool capture_finished =
+                                destination_available &&
+                                renderPipeline.diagnostic_capture_ready() &&
                                 Luminumbra::Rendering::WithCaptureManifest(
                                     std::filesystem::path(g_app.capture.frame_scan_path),
                                     frame_scan_manifest,
@@ -6702,8 +6764,24 @@ int main(int argc, char* argv[]) {
                                                         g_app.capture.frame_scan_path));
                                         return capture_ok;
                                     });
+                            if (capture_finished && renderPipeline.capture_diagnostics_enabled()) {
+                                auto image = std::filesystem::path(g_app.capture.frame_scan_path);
+                                image.replace_extension(".ppm");
+                                capture_finished = renderPipeline.capture_diagnostics(image);
+                            }
                             frame_scan_complete = capture_finished;
-                            if (!capture_finished)
+                            renderPipeline.end_diagnostic_capture();
+                            if (destination_available && !capture_finished &&
+                                renderPipeline.capture_diagnostics_enabled()) {
+                                capture_failure(g_app.capture.frame_scan_path,
+                                                "frame_capture_incomplete",
+                                                true);
+                            } else if (!destination_available) {
+                                exit_code = 2;
+                                LUMINUMBRA_CORE_ERROR(
+                                    "Frame-scan destination occupied or inaccessible: {}",
+                                    diagnostic_image.string());
+                            } else if (!capture_finished)
                                 capture_failure(g_app.capture.frame_scan_path,
                                                 "frame_capture_incomplete");
                             glfwSetWindowShouldClose(window, GLFW_TRUE);
@@ -6848,11 +6926,19 @@ int main(int argc, char* argv[]) {
             g_app.benchmark.measuredFrames == g_app.capture.render_benchmark_frames &&
             renderPipeline.render_uploads_settled() &&
             !g_app.capture.render_benchmark_screenshot.empty()) {
+            Luminumbra::Rendering::RenderPipeline::CaptureCleanup diagnostic_cleanup(
+                renderPipeline);
             int width = 0, height = 0;
             glfwGetFramebufferSize(window, &width, &height);
             bool screenshot_complete = false;
+            const auto screenshot =
+                std::filesystem::path(g_app.capture.render_benchmark_screenshot);
+            const Luminumbra::Rendering::RenderPipeline::CaptureDestinationReservation
+                destination_reservation(renderPipeline, screenshot);
+            const bool destination_available = destination_reservation.acquired();
             std::size_t pixel_bytes = 0;
-            if (Luminumbra::Rendering::CapturePixelBytes(width, height, 3, pixel_bytes)) {
+            if (destination_available &&
+                Luminumbra::Rendering::CapturePixelBytes(width, height, 3, pixel_bytes)) {
                 GLint previous_read_fbo = 0, previous_pack_alignment = 0;
                 glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read_fbo);
                 glGetIntegerv(GL_PACK_ALIGNMENT, &previous_pack_alignment);
@@ -6861,13 +6947,30 @@ int main(int argc, char* argv[]) {
                 glPixelStorei(GL_PACK_ALIGNMENT, 1);
                 std::vector<unsigned char> pixels(pixel_bytes);
                 glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
-                screenshot_complete =
-                    glGetError() == GL_NO_ERROR &&
-                    WritePixelBufferPpm(
-                        std::filesystem::path(g_app.capture.render_benchmark_screenshot),
-                        width,
-                        height,
-                        pixels);
+                if (glGetError() == GL_NO_ERROR) {
+                    const auto write_screenshot = [&] {
+                        return WritePixelBufferPpm(screenshot, width, height, pixels);
+                    };
+                    if (!renderPipeline.capture_diagnostics_enabled()) {
+                        screenshot_complete = write_screenshot();
+                    } else {
+                        screenshot_complete = renderPipeline.diagnostic_capture_ready() &&
+                                              Luminumbra::Rendering::WithCaptureManifest(
+                                                  screenshot,
+                                                  Luminumbra::Rendering::ObserveCaptureManifest(
+                                                      *gameSession,
+                                                      renderPipeline,
+                                                      width,
+                                                      height,
+                                                      resolved_graphics,
+                                                      g_app.overlay.wireframe_mode,
+                                                      true),
+                                                  write_screenshot);
+                    }
+                    if (screenshot_complete && renderPipeline.capture_diagnostics_enabled()) {
+                        screenshot_complete = renderPipeline.capture_diagnostics(screenshot);
+                    }
+                }
                 glPixelStorei(GL_PACK_ALIGNMENT, previous_pack_alignment);
                 glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(previous_read_fbo));
                 if (screenshot_complete)
@@ -6877,9 +6980,15 @@ int main(int argc, char* argv[]) {
                         width,
                         height);
             }
-            if (!screenshot_complete)
+            renderPipeline.end_diagnostic_capture();
+            if (!destination_available) {
+                exit_code = 2;
+                LUMINUMBRA_CORE_ERROR("Benchmark capture destination occupied or inaccessible: {}",
+                                      screenshot.string());
+            } else if (!screenshot_complete)
                 capture_failure(g_app.capture.render_benchmark_screenshot + ".json",
-                                "benchmark_screenshot_incomplete");
+                                "benchmark_screenshot_incomplete",
+                                true);
         }
 
         if (g_rb_active && currentState == GameState::IN_GAME &&

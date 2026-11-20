@@ -1911,6 +1911,16 @@ void BlendCreatureSurvivalWishes(entt::registry& registry,
 
 } // namespace
 
+// Regional water runs after the tick's events and before its completed work is published.
+void GameSession::UpdateRegionalWaterFromSimulation() {
+    if (m_activeRegionsEnabled && m_authorityProfile.regional_water && m_waterSystem) {
+        const auto anchors = RegionalWaterAnchors(m_replicatedSimulationAnchors,
+                                                  m_activeRegionLedger.local_anchor());
+        m_waterSystem->UpdateRegionalFromSimulation(
+            m_registry, anchors, m_activeRegionLedger, m_regionSchedule, m_regionCompletedWork);
+    }
+}
+
 std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_authority) {
     if (m_regionFault)
         return 0;
@@ -2663,15 +2673,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             }
             if (m_regionFault)
                 return i + 1;
-            if (m_activeRegionsEnabled && m_authorityProfile.regional_water && m_waterSystem) {
-                const auto anchors = RegionalWaterAnchors(m_replicatedSimulationAnchors,
-                                                          m_activeRegionLedger.local_anchor());
-                m_waterSystem->UpdateRegionalFromSimulation(m_registry,
-                                                            anchors,
-                                                            m_activeRegionLedger,
-                                                            m_regionSchedule,
-                                                            m_regionCompletedWork);
-            }
+            UpdateRegionalWaterFromSimulation();
             if (m_activeRegionsEnabled) {
                 PublishRegionCompletedWork(
                     field_candidate, scheduled_energy, defer_water_authority);
