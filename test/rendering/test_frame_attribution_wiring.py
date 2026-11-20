@@ -3627,14 +3627,15 @@ class DeferredRasterDiagnosticWiring(unittest.TestCase):
                         execute.index("identity_view && (!m_snapshot"))
         self.assertLess(execute.index("if (!shader || !shader->IsValid() || m_vao == 0)"),
                         execute.index("if (contribution_view && !prepare_inspector_storage())"))
-        predicate = re.search(r"const bool identity_view = (.*?);", execute).group(1)
+        predicate = re.search(r"const bool identity_view =\s*(.*?);", execute, re.S).group(1)
         for enabled in (False, True):
             for wireframe in (False, True):
                 for mode in (0, 5, 6, 12, 30, 34, 36):
-                    self.assertEqual(cpp_expression(predicate, **{
-                        "controls().enabled": enabled, "controls().wireframe": wireframe,
-                        "mode()": mode, "DrawId": 6}),
-                        (enabled or wireframe) and mode >= 6)
+                    for contribution in (False, True):
+                        self.assertEqual(cpp_expression(predicate, **{
+                            "controls().enabled": enabled, "controls().wireframe": wireframe,
+                            "mode()": mode, "DrawId": 6, "contribution_view": contribution}),
+                            (enabled or wireframe) and mode >= 6 and not contribution)
         self.assertIn("InspectorStorageBinding bindings;", prepare)
         self.assertIn("if (m_snapshot->sample_buffer == 0)", prepare)
         self.assertIn("sizeof(InspectorPixel), &empty, GL_STREAM_READ", compact(prepare))
