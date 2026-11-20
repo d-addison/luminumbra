@@ -80,6 +80,21 @@ std::string Body(const std::string& source, std::string_view signature) {
 }
 
 std::string WithoutDiagnosticBlocks(std::string source) {
+    // Surface instrumentation is additive too; preserve the original off-byte oracle.
+    constexpr std::string_view surface_guard = "#ifdef LUMIN_DIAG_SURFACE\n";
+    for (auto start = source.find(surface_guard); start != std::string::npos;
+         start = source.find(surface_guard)) {
+        const auto end = source.find("#endif\n", start);
+        EXPECT_NE(end, std::string::npos);
+        if (end == std::string::npos) {
+            return {};
+        }
+        const auto body =
+            source.substr(start + surface_guard.size(), end - start - surface_guard.size());
+        EXPECT_EQ(body.find("#if"), std::string::npos);
+        EXPECT_EQ(body.find("#else"), std::string::npos);
+        source.erase(start, end + std::string_view("#endif\n").size() - start);
+    }
     constexpr std::string_view directive = "#ifdef LUMIN_DIAG_IDS\n";
     EXPECT_EQ(Count(source, directive), 2u);
     for (int block = 0; block < 2; ++block) {

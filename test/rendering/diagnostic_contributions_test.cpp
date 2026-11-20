@@ -1,5 +1,7 @@
 #include "rendering/AttributedGl.h"
 #include "rendering/Camera.h"
+#include "rendering/DiagnosticDrawTable.h"
+#include "rendering/GBufferTargets.h"
 #include "rendering/RenderContext.h"
 #include "rendering/RenderResourceRegistry.h"
 #include "rendering/Shader.h"
@@ -17,6 +19,7 @@
 #include <fstream>
 #include <limits>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -43,9 +46,9 @@ std::uint64_t Hash(std::string_view text) {
     return hash;
 }
 
-std::string CaptureOff(std::string_view text) {
+std::string CaptureOff(std::string_view text,
+                       std::string_view guard = "#ifdef LUMIN_DIAG_CONTRIBUTIONS\n") {
     // Preserve every byte outside additive, unnested contribution guards, including blank lines.
-    constexpr std::string_view guard = "#ifdef LUMIN_DIAG_CONTRIBUTIONS\n";
     std::string result;
     std::size_t position = 0;
     while (position < text.size()) {
@@ -103,7 +106,7 @@ TEST(DiagnosticContributions, CatalogueLegendsAndCycleCoverEveryNamedTermAndUnsu
     control = {};
     control.enabled = true;
     int legacy = Pass::Position;
-    for (int mode = Pass::DrawId; mode <= Pass::ShadowPlane; ++mode) {
+    for (int mode = Pass::DrawId; mode <= Pass::RawFinite; ++mode) {
         Pass::cycle_mode(legacy);
         EXPECT_EQ(control.view, mode);
         EXPECT_EQ(legacy, Pass::None);
@@ -167,8 +170,9 @@ TEST(DiagnosticContributions, CaptureOffLightingAndGBufferKeepEveryOriginalByte)
     const auto lighting = Source("res/shaders/lighting_pass.frag");
     EXPECT_NE(lighting.find("#ifdef LUMIN_DIAG_CONTRIBUTIONS\n"), std::string::npos);
     EXPECT_EQ(Hash(CaptureOff(lighting)), 0xc6e9bc9c6fc7110bULL);
-    // No G-buffer instrumentation is needed: its existing material channels are authoritative.
-    EXPECT_EQ(Hash(Source("res/shaders/g_buffer.frag")), 0x5384913db4971619ULL);
+    // Remove only additive instrumentation, retaining the original, fixed off-byte oracle.
+    EXPECT_EQ(Hash(CaptureOff(Source("res/shaders/g_buffer.frag"), "#ifdef LUMIN_DIAG_SURFACE\n")),
+              0x5384913db4971619ULL);
 }
 
 TEST(DiagnosticContributions, UnsupportedAndStaleInputsAreHatchedWithoutSamplingGuessedPlanes) {
@@ -558,4 +562,481 @@ TEST_F(DiagnosticContributionsGl,
     lighting.destroy_lighting_fbo(registry);
     glDeleteVertexArrays(1, &vao);
     EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+}
+
+TEST(DiagnosticContributions, SurfaceCatalogueLabelsAndWeightBoundariesAreGlFree) {
+    auto& control = Pass::controls();
+    control = {};
+    Pass pass;
+    constexpr std::array<const char*, 4> names = {
+        "actual-mip", "texel-density", "triplanar-weights", "raw-finite"};
+    for (std::size_t index = 0; index < names.size(); ++index) {
+        const int mode = Pass::ActualMip + static_cast<int>(index);
+        EXPECT_EQ(Pass::identity_mode(names[index]), mode);
+        EXPECT_TRUE(DiagnosticContributions::surface_mode(mode));
+        EXPECT_FALSE(Pass::contribution_mode(mode));
+        EXPECT_FALSE(Pass::supported_contribution(mode));
+        EXPECT_FALSE(Pass::contribution_legend(mode).empty());
+        control.enabled = true;
+        control.view = mode;
+        control.refresh = true;
+        EXPECT_FALSE(pass.begin_frame(RenderContext{}));
+        EXPECT_FALSE(control.refresh);
+        EXPECT_EQ(pass.mode(), mode);
+        control.enabled = false;
+        EXPECT_EQ(pass.mode(), Pass::None);
+    }
+    EXPECT_NE(Pass::contribution_legend(Pass::ActualMip).find("black=0, white=16"),
+              std::string_view::npos);
+    EXPECT_NE(Pass::contribution_legend(Pass::TexelDensity).find("texels/pixel"),
+              std::string_view::npos);
+    EXPECT_NE(Pass::contribution_legend(Pass::RawFinite).find("before"), std::string_view::npos);
+    for (const int invalid : {-1, 0, 29, 34, std::numeric_limits<int>::max()}) {
+        EXPECT_FALSE(DiagnosticContributions::surface_mode(invalid));
+    }
+    for (const auto& weights : std::array<std::array<float, 3>, 4>{
+             {{1, 0, 0}, {0.25f, 0.5f, 0.25f}, {0.9995f, 0, 0}, {1, 0.0005f, 0}}}) {
+        EXPECT_TRUE(DiagnosticContributions::normalized_weights(weights));
+    }
+    for (const auto& weights :
+         std::array<std::array<float, 3>, 7>{{{0, 0, 0},
+                                              {1, 1, 1},
+                                              {-0.1f, 0.1f, 1},
+                                              {1.0001f, 0, 0},
+                                              {0.998f, 0, 0},
+                                              {std::numeric_limits<float>::quiet_NaN(), 0, 1},
+                                              {0, std::numeric_limits<float>::infinity(), 1}}}) {
+        EXPECT_FALSE(DiagnosticContributions::normalized_weights(weights));
+    }
+    control = {};
+}
+
+TEST(DiagnosticContributions, SurfaceLodUsesTheProductionSamplerGradientsAndBias) {
+    const auto shader = Source("res/shaders/g_buffer.frag");
+    for (const auto* contract :
+         {"diagnosticFootprint(image, dx * biasScale, dy * biasScale);",
+          "textureGrad(image, uvw, dx * biasScale, dy * biasScale)",
+          "diagnosticFootprint(s, dFdx(uvw.xy) * exp2(u_lodBias), dFdy(uvw.xy) * exp2(u_lodBias));",
+          "vec2 size = vec2(textureSize(image, 0).xy);",
+          "float rho = max(length(dx * size), length(dy * size));",
+          "float lambda = log2(max(rho, 1e-8));",
+          "textureQueryLod(image, projected.zy).x",
+          "textureQueryLod(image, projected.xz).x",
+          "textureQueryLod(image, projected.xy).x",
+          "diagnosticRecordMip(diagnosticTerrainMips[materialId >= 1u && materialId <= 5u ? "
+          "int(materialId) : 0]);",
+          "diagnosticRecordMip(diagnosticSandMip);",
+          "diagnosticRecordMip(diagnosticUvMips.x);",
+          "diagnosticRecordMip(diagnosticUvMips.z);",
+          "diagnosticDensity = max(diagnosticDensity, lambda);"}) {
+        EXPECT_NE(shader.find(contract), std::string::npos) << contract;
+    }
+    EXPECT_LT(shader.find("    diagnosticQueryMips();"), shader.find("            discard;"));
+    const auto pass = Source("src/luminumbra_client/rendering/passes/GBufferPass.cpp");
+    std::size_t position = 0;
+    for (int sibling = 0; sibling < 3; ++sibling) {
+        position = pass.find("shader = DebugViewPass::surface_variant(", position);
+        ASSERT_NE(position, std::string::npos);
+        ++position;
+    }
+    EXPECT_EQ(pass.find("shader = DebugViewPass::surface_variant(", position), std::string::npos);
+}
+
+TEST(DiagnosticContributions, SurfaceWeightsObserveTheProductionResultAndRejectViolations) {
+    const auto shader = Source("res/shaders/g_buffer.frag");
+    for (const auto* contract :
+         {"return w / max(w.x + w.y + w.z, 1e-4);",
+          "vec3 weights = triplanar_weights(u_macroRockOverlay == 1 ? surfaceN : worldN);",
+          "diagnosticWeights = weights;",
+          "any(lessThan(weights, vec3(0.0)))",
+          "any(greaterThan(weights, vec3(1.0)))",
+          "abs(dot(weights, vec3(1.0)) - 1.0) > 0.001",
+          "diagnosticBadWeights && u_surfaceMode == 32"}) {
+        EXPECT_NE(shader.find(contract), std::string::npos) << contract;
+    }
+}
+
+TEST(DiagnosticContributions, SurfaceFiniteChecksPrecedeStorageAndCoverEveryMaterialSampler) {
+    const auto shader = Source("res/shaders/g_buffer.frag");
+    for (const auto* contract :
+         {"diagnosticNonfinite || any(isnan(value)) || any(isinf(value))",
+          "diagnosticCheck(textureGrad(image, uvw, dx * biasScale, dy * biasScale));",
+          "diagnosticCheck(u_lodBias != 0.0 ? texture(s, uvw, u_lodBias) : texture(s, uvw));",
+          "diagnosticCheck(matProps);",
+          "diagnosticCheck(texInfo);",
+          "diagnosticCheck(rockProps);",
+          "diagnosticCheck(rockInfo);",
+          "diagnosticCheck(vec4(albedoScale, albedoTint));",
+          "diagnosticCheck(vec4(rockAlbedoScale, rockAlbedoTint));",
+          "diagnosticCheck(vec4(bx, 0.0));",
+          "diagnosticCheck(vec4(by, 0.0));",
+          "diagnosticCheck(vec4(bz, 0.0));",
+          "diagnosticCheck(vec4(gPosition, 0.0));",
+          "diagnosticCheck(gNormalMaterial);",
+          "diagnosticCheck(gAlbedoRoughness);",
+          "diagnosticCheck(vec4(gMetallicAO, gMotionVector));",
+          "diagnosticCheck(gAuthoredSurface);",
+          "if (diagnosticNonfinite) diagnosticValue = vec3(-1.0, 0.0, -1.0);"}) {
+        EXPECT_NE(shader.find(contract), std::string::npos) << contract;
+    }
+    EXPECT_LT(shader.rfind("diagnosticCheck("),
+              shader.find("gDiagnosticSurface = vec4(diagnosticValue"));
+}
+
+TEST(DiagnosticContributions,
+     SurfaceOffGuardPrecedesAllGlWorkAndPreservesSubmissionAndAttachmentContracts) {
+    const auto pass = Source("src/luminumbra_client/rendering/passes/DebugViewPass.cpp");
+    const auto begin = pass.find("DebugViewPass::SurfaceFrame::SurfaceFrame(");
+    ASSERT_NE(begin, std::string::npos);
+    const auto end = pass.find("DebugViewPass::SurfaceFrame::~SurfaceFrame", begin);
+    ASSERT_NE(end, std::string::npos);
+    const auto body = pass.substr(begin, end - begin);
+    EXPECT_LT(body.find("!control.enabled"), body.find("std::make_unique<SurfaceState>"));
+    EXPECT_LT(body.find("ctx.frozen_replay"), body.find("->attach(ctx, gbuffer)"));
+    EXPECT_LT(body.find("GBufferDiagnosticCapture::Current()"),
+              body.find("->attach(ctx, gbuffer)"));
+    for (const auto* contract : {"std::array<Variant, 6>",
+                                 "entry.generation != base->ProgramGeneration()",
+                                 "occupied != GL_NONE",
+                                 "glDrawBuffers(buffer_count, buffers.data())",
+                                 "glColorMaski(6, mask[0]",
+                                 "std::uncaught_exceptions() > exceptions_",
+                                 "m_surface->view == mode()",
+                                 "m_surface->extent.width == ctx.internal_w()",
+                                 "m_surface->extent.height == ctx.internal_h()"}) {
+        EXPECT_NE(pass.find(contract), std::string::npos) << contract;
+    }
+    const auto shader = Source("res/shaders/debug_view.frag");
+    EXPECT_NE(shader.find("surface.a == texelFetch(gDepth, pixel, 0).r"), std::string::npos);
+    EXPECT_NE(shader.find("all(equal(surface.rgb, vec3(-1.0, 0.0, -1.0)))"), std::string::npos);
+    EXPECT_NE(shader.find("all(equal(surface.rgb, vec3(-2.0, 0.0, -2.0)))"), std::string::npos);
+    for (const auto* texture : {"gPosition",
+                                "gNormalMaterial",
+                                "gAlbedo",
+                                "gDepth",
+                                "gRawMaterial",
+                                "gRawMotion",
+                                "gRawAuthored"}) {
+        EXPECT_NE(shader.find(std::string("rawNonfinite(texelFetch(") + texture + ", pixel, 0))"),
+                  std::string::npos);
+    }
+}
+
+TEST_F(DiagnosticContributionsGl,
+       SurfaceVariantsUseRealMipWeightsAndRawFiniteInputsWithoutChangingOutputs) {
+    const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) / "res/shaders";
+    const auto fragment = (root / "g_buffer.frag").string();
+    for (const auto* stage : {"g_buffer.vert", "instanced_mesh.vert", "skinned_mesh.vert"}) {
+        const auto vertex = (root / stage).string();
+        Shader legacy(vertex.c_str(), fragment.c_str(), {}, {"LUMIN_DIAG_SURFACE 1"});
+        Shader ladder(vertex.c_str(),
+                      fragment.c_str(),
+                      {},
+                      {"LUMIN_DIAG_SURFACE 1", "LUMINUMBRA_FAR_WORLD_LADDER 1"});
+        ASSERT_TRUE(legacy.IsValid()) << stage;
+        ASSERT_TRUE(ladder.IsValid()) << stage;
+    }
+    const auto vertex = (root / "g_buffer.vert").string();
+    Shader normal(vertex.c_str(), fragment.c_str());
+    Shader instrumented(vertex.c_str(), fragment.c_str(), {}, {"LUMIN_DIAG_SURFACE 1"});
+    ASSERT_TRUE(normal.IsValid());
+    ASSERT_TRUE(instrumented.IsValid());
+    EXPECT_EQ(glGetUniformLocation(normal.Id(), "u_surfaceMode"), -1);
+    EXPECT_GE(glGetUniformLocation(instrumented.Id(), "u_surfaceMode"), 0);
+    EXPECT_EQ(glGetFragDataLocation(normal.Id(), "gDiagnosticSurface"), -1);
+    EXPECT_EQ(glGetFragDataLocation(instrumented.Id(), "gDiagnosticSurface"), 6);
+
+    std::array<GLuint, 7> outputs{};
+    glCreateTextures(GL_TEXTURE_2D, static_cast<GLsizei>(outputs.size()), outputs.data());
+    GLuint fbo = 0;
+    glCreateFramebuffers(1, &fbo);
+    std::array<GLenum, 7> buffers{};
+    for (std::size_t index = 0; index < outputs.size(); ++index) {
+        glTextureStorage2D(outputs[index], 1, GL_RGBA32F, 8, 8);
+        buffers[index] = GL_COLOR_ATTACHMENT0 + static_cast<GLenum>(index);
+        glNamedFramebufferTexture(fbo, buffers[index], outputs[index], 0);
+    }
+    glNamedFramebufferDrawBuffers(fbo, static_cast<GLsizei>(buffers.size()), buffers.data());
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER),
+              static_cast<GLenum>(GL_FRAMEBUFFER_COMPLETE));
+    GLuint lut = 0;
+    glCreateTextures(GL_TEXTURE_2D, 1, &lut);
+    glTextureStorage2D(lut, 1, GL_RGBA32F, 1, 4);
+    glTextureParameteri(lut, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTextureParameteri(lut, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    const std::array<std::array<float, 4>, 4> material = {
+        {{0.2f, 0.7f, 1, 0}, {0, 0, 1.0f / 64, 1}, {0, 1, 0, 0}, {1, 1, 1, 0}}};
+    glTextureSubImage2D(lut, 0, 0, 0, 1, 4, GL_RGBA, GL_FLOAT, material.data());
+    std::array<GLuint, 2> arrays{};
+    glCreateTextures(GL_TEXTURE_2D_ARRAY, 2, arrays.data());
+    constexpr std::array<std::array<float, 4>, 2> samples = {
+        {{0.4f, 0.5f, 0.6f, 1}, {0.5f, 0.5f, 1, 1}}};
+    for (std::size_t index = 0; index < arrays.size(); ++index) {
+        glTextureStorage3D(arrays[index], 7, GL_RGBA32F, 64, 64, 1);
+        glTextureParameteri(arrays[index], GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+        glTextureParameteri(arrays[index], GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        for (int level = 0; level < 7; ++level) {
+            glClearTexImage(arrays[index], level, GL_RGBA, GL_FLOAT, samples[index].data());
+        }
+    }
+    glBindTextureUnit(0, lut);
+    for (GLuint unit = 1; unit <= 6; ++unit) {
+        glBindTextureUnit(unit, arrays[unit == 2 || unit == 5 ? 1 : 0]);
+    }
+    GLuint vao = 0;
+    GLuint vbo = 0;
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &vbo);
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    constexpr std::array<float, 9> triangle = {-1, -1, -0.5f, 3, -1, -0.5f, -1, 3, -0.5f};
+    glBufferData(GL_ARRAY_BUFFER, sizeof(triangle), triangle.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+    glVertexAttrib3f(1, 1, 2, 3);
+    glVertexAttribI1ui(2, 1);
+    glViewport(0, 0, 8, 8);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glDisable(GL_CULL_FACE);
+    bool uv_case = false;
+    const auto draw = [&](Shader& shader, int mode, float bias) {
+        shader.use();
+        shader.setMat4("model", glm::mat4(1));
+        shader.setMat4("view", glm::mat4(1));
+        shader.setMat4("projection", glm::mat4(1));
+        shader.setMat3("normalMatrix", glm::mat3(1));
+        shader.setMat3("u_normalViewMatrix", glm::mat3(1));
+        shader.setMat4("u_prev_view_proj", glm::mat4(1));
+        shader.setVec2("u_inv_screen_size", glm::vec2(1.0f / 8));
+        shader.setInt("u_materialLUT", 0);
+        shader.setInt("u_terrainTextures", 1);
+        shader.setInt("u_terrainNormals", 2);
+        shader.setInt("u_skinnedTextures", 3);
+        shader.setInt("u_terrainRoughness", 4);
+        shader.setInt("u_skinnedAlbedoLayer", uv_case ? 0 : -1);
+        shader.setInt("u_skinnedNormalLayer", uv_case ? 0 : -1);
+        shader.setInt("u_staticSurfaceLayer", uv_case ? 0 : -1);
+        shader.setInt("u_surfaceMode", mode);
+        shader.setFloat("u_lodBias", bias);
+        AttributedGl::Submit(glDrawArrays, static_cast<GLenum>(GL_TRIANGLES), 0, 3);
+        std::array<std::array<float, 4>, 7> values{};
+        for (std::size_t index = 0; index < values.size(); ++index) {
+            glReadBuffer(buffers[index]);
+            glReadPixels(4, 4, 1, 1, GL_RGBA, GL_FLOAT, values[index].data());
+        }
+        return values;
+    };
+    const auto reference = draw(normal, 0, 0);
+    constexpr std::array<std::size_t, 6> channels = {3, 4, 4, 2, 2, 4};
+    for (int mode = Pass::ActualMip; mode <= Pass::RawFinite; ++mode) {
+        const auto result = draw(instrumented, mode, 0);
+        for (std::size_t attachment = 0; attachment < channels.size(); ++attachment) {
+            for (std::size_t channel = 0; channel < channels[attachment]; ++channel) {
+                EXPECT_FLOAT_EQ(result[attachment][channel], reference[attachment][channel]);
+            }
+        }
+        EXPECT_FLOAT_EQ(result[6][3], 0.25f);
+        if (mode == Pass::ActualMip || mode == Pass::TexelDensity) {
+            EXPECT_NEAR(result[6][0], 4.0f, 0.00001f);
+            EXPECT_NEAR(draw(instrumented, mode, 1)[6][0], 5.0f, 0.00001f);
+            // Clamping changes selected mip, while density retains the true footprint.
+            EXPECT_NEAR(draw(instrumented, mode, 8)[6][0],
+                        mode == Pass::ActualMip ? 6.0f : 12.0f,
+                        0.00001f);
+        } else if (mode == Pass::TriplanarWeights) {
+            EXPECT_NEAR(result[6][0], 1.0f / 98, 0.00001f);
+            EXPECT_NEAR(result[6][1], 16.0f / 98, 0.00001f);
+            EXPECT_NEAR(result[6][2], 81.0f / 98, 0.00001f);
+            EXPECT_TRUE(DiagnosticContributions::normalized_weights(
+                {result[6][0], result[6][1], result[6][2]}));
+        } else {
+            EXPECT_EQ(result[6], (std::array<float, 4>{0, 0, 0, 0.25f}));
+        }
+    }
+    // The terrain vertex fixture has constant mesh UVs: all UV material arrays magnify at mip 0.
+    uv_case = true;
+    EXPECT_FLOAT_EQ(draw(instrumented, Pass::ActualMip, 0)[6][0], 0.0f);
+    EXPECT_NEAR(draw(instrumented, Pass::TexelDensity, 0)[6][0], std::log2(1e-8f), 0.00001f);
+    EXPECT_EQ(draw(instrumented, Pass::RawFinite, 0)[6], (std::array<float, 4>{0, 0, 0, 0.25f}));
+    uv_case = false;
+    for (const float invalid :
+         {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()}) {
+        auto corrupt = material;
+        // This raw LUT channel is otherwise hidden by the material path's clamp/encoding.
+        corrupt[3][0] = invalid;
+        glTextureSubImage2D(lut, 0, 0, 0, 1, 4, GL_RGBA, GL_FLOAT, corrupt.data());
+        EXPECT_EQ(draw(instrumented, Pass::RawFinite, 0)[6],
+                  (std::array<float, 4>{-1, 0, -1, 0.25f}));
+    }
+    EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteTextures(2, arrays.data());
+    glDeleteTextures(1, &lut);
+    glDeleteTextures(static_cast<GLsizei>(outputs.size()), outputs.data());
+    glDeleteFramebuffers(1, &fbo);
+}
+
+TEST_F(DiagnosticContributionsGl,
+       SurfaceScopeRestoresAttachmentsAndRefusesCollisionsReplayAndIdentityOwnership) {
+    Pass pass;
+    auto& control = Pass::controls();
+    control = {};
+    control.enabled = true;
+    control.view = Pass::RawFinite;
+    RenderContext ctx;
+    ctx.screen_width = ctx.screen_height = 8;
+    EXPECT_FALSE(pass.begin_frame(ctx));
+    GBuffer gbuffer;
+    glGenFramebuffers(1, &gbuffer.fbo_id);
+    GLuint color = 0;
+    glCreateTextures(GL_TEXTURE_2D, 1, &color);
+    glTextureStorage2D(color, 1, GL_RGBA32F, 8, 8);
+    glBindFramebuffer(GL_FRAMEBUFFER, gbuffer.fbo_id);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color, 0);
+    glDrawBuffer(GL_COLOR_ATTACHMENT0);
+    glColorMaski(6, GL_FALSE, GL_TRUE, GL_FALSE, GL_TRUE);
+    glEnablei(GL_BLEND, 6);
+    const auto attachment = [&] {
+        GLint value = GL_NONE;
+        glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,
+                                              GL_COLOR_ATTACHMENT6,
+                                              GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE,
+                                              &value);
+        return value;
+    };
+    {
+        Pass::SurfaceFrame frame(ctx, gbuffer);
+        EXPECT_EQ(attachment(), GL_TEXTURE);
+        EXPECT_EQ(glIsEnabledi(GL_BLEND, 6), GL_FALSE);
+        std::array<GLboolean, 4> mask{};
+        glGetBooleani_v(GL_COLOR_WRITEMASK, 6, mask.data());
+        EXPECT_EQ(mask, (std::array<GLboolean, 4>{GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE}));
+        {
+            Pass::SurfaceFrame nested(ctx, gbuffer);
+            EXPECT_EQ(attachment(), GL_TEXTURE);
+        }
+        EXPECT_EQ(attachment(), GL_TEXTURE);
+        Pass::unsupported_surface();
+    }
+    EXPECT_EQ(attachment(), GL_NONE);
+    EXPECT_EQ(glIsEnabledi(GL_BLEND, 6), GL_TRUE);
+    std::array<GLboolean, 4> mask{};
+    glGetBooleani_v(GL_COLOR_WRITEMASK, 6, mask.data());
+    EXPECT_EQ(mask, (std::array<GLboolean, 4>{GL_FALSE, GL_TRUE, GL_FALSE, GL_TRUE}));
+    GLint buffer = -1;
+    glGetIntegerv(GL_DRAW_BUFFER6, &buffer);
+    EXPECT_EQ(buffer, GL_NONE);
+    for (const int refusal : {0, 1, 2, 3, 4}) {
+        SCOPED_TRACE(refusal);
+        control.enabled = refusal != 0;
+        ctx.frozen_replay = refusal == 1;
+        ctx.screen_width = refusal == 2 ? 0U : 8U;
+        if (refusal == 3) {
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT6, GL_TEXTURE_2D, color, 0);
+        }
+        DiagnosticDrawTable table;
+        std::unique_ptr<GBufferDiagnosticCapture> capture;
+        if (refusal == 4) {
+            capture = std::make_unique<GBufferDiagnosticCapture>(table);
+        }
+        {
+            Pass::SurfaceFrame frame(ctx, gbuffer);
+            EXPECT_EQ(attachment(), refusal == 3 ? GL_TEXTURE : GL_NONE);
+        }
+        if (refusal == 3) {
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT6, GL_TEXTURE_2D, 0, 0);
+        }
+    }
+    control.enabled = true;
+    ctx.screen_width = 8;
+    try {
+        Pass::SurfaceFrame frame(ctx, gbuffer);
+        ASSERT_EQ(attachment(), GL_TEXTURE);
+        throw std::runtime_error("surface scope exit");
+    } catch (const std::runtime_error&) {
+        EXPECT_EQ(attachment(), GL_NONE);
+    }
+    pass.reset_shader();
+    glDeleteFramebuffers(1, &gbuffer.fbo_id);
+    glDeleteTextures(1, &color);
+    EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+}
+
+TEST_F(DiagnosticContributionsGl, SurfaceOverlayHasDisjointSentinelsAndRejectsHiddenPixels) {
+    const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) / "res/shaders";
+    const auto vertex = (root / "fullscreen_tri.vert").string();
+    const auto fragment = (root / "debug_view.frag").string();
+    Shader shader(vertex.c_str(), fragment.c_str(), {}, {"LUMIN_DIAG_VIEWS 1"});
+    ASSERT_TRUE(shader.IsValid());
+    std::array<GLuint, 4> textures{};
+    glCreateTextures(GL_TEXTURE_2D, 4, textures.data());
+    for (const GLuint texture : textures) {
+        glTextureStorage2D(texture, 1, GL_RGBA32F, 1, 1);
+        glClearTexImage(texture, 0, GL_RGBA, GL_FLOAT, nullptr);
+        glTextureParameteri(texture, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTextureParameteri(texture, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    }
+    const std::array<float, 4> depth = {0.5f, 0, 0, 0};
+    glTextureSubImage2D(textures[1], 0, 0, 0, 1, 1, GL_RGBA, GL_FLOAT, depth.data());
+    GLuint fbo = 0;
+    glCreateFramebuffers(1, &fbo);
+    glNamedFramebufferTexture(fbo, GL_COLOR_ATTACHMENT0, textures[0], 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glDrawBuffer(GL_COLOR_ATTACHMENT0);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    GLuint vao = 0;
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glViewport(0, 0, 1, 1);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glBindTextureUnit(3, textures[1]);
+    glBindTextureUnit(6, textures[2]);
+    glBindTextureUnit(7, textures[3]);
+    shader.use();
+    shader.setInt("gDepth", 3);
+    shader.setInt("gIdentity", 4);
+    shader.setInt("gDrawMetadata", 5);
+    shader.setInt("u_contributionReady", 1);
+    shader.setInt("u_rawMaterialReady", 1);
+    const auto draw = [&](int mode, const std::array<float, 4>& input) {
+        shader.setInt("u_mode", mode);
+        glTextureSubImage2D(textures[2], 0, 0, 0, 1, 1, GL_RGBA, GL_FLOAT, input.data());
+        AttributedGl::Submit(glDrawArrays, static_cast<GLenum>(GL_TRIANGLES), 0, 3);
+        std::array<float, 4> pixel{};
+        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, pixel.data());
+        return pixel;
+    };
+    EXPECT_EQ(draw(Pass::ActualMip, {4, 4, 4, 0.5f}),
+              (std::array<float, 4>{0.25f, 0.25f, 0.25f, 1}));
+    EXPECT_EQ(draw(Pass::TexelDensity, {0, 0, 0, 0.5f}),
+              (std::array<float, 4>{0.5f, 0.5f, 0.5f, 1}));
+    // Valid magnification footprints at -1/-2 octaves must never collide with sentinels.
+    EXPECT_EQ(draw(Pass::TexelDensity, {-1, -1, -1, 0.5f}),
+              (std::array<float, 4>{0.4375f, 0.4375f, 0.4375f, 1}));
+    EXPECT_EQ(draw(Pass::TexelDensity, {-2, -2, -2, 0.5f}),
+              (std::array<float, 4>{0.375f, 0.375f, 0.375f, 1}));
+    EXPECT_EQ(draw(Pass::TriplanarWeights, {0.25f, 0.5f, 0.25f, 0.5f}),
+              (std::array<float, 4>{0.25f, 0.5f, 0.25f, 1}));
+    EXPECT_EQ(draw(Pass::TriplanarWeights, {-2, 0, -2, 0.5f}), (std::array<float, 4>{1, 1, 0, 1}));
+    EXPECT_EQ(draw(Pass::RawFinite, {-1, 0, -1, 0.5f}), (std::array<float, 4>{1, 0, 1, 1}));
+    EXPECT_EQ(draw(Pass::RawFinite, {0, 0, 0, 0.5f}), (std::array<float, 4>{0, 0, 0, 1}));
+    const std::array<float, 4> hatch = {1, 0, 1, 1};
+    EXPECT_EQ(draw(Pass::ActualMip, {4, 4, 4, 0.25f}), hatch);
+    EXPECT_EQ(draw(Pass::ActualMip, {4, 4, 4, 0}), hatch);
+    for (const float invalid :
+         {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()}) {
+        const std::array<float, 4> stored = {0, invalid, 0, 0};
+        glTextureSubImage2D(textures[3], 0, 0, 0, 1, 1, GL_RGBA, GL_FLOAT, stored.data());
+        EXPECT_EQ(draw(Pass::RawFinite, {0, 0, 0, 0.5f}), (std::array<float, 4>{1, 0, 1, 1}));
+    }
+    shader.setInt("u_contributionReady", 0);
+    EXPECT_EQ(draw(Pass::ActualMip, {4, 4, 4, 0.5f}), hatch);
+    EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+    glDeleteVertexArrays(1, &vao);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(4, textures.data());
 }

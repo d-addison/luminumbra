@@ -27,6 +27,12 @@ uniform sampler2D gDepth;           // unit 3: hardware depth texture
 layout(binding = 4) uniform usampler2D gIdentity;
 layout(binding = 5) uniform usamplerBuffer gDrawMetadata;
 layout(binding = 6) uniform sampler2D gContribution;
+layout(binding = 7) uniform sampler2D gRawMaterial;
+layout(binding = 8) uniform sampler2D gRawMotion;
+layout(binding = 9) uniform sampler2D gRawAuthored;
+uniform int u_rawMaterialReady = 0;
+uniform int u_rawMotionReady = 0;
+uniform int u_rawAuthoredReady = 0;
 uniform int u_contributionReady = 0;
 uniform int u_identityReady = 0;
 uniform int u_inspect = 0;
@@ -71,6 +77,18 @@ vec3 hash_id_color(uint id) {
 }
 
 #ifdef LUMIN_DIAG_VIEWS
+bool rawNonfinite(vec4 value) {
+    return any(isnan(value)) || any(isinf(value));
+}
+bool rawGBufferNonfinite(ivec2 pixel) {
+    return rawNonfinite(texelFetch(gPosition, pixel, 0)) ||
+        rawNonfinite(texelFetch(gNormalMaterial, pixel, 0)) ||
+        rawNonfinite(texelFetch(gAlbedo, pixel, 0)) ||
+        rawNonfinite(texelFetch(gDepth, pixel, 0)) ||
+        (u_rawMaterialReady != 0 && rawNonfinite(texelFetch(gRawMaterial, pixel, 0))) ||
+        (u_rawMotionReady != 0 && rawNonfinite(texelFetch(gRawMotion, pixel, 0))) ||
+        (u_rawAuthoredReady != 0 && rawNonfinite(texelFetch(gRawAuthored, pixel, 0)));
+}
 // Stable uint32 hash, identical to DebugViewPass::hash_id.
 uint diagnosticHash(uint value) {
     return value * 2654435761u;
@@ -116,6 +134,31 @@ vec3 identityColor() {
 
 void main() {
 #ifdef LUMIN_DIAG_VIEWS
+    if (u_mode >= 30 && u_mode <= 33) {
+        vec3 value = unsupportedColor();
+        if (u_contributionReady != 0) {
+            ivec2 extent = textureSize(gContribution, 0);
+            ivec2 pixel = clamp(ivec2(TexCoords * vec2(extent)), ivec2(0), extent - 1);
+            // Also detect storage overflow (e.g. finite float32 -> infinite RG16F).
+            if (u_mode == 33 && rawGBufferNonfinite(pixel)) {
+                FragColor = vec4(1.0, 0.0, 1.0, 1.0);
+                return;
+            }
+            vec4 surface = texelFetch(gContribution, pixel, 0);
+            // Later unsupported producers must not inherit a diagnostic from hidden geometry.
+            if (surface.a > 0.0 && surface.a == texelFetch(gDepth, pixel, 0).r) {
+                if (any(isnan(surface.rgb)) || any(isinf(surface.rgb)) || all(equal(surface.rgb, vec3(-1.0, 0.0, -1.0))))
+                    value = vec3(1.0, 0.0, 1.0);
+                else if (all(equal(surface.rgb, vec3(-2.0, 0.0, -2.0)))) value = vec3(1.0, 1.0, 0.0);
+                else if (u_mode == 30) value = vec3(clamp(surface.r / 16.0, 0.0, 1.0));
+                else if (u_mode == 31) value = vec3(clamp(surface.r / 16.0 + 0.5, 0.0, 1.0));
+                else if (u_mode == 32) value = surface.rgb;
+                else value = vec3(0.0);
+            }
+        }
+        FragColor = vec4(value, 1.0);
+        return;
+    }
     if (u_mode >= 12 && u_mode <= 29) {
         vec3 value = unsupportedColor();
         if (u_contributionReady != 0) {

@@ -197,6 +197,9 @@ std::string DebugViewPass::join(std::string_view table, const DiagnosticId& id) 
 }
 
 std::string_view DebugViewPass::contribution_legend(int mode) {
+    if (DiagnosticContributions::surface_mode(mode)) {
+        return DiagnosticContributions::legend(mode);
+    }
     switch (mode) {
         case DirectSun:
             return "Deferred direct sun: linear BRDF, shadow, cloud and transmission; RGB x/(1+x)";
@@ -250,8 +253,234 @@ void DebugViewPass::set_mode(int mode) {
     }
 }
 
+// Surface instrumentation shares this pass's lifetime and existing native target.
+// No new translation unit or source-list registration is required.
+struct DebugViewPass::SurfaceState {
+    struct Variant {
+        const Shader* source = nullptr;
+        std::uint64_t generation = 0;
+        bool ladder = false;
+        std::unique_ptr<Shader> shader;
+    };
+    // Three vertex stages times two backends; no unbounded per-frame cache.
+    std::array<Variant, 6> variants{};
+    GLuint texture = 0;
+    DiagnosticExtent extent{};
+    int view = None;
+    GLuint framebuffer = 0;
+    GLint buffer_count = 0;
+    std::array<GLenum, 32> buffers{};
+    std::array<GLboolean, 4> mask{};
+    GLboolean blend = GL_FALSE;
+    bool attached = false;
+    bool ready = false;
+    bool supported = false;
+
+    ~SurfaceState() {
+        detach();
+        if (texture != 0) {
+            glDeleteTextures(1, &texture);
+        }
+    }
+    bool storage(const DiagnosticExtent& requested) {
+        if (!contribution_extent(requested.width, requested.height)) {
+            return false;
+        }
+        if (texture != 0 && extent.width == requested.width && extent.height == requested.height) {
+            return true;
+        }
+        GLint maximum = 0;
+        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maximum);
+        if (maximum <= 0 || requested.width > static_cast<unsigned int>(maximum) ||
+            requested.height > static_cast<unsigned int>(maximum)) {
+            return false;
+        }
+        // RGBA32F, <=16M pixels / 256 MiB; transactional resize peaks at 512 MiB.
+        GLuint replacement = 0;
+        glCreateTextures(GL_TEXTURE_2D, 1, &replacement);
+        if (replacement == 0) {
+            return false;
+        }
+        glTextureStorage2D(replacement,
+                           1,
+                           GL_RGBA32F,
+                           static_cast<GLsizei>(requested.width),
+                           static_cast<GLsizei>(requested.height));
+        glTextureParameteri(replacement, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTextureParameteri(replacement, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        GLint allocated = 0;
+        glGetTextureLevelParameteriv(replacement, 0, GL_TEXTURE_WIDTH, &allocated);
+        if (allocated != static_cast<GLint>(requested.width)) {
+            glDeleteTextures(1, &replacement);
+            return false;
+        }
+        if (texture != 0) {
+            glDeleteTextures(1, &texture);
+        }
+        texture = replacement;
+        extent = requested;
+        return true;
+    }
+    void attach(const RenderContext& ctx, const GBuffer& gbuffer) {
+        ready = false;
+        supported = false;
+        if (attached || gbuffer.fbo_id == 0) {
+            return;
+        }
+        GLint bound = 0;
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &bound);
+        if (static_cast<GLuint>(bound) != gbuffer.fbo_id) {
+            return;
+        }
+        glGetIntegerv(GL_MAX_DRAW_BUFFERS, &buffer_count);
+        GLint attachments = 0;
+        glGetIntegerv(GL_MAX_COLOR_ATTACHMENTS, &attachments);
+        if (buffer_count < 7 || buffer_count > static_cast<GLint>(buffers.size()) ||
+            attachments < 7) {
+            return;
+        }
+        GLint occupied = GL_NONE;
+        glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,
+                                              GL_COLOR_ATTACHMENT6,
+                                              GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE,
+                                              &occupied);
+        if (occupied != GL_NONE || !storage({ctx.internal_w(), ctx.internal_h()})) {
+            return;
+        }
+        for (GLint index = 0; index < buffer_count; ++index) {
+            GLint value = GL_NONE;
+            glGetIntegerv(GL_DRAW_BUFFER0 + static_cast<GLenum>(index), &value);
+            buffers[static_cast<std::size_t>(index)] = static_cast<GLenum>(value);
+        }
+        glGetBooleani_v(GL_COLOR_WRITEMASK, 6, mask.data());
+        blend = glIsEnabledi(GL_BLEND, 6);
+        glClearTexImage(texture, 0, GL_RGBA, GL_FLOAT, nullptr);
+        framebuffer = gbuffer.fbo_id;
+        attached = true;
+        glFramebufferTexture2D(
+            GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT6, GL_TEXTURE_2D, texture, 0);
+        auto outputs = buffers;
+        outputs[6] = GL_COLOR_ATTACHMENT6;
+        glDrawBuffers(buffer_count, outputs.data());
+        glColorMaski(6, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glDisablei(GL_BLEND, 6);
+        supported = glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+        if (!supported) {
+            detach();
+        }
+    }
+    void detach() {
+        if (!attached) {
+            return;
+        }
+        GLint previous = 0;
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
+        glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT6, GL_TEXTURE_2D, 0, 0);
+        glDrawBuffers(buffer_count, buffers.data());
+        glColorMaski(6, mask[0], mask[1], mask[2], mask[3]);
+        if (blend == GL_TRUE) {
+            glEnablei(GL_BLEND, 6);
+        } else {
+            glDisablei(GL_BLEND, 6);
+        }
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(previous));
+        attached = false;
+        ready = supported;
+    }
+    Shader* variant(Shader* base, bool ladder) {
+        if (!attached) {
+            return base;
+        }
+        if (!base || !base->IsValid()) {
+            supported = false;
+            glColorMaski(6, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+            return base;
+        }
+        for (auto& entry : variants) {
+            if ((entry.source == base && entry.ladder == ladder) || entry.source == nullptr) {
+                if (entry.source != base || entry.generation != base->ProgramGeneration() ||
+                    entry.ladder != ladder) {
+                    std::vector<std::string> defines{"LUMIN_DIAG_SURFACE 1"};
+                    if (ladder) {
+                        defines.emplace_back("LUMINUMBRA_FAR_WORLD_LADDER 1");
+                    }
+                    entry.shader = std::make_unique<Shader>(base->VertexPath().c_str(),
+                                                            base->FragmentPath().c_str(),
+                                                            std::vector<std::string>{},
+                                                            defines);
+                    entry.source = base;
+                    entry.generation = base->ProgramGeneration();
+                    entry.ladder = ladder;
+                }
+                if (entry.shader && entry.shader->IsValid()) {
+                    entry.shader->use();
+                    entry.shader->setInt("u_surfaceMode", view);
+                    glColorMaski(6, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+                    return entry.shader.get();
+                }
+                break;
+            }
+        }
+        supported = false;
+        glColorMaski(6, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+        return base;
+    }
+};
+
+DebugViewPass::SurfaceFrame::SurfaceFrame(const RenderContext& ctx, const GBuffer& gbuffer) {
+    auto& control = controls();
+    if (!control.enabled || !DiagnosticContributions::surface_mode(control.view) ||
+        ctx.frozen_replay || GBufferDiagnosticCapture::Current() || !control.surface_owner) {
+        return;
+    }
+    if (control.surface_owner->m_surface && control.surface_owner->m_surface->attached) {
+        return;
+    }
+    owner_ = control.surface_owner;
+    exceptions_ = std::uncaught_exceptions();
+    if (!owner_->m_surface) {
+        owner_->m_surface = std::make_unique<SurfaceState>();
+    }
+    owner_->m_surface->view = control.view;
+    owner_->m_surface->attach(ctx, gbuffer);
+}
+DebugViewPass::SurfaceFrame::~SurfaceFrame() {
+    if (owner_) {
+        if (std::uncaught_exceptions() > exceptions_) {
+            owner_->m_surface->supported = false;
+        }
+        owner_->m_surface->detach();
+    }
+}
+Shader* DebugViewPass::surface_variant(Shader* base, bool ladder) {
+    const auto& control = controls();
+    if (control.enabled && DiagnosticContributions::surface_mode(control.view) &&
+        control.surface_owner && control.surface_owner->m_surface) {
+        return control.surface_owner->m_surface->variant(base, ladder);
+    }
+    return base;
+}
+void DebugViewPass::unsupported_surface() {
+    const auto& control = controls();
+    if (control.enabled && DiagnosticContributions::surface_mode(control.view) &&
+        control.surface_owner && control.surface_owner->m_surface &&
+        control.surface_owner->m_surface->attached) {
+        control.surface_owner->m_surface->supported = false;
+        glColorMaski(6, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+    }
+}
+
 std::shared_ptr<DebugViewPass::Frame> DebugViewPass::begin_frame(const RenderContext& ctx) {
     auto& control = controls();
+    control.surface_owner = this;
+    if (m_surface) {
+        m_surface->ready = false;
+    }
+    if (control.enabled && DiagnosticContributions::surface_mode(control.view)) {
+        control.refresh = false;
+        return {};
+    }
     if (!control.enabled || !control.refresh || ctx.frozen_replay) {
         return {};
     }
@@ -310,7 +539,10 @@ std::shared_ptr<DebugViewPass::Frame> DebugViewPass::begin_frame(const RenderCon
     }
     m_snapshot->ready = false;
     m_snapshot->draws.clear();
-    m_snapshot->targets.reset();
+    if (!m_snapshot->targets.reset()) {
+        control.status = "Identity target is leased";
+        return {};
+    }
     return std::make_shared<Frame>(*this, ctx);
 }
 
@@ -497,10 +729,15 @@ void DebugViewPass::finish_frame(const RenderContext& ctx) {
 }
 
 DebugViewPass::DebugViewPass() = default;
-DebugViewPass::~DebugViewPass() = default;
+DebugViewPass::~DebugViewPass() {
+    if (controls().surface_owner == this) {
+        controls().surface_owner = nullptr;
+    }
+}
 
 void DebugViewPass::init_shader(const std::filesystem::path& root_path) {
     m_contribution_shader.reset();
+    m_surface.reset();
     const std::string vert = (root_path / "res/shaders/fullscreen_tri.vert").string();
     const std::string frag = (root_path / "res/shaders/debug_view.frag").string();
     m_shader = std::make_unique<Shader>(vert.c_str(), frag.c_str());
@@ -517,6 +754,7 @@ void DebugViewPass::init_buffers() {
 }
 
 void DebugViewPass::destroy_buffers() {
+    m_surface.reset();
     m_snapshot.reset();
     if (m_vao) {
         glDeleteVertexArrays(1, &m_vao);
@@ -525,6 +763,7 @@ void DebugViewPass::destroy_buffers() {
 }
 
 void DebugViewPass::reset_shader() {
+    m_surface.reset();
     m_contribution_shader.reset();
     m_shader.reset();
 }
@@ -534,7 +773,9 @@ void DebugViewPass::execute(const RenderContext& ctx) {
     // Default-OFF guard: Mode::None (0) is a true no-op so the normal render is untouched.
     if (mode() == Mode::None)
         return;
-    const bool contribution_view = controls().enabled && contribution_mode(mode());
+    const bool contribution_view =
+        controls().enabled &&
+        (contribution_mode(mode()) || DiagnosticContributions::surface_mode(mode()));
     if (contribution_view && !m_contribution_shader && m_shader) {
         m_contribution_shader =
             std::make_unique<Shader>(m_shader->VertexPath().c_str(),
@@ -554,8 +795,11 @@ void DebugViewPass::execute(const RenderContext& ctx) {
         controls().status = std::string(contribution_legend(mode()));
         controls().status +=
             overlay_available
-                ? "; magenta hatch=unsupported/unavailable/sky; magenta=NaN, cyan=Inf. "
-                  "Deferred surface only; forward/sky/shadow contributors unsupported."
+                ? (DiagnosticContributions::surface_mode(mode())
+                       ? "; magenta=raw NaN/Inf; yellow=invalid weights; hatch=unavailable/sky. "
+                         "G-buffer producers only; detail blur excluded from mip scale."
+                       : "; magenta hatch=unsupported/unavailable/sky; magenta=NaN, cyan=Inf. "
+                         "Deferred surface only; forward/sky/shadow contributors unsupported.")
                 : "; overlay shader unavailable: solid magenta error sentinel";
     }
     if (!shader || !shader->IsValid() || m_vao == 0)
@@ -615,6 +859,27 @@ void DebugViewPass::bind_sources(const RenderContext& ctx, Shader& shader) {
     glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_depth.id);
     shader.setInt("gDepth", 3);
 
+    if (DiagnosticContributions::surface_mode(mode())) {
+        const bool ready = controls().enabled && !ctx.frozen_replay && m_surface &&
+                           m_surface->ready && m_surface->view == mode() &&
+                           m_surface->extent.width == ctx.internal_w() &&
+                           m_surface->extent.height == ctx.internal_h();
+        shader.setInt("u_contributionReady", ready ? 1 : 0);
+        if (mode() == RawFinite) {
+            shader.setInt("u_rawMaterialReady", ctx.gbuffer_material.id != 0 ? 1 : 0);
+            shader.setInt("u_rawMotionReady", ctx.motion_vectors.id != 0 ? 1 : 0);
+            shader.setInt("u_rawAuthoredReady", ctx.authored_surface.id != 0 ? 1 : 0);
+            glActiveTexture(GL_TEXTURE7);
+            glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_material.id);
+            glActiveTexture(GL_TEXTURE8);
+            glBindTexture(GL_TEXTURE_2D, ctx.motion_vectors.id);
+            glActiveTexture(GL_TEXTURE9);
+            glBindTexture(GL_TEXTURE_2D, ctx.authored_surface.id);
+        }
+        glActiveTexture(GL_TEXTURE6);
+        glBindTexture(GL_TEXTURE_2D, ready ? m_surface->texture : 0);
+        return;
+    }
     if (contribution_mode(mode())) {
         const auto& control = controls();
         const bool ready = control.enabled && supported_contribution(mode()) &&
