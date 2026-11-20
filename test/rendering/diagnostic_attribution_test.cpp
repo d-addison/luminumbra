@@ -123,8 +123,9 @@ bool SubmitGenerated(Luminumbra::Rendering::DiagnosticDrawTable& table,
     if constexpr (requires { submission.generated_mesh; }) {
         submission.generated_mesh = key;
         return table.submit(submission, id);
+    } else {
+        return false;
     }
-    return false;
 }
 } // namespace
 
