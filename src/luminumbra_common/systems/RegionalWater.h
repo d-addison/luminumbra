@@ -134,6 +134,13 @@ public:
                std::uint64_t tick,
                std::span<const std::shared_ptr<Chunk>> participants,
                std::span<const RegionPlan> regions);
+    // Explicit production entry for source-inclusive activity. Shipping callers select
+    // it only through kSourceInclusiveActivity; Begin retains the existing contract.
+    // Preparation must precede the first source/interior/face on each target.
+    void BeginSourceActivity(world::ActiveRegionLedger& ledger,
+                             std::uint64_t tick,
+                             std::span<const std::shared_ptr<Chunk>> participants,
+                             std::span<const RegionPlan> regions);
     WaterKernels::Result StepInterior(ChunkID id,
                                       SHIELD_WorldSystem& shield,
                                       const WaterKernels::InteriorInputs& inputs);
@@ -167,12 +174,17 @@ private:
         // transaction from its first seam change above 1 mm.
         bool interior_stepped = false;
         bool face_cadence_advanced = false;
+        bool source_accepted = false;
     };
+    WaterKernels::ActivityBaseline& Activity(Entry& entry);
     Entry& FindEntry(ChunkID id);
     Chunk& Grid(ChunkID id);
     void AdvanceFaceCadence(Entry& entry, const std::vector<std::int32_t>& before);
     void Account(const WaterKernels::Result& result, const Chunk& grid);
     std::vector<Entry> m_entries;
+    // Reused across transactions, at most kMaxResidents baselines of <= 1024 cells.
+    std::vector<WaterKernels::ActivityBaseline> m_activity;
+    bool m_source_activity = false;
     std::vector<world::ActiveRegionLedger::WaterPatch> m_patches;
     world::ActiveRegionLedger::WaterDebts m_debts;
     world::ActiveRegionLedger* m_ledger = nullptr;

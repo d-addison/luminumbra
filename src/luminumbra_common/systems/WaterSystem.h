@@ -58,6 +58,9 @@ Selection SelectPriorityWindow(std::vector<Candidate> candidates,
 
 namespace WaterKernels {
 
+// Selected only together with the shared authority-rules revision.
+inline constexpr bool kSourceInclusiveActivity = false;
+
 // Refuse leaves both integer authority and runtime mirrors unchanged. Saturate retains the
 // legacy solver's depth clamps, saturation sinks and receiver-limited seam transfers.
 enum class OverflowPolicy {
@@ -98,6 +101,40 @@ Result StepSharedFace(Chunk& owner,
 // Advances the coalesced remesh cadence after a committed depth change above 1 mm.
 // Returns true when the interval is reached and the water mesh was invalidated.
 bool AdvanceWaterMeshCadence(Chunk& chunk) noexcept;
+
+// Owner-thread activity origin, separate from each kernel's conservation totals.
+// Capture after preparation and before mutation. Storage is reused, bounded to 32x32
+// depths. Repeated Capture is idempotent for the same target/shape; Reset starts a
+// new tick. Invalid shapes, mismatched targets, negative sources, overflowing Refuse
+// injections and calls after Finalize refuse without changing the chunk.
+class ActivityBaseline {
+public:
+    void Reset() noexcept;
+    bool Capture(const Chunk& chunk);
+    Result Inject(Chunk& chunk,
+                  std::size_t cell,
+                  std::int32_t millimetres,
+                  OverflowPolicy policy = OverflowPolicy::Refuse);
+    Result StepInterior(Chunk& chunk,
+                        SHIELD_WorldSystem& shield,
+                        const InteriorInputs& inputs,
+                        OverflowPolicy policy = OverflowPolicy::Refuse);
+    // Final depth includes every source, interior and face mutation. Calm time advances
+    // only for interior/source targets; changed seam-only endpoints are still woken.
+    Result Finalize(Chunk& chunk, bool advance_calm);
+    [[nodiscard]] std::size_t cells_captured() const noexcept {
+        return m_depth.size();
+    }
+
+private:
+    bool Matches(const Chunk& chunk) const noexcept;
+    std::vector<std::int32_t> m_depth;
+    ChunkID m_id = 0;
+    int m_resolution = 0;
+    int m_calm_ticks = 0;
+    bool m_sleeping = false;
+    bool m_finalized = false;
+};
 
 } // namespace WaterKernels
 
@@ -389,6 +426,7 @@ private:
     // callers; the live path is the integer  StepChunkWaterFixed. Removed.
     Vec3 get_camera_position(entt::registry& registry) const;
     void inject_water_sources(entt::registry& registry, bool deterministic_authority);
+    WaterKernels::ActivityBaseline& activity_for(Chunk& chunk);
 
     std::vector<std::shared_ptr<HighWaterSeedInputs>>
     prepare_high_water_seed_inputs(std::span<Chunk* const> to_init,
@@ -425,6 +463,15 @@ private:
     std::int64_t m_debug_source_injected_mm = 0;
     std::uint64_t m_water_epoch = 0; //  (see water_epoch())
     std::unordered_set<ChunkID> m_mesh_invalidations;
+    struct ActivityTarget {
+        Chunk* chunk = nullptr;
+        WaterKernels::ActivityBaseline baseline;
+    };
+    // Reused high-water storage for distinct source/solver participants only, never
+    // more than the supplied active map. Each baseline holds at most 1,024 depths.
+    std::vector<ActivityTarget> m_activity_targets;
+    std::unordered_map<ChunkID, std::size_t> m_activity_indices;
+    std::size_t m_activity_count = 0;
 
     // boot-settle mode (see SetBootSettleMode). Lifts the init/sim caps during Boot.
     bool m_boot_settle_mode = false;
