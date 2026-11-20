@@ -520,9 +520,6 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
     // cull/draw/index counts; we fold them into the returned stats with the EXACT
     // current policy (terrain_visible_chunks '=', draws/indices '+=').
     const TerrainSubmitStats ts = input.submit_terrain_chunks(frustum_planes);
-    if (capture && ts.draws != 0) {
-        capture->unsupported("live_terrain_mdi_unsupported");
-    }
     stats.terrain_visible_chunks = ts.visible_chunks;
     stats.terrain_draws += ts.draws;
     stats.terrain_indices += ts.indices;
@@ -546,6 +543,8 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
         input.submit_ladder,
         [&uniforms, capture](const FarWorldDrawCommand& command) {
             if (capture) {
+                // The shared terrain program still holds the last live chunk's ID.
+                capture->clear_current_identity();
                 capture->unsupported(
                     "ladder_backend_identity_unavailable", 0, DiagnosticOwnership::LadderFar);
             }
@@ -639,8 +638,10 @@ void GBufferPass::build_static_prop_cache(entt::registry& registry) {
                 anchorSlots.try_emplace({anchor_coords.x, anchor_coords.y, anchor_coords.z},
                                         static_cast<std::uint32_t>(m_anchorChunks.size()));
             if (inserted) {
-                m_anchorChunks.push_back(
-                    {.coords = anchor_coords, .chunk = nullptr, .resolved = false});
+                m_anchorChunks.push_back({.coords = anchor_coords,
+                                          .chunk = nullptr,
+                                          .resolved = false,
+                                          .supportOwner = {}});
             }
             cp.anchorSlot = slot->second;
         }
