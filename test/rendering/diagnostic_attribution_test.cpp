@@ -3572,8 +3572,8 @@ TEST(DiagnosticAttribution, ParticleBatchAttributesAllEmitterKindsAtTheOriginalD
     EXPECT_LT(shader.rfind("discard;"), shader.find("gDiagnosticIds ="));
     EXPECT_LT(shader.find("FragColor = finalColor;"), shader.find("gDiagnosticIds ="));
     EXPECT_EQ(SourceHash(WithoutForwardSubmissionDiagnostics(draw, "m_shader")),
-              0xd510044fe0ddbaf3ull);
-    EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(shader, 3)), 0xbb0d97018dfba3d4ull);
+              0x898d08b83ad897a7ull);
+    EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(shader, 3)), 0xa054f82b3bb88a66ull);
 }
 
 TEST(DiagnosticAttribution, WeatherOverlayRefusesCoverageOnlyWhenItsOriginalDrawIsSubmitted) {
