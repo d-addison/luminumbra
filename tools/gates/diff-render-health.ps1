@@ -26,7 +26,7 @@ if ($CapturePath) {
     $bundlePath = "$CapturePath.diagnostics.json"
     if (Test-Path -LiteralPath $bundlePath) {
         $checker = Join-Path $PSScriptRoot "check-diagnostic-capture.py"
-        & python3 -I -B $checker $bundlePath
+        & python -I -B $checker $bundlePath
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
 }

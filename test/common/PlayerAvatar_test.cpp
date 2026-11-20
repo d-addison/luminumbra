@@ -1551,27 +1551,46 @@ namespace {
 // Only the session constructs the internal physics adapter.
 static_assert(!std::is_constructible_v<PhysicsSystem::OwnerContinuation, PhysicsSystem&>);
 
-template<class Physics>
-concept PublicAvatarCapture = requires(Physics& physics, PhysicsOwnerState& state) {
-    physics.capture_avatar_owner(0, state);
-};
-template<class Physics>
-concept PublicAvatarRestore =
-    requires(Physics& physics, const PhysicsOwnerState& state, std::size_t& index) {
-        physics.restore_avatar_owner(state, index);
-    };
-static_assert(!PublicAvatarCapture<PhysicsSystem>);
-static_assert(!PublicAvatarRestore<PhysicsSystem>);
+// Use substitution failure for access checks: MSVC can admit private calls
+// inside requires-expressions. Positive controls also catch vacuous probes.
 
+template<class Physics, class = void>
+struct PublicAvatarCapture : std::false_type {};
 template<class Physics>
-concept PublicPlayerCapture =
-    requires(Physics& physics, PhysicsOwnerState& state) { physics.capture_player_owner(state); };
+struct PublicAvatarCapture<Physics,
+                           std::void_t<decltype(std::declval<Physics&>().capture_avatar_owner(
+                               0, std::declval<PhysicsOwnerState&>()))>> : std::true_type {};
+static_assert(!PublicAvatarCapture<PhysicsSystem>::value);
+static_assert(PublicAvatarCapture<PhysicsSystem::OwnerContinuation>::value);
+
+template<class Physics, class = void>
+struct PublicAvatarRestore : std::false_type {};
 template<class Physics>
-concept PublicPlayerRestore = requires(Physics& physics, const PhysicsOwnerState& state) {
-    physics.restore_player_owner(state);
-};
-static_assert(!PublicPlayerCapture<PhysicsSystem>);
-static_assert(!PublicPlayerRestore<PhysicsSystem>);
+struct PublicAvatarRestore<
+    Physics,
+    std::void_t<decltype(std::declval<Physics&>().restore_avatar_owner(
+        std::declval<const PhysicsOwnerState&>(), std::declval<std::size_t&>()))>>
+    : std::true_type {};
+static_assert(!PublicAvatarRestore<PhysicsSystem>::value);
+static_assert(PublicAvatarRestore<PhysicsSystem::OwnerContinuation>::value);
+
+template<class Physics, class = void>
+struct PublicPlayerCapture : std::false_type {};
+template<class Physics>
+struct PublicPlayerCapture<Physics,
+                           std::void_t<decltype(std::declval<Physics&>().capture_player_owner(
+                               std::declval<PhysicsOwnerState&>()))>> : std::true_type {};
+static_assert(!PublicPlayerCapture<PhysicsSystem>::value);
+static_assert(PublicPlayerCapture<PhysicsSystem::OwnerContinuation>::value);
+
+template<class Physics, class = void>
+struct PublicPlayerRestore : std::false_type {};
+template<class Physics>
+struct PublicPlayerRestore<Physics,
+                           std::void_t<decltype(std::declval<Physics&>().restore_player_owner(
+                               std::declval<const PhysicsOwnerState&>()))>> : std::true_type {};
+static_assert(!PublicPlayerRestore<PhysicsSystem>::value);
+static_assert(PublicPlayerRestore<PhysicsSystem::OwnerContinuation>::value);
 
 void ExpectControllerBits(const PhysicsOwnerState& expected, const PhysicsOwnerState& actual) {
     ASSERT_EQ(expected.size, actual.size);
