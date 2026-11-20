@@ -1719,6 +1719,7 @@ add_executable(world_open_refusal_test
     ../src/luminumbra_server/ServerWorldRunner.cpp
     ../src/luminumbra_server/modes/ModeHelpers.cpp
     ../src/luminumbra_server/modes/Replay.cpp
+    ../src/luminumbra_server/modes/Heavy.cpp
 )
 target_include_directories(world_open_refusal_test PRIVATE ../src ../src/luminumbra_common ../src/luminumbra_client)
 target_compile_definitions(world_open_refusal_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")

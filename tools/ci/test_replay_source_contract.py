@@ -964,8 +964,13 @@ class AuthorityConsumerSourceContract(unittest.TestCase):
         heavy = sources["heavy"]
         self.assertIn("intRunHeavy(constServerCliOptions&options,"
                       "constLuminumbra::world::OwnerContinuationOptions&profile)try{", heavy)
-        self.assertIn("intRunHeavy(constServerCliOptions&options){"
-                      "returnRunHeavy(options,Luminumbra::world::OwnerContinuationOptions{});}", heavy)
+        cli = capture_body(heavy, "intRunHeavy(constServerCliOptions&options)")
+        self.assertIn("returnRunHeavy(options,{.owner_continuation=!options.weather_schedule});", cli)
+        skip = capture_body(cli, "if(options.weather_schedule)")
+        self.assertIn("ownercomparisonskipped:weatherschedule", skip)
+        for runner, config in (("original", "cfgOrig"), ("loaded", "cfgLoad")):
+            self.assertIn(f"ServerWorldRunner{runner}(std::move({config}),profile);", heavy)
+            self.assertEqual(heavy.count(f"CaptureOwners({runner},profile.owner_continuation)"), 2)
         catch = capture_body(heavy, "catch(constLuminumbra::Persistence::AuthorityCaptureRefused&error)")
         self.assert_ordered(catch, "error.status()", "return1;")
         checked = capture_body(heavy, "intRunHeavy(")
@@ -992,6 +997,34 @@ class AuthorityConsumerSourceContract(unittest.TestCase):
 
     def test_heavy_and_sibling_modes_stop_on_capture_refusal(self):
         self.assert_other_modes_contract(self.sources())
+
+    def test_heavy_cli_owner_profile_and_skip_have_registered_regressions(self):
+        native = read_source("test/common/ReplayModeAdmission_test.cpp")
+        for case in ("HeavyCliComparesUnchangedOwnerCheckpoints",
+                     "HeavyCliOwnerMismatchFailsBothCheckpointPairs",
+                     "HeavyCliWeatherScheduleLogsSkippedOwnerComparison",
+                     "HeavyCliInvalidWeatherScheduleStillRefusesBeforeSave"):
+            self.assertIn("TEST_F(ReplayModeAdmission, " + case + ")", native)
+        self.assertIn("ASSERT_EQ(RunHeavy(options), 0)", native)
+        self.assertIn("EXPECT_EQ(RunRefusedCaptureHeavy(options), 1)", native)
+        cmake = read_source("test/CMakeLists.txt")
+        target = re.search(r'add_executable\(world_open_refusal_test\s+(.*?)\)', cmake, re.DOTALL)
+        self.assertIsNotNone(target)
+        for path in ("common/ReplayModeAdmission_test.cpp",
+                     "../src/luminumbra_server/modes/Heavy.cpp"):
+            self.assertEqual(target[1].split().count(path), 1)
+        sources = self.sources()
+        for token, replacement in (
+                (".owner_continuation=!options.weather_schedule", ".owner_continuation=false"),
+                (".owner_continuation=!options.weather_schedule", ".owner_continuation=true"),
+                ("ownercomparisonskipped:weatherschedule", ""),
+                ("std::move(cfgOrig),profile", "std::move(cfgOrig)"),
+                ("std::move(cfgLoad),profile", "std::move(cfgLoad)")):
+            changed = dict(sources)
+            self.assertIn(token, changed["heavy"])
+            changed["heavy"] = changed["heavy"].replace(token, replacement, 1)
+            with self.subTest(token=token), self.assertRaises(AssertionError):
+                self.assert_other_modes_contract(changed)
 
     def test_each_capture_guard_and_order_has_an_isolated_mutation(self):
         sources = self.sources()

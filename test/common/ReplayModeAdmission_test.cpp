@@ -26,6 +26,7 @@
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <system_error>
@@ -434,6 +435,72 @@ INSTANTIATE_TEST_SUITE_P(CaptureBoundaries,
                          testing::Combine(testing::Values(std::size_t{1}, 2, 3, 4),
                                           testing::Bool()));
 
+TEST_F(ReplayModeAdmission, HeavyCliComparesUnchangedOwnerCheckpoints) {
+    ConfigureLegacyHeavyCheckpoints();
+    ASSERT_EQ(RunHeavy(options), 0) << logs.str();
+    const auto artifact = Artifact();
+    ExpectHeavySettleContract(artifact);
+    EXPECT_EQ(artifact.at("roundtrip_owner_difference"), "");
+    EXPECT_EQ(artifact.at("resim_owner_difference"), "");
+    EXPECT_EQ(artifact.at("passed"), true);
+    EXPECT_EQ(logs.str().find("owner comparison skipped"), std::string::npos);
+}
+
+TEST_F(ReplayModeAdmission, HeavyCliOwnerMismatchFailsBothCheckpointPairs) {
+    ConfigureLegacyHeavyCheckpoints();
+    for (const std::size_t call : {std::size_t{2}, std::size_t{4}}) {
+        SCOPED_TRACE(call);
+        CaptureFault() = {.calls = 0,
+                          .refuse_call = 0,
+                          .save_dir = {},
+                          .owner_mutation_call = call,
+                          .unbound_avatar = false};
+        // The included shipping implementation keeps the one-argument CLI dispatch.
+        EXPECT_EQ(RunRefusedCaptureHeavy(options), 1) << logs.str();
+        EXPECT_EQ(CaptureFault().calls, 4u);
+        const auto artifact = Artifact();
+        ExpectHeavySettleContract(artifact);
+        EXPECT_EQ(artifact.at("roundtrip_owner_difference"),
+                  call == 2 ? "owner.player.present" : "");
+        EXPECT_EQ(artifact.at("resim_owner_difference"), "owner.player.present");
+        EXPECT_EQ(artifact.at("roundtrip_match"), call == 4);
+        EXPECT_EQ(artifact.at("resim_match"), false);
+        EXPECT_EQ(artifact.at("passed"), false);
+    }
+}
+
+TEST_F(ReplayModeAdmission, HeavyCliWeatherScheduleLogsSkippedOwnerComparison) {
+    ConfigureLegacyHeavyCheckpoints();
+    using Schedule = Luminumbra::Systems::WeatherSchedule;
+    using Category = Luminumbra::Systems::WeatherCategory;
+    options.weather_schedule = std::make_shared<const Schedule>(
+        Schedule{.phases = {{0, Category::Clear, 0, 0}}, .strike_tick = std::nullopt});
+    ASSERT_EQ(RunHeavy(options), 0) << logs.str();
+    const auto artifact = Artifact();
+    ExpectHeavySettleContract(artifact);
+    EXPECT_FALSE(artifact.contains("roundtrip_owner_difference"));
+    EXPECT_FALSE(artifact.contains("resim_owner_difference"));
+    EXPECT_EQ(artifact.at("passed"), true);
+    EXPECT_NE(logs.str().find("owner comparison skipped: weather schedule"), std::string::npos)
+        << logs.str();
+}
+
+TEST_F(ReplayModeAdmission, HeavyCliInvalidWeatherScheduleStillRefusesBeforeSave) {
+    ConfigureLegacyHeavyCheckpoints();
+    options.weather_schedule = std::make_shared<const Luminumbra::Systems::WeatherSchedule>();
+    {
+        std::ofstream output(options.artifact_path);
+        output << "retained";
+        ASSERT_TRUE(output.good());
+    }
+    EXPECT_EQ(RunHeavy(options), 1);
+    EXPECT_EQ(ReadReplayModeFile(options.artifact_path), "retained");
+    EXPECT_FALSE(fs::exists(root / "worlds/saves"));
+    EXPECT_NE(logs.str().find("owner comparison skipped: weather schedule"), std::string::npos)
+        << logs.str();
+    EXPECT_NE(logs.str().find("original session failed to boot"), std::string::npos) << logs.str();
+}
+
 TEST_F(ReplayModeAdmission, HeavyOwnerComparisonAcceptsUnchangedCheckpoints) {
     ConfigureLegacyHeavyCheckpoints();
     for (const bool enabled : {false, true}) {
@@ -496,7 +563,7 @@ TEST_F(ReplayModeAdmission, HeavyRefusedOwnerCaptureFailsBothCheckpointPairs) {
                       .save_dir = {},
                       .owner_mutation_call = 2,
                       .unbound_avatar = true};
-    EXPECT_EQ(RunRefusedCaptureHeavy(options, {.owner_continuation = true}), 1);
+    EXPECT_EQ(RunRefusedCaptureHeavy(options), 1);
     EXPECT_EQ(CaptureFault().calls, 4u);
     const auto artifact = Artifact();
     ExpectHeavySettleContract(artifact);

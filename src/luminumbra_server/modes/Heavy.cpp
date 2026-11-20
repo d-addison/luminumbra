@@ -432,5 +432,11 @@ int RunHeavy(const ServerCliOptions& options,
 }
 
 int RunHeavy(const ServerCliOptions& options) {
-    return RunHeavy(options, Luminumbra::world::OwnerContinuationOptions{});
+    // Heavy creates its own fresh snapshot, so both boots use the record profile.
+    // Scheduled weather does not support owner continuation in the runner.
+    if (options.weather_schedule) {
+        LUMINUMBRA_CORE_INFO("heavy: owner comparison skipped: weather schedule does not support "
+                             "owner continuation");
+    }
+    return RunHeavy(options, {.owner_continuation = !options.weather_schedule});
 }
