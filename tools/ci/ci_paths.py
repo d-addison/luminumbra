@@ -17,6 +17,7 @@ PYTHON_TESTS = (
     "tools/test_frozen_terrain_presets.py",
     "test/tools/test_regenerate_region_fixtures.py",
     "tools/gates/test_diagnostic_rois.py",
+    "tools/gates/test_diagnostic_checks.py",
     "tools/gates/test_diagnostic_capture.py",
 
     "tools/ci/test_compile_shaders.py",

@@ -1,5 +1,6 @@
 #include "../support/UniqueTempPath.h"
 #include "core/RuntimeScenarioConfig.h"
+#include "luminumbra_common/core/Environment.h"
 #include "rendering/DiagnosticCapture.h"
 #include "rendering/DiagnosticDrawTable.h"
 
@@ -10,6 +11,7 @@
 #include <array>
 #include <bit>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -25,6 +27,44 @@
 
 namespace {
 using namespace Luminumbra::Rendering;
+namespace Harness = Luminumbra::Client::ScenarioHarness;
+
+// Match the rendering tests' scoped overrides, including the Windows unset form.
+class ScopedEnv {
+public:
+    ScopedEnv(const char* name, const char* value)
+        : name_(name)
+        , previous_(Luminumbra::Core::ReadEnvironment(name)) {
+        if (assign(name_, value) != 0) {
+            throw std::runtime_error("Cannot override test environment");
+        }
+    }
+    ~ScopedEnv() {
+        EXPECT_EQ(assign(name_, previous_ ? previous_->c_str() : nullptr), 0);
+    }
+    ScopedEnv(const ScopedEnv&) = delete;
+    ScopedEnv& operator=(const ScopedEnv&) = delete;
+
+private:
+    static int assign(const char* name, const char* value) {
+#if defined(_WIN32)
+        return _putenv_s(name, value ? value : "");
+#else
+        return value ? setenv(name, value, 1) : unsetenv(name);
+#endif
+    }
+    const char* name_;
+    const std::optional<std::string> previous_;
+};
+
+template<std::size_t Count>
+auto Arguments(std::array<std::string, Count>& text) {
+    std::array<char*, Count> arguments{};
+    for (std::size_t index = 0; index < Count; ++index) {
+        arguments[index] = text[index].data();
+    }
+    return arguments;
+}
 
 DiagnosticCaptureOptions Options(std::initializer_list<std::string_view> arguments,
                                  std::optional<std::string_view> environment = std::nullopt) {
@@ -498,6 +538,93 @@ TEST(DiagnosticBundleWiring, CompletedFrameAdmissionAndRetentionPrecedeOutput) {
               runner_header.find("renderPipeline.with_diagnostic_capture("));
     EXPECT_LT(runner.find("CapturePixelBytes(width, height, 3, bytes)"),
               runner.find("return writeScenarioCapture("));
+}
+
+TEST_F(DiagnosticBundleTest, RuntimeAdmissionAcceptsEnvironmentSweepDiagnostics) {
+    const ScopedEnv diagnostics("LUMIN_CAPTURE_DIAGNOSTICS", nullptr);
+    std::array<std::string, 2> text{"client", "--capture-diagnostics"};
+    auto arguments = Arguments(text);
+    const auto argc = static_cast<int>(arguments.size());
+    for (const auto* value : {"1", "enabled"}) {
+        const ScopedEnv sweep("LUMINUMBRA_VISUAL_SWEEP", value);
+        const auto paths = Harness::ParseRuntimePathOptions(argc, arguments.data());
+        const auto config = Harness::ParseRuntimeScenarioConfig(argc, arguments.data(), directory);
+        EXPECT_TRUE(paths.diagnostics.enabled);
+        EXPECT_FALSE(paths.diagnostics.probe.has_value());
+        EXPECT_EQ(config.scenario, "world_visual_sweep");
+        EXPECT_TRUE(config.world_visual_sweep());
+        EXPECT_TRUE(config.auto_create_world);
+        EXPECT_TRUE(config.auto_enter_world);
+        EXPECT_EQ(config.timed_run_seconds, 60);
+        // Exercise the parsed opt-in through the bundle consumer without GL.
+        MemoryOutput output;
+        ASSERT_TRUE(WriteDiagnosticBundle(paths.diagnostics, frame, draws, source, output));
+        EXPECT_TRUE(output.published);
+    }
+}
+
+TEST_F(DiagnosticBundleTest, RuntimeAdmissionKeepsExplicitScenarioPrecedence) {
+    const ScopedEnv diagnostics("LUMIN_CAPTURE_DIAGNOSTICS", nullptr);
+    const ScopedEnv sweep("LUMINUMBRA_VISUAL_SWEEP", "1");
+    std::array<std::string, 2> baseline_text{"client", "--capture-diagnostics"};
+    auto baseline_arguments = Arguments(baseline_text);
+    ASSERT_TRUE(Harness::ParseRuntimePathOptions(static_cast<int>(baseline_arguments.size()),
+                                                 baseline_arguments.data())
+                    .diagnostics.enabled);
+    for (const auto* scenario : {"weather_visual_smoke", "unknown"}) {
+        for (const bool assigned : {false, true}) {
+            std::array<std::string, 6> text{"client",
+                                            "--capture-diagnostics",
+                                            assigned ? std::string("--scenario=") + scenario
+                                                     : "--scenario",
+                                            assigned ? "" : scenario,
+                                            "--save-root",
+                                            (directory / "must-not-exist").string()};
+            auto arguments = Arguments(text);
+            const auto argc = static_cast<int>(arguments.size());
+            const auto config =
+                Harness::ParseRuntimeScenarioConfig(argc, arguments.data(), directory);
+            EXPECT_EQ(config.scenario, scenario);
+            EXPECT_FALSE(config.world_visual_sweep());
+            EXPECT_THROW(Harness::ParseRuntimePathOptions(argc, arguments.data()),
+                         std::invalid_argument);
+            EXPECT_FALSE(std::filesystem::exists(directory / "must-not-exist"));
+        }
+    }
+}
+
+TEST_F(DiagnosticBundleTest, RuntimeSweepEnvironmentWithoutDiagnosticsIsUnchanged) {
+    const ScopedEnv diagnostics("LUMIN_CAPTURE_DIAGNOSTICS", nullptr);
+    for (const auto* value :
+         std::array<const char*, 7>{nullptr, "", "0", "00", "0enabled", "1", "enabled"}) {
+        const ScopedEnv sweep("LUMINUMBRA_VISUAL_SWEEP", value);
+        const bool selected = value != nullptr && value[0] != '\0' && value[0] != '0';
+        for (const auto* scenario : {"", "--scenario=", "--scenario"}) {
+            std::array<std::string, 2> text{"client", scenario};
+            auto arguments = Arguments(text);
+            const auto argc = scenario[0] == '\0' ? 1 : static_cast<int>(arguments.size());
+            const auto paths = Harness::ParseRuntimePathOptions(argc, arguments.data());
+            const auto config =
+                Harness::ParseRuntimeScenarioConfig(argc, arguments.data(), directory);
+            EXPECT_FALSE(paths.diagnostics.enabled);
+            EXPECT_FALSE(paths.diagnostics.probe.has_value());
+            EXPECT_EQ(config.scenario, selected ? "world_visual_sweep" : "");
+            EXPECT_EQ(config.world_visual_sweep(), selected);
+            EXPECT_EQ(config.auto_create_world, selected);
+            EXPECT_EQ(config.auto_enter_world, selected);
+            EXPECT_EQ(config.timed_run_seconds, selected ? 60 : 0);
+            // The same selection must govern admission when diagnostics are requested.
+            text[1] = "--capture-diagnostics";
+            arguments = Arguments(text);
+            if (selected) {
+                EXPECT_TRUE(
+                    Harness::ParseRuntimePathOptions(2, arguments.data()).diagnostics.enabled);
+            } else {
+                EXPECT_THROW(Harness::ParseRuntimePathOptions(2, arguments.data()),
+                             std::invalid_argument);
+            }
+        }
+    }
 }
 
 TEST(DiagnosticBundleWiring, SharedAdapterOwnsEveryAdmittedCapturePath) {
