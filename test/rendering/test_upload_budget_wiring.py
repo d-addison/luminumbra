@@ -2940,7 +2940,7 @@ class DuskAttributionWiring(unittest.TestCase):
         self.assertIn("anchor(168.0f, 10.0505952835083f, -40.0f)", sweep)
         for token in ('{"dusk", 0.25f}', '{"yaw000", 0.0f, 0.0f, false',
                       '{"yaw240", 240.0f, 0.0f, false', 'camera->Zoom = 75.0f;',
-                      'const int settle = storm ? 5 : 3;', 'apply_weather(storm, phase_clock,'):
+                      'const int settle = WorldSweepStillSettleFrames(storm);', 'apply_weather(storm, phase_clock,'):
             self.assertIn(token, sweep)
         settled = compact(body(sweep, "const auto render_settled ="))
         self.assertIn("i + 1 == settle_frames ? attribution_dir : std::filesystem::path{}", settled)
