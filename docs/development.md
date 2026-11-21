@@ -441,21 +441,27 @@ on the current head rather than an old draft-event rerun. Persistent stale
 merge-ref checks require a fresh pull request event/ref, such as closing and
 reopening the pull request.
 
-The required `Linux / GCC` job always runs on ready PRs.
-When `needs_cpp=false`, it installs only numpy, Pillow and jsonschema
-and runs `ci_paths.py python-tests`, skipping native dependencies, compiler caches,
-configure/build/CTest, native qualification, packaging and native artifacts.
-The job logs and summarizes `route: python-only (native build skipped by Classify
-changed paths)` and expose a `route` job output of `python-only`. When `needs_cpp`
+The required `Linux / GCC` aggregate waits for both GCC shards and the separate
+`Linux / Python contracts` job. The Python job runs on Ubuntu 24.04 with a
+20-minute timeout and the same draft rejection as the GCC producer. It installs
+numpy, Pillow and jsonschema and runs `ci_paths.py python-tests` when
+`needs_cpp=false` or `needs_python` is true or missing. This retains standalone
+coverage for documentation-only, mixed Python/native and full push/manual runs.
+The GCC shards retain their 60-minute timeouts and run no standalone Python plan.
+
+When `needs_cpp=false`, the GCC producer skips native dependencies, compiler
+caches, configure/build/CTest, native qualification, packaging and native artifacts.
+It logs and summarizes `route: python-only (native build skipped by Classify
+changed paths)` and exposes a `route` job output of `python-only`. When `needs_cpp`
 is true or missing, it reports and exposes `native` and retains its full native
 path. Consumers requiring native qualification must check that output alongside
-the job conclusion; a successful Python route provides Python coverage.
+the job conclusion; a successful Python route provides Python coverage through
+the separate Python job.
 
-The standalone plan also runs whenever `needs_python=true` or its output is
-missing, including mixed Python/native PRs and full push/manual runs, with numpy,
-Pillow and jsonschema installed. It includes `tools/ci/test_ci_paths.py` and cache
-retention regression tests. Python failures block merging through the existing
-required Linux contexts on either route; daily Windows failures are report-only for landings.
+The standalone plan includes `tools/ci/test_ci_paths.py` and cache retention
+regression tests. The required Linux aggregate rejects an unsuccessful or skipped
+Python job and unsuccessful classification on either route; daily Windows failures
+are report-only for landings.
 
 The standalone plan explicitly lists tests in `tools/ci`, `tools/perf`,
 `tools/release`, `tools/assets`, `tools/audio`, `tools/persistence`, and
@@ -480,8 +486,9 @@ edits use the distinct skipped names described above. Native lanes depend
 directly on the classifier, which runs for every admitted validation event. The
 clang-tidy aggregate also depends on the shards and reports their result, including routed skips.
 Workflow cancellation stops aggregates with valid dependencies; invalid
-dependencies reach an explicit failure step. Linux/GCC selects its native or Python
-steps. Other unaffected heavy lanes report a terminal `skipped` conclusion,
+dependencies reach an explicit failure step. Linux/GCC selects its native steps
+and waits for the separate Python job. Other unaffected heavy lanes report a
+terminal `skipped` conclusion,
 which GitHub accepts for required checks, rather than leaving a missing status
 pending. Public tree, Format, Doxygen, and runner contracts run independently
 of the classifier. Assuming those checks pass, the following table describes listed-docs-only and

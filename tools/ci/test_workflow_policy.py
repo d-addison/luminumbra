@@ -753,6 +753,8 @@ def value(block, key, indent):
 def aggregate_invalid_expression(producer):
     expression = ("needs.changes.result != 'success' || "
                   f"(needs.{producer}.result != 'success' && needs.{producer}.result != 'skipped')")
+    if producer == "linux":
+        expression += " || needs.python-contracts.result != 'success'"
     if producer == "asan-shard":
         expression += " || (needs.fast-lane.result != 'success' && needs.fast-lane.result != 'skipped')"
     return expression
@@ -800,7 +802,8 @@ def guarded_jobs(workflows):
     yield ("asan.yml", "asan-shard", "Linux / GCC ASan shard ${{ matrix.shard }}/3",
            jobs(workflows["asan.yml"])["asan-shard"])
     ci = jobs(workflows["ci.yml"])
-    yield "ci.yml", "linux", value(ci["linux"], "name", 4), ci["linux"]
+    for job_id in ("linux", "python-contracts"):
+        yield "ci.yml", job_id, value(ci[job_id], "name", 4), ci[job_id]
 
 
 def status_function_violations(workflow):
@@ -1511,11 +1514,11 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         # Pin literal check names and existing limits and gates.
         expected = {
             "changes": "ee44cbd3bd4de35af5c4fe902e02b3db0aaafdde796dfa739e30f22b4122e833",
-            # Require all three offline-dependency partitions in local-check evidence.
-            "linux": "d97f90f49ea0813f1b1c043a1511d9562a150f3b0d5fe632907820df04fe86fb",
+            # Standalone Python contracts run separately from the GCC shards.
+            "linux": "6087a732015ac4c46e1e4f85667fa27c4cff1f0d9e9041bcfcf01c43213c6998",
             "gns-compile-probe": "526ac5338e887912d62da8f29aea39ff6869e9d313a9cf00cdc5b4c64d452d40",
             "diligent-rhi": "72949e423c04585d5acfd6674165985741a8283719ce8affdd4182f8afb4ff8d",
-            "linux-result": "1960cc22686c09eb933732f54dd2a1562de8823417c884afb2718aea3728ccf5",
+            "linux-result": "228cc43d8a28508ea867d65da54cc02068767080a91b88600c9ae1fd5e4738c9",
             "lint": "dd5aa1be75b2a7139dc2fc676293422207c80c6b031b5df0d21e60dc615faa32",
             "tidy-shard": "46faf8410f18629a107172a8dcc148e88f7df8b693541835fccfe53c3c34307a",
             "tidy": "9c7e37ba07488aefd7232a216a927229f1a0a7b83820f4439187f1972f057ad8",
@@ -1523,7 +1526,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
         }
         actual = jobs(self.workflows["ci.yml"])
         self.assertTrue(all(not key.startswith("windows-") for key in actual))
-        self.assertEqual(set(actual), set(expected) | {"fast-compile"})
+        self.assertEqual(set(actual), set(expected) | {"fast-compile", "python-contracts"})
         for name, digest in expected.items():
             self.assertEqual(hashlib.sha256(actual[name].encode()).hexdigest(), digest, name)
 
@@ -1651,6 +1654,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
                 self.assertEqual(value(job, "needs", 4),
                                  "[changes, fast-lane, asan-shard]" if job_id == "asan" else
                                  "[changes, fast-lane]" if job_id == "asan-shard" else
+                                 "[changes, linux, python-contracts]" if job_id == "linux-result" else
                                  f"[changes, {job_id.removesuffix('-result')}]" if job_id.endswith("-result") else "changes")
                 condition = ("!cancelled() || " + aggregate_invalid_expression(
                     "asan-shard" if job_id == "asan" else job_id.removesuffix("-result"))
@@ -1987,7 +1991,7 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
                 self.assertEqual(windows_condition(value(aggregate, "if", 4)),
                                  "${{ (!cancelled() || " + aggregate_invalid_expression(job_id) + ") }}" if job_id.startswith("windows-") else
                                  ci_event_condition("!cancelled() || " + aggregate_invalid_expression(job_id)))
-                self.assertEqual(value(aggregate, "needs", 4), f"[changes, {job_id}]")
+                self.assertEqual(value(aggregate, "needs", 4), "[changes, linux, python-contracts]" if job_id == "linux" else f"[changes, {job_id}]")
                 self.assertEqual(value(aggregate, "timeout-minutes", 4), "5")
                 self.assertEqual(self.workflows["windows-build.yml" if job_id.startswith("windows-") else "ci.yml"].count("    name: " + title + "\n"), 1)
                 self.assertIsNone(value(producer, "continue-on-error", 4))
@@ -2618,6 +2622,8 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
             for classification in ("success", "failure", "cancelled", "skipped", "", "unknown"):
                 for result in ("success", "failure", "cancelled", "skipped", "", "unknown"):
                     dependencies = {"changes": classification, producer: result}
+                    if producer == "linux":
+                        dependencies["python-contracts"] = "success"
                     if producer == "asan-shard":
                         dependencies["fast-lane"] = "success"
                     invalid = classification != "success" or result not in ("success", "skipped")
@@ -2641,6 +2647,8 @@ class WorkflowDraftPolicyTests(WorkflowPolicyFixture, unittest.TestCase):
             # validation and uploads. A completed early guard offers no protection.
             for result in ("success", "skipped"):
                 dependencies = {"changes": "success", producer: result}
+                if producer == "linux":
+                    dependencies["python-contracts"] = "success"
                 if producer == "asan-shard":
                     dependencies["fast-lane"] = "success"
                 self.assertTrue(evaluate_condition(condition, dependencies))
@@ -2887,6 +2895,7 @@ class WorkflowRequiredAggregatePolicyTests(WorkflowPolicyFixture, unittest.TestC
             aggregate = jobs(self.workflows[filename])[job_id]
             self.assertEqual(value(aggregate, "needs", 4),
                              "[changes, fast-lane, asan-shard]" if shard_id == "asan-shard"
+                             else "[changes, linux, python-contracts]" if shard_id == "linux"
                              else f"[changes, {shard_id}]")
             self.assertIsNone(value(aggregate, "continue-on-error", 4))
             refusal = next(step for step in steps(aggregate)
@@ -2928,6 +2937,7 @@ class WorkflowRequiredAggregatePolicyTests(WorkflowPolicyFixture, unittest.TestC
                                  lambda match: str(status[match[1]]), expression)
         for key, item in (("needs.changes.result", changes), (f"needs.{shard_id}.result", shard),
                           ("needs.fast-lane.result", "success"),
+                          ("needs.python-contracts.result", "success"),
                           ("github.event_name", event), ("github.event.pull_request.draft", False)):
             rendered = rendered.replace(key, repr(item))
         rendered = re.sub(r"!(?!=)", "not ", rendered.replace("false", "False"))
@@ -3240,7 +3250,7 @@ class WorkflowUcrtClassifierPolicyTests(WorkflowPolicyFixture, unittest.TestCase
                     "needs.changes.outputs.needs_cpp", repr(cpp)).replace("needs.changes.outputs.needs_python", repr(python))
                 with self.subTest(shard=shard, cpp=cpp, python=python):
                     self.assertEqual(evaluate_condition(condition, {}), python != "false" and shard != 1)
-        linux_step = next(step for step in steps(ci["linux"]) if "name: Run standalone Python contracts" in step)
+        linux_step = next(step for step in steps(ci["python-contracts"]) if "name: Run standalone Python contracts" in step)
         self.assertEqual(value(linux_step, "run", 8), "python3 -B tools/ci/ci_paths.py python-tests")
 
 class WorkflowBaseEditPolicyTests(unittest.TestCase):
@@ -3272,7 +3282,7 @@ class WorkflowBaseEditPolicyTests(unittest.TestCase):
             "needs.changes.outputs.needs_cpp": cpp,
             "needs.changes.outputs.needs_python": "false",
             **{f"needs.{job}.result": result for job in (
-                "changes", "linux", "windows-msvc", "windows-ucrt64", "tidy-shard")},
+                "changes", "linux", "python-contracts", "windows-msvc", "windows-ucrt64", "tidy-shard")},
         }
 
     @staticmethod
