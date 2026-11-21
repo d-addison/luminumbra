@@ -188,6 +188,10 @@ void record_foliage_rebuild(const FoliageRebuild& rebuild,
 double exclusive_parent_ms(double parent_ms, double nested_before_ms, double nested_after_ms) {
     return parent_ms - (nested_after_ms - nested_before_ms);
 }
+double foliage_total_ms() {
+    const auto* frame = current_foliage_frame();
+    return frame ? frame->rebuild_ms : 0;
+}
 namespace {
 // Frame guards own the totals; each thread only borrows its active guard's
 // mutable storage. Keep the stack pointers local to their accessors, like foliage.
@@ -198,10 +202,6 @@ PhaseTotals*& current_phases() {
 const PhaseScope*& current_phase_scope() {
     thread_local const PhaseScope* scope = nullptr;
     return scope;
-}
-double foliage_ms() {
-    const auto* frame = current_foliage_frame();
-    return frame ? frame->rebuild_ms : 0;
 }
 constexpr std::array<const char*, kPhaseCount> kPhaseNames{"ui_update",
                                                            "ui_render",
@@ -232,11 +232,11 @@ void PhaseTotals::add(Phase phase, double inclusive_ms, double child_ms, double 
 PhaseFrameScope::PhaseFrameScope(bool enabled)
     : m_previous(current_phases()) {
     current_phases() = enabled ? &m_totals : nullptr;
-    shader_first_use_collection_enabled = current_phases() != nullptr;
+    shader_first_use_collection_enabled() = current_phases() != nullptr;
 }
 PhaseFrameScope::~PhaseFrameScope() {
     current_phases() = m_previous;
-    shader_first_use_collection_enabled = current_phases() != nullptr;
+    shader_first_use_collection_enabled() = current_phases() != nullptr;
 }
 bool PhaseFrameScope::is_current() const {
     return current_phases() == &m_totals;
@@ -252,7 +252,7 @@ PhaseScope::PhaseScope(Phase phase, bool enabled)
     m_totals = current_phases();
     m_parent = current_phase_scope();
     current_phase_scope() = this;
-    m_foliage_before = foliage_ms();
+    m_foliage_before = foliage_total_ms();
     m_start = std::chrono::steady_clock::now();
 }
 PhaseScope::~PhaseScope() {
@@ -261,7 +261,7 @@ PhaseScope::~PhaseScope() {
     const double elapsed =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - m_start)
             .count();
-    const double foliage = foliage_ms() - m_foliage_before;
+    const double foliage = foliage_total_ms() - m_foliage_before;
     m_totals->add(m_phase, elapsed, m_children_ms, foliage - m_child_foliage_ms);
     if (m_parent && m_parent->m_totals == m_totals) {
         m_parent->m_children_ms += elapsed;

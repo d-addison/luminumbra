@@ -73,7 +73,7 @@ std::vector<ReplEntityState> AvatarStates(std::uint32_t n, std::uint64_t t) {
         e.entity_id = i;
         // Clustered near origin (within one chunk) so the chunk-AOI gather includes the
         // full set -- the worst case for per-client snapshot bytes.
-        e.px_mm = static_cast<std::int32_t>((i * 250) + static_cast<std::int32_t>(t));
+        e.px_mm = static_cast<std::int32_t>((i * 250u) + static_cast<std::uint32_t>(t));
         e.py_mm = 1000;
         e.pz_mm = static_cast<std::int32_t>(i * 250);
         e.yaw_mrad = static_cast<std::int16_t>(i * 7);

@@ -173,7 +173,8 @@ public:
             float distance_squared,
             std::vector<VoxelVertex>& vertices,
             std::vector<u32>& indices,
-            double elapsed_ms) {
+            double elapsed_ms,
+            UploadPresentation presentation = UploadPresentation::Streaming) {
         const auto current = observe(chunk, version, evidence, distance_squared);
         if (!current) {
             return NearTerrainUploadResult::Unrefined;
@@ -185,7 +186,8 @@ public:
             return NearTerrainUploadResult::Unrefined;
         }
         if (!std::isfinite(elapsed_ms) || elapsed_ms < 0 ||
-            elapsed_ms >= kTerrainUploadLimits.milliseconds) {
+            (presentation != UploadPresentation::Loading &&
+             elapsed_ms >= kTerrainUploadLimits.milliseconds)) {
             return NearTerrainUploadResult::Deferred;
         }
         if (found == m_index.end()) {
@@ -259,16 +261,20 @@ private:
     bool m_enabled = false;
 };
 
-// Both queues share one upload budget. Baseline uploads retain the guaranteed
-// progress attempt; optional replacements run only in remaining bytes/time.
+// Both queues share one upload budget. Streaming baselines retain the guaranteed
+// progress attempt; optional replacements use only remaining bytes/time. Hidden
+// loading shares the fixed attempt allowance across both queues instead.
 // Each queue has one entry per participating chunk, visited at most once here.
 template<typename Item, typename Cost, typename Adopt, typename Elapsed>
-UploadWorkStats drain_terrain_uploads(UploadQueue<Item>& baseline,
-                                      UploadQueue<Item>& refinement,
-                                      Cost cost,
-                                      Adopt adopt,
-                                      Elapsed elapsed) {
-    UploadBudget budget(kTerrainUploadLimits);
+UploadWorkStats
+drain_terrain_uploads(UploadQueue<Item>& baseline,
+                      UploadQueue<Item>& refinement,
+                      Cost cost,
+                      Adopt adopt,
+                      Elapsed elapsed,
+                      UploadPresentation presentation = UploadPresentation::Streaming) {
+    const auto limits = upload_limits(presentation, false);
+    UploadBudget budget(limits);
     const auto drain = [&](auto& queue, bool optional) {
         const auto pending = queue.size();
         for (std::size_t visited = 0; visited < pending; ++visited) {
@@ -277,9 +283,10 @@ UploadWorkStats drain_terrain_uploads(UploadQueue<Item>& baseline,
             const auto elapsed_ms = elapsed();
             const auto used = budget.finish(elapsed_ms);
             if (optional && (!std::isfinite(elapsed_ms) || elapsed_ms < 0 ||
-                             elapsed_ms >= kTerrainUploadLimits.milliseconds ||
-                             used.bytes > kTerrainUploadLimits.bytes ||
-                             bytes > kTerrainUploadLimits.bytes - used.bytes)) {
+                             (presentation != UploadPresentation::Loading &&
+                              (elapsed_ms >= kTerrainUploadLimits.milliseconds ||
+                               used.bytes > kTerrainUploadLimits.bytes ||
+                               bytes > kTerrainUploadLimits.bytes - used.bytes)))) {
                 break;
             }
             if (!budget.admits(bytes, elapsed_ms)) {
