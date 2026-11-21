@@ -2113,7 +2113,8 @@ target_include_directories(frame_attribution_test PRIVATE ../src)
 target_link_libraries(frame_attribution_test PRIVATE gtest_main)
 luminumbra_configure_first_party_target(frame_attribution_test)
 
-add_executable(upload_budget_test rendering/upload_budget_test.cpp)
+add_executable(upload_budget_test rendering/upload_budget_test.cpp
+    rendering/terrain_stream_ring_test.cpp)
 target_include_directories(upload_budget_test PRIVATE ../src)
 target_link_libraries(upload_budget_test PRIVATE gtest_main)
 luminumbra_configure_first_party_target(upload_budget_test)
