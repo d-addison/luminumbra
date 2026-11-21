@@ -199,6 +199,36 @@ class ReplaySourceContract(unittest.TestCase):
             with self.subTest(token=token), self.assertRaises(AssertionError):
                 self.assert_client_capture(driver.replace(token, "removed", 1))
 
+    def assert_publication_admission(self, source):
+        recording = source.split("int RunRecord(", 1)[1].split("int RunReplay(", 1)[0]
+        preflight = recording.split("RunnerConfigFrom(options)", 1)[0]
+        self.assertIn("ReplayReadLimits{}.records", preflight)
+        self.assertIn("options.ticks / kCheckpointIntervalTicks +", preflight)
+        self.assertIn("(options.ticks % kCheckpointIntervalTicks != 0 ? 1u : 0u)", preflight)
+        self.assertIn("options.ticks > record_limit || checkpoints > record_limit - options.ticks",
+                      preflight)
+        self.assertRegex(preflight, r'requested workload exceeds replay admission budget"\);'
+                         r'\s*return 1;')
+        playback = source.split("int RunReplay(", 1)[1]
+        before_read = playback.split("Luminumbra::Replay::ReadReplay(", 1)[0]
+        self.assertRegex(before_read,
+                         r'if \(ReplayFinalizationIncomplete\(options.replay_path\)\)\s*\{'
+                         r'\s*LUMINUMBRA_CORE_ERROR\("replay: recording finalization is incomplete"\);'
+                         r'\s*return 1;\s*\}')
+
+    def test_recording_budget_and_incomplete_marker_precede_startup_and_read(self):
+        self.assert_publication_admission(read_source(MODES + "Replay.cpp"))
+
+    def test_publication_admission_contract_detects_isolated_regressions(self):
+        source = read_source(MODES + "Replay.cpp")
+        for token in ("ReplayReadLimits{}.records",
+                      "(options.ticks % kCheckpointIntervalTicks != 0 ? 1u : 0u)",
+                      "options.ticks > record_limit || checkpoints > record_limit - options.ticks",
+                      "ReplayFinalizationIncomplete(options.replay_path)"):
+            self.assertIn(token, source)
+            with self.subTest(token=token), self.assertRaises(AssertionError):
+                self.assert_publication_admission(source.replace(token, "false", 1))
+
     def test_mode_admission_contract_detects_isolated_regressions(self):
         source = read_source(MODES + "Replay.cpp")
         for token in ("header.engine_version != engine_now",
