@@ -24,8 +24,8 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | Linux shader compilation and software-GL reference scenes | Partial | Fast Linux steps and material, cutout, night, terrain, normal decode and both depth-convention fixtures registered; bounded sky/terrain shader replays checked under llvmpipe; native scene target execution pending; dusk continuity diagnostic pending issue #918; no required-check or ruleset changes |
 | Bundle validity and image checks | Implemented for schema 1 and reader-only schemas 2/3 | `check-diagnostic-capture.py` and registered `DiagnosticCapturePython` synthetic regressions validate bundles without a renderer. ROI coverage, validity, weather, edge and masked defect measurements plus worst-pixel SVG crops are implemented; synthetic detection is covered, while production thresholds remain advisory/unqualified |
 | Capture feature profile and capability manifest | GL-free setup and shared app policy boundary implemented; adapter admission pending | `CaptureFeatureProfile.h/.cpp`; strict `--capture-feature-profile=none\|all_features` runtime selection; registered `CaptureFeatureProfile.*` and `CaptureFeaturePolicy.*` regressions; native execution pending |
-| Temporal audit plans and admission | GL-free planning, sequence protocol and completion-manifest transport implemented; shipping runtime execution refused | `TemporalAudit.h/.cpp`, `RuntimeScenarioConfig.h/.cpp`; registered `TemporalAudit.*` and `TemporalAuditSequence.*` regressions in `capture_manifest_test`; weather input, app/site admission and A4 runtime integration remain pending; native fixed-site frontier capture is native-pending |
-| Temporal sequences and non-vacuous evidence (E1–E3) | Partial GL-free sequence/profile/policy contracts; runtime coverage pending | Exact-tick site execution, temporal metrics, shipping producer adapters and non-vacuous feature evidence require implementation; existing captures do not establish this coverage |
+| Temporal audit plans and admission | Fixed-site runtime scheduling and A4 transport wired; native-pending | `TemporalAudit.h/.cpp`, `RuntimeScenarioConfig.h/.cpp`, `ScenarioRunnerDrive.cpp`, `ScenarioRunnerCapture.cpp` and `main_client.cpp`; registered `TemporalAudit.*` and `TemporalAuditSequence.*` regressions in `capture_manifest_test`; canonical fresh-world spawn/full-frame admission precedes startup writes. Existing A4 contributor refusals remain enforced; native fixed-site capture and visual qualification are native-pending |
+| Temporal sequences and non-vacuous evidence (E1–E3) | Partial; fixed-site runtime wired, GL-free sequence/profile/policy contracts, broader evidence planned | Fixed-site exact-tick execution is wired but native-pending. Temporal metrics, shipping producer adapters and non-vacuous feature evidence require implementation; existing captures do not establish this coverage |
 
 For issue #873, `world_visual_sweep` fixes the land eye at
 `(168, 10.0505952835083, -40)`. The dusk pin is `0.25`, horizon pitch is 0°
@@ -977,7 +977,7 @@ in the plan, along with conservative total presentation/render-attempt bounds
 including unsaved substeps (at most 600 million span presentation steps before
 holds/readiness). No frame-delta or wall-clock input enters scheduling.
 Registered `TemporalAudit.*` regressions cover admission, exact scheduling,
-deduplication, limits and both startup refusal paths; native execution is pending.
+deduplication, limits, fixed-site/A4 byte admission and both startup refusal paths; native execution is pending.
 
 `TemporalAuditSequence` implements a GL-free execution protocol for one admitted
 schedule. It re-admits and compares the complete plan, checks overflow-safe
@@ -1004,11 +1004,12 @@ protocol owns no filesystem destination, scenario counters, recorder or runtime 
 `TemporalAuditSequence.*` regressions exercise endpoints, rational bursts, holds,
 readiness exhaustion and last-attempt success, exact settling, phase/controls,
 byte-boundary and altered-plan refusal, clock/transport faults, partial publication
-and real creature-brain ticks matching ordinary fixed ticking. These native tests
-are registered, not execution evidence. Shipping startup still refuses temporal
-runs: integration with the fixed site, simulation/physics/streaming dependencies,
-A4 reservations and completed-frame capture, and existing frontier actions remains
-pending. No temporal or all-features runtime support is claimed.
+and real creature-brain ticks matching ordinary fixed ticking. `TemporalAudit.*`
+additionally exercises the runner's shared tick driver. These native tests are
+registered, not execution evidence.
+The runner now owns temporal simulation/physics advancement and completed-frame
+capture; native execution remains pending. A4 still refuses unsupported contributor
+coverage. No all-features runtime support is claimed.
 
 The optional GL-free file transport acknowledges immutable completed payloads with
 `acknowledgeCaptureFiles`. It opens and verifies the directory and each regular
@@ -1018,8 +1019,9 @@ beginning `frame-<frame_index>.`, at most 128 bytes; duplicate names, wrong fram
 prefixes, empty payloads, directory escapes and byte-reservation excess refuse.
 The caller must enumerate every completed-frame payload, including A4 sidecars,
 and must keep the directory and acknowledged files immutable. All captures and
-the manifest must share that directory; changing it refuses. This is a transport contract; no
-shipping scenario invokes it yet and it does not establish site/ROI admission.
+the manifest must share that directory; changing it refuses. The fixed-site runner
+enumerates the RGB image, capture manifest and every A4 sidecar explicitly; it
+acknowledges the immutable payloads before sequence publication.
 
 `completionManifest` serializes only after all file-backed captures are acknowledged.
 Its JSON schema is `luminumbra.temporal_audit_sequence`, `version` is 1 and `status`
@@ -1047,14 +1049,48 @@ binary hashes, exact tick counts through file acknowledgement, malformed/missing
 oversized payloads, occupied destinations/staging, cancellation and reservation
 failure before filesystem writes. Native execution and mutation runs remain pending.
 
-The planning parser is callable independently. Both shipping startup parsers reject
-even valid temporal plans, and `--scenario=temporal_audit`, with an explicit
-unsupported-execution reason before world/output creation, including save-root
-creation. Weather input, app/site transport integration, site/ROI/feature capability
-admission, transport byte-bound enforcement and assembly remain later work. Admission alone
-does not certify a temporal or all-features capture, or change simulation identity,
-save/replay formats or authority state. The rest of this section specifies that
-future execution contract.
+The planning parser remains independently callable. Both startup parsers now admit
+`--scenario=temporal_audit` with a plan, `--capture-diagnostics`, site `spawn` and
+ROI `full-frame` (the defaults for `--temporal-site` and `--temporal-roi`). Execution
+requires a fresh seed-424242 default world at tick zero and the canonical 30 Hz,
+162000-tick calendar (dawn 27000, dusk 135000). Alternate worlds, cameras, calendars,
+independent capture drivers and timed runs refuse. This is a single fixed spawn-eye
+view: position is spawn plus 1.8 metres vertically, yaw -90 degrees, pitch -10 degrees.
+Arbitrary sites, ROI selection and feature profiles remain later work.
+Execution uses the QA client scenario runner, as do the existing frontier scenarios;
+the ordinary client continues to refuse QA scenarios when that harness is not linked.
+
+Admission checks the pinned 3840x1600 extent against A4's 512 MiB staging reservation
+and reserves 51 bytes/pixel plus 64 MiB of metadata per frame, plus a 16 MiB sequence
+manifest. `--temporal-output-bytes` can lower the 512 GiB aggregate ceiling. Every
+plan must fit its entire reservation; larger multi-day plans can refuse this bound.
+Invalid site/ROI, probe, calendar and byte-budget inputs refuse before world or
+output creation, including save-root creation. The runtime creates one exclusive
+`temporal` directory under the artifact root and never reuses partial output.
+
+The runner supplies only requested fixed ticks to normal `GameSession` simulation
+and physics; creatures remain on the normal simulation tick path. Frame delta
+supplies no additional ticks. Warmup, settling and readiness use the protocol's
+bounded frozen-tick steps; readiness retries also freeze presentation. A failed
+simulation barrier aborts rather than accumulating another tick. The weather span
+installs the existing versioned weather schedule before world creation, using its
+existing session identity and persistence contract. Calendar TOD resolves through
+the session calendar; noon/night holds are render-only. Each completed RGB/A4 bundle
+is file-acknowledged, then `sequence.json` is published only after the final capture.
+Failure or cancellation preserves partial evidence without a complete sequence manifest.
+
+The existing `TimeOfDaySweep` frontier family has an explicit `-TemporalAudit` leg
+for this fixed-site weather capture. It has not run here: native fixed-site capture,
+A4 contributor coverage at that site and visual qualification remain native-pending.
+A4 producer/extent refusal is preserved, including forward contributors and later
+deferred contributors. The ordinary spawn view can contain these contributors,
+and weather precipitation uses forward particles: this wiring does not yet enable
+a complete native sequence with those contributors active. A fixed-site producer
+policy or the missing A4 producer coverage is a separate prerequisite; admission
+does not promise that coverage. Manifest-aware assembly remains E1d; shared
+producer policy and all-features evidence remain E3.
+No save-format, authority revision or hash algorithm changes are made. The remaining
+section specifies the broader execution contract.
 
 Use the audit site's recorded seed, content/settings identity, camera position,
 orientation, projection, resolution and D2 ROIs. Run each site/camera from the same
@@ -1353,8 +1389,8 @@ edits when parallel branches join. No new required CI checks are part of any row
 | D2: image metrics and synthetic qualification | `tools/gates/check-diagnostic-capture.py`; `tools/gates/test_diagnostic_capture.py`; `tools/gates/baselines/diagnostic-rois.json`; `tools/gates/build-visual-sweep-montages.py`; `tools/gates/test_diagnostic_checks.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After D1 and relevant C2 fixtures/B2 channels. Implemented masked holes, seam/reference and boundary residuals, cards, bands, wedges, weather/detail and composition checks with isolated synthetic defects and labeled worst-pixel montages. All shipped thresholds remain advisory/unqualified; production enforcement needs separate repeated-capture evidence. Acceptance-row state is unchanged. Avoids owned files. |
 | E1a: exact-tick plan and admission | `rendering/TemporalAudit.h`; `rendering/TemporalAudit.cpp`; `src/luminumbra_client/core/RuntimeScenarioConfig.h`; `src/luminumbra_client/core/RuntimeScenarioConfig.cpp`; `src/luminumbra_client/sources.cmake`; `test/rendering/temporal_audit_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After A4, D1. Register GL-free tick/cadence/overflow/refusal regressions in capture_manifest_test. Coordinate configuration ownership; admission alone cannot advertise runtime support. |
 | E1b: deterministic weather input | `src/luminumbra_common/systems/WeatherSystem.h`; `src/luminumbra_common/systems/WeatherSystem.cpp`; `src/luminumbra_common/world/GameSession.cpp`; `rendering/TemporalAudit.cpp`; `test/rendering/temporal_weather_test.cpp`; `test/CMakeLists.txt`; `src/luminumbra_client/core/ScenarioRunnerDrive.cpp`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E1a. Coordinate simulation owners: register fixed-tick weather/hydrology/strike and identity/replay tests before enabling script support. Exercise normal live bridge; any format migration is a prerequisite separate slice with both readers/writers, not hidden in this count. |
-| E1c: site sequence driver | `src/luminumbra_client/main_client.cpp`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `src/luminumbra_client/core/ScenarioRunnerImpl.h`; `rendering/TemporalAudit.cpp`; `test/rendering/temporal_sequence_test.cpp`; `test/CMakeLists.txt`; `tools/gates/validate-engine-frontier.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E1b, A4, D1. GL-free protocol and optional version-1 completion-manifest transport implemented with registered sequence/readiness/phase/creature-tick and file-publication regressions. The manifest transport slice changes `rendering/TemporalAudit.h/.cpp`, `test/rendering/temporal_sequence_test.cpp`, `src/luminumbra_common/sources.cmake` (link the unchanged SHA-256 implementation) and this document (5). App/site admission, A4 reservations/runtime transport and existing frontier action wiring remain pending; native fixed-site capture is native-pending. Shipping startup still refuses execution. No all-features claim before E3. |
-| E1d: manifest-aware assembly | `tools/timelapse.py`; `tools/gates/test_temporal_assembly.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/visual-regression.md`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (8) | After E1c and D1. Register Python manifest/order/hash/partial-input/encoder-failure/budget tests in PYTHON_TESTS and CTest; preserve existing assembler callers. Existing generic workflow invokes the registry. Coordinate shared assembler and document edits. |
+| E1c: site sequence driver | `src/luminumbra_client/main_client.cpp`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `src/luminumbra_client/core/ScenarioRunnerImpl.h`; `rendering/TemporalAudit.cpp`; `test/rendering/temporal_sequence_test.cpp`; `test/CMakeLists.txt`; `tools/gates/validate-engine-frontier.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E1b, A4, D1. GL-free protocol and optional version-1 completion-manifest transport implemented with registered sequence/readiness/phase/creature-tick and file-publication regressions. The manifest transport slice changes `rendering/TemporalAudit.h/.cpp`, `test/rendering/temporal_sequence_test.cpp`, `src/luminumbra_common/sources.cmake` (link the unchanged SHA-256 implementation) and this document (5). Fixed spawn/full-frame startup admission, canonical fixed-tick simulation/physics, existing weather-schedule installation, A4 file acknowledgements and the opt-in TimeOfDaySweep frontier leg are wired. The runtime slice changes `main_client.cpp`, `RuntimeScenarioConfig.h/.cpp`, `ScenarioRunnerDrive.cpp`, `ScenarioRunnerCapture.cpp`, `test/rendering/temporal_audit_test.cpp`, the existing frontier script, this document, `tools/ci/acceptance_matrix.json` and `docs/acceptance-matrix.md` (10). A4 unsupported-contributor refusal remains; native fixed-site capture is native-pending. No all-features claim before E3. |
+| E1d: manifest-aware assembly | `tools/timelapse.py`; `tools/gates/test_temporal_assembly.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/visual-regression.md`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (8) | After E1c and D1; native fixed-site evidence is still pending. The version-1 manifest contract is available for reader fixtures. Register Python manifest/order/hash/partial-input/encoder-failure/budget tests in PYTHON_TESTS and CTest; preserve existing assembler callers. Existing generic workflow invokes the registry. Coordinate shared assembler and document edits. |
 | E2a: temporal measurements | `tools/gates/check-temporal-capture.py`; `tools/gates/test_temporal_capture.py`; `tools/gates/check-diagnostic-capture.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (8) | After E1d, D1, D2. Register Python fixtures for all five metrics, unknown metadata, empty masks and stable cross-frame identity; reuse D1/D2 readers. Avoid owned rendering files. |
 | E2b: qualification and worst events | `tools/gates/check-temporal-capture.py`; `tools/gates/test_temporal_capture.py`; `tools/gates/baselines/diagnostic-rois.json`; `tools/gates/build-visual-sweep-montages.py`; `tools/gates/test_temporal_montages.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E2a and relevant B2/C2 contributions. Register qualification-status, repeated-run, injected-defect and labelled failure-slot tests in PYTHON_TESTS/CTest. Threshold enforcement requires separately reviewed qualification evidence. Coordinate shared ROI/montage edits. |
 | E3a: profile and capability manifest | `rendering/CaptureFeatureProfile.h`; `rendering/CaptureFeatureProfile.cpp`; `src/luminumbra_client/sources.cmake`; `src/luminumbra_client/core/RuntimeScenarioConfig.h`; `src/luminumbra_client/core/RuntimeScenarioConfig.cpp`; `test/rendering/capture_feature_profile_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | Profile foundation implemented with registered GL-free profile/capability/unknown-feature/incompatible-option tests. Every unimplemented adapter defaults to unsupported. Shipping adapter admission remains pending. |

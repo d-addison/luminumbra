@@ -12,6 +12,10 @@
 #include <optional>
 #include <string>
 
+namespace Luminumbra::Systems {
+struct WeatherSchedule;
+}
+
 namespace Luminumbra::Client::ScenarioHarness {
 
 bool HasCommandLineFlag(int argc, char* argv[], const std::string& flag);
@@ -57,11 +61,50 @@ const char* WindowModeName(WindowMode mode);
 // analysis can hard-fail if a capture ever ran at a non-pinned size.
 inline constexpr int kCapturePinnedWidth = 3840;
 inline constexpr int kCapturePinnedHeight = 1600;
+
+struct RuntimeTemporalAudit {
+    Rendering::TemporalAuditPlan plan;
+    Rendering::TemporalSequenceBudget budget;
+    Rendering::DiagnosticCaptureOptions diagnostics;
+    // Runner-owned state, empty during side-effect-free startup admission.
+    std::optional<Rendering::TemporalAuditSequence> sequence = std::nullopt;
+    std::optional<Rendering::TemporalSequenceStep> step = std::nullopt;
+    std::filesystem::path directory{};
+    std::uint64_t presentation_frames = 0;
+};
+
+// Uses the existing versioned simulation weather input, installed before world
+// creation. Refuses requests outside this runtime's admitted weather contract.
+Systems::WeatherSchedule BuildTemporalAuditWeatherSchedule(const RuntimeTemporalAudit& audit);
+
+// The runner's only temporal simulation driver. Callbacks are statically bound;
+// no frame delta enters this path. At most 1000 ticks can precede a presentation
+// (the planner's maximum tick rate); retries and captures execute no ticks.
+template<class Clock, class Tick>
+Rendering::TemporalSequenceStep DriveTemporalAuditTicks(Rendering::TemporalAuditSequence& sequence,
+                                                        const Clock& clock,
+                                                        const Tick& tick) {
+    for (unsigned remaining = 1000; remaining > 0; --remaining) {
+        const auto command = sequence.next(clock());
+        if (command.action != Rendering::TemporalSequenceAction::AdvanceTick) {
+            return command;
+        }
+        const bool advanced = tick();
+        sequence.acknowledge(clock(), advanced);
+    }
+    sequence.refuse();
+    return sequence.next(clock());
+}
 // Resolution-relative gate-threshold scaling (kThresholdTuning* + ScalePinned*).
 // Dependency-free header so the scaling math is unit-testable without GL.
 // (Included here so every gate in RuntimeScenarioHarness.cpp sees the helpers.)
 
 struct RuntimeScenarioConfig {
+    std::optional<RuntimeTemporalAudit> temporal_audit;
+    // Written by the scenario runner before rendering. Simulation uses only the
+    // sequence driver above; held readiness renders always supply zero here.
+    double temporal_presentation_delta = 0;
+    bool temporal_presentation_ready = false;
     std::string scenario;
     std::string systems_config_path;
     std::string preset_json_path;
@@ -301,6 +344,7 @@ namespace Luminumbra::Client::ScenarioHarness {
 // Returns absent only when no temporal options were supplied. Invalid plans
 // throw invalid_argument with a reason. No world or output is created.
 std::optional<Rendering::TemporalAuditPlan> ParseTemporalAuditPlanOptions(int argc, char* argv[]);
-// Shipping startup refuses execution until the tick driver is available.
-void RefuseUnsupportedTemporalAuditExecution(int argc, char* argv[]);
+// Fixed spawn site/full-frame ROI, canonical fresh-world clock, A4 staging and
+// aggregate output admission. Both startup paths call this before any writes.
+std::optional<RuntimeTemporalAudit> ParseTemporalAuditRuntimeOptions(int argc, char* argv[]);
 } // namespace Luminumbra::Client::ScenarioHarness

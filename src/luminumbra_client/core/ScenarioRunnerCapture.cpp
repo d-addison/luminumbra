@@ -113,6 +113,10 @@ Rendering::CaptureManifestInput ScenarioRunnerImpl::scenarioCaptureManifest() co
                         "session_preset_content_identity_unavailable"};
     input.asset_hash_scope = "terrain_preset_and_resolved_dependency_content_identity";
     input.render_settings["scenario"] = scenario_config.scenario;
+    if (scenario_config.temporal_audit) {
+        input.render_settings["temporal_site"] = std::string("spawn");
+        input.render_settings["temporal_roi"] = std::string("full-frame");
+    }
     return input;
 }
 
@@ -271,6 +275,24 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
 }
 
 void ScenarioRunnerImpl::onPreRenderCapturePins() {
+    if (scenario_config.temporal_audit && scenario_config.temporal_audit->step) {
+        const auto& command = *scenario_config.temporal_audit->step;
+        const Luminumbra::world::WorldClock clock(0, gameSession->GetRenderCalendar());
+        const double solar = clock.solar_phase_from_day_phase(command.day_phase);
+        const float tod = command.control == Rendering::TemporalAuditControl::Noon ? 0.0f
+                          : command.control == Rendering::TemporalAuditControl::Night
+                              ? 0.5f
+                              : static_cast<float>(solar >= 0.5 ? solar - 0.5 : solar + 0.5);
+        renderPipeline.set_time_of_day(tod);
+        renderPipeline.set_time_of_day_hold(true);
+        renderPipeline.set_moon_illumination(
+            command.control == Rendering::TemporalAuditControl::Night
+                ? static_cast<float>(
+                      scenario_config.temporal_audit->plan.request.night_moon_phase_milli) /
+                      1000.0f
+                : -1.0f);
+        return;
+    }
     // Live weather and clouds have supplied defaults. Apply each atmosphere
     // scenario's final weather, cloud, lightning and particle wind pins once here.
     if (g_app.capture.feature_policy.UseLegacyAtmospherePins()) {
@@ -356,6 +378,66 @@ void ScenarioRunnerImpl::onPostRenderCapture(float deltaTime) {
     // render branch, so the guard is met by construction. The capture blocks
     // run in their exact original order.
     Rendering::RenderPipeline::CaptureCleanup diagnostic_cleanup(renderPipeline);
+    if (scenario_config.temporal_audit) {
+        auto& temporal_sequence = scenario_config.temporal_audit->sequence;
+        auto& temporal_step = scenario_config.temporal_audit->step;
+        const auto& temporal_directory = scenario_config.temporal_audit->directory;
+        if (!temporal_sequence || !temporal_step || scenario_failed) {
+            return;
+        }
+        using Action = Rendering::TemporalSequenceAction;
+        const auto& command = *temporal_step;
+        const auto tick = gameSession->GetSimulationTickCount();
+        const auto& uploads = renderPipeline.get_last_mesh_upload_stats();
+        const bool ready = renderPipeline.diagnostic_capture_refusal().empty() &&
+                           uploads.terrain_uploads_deferred == 0 &&
+                           uploads.water_uploads_deferred == 0 &&
+                           scenario_config.temporal_presentation_ready;
+        if (command.action == Action::Capture) {
+            int width = 0;
+            int height = 0;
+            glfwGetFramebufferSize(window, &width, &height);
+            const auto name = "frame-" + std::to_string(command.frame_index) + ".ppm";
+            const auto path = temporal_directory / name;
+            if (!ready || !writeScenarioBackbuffer(path, width, height)) {
+                temporal_sequence->refuse();
+            } else {
+                // Exactly the completed-frame A4 bundle, including its own capture
+                // manifest. No directory scan, and no unacknowledged sibling output.
+                std::vector<std::string> names{
+                    name, Rendering::CaptureManifestPath(path).filename().string()};
+                for (const auto* suffix : {".albedo.pfm",
+                                           ".normal.pfm",
+                                           ".depth.pfm",
+                                           ".material.pfm",
+                                           ".ids.bin",
+                                           ".draws.json",
+                                           ".diagnostics.json"}) {
+                    names.push_back(name + suffix);
+                }
+                // Probe output is optional and was range-checked before startup writes.
+                const auto& probe = scenario_config.temporal_audit->diagnostics.probe;
+                if (probe) {
+                    names.push_back(name + ".probe-" + std::to_string((*probe)[0]) + "-" +
+                                    std::to_string((*probe)[1]) + ".json");
+                }
+                (void)temporal_sequence->acknowledgeCaptureFiles(tick, temporal_directory, names);
+            }
+        } else if (command.action == Action::Publish) {
+            if (temporal_sequence->publishCompletionManifest(temporal_directory /
+                                                             "sequence.json")) {
+                scenario_timed_run_complete = true;
+                glfwSetWindowShouldClose(window, true);
+            }
+        } else {
+            temporal_sequence->acknowledge(tick, true, ready);
+        }
+        temporal_step.reset();
+        if (!temporal_sequence->refusal().empty()) {
+            (void)refuseScenarioCapture(temporal_sequence->refusal());
+        }
+        return;
+    }
     if (renderPipeline.capture_diagnostics_enabled()) {
         int width = 0;
         int height = 0;
@@ -2262,6 +2344,18 @@ void ScenarioRunnerImpl::captureCreatureSlice(std::chrono::steady_clock::time_po
 }
 
 void ScenarioRunnerImpl::onShutdown() {
+    if (scenario_config.temporal_audit) {
+        auto& temporal_sequence = scenario_config.temporal_audit->sequence;
+        if (!temporal_sequence || !temporal_sequence->complete()) {
+            if (temporal_sequence) {
+                temporal_sequence->refuse();
+            }
+            if (!scenario_failed) {
+                scenario_failed = true;
+                scenario_failure_reason = "temporal_sequence_incomplete";
+            }
+        }
+    }
     if (scenario_config.active() && scenario_config.timed_run_seconds > 0 && scenario_ready &&
         !scenario_timed_run_complete && !scenario_failed) {
         const auto elapsed_play_seconds =
