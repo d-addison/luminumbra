@@ -8,6 +8,8 @@
 #include "PassGlHelpers.h"
 #include "rendering/Shader.h"
 
+#include <limits>
+
 namespace Luminumbra::Rendering {
 
 TaauPass::TaauPass() = default;
@@ -40,7 +42,7 @@ void TaauPass::init(RenderResourceRegistry& registry, u32 width, u32 height) {
     // execute_taau_resolve - not a fixed-layout render target the registry can own.
     // The desc reproduces the retired glTexImage2D/glTexParameter calls exactly
     // (RGBA16F, LINEAR, CLAMP_TO_EDGE).
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 2; ++i) {
         TextureDesc history;
         history.width = width;
         history.height = height;
@@ -54,17 +56,31 @@ void TaauPass::init(RenderResourceRegistry& registry, u32 width, u32 height) {
         history.lifetime = ResourceLifetime::History;
         history.expected_layout = "color_attachment";
         history.debug_label = "taau.history";
-        if (i < 2)
-            m_history[i] =
-                registry.create_texture(i == 0 ? "taau_history_0" : "taau_history_1", history).id;
-        else {
-            history.lifetime = ResourceLifetime::History;
-            history.debug_label = "taau.replay_output";
-            m_replay_output = registry.create_texture("taau_replay_output", history).id;
-        }
+        m_history[i] =
+            registry.create_texture(i == 0 ? "taau_history_0" : "taau_history_1", history).id;
     }
     m_history_write = 0;
     m_history_valid = false; // no usable history until the first resolve fills it
+}
+
+bool TaauPass::prepare_replay(RenderResourceRegistry& registry) {
+    if (replay_available())
+        return true;
+    const auto* history = registry.owned_texture_desc("taau_history_0");
+    if (!m_replay_fbo || !m_history[0] || !m_history[1] || !history || history->width == 0 ||
+        history->height == 0 ||
+        history->width > static_cast<u32>(std::numeric_limits<GLsizei>::max()) ||
+        history->height > static_cast<u32>(std::numeric_limits<GLsizei>::max()) ||
+        static_cast<std::size_t>(history->width) >
+            std::numeric_limits<std::size_t>::max() / history->height / 8u)
+        return false;
+    // One output-sized RGBA16F texture (8 bytes/texel), reused until resize.
+    auto replay = *history;
+    replay.debug_label = "taau.replay_output";
+    // Null storage data must not be interpreted as an offset into a caller's PBO.
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    m_replay_output = registry.create_texture("taau_replay_output", replay).id;
+    return replay_available();
 }
 
 void TaauPass::destroy(RenderResourceRegistry& registry) {

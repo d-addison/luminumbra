@@ -20,6 +20,8 @@ public:
 
     void init_shader(const std::filesystem::path& root_path);
     void init(RenderResourceRegistry& registry, u32 width, u32 height);
+    // Call inside the replay GL guard, before dispatching a frozen resolve.
+    bool prepare_replay(RenderResourceRegistry& registry);
     void destroy(RenderResourceRegistry& registry);
     void reset_shader();
     void invalidate_history();
