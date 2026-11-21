@@ -3318,6 +3318,65 @@ class SkyAppearanceWiring(unittest.TestCase):
         self.assertIn("return mix(baseColor, cloudColor, alpha);", clouds)
         self.assertIn("return baseColor;", clouds)
 
+    def test_cloud_opacity_attenuates_each_celestial_contribution(self):
+        shader = read(ROOT / "res/shaders/enhanced_skybox.frag")
+        main = body(shader, "void main()")
+        # Consume the production order and composite expression. Moving aurora
+        # after clouds must change these numeric results, even for partial cover.
+        layers = re.findall(r"skyColor\s*(\+=|=)\s*(renderStars|renderAurora|renderClouds)\([^;]*;",
+                            main)
+        self.assertEqual(sorted(layers),
+                         sorted((("+=", "renderStars"), ("+=", "renderAurora"),
+                                 ("=", "renderClouds"))))
+        clouds = compact(body(shader, "vec3 renderClouds("))
+        composite = re.search(r"return ([^;]+);$", clouds).group(1)
+
+        def render(stars, aurora, opacity):
+            color = .02
+            for _, layer in layers:
+                if layer == "renderClouds":
+                    color = eval(composite, {"__builtins__": {}},
+                                 dict(baseColor=color, cloudColor=.04, alpha=opacity,
+                                      mix=lambda a, b, t: a * (1 - t) + b * t))
+                else:
+                    color += stars if layer == "renderStars" else aurora
+            return color
+
+        # Five opacities * four layer combinations: clear, partial and opaque
+        # cover, both zero and independent nonzero layer controls, all bounded.
+        for opacity in (0, .25, .5, .9, 1):
+            baseline = render(0, 0, opacity)
+            for stars, aurora in ((0, 0), (.3, 0), (0, .7), (.3, .7)):
+                with self.subTest(opacity=opacity, stars=stars, aurora=aurora):
+                    self.assertAlmostEqual(render(stars, aurora, opacity) - baseline,
+                                           (stars + aurora) * (1 - opacity))
+
+    def test_stellar_neighbourhood_sharpening_cannot_dig_a_dark_ring(self):
+        shader = read(ROOT / "res/shaders/taau_resolve.frag")
+        helper = compact(body(shader, "vec3 sharpenLuma("))
+        self.assertIn("const vec3 weights = vec3(0.2126, 0.7152, 0.0722);", helper)
+        self.assertIn("float luminance = dot(color, weights);", helper)
+        self.assertIn("float detail = luminance - dot(mean, weights);", helper)
+        gain = re.search(r"float gain = ([^;]+);", helper).group(1)
+        result = re.search(r"return ([^;]+);$", helper).group(1)
+        main = compact(body(shader, "void main()"))
+        self.assertIn("resolved = sharpenLuma(resolved, mean, nmin, nmax);", main)
+        # Grey stellar neighbourhoods make dot(color, weights) equal color.
+        # The dark neighbour's mean includes one bright star among nine taps.
+        # Test both that neighbour and the peak, including zero background/HDR.
+        for background, peak in ((0, 1), (.02, 1), (.1, 4)):
+            mean = (8 * background + peak) / 9
+            for color in (background, peak):
+                for sharpness in (0, .25, 1):
+                    scope = dict(color=color, luminance=color, detail=color - mean,
+                                 u_sharpness=sharpness, lower=background, upper=peak,
+                                 max=max, clamp=lambda x, lo, hi: min(hi, max(lo, x)))
+                    scope["gain"] = eval(gain, {"__builtins__": {}}, scope)
+                    actual = eval(result, {"__builtins__": {}}, scope)
+                    with self.subTest(background=background, color=color, sharpness=sharpness):
+                        self.assertGreaterEqual(actual, background)
+                        self.assertLessEqual(actual, peak)
+
 class NightLightingSourceTests(unittest.TestCase):
     def test_frame_scan_pins_override_live_clock_before_the_rendered_capture(self):
         source = read(ROOT / 'src/luminumbra_client/main_client.cpp')

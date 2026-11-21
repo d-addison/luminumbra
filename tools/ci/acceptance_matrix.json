@@ -86,6 +86,37 @@
       "requirements": []
     },
     {
+      "id": "render.sky-layer-corrections",
+      "source": "docs/development/visual-diagnostics.md#implementation-inventory",
+      "statement": "Issue #874 code corrections are present: render-tagged ambient dust scatters local light, rejects clear sky depth and fades with distance; compact radial stars fade to zero at the horizon; aurora and stars precede cloud compositing; CPU/GPU atmosphere integration uses texel-centred bilinear LUT inputs. Bounded post-resolve sharpening and the interior-sky temporal bypass address a separate possible dark-ring producer. Registered source and numeric regressions cover these contracts, including independent celestial contributions under clear, partial and opaque cover and sharpening at dark neighbours and bright peaks. Dusk remains diagnostic. Native re-capture of every audited symptom remains pending; the issue is not closed and visual acceptance is not claimed.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "script",
+          "ref": "test/rendering/test_upload_budget_wiring.py"
+        },
+        {
+          "kind": "script",
+          "ref": "test/rendering/test_frame_attribution_wiring.py"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RenderSmokeTest.ReversedDepthSoftParticlesFadeAgainstGeometry",
+          "planned": "Run the particle regression and re-capture all issue #874 sky symptoms on the native release build; owner: release"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ShaderScene.*",
+          "planned": "Run the registered sky shader scenes under llvmpipe; owner: maintainers"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development/visual-diagnostics.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
       "id": "render.shadow-receivers",
       "source": "docs/development/visual-diagnostics.md#implementation-inventory",
       "statement": "Shadow projection converts signed light-view Z bounds to negative-Z plane distances. Surface PCF interpolates comparison results with a four by four box and 25 nearest-depth taps. Depth and tint use identity outside all six light planes. Registered regressions cover asymmetric signed bounds, corner inclusion, culling, depth ordering, fractional receiver motion, every cascade, small and shipping shadow sizes, border taps and out-of-frustum inputs. The orange-brown canopy hue remains unattributed, and native re-capture must qualify both the canopy appearance and the dusk wedge before issue #873 can close. Froxel tint is identity before the light near plane; its single-tap depth filter is unchanged.",
