@@ -136,6 +136,8 @@ private:
     FoliageFrame* m_previous = nullptr;
 };
 bool foliage_frame_active();
+// Completed rebuild time in the current collector, zero when collection is disabled.
+double foliage_total_ms();
 void record_render_uploads(const Rendering::UploadWorkStats& work, bool water, std::size_t pending);
 void record_foliage_rebuild(const FoliageRebuild& rebuild,
                             double milliseconds,

@@ -3129,12 +3129,12 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
     const double snapshot_ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - snapshot_start)
             .count();
-    manage_chunk_gpu_resources(renderable_chunk_snapshots, camera, snapshot_ms);
-    manage_water_gpu_resources(renderable_chunk_snapshots, camera);
+    manage_chunk_gpu_resources(renderable_chunk_snapshots, camera, snapshot_ms, presentation);
+    manage_water_gpu_resources(renderable_chunk_snapshots, camera, presentation);
     if (!draw_upload_frame(presentation, render_uploads_settled())) {
-        // No consumer is submitted while an unmeasured capture wait drains.
-        // Keep the count/byte/time limits unchanged and do not advance temporal
-        // history, far-world scheduling, particles or the GPU query ring.
+        // No consumer is submitted while a hidden entry or capture wait drains.
+        // Do not advance temporal history, far-world scheduling, particles or
+        // the GPU query ring.
         m_last_render_pass_stats.cpu_prepare_ms =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
                                                       m_cpu_frame_t0)
@@ -3306,6 +3306,9 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
 
     glEnable(GL_DEPTH_TEST);
 
+    // The scene owns depth writes; transparent stages restore them before exit.
+    glDepthMask(GL_TRUE);
+
     // The wireframe toggle now adds a depth-tested mask over the shaded frame.
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
     glEnable(GL_CULL_FACE);
@@ -3400,7 +3403,16 @@ void RenderPipeline::execute_stage_shadow(const Camera& camera) {
         // translucent occluders for the tint cascade.
         shadow_input.glass_items = &m_glass_pane_items;
         shadow_input.glass_vao = m_glass_quad_vao;
-        const auto shadow_stats = m_shadow_pass->execute(shadow_ctx, shadow_input);
+        // Startup establishes reversed Z; scene stages retain that convention.
+        // dispatch_stages establishes depth writes/testing and back-face culling.
+        const ShadowPass::CallerState caller{
+            .depth = {.function = GL_GREATER, .write_mask = GL_TRUE, .test_enabled = GL_TRUE},
+            .clip_origin = GL_LOWER_LEFT,
+            .clip_depth = GL_ZERO_TO_ONE,
+            .clear_depth = 0.0,
+            .cull_face = GL_BACK,
+            .cull_enabled = GL_TRUE};
+        const auto shadow_stats = m_shadow_pass->execute(shadow_ctx, shadow_input, caller);
         for (std::size_t i = 0; i < ShadowMap::CASCADE_COUNT; ++i) {
             m_last_render_pass_stats.shadow_cascade_visible_chunks[i] =
                 shadow_stats[i].visible_chunks;
@@ -4896,19 +4908,23 @@ void RenderPipeline::prepare_waterfalls(const Systems::SHIELD_WorldSystem& world
 
 void RenderPipeline::manage_chunk_gpu_resources(const std::vector<ChunkMeshSnapshot>& chunks,
                                                 const Camera& camera,
-                                                double preparation_ms) {
-    manage_mesh_gpu_resources<false>(chunks, camera, preparation_ms);
+                                                double preparation_ms,
+                                                UploadPresentation presentation) {
+    manage_mesh_gpu_resources<false>(chunks, camera, presentation, preparation_ms);
 }
 
 void RenderPipeline::manage_water_gpu_resources(const std::vector<ChunkMeshSnapshot>& chunks,
-                                                const Camera& camera) {
-    manage_mesh_gpu_resources<true>(chunks, camera);
+                                                const Camera& camera,
+                                                UploadPresentation presentation) {
+    manage_mesh_gpu_resources<true>(chunks, camera, presentation);
 }
 
 template<bool Water>
 void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapshot>& chunks,
                                                const Camera& camera,
+                                               UploadPresentation presentation,
                                                double preparation_ms) {
+    const auto limits = upload_limits(presentation, Water);
     const auto start = std::chrono::steady_clock::now();
     // Construct before scratch containers, so their destruction is timed too.
     struct UploadMeasurement {
@@ -4916,14 +4932,12 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
         const std::size_t& pending;
         std::chrono::steady_clock::time_point begin;
         double preparation;
+        double allowance_ms;
         ~UploadMeasurement() {
             work.elapsed_ms = preparation + std::chrono::duration<double, std::milli>(
                                                 std::chrono::steady_clock::now() - begin)
                                                 .count();
-            work.overshoot_ms =
-                std::max(0.0,
-                         work.elapsed_ms - (Water ? kWaterUploadLimits.milliseconds
-                                                  : kTerrainUploadLimits.milliseconds));
+            work.overshoot_ms = std::max(0.0, work.elapsed_ms - allowance_ms);
             Client::Attribution::record_render_uploads(work, Water, pending);
         }
     } measurement{Water ? m_last_mesh_upload_stats.water_budget
@@ -4931,7 +4945,8 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
                   Water ? m_last_mesh_upload_stats.water_uploads_deferred
                         : m_last_mesh_upload_stats.terrain_uploads_deferred,
                   start,
-                  preparation_ms};
+                  preparation_ms,
+                  limits.milliseconds};
     const auto elapsed = [&] {
         return preparation_ms +
                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
@@ -5126,7 +5141,8 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
                                                                   candidate.distance_sq,
                                                                   payload.vertices,
                                                                   payload.indices,
-                                                                  elapsed());
+                                                                  elapsed(),
+                                                                  presentation);
             if (candidate.refinement_only && result == NearTerrainUploadResult::Deferred) {
                 return false;
             }
@@ -5157,9 +5173,10 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
     };
     const auto work = [&] {
         if constexpr (Water) {
-            return drain_uploads(queue, kWaterUploadLimits, cost, adopt, elapsed);
+            return drain_uploads(queue, limits, cost, adopt, elapsed);
         } else {
-            return drain_terrain_uploads(queue, m_near_terrain_upload_queue, cost, adopt, elapsed);
+            return drain_terrain_uploads(
+                queue, m_near_terrain_upload_queue, cost, adopt, elapsed, presentation);
         }
     }();
     (Water ? stats.water_budget : stats.terrain_budget) = work;
@@ -6420,7 +6437,10 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
         if (const auto value = Core::ReadEnvironment("LUMIN_MOON")) {
             try {
                 return std::stof(*value);
-            } catch (...) {}
+            } catch (...) {
+                // The static initializer bounds this diagnostic to once per process.
+                LUMINUMBRA_CORE_WARN("Invalid LUMIN_MOON; using configured illumination");
+            }
         }
         return -1.0f;
     }();
@@ -6788,7 +6808,8 @@ std::vector<glm::mat4> RenderPipeline::get_light_space_matrices(const Camera& ca
         minZ = (minZ < 0) ? minZ * z_mult : minZ / z_mult;
         maxZ = (maxZ < 0) ? maxZ / z_mult : maxZ * z_mult;
         // ShadowPass keeps the conventional [-1,1] orthographic clip convention.
-        glm::mat4 light_proj = glm::orthoRH_NO(minX, maxX, minY, maxY, minZ, maxZ);
+        glm::mat4 light_proj = PassGl::shadow_projection_from_bounds(glm::vec3(minX, minY, minZ),
+                                                                     glm::vec3(maxX, maxY, maxZ));
         matrices.push_back(light_proj * light_view);
     }
     return matrices;
