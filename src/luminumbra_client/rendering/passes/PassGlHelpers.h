@@ -8,6 +8,7 @@
 
 #include <array>
 #include <glad/glad.h>
+#include <glm/ext/matrix_clip_space.hpp>
 #include <glm/glm.hpp>
 #include <string>
 
@@ -150,6 +151,12 @@ inline std::array<glm::vec4, 8> cascade_frustum_corners_world(const glm::mat4& p
                 corners[index++] = point / point.w;
             }
     return corners;
+}
+
+// Bounds are signed light-view coordinates. GLM's right-handed orthographic
+// projection takes distances along -Z, so the closest plane is -maximum.z.
+inline glm::mat4 shadow_projection_from_bounds(const glm::vec3& minimum, const glm::vec3& maximum) {
+    return glm::orthoRH_NO(minimum.x, maximum.x, minimum.y, maximum.y, -maximum.z, -minimum.z);
 }
 
 inline void set_default_shadow_cascade_splits(ShadowMap& shadow_map) {

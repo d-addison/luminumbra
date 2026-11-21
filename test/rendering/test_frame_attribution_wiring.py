@@ -4019,9 +4019,16 @@ class DeferredRasterDiagnosticWiring(unittest.TestCase):
             return value
 
         self.assertEqual(fingerprint(without_guard(self.lighting, "LUMIN_DIAG_CONTRIBUTIONS")),
-                         0xc6e9bc9c6fc7110b)
+                         0xf8fca67f768319ee)
         self.assertEqual(fingerprint(without_guard(self.fragment, "LUMIN_DIAG_SURFACE")),
                          0x7289f9525f762361)
+
+    def test_compute_regression_source_pin_matches_the_production_shader(self):
+        import hashlib
+        inventory = json.loads(read(ROOT / "test/rendering/shader_scenes/scenes.json"))
+        self.assertEqual(set(inventory["regression_inputs"]), {"res/shaders/froxel_inject.comp"})
+        for path, expected in inventory["regression_inputs"].items():
+            self.assertEqual(hashlib.sha256(read(ROOT / path).encode()).hexdigest(), expected)
 
 
 class LaterDiagnosticSubmissionWiring(unittest.TestCase):
