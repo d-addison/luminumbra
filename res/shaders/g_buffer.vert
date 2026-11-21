@@ -106,9 +106,17 @@ void main()
     vs_out.FragPos = vec3(viewPos);
     vs_out.Normal = viewNormal;
     vs_out.UV = vec2(0.0); // terrain uses triplanar projection, not mesh UVs
+    // Refined render vertices retain the flat ID in the low byte and carry
+    // five coverage numerators in sixths. Ordinary live/far IDs stay one-hot.
     vs_out.MaterialID = aMaterialID;
-    vs_out.GroundWeights = vec4(equal(uvec4(aMaterialID), uvec4(1u, 2u, 3u, 4u)));
-    vs_out.DeepslateWeight = aMaterialID == 5u ? 1.0 : 0.0;
+    if ((aMaterialID & 0x80000000u) != 0u) {
+        vs_out.MaterialID = aMaterialID & 255u;
+        vs_out.GroundWeights = vec4((uvec4(aMaterialID) >> uvec4(8u, 11u, 14u, 17u)) & 7u) / 6.0;
+        vs_out.DeepslateWeight = float((aMaterialID >> 20u) & 7u) / 6.0;
+    } else {
+        vs_out.GroundWeights = vec4(equal(uvec4(aMaterialID), uvec4(1u, 2u, 3u, 4u)));
+        vs_out.DeepslateWeight = aMaterialID == 5u ? 1.0 : 0.0;
+    }
     vs_out.Tint = vec3(1.0);  // terrain is never per-instance tinted
 
     // Far-region radial clip band: positive only between the near and far radii.

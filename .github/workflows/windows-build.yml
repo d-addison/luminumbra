@@ -45,6 +45,12 @@ jobs:
         with:
           clean: true
           ref: ${{ github.event_name == 'schedule' && 'devel' || github.sha }}
+      - name: Refresh frozen preset bytes
+        shell: bash
+        # Reused workspaces can retain CRLF from before the -text attribute.
+        run: |
+          git ls-files -z -- 'worlds/atlas/presets-rev6/*.json' | xargs -0 rm -f --
+          git ls-files -z -- 'worlds/atlas/presets-rev6/*.json' | git checkout-index --force -z --stdin
       - name: Resolve exact tested revision
         id: source
         shell: pwsh
@@ -91,6 +97,12 @@ jobs:
         with:
           clean: true
           ref: ${{ needs.changes.outputs.head_sha }}
+      - name: Refresh frozen preset bytes
+        shell: bash
+        # Reused workspaces can retain CRLF from before the -text attribute.
+        run: |
+          git ls-files -z -- 'worlds/atlas/presets-rev6/*.json' | xargs -0 rm -f --
+          git ls-files -z -- 'worlds/atlas/presets-rev6/*.json' | git checkout-index --force -z --stdin
       - name: Select Python runtime
         id: python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -448,6 +460,12 @@ jobs:
         with:
           clean: true
           ref: ${{ needs.changes.outputs.head_sha }}
+      - name: Refresh frozen preset bytes
+        shell: bash
+        # Reused workspaces can retain CRLF from before the -text attribute.
+        run: |
+          git ls-files -z -- 'worlds/atlas/presets-rev6/*.json' | xargs -0 rm -f --
+          git ls-files -z -- 'worlds/atlas/presets-rev6/*.json' | git checkout-index --force -z --stdin
       - name: Select Python runtime
         id: python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -698,6 +716,12 @@ jobs:
         with:
           clean: true
           ref: ${{ needs.changes.outputs.head_sha }}
+      - name: Refresh frozen preset bytes
+        shell: bash
+        # Reused workspaces can retain CRLF from before the -text attribute.
+        run: |
+          git ls-files -z -- 'worlds/atlas/presets-rev6/*.json' | xargs -0 rm -f --
+          git ls-files -z -- 'worlds/atlas/presets-rev6/*.json' | git checkout-index --force -z --stdin
       - name: Select Python runtime
         id: python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -806,6 +830,12 @@ jobs:
         with:
           clean: true
           ref: ${{ needs.changes.outputs.head_sha }}
+      - name: Refresh frozen preset bytes
+        shell: bash
+        # Reused workspaces can retain CRLF from before the -text attribute.
+        run: |
+          git ls-files -z -- 'worlds/atlas/presets-rev6/*.json' | xargs -0 rm -f --
+          git ls-files -z -- 'worlds/atlas/presets-rev6/*.json' | git checkout-index --force -z --stdin
       - name: Select Python runtime
         id: python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0

@@ -22,6 +22,55 @@ class TerrainShaderContract(unittest.TestCase):
         self.main = self.shader.split("void main()", 1)[1]
         self.terrain = self.shader.split("void terrainSurface(", 1)[1].split("void main()", 1)[0]
 
+    def test_refined_coverage_decodes_sixths_without_changing_flat_ids_or_plain_vertices(self):
+        vertex = source("res/shaders/g_buffer.vert")
+        self.assertIn("vs_out.MaterialID = aMaterialID;", vertex)
+        self.assertIn("if ((aMaterialID & 0x80000000u) != 0u) { "
+                      "vs_out.MaterialID = aMaterialID & 255u;", vertex)
+        packed = re.search(r"vs_out.GroundWeights = vec4\(\(uvec4\(aMaterialID\) >> "
+                           r"uvec4\((\d+)u, (\d+)u, (\d+)u, (\d+)u\)\) & (\d+)u\) / ([\d.]+);",
+                           vertex)
+        deep = re.search(r"vs_out.DeepslateWeight = float\(\(aMaterialID >> (\d+)u\) "
+                         r"& (\d+)u\) / ([\d.]+);", vertex)
+        self.assertIsNotNone(packed, "refined vertices need fractional coverage")
+        self.assertIsNotNone(deep)
+        shifts = [int(value) for value in packed.groups()[:4]] + [int(deep[1])]
+        mask, divisor = int(packed[5]), float(packed[6])
+        self.assertEqual((int(deep[2]), float(deep[3])), (mask, divisor))
+        self.assertIn("} else { vs_out.GroundWeights = "
+                      "vec4(equal(uvec4(aMaterialID), uvec4(1u, 2u, 3u, 4u))); "
+                      "vs_out.DeepslateWeight = aMaterialID == 5u ? 1.0 : 0.0; }", vertex)
+        kernel = source("src/luminumbra_client/rendering/NearTerrainRefinement.cpp")
+        self.assertIn("if (vertex.material_id > 255u) { return false; }", kernel)
+        foliage = source("src/luminumbra_client/rendering/FoliageGroundMesh.h")
+        self.assertIn("const u32 material = (a.material_id & 0x80000000u) != 0u ? "
+                      "a.material_id & 255u : a.material_id;", foliage)
+        self.assertIn("if (material < 1 || material > 5 ||", foliage)
+        encoding = re.search(r"return material >= (\d+)u && material <= (\d+)u \? "
+                             r"numerator << \((\d+)u \+ (\d+)u \* \(material - (\d+)u\)\) : 0u;",
+                             kernel)
+        self.assertIsNotNone(encoding)
+        first, last, offset, stride, origin = map(int, encoding.groups())
+        self.assertEqual((first, last, origin), (1, 5, 1))
+        self.assertEqual(shifts, [offset + stride * lane for lane in range(5)])
+        for material in "ab":
+            self.assertIn(f"GroundContribution({material}.material_id, 3u)", kernel)
+        for material in "abc":
+            self.assertIn(f"GroundContribution({material}.material_id, 2u)", kernel)
+        # All byte IDs: natural lanes, absent lanes, water, crystal, far water
+        # and unknown IDs. Half/third numerators never carry into another field.
+        for a in range(256):
+            for b in range(256):
+                for materials in ((a, b), (a, b, 5)):
+                    word = 0x80000000 | materials[-1]
+                    for material in materials:
+                        if first <= material <= last:
+                            word += (6 // len(materials)) << (offset + stride * (material - origin))
+                    self.assertEqual(word & 255, materials[-1])
+                    actual = [((word >> shift) & mask) / divisor for shift in shifts]
+                    expected = [materials.count(lane) / len(materials) for lane in range(1, 6)]
+                    self.assertEqual(actual, expected)
+
     def test_projection_uses_face_and_slope_uses_smooth_normal_before_normal_mapping(self):
         # Collapsed relative derivatives retain a finite interpolated normal;
         # back-facing winding is aligned to the authored surface orientation.

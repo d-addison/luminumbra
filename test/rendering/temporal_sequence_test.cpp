@@ -1,11 +1,21 @@
 #include "rendering/TemporalAudit.h"
 
+#include "../support/UniqueTempPath.h"
 #include "luminumbra_common/ai/CreatureBrainSystem.h"
+#include "luminumbra_common/authoring/PrefabDigest.h"
 #include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
 
 #include <array>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <limits>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <vector>
 
 namespace {
 using namespace Luminumbra::Rendering;
@@ -55,6 +65,67 @@ void Reach(TemporalAuditSequence& sequence, Action action, std::uint64_t& tick) 
         Accept(sequence, command);
     }
     FAIL() << "sequence did not reach requested state";
+}
+
+struct CompletionDirectory {
+    std::filesystem::path path = Luminumbra::TestSupport::CreateUniqueTempDirectory("temporal-");
+    ~CompletionDirectory() {
+        std::error_code error;
+        std::filesystem::remove_all(path, error);
+    }
+};
+
+bool WriteBytes(const std::filesystem::path& path, std::string_view bytes) {
+    std::ofstream output(path, std::ios::binary);
+    output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    output.close();
+    return static_cast<bool>(output);
+}
+
+TemporalSequenceBudget FileBudget(const TemporalAuditPlan& plan) {
+    return {.frame_bytes = 1024,
+            .manifest_bytes = 16U * 1024U * 1024U,
+            .output_bytes =
+                static_cast<std::uint64_t>(plan.frames.size()) * 1024 + 16U * 1024U * 1024U};
+}
+
+void ReachFilePublication(TemporalAuditSequence& sequence,
+                          const TemporalAuditPlan& plan,
+                          const std::filesystem::path& directory) {
+    auto tick = plan.request.start_tick;
+    std::uint64_t advanced = 0;
+    for (unsigned attempt = 0; attempt < 20000; ++attempt) {
+        const auto command = sequence.next(tick);
+        ASSERT_NE(command.action, Action::Refused) << sequence.refusal();
+        if (command.action == Action::Publish) {
+            EXPECT_EQ(advanced, plan.end_tick - plan.request.start_tick);
+            EXPECT_EQ(tick, plan.end_tick);
+            return;
+        }
+        if (command.action == Action::AdvanceTick) {
+            ASSERT_EQ(command.simulation_tick, tick + 1);
+            ++advanced;
+        } else {
+            ASSERT_EQ(command.simulation_tick, tick);
+        }
+        tick = command.simulation_tick;
+        if (command.action == Action::Capture) {
+            ASSERT_LT(command.frame_index, plan.frames.size());
+            EXPECT_EQ(tick, plan.frames[command.frame_index].target_tick);
+            const auto name = "frame-" + std::to_string(command.frame_index) + ".ppm";
+            ASSERT_TRUE(WriteBytes(directory / name, "abc"));
+            std::vector<std::string> names{name};
+            if (command.frame_index == 0) {
+                names.push_back("frame-0.ppm.depth.pfm");
+                ASSERT_TRUE(WriteBytes(directory / names.back(), std::string_view("\0\r\n", 3)));
+            }
+            ASSERT_TRUE(sequence.acknowledgeCaptureFiles(tick, directory, names));
+            EXPECT_FALSE(sequence.complete());
+        } else {
+            Accept(sequence, command);
+        }
+    }
+    FAIL() << "file-backed sequence did not reach publication";
 }
 
 TEST(TemporalAuditSequence, ExactEndpointsBurstsAndHoldsWithoutExtraFrameDeltaTicks) {
@@ -395,5 +466,297 @@ TEST(TemporalAuditSequence, CreatureTicksStayLiveBetweenCapturesAndMatchOrdinary
     EXPECT_EQ(actual.last_action, expected.last_action);
     EXPECT_EQ(sequence_registry.get<Comp::TransformComponent>(subject).position,
               ordinary_registry.get<Comp::TransformComponent>(reference).position);
+}
+
+TEST(TemporalAuditSequence, CompletionManifestPreservesPlanOrderExactByteHashesAndVersion) {
+    const CompletionDirectory directory;
+    const auto plan = Plan(TemporalAuditSpan::DayNight, 1);
+    TemporalAuditSequence sequence(plan, FileBudget(plan));
+    EXPECT_TRUE(sequence.completionManifest().empty());
+    ReachFilePublication(sequence, plan, directory.path);
+    ASSERT_EQ(sequence.next(plan.end_tick).action, Action::Publish);
+    const auto text = sequence.completionManifest();
+    ASSERT_FALSE(text.empty());
+    const auto document = nlohmann::json::parse(text);
+    EXPECT_EQ(document.at("schema"), "luminumbra.temporal_audit_sequence");
+    EXPECT_EQ(document.at("version"), 1);
+    EXPECT_EQ(document.at("status"), "complete");
+    const auto canonical_plan = document.at("plan").dump();
+    EXPECT_EQ(
+        document.at("plan_sha256"),
+        Luminumbra::Authoring::Detail::Sha256(
+            {reinterpret_cast<const std::uint8_t*>(canonical_plan.data()), canonical_plan.size()}));
+    EXPECT_EQ(document.at("plan").at("night_moon_phase_milli"), 1000);
+    EXPECT_EQ(document.at("plan").at("start_tick"), plan.request.start_tick);
+    EXPECT_EQ(document.at("plan").at("end_tick"), plan.end_tick);
+    const auto& frames = document.at("frames");
+    ASSERT_EQ(frames.size(), plan.frames.size());
+    ASSERT_EQ(document.at("plan").at("frames").size(), plan.frames.size());
+    for (std::size_t index = 0; index < plan.frames.size(); ++index) {
+        const auto& expected = plan.frames[index];
+        const auto& frame = frames.at(index);
+        EXPECT_EQ(frame.at("index"), index);
+        EXPECT_EQ(frame.at("tick"), expected.target_tick);
+        EXPECT_EQ(frame.at("sub_tick_60"), expected.sub_tick_60);
+        EXPECT_EQ(frame.at("kind"), static_cast<unsigned>(expected.kind));
+        EXPECT_EQ(frame.at("control"), static_cast<unsigned>(expected.control));
+        EXPECT_EQ(frame.at("dense"), expected.dense);
+        EXPECT_EQ(frame.at("hold_frame"), expected.hold_frame);
+        auto scheduled = frame;
+        scheduled.erase("payloads");
+        EXPECT_EQ(scheduled, document.at("plan").at("frames").at(index));
+        const auto& payloads = frame.at("payloads");
+        ASSERT_EQ(payloads.size(), index == 0 ? 2U : 1U);
+        EXPECT_EQ(payloads.at(0).at("path"), "frame-" + std::to_string(index) + ".ppm");
+        EXPECT_EQ(payloads.at(0).at("bytes"), 3);
+        EXPECT_EQ(payloads.at(0).at("sha256"),
+                  "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
+    EXPECT_EQ(frames.at(0).at("payloads").at(1).at("path"), "frame-0.ppm.depth.pfm");
+    EXPECT_EQ(frames.at(0).at("payloads").at(1).at("sha256"),
+              "5016d27e02b85de4602313289699acbf145b3b1e47d8f94320cce8ded4a6ceef");
+    EXPECT_EQ(text, sequence.completionManifest());
+
+    // Copies at the publication boundary exercise failures without repeating
+    // capture I/O. Old output and stale staging are never replaced or removed.
+    for (const auto* occupied : {"complete.json", "stale.json.tmp"}) {
+        ASSERT_TRUE(WriteBytes(directory.path / occupied, "previous"));
+    }
+    ASSERT_TRUE(std::filesystem::create_directory(directory.path / "directory.json"));
+    for (const auto& target : {directory.path / "absent" / "sequence.json",
+                               directory.path / "complete.json",
+                               directory.path / "stale.json",
+                               directory.path / "directory.json",
+                               directory.path / std::string("invalid\0.json", 13),
+                               directory.path / std::string("\0ignored", 8) / "invalid-parent.json",
+                               directory.path / "Upper.json",
+                               directory.path / "trailing.json.",
+                               directory.path / std::string(129, 'a'),
+                               directory.path / "con.json",
+                               directory.path / "prn.json",
+                               directory.path / "aux.json",
+                               directory.path / "nul.json",
+                               directory.path / "com1.json",
+                               directory.path / "com9.json",
+                               directory.path / "lpt1.json",
+                               directory.path / "lpt9.json",
+                               directory.path / "",
+                               directory.path / ".",
+                               directory.path / "..",
+                               std::filesystem::path{}}) {
+        SCOPED_TRACE(target.string());
+        auto failed = sequence;
+        EXPECT_FALSE(failed.publishCompletionManifest(target));
+        EXPECT_FALSE(failed.complete());
+        EXPECT_TRUE(failed.completionManifest().empty());
+        EXPECT_EQ(failed.next(plan.end_tick).action, Action::Refused);
+    }
+    EXPECT_FALSE(std::filesystem::exists(directory.path / "absent"));
+    EXPECT_FALSE(std::filesystem::exists(directory.path / "stale.json"));
+    EXPECT_FALSE(std::filesystem::exists(directory.path / "invalid"));
+    EXPECT_FALSE(std::filesystem::exists(directory.path / "invalid-parent.json"));
+    EXPECT_FALSE(std::filesystem::exists(directory.path / "Upper.json"));
+    const CompletionDirectory other_directory;
+    auto misplaced = sequence;
+    EXPECT_FALSE(misplaced.publishCompletionManifest(other_directory.path / "sequence.json"));
+    EXPECT_TRUE(std::filesystem::is_empty(other_directory.path));
+    for (const auto* occupied : {"complete.json", "stale.json.tmp"}) {
+        std::ifstream input(directory.path / occupied, std::ios::binary);
+        const std::string bytes{std::istreambuf_iterator<char>(input), {}};
+        EXPECT_EQ(bytes, "previous");
+    }
+    auto cancelled = sequence;
+    cancelled.refuse();
+    EXPECT_FALSE(cancelled.publishCompletionManifest(directory.path / "cancelled.json"));
+    EXPECT_FALSE(std::filesystem::exists(directory.path / "cancelled.json"));
+    EXPECT_FALSE(std::filesystem::exists(directory.path / "cancelled.json.tmp"));
+
+    const auto manifest = directory.path / "sequence.json";
+    ASSERT_TRUE(sequence.publishCompletionManifest(directory.path / "." / "sequence.json"));
+    EXPECT_TRUE(sequence.complete());
+    EXPECT_FALSE(std::filesystem::exists(directory.path / "sequence.json.tmp"));
+    std::ifstream input(manifest, std::ios::binary);
+    const std::string written{std::istreambuf_iterator<char>(input), {}};
+    EXPECT_EQ(written, text);
+    EXPECT_EQ(sequence.completionManifest(), text);
+    EXPECT_FALSE(sequence.publishCompletionManifest(manifest));
+    std::ifstream unchanged(manifest, std::ios::binary);
+    const std::string retained{std::istreambuf_iterator<char>(unchanged), {}};
+    EXPECT_EQ(retained, text);
+}
+
+TEST(TemporalAuditSequence, CaptureFileFailuresAndInvalidAdmissionNeverWriteCompletion) {
+    const CompletionDirectory directory;
+    const auto plan = Plan(TemporalAuditSpan::DayNight, 1);
+    TemporalAuditSequence ready(plan, FileBudget(plan));
+    auto tick = plan.request.start_tick;
+    Reach(ready, Action::Capture, tick);
+    ASSERT_TRUE(WriteBytes(directory.path / "frame-0.ppm", "abc"));
+    ASSERT_TRUE(WriteBytes(directory.path / "frame-1.ppm", "abc"));
+    ASSERT_TRUE(WriteBytes(directory.path / ("frame-0." + std::string(121, 'a')), "abc"));
+    ASSERT_TRUE(WriteBytes(directory.path / "frame-0.empty", ""));
+    ASSERT_TRUE(WriteBytes(directory.path / "frame-0.UPPER", "abc"));
+    ASSERT_TRUE(std::filesystem::create_directory(directory.path / "frame-0.directory"));
+    ASSERT_TRUE(WriteBytes(directory.path / "frame-0.large", "abc"));
+    std::filesystem::resize_file(directory.path / "frame-0.large", 128ULL * 1024 * 1024 + 1);
+    std::vector<std::string> too_many;
+    for (unsigned index = 0; index < 13; ++index) {
+        too_many.push_back("frame-0." + std::to_string(index));
+        ASSERT_TRUE(WriteBytes(directory.path / too_many.back(), "abc"));
+    }
+    const std::vector<std::vector<std::string>> cases = {
+        {},
+        {"frame-0.ppm", "frame-0.ppm"},
+        {"../frame-0.ppm"},
+        {(directory.path / "frame-0.ppm").string()},
+        {"frame-1.ppm"},
+        {"frame-0.sub/path"},
+        {"frame-0.missing"},
+        {"frame-0.directory"},
+        {"frame-0.empty"},
+        {"frame-0.ppm", "frame-0.empty"},
+        {"frame-0.UPPER"},
+        {"frame-0.upper"}, // Windows must not record a case alias of the uppercase file.
+        {"frame-0.large"},
+        {std::string("frame-0.ppm\0suffix", 18)},
+        {"frame-0.\xff"},
+        {"frame-0.trailing."},
+        {"frame-0." + std::string(121, 'a')},
+        too_many};
+    for (const auto& names : cases) {
+        auto failed = ready;
+        EXPECT_FALSE(failed.acknowledgeCaptureFiles(tick, directory.path, names));
+        EXPECT_EQ(failed.captured_frames(), 0U);
+        EXPECT_TRUE(failed.completionManifest().empty());
+        EXPECT_FALSE(failed.publishCompletionManifest(directory.path / "refused.json"));
+        EXPECT_EQ(failed.next(tick).action, Action::Refused);
+    }
+    std::error_code link_error;
+    std::filesystem::create_symlink(
+        directory.path / "frame-0.ppm", directory.path / "frame-0.link", link_error);
+    if (link_error) {
+        // Windows may deny symlink creation; denial must not create an input.
+        EXPECT_FALSE(std::filesystem::exists(directory.path / "frame-0.link"));
+    } else {
+        auto linked = ready;
+        const std::array<std::string, 1> link_names{"frame-0.link"};
+        EXPECT_FALSE(linked.acknowledgeCaptureFiles(tick, directory.path, link_names));
+        EXPECT_TRUE(linked.completionManifest().empty());
+    }
+    const std::array<std::string, 1> names{"frame-0.ppm"};
+    for (unsigned fault = 0; fault < 6; ++fault) {
+        auto failed = ready;
+        const auto root = fault == 0   ? directory.path / "missing"
+                          : fault == 3 ? std::filesystem::path{}
+                          : fault == 4 ? directory.path / std::string("\0ignored", 8)
+                          : fault == 5 ? directory.path / std::string(32768, 'x')
+                                       : directory.path;
+        if (fault == 2) {
+            failed.refuse();
+        }
+        EXPECT_FALSE(failed.acknowledgeCaptureFiles(tick + (fault == 1 ? 1U : 0U), root, names));
+        EXPECT_TRUE(failed.completionManifest().empty());
+    }
+    // A real capture acknowledgement remains incomplete after cancellation.
+    auto partial = ready;
+    ASSERT_TRUE(partial.acknowledgeCaptureFiles(tick, directory.path, names));
+    EXPECT_EQ(partial.captured_frames(), 1U);
+    EXPECT_TRUE(partial.completionManifest().empty());
+    auto relocated = partial;
+    auto relocated_tick = tick;
+    Reach(relocated, Action::Capture, relocated_tick);
+    const CompletionDirectory other_directory;
+    ASSERT_TRUE(WriteBytes(other_directory.path / "frame-1.ppm", "abc"));
+    const std::array<std::string, 1> relocated_names{"frame-1.ppm"};
+    EXPECT_FALSE(
+        relocated.acknowledgeCaptureFiles(relocated_tick, other_directory.path, relocated_names));
+    EXPECT_EQ(relocated.captured_frames(), 1U);
+    EXPECT_TRUE(relocated.completionManifest().empty());
+    partial.refuse();
+    EXPECT_FALSE(partial.publishCompletionManifest(directory.path / "partial.json"));
+    EXPECT_FALSE(std::filesystem::exists(directory.path / "partial.json"));
+
+    auto small_budget = FileBudget(plan);
+    small_budget.frame_bytes = 2;
+    TemporalAuditSequence tight(plan, small_budget);
+    auto small_tick = plan.request.start_tick;
+    Reach(tight, Action::Capture, small_tick);
+    EXPECT_FALSE(tight.acknowledgeCaptureFiles(small_tick, directory.path, names));
+    EXPECT_EQ(tight.captured_frames(), 0U);
+
+    auto large_budget = FileBudget(plan);
+    large_budget.frame_bytes = 128ULL * 1024 * 1024 + 1;
+    large_budget.output_bytes =
+        static_cast<std::uint64_t>(plan.frames.size()) * large_budget.frame_bytes +
+        large_budget.manifest_bytes;
+    TemporalAuditSequence oversized(plan, large_budget);
+    auto oversized_tick = plan.request.start_tick;
+    Reach(oversized, Action::Capture, oversized_tick);
+    const std::array<std::string, 1> large_names{"frame-0.large"};
+    EXPECT_FALSE(oversized.acknowledgeCaptureFiles(oversized_tick, directory.path, large_names));
+    EXPECT_EQ(oversized.captured_frames(), 0U);
+
+    // Aggregate limits apply to all payloads, not only the largest member.
+    small_budget.frame_bytes = 4;
+    TemporalAuditSequence aggregate(plan, small_budget);
+    small_tick = plan.request.start_tick;
+    Reach(aggregate, Action::Capture, small_tick);
+    ASSERT_TRUE(WriteBytes(directory.path / "frame-0.second", "abc"));
+    const std::array<std::string, 2> pair{"frame-0.ppm", "frame-0.second"};
+    EXPECT_FALSE(aggregate.acknowledgeCaptureFiles(small_tick, directory.path, pair));
+    EXPECT_EQ(aggregate.captured_frames(), 0U);
+
+    auto duplicate = ready;
+    ASSERT_TRUE(duplicate.acknowledgeCaptureFiles(tick, directory.path, names));
+    EXPECT_FALSE(duplicate.acknowledgeCaptureFiles(tick, directory.path, names));
+    auto mixed = ready;
+    Accept(mixed, mixed.next(tick));
+    auto mixed_tick = tick;
+    Reach(mixed, Action::Capture, mixed_tick);
+    const std::array<std::string, 1> next_names{"frame-1.ppm"};
+    EXPECT_FALSE(mixed.acknowledgeCaptureFiles(mixed_tick, directory.path, next_names));
+
+    // The inclusive filename and payload-count boundaries remain usable.
+    std::vector<std::string> maximal_names{"frame-0." + std::string(120, 'a')};
+    for (unsigned index = 1; index < 12; ++index) {
+        maximal_names.push_back("frame-0." + std::to_string(index));
+    }
+    for (const auto& name : maximal_names) {
+        ASSERT_TRUE(WriteBytes(directory.path / name, "a"));
+    }
+    auto maximal = ready;
+    EXPECT_TRUE(maximal.acknowledgeCaptureFiles(tick, directory.path, maximal_names));
+    EXPECT_EQ(maximal.captured_frames(), 1U);
+
+    TemporalAuditSequence invalid(plan, {});
+    EXPECT_FALSE(invalid.publishCompletionManifest(directory.path / "uncreated" / "result.json"));
+    EXPECT_FALSE(std::filesystem::exists(directory.path / "uncreated"));
+    TemporalAuditSequence early(plan, FileBudget(plan));
+    EXPECT_FALSE(early.publishCompletionManifest(directory.path / "early.json"));
+    EXPECT_FALSE(std::filesystem::exists(directory.path / "early.json"));
+    EXPECT_FALSE(std::filesystem::exists(directory.path / "refused.json"));
+    EXPECT_FALSE(std::filesystem::exists(directory.path / "refused.json.tmp"));
+}
+
+TEST(TemporalAuditSequence, PublicationRequiresFileAcknowledgementsAndManifestReservation) {
+    const CompletionDirectory directory;
+    const auto plan = Plan(TemporalAuditSpan::DayNight, 1);
+    TemporalAuditSequence unverified(plan, FileBudget(plan));
+    auto tick = plan.request.start_tick;
+    Reach(unverified, Action::Publish, tick);
+    EXPECT_TRUE(unverified.completionManifest().empty());
+    EXPECT_FALSE(unverified.publishCompletionManifest(directory.path / "unverified.json"));
+    EXPECT_FALSE(std::filesystem::exists(directory.path / "unverified.json"));
+    EXPECT_FALSE(std::filesystem::exists(directory.path / "unverified.json.tmp"));
+
+    auto small_budget = FileBudget(plan);
+    small_budget.manifest_bytes = 1;
+    TemporalAuditSequence tight(plan, small_budget);
+    ReachFilePublication(tight, plan, directory.path);
+    ASSERT_EQ(tight.next(plan.end_tick).action, Action::Publish);
+    EXPECT_TRUE(tight.completionManifest().empty());
+    EXPECT_FALSE(tight.publishCompletionManifest(directory.path / "tight.json"));
+    EXPECT_FALSE(std::filesystem::exists(directory.path / "tight.json"));
+    EXPECT_FALSE(std::filesystem::exists(directory.path / "tight.json.tmp"));
 }
 } // namespace
