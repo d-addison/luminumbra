@@ -2859,7 +2859,8 @@ void RenderPipeline::render_frame(entt::registry& registry,
                                   float deltaTime,
                                   bool wireframe,
                                   UploadPresentation presentation,
-                                  DiagnosticCapturePolicy capture_policy) {
+                                  DiagnosticCapturePolicy capture_policy,
+                                  SkyAtmosphereLut::Publication sky_publication) {
     end_diagnostic_capture();
     m_water_pass->invalidate_visibility();
     if (!m_started) {
@@ -2885,7 +2886,8 @@ void RenderPipeline::render_frame(entt::registry& registry,
         camera);
     m_far_world_advanced = false;
     ++m_far_world_frame;
-    prepare_frame(registry, world_system, camera, deltaTime, wireframe, presentation);
+    prepare_frame(
+        registry, world_system, camera, deltaTime, wireframe, presentation, sky_publication);
     if (!m_frame_prepared.valid)
         return;
     // Retain the exact ON temporal inputs before the frame epilogue updates them.
@@ -3095,7 +3097,8 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
                                    const Camera& camera,
                                    float deltaTime,
                                    bool wireframe,
-                                   UploadPresentation presentation) {
+                                   UploadPresentation presentation,
+                                   SkyAtmosphereLut::Publication sky_publication) {
     m_frame_prepared.valid = false;
     m_mdi_stream.begin_frame();
     m_frame_stage_trace.clear();
@@ -3106,7 +3109,7 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
     // each other (no per-pass glfwGetTime drift). Render-only (u_time sway etc.).
     m_wall_clock_time = static_cast<float>(Client::presentation_clock().now(glfwGetTime));
 
-    update_time_of_day(deltaTime);
+    update_time_of_day(deltaTime, sky_publication);
 
     // consume the newest COMPLETED luminance readback (never
     // blocks; a stale N-frame-old value is the contract) and advance the damped
@@ -4390,6 +4393,7 @@ bool RenderPipeline::apply_graphics(const luminumbra::core::ResolvedGraphics& re
     const auto previous = graphics_runtime_config();
     if (!resize_graphics_targets(config.render_scale, static_cast<u32>(config.shadow_resolution)))
         return false;
+    m_sky_lut.discard_pending_readback();
     m_foliage_pass->set_enabled(config.grass_enabled);
     m_foliage_pass->set_density_scale(config.grass_density);
     m_foliage_pass->set_fade_distances(config.grass_fade_start_m, config.grass_fade_end_m);
@@ -6454,7 +6458,8 @@ bool RenderPipeline::load_ltex_cpu_image(const std::filesystem::path& path, Ltex
     return true;
 }
 
-void RenderPipeline::update_time_of_day(float deltaTime) {
+void RenderPipeline::update_time_of_day(float deltaTime,
+                                        SkyAtmosphereLut::Publication sky_publication) {
     // while HELD (photo-mode time-of-day scrub), the day clock does NOT
     // auto-advance — the externally-set m_timeOfDay (via set_time_of_day) persists and the
     // sun/season below recompute from it. Render-only; never touches the sim clock.
@@ -6541,8 +6546,28 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     // transmittance coupling —  — not a normalized-to-~1 hue multiplier.)
     double refresh_ms = 0.0;
     const glm::vec3 toward_sun = -m_sun.direction;
-    if (m_sky_lut.ready() && m_sky_lut.refresh_sky_view(toward_sun, &refresh_ms)) {
+    // Replay/capture consumers always retain same-frame publication, even if a
+    // caller mistakenly requests deferred publication for an offscreen frame.
+    const auto publication = SkyAtmosphereLut::select_publication(
+        {.interactive = sky_publication == SkyAtmosphereLut::Publication::Deferred,
+         .replay = m_far_world_paired || DebugViewPass::controls().frozen ||
+                   DebugViewPass::replay_mode(DebugViewPass::geometry_view()),
+         .capture = m_capture_diagnostics.enabled || m_offscreen_target_active ||
+                    Client::presentation_clock.capture_seconds().has_value(),
+         .benchmark = m_benchmark_gpu_queries != nullptr,
+         .headless = false,
+         .test_harness = false});
+    const bool refreshed =
+        m_sky_lut.ready() && m_sky_lut.refresh_sky_view(toward_sun, &refresh_ms, publication);
+    if (refreshed) {
         m_skyScatterAmbient = m_sky_lut.sky_ambient();
+    }
+    if (publication == SkyAtmosphereLut::Publication::Deferred && m_sky_lut.ready() &&
+        m_sky_lut.gpu_skyview_enabled() && (refreshed || m_sky_lut.readback_pending())) {
+        // All sky, aerial and direct-light consumers use the published input
+        // while the next GPU result is pending. The requested sun above still
+        // comes from the current clock on every frame.
+        m_sun.direction = -m_sky_lut.sky_view_sun_dir();
     }
     m_sky_view_refresh_ms =
         refresh_ms; // 0.0 on no-refresh frames; copied into stats after the per-frame reset

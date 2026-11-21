@@ -426,13 +426,15 @@ public:
     };
     // DeferredOnlyFixedSite applies to this admitted diagnostic frame only. It
     // omits unsupported contributors; ordinary rendering keeps Complete.
-    void render_frame(entt::registry& registry,
-                      Systems::SHIELD_WorldSystem& world_system,
-                      const Camera& camera,
-                      float deltaTime,
-                      bool wireframe = false,
-                      UploadPresentation presentation = UploadPresentation::Streaming,
-                      DiagnosticCapturePolicy capture_policy = DiagnosticCapturePolicy::Complete);
+    void render_frame(
+        entt::registry& registry,
+        Systems::SHIELD_WorldSystem& world_system,
+        const Camera& camera,
+        float deltaTime,
+        bool wireframe = false,
+        UploadPresentation presentation = UploadPresentation::Streaming,
+        DiagnosticCapturePolicy capture_policy = DiagnosticCapturePolicy::Complete,
+        SkyAtmosphereLut::Publication sky_publication = SkyAtmosphereLut::Publication::SameFrame);
 
     // push the deterministic Aether scalar field to the lighting-pass
     // emissive tap (one-way sim->render bridge, called per frame from the client).
@@ -1273,7 +1275,8 @@ private:
                        const Camera& camera,
                        float deltaTime,
                        bool wireframe,
-                       UploadPresentation presentation);
+                       UploadPresentation presentation,
+                       SkyAtmosphereLut::Publication sky_publication);
     void dispatch_stages(const Camera& camera, bool deferred_only_capture = false);
     void finish_gbuffer_stage();
     FarReplayCamera replay_camera(const Camera& camera) const;
@@ -1395,7 +1398,9 @@ private:
 
     std::vector<glm::mat4> get_light_space_matrices(const Camera& camera);
 
-    void update_time_of_day(float deltaTime);
+    void update_time_of_day(
+        float deltaTime,
+        SkyAtmosphereLut::Publication sky_publication = SkyAtmosphereLut::Publication::SameFrame);
     float m_timeOfDay = 0.5f;       // Midnight in the noon-origin sky
     double m_elapsedDayPhase = 0.5; // Unwarped, noon-origin presentation time
     bool m_timeOfDayHold = false;   // freeze auto-advance for photo-mode TOD scrub

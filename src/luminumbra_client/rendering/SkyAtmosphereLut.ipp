@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <thread>
 
 namespace Luminumbra::Rendering {
@@ -53,6 +54,12 @@ float mie_phase(float cos_theta, float g) {
 }
 
 constexpr float kEpsilonM = 10.0f; // lift the viewer off the exact ground sphere
+constexpr std::size_t kSkyViewTexels =
+    static_cast<std::size_t>(SkyAtmosphereLut::kSkyViewWidth) * SkyAtmosphereLut::kSkyViewHeight;
+constexpr std::size_t kSkyViewBytes = kSkyViewTexels * 3u * sizeof(float);
+static_assert(kSkyViewTexels <= std::numeric_limits<std::size_t>::max() / (3u * sizeof(float)));
+static_assert(kSkyViewBytes <= static_cast<std::size_t>(std::numeric_limits<GLsizeiptr>::max()));
+static_assert(sizeof(glm::vec3) == 3u * sizeof(float));
 
 // Populated 256x64 or 32x32 nonperiodic LUTs use texel-centred bilinear sampling.
 // Nearest sampling jumps at mu=0 during dusk integration, leaving a meridian
@@ -731,10 +738,9 @@ bool SkyAtmosphereLut::build_sky_lut_gpu_init(const glm::vec3& sun_dir_world) {
     return build_sky_view_gpu(sun_dir_world); // dispatch + upload + ambient readback
 }
 
-bool SkyAtmosphereLut::build_sky_view_gpu(const glm::vec3& sun_dir_world) {
-    // Needs the transmittance/multiscatter textures (the compute samples them) and the sky-view
-    // texture (the compute writes it); all three are uploaded by the CPU initialize. Refuse if
-    // any is missing or the compute program/SSBO can't be created -> caller falls back to CPU.
+bool SkyAtmosphereLut::dispatch_sky_view_gpu(const glm::vec3& sun_dir_world) {
+    // Compute samples the base LUTs and writes only the SSBO. Publication is
+    // handled by the same-frame or deferred consumer after this dispatch.
     if (m_transmittance_tex == 0 || m_multiscatter_tex == 0 || m_skyview_tex == 0)
         return false;
     if (!ensure_skyview_compute_resources())
@@ -758,6 +764,12 @@ bool SkyAtmosphereLut::build_sky_view_gpu(const glm::vec3& sun_dir_world) {
                                                 static_cast<GLuint>((kSkyViewHeight + 7) / 8),
                                                 1u);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_PIXEL_BUFFER_BARRIER_BIT);
+    return true;
+}
+
+bool SkyAtmosphereLut::build_sky_view_gpu(const glm::vec3& sun_dir_world) {
+    if (!dispatch_sky_view_gpu(sun_dir_world))
+        return false;
 
     // RGB16F is not image-store-able, so upload the SSBO into the sky-view texture through a
     // PIXEL_UNPACK_BUFFER: 3 tightly-packed floats per texel match GL_RGB/GL_FLOAT exactly.
@@ -769,14 +781,8 @@ bool SkyAtmosphereLut::build_sky_view_gpu(const glm::vec3& sun_dir_world) {
     glBindTexture(GL_TEXTURE_2D, 0);
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
 
-    // the blocking glGetBufferSubData ambient readback is
-    // retired onto the asynchronous-readback ring — submit + a BOUNDED zero-timeout poll, so a
-    // wedged GPU can no longer stall this call indefinitely (on timeout the
-    // caller falls back to the CPU sky-view path). Same-invocation consumption
-    // is retained because m_sky_ambient must match the LUT this call built and
-    // the path is the default-OFF debug-stall fix ("the readback stall is
-    // acceptable for the use case"); a fully deferred stale-safe consumer is
-    // the implementation note if this ever ships default-ON.
+    // Same-frame publication is contractual for the existing preset, replay
+    // and capture consumers. Retain their bounded wait and CPU timeout fallback.
     const std::size_t skyview_bytes =
         sizeof(float) * 3u * static_cast<std::size_t>(kSkyViewWidth) * kSkyViewHeight;
     m_skyview_cpu.assign(static_cast<std::size_t>(kSkyViewWidth) * kSkyViewHeight, glm::vec3(0.0f));
@@ -806,6 +812,82 @@ bool SkyAtmosphereLut::build_sky_view_gpu(const glm::vec3& sun_dir_world) {
         return false; // caller falls back to the CPU sky-view path
     }
 
+    reduce_sky_view_ambient(sun_dir_world);
+    return true;
+}
+
+void SkyAtmosphereLut::release_deferred_readback() {
+    if (m_deferred_fence != nullptr) {
+        glDeleteSync(m_deferred_fence);
+        m_deferred_fence = nullptr;
+    }
+    if (m_deferred_pbo != 0) {
+        if (m_deferred_mapped != nullptr) {
+            glBindBuffer(GL_COPY_WRITE_BUFFER, m_deferred_pbo);
+            glUnmapBuffer(GL_COPY_WRITE_BUFFER);
+            glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+        }
+        glDeleteBuffers(1, &m_deferred_pbo);
+        m_deferred_pbo = 0;
+    }
+    m_deferred_mapped = nullptr;
+}
+
+bool SkyAtmosphereLut::submit_deferred_sky_view(const glm::vec3& sun_dir_world) {
+    if (m_deferred_pbo == 0) {
+        glGenBuffers(1, &m_deferred_pbo);
+        if (m_deferred_pbo == 0)
+            return false;
+        glBindBuffer(GL_COPY_WRITE_BUFFER, m_deferred_pbo);
+        constexpr GLbitfield flags = GL_MAP_READ_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
+        glBufferStorage(
+            GL_COPY_WRITE_BUFFER, static_cast<GLsizeiptr>(kSkyViewBytes), nullptr, flags);
+        m_deferred_mapped = glMapBufferRange(
+            GL_COPY_WRITE_BUFFER, 0, static_cast<GLsizeiptr>(kSkyViewBytes), flags);
+        glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+        if (m_deferred_mapped == nullptr) {
+            release_deferred_readback();
+            return false;
+        }
+    }
+    if (!dispatch_sky_view_gpu(sun_dir_world))
+        return false;
+    Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, 0);
+    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
+    glBindBuffer(GL_COPY_READ_BUFFER, m_skyview_ssbo);
+    glBindBuffer(GL_COPY_WRITE_BUFFER, m_deferred_pbo);
+    glCopyBufferSubData(
+        GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, static_cast<GLsizeiptr>(kSkyViewBytes));
+    glBindBuffer(GL_COPY_READ_BUFFER, 0);
+    glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+    m_deferred_fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    if (m_deferred_fence == nullptr) {
+        release_deferred_readback();
+        return false;
+    }
+    m_deferred_sun = sun_dir_world;
+    glFlush();
+    return true;
+}
+
+SkyAtmosphereLut::DeferredResult SkyAtmosphereLut::adopt_deferred_sky_view() {
+    const GLenum status = glClientWaitSync(m_deferred_fence, 0, 0);
+    if (status == GL_TIMEOUT_EXPIRED)
+        return DeferredResult::Pending;
+    if (status != GL_ALREADY_SIGNALED && status != GL_CONDITION_SATISFIED) {
+        release_deferred_readback();
+        return DeferredResult::Failed;
+    }
+    glDeleteSync(m_deferred_fence);
+    m_deferred_fence = nullptr;
+    m_skyview_cpu.resize(kSkyViewTexels);
+    std::memcpy(m_skyview_cpu.data(), m_deferred_mapped, kSkyViewBytes);
+    update_texture(m_skyview_tex, kSkyViewWidth, kSkyViewHeight, m_skyview_cpu);
+    reduce_sky_view_ambient(m_deferred_sun);
+    return DeferredResult::Adopted;
+}
+
+void SkyAtmosphereLut::reduce_sky_view_ambient(const glm::vec3& sun_dir_world) {
     glm::vec3 ambient_accum(0.0f);
     float ambient_weight = 0.0f;
     for (int y = 0; y < kSkyViewHeight; ++y) {
@@ -825,7 +907,6 @@ bool SkyAtmosphereLut::build_sky_view_gpu(const glm::vec3& sun_dir_world) {
     m_skyview_sun_dir = sun_dir_world;
     m_sky_ambient =
         ambient_weight > 0.0f ? ambient_accum / ambient_weight * glm::pi<float>() : glm::vec3(0.0f);
-    return true;
 }
 
 // --- GL upload --------------------------------------------------------------
@@ -855,6 +936,9 @@ void SkyAtmosphereLut::update_texture(GLuint tex,
 }
 
 bool SkyAtmosphereLut::initialize(const glm::vec3& sun_dir_world, double* out_full_precompute_ms) {
+    // Direct reinitialization must retire both pending and published resources.
+    if (m_base_built)
+        destroy();
     const auto t0 = std::chrono::steady_clock::now();
 
     // build all three LUTs on the GPU when render.sky_lut_gpu is on (the CPU
@@ -891,10 +975,37 @@ bool SkyAtmosphereLut::initialize(const glm::vec3& sun_dir_world, double* out_fu
     return ready();
 }
 
-bool SkyAtmosphereLut::refresh_sky_view(const glm::vec3& sun_dir_world, double* out_refresh_ms) {
+bool SkyAtmosphereLut::refresh_sky_view(const glm::vec3& sun_dir_world,
+                                        double* out_refresh_ms,
+                                        Publication publication) {
     if (!m_base_built)
         return false;
-    const glm::vec3 sun = glm::normalize(sun_dir_world);
+    glm::vec3 sun = glm::normalize(sun_dir_world);
+    bool deferred_failed = false;
+    if (m_deferred_fence != nullptr) {
+        if (publication == Publication::Deferred && m_use_gpu_skyview) {
+            const auto adoption_start = std::chrono::steady_clock::now();
+            const auto result = adopt_deferred_sky_view();
+            if (result == DeferredResult::Pending) {
+                return false;
+            }
+            if (result == DeferredResult::Adopted) {
+                if (out_refresh_ms) {
+                    *out_refresh_ms = std::chrono::duration<double, std::milli>(
+                                          std::chrono::steady_clock::now() - adoption_start)
+                                          .count();
+                }
+                return true;
+            }
+            // Failure falls back for the submitted input, even if the caller's
+            // sun moved again while that readback was in flight.
+            sun = m_deferred_sun;
+            deferred_failed = true;
+        } else {
+            // A policy/mode switch must never publish an older deferred input.
+            release_deferred_readback();
+        }
+    }
     // Only refresh when the sun has moved past the threshold (cosine of arc).
     if (glm::dot(sun, m_skyview_sun_dir) >= 1.0f - kSunRefreshCosThreshold) {
         return false;
@@ -903,8 +1014,13 @@ bool SkyAtmosphereLut::refresh_sky_view(const glm::vec3& sun_dir_world, double* 
     //  GPU compute path when render.sky_lut_gpu is on (it writes the texture +
     // ambient itself); fall back to the CPU march if the path is off or its resources fail.
     bool gpu_done = false;
-    if (m_use_gpu_skyview) {
-        gpu_done = build_sky_view_gpu(sun);
+    if (m_use_gpu_skyview && !deferred_failed) {
+        if (publication == Publication::Deferred) {
+            if (submit_deferred_sky_view(sun))
+                return false;
+        } else {
+            gpu_done = build_sky_view_gpu(sun);
+        }
     }
     if (!gpu_done) {
         build_sky_view_cpu(sun);
@@ -918,6 +1034,7 @@ bool SkyAtmosphereLut::refresh_sky_view(const glm::vec3& sun_dir_world, double* 
 }
 
 void SkyAtmosphereLut::destroy() {
+    release_deferred_readback();
     if (m_transmittance_tex) {
         glDeleteTextures(1, &m_transmittance_tex);
         m_transmittance_tex = 0;
