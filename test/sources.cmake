@@ -1,6 +1,9 @@
 # This file lists test source files that are shared by CTest executables.
 # Paths are anchored to this file so it is safe to include from any test
 # CMakeLists.txt in the tree.
+set(NATIVE_PLUGIN_TEST_SOURCE ${CMAKE_CURRENT_LIST_DIR}/mods/NativePluginLoader_test.cpp)
+set(NATIVE_PLUGIN_FIXTURE_SOURCE ${CMAKE_CURRENT_LIST_DIR}/mods/DummyNativePlugin.c)
+
 set(SIMULATION_TEST_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/simulation/eventbus_order_gate_test.cpp
 )

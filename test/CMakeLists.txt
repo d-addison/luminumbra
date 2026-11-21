@@ -1,3 +1,30 @@
+include("${CMAKE_CURRENT_LIST_DIR}/sources.cmake")
+
+set(_native_plugin_variants good bad_major bad_minor bad_size query_failure
+    init_failure clean_init_failure null_context missing_query missing_init missing_shutdown)
+foreach(_variant IN LISTS _native_plugin_variants)
+    add_library(native_plugin_${_variant} MODULE ${NATIVE_PLUGIN_FIXTURE_SOURCE})
+    target_include_directories(native_plugin_${_variant} PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    target_compile_definitions(native_plugin_${_variant} PRIVATE LUM_PLUGIN_BUILD)
+    set_target_properties(native_plugin_${_variant} PROPERTIES
+        PREFIX "" C_STANDARD 11 C_STANDARD_REQUIRED YES
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/native-plugins/$<CONFIG>"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/native-plugins/$<CONFIG>")
+    if(_variant MATCHES "^missing_(query|init|shutdown)$")
+        target_compile_definitions(native_plugin_${_variant} PRIVATE
+            "luminumbra_plugin_${CMAKE_MATCH_1}=luminumbra_omitted_${CMAKE_MATCH_1}")
+    elseif(NOT _variant STREQUAL "good")
+        string(TOUPPER "${_variant}" _fixture_mode)
+        target_compile_definitions(native_plugin_${_variant} PRIVATE "LUM_TEST_${_fixture_mode}")
+    endif()
+endforeach()
+add_executable(native_plugin_loader_test ${NATIVE_PLUGIN_TEST_SOURCE})
+target_link_libraries(native_plugin_loader_test PRIVATE gtest_main luminumbra_common)
+luminumbra_configure_first_party_target(native_plugin_loader_test)
+foreach(_variant IN LISTS _native_plugin_variants)
+    add_dependencies(native_plugin_loader_test native_plugin_${_variant})
+endforeach()
+
 # Add the world generation test executable
 add_executable(world_generation_test
     shield/test_world_generation.cpp
@@ -2197,6 +2224,7 @@ add_test(NAME DiagnosticChecksPython COMMAND "${Python3_EXECUTABLE}" -I -B
 set_tests_properties(DiagnosticChecksPython PROPERTIES LABELS "tools" TIMEOUT 60)
 
 set(LUMINUMBRA_GTEST_TARGETS
+    native_plugin_loader_test
     upload_budget_test
     jolt_startup_test
     frame_attribution_test
@@ -2340,7 +2368,11 @@ foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
     # per-instance unique roots and its socket tests bind ephemeral ports
     # (Listen(0)), so no RESOURCE_LOCK is needed. New tests in the aggregate
     # must keep it that way.
-    if(_lum_gtest_target STREQUAL world_load_bounded_test)
+    if(_lum_gtest_target STREQUAL native_plugin_loader_test)
+        gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
+            PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/native-plugins/$<CONFIG>"
+            TEST_LIST ${_lum_gtest_target}_TESTS)
+    elseif(_lum_gtest_target STREQUAL world_load_bounded_test)
         # This machine-sensitive latency observation is opt-in. Keep it out of
         # normal correctness lanes; the paired relative workflow is the gate.
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
