@@ -72,10 +72,14 @@ void UpdateCaveFlourishes(ClientAppContext& app,
     // flourishes entirely — captures want the world + shaders, not spelunking
     // cues (and the crystal point lights would move visual baselines).
     // --debug-goto cave still lights its framed cave (below).
-    const bool headless_automation =
+    const bool legacy_automation =
         app.capture.frame_scan_active || app.capture.scene_active || app.capture.play_paths ||
         !app.capture.render_benchmark_path.empty() || !app.capture.survey_dir.empty() ||
         app.capture.timelapse_frames > 0;
+    const bool headless_automation =
+        !app.capture.feature_policy
+             .Apply(CaptureGameplayFeatures{.cave_flourishes = !legacy_automation}, false)
+             .cave_flourishes;
     // dispatch the  scans (doline locate + 25
     // cave anchors + hero call) as ONE background job batch instead of the
     // old frame-2 inline walk (6m25s main-thread in debug, est. 10-25 s
