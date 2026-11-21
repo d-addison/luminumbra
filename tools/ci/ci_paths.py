@@ -264,6 +264,9 @@ def needs_python(path: str) -> bool:
                         "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp"}
             or path.startswith("src/luminumbra_common/world/MarchingCubes")
             or path == "src/luminumbra_common/world/FarVolumeMesher.cpp"
+            or path in {"src/luminumbra_client/rendering/RenderPipeline.cpp",
+                        "src/luminumbra_client/rendering/passes/WaterPass.cpp",
+                        "src/luminumbra_client/rendering/passes/WaterPass.h"}
             or path == "tools/gates/baselines/diagnostic-rois.json"
             or path == "vendor/rmlui/rmlui-6.1-source.json"
             or path == "cmake/rmlui_source.cmake" or path.startswith("cmake/patches/rmlui-"))
