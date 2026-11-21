@@ -38,6 +38,56 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         cls.runner = compact_cpp((ROOT / "src/luminumbra_server/ServerWorldRunner.cpp").read_text(encoding="utf-8"))
         cls.admission = compact_cpp((ROOT / "src/luminumbra_server/modes/ModeHelpers.cpp").read_text(encoding="utf-8"))
 
+    def test_capture_float_parse_failures_refuse_before_continuing(self):
+        # main() has no isolated invocation seam: pin the refusal at each parser.
+        for variable, target, flag in (
+                ("cy", "fixed_cam_yaw", "--cam-yaw"),
+                ("cpi", "fixed_cam_pitch", "--cam-pitch"),
+                ("ds", "timelapse_daystep", "--timelapse-daystep"),
+                ("t0", "timelapse_tod", "--timelapse-tod")):
+            with self.subTest(flag=flag):
+                body = cpp_block(self.client, f"if(!{variable}.empty())")
+                self.assertIn(f"g_app.capture.{target}=std::stof({variable});", body)
+                failure = cpp_block(body, "catch(...)")
+                self.assertIn("return2;", failure)
+                self.assertIn("LUMINUMBRA_CORE_ERROR(", failure)
+                self.assertIn(flag, failure)
+
+    def test_preset_list_failures_have_process_bounded_diagnostics(self):
+        body = cpp_block(self.client, "g_uiManager->SetWorldPresetList(")
+        name_failure = cpp_block(body, "constautoreport_name_failure=")
+        enumeration_failure = body[body.rindex("catch(...)"):]
+        for failure in (name_failure, enumeration_failure):
+            self.assertIn("staticstd::atomic_flagreported{};", failure)
+            self.assertIn("if(!reported.test_and_set(std::memory_order_relaxed))"
+                          "LUMINUMBRA_CORE_WARN(", failure)
+        self.assertIn("catch(...){report_name_failure();}", body)
+        read = body[body.index("if(Luminumbra::Persistence::ReadSavedJson("):]
+        self.assertIn("else{report_name_failure();}", read)
+        self.assertIn("out.emplace_back(name,stem);", body)
+        self.assertTrue(body.endswith("returnout;}"))
+
+    def test_archetype_parse_diagnostic_is_process_bounded(self):
+        config = compact_cpp((ROOT / "src/luminumbra_client/core/RuntimeScenarioConfig.cpp")
+                             .read_text(encoding="utf-8"))
+        body = cpp_block(config, "if(config.skinned_albedo_texture.empty()&&"
+                         "!config.creature_archetype.empty())")
+        failure = cpp_block(body, "catch(...)")
+        self.assertIn("staticstd::atomic_flagreported{};", failure)
+        self.assertIn("if(!reported.test_and_set(std::memory_order_relaxed))"
+                      "LUMINUMBRA_CORE_WARN(", failure)
+
+    def test_moon_override_diagnostics_stay_in_one_time_initializers(self):
+        for filename, initializer, fallback in (
+                ("rendering/passes/LightingPass.cpp", "staticconstfloats_moon_wrap_floor=", "0.25f"),
+                ("rendering/RenderPipeline.cpp", "staticconstfloats_moon_env=", "-1.0f")):
+            with self.subTest(filename=filename):
+                source = compact_cpp((ROOT / "src/luminumbra_client" / filename)
+                                     .read_text(encoding="utf-8"))
+                body = cpp_block(source, initializer)
+                self.assertIn("LUMINUMBRA_CORE_WARN(", cpp_block(body, "catch(...)"))
+                self.assertTrue(body.endswith(f"return{fallback};}}"))
+
     def authority_capture_blocks(self):
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
                               .read_text(encoding="utf-8"))
@@ -1269,6 +1319,100 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertIn("if(!AllowPublication(path,true,errors)){", empty_roster)
         self.assertIn("returnfalse;", empty_roster)
         self.assertIn("returnFlushRemovalDirectory(path,errors)&&scope.commit(errors);", service[end:])
+
+
+class CaptureFailureSourceContract(unittest.TestCase):
+    def test_showcase_parse_failure_refuses_even_after_paths_were_assigned(self):
+        source = compact_cpp((ROOT / "src/luminumbra_client/core/scenarios/SkinnedMeshVisualSmoke.cpp")
+                             .read_text(encoding="utf-8"))
+        spawn = cpp_block(source, "SkinnedMeshVisualTargetSpawnSkinnedMeshVisualEntity(")
+        parse = cpp_block(spawn, "try")
+        # Syntax errors and wrong types in any field share the same refusal, including
+        # a bad label encountered after both paths have already been assigned.
+        for field, destination in (("mesh", "mesh_rel"), ("clip", "clip_rel"),
+                                   ("label", "showcase_label")):
+            self.assertIn(destination + '=j.value("' + field + '",', parse)
+        refused = cpp_block(spawn, "catch(...)")
+        self.assertIn("LUMINUMBRA_CORE_ERROR(", refused)
+        self.assertIn("refusingcapture", refused)
+        self.assertIn('target.failure_reason="showcase_model_config_invalid";', refused)
+        self.assertTrue(refused.endswith("returntarget;}"))
+        self.assertLess(spawn.index(refused), spawn.index("conststd::filesystem::pathgmesh="))
+        self.assertLess(spawn.index(refused), spawn.index("registry.create()"))
+
+    def test_skinned_spawn_failure_propagates_to_nonzero_process_status(self):
+        source = compact_cpp((ROOT / "src/luminumbra_client/core/ScenarioRunnerDrive.cpp")
+                             .read_text(encoding="utf-8"))
+        drive = cpp_block(source, "boolScenarioRunnerImpl::driveSkinnedMeshVisual(")
+        attempt = cpp_block(drive, "if(!skinned_mesh_spawn_attempted)")
+        refused = cpp_block(attempt, "if(!skinned_mesh_visual_target.spawned)")
+        for statement in ("LUMINUMBRA_CORE_ERROR(", "scenario_failed=true;",
+                          "scenario_failure_reason=skinned_mesh_visual_target.failure_reason;",
+                          "exit_code=2;", "glfwSetWindowShouldClose(window,true);"):
+            self.assertIn(statement, refused)
+        self.assertTrue(refused.endswith("returntrue;}"))
+        self.assertLess(attempt.index("SpawnSkinnedMeshVisualEntity("), attempt.index(refused))
+        self.assertLess(drive.index(refused), drive.index("if(scenario_config.wildlife"))
+        self.assertLess(drive.index(refused), drive.index("ApplySkinnedMeshVisualCamera("))
+        dispatch = cpp_block(source, "ScenarioRunnerImpl::onGameStateInGame(")
+        self.assertIn("driveSkinnedMeshVisual(deltaTime)", dispatch)
+        self.assertIn("returnscenario_failed?InGameDrive::kBreakCase:InGameDrive::kHandled;", dispatch)
+        client = compact_cpp((ROOT / "src/luminumbra_client/main_client.cpp")
+                             .read_text(encoding="utf-8"))
+        self.assertIn("returnexit_code;", client)
+
+    def test_preview_deadline_report_failure_preserves_terminal_diagnostic_and_status(self):
+        for name, diagnostic in (("main.cpp", "static-preview"), ("ViewportServe.cpp", "viewport")):
+            with self.subTest(source=name):
+                source = (ROOT / "tools/static_preview" / name).read_text(encoding="utf-8")
+                report = source.index('WriteJson(')
+                catch = source.index("catch (...)", report)
+                reason = cpp_block(source[catch:], "catch (...)")
+                self.assertIn("report is best-effort", reason)
+                self.assertIn("must not prevent the deadline", reason)
+                self.assertIn("exit status 124", reason)
+                terminal = source[source.index(reason, catch) + len(reason):]
+                self.assertRegex(terminal, r'^\s*std::cerr << "' + diagnostic +
+                                 r' watchdog deadline exceeded\\n" << std::flush;\s*std::_Exit\(124\);')
+
+    def test_preview_refusal_report_failure_preserves_primary_error_and_status(self):
+        for name, diagnostic in (("main.cpp", "static-preview"), ("ViewportServe.cpp", "viewport")):
+            with self.subTest(source=name):
+                source = (ROOT / "tools/static_preview" / name).read_text(encoding="utf-8")
+                start = source.index('std::cerr << "' + diagnostic + ' refused: "')
+                refused = source[start:]
+                catch = refused.index("catch (...)")
+                reason = cpp_block(refused[catch:], "catch (...)")
+                self.assertIn("refusal is already on stderr", reason)
+                self.assertIn("must not", reason)
+                self.assertIn("prevent returning status 1", reason)
+                self.assertLess(refused.index('"failure.json"'), catch)
+                self.assertRegex(refused[refused.index(reason, catch) + len(reason):],
+                                 r'^\s*\}?\s*return 1;')
+
+    def test_publication_rollback_exception_has_a_nothrow_cleanup_reason(self):
+        source = (ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp").read_text(
+            encoding="utf-8")
+        destructor = cpp_block(source, "~NewFilePublication()")
+        reason = cpp_block(destructor, "catch (const std::exception&)")
+        self.assertIn("must not throw during stack unwinding", reason)
+        self.assertIn("artifact that cannot be removed", reason)
+        self.assertIn("descriptor and temporary cleanup continue", reason)
+        self.assertLess(destructor.index(reason), destructor.index("::close(m_descriptor)"))
+        self.assertLess(destructor.index("::close(m_descriptor)"),
+                        destructor.index("RemoveTemporaryFile(m_temp)"))
+
+    def test_viewport_instance_builder_borrows_the_prefab_and_retains_each_instance(self):
+        source = compact_cpp((ROOT / "tools/static_preview/ViewportServe.cpp")
+                             .read_text(encoding="utf-8"))
+        # Borrowing removes one shared ownership increment/decrement per rebuild;
+        # every output instance must still retain its own shared ownership.
+        signature = ("std::vector<StaticInstanceDescription>Instances(constJson&state,"
+                     "conststd::shared_ptr<constStaticPrefab>&prefab)")
+        instances = cpp_block(source, signature)
+        self.assertIn("instance.prefab=prefab;", instances)
+        self.assertLess(source.index("Instances(state,candidate)"),
+                        source.index("prefab=std::move(candidate);"))
 
 
 class RegionalEnergySourceContract(unittest.TestCase):
