@@ -372,8 +372,14 @@ The same six names are accepted by `--debug-view`; selecting one explicitly
 enables identity diagnostics and requests one snapshot. Existing CLI modes retain
 their meaning.
 
-Magenta hatching labels zero, unresolved and unsupported identities. Producer
-colours are terrain brown, impostor cyan, foliage green, static/skinned yellow and
+Magenta hatching labels zero, unresolved and unsupported identities. Coverage
+may be incomplete without discarding the snapshot: supported identities
+retain their normal colours and inspector joins, while unsupported records and
+pixels remain hatched. The panel explicitly reports incomplete coverage and the
+inspector reports `identity_complete: false`. Aborted captures, failed attachments
+and refused registry submissions remain unavailable. Capture publication still
+requires complete identity; display readiness never certifies a bundle or manifest.
+Producer colours are terrain brown, impostor cyan, foliage green, static/skinned yellow and
 far volume blue; live ownership has full brightness, legacy far 70% and ladder far
 45%. Mesh-path provenance uses hashed mesh colours, orange SDF, blue heightfield
 and explicit magenta hatching for unknown provenance. Producer spellings outside
