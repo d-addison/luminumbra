@@ -3164,7 +3164,7 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
         [&] {
             m_far_world_advanced = m_far_world->PrepareFrame(
                 m_far_world_frame, {camera.Position.x, camera.Position.y, camera.Position.z});
-            // Checked request refusal is reported; one scheduler per frame.
+            // Republish refusal before dispatch checks for a Legacy fallback.
             select_frame_far_world(
                 FarWorldSubmissionOverride(
                     ApplyLegacyFarWorldEnable(m_far_world->Selection(FarWorldPurpose::World),
