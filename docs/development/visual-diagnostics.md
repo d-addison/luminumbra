@@ -946,6 +946,22 @@ runs: integration with the fixed site, simulation/physics/streaming dependencies
 A4 reservations and completed-frame capture, and existing frontier actions remains
 pending. No temporal or all-features runtime support is claimed.
 
+The renderer exposes an explicit `DeferredOnlyFixedSite` policy for a single
+admitted A4 diagnostic frame. It omits procedural plants, scent decals, forward
+water and waterfalls, glass accumulation and resolve, foliage and particles before
+draw submission. Supported deferred geometry, lighting, sky, weather grading and
+lightning remain; weather precipitation particles are omitted. The capture's
+`render_settings.capture_policy` is `deferred_only_fixed_site`. This is a reduced
+capture, so it cannot establish all-features or precipitation evidence. Default
+renders, parity/replay dispatch and unadmitted diagnostic requests retain their
+existing behavior and unsupported-contributor refusals. Registered
+`PassContext.DeferredOnlyDiagnosticPolicyOmitsUnsupportedDrawsForOneAdmittedFrame`
+and Python attribution-wiring regressions cover admission, stage exclusion,
+metadata and policy isolation. The policy has no temporal runtime caller yet:
+fixed-site transport integration and native day/night and weather-cycle
+recapture with non-vacuous manifests and bounded payload verification remain
+pending. No authority revision, simulation identity or save format changes.
+
 The planning parser is callable independently. Both shipping startup parsers reject
 even valid temporal plans, and `--scenario=temporal_audit`, with an explicit
 unsupported-execution reason before world/output creation, including save-root
