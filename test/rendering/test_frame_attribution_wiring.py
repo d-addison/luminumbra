@@ -3939,7 +3939,7 @@ class DeferredRasterDiagnosticWiring(unittest.TestCase):
         self.assertIn("return std::make_shared<Frame>(*this);", begin)
         self.assertNotIn("std::make_shared<Frame>(*this, ctx)", begin)
         self.assertEqual(begin.count("m_snapshot->targets.reset()"), 1)
-        self.assertLess(begin.index("if (!m_snapshot->targets.reset())"),
+        self.assertLess(begin.index("if (!m_snapshot->targets.reset() ||"),
                         begin.index("m_snapshot->draws.clear();"))
         self.assertIn("Identity attachment still leased", begin)
         self.assertLess(finish.index("frame->finish(ctx);"), finish.index("frame.reset();"))
@@ -4615,6 +4615,58 @@ class DiagnosticContributorWiring(unittest.TestCase):
             self.assertIn(text, submit)
         for check in (length, "mesh_json = mesh.dump()", "added > max_json_bytes - json_bytes_"):
             self.assertLess(submit.index(check), submit.index("mesh_ids_.emplace("))
+
+
+class DiagnosticSnapshotStageWiring(unittest.TestCase):
+    def test_plant_submission_has_an_explicit_foliage_identity_mapping(self):
+        plant = block(read(CLIENT / "rendering/passes/PlantProcgenPass.cpp"),
+                      "void PlantProcgenPass::execute(")
+        variants = re.findall(r'\.shader_variant = "([^"]+)"', plant)
+        self.assertEqual(variants, ["plant_procgen"])
+        producer = block(read(CLIENT / "rendering/passes/DebugViewPass.h"),
+                         "static ProducerKind producer(")
+        self.assertIn("return ProducerKind::Unsupported;", block(producer, "if (!supported)"))
+        foliage = re.search(r'if \(([^{}]+)\)\s*\{\s*return ProducerKind::Foliage;', producer)
+        self.assertIsNotNone(foliage)
+        spellings = re.findall(r'variant == "([^"]+)"', foliage.group(1))
+        self.assertIn(variants[0], spellings)
+        for unknown in ("", "plant_procgen_ladder", "plant_procgen_unknown"):
+            with self.subTest(variant=unknown):
+                self.assertNotIn(unknown, spellings)
+
+    def test_snapshot_finishes_after_decal_submission_before_lighting_and_post(self):
+        source = read(CLIENT / "rendering/RenderPipeline.cpp")
+        dispatch = block(source, "void RenderPipeline::dispatch_stages(")
+        finish = block(dispatch, 'if (diagnostic_frame && node == "ground_decals")')
+        self.assertIn("DebugViewPass::end_frame(diagnostic_frame, make_debug_view_context(camera));",
+                      finish)
+        self.assertLess(dispatch.index("(this->*fn)(camera);"), dispatch.index(finish))
+        stages = block(source, "RenderPipeline::stage_executor_table() {")
+        names = re.findall(r'\{"([a-z_]+)", &RenderPipeline::execute_stage_', stages)
+        self.assertEqual(names[:7], ["shadow", "gbuffer", "plant_procgen", "ground_decals",
+                                     "ssao", "ssao_blur", "lighting"])
+        self.assertEqual(dispatch.count("DebugViewPass::end_frame("), 1)
+        self.assertIn("auto diagnostic_frame = m_debug_view_pass && (", dispatch)
+        self.assertIn("DebugViewPass::controls().enabled)", dispatch)
+
+    def test_snapshot_owns_distinct_lazy_contributor_storage_and_resets_both_planes(self):
+        source = read(CLIENT / "rendering/passes/DebugViewPass.cpp")
+        snapshot = block(source, "struct DebugViewPass::Snapshot")
+        self.assertIn("DiagnosticTargets targets;", snapshot)
+        self.assertIn("DiagnosticTargets contributors;", snapshot)
+        frame = compact(block(source, "class DebugViewPass::Frame"))
+        self.assertRegex(frame, r"std::make_unique<GBufferDiagnosticCapture>\(\s*"
+                         r"pass\.m_snapshot->targets, pass\.m_snapshot->draws, "
+                         r"&pass\.m_snapshot->contributors\)")
+        begin = block(source, "DebugViewPass::begin_frame(")
+        reset = "if (!m_snapshot->targets.reset() || !m_snapshot->contributors.reset())"
+        self.assertIn('control.status = control.result = "Identity attachment still leased";',
+                      block(begin, reset))
+        self.assertLess(begin.index(reset), begin.index("m_snapshot->draws.clear();"))
+        self.assertLess(begin.index("if (!control.enabled || ctx.frozen_replay)"),
+                        begin.index("std::make_unique<Snapshot>()"))
+        self.assertLess(begin.index("if (!control.refresh) {"),
+                        begin.index("std::make_unique<Snapshot>()"))
 
 
 class DiagnosticScenarioCaptureWiring(unittest.TestCase):

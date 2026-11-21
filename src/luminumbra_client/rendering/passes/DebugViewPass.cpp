@@ -224,6 +224,8 @@ std::string DebugViewPass::pixel_json(const DiagnosticExtent& extent,
 struct DebugViewPass::Snapshot {
     std::unique_ptr<Shader> shader;
     DiagnosticTargets targets;
+    // Separate last-contributor IDs; each lazy target is bounded to 16M pixels.
+    DiagnosticTargets contributors;
     DiagnosticDrawTable draws;
     nlohmann::json table;
     GLuint metadata = 0;
@@ -260,8 +262,8 @@ class DebugViewPass::Frame {
 public:
     explicit Frame(DebugViewPass& pass)
         : pass_(pass)
-        , capture_(std::make_unique<GBufferDiagnosticCapture>(pass.m_snapshot->targets,
-                                                              pass.m_snapshot->draws)) {}
+        , capture_(std::make_unique<GBufferDiagnosticCapture>(
+              pass.m_snapshot->targets, pass.m_snapshot->draws, &pass.m_snapshot->contributors)) {}
     ~Frame() {
         if (capture_) {
             AttributedGl::UseProgram(glUseProgram, 0U);
@@ -790,7 +792,7 @@ std::shared_ptr<DebugViewPass::Frame> DebugViewPass::begin_frame(const RenderCon
         m_snapshot->view[index] = view[column][row];
         m_snapshot->projection[index] = ctx.gbuffer_projection[column][row];
     }
-    if (!m_snapshot->targets.reset()) {
+    if (!m_snapshot->targets.reset() || !m_snapshot->contributors.reset()) {
         control.status = control.result = "Identity attachment still leased";
         return {};
     }

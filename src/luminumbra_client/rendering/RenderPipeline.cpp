@@ -3341,8 +3341,9 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
         assert(fn && "frame-graph node has no executor table entry");
         if (fn)
             (this->*fn)(camera);
-        if (diagnostic_frame && node == "gbuffer") {
-            // Gather the deferred snapshot before plants or decals change its AOVs.
+        if (diagnostic_frame && node == "ground_decals") {
+            // Include later deferred surfaces and decal contributors, then retire
+            // attribution before SSAO, lighting and post-processing.
             DebugViewPass::end_frame(diagnostic_frame, make_debug_view_context(camera));
         }
     }
