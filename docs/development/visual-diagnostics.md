@@ -13,9 +13,9 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | AOV serialization, integer ID encoding and point-probe JSON | Implemented as independent, GL-free codecs | `DiagnosticCapture.h/.cpp`; registered `DiagnosticCapture.*` regressions in `capture_manifest_test`; native execution pending |
 | Lazy integer target with attachment leases | Implemented as a standalone helper | `DiagnosticTargets.h`; registered `DiagnosticTargetDriver.*` regressions in `capture_manifest_test`; native execution pending |
 | Capture-local draw registry | Implemented with separate asset and generated-geometry identities | `DiagnosticDrawTable.h`; registered `DiagnosticDrawTable.*` regressions in `capture_manifest_test` and generated-key `DiagnosticAttribution.*` regressions in `render_smoke_test`; native execution pending |
-| Deferred attribution producers | Implemented inside a leased deferred scope | `GBufferTargets.h/.cpp` and `GBufferPass.cpp` add a render-thread producer scope, capture-local draw identities and explicit unsupported records; `g_buffer.frag`, `foliage.frag`, `plant_procgen.frag` and `scent_decal.frag` have guarded `LUMIN_DIAG_IDS` outputs; registered `DiagnosticAttribution.*` source-contract and `DiagnosticAttributionGl.*` hidden-GL regressions in `render_smoke_test`; native execution pending |
+| Deferred attribution producers | Implemented inside a leased deferred scope | `GBufferTargets.h/.cpp` and `GBufferPass.cpp` add a render-thread producer scope, capture-local draw identities and explicit unsupported records; `g_buffer.frag`, `static_asset.frag`, `foliage.frag`, `plant_procgen.frag` and `scent_decal.frag` have guarded `LUMIN_DIAG_IDS` outputs; registered `DiagnosticAttribution.*` source-contract and `DiagnosticAttributionGl.*` hidden-GL regressions in `render_smoke_test`; native execution pending |
 | G-buffer ID attachment | Implemented for explicit deferred captures | `GBufferPass` holds an `AttachmentLease` during deferred submission; detachment and lease release precede completion, including rollback, recreation, retirement and exceptional exits; registered `GBufferLeaseGl.*` and `DiagnosticAttributionGl.*` regressions; native execution pending |
-| Exact producer coverage | Partial | Inside an explicit producer scope, file-backed static instances and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier with unsupported generated-mesh metadata. Live terrain MDI produces one identity per original command in pool-bucket order, using resident upload LOD and mesh version. The ladder backend, authored surfaces and tree impostors explicitly invalidate coverage; procedural static meshes also remain unsupported. Uploaded plant/marker batches resume deferred attribution, and additive scent decals use separate contributor storage. Missing contributor storage retains exact Forward records labeled `:contributor_only` and refuses completion. Water surfaces, glass panes and waterfall sheet/pool slots use the separate contributor plane at their original submissions through guarded `water.frag`, `glass_oit.frag` and `waterfall.frag` outputs. Foliage has a guarded shader output but no instrumented forward submission. The original particle batch writes the contributor plane through a guarded `magical_particles.frag` output; the separate weather overlay explicitly refuses coverage |
+| Exact producer coverage | Partial | Inside an explicit producer scope, file-backed and procedural static instances, authored surfaces and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier and bounded generated-geometry keys, retaining unknown provenance where exact SDF provenance is unavailable. Live terrain MDI produces one identity per original command in pool-bucket order, using resident upload LOD and mesh version. The ladder backend records its original submission identity; tree impostors explicitly invalidate coverage. Uploaded plant/marker batches resume deferred attribution, and additive scent decals use separate contributor storage. Missing contributor storage retains exact Forward records labeled `:contributor_only` and refuses completion. Water surfaces, glass panes and waterfall sheet/pool slots use the separate contributor plane at their original submissions through guarded `water.frag`, `glass_oit.frag` and `waterfall.frag` outputs. Foliage has a guarded shader output but no instrumented forward submission. The original particle batch writes the contributor plane through a guarded `magical_particles.frag` output; the separate weather overlay writes it at its original fullscreen draw through an opt-in `weather_system.frag` diagnostic variant (`weather-overlay/fullscreen-quad`) and refuses when that storage or variant is missing |
 | Bundle transactions and opt-in admission | Implemented for the admitted capture paths | `DiagnosticCapture.h/.cpp` resolves options, streams normalized planes, joins draw records, enforces staging budgets and publishes completion last using identity-checked ownership. `diagnostic_bundle_test` covers public transports and filesystem refusal/rollback; native execution pending. Runtime admission accepts enabled diagnostics only for `world_visual_sweep`, `--frame-scan`, or `--render-benchmark` with `--render-benchmark-screenshot`; every other scenario and the parity redispatches refuse them before save-root output |
 | Shadow projection and receiver filtering (issue #873) | Projection and surface filtering corrected; native re-capture pending | Signed light-view Z bounds become negative-Z plane distances; surface PCF interpolates comparisons with 25 taps. Registered `DiagnosticContributions.LightBoundsContainEveryCornerAndOrderDepthTowardTheLight` and `DiagnosticContributionsGl.ProductionShadowFiltersInterpolateComparisonsAtEveryResolutionAndCascade` regressions; canopy hue and the captured dusk wedge remain unqualified |
 | Terrain coverage lighting/fog evidence (issue #1107) | Existing capture contract retained; regression expanded; native execution pending | `TerrainCoverageCaptureGl.SyntheticPlanesAndCallerStateSurviveReadback` checks source file headers and payload sizes for every captured layer, lighting/fog uniform values and explicit unavailable volume records; `TerrainCaptureResourceWiring` guards manifest publication |
@@ -180,6 +180,22 @@ keeps those pane IDs and does not substitute a fullscreen identity. Waterfall dr
 record the immutable uploaded sheet/pool slot only after the live-water skip; zero
 alpha fragments preserve earlier IDs. Glass and waterfalls use Live ownership,
 Forward pass and LOD zero; their generated geometry is not chunk-owned.
+The particle pass records its original four-vertex instanced billboard batch with
+Live ownership, Forward pass and LOD zero, using the generated mesh key
+`particles/instanced-billboards`. Magical particles, ambient motes, rain, snow,
+impact foam and waterfall spray share that draw; the ID identifies the batch,
+not an individual particle or emitter. Existing shape and final-alpha discards
+preserve earlier contributor IDs, including fully soft-faded fragments. The retained
+particle geometry shader is inventory-only; the live path uses vertex and fragment
+stages. The scene-compositing weather overlay writes the contributor plane at its
+original fullscreen draw through an opt-in diagnostic shader variant, labelled
+`weather-overlay/fullscreen-quad`. Production composition is unchanged; the
+diagnostic tail discards zero-alpha output before writing IDs, so earlier identities
+survive. Missing contributor storage or a missing variant still refuses.
+The adapter must still account for other
+uninstrumented forward passes and refuse incomplete captures before publishing a bundle.
+Capture scopes cannot nest or reuse a nonempty draw table. Exception unwinding
+invalidates the frame; an empty live-terrain submission adds no unsupported record.
 
 Generated geometry can supply an exact bounded key instead of an asset path. The
 registry separates the two namespaces and emits a `generated` mesh member while
@@ -211,19 +227,16 @@ after lease release, unavailable base/skinned/impostor programs and exceptional
 state restoration; native execution remains pending. Normal rendering keeps its batched draws and
 original attachments.
 
-Completing exact coverage requires changes beyond the deferred attachment owners:
-the ladder submission metadata/backend, `StaticDrawPass`, `FoliagePass` and
-`tree_impostor.frag`, plus the scene-compositing weather overlay.
-A foliage identity belongs to a separate forward contributor plane because its color blends
-with the already lit scene. The particle pass records its original four-vertex
-instanced billboard batch with Live ownership, Forward pass and LOD zero, using the
-generated mesh key `particles/instanced-billboards`. Magical particles, ambient motes,
-rain, snow, impact foam and waterfall spray share that draw, so the ID identifies the
-batch, not an individual particle or emitter. Existing shape and final-alpha discards
-preserve earlier contributor IDs. The weather overlay has no exact contributor mask and
-records `weather_overlay_contributor_uninstrumented` immediately before its draw, so it
-cannot publish a complete capture. None of these gaps is represented as a guessed mesh or
-as successful background coverage.
+Remaining unsupported records cover missing/invalid producer metadata, attachment and
+capability refusal, shader variant failures and registry bounds. Without contributor
+storage, scent decal, water, glass, waterfall, particle and weather-overlay records preserve the original
+identity, Forward pass and LOD zero, append `:contributor_only` to the producer label, and invalidate
+completion. Invalid contributor labels or identities explicitly refuse. The former
+`foliage_forward_contributor_target_unavailable` placeholder is no longer emitted.
+Completed-frame readback and scenario bundle integration remain pending. Completing exact coverage still requires
+forward submission instrumentation in `FoliagePass` and guarded outputs in
+`tree_impostor.frag`. A foliage identity belongs to a separate forward contributor
+plane because its color blends with the already lit scene. None of these gaps is represented as a guessed mesh or successful background coverage.
 
 ## A: capture bundle and pixel identity
 

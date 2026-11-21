@@ -14,7 +14,21 @@
 #include <GLFW/glfw3.h>
 #include <glm/gtc/matrix_transform.hpp>
 
+#include <optional>
+
 namespace Luminumbra::Rendering {
+namespace {
+// The production overlay leaves its program current. Restore that same postcondition
+// after capture, including unwinding; an inactive guard performs no GL calls.
+struct WeatherProgramRestore {
+    const Shader* shader = nullptr;
+    ~WeatherProgramRestore() {
+        if (shader) {
+            AttributedGl::UseProgram(glUseProgram, shader->Id());
+        }
+    }
+};
+} // namespace
 
 SkyboxPass::SkyboxPass() = default;
 SkyboxPass::~SkyboxPass() = default;
@@ -386,7 +400,30 @@ void SkyboxPass::execute_weather_overlay(const RenderContext& ctx,
     glBindFramebuffer(GL_FRAMEBUFFER, ctx.lit_scene.id);
     glDisable(GL_DEPTH_TEST);
 
-    m_weather_shader->use();
+    Shader* draw_shader = m_weather_shader.get();
+    WeatherProgramRestore diagnostic_program;
+    std::optional<GBufferDiagnosticAttachment> diagnostic_attachment;
+    if (auto* capture = GBufferDiagnosticCapture::Current()) {
+        GLint color_texture = 0;
+        GLint attachment_type = 0;
+        glGetNamedFramebufferAttachmentParameteriv(ctx.lit_scene.id,
+                                                   GL_COLOR_ATTACHMENT0,
+                                                   GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE,
+                                                   &attachment_type);
+        if (attachment_type == GL_TEXTURE) {
+            glGetNamedFramebufferAttachmentParameteriv(ctx.lit_scene.id,
+                                                       GL_COLOR_ATTACHMENT0,
+                                                       GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,
+                                                       &color_texture);
+        }
+        diagnostic_attachment.emplace(ctx.lit_scene.id,
+                                      static_cast<GLuint>(color_texture),
+                                      DiagnosticExtent{ctx.internal_w(), ctx.internal_h()});
+        diagnostic_program.shader = m_weather_shader.get();
+        draw_shader = capture->variant(draw_shader, false);
+    }
+
+    draw_shader->use();
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, ctx.opaque_scene.id);
     glActiveTexture(GL_TEXTURE1);
@@ -395,21 +432,21 @@ void SkyboxPass::execute_weather_overlay(const RenderContext& ctx,
     glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_position.id);
     glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_normal.id);
-    m_weather_shader->setInt("u_sceneColor", 0);
-    m_weather_shader->setInt("u_sceneDepth", 1);
-    m_weather_shader->setInt("gPosition", 2);
-    m_weather_shader->setInt("gNormal", 3);
-    m_weather_shader->setFloat("u_time", ctx.time_seconds);
-    m_weather_shader->setVec3("u_cameraPos", camera.Position);
-    m_weather_shader->setMat4("u_inverseView", glm::inverse(camera.GetViewMatrix()));
-    m_weather_shader->setMat4("u_inverseProjection",
-                              ctx.far_world_ladder ? ctx.gbuffer_inverse_projection
-                                                   : glm::inverse(projection));
+    draw_shader->setInt("u_sceneColor", 0);
+    draw_shader->setInt("u_sceneDepth", 1);
+    draw_shader->setInt("gPosition", 2);
+    draw_shader->setInt("gNormal", 3);
+    draw_shader->setFloat("u_time", ctx.time_seconds);
+    draw_shader->setVec3("u_cameraPos", camera.Position);
+    draw_shader->setMat4("u_inverseView", glm::inverse(camera.GetViewMatrix()));
+    draw_shader->setMat4("u_inverseProjection",
+                         ctx.far_world_ladder ? ctx.gbuffer_inverse_projection
+                                              : glm::inverse(projection));
     // Weather fog scattering follows the lighting-pass convention (the
     // light-travel direction), unlike the skybox disc uniforms above.
-    m_weather_shader->setVec3("u_sunDirection", ctx.sun.direction);
-    m_weather_shader->setVec3("u_sunColor", ctx.sun.color);
-    m_weather_shader->setFloat("u_sunIntensity", ctx.sun.intensity);
+    draw_shader->setVec3("u_sunDirection", ctx.sun.direction);
+    draw_shader->setVec3("u_sunColor", ctx.sun.color);
+    draw_shader->setFloat("u_sunIntensity", ctx.sun.intensity);
 
     // the weather uniforms are SIM-DRIVEN when a replicated weather
     // state has been pushed (one-way, ): the WeatherSystem region category +
@@ -421,21 +458,24 @@ void SkyboxPass::execute_weather_overlay(const RenderContext& ctx,
     // local precip and never feeds back into the sim or world_hash.
     const auto weather =
         ResolveWeatherOverlayState(*ctx.weather_state, ctx.weather_type, ctx.weather_intensity);
-    m_weather_shader->setFloat("u_rainIntensity", weather.rain_intensity);
-    m_weather_shader->setFloat("u_snowIntensity", weather.snow_intensity);
-    m_weather_shader->setFloat("u_fogDensity", weather.fog_density);
-    m_weather_shader->setFloat("u_stormIntensity", ResolveWeatherOvercast(weather));
-    m_weather_shader->setFloat("u_wetness", weather.wetness);
-    m_weather_shader->setVec3("u_windDirection", weather.wind_direction);
-    m_weather_shader->setFloat("u_windStrength", weather.wind_strength);
+    draw_shader->setFloat("u_rainIntensity", weather.rain_intensity);
+    draw_shader->setFloat("u_snowIntensity", weather.snow_intensity);
+    draw_shader->setFloat("u_fogDensity", weather.fog_density);
+    draw_shader->setFloat("u_stormIntensity", ResolveWeatherOvercast(weather));
+    draw_shader->setFloat("u_wetness", weather.wetness);
+    draw_shader->setVec3("u_windDirection", weather.wind_direction);
+    draw_shader->setFloat("u_windStrength", weather.wind_strength);
 
     glBindVertexArray(ctx.screen_quad_vao);
     if (auto* capture = GBufferDiagnosticCapture::Current()) {
-        // This scene-compositing overlay has no exact contributor mask yet.
-        capture->unsupported("weather_overlay_contributor_uninstrumented",
-                             0,
-                             DiagnosticOwnership::Live,
-                             DiagnosticPass::Forward);
+        capture->write_current({.mesh_path = {},
+                                .shader_variant = "weather_overlay",
+                                .chunk = {},
+                                .lod = 0,
+                                .ownership = DiagnosticOwnership::Live,
+                                .pass = DiagnosticPass::Forward,
+                                .provenance = DiagnosticProvenance::Mesh,
+                                .generated_mesh = "weather-overlay/fullscreen-quad"});
     }
     Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GLenum{GL_TRIANGLE_STRIP}, 0, 4);
     glBindVertexArray(0);
