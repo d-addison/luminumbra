@@ -4731,8 +4731,10 @@ GameSession::CaptureAuthorityHashes(const std::string& entity_snapshot_json,
         return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
     }
     try {
-        // Observation never settles water ownership; the host finishes that at its tick boundary.
-        m_worldSystem->wait_for_streaming_jobs();
+        // Observation fences worker writes without publishing streaming work or settling
+        // water ownership. Both belong to the host's simulation boundary: publishing here
+        // would change chunk lifecycle state and make later captures depend on read order.
+        m_worldSystem->quiesce_streaming_jobs_for_save();
         const auto cursor = m_worldSystem->GetWaterSimWindowCursor();
         WorldStreamingState state;
         for (const auto& chunk : m_worldSystem->snapshot_streamed_chunks()) {

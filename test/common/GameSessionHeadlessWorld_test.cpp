@@ -19582,3 +19582,49 @@ TEST(GameSessionHeadlessWorldTest, OwnerResidentContinuationKeepsPrivateTerrainA
         ASSERT_NO_FATAL_FAILURE(CheckOwnerResidentContinuation(root, jobs, resident));
     }
 }
+
+TEST(GameSessionHeadlessWorldTest, AuthorityHashCapturePreservesPendingStreamingPublication) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    for (const bool regions : {false, true}) {
+        SCOPED_TRACE(regions);
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(root.root_string());
+        session.SetActiveRegionsEnabled(regions);
+        ASSERT_TRUE(session.CreateTransientWorld("Capture publication", "1337", "default"));
+        auto* world = session.GetWorldSystem();
+        auto floor = SimulationFloorChunk({0, 0, 0}, 8);
+        floor->mark_sdf_loaded_or_edited();
+        floor->set_state(Luminumbra::ChunkState::Idle);
+        ASSERT_TRUE(world->adopt_streamed_chunk(floor));
+        world->begin_tick(1, true);
+        world->update(session.GetRegistry(), Luminumbra::Vec3{8, 9, 8}, nullptr, false);
+        world->quiesce_streaming_jobs_for_save();
+        ASSERT_EQ(floor->get_state(), Luminumbra::ChunkState::Meshing);
+        ASSERT_GE(floor->pending_lod.load(), 0);
+        const auto pending = world->pending_publication_chunks();
+        ASSERT_GT(pending, 0u);
+        const auto snapshot = P::SerializeChunkSnapshotJson(*floor);
+        for (const auto parts : {P::AuthorityCaptureParts::All,
+                                 P::AuthorityCaptureParts::Chunk,
+                                 P::AuthorityCaptureParts::Composite,
+                                 P::AuthorityCaptureParts::SubHashes,
+                                 P::AuthorityCaptureParts::StreamedAndSubHashes}) {
+            SCOPED_TRACE(static_cast<int>(parts));
+            // Repeat before the due tick: observation must leave both the live
+            // lifecycle and completed worker staging available to the normal publisher.
+            for (int capture = 0; capture < 2; ++capture) {
+                const auto result = session.CaptureAuthorityHashes({}, parts);
+                EXPECT_EQ(result.status, P::AuthorityCaptureStatus::Ready);
+                EXPECT_TRUE(result.capture.has_value());
+                EXPECT_EQ(P::SerializeChunkSnapshotJson(*floor), snapshot);
+                EXPECT_EQ(world->pending_publication_chunks(), pending);
+            }
+        }
+        world->wait_for_streaming_jobs();
+        EXPECT_EQ(floor->get_state(), Luminumbra::ChunkState::Ready);
+        EXPECT_EQ(world->pending_publication_chunks(), 0u);
+    }
+}
