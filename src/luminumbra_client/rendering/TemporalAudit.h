@@ -2,7 +2,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -143,8 +145,9 @@ struct TemporalSequenceStep {
 // owner executes each step once, acknowledges the actual simulation clock, and
 // keeps payloads unpublished until Publish. Capture uses the most recent held
 // readiness render through the completed-frame adapter. On refusal the owner
-// abandons its reservation; the protocol never performs I/O or runtime writes.
-// Every query/acknowledgement is O(1), with no per-step container allocation.
+// abandons its reservation. The basic query/acknowledgement protocol performs no
+// I/O and is O(1), with no per-step allocation. The optional file transport below
+// hashes bounded payloads at capture and serializes once, at publication.
 class TemporalAuditSequence {
 public:
     TemporalAuditSequence(const TemporalAuditPlan& plan, const TemporalSequenceBudget& budget);
@@ -154,6 +157,24 @@ public:
                      bool ready = true,
                      std::uint64_t written_bytes = 0);
     void refuse();
+    // Optional filesystem transport for completed-frame captures. Names are
+    // lowercase ASCII leaves beginning "frame-<frame_index>."; at most 12 nonempty payloads,
+    // each <= 128 MiB, within the already admitted aggregate frame reservation.
+    // Hashes come from the same verified open handle as the payload bytes.
+    // All captures and the manifest must share one immutable directory.
+    // Failure is sticky; no files are created by capture acknowledgement.
+    bool acknowledgeCaptureFiles(std::uint64_t actual_tick,
+                                 const std::filesystem::path& directory,
+                                 std::span<const std::string> filenames);
+    // Schema/version 1; empty until every capture has a successful file-backed
+    // acknowledgement, or after refusal/cancellation. No wall-clock fields.
+    [[nodiscard]] std::string completionManifest() const;
+    // Only a pending Publish can write. Manifest names are lowercase ASCII
+    // leaves <= 128 bytes, excluding device stems; paths cannot contain NUL.
+    // Existing parent required; exclusively
+    // create a sibling .tmp, close it, then rename without replacing old output.
+    // A failed publication leaves no newly published complete manifest.
+    bool publishCompletionManifest(const std::filesystem::path& path);
     [[nodiscard]] std::string_view refusal() const {
         return refusal_;
     }
@@ -165,6 +186,11 @@ public:
     }
 
 private:
+    struct Payload {
+        std::string path;
+        std::string sha256;
+        std::uint64_t bytes = 0;
+    };
     void beginFrame();
     void beginSample();
     void fail(std::string_view reason);
@@ -184,6 +210,9 @@ private:
     std::uint64_t render_attempts_ = 0;
     std::size_t frame_index_ = 0;
     std::uint32_t attempts_ = 0;
+    // At most kTemporalMaxFrames entries, each containing at most 12 payloads.
+    std::vector<std::vector<Payload>> payloads_;
+    std::filesystem::path payload_directory_;
 };
 
 } // namespace Luminumbra::Rendering
