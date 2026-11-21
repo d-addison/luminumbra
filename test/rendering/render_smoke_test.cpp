@@ -10295,11 +10295,20 @@ TEST(RenderSmokeTest, TimedScenarioPublicHookPublishesSiblingBundlesAndKeepsLega
     using namespace Luminumbra::Client::App;
     HiddenGlContext context;
     ASSERT_TRUE(context.ready()) << context.error();
+    // Windows can enforce a minimum window width; captures use the framebuffer,
+    // which can also differ from the requested window size on scaled displays.
+    int framebuffer_width = 0;
+    int framebuffer_height = 0;
+    glfwGetFramebufferSize(glfwGetCurrentContext(), &framebuffer_width, &framebuffer_height);
+    ASSERT_GT(framebuffer_width, 1);
+    ASSERT_GT(framebuffer_height, 0);
     Luminumbra::TestSupport::ScopedTempFile temporary("timed-scenario-", ".ppm");
     const auto directory = temporary.Path().parent_path();
     RenderPipeline pipeline;
     pipeline.enable_static_model_content(false);
-    ASSERT_TRUE(pipeline.startup(64, 64, SourceRoot()));
+    ASSERT_TRUE(pipeline.startup(static_cast<unsigned int>(framebuffer_width),
+                                 static_cast<unsigned int>(framebuffer_height),
+                                 SourceRoot()));
     pipeline.set_far_world_mode(FarWorldMode::Legacy);
     pipeline.set_far_lod_enabled(false);
     pipeline.set_taau_enabled(false);
@@ -10363,7 +10372,9 @@ TEST(RenderSmokeTest, TimedScenarioPublicHookPublishesSiblingBundlesAndKeepsLega
                                             .scenario_play_started_at = started,
                                             .last_readiness_report = readiness,
                                             .exit_code = result.exit_code});
-        pipeline.on_resize(mismatched_extent ? 32U : 64U, 64U);
+        pipeline.on_resize(static_cast<unsigned int>(mismatched_extent ? framebuffer_width / 2
+                                                                       : framebuffer_width),
+                           static_cast<unsigned int>(framebuffer_height));
         pipeline.set_capture_diagnostics({.enabled = diagnostics, .probe = std::nullopt});
         pipeline.render_frame(registry, world, *camera, 0.0f, false, UploadPresentation::Settled);
         if (capture_case == CaptureCase::MissingFrame) {
@@ -10377,7 +10388,11 @@ TEST(RenderSmokeTest, TimedScenarioPublicHookPublishesSiblingBundlesAndKeepsLega
         } else if (capture_case == CaptureCase::Continuation) {
             auto* scope = GBufferDiagnosticCapture::Current();
             ASSERT_NE(scope, nullptr);
-            ASSERT_TRUE(scope->attach(pipeline.gbuffer(), {64, 64}));
+            const DiagnosticExtent pipeline_extent{
+                static_cast<std::uint32_t>(mismatched_extent ? framebuffer_width / 2
+                                                             : framebuffer_width),
+                static_cast<std::uint32_t>(framebuffer_height)};
+            ASSERT_TRUE(scope->attach(pipeline.gbuffer(), pipeline_extent));
             // Readiness must detach this valid continuation before observing coverage.
             EXPECT_FALSE(pipeline.diagnostic_capture_refusal().empty());
         }
@@ -10396,7 +10411,7 @@ TEST(RenderSmokeTest, TimedScenarioPublicHookPublishesSiblingBundlesAndKeepsLega
         }
         const auto reference = config.artifact_dir / "legacy.ppm";
         if (expected_failure.empty()) {
-            ASSERT_TRUE(WriteBackbufferPpm(reference, 64, 64));
+            ASSERT_TRUE(WriteBackbufferPpm(reference, framebuffer_width, framebuffer_height));
         }
         runner->onPostRenderCapture(0.0f);
         if (!expected_failure.empty()) {
