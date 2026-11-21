@@ -72,18 +72,22 @@ FarWorldSelection SelectFarWorld(FarWorldMode requested,
                                  FarWorldRefusal prerequisite,
                                  bool enabled = true) noexcept;
 
-// Exactly one scheduler at the owner frame-preparation point. Passing callbacks
-// directly keeps this seam independent of GL and avoids owned callback storage.
+// The Ladder callback republishes selection after preparation. A refusal must
+// advance effective Legacy in this frame, while a successful Ladder frame never
+// advances Legacy. Callbacks run at most once each, without owned storage or GL.
 template<class LegacyAdvance, class LadderAdvance>
 void AdvanceSelectedFarWorld(const FarWorldSelection& selection,
                              LegacyAdvance&& legacy,
                              LadderAdvance&& ladder) {
     if (!selection.advance)
         return;
-    if (selection.effective == FarWorldMode::Legacy)
+    if (selection.effective == FarWorldMode::Legacy) {
         legacy();
-    else
-        ladder();
+        return;
+    }
+    ladder();
+    if (selection.advance && selection.effective == FarWorldMode::Legacy)
+        legacy();
 }
 
 // Values only. The backend consumes the allocation synchronously; a pass never
