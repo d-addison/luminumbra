@@ -2103,6 +2103,11 @@ target_link_libraries(eventbus_order_gate_test PRIVATE
     luminumbra_common
 )
 
+add_executable(authority_contributor_test common/AuthorityContributor_test.cpp)
+target_include_directories(authority_contributor_test PRIVATE ../src)
+target_link_libraries(authority_contributor_test PRIVATE gtest_main luminumbra_common)
+luminumbra_configure_first_party_target(authority_contributor_test)
+
 add_executable(world_persistence_roundtrip_gate_test
     persistence/world_persistence_roundtrip_gate_test.cpp
 )
@@ -2197,6 +2202,7 @@ add_test(NAME DiagnosticChecksPython COMMAND "${Python3_EXECUTABLE}" -I -B
 set_tests_properties(DiagnosticChecksPython PROPERTIES LABELS "tools" TIMEOUT 60)
 
 set(LUMINUMBRA_GTEST_TARGETS
+    authority_contributor_test
     upload_budget_test
     jolt_startup_test
     frame_attribution_test
