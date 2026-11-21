@@ -4145,9 +4145,9 @@ TEST(RenderSmokeTest, GodRaysUseSkyOcclusionAndRemainVisibleInAir) {
 
 namespace {
 struct ComparisonClockGuard {
-    Luminumbra::Client::PresentationClock saved = Luminumbra::Client::presentation_clock;
+    Luminumbra::Client::PresentationClock saved = Luminumbra::Client::presentation_clock();
     ~ComparisonClockGuard() {
-        Luminumbra::Client::presentation_clock = saved;
+        Luminumbra::Client::presentation_clock() = saved;
     }
 };
 
@@ -4226,7 +4226,7 @@ TEST(RenderSmokeTest, ComparisonAtmosphereReplacesAdverseDefaultsBeforeEveryPhas
     ASSERT_TRUE(context.ready()) << context.error();
     const ComparisonClockGuard clock_guard;
     RenderPipeline pipeline;
-    Luminumbra::Client::presentation_clock.use_wall_clock();
+    Luminumbra::Client::presentation_clock().use_wall_clock();
     EXPECT_TRUE(ResolvedAtmosphereToJson(pipeline)["presentation_seconds"].is_null());
     auto* particles = pipeline.particles();
     ASSERT_NE(particles, nullptr);
@@ -4258,7 +4258,7 @@ TEST(RenderSmokeTest, ComparisonAtmosphereReplacesAdverseDefaultsBeforeEveryPhas
         pipeline.set_lightning_state(lightning);
         particles->set_precipitation(data_root, glm::vec3(0), 1, 1);
         particles->set_wind(glm::vec3(20, 0, -30));
-        Luminumbra::Client::presentation_clock.set_capture_tick(9999, 30);
+        Luminumbra::Client::presentation_clock().set_capture_tick(9999, 30);
         PinComparisonAtmosphere(pipeline, data_root, glm::vec3(0), rain);
         const auto expected = BuildComparisonAtmosphere(rain);
         const auto& actual = pipeline.get_weather_state();

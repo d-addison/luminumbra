@@ -1724,7 +1724,7 @@ int main(int argc, char* argv[]) {
             throw std::invalid_argument("schema v4 requires a workload traversal");
         if (benchmark_v4) {
             benchmark_content = capture_content();
-            Luminumbra::Client::presentation_clock.set_capture_tick(
+            Luminumbra::Client::presentation_clock().set_capture_tick(
                 0, static_cast<std::uint32_t>(traversal->tickRate));
         }
     } catch (const std::exception& error) {
@@ -4807,7 +4807,7 @@ int main(int argc, char* argv[]) {
             traversal ? static_cast<std::uint32_t>(traversal->expectedTicks) : 0u,
             traversal ? static_cast<std::uint32_t>(traversal->tickRate) : 30u);
         if (frame_presentation.tick)
-            Luminumbra::Client::presentation_clock.set_capture_tick(
+            Luminumbra::Client::presentation_clock().set_capture_tick(
                 *frame_presentation.tick, static_cast<std::uint32_t>(traversal->tickRate));
         if (measuring_v3) {
             measured_samples->append(measured_frame_id);
@@ -7353,7 +7353,7 @@ int main(int argc, char* argv[]) {
                 workload_frame_records.append(
                     {.tick = traversal_target_tick,
                      .presentation_seconds =
-                         *Luminumbra::Client::presentation_clock.capture_seconds(),
+                         *Luminumbra::Client::presentation_clock().capture_seconds(),
                      .frame = measured_frame_id,
                      .state = menu.state,
                      .ui_document = menu.document,

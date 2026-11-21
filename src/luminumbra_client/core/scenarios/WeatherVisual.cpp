@@ -57,7 +57,7 @@ void PinComparisonAtmosphere(Luminumbra::Rendering::RenderPipeline& pipeline,
                              const glm::vec3& camera_position,
                              bool rain) {
     const auto state = BuildComparisonAtmosphere(rain);
-    presentation_clock.set_capture_tick(kComparisonPresentationTick, kComparisonPresentationRate);
+    presentation_clock().set_capture_tick(kComparisonPresentationTick, kComparisonPresentationRate);
     pipeline.set_time_of_day_hold(true);
     pipeline.set_weather_state(state.weather);
     pipeline.set_cloud_state(state.clouds);
@@ -75,7 +75,7 @@ void PinComparisonAtmosphere(Luminumbra::Rendering::RenderPipeline& pipeline,
 nlohmann::json ResolvedAtmosphereToJson(const Luminumbra::Rendering::RenderPipeline& pipeline) {
     const auto& weather = pipeline.get_weather_state();
     const auto& clouds = pipeline.get_cloud_state();
-    const auto& seconds = presentation_clock.capture_seconds();
+    const auto& seconds = presentation_clock().capture_seconds();
     const auto* particles = pipeline.particles();
     const auto vector3 = [](const glm::vec3& value) {
         return nlohmann::json::array({value.x, value.y, value.z});

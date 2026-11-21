@@ -2948,7 +2948,7 @@ void RenderPipeline::render_frame(entt::registry& registry,
     //  TAAU: also remember this frame's wind wall-clock so next frame's instanced vertex shader
     // can reconstruct where each wind-swayed vertex WAS (camera-only reprojection ghosts
     // tree-tops).
-    m_prev_time = static_cast<float>(Client::presentation_clock.now(glfwGetTime));
+    m_prev_time = static_cast<float>(Client::presentation_clock().now(glfwGetTime));
     // Scatter preparation happens before render_frame. Open admission for the
     // next rendered frame here, so nested sweeps/previews need no outer loop.
     m_diagnostic_capture = std::move(diagnostic_frame);
@@ -3083,7 +3083,7 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
     // One presentation snapshot per frame, shared by every pass
     // via RenderContext.time_seconds so converted passes are deterministic w.r.t.
     // each other (no per-pass glfwGetTime drift). Render-only (u_time sway etc.).
-    m_wall_clock_time = static_cast<float>(Client::presentation_clock.now(glfwGetTime));
+    m_wall_clock_time = static_cast<float>(Client::presentation_clock().now(glfwGetTime));
 
     update_time_of_day(deltaTime);
 
@@ -6399,7 +6399,7 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
             m_dayLengthOverride ? m_dayLengthTicks : m_renderClock.calendar().dayLengthTicks;
         m_dayDurationSeconds = static_cast<double>(day_ticks) /
                                luminumbra::core::SimulationClock::kCanonicalTickRateHz;
-        if (const auto& seconds = Client::presentation_clock.capture_seconds())
+        if (const auto& seconds = Client::presentation_clock().capture_seconds())
             m_elapsedDayPhase = std::fmod(*seconds / m_dayDurationSeconds, 1.0);
         else
             m_elapsedDayPhase =
@@ -6718,7 +6718,7 @@ void RenderPipeline::advance_cloud_phase(float deltaTime) {
     if (!m_cloud_state.enabled) {
         return;
     }
-    if (const auto& seconds = Client::presentation_clock.capture_seconds())
+    if (const auto& seconds = Client::presentation_clock().capture_seconds())
         m_cloud_phase = static_cast<float>(*seconds);
     else
         m_cloud_phase += deltaTime;
