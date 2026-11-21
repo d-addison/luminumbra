@@ -28,7 +28,7 @@ void ExpectCaptureTimeDrivesCalendarPhase(Luminumbra::Rendering::RenderPipeline&
     using namespace Luminumbra;
     struct CaptureLifetime {
         ~CaptureLifetime() {
-            Client::presentation_clock.use_wall_clock();
+            Client::presentation_clock().use_wall_clock();
         }
     } capture_lifetime;
     pipeline.set_time_of_day_hold(false);
@@ -37,7 +37,7 @@ void ExpectCaptureTimeDrivesCalendarPhase(Luminumbra::Rendering::RenderPipeline&
         pipeline.set_render_calendar(calendar);
         pipeline.set_day_length_ticks(calendar.dayLengthTicks);
         for (const std::uint64_t tick : {0u, 27000u, 81000u, 162000u, 324000u}) {
-            Client::presentation_clock.set_capture_tick(tick, 30);
+            Client::presentation_clock().set_capture_tick(tick, 30);
             Rendering::RenderClockTestPeer::Update(pipeline, 123.0f);
             const auto phase =
                 static_cast<double>(tick % calendar.dayLengthTicks) / calendar.dayLengthTicks;
@@ -49,7 +49,7 @@ void ExpectCaptureTimeDrivesCalendarPhase(Luminumbra::Rendering::RenderPipeline&
         }
     }
     pipeline.set_day_length_ticks(60);
-    Client::presentation_clock.set_capture_tick(15, 30);
+    Client::presentation_clock().set_capture_tick(15, 30);
     Rendering::RenderClockTestPeer::Update(pipeline, 123.0f);
     EXPECT_FLOAT_EQ(pipeline.get_time_of_day(), .25f);
     pipeline.set_time_of_day(.3f);

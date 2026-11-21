@@ -682,7 +682,7 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn("m_dayLengthOverride ? m_dayLengthTicks : "
                       "m_renderClock.calendar().dayLengthTicks", advance)
         self.assertRegex(advance, r"if \(const auto& seconds = "
-                         r"Client::presentation_clock.capture_seconds\(\)\) "
+                         r"Client::presentation_clock\(\).capture_seconds\(\)\) "
                          r"m_elapsedDayPhase = std::fmod\(\*seconds / m_dayDurationSeconds, 1.0\); "
                          r"else m_elapsedDayPhase = std::fmod\(m_elapsedDayPhase \+ "
                          r"deltaTime / m_dayDurationSeconds, 1.0\);")
@@ -1631,7 +1631,7 @@ class FrameAttributionWiring(unittest.TestCase):
         constructor = block(pipeline, "RenderPipeline::RenderPipeline()")
         self.assertIn("m_foliage_pass->begin_ground_frame();", constructor)
         render = block(pipeline, "void RenderPipeline::render_frame(")
-        self.assertIn("m_prev_time = static_cast<float>(Client::presentation_clock.now(glfwGetTime));",
+        self.assertIn("m_prev_time = static_cast<float>(Client::presentation_clock().now(glfwGetTime));",
                       render)
         self.assertEqual(render.count("m_foliage_pass->begin_ground_frame();"), 1)
         self.assertGreater(render.index("m_foliage_pass->begin_ground_frame();"),
@@ -3650,7 +3650,7 @@ class ComparisonAtmosphereWiring(unittest.TestCase):
                      "pipeline.set_cloud_state(state.clouds);",
                      "pipeline.set_lightning_state({});",
                      "pipeline.set_time_of_day_hold(true);",
-                     "presentation_clock.set_capture_tick(kComparisonPresentationTick, "
+                     "presentation_clock().set_capture_tick(kComparisonPresentationTick, "
                      "kComparisonPresentationRate);",
                      "particles->set_precipitation(particle_data_root, camera_position, "
                      "frame_weather.rain_intensity, frame_weather.snow_intensity);",
@@ -3674,7 +3674,7 @@ class ComparisonAtmosphereWiring(unittest.TestCase):
         # advance actually resolves it from the fixed presentation clock.
         pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
         advance = block(pipeline, "void RenderPipeline::advance_cloud_phase(")
-        self.assertIn("presentation_clock.capture_seconds()", advance)
+        self.assertIn("presentation_clock().capture_seconds()", advance)
         self.assertIn("m_cloud_phase = static_cast<float>(*seconds);", advance)
         self.assertIn("m_cloud_state.scroll_offset = wind_xz * (m_cloud_phase * speed);", advance)
 
@@ -3700,7 +3700,7 @@ class ComparisonAtmosphereWiring(unittest.TestCase):
             self.assertIn("clouds." + field, snapshot)
         self.assertIn("pipeline.get_time_of_day()", snapshot)
         self.assertIn("pipeline.get_season_tick()", snapshot)
-        self.assertIn("presentation_clock.capture_seconds()", snapshot)
+        self.assertIn("presentation_clock().capture_seconds()", snapshot)
         self.assertIn("particles->wind_velocity()", snapshot)
 
 
