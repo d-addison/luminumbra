@@ -3794,7 +3794,9 @@ void RenderPipeline::execute_stage_lighting(const Camera& camera) {
     // G-buffer establishes depth testing; plant/decal stages retain or restore it,
     // SSAO only changes bindings, and diagnostic replay restores its entry state.
     const LightingPass::CallerState caller{.depth_test_enabled = GL_TRUE};
-    m_lighting_pass->execute(m_frame_lighting_ctx, caller);
+    const bool sky_replaces_color = m_cloud_quality > 0 && m_halfres_cloud.fbo &&
+                                    m_cloud_composite_shader && m_cloud_composite_shader->IsValid();
+    m_lighting_pass->execute(m_frame_lighting_ctx, caller, sky_replaces_color);
     end_gpu_pass_timer(GpuTimerPass::Lighting);
     glBindVertexArray(0); // Unbind after lighting pass
 }
