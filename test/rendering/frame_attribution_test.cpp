@@ -800,6 +800,27 @@ TEST(CaptureArtifacts, TruncatedIndexFlushFailureAndCompleteStreamAreDistinct) {
     EXPECT_EQ(bytes, 18u);
 }
 
+TEST(CaptureArtifacts, PixelBudgetAcceptsExactBoundAndRefusesOnePixelOverWithoutAllocation) {
+    using Luminumbra::Rendering::CapturePixelBytes;
+    constexpr int pixel_limit = 64 * 1024 * 1024;
+    for (const auto extent :
+         {std::array{pixel_limit, 1}, std::array{1, pixel_limit}, std::array{8192, 8192}}) {
+        SCOPED_TRACE(::testing::Message() << extent[0] << 'x' << extent[1]);
+        std::size_t bytes = 19;
+        EXPECT_TRUE(CapturePixelBytes(extent[0], extent[1], 3, bytes));
+        EXPECT_EQ(bytes, static_cast<std::size_t>(pixel_limit) * 3u);
+    }
+    for (const auto extent : {std::array{pixel_limit + 1, 1},
+                              std::array{1, pixel_limit + 1},
+                              std::array{8193, 8192},
+                              std::array{8192, 8193}}) {
+        SCOPED_TRACE(::testing::Message() << extent[0] << 'x' << extent[1]);
+        std::size_t bytes = 19;
+        EXPECT_FALSE(CapturePixelBytes(extent[0], extent[1], 3, bytes));
+        EXPECT_EQ(bytes, 19u);
+    }
+}
+
 class FrameRecorderTest : public ::testing::Test {
 protected:
     void SetUp() override {

@@ -15,9 +15,11 @@ namespace Luminumbra::Rendering {
 
 // Validate the whole capture before its image or manifest can be replaced.
 // symlink_status treats even dangling links as occupied. Publication still uses
-// the bundle writer's exclusive creates; this admission check never owns files.
+// the bundle writer's exclusive creates. Callers must hold a destination
+// reservation across this check and every subsequent payload write.
 inline bool DiagnosticCaptureDestinationAvailable(const std::filesystem::path& capture,
-                                                  const DiagnosticCaptureOptions& options) {
+                                                  const DiagnosticCaptureOptions& options,
+                                                  bool owns_reservation = false) {
     if (!options.enabled) {
         return true;
     }
@@ -30,6 +32,11 @@ inline bool DiagnosticCaptureDestinationAvailable(const std::filesystem::path& c
         return status.type() == std::filesystem::file_type::not_found &&
                (!error || error == std::errc::no_such_file_or_directory);
     };
+    auto marker = CaptureManifestPath(capture);
+    marker += ".lck";
+    if (!owns_reservation && !vacant(marker)) {
+        return false;
+    }
     auto manifest = CaptureManifestPath(capture);
     if (!vacant(capture) || !vacant(manifest)) {
         return false;
@@ -251,8 +258,15 @@ public:
             scope_ = std::make_unique<GBufferDiagnosticCapture>(targets_, draws_);
         }
     }
+    // Observation is GL-free; publication must use the mutating overload first.
     bool ready() const {
         return scope_ ? scope_->complete() : identity_complete_;
+    }
+    bool ready() {
+        if (scope_) {
+            scope_->detach();
+        }
+        return std::as_const(*this).ready();
     }
     bool finish(const std::filesystem::path& path,
                 const DiagnosticCaptureOptions& options,

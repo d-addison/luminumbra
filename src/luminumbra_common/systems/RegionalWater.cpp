@@ -10,10 +10,57 @@
 #include <limits>
 #include <map>
 #include <stdexcept>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 
 namespace Luminumbra::Systems::RegionalWater {
+Columns SelectColumns(std::span<const Vec3> anchors,
+                      std::span<const Vec3> sources,
+                      const world::ActiveRegionLedger& ledger) {
+    if (anchors.size() > kMaxSimulationAnchors || sources.size() > kMaxSimulationSources) {
+        throw std::invalid_argument("Regional water simulation input cap exceeded");
+    }
+    Columns columns;
+    const auto append = [&](int x, int z) {
+        if (x < Chunk::kPackedMinXz || x > Chunk::kPackedMaxXz || z < Chunk::kPackedMinXz ||
+            z > Chunk::kPackedMaxXz) {
+            return;
+        }
+        const auto owner = world::ActiveRegionLedger::region_at(
+            {static_cast<float>(x * CHUNK_SIZE_X), 0.0f, static_cast<float>(z * CHUNK_SIZE_Z)});
+        const auto found = ledger.records().find(owner);
+        if (found != ledger.records().end() && found->second.state != world::RegionState::Frozen) {
+            columns.ids[columns.size++] = Chunk::calculate_id({x, 0, z});
+        }
+    };
+    for (const auto& anchor : anchors) {
+        ++columns.inputs_visited;
+        if (!world::ActiveRegionLedger::valid_anchor(anchor)) {
+            continue;
+        }
+        const auto centre = SHIELD_WorldSystem::world_to_chunk_coords({anchor.x, 0.0f, anchor.z});
+        for (int dz = -1; dz <= 1; ++dz) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                append(centre.x + dx, centre.z + dz);
+            }
+        }
+    }
+    for (const auto& source : sources) {
+        ++columns.inputs_visited;
+        if (!world::ActiveRegionLedger::valid_anchor(source)) {
+            throw std::invalid_argument("Invalid regional water source position");
+        }
+        const auto coords = SHIELD_WorldSystem::world_to_chunk_coords({source.x, 0.0f, source.z});
+        append(coords.x, coords.z);
+    }
+    const auto end = columns.ids.begin() + static_cast<std::ptrdiff_t>(columns.size);
+    std::sort(columns.ids.begin(), end);
+    columns.size =
+        static_cast<std::size_t>(std::unique(columns.ids.begin(), end) - columns.ids.begin());
+    return columns;
+}
+
 namespace {
 using world::ActiveRegionLedger;
 using world::RegionKey;
@@ -21,6 +68,41 @@ using world::RegionState;
 
 [[noreturn]] void Refuse() {
     throw std::invalid_argument("Regional water planning input refused");
+}
+
+world::RegionSchedule FilterSchedule(const Columns& columns,
+                                     const world::RegionSchedule& schedule) {
+    // Each selected column has one owner: <= 9*64+256 = 832 owners, independent
+    // of ledger size. Only this bounded set is allocated or passed to planning.
+    std::map<RegionKey, bool> owners;
+    for (std::size_t i = 0; i < columns.size; ++i) {
+        const auto coords = Chunk::decode_id(columns.ids[i]);
+        const auto owner =
+            ActiveRegionLedger::region_at({static_cast<float>(coords.x * CHUNK_SIZE_X),
+                                           0.0f,
+                                           static_cast<float>(coords.z * CHUNK_SIZE_Z)});
+        owners.emplace(owner, false);
+    }
+    // Due keys are in scheduler priority order, not owner order. Inspect the
+    // supplied schedule (<= kMaxRegions), without copying it or scanning records.
+    for (const auto owner : schedule.due) {
+        const auto found = owners.find(owner);
+        if (found != owners.end()) {
+            if (found->second) {
+                Refuse();
+            }
+            found->second = true;
+        }
+    }
+    world::RegionSchedule filtered;
+    filtered.tick = schedule.tick;
+    filtered.due.reserve(owners.size());
+    for (const auto& [owner, due] : owners) {
+        if (due) {
+            filtered.due.push_back(owner);
+        }
+    }
+    return filtered;
 }
 
 bool LegalResolution(int resolution) {
@@ -98,8 +180,10 @@ std::vector<Entry> Admit(std::span<const Resident> residents,
                                            0.0f,
                                            static_cast<float>(entry.coords.z * CHUNK_SIZE_Z)});
         entry.record = FindRecord(ledger, entry.owner);
-        entry.admitted = resident.available && entry.record != nullptr &&
-                         entry.record->state != RegionState::Frozen;
+        // Resolution zero is an intentional Off stamp, including retained integer
+        // water. Neither preparation, sources, rain nor adjacent activity re-enable it.
+        entry.admitted = resident.available && resident.resolution != 0 &&
+                         entry.record != nullptr && entry.record->state != RegionState::Frozen;
         entry.preparation = !resident.initialized || resident.resolution != inputs.resolution;
         if (entry.admitted) {
             auto& group = groups[entry.owner];
@@ -281,12 +365,49 @@ std::uint64_t SelectInteriorPair(const Group& group,
     return 2;
 }
 
+// Keep the shared allocator's credit and fixed debt ranking, but cap funding
+// before spending windows: every candidate can resolve/execute only once.
+void CapFundingGrants(std::span<const world::water_share::Claim> claims,
+                      ActiveRegionLedger::WaterDebts& debts,
+                      std::vector<world::water_share::Grant>& grants,
+                      std::uint64_t windows) {
+    for (const auto& grant : grants) {
+        debts[grant.key] += grant.windows * world::water_share::kQ32;
+    }
+    std::vector<world::water_share::Claim> ranked(claims.begin(), claims.end());
+    const auto debt_for = [&debts](RegionKey owner) {
+        const auto found = debts.find(owner);
+        return found == debts.end() ? 0 : found->second;
+    };
+    std::sort(ranked.begin(), ranked.end(), [&](const auto& a, const auto& b) {
+        const auto first = debt_for(a.key), second = debt_for(b.key);
+        return first != second ? first > second : a.key < b.key;
+    });
+    grants.clear();
+    // At most one pass over the bounded candidate owners; never recredit debt.
+    for (const auto& claim : ranked) {
+        const auto awarded =
+            std::min({claim.awake, debt_for(claim.key) / world::water_share::kQ32, windows});
+        if (awarded == 0) {
+            continue;
+        }
+        auto debt = debts.find(claim.key);
+        debt->second -= awarded * world::water_share::kQ32;
+        if (debt->second == 0) {
+            debts.erase(debt);
+        }
+        grants.push_back({claim.key, awarded});
+        windows -= awarded;
+    }
+}
+
 void Allocate(Groups& groups,
               const ActiveRegionLedger& ledger,
               std::uint64_t windows,
               std::uint64_t tick,
               std::vector<Entry>& entries,
-              Plan& plan) {
+              Plan& plan,
+              bool funding_columns) {
     std::vector<world::water_share::Claim> claims;
     // All positive candidate demand competes for credit and saved debt service.
     ActiveRegionLedger::WaterDebts debts;
@@ -308,6 +429,9 @@ void Allocate(Groups& groups,
     if (!world::water_share::allocate(
             std::min(windows, serviceable_demand), claims, debts, grants)) {
         Refuse();
+    }
+    if (funding_columns) {
+        CapFundingGrants(claims, debts, grants, std::min(windows, serviceable_demand));
     }
     std::sort(
         grants.begin(), grants.end(), [](const auto& a, const auto& b) { return a.key < b.key; });
@@ -353,13 +477,69 @@ void Allocate(Groups& groups,
                                 carried_debt});
     }
 }
-} // namespace
 
-Plan Build(std::span<const Resident> residents,
-           std::span<const SourceInput> sources,
-           const ActiveRegionLedger& ledger,
-           const world::RegionSchedule& schedule,
-           const Inputs& inputs) {
+void Reconcile(const Groups& groups,
+               std::vector<Entry>& entries,
+               const Plan& funding,
+               std::uint64_t windows,
+               Plan& plan) {
+    // Only funding sees the full rings; execution may have no admitted group
+    // for an owner that received no windows.
+    // Never recredit owners or advance a cursor against the narrowed snapshot.
+    // Simulation admission bounds this pass to 832 owners and candidates.
+    for (const auto& funded : funding.regions) {
+        const auto found = groups.find(funded.owner);
+        if (found == groups.end()) {
+            if (funded.windows != 0) {
+                Refuse();
+            }
+            plan.regions.push_back(funded);
+            continue;
+        }
+        const auto& group = found->second;
+        const auto limit = std::min(
+            {funded.windows, static_cast<std::uint64_t>(group.candidates.size()), windows});
+        std::uint64_t awarded = 0, demand = 0;
+        // At most kMaxResidents candidates across all groups. The canonical
+        // funding identities include pair endpoints; border-only participants
+        // cannot replace a funded interior, even if it resolves to an idle grid.
+        for (const auto candidate : group.candidates) {
+            auto& entry = entries[candidate];
+            if (std::binary_search(
+                    funding.interiors.begin(), funding.interiors.end(), entry.resident.id)) {
+                ++demand;
+                if (awarded < limit) {
+                    entry.selected = true;
+                    ++awarded;
+                }
+            }
+        }
+        windows -= awarded;
+        plan.allocated_windows += awarded;
+        auto region = funded;
+        region.windows = awarded;
+        // Restoring unused grants cannot exceed funding's checked post-credit
+        // debt (<= kMaxDebt).
+        region.debt += (funded.windows - awarded) * world::water_share::kQ32;
+        if (demand < funded.windows) {
+            // Resolved idle grants must not keep earning credit and outrank
+            // executable owners forever. Keep at most one window per executable
+            // candidate (<= kMaxResidents, so this Q32 product fits uint64_t).
+            // Without a grant, demand is still unknown: retain fractional credit
+            // and saved debt until a later funded snapshot can execute it.
+            region.debt = std::min(region.debt, demand * world::water_share::kQ32);
+        }
+        plan.regions.push_back(region);
+    }
+}
+
+Plan BuildPlan(std::span<const Resident> residents,
+               std::span<const SourceInput> sources,
+               const ActiveRegionLedger& ledger,
+               const world::RegionSchedule& schedule,
+               const Inputs& inputs,
+               const Plan* funding,
+               bool funding_columns = false) {
     if (residents.size() > kMaxResidents || sources.size() > kMaxSources ||
         schedule.due.size() > ActiveRegionLedger::kMaxRegions ||
         !LegalResolution(inputs.resolution) || schedule.tick >= world::WorldClock::kTickLimit) {
@@ -393,8 +573,12 @@ Plan Build(std::span<const Resident> residents,
         }
         const auto* a = Find(entries, Chunk::decode_id(face.positive));
         const auto* b = Find(entries, Chunk::decode_id(face.other));
-        if (a->preparation || b->preparation ||
-            (!Awake(*a) && !Awake(*b) && !inputs.raining && !a->source && !b->source)) {
+        // Funding must reserve both endpoints and their worst-case preparation
+        // costs together, before either payload can be read. Execution still seals
+        // borders until both grids are initialized at the requested resolution.
+        if (!funding_columns &&
+            (a->preparation || b->preparation ||
+             (!Awake(*a) && !Awake(*b) && !inputs.raining && !a->source && !b->source))) {
             continue;
         }
         plan.faces.push_back(face);
@@ -415,7 +599,11 @@ Plan Build(std::span<const Resident> residents,
     }
     plan.border_windows = plan.global_windows - remaining;
     PlanInteriorPairs(faces, entries, groups);
-    Allocate(groups, ledger, remaining, schedule.tick, entries, plan);
+    if (funding) {
+        Reconcile(groups, entries, *funding, remaining, plan);
+    } else {
+        Allocate(groups, ledger, remaining, schedule.tick, entries, plan, funding_columns);
+    }
     for (const auto& entry : entries) {
         if (entry.selected) {
             plan.interiors.push_back(entry.resident.id);
@@ -444,6 +632,15 @@ Plan Build(std::span<const Resident> residents,
                        static_cast<std::uint64_t>(plan.interiors.size()) * cells +
                        static_cast<std::uint64_t>(plan.faces.size()) * 2 * resolution;
     return plan;
+}
+} // namespace
+
+Plan Build(std::span<const Resident> residents,
+           std::span<const SourceInput> sources,
+           const ActiveRegionLedger& ledger,
+           const world::RegionSchedule& schedule,
+           const Inputs& inputs) {
+    return BuildPlan(residents, sources, ledger, schedule, inputs, nullptr);
 }
 
 namespace {
@@ -937,6 +1134,143 @@ void Transaction::Rollback() noexcept {
 } // namespace Luminumbra::Systems::RegionalWater
 
 namespace Luminumbra::Systems {
+void WaterSystem::UpdateRegionalFromSimulation(entt::registry& registry,
+                                               std::span<const Vec3> anchors,
+                                               world::ActiveRegionLedger& ledger,
+                                               const world::RegionSchedule& schedule,
+                                               std::vector<world::RegionWork>& completed,
+                                               std::uint64_t cell_budget) {
+    if (!m_regional_scheduling || m_boot_paused) {
+        return;
+    }
+    if (!m_shield_system || !m_shield_system->durable_residency() ||
+        m_shield_system->durable_read_failed() || schedule.tick != ledger.tick() ||
+        schedule.due.size() > world::ActiveRegionLedger::kMaxRegions ||
+        !RegionalWater::LegalResolution(m_sim_resolution) ||
+        (m_last_regional_tick && schedule.tick <= *m_last_regional_tick) ||
+        m_rain_mm_per_tick < 0 || m_evap_mm_per_tick < 0 || m_weather_rain_scale_mm < 0) {
+        throw std::invalid_argument("Regional water simulation context refused");
+    }
+    const Persistence::WorldSaveService::SaveOwnership ownership;
+    std::array<Vec3, RegionalWater::kMaxSimulationSources> sources{};
+    std::size_t source_count = 0;
+    std::vector<RegionalWater::SourceInput> source_inputs;
+    source_inputs.reserve(RegionalWater::kMaxSimulationSources);
+    const auto* source_storage =
+        std::as_const(registry).storage<Components::FlowingWaterSourceComponent>();
+    if (source_storage && source_storage->size() > RegionalWater::kMaxSimulationSources) {
+        throw std::invalid_argument("Regional water simulation source cap exceeded");
+    }
+    // The smaller view pool has at most 256 entries, including filtered entities.
+    const auto view = registry.view<const Components::TransformComponent,
+                                    const Components::FlowingWaterSourceComponent>();
+    for (const auto entity : view) {
+        const auto position = view.get<const Components::TransformComponent>(entity).position;
+        const RegionalWater::SourceInput input{
+            .id = static_cast<std::uint64_t>(entt::to_integral(entity)),
+            .position = position,
+            .physical = view.get<const Components::FlowingWaterSourceComponent>(entity)};
+        static_cast<void>(RegionalWater::SourceAmount(input, m_sim_resolution));
+        sources[source_count++] = position;
+        source_inputs.push_back(input);
+    }
+    const auto columns =
+        RegionalWater::SelectColumns(anchors, {sources.data(), source_count}, ledger);
+    const auto selected_schedule = RegionalWater::FilterSchedule(columns, schedule);
+    if (completed.size() > world::ActiveRegionLedger::kMaxRegions - columns.size) {
+        throw std::invalid_argument("Regional water completed work cap exceeded");
+    }
+    // Reserve the bounded append before stepping; never copy other consumers' work.
+    completed.reserve(completed.size() + columns.size);
+    // At most 832 lookups and handles; no world scan or growing admission container.
+    std::array<std::shared_ptr<Chunk>, std::tuple_size_v<decltype(columns.ids)>> participants{};
+    std::vector<RegionalWater::Resident> residents;
+    residents.reserve(columns.size);
+    for (std::size_t i = 0; i < columns.size; ++i) {
+        // Fund against the worst-case preparation cost without reading terrain or
+        // renderer caches. Only the funded set may load committed payloads below.
+        residents.push_back({.id = columns.ids[i],
+                             .initialized = false,
+                             .resolution = 8,
+                             .awake = true,
+                             .preparation_ready = true,
+                             .available = true});
+    }
+    const bool raining = m_rain_mm_per_tick > 0 || (m_weather_rain && m_weather_rain_scale_mm > 0);
+    const auto resolution = static_cast<std::uint64_t>(m_sim_resolution);
+    const auto capacity = m_shield_system->water_column_capacity();
+    // Capacity <=4096 and resolution <=32 bound this product before allocation.
+    const auto storage_budget = capacity * (2 * resolution * resolution + 4 * resolution);
+    const auto budget = capacity == 0 ? cell_budget : std::min(cell_budget, storage_budget);
+    auto plan = RegionalWater::BuildPlan(residents,
+                                         source_inputs,
+                                         ledger,
+                                         selected_schedule,
+                                         {m_sim_resolution, budget, raining},
+                                         nullptr,
+                                         true);
+    const auto funded = plan.participants;
+    if (!m_shield_system->reserve_water_columns(funded)) {
+        return;
+    }
+    try {
+        // Each participant is paid for before terrain resolution: at most
+        // floor(cell_budget / (2*r*r + 4*r)) columns (seven at r=16, budget=4096).
+        for (auto& resident : residents) {
+            resident.available = false;
+        }
+        for (std::size_t i = 0; i < funded.size(); ++i) {
+            participants[i] = m_shield_system->resolve_water_column(Chunk::decode_id(funded[i]));
+            if (!participants[i]) {
+                // Parking pressure defers the entire funded set without publishing
+                // debt, cursors, water, telemetry or completion. Admission requests a save.
+                m_shield_system->discard_unclaimed_water_columns(
+                    {participants.data(), funded.size()}, funded);
+                return;
+            }
+            const auto found = std::lower_bound(
+                residents.begin(), residents.end(), funded[i], [](const auto& entry, ChunkID id) {
+                    return entry.id < id;
+                });
+            if (found == residents.end() || found->id != funded[i]) {
+                throw std::invalid_argument("Missing funded regional water candidate");
+            }
+            auto& resident = *found;
+            resident.initialized = participants[i]->has_water_sim.load();
+            resident.resolution = participants[i]->current_water_resolution.load();
+            resident.awake = !participants[i]->is_water_sleeping.load();
+            resident.available = true;
+        }
+        // Reconcile sleeping/resized saved grids and seam eligibility only inside
+        // the funded set. This pass cannot admit another payload or exceed its grant.
+        plan = RegionalWater::BuildPlan(residents,
+                                        source_inputs,
+                                        ledger,
+                                        selected_schedule,
+                                        {m_sim_resolution, budget, raining},
+                                        &plan);
+        std::array<std::shared_ptr<Chunk>, std::tuple_size_v<decltype(columns.ids)>> execution{};
+        for (std::size_t i = 0; i < plan.participants.size(); ++i) {
+            const auto found = std::lower_bound(funded.begin(), funded.end(), plan.participants[i]);
+            if (found == funded.end() || *found != plan.participants[i]) {
+                throw std::invalid_argument("Unfunded regional water participant");
+            }
+            execution[i] = participants[static_cast<std::size_t>(found - funded.begin())];
+        }
+        ExecuteRegionalPlan(plan,
+                            {execution.data(), plan.participants.size()},
+                            ledger,
+                            schedule.tick,
+                            completed,
+                            source_count);
+    } catch (...) {
+        m_shield_system->discard_unclaimed_water_columns({participants.data(), funded.size()},
+                                                         funded);
+        throw;
+    }
+    m_shield_system->discard_unclaimed_water_columns({participants.data(), funded.size()}, funded);
+}
+
 void WaterSystem::UpdateRegional(entt::registry& registry,
                                  std::span<const std::shared_ptr<Chunk>> resident,
                                  world::ActiveRegionLedger& ledger,
@@ -1002,8 +1336,17 @@ void WaterSystem::UpdateRegional(entt::registry& registry,
         }
         participants.push_back(*found);
     }
+    ExecuteRegionalPlan(plan, participants, ledger, schedule.tick, completed, sources.size());
+}
+
+void WaterSystem::ExecuteRegionalPlan(const RegionalWater::Plan& plan,
+                                      std::span<const std::shared_ptr<Chunk>> participants,
+                                      world::ActiveRegionLedger& ledger,
+                                      std::uint64_t tick,
+                                      std::vector<world::RegionWork>& completed,
+                                      std::size_t source_count) {
     RegionalWater::Transaction stage;
-    stage.Begin(ledger, schedule.tick, participants, plan.regions);
+    stage.Begin(ledger, tick, participants, plan.regions);
     RegionalWork result;
     result.global_windows = plan.global_windows;
     result.border_windows = plan.border_windows;
@@ -1069,23 +1412,23 @@ void WaterSystem::UpdateRegional(entt::registry& registry,
     if (result.volume_before_qmm + result.preparation_volume_qmm + result.source_volume_qmm !=
             result.volume_after_qmm + result.sink_volume_qmm ||
         injected > std::numeric_limits<std::int64_t>::max() - m_debug_source_injected_mm ||
-        sources.size() > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() -
-                                                    m_debug_sources_seen) ||
+        source_count > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() -
+                                                  m_debug_sources_seen) ||
         contributions.size() > world::ActiveRegionLedger::kMaxRegions - completed.size()) {
         throw std::invalid_argument("Regional water publication accounting refused");
     }
-    auto next_completed = completed;
-    next_completed.reserve(completed.size() + contributions.size());
-    for (const auto& [owner, work] : contributions) {
-        static_cast<void>(owner);
-        next_completed.push_back(work);
-    }
+    // Allocate only the append before publishing; never copy unrelated consumers' work.
+    completed.reserve(completed.size() + contributions.size());
+    static_assert(std::is_nothrow_copy_constructible_v<world::RegionWork>);
     static_assert(std::is_nothrow_swappable_v<RegionalWork>);
     stage.Publish(m_shield_system, &m_mesh_invalidations);
-    // Every allocation/refusal precedes this tail: only swaps and scalar writes remain.
-    completed.swap(next_completed);
+    // Every allocation/refusal precedes this tail; the append has reserved capacity.
+    for (const auto& [owner, work] : contributions) {
+        static_cast<void>(owner);
+        completed.push_back(work);
+    }
     m_debug_source_injected_mm += injected;
-    m_debug_sources_seen += static_cast<std::int64_t>(sources.size());
+    m_debug_sources_seen += static_cast<std::int64_t>(source_count);
     m_dbg_last_source_mm = result.source_mm;
     m_dbg_last_sink_mm = result.sink_mm;
     m_dbg_mass_ok = true;
@@ -1097,6 +1440,6 @@ void WaterSystem::UpdateRegional(entt::registry& registry,
     m_dbg_cells_simmed = static_cast<std::size_t>(result.water_cells);
     m_cells_stepped_last_update = static_cast<std::size_t>(result.water_cells);
     std::swap(m_regional_work, result);
-    m_last_regional_tick = schedule.tick;
+    m_last_regional_tick = tick;
 }
 } // namespace Luminumbra::Systems

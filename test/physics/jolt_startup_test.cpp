@@ -17,8 +17,11 @@
 
 #include <gtest/gtest.h>
 
+#include "../fixtures/AvatarContinuationWorld.h"
 #include "luminumbra_common/core/Log.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
+#include "luminumbra_common/world/Chunk.h"
+#include "luminumbra_common/world/PlayerAvatar.h"
 #include <Jolt/Physics/Collision/PhysicsMaterialSimple.h>
 #include <mutex>
 #include <spdlog/sinks/base_sink.h>
@@ -2481,3 +2484,218 @@ TEST(JoltStartup, ApplicationDefaultAllocatorsRemainCompatibleWithStaticStorage)
     ASSERT_EXIT(ApplicationDefaultAllocatorLifetime(), ::testing::ExitedWithCode(0), "");
 }
 #endif
+
+namespace {
+
+using ControllerOwner = Luminumbra::World::PhysicsOwnerState;
+
+template<class Physics>
+concept HasPublicControllerRestore =
+    requires(Physics& physics, const ControllerOwner& state, std::size_t& index) {
+        physics.restore_avatar_owner(state, index);
+    };
+static_assert(!HasPublicControllerRestore<ApplicationPhysics>);
+
+void ControllerFloor(ApplicationPhysics& physics) {
+    Luminumbra::Chunk floor(Luminumbra::IVec3(0));
+    constexpr auto side = static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1);
+    floor.heightmap_data.assign(side * side, 8.0f);
+    Require(physics.add_chunk_collision(floor));
+}
+
+void RequireOwnerEqual(const ControllerOwner& expected, const ControllerOwner& actual) {
+    Require(expected.size == actual.size && expected.bytes == actual.bytes);
+}
+
+std::uint32_t ControllerWord(const ControllerOwner& state, std::size_t offset) {
+    Require(offset <= state.size && 4 <= state.size - offset);
+    std::uint32_t word = 0;
+    for (unsigned shift = 0; shift < 32; shift += 8) {
+        word |= static_cast<std::uint32_t>(state.bytes[offset++]) << shift;
+    }
+    return word;
+}
+
+void RequireBodySetEqual(const ApplicationPhysics::BodySetState& before,
+                         const ApplicationPhysics::BodySetState& after) {
+    Require(before.slot_count == after.slot_count && before.free_slots == after.free_slots &&
+            before.owners.size() == after.owners.size());
+    for (std::size_t i = 0; i < before.owners.size(); ++i) {
+        Require(before.owners[i].size == after.owners[i].size &&
+                before.owners[i].bytes == after.owners[i].bytes);
+    }
+}
+
+// Modes: moving avatar, new/adopted frozen capsule, standing/crouching player.
+// Every real allocation ordinal is refused.
+void ControllerRestoreAllocationSweep(int mode) {
+    Log::Init();
+    InitializeAllocators();
+    {
+        Luminumbra::TestSupport::AvatarContinuationWorld source_world;
+        auto& source = source_world.physics();
+        ControllerFloor(source);
+        const bool frozen = mode == 1 || mode == 2;
+        const bool player = mode >= 3;
+        if (player) {
+            Require(source.create_player_controller({8.0f, 8.1f, 8.0f}));
+            Require(source.set_player_crouched(mode == 4));
+        } else {
+            Require(source.create_avatar_character({8.0f, 8.1f, 8.0f}) == 0);
+        }
+        for (unsigned tick = 0; tick < 45; ++tick) {
+            if (player) {
+                source.update_player({0.1f, 0, 0.2f}, false, 5.0f, 1.0f / 30.0f);
+            } else {
+                source.update_avatars(1.0f / 30.0f);
+            }
+        }
+        if (frozen) {
+            const auto hole = source.create_dynamic_sphere({20, 20, 20}, {0, 0, 0}, 0.3f);
+            Require(!hole.IsInvalid());
+            source.set_avatar_frozen(0, true, source.get_avatar_position(0));
+            source.destroy_body(hole); // Exercise scratch allocation and free-slot order.
+        }
+        ControllerOwner captured;
+        Require(player ? source_world.capture_player_owner(captured)
+                       : source_world.capture_avatar_owner(0, captured));
+        // Character contacts are at word 36 in the established scalar schema.
+        Require(ControllerWord(captured, 144) > 0);
+        ApplicationPhysics::BodySetState body_set;
+        Require(source.capture_body_owners(body_set));
+        std::size_t measured = 0;
+        for (std::size_t ordinal = 0; ordinal <= measured; ++ordinal) {
+            {
+                Luminumbra::TestSupport::AvatarContinuationWorld target_world;
+                auto& target = target_world.physics();
+                ControllerFloor(target);
+                std::size_t index = 777;
+                const auto restore = [&] {
+                    return player ? target_world.restore_player_owner(captured)
+                                  : target_world.restore_avatar_owner(captured, index);
+                };
+                if (mode == 2) {
+                    std::array<JPH::BodyID, 1> ids{};
+                    Require(target.restore_body_owners(body_set, ids));
+                }
+                ApplicationPhysics::BodySetState before;
+                Require(target.capture_body_owners(before));
+                bool restored = false;
+                bool caught = false;
+                Arm(ordinal, false, false);
+                try {
+                    restored = restore();
+                } catch (const std::bad_alloc&) {
+                    caught = true;
+                }
+                const auto attempts = Allocations().attempts.load();
+                Disarm();
+                if (ordinal == 0) {
+                    measured = attempts;
+                    Require(restored && !caught && measured > 0 && measured < 128);
+                } else {
+                    Require(caught && !restored && Allocations().failures == 1);
+                    Require(index == 777 && target.avatar_character_slot_count() == 0);
+                    ControllerOwner absent;
+                    Require(player ? !target_world.capture_player_owner(absent)
+                                   : !target_world.capture_avatar_owner(0, absent));
+                    ApplicationPhysics::BodySetState after;
+                    Require(target.capture_body_owners(after));
+                    RequireBodySetEqual(before, after);
+                    // Retry on the same destination. A premature append makes
+                    // this yield index 1.
+                    Require(restore());
+                }
+                Require(target.avatar_character_slot_count() == (player ? 0u : 1u));
+                Require(index == (player ? 777u : 0u));
+                ControllerOwner actual;
+                Require(player ? target_world.capture_player_owner(actual)
+                               : target_world.capture_avatar_owner(0, actual));
+                RequireOwnerEqual(captured, actual);
+                if (frozen || player) {
+                    Require(!restore());
+                    Require(target.avatar_character_slot_count() == (player ? 0u : 1u));
+                }
+            }
+            Require(Outstanding() == 0);
+        }
+    }
+    Require(Outstanding() == 0);
+    std::_Exit(0);
+}
+
+} // namespace
+
+TEST(JoltStartup, ControllerAllocationFailuresPublishNothingAndRetryExactlyOnce) {
+    for (int mode = 0; mode < 5; ++mode) {
+        ASSERT_EXIT(ControllerRestoreAllocationSweep(mode), ::testing::ExitedWithCode(0), "");
+    }
+}
+
+namespace {
+void ControllerFailedInsertionPreservesNextBody(bool has_free_slot) {
+    Log::Init();
+    InitializeAllocators();
+    Luminumbra::TestSupport::AvatarContinuationWorld source_world;
+    auto& source = source_world.physics();
+    ControllerFloor(source);
+    source.create_avatar_character({8, 10, 8});
+    std::array<JPH::BodyID, 4> holes{};
+    for (auto& hole : holes) {
+        hole = source.create_dynamic_sphere({20, 20, 20}, {0, 0, 0}, 0.3f);
+        Require(!hole.IsInvalid());
+    }
+    source.set_avatar_frozen(0, true, source.get_avatar_position(0));
+    for (const auto hole : holes) {
+        source.destroy_body(hole);
+    }
+    ControllerOwner captured;
+    Require(source_world.capture_avatar_owner(0, captured));
+    const auto prepare = [has_free_slot](ApplicationPhysics& physics) {
+        ControllerFloor(physics);
+        if (has_free_slot) {
+            const auto hole = physics.create_dynamic_sphere({20, 20, 20}, {0, 0, 0}, 0.3f);
+            Require(!hole.IsInvalid());
+            physics.destroy_body(hole);
+        }
+    };
+    Luminumbra::TestSupport::AvatarContinuationWorld measured_world;
+    auto& measured = measured_world.physics();
+    prepare(measured);
+    std::size_t index = 777;
+    Arm(0, false, false);
+    const bool succeeded = measured_world.restore_avatar_owner(captured, index);
+    const auto attempts = Allocations().attempts.load();
+    Disarm();
+    Require(succeeded && attempts > 0);
+    Luminumbra::TestSupport::AvatarContinuationWorld target_world;
+    auto& target = target_world.physics();
+    prepare(target);
+    Luminumbra::TestSupport::AvatarContinuationWorld baseline_world;
+    auto& baseline = baseline_world.physics();
+    prepare(baseline);
+    bool caught = false;
+    Arm(attempts, false, false); // The final allocation prepares broadphase insertion.
+    try {
+        static_cast<void>(target_world.restore_avatar_owner(captured, index));
+    } catch (const std::bad_alloc&) {
+        caught = true;
+    }
+    Disarm();
+    Require(caught && target.avatar_character_slot_count() == 0);
+    for (unsigned body = 0; body < 5; ++body) {
+        const auto expected = baseline.create_dynamic_sphere({20, 20, 20}, {0, 0, 0}, 0.3f);
+        const auto actual = target.create_dynamic_sphere({20, 20, 20}, {0, 0, 0}, 0.3f);
+        Require(!expected.IsInvalid() && actual == expected);
+    }
+    std::_Exit(0);
+}
+} // namespace
+
+TEST(JoltStartup, ControllerInsertionFailurePreservesFreshAndReusedBodyGenerations) {
+    for (const bool has_free_slot : {false, true}) {
+        ASSERT_EXIT(ControllerFailedInsertionPreservesNextBody(has_free_slot),
+                    ::testing::ExitedWithCode(0),
+                    "");
+    }
+}

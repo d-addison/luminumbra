@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 
-ROOTS = ("data/", "docs/assets/", "test/fixtures/", "worlds/")
+ROOTS = ("data/", "docs/assets/", "test/fixtures/", "test/rendering/shader_scenes/references/", "worlds/")
 RULES = (
     ("data/fonts/Lora/", "OFL-1.1", "Lora"),
     ("data/textures/terrain/soil/", "CC0-1.0", "ambientCG Ground048"),
@@ -23,6 +23,7 @@ RULES = (
     ("data/", "MIT", "Luminumbra first-party runtime data"),
     ("docs/assets/", "MIT", "Luminumbra documentation assets"),
     ("test/fixtures/", "MIT", "Luminumbra test fixtures"),
+    ("test/rendering/shader_scenes/references/", "MIT", "Luminumbra shader scene references"),
     ("worlds/", "MIT", "Luminumbra authored worlds"),
 )
 

@@ -187,6 +187,17 @@ def placeholder_bindings():
         yield
 
 
+def confirmed_matrix(matrix):
+    """Synthetic native-confirmed universe; never changes committed evidence."""
+    matrix = copy.deepcopy(matrix)
+    for workload in matrix['workloads']:
+        if workload['kind'] == 'fixed_view':
+            if workload['pose'] is None:
+                workload['pose'] = dict(POSE)
+            workload['pose_provenance'] = 'native-confirmed: synthetic evidence'
+    return matrix
+
+
 def passing_results(matrix, renderer=RENDERER):
     """Synthetic all-pass results with a complete adapter, artifact and verdict.
 
@@ -388,6 +399,8 @@ class RunnerTestBase(unittest.TestCase):
             for workload in matrix['workloads']:
                 if workload['kind'] == 'fixed_view':
                     workload['pose'] = dict(POSE)
+                    workload.pop('pose_source', None)
+                    workload['pose_provenance'] = 'native-confirmed: synthetic evidence'
         path = root / 'matrix.json'
         path.write_text(json.dumps(matrix, indent=2), encoding='utf-8')
         return path
@@ -549,6 +562,23 @@ class FullMatrixTests(RunnerTestBase):
 
 
 class SelectionTests(RunnerTestBase):
+    def test_unconfirmed_authored_poses_are_reported_without_launch(self):
+        for workload in ('ground-settled', 'high-altitude-settled', 'cave-air-settled'):
+            with self.subTest(workload=workload):
+                cell_id = f'{workload}.quality.3840x1600'
+                args = ['--client', str(self.fake_client), '--out-dir', str(self.out),
+                        '--checker', str(self.fake_checker), '--only', cell_id]
+                with mock.patch.object(rq.runner, 'run_process') as launch:
+                    code, _, err = self.run_main(args)
+                self.assertEqual(code, 3, err)
+                launch.assert_not_called()
+                document = self.load_qualification()
+                cell = self.cell_of(document, cell_id)
+                self.assertEqual((cell['state'], cell['reason']),
+                                 ('unevaluated', 'pose-native-unconfirmed'))
+                self.assertIsNone(cell['artifact'])
+                self.assertEqual(document['qualification_status'], 'NEEDS-NATIVE-RUN')
+
     local_matrix = True
 
     def setUp(self):
@@ -567,6 +597,20 @@ class SelectionTests(RunnerTestBase):
             code, _, error = self.run_main(self.argv('--only', SURFACE_CELL))
         self.assertEqual(code, 2)
         self.assertIn('script_sha256', error)
+        self.assertFalse(self.out.exists())
+        launch.assert_not_called()
+        checker.assert_not_called()
+
+    def test_authored_pose_identity_drift_exits_2_without_launch_or_output(self):
+        matrix = matrix_lib.load_matrix(MATRIX_PATH)
+        workload = next(item for item in matrix['workloads'] if item['id'] == 'ground-settled')
+        workload['pose_source']['sha256'] = '0' * 64
+        self.matrix_path.write_text(json.dumps(matrix), encoding='utf-8')
+        with mock.patch.object(rq.runner, 'run_process') as launch, \
+                mock.patch.object(rq.subprocess, 'run') as checker:
+            code, _, error = self.run_main(self.argv('--only', SURFACE_CELL))
+        self.assertEqual(code, 2)
+        self.assertIn('pose_source SHA-256 mismatch', error)
         self.assertFalse(self.out.exists())
         launch.assert_not_called()
         checker.assert_not_called()
@@ -769,7 +813,8 @@ class SelectionTests(RunnerTestBase):
 
     def test_mkdir_file_exists_error_is_not_reported_as_held_lock(self):
         # Windows can report an obstructing parent file as FileExistsError.
-        with mock.patch.object(Path, 'mkdir', side_effect=FileExistsError('blocked parent')), \
+        with mock.patch.object(rq, 'os', types.SimpleNamespace(**vars(os))), \
+                mock.patch.object(Path, 'mkdir', side_effect=FileExistsError('blocked parent')), \
                 mock.patch.object(rq.os, 'open') as open_file, \
                 mock.patch.object(rq, 'run_cells') as launch:
             code, _, err = self.run_main(self.argv('--only', SURFACE_CELL))
@@ -1140,6 +1185,8 @@ class CheckCommandTests(unittest.TestCase):
         for workload in matrix['workloads']:
             if workload['kind'] == 'fixed_view':
                 workload['pose'] = dict(POSE)
+                workload.pop('pose_source', None)
+                workload['pose_provenance'] = 'native-confirmed: synthetic evidence'
         self.matrix = matrix
         self.cells = {cell['id']: cell for cell in matrix_lib.cells(matrix)}
 
@@ -1201,7 +1248,8 @@ class SettingsResetTests(RunnerTestBase):
 class DirectoryLockTests(RunnerTestBase):
     def test_output_directory_file_is_cannot_write_before_lock_creation(self):
         self.out.write_text('not a directory', encoding='utf-8')
-        with mock.patch.object(rq.os, 'open') as open_lock:
+        with mock.patch.object(rq, 'os', types.SimpleNamespace(**vars(os))), \
+                mock.patch.object(rq.os, 'open') as open_lock:
             code, _, err = self.run_main(self.argv('--only', SURFACE_CELL))
         self.assertEqual(code, 2)
         self.assertIn('cannot write', err)
@@ -1210,7 +1258,8 @@ class DirectoryLockTests(RunnerTestBase):
         self.assertEqual(self.out.read_text(encoding='utf-8'), 'not a directory')
 
     def test_lock_creation_file_exists_error_without_lock_is_cannot_write(self):
-        with mock.patch.object(rq.os, 'open', side_effect=FileExistsError('cannot create')):
+        with mock.patch.object(rq, 'os', types.SimpleNamespace(**vars(os))), \
+                mock.patch.object(rq.os, 'open', side_effect=FileExistsError('cannot create')):
             code, _, err = self.run_main(self.argv('--only', SURFACE_CELL))
         self.assertEqual(code, 2)
         self.assertIn('cannot write', err)
@@ -1218,7 +1267,8 @@ class DirectoryLockTests(RunnerTestBase):
         self.assertFalse((self.out / rq.LOCK_NAME).exists())
 
     def test_lock_creation_permission_error_is_cannot_write(self):
-        with mock.patch.object(rq.os, 'open', side_effect=PermissionError('access denied')):
+        with mock.patch.object(rq, 'os', types.SimpleNamespace(**vars(os))), \
+                mock.patch.object(rq.os, 'open', side_effect=PermissionError('access denied')):
             code, _, err = self.run_main(self.argv('--only', SURFACE_CELL))
         self.assertEqual(code, 2)
         self.assertIn('cannot write', err)
@@ -2008,6 +2058,8 @@ class RealCheckerTests(RunnerTestBase):
         for workload in matrix['workloads']:
             if workload['kind'] == 'fixed_view':
                 workload['pose'] = dict(POSE)
+                workload.pop('pose_source', None)
+                workload['pose_provenance'] = 'native-confirmed: synthetic evidence'
         data, matrix = cls.positive_documents(matrix)
         cls.positive_fixture = cls.shared / 'positive-control.json'
         cls.positive_fixture.write_text(json.dumps(data), encoding='utf-8')
@@ -2159,12 +2211,13 @@ class BuildManifestTests(RealCheckerTests):
         self.assertFalse(client['native_build'])
         # Even grant the forged capture every other prerequisite, including all 36
         # cells and the canonical checker: its client evidence still blocks qualification.
-        matrix = matrix_lib.load_matrix(MATRIX_PATH)
+        matrix = confirmed_matrix(matrix_lib.load_matrix(MATRIX_PATH))
         results = passing_results(matrix)
         for result in results:
             result['client'] = client
             result['gl_debug']['client_sha256'] = client['sha256']
-        with placeholder_bindings():
+        with placeholder_bindings(), mock.patch.object(
+                matrix_lib, 'load_matrix', return_value=matrix):
             document = rq.aggregate(matrix, results, partial=False,
                                     declared_refresh={'3440x1440': 60})
         self.assertFalse(document['render_floor_qualified'])
@@ -2418,12 +2471,13 @@ class BuildManifestTests(RealCheckerTests):
         self.assertNotIn('LUMIN_GL_DEBUG', self.native_launch_environments[0])
         self.assertEqual(self.native_launch_environments[1]['LUMIN_GL_DEBUG'], '1')
         self.assertTrue(rq.gl_debug_passes(cell['gl_debug'], client))
-        matrix = matrix_lib.load_matrix(MATRIX_PATH)
+        matrix = confirmed_matrix(matrix_lib.load_matrix(MATRIX_PATH))
         results = passing_results(matrix)
         for result in results:
             result['client'] = client
             result['gl_debug']['client_sha256'] = client['sha256']
-        with placeholder_bindings():
+        with placeholder_bindings(), mock.patch.object(
+                matrix_lib, 'load_matrix', return_value=matrix):
             document = rq.aggregate(matrix, results, partial=False,
                                     declared_refresh={'3440x1440': 60})
         self.assertTrue(document['render_floor_qualified'])
@@ -2525,6 +2579,25 @@ class BuildManifestTests(RealCheckerTests):
 
 
 class AggregateTests(unittest.TestCase):
+    def test_unconfirmed_pose_cannot_qualify_even_with_passing_results(self):
+        with placeholder_bindings():
+            baseline = self.baseline()
+            self.assertEqual(self.aggregate(baseline)['qualification_status'], 'QUALIFIED')
+            for provenance in ('needs native confirmation', 'unknown',
+                               'native-confirmed:', 'native-confirmed: \n'):
+                with self.subTest(provenance=provenance):
+                    matrix = copy.deepcopy(self.matrix)
+                    matrix['workloads'][0]['pose_provenance'] = provenance
+                    # Treat this fixture as the committed universe: otherwise a
+                    # custom-matrix refusal could hide a missing confirmation gate.
+                    with mock.patch.object(matrix_lib, 'load_matrix', return_value=matrix):
+                        document = self.aggregate(passing_results(matrix), matrix=matrix)
+                    self.assertTrue(document['matrix']['canonical'])
+                    self.assertFalse(document['render_floor_qualified'])
+                    self.assertEqual(document['qualification_status'], 'NEEDS-NATIVE-RUN')
+                    self.assertIn('poses_not_native_confirmed',
+                                  document['render_floor_qualified_reasons'])
+
     def test_missing_failed_or_mismatched_debug_evidence_never_qualifies(self):
         matrix = matrix_lib.load_matrix(MATRIX_PATH)
         for defect in ('missing', 'unverified', 'identity', 'schema', 'verdict',
@@ -2558,7 +2631,10 @@ class AggregateTests(unittest.TestCase):
                     self.assertFalse(self.aggregate(results)['render_floor_qualified'])
 
     def setUp(self):
-        self.matrix = matrix_lib.load_matrix(MATRIX_PATH)
+        self.matrix = confirmed_matrix(matrix_lib.load_matrix(MATRIX_PATH))
+        canonical = mock.patch.object(matrix_lib, 'load_matrix', return_value=self.matrix)
+        canonical.start()
+        self.addCleanup(canonical.stop)
         self.declared = {'3440x1440': 60}
 
     def aggregate(self, results, partial=False, declared=None, matrix=None):
@@ -2590,7 +2666,8 @@ class AggregateTests(unittest.TestCase):
         self.assertEqual(document['displays'][0]['refresh_source'], 'matrix')
 
     def test_changed_fixed_view_pose_and_provenance_never_qualify(self):
-        for field, value in (('pose', dict(POSE)), ('pose_provenance', 'easier custom view')):
+        for field, value in (('pose', dict(POSE, x=POSE['x'] + 1.0)),
+                             ('pose_provenance', 'easier custom view')):
             with self.subTest(field=field), placeholder_bindings():
                 matrix = copy.deepcopy(self.matrix)
                 matrix['workloads'][0][field] = value

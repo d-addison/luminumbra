@@ -9,6 +9,17 @@
 namespace Luminumbra::Rendering {
 
 namespace {
+// Pool uploads run on the GL context thread. Keep the sequence across pool
+// destruction and world swaps; identical upload sequences assign identical IDs.
+// Zero refuses exhaustion rather than wrapping and aliasing earlier geometry.
+u64 next_geometry_generation() {
+    static u64 generation = 0;
+    if (generation == std::numeric_limits<u64>::max()) {
+        return 0;
+    }
+    return ++generation;
+}
+
 // GL has a finite set of sticky error flags. Drain them before any mapped
 // write; no GL operation is permitted between the two copies and publication.
 bool pool_gl_error() {
@@ -344,6 +355,10 @@ u32 ChunkGeometryPool::allocate_with_reclaim(const VoxelVertex* vertices,
         index_count > std::numeric_limits<u32>::max() - (kPoolSlotAlign - 1u) ||
         !mesh_upload_bytes(vertex_count, sizeof(VoxelVertex), index_count, checked_bytes))
         return kInvalid;
+    const u64 geometry_generation = next_geometry_generation();
+    if (geometry_generation == 0) {
+        return kInvalid;
+    }
     if (pool_gl_error())
         return kInvalid;
     reclaim(visits);
@@ -402,6 +417,7 @@ u32 ChunkGeometryPool::allocate_with_reclaim(const VoxelVertex* vertices,
     alloc.index_offset = index_offset;
     alloc.index_count = index_count;
     alloc.index_slot = index_slot;
+    alloc.geometry_generation = geometry_generation;
     alloc.live = true;
     ++block.allocation_count;
     ++m_live_count;
@@ -500,6 +516,10 @@ u32 ChunkGeometryPool::reuse_completed(u32 handle,
                                        u32 vertex_count,
                                        const u32* indices,
                                        u32 index_count) {
+    const u64 geometry_generation = next_geometry_generation();
+    if (geometry_generation == 0) {
+        return kInvalid;
+    }
     Allocation& alloc = m_allocations[handle];
     Block& block = m_blocks[alloc.block_index];
     const u32 vertex_slot = std::max(alloc.vertex_slot, round_up_pool(vertex_count));
@@ -539,6 +559,7 @@ u32 ChunkGeometryPool::reuse_completed(u32 handle,
     alloc.index_slot = index_slot;
     alloc.vertex_count = vertex_count;
     alloc.index_count = index_count;
+    alloc.geometry_generation = geometry_generation;
     return handle;
 }
 

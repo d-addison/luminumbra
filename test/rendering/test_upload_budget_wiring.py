@@ -467,7 +467,7 @@ class UploadBudgetWiring(unittest.TestCase):
         for signal in ("NearTerrainPrepared(coverage.expected_surface_chunks", "coverage.ready_surface_chunks",
                        "coverage.pending_lod_chunks", "diagnostic.missing == 0",
                        "diagnostic.stale == 0", "diagnostic.pending == 0",
-                       "far.coverage_settled", "InitialWaterPrepared(water_prepared,",
+                       "far_world.coverage_settled", "InitialWaterPrepared(water_prepared,",
                        "uploads.water_uploads_deferred",
                        "foliage->build_pending()", "pipeline.render_uploads_settled()",
                        "streaming.quiescent()"):
@@ -776,6 +776,23 @@ class UploadBudgetWiring(unittest.TestCase):
         for retained in ("m_durable_read_failed", "snapshot.params_hash",
                          "HasPublishedFarLodSdf", "published_sdfs == captured_resident_sdfs"):
             self.assertIn(retained, validation)
+
+    def test_ladder_preparation_refusal_advances_legacy_in_the_same_frame(self):
+        selection = read(RENDERING / "FarWorldSelection.h")
+        dispatch = body(selection, "void AdvanceSelectedFarWorld(")
+        fallback = dispatch[dispatch.index("ladder();") + len("ladder();"):]
+        self.assertIn("selection.advance", fallback)
+        self.assertIn("selection.effective == FarWorldMode::Legacy", fallback)
+        self.assertIn("legacy();", fallback)
+        frame = body(self.pipeline, "void RenderPipeline::prepare_frame(")
+        advance = frame[frame.index("AdvanceSelectedFarWorld("):]
+        self.assertLess(advance.index("m_far_world->PrepareFrame("),
+                        advance.index("select_frame_far_world("))
+        tests = read(ROOT / "test/rendering/FarWorldLegacyIsolation_test.cpp")
+        for case in ("PreparationRefusalAdvancesAndSubmitsLegacyInTheSameFrame",
+                     "PreparationRefusalHonorsSuppressionAndDoesNotRetry",
+                     "SuccessfulPreparationDoesNotAdvanceLegacy"):
+            self.assertIn(case, tests)
 
     def test_impostor_collection_requires_submitted_resident_terrain_at_each_tree(self):
         gbuffer = read(RENDERING / "passes/GBufferPass.cpp")
@@ -1919,6 +1936,80 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertLess(allocation.index("block_index == kInvalid)\n            return kInvalid"),
                         allocation.index("std::memcpy("))
 
+    def test_terrain_diagnostic_refusal_clears_before_batched_fallback(self):
+        attributed = body(self.pipeline, "void SubmitDiagnosticTerrainBucket(")
+        refusal = compact(body(attributed, "if (resident.lod < 0 || resident.lod > 255)"))
+        self.assertLess(refusal.index('unsupported("terrain_resident_lod_unavailable")'),
+                        refusal.index("capture->clear_current_identity();"))
+        self.assertLess(refusal.index("capture->clear_current_identity();"),
+                        refusal.index("capture = nullptr;"))
+        # A table-full refusal clears, drops the capture and leaves the loop the same way.
+        table_full = compact(body(attributed, "if (capture->refused())"))
+        self.assertTrue(table_full.endswith(
+            "capture->clear_current_identity(); capture = nullptr; break;"), table_full)
+        self.assertEqual(attributed.count("break;"), 2)
+        draw = body(self.pipeline, "void RenderPipeline::draw_chunks_mdi(")
+        excess = compact(body(draw, "if (diagnostic_capture && running > 65536)"))
+        self.assertLess(excess.index("clear_current_identity();"),
+                        excess.index("diagnostic_capture = nullptr;"))
+        staged = body(draw, "if (diagnostic_chunks)")
+        self.assertIn("SubmitDiagnosticTerrainBucket(", staged)
+        self.assertIn("continue;", staged)
+
+    def test_terrain_diagnostic_identity_precedes_each_indirect_command(self):
+        attributed = body(self.pipeline, "void SubmitDiagnosticTerrainBucket(")
+        loop = compact(body(attributed, "for (std::size_t draw = first;"))
+        self.assertLess(loop.index("capture->write_current("),
+                        loop.index("AttributedGl::Submit( glDrawElementsIndirect,"))
+        self.assertIn(".lod = static_cast<std::uint32_t>(resident.lod)", loop)
+        self.assertIn("const auto& resident = draws[draw - first]", loop)
+
+    def test_terrain_generated_mesh_key_includes_resident_geometry_generation(self):
+        draw = body(self.pipeline, "void RenderPipeline::draw_chunks_mdi(")
+        self.assertIn(".geometry_generation = a.geometry_generation", draw)
+        attributed = body(self.pipeline, "void SubmitDiagnosticTerrainBucket(")
+        key = compact(attributed[attributed.index("std::string mesh_key;"):
+                                 attributed.index("capture->write_current(")])
+        self.assertEqual(key,
+                         'std::string mesh_key; mesh_key.reserve(94); mesh_key += "terrain/"; '
+                         "mesh_key += std::to_string(resident.chunk[0]); mesh_key += '/'; "
+                         "mesh_key += std::to_string(resident.chunk[1]); mesh_key += '/'; "
+                         'mesh_key += std::to_string(resident.chunk[2]); mesh_key += "/version/"; '
+                         'mesh_key += std::to_string(resident.mesh_version); '
+                         'mesh_key += "/generation/"; '
+                         'std::array<char, 20> generation{}; // uint64 has at most 20 decimal digits. '
+                         'const auto* generation_end = std::to_chars(generation.data(), '
+                         'generation.data() + generation.size(), resident.geometry_generation) .ptr; '
+                         'mesh_key.append(generation.data(), '
+                         'static_cast<std::size_t>(generation_end - generation.data()));')
+        regression = read(ROOT / "test/rendering/diagnostic_attribution_test.cpp")
+        self.assertIn("TerrainGeometryIdentityTracksUploadsAcrossEvictionAndRedraw", regression)
+
+    def test_terrain_geometry_generation_covers_both_upload_paths_and_never_resets(self):
+        pool = read(RENDERING / "passes/ChunkGeometryPool.cpp")
+        self.assertIn("u64 next_geometry_generation()", pool)
+        sequence = compact(body(pool, "u64 next_geometry_generation()"))
+        self.assertIn("static u64 generation = 0;", sequence)
+        self.assertIn("if (generation == std::numeric_limits<u64>::max()) { return 0; }",
+                      sequence)
+        self.assertTrue(sequence.endswith("return ++generation;"), sequence)
+        self.assertEqual(pool.count("next_geometry_generation();"), 2)
+        for signature in ("u32 ChunkGeometryPool::allocate_with_reclaim(",
+                          "u32 ChunkGeometryPool::reuse_completed("):
+            upload = compact(body(pool, signature))
+            self.assertIn("const u64 geometry_generation = next_geometry_generation();", upload)
+            self.assertIn("if (geometry_generation == 0) { return kInvalid; }", upload)
+            self.assertLess(upload.index("if (geometry_generation == 0)"),
+                            upload.index("std::memcpy("))
+            self.assertIn("alloc.geometry_generation = geometry_generation;", upload)
+            self.assertLess(upload.rindex("std::memcpy("),
+                            upload.index("alloc.geometry_generation = geometry_generation;"))
+        for signature in ("void ChunkGeometryPool::free(", "void ChunkGeometryPool::clear()",
+                          "void ChunkGeometryPool::destroy()"):
+            self.assertNotIn("generation", body(pool, signature))
+        header = read(RENDERING / "passes/ChunkGeometryPool.h")
+        self.assertIn("u64 geometry_generation = 0;", header)
+
     def test_terrain_retirement_covers_every_submission_and_never_overwrites(self):
         pool = read(RENDERING / "passes/ChunkGeometryPool.cpp")
         pool_header = read(RENDERING / "passes/ChunkGeometryPool.h")
@@ -1963,10 +2054,27 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("glDeleteSync(retired.completion)", destroy)
         self.assertIn("m_storage_bytes = 0", destroy)
         draw = body(self.pipeline, "void RenderPipeline::draw_chunks_mdi(")
-        self.assertIn("m_chunk_geometry_pool.mark_submitted(", draw)
-        self.assertLess(compact(draw).index("AttributedGl::Submit( glMultiDrawElementsIndirect,"),
-                        draw.index("m_chunk_geometry_pool.mark_submitted("))
-        self.assertEqual(compact(self.pipeline).count("AttributedGl::Submit( glMultiDrawElementsIndirect,"), 1)
+        attributed = body(self.pipeline, "void SubmitDiagnosticTerrainBucket(")
+        diagnostic = compact(body(attributed, "for (std::size_t draw = first;"))
+        self.assertLess(diagnostic.index("AttributedGl::Submit( glDrawElementsIndirect,"),
+                        diagnostic.index("retirement.submitted = true;"))
+        # A table-full refusal leaves the loop before its command is drawn individually.
+        self.assertLess(diagnostic.index("capture->refused()"),
+                        diagnostic.index("AttributedGl::Submit( glDrawElementsIndirect,"))
+        # Undiagnosed draws, and the rest of a bucket after a diagnostic refusal, share one multi-draw.
+        batched = compact(body(attributed, "if (mdi_first < first + count)"))
+        self.assertLess(batched.index("AttributedGl::Submit( glMultiDrawElementsIndirect,"),
+                        batched.index("retirement.submitted = true;"))
+        self.assertNotIn("pool.mark_submitted(", diagnostic)
+        self.assertNotIn("pool.mark_submitted(", batched)
+        # One fence-tracked retirement per bucket, also on an exception after a draw.
+        retire = compact(body(attributed, "~BucketRetirement()"))
+        self.assertIn("if (submitted) { pool.mark_submitted(bucket); }", retire)
+        self.assertEqual(compact(attributed).count("pool.mark_submitted("), 1)
+        self.assertEqual(compact(self.pipeline).count("AttributedGl::Submit( glMultiDrawElementsIndirect,"), 2)
+        shipping = compact(body(draw, "if (mdi_first < first + count)"))
+        self.assertLess(shipping.index("glMultiDrawElementsIndirect,"),
+                        shipping.index("m_chunk_geometry_pool.mark_submitted("))
         probe = read(ROOT / "test/rendering/render_smoke_test.cpp")
         self.assertIn("glMultiDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_INT, nullptr, 1, 0);\n"
                       "        pool_.mark_submitted(allocation.block_index);", probe)
@@ -2824,6 +2932,80 @@ class SkyLutContinuity(unittest.TestCase):
                 old_left = values[int(left * width)]
                 old_right = values[int(right * width)]
                 self.assertEqual(abs(old_left - old_right), 1.0)
+
+
+class DuskAttributionWiring(unittest.TestCase):
+    def test_audit_pose_and_only_last_settled_frame_request_attribution(self):
+        sweep = read(ROOT / "src/luminumbra_client/core/scenarios/WorldVisualSweep.cpp")
+        self.assertIn("anchor(168.0f, 10.0505952835083f, -40.0f)", sweep)
+        for token in ('{"dusk", 0.25f}', '{"yaw000", 0.0f, 0.0f, false',
+                      '{"yaw240", 240.0f, 0.0f, false', 'camera->Zoom = 75.0f;',
+                      'const int settle = storm ? 5 : 3;', 'apply_weather(storm, phase_clock,'):
+            self.assertIn(token, sweep)
+        settled = compact(body(sweep, "const auto render_settled ="))
+        self.assertIn("i + 1 == settle_frames ? attribution_dir : std::filesystem::path{}", settled)
+        self.assertIn("if (!ok)", settled)
+        selection = re.search(r"const bool dusk_attribution = (.*?);", compact(sweep)).group(1)
+        self.assertEqual(selection, "tod.time_of_day == 0.25f && "
+                         "(a.yaw_degrees == 0.0f || a.yaw_degrees == 240.0f) && !a.aim_at_water")
+        self.assertIn('failures.push_back("missing_attribution:" + c.file)', sweep)
+        self.assertIn('cell.attribution_complete = dusk_attribution && ok;', sweep)
+        self.assertIn('pipeline->set_terrain_coverage_diagnostics_enabled(enabled, bypass)', sweep)
+        self.assertIn('pipeline->set_terrain_coverage_diagnostics_enabled(true)', sweep)
+        for key in ("attribution_directory", "attribution_complete", "cloud_phase",
+                    "horizon_fov_degrees", "horizon_pitch_degrees"):
+            self.assertIn('"' + key + '"', sweep)
+
+    def test_matching_capture_precedes_present_and_propagates_failure(self):
+        source = read(ROOT / "src/luminumbra_client/core/ScenarioRunnerCapture.cpp")
+        hook = body(source, "void ScenarioRunnerImpl::onPreRenderWorldSweep()")
+        readback = hook.index("glReadPixels(")
+        self.assertIn("!renderPipeline.capture_terrain_coverage(attribution_dir)", hook)
+        attribution = hook.index("!renderPipeline.capture_terrain_coverage(attribution_dir)")
+        present = hook.index("glfwSwapBuffers(window)")
+        self.assertLess(readback, attribution)
+        self.assertLess(attribution, present)
+        refusal = body(hook, "if (!attribution_dir.empty() &&")
+        self.assertIn("return false;", refusal)
+        self.assertIn("settle_uploads(", hook[:readback])
+
+    def test_sources_are_bounded_and_completion_follows_every_readback(self):
+        source = read(RENDERING / "TerrainCoverageCapture.cpp")
+        capture = body(source, "bool RenderPipeline::capture_terrain_coverage(")
+        for name in ("lit-scene", "opaque-scene", "sky-view", "transmittance", "ambient-ssao",
+                     "shadow-depth", "shadow-tint", "fog-inscatter", "fog-transmittance"):
+            self.assertIn('"' + name + '"', capture)
+        for key in ("lighting_uniforms", "fog_uniforms", "ambient_color", "clouds", "weather",
+                    "volumetric_quality", "unavailable_terms", "lighting_source_scope"):
+            self.assertIn('"' + key + '"', capture)
+        self.assertLess(capture.index("CaptureFog("), capture.index('receipt["complete"] = true'))
+        self.assertLess(capture.index('receipt["complete"] = true'), capture.index("receipt.dump(2)"))
+        self.assertLess(capture.index("max_pixels / m_internal_height"), capture.index("create_directory("))
+        texture = compact(body(source, "bool CaptureTexture("))
+        for guard in ("texture == 0", "width <= 0", "height <= 0", "layers < 1", "layers > 64",
+                      "max_pixels / static_cast<std::size_t>(height)", "channels != 1",
+                      "glGetError() != GL_NO_ERROR", "!WriteFloatPlane("):
+            self.assertIn(guard, texture)
+        self.assertLess(texture.index("max_pixels /"), texture.index("std::vector<float> values(count)"))
+        for field in ("GL_PACK_IMAGE_HEIGHT", "GL_PACK_SKIP_IMAGES", "GL_PIXEL_PACK_BUFFER_BINDING",
+                      "GL_PACK_SWAP_BYTES"):
+            self.assertIn(field, source)
+        replay = body(source, "bool CaptureFog(")
+        self.assertIn('"aerial-inscatter"', replay)
+        self.assertIn('"aerial-opacity"', replay)
+        self.assertIn("glCheckNamedFramebufferStatus(", replay)
+        self.assertNotIn("setFloat(", replay)
+        self.assertNotIn("render_frame(", replay)
+        for state in ("GL_DRAW_FRAMEBUFFER_BINDING", "GL_CURRENT_PROGRAM", "GL_VERTEX_ARRAY_BINDING",
+                      "GL_VIEWPORT", "GL_COLOR_WRITEMASK", "GL_POLYGON_MODE", "GL_ACTIVE_TEXTURE"):
+            self.assertIn(state, body(source, "struct FogReadback"))
+        native = read(ROOT / "test/rendering/FarWorldFogGl_test.cpp")
+        fixture = body(native, "TEST_F(FarWorldFogGl, DuskAuditFogIsContinuousAcrossDistanceAndHeightBoundaries)")
+        for pin in ("ComputeSunGeometry(.25f, kSeasonalTiltAmplitude)", "{0.0f, 240.0f}",
+                    "{false, true}", "Near(samples[0], samples[1], .002f)",
+                    "EXPECT_GT(samples[0].a, .01f)"):
+            self.assertIn(pin, fixture)
+        self.assertIn("rendering/FarWorldFogGl_test.cpp", read(ROOT / "test/CMakeLists.txt"))
 
 
 class SkyAppearanceWiring(unittest.TestCase):
