@@ -37,7 +37,6 @@ target_include_directories(mod_dependency_solver_test PRIVATE ../src)
 target_link_libraries(mod_dependency_solver_test PRIVATE gtest_main luminumbra_common)
 luminumbra_configure_first_party_target(mod_dependency_solver_test)
 
-include("${CMAKE_CURRENT_LIST_DIR}/sources.cmake")
 
 set(_native_plugin_variants good bad_major bad_minor bad_size query_failure
     init_failure clean_init_failure null_context missing_query missing_init missing_shutdown)
@@ -268,7 +267,6 @@ target_compile_definitions(net_sockets_transport_test PRIVATE LUMINUMBRA_ENABLE_
 target_link_libraries(net_sockets_transport_test PRIVATE gtest_main spdlog::spdlog)
 luminumbra_configure_first_party_target(net_sockets_transport_test)
 
-include("${CMAKE_CURRENT_LIST_DIR}/sources.cmake")
 add_executable(common_tests
     ${MATERIAL_REGISTRY_TEST_SOURCES}
     common/StationDiscoveryArguments_test.cpp
