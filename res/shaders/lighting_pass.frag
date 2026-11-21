@@ -312,6 +312,31 @@ vec3 diagnosticDpdx;
 vec3 diagnosticDpdy;
 bool diagnosticShadowObserved = false;
 #endif
+// Interpolate visibility after comparison, never the stored depths. The
+// separable four by four box needs only 25 nearest-depth taps. Fractional
+// edge weights remove texel-sized steps without increasing the surface budget.
+float filteredShadow(vec3 projected, int cascadeIndex, float bias) {
+    if (any(lessThan(projected, vec3(0.0))) || any(greaterThan(projected, vec3(1.0)))) {
+        return 1.0;
+    }
+    const int WIDTH = 4;
+    vec2 size = vec2(textureSize(u_shadowCascades, 0).xy);
+    vec2 texelPosition = projected.xy * size;
+    vec2 phase = fract(texelPosition);
+    vec2 base = floor(texelPosition) - vec2(float(WIDTH / 2));
+    float visibility = 0.0;
+    for (int x = 0; x <= WIDTH; ++x) {
+        float wx = x == 0 ? 1.0 - phase.x : (x == WIDTH ? phase.x : 1.0);
+        for (int y = 0; y <= WIDTH; ++y) {
+            float wy = y == 0 ? 1.0 - phase.y : (y == WIDTH ? phase.y : 1.0);
+            vec2 uv = (base + vec2(x, y) + 0.5) / size;
+            float depth = texture(u_shadowCascades, vec3(uv, cascadeIndex)).r;
+            visibility += wx * wy * (projected.z - bias > depth ? 0.0 : 1.0);
+        }
+    }
+    return visibility / float(WIDTH * WIDTH);
+}
+
 float CalculateShadow(vec3 fragPos, vec3 normal, vec3 lightDir, float viewDepth) {
     // 1. Determine which cascade to use in a branchless way
     int cascadeIndex = 0;
@@ -336,8 +361,6 @@ float CalculateShadow(vec3 fragPos, vec3 normal, vec3 lightDir, float viewDepth)
         float footprint = max(length(uvDx * shadowSize), length(uvDy * shadowSize));
         diagnosticShadowUv = vec3(projCoords.xy, log2(max(footprint, 1e-8)));
         // Observe full light-frustum coverage without changing production sampling.
-        // Production also samples before the light near plane; that still selects a
-        // real index, but the diagnostic must distinguish absence from all four frusta.
         bool insideSelected = fragPosLightSpace.w != 0.0 &&
             all(greaterThanEqual(projCoords, vec3(0.0))) && all(lessThanEqual(projCoords, vec3(1.0)));
         if (!insideSelected) {
@@ -355,7 +378,7 @@ float CalculateShadow(vec3 fragPos, vec3 normal, vec3 lightDir, float viewDepth)
     }
 #endif
 
-    if(projCoords.z > 1.0 || projCoords.x < 0.0 || projCoords.x > 1.0 || projCoords.y < 0.0 || projCoords.y > 1.0) {
+    if(projCoords.z < 0.0 || projCoords.z > 1.0 || projCoords.x < 0.0 || projCoords.x > 1.0 || projCoords.y < 0.0 || projCoords.y > 1.0) {
         // Outside the last cascade's light frustum: no shadow information
         // exists, so treat the fragment as LIT (standard CSM out-of-range
         // convention). Returning 0.0 here rendered everything beyond the
@@ -365,21 +388,8 @@ float CalculateShadow(vec3 fragPos, vec3 normal, vec3 lightDir, float viewDepth)
     }
 
     // 3. PCF (Percentage-Closer Filtering)
-    float currentDepth = projCoords.z;
-    float shadow = 0.0;
     float bias = max(0.005 * (1.0 - dot(normal, lightDir)), 0.001);
-    vec2 texelSize = 1.0 / vec2(textureSize(u_shadowCascades, 0).xy);
-
-    // 5x5 PCF (25 taps) for softer shadow edges / less harsh terminators than the
-    // prior 3x3. Cheap in this pass (lighting is ~0.15 ms); soft contact shadows
-    // read far more naturally than the hard 3x3 step.
-    for(int x = -2; x <= 2; ++x) {
-        for(int y = -2; y <= 2; ++y) {
-            float pcfDepth = texture(u_shadowCascades, vec3(projCoords.xy + vec2(x, y) * texelSize, cascadeIndex)).r;
-            shadow += currentDepth - bias > pcfDepth ? 1.0: 0.0;
-        }
-    }
-    return 1.0 - (shadow / 25.0);
+    return filteredShadow(projCoords, cascadeIndex, bias);
 }
 // sample the tinted transmission at the SAME cascade
 // projection CalculateShadow uses. Out-of-range = white (no tint information),
@@ -397,7 +407,7 @@ vec3 SampleShadowTint(vec3 fragPos, float viewDepth) {
     vec4 fragPosLightSpace = u_lightSpaceMatrices[cascadeIndex] * vec4(fragPos, 1.0);
     vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
     projCoords = projCoords * 0.5 + 0.5;
-    if (projCoords.z > 1.0 || projCoords.x < 0.0 || projCoords.x > 1.0 ||
+    if (projCoords.z < 0.0 || projCoords.z > 1.0 || projCoords.x < 0.0 || projCoords.x > 1.0 ||
         projCoords.y < 0.0 || projCoords.y > 1.0) {
         return vec3(1.0);
     }

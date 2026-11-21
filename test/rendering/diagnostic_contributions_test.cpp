@@ -7,6 +7,7 @@
 #include "rendering/Shader.h"
 #include "rendering/passes/DebugViewPass.h"
 #include "rendering/passes/LightingPass.h"
+#include "rendering/passes/PassGlHelpers.h"
 #include <glad/glad.h>
 
 #define GLFW_INCLUDE_NONE
@@ -168,10 +169,323 @@ TEST(DiagnosticContributions, LiveTermsNeverRequestIdentityReplayOrInspectorRead
     control = {};
 }
 
+class ShadowFilterProbe {
+public:
+    ShadowFilterProbe() {
+        glGenTextures(1, &output);
+        glBindTexture(GL_TEXTURE_2D, output);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 1, 1, 0, GL_RGBA, GL_FLOAT, nullptr);
+        glGenFramebuffers(1, &framebuffer);
+        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, output, 0);
+        glDrawBuffer(GL_COLOR_ATTACHMENT0);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glViewport(0, 0, 1, 1);
+        glGenVertexArrays(1, &vao);
+        glBindVertexArray(vao);
+        glGenTextures(1, &shadows);
+    }
+    ~ShadowFilterProbe() {
+        glUseProgram(0);
+        glDeleteProgram(program);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glDeleteFramebuffers(1, &framebuffer);
+        glDeleteTextures(1, &output);
+        glDeleteTextures(1, &shadows);
+        glBindVertexArray(0);
+        glDeleteVertexArrays(1, &vao);
+    }
+    ShadowFilterProbe(const ShadowFilterProbe&) = delete;
+    ShadowFilterProbe& operator=(const ShadowFilterProbe&) = delete;
+    void shadow_probe(const char* filename) {
+        const auto source = Source(std::string("res/shaders/") + filename);
+        const auto begin = source.find("float filteredShadow(");
+        ASSERT_NE(begin, std::string::npos);
+        const auto end = source.find("\n}\n", begin);
+        ASSERT_NE(end, std::string::npos);
+        // The extracted function must also be called by the shipping consumer.
+        ASSERT_NE(source.find("filteredShadow(", end), std::string::npos);
+        const auto tint_begin = source.find("vec3 SampleShadowTint(");
+        ASSERT_NE(tint_begin, std::string::npos);
+        const auto tint_end = source.find("\n}\n", tint_begin);
+        ASSERT_NE(tint_end, std::string::npos);
+        const std::string fragment = R"(#version 450 core
+uniform sampler2DArray u_shadowCascades;
+uniform sampler2DArray u_shadowTintCascades;
+uniform int u_shadowTintEnabled;
+uniform mat4 u_lightSpaceMatrices[4];
+uniform vec4 u_cascadeSplits;
+uniform vec3 projected;
+uniform int layer;
+uniform bool probeTint;
+uniform float bias;
+out vec4 result;
+)" + source.substr(begin, end + 3 - begin) +
+                                     source.substr(tint_begin, tint_end + 3 - tint_begin) +
+                                     R"(
+void main() {
+    vec3 value = probeTint ? SampleShadowTint(projected * 2 - 1, float(layer) + 0.5)
+                          : vec3(filteredShadow(projected, layer, bias));
+    result = vec4(value, 1);
+}
+)";
+        const char* vertex = R"(#version 450 core
+void main() {
+    vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+    gl_Position = vec4(p * 2 - 1, 0, 1);
+})";
+        glUseProgram(0);
+        glDeleteProgram(program);
+        program = glCreateProgram();
+        for (const auto& stage :
+             {std::pair<GLenum, const char*>{GL_VERTEX_SHADER, vertex},
+              std::pair<GLenum, const char*>{GL_FRAGMENT_SHADER, fragment.c_str()}}) {
+            const GLuint shader = glCreateShader(stage.first);
+            glShaderSource(shader, 1, &stage.second, nullptr);
+            glCompileShader(shader);
+            GLint compiled = GL_FALSE;
+            glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
+            ASSERT_EQ(compiled, GL_TRUE) << filename;
+            glAttachShader(program, shader);
+            glDeleteShader(shader);
+        }
+        glLinkProgram(program);
+        GLint linked = GL_FALSE;
+        glGetProgramiv(program, GL_LINK_STATUS, &linked);
+        ASSERT_EQ(linked, GL_TRUE);
+        glUseProgram(program);
+        glDisable(GL_DEPTH_TEST);
+        glUniform1i(glGetUniformLocation(program, "u_shadowCascades"), 0);
+        glUniform1i(glGetUniformLocation(program, "u_shadowTintCascades"), 0);
+        glUniform1i(glGetUniformLocation(program, "u_shadowTintEnabled"), 1);
+        glUniform4f(glGetUniformLocation(program, "u_cascadeSplits"), 1, 2, 3, 4);
+        const glm::mat4 identity(1);
+        for (int index = 0; index < 4; ++index) {
+            const auto name = "u_lightSpaceMatrices[" + std::to_string(index) + "]";
+            glUniformMatrix4fv(
+                glGetUniformLocation(program, name.c_str()), 1, GL_FALSE, &identity[0][0]);
+        }
+        glUniform1f(glGetUniformLocation(program, "bias"), 0.002f);
+    }
+
+    float shadow_sample(const glm::vec3& projected, int layer, bool tint = false) {
+        glUniform3fv(glGetUniformLocation(program, "projected"), 1, &projected[0]);
+        glUniform1i(glGetUniformLocation(program, "layer"), layer);
+        glUniform1i(glGetUniformLocation(program, "probeTint"), tint ? 1 : 0);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        std::array<float, 4> pixel{};
+        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, pixel.data());
+        return pixel[0];
+    }
+
+    GLuint shadows = 0;
+
+private:
+    GLuint program = 0, framebuffer = 0, output = 0, vao = 0;
+};
+
+TEST(DiagnosticContributions, LightBoundsContainEveryCornerAndOrderDepthTowardTheLight) {
+    EXPECT_NE(Source("src/luminumbra_client/rendering/RenderPipeline.cpp")
+                  .find("PassGl::shadow_projection_from_bounds("),
+              std::string::npos);
+    for (const auto range : {glm::vec2(-90, 10), glm::vec2(-90, -30), glm::vec2(10, 90)}) {
+        const glm::vec3 minimum(-12, -8, range.x);
+        const glm::vec3 maximum(9, 15, range.y);
+        const auto projection = PassGl::shadow_projection_from_bounds(minimum, maximum);
+        glm::vec4 planes[6];
+        PassGl::ExtractFrustumPlanes(projection, planes, PassGl::ClipDepth::NegativeOneToOne);
+        for (int x = 0; x < 2; ++x)
+            for (int y = 0; y < 2; ++y)
+                for (int z = 0; z < 2; ++z) {
+                    const glm::vec4 point(x ? maximum.x : minimum.x,
+                                          y ? maximum.y : minimum.y,
+                                          z ? maximum.z : minimum.z,
+                                          1);
+                    const auto clip = projection * point;
+                    EXPECT_NEAR(clip.x, x ? 1 : -1, 1e-5);
+                    EXPECT_NEAR(clip.y, y ? 1 : -1, 1e-5);
+                    EXPECT_NEAR(clip.z, z ? -1 : 1, 1e-5);
+                    for (const auto& plane : planes)
+                        EXPECT_GE(glm::dot(plane, point), -1e-4);
+                }
+        const auto closest = projection * glm::vec4(0, 0, maximum.z, 1);
+        const auto farthest = projection * glm::vec4(0, 0, minimum.z, 1);
+        EXPECT_LT(closest.z, farthest.z); // GL_LESS shadow depth, independent of scene reversed-Z.
+    }
+}
+
+TEST_F(DiagnosticContributionsGl,
+       ProductionShadowFiltersInterpolateComparisonsAtEveryResolutionAndCascade) {
+    for (const auto& consumer : {std::pair{"lighting_pass.frag", 4}}) {
+        ShadowFilterProbe probe;
+        ASSERT_NO_FATAL_FAILURE(probe.shadow_probe(consumer.first));
+        const GLuint shadows = probe.shadows;
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, shadows);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+        const std::array<float, 4> border = {1, 1, 1, 1};
+        glTexParameterfv(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BORDER_COLOR, border.data());
+        for (const int size : {8, 32, 1024, 1536, 2048}) {
+            SCOPED_TRACE(size);
+            // One layer at a time, bounded to 2048^2 floats (16 MiB) of CPU staging.
+            const auto extent = static_cast<std::size_t>(size);
+            std::vector<float> depths(extent * extent);
+            glTexImage3D(
+                GL_TEXTURE_2D_ARRAY, 0, GL_R32F, size, size, 4, 0, GL_RED, GL_FLOAT, nullptr);
+            for (int layer = 0; layer < 4; ++layer) {
+                for (int y = 0; y < size; ++y)
+                    for (int x = 0; x < size; ++x)
+                        depths[static_cast<std::size_t>(y) * extent + static_cast<std::size_t>(x)] =
+                            (layer % 2 == 0 ? x : y) < size / 2 ? 0.25f : 0.75f;
+                glTexSubImage3D(GL_TEXTURE_2D_ARRAY,
+                                0,
+                                0,
+                                0,
+                                layer,
+                                size,
+                                size,
+                                1,
+                                GL_RED,
+                                GL_FLOAT,
+                                depths.data());
+                for (int step = -48; step <= 48; ++step) {
+                    const float offset = static_cast<float>(step) / 16;
+                    glm::vec3 projected(0.5f, 0.5f, 0.5f);
+                    projected[layer % 2] += offset / static_cast<float>(size);
+                    // Independent continuous box-area oracle, including the white border.
+                    const float position = 0.5f * static_cast<float>(size) + offset;
+                    const float width = static_cast<float>(consumer.second);
+                    const float left = position - 0.5f * width;
+                    const float right = position + 0.5f * width;
+                    const float lit =
+                        std::max(0.0f, right - std::max(left, 0.5f * static_cast<float>(size)));
+                    const float border_lit = std::max(0.0f, std::min(right, 0.0f) - left);
+                    const float expected = (lit + border_lit) / width;
+                    EXPECT_NEAR(probe.shadow_sample(projected, layer), expected, 1e-6f);
+                }
+                EXPECT_FLOAT_EQ(probe.shadow_sample(glm::vec3(0.5f, 0.5f, 0), layer), 1);
+                EXPECT_FLOAT_EQ(probe.shadow_sample(glm::vec3(0.5f, 0.5f, 1), layer), 0);
+                EXPECT_FLOAT_EQ(probe.shadow_sample(glm::vec3(0.5f), layer, true), 0.75f);
+                for (int axis = 0; axis < 3; ++axis)
+                    for (const float outside : {-0.001f, 1.001f}) {
+                        glm::vec3 projected(0.5f);
+                        projected[axis] = outside;
+                        EXPECT_FLOAT_EQ(probe.shadow_sample(projected, layer), 1);
+                        EXPECT_FLOAT_EQ(probe.shadow_sample(projected, layer, true), 1);
+                    }
+                // Border taps carry white visibility, rather than clamping an occluder.
+                EXPECT_NEAR(probe.shadow_sample(glm::vec3(0, 0, 0.5f), layer), 0.75f, 1e-6f);
+            }
+        }
+    }
+}
+
+TEST_F(DiagnosticContributionsGl, FroxelTintIsIdentityOutsideEveryLightPlane) {
+    const auto source = Source("res/shaders/froxel_inject.comp");
+    const char* text = source.c_str();
+    const GLuint shader = glCreateShader(GL_COMPUTE_SHADER);
+    glShaderSource(shader, 1, &text, nullptr);
+    glCompileShader(shader);
+    GLint compiled = GL_FALSE;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
+    ASSERT_EQ(compiled, GL_TRUE);
+    const GLuint program = glCreateProgram();
+    glAttachShader(program, shader);
+    glDeleteShader(shader);
+    glLinkProgram(program);
+    GLint linked = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    ASSERT_EQ(linked, GL_TRUE);
+    glUseProgram(program);
+
+    std::array<GLuint, 3> textures{};
+    glGenTextures(static_cast<GLsizei>(textures.size()), textures.data());
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, textures[0]);
+    const std::array<float, 4> depth = {1, 1, 1, 1};
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_R32F, 1, 1, 4, 0, GL_RED, GL_FLOAT, depth.data());
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, textures[1]);
+    const std::array<float, 12> tint = {
+        .25f, .5f, .75f, .25f, .5f, .75f, .25f, .5f, .75f, .25f, .5f, .75f};
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGB32F, 1, 1, 4, 0, GL_RGB, GL_FLOAT, tint.data());
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_3D, textures[2]);
+    // One 8x8 workgroup writes slice zero; readback is bounded to 256 floats.
+    glTexStorage3D(GL_TEXTURE_3D, 1, GL_RGBA16F, 8, 8, 1);
+    glBindImageTexture(0, textures[2], 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA16F);
+    glUniform1i(glGetUniformLocation(program, "u_shadowCascades"), 0);
+    glUniform1i(glGetUniformLocation(program, "u_shadowTintCascades"), 1);
+    const glm::mat4 identity(1);
+    glUniformMatrix4fv(
+        glGetUniformLocation(program, "u_inverseView"), 1, GL_FALSE, &identity[0][0]);
+    glUniform3f(glGetUniformLocation(program, "u_cameraPos"), 0, 0, 0);
+    glUniform3f(glGetUniformLocation(program, "u_sunDirection"), 0, 0, -1);
+    glUniform3f(glGetUniformLocation(program, "u_sunColor"), 1, 1, 1);
+    glUniform3f(glGetUniformLocation(program, "u_ambientColor"), 0, 0, 0);
+    glUniform1f(glGetUniformLocation(program, "u_tanHalfFovY"), 1);
+    glUniform1f(glGetUniformLocation(program, "u_aspect"), 1);
+    glUniform1f(glGetUniformLocation(program, "u_baseDensity"), 1);
+    glUniform1f(glGetUniformLocation(program, "u_densityFalloff"), 0);
+    glUniform1f(glGetUniformLocation(program, "u_baseHeight"), 0);
+    glUniform4f(glGetUniformLocation(program, "u_cascadeSplits"), 1, 2, 3, 4);
+
+    // Interior tint remains active; each of the six outside planes is identity.
+    for (int axis = -1; axis < 3; ++axis) {
+        for (const float coordinate : {-1.01f, -1.0f, 1.0f, 1.01f}) {
+            SCOPED_TRACE(axis);
+            SCOPED_TRACE(coordinate);
+            glm::vec4 projected(0, 0, 0, 1);
+            if (axis >= 0)
+                projected[axis] = coordinate;
+            glm::mat4 projection(0);
+            projection[3] = projected;
+            for (int index = 0; index < 4; ++index) {
+                const auto name = "u_lightSpaceMatrices[" + std::to_string(index) + "]";
+                glUniformMatrix4fv(
+                    glGetUniformLocation(program, name.c_str()), 1, GL_FALSE, &projection[0][0]);
+            }
+            std::array<std::array<float, 256>, 2> samples{};
+            for (int enabled = 0; enabled < 2; ++enabled) {
+                glUniform1i(glGetUniformLocation(program, "u_shadowTintEnabled"), enabled);
+                glDispatchCompute(1, 1, 1);
+                glMemoryBarrier(GL_TEXTURE_UPDATE_BARRIER_BIT);
+                glGetTexImage(GL_TEXTURE_3D,
+                              0,
+                              GL_RGBA,
+                              GL_FLOAT,
+                              samples[static_cast<std::size_t>(enabled)].data());
+            }
+            for (std::size_t pixel = 0; pixel < 64; ++pixel) {
+                ASSERT_GT(samples[0][pixel * 4], 0);
+                for (std::size_t channel = 0; channel < 3; ++channel) {
+                    const bool inside = axis < 0 || std::abs(coordinate) <= 1;
+                    const float transmission = inside ? .25f * static_cast<float>(channel + 1) : 1;
+                    EXPECT_NEAR(samples[1][pixel * 4 + channel],
+                                samples[0][pixel * 4 + channel] * transmission,
+                                .0001f);
+                }
+                EXPECT_EQ(samples[1][pixel * 4 + 3], samples[0][pixel * 4 + 3]);
+            }
+        }
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glUseProgram(0);
+    glDeleteProgram(program);
+    glDeleteTextures(static_cast<GLsizei>(textures.size()), textures.data());
+}
+
 TEST(DiagnosticContributions, CaptureOffLightingAndGBufferKeepEveryOriginalByte) {
     const auto lighting = Source("res/shaders/lighting_pass.frag");
     EXPECT_NE(lighting.find("#ifdef LUMIN_DIAG_CONTRIBUTIONS\n"), std::string::npos);
-    EXPECT_EQ(Hash(CaptureOff(lighting)), 0xc6e9bc9c6fc7110bULL);
+    EXPECT_EQ(Hash(CaptureOff(lighting)), 0xf8fca67f768319eeULL);
     // Remove only additive instrumentation, retaining the original, fixed off-byte oracle.
     EXPECT_EQ(Hash(CaptureOff(Source("res/shaders/g_buffer.frag"), "#ifdef LUMIN_DIAG_SURFACE\n")),
               0x7289f9525f762361ULL);

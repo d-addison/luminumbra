@@ -140,7 +140,7 @@
     "res/shaders/g_buffer.vert": "209c1c0801801209e669e60dcadfa7085e8e44780f9e2c7599a7d48a5fe2abed",
     "res/shaders/grass_compact_prefix.comp": "43bcf2b6c883f958cab97d9b88c911701edd1ff1416e0290ef427228b406e677",
     "res/shaders/instanced_mesh.vert": "83198486e34bcb2d2ad4dcd5271efc9b4fd5deab5842768a8a85eac76d245d9c",
-    "res/shaders/lighting_pass.frag": "4f1cf13c57aea1a8c4b0c5195e06135a983377b7ca0be591201b5b5cfcfa4d0a",
+    "res/shaders/lighting_pass.frag": "5ca4acaa1c88120006c13da7d5edadbbdaadd8c69fbee8bd696c05ffb830a5dc",
     "res/shaders/magical_particles.frag": "dcb928e1b40f30b5cfcf32796a675a12b38bee756deb9e988ddf2862c0ae3c8c",
     "res/shaders/ssao.vert": "f5c6db443362910b98714dd5dcfb5bc1c54e4e23e4a87f1cfc043f07ee01777c",
     "res/shaders/static_asset.frag": "38945ff338541c021f1b4d736648794cc556ce09183d520d76a28e7843e08d2c",
@@ -197,6 +197,9 @@
     "reversed-z": "d2c0f9e1a62e750c2ea88959818e53b9e155e1ecf1516e5f1603fd9a612c1c26",
     "terrain-blend": "b079254cb96c67ae0eeaada25d0da87536d672d333cc8b130a43b8279a5d29c3",
     "tree-cutout": "d2f7312235786b11c22e66a155d2f4699ab7112bd80a65e30e88558a89705e95"
+  },
+  "regression_inputs": {
+    "res/shaders/froxel_inject.comp": "64db4d491132c4aa1dffd9b11019d2d4241d276b4bf8cc4e64afd6edd11ee3b8"
   },
   "schema": 3,
   "size": [
