@@ -21,6 +21,28 @@ visible in the debug HUD and diagnostic snapshots. Normal presets still lack
 the injected immutable fixture, so the default request does not establish native
 Ladder activation or qualification.
 
+## Legacy refusal fallback
+
+Effective Legacy advances and submits terrain and its water sheets after a
+Ladder refusal. If preparation changes the selection from Ladder to Legacy,
+the same frame advances Legacy once; successful Ladder preparation does not
+advance Legacy. Initial suppression and suppression published by preparation
+prevent that fallback update. This transition uses the existing bounded Legacy
+build and upload queues; it does not wait for cold terrain to become resident.
+
+Legacy upload freshness is region-scoped, so unrelated authority updates do not
+starve completed terrain and water builds. Local and halo authority changes,
+parameter changes and invalid immutable payloads still reject stale builds.
+Tree impostors require resident terrain support: submitted or resident live
+terrain, or confirmed resident terrain from the selected far renderer. Unknown
+far coverage refuses the impostor and retains the available mesh LOD fallback.
+
+Registered CPU selection and source-contract regressions cover preparation
+refusal, suppression and successful Ladder preparation. Existing terrain/water
+and impostor regressions cover residency and ownership. Native re-capture of
+the preview and archipelago horizon remains pending for issue #867; these
+checks do not establish native visual qualification or close that issue.
+
 `farlod-horizon-analysis.json` keeps the historical
 `luminumbra.farlod_horizon.v1` keys and thresholds. Its most-converged legacy
 aggregate is historical evidence; it cannot qualify ladder coverage.
