@@ -150,6 +150,10 @@ public:
     const Persistence::OwnerContinuation* RestoredOwnerContinuation() const;
     // Runner boot reserves this storage through SetReplicatedSimulationAnchors.
     void SetOwnerContinuationSimulationAnchors(std::span<const Vec3> anchors);
+    // World reloads clear the reserved storage; the runner reserves it again before reuse.
+    bool ReplicatedSimulationAnchorsReserved(std::size_t count) const {
+        return m_replicatedSimulationAnchors && m_replicatedSimulationAnchors->capacity() >= count;
+    }
 
     ~GameSession();
 
@@ -474,6 +478,8 @@ public:
     [[nodiscard]] const std::string& PresetContentHash() const {
         return m_presetContentHash;
     }
+    // Const snapshot of the effective values used by identity and replay admission.
+    [[nodiscard]] luminumbra::core::SimulationIdentityValues EffectiveIdentityValues() const;
     [[nodiscard]] std::map<std::string, bool> EffectiveSimulationGates() const;
 
     void SetEcologyTuning(const luminumbra::ai::EcologyTuning& t) {
@@ -805,7 +811,6 @@ private:
     std::uint64_t m_worldRevision = 0;
     bool m_transientWorld = false;
     void ResetWorldSystems();
-    [[nodiscard]] luminumbra::core::SimulationIdentityValues EffectiveIdentityValues() const;
     void RestoreWorldClock(const WorldClock& clock);
     void RestoreAmbientFieldsAtTick(std::uint64_t tick);
     bool SaveWorldMetadataTo(const std::filesystem::path& save_dir,
