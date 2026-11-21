@@ -241,7 +241,8 @@ struct ScenarioRunnerImpl::RuntimeWorldSweepBackend {
     }
     Luminumbra::Rendering::TemporalSweepOutput
     capture(const Luminumbra::Rendering::TemporalSequenceStep& step) {
-        if (!audit.completed || audit.completed->simulation_tick != step.simulation_tick ||
+        if (!audit.sequence || !audit.completed ||
+            audit.completed->simulation_tick != step.simulation_tick ||
             audit.completed->sub_tick_60 != step.sub_tick_60 ||
             audit.completed->frame_index != step.frame_index ||
             audit.completed->control != step.control) {
@@ -279,6 +280,9 @@ struct ScenarioRunnerImpl::RuntimeWorldSweepBackend {
     }
     Luminumbra::Rendering::TemporalSweepOutput
     publish(const Luminumbra::Rendering::TemporalSequenceStep& step) {
+        if (!audit.sequence) {
+            return {};
+        }
         const bool published = audit.sequence->publishCompletionManifest(output / "sequence.json");
         return {published, published ? step.byte_limit : 0};
     }
