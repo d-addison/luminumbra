@@ -1111,7 +1111,7 @@ TEST_P(ClientReplayProducerTest, AutomaticDumpMatchesCliBootAndReconstructsStart
     options.root = root.root_string();
     options.seed = GetParam() ? "4294967297" : "424242";
     options.preset = "default";
-    options.ticks = 0;
+    options.ticks = 1;
     options.surface_radius = 0;
     options.collision_radius = 0;
     options.test_streaming_radius_cap = 1;
@@ -1177,6 +1177,10 @@ TEST_P(ClientReplayProducerTest, AutomaticDumpMatchesCliBootAndReconstructsStart
     Server::ServerWorldRunner playback(*playback_config, {.owner_continuation = true});
     ASSERT_TRUE(playback.Boot());
     EXPECT_EQ(playback.ComputeWorldHash(), automatic->header.start_world_hash);
+    EXPECT_EQ(playback.Session()->ActiveRegionsEnabled(), GetParam());
+    const auto playback_step = playback.RunFixedTicks(1);
+    ASSERT_EQ(playback_step.ticks_executed, 1u);
+    ASSERT_FALSE(playback_step.region_fault);
     options.replay_path = dump.string();
     options.artifact_path = (root.path() / "client-playback.json").string();
     // The unrecorded edit must diverge at the checkpoint, after reconstructing
@@ -1193,6 +1197,11 @@ TEST_P(ClientReplayProducerTest, AutomaticDumpMatchesCliBootAndReconstructsStart
         ASSERT_TRUE(replay::ReadRegionScheduleTrace(dump, 1, trace, trace_error)) << trace_error;
         ASSERT_EQ(trace.size(), 1u);
         EXPECT_EQ(trace.front().second, client.GetRegionSchedule().digest);
+        EXPECT_EQ(trace.front().second, playback.Session()->GetRegionSchedule().digest);
+        replay::RegionScheduleTrace cli_trace;
+        ASSERT_TRUE(replay::ReadRegionScheduleTrace(options.record_path, 1, cli_trace, trace_error))
+            << trace_error;
+        EXPECT_EQ(trace, cli_trace);
         artifact_file.close();
         fs::remove(options.artifact_path);
         fs::remove(dump.string() + ".regions.json");
