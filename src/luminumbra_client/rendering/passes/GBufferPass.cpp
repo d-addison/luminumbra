@@ -18,6 +18,7 @@
 #include "core/IsolationConfig.h" // ctx.isolation->renders(...) needs the full type
 #include "core/Log.h"
 #include "luminumbra_common/components/CoreComponents.h"
+#include "luminumbra_common/core/IntegerPrimitives.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "rendering/Camera.h"
 #include "rendering/Mesh.h"
@@ -80,6 +81,19 @@ bool UseDrawProgram(const Shader* shader, GBufferDrawStats& stats) {
     }
     shader->use();
     return true;
+}
+
+// Queued impostor geometry is unsupported even when its program prevents submission.
+// An unavailable base stays the refused program, so it records no second draw.
+Shader* RefusedImpostorProgram(Shader* base, GBufferDiagnosticCapture* capture) {
+    if (!capture) {
+        return base;
+    }
+    capture->unsupported("tree_impostor_fragment_output_unavailable", 3);
+    if (base && base->IsValid()) {
+        return capture->variant(base, false, {}, true);
+    }
+    return base;
 }
 } // namespace
 
@@ -406,8 +420,12 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
         geometry_pass_static_meshes(ctx, input, registry, camera, fp, stats);
         if (authored) {
             DebugViewPass::unsupported_surface();
-            const auto authored_stats =
-                m_authored_pass->Render(*input.authored_view, input.authored_draws, m_gbuffer);
+            // Established above; mesh subpasses only change bindings/culling.
+            const StaticDrawPass::CallerState caller{
+                .depth = {.function = GL_GREATER, .write_mask = GL_TRUE, .test_enabled = GL_TRUE},
+                .draw_framebuffer = m_gbuffer.fbo_id};
+            const auto authored_stats = m_authored_pass->Render(
+                *input.authored_view, input.authored_draws, m_gbuffer, false, &caller);
             stats.authored_draws += authored_stats.draws;
             stats.authored_indices += authored_stats.indices;
         }
@@ -620,15 +638,6 @@ void GBufferPass::build_static_prop_cache(entt::registry& registry) {
         pathIntern.emplace(p, idx);
         return idx;
     };
-    auto fnv64 = [](const std::string& s, std::uint64_t seed) {
-        std::uint64_t h = seed;
-        for (const char character : s) {
-            const auto c = static_cast<unsigned char>(character);
-            h ^= c;
-            h *= 1099511628211ull;
-        }
-        return h;
-    };
     // Render-only deterministic position hash -> [0,1] (never feeds sim/world_hash).
     auto hash01 = [](const glm::vec3& p, float salt) {
         float s = std::sin(glm::dot(p, glm::vec3(12.9898f, 78.233f, 37.719f)) + salt) * 43758.5453f;
@@ -685,7 +694,8 @@ void GBufferPass::build_static_prop_cache(entt::registry& registry) {
             }
             cp.anchorSlot = slot->second;
         }
-        cp.baseMeshHash = fnv64(mesh_info.meshPath, 1469598103934665603ull);
+        cp.baseMeshHash = Core::Fnv1a64(
+            mesh_info.meshPath.data(), mesh_info.meshPath.size(), Core::kFnv1a64HistoricalBasis);
         cp.pathIndex = intern(mesh_info.meshPath);
         cp.materialId = mesh_info.materialId;
         m_staticPropCache.push_back(cp);
@@ -819,26 +829,31 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     // actually resolved so the group is keyed by what is really drawn.
     auto resolve_mesh = [&](const std::string& candidatePath,
                             const std::string& basePath) -> std::pair<Mesh*, std::string> {
-        if (m_meshCache.find(candidatePath) == m_meshCache.end()) {
+        auto candidate = m_meshCache.find(candidatePath);
+        if (candidate == m_meshCache.end()) {
             if (ctx.frozen_replay)
                 throw std::logic_error("Replay cannot change mesh residency");
             std::string full = (input.root_path / candidatePath).string();
             // Only load the LOD variant if it exists on disk; an absent.lodN.lmesh caches a
             // null and falls back to LOD0 SILENTLY (no MeshLoader "failed header" error spam).
-            m_meshCache[candidatePath] =
-                std::filesystem::exists(full) ? MeshLoader::Load(full) : nullptr;
+            candidate =
+                m_meshCache
+                    .emplace(candidatePath,
+                             std::filesystem::exists(full) ? MeshLoader::Load(full) : nullptr)
+                    .first;
         }
-        Mesh* m = m_meshCache[candidatePath].get();
+        Mesh* m = candidate->second.get();
         if (m)
             return {m, candidatePath};
         if (candidatePath != basePath) {
-            if (m_meshCache.find(basePath) == m_meshCache.end()) {
+            auto base_entry = m_meshCache.find(basePath);
+            if (base_entry == m_meshCache.end()) {
                 if (ctx.frozen_replay)
                     throw std::logic_error("Replay cannot change mesh residency");
                 std::string full = (input.root_path / basePath).string();
-                m_meshCache[basePath] = MeshLoader::Load(full);
+                base_entry = m_meshCache.emplace(basePath, MeshLoader::Load(full)).first;
             }
-            Mesh* base = m_meshCache[basePath].get();
+            Mesh* base = base_entry->second.get();
             if (base)
                 return {base, basePath};
         }
@@ -1188,24 +1203,20 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     // for the whole far field (the draw-call/triangle collapse the forest_perf_budget gate
     // targets).
     if (impostorsOn && !impostorInstances.empty()) {
-        // Queued geometry is unsupported even when its program prevents submission.
-        if (capture) {
-            capture->unsupported("tree_impostor_fragment_output_unavailable", 3);
-        }
+        Shader* impostor_program = RefusedImpostorProgram(m_tree_impostor_shader.get(), capture);
         DebugViewPass::unsupported_surface();
-        if (!UseDrawProgram(m_tree_impostor_shader.get(), stats)) {
+        if (!UseDrawProgram(impostor_program, stats)) {
             return;
         }
-        m_tree_impostor_shader->setMat4("u_view", static_view);
-        m_tree_impostor_shader->setMat4("u_proj", static_proj);
-        m_tree_impostor_shader->setVec3("u_cameraPos", cameraPos);
-        m_tree_impostor_shader->setFloat("u_radius", input.tree_impostor_radius);
-        m_tree_impostor_shader->setVec3("u_center", input.tree_impostor_center);
-        m_tree_impostor_shader->setFloat("u_grid", static_cast<float>(input.tree_impostor_grid));
-        m_tree_impostor_shader->setFloat("u_materialId",
-                                         static_cast<float>(impostorMatId) / 255.0f);
-        m_tree_impostor_shader->setInt("u_albedo", 0);
-        m_tree_impostor_shader->setInt("u_normal", 1);
+        impostor_program->setMat4("u_view", static_view);
+        impostor_program->setMat4("u_proj", static_proj);
+        impostor_program->setVec3("u_cameraPos", cameraPos);
+        impostor_program->setFloat("u_radius", input.tree_impostor_radius);
+        impostor_program->setVec3("u_center", input.tree_impostor_center);
+        impostor_program->setFloat("u_grid", static_cast<float>(input.tree_impostor_grid));
+        impostor_program->setFloat("u_materialId", static_cast<float>(impostorMatId) / 255.0f);
+        impostor_program->setInt("u_albedo", 0);
+        impostor_program->setInt("u_normal", 1);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, input.tree_impostor_albedo);
         glActiveTexture(GL_TEXTURE1);
@@ -1331,13 +1342,16 @@ void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
         auto const& mesh_info = view.get<const Components::SkinnedMeshComponent>(entity);
         auto const& player = view.get<const anim::AnimationPlayerComponent>(entity);
 
-        if (m_skinnedMeshCache.find(mesh_info.meshPath) == m_skinnedMeshCache.end()) {
+        auto mesh_entry = m_skinnedMeshCache.find(mesh_info.meshPath);
+        if (mesh_entry == m_skinnedMeshCache.end()) {
             if (ctx.frozen_replay)
                 throw std::logic_error("Replay cannot change skinned residency");
             std::string full_mesh_path = (input.root_path / mesh_info.meshPath).string();
-            m_skinnedMeshCache[mesh_info.meshPath] = MeshLoader::LoadSkinned(full_mesh_path);
+            mesh_entry = m_skinnedMeshCache
+                             .emplace(mesh_info.meshPath, MeshLoader::LoadSkinned(full_mesh_path))
+                             .first;
         }
-        Mesh* mesh = m_skinnedMeshCache[mesh_info.meshPath].get();
+        Mesh* mesh = mesh_entry->second.get();
         if (!mesh || mesh->jointCount == 0)
             continue;
 

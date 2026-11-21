@@ -1,6 +1,5 @@
 #pragma once
 #include <memory>
-#include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 
 class LogDispatcherSink;
@@ -15,14 +14,9 @@ public:
     static void Init();
     static std::shared_ptr<LogDispatcherSink> GetDispatcherSink();
 
-    /// Lazy accessor: returns a valid logger even if Init() was never called
-    /// (test binaries that use gtest_main, ad-hoc tooling, etc.). Calling this
-    /// from a hot path is the same cost as the pre-lazy-init version once the
-    /// logger is set.
-    static std::shared_ptr<spdlog::logger>& GetCoreLogger();
-
-private:
-    static std::shared_ptr<spdlog::logger> s_CoreLogger;
+    /// Thread-safe lazy accessor, including concurrent calls to Init(). The
+    /// owner cannot be replaced; attach temporary sinks through the dispatcher.
+    static const std::shared_ptr<spdlog::logger>& GetCoreLogger();
 };
 
 // Core log macros
