@@ -34,6 +34,9 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/core/SystemConfig.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/GraphicsPresets.cpp
 
+    # Read-only content overlays
+    ${CMAKE_CURRENT_LIST_DIR}/vfs/ContentVfs.cpp
+
     # Net
     # delay-based lockstep transport (engine-generic; LoopbackTransport
     # for gates/tests, _WIN32-guarded TcpTransport for loopback+LAN).
