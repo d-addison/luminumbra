@@ -890,6 +890,17 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn("Phase::ShaderLoad", block(shader, "AttributedGl::Program Shader::buildProgram("))
         self.assertIn("AttributedGl::UseProgram(glUseProgram,", block(shader, "void Shader::use()"))
 
+    def test_mutable_header_state_uses_function_local_storage(self):
+        for path, signature, storage in (
+                ("app/FrameAttribution.h", "inline bool& shader_first_use_collection_enabled()",
+                 "static constinit bool enabled = false; return enabled;"),
+                ("rendering/AttributedGl.h", "inline Client::Attribution::ProgramFirstUse& programs()",
+                 "static Client::Attribution::ProgramFirstUse state; return state;"),
+                ("rendering/FarWorldReplay.h", "inline ReplayStateAccess*& active_replay_state()",
+                 "static thread_local ReplayStateAccess* state = nullptr; return state;")):
+            with self.subTest(path=path):
+                self.assertEqual(compact(block(read(CLIENT / path), signature)), storage)
+
     def test_all_program_lifetimes_and_submissions_use_first_use_attribution(self):
         # Enumerate the rendering and both UI backends, including state restores,
         # platform branches, compute kernels, indirect and instanced submissions.
@@ -913,7 +924,7 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertNotIn("PhaseScope", submit)
         self.assertNotIn("lookup(", submit)
         self.assertLess(submit.index("m_bound->pending = false;"),
-                        submit.index("if (shader_first_use_collection_enabled)"))
+                        submit.index("if (shader_first_use_collection_enabled())"))
         for method, invocation in (("use_attributed(", "function(program);"),
                                    ("submit_attributed(", "function(std::forward<Args>(args)...);")):
             cold = compact(block(helper, "void " + method))
@@ -923,7 +934,7 @@ class FrameAttributionWiring(unittest.TestCase):
             self.assertIn("LUMINUMBRA_FIRST_USE_COLD void " + method, helper)
             self.assertNotIn("phase.stop", cold)
         use = compact(block(helper, "void use("))
-        self.assertIn("if (static_cast<unsigned>(shader_first_use_collection_enabled) & "
+        self.assertIn("if (static_cast<unsigned>(shader_first_use_collection_enabled()) & "
                       "static_cast<unsigned>(m_bound->pending))", use)
         self.assertNotIn("PhaseScope", use)
         self.assertNotIn("lookup(", use)
@@ -932,17 +943,17 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn("__declspec(noinline)", helper)
         self.assertIn("__attribute__((cold, noinline))", helper)
         gl = read(CLIENT / "rendering/AttributedGl.h")
-        self.assertIn("return programs.created(function());", block(gl, "CreateProgram("))
-        self.assertIn("programs.deleted(program);", block(gl, "DeleteProgram("))
-        self.assertIn("programs.use(function, program);", block(gl, "UseProgram("))
-        self.assertIn("programs.submit(function, std::forward<Args>(args)...);",
+        self.assertIn("return programs().created(function());", block(gl, "CreateProgram("))
+        self.assertIn("programs().deleted(program);", block(gl, "DeleteProgram("))
+        self.assertIn("programs().use(function, program);", block(gl, "UseProgram("))
+        self.assertIn("programs().submit(function, std::forward<Args>(args)...);",
                       block(gl, "Submit("))
         self.assertNotIn("thread_local", gl)
         self.assertNotIn("PhaseScope", gl)
-        self.assertIn("inline constinit bool shader_first_use_collection_enabled = false;",
-                      self.header)
+        self.assertEqual(compact(block(self.header, "inline bool& shader_first_use_collection_enabled()")),
+                         "static constinit bool enabled = false; return enabled;")
         for method in ("PhaseFrameScope::PhaseFrameScope(", "PhaseFrameScope::~PhaseFrameScope()"):
-            self.assertIn("shader_first_use_collection_enabled = current_phases() != nullptr;",
+            self.assertIn("shader_first_use_collection_enabled() = current_phases() != nullptr;",
                           block(self.collector, method))
         preview = read(ROOT / "tools/static_preview/CMakeLists.txt")
         self.assertIn('"${STATIC_PREVIEW_ROOT}/src/luminumbra_client/app/FrameAttribution.cpp"',

@@ -255,7 +255,10 @@ private:
 // The client and static-preview host each have one owning render thread/context.
 // This flag is written by that thread's frame collector only. Keep the GL fast
 // path independent of TLS initialization and phase-stack access.
-inline constinit bool shader_first_use_collection_enabled = false;
+inline bool& shader_first_use_collection_enabled() {
+    static constinit bool enabled = false;
+    return enabled;
+}
 // Completed exclusive phases, also usable inside an open enclosing phase.
 double phase_total_ms();
 class PhaseScope {
