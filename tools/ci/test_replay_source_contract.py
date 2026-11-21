@@ -3,10 +3,12 @@
 import ast
 from pathlib import Path
 import re
+import runpy
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[2]
+TEST_SOURCES = runpy.run_path(str(ROOT / "tools/ci/test_shared_test_sources.py"))
 FIXTURE = "test/persistence/host_scheduler_fault_test.cpp"
 MODES = "src/luminumbra_server/modes/"
 ENTRY_POINTS = {
@@ -750,7 +752,9 @@ class ReplaySourceContract(unittest.TestCase):
         runtime = "../src/luminumbra_client/core/RuntimeScenarioConfig.cpp"
         capture = "../src/luminumbra_client/rendering/DiagnosticCapture.cpp"
         temporal = "../src/luminumbra_client/rendering/TemporalAudit.cpp"
-        consumers = {name for name, sources in targets.items() if runtime in sources.split()}
+        graph = TEST_SOURCES["test_targets"](ROOT, cmake)
+        closures = {name: TEST_SOURCES["source_closure"](graph, name) for name in targets}
+        consumers = {name for name, sources in closures.items() if Path(runtime[3:]) in sources}
         self.assertEqual(consumers, {"capture_manifest_test", "capture_feature_profile_test",
                                      "diagnostic_bundle_test", "runtime_surface_options_test",
                                      "audio_disabled_test", "temporal_sweep_test"})
@@ -759,22 +763,19 @@ class ReplaySourceContract(unittest.TestCase):
                                        "rendering/diagnostic_capture_test.cpp",
                                        "rendering/temporal_audit_test.cpp",
                                        "../src/luminumbra_client/rendering/CaptureManifest.cpp")),
-            ("capture_feature_profile_test", ("rendering/capture_feature_profile_test.cpp",
-                                              "../src/luminumbra_client/rendering/CaptureFeatureProfile.cpp")),
-            ("temporal_sweep_test", ("rendering/temporal_sweep_test.cpp",
-                                    "../src/luminumbra_client/rendering/CaptureFeatureProfile.cpp")),
+            ("capture_feature_profile_test", ("rendering/capture_feature_profile_test.cpp",)),
+            ("temporal_sweep_test", ("rendering/temporal_sweep_test.cpp",)),
         ):
             for source in retained:
                 self.assertEqual(targets[target].split().count(source), 1, (target, source))
+        profile = Path("src/luminumbra_client/rendering/CaptureFeatureProfile.cpp")
+        for target in ("capture_feature_profile_test", "temporal_sweep_test"):
+            self.assertEqual(closures[target][profile], 1, target)
         for target in sorted(consumers):
-            sources = targets[target].split()
-            for extra in re.findall(rf'target_sources\({target}\s+PRIVATE\s+(.*?)\)',
-                                    cmake, re.DOTALL):
-                sources.extend(extra.split())
             for source in (runtime, capture, temporal):
-                self.assertEqual(sources.count(source), 1, (target, source))
-            for source in sources:
-                self.assertTrue((ROOT / "test" / source).is_file(), source)
+                self.assertEqual(closures[target][Path(source[3:])], 1, (target, source))
+            for source in graph[target]["sources"]:
+                self.assertTrue((ROOT / source).is_file(), source)
             libraries = re.search(rf'target_link_libraries\({target}\s+PRIVATE\s+(.*?)\)',
                                   cmake, re.DOTALL)
             self.assertIsNotNone(libraries)
@@ -799,18 +800,25 @@ class ReplaySourceContract(unittest.TestCase):
         cmake = read_source("test/CMakeLists.txt")
         for target, token in (
             ("diagnostic_bundle_test", "../src/luminumbra_client/rendering/TemporalAudit.cpp"),
-            ("capture_feature_profile_test", "../src/luminumbra_client/rendering/DiagnosticCapture.cpp"),
+            ("capture_profile_test_support", "../src/luminumbra_client/rendering/DiagnosticCapture.cpp"),
+            ("capture_profile_test_support", "../src/luminumbra_client/rendering/TemporalAudit.cpp"),
+            ("capture_profile_test_support", "../src/luminumbra_client/rendering/CaptureFeatureProfile.cpp"),
+            ("capture_launch_test_support", "../src/luminumbra_client/core/RuntimeScenarioConfig.cpp"),
             ("capture_manifest_test", "rendering/temporal_audit_test.cpp"),
             ("diagnostic_bundle_test", "rendering/diagnostic_bundle_test.cpp"),
             ("temporal_sweep_test", "rendering/temporal_sweep_test.cpp"),
-            ("temporal_sweep_test", "../src/luminumbra_client/rendering/CaptureFeatureProfile.cpp"),
-            ("temporal_sweep_test", "../src/luminumbra_client/rendering/TemporalAudit.cpp"),
-            ("temporal_sweep_test", "../src/luminumbra_client/rendering/DiagnosticCapture.cpp"),
+            ("temporal_sweep_test", "capture_profile_test_support"),
         ):
-            start = cmake.index(f"add_executable({target}")
+            command = "add_library" if target.endswith("_support") else "add_executable"
+            start = cmake.index(f"{command}({target}")
             changed = cmake[:start] + cmake[start:].replace(token, "", 1)
             with self.subTest(target=target, token=token), self.assertRaises(AssertionError):
                 self.assert_diagnostic_bundle_build_graph(changed)
+        changed = cmake.replace("add_executable(temporal_sweep_test",
+                                "add_executable(temporal_sweep_test\n"
+                                "    ../src/luminumbra_client/rendering/DiagnosticCapture.cpp", 1)
+        with self.assertRaises(AssertionError):
+            self.assert_diagnostic_bundle_build_graph(changed)
         changed = cmake.replace("add_executable(capture_manifest_test",
                                 "add_executable(capture_manifest_test\n"
                                 "    rendering/diagnostic_attribution_test.cpp", 1)
@@ -824,14 +832,17 @@ class ReplaySourceContract(unittest.TestCase):
         target = "runtime_surface_options_test"
         sources = re.search(rf'add_executable\({target}\s+(.*?)\)', cmake, re.DOTALL)
         self.assertIsNotNone(sources)
-        self.assertEqual(sources[1].split(), [
-            "client/runtime_surface_options_test.cpp",
-            "../src/luminumbra_client/core/RuntimeScenarioConfig.cpp",
-            "../src/luminumbra_client/rendering/DiagnosticCapture.cpp",
-        ])
+        self.assertEqual(sources[1].split(), ["client/runtime_surface_options_test.cpp"])
+        graph = TEST_SOURCES["test_targets"](ROOT, cmake)
+        closure = TEST_SOURCES["source_closure"](graph, target)
+        for source in ("src/luminumbra_client/core/RuntimeScenarioConfig.cpp",
+                       "src/luminumbra_client/rendering/DiagnosticCapture.cpp",
+                       "src/luminumbra_client/rendering/TemporalAudit.cpp"):
+            self.assertEqual(closure[Path(source)], 1, source)
         for command, dependencies in (
             ("target_include_directories", ("../src", "../src/luminumbra_client")),
-            ("target_link_libraries", ("gtest_main", "luminumbra_common", "nlohmann_json", "glm")),
+            ("target_link_libraries", ("capture_launch_test_support", "gtest_main",
+                                       "luminumbra_common", "nlohmann_json", "glm")),
         ):
             block = re.search(rf'{command}\({target}\s+PRIVATE\s+(.*?)\)', cmake, re.DOTALL)
             self.assertIsNotNone(block)
@@ -873,8 +884,7 @@ class ReplaySourceContract(unittest.TestCase):
         cmake = read_source("test/CMakeLists.txt")
         native = read_source("test/client/runtime_surface_options_test.cpp")
         for token in ("client/runtime_surface_options_test.cpp",
-                      "../src/luminumbra_client/core/RuntimeScenarioConfig.cpp",
-                      "../src/luminumbra_client/rendering/DiagnosticCapture.cpp",
+                      "capture_launch_test_support",
                       "    runtime_surface_options_test\n"):
             # Mutate the new target itself, even when another target owns the
             # same production source. The target must retain every dependency.

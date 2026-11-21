@@ -82,7 +82,7 @@ def cmake_commands(body):
     return commands
 
 
-def targets_in(root, cmake):
+def targets_in(root, cmake, *, strict_sources=False, follow_includes=False, cmake_text=None):
     """Return explicit sources and links, with source-list variables expanded."""
     # The offline graph uses a symbolic binary directory; FetchContent's default
     # source location is resolved without configuring or downloading dependencies.
@@ -155,10 +155,32 @@ def targets_in(root, cmake):
                                                   str(Path(base) / (args[0].lower() + '-src')))
             elif command == "get_filename_component" and args[-1] == "ABSOLUTE":
                 variables[args[0]] = str((path.parent / args[1]).resolve())
-            elif command == "include" and args[0].endswith("/sources.cmake"):
-                read(Path(args[0]))
+            elif command == "include" and (follow_includes or args[0].endswith('/sources.cmake')):
+                source_directory = Path(variables['CMAKE_CURRENT_SOURCE_DIR'])
+                included = source_directory / args[0]
+                if follow_includes and '/' not in args[0] and not args[0].endswith('.cmake'):
+                    modules = [source_directory / directory / (args[0] + '.cmake')
+                               for directory in variables.get('CMAKE_MODULE_PATH', '').split(';')
+                               if directory]
+                    if any(read(module, source_directory, optional=True) for module in modules):
+                        continue
+                    # These CMake modules register tests, not production sources.
+                    if args[0] in {'GoogleTest', 'CTest'}:
+                        continue
+                read(included, source_directory, optional='OPTIONAL' in args[1:])
+            elif command == "add_subdirectory" and follow_includes:
+                directory = Path(variables['CMAKE_CURRENT_SOURCE_DIR']) / args[0]
+                saved = variables.copy()
+                read(directory / 'CMakeLists.txt', directory)
+                variables.clear()
+                variables.update(saved)
             elif command in {"add_executable", "add_library", "target_sources"}:
                 target = targets.setdefault(args[0], {"sources": set(), "links": set()})
+                if args[1:2] == ['ALIAS']:
+                    if len(args) != 3:
+                        raise ValueError('invalid CMake alias')
+                    target['links'].add(args[2])
+                    continue
                 for arg in args[1:]:
                     for source in arg.split(";"):
                         objects = OBJECTS.fullmatch(source)
@@ -169,7 +191,10 @@ def targets_in(root, cmake):
                             raise ValueError(f"unresolved source in {cmake}: {source}")
                         if Path(source).suffix.lower() not in {".cpp", ".cc", ".cxx", ".c", ".h", ".hpp"}:
                             continue
-                        resolved = (cmake.parent / source).resolve()
+                        resolved = (Path(variables['CMAKE_CURRENT_SOURCE_DIR']) / source).resolve()
+                        if (strict_sources and resolved.is_relative_to(root / 'src')
+                                and resolved.suffix == '.cpp' and not resolved.is_file()):
+                            raise ValueError(f'missing production source: {resolved}')
                         # Only first-party files can use the policy.
                         if resolved.is_relative_to(root) and resolved.is_file():
                             target["sources"].add(resolved.relative_to(root))
@@ -187,22 +212,33 @@ def targets_in(root, cmake):
                                 raise ValueError(f'unresolved link in {cmake}: {link}')
                             target['links'].add(link)
 
-    def read(path):
+    def read(path, source_directory, *, optional=False):
         path = path.resolve()
         if path in reading:
             raise ValueError(f'recursive CMake include: {path}')
+        try:
+            text = cmake_text if path == cmake and cmake_text is not None else path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            if optional:
+                return False
+            raise
         reading.add(path)
-        previous = variables.get("CMAKE_CURRENT_LIST_DIR")
+        previous = {name: variables.get(name) for name in
+                    ('CMAKE_CURRENT_LIST_DIR', 'CMAKE_CURRENT_SOURCE_DIR',
+                     'CMAKE_CURRENT_BINARY_DIR')}
         variables["CMAKE_CURRENT_LIST_DIR"] = str(path.parent)
-        variables["CMAKE_CURRENT_SOURCE_DIR"] = str(cmake.parent)
-        execute(cmake_commands(path.read_text(encoding="utf-8")), path)
-        if previous is not None:
-            variables["CMAKE_CURRENT_LIST_DIR"] = previous
-        else:
-            variables.pop('CMAKE_CURRENT_LIST_DIR', None)
+        variables["CMAKE_CURRENT_SOURCE_DIR"] = str(source_directory)
+        variables['CMAKE_CURRENT_BINARY_DIR'] = str(root / 'build' / source_directory.relative_to(root))
+        execute(cmake_commands(text), path)
+        for name, value in previous.items():
+            if value is not None:
+                variables[name] = value
+            else:
+                variables.pop(name, None)
         reading.remove(path)
+        return True
 
-    read(cmake)
+    read(cmake, cmake.parent)
     return targets
 
 

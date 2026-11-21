@@ -1,3 +1,36 @@
+# Compatible leaf implementations compile once; usage requirements stay private.
+add_library(frame_attribution_test_support STATIC
+    ../src/luminumbra_client/app/FrameAttribution.cpp
+)
+target_include_directories(frame_attribution_test_support PRIVATE ../src)
+target_link_libraries(frame_attribution_test_support PRIVATE gtest_main)
+luminumbra_configure_first_party_target(frame_attribution_test_support)
+
+add_library(far_volume_tile_test_support STATIC
+    ../src/luminumbra_common/world/FarVolumeTile.cpp
+)
+target_include_directories(far_volume_tile_test_support PRIVATE ../src)
+target_link_libraries(far_volume_tile_test_support PRIVATE gtest_main)
+luminumbra_configure_first_party_target(far_volume_tile_test_support)
+
+add_library(capture_launch_test_support STATIC
+    ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp
+    ../src/luminumbra_client/rendering/DiagnosticCapture.cpp
+    ../src/luminumbra_client/rendering/TemporalAudit.cpp
+)
+target_include_directories(capture_launch_test_support PRIVATE ../src ../src/luminumbra_client)
+target_link_libraries(capture_launch_test_support PRIVATE gtest_main luminumbra_common nlohmann_json glm)
+
+add_library(capture_profile_test_support STATIC
+    ../src/luminumbra_client/rendering/CaptureFeatureProfile.cpp
+    ../src/luminumbra_client/rendering/DiagnosticCapture.cpp
+    ../src/luminumbra_client/rendering/TemporalAudit.cpp
+    ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp
+)
+target_include_directories(capture_profile_test_support PRIVATE ../src ../src/luminumbra_client)
+target_link_libraries(capture_profile_test_support PRIVATE gtest_main luminumbra_common nlohmann_json glm)
+luminumbra_configure_first_party_target(capture_profile_test_support)
+
 # Add the world generation test executable
 add_executable(world_generation_test
     shield/test_world_generation.cpp
@@ -146,19 +179,19 @@ luminumbra_configure_first_party_target(hardware_info_test)
 
 # Table-driven volume generation has no client, GL or world-service dependency.
 add_executable(far_volume_tile_test
-    common/FarVolumeTile_test.cpp
-    ../src/luminumbra_common/world/FarVolumeTile.cpp)
+    common/FarVolumeTile_test.cpp)
 target_include_directories(far_volume_tile_test PRIVATE ../src)
-target_link_libraries(far_volume_tile_test PRIVATE gtest_main)
+target_link_libraries(far_volume_tile_test PRIVATE far_volume_tile_test_support
+    gtest_main)
 luminumbra_configure_first_party_target(far_volume_tile_test)
 
 add_executable(far_volume_mesher_test
     common/FarVolumeMesher_test.cpp
     common/FarVolumeMemory_test.cpp
-    ../src/luminumbra_common/world/FarVolumeTile.cpp
     ../src/luminumbra_common/world/FarVolumeMesher.cpp)
 target_include_directories(far_volume_mesher_test PRIVATE ../src)
-target_link_libraries(far_volume_mesher_test PRIVATE gtest_main)
+target_link_libraries(far_volume_mesher_test PRIVATE far_volume_tile_test_support
+    gtest_main)
 luminumbra_configure_first_party_target(far_volume_mesher_test)
 
 add_executable(far_volume_facade_test
@@ -466,25 +499,19 @@ luminumbra_configure_first_party_target(capture_manifest_test)
 # GL-free feature selection, runtime resolution and capability manifest contracts.
 add_executable(capture_feature_profile_test
     rendering/capture_feature_profile_test.cpp
-    rendering/capture_feature_policy_test.cpp
-    ../src/luminumbra_client/rendering/CaptureFeatureProfile.cpp
-    ../src/luminumbra_client/rendering/DiagnosticCapture.cpp
-    ../src/luminumbra_client/rendering/TemporalAudit.cpp
-    ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp)
+    rendering/capture_feature_policy_test.cpp)
 target_include_directories(capture_feature_profile_test PRIVATE ../src ../src/luminumbra_client)
 target_link_libraries(capture_feature_profile_test PRIVATE
+    capture_profile_test_support
     gtest_main luminumbra_common nlohmann_json glm)
 luminumbra_configure_first_party_target(capture_feature_profile_test)
 
 # GL-free sweep pins, profile refusal and continuous exact-tick transport protocol.
 add_executable(temporal_sweep_test
-    rendering/temporal_sweep_test.cpp
-    ../src/luminumbra_client/rendering/CaptureFeatureProfile.cpp
-    ../src/luminumbra_client/rendering/DiagnosticCapture.cpp
-    ../src/luminumbra_client/rendering/TemporalAudit.cpp
-    ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp)
+    rendering/temporal_sweep_test.cpp)
 target_include_directories(temporal_sweep_test PRIVATE ../src ../src/luminumbra_client)
 target_link_libraries(temporal_sweep_test PRIVATE
+    capture_profile_test_support
     gtest_main luminumbra_common nlohmann_json glm)
 luminumbra_configure_first_party_target(temporal_sweep_test)
 
@@ -1773,14 +1800,13 @@ target_link_libraries(world_open_refusal_test PRIVATE gtest_main luminumbra_comm
 # Surface admission exercises both shipping launch parsers without a device.
 add_executable(runtime_surface_options_test
     client/runtime_surface_options_test.cpp
-    ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp
-    ../src/luminumbra_client/rendering/DiagnosticCapture.cpp
 )
 target_include_directories(runtime_surface_options_test PRIVATE
     ../src
     ../src/luminumbra_client
 )
 target_link_libraries(runtime_surface_options_test PRIVATE
+    capture_launch_test_support
     gtest_main
     luminumbra_common
     nlohmann_json
@@ -2045,23 +2071,18 @@ target_link_libraries(audio_volume_readback_test PRIVATE
 # The real CLI parser and null manager run without a client, GL or audio device.
 add_executable(audio_disabled_test
     audio/audio_disabled_test.cpp
-../src/luminumbra_client/core/RuntimeScenarioConfig.cpp
-    ../src/luminumbra_client/rendering/DiagnosticCapture.cpp
 )
 target_include_directories(audio_disabled_test PRIVATE
 ../src
 ../src/luminumbra_client
 )
 target_link_libraries(audio_disabled_test PRIVATE
+    capture_launch_test_support
     gtest_main
     luminumbra_common
     nlohmann_json
     glm
 )
-
-# Shared GL-free dependency for the standalone launch-parser consumers.
-target_sources(runtime_surface_options_test PRIVATE ../src/luminumbra_client/rendering/TemporalAudit.cpp)
-target_sources(audio_disabled_test PRIVATE ../src/luminumbra_client/rendering/TemporalAudit.cpp)
 
 #  capture-native update the baseline: resolution-relative gate-threshold scaling unit
 # tests (core/CaptureScale.h is dependency-free, so this needs no GL/common libs).
@@ -2158,10 +2179,10 @@ if(LUMINUMBRA_ENABLE_STATIC_PREVIEW)
     luminumbra_configure_first_party_target(viewport_protocol_test)
     gtest_discover_tests(viewport_protocol_test PROPERTIES LABELS "authoring;tools" TIMEOUT 30)
 endif()
-add_executable(frame_attribution_test rendering/frame_attribution_test.cpp
-    ../src/luminumbra_client/app/FrameAttribution.cpp)
+add_executable(frame_attribution_test rendering/frame_attribution_test.cpp)
 target_include_directories(frame_attribution_test PRIVATE ../src)
-target_link_libraries(frame_attribution_test PRIVATE gtest_main)
+target_link_libraries(frame_attribution_test PRIVATE frame_attribution_test_support
+    gtest_main)
 luminumbra_configure_first_party_target(frame_attribution_test)
 
 add_executable(upload_budget_test rendering/upload_budget_test.cpp
@@ -2170,10 +2191,10 @@ target_include_directories(upload_budget_test PRIVATE ../src)
 target_link_libraries(upload_budget_test PRIVATE gtest_main)
 luminumbra_configure_first_party_target(upload_budget_test)
 
-add_executable(menu_presentation_test rendering/menu_presentation_test.cpp
-    ../src/luminumbra_client/app/FrameAttribution.cpp)
+add_executable(menu_presentation_test rendering/menu_presentation_test.cpp)
 target_include_directories(menu_presentation_test PRIVATE ../src)
-target_link_libraries(menu_presentation_test PRIVATE gtest_main)
+target_link_libraries(menu_presentation_test PRIVATE frame_attribution_test_support
+    gtest_main)
 luminumbra_configure_first_party_target(menu_presentation_test)
 
 add_executable(jolt_startup_test physics/jolt_startup_test.cpp)
