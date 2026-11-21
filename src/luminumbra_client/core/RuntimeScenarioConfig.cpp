@@ -6,6 +6,7 @@
 #include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/world/SurfaceWorkBudget.h"
 #include "rendering/DiagnosticCapture.h"
+#include "rendering/TemporalSweep.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -26,16 +27,17 @@
 
 namespace Luminumbra::Client::ScenarioHarness {
 
-std::atomic<uint64_t> g_gl_debug_message_count{0};
-std::atomic<uint64_t> g_gl_debug_error_count{0};
-std::atomic<uint64_t> g_gl_debug_warning_count{0};
-std::atomic<uint64_t> g_gl_debug_notification_count{0};
+GLDebugRuntimeCounters& GetGLDebugRuntimeCounters() {
+    static GLDebugRuntimeCounters counters;
+    return counters;
+}
 
 GLDebugRuntimeStats CurrentGLDebugRuntimeStats() {
-    return {g_gl_debug_message_count.load(std::memory_order_relaxed),
-            g_gl_debug_error_count.load(std::memory_order_relaxed),
-            g_gl_debug_warning_count.load(std::memory_order_relaxed),
-            g_gl_debug_notification_count.load(std::memory_order_relaxed)};
+    const auto& counters = GetGLDebugRuntimeCounters();
+    return {counters.messages.load(std::memory_order_relaxed),
+            counters.errors.load(std::memory_order_relaxed),
+            counters.warnings.load(std::memory_order_relaxed),
+            counters.notifications.load(std::memory_order_relaxed)};
 }
 
 bool HasCommandLineFlag(int argc, char* argv[], const std::string& flag) {
@@ -151,6 +153,18 @@ std::string ResolveRuntimeScenario(int argc, char* argv[]) {
     return scenario;
 }
 
+// Both startup paths must reject the matrix before creating a save root or world.
+void RefuseIncompatibleSweepProfile(int argc, char* argv[]) {
+    const auto profile = ParseCaptureFeatureProfile(argc, argv);
+    if (ResolveRuntimeScenario(argc, argv) == "world_visual_sweep") {
+        const auto reason = Rendering::WorldSweepMatrixRefusal(
+            profile == RuntimeScenarioConfig::FeatureProfile::AllFeatures);
+        if (!reason.empty()) {
+            throw std::invalid_argument(std::string(reason));
+        }
+    }
+}
+
 // Parses "WxH" (e.g. "1600x900") into width/height. Returns false (leaving the
 // outputs untouched) on any malformed/non-positive value.
 bool ParseResolution(const std::string& value, int& out_width, int& out_height) {
@@ -207,7 +221,7 @@ void ParseSurfaceRadiusOptions(int argc,
 } // namespace
 
 RuntimePathOptions ParseRuntimePathOptions(int argc, char* argv[]) {
-    (void)ParseCaptureFeatureProfile(argc, argv);
+    RefuseIncompatibleSweepProfile(argc, argv);
     RefuseUnsupportedTemporalAuditExecution(argc, argv);
     // Admission precedes --save-root directory creation.
     const auto diagnostic_environment = Core::ReadEnvironment("LUMIN_CAPTURE_DIAGNOSTICS");
@@ -318,6 +332,7 @@ RuntimePathOptions ParseRuntimePathOptions(int argc, char* argv[]) {
 
 RuntimeScenarioConfig
 ParseRuntimeScenarioConfig(int argc, char* argv[], const std::filesystem::path& root_dir) {
+    RefuseIncompatibleSweepProfile(argc, argv);
     RefuseUnsupportedTemporalAuditExecution(argc, argv);
     RuntimeScenarioConfig config;
     config.capture_feature_profile = ParseCaptureFeatureProfile(argc, argv);

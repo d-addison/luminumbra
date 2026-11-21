@@ -171,7 +171,10 @@ public:
                               {{"schema", "luminumbra.viewport.hang.v1"},
                                {"pid", Pid()},
                                {"deadline_seconds", 60}});
-                } catch (...) {}
+                } catch (...) {
+                    // The report is best-effort: its failure must not prevent the deadline
+                    // diagnostic and exit status 124 below from terminating a hung capture.
+                }
                 std::cerr << "viewport watchdog deadline exceeded\n" << std::flush;
                 std::_Exit(124);
             }
@@ -235,8 +238,8 @@ RenderView Camera(const Json& state) {
     view.far_plane = state.at("far_plane");
     return RenderView::Validate(view);
 }
-std::vector<StaticInstanceDescription> Instances(const Json& state,
-                                                 std::shared_ptr<const StaticPrefab> prefab) {
+std::vector<StaticInstanceDescription>
+Instances(const Json& state, const std::shared_ptr<const StaticPrefab>& prefab) {
     std::map<std::string, StaticInstanceDescription> instances;
     for (const auto& local : state.at("locals")) {
         const auto id = local.at("instance_id").get<std::string>();
@@ -451,7 +454,10 @@ int Serve(int argc, char** argv) {
                            {"pid", Pid()},
                            {"error", error.what()},
                            {"visual_approved", false}});
-            } catch (...) {}
+            } catch (...) {
+                // The refusal is already on stderr; a best-effort report failure must not
+                // replace that primary error or prevent returning status 1 below.
+            }
         return 1;
     }
 }
