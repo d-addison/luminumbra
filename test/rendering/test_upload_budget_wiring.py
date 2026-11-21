@@ -119,6 +119,38 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn(".live_factor = std::min(live, 1.0f)", select)
         self.assertNotIn("world", select.replace("no world queries", ""))
 
+    def test_static_prop_spatial_query_precedes_instance_work_and_retains_streams(self):
+        source = read(RENDERING / "passes/GBufferPass.cpp")
+        draw = body(source, "void GBufferPass::geometry_pass_static_meshes(")
+        collect = body(draw, "for (const std::size_t propIndex : candidates)")
+        self.assertLess(draw.index("m_staticPropIndex.Query("), draw.index("glm::length("))
+        self.assertIn("const CachedStaticProp& cp = m_staticPropCache[propIndex];", collect)
+        self.assertIn("const bool authoredTree = cp.authoredTree;", collect)
+        self.assertNotIn("starts_with", collect)
+        self.assertNotIn("kv.second.mats.clear()", draw)
+        self.assertNotIn("kv.second.tints.clear()", draw)
+        mesh_append = body(collect, "if (batch.selection.Select(propIndex))")
+        self.assertIn("batch.mats.push_back(cp.model);", mesh_append)
+        self.assertIn("batch.tints.push_back(cp.tint);", mesh_append)
+        atlas_append = body(collect, "if (m_impostorSelection.Select(propIndex))")
+        self.assertIn("impostorInstances.push_back({cp.model, glm::vec4(cp.tint, 1.0f)});", atlas_append)
+        self.assertIn("kv.second.selection.Begin();", draw)
+        self.assertIn("kv.second.selection.Finish()", draw)
+        self.assertIn("m_impostorSelection.Begin();", draw)
+        self.assertIn("m_impostorSelection.Finish()", draw)
+        cache = body(source, "void GBufferPass::build_static_prop_cache(")
+        self.assertIn('cp.authoredTree = bp.starts_with("game-assets/tree-small-02/");', cache)
+        self.assertIn("m_staticPropIndexValid = false;", cache)
+        bounds = body(source, "StaticPropSpatialIndex BuildStaticPropSpatialIndex(")
+        self.assertIn("item.lodBounds[3].Include(item.lodBounds[2]);", bounds)
+        self.assertIn("impostorRadius * cp.maxScale", bounds)
+        replay = body(source, "if (replay)")
+        self.assertIn("std::swap(m_impostorSelection, impostor_selection);", replay)
+        header = read(RENDERING / "passes/GBufferPass.h")
+        self.assertIn("return m_staticPropIndex.work();", header)
+        cmake = read(ROOT / "test/CMakeLists.txt")
+        self.assertIn("rendering/StaticPropSpatialIndex_test.cpp", cmake)
+
     def test_visible_rocks_and_shrubs_check_resident_support_before_batching(self):
         source = read(RENDERING / "passes/GBufferPass.cpp")
         cache = compact(body(source, "void GBufferPass::build_static_prop_cache("))
@@ -779,7 +811,7 @@ class UploadBudgetWiring(unittest.TestCase):
 
     def test_impostor_collection_requires_submitted_resident_terrain_at_each_tree(self):
         gbuffer = read(RENDERING / "passes/GBufferPass.cpp")
-        collect = body(gbuffer, "for (const CachedStaticProp& cp : m_staticPropCache)")
+        collect = body(gbuffer, "for (const std::size_t propIndex : candidates)")
         self.assertIn("if (impostorsOn && authoredTree && lod == 3 && cp.impostorTree) {", collect)
         self.assertIn("impostor_candidate = true;", collect)
         self.assertIn("input.submitted_live_terrain->covers(cp.position)", collect)
@@ -819,7 +851,7 @@ class UploadBudgetWiring(unittest.TestCase):
 
     def test_refused_impostors_resolve_farthest_available_mesh_through_ordinary_batch(self):
         collect = body(read(RENDERING / "passes/GBufferPass.cpp"),
-                       "for (const CachedStaticProp& cp : m_staticPropCache)")
+                       "for (const std::size_t propIndex : candidates)")
         resolver = body(read(RENDERING / "passes/GBufferPass.cpp"), "auto resolve_lod =")
         memo = body(resolver, "if (rit == m_resolveMemo.end())")
         self.assertIn("resolve_mesh(candidatePath, candidatePath)", memo)
@@ -842,7 +874,7 @@ class UploadBudgetWiring(unittest.TestCase):
 
     def test_cold_far_supported_frame_prepares_frozen_mesh_fallback(self):
         source = read(RENDERING / "passes/GBufferPass.cpp")
-        collect = body(source, "for (const CachedStaticProp& cp : m_staticPropCache)")
+        collect = body(source, "for (const std::size_t propIndex : candidates)")
         self.assertIn("if (impostor_candidate && !ctx.frozen_replay)", collect)
         warm = body(collect, "if (impostor_candidate && !ctx.frozen_replay)")
         self.assertIn("resolve_lod(cp, authoredTree, 2)", warm)
@@ -948,7 +980,7 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertLess(frame.index("live.clear();"), frame.index("m_gbuffer_pass->execute("))
         self.assertIn("gbuffer_input.submitted_live_terrain = &live", frame)
         collect = body(read(RENDERING / "passes/GBufferPass.cpp"),
-                       "for (const CachedStaticProp& cp : m_staticPropCache)")
+                       "for (const std::size_t propIndex : candidates)")
         self.assertIn("input.submitted_live_terrain && input.submitted_live_terrain->covers(cp.position)", compact(collect))
         self.assertNotIn("kFarClipInnerRadiusMeters", collect)
         return source
@@ -985,7 +1017,7 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertNotIn("resident_live_terrain().clear()", frame)
         self.assertNotIn("resident_live_terrain().add_origin(", frame)
         collect = body(read(RENDERING / "passes/GBufferPass.cpp"),
-                       "for (const CachedStaticProp& cp : m_staticPropCache)")
+                       "for (const std::size_t propIndex : candidates)")
         ownership = compact(collect[collect.index("const bool live_terrain_owned"):
                                     collect.index("const bool far_terrain_resident")])
         self.assertIn("impostor_candidate &&", ownership)
@@ -1067,7 +1099,7 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertLess(policy.index("if (live_terrain_owned)"),
                         policy.index("if (!selection.submit || !far_terrain_resident)"))
         collect = body(read(RENDERING / "passes/GBufferPass.cpp"),
-                       "for (const CachedStaticProp& cp : m_staticPropCache)")
+                       "for (const std::size_t propIndex : candidates)")
         far_support = compact(collect[collect.index("const bool far_terrain_resident"):
                                       collect.index("const auto submission")])
         self.assertIn("input.far_selection.effective == FarWorldMode::Legacy", far_support)
