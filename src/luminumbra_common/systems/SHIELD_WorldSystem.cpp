@@ -4468,7 +4468,8 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
             if (m_durable_residency) {
                 const auto found = m_streaming_state.chunks.find(id);
                 if (found != m_streaming_state.chunks.end() && found->second &&
-                    found->second->needs_authority()) {
+                    (found->second->needs_authority() ||
+                     found->second->has_pending_water_retirement())) {
                     const std::shared_ptr<::Luminumbra::Chunk> chunk = found->second;
                     if (!in_flight_built) {
                         build_in_flight();
@@ -6391,10 +6392,19 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(
     std::vector<Luminumbra::Job> jobs;
     for (const auto& request : chunks_to_generate) {
         const IVec3 coords = request.coords;
+        const auto in_progress = m_streaming_state.chunks.find(Chunk::calculate_id(coords));
+        if (in_progress != m_streaming_state.chunks.end() && in_progress->second &&
+            (in_progress->second->has_water_authority() ||
+             in_progress->second->has_pending_water_retirement()) &&
+            in_progress->second->get_state() == ChunkState::Loading) {
+            continue; // an in-place backfill already owns these terrain buffers
+        }
         if (m_durable_residency) {
-            if (restore_authoritative_chunk(coords)) {
-                continue; // parked authoritative data must never be replaced by a fresh chunk
-            }
+            restore_authoritative_chunk(coords);
+            if (m_durable_read_failed)
+                break; // publish any earlier admitted jobs instead of stranding Loading chunks
+            // Restored water-only owners and migration retirements still need
+            // terrain. Generate into their existing storage below.
         }
         // Chunks restored from a world save (or already generated) carry
         // populated voxel data, possibly with player edits; regeneration would
@@ -6409,7 +6419,11 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(
             continue;
         }
 
-        auto chunk = std::make_shared<Luminumbra::Chunk>(coords);
+        auto chunk = existing != m_streaming_state.chunks.end() && existing->second &&
+                             (existing->second->has_water_authority() ||
+                              existing->second->has_pending_water_retirement())
+                         ? existing->second
+                         : std::make_shared<Luminumbra::Chunk>(coords);
         set_renderable_chunk_state(*chunk, Luminumbra::ChunkState::Loading);
         invalidate_renderable_chunks();
         m_streaming_state.chunks[chunk->get_id()] = chunk;
@@ -7636,11 +7650,7 @@ std::shared_ptr<Chunk> SHIELD_WorldSystem::resolve_water_column(const IVec3& coo
         chunk = cached;
     }
     if (chunk && chunk->has_water_authority()) {
-        const bool active =
-            chunk->has_water_sim.load() && chunk->current_water_resolution.load() != 0;
-        const bool valid = active ? chunk->has_complete_water_state()
-                                  : Persistence::HasValidWaterPersistenceState(*chunk);
-        if (!valid) {
+        if (!Persistence::HasValidWaterColumnState(*chunk)) {
             throw std::invalid_argument("Incomplete regional water column authority");
         }
     }
@@ -7813,7 +7823,9 @@ std::shared_ptr<Chunk> SHIELD_WorldSystem::read_committed_chunk(const IVec3& coo
         RunWorkerBoundary(m_job_system, [&] { chunk = m_durable_chunk_loader(coords); });
         if (!chunk || chunk->get_id() != Chunk::calculate_id(coords) ||
             chunk->get_coords() != coords ||
-            (chunk->sdf_data.empty() && chunk->heightmap_data.empty()))
+            (chunk->sdf_data.empty() && chunk->heightmap_data.empty() &&
+             !(coords.y == 0 && chunk->has_water_authority() &&
+               Persistence::HasValidWaterColumnState(*chunk))))
             throw std::runtime_error(
                 "expected durable chunk is missing, empty or has wrong identity");
         return chunk;
@@ -8026,7 +8038,8 @@ std::vector<std::pair<i32, i32>> SHIELD_WorldSystem::authority_region_keys() con
             const auto qualifies = [](const auto& member) {
                 const auto& chunk = member.second;
                 return chunk && chunk->needs_authority() &&
-                       chunk->get_state() != ChunkState::Loading;
+                       (chunk->get_state() != ChunkState::Loading ||
+                        (chunk->has_water_authority() && !chunk->has_terrain_authority()));
             };
             const auto live = std::find_if(region.live.begin(), region.live.end(), qualifies);
             if (live != region.live.end()) {
@@ -8061,6 +8074,24 @@ void SHIELD_WorldSystem::remember_durable_chunks(const std::vector<IVec3>& coord
         int rx = 0, rz = 0;
         Persistence::WorldSaveService::region_coords_for_chunk(coord, rx, rz);
         m_digest_members[digest_region_id(rx, rz)].durable.insert_or_assign(id, coord);
+        ++m_digest_membership_revision;
+    }
+}
+
+void SHIELD_WorldSystem::forget_durable_chunks(const std::vector<IVec3>& coords) {
+    for (const auto& coord : coords) {
+        const auto id = Chunk::calculate_id(coord);
+        if (m_durable_chunks.erase(id) == 0 || !m_durable_residency)
+            continue;
+        int rx = 0, rz = 0;
+        Persistence::WorldSaveService::region_coords_for_chunk(coord, rx, rz);
+        const auto region = m_digest_members.find(digest_region_id(rx, rz));
+        if (region != m_digest_members.end()) {
+            region->second.durable.erase(id);
+            if (region->second.live.empty() && region->second.parked.empty() &&
+                region->second.durable.empty())
+                m_digest_members.erase(region);
+        }
         ++m_digest_membership_revision;
     }
 }
@@ -8101,7 +8132,9 @@ bool SHIELD_WorldSystem::restore_authoritative_chunk(const IVec3& coords) {
     const auto id = Chunk::calculate_id(coords);
     const auto resident = m_streaming_state.chunks.find(id);
     if (resident != m_streaming_state.chunks.end() && resident->second &&
-        (!resident->second->sdf_data.empty() || !resident->second->heightmap_data.empty()))
+        (resident->second->has_water_authority() ||
+         resident->second->has_pending_water_retirement() || !resident->second->sdf_data.empty() ||
+         !resident->second->heightmap_data.empty()))
         return true;
     const auto discard_placeholder = [&] {
         if (resident == m_streaming_state.chunks.end())
@@ -8145,8 +8178,8 @@ void SHIELD_WorldSystem::release_clean_parked_chunks() {
     const auto parked_count = m_parked.size();
     for (auto it = m_parked.begin(); it != m_parked.end();) {
         const auto& chunk = it->second.chunk;
-        if (chunk && m_durable_chunks.contains(it->first) && !chunk->is_voxel_data_dirty() &&
-            !chunk->is_water_state_dirty()) {
+        if (chunk && (m_durable_chunks.contains(it->first) || !chunk->needs_authority()) &&
+            !chunk->is_voxel_data_dirty() && !chunk->is_water_state_dirty()) {
             m_parked_bytes -= it->second.bytes;
             note_digest_chunk(it->second.chunk, true, false);
             m_admitted_water_columns.erase(it->first);
@@ -8279,8 +8312,9 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
     // codec's business): a save captured between generation-job completion and
     // the main-thread Loading→Idle publish (the save quiesce is deliberately
     // non-publishing) carries Loading WITH populated voxel data. The data is
-    // complete generation output, so the adoptee enters as Idle — a
-    // stuck-Loading adoptee would never re-candidate for anything.
+    // complete generation output, so the adoptee enters as Idle. Water ownership
+    // or retirement alone cannot prove that a Loading chunk is quiescent.
+    // Persisted water-only chunks settle at world adoption or normalize_for_park().
     if (chunk->get_state() == Luminumbra::ChunkState::Loading &&
         (!chunk->sdf_data.empty() || !chunk->heightmap_data.empty())) {
         set_renderable_chunk_state(*chunk, Luminumbra::ChunkState::Idle);
