@@ -199,15 +199,27 @@ void SkyboxPass::reset_shader() {
     m_weather_shader.reset();
 }
 
+SkyboxPass::CallerState SkyboxPass::CallerState::QueryExternal() {
+    return {.cull_enabled = glIsEnabled(GL_CULL_FACE)};
+}
+
+void SkyboxPass::execute_external(const RenderContext& ctx,
+                                  const Camera& camera,
+                                  bool draw_weather_overlay) {
+    LUMIN_PROFILE_ZONE_N("GL SkyboxPass.execute_external");
+    return execute(ctx, camera, draw_weather_overlay, CallerState::QueryExternal());
+}
+
 void SkyboxPass::execute(const RenderContext& ctx,
                          const Camera& camera,
-                         bool draw_weather_overlay) {
+                         bool draw_weather_overlay,
+                         const CallerState& caller) {
     LUMIN_PROFILE_ZONE_N("GL SkyboxPass.execute");
     glDepthFunc(GL_GEQUAL);
     // The camera sits inside the skybox cube, so its upward faces wind
     // clockwise from the inside view and were backface-culled (black wedges
     // above ~50 degrees elevation, first caught by skybox_visual_smoke).
-    const GLboolean cull_was_enabled = glIsEnabled(GL_CULL_FACE);
+    const GLboolean cull_was_enabled = caller.cull_enabled;
     if (cull_was_enabled) {
         glDisable(GL_CULL_FACE);
     }
