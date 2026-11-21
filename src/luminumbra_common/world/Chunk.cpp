@@ -199,12 +199,14 @@ bool Chunk::is_valid_state_transition(ChunkState from, ChunkState to) {
 }
 
 bool Chunk::try_set_state(ChunkState expected_state, ChunkState new_state) {
-    LUMIN_PROFILE_LOCK(std::lock_guard<std::mutex>, lock, m_state_mutex, "Chunk state lock wait");
-    if (m_state != expected_state || !is_valid_state_transition(m_state, new_state)) {
-        return false;
-    }
-
-    m_state = new_state;
+    auto current_state = m_state.load(std::memory_order_acquire);
+    do {
+        if (current_state != expected_state ||
+            !is_valid_state_transition(current_state, new_state)) {
+            return false;
+        }
+    } while (!m_state.compare_exchange_weak(
+        current_state, new_state, std::memory_order_acq_rel, std::memory_order_acquire));
     notify_lifecycle_change();
     return true;
 }
