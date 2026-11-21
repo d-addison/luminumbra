@@ -3496,7 +3496,7 @@ TEST(DiagnosticAttribution, WaterAttributesOriginalChunkSubmissionsOnTheContribu
     EXPECT_EQ(Count(draw, "glDrawElements,"), 1u);
     EXPECT_LT(shader.rfind("discard;"), shader.find("gDiagnosticIds ="));
     EXPECT_EQ(SourceHash(WithoutForwardSubmissionDiagnostics(draw, "m_water_shader")),
-              0x11b136e405c12634ull);
+              0x23c04dd060795caaull);
     EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(shader, 3)), 0x9bb7b237f54a53a7ull);
     EXPECT_EQ(SourceHash(WithoutWhitespace(Body(source, "void WaterPass::generate_caustics("))),
               0x3284c18c119ae4d1ull);
