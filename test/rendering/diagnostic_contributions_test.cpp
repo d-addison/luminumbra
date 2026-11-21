@@ -101,6 +101,96 @@ private:
     bool initialized_ = false;
     GLFWwindow* window_ = nullptr;
 };
+void CheckShadowFootprintPositionValidity(Shader& shader,
+                                          bool ladder,
+                                          const std::array<GLuint, 9>& textures) {
+    const auto draw = [&](int mode) {
+        shader.setVec4("u_cascadeSplits", glm::vec4(1, 2, 3, 4));
+        shader.setInt("u_contributionMode", mode);
+        AttributedGl::Submit(glDrawArrays, static_cast<GLenum>(GL_TRIANGLE_STRIP), 0, 4);
+        glReadBuffer(GL_COLOR_ATTACHMENT1);
+        std::array<float, 16> result{};
+        glReadPixels(0, 0, 2, 2, GL_RGBA, GL_FLOAT, result.data());
+        return result;
+    };
+    constexpr std::array<float, 4> regular = {0.5f, 1, 0, 0};
+    glClearTexImage(textures[3], 0, GL_RGBA, GL_FLOAT, regular.data());
+    glm::mat4 footprint_light(1);
+    footprint_light[2][2] = 0;
+    shader.setMat4("u_lightSpaceMatrices[0]", footprint_light);
+    // All 16 validity masks cover single invalid lanes (including diagonals),
+    // rows, columns, mixed lanes, an empty quad and the fully valid control.
+    // Both position backends reject cleared/nonfinite storage; Ladder also
+    // rejects cleared depth even when the stored position still looks valid.
+    const int invalid_kinds = ladder ? 4 : 3;
+    for (int invalid_kind = 0; invalid_kind < invalid_kinds; ++invalid_kind) {
+        for (unsigned int valid_mask = 0; valid_mask < 16; ++valid_mask) {
+            SCOPED_TRACE(::testing::Message() << (ladder) << invalid_kind << valid_mask);
+            std::array<float, 16> positions{};
+            std::array<float, 16> depths{};
+            for (std::size_t pixel = 0; pixel < 4; ++pixel) {
+                positions[4 * pixel] = 0.02f * static_cast<float>(pixel % 2);
+                positions[4 * pixel + 1] = 0.02f * static_cast<float>(pixel / 2);
+                positions[4 * pixel + 2] = -1;
+                positions[4 * pixel + 3] = 1;
+                depths[4 * pixel] = 0.5f;
+                if ((valid_mask & (1U << pixel)) == 0) {
+                    if (invalid_kind == 3) {
+                        depths[4 * pixel] = 0;
+                    } else {
+                        const float invalid =
+                            invalid_kind == 0
+                                ? 0.0f
+                                : (invalid_kind == 1 ? std::numeric_limits<float>::quiet_NaN()
+                                                     : std::numeric_limits<float>::infinity());
+                        positions[4 * pixel] = invalid;
+                        positions[4 * pixel + 1] = invalid;
+                        positions[4 * pixel + 2] = invalid;
+                    }
+                }
+            }
+            glTextureSubImage2D(textures[0], 0, 0, 0, 2, 2, GL_RGBA, GL_FLOAT, positions.data());
+            glTextureSubImage2D(textures[4], 0, 0, 0, 2, 2, GL_RGBA, GL_FLOAT, depths.data());
+            const auto footprint = draw(Pass::ShadowFootprint);
+            const auto cascades = draw(Pass::ShadowCascade);
+            // Frustum status must not overwrite an invalid-quad sentinel.
+            footprint_light[3][0] = 10;
+            shader.setMat4("u_lightSpaceMatrices[0]", footprint_light);
+            const auto outside = draw(Pass::ShadowFootprint);
+            footprint_light[3][0] = 0;
+            shader.setMat4("u_lightSpaceMatrices[0]", footprint_light);
+            for (std::size_t pixel = 0; pixel < 4; ++pixel) {
+                if ((valid_mask & (1U << pixel)) != 0) {
+                    const float outside_sentinel = valid_mask == 15 ? -1.0f : -2.0f;
+                    EXPECT_EQ((std::array<float, 4>{outside[4 * pixel],
+                                                    outside[4 * pixel + 1],
+                                                    outside[4 * pixel + 2],
+                                                    outside[4 * pixel + 3]}),
+                              (std::array<float, 4>{
+                                  outside_sentinel, outside_sentinel, outside_sentinel, 1}));
+                    EXPECT_FLOAT_EQ(footprint[4 * pixel + 3], 1);
+                    EXPECT_FLOAT_EQ(cascades[4 * pixel], 0);
+                    if (valid_mask == 15) {
+                        EXPECT_TRUE(std::isfinite(footprint[4 * pixel + 2]));
+                        EXPECT_GE(footprint[4 * pixel], 0);
+                        EXPECT_GE(footprint[4 * pixel + 1], 0);
+                    } else {
+                        EXPECT_EQ((std::array<float, 3>{footprint[4 * pixel],
+                                                        footprint[4 * pixel + 1],
+                                                        footprint[4 * pixel + 2]}),
+                                  (std::array<float, 3>{-2, -2, -2}));
+                    }
+                }
+            }
+            if (valid_mask == 0 && (invalid_kind == 0 || invalid_kind == 3)) {
+                for (std::size_t pixel = 0; pixel < 4; ++pixel) {
+                    EXPECT_FLOAT_EQ(footprint[4 * pixel + 3], 0);
+                }
+            }
+        }
+    }
+}
+
 } // namespace
 
 TEST(DiagnosticContributions, CatalogueLegendsAndCycleCoverEveryNamedTermAndUnsupportedPlane) {
@@ -648,6 +738,7 @@ TEST_F(DiagnosticContributionsGl, ShadowFootprintStaysLocalAcrossSplitQuadsAndBy
                 }
             }
         }
+        CheckShadowFootprintPositionValidity(*variant, variant == &ladder, textures);
     }
     EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
     glDeleteBuffers(1, &vbo);

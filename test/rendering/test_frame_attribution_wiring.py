@@ -3546,7 +3546,7 @@ class DeferredRasterDiagnosticWiring(unittest.TestCase):
             self.assertEqual(self.lighting.count(f"dFd{axis}(FragPos)"), 1)
             self.assertIn(derivative, prefix)
             self.assertNotIn(f"dFd{axis}(", block(self.lighting, "float CalculateShadow("))
-        self.assertIn("farWorldPosition(gPosition, u_sceneDepth, TexCoords, diagnosticViewPos);", prefix)
+        self.assertIn("bool diagnosticValid = diagnosticPositionAt(TexCoords, diagnosticViewPos);", prefix)
         self.assertIn("vec3 FragPos = vec3(u_inverseView * vec4(diagnosticViewPos, 1.0));", prefix)
         globals = self.lighting[:self.lighting.index("float CalculateShadow(")]
         for declaration in ("vec3 diagnosticDpdx;", "vec3 diagnosticDpdy;",
@@ -3559,6 +3559,42 @@ class DeferredRasterDiagnosticWiring(unittest.TestCase):
         self.assertIn("diagnosticShadowUv = vec3(projCoords.xy, log2(max(footprint, 1e-8)));", observation)
         self.assertLess(main.index("CalculateShadow(FragPos, Normal, L_sun"),
                         main.index("CalculateShadow(FragPos, Normal, L_moon"))
+
+    def test_shadow_footprint_rejects_every_incomplete_quad_with_the_existing_sentinel(self):
+        validity = block(self.lighting, "bool diagnosticPositionAt(")
+        for statement in ("farWorldPosition(gPosition, u_sceneDepth, uv, position)",
+                          "reconstructed && !any(isnan(position)) && !any(isinf(position))",
+                          "dot(position, position) >= 1e-8"):
+            self.assertIn(statement, validity)
+        main = block(self.lighting, "void main()")
+        prefix = main[:main.index("// Alpha zero")]
+        for statement in (
+                "float diagnosticNeighbourOffset = 1.0 - 2.0 * mod(floor(gl_FragCoord.y), 2.0);",
+                "vec2 diagnosticNeighbourUv = TexCoords + dFdyFine(TexCoords) * diagnosticNeighbourOffset;",
+                "bool diagnosticNeighbourValid = diagnosticPositionAt(diagnosticNeighbourUv, diagnosticNeighbourPos);",
+                "float diagnosticColumnValid = float(diagnosticValid && diagnosticNeighbourValid);",
+                "float diagnosticValidityDx = dFdxFine(diagnosticColumnValid);"):
+            self.assertIn(statement, prefix)
+        predicate = re.search(r"diagnosticQuadValid = ([^;]+);", prefix).group(1)
+        # Fine horizontal differences of paired columns include the diagonal,
+        # without undefined higher-order derivatives or divergent derivative calls.
+        for mask in range(16):
+            columns = [float(bool(mask & (1 << x)) and bool(mask & (1 << (x + 2))))
+                       for x in range(2)]
+            for lane in range(4):
+                with self.subTest(mask=mask, lane=lane):
+                    self.assertEqual(cpp_expression(
+                        predicate, diagnosticColumnValid=columns[lane % 2],
+                        diagnosticValidityDx=columns[1] - columns[0]), mask == 15)
+        selector = block(self.lighting, "float CalculateShadow(")
+        supported = block(selector, "if (diagnosticQuadValid)")
+        self.assertIn("float footprint =", supported)
+        self.assertIn("diagnosticShadowUv = vec3(projCoords.xy, log2(max(footprint, 1e-8)));",
+                      supported)
+        self.assertIn("vec3 diagnosticShadowUv = vec3(-2.0);", self.lighting)
+        self.assertIn("if (diagnosticQuadValid) diagnosticShadowUv = diagnosticCascade;", selector)
+        self.assertIn("all(equal(contribution.rgb, vec3(-2.0)))) value = unsupportedColor();",
+                      self.overlay)
 
     def test_wireframe_depth_policy_and_full_restoration_are_wired(self):
         attach = block(self.debug, "void attach(")
