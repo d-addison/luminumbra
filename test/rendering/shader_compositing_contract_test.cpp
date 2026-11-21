@@ -42,28 +42,33 @@ std::size_t CountOccurrences(const std::string& source, const std::string& fragm
     return count;
 }
 
-// Returns the shipping variant: drops each `#ifdef LUMIN_DIAG_IDS` branch and keeps
-// its `#else` branch, so opt-in diagnostic duplicates are not counted.
+// Returns the shipping variant: drops each `#ifdef LUMIN_DIAG_IDS` and
+// `#ifdef LUMIN_DIAG_CONTRIBUTIONS` branch and keeps its `#else` branch, so opt-in
+// diagnostic duplicates are not counted. Nested conditionals stay with their block.
 std::string WithoutDiagnosticVariant(const std::string& source) {
     std::istringstream lines(source);
     std::string line;
     std::string shipping;
     bool diagnostic = false;
-    bool in_block = false;
+    std::size_t depth = 0;
     while (std::getline(lines, line)) {
-        if (line == "#ifdef LUMIN_DIAG_IDS") {
-            in_block = true;
+        if (depth == 0 &&
+            (line == "#ifdef LUMIN_DIAG_IDS" || line == "#ifdef LUMIN_DIAG_CONTRIBUTIONS")) {
+            depth = 1;
             diagnostic = true;
             continue;
         }
-        if (in_block && line == "#else") {
+        if (depth > 0 && line.rfind("#if", 0) == 0) {
+            ++depth;
+        } else if (depth == 1 && line == "#else") {
             diagnostic = false;
             continue;
-        }
-        if (in_block && line == "#endif") {
-            in_block = false;
-            diagnostic = false;
-            continue;
+        } else if (depth > 0 && line.rfind("#endif", 0) == 0) {
+            --depth;
+            if (depth == 0) {
+                diagnostic = false;
+                continue;
+            }
         }
         if (!diagnostic) {
             shipping += line;

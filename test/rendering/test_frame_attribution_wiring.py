@@ -3519,8 +3519,11 @@ class DeferredRasterDiagnosticWiring(unittest.TestCase):
         selector = block(self.lighting, "float CalculateShadow(")
         for statement in ("diagnosticCascade = vec3(float(cascadeIndex), projCoords.xy);",
                           "vec2 shadowSize = vec2(textureSize(u_shadowCascades, 0).xy);",
-                          "length(dFdx(projCoords.xy) * shadowSize)",
-                          "length(dFdy(projCoords.xy) * shadowSize)",
+                          "u_lightSpaceMatrices[cascadeIndex] * vec4(fragPos + diagnosticDpdx, 1.0)",
+                          "u_lightSpaceMatrices[cascadeIndex] * vec4(fragPos + diagnosticDpdy, 1.0)",
+                          "vec2 uvDx = (lightDx.xy / lightDx.w) * 0.5 + 0.5 - projCoords.xy;",
+                          "vec2 uvDy = (lightDy.xy / lightDy.w) * 0.5 + 0.5 - projCoords.xy;",
+                          "max(length(uvDx * shadowSize), length(uvDy * shadowSize))",
                           "diagnosticShadowUv = vec3(projCoords.xy, log2(max(footprint, 1e-8)));",
                           "diagnosticCascade = vec3(insideAny ? -1.0 : -3.0);"):
             self.assertIn(statement, selector)
@@ -3532,6 +3535,30 @@ class DeferredRasterDiagnosticWiring(unittest.TestCase):
         self.assertIn("u_contributionMode == 35) diagnosticValue = diagnosticShadowUv", self.lighting)
         for sentinel in (-1, -2, -3):
             self.assertIn(f"all(equal(contribution.rgb, vec3({sentinel}.0)))", self.overlay)
+
+    def test_shadow_footprint_derivatives_precede_all_main_branches_and_keep_sun_observation(self):
+        main = block(self.lighting, "void main()")
+        prefix = main[:main.index("// Alpha zero")]
+        self.assertNotRegex(re.sub(r"//[^\n]*", "", prefix),
+                            r"\b(?:if|for|while|return|discard)\b|\?")
+        for axis in ("x", "y"):
+            derivative = f"diagnosticDpd{axis} = dFd{axis}(FragPos);"
+            self.assertEqual(self.lighting.count(f"dFd{axis}(FragPos)"), 1)
+            self.assertIn(derivative, prefix)
+            self.assertNotIn(f"dFd{axis}(", block(self.lighting, "float CalculateShadow("))
+        self.assertIn("farWorldPosition(gPosition, u_sceneDepth, TexCoords, diagnosticViewPos);", prefix)
+        self.assertIn("vec3 FragPos = vec3(u_inverseView * vec4(diagnosticViewPos, 1.0));", prefix)
+        globals = self.lighting[:self.lighting.index("float CalculateShadow(")]
+        for declaration in ("vec3 diagnosticDpdx;", "vec3 diagnosticDpdy;",
+                            "bool diagnosticShadowObserved = false;"):
+            self.assertIn(declaration, globals)
+        selector = block(self.lighting, "float CalculateShadow(")
+        observation = block(selector, "if (!diagnosticShadowObserved)")
+        self.assertIn("diagnosticShadowObserved = true;", observation)
+        self.assertIn("diagnosticCascade = vec3(float(cascadeIndex), projCoords.xy);", observation)
+        self.assertIn("diagnosticShadowUv = vec3(projCoords.xy, log2(max(footprint, 1e-8)));", observation)
+        self.assertLess(main.index("CalculateShadow(FragPos, Normal, L_sun"),
+                        main.index("CalculateShadow(FragPos, Normal, L_moon"))
 
     def test_wireframe_depth_policy_and_full_restoration_are_wired(self):
         attach = block(self.debug, "void attach(")
