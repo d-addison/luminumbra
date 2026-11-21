@@ -5,6 +5,10 @@ set(GPU_FRAME_ARENA_TEST_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/GpuFrameArenaGl_test.cpp
 )
 
+set(MATERIAL_REGISTRY_TEST_SOURCES
+    ${CMAKE_CURRENT_LIST_DIR}/common/MaterialRegistry_test.cpp
+)
+
 set(SIMULATION_TEST_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/simulation/eventbus_order_gate_test.cpp
 )
