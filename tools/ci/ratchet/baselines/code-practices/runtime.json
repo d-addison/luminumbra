@@ -1,13 +1,4 @@
 {
-  "entries": [
-    {
-      "construct": "if ( m_uniformLocationCache . find ( name ) != m_uniformLocationCache . end ( ) ) { return m_uniformLocationCache [ name ] ; }",
-      "count": 1,
-      "file": "src/luminumbra_client/rendering/Shader.cpp",
-      "key": "8c9f919a39d47bd9d67a14602c585ea559c2476d0da4114dcc633f284f2d4576",
-      "rule": "double-lookup-after-find",
-      "symbol": "Luminumbra::Rendering::Shader::getUniformLocation( const std :: string & name )const"
-    }
-  ],
+  "entries": [],
   "schema": 1
 }

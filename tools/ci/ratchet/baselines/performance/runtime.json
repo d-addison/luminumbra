@@ -41,14 +41,6 @@
       "symbol": "Luminumbra::Rendering::RenderPipeline::collect_gpu_pass_timers( )"
     },
     {
-      "construct": "glGetIntegerv ( GL_CLIP_ORIGIN , & clip_origin )",
-      "count": 1,
-      "file": "src/luminumbra_client/rendering/passes/ShadowPass.cpp",
-      "key": "05abd450f4e072f98eb7630070697588e9b1988ba8f0373f5a5742e71174d6d8",
-      "rule": "hot-gl-query",
-      "symbol": "Luminumbra::Rendering::ShadowPass::execute( const RenderContext & ctx , const ShadowPassInput & input )"
-    },
-    {
       "construct": "glGetUniformLocation ( m_inject_program , \"u_cascadeSplits\" )",
       "count": 1,
       "file": "src/luminumbra_client/rendering/passes/FroxelPass.cpp",
@@ -361,14 +353,6 @@
       "symbol": "Luminumbra::Rendering::FroxelPass::execute_inject( const RenderContext & ctx , const std :: filesystem :: path & root_path )"
     },
     {
-      "construct": "RunWorkerBoundary ( m_job_system , [ & ] { chunk = m_durable_chunk_loader ( coords ) ; } )",
-      "count": 1,
-      "file": "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
-      "key": "8d678c0d175773d8535b5de0f5e3f4fcc428052dafbfc14ac8665b6b0f97d776",
-      "rule": "owner-blocking-wait",
-      "symbol": "Luminumbra::Systems::SHIELD_WorldSystem::read_committed_chunk( const IVec3 & coords )const"
-    },
-    {
       "construct": "RunWorkerBoundary ( m_jobSystem , [ & ] { if ( ! digest_operation ) { digest_operation . emplace ( directory , m_regionRequiresIndex ) ; } digest = digest_operation -> digest ( key , inputs ) ; } )",
       "count": 1,
       "file": "src/luminumbra_common/world/GameSession.cpp",
@@ -441,14 +425,6 @@
       "symbol": "Luminumbra::Rendering::TaauPass::execute( const RenderContext & ctx , const TaauHistoryState * frozen )"
     },
     {
-      "construct": "glGetIntegerv ( GL_DEPTH_FUNC , & depth_func )",
-      "count": 1,
-      "file": "src/luminumbra_client/rendering/passes/ShadowPass.cpp",
-      "key": "aecd2c51e2cd177861e3ca081efaf6c00d3da2182bcebd07f0f3c245fcbc5d5f",
-      "rule": "hot-gl-query",
-      "symbol": "Luminumbra::Rendering::ShadowPass::execute( const RenderContext & ctx , const ShadowPassInput & input )"
-    },
-    {
       "construct": "glGetIntegerv ( GL_DRAW_FRAMEBUFFER_BINDING , & framebuffer )",
       "count": 1,
       "file": "src/luminumbra_client/rendering/passes/PlantProcgenPass.cpp",
@@ -481,14 +457,6 @@
       "symbol": "Luminumbra::Rendering::FroxelPass::execute_inject( const RenderContext & ctx , const std :: filesystem :: path & root_path )"
     },
     {
-      "construct": "glGetIntegerv ( GL_CLIP_DEPTH_MODE , & clip_depth )",
-      "count": 1,
-      "file": "src/luminumbra_client/rendering/passes/ShadowPass.cpp",
-      "key": "bd0c042db52eab7fa431d89214984178d56da5787c0c0db2174cecb305db75a6",
-      "rule": "hot-gl-query",
-      "symbol": "Luminumbra::Rendering::ShadowPass::execute( const RenderContext & ctx , const ShadowPassInput & input )"
-    },
-    {
       "construct": "glIsEnabled ( GL_DEPTH_TEST )",
       "count": 1,
       "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
@@ -503,6 +471,14 @@
       "key": "c0e44648e22ce443e1a4eb070637ffa40822528968a5fb2949ce40fc83eace0f",
       "rule": "hot-gl-query",
       "symbol": "Luminumbra::Rendering::AerialPass::execute( const RenderContext & ctx )"
+    },
+    {
+      "construct": "RunWorkerBoundary ( m_job_system , [ & ] { chunk = m_durable_chunk_loader ( coords ) ; if ( ! chunk || chunk -> get_id ( ) != Chunk :: calculate_id ( coords ) || chunk -> get_coords ( ) != coords || ( chunk -> sdf_data . empty ( ) && chunk -> heightmap_data . empty ( ) && ! ( coords . y == 0 && chunk -> has_water_authority ( ) && Persistence :: HasValidWaterColumnState ( * chunk ) ) ) ) throw std :: runtime_error ( \"expected durable chunk is missing, empty or has wrong identity\" ) ; if ( prepare_water ) { chunk -> stage_water_seed_inputs ( { } ) ; const auto scope = acquire_worldgen_sample_scope ( ) ; if ( const auto inputs = request_water_seed_inputs ( * chunk ) ) { ComputeHighWaterSeedInputs ( * inputs , coords , * this ) ; } } } )",
+      "count": 1,
+      "file": "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+      "key": "c4e05be06441ca41fc26440efbdaef39ad9e54fba8c73c2ceebb12949aa4b47d",
+      "rule": "owner-blocking-wait",
+      "symbol": "Luminumbra::Systems::SHIELD_WorldSystem::read_committed_chunk( const IVec3 & coords , bool prepare_water )const"
     },
     {
       "construct": "glGetNamedFramebufferAttachmentParameteriv ( ctx . lit_scene . id , GL_COLOR_ATTACHMENT0 , GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME , & color_texture )",
@@ -535,14 +511,6 @@
       "key": "d0a8dce122e9bc84aedc7802d17a81c3f41f18f519079000928bbec82841f27a",
       "rule": "hot-gl-query",
       "symbol": "Luminumbra::Rendering::WaterfallPass::execute( const RenderContext & ctx )"
-    },
-    {
-      "construct": "glGetDoublev ( GL_DEPTH_CLEAR_VALUE , & clear_depth )",
-      "count": 1,
-      "file": "src/luminumbra_client/rendering/passes/ShadowPass.cpp",
-      "key": "d64895970de9cf5631c84ebf2278be3735b05bfbaf4884e1c43b98ea0ea8e723",
-      "rule": "hot-gl-query",
-      "symbol": "Luminumbra::Rendering::ShadowPass::execute( const RenderContext & ctx , const ShadowPassInput & input )"
     },
     {
       "construct": "glGetIntegerv ( GL_STENCIL_BACK_PASS_DEPTH_FAIL , & glstate_backup . stencil_back . pass_depth_fail )",
@@ -679,14 +647,6 @@
       "key": "f57e9fbbf89d4648fa01cabe78a06f760e623f910ae8044c973012e2f1e20258",
       "rule": "hot-gl-query",
       "symbol": "RenderInterface_GL3::BeginFrame( )"
-    },
-    {
-      "construct": "MeshLoader :: Load ( full )",
-      "count": 2,
-      "file": "src/luminumbra_client/rendering/passes/GBufferPass.cpp",
-      "key": "f6bb6d6f4fca26467127585c39af976736d517fd2be379ae018e827ee492e0ce",
-      "rule": "hot-draw-file-load",
-      "symbol": "Luminumbra::Rendering::GBufferPass::geometry_pass_static_meshes( const RenderContext & ctx , const GBufferPassInput & input , entt :: registry & registry , const Camera & camera , const glm :: vec4 ( & frustum_planes ) [ 6 ] , GBufferDrawStats & stats )"
     },
     {
       "construct": "glIsEnabled ( GL_DEPTH_TEST )",
