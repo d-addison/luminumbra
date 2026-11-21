@@ -20,9 +20,7 @@
 #include <algorithm>
 #include <cmath>
 #include <string>
-#include <unordered_map>
 #include <unordered_set>
-#include <utility>
 
 namespace Luminumbra::Client::App {
 
@@ -56,8 +54,9 @@ void UpdateListenerEnvironment(GameState currentState,
     }
 }
 
-// Material-keyed player footsteps (verbatim region 2).
+// Material-keyed player footsteps.
 void UpdatePlayerFootsteps(ClientAppContext& app,
+                           FrameAudioState& audio,
                            GameState currentState,
                            float deltaTime,
                            Luminumbra::Client::IAudioManager* audioManager,
@@ -71,55 +70,43 @@ void UpdatePlayerFootsteps(ClientAppContext& app,
     // by ear.
     if (currentState == GameState::IN_GAME && audioManager && camera && !app.hud.paused &&
         !scenario_config.active() && gameSession && gameSession->GetWorldSystem()) {
-        static glm::vec3 s_footLastPos = camera->Position;
-        static float s_footDist = 0.0f;
         const glm::vec3 fp = camera->Position;
-        const float fdx = fp.x - s_footLastPos.x, fdz = fp.z - s_footLastPos.z;
-        const float fhoriz = std::sqrt(fdx * fdx + fdz * fdz);
-        s_footLastPos = fp;
-        const float fspeed = deltaTime > 0.0f ? fhoriz / static_cast<float>(deltaTime) : 0.0f;
-        if (fspeed < 0.8f || fspeed > 25.0f) {
-            s_footDist = 0.0f; // standing still, or a teleport/respawn jump -> reset
-        } else {
-            s_footDist += fhoriz;
-            if (s_footDist >= 1.9f) { // stride length (m)
-                s_footDist = 0.0f;
-                auto* fws = gameSession->GetWorldSystem();
-                const float fth = fws->GetTerrainHeightAt(fp.x, fp.z);
-                // Material-based footstep: the surface under the player picks the sound.
-                const char* fev = "footstep_grass";
-                switch (fws->SurfaceVertexMaterial(fp.x, fp.z, fth)) {
-                    case Luminumbra::MaterialType::Stone:
-                    case Luminumbra::MaterialType::Deepslate:
-                        fev = "footstep_stone";
-                        break;
-                    case Luminumbra::MaterialType::Soil:
-                        fev = "footstep_soil";
-                        break;
-                    case Luminumbra::MaterialType::Sand:
-                        fev = "footstep_sand";
-                        break;
-                    case Luminumbra::MaterialType::Water:
-                        fev = "footstep_water";
-                        break;
-                    case Luminumbra::MaterialType::LuminCrystal:
-                        fev = "footstep_crystal";
-                        break;
-                    case Luminumbra::MaterialType::Grass:
-                    default:
-                        fev = "footstep_grass";
-                        break;
-                }
-                audioManager->PlayOneShot(fev, glm::vec3(fp.x, fth, fp.z));
+        if (audio.PlayerFootstep(fp, deltaTime)) {
+            auto* fws = gameSession->GetWorldSystem();
+            const float fth = fws->GetTerrainHeightAt(fp.x, fp.z);
+            // Material-based footstep: the surface under the player picks the sound.
+            const char* fev = "footstep_grass";
+            switch (fws->SurfaceVertexMaterial(fp.x, fp.z, fth)) {
+                case Luminumbra::MaterialType::Stone:
+                case Luminumbra::MaterialType::Deepslate:
+                    fev = "footstep_stone";
+                    break;
+                case Luminumbra::MaterialType::Soil:
+                    fev = "footstep_soil";
+                    break;
+                case Luminumbra::MaterialType::Sand:
+                    fev = "footstep_sand";
+                    break;
+                case Luminumbra::MaterialType::Water:
+                    fev = "footstep_water";
+                    break;
+                case Luminumbra::MaterialType::LuminCrystal:
+                    fev = "footstep_crystal";
+                    break;
+                case Luminumbra::MaterialType::Grass:
+                default:
+                    fev = "footstep_grass";
+                    break;
             }
+            audioManager->PlayOneShot(fev, glm::vec3(fp.x, fth, fp.z));
         }
     }
 }
 
 // Living-world ambience: rain/stream/waterfall/wind beds, creature
-// calls/sleep/feeding/colony/locomotion, and the dawn/dusk cues (verbatim
-// region 3).
+// calls/sleep/feeding/colony/locomotion, and the dawn/dusk cues.
 void UpdateLivingWorldAudio(ClientAppContext& app,
+                            FrameAudioState& audio,
                             GameState currentState,
                             float deltaTime,
                             Luminumbra::Client::IAudioManager* audioManager,
@@ -134,28 +121,21 @@ void UpdateLivingWorldAudio(ClientAppContext& app,
     // untouched).
     if (currentState == GameState::IN_GAME && audioManager && camera && !app.hud.paused &&
         !scenario_config.active() && gameSession) {
-        static float s_envTimer = 0.0f, s_callTimer = 0.0f, s_sleepTimer = 0.0f;
-        static float s_feedTimer = 0.0f, s_colonyTimer = 0.0f;
-        static bool s_rainOn = false, s_waterOn = false;
-        s_envTimer += static_cast<float>(deltaTime);
-        s_callTimer += static_cast<float>(deltaTime);
-        s_sleepTimer += static_cast<float>(deltaTime);
-        s_feedTimer += static_cast<float>(deltaTime);
-        s_colonyTimer += static_cast<float>(deltaTime);
+        audio.AdvanceTimers(deltaTime);
         const glm::vec3 pc = camera->Position;
-        if (s_envTimer >= 0.5f) {
-            s_envTimer = 0.0f;
+        if (audio.envTimer >= 0.5f) {
+            audio.envTimer = 0.0f;
             // Rain: tie ambient_rain to the live weather precipitation at the player
             // (hysteresis so it doesn't flutter at a storm-cell edge). Same field the foliage
             // growth reads.
             if (auto* weather = gameSession->GetWeatherSystem()) {
                 const float precip = weather->PrecipitationAt(Luminumbra::Vec3(pc.x, pc.y, pc.z));
-                if (!s_rainOn && precip > 0.18f) {
+                if (!audio.rainOn && precip > 0.18f) {
                     audioManager->PlayAmbientLoop("ambient_rain", pc, 1.0e6f);
-                    s_rainOn = true;
-                } else if (s_rainOn && precip < 0.08f) {
+                    audio.rainOn = true;
+                } else if (audio.rainOn && precip < 0.08f) {
                     audioManager->StopAmbientLoop("ambient_rain");
-                    s_rainOn = false;
+                    audio.rainOn = false;
                 }
                 // thunder now follows the SIM strike schedule when
                 // the live-weather bridge is on — each queued strike cue fires after
@@ -164,30 +144,29 @@ void UpdateLivingWorldAudio(ClientAppContext& app,
                 // fallback when the bridge is off (no schedule consumer running).
                 if (systemConfig.enabled(luminumbra::core::SysKey::RenderLiveWeather)) {
                     const double now_s = glfwGetTime();
-                    for (auto it = app.audio.pendingThunder.begin();
-                         it != app.audio.pendingThunder.end();) {
+                    for (auto it = audio.pendingThunder.begin();
+                         it != audio.pendingThunder.end();) {
                         const double delay_s = it->distance_m / 343.0; // speed of sound
                         if (now_s - it->fired_at_seconds >= delay_s) {
                             audioManager->PlayOneShot2D(
                                 "thunder",
                                 Luminumbra::Client::BusId::Events,
                                 Luminumbra::Client::ThunderCueGain(it->magnitude, it->distance_m));
-                            it = app.audio.pendingThunder.erase(it);
+                            it = audio.pendingThunder.erase(it);
                         } else {
                             ++it;
                         }
                     }
                 } else {
-                    static float s_thunderTimer = 0.0f;
                     if (precip > 0.40f) {
-                        s_thunderTimer += 0.5f; // this branch runs once per 0.5 s tick above
-                        if (s_thunderTimer >= 22.0f) {
-                            s_thunderTimer = 0.0f;
+                        audio.thunderTimer += 0.5f; // this branch runs once per 0.5 s tick above
+                        if (audio.thunderTimer >= 22.0f) {
+                            audio.thunderTimer = 0.0f;
                             audioManager->PlayOneShot2D("thunder",
                                                         Luminumbra::Client::BusId::Events);
                         }
                     } else {
-                        s_thunderTimer = 0.0f;
+                        audio.thunderTimer = 0.0f;
                     }
                 }
             }
@@ -204,18 +183,18 @@ void UpdateLivingWorldAudio(ClientAppContext& app,
                         break;
                     }
                 }
-                if (nearWater && !s_waterOn) {
+                if (nearWater && !audio.waterOn) {
                     audioManager->PlayAmbientLoop("ambient_stream", pc, 1.0e6f);
-                    s_waterOn = true;
-                } else if (!nearWater && s_waterOn) {
+                    audio.waterOn = true;
+                } else if (!nearWater && audio.waterOn) {
                     audioManager->StopAmbientLoop("ambient_stream");
-                    s_waterOn = false;
+                    audio.waterOn = false;
                 }
                 // The nearest live baked sheet drives the roar, using the last
                 // prepared frame's water/support factors without another survey.
                 {
-                    auto& roarOn = app.audio.waterfallRoarOn;
-                    auto& roarPosition = app.audio.waterfallRoarPosition;
+                    auto& roarOn = audio.waterfallRoarOn;
+                    auto& roarPosition = audio.waterfallRoarPosition;
                     const auto source = renderPipeline.waterfall_roar_source(pc);
                     const auto* best = source.site;
                     if (best != nullptr) {
@@ -268,8 +247,8 @@ void UpdateLivingWorldAudio(ClientAppContext& app,
             }
         }
         // Occasional call from the nearest LIVE creature (<50 m) so the world has voices.
-        if (s_callTimer >= 11.0f) {
-            s_callTimer = 0.0f;
+        if (audio.callTimer >= 11.0f) {
+            audio.callTimer = 0.0f;
             const auto& reg = gameSession->GetRegistry();
             auto cview = reg.view<const Luminumbra::Components::CreatureComponent,
                                   const Luminumbra::Components::TransformComponent>();
@@ -304,14 +283,14 @@ void UpdateLivingWorldAudio(ClientAppContext& app,
                 }
                 audioManager->PlayOneShot(ev, bestPos);
             } else {
-                s_callTimer = 8.0f; // nobody near -> check again soon
+                audio.callTimer = 8.0f; // nobody near -> check again soon
             }
         }
         // a soft sleeping breath from the nearest SLEEPING creature (<18 m) every
         // ~6 s, so a creature bedded down for the night reads as alive, not frozen. last_action
         // == Sleep (CreatureAction::Sleep = 5). Render-only; one breath at a time stays subtle.
-        if (s_sleepTimer >= 6.0f) {
-            s_sleepTimer = 0.0f;
+        if (audio.sleepTimer >= 6.0f) {
+            audio.sleepTimer = 0.0f;
             const auto& reg = gameSession->GetRegistry();
             auto sview = reg.view<const Luminumbra::Components::CreatureComponent,
                                   const Luminumbra::Components::TransformComponent>();
@@ -334,13 +313,13 @@ void UpdateLivingWorldAudio(ClientAppContext& app,
             if (best != entt::null)
                 audioManager->PlayOneShot("creature_sleep", bestPos);
             else
-                s_sleepTimer = 4.0f; // none asleep nearby -> re-check sooner
+                audio.sleepTimer = 4.0f; // none asleep nearby -> re-check sooner
         }
         // per-action audio: the nearest GRAZING creature (<20 m) emits a
         // soft feed/chew every ~5 s (a drink/sip instead if it is feeding right at the water's
         // edge). last_action == Graze (CreatureAction::Graze = 1). Render-only.
-        if (s_feedTimer >= 5.0f) {
-            s_feedTimer = 0.0f;
+        if (audio.feedTimer >= 5.0f) {
+            audio.feedTimer = 0.0f;
             const auto& reg = gameSession->GetRegistry();
             auto* ws3 = gameSession->GetWorldSystem();
             auto gview = reg.view<const Luminumbra::Components::CreatureComponent,
@@ -369,14 +348,14 @@ void UpdateLivingWorldAudio(ClientAppContext& app,
                                ws3->GetTerrainHeightAt(bestPos.x, bestPos.z) + 0.2f;
                 audioManager->PlayOneShot(atWater ? "creature_drink" : "creature_feed", bestPos);
             } else {
-                s_feedTimer = 3.0f; // nobody grazing nearby -> re-check sooner
+                audio.feedTimer = 3.0f; // nobody grazing nearby -> re-check sooner
             }
         }
         // colony bed: a faint chitter from the nearest forager NEST (<25 m)
         // every ~5 s, so an active ant colony reads as alive. Keyed on the colony's shared home
         // cell (every ForagerComponent carries it). Render-only.
-        if (s_colonyTimer >= 5.0f) {
-            s_colonyTimer = 0.0f;
+        if (audio.colonyTimer >= 5.0f) {
+            audio.colonyTimer = 0.0f;
             const auto& reg = gameSession->GetRegistry();
             auto* ws4 = gameSession->GetWorldSystem();
             auto nview = reg.view<const Luminumbra::Components::ForagerComponent>();
@@ -399,22 +378,21 @@ void UpdateLivingWorldAudio(ClientAppContext& app,
             if (haveNest)
                 audioManager->PlayOneShot("creature_colony", nestPos);
             else
-                s_colonyTimer = 3.0f;
+                audio.colonyTimer = 3.0f;
         }
         // Creature LOCOMOTION sound: grounded creatures near the player tick a soft footfall
         // as they travel (stride-accumulated from real movement, so cadence tracks speed);
         // fliers (corvid/heron/finch/moth) get wingbeats at a longer interval; the small
         // skink gets a light skitter. Render-only.
         {
-            static std::unordered_set<std::uint16_t> s_fliers, s_light;
-            if (s_fliers.empty()) {
-                for (const char* f : {"ashen_corvid", "dusk_heron", "glimmer_finch", "lumen_moth"})
-                    s_fliers.insert(Luminumbra::Components::CreatureSpeciesId16(f));
-                s_light.insert(Luminumbra::Components::CreatureSpeciesId16("ember_skink"));
-            }
-            static std::unordered_map<std::uint32_t, std::pair<glm::vec2, float>> s_stride;
-            if (s_stride.size() > 512)
-                s_stride.clear(); // bound: render-only bookkeeping
+            static const std::unordered_set<std::uint16_t> fliers{
+                Luminumbra::Components::CreatureSpeciesId16("ashen_corvid"),
+                Luminumbra::Components::CreatureSpeciesId16("dusk_heron"),
+                Luminumbra::Components::CreatureSpeciesId16("glimmer_finch"),
+                Luminumbra::Components::CreatureSpeciesId16("lumen_moth")};
+            static const std::unordered_set<std::uint16_t> light{
+                Luminumbra::Components::CreatureSpeciesId16("ember_skink")};
+            audio.BeginCreatureFrame();
             const auto& reg = gameSession->GetRegistry();
             auto fview = reg.view<const Luminumbra::Components::CreatureComponent,
                                   const Luminumbra::Components::TransformComponent>();
@@ -429,27 +407,16 @@ void UpdateLivingWorldAudio(ClientAppContext& app,
                 // Pick the gait sound + stride length by species class.
                 const char* gait = "creature_grovestrider_footstep";
                 float kStride = 1.7f;
-                if (s_fliers.count(cc.species_id)) {
+                if (fliers.count(cc.species_id)) {
                     gait = "creature_wingbeat";
                     kStride = 3.0f;
-                } else if (s_light.count(cc.species_id)) {
+                } else if (light.count(cc.species_id)) {
                     gait = "creature_footstep_light";
                     kStride = 1.0f;
                 }
                 const glm::vec2 cur(tf.position.x, tf.position.z);
                 const auto key = static_cast<std::uint32_t>(entt::to_integral(e));
-                auto it = s_stride.find(key);
-                if (it == s_stride.end()) {
-                    s_stride.emplace(key, std::make_pair(cur, 0.0f));
-                    continue;
-                }
-                const float moved = glm::distance(cur, it->second.first);
-                it->second.first = cur;
-                if (moved > 5.0f)
-                    continue; // ignore teleport-sized jumps (re-anchor/respawn)
-                it->second.second += moved;
-                if (it->second.second >= kStride) {
-                    it->second.second -= kStride;
+                if (audio.CreatureFootfall(key, cur, kStride)) {
                     audioManager->PlayOneShot(
                         gait, glm::vec3(tf.position.x, tf.position.y, tf.position.z));
                 }
@@ -459,20 +426,19 @@ void UpdateLivingWorldAudio(ClientAppContext& app,
         // at dusk. Sun elevation = -sun_direction.y (the vector points away from the sun).
         // The state only flips once clearly past the horizon, so it fires once per transition.
         {
-            static int s_sunUp = -1; // -1 uninit, 0 below horizon, 1 above
             const float elev = -renderPipeline.sun_direction().y;
             const int up = elev > 0.0f ? 1 : 0;
-            if (s_sunUp == -1) {
-                s_sunUp = up;
-            } else if (up != s_sunUp) {
+            if (audio.sunUp == -1) {
+                audio.sunUp = up;
+            } else if (up != audio.sunUp) {
                 if (up == 1 && elev > 0.03f) {
                     audioManager->PlayOneShot2D("time_dawn", Luminumbra::Client::BusId::Events);
                     audioManager->PlayMusic("music_exploration");
-                    s_sunUp = 1;
+                    audio.sunUp = 1;
                 } else if (up == 0 && elev < -0.03f) {
                     audioManager->PlayOneShot2D("time_dusk", Luminumbra::Client::BusId::Events);
                     audioManager->PlayMusic("music_dusk");
-                    s_sunUp = 0;
+                    audio.sunUp = 0;
                 }
             }
         }
@@ -482,6 +448,7 @@ void UpdateLivingWorldAudio(ClientAppContext& app,
 } // namespace
 
 void UpdateFrameAudio(ClientAppContext& app,
+                      FrameAudioState& audio,
                       GameState currentState,
                       float deltaTime,
                       Luminumbra::Client::IAudioManager* audioManager,
@@ -494,8 +461,9 @@ void UpdateFrameAudio(ClientAppContext& app,
     UpdateListenerEnvironment(
         currentState, deltaTime, audioManager, envAudio, camera, gameSession, renderPipeline);
     UpdatePlayerFootsteps(
-        app, currentState, deltaTime, audioManager, camera, gameSession, scenario_config);
+        app, audio, currentState, deltaTime, audioManager, camera, gameSession, scenario_config);
     UpdateLivingWorldAudio(app,
+                           audio,
                            currentState,
                            deltaTime,
                            audioManager,

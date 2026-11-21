@@ -12,6 +12,7 @@
 
 #include "app/DeveloperUiPolicy.h"
 #include "app/FarmSpeciesCache.h"
+#include "app/FrameAudioState.h"
 #include "app/PhotoEnvironment.h"
 
 #include "../../../include/luminumbra/core/Types.h"
@@ -39,16 +40,6 @@
 #include <vector>
 
 namespace Luminumbra::Client::App {
-
-// ->: thunder cues queued by the live lightning
-// consumer (strike sim tick + distance + magnitude); the audio tick drains them
-// with the physical sound delay (distance / 343 m/s). Client-only, never sim.
-struct PendingThunder {
-    std::uint64_t strike_tick = 0;
-    double fired_at_seconds = 0.0; // wall clock when the bolt rendered
-    float distance_m = 0.0f;
-    float magnitude = 0.0f;
-};
 
 struct TimelapseDrainState {
     bool init = false;
@@ -294,13 +285,6 @@ struct MouseLookState {
     float lastX = 1280 / 2.0f;
     float lastY = 720 / 2.0f;
     bool firstMouse = true;
-};
-
-// Frame-audio bookkeeping (the thunder cue queue).
-struct FrameAudioState {
-    std::vector<PendingThunder> pendingThunder;
-    bool waterfallRoarOn = false;
-    glm::vec3 waterfallRoarPosition{0.0f};
 };
 
 // Live forager presentation caches and diagnostics. The environment-gated

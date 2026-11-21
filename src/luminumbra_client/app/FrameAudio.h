@@ -1,6 +1,6 @@
 #pragma once
 
-// Per-frame audio region extracted verbatim from main_client.cpp's frame
+// Per-frame audio region extracted from main_client.cpp's frame
 // loop: the 3D listener follow, material-keyed player footsteps, and the
 // living-world ambience (weather-reactive rain/streams/waterfall roar,
 // creature calls/sleep/feeding/colony/locomotion, and the dawn/dusk cues).
@@ -33,6 +33,7 @@ namespace Luminumbra::Client::App {
 // same objects the inline code reached for (the audio manager and session are
 // main()-locals; the camera is the core singleton).
 void UpdateFrameAudio(ClientAppContext& app,
+                      FrameAudioState& audio,
                       GameState currentState,
                       float deltaTime,
                       Luminumbra::Client::IAudioManager* audioManager,
