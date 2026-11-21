@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string>
 #include <vector>
 
 #include "../components/CoreComponents.h"
@@ -9,6 +10,7 @@
 #include "CreatureTickAdmission.h"
 #include "InstinctPlanner.h"
 #include "PerceptionSubstrate.h"
+#include "PerceptionSystem.h"
 #include "StimulusChannels.h"
 
 namespace luminumbra::ai {
@@ -50,6 +52,7 @@ InstinctSystemTickStats RunInstinctSystemOnTick(entt::registry& registry,
     using Luminumbra::Components::TransformComponent;
 
     InstinctSystemTickStats stats;
+    auto* identity_order = registry.ctx().find<PerceptionIdentityOrder>();
 
     // Snapshot the opportunities once per tick, sorted by id so planner
     // input order is independent of registry storage order.
@@ -70,6 +73,11 @@ InstinctSystemTickStats RunInstinctSystemOnTick(entt::registry& registry,
                 source.position[2] = transform->position.z;
             }
             opportunities.push_back(source);
+        }
+        if (identity_order != nullptr) {
+            identity_order->Sort(registry, opportunities, [](const OpportunitySource& source) {
+                return source.entity;
+            });
         }
         std::stable_sort(opportunities.begin(),
                          opportunities.end(),
@@ -102,9 +110,18 @@ InstinctSystemTickStats RunInstinctSystemOnTick(entt::registry& registry,
     }
 
     auto agent_view = registry.view<InstinctAgentComponent, NeedsComponent>();
-    for (auto entity : agent_view) {
+    std::vector<entt::entity> agents;
+    if (identity_order != nullptr) {
+        for (auto entity : agent_view) {
+            if (!admission || admission->Allows(entity)) {
+                agents.push_back(entity);
+            }
+        }
+        identity_order->Sort(registry, agents, [](entt::entity entity) { return entity; });
+    }
+    const auto run_agent = [&](entt::entity entity) {
         if (admission && !admission->Allows(entity)) {
-            continue;
+            return;
         }
         auto& agent = agent_view.get<InstinctAgentComponent>(entity);
         auto& needs = agent_view.get<NeedsComponent>(entity);
@@ -148,7 +165,7 @@ InstinctSystemTickStats RunInstinctSystemOnTick(entt::registry& registry,
         const bool never_planned = agent.plans_executed == 0;
         const std::uint64_t interval = std::max<std::uint32_t>(1u, agent.replan_interval_ticks);
         if (!never_planned && tick < agent.last_planned_tick + interval) {
-            continue;
+            return;
         }
 
         InstinctPlanRequest request;
@@ -171,6 +188,18 @@ InstinctSystemTickStats RunInstinctSystemOnTick(entt::registry& registry,
             const OpportunityComponent& component = *source.component;
             InstinctOpportunity opportunity;
             opportunity.id = component.id;
+            if (identity_order != nullptr) {
+                // Qualify the planner's source key without changing the component's
+                // semantic name. The final decimal suffix is unique even when names
+                // contain colons (at most 20 appended bytes for an admitted ID).
+                // Winner lookup must distinguish equal names too.
+                opportunity.id +=
+                    ":" + std::to_string(
+                              registry
+                                  .get<const Luminumbra::Components::SimulationIdentityComponent>(
+                                      source.entity)
+                                  .id);
+            }
             opportunity.action = component.action;
             opportunity.target = component.target;
             opportunity.need = component.need;
@@ -247,6 +276,15 @@ InstinctSystemTickStats RunInstinctSystemOnTick(entt::registry& registry,
                 }
             }
             action_plan.plan.push_back(std::move(action));
+        }
+    };
+    if (identity_order != nullptr) {
+        for (const auto entity : agents) {
+            run_agent(entity);
+        }
+    } else {
+        for (const auto entity : agent_view) {
+            run_agent(entity);
         }
     }
 

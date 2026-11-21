@@ -1,5 +1,6 @@
 #include "InstinctLocomotionSystem.h"
 #include "CreatureTickAdmission.h"
+#include "PerceptionSystem.h"
 
 #include <algorithm>
 #include <array>
@@ -197,9 +198,13 @@ InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry
             }
         }
     }
-    std::sort(agents.begin(), agents.end(), [](entt::entity lhs, entt::entity rhs) {
-        return entt::to_integral(lhs) < entt::to_integral(rhs);
-    });
+    if (auto* identity_order = registry.ctx().find<PerceptionIdentityOrder>()) {
+        identity_order->Sort(registry, agents, [](entt::entity entity) { return entity; });
+    } else {
+        std::sort(agents.begin(), agents.end(), [](entt::entity lhs, entt::entity rhs) {
+            return entt::to_integral(lhs) < entt::to_integral(rhs);
+        });
+    }
 
     // snapshot of all locomotion agents (position + PRIOR-tick heading),
     // in deterministic id order, for the Reynolds flocking terms below
