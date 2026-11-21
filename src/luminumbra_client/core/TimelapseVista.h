@@ -5,9 +5,10 @@
 
 #include <glm/glm.hpp>
 
+#include "StrictNumeric.h"
+
 #include <algorithm>
 #include <cmath>
-#include <exception>
 #include <optional>
 #include <string>
 
@@ -22,19 +23,10 @@ inline int ClampSettleFrames(int requested, int default_frames) {
     return std::clamp(requested, default_frames, std::max(default_frames, kMaxSettleFrames));
 }
 
-// Empty, unparsable or non-finite input keeps the default (nullopt); std::stof
-// accepts "nan"/"inf" and std::clamp keeps NaN, so finiteness is checked first.
+// Empty, malformed or non-finite input keeps the default (nullopt).
 inline std::optional<float> ParsePanDegrees(const std::string& text) {
-    if (text.empty()) {
-        return std::nullopt;
-    }
     float parsed = 0.0f;
-    try {
-        parsed = std::stof(text);
-    } catch (const std::exception&) {
-        return std::nullopt;
-    }
-    if (!std::isfinite(parsed)) {
+    if (!Core::ParseNumber(text, parsed)) {
         return std::nullopt;
     }
     return std::clamp(parsed, -kMaxPanDegreesPerFrame, kMaxPanDegreesPerFrame);
