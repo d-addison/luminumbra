@@ -464,6 +464,7 @@ luminumbra_configure_first_party_target(capture_manifest_test)
 # GL-free feature selection, runtime resolution and capability manifest contracts.
 add_executable(capture_feature_profile_test
     rendering/capture_feature_profile_test.cpp
+    rendering/capture_feature_policy_test.cpp
     ../src/luminumbra_client/rendering/CaptureFeatureProfile.cpp
     ../src/luminumbra_client/rendering/DiagnosticCapture.cpp
     ../src/luminumbra_client/rendering/TemporalAudit.cpp
