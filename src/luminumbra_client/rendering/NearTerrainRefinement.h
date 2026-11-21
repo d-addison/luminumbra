@@ -220,8 +220,9 @@ public:
             // At most 65 index nodes exist during this commit; failure preserves
             // all resident entries and the original payload.
             found = m_index.emplace(chunk.get_id(), m_next).first;
-            if (m_entries[m_next].id) {
-                forget(*m_entries[m_next].id);
+            const auto& previous_id = m_entries[m_next].id;
+            if (previous_id) {
+                forget(*previous_id);
             }
             m_entries[m_next] = std::move(replacement);
             m_next = (m_next + 1) % kCapacity;

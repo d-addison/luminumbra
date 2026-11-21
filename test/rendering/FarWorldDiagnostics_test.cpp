@@ -108,8 +108,9 @@ TEST(RenderBenchmarkOverrides, WorkloadAssignmentsDoNotConsumeSuccessorsOrHideOv
             const auto active = Luminumbra::Client::Measurement::render_overrides(
                 static_cast<int>(argv.size()), argv.data());
             EXPECT_FALSE(active.contains(std::string("cli:") + option));
-            if (!terminal)
+            if (!terminal) {
                 EXPECT_EQ(active.at("cli:--render-scale"), "0");
+            }
         }
     }
 }
@@ -715,7 +716,9 @@ TEST(FarWorldDiagnostics, WrongModeStaleGenerationSpanAndIncompleteStationRefuse
                 FAIL() << "Unknown diagnostic fault: " << fault;
         }
         EXPECT_FALSE(station.Ready()) << fault;
-        EXPECT_EQ(CheckFarWorldStation(s, station.Expected(), 1), reasons[fault]) << fault;
+        EXPECT_EQ(CheckFarWorldStation(s, station.Expected(), 1),
+                  reasons[static_cast<std::size_t>(fault)])
+            << fault;
     }
 }
 
