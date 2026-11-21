@@ -6370,6 +6370,33 @@ int main(int argc, char* argv[]) {
                     renderPipeline.set_diagnostic_capture_armed(
                         !g_rb_active ||
                         g_app.benchmark.measuredFrames == g_app.capture.render_benchmark_frames);
+                    using SkyLut = Luminumbra::Rendering::SkyAtmosphereLut;
+#if defined(LUMINUMBRA_QA_RUNNER)
+                    constexpr bool sky_test_harness = true;
+#else
+                    constexpr bool sky_test_harness = false;
+#endif
+                    // This is the sole interactive opt-in. Use the benchmark
+                    // request, independent of schema and warmup/measurement state.
+                    const auto sky_publication = SkyLut::select_publication(
+                        {.interactive = currentState == GameState::IN_GAME,
+                         .replay = Luminumbra::Rendering::DebugViewPass::controls().frozen ||
+                                   Luminumbra::Rendering::DebugViewPass::replay_mode(
+                                       Luminumbra::Rendering::DebugViewPass::geometry_view()),
+                         .capture =
+                             photo_capture_pinned || capture_pinned || scenario_config.active() ||
+                             g_app.capture.scene_active || !g_app.capture.frame_scan_path.empty() ||
+                             !g_app.capture.survey_dir.empty() ||
+                             !g_app.capture.ui_screens.empty() || g_app.capture.ui_preview_live ||
+                             g_app.capture.ui_fixtures || g_app.capture.fixed_cam ||
+                             g_app.capture.play_paths || g_app.capture.profile_fly_seconds != 0.0 ||
+                             !g_app.capture.debug_goto.empty() ||
+                             !g_app.capture.render_benchmark_screenshot.empty() ||
+                             path_options.diagnostics.enabled || g_app.hud.photoMode.active ||
+                             (g_playerController && g_playerController->photo_mode_active()),
+                         .benchmark = !g_app.capture.render_benchmark_path.empty(),
+                         .headless = hidden_window || g_windowState.mode == WindowMode::Headless,
+                         .test_harness = sky_test_harness});
                     renderPipeline.render_frame(
                         gameSession->GetRegistry(),
                         *gameSession->GetWorldSystem(),
@@ -6378,7 +6405,8 @@ int main(int argc, char* argv[]) {
                         g_app.overlay.wireframe_mode,
                         settling_benchmark_uploads || settling_capture_uploads
                             ? Luminumbra::Rendering::UploadPresentation::Settled
-                            : Luminumbra::Rendering::UploadPresentation::Streaming);
+                            : Luminumbra::Rendering::UploadPresentation::Streaming,
+                        sky_publication);
                     if (timelapse_waiting) {
                         if (timelapse_presentation_started_at ==
                             std::chrono::steady_clock::time_point{}) {

@@ -73,11 +73,51 @@ public:
     // (the startup one-shot, budget <= 8.0 ms on release).
     bool initialize(const glm::vec3& sun_dir_world, double* out_full_precompute_ms = nullptr);
 
+    enum class Publication {
+        SameFrame,
+        // Only for consumers that permit changes to the frame of publication.
+        // Replay, capture and pixel-identical preset paths require SameFrame.
+        Deferred
+    };
+
+    // Unknown callers stay synchronous; only ordinary interactive play opts in.
+    struct RefreshPolicy {
+        bool interactive = false;
+        bool replay = false;
+        bool capture = false;
+        bool benchmark = false;
+        bool headless = false;
+        bool test_harness = false;
+    };
+    static constexpr Publication select_publication(const RefreshPolicy& policy) {
+        return policy.interactive && !policy.replay && !policy.capture && !policy.benchmark &&
+                       !policy.headless && !policy.test_harness
+                   ? Publication::Deferred
+                   : Publication::SameFrame;
+    }
+
+    // Owner-thread cancellation: keep published pixels/ambient/sun, retire only
+    // the unpublished readback. GL retains storage still referenced by commands.
+    void discard_pending_readback() {
+        release_deferred_readback();
+    }
+    // Owner-thread publication state; consumers can retain their last sun while
+    // a new LUT is in flight without changing their normal no-refresh cadence.
+    bool readback_pending() const {
+        return m_deferred_fence != nullptr;
+    }
+
     // Recomputes ONLY the sky-view LUT for a new sun direction when it has moved
     // past kSunRefreshCosThreshold since the last refresh. A no-op (returns
     // false) when the sun has not moved enough. out_refresh_ms receives the
     // wall-clock cost when a refresh happened (budget <= 0.2 ms on release).
-    bool refresh_sky_view(const glm::vec3& sun_dir_world, double* out_refresh_ms = nullptr);
+    // Deferred submits at most one readback and returns false until a later call
+    // adopts it. Texture, sun direction and ambient remain published together.
+    // A pending input is adopted before a newer sun is considered. Switching
+    // publication policy or disabling GPU computation discards the pending input.
+    bool refresh_sky_view(const glm::vec3& sun_dir_world,
+                          double* out_refresh_ms = nullptr,
+                          Publication publication = Publication::SameFrame);
 
     void destroy();
     bool ready() const {
@@ -89,6 +129,9 @@ public:
     // transmittance/multiscatter textures and writes the sky-view texture; a
     // compile/link failure explicitly falls back to the CPU march.
     void set_gpu_skyview_enabled(bool e) {
+        if (!e) {
+            discard_pending_readback();
+        }
         m_use_gpu_skyview = e;
     }
     bool gpu_skyview_enabled() const {
@@ -110,7 +153,7 @@ public:
         return m_skyview_tex;
     }
 
-    // Sun direction the sky-view LUT was last computed for (toward-sun).
+    // Sun direction of the currently published sky-view LUT (toward-sun).
     const glm::vec3& sky_view_sun_dir() const {
         return m_skyview_sun_dir;
     }
@@ -172,9 +215,14 @@ private:
     AttributedGl::Program m_transmittance_compute_prog{}; // Initializes LUTs once on the GPU.
     AttributedGl::Program m_multiscatter_compute_prog{};
     GLuint m_skyview_ssbo = 0;
-    // the ambient readback rides the asynchronous-readback ring — no
-    // blocking GL readback primitives remain on this path.
+    // Same-frame publication retains the bounded synchronous ring consumer.
     Luminumbra::Rendering::AsyncReadbackRing m_skyview_readback;
+    // Deferred publication has exactly one persistent read-mapped PBO, bounded
+    // to 192 * 108 * 3 floats (248,832 bytes), and one in-flight fence.
+    GLuint m_deferred_pbo = 0;
+    void* m_deferred_mapped = nullptr;
+    GLsync m_deferred_fence = nullptr;
+    glm::vec3 m_deferred_sun{0.0f, 1.0f, 0.0f};
 
     void build_transmittance_cpu();
     void build_multiscatter_cpu();
@@ -182,6 +230,16 @@ private:
     // Returns true and fills the sky-view texture via compute; false if GPU resources
     // could not be created (caller falls back to build_sky_view_cpu).
     bool build_sky_view_gpu(const glm::vec3& sun_dir_world);
+    bool dispatch_sky_view_gpu(const glm::vec3& sun_dir_world);
+    bool submit_deferred_sky_view(const glm::vec3& sun_dir_world);
+    enum class DeferredResult {
+        Pending,
+        Adopted,
+        Failed
+    };
+    DeferredResult adopt_deferred_sky_view();
+    void release_deferred_readback();
+    void reduce_sky_view_ambient(const glm::vec3& sun_dir_world);
     bool ensure_skyview_compute_resources();
     // build ALL three LUTs (transmittance + multiscatter + sky-view) on the GPU
     // at startup so the one-shot precompute drops under the 8 ms budget. Returns false on any GPU
