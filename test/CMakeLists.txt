@@ -1,3 +1,9 @@
+include("${CMAKE_CURRENT_LIST_DIR}/sources.cmake")
+add_executable(mod_dependency_solver_test ${MOD_DEPENDENCY_TEST_SOURCES})
+target_include_directories(mod_dependency_solver_test PRIVATE ../src)
+target_link_libraries(mod_dependency_solver_test PRIVATE gtest_main luminumbra_common)
+luminumbra_configure_first_party_target(mod_dependency_solver_test)
+
 # Add the world generation test executable
 add_executable(world_generation_test
     shield/test_world_generation.cpp
@@ -2197,6 +2203,7 @@ add_test(NAME DiagnosticChecksPython COMMAND "${Python3_EXECUTABLE}" -I -B
 set_tests_properties(DiagnosticChecksPython PROPERTIES LABELS "tools" TIMEOUT 60)
 
 set(LUMINUMBRA_GTEST_TARGETS
+    mod_dependency_solver_test
     upload_budget_test
     jolt_startup_test
     frame_attribution_test

@@ -34,6 +34,10 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/core/SystemConfig.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/GraphicsPresets.cpp
 
+    # Mods
+    ${CMAKE_CURRENT_LIST_DIR}/mods/ModManifest.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/mods/ModDependencySolver.cpp
+
     # Net
     # delay-based lockstep transport (engine-generic; LoopbackTransport
     # for gates/tests, _WIN32-guarded TcpTransport for loopback+LAN).
