@@ -57,6 +57,7 @@ PYTHON_TESTS = (
     "tools/ci/test_local_check_contracts.py",
     "tools/ci/test_check_ctest_junit.py",
     "tools/ci/test_containment_link_closure.py",
+    "tools/ci/test_shared_test_sources.py",
     "tools/ci/test_first_party_exceptions.py",
     "tools/ci/test_qualification_capture.py",
     "tools/ci/test_compare_ambient_receipts.py",
