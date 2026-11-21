@@ -24,8 +24,10 @@ void AerialPass::init_shader(const std::filesystem::path& root_path) {
     PassGl::label_gl_object(
         GL_PROGRAM, m_shader ? m_shader->Id() : 0u, "shader.aerial_perspective");
     if (m_shader && m_shader->IsValid()) {
-        if (const ExpectedLayout* layout = FindPassExpectedLayout("aerial_perspective"))
-            m_shader->ValidateLayout(*layout);
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("aerial_perspective");
+            layout && !m_shader->ValidateLayout(*layout)) {
+            m_shader.reset();
+        }
     }
 }
 
@@ -54,7 +56,10 @@ void AerialPass::execute(const RenderContext& ctx) {
     const Camera& camera = *ctx.camera;
 
     glBindFramebuffer(GL_FRAMEBUFFER, lit_fbo);
-    glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // aerial into internal lit FBO
+    glViewport(0,
+               0,
+               static_cast<GLsizei>(ctx.internal_w()),
+               static_cast<GLsizei>(ctx.internal_h())); // aerial into internal lit FBO
     const GLboolean depth_was_enabled = glIsEnabled(GL_DEPTH_TEST);
     glDisable(GL_DEPTH_TEST);
     const GLboolean blend_was_enabled = glIsEnabled(GL_BLEND);
@@ -101,7 +106,7 @@ void AerialPass::execute(const RenderContext& ctx) {
     m_shader->setInt("u_froxelIntegrated", 3);
 
     glBindVertexArray(ctx.screen_quad_vao);
-    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GLenum{GL_TRIANGLE_STRIP}, 0, 4);
     glBindVertexArray(0);
 
     if (!blend_was_enabled) {

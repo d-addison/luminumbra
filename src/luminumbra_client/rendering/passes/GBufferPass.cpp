@@ -123,15 +123,21 @@ void GBufferPass::init_geometry_shader(const std::filesystem::path& root_path) {
     m_geometry_far_uniforms.Cache(*m_geometry_shader);
     m_geometry_ladder_uniforms.Cache(*m_geometry_ladder_shader);
     if (m_geometry_ladder_shader->IsValid()) {
-        if (const ExpectedLayout* layout = FindPassExpectedLayout("gbuffer_geometry"))
-            m_geometry_ladder_shader->ValidateLayout(*layout);
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("gbuffer_geometry");
+            layout && !m_geometry_ladder_shader->ValidateLayout(*layout)) {
+            m_geometry_ladder_uniforms.Cache(0);
+            m_geometry_ladder_shader.reset();
+        }
     }
     PassGl::label_gl_object(
         GL_PROGRAM, m_geometry_shader ? m_geometry_shader->Id() : 0u, "shader.geometry");
     // validate g_buffer.frag's sampler bindings against the registry.
     if (m_geometry_shader && m_geometry_shader->IsValid()) {
-        if (const ExpectedLayout* layout = FindPassExpectedLayout("gbuffer_geometry"))
-            m_geometry_shader->ValidateLayout(*layout);
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("gbuffer_geometry");
+            layout && !m_geometry_shader->ValidateLayout(*layout)) {
+            m_geometry_far_uniforms.Cache(0);
+            m_geometry_shader.reset();
+        }
     }
 }
 
@@ -148,8 +154,11 @@ void GBufferPass::init_instanced_static_mesh(const std::filesystem::path& root_p
     m_static_far_uniforms.Cache(*m_instanced_static_mesh_shader);
     m_static_ladder_uniforms.Cache(*m_instanced_static_mesh_ladder_shader);
     if (m_instanced_static_mesh_ladder_shader->IsValid()) {
-        if (const ExpectedLayout* layout = FindPassExpectedLayout("gbuffer_static"))
-            m_instanced_static_mesh_ladder_shader->ValidateLayout(*layout);
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("gbuffer_static");
+            layout && !m_instanced_static_mesh_ladder_shader->ValidateLayout(*layout)) {
+            m_static_ladder_uniforms.Cache(0);
+            m_instanced_static_mesh_ladder_shader.reset();
+        }
     }
     PassGl::label_gl_object(GL_PROGRAM,
                             m_instanced_static_mesh_shader ? m_instanced_static_mesh_shader->Id()
@@ -157,8 +166,11 @@ void GBufferPass::init_instanced_static_mesh(const std::filesystem::path& root_p
                             "shader.instanced_static_mesh");
     // Real mesh UVs retain the authored normal-map sampler.
     if (m_instanced_static_mesh_shader && m_instanced_static_mesh_shader->IsValid()) {
-        if (const ExpectedLayout* layout = FindPassExpectedLayout("gbuffer_static"))
-            m_instanced_static_mesh_shader->ValidateLayout(*layout);
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("gbuffer_static");
+            layout && !m_instanced_static_mesh_shader->ValidateLayout(*layout)) {
+            m_static_far_uniforms.Cache(0);
+            m_instanced_static_mesh_shader.reset();
+        }
     }
     glGenBuffers(1, &m_instanceMatrixVBO);
     PassGl::label_gl_object(GL_BUFFER, m_instanceMatrixVBO, "static_mesh.instance_matrices");
@@ -187,8 +199,10 @@ void GBufferPass::init_instanced_static_mesh(const std::filesystem::path& root_p
                             m_tree_impostor_shader ? m_tree_impostor_shader->Id() : 0u,
                             "shader.tree_impostor");
     if (m_tree_impostor_shader && m_tree_impostor_shader->IsValid()) {
-        if (const ExpectedLayout* layout = FindPassExpectedLayout("gbuffer_impostor"))
-            m_tree_impostor_shader->ValidateLayout(*layout);
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("gbuffer_impostor");
+            layout && !m_tree_impostor_shader->ValidateLayout(*layout)) {
+            m_tree_impostor_shader.reset();
+        }
     }
     glGenBuffers(1, &m_impostorInstanceVBO);
     glBindBuffer(GL_ARRAY_BUFFER, m_impostorInstanceVBO);
@@ -227,16 +241,22 @@ void GBufferPass::init_skinned_mesh(const std::filesystem::path& root_path) {
     m_skinned_far_uniforms.Cache(*m_skinned_mesh_shader);
     m_skinned_ladder_uniforms.Cache(*m_skinned_mesh_ladder_shader);
     if (m_skinned_mesh_ladder_shader->IsValid()) {
-        if (const ExpectedLayout* layout = FindPassExpectedLayout("gbuffer_skinned"))
-            m_skinned_mesh_ladder_shader->ValidateLayout(*layout);
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("gbuffer_skinned");
+            layout && !m_skinned_mesh_ladder_shader->ValidateLayout(*layout)) {
+            m_skinned_ladder_uniforms.Cache(0);
+            m_skinned_mesh_ladder_shader.reset();
+        }
     }
     PassGl::label_gl_object(GL_PROGRAM,
                             m_skinned_mesh_shader ? m_skinned_mesh_shader->Id() : 0u,
                             "shader.skinned_mesh");
     // Shares g_buffer.frag with the chunk geometry program -> same sampler layout.
     if (m_skinned_mesh_shader && m_skinned_mesh_shader->IsValid()) {
-        if (const ExpectedLayout* layout = FindPassExpectedLayout("gbuffer_skinned"))
-            m_skinned_mesh_shader->ValidateLayout(*layout);
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("gbuffer_skinned");
+            layout && !m_skinned_mesh_shader->ValidateLayout(*layout)) {
+            m_skinned_far_uniforms.Cache(0);
+            m_skinned_mesh_shader.reset();
+        }
     }
     glGenBuffers(1, &m_jointPaletteSSBO);
     PassGl::label_gl_object(GL_BUFFER, m_jointPaletteSSBO, "skinned_mesh.joint_palette");

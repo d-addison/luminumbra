@@ -47,10 +47,12 @@ void SsaoPass::init_shaders(const std::filesystem::path& root_path) {
                             "shader.ssao_bilateral_upsample");
 
     // validate each AO program's sampler bindings against the registry.
-    const auto validate = [](const std::unique_ptr<Shader>& s, const char* name) {
+    const auto validate = [](std::unique_ptr<Shader>& s, const char* name) {
         if (s && s->IsValid()) {
-            if (const ExpectedLayout* layout = FindPassExpectedLayout(name))
-                s->ValidateLayout(*layout);
+            if (const ExpectedLayout* layout = FindPassExpectedLayout(name);
+                layout && !s->ValidateLayout(*layout)) {
+                s.reset();
+            }
         }
     };
     validate(m_ssao.ssaoShader, "ssao");
@@ -173,8 +175,11 @@ void SsaoPass::reset_shaders() {
 // The ssao_draws stat bump moved to the call site (the pipeline owns stats).
 void SsaoPass::execute_ssao(const RenderContext& ctx) {
     LUMIN_PROFILE_ZONE_N("GL SsaoPass.execute_ssao");
-    const Camera& camera = *ctx.camera;
     const int quality = ctx.ssao_quality;
+    const bool use_gtao = quality > 0 && m_ssao.gtaoShader && m_ssao.gtaoShader->IsValid();
+    if (!use_gtao && (!m_ssao.ssaoShader || !m_ssao.ssaoShader->IsValid()))
+        return;
+    const Camera& camera = *ctx.camera;
     // quality 3 = half-res GTAO: render into the 1/2-per-axis FBO (1/4 the fragments),
     // then execute_blur does the depth-aware upsample to full res.
     const bool halfres = (quality == 3) && m_ssao.halfFBO != 0 && m_ssao.upsampleShader &&
@@ -195,7 +200,7 @@ void SsaoPass::execute_ssao(const RenderContext& ctx) {
     // byte-identical). The half-res GTAO sub-scaling composes on top of this.
     const glm::vec2 screen_size(ctx.internal_w(), ctx.internal_h());
 
-    if (quality > 0 && m_ssao.gtaoShader && m_ssao.gtaoShader->IsValid()) {
+    if (use_gtao) {
         // Render-optimization (ssao-gtao): XeGTAO horizon-slice AO. Reads the SAME
         // view-space G-buffer. High = 3x6 = 18 spp; Low = 2x4 = 8 spp.
         m_ssao.gtaoShader->use();
@@ -247,7 +252,7 @@ void SsaoPass::execute_ssao(const RenderContext& ctx) {
         m_ssao.ssaoShader->setVec2("u_screenSize", screen_size);
     }
     glBindVertexArray(ctx.screen_quad_vao);
-    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GLenum{GL_TRIANGLE_STRIP}, 0, 4);
     glBindVertexArray(0);
     if (halfres)
         glViewport(0,
@@ -285,11 +290,13 @@ void SsaoPass::execute_blur(const RenderContext& ctx) {
         m_ssao.upsampleShader->setVec2(
             "u_halfTexel", glm::vec2(1.0f / (float)m_ssao.halfW, 1.0f / (float)m_ssao.halfH));
         glBindVertexArray(ctx.screen_quad_vao);
-        Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
+        Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GLenum{GL_TRIANGLE_STRIP}, 0, 4);
         glBindVertexArray(0);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         return;
     }
+    if (!m_ssao.blurShader || !m_ssao.blurShader->IsValid())
+        return;
     glBindFramebuffer(GL_FRAMEBUFFER, m_ssao.blurFBO);
     glClear(GL_COLOR_BUFFER_BIT);
     m_ssao.blurShader->use();
@@ -297,7 +304,7 @@ void SsaoPass::execute_blur(const RenderContext& ctx) {
     glBindTexture(GL_TEXTURE_2D, m_ssao.ssaoColorBuffer);
     m_ssao.blurShader->setInt("u_ssaoInput", 0);
     glBindVertexArray(ctx.screen_quad_vao);
-    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
+    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GLenum{GL_TRIANGLE_STRIP}, 0, 4);
     glBindVertexArray(0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }

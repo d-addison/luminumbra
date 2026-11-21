@@ -44,8 +44,10 @@ void SkyboxPass::init_shader(const std::filesystem::path& root_path) {
     PassGl::label_gl_object(
         GL_PROGRAM, m_skybox_shader ? m_skybox_shader->Id() : 0u, "shader.skybox");
     if (m_skybox_shader && m_skybox_shader->IsValid()) {
-        if (const ExpectedLayout* layout = FindPassExpectedLayout("skybox"))
-            m_skybox_shader->ValidateLayout(*layout);
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("skybox");
+            layout && !m_skybox_shader->ValidateLayout(*layout)) {
+            m_skybox_shader.reset();
+        }
     }
 
     // screen-space weather overlay (rain/snow/fog/storm). Reuses
@@ -58,8 +60,10 @@ void SkyboxPass::init_shader(const std::filesystem::path& root_path) {
     // NB: weather_system.frag declares gPosition but never samples it (stripped) ->
     // the registry entry excludes it, so this validates clean + non-vacuously.
     if (m_weather_shader && m_weather_shader->IsValid()) {
-        if (const ExpectedLayout* layout = FindPassExpectedLayout("weather_overlay"))
-            m_weather_shader->ValidateLayout(*layout);
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("weather_overlay");
+            layout && !m_weather_shader->ValidateLayout(*layout)) {
+            m_weather_shader.reset();
+        }
     }
 }
 
@@ -217,6 +221,8 @@ void SkyboxPass::execute(const RenderContext& ctx,
                          const Camera& camera,
                          bool draw_weather_overlay) {
     LUMIN_PROFILE_ZONE_N("GL SkyboxPass.execute");
+    if (!m_skybox_shader || !m_skybox_shader->IsValid())
+        return;
     glDepthFunc(GL_GEQUAL);
     // The camera sits inside the skybox cube, so its upward faces wind
     // clockwise from the inside view and were backface-culled (black wedges
