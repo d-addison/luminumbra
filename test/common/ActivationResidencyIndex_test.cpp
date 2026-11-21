@@ -1,4 +1,5 @@
 #include "../fixtures/TerrainFixtureParams.h"
+#include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/world/ActivationResidencyIndex.h"
 #include <gtest/gtest.h>
 
@@ -682,17 +683,50 @@ TEST(ActivationResidencyIndex, LifecycleCensusPreservesScriptedSelectionAndOrder
         const auto actual = world.generation_queue_prefix(1024);
         ASSERT_EQ(actual.size(), stats.scheduled_generation);
         ASSERT_LE(actual.size(), expected.size());
-        for (std::size_t index = 0; index < actual.size(); ++index)
+        for (std::size_t index = 0; index < actual.size(); ++index) {
             EXPECT_EQ(actual[index], expected[index].coords);
+        }
         world.quiesce_streaming_jobs_for_save();
         EXPECT_EQ(world.generation_queue_prefix(1024), actual);
         world.wait_for_streaming_jobs();
     }
-    // More than 128 ready-build jobs exercises the parallel blocking backend;
-    // census container updates belong to the owner after all worker joins.
-    ASSERT_TRUE(world.EnsureSurfaceReadyNear(anchor, nullptr, 4, 0));
     world.update(registry, script.back(), nullptr, false);
     ExpectLifecycleStats(world);
+    world.wait_for_streaming_jobs();
+
+    Systems::PhysicsSystem physics;
+    physics.startup();
+    SHIELD_WorldSystem blocking_world(&jobs, nullptr, params, 12345);
+    blocking_world.debug_set_streaming_radius_cap(2);
+    ASSERT_TRUE(blocking_world.snapshot_streamed_chunks().empty());
+    // Radius four covers 81 flat columns with three chunks each, all unbuilt.
+    // The 243 jobs exceed the parallel backend's 128-job threshold even though
+    // the asynchronous streaming cap is two. Collision radius zero still
+    // requires physics for the center column.
+    constexpr std::size_t kSurfaceChunks = 9u * 9u * 3u;
+    for (int z = -4; z <= 4; ++z) {
+        for (int x = -4; x <= 4; ++x) {
+            const auto span = FullScanSpan(blocking_world, x, z);
+            ASSERT_EQ(span.min_y, 0);
+            ASSERT_EQ(span.max_y, 0);
+        }
+    }
+    EXPECT_FALSE(blocking_world.EnsureSurfaceReadyNear(anchor, nullptr, 4, 0));
+    EXPECT_TRUE(blocking_world.snapshot_streamed_chunks().empty());
+    EXPECT_EQ(blocking_world.activation_index_counters().lifecycle_chunk_visits, 0u);
+    ASSERT_TRUE(blocking_world.EnsureSurfaceReadyNear(anchor, &physics, 4, 0));
+    const auto built_chunks = blocking_world.snapshot_streamed_chunks();
+    ASSERT_EQ(built_chunks.size(), kSurfaceChunks);
+    for (const auto& chunk : built_chunks) {
+        EXPECT_EQ(chunk->get_state(), ChunkState::Ready);
+        EXPECT_EQ(chunk->pending_lod.load(std::memory_order_acquire), -1);
+    }
+    const auto center = blocking_world.find_streamed_chunk(IVec3(0));
+    ASSERT_TRUE(center);
+    EXPECT_TRUE(center->has_collision.load());
+    // Census containers consume worker notifications only after all joins.
+    blocking_world.update(registry, {anchor}, nullptr, false);
+    ExpectLifecycleStats(blocking_world);
 }
 
 INSTANTIATE_TEST_SUITE_P(FixedSeeds, ActivationFullScanParity, testing::Values(12345u, 424242u));
