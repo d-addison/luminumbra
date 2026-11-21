@@ -14,6 +14,7 @@
 // taken; evolution and scent use distinct subsequent offsets.
 
 #include <cstdint>
+#include <string_view>
 
 namespace luminumbra::core {
 
@@ -27,6 +28,42 @@ public:
     [[nodiscard]] static DeterministicRng
     seeded(std::uint64_t a, std::uint64_t b = 0, std::uint64_t c = 0) {
         return DeterministicRng(mix(mix(mix(a) ^ b) ^ c));
+    }
+
+    // Named module stream: FNV-1a-64 over the domain, world seed, length-prefixed
+    // name bytes, entity id and tick, followed by splitmix64. Integers (including
+    // byte lengths) are encoded as eight little-endian bytes. Names are exact
+    // bytes, including embedded NULs; no normalization is performed.
+    // No allocation; work is linear in the two name lengths.
+    [[nodiscard]] static DeterministicRng for_module(std::uint64_t world_seed,
+                                                     std::string_view mod_id,
+                                                     std::string_view stream_name,
+                                                     std::uint64_t entity_id,
+                                                     std::uint64_t tick) {
+        std::uint64_t hash = 14695981039346656037ull;
+        const auto append_byte = [&hash](unsigned char byte) {
+            hash = (hash ^ byte) * 1099511628211ull;
+        };
+        const auto append_u64 = [&append_byte](std::uint64_t value) {
+            for (unsigned int shift = 0; shift < 64; shift += 8) {
+                append_byte(static_cast<unsigned char>(value >> shift));
+            }
+        };
+        const auto append_name = [&append_byte, &append_u64](std::string_view name) {
+            append_u64(static_cast<std::uint64_t>(name.size()));
+            for (const char byte : name) {
+                append_byte(static_cast<unsigned char>(byte));
+            }
+        };
+        for (const char byte : std::string_view("luminumbra:rng:module:v1")) {
+            append_byte(static_cast<unsigned char>(byte));
+        }
+        append_u64(world_seed);
+        append_name(mod_id);
+        append_name(stream_name);
+        append_u64(entity_id);
+        append_u64(tick);
+        return DeterministicRng(mix(hash));
     }
 
     // splitmix64 finalizer (Steele et al. 2014) — the engine's existing render-side
