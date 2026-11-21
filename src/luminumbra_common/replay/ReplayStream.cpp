@@ -5,6 +5,7 @@
 // platform/compiler. Strings are length-prefixed (u32 LE length + raw bytes).
 
 #include "replay/ReplayStream.h"
+#include "replay/RegionScheduleTrace.h"
 
 #include <algorithm>
 #include <array>
@@ -881,7 +882,9 @@ bool BoundedReplayRecorder::Refused(int formatted) {
     return false;
 }
 
-bool BoundedReplayRecorder::Open(const std::string& destination, const ReplayHeader& header) {
+bool BoundedReplayRecorder::Open(const std::string& destination,
+                                 const ReplayHeader& header,
+                                 bool regions) {
     // Every refusal below names its step in the fixed-size refusal text; the
     // full paths go to the logger only.
     if (m_byte_limit == 0)
@@ -958,6 +961,7 @@ bool BoundedReplayRecorder::Open(const std::string& destination, const ReplayHea
         if (fs::create_directory(candidate, ec)) {
             m_directory = candidate;
             m_header = header;
+            m_regions = regions;
             m_digest = 1469598103934665603ULL;
             m_elided_tick = 0;
             m_elided_digest = m_digest;
@@ -1027,7 +1031,8 @@ bool BoundedReplayRecorder::Prune(std::uint64_t tick, std::uint64_t confirmed_ti
 bool BoundedReplayRecorder::RecordTick(std::uint64_t tick,
                                        const std::vector<std::uint8_t>& inputs,
                                        const std::array<std::string_view, 4>* hashes,
-                                       std::uint64_t confirmed_tick) {
+                                       std::uint64_t confirmed_tick,
+                                       std::string_view schedule_digest) {
     if (m_directory.empty() || tick <= m_last_tick || m_max_tick_bytes < 17 ||
         inputs.size() > m_max_tick_bytes - 17 ||
         inputs.size() > (std::numeric_limits<std::uint32_t>::max)() - 4)
@@ -1046,6 +1051,17 @@ bool BoundedReplayRecorder::RecordTick(std::uint64_t tick,
         if (bytes - 17 - inputs.size() - 13 > (std::numeric_limits<std::uint32_t>::max)())
             return false;
     }
+    // The private trace frame is stripped during finalization; LREC1 is unchanged.
+    constexpr std::size_t trace_bytes = 13 + 16;
+    if (m_regions
+            ? (tick != m_last_tick + 1 || schedule_digest.size() != 16 ||
+               schedule_digest.find_first_not_of("0123456789abcdef") != std::string_view::npos ||
+               trace_bytes > m_max_tick_bytes - bytes)
+            : !schedule_digest.empty())
+        return false;
+    const auto replay_bytes = bytes;
+    if (m_regions)
+        bytes += trace_bytes;
     if (!Prune(tick, confirmed_tick) || bytes > m_byte_limit - m_bytes)
         return false;
 
@@ -1060,11 +1076,18 @@ bool BoundedReplayRecorder::RecordTick(std::uint64_t tick,
     if (hashes) {
         PutU8(encoded, static_cast<std::uint8_t>(RecordType::Checkpoint));
         PutU64(encoded, tick);
-        PutU32(encoded, static_cast<std::uint32_t>(bytes - 17 - inputs.size() - 13));
+        PutU32(encoded, static_cast<std::uint32_t>(replay_bytes - 17 - inputs.size() - 13));
         for (const auto part : *hashes) {
             PutU32(encoded, static_cast<std::uint32_t>(part.size()));
             encoded.insert(encoded.end(), part.begin(), part.end());
         }
+    }
+    if (m_regions) {
+        // 0xff is private spool metadata, never a published replay record type.
+        PutU8(encoded, 0xff);
+        PutU64(encoded, tick);
+        PutU32(encoded, 16);
+        encoded.insert(encoded.end(), schedule_digest.begin(), schedule_digest.end());
     }
     const bool rotate = !m_segments.empty() &&
                         (m_segments.back().ticks == kSegmentTicks ||
@@ -1085,8 +1108,8 @@ bool BoundedReplayRecorder::RecordTick(std::uint64_t tick,
                    static_cast<std::streamsize>(encoded.size()));
     if (!m_output.good())
         return false;
-    for (const auto byte : encoded) {
-        m_digest ^= byte;
+    for (std::size_t index = 0; index < replay_bytes; ++index) {
+        m_digest ^= encoded[index];
         m_digest *= 1099511628211ULL;
     }
     auto& segment = m_segments.back();
@@ -1110,13 +1133,11 @@ bool BoundedReplayRecorder::Finalize(const std::string& destination,
     };
     const CloseOnExit close{*this};
     try {
-        if (m_directory.empty() || divergence_tick <= m_elided_tick)
+        // Trace admission matches the existing encoder/reader: at most one
+        // million ticks and 96 MiB encoded. Elided dumps are diagnostic only.
+        if (m_directory.empty() || divergence_tick <= m_elided_tick ||
+            (m_regions && m_elided_tick == 0 && tick_count > 1000000))
             return false;
-        // Own recovery and publication before reading any retained segment.
-        const auto ownership = AcquireReplayPublication(destination);
-        if (!ownership) {
-            return false;
-        }
         if (m_output.is_open()) {
             m_output.close();
             if (m_output.fail())
@@ -1144,8 +1165,10 @@ bool BoundedReplayRecorder::Finalize(const std::string& destination,
             return false;
         if (!out.write({reinterpret_cast<const char*>(header.data()), header.size()}))
             return false;
+        RegionScheduleTrace trace;
         std::uint64_t input_count = 0;
         std::uint64_t checkpoint_count = 0;
+        std::uint64_t trace_tick = m_elided_tick;
         // Finalization streams through a fixed 64 KiB scratch buffer; the replay
         // artifact is never assembled in memory, regardless of the negotiated bound.
         std::array<char, std::size_t{64} * 1024> scratch{};
@@ -1169,6 +1192,25 @@ bool BoundedReplayRecorder::Finalize(const std::string& destination,
                 if (!cursor.GetU8(type) || !cursor.GetU64(tick) || !cursor.GetU32(payload) ||
                     payload > remaining - frame.size())
                     return false;
+                if (type == 0xff) {
+                    std::array<char, 16> digest{};
+                    if (!m_regions || payload != digest.size() ||
+                        !in.read(digest.data(), digest.size()))
+                        return false;
+                    const std::string_view digest_view(digest.data(), digest.size());
+                    if (trace_tick == (std::numeric_limits<std::uint64_t>::max)() ||
+                        tick != trace_tick + 1 ||
+                        digest_view.find_first_not_of("0123456789abcdef") != std::string_view::npos)
+                        return false;
+                    trace_tick = tick;
+                    if (m_elided_tick == 0) {
+                        if (trace.size() >= tick_count || tick != trace.size() + 1)
+                            return false;
+                        trace.emplace_back(tick, std::string(digest.data(), digest.size()));
+                    }
+                    remaining -= frame.size() + payload;
+                    continue;
+                }
                 const bool keep = type != static_cast<std::uint8_t>(RecordType::Checkpoint) ||
                                   tick <= divergence_tick;
                 if (type == static_cast<std::uint8_t>(RecordType::Input))
@@ -1196,8 +1238,15 @@ bool BoundedReplayRecorder::Finalize(const std::string& destination,
         PutU64(trailer, tick_count);
         PutU64(trailer, input_count);
         PutU64(trailer, checkpoint_count);
+        std::string trace_bytes;
+        const bool publish_trace = m_regions && m_elided_tick == 0;
+        if (m_regions && trace_tick != tick_count)
+            return false;
+        if (publish_trace &&
+            (trace.size() != tick_count || !EncodeRegionScheduleTrace(trace, trace_bytes)))
+            return false;
         return out.write({reinterpret_cast<const char*>(trailer.data()), trailer.size()}) &&
-               out.commit();
+               out.commit_with_companion(publish_trace ? &trace_bytes : nullptr);
     } catch (const std::exception&) {
         return false;
     }
@@ -1224,11 +1273,12 @@ struct QueuedReplayRecorder::State {
 
     bool
     Configure(std::size_t tick_byte_limit, std::uint64_t unconfirmed_ticks, QueueLimits limits);
-    bool Open(const std::string& destination, const ReplayHeader& header);
+    bool Open(const std::string& destination, const ReplayHeader& header, bool regions_enabled);
     bool RecordTick(std::uint64_t tick,
                     std::shared_ptr<const std::vector<std::uint8_t>> inputs,
                     std::shared_ptr<const CheckpointRecord> checkpoint,
-                    std::uint64_t confirmed_tick);
+                    std::uint64_t confirmed_tick,
+                    std::string_view schedule_digest);
     bool Flush();
     bool Finalize(const std::string& destination,
                   std::uint64_t tick_count,
@@ -1256,6 +1306,7 @@ private:
         std::shared_ptr<const CheckpointRecord> checkpoint;
         std::uint64_t confirmed = 0;
         std::size_t bytes = 0;
+        std::array<char, 16> schedule_digest{};
     };
 
     // Requires mutex. Preserve the first failure even while draining accepted work.
@@ -1290,8 +1341,13 @@ private:
                     const auto& hash = *next.checkpoint;
                     hashes = {hash.world_hash, hash.terrain, hash.water, hash.entities};
                 }
-                recorded = sink->RecordTick(
-                    next.tick, *next.inputs, next.checkpoint ? &hashes : nullptr, next.confirmed);
+                recorded = sink->RecordTick(next.tick,
+                                            *next.inputs,
+                                            next.checkpoint ? &hashes : nullptr,
+                                            next.confirmed,
+                                            regions ? std::string_view(next.schedule_digest.data(),
+                                                                       next.schedule_digest.size())
+                                                    : std::string_view{});
             } catch (...) {
                 // JobSystem catches exceptions too, but the lifecycle waiters must
                 // always be notified and this artifact must be marked incomplete.
@@ -1348,6 +1404,7 @@ private:
     // Static text for this recorder's own Open preconditions; nullptr defers to
     // the sink. Written and read only on the thread that calls Open.
     const char* open_refusal = nullptr;
+    bool regions = false;
     bool open = false;
     bool stopping = false;
     bool waiting = false;
@@ -1385,7 +1442,9 @@ bool QueuedReplayRecorder::State::Configure(std::size_t tick_byte_limit,
     return true;
 }
 
-bool QueuedReplayRecorder::State::Open(const std::string& destination, const ReplayHeader& header) {
+bool QueuedReplayRecorder::State::Open(const std::string& destination,
+                                       const ReplayHeader& header,
+                                       bool regions_enabled) {
     auto& state = *this;
     if (state.open) {
         state.open_refusal = "already-open: recorder is open";
@@ -1397,8 +1456,9 @@ bool QueuedReplayRecorder::State::Open(const std::string& destination, const Rep
     }
     // From here the sink's own refusal text (or its emptiness) is authoritative.
     state.open_refusal = nullptr;
-    if (!state.sink->Open(destination, header))
+    if (!state.sink->Open(destination, header, regions_enabled))
         return false;
+    state.regions = regions_enabled;
     state.stopping = false;
     state.failure = State::Failure::None;
     state.failure_tick = 0;
@@ -1415,7 +1475,8 @@ bool QueuedReplayRecorder::State::RecordTick(
     std::uint64_t tick,
     std::shared_ptr<const std::vector<std::uint8_t>> inputs,
     std::shared_ptr<const CheckpointRecord> checkpoint,
-    std::uint64_t confirmed_tick) {
+    std::uint64_t confirmed_tick,
+    std::string_view schedule_digest) {
     auto& state = *this;
     // Validate exact wire size before retaining anything. Checkpoint validation is
     // four constant-time size checks, with no scans/copies of the encoded payload.
@@ -1445,13 +1506,22 @@ bool QueuedReplayRecorder::State::RecordTick(
             }
         }
     }
+    if (valid && state.regions) {
+        valid = schedule_digest.size() == 16 &&
+                schedule_digest.find_first_not_of("0123456789abcdef") == std::string_view::npos &&
+                state.max_tick_bytes - bytes >= 29;
+        if (valid)
+            bytes += 29;
+    } else if (!schedule_digest.empty()) {
+        valid = false;
+    }
     // Charge capacity as well as wire size: a small view of a large allocation
     // must not evade the queue's byte budget. Fixed metadata is count-bounded.
     const auto charged = std::max(bytes, storage);
     const std::lock_guard lock(state.mutex);
     if (!state.open || state.stopping || state.failure != State::Failure::None)
         return false;
-    if (!valid || tick <= state.last_tick) {
+    if (!valid || tick <= state.last_tick || (state.regions && tick != state.last_tick + 1)) {
         state.Fail(State::Failure::InvalidTick, tick);
         return false;
     }
@@ -1466,7 +1536,12 @@ bool QueuedReplayRecorder::State::RecordTick(
                          .inputs = std::move(inputs),
                          .checkpoint = std::move(checkpoint),
                          .confirmed = confirmed_tick,
-                         .bytes = charged};
+                         .bytes = charged,
+                         .schedule_digest = {}};
+    if (state.regions)
+        std::copy(schedule_digest.begin(),
+                  schedule_digest.end(),
+                  state.queue[slot].schedule_digest.begin());
     ++state.queued_ticks;
     state.pending_bytes += charged;
     ++state.pending_ticks;
@@ -1586,15 +1661,19 @@ bool QueuedReplayRecorder::Configure(std::size_t max_tick_bytes,
     return m_state->Configure(max_tick_bytes, unconfirmed_ticks, limits);
 }
 
-bool QueuedReplayRecorder::Open(const std::string& destination, const ReplayHeader& header) {
-    return m_state->Open(destination, header);
+bool QueuedReplayRecorder::Open(const std::string& destination,
+                                const ReplayHeader& header,
+                                bool regions) {
+    return m_state->Open(destination, header, regions);
 }
 
 bool QueuedReplayRecorder::RecordTick(std::uint64_t tick,
                                       std::shared_ptr<const std::vector<std::uint8_t>> inputs,
                                       std::shared_ptr<const CheckpointRecord> checkpoint,
-                                      std::uint64_t confirmed_tick) {
-    return m_state->RecordTick(tick, std::move(inputs), std::move(checkpoint), confirmed_tick);
+                                      std::uint64_t confirmed_tick,
+                                      std::string_view schedule_digest) {
+    return m_state->RecordTick(
+        tick, std::move(inputs), std::move(checkpoint), confirmed_tick, schedule_digest);
 }
 
 bool QueuedReplayRecorder::Flush() {

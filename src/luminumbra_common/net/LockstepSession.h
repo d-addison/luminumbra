@@ -601,11 +601,15 @@ struct LockstepHooks {
     // Optional additional replay sink, called once per executed tick. The hash
     // pointer is nonnull at checkpoints. Append synchronously to a caller-owned,
     // bounded streaming sink; do not accumulate records in memory. Never changes
-    // simulation state. Automatic bounded desync recording needs no hook installation.
+    // simulation state. Automatic bounded desync recording does not use this sink.
     void (*record_replay_tick)(std::uint64_t tick,
                                const std::vector<std::uint8_t>& merged,
                                const HashMsg* hash,
                                void* user) = nullptr;
+
+    // Borrow the consumed tick's schedule digest; null means regions disabled.
+    // The automatic recorder copies the fixed 16 bytes before returning.
+    const std::string* (*region_schedule_digest)(void* user) = nullptr;
 };
 
 // --- LockstepSession ---------------------------------------------------------------

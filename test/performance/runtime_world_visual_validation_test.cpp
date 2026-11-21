@@ -34,6 +34,7 @@
 #include "core/JobSystem.h"
 #include "luminumbra_client/core/RuntimeScenarioConfig.h"
 #include "luminumbra_client/core/RuntimeScenarioHarness.h"
+#include "luminumbra_common/replay/RegionScheduleTrace.h"
 #include "luminumbra_common/replay/ReplayStream.h"
 #include "luminumbra_server/modes/ModeHelpers.h"
 #include "luminumbra_server/modes/Modes.h"
@@ -1244,16 +1245,38 @@ TEST_P(ClientReplayProducerTest, AutomaticDumpMatchesCliBootAndReconstructsStart
     Server::ServerWorldRunner playback(*playback_config, {.owner_continuation = true});
     ASSERT_TRUE(playback.Boot());
     EXPECT_EQ(playback.ComputeWorldHash(), automatic->header.start_world_hash);
-    if (!GetParam()) {
-        options.replay_path = dump.string();
-        options.artifact_path = (root.path() / "client-playback.json").string();
-        // The unrecorded edit must diverge at the checkpoint, after reconstructing
-        // the identical start world. This exercises playback of the unmodified dump.
+    options.replay_path = dump.string();
+    options.artifact_path = (root.path() / "client-playback.json").string();
+    // The unrecorded edit must diverge at the checkpoint, after reconstructing
+    // the identical start world. This exercises playback of the unmodified dump.
+    EXPECT_EQ(RunReplay(options), 1);
+    std::ifstream artifact_file(options.artifact_path);
+    ASSERT_TRUE(artifact_file.is_open());
+    const auto artifact = nlohmann::json::parse(artifact_file);
+    EXPECT_EQ(artifact.at("divergence_tick"), 1u);
+    EXPECT_NE(artifact.at("divergence_section"), "region_schedule");
+    if (GetParam()) {
+        replay::RegionScheduleTrace trace;
+        std::string trace_error;
+        ASSERT_TRUE(replay::ReadRegionScheduleTrace(dump, 1, trace, trace_error)) << trace_error;
+        ASSERT_EQ(trace.size(), 1u);
+        EXPECT_EQ(trace.front().second, client.GetRegionSchedule().digest);
+        artifact_file.close();
+        fs::remove(options.artifact_path);
+        fs::remove(dump.string() + ".regions.json");
         EXPECT_EQ(RunReplay(options), 1);
-        std::ifstream artifact_file(options.artifact_path);
-        ASSERT_TRUE(artifact_file.is_open());
-        const auto artifact = nlohmann::json::parse(artifact_file);
-        EXPECT_EQ(artifact.at("divergence_tick"), 1u);
+        EXPECT_FALSE(fs::exists(options.artifact_path));
+        // A valid, checksummed older schedule must reach the schedule oracle,
+        // rather than masquerading as a checkpoint/world divergence.
+        trace.front().second =
+            trace.front().second == "0000000000000000" ? "1111111111111111" : "0000000000000000";
+        ASSERT_TRUE(replay::WriteRegionScheduleTrace(dump, trace, trace_error)) << trace_error;
+        EXPECT_EQ(RunReplay(options), 1);
+        std::ifstream stale_file(options.artifact_path);
+        ASSERT_TRUE(stale_file.is_open());
+        const auto stale = nlohmann::json::parse(stale_file);
+        EXPECT_EQ(stale.at("divergence_tick"), 1u);
+        EXPECT_EQ(stale.at("divergence_section"), "region_schedule");
     }
 }
 

@@ -1536,6 +1536,9 @@ bool LockstepSession::ConfigureRetention(const HelloMsg& mine, const HelloMsg& p
     }
     const auto unconfirmed_ticks =
         cadence == 0 ? 0 : m_checkpoint_window * cadence + lead + cadence;
+    // Replacing two input frames (21 bytes each) and a hash frame (29 bytes)
+    // with replay framing (46 bytes) and a private trace frame (29 bytes) still
+    // fits this existing bound: 3 * frame_limit - 71 + 75 <= 3 * frame_limit + 46.
     if (m_frame_limit > (size_max - 46) / 3 ||
         !m_replay->Configure(3 * m_frame_limit + 46, unconfirmed_ticks)) {
         m_status.handshake_error = "lockstep replay retention size overflows this platform";
@@ -2022,7 +2025,9 @@ bool LockstepSession::OpenReplayRecorder() {
         header = captured;
     }
     header.start_world_hash = std::move(boot.world_hash);
-    m_replay_open = m_replay->Open(m_dump_path, header);
+    const bool regions =
+        m_hooks.region_schedule_digest && m_hooks.region_schedule_digest(m_hooks.user) != nullptr;
+    m_replay_open = m_replay->Open(m_dump_path, header, regions);
     m_replay_failed = !m_replay_open;
     if (m_replay_failed) {
         // The recorder's refusal is fixed-size text naming the failing setup
@@ -2045,7 +2050,13 @@ void LockstepSession::RecordReplayTick(std::uint64_t tick,
     if (!m_replay_open || m_replay_failed)
         return;
     const auto confirmed = m_config.hash_cadence_ticks == 0 ? tick : m_confirmed_peer_hash_tick;
-    if (!m_replay->RecordTick(tick, std::move(merged), std::move(hash), confirmed)) {
+    const auto* digest =
+        m_hooks.region_schedule_digest ? m_hooks.region_schedule_digest(m_hooks.user) : nullptr;
+    if (!m_replay->RecordTick(tick,
+                              std::move(merged),
+                              std::move(hash),
+                              confirmed,
+                              digest ? std::string_view(*digest) : std::string_view{})) {
         m_replay_failed = true;
         m_status.replay_error = m_replay->FailureReason();
         // Do not wait, log to disk, or discard accepted work on the tick path.

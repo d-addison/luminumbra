@@ -261,15 +261,19 @@ private:
 // seed alone cannot reconstruct the suffix. Such an artifact is diagnostic only.
 // A whole-tick sink. Calls are serialized by QueuedReplayRecorder; implementations
 // may perform blocking I/O here, never in the simulation's enqueue operation.
+// Regional recording requires 29 additional private segment bytes per tick within
+// max_tick_bytes. Published replay bytes and elided-prefix digests exclude them.
 class ReplayTickSink {
 public:
     virtual ~ReplayTickSink() = default;
     virtual bool Configure(std::size_t max_tick_bytes, std::uint64_t unconfirmed_ticks) = 0;
-    virtual bool Open(const std::string& destination, const ReplayHeader& header) = 0;
+    virtual bool
+    Open(const std::string& destination, const ReplayHeader& header, bool regions = false) = 0;
     virtual bool RecordTick(std::uint64_t tick,
                             const std::vector<std::uint8_t>& inputs,
                             const std::array<std::string_view, 4>* hashes,
-                            std::uint64_t confirmed_tick) = 0;
+                            std::uint64_t confirmed_tick,
+                            std::string_view schedule_digest = {}) = 0;
     virtual bool Finalize(const std::string& destination,
                           std::uint64_t tick_count,
                           std::uint64_t divergence_tick) = 0;
@@ -301,11 +305,13 @@ public:
     // Checks the disk bound before any recording allocation: unconfirmed_ticks
     // * max_tick_bytes + three segments (a segment may hold one maximum tick).
     bool Configure(std::size_t max_tick_bytes, std::uint64_t unconfirmed_ticks) override;
-    bool Open(const std::string& destination, const ReplayHeader& header) override;
+    bool
+    Open(const std::string& destination, const ReplayHeader& header, bool regions = false) override;
     bool RecordTick(std::uint64_t tick,
                     const std::vector<std::uint8_t>& inputs,
                     const std::array<std::string_view, 4>* hashes,
-                    std::uint64_t confirmed_tick) override;
+                    std::uint64_t confirmed_tick,
+                    std::string_view schedule_digest = {}) override;
     bool Finalize(const std::string& destination,
                   std::uint64_t tick_count,
                   std::uint64_t divergence_tick) override;
@@ -337,6 +343,7 @@ private:
     // and returns false so Open can refuse in one statement.
     bool Refused(int formatted);
 
+    bool m_regions = false;
     ReplayHeader m_header;
     std::string m_directory;
     std::ofstream m_output;
@@ -380,11 +387,12 @@ public:
     // limits. Zero bytes selects the default above; ticks must be in [1,4096].
     bool Configure(std::size_t max_tick_bytes, std::uint64_t unconfirmed_ticks);
     bool Configure(std::size_t max_tick_bytes, std::uint64_t unconfirmed_ticks, QueueLimits limits);
-    bool Open(const std::string& destination, const ReplayHeader& header);
+    bool Open(const std::string& destination, const ReplayHeader& header, bool regions = false);
     bool RecordTick(std::uint64_t tick,
                     std::shared_ptr<const std::vector<std::uint8_t>> inputs,
                     std::shared_ptr<const CheckpointRecord> checkpoint,
-                    std::uint64_t confirmed_tick);
+                    std::uint64_t confirmed_tick,
+                    std::string_view schedule_digest = {});
     // Explicit blocking lifecycle barrier, never called by the tick path.
     bool Flush();
     bool Finalize(const std::string& destination,

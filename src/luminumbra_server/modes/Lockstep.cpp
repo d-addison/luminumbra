@@ -37,6 +37,12 @@ std::vector<std::uint8_t> LockstepCollectInput(std::uint64_t /*tick*/, void* /*u
     return {};
 }
 
+const std::string* LockstepRegionScheduleDigest(void* user) {
+    const auto* ctx = static_cast<LockstepPeerContext*>(user);
+    const auto* session = ctx->runner->Session();
+    return session->ActiveRegionsEnabled() ? &session->GetRegionSchedule().digest : nullptr;
+}
+
 bool LockstepApplyStep(std::uint64_t /*tick*/,
                        const std::vector<std::uint8_t>& /*merged*/,
                        void* user) {
@@ -115,6 +121,7 @@ int RunLockstepLoopback(const ServerCliOptions& options) try {
     hooks_template.collect_local_input = &LockstepCollectInput;
     hooks_template.apply_and_step = &LockstepApplyStep;
     hooks_template.capture_hashes = &LockstepCaptureHashes;
+    hooks_template.region_schedule_digest = &LockstepRegionScheduleDigest;
 
     auto [host_transport, peer_transport] = Luminumbra::Net::MakeLoopbackPair();
 
