@@ -630,9 +630,48 @@ class TaauShaderContracts(unittest.TestCase):
         self.source = (ROOT / "res/shaders/taau_resolve.frag").read_text(encoding="utf-8")
 
     def body(self, name):
-        match = re.search(r"\b" + name + r"\([^)]*\)\s*\{([^}]+)\}", self.source)
+        match = re.search(r"\b" + name + r"\([^)]*\)\s*\{", self.source)
         self.assertIsNotNone(match, name)
-        return re.sub(r"//[^\n]*", "", match[1])
+        start = match.end()
+        nesting = 1
+        for index in range(start, len(self.source)):
+            nesting += (self.source[index] == "{") - (self.source[index] == "}")
+            if nesting == 0:
+                return re.sub(r"//[^\n]*", "", self.source[start:index])
+        self.fail("Incomplete shader helper: " + name)
+
+    def sharpen(self, color, mean, lower, upper, sharpness):
+        # Evaluate shipping expressions as scalars; the source contract below
+        # pins the fixed three-channel reduction and its branch directions.
+        body = self.body("sharpenLuma")
+        weights = (0.2126, 0.7152, 0.0722)
+        luminance = sum(c * w for c, w in zip(color, weights))
+        names = {"max": max, "min": min,
+                 "clamp": lambda v, lo, hi: min(hi, max(lo, v)),
+                 "luminance": luminance,
+                 "detail": luminance - sum(c * w for c, w in zip(mean, weights)),
+                 "u_sharpness": sharpness}
+
+        def evaluate(expression, **values):
+            return eval(expression, {"__builtins__": {}}, dict(names, **values))
+
+        names["gain"] = evaluate(re.search(r"float gain = ([^;]+);", body)[1])
+        self.assertGreaterEqual(names["gain"], 0.)
+        initial_fraction = re.search(r"float fraction = ([^;]+);", body)
+        fraction = evaluate(initial_fraction[1]) if initial_fraction else 1.
+        if "vec3 delta =" in body:
+            delta_expression = re.search(r"vec3 delta = ([^;]+);", body)[1]
+            bounds = re.findall(r"fraction = min\(fraction, ([^;]+)\);", body)
+            self.assertEqual(len(bounds), 2)
+            for channel, value in enumerate(color):
+                delta = evaluate(delta_expression, color=value)
+                if delta != 0.:
+                    fraction = min(fraction, evaluate(bounds[0 if delta > 0. else 1],
+                                   channel=channel, color=color, lower=lower, upper=upper,
+                                   delta=[delta] * 3))
+        expression = re.search(r"return ([^;]+);", body)[1]
+        return tuple(evaluate(expression, color=c, lower=lo, upper=hi, fraction=fraction)
+                     for c, lo, hi in zip(color, lower, upper))
 
     def test_sharpen_uses_luminance_and_bounds_the_published_history(self):
         body = self.body("sharpenLuma")
@@ -640,7 +679,14 @@ class TaauShaderContracts(unittest.TestCase):
             "const vec3 weights = vec3(0.2126, 0.7152, 0.0722);",
             "float luminance = dot(color, weights);",
             "float detail = luminance - dot(mean, weights);",
-            "return clamp(color * gain, lower, upper);",
+            "vec3 delta = color * (gain - 1.0);",
+            "float fraction = 1.0;",
+            "for (int channel = 0; channel < 3; ++channel)",
+            "if (delta[channel] > 0.0)",
+            "fraction = min(fraction, (upper[channel] - color[channel]) / delta[channel]);",
+            "else if (delta[channel] < 0.0)",
+            "fraction = min(fraction, (lower[channel] - color[channel]) / delta[channel]);",
+            "return color * (1.0 + clamp(fraction, 0.0, 1.0) * (gain - 1.0));",
         ):
             self.assertIn(statement, body)
         self.assertIn("resolved = sharpenLuma(resolved, mean, nmin, nmax);", self.source)
@@ -648,12 +694,6 @@ class TaauShaderContracts(unittest.TestCase):
         self.assertIn("hist = clamp(hist, nmin, nmax);", self.source)
 
     def test_sharpen_black_hdr_flat_and_silhouette_inputs(self):
-        # Evaluate the shipping scalar gain expression; RGB multiplication and
-        # range checks below are independent oracles for its output contract.
-        body = self.body("sharpenLuma")
-        match = re.search(r"float gain = ([^;]+);", body)
-        self.assertIsNotNone(match)
-        weights = (0.2126, 0.7152, 0.0722)
         cases = (
             ((0., 0., 0.), (1., 1., 1.), (0., 0., 0.), (1., 1., 1.)),
             ((0.1, 0.4, 0.05), (0.3, 0.6, 0.9), (0., 0., 0.), (1., 1., 1.)),
@@ -664,15 +704,7 @@ class TaauShaderContracts(unittest.TestCase):
         for color, mean, lower, upper in cases:
             for sharpness in (0., 0.4):
                 with self.subTest(color=color, sharpness=sharpness):
-                    luminance = sum(c * w for c, w in zip(color, weights))
-                    detail = luminance - sum(c * w for c, w in zip(mean, weights))
-                    gain = eval(match[1], {"__builtins__": {}}, {
-                        "max": max, "luminance": luminance, "detail": detail,
-                        "u_sharpness": sharpness,
-                    })
-                    self.assertGreaterEqual(gain, 0.)
-                    result = tuple(min(hi, max(lo, c * gain))
-                                   for c, lo, hi in zip(color, lower, upper))
+                    result = self.sharpen(color, mean, lower, upper, sharpness)
                     for value, lo, hi in zip(result, lower, upper):
                         self.assertGreaterEqual(value, lo)
                         self.assertLessEqual(value, hi)
@@ -684,6 +716,32 @@ class TaauShaderContracts(unittest.TestCase):
                         self.assertGreater(result[0], color[0])
                         self.assertAlmostEqual(result[1] / result[0], 2.)
                         self.assertAlmostEqual(result[2] / result[0], 0.5)
+
+    def test_sharpen_preserves_chroma_when_any_channel_limits_brightening_or_darkening(self):
+        # Unequal channel headroom exposes the previous independent RGB clamp.
+        # Permutations make each channel the limiting channel in both branches.
+        for permutation in ((0, 1, 2), (1, 2, 0), (2, 0, 1)):
+            for mean in ((.1, .4, .3), (.21, .8, .4)):
+                for color in ((.2, .5, .1), (.2, 0., .1), (0., 0., 0.),
+                              (-.2, .5, .1), (4., 8., 2.), (65504., 0., 0.)):
+                    lower = tuple(min(c, m) for c, m in zip(color, mean))
+                    upper = tuple(max(c, m) for c, m in zip(color, mean))
+                    for bounds in ((lower, upper), (color, upper), (lower, color),
+                                   (color, color)):
+                        ordered = [tuple(v[i] for i in permutation)
+                                   for v in (color, mean, *bounds)]
+                        for sharpness in (0., .4):
+                            with self.subTest(inputs=ordered, sharpness=sharpness):
+                                c, m, lo, hi = ordered
+                                result = self.sharpen(c, m, lo, hi, sharpness)
+                                for channel in range(3):
+                                    self.assertGreaterEqual(result[channel], lo[channel] - 1e-9)
+                                    self.assertLessEqual(result[channel], hi[channel] + 1e-9)
+                                    other = (channel + 1) % 3
+                                    self.assertAlmostEqual(result[channel] * c[other],
+                                                           result[other] * c[channel], delta=1e-8)
+                                if sharpness == 0. or lo == hi:
+                                    self.assertEqual(result, c)
 
     def test_current_reads_clamp_before_filtering_at_all_extents(self):
         body = self.body("currentUv")

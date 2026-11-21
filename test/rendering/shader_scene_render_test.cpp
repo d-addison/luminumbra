@@ -47,6 +47,7 @@ protected:
     void NormalDecode();
     void DepthConventions();
     void PostEdge();
+    void SharpenChroma();
     void ComputeReadback();
 
     void SetUp() override {
@@ -784,6 +785,9 @@ TEST_F(ShaderScene, TerrainMaterialTransition) {
     PostEdge();
     ASSERT_FALSE(HasFatalFailure());
     ResetTargets();
+    SharpenChroma();
+    ASSERT_FALSE(HasFatalFailure());
+    ResetTargets();
     ComputeReadback();
 }
 
@@ -1212,6 +1216,61 @@ void ShaderScene::PostEdge() {
     Save("post-edge", pixels);
     ASSERT_FALSE(HasFatalFailure());
     Save("post-edge-mask", mask);
+}
+
+void ShaderScene::SharpenChroma() {
+    const std::string source = Source("res/shaders/taau_resolve.frag");
+    Kernel(R"GLSL(#version 450 core
+void main() {
+    vec2 corners[3] = vec2[](vec2(-1, -1), vec2(3, -1), vec2(-1, 3));
+    gl_Position = vec4(corners[gl_VertexID], 0, 1);
+}
+)GLSL",
+           "#version 450 core\nuniform float u_sharpness;\n"
+           "uniform vec3 inputColor, inputMean, inputLower, inputUpper;\nout vec3 result;\n" +
+               Helper(source, "vec3 sharpenLuma(") + R"GLSL(
+void main() { result = sharpenLuma(inputColor, inputMean, inputLower, inputUpper); }
+)GLSL",
+           0,
+           GL_RGB32F);
+    ASSERT_FALSE(HasFatalFailure());
+    struct Sample {
+        glm::vec3 color, mean, lower, upper;
+        float expected_gain;
+    };
+    // Seven fixed inputs and two sharpness values; one RGB pixel read per draw.
+    // Unequal bounds expose independent channel clipping.
+    const std::array<Sample, 7> samples{{
+        {{.2f, .5f, .1f}, {.12f, .42f, .3f}, {.1f, .4f, .05f}, {.21f, .8f, .4f}, 1.05f},
+        {{.2f, .5f, .1f}, {.2f, .7f, .3f}, {.1f, .49f, .05f}, {.3f, .8f, .4f}, .98f},
+        {{0, .5f, .1f}, {0, .42f, .06f}, {0, .4f, .05f}, {0, .51f, .2f}, 1.02f},
+        {{0, 0, 0}, {1, 1, 1}, {0, 0, 0}, {1, 1, 1}, 1},
+        {{.2f, .5f, .1f}, {.2f, .5f, .1f}, {.2f, .5f, .1f}, {.2f, .5f, .1f}, 1},
+        {{-.2f, .5f, .1f}, {-.12f, .42f, .06f}, {-.21f, .4f, .05f}, {-.1f, .8f, .4f}, 1.05f},
+        {{4, 8, 2}, {2, 4, 1}, {0, 0, 0}, {16, 16, 16}, 1.2f},
+    }};
+    for (const auto& sample : samples) {
+        for (const float sharpness : {0.f, .4f}) {
+            glUniform1f(Uniform("u_sharpness"), sharpness);
+            glUniform3fv(Uniform("inputColor"), 1, &sample.color[0]);
+            glUniform3fv(Uniform("inputMean"), 1, &sample.mean[0]);
+            glUniform3fv(Uniform("inputLower"), 1, &sample.lower[0]);
+            glUniform3fv(Uniform("inputUpper"), 1, &sample.upper[0]);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            std::array<float, 3> actual{};
+            glReadPixels(0, 0, 1, 1, GL_RGB, GL_FLOAT, actual.data());
+            for (int channel = 0; channel < 3; ++channel) {
+                const auto index = static_cast<std::size_t>(channel);
+                ASSERT_TRUE(std::isfinite(actual[index]));
+                const float expected =
+                    sample.color[channel] * (sharpness == 0.f ? 1.f : sample.expected_gain);
+                EXPECT_NEAR(actual[index], expected, 2e-6f);
+                EXPECT_GE(actual[index], sample.lower[channel] - 2e-6f);
+                EXPECT_LE(actual[index], sample.upper[channel] + 2e-6f);
+            }
+        }
+    }
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
 }
 
 void ShaderScene::ComputeReadback() {
