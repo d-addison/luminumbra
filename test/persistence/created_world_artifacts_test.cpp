@@ -800,9 +800,12 @@ BOOL WINAPI Dispose(HANDLE file, FILE_INFO_BY_HANDLE_CLASS kind, LPVOID info, DW
             ::SetLastError(ERROR_ACCESS_DENIED);
             return FALSE;
         }
-        if (kind == FileDispositionInfo &&
-            static_cast<const FILE_DISPOSITION_INFO*>(info)->DeleteFile &&
-            !active->source_retired) {
+        // FILE_DISPOSITION_INFO_EX is a single DWORD of flags; bit 0 requests deletion.
+        const bool delete_request =
+            kind == FileDispositionInfo
+                ? static_cast<const FILE_DISPOSITION_INFO*>(info)->DeleteFile != FALSE
+                : (*static_cast<const DWORD*>(info) & 0x1u) != 0;
+        if (delete_request && !active->source_retired) {
             const auto result = ::SetFileInformationByHandle(file, kind, info, bytes);
             if (result)
                 active->source_retired = true;

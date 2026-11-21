@@ -10388,7 +10388,11 @@ TEST(RenderSmokeTest, TimedScenarioPublicHookPublishesSiblingBundlesAndKeepsLega
         } else if (capture_case == CaptureCase::Continuation) {
             auto* scope = GBufferDiagnosticCapture::Current();
             ASSERT_NE(scope, nullptr);
-            ASSERT_TRUE(scope->attach(pipeline.gbuffer(), {64, 64}));
+            const DiagnosticExtent pipeline_extent{
+                static_cast<std::uint32_t>(mismatched_extent ? framebuffer_width / 2
+                                                             : framebuffer_width),
+                static_cast<std::uint32_t>(framebuffer_height)};
+            ASSERT_TRUE(scope->attach(pipeline.gbuffer(), pipeline_extent));
             // Readiness must detach this valid continuation before observing coverage.
             EXPECT_FALSE(pipeline.diagnostic_capture_refusal().empty());
         }
