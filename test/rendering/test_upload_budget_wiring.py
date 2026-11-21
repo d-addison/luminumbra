@@ -290,9 +290,9 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("m_terrainCullingCache.chunk_count = sorted_chunk_ids.size();", cache)
         prepare = body(self.pipeline, "void RenderPipeline::prepare_frame(")
         self.assertIn("if (chunk.has_terrain_mesh() && found != m_chunk_render_data.end())", prepare)
-        water = body(self.pipeline, "void RenderPipeline::execute_stage_water(")
+        water = body(self.pipeline, "void RenderPipeline::execute_stage_opaque_snapshot(")
         self.assertIn("for (const auto& chunk : renderable_chunk_snapshots)", water)
-        self.assertIn("water_input.draw_items.push_back(", water)
+        self.assertIn("m_frame_water_input.draw_items.push_back(", water)
 
     def test_water_only_dispatch_preserves_ready_without_terrain_work(self):
         world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
@@ -1809,7 +1809,7 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertLess(water.index("if (!vertex_uploaded"), water.index("it->second = data;"))
         self.assertIn("!vertex_uploaded || !index_uploaded || !attributes_valid", water)
         self.assertIn("delete_water_slot(data);", water)
-        draw = body(self.pipeline, "void RenderPipeline::execute_stage_water(")
+        draw = body(self.pipeline, "void RenderPipeline::execute_stage_opaque_snapshot(")
         self.assertIn("PresentedLadderWaterEligible(", draw)
         self.assertIn("water_data.SetPresentedLadderWaterUpload(", self.pipeline)
         presentation = body(self.header, "void SetPresentedLadderWaterUpload(")
