@@ -195,14 +195,15 @@ void LightingPass::init_shader(const std::filesystem::path& root_path) {
     // validate the sampler bindings THIS pass
     // adopts in execute (the glActiveTexture+glBindTexture set above) against the
     // shader's reflected layout. A TYPE mismatch (e.g. binding a sampler2DArray
-    // where the shader declares sampler2D) would render garbage -- this logs it
-    // loudly at load instead. The ExpectedLayout is declared once in the enumerable
+    // where the shader declares sampler2D) would render garbage -- refuse it
+    // at load instead. The ExpectedLayout is declared once in the enumerable
     // PassShaderLayouts registry (the single source the  fixture test +
     // the  coverage gate also read); registering it here also arms the
     // hot-reload rollback for this shader.
     if (m_lighting_shader && m_lighting_shader->IsValid()) {
-        if (const ExpectedLayout* layout = FindPassExpectedLayout("lighting")) {
-            m_lighting_shader->ValidateLayout(*layout);
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("lighting");
+            layout && !m_lighting_shader->ValidateLayout(*layout)) {
+            m_lighting_shader.reset();
         }
     }
 }
@@ -337,6 +338,8 @@ void LightingPass::copy_lighting_color_to_opaque_texture(const RenderContext& ct
 
 void LightingPass::execute(const RenderContext& ctx) {
     LUMIN_PROFILE_ZONE_N("GL LightingPass.execute");
+    if (!m_lighting_shader || !m_lighting_shader->IsValid())
+        return;
     if (!ctx.render_view && !ctx.camera)
         throw std::invalid_argument("Lighting requires a validated view or production camera");
     if (ctx.static_studio && (!ctx.render_view || ctx.authored_surface.id == 0))
@@ -646,8 +649,9 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
                                 "shader.lightning_overlay");
         // Validate the overlay color and reversed-Z depth samplers.
         if (m_lightning_overlay_shader && m_lightning_overlay_shader->IsValid()) {
-            if (const ExpectedLayout* layout = FindPassExpectedLayout("lightning_overlay")) {
-                m_lightning_overlay_shader->ValidateLayout(*layout);
+            if (const ExpectedLayout* layout = FindPassExpectedLayout("lightning_overlay");
+                layout && !m_lightning_overlay_shader->ValidateLayout(*layout)) {
+                m_lightning_overlay_shader.reset();
             }
         }
     }
