@@ -27,6 +27,14 @@
     {
       "construct": "glGetNamedFramebufferAttachmentParameteriv ( ctx . lit_scene . id , GL_COLOR_ATTACHMENT0 , GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE , & attachment_type )",
       "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/SkyboxPass.cpp",
+      "key": "04780f84d1f54f81c8eb40dfa13c2e4d9afb9dfd4aab4f912ad285c84da4612a",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::SkyboxPass::execute_weather_overlay( const RenderContext & ctx , const Camera & camera , const glm :: mat4 & projection )"
+    },
+    {
+      "construct": "glGetNamedFramebufferAttachmentParameteriv ( ctx . lit_scene . id , GL_COLOR_ATTACHMENT0 , GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE , & attachment_type )",
+      "count": 1,
       "file": "src/luminumbra_client/rendering/passes/WaterfallPass.cpp",
       "key": "048d2aaafb56269c99cfa27d557065a641285ae4e2ce89823da96488277c4ca7",
       "rule": "hot-gl-query",
@@ -97,14 +105,6 @@
       "symbol": "RenderInterface_GL3::BeginFrame( )"
     },
     {
-      "construct": "glIsEnabled ( GL_CULL_FACE )",
-      "count": 1,
-      "file": "src/luminumbra_client/rendering/passes/SkyboxPass.cpp",
-      "key": "1d8a58085b3c01f74b826e2643a7b522985b788b918dfc50974748ff055b46d6",
-      "rule": "hot-gl-query",
-      "symbol": "Luminumbra::Rendering::SkyboxPass::execute( const RenderContext & ctx , const Camera & camera , bool draw_weather_overlay )"
-    },
-    {
       "construct": "glIsEnabled ( GL_BLEND )",
       "count": 1,
       "file": "src/luminumbra_client/rendering/passes/GodRaysPass.cpp",
@@ -127,6 +127,14 @@
       "key": "1fb2058fcc1fc018ea9ac12b675f7159481021bf58a242665a2fbb96cd60bd89",
       "rule": "hot-gl-query",
       "symbol": "Luminumbra::Rendering::FroxelPass::execute_inject( const RenderContext & ctx , const std :: filesystem :: path & root_path )"
+    },
+    {
+      "construct": "RunWorkerBoundary ( m_job_system , \"committed-chunk-read\" , [ & ] { chunk = m_durable_chunk_loader ( coords ) ; if ( ! chunk || chunk -> get_id ( ) != Chunk :: calculate_id ( coords ) || chunk -> get_coords ( ) != coords || ( chunk -> sdf_data . empty ( ) && chunk -> heightmap_data . empty ( ) && ! ( coords . y == 0 && chunk -> has_water_authority ( ) && Persistence :: HasValidWaterColumnState ( * chunk ) ) ) ) throw std :: runtime_error ( \"expected durable chunk is missing, empty or has wrong identity\" ) ; if ( prepare_water ) { chunk -> stage_water_seed_inputs ( { } ) ; const auto scope = acquire_worldgen_sample_scope ( ) ; if ( const auto inputs = request_water_seed_inputs ( * chunk ) ) { ComputeHighWaterSeedInputs ( * inputs , coords , * this ) ; } } } )",
+      "count": 1,
+      "file": "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
+      "key": "207e7d0e0378d7fc2c9a19c8d27ca5856cb01c0e5dc01b942ded00b2daa14d8f",
+      "rule": "owner-blocking-wait",
+      "symbol": "Luminumbra::Systems::SHIELD_WorldSystem::read_committed_chunk( const IVec3 & coords , bool prepare_water )const"
     },
     {
       "construct": "glIsEnabled ( GL_STENCIL_TEST )",
@@ -177,6 +185,14 @@
       "symbol": "RenderInterface_GL3::BeginFrame( )"
     },
     {
+      "construct": "RunWorkerBoundary ( m_jobSystem , \"world-save\" , [ & ] { saved = save ( ) ; } )",
+      "count": 1,
+      "file": "src/luminumbra_common/world/GameSession.cpp",
+      "key": "38975658e510976755f4b387a54fd2b8ba2f65d94e680e1753d3fae523bb6588",
+      "rule": "owner-blocking-wait",
+      "symbol": "Luminumbra::world::GameSession::SaveWorldStateToImpl( const std :: filesystem :: path & save_dir , WorldStateSaveReport * report , bool full_snapshot , bool write_metadata )"
+    },
+    {
       "construct": "glGetIntegerv ( GL_STENCIL_PASS_DEPTH_FAIL , & glstate_backup . stencil_front . pass_depth_fail )",
       "count": 1,
       "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
@@ -191,14 +207,6 @@
       "key": "473ad6f68d211d07fb8db38f9af35e3474c1cb46182c6410d6212f1132ad0252",
       "rule": "hot-gl-query",
       "symbol": "Luminumbra::Rendering::GBufferPass::execute( const RenderContext & ctx , entt :: registry & registry , const GBufferPassInput & input )"
-    },
-    {
-      "construct": "MeshLoader :: LoadSkinned ( full_mesh_path )",
-      "count": 1,
-      "file": "src/luminumbra_client/rendering/passes/GBufferPass.cpp",
-      "key": "496a58a29a1f5e277a76f5920d2f6a05a2edf2c5d9923b51675b6ab3d388fcad",
-      "rule": "hot-draw-file-load",
-      "symbol": "Luminumbra::Rendering::GBufferPass::geometry_pass_skinned_meshes( const RenderContext & ctx , const GBufferPassInput & input , entt :: registry & registry , const Camera & camera , const glm :: vec4 ( & frustum_planes ) [ 6 ] , GBufferDrawStats & stats )"
     },
     {
       "construct": "glGetUniformLocation ( m_inject_program , \"u_baseHeight\" )",
@@ -313,14 +321,6 @@
       "symbol": "Luminumbra::Rendering::FroxelPass::execute_inject( const RenderContext & ctx , const std :: filesystem :: path & root_path )"
     },
     {
-      "construct": "RunWorkerBoundary ( m_jobSystem , [ & ] { saved = save ( ) ; } )",
-      "count": 1,
-      "file": "src/luminumbra_common/world/GameSession.cpp",
-      "key": "7828ed040b922dc711452d4b137aee984fefeb34591341710e7a8d48d89dc755",
-      "rule": "owner-blocking-wait",
-      "symbol": "Luminumbra::world::GameSession::SaveWorldStateToImpl( const std :: filesystem :: path & save_dir , WorldStateSaveReport * report , bool full_snapshot , bool write_metadata )"
-    },
-    {
       "construct": "glIsEnabled ( GL_BLEND )",
       "count": 1,
       "file": "src/luminumbra_client/rendering/passes/WaterfallPass.cpp",
@@ -351,14 +351,6 @@
       "key": "8d4e19fd404ae34e05dfe8803e297ebc838ced5143a70851d52cc724796f35bd",
       "rule": "hot-gl-query",
       "symbol": "Luminumbra::Rendering::FroxelPass::execute_inject( const RenderContext & ctx , const std :: filesystem :: path & root_path )"
-    },
-    {
-      "construct": "RunWorkerBoundary ( m_jobSystem , [ & ] { if ( ! digest_operation ) { digest_operation . emplace ( directory , m_regionRequiresIndex ) ; } digest = digest_operation -> digest ( key , inputs ) ; } )",
-      "count": 1,
-      "file": "src/luminumbra_common/world/GameSession.cpp",
-      "key": "91ac13c0813a985c4dcd36bb96bd29a68dada3d838b24ae0c0bdfaac4d8b443b",
-      "rule": "owner-blocking-wait",
-      "symbol": "Luminumbra::world::GameSession::RunRegionScheduler( std :: uint64_t current_tick )"
     },
     {
       "construct": "glGetIntegerv ( GL_VIEWPORT , glstate_backup . viewport )",
@@ -473,12 +465,12 @@
       "symbol": "Luminumbra::Rendering::AerialPass::execute( const RenderContext & ctx )"
     },
     {
-      "construct": "RunWorkerBoundary ( m_job_system , [ & ] { chunk = m_durable_chunk_loader ( coords ) ; if ( ! chunk || chunk -> get_id ( ) != Chunk :: calculate_id ( coords ) || chunk -> get_coords ( ) != coords || ( chunk -> sdf_data . empty ( ) && chunk -> heightmap_data . empty ( ) && ! ( coords . y == 0 && chunk -> has_water_authority ( ) && Persistence :: HasValidWaterColumnState ( * chunk ) ) ) ) throw std :: runtime_error ( \"expected durable chunk is missing, empty or has wrong identity\" ) ; if ( prepare_water ) { chunk -> stage_water_seed_inputs ( { } ) ; const auto scope = acquire_worldgen_sample_scope ( ) ; if ( const auto inputs = request_water_seed_inputs ( * chunk ) ) { ComputeHighWaterSeedInputs ( * inputs , coords , * this ) ; } } } )",
+      "construct": "RunWorkerBoundary ( m_jobSystem , \"region-freeze-digest\" , [ & ] { if ( ! digest_operation ) { digest_operation . emplace ( directory , m_regionRequiresIndex ) ; } digest = digest_operation -> digest ( key , inputs ) ; } )",
       "count": 1,
-      "file": "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp",
-      "key": "c4e05be06441ca41fc26440efbdaef39ad9e54fba8c73c2ceebb12949aa4b47d",
+      "file": "src/luminumbra_common/world/GameSession.cpp",
+      "key": "c1713a48913aa0ab9d707a2bfcee7aa0d61f020d7dc1222c8e2e901afef39b52",
       "rule": "owner-blocking-wait",
-      "symbol": "Luminumbra::Systems::SHIELD_WorldSystem::read_committed_chunk( const IVec3 & coords , bool prepare_water )const"
+      "symbol": "Luminumbra::world::GameSession::RunRegionScheduler( std :: uint64_t current_tick )"
     },
     {
       "construct": "glGetNamedFramebufferAttachmentParameteriv ( ctx . lit_scene . id , GL_COLOR_ATTACHMENT0 , GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME , & color_texture )",
@@ -537,6 +529,14 @@
       "symbol": "RenderInterface_GL3::BeginFrame( )"
     },
     {
+      "construct": "glGetNamedFramebufferAttachmentParameteriv ( ctx . lit_scene . id , GL_COLOR_ATTACHMENT0 , GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME , & color_texture )",
+      "count": 1,
+      "file": "src/luminumbra_client/rendering/passes/SkyboxPass.cpp",
+      "key": "dea9ab9c1e07f115610d636b663e92ac4fd6e2b9cdcd2295571145bc9e2a4026",
+      "rule": "hot-gl-query",
+      "symbol": "Luminumbra::Rendering::SkyboxPass::execute_weather_overlay( const RenderContext & ctx , const Camera & camera , const glm :: mat4 & projection )"
+    },
+    {
       "construct": "glGetIntegerv ( GL_STENCIL_BACK_VALUE_MASK , & glstate_backup . stencil_back . value_mask )",
       "count": 1,
       "file": "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp",
@@ -559,14 +559,6 @@
       "key": "e1ff01a3a5a3060d61453dc1245bdb87248641ac0c4f712eb91d7337a4841acd",
       "rule": "hot-gl-query",
       "symbol": "Luminumbra::Rendering::ParticlePass::execute( const RenderContext & ctx , const Camera & camera )"
-    },
-    {
-      "construct": "glIsEnabled ( GL_CULL_FACE )",
-      "count": 1,
-      "file": "src/luminumbra_client/rendering/passes/FoliagePass.cpp",
-      "key": "e28e4b7c536400059c5dea9863d23a05ac10d7601f2942481b2cb9428d40cb6a",
-      "rule": "hot-gl-query",
-      "symbol": "Luminumbra::Rendering::FoliagePass::execute( const RenderContext & ctx , const Camera & camera )"
     },
     {
       "construct": "glIsEnabled ( GL_CULL_FACE )",
@@ -647,14 +639,6 @@
       "key": "f57e9fbbf89d4648fa01cabe78a06f760e623f910ae8044c973012e2f1e20258",
       "rule": "hot-gl-query",
       "symbol": "RenderInterface_GL3::BeginFrame( )"
-    },
-    {
-      "construct": "glIsEnabled ( GL_DEPTH_TEST )",
-      "count": 1,
-      "file": "src/luminumbra_client/rendering/passes/LightingPass.cpp",
-      "key": "f74411e19ea5d5481fae142b2d629fcd213cee026da84b69e048ae543440e9ba",
-      "rule": "hot-gl-query",
-      "symbol": "Luminumbra::Rendering::LightingPass::execute( const RenderContext & ctx )"
     },
     {
       "construct": "glGetUniformLocation ( m_inject_program , \"u_tanHalfFovY\" )",
