@@ -32,6 +32,69 @@ def cpp_block(source, anchor):
 
 
 class RuntimeConfigSourceContract(unittest.TestCase):
+    def test_strict_numeric_input_sites_share_the_checked_parser(self):
+        sites = {
+            "core/RuntimeScenarioConfig.cpp": (
+                "Core::ParseNumber(value,parsed)",
+                "Core::ParseNumber(dimensions.substr(0,x_pos),width)",
+                "Core::ParseNumber(dimensions.substr(x_pos+1),height)",
+                "Core::ParseNumber(s,v)",
+                'Core::ParseNumber(GetCommandLineOption(argc,argv,"--hang-watchdog-seconds","0"),watchdog_seconds)',
+            ),
+            "core/TimelapseVista.h": ("Core::ParseNumber(text,parsed)",),
+            "ui/components/common/Input.cpp": ("Core::ParseNumber(value,parsed)",),
+            "ui/Rml_UIManager.cpp": ("Core::ParseNumber(v,st.tod)",
+                                     "Core::ParseNumber(value,parsed)"),
+            "main_client.cpp": (
+                "Luminumbra::Core::ParseNumber(volumetric_option,quality)",
+                "Luminumbra::Core::ParseNumber(cy,g_app.capture.fixed_cam_yaw)",
+                "Luminumbra::Core::ParseNumber(cpi,g_app.capture.fixed_cam_pitch)",
+                "Luminumbra::Core::ParseNumber(*settle_env,v)",
+                "Luminumbra::Core::ParseNumber(ds,g_app.capture.timelapse_daystep)",
+                "Luminumbra::Core::ParseNumber(t0,g_app.capture.timelapse_tod)",
+                "Luminumbra::Core::ParseNumber(*value,scale)",
+                "Luminumbra::Core::ParseNumber(*cq,cloud_quality)",
+                "Luminumbra::Core::ParseNumber(*sq,ssao_quality)",
+            ),
+        }
+        for relative, calls in sites.items():
+            source = compact_cpp((ROOT / "src/luminumbra_client" / relative)
+                                 .read_text(encoding="utf-8"))
+            with self.subTest(source=relative):
+                self.assertNotRegex(source, r"\b(?:std::)?(?:sto[ifd]|stoull|atoi|atof|strtof)\(")
+                for call in calls:
+                    self.assertIn(call, source)
+
+    def test_strict_numeric_policies_and_volumetric_error_boundary(self):
+        source = compact_cpp((ROOT / "src/luminumbra_client/main_client.cpp")
+                             .read_text(encoding="utf-8"))
+        boundary = cpp_block(source, "try{if(!volumetric_option.empty())")
+        self.assertIn("if(!Luminumbra::Core::ParseNumber(volumetric_option,quality))"
+                      'throwstd::invalid_argument("Invalidintegervaluefor--volumetric-quality:"+'
+                      "volumetric_option);", boundary)
+        self.assertIn(boundary + 'catch(conststd::invalid_argument&error){'
+                      'LUMINUMBRA_CORE_ERROR("{}",error.what());return2;}', source)
+        for policy in ("intv=0;Luminumbra::Core::ParseNumber(*settle_env,v);if(v>0)",
+                       "floatscale=0.0f;Luminumbra::Core::ParseNumber(*value,scale);",
+                       "cloud_quality=0;Luminumbra::Core::ParseNumber(*cq,cloud_quality);",
+                       "ssao_quality=0;Luminumbra::Core::ParseNumber(*sq,ssao_quality);"):
+            self.assertIn(policy, source)
+        ui = compact_cpp((ROOT / "src/luminumbra_client/ui/Rml_UIManager.cpp")
+                         .read_text(encoding="utf-8"))
+        self.assertIn("st.tod=0.24f;Core::ParseNumber(v,st.tod);", ui)
+        self.assertIn("floatparsed=fallback;Core::ParseNumber(value,parsed);returnparsed;", ui)
+
+    def test_fixed_email_regex_has_one_immutable_cached_construction(self):
+        source = compact_cpp((ROOT / "src/luminumbra_client/ui/components/common/Input.cpp")
+                             .read_text(encoding="utf-8"))
+        email = cpp_block(source, "caseType::Email:")
+        self.assertEqual(email, '{staticconststd::regexemailPattern('
+                         'R"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})");'
+                         'returnstd::regex_match(value,emailPattern);}')
+        self.assertEqual(source.count("std::regexemailPattern("), 1)
+        # Optional fields retain their existing empty-value exemption.
+        self.assertIn("if(!m_required&&value.empty()){returntrue;}", source)
+
     @classmethod
     def setUpClass(cls):
         cls.client = compact_cpp((ROOT / "src/luminumbra_client/main_client.cpp").read_text(encoding="utf-8"))
@@ -47,8 +110,11 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                 ("t0", "timelapse_tod", "--timelapse-tod")):
             with self.subTest(flag=flag):
                 body = cpp_block(self.client, f"if(!{variable}.empty())")
-                self.assertIn(f"g_app.capture.{target}=std::stof({variable});", body)
-                failure = cpp_block(body, "catch(...)")
+                # Strict parsing rejects trailing junk and non-finite values.
+                parse = f"if(!Luminumbra::Core::ParseNumber({variable},g_app.capture.{target}))"
+                self.assertIn(parse, body)
+                self.assertNotIn("std::stof(", body)
+                failure = cpp_block(body, parse)
                 self.assertIn("return2;", failure)
                 self.assertIn("LUMINUMBRA_CORE_ERROR(", failure)
                 self.assertIn(flag, failure)
@@ -1136,8 +1202,12 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         world = compact_cpp((ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
                             .read_text(encoding="utf-8"))
         read = cpp_block(world, "SHIELD_WorldSystem::read_committed_chunk(")
-        self.assertIn("RunWorkerBoundary(m_job_system,[&]{"
-                      "chunk=m_durable_chunk_loader(coords);});", read)
+        self.assertEqual(read.count("RunWorkerBoundary("), 1)
+        worker = cpp_block(read, "RunWorkerBoundary(m_job_system,[&]")
+        self.assertIn("chunk=m_durable_chunk_loader(coords);", worker)
+        self.assertLess(worker.index("chunk->get_coords()!=coords"),
+                        worker.index("if(prepare_water)"))
+        self.assertIn("ComputeHighWaterSeedInputs(*inputs,coords,*this);", worker)
         self.assertLess(read.index("RunWorkerBoundary("),
                         read.index("m_durable_chunk_fault(error.what())"))
         helper = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorkerBoundary.h")
@@ -1547,6 +1617,74 @@ class RegionalEnergySourceContract(unittest.TestCase):
         self.assertIn("if(!can_exchange(lhs,rhs)||!admitted(lhs,rhs))", header)
         self.assertIn("admits(lhs%width_,lhs/width_,rhs%width_,rhs/width_)", header)
         self.assertIn("returndiffuse<EdgeGate>(iterations,diffusion_rate,gate);", source)
+
+
+class StreamingLifecycleSourceContract(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.world = compact_cpp((ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+                                .read_text(encoding="utf-8"))
+        cls.index = compact_cpp((ROOT / "src/luminumbra_common/world/ActivationResidencyIndex.h")
+                                .read_text(encoding="utf-8"))
+        cls.native = (ROOT / "test/common/ActivationResidencyIndex_test.cpp").read_text(encoding="utf-8")
+
+    def test_both_census_boundaries_read_exact_transition_counts(self):
+        update = cpp_block(self.world, "voidSHIELD_WorldSystem::update(entt::registry&registry,"
+                           "conststd::vector<Vec3>&anchor_positions,")
+        before = update[update.index("m_last_streaming_budget_stats.active_chunks_before="):]
+        before = before[:before.index("_dbg_split(")]
+        after = update[update.index("m_last_streaming_budget_stats.active_chunks_after="):]
+        after = after[:after.index("m_streaming_telemetry_stats.generation_batches=")]
+        for boundary in (before, after):
+            self.assertEqual(boundary.count("streaming_lifecycle_counts()"), 1)
+            self.assertNotIn("for(", boundary)
+        read = cpp_block(self.world, "SHIELD_WorldSystem::streaming_lifecycle_counts()")
+        self.assertIn("#ifndefNDEBUG", read)
+        self.assertIn("assert(counts==expected)", read)
+        self.assertIn("pending_lod.load(std::memory_order_acquire)>=0", read)
+        for match in re.finditer(r"(chunk|item\.chunk)->pending_lod\.store\([^;]+;", self.world):
+            self.assertTrue(self.world[match.end():].startswith(
+                "m_activation_index.observe_lifecycle(*" + match[1] + ");"))
+        state = cpp_block(self.world, "voidSHIELD_WorldSystem::set_renderable_chunk_state(")
+        self.assertIn("chunk.set_state(state)", state)
+        self.assertNotIn("m_activation_index", state)
+        self.assertIn("observe_lifecycle(*chunk)", cpp_block(self.index, "voidinsert("))
+        self.assertIn("adjust_lifecycle(previous->second.mask,false)",
+                      cpp_block(self.index, "voiderase("))
+        self.assertIn("m_lifecycle_counts={}", cpp_block(self.index, "voidclear()"))
+        self.assertIn("++m_counters.lifecycle_chunk_visits", self.index)
+        read_index = cpp_block(self.index, "constLifecycleCounts&lifecycle_counts()")
+        self.assertIn("for(constautoid:m_pending_lifecycle)", read_index)
+        self.assertNotIn("resident_columns()", read_index)
+        self.assertNotIn(":m_columns)", read_index)
+        self.assertIn("TEST(ActivationResidencyIndex, SettledLifecycleReadsVisitOnlyChangedResidents)",
+                      self.native)
+
+    def test_equivalence_and_worker_handoff_use_registered_production_paths(self):
+        # The native old/new oracle must exercise the production census reads,
+        # not only a standalone model that would leave the old full walks live.
+        self.assertEqual(self.world.count("streaming_lifecycle_counts()"), 3)
+        case = cpp_block(compact_cpp(self.native),
+                         "TEST(ActivationResidencyIndex,LifecycleCensusPreservesScriptedSelectionAndOrder)")
+        for expression in ("FullScan(world,anchors,2)", "ExpectLifecycleStats(world)",
+                           "world.generation_queue_prefix(1024)",
+                           "expected[index].coords", "lifecycle_snapshots"):
+            self.assertIn(expression, case)
+        self.assertIn("LifecycleTransitionsMatchCensusIncludingReplacementAndStaleWork", self.native)
+        self.assertIn("DirectStateWritersCoalesceAndRefusalsLeaveCensusUnchanged", self.native)
+        chunk = compact_cpp((ROOT / "src/luminumbra_common/world/Chunk.h").read_text(encoding="utf-8"))
+        chunk_source = compact_cpp((ROOT / "src/luminumbra_common/world/Chunk.cpp")
+                                   .read_text(encoding="utf-8"))
+        for setter in (cpp_block(chunk, "voidset_state("),
+                       cpp_block(chunk_source, "boolChunk::try_set_state(")):
+            self.assertIn("m_state=new_state;notify_lifecycle_change();", setter)
+        self.assertIn("m_lifecycle_changes->take(m_pending_lifecycle)", self.index)
+        ready = cpp_block(self.world, "boolSHIELD_WorldSystem::EnsureSurfaceReadyNear(")
+        self.assertIn("set_renderable_chunk_state(*chunk,ChunkState::Meshing)", ready)
+        self.assertIn("set_renderable_chunk_state(*chunk,ChunkState::Ready)", ready)
+        self.assertNotIn("observe_lifecycle", ready)
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("common/ActivationResidencyIndex_test.cpp", cmake)
 
 
 if __name__ == "__main__":

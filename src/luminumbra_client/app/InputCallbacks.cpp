@@ -400,21 +400,22 @@ void GLAPIENTRY GLDebugMessageCallback(GLenum source,
     (void)userParam;
     if (id == 131169 || id == 131185 || id == 131218 || id == 131204)
         return;
-    g_gl_debug_message_count.fetch_add(1, std::memory_order_relaxed);
+    auto& counters = GetGLDebugRuntimeCounters();
+    counters.messages.fetch_add(1, std::memory_order_relaxed);
     const bool is_error = type == GL_DEBUG_TYPE_ERROR || severity == GL_DEBUG_SEVERITY_HIGH;
     if (is_error) {
-        g_gl_debug_error_count.fetch_add(1, std::memory_order_relaxed);
+        counters.errors.fetch_add(1, std::memory_order_relaxed);
         LUMINUMBRA_CORE_ERROR("OpenGL: {0}", message);
         return;
     }
 
     switch (severity) {
         case GL_DEBUG_SEVERITY_NOTIFICATION:
-            g_gl_debug_notification_count.fetch_add(1, std::memory_order_relaxed);
+            counters.notifications.fetch_add(1, std::memory_order_relaxed);
             LUMINUMBRA_CORE_TRACE("OpenGL: {0}", message);
             break;
         default:
-            g_gl_debug_warning_count.fetch_add(1, std::memory_order_relaxed);
+            counters.warnings.fetch_add(1, std::memory_order_relaxed);
             LUMINUMBRA_CORE_WARN("OpenGL: {0}", message);
             break;
     }
