@@ -870,5 +870,7 @@ void main()
     if (diagnosticAvailable || diagnosticNonfinite)
         gDiagnosticSurface = vec4(diagnosticValue, diagnosticRasterDepth);
     else gDiagnosticSurface = vec4(0.0);
+    // Count surviving opaque fragments independently of material colour and raster depth.
+    if (u_surfaceMode == 37) gDiagnosticSurface = vec4(1.0, 0.0, 0.0, 0.0);
 #endif
 }
