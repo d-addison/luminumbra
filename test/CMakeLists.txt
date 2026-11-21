@@ -452,6 +452,7 @@ add_executable(capture_manifest_test
     rendering/capture_manifest_test.cpp
     rendering/diagnostic_capture_test.cpp
     rendering/temporal_audit_test.cpp
+    rendering/temporal_sequence_test.cpp
     ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp
     ../src/luminumbra_client/rendering/TemporalAudit.cpp
     ../src/luminumbra_client/rendering/CaptureManifest.cpp
