@@ -15,6 +15,7 @@
 #include "audio/MiniaudioManager.h"
 #include "audio/NullAudioManager.h"
 #include "core/Log.h"
+#include "core/LogDispatcherSink.h"
 #include "luminumbra_common/components/audio/AudioTypes.h"
 #include "luminumbra_common/core/CaptureContentPaths.h"
 #include "luminumbra_common/core/SystemConfig.h"
@@ -38,9 +39,8 @@
 
 namespace {
 
-// Counts binding log records without touching the shared logger's sink list: a
-// private logger with the same sink type is installed for the duration of the test
-// via the manager's own logging path, so nothing races the periodic flusher.
+// Counts binding log records through the synchronized dispatcher without changing
+// the shared logger owner or its sink list.
 class CountingSink : public spdlog::sinks::base_sink<std::mutex> {
 public:
     std::size_t count = 0;
@@ -62,17 +62,8 @@ protected:
 } // namespace
 
 TEST(AudioPhysicsBinding, RepeatedBindingLogsOnce) {
-    // Swap in a private logger for the duration of the test, restoring the previous
-    // one afterwards, so no sink is added to or removed from a logger that a
-    // background flusher may be using.
     auto sink = std::make_shared<CountingSink>();
-    auto probe = std::make_shared<spdlog::logger>("LUMINUMBRA_BINDING_PROBE", sink);
-    probe->set_level(spdlog::level::trace);
-    // GetCoreLogger() returns a reference to the static handle, so the swap is a
-    // plain assignment; the probe logger is never registered with spdlog, so the
-    // periodic flusher never touches it.
-    auto previous = Log::GetCoreLogger();
-    Log::GetCoreLogger() = probe;
+    Log::GetDispatcherSink()->Attach(sink);
     {
         Luminumbra::Client::MiniaudioManager manager(".");
         auto* physics = FakePhysics(0x1000);
@@ -81,7 +72,7 @@ TEST(AudioPhysicsBinding, RepeatedBindingLogsOnce) {
         }
         manager.SetPhysicsSystem(FakePhysics(0x2000));
     }
-    Log::GetCoreLogger() = previous;
+    Log::GetDispatcherSink()->Detach(sink);
     EXPECT_EQ(sink->count, 2u); // one bind, one rebind; never one per frame
 }
 
@@ -107,13 +98,12 @@ TEST(AudioPhysicsBinding, CountsOnlyPointerChanges) {
 }
 
 TEST(AudioPhysicsBinding, FailedDeviceInitializationReportsUnavailableAndSuppressesPlayback) {
-    auto previous = Log::GetCoreLogger();
-    Log::GetCoreLogger() =
-        std::make_shared<spdlog::logger>("AUDIO_FAILURE_PROBE", std::make_shared<CountingSink>());
+    auto sink = std::make_shared<CountingSink>();
+    Log::GetDispatcherSink()->Attach(sink);
     Luminumbra::Client::MiniaudioManager manager(".");
     const bool initialized =
         manager.Init([](const ma_engine_config*, ma_engine*) -> ma_result { return MA_NO_DEVICE; });
-    Log::GetCoreLogger() = previous;
+    Log::GetDispatcherSink()->Detach(sink);
     EXPECT_FALSE(initialized);
     EXPECT_FALSE(manager.IsPlaybackEnabled());
     manager.SetMasterVolume(1.0f);
@@ -345,9 +335,8 @@ TEST(AudioPhysicsBinding, FailedFileLoadsReleaseAllocationsAndLeaveNoWindNode) {
         output << "partial audio bytes";
         ASSERT_TRUE(output.good());
     }
-    auto previous = Log::GetCoreLogger();
-    Log::GetCoreLogger() =
-        std::make_shared<spdlog::logger>("audio-load", std::make_shared<CountingSink>());
+    auto sink = std::make_shared<CountingSink>();
+    Log::GetDispatcherSink()->Attach(sink);
     {
         Luminumbra::Client::MiniaudioManager manager(root.generic_string() + "/");
         const bool initialized = manager.Init(InitSilentAudio);
@@ -400,7 +389,7 @@ TEST(AudioPhysicsBinding, FailedFileLoadsReleaseAllocationsAndLeaveNoWindNode) {
         }
         manager.Shutdown();
     }
-    Log::GetCoreLogger() = previous;
+    Log::GetDispatcherSink()->Detach(sink);
     EXPECT_EQ(AudioAllocations().load(), 0u);
 }
 
@@ -431,9 +420,8 @@ TEST(CaptureAudioInput, DeferredReadersOwnVerifiedBytes) {
     std::ofstream(payload, std::ios::binary) << "verified\r\n";
     std::ofstream(root / "outside", std::ios::binary) << "private bytes";
     paths::capture_content_paths().enable(root);
-    const auto previous = Log::GetCoreLogger();
-    Log::GetCoreLogger() =
-        std::make_shared<spdlog::logger>("AUDIO_INPUT_PROBE", std::make_shared<CountingSink>());
+    auto sink = std::make_shared<CountingSink>();
+    Log::GetDispatcherSink()->Attach(sink);
     Luminumbra::Client::MiniaudioManager manager(paths::GenericPathString(root) + '/');
     std::ofstream(root / "data/optional.bank.json")
         << R"({"events":{"optional":{"files":["assets/audio/sfx/ui/button_click.mp3"]}}})";
@@ -534,5 +522,5 @@ TEST(CaptureAudioInput, DeferredReadersOwnVerifiedBytes) {
         EXPECT_TRUE(manager.PlayOneShot2D("retained"));
     }
     manager.Shutdown();
-    Log::GetCoreLogger() = previous;
+    Log::GetDispatcherSink()->Detach(sink);
 }

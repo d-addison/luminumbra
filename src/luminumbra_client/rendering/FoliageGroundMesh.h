@@ -41,8 +41,10 @@ public:
             const auto& a = vertices[indices[i]];
             const auto& b = vertices[indices[i + 1]];
             const auto& c = vertices[indices[i + 2]];
-            if (a.material_id < 1 || a.material_id > 5 ||
-                (a.normal.y + b.normal.y + c.normal.y) <= 0.3f)
+            // Near-terrain render vertices carry coverage above the flat ID.
+            const u32 material =
+                (a.material_id & 0x80000000u) != 0u ? a.material_id & 255u : a.material_id;
+            if (material < 1 || material > 5 || (a.normal.y + b.normal.y + c.normal.y) <= 0.3f)
                 continue;
             const glm::vec3 ab = b.position - a.position;
             const glm::vec3 ac = c.position - a.position;
