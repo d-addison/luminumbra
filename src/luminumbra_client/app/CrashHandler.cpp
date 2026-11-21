@@ -454,7 +454,9 @@ void ReportMainThreadHang(std::uint64_t last_heartbeat, double stalled_seconds) 
     // Best-effort, Windows-only. No suspension, no logging, no allocation, no DbgHelp.
     try {
         ReportMainThreadHangImpl(last_heartbeat, stalled_seconds);
-    } catch (...) {}
+    } catch (...) {
+        // Best-effort hang reporting must never throw from this noexcept watchdog boundary.
+    }
 }
 #else
 void InstallRuntimeCrashHandler(RuntimeStateRecorder& recorder) {

@@ -4,6 +4,7 @@
 #include "../GBufferTargets.h"
 #include "core/Profiler.h"
 #include "luminumbra_common/core/CaptureContentPaths.h"
+#include "luminumbra_common/core/IntegerPrimitives.h"
 #include "rendering/AttributedGl.h"
 
 #include "../PassShaderLayouts.h" // enumerable ExpectedLayout registry
@@ -37,17 +38,6 @@ uint64_t splitmix64(uint64_t x) {
     x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
     x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
     return x ^ (x >> 31);
-}
-
-// FNV-1a over a byte range.
-uint64_t fnv1a(const void* data, std::size_t len, uint64_t seed = 1469598103934665603ull) {
-    const auto* bytes = static_cast<const uint8_t*>(data);
-    uint64_t hash = seed;
-    for (std::size_t i = 0; i < len; ++i) {
-        hash ^= bytes[i];
-        hash *= 1099511628211ull;
-    }
-    return hash;
 }
 
 // Render-only xorshift64 (particle spawn jitter). Reproducible per emitter seed
@@ -497,9 +487,11 @@ void ParticlePass::rebuild_emitter_descriptors(uint64_t world_seed, uint64_t wor
 
 uint64_t ParticlePass::emitter_descriptor_hash() const {
     if (m_descriptors.empty()) {
-        return fnv1a(nullptr, 0);
+        return Core::Fnv1a64(nullptr, 0, Core::kFnv1a64HistoricalBasis);
     }
-    return fnv1a(m_descriptors.data(), m_descriptors.size() * sizeof(EmitterDescriptor));
+    return Core::Fnv1a64(m_descriptors.data(),
+                         m_descriptors.size() * sizeof(EmitterDescriptor),
+                         Core::kFnv1a64HistoricalBasis);
 }
 
 void ParticlePass::spawn_from_emitter(ActiveEmitter& emitter, float dt) {

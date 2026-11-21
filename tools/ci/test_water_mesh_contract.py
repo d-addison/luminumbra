@@ -1,4 +1,4 @@
-"""Source contracts for wet-only interpolation of the live water render mesh."""
+"""Source contracts for live water mesh interpolation and consumer-driven preparation."""
 
 import importlib.util
 from pathlib import Path
@@ -81,6 +81,88 @@ class WaterMeshContract(unittest.TestCase):
         for workflow in ("ci.yml", "windows-build.yml"):
             self.assertIn("tools/ci/ci_paths.py python-tests",
                           (ROOT / ".github/workflows" / workflow).read_text(encoding="utf-8"))
+
+
+class WaterPreparationContract(unittest.TestCase):
+    def test_preparation_requires_the_submitted_water_glass_or_capture_consumer(self):
+        pipeline = source("src/luminumbra_client/rendering/RenderPipeline.cpp")
+        snapshot = pipeline.split("void RenderPipeline::execute_stage_opaque_snapshot(", 1)[1].split(
+            "void RenderPipeline::execute_stage_water(", 1)[0]
+        self.assertIn("m_frame_water_input.draw_items.clear();", snapshot)
+        self.assertIn("WaterPreparationDrawConsumes(it->second.element_count)", snapshot)
+        self.assertIn("PresentedLadderWaterEligible", snapshot)
+        self.assertIn("m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Water)",
+                      snapshot)
+        self.assertIn(".water = !m_frame_water_input.draw_items.empty()", snapshot)
+        self.assertIn(".glass = !m_glass_pane_items.empty() && m_glass_quad_vao != 0", snapshot)
+        self.assertIn(".capture = m_terrain_coverage_enabled || m_water_visibility_capture_enabled",
+                      snapshot)
+        self.assertRegex(snapshot, r"if \(consumers.opaque_snapshot\(\)\) \{ "
+                         r"m_lighting_pass->copy_lighting_color_to_opaque_texture\(m_frame_lighting_ctx\);")
+        water = pipeline.split("void RenderPipeline::execute_stage_water(", 1)[1].split(
+            "const WaterVisibilityMask&", 1)[0]
+        self.assertIn("water_ctx, water_input, camera, m_water_visibility_capture_enabled",
+                      water)
+        self.assertIn("const auto& water_input = m_frame_water_input;", water)
+        self.assertNotIn("draw_items.push_back", water)
+
+    def test_empty_and_overflow_draws_cannot_trigger_caustics(self):
+        water = source("src/luminumbra_client/rendering/passes/WaterPass.cpp")
+        execute = water.split("WaterDrawStats WaterPass::execute(", 1)[1].split(
+            "void WaterPass::capture_visibility(", 1)[0]
+        self.assertIn("m_caustics_valid = false;", execute)
+        self.assertIn("return WaterPreparationDrawConsumes(item.element_count);", execute)
+        self.assertIn(".water = water_draws, .glass = false, .capture = capture_visibility_requested",
+                      execute)
+        self.assertRegex(execute, r"if \(consumers.caustics\(\)\) \{ generate_caustics\(ctx\); \}")
+        self.assertEqual(execute.count("generate_caustics(ctx)"), 1)
+        self.assertIn("std::numeric_limits<GLsizei>::max() == std::numeric_limits<std::int32_t>::max()", water)
+        self.assertIn("m_caustics_valid = true;", water)
+        helper = source("src/luminumbra_client/rendering/passes/WaterPass.h")
+        self.assertIn("return water || glass || capture;", helper)
+        self.assertIn("return water || capture;", helper)
+        self.assertIn("elements != 0 && elements <= "
+                      "static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())",
+                      helper)
+
+    def test_remaining_readers_have_current_producers(self):
+        # Deferred lighting/debug views have no sampler for either resource.
+        for path in ("res/shaders/lighting_pass.frag", "res/shaders/debug_view.frag"):
+            self.assertNotRegex(source(path), r"uniform sampler\w* .*?(?:caustic|opaque)")
+        pipeline = source("src/luminumbra_client/rendering/RenderPipeline.cpp")
+        for name in ("god_rays", "weather"):
+            stage = pipeline.split(f"void RenderPipeline::execute_stage_{name}_opaque_snapshot(",
+                                   1)[1].split("void RenderPipeline::", 1)[0]
+            self.assertIn("copy_lighting_color_to_opaque_texture", stage)
+        capture = source("src/luminumbra_client/core/ScenarioRunnerCapture.cpp")
+        probe = capture.split("SampleCausticsTextureDelta(", 1)[0]
+        self.assertIn("render_pass_stats.water_draws > 0", probe.rsplit("if (", 1)[1])
+        terrain = source("src/luminumbra_client/rendering/TerrainCoverageCapture.cpp")
+        terrain = terrain.split("bool RenderPipeline::capture_terrain_coverage(", 1)[1]
+        self.assertIn("!m_terrain_coverage_enabled", terrain)
+        self.assertIn('"opaque-scene", context.opaque_scene.id', terrain)
+        shader = source("res/shaders/caustics_generator.frag")
+        self.assertNotIn("sampler", shader)
+        self.assertEqual(re.findall(r"uniform \w+ (\w+)", shader), ["u_time", "u_resolution"])
+
+    def test_registered_native_work_counters_and_equivalence_cover_the_contract(self):
+        native = source("test/rendering/render_smoke_test.cpp")
+        for name in ("WaterPreparationConsumerTruthTableAndDrawLimits",
+                     "WaterPreparationCountsActualWritesForDryGlassCaptureAndWaterFrames",
+                     "WaterCausticsRegenerateIdenticallyAfterSkippedFrames"):
+            self.assertIn(f"TEST(RenderSmokeTest, {name})", native)
+        self.assertIn("glad_glDrawArrays = Draw;", native)
+        self.assertIn("glad_glCopyTexSubImage2D = Copy;", native)
+        self.assertIn("EXPECT_EQ(sample(4.0f, true), expected);", native)
+        self.assertIn("render(0, 0);", native)
+        self.assertIn("render(1, 1);", native)
+        self.assertIn("rendering/render_smoke_test.cpp", source("test/CMakeLists.txt"))
+        spec = importlib.util.spec_from_file_location("water_prep_ci_paths", ROOT / "tools/ci/ci_paths.py")
+        gate = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gate)
+        for path in ("RenderPipeline.cpp", "passes/WaterPass.cpp",
+                     "passes/WaterPass.h"):
+            self.assertTrue(gate.needs_python("src/luminumbra_client/rendering/" + path))
 
 
 if __name__ == "__main__":

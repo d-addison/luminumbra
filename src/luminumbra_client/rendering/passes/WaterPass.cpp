@@ -27,6 +27,7 @@ namespace Luminumbra::Rendering {
 namespace {
 
 GLsizei WaterElementCount(u32 count) {
+    static_assert(std::numeric_limits<GLsizei>::max() == std::numeric_limits<std::int32_t>::max());
     if (count > static_cast<u32>(std::numeric_limits<GLsizei>::max())) {
         return 0;
     }
@@ -53,6 +54,7 @@ WaterPass::WaterPass() = default;
 WaterPass::~WaterPass() = default;
 
 void WaterPass::init_shader(const std::filesystem::path& root_path) {
+    m_caustics_valid = false;
     m_water_shader =
         std::make_unique<Shader>((root_path / "res/shaders/water.vert").string().c_str(),
                                  (root_path / "res/shaders/water.frag").string().c_str());
@@ -76,6 +78,7 @@ void WaterPass::init_shader(const std::filesystem::path& root_path) {
 }
 
 void WaterPass::init_water_fallback_textures(RenderResourceRegistry& registry) {
+    m_caustics_valid = false;
     const unsigned char flat_normal[4] = {128, 128, 255, 255};
     const unsigned char neutral_flow[4] = {128, 128, 0, 0};
     const unsigned char black[4] = {0, 0, 0, 255};
@@ -127,6 +130,7 @@ void WaterPass::init_water_fallback_textures(RenderResourceRegistry& registry) {
 }
 
 void WaterPass::destroy_water_fallback_textures(RenderResourceRegistry& registry) {
+    m_caustics_valid = false;
     if (m_water_flat_normal_texture) {
         glDeleteTextures(1, &m_water_flat_normal_texture);
         m_water_flat_normal_texture = 0;
@@ -151,15 +155,15 @@ void WaterPass::destroy_water_fallback_textures(RenderResourceRegistry& registry
 }
 
 void WaterPass::reset_shader() {
+    m_caustics_valid = false;
     m_water_shader.reset();
     m_caustics_shader.reset();
 }
 
 // Renders the animated caustics pattern into the offscreen target. Runs at
-// the start of execute, so the cost is reported inside water_gpu_ms. The
-// lighting pass (which runs earlier in the frame) samples the previous
-// frame's pattern through black_texture; a one-frame lag is invisible for
-// a slowly-flowing intensity field.
+// the start of a consuming execute, inside water_gpu_ms. The generator has no
+// samplers or history: only u_time and the fixed resolution affect its output.
+// Regenerating on every consuming frame therefore also handles gaps in demand.
 void WaterPass::generate_caustics(const RenderContext& ctx) {
     if (m_caustics_fbo == 0 || !m_caustics_shader || !m_caustics_shader->IsValid()) {
         return;
@@ -182,6 +186,7 @@ void WaterPass::generate_caustics(const RenderContext& ctx) {
     glBindFramebuffer(GL_FRAMEBUFFER, ctx.lit_scene.id);
     glViewport(
         0, 0, static_cast<GLsizei>(ctx.internal_w()), static_cast<GLsizei>(ctx.internal_h()));
+    m_caustics_valid = true;
 }
 
 WaterDrawStats WaterPass::execute(const RenderContext& ctx,
@@ -195,7 +200,17 @@ WaterDrawStats WaterPass::execute(const RenderContext& ctx,
         return stats;
     }
     // --- 0. Generate the animated caustics pattern (offscreen) ---
-    generate_caustics(ctx);
+    m_caustics_valid = false;
+    // Bound: the prepared water draw list, with the exact submission count rule.
+    const bool water_draws =
+        std::any_of(input.draw_items.begin(), input.draw_items.end(), [](const auto& item) {
+            return WaterPreparationDrawConsumes(item.element_count);
+        });
+    const WaterPreparationConsumers consumers{
+        .water = water_draws, .glass = false, .capture = capture_visibility_requested};
+    if (consumers.caustics()) {
+        generate_caustics(ctx);
+    }
 
     // --- 1. Set OpenGL State ---
     glEnable(GL_DEPTH_TEST);

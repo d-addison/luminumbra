@@ -10559,11 +10559,20 @@ TEST(RenderSmokeTest, TimedScenarioPublicHookPublishesSiblingBundlesAndKeepsLega
     using namespace Luminumbra::Client::App;
     HiddenGlContext context;
     ASSERT_TRUE(context.ready()) << context.error();
+    // Windows can enforce a minimum window width; captures use the framebuffer,
+    // which can also differ from the requested window size on scaled displays.
+    int framebuffer_width = 0;
+    int framebuffer_height = 0;
+    glfwGetFramebufferSize(glfwGetCurrentContext(), &framebuffer_width, &framebuffer_height);
+    ASSERT_GT(framebuffer_width, 1);
+    ASSERT_GT(framebuffer_height, 0);
     Luminumbra::TestSupport::ScopedTempFile temporary("timed-scenario-", ".ppm");
     const auto directory = temporary.Path().parent_path();
     RenderPipeline pipeline;
     pipeline.enable_static_model_content(false);
-    ASSERT_TRUE(pipeline.startup(64, 64, SourceRoot()));
+    ASSERT_TRUE(pipeline.startup(static_cast<unsigned int>(framebuffer_width),
+                                 static_cast<unsigned int>(framebuffer_height),
+                                 SourceRoot()));
     pipeline.set_far_world_mode(FarWorldMode::Legacy);
     pipeline.set_far_lod_enabled(false);
     pipeline.set_taau_enabled(false);
@@ -10627,7 +10636,9 @@ TEST(RenderSmokeTest, TimedScenarioPublicHookPublishesSiblingBundlesAndKeepsLega
                                             .scenario_play_started_at = started,
                                             .last_readiness_report = readiness,
                                             .exit_code = result.exit_code});
-        pipeline.on_resize(mismatched_extent ? 32U : 64U, 64U);
+        pipeline.on_resize(static_cast<unsigned int>(mismatched_extent ? framebuffer_width / 2
+                                                                       : framebuffer_width),
+                           static_cast<unsigned int>(framebuffer_height));
         pipeline.set_capture_diagnostics({.enabled = diagnostics, .probe = std::nullopt});
         pipeline.render_frame(registry, world, *camera, 0.0f, false, UploadPresentation::Settled);
         if (capture_case == CaptureCase::MissingFrame) {
@@ -10641,7 +10652,11 @@ TEST(RenderSmokeTest, TimedScenarioPublicHookPublishesSiblingBundlesAndKeepsLega
         } else if (capture_case == CaptureCase::Continuation) {
             auto* scope = GBufferDiagnosticCapture::Current();
             ASSERT_NE(scope, nullptr);
-            ASSERT_TRUE(scope->attach(pipeline.gbuffer(), {64, 64}));
+            const DiagnosticExtent pipeline_extent{
+                static_cast<std::uint32_t>(mismatched_extent ? framebuffer_width / 2
+                                                             : framebuffer_width),
+                static_cast<std::uint32_t>(framebuffer_height)};
+            ASSERT_TRUE(scope->attach(pipeline.gbuffer(), pipeline_extent));
             // Readiness must detach this valid continuation before observing coverage.
             EXPECT_FALSE(pipeline.diagnostic_capture_refusal().empty());
         }
@@ -10660,7 +10675,7 @@ TEST(RenderSmokeTest, TimedScenarioPublicHookPublishesSiblingBundlesAndKeepsLega
         }
         const auto reference = config.artifact_dir / "legacy.ppm";
         if (expected_failure.empty()) {
-            ASSERT_TRUE(WriteBackbufferPpm(reference, 64, 64));
+            ASSERT_TRUE(WriteBackbufferPpm(reference, framebuffer_width, framebuffer_height));
         }
         runner->onPostRenderCapture(0.0f);
         if (!expected_failure.empty()) {
@@ -10849,4 +10864,211 @@ TEST(RenderSmokeTest, DiagnosticRefusalPrecedesManifestAndRetractsLateCompletion
     EXPECT_EQ(ReadTextFile(capture), "completed image");
     EXPECT_FALSE(pipeline.capture_diagnostics(capture));
     EXPECT_FALSE(fs::exists(manifest));
+}
+
+namespace {
+// Count the actual resource writes while forwarding every call to the driver.
+// State is scoped to one owner-thread fixture; no native timing is involved.
+class WaterPreparationGlCalls {
+public:
+    WaterPreparationGlCalls(GLuint caustics, GLuint opaque)
+        : m_caustics(caustics)
+        , m_opaque(opaque) {
+        Active() = this;
+        glad_glDrawArrays = Draw;
+        glad_glCopyTexSubImage2D = Copy;
+    }
+    ~WaterPreparationGlCalls() {
+        glad_glDrawArrays = m_draw;
+        glad_glCopyTexSubImage2D = m_copy;
+        Active() = nullptr;
+    }
+    WaterPreparationGlCalls(const WaterPreparationGlCalls&) = delete;
+    WaterPreparationGlCalls& operator=(const WaterPreparationGlCalls&) = delete;
+    unsigned caustics_draws = 0;
+    unsigned opaque_copies = 0;
+
+private:
+    static WaterPreparationGlCalls*& Active() {
+        static WaterPreparationGlCalls* active = nullptr;
+        return active;
+    }
+    static void GLAPIENTRY Draw(GLenum mode, GLint first, GLsizei count) {
+        auto& calls = *Active();
+        GLint fbo = 0;
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &fbo);
+        if (fbo != 0) {
+            GLint type = 0;
+            glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,
+                                                  GL_COLOR_ATTACHMENT0,
+                                                  GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE,
+                                                  &type);
+            if (type == GL_TEXTURE) {
+                GLint texture = 0;
+                glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,
+                                                      GL_COLOR_ATTACHMENT0,
+                                                      GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,
+                                                      &texture);
+                if (static_cast<GLuint>(texture) == calls.m_caustics)
+                    ++calls.caustics_draws;
+            }
+        }
+        calls.m_draw(mode, first, count);
+    }
+    static void GLAPIENTRY Copy(GLenum target,
+                                GLint level,
+                                GLint xoffset,
+                                GLint yoffset,
+                                GLint x,
+                                GLint y,
+                                GLsizei width,
+                                GLsizei height) {
+        auto& calls = *Active();
+        GLint texture = 0;
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
+        if (static_cast<GLuint>(texture) == calls.m_opaque)
+            ++calls.opaque_copies;
+        calls.m_copy(target, level, xoffset, yoffset, x, y, width, height);
+    }
+    GLuint m_caustics;
+    GLuint m_opaque;
+    PFNGLDRAWARRAYSPROC m_draw = glad_glDrawArrays;
+    PFNGLCOPYTEXSUBIMAGE2DPROC m_copy = glad_glCopyTexSubImage2D;
+};
+} // namespace
+
+TEST(RenderSmokeTest, WaterPreparationConsumerTruthTableAndDrawLimits) {
+    for (const bool water : {false, true}) {
+        for (const bool glass : {false, true}) {
+            for (const bool capture : {false, true}) {
+                const WaterPreparationConsumers consumers{
+                    .water = water, .glass = glass, .capture = capture};
+                EXPECT_EQ(consumers.opaque_snapshot(), water || glass || capture);
+                EXPECT_EQ(consumers.caustics(), water || capture);
+            }
+        }
+    }
+    EXPECT_FALSE(WaterPreparationDrawConsumes(0));
+    EXPECT_TRUE(WaterPreparationDrawConsumes(1));
+    EXPECT_TRUE(WaterPreparationDrawConsumes(2147483647u));
+    EXPECT_FALSE(WaterPreparationDrawConsumes(2147483648u));
+    EXPECT_FALSE(WaterPreparationDrawConsumes(4294967295u));
+}
+
+TEST(RenderSmokeTest, WaterPreparationCountsActualWritesForDryGlassCaptureAndWaterFrames) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    RenderPipeline pipeline;
+    pipeline.enable_static_model_content(false);
+    ASSERT_TRUE(pipeline.startup(32, 32, SourceRoot()));
+    pipeline.set_far_world_mode(FarWorldMode::Legacy);
+    pipeline.set_far_lod_enabled(false);
+    pipeline.set_taau_enabled(false);
+    pipeline.set_time_of_day(0.5f);
+    pipeline.set_time_of_day_hold(true); // sun below the horizon: no later ray snapshot
+    pipeline.set_weather(WeatherType::None, 0.0f);
+    Luminumbra::Systems::SHIELD_WorldSystem world(
+        nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    entt::registry registry;
+    Camera camera({8, 12, 8}, {0, 1, 0}, -90, -89);
+    WaterPreparationGlCalls calls(pipeline.water_caustics_texture(),
+                                  pipeline.lighting_fbo().opaque_color_texture);
+    const auto render = [&](unsigned caustics, unsigned copies) {
+        calls.caustics_draws = 0;
+        calls.opaque_copies = 0;
+        pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
+        EXPECT_EQ(calls.caustics_draws, caustics);
+        EXPECT_EQ(calls.opaque_copies, copies);
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    };
+    render(0, 0);
+    pipeline.set_glass_panes(std::vector<GlassPaneItem>(1));
+    render(0, 1);
+    pipeline.set_glass_panes({});
+    render(0, 0);
+    pipeline.set_terrain_coverage_diagnostics_enabled(true);
+    render(0, 1);
+    pipeline.set_terrain_coverage_diagnostics_enabled(false);
+    pipeline.set_water_visibility_capture_enabled(true);
+    render(1, 1);
+    pipeline.set_water_visibility_capture_enabled(false);
+    render(0, 0);
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0));
+    chunk->set_state(Luminumbra::ChunkState::Ready);
+    chunk->water_mesh_vertices = {
+        {{0, 6, 0}, {0, 1, 0}, 0u},
+        {{0, 6, 16}, {0, 1, 0}, 0u},
+        {{16, 6, 0}, {0, 1, 0}, 0u},
+    };
+    chunk->water_mesh_indices = {0u, 1u, 2u};
+    chunk->water_mesh_version.store(1u);
+    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    render(1, 1);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().water_draws, 1u);
+    pipeline.set_isolation_config(
+        {.layer_mask = Luminumbra::Client::ScenarioHarness::IsolationLayer::Terrain,
+         .backdrop = Luminumbra::Client::ScenarioHarness::BackdropMode::Scene});
+    render(0, 0);
+    pipeline.set_isolation_config({});
+    render(1, 1);
+}
+
+TEST(RenderSmokeTest, WaterCausticsRegenerateIdenticallyAfterSkippedFrames) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    RenderResourceRegistry resources;
+    WaterPass water;
+    water.init_shader(SourceRoot());
+    water.init_water_fallback_textures(resources);
+    ASSERT_TRUE(water.shader()->IsValid());
+    FullscreenFloatProbe quad;
+    GLint quad_vao = 0;
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &quad_vao);
+    RenderContext ctx;
+    ctx.screen_width = 32;
+    ctx.screen_height = 32;
+    ctx.screen_quad_vao = static_cast<GLuint>(quad_vao);
+    Camera camera;
+    const auto sample = [&](float time, bool capture) {
+        ctx.time_seconds = time;
+        water.execute(ctx, {}, camera, capture);
+        // Bounded by the fixed 256 x 256 RGBA8 target, independent of the scene.
+        std::vector<unsigned char> pixels(WaterPass::kCausticsResolution *
+                                          WaterPass::kCausticsResolution * 4u);
+        glGetTextureImage(water.caustics_texture(),
+                          0,
+                          GL_RGBA,
+                          GL_UNSIGNED_BYTE,
+                          static_cast<GLsizei>(pixels.size()),
+                          pixels.data());
+        return pixels;
+    };
+    const auto first = sample(1.0f, true);
+    ASSERT_TRUE(water.caustics_valid());
+    const auto expected = sample(4.0f, true);
+    EXPECT_NE(first, expected);
+    {
+        WaterPreparationGlCalls calls(water.caustics_texture(), 0);
+        WaterPassInput invalid;
+        invalid.draw_items.push_back(
+            {.model = glm::mat4(1),
+             .vao_id = 0,
+             .element_count = std::numeric_limits<Luminumbra::u32>::max()});
+        water.execute(ctx, invalid, camera);
+        EXPECT_FALSE(water.caustics_valid());
+        sample(2.0f, false);
+        EXPECT_FALSE(water.caustics_valid());
+        sample(3.0f, false);
+        EXPECT_FALSE(water.caustics_valid());
+        EXPECT_EQ(calls.caustics_draws, 0u);
+    }
+    EXPECT_EQ(sample(4.0f, true), expected);
+    EXPECT_TRUE(water.caustics_valid());
+    water.destroy_water_fallback_textures(resources);
+    EXPECT_FALSE(water.caustics_valid());
+    water.execute(ctx, {}, camera, true); // Unavailable target must not become valid.
+    EXPECT_FALSE(water.caustics_valid());
+    water.reset_shader();
+    EXPECT_FALSE(water.caustics_valid());
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }
