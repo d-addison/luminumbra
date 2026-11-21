@@ -59,7 +59,7 @@ inline constexpr std::uint16_t kLrec1Version = 3;
 // Legacy complete/suffix family, with frozen byte-identical layouts.
 inline constexpr std::uint16_t kLrec1ElidedVersion = 4;
 // Opt-in complete/suffix family with a bounded authority boot descriptor.
-// Unscheduled producers keep version 3 until descriptor capture is wired.
+// Fresh authority recordings use this family; legacy layouts remain frozen.
 inline constexpr std::uint16_t kLrec1BootVersion = 5;
 inline constexpr std::uint16_t kLrec1BootElidedVersion = 6;
 // Schedule-only complete/suffix family: the frozen 3/4 layout followed by a
@@ -72,9 +72,11 @@ inline constexpr std::uint16_t kLrec1WeatherElidedVersion = 8;
 [[nodiscard]] inline bool WeatherVersion(std::uint16_t version) {
     return version == kLrec1WeatherVersion || version == kLrec1WeatherElidedVersion;
 }
-// Descriptor playback remains refused until descriptor application is wired.
+// Suffixes require separate admission: they cannot boot from a seed.
 [[nodiscard]] inline bool PlaybackVersion(std::uint16_t version) {
-    return version == kLrec1Version || version == kLrec1ElidedVersion || WeatherVersion(version);
+    return version == kLrec1Version || version == kLrec1ElidedVersion ||
+           version == kLrec1BootVersion || version == kLrec1BootElidedVersion ||
+           WeatherVersion(version);
 }
 [[nodiscard]] inline bool ElidedVersion(std::uint16_t version) {
     return version == kLrec1ElidedVersion || version == kLrec1BootElidedVersion ||
@@ -101,7 +103,7 @@ struct ReplayHeader {
     // seed_string with legacy conversion. Legacy strtoull returns 0 or UINT64_MAX
     // when stoull cannot parse the text, so it cannot collide with the tag. A legacy
     // numeric seed with upper word 1 already has the same resolved low word.
-    // Lockstep producers continue storing untagged numeric seeds.
+    // Engine-generic legacy lockstep callers may store untagged numeric seeds.
     std::uint64_t seed = 0;
     std::string seed_string;
     std::string preset;            // preset name (worlds/atlas/presets/<preset>.json)
@@ -121,11 +123,15 @@ struct ReplayHeader {
 };
 
 // Playback admission, required in addition to start/checkpoint hashes.
-// The boot family stays refused until descriptor application/comparison is wired.
+// Descriptor versions additionally require an exact effective boot comparison by the consumer.
 [[nodiscard]] inline bool ConfigurationMatches(const ReplayHeader& header,
                                                const std::string& live_identity,
                                                const std::string& live_preset_hash) {
-    return PlaybackVersion(header.version) && !header.authority_boot.has_value() &&
+    return PlaybackVersion(header.version) &&
+           ((header.version == kLrec1BootVersion || header.version == kLrec1BootElidedVersion) ==
+            header.authority_boot.has_value()) &&
+           (!header.authority_boot.has_value() ||
+            header.authority_boot->system_config_identity == live_identity) &&
            WeatherVersion(header.version) == !header.weather_schedule.empty() &&
            !live_identity.empty() && !header.system_config_identity.empty() &&
            header.system_config_identity == live_identity && !live_preset_hash.empty() &&

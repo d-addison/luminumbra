@@ -42,6 +42,42 @@ std::size_t CountOccurrences(const std::string& source, const std::string& fragm
     return count;
 }
 
+// Returns the shipping variant: drops each `#ifdef LUMIN_DIAG_IDS` and
+// `#ifdef LUMIN_DIAG_CONTRIBUTIONS` branch and keeps its `#else` branch, so opt-in
+// diagnostic duplicates are not counted. Nested conditionals stay with their block.
+std::string WithoutDiagnosticVariant(const std::string& source) {
+    std::istringstream lines(source);
+    std::string line;
+    std::string shipping;
+    bool diagnostic = false;
+    std::size_t depth = 0;
+    while (std::getline(lines, line)) {
+        if (depth == 0 &&
+            (line == "#ifdef LUMIN_DIAG_IDS" || line == "#ifdef LUMIN_DIAG_CONTRIBUTIONS")) {
+            depth = 1;
+            diagnostic = true;
+            continue;
+        }
+        if (depth > 0 && line.rfind("#if", 0) == 0) {
+            ++depth;
+        } else if (depth == 1 && line == "#else") {
+            diagnostic = false;
+            continue;
+        } else if (depth > 0 && line.rfind("#endif", 0) == 0) {
+            --depth;
+            if (depth == 0) {
+                diagnostic = false;
+                continue;
+            }
+        }
+        if (!diagnostic) {
+            shipping += line;
+            shipping += '\n';
+        }
+    }
+    return shipping;
+}
+
 // Shadow orchestration must delegate only live terrain/glass to ShadowPass.
 // Reject owner references and types, class-qualified access and submission/draw calls,
 // independent of whitespace. Replay flags and replay-preservation helpers are allowed.
@@ -572,6 +608,24 @@ TEST(WeatherFrameContract, FinalScenarioPinsAndConsumersShareTheResolvedFrame) {
     ExpectContains(sky, "setFloat(\"u_wetness\", weather.wetness)");
 }
 
+TEST(FarWorldPositionContract, DiagnosticVariantDuplicatesAreNotShippingCalls) {
+    const std::string source = "void main() {\n"
+                               "#ifdef LUMIN_DIAG_IDS\n"
+                               "    if (!farWorldPosition(a)) { discard; }\n"
+                               "#else\n"
+                               "    if (!farWorldPosition(a)) { return; }\n"
+                               "#endif\n"
+                               "#ifdef LUMIN_DIAG_IDS\n"
+                               "    farWorldPosition(b);\n"
+                               "#endif\n"
+                               "}\n";
+    EXPECT_EQ(CountOccurrences(source, "farWorldPosition("), 3u);
+    const auto shipping = WithoutDiagnosticVariant(source);
+    EXPECT_EQ(CountOccurrences(shipping, "farWorldPosition("), 1u);
+    EXPECT_NE(shipping.find("{ return; }"), std::string::npos);
+    EXPECT_EQ(shipping.find("discard"), std::string::npos);
+}
+
 TEST(FarWorldPositionContract, EveryPositionReadIncludingNeighborsUsesTheSharedHelper) {
     const char* files[]{"lighting_pass.frag",
                         "ssao.frag",
@@ -584,7 +638,8 @@ TEST(FarWorldPositionContract, EveryPositionReadIncludingNeighborsUsesTheSharedH
         SCOPED_TRACE(files[i]);
         const auto source = ReadShader(std::filesystem::path("res/shaders") / files[i]);
         ExpectContains(source, "#include \"far_world_position.glsl\"");
-        EXPECT_EQ(CountOccurrences(source, "farWorldPosition("), expected_calls[i]);
+        EXPECT_EQ(CountOccurrences(WithoutDiagnosticVariant(source), "farWorldPosition("),
+                  expected_calls[i]);
         EXPECT_EQ(source.find("texture(gPosition"), std::string::npos);
         EXPECT_EQ(source.find("texelFetch(gPosition"), std::string::npos);
     }

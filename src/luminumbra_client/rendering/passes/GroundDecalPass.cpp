@@ -1,4 +1,6 @@
 #include "GroundDecalPass.h"
+#include "../DiagnosticDrawTable.h"
+#include "../GBufferTargets.h"
 #include "core/Profiler.h"
 #include "rendering/AttributedGl.h"
 
@@ -9,6 +11,8 @@
 #include "PassGlHelpers.h"
 
 #include <glm/gtc/matrix_inverse.hpp>
+
+#include <optional>
 
 namespace Luminumbra::Rendering {
 
@@ -91,26 +95,48 @@ void GroundDecalPass::execute(const RenderContext& ctx) {
     const glm::mat4 inverse_view =
         ctx.camera ? glm::inverse(ctx.camera->GetViewMatrix()) : glm::mat4(1.0f);
 
-    m_shader->use();
-    m_shader->setInt("u_farWorldLadder", ctx.far_world_ladder ? 1 : 0);
-    m_shader->setMat4("u_gbufferInverseProjection", ctx.gbuffer_inverse_projection);
-    m_shader->setMat4("u_inverseView", inverse_view);
-    m_shader->setVec2("u_scentWorldOrigin", glm::vec2(m_origin_x, m_origin_z));
-    m_shader->setFloat("u_scentInvWorldSpan", m_inv_world_span);
-    m_shader->setFloat("u_scentScale", m_scent_scale);
+    Shader* draw_shader = m_shader.get();
+    std::optional<GBufferDiagnosticAttachment> diagnostic_attachment;
+    if (auto* capture = GBufferDiagnosticCapture::Current()) {
+        GLint framebuffer = 0;
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &framebuffer);
+        // Additive albedo is a contributor, never the deferred surface owner.
+        diagnostic_attachment.emplace(static_cast<GLuint>(framebuffer),
+                                      ctx.gbuffer_position.id,
+                                      DiagnosticExtent{ctx.internal_w(), ctx.internal_h()});
+        draw_shader = capture->variant(draw_shader, false);
+    }
+
+    draw_shader->use();
+    draw_shader->setInt("u_farWorldLadder", ctx.far_world_ladder ? 1 : 0);
+    draw_shader->setMat4("u_gbufferInverseProjection", ctx.gbuffer_inverse_projection);
+    draw_shader->setMat4("u_inverseView", inverse_view);
+    draw_shader->setVec2("u_scentWorldOrigin", glm::vec2(m_origin_x, m_origin_z));
+    draw_shader->setFloat("u_scentInvWorldSpan", m_inv_world_span);
+    draw_shader->setFloat("u_scentScale", m_scent_scale);
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_position.id);
-    m_shader->setInt("gPosition", 0);
+    draw_shader->setInt("gPosition", 0);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, m_scent_tex);
-    m_shader->setInt("u_scentField", 1);
+    draw_shader->setInt("u_scentField", 1);
 
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_depth.id);
-    m_shader->setInt("gDepth", 2);
+    draw_shader->setInt("gDepth", 2);
 
     glBindVertexArray(m_vao);
+    if (auto* capture = GBufferDiagnosticCapture::Current()) {
+        capture->write_current({.mesh_path = {},
+                                .shader_variant = "scent_decal",
+                                .chunk = {},
+                                .lod = 0,
+                                .ownership = DiagnosticOwnership::Live,
+                                .pass = DiagnosticPass::Forward,
+                                .provenance = DiagnosticProvenance::Mesh,
+                                .generated_mesh = "scent-decal/fullscreen-triangle"});
+    }
     Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLES, 0, 3);
     glBindVertexArray(0);
 }

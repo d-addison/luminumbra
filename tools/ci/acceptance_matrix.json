@@ -5,7 +5,7 @@
     {
       "id": "render.visual-diagnostic-codecs",
       "source": "docs/development/visual-diagnostics.md#implementation-inventory",
-      "statement": "Independent GL-free diagnostic codecs serialize linear albedo, signed view normals, raw hardware depth and integral material IDs as little-endian PFM, exact RGBA32UI draw/mesh/LOD/ownership/pass identities as a versioned binary image, and schema-1 top-left JSON point probes. Exact sizes, bounded dimensions and identity/material metadata are validated before stream writes; nonfinite floating samples survive in AOVs and become explicit null channels in probes. Registered regressions cover encoding, orientation, invalid input, nonfinite values and partial stream failures. A standalone header-only helper adds a submission-ordered capture-local draw/mesh registry bounded to 65,536 entries each and 16 MiB escaped JSON with generic UTF-8 asset paths, separate bounded generated-geometry keys and explicit unsupported coverage. Registered registry regressions cover refusal, IDs, metadata, bounds and reset. A second standalone helper adds lazy RGBA32UI targets with capability and dimension refusal, transactional resize and caller binding restoration. Move-only attachment leases protect caller attachments on bound and unbound framebuffers: resize, reset and disable refuse while leased, and owner destruction with live leases terminates before deletion. Registered modeled-driver regressions cover lifecycle, refusal, attachment retention, moves and release. Deferred attribution producers are implemented through an explicit render-thread scope, guarded integer shader outputs and capture-local submission identities, including actual legacy far terrain/water tiers. A scoped G-buffer ID attachment ensures storage before acquiring an AttachmentLease and retains it through deferred submission until detachment and caller-state restoration, including incomplete-FBO rollback, recreation, registry retirement, capture destruction and exceptional teardown. Capability, extent and occupied-attachment refusal preserve caller state and record unsupported coverage. The contributor API supports a distinct forward target through the same lease path and preserves its original draw buffers; no shipping forward producer invokes it yet. Missing or aliased storage, nested or repeated attachment, invalid extents and mismatched contributor passes refuse coverage. Current-program writes clear mismatched IDs without throwing; shader variants include bounded feedback signatures. Completion requires successful attachment, detachment, lease release and complete deferred coverage without sticky failure or refusal. Missing base programs, unavailable skinned programs even with empty views, and queued tree impostors with invalid programs invalidate coverage. Registered DiagnosticAttribution and GBufferLeaseGl source-contract and hidden-GL regressions cover attachment scope, full state restoration, lease ordering, detached writers and unavailable programs. The existing Python attribution wiring suite evaluates all completion-predicate states and guards producer refusal ordering. Registry exhaustion sets a sticky capture refusal without throwing or growing the table; later writes upload zero IDs. Registered DiagnosticAttributionGl hidden-GL regressions cover bounded exhaustion, repeated refusal, invalid static metadata with skipped unrepresentable index counts and preserved geometry for unrecordable identity paths, and caller culling, VAO and framebuffer restoration on normal and exceptional exits; live MDI, ladder backend, authored surfaces, tree impostors and later contributors remain incomplete. Native execution, completed-frame GL readback and scenario integration remain pending. Every-PR Linux shader compilation and path-gated llvmpipe scene tooling are registered. The scene catalogue pins material, tree-impostor cutout, night-sky and terrain-blend references with per-reference origins, source identities, full-image MAE/p99 thresholds and independent cutout, stellar horizon/radial and terrain coverage invariants. Bounded sky/terrain shader replays ran under llvmpipe; native scene target execution remains pending. Dusk azimuth continuity is measured without an accepted baseline, with its proposed threshold pending issue #918. Debug views and a pixel inspector remain planned. Implemented bundle validation and advisory ROI image checks are recorded separately.",
+      "statement": "Independent GL-free diagnostic codecs serialize linear albedo, signed view normals, raw hardware depth and integral material IDs as little-endian PFM, exact RGBA32UI draw/mesh/LOD/ownership/pass identities as a versioned binary image, and schema-1 top-left JSON point probes. Exact sizes, bounded dimensions and identity/material metadata are validated before stream writes; nonfinite floating samples survive in AOVs and become explicit null channels in probes. Registered regressions cover encoding, orientation, invalid input, nonfinite values and partial stream failures. A standalone header-only helper adds a submission-ordered capture-local draw/mesh registry bounded to 65,536 entries each and 16 MiB escaped JSON with generic UTF-8 asset paths, separate bounded generated-geometry keys and explicit unsupported coverage. Registered registry regressions cover refusal, IDs, metadata, bounds and reset. A second standalone helper adds lazy RGBA32UI targets with capability and dimension refusal, transactional resize and caller binding restoration. Move-only attachment leases protect caller attachments on bound and unbound framebuffers: resize, reset and disable refuse while leased, and owner destruction with live leases terminates before deletion. Registered modeled-driver regressions cover lifecycle, refusal, attachment retention, moves and release. Deferred attribution producers are implemented through an explicit render-thread scope, guarded integer shader outputs and capture-local submission identities, including actual legacy far terrain/water tiers. A scoped G-buffer ID attachment ensures storage before acquiring an AttachmentLease and retains it through deferred submission until detachment and caller-state restoration, including incomplete-FBO rollback, recreation, registry retirement, capture destruction and exceptional teardown. Capability, extent and occupied-attachment refusal preserve caller state and record unsupported coverage. The contributor API supports a distinct forward target through the same lease path and preserves its original draw buffers; scent decals invoke it without replacing deferred surface identities. Water surfaces, glass panes, waterfall sheet/pool slots and the original particle batch resume the same contributor plane at their original draws; water metadata that cannot recover an exact chunk translation explicitly refuses attribution. Noncontributing fragments preserve prior contributor IDs; glass resolve retains pane identities and unavailable resolve resources refuse capture completion. Particle IDs identify the original shared billboard batch across magical particles, ambient motes, rain, snow, impact foam and waterfall spray; existing shape/alpha discards preserve earlier IDs. The separate weather overlay explicitly refuses coverage until its contributor mask is instrumented. Uploaded plant/marker batches resume the deferred plane. Both continuation planes retain earlier IDs and original color routing, and refuse mid-frame extent changes before resizing or leasing storage. Empty, sky, outside-field and negligible decal fragments discard before writing contributor IDs. Without forward storage or an instrumented current program, exact per-draw Forward records retain metadata with a :contributor_only label and completion remains false. Invalid labels or identities refuse without throwing; sticky registry refusal stops further table work. Missing or aliased storage, nested attachment, invalid extents and mismatched contributor passes refuse coverage. Current-program writes clear mismatched IDs without throwing; shader variants include bounded feedback signatures. Completion requires successful attachment, detachment, lease release and complete deferred coverage without sticky failure or refusal. Missing base programs, unavailable skinned programs even with empty views, and queued tree impostors with invalid programs invalidate coverage. Registered DiagnosticAttribution and GBufferLeaseGl source-contract and hidden-GL regressions cover attachment scope, full state restoration, lease ordering, detached writers and unavailable programs. The existing Python attribution wiring suite evaluates all completion-predicate states and guards producer refusal ordering. Registry exhaustion sets a sticky capture refusal without throwing or growing the table; later writes upload zero IDs. Registered DiagnosticAttributionGl hidden-GL regressions cover bounded exhaustion, repeated refusal, invalid static metadata with skipped unrepresentable index counts and preserved geometry for unrecordable identity paths, and caller culling, VAO and framebuffer restoration on normal and exceptional exits; live MDI, ladder backend, authored surfaces, tree impostors and later contributors remain incomplete. Native execution, completed-frame GL readback and scenario integration remain pending. Every-PR Linux shader compilation and path-gated llvmpipe scene tooling are registered. The scene catalogue pins material, tree-impostor cutout, night-sky and terrain-blend references with per-reference origins, source identities, full-image MAE/p99 thresholds and independent cutout, stellar horizon/radial and terrain coverage invariants. Bounded sky/terrain shader replays ran under llvmpipe; native scene target execution remains pending. Dusk azimuth continuity is measured without an accepted baseline, with its proposed threshold pending issue #918. Identity views and the developer-console pixel inspector retain deferred IDs, camera and draw metadata on explicit refresh. Armed viewport picking converts window/DPI coordinates once, labels render/output resolutions and ignores disarmed or out-of-image clicks. A fixed nearest-texel 9 by 9 deferred-albedo zoom shares the one-record 48-byte inspection readback. Freeze retains one frame of albedo, normal/material, depth, IDs, camera and draw table; output resize and render-scale changes invalidate pending selections and retained storage. Clipboard export copies the exact schema-1 probe; closed and idle inspectors do not read back. Registered DiagnosticInspector, DiagnosticInspectorGl and DiagnosticViewportGl regressions cover conversion, refusal, consistency, resize, request counts and export; native execution remains pending. Other diagnostic views and runtime bundle requests remain planned. Implemented bundle validation and advisory ROI image checks are recorded separately.",
       "status": "partial",
       "evidence": [
         {
@@ -42,6 +42,18 @@
         },
         {
           "kind": "ctest",
+          "ref": "DiagnosticInspector.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DiagnosticInspectorGl.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DiagnosticViewportGl.*"
+        },
+        {
+          "kind": "ctest",
           "ref": "DiagnosticCaptureIntegration.*",
           "planned": "Add and run GPU attribution and scenario capture bundle regressions; owner: maintainers"
         },
@@ -57,6 +69,28 @@
           "kind": "ctest",
           "ref": "ShaderScene.*",
           "planned": "Run the registered opt-in material, tree-impostor, night, dusk and terrain scene target under llvmpipe; owner: maintainers"
+        }
+      ],
+      "requirements": []
+    },
+    {
+      "id": "render.terrain-coverage-evidence",
+      "source": "docs/development/visual-diagnostics.md#implementation-inventory",
+      "statement": "Terrain coverage capture schema v1 retains lighting source planes and lighting/fog uniform snapshots. The expanded synthetic capture regression checks all nine available source kinds, every layer file header and payload size, explicit unavailable integrated volume records with volumetrics disabled, and uploaded lighting/fog uniform values. Source-contract regressions guard the three manifest records before completion. Native execution of the expanded checks remains pending.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "TerrainCoverageCaptureGl.SyntheticPlanesAndCallerStateSurviveReadback",
+          "planned": "Run the expanded lighting/fog capture assertions under native GL; owner: maintainers"
+        },
+        {
+          "kind": "script",
+          "ref": "test/rendering/test_frame_attribution_wiring.py"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development/visual-diagnostics.md"
         }
       ],
       "requirements": []
@@ -112,7 +146,7 @@
     {
       "id": "render.visual-diagnostic-bundles",
       "source": "docs/development/visual-diagnostics.md#implementation-inventory",
-      "statement": "The GL-free diagnostic bundle core resolves CLI and environment opt-in, rejects malformed probes, normalizes bottom-first source planes to top-first codec inputs, joins identities to capture-local draw records and streams one plane at a time under an aggregate 512 MiB staging budget checked before image allocation. Filesystem publication refuses occupied bundle members, checks stream, flush and close, publishes completion metadata last and uses identity-checked cleanup for owned artifacts. Metadata links the capture manifest, records frame and camera, labels the deferred surface and serializes explicit unsupported submission records. Registered regressions cover parsing, admission before save-root output, orientation, probe consistency, exact budget boundaries, input and transport failures, existing destinations, rollback and disabled no-op. Native execution remains pending. Runtime admission refuses enabled diagnostics before output until completed-frame GL readback and all scenario paths are integrated; production play cannot enable diagnostics.",
+      "statement": "The GL-free diagnostic bundle core resolves CLI and environment opt-in, rejects malformed probes, normalizes bottom-first source planes to top-first codec inputs, joins identities to capture-local draw records and streams one plane at a time under an aggregate 512 MiB staging budget checked before image allocation. Filesystem publication refuses occupied bundle members, checks stream, flush and close, publishes completion metadata last and uses identity-checked cleanup for owned artifacts. Metadata links the capture manifest, records frame and camera, labels the deferred surface and serializes explicit unsupported submission records. Registered regressions cover parsing, admission before save-root output, orientation, probe consistency, exact budget boundaries, input and transport failures, existing destinations, rollback and disabled no-op. Native execution remains pending. Runtime admission accepts enabled diagnostics only for the world_visual_sweep scenario, --frame-scan, or --render-benchmark with --render-benchmark-screenshot; those paths reserve their bundle destination exclusively and check completed-frame readiness before the manifest is published. Every other scenario and the --render-parity-frame and --upscale-seam-parity redispatches refuse enabled diagnostics before save-root output; production play cannot enable diagnostics.",
       "status": "partial",
       "evidence": [
         {
@@ -527,7 +561,7 @@
     {
       "id": "ci.compiler-cache-budget",
       "source": "docs/development.md#continuous-integration",
-      "statement": "MSVC and UCRT64 compiler caches use 1200M each on the daily runner's disk. The five hosted compiler lanes total 1.75 GB per branch; main/devel's newest generations total 3.5 GB, within the unchanged 9.5 GB repository cleanup budget. The remaining 6.5 GB of the 10 GB repository limit accommodates other caches, grace-window generations and saves in progress. Extra protected or grace-window caches that exceed the cleanup budget cause cleanup to warn and skip deletion; the margin does not guarantee against cache churn and no extra cache spend is enabled.",
+      "statement": "MSVC and UCRT64 compiler caches use 1200M each on the daily runner's disk. The five hosted compiler lanes total 2.35 GB per branch; main/devel's newest generations total 4.7 GB, within the unchanged 9.5 GB repository cleanup budget with 4.8 GB to spare. The remaining 5.3 GB of the 10 GB repository limit accommodates other caches, grace-window generations and saves in progress. Extra protected or grace-window caches that exceed the cleanup budget cause cleanup to warn and skip deletion; the margin does not guarantee against cache churn and no extra cache spend is enabled.",
       "status": "covered",
       "evidence": [
         {
@@ -8384,6 +8418,32 @@
           "kind": "doc",
           "ref": "docs/development/terrain-resolution-options.md",
           "planned": "Qualify captured-pose terrain, existing-world continuation, grid admission and High/Ultra performance before activation; owner: terrain"
+        }
+      ]
+    },
+    {
+      "id": "rendering.near-terrain-refinement",
+      "source": "issue #876",
+      "statement": "Graphics preset revision 4 enables the render-only, budgeted near-terrain refinement for new High and Ultra selections; Low and Medium keep it off. Saved revisions 1-3 and explicit saved overrides keep their payloads until the player reselects a preset. Refinement stays within the existing 4 MiB, 8-upload and 3 ms per-frame budget and defers past its deadline. Native High/Ultra p99 at or below 8.33 ms is qualified in the release native pass.",
+      "status": "partial",
+      "requirements": [],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "NearTerrainUpload.PresetSelectionsUseBudgetedRefinementAndExplicitOffPreservesPayload"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GraphicsPresetStartup.DetectedHighAndUltraPersistRefinementAndSavedOffSurvivesStartup"
+        },
+        {
+          "kind": "script",
+          "ref": "test/tools/test_graphics_ui_contract.py"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development/terrain-resolution-options.md",
+          "planned": "Qualify native High/Ultra p99 at or below 8.33 ms with refinement on in the release native pass; owner: rendering"
         }
       ]
     }

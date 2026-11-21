@@ -23,6 +23,29 @@ uniform sampler2D gNormalMaterial;  // unit 1: oct-normal.xy + material-id.a (RG
 uniform sampler2D gAlbedo;          // unit 2: base color (sRGB8)
 uniform sampler2D gDepth;           // unit 3: hardware depth texture
 
+#ifdef LUMIN_DIAG_VIEWS
+layout(binding = 4) uniform usampler2D gIdentity;
+layout(binding = 5) uniform usamplerBuffer gDrawMetadata;
+layout(binding = 6) uniform sampler2D gContribution;
+layout(binding = 7) uniform sampler2D gRawMaterial;
+layout(binding = 8) uniform sampler2D gRawMotion;
+layout(binding = 9) uniform sampler2D gRawAuthored;
+uniform int u_rawMaterialReady = 0;
+uniform int u_rawMotionReady = 0;
+uniform int u_rawAuthoredReady = 0;
+uniform int u_contributionReady = 0;
+uniform int u_identityReady = 0;
+uniform int u_inspect = 0;
+uniform int u_zoom = 0;
+uniform int u_pixelX = 0;
+uniform int u_pixelY = 0;
+layout(std430, binding = 7) buffer InspectorResult {
+    uvec4 inspectorId;
+    vec4 inspectorAlbedo;
+    vec4 inspectorNormalDepth;
+};
+#endif
+
 uniform int   u_mode;               // 1..5; see DebugViewPass::Mode
 uniform float u_near = 0.1;         // camera near plane (for hw-depth linearization)
 uniform float u_far  = 4000.0;      // camera far plane
@@ -54,7 +77,162 @@ vec3 hash_id_color(uint id) {
     return clamp(vec3(r, g, b) * 0.85 + 0.15, 0.0, 1.0);
 }
 
+#ifdef LUMIN_DIAG_VIEWS
+bool rawNonfinite(vec4 value) {
+    return any(isnan(value)) || any(isinf(value));
+}
+// Inspects stored texel bits only. It never reconstructs a world position, so
+// it is not a position read under the far-world position contract.
+bool rawTexelNonfinite(sampler2D target, ivec2 pixel) {
+    return rawNonfinite(texelFetch(target, pixel, 0));
+}
+bool rawGBufferNonfinite(ivec2 pixel) {
+    return rawTexelNonfinite(gPosition, pixel) ||
+        rawTexelNonfinite(gNormalMaterial, pixel) ||
+        rawTexelNonfinite(gAlbedo, pixel) ||
+        rawTexelNonfinite(gDepth, pixel) ||
+        (u_rawMaterialReady != 0 && rawTexelNonfinite(gRawMaterial, pixel)) ||
+        (u_rawMotionReady != 0 && rawTexelNonfinite(gRawMotion, pixel)) ||
+        (u_rawAuthoredReady != 0 && rawTexelNonfinite(gRawAuthored, pixel));
+}
+// Stable uint32 hash, identical to DebugViewPass::hash_id.
+uint diagnosticHash(uint value) {
+    return value * 2654435761u;
+}
+vec3 diagnosticColor(uint value) {
+    uint hashed = diagnosticHash(value);
+    return vec3(hashed & 255u, (hashed >> 8u) & 255u, (hashed >> 16u) & 255u) / 255.0;
+}
+vec3 unsupportedColor() {
+    // Legend: magenta hatch = zero, unresolved, unsupported or unavailable.
+    return (int(gl_FragCoord.x + gl_FragCoord.y) / 6) % 2 == 0
+        ? vec3(1.0, 0.0, 1.0) : vec3(0.15, 0.0, 0.15);
+}
+vec3 identityColor() {
+    if (u_identityReady == 0) return unsupportedColor();
+    ivec2 extent = textureSize(gIdentity, 0);
+    ivec2 pixel = clamp(ivec2(TexCoords * vec2(extent)), ivec2(0), extent - 1);
+    uvec4 id = texelFetch(gIdentity, pixel, 0);
+    if (id.x == 0u || id.x >= uint(textureSize(gDrawMetadata) / 2)) return unsupportedColor();
+    uvec4 exactId = texelFetch(gDrawMetadata, int(id.x * 2u));
+    uvec4 metadata = texelFetch(gDrawMetadata, int(id.x * 2u + 1u));
+    if (any(notEqual(id, exactId)) || metadata.y == 0u) return unsupportedColor();
+    if (u_mode == 6) return diagnosticColor(id.x);
+    if (u_mode == 7) return diagnosticColor(id.y);
+    // LOD 0 is the common case; hash lod + 1 so it never maps to black.
+    if (u_mode == 8) return diagnosticColor(id.z + 1u);
+    if (u_mode == 9) return diagnosticColor(metadata.x);
+    if (u_mode == 10) {
+        // Terrain, impostor, foliage, static, far volume. Owner: live / legacy / ladder.
+        const vec3 colors[5] = vec3[5](vec3(0.7,0.4,0.1), vec3(0.1,0.8,0.9),
+            vec3(0.2,0.8,0.2), vec3(0.9,0.8,0.2), vec3(0.3,0.3,1.0));
+        if (metadata.y > 5u) return unsupportedColor();
+        uint owner = id.w & 255u;
+        return colors[metadata.y - 1u] * (owner == 1u ? 1.0 : owner == 2u ? 0.7 : 0.45);
+    }
+    // Mesh path provenance: mesh=hashed path index, SDF=orange, heightfield=blue.
+    if (metadata.z == 1u) return diagnosticColor(id.y);
+    if (metadata.z == 2u) return vec3(1.0, 0.4, 0.05);
+    if (metadata.z == 3u) return vec3(0.1, 0.4, 1.0);
+    return unsupportedColor();
+}
+
+#endif
+
 void main() {
+#ifdef LUMIN_DIAG_VIEWS
+    if (u_mode == 36) {
+        vec4 result = vec4(unsupportedColor(), 1.0);
+        if (u_contributionReady != 0) {
+            ivec2 extent = textureSize(gContribution, 0);
+            ivec2 pixel = clamp(ivec2(TexCoords * vec2(extent)), ivec2(0), extent - 1);
+            vec4 replay = texelFetch(gContribution, pixel, 0);
+            // Lines were hardware depth-tested against opaque depth. Reject later
+            // occluders too; alpha zero leaves the shaded destination untouched.
+            bool visible = replay.a > 0.0 && replay.a >= texelFetch(gDepth, pixel, 0).r;
+            result = visible ? vec4(0.05, 1.0, 0.2, 0.85) : vec4(0.0);
+        }
+        FragColor = result;
+        return;
+    }
+    if (u_mode >= 30 && u_mode <= 33) {
+        vec3 value = unsupportedColor();
+        if (u_contributionReady != 0) {
+            ivec2 extent = textureSize(gContribution, 0);
+            ivec2 pixel = clamp(ivec2(TexCoords * vec2(extent)), ivec2(0), extent - 1);
+            // Also detect storage overflow (e.g. finite float32 -> infinite RG16F).
+            if (u_mode == 33 && rawGBufferNonfinite(pixel)) {
+                FragColor = vec4(1.0, 0.0, 1.0, 1.0);
+                return;
+            }
+            vec4 surface = texelFetch(gContribution, pixel, 0);
+            // Later unsupported producers must not inherit a diagnostic from hidden geometry.
+            if (surface.a > 0.0 && surface.a == texelFetch(gDepth, pixel, 0).r) {
+                if (any(isnan(surface.rgb)) || any(isinf(surface.rgb)) || all(equal(surface.rgb, vec3(-1.0, 0.0, -1.0))))
+                    value = vec3(1.0, 0.0, 1.0);
+                else if (all(equal(surface.rgb, vec3(-2.0, 0.0, -2.0)))) value = vec3(1.0, 1.0, 0.0);
+                else if (u_mode == 30) value = vec3(clamp(surface.r / 16.0, 0.0, 1.0));
+                else if (u_mode == 31) value = vec3(clamp(surface.r / 16.0 + 0.5, 0.0, 1.0));
+                else if (u_mode == 32) value = surface.rgb;
+                else value = vec3(0.0);
+            }
+        }
+        FragColor = vec4(value, 1.0);
+        return;
+    }
+    if ((u_mode >= 12 && u_mode <= 29) || u_mode == 34 || u_mode == 35) {
+        vec3 value = unsupportedColor();
+        if (u_contributionReady != 0) {
+            ivec2 extent = textureSize(gContribution, 0);
+            ivec2 pixel = clamp(ivec2(TexCoords * vec2(extent)), ivec2(0), extent - 1);
+            vec4 contribution = texelFetch(gContribution, pixel, 0);
+            if (contribution.a == 1.0) {
+                // Non-finite values stay conspicuous; raw HDR storage is never clamped.
+                if (any(isnan(contribution.rgb))) value = vec3(1.0, 0.0, 1.0);
+                else if (any(isinf(contribution.rgb))) value = vec3(0.0, 1.0, 1.0);
+                else if (u_mode == 12 || u_mode == 13 || u_mode == 14 ||
+                         u_mode == 17 || u_mode == 19 || u_mode == 26)
+                    value = max(contribution.rgb, vec3(0.0)) / (vec3(1.0) + max(contribution.rgb, vec3(0.0)));
+                else if (u_mode == 34 || u_mode == 35) {
+                    if (all(equal(contribution.rgb, vec3(-3.0)))) value = vec3(1.0);
+                    else if (all(equal(contribution.rgb, vec3(-1.0)))) value = vec3(1.0, 0.4, 0.0);
+                    else if (all(equal(contribution.rgb, vec3(-2.0)))) value = unsupportedColor();
+                    else if (u_mode == 35) value = vec3(contribution.rg,
+                        clamp(contribution.b / 16.0 + 0.5, 0.0, 1.0));
+                    else {
+                        const vec3 cascadeColors[4] = vec3[4](vec3(1,0,0), vec3(0,1,0),
+                            vec3(0,0,1), vec3(1,1,0));
+                        int selected = int(clamp(contribution.r, 0.0, 3.0));
+                        value = cascadeColors[selected] * (0.4 + 0.3 * (contribution.g + contribution.b));
+                    }
+                }
+                else value = contribution.rgb;
+            }
+        }
+        FragColor = vec4(value, 1.0);
+        return;
+    }
+    if (u_inspect != 0) {
+        ivec2 offset = u_zoom != 0 ? ivec2(gl_FragCoord.xy) - ivec2(4) : ivec2(0);
+        ivec2 pixel = clamp(ivec2(u_pixelX, u_pixelY) + offset,
+                            ivec2(0), textureSize(gIdentity, 0) - 1);
+        // Only the centre invocation owns the one-record SSBO; all 81 texels display raw albedo.
+        if (u_zoom == 0 || all(equal(ivec2(gl_FragCoord.xy), ivec2(4)))) {
+            inspectorId = texelFetch(gIdentity, pixel, 0);
+            vec4 normalMaterial = texelFetch(gNormalMaterial, pixel, 0);
+            inspectorAlbedo = vec4(texelFetch(gAlbedo, pixel, 0).rgb,
+                                   round(normalMaterial.a * 255.0));
+            inspectorNormalDepth = vec4(decode_octahedral(normalMaterial.xy),
+                                        texelFetch(gDepth, pixel, 0).r);
+        }
+        FragColor = vec4(texelFetch(gAlbedo, pixel, 0).rgb, 1.0);
+        return;
+    }
+    if (u_mode >= 6 && u_mode <= 11) {
+        FragColor = vec4(identityColor(), 1.0);
+        return;
+    }
+#endif
     vec3 viewPos = vec3(0.0);
     bool validPosition = farWorldPosition(gPosition, gDepth, TexCoords, viewPos);
     vec4 nrmData  = texture(gNormalMaterial, TexCoords);

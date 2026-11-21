@@ -4,6 +4,36 @@
 layout (location = 6) out uvec4 gDiagnosticIds;
 uniform uvec4 u_diagnosticIds;
 #endif
+#ifdef LUMIN_DIAG_SURFACE
+// Raw diagnostic plane: RGB selected quantity, A exact raster depth for coverage validation.
+layout(location = 6) out vec4 gDiagnosticSurface;
+uniform int u_surfaceMode;
+float diagnosticMip = -1.0;
+float diagnosticRasterDepth = 0.0;
+float diagnosticTerrainMips[6] = float[6](0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+float diagnosticSandMip = 0.0;
+vec3 diagnosticUvMips = vec3(0.0);
+float diagnosticDensity = -128.0;
+vec3 diagnosticWeights = vec3(0.0);
+bool diagnosticHasWeights = false;
+bool diagnosticBadWeights = false;
+bool diagnosticNonfinite = false;
+void diagnosticCheck(vec4 value) {
+    diagnosticNonfinite = diagnosticNonfinite || any(isnan(value)) || any(isinf(value));
+}
+void diagnosticFootprint(sampler2DArray image, vec2 dx, vec2 dy) {
+    vec2 size = vec2(textureSize(image, 0).xy);
+    float rho = max(length(dx * size), length(dy * size));
+    float lambda = log2(max(rho, 1e-8));
+    diagnosticCheck(vec4(dx, dy));
+    diagnosticCheck(vec4(rho, lambda, 0.0, 0.0));
+    diagnosticDensity = max(diagnosticDensity, lambda);
+}
+void diagnosticRecordMip(float lod) {
+    diagnosticCheck(vec4(lod, 0.0, 0.0, 0.0));
+    diagnosticMip = max(diagnosticMip, lod);
+}
+#endif
 layout (location = 5) out vec4 gAuthoredSurface; // RGB emission, A material lane
 layout (location = 0) out vec3 gPosition;          // RGB16F: full view-space position
 layout (location = 1) out vec4 gNormalMaterial;    // RGBA8: Oct normal, marker emissivity, material ID
@@ -50,6 +80,11 @@ uniform int u_terrainRoughnessValid;
 // branches retain defined sampling. The material LUT is not mipmapped.
 uniform float u_lodBias = 0.0;
 vec4 sampleBias(sampler2DArray s, vec3 uvw) {
+#ifdef LUMIN_DIAG_SURFACE
+    // Same UV derivatives and bias as the production implicit sample below.
+    diagnosticFootprint(s, dFdx(uvw.xy) * exp2(u_lodBias), dFdy(uvw.xy) * exp2(u_lodBias));
+    diagnosticCheck(u_lodBias != 0.0 ? texture(s, uvw, u_lodBias) : texture(s, uvw));
+#endif
     return u_lodBias != 0.0 ? texture(s, uvw, u_lodBias): texture(s, uvw);
 }
 
@@ -90,6 +125,8 @@ uniform int u_macroRockOverlay = 0;
 // but was the single largest G-buffer cost in the forest. The flat grass base colour × Tint
 // reads the same at the densities this draws. Terrain/bark/rock keep triplanar (set to 0).
 uniform int u_forceFlat = 0;
+// 1: procedural leaf reflectance without the card silhouette (closed distant shrub hulls).
+uniform int u_leafSurface = 0;
 
 //  far-LOD: view-space radius (meters) inside which far-region mesh
 // fragments are discarded - the live chunk ring owns that space (live wins;
@@ -260,6 +297,11 @@ float vnoise(vec3 p) {
 // Explicit gradients keep material sampling defined across divergent blend lanes.
 vec4 sampleTerrain(sampler2DArray image, vec3 uvw, vec2 dx, vec2 dy) {
     float biasScale = exp2(u_lodBias);
+#ifdef LUMIN_DIAG_SURFACE
+    // Texel density from the exact production gradients and sampler dimensions.
+    diagnosticFootprint(image, dx * biasScale, dy * biasScale);
+    diagnosticCheck(textureGrad(image, uvw, dx * biasScale, dy * biasScale));
+#endif
     return textureGrad(image, uvw, dx * biasScale, dy * biasScale);
 }
 
@@ -292,6 +334,11 @@ vec3 triplanar_albedo(vec3 worldPos, vec3 weights, float layer, float scale, vec
     vec3 by = textureLod(u_terrainTextures, vec3(uv_y, layer), blurLod.y).rgb;
     vec3 bz = textureLod(u_terrainTextures, vec3(uv_z, layer), blurLod.z).rgb;
     vec3 blur = bx * weights.x + by * weights.y + bz * weights.z;
+#ifdef LUMIN_DIAG_SURFACE
+    diagnosticCheck(vec4(bx, 0.0));
+    diagnosticCheck(vec4(by, 0.0));
+    diagnosticCheck(vec4(bz, 0.0));
+#endif
     return clamp(blur + (sharp - blur) * kDetailGain, 0.0, 1.0);
 }
 
@@ -356,6 +403,11 @@ void terrainSurface(uint materialId, vec3 worldPos, vec3 dx, vec3 dy, vec3 surfa
     vec4 texInfo = texture(u_materialLUT, vec2(matIndex, lutRowV(1)));
     float albedoScale = texture(u_materialLUT, vec2(matIndex, lutRowV(2))).g;
     vec3 albedoTint = texture(u_materialLUT, vec2(matIndex, lutRowV(3))).rgb;
+#ifdef LUMIN_DIAG_SURFACE
+    diagnosticCheck(matProps);
+    diagnosticCheck(texInfo);
+    diagnosticCheck(vec4(albedoScale, albedoTint));
+#endif
     albedo = materialAlbedo(materialId);
     roughness = matProps.g;
     metallic = matProps.r;
@@ -366,6 +418,15 @@ void terrainSurface(uint materialId, vec3 worldPos, vec3 dx, vec3 dy, vec3 surfa
     float tiling = max(texInfo.b * 64.0, 0.0625);
     float scale = 1.0 / tiling; // repeats per world unit
     vec3 weights = triplanar_weights(u_macroRockOverlay == 1 ? surfaceN : worldN);
+#ifdef LUMIN_DIAG_SURFACE
+    diagnosticRecordMip(diagnosticTerrainMips[materialId >= 1u && materialId <= 5u ? int(materialId) : 0]);
+    // Observe the production result, including failures, before any visualization mapping.
+    diagnosticHasWeights = true;
+    diagnosticWeights = weights;
+    diagnosticCheck(vec4(weights, 0.0));
+    diagnosticBadWeights = diagnosticBadWeights || any(lessThan(weights, vec3(0.0))) ||
+        any(greaterThan(weights, vec3(1.0))) || abs(dot(weights, vec3(1.0)) - 1.0) > 0.001;
+#endif
     // Coverage follows the interpolated terrain normal before normal mapping.
     // A derivative face normal is constant per triangle: using it for slope
     // reintroduces hard rock/sand edges even with blended material lanes.
@@ -384,6 +445,9 @@ void terrainSurface(uint materialId, vec3 worldPos, vec3 dx, vec3 dy, vec3 surfa
         vec3 detailPos = worldPos * 4.17 + vec3(37.0, 17.0, 53.0);
         vec3 detailDx = dx * 4.17, detailDy = dy * 4.17;
         float detailWeight = mix(0.25, 0.45, vnoise(worldPos * 0.13));
+#ifdef LUMIN_DIAG_SURFACE
+        diagnosticRecordMip(diagnosticSandMip);
+#endif
         baseAlbedo = mix(baseAlbedo, triplanar_albedo(detailPos, weights, texLayer, scale, detailDx, detailDy), detailWeight);
         baseN = normalize(mix(baseN, triplanar_normal(detailPos, worldN, weights, normLayer, scale, detailDx, detailDy), detailWeight));
         if (u_terrainRoughnessValid == 1) {
@@ -402,17 +466,27 @@ void terrainSurface(uint materialId, vec3 worldPos, vec3 dx, vec3 dy, vec3 surfa
         float rockW = 1.0 - smoothstep(0.50 + jitter, 0.80 + jitter, geomSlope); // steep -> rock
         if (rockW > 0.002) {
             vec4 rockInfo = texture(u_materialLUT, vec2(1.0/255.0, lutRowV(1))); // Stone row 1
+#ifdef LUMIN_DIAG_SURFACE
+            diagnosticCheck(rockInfo);
+            diagnosticRecordMip(diagnosticTerrainMips[1]);
+#endif
             float rockTex   = floor(rockInfo.r * 255.0 + 0.5);
             float rockNrm   = floor(rockInfo.g * 255.0 + 0.5);
             float rockScale = 1.0 / max(rockInfo.b * 64.0, 0.0625);
             vec3 rockAlbedo = triplanar_albedo(worldPos, weights, rockTex, rockScale, dx, dy);
             float rockAlbedoScale = texture(u_materialLUT, vec2(1.0 / 255.0, lutRowV(2))).g;
             vec3 rockAlbedoTint = texture(u_materialLUT, vec2(1.0 / 255.0, lutRowV(3))).rgb;
+#ifdef LUMIN_DIAG_SURFACE
+            diagnosticCheck(vec4(rockAlbedoScale, rockAlbedoTint));
+#endif
             rockAlbedo *= rockAlbedoScale * rockAlbedoTint;
             vec3 rockN      = triplanar_normal(worldPos, worldN, weights, rockNrm, rockScale, dx, dy);
             baseAlbedo = mix(baseAlbedo, rockAlbedo, rockW);
             baseN      = normalize(mix(baseN, rockN, rockW));
             vec4 rockProps = texture(u_materialLUT, vec2(1.0 / 255.0, lutRowV(0)));
+#ifdef LUMIN_DIAG_SURFACE
+            diagnosticCheck(rockProps);
+#endif
             float rockRough = u_terrainRoughnessValid == 1
                 ? triplanar_roughness(worldPos, weights, rockTex, rockScale, dx, dy)
                 : rockProps.g;
@@ -425,6 +499,41 @@ void terrainSurface(uint materialId, vec3 worldPos, vec3 dx, vec3 dy, vec3 surfa
     roughness = baseRoughness;
 }
 
+#ifdef LUMIN_DIAG_SURFACE
+float diagnosticProjectionMip(sampler2DArray image, vec3 projected) {
+    // Query the actual sampler, including anisotropy and mip clamps. The uniform
+    // bias scales the same projection derivatives used by textureGrad/sampleBias.
+    return max(textureQueryLod(image, projected.zy).x,
+               max(textureQueryLod(image, projected.xz).x,
+                   textureQueryLod(image, projected.xy).x));
+}
+float diagnosticTerrainMip(vec3 position, float scale) {
+    vec3 projected = position * (scale * exp2(u_lodBias));
+    float lod = max(diagnosticProjectionMip(u_terrainTextures, projected),
+                    diagnosticProjectionMip(u_terrainNormals, projected));
+    if (u_terrainRoughnessValid == 1)
+        lod = max(lod, diagnosticProjectionMip(u_terrainRoughness, projected));
+    return lod;
+}
+void diagnosticQueryMips() {
+    // Six bounded material slots, three projections and at most three arrays per
+    // slot, plus sand detail and three UV arrays: <=66 LOD queries + seven LUT fetches.
+    // Run before ALL discards and lane divergence; only consumed samples are recorded.
+    for (int slot = 0; slot < 6; ++slot) {
+        uint material = slot == 0 ? fs_in.MaterialID : uint(slot);
+        vec4 info = texture(u_materialLUT, vec2(float(material) / 255.0, lutRowV(1)));
+        float scale = 1.0 / max(info.b * 64.0, 0.0625);
+        diagnosticTerrainMips[slot] = diagnosticTerrainMip(fs_in.WorldPos, scale);
+    }
+    vec4 sandInfo = texture(u_materialLUT, vec2(4.0 / 255.0, lutRowV(1)));
+    float sandScale = 1.0 / max(sandInfo.b * 64.0, 0.0625);
+    diagnosticSandMip = diagnosticTerrainMip(fs_in.WorldPos * 4.17 + vec3(37.0, 17.0, 53.0), sandScale);
+    vec2 uv = fs_in.UV * exp2(u_lodBias);
+    diagnosticUvMips = vec3(textureQueryLod(u_skinnedTextures, uv).x,
+                            textureQueryLod(u_staticNormals, uv).x,
+                            textureQueryLod(u_staticSurface, uv).x);
+}
+#endif
 void main()
 {
     vec3 worldDx = dFdx(fs_in.WorldPos), worldDy = dFdy(fs_in.WorldPos);
@@ -433,6 +542,12 @@ void main()
     if (u_macroRockOverlay == 1) {
         surfaceN = terrain_surface_normal(fs_in.FragPos, normalize(fs_in.WorldNormal));
     }
+#ifdef LUMIN_DIAG_SURFACE
+    if (u_surfaceMode == 30) {
+        diagnosticQueryMips();
+    }
+    diagnosticRasterDepth = gl_FragCoord.z;
+#endif
 #ifdef LUMINUMBRA_FAR_WORLD_LADDER
     // A program writing gl_FragDepth must assign it on every surviving path.
     // Live, legacy, static and skinned depth/material outputs stay inert.
@@ -458,6 +573,9 @@ void main()
             discard;
         gl_FragDepth = biasedDepth;
     }
+#ifdef LUMIN_DIAG_SURFACE
+    diagnosticRasterDepth = gl_FragDepth;
+#endif
 #endif
     gAuthoredSurface = vec4(0.0);
     // Public procedural trees have no leaf-card texture. Give their cards an
@@ -521,6 +639,10 @@ void main()
     // sample at the row centers derived from LUT_ROWS (no magic literals).
     vec4 matProps = texture(u_materialLUT, vec2(matIndex, lutRowV(0))); // row 0
     vec4 texInfo  = texture(u_materialLUT, vec2(matIndex, lutRowV(1))); // row 1
+#ifdef LUMIN_DIAG_SURFACE
+    diagnosticCheck(matProps);
+    diagnosticCheck(texInfo);
+#endif
     float metallic = matProps.r;
     float roughness = matProps.g;
     float ao = matProps.b;
@@ -560,24 +682,34 @@ void main()
     float coverage = dot(fs_in.GroundWeights, vec4(1.0)) + fs_in.DeepslateWeight;
     bool naturalCoverage = coverage > 0.999 && fs_in.MaterialID >= 1u && fs_in.MaterialID <= 5u;
     bool textured = false;
-    if (proceduralLeaf) {
+    if (proceduralLeaf || u_leafSurface == 1) {
         // The same leaf reflectance at every mesh LOD avoids a bright green
         // distance band. Keep ground textures and their normal maps off leaves.
         albedo = vec3(0.10, 0.24, 0.045);
         roughness = 0.85;
         metallic = 0.0;
-        if (!gl_FrontFacing) worldN = -worldN;
-        textured = true; // rotate the two-sided world normal into view space below
+        if (proceduralLeaf) {
+            if (!gl_FrontFacing) worldN = -worldN;
+            textured = true; // rotate the two-sided world normal into view space below
+        }
+        // Closed distant shrub hulls keep the inverse-transposed view-space
+        // normal: their instances are scaled nonuniformly.
     } else if (u_skinnedAlbedoLayer >= 0) {
         // UV-mapped skinned/creature texturing. Samples the skinned
         // texture array by the mesh UVs; optionally perturbs the normal by a
         // tangent-derivative-free approximation (UV-space normal map, applied in
         // world space via the geometric normal as the z axis).
         // also the static-model lane (tree bark/leaf) — same UV sampling.
+#ifdef LUMIN_DIAG_SURFACE
+        diagnosticRecordMip(diagnosticUvMips.x);
+#endif
         vec4 baseColor = sampleBias(u_skinnedTextures, vec3(fs_in.UV, float(u_skinnedAlbedoLayer)));
         if (u_alphaTest == 3 && baseColor.a < 0.5) discard;
         albedo = baseColor.rgb * u_albedo_tint;
         if (u_staticSurfaceLayer >= 0) {
+#ifdef LUMIN_DIAG_SURFACE
+            diagnosticRecordMip(diagnosticUvMips.z);
+#endif
             vec3 surface = sampleBias(u_staticSurface, vec3(fs_in.UV, float(u_staticSurfaceLayer))).rgb;
             ao = surface.r;
             roughness = surface.g;
@@ -594,6 +726,9 @@ void main()
             if (leafLuma < 0.025) discard;
         }
         if (u_skinnedNormalLayer >= 0) {
+#ifdef LUMIN_DIAG_SURFACE
+            diagnosticRecordMip(u_staticNormalsBound == 1 ? diagnosticUvMips.y : diagnosticUvMips.x);
+#endif
             vec3 tn = (u_staticNormalsBound == 1
                 ? sampleBias(u_staticNormals, vec3(fs_in.UV, float(u_skinnedNormalLayer)))
                 : sampleBias(u_skinnedTextures, vec3(fs_in.UV, float(u_skinnedNormalLayer)))).xyz * 2.0 - 1.0;
@@ -711,4 +846,29 @@ void main()
 #endif
     vec4 prevClip = u_prev_view_proj * vec4(fs_in.PrevWorldPos, 1.0);
     gMotionVector = (prevClip.w > 1e-5) ? (currNdc - prevClip.xy / prevClip.w): vec2(0.0);
+#ifdef LUMIN_DIAG_SURFACE
+    // Check raw outputs before RGBA8/RG16F storage, decode, tonemap or clamping.
+    diagnosticCheck(vec4(gPosition, 0.0));
+    diagnosticCheck(gNormalMaterial);
+    diagnosticCheck(gAlbedoRoughness);
+    diagnosticCheck(vec4(gMetallicAO, gMotionVector));
+    diagnosticCheck(gAuthoredSurface);
+    diagnosticCheck(vec4(worldN, 0.0));
+    diagnosticCheck(vec4(viewN, 0.0));
+    vec3 diagnosticValue = vec3(0.0);
+    bool diagnosticAvailable = u_surfaceMode == 33;
+    if (u_surfaceMode == 30 || u_surfaceMode == 31) {
+        diagnosticAvailable = diagnosticMip >= 0.0;
+        diagnosticValue = vec3(u_surfaceMode == 30 ? diagnosticMip : diagnosticDensity);
+    } else if (u_surfaceMode == 32) {
+        diagnosticAvailable = diagnosticHasWeights;
+        diagnosticValue = diagnosticWeights;
+    }
+    // Negative payloads reserve disjoint sentinel colours; valid data never uses them.
+    if (diagnosticBadWeights && u_surfaceMode == 32) diagnosticValue = vec3(-2.0, 0.0, -2.0);
+    if (diagnosticNonfinite) diagnosticValue = vec3(-1.0, 0.0, -1.0);
+    if (diagnosticAvailable || diagnosticNonfinite)
+        gDiagnosticSurface = vec4(diagnosticValue, diagnosticRasterDepth);
+    else gDiagnosticSurface = vec4(0.0);
+#endif
 }

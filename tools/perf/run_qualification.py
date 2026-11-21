@@ -996,11 +996,17 @@ def aggregate(matrix, results, *, partial, declared_refresh, matrix_provenance=N
     complete_universe = (not partial and len(ids) == len(canonical)
                          and set(ids) == canonical)
     undeclared = any(item['refresh_source'] == 'undeclared' for item in displays)
+    poses_confirmed = all(matrix_lib.readiness(cell, planner.ROOT)[0] == 'ready'
+                          for cell in matrix_lib.cells(matrix)
+                          if cell['kind'] == 'fixed_view')
     render_floor = (provenance['canonical'] and complete_universe
+                    and poses_confirmed
                     and qualified == CANONICAL_RENDERER
                     and all(cell_qualifies(result) for result in results)
                     and adapter_identical and adapter_matches and not undeclared)
     reasons = []
+    if not poses_confirmed:
+        reasons.append('poses_not_native_confirmed')
     if not provenance['canonical'] or any(not result.get('matrix_canonical')
                                           for result in results):
         reasons.append('non_canonical_matrix')

@@ -1,4 +1,6 @@
 #include "PlantProcgenPass.h"
+#include "../DiagnosticDrawTable.h"
+#include "../GBufferTargets.h"
 #include "core/Profiler.h"
 #include "rendering/AttributedGl.h"
 
@@ -8,6 +10,8 @@
 
 #include <GLFW/glfw3.h> // glfwGetTime for render-only leaf wind animation
 #include <glm/gtc/matrix_transform.hpp>
+
+#include <optional>
 
 namespace Luminumbra::Rendering {
 
@@ -134,20 +138,55 @@ void PlantProcgenPass::execute(const RenderContext& ctx, const Camera& camera) {
                              : camera.GetProjectionMatrix(static_cast<int>(ctx.screen_width),
                                                           static_cast<int>(ctx.screen_height));
 
-    m_shader->use();
-    m_shader->setMat4("projection", projection);
-    m_shader->setMat4("view", view);
-    m_shader->setMat3("u_normalViewMatrix", glm::mat3(view));
-    m_shader->setFloat("u_time", ctx.time_seconds); // render-only leaf sway
-    m_shader->setFloat("u_windStrength", 1.0f);
+    Shader* draw_shader = m_shader.get();
+    std::optional<GBufferDiagnosticAttachment> diagnostic_attachment;
+    if (auto* capture = GBufferDiagnosticCapture::Current()) {
+        GLint framebuffer = 0;
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &framebuffer);
+        GBuffer target{};
+        target.fbo_id = static_cast<GLuint>(framebuffer);
+        GLint position_texture = 0;
+        glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,
+                                              GL_COLOR_ATTACHMENT0,
+                                              GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,
+                                              &position_texture);
+        target.position_texture = static_cast<GLuint>(position_texture);
+        diagnostic_attachment.emplace(target, DiagnosticExtent{ctx.internal_w(), ctx.internal_h()});
+        draw_shader = capture->variant(draw_shader, false);
+    }
+
+    draw_shader->use();
+    if (draw_shader != m_shader.get()) {
+        draw_shader->setMat4("projection", projection);
+    } else {
+        m_shader->setMat4("projection", projection);
+    }
+    draw_shader->setMat4("view", view);
+    draw_shader->setMat3("u_normalViewMatrix", glm::mat3(view));
+    draw_shader->setFloat("u_time", ctx.time_seconds); // render-only leaf sway
+    draw_shader->setFloat("u_windStrength", 1.0f);
     // This pass now draws ONLY the gameplay marker octahedra (creatures / foragers /
     // crystals). Make them self-luminous beacons so they read as glowing motes in dark
     // caves where there is no sky light. Packed into gNormalMaterial.b; the lighting
     // pass adds an albedo-tinted glow faded by daylight. (Default uniform is 0.0, so
     // the G-buffer is pixel-identical whenever this is not set.)
-    m_shader->setFloat("u_markerEmissive", 0.55f);
+    draw_shader->setFloat("u_markerEmissive", 0.55f);
 
     glBindVertexArray(m_vao);
+    if (auto* capture = GBufferDiagnosticCapture::Current()) {
+        // Fixed numeric inputs keep this actual uploaded-batch key below 96 bytes.
+        const std::string mesh_key = "plants/batch/" + std::to_string(m_signature) + "/indices/" +
+                                     std::to_string(m_index_count);
+        capture->write(*draw_shader,
+                       {.mesh_path = {},
+                        .shader_variant = "plant_procgen",
+                        .chunk = {},
+                        .lod = 0,
+                        .ownership = DiagnosticOwnership::Live,
+                        .pass = DiagnosticPass::GBuffer,
+                        .provenance = DiagnosticProvenance::Mesh,
+                        .generated_mesh = mesh_key});
+    }
     Luminumbra::Rendering::AttributedGl::Submit(glDrawElements,
                                                 GL_TRIANGLES,
                                                 static_cast<GLsizei>(m_index_count),

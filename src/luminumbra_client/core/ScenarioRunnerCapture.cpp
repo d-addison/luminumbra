@@ -117,9 +117,11 @@ Rendering::CaptureManifestInput ScenarioRunnerImpl::scenarioCaptureManifest() co
 }
 
 bool ScenarioRunnerImpl::refuseScenarioCapture(std::string_view reason) {
-    scenario_failed = true;
-    scenario_failure_reason = "capture_diagnostics_" + std::string(reason);
-    LUMINUMBRA_CORE_ERROR("Scenario capture refused: {}", scenario_failure_reason);
+    if (!scenario_failed) {
+        scenario_failed = true;
+        scenario_failure_reason = "capture_diagnostics_" + std::string(reason);
+        LUMINUMBRA_CORE_ERROR("Scenario capture refused: {}", scenario_failure_reason);
+    }
     glfwSetWindowShouldClose(window, true);
     return false;
 }
@@ -128,9 +130,11 @@ bool ScenarioRunnerImpl::scenarioCaptureReady(int width, int height) {
     if (!renderPipeline.capture_diagnostics_enabled()) {
         return true;
     }
-    const auto reason = renderPipeline.diagnostic_capture_refusal();
-    if (!reason.empty()) {
-        return refuseScenarioCapture(reason);
+    if (scenario_failed) {
+        return false;
+    }
+    if (!renderPipeline.diagnostic_capture_ready()) {
+        return refuseScenarioCapture(renderPipeline.diagnostic_capture_refusal());
     }
     if (width <= 0 || height <= 0 ||
         static_cast<unsigned int>(width) != renderPipeline.screen_width() ||
@@ -194,8 +198,11 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
         // stream ONCE. We stream until warmup confirms residency, then skip the
         // expensive per-frame world update and just re-render — the same
         // settled geometry is reused for every subsequent cell.
-        deps.render_and_read =
-            [&](std::vector<unsigned char>& out_pixels, int& w, int& h, bool stream_world) -> bool {
+        deps.render_and_read = [&](std::vector<unsigned char>& out_pixels,
+                                   int& w,
+                                   int& h,
+                                   bool stream_world,
+                                   const std::filesystem::path& attribution_dir) -> bool {
             Luminumbra::Rendering::RenderPipeline::CaptureCleanup frame_cleanup(renderPipeline);
             LUMIN_PROFILE_FRAME_N("Client capture");
             LUMIN_PROFILE_ZONE_N("Client capture frame");
@@ -242,6 +249,11 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
             glPixelStorei(GL_PACK_ALIGNMENT, 1);
             // glReadPixels itself synchronizes; no explicit glFinish needed.
             glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, out_pixels.data());
+            // Deferred attachments still belong to the backbuffer just read.
+            if (!attribution_dir.empty() &&
+                !renderPipeline.capture_terrain_coverage(attribution_dir)) {
+                return false;
+            }
             LUMIN_PROFILE_WAIT("Client present wait", glfwSwapBuffers(window));
             glfwPollEvents();
             frame_cleanup.retain();
