@@ -46,20 +46,23 @@ public:
     virtual void Restore() noexcept = 0;
     virtual void PreserveObject(ReplayObjectKind kind, std::uint32_t name) = 0;
 };
-inline thread_local ReplayStateAccess* active_replay_state = nullptr;
+inline ReplayStateAccess*& active_replay_state() {
+    static thread_local ReplayStateAccess* state = nullptr;
+    return state;
+}
 inline void PreserveReplayObject(ReplayObjectKind kind, std::uint32_t name) {
-    if (active_replay_state)
-        active_replay_state->PreserveObject(kind, name);
+    if (active_replay_state())
+        active_replay_state()->PreserveObject(kind, name);
 }
 class ReplayGlGuard {
 public:
     explicit ReplayGlGuard(ReplayStateAccess& access)
         : access_(access) {
         access_.Save();
-        previous_ = std::exchange(active_replay_state, &access_);
+        previous_ = std::exchange(active_replay_state(), &access_);
     }
     ~ReplayGlGuard() {
-        active_replay_state = previous_;
+        active_replay_state() = previous_;
         access_.Restore();
     }
     ReplayGlGuard(const ReplayGlGuard&) = delete;
