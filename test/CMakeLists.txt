@@ -2967,6 +2967,8 @@ if(LUMINUMBRA_SHADER_SCENES)
 endif()
 add_test(NAME ShaderScenesPython COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/tools/gates/test_shader_scenes.py")
+add_test(NAME TemporalAssemblyPython COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/tools/gates/test_temporal_assembly.py")
 
 # Ordinary test lanes need no downloaded game art. Generate valid synthetic
 # meshes/materials and their manifest solely for the isolated runner roots.
