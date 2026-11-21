@@ -433,6 +433,14 @@ and any explicit saved override keep their payloads until the player selects a
 preset again. Refinement stays inside the existing per-frame budget (4 MiB,
 8 uploads, 3 ms) and defers work past its deadline. Native High/Ultra p99 at or
 below 8.33 ms with refinement on is qualified in the release native pass.
+Added edge and centre vertices retain the source triangle's interpolated Stone,
+Soil, Grass, Sand and Deepslate coverage in a render-only packed material word;
+the low byte preserves the flat diagnostic ID. Ordinary live and distant meshes
+keep their one-hot coverage. This repairs refinement-induced material patches
+for issue #872 without changing authoritative mesh storage or save formats.
+The existing 1024-pixel terrain arrays and two-scale sand sampling still require
+native re-capture of the reported sand blur, repetition and material transitions;
+software contracts alone do not establish WorldVisualSweep acceptance.
 Options 2 and 3 remain opt-in or experimental as described below.
 
 ## Combined recommendation

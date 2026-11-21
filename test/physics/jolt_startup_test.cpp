@@ -19,6 +19,7 @@
 
 #include "../fixtures/AvatarContinuationWorld.h"
 #include "luminumbra_common/core/Log.h"
+#include "luminumbra_common/core/LogDispatcherSink.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/PlayerAvatar.h"
@@ -1752,15 +1753,16 @@ protected:
 class ScopedStartupLogRefusal {
 public:
     ScopedStartupLogRefusal()
-        : m_prior(Log::GetCoreLogger())
-        , m_sink(std::make_shared<RefusingStartupSink>()) {
-        auto logger = std::make_shared<spdlog::logger>("physics-startup-refusal", m_sink);
-        logger->set_level(spdlog::level::info);
-        logger->set_error_handler([](const std::string&) { throw std::bad_alloc(); });
-        Log::GetCoreLogger() = std::move(logger);
+        : m_sink(std::make_shared<RefusingStartupSink>()) {
+        m_sink->set_level(spdlog::level::info);
+        // These isolated cases start with the default error handler. Keep the
+        // refusal observable through spdlog's exception boundary, then restore it.
+        Log::GetCoreLogger()->set_error_handler([](const std::string&) { throw std::bad_alloc(); });
+        Log::GetDispatcherSink()->Attach(m_sink);
     }
     ~ScopedStartupLogRefusal() {
-        Log::GetCoreLogger() = std::move(m_prior);
+        Log::GetDispatcherSink()->Detach(m_sink);
+        Log::GetCoreLogger()->set_error_handler({});
     }
     void RequireRefused() const {
         Require(m_sink->refusals == 1);
@@ -1769,7 +1771,6 @@ public:
     ScopedStartupLogRefusal& operator=(const ScopedStartupLogRefusal&) = delete;
 
 private:
-    std::shared_ptr<spdlog::logger> m_prior;
     std::shared_ptr<RefusingStartupSink> m_sink;
 };
 

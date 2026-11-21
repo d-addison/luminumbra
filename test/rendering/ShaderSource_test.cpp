@@ -1,8 +1,10 @@
+#include "luminumbra_client/rendering/IndexedUniformNames.h"
 #include "luminumbra_client/rendering/ShaderSource.h"
 
 #include <gtest/gtest.h>
 
 #include <array>
+#include <stdexcept>
 #include <string>
 
 namespace {
@@ -93,5 +95,107 @@ TEST(ShaderSource, MultipleDefinesUseVersionLineEndingAndPreserveBodyLine) {
     EXPECT_EQ(source,
               "// LF header\n#version 450 core\r\n"
               "#define FIRST 1\r\n#define SECOND 2\r\n#line 3\r\nvoid main() {}");
+}
+} // namespace
+
+namespace {
+using Luminumbra::Rendering::IndexedUniformNames;
+
+template<std::size_t Count, std::size_t Fields>
+void CheckIndexedNames(const std::array<std::string, Fields>& prefixes,
+                       const std::array<std::string, Fields>& suffixes) {
+    IndexedUniformNames<Count, Fields> cache;
+    std::array<std::size_t, Count> builds{};
+    const auto build = [&](std::size_t index) {
+        ++builds[index];
+        std::array<std::string, Fields> names{};
+        for (std::size_t field = 0; field < Fields; ++field)
+            names[field] = prefixes[field] + std::to_string(index) + suffixes[field];
+        return names;
+    };
+    // Empty frames build nothing; shrinking/growing and reverse upload order
+    // still build each accessed name only once in the current generation.
+    for (std::uint64_t generation : {0U, 1U, 2U}) {
+        for (std::size_t frame = 0; frame < 4; ++frame) {
+            const auto count = frame == 0 ? 0 : (frame == 1 ? Count / 2 : Count);
+            for (std::size_t offset = 0; offset < count; ++offset) {
+                const auto index = count - offset - 1;
+                const auto& names = cache.Get(generation, index, build);
+                for (std::size_t field = 0; field < Fields; ++field)
+                    EXPECT_EQ(names[field],
+                              prefixes[field] + std::to_string(index) + suffixes[field]);
+            }
+        }
+        for (const auto count : builds)
+            EXPECT_EQ(count, generation + 1);
+        // Failed reload keeps the generation, so even another full frame is free.
+        for (std::size_t index = 0; index < Count; ++index) {
+            cache.Get(generation, index, build);
+            EXPECT_EQ(builds[index], generation + 1);
+        }
+    }
+    cache.Reset(); // replacement shader can restart at the same generation
+    for (std::size_t index = 0; index < Count; ++index) {
+        cache.Get(2, index, build);
+        cache.Get(2, index, build);
+        EXPECT_EQ(builds[index], 4U);
+    }
+}
+
+TEST(IndexedUniformNames, EveryShippingFamilyBuildsOncePerGeneration) {
+    CheckIndexedNames<64, 1>({"u_samples["}, {"]"});
+    CheckIndexedNames<32, 4>(
+        {"u_pointLights[", "u_pointLights[", "u_pointLights[", "u_pointLights["},
+        {"].position", "].color", "].radius", "].intensity"});
+    CheckIndexedNames<4, 1>({"u_lightSpaceMatrices["}, {"]"});
+    CheckIndexedNames<8, 3>({"u_flashNdc[", "u_flashPulse[", "u_flashOnscreen["}, {"]", "]", "]"});
+    CheckIndexedNames<96, 2>({"u_bolt[", "u_boltInverseDepth["}, {"]", "]"});
+}
+
+TEST(IndexedUniformNames, ShaderInstancesRetainIndependentGenerations) {
+    IndexedUniformNames<1> normal, contribution;
+    std::size_t builds = 0;
+    const auto build = [&](std::size_t) {
+        ++builds;
+        return IndexedUniformNames<1>::Names{"u_samples[0]"};
+    };
+    for (int frame = 0; frame < 4; ++frame) {
+        normal.Get(1, 0, build);
+        contribution.Get(1, 0, build);
+    }
+    EXPECT_EQ(builds, 2U);
+    normal.Get(2, 0, build);
+    contribution.Get(1, 0, build);
+    EXPECT_EQ(builds, 3U);
+}
+
+TEST(IndexedUniformNames, RefusedIndexAndFailedBuildDoNotPublishEntries) {
+    IndexedUniformNames<1> cache;
+    std::size_t builds = 0;
+    bool refuse = true;
+    const auto build = [&](std::size_t) -> IndexedUniformNames<1>::Names {
+        ++builds;
+        if (refuse)
+            throw std::runtime_error("name build refused");
+        return {"u_samples[0]"};
+    };
+    EXPECT_THROW(cache.Get(1, 1, build), std::out_of_range);
+    EXPECT_THROW(cache.Get(1, static_cast<std::size_t>(-1), build), std::out_of_range);
+    EXPECT_EQ(builds, 0U);
+    EXPECT_THROW(cache.Get(1, 0, build), std::runtime_error);
+    refuse = false;
+    EXPECT_EQ(cache.Get(1, 0, build)[0], "u_samples[0]");
+    EXPECT_EQ(builds, 2U);
+    refuse = true;
+    EXPECT_EQ(cache.Get(1, 0, build)[0], "u_samples[0]");
+    EXPECT_THROW(cache.Get(2, 0, build), std::runtime_error);
+    // An unsuccessful generation change leaves the previous entry usable.
+    EXPECT_EQ(cache.Get(1, 0, build)[0], "u_samples[0]");
+    refuse = false;
+    EXPECT_EQ(cache.Get(2, 0, build)[0], "u_samples[0]");
+    EXPECT_EQ(builds, 4U);
+    IndexedUniformNames<0> empty;
+    EXPECT_THROW(empty.Get(0, 0, build), std::out_of_range);
+    EXPECT_EQ(builds, 4U);
 }
 } // namespace
