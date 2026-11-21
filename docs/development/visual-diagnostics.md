@@ -1158,7 +1158,7 @@ deferred contributors. The ordinary spawn view can contain these contributors,
 and weather precipitation uses forward particles: this wiring does not yet enable
 a complete native sequence with those contributors active. A fixed-site producer
 policy or the missing A4 producer coverage is a separate prerequisite; admission
-does not promise that coverage. Manifest-aware assembly (E1d) follows; shared
+does not promise that coverage. Manifest-aware assembly follows; shared
 producer policy and all-features evidence remain E3.
 No save-format, authority revision or hash algorithm changes are made. The remaining
 section specifies the broader execution contract.
