@@ -160,6 +160,14 @@ target_link_libraries(morph_asset_test PRIVATE gtest_main nlohmann_json meshopti
 luminumbra_configure_first_party_target(morph_asset_test)
 luminumbra_pin_fp_determinism(morph_asset_test)
 
+# The palette primitive has no client or world-service dependency.
+add_executable(palette_table_test
+    common/PaletteTable_test.cpp
+    ../src/luminumbra_common/core/PaletteTable.cpp)
+target_include_directories(palette_table_test PRIVATE ../src ../include)
+target_link_libraries(palette_table_test PRIVATE gtest_main glm::glm entt)
+luminumbra_configure_first_party_target(palette_table_test)
+
 # The preset classifier has no client, GL or world-service dependency.
 add_executable(graphics_preset_classifier_test
     common/GraphicsPresetClassifier_test.cpp
@@ -2239,6 +2247,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     frame_attribution_test
     menu_presentation_test
     graphics_preset_classifier_test
+    palette_table_test
     hardware_info_test
     far_volume_tile_test
     far_volume_mesher_test
