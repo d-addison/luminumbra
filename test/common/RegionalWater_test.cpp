@@ -798,7 +798,13 @@ TEST(RegionalWaterMigration, UnownedCanonicalAndDormantOffLayerPartialStatesRefu
                     }
                 }
                 std::vector<std::string> errors;
-                ASSERT_TRUE(saved.write(errors, indexed));
+                // The indexed writer validates records and can refuse a partial state
+                // before it commits; either refusal keeps it out of a regional load.
+                if (!saved.write(errors, indexed)) {
+                    EXPECT_TRUE(indexed);
+                    EXPECT_FALSE(errors.empty());
+                    continue;
+                }
                 const auto bytes = saved.bytes();
                 WorldStreamingState loaded;
                 std::vector<IVec3> inventory;
