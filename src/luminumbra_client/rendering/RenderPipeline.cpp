@@ -3094,12 +3094,12 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
     const double snapshot_ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - snapshot_start)
             .count();
-    manage_chunk_gpu_resources(renderable_chunk_snapshots, camera, snapshot_ms);
-    manage_water_gpu_resources(renderable_chunk_snapshots, camera);
+    manage_chunk_gpu_resources(renderable_chunk_snapshots, camera, snapshot_ms, presentation);
+    manage_water_gpu_resources(renderable_chunk_snapshots, camera, presentation);
     if (!draw_upload_frame(presentation, render_uploads_settled())) {
-        // No consumer is submitted while an unmeasured capture wait drains.
-        // Keep the count/byte/time limits unchanged and do not advance temporal
-        // history, far-world scheduling, particles or the GPU query ring.
+        // No consumer is submitted while a hidden entry or capture wait drains.
+        // Do not advance temporal history, far-world scheduling, particles or
+        // the GPU query ring.
         m_last_render_pass_stats.cpu_prepare_ms =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
                                                       m_cpu_frame_t0)
@@ -4849,19 +4849,23 @@ void RenderPipeline::prepare_waterfalls(const Systems::SHIELD_WorldSystem& world
 
 void RenderPipeline::manage_chunk_gpu_resources(const std::vector<ChunkMeshSnapshot>& chunks,
                                                 const Camera& camera,
-                                                double preparation_ms) {
-    manage_mesh_gpu_resources<false>(chunks, camera, preparation_ms);
+                                                double preparation_ms,
+                                                UploadPresentation presentation) {
+    manage_mesh_gpu_resources<false>(chunks, camera, presentation, preparation_ms);
 }
 
 void RenderPipeline::manage_water_gpu_resources(const std::vector<ChunkMeshSnapshot>& chunks,
-                                                const Camera& camera) {
-    manage_mesh_gpu_resources<true>(chunks, camera);
+                                                const Camera& camera,
+                                                UploadPresentation presentation) {
+    manage_mesh_gpu_resources<true>(chunks, camera, presentation);
 }
 
 template<bool Water>
 void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapshot>& chunks,
                                                const Camera& camera,
+                                               UploadPresentation presentation,
                                                double preparation_ms) {
+    const auto limits = upload_limits(presentation, Water);
     const auto start = std::chrono::steady_clock::now();
     // Construct before scratch containers, so their destruction is timed too.
     struct UploadMeasurement {
@@ -4869,14 +4873,12 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
         const std::size_t& pending;
         std::chrono::steady_clock::time_point begin;
         double preparation;
+        double allowance_ms;
         ~UploadMeasurement() {
             work.elapsed_ms = preparation + std::chrono::duration<double, std::milli>(
                                                 std::chrono::steady_clock::now() - begin)
                                                 .count();
-            work.overshoot_ms =
-                std::max(0.0,
-                         work.elapsed_ms - (Water ? kWaterUploadLimits.milliseconds
-                                                  : kTerrainUploadLimits.milliseconds));
+            work.overshoot_ms = std::max(0.0, work.elapsed_ms - allowance_ms);
             Client::Attribution::record_render_uploads(work, Water, pending);
         }
     } measurement{Water ? m_last_mesh_upload_stats.water_budget
@@ -4884,7 +4886,8 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
                   Water ? m_last_mesh_upload_stats.water_uploads_deferred
                         : m_last_mesh_upload_stats.terrain_uploads_deferred,
                   start,
-                  preparation_ms};
+                  preparation_ms,
+                  limits.milliseconds};
     const auto elapsed = [&] {
         return preparation_ms +
                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
@@ -5079,7 +5082,8 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
                                                                   candidate.distance_sq,
                                                                   payload.vertices,
                                                                   payload.indices,
-                                                                  elapsed());
+                                                                  elapsed(),
+                                                                  presentation);
             if (candidate.refinement_only && result == NearTerrainUploadResult::Deferred) {
                 return false;
             }
@@ -5110,9 +5114,10 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
     };
     const auto work = [&] {
         if constexpr (Water) {
-            return drain_uploads(queue, kWaterUploadLimits, cost, adopt, elapsed);
+            return drain_uploads(queue, limits, cost, adopt, elapsed);
         } else {
-            return drain_terrain_uploads(queue, m_near_terrain_upload_queue, cost, adopt, elapsed);
+            return drain_terrain_uploads(
+                queue, m_near_terrain_upload_queue, cost, adopt, elapsed, presentation);
         }
     }();
     (Water ? stats.water_budget : stats.terrain_budget) = work;
