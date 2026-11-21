@@ -801,9 +801,10 @@ class UploadBudgetWiring(unittest.TestCase):
         prepare = body(policy, "prepare(")
         self.assertLess(prepare.index("m_index.find(chunk.get_id())"),
                         prepare.index("RefineNearTerrain("))
-        self.assertIn("forget(*m_entries[m_next].id)", prepare)
+        self.assertIn("const auto& previous_id = m_entries[m_next].id;", prepare)
+        self.assertIn("forget(*previous_id)", body(prepare, "if (previous_id)"))
         self.assertLess(prepare.index("m_index.emplace("),
-                        prepare.index("forget(*m_entries[m_next].id)"))
+                        prepare.index("forget(*previous_id)"))
         for signature in ("void RenderPipeline::clear_all_chunk_data()",
                           "void RenderPipeline::cleanup_gpu_resources()"):
             self.assertIn("m_near_terrain_refinement.clear()", body(self.pipeline, signature))

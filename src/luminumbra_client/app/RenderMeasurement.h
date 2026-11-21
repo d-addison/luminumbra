@@ -269,9 +269,10 @@ private:
                 continue;
             if (!slot.invalid[pass])
                 sample.passes[pass] = slot.accumulated[pass];
-            complete = complete && sample.passes[pass].has_value();
-            if (sample.passes[pass])
-                sum += *sample.passes[pass];
+            const auto& pass_sample = sample.passes[pass];
+            complete = complete && pass_sample.has_value();
+            if (pass_sample)
+                sum += *pass_sample;
         }
         if (complete)
             sample.passSum = sum;
