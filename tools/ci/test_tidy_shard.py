@@ -134,7 +134,7 @@ class ShardShellTests(unittest.TestCase):
             units = [str(Path(arg).relative_to(self.root)) for arg in call if arg.endswith(".cpp")]
             seen.extend(units)
             for unit in units:
-                tracked = unit in self.files[:2]
+                tracked = unit == self.files[0]
                 self.assertEqual(config["Checks"].endswith(
                     ",-cppcoreguidelines-avoid-non-const-global-variables"), tracked)
         self.assertCountEqual(seen, expected)

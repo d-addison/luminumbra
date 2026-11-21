@@ -887,6 +887,7 @@ jobs:
           python3 tools/ci/check_acceptance_matrix.py --check-doc docs/acceptance-matrix.md
           python3 tools/ci/test_tidy_cache.py
           python3 tools/ci/test_tidy_shard.py
+          python3 -I -B tools/ci/check_tidy_suppressions.py
           python3 tools/ci/test_validate_visual_catalog.py
           python3 tools/ci/validate_visual_catalog.py
           python3 tools/ci/render_visual_catalog.py --check
