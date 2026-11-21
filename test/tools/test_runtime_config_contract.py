@@ -101,6 +101,59 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         cls.runner = compact_cpp((ROOT / "src/luminumbra_server/ServerWorldRunner.cpp").read_text(encoding="utf-8"))
         cls.admission = compact_cpp((ROOT / "src/luminumbra_server/modes/ModeHelpers.cpp").read_text(encoding="utf-8"))
 
+    def test_capture_float_parse_failures_refuse_before_continuing(self):
+        # main() has no isolated invocation seam: pin the refusal at each parser.
+        for variable, target, flag in (
+                ("cy", "fixed_cam_yaw", "--cam-yaw"),
+                ("cpi", "fixed_cam_pitch", "--cam-pitch"),
+                ("ds", "timelapse_daystep", "--timelapse-daystep"),
+                ("t0", "timelapse_tod", "--timelapse-tod")):
+            with self.subTest(flag=flag):
+                body = cpp_block(self.client, f"if(!{variable}.empty())")
+                # Strict parsing rejects trailing junk and non-finite values.
+                parse = f"if(!Luminumbra::Core::ParseNumber({variable},g_app.capture.{target}))"
+                self.assertIn(parse, body)
+                self.assertNotIn("std::stof(", body)
+                failure = cpp_block(body, parse)
+                self.assertIn("return2;", failure)
+                self.assertIn("LUMINUMBRA_CORE_ERROR(", failure)
+                self.assertIn(flag, failure)
+
+    def test_preset_list_failures_have_process_bounded_diagnostics(self):
+        body = cpp_block(self.client, "g_uiManager->SetWorldPresetList(")
+        name_failure = cpp_block(body, "constautoreport_name_failure=")
+        enumeration_failure = body[body.rindex("catch(...)"):]
+        for failure in (name_failure, enumeration_failure):
+            self.assertIn("staticstd::atomic_flagreported{};", failure)
+            self.assertIn("if(!reported.test_and_set(std::memory_order_relaxed))"
+                          "LUMINUMBRA_CORE_WARN(", failure)
+        self.assertIn("catch(...){report_name_failure();}", body)
+        read = body[body.index("if(Luminumbra::Persistence::ReadSavedJson("):]
+        self.assertIn("else{report_name_failure();}", read)
+        self.assertIn("out.emplace_back(name,stem);", body)
+        self.assertTrue(body.endswith("returnout;}"))
+
+    def test_archetype_parse_diagnostic_is_process_bounded(self):
+        config = compact_cpp((ROOT / "src/luminumbra_client/core/RuntimeScenarioConfig.cpp")
+                             .read_text(encoding="utf-8"))
+        body = cpp_block(config, "if(config.skinned_albedo_texture.empty()&&"
+                         "!config.creature_archetype.empty())")
+        failure = cpp_block(body, "catch(...)")
+        self.assertIn("staticstd::atomic_flagreported{};", failure)
+        self.assertIn("if(!reported.test_and_set(std::memory_order_relaxed))"
+                      "LUMINUMBRA_CORE_WARN(", failure)
+
+    def test_moon_override_diagnostics_stay_in_one_time_initializers(self):
+        for filename, initializer, fallback in (
+                ("rendering/passes/LightingPass.cpp", "staticconstfloats_moon_wrap_floor=", "0.25f"),
+                ("rendering/RenderPipeline.cpp", "staticconstfloats_moon_env=", "-1.0f")):
+            with self.subTest(filename=filename):
+                source = compact_cpp((ROOT / "src/luminumbra_client" / filename)
+                                     .read_text(encoding="utf-8"))
+                body = cpp_block(source, initializer)
+                self.assertIn("LUMINUMBRA_CORE_WARN(", cpp_block(body, "catch(...)"))
+                self.assertTrue(body.endswith(f"return{fallback};}}"))
+
     def authority_capture_blocks(self):
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
                               .read_text(encoding="utf-8"))

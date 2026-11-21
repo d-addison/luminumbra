@@ -395,7 +395,11 @@ ParseRuntimeScenarioConfig(int argc, char* argv[], const std::filesystem::path& 
                     config.skinned_normal_texture = creature.value("normal_texture", std::string{});
                 }
             } catch (...) {
-                // Leave empty: RenderPipeline keeps the flat fallback.
+                // Keep the render fallback; diagnose at most once across config parses.
+                static std::atomic_flag reported{};
+                if (!reported.test_and_set(std::memory_order_relaxed))
+                    LUMINUMBRA_CORE_WARN(
+                        "Cannot parse creature archetype textures; keeping fallback");
             }
         }
     }

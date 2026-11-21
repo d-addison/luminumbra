@@ -1451,7 +1451,9 @@ SaveTransaction::~SaveTransaction() {
     if (m_state == State::Open || m_state == State::Committing) {
         try {
             abort(nullptr);
-        } catch (...) {}
+        } catch (...) {
+            // Best-effort rollback must not throw during unwinding; always release registration.
+        }
     }
     release_registration();
 }
