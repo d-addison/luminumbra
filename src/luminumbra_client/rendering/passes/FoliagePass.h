@@ -9,8 +9,6 @@
 #include "../RenderContext.h"
 #include "app/FrameAttribution.h"
 
-#include <glad/glad.h>
-
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -90,7 +88,8 @@ class Shader;
 class FoliagePass {
 public:
     struct CallerState {
-        GLboolean cull_enabled = GL_FALSE;
+        // GLboolean storage; this header stays GL-free for non-GL test hosts.
+        unsigned char cull_enabled = 0;
         static CallerState QueryExternal();
     };
     // --- Pinned capacities. ---

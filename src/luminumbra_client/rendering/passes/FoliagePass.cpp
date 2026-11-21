@@ -49,6 +49,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -1931,6 +1932,8 @@ void FoliagePass::map_instances_for_frame() {
     }
     m_draw_instance_limit = count;
 }
+
+static_assert(std::is_same_v<GLboolean, unsigned char>);
 
 FoliagePass::CallerState FoliagePass::CallerState::QueryExternal() {
     return {.cull_enabled = glIsEnabled(GL_CULL_FACE)};
