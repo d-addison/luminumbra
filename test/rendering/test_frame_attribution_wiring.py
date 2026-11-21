@@ -3531,6 +3531,59 @@ class DeferredDiagnosticLeaseWiring(unittest.TestCase):
                 self.assertEqual(actual, captured and not framebuffer and not lease
                                  and not failed and not refused and coverage)
 
+    def test_partial_snapshot_readiness_requires_valid_detached_storage(self):
+        import itertools
+
+        body = block(self.targets, "bool GBufferDiagnosticCapture::snapshot_ready()")
+        expression = re.fullmatch(r"\s*return\s+(.*?);\s*", body, re.S).group(1)
+        for captured, framebuffer, lease, failed, refused in itertools.product(
+                (False, True), repeat=5):
+            with self.subTest(captured=captured, framebuffer=framebuffer, lease=lease,
+                              failed=failed, refused=refused):
+                actual = cpp_expression(expression, **{
+                    "state_->captured": captured, "state_->framebuffer": framebuffer,
+                    "state_->attachment_lease": lease, "state_->snapshot_failed": failed,
+                    "state_->refused": refused})
+                self.assertEqual(actual, captured and not framebuffer and not lease
+                                 and not failed and not refused)
+        # Unsupported coverage must leave this independent storage diagnostic usable.
+        self.assertNotIn("snapshot_failed", block(
+            self.targets, "void GBufferDiagnosticCapture::unsupported("))
+        for marker in ("void GBufferDiagnosticCapture::abort()",
+                       "void GBufferDiagnosticCapture::before_destroy(",
+                       "void GBufferDiagnosticCapture::detach_target()"):
+            self.assertIn("state_->snapshot_failed = true;", block(self.targets, marker))
+        for marker in ("bool GBufferDiagnosticCapture::attach(",
+                       "bool GBufferDiagnosticCapture::attach_forward(",
+                       "void GBufferDiagnosticCapture::detach()"):
+            self.assertIn("abort();", block(self.targets, marker))
+
+    def test_partial_snapshot_display_preserves_strict_publication_identity(self):
+        source = read(CLIENT / "rendering/passes/DebugViewPass.cpp")
+        finish = block(block(source, "class DebugViewPass::Frame"), "void finish(")
+        self.assertIn("const bool ready = capture_->snapshot_ready();", finish)
+        self.assertIn("identity_complete = capture_->complete();", finish)
+        self.assertLess(finish.index("snapshot_ready()"), finish.index("capture_.reset()"))
+        self.assertIn("return;", block(finish, "if (!ready)"))
+        self.assertNotIn("if (!complete)", finish)
+        gather = block(source, "void DebugViewPass::finish_frame(")
+        self.assertIn('"Identity snapshot (incomplete coverage)"', gather)
+        inspect = block(source, "void DebugViewPass::inspect_snapshot(")
+        self.assertIn('{"identity_complete", m_snapshot->identity_complete}', inspect)
+        self.assertIn("m_snapshot->identity_complete && kind != ProducerKind::Unsupported", gather)
+        readback = block(read(CLIENT / "rendering/DiagnosticReadback.h"),
+                         "class DiagnosticFrameCapture")
+        self.assertIn("return scope_ ? scope_->complete() : identity_complete_;", readback)
+        self.assertIn("identity_complete_ = ending->complete();", readback)
+        self.assertIn("frame.identity_complete = identity_complete_;", readback)
+        self.assertNotIn("snapshot_ready()", readback)
+        bundle = read(CLIENT / "rendering/DiagnosticCapture.cpp")
+        self.assertIn("!frame.identity_complete", bundle)
+        self.assertIn("!draws.complete_deferred_coverage()", bundle)
+        shader = block(read(ROOT / "res/shaders/debug_view.frag"), "vec3 identityColor()")
+        self.assertIn("metadata.y == 0u) return unsupportedColor();", shader)
+        self.assertIn("if (u_mode == 6) return diagnosticColor(id.x);", shader)
+
     def test_attachment_wraps_deferred_submission(self):
         execute = block(self.passes, "GBufferDrawStats GBufferPass::execute(")
         attachment = execute.index("GBufferDiagnosticAttachment diagnostic_attachment(")
@@ -3562,11 +3615,57 @@ class DeferredDiagnosticLeaseWiring(unittest.TestCase):
     def test_queued_impostor_is_invalidated_before_program_refusal(self):
         static = block(self.passes, "void GBufferPass::geometry_pass_static_meshes(")
         queued = block(static, "if (impostorsOn && !impostorInstances.empty())")
-        record = queued.index('capture->unsupported("tree_impostor_fragment_output_unavailable", 3)')
-        self.assertLess(record, queued.index("if (!UseDrawProgram("))
+        select = queued.index("RefusedImpostorProgram(m_tree_impostor_shader.get(), capture)")
+        self.assertLess(select, queued.index("if (!UseDrawProgram("))
         self.assertIn("return;", block(queued, "if (!UseDrawProgram("))
-        self.assertIn('capture->unsupported("tree_impostor_fragment_output_unavailable", 3)',
-                      block(queued, "if (capture)"))
+        helper = block(self.passes, "Shader* RefusedImpostorProgram(")
+        record = helper.index('capture->unsupported("tree_impostor_fragment_output_unavailable", 3)')
+        self.assertLess(helper.index("if (!capture)"), record)
+        self.assertIn("if (base && base->IsValid())", helper)
+        self.assertLess(record, helper.index("return capture->variant(base, false, {}, true)"))
+        self.assertIn("UseDrawProgram(impostor_program, stats)", queued)
+        uniforms = queued[queued.index("UseDrawProgram("):]
+        self.assertIn('impostor_program->setMat4("u_proj", static_proj)', uniforms)
+        self.assertNotIn("m_tree_impostor_shader->set", uniforms)
+
+    def test_uninstrumented_capture_wraps_original_fragment_and_separates_cache_modes(self):
+        shader = block(read(CLIENT / "rendering/Shader.cpp"),
+                       "AttributedGl::Program Shader::buildProgram(")
+        self.assertIn('"LUMIN_DIAG_ZERO_IDS 1"', shader)
+        rename = block(shader, "if (zero_ids && source == &fragmentCode)")
+        self.assertIn('defines.emplace_back("main lumin_diagnostic_original_main")', rename)
+        wrapper = block(shader, "if (zero_ids)")
+        self.assertIn("#undef main", wrapper)
+        self.assertIn("layout(location = 6) out uvec4", wrapper)
+        self.assertLess(wrapper.index("lumin_diagnostic_original_main();"),
+                        wrapper.index("lumin_diagnostic_zero = uvec4(0);"))
+        variant = block(self.targets, "Shader* GBufferDiagnosticCapture::variant(")
+        self.assertIn("entry.zero_ids == zero_ids", variant)
+        self.assertIn('zero_ids ? "LUMIN_DIAG_ZERO_IDS 1" : "LUMIN_DIAG_IDS 1"', variant)
+        fixture = read(ROOT / "test/rendering/diagnostic_inspector_test.cpp")
+        draw = block(fixture, "void DrawImpostor(")
+        for token in ('"tree_impostor.vert"', '"tree_impostor.frag"',
+                      "capture.variant(&original, false, {}, true)",
+                      "glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, 1)",
+                      "glReadPixels(0, 0, 2, 2, GL_RGBA_INTEGER", "DiagnosticId{}"):
+            self.assertIn(token, draw)
+        self.assertNotIn("glTextureSubImage2D", draw)
+        self.assertIn("ASSERT_NO_FATAL_FAILURE(DrawImpostor(*capture, coverage))", fixture)
+
+    def test_unsafe_program_fallbacks_refuse_snapshot_before_return(self):
+        variant = block(self.targets, "Shader* GBufferDiagnosticCapture::variant(")
+        for marker in ("if (!shader || !shader->IsValid())",
+                       "})) {",
+                       "if (state_->variants.size() == 6)",
+                       "if (!diagnostic->IsValid() || (!zero_ids && identity < 0))"):
+            failure = block(variant, marker)
+            self.assertLess(failure.index("abort();"), failure.index("return shader;"))
+        writer = block(self.targets, "void GBufferDiagnosticCapture::write(")
+        self.assertIn("abort();", block(writer, "if (entry.zero_ids)"))
+        for signature in ("void GBufferDiagnosticCapture::write(",
+                          "void GBufferDiagnosticCapture::write_current("):
+            body = block(self.targets, signature)
+            self.assertRegex(body, r'"diagnostic_writer_without_variant"[^;]*;\s*abort\(\);')
 
     def test_detached_writers_and_variants_do_no_work(self):
         for signature, work, returned in (
@@ -3647,7 +3746,7 @@ class DeferredRasterDiagnosticWiring(unittest.TestCase):
             self.assertEqual(self.lighting.count(f"dFd{axis}(FragPos)"), 1)
             self.assertIn(derivative, prefix)
             self.assertNotIn(f"dFd{axis}(", block(self.lighting, "float CalculateShadow("))
-        self.assertIn("farWorldPosition(gPosition, u_sceneDepth, TexCoords, diagnosticViewPos);", prefix)
+        self.assertIn("bool diagnosticValid = diagnosticPositionAt(TexCoords, diagnosticViewPos);", prefix)
         self.assertIn("vec3 FragPos = vec3(u_inverseView * vec4(diagnosticViewPos, 1.0));", prefix)
         globals = self.lighting[:self.lighting.index("float CalculateShadow(")]
         for declaration in ("vec3 diagnosticDpdx;", "vec3 diagnosticDpdy;",
@@ -3660,6 +3759,42 @@ class DeferredRasterDiagnosticWiring(unittest.TestCase):
         self.assertIn("diagnosticShadowUv = vec3(projCoords.xy, log2(max(footprint, 1e-8)));", observation)
         self.assertLess(main.index("CalculateShadow(FragPos, Normal, L_sun"),
                         main.index("CalculateShadow(FragPos, Normal, L_moon"))
+
+    def test_shadow_footprint_rejects_every_incomplete_quad_with_the_existing_sentinel(self):
+        validity = block(self.lighting, "bool diagnosticPositionAt(")
+        for statement in ("farWorldPosition(gPosition, u_sceneDepth, uv, position)",
+                          "reconstructed && !any(isnan(position)) && !any(isinf(position))",
+                          "dot(position, position) >= 1e-8"):
+            self.assertIn(statement, validity)
+        main = block(self.lighting, "void main()")
+        prefix = main[:main.index("// Alpha zero")]
+        for statement in (
+                "float diagnosticNeighbourOffset = 1.0 - 2.0 * mod(floor(gl_FragCoord.y), 2.0);",
+                "vec2 diagnosticNeighbourUv = TexCoords + dFdyFine(TexCoords) * diagnosticNeighbourOffset;",
+                "bool diagnosticNeighbourValid = diagnosticPositionAt(diagnosticNeighbourUv, diagnosticNeighbourPos);",
+                "float diagnosticColumnValid = float(diagnosticValid && diagnosticNeighbourValid);",
+                "float diagnosticValidityDx = dFdxFine(diagnosticColumnValid);"):
+            self.assertIn(statement, prefix)
+        predicate = re.search(r"diagnosticQuadValid = ([^;]+);", prefix).group(1)
+        # Fine horizontal differences of paired columns include the diagonal,
+        # without undefined higher-order derivatives or divergent derivative calls.
+        for mask in range(16):
+            columns = [float(bool(mask & (1 << x)) and bool(mask & (1 << (x + 2))))
+                       for x in range(2)]
+            for lane in range(4):
+                with self.subTest(mask=mask, lane=lane):
+                    self.assertEqual(cpp_expression(
+                        predicate, diagnosticColumnValid=columns[lane % 2],
+                        diagnosticValidityDx=columns[1] - columns[0]), mask == 15)
+        selector = block(self.lighting, "float CalculateShadow(")
+        supported = block(selector, "if (diagnosticQuadValid)")
+        self.assertIn("float footprint =", supported)
+        self.assertIn("diagnosticShadowUv = vec3(projCoords.xy, log2(max(footprint, 1e-8)));",
+                      supported)
+        self.assertIn("vec3 diagnosticShadowUv = vec3(-2.0);", self.lighting)
+        self.assertIn("if (diagnosticQuadValid) diagnosticShadowUv = diagnosticCascade;", selector)
+        self.assertIn("all(equal(contribution.rgb, vec3(-2.0)))) value = unsupportedColor();",
+                      self.overlay)
 
     def test_wireframe_depth_policy_and_full_restoration_are_wired(self):
         attach = block(self.debug, "void attach(")
@@ -3696,7 +3831,7 @@ class DeferredRasterDiagnosticWiring(unittest.TestCase):
                         dispatch.index("m_debug_view_pass->begin_frame("))
         mdi = block(pipeline, "void RenderPipeline::draw_chunks_mdi(")
         self.assertIn("ReplayRollback restore_cursor", mdi)
-        self.assertIn("m_mdi_frame_cursor = saved_cursor;", block(mdi, "if (diagnostic_replay)"))
+        self.assertIn("m_mdi_stream.restore_cursor(saved_cursor);", block(mdi, "if (diagnostic_replay)"))
 
     def test_overdraw_shader_pins_match_shipping_sources(self):
         import hashlib
@@ -4567,7 +4702,8 @@ class DiagnosticContributorWiring(unittest.TestCase):
     def test_variant_and_detachment_failures_record_the_active_pass(self):
         variant = block(self.source, "Shader* GBufferDiagnosticCapture::variant(")
         for marker in ("if (!shader || !shader->IsValid())",
-                       "if (state_->variants.size() == 6)", "if (identity < 0)"):
+                       "if (state_->variants.size() == 6)",
+                       "if (!diagnostic->IsValid() || (!zero_ids && identity < 0))"):
             self.assertIn("state_->forward ? DiagnosticPass::Forward : DiagnosticPass::GBuffer",
                           block(variant, marker))
         detach = block(self.source, "void GBufferDiagnosticCapture::detach()")

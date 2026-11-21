@@ -4,11 +4,32 @@
 #include "../RenderInputs.h"
 #include "../WaterVisibility.h"
 
+#include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <vector>
 
 namespace Luminumbra::Rendering {
+
+// Match the signed GLsizei draw limit before treating a mesh as a consumer.
+constexpr bool WaterPreparationDrawConsumes(std::uint32_t elements) noexcept {
+    return elements != 0 &&
+           elements <= static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max());
+}
+
+struct WaterPreparationConsumers {
+    bool water = false;
+    bool glass = false;
+    bool capture = false;
+
+    constexpr bool opaque_snapshot() const noexcept {
+        return water || glass || capture;
+    }
+    constexpr bool caustics() const noexcept {
+        return water || capture;
+    }
+};
 
 class Camera;
 class Shader;
@@ -24,10 +45,8 @@ class RenderResourceRegistry;
 // the pass also owns a small offscreen caustics generation target
 // (kCausticsResolution^2 RGBA8 texture + FBO) rendered through
 // caustics_generator.frag at the start of execute, inside the Water GPU
-// timer. The caustics feed is published through black_texture: the lighting
-// pass binds that accessor as its caustics sampler, so it picks up the
-// generated texture (or the black fallback before the first generated frame /
-// when the caustics shader is unavailable) without any LightingPass changes.
+// timer, only for water draws or an explicit visibility capture. Lighting does
+// not sample caustics; water samples the current frame through black_texture.
 class WaterPass {
 public:
     // Resolution of the offscreen caustics generation target.
@@ -103,6 +122,11 @@ public:
     u32 caustics_fbo() const {
         return m_caustics_fbo;
     }
+    // Last execute generated the current frame's pattern. Raw target accessors
+    // also serve allocation accounting; their nonzero ids do not imply validity.
+    bool caustics_valid() const {
+        return m_caustics_valid;
+    }
 
 private:
     void generate_caustics(const RenderContext& ctx);
@@ -117,6 +141,7 @@ private:
     u32 m_water_underwater_texture = 0;
     u32 m_caustics_texture = 0;
     u32 m_caustics_fbo = 0;
+    bool m_caustics_valid = false;
 };
 
 } // namespace Luminumbra::Rendering

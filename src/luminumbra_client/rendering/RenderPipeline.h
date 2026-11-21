@@ -24,7 +24,8 @@
 #include "ShadowMap.h"              // ShadowMap (extracted)
 #include "SkyAtmosphereLut.h"       //  Hillaire 2020 scattering LUTs
 #include "StaticModelTex.h"         // StaticModelTex hoisted to namespace scope
-#include "TerrainSubmit.h"          // SubmitTerrainChunksFn + TerrainSubmitStats
+#include "TerrainStreamRing.h"
+#include "TerrainSubmit.h" // SubmitTerrainChunksFn + TerrainSubmitStats
 #include "UploadBudget.h"
 #include "core/AssetManager.h"
 #include "core/IsolationConfig.h" // isolation/layer render mode (backdrop + spawn-suppression)
@@ -1552,6 +1553,7 @@ private:
     std::unique_ptr<SsaoPass> m_ssao_pass;
     std::unique_ptr<LightingPass> m_lighting_pass;
     std::unique_ptr<WaterPass> m_water_pass;
+    WaterPassInput m_frame_water_input;
     bool m_water_visibility_capture_enabled = false;
     std::unique_ptr<SkyboxPass> m_skybox_pass;
     std::unique_ptr<ParticlePass> m_particle_pass;          //
@@ -1607,6 +1609,11 @@ private:
     void init_sky_lut();
 
 public:
+    // Production frame counters; diagnostic replays retain GPU ownership separately.
+    const TerrainStreamRing::Diagnostics& terrain_stream_diagnostics() const {
+        return m_mdi_stream.diagnostics();
+    }
+
     const SkyAtmosphereLut& sky_lut() const {
         return m_sky_lut;
     }
@@ -1618,10 +1625,8 @@ private:
     std::vector<WaterRenderData> m_free_water_render_slots;
 
     // shared bucketed persistent-mapped pool backing all live terrain
-    // chunk geometry, plus the per-frame MDI scratch buffers (an indirect
-    // command buffer and a chunk-origin SSBO, double/triple-buffered to avoid
-    // stalling on the GPU still reading last frame's commands). The G-buffer and
-    // shadow passes both submit live terrain through draw_chunks_mdi.
+    // chunk geometry, plus fence-protected terrain command/origin buffer pairs.
+    // The G-buffer and shadow passes both submit live terrain through draw_chunks_mdi.
     ChunkGeometryPool m_chunk_geometry_pool;
 
     struct DrawElementsIndirectCommand {
@@ -1632,7 +1637,6 @@ private:
         GLuint baseInstance;  // gl_DrawID fallback / origin index
     };
 
-    static constexpr std::size_t kMdiRingFrames = 3;
     struct MdiFrameBuffers {
         GLuint indirect_buffer = 0; // GL_DRAW_INDIRECT_BUFFER
         // Per-draw chunk origin (vec4), consumed as an instanced vertex
@@ -1641,16 +1645,17 @@ private:
         // per-draw origin selection work without GLSL 4.6 gl_BaseInstance.
         GLuint origin_buffer = 0;
         std::size_t command_capacity = 0; // commands the buffers can hold
+        GLsync completion = nullptr;      // last consumer; null requires orphaning after first use
     };
-    std::array<MdiFrameBuffers, kMdiRingFrames> m_mdi_frames;
-    std::size_t m_mdi_frame_cursor = 0;
+    std::array<MdiFrameBuffers, TerrainStreamRing::kSlotCount> m_mdi_frames;
+    TerrainStreamRing m_mdi_stream;
     // Reusable CPU scratch so the per-frame submit allocates nothing steady-state.
     std::vector<DrawElementsIndirectCommand> m_mdi_command_scratch;
     std::vector<glm::vec4> m_mdi_origin_scratch;
 
     void init_mdi_buffers();
     void destroy_mdi_buffers();
-    void ensure_mdi_capacity(MdiFrameBuffers& frame, std::size_t commands);
+    void ensure_mdi_capacity(MdiFrameBuffers& frame, std::size_t commands, bool orphan);
     // draw_chunks_mdi is declared after ChunkCullEntry (it takes a vector of
     // those), further down in this class.
 
