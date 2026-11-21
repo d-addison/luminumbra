@@ -52,6 +52,8 @@ public:
     void onShutdown() override;
 
 private:
+    struct RuntimeWorldSweepBackend;
+    bool driveTemporalAudit();
     Rendering::CaptureManifestInput scenarioCaptureManifest() const;
     bool refuseScenarioCapture(std::string_view reason);
     bool scenarioCaptureReady(int width, int height);

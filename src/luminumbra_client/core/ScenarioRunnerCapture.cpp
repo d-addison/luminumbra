@@ -11,10 +11,12 @@
 #include "core/ScenarioRunnerImpl.h"
 
 #include "core/Log.h"
+#include "core/PresentationClock.h"
 #include "core/Profiler.h"
 #include "core/scenarios/ScenarioCommon.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/network/NetworkLoopbackAuthority.h"
+#include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "nlohmann/json.hpp"
@@ -22,6 +24,8 @@
 #include "rendering/FarLodSystem.h"
 #include "rendering/PixelIo.h"
 #include "rendering/UploadBudget.h"
+#include "rendering/WeatherRenderBridge.h"
+#include "rendering/passes/ParticlePass.h"
 #include "rendering/passes/WaterPass.h"
 
 #include <algorithm>
@@ -104,6 +108,237 @@ constexpr double kAtmosMotionFrameIntervalS = 1.0 / 60.0;
 } // namespace
 
 namespace Luminumbra::Client::ScenarioHarness {
+
+struct ScenarioRunnerImpl::RuntimeWorldSweepBackend {
+    ScenarioRunnerImpl& runner;
+    RuntimeTemporalAudit& audit = *runner.scenario_config.temporal_audit;
+    Luminumbra::world::GameSession& session = *runner.gameSession;
+    Luminumbra::Rendering::RenderPipeline& pipeline = runner.renderPipeline;
+    Luminumbra::Rendering::Camera& camera = *runner.g_camera;
+    const std::filesystem::path& root = runner.root_dir;
+    const std::filesystem::path& output = audit.directory;
+
+    std::uint64_t actual_tick() const {
+        return session.GetSimulationTickCount();
+    }
+    bool begin(const Luminumbra::Rendering::TemporalAuditPlan& plan,
+               const Luminumbra::Rendering::TemporalSequenceBudget& budget) {
+        using namespace Luminumbra::Rendering;
+        if (!session.GetWorldSystem() || !session.GetPhysicsSystem() ||
+            session.GetRegionSchedulerFault() || !pipeline.capture_diagnostics_enabled() ||
+            !session.IsSimulationTickBoundary() ||
+            session.GetRenderCalendar() != Luminumbra::world::WorldCalendar{} ||
+            !TemporalSweepClockMatches(plan.request,
+                                       actual_tick(),
+                                       session.GetSimulationClock().tick_rate_hz(),
+                                       session.GetRenderCalendar()) ||
+            budget.frame_bytes != audit.budget.frame_bytes ||
+            budget.manifest_bytes != audit.budget.manifest_bytes ||
+            budget.output_bytes != audit.budget.output_bytes || !weather_ready(actual_tick())) {
+            return false;
+        }
+        int width = 0;
+        int height = 0;
+        glfwGetFramebufferSize(runner.window, &width, &height);
+        if (width != kCapturePinnedWidth || height != kCapturePinnedHeight) {
+            return false;
+        }
+        const auto* schedule = session.GetWeatherSchedule();
+        if (plan.request.span == TemporalAuditSpan::WeatherCycle &&
+            (schedule == nullptr || *schedule != BuildTemporalAuditWeatherSchedule(audit))) {
+            return false;
+        }
+        audit.directory = runner.scenario_config.artifact_dir / "temporal";
+        std::error_code error;
+        if (!std::filesystem::create_directory(output, error) || error) {
+            return false;
+        }
+        const auto spawn = session.GetMetadata().spawnPoint;
+        camera.Position = glm::vec3(spawn.x, spawn.y + 1.8f, spawn.z);
+        camera.Yaw = -90.0f;
+        camera.Pitch = -10.0f;
+        camera.updateCameraVectors();
+        return true;
+    }
+    bool advance_simulation(const Luminumbra::Rendering::TemporalSequenceStep& step) {
+        const auto before = actual_tick();
+        if (before >= Luminumbra::world::WorldClock::kTickLimit - 1 ||
+            step.simulation_tick != before + 1 || session.GetRegionSchedulerFault()) {
+            return false;
+        }
+        if (!session.GetPhysicsSystem()->prepare_simulation_collisions({}, step.simulation_tick)) {
+            LUMINUMBRA_CORE_ERROR("Temporal sweep collision preparation failed at tick {}",
+                                  step.simulation_tick);
+            return false;
+        }
+        const auto delta = session.GetSimulationClock().fixed_dt();
+        session.SetLocalPlayerSimulationPosition(camera.Position, false);
+        session.GetPhysicsSystem()->update(static_cast<float>(delta));
+        if (session.TickSimulation(delta, true) != 1 || session.GetRegionSchedulerFault() ||
+            actual_tick() != step.simulation_tick) {
+            return false;
+        }
+        // The normal host ordering: physics, sim (including weather/creatures),
+        // streaming/water, then promotion of water authority. Exactly once/tick.
+        session.GetWorldSystem()->update(
+            session.GetRegistry(), camera.Position, session.GetPhysicsSystem());
+        session.GetWorldSystem()->sync_water_authority();
+        return true;
+    }
+    bool weather_ready(std::uint64_t tick) const {
+        const auto* weather = session.GetWeatherSystem();
+        return weather != nullptr && weather->last_tick() == tick;
+    }
+    bool apply_weather(const Luminumbra::Rendering::TemporalSequenceStep& step) {
+        using namespace Luminumbra::Rendering;
+        const auto* weather = session.GetWeatherSystem();
+        if (weather == nullptr) {
+            return false;
+        }
+        const auto sample = weather->SampleAt(camera.Position);
+        if (!std::isfinite(sample.precip_intensity) || !std::isfinite(sample.storm_intensity) ||
+            !std::isfinite(sample.wind.x) || !std::isfinite(sample.wind.y)) {
+            return false;
+        }
+        const auto state = WeatherBridge::BuildWeatherRenderState(sample);
+        pipeline.set_weather_state(state);
+        pipeline.set_cloud_state(
+            WeatherBridge::BuildCloudRenderState(sample, step.simulation_tick));
+        if (auto* particles = pipeline.particles()) {
+            particles->set_precipitation(root / "data/common/particles",
+                                         camera.Position,
+                                         state.rain_intensity,
+                                         state.snow_intensity);
+            particles->set_wind(state.wind_direction * state.wind_strength * 8.0f);
+        }
+        return true;
+    }
+    // The app renders between prepare_render and complete_render. This backend
+    // validates that completed backbuffer before any capture or acknowledgement.
+    bool render_completed(const Luminumbra::Rendering::TemporalSequenceStep& step,
+                          const Luminumbra::Rendering::CaptureFeaturePolicy& /*policy*/,
+                          const Luminumbra::Rendering::WorldSweepAngle& /*angle*/,
+                          bool& ready) {
+        audit.completed.reset();
+        int width = 0;
+        int height = 0;
+        glfwGetFramebufferSize(runner.window, &width, &height);
+        if (glfwWindowShouldClose(runner.window) || width != kCapturePinnedWidth ||
+            height != kCapturePinnedHeight || actual_tick() != step.simulation_tick ||
+            glGetError() != GL_NO_ERROR) {
+            return false;
+        }
+        ready = pipeline.diagnostic_capture_refusal().empty() &&
+                pipeline.render_uploads_settled() &&
+                runner.scenario_config.temporal_presentation_ready;
+        if (ready) {
+            audit.completed = step;
+        }
+        if (auto* heartbeat = runner.scenario_config.capture_heartbeat) {
+            heartbeat->fetch_add(1, std::memory_order_relaxed);
+        }
+        return true;
+    }
+    Luminumbra::Rendering::TemporalSweepOutput
+    capture(const Luminumbra::Rendering::TemporalSequenceStep& step) {
+        if (!audit.completed || audit.completed->simulation_tick != step.simulation_tick ||
+            audit.completed->sub_tick_60 != step.sub_tick_60 ||
+            audit.completed->frame_index != step.frame_index ||
+            audit.completed->control != step.control) {
+            return {};
+        }
+        const auto name = "frame-" + std::to_string(step.frame_index) + ".ppm";
+        const auto path = output / name;
+        if (!runner.writeScenarioBackbuffer(path, kCapturePinnedWidth, kCapturePinnedHeight) ||
+            glGetError() != GL_NO_ERROR) {
+            return {};
+        }
+        // Exactly the completed-frame A4 bundle, including its own capture
+        // manifest. No directory scan, and no unacknowledged sibling output.
+        std::vector<std::string> names{
+            name, Luminumbra::Rendering::CaptureManifestPath(path).filename().string()};
+        for (const auto* suffix : {".albedo.pfm",
+                                   ".normal.pfm",
+                                   ".depth.pfm",
+                                   ".material.pfm",
+                                   ".ids.bin",
+                                   ".draws.json",
+                                   ".diagnostics.json"}) {
+            names.push_back(name + suffix);
+        }
+        // Probe output is optional and was range-checked before startup writes.
+        const auto& probe = audit.diagnostics.probe;
+        if (probe) {
+            names.push_back(name + ".probe-" + std::to_string((*probe)[0]) + "-" +
+                            std::to_string((*probe)[1]) + ".json");
+        }
+        const bool acknowledged =
+            audit.sequence->acknowledgeCaptureFiles(actual_tick(), output, names);
+        audit.completed.reset();
+        return {acknowledged, step.byte_limit};
+    }
+    Luminumbra::Rendering::TemporalSweepOutput
+    publish(const Luminumbra::Rendering::TemporalSequenceStep& step) {
+        const bool published = audit.sequence->publishCompletionManifest(output / "sequence.json");
+        return {published, published ? step.byte_limit : 0};
+    }
+};
+
+bool ScenarioRunnerImpl::driveTemporalAudit() {
+    if (!scenario_config.temporal_audit) {
+        return false;
+    }
+    auto& temporal_sequence = scenario_config.temporal_audit->sequence;
+    auto& temporal_step = scenario_config.temporal_audit->step;
+    scenario_config.temporal_presentation_delta = 0;
+    if (!scenario_ready || scenario_failed) {
+        return true;
+    }
+    if (!g_camera) {
+        (void)refuseScenarioCapture("temporal_camera_unavailable");
+        return true;
+    }
+    if (!temporal_sequence) {
+        const auto& audit = *scenario_config.temporal_audit;
+        temporal_sequence.emplace(audit.plan, audit.budget);
+        RuntimeWorldSweepBackend backend{*this};
+        if (!temporal_sequence->refusal().empty() || !backend.begin(audit.plan, audit.budget)) {
+            temporal_sequence->refuse();
+            (void)refuseScenarioCapture("temporal_initialization_failed");
+            return true;
+        }
+    }
+    RuntimeWorldSweepBackend backend{*this};
+    WorldVisualTemporalTransport transport(backend);
+    const auto spawn = gameSession->GetMetadata().spawnPoint;
+    g_camera->Position = glm::vec3(spawn.x, spawn.y + 1.8f, spawn.z);
+    g_camera->Yaw = -90.0f;
+    g_camera->Pitch = -10.0f;
+    g_camera->updateCameraVectors();
+    gameSession->SetLocalPlayerSimulationPosition(g_camera->Position, false);
+    temporal_step = DriveTemporalAuditTicks(
+        *temporal_sequence,
+        [&] { return gameSession->GetSimulationTickCount(); },
+        [&] {
+            const Rendering::TemporalSequenceStep step{
+                .action = Rendering::TemporalSequenceAction::AdvanceTick,
+                .simulation_tick = gameSession->GetSimulationTickCount() + 1};
+            return transport.advance_tick(step);
+        });
+    if (temporal_step->action == Rendering::TemporalSequenceAction::Refused) {
+        (void)refuseScenarioCapture(temporal_sequence->refusal());
+        return true;
+    }
+    scenario_config.temporal_presentation_delta = temporal_step->presentation_delta_seconds;
+    // Canonical 30 Hz plans present in exact 1/60-second steps. Repeated
+    // readiness/settling/capture renders keep the same shader clock.
+    auto& presentation_frames = scenario_config.temporal_audit->presentation_frames;
+    if (scenario_config.temporal_presentation_delta > 0) {
+        ++presentation_frames;
+    }
+    presentation_clock().set_capture_tick(presentation_frames, 60);
+    return true;
+}
 
 Rendering::CaptureManifestInput ScenarioRunnerImpl::scenarioCaptureManifest() const {
     auto input = renderPipeline.diagnostic_capture_manifest();
@@ -279,6 +514,12 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
 void ScenarioRunnerImpl::onPreRenderCapturePins() {
     if (scenario_config.temporal_audit && scenario_config.temporal_audit->step) {
         const auto& command = *scenario_config.temporal_audit->step;
+        RuntimeWorldSweepBackend backend{*this};
+        WorldVisualTemporalTransport transport(backend);
+        if (!transport.prepare_render(command)) {
+            (void)refuseScenarioCapture("temporal_weather_unavailable");
+            return;
+        }
         const Luminumbra::world::WorldClock clock(0, gameSession->GetRenderCalendar());
         const double solar = clock.solar_phase_from_day_phase(command.day_phase);
         const float tod = command.control == Rendering::TemporalAuditControl::Noon ? 0.0f
@@ -383,56 +624,17 @@ void ScenarioRunnerImpl::onPostRenderCapture(float deltaTime) {
     if (scenario_config.temporal_audit) {
         auto& temporal_sequence = scenario_config.temporal_audit->sequence;
         auto& temporal_step = scenario_config.temporal_audit->step;
-        const auto& temporal_directory = scenario_config.temporal_audit->directory;
         if (!temporal_sequence || !temporal_step || scenario_failed) {
             return;
         }
-        using Action = Rendering::TemporalSequenceAction;
-        const auto& command = *temporal_step;
-        const auto tick = gameSession->GetSimulationTickCount();
-        const auto& uploads = renderPipeline.get_last_mesh_upload_stats();
-        const bool ready = renderPipeline.diagnostic_capture_refusal().empty() &&
-                           uploads.terrain_uploads_deferred == 0 &&
-                           uploads.water_uploads_deferred == 0 &&
-                           scenario_config.temporal_presentation_ready;
-        if (command.action == Action::Capture) {
-            int width = 0;
-            int height = 0;
-            glfwGetFramebufferSize(window, &width, &height);
-            const auto name = "frame-" + std::to_string(command.frame_index) + ".ppm";
-            const auto path = temporal_directory / name;
-            if (!ready || !writeScenarioBackbuffer(path, width, height)) {
-                temporal_sequence->refuse();
-            } else {
-                // Exactly the completed-frame A4 bundle, including its own capture
-                // manifest. No directory scan, and no unacknowledged sibling output.
-                std::vector<std::string> names{
-                    name, Rendering::CaptureManifestPath(path).filename().string()};
-                for (const auto* suffix : {".albedo.pfm",
-                                           ".normal.pfm",
-                                           ".depth.pfm",
-                                           ".material.pfm",
-                                           ".ids.bin",
-                                           ".draws.json",
-                                           ".diagnostics.json"}) {
-                    names.push_back(name + suffix);
-                }
-                // Probe output is optional and was range-checked before startup writes.
-                const auto& probe = scenario_config.temporal_audit->diagnostics.probe;
-                if (probe) {
-                    names.push_back(name + ".probe-" + std::to_string((*probe)[0]) + "-" +
-                                    std::to_string((*probe)[1]) + ".json");
-                }
-                (void)temporal_sequence->acknowledgeCaptureFiles(tick, temporal_directory, names);
-            }
-        } else if (command.action == Action::Publish) {
-            if (temporal_sequence->publishCompletionManifest(temporal_directory /
-                                                             "sequence.json")) {
-                scenario_timed_run_complete = true;
-                glfwSetWindowShouldClose(window, true);
-            }
-        } else {
-            temporal_sequence->acknowledge(tick, true, ready);
+        RuntimeWorldSweepBackend backend{*this};
+        const auto refusal = RunWorldVisualTemporalSweep(
+            *scenario_config.temporal_audit, backend, g_app.capture.feature_policy);
+        if (!refusal.empty()) {
+            LUMINUMBRA_CORE_ERROR("Temporal sweep refused: {}", refusal);
+        } else if (temporal_sequence->complete()) {
+            scenario_timed_run_complete = true;
+            glfwSetWindowShouldClose(window, true);
         }
         temporal_step.reset();
         if (!temporal_sequence->refusal().empty()) {

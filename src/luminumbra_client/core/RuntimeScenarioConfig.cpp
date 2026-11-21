@@ -335,6 +335,9 @@ ParseRuntimeScenarioConfig(int argc, char* argv[], const std::filesystem::path& 
     RuntimeScenarioConfig config;
     config.temporal_audit = ParseTemporalAuditRuntimeOptions(argc, argv);
     config.capture_feature_profile = ParseCaptureFeatureProfile(argc, argv);
+    if (config.temporal_audit) {
+        config.temporal_audit_plan = config.temporal_audit->plan;
+    }
     ParseSurfaceRadiusOptions(
         argc, argv, config.horizon_radius, config.collision_radius, config.benchmark_stream_radius);
     config.scenario = ResolveRuntimeScenario(argc, argv);
@@ -643,7 +646,8 @@ std::optional<RuntimeTemporalAudit> ParseTemporalAuditRuntimeOptions(int argc, c
     // temporal run owns one fresh seed-424242 default world and one fixed view.
     for (int index = 1; index < argc; ++index) {
         const std::string_view argument(argv[index]);
-        if (argument.starts_with("--timelapse-") || argument.starts_with("--render-benchmark-")) {
+        if (argument.starts_with("--timelapse-") || argument.starts_with("--render-benchmark-") ||
+            argument.starts_with("--runtime-boot") || argument.starts_with("--render-parity-")) {
             throw std::invalid_argument("temporal execution refuses other capture controls");
         }
     }
@@ -736,19 +740,20 @@ Systems::WeatherSchedule BuildTemporalAuditWeatherSchedule(const RuntimeTemporal
         request.strike_tick >= 2700) {
         throw std::invalid_argument("temporal weather requires an admitted canonical weather plan");
     }
-    using Category = Systems::WeatherCategory;
-    return {.phases =
-                {{.start_tick = 0, .category = Category::Clear, .precipitation = 0, .storm = 0},
-                 {.start_tick = 600, .category = Category::Clear, .precipitation = 0, .storm = 0},
-                 {.start_tick = 1500,
-                  .category = Category::Rain,
-                  .precipitation = 65535,
-                  .storm = 65535},
-                 {.start_tick = 2700,
-                  .category = Category::Rain,
-                  .precipitation = 65535,
-                  .storm = 65535},
-                 {.start_tick = 3600, .category = Category::Clear, .precipitation = 0, .storm = 0}},
-            .strike_tick = request.strike_tick};
+    return WorldVisualSweepWeatherSchedule(audit.plan);
+}
+
+Systems::WeatherSchedule WorldVisualSweepWeatherSchedule(const Rendering::TemporalAuditPlan& plan) {
+    using Systems::WeatherCategory;
+    const auto rate = plan.request.ticks_per_second;
+    const auto start = plan.request.start_tick;
+    // Five admitted keyframes and one strike; canonical encoding, identity and
+    // persistence are owned by WeatherSchedule/GameSession, not this renderer.
+    return {.phases = {{start, WeatherCategory::Clear, 0, 0},
+                       {start + 20ULL * rate, WeatherCategory::Clear, 0, 0},
+                       {start + 50ULL * rate, WeatherCategory::Rain, 65535, 65535},
+                       {start + 90ULL * rate, WeatherCategory::Rain, 65535, 65535},
+                       {start + 120ULL * rate, WeatherCategory::Clear, 0, 0}},
+            .strike_tick = start + plan.request.strike_tick};
 }
 } // namespace Luminumbra::Client::ScenarioHarness

@@ -1569,6 +1569,9 @@ int main(int argc, char* argv[]) {
     }
     g_app.overlay.imgui_enabled = g_app.capture.feature_policy.Apply({}, scenario_config.no_ui).ui;
     g_app.scenario_active = scenario_config.active();
+    if (scenario_config.temporal_audit) {
+        scenario_config.capture_heartbeat = &MainLoopHeartbeat();
+    }
     runtime_state_recorder.capture("startup_requested", nullptr, nullptr, nullptr, 0, {});
 
     if (scenario_config.forced_crash()) {
@@ -5386,15 +5389,16 @@ int main(int argc, char* argv[]) {
 
         const bool timelapse_waiting =
             g_app.capture.timelapse_frames > 0 && !timelapse_presentation_ready;
-        const bool simulate_frame =
-            !timelapse_waiting && Measurement::frame_simulation_enabled(benchmark_v4,
-                                                                        traversal.has_value(),
-                                                                        measuring_v3,
-                                                                        g_app.hud.paused,
-                                                                        g_app.capture.timeScale);
+        const bool simulate_frame = !timelapse_waiting && !scenario_config.temporal_audit &&
+                                    Measurement::frame_simulation_enabled(benchmark_v4,
+                                                                          traversal.has_value(),
+                                                                          measuring_v3,
+                                                                          g_app.hud.paused,
+                                                                          g_app.capture.timeScale);
         // Preserve the historical frame-driven behavior outside benchmark capture.
-        const bool advance_frame_simulation =
-            !timelapse_waiting && (!g_rb_active || simulate_frame);
+        const bool advance_frame_simulation = !timelapse_waiting &&
+                                              !scenario_config.temporal_audit &&
+                                              (!g_rb_active || simulate_frame);
         switch (currentState) {
             case GameState::WORLD_LOADING: {
                 glClearColor(0.01f, 0.02f, 0.05f, 1.0f);
@@ -6115,7 +6119,7 @@ int main(int argc, char* argv[]) {
                     // overwrites it, so all capture paths keep their exact pins.
                     {
                         const std::uint64_t sim_tick = gameSession->GetSimulationTickCount();
-                        if (gameSession->ActiveRegionsEnabled()) {
+                        if (gameSession->ActiveRegionsEnabled() || scenario_config.temporal_audit) {
                             renderPipeline.set_world_clock(gameSession->GetWorldClock());
                         } else {
                             renderPipeline.set_render_calendar(gameSession->GetRenderCalendar());
