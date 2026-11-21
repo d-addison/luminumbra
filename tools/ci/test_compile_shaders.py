@@ -38,7 +38,7 @@ class ShaderInventoryTests(unittest.TestCase):
         sources = shaders.inventory(ROOT / "res/shaders")
         self.assertEqual(len(sources), 63)
         units = shaders.compile_units(sources)
-        self.assertEqual(len(units), 73)
+        self.assertEqual(len(units), 74)
         self.assertEqual({unit.name for unit in units}, sources.keys() - shaders.INCLUDES - shaders.EXCLUDED)
         self.assertEqual({unit.name for unit in units if unit.defines},
                          shaders.LADDER_FILES | shaders.DIAGNOSTIC_FILES)
@@ -343,7 +343,7 @@ class ShaderLinkTests(unittest.TestCase):
                          {unit.name for unit in units if unit.stage == "comp"})
         # Three Ladder programs, both diagnostic G-buffer variants of those three
         # programs, and one diagnostic variant of each forward/material program.
-        self.assertEqual(sum(any(unit.defines for unit in program.units) for program in programs), 18)
+        self.assertEqual(sum(any(unit.defines for unit in program.units) for program in programs), 19)
         # The particle billboard program and its diagnostic variant.
         self.assertEqual(sum(any(unit.stage == "geom" for unit in program.units) for program in programs), 2)
         self.assertEqual(sum(program.units[0].stage == "comp" for program in programs), 5)
