@@ -758,9 +758,24 @@ TEST_P(ReplaySeedCompatibility, RecordedSeedReproducesTheStartingWorld) {
     if (!recording)
         return;
     const auto& header = recording->header;
-    EXPECT_EQ(header.version, Replay::kLrec1Version);
+    EXPECT_EQ(header.version,
+              new_recording != 0 ? Replay::kLrec1BootVersion : Replay::kLrec1Version);
+    EXPECT_EQ(header.authority_boot.has_value(), new_recording != 0);
     EXPECT_EQ(header.seed_string, options.seed);
     if (new_recording != 0) {
+        ASSERT_TRUE(header.authority_boot.has_value());
+        if (!header.authority_boot.has_value())
+            return;
+        EXPECT_EQ(header.authority_boot->system_config_identity, header.system_config_identity);
+        EXPECT_EQ(header.authority_boot->resolved_world_seed,
+                  static_cast<std::uint32_t>(header.seed));
+        std::vector<std::uint8_t> encoded;
+        std::string error;
+        ASSERT_TRUE(world::EncodeAuthorityBootDescriptor(*header.authority_boot, encoded, error))
+            << error;
+        world::AuthorityBootDescriptor decoded;
+        ASSERT_TRUE(world::DecodeAuthorityBootDescriptor(encoded, decoded, error)) << error;
+        EXPECT_EQ(decoded, *header.authority_boot);
         EXPECT_EQ(header.seed >> 32, 1u);
         expected_seed = static_cast<std::uint32_t>(header.seed);
         if (!options.seed.empty()) {
@@ -775,8 +790,11 @@ TEST_P(ReplaySeedCompatibility, RecordedSeedReproducesTheStartingWorld) {
         EXPECT_TRUE(config->seed.empty());
     } else {
         EXPECT_EQ(world::ResolveWorldSeed(config->seed, 1), expected_seed);
-        Server::ServerWorldRunner playback(*config);
+        Server::ServerWorldRunner playback(*config, {.owner_continuation = new_recording != 0});
         ASSERT_TRUE(playback.Boot()) << playback.GetBootError();
+        if (new_recording != 0) {
+            EXPECT_EQ(playback.CaptureReplayHeader().authority_boot, header.authority_boot);
+        }
         EXPECT_EQ(static_cast<std::uint32_t>(playback.Session()->GetWorldSystem()->get_seed()),
                   expected_seed);
         EXPECT_EQ(playback.ComputeWorldHash(), header.start_world_hash);

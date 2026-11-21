@@ -3619,8 +3619,11 @@ class DeferredRasterDiagnosticWiring(unittest.TestCase):
         selector = block(self.lighting, "float CalculateShadow(")
         for statement in ("diagnosticCascade = vec3(float(cascadeIndex), projCoords.xy);",
                           "vec2 shadowSize = vec2(textureSize(u_shadowCascades, 0).xy);",
-                          "length(dFdx(projCoords.xy) * shadowSize)",
-                          "length(dFdy(projCoords.xy) * shadowSize)",
+                          "u_lightSpaceMatrices[cascadeIndex] * vec4(fragPos + diagnosticDpdx, 1.0)",
+                          "u_lightSpaceMatrices[cascadeIndex] * vec4(fragPos + diagnosticDpdy, 1.0)",
+                          "vec2 uvDx = (lightDx.xy / lightDx.w) * 0.5 + 0.5 - projCoords.xy;",
+                          "vec2 uvDy = (lightDy.xy / lightDy.w) * 0.5 + 0.5 - projCoords.xy;",
+                          "max(length(uvDx * shadowSize), length(uvDy * shadowSize))",
                           "diagnosticShadowUv = vec3(projCoords.xy, log2(max(footprint, 1e-8)));",
                           "diagnosticCascade = vec3(insideAny ? -1.0 : -3.0);"):
             self.assertIn(statement, selector)
@@ -3632,6 +3635,30 @@ class DeferredRasterDiagnosticWiring(unittest.TestCase):
         self.assertIn("u_contributionMode == 35) diagnosticValue = diagnosticShadowUv", self.lighting)
         for sentinel in (-1, -2, -3):
             self.assertIn(f"all(equal(contribution.rgb, vec3({sentinel}.0)))", self.overlay)
+
+    def test_shadow_footprint_derivatives_precede_all_main_branches_and_keep_sun_observation(self):
+        main = block(self.lighting, "void main()")
+        prefix = main[:main.index("// Alpha zero")]
+        self.assertNotRegex(re.sub(r"//[^\n]*", "", prefix),
+                            r"\b(?:if|for|while|return|discard)\b|\?")
+        for axis in ("x", "y"):
+            derivative = f"diagnosticDpd{axis} = dFd{axis}(FragPos);"
+            self.assertEqual(self.lighting.count(f"dFd{axis}(FragPos)"), 1)
+            self.assertIn(derivative, prefix)
+            self.assertNotIn(f"dFd{axis}(", block(self.lighting, "float CalculateShadow("))
+        self.assertIn("farWorldPosition(gPosition, u_sceneDepth, TexCoords, diagnosticViewPos);", prefix)
+        self.assertIn("vec3 FragPos = vec3(u_inverseView * vec4(diagnosticViewPos, 1.0));", prefix)
+        globals = self.lighting[:self.lighting.index("float CalculateShadow(")]
+        for declaration in ("vec3 diagnosticDpdx;", "vec3 diagnosticDpdy;",
+                            "bool diagnosticShadowObserved = false;"):
+            self.assertIn(declaration, globals)
+        selector = block(self.lighting, "float CalculateShadow(")
+        observation = block(selector, "if (!diagnosticShadowObserved)")
+        self.assertIn("diagnosticShadowObserved = true;", observation)
+        self.assertIn("diagnosticCascade = vec3(float(cascadeIndex), projCoords.xy);", observation)
+        self.assertIn("diagnosticShadowUv = vec3(projCoords.xy, log2(max(footprint, 1e-8)));", observation)
+        self.assertLess(main.index("CalculateShadow(FragPos, Normal, L_sun"),
+                        main.index("CalculateShadow(FragPos, Normal, L_moon"))
 
     def test_wireframe_depth_policy_and_full_restoration_are_wired(self):
         attach = block(self.debug, "void attach(")
@@ -4012,6 +4039,26 @@ class TerrainCaptureResourceWiring(unittest.TestCase):
         self.capture = block(self.source, "bool RenderPipeline::capture_terrain_coverage(")
         self.replay = block(self.source, "bool CaptureFog(")
 
+    def test_manifest_retains_lighting_sources_and_uploaded_uniform_snapshots(self):
+        capture = compact(self.capture)
+        records = (
+            'receipt["lighting_sources"] = std::move(sources);',
+            'receipt["lighting_uniforms"] = CaptureUniforms('
+            'm_lighting_pass ? m_lighting_pass->shader().get() : nullptr);',
+            'receipt["fog_uniforms"] = CaptureUniforms('
+            'm_aerial_pass ? m_aerial_pass->shader().get() : nullptr);',
+        )
+        for record in records:
+            with self.subTest(record=record):
+                self.assertIn(record, capture)
+                self.assertLess(capture.index(record), capture.index('receipt["complete"] = true'))
+        uniforms = block(self.source, "Json CaptureUniforms(")
+        for readback in ("glGetActiveUniform(", "glGetUniformfv(", "glGetUniformiv("):
+            self.assertIn(readback, uniforms)
+        refusal = block(self.capture, 'if (receipt["lighting_uniforms"].contains("status")')
+        self.assertIn('receipt["fog_uniforms"].contains("status")', capture)
+        self.assertEqual(compact(refusal), "return false;")
+
     def test_allocated_frame_owners_supply_nonzero_recorded_source_handles(self):
         # Lighting builds only its own inputs. Capture must fill these from the
         # same owners used by the production scene and aerial consumers.
@@ -4364,6 +4411,55 @@ class DiagnosticContributorWiring(unittest.TestCase):
 
 
 class DiagnosticScenarioCaptureWiring(unittest.TestCase):
+    def test_first_refusal_stops_sibling_writers_and_preserves_the_reason(self):
+        capture = read(CLIENT / "core/ScenarioRunnerCapture.cpp")
+        refuse = block(capture, "bool ScenarioRunnerImpl::refuseScenarioCapture(")
+        self.assertIn("if (!scenario_failed)", refuse)
+        latch = block(refuse, "if (!scenario_failed)")
+        self.assertIn('scenario_failure_reason = "capture_diagnostics_" + std::string(reason);', latch)
+        self.assertEqual(refuse.count("scenario_failure_reason ="), 1)
+        ready = block(capture, "bool ScenarioRunnerImpl::scenarioCaptureReady(")
+        self.assertIn("if (scenario_failed) { return false; }", compact(ready))
+        self.assertLess(ready.index("if (scenario_failed)"),
+                        ready.index("renderPipeline.diagnostic_capture_ready()"))
+
+    def test_mutating_readiness_precedes_frame_and_recorder_updates(self):
+        capture = read(CLIENT / "core/ScenarioRunnerCapture.cpp")
+        ready = block(capture, "bool ScenarioRunnerImpl::scenarioCaptureReady(")
+        self.assertIn("if (!renderPipeline.diagnostic_capture_ready())", ready)
+        refusal = block(ready, "if (!renderPipeline.diagnostic_capture_ready())")
+        self.assertIn("return refuseScenarioCapture(renderPipeline.diagnostic_capture_refusal());", refusal)
+        post = block(capture, "void ScenarioRunnerImpl::onPostRenderCapture(")
+        preflight = block(post, "if (renderPipeline.capture_diagnostics_enabled())")
+        self.assertIn("if (!scenarioCaptureReady(width, height)) { return; }", compact(preflight))
+        for update in ("++scenario_frame_count", "lod_ground_frame_recorder.record_frame(",
+                       "lod_boundary_transition_recorder.record_frame(", "runtime_state_recorder.capture("):
+            self.assertLess(post.index(preflight), post.index(update))
+
+    def test_backbuffer_completion_uses_the_checked_pixel_writer(self):
+        harness = read(CLIENT / "core/RuntimeScenarioHarness.cpp")
+        writer = block(harness, "bool WriteBackbufferPpm(")
+        self.assertIn("return WritePixelBufferPpm(path, width, height, pixels);", writer)
+        self.assertNotIn("std::ofstream", writer)
+        self.assertLess(writer.index("CapturePixelBytes(width, height, 3, bytes)"),
+                        writer.index("std::vector<unsigned char> pixels(bytes)"))
+        pixels = read(CLIENT / "rendering/PixelIo.cpp")
+        checked = block(pixels, "bool WritePixelBufferPpm(")
+        self.assertIn("const bool written = WritePixelBufferPpmStream(output, width, height, pixels);", checked)
+        self.assertIn("const bool closed = CloseCaptureFile(output);", checked)
+        self.assertIn("if (!written || !closed) {", checked)
+
+    def test_scan_and_benchmark_conflict_without_a_scenario_before_paths(self):
+        config = block(read(CLIENT / "core/RuntimeScenarioConfig.cpp"),
+                       "RuntimePathOptions ParseRuntimePathOptions(")
+        admission = block(config, "if (diagnostics.enabled)")
+        self.assertIn('const bool frame_scan = HasCommandLineOption(argc, argv, "--frame-scan");', admission)
+        self.assertIn('const bool render_benchmark = HasCommandLineOption(argc, argv, "--render-benchmark");', admission)
+        self.assertIn('if ((!scenario.empty() && (frame_scan || render_benchmark)) || '
+                      '(frame_scan && render_benchmark)) { throw std::invalid_argument('
+                      '"capture diagnostics refuse multiple capture drivers"); }', compact(admission))
+        self.assertLess(config.index(admission), config.index("std::filesystem::create_directories("))
+
     def test_every_scenario_writer_uses_the_completed_frame_adapter(self):
         capture = read(CLIENT / "core/ScenarioRunnerCapture.cpp")
         families = (("captureWindowModeStress", 1), ("captureLodSeamArrival", 1),

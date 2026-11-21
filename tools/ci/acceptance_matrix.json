@@ -74,6 +74,28 @@
       "requirements": []
     },
     {
+      "id": "render.terrain-coverage-evidence",
+      "source": "docs/development/visual-diagnostics.md#implementation-inventory",
+      "statement": "Terrain coverage capture schema v1 retains lighting source planes and lighting/fog uniform snapshots. The expanded synthetic capture regression checks all nine available source kinds, every layer file header and payload size, explicit unavailable integrated volume records with volumetrics disabled, and uploaded lighting/fog uniform values. Source-contract regressions guard the three manifest records before completion. Native execution of the expanded checks remains pending.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "TerrainCoverageCaptureGl.SyntheticPlanesAndCallerStateSurviveReadback",
+          "planned": "Run the expanded lighting/fog capture assertions under native GL; owner: maintainers"
+        },
+        {
+          "kind": "script",
+          "ref": "test/rendering/test_frame_attribution_wiring.py"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development/visual-diagnostics.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
       "id": "render.capture-feature-capabilities",
       "source": "docs/development/visual-diagnostics.md#e3-all-features-profile-and-non-vacuous-evidence",
       "statement": "GL-free capture feature resolution names 31 producer/settings features, records requested/effective state and forced, suppressed or unavailable reasons, and serializes a versioned capability manifest with resolved asset/config identities or unavailable reasons. Strict runtime all_features selection is validated by both launch parsers before save-root creation. Unimplemented adapters default to unsupported across all eight capture modes; disabled requested settings refuse support and missing identities prevent aggregate support. Explicit final forced/suppressed observations take precedence over baseline producer controls; resolved isolation masks and sky backdrops still suppress forced enabled settings while preserving explicit suppression reasons. Registered regressions cover selections, catalog completeness, explicit subsets, every missing or suppressed feature, actual system and graphics gates, terrain cave/structure and static-plant isolation, skinned creature isolation, vegetation requiring both terrain and foliage consumers, missing-adapter and explicit-subset isolation refusals, independent ungated stages, tuning-default semantics, malformed metadata/enums, exact bounds, snapshot ownership and stream write/flush failures. Native execution, app/scenario producer policy, admission/publication wiring and per-frame presence evidence remain pending; selection and capability do not certify an all-features capture.",
@@ -98,7 +120,7 @@
     {
       "id": "render.temporal-audit-plan",
       "source": "docs/development/visual-diagnostics.md#e1-fixed-camera-time-lapse-audit-runs",
-      "statement": "GL-free temporal admission plans inclusive day/night, 120-second clear-storm-clear and three-day schedules using exact simulation ticks, ceiling sparse cadence, rational 60 Hz bursts, deduplicated overlaps, explicit final-tick steady/night holds and bounded warmup/readiness/settling. Plans cap recorded frames at 4096 and simulation advancement at 10 million ticks, bound presentation work, and refuse invalid calendars, rates, spans, clock bounds, budgets and malformed or duplicate CLI options with reasons. The O(1) advancement query refuses invalid indices and clock faults. Both shipping startup parsers refuse temporal execution before save-root or world/output creation; planning alone cannot advertise runtime or all-features support. Registered regressions cover acceptance, tick schedules, rational cadence, limits and refusal paths; native execution, weather input, site/sequence driving, capability checks, run/output-byte budgets and assembly remain pending.",
+      "statement": "GL-free admission plans inclusive day/night, 120-second weather and three-day schedules with exact ticks, rational bursts and final-tick holds under 4096-frame and 10-million-tick ceilings. The sequence execution protocol re-admits immutable plans and checks aggregate transport-provided frame/manifest byte reservations against a caller-lowered 512 GiB ceiling before executable steps. It requests and verifies individual simulation ticks, bounds frozen warmup/readiness/settling and presentation substeps, derives calendar phase from ticks and carries explicit lighting controls. Sticky refusal and a final publication acknowledgement prevent partial captures from becoming complete in the protocol. Registered regressions cover schedules, readiness, phase, budgets, clock/transport faults and real creature-brain progression matching ordinary fixed ticking. Both shipping startup parsers still refuse temporal execution before output. Fixed-site app/simulation/A4 transport wiring, enforceable transport byte bounds, weather input, capability checks, existing-frontier native capture and assembly remain pending; no temporal or all-features runtime support is claimed.",
       "status": "partial",
       "evidence": [
         {
@@ -107,8 +129,12 @@
         },
         {
           "kind": "ctest",
-          "ref": "TemporalAuditSequence.*",
-          "planned": "Add weather and site/sequence execution regressions before runtime support; owner: maintainers"
+          "ref": "TemporalAuditSequence.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "TemporalAuditSite.*",
+          "planned": "Integrate and validate fixed-site simulation and completed-frame transport before native temporal capture; owner: maintainers"
         },
         {
           "kind": "doc",
