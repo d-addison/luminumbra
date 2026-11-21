@@ -54,6 +54,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "core/Profiler.h"
 #include "core/RuntimeScenarioConfig.h"
 #include "core/ScenarioRunner.h"
+#include "core/StrictNumeric.h"
 #include "core/TimelapseVista.h"
 #include "debug/DebugCamera.h" // deterministic feature locator (--debug-goto cave|doline)
 #include "debug/DeveloperConsole.h"
@@ -1745,12 +1746,18 @@ int main(int argc, char* argv[]) {
     g_app.overlay.auto_exposure_metered = HasCommandLineFlag(argc, argv, "--auto-exposure-metered");
     //  rendering (,  ): opt-in froxel volumetrics tier.
     const auto volumetric_option = GetCommandLineOption(argc, argv, "--volumetric-quality", "");
-    const std::optional<int> volumetric_override =
-        volumetric_option.empty() ? std::nullopt : std::optional(std::stoi(volumetric_option));
+    std::optional<int> volumetric_override;
     g_app.capture.profile_fly_seconds = static_cast<double>(GetCommandLineIntOption(
         argc, argv, "--profile-fly", 0)); // runtime telemetry: constant-speed eye-level moving
                                           // profiler (normal-play, self-exits)
     try {
+        if (!volumetric_option.empty()) {
+            int quality = 0;
+            if (!Luminumbra::Core::ParseNumber(volumetric_option, quality))
+                throw std::invalid_argument("Invalid integer value for --volumetric-quality: " +
+                                            volumetric_option);
+            volumetric_override = quality;
+        }
         g_app.capture.render_benchmark_frames = Measurement::benchmark_frame_count(argc, argv);
     } catch (const std::invalid_argument& error) {
         LUMINUMBRA_CORE_ERROR("{}", error.what());
@@ -1813,15 +1820,11 @@ int main(int argc, char* argv[]) {
         }
         const std::string cy = GetCommandLineOption(argc, argv, "--cam-yaw", "");
         if (!cy.empty()) {
-            try {
-                g_app.capture.fixed_cam_yaw = std::stof(cy);
-            } catch (...) {}
+            Luminumbra::Core::ParseNumber(cy, g_app.capture.fixed_cam_yaw);
         }
         const std::string cpi = GetCommandLineOption(argc, argv, "--cam-pitch", "");
         if (!cpi.empty()) {
-            try {
-                g_app.capture.fixed_cam_pitch = std::stof(cpi);
-            } catch (...) {}
+            Luminumbra::Core::ParseNumber(cpi, g_app.capture.fixed_cam_pitch);
         }
     }
     // --scene-config <json>: compose a full scene to match a reference, then capture.
@@ -1949,7 +1952,8 @@ int main(int argc, char* argv[]) {
     // DIAGNOSTIC-only settle override (see g_app.capture.frame_scan_settle_target): let a
     // fully-loaded capture wait past the gate's 90-frame default. Gates never set this env.
     if (const auto settle_env = Luminumbra::Core::ReadEnvironment("LUMIN_FRAME_SCAN_SETTLE")) {
-        const int v = std::atoi(settle_env->c_str());
+        int v = 0;
+        Luminumbra::Core::ParseNumber(*settle_env, v);
         if (v > 0)
             g_app.capture.frame_scan_settle_target = v;
     }
@@ -2074,15 +2078,11 @@ int main(int argc, char* argv[]) {
     {
         const std::string ds = GetCommandLineOption(argc, argv, "--timelapse-daystep", "");
         if (!ds.empty()) {
-            try {
-                g_app.capture.timelapse_daystep = std::stof(ds);
-            } catch (...) {}
+            Luminumbra::Core::ParseNumber(ds, g_app.capture.timelapse_daystep);
         }
         const std::string t0 = GetCommandLineOption(argc, argv, "--timelapse-tod", "");
         if (!t0.empty()) {
-            try {
-                g_app.capture.timelapse_tod = std::stof(t0);
-            } catch (...) {}
+            Luminumbra::Core::ParseNumber(t0, g_app.capture.timelapse_tod);
         }
         const std::string td = GetCommandLineOption(argc, argv, "--timelapse-dir", "");
         g_app.capture.timelapse_dir = !td.empty()
@@ -2486,8 +2486,11 @@ int main(int argc, char* argv[]) {
     renderPipeline.set_sky_lut_gpu_enabled(
         g_systemConfig.enabled(luminumbra::core::SysKey::RenderSkyLutGpu));
     std::optional<float> environment_render_scale;
-    if (const auto value = Luminumbra::Core::ReadEnvironment("LUMIN_RENDER_SCALE"))
-        environment_render_scale = std::strtof(value->c_str(), nullptr);
+    if (const auto value = Luminumbra::Core::ReadEnvironment("LUMIN_RENDER_SCALE")) {
+        float scale = 0.0f; // Zero keeps malformed input from overriding the graphics settings.
+        Luminumbra::Core::ParseNumber(*value, scale);
+        environment_render_scale = scale;
+    }
     const auto graphics_session_overrides = Luminumbra::Client::GraphicsSessionOverrides(
         perf_profile, environment_render_scale, volumetric_override);
     Luminumbra::Client::GraphicsSettingsState graphics_state(
@@ -2562,11 +2565,13 @@ int main(int argc, char* argv[]) {
     // LUMIN_SSAO_QUALITY=0 to fall back to the legacy full-res paths for A/B.
     int cloud_quality = resolved_graphics.values.cloud_quality;
     if (const auto cq = Luminumbra::Core::ReadEnvironment("LUMIN_CLOUD_QUALITY")) {
-        cloud_quality = std::atoi(cq->c_str());
+        cloud_quality = 0; // Keep the existing malformed-value fallback.
+        Luminumbra::Core::ParseNumber(*cq, cloud_quality);
     }
     int ssao_quality = resolved_graphics.values.ao_quality;
     if (const auto sq = Luminumbra::Core::ReadEnvironment("LUMIN_SSAO_QUALITY")) {
-        ssao_quality = std::atoi(sq->c_str());
+        ssao_quality = 0; // Keep the existing malformed-value fallback.
+        Luminumbra::Core::ParseNumber(*sq, ssao_quality);
     }
     const std::string game_asset_startup_error = VerifyGameAssets(root_dir);
     if (!game_asset_startup_error.empty())
