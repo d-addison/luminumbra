@@ -834,6 +834,23 @@ class UploadBudgetWiring(unittest.TestCase):
                          "HasPublishedFarLodSdf", "published_sdfs == captured_resident_sdfs"):
             self.assertIn(retained, validation)
 
+    def test_ladder_preparation_refusal_advances_legacy_in_the_same_frame(self):
+        selection = read(RENDERING / "FarWorldSelection.h")
+        dispatch = body(selection, "void AdvanceSelectedFarWorld(")
+        fallback = dispatch[dispatch.index("ladder();") + len("ladder();"):]
+        self.assertIn("selection.advance", fallback)
+        self.assertIn("selection.effective == FarWorldMode::Legacy", fallback)
+        self.assertIn("legacy();", fallback)
+        frame = body(self.pipeline, "void RenderPipeline::prepare_frame(")
+        advance = frame[frame.index("AdvanceSelectedFarWorld("):]
+        self.assertLess(advance.index("m_far_world->PrepareFrame("),
+                        advance.index("select_frame_far_world("))
+        tests = read(ROOT / "test/rendering/FarWorldLegacyIsolation_test.cpp")
+        for case in ("PreparationRefusalAdvancesAndSubmitsLegacyInTheSameFrame",
+                     "PreparationRefusalHonorsSuppressionAndDoesNotRetry",
+                     "SuccessfulPreparationDoesNotAdvanceLegacy"):
+            self.assertIn(case, tests)
+
     def test_impostor_collection_requires_submitted_resident_terrain_at_each_tree(self):
         gbuffer = read(RENDERING / "passes/GBufferPass.cpp")
         collect = body(gbuffer, "for (const CachedStaticProp& cp : m_staticPropCache)")
