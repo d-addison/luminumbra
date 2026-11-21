@@ -118,6 +118,15 @@ profile with non-vacuous presence evidence. These are planned capabilities;
 current still gates and `tools/timelapse.py` do not establish this coverage or
 visual approval.
 
+The shared feature policy has GL-free setting-level tests in the registered
+`capture_feature_profile_test` target, including time-lapse, scan, general scenario,
+TOD/weather and both hidden-window leg labels. Complete supported snapshots restore
+ordinary-play ambient animals, weather, particles and cave-flourish settings while
+preserving UI restrictions and deterministic fixtures. Shipping adapters and their
+resolved identities remain unsupported; selecting `--capture-feature-profile=all_features`
+currently retains legacy capture behavior. These tests do not prove runtime entry-point
+execution, visible features, temporal continuity or all-features capture success.
+
 For offline assembly of an E1c file-transport sequence, select its manifest explicitly:
 
 ```sh
