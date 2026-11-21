@@ -406,8 +406,12 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
         geometry_pass_static_meshes(ctx, input, registry, camera, fp, stats);
         if (authored) {
             DebugViewPass::unsupported_surface();
-            const auto authored_stats =
-                m_authored_pass->Render(*input.authored_view, input.authored_draws, m_gbuffer);
+            // Established above; mesh subpasses only change bindings/culling.
+            const StaticDrawPass::CallerState caller{
+                .depth = {.function = GL_GREATER, .write_mask = GL_TRUE, .test_enabled = GL_TRUE},
+                .draw_framebuffer = m_gbuffer.fbo_id};
+            const auto authored_stats = m_authored_pass->Render(
+                *input.authored_view, input.authored_draws, m_gbuffer, false, &caller);
             stats.authored_draws += authored_stats.draws;
             stats.authored_indices += authored_stats.indices;
         }
