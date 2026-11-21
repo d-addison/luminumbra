@@ -447,6 +447,12 @@ target_include_directories(filesystem_path_test PRIVATE ../src ../src/luminumbra
 target_compile_definitions(filesystem_path_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
 target_link_libraries(filesystem_path_test PRIVATE gtest_main)
 
+# Content overlays use only read-only filesystem operations.
+add_executable(content_vfs_test common/ContentVfs_test.cpp)
+target_include_directories(content_vfs_test PRIVATE ../src)
+target_link_libraries(content_vfs_test PRIVATE gtest_main luminumbra_common)
+luminumbra_configure_first_party_target(content_vfs_test)
+
 # Temporary-path reservation contracts need only the filesystem and GoogleTest.
 add_executable(unique_temp_path_test support/UniqueTempPath_test.cpp)
 target_link_libraries(unique_temp_path_test PRIVATE gtest_main)
@@ -2224,6 +2230,7 @@ add_test(NAME DiagnosticChecksPython COMMAND "${Python3_EXECUTABLE}" -I -B
 set_tests_properties(DiagnosticChecksPython PROPERTIES LABELS "tools" TIMEOUT 60)
 
 set(LUMINUMBRA_GTEST_TARGETS
+    content_vfs_test
     upload_budget_test
     jolt_startup_test
     frame_attribution_test
