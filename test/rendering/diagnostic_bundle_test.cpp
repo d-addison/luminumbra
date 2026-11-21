@@ -469,6 +469,48 @@ TEST_F(DiagnosticBundleTest, RuntimeAdmissionNamesConflictingCaptureDriversBefor
     }
 }
 
+TEST_F(DiagnosticBundleTest, RuntimeAdmissionRefusesScanAndBenchmarkWithoutScenarioBeforeOutput) {
+    const ScopedEnv sweep("LUMINUMBRA_VISUAL_SWEEP", nullptr);
+    for (const bool environment : {false, true}) {
+        const ScopedEnv diagnostics("LUMIN_CAPTURE_DIAGNOSTICS", environment ? "1" : nullptr);
+        for (const bool attached : {false, true}) {
+            for (const bool empty_values : {false, true}) {
+                SCOPED_TRACE(testing::Message()
+                             << environment << ':' << attached << ':' << empty_values);
+                std::vector<std::string> text{
+                    "client", "--save-root", (directory / "save").string()};
+                if (!environment) {
+                    text.emplace_back("--capture-diagnostics");
+                }
+                if (attached) {
+                    text.emplace_back(empty_values ? "--frame-scan=" : "--frame-scan=view.json");
+                    text.emplace_back(empty_values ? "--render-benchmark="
+                                                   : "--render-benchmark=2");
+                } else {
+                    text.insert(text.end(),
+                                {"--frame-scan",
+                                 empty_values ? "" : "view.json",
+                                 "--render-benchmark",
+                                 empty_values ? "" : "2"});
+                }
+                std::vector<char*> arguments;
+                for (auto& argument : text) {
+                    arguments.push_back(argument.data());
+                }
+                try {
+                    (void)Harness::ParseRuntimePathOptions(static_cast<int>(arguments.size()),
+                                                           arguments.data());
+                    FAIL() << "conflicting capture drivers admitted";
+                } catch (const std::invalid_argument& error) {
+                    EXPECT_NE(std::string(error.what()).find("multiple capture drivers"),
+                              std::string::npos);
+                }
+                EXPECT_TRUE(std::filesystem::is_empty(directory));
+            }
+        }
+    }
+}
+
 TEST(DiagnosticBundleWiring, EveryScenarioWriterUsesTheCompletedFrameAdapter) {
     const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT);
     const auto source = ReadFile(root / "src/luminumbra_client/core/ScenarioRunnerCapture.cpp");

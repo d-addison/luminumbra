@@ -4335,6 +4335,55 @@ class DiagnosticContributorWiring(unittest.TestCase):
 
 
 class DiagnosticScenarioCaptureWiring(unittest.TestCase):
+    def test_first_refusal_stops_sibling_writers_and_preserves_the_reason(self):
+        capture = read(CLIENT / "core/ScenarioRunnerCapture.cpp")
+        refuse = block(capture, "bool ScenarioRunnerImpl::refuseScenarioCapture(")
+        self.assertIn("if (!scenario_failed)", refuse)
+        latch = block(refuse, "if (!scenario_failed)")
+        self.assertIn('scenario_failure_reason = "capture_diagnostics_" + std::string(reason);', latch)
+        self.assertEqual(refuse.count("scenario_failure_reason ="), 1)
+        ready = block(capture, "bool ScenarioRunnerImpl::scenarioCaptureReady(")
+        self.assertIn("if (scenario_failed) { return false; }", compact(ready))
+        self.assertLess(ready.index("if (scenario_failed)"),
+                        ready.index("renderPipeline.diagnostic_capture_ready()"))
+
+    def test_mutating_readiness_precedes_frame_and_recorder_updates(self):
+        capture = read(CLIENT / "core/ScenarioRunnerCapture.cpp")
+        ready = block(capture, "bool ScenarioRunnerImpl::scenarioCaptureReady(")
+        self.assertIn("if (!renderPipeline.diagnostic_capture_ready())", ready)
+        refusal = block(ready, "if (!renderPipeline.diagnostic_capture_ready())")
+        self.assertIn("return refuseScenarioCapture(renderPipeline.diagnostic_capture_refusal());", refusal)
+        post = block(capture, "void ScenarioRunnerImpl::onPostRenderCapture(")
+        preflight = block(post, "if (renderPipeline.capture_diagnostics_enabled())")
+        self.assertIn("if (!scenarioCaptureReady(width, height)) { return; }", compact(preflight))
+        for update in ("++scenario_frame_count", "lod_ground_frame_recorder.record_frame(",
+                       "lod_boundary_transition_recorder.record_frame(", "runtime_state_recorder.capture("):
+            self.assertLess(post.index(preflight), post.index(update))
+
+    def test_backbuffer_completion_uses_the_checked_pixel_writer(self):
+        harness = read(CLIENT / "core/RuntimeScenarioHarness.cpp")
+        writer = block(harness, "bool WriteBackbufferPpm(")
+        self.assertIn("return WritePixelBufferPpm(path, width, height, pixels);", writer)
+        self.assertNotIn("std::ofstream", writer)
+        self.assertLess(writer.index("CapturePixelBytes(width, height, 3, bytes)"),
+                        writer.index("std::vector<unsigned char> pixels(bytes)"))
+        pixels = read(CLIENT / "rendering/PixelIo.cpp")
+        checked = block(pixels, "bool WritePixelBufferPpm(")
+        self.assertIn("const bool written = WritePixelBufferPpmStream(output, width, height, pixels);", checked)
+        self.assertIn("const bool closed = CloseCaptureFile(output);", checked)
+        self.assertIn("if (!written || !closed) {", checked)
+
+    def test_scan_and_benchmark_conflict_without_a_scenario_before_paths(self):
+        config = block(read(CLIENT / "core/RuntimeScenarioConfig.cpp"),
+                       "RuntimePathOptions ParseRuntimePathOptions(")
+        admission = block(config, "if (diagnostics.enabled)")
+        self.assertIn('const bool frame_scan = HasCommandLineOption(argc, argv, "--frame-scan");', admission)
+        self.assertIn('const bool render_benchmark = HasCommandLineOption(argc, argv, "--render-benchmark");', admission)
+        self.assertIn('if ((!scenario.empty() && (frame_scan || render_benchmark)) || '
+                      '(frame_scan && render_benchmark)) { throw std::invalid_argument('
+                      '"capture diagnostics refuse multiple capture drivers"); }', compact(admission))
+        self.assertLess(config.index(admission), config.index("std::filesystem::create_directories("))
+
     def test_every_scenario_writer_uses_the_completed_frame_adapter(self):
         capture = read(CLIENT / "core/ScenarioRunnerCapture.cpp")
         families = (("captureWindowModeStress", 1), ("captureLodSeamArrival", 1),
