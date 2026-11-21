@@ -3606,7 +3606,7 @@ class DeferredRasterDiagnosticWiring(unittest.TestCase):
         self.assertIn("return std::make_shared<Frame>(*this);", begin)
         self.assertNotIn("std::make_shared<Frame>(*this, ctx)", begin)
         self.assertEqual(begin.count("m_snapshot->targets.reset()"), 1)
-        self.assertLess(begin.index("if (!m_snapshot->targets.reset())"),
+        self.assertLess(begin.index("if (!m_snapshot->targets.reset() ||"),
                         begin.index("m_snapshot->draws.clear();"))
         self.assertIn("Identity attachment still leased", begin)
         self.assertLess(finish.index("frame->finish(ctx);"), finish.index("frame.reset();"))
@@ -4276,7 +4276,8 @@ class DiagnosticSnapshotStageWiring(unittest.TestCase):
         self.assertEqual(names[:7], ["shadow", "gbuffer", "plant_procgen", "ground_decals",
                                      "ssao", "ssao_blur", "lighting"])
         self.assertEqual(dispatch.count("DebugViewPass::end_frame("), 1)
-        self.assertIn("m_debug_view_pass && DebugViewPass::controls().enabled", dispatch)
+        self.assertIn("auto diagnostic_frame = m_debug_view_pass && (", dispatch)
+        self.assertIn("DebugViewPass::controls().enabled)", dispatch)
 
     def test_snapshot_owns_distinct_lazy_contributor_storage_and_resets_both_planes(self):
         source = read(CLIENT / "rendering/passes/DebugViewPass.cpp")
