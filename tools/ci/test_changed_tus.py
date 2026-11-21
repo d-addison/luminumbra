@@ -3669,10 +3669,27 @@ class ProcessTimeoutTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("tree_timeout_tests", ROOT / "tools/ci/test_tidy_cache.py")
         fixtures = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(fixtures)
+
+        def probe_timeout(command, directory):
+            run_process = tus._DEPS.run_process
+
+            def run_probe(probe, **kwargs):
+                # Keep the compiler-facing argv valid on every platform; the
+                # real Python process is only the timed tool implementation.
+                self.assertEqual(probe, ["clang++", "-E", "-v", "-x", "c++", "-"])
+                return run_process(command, **kwargs)
+
+            tus._compiler_header_roots.cache_clear()
+            with patch.object(tus._DEPS, "run_process", side_effect=run_probe):
+                with self.assertRaises(tus.SelectionError) as raised:
+                    COMPILER_HEADER_ROOTS(["clang++", str(directory / "unit.cpp")], directory)
+            # An unrelated refusal must never count as exercising the timeout.
+            self.assertIsInstance(raised.exception.__cause__, subprocess.TimeoutExpired)
+            raise raised.exception
+
         actions = (
             (lambda command, directory: EXECUTE(command, directory), subprocess.TimeoutExpired),
-            (lambda command, directory: tus._compiler_header_roots(
-                tuple(command), directory, tuple(os.environ.items())), tus.SelectionError),
+            (probe_timeout, tus.SelectionError),
         )
         for launch, error_type in actions:
             with self.subTest(error_type=error_type):
