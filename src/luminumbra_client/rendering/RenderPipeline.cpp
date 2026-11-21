@@ -6808,7 +6808,8 @@ std::vector<glm::mat4> RenderPipeline::get_light_space_matrices(const Camera& ca
         minZ = (minZ < 0) ? minZ * z_mult : minZ / z_mult;
         maxZ = (maxZ < 0) ? maxZ / z_mult : maxZ * z_mult;
         // ShadowPass keeps the conventional [-1,1] orthographic clip convention.
-        glm::mat4 light_proj = glm::orthoRH_NO(minX, maxX, minY, maxY, minZ, maxZ);
+        glm::mat4 light_proj = PassGl::shadow_projection_from_bounds(glm::vec3(minX, minY, minZ),
+                                                                     glm::vec3(maxX, maxY, maxZ));
         matrices.push_back(light_proj * light_view);
     }
     return matrices;
