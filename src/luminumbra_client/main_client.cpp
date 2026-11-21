@@ -1505,7 +1505,7 @@ int main(int argc, char* argv[]) {
         return 2;
     }
     if (scenario_config.temporal_audit) {
-        Luminumbra::Client::presentation_clock.set_capture_tick(0, 60);
+        Luminumbra::Client::presentation_clock().set_capture_tick(0, 60);
     }
     std::string override_error;
     if (HasCommandLineOption(argc, argv, "--systems-config")) {

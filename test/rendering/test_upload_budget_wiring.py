@@ -3017,7 +3017,7 @@ class SkyLutContinuity(unittest.TestCase):
         capture = update.split(".capture = ", 1)[1].split(", .benchmark", 1)[0]
         assert_each_mode_guard(self, capture,
                               ("m_capture_diagnostics.enabled", "m_offscreen_target_active",
-                               "Client::presentation_clock.capture_seconds().has_value()"))
+                               "Client::presentation_clock().capture_seconds().has_value()"))
         self.assertIn(".benchmark = m_benchmark_gpu_queries != nullptr", update)
         self.assertIn("m_sky_lut.refresh_sky_view(toward_sun, &refresh_ms, publication)", update)
         held_sun = body(update, "if (publication == SkyAtmosphereLut::Publication::Deferred &&")

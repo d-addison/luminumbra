@@ -6655,7 +6655,7 @@ void RenderPipeline::update_time_of_day(float deltaTime,
          .replay = m_far_world_paired || DebugViewPass::controls().frozen ||
                    DebugViewPass::replay_mode(DebugViewPass::geometry_view()),
          .capture = m_capture_diagnostics.enabled || m_offscreen_target_active ||
-                    Client::presentation_clock.capture_seconds().has_value(),
+                    Client::presentation_clock().capture_seconds().has_value(),
          .benchmark = m_benchmark_gpu_queries != nullptr,
          .headless = false,
          .test_harness = false});

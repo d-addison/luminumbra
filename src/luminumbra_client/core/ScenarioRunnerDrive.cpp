@@ -158,7 +158,7 @@ ScenarioRunner::InGameDrive ScenarioRunnerImpl::onGameStateInGame(float deltaTim
         if (scenario_config.temporal_presentation_delta > 0) {
             ++presentation_frames;
         }
-        presentation_clock.set_capture_tick(presentation_frames, 60);
+        presentation_clock().set_capture_tick(presentation_frames, 60);
         return true;
     };
     if (drive_temporal() || driveLodGround() || driveWaterVisual() || driveMaterialVisual() ||
