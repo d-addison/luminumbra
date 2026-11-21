@@ -8229,6 +8229,13 @@ TEST(RenderSmokeTest, RefusedTreeImpostorsSubmitAvailableMeshLods) {
             entities.emplace<Luminumbra::Components::TransformComponent>(entity).position = root;
             entities.emplace<Luminumbra::Components::StaticMeshComponent>(entity).meshPath = base;
         }
+        // Entry preparation resolves every fallback before frozen replay.
+        for (std::size_t frame = 0; frame < 64; ++frame) {
+            if (pass.prepare_meshes(entities, sources.directory, UploadPresentation::Settled)
+                    .pending == 0)
+                break;
+            ASSERT_LT(frame, 63u);
+        }
         // Cold far-supported ON frame goes directly to frozen OFF. No mesh-support
         // warm-up is allowed, even for empty or malformed fallback chains.
         input.far_selection =
@@ -10585,4 +10592,406 @@ TEST(RenderSmokeTest, DiagnosticRefusalPrecedesManifestAndRetractsLateCompletion
     EXPECT_EQ(ReadTextFile(capture), "completed image");
     EXPECT_FALSE(pipeline.capture_diagnostics(capture));
     EXPECT_FALSE(fs::exists(manifest));
+}
+
+namespace {
+bool WritePreparedMesh(const fs::path& path, bool skinned = false, std::uint32_t vertex_count = 3) {
+    using namespace Luminumbra::Rendering;
+    namespace anim = luminumbra::animation;
+    std::ofstream output(path, std::ios::binary);
+    const std::array<std::uint32_t, 3> indices{0, 1, 2};
+    if (skinned) {
+        anim::Lms2Header header;
+        header.vertexCount = vertex_count;
+        header.indexCount = 3;
+        header.jointCount = 1;
+        header.boundingSphere[3] = 1;
+        std::vector<anim::SkinnedVertexData> vertices(vertex_count);
+        for (auto& vertex : vertices)
+            vertex.weights[0] = 255;
+        const anim::Lms2Joint joint;
+        output.write(reinterpret_cast<const char*>(&header), sizeof(header));
+        output.write(reinterpret_cast<const char*>(vertices.data()),
+                     static_cast<std::streamsize>(vertices.size() * sizeof(vertices[0])));
+        output.write(reinterpret_cast<const char*>(indices.data()), sizeof(indices));
+        output.write(reinterpret_cast<const char*>(&joint), sizeof(joint));
+    } else {
+        constexpr std::uint32_t magic = 0x48534d4c;
+        const std::array<std::uint32_t, 3> counts{magic, vertex_count, 3};
+        const std::array<float, 4> sphere{0, 0, 0, 1};
+        const std::vector<Vertex> vertices(vertex_count, Vertex{{0, 0, 0}, {0, 1, 0}, {0, 0}});
+        output.write(reinterpret_cast<const char*>(counts.data()), sizeof(counts));
+        output.write(reinterpret_cast<const char*>(sphere.data()), sizeof(sphere));
+        output.write(reinterpret_cast<const char*>(vertices.data()),
+                     static_cast<std::streamsize>(vertices.size() * sizeof(Vertex)));
+        output.write(reinterpret_cast<const char*>(indices.data()), sizeof(indices));
+    }
+    output.close();
+    return output.good();
+}
+
+struct MeshAdoptionCalls {
+    std::size_t buffers = 0;
+    std::size_t uploads = 0;
+    std::size_t bytes = 0;
+    PFNGLGENBUFFERSPROC generate = nullptr;
+    PFNGLBUFFERDATAPROC upload = nullptr;
+    static MeshAdoptionCalls*& Active() {
+        static MeshAdoptionCalls* active = nullptr;
+        return active;
+    }
+    static void APIENTRY Generate(GLsizei count, GLuint* names) {
+        auto& calls = *Active();
+        calls.buffers += static_cast<std::size_t>(count);
+        calls.generate(count, names);
+    }
+    static void APIENTRY Upload(GLenum target, GLsizeiptr size, const void* data, GLenum usage) {
+        auto& calls = *Active();
+        ++calls.uploads;
+        calls.bytes += static_cast<std::size_t>(size);
+        calls.upload(target, size, data, usage);
+    }
+    MeshAdoptionCalls()
+        : generate(glGenBuffers)
+        , upload(glBufferData) {
+        Active() = this;
+        glad_glGenBuffers = Generate;
+        glad_glBufferData = Upload;
+    }
+    ~MeshAdoptionCalls() {
+        glad_glGenBuffers = generate;
+        glad_glBufferData = upload;
+        Active() = nullptr;
+    }
+};
+} // namespace
+
+TEST(RenderSmokeTest, MeshDrawCacheMissesDoNoFileReadsOrMeshUploads) {
+    using namespace Luminumbra::Rendering;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("mesh-cold-", ".lmesh");
+    ASSERT_TRUE(WritePreparedMesh(temporary.Path()));
+    RenderResourceRegistry resources;
+    GBufferPass pass;
+    pass.init_geometry_shader(SourceRoot());
+    pass.init_instanced_static_mesh(SourceRoot());
+    pass.init_skinned_mesh(SourceRoot());
+    pass.init_gbuffer(resources, 32, 32);
+    struct Cleanup {
+        GBufferPass& pass;
+        RenderResourceRegistry& resources;
+        ~Cleanup() {
+            pass.destroy_instanced_static_mesh();
+            pass.destroy_skinned_mesh();
+            pass.destroy_gbuffer(resources);
+        }
+    } cleanup{pass, resources};
+    Camera camera({0, 0, 0});
+    Luminumbra::Client::ScenarioHarness::IsolationConfig isolation;
+    glm::vec4 planes[6];
+    std::fill_n(planes, 6, glm::vec4(0, 0, 0, 1));
+    RenderContext ctx;
+    ctx.camera = &camera;
+    ctx.screen_width = 32;
+    ctx.screen_height = 32;
+    ctx.isolation = &isolation;
+    ctx.frustum_planes = planes;
+    GBufferPassInput input;
+    input.root_path = temporary.Path().parent_path();
+    input.submit_terrain_chunks = [](const glm::vec4(&)[6]) {
+        return TerrainSubmitStats{};
+    };
+    input.static_model_tex = [](const std::string&) -> const StaticModelTex* {
+        return nullptr;
+    };
+    entt::registry entities;
+    constexpr std::size_t count = 7;
+    for (std::size_t index = 0; index < count; ++index) {
+        const auto entity = entities.create();
+        entities.emplace<Luminumbra::Components::TransformComponent>(entity);
+        // One present cold static asset plus distinct absent static/skinned assets.
+        entities.emplace<Luminumbra::Components::StaticMeshComponent>(entity).meshPath =
+            index == 0 ? temporary.Path().filename().string()
+                       : "cold" + std::to_string(index) + ".lmesh";
+        entities.emplace<Luminumbra::Components::SkinnedMeshComponent>(entity).meshPath =
+            "skin" + std::to_string(index) + ".lmesh";
+        entities.emplace<luminumbra::animation::AnimationPlayerComponent>(entity);
+    }
+    MeshAdoptionCalls calls;
+    const auto reads = MeshLoader::file_read_count();
+    for (int frame = 0; frame < 3; ++frame)
+        EXPECT_NO_THROW((void)pass.execute(ctx, entities, input));
+    EXPECT_EQ(MeshLoader::file_read_count(), reads);
+    EXPECT_EQ(calls.buffers, 0u);
+    EXPECT_EQ(calls.uploads, 0u);
+    EXPECT_EQ(pass.cached_mesh(temporary.Path().filename().string()), nullptr);
+    bool prepared = false;
+    for (std::size_t frame = 0; frame < count * (kTreeLodCount + 1) + 1; ++frame) {
+        if (pass.prepare_meshes(entities, input.root_path, UploadPresentation::Settled).pending ==
+            0) {
+            prepared = true;
+            break;
+        }
+    }
+    ASSERT_TRUE(prepared);
+    ASSERT_NE(pass.cached_mesh(temporary.Path().filename().string()), nullptr);
+    // A negative draw memo must not pin a mesh that has since been adopted.
+    TreeSubmissionCapture submissions;
+    const auto resident_reads = MeshLoader::file_read_count();
+    for (const bool replay : {false, true}) {
+        ctx.frozen_replay = replay;
+        TreeSubmissionCapture::Current().mesh_draws = 0;
+        EXPECT_NO_THROW((void)pass.execute(ctx, entities, input));
+        EXPECT_EQ(TreeSubmissionCapture::Current().mesh_draws, 1u);
+        EXPECT_EQ(MeshLoader::file_read_count(), resident_reads);
+    }
+}
+
+TEST(RenderSmokeTest, MeshPreparationBoundsActualGlCallsAndDrainsSettledInventory) {
+    using namespace Luminumbra::Rendering;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("mesh-budget-", ".lmesh");
+    const auto root = temporary.Path().parent_path();
+    entt::registry entities;
+    constexpr std::size_t count = 7;
+    for (std::size_t index = 0; index < count; ++index) {
+        const auto name = "asset" + std::to_string(index) + ".lmesh";
+        // Both layouts, and an indivisible payload exceeding the byte allowance.
+        ASSERT_TRUE(WritePreparedMesh(root / name, index % 2 != 0, index == 0 ? 140000u : 3u));
+        const auto entity = entities.create();
+        if (index % 2 != 0)
+            entities.emplace<Luminumbra::Components::SkinnedMeshComponent>(entity).meshPath = name;
+        else
+            entities.emplace<Luminumbra::Components::StaticMeshComponent>(entity).meshPath = name;
+    }
+    GBufferPass pass;
+    MeshAdoptionCalls calls;
+    bool settled = false;
+    for (std::size_t frame = 0; frame < count * kTreeLodCount + 1; ++frame) {
+        calls.buffers = 0;
+        calls.uploads = 0;
+        calls.bytes = 0;
+        const auto prepared = pass.prepare_meshes(entities, root, UploadPresentation::Settled);
+        EXPECT_LE(prepared.work.attempts, GBufferPass::kMeshUploadLimits.count);
+        EXPECT_LE(calls.buffers, 2 * GBufferPass::kMeshUploadLimits.count);
+        EXPECT_LE(calls.uploads, 2 * GBufferPass::kMeshUploadLimits.count);
+        EXPECT_EQ(calls.bytes, prepared.work.bytes);
+        if (calls.bytes > GBufferPass::kMeshUploadLimits.bytes) {
+            EXPECT_EQ(prepared.work.attempts, 1u);
+        }
+        if (draw_upload_frame(UploadPresentation::Settled, prepared.pending == 0)) {
+            for (std::size_t index = 0; index < count; ++index)
+                EXPECT_NE(
+                    pass.cached_mesh("asset" + std::to_string(index) + ".lmesh", index % 2 != 0),
+                    nullptr);
+            settled = true;
+            break;
+        }
+        EXPECT_GT(prepared.pending, 0u);
+    }
+    EXPECT_TRUE(settled);
+    const auto reads = MeshLoader::file_read_count();
+    const auto empty = pass.prepare_meshes(entities, root, UploadPresentation::Settled);
+    EXPECT_EQ(empty.pending, 0u);
+    EXPECT_EQ(empty.work.attempts, 0u);
+    EXPECT_EQ(MeshLoader::file_read_count(), reads);
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, PreparedMeshPayloadsPreserveBuffersAndRejectPartialInputs) {
+    using namespace Luminumbra::Rendering;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("mesh-payload-", ".lmesh");
+    for (const bool skinned : {false, true}) {
+        ASSERT_TRUE(WritePreparedMesh(temporary.Path(), skinned));
+        auto payload = skinned ? MeshLoader::ReadSkinned(temporary.Path().string())
+                               : MeshLoader::Read(temporary.Path().string());
+        ASSERT_NE(payload, nullptr);
+        MeshAdoptionCalls calls;
+        const auto reads = MeshLoader::file_read_count();
+        const auto mesh = MeshLoader::Adopt(*payload);
+        ASSERT_NE(mesh, nullptr);
+        EXPECT_EQ(MeshLoader::file_read_count(), reads);
+        EXPECT_EQ(calls.buffers, 2u);
+        EXPECT_EQ(calls.uploads, 2u);
+        EXPECT_EQ(calls.bytes, payload->upload_bytes());
+        EXPECT_EQ(mesh->indexCount, 3u);
+        EXPECT_EQ(mesh->jointCount, skinned ? 1u : 0u);
+        const auto vertex_bytes = skinned ? payload->skinnedVertices.size() * sizeof(SkinnedVertex)
+                                          : payload->vertices.size() * sizeof(Vertex);
+        std::vector<char> actual(vertex_bytes);
+        glBindBuffer(GL_ARRAY_BUFFER, mesh->vbo);
+        glGetBufferSubData(
+            GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(actual.size()), actual.data());
+        const auto* expected = skinned
+                                   ? reinterpret_cast<const char*>(payload->skinnedVertices.data())
+                                   : reinterpret_cast<const char*>(payload->vertices.data());
+        EXPECT_EQ(actual, std::vector<char>(expected, expected + vertex_bytes));
+        // Size mismatch is rejected before allocating payload vectors.
+        fs::resize_file(temporary.Path(), fs::file_size(temporary.Path()) - 1);
+        EXPECT_EQ(skinned ? MeshLoader::ReadSkinned(temporary.Path().string())
+                          : MeshLoader::Read(temporary.Path().string()),
+                  nullptr);
+    }
+    {
+        std::ofstream partial(temporary.Path(), std::ios::binary | std::ios::trunc);
+        partial << "LM";
+    }
+    EXPECT_EQ(MeshLoader::Read(temporary.Path().string()), nullptr);
+    EXPECT_EQ(MeshLoader::ReadSkinned(temporary.Path().string()), nullptr);
+    EXPECT_EQ(MeshLoader::Read((temporary.Path().parent_path() / "missing.lmesh").string(), true),
+              nullptr);
+    EXPECT_EQ(MeshLoader::ReadSkinned((temporary.Path().parent_path() / "missing.lmesh").string()),
+              nullptr);
+    MeshPayload empty;
+    EXPECT_EQ(MeshLoader::Adopt(empty), nullptr);
+}
+
+TEST(RenderSmokeTest, MeshPreparationTracksOnlyChangedEntitiesAndSurvivesJobRefusal) {
+    using namespace Luminumbra::Rendering;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("mesh-inventory-", ".lmesh");
+    ASSERT_TRUE(WritePreparedMesh(temporary.Path()));
+    const auto root = temporary.Path().parent_path();
+    Luminumbra::JobSystem jobs; // Closed admission must not read on a streaming frame.
+    entt::registry entities;
+    const auto entity = entities.create();
+    entities.emplace<Luminumbra::Components::StaticMeshComponent>(entity).meshPath =
+        temporary.Path().filename().string();
+    GBufferPass pass;
+    pass.attach_mesh_jobs(&jobs);
+    const auto reads = MeshLoader::file_read_count();
+    const auto refused = pass.prepare_meshes(entities, root, UploadPresentation::Streaming);
+    EXPECT_EQ(refused.inventory_visits, 1u);
+    EXPECT_EQ(refused.pending, static_cast<std::size_t>(kTreeLodCount));
+    EXPECT_EQ(refused.work.attempts, 0u);
+    EXPECT_EQ(MeshLoader::file_read_count(), reads);
+    EXPECT_EQ(pass.prepare_meshes(entities, root, UploadPresentation::Streaming).inventory_visits,
+              0u);
+    // Explicit settled preparation can finish even with a closed job system.
+    for (int frame = 0; frame < kTreeLodCount + 1; ++frame) {
+        if (pass.prepare_meshes(entities, root, UploadPresentation::Settled).pending == 0)
+            break;
+        ASSERT_LT(frame, kTreeLodCount);
+    }
+    ASSERT_NE(pass.cached_mesh(temporary.Path().filename().string()), nullptr);
+    ASSERT_TRUE(WritePreparedMesh(root / "replacement.lmesh"));
+    jobs.startup(1);
+    entities.patch<Luminumbra::Components::StaticMeshComponent>(
+        entity, [](auto& component) { component.meshPath = "replacement.lmesh"; });
+    // The worker owns a copied path/payload; changing the component afterwards is safe.
+    const auto changed = pass.prepare_meshes(entities, root, UploadPresentation::Streaming);
+    EXPECT_EQ(changed.inventory_visits, 1u);
+    entities.patch<Luminumbra::Components::StaticMeshComponent>(
+        entity, [](auto& component) { component.meshPath = "removed.lmesh"; });
+    entities.destroy(entity);
+    bool complete = false;
+    for (int frame = 0; frame < kTreeLodCount + 1; ++frame) {
+        if (pass.prepare_meshes(entities, root, UploadPresentation::Settled).pending == 0) {
+            complete = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(complete);
+    EXPECT_NE(pass.cached_mesh("replacement.lmesh"), nullptr);
+    EXPECT_EQ(pass.cached_mesh("removed.lmesh"), nullptr);
+    EXPECT_EQ(pass.prepare_meshes(entities, root, UploadPresentation::Settled).inventory_visits,
+              0u);
+    jobs.shutdown();
+    // Registry-owned callbacks remain safe after an observing pass goes away.
+    {
+        GBufferPass outgoing;
+        EXPECT_EQ(outgoing.prepare_meshes(entities, root, UploadPresentation::Settled).pending, 0u);
+    }
+    const auto arrival = entities.create();
+    entities.emplace<Luminumbra::Components::StaticMeshComponent>(arrival).meshPath =
+        "missing.lmesh";
+    const auto arrival_work = pass.prepare_meshes(entities, root, UploadPresentation::Settled);
+    EXPECT_EQ(arrival_work.inventory_visits, 1u);
+}
+
+TEST(RenderSmokeTest, SettledPipelineWaitsForMeshAssetsBeforeDispatch) {
+    using namespace Luminumbra::Rendering;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    RenderPipeline pipeline;
+    pipeline.enable_static_model_content(false);
+    ASSERT_TRUE(pipeline.startup(32, 32, SourceRoot()));
+    pipeline.set_far_world_mode(FarWorldMode::Legacy);
+    pipeline.set_far_lod_enabled(false);
+    pipeline.set_taau_enabled(false);
+    Luminumbra::Systems::SHIELD_WorldSystem world(
+        nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    entt::registry entities;
+    // Absolute filenames exercise the same root-independent input used by tools.
+    Luminumbra::TestSupport::ScopedTempFile temporary("mesh-settled-", ".lmesh");
+    ASSERT_TRUE(WritePreparedMesh(temporary.Path()));
+    for (int index = 0; index < 3; ++index) {
+        const auto entity = entities.create();
+        entities.emplace<Luminumbra::Components::TransformComponent>(entity);
+        entities.emplace<Luminumbra::Components::StaticMeshComponent>(entity).meshPath =
+            (temporary.Path().parent_path() / ("missing" + std::to_string(index) + ".lmesh"))
+                .string();
+    }
+    const auto entity = entities.create();
+    entities.emplace<Luminumbra::Components::TransformComponent>(entity);
+    entities.emplace<Luminumbra::Components::StaticMeshComponent>(entity).meshPath =
+        temporary.Path().string();
+    Camera camera({0, 0, 0});
+    bool drawn = false;
+    bool deferred = false;
+    for (int frame = 0; frame < 4 * kTreeLodCount + 1; ++frame) {
+        pipeline.render_frame(entities, world, camera, 0.0f, false, UploadPresentation::Settled);
+        const auto& stats = pipeline.get_last_mesh_upload_stats();
+        EXPECT_LE(stats.asset_budget.attempts, GBufferPass::kMeshUploadLimits.count);
+        if (stats.asset_uploads_deferred != 0) {
+            deferred = true;
+            EXPECT_FALSE(pipeline.render_uploads_settled());
+            EXPECT_TRUE(pipeline.frame_stage_trace().empty());
+        } else {
+            EXPECT_TRUE(pipeline.render_uploads_settled());
+            EXPECT_FALSE(pipeline.frame_stage_trace().empty());
+            drawn = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(deferred);
+    EXPECT_TRUE(drawn);
+}
+
+TEST(RenderSmokeTest, MeshDrawRootsCannotAcquireFilesAndSettlingCountsEveryAssetLane) {
+    const auto source =
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/passes/GBufferPass.cpp");
+    const auto begin = source.find("void GBufferPass::geometry_pass_static_meshes(");
+    ASSERT_NE(begin, std::string::npos);
+    const auto draw_roots = source.substr(begin);
+    for (const auto* forbidden : {"MeshLoader::Load(",
+                                  "MeshLoader::LoadSkinned(",
+                                  "MeshLoader::Read(",
+                                  "MeshLoader::ReadSkinned(",
+                                  "MeshLoader::Adopt(",
+                                  "std::filesystem::exists("})
+        EXPECT_EQ(draw_roots.find(forbidden), std::string::npos) << forbidden;
+    const auto pipeline =
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const auto prepare = pipeline.find("void RenderPipeline::prepare_frame(");
+    ASSERT_NE(prepare, std::string::npos);
+    const auto preparation = pipeline.substr(prepare);
+    EXPECT_LT(preparation.find("prepare_meshes(registry, m_root_path, presentation)"),
+              preparation.find("draw_upload_frame(presentation, render_uploads_settled())"));
+    const auto header =
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
+    EXPECT_NE(header.find("m_last_mesh_upload_stats.asset_uploads_deferred == 0"),
+              std::string::npos);
+    for (const auto* path : {"src/luminumbra_client/main_client.cpp",
+                             "src/luminumbra_client/core/ScenarioRunnerCapture.cpp",
+                             "src/luminumbra_client/rendering/SceneSurvey.cpp"}) {
+        const auto consumer = ReadSourceFile(SourceRoot() / path);
+        EXPECT_NE(consumer.find("asset_uploads_deferred"), std::string::npos);
+        EXPECT_NE(consumer.find("asset_budget.adopted"), std::string::npos);
+    }
 }

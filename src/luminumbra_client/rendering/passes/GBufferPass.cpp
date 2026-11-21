@@ -18,6 +18,7 @@
 #include "core/IsolationConfig.h" // ctx.isolation->renders(...) needs the full type
 #include "core/Log.h"
 #include "luminumbra_common/components/CoreComponents.h"
+#include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "rendering/Camera.h"
 #include "rendering/Mesh.h"
@@ -28,12 +29,18 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono> // CPU submit cost of the static-prop pass
+#include <condition_variable>
 #include <cstddef>
-#include <filesystem> // existence-probe LOD variants before loading (avoid load-error spam)
+#include <deque>
+#include <exception>
+#include <filesystem>
 #include <limits>
+#include <mutex>
 #include <string>
 #include <tuple>
+#include <unordered_set>
 #include <utility> // std::pair for the LOD-resolve helper return
 
 #include "luminumbra_common/animation/AnimationRuntime.h"
@@ -52,7 +59,82 @@ namespace Luminumbra::Rendering {
 // per-instance SSBO sized for the total set + growth.
 static constexpr GLsizei kStaticInstanceCapacity = 131072;
 
-GBufferPass::GBufferPass() = default;
+namespace {
+// Registry-owned signal targets outlive the pass and contain only weak observers.
+// Each queue holds at most one record per changed entity between preparations.
+struct MeshInventoryChanges {
+    std::vector<entt::entity> entities;
+    std::unordered_set<entt::entity> queued;
+    void add(entt::entity entity) {
+        if (queued.insert(entity).second)
+            entities.push_back(entity);
+    }
+};
+struct MeshInventoryEvents {
+    std::vector<std::weak_ptr<MeshInventoryChanges>> observers;
+    static void Changed(entt::registry& registry, entt::entity entity) {
+        auto& subscribers = registry.ctx().get<std::shared_ptr<MeshInventoryEvents>>()->observers;
+        for (std::size_t index = 0; index < subscribers.size();) {
+            if (auto observer = subscribers[index].lock()) {
+                observer->add(entity);
+                ++index;
+            } else {
+                subscribers[index] = subscribers.back();
+                subscribers.pop_back();
+            }
+        }
+    }
+};
+struct MeshReadTask {
+    std::string path;
+    bool skinned = false;
+    bool started = false; // owner-thread only
+    std::unique_ptr<MeshPayload> payload;
+    std::exception_ptr failure;
+    std::mutex mutex;
+    std::condition_variable completion;
+    std::atomic<bool> ready{false};
+
+    static void Run(void* state) {
+        auto& task = *static_cast<MeshReadTask*>(state);
+        try {
+            task.payload = task.skinned ? MeshLoader::ReadSkinned(task.path)
+                                        : MeshLoader::Read(task.path, true);
+        } catch (...) {
+            task.failure = std::current_exception();
+        }
+        {
+            const std::lock_guard lock(task.mutex);
+            task.ready.store(true, std::memory_order_release);
+        }
+        task.completion.notify_all();
+    }
+    void wait() {
+        std::unique_lock lock(mutex);
+        completion.wait(lock, [this] { return ready.load(std::memory_order_acquire); });
+    }
+};
+} // namespace
+
+struct GBufferPass::MeshPreparation {
+    struct Pending {
+        std::string key;
+        bool skinned;
+        std::string path;
+        std::shared_ptr<MeshReadTask> task;
+    };
+    JobSystem* jobs = nullptr;
+    std::weak_ptr<MeshInventoryEvents> inventory;
+    std::shared_ptr<MeshInventoryChanges> changes;
+    // One metadata entry per distinct requested asset/LOD. Only the head can
+    // own a CPU payload or a dispatched job, bounding decoded backlog to one.
+    std::deque<Pending> pending;
+    std::uint64_t generation = 1;
+};
+
+GBufferPass::GBufferPass()
+    : m_mesh_preparation(std::make_unique<MeshPreparation>()) {}
+
 GBufferPass::~GBufferPass() = default;
 
 FarWorldSelection GBufferPass::SelectFarWorldRenderer(FarWorldSelection selection) const {
@@ -84,11 +166,163 @@ bool UseDrawProgram(const Shader* shader, GBufferDrawStats& stats) {
 } // namespace
 
 void GBufferPass::register_cached_mesh(const std::string& key, std::unique_ptr<Mesh> mesh) {
-    if (mesh)
+    if (mesh) {
         m_meshCache[key] = std::move(mesh);
+        ++m_mesh_preparation->generation;
+    }
 }
 bool GBufferPass::has_cached_mesh(const std::string& key) const {
     return m_meshCache.find(key) != m_meshCache.end();
+}
+
+const Mesh* GBufferPass::cached_mesh(const std::string& key, bool skinned) const {
+    const auto& cache = skinned ? m_skinnedMeshCache : m_meshCache;
+    const auto found = cache.find(key);
+    return found == cache.end() ? nullptr : found->second.get();
+}
+
+void GBufferPass::attach_mesh_jobs(JobSystem* jobs) {
+    m_mesh_preparation->jobs = jobs;
+}
+
+void GBufferPass::request_mesh(const std::string& key,
+                               bool skinned,
+                               const std::filesystem::path& root_path) {
+    auto& cache = skinned ? m_skinnedMeshCache : m_meshCache;
+    if (cache.contains(key))
+        return;
+    auto& preparation = *m_mesh_preparation;
+    preparation.pending.push_back({key, skinned, (root_path / key).string(), {}});
+    cache.emplace(key, nullptr);
+}
+
+Mesh* GBufferPass::lookup_mesh(const std::string& key,
+                               bool skinned,
+                               bool frozen,
+                               const std::filesystem::path& root_path) {
+    auto& cache = skinned ? m_skinnedMeshCache : m_meshCache;
+    const auto found = cache.find(key);
+    if (found != cache.end())
+        return found->second.get();
+    if (frozen)
+        throw std::logic_error(skinned ? "Replay cannot change skinned residency"
+                                       : "Replay cannot change mesh residency");
+    // Dynamic arrivals can request metadata, but drawing never reads or uploads.
+    request_mesh(key, skinned, root_path);
+    return nullptr;
+}
+
+GBufferPass::MeshPreparationStats
+GBufferPass::prepare_meshes(entt::registry& registry,
+                            const std::filesystem::path& root_path,
+                            UploadPresentation presentation) {
+    auto& preparation = *m_mesh_preparation;
+    using Inventory = std::shared_ptr<MeshInventoryEvents>;
+    auto* inventory = registry.ctx().find<Inventory>();
+    if (!inventory) {
+        inventory = &registry.ctx().emplace<Inventory>(std::make_shared<MeshInventoryEvents>());
+        // Free signal targets use registry-owned state, never a pass/worker pointer.
+        registry.on_construct<Components::StaticMeshComponent>()
+            .connect<&MeshInventoryEvents::Changed>();
+        registry.on_update<Components::StaticMeshComponent>()
+            .connect<&MeshInventoryEvents::Changed>();
+        registry.on_construct<Components::SkinnedMeshComponent>()
+            .connect<&MeshInventoryEvents::Changed>();
+        registry.on_update<Components::SkinnedMeshComponent>()
+            .connect<&MeshInventoryEvents::Changed>();
+    }
+    if (preparation.inventory.lock() != *inventory) {
+        preparation.changes = std::make_shared<MeshInventoryChanges>();
+        preparation.inventory = *inventory;
+        auto& observers = (*inventory)->observers;
+        std::erase_if(observers, [](const auto& observer) { return observer.expired(); });
+        observers.push_back(preparation.changes);
+        // Initial entry inventory only. Later preparations visit changed entities.
+        for (auto entity : registry.view<const Components::StaticMeshComponent>())
+            preparation.changes->add(entity);
+        for (auto entity : registry.view<const Components::SkinnedMeshComponent>())
+            preparation.changes->add(entity);
+    }
+    const auto inventory_visits = preparation.changes->entities.size();
+    for (auto entity : preparation.changes->entities) {
+        if (!registry.valid(entity))
+            continue;
+        if (const auto* mesh = registry.try_get<Components::StaticMeshComponent>(entity)) {
+            for (int lod = 0; lod < kTreeLodCount; ++lod)
+                request_mesh(LodMeshPath(mesh->meshPath, lod), false, root_path);
+        }
+        if (const auto* mesh = registry.try_get<Components::SkinnedMeshComponent>(entity))
+            request_mesh(mesh->meshPath, true, root_path);
+    }
+    preparation.changes->entities.clear();
+    preparation.changes->queued.clear();
+    UploadBudget budget(kMeshUploadLimits);
+    const auto started = std::chrono::steady_clock::now();
+    const auto elapsed = [&] {
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
+            .count();
+    };
+    // At most two attempts/frame, including absent or malformed assets. The
+    // shared upload policy admits one indivisible oversized payload for progress.
+    for (std::size_t attempt = 0; attempt < kMeshUploadLimits.count && !preparation.pending.empty();
+         ++attempt) {
+        auto& pending = preparation.pending.front();
+        // A runtime registration may satisfy an earlier request while its CPU
+        // job is queued. Discard only our ownership; the worker owns its task.
+        if (cached_mesh(pending.key, pending.skinned)) {
+            if (pending.task && pending.task->started) {
+                if (presentation == UploadPresentation::Settled)
+                    pending.task->wait();
+                if (!pending.task->ready.load(std::memory_order_acquire))
+                    break;
+            }
+            if (!budget.admits(0, elapsed()))
+                break;
+            budget.charge(0, true);
+            preparation.pending.pop_front();
+            continue;
+        }
+        if (!pending.task) {
+            pending.task = std::make_shared<MeshReadTask>();
+            pending.task->path = pending.path;
+            pending.task->skinned = pending.skinned;
+        }
+        auto& task = *pending.task;
+        if (!task.started) {
+            if (preparation.jobs) {
+                // Bound admission into the shared Normal lane. Rejection retries
+                // next frame; explicit settled preparation can prepare inline.
+                task.started = preparation.jobs->try_dispatch(&MeshReadTask::Run, pending.task, 64);
+            }
+            if (!task.started &&
+                (!preparation.jobs || presentation == UploadPresentation::Settled)) {
+                task.started = true;
+                MeshReadTask::Run(&task);
+            }
+        }
+        if (presentation == UploadPresentation::Settled && task.started)
+            task.wait();
+        if (!task.ready.load(std::memory_order_acquire))
+            break;
+        if (task.failure)
+            std::rethrow_exception(task.failure);
+        const auto bytes = task.payload ? task.payload->upload_bytes() : 0;
+        if (!budget.admits(bytes, elapsed()))
+            break;
+        auto& cache = pending.skinned ? m_skinnedMeshCache : m_meshCache;
+        auto& resident = cache.at(pending.key);
+        // Runtime registration wins over a previously queued file candidate.
+        if (!resident && task.payload) {
+            resident = MeshLoader::Adopt(*task.payload);
+            if (resident)
+                ++preparation.generation;
+        }
+        budget.charge(bytes, true); // resolved absence is completed work too
+        preparation.pending.pop_front();
+    }
+    return {.work = budget.finish(elapsed()),
+            .pending = preparation.pending.size(),
+            .inventory_visits = inventory_visits};
 }
 
 void GBufferPass::init_geometry_shader(const std::filesystem::path& root_path) {
@@ -255,6 +489,9 @@ void GBufferPass::destroy_skinned_mesh() {
         m_jointPaletteSSBO = 0;
     }
     m_jointPaletteSSBOCapacityBytes = 0;
+    std::erase_if(m_mesh_preparation->pending, [](const auto& pending) { return pending.skinned; });
+    m_mesh_preparation->inventory.reset();
+    m_mesh_preparation->changes.reset();
     m_skinnedMeshCache.clear();
 }
 
@@ -814,32 +1051,13 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     const glm::vec3 cameraPos = camera.Position;
     const bool impostorsOn = input.tree_impostor_enabled;
     TreeLodConfig kTreeLodCfg; // data-driven defaults; render.tree_lod.* may override later.
-    // Resolves (loading + caching) the mesh for a candidate path, falling back to
-    // the base LOD0 path if the LOD variant cannot be loaded. Returns the path that
-    // actually resolved so the group is keyed by what is really drawn.
+    // Cache-only selection retains the same candidate/base fallback chain.
     auto resolve_mesh = [&](const std::string& candidatePath,
                             const std::string& basePath) -> std::pair<Mesh*, std::string> {
-        if (m_meshCache.find(candidatePath) == m_meshCache.end()) {
-            if (ctx.frozen_replay)
-                throw std::logic_error("Replay cannot change mesh residency");
-            std::string full = (input.root_path / candidatePath).string();
-            // Only load the LOD variant if it exists on disk; an absent.lodN.lmesh caches a
-            // null and falls back to LOD0 SILENTLY (no MeshLoader "failed header" error spam).
-            m_meshCache[candidatePath] =
-                std::filesystem::exists(full) ? MeshLoader::Load(full) : nullptr;
-        }
-        Mesh* m = m_meshCache[candidatePath].get();
-        if (m)
-            return {m, candidatePath};
+        if (Mesh* mesh = lookup_mesh(candidatePath, false, ctx.frozen_replay, input.root_path))
+            return {mesh, candidatePath};
         if (candidatePath != basePath) {
-            if (m_meshCache.find(basePath) == m_meshCache.end()) {
-                if (ctx.frozen_replay)
-                    throw std::logic_error("Replay cannot change mesh residency");
-                std::string full = (input.root_path / basePath).string();
-                m_meshCache[basePath] = MeshLoader::Load(full);
-            }
-            Mesh* base = m_meshCache[basePath].get();
-            if (base)
+            if (Mesh* base = lookup_mesh(basePath, false, ctx.frozen_replay, input.root_path))
                 return {base, basePath};
         }
         return {nullptr, basePath};
@@ -848,6 +1066,8 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         const std::uint64_t rkey = cp.baseMeshHash ^ (static_cast<std::uint64_t>(lod) *
                                                       std::uint64_t{0x9E3779B97F4A7C15ull});
         auto rit = m_resolveMemo.find(rkey);
+        if (rit != m_resolveMemo.end() && rit->second.generation != m_mesh_preparation->generation)
+            rit = m_resolveMemo.end();
         if (rit == m_resolveMemo.end()) {
             const std::string& basePath = m_propMeshPaths[cp.pathIndex];
             const std::string candidatePath = LodMeshPath(basePath, lod);
@@ -863,7 +1083,10 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                 resolved = resolve_mesh(basePath, basePath);
             }
             rit = m_resolveMemo
-                      .emplace(rkey, std::make_pair(resolved.first, std::move(resolved.second)))
+                      .insert_or_assign(rkey,
+                                        ResolvedMesh{resolved.first,
+                                                     std::move(resolved.second),
+                                                     m_mesh_preparation->generation})
                       .first;
         }
         return rit;
@@ -1002,7 +1225,7 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         const std::uint64_t gkey =
             rkey ^ (static_cast<std::uint64_t>(cp.materialId) * std::uint64_t{0x100000001B3ull});
         auto& batch = m_visibleGroups[gkey];
-        if (batch.mesh == nullptr) { // first ever sighting fixes the group metadata
+        if (batch.mesh != mesh) { // adoption can replace a temporary LOD fallback
             batch.mesh = mesh;
             batch.drawPath = rit->second.second;
             batch.basePath = m_propMeshPaths[cp.pathIndex];
@@ -1331,13 +1554,7 @@ void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
         auto const& mesh_info = view.get<const Components::SkinnedMeshComponent>(entity);
         auto const& player = view.get<const anim::AnimationPlayerComponent>(entity);
 
-        if (m_skinnedMeshCache.find(mesh_info.meshPath) == m_skinnedMeshCache.end()) {
-            if (ctx.frozen_replay)
-                throw std::logic_error("Replay cannot change skinned residency");
-            std::string full_mesh_path = (input.root_path / mesh_info.meshPath).string();
-            m_skinnedMeshCache[mesh_info.meshPath] = MeshLoader::LoadSkinned(full_mesh_path);
-        }
-        Mesh* mesh = m_skinnedMeshCache[mesh_info.meshPath].get();
+        Mesh* mesh = lookup_mesh(mesh_info.meshPath, true, ctx.frozen_replay, input.root_path);
         if (!mesh || mesh->jointCount == 0)
             continue;
 
