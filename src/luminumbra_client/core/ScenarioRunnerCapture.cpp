@@ -221,8 +221,10 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
                     [&] {
                         const auto& pending = renderPipeline.get_last_mesh_upload_stats();
                         return std::pair{
-                            pending.terrain_uploads_deferred + pending.water_uploads_deferred,
-                            pending.terrain_budget.adopted + pending.water_budget.adopted};
+                            pending.terrain_uploads_deferred + pending.water_uploads_deferred +
+                                pending.asset_uploads_deferred,
+                            pending.terrain_budget.adopted + pending.water_budget.adopted +
+                                pending.asset_budget.adopted};
                     },
                     [&] {
                         // Adoption retries preserve the selected sun and cloud phase.

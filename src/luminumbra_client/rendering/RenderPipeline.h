@@ -213,6 +213,8 @@ public:
     struct MeshUploadFrameStats {
         UploadWorkStats terrain_budget{};
         UploadWorkStats water_budget{};
+        UploadWorkStats asset_budget{};
+        size_t asset_uploads_deferred = 0;
         size_t snapshot_count = 0;
         size_t terrain_upload_candidates = 0;
         size_t terrain_uploads = 0;
@@ -579,7 +581,8 @@ public:
     // Presentation readiness only. Never use to gate simulation or collision.
     bool render_uploads_settled() const {
         return m_last_mesh_upload_stats.terrain_uploads_deferred == 0 &&
-               m_last_mesh_upload_stats.water_uploads_deferred == 0;
+               m_last_mesh_upload_stats.water_uploads_deferred == 0 &&
+               m_last_mesh_upload_stats.asset_uploads_deferred == 0;
     }
     const RenderPassFrameStats& get_last_render_pass_stats() const {
         return m_last_render_pass_stats;

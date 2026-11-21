@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../UploadBudget.h"
 #include "FarWorldPassUniforms.h"
 
 #include "../GBuffer.h"       // GBuffer attachments (value member)
@@ -22,6 +23,7 @@
 
 namespace Luminumbra {
 class Chunk;
+class JobSystem;
 } // namespace Luminumbra
 
 namespace Luminumbra::Rendering {
@@ -110,8 +112,29 @@ public:
     // palette.
     void register_cached_mesh(const std::string& key, std::unique_ptr<Mesh> mesh);
     [[nodiscard]] bool has_cached_mesh(const std::string& key) const;
+    // Read-only residency diagnostic; never requests or loads an asset.
+    const Mesh* cached_mesh(const std::string& key, bool skinned = false) const;
+    struct MeshPreparationStats {
+        UploadWorkStats work{};
+        std::size_t pending = 0;
+        std::size_t inventory_visits = 0;
+    };
+    // Called by frame preparation, including the existing entry preload draw.
+    // Settled waits for CPU jobs, but retains the same per-frame GL budget.
+    MeshPreparationStats prepare_meshes(entt::registry& registry,
+                                        const std::filesystem::path& root_path,
+                                        UploadPresentation presentation);
+    void attach_mesh_jobs(JobSystem* jobs);
+    static constexpr UploadLimits kMeshUploadLimits{4 * 1024 * 1024, 2, 1, 3.0};
 
 private:
+    struct MeshPreparation;
+    std::unique_ptr<MeshPreparation> m_mesh_preparation;
+    Mesh* lookup_mesh(const std::string& key,
+                      bool skinned,
+                      bool frozen,
+                      const std::filesystem::path& root_path);
+    void request_mesh(const std::string& key, bool skinned, const std::filesystem::path& root_path);
     void geometry_pass_chunks(const RenderContext& ctx,
                               const GBufferPassInput& input,
                               const Camera& camera,
@@ -222,8 +245,13 @@ private:
         bool active = false; // appeared this frame
     };
     std::unordered_map<std::uint64_t, InstanceBatchCached> m_visibleGroups;
-    std::unordered_map<std::uint64_t, std::pair<Mesh*, std::string>> m_resolveMemo; // persistent
-    double m_last_static_prop_cpu_ms = 0.0; // CPU submit cost, last frame
+    struct ResolvedMesh {
+        Mesh* first = nullptr;
+        std::string second;
+        std::uint64_t generation = 0;
+    };
+    std::unordered_map<std::uint64_t, ResolvedMesh> m_resolveMemo; // persistent
+    double m_last_static_prop_cpu_ms = 0.0;                        // CPU submit cost, last frame
 };
 
 } // namespace Luminumbra::Rendering
