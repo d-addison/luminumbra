@@ -1287,6 +1287,7 @@ private:
     RenderableViewWork m_renderable_view_work;
     void invalidate_renderable_chunks();
     void set_renderable_chunk_state(Chunk& chunk, ChunkState state);
+    const World::ActivationResidencyIndex::LifecycleCounts& streaming_lifecycle_counts();
     // debug_set_streaming_radius_cap: 0 = uncapped (production behaviour).
     int m_streaming_radius_cap = 0;
     DbgStreamTimings m_dbg_stream; // runtime telemetry
