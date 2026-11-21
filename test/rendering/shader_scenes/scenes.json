@@ -134,14 +134,19 @@
       "reference": "references/post-edge.ppm"
     }
   ],
+  "diagnostic_shader_sha256": {
+    "res/shaders/debug_view.frag": "1cf6e11af393befe2df9fd2d74588616694b2782a826552025307668f100b75a"
+  },
   "inputs": {
     "res/shaders/enhanced_skybox.frag": "dcbd2b15fdca9acfb4b8d4fe01029f0e91727556bce842c9d058362f6c07ee27",
-    "res/shaders/g_buffer.frag": "38c27298d127b44f59b033446c8bbc8d23b4cc17d6b8d5b732909c029cc22e31",
-    "res/shaders/g_buffer.vert": "209c1c0801801209e669e60dcadfa7085e8e44780f9e2c7599a7d48a5fe2abed",
+    "res/shaders/foliage.frag": "fc0345ef7d4d7895acb440bf34a728b3cfd478186742948528e47f7202c6daae",
+    "res/shaders/foliage.vert": "aba0d84c40685a71d6b332d8e3e72ff68144d2aa6b01a3a89abcd70bd6c2c20f",
+    "res/shaders/g_buffer.frag": "6e07692ad1d04e3fdaa79184c03d31d4d61965ea0e4c77e8de48fa98b57a227d",
+    "res/shaders/g_buffer.vert": "bb20ba2c791ac0d4c087d8c7b792ee45eb6dbfcffa12cfa1838c27002e2b25b4",
     "res/shaders/grass_compact_prefix.comp": "43bcf2b6c883f958cab97d9b88c911701edd1ff1416e0290ef427228b406e677",
     "res/shaders/instanced_mesh.vert": "83198486e34bcb2d2ad4dcd5271efc9b4fd5deab5842768a8a85eac76d245d9c",
-    "res/shaders/lighting_pass.frag": "4f1cf13c57aea1a8c4b0c5195e06135a983377b7ca0be591201b5b5cfcfa4d0a",
-    "res/shaders/magical_particles.frag": "dcb928e1b40f30b5cfcf32796a675a12b38bee756deb9e988ddf2862c0ae3c8c",
+    "res/shaders/lighting_pass.frag": "24c49d8cac6198ea9c93bb2e16ba39daa990b453b53d72d97a821884d03e9219",
+    "res/shaders/magical_particles.frag": "4b04d290eba44750b4c908a8195a9d5f94d14b9a00b4ff19e9eb5d862e6b4e2d",
     "res/shaders/ssao.vert": "f5c6db443362910b98714dd5dcfb5bc1c54e4e23e4a87f1cfc043f07ee01777c",
     "res/shaders/static_asset.frag": "38945ff338541c021f1b4d736648794cc556ce09183d520d76a28e7843e08d2c",
     "res/shaders/static_asset.vert": "3c6ca3b3154e0f28bbecd1c5fa2048b09e6623a1a58823b64d6a01e5f78e475d",
@@ -150,7 +155,7 @@
     "res/shaders/tree_impostor.vert": "6e69ff1391d2d6dd6ef93d7c72c3c387cc4009b3bccf317e5c050018f2e1d796",
     "src/luminumbra_client/rendering/Camera.h": "eccf0f45502d6a41b96833328a5c45258cf19599eb6a23aafd76dccf1009546c",
     "src/luminumbra_client/rendering/SkyAtmosphereLut.ipp": "50fe51e78e3ba33c36e4bad2248a57d09c0289ed730142c0aa447e4bc6567930",
-    "test/rendering/shader_scene_render_test.cpp": "bbfd3d65d5ebdc6337ae69b11cea5177880ae4a70708e8b5352623b0aa3ded04"
+    "test/rendering/shader_scene_render_test.cpp": "0d8797a35f25dde9a55f84f7238ed6c72dad7664a880a506e0572b1636e63953"
   },
   "reference_capture": {
     "material": {
