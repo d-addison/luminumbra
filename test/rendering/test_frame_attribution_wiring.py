@@ -3731,7 +3731,7 @@ class DeferredRasterDiagnosticWiring(unittest.TestCase):
                         dispatch.index("m_debug_view_pass->begin_frame("))
         mdi = block(pipeline, "void RenderPipeline::draw_chunks_mdi(")
         self.assertIn("ReplayRollback restore_cursor", mdi)
-        self.assertIn("m_mdi_frame_cursor = saved_cursor;", block(mdi, "if (diagnostic_replay)"))
+        self.assertIn("m_mdi_stream.restore_cursor(saved_cursor);", block(mdi, "if (diagnostic_replay)"))
 
     def test_overdraw_shader_pins_match_shipping_sources(self):
         import hashlib
