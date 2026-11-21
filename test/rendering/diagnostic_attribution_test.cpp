@@ -3563,7 +3563,7 @@ TEST(DiagnosticAttribution, WaterfallAttributesOnlySubmittedSheetPoolSlotsAndNon
 
 TEST(DiagnosticAttribution, ParticleBatchAttributesAllEmitterKindsAtTheOriginalDraw) {
     const auto draw = Body(Read("src/luminumbra_client/rendering/passes/ParticlePass.cpp"),
-                           "std::size_t ParticlePass::execute(");
+                           "ParticlePass::execute(");
     const auto shader = Read("res/shaders/magical_particles.frag");
     ForwardSubmissionContract(draw, shader);
     Contains(draw, "m_frame_instance_count == 0 || m_vao == 0");
@@ -3587,7 +3587,7 @@ TEST(DiagnosticAttribution, ParticleBatchAttributesAllEmitterKindsAtTheOriginalD
     EXPECT_LT(shader.rfind("discard;"), shader.find("gDiagnosticIds ="));
     EXPECT_LT(shader.find("FragColor = finalColor;"), shader.find("gDiagnosticIds ="));
     EXPECT_EQ(SourceHash(WithoutForwardSubmissionDiagnostics(draw, "m_shader")),
-              0x898d08b83ad897a7ull);
+              0x0c5d62f44ac3e045ull);
     EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(shader, 3)), 0xa054f82b3bb88a66ull);
 }
 

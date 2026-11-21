@@ -3481,8 +3481,9 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
         gbuffer_input.tree_impostor_grid = tree_impostor_grid();
         gbuffer_input.tree_impostor_radius = tree_impostor_radius();
         gbuffer_input.tree_impostor_center = tree_impostor_center();
+        const GBufferPass::CallerState caller{.cull_enabled = GL_TRUE};
         const GBufferDrawStats gstats =
-            m_gbuffer_pass->execute(gbuffer_ctx, registry, gbuffer_input);
+            m_gbuffer_pass->execute(gbuffer_ctx, registry, gbuffer_input, caller);
         if (gstats.refusal != FarWorldRefusal::None)
             m_frame_far_selection.refusal = gstats.refusal;
         // Fold with the EXACT current policy: terrain_visible_chunks '=', rest '+='.
@@ -3958,7 +3959,8 @@ void RenderPipeline::execute_stage_particles(const Camera& camera) {
         // motion advance hoisted to prepare_frame (dispatch only draws).
         RenderContext particle_ctx = make_particle_context(camera);
         begin_gpu_pass_timer(GpuTimerPass::Particle);
-        const std::size_t particles_drawn = m_particle_pass->execute(particle_ctx, camera);
+        const ParticlePass::CallerState caller{.cull_enabled = GL_TRUE};
+        const std::size_t particles_drawn = m_particle_pass->execute(particle_ctx, camera, caller);
         end_gpu_pass_timer(GpuTimerPass::Particle);
         // stat bumps relocated out of the pass; bump only
         // when the pass actually drew (preserves the original guarded behavior).

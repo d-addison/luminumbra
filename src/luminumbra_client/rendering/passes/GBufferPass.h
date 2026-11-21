@@ -48,6 +48,10 @@ class RenderResourceRegistry;
 // (the official entity/fwd.hpp header declares the registry alias).
 class GBufferPass {
 public:
+    struct CallerState {
+        GLboolean cull_enabled = GL_FALSE;
+        static CallerState QueryExternal();
+    };
     GBufferPass();
     ~GBufferPass();
 
@@ -73,8 +77,19 @@ public:
     // RenderContext seam. Returns the draw stats the
     // call site folds into RenderPassFrameStats with the exact =/+= policy
     // (terrain_visible_chunks '=', all other counters '+=').
+    // Shipping dispatch supplies known enable state; direct hosts preserve arbitrary state.
+    GBufferDrawStats execute(const RenderContext& ctx,
+                             entt::registry& registry,
+                             const GBufferPassInput& input,
+                             const CallerState& caller);
+    GBufferDrawStats execute_external(const RenderContext& ctx,
+                                      entt::registry& registry,
+                                      const GBufferPassInput& input);
+    // Preserve the existing direct-call boundary for previews and pass consumers.
     GBufferDrawStats
-    execute(const RenderContext& ctx, entt::registry& registry, const GBufferPassInput& input);
+    execute(const RenderContext& ctx, entt::registry& registry, const GBufferPassInput& input) {
+        return execute_external(ctx, registry, input);
+    }
 
     GBuffer& gbuffer() {
         return m_gbuffer;
@@ -122,7 +137,8 @@ private:
                                      entt::registry& registry,
                                      const Camera& camera,
                                      const glm::vec4 (&frustum_planes)[6],
-                                     GBufferDrawStats& stats);
+                                     GBufferDrawStats& stats,
+                                     const CallerState& caller);
     void geometry_pass_skinned_meshes(const RenderContext& ctx,
                                       const GBufferPassInput& input,
                                       entt::registry& registry,

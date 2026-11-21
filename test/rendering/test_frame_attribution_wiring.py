@@ -3219,7 +3219,7 @@ class WorldVisualSweepWiring(unittest.TestCase):
         pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
         self.assertIn("m_last_render_pass_stats = {};", block(pipeline, "void RenderPipeline::prepare_frame("))
         particle = block(read(CLIENT / "rendering/passes/ParticlePass.cpp"),
-                         "std::size_t ParticlePass::execute(")
+                         "ParticlePass::execute(")
         self.assertIn("return m_frame_instance_count;", particle)
 
     def test_capture_and_analysis_refuse_partial_or_unaddressable_rgb_buffers(self):
@@ -3245,7 +3245,7 @@ class WorldVisualSweepWiring(unittest.TestCase):
 class ParticleContributorTests(unittest.TestCase):
     def test_original_particle_batch_uses_the_shared_forward_transaction(self):
         source = read(CLIENT / "rendering/passes/ParticlePass.cpp")
-        draw = block(source, "std::size_t ParticlePass::execute(")
+        draw = block(source, "ParticlePass::execute(")
         setup = block(draw, "if (auto* capture = GBufferDiagnosticCapture::Current())")
         for required in ("GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE", "if (attachment_type == GL_TEXTURE)",
                          "GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME", "diagnostic_attachment.emplace(",
@@ -3307,7 +3307,7 @@ class ParticleContributorTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(shader.encode()).hexdigest(),
                          "dcb928e1b40f30b5cfcf32796a675a12b38bee756deb9e988ddf2862c0ae3c8c")
         draw = block(read(CLIENT / "rendering/passes/ParticlePass.cpp"),
-                     "std::size_t ParticlePass::execute(")
+                     "ParticlePass::execute(")
         branch = "if (auto* capture = GBufferDiagnosticCapture::Current())"
         setup = draw.index("Shader* draw_shader = m_shader.get();")
         contents = block(draw, branch)
@@ -3320,7 +3320,7 @@ class ParticleContributorTests(unittest.TestCase):
         draw = draw.replace("draw_shader->", "m_shader->")
         original = "{" + re.sub(r"\s+", "", draw) + "}"
         self.assertEqual(hashlib.sha256(original.encode()).hexdigest(),
-                         "2b294f4af9fe4ae19afd27a6be23488b665e84dbbe07a4505ce820d75ae19286")
+                         "9b814a5581a957dfc4e34b3b3c452693eb1d6e111a81f3f762900b0c3e02b576")
 
     def test_weather_overlay_refuses_instead_of_guessing_a_particle_identity(self):
         draw = block(read(CLIENT / "rendering/passes/SkyboxPass.cpp"),
@@ -4665,12 +4665,28 @@ class PassCallerStateContract(unittest.TestCase):
                  ("Skybox", "skybox", ".cull_enabled = GL_TRUE",
                   "m_skybox_pass->execute(skybox_ctx, camera, false, caller)"),
                  ("Foliage", "foliage", ".cull_enabled = GL_TRUE",
-                  "m_foliage_pass->execute(foliage_ctx, camera, caller)"))
+                  "m_foliage_pass->execute(foliage_ctx, camera, caller)"),
+                 ("GBuffer", "gbuffer", ".cull_enabled = GL_TRUE",
+                  "m_gbuffer_pass->execute(gbuffer_ctx, registry, gbuffer_input, caller)"),
+                 ("Particle", "particles", ".cull_enabled = GL_TRUE",
+                  "m_particle_pass->execute(particle_ctx, camera, caller)"))
         for name, stage_name, value, call in cases:
             with self.subTest(pass_name=name):
                 source = read(CLIENT / f"rendering/passes/{name}Pass.cpp")
                 execute = block(source, f"{name}Pass::execute(")
-                self.assertNotRegex(execute, r"\bgl(?:Get\w*|IsEnabled\w*)\s*\(")
+                self.assertNotRegex(execute, r"\bglIsEnabled\w*\s*\(")
+                ordinary = execute
+                if name == "GBuffer":
+                    ordinary = ordinary.replace(block(execute, "if (diagnostic_capture)"), "")
+                    static = block(source, "void GBufferPass::geometry_pass_static_meshes(")
+                    self.assertNotRegex(static, r"\bgl(?:Get\w*|IsEnabled\w*)\s*\(")
+                    self.assertIn("const GLboolean cull_was_enabled = caller.cull_enabled", static)
+                    for stats in ("stats", "replay_stats"):
+                        self.assertIn(f"geometry_pass_static_meshes(ctx, input, registry, camera, fp, {stats}, caller)",
+                                      compact(execute))
+                elif name == "Particle":
+                    ordinary = ordinary.replace(block(execute, "if (auto* capture = GBufferDiagnosticCapture::Current())"), "", 1)
+                self.assertNotRegex(ordinary, r"\bgl(?:Get\w*|IsEnabled\w*)\s*\(")
                 self.assertNotIn("QueryExternal(", execute)
                 self.assertIn("caller.", execute)
                 stage = compact(block(pipeline, f"void RenderPipeline::execute_stage_{stage_name}("))
@@ -4688,11 +4704,24 @@ class PassCallerStateContract(unittest.TestCase):
         pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
         dispatch = block(pipeline, "void RenderPipeline::dispatch_stages(")
         self.assertIn("glEnable(GL_DEPTH_TEST)", dispatch)
+        self.assertLess(dispatch.index("glEnable(GL_CULL_FACE)"),
+                        dispatch.index("for (const std::string& node : kSchedule)"))
+        shadow = block(pipeline, "void RenderPipeline::execute_stage_shadow(")
+        self.assertIn(".cull_enabled = GL_TRUE", shadow)
+        shadow_source = read(CLIENT / "rendering/passes/ShadowPass.cpp")
+        self.assertIn("caller.Restore()", block(shadow_source, "ShadowPass::execute("))
+        self.assertIn("if (cull_enabled)", block(shadow_source, "void ShadowPass::CallerState::Restore()"))
+        for name, stage_name in (("GBuffer", "gbuffer"), ("Particle", "particles")):
+            stage = compact(block(pipeline, f"void RenderPipeline::execute_stage_{stage_name}("))
+            self.assertIn(f"const {name}Pass::CallerState caller{{.cull_enabled = GL_TRUE}}", stage)
+            self.assertNotIn("execute_external(", stage)
         table = block(pipeline, "RenderPipeline::stage_executor_table()")
         stages = re.findall(r'\{"([a-z_]+)",', table)
-        ordered = ("gbuffer", "plant_procgen", "ground_decals", "ssao", "ssao_blur",
+        ordered = ("shadow", "gbuffer", "plant_procgen", "ground_decals", "ssao", "ssao_blur",
                    "lighting", "depth_blit_to_lighting", "skybox", "water", "waterfall",
-                   "glass_oit_accum", "glass_oit_resolve", "god_rays", "foliage")
+                   "glass_oit_accum", "glass_oit_resolve", "god_rays", "foliage",
+                   "weather_opaque_snapshot", "weather_overlay", "froxel_inject",
+                   "froxel_integrate", "aerial", "taau_resolve", "luminance_meter", "particles")
         positions = [stages.index(stage) for stage in ordered]
         self.assertEqual(positions, sorted(positions))
         lighting = block(pipeline, "void RenderPipeline::execute_stage_lighting(")
@@ -4704,6 +4733,46 @@ class PassCallerStateContract(unittest.TestCase):
         for name in ("Ssao", "Froxel"):
             source = read(CLIENT / f"rendering/passes/{name}Pass.cpp")
             self.assertNotIn("glDisable(GL_DEPTH_TEST)", source)
+        # All optional stages between the final explicit cull producer and particles
+        # either retain the enable or restore it on every active backend.
+        for name in ("Lighting", "GodRays", "Froxel", "Aerial", "Taau", "LuminanceMeter"):
+            source = read(CLIENT / f"rendering/passes/{name}Pass.cpp")
+            self.assertNotRegex(source, r"gl(?:Enable|Disable)\s*\(GL_CULL_FACE\)")
+        for name in ("Skybox", "Foliage", "Particle"):
+            source = read(CLIENT / f"rendering/passes/{name}Pass.cpp")
+            execute = block(source, f"{name}Pass::execute(")
+            self.assertIn("const GLboolean cull_was_enabled = caller.cull_enabled", execute)
+            self.assertIn("if (cull_was_enabled) { glEnable(GL_CULL_FACE); }", compact(execute))
+        skybox = read(CLIENT / "rendering/passes/SkyboxPass.cpp")
+        overlays = skybox[skybox.index("void SkyboxPass::execute_weather_overlay("):]
+        self.assertNotIn("GL_CULL_FACE", overlays)
+        resolve = block(read(CLIENT / "rendering/passes/GlassOitPass.cpp"),
+                        "void GlassOitPass::execute_resolve(")
+        self.assertNotIn("GL_CULL_FACE", resolve)
+        gbuffer = read(CLIENT / "rendering/passes/GBufferPass.cpp")
+        for entry in ("geometry_pass_chunks(", "geometry_pass_skinned_meshes("):
+            self.assertNotIn("GL_CULL_FACE", block(gbuffer, "void GBufferPass::" + entry))
+        waterfall = compact(block(read(CLIENT / "rendering/passes/WaterfallPass.cpp"),
+                                  "void WaterfallPass::execute("))
+        self.assertIn("const GLboolean cull_was = glIsEnabled(GL_CULL_FACE)", waterfall)
+        self.assertIn("if (cull_was) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);", waterfall)
+        for name, entry in (("Water", "WaterDrawStats WaterPass::execute("),
+                            ("GlassOit", "void GlassOitPass::execute_accum(")):
+            execute = block(read(CLIENT / f"rendering/passes/{name}Pass.cpp"), entry)
+            disabled = execute.index("glDisable(GL_CULL_FACE)")
+            restored = execute.index("glEnable(GL_CULL_FACE)", disabled)
+            active = execute[disabled:restored]
+            if name == "Water":
+                active = active.replace(block(active, "if (auto* capture = GBufferDiagnosticCapture::Current())"), "", 1)
+            self.assertNotRegex(active, r"\breturn\b")
+        for stage in stages[stages.index("lighting"):stages.index("particles")]:
+            execute = block(pipeline, f"void RenderPipeline::execute_stage_{stage}(")
+            self.assertNotIn("glDisable(GL_CULL_FACE)", execute)
+        terrain = block(pipeline, "void RenderPipeline::draw_chunks_mdi(")
+        self.assertNotIn("GL_CULL_FACE", terrain)
+        for filename in ("FarLodSystem.cpp", "FarVolumeGlBackend.cpp"):
+            source = read(CLIENT / f"rendering/{filename}")
+            self.assertNotRegex(source, r"gl(?:Enable|Disable)\s*\(GL_CULL_FACE\)")
         replay = block(pipeline, "bool RenderPipeline::render_far_world_off_pair(")
         self.assertIn("dispatch_stages(camera)", replay)
 
@@ -4770,10 +4839,10 @@ class PassCallerStateContract(unittest.TestCase):
         gbuffer = block(read(CLIENT / "rendering/passes/GBufferPass.cpp"),
                         "GBufferDrawStats GBufferPass::execute(")
         self.assertIn(".draw_framebuffer = m_gbuffer.fbo_id", gbuffer)
-        self.assertIn("m_gbuffer, false, &caller)", compact(gbuffer))
+        self.assertIn("m_gbuffer, false, &authored_caller)", compact(gbuffer))
         for call in ("glEnable(GL_DEPTH_TEST)", "glDepthFunc(GL_GREATER)",
                      "glDepthMask(GL_TRUE)", "glBindFramebuffer(GL_FRAMEBUFFER, m_gbuffer.fbo_id)"):
-            self.assertLess(gbuffer.index(call), gbuffer.index("StaticDrawPass::CallerState caller"))
+            self.assertLess(gbuffer.index(call), gbuffer.index("StaticDrawPass::CallerState authored_caller"))
 
 
 if __name__ == "__main__":

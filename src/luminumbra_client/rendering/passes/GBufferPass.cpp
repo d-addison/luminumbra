@@ -275,22 +275,33 @@ void GBufferPass::reset_shaders() {
     m_skinned_mesh_ladder_shader.reset();
 }
 
+GBufferPass::CallerState GBufferPass::CallerState::QueryExternal() {
+    return {.cull_enabled = glIsEnabled(GL_CULL_FACE)};
+}
+
+GBufferDrawStats GBufferPass::execute_external(const RenderContext& ctx,
+                                               entt::registry& registry,
+                                               const GBufferPassInput& input) {
+    LUMIN_PROFILE_ZONE_N("GL GBufferPass.execute_external");
+    return execute(ctx, registry, input, CallerState::QueryExternal());
+}
+
 GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
                                       entt::registry& registry,
-                                      const GBufferPassInput& input) {
+                                      const GBufferPassInput& input,
+                                      const CallerState& caller) {
     LUMIN_PROFILE_ZONE_N("GL GBufferPass.execute");
     // Only diagnostic captures save caller state. Ordinary frames retain the
     // normal pass bindings without capture-only driver queries or restore binds.
     const bool diagnostic_capture = GBufferDiagnosticCapture::Current() != nullptr;
     GLint previous_vao = 0, previous_draw_fbo = 0, previous_read_fbo = 0;
     GLuint previous_gbuffer_fbo = 0;
-    GLboolean previous_cull = GL_FALSE;
+    const GLboolean previous_cull = caller.cull_enabled;
     if (diagnostic_capture) {
         previous_gbuffer_fbo = m_gbuffer.fbo_id;
         glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &previous_vao);
         glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous_draw_fbo);
         glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read_fbo);
-        previous_cull = glIsEnabled(GL_CULL_FACE);
     }
     ReplayRollback restore_gl([=, this]() noexcept {
         if (!diagnostic_capture) {
@@ -403,15 +414,15 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
         geometry_pass_chunks(ctx, input, camera, fp, stats);
 
         // Pass 2: Render all instanced static meshes
-        geometry_pass_static_meshes(ctx, input, registry, camera, fp, stats);
+        geometry_pass_static_meshes(ctx, input, registry, camera, fp, stats, caller);
         if (authored) {
             DebugViewPass::unsupported_surface();
             // Established above; mesh subpasses only change bindings/culling.
-            const StaticDrawPass::CallerState caller{
+            const StaticDrawPass::CallerState authored_caller{
                 .depth = {.function = GL_GREATER, .write_mask = GL_TRUE, .test_enabled = GL_TRUE},
                 .draw_framebuffer = m_gbuffer.fbo_id};
             const auto authored_stats = m_authored_pass->Render(
-                *input.authored_view, input.authored_draws, m_gbuffer, false, &caller);
+                *input.authored_view, input.authored_draws, m_gbuffer, false, &authored_caller);
             stats.authored_draws += authored_stats.draws;
             stats.authored_indices += authored_stats.indices;
         }
@@ -437,7 +448,7 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
             GBufferDrawStats replay_stats;
             if (iso.renders(SH::IsolationLayer::Terrain)) {
                 geometry_pass_chunks(ctx, input, camera, fp, replay_stats);
-                geometry_pass_static_meshes(ctx, input, registry, camera, fp, replay_stats);
+                geometry_pass_static_meshes(ctx, input, registry, camera, fp, replay_stats, caller);
                 if (authored) {
                     DebugViewPass::unsupported_surface();
                 }
@@ -704,7 +715,8 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                                               entt::registry& registry,
                                               const Camera& camera,
                                               const glm::vec4 (&frustum_planes)[6],
-                                              GBufferDrawStats& stats) {
+                                              GBufferDrawStats& stats,
+                                              const CallerState& caller) {
     Shader* shader = instanced_static_mesh_shader(input.far_selection.effective).get();
     auto* capture = GBufferDiagnosticCapture::Current();
     FarWorldPassUniforms diagnostic_uniforms;
@@ -1021,7 +1033,7 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         m_anchorChunks[index].resolved = false;
     }
     m_resolvedAnchorSlots.clear();
-    const GLboolean cull_was_enabled = glIsEnabled(GL_CULL_FACE);
+    const GLboolean cull_was_enabled = caller.cull_enabled;
     for (const auto& kv : m_visibleGroups) {
         const InstanceBatchCached& batch = kv.second;
         if (!batch.active)

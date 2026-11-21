@@ -6,6 +6,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <memory>
 #include <span>
@@ -55,6 +56,10 @@ class Shader;
 // ===========================================================================
 class ParticlePass {
 public:
+    struct CallerState {
+        GLboolean cull_enabled = GL_FALSE;
+        static CallerState QueryExternal();
+    };
     // --- Pinned capacities (documented design). ---
     static constexpr std::size_t kMaxInstances = 65536; // global ring pool
     static constexpr std::size_t kMaxEmitters = 256;    // concurrent emitters
@@ -289,7 +294,13 @@ public:
     // G-buffer depth/lit-scene draw target) from the RenderContext seam instead
     // of RenderPipeline&. RETURNS the instances drawn (0 on a no-op) so the
     // pipeline owns the stat bump at the call site.
-    std::size_t execute(const RenderContext& ctx, const Camera& camera);
+    // Shipping dispatch supplies known enable state; direct hosts preserve arbitrary state.
+    std::size_t execute(const RenderContext& ctx, const Camera& camera, const CallerState& caller);
+    std::size_t execute_external(const RenderContext& ctx, const Camera& camera);
+    // Preserve the existing direct-call boundary for previews and pass consumers.
+    std::size_t execute(const RenderContext& ctx, const Camera& camera) {
+        return execute_external(ctx, camera);
+    }
 
 private:
     struct ActiveEmitter {
