@@ -58,6 +58,12 @@ enum class NearTerrainRefinementResult {
 // roundoff). Non-height-like lattices refuse wholesale. The mesh and lattice
 // must come from the same immutable snapshot; this kernel never accesses a world.
 // Child triangles preserve the source's flat last-vertex material convention.
+// Input material IDs must fit a byte. Added render vertices use bit 31 as a
+// coverage flag, bits 0..7 as the flat ID, and five 3-bit numerators in bits
+// 8..22 (Stone, Soil, Grass, Sand, Deepslate), each divided by six. Both halves
+// and thirds are exact in this encoding; missing/non-ground lanes contribute
+// zero. g_buffer.vert decodes before interpolation. Never persist these words
+// or feed them back as refinement input; VoxelVertex and authority stay unchanged.
 //
 // Work is capped before scanning: 4913 densities, 6144 vertices, 2048 triangles,
 // and sorting 6144 edge records. At most 12288 output triangles and 5120 added

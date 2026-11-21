@@ -1694,6 +1694,15 @@ add_executable(frontier_gates_test
     persistence/SaveTransaction_test.cpp
 )
 
+# The region consumer regressions also exceed the default COFF section count.
+if(MSVC)
+    set_source_files_properties(common/RegionConsumerGate_test.cpp PROPERTIES
+        COMPILE_OPTIONS "/bigobj")
+elseif(MINGW)
+    set_source_files_properties(common/RegionConsumerGate_test.cpp PROPERTIES
+        COMPILE_OPTIONS "-Wa,-mbig-obj")
+endif()
+
 target_compile_definitions(frontier_gates_test PRIVATE
     LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
     LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts"
