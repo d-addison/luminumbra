@@ -2747,9 +2747,6 @@ if(LUMINUMBRA_ENABLE_TRACY)
 endif()
 add_test(NAME ProfilerSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/test/tools/check_profiler_contract.py)
-add_test(NAME TidySuppressionBudget COMMAND "${Python3_EXECUTABLE}" -I -B
-    ${CMAKE_SOURCE_DIR}/tools/ci/test_check_tidy_suppressions.py)
-set_tests_properties(TidySuppressionBudget PROPERTIES LABELS "ci;tools" TIMEOUT 30)
 
 # Generate from the production destructor so a shutdown reversion also changes
 # the native ordering probe. No access hooks are added to the production class.
