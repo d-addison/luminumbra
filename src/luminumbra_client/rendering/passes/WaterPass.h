@@ -65,7 +65,12 @@ public:
                            const Camera& camera,
                            bool capture_visibility = false);
 
-    // Last execute only. Empty when disabled or capture failed; never submission evidence.
+    // Invalidate at frame start even when submission is omitted.
+    void invalidate_visibility() {
+        m_visibility_mask = {};
+    }
+
+    // Current frame only. Empty when disabled or capture failed; never submission evidence.
     const WaterVisibilityMask& visibility_mask() const {
         return m_visibility_mask;
     }

@@ -17,6 +17,7 @@
 #include "luminumbra_client/rendering/RenderPipeline.h"
 #include "luminumbra_client/rendering/RenderResourceRegistry.h"
 #include "luminumbra_client/rendering/ScentFieldRenderMirror.h"
+#include "luminumbra_client/rendering/WaterVisibility.h"
 #include "luminumbra_client/rendering/passes/DebugViewPass.h"
 #include "luminumbra_client/rendering/passes/FoliagePass.h"
 #include "luminumbra_client/rendering/passes/FroxelPass.h"
@@ -283,6 +284,7 @@ TEST(PassContext, GlassUsesSharedRenderbufferDepthAndSurvivesRecreation) {
         GTEST_SKIP() << gl.error();
     using namespace Luminumbra::Rendering;
     GlassOitPass pass;
+    EXPECT_FALSE(pass.has_targets());
     Camera camera(glm::vec3(0, 0, 2));
     GLuint pane_vao = 0, quad_vao = 0;
     std::array<GLuint, 2> buffers{};
@@ -343,6 +345,7 @@ TEST(PassContext, GlassUsesSharedRenderbufferDepthAndSurvivesRecreation) {
             glClearColor(0.8f, 0.8f, 0.8f, 1);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             pass.execute_accum(ctx, input);
+            EXPECT_TRUE(pass.has_targets());
             pass.execute_resolve(ctx, input);
             EXPECT_EQ(glGetError(), GL_NO_ERROR);
             const auto pixels = ReadTarget(target);
@@ -414,6 +417,7 @@ TEST(PassContext, GlassUsesSharedRenderbufferDepthAndSurvivesRecreation) {
         }
         panes[0].tint = glm::vec3(0.2f, 0.8f, 0.3f);
         pass.destroy(); // the pipeline destroys OIT before replacing its shared depth on resize
+        EXPECT_FALSE(pass.has_targets());
         glDeleteRenderbuffers(1, &depth);
         glDeleteTextures(1, &opaque);
         glDeleteTextures(1, &target.tex);
@@ -1428,6 +1432,177 @@ TEST(PassContext, DeferredOnlyDiagnosticPolicyOmitsUnsupportedDrawsForOneAdmitte
     }
     pipeline.end_diagnostic_capture();
     EXPECT_FALSE(pipeline.diagnostic_capture_manifest().render_settings.contains("capture_policy"));
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(PassContext, DeferredOnlyWeatherOmitsSceneOverlayAndCompleteRetainsRefusal) {
+    HiddenGlContext gl;
+    ASSERT_TRUE(gl.ready()) << gl.error();
+    using namespace Luminumbra;
+    using namespace Luminumbra::Rendering;
+    using Policy = RenderPipeline::DiagnosticCapturePolicy;
+    ScopedEnv pinned_scale("LUMIN_RENDER_SCALE", "1.0");
+    RenderPipeline pipeline;
+    pipeline.enable_static_model_content(false);
+    ASSERT_TRUE(pipeline.startup(64, 48, LUMINUMBRA_SOURCE_ROOT));
+    pipeline.set_far_world_mode(FarWorldMode::Legacy);
+    pipeline.set_far_lod_enabled(false);
+    pipeline.set_taau_enabled(false);
+    pipeline.set_capture_diagnostics({.enabled = true, .probe = std::nullopt});
+    Systems::TerrainGenParams params;
+    params.biomes_enabled = params.structures_enabled = params.hydro_enabled = false;
+    Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    entt::registry registry;
+    Camera camera({0, 0, 2}, {0, 1, 0}, -90, 0);
+    for (const auto weather : {WeatherType::None,
+                               WeatherType::Rain,
+                               WeatherType::Snow,
+                               WeatherType::Fog,
+                               WeatherType::Storm}) {
+        for (const float intensity : {0.0f, 1.0f}) {
+            pipeline.set_weather(weather, intensity);
+            for (const auto policy : {Policy::DeferredOnlyFixedSite, Policy::Complete}) {
+                pipeline.render_frame(
+                    registry, world, camera, 0.0f, false, UploadPresentation::Settled, policy);
+                const bool complete = policy == Policy::Complete;
+                const bool active = weather != WeatherType::None && intensity > 0;
+                EXPECT_EQ(pipeline.diagnostic_capture_ready(), !complete || !active);
+                EXPECT_EQ(pipeline.diagnostic_capture_refusal(),
+                          complete && active ? "producer_coverage_incomplete" : "");
+                EXPECT_EQ(pipeline.get_weather_type(), weather);
+            }
+        }
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(PassContext, OmittedWaterInvalidatesVisibilityAcrossPolicyAndIsolationChanges) {
+    HiddenGlContext gl;
+    ASSERT_TRUE(gl.ready()) << gl.error();
+    using namespace Luminumbra;
+    using namespace Luminumbra::Rendering;
+    using namespace Luminumbra::Client::ScenarioHarness;
+    using Policy = RenderPipeline::DiagnosticCapturePolicy;
+    ScopedEnv pinned_scale("LUMIN_RENDER_SCALE", "1.0");
+    RenderPipeline pipeline;
+    pipeline.enable_static_model_content(false);
+    ASSERT_TRUE(pipeline.startup(64, 48, LUMINUMBRA_SOURCE_ROOT));
+    pipeline.set_far_world_mode(FarWorldMode::Legacy);
+    pipeline.set_far_lod_enabled(false);
+    pipeline.set_taau_enabled(false);
+    pipeline.set_water_visibility_capture_enabled(true);
+    pipeline.set_capture_diagnostics({.enabled = true, .probe = std::nullopt});
+    Systems::TerrainGenParams params;
+    params.biomes_enabled = params.structures_enabled = params.hydro_enabled = false;
+    Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    auto chunk = std::make_shared<Chunk>(IVec3(0));
+    chunk->set_state(ChunkState::Ready);
+    chunk->water_mesh_vertices = {{{0, 6, 0}, {0, 1, 0}, 0u},
+                                  {{0, 6, 16}, {0, 1, 0}, 0u},
+                                  {{16, 6, 0}, {0, 1, 0}, 0u},
+                                  {{16, 6, 16}, {0, 1, 0}, 0u}};
+    chunk->water_mesh_indices = {0u, 1u, 2u, 2u, 1u, 3u};
+    chunk->water_mesh_version.store(1u);
+    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    entt::registry registry;
+    Camera camera({8, 12, 8}, {0, 1, 0}, -90, -89);
+    for (const bool isolate_water : {false, true}) {
+        pipeline.set_diagnostic_capture_armed(false);
+        pipeline.render_frame(registry, world, camera, 0.0f);
+        ASSERT_EQ(pipeline.get_last_render_pass_stats().water_draws, 1u);
+        ASSERT_TRUE(pipeline.water_visibility_mask().valid());
+        ASSERT_GT(pipeline.water_visibility_mask().visible_pixels_in_target(), 0u);
+        pipeline.set_diagnostic_capture_armed(true);
+        if (isolate_water) {
+            pipeline.set_isolation_config(
+                {.layer_mask = IsolationLayer::All & ~IsolationLayer::Water,
+                 .backdrop = BackdropMode::Scene});
+        }
+        for (int repeat = 0; repeat < 2; ++repeat) {
+            pipeline.render_frame(registry,
+                                  world,
+                                  camera,
+                                  0.0f,
+                                  false,
+                                  UploadPresentation::Settled,
+                                  isolate_water ? Policy::Complete : Policy::DeferredOnlyFixedSite);
+            EXPECT_EQ(pipeline.get_last_render_pass_stats().water_draws, 0u);
+            pipeline.end_diagnostic_capture();
+            pipeline.set_isolation_config({});
+            EXPECT_FALSE(pipeline.water_visibility_mask().valid());
+            if (isolate_water) {
+                pipeline.set_isolation_config(
+                    {.layer_mask = IsolationLayer::All & ~IsolationLayer::Water,
+                     .backdrop = BackdropMode::Scene});
+            }
+        }
+        pipeline.set_isolation_config({});
+    }
+    pipeline.set_diagnostic_capture_armed(false);
+    pipeline.render_frame(registry, world, camera, 0.0f);
+    ASSERT_TRUE(pipeline.water_visibility_mask().valid());
+    pipeline.set_water_visibility_capture_enabled(false);
+    pipeline.render_frame(registry, world, camera, 0.0f);
+    pipeline.set_water_visibility_capture_enabled(true);
+    EXPECT_FALSE(pipeline.water_visibility_mask().valid());
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(PassContext, PairedReplayRefusesColdGlassWithoutChangingReducedCapture) {
+    HiddenGlContext gl;
+    ASSERT_TRUE(gl.ready()) << gl.error();
+    using namespace Luminumbra;
+    using namespace Luminumbra::Rendering;
+    using Policy = RenderPipeline::DiagnosticCapturePolicy;
+    ScopedEnv pinned_scale("LUMIN_RENDER_SCALE", "1.0");
+    RenderPipeline pipeline;
+    pipeline.enable_static_model_content(false);
+    ASSERT_TRUE(pipeline.startup(64, 48, LUMINUMBRA_SOURCE_ROOT));
+    pipeline.set_far_world_mode(FarWorldMode::Legacy);
+    pipeline.set_far_lod_enabled(false);
+    pipeline.set_taau_enabled(false);
+    pipeline.set_capture_diagnostics({.enabled = true, .probe = std::nullopt});
+    Systems::TerrainGenParams params;
+    params.biomes_enabled = params.structures_enabled = params.hydro_enabled = false;
+    Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    entt::registry registry;
+    Camera camera({0, 0, 2}, {0, 1, 0}, -90, 0);
+    pipeline.set_glass_panes({GlassPaneItem{}});
+    const auto reduced = [&] {
+        pipeline.render_frame(registry,
+                              world,
+                              camera,
+                              0.0f,
+                              false,
+                              UploadPresentation::Settled,
+                              Policy::DeferredOnlyFixedSite);
+    };
+    reduced();
+    ASSERT_TRUE(pipeline.diagnostic_capture_ready());
+    const auto trace = pipeline.frame_stage_trace();
+    for (int repeat = 0; repeat < 2; ++repeat) {
+        EXPECT_FALSE(pipeline.render_far_world_off_pair(camera));
+        EXPECT_TRUE(pipeline.diagnostic_capture_ready());
+        EXPECT_TRUE(
+            pipeline.diagnostic_capture_manifest().render_settings.contains("capture_policy"));
+        EXPECT_EQ(pipeline.frame_stage_trace(), trace);
+    }
+    pipeline.end_diagnostic_capture();
+    EXPECT_FALSE(pipeline.render_far_world_off_pair(camera));
+    pipeline.set_glass_panes({});
+    EXPECT_TRUE(pipeline.render_far_world_off_pair(camera));
+    pipeline.set_glass_panes({GlassPaneItem{}});
+    pipeline.render_frame(registry, world, camera, 0.0f);
+    EXPECT_FALSE(pipeline.diagnostic_capture_ready());
+    reduced();
+    ASSERT_TRUE(pipeline.diagnostic_capture_ready());
+    EXPECT_TRUE(pipeline.render_far_world_off_pair(camera));
+    EXPECT_FALSE(pipeline.diagnostic_capture_ready());
+    pipeline.on_resize(80, 60);
+    reduced();
+    ASSERT_TRUE(pipeline.diagnostic_capture_ready());
+    EXPECT_FALSE(pipeline.render_far_world_off_pair(camera));
+    EXPECT_TRUE(pipeline.diagnostic_capture_ready());
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }
 

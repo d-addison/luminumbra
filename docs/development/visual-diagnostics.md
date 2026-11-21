@@ -968,15 +968,27 @@ pending. No temporal or all-features runtime support is claimed.
 The renderer exposes an explicit `DeferredOnlyFixedSite` policy for a single
 admitted A4 diagnostic frame. It omits procedural plants, scent decals, forward
 water and waterfalls, glass accumulation and resolve, foliage and particles before
-draw submission. Supported deferred geometry, lighting, sky, weather grading and
-lightning remain; weather precipitation particles are omitted. The capture's
+draw submission. The scene-compositing weather overlay and its snapshot are also
+omitted because that overlay has no exact contributor mask. Supported deferred
+geometry, lighting, sky and lightning remain, including weather inputs to lighting
+and sky. Scene-overlay grading and weather precipitation particles are omitted.
+The capture's
 `render_settings.capture_policy` is `deferred_only_fixed_site`. This is a reduced
 capture, so it cannot establish all-features or precipitation evidence. Default
-renders, parity/replay dispatch and unadmitted diagnostic requests retain their
-existing behavior and unsupported-contributor refusals. Registered
-`PassContext.DeferredOnlyDiagnosticPolicyOmitsUnsupportedDrawsForOneAdmittedFrame`
-and Python attribution-wiring regressions cover admission, stage exclusion,
-metadata and policy isolation. The policy has no temporal runtime caller yet:
+renders and unadmitted diagnostic requests retain their existing behavior and
+unsupported-contributor refusals. Paired replay refuses before changing the capture
+when nonempty glass lacks prepared OIT targets, valid accumulation/resolve shaders
+or draw VAOs; an ordinary glass frame prepares those resources. Empty glass needs
+no OIT resources. Resize retires the targets and requires preparation again. Water
+visibility evidence is invalidated at every frame start, including omitted water
+submission and layer isolation. Registered
+`PassContext.DeferredOnlyDiagnosticPolicyOmitsUnsupportedDrawsForOneAdmittedFrame`,
+`PassContext.DeferredOnlyWeatherOmitsSceneOverlayAndCompleteRetainsRefusal`,
+`PassContext.OmittedWaterInvalidatesVisibilityAcrossPolicyAndIsolationChanges`,
+`PassContext.PairedReplayRefusesColdGlassWithoutChangingReducedCapture`
+and Python attribution-wiring regressions cover admission, active rain/snow/fog,
+stage exclusion, water evidence lifetime, replay resource admission, metadata and
+policy isolation. The policy has no temporal runtime caller yet:
 fixed-site transport integration and native day/night and weather-cycle
 recapture with non-vacuous manifests and bounded payload verification remain
 pending. No authority revision, simulation identity or save format changes.

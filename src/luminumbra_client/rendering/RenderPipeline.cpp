@@ -2825,6 +2825,7 @@ void RenderPipeline::render_frame(entt::registry& registry,
                                   UploadPresentation presentation,
                                   DiagnosticCapturePolicy capture_policy) {
     end_diagnostic_capture();
+    m_water_pass->invalidate_visibility();
     if (!m_started) {
         return;
     }
@@ -2954,6 +2955,15 @@ FarReplayCamera RenderPipeline::replay_camera(const Camera& camera) const {
 bool RenderPipeline::render_far_world_off_pair(const Camera& camera) {
     if (!m_started || !m_frame_prepared.valid || m_far_world_paired)
         return false;
+    // Frozen dispatch cannot initialize glass resources omitted by an earlier frame.
+    // Refuse before detaching attribution or mutating the prepared frame and GL state.
+    if (!m_glass_pane_items.empty() &&
+        (!m_glass_oit_pass->has_targets() || !m_glass_oit_pass->accum_shader() ||
+         !m_glass_oit_pass->accum_shader()->IsValid() || !m_glass_oit_pass->resolve_shader() ||
+         !m_glass_oit_pass->resolve_shader()->IsValid() || !m_glass_quad_vao ||
+         !m_screen_quad_vao)) {
+        return false;
+    }
     const bool history_matches = m_taau_enabled == m_far_world_pair_taau_enabled &&
                                  m_taau_frame == m_far_world_pair_jitter_frame &&
                                  m_taau_jitter_ndc == m_far_world_pair_jitter &&
@@ -3321,14 +3331,17 @@ void RenderPipeline::dispatch_stages(const Camera& camera, bool deferred_only_ca
         // The fixed graph has a bounded number of stages. Exclude every A4
         // unsupported producer before submission, retaining the graph trace and
         // G-buffer timer/state epilogue even when procedural plants are omitted.
-        if (deferred_only_capture && (fn == &RenderPipeline::execute_stage_plant_procgen ||
-                                      fn == &RenderPipeline::execute_stage_ground_decals ||
-                                      fn == &RenderPipeline::execute_stage_water ||
-                                      fn == &RenderPipeline::execute_stage_waterfall ||
-                                      fn == &RenderPipeline::execute_stage_glass_oit_accum ||
-                                      fn == &RenderPipeline::execute_stage_glass_oit_resolve ||
-                                      fn == &RenderPipeline::execute_stage_foliage ||
-                                      fn == &RenderPipeline::execute_stage_particles)) {
+        if (deferred_only_capture &&
+            (fn == &RenderPipeline::execute_stage_plant_procgen ||
+             fn == &RenderPipeline::execute_stage_ground_decals ||
+             fn == &RenderPipeline::execute_stage_water ||
+             fn == &RenderPipeline::execute_stage_waterfall ||
+             fn == &RenderPipeline::execute_stage_glass_oit_accum ||
+             fn == &RenderPipeline::execute_stage_glass_oit_resolve ||
+             fn == &RenderPipeline::execute_stage_foliage ||
+             fn == &RenderPipeline::execute_stage_weather_opaque_snapshot ||
+             fn == &RenderPipeline::execute_stage_weather_overlay ||
+             fn == &RenderPipeline::execute_stage_particles)) {
             record_frame_stage(node.c_str());
             if (fn == &RenderPipeline::execute_stage_plant_procgen) {
                 finish_gbuffer_stage();

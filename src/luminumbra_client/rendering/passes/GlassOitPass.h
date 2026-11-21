@@ -36,6 +36,11 @@ public:
     void execute_resolve(const RenderContext& ctx, const GlassOitPassInput& input);
     void destroy();
 
+    // Const diagnostic for replay admission; shader validity is checked separately.
+    bool has_targets() const {
+        return m_fbo != 0 && m_accum_tex != 0 && m_reveal_tex != 0;
+    }
+
     const std::unique_ptr<Shader>& accum_shader() const {
         return m_accum_shader;
     }

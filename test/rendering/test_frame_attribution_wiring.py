@@ -3,6 +3,7 @@
 from pathlib import Path
 import ast
 import hashlib
+import itertools
 import json
 import math
 import re
@@ -3931,7 +3932,8 @@ class LaterDiagnosticSubmissionWiring(unittest.TestCase):
         dispatch = block(source, "void RenderPipeline::dispatch_stages(")
         predicate = re.search(r"if \((deferred_only_capture &&.*?)\) \{", dispatch, re.S).group(1)
         omitted = {"plant_procgen", "ground_decals", "water", "waterfall",
-                   "glass_oit_accum", "glass_oit_resolve", "foliage", "particles"}
+                   "glass_oit_accum", "glass_oit_resolve", "foliage", "particles",
+                   "weather_opaque_snapshot", "weather_overlay"}
         table = block(source, "RenderPipeline::stage_executor_table()")
         stages = re.findall(r'\{"(\w+)", &RenderPipeline::execute_stage_\w+\}', table)
         self.assertGreater(len(stages), len(omitted))
@@ -3957,6 +3959,49 @@ class LaterDiagnosticSubmissionWiring(unittest.TestCase):
         native = read(ROOT / "test/rendering/pass_context_test.cpp")
         self.assertIn("TEST(PassContext, DeferredOnlyDiagnosticPolicyOmitsUnsupportedDrawsForOneAdmittedFrame)",
                       compact(native))
+
+    def test_water_visibility_is_invalidated_before_every_frame_admission(self):
+        source = read(CLIENT / "rendering/RenderPipeline.cpp")
+        render = block(source, "void RenderPipeline::render_frame(")
+        reset = "m_water_pass->invalidate_visibility();"
+        self.assertLess(render.index(reset), render.index("if (!m_started)"))
+        self.assertLess(render.index(reset), render.index("prepare_frame("))
+        water = read(CLIENT / "rendering/passes/WaterPass.h")
+        self.assertEqual(compact(block(water, "void invalidate_visibility()")),
+                         "m_visibility_mask = {};")
+        accessor = block(source, "const WaterVisibilityMask& RenderPipeline::water_visibility_mask()")
+        self.assertIn("return m_water_pass->visibility_mask();", accessor)
+        self.assertIn("TEST(PassContext, OmittedWaterInvalidatesVisibilityAcrossPolicyAndIsolationChanges)",
+                      compact(read(ROOT / "test/rendering/pass_context_test.cpp")))
+
+    def test_glass_replay_admits_only_complete_resources_before_any_mutation(self):
+        source = read(CLIENT / "rendering/RenderPipeline.cpp")
+        pair = block(source, "bool RenderPipeline::render_far_world_off_pair(")
+        marker = "if (!m_glass_pane_items.empty() &&"
+        predicate = re.search(r"if \((!m_glass_pane_items.empty\(\).*?)\) \{", pair, re.S).group(1)
+        resources = ("m_glass_oit_pass->has_targets()",
+                     "m_glass_oit_pass->accum_shader()",
+                     "m_glass_oit_pass->accum_shader()->IsValid()",
+                     "m_glass_oit_pass->resolve_shader()",
+                     "m_glass_oit_pass->resolve_shader()->IsValid()",
+                     "m_glass_quad_vao", "m_screen_quad_vao")
+        for empty in (False, True):
+            for values in itertools.product((False, True), repeat=len(resources)):
+                bindings = dict(zip(resources, values))
+                bindings["m_glass_pane_items.empty()"] = empty
+                self.assertEqual(cpp_expression(predicate, **bindings),
+                                 not empty and not all(values), (empty, values))
+        self.assertEqual(compact(block(pair, marker)), "return false;")
+        self.assertLess(pair.index(marker), pair.index("RunFarWorldReplay("))
+        self.assertLess(pair.index(resources[1]), pair.index(resources[2]))
+        self.assertLess(pair.index(resources[3]), pair.index(resources[4]))
+        glass = read(CLIENT / "rendering/passes/GlassOitPass.h")
+        targets = re.search(r"return (.*?);", block(glass, "bool has_targets() const")).group(1)
+        for values in itertools.product((0, 1), repeat=3):
+            self.assertEqual(cpp_expression(targets, **dict(zip(
+                ("m_fbo", "m_accum_tex", "m_reveal_tex"), values))), all(values))
+        self.assertIn("TEST(PassContext, PairedReplayRefusesColdGlassWithoutChangingReducedCapture)",
+                      compact(read(ROOT / "test/rendering/pass_context_test.cpp")))
 
     @staticmethod
     def without_diagnostics(source):
