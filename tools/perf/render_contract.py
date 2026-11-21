@@ -23,6 +23,10 @@ ACTION_SEQUENCES = {
 METRICS = ('frame_wall_ms', 'cpu_submit_ms', 'present_ms', 'gpu_frame_ms', 'gpu_pass_sum_ms')
 PASSES = ('shadow', 'gbuffer', 'ssao', 'ssao_blur', 'lighting', 'water', 'skybox',
           'particle', 'foliage', 'aerial', 'final_blit')
+GPU_STAGES = ('depth_blit_to_lighting', 'opaque_snapshot', 'froxel_inject',
+              'froxel_integrate', 'taau_resolve', 'foliage_count', 'foliage_prefix',
+              'foliage_emit', 'cloud_dome', 'cloud_composite')
+GPU_SUBSTAGES = ('cloud_dome', 'cloud_composite')
 STATS = ('p50', 'p95', 'p99', 'max', 'mad')
 GPU_EPSILON_MS = 0.05  # Timestamp precision allowance, not a performance threshold.
 
@@ -341,6 +345,9 @@ def validate(data, qualified_renderer=None, qualified_vendor=None, traversal=Non
     rows = data['frame_samples']
     if not isinstance(rows, list) or len(rows) != count:
         raise ValueError('incomplete frame sample coverage')
+    pass_names = PASSES
+    if rows and any(name in rows[0]['passes'] for name in GPU_STAGES):
+        pass_names += GPU_STAGES
     for index, row in enumerate(rows):
         frame = warmup + index
         if type(row['frame']) is not int or type(row['gpu_frame']) is not int or row['frame'] != frame or row['gpu_frame'] != frame:
@@ -349,15 +356,17 @@ def validate(data, qualified_renderer=None, qualified_vendor=None, traversal=Non
             number(row[metric], metric)
         if row['gpu_frame_ms'] + GPU_EPSILON_MS < row['gpu_pass_sum_ms']:
             raise ValueError('whole-frame GPU time is shorter than the pass sum')
-        if set(row['passes']) != set(PASSES):
+        if set(row['passes']) != set(pass_names):
             raise ValueError('incomplete pass timer coverage')
         total = 0
-        for name in PASSES:
+        for name in pass_names:
             timer = row['passes'][name]
             if type(timer['issued']) is not bool:
                 raise ValueError('invalid pass timer status')
             if timer['issued']:
-                total += number(timer['ms'], name + ' timer')
+                duration = number(timer['ms'], name + ' timer')
+                if name not in GPU_SUBSTAGES:
+                    total += duration
             elif timer['ms'] is not None:
                 raise ValueError('unissued timer must be unavailable, not zero')
         if (not any(timer['issued'] for timer in row['passes'].values()) and
@@ -376,7 +385,7 @@ def validate(data, qualified_renderer=None, qualified_vendor=None, traversal=Non
         for stat in STATS:
             equal_number(block[stat], expected[stat], metric + '.' + stat)
         equal_number(data['avg'][metric], sum(values) / count, metric + ' mean')
-    for name in PASSES:
+    for name in pass_names:
         expected = sum(row['passes'][name]['ms'] or 0 for row in rows) / count
         equal_number(data['avg_ms'][name], expected, name + ' mean')
     equal_number(data['avg_ms']['total'], data['avg']['gpu_pass_sum_ms'], 'legacy total')

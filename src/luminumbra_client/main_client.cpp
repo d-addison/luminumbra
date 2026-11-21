@@ -4070,6 +4070,8 @@ int main(int argc, char* argv[]) {
     const glm::vec3 kRenderBenchmarkCameraPosition(Luminumbra::BenchmarkPose::kPosX,
                                                    Luminumbra::BenchmarkPose::kPosY,
                                                    Luminumbra::BenchmarkPose::kPosZ);
+    // Ten appended GPU intervals; the final two are included in Skybox.
+    std::array<double, Measurement::kPassCount - Measurement::kLegacyPassCount> gpu_stage_totals{};
     std::unique_ptr<Measurement::SampleRing> measured_samples;
     std::unique_ptr<Luminumbra::Rendering::BenchmarkGpuQueries> benchmark_queries;
     std::uint64_t traversal_ticks = 0;
@@ -4688,6 +4690,8 @@ int main(int argc, char* argv[]) {
     };
     const bool frame_attribution_enabled =
         frame_csv_enabled || HasCommandLineFlag(argc, argv, "--frame-attribution");
+    renderPipeline.set_gpu_stage_attribution(frame_attribution_enabled ||
+                                             !g_app.capture.render_benchmark_path.empty());
     Attribution::FrameRecorder frame_recorder(frame_csv_enabled, "logs");
     if (frame_csv_enabled && !frame_recorder.active())
         LUMINUMBRA_CORE_ERROR("Cannot open logs/frame-attribution.csv");
@@ -7697,6 +7701,24 @@ int main(int argc, char* argv[]) {
                 rb_foliage += s.foliage_gpu_ms;
                 rb_aerial += s.aerial_gpu_ms;
                 rb_final += s.final_blit_gpu_ms;
+                const std::array stage_times = {
+                    s.depth_blit_to_lighting_gpu_ms,
+                    s.opaque_snapshot_gpu_ms,
+                    s.froxel_inject_gpu_ms,
+                    s.froxel_integrate_gpu_ms,
+                    s.taau_resolve_gpu_ms,
+                    s.foliage_count_gpu_ms,
+                    s.foliage_prefix_gpu_ms,
+                    s.foliage_emit_gpu_ms,
+                    s.cloud_dome_gpu_ms,
+                    s.cloud_composite_gpu_ms,
+                };
+                for (std::size_t stage = 0; stage < stage_times.size(); ++stage) {
+                    gpu_stage_totals[stage] += stage_times[stage];
+                    if (Measurement::kLegacyPassCount + stage < Measurement::kSummedPassCount) {
+                        rb_total += stage_times[stage];
+                    }
+                }
                 rb_total += s.shadow_gpu_ms + s.gbuffer_gpu_ms + s.ssao_gpu_ms +
                             s.ssao_blur_gpu_ms + s.lighting_gpu_ms + s.water_gpu_ms +
                             s.skybox_gpu_ms + s.particle_gpu_ms + s.foliage_gpu_ms +
@@ -7929,6 +7951,10 @@ int main(int argc, char* argv[]) {
                                {"aerial", rb_aerial / n},
                                {"final_blit", rb_final / n},
                                {"total", gpu_sum}};
+                for (std::size_t stage = 0; stage < gpu_stage_totals.size(); ++stage) {
+                    j["avg_ms"][Measurement::kPassNames[Measurement::kLegacyPassCount + stage]] =
+                        gpu_stage_totals[stage] / n;
+                }
                 // The honest frame attribution (the numbers that actually decide
                 // whether we are CPU-bound or GPU-bound).
                 j["avg"] = {{"cpu_submit_ms", cpu},

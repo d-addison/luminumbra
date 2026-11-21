@@ -416,6 +416,209 @@ class GameplayPhotoRelease(unittest.TestCase):
                                      (4.0, True, True, 0))
 
 
+class GpuStageAttributionWiring(unittest.TestCase):
+    stages = (
+        ('DepthBlitToLighting', 'depth_blit_to_lighting'),
+        ('OpaqueSnapshot', 'opaque_snapshot'),
+        ('FroxelInject', 'froxel_inject'),
+        ('FroxelIntegrate', 'froxel_integrate'),
+        ('TaauResolve', 'taau_resolve'),
+        ('FoliageCount', 'foliage_count'),
+        ('FoliagePrefix', 'foliage_prefix'),
+        ('FoliageEmit', 'foliage_emit'),
+        ('CloudDome', 'cloud_dome'),
+        ('CloudComposite', 'cloud_composite'),
+    )
+
+    def setUp(self):
+        self.pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        self.measurement = read(CLIENT / "app/RenderMeasurement.h")
+        self.main = read(CLIENT / "main_client.cpp")
+
+    def assert_bracket(self, body, stage, operation):
+        begin = body.index(f"begin_gpu_pass_timer(GpuTimerPass::{stage})")
+        end = body.index(f"end_gpu_pass_timer(GpuTimerPass::{stage})")
+        self.assertLess(begin, body.index(operation))
+        self.assertLess(body.index(operation), end)
+        self.assertNotIn("return", body[begin:end])
+
+    def test_render_operations_keep_timestamp_brackets_on_all_paths(self):
+        operations = ('glBlitFramebuffer(', 'copy_lighting_color_to_opaque_texture(',
+                      'execute_inject(', 'execute_integrate(', 'm_taau_pass->execute(')
+        for (stage, name), operation in zip(self.stages, operations):
+            with self.subTest(stage=name):
+                body = block(self.pipeline, f"void RenderPipeline::execute_stage_{name}(")
+                self.assert_bracket(body, stage, operation)
+        skybox = block(self.pipeline, "void RenderPipeline::execute_stage_skybox(")
+        self.assert_bracket(skybox, "Skybox", "m_skybox_pass->execute(")
+        reduced = block(skybox, "if (m_cloud_quality > 0")
+        legacy = block(skybox, "else")
+        self.assert_bracket(reduced, "CloudDome", "m_skybox_pass->execute(")
+        self.assert_bracket(legacy, "CloudDome", "m_skybox_pass->execute(")
+        self.assert_bracket(reduced, "CloudComposite", "Submit(glDrawArrays")
+        self.assertNotIn("GpuTimerPass::CloudComposite", legacy)
+        self.assertLess(reduced.index("end_gpu_pass_timer(GpuTimerPass::CloudDome)"),
+                        reduced.index("begin_gpu_pass_timer(GpuTimerPass::CloudComposite)"))
+        opaque = block(self.pipeline, "void RenderPipeline::execute_stage_opaque_snapshot(")
+        self.assert_bracket(block(opaque, "if (consumers.opaque_snapshot())"),
+                            "OpaqueSnapshot", "copy_lighting_color_to_opaque_texture(")
+        taau = block(self.pipeline, "void RenderPipeline::execute_stage_taau_resolve(")
+        self.assert_bracket(block(taau, "if (m_taau_enabled)"),
+                            "TaauResolve", "m_taau_pass->execute(")
+
+    def test_scatter_dispatches_and_barriers_are_inside_separate_intervals(self):
+        scatter = block(read(CLIENT / "rendering/passes/FoliagePass.cpp"),
+                        "void FoliagePass::dispatch_scatter()")
+        spans = []
+        for stage in range(3):
+            begin = scatter.index(f"m_scatter_gpu_timers[{stage}].begin()")
+            end = scatter.index(f"m_scatter_gpu_timers[{stage}].end()")
+            commands = scatter[begin:end]
+            self.assertEqual(commands.count("glDispatchCompute"), 1)
+            self.assertEqual(commands.count("glMemoryBarrier"), 1)
+            self.assertNotIn("return", commands)
+            spans.append((begin, end))
+        self.assertLess(spans[0][1], spans[1][0])
+        self.assertLess(spans[1][1], spans[2][0])
+        refresh = block(self.pipeline, "void RenderPipeline::refresh_scatter_gpu_timers()")
+        names = re.findall(r"gpu_pass_timer\(GpuTimerPass::(\w+)\)", refresh)
+        self.assertEqual(names, ['FoliageCount', 'FoliagePrefix', 'FoliageEmit'])
+        finish = block(self.pipeline, "void RenderPipeline::finish_gpu_pass_timer_frame()")
+        self.assertLess(finish.index("++m_gpu_timers.frame_index"),
+                        finish.index("refresh_scatter_gpu_timers()"))
+
+    def test_names_append_and_both_report_sums_cover_only_disjoint_intervals(self):
+        legacy = ['shadow', 'gbuffer', 'ssao', 'ssao_blur', 'lighting', 'water',
+                  'skybox', 'particle', 'foliage', 'aerial', 'final_blit']
+        expected = legacy + [name for _, name in self.stages]
+        names = re.findall(r'"([^"\n]+)"', block(self.measurement, 'kPassNames ='))
+        self.assertEqual(names, expected)
+        debug_names = re.findall(r'"([^"\n]+)"', block(self.pipeline, 'kGpuTimerPassNames[] ='))
+        self.assertEqual([name.replace('particles', 'particle') for name in debug_names], expected)
+        header = read(CLIENT / "rendering/RenderPipeline.h")
+        enum = block(header, "enum class GpuTimerPass")
+        self.assertEqual(re.findall(r"\b(\w+),", enum)[-11:-1], [stage for stage, _ in self.stages])
+        collect = compact(block(self.pipeline, "void RenderPipeline::collect_gpu_pass_timers()"))
+        for stage, name in self.stages:
+            self.assertIn(f"m_last_render_pass_stats.{name}_gpu_ms = "
+                          f"m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::{stage})]", collect)
+        times = re.search(r"const std::array stage_times\s*=\s*\{(.*?)\};", self.main, re.S).group(1)
+        self.assertEqual(re.findall(r"s\.(\w+)_gpu_ms", times), [name for _, name in self.stages])
+        legacy_count = int(re.search(r"kLegacyPassCount = (\d+)", self.measurement).group(1))
+        summed_count = int(re.search(r"kSummedPassCount = (\d+)", self.measurement).group(1))
+        main_condition = re.search(r"if \((Measurement::kLegacyPassCount.*?)\)", self.main).group(1)
+        query_condition = re.search(r"if \((pass < kSummedPassCount.*?)\)", self.measurement).group(1)
+        for index, (_, name) in enumerate(self.stages):
+            contributes = name not in ('cloud_dome', 'cloud_composite')
+            self.assertEqual(cpp_expression(main_condition, **{
+                'Measurement::kLegacyPassCount': legacy_count, 'stage': index,
+                'Measurement::kSummedPassCount': summed_count}), contributes)
+            self.assertEqual(cpp_expression(query_condition, **{
+                'pass': legacy_count + index, 'kSummedPassCount': summed_count,
+                'sample.passes[pass]': True}), contributes)
+        self.assertIn('gpu_stage_totals[stage] += stage_times[stage]', self.main)
+        self.assertIn('rb_total += stage_times[stage]', self.main)
+        self.assertIn('gpu_stage_totals[stage] / n', self.main)
+        self.assertIn('Measurement::kPassNames[Measurement::kLegacyPassCount + stage]', self.main)
+        report = read(CLIENT / 'app/RenderBenchmarkReport.h')
+        self.assertIn('row["passes"][kPassNames[pass]]', report)
+        self.assertIn('report["avg_ms"][kPassNames[pass]]', report)
+
+    def test_appended_gpu_stages_preserve_legacy_and_exclude_cloud_substages(self):
+        import runpy
+
+        helpers = runpy.run_path(str(ROOT / 'tools/perf/test_render_contract.py'))
+        contract = helpers['contract']
+        artifact = helpers['artifact']
+        qualified = helpers['QUALIFIED']
+        perf = helpers['perf']
+        import copy
+
+        self.assertEqual(contract.validate(artifact(), qualified)['verdict'], 'PASS')
+        data = artifact()
+        stages = ('depth_blit_to_lighting', 'opaque_snapshot', 'froxel_inject',
+                  'froxel_integrate', 'taau_resolve', 'foliage_count', 'foliage_prefix',
+                  'foliage_emit', 'cloud_dome', 'cloud_composite')
+        for row in data['frame_samples']:
+            for name in stages:
+                row['passes'][name] = {'issued': True, 'ms': 0.01}
+            row['gpu_pass_sum_ms'] += 0.08
+        for name in stages:
+            data['avg_ms'][name] = 0.01
+        values = [row['gpu_pass_sum_ms'] for row in data['frame_samples']]
+        summary = perf.summarize(values, 'ms')
+        data['distribution']['gpu_pass_sum_ms'].update({key: summary[key] for key in contract.STATS})
+        data['avg']['gpu_pass_sum_ms'] = sum(values) / len(values)
+        data['avg_ms']['total'] = data['avg']['gpu_pass_sum_ms']
+        self.assertEqual(contract.validate(data, qualified)['verdict'], 'PASS')
+        for name in stages:
+            for changed in ('missing', 'unavailable', 'unissued', 'negative', 'mean'):
+                broken = copy.deepcopy(data)
+                timer = broken['frame_samples'][0]['passes'][name]
+                if changed == 'missing':
+                    del broken['frame_samples'][0]['passes'][name]
+                elif changed == 'unavailable':
+                    timer['ms'] = None
+                elif changed == 'unissued':
+                    timer['issued'] = False
+                elif changed == 'negative':
+                    timer['ms'] = -1
+                else:
+                    broken['avg_ms'][name] = 1
+                with self.subTest(stage=name, changed=changed), self.assertRaises(ValueError):
+                    contract.validate(broken, qualified)
+        for name in stages:
+            broken = copy.deepcopy(data)
+            # Every added disjoint interval affects the sum; cloud diagnostics do not.
+            broken['frame_samples'][0]['passes'][name]['ms'] += 0.1
+            broken['avg_ms'][name] += 0.1 / len(broken['frame_samples'])
+            with self.subTest(stage=name):
+                if name in ('cloud_dome', 'cloud_composite'):
+                    self.assertEqual(contract.validate(broken, qualified)['verdict'], 'PASS')
+                else:
+                    with self.assertRaisesRegex(ValueError, 'pass sum'):
+                        contract.validate(broken, qualified)
+        for mutation in ('unknown', 'mixed'):
+            broken = copy.deepcopy(data)
+            if mutation == 'unknown':
+                broken['frame_samples'][0]['passes']['unknown'] = {'issued': False, 'ms': None}
+            else:
+                for name in stages:
+                    del broken['frame_samples'][1]['passes'][name]
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(ValueError, 'pass timer coverage'):
+                contract.validate(broken, qualified)
+
+    def test_new_queries_are_opt_in_and_keep_the_nonblocking_ring(self):
+        enable = block(self.pipeline, "void RenderPipeline::set_gpu_stage_attribution(")
+        guard = re.search(r"if \((.*?)\)", enable).group(1)
+        for enabled in (False, True):
+            for supported in (False, True):
+                for created in (False, True):
+                    self.assertEqual(cpp_expression(guard, **{
+                        'enabled': enabled, 'm_gpu_timers.supported': supported,
+                        'm_gpu_stage_queries_created': created}), enabled and supported and not created)
+        self.assertIn('glGenQueries', block(enable, 'if (enabled'))
+        self.assertIn('frame_attribution_enabled || !g_app.capture.render_benchmark_path.empty()', compact(self.main))
+        handle = block(self.pipeline, 'GpuPassTimer RenderPipeline::gpu_pass_timer(')
+        self.assertIn('m_gpu_timers_suppressed', handle)
+        self.assertIn('!m_gpu_stage_attribution', handle)
+        self.assertIn('return {};', handle)
+        foliage = read(CLIENT / 'rendering/passes/FoliagePass.cpp')
+        timer = (block(foliage, 'void GpuPassTimer::begin()') +
+                 block(foliage, 'void GpuPassTimer::end()'))
+        self.assertIn('glQueryCounter(begin_query, GL_TIMESTAMP)', block(timer, 'if (begin_query != 0)'))
+        self.assertIn('glQueryCounter(end_query, GL_TIMESTAMP)', block(timer, 'if (end_query != 0)'))
+        self.assertIn('benchmark->begin_pass(pass)', timer)
+        self.assertIn('benchmark->end_pass(pass)', timer)
+        collect = block(self.pipeline, 'void RenderPipeline::collect_gpu_pass_timers()')
+        self.assertIn('(m_gpu_timers.frame_index + 1u) % kGpuTimerFrameRing', collect)
+        self.assertLess(collect.index('GL_QUERY_RESULT_AVAILABLE'), collect.index('glGetQueryObjectui64v'))
+        self.assertIn('continue;', block(collect, 'if (begin_available != GL_TRUE'))
+        for source in (enable, handle, timer, collect):
+            self.assertNotIn('glFinish', source)
+            self.assertNotIn('glClientWaitSync', source)
+
+
 class FrameAttributionWiring(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -1896,6 +2099,7 @@ class FrameAttributionWiring(unittest.TestCase):
         dispatch = compact(block(self.foliage, "void FoliagePass::dispatch_scatter()"))
         self.assertIn("Luminumbra::Rendering::AttributedGl::Submit(glDispatchCompute, 1u, 1u, 1u); "
                       "glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT); "
+                      "m_scatter_gpu_timers[1].end(); m_scatter_gpu_timers[2].begin(); "
                       "Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, m_compute_prog); "
                       "glUniform1i(m_scatter_uniforms.emit, GL_TRUE);", dispatch)
 
