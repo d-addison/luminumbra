@@ -316,10 +316,14 @@ nlohmann::json IVec3ToJson(const Luminumbra::IVec3& value);
 // GL debug callback (app/InputCallbacks.cpp), read by the runtime-state
 // recorder's health snapshots and by every QA analysis writer. Client-lib
 // telemetry (not harness code): the shipping client records these too.
-extern std::atomic<uint64_t> g_gl_debug_message_count;
-extern std::atomic<uint64_t> g_gl_debug_error_count;
-extern std::atomic<uint64_t> g_gl_debug_warning_count;
-extern std::atomic<uint64_t> g_gl_debug_notification_count;
+struct GLDebugRuntimeCounters {
+    std::atomic<uint64_t> messages{0};
+    std::atomic<uint64_t> errors{0};
+    std::atomic<uint64_t> warnings{0};
+    std::atomic<uint64_t> notifications{0};
+};
+
+GLDebugRuntimeCounters& GetGLDebugRuntimeCounters();
 
 struct GLDebugRuntimeStats {
     uint64_t messages = 0;

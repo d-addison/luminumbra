@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Chunk.h"
+#include "ChunkLifecycleChanges.h"
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
@@ -19,6 +20,15 @@ namespace Luminumbra::World {
 // change content versions or residency. Neither the index nor its counters is hashed.
 class ActivationResidencyIndex {
 public:
+    ActivationResidencyIndex() = default;
+    ~ActivationResidencyIndex() {
+        clear();
+    }
+    ActivationResidencyIndex(const ActivationResidencyIndex&) = delete;
+    ActivationResidencyIndex& operator=(const ActivationResidencyIndex&) = delete;
+    ActivationResidencyIndex(ActivationResidencyIndex&&) = delete;
+    ActivationResidencyIndex& operator=(ActivationResidencyIndex&&) = delete;
+
     struct SurfaceSpan {
         int min_y = 0;
         int max_y = 0;
@@ -52,7 +62,20 @@ public:
             return a.coords.z < b.coords.z;
         }
     };
+    struct LifecycleCounts {
+        std::size_t ready_chunks = 0;
+        std::size_t renderable_chunks = 0;
+        std::size_t idle_chunks = 0;
+        std::size_t loading_chunks = 0;
+        std::size_t meshing_chunks = 0;
+        std::size_t pending_lod_chunks = 0;
+        bool operator==(const LifecycleCounts&) const = default;
+    };
     struct Counters {
+        // Production census work: changed residents only. Debug validation is
+        // deliberately excluded and recomputes the full independent census.
+        std::uint64_t lifecycle_chunk_visits = 0;
+        std::uint64_t lifecycle_snapshots = 0;
         std::uint64_t span_cache_hits = 0;
         std::uint64_t span_cache_misses = 0;
         std::uint64_t columns_scanned =
@@ -103,8 +126,13 @@ public:
     void insert(const std::shared_ptr<Chunk>& chunk) {
         const auto coords = chunk->get_coords();
         auto& column = ensure_column(coords.x, coords.z);
+        if (const auto old = column.residents.find(chunk->get_id());
+            old != column.residents.end() && old->second != chunk)
+            old->second->bind_lifecycle_changes(nullptr);
         column.residents.insert_or_assign(chunk->get_id(), chunk);
+        chunk->bind_lifecycle_changes(m_lifecycle_changes);
         column.water_layers.insert_or_assign(coords.y, chunk);
+        observe_lifecycle(*chunk);
         update_water_owners(column);
         m_resident_columns.insert(column_key(coords.x, coords.z));
         m_nonresident_columns.erase(column_key(coords.x, coords.z));
@@ -115,9 +143,17 @@ public:
     }
 
     void erase(const Chunk& chunk) {
+        if (const auto previous = m_lifecycle_states.find(chunk.get_id());
+            previous != m_lifecycle_states.end()) {
+            adjust_lifecycle(previous->second.mask, false);
+            m_lifecycle_states.erase(previous);
+        }
         const auto coords = chunk.get_coords();
         const auto key = column_key(coords.x, coords.z);
         if (const auto it = m_columns.find(key); it != m_columns.end()) {
+            if (const auto old = it->second.residents.find(chunk.get_id());
+                old != it->second.residents.end())
+                old->second->bind_lifecycle_changes(nullptr);
             it->second.residents.erase(chunk.get_id());
             it->second.water_layers.erase(coords.y);
             update_water_owners(it->second);
@@ -131,10 +167,58 @@ public:
                 }
             }
         }
+        // Unbind first: an already received state notification must not leave
+        // an orphan ID queued after the resident is removed.
+        m_lifecycle_changes->erase(chunk.get_id());
         if (const auto it = m_wanted.find(chunk.get_id()); it != m_wanted.end())
             add_pending(it->second);
         m_dirty_columns.insert(key);
         ++m_counters.index_updates;
+    }
+
+    // Owner-thread publication/reservation changes only. Stale completions
+    // and unadopted scratch chunks cannot change a resident's contribution.
+    void observe_lifecycle(const Chunk& chunk) {
+        const auto coords = chunk.get_coords();
+        const auto column = m_columns.find(column_key(coords.x, coords.z));
+        if (column == m_columns.end())
+            return;
+        const auto resident = column->second.residents.find(chunk.get_id());
+        if (resident == column->second.residents.end() || resident->second.get() != &chunk)
+            return;
+        m_lifecycle_changes->erase(chunk.get_id());
+        ++m_counters.lifecycle_chunk_visits;
+        const auto state = chunk.get_state();
+        const auto mask = static_cast<u8>(
+            (state == ChunkState::Ready ? 1u : 0u) |
+            (state == ChunkState::Ready && !chunk.mesh_vertices.empty() &&
+                     !chunk.mesh_indices.empty()
+                 ? 2u
+                 : 0u) |
+            (state == ChunkState::Idle ? 4u : 0u) | (state == ChunkState::Loading ? 8u : 0u) |
+            (state == ChunkState::Meshing ? 16u : 0u) |
+            (chunk.pending_lod.load(std::memory_order_acquire) >= 0 ? 32u : 0u));
+        const auto [previous, inserted] =
+            m_lifecycle_states.try_emplace(chunk.get_id(), LifecycleState{&chunk, mask});
+        if (!inserted) {
+            adjust_lifecycle(previous->second.mask, false);
+            previous->second = LifecycleState{&chunk, mask};
+        }
+        adjust_lifecycle(mask, true);
+    }
+
+    const LifecycleCounts& lifecycle_counts() {
+        // Setters outside streaming publication use the same changed-ID path.
+        // Unordered iteration only sums diagnostics; never selects/publishes work.
+        m_lifecycle_changes->take(m_pending_lifecycle);
+        for (const auto id : m_pending_lifecycle) {
+            const auto resident = m_lifecycle_states.find(id);
+            if (resident != m_lifecycle_states.end())
+                observe_lifecycle(*resident->second.chunk);
+        }
+        m_pending_lifecycle.clear();
+        ++m_counters.lifecycle_snapshots;
+        return m_lifecycle_counts;
     }
 
     // Acknowledge only after the owner thread queued the whole affected stack.
@@ -211,6 +295,17 @@ public:
     }
 
     void clear() {
+        for (const auto& [key, column] : m_columns) {
+            (void)key;
+            for (const auto& [id, chunk] : column.residents) {
+                (void)id;
+                chunk->bind_lifecycle_changes(nullptr);
+            }
+        }
+        m_lifecycle_changes->take(m_pending_lifecycle);
+        m_pending_lifecycle.clear();
+        m_lifecycle_states.clear();
+        m_lifecycle_counts = {};
         m_columns.clear();
         m_resident_columns.clear();
         m_nonresident_columns.clear();
@@ -223,6 +318,23 @@ public:
     }
 
 private:
+    void adjust_lifecycle(u8 mask, bool add) {
+        const auto adjust = [mask, add](std::size_t& count, unsigned bit) {
+            if ((mask & bit) != 0u) {
+                if (add)
+                    ++count;
+                else
+                    --count;
+            }
+        };
+        adjust(m_lifecycle_counts.ready_chunks, 1u);
+        adjust(m_lifecycle_counts.renderable_chunks, 2u);
+        adjust(m_lifecycle_counts.idle_chunks, 4u);
+        adjust(m_lifecycle_counts.loading_chunks, 8u);
+        adjust(m_lifecycle_counts.meshing_chunks, 16u);
+        adjust(m_lifecycle_counts.pending_lod_chunks, 32u);
+    }
+
     void update_water_owners(Column& column) {
         // One residency-change pass, bounded by this column's resident stack.
         // Layer Y owns the half-open band [Y, nextY) * CHUNK_SIZE_Y (lowest open
@@ -270,6 +382,17 @@ private:
     std::unordered_set<u64> m_wanted_columns;
     std::set<Candidate, Priority> m_pending;
     std::size_t m_surface_pending = 0;
+    // One contribution and borrowed pointer per resident, held alive by
+    // columns(). Erased with residency; never a history of visited chunks.
+    struct LifecycleState {
+        const Chunk* chunk = nullptr;
+        u8 mask = 0;
+    };
+    std::shared_ptr<ChunkLifecycleChanges> m_lifecycle_changes =
+        std::make_shared<ChunkLifecycleChanges>();
+    std::unordered_set<ChunkID> m_pending_lifecycle;
+    std::unordered_map<ChunkID, LifecycleState> m_lifecycle_states;
+    LifecycleCounts m_lifecycle_counts;
     Counters m_counters;
 };
 
