@@ -3758,42 +3758,22 @@ class DeferredRasterDiagnosticWiring(unittest.TestCase):
         self.debug = read(CLIENT / "rendering/passes/DebugViewPass.cpp")
         self.gbuffer = read(CLIENT / "rendering/passes/GBufferPass.cpp")
 
-    def test_shadow_fetch_budget_and_shared_comparison_order(self):
-        gather = block(self.lighting, "vec4 gatherShadowDepths(")
-        fetch = block(self.lighting, "void fetchShadowDepths(")
-        filtered = block(self.lighting, "float filteredShadow(")
+    def test_shadow_filter_keeps_frozen_scalar_arithmetic(self):
+        # A depth cache can change compiler contraction even with the same tap order.
+        # Keep the complete filter expression graph equal to the independent GL oracle.
+        oracle = read(ROOT / "test/rendering/diagnostic_contributions_test.cpp")
+        reference = oracle.split('R"GLSL(', 1)[1].split(')GLSL"', 1)[0]
+        self.assertEqual(compact(block(self.lighting, "float filteredShadow(")),
+                         compact(block(reference, "float referenceFilteredShadow(")))
+        self.assertIn("float filteredShadow(vec3 projected, int cascadeIndex, float bias)",
+                      self.lighting)
+        self.assertNotIn("ShadowDepths", self.lighting)
+        self.assertNotIn("textureGather(", self.lighting)
+        selector = block(self.lighting, "float CalculateShadow(")
+        self.assertIn("return filteredShadow(projCoords, cascadeIndex, bias);", selector)
         main = block(self.lighting, "void main()")
-        self.assertEqual(gather.count("textureGather("), 1)
-        self.assertIn("vec3((base + 1.0) / size, cascadeIndex), 0)", gather)
-        self.assertNotRegex(self.lighting, r"\btexture\s*\(\s*u_shadowCascades")
-        self.assertNotRegex(fetch, r"\b(?:texture|texelFetch)\s*\(")
-        # 2*2 interior tiles + 2*(column + row) edge tiles + one corner = 9 gathers.
-        self.assertIn("for (int x = 0; x < 4; x += 2)", fetch)
-        self.assertIn("for (int y = 0; y < 4; y += 2)", fetch)
-        self.assertIn("for (int offset = 0; offset < 4; offset += 2)", fetch)
-        self.assertEqual(fetch.count("gatherShadowDepths("), 4)
-        for assignment in (
-                "depths[x * 5 + y] = depths4.w;",
-                "depths[x * 5 + y + 1] = depths4.x;",
-                "depths[(x + 1) * 5 + y] = depths4.z;",
-                "depths[(x + 1) * 5 + y + 1] = depths4.y;",
-                "depths[20 + offset] = column.z;",
-                "depths[21 + offset] = column.y;",
-                "depths[offset * 5 + 4] = row.x;",
-                "depths[(offset + 1) * 5 + 4] = row.y;",
-                "depths[24] = gatherShadowDepths(base + vec2(3), size, cascadeIndex).y;"):
-            self.assertIn(assignment, fetch)
-        once = block(filtered, "if (!samples.fetched)")
-        self.assertEqual(filtered.count("fetchShadowDepths("), 1)
-        self.assertIn("fetchShadowDepths(base, size, cascadeIndex, samples.values);", once)
-        self.assertIn("samples.fetched = true;", once)
-        self.assertIn("for (int x = 0; x <= WIDTH; ++x)", filtered)
-        self.assertIn("for (int y = 0; y <= WIDTH; ++y)", filtered)
-        self.assertIn("float depth = samples.values[x * 5 + y];", filtered)
-        self.assertIn("visibility += wx * wy * (projected.z - bias > depth ? 0.0 : 1.0);", filtered)
-        self.assertEqual(main.count("shadowDepths.fetched = false;"), 1)
         for light in ("sun", "moon"):
-            self.assertIn(f"CalculateShadow(FragPos, Normal, L_{light}, abs(viewPos.z), shadowDepths)", main)
+            self.assertIn(f"CalculateShadow(FragPos, Normal, L_{light}, abs(viewPos.z))", main)
 
     def test_legacy_sky_skip_requires_replacement_and_preserves_other_consumers(self):
         main = block(self.lighting, "void main()")
@@ -4149,7 +4129,7 @@ class DeferredRasterDiagnosticWiring(unittest.TestCase):
             return value
 
         self.assertEqual(fingerprint(without_guard(self.lighting, "LUMIN_DIAG_CONTRIBUTIONS")),
-                         0x10c0f1a579f34e4d)
+                         0xb2f4c0d0889a7501)
         self.assertEqual(fingerprint(without_guard(self.fragment, "LUMIN_DIAG_SURFACE")),
                          0x7289f9525f762361)
 

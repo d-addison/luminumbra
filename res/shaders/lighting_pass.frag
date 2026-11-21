@@ -324,42 +324,7 @@ bool diagnosticPositionAt(vec2 uv, inout vec3 position) {
 // Interpolate visibility after comparison, never the stored depths. The
 // separable four by four box needs only 25 nearest-depth taps. Fractional
 // edge weights remove texel-sized steps without increasing the surface budget.
-struct ShadowDepths {
-    bool fetched;
-    float values[25];
-};
-
-vec4 gatherShadowDepths(vec2 base, vec2 size, int cascadeIndex) {
-    // A gather between four texel centres returns the offsets
-    // ((0,1), (1,1), (1,0), (0,0)) from the lower-left texel.
-    // Keep the array layer separate from the two normalized coordinates.
-    return textureGather(u_shadowCascades, vec3((base + 1.0) / size, cascadeIndex), 0);
-}
-
-void fetchShadowDepths(vec2 base, vec2 size, int cascadeIndex, out float depths[25]) {
-    // Four interior gathers, four overlapping edge gathers, and one corner
-    // gather cover exactly the original 5 by 5 footprint, including white border.
-    for (int x = 0; x < 4; x += 2) {
-        for (int y = 0; y < 4; y += 2) {
-            vec4 depths4 = gatherShadowDepths(base + vec2(x, y), size, cascadeIndex);
-            depths[x * 5 + y] = depths4.w;
-            depths[x * 5 + y + 1] = depths4.x;
-            depths[(x + 1) * 5 + y] = depths4.z;
-            depths[(x + 1) * 5 + y + 1] = depths4.y;
-        }
-    }
-    for (int offset = 0; offset < 4; offset += 2) {
-        vec4 column = gatherShadowDepths(base + vec2(3, offset), size, cascadeIndex);
-        depths[20 + offset] = column.z;
-        depths[21 + offset] = column.y;
-        vec4 row = gatherShadowDepths(base + vec2(offset, 3), size, cascadeIndex);
-        depths[offset * 5 + 4] = row.x;
-        depths[(offset + 1) * 5 + 4] = row.y;
-    }
-    depths[24] = gatherShadowDepths(base + vec2(3), size, cascadeIndex).y;
-}
-
-float filteredShadow(vec3 projected, int cascadeIndex, float bias, inout ShadowDepths samples) {
+float filteredShadow(vec3 projected, int cascadeIndex, float bias) {
     if (any(lessThan(projected, vec3(0.0))) || any(greaterThan(projected, vec3(1.0)))) {
         return 1.0;
     }
@@ -368,24 +333,20 @@ float filteredShadow(vec3 projected, int cascadeIndex, float bias, inout ShadowD
     vec2 texelPosition = projected.xy * size;
     vec2 phase = fract(texelPosition);
     vec2 base = floor(texelPosition) - vec2(float(WIDTH / 2));
-    if (!samples.fetched) {
-        fetchShadowDepths(base, size, cascadeIndex, samples.values);
-        samples.fetched = true;
-    }
     float visibility = 0.0;
     for (int x = 0; x <= WIDTH; ++x) {
         float wx = x == 0 ? 1.0 - phase.x : (x == WIDTH ? phase.x : 1.0);
         for (int y = 0; y <= WIDTH; ++y) {
             float wy = y == 0 ? 1.0 - phase.y : (y == WIDTH ? phase.y : 1.0);
-            float depth = samples.values[x * 5 + y];
+            vec2 uv = (base + vec2(x, y) + 0.5) / size;
+            float depth = texture(u_shadowCascades, vec3(uv, cascadeIndex)).r;
             visibility += wx * wy * (projected.z - bias > depth ? 0.0 : 1.0);
         }
     }
     return visibility / float(WIDTH * WIDTH);
 }
 
-float CalculateShadow(vec3 fragPos, vec3 normal, vec3 lightDir, float viewDepth,
-                      inout ShadowDepths samples) {
+float CalculateShadow(vec3 fragPos, vec3 normal, vec3 lightDir, float viewDepth) {
     // 1. Determine which cascade to use in a branchless way
     int cascadeIndex = 0;
     cascadeIndex += (viewDepth > u_cascadeSplits.x) ? 1: 0;
@@ -439,7 +400,7 @@ float CalculateShadow(vec3 fragPos, vec3 normal, vec3 lightDir, float viewDepth,
 
     // 3. PCF (Percentage-Closer Filtering)
     float bias = max(0.005 * (1.0 - dot(normal, lightDir)), 0.001);
-    return filteredShadow(projCoords, cascadeIndex, bias, samples);
+    return filteredShadow(projCoords, cascadeIndex, bias);
 }
 // sample the tinted transmission at the SAME cascade
 // projection CalculateShadow uses. Out-of-range = white (no tint information),
@@ -748,11 +709,7 @@ void main() {
     vec3 Lo = vec3(0.0);
     // The input is the ray-travel direction; the BRDF needs surface-to-light.
     vec3 L_sun = normalize(-u_sun.direction);
-    // Both calls below use this fragment and view depth, hence the same cascade
-    // and projection. Only the comparison bias changes with the light direction.
-    ShadowDepths shadowDepths;
-    shadowDepths.fetched = false;
-    float shadow = (isFarSurface || u_staticStudio != 0) ? 1.0 : CalculateShadow(FragPos, Normal, L_sun, abs(viewPos.z), shadowDepths);
+    float shadow = (isFarSurface || u_staticStudio != 0) ? 1.0 : CalculateShadow(FragPos, Normal, L_sun, abs(viewPos.z));
     // Convert the authored sun COLOR into surface IRRADIANCE (x PI) so the
     // diffuse 1/PI division round-trips albedo faithfully (exposure-audit root
     // fix; see SUN_IRRADIANCE_SCALE above).
@@ -795,7 +752,7 @@ void main() {
         // a touch of softening: lift the floor a hair to avoid harsh black edges /
         // peter-panning from the wider-spread night cascade, while still reading as
         // a directional shadow.
-        float moonShadow = isFarSurface ? 1.0 : CalculateShadow(FragPos, Normal, L_moon, abs(viewPos.z), shadowDepths);
+        float moonShadow = isFarSurface ? 1.0 : CalculateShadow(FragPos, Normal, L_moon, abs(viewPos.z));
         //  rendering: the moon-shadow FLOOR scales with the lunar phase.
         // A FULL moon throws PROPER, crisp cast shadows (floor ~0.25 -> shadows read as real
         // directional contrast, DayZ bright-night feel); toward NEW moon the moon is too dim

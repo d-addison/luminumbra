@@ -291,13 +291,13 @@ std::string ReferenceLightingSource() {
     return visibility / float(WIDTH * WIDTH);
 }
 )GLSL");
-    const std::string gathered = "return filteredShadow(projCoords, cascadeIndex, bias, samples);";
-    const auto call = source.find(gathered);
+    const std::string comparison = "return filteredShadow(projCoords, cascadeIndex, bias);";
+    const auto call = source.find(comparison);
     if (call == std::string::npos) {
         throw std::runtime_error("Missing lighting comparison");
     }
     source.replace(
-        call, gathered.size(), "return referenceFilteredShadow(projCoords, cascadeIndex, bias);");
+        call, comparison.size(), "return referenceFilteredShadow(projCoords, cascadeIndex, bias);");
     const std::string sky = "u_skipLegacySky != 0";
     const auto sky_guard = source.find(sky);
     if (sky_guard == std::string::npos) {
@@ -345,9 +345,9 @@ public:
     ShadowFilterProbe& operator=(const ShadowFilterProbe&) = delete;
     void shadow_probe(const char* filename) {
         const auto source = Source(std::string("res/shaders/") + filename);
-        const auto begin = source.find("struct ShadowDepths");
+        const auto begin = source.find("float filteredShadow(");
         ASSERT_NE(begin, std::string::npos);
-        const auto end = source.find("float CalculateShadow(", begin);
+        const auto end = source.find("\n}\n", begin);
         ASSERT_NE(end, std::string::npos);
         // The extracted function must also be called by the shipping consumer.
         ASSERT_NE(source.find("filteredShadow(", end), std::string::npos);
@@ -366,14 +366,12 @@ uniform int layer;
 uniform bool probeTint;
 uniform float bias;
 out vec4 result;
-)" + source.substr(begin, end - begin) +
+)" + source.substr(begin, end + 3 - begin) +
                                      source.substr(tint_begin, tint_end + 3 - tint_begin) +
                                      R"(
 void main() {
-    ShadowDepths samples;
-    samples.fetched = false;
     vec3 value = probeTint ? SampleShadowTint(projected * 2 - 1, float(layer) + 0.5)
-                          : vec3(filteredShadow(projected, layer, bias, samples));
+                          : vec3(filteredShadow(projected, layer, bias));
     result = vec4(value, 1);
 }
 )";
@@ -633,7 +631,7 @@ TEST_F(DiagnosticContributionsGl, FroxelTintIsIdentityOutsideEveryLightPlane) {
 TEST(DiagnosticContributions, CaptureOffLightingAndGBufferKeepEveryOriginalByte) {
     const auto lighting = Source("res/shaders/lighting_pass.frag");
     EXPECT_NE(lighting.find("#ifdef LUMIN_DIAG_CONTRIBUTIONS\n"), std::string::npos);
-    EXPECT_EQ(Hash(CaptureOff(lighting)), 0x10c0f1a579f34e4dULL);
+    EXPECT_EQ(Hash(CaptureOff(lighting)), 0xb2f4c0d0889a7501ULL);
     // Pin the production source outside additive diagnostic instrumentation.
     EXPECT_EQ(Hash(CaptureOff(Source("res/shaders/g_buffer.frag"), "#ifdef LUMIN_DIAG_SURFACE\n")),
               0x7289f9525f762361ULL);
@@ -813,6 +811,7 @@ void CheckShadowFetchEquivalence(const std::array<GLuint, 9>& textures,
                                                99.97f,
                                                100.0f,
                                                101.0f}) {
+                    SCOPED_TRACE(coordinate);
                     const std::array<float, 4> position = {coordinate, coordinate, -depth, 1};
                     glTextureSubImage2D(
                         textures[0], 0, 0, 0, 1, 1, GL_RGBA, GL_FLOAT, position.data());
@@ -821,9 +820,18 @@ void CheckShadowFetchEquivalence(const std::array<GLuint, 9>& textures,
                                            Pass::ShadowFactor,
                                            Pass::ShadowCascade,
                                            Pass::ShadowFootprint}) {
+                        SCOPED_TRACE(mode);
                         const auto actual = draw(diagnostic, mode, GL_COLOR_ATTACHMENT1, light);
+                        std::array<float, 4> actual_color{};
+                        glReadBuffer(GL_COLOR_ATTACHMENT0);
+                        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, actual_color.data());
                         const auto expected =
                             draw(scalar_diagnostic, mode, GL_COLOR_ATTACHMENT1, light);
+                        std::array<float, 4> expected_color{};
+                        glReadBuffer(GL_COLOR_ATTACHMENT0);
+                        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, expected_color.data());
+                        EXPECT_EQ((std::bit_cast<std::array<std::uint32_t, 4>>(actual_color)),
+                                  (std::bit_cast<std::array<std::uint32_t, 4>>(expected_color)));
                         EXPECT_EQ((std::bit_cast<std::array<std::uint32_t, 4>>(actual)),
                                   (std::bit_cast<std::array<std::uint32_t, 4>>(expected)));
                     }
