@@ -2295,8 +2295,10 @@ class ChangedTranslationUnitsTests(unittest.TestCase):
         self.assertIn("bugprone-unchecked-optional-access", regular["Checks"])
         self.assertIn("clang-analyzer-core*", regular["Checks"])
         self.assertEqual(regular["CheckOptions"][0]["value"], "250")
-        tracked = tus.gate_config(ROOT, ROOT / "src/luminumbra_common/net/GnsTransport.cpp")
+        tracked = tus.gate_config(ROOT, ROOT / "src/luminumbra_client/core/RuntimeScenarioConfig.cpp")
         self.assertEqual(tracked["Checks"], regular["Checks"] + ",-cppcoreguidelines-avoid-non-const-global-variables")
+        former = tus.gate_config(ROOT, ROOT / "src/luminumbra_common/net/GnsTransport.cpp")
+        self.assertEqual(former["Checks"], regular["Checks"])
 
     def test_curated_file_filter_uses_ci_definition(self):
         text = (ROOT / "scripts/tidy.sh").read_text()

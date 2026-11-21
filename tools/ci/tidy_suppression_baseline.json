@@ -1,0 +1,612 @@
+{
+  "version": 1,
+  "gate_checks": [
+    "bugprone-dangling-handle",
+    "bugprone-infinite-loop",
+    "bugprone-unchecked-optional-access",
+    "bugprone-use-after-move",
+    "clang-analyzer-core*",
+    "cppcoreguidelines-avoid-non-const-global-variables",
+    "modernize-use-nullptr",
+    "performance-for-range-copy",
+    "performance-move-const-arg",
+    "performance-unnecessary-value-param",
+    "readability-function-cognitive-complexity"
+  ],
+  "suppressions": [
+    {
+      "path": "src/luminumbra_client/core/scenarios/CreatureSliceSmoke.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [
+        "namespace Luminumbra : : Client : : ScenarioHarness",
+        "namespace"
+      ],
+      "target": "anim : : Skeleton g_creature_skeleton ;"
+    },
+    {
+      "path": "src/luminumbra_client/core/scenarios/CreatureSliceSmoke.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [
+        "namespace Luminumbra : : Client : : ScenarioHarness",
+        "namespace"
+      ],
+      "target": "std : : map < std : : string , anim : : AnimationClip > g_creature_clips ;"
+    },
+    {
+      "path": "src/luminumbra_client/core/scenarios/SkinnedMeshVisualSmoke.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [
+        "namespace Luminumbra : : Client : : ScenarioHarness",
+        "namespace"
+      ],
+      "target": "anim : : Skeleton g_skinned_test_skeleton ;"
+    },
+    {
+      "path": "src/luminumbra_client/core/scenarios/SkinnedMeshVisualSmoke.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [
+        "namespace Luminumbra : : Client : : ScenarioHarness",
+        "namespace"
+      ],
+      "target": "anim : : AnimationClip g_skinned_test_clip ;"
+    },
+    {
+      "path": "src/luminumbra_client/main_client.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "readability-function-cognitive-complexity"
+      ],
+      "patterns": [
+        "readability-function-cognitive-complexity"
+      ],
+      "scope": [],
+      "target": "static void ConsumeWorldDressing ( ClientAppContext & g_app , Luminumbra : : Systems : : SHIELD_WorldSystem * ws , Luminumbra : : world : : GameSession * gameSession , Luminumbra : : Rendering : : RenderPipeline & renderPipeline , const std : : filesystem : : path & root_dir , ProcgenPlantState & g_procgen , luminumbra : : core : : SystemConfig & g_systemConfig , std : : shared_ptr < WorldDressingPending > & worldDressing , Luminumbra : : JobHandle & worldDressingHandle ) {"
+    },
+    {
+      "path": "src/luminumbra_client/main_client.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "readability-function-cognitive-complexity"
+      ],
+      "patterns": [
+        "readability-function-cognitive-complexity"
+      ],
+      "scope": [],
+      "target": "static bool CaptureTimelapseFrame ( ClientAppContext & g_app , GLFWwindow * window , GameState currentState , bool presentation_ready , Luminumbra : : world : : GameSession * gameSession , Luminumbra : : Rendering : : RenderPipeline & renderPipeline , const luminumbra : : core : : ResolvedGraphics & graphics , ProcgenPlantState & g_procgen ) {"
+    },
+    {
+      "path": "src/luminumbra_client/main_client.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "readability-function-cognitive-complexity"
+      ],
+      "patterns": [
+        "readability-function-cognitive-complexity"
+      ],
+      "scope": [],
+      "target": "static void UpdateFoliageScatter ( ClientAppContext & g_app , const std : : filesystem : : path & root_dir , const RuntimeScenarioConfig & scenario_config , Luminumbra : : Rendering : : Camera * g_camera , Luminumbra : : world : : GameSession * gameSession , Luminumbra : : Rendering : : RenderPipeline & renderPipeline , bool photo_mode_active , double & rb_scatter_ms , double & rb_foliage_ms ) {"
+    },
+    {
+      "path": "src/luminumbra_client/main_client.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "readability-function-cognitive-complexity"
+      ],
+      "patterns": [
+        "readability-function-cognitive-complexity"
+      ],
+      "scope": [],
+      "target": "static void HandlePlayerVerbs ( ClientAppContext & g_app , GLFWwindow * window , GameState currentState , const RuntimeScenarioConfig & scenario_config , const std : : filesystem : : path & root_dir , Luminumbra : : Client : : PlayerController * g_playerController , Luminumbra : : Rendering : : Camera * g_camera , Luminumbra : : Client : : IAudioManager * audioManager , Luminumbra : : world : : GameSession * gameSession , Luminumbra : : Rendering : : RenderPipeline & renderPipeline , ProcgenPlantState & g_procgen , const UiInputRouter & inputRouter , double frame_seconds ) {"
+    },
+    {
+      "path": "src/luminumbra_client/main_client.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "readability-function-cognitive-complexity"
+      ],
+      "patterns": [
+        "readability-function-cognitive-complexity"
+      ],
+      "scope": [],
+      "target": "int main ( int argc , char * argv [ ] ) {"
+    },
+    {
+      "path": "src/luminumbra_client/rendering/CaptureHooks.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [
+        "namespace Luminumbra : : Rendering",
+        "namespace"
+      ],
+      "target": "void * g_injected_renderdoc_api = nullptr ;"
+    },
+    {
+      "path": "src/luminumbra_client/rendering/CaptureHooks.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [
+        "namespace Luminumbra : : Rendering",
+        "namespace"
+      ],
+      "target": "void * g_injected_pix_api = nullptr ;"
+    },
+    {
+      "path": "src/luminumbra_client/rendering/CaptureHooks.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [
+        "namespace Luminumbra : : Rendering",
+        "namespace"
+      ],
+      "target": "void * g_injected_nsight_api = nullptr ;"
+    },
+    {
+      "path": "src/luminumbra_client/rendering/GlDebugOutput.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [
+        "namespace Luminumbra : : Rendering : : GlDebug",
+        "namespace"
+      ],
+      "target": "std : : atomic < bool > g_installed {"
+    },
+    {
+      "path": "src/luminumbra_client/rendering/GlDebugOutput.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [
+        "namespace Luminumbra : : Rendering : : GlDebug",
+        "namespace"
+      ],
+      "target": "std : : atomic < unsigned long long > g_total {"
+    },
+    {
+      "path": "src/luminumbra_client/rendering/GlDebugOutput.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [
+        "namespace Luminumbra : : Rendering : : GlDebug",
+        "namespace"
+      ],
+      "target": "std : : atomic < unsigned long long > g_errors {"
+    },
+    {
+      "path": "src/luminumbra_client/rendering/GlDebugOutput.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [
+        "namespace Luminumbra : : Rendering : : GlDebug",
+        "namespace"
+      ],
+      "target": "std : : atomic < unsigned long long > g_warnings {"
+    },
+    {
+      "path": "src/luminumbra_client/rendering/GlDebugOutput.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [
+        "namespace Luminumbra : : Rendering : : GlDebug",
+        "namespace"
+      ],
+      "target": "std : : atomic < unsigned long long > g_notifications {"
+    },
+    {
+      "path": "src/luminumbra_common/core/CrashReport.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [
+        "namespace luminumbra : : crash",
+        "namespace"
+      ],
+      "target": "std : : atomic < int > g_report_fd {"
+    },
+    {
+      "path": "src/luminumbra_common/core/CrashReport.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [
+        "namespace luminumbra : : crash",
+        "namespace"
+      ],
+      "target": "std : : atomic_flag g_handler_entered {"
+    },
+    {
+      "path": "src/luminumbra_common/core/CrashReport.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [
+        "namespace luminumbra : : crash",
+        "namespace"
+      ],
+      "target": "std : : atomic < HANDLE > g_report {"
+    },
+    {
+      "path": "src/luminumbra_common/core/CrashReport.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [
+        "namespace luminumbra : : crash",
+        "namespace"
+      ],
+      "target": "LONG g_handler_entered = 0 ;"
+    },
+    {
+      "path": "src/luminumbra_common/core/CrashReport.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [
+        "namespace luminumbra : : crash",
+        "namespace"
+      ],
+      "target": "std : : uintptr_t g_module_base = 0 ;"
+    },
+    {
+      "path": "src/luminumbra_common/core/CrashReport.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [
+        "namespace luminumbra : : crash",
+        "namespace"
+      ],
+      "target": "std : : uintptr_t g_module_end = 0 ;"
+    },
+    {
+      "path": "src/luminumbra_common/core/CrashReport.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [
+        "namespace luminumbra : : crash",
+        "namespace"
+      ],
+      "target": "char g_module_path [ kMaxModulePathChars ] = {"
+    },
+    {
+      "path": "src/luminumbra_common/core/CrashReport.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [
+        "namespace luminumbra : : crash",
+        "namespace"
+      ],
+      "target": "DWORD g_module_path_length = 0 ;"
+    },
+    {
+      "path": "src/luminumbra_common/core/CrashReport.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [
+        "namespace luminumbra : : crash",
+        "namespace"
+      ],
+      "target": "RtlLookupFunctionEntryFn g_lookup_function_entry = nullptr ;"
+    },
+    {
+      "path": "src/luminumbra_common/core/CrashReport.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [
+        "namespace luminumbra : : crash",
+        "namespace"
+      ],
+      "target": "RtlVirtualUnwindFn g_virtual_unwind = nullptr ;"
+    },
+    {
+      "path": "test/common/AmbientInputBounds_test.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [
+        "namespace"
+      ],
+      "target": "sigjmp_buf g_jump ;"
+    },
+    {
+      "path": "test/common/AmbientInputBounds_test.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [
+        "namespace"
+      ],
+      "target": "volatile sig_atomic_t g_armed = 0 ;"
+    },
+    {
+      "path": "test/common/FarWorldAuthorityProducer_test.cpp",
+      "directive": "NOLINT",
+      "checks": [
+        "bugprone-use-after-move"
+      ],
+      "patterns": [
+        "bugprone-use-after-move"
+      ],
+      "scope": [
+        "namespace",
+        "TEST ( FarWorldAuthorityProducer , PoolAllocatorMovesKeepTheSourcePool )"
+      ],
+      "target": "EXPECT_EQ ( source . pool ( ) , pool ) ;"
+    },
+    {
+      "path": "test/common/FarWorldAuthorityProducer_test.cpp",
+      "directive": "NOLINT",
+      "checks": [
+        "bugprone-use-after-move"
+      ],
+      "patterns": [
+        "bugprone-use-after-move"
+      ],
+      "scope": [
+        "namespace",
+        "TEST ( FarWorldAuthorityProducer , PoolAllocatorMovesKeepTheSourcePool )"
+      ],
+      "target": "EXPECT_TRUE ( source = = moved ) ;"
+    },
+    {
+      "path": "test/common/FarWorldAuthorityProducer_test.cpp",
+      "directive": "NOLINT",
+      "checks": [
+        "bugprone-use-after-move"
+      ],
+      "patterns": [
+        "bugprone-use-after-move"
+      ],
+      "scope": [
+        "namespace",
+        "TEST ( FarWorldAuthorityProducer , PoolAllocatorMovesKeepTheSourcePool )"
+      ],
+      "target": "EXPECT_EQ ( source . pool ( ) , pool ) ;"
+    },
+    {
+      "path": "test/common/FarWorldAuthorityProducer_test.cpp",
+      "directive": "NOLINT",
+      "checks": [
+        "bugprone-use-after-move"
+      ],
+      "patterns": [
+        "bugprone-use-after-move"
+      ],
+      "scope": [
+        "namespace",
+        "TEST ( FarWorldAuthorityProducer , PoolAllocatorMovesKeepTheSourcePool )",
+        ""
+      ],
+      "target": "EXPECT_EQ ( first . get_allocator ( ) . pool ( ) , pool ) ;"
+    },
+    {
+      "path": "test/common/FarWorldAuthorityProducer_test.cpp",
+      "directive": "NOLINT",
+      "checks": [
+        "bugprone-use-after-move"
+      ],
+      "patterns": [
+        "bugprone-use-after-move"
+      ],
+      "scope": [
+        "namespace",
+        "TEST ( FarWorldAuthorityProducer , PoolAllocatorMovesKeepTheSourcePool )",
+        ""
+      ],
+      "target": "first . assign ( 8 , 1 u ) ;"
+    },
+    {
+      "path": "test/common/FarWorldAuthorityProducer_test.cpp",
+      "directive": "NOLINT",
+      "checks": [
+        "bugprone-use-after-move"
+      ],
+      "patterns": [
+        "bugprone-use-after-move"
+      ],
+      "scope": [
+        "namespace",
+        "TEST ( FarWorldAuthorityProducer , RefusingPoolAdmitsOnlyContainerBookkeeping )",
+        ""
+      ],
+      "target": "EXPECT_THROW ( first . assign ( 8 , 1 u ) , World : : FarVolumeMemoryRefused ) ;"
+    },
+    {
+      "path": "test/common/bounded_console_sink_test.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [
+        "namespace"
+      ],
+      "target": "ScriptedWriter g_scripted ;"
+    },
+    {
+      "path": "test/diagnostics/worldgen_probe.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [
+        "namespace"
+      ],
+      "target": "volatile float g_probe_sink_f = 0 . 0 f ;"
+    },
+    {
+      "path": "test/diagnostics/worldgen_probe.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [
+        "namespace"
+      ],
+      "target": "volatile double g_probe_sink_d = 0 . 0 ;"
+    },
+    {
+      "path": "test/physics/jolt_startup_test.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [
+        "namespace"
+      ],
+      "target": "RuntimeAllocationState * runtime_allocations = nullptr ;"
+    },
+    {
+      "path": "tools/asset_processor.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [],
+      "target": "static size_t g_max_tris = 0 ;"
+    },
+    {
+      "path": "tools/asset_processor.cpp",
+      "directive": "NOLINTNEXTLINE",
+      "checks": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "patterns": [
+        "cppcoreguidelines-avoid-non-const-global-variables"
+      ],
+      "scope": [],
+      "target": "static int g_only_primitive = - 1 ;"
+    }
+  ],
+  "tracked_global_tus": [
+    "src/luminumbra_client/core/RuntimeScenarioConfig.cpp"
+  ]
+}

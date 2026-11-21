@@ -1548,6 +1548,13 @@
       "source": "Luminumbra test fixtures"
     },
     {
+      "bytes": 142,
+      "license": "MIT",
+      "path": "test/fixtures/tidy_header_smoke.h",
+      "sha256": "93ccbaeb17192aeaaab1e134a764ebc41d1b49fad386ead8715fe4b49ba93cdb",
+      "source": "Luminumbra test fixtures"
+    },
+    {
       "bytes": 49167,
       "license": "MIT",
       "path": "test/rendering/shader_scenes/references/material.ppm",
