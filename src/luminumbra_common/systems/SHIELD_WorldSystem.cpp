@@ -3996,6 +3996,11 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
         m_deferred_meshing.begin() + static_cast<std::ptrdiff_t>(m_deferred_meshing_cursor),
         m_deferred_meshing.end(),
         [](const MeshingWorkItem& item) { return !item.current_candidate; }));
+    const auto retained_candidates =
+        m_deferred_meshing.size() - m_deferred_meshing_cursor - retained_non_candidates;
+    m_unadmitted_meshing_candidates = m_last_streaming_budget_stats.meshing_candidates -
+                                      m_last_streaming_budget_stats.submitted_meshing -
+                                      retained_candidates;
     m_last_streaming_budget_stats.deferred_meshing =
         m_last_streaming_budget_stats.meshing_candidates -
         m_last_streaming_budget_stats.submitted_meshing + retained_non_candidates;
@@ -7039,6 +7044,7 @@ void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
     m_parking_deferred = 0;
     m_persistence_save_requested = false;
     m_deferred_generation_candidates = 0;
+    m_unadmitted_meshing_candidates = 0;
     m_activation_index.clear();
     m_activation_plan_valid = false;
     m_activation_has_run = false;
@@ -7100,6 +7106,17 @@ void SHIELD_WorldSystem::wait_for_streaming_jobs() {
         dispatch_deferred_meshing();
         wait_for_admitted_streaming_jobs();
     }
+    // Observe publication after the fence, without another streaming/water
+    // update or a resident-world scan. Repeated barriers preserve the backlog.
+    m_streaming_telemetry_stats.last_queue_depth =
+        m_deferred_generation_candidates + m_unadmitted_meshing_candidates;
+    m_streaming_telemetry_stats.settled_queue_depth =
+        std::min(m_streaming_telemetry_stats.settled_queue_depth,
+                 m_streaming_telemetry_stats.last_queue_depth);
+    m_streaming_telemetry_stats.generation_batches = m_streaming_state.generation_batches.size();
+    m_streaming_telemetry_stats.meshing_batches = m_streaming_state.meshing_batches.size();
+    m_streaming_telemetry_stats.promotion_pending = promotion_pipeline_pending();
+    m_streaming_telemetry_stats.pending_lod_chunks = 0;
 }
 
 namespace {
@@ -7230,7 +7247,13 @@ SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const {
         entry.coords = chunk->get_coords();
         entry.provenance = chunk->sdf_provenance();
         entry.voxel_revision = chunk->voxel_revision();
+        // Far tiles consume terrain, not the live water grid. Water-only
+        // ownership shares saved provenance, but its generated SDF is already
+        // reproducible. Only edited terrain must wait for a durable voxel save.
         entry.authority_durable = !chunk->is_voxel_data_dirty();
+        if (!chunk->has_terrain_authority()) {
+            entry.authority_durable = true;
+        }
         entry.payload = chunk->capture_far_lod_sdf(snapshot->bytes_copied);
         snapshot->entries.push_back(std::move(entry));
     };

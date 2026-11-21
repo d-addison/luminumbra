@@ -184,20 +184,25 @@ class ReplaySourceContract(unittest.TestCase):
         self.assertLess(driver.index("host_session->PrepareInitialSimulation("),
                         driver.index("Luminumbra::Replay::CaptureReplayHeader("))
         runner = read_source("src/luminumbra_server/ServerWorldRunner.cpp")
-        self.assertIn("m_session->SettleInitialSimulation(boot_anchors, m_boot_settle)", runner)
+        self.assertRegex(runner, r"m_session->SettleInitialSimulation\(\s*boot_anchors,\s*"
+                         r"settle_stats,\s*m_config.surface_radius != 0 \|\|\s*"
+                         r"m_config.collision_radius != 0\)")
         session = read_source("src/luminumbra_common/world/GameSession.cpp")
         entry = session.split("bool GameSession::PrepareInitialSimulation(", 1)[1].split(
             "bool GameSession::SettleInitialSimulation(", 1)[0]
         self.assertLess(entry.index("SetWaterBootPaused(true)"),
                         entry.index("EnsureSurfaceReadyNear("))
-        self.assertLess(entry.index("SettleInitialSimulation({}, stats, stop)"),
+        self.assertLess(entry.index("SettleInitialSimulation("),
                         entry.index("sync_water_authority()"))
+        self.assertIn("surface_radius != 0 || collision_radius != 0, stop)", entry)
         settle = session.split("bool GameSession::SettleInitialSimulation(", 1)[1].split(
             "struct GameSession::LoadedWorldState", 1)[0]
         self.assertIn("i < 400 && stable < 8", settle)
         self.assertIn("kInitSettleCap = 50", settle)
         self.assertIn("kPostInitSettleTicks = 240", settle)
         self.assertIn("!continuation && !water_loaded_from_save", settle)
+        self.assertIn("settle_streaming && !continuation && i < 400", settle)
+        self.assertIn("settle_streaming && !continuation && !water_loaded_from_save", settle)
         self.assertNotIn("TickSimulation(", settle)
         self.assertGreaterEqual(settle.count("stop.stop_requested()"), 5)
         native = read_source("test/performance/runtime_world_visual_validation_test.cpp")
@@ -208,6 +213,28 @@ class ReplaySourceContract(unittest.TestCase):
         self.assertIn("EXPECT_EQ(start_hash, cli->header.start_world_hash)", regression)
         self.assertIn("EXPECT_EQ(automatic->header.start_world_hash, start_hash)", regression)
         self.assertIn("playback.ComputeWorldHash(), automatic->header.start_world_hash", regression)
+
+    def test_boot_presentation_observes_publication_and_terrain_save_dependencies(self):
+        source = read_source("src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        drain = source.split("void SHIELD_WorldSystem::wait_for_streaming_jobs()", 1)[1].split(
+            "namespace {", 1)[0]
+        self.assertLess(drain.index("while (deferred_meshing_pending())"),
+                        drain.index("m_streaming_telemetry_stats.last_queue_depth"))
+        self.assertIn("m_deferred_generation_candidates + m_unadmitted_meshing_candidates", drain)
+        self.assertIn("m_last_streaming_budget_stats.submitted_meshing -", source)
+        self.assertIn("retained_candidates;", source)
+        self.assertIn("m_streaming_telemetry_stats.pending_lod_chunks = 0", drain)
+        self.assertNotIn("m_streaming_state.chunks", drain)
+        capture = source.split("SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(", 1)[1].split(
+            "bool SHIELD_WorldSystem::is_far_lod_sdf_snapshot_current(", 1)[0]
+        self.assertIn("entry.authority_durable = !chunk->is_voxel_data_dirty();", capture)
+        self.assertIn("if (!chunk->has_terrain_authority()) {\n"
+                      "            entry.authority_durable = true;\n        }", capture)
+        native = read_source("test/performance/runtime_world_visual_validation_test.cpp")
+        for name in ("RadiusZeroKeepsOnlyThePreparedSurface",
+                     "DrainedStreamingAndWaterOnlyTerrainArePresentationReady",
+                     "StreamingDrainRetainsUnadmittedCandidates"):
+            self.assertIn("TEST(ClientBootPreparation, " + name + ")", native)
 
     def test_client_replay_headers_share_authority_capture_for_both_peers(self):
         driver = read_source("src/luminumbra_client/core/scenarios/NetworkedSessionDriver.cpp")

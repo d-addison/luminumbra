@@ -513,12 +513,21 @@ bool ServerWorldRunner::Boot() {
     for (const World::PlayerAvatar& avatar : m_avatars) {
         boot_anchors.push_back(avatar.position);
     }
-    if (!m_session->SettleInitialSimulation(boot_anchors, m_boot_settle)) {
+    world::GameSession::BootSettleStats settle_stats;
+    if (!m_session->SettleInitialSimulation(boot_anchors,
+                                            settle_stats,
+                                            m_config.surface_radius != 0 ||
+                                                m_config.collision_radius != 0)) {
         m_bootError = "Initial simulation preparation failed";
         m_session.reset();
         m_jobSystem.shutdown();
         return false;
     }
+    m_boot_settle = {.water_chunks = settle_stats.water_chunks,
+                     .awake = settle_stats.awake,
+                     .uninited = settle_stats.uninited,
+                     .iterations = settle_stats.iterations,
+                     .water_settle_skipped = settle_stats.water_settle_skipped};
 
     // live ticks resume the loaded water state exactly where the save left it.
     if (water_loaded_from_save) {

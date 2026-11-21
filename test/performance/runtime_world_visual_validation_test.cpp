@@ -1106,7 +1106,7 @@ TEST(ClientBootPreparation, MissingSystemsInvalidRadiiAndCancellationRefuseBefor
     world::GameSession missing;
     world::GameSession::BootSettleStats stats;
     EXPECT_FALSE(missing.PrepareInitialSimulation(0, 0));
-    EXPECT_FALSE(missing.SettleInitialSimulation({}, stats));
+    EXPECT_FALSE(missing.SettleInitialSimulation({}, stats, true));
 
     const TestSupport::HeadlessRoot root;
     JobSystem jobs;
@@ -1124,7 +1124,7 @@ TEST(ClientBootPreparation, MissingSystemsInvalidRadiiAndCancellationRefuseBefor
     std::stop_source cancellation;
     cancellation.request_stop();
     EXPECT_FALSE(client.PrepareInitialSimulation(0, 0, cancellation.get_token()));
-    EXPECT_FALSE(client.SettleInitialSimulation({}, stats, cancellation.get_token()));
+    EXPECT_FALSE(client.SettleInitialSimulation({}, stats, true, cancellation.get_token()));
     EXPECT_EQ(TestSupport::SessionWorldHash(client), before);
     EXPECT_EQ(client.GetSimulationTickCount(), 0u);
     EXPECT_FALSE(fs::exists(client.GetWorldSaveDir() / "desync.lrec1"));
@@ -1157,6 +1157,116 @@ TEST(ClientBootPreparation, LoadedEntryPreservesWaterAtTickZero) {
     EXPECT_EQ(loaded.GetWorldSystem()->debug_water_state_hash().water_chunks, before.water_chunks);
     EXPECT_EQ(loaded.GetSimulationTickCount(), 0u);
     EXPECT_EQ(loaded.TickSimulation(loaded.GetSimulationClock().fixed_dt()), 1u);
+}
+
+TEST(ClientBootPreparation, RadiusZeroKeepsOnlyThePreparedSurface) {
+    const TestSupport::HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    world::GameSession client;
+    client.SetJobSystem(&jobs);
+    client.SetRootPath(root.root_string());
+    ASSERT_TRUE(client.CreateWorld("Client", "424242", "default"));
+    ASSERT_TRUE(client.LoadWorldState());
+    ASSERT_TRUE(client.PrepareInitialSimulation(0, 0));
+    auto* world_system = client.GetWorldSystem();
+    EXPECT_EQ(world_system->get_streaming_telemetry_stats().frames_observed, 0u);
+    EXPECT_TRUE(world_system->get_streaming_telemetry_stats().quiescent());
+    const auto spawn = SHIELD_WorldSystem::world_to_chunk_coords(client.GetMetadata().spawnPoint);
+    const auto chunks = world_system->snapshot_streamed_chunks();
+    ASSERT_FALSE(chunks.empty());
+    for (const auto& chunk : chunks) {
+        EXPECT_EQ(chunk->get_coords().x, spawn.x);
+        EXPECT_EQ(chunk->get_coords().z, spawn.z);
+    }
+    EXPECT_EQ(client.GetSimulationTickCount(), 0u);
+}
+
+TEST(ClientBootPreparation, DrainedStreamingAndWaterOnlyTerrainArePresentationReady) {
+    JobSystem jobs;
+    jobs.startup(1);
+    const auto params = Luminumbra::Test::SyntheticTerrainParams();
+    SHIELD_WorldSystem world_system(&jobs, nullptr, params, 4242);
+    entt::registry registry;
+    world_system.wait_for_streaming_jobs();
+    EXPECT_TRUE(world_system.get_streaming_telemetry_stats().quiescent());
+    auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+    constexpr std::size_t kSamples =
+        static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+    chunk->sdf_data.assign(kSamples, -1.0f);
+    ASSERT_TRUE(world_system.adopt_streamed_chunk(chunk));
+    world_system.update(registry, Vec3(8.0f), nullptr, false);
+    ASSERT_FALSE(world_system.get_streaming_telemetry_stats().quiescent());
+    world_system.wait_for_streaming_jobs();
+    EXPECT_TRUE(world_system.get_streaming_telemetry_stats().quiescent());
+    world_system.wait_for_streaming_jobs();
+    EXPECT_TRUE(world_system.get_streaming_telemetry_stats().quiescent());
+
+    // A water-only save dependency must not hold the terrain cache stale.
+    chunk->set_water_authority();
+    chunk->mark_water_data_dirty();
+    ASSERT_TRUE(chunk->is_voxel_data_dirty());
+    ASSERT_FALSE(chunk->has_terrain_authority());
+    const auto water_only = world_system.capture_far_lod_sdf_snapshot(0, 0);
+    ASSERT_TRUE(water_only);
+    ASSERT_EQ(water_only->entries.size(), 1u);
+    EXPECT_EQ(water_only->entries.front().provenance, ChunkSdfProvenance::LoadedOrEdited);
+    EXPECT_TRUE(water_only->entries.front().authority_durable);
+    EXPECT_TRUE(world_system.is_far_lod_sdf_snapshot_current(*water_only, true));
+    EXPECT_TRUE(chunk->is_voxel_data_dirty());
+
+    // Edited terrain retains its save dependency, including after water ownership.
+    chunk->mark_voxel_data_dirty();
+    const auto edited = world_system.capture_far_lod_sdf_snapshot(0, 0);
+    ASSERT_TRUE(edited);
+    ASSERT_EQ(edited->entries.size(), 1u);
+    EXPECT_FALSE(edited->entries.front().authority_durable);
+    EXPECT_FALSE(world_system.is_far_lod_sdf_snapshot_current(*water_only, true));
+    chunk->clear_voxel_data_dirty();
+    const auto durable = world_system.capture_far_lod_sdf_snapshot(0, 0);
+    ASSERT_TRUE(durable);
+    ASSERT_EQ(durable->entries.size(), 1u);
+    EXPECT_TRUE(durable->entries.front().authority_durable);
+}
+
+TEST(ClientBootPreparation, StreamingDrainRetainsUnadmittedCandidates) {
+    JobSystem jobs;
+    jobs.startup(1);
+    const auto params = Luminumbra::Test::SyntheticTerrainParams();
+    SHIELD_WorldSystem world_system(&jobs, nullptr, params, 4242);
+    entt::registry registry;
+    // This backlog selects a 320-item prefix. Empty SDFs keep the fixed
+    // workload bounded while exercising snapshot backpressure too.
+    constexpr int kChunks = 321;
+    constexpr std::size_t kSamples =
+        static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+    for (int x = 0; x < kChunks; ++x) {
+        auto chunk = std::make_shared<Chunk>(IVec3(x, 0, 0));
+        chunk->sdf_data.assign(kSamples, -1.0f);
+        ASSERT_TRUE(world_system.adopt_streamed_chunk(chunk));
+    }
+    world_system.update(registry, Vec3(8.0f), nullptr, false);
+    const auto frame = world_system.get_last_streaming_budget_stats();
+    ASSERT_EQ(frame.meshing_candidates, static_cast<std::size_t>(kChunks));
+    ASSERT_GT(frame.meshing_budget, 0);
+    ASSERT_LT(static_cast<std::size_t>(frame.meshing_budget), frame.meshing_candidates);
+    const auto unadmitted =
+        frame.meshing_candidates - static_cast<std::size_t>(frame.meshing_budget);
+    for (int barrier = 0; barrier < 2; ++barrier) {
+        // Other public drains can consume retained work before this observation.
+        world_system.wait_for_promotion_jobs();
+        world_system.wait_for_admitted_streaming_jobs();
+        world_system.wait_for_streaming_jobs();
+        const auto& streaming = world_system.get_streaming_telemetry_stats();
+        EXPECT_FALSE(streaming.quiescent());
+        EXPECT_EQ(streaming.last_queue_depth, unadmitted);
+        EXPECT_EQ(streaming.generation_batches, 0u);
+        EXPECT_EQ(streaming.meshing_batches, 0u);
+        EXPECT_EQ(streaming.pending_lod_chunks, 0u);
+        EXPECT_FALSE(streaming.promotion_pending);
+        EXPECT_EQ(world_system.get_last_streaming_budget_stats().submitted_meshing,
+                  frame.submitted_meshing);
+    }
 }
 
 TEST_P(ClientReplayProducerTest, AutomaticDumpMatchesCliBootAndReconstructsStartWorld) {
