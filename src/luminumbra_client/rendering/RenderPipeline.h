@@ -420,12 +420,19 @@ public:
 
     bool startup(u32 screen_width, u32 screen_height, const std::filesystem::path& root_path);
     void shutdown();
+    enum class DiagnosticCapturePolicy {
+        Complete,
+        DeferredOnlyFixedSite
+    };
+    // DeferredOnlyFixedSite applies to this admitted diagnostic frame only. It
+    // omits unsupported contributors; ordinary rendering keeps Complete.
     void render_frame(entt::registry& registry,
                       Systems::SHIELD_WorldSystem& world_system,
                       const Camera& camera,
                       float deltaTime,
                       bool wireframe = false,
-                      UploadPresentation presentation = UploadPresentation::Streaming);
+                      UploadPresentation presentation = UploadPresentation::Streaming,
+                      DiagnosticCapturePolicy capture_policy = DiagnosticCapturePolicy::Complete);
 
     // push the deterministic Aether scalar field to the lighting-pass
     // emissive tap (one-way sim->render bridge, called per frame from the client).
@@ -1267,7 +1274,8 @@ private:
                        float deltaTime,
                        bool wireframe,
                        UploadPresentation presentation);
-    void dispatch_stages(const Camera& camera);
+    void dispatch_stages(const Camera& camera, bool deferred_only_capture = false);
+    void finish_gbuffer_stage();
     FarReplayCamera replay_camera(const Camera& camera) const;
 
     using StageExecutorFn = void (RenderPipeline::*)(const Camera&);
@@ -1404,6 +1412,7 @@ private:
 
     DiagnosticCaptureOptions m_capture_diagnostics;
     bool m_diagnostic_capture_armed = true;
+    bool m_diagnostic_deferred_only = false;
     std::unique_ptr<DiagnosticFrameCapture> m_diagnostic_capture;
     bool m_capture_waterfall_geometry = false;
     u32 m_screen_width = 0;

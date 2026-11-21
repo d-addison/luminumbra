@@ -1054,6 +1054,34 @@ The runner now owns temporal simulation/physics advancement and completed-frame
 capture; native execution remains pending. A4 still refuses unsupported contributor
 coverage. No all-features runtime support is claimed.
 
+The renderer exposes an explicit `DeferredOnlyFixedSite` policy for a single
+admitted A4 diagnostic frame. It omits procedural plants, scent decals, forward
+water and waterfalls, glass accumulation and resolve, foliage and particles before
+draw submission. The scene-compositing weather overlay and its snapshot are also
+omitted because that overlay has no exact contributor mask. Supported deferred
+geometry, lighting, sky and lightning remain, including weather inputs to lighting
+and sky. Scene-overlay grading and weather precipitation particles are omitted.
+The capture's
+`render_settings.capture_policy` is `deferred_only_fixed_site`. This is a reduced
+capture, so it cannot establish all-features or precipitation evidence. Default
+renders and unadmitted diagnostic requests retain their existing behavior and
+unsupported-contributor refusals. Paired replay refuses before changing the capture
+when nonempty glass lacks prepared OIT targets, valid accumulation/resolve shaders
+or draw VAOs; an ordinary glass frame prepares those resources. Empty glass needs
+no OIT resources. Resize retires the targets and requires preparation again. Water
+visibility evidence is invalidated at every frame start, including omitted water
+submission and layer isolation. Registered
+`PassContext.DeferredOnlyDiagnosticPolicyOmitsUnsupportedDrawsForOneAdmittedFrame`,
+`PassContext.DeferredOnlyWeatherOmitsSceneOverlayAndCompleteRetainsRefusal`,
+`PassContext.OmittedWaterInvalidatesVisibilityAcrossPolicyAndIsolationChanges`,
+`PassContext.PairedReplayRefusesColdGlassWithoutChangingReducedCapture`
+and Python attribution-wiring regressions cover admission, active rain/snow/fog,
+stage exclusion, water evidence lifetime, replay resource admission, metadata and
+policy isolation. The policy has no temporal runtime caller yet:
+fixed-site transport integration and native day/night and weather-cycle
+recapture with non-vacuous manifests and bounded payload verification remain
+pending. No authority revision, simulation identity or save format changes.
+
 The optional GL-free file transport acknowledges immutable completed payloads with
 `acknowledgeCaptureFiles`. It opens and verifies the directory and each regular
 file, reads at most 128 MiB per payload and at most 12 payloads per frame, and hashes

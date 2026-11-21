@@ -1756,7 +1756,7 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("return;", body(prepare, guard))
         render = body(self.pipeline, "void RenderPipeline::render_frame(")
         self.assertLess(render.index("if (!m_frame_prepared.valid)"),
-                        render.index("dispatch_stages(camera)"))
+                        render.index("dispatch_stages(camera, deferred_only_capture)"))
         self.assertIn("UploadPresentation presentation = UploadPresentation::Streaming",
                       compact(self.header))
         # Evaluate the shipping selector for all phase boundaries. A measured
