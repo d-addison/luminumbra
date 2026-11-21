@@ -234,6 +234,7 @@ struct DebugViewPass::Snapshot {
     GLuint sample_fbo = 0;
     GLuint sample_texture = 0;
     bool ready = false;
+    bool identity_complete = false;
     bool images_ready = false;
     bool inspect_requested = false;
     bool freeze_requested = false;
@@ -273,11 +274,12 @@ public:
         if (!capture_) {
             return;
         }
-        const bool complete = capture_->complete();
+        const bool ready = capture_->snapshot_ready();
+        pass_.m_snapshot->identity_complete = capture_->complete();
         // Retire the current variant before deletion so the gather saves a valid binding.
         AttributedGl::UseProgram(glUseProgram, 0U);
         capture_.reset();
-        if (!complete) {
+        if (!ready) {
             controls().status = controls().result =
                 "Snapshot refused: incomplete or unsupported coverage";
             return;
@@ -854,6 +856,8 @@ void DebugViewPass::finish_frame(const RenderContext& ctx) {
         }
         const auto kind = producer(draw.at("shader_variant").get<std::string>(),
                                    draw.at("supported").get<bool>());
+        m_snapshot->identity_complete =
+            m_snapshot->identity_complete && kind != ProducerKind::Unsupported;
         metadata[(index + 1) * 2] = *id;
         metadata[(index + 1) * 2 + 1] = {
             chunk, static_cast<std::uint32_t>(kind), mesh.at("provenance").get<std::uint32_t>(), 0};
@@ -892,8 +896,9 @@ void DebugViewPass::finish_frame(const RenderContext& ctx) {
     glBindTexture(GL_TEXTURE_BUFFER, m_snapshot->metadata_texture);
     glTexBuffer(GL_TEXTURE_BUFFER, GL_RGBA32UI, m_snapshot->metadata);
     m_snapshot->ready = true;
-    control.status =
-        "Identity snapshot; refresh to capture a new frame. Magenta hatch = zero / unsupported.";
+    control.status = m_snapshot->identity_complete ? "Identity snapshot (complete coverage)"
+                                                   : "Identity snapshot (incomplete coverage)";
+    control.status += "; refresh to capture a new frame. Magenta hatch = zero / unsupported.";
     if (control.inspector_open && !retain_images(ctx)) {
         control.frozen = false;
         control.result = "Snapshot image storage unavailable";
@@ -1075,6 +1080,7 @@ void DebugViewPass::inspect_snapshot(const RenderContext& ctx) {
                        {"record", record},
                        {"view", m_snapshot->view},
                        {"projection", m_snapshot->projection},
+                       {"identity_complete", m_snapshot->identity_complete},
                        {"identity_supported",
                         !record.is_null() &&
                             producer(record.at("draw").at("shader_variant").get<std::string>(),

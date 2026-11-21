@@ -394,7 +394,7 @@ bool RenderPipeline::startup(u32 screen_width,
         init_material_lut();
         m_water_pass->init_water_fallback_textures(m_render_registry);
         init_gpu_pass_timers();
-        init_mdi_buffers(); // per-frame MDI command + origin SSBO ring
+        init_mdi_buffers(); // terrain command/origin stream
         init_sky_lut();     //  Hillaire 2020 scattering LUT precompute
 
         m_gbuffer_pass->init_instanced_static_mesh(m_root_path);
@@ -1883,7 +1883,7 @@ RenderPipeline::RenderResourceRegistryStats RenderPipeline::get_resource_registr
     }
 
     // live terrain geometry is now backed by the shared pool's blocks
-    // (each block: 1 VAO + vertex VBO + index EBO) plus the per-frame MDI ring
+    // (each block: 1 VAO + vertex VBO + index EBO) plus the terrain MDI ring
     // (indirect command buffer + origin buffer per ring slot), rather than a
     // VAO/VBO/EBO per chunk. Count those here so the resource registry remains
     // accurate (debug-labelled, and empty after shutdown -- the pool/MDI buffers
@@ -2179,27 +2179,32 @@ void RenderPipeline::refresh_render_pass_metadata() {
 //
 // The G-buffer and shadow passes share this path. Each visible pool-resident
 // chunk becomes one DrawElementsIndirectCommand (firstIndex/baseVertex into the
-// chunk's pool block) plus a chunk world origin written to the origin SSBO at
+// chunk's pool block) plus a chunk world origin written to the origin buffer at
 // the same draw index. Commands are grouped by pool block so each block's VAO
 // is bound once and submitted with a single glMultiDrawElementsIndirect (the
 // "per-bucket MDI" form from the dispatch). The vertex shaders read the origin
-// by gl_DrawID from the SSBO instead of a per-draw model uniform.
+// through an instanced attribute indexed by baseInstance.
 //
-// A small ring of {indirect buffer, origin SSBO} pairs avoids the GPU stalling
-// on buffers it may still be reading from a prior frame (the passes run twice
-// per frame -> shadow then gbuffer; the ring advances per submit).
+// Independent command/origin pairs cover five submissions over three frames.
+// Fences prove completion; a pending/missing/failed fence causes storage orphaning.
+// The origin is an instanced vertex attribute, and commands retain their original bytes.
 // ===========================================================================
 void RenderPipeline::init_mdi_buffers() {
     for (MdiFrameBuffers& frame : m_mdi_frames) {
         frame.indirect_buffer = 0;
         frame.origin_buffer = 0;
         frame.command_capacity = 0;
+        frame.completion = nullptr;
     }
-    m_mdi_frame_cursor = 0;
+    m_mdi_stream = {};
 }
 
 void RenderPipeline::destroy_mdi_buffers() {
     for (MdiFrameBuffers& frame : m_mdi_frames) {
+        if (frame.completion) {
+            glDeleteSync(frame.completion);
+            frame.completion = nullptr;
+        }
         if (frame.indirect_buffer) {
             glDeleteBuffers(1, &frame.indirect_buffer);
             frame.indirect_buffer = 0;
@@ -2210,51 +2215,54 @@ void RenderPipeline::destroy_mdi_buffers() {
         }
         frame.command_capacity = 0;
     }
-    m_mdi_frame_cursor = 0;
+    m_mdi_stream = {};
     m_mdi_command_scratch.clear();
     m_mdi_command_scratch.shrink_to_fit();
     m_mdi_origin_scratch.clear();
     m_mdi_origin_scratch.shrink_to_fit();
 }
 
-void RenderPipeline::ensure_mdi_capacity(MdiFrameBuffers& frame, std::size_t commands) {
-    if (commands <= frame.command_capacity && frame.indirect_buffer != 0) {
+void RenderPipeline::ensure_mdi_capacity(MdiFrameBuffers& frame,
+                                         std::size_t commands,
+                                         bool orphan) {
+    const bool grow =
+        commands > frame.command_capacity || frame.indirect_buffer == 0 || frame.origin_buffer == 0;
+    if (!grow && !orphan)
         return;
-    }
-    // Grow with headroom so steady-state frames never reallocate.
-    std::size_t new_capacity = std::max<std::size_t>(commands, 256u);
-    new_capacity += new_capacity / 2u;
+    const std::size_t new_capacity =
+        grow ? TerrainStreamRing::capacity(commands) : frame.command_capacity;
+    // Check both exact sizes before any GL storage mutation. At most 65,536
+    // commands per pair, 15 current stores: 33.75 MiB for commands + origins.
+    // The driver retains orphaned stores until their previous consumers retire.
+    static_assert(TerrainStreamRing::kMaxCommands == ChunkGeometryPool::kMaxAllocations);
+    static_assert(TerrainStreamRing::kSubmissionsPerFrame == ShadowMap::CASCADE_COUNT + 1);
+    static_assert(sizeof(DrawElementsIndirectCommand) == 20 && sizeof(glm::vec4) == 16);
+    const auto byte_limit = static_cast<std::size_t>(std::numeric_limits<GLsizeiptr>::max());
+    const auto command_bytes = TerrainStreamRing::storage_bytes(
+        new_capacity, sizeof(DrawElementsIndirectCommand), byte_limit);
+    const auto origin_bytes =
+        TerrainStreamRing::storage_bytes(new_capacity, sizeof(glm::vec4), byte_limit);
 
-    if (frame.indirect_buffer) {
-        glDeleteBuffers(1, &frame.indirect_buffer);
-        frame.indirect_buffer = 0;
-    }
-    if (frame.origin_buffer) {
-        glDeleteBuffers(1, &frame.origin_buffer);
-        frame.origin_buffer = 0;
-    }
-
-    glGenBuffers(1, &frame.indirect_buffer);
+    // Keep names stable for VAOs and replay state restoration. glBufferData with
+    // null data replaces the store; previous draws retain the old backing store.
+    if (!frame.indirect_buffer)
+        glGenBuffers(1, &frame.indirect_buffer);
     glBindBuffer(GL_DRAW_INDIRECT_BUFFER, frame.indirect_buffer);
-    glBufferData(GL_DRAW_INDIRECT_BUFFER,
-                 static_cast<GLsizeiptr>(new_capacity * sizeof(DrawElementsIndirectCommand)),
-                 nullptr,
-                 GL_STREAM_DRAW);
-
-    glGenBuffers(1, &frame.origin_buffer);
+    glBufferData(
+        GL_DRAW_INDIRECT_BUFFER, static_cast<GLsizeiptr>(command_bytes), nullptr, GL_STREAM_DRAW);
+    if (!frame.origin_buffer)
+        glGenBuffers(1, &frame.origin_buffer);
     glBindBuffer(GL_ARRAY_BUFFER, frame.origin_buffer);
-    glBufferData(GL_ARRAY_BUFFER,
-                 static_cast<GLsizeiptr>(new_capacity * sizeof(glm::vec4)),
-                 nullptr,
-                 GL_STREAM_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(origin_bytes), nullptr, GL_STREAM_DRAW);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
 
-    const std::size_t slot = static_cast<std::size_t>(&frame - m_mdi_frames.data());
-    const std::string base = "terrain.mdi." + std::to_string(slot);
-    label_gl_object(GL_BUFFER, frame.indirect_buffer, base + ".indirect");
-    label_gl_object(GL_BUFFER, frame.origin_buffer, base + ".origins");
-
+    if (grow) {
+        const std::size_t slot = static_cast<std::size_t>(&frame - m_mdi_frames.data());
+        const std::string base = "terrain.mdi." + std::to_string(slot);
+        label_gl_object(GL_BUFFER, frame.indirect_buffer, base + ".indirect");
+        label_gl_object(GL_BUFFER, frame.origin_buffer, base + ".origins");
+    }
     frame.command_capacity = new_capacity;
 }
 
@@ -2352,12 +2360,12 @@ void SubmitDiagnosticTerrainBucket(GBufferDiagnosticCapture*& capture,
 void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& visible_chunks,
                                      std::size_t& out_draws,
                                      std::size_t& out_indices) {
-    // A diagnostic replay may reuse a ring slot but never advances production ownership.
+    // Replay restores scheduling, but its consumers still fence the actual storage.
     const bool diagnostic_replay = DebugViewPass::replaying();
-    const auto saved_cursor = m_mdi_frame_cursor;
+    const auto saved_cursor = m_mdi_stream.cursor();
     ReplayRollback restore_cursor([this, diagnostic_replay, saved_cursor]() noexcept {
         if (diagnostic_replay) {
-            m_mdi_frame_cursor = saved_cursor;
+            m_mdi_stream.restore_cursor(saved_cursor);
         }
     });
     out_draws = 0;
@@ -2392,6 +2400,8 @@ void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& v
     if (running == 0) {
         return;
     }
+    // Validate the pool-derived count before CPU or GPU allocation and narrowing.
+    (void)TerrainStreamRing::capacity(running);
 
     auto* diagnostic_capture = GBufferDiagnosticCapture::Current();
     if (diagnostic_capture && !diagnostic_capture->deferred_attached()) {
@@ -2447,24 +2457,50 @@ void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& v
     }
     out_draws = running;
 
-    MdiFrameBuffers& frame = m_mdi_frames[m_mdi_frame_cursor];
-    if (m_far_world_paired && frame.command_capacity < running)
+    MdiFrameBuffers& frame = m_mdi_frames[m_mdi_stream.cursor()];
+    if (m_far_world_paired && (frame.command_capacity < running || frame.indirect_buffer == 0 ||
+                               frame.origin_buffer == 0))
         throw std::logic_error("Replay cannot allocate submission buffers");
-    ensure_mdi_capacity(frame, running);
+    {
+        // Native captures attribute CPU driver work in uploads separately from draws.
+        const bool marker = glPushDebugGroup && glPopDebugGroup && !m_far_world_paired;
+        if (marker)
+            glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0u, -1, "Terrain upload");
+        ReplayRollback end_upload_marker([marker]() noexcept {
+            if (marker)
+                glPopDebugGroup();
+        });
+        bool completed = false;
+        if (frame.completion) {
+            // Exactly one poll, zero timeout/flags: never block the render thread.
+            const GLenum status = glClientWaitSync(frame.completion, 0, 0);
+            completed = status == GL_ALREADY_SIGNALED || status == GL_CONDITION_SATISFIED;
+            glDeleteSync(frame.completion);
+            frame.completion = nullptr;
+        }
+        // Parity/scale captures suppress timers while redispatching prepared
+        // frames. Like debug/far replays, they do not count as production submits.
+        const auto allocation = m_mdi_stream.acquire(
+            completed, diagnostic_replay || m_gpu_timers_suppressed || m_far_world_paired);
+        ensure_mdi_capacity(frame, running, allocation.orphan);
 
-    glBindBuffer(GL_DRAW_INDIRECT_BUFFER, frame.indirect_buffer);
-    glBufferSubData(GL_DRAW_INDIRECT_BUFFER,
-                    0,
-                    static_cast<GLsizeiptr>(running * sizeof(DrawElementsIndirectCommand)),
-                    m_mdi_command_scratch.data());
-    // The origin buffer is consumed as an instanced vertex attribute (binding 1,
-    // vec4 stride), not an SSBO -- baseInstance indexing works without GLSL 4.6.
-    glBindBuffer(GL_ARRAY_BUFFER, frame.origin_buffer);
-    glBufferSubData(GL_ARRAY_BUFFER,
-                    0,
-                    static_cast<GLsizeiptr>(running * sizeof(glm::vec4)),
-                    m_mdi_origin_scratch.data());
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, frame.indirect_buffer);
+        glBufferSubData(GL_DRAW_INDIRECT_BUFFER,
+                        0,
+                        static_cast<GLsizeiptr>(running * sizeof(DrawElementsIndirectCommand)),
+                        m_mdi_command_scratch.data());
+        // Same bytes, including baseInstance: each pair has its own offset-zero range.
+        glBindBuffer(GL_ARRAY_BUFFER, frame.origin_buffer);
+        glBufferSubData(GL_ARRAY_BUFFER,
+                        0,
+                        static_cast<GLsizeiptr>(running * sizeof(glm::vec4)),
+                        m_mdi_origin_scratch.data());
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+    }
+    // Also retire partial submissions if diagnostic identity staging throws.
+    // A failed fence leaves null, so the next acquire must orphan this pair.
+    ReplayRollback retire_stream(
+        [&frame]() noexcept { frame.completion = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0); });
 
     const auto& blocks = m_chunk_geometry_pool.blocks();
     for (std::size_t b = 0; b < block_count; ++b) {
@@ -2505,8 +2541,6 @@ void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& v
 
     glBindVertexArray(0);
     glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
-
-    m_mdi_frame_cursor = (m_mdi_frame_cursor + 1u) % kMdiRingFrames;
 }
 
 void RenderPipeline::init_gpu_pass_timers() {
@@ -2853,7 +2887,7 @@ void RenderPipeline::render_frame(entt::registry& registry,
     m_far_world_pair_taau_enabled = m_taau_enabled;
     m_far_world_pair_jitter_frame = m_taau_frame;
     m_far_world_pair_jitter = m_taau_jitter_ndc;
-    m_far_world_pair_mdi_cursor = m_mdi_frame_cursor;
+    m_far_world_pair_mdi_cursor = m_mdi_stream.cursor();
     std::unique_ptr<DiagnosticFrameCapture> diagnostic_frame;
     if (m_capture_diagnostics.enabled && m_diagnostic_capture_armed &&
         purpose == FarWorldPurpose::World) {
@@ -2973,7 +3007,7 @@ bool RenderPipeline::render_far_world_off_pair(const Camera& camera) {
                     previous_time = m_prev_time,
                     jitter_frame = m_taau_frame,
                     jitter = m_taau_jitter_ndc,
-                    cursor = m_mdi_frame_cursor,
+                    cursor = m_mdi_stream.cursor(),
                     trace = m_frame_stage_trace,
                     commands = m_mdi_command_scratch,
                     origins = m_mdi_origin_scratch,
@@ -2992,7 +3026,7 @@ bool RenderPipeline::render_far_world_off_pair(const Camera& camera) {
                 m_prev_time = previous_time;
                 m_taau_frame = jitter_frame;
                 m_taau_jitter_ndc = jitter;
-                m_mdi_frame_cursor = cursor;
+                m_mdi_stream.restore_cursor(cursor);
                 m_frame_stage_trace.swap(trace);
                 m_mdi_command_scratch.swap(commands);
                 m_mdi_origin_scratch.swap(origins);
@@ -3015,7 +3049,7 @@ bool RenderPipeline::render_far_world_off_pair(const Camera& camera) {
             m_prev_time = m_far_world_pair_prev_time;
             m_taau_frame = m_far_world_pair_jitter_frame;
             m_taau_jitter_ndc = m_far_world_pair_jitter;
-            m_mdi_frame_cursor = m_far_world_pair_mdi_cursor;
+            m_mdi_stream.restore_cursor(m_far_world_pair_mdi_cursor);
             m_far_world_paired = true;
             m_gpu_timers_suppressed = !FarReplayEffects{true}.Timers();
             m_frame_far_selection = FarWorldSubmissionOverride(m_frame_far_selection, false);
@@ -3042,6 +3076,7 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
                                    bool wireframe,
                                    UploadPresentation presentation) {
     m_frame_prepared.valid = false;
+    m_mdi_stream.begin_frame();
     m_frame_stage_trace.clear();
     m_cpu_frame_t0 = std::chrono::steady_clock::now(); // CPU per-phase submit cost
 
@@ -3703,36 +3738,48 @@ void RenderPipeline::execute_stage_skybox(const Camera& camera) {
 void RenderPipeline::execute_stage_opaque_snapshot(const Camera& camera) {
     LUMIN_PROFILE_ZONE_N("GL opaque_snapshot");
     (void)camera;
-    // 7. SNAPSHOT THE LIT OPAQUE+SKY SCENE, THEN WATER PASS BLENDS OVER IT.
-    // Water keeps depth writes off for transparency. Drawing the sky first prevents
-    // cloud/aurora sky pixels from overwriting water over far-depth/background
-    // samples while still giving refraction a stable pre-water color source.
-    record_frame_stage("opaque_snapshot");
-    m_lighting_pass->copy_lighting_color_to_opaque_texture(m_frame_lighting_ctx);
-}
-
-void RenderPipeline::execute_stage_water(const Camera& camera) {
+    // Prepare once in the original chunk order, before deciding whether to copy.
     const auto& renderable_chunk_snapshots = m_frame_prepared.renderable_chunk_snapshots;
-    glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
-    record_frame_stage("water");
+    m_frame_water_input.draw_items.clear();
     if (m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Water)) {
-        //  (T16): build the water draw list from m_water_render_data in
-        // chunk order (byte-stable) + the ctx, then run the seam.
-        RenderContext water_ctx = make_water_context(camera);
-        WaterPassInput water_input;
         for (const auto& chunk : renderable_chunk_snapshots) {
             auto it = m_water_render_data.find(chunk.id);
-            if (it != m_water_render_data.end() && it->second.element_count > 0 &&
+            if (it != m_water_render_data.end() &&
+                WaterPreparationDrawConsumes(it->second.element_count) &&
                 (m_frame_far_selection.effective != FarWorldMode::Ladder ||
                  it->second.PresentedLadderWaterEligible(m_water_pass->shader() &&
                                                          m_water_pass->shader()->IsValid()))) {
                 glm::mat4 model = glm::translate(
                     glm::mat4(1.0f),
                     glm::vec3(chunk.coords * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z)));
-                water_input.draw_items.push_back(
+                m_frame_water_input.draw_items.push_back(
                     {model, it->second.vao_id, it->second.element_count});
             }
         }
+    }
+    // 7. SNAPSHOT THE LIT OPAQUE+SKY SCENE, THEN WATER PASS BLENDS OVER IT.
+    // Water keeps depth writes off for transparency. Drawing the sky first prevents
+    // cloud/aurora sky pixels from overwriting water over far-depth/background
+    // samples while still giving refraction a stable pre-water color source.
+    record_frame_stage("opaque_snapshot");
+    // Glass uses this pre-water snapshot. Rays and weather refresh it at their
+    // own stages. Terrain capture can read it even when no transparent mesh draws.
+    const WaterPreparationConsumers consumers{
+        .water = !m_frame_water_input.draw_items.empty(),
+        .glass = !m_glass_pane_items.empty() && m_glass_quad_vao != 0,
+        .capture = m_terrain_coverage_enabled || m_water_visibility_capture_enabled};
+    if (consumers.opaque_snapshot()) {
+        m_lighting_pass->copy_lighting_color_to_opaque_texture(m_frame_lighting_ctx);
+    }
+}
+
+void RenderPipeline::execute_stage_water(const Camera& camera) {
+    glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
+    record_frame_stage("water");
+    if (m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Water)) {
+        // Consume the chunk-ordered list prepared before the opaque snapshot.
+        RenderContext water_ctx = make_water_context(camera);
+        const auto& water_input = m_frame_water_input;
         begin_gpu_pass_timer(GpuTimerPass::Water);
         const WaterDrawStats water_stats = m_water_pass->execute(
             water_ctx, water_input, camera, m_water_visibility_capture_enabled);
