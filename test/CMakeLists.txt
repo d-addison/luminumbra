@@ -2180,6 +2180,11 @@ target_link_libraries(eventbus_order_gate_test PRIVATE
     luminumbra_common
 )
 
+add_executable(authority_contributor_test common/AuthorityContributor_test.cpp)
+target_include_directories(authority_contributor_test PRIVATE ../src)
+target_link_libraries(authority_contributor_test PRIVATE gtest_main luminumbra_common)
+luminumbra_configure_first_party_target(authority_contributor_test)
+
 add_executable(world_persistence_roundtrip_gate_test
     persistence/world_persistence_roundtrip_gate_test.cpp
 )
@@ -2277,6 +2282,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     content_vfs_test
     mod_dependency_solver_test
     native_plugin_loader_test
+    authority_contributor_test
     upload_budget_test
     jolt_startup_test
     frame_attribution_test

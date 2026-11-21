@@ -1,6 +1,7 @@
 #include "WorldPersistenceRoundtrip.h"
 #include "../systems/PhysicsSystem.h"
 #include "../world/WorldClock.h"
+#include "AuthorityContributor.h"
 #include "SavedInputLimits.h"
 #include "SavedJsonAdmission.h"
 #include "WorldSaveEncoding.h"
@@ -2835,6 +2836,25 @@ std::string ComposeWorldHash(const std::string& chunk_hash,
     return StableChecksum(chunk_hash + "|wind:" + wind_hash + "|weather:" + weather_hash +
                           "|aether:" + aether_hash + "|scents:" + scent_hash +
                           "|ecology:" + ecology_hash + "|plants:" + plant_hash);
+}
+
+std::string ComposeWorldHash(const std::string& chunk_hash,
+                             const std::string& wind_hash,
+                             const std::string& weather_hash,
+                             const std::string& aether_hash,
+                             const std::string& scent_hash,
+                             const std::string& ecology_hash,
+                             const std::string& plant_hash,
+                             const AuthorityContributorRegistry& contributors) {
+    const auto suffix = contributors.SerializeCanonicalState();
+    if (suffix.empty()) {
+        return ComposeWorldHash(
+            chunk_hash, wind_hash, weather_hash, aether_hash, scent_hash, ecology_hash, plant_hash);
+    }
+    return Checksum(chunk_hash + "|wind:" + wind_hash + "|weather:" + weather_hash +
+                        "|aether:" + aether_hash + "|scents:" + scent_hash +
+                        "|ecology:" + ecology_hash + "|plants:" + plant_hash,
+                    suffix);
 }
 
 std::string StableChecksum(const std::string& canonical_text) {

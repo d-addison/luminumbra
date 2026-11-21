@@ -70,6 +70,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/network/NetworkStateHash.cpp
 
     # Persistence
+    ${CMAKE_CURRENT_LIST_DIR}/persistence/AuthorityContributor.cpp
     ${CMAKE_CURRENT_LIST_DIR}/persistence/WorldPersistenceRoundtrip.cpp
     ${CMAKE_CURRENT_LIST_DIR}/persistence/SaveTransaction.cpp
     ${CMAKE_CURRENT_LIST_DIR}/persistence/WorldSaveService.cpp
