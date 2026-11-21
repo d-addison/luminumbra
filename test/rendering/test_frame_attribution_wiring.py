@@ -4668,7 +4668,7 @@ class DiagnosticScenarioCaptureWiring(unittest.TestCase):
     def test_scan_and_benchmark_conflict_without_a_scenario_before_paths(self):
         config = block(read(CLIENT / "core/RuntimeScenarioConfig.cpp"),
                        "RuntimePathOptions ParseRuntimePathOptions(")
-        admission = block(config, "if (diagnostics.enabled)")
+        admission = block(config, "if (diagnostics.enabled && !temporal_audit)")
         self.assertIn('const bool frame_scan = HasCommandLineOption(argc, argv, "--frame-scan");', admission)
         self.assertIn('const bool render_benchmark = HasCommandLineOption(argc, argv, "--render-benchmark");', admission)
         self.assertIn('if ((!scenario.empty() && (frame_scan || render_benchmark)) || '
@@ -4740,7 +4740,7 @@ class DiagnosticScenarioCaptureWiring(unittest.TestCase):
     def test_admission_covers_all_supported_and_unsupported_producers_before_paths(self):
         config = block(read(CLIENT / "core/RuntimeScenarioConfig.cpp"),
                        "RuntimePathOptions ParseRuntimePathOptions(")
-        admission = block(config, "if (diagnostics.enabled)")
+        admission = block(config, "if (diagnostics.enabled && !temporal_audit)")
         supported = set(re.findall(r'scenario == "([^"]+)"', admission))
         self.assertEqual(supported, {"world_visual_sweep",
                                      "lod_seam_arrival_smoke", "lod_ground_smoke", "skybox_visual_smoke",
@@ -4758,7 +4758,7 @@ class DiagnosticScenarioCaptureWiring(unittest.TestCase):
             self.assertIn('"' + producer + '"', admission)
         self.assertIn("HasCommandLineOption(argc, argv, producer)", admission)
         self.assertIn("capture diagnostics refuse multiple capture drivers", admission)
-        self.assertLess(config.index("if (diagnostics.enabled)"),
+        self.assertLess(config.index("if (diagnostics.enabled && !temporal_audit)"),
                         config.index("options.diagnostics = diagnostics;"))
         self.assertLess(config.index("options.diagnostics = diagnostics;"),
                         config.index("for (const char* flag :"))
