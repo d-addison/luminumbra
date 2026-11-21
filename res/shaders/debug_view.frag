@@ -141,6 +141,26 @@ vec3 identityColor() {
 
 void main() {
 #ifdef LUMIN_DIAG_VIEWS
+    if (u_mode == 37) {
+        vec3 value = unsupportedColor();
+        if (u_contributionReady != 0) {
+            ivec2 extent = textureSize(gContribution, 0);
+            ivec2 pixel = clamp(ivec2(TexCoords * vec2(extent)), ivec2(0), extent - 1);
+            float count = texelFetch(gContribution, pixel, 0).r;
+            // Fixed integer bands; cyan is reserved exclusively for saturation.
+            value = count >= 16.0 ? vec3(0.0, 1.0, 1.0)
+                : count < 1.0 ? vec3(0.0)
+                : vec3((count - 1.0) / 14.0, (count - 1.0) / 14.0, (16.0 - count) / 15.0);
+        }
+        if (u_inspect != 0 && all(equal(ivec2(gl_FragCoord.xy), ivec2(0)))) {
+            // One invocation, one fixed record, independent of output/render scaling.
+            float selected = u_contributionReady != 0
+                ? texelFetch(gContribution, ivec2(u_pixelX, u_pixelY), 0).r : 0.0;
+            inspectorNormalDepth = vec4(selected, 0.0, 0.0, float(u_contributionReady));
+        }
+        FragColor = vec4(value, 1.0);
+        return;
+    }
     if (u_mode == 36) {
         vec4 result = vec4(unsupportedColor(), 1.0);
         if (u_contributionReady != 0) {
