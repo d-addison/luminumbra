@@ -4,16 +4,19 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 #include <vector>
 
+#include "core/EngineVersion.h"
 #include "luminumbra_common/ai/EcologyHash.h"
 #include "luminumbra_common/components/AlarmComponents.h"
 #include "luminumbra_common/components/CoreComponents.h"
@@ -31,10 +34,12 @@
 #include "luminumbra_common/ecs/EntitySnapshot.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
+#include "luminumbra_common/replay/ReplayStream.h"
 #include "luminumbra_common/systems/FarmingSystem.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WaterSystem.h" // water-smoke telemetry reads
+#include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/SurfaceWorkBudget.h"
 
@@ -167,7 +172,99 @@ bool HorizontalChunkHorizonCovers(const Vec3& center, const Vec3& candidate, int
     return std::max(std::abs(tx - cx), std::abs(tz - cz)) <= std::max(0, radius);
 }
 
+world::AuthorityBootDescriptor DescribeBoot(const ServerWorldRunnerConfig& config,
+                                            const world::GameSession& session,
+                                            std::uint32_t seed,
+                                            const world::WorldCalendar& calendar) {
+    if (config.avatar_count < 0 ||
+        config.avatar_count > static_cast<int>(world::AuthorityBootDescriptor::kMaxAvatars)) {
+        throw std::invalid_argument("Replay avatar roster exceeds descriptor bound");
+    }
+    world::AuthorityBootDescriptor boot;
+    const auto values = session.EffectiveIdentityValues();
+    boot.authority_rules_revision =
+        luminumbra::core::SimulationIdentityValues::kAuthorityRulesRevision;
+    boot.resolved_world_seed = seed;
+    boot.system_config_identity = session.SystemConfigIdentity(calendar);
+    static_assert(boot.system_gates.size() == values.enabled.size());
+    static_assert(boot.scalar_bits.size() == values.scalars.size());
+    // Fixed registry slots: at most 25 gates and 46 scalar/vector settings.
+    for (std::size_t i = 0; i < boot.system_gates.size(); ++i) {
+        boot.system_gates[i] = static_cast<std::uint8_t>(values.enabled[i]);
+    }
+    for (std::size_t i = 0; i < boot.scalar_bits.size(); ++i) {
+        boot.scalar_bits[i] = std::bit_cast<std::uint64_t>(values.scalars[i]);
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            boot.vector_bits[i][axis] =
+                std::bit_cast<std::uint32_t>(values.vectors[i][static_cast<int>(axis)]);
+        }
+    }
+    boot.finite_hydrology = values.finite_hydrology_enabled;
+    boot.weather_rain_scale_mm = values.weather_rain_scale_mm;
+    boot.region_work_limit = values.region_work_limit;
+    boot.region_hold_ticks = values.region_hold_ticks;
+    boot.region_reduced_shift = values.region_reduced_shift;
+    boot.day_length_ticks = calendar.dayLengthTicks;
+    boot.days_per_year = calendar.daysPerYear;
+    boot.daylight_numerator = calendar.daylightNumerator;
+    boot.daylight_denominator = calendar.daylightDenominator;
+    boot.lunar_cycle_days = calendar.lunarCycleDays;
+    boot.parked_bytes_limit = config.parked_bytes_limit;
+    boot.avatar_count = static_cast<std::uint32_t>(config.avatar_count);
+    boot.ecology_roster = config.ecology_roster;
+    boot.planted_roster = config.planted_roster;
+    boot.moving_anchor = config.moving_anchor;
+    boot.water_smoke = config.water_smoke;
+    return boot;
+}
+
 } // namespace
+
+world::AuthorityBootDescriptor
+ServerWorldRunner::DescribeReplayBoot(const ServerWorldRunnerConfig& config) {
+    if (config.seed.empty()) {
+        throw std::invalid_argument("Replay boot description requires a nonempty seed");
+    }
+    world::GameSession session;
+    session.ApplySystemConfig(
+        config.systems_config_override
+            ? *config.systems_config_override
+            : luminumbra::core::SystemConfig::LoadFromRuntimeRoot(config.root_path));
+    session.SetFiniteHydrologyEnabled(config.finite_hydrology);
+    if (config.region_scheduler) {
+        session.SetRegionSchedulerConfig(*config.region_scheduler);
+    }
+    return DescribeBoot(
+        config, session, world::ResolveWorldSeed(config.seed, 1), world::WorldCalendar{});
+}
+
+Replay::ReplayHeader ServerWorldRunner::CaptureReplayHeader() const {
+    if (!m_booted || !m_session || !m_config.world_id.empty() || TickCount() != 0 ||
+        (!m_session->GetWeatherSchedule() && !m_continuationOptions.owner_continuation)) {
+        throw std::invalid_argument("Replay requires a fresh boot at tick zero");
+    }
+    Replay::ReplayHeader header;
+    header.version = Replay::kLrec1BootVersion;
+    header.seed_string = m_config.seed;
+    header.seed = Replay::kResolvedSeedTag | m_session->GetMetadata().resolvedSeed;
+    header.preset = m_config.preset;
+    header.preset_hash = std::strtoull(Replay::Fnv1a64Hex(header.preset).c_str(), nullptr, 16);
+    header.surface_radius = static_cast<std::uint32_t>(m_config.surface_radius);
+    header.collision_radius = static_cast<std::uint32_t>(m_config.collision_radius);
+    header.engine_version = std::string(luminumbra::core::GetEngineVersionString());
+    header.system_config_identity = m_session->SystemConfigIdentity();
+    header.preset_content_hash = m_session->PresetContentHash();
+    if (const auto* schedule = m_session->GetWeatherSchedule()) {
+        header.version = Replay::kLrec1WeatherVersion;
+        header.weather_schedule = schedule->canonical_bytes();
+    } else {
+        header.authority_boot = DescribeBoot(m_config,
+                                             *m_session,
+                                             m_session->GetMetadata().resolvedSeed,
+                                             m_session->GetRenderCalendar());
+    }
+    return header;
+}
 
 ServerWorldRunner::ServerWorldRunner(ServerWorldRunnerConfig config)
     : ServerWorldRunner(std::move(config), world::OwnerContinuationOptions{}) {}
@@ -733,6 +830,13 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
             }
         }
         if (m_session->ActiveRegionsEnabled() && m_continuationOptions.owner_continuation) {
+            if (!m_session->ReplicatedSimulationAnchorsReserved(
+                    Systems::PhysicsSystem::kMaxRestoredAvatars)) {
+                // A world reload resets session storage after boot reserved it.
+                std::vector<Vec3> simulation_anchors;
+                simulation_anchors.reserve(Systems::PhysicsSystem::kMaxRestoredAvatars);
+                m_session->SetReplicatedSimulationAnchors(std::move(simulation_anchors));
+            }
             m_session->SetOwnerContinuationSimulationAnchors(m_ownerStreamingAnchors);
         } else if (m_session->ActiveRegionsEnabled()) {
             std::vector<Vec3> anchors;

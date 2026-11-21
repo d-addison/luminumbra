@@ -1028,6 +1028,9 @@ public:
     [[nodiscard]] std::uint64_t snapshot_copies() const {
         return m_snapshot_copies.load(std::memory_order_relaxed);
     }
+    // Calling-thread lifetime resident-map visits for complete authority snapshots,
+    // including rejected entries across worlds. Tick preparation must use footprints/queues.
+    [[nodiscard]] u64 authority_snapshot_resident_visits() const;
     // Owner-thread capture for a 32x32 chunk far region plus a one-chunk X/Z
     // halo. Only exact full SDF lattices enter the shared immutable result.
     std::shared_ptr<const FarLodSdfSnapshot> capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const;

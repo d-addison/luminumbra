@@ -33,6 +33,15 @@ namespace {
 
 constexpr std::uint64_t kCheckpointIntervalTicks = 30; // one second at 30 Hz
 
+// A failed automatic publication may retain an older complete generation.
+// Presence (including an invalid/unreadable entry) is a refusal, never a clean miss.
+bool ReplayFinalizationIncomplete(const std::string& path) {
+    std::error_code error;
+    const auto marker = fs::symlink_status(path + ".incomplete", error);
+    return (error && error != std::errc::no_such_file_or_directory) ||
+           marker.type() != fs::file_type::not_found;
+}
+
 // Captures a checkpoint record at the given tick from a booted runner. Uses the
 // single-snapshot combined hash path (one settled-state read per checkpoint).
 std::optional<Luminumbra::Replay::CheckpointRecord>
@@ -75,43 +84,47 @@ int RunRecord(const ServerCliOptions& options) {
                          options.ticks,
                          options.record_path);
 
+    // Do not clear another recorder's failure marker or silently supersede it.
+    if (ReplayFinalizationIncomplete(options.record_path)) {
+        LUMINUMBRA_CORE_ERROR("record: destination has an incomplete recording");
+        return 1;
+    }
+
+    // Keep CLI recording/finalization within the reader's one-million-record
+    // admission budget. Empty inputs and fixed-size hashes also bound the buffer
+    // and optional region trace; reject before boot or any output allocation.
+    const auto record_limit = Luminumbra::Replay::ReplayReadLimits{}.records;
+    const auto checkpoints = options.ticks / kCheckpointIntervalTicks +
+                             (options.ticks % kCheckpointIntervalTicks != 0 ? 1u : 0u);
+    if (options.ticks > record_limit || checkpoints > record_limit - options.ticks ||
+        options.avatars < 0 ||
+        options.avatars >
+            static_cast<int>(Luminumbra::world::AuthorityBootDescriptor::kMaxAvatars)) {
+        LUMINUMBRA_CORE_ERROR("record: requested workload exceeds replay admission budget");
+        return 1;
+    }
+
     Luminumbra::Server::ServerWorldRunnerConfig config = RunnerConfigFrom(options);
     config.world_id.clear();
     config.world_name = "Replay Record";
     config.autosave_interval_ticks = 0; // no autosave noise during recording
 
     Luminumbra::Server::ThrowawaySaveDirGuard save_cleanup;
-    Luminumbra::Server::ServerWorldRunner runner(std::move(config));
+    const bool owner_continuation = !config.weather_schedule;
+    Luminumbra::Server::ServerWorldRunner runner(std::move(config),
+                                                 {.owner_continuation = owner_continuation});
     if (!runner.Boot()) {
         LUMINUMBRA_CORE_ERROR("record: session failed to boot");
         return 1;
     }
     save_cleanup.Arm(runner.Session()->GetWorldSaveDir());
 
-    Luminumbra::Replay::ReplayHeader header;
-    header.version = Luminumbra::Replay::kLrec1Version;
-    header.tick_rate_hz = 30;
-    header.seed_string = options.seed;
-    header.seed =
-        Luminumbra::Replay::kResolvedSeedTag | runner.Session()->GetMetadata().resolvedSeed;
-    header.preset = options.preset;
-    header.preset_hash =
-        std::strtoull(Luminumbra::Replay::Fnv1a64Hex(options.preset).c_str(), nullptr, 16);
-    header.surface_radius = static_cast<std::uint32_t>(options.surface_radius);
-    header.collision_radius = static_cast<std::uint32_t>(options.collision_radius);
-    header.engine_version = std::string(luminumbra::core::GetEngineVersionString());
+    auto header = runner.CaptureReplayHeader();
     const auto start_hash = CaptureWorldHash(0, runner);
     if (!start_hash) {
         return 1;
     }
     header.start_world_hash = *start_hash;
-    header.system_config_identity = runner.Session()->SystemConfigIdentity();
-    header.preset_content_hash = runner.Session()->PresetContentHash();
-    if (const auto* schedule = runner.Session()->GetWeatherSchedule()) {
-        header.version = Luminumbra::Replay::kLrec1WeatherVersion;
-        header.weather_schedule = schedule->canonical_bytes();
-    }
-
     Luminumbra::Replay::RegionScheduleTrace schedule_trace;
     Luminumbra::Replay::ReplayWriter writer;
     if (!writer.Open(options.record_path, header)) {
@@ -211,6 +224,10 @@ int RunReplay(const ServerCliOptions& options) {
         LUMINUMBRA_CORE_ERROR("replay: cannot recover replay pair '{}'", options.replay_path);
         return 1;
     }
+    if (ReplayFinalizationIncomplete(options.replay_path)) {
+        LUMINUMBRA_CORE_ERROR("replay: recording finalization is incomplete");
+        return 1;
+    }
     auto contents = Luminumbra::Replay::ReadReplay(options.replay_path);
     if (!contents.has_value()) {
         LUMINUMBRA_CORE_ERROR("replay: '{}' is invalid or has an unsupported LREC1 version; "
@@ -223,7 +240,8 @@ int RunReplay(const ServerCliOptions& options) {
                               options.replay_path);
         return 1;
     }
-    if (contents->elided_through_tick != 0) {
+    if (Luminumbra::Replay::ElidedVersion(contents->header.version) ||
+        contents->elided_through_tick != 0) {
         LUMINUMBRA_CORE_ERROR("replay: '{}' is a diagnostic suffix; inputs through tick {} "
                               "were elided (prefix digest={:016x}); cannot replay from seed",
                               options.replay_path,
@@ -283,7 +301,8 @@ int RunReplay(const ServerCliOptions& options) {
         return 1;
     }
     Luminumbra::Server::ThrowawaySaveDirGuard save_cleanup;
-    Luminumbra::Server::ServerWorldRunner runner(std::move(*config));
+    Luminumbra::Server::ServerWorldRunner runner(
+        std::move(*config), {.owner_continuation = header.authority_boot.has_value()});
     if (!runner.Boot()) {
         LUMINUMBRA_CORE_ERROR("replay: session failed to boot from header");
         return 1;

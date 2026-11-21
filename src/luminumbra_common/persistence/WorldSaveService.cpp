@@ -2408,13 +2408,20 @@ std::atomic<std::uint64_t>& RecordCompressionCounter() {
     return counter;
 }
 
+SaveWorkCounts& SaveWork() {
+    static thread_local SaveWorkCounts counts;
+    return counts;
+}
+
 bool CompressPayload(const std::string& payload,
                      RegionRecord& record,
-                     std::vector<std::string>* errors) {
+                     std::vector<std::string>* errors,
+                     std::uint64_t& bytes_compressed) {
     if (payload.empty() || payload.size() > SavedInputLimits::kRegionRecordBytes) {
         AddError(errors, "region record payload exceeds the 64 MiB compatibility limit");
         return false;
     }
+    bytes_compressed += payload.size();
     RecordCompressionCounter().fetch_add(1, std::memory_order_relaxed);
     const int bound = LZ4_compressBound(static_cast<int>(payload.size()));
     std::string compressed(static_cast<std::size_t>(bound), '\0');
@@ -2441,6 +2448,8 @@ struct ChunkEncodeWork {
     bool success = false;
     std::vector<std::string> errors{};
     std::exception_ptr exception{};
+    std::uint64_t bytes_compressed = 0;
+    bool serialized = false;
 };
 
 // Matches the budget of the admitted-record cache that receives the retained inputs.
@@ -2479,6 +2488,20 @@ private:
 };
 
 void EncodeChunkRecords(std::vector<ChunkEncodeWork>& work) {
+    struct WorkReport {
+        const std::vector<ChunkEncodeWork>& items;
+        ~WorkReport() {
+            // Workers join before this diagnostic folds their plain per-record counts,
+            // including on failure or thread-creation exceptions. No shared hot counter.
+            auto& counts = SaveWork();
+            for (const auto& item : items) {
+                counts.owners_serialized += item.serialized ? 1u : 0u;
+                counts.clean_siblings_serialized +=
+                    item.serialized && !item.chunk->is_voxel_data_dirty() ? 1u : 0u;
+                counts.bytes_compressed += item.bytes_compressed;
+            }
+        }
+    } work_report{work};
     const auto hook = detail::ChunkEncodeHookForTesting().load(std::memory_order_acquire);
     const auto limit_override =
         detail::ChunkEncodeInFlightLimitForTesting().load(std::memory_order_acquire);
@@ -2514,9 +2537,10 @@ void EncodeChunkRecords(std::vector<ChunkEncodeWork>& work) {
             if (hook)
                 hook(index);
             item.inputs = ChunkSnapshotInputBytes(*item.chunk);
+            item.serialized = true;
             const std::string payload =
                 SerializeChunkRecordPayloadJson(*item.chunk, &item.strict_water_valid);
-            if (!CompressPayload(payload, item.record, &item.errors)) {
+            if (!CompressPayload(payload, item.record, &item.errors, item.bytes_compressed)) {
                 in_flight.release(admitted);
                 admitted = 0;
                 note_failure(index);
@@ -2905,7 +2929,9 @@ bool WriteRegionFile(const std::filesystem::path& path,
     bytes.append(kRegionMagic, sizeof(kRegionMagic));
     AppendU16(bytes, kRegionVersion);
     AppendU16(bytes, static_cast<std::uint16_t>(records.size()));
+    std::uint64_t owners_rewritten = 0;
     for (const RegionRecord& record : records) {
+        owners_rewritten += record.lod_level == 0 ? 1u : 0u;
         AppendU64(bytes, record.id);
         bytes.push_back(static_cast<char>(record.lod_level));
         bytes.push_back(static_cast<char>(record.flags));
@@ -2950,6 +2976,8 @@ bool WriteRegionFile(const std::filesystem::path& path,
         RemoveTemporaryFile(temp_path);
         return false;
     }
+    ++SaveWork().regions_rewritten;
+    SaveWork().owners_rewritten += owners_rewritten;
     return true;
 }
 
@@ -2995,6 +3023,7 @@ std::shared_ptr<Chunk> DecodeChunkRecord(const RegionRecord& record,
                                          bool strict_water = false,
                                          bool* strict_water_valid = nullptr) {
     ChunkRecordDecodeCounter().fetch_add(1, std::memory_order_acq_rel);
+    ++SaveWork().chunk_decodes;
     std::string payload;
     if (!DecompressPayload(record, payload, errors)) {
         return nullptr;
@@ -6785,7 +6814,7 @@ bool WorldSaveService::upsert_container_records(const SaveOwnership&,
             raw.id = record.id;
             raw.lod_level = record.lod_level;
             raw.flags = record.flags;
-            if (!CompressPayload(record.payload, raw, errors)) {
+            if (!CompressPayload(record.payload, raw, errors, SaveWork().bytes_compressed)) {
                 return false;
             }
             const auto existing = record_index.find({raw.lod_level, raw.id});
@@ -6833,6 +6862,10 @@ std::uint64_t WorldSaveService::record_compression_count_for_testing() {
 
 std::uint64_t WorldSaveService::chunk_record_decode_count_for_testing() {
     return ChunkRecordDecodeCounter().load(std::memory_order_acquire);
+}
+
+SaveWorkCounts WorldSaveService::work_counts() {
+    return SaveWork();
 }
 
 std::uint64_t WorldSaveService::region_fingerprint_count_for_testing() {
@@ -9176,6 +9209,7 @@ bool WorldSaveService::load_world_impl(WorldStreamingState& state,
     const detail::SnapshotReadOwnership ownership;
     const SavedJsonReadScope json_reads;
     DecodeCounter().fetch_add(1, std::memory_order_acq_rel);
+    ++SaveWork().world_decodes;
     LUMIN_PROFILE_ZONE_N("File world load");
     // Staging lives outside the strict region inventory. Each published file
     // uses its file lock; the snapshot gate excludes partial indexed publication only.

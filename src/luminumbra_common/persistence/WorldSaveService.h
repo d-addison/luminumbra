@@ -1,4 +1,5 @@
 #pragma once
+#include "SaveWorkCounts.h"
 
 #include "SaveTransaction.h"
 #include "WorldPersistenceRoundtrip.h"
@@ -725,6 +726,9 @@ public:
     static std::uint64_t record_compression_count_for_testing();
     // Number of lod-0 chunk record payload decodes since process start.
     static std::uint64_t chunk_record_decode_count_for_testing();
+    // Calling-thread cumulative work. Take differences within one save worker boundary;
+    // parallel encoders contribute their plain per-record counts after joining.
+    [[nodiscard]] static SaveWorkCounts work_counts();
     // Number of region lod-0 fingerprints hashed (not reused from identical bytes) since
     // process start.
     static std::uint64_t region_fingerprint_count_for_testing();
