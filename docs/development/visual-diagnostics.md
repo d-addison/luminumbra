@@ -17,7 +17,7 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | G-buffer ID attachment | Implemented for explicit deferred captures | `GBufferPass` holds an `AttachmentLease` during deferred submission; detachment and lease release precede completion, including rollback, recreation, retirement and exceptional exits; registered `GBufferLeaseGl.*` and `DiagnosticAttributionGl.*` regressions; native execution pending |
 | Exact producer coverage | Partial | Inside an explicit producer scope, file-backed and procedural static instances, authored surfaces and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier and bounded generated-geometry keys, retaining unknown provenance where exact SDF provenance is unavailable. Live terrain MDI produces one identity per original command in pool-bucket order, using resident upload LOD and mesh version. The ladder backend records its original submission identity; tree impostors explicitly invalidate coverage. Uploaded plant/marker batches resume deferred attribution, and additive scent decals use separate contributor storage. Missing contributor storage retains exact Forward records labeled `:contributor_only` and refuses completion. Water surfaces, glass panes and waterfall sheet/pool slots use the separate contributor plane at their original submissions through guarded `water.frag`, `glass_oit.frag` and `waterfall.frag` outputs. Foliage has a guarded shader output but no instrumented forward submission. The original particle batch writes the contributor plane through a guarded `magical_particles.frag` output; the separate weather overlay writes it at its original fullscreen draw through an opt-in `weather_system.frag` diagnostic variant (`weather-overlay/fullscreen-quad`) and refuses when that storage or variant is missing |
 | Bundle transactions and opt-in admission | Implemented for the admitted capture paths | `DiagnosticCapture.h/.cpp` resolves options, streams normalized planes, joins draw records, enforces staging budgets and publishes completion last using identity-checked ownership. `diagnostic_bundle_test` covers public transports and filesystem refusal/rollback; native execution pending. Runtime admission accepts enabled diagnostics only for `world_visual_sweep`, `--frame-scan`, or `--render-benchmark` with `--render-benchmark-screenshot`; every other scenario and the parity redispatches refuse them before save-root output |
-| Dusk wedge attribution (issue #873) | Capture wiring and regression implemented; native execution pending | Fixed audit land pose, paired pre-present final/depth and available lighting sources; `FarWorldFogGl.DuskAuditFogIsContinuousAcrossDistanceAndHeightBoundaries`; no producer correction or visual approval |
+| Shadow projection and receiver filtering (issue #873) | Projection and surface filtering corrected; native re-capture pending | Signed light-view Z bounds become negative-Z plane distances; surface PCF interpolates comparisons with 25 taps. Registered `DiagnosticContributions.LightBoundsContainEveryCornerAndOrderDepthTowardTheLight` and `DiagnosticContributionsGl.ProductionShadowFiltersInterpolateComparisonsAtEveryResolutionAndCascade` regressions; canopy hue and the captured dusk wedge remain unqualified |
 | Terrain coverage lighting/fog evidence (issue #1107) | Existing capture contract retained; regression expanded; native execution pending | `TerrainCoverageCaptureGl.SyntheticPlanesAndCallerStateSurviveReadback` checks source file headers and payload sizes for every captured layer, lighting/fog uniform values and explicit unavailable volume records; `TerrainCaptureResourceWiring` guards manifest publication |
 | ID views and single-pixel inspector | Implemented as explicit render-thread snapshots | `DebugViewPass`; developer-console debug-view panel; registered `DiagnosticInspector.*` and `DiagnosticInspectorGl.*` regressions in `pass_context_test`; native execution pending. Other B views remain planned |
 | Deferred shader contribution views | Implemented as opt-in live overlays | `DebugViewPass` and `LightingPass`; registered `DiagnosticContributions.*` and `DiagnosticContributionsGl.*` regressions in `pass_context_test`; native execution pending. Fog and separate forward/sky/shadow planes explicitly unsupported |
@@ -65,7 +65,26 @@ optional froxel injection samples their depth/tint; those paths can project a
 view-dependent shadow boundary. The production-shader GL fixture isolates aerial
 fog at both audited yaws, legacy/ladder distances and aerosol/valley height
 boundaries, with nonzero opacity and nonconstant filtered sky input. Native
-execution and mutation evidence remain pending; no shader correction is claimed.
+execution of that aerial-only regression remains pending. The shadow projection
+now converts signed light-view bounds to plane distances along negative Z before
+constructing the conventional orthographic matrix. Previously passing the signed
+bounds directly displaced the depth interval whenever its endpoints were asymmetric,
+which could clip casters and falsely shadow receivers. Surface PCF now interpolates
+comparison results across fractional texel positions using a four by four box and
+25 nearest-depth taps, removing whole-texel visibility steps without increasing
+the sample budget. Depth and tint return identity outside all six light planes, including froxel
+tint before the light near plane. The complete froxel compute shader is exercised
+by `DiagnosticContributionsGl.FroxelTintIsIdentityOutsideEveryLightPlane`; its
+source pin is in the scene inventory’s separate `regression_inputs` map because
+the image fixtures do not consume it.
+The registered bounds regression covers positive, negative and mixed Z intervals,
+corner inclusion, culling and depth ordering. The registered production-filter GL
+regression covers sub-texel motion on both axes, every cascade, small and shipping
+shadow sizes, open/blocked regions, border taps and out-of-frustum receivers.
+These code defects do not establish the producer of the audit pixels. Froxel
+injection retains its single-tap depth filter; changing its media appearance requires
+attribution with volumetrics active. Orange-brown canopy hue remains unattributed;
+no palette or art change is justified by the code evidence alone.
 A native review must locate the wedge in paired final/depth first, then compare
 fog opacity/color, cascade layers and matrices, sky LUT, SSAO and canopy controls.
 A clear-depth edge implicates coverage; a continuous fog term over discontinuous

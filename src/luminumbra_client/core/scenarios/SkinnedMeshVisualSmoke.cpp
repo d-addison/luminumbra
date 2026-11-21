@@ -246,7 +246,11 @@ SkinnedMeshVisualTarget SpawnSkinnedMeshVisualEntity(Luminumbra::world::GameSess
                     mesh_rel = j.value("mesh", std::string{});
                     clip_rel = j.value("clip", std::string{});
                     showcase_label = j.value("label", showcase_label);
-                } catch (...) { /* malformed -> handled by the empty-path guard below */
+                } catch (...) {
+                    LUMINUMBRA_CORE_ERROR(
+                        "Invalid skinned showcase model configuration; refusing capture");
+                    target.failure_reason = "showcase_model_config_invalid";
+                    return target;
                 }
             }
         }
