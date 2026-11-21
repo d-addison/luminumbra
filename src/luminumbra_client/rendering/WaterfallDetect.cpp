@@ -1,5 +1,6 @@
 #include "WaterfallDetect.h"
 #include "TerrainAnchor.h"
+#include "luminumbra_common/core/IntegerPrimitives.h"
 
 #include <algorithm>
 #include <cmath>
@@ -13,14 +14,6 @@ namespace {
 // the last float bit but still discriminates real position differences.
 int32_t quant_mm(float metres) {
     return static_cast<int32_t>(std::lround(static_cast<double>(metres) * 1000.0));
-}
-
-void fnv1a(uint64_t& h, const void* data, std::size_t bytes) {
-    const auto* p = static_cast<const unsigned char*>(data);
-    for (std::size_t i = 0; i < bytes; ++i) {
-        h ^= static_cast<uint64_t>(p[i]);
-        h *= 0x100000001b3ull;
-    }
 }
 
 // A lip candidate emitted by the scan before de-duplication.
@@ -335,9 +328,9 @@ std::vector<WaterfallSite> DetectWaterfalls(const Luminumbra::Systems::SHIELD_Wo
 }
 
 uint64_t HashWaterfallSites(const std::vector<WaterfallSite>& sites) {
-    uint64_t h = 0xcbf29ce484222325ull; // FNV-1a offset basis
+    uint64_t h = Core::kFnv1a64StandardBasis;
     const uint64_t count = sites.size();
-    fnv1a(h, &count, sizeof(count));
+    h = Core::Fnv1a64(&count, sizeof(count), h);
     for (const WaterfallSite& s : sites) {
         const int32_t q[] = {
             quant_mm(s.crest.x),
@@ -354,7 +347,7 @@ uint64_t HashWaterfallSites(const std::vector<WaterfallSite>& sites) {
             quant_mm(s.steepness),
             s.lake_outlet ? 1 : 0,
         };
-        fnv1a(h, q, sizeof(q));
+        h = Core::Fnv1a64(q, sizeof(q), h);
     }
     return h;
 }
@@ -372,13 +365,13 @@ WaterfallDetectKey MakeWaterfallDetectKey(const Luminumbra::Systems::SHIELD_Worl
 }
 
 std::size_t WaterfallSiteCache::KeyHash::operator()(const WaterfallDetectKey& k) const noexcept {
-    uint64_t h = 0xcbf29ce484222325ull;
-    fnv1a(h, &k.seed, sizeof(k.seed));
-    fnv1a(h, &k.half_extent, sizeof(k.half_extent));
-    fnv1a(h, &k.lattice_step_milli, sizeof(k.lattice_step_milli));
-    fnv1a(h, &k.min_drop_milli, sizeof(k.min_drop_milli));
-    fnv1a(h, &k.min_steepness_milli, sizeof(k.min_steepness_milli));
-    fnv1a(h, &k.water_epoch, sizeof(k.water_epoch)); //
+    uint64_t h = Core::kFnv1a64StandardBasis;
+    h = Core::Fnv1a64(&k.seed, sizeof(k.seed), h);
+    h = Core::Fnv1a64(&k.half_extent, sizeof(k.half_extent), h);
+    h = Core::Fnv1a64(&k.lattice_step_milli, sizeof(k.lattice_step_milli), h);
+    h = Core::Fnv1a64(&k.min_drop_milli, sizeof(k.min_drop_milli), h);
+    h = Core::Fnv1a64(&k.min_steepness_milli, sizeof(k.min_steepness_milli), h);
+    h = Core::Fnv1a64(&k.water_epoch, sizeof(k.water_epoch), h); //
     return static_cast<std::size_t>(h);
 }
 

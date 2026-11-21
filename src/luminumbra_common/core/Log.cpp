@@ -3,18 +3,11 @@
 #include "LogDispatcherSink.h"
 #include <chrono>
 #include <filesystem>
-#include <mutex>
 #include <spdlog/sinks/basic_file_sink.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
 #include <vector>
 
-std::shared_ptr<spdlog::logger> Log::s_CoreLogger;
-
 namespace {
-
-std::mutex& init_mutex() {
-    static std::mutex mu;
-    return mu;
-}
 
 std::shared_ptr<spdlog::logger> create_default_logger() {
     // spdlog::get returns the existing logger if a previous Init registered it,
@@ -67,23 +60,12 @@ std::shared_ptr<spdlog::logger> create_default_logger() {
 } // namespace
 
 void Log::Init() {
-    std::lock_guard<std::mutex> lock(init_mutex());
-    if (!s_CoreLogger) {
-        s_CoreLogger = create_default_logger();
-    }
+    (void)GetCoreLogger();
 }
 
-std::shared_ptr<spdlog::logger>& Log::GetCoreLogger() {
-    if (!s_CoreLogger) {
-        // Lazy fallback for callers that bypass Init (test binaries via
-        // gtest_main, ad-hoc tooling). Same configuration as Init so the
-        // log output is consistent regardless of how the logger came up.
-        std::lock_guard<std::mutex> lock(init_mutex());
-        if (!s_CoreLogger) {
-            s_CoreLogger = create_default_logger();
-        }
-    }
-    return s_CoreLogger;
+const std::shared_ptr<spdlog::logger>& Log::GetCoreLogger() {
+    static const auto logger = create_default_logger();
+    return logger;
 }
 
 std::shared_ptr<LogDispatcherSink> Log::GetDispatcherSink() {

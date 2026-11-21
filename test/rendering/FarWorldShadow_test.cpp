@@ -377,7 +377,7 @@ TEST_F(FarWorldShadowGl, UploadedLadderAllocationsNeverEnterProductionCascades) 
         EXPECT_EQ(stats.refused, 0u);
         return TerrainSubmitStats{stats.draws, stats.draws, stats.indices};
     };
-    const auto injected_stats = pass.execute(RenderContext{}, injected);
+    const auto injected_stats = pass.execute_external(RenderContext{}, injected);
     EXPECT_FALSE(observer->Excluded()) << "an injected far submission must fail exclusion";
     EXPECT_EQ(prepared, requests.size() * ShadowMap::CASCADE_COUNT);
     EXPECT_EQ(observer->submissions, static_cast<std::size_t>(ShadowMap::CASCADE_COUNT));
