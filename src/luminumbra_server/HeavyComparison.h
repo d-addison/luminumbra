@@ -14,6 +14,7 @@
 
 #include "luminumbra_common/ai/ScentField.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
+#include "luminumbra_common/systems/AmbientContinuation.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/world/ActiveRegionLedger.h"
 #include "luminumbra_common/world/GroundObjectStore.h"
@@ -327,8 +328,9 @@ inline std::uint32_t HeavyOwnerFloatBits(float value) {
     return std::bit_cast<std::uint32_t>(value);
 }
 
-inline std::array<HeavyOwnerField, 12> HeavyOwnerFields(const Persistence::OwnerContinuation& v) {
+inline std::array<HeavyOwnerField, 13> HeavyOwnerFields(const Persistence::OwnerContinuation& v) {
     return {{
+        {"version", v.version},
         {"world_seed", v.world_seed},
         {"simulation_tick", v.simulation_tick},
         {"stream_tick", v.stream_tick},
@@ -341,6 +343,50 @@ inline std::array<HeavyOwnerField, 12> HeavyOwnerFields(const Persistence::Owner
         {"anchor.y", HeavyOwnerFloatBits(v.anchor.y)},
         {"anchor.z", HeavyOwnerFloatBits(v.anchor.z)},
         {"slot_count", v.slot_count},
+    }};
+}
+
+inline std::array<HeavyOwnerField, 5> HeavyOwnerFields(const Systems::AmbientContinuation& v) {
+    return {{
+        {"tick", v.tick},
+        {"anchor.x", HeavyOwnerFloatBits(v.anchor.x)},
+        {"anchor.y", HeavyOwnerFloatBits(v.anchor.y)},
+        {"anchor.z", HeavyOwnerFloatBits(v.anchor.z)},
+        {"constructor_state", v.constructor_state},
+    }};
+}
+
+inline std::array<HeavyOwnerField, 8> HeavyOwnerFields(const Systems::StormCell& v) {
+    return {{
+        {"center_world.x", HeavyOwnerFloatBits(v.center_world.x)},
+        {"center_world.y", HeavyOwnerFloatBits(v.center_world.y)},
+        {"velocity.x", HeavyOwnerFloatBits(v.velocity.x)},
+        {"velocity.y", HeavyOwnerFloatBits(v.velocity.y)},
+        {"intensity", HeavyOwnerFloatBits(v.intensity)},
+        {"spawn_tick", v.spawn_tick},
+        {"lifetime_ticks", v.lifetime_ticks},
+        {"seed_salt", v.seed_salt},
+    }};
+}
+
+inline std::array<HeavyOwnerField, 5> HeavyOwnerFields(const Systems::StrikeEvent& v) {
+    return {{
+        {"strike_tick", v.strike_tick},
+        {"world_x", HeavyOwnerFloatBits(v.world_x)},
+        {"world_z", HeavyOwnerFloatBits(v.world_z)},
+        {"magnitude", HeavyOwnerFloatBits(v.magnitude)},
+        {"storm_salt", v.storm_salt},
+    }};
+}
+
+inline std::array<HeavyOwnerField, 6> HeavyOwnerFields(const Systems::AmbientWindPerturbation& v) {
+    return {{
+        {"center_world.x", HeavyOwnerFloatBits(v.center_world.x)},
+        {"center_world.y", HeavyOwnerFloatBits(v.center_world.y)},
+        {"radius_m", HeavyOwnerFloatBits(v.radius_m)},
+        {"velocity.x", HeavyOwnerFloatBits(v.velocity.x)},
+        {"velocity.y", HeavyOwnerFloatBits(v.velocity.y)},
+        {"intensity", HeavyOwnerFloatBits(v.intensity)},
     }};
 }
 
@@ -526,6 +572,30 @@ HeavyBodyOwnerDifference(const std::string& prefix, const Owner& a, const Owner&
                               : descriptor;
 }
 
+inline std::string HeavyAmbientContinuationDifference(const Systems::AmbientContinuation& a,
+                                                      const Systems::AmbientContinuation& b) {
+    auto difference =
+        HeavyOwnerScalarDifference("owner.ambient", HeavyOwnerFields(a), HeavyOwnerFields(b));
+    if (!difference.empty()) {
+        return difference;
+    }
+    const auto scalar_difference = [](const auto& prefix, const auto& lhs, const auto& rhs) {
+        return HeavyOwnerScalarDifference(prefix, HeavyOwnerFields(lhs), HeavyOwnerFields(rhs));
+    };
+    // Preserve the encoded order; admitted captures contain at most 16/32/16 records.
+    difference =
+        HeavyOwnerSequenceDifference("owner.ambient.storms", a.storms, b.storms, scalar_difference);
+    if (!difference.empty()) {
+        return difference;
+    }
+    difference = HeavyOwnerSequenceDifference(
+        "owner.ambient.strikes", a.strikes, b.strikes, scalar_difference);
+    if (!difference.empty()) {
+        return difference;
+    }
+    return HeavyOwnerSequenceDifference("owner.ambient.wind", a.wind, b.wind, scalar_difference);
+}
+
 inline std::string HeavyOwnerContinuationDifference(const Persistence::OwnerContinuation& a,
                                                     const Persistence::OwnerContinuation& b) {
     if (a.preset_identity != b.preset_identity) {
@@ -534,6 +604,23 @@ inline std::string HeavyOwnerContinuationDifference(const Persistence::OwnerCont
     auto difference = HeavyOwnerScalarDifference("owner", HeavyOwnerFields(a), HeavyOwnerFields(b));
     if (!difference.empty()) {
         return difference;
+    }
+    const auto integer_difference = [](const auto& prefix, auto lhs, auto rhs) -> std::string {
+        return lhs == rhs ? std::string{} : prefix + ".value";
+    };
+    difference = HeavyOwnerSequenceDifference(
+        "owner.resident_chunks", a.resident_chunks, b.resident_chunks, integer_difference);
+    if (!difference.empty()) {
+        return difference;
+    }
+    if (a.ambient.has_value() != b.ambient.has_value()) {
+        return "owner.ambient.present";
+    }
+    if (a.ambient && b.ambient) {
+        difference = HeavyAmbientContinuationDifference(*a.ambient, *b.ambient);
+        if (!difference.empty()) {
+            return difference;
+        }
     }
     difference = HeavyOwnerSequenceDifference(
         "owner.avatars",
@@ -576,9 +663,6 @@ inline std::string HeavyOwnerContinuationDifference(const Persistence::OwnerCont
     if (!difference.empty()) {
         return difference;
     }
-    const auto integer_difference = [](const auto& prefix, auto lhs, auto rhs) -> std::string {
-        return lhs == rhs ? std::string{} : prefix + ".value";
-    };
     difference = HeavyOwnerSequenceDifference(
         "owner.free_slots", a.free_slots, b.free_slots, integer_difference);
     if (!difference.empty()) {

@@ -1023,6 +1023,8 @@ public:
     ActivationShadowReport activation_shadow_report() const;
     // Shared-ownership snapshot of every streamed chunk (save path).
     std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_streamed_chunks() const;
+    // Quiesced owner-thread save only. Refuses before allocating if over the bound.
+    bool capture_resident_chunk_ids(std::vector<ChunkID>& ids, std::size_t maximum) const;
     // Lifetime pointer entries written by snapshots and renderable-view rebuilds.
     // Const diagnostic only; relaxed atomic supports concurrent diagnostic reads.
     [[nodiscard]] std::uint64_t snapshot_copies() const {
@@ -1062,6 +1064,11 @@ public:
     // (without clobbering the streamed chunk) when a chunk with the same id
     // is already active.
     bool adopt_streamed_chunk(const std::shared_ptr<::Luminumbra::Chunk>& chunk);
+    // Continuation adoption supplies the exact saved residents, including an empty set.
+    // Cold authority must wait for the normal activation cadence instead of a fresh-open pass.
+    void finish_continuation_adoption() {
+        m_first_update = false;
+    }
 
     // --- Durable residency (S3). All of it is inert unless set_durable_residency(true). ---
     struct ParkingStatus {
