@@ -123,7 +123,10 @@ class UploadBudgetWiring(unittest.TestCase):
         source = read(RENDERING / "passes/GBufferPass.cpp")
         draw = body(source, "void GBufferPass::geometry_pass_static_meshes(")
         collect = body(draw, "for (const std::size_t propIndex : candidates)")
-        self.assertLess(draw.index("m_staticPropIndex.Query("), draw.index("glm::length("))
+        self.assertLess(draw.index("static_prop_candidates("), draw.index("glm::length("))
+        query = body(source, "GBufferPass::static_prop_candidates(")
+        self.assertIn("m_staticPropIndex.Query(", query)
+        self.assertIn("BuildStaticPropSpatialIndex(", query)
         self.assertIn("const CachedStaticProp& cp = m_staticPropCache[propIndex];", collect)
         self.assertIn("const bool authoredTree = cp.authoredTree;", collect)
         self.assertNotIn("starts_with", collect)
@@ -849,7 +852,7 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertTrue(compact(tree).endswith("continue; // all LOD3 tree parts are folded into the billboard"))
         self.assertLess(collect.index(decision.split("(")[0]), collect.index(guard))
         self.assertLess(collect.index(guard), collect.index("impostorInstances.push_back"))
-        self.assertLess(collect.index("impostorInstances.push_back"), collect.index("const auto rit = resolve_lod(cp, authoredTree, lod)"))
+        self.assertLess(collect.index("impostorInstances.push_back"), collect.index("const auto rit = resolve_static_prop_lod(ctx, input, cp, lod)"))
         legacy = read(RENDERING / "FarLodSystem.cpp")
         policy = compact(body(legacy, "StaticPropSubmission SelectStaticPropSubmission("))
         self.assertLess(policy.index("if (!impostor_candidate)"), policy.index("if (live_terrain_owned)"))
@@ -869,13 +872,13 @@ class UploadBudgetWiring(unittest.TestCase):
     def test_refused_impostors_resolve_farthest_available_mesh_through_ordinary_batch(self):
         collect = body(read(RENDERING / "passes/GBufferPass.cpp"),
                        "for (const std::size_t propIndex : candidates)")
-        resolver = body(read(RENDERING / "passes/GBufferPass.cpp"), "auto resolve_lod =")
+        resolver = body(read(RENDERING / "passes/GBufferPass.cpp"), "GBufferPass::resolve_static_prop_lod(")
         memo = body(resolver, "if (rit == m_resolveMemo.end())")
         self.assertIn("resolve_mesh(candidatePath, candidatePath)", memo)
         self.assertIn("for (int mesh_lod = lod - 1; !resolved.first && mesh_lod >= 0; --mesh_lod)", memo)
         self.assertIn("resolve_mesh(fallbackPath, fallbackPath)", memo)
         self.assertIn("LodMeshPath(basePath, mesh_lod)", memo)
-        self.assertIn("if (authoredTree)", memo)
+        self.assertIn("if (cp.authoredTree)", memo)
         self.assertIn("m_resolveMemo", memo)
         for retained in ("cp.model * glm::vec4(glm::vec3(mesh->boundingSphere), 1.0f)",
                          "batch.materialId = cp.materialId", "batch.mats.push_back(cp.model)",
@@ -894,13 +897,13 @@ class UploadBudgetWiring(unittest.TestCase):
         collect = body(source, "for (const std::size_t propIndex : candidates)")
         self.assertIn("if (impostor_candidate && !ctx.frozen_replay)", collect)
         warm = body(collect, "if (impostor_candidate && !ctx.frozen_replay)")
-        self.assertIn("resolve_lod(cp, authoredTree, 2)", warm)
+        self.assertIn("resolve_static_prop_lod(ctx, input, cp, 2)", warm)
         self.assertLess(collect.index("if (impostor_candidate && !ctx.frozen_replay)"),
                         collect.index("if (submission == StaticPropSubmission::Impostor)"))
-        resolver = body(source, "auto resolve_lod =")
+        resolver = body(source, "GBufferPass::resolve_static_prop_lod(")
         self.assertIn("m_resolveMemo.find(rkey)", resolver)
         self.assertIn("m_resolveMemo", body(resolver, "if (rit == m_resolveMemo.end())"))
-        self.assertIn("const auto rit = resolve_lod(cp, authoredTree, lod);", collect)
+        self.assertIn("const auto rit = resolve_static_prop_lod(ctx, input, cp, lod);", collect)
         regression = body(read(ROOT / "test/rendering/render_smoke_test.cpp"),
                           "TEST(RenderSmokeTest, RefusedTreeImpostorsSubmitAvailableMeshLods)")
         cold = regression[regression.index("input.legacy_far = &far;"):

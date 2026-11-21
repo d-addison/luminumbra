@@ -76,7 +76,7 @@ std::vector<Draw> DrawList(const std::vector<Instance>& instances,
             }
         }
         if ((instance.available & (1u << lod)) != 0 && !instance.removed &&
-            Visible(instance.spheres[lod], planes))
+            Visible(instance.spheres[static_cast<std::size_t>(lod)], planes))
             draws.push_back({id, lod, instance.matrix, instance.tint});
     }
     return draws;
@@ -98,8 +98,9 @@ std::vector<StaticPropSpatialIndex::Item> Bounds(const std::vector<Instance>& in
                 }
             }
             if ((instance.available & (1u << resolved)) != 0) {
-                const auto& sphere = instance.spheres[resolved];
-                item.lodBounds[requested].Include({sphere[0], sphere[1], sphere[2]}, sphere[3]);
+                const auto& sphere = instance.spheres[static_cast<std::size_t>(resolved)];
+                item.lodBounds[static_cast<std::size_t>(requested)].Include(
+                    {sphere[0], sphere[1], sphere[2]}, sphere[3]);
             }
         }
         if (instance.authored && instance.tree) {

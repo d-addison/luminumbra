@@ -235,7 +235,16 @@ private:
         bool active = false; // appeared this frame
     };
     std::unordered_map<std::uint64_t, InstanceBatchCached> m_visibleGroups;
-    std::unordered_map<std::uint64_t, std::pair<Mesh*, std::string>> m_resolveMemo; // persistent
+    using ResolvedStaticProps = std::unordered_map<std::uint64_t, std::pair<Mesh*, std::string>>;
+    ResolvedStaticProps m_resolveMemo; // persistent
+    ResolvedStaticProps::iterator resolve_static_prop_lod(const RenderContext& ctx,
+                                                          const GBufferPassInput& input,
+                                                          const CachedStaticProp& cp,
+                                                          int lod);
+    const std::vector<std::size_t>& static_prop_candidates(const RenderContext& ctx,
+                                                           const GBufferPassInput& input,
+                                                           const glm::vec3& cameraPos,
+                                                           const glm::vec4 (&frustum_planes)[6]);
     double m_last_static_prop_cpu_ms = 0.0; // CPU submit cost, last frame
 };
 
