@@ -134,6 +134,9 @@
       "reference": "references/post-edge.ppm"
     }
   ],
+  "diagnostic_shader_sha256": {
+    "res/shaders/debug_view.frag": "1cf6e11af393befe2df9fd2d74588616694b2782a826552025307668f100b75a"
+  },
   "inputs": {
     "res/shaders/enhanced_skybox.frag": "dcbd2b15fdca9acfb4b8d4fe01029f0e91727556bce842c9d058362f6c07ee27",
     "res/shaders/g_buffer.frag": "6e07692ad1d04e3fdaa79184c03d31d4d61965ea0e4c77e8de48fa98b57a227d",

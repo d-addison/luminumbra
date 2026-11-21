@@ -5600,8 +5600,15 @@ TEST(RenderSmokeTest, ColoredShadowTintedTransmissionColorsDirectSun) {
     glUniform1i(glGetUniformLocation(program, "u_materialLUT"), 8);
     glUniform1i(glGetUniformLocation(program, "u_shadowTintCascades"), 9);
     SetMat4Identity(program, "u_inverseView");
-    for (int i = 0; i < 4; ++i)
-        SetMat4Identity(program, ("u_lightSpaceMatrices[" + std::to_string(i) + "]").c_str());
+    // A conventional light projection over signed light-view Z [-4, 4], so the
+    // receiver at z=-3 projects to depth 0.875, inside the light frustum.
+    glm::mat4 light_space(1.0f);
+    light_space[2][2] = -0.25f;
+    for (int i = 0; i < 4; ++i) {
+        const std::string name = "u_lightSpaceMatrices[" + std::to_string(i) + "]";
+        glUniformMatrix4fv(
+            glGetUniformLocation(program, name.c_str()), 1, GL_FALSE, glm::value_ptr(light_space));
+    }
     glUniform4f(glGetUniformLocation(program, "u_cascadeSplits"), 1e9f, 1e9f, 1e9f, 1e9f);
     glUniform1f(glGetUniformLocation(program, "u_time"), 0.0f);
     glUniform1f(glGetUniformLocation(program, "u_sea_level"), -1000.0f);
