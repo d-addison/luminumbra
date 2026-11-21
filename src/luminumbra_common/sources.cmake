@@ -41,6 +41,10 @@ set(COMMON_SOURCES
     # Read-only content overlays
     ${CMAKE_CURRENT_LIST_DIR}/vfs/ContentVfs.cpp
 
+    # Mods
+    ${CMAKE_CURRENT_LIST_DIR}/mods/ModManifest.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/mods/ModDependencySolver.cpp
+
     # Net
     # delay-based lockstep transport (engine-generic; LoopbackTransport
     # for gates/tests, _WIN32-guarded TcpTransport for loopback+LAN).
