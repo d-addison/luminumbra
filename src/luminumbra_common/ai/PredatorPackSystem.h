@@ -22,8 +22,8 @@
 // SteeringConsumer blends coord_x/coord_z into the predator's movement after
 // this system computes the coordination field.
 //
-// DETERMINISM. id-ordered traversal (sort by entt::to_integral). TWO-PHASE so the result is
-// order-INDEPENDENT:  SNAPSHOTS every predator's position + every live prey's position;
+// DETERMINISM. Legacy handle order; candidate v2 uses session-stable identity. TWO-PHASE so the
+// result is order-INDEPENDENT:  SNAPSHOTS every predator's position + every live prey's position;
 //  computes each predator's wish from that frozen snapshot (its pack is its allies in
 // range from the snapshot; its flank rank is its index among the id-sorted pack). Because all
 // reads are from the snapshot, no predator's update can see another's in-this-tick write, so
@@ -47,6 +47,7 @@
 #include "../components/PackHunterComponents.h"
 #include "../core/DeterministicMath.h"
 #include "CreatureTickAdmission.h"
+#include "HerdAlarmSystem.h"
 
 namespace luminumbra::ai {
 
@@ -86,9 +87,30 @@ inline PredatorPackStats RunPredatorPackOnTick(entt::registry& reg,
 
     // id-ordered participant list (deterministic traversal + stable flank ranks).
     std::vector<entt::entity> preds(predView.begin(), predView.end());
-    std::sort(preds.begin(), preds.end(), [](entt::entity a, entt::entity b) {
-        return entt::to_integral(a) < entt::to_integral(b);
-    });
+    auto* identity_order = reg.ctx().find<SocialIdentityOrder>();
+    if (identity_order) {
+        if (admission)
+            std::erase_if(preds,
+                          [admission](entt::entity entity) { return !admission->Allows(entity); });
+        // Validate the union of hunters and live prey before any wishes change.
+        // A prey carrying the hunter tag already appears in preds; include it once.
+        // No prey scan is needed when no admitted hunter can use a target.
+        if (!preds.empty()) {
+            auto candidates = reg.view<Comp::CreatureComponent, Comp::TransformComponent>();
+            for (const auto entity : candidates) {
+                const auto& creature = candidates.get<Comp::CreatureComponent>(entity);
+                if (!creature.is_predator && !creature.eaten &&
+                    !reg.all_of<Comp::PackHunterComponent>(entity) &&
+                    (!admission || admission->Allows(entity)))
+                    preds.push_back(entity);
+            }
+        }
+        identity_order->Sort(reg, preds);
+    } else {
+        std::sort(preds.begin(), preds.end(), [](entt::entity a, entt::entity b) {
+            return entt::to_integral(a) < entt::to_integral(b);
+        });
+    }
     if (preds.empty())
         return stats; // empty roster -> pure no-op.
 
@@ -102,6 +124,8 @@ inline PredatorPackStats RunPredatorPackOnTick(entt::registry& reg,
     std::vector<PredSnap> ps;
     ps.reserve(preds.size());
     for (auto e : preds) {
+        if (identity_order && !reg.all_of<Comp::PackHunterComponent>(e))
+            continue;
         if (admission && !admission->Allows(e)) {
             continue;
         }
@@ -119,15 +143,27 @@ inline PredatorPackStats RunPredatorPackOnTick(entt::registry& reg,
     std::vector<PreySnap> prey;
     {
         auto preyView = reg.view<Comp::CreatureComponent, Comp::TransformComponent>();
-        for (auto e : preyView) {
-            if (admission && !admission->Allows(e)) {
-                continue;
+        if (identity_order) {
+            // The validated union is identity-sorted, so the first equal-distance
+            // candidate wins in both region modes, independently of position/handle.
+            for (const auto entity : preds) {
+                const auto& creature = preyView.get<Comp::CreatureComponent>(entity);
+                if (!creature.is_predator && !creature.eaten) {
+                    const auto& transform = preyView.get<Comp::TransformComponent>(entity);
+                    prey.push_back({transform.position.x, transform.position.z});
+                }
             }
-            const auto& cr = preyView.get<Comp::CreatureComponent>(e);
-            if (cr.is_predator || cr.eaten)
-                continue;
-            const auto& tf = preyView.get<Comp::TransformComponent>(e);
-            prey.push_back({tf.position.x, tf.position.z});
+        } else {
+            for (auto e : preyView) {
+                if (admission && !admission->Allows(e)) {
+                    continue;
+                }
+                const auto& cr = preyView.get<Comp::CreatureComponent>(e);
+                if (cr.is_predator || cr.eaten)
+                    continue;
+                const auto& tf = preyView.get<Comp::TransformComponent>(e);
+                prey.push_back({tf.position.x, tf.position.z});
+            }
         }
     }
 
@@ -173,7 +209,8 @@ inline PredatorPackStats RunPredatorPackOnTick(entt::registry& reg,
 
         // Order-INDEPENDENT flank rank: rank pack-mates by POSITION (x then z), not by entity
         // id, so a predator's flank angle depends on WHERE it is — invariant to spawn order.
-        // (ps is id-sorted, so the index `j` is the id; use it as a stable positional tiebreak.)
+        // Candidate v2 snapshots use stable identity order, including coincident positions.
+        // Legacy snapshots retain their original handle-order tiebreak.
         std::sort(pack.begin(), pack.end(), [&](std::size_t a, std::size_t b) {
             if (ps[a].x != ps[b].x)
                 return ps[a].x < ps[b].x;
@@ -214,7 +251,8 @@ inline PredatorPackStats RunPredatorPackOnTick(entt::registry& reg,
             const float dz = q.z - cz;
             const float d2 = dx * dx + dz * dz;
             if (first || d2 < bestD2 ||
-                (admission && d2 == bestD2 && (q.x < preyX || (q.x == preyX && q.z < preyZ)))) {
+                (!identity_order && admission && d2 == bestD2 &&
+                 (q.x < preyX || (q.x == preyX && q.z < preyZ)))) {
                 bestD2 = d2;
                 preyX = q.x;
                 preyZ = q.z;
