@@ -4757,9 +4757,11 @@ int main(int argc, char* argv[]) {
                                       const char* phase,
                                       const std::filesystem::path& report) {
         const auto& work = renderPipeline.get_last_mesh_upload_stats();
-        const auto pending = work.terrain_uploads_deferred + work.water_uploads_deferred;
-        const bool waiting =
-            wait.waiting(pending, work.terrain_budget.adopted + work.water_budget.adopted);
+        const auto pending = work.terrain_uploads_deferred + work.water_uploads_deferred +
+                             work.asset_uploads_deferred;
+        const bool waiting = wait.waiting(pending,
+                                          work.terrain_budget.adopted + work.water_budget.adopted +
+                                              work.asset_budget.adopted);
         if (wait.failed()) {
             const nlohmann::json failure{{"status", "failed"},
                                          {"capture_complete", false},

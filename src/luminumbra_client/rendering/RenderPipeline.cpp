@@ -1500,6 +1500,8 @@ bool RenderPipeline::capture_ssao_parity(const std::filesystem::path& out_dir,
 }
 
 void RenderPipeline::attach_farlod_job_system(JobSystem* job_system) {
+    if (m_gbuffer_pass)
+        m_gbuffer_pass->attach_mesh_jobs(job_system);
     if (m_foliage_pass)
         m_foliage_pass->attach_job_system(job_system);
     if (m_farlod) {
@@ -3110,10 +3112,13 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
     // Underwater is a water-volume membership query, not a global height cutoff.
     // Dry caves below sea/lake level retain their air lighting.
     m_underwater_factor = world_system.IsUnderwater(camera.Position) ? 1.0f : 0.0f;
+    m_last_mesh_upload_stats = {};
+    const auto assets = m_gbuffer_pass->prepare_meshes(registry, m_root_path, presentation);
+    m_last_mesh_upload_stats.asset_budget = assets.work;
+    m_last_mesh_upload_stats.asset_uploads_deferred = assets.pending;
     const auto snapshot_start = std::chrono::steady_clock::now();
     const auto& renderable_chunks = world_system.renderable_chunks_view();
     auto renderable_chunk_snapshots = build_chunk_snapshots(renderable_chunks);
-    m_last_mesh_upload_stats = {};
     m_last_mesh_upload_stats.snapshot_count = renderable_chunk_snapshots.size();
     m_last_render_pass_stats = {};
     m_last_render_pass_stats.snapshot_count = renderable_chunk_snapshots.size();

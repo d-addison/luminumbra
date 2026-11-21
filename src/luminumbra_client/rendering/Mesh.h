@@ -1,4 +1,6 @@
 #pragma once
+#include <cstddef>
+#include <cstdint>
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <memory>
@@ -45,8 +47,29 @@ struct Mesh {
     }
 };
 
+// CPU-only ownership: safe to prepare and destroy on a JobSystem worker.
+// Payload storage is bounded by the validated file's exact vertex/index counts.
+struct MeshPayload {
+    std::vector<Vertex> vertices;
+    std::vector<SkinnedVertex> skinnedVertices;
+    std::vector<uint32_t> indices;
+    glm::vec4 boundingSphere{0.0f};
+    uint32_t jointCount = 0;
+    std::string resolvedPath;
+
+    std::size_t upload_bytes() const;
+};
+
 class MeshLoader {
 public:
+    // These functions do no GL work. Optional static candidates retain the
+    // draw pass's quiet missing-LOD behavior; malformed present files still log.
+    static std::unique_ptr<MeshPayload> Read(const std::string& path, bool optional = false);
+    static std::unique_ptr<MeshPayload> ReadSkinned(const std::string& path);
+    // Owner-thread only; consumes an already validated CPU payload, with no I/O.
+    static std::unique_ptr<Mesh> Adopt(const MeshPayload& payload);
+    // Monotonic diagnostic: attempted mesh file opens, including failed opens.
+    static std::uint64_t file_read_count();
     static std::unique_ptr<Mesh> Load(const std::string& path);
     // Build a Mesh from IN-MEMORY arrays (no disk I/O) — used to register runtime-generated
     // PROCEDURAL tree meshes into the instanced static-mesh cache (vast-forest palette). Same
