@@ -23,9 +23,9 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | Deferred shader contribution views | Implemented as opt-in live overlays | `DebugViewPass` and `LightingPass`; registered `DiagnosticContributions.*` and `DiagnosticContributionsGl.*` regressions in `pass_context_test`; native execution pending. Fog and separate forward/sky/shadow planes explicitly unsupported |
 | Linux shader compilation and software-GL reference scenes | Partial | Fast Linux steps and material, cutout, night, terrain, normal decode and both depth-convention fixtures registered; bounded sky/terrain shader replays checked under llvmpipe; native scene target execution pending; dusk continuity diagnostic pending issue #918; no required-check or ruleset changes |
 | Bundle validity and image checks | Implemented for schema 1 and reader-only schemas 2/3 | `check-diagnostic-capture.py` and registered `DiagnosticCapturePython` synthetic regressions validate bundles without a renderer. ROI coverage, validity, weather, edge and masked defect measurements plus worst-pixel SVG crops are implemented; synthetic detection is covered, while production thresholds remain advisory/unqualified |
-| Capture feature profile and capability manifest | Implemented as GL-free setup logic; app wiring pending | `CaptureFeatureProfile.h/.cpp`; strict `--capture-feature-profile=none\|all_features` runtime selection; registered `CaptureFeatureProfile.*` regressions; native execution pending |
+| Capture feature profile and capability manifest | GL-free setup and shared app policy boundary implemented; adapter admission pending | `CaptureFeatureProfile.h/.cpp`; strict `--capture-feature-profile=none\|all_features` runtime selection; registered `CaptureFeatureProfile.*` and `CaptureFeaturePolicy.*` regressions; native execution pending |
 | Temporal audit plans and admission | GL-free planning, sequence protocol and completion-manifest transport implemented; shipping runtime execution refused | `TemporalAudit.h/.cpp`, `RuntimeScenarioConfig.h/.cpp`; registered `TemporalAudit.*` and `TemporalAuditSequence.*` regressions in `capture_manifest_test`; weather input, app/site admission and A4 runtime integration remain pending; native fixed-site frontier capture is native-pending |
-| Temporal sequences and non-vacuous evidence (E1–E3) | Planned; gap inventory below describes current capture code | Exact-tick site execution, temporal metrics, shared producer policy and non-vacuous feature evidence require implementation; existing captures do not establish this coverage |
+| Temporal sequences and non-vacuous evidence (E1–E3) | Partial GL-free sequence/profile/policy contracts; runtime coverage pending | Exact-tick site execution, temporal metrics, shipping producer adapters and non-vacuous feature evidence require implementation; existing captures do not establish this coverage |
 
 For issue #873, `world_visual_sweep` fixes the land eye at
 `(168, 10.0505952835083, -40)`. The dusk pin is `0.25`, horizon pitch is 0°
@@ -372,8 +372,14 @@ The same six names are accepted by `--debug-view`; selecting one explicitly
 enables identity diagnostics and requests one snapshot. Existing CLI modes retain
 their meaning.
 
-Magenta hatching labels zero, unresolved and unsupported identities. Producer
-colours are terrain brown, impostor cyan, foliage green, static/skinned yellow and
+Magenta hatching labels zero, unresolved and unsupported identities. Coverage
+may be incomplete without discarding the snapshot: supported identities
+retain their normal colours and inspector joins, while unsupported records and
+pixels remain hatched. The panel explicitly reports incomplete coverage and the
+inspector reports `identity_complete: false`. Aborted captures, failed attachments
+and refused registry submissions remain unavailable. Capture publication still
+requires complete identity; display readiness never certifies a bundle or manifest.
+Producer colours are terrain brown, impostor cyan, foliage green, static/skinned yellow and
 far volume blue; live ownership has full brightness, legacy far 70% and ladder far
 45%. Mesh-path provenance uses hashed mesh colours, orange SDF, blue heightfield
 and explicit magenta hatching for unknown provenance. Producer spellings outside
@@ -839,9 +845,10 @@ Keep `diff-render-health.ps1`, native shader-health checks and current threshold
 
 ## E: temporal audits and all-features captures
 
-Temporal plan admission is implemented, as are the profile selection and GL-free
-capability resolver described under E3; sequence execution, E2 and the rest of E3
-remain planned. Neither adds a capture guarantee, metric enforcement or CI job.
+Temporal plan admission is implemented, as are profile selection, the GL-free
+capability resolver and the shared policy boundary described under E3. Shipping
+sequence execution, E2 and the remaining E3 adapters and evidence remain planned.
+These foundations add no capture guarantee, metric enforcement or CI job.
 The inventory below distinguishes current capture behavior from the proposed
 all-features contract. Existing specialized gates remain useful and retain their
 baselines; passing them does not establish an all-features audit.
@@ -1171,6 +1178,30 @@ weather and both headless legs. Every unimplemented adapter defaults to unsuppor
 with unknown effective state represented as null. No shipping adapter is implemented
 or certified by this foundation.
 
+The shared `CaptureFeaturePolicy` boundary now consumes a resolved snapshot.
+Only a supported snapshot requesting and enabling every catalog feature may remove
+legacy capture suppression. GL-free policy regressions cover the eight mode labels,
+ordinary-play producer-setting equivalence (ambient animals, weather, particles and
+cave flourishes), every missing/disabled adapter, missing identities, incomplete
+subsets, UI composition and the deterministic-fixture guard. These are synthetic
+adapter snapshots, not runtime adapter or rendered-presence certification.
+
+The app routes ambient wildlife and cave automation through that boundary; scenario
+weather/cloud/precipitation and TOD comparison pins, plus scene weather/particle pins,
+use its legacy-pin decision. Camera, time-of-day, season and moon selections remain
+explicit capture inputs. `--no-ui` and pre-existing UI availability remain restrictive;
+developer-widget suppression and the ecology nameplate exception remain unchanged.
+The particle-emitter determinism scenario retains its fixture policy even with a
+supported snapshot. Fixed tick spacing and deterministic descriptor generation are
+not feature-off switches and are unchanged. Both hidden-window scan and scene legs
+use the same app boundary; hidden-window visibility itself changes no feature setting.
+
+Shipping mode adapters and resolved identities remain unavailable, so the CLI still
+retains legacy feature behavior even with `all_features` selected. In particular,
+this slice does not deliver the time-lapse all-features requirement or certify the
+synchronous world sweep. Completing those adapters and native entry-point validation
+is a follow-up; no all-features capture success is claimed here.
+
 The resolver records requested/effective settings, forced/suppressed/unavailable
 reasons, per-feature and aggregate capability, and resolved asset/config identities
 or explicit unavailable reasons. Missing identities prevent aggregate support;
@@ -1292,8 +1323,8 @@ edits when parallel branches join. No new required CI checks are part of any row
 | E1d: manifest-aware assembly | `tools/timelapse.py`; `tools/gates/test_temporal_assembly.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/visual-regression.md`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (8) | After E1c and D1. Register Python manifest/order/hash/partial-input/encoder-failure/budget tests in PYTHON_TESTS and CTest; preserve existing assembler callers. Existing generic workflow invokes the registry. Coordinate shared assembler and document edits. |
 | E2a: temporal measurements | `tools/gates/check-temporal-capture.py`; `tools/gates/test_temporal_capture.py`; `tools/gates/check-diagnostic-capture.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (8) | After E1d, D1, D2. Register Python fixtures for all five metrics, unknown metadata, empty masks and stable cross-frame identity; reuse D1/D2 readers. Avoid owned rendering files. |
 | E2b: qualification and worst events | `tools/gates/check-temporal-capture.py`; `tools/gates/test_temporal_capture.py`; `tools/gates/baselines/diagnostic-rois.json`; `tools/gates/build-visual-sweep-montages.py`; `tools/gates/test_temporal_montages.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E2a and relevant B2/C2 contributions. Register qualification-status, repeated-run, injected-defect and labelled failure-slot tests in PYTHON_TESTS/CTest. Threshold enforcement requires separately reviewed qualification evidence. Coordinate shared ROI/montage edits. |
-| E3a: profile and capability manifest | `rendering/CaptureFeatureProfile.h`; `rendering/CaptureFeatureProfile.cpp`; `src/luminumbra_client/sources.cmake`; `src/luminumbra_client/core/RuntimeScenarioConfig.h`; `src/luminumbra_client/core/RuntimeScenarioConfig.cpp`; `test/rendering/capture_feature_profile_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After A4, D1; may precede E1. Register GL-free profile/capability/unknown-feature/incompatible-option tests. Default every unimplemented adapter to unsupported. Coordinate configuration ownership. |
-| E3b: shared app and scenario policy | `src/luminumbra_client/main_client.cpp`; `src/luminumbra_client/app/ClientAppContext.h`; `src/luminumbra_client/app/CaveFlourishes.cpp`; `src/luminumbra_client/core/ScenarioRunnerDrive.cpp`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `rendering/CaptureFeatureProfile.cpp`; `test/rendering/capture_feature_policy_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `docs/visual-regression.md` (10) | After E3a and E1c. Coordinate app/scenario/cave ownership; register ordinary-play equivalence and profile tests across timelapse, scan, general scenario, TOD/weather and both headless legs, including no-ui and determinism options. Remove suppression only for admitted profile runs. |
+| E3a: profile and capability manifest | `rendering/CaptureFeatureProfile.h`; `rendering/CaptureFeatureProfile.cpp`; `src/luminumbra_client/sources.cmake`; `src/luminumbra_client/core/RuntimeScenarioConfig.h`; `src/luminumbra_client/core/RuntimeScenarioConfig.cpp`; `test/rendering/capture_feature_profile_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | Profile foundation implemented with registered GL-free profile/capability/unknown-feature/incompatible-option tests. Every unimplemented adapter defaults to unsupported. Shipping adapter admission remains pending. |
+| E3b: shared app and scenario policy | `src/luminumbra_client/main_client.cpp`; `src/luminumbra_client/app/ClientAppContext.h`; `src/luminumbra_client/app/CaveFlourishes.cpp`; `rendering/CaptureFeatureProfile.h`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `rendering/CaptureFeatureProfile.cpp`; `test/rendering/capture_feature_policy_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `docs/visual-regression.md` (10) | Shared policy boundary implemented after E3a and E1c; registered synthetic ordinary-play equivalence, mode-label, admission, no-ui and determinism regressions. Only complete supported snapshots can remove suppression. Shipping adapters and native entry-point validation remain pending; no runtime all-features claim. |
 | E3c: sweep profile adapter | `scenarios/WorldVisualSweep.cpp`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `rendering/TemporalAudit.cpp`; `rendering/CaptureFeatureProfile.cpp`; `test/rendering/temporal_sweep_test.cpp`; `test/CMakeLists.txt`; `tools/gates/validate-engine-frontier.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E3b. Coordinate sweep ownership. Register exact-tick sweep/particle-continuity/creature tests; existing still matrix keeps its pins. Feature-incompatible camera/profile combinations refuse explicitly. |
 | E3d: forward feature evidence | `rendering/DiagnosticContributions.h`; `rendering/DiagnosticContributions.cpp`; `rendering/passes/WaterPass.cpp`; `rendering/passes/WaterfallPass.cpp`; `rendering/passes/ParticlePass.cpp`; `rendering/passes/FoliagePass.cpp`; `rendering/RenderPipeline.cpp`; `test/rendering/capture_forward_presence_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md` (10) | After B2 and E3a. Coordinate owned producers. Register GL-free counter joins and native visible-contribution/occlusion fixtures; separate river/waterfall/spray evidence, and report unsupported until instrumented shader contributors land in additional bounded slices with asset inventory updates. |
 | E3e: geometry and atmosphere evidence | `rendering/DiagnosticContributions.h`; `rendering/DiagnosticContributions.cpp`; `rendering/passes/GBufferPass.cpp`; `rendering/passes/SkyboxPass.cpp`; `rendering/passes/LightingPass.cpp`; `rendering/RenderPipeline.cpp`; `test/rendering/capture_scene_presence_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `docs/visual-regression.md` (10) | After E3d. Coordinate owned passes. Register creature/cave/structure/sky/moon/star/cloud-shadow/bolt visibility fixtures, including absent/offscreen cases; shader variants and public asset inventory changes are prerequisite bounded slices under B2, not implicit extra files. |
