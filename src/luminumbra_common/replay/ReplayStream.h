@@ -43,6 +43,7 @@
 #include <vector>
 
 #include "../HashCheckpoint.h"
+#include "../core/IntegerPrimitives.h"
 #include "../world/AuthorityBootDescriptor.h"
 #include "RegionScheduleTrace.h"
 
@@ -351,9 +352,9 @@ private:
     std::size_t m_max_tick_bytes = 0;
     std::size_t m_byte_limit = 0;
     std::size_t m_bytes = 0;
-    std::uint64_t m_digest = 1469598103934665603ULL;
+    std::uint64_t m_digest = Core::kFnv1a64StandardBasis;
     std::uint64_t m_elided_tick = 0;
-    std::uint64_t m_elided_digest = 1469598103934665603ULL;
+    std::uint64_t m_elided_digest = Core::kFnv1a64StandardBasis;
     std::uint64_t m_last_tick = 0;
     std::array<char, kOpenRefusalBytes> m_open_refusal{};
     std::size_t m_open_refusal_length = 0;

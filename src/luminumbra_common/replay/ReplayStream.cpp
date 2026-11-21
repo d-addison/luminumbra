@@ -739,7 +739,7 @@ void AppendRecordFrame(std::vector<std::uint8_t>& out,
 } // namespace
 
 std::string Fnv1a64Hex(const std::string& text) {
-    std::uint64_t hash = 1469598103934665603ULL; // FNV offset basis
+    std::uint64_t hash = Core::kFnv1a64StandardBasis;
     for (const char character : text) {
         const auto ch = static_cast<unsigned char>(character);
         hash ^= static_cast<std::uint64_t>(ch);
@@ -962,7 +962,7 @@ bool BoundedReplayRecorder::Open(const std::string& destination,
             m_directory = candidate;
             m_header = header;
             m_regions = regions;
-            m_digest = 1469598103934665603ULL;
+            m_digest = Core::kFnv1a64StandardBasis;
             m_elided_tick = 0;
             m_elided_digest = m_digest;
             m_last_tick = 0;
