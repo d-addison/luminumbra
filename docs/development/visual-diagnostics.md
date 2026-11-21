@@ -908,9 +908,9 @@ proof. Deterministic still pins likewise do not imply deterministic temporal
 sampling: ordinary frame dt is wall-clock derived (`client/main_client.cpp:4518`),
 and current time-lapse adds ticks after readback. Its 45 initial settle frames
 (`client/app/ClientAppContext.h:60`) do not settle each later sample. The existing
-assembler naturally sorts filenames and loads all frames, uses Pillow for GIF
-and optionally ffmpeg for MP4 (`tools/timelapse.py:35`, `:43`, `:75`); it does not
-validate a sequence manifest or produce a temporal contact sheet.
+assembler's legacy path naturally sorts filenames and loads all frames, using
+Pillow for GIF and optionally ffmpeg for MP4. Manifest-aware assembly is described
+below; it does not produce a temporal contact sheet.
 
 ### E1: fixed-camera time-lapse audit runs
 
@@ -999,7 +999,7 @@ without a trailing newline. `frames` preserves capture order with `index`, `tick
 Version 1 encodes span as day-night=0, weather-cycle=1, multi-day=2; frame kind as
 sequence=0, steady-hold=1, night-presence-hold=2; control as live=0, noon=1, night=2.
 There are no wall-clock fields. Serialization is bounded to 16 MiB and the admitted
-manifest reservation. E1d can use this format contract for its reader fixtures;
+manifest reservation. The assembler's reader fixtures use this format contract;
 there is no native sequence artifact yet.
 
 Only a pending publication step can call `publishCompletionManifest`: validate
@@ -1015,11 +1015,34 @@ binary hashes, exact tick counts through file acknowledgement, malformed/missing
 oversized payloads, occupied destinations/staging, cancellation and reservation
 failure before filesystem writes. Native execution and mutation runs remain pending.
 
+`tools/timelapse.py --manifest PATH` explicitly selects a version-1 sequence
+manifest with any filename inside or outside the frame directory, requires
+complete status and validates the canonical plan hash. An in-directory manifest
+is excluded from extras by file identity. Missing, unreadable, nonregular, oversized
+or invalid explicit manifests refuse without legacy fallback. Assembly joins
+capture records by index to planned tick order, preserving equal-tick holds,
+and requires exactly one image per frame under the existing pattern option.
+Missing, extra, duplicate, malformed or hash-mismatched inputs refuse. Every
+payload, including sidecars, is size/hash checked through D1's shared verified-file
+reader; image bytes are copied from those same descriptors into private staging.
+The assembler admits at most 4,096 frames, 12 payloads per frame, 128 MiB per
+payload and 512 MiB total payload bytes before decoding/encoding. The selected
+manifest is capped at 16 MiB; the frame scan permits 100,000 flat entries without
+reading unrelated JSON documents. Decoded RGB buffers reserve at most 512 MiB in aggregate; dimensions are at most 16,384
+and image area at most 16,777,216 pixels before and after scaling. GIF uses Pillow;
+requested MP4 requires ffmpeg. Missing/failed encoders and empty videos refuse
+without publishing either staged output, preserving existing destinations.
+No partial-output mode is added. Without `--manifest`, the legacy pipeline and
+optional encoder fallback are retained and no manifest discovery runs. Registered
+stdlib-only `TemporalAssemblyPython` regressions cover order, hashes, partial input, budgets, staged bytes, fake-encoder
+failures and legacy byte parity. This is offline assembly, not native capture,
+temporal metric qualification or all-features support.
+
 The planning parser is callable independently. Both shipping startup parsers reject
 even valid temporal plans, and `--scenario=temporal_audit`, with an explicit
 unsupported-execution reason before world/output creation, including save-root
 creation. Weather input, app/site transport integration, site/ROI/feature capability
-admission, transport byte-bound enforcement and assembly remain later work. Admission alone
+admission and runtime transport byte-bound enforcement remain later work. Admission alone
 does not certify a temporal or all-features capture, or change simulation identity,
 save/replay formats or authority state. The rest of this section specifies that
 future execution contract.
@@ -1320,7 +1343,7 @@ edits when parallel branches join. No new required CI checks are part of any row
 | E1a: exact-tick plan and admission | `rendering/TemporalAudit.h`; `rendering/TemporalAudit.cpp`; `src/luminumbra_client/core/RuntimeScenarioConfig.h`; `src/luminumbra_client/core/RuntimeScenarioConfig.cpp`; `src/luminumbra_client/sources.cmake`; `test/rendering/temporal_audit_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After A4, D1. Register GL-free tick/cadence/overflow/refusal regressions in capture_manifest_test. Coordinate configuration ownership; admission alone cannot advertise runtime support. |
 | E1b: deterministic weather input | `src/luminumbra_common/systems/WeatherSystem.h`; `src/luminumbra_common/systems/WeatherSystem.cpp`; `src/luminumbra_common/world/GameSession.cpp`; `rendering/TemporalAudit.cpp`; `test/rendering/temporal_weather_test.cpp`; `test/CMakeLists.txt`; `src/luminumbra_client/core/ScenarioRunnerDrive.cpp`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E1a. Coordinate simulation owners: register fixed-tick weather/hydrology/strike and identity/replay tests before enabling script support. Exercise normal live bridge; any format migration is a prerequisite separate slice with both readers/writers, not hidden in this count. |
 | E1c: site sequence driver | `src/luminumbra_client/main_client.cpp`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `src/luminumbra_client/core/ScenarioRunnerImpl.h`; `rendering/TemporalAudit.cpp`; `test/rendering/temporal_sequence_test.cpp`; `test/CMakeLists.txt`; `tools/gates/validate-engine-frontier.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E1b, A4, D1. GL-free protocol and optional version-1 completion-manifest transport implemented with registered sequence/readiness/phase/creature-tick and file-publication regressions. The manifest transport slice changes `rendering/TemporalAudit.h/.cpp`, `test/rendering/temporal_sequence_test.cpp`, `src/luminumbra_common/sources.cmake` (link the unchanged SHA-256 implementation) and this document (5). App/site admission, A4 reservations/runtime transport and existing frontier action wiring remain pending; native fixed-site capture is native-pending. Shipping startup still refuses execution. No all-features claim before E3. |
-| E1d: manifest-aware assembly | `tools/timelapse.py`; `tools/gates/test_temporal_assembly.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/visual-regression.md`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (8) | After E1c and D1. Register Python manifest/order/hash/partial-input/encoder-failure/budget tests in PYTHON_TESTS and CTest; preserve existing assembler callers. Existing generic workflow invokes the registry. Coordinate shared assembler and document edits. |
+| E1d: manifest-aware assembly | `tools/timelapse.py`; `tools/gates/test_temporal_assembly.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/visual-regression.md`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (8) | Implemented offline after E1c and D1: explicit `--manifest PATH` / `build(..., manifest=PATH)` locator for any filename inside or outside the frame directory, file-identity exclusion, complete/version/plan-order/hash admission, bounded payload and decoded-image work, staged encoder publication and unchanged default legacy pipeline without discovery. Invalid explicit locators refuse without fallback. Stdlib-only locator/identity/manifest/order/hash/partial-input/encoder-failure/budget/legacy-parity regressions are registered in PYTHON_TESTS and CTest; the existing generic workflow invokes the registry. Native sequence capture, metrics and all-features qualification remain pending. |
 | E2a: temporal measurements | `tools/gates/check-temporal-capture.py`; `tools/gates/test_temporal_capture.py`; `tools/gates/check-diagnostic-capture.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (8) | After E1d, D1, D2. Register Python fixtures for all five metrics, unknown metadata, empty masks and stable cross-frame identity; reuse D1/D2 readers. Avoid owned rendering files. |
 | E2b: qualification and worst events | `tools/gates/check-temporal-capture.py`; `tools/gates/test_temporal_capture.py`; `tools/gates/baselines/diagnostic-rois.json`; `tools/gates/build-visual-sweep-montages.py`; `tools/gates/test_temporal_montages.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E2a and relevant B2/C2 contributions. Register qualification-status, repeated-run, injected-defect and labelled failure-slot tests in PYTHON_TESTS/CTest. Threshold enforcement requires separately reviewed qualification evidence. Coordinate shared ROI/montage edits. |
 | E3a: profile and capability manifest | `rendering/CaptureFeatureProfile.h`; `rendering/CaptureFeatureProfile.cpp`; `src/luminumbra_client/sources.cmake`; `src/luminumbra_client/core/RuntimeScenarioConfig.h`; `src/luminumbra_client/core/RuntimeScenarioConfig.cpp`; `test/rendering/capture_feature_profile_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | Profile foundation implemented with registered GL-free profile/capability/unknown-feature/incompatible-option tests. Every unimplemented adapter defaults to unsupported. Shipping adapter admission remains pending. |
