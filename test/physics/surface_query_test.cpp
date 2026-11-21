@@ -29,6 +29,8 @@
 
 #include <cmath>
 #include <memory>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -268,4 +270,40 @@ TEST(SurfaceQuery, IncompleteHeightmapsNeverCreateCollision) {
     physics.add_chunk_collision(*complete);
     EXPECT_TRUE(physics.audio_raycast({8, 12, 8}, {8, 4, 8}).hit);
     physics.shutdown();
+}
+
+// A continuation restores a terrain collider under its saved BodyID. Removing and
+// re-adding it must then allocate the generation an uninterrupted run allocates.
+TEST(SurfaceQuery, RestoredTerrainColliderReusesTheUninterruptedGeneration) {
+    using Owners = std::vector<std::pair<Luminumbra::ChunkID, JPH::BodyID>>;
+    auto floor = MakeFlatFloorChunk(IVec3(0, 0, 0), 8.0f);
+    const auto owner = [](const PhysicsSystem& physics) {
+        Owners owners;
+        EXPECT_TRUE(physics.capture_chunk_collision_owners(owners));
+        return owners.size() == 1 ? owners.front().second : JPH::BodyID();
+    };
+
+    PhysicsSystem uninterrupted;
+    uninterrupted.startup();
+    ASSERT_TRUE(uninterrupted.add_chunk_collision(*floor));
+    uninterrupted.remove_chunk_collision(floor->get_id());
+    ASSERT_TRUE(uninterrupted.add_chunk_collision(*floor));
+    const JPH::BodyID saved = owner(uninterrupted);
+    ASSERT_FALSE(saved.IsInvalid());
+    uninterrupted.remove_chunk_collision(floor->get_id());
+    ASSERT_TRUE(uninterrupted.add_chunk_collision(*floor));
+    const JPH::BodyID expected = owner(uninterrupted);
+    ASSERT_EQ(expected.GetIndex(), saved.GetIndex());
+    ASSERT_NE(expected, saved);
+
+    PhysicsSystem restored;
+    restored.startup();
+    ASSERT_TRUE(restored.add_chunk_collision(*floor, saved));
+    EXPECT_EQ(owner(restored), saved);
+    restored.remove_chunk_collision(floor->get_id());
+    ASSERT_TRUE(restored.add_chunk_collision(*floor));
+    EXPECT_EQ(owner(restored), expected);
+
+    restored.shutdown();
+    uninterrupted.shutdown();
 }

@@ -145,6 +145,47 @@ namespace fs = std::filesystem;
 using Luminumbra::Systems::TerrainGenParams;
 
 namespace {
+bool CompleteContinuationChunk(const Luminumbra::Chunk& chunk) {
+    constexpr std::size_t lattice = static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
+                                    (Luminumbra::CHUNK_SIZE_Y + 1) * (Luminumbra::CHUNK_SIZE_Z + 1);
+    constexpr std::size_t heights =
+        static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) * (Luminumbra::CHUNK_SIZE_Z + 1);
+    return (chunk.sdf_data.empty() || chunk.sdf_data.size() == lattice) &&
+           (chunk.heightmap_data.empty() || chunk.heightmap_data.size() == heights);
+}
+bool PrepareContinuationResidency(Luminumbra::WorldStreamingState& chunks,
+                                  const std::vector<Luminumbra::ChunkID>& residents,
+                                  const std::vector<Luminumbra::IVec3>& inventory,
+                                  const std::stop_token& stop,
+                                  std::string& error) {
+    // At most 8192 exact residents; payload sizes were admitted by the shared reader.
+    for (const auto id : residents) {
+        if (stop.stop_requested()) {
+            error = "Saved-world validation cancelled.";
+            return false;
+        }
+        const auto chunk = chunks.find_chunk(id);
+        if (!chunk || !CompleteContinuationChunk(*chunk)) {
+            error = "Saved-input admission refused: missing or partial resident chunk.";
+            return false;
+        }
+    }
+    // The reader can stage repaired cold water flags (within its 256 MiB budget).
+    // Every such chunk is in the admitted inventory. Retire those staging handles
+    // without copying the chunk store; their payloads remain in cold inventory.
+    for (const auto& coords : inventory) {
+        if (stop.stop_requested()) {
+            error = "Saved-world validation cancelled.";
+            return false;
+        }
+        const auto id = Luminumbra::Chunk::calculate_id(coords);
+        if (!std::binary_search(residents.begin(), residents.end(), id)) {
+            chunks.erase_chunk(id);
+        }
+    }
+    return true;
+}
+
 std::span<const Luminumbra::Vec3>
 RegionalWaterAnchors(const std::optional<std::vector<Luminumbra::Vec3>>& replicated,
                      const std::optional<Luminumbra::Vec3>& local) {
@@ -4692,8 +4733,10 @@ GameSession::CaptureAuthorityHashes(const std::string& entity_snapshot_json,
         return {AuthorityCaptureStatus::PreparationRefused, std::nullopt};
     }
     try {
-        // Observation never settles water ownership; the host finishes that at its tick boundary.
-        m_worldSystem->wait_for_streaming_jobs();
+        // Observation fences worker writes without publishing streaming work or settling
+        // water ownership. Both belong to the host's simulation boundary: publishing here
+        // would change chunk lifecycle state and make later captures depend on read order.
+        m_worldSystem->quiesce_streaming_jobs_for_save();
         const auto cursor = m_worldSystem->GetWaterSimWindowCursor();
         WorldStreamingState state;
         for (const auto& chunk : m_worldSystem->snapshot_streamed_chunks()) {
@@ -5971,7 +6014,7 @@ bool GameSession::ReadPreparedWorldState(
         // Preserve legacy damaged-snapshot invalidation, including an unscheduled session
         // refusing a future metadata container version. Schedule admission failures leave
         // the live session intact.
-        state.input_refused = options.weather_schedule ||
+        state.input_refused = options.owner_continuation || options.weather_schedule ||
                               error.find("weather schedule") != std::string::npos ||
                               error.starts_with("Saved-input admission refused:");
         return false;
@@ -6000,10 +6043,21 @@ bool GameSession::ReadPreparedWorldState(
         }
         if (!missing && metadata.contains("owner_continuation")) {
             state.continuation = std::make_shared<Persistence::OwnerContinuation>();
+            state.input_refused = true; // Continuation refusals never invalidate live state.
             const auto& value = metadata.at("owner_continuation");
             if (!options.owner_continuation || !value.is_string() ||
                 !Persistence::DecodeOwnerContinuation(value.get_ref<const std::string&>(),
-                                                      *state.continuation) ||
+                                                      *state.continuation)) {
+                error = "Saved-input admission refused: unsupported or invalid owner continuation.";
+                return false;
+            }
+            if (state.continuation->version == 1) {
+                error = "Saved-input admission refused: legacy owner continuation v1 lacks exact "
+                        "ambient and resident state.";
+                return false;
+            }
+            if (state.continuation->ambient.has_value() !=
+                    (!options.active_regions && !state.weather_schedule) ||
                 state.continuation->world_seed != options.owner_world_seed ||
                 state.continuation->preset_identity != options.owner_preset_identity ||
                 (options.owner_roster_count &&
@@ -6011,20 +6065,21 @@ bool GameSession::ReadPreparedWorldState(
                 state.continuation->moving_anchor != options.owner_moving_anchor ||
                 state.continuation->water_smoke != options.owner_water_smoke) {
                 state.input_refused = true;
-                error = "Saved-input admission refused: invalid or conflicting owner continuation.";
+                error = "Saved-input admission refused: unsupported, invalid or conflicting owner "
+                        "continuation.";
                 return false;
             }
         }
     }
-    // The 25-by-25 initial surface-column set bounds retained chunks. Cold decodes
-    // outside it remain available in the bounded cache for subsequent activation.
+    // Continuations retain exactly the quiesced resident set, including empty.
+    // Ordinary regional loads retain the bounded 25-by-25 spawn footprint.
     std::unordered_set<ChunkID> wanted;
-    for (const auto& coords : options.wanted_chunks)
-        wanted.insert(Chunk::calculate_id(coords));
     if (state.continuation) {
-        for (const auto& terrain : state.continuation->terrain) {
-            wanted.insert(terrain.chunk_id);
-        }
+        wanted.insert(state.continuation->resident_chunks.begin(),
+                      state.continuation->resident_chunks.end());
+    } else {
+        for (const auto& coords : options.wanted_chunks)
+            wanted.insert(Chunk::calculate_id(coords));
     }
     state.requires_index = Persistence::snapshot_index_exists(save_dir);
     if (cancelled())
@@ -6034,13 +6089,14 @@ bool GameSession::ReadPreparedWorldState(
                            save_dir,
                            errors,
                            stop,
-                           options.active_regions ? &wanted : nullptr,
+                           (options.active_regions || state.continuation) ? &wanted : nullptr,
                            options.active_regions ? &state.durable_inventory : nullptr,
                            nullptr,
                            options.active_regions && options.regional_water);
     if (!state.snapshot_present && !errors.empty()) {
         error = errors.front();
-        state.input_refused = error.find("Saved-input admission refused:") == 0 ||
+        state.input_refused = state.continuation ||
+                              error.find("Saved-input admission refused:") == 0 ||
                               error.find("Corrupt regional energy record:") == 0 ||
                               error.find("Corrupt plant authority:") == 0;
         for (const std::string& diagnostic : errors)
@@ -6063,7 +6119,8 @@ bool GameSession::ReadPreparedWorldState(
         error = errors.empty()
                     ? "Incompatible configuration: this world requires sim.active_regions."
                     : errors.front();
-        state.input_refused = error.find("Saved-input admission refused:") == 0 ||
+        state.input_refused = state.continuation ||
+                              error.find("Saved-input admission refused:") == 0 ||
                               error.find("Corrupt regional energy record:") == 0 ||
                               error.find("Corrupt plant authority:") == 0;
         return false;
@@ -6245,6 +6302,13 @@ bool GameSession::ReadPreparedWorldState(
             return false;
         }
     }
+    if (state.continuation && !PrepareContinuationResidency(state.chunks,
+                                                            state.continuation->resident_chunks,
+                                                            state.durable_inventory,
+                                                            stop,
+                                                            error)) {
+        return false;
+    }
     if (state.continuation) {
         auto physics = std::make_unique<Systems::PhysicsSystem>();
         physics->startup();
@@ -6317,6 +6381,8 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
         m_ownerAnchor = m_restoredOwnerContinuation->anchor;
         m_ownerStreamTick = m_restoredOwnerContinuation->stream_tick;
         m_ownerAnchorSet = true;
+        // The validated resident set is adopted below. Do not expand it on the first update.
+        m_worldSystem->finish_continuation_adoption();
     }
 
     // All refusing readers have passed; publish the staged state together.
@@ -6377,8 +6443,16 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
         *m_energyFieldState = std::move(*saved.energy);
     if (m_restoredOwnerContinuation && !m_activeRegionsEnabled) {
         m_simulationClock.reset(m_restoredOwnerContinuation->simulation_tick);
-        m_ambientFieldAnchor = m_metadata.spawnPoint;
-        RestoreAmbientFieldsAtTick(m_restoredOwnerContinuation->simulation_tick);
+        const auto& ambient_state = m_restoredOwnerContinuation->ambient;
+        if (ambient_state.has_value()) {
+            const auto& ambient = *ambient_state;
+            m_weatherSystem->RestoreContinuation(ambient, *m_windFieldSystem);
+            m_ambientFieldAnchor = ambient.anchor;
+            m_aetherFieldSystem->Update(ambient.tick,
+                                        ambient.anchor,
+                                        ambient.constructor_state ? nullptr
+                                                                  : m_windFieldSystem.get());
+        }
     }
     if (!saved.snapshot_present && !m_activeRegionsEnabled) {
         m_worldSystem->SetWaterSimWindowCursor(saved.water_sim_cursor);
@@ -7087,6 +7161,29 @@ bool GameSession::CaptureOwnerContinuation(std::string& bytes) const {
         return false;
     }
     Persistence::OwnerContinuation record;
+    if (!m_worldSystem ||
+        !m_worldSystem->capture_resident_chunk_ids(record.resident_chunks,
+                                                   Persistence::kOwnerContinuationResidentChunks)) {
+        return false;
+    }
+    for (const auto id : record.resident_chunks) {
+        const auto chunk = m_worldSystem->find_streamed_chunk(Chunk::decode_id(id));
+        if (!chunk || !CompleteContinuationChunk(*chunk)) {
+            return false;
+        }
+    }
+    if (!m_activeRegionsEnabled && !m_weatherSchedule) {
+        if (!m_weatherSystem || !m_windFieldSystem || !m_aetherFieldSystem ||
+            m_weatherSystem->last_tick() != GetSimulationTickCount() ||
+            m_windFieldSystem->last_tick() != GetSimulationTickCount() ||
+            m_aetherFieldSystem->last_tick() != GetSimulationTickCount()) {
+            return false;
+        }
+        record.ambient.emplace();
+        if (!m_weatherSystem->CaptureContinuation(*m_windFieldSystem, *record.ambient)) {
+            return false;
+        }
+    }
     record.world_seed = m_numericSeed;
     record.preset_identity = m_presetContentHash;
     record.simulation_tick = GetSimulationTickCount();

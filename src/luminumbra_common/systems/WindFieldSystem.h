@@ -1,5 +1,7 @@
 #pragma once
 
+#include "AmbientContinuation.h"
+
 // Deterministic coarse 2.5D wind grid (simulation-authoritative).
 //
 // Shape: 24 m cells, three layers
@@ -21,8 +23,11 @@
 // perturbations; save/load/resimulation reaches the same field at the same tick
 // when those inputs match.
 
+#include <array>
 #include <cstdint>
 #include <functional>
+#include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -114,12 +119,20 @@ public:
 
     // Queue localized storm gusts for the next Update. The queue is sorted by
     // value so caller iteration order cannot change the resulting field.
-    struct StormPerturbation {
-        Vec2 center_world = Vec2(0.0f);
-        float radius_m = 0.0f;
-        Vec2 velocity = Vec2(0.0f);
-        float intensity = 0.0f;
-    };
+    using StormPerturbation = AmbientWindPerturbation;
+    // Const explicit-save diagnostics of the last Update, independent of later queue edits.
+    [[nodiscard]] std::optional<std::span<const StormPerturbation>>
+    continuation_perturbations() const {
+        if (m_appliedStormCount > m_appliedStorms.size()) {
+            return std::nullopt;
+        }
+        return std::span(m_appliedStorms).first(m_appliedStormCount);
+    }
+    [[nodiscard]] const Vec3& field_anchor() const {
+        return m_fieldAnchor;
+    }
+    // Explicit-save adoption preserves the applied order, including equal-valued inputs.
+    void RestoreContinuation(const AmbientContinuation& state);
     void InjectStormPerturbation(const StormPerturbation& perturbation);
     void ClearStormPerturbations();
 
@@ -182,6 +195,10 @@ private:
     std::vector<float> m_scratch_pz;
     std::vector<float> m_scratch_cell_noise;
     std::vector<StormPerturbation> m_storm_perturbations;
+    // Save bookkeeping only, never hashed. No heap allocation on the tick path.
+    std::array<StormPerturbation, kMaxStormCells> m_appliedStorms{};
+    std::size_t m_appliedStormCount = 0;
+    Vec3 m_fieldAnchor{};
 };
 
 } // namespace Luminumbra::Systems
