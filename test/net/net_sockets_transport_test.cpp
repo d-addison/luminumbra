@@ -7,8 +7,8 @@
 #include "steam/isteamnetworkingsockets.h"
 
 // This isolated target needs only the public log accessor, without engine startup.
-std::shared_ptr<spdlog::logger>& Log::GetCoreLogger() {
-    static auto logger = spdlog::default_logger();
+const std::shared_ptr<spdlog::logger>& Log::GetCoreLogger() {
+    static const auto logger = spdlog::default_logger();
     return logger;
 }
 

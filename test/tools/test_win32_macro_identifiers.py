@@ -33,6 +33,18 @@ def banned_identifiers(text):
 
 
 class Win32MacroIdentifiers(unittest.TestCase):
+    def test_diagnostic_json_strings_are_extracted_before_comparing_views(self):
+        source = (ROOT / "test/rendering/diagnostic_capture_test.cpp").read_text(encoding="utf-8")
+        source = " ".join(source.split())
+        # These two submission members are string_view, unlike literal or
+        # std::string operands. MSVC's rewritten equality candidates conflict
+        # with JSON's implicit conversion unless the JSON string is extracted.
+        for collection, field, member in (("meshes", "path", "mesh_path"),
+                                           ("draws", "shader_variant", "shader_variant")):
+            with self.subTest(member=member):
+                self.assertIn(f'EXPECT_EQ(doc.at("{collection}")[0].at("{field}").get<std::string>(), '
+                              f'Submission().{member});', source)
+
     def test_scanner_ignores_comments_and_literals(self):
         sample = (
             "// far and near in a comment\n"

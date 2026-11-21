@@ -1,5 +1,6 @@
 #include "../fixtures/TerrainFixtureParams.h"
 #include "../support/UniqueTempPath.h"
+#include "luminumbra_client/rendering/FoliageGroundMesh.h"
 #include "luminumbra_client/rendering/NearTerrainRefinement.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/world/NearTerrainMeshSnapshot.h"
@@ -389,8 +390,110 @@ TEST(NearTerrainRefinement, EveryChildPreservesFlatProvokingVertexMaterial) {
         ASSERT_LT(provoking, output.vertices.size());
         const auto source_triangle = provoking - first_centre;
         const auto source_provoking = patch.mesh.indices[source_triangle * 3 + 2];
-        EXPECT_EQ(output.vertices[provoking].material_id,
+        EXPECT_EQ(output.vertices[provoking].material_id & 255u,
                   patch.mesh.vertices[source_provoking].material_id);
+    }
+}
+
+TEST(NearTerrainRefinement, AddedVerticesPreserveEveryInterpolatedGroundLane) {
+    // Flat geometry isolates coverage from the bounded height displacement.
+    // Curved geometry must carry the same barycentrics in X/Z as well.
+    for (const bool flat : {false, true}) {
+        for (const u32 first : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 200u, 255u}) {
+            for (const u32 second : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 200u, 255u}) {
+                for (const bool third_lane : {false, true}) {
+                    auto patch = MakePatch(2, flat);
+                    for (std::size_t index = 0; index < patch.mesh.vertices.size(); ++index) {
+                        patch.mesh.vertices[index].material_id =
+                            third_lane && index % 3 == 2 ? 5u : (index % 2 == 0 ? first : second);
+                    }
+                    NearTerrainRenderMesh output;
+                    ASSERT_EQ(RefineNearTerrain(patch.Input(), output),
+                              NearTerrainRefinementResult::Refined);
+                    const auto centres = output.vertices.size() - patch.mesh.indices.size() / 3;
+                    // Every child ends at its source centre. Checking all three
+                    // vertices proves the entire linear coverage interpolant.
+                    for (std::size_t start = 0; start < output.indices.size(); start += 3) {
+                        const auto source = (output.indices[start + 2] - centres) * 3;
+                        const auto& a = patch.mesh.vertices[patch.mesh.indices[source]];
+                        const auto& b = patch.mesh.vertices[patch.mesh.indices[source + 1]];
+                        const auto& c = patch.mesh.vertices[patch.mesh.indices[source + 2]];
+                        const Vec3 ab = b.position - a.position;
+                        const Vec3 ac = c.position - a.position;
+                        const float area = ab.x * ac.z - ac.x * ab.z;
+                        ASSERT_NE(area, 0.0f);
+                        for (std::size_t corner = 0; corner < 3; ++corner) {
+                            const auto& vertex = output.vertices[output.indices[start + corner]];
+                            const Vec3 offset = vertex.position - a.position;
+                            const float beta = (offset.x * ac.z - ac.x * offset.z) / area;
+                            const float gamma = (ab.x * offset.z - offset.x * ab.z) / area;
+                            for (u32 lane = 1; lane <= 5; ++lane) {
+                                const float expected =
+                                    (a.material_id == lane ? 1.0f - beta - gamma : 0.0f) +
+                                    (b.material_id == lane ? beta : 0.0f) +
+                                    (c.material_id == lane ? gamma : 0.0f);
+                                const float actual =
+                                    (vertex.material_id & 0x80000000u) != 0u
+                                        ? static_cast<float>(
+                                              (vertex.material_id >> (8u + 3u * (lane - 1u))) &
+                                              7u) /
+                                              6.0f
+                                        : (vertex.material_id == lane ? 1.0f : 0.0f);
+                                EXPECT_NEAR(actual, expected, 0.00001f);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST(NearTerrainRefinement, PackedAndOutOfByteRangeInputsPreservePriorOutput) {
+    for (const u32 material : {256u, 0x80000001u, std::numeric_limits<u32>::max()}) {
+        auto patch = MakePatch();
+        patch.mesh.vertices.back().material_id = material;
+        ExpectRefusal(patch.Input(), NearTerrainRefinementResult::InvalidMesh);
+    }
+    auto patch = MakePatch();
+    NearTerrainRenderMesh output;
+    ASSERT_EQ(RefineNearTerrain(patch.Input(), output), NearTerrainRefinementResult::Refined);
+    const auto prior = output;
+    auto input = patch.Input();
+    input.vertices = output.vertices;
+    input.indices = output.indices;
+    EXPECT_EQ(RefineNearTerrain(input, output), NearTerrainRefinementResult::InvalidMesh);
+    ExpectSameMesh(output, prior);
+}
+
+TEST(NearTerrainRefinement, FoliageQueriesRetainEveryRefinedGroundTriangle) {
+    for (const u32 material : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 200u, 255u}) {
+        const bool ground_material = material >= 1u && material <= 5u;
+        auto patch = MakePatch();
+        for (auto& vertex : patch.mesh.vertices) {
+            vertex.material_id = material;
+        }
+        auto packed = patch.mesh;
+        for (auto& vertex : packed.vertices) {
+            vertex.material_id =
+                0x80000000u | material | (ground_material ? 6u << (8u + 3u * (material - 1u)) : 0u);
+        }
+        const FoliageGroundMesh packed_ground(Vec3(0), packed.vertices, packed.indices);
+        EXPECT_EQ(packed_ground.sample(8.25f, 8.25f).valid, ground_material);
+        NearTerrainRenderMesh output;
+        ASSERT_EQ(RefineNearTerrain(patch.Input(), output), NearTerrainRefinementResult::Refined);
+        const FoliageGroundMesh ground(Vec3(0), output.vertices, output.indices);
+        for (std::size_t start = 0; start < output.indices.size(); start += 3) {
+            const Vec3 point = (output.vertices[output.indices[start]].position +
+                                output.vertices[output.indices[start + 1]].position +
+                                output.vertices[output.indices[start + 2]].position) /
+                               3.0f;
+            const auto hit = ground.sample(point.x, point.z);
+            EXPECT_EQ(hit.valid, ground_material);
+            if (hit.valid) {
+                EXPECT_NEAR(hit.height, point.y, 0.00001f);
+            }
+        }
     }
 }
 
