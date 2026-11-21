@@ -4,9 +4,9 @@
 
 #include <exception>
 #include <future>
-#include <limits>
 #include <memory>
 #include <stdexcept>
+#include <string_view>
 
 namespace Luminumbra {
 
@@ -27,13 +27,13 @@ public:
 // of world containers. Explicit enclosing maintenance transactions must retain
 // their thread-local ownership. A null pool supports standalone worlds only.
 template<typename Work>
-void RunWorkerBoundary(JobSystem* jobs, const Work& work) {
+void RunWorkerBoundary(JobSystem* jobs, std::string_view operation, const Work& work) {
     if (!jobs || Persistence::detail::CurrentThreadOwnsSaveTransaction()) {
         work();
         return;
     }
     // Already off the owner; queuing and waiting here can exhaust this pool.
-    if (jobs->is_current_worker()) {
+    if (jobs->is_current_worker() || jobs->io_executor().is_current_worker()) {
         work();
         return;
     }
@@ -53,9 +53,9 @@ void RunWorkerBoundary(JobSystem* jobs, const Work& work) {
     };
     const auto task = std::make_shared<Task>(Task{work, {}});
     auto completed = task->completion.get_future();
-    // Use the existing pool's admission policy; this boundary adds just one
-    // task, never a second queue or an inline fallback on a stopped pool.
-    if (!jobs->try_dispatch(&Task::Execute, task, std::numeric_limits<std::size_t>::max())) {
+    // Bounded admission applies backpressure, never an inline fallback when
+    // stopped. Completion still fences every caller-owned input and result.
+    if (!jobs->io_executor().dispatch(&Task::Execute, task, operation)) {
         throw WorkerBoundaryUnavailable();
     }
     completed.get();

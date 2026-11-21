@@ -3416,7 +3416,7 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                                 static_cast<char>((age->second >> (8 * i)) & 255));
                     }
                     std::uint64_t digest = 0;
-                    RunWorkerBoundary(m_jobSystem, [&] {
+                    RunWorkerBoundary(m_jobSystem, "region-freeze-digest", [&] {
                         if (!digest_operation) {
                             digest_operation.emplace(directory, m_regionRequiresIndex);
                         }
@@ -4711,8 +4711,9 @@ GameSession::CaptureAuthorityHashes(const std::string& entity_snapshot_json,
                 m_regionDurableDirectory.empty() ? GetWorldSaveDir() : m_regionDurableDirectory;
             std::string regional = "authoritative_chunks:v2:" + std::to_string(cursor) + ":";
             std::optional<Persistence::RegionDigestOperation> operation;
-            RunWorkerBoundary(m_jobSystem,
-                              [&] { operation.emplace(directory, m_regionRequiresIndex); });
+            RunWorkerBoundary(m_jobSystem, "authority-digest-open", [&] {
+                operation.emplace(directory, m_regionRequiresIndex);
+            });
             struct RegionInput {
                 RegionKey key;
                 std::uint64_t digest;
@@ -4737,7 +4738,7 @@ GameSession::CaptureAuthorityHashes(const std::string& entity_snapshot_json,
                         }
                     }
                     std::optional<Persistence::PreparedRegionDigest> prepared;
-                    RunWorkerBoundary(m_jobSystem, [&] {
+                    RunWorkerBoundary(m_jobSystem, "authority-digest-prepare", [&] {
                         if (operation) {
                             prepared = operation->prepare(key, inputs);
                         }
@@ -4987,7 +4988,7 @@ bool GameSession::EnableFarWorldAuthorityProducer(const World::FarWorldAuthority
         }
         m_worldSystem->quiesce_streaming_jobs_for_save();
         bool admitted = false;
-        RunWorkerBoundary(m_jobSystem, [&] {
+        RunWorkerBoundary(m_jobSystem, "far-source-admit", [&] {
             admitted = candidate->admit_saved_source(GetWorldSaveDir(), config.capture.read, error);
         });
         if (!admitted) {
@@ -5030,7 +5031,7 @@ void GameSession::PumpFarWorldAuthorityCapture() {
         std::string error;
         bool refreshed = false;
         try {
-            RunWorkerBoundary(m_jobSystem, [&] {
+            RunWorkerBoundary(m_jobSystem, "far-source-refresh", [&] {
                 refreshed =
                     m_farWorldAuthorityProducer->refresh_saved_source(GetWorldSaveDir(), error);
             });
@@ -5051,7 +5052,7 @@ void GameSession::PumpFarWorldAuthorityCapture() {
         // published-memory capture on the owner without per-frame job allocation.
         bool pump_started = false;
         try {
-            RunWorkerBoundary(m_jobSystem, [&] {
+            RunWorkerBoundary(m_jobSystem, "far-source-capture", [&] {
                 pump_started = true;
                 m_farWorldAuthorityProducer->pump_capture();
             });
@@ -5855,7 +5856,7 @@ bool GameSession::SaveWorldStateToImpl(const std::filesystem::path& save_dir,
     }
     bool saved = false;
     try {
-        RunWorkerBoundary(m_jobSystem, [&] { saved = save(); });
+        RunWorkerBoundary(m_jobSystem, "world-save", [&] { saved = save(); });
     } catch (const WorkerBoundaryUnavailable& error) {
         if (report) {
             *report = {};

@@ -28,6 +28,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/core/FilesystemPath.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/GraphicsPresetClassifier.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/JobSystem.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/IoExecutor.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/Log.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/BoundedConsoleSink.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/SimulationClock.cpp
