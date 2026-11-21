@@ -2859,15 +2859,18 @@ TEST_F(ReplayStreamTest, BoundedRecorderStandardDigestResetsAcrossRecordings) {
                 recorder.RecordTick(tick, {static_cast<std::uint8_t>(tick)}, nullptr, tick));
         }
         ASSERT_TRUE(recorder.Finalize(m_path, 3072, 3072));
-        const auto contents = replay::ReadReplay(m_path);
-        ASSERT_TRUE(contents.has_value());
-        EXPECT_FALSE(contents->truncated);
-        EXPECT_TRUE(contents->trailer_present);
-        EXPECT_EQ(contents->elided_through_tick, 2048u);
-        EXPECT_EQ(contents->elided_prefix_digest, UINT64_C(0xfc31c0fdbea9e11d));
-        ASSERT_EQ(contents->inputs.size(), 1024u);
-        EXPECT_EQ(contents->inputs.front().tick, 2049u);
-        EXPECT_EQ(contents->inputs.back().tick, 3072u);
+        const auto read = replay::ReadReplay(m_path);
+        if (!read.has_value()) {
+            FAIL() << "finalized bounded recording should read back";
+        }
+        const auto& contents = *read;
+        EXPECT_FALSE(contents.truncated);
+        EXPECT_TRUE(contents.trailer_present);
+        EXPECT_EQ(contents.elided_through_tick, 2048u);
+        EXPECT_EQ(contents.elided_prefix_digest, UINT64_C(0xfc31c0fdbea9e11d));
+        ASSERT_EQ(contents.inputs.size(), 1024u);
+        EXPECT_EQ(contents.inputs.front().tick, 2049u);
+        EXPECT_EQ(contents.inputs.back().tick, 3072u);
     }
 }
 
