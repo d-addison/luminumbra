@@ -6331,6 +6331,8 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
         m_ownerAnchor = m_restoredOwnerContinuation->anchor;
         m_ownerStreamTick = m_restoredOwnerContinuation->stream_tick;
         m_ownerAnchorSet = true;
+        // The validated resident set is adopted below. Do not expand it on the first update.
+        m_worldSystem->finish_continuation_adoption();
     }
 
     // All refusing readers have passed; publish the staged state together.

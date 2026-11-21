@@ -1061,6 +1061,11 @@ public:
     // (without clobbering the streamed chunk) when a chunk with the same id
     // is already active.
     bool adopt_streamed_chunk(const std::shared_ptr<::Luminumbra::Chunk>& chunk);
+    // Continuation adoption supplies the exact saved residents, including an empty set.
+    // Cold authority must wait for the normal activation cadence instead of a fresh-open pass.
+    void finish_continuation_adoption() {
+        m_first_update = false;
+    }
 
     // --- Durable residency (S3). All of it is inert unless set_durable_residency(true). ---
     struct ParkingStatus {
