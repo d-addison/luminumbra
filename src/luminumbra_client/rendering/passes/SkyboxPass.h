@@ -2,6 +2,8 @@
 
 #include "../RenderContext.h"
 
+#include <glad/glad.h>
+
 #include <filesystem>
 #include <memory>
 
@@ -25,6 +27,10 @@ class Shader;
 // same sequence point); skybox_draws is bumped through ctx.skybox_draw_counter.
 class SkyboxPass {
 public:
+    struct CallerState {
+        GLboolean cull_enabled = GL_FALSE;
+        static CallerState QueryExternal();
+    };
     SkyboxPass();
     ~SkyboxPass();
 
@@ -33,7 +39,18 @@ public:
     void destroy_geometry();
     void reset_shader();
 
-    void execute(const RenderContext& ctx, const Camera& camera, bool draw_weather_overlay = true);
+    // Shipping dispatch supplies known enable state; direct hosts preserve arbitrary state.
+    void execute(const RenderContext& ctx,
+                 const Camera& camera,
+                 bool draw_weather_overlay,
+                 const CallerState& caller);
+    void execute_external(const RenderContext& ctx,
+                          const Camera& camera,
+                          bool draw_weather_overlay = true);
+    // Preserve the existing direct-call boundary for previews and pass consumers.
+    void execute(const RenderContext& ctx, const Camera& camera, bool draw_weather_overlay = true) {
+        return execute_external(ctx, camera, draw_weather_overlay);
+    }
     void execute_weather_overlay(const RenderContext& ctx, const Camera& camera);
 
     const std::unique_ptr<Shader>& shader() const {

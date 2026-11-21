@@ -4658,6 +4658,55 @@ class DiagnosticScenarioCaptureWiring(unittest.TestCase):
 class PassCallerStateContract(unittest.TestCase):
     """Shipping preservation uses known values; external callers query explicitly."""
 
+    def test_ordinary_passes_have_zero_shipping_preservation_enable_queries(self):
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        cases = (("Lighting", "lighting", ".depth_test_enabled = GL_TRUE",
+                  "m_lighting_pass->execute(m_frame_lighting_ctx, caller)"),
+                 ("Skybox", "skybox", ".cull_enabled = GL_TRUE",
+                  "m_skybox_pass->execute(skybox_ctx, camera, false, caller)"),
+                 ("Foliage", "foliage", ".cull_enabled = GL_TRUE",
+                  "m_foliage_pass->execute(foliage_ctx, camera, caller)"))
+        for name, stage_name, value, call in cases:
+            with self.subTest(pass_name=name):
+                source = read(CLIENT / f"rendering/passes/{name}Pass.cpp")
+                execute = block(source, f"{name}Pass::execute(")
+                self.assertNotRegex(execute, r"\bgl(?:Get\w*|IsEnabled\w*)\s*\(")
+                self.assertNotIn("QueryExternal(", execute)
+                self.assertIn("caller.", execute)
+                stage = compact(block(pipeline, f"void RenderPipeline::execute_stage_{stage_name}("))
+                self.assertIn(value, stage)
+                self.assertEqual(stage.count(call), 2 if name == "Skybox" else 1)
+                self.assertNotIn("execute_external(", stage)
+                external = compact(block(source, f"{name}Pass::execute_external("))
+                self.assertIn("CallerState::QueryExternal()", external)
+                query = block(source, f"{name}Pass::CallerState::QueryExternal()")
+                self.assertEqual(query.count("glIsEnabled("), 1)
+                header = read(CLIENT / f"rendering/passes/{name}Pass.h")
+                self.assertIn("return execute_external(", header)
+
+    def test_ordinary_pass_entry_state_producers_and_order_are_pinned(self):
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        dispatch = block(pipeline, "void RenderPipeline::dispatch_stages(")
+        self.assertIn("glEnable(GL_DEPTH_TEST)", dispatch)
+        table = block(pipeline, "RenderPipeline::stage_executor_table()")
+        stages = re.findall(r'\{"([a-z_]+)",', table)
+        ordered = ("gbuffer", "plant_procgen", "ground_decals", "ssao", "ssao_blur",
+                   "lighting", "depth_blit_to_lighting", "skybox", "water", "waterfall",
+                   "glass_oit_accum", "glass_oit_resolve", "god_rays", "foliage")
+        positions = [stages.index(stage) for stage in ordered]
+        self.assertEqual(positions, sorted(positions))
+        lighting = block(pipeline, "void RenderPipeline::execute_stage_lighting(")
+        self.assertLess(lighting.index("glEnable(GL_CULL_FACE)"),
+                        lighting.index("m_lighting_pass->execute("))
+        for name in ("Water", "GlassOit"):
+            source = read(CLIENT / f"rendering/passes/{name}Pass.cpp")
+            self.assertIn("glEnable(GL_CULL_FACE)", source)
+        for name in ("Ssao", "Froxel"):
+            source = read(CLIENT / f"rendering/passes/{name}Pass.cpp")
+            self.assertNotIn("glDisable(GL_DEPTH_TEST)", source)
+        replay = block(pipeline, "bool RenderPipeline::render_far_world_off_pair(")
+        self.assertIn("dispatch_stages(camera)", replay)
+
     def test_shipping_shadow_has_zero_state_queries(self):
         pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
         shadow = read(CLIENT / "rendering/passes/ShadowPass.cpp")

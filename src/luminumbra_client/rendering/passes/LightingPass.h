@@ -3,6 +3,8 @@
 #include "../FrameBufferObject.h"
 #include "../RenderContext.h"
 
+#include <glad/glad.h>
+
 #include <filesystem>
 #include <memory>
 
@@ -22,6 +24,10 @@ class RenderResourceRegistry;
 // ctx.light_space_matrices carry the resolved values.
 class LightingPass {
 public:
+    struct CallerState {
+        GLboolean depth_test_enabled = GL_FALSE;
+        static CallerState QueryExternal();
+    };
     LightingPass();
     ~LightingPass();
 
@@ -44,7 +50,13 @@ public:
     void reset_shader();
 
     void copy_lighting_color_to_opaque_texture(const RenderContext& ctx);
-    void execute(const RenderContext& ctx);
+    // Shipping dispatch supplies known enable state; direct hosts preserve arbitrary state.
+    void execute(const RenderContext& ctx, const CallerState& caller);
+    void execute_external(const RenderContext& ctx);
+    // Preserve the existing direct-call boundary for previews and pass consumers.
+    void execute(const RenderContext& ctx) {
+        return execute_external(ctx);
+    }
 
     // full-scene lightning light-pulse + bolt overlay. A strike is a
     // deterministic SIM world event (in the `weather` world_hash sub-hash); this is
