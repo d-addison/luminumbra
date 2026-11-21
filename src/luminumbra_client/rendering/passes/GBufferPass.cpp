@@ -832,26 +832,31 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     // actually resolved so the group is keyed by what is really drawn.
     auto resolve_mesh = [&](const std::string& candidatePath,
                             const std::string& basePath) -> std::pair<Mesh*, std::string> {
-        if (m_meshCache.find(candidatePath) == m_meshCache.end()) {
+        auto candidate = m_meshCache.find(candidatePath);
+        if (candidate == m_meshCache.end()) {
             if (ctx.frozen_replay)
                 throw std::logic_error("Replay cannot change mesh residency");
             std::string full = (input.root_path / candidatePath).string();
             // Only load the LOD variant if it exists on disk; an absent.lodN.lmesh caches a
             // null and falls back to LOD0 SILENTLY (no MeshLoader "failed header" error spam).
-            m_meshCache[candidatePath] =
-                std::filesystem::exists(full) ? MeshLoader::Load(full) : nullptr;
+            candidate =
+                m_meshCache
+                    .emplace(candidatePath,
+                             std::filesystem::exists(full) ? MeshLoader::Load(full) : nullptr)
+                    .first;
         }
-        Mesh* m = m_meshCache[candidatePath].get();
+        Mesh* m = candidate->second.get();
         if (m)
             return {m, candidatePath};
         if (candidatePath != basePath) {
-            if (m_meshCache.find(basePath) == m_meshCache.end()) {
+            auto base_entry = m_meshCache.find(basePath);
+            if (base_entry == m_meshCache.end()) {
                 if (ctx.frozen_replay)
                     throw std::logic_error("Replay cannot change mesh residency");
                 std::string full = (input.root_path / basePath).string();
-                m_meshCache[basePath] = MeshLoader::Load(full);
+                base_entry = m_meshCache.emplace(basePath, MeshLoader::Load(full)).first;
             }
-            Mesh* base = m_meshCache[basePath].get();
+            Mesh* base = base_entry->second.get();
             if (base)
                 return {base, basePath};
         }
@@ -1340,13 +1345,16 @@ void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
         auto const& mesh_info = view.get<const Components::SkinnedMeshComponent>(entity);
         auto const& player = view.get<const anim::AnimationPlayerComponent>(entity);
 
-        if (m_skinnedMeshCache.find(mesh_info.meshPath) == m_skinnedMeshCache.end()) {
+        auto mesh_entry = m_skinnedMeshCache.find(mesh_info.meshPath);
+        if (mesh_entry == m_skinnedMeshCache.end()) {
             if (ctx.frozen_replay)
                 throw std::logic_error("Replay cannot change skinned residency");
             std::string full_mesh_path = (input.root_path / mesh_info.meshPath).string();
-            m_skinnedMeshCache[mesh_info.meshPath] = MeshLoader::LoadSkinned(full_mesh_path);
+            mesh_entry = m_skinnedMeshCache
+                             .emplace(mesh_info.meshPath, MeshLoader::LoadSkinned(full_mesh_path))
+                             .first;
         }
-        Mesh* mesh = m_skinnedMeshCache[mesh_info.meshPath].get();
+        Mesh* mesh = mesh_entry->second.get();
         if (!mesh || mesh->jointCount == 0)
             continue;
 

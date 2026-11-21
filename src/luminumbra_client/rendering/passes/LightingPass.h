@@ -67,6 +67,8 @@ public:
     }
 
 private:
+    struct UniformNames;
+    std::unique_ptr<UniformNames> m_uniform_names;
     FrameBufferObject m_lighting_fbo;
     u32 m_environment_brdf = 0; // registry-owned; independent of framebuffer size
     std::unique_ptr<Shader> m_lighting_shader;
