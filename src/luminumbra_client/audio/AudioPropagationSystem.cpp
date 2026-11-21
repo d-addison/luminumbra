@@ -1,6 +1,7 @@
 #include "AudioPropagationSystem.h"
 #include "core/Log.h"
 #include "core/Profiler.h"
+#include "luminumbra_common/core/IntegerPrimitives.h"
 #include <algorithm>
 #include <bit>
 #include <chrono>
@@ -445,10 +446,11 @@ AudioPropagationSystem::PropagationCache::MakeKey(const glm::vec3& source,
 
 size_t AudioPropagationSystem::PropagationCache::KeyHash::operator()(const Key& key) const {
     // FNV-1a over eight 32-bit inputs followed by the 64-bit generation, low byte first.
-    uint64_t hash = 14695981039346656037ULL;
+    uint64_t hash = Core::kFnv1a64StandardBasis;
     const auto fold = [&hash](uint64_t value, unsigned int bytes) {
         for (unsigned int byte = 0; byte < bytes; ++byte) {
-            hash = (hash ^ (value & 0xffU)) * 1099511628211ULL;
+            const auto octet = static_cast<unsigned char>(value & 0xffU);
+            hash = Core::Fnv1a64(&octet, 1, hash);
             value >>= 8;
         }
     };

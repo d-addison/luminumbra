@@ -2,6 +2,7 @@
 
 #include "luminumbra_common/core/CaptureContentPaths.h"
 #include "luminumbra_common/core/GraphicsPresets.h"
+#include "luminumbra_common/core/IntegerPrimitives.h"
 #include "luminumbra_common/core/SystemConfig.h"
 
 #include <algorithm>
@@ -55,9 +56,7 @@ inline std::uintmax_t append_content_digest(std::istream& input, std::uint64_t& 
         if (count > std::numeric_limits<std::uintmax_t>::max() - bytes)
             throw std::runtime_error("workload content size overflow");
         bytes += count;
-        for (std::streamsize index = 0; index < input.gcount(); ++index)
-            hash = (hash ^ static_cast<unsigned char>(buffer[static_cast<std::size_t>(index)])) *
-                   1099511628211ull;
+        hash = Core::Fnv1a64(buffer.data(), static_cast<std::size_t>(input.gcount()), hash);
     } while (input);
     if (!input.eof() || input.bad())
         throw std::runtime_error("cannot read workload content");
@@ -73,7 +72,7 @@ inline std::string content_digest_hex(std::uint64_t hash) {
 }
 
 inline std::string content_digest(std::istream& input) {
-    std::uint64_t hash = 14695981039346656037ull;
+    std::uint64_t hash = Core::kFnv1a64StandardBasis;
     append_content_digest(input, hash);
     return content_digest_hex(hash);
 }
@@ -82,7 +81,7 @@ inline std::string content_digest(std::istream& input) {
 using SavedFileInput = Filesystem::VerifiedFileInput;
 
 inline std::string content_digest(SavedFileInput& input) {
-    std::uint64_t hash = 14695981039346656037ull;
+    std::uint64_t hash = Core::kFnv1a64StandardBasis;
     std::uint64_t consumed = 0;
     std::array<char, 65536> buffer{}; // At most 64 KiB of asset bytes in memory.
     for (;;) {
@@ -92,8 +91,7 @@ inline std::string content_digest(SavedFileInput& input) {
         if (count > input.size() - consumed)
             throw std::runtime_error("workload content changed while reading");
         consumed += count;
-        for (std::size_t index = 0; index < count; ++index)
-            hash = (hash ^ static_cast<unsigned char>(buffer[index])) * 1099511628211ull;
+        hash = Core::Fnv1a64(buffer.data(), count, hash);
     }
     if (consumed != input.size())
         throw std::runtime_error("workload content changed while reading");
@@ -167,7 +165,7 @@ inline std::string read_saved_world(const std::filesystem::path& directory,
             throw std::runtime_error("unsupported workload save file");
     }
     std::sort(paths.begin(), paths.end());
-    std::uint64_t hash = 14695981039346656037ull;
+    std::uint64_t hash = Core::kFnv1a64StandardBasis;
     constexpr std::uint64_t max_bytes = 512ull * 1024 * 1024;
     std::uint64_t total = 0;
     for (const auto& relative : paths) {
@@ -196,8 +194,7 @@ inline std::string read_saved_world(const std::filesystem::path& directory,
             if (count > size - consumed)
                 throw std::runtime_error("workload save changed while reading");
             consumed += count;
-            for (std::size_t index = 0; index < count; ++index)
-                hash = (hash ^ static_cast<unsigned char>(buffer[index])) * 1099511628211ull;
+            hash = Core::Fnv1a64(buffer.data(), count, hash);
             if (snapshot)
                 bytes.append(buffer.data(), count);
         }
@@ -490,13 +487,12 @@ inline nlohmann::json content_after_settings_save(const nlohmann::json& before,
 // Mirrors render_contract.render_identity. Called only at report boundaries.
 inline std::string render_identity(const nlohmann::json& settings) {
     static_assert(sizeof(double) == 8 && std::numeric_limits<double>::is_iec559);
-    std::uint64_t hash = 14695981039346656037ull;
+    std::uint64_t hash = Core::kFnv1a64StandardBasis;
     const auto byte = [&](unsigned char value) {
-        hash = (hash ^ value) * 1099511628211ull;
+        hash = Core::Fnv1a64(&value, 1, hash);
     };
     const auto text = [&](std::string_view value) {
-        for (const char item : value)
-            byte(static_cast<unsigned char>(item));
+        hash = Core::Fnv1a64(value.data(), value.size(), hash);
     };
     const auto visit = [&](const auto& self, const nlohmann::json& value) -> void {
         if (value.is_object()) {
