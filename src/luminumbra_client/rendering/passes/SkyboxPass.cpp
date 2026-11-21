@@ -206,6 +206,7 @@ SkyboxPass::CallerState SkyboxPass::CallerState::QueryExternal() {
 void SkyboxPass::execute_external(const RenderContext& ctx,
                                   const Camera& camera,
                                   bool draw_weather_overlay) {
+    LUMIN_PROFILE_ZONE_N("GL SkyboxPass.execute_external");
     return execute(ctx, camera, draw_weather_overlay, CallerState::QueryExternal());
 }
 

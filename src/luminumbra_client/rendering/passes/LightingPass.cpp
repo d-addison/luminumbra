@@ -340,6 +340,7 @@ LightingPass::CallerState LightingPass::CallerState::QueryExternal() {
 }
 
 void LightingPass::execute_external(const RenderContext& ctx) {
+    LUMIN_PROFILE_ZONE_N("GL LightingPass.execute_external");
     return execute(ctx, CallerState::QueryExternal());
 }
 

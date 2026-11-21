@@ -1945,6 +1945,7 @@ FoliagePass::CallerState FoliagePass::CallerState::QueryExternal() {
 }
 
 std::size_t FoliagePass::execute_external(const RenderContext& ctx, const Camera& camera) {
+    LUMIN_PROFILE_ZONE_N("GL FoliagePass.execute_external");
     return execute(ctx, camera, CallerState::QueryExternal());
 }
 
