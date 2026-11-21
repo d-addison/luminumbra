@@ -1,0 +1,122 @@
+{
+  "groups": {
+    "double-lookup-after-find": [
+      {
+        "files": [
+          "src/**/*.cpp",
+          "src/**/*.h"
+        ],
+        "frequency": "frame",
+        "symbols": [
+          "*"
+        ]
+      }
+    ],
+    "hot-draw-file-load": [
+      {
+        "files": [
+          "src/luminumbra_client/rendering/passes/*.cpp",
+          "src/luminumbra_client/rendering/passes/*.h"
+        ],
+        "frequency": "frame",
+        "symbols": [
+          "*Pass::execute*",
+          "GBufferPass::geometry_pass_*"
+        ]
+      },
+      {
+        "files": [
+          "src/luminumbra_client/rendering/passes/FinalBlitPass.h"
+        ],
+        "frequency": "frame",
+        "symbols": [
+          "FinalBlitPass::execute"
+        ]
+      }
+    ],
+    "hot-gl-query": [
+      {
+        "files": [
+          "src/luminumbra_client/rendering/passes/*.cpp",
+          "src/luminumbra_client/rendering/passes/*.h"
+        ],
+        "frequency": "frame",
+        "symbols": [
+          "AerialPass::execute*",
+          "DebugViewPass::execute*",
+          "FoliagePass::execute*",
+          "GBufferPass::execute*",
+          "GlassOitPass::execute*",
+          "GodRaysPass::execute*",
+          "GroundDecalPass::execute*",
+          "LightingPass::execute*",
+          "LuminanceMeterPass::execute*",
+          "ParticlePass::execute*",
+          "PlantProcgenPass::execute*",
+          "ShadowPass::execute*",
+          "SkyboxPass::execute*",
+          "SsaoPass::execute*",
+          "TaauPass::execute*",
+          "WaterPass::execute*",
+          "WaterfallPass::execute*",
+          "FroxelPass::execute*",
+          "*Pass::execute*"
+        ]
+      },
+      {
+        "files": [
+          "src/luminumbra_client/rendering/passes/FinalBlitPass.h"
+        ],
+        "frequency": "frame",
+        "symbols": [
+          "FinalBlitPass::execute"
+        ]
+      },
+      {
+        "files": [
+          "src/luminumbra_client/rendering/RenderPipeline.cpp"
+        ],
+        "frequency": "frame",
+        "symbols": [
+          "RenderPipeline::render_frame",
+          "RenderPipeline::prepare_frame",
+          "RenderPipeline::dispatch_stages",
+          "RenderPipeline::execute_stage_*",
+          "RenderPipeline::collect_gpu_pass_timers",
+          "RenderPipeline::finish_gpu_pass_timer_frame"
+        ]
+      },
+      {
+        "files": [
+          "src/luminumbra_client/ui/gl3/RmlUi_Renderer_GL3.cpp"
+        ],
+        "frequency": "frame",
+        "symbols": [
+          "RenderInterface_GL3::BeginFrame"
+        ]
+      }
+    ],
+    "owner-blocking-wait": [
+      {
+        "files": [
+          "src/luminumbra_common/world/GameSession.cpp"
+        ],
+        "frequency": "owner",
+        "symbols": [
+          "GameSession::SaveWorldStateToImpl",
+          "GameSession::RunRegionScheduler"
+        ]
+      },
+      {
+        "files": [
+          "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp"
+        ],
+        "frequency": "owner",
+        "symbols": [
+          "SHIELD_WorldSystem::read_committed_chunk"
+        ]
+      }
+    ]
+  },
+  "schema": 1
+}

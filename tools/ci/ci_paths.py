@@ -39,6 +39,7 @@ PYTHON_TESTS = (
     "tools/ci/test_replay_workspace.py",
     "test/rendering/test_upload_budget_wiring.py",
     "tools/ci/test_ci_paths.py",
+    "tools/ci/test_ratchet.py",
     "tools/ci/test_asan_shards.py",
     "tools/ci/test_ctest_shards.py",
     "tools/ci/test_workflow_policy.py",
@@ -103,6 +104,7 @@ PYTHON_MODULES = {
     "tools/ci/rmlui_source.py",
     "tools/ci/check_acceptance_matrix.py",
     "tools/ci/ci_paths.py", "tools/ci/ci_shell.py", "tools/ci/check_docs.py",
+    "tools/ci/ratchet.py",
     "tools/ci/changed_tus.py", "tools/ci/offline_deps.py", "tools/ci/path_safety.py",
     "tools/ci/check_ctest_junit.py", "tools/ci/slowest_tests.py",
     "tools/ci/validate_performance_measurement.py",
@@ -257,7 +259,11 @@ RMLUI_CALLER_INPUTS = frozenset({
 def needs_python(path: str) -> bool:
     # Standalone Python suites validate workflow and CI configuration files,
     # so CI infrastructure changes run the Python plan as well as native lanes.
-    return (path.endswith(".py") or path.startswith(CI_PREFIXES) or path in RMLUI_CALLER_INPUTS
+    # The source ratchet scans src/**/*.cpp and src/**/*.h. Keep additions and
+    # deletions in those scopes on the Python lane, including unknown owners.
+    source_ratchet = (path.startswith("src/") and len(PurePosixPath(path).parts) > 2
+                      and PurePosixPath(path).suffix in {".cpp", ".h"})
+    return (source_ratchet or path.endswith(".py") or path.startswith(CI_PREFIXES) or path in RMLUI_CALLER_INPUTS
             or path in {"res/shaders/g_buffer.frag",
                         "src/luminumbra_common/world/MarchingCubes.cpp",
                         "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp"}
