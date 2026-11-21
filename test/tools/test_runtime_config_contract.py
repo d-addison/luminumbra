@@ -1086,8 +1086,12 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         world = compact_cpp((ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
                             .read_text(encoding="utf-8"))
         read = cpp_block(world, "SHIELD_WorldSystem::read_committed_chunk(")
-        self.assertIn("RunWorkerBoundary(m_job_system,[&]{"
-                      "chunk=m_durable_chunk_loader(coords);});", read)
+        self.assertEqual(read.count("RunWorkerBoundary("), 1)
+        worker = cpp_block(read, "RunWorkerBoundary(m_job_system,[&]")
+        self.assertIn("chunk=m_durable_chunk_loader(coords);", worker)
+        self.assertLess(worker.index("chunk->get_coords()!=coords"),
+                        worker.index("if(prepare_water)"))
+        self.assertIn("ComputeHighWaterSeedInputs(*inputs,coords,*this);", worker)
         self.assertLess(read.index("RunWorkerBoundary("),
                         read.index("m_durable_chunk_fault(error.what())"))
         helper = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorkerBoundary.h")

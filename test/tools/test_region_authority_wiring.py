@@ -597,7 +597,7 @@ class RegionAuthorityWiring(unittest.TestCase):
         worker = dispatch.split("lane_jobs.emplace_back(", 1)[1]
         # Strong owners hold both the destination and immutable input until the
         # job exits. No mutable live arrays or revisions may be read by workers.
-        self.assertIn("[this, chunk, scratch_owner = std::move(scratch_owner), step, transition_faces, terrain_mesh_required]", worker)
+        self.assertIn("[this, chunk, seed_inputs, scratch_owner = std::move(scratch_owner), step, transition_faces, terrain_mesh_required]", worker)
         for live_read in ("chunk->sdf_data", "chunk->heightmap_data", "chunk->material_data",
                           "chunk->water_level_data", "chunk->water_depth_mm",
                           "chunk->voxel_revision()", "chunk->authority_hash_revision()",
