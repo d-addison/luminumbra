@@ -2116,6 +2116,54 @@ class FrameAttributionWiring(unittest.TestCase):
                      "ReadinessRequiresPublishedSupportedAndMatchingResolution"):
             self.assertIn("TEST(WaterSeedInputs, " + name + ")", native)
 
+    def test_existing_worker_seed_coverage_keeps_dispatch_and_publication_boundaries(self):
+        world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        mesh_source = block(world, "SHIELD_WorldSystem::dispatch_meshing_jobs(")
+        mesh = compact(mesh_source)
+        request = "const auto seed_inputs = request_water_seed_inputs(*chunk);"
+        self.assertIn(request, mesh)
+        self.assertLess(mesh.index("mesh_batch.chunks.push_back("), mesh.index(request))
+        self.assertLess(mesh.index(request), mesh.index("lane_jobs.emplace_back("))
+        worker = compact(block(mesh_source, "lane_jobs.emplace_back("))
+        compute = "ComputeHighWaterSeedInputs(*seed_inputs, scratch.get_coords(), *this);"
+        self.assertIn(compute, worker)
+        self.assertLess(worker.index("acquire_worldgen_sample_scope()"), worker.index(compute))
+        self.assertNotIn("request_water_seed_inputs", worker)
+        self.assertNotIn("seed_chunk_water", worker)
+        reader_source = block(world, "SHIELD_WorldSystem::read_committed_chunk(")
+        reader = compact(reader_source)
+        self.assertEqual(reader.count("RunWorkerBoundary("), 1)
+        worker_source = block(reader_source, "RunWorkerBoundary(")
+        worker = compact(worker_source)
+        self.assertLess(worker.index("chunk->get_coords() != coords"),
+                        worker.index("if (prepare_water)"))
+        preparation = compact(block(worker_source, "if (prepare_water)"))
+        self.assertLess(preparation.index("stage_water_seed_inputs({})"),
+                        preparation.index("request_water_seed_inputs(*chunk)"))
+        self.assertIn("ComputeHighWaterSeedInputs(*inputs, coords, *this);", preparation)
+        restore = compact(block(world, "bool SHIELD_WorldSystem::restore_authoritative_chunk("))
+        self.assertIn("read_committed_chunk(coords, true)", restore)
+        self.assertLess(restore.index("take_water_seed_inputs()"),
+                        restore.index("adopt_streamed_chunk(chunk)"))
+        self.assertLess(restore.index("adopt_streamed_chunk(chunk)"),
+                        restore.index("stage_water_seed_inputs(std::move(seed_inputs))"))
+        adoption = compact(block(world, "bool SHIELD_WorldSystem::adopt_streamed_chunk("))
+        self.assertIn("chunk->stage_water_seed_inputs({});", adoption)
+        # Hash/collision/admission inspection keeps the non-preparing default.
+        self.assertEqual(world.count("read_committed_chunk(coords, true)"), 1)
+        native = read(ROOT / "test/common/WaterSeedInputs_test.cpp")
+        for name in ("ExistingMeshWorkersPrepareEditRestoreCrossingAndGenerationKeys",
+                     "ExistingCommittedReadWorkerPreparesColdRestoreAndHydroCrossing",
+                     "MeshPreparationRetainsReadyInputsAndReplacesInvalidRequests",
+                     "CommittedReadPreparationRespectsWaterAndPresetEligibility",
+                     "CommittedReadPreparationRefusesInvalidPayloadsBeforeSamplingOrAdoption"):
+            self.assertIn("TEST(WaterSeedInputs, " + name + ")", native)
+        consumer = compact(block(native, "void ExpectPreparedConsumption("))
+        for proof in ("precomputed_columns, 1u", "fallback_columns, 0u", "stale_columns, 0u",
+                      "std::bit_cast<std::uint32_t>", "same_water_state(*reference)",
+                      "SerializeChunkRecordPayloadJson(*reference)"):
+            self.assertIn(proof, consumer)
+
     def test_water_seed_inputs_require_supported_preset_and_matching_publication(self):
         header = read(ROOT / "src/luminumbra_common/core/WaterSeedInputs.h")
         self.assertIn("static constexpr bool supports_resolution(", header)
