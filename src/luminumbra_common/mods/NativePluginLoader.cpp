@@ -92,9 +92,9 @@ struct NativePluginLoader::State {
     std::optional<NativeFileOwner> image;
 #if defined(_WIN32)
     std::vector<NativeFileOwner> parents;
-    HMODULE module = nullptr;
+    HMODULE library = nullptr;
 #else
-    void* module = nullptr;
+    void* library = nullptr;
 #endif
     LumHostApi host{};
     LumPluginShutdownFn stop = nullptr;
@@ -103,11 +103,11 @@ struct NativePluginLoader::State {
 
     ~State() {
         shutdown();
-        if (module != nullptr) {
+        if (library != nullptr) {
 #if defined(_WIN32)
-            FreeLibrary(module);
+            FreeLibrary(library);
 #else
-            dlclose(module);
+            dlclose(library);
 #endif
         }
     }
@@ -123,9 +123,9 @@ struct NativePluginLoader::State {
     template<typename Function>
     Function symbol(const char* name) const {
 #if defined(_WIN32)
-        return std::bit_cast<Function>(GetProcAddress(module, name));
+        return std::bit_cast<Function>(GetProcAddress(library, name));
 #else
-        return reinterpret_cast<Function>(dlsym(module, name));
+        return reinterpret_cast<Function>(dlsym(library, name));
 #endif
     }
 
@@ -190,7 +190,7 @@ struct NativePluginLoader::State {
         image.emplace(input.release());
         // File sharing denies writes/deletion; locked parents keep this handle's
         // resolved spelling attached to the same image through LoadLibraryExW.
-        module = LoadLibraryExW(resolved.c_str(), nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        library = LoadLibraryExW(resolved.c_str(), nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
 #else
         NativeFileOwner snapshot(
             memfd_create("luminumbra-plugin", MFD_CLOEXEC | MFD_ALLOW_SEALING));
@@ -206,9 +206,9 @@ struct NativePluginLoader::State {
         // linker consumes exactly the verified bytes, never the input path again.
         const auto descriptor_path = "/proc/self/fd/" + std::to_string(snapshot.get());
         image.emplace(snapshot.release());
-        module = dlopen(descriptor_path.c_str(), RTLD_LOCAL | RTLD_NOW);
+        library = dlopen(descriptor_path.c_str(), RTLD_LOCAL | RTLD_NOW);
 #endif
-        return module != nullptr ? NativePluginResult::Loaded : NativePluginResult::LoadFailed;
+        return library != nullptr ? NativePluginResult::Loaded : NativePluginResult::LoadFailed;
     }
 };
 
