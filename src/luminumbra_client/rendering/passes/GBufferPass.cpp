@@ -81,6 +81,19 @@ bool UseDrawProgram(const Shader* shader, GBufferDrawStats& stats) {
     shader->use();
     return true;
 }
+
+// Queued impostor geometry is unsupported even when its program prevents submission.
+// An unavailable base stays the refused program, so it records no second draw.
+Shader* RefusedImpostorProgram(Shader* base, GBufferDiagnosticCapture* capture) {
+    if (!capture) {
+        return base;
+    }
+    capture->unsupported("tree_impostor_fragment_output_unavailable", 3);
+    if (base && base->IsValid()) {
+        return capture->variant(base, false, {}, true);
+    }
+    return base;
+}
 } // namespace
 
 void GBufferPass::register_cached_mesh(const std::string& key, std::unique_ptr<Mesh> mesh) {
@@ -1188,15 +1201,7 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     // for the whole far field (the draw-call/triangle collapse the forest_perf_budget gate
     // targets).
     if (impostorsOn && !impostorInstances.empty()) {
-        Shader* impostor_program = m_tree_impostor_shader.get();
-        // Queued geometry is unsupported even when its program prevents submission.
-        if (capture) {
-            capture->unsupported("tree_impostor_fragment_output_unavailable", 3);
-            // An unavailable base stays the refused program, so it records no second draw.
-            if (impostor_program && impostor_program->IsValid()) {
-                impostor_program = capture->variant(impostor_program, false, {}, true);
-            }
-        }
+        Shader* impostor_program = RefusedImpostorProgram(m_tree_impostor_shader.get(), capture);
         DebugViewPass::unsupported_surface();
         if (!UseDrawProgram(impostor_program, stats)) {
             return;

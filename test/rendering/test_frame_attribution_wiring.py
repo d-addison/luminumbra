@@ -3514,14 +3514,14 @@ class DeferredDiagnosticLeaseWiring(unittest.TestCase):
     def test_queued_impostor_is_invalidated_before_program_refusal(self):
         static = block(self.passes, "void GBufferPass::geometry_pass_static_meshes(")
         queued = block(static, "if (impostorsOn && !impostorInstances.empty())")
-        record = queued.index('capture->unsupported("tree_impostor_fragment_output_unavailable", 3)')
-        self.assertLess(record, queued.index("if (!UseDrawProgram("))
+        select = queued.index("RefusedImpostorProgram(m_tree_impostor_shader.get(), capture)")
+        self.assertLess(select, queued.index("if (!UseDrawProgram("))
         self.assertIn("return;", block(queued, "if (!UseDrawProgram("))
-        self.assertIn('capture->unsupported("tree_impostor_fragment_output_unavailable", 3)',
-                      block(queued, "if (capture)"))
-        self.assertIn("impostor_program = capture->variant(impostor_program, false, {}, true)",
-                      block(queued, "if (capture)"))
-        self.assertLess(queued.index("capture->variant("), queued.index("UseDrawProgram("))
+        helper = block(self.passes, "Shader* RefusedImpostorProgram(")
+        record = helper.index('capture->unsupported("tree_impostor_fragment_output_unavailable", 3)')
+        self.assertLess(helper.index("if (!capture)"), record)
+        self.assertIn("if (base && base->IsValid())", helper)
+        self.assertLess(record, helper.index("return capture->variant(base, false, {}, true)"))
         self.assertIn("UseDrawProgram(impostor_program, stats)", queued)
         uniforms = queued[queued.index("UseDrawProgram("):]
         self.assertIn('impostor_program->setMat4("u_proj", static_proj)', uniforms)
