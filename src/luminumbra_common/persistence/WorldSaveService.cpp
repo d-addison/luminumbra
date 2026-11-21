@@ -18,6 +18,7 @@
 #include "core/CaptureContentPaths.h"
 #include "core/FilesystemPath.h"
 #include "core/Log.h"
+#include "core/NativeFileOwner.h"
 #include "luminumbra/core/Types.h"
 #include "world/ActiveRegionLedger.h"
 #include "world/Chunk.h"
@@ -216,8 +217,10 @@ SavedInputFile::SavedInputFile(const std::filesystem::path& path, LeafSymlinks l
 #endif
 
 #if defined(_WIN32)
+    Filesystem::NativeFileOwner opened_file(m_handle);
     const bool opened = m_handle != INVALID_HANDLE_VALUE;
 #else
+    Filesystem::NativeFileOwner opened_file(m_descriptor);
     const bool opened = m_descriptor >= 0;
 #endif
     if (!opened && m_missing && leaf_symlinks == LeafSymlinks::Refuse)
@@ -231,6 +234,7 @@ SavedInputFile::SavedInputFile(const std::filesystem::path& path, LeafSymlinks l
         if (leaf_symlinks == LeafSymlinks::Refuse)
             m_location_admitted = is_within_save_root();
     }
+    opened_file.release(); // The completed reader now owns the native file.
 }
 
 SavedInputFile::~SavedInputFile() {
@@ -262,22 +266,13 @@ std::shared_ptr<const void> SavedInputFile::retain_identity() const {
     if (!identity(checked))
         return {};
 #if defined(_WIN32)
-    const auto retained = CreatedWorldArtifacts::retain_file_identity(m_handle);
-    return std::shared_ptr<const void>(new HANDLE(retained), [](const void* pointer) {
-        const auto* handle = static_cast<const HANDLE*>(pointer);
-        ::CloseHandle(*handle);
-        delete handle;
-    });
+    Filesystem::NativeFileOwner retained(CreatedWorldArtifacts::retain_file_identity(m_handle));
 #else
-    const auto retained = ::fcntl(m_descriptor, F_DUPFD_CLOEXEC, 0);
-    if (retained < 0)
+    Filesystem::NativeFileOwner retained(::fcntl(m_descriptor, F_DUPFD_CLOEXEC, 0));
+    if (retained.get() < 0)
         return {};
-    return std::shared_ptr<const void>(new int(retained), [](const void* pointer) {
-        const auto* descriptor = static_cast<const int*>(pointer);
-        ::close(*descriptor);
-        delete descriptor;
-    });
 #endif
+    return std::make_shared<Filesystem::NativeFileOwner>(std::move(retained));
 }
 
 namespace {
@@ -7773,17 +7768,18 @@ struct ReplayPairReadGuard::State {
         const auto name =
             L"Global\\Luminumbra.ReplayPair." + std::to_wstring(info.dwVolumeSerialNumber) + L"." +
             std::to_wstring(info.nFileIndexHigh) + L"." + std::to_wstring(info.nFileIndexLow);
-        handle = ::CreateMutexW(nullptr, FALSE, name.c_str());
-        if (!handle)
+        handle.emplace(::CreateMutexW(nullptr, FALSE, name.c_str()));
+        if (!handle->get())
             return;
-        const auto acquired = ::WaitForSingleObject(handle, 0);
+        const auto acquired = ::WaitForSingleObject(handle->get(), 0);
         locked = acquired == WAIT_OBJECT_0 || acquired == WAIT_ABANDONED;
         if (!locked)
             return;
 #else
         // Lock the existing directory, so playback also works on read-only
         // media and there is no removable lock-file name to substitute.
-        descriptor = ::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        directory_file.emplace(::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+        const int descriptor = directory_file->get();
         struct stat info {};
         if (descriptor < 0 || ::fstat(descriptor, &info) != 0 || !S_ISDIR(info.st_mode))
             return;
@@ -7800,23 +7796,18 @@ struct ReplayPairReadGuard::State {
     }
     ~State() {
 #if defined(_WIN32)
-        if (locked)
-            ::ReleaseMutex(handle);
-        if (handle)
-            ::CloseHandle(handle);
-#else
-        if (descriptor >= 0)
-            ::close(descriptor);
+        if (handle && locked)
+            ::ReleaseMutex(handle->get());
 #endif
     }
     std::unique_ptr<PairDirectoryLock> thread_lock;
     std::filesystem::path directory;
     bool ready = false;
 #if defined(_WIN32)
-    HANDLE handle = nullptr;
+    std::optional<Filesystem::NativeFileOwner> handle;
     bool locked = false;
 #else
-    int descriptor = -1;
+    std::optional<Filesystem::NativeFileOwner> directory_file;
 #endif
 };
 
