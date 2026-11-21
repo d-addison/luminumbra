@@ -102,6 +102,96 @@ private:
     bool initialized_ = false;
     GLFWwindow* window_ = nullptr;
 };
+void CheckShadowFootprintPositionValidity(Shader& shader,
+                                          bool ladder,
+                                          const std::array<GLuint, 9>& textures) {
+    const auto draw = [&](int mode) {
+        shader.setVec4("u_cascadeSplits", glm::vec4(1, 2, 3, 4));
+        shader.setInt("u_contributionMode", mode);
+        AttributedGl::Submit(glDrawArrays, static_cast<GLenum>(GL_TRIANGLE_STRIP), 0, 4);
+        glReadBuffer(GL_COLOR_ATTACHMENT1);
+        std::array<float, 16> result{};
+        glReadPixels(0, 0, 2, 2, GL_RGBA, GL_FLOAT, result.data());
+        return result;
+    };
+    constexpr std::array<float, 4> regular = {0.5f, 1, 0, 0};
+    glClearTexImage(textures[3], 0, GL_RGBA, GL_FLOAT, regular.data());
+    glm::mat4 footprint_light(1);
+    footprint_light[2][2] = 0;
+    shader.setMat4("u_lightSpaceMatrices[0]", footprint_light);
+    // All 16 validity masks cover single invalid lanes (including diagonals),
+    // rows, columns, mixed lanes, an empty quad and the fully valid control.
+    // Both position backends reject cleared/nonfinite storage; Ladder also
+    // rejects cleared depth even when the stored position still looks valid.
+    const int invalid_kinds = ladder ? 4 : 3;
+    for (int invalid_kind = 0; invalid_kind < invalid_kinds; ++invalid_kind) {
+        for (unsigned int valid_mask = 0; valid_mask < 16; ++valid_mask) {
+            SCOPED_TRACE(::testing::Message() << (ladder) << invalid_kind << valid_mask);
+            std::array<float, 16> positions{};
+            std::array<float, 16> depths{};
+            for (std::size_t pixel = 0; pixel < 4; ++pixel) {
+                positions[4 * pixel] = 0.02f * static_cast<float>(pixel % 2);
+                positions[4 * pixel + 1] = 0.02f * static_cast<float>(pixel / 2);
+                positions[4 * pixel + 2] = -1;
+                positions[4 * pixel + 3] = 1;
+                depths[4 * pixel] = 0.5f;
+                if ((valid_mask & (1U << pixel)) == 0) {
+                    if (invalid_kind == 3) {
+                        depths[4 * pixel] = 0;
+                    } else {
+                        const float invalid =
+                            invalid_kind == 0
+                                ? 0.0f
+                                : (invalid_kind == 1 ? std::numeric_limits<float>::quiet_NaN()
+                                                     : std::numeric_limits<float>::infinity());
+                        positions[4 * pixel] = invalid;
+                        positions[4 * pixel + 1] = invalid;
+                        positions[4 * pixel + 2] = invalid;
+                    }
+                }
+            }
+            glTextureSubImage2D(textures[0], 0, 0, 0, 2, 2, GL_RGBA, GL_FLOAT, positions.data());
+            glTextureSubImage2D(textures[4], 0, 0, 0, 2, 2, GL_RGBA, GL_FLOAT, depths.data());
+            const auto footprint = draw(Pass::ShadowFootprint);
+            const auto cascades = draw(Pass::ShadowCascade);
+            // Frustum status must not overwrite an invalid-quad sentinel.
+            footprint_light[3][0] = 10;
+            shader.setMat4("u_lightSpaceMatrices[0]", footprint_light);
+            const auto outside = draw(Pass::ShadowFootprint);
+            footprint_light[3][0] = 0;
+            shader.setMat4("u_lightSpaceMatrices[0]", footprint_light);
+            for (std::size_t pixel = 0; pixel < 4; ++pixel) {
+                if ((valid_mask & (1U << pixel)) != 0) {
+                    const float outside_sentinel = valid_mask == 15 ? -1.0f : -2.0f;
+                    EXPECT_EQ((std::array<float, 4>{outside[4 * pixel],
+                                                    outside[4 * pixel + 1],
+                                                    outside[4 * pixel + 2],
+                                                    outside[4 * pixel + 3]}),
+                              (std::array<float, 4>{
+                                  outside_sentinel, outside_sentinel, outside_sentinel, 1}));
+                    EXPECT_FLOAT_EQ(footprint[4 * pixel + 3], 1);
+                    EXPECT_FLOAT_EQ(cascades[4 * pixel], 0);
+                    if (valid_mask == 15) {
+                        EXPECT_TRUE(std::isfinite(footprint[4 * pixel + 2]));
+                        EXPECT_GE(footprint[4 * pixel], 0);
+                        EXPECT_GE(footprint[4 * pixel + 1], 0);
+                    } else {
+                        EXPECT_EQ((std::array<float, 3>{footprint[4 * pixel],
+                                                        footprint[4 * pixel + 1],
+                                                        footprint[4 * pixel + 2]}),
+                                  (std::array<float, 3>{-2, -2, -2}));
+                    }
+                }
+            }
+            if (valid_mask == 0 && (invalid_kind == 0 || invalid_kind == 3)) {
+                for (std::size_t pixel = 0; pixel < 4; ++pixel) {
+                    EXPECT_FLOAT_EQ(footprint[4 * pixel + 3], 0);
+                }
+            }
+        }
+    }
+}
+
 } // namespace
 
 TEST(DiagnosticContributions, CatalogueLegendsAndCycleCoverEveryNamedTermAndUnsupportedPlane) {
@@ -109,7 +199,7 @@ TEST(DiagnosticContributions, CatalogueLegendsAndCycleCoverEveryNamedTermAndUnsu
     control = {};
     control.enabled = true;
     int legacy = Pass::Position;
-    for (int mode = Pass::DrawId; mode <= Pass::Wireframe; ++mode) {
+    for (int mode = Pass::DrawId; mode <= Pass::Overdraw; ++mode) {
         Pass::cycle_mode(legacy);
         EXPECT_EQ(control.view, mode);
         EXPECT_EQ(legacy, Pass::None);
@@ -962,6 +1052,7 @@ TEST_F(DiagnosticContributionsGl, ShadowFootprintStaysLocalAcrossSplitQuadsAndBy
                 }
             }
         }
+        CheckShadowFootprintPositionValidity(*variant, variant == &ladder, textures);
     }
     EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
     glDeleteBuffers(1, &vbo);
@@ -1292,6 +1383,158 @@ TEST(DiagnosticContributions,
 }
 
 template<typename Draw>
+void CheckOverdrawReplay(const Draw& draw,
+                         Shader& normal,
+                         bool& uv_case,
+                         Pass& pass,
+                         RenderContext& ctx,
+                         const GBuffer& gbuffer,
+                         GLuint fbo,
+                         GLuint vao,
+                         GLuint vbo,
+                         GLuint composite,
+                         GLuint opaque_depth,
+                         const std::array<GLuint, 7>& outputs,
+                         const std::array<GLuint, 2>& arrays,
+                         const std::array<std::array<float, 4>, 2>& samples,
+                         const std::array<float, 9>& triangle) {
+    auto& control = Pass::controls();
+    // N overlapping opaque quads: left half 0, right half N, including both sides
+    // of the fixed cap. Every quad lies behind production depth and must still count.
+    constexpr std::array<float, 18> quad = {
+        0, -1, -0.5f, 1, -1, -0.5f, 1, 1, -0.5f, 0, -1, -0.5f, 1, 1, -0.5f, 0, 1, -0.5f};
+    std::array<std::array<std::uint32_t, 256>, 6> production_bytes{};
+    for (std::size_t index = 0; index < production_bytes.size(); ++index) {
+        glGetTextureImage(outputs[index],
+                          0,
+                          GL_RGBA,
+                          GL_FLOAT,
+                          sizeof(production_bytes[index]),
+                          production_bytes[index].data());
+    }
+    control.view = Pass::Overdraw;
+    EXPECT_FALSE(pass.begin_frame(ctx)); // Establish the extent before selecting a pixel.
+    for (int overlap = 0; overlap <= 17; ++overlap) {
+        SCOPED_TRACE(overlap);
+        glBindFramebuffer(GL_FRAMEBUFFER, composite);
+        glDrawBuffer(GL_COLOR_ATTACHMENT0);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        control.result = "Previous identity result";
+        control.inspector_open = false;
+        pass.execute(ctx);
+        EXPECT_TRUE(control.result.empty());
+        EXPECT_FALSE(control.inspect_requested);
+        control.inspector_open = true;
+        control.x = 4;
+        control.y = 0;
+        Pass::request_inspection(control);
+        ASSERT_TRUE(control.inspect_requested);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(triangle), triangle.data(), GL_STATIC_DRAW);
+        EXPECT_FALSE(pass.begin_frame(ctx));
+        EXPECT_TRUE(control.inspect_requested); // Replay must leave the live count for execute.
+        GLuint count_texture = 0;
+        {
+            Pass::SurfaceFrame frame(ctx, gbuffer, true);
+            ASSERT_TRUE(frame.ready());
+            auto* variant = Pass::surface_variant(&normal, false);
+            ASSERT_NE(variant, &normal);
+            // Configure the production material path, then discard this setup draw's count.
+            draw(*variant, Pass::Overdraw, 0);
+            GLint attached = 0;
+            glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,
+                                                  GL_COLOR_ATTACHMENT6,
+                                                  GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,
+                                                  &attached);
+            count_texture = static_cast<GLuint>(attached);
+            glClearTexImage(count_texture, 0, GL_RGBA, GL_FLOAT, nullptr);
+            // Overdraw follows the same production material discard as the wire mask.
+            uv_case = true;
+            const std::array<float, 4> transparent = {0.4f, 0.5f, 0.6f, 0};
+            for (int level = 0; level < 7; ++level) {
+                glClearTexImage(arrays[0], level, GL_RGBA, GL_FLOAT, transparent.data());
+            }
+            variant->setInt("u_alphaTest", 3);
+            EXPECT_FLOAT_EQ(draw(*variant, Pass::Overdraw, 0)[6][0], 0);
+            variant->setInt("u_alphaTest", 0);
+            uv_case = false;
+            for (int level = 0; level < 7; ++level) {
+                glClearTexImage(arrays[0], level, GL_RGBA, GL_FLOAT, samples[0].data());
+            }
+            draw(*variant, Pass::Overdraw, 0);
+            glClearTexImage(count_texture, 0, GL_RGBA, GL_FLOAT, nullptr);
+            glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad.data(), GL_STATIC_DRAW);
+            for (int layer = 0; layer < overlap; ++layer) {
+                AttributedGl::Submit(glDrawArrays, static_cast<GLenum>(GL_TRIANGLES), 0, 6);
+            }
+        }
+        std::array<std::array<float, 4>, 64> counts{};
+        glGetTextureImage(count_texture, 0, GL_RGBA, GL_FLOAT, sizeof(counts), counts.data());
+        for (std::size_t index = 0; index < counts.size(); ++index) {
+            EXPECT_FLOAT_EQ(counts[index][0], index % 8 < 4 ? 0.0f : static_cast<float>(overlap));
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, composite);
+        glDrawBuffer(GL_COLOR_ATTACHMENT0);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        pass.execute(ctx);
+        EXPECT_EQ(control.result,
+                  overlap >= 16 ? "Overdraw count >=16 (saturated); depth test OFF"
+                                : "Overdraw count " + std::to_string(overlap) + "; depth test OFF");
+        const auto sampled_result = control.result;
+        EXPECT_FALSE(control.inspect_requested);
+        pass.execute(ctx);
+        EXPECT_EQ(control.result, sampled_result); // Remains readable on subsequent UI frames.
+        std::array<std::array<float, 4>, 64> display{};
+        glReadPixels(0, 0, 8, 8, GL_RGBA, GL_FLOAT, display.data());
+        for (std::size_t index = 0; index < display.size(); ++index) {
+            if (index % 8 < 4 || overlap == 0) {
+                EXPECT_EQ(display[index], (std::array<float, 4>{0, 0, 0, 1}));
+            } else if (overlap >= 16) {
+                EXPECT_EQ(display[index], (std::array<float, 4>{0, 1, 1, 1}));
+            } else {
+                EXPECT_NEAR(display[index][0], static_cast<float>(overlap - 1) / 14, 0.00001f);
+                EXPECT_NEAR(display[index][1], static_cast<float>(overlap - 1) / 14, 0.00001f);
+                EXPECT_NEAR(display[index][2], static_cast<float>(16 - overlap) / 15, 0.00001f);
+            }
+        }
+        for (std::size_t index = 0; index < production_bytes.size(); ++index) {
+            std::array<std::uint32_t, 256> retained{};
+            glGetTextureImage(
+                outputs[index], 0, GL_RGBA, GL_FLOAT, sizeof(retained), retained.data());
+            EXPECT_EQ(retained, production_bytes[index]);
+        }
+        std::array<float, 64> depth_bytes{};
+        glGetTextureImage(
+            opaque_depth, 0, GL_DEPTH_COMPONENT, GL_FLOAT, sizeof(depth_bytes), depth_bytes.data());
+        EXPECT_TRUE(std::all_of(
+            depth_bytes.begin(), depth_bytes.end(), [](float value) { return value == 0.5f; }));
+    }
+    // Refusals never publish a stale selected count, including a completed but unsupported replay.
+    for (int refusal = 0; refusal < 4; ++refusal) {
+        control.x = refusal == 1 ? -1 : refusal == 2 ? 8 : 4;
+        Pass::request_inspection(control);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        EXPECT_FALSE(pass.begin_frame(ctx));
+        EXPECT_TRUE(control.inspect_requested);
+        if (refusal == 0) {
+            Pass::SurfaceFrame frame(ctx, gbuffer, true);
+            ASSERT_TRUE(frame.ready());
+            Pass::unsupported_surface();
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, composite);
+        pass.execute(ctx);
+        EXPECT_FALSE(control.inspect_requested);
+        EXPECT_EQ(control.result,
+                  "Overdraw count unavailable (producer, target or selected pixel)");
+        for (const auto* producer : {"authored", "impostor", "forward", "sky"}) {
+            EXPECT_NE(control.status.find(producer), std::string::npos);
+        }
+    }
+}
+
+template<typename Draw>
 void CheckRasterReplays(const Draw& draw,
                         Shader& normal,
                         Shader& instrumented,
@@ -1431,7 +1674,22 @@ void CheckRasterReplays(const Draw& draw,
             EXPECT_FLOAT_EQ(value, static_cast<float>(scene_depth));
         }
     }
-    // Restore the fixture and verify every production channel survived the wire replays.
+    CheckOverdrawReplay(draw,
+                        normal,
+                        uv_case,
+                        pass,
+                        ctx,
+                        gbuffer,
+                        fbo,
+                        vao,
+                        vbo,
+                        composite,
+                        opaque_depth,
+                        outputs,
+                        arrays,
+                        samples,
+                        triangle);
+    // Restore the fixture and verify every production channel survived the wire and count replays.
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     for (std::size_t attachment = 0; attachment < channels.size(); ++attachment) {
         std::array<float, 4> retained{};
@@ -1824,6 +2082,27 @@ TEST(DiagnosticContributions, CascadeAndReplayContractsUseProductionInputsAndBou
     EXPECT_EQ(pipeline.find("glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)"), std::string::npos);
 }
 
+TEST(DiagnosticContributions, OverdrawCatalogueCountsFragmentsWithAnExplicitDepthPolicy) {
+    EXPECT_EQ(Pass::identity_mode("overdraw"), 37);
+    EXPECT_TRUE(Pass::replay_mode(Pass::Overdraw));
+    EXPECT_FALSE(Pass::replay_mode(38));
+    const auto legend = Pass::contribution_legend(Pass::Overdraw);
+    for (const auto* label : {"depth test OFF",
+                              "0=black",
+                              "1..15",
+                              ">=16=cyan",
+                              "authored",
+                              "impostor",
+                              "forward",
+                              "sky"}) {
+        EXPECT_NE(legend.find(label), std::string_view::npos);
+    }
+    const auto fragment = Source("res/shaders/g_buffer.frag");
+    EXPECT_NE(
+        fragment.find("if (u_surfaceMode == 37) gDiagnosticSurface = vec4(1.0, 0.0, 0.0, 0.0);"),
+        std::string::npos);
+}
+
 TEST(DiagnosticContributions, ReplayAndExistingWireframeToggleAreOptInWithoutGlWorkOff) {
     Pass pass;
     auto& control = Pass::controls();
@@ -1831,7 +2110,8 @@ TEST(DiagnosticContributions, ReplayAndExistingWireframeToggleAreOptInWithoutGlW
     EXPECT_FALSE(Pass::geometry_requested());
     EXPECT_FALSE(Pass::replaying());
     Pass::replay_depth_policy(); // disabled path needs no loader/context
-    for (const int mode : {Pass::ShadowCascade, Pass::ShadowFootprint, Pass::Wireframe}) {
+    for (const int mode :
+         {Pass::ShadowCascade, Pass::ShadowFootprint, Pass::Wireframe, Pass::Overdraw}) {
         control.view = mode;
         EXPECT_EQ(pass.mode(), Pass::None);
         pass.execute(RenderContext{});
@@ -1936,83 +2216,92 @@ TEST_F(DiagnosticContributionsGl, ReplayRestoresRasterBlendBindingsAndAttachment
         return values;
     };
     GLuint previous_plane = 0;
-    control.view = Pass::Wireframe;
-    for (const bool exceptional : {false, true}) {
-        EXPECT_FALSE(pass.begin_frame(ctx));
-        glPolygonMode(GL_FRONT_AND_BACK, GL_POINT);
-        glDisable(GL_DEPTH_TEST);
-        glDepthFunc(GL_LESS);
-        glDepthMask(GL_TRUE);
-        glEnable(GL_DITHER);
-        glEnablei(GL_BLEND, 6);
-        glBlendFuncSeparatei(6, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA, GL_ONE, GL_ZERO);
-        glBlendEquationSeparatei(6, GL_FUNC_SUBTRACT, GL_FUNC_REVERSE_SUBTRACT);
-        glColorMaski(6, GL_FALSE, GL_TRUE, GL_FALSE, GL_TRUE);
-        glBindTextureUnit(0, previous_plane);
-        const auto before = snapshot();
-        try {
-            Pass::SurfaceFrame frame(ctx, gbuffer, true);
-            ASSERT_TRUE(frame.ready());
-            GLint plane = 0;
-            glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,
-                                                  GL_COLOR_ATTACHMENT6,
-                                                  GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,
-                                                  &plane);
-            previous_plane = static_cast<GLuint>(plane);
-            EXPECT_TRUE(Pass::replaying());
-            EXPECT_EQ(glIsEnabled(GL_DEPTH_TEST), GL_TRUE);
-            GLint depth = 0;
-            glGetIntegerv(GL_DEPTH_FUNC, &depth);
-            EXPECT_EQ(depth, GL_GEQUAL);
-            GLboolean mask = GL_TRUE;
-            glGetBooleanv(GL_DEPTH_WRITEMASK, &mask);
-            EXPECT_EQ(mask, GL_FALSE);
-            glBindVertexArray(vao);
-            glActiveTexture(GL_TEXTURE9);
-            glDisable(GL_CULL_FACE);
-            // Simulate the ladder's state installation and exercise its pre-draw repair.
-            glEnable(GL_DEPTH_TEST);
-            glDepthFunc(GL_GREATER);
+    for (const int replay_mode : {Pass::Wireframe, Pass::Overdraw}) {
+        control.enabled = true;
+        ctx.frozen_replay = false;
+        ctx.screen_width = 8;
+        control.view = replay_mode;
+        for (const bool exceptional : {false, true}) {
+            EXPECT_FALSE(pass.begin_frame(ctx));
+            glPolygonMode(GL_FRONT_AND_BACK, GL_POINT);
+            glDisable(GL_DEPTH_TEST);
+            glDepthFunc(GL_LESS);
             glDepthMask(GL_TRUE);
-            Pass::replay_depth_policy();
-            glGetBooleanv(GL_DEPTH_WRITEMASK, &mask);
-            EXPECT_EQ(mask, GL_FALSE);
-            if (exceptional) {
-                throw std::runtime_error("replay exit");
+            glEnable(GL_DITHER);
+            glEnablei(GL_BLEND, 6);
+            glBlendFuncSeparatei(6, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA, GL_ONE, GL_ZERO);
+            glBlendEquationSeparatei(6, GL_FUNC_SUBTRACT, GL_FUNC_REVERSE_SUBTRACT);
+            glColorMaski(6, GL_FALSE, GL_TRUE, GL_FALSE, GL_TRUE);
+            glBindTextureUnit(0, previous_plane);
+            const auto before = snapshot();
+            try {
+                Pass::SurfaceFrame frame(ctx, gbuffer, true);
+                ASSERT_TRUE(frame.ready());
+                GLint plane = 0;
+                glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,
+                                                      GL_COLOR_ATTACHMENT6,
+                                                      GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,
+                                                      &plane);
+                previous_plane = static_cast<GLuint>(plane);
+                EXPECT_TRUE(Pass::replaying());
+                EXPECT_EQ(glIsEnabled(GL_DEPTH_TEST),
+                          replay_mode == Pass::Overdraw ? GL_FALSE : GL_TRUE);
+                GLint depth = 0;
+                glGetIntegerv(GL_DEPTH_FUNC, &depth);
+                EXPECT_EQ(depth, replay_mode == Pass::Overdraw ? GL_LESS : GL_GEQUAL);
+                GLboolean mask = GL_TRUE;
+                glGetBooleanv(GL_DEPTH_WRITEMASK, &mask);
+                EXPECT_EQ(mask, GL_FALSE);
+                glBindVertexArray(vao);
+                glActiveTexture(GL_TEXTURE9);
+                glDisable(GL_CULL_FACE);
+                // Simulate the ladder's state installation and exercise its pre-draw repair.
+                glEnable(GL_DEPTH_TEST);
+                glDepthFunc(GL_GREATER);
+                glDepthMask(GL_TRUE);
+                Pass::replay_depth_policy();
+                glGetBooleanv(GL_DEPTH_WRITEMASK, &mask);
+                EXPECT_EQ(mask, GL_FALSE);
+                EXPECT_EQ(glIsEnabled(GL_DEPTH_TEST),
+                          replay_mode == Pass::Overdraw ? GL_FALSE : GL_TRUE);
+                if (exceptional) {
+                    throw std::runtime_error("replay exit");
+                }
+            } catch (const std::runtime_error&) {
+                EXPECT_TRUE(exceptional);
             }
-        } catch (const std::runtime_error&) {
-            EXPECT_TRUE(exceptional);
+            EXPECT_FALSE(Pass::replaying());
+            EXPECT_EQ(snapshot(), before);
+            const auto overlay_before = snapshot();
+            ctx.gbuffer_depth.id = previous_plane;
+            pass.execute(ctx);
+            EXPECT_EQ(snapshot(), overlay_before);
         }
-        EXPECT_FALSE(Pass::replaying());
-        EXPECT_EQ(snapshot(), before);
-        const auto overlay_before = snapshot();
-        ctx.gbuffer_depth.id = previous_plane;
-        pass.execute(ctx);
-        EXPECT_EQ(snapshot(), overlay_before);
-    }
-    // Every refusal preserves state: disabled, frozen, invalid extent, collision, identity owner.
-    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-    for (int refusal = 0; refusal < 5; ++refusal) {
-        control.view = Pass::Wireframe;
-        control.enabled = refusal != 0;
-        ctx.frozen_replay = refusal == 1;
-        ctx.screen_width = refusal == 2 ? 0U : 8U;
-        if (refusal == 3) {
-            glNamedFramebufferTexture(gbuffer.fbo_id, GL_COLOR_ATTACHMENT6, color, 0);
-        }
-        DiagnosticDrawTable table;
-        std::unique_ptr<GBufferDiagnosticCapture> capture;
-        if (refusal == 4) {
-            capture = std::make_unique<GBufferDiagnosticCapture>(table);
-        }
-        const auto before = snapshot();
-        {
-            Pass::SurfaceFrame frame(ctx, gbuffer, true);
-            EXPECT_FALSE(frame.ready());
-        }
-        EXPECT_EQ(snapshot(), before);
-        if (refusal == 3) {
-            glNamedFramebufferTexture(gbuffer.fbo_id, GL_COLOR_ATTACHMENT6, 0, 0);
+        // Every refusal preserves state: disabled, frozen, invalid extent, collision, identity
+        // owner.
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        for (int refusal = 0; refusal < 5; ++refusal) {
+            control.view = replay_mode;
+            control.enabled = refusal != 0;
+            ctx.frozen_replay = refusal == 1;
+            ctx.screen_width = refusal == 2 ? 0U : 8U;
+            if (refusal == 3) {
+                glNamedFramebufferTexture(gbuffer.fbo_id, GL_COLOR_ATTACHMENT6, color, 0);
+            }
+            DiagnosticDrawTable table;
+            std::unique_ptr<GBufferDiagnosticCapture> capture;
+            if (refusal == 4) {
+                capture = std::make_unique<GBufferDiagnosticCapture>(table);
+            }
+            const auto before = snapshot();
+            {
+                Pass::SurfaceFrame frame(ctx, gbuffer, true);
+                EXPECT_FALSE(frame.ready());
+            }
+            EXPECT_EQ(snapshot(), before);
+            if (refusal == 3) {
+                glNamedFramebufferTexture(gbuffer.fbo_id, GL_COLOR_ATTACHMENT6, 0, 0);
+            }
         }
     }
     control.enabled = control.wireframe = false;

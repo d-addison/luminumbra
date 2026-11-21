@@ -57,6 +57,7 @@ class FirstPartyExceptionsTests(unittest.TestCase):
         source = re.sub(r'#[^\n]*', '', source)
         blocks = re.findall(r'if\(MSVC\)\s*(.*?)\s*endif\(\)', source, re.DOTALL)
         expected = {'common/GameSessionHeadlessWorld_test.cpp',
+                    'common/RegionConsumerGate_test.cpp',
                     'rendering/render_smoke_test.cpp'}
         protected = set()
         for block in blocks:
@@ -65,6 +66,14 @@ class FirstPartyExceptionsTests(unittest.TestCase):
                     r'COMPILE_OPTIONS\s+"/bigobj"\s*\)', block, re.DOTALL):
                 protected.update(match[1].split())
         self.assertEqual(protected, expected)
+        for path in expected:
+            if path == 'rendering/render_smoke_test.cpp':
+                continue  # This source has an MSVC-only section-count exception.
+            self.assertRegex(source, r'if\(MSVC\)\s*set_source_files_properties\(\s*'
+                             + re.escape(path) + r'\s+PROPERTIES\s+COMPILE_OPTIONS "/bigobj"\)'
+                             + r'\s*elseif\(MINGW\)\s*set_source_files_properties\(\s*'
+                             + re.escape(path) + r'\s+PROPERTIES\s+'
+                             + r'COMPILE_OPTIONS "-Wa,-mbig-obj"\)\s*endif\(\)')
         # The option must not invalidate every test object's compiler cache.
         self.assertNotRegex(source, r'target_compile_options\([^)]*/bigobj')
 

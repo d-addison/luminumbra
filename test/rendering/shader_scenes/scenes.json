@@ -136,11 +136,11 @@
   ],
   "inputs": {
     "res/shaders/enhanced_skybox.frag": "dcbd2b15fdca9acfb4b8d4fe01029f0e91727556bce842c9d058362f6c07ee27",
-    "res/shaders/g_buffer.frag": "38c27298d127b44f59b033446c8bbc8d23b4cc17d6b8d5b732909c029cc22e31",
+    "res/shaders/g_buffer.frag": "6e07692ad1d04e3fdaa79184c03d31d4d61965ea0e4c77e8de48fa98b57a227d",
     "res/shaders/g_buffer.vert": "209c1c0801801209e669e60dcadfa7085e8e44780f9e2c7599a7d48a5fe2abed",
     "res/shaders/grass_compact_prefix.comp": "43bcf2b6c883f958cab97d9b88c911701edd1ff1416e0290ef427228b406e677",
     "res/shaders/instanced_mesh.vert": "83198486e34bcb2d2ad4dcd5271efc9b4fd5deab5842768a8a85eac76d245d9c",
-    "res/shaders/lighting_pass.frag": "5ca4acaa1c88120006c13da7d5edadbbdaadd8c69fbee8bd696c05ffb830a5dc",
+    "res/shaders/lighting_pass.frag": "85af518c331ee1eb07b361f7b3b5177fb2d0f6b9d2ab0a1b462ec4f0439fa54d",
     "res/shaders/magical_particles.frag": "4b04d290eba44750b4c908a8195a9d5f94d14b9a00b4ff19e9eb5d862e6b4e2d",
     "res/shaders/ssao.vert": "f5c6db443362910b98714dd5dcfb5bc1c54e4e23e4a87f1cfc043f07ee01777c",
     "res/shaders/static_asset.frag": "38945ff338541c021f1b4d736648794cc556ce09183d520d76a28e7843e08d2c",

@@ -310,7 +310,15 @@ vec3 diagnosticCascade = vec3(-2.0);
 vec3 diagnosticShadowUv = vec3(-2.0);
 vec3 diagnosticDpdx;
 vec3 diagnosticDpdy;
+bool diagnosticQuadValid;
 bool diagnosticShadowObserved = false;
+
+bool diagnosticPositionAt(vec2 uv, inout vec3 position) {
+    bool reconstructed = farWorldPosition(gPosition, u_sceneDepth, uv, position);
+    // Legacy storage reports success for cleared sky texels as well.
+    return reconstructed && !any(isnan(position)) && !any(isinf(position)) &&
+        dot(position, position) >= 1e-8;
+}
 #endif
 // Interpolate visibility after comparison, never the stored depths. The
 // separable four by four box needs only 25 nearest-depth taps. Fractional
@@ -353,13 +361,15 @@ float CalculateShadow(vec3 fragPos, vec3 normal, vec3 lightDir, float viewDepth)
     if (!diagnosticShadowObserved) {
         diagnosticShadowObserved = true;
         diagnosticCascade = vec3(float(cascadeIndex), projCoords.xy);
-        vec2 shadowSize = vec2(textureSize(u_shadowCascades, 0).xy);
-        vec4 lightDx = u_lightSpaceMatrices[cascadeIndex] * vec4(fragPos + diagnosticDpdx, 1.0);
-        vec4 lightDy = u_lightSpaceMatrices[cascadeIndex] * vec4(fragPos + diagnosticDpdy, 1.0);
-        vec2 uvDx = (lightDx.xy / lightDx.w) * 0.5 + 0.5 - projCoords.xy;
-        vec2 uvDy = (lightDy.xy / lightDy.w) * 0.5 + 0.5 - projCoords.xy;
-        float footprint = max(length(uvDx * shadowSize), length(uvDy * shadowSize));
-        diagnosticShadowUv = vec3(projCoords.xy, log2(max(footprint, 1e-8)));
+        if (diagnosticQuadValid) {
+            vec2 shadowSize = vec2(textureSize(u_shadowCascades, 0).xy);
+            vec4 lightDx = u_lightSpaceMatrices[cascadeIndex] * vec4(fragPos + diagnosticDpdx, 1.0);
+            vec4 lightDy = u_lightSpaceMatrices[cascadeIndex] * vec4(fragPos + diagnosticDpdy, 1.0);
+            vec2 uvDx = (lightDx.xy / lightDx.w) * 0.5 + 0.5 - projCoords.xy;
+            vec2 uvDy = (lightDy.xy / lightDy.w) * 0.5 + 0.5 - projCoords.xy;
+            float footprint = max(length(uvDx * shadowSize), length(uvDy * shadowSize));
+            diagnosticShadowUv = vec3(projCoords.xy, log2(max(footprint, 1e-8)));
+        }
         // Observe full light-frustum coverage without changing production sampling.
         bool insideSelected = fragPosLightSpace.w != 0.0 &&
             all(greaterThanEqual(projCoords, vec3(0.0))) && all(lessThanEqual(projCoords, vec3(1.0)));
@@ -373,7 +383,7 @@ float CalculateShadow(vec3 fragPos, vec3 normal, vec3 lightDir, float viewDepth)
                     projected.y >= 0.0 && projected.y <= 1.0);
             }
             diagnosticCascade = vec3(insideAny ? -1.0 : -3.0);
-            diagnosticShadowUv = diagnosticCascade;
+            if (diagnosticQuadValid) diagnosticShadowUv = diagnosticCascade;
         }
     }
 #endif
@@ -589,10 +599,19 @@ void main() {
         // Use the same position backend as lighting, before any receiver can return
         // or bypass shadows. All quad lanes reach the world-position derivatives.
         vec3 diagnosticViewPos = vec3(0.0);
-        farWorldPosition(gPosition, u_sceneDepth, TexCoords, diagnosticViewPos);
+        bool diagnosticValid = diagnosticPositionAt(TexCoords, diagnosticViewPos);
         vec3 FragPos = vec3(u_inverseView * vec4(diagnosticViewPos, 1.0));
         diagnosticDpdx = dFdx(FragPos);
         diagnosticDpdy = dFdy(FragPos);
+        // Pair each quad column before differentiating across columns: direct
+        // validity derivatives alone cannot see an invalid diagonal neighbour.
+        float diagnosticNeighbourOffset = 1.0 - 2.0 * mod(floor(gl_FragCoord.y), 2.0);
+        vec2 diagnosticNeighbourUv = TexCoords + dFdyFine(TexCoords) * diagnosticNeighbourOffset;
+        vec3 diagnosticNeighbourPos = vec3(0.0);
+        bool diagnosticNeighbourValid = diagnosticPositionAt(diagnosticNeighbourUv, diagnosticNeighbourPos);
+        float diagnosticColumnValid = float(diagnosticValid && diagnosticNeighbourValid);
+        float diagnosticValidityDx = dFdxFine(diagnosticColumnValid);
+        diagnosticQuadValid = diagnosticColumnValid == 1.0 && diagnosticValidityDx == 0.0;
     }
     // Alpha zero is explicit unsupported, including every early return / sky texel.
     DiagnosticContribution = vec4(0.0);
