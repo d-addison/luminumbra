@@ -496,6 +496,9 @@ TEST(PassContext, GBufferKnownAndExternalEntriesAreEquivalentOnBothBackends) {
     input.submit_ladder = [](const FarWorldPrepareDraw&) {
         return FarWorldSubmitStats{};
     };
+    input.static_model_tex = [](const std::string&) -> const StaticModelTex* {
+        return nullptr;
+    };
     const auto readback = [&] {
         // Five RGBA attachments and depth, bounded by this 32 x 32 fixture.
         constexpr std::size_t pixels = extent * extent;
@@ -1298,14 +1301,15 @@ TEST(PassContext, ShadowKnownAndExternalRasterRestorationAreEquivalent) {
                     reference_depth[index] = depths;
                     reference_tint[index] = tints;
                 }
-                if (phase == 1)
+                if (phase == 1) {
                     EXPECT_TRUE(std::any_of(tints.begin(), tints.end(), [](unsigned char value) {
                         return value != 255;
                     }));
-                else
+                } else {
                     EXPECT_TRUE(std::all_of(tints.begin(), tints.end(), [](unsigned char value) {
                         return value == 255;
                     }));
+                }
             }
         }
     }
@@ -1657,15 +1661,16 @@ TEST(PassContext, FoliageCappedCompactionAndIndependentRebuildAreByteStable) {
         }
         ASSERT_EQ(pass.instances().size(), FoliagePass::kMaxInstances)
             << "must exercise saturation";
-        if (run == 0)
+        if (run == 0) {
             reference = pass.instances();
-        else
+        } else {
             ASSERT_EQ(std::memcmp(reference.data(),
                                   pass.instances().data(),
                                   reference.size() * sizeof(reference[0])),
                       0)
                 << "fresh output allocation and reversed chunk input order must preserve capped "
                    "bytes";
+        }
         ASSERT_TRUE(pass.begin_qualification());
         glFinish();
         pass.set_evidence_frame(5, 1);
@@ -1881,9 +1886,9 @@ TEST(PassContext, FoliageActualDrawFeedbackSurvivesReloadAndPreservesFrameIdenti
             const auto& b = proof.vertices[1].vertices[blade * 12 + j];
             const double displacement =
                 glm::distance(glm::dvec3(a[0], a[1], a[2]), glm::dvec3(b[0], b[1], b[2]));
-            if (a[3] == 0 || !proof.vertices[0].sways[blade])
+            if (a[3] == 0 || !proof.vertices[0].sways[blade]) {
                 EXPECT_LE(displacement, .00001);
-            else {
+            } else {
                 EXPECT_GT(displacement, .00001);
                 EXPECT_LE(displacement, proof.vertices[0].blade_heights[blade] * .45 + .0001);
             }
@@ -2204,10 +2209,11 @@ TEST(PassContext, FroxelInitializationFailureCleansUpAndRequiresExplicitRetry) {
         calls.invalid_layout = failure == 6;
         calls.label_exception = failure == 8;
         const std::filesystem::path root = LUMINUMBRA_SOURCE_ROOT;
-        if (calls.label_exception)
+        if (calls.label_exception) {
             EXPECT_THROW(pass.execute_inject(ctx, root), std::runtime_error);
-        else
+        } else {
             EXPECT_FALSE(pass.execute_inject(ctx, failure == 7 ? root / "res" : root));
+        }
         EXPECT_EQ(pass.integrated_texture(), 0u);
         EXPECT_EQ(calls.live_programs, 0);
         EXPECT_EQ(calls.live_textures, 0);
