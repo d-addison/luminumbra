@@ -96,7 +96,8 @@ std::vector<ReplEntityState> AvatarStates(std::uint32_t n, std::uint64_t t) {
     for (std::uint32_t i = 1; i <= n; ++i) {
         ReplEntityState e;
         e.entity_id = i;
-        e.px_mm = static_cast<std::int32_t>((i * 250) + static_cast<std::int32_t>(t)); // marches +X
+        e.px_mm =
+            static_cast<std::int32_t>((i * 250u) + static_cast<std::uint32_t>(t)); // marches +X
         e.py_mm = 1000;
         e.pz_mm = static_cast<std::int32_t>(i * 250);
         e.yaw_mrad = static_cast<std::int16_t>(i * 7);
