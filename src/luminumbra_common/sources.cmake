@@ -21,6 +21,9 @@ set(COMMON_SOURCES
     # Core
     # Shared exact-byte SHA-256 for content and capture manifests.
     ${CMAKE_CURRENT_LIST_DIR}/authoring/PrefabDigest.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/mods/NativePluginLoader.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/mods/NativePluginLoader.h
+    ${CMAKE_CURRENT_LIST_DIR}/../../include/luminumbra/abi/luminumbra_abi.h
     ${CMAKE_CURRENT_LIST_DIR}/core/CrashReport.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/EngineContracts.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/EngineVersion.cpp

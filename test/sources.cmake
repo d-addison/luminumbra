@@ -9,6 +9,9 @@ set(MATERIAL_REGISTRY_TEST_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/common/MaterialRegistry_test.cpp
 )
 
+set(NATIVE_PLUGIN_TEST_SOURCE ${CMAKE_CURRENT_LIST_DIR}/mods/NativePluginLoader_test.cpp)
+set(NATIVE_PLUGIN_FIXTURE_SOURCE ${CMAKE_CURRENT_LIST_DIR}/mods/DummyNativePlugin.c)
+
 set(SIMULATION_TEST_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/simulation/eventbus_order_gate_test.cpp
 )

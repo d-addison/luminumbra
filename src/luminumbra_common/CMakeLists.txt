@@ -102,6 +102,8 @@ target_link_libraries(luminumbra_common PUBLIC
     FastNoise
 )
 
+target_link_libraries(luminumbra_common PUBLIC ${CMAKE_DL_LIBS})
+
 # the TcpTransport (net/LockstepSession.cpp) uses winsock2 under _WIN32; link
 # ws2_32 where (and only where) the platform needs it. The gates/tests drive
 # LoopbackTransport (no sockets), so this link is for the real loopback/LAN session path.
