@@ -12,6 +12,24 @@ namespace fs = std::filesystem;
 using Luminumbra::TestSupport::ScopedTempFile;
 } // namespace
 
+TEST(UniqueTempPath, StemHashesTheCompleteUnsanitisedTestNameBeforeTruncation) {
+    const auto* info = ::testing::UnitTest::GetInstance()->current_test_info();
+    ASSERT_NE(info, nullptr);
+    const auto name = std::string(info->test_suite_name()) + "." + info->name();
+    // Frozen local fold, deliberately independent of the shared helper.
+    std::uint32_t hash = 2166136261U;
+    for (const char character : name) {
+        hash ^= static_cast<unsigned char>(character);
+        hash *= 16777619U;
+    }
+    auto hex = Luminumbra::TestSupport::detail::CompactHex(hash);
+    hex.insert(0, 8 - hex.size(), '0');
+    auto shortened = name.substr(0, 24);
+    shortened[shortened.find('.')] = '_';
+    const auto prefix = "utility-" + shortened + "_" + hex + "_";
+    EXPECT_EQ(Luminumbra::TestSupport::detail::UniqueTempStem("utility-").find(prefix), 0u);
+}
+
 TEST(UniqueTempPath, SamePrefixFilesHaveDistinctReservedDirectoriesAndCleanUp) {
     fs::path first_directory;
     fs::path second_directory;

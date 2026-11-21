@@ -215,6 +215,166 @@ private:
     const std::filesystem::path root_;
 };
 
+// Frozen render byte reader, hex formatter and typed identity encoder.
+// Keep independent of the shared primitives and production adapters.
+std::uintmax_t FrozenAppendContentDigest(std::istream& input, std::uint64_t& hash) {
+    std::array<char, 65536> buffer{}; // At most 64 KiB of asset bytes in memory.
+    std::uintmax_t bytes = 0;
+    do {
+        input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const auto count = static_cast<std::uintmax_t>(input.gcount());
+        if (count > std::numeric_limits<std::uintmax_t>::max() - bytes)
+            throw std::runtime_error("workload content size overflow");
+        bytes += count;
+        for (std::streamsize index = 0; index < input.gcount(); ++index)
+            hash = (hash ^ static_cast<unsigned char>(buffer[static_cast<std::size_t>(index)])) *
+                   1099511628211ull;
+    } while (input);
+    if (!input.eof() || input.bad())
+        throw std::runtime_error("cannot read workload content");
+    return bytes;
+}
+
+std::string FrozenContentDigestHex(std::uint64_t hash) {
+    constexpr char digits[] = "0123456789abcdef";
+    std::string result = "fnv1a64:";
+    for (int shift = 60; shift >= 0; shift -= 4)
+        result += digits[(hash >> shift) & 15u];
+    return result;
+}
+
+std::string FrozenRenderIdentity(const nlohmann::json& settings) {
+    static_assert(sizeof(double) == 8 && std::numeric_limits<double>::is_iec559);
+    std::uint64_t hash = 14695981039346656037ull;
+    const auto byte = [&](unsigned char value) {
+        hash = (hash ^ value) * 1099511628211ull;
+    };
+    const auto text = [&](std::string_view value) {
+        for (const char item : value)
+            byte(static_cast<unsigned char>(item));
+    };
+    const auto visit = [&](const auto& self, const nlohmann::json& value) -> void {
+        if (value.is_object()) {
+            byte('{');
+            for (const auto& [key, item] : value.items()) {
+                self(self, nlohmann::json(key));
+                self(self, item);
+            }
+            byte('}');
+        } else if (value.is_array()) {
+            byte('[');
+            for (const auto& item : value)
+                self(self, item);
+            byte(']');
+        } else if (value.is_string()) {
+            const auto& string = value.get_ref<const std::string&>();
+            byte('s');
+            text(std::to_string(string.size()));
+            byte(':');
+            text(string);
+        } else if (value.is_boolean()) {
+            byte(value.get<bool>() ? 't' : 'f');
+        } else if (value.is_number_float()) {
+            const double number = value.get<double>();
+            if (!std::isfinite(number))
+                throw std::invalid_argument("non-finite render configuration");
+            byte('d');
+            const auto bits = std::bit_cast<std::uint64_t>(number);
+            for (unsigned shift = 0; shift < 64; shift += 8)
+                byte(static_cast<unsigned char>(bits >> shift));
+        } else if (value.is_number_integer()) {
+            byte('i');
+            text(value.dump());
+            byte(';');
+        } else if (value.is_null()) {
+            byte('n');
+        } else {
+            throw std::invalid_argument("unsupported render configuration value");
+        }
+    };
+    visit(visit, settings);
+    constexpr char digits[] = "0123456789abcdef";
+    std::string result = "fnv1a64:";
+    for (int shift = 60; shift >= 0; shift -= 4)
+        result += digits[(hash >> shift) & 15u];
+    return result;
+}
+
+void byte_fold_parity() {
+    // Fixed upper bound: two 64 KiB reader blocks plus a partial block.
+    std::string long_bytes(131089, '\0');
+    for (std::size_t index = 0; index < long_bytes.size(); ++index)
+        long_bytes[index] = static_cast<char>(static_cast<unsigned char>(index % 256));
+    const std::array inputs = {std::string{},
+                               std::string("hello"),
+                               std::string("a\0b\0", 4),
+                               std::string("\x7f\x80\xff\r\n", 5),
+                               long_bytes.substr(0, 65535),
+                               long_bytes.substr(0, 65536),
+                               long_bytes.substr(0, 65537),
+                               long_bytes};
+    const TemporaryContent content;
+    const auto save_root = content.root() / "data/fold-parity";
+    require(std::filesystem::create_directory(save_root));
+    Luminumbra::Filesystem::CaptureContentPaths containment;
+    containment.enable(content.root());
+    require(read_saved_world(save_root) == FrozenContentDigestHex(14695981039346656037ull));
+    for (const auto& bytes : inputs) {
+        std::istringstream frozen_input(bytes);
+        std::uint64_t frozen_hash = 14695981039346656037ull;
+        require(FrozenAppendContentDigest(frozen_input, frozen_hash) == bytes.size());
+        const auto expected = FrozenContentDigestHex(frozen_hash);
+        std::istringstream stream(bytes);
+        require(content_digest(stream) == expected);
+        for (const auto seed : {std::uint64_t{0},
+                                std::uint64_t{14695981039346656037ull},
+                                (std::numeric_limits<std::uint64_t>::max)()}) {
+            auto old_hash = seed;
+            auto new_hash = seed;
+            std::istringstream old_stream(bytes);
+            std::istringstream new_stream(bytes);
+            require(append_content_digest(new_stream, new_hash) ==
+                    FrozenAppendContentDigest(old_stream, old_hash));
+            require(new_hash == old_hash);
+        }
+        content.write("data/fold-parity/z", bytes);
+        content.write("data/fold-parity/a", "\r\n");
+        const auto path = save_root / "z";
+        require(content_digest(path) == expected);
+        require(content_digest(path, containment) == expected);
+        {
+            SavedFileInput opened(path);
+            require(content_digest(opened) == expected);
+        }
+        // Frozen sorted path/decimal-length recipe, including empty payloads.
+        std::istringstream canonical("1:a2:\r\n1:z" + std::to_string(bytes.size()) + ":" + bytes);
+        std::uint64_t old_save_hash = 14695981039346656037ull;
+        FrozenAppendContentDigest(canonical, old_save_hash);
+        const auto expected_save = FrozenContentDigestHex(old_save_hash);
+        require(read_saved_world(save_root) == expected_save);
+        require(saved_world_digest(save_root) == expected_save);
+        std::vector<SavedFileBytes> snapshot;
+        require(read_saved_world(save_root, &snapshot) == expected_save);
+        require(snapshot.size() == 2);
+        require(snapshot[0].relative == "a" && snapshot[0].bytes == "\r\n");
+        require(snapshot[1].relative == "z" && snapshot[1].bytes == bytes);
+        const json settings = {{"payload", bytes}, {"nested", {bytes, nullptr, true, false}}};
+        require(render_identity(settings) == FrozenRenderIdentity(settings));
+    }
+    const std::array<json, 10> values = {json::object(),
+                                         json::array(),
+                                         nullptr,
+                                         true,
+                                         false,
+                                         -1,
+                                         18446744073709551615ull,
+                                         -0.0,
+                                         1.5,
+                                         json{{"b", {0, -1, 2.5}}, {"a", "snow \xe2\x98\x83"}}};
+    for (const auto& value : values)
+        require(render_identity(value) == FrozenRenderIdentity(value));
+}
+
 void content_configuration() {
     std::istringstream empty;
     std::istringstream hello("hello");
@@ -1560,6 +1720,7 @@ int main(int argc, char** argv) {
         configuration();
         graphics_capture_configuration();
         simulation_configuration();
+        byte_fold_parity();
         content_configuration();
         return 0;
     } catch (const std::exception& error) {

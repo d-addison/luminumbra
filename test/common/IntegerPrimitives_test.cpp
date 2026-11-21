@@ -53,6 +53,36 @@ constexpr std::uint32_t FrozenNameFold(std::string_view text, std::uint32_t seed
     return hash;
 }
 
+// Frozen UniqueTempStem utility fold, before truncation and sanitization.
+std::uint32_t FrozenTempNameFold(std::string_view test_name) {
+    std::uint32_t name_hash = 2166136261U;
+    for (const char character : test_name) {
+        name_hash ^= static_cast<unsigned char>(character);
+        name_hash *= 16777619U;
+    }
+    return name_hash;
+}
+
+// Frozen audio cache scalar encoder: width is 4 or 8, low byte first.
+std::uint64_t FrozenAudioScalarFold(std::uint64_t value, unsigned int bytes, std::uint64_t hash) {
+    for (unsigned int byte = 0; byte < bytes; ++byte) {
+        hash = (hash ^ (value & 0xffU)) * 1099511628211ULL;
+        value >>= 8;
+    }
+    return hash;
+}
+
+// Exercise the local audio adapter's byte-at-a-time shared fold independently
+// of host object representation. No new production test seam is needed.
+std::uint64_t SharedAudioScalarFold(std::uint64_t value, unsigned int bytes, std::uint64_t hash) {
+    for (unsigned int byte = 0; byte < bytes; ++byte) {
+        const auto octet = static_cast<unsigned char>(value & 0xffU);
+        hash = Fnv1a64(&octet, 1, hash);
+        value >>= 8;
+    }
+    return hash;
+}
+
 // Frozen StructurePlacement semantics, also exercised at 64-bit width.
 template<typename Integer>
 constexpr Integer FrozenStructureDivision(Integer value, Integer divisor) {
@@ -212,6 +242,55 @@ TEST(IntegerPrimitivesTest, EmptyAndLongDigestsStayPinned) {
     EXPECT_EQ(Fnv1a64(bytes.data(), bytes.size(), kFnv1a64StandardBasis), 0x1ec0db407f352325ull);
     EXPECT_EQ(Fnv1a64(bytes.data(), bytes.size(), kFnv1a64HistoricalBasis), 0x435795b8ed7f0383ull);
     EXPECT_EQ(Fnv1a32(bytes.data(), bytes.size(), kFnv1a32StandardBasis), 0xa2d79dc5u);
+}
+
+TEST(IntegerPrimitivesTest, FrozenTempNameUtilityMatchesByteEdgesAndLongNames) {
+    // At most 64 KiB, including repeated embedded NULs and every high-bit byte.
+    std::string long_name(65536, '\0');
+    for (std::size_t i = 0; i < long_name.size(); ++i)
+        long_name[i] = static_cast<char>(static_cast<unsigned char>(i % 256));
+    const std::array names = {
+        std::string{}, std::string("Suite.Test"), std::string("a\0b\x80\xff", 5), long_name};
+    for (const auto& name : names)
+        EXPECT_EQ(Fnv1a32(name.data(), name.size(), kFnv1a32StandardBasis),
+                  FrozenTempNameFold(name));
+}
+
+TEST(IntegerPrimitivesTest, FrozenAudioScalarsPreserveWidthsAndLowByteOrder) {
+    constexpr std::array<std::uint64_t, 8> values = {
+        0, 1, 0x80, 0xff, 0x80000000, 0xffffffff, 0x0102030480ff007full, 0xffffffffffffffffull};
+    for (const auto seed :
+         {kFnv1a64StandardBasis, std::uint64_t{0}, (std::numeric_limits<std::uint64_t>::max)()}) {
+        for (const auto value : values) {
+            for (const auto bytes : {0u, 4u, 8u}) {
+                EXPECT_EQ(SharedAudioScalarFold(value, bytes, seed),
+                          FrozenAudioScalarFold(value, bytes, seed));
+            }
+        }
+    }
+    for (const auto generation : values) {
+        std::uint64_t frozen_hash = 14695981039346656037ull;
+        auto shared_hash = kFnv1a64StandardBasis;
+        // One cache key always encodes eight 32-bit inputs then one 64-bit generation.
+        for (const auto value : values) {
+            const auto input = static_cast<std::uint32_t>(value);
+            frozen_hash = FrozenAudioScalarFold(input, 4, frozen_hash);
+            shared_hash = SharedAudioScalarFold(input, 4, shared_hash);
+        }
+        frozen_hash = FrozenAudioScalarFold(generation, 8, frozen_hash);
+        shared_hash = SharedAudioScalarFold(generation, 8, shared_hash);
+        EXPECT_EQ(static_cast<std::size_t>(shared_hash), static_cast<std::size_t>(frozen_hash));
+        EXPECT_EQ(shared_hash, frozen_hash);
+    }
+    // Fixed 64 KiB logical stream exercises repeated chaining with embedded zero/high bytes.
+    std::uint64_t frozen_hash = 14695981039346656037ull;
+    auto shared_hash = kFnv1a64StandardBasis;
+    for (unsigned int i = 0; i < 8192; ++i) {
+        const auto value = values[i % values.size()];
+        frozen_hash = FrozenAudioScalarFold(value, 8, frozen_hash);
+        shared_hash = SharedAudioScalarFold(value, 8, shared_hash);
+    }
+    EXPECT_EQ(shared_hash, frozen_hash);
 }
 
 template<typename Integer>
