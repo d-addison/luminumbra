@@ -73,6 +73,7 @@
 #include "../persistence/WorldPersistenceRoundtrip.h" // Persistence::StableChecksum (ComputeScentSubHash)
 #include "../persistence/WorldSaveService.h"
 #include "../scripting/LuaState.h"
+#include "../simulation/ParticipantProjection.h"
 #include "../simulation/SimWorkCounters.h"
 #include "../systems/AetherFieldSystem.h"
 #include "../systems/CropLifecycleSystem.h"
@@ -7004,6 +7005,9 @@ std::string GameSession::ComputeAetherStateSubHash() const {
 }
 
 std::string GameSession::ComputePlantSubHash() const {
+    if constexpr (simulation::UseCompleteSimulationProjections())
+        return simulation::ComputeCandidatePlantSubHash(m_registry,
+                                                        m_activeRegionLedger.next_persistent_id());
     if (!HasPlantParticipants()) {
         return {};
     }
