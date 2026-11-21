@@ -3664,6 +3664,9 @@ void RenderPipeline::execute_stage_depth_blit_to_lighting(const Camera& camera) 
     record_frame_stage("depth_blit_to_lighting");
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_gbuffer_pass->gbuffer().fbo_id);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
+    if (m_lighting_pass->depth_copied_from_gbuffer()) {
+        return;
+    }
     // both G-buffer and lighting are internal-sized; copy the internal depth rect
     // (a screen-sized rect would leave the internal depth garbage at scale<1.0 -> the skybox
     // depth-mask fails and the sky goes dark). At scale 1.0 internal==screen (byte-identical).

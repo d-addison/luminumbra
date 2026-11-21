@@ -3772,21 +3772,43 @@ class DeferredRasterDiagnosticWiring(unittest.TestCase):
             self.assertIn(f"CalculateShadow(FragPos, Normal, L_{light}, abs(viewPos.z))", main)
 
     def test_legacy_sky_skip_requires_replacement_and_preserves_other_consumers(self):
-        main = block(self.lighting, "void main()")
-        guard = "if (u_skipLegacySky != 0 && u_farWorldLadder == 0 && u_staticStudio == 0 &&"
-        early = block(main, guard)
-        self.assertIn("texture(u_sceneDepth, TexCoords).r == 0.0)", main)
-        self.assertIn("FragColor = vec4(0.0);", early)
-        self.assertIn("return;", early)
-        self.assertLess(main.index("u_staticStudio != 0"), main.index(guard))
-        self.assertLess(main.index(guard), main.index("vec4 authoredSurface"))
+        self.assertNotIn("u_skipLegacySky", self.lighting)
+        self.assertNotIn("gl_FragDepth", self.lighting)
+        self.assertNotIn("discard", self.lighting)
         header = read(CLIENT / "rendering/passes/LightingPass.h")
         self.assertIn("bool skybox_follows = false", header)
         lighting = read(CLIENT / "rendering/passes/LightingPass.cpp")
-        self.assertIn('setInt("u_skipLegacySky", skybox_follows && !contribution.ready() ? 1 : 0)', lighting)
+        execute = block(lighting, "void LightingPass::execute(")
+        self.assertIn("skybox_follows && !ctx.far_world_ladder && !ctx.static_studio", execute)
+        self.assertIn("!requested && ctx.gbuffer_fbo.id != 0 && m_lighting_fbo.fbo_id != 0", execute)
+        early = block(execute, "if (skip_sky)")
+        self.assertIn("glClearBufferfv(GL_COLOR, 0, zero.data())", early)
+        self.assertIn("glBlitNamedFramebuffer(ctx.gbuffer_fbo.id", early)
+        self.assertIn("glDepthRange(0.0, 0.0)", early)
+        self.assertIn("glDepthFunc(GL_LESS)", early)
+        self.assertIn("glDepthMask(GL_FALSE)", early)
+        self.assertIn("glEnable(GL_DEPTH_TEST)", early)
+        self.assertLess(execute.index("if (skip_sky)"), execute.index("glDrawArrays"))
+        state = block(lighting, "class LightingDepthState")
+        for saved in ("GL_DEPTH_TEST", "GL_DEPTH_FUNC", "GL_DEPTH_WRITEMASK",
+                      "GL_DEPTH_RANGE", "GL_DEPTH_CLEAR_VALUE"):
+            self.assertIn(saved, state)
+        for restored in ("glDepthFunc", "glDepthMask", "glDepthRange", "glClearDepth",
+                         "glEnable(GL_DEPTH_TEST)", "glDisable(GL_DEPTH_TEST)"):
+            self.assertIn(restored, state)
+        gbuffer = block(self.gbuffer, "GBufferDrawStats GBufferPass::execute(")
+        self.assertIn("glClearDepth(0.0)", gbuffer)
+        self.assertIn("glDepthFunc(GL_GREATER)", gbuffer)
         pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
         stage = block(pipeline, "void RenderPipeline::execute_stage_lighting(")
         self.assertIn("m_lighting_pass->execute(m_frame_lighting_ctx, sky_replaces_color);", stage)
+        depth_copy = block(pipeline, "void RenderPipeline::execute_stage_depth_blit_to_lighting(")
+        copied = block(depth_copy, "if (m_lighting_pass->depth_copied_from_gbuffer())")
+        self.assertIn("return;", copied)
+        self.assertLess(depth_copy.index("depth_copied_from_gbuffer()"),
+                        depth_copy.index("glBlitFramebuffer"))
+        self.assertIn("m_depth_copied_from_gbuffer = false", execute)
+        self.assertIn("m_depth_copied_from_gbuffer = true", early)
         skybox = block(pipeline, "void RenderPipeline::execute_stage_skybox(")
         predicate = re.search(r"sky_replaces_color = ([^;]+);", stage).group(1)
         sky_predicate = re.search(r"if \((.*?)\) \{", skybox, re.S).group(1)
@@ -4125,7 +4147,7 @@ class DeferredRasterDiagnosticWiring(unittest.TestCase):
             return value
 
         self.assertEqual(fingerprint(without_guard(self.lighting, "LUMIN_DIAG_CONTRIBUTIONS")),
-                         0xb2f4c0d0889a7501)
+                         0xf8fca67f768319ee)
         self.assertEqual(fingerprint(without_guard(self.fragment, "LUMIN_DIAG_SURFACE")),
                          0x7289f9525f762361)
 
