@@ -515,6 +515,126 @@ class RegionAuthorityWiring(unittest.TestCase):
         self.assertIn("common/WaterSeedInputs_test.cpp", cmake)
         self.assertIn("gtest_discover_tests(${_lum_gtest_target}", cmake)
 
+    def test_prepared_water_migration_uses_captured_profile_independently_of_inventory(self):
+        session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(
+            encoding="utf-8")
+        capture = function(session, "GameSession::CaptureWorldPreparationOptions() const")
+        self.assertIn(".regional_water = m_authorityProfile.regional_water,", capture)
+        adopt = function(session, "bool GameSession::AdoptPreparedWorld(")
+        self.assertIn("options.regional_water != m_authorityProfile.regional_water", adopt)
+        read = function(session, "bool GameSession::ReadPreparedWorldState(")
+        self.assertIn("options.active_regions ? &state.durable_inventory : nullptr", read)
+        self.assertIn("nullptr, options.active_regions && options.regional_water)", read)
+        service = (ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp").read_text(
+            encoding="utf-8")
+        load = function(service, "bool WorldSaveService::load_world_impl(")
+        self.assertIn("regional_water && chunk && NeedsLegacyWaterMigration(", load)
+        self.assertNotIn("authoritative_inventory && chunk && NeedsLegacyWaterMigration(", load)
+
+    def test_migration_budget_is_charged_only_after_candidate_admission(self):
+        service = (ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp").read_text(
+            encoding="utf-8")
+        load = function(service, "bool WorldSaveService::load_world_impl(")
+        candidates = function(load, "if (migrate_water)")
+        self.assertIn("legacy_water.size() == kMaxLegacyWaterRecords", candidates)
+        self.assertIn("legacy_bytes += record.uncompressed_size;", candidates)
+        self.assertNotIn("legacy_records", load)
+        self.assertIn("regional_water && (facts.coords.y != 0 || !facts.water_owned)", load)
+        native = (ROOT / "test/common/RegionalWater_test.cpp").read_text(encoding="utf-8")
+        for name in ("LargeDryLegacySaveDoesNotConsumeWaterCandidateBudget",
+                     "WaterCandidateCapRefusesWithoutChangingLegacyBytes"):
+            case = function(native, f"TEST(RegionalWaterMigration, {name})")
+            self.assertIn("saved.service.load_world(", case)
+            self.assertIn("EXPECT_EQ(saved.bytes(), bytes);", case)
+
+    def test_indexed_unowned_and_dormant_water_share_migration_admission(self):
+        service = (ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp").read_text(
+            encoding="utf-8")
+        load = function(service, "bool WorldSaveService::load_world_impl(")
+        self.assertIn("const bool unowned_legacy_water = chunk && !chunk->has_water_authority();",
+                      load)
+        self.assertIn("if (!chunk && (inspect_legacy_water || repair_owned_flag)", load)
+        admissible = function(service, "bool HasValidWaterColumnState(")
+        self.assertIn("chunk.has_water_sim.load() && resolution != 0", admissible)
+        self.assertIn("return chunk.has_complete_water_state();", admissible)
+        self.assertIn("!HasValidWaterPersistenceState(chunk)", admissible)
+        migrate = function(service, "void MigrateLegacyWaterColumns(")
+        self.assertIn("!HasValidWaterColumnState(*source)", migrate)
+        self.assertIn("!HasValidWaterColumnState(*destination)", migrate)
+        shield = SOURCE.read_text(encoding="utf-8")
+        for signature in ("std::shared_ptr<Chunk> SHIELD_WorldSystem::resolve_water_column(",
+                          "std::shared_ptr<Chunk> SHIELD_WorldSystem::read_committed_chunk("):
+            self.assertIn("Persistence::HasValidWaterColumnState(*chunk)",
+                          function(shield, signature))
+        native = (ROOT / "test/common/RegionalWater_test.cpp").read_text(encoding="utf-8")
+        # The positive cases run each scenario through a registered helper.
+        for name, helper in (
+                ("IndexedUnownedCanonicalWaterSurvivesLoadAndResolution",
+                 "VerifyIndexedUnownedCanonicalWater"),
+                ("DormantOffLayerOwnersMigrateWithoutActiveGrids",
+                 "VerifyDormantOffLayerMigration")):
+            case = function(native, f"TEST(RegionalWaterMigration, {name})")
+            self.assertIn(f"{helper}(scenario);", case)
+            body = function(native, f"void {helper}(int scenario)")
+            self.assertIn("saved.service.load_world(", body)
+            self.assertIn("EXPECT_EQ(saved.bytes(), bytes);", body)
+            self.assertIn("ASSERT_TRUE(saved.save_dirty(loaded, errors));", body)
+        for name in ("UnownedCanonicalAndDormantOffLayerPartialStatesRefuse",
+                     "ConflictingDormantOwnersRefuseWithoutChangingSavedBytes"):
+            case = function(native, f"TEST(RegionalWaterMigration, {name})")
+            self.assertIn("saved.service.load_world(", case)
+            self.assertIn("EXPECT_EQ(saved.bytes(), bytes);", case)
+
+    def test_water_backfill_preserves_resident_identity_in_both_generation_backends(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        dispatch = function(source, "JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(\n"
+                            "    const std::vector<ChunkGenerationRequest>&")
+        self.assertIn("existing->second->has_water_authority() ||", dispatch)
+        self.assertIn("existing->second->has_pending_water_retirement()", dispatch)
+        self.assertIn("? existing->second : std::make_shared<Luminumbra::Chunk>(coords)", dispatch)
+        self.assertIn("GenerateChunkData(*chunk, target_step);", dispatch)
+        self.assertIn("m_job_system->dispatch_batch(jobs)", dispatch)
+        self.assertIn("job();", dispatch)
+        restore = function(source, "bool SHIELD_WorldSystem::restore_authoritative_chunk(")
+        self.assertIn("resident->second->has_water_authority() ||", restore)
+        self.assertIn("resident->second->has_pending_water_retirement()", restore)
+        self.assertNotIn("is_voxel_data_dirty()", restore)
+
+    def test_water_ownership_cannot_settle_live_loading_adoption(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        adopt = function(source, "bool SHIELD_WorldSystem::adopt_streamed_chunk(")
+        lifecycle = adopt[:adopt.index("if (!m_parked.empty())")]
+        self.assertNotIn("chunk->has_water_authority()", lifecycle)
+        self.assertNotIn("chunk->has_pending_water_retirement()", lifecycle)
+        restore = function(source, "bool SHIELD_WorldSystem::restore_authoritative_chunk(")
+        self.assertLess(restore.index("chunk->normalize_for_park();"),
+                        restore.index("adopt_streamed_chunk(chunk)"))
+        session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(
+            encoding="utf-8")
+        entry = function(session, "void GameSession::AdoptWorldStateFrom(")
+        self.assertLess(entry.index("chunk->set_state(has_mesh ? ChunkState::Ready : ChunkState::Idle);"),
+                        entry.index("adopt_streamed_chunk(chunk)"))
+
+    def test_water_retirement_acknowledgement_is_independent_of_generation(self):
+        header = (ROOT / "src/luminumbra_common/world/Chunk.h").read_text(encoding="utf-8")
+        dirty = function(header, "bool is_voxel_data_dirty() const")
+        self.assertIn("|| has_pending_water_retirement()", dirty)
+        retirement = function(header, "void retire_legacy_water()")
+        self.assertIn("clear_water_data();", retirement)
+        self.assertIn("m_pending_water_retirement.store(true,", retirement)
+        for name in ("void mark_sdf_generated_current_params()",
+                     "void clear_voxel_data_dirty_after_generation()"):
+            self.assertNotIn("m_pending_water_retirement", function(header, name))
+        service = (ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp").read_text(
+            encoding="utf-8")
+        migrate = function(service, "void MigrateLegacyWaterColumns(")
+        self.assertIn("source->retire_legacy_water();", migrate)
+        ack = function(service, "WorldSaveService::chunk_save_acknowledgement(")
+        self.assertIn("revision.chunk->acknowledge_water_retirement();", ack)
+        dirty_save = function(service, "WorldSaveDirtyReport WorldSaveService::save_dirty_chunks(")
+        self.assertLess(dirty_save.index("!prepared.publish("),
+                        dirty_save.index("transaction->defer_until_commit(std::move(acknowledge))"))
+
     def test_default_eviction_preserves_legacy_residency_probe(self):
         session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(
             encoding="utf-8")
@@ -532,10 +652,10 @@ class RegionAuthorityWiring(unittest.TestCase):
         self.assertIn("const AuthorityProfileOptions m_authorityProfile;", header)
         self.assertIn(": GameSession(AuthorityProfileOptions{}, AuthorityProfileTag{}) {}", session)
         self.assertIn(": m_authorityProfile(authority_profile)", session)
-        # Construction, eviction and nine water execution/publication gates are the only uses.
+        # Construction, eviction and eleven water load/execution/publication gates are the only uses.
         # Config, hashes and save writers cannot read this dormant profile.
-        self.assertEqual(session.count("m_authorityProfile"), 11)
-        self.assertEqual(session.count("m_authorityProfile.regional_water"), 9)
+        self.assertEqual(session.count("m_authorityProfile"), 13)
+        self.assertEqual(session.count("m_authorityProfile.regional_water"), 11)
         self.assertEqual(session.count("residency_free_eviction"), 1)
         native = (ROOT / "test/common/GameSessionHeadlessWorld_test.cpp").read_text(
             encoding="utf-8")
@@ -597,7 +717,7 @@ class RegionAuthorityWiring(unittest.TestCase):
         worker = dispatch.split("lane_jobs.emplace_back(", 1)[1]
         # Strong owners hold both the destination and immutable input until the
         # job exits. No mutable live arrays or revisions may be read by workers.
-        self.assertIn("[this, chunk, scratch_owner = std::move(scratch_owner), step, transition_faces, terrain_mesh_required]", worker)
+        self.assertIn("[this, chunk, seed_inputs, scratch_owner = std::move(scratch_owner), step, transition_faces, terrain_mesh_required]", worker)
         for live_read in ("chunk->sdf_data", "chunk->heightmap_data", "chunk->material_data",
                           "chunk->water_level_data", "chunk->water_depth_mm",
                           "chunk->voxel_revision()", "chunk->authority_hash_revision()",
@@ -702,9 +822,12 @@ class RegionAuthorityWiring(unittest.TestCase):
         adopt = function(source, "bool SHIELD_WorldSystem::adopt_streamed_chunk(")
         self.assertNotIn("reset_pending_jobs", adopt)
         self.assertNotIn("pending_lod.store", adopt)
-        self.assertIn("if (chunk_ptr->pending_lod.load(std::memory_order_acquire) >= 0) "
-                      "++m_streaming_telemetry_stats.pending_lod_chunks;",
+        self.assertIn("m_streaming_telemetry_stats.pending_lod_chunks = lifecycle.pending_lod_chunks;",
                       re.sub(r"\s+", " ", source))
+        index = (ROOT / "src/luminumbra_common/world/ActivationResidencyIndex.h").read_text(encoding="utf-8")
+        observe = function(index, "void observe_lifecycle(")
+        self.assertIn("chunk.pending_lod.load(std::memory_order_acquire) >= 0 ? 32u : 0u", observe)
+        self.assertIn("adjust(m_lifecycle_counts.pending_lod_chunks, 32u);", index)
         header = SOURCE.with_suffix(".h").read_text(encoding="utf-8")
         self.assertIn("pending_lod_chunks == 0 && !promotion_pending", header)
         chunk = (ROOT / "src/luminumbra_common/world/Chunk.h").read_text(encoding="utf-8")

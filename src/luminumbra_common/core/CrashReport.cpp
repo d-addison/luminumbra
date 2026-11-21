@@ -4,6 +4,7 @@
 #endif
 
 #include "core/CrashReport.h"
+#include "core/NativeFileOwner.h"
 
 #include <array>
 #include <atomic>
@@ -632,12 +633,8 @@ bool InstallCrashCapture(const std::filesystem::path& crash_dir, std::string_vie
         return false;
     }
 #endif
+    Luminumbra::Filesystem::NativeFileOwner pending(candidate.target);
     if (!WriteHeader(candidate.target, program_name, pid)) {
-#if defined(_WIN32)
-        CloseHandle(candidate.target);
-#else
-        ::close(candidate.target);
-#endif
         return false;
     }
     std::filesystem::path report = crash_dir / candidate.report.filename();
@@ -652,11 +649,11 @@ bool InstallCrashCapture(const std::filesystem::path& crash_dir, std::string_vie
     SetUnhandledExceptionFilter(&HandleUnhandledException);
 #else
     if (!InstallSignalHandlers()) {
-        ::close(candidate.target);
         return false;
     }
     g_report_fd.store(candidate.target);
 #endif
+    pending.release(); // Published targets remain open for the crash handlers.
     targets[target_count++] = std::move(candidate);
     ReportPathStorage() = std::move(report);
     return true;

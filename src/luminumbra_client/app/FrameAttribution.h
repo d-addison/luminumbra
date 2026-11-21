@@ -136,6 +136,8 @@ private:
     FoliageFrame* m_previous = nullptr;
 };
 bool foliage_frame_active();
+// Completed rebuild time in the current collector, zero when collection is disabled.
+double foliage_total_ms();
 void record_render_uploads(const Rendering::UploadWorkStats& work, bool water, std::size_t pending);
 void record_foliage_rebuild(const FoliageRebuild& rebuild,
                             double milliseconds,
@@ -255,7 +257,10 @@ private:
 // The client and static-preview host each have one owning render thread/context.
 // This flag is written by that thread's frame collector only. Keep the GL fast
 // path independent of TLS initialization and phase-stack access.
-inline constinit bool shader_first_use_collection_enabled = false;
+inline bool& shader_first_use_collection_enabled() {
+    static constinit bool enabled = false;
+    return enabled;
+}
 // Completed exclusive phases, also usable inside an open enclosing phase.
 double phase_total_ms();
 class PhaseScope {

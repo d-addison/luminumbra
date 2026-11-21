@@ -203,8 +203,40 @@ void ShadowPass::reset_shader() {
     m_tint_shader.reset();
 }
 
+ShadowPass::CallerState ShadowPass::CallerState::QueryExternal() {
+    GLint origin = 0, mode = 0, face = 0;
+    GLdouble clear = 0;
+    glGetIntegerv(GL_CLIP_ORIGIN, &origin);
+    glGetIntegerv(GL_CLIP_DEPTH_MODE, &mode);
+    glGetDoublev(GL_DEPTH_CLEAR_VALUE, &clear);
+    glGetIntegerv(GL_CULL_FACE_MODE, &face);
+    return {.depth = PassDepthState::QueryExternal(),
+            .clip_origin = static_cast<GLenum>(origin),
+            .clip_depth = static_cast<GLenum>(mode),
+            .clear_depth = clear,
+            .cull_face = static_cast<GLenum>(face),
+            .cull_enabled = glIsEnabled(GL_CULL_FACE)};
+}
+
+void ShadowPass::CallerState::Restore() const {
+    glClipControl(clip_origin, clip_depth);
+    glClearDepth(clear_depth);
+    depth.Restore();
+    glCullFace(cull_face);
+    if (cull_enabled)
+        glEnable(GL_CULL_FACE);
+    else
+        glDisable(GL_CULL_FACE);
+}
+
 std::array<TerrainSubmitStats, ShadowMap::CASCADE_COUNT>
-ShadowPass::execute(const RenderContext& ctx, const ShadowPassInput& input) {
+ShadowPass::execute_external(const RenderContext& ctx, const ShadowPassInput& input) {
+    LUMIN_PROFILE_ZONE_N("GL ShadowPass.execute_external");
+    return execute(ctx, input, CallerState::QueryExternal());
+}
+
+std::array<TerrainSubmitStats, ShadowMap::CASCADE_COUNT> ShadowPass::execute(
+    const RenderContext& ctx, const ShadowPassInput& input, const CallerState& caller) {
     LUMIN_PROFILE_ZONE_N("GL ShadowPass.execute");
     (void)
         ctx; // Shadow reads no RenderContext fields; its inputs are m_shadow_map + ShadowPassInput.
@@ -223,12 +255,7 @@ ShadowPass::execute(const RenderContext& ctx, const ShadowPassInput& input) {
 
     // Shadow coordinates and shader PCF remain conventional. Restore the caller's
     // scene convention after both opaque and tinted shadow draws.
-    GLint clip_origin = 0, clip_depth = 0, depth_func = 0;
-    GLdouble clear_depth = 0;
-    glGetIntegerv(GL_CLIP_ORIGIN, &clip_origin);
-    glGetIntegerv(GL_CLIP_DEPTH_MODE, &clip_depth);
-    glGetIntegerv(GL_DEPTH_FUNC, &depth_func);
-    glGetDoublev(GL_DEPTH_CLEAR_VALUE, &clear_depth);
+    ReplayRollback restore_raster([&caller]() noexcept { caller.Restore(); });
     glClipControl(GL_LOWER_LEFT, GL_NEGATIVE_ONE_TO_ONE);
 
     m_shadow_map.light_space_matrices = light_space_matrices;
@@ -311,7 +338,8 @@ ShadowPass::execute(const RenderContext& ctx, const ShadowPassInput& input) {
                 m_tint_shader->setMat4("u_model", pane.model);
                 m_tint_shader->setVec3("u_tint", pane.tint);
                 m_tint_shader->setFloat("u_thickness", pane.thickness);
-                Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLES, 0, 6);
+                Luminumbra::Rendering::AttributedGl::Submit(
+                    glDrawArrays, GLenum{GL_TRIANGLES}, 0, 6);
             }
             glBindVertexArray(0);
         }
@@ -322,9 +350,6 @@ ShadowPass::execute(const RenderContext& ctx, const ShadowPassInput& input) {
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glClipControl(static_cast<GLenum>(clip_origin), static_cast<GLenum>(clip_depth));
-    glDepthFunc(static_cast<GLenum>(depth_func));
-    glClearDepth(clear_depth);
     return cascade_stats;
 }
 

@@ -1,5 +1,6 @@
 #include "Input.h"
 #include "core/Log.h"
+#include "core/StrictNumeric.h"
 #include <RmlUi/Core/Elements/ElementFormControl.h>
 #include <RmlUi/Core/StringUtilities.h>
 
@@ -165,9 +166,8 @@ void Input::BindValue(Property<std::string>& property) {
     SetValue(property.Get());
 
     // Subscribe to property changes
-    TrackSubscription(property, [this](const std::string& oldValue, const std::string& newValue) {
-        SetValue(newValue);
-    });
+    TrackSubscription(
+        property, [this](const std::string&, const std::string& newValue) { SetValue(newValue); });
 
     // Update property when input changes
     SetChangeHandler([&property](const std::string& newValue) { property.Set(newValue); });
@@ -179,7 +179,7 @@ void Input::BindEnabled(Property<bool>& property) {
 
     // Subscribe to changes
     TrackSubscription(property,
-                      [this](const bool& oldValue, const bool& newValue) { SetEnabled(newValue); });
+                      [this](const bool&, const bool& newValue) { SetEnabled(newValue); });
 }
 
 void Input::Focus() {
@@ -275,11 +275,11 @@ void Input::HandleChange(Rml::Event& event) {
     }
 }
 
-void Input::HandleFocus(Rml::Event& event) {
+void Input::HandleFocus(Rml::Event&) {
     AddClass("focused");
 }
 
-void Input::HandleBlur(Rml::Event& event) {
+void Input::HandleBlur(Rml::Event&) {
     RemoveClass("focused");
 
     // Validate on blur
@@ -321,17 +321,14 @@ bool Input::ValidateInternal(const std::string& value) {
     // Type-specific validation
     switch (m_type) {
         case Type::Email: {
-            std::regex emailPattern(R"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})");
+            static const std::regex emailPattern(
+                R"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})");
             return std::regex_match(value, emailPattern);
         }
 
         case Type::Number: {
-            try {
-                std::stod(value);
-                return true;
-            } catch (...) {
-                return false;
-            }
+            double parsed = 0.0;
+            return Core::ParseNumber(value, parsed);
         }
 
         case Type::Text:

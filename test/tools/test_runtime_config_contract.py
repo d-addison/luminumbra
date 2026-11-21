@@ -32,11 +32,127 @@ def cpp_block(source, anchor):
 
 
 class RuntimeConfigSourceContract(unittest.TestCase):
+    def test_strict_numeric_input_sites_share_the_checked_parser(self):
+        sites = {
+            "core/RuntimeScenarioConfig.cpp": (
+                "Core::ParseNumber(value,parsed)",
+                "Core::ParseNumber(dimensions.substr(0,x_pos),width)",
+                "Core::ParseNumber(dimensions.substr(x_pos+1),height)",
+                "Core::ParseNumber(s,v)",
+                'Core::ParseNumber(GetCommandLineOption(argc,argv,"--hang-watchdog-seconds","0"),watchdog_seconds)',
+            ),
+            "core/TimelapseVista.h": ("Core::ParseNumber(text,parsed)",),
+            "ui/components/common/Input.cpp": ("Core::ParseNumber(value,parsed)",),
+            "ui/Rml_UIManager.cpp": ("Core::ParseNumber(v,st.tod)",
+                                     "Core::ParseNumber(value,parsed)"),
+            "main_client.cpp": (
+                "Luminumbra::Core::ParseNumber(volumetric_option,quality)",
+                "Luminumbra::Core::ParseNumber(cy,g_app.capture.fixed_cam_yaw)",
+                "Luminumbra::Core::ParseNumber(cpi,g_app.capture.fixed_cam_pitch)",
+                "Luminumbra::Core::ParseNumber(*settle_env,v)",
+                "Luminumbra::Core::ParseNumber(ds,g_app.capture.timelapse_daystep)",
+                "Luminumbra::Core::ParseNumber(t0,g_app.capture.timelapse_tod)",
+                "Luminumbra::Core::ParseNumber(*value,scale)",
+                "Luminumbra::Core::ParseNumber(*cq,cloud_quality)",
+                "Luminumbra::Core::ParseNumber(*sq,ssao_quality)",
+            ),
+        }
+        for relative, calls in sites.items():
+            source = compact_cpp((ROOT / "src/luminumbra_client" / relative)
+                                 .read_text(encoding="utf-8"))
+            with self.subTest(source=relative):
+                self.assertNotRegex(source, r"\b(?:std::)?(?:sto[ifd]|stoull|atoi|atof|strtof)\(")
+                for call in calls:
+                    self.assertIn(call, source)
+
+    def test_strict_numeric_policies_and_volumetric_error_boundary(self):
+        source = compact_cpp((ROOT / "src/luminumbra_client/main_client.cpp")
+                             .read_text(encoding="utf-8"))
+        boundary = cpp_block(source, "try{if(!volumetric_option.empty())")
+        self.assertIn("if(!Luminumbra::Core::ParseNumber(volumetric_option,quality))"
+                      'throwstd::invalid_argument("Invalidintegervaluefor--volumetric-quality:"+'
+                      "volumetric_option);", boundary)
+        self.assertIn(boundary + 'catch(conststd::invalid_argument&error){'
+                      'LUMINUMBRA_CORE_ERROR("{}",error.what());return2;}', source)
+        for policy in ("intv=0;Luminumbra::Core::ParseNumber(*settle_env,v);if(v>0)",
+                       "floatscale=0.0f;Luminumbra::Core::ParseNumber(*value,scale);",
+                       "cloud_quality=0;Luminumbra::Core::ParseNumber(*cq,cloud_quality);",
+                       "ssao_quality=0;Luminumbra::Core::ParseNumber(*sq,ssao_quality);"):
+            self.assertIn(policy, source)
+        ui = compact_cpp((ROOT / "src/luminumbra_client/ui/Rml_UIManager.cpp")
+                         .read_text(encoding="utf-8"))
+        self.assertIn("st.tod=0.24f;Core::ParseNumber(v,st.tod);", ui)
+        self.assertIn("floatparsed=fallback;Core::ParseNumber(value,parsed);returnparsed;", ui)
+
+    def test_fixed_email_regex_has_one_immutable_cached_construction(self):
+        source = compact_cpp((ROOT / "src/luminumbra_client/ui/components/common/Input.cpp")
+                             .read_text(encoding="utf-8"))
+        email = cpp_block(source, "caseType::Email:")
+        self.assertEqual(email, '{staticconststd::regexemailPattern('
+                         'R"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})");'
+                         'returnstd::regex_match(value,emailPattern);}')
+        self.assertEqual(source.count("std::regexemailPattern("), 1)
+        # Optional fields retain their existing empty-value exemption.
+        self.assertIn("if(!m_required&&value.empty()){returntrue;}", source)
+
     @classmethod
     def setUpClass(cls):
         cls.client = compact_cpp((ROOT / "src/luminumbra_client/main_client.cpp").read_text(encoding="utf-8"))
         cls.runner = compact_cpp((ROOT / "src/luminumbra_server/ServerWorldRunner.cpp").read_text(encoding="utf-8"))
         cls.admission = compact_cpp((ROOT / "src/luminumbra_server/modes/ModeHelpers.cpp").read_text(encoding="utf-8"))
+
+    def test_capture_float_parse_failures_refuse_before_continuing(self):
+        # main() has no isolated invocation seam: pin the refusal at each parser.
+        for variable, target, flag in (
+                ("cy", "fixed_cam_yaw", "--cam-yaw"),
+                ("cpi", "fixed_cam_pitch", "--cam-pitch"),
+                ("ds", "timelapse_daystep", "--timelapse-daystep"),
+                ("t0", "timelapse_tod", "--timelapse-tod")):
+            with self.subTest(flag=flag):
+                body = cpp_block(self.client, f"if(!{variable}.empty())")
+                # Strict parsing rejects trailing junk and non-finite values.
+                parse = f"if(!Luminumbra::Core::ParseNumber({variable},g_app.capture.{target}))"
+                self.assertIn(parse, body)
+                self.assertNotIn("std::stof(", body)
+                failure = cpp_block(body, parse)
+                self.assertIn("return2;", failure)
+                self.assertIn("LUMINUMBRA_CORE_ERROR(", failure)
+                self.assertIn(flag, failure)
+
+    def test_preset_list_failures_have_process_bounded_diagnostics(self):
+        body = cpp_block(self.client, "g_uiManager->SetWorldPresetList(")
+        name_failure = cpp_block(body, "constautoreport_name_failure=")
+        enumeration_failure = body[body.rindex("catch(...)"):]
+        for failure in (name_failure, enumeration_failure):
+            self.assertIn("staticstd::atomic_flagreported{};", failure)
+            self.assertIn("if(!reported.test_and_set(std::memory_order_relaxed))"
+                          "LUMINUMBRA_CORE_WARN(", failure)
+        self.assertIn("catch(...){report_name_failure();}", body)
+        read = body[body.index("if(Luminumbra::Persistence::ReadSavedJson("):]
+        self.assertIn("else{report_name_failure();}", read)
+        self.assertIn("out.emplace_back(name,stem);", body)
+        self.assertTrue(body.endswith("returnout;}"))
+
+    def test_archetype_parse_diagnostic_is_process_bounded(self):
+        config = compact_cpp((ROOT / "src/luminumbra_client/core/RuntimeScenarioConfig.cpp")
+                             .read_text(encoding="utf-8"))
+        body = cpp_block(config, "if(config.skinned_albedo_texture.empty()&&"
+                         "!config.creature_archetype.empty())")
+        failure = cpp_block(body, "catch(...)")
+        self.assertIn("staticstd::atomic_flagreported{};", failure)
+        self.assertIn("if(!reported.test_and_set(std::memory_order_relaxed))"
+                      "LUMINUMBRA_CORE_WARN(", failure)
+
+    def test_moon_override_diagnostics_stay_in_one_time_initializers(self):
+        for filename, initializer, fallback in (
+                ("rendering/passes/LightingPass.cpp", "staticconstfloats_moon_wrap_floor=", "0.25f"),
+                ("rendering/RenderPipeline.cpp", "staticconstfloats_moon_env=", "-1.0f")):
+            with self.subTest(filename=filename):
+                source = compact_cpp((ROOT / "src/luminumbra_client" / filename)
+                                     .read_text(encoding="utf-8"))
+                body = cpp_block(source, initializer)
+                self.assertIn("LUMINUMBRA_CORE_WARN(", cpp_block(body, "catch(...)"))
+                self.assertTrue(body.endswith(f"return{fallback};}}"))
 
     def authority_capture_blocks(self):
         service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
@@ -1086,8 +1202,12 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         world = compact_cpp((ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
                             .read_text(encoding="utf-8"))
         read = cpp_block(world, "SHIELD_WorldSystem::read_committed_chunk(")
-        self.assertIn("RunWorkerBoundary(m_job_system,[&]{"
-                      "chunk=m_durable_chunk_loader(coords);});", read)
+        self.assertEqual(read.count("RunWorkerBoundary("), 1)
+        worker = cpp_block(read, "RunWorkerBoundary(m_job_system,[&]")
+        self.assertIn("chunk=m_durable_chunk_loader(coords);", worker)
+        self.assertLess(worker.index("chunk->get_coords()!=coords"),
+                        worker.index("if(prepare_water)"))
+        self.assertIn("ComputeHighWaterSeedInputs(*inputs,coords,*this);", worker)
         self.assertLess(read.index("RunWorkerBoundary("),
                         read.index("m_durable_chunk_fault(error.what())"))
         helper = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorkerBoundary.h")
@@ -1271,6 +1391,100 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertIn("returnFlushRemovalDirectory(path,errors)&&scope.commit(errors);", service[end:])
 
 
+class CaptureFailureSourceContract(unittest.TestCase):
+    def test_showcase_parse_failure_refuses_even_after_paths_were_assigned(self):
+        source = compact_cpp((ROOT / "src/luminumbra_client/core/scenarios/SkinnedMeshVisualSmoke.cpp")
+                             .read_text(encoding="utf-8"))
+        spawn = cpp_block(source, "SkinnedMeshVisualTargetSpawnSkinnedMeshVisualEntity(")
+        parse = cpp_block(spawn, "try")
+        # Syntax errors and wrong types in any field share the same refusal, including
+        # a bad label encountered after both paths have already been assigned.
+        for field, destination in (("mesh", "mesh_rel"), ("clip", "clip_rel"),
+                                   ("label", "showcase_label")):
+            self.assertIn(destination + '=j.value("' + field + '",', parse)
+        refused = cpp_block(spawn, "catch(...)")
+        self.assertIn("LUMINUMBRA_CORE_ERROR(", refused)
+        self.assertIn("refusingcapture", refused)
+        self.assertIn('target.failure_reason="showcase_model_config_invalid";', refused)
+        self.assertTrue(refused.endswith("returntarget;}"))
+        self.assertLess(spawn.index(refused), spawn.index("conststd::filesystem::pathgmesh="))
+        self.assertLess(spawn.index(refused), spawn.index("registry.create()"))
+
+    def test_skinned_spawn_failure_propagates_to_nonzero_process_status(self):
+        source = compact_cpp((ROOT / "src/luminumbra_client/core/ScenarioRunnerDrive.cpp")
+                             .read_text(encoding="utf-8"))
+        drive = cpp_block(source, "boolScenarioRunnerImpl::driveSkinnedMeshVisual(")
+        attempt = cpp_block(drive, "if(!skinned_mesh_spawn_attempted)")
+        refused = cpp_block(attempt, "if(!skinned_mesh_visual_target.spawned)")
+        for statement in ("LUMINUMBRA_CORE_ERROR(", "scenario_failed=true;",
+                          "scenario_failure_reason=skinned_mesh_visual_target.failure_reason;",
+                          "exit_code=2;", "glfwSetWindowShouldClose(window,true);"):
+            self.assertIn(statement, refused)
+        self.assertTrue(refused.endswith("returntrue;}"))
+        self.assertLess(attempt.index("SpawnSkinnedMeshVisualEntity("), attempt.index(refused))
+        self.assertLess(drive.index(refused), drive.index("if(scenario_config.wildlife"))
+        self.assertLess(drive.index(refused), drive.index("ApplySkinnedMeshVisualCamera("))
+        dispatch = cpp_block(source, "ScenarioRunnerImpl::onGameStateInGame(")
+        self.assertIn("driveSkinnedMeshVisual(deltaTime)", dispatch)
+        self.assertIn("returnscenario_failed?InGameDrive::kBreakCase:InGameDrive::kHandled;", dispatch)
+        client = compact_cpp((ROOT / "src/luminumbra_client/main_client.cpp")
+                             .read_text(encoding="utf-8"))
+        self.assertIn("returnexit_code;", client)
+
+    def test_preview_deadline_report_failure_preserves_terminal_diagnostic_and_status(self):
+        for name, diagnostic in (("main.cpp", "static-preview"), ("ViewportServe.cpp", "viewport")):
+            with self.subTest(source=name):
+                source = (ROOT / "tools/static_preview" / name).read_text(encoding="utf-8")
+                report = source.index('WriteJson(')
+                catch = source.index("catch (...)", report)
+                reason = cpp_block(source[catch:], "catch (...)")
+                self.assertIn("report is best-effort", reason)
+                self.assertIn("must not prevent the deadline", reason)
+                self.assertIn("exit status 124", reason)
+                terminal = source[source.index(reason, catch) + len(reason):]
+                self.assertRegex(terminal, r'^\s*std::cerr << "' + diagnostic +
+                                 r' watchdog deadline exceeded\\n" << std::flush;\s*std::_Exit\(124\);')
+
+    def test_preview_refusal_report_failure_preserves_primary_error_and_status(self):
+        for name, diagnostic in (("main.cpp", "static-preview"), ("ViewportServe.cpp", "viewport")):
+            with self.subTest(source=name):
+                source = (ROOT / "tools/static_preview" / name).read_text(encoding="utf-8")
+                start = source.index('std::cerr << "' + diagnostic + ' refused: "')
+                refused = source[start:]
+                catch = refused.index("catch (...)")
+                reason = cpp_block(refused[catch:], "catch (...)")
+                self.assertIn("refusal is already on stderr", reason)
+                self.assertIn("must not", reason)
+                self.assertIn("prevent returning status 1", reason)
+                self.assertLess(refused.index('"failure.json"'), catch)
+                self.assertRegex(refused[refused.index(reason, catch) + len(reason):],
+                                 r'^\s*\}?\s*return 1;')
+
+    def test_publication_rollback_exception_has_a_nothrow_cleanup_reason(self):
+        source = (ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp").read_text(
+            encoding="utf-8")
+        destructor = cpp_block(source, "~NewFilePublication()")
+        reason = cpp_block(destructor, "catch (const std::exception&)")
+        self.assertIn("must not throw during stack unwinding", reason)
+        self.assertIn("artifact that cannot be removed", reason)
+        self.assertIn("descriptor and temporary cleanup continue", reason)
+        self.assertLess(destructor.index(reason), destructor.index("::close(m_descriptor)"))
+        self.assertLess(destructor.index("::close(m_descriptor)"),
+                        destructor.index("RemoveTemporaryFile(m_temp)"))
+
+    def test_viewport_instance_builder_borrows_the_prefab_and_retains_each_instance(self):
+        source = compact_cpp((ROOT / "tools/static_preview/ViewportServe.cpp")
+                             .read_text(encoding="utf-8"))
+        # Borrowing removes one shared ownership increment/decrement per rebuild;
+        # every output instance must still retain its own shared ownership.
+        signature = ("std::vector<StaticInstanceDescription>Instances(constJson&state,"
+                     "conststd::shared_ptr<constStaticPrefab>&prefab)")
+        instances = cpp_block(source, signature)
+        self.assertIn("instance.prefab=prefab;", instances)
+        self.assertLess(source.index("Instances(state,candidate)"),
+                        source.index("prefab=std::move(candidate);"))
+
+
 class RegionalEnergySourceContract(unittest.TestCase):
     def test_energy_ownership_reads_only_overlapping_pages_without_serialization(self):
         source = compact_cpp((ROOT / "src/luminumbra_common/fields/EnergyFieldState.cpp")
@@ -1403,6 +1617,74 @@ class RegionalEnergySourceContract(unittest.TestCase):
         self.assertIn("if(!can_exchange(lhs,rhs)||!admitted(lhs,rhs))", header)
         self.assertIn("admits(lhs%width_,lhs/width_,rhs%width_,rhs/width_)", header)
         self.assertIn("returndiffuse<EdgeGate>(iterations,diffusion_rate,gate);", source)
+
+
+class StreamingLifecycleSourceContract(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.world = compact_cpp((ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+                                .read_text(encoding="utf-8"))
+        cls.index = compact_cpp((ROOT / "src/luminumbra_common/world/ActivationResidencyIndex.h")
+                                .read_text(encoding="utf-8"))
+        cls.native = (ROOT / "test/common/ActivationResidencyIndex_test.cpp").read_text(encoding="utf-8")
+
+    def test_both_census_boundaries_read_exact_transition_counts(self):
+        update = cpp_block(self.world, "voidSHIELD_WorldSystem::update(entt::registry&registry,"
+                           "conststd::vector<Vec3>&anchor_positions,")
+        before = update[update.index("m_last_streaming_budget_stats.active_chunks_before="):]
+        before = before[:before.index("_dbg_split(")]
+        after = update[update.index("m_last_streaming_budget_stats.active_chunks_after="):]
+        after = after[:after.index("m_streaming_telemetry_stats.generation_batches=")]
+        for boundary in (before, after):
+            self.assertEqual(boundary.count("streaming_lifecycle_counts()"), 1)
+            self.assertNotIn("for(", boundary)
+        read = cpp_block(self.world, "SHIELD_WorldSystem::streaming_lifecycle_counts()")
+        self.assertIn("#ifndefNDEBUG", read)
+        self.assertIn("assert(counts==expected)", read)
+        self.assertIn("pending_lod.load(std::memory_order_acquire)>=0", read)
+        for match in re.finditer(r"(chunk|item\.chunk)->pending_lod\.store\([^;]+;", self.world):
+            self.assertTrue(self.world[match.end():].startswith(
+                "m_activation_index.observe_lifecycle(*" + match[1] + ");"))
+        state = cpp_block(self.world, "voidSHIELD_WorldSystem::set_renderable_chunk_state(")
+        self.assertIn("chunk.set_state(state)", state)
+        self.assertNotIn("m_activation_index", state)
+        self.assertIn("observe_lifecycle(*chunk)", cpp_block(self.index, "voidinsert("))
+        self.assertIn("adjust_lifecycle(previous->second.mask,false)",
+                      cpp_block(self.index, "voiderase("))
+        self.assertIn("m_lifecycle_counts={}", cpp_block(self.index, "voidclear()"))
+        self.assertIn("++m_counters.lifecycle_chunk_visits", self.index)
+        read_index = cpp_block(self.index, "constLifecycleCounts&lifecycle_counts()")
+        self.assertIn("for(constautoid:m_pending_lifecycle)", read_index)
+        self.assertNotIn("resident_columns()", read_index)
+        self.assertNotIn(":m_columns)", read_index)
+        self.assertIn("TEST(ActivationResidencyIndex, SettledLifecycleReadsVisitOnlyChangedResidents)",
+                      self.native)
+
+    def test_equivalence_and_worker_handoff_use_registered_production_paths(self):
+        # The native old/new oracle must exercise the production census reads,
+        # not only a standalone model that would leave the old full walks live.
+        self.assertEqual(self.world.count("streaming_lifecycle_counts()"), 3)
+        case = cpp_block(compact_cpp(self.native),
+                         "TEST(ActivationResidencyIndex,LifecycleCensusPreservesScriptedSelectionAndOrder)")
+        for expression in ("FullScan(world,anchors,2)", "ExpectLifecycleStats(world)",
+                           "world.generation_queue_prefix(1024)",
+                           "expected[index].coords", "lifecycle_snapshots"):
+            self.assertIn(expression, case)
+        self.assertIn("LifecycleTransitionsMatchCensusIncludingReplacementAndStaleWork", self.native)
+        self.assertIn("DirectStateWritersCoalesceAndRefusalsLeaveCensusUnchanged", self.native)
+        chunk = compact_cpp((ROOT / "src/luminumbra_common/world/Chunk.h").read_text(encoding="utf-8"))
+        chunk_source = compact_cpp((ROOT / "src/luminumbra_common/world/Chunk.cpp")
+                                   .read_text(encoding="utf-8"))
+        for setter in (cpp_block(chunk, "voidset_state("),
+                       cpp_block(chunk_source, "boolChunk::try_set_state(")):
+            self.assertIn("m_state=new_state;notify_lifecycle_change();", setter)
+        self.assertIn("m_lifecycle_changes->take(m_pending_lifecycle)", self.index)
+        ready = cpp_block(self.world, "boolSHIELD_WorldSystem::EnsureSurfaceReadyNear(")
+        self.assertIn("set_renderable_chunk_state(*chunk,ChunkState::Meshing)", ready)
+        self.assertIn("set_renderable_chunk_state(*chunk,ChunkState::Ready)", ready)
+        self.assertNotIn("observe_lifecycle", ready)
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("common/ActivationResidencyIndex_test.cpp", cmake)
 
 
 if __name__ == "__main__":

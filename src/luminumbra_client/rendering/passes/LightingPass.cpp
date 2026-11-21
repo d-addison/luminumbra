@@ -1,5 +1,6 @@
 #include "LightingPass.h"
 #include "../FarWorldReplay.h"
+#include "../IndexedUniformNames.h"
 #include "../RenderingDefaults.h"
 #include "DebugViewPass.h"
 #include "core/Profiler.h"
@@ -29,7 +30,19 @@
 
 namespace Luminumbra::Rendering {
 
-LightingPass::LightingPass() = default;
+struct LightingPass::UniformNames {
+    struct Lighting {
+        IndexedUniformNames<32, 4> points;
+        IndexedUniformNames<ShadowMap::CASCADE_COUNT> cascades;
+    };
+    Lighting normal;
+    Lighting contribution;
+    IndexedUniformNames<kMaxLiveStrikeFlashes, 3> flashes;
+    IndexedUniformNames<kMaxBoltSegmentPoints, 2> bolts;
+};
+
+LightingPass::LightingPass()
+    : m_uniform_names(std::make_unique<UniformNames>()) {}
 LightingPass::~LightingPass() {
     reset_contributions();
 }
@@ -134,6 +147,7 @@ bool LightingPass::prepare_contributions(const RenderContext& ctx) {
         m_contribution_source_program = m_lighting_shader->Id();
     }
     if (!m_contribution_shader) {
+        m_uniform_names->contribution = {};
         m_contribution_shader =
             std::make_unique<Shader>(m_lighting_shader->VertexPath().c_str(),
                                      m_lighting_shader->FragmentPath().c_str(),
@@ -186,6 +200,7 @@ void LightingPass::init_shader(const std::filesystem::path& root_path) {
     m_contribution_source_program = 0;
     reset_contributions();
     m_root_path = root_path; // retained for the lazy lightning overlay ()
+    m_uniform_names->normal = {};
     m_lighting_shader =
         std::make_unique<Shader>((root_path / "res/shaders/lighting_pass.vert").string().c_str(),
                                  (root_path / "res/shaders/lighting_pass.frag").string().c_str());
@@ -378,6 +393,9 @@ void LightingPass::execute(const RenderContext& ctx) {
     if (contribution.ready()) {
         lighting_shader = m_contribution_shader.get();
     }
+    auto& uniform_names =
+        contribution.ready() ? m_uniform_names->contribution : m_uniform_names->normal;
+    const auto generation = lighting_shader->ProgramGeneration();
     lighting_shader->use();
     if (contribution.ready()) {
         lighting_shader->setInt("u_contributionMode", diagnostics.view);
@@ -488,7 +506,10 @@ void LightingPass::execute(const RenderContext& ctx) {
             if (const auto value = Core::ReadEnvironment("LUMIN_MOON_WRAP_FLOOR")) {
                 try {
                     return std::stof(*value);
-                } catch (...) {}
+                } catch (...) {
+                    // The static initializer bounds this diagnostic to once per process.
+                    LUMINUMBRA_CORE_WARN("Invalid LUMIN_MOON_WRAP_FLOOR; using 0.25");
+                }
             }
             return 0.25f;
         }();
@@ -531,11 +552,15 @@ void LightingPass::execute(const RenderContext& ctx) {
         throw std::invalid_argument("Lighting point-light count exceeds shader capacity");
     lighting_shader->setInt("u_pointLightCount", static_cast<int>(point_light_count));
     for (size_t i = 0; i < point_light_count; ++i) {
-        std::string prefix = "u_pointLights[" + std::to_string(i) + "].";
-        lighting_shader->setVec3(prefix + "position", (*ctx.point_lights)[i].position);
-        lighting_shader->setVec3(prefix + "color", (*ctx.point_lights)[i].color);
-        lighting_shader->setFloat(prefix + "radius", (*ctx.point_lights)[i].radius);
-        lighting_shader->setFloat(prefix + "intensity", (*ctx.point_lights)[i].intensity);
+        const auto& names = uniform_names.points.Get(generation, i, [](std::size_t index) {
+            const std::string prefix = "u_pointLights[" + std::to_string(index) + "].";
+            return IndexedUniformNames<32, 4>::Names{
+                prefix + "position", prefix + "color", prefix + "radius", prefix + "intensity"};
+        });
+        lighting_shader->setVec3(names[0], (*ctx.point_lights)[i].position);
+        lighting_shader->setVec3(names[1], (*ctx.point_lights)[i].color);
+        lighting_shader->setFloat(names[2], (*ctx.point_lights)[i].radius);
+        lighting_shader->setFloat(names[3], (*ctx.point_lights)[i].intensity);
     }
     // Cave / sky-visibility ambient occlusion (render-only). Default OFF =>
     // u_caveAmbientOcclusion 0.0 => the shader's skyVis term is exactly 1.0 =>
@@ -576,11 +601,20 @@ void LightingPass::execute(const RenderContext& ctx) {
             ctx.light_space_matrices->size() <= static_cast<size_t>(i)) {
             if (!ctx.static_studio)
                 throw std::invalid_argument("Missing lighting cascade matrices");
-            lighting_shader->setMat4("u_lightSpaceMatrices[" + std::to_string(i) + "]",
-                                     glm::mat4(1));
+            const auto& names = uniform_names.cascades.Get(
+                generation, static_cast<std::size_t>(i), [](std::size_t index) {
+                    return IndexedUniformNames<ShadowMap::CASCADE_COUNT>::Names{
+                        "u_lightSpaceMatrices[" + std::to_string(index) + "]"};
+                });
+            lighting_shader->setMat4(names[0], glm::mat4(1));
             continue;
         }
-        lighting_shader->setMat4("u_lightSpaceMatrices[" + std::to_string(i) + "]",
+        const auto& names = uniform_names.cascades.Get(
+            generation, static_cast<std::size_t>(i), [](std::size_t index) {
+                return IndexedUniformNames<ShadowMap::CASCADE_COUNT>::Names{
+                    "u_lightSpaceMatrices[" + std::to_string(index) + "]"};
+            });
+        lighting_shader->setMat4(names[0],
                                  (*ctx.light_space_matrices)[static_cast<std::size_t>(i)]);
     }
     glm::vec3 terrainOrigin(floor(eye.x / CHUNK_SIZE_X) * CHUNK_SIZE_X,
@@ -638,6 +672,8 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
     if (!m_lightning_overlay_shader) {
         if (ctx.frozen_replay)
             return;
+        m_uniform_names->flashes.Reset();
+        m_uniform_names->bolts.Reset();
         m_lightning_overlay_shader = std::make_unique<Shader>(
             (m_root_path / "res/shaders/lightning_overlay.vert").string().c_str(),
             (m_root_path / "res/shaders/lightning_overlay.frag").string().c_str());
@@ -692,6 +728,7 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_BLEND); // shader reads the scene copy and writes pulse+bolt added
 
+    const auto generation = m_lightning_overlay_shader->ProgramGeneration();
     m_lightning_overlay_shader->use();
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, m_lightning_scene_copy);
@@ -712,10 +749,14 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
     m_lightning_overlay_shader->setInt("u_flashCount", static_cast<int>(flash_count));
     for (std::size_t i = 0; i < flash_count; ++i) {
         const auto& flash = lit.flashes.entries[i];
-        const std::string suffix = "[" + std::to_string(i) + "]";
-        m_lightning_overlay_shader->setVec2("u_flashNdc" + suffix, flash.strike_ndc);
-        m_lightning_overlay_shader->setFloat("u_flashPulse" + suffix, flash.pulse);
-        m_lightning_overlay_shader->setInt("u_flashOnscreen" + suffix, flash.onscreen ? 1 : 0);
+        const auto& names = m_uniform_names->flashes.Get(generation, i, [](std::size_t index) {
+            const std::string suffix = "[" + std::to_string(index) + "]";
+            return IndexedUniformNames<kMaxLiveStrikeFlashes, 3>::Names{
+                "u_flashNdc" + suffix, "u_flashPulse" + suffix, "u_flashOnscreen" + suffix};
+        });
+        m_lightning_overlay_shader->setVec2(names[0], flash.strike_ndc);
+        m_lightning_overlay_shader->setFloat(names[1], flash.pulse);
+        m_lightning_overlay_shader->setInt(names[2], flash.onscreen ? 1 : 0);
     }
     m_lightning_overlay_shader->setFloat("u_boltWidth", lit.bolt_width_ndc);
     m_lightning_overlay_shader->setFloat("u_boltGlow", lit.bolt_glow_ndc);
@@ -727,11 +768,16 @@ void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {
         std::min(lit.bolt_points_ndc.size(), static_cast<std::size_t>(kMaxBoltSegmentPoints)));
     m_lightning_overlay_shader->setInt("u_boltCount", point_count);
     for (int i = 0; i < point_count; ++i) {
-        m_lightning_overlay_shader->setVec2("u_bolt[" + std::to_string(i) + "]",
+        const auto& names = m_uniform_names->bolts.Get(
+            generation, static_cast<std::size_t>(i), [](std::size_t index) {
+                const std::string suffix = "[" + std::to_string(index) + "]";
+                return IndexedUniformNames<kMaxBoltSegmentPoints, 2>::Names{
+                    "u_bolt" + suffix, "u_boltInverseDepth" + suffix};
+            });
+        m_lightning_overlay_shader->setVec2(names[0],
                                             lit.bolt_points_ndc[static_cast<std::size_t>(i)]);
         m_lightning_overlay_shader->setFloat(
-            "u_boltInverseDepth[" + std::to_string(i) + "]",
-            lit.bolt_points_ndc[static_cast<std::size_t>(i)].inverse_depth);
+            names[1], lit.bolt_points_ndc[static_cast<std::size_t>(i)].inverse_depth);
     }
 
     glBindVertexArray(ctx.screen_quad_vao);
