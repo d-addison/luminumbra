@@ -11,6 +11,7 @@
 #include "../core/SimulationClock.h"
 #include "../core/SystemConfig.h"
 #include "../fields/FieldPageState.h"
+#include "../persistence/SaveWorkCounts.h"
 #include "../simulation/SimBudgetTelemetry.h"
 #include "../simulation/SimulationEventBus.h"
 #include "../systems/PollinationSystem.h"
@@ -97,14 +98,15 @@ struct WorldConfigValidationResult {
     std::vector<std::string> errors;
 };
 
-// Counters for one runtime world-state save pass. The on-disk layout
-// is a whole-world snapshot, so chunks_saved is the full streamed chunk count
-// whenever a write happened and zero otherwise.
+// Selection counters for one runtime save pass. chunks_saved retains the selected
+// chunk count when writing is requested; work measures actual chunk serialization,
+// region rewrites (including siblings), compression and validation, even on refusal.
 struct WorldStateSaveReport {
     std::size_t chunks_total = 0;
     std::size_t chunks_dirty = 0;
     std::size_t chunks_saved = 0;
     bool saved = false;
+    Persistence::SaveWorkCounts work{};
 };
 
 struct PersistenceStatus {
