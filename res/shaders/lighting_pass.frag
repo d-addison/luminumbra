@@ -1,7 +1,15 @@
 #version 450 core
 #include "far_world_position.glsl"
 #include "config_constants.gen.glsl"
+#ifdef LUMIN_DIAG_CONTRIBUTIONS
+layout(location = 0)
+#endif
 out vec4 FragColor;
+#ifdef LUMIN_DIAG_CONTRIBUTIONS
+layout(location = 1) out vec4 DiagnosticContribution;
+uniform int u_contributionMode;
+vec3 diagnosticLightSpecular = vec3(0.0);
+#endif
 
 in vec2 TexCoords;
 
@@ -295,6 +303,48 @@ vec3 environmentBrdf(float NdotV, vec3 F0, float roughness) {
     vec2 AB = texture(u_environmentBrdf, (coordinate * 63.0 + 0.5) / 64.0).rg;
     return clamp(F0 * AB.x + AB.y, vec3(0.0), vec3(1.0));
 }
+#ifdef LUMIN_DIAG_CONTRIBUTIONS
+// Written only by the actual production selector/projection below. Bypassed receivers
+// (studio/far surfaces) retain -2: never pretend they sampled a cascade.
+vec3 diagnosticCascade = vec3(-2.0);
+vec3 diagnosticShadowUv = vec3(-2.0);
+vec3 diagnosticDpdx;
+vec3 diagnosticDpdy;
+bool diagnosticQuadValid;
+bool diagnosticShadowObserved = false;
+
+bool diagnosticPositionAt(vec2 uv, inout vec3 position) {
+    bool reconstructed = farWorldPosition(gPosition, u_sceneDepth, uv, position);
+    // Legacy storage reports success for cleared sky texels as well.
+    return reconstructed && !any(isnan(position)) && !any(isinf(position)) &&
+        dot(position, position) >= 1e-8;
+}
+#endif
+// Interpolate visibility after comparison, never the stored depths. The
+// separable four by four box needs only 25 nearest-depth taps. Fractional
+// edge weights remove texel-sized steps without increasing the surface budget.
+float filteredShadow(vec3 projected, int cascadeIndex, float bias) {
+    if (any(lessThan(projected, vec3(0.0))) || any(greaterThan(projected, vec3(1.0)))) {
+        return 1.0;
+    }
+    const int WIDTH = 4;
+    vec2 size = vec2(textureSize(u_shadowCascades, 0).xy);
+    vec2 texelPosition = projected.xy * size;
+    vec2 phase = fract(texelPosition);
+    vec2 base = floor(texelPosition) - vec2(float(WIDTH / 2));
+    float visibility = 0.0;
+    for (int x = 0; x <= WIDTH; ++x) {
+        float wx = x == 0 ? 1.0 - phase.x : (x == WIDTH ? phase.x : 1.0);
+        for (int y = 0; y <= WIDTH; ++y) {
+            float wy = y == 0 ? 1.0 - phase.y : (y == WIDTH ? phase.y : 1.0);
+            vec2 uv = (base + vec2(x, y) + 0.5) / size;
+            float depth = texture(u_shadowCascades, vec3(uv, cascadeIndex)).r;
+            visibility += wx * wy * (projected.z - bias > depth ? 0.0 : 1.0);
+        }
+    }
+    return visibility / float(WIDTH * WIDTH);
+}
+
 float CalculateShadow(vec3 fragPos, vec3 normal, vec3 lightDir, float viewDepth) {
     // 1. Determine which cascade to use in a branchless way
     int cascadeIndex = 0;
@@ -306,8 +356,39 @@ float CalculateShadow(vec3 fragPos, vec3 normal, vec3 lightDir, float viewDepth)
     vec4 fragPosLightSpace = u_lightSpaceMatrices[cascadeIndex] * vec4(fragPos, 1.0);
     vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
     projCoords = projCoords * 0.5 + 0.5;
+#ifdef LUMIN_DIAG_CONTRIBUTIONS
+    // The sun call observes the production cascade before the optional moon call.
+    if (!diagnosticShadowObserved) {
+        diagnosticShadowObserved = true;
+        diagnosticCascade = vec3(float(cascadeIndex), projCoords.xy);
+        if (diagnosticQuadValid) {
+            vec2 shadowSize = vec2(textureSize(u_shadowCascades, 0).xy);
+            vec4 lightDx = u_lightSpaceMatrices[cascadeIndex] * vec4(fragPos + diagnosticDpdx, 1.0);
+            vec4 lightDy = u_lightSpaceMatrices[cascadeIndex] * vec4(fragPos + diagnosticDpdy, 1.0);
+            vec2 uvDx = (lightDx.xy / lightDx.w) * 0.5 + 0.5 - projCoords.xy;
+            vec2 uvDy = (lightDy.xy / lightDy.w) * 0.5 + 0.5 - projCoords.xy;
+            float footprint = max(length(uvDx * shadowSize), length(uvDy * shadowSize));
+            diagnosticShadowUv = vec3(projCoords.xy, log2(max(footprint, 1e-8)));
+        }
+        // Observe full light-frustum coverage without changing production sampling.
+        bool insideSelected = fragPosLightSpace.w != 0.0 &&
+            all(greaterThanEqual(projCoords, vec3(0.0))) && all(lessThanEqual(projCoords, vec3(1.0)));
+        if (!insideSelected) {
+            bool insideAny = false;
+            for (int candidate = 0; candidate < 4; ++candidate) {
+                vec4 light = u_lightSpaceMatrices[candidate] * vec4(fragPos, 1.0);
+                vec3 projected = (light.xyz / light.w) * 0.5 + 0.5;
+                insideAny = insideAny || (light.w != 0.0 && projected.z >= 0.0 && projected.z <= 1.0 &&
+                    projected.x >= 0.0 && projected.x <= 1.0 &&
+                    projected.y >= 0.0 && projected.y <= 1.0);
+            }
+            diagnosticCascade = vec3(insideAny ? -1.0 : -3.0);
+            if (diagnosticQuadValid) diagnosticShadowUv = diagnosticCascade;
+        }
+    }
+#endif
 
-    if(projCoords.z > 1.0 || projCoords.x < 0.0 || projCoords.x > 1.0 || projCoords.y < 0.0 || projCoords.y > 1.0) {
+    if(projCoords.z < 0.0 || projCoords.z > 1.0 || projCoords.x < 0.0 || projCoords.x > 1.0 || projCoords.y < 0.0 || projCoords.y > 1.0) {
         // Outside the last cascade's light frustum: no shadow information
         // exists, so treat the fragment as LIT (standard CSM out-of-range
         // convention). Returning 0.0 here rendered everything beyond the
@@ -317,21 +398,8 @@ float CalculateShadow(vec3 fragPos, vec3 normal, vec3 lightDir, float viewDepth)
     }
 
     // 3. PCF (Percentage-Closer Filtering)
-    float currentDepth = projCoords.z;
-    float shadow = 0.0;
     float bias = max(0.005 * (1.0 - dot(normal, lightDir)), 0.001);
-    vec2 texelSize = 1.0 / vec2(textureSize(u_shadowCascades, 0).xy);
-
-    // 5x5 PCF (25 taps) for softer shadow edges / less harsh terminators than the
-    // prior 3x3. Cheap in this pass (lighting is ~0.15 ms); soft contact shadows
-    // read far more naturally than the hard 3x3 step.
-    for(int x = -2; x <= 2; ++x) {
-        for(int y = -2; y <= 2; ++y) {
-            float pcfDepth = texture(u_shadowCascades, vec3(projCoords.xy + vec2(x, y) * texelSize, cascadeIndex)).r;
-            shadow += currentDepth - bias > pcfDepth ? 1.0: 0.0;
-        }
-    }
-    return 1.0 - (shadow / 25.0);
+    return filteredShadow(projCoords, cascadeIndex, bias);
 }
 // sample the tinted transmission at the SAME cascade
 // projection CalculateShadow uses. Out-of-range = white (no tint information),
@@ -349,7 +417,7 @@ vec3 SampleShadowTint(vec3 fragPos, float viewDepth) {
     vec4 fragPosLightSpace = u_lightSpaceMatrices[cascadeIndex] * vec4(fragPos, 1.0);
     vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
     projCoords = projCoords * 0.5 + 0.5;
-    if (projCoords.z > 1.0 || projCoords.x < 0.0 || projCoords.x > 1.0 ||
+    if (projCoords.z < 0.0 || projCoords.z > 1.0 || projCoords.x < 0.0 || projCoords.x > 1.0 ||
         projCoords.y < 0.0 || projCoords.y > 1.0) {
         return vec3(1.0);
     }
@@ -381,6 +449,9 @@ vec3 CalculateLightContribution(vec3 L, vec3 V, vec3 N, vec3 F0, vec3 albedo, fl
     // Optimized specular calculation
     vec3 specular = (NDF * G * F) / max(4.0 * NdotV * NdotL, 0.0001);
 
+#ifdef LUMIN_DIAG_CONTRIBUTIONS
+    diagnosticLightSpecular = specular * radiance * NdotL;
+#endif
     return (kD * albedo / PI + specular) * radiance * NdotL;
 }
 
@@ -523,6 +594,33 @@ float computeSkyVisibility(vec3 viewPosFrag, vec3 viewNrm) {
 }
 
 void main() {
+#ifdef LUMIN_DIAG_CONTRIBUTIONS
+    {
+        // Use the same position backend as lighting, before any receiver can return
+        // or bypass shadows. All quad lanes reach the world-position derivatives.
+        vec3 diagnosticViewPos = vec3(0.0);
+        bool diagnosticValid = diagnosticPositionAt(TexCoords, diagnosticViewPos);
+        vec3 FragPos = vec3(u_inverseView * vec4(diagnosticViewPos, 1.0));
+        diagnosticDpdx = dFdx(FragPos);
+        diagnosticDpdy = dFdy(FragPos);
+        // Pair each quad column before differentiating across columns: direct
+        // validity derivatives alone cannot see an invalid diagonal neighbour.
+        float diagnosticNeighbourOffset = 1.0 - 2.0 * mod(floor(gl_FragCoord.y), 2.0);
+        vec2 diagnosticNeighbourUv = TexCoords + dFdyFine(TexCoords) * diagnosticNeighbourOffset;
+        vec3 diagnosticNeighbourPos = vec3(0.0);
+        bool diagnosticNeighbourValid = diagnosticPositionAt(diagnosticNeighbourUv, diagnosticNeighbourPos);
+        float diagnosticColumnValid = float(diagnosticValid && diagnosticNeighbourValid);
+        float diagnosticValidityDx = dFdxFine(diagnosticColumnValid);
+        diagnosticQuadValid = diagnosticColumnValid == 1.0 && diagnosticValidityDx == 0.0;
+    }
+    // Alpha zero is explicit unsupported, including every early return / sky texel.
+    DiagnosticContribution = vec4(0.0);
+    vec3 diagnosticSun = vec3(0.0);
+    vec3 diagnosticMoon = vec3(0.0);
+    vec3 diagnosticLighting = vec3(0.0);
+    vec3 diagnosticSpecular = vec3(0.0);
+    float diagnosticShadow = 1.0;
+#endif
     if (u_staticStudio != 0 && texture(u_sceneDepth, TexCoords).r == 0.0) {
         FragColor = vec4(u_studioBackground, 0.0);
         return;
@@ -621,6 +719,13 @@ void main() {
     Lo += CalculateLightContribution(L_sun, V, Normal, F0, Albedo, Metallic, a2, k, sunRadiance)
           * shadow * (1.0 - cloud_shadow) * shadowTint;
 
+#ifdef LUMIN_DIAG_CONTRIBUTIONS
+    diagnosticSun = Lo;
+    diagnosticLighting = (sunRadiance / PI) * max(dot(Normal, L_sun), 0.0)
+        * shadow * (1.0 - cloud_shadow) * shadowTint;
+    diagnosticSpecular = diagnosticLightSpecular * shadow * (1.0 - cloud_shadow) * shadowTint;
+    diagnosticShadow = shadow;
+#endif
     //  moonlight (owner: "there should be some brightness from the moon"):
     // a dim cool directional fill so night terrain reads as FORMED (directional
     // N.L gives contrast/detail) rather than a flat near-black sheet. Derived
@@ -679,6 +784,15 @@ void main() {
         float moonLuma = dot(moonLit, vec3(0.2126, 0.7152, 0.0722));
         moonLit = mix(moonLit, moonLuma * vec3(0.70, 0.80, 1.05), 0.55);
         Lo += moonLit;
+#ifdef LUMIN_DIAG_CONTRIBUTIONS
+        diagnosticMoon = moonLit;
+        diagnosticLighting += (moonRadiance / PI) * moonWrap * moonShadow;
+        vec3 moonSpecularLit = moonSpecular * moonShadow;
+        float moonSpecularLuma = dot(moonSpecularLit, vec3(0.2126, 0.7152, 0.0722));
+        diagnosticSpecular += mix(moonSpecularLit,
+            moonSpecularLuma * vec3(0.70, 0.80, 1.05), 0.55);
+        diagnosticShadow = moonShadow;
+#endif
     }
 
     // Point Lights with early rejection
@@ -692,6 +806,10 @@ void main() {
             vec3 L_point = lightVec / dist; // Avoid normalize when we already have distance
             vec3 radiance = u_pointLights[i].color * u_pointLights[i].intensity * attenuation;
             Lo += CalculateLightContribution(L_point, V, Normal, F0, Albedo, Metallic, a2, k, radiance);
+#ifdef LUMIN_DIAG_CONTRIBUTIONS
+            diagnosticSpecular += diagnosticLightSpecular;
+            diagnosticLighting += (radiance / PI) * max(dot(Normal, L_point), 0.0);
+#endif
         }
     }
 
@@ -822,6 +940,33 @@ void main() {
     vec3 color = ambient + Lo + crystalGlow + aetherGlow + markerGlow
         + (authored ? authoredSurface.rgb : vec3(0.0)); // + emissive markers
 
+#ifdef LUMIN_DIAG_CONTRIBUTIONS
+    // Linear terms before exposure/grade. Material views show the values lighting uses.
+    // Direct terms include BRDF/albedo and their exact shadow/cloud/transmission factors.
+    // Fog and later forward/sky/shadow producers have no output here.
+    vec3 diagnosticValue = vec3(0.0);
+    bool diagnosticSupported = true;
+    if (u_contributionMode == 12) diagnosticValue = diagnosticSun;
+    else if (u_contributionMode == 13) diagnosticValue = diagnosticMoon;
+    else if (u_contributionMode == 14) diagnosticValue = ambient;
+    else if (u_contributionMode == 15) diagnosticValue = vec3(diagnosticShadow);
+    else if (u_contributionMode == 16) diagnosticValue = vec3(ao);
+    else if (u_contributionMode == 17) diagnosticValue = crystalGlow + aetherGlow + markerGlow
+        + (authored ? authoredSurface.rgb : vec3(0.0));
+    else if (u_contributionMode == 19) diagnosticValue = diagnosticSpecular + ambientSpecular * ao * skyVis;
+    else if (u_contributionMode == 20) diagnosticValue = vec3(Roughness);
+    else if (u_contributionMode == 21) diagnosticValue = vec3(Metallic);
+    else if (u_contributionMode == 22) diagnosticValue = viewNormal * 0.5 + 0.5;
+    else if (u_contributionMode == 23) diagnosticValue = Normal * 0.5 + 0.5;
+    else if (u_contributionMode == 24) diagnosticValue = vec3(skyVis);
+    else if (u_contributionMode == 25) diagnosticValue = vec3(materialAO);
+    else if (u_contributionMode == 26) diagnosticValue = diagnosticLighting;
+    else if (u_contributionMode == 34) diagnosticValue = diagnosticCascade;
+    else if (u_contributionMode == 35) diagnosticValue = diagnosticShadowUv;
+    else diagnosticSupported = false;
+    if (dot(viewPos, viewPos) >= 1e-8 && diagnosticSupported)
+        DiagnosticContribution = vec4(diagnosticValue, 1.0);
+#endif
     // the lightning light-pulse + bolt are injected by a dedicated
     // FULL-SCREEN overlay (lightning_overlay.frag) drawn AFTER the skybox, so the
     // flash composites over BOTH the lit terrain and the sky. (The lighting pass

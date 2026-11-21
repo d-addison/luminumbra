@@ -1,4 +1,6 @@
 #include "WaterPass.h"
+#include "../DiagnosticDrawTable.h"
+#include "../GBufferTargets.h"
 #include "core/Profiler.h"
 #include "rendering/AttributedGl.h"
 
@@ -13,11 +15,19 @@
 #include <limits>
 #include <string>
 
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <limits>
+#include <optional>
+#include <stdexcept>
+
 namespace Luminumbra::Rendering {
 
 namespace {
 
 GLsizei WaterElementCount(u32 count) {
+    static_assert(std::numeric_limits<GLsizei>::max() == std::numeric_limits<std::int32_t>::max());
     if (count > static_cast<u32>(std::numeric_limits<GLsizei>::max())) {
         return 0;
     }
@@ -44,6 +54,7 @@ WaterPass::WaterPass() = default;
 WaterPass::~WaterPass() = default;
 
 void WaterPass::init_shader(const std::filesystem::path& root_path) {
+    m_caustics_valid = false;
     m_water_shader =
         std::make_unique<Shader>((root_path / "res/shaders/water.vert").string().c_str(),
                                  (root_path / "res/shaders/water.frag").string().c_str());
@@ -65,6 +76,7 @@ void WaterPass::init_shader(const std::filesystem::path& root_path) {
 }
 
 void WaterPass::init_water_fallback_textures(RenderResourceRegistry& registry) {
+    m_caustics_valid = false;
     const unsigned char flat_normal[4] = {128, 128, 255, 255};
     const unsigned char neutral_flow[4] = {128, 128, 0, 0};
     const unsigned char black[4] = {0, 0, 0, 255};
@@ -116,6 +128,7 @@ void WaterPass::init_water_fallback_textures(RenderResourceRegistry& registry) {
 }
 
 void WaterPass::destroy_water_fallback_textures(RenderResourceRegistry& registry) {
+    m_caustics_valid = false;
     if (m_water_flat_normal_texture) {
         glDeleteTextures(1, &m_water_flat_normal_texture);
         m_water_flat_normal_texture = 0;
@@ -140,15 +153,15 @@ void WaterPass::destroy_water_fallback_textures(RenderResourceRegistry& registry
 }
 
 void WaterPass::reset_shader() {
+    m_caustics_valid = false;
     m_water_shader.reset();
     m_caustics_shader.reset();
 }
 
 // Renders the animated caustics pattern into the offscreen target. Runs at
-// the start of execute, so the cost is reported inside water_gpu_ms. The
-// lighting pass (which runs earlier in the frame) samples the previous
-// frame's pattern through black_texture; a one-frame lag is invisible for
-// a slowly-flowing intensity field.
+// the start of a consuming execute, inside water_gpu_ms. The generator has no
+// samplers or history: only u_time and the fixed resolution affect its output.
+// Regenerating on every consuming frame therefore also handles gaps in demand.
 void WaterPass::generate_caustics(const RenderContext& ctx) {
     if (m_caustics_fbo == 0 || !m_caustics_shader || !m_caustics_shader->IsValid()) {
         return;
@@ -171,6 +184,7 @@ void WaterPass::generate_caustics(const RenderContext& ctx) {
     glBindFramebuffer(GL_FRAMEBUFFER, ctx.lit_scene.id);
     glViewport(
         0, 0, static_cast<GLsizei>(ctx.internal_w()), static_cast<GLsizei>(ctx.internal_h()));
+    m_caustics_valid = true;
 }
 
 WaterDrawStats WaterPass::execute(const RenderContext& ctx,
@@ -181,7 +195,17 @@ WaterDrawStats WaterPass::execute(const RenderContext& ctx,
     m_visibility_mask = {};
     WaterDrawStats stats;
     // --- 0. Generate the animated caustics pattern (offscreen) ---
-    generate_caustics(ctx);
+    m_caustics_valid = false;
+    // Bound: the prepared water draw list, with the exact submission count rule.
+    const bool water_draws =
+        std::any_of(input.draw_items.begin(), input.draw_items.end(), [](const auto& item) {
+            return WaterPreparationDrawConsumes(item.element_count);
+        });
+    const WaterPreparationConsumers consumers{
+        .water = water_draws, .glass = false, .capture = capture_visibility_requested};
+    if (consumers.caustics()) {
+        generate_caustics(ctx);
+    }
 
     // --- 1. Set OpenGL State ---
     glEnable(GL_DEPTH_TEST);
@@ -191,8 +215,40 @@ WaterDrawStats WaterPass::execute(const RenderContext& ctx,
     glDepthMask(GL_FALSE);
     glDisable(GL_CULL_FACE);
 
+    Shader* draw_shader = m_water_shader.get();
+    std::optional<GBufferDiagnosticAttachment> diagnostic_attachment;
+    if (auto* capture = GBufferDiagnosticCapture::Current()) {
+        if (!draw_shader || !draw_shader->IsValid()) {
+            capture->unsupported(
+                "water_shader_unavailable", 0, DiagnosticOwnership::Live, DiagnosticPass::Forward);
+            throw std::runtime_error("Water diagnostic shader is unavailable");
+        }
+        // Only submitted water needs a contributor plane. Scan at most the prepared draw list,
+        // only while capturing, using the same count conversion as the draw loop.
+        if (std::any_of(input.draw_items.begin(), input.draw_items.end(), [](const auto& item) {
+                return WaterElementCount(item.element_count) != 0;
+            })) {
+            GLint color_texture = 0;
+            GLint attachment_type = 0;
+            glGetNamedFramebufferAttachmentParameteriv(ctx.lit_scene.id,
+                                                       GL_COLOR_ATTACHMENT0,
+                                                       GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE,
+                                                       &attachment_type);
+            if (attachment_type == GL_TEXTURE) {
+                glGetNamedFramebufferAttachmentParameteriv(ctx.lit_scene.id,
+                                                           GL_COLOR_ATTACHMENT0,
+                                                           GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,
+                                                           &color_texture);
+            }
+            diagnostic_attachment.emplace(ctx.lit_scene.id,
+                                          static_cast<GLuint>(color_texture),
+                                          DiagnosticExtent{ctx.internal_w(), ctx.internal_h()});
+            draw_shader = capture->variant(draw_shader, false);
+        }
+    }
+
     // --- 2. Activate Shader and Set Uniforms ---
-    m_water_shader->use();
+    draw_shader->use();
 
     glm::mat4 projection =
         ctx.far_world_ladder
@@ -204,51 +260,51 @@ WaterDrawStats WaterPass::execute(const RenderContext& ctx,
     glm::mat4 view = camera.GetViewMatrix();
 
     // Set matrices
-    m_water_shader->setMat4("u_view", view);
-    m_water_shader->setMat4("u_projection", projection);
-    m_water_shader->setMat4("u_inverse_view", glm::inverse(view));
-    m_water_shader->setMat4("u_inverse_projection", glm::inverse(projection));
+    draw_shader->setMat4("u_view", view);
+    draw_shader->setMat4("u_projection", projection);
+    draw_shader->setMat4("u_inverse_view", glm::inverse(view));
+    draw_shader->setMat4("u_inverse_projection", glm::inverse(projection));
     // <<< OPTIMIZATION: Set the new pre-combined matrix for the SSR loop
-    m_water_shader->setMat4("u_view_projection", projection * view);
+    draw_shader->setMat4("u_view_projection", projection * view);
 
     // Set scene and material properties (as before)
-    m_water_shader->setVec3("u_camera_pos", camera.Position);
-    m_water_shader->setVec2(
+    draw_shader->setVec3("u_camera_pos", camera.Position);
+    draw_shader->setVec2(
         "u_screen_size",
         glm::vec2(ctx.internal_w(), ctx.internal_h())); // samples the internal scene
-    m_water_shader->setFloat("u_time", ctx.time_seconds);
-    m_water_shader->setVec3("u_sun_direction", ctx.sun.direction);
-    m_water_shader->setVec3("u_sun_color", ctx.sun.color);
-    m_water_shader->setVec3("u_sky_color", approximate_sky_reflection_color(ctx.sun.intensity));
-    m_water_shader->setVec3("u_shallow_color", glm::vec3(0.3, 0.8, 0.7));
-    m_water_shader->setVec3("u_deep_color", glm::vec3(0.02, 0.18, 0.34));
-    m_water_shader->setFloat("u_water_depth_scaler", 0.2f);
-    m_water_shader->setFloat("u_reflection_power", 0.7f);
+    draw_shader->setFloat("u_time", ctx.time_seconds);
+    draw_shader->setVec3("u_sun_direction", ctx.sun.direction);
+    draw_shader->setVec3("u_sun_color", ctx.sun.color);
+    draw_shader->setVec3("u_sky_color", approximate_sky_reflection_color(ctx.sun.intensity));
+    draw_shader->setVec3("u_shallow_color", glm::vec3(0.3, 0.8, 0.7));
+    draw_shader->setVec3("u_deep_color", glm::vec3(0.02, 0.18, 0.34));
+    draw_shader->setFloat("u_water_depth_scaler", 0.2f);
+    draw_shader->setFloat("u_reflection_power", 0.7f);
 
     // Bind textures (as before)
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, ctx.opaque_scene.id);
-    m_water_shader->setInt("u_opaque_scene_color", 0);
+    draw_shader->setInt("u_opaque_scene_color", 0);
 
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_depth.id);
-    m_water_shader->setInt("u_opaque_depth", 1);
+    draw_shader->setInt("u_opaque_depth", 1);
 
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D, m_water_flat_normal_texture);
-    m_water_shader->setInt("u_normal_map", 2);
+    draw_shader->setInt("u_normal_map", 2);
 
     glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_2D, m_water_neutral_flow_texture);
-    m_water_shader->setInt("u_flow_map", 3);
+    draw_shader->setInt("u_flow_map", 3);
 
     glActiveTexture(GL_TEXTURE4);
     glBindTexture(GL_TEXTURE_2D, black_texture()); // generated caustics, black fallback otherwise
-    m_water_shader->setInt("u_caustics_texture", 4);
+    draw_shader->setInt("u_caustics_texture", 4);
 
     glActiveTexture(GL_TEXTURE5);
     glBindTexture(GL_TEXTURE_2D, m_water_underwater_texture);
-    m_water_shader->setInt("u_underwater_texture", 5);
+    draw_shader->setInt("u_underwater_texture", 5);
     // shoreline foam is generated procedurally in the shader; the
     // old u_foam_texture slot (black fallback) is gone.
 
@@ -260,7 +316,50 @@ WaterDrawStats WaterPass::execute(const RenderContext& ctx,
         if (count == 0) {
             continue;
         }
-        m_water_shader->setMat4("u_model", item.model);
+        draw_shader->setMat4("u_model", item.model);
+        if (auto* capture = GBufferDiagnosticCapture::Current()) {
+            // The input contract is a chunk translation, never a guessed asset or GL name.
+            // Recover only exact integral coordinates; check bounds before conversion.
+            std::array<std::int32_t, 3> chunk{};
+            constexpr std::array<int, 3> sizes{CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z};
+            glm::mat4 translated(1.0f);
+            translated[3] = item.model[3];
+            if (item.model != translated || item.model[3].w != 1.0f) {
+                capture->unsupported("water_submission_transform_unavailable",
+                                     0,
+                                     DiagnosticOwnership::Live,
+                                     DiagnosticPass::Forward);
+                throw std::runtime_error("Water diagnostic input is not a chunk translation");
+            }
+            for (int axis = 0; axis < 3; ++axis) {
+                const auto index = static_cast<std::size_t>(axis);
+                const double coordinate = static_cast<double>(item.model[3][axis]) / sizes[index];
+                if (!std::isfinite(coordinate) || std::trunc(coordinate) != coordinate ||
+                    // Beyond this range adjacent integer chunks alias in float model origins.
+                    coordinate <= -16777216.0 || coordinate >= 16777216.0 ||
+                    coordinate < std::numeric_limits<std::int32_t>::min() ||
+                    coordinate > std::numeric_limits<std::int32_t>::max()) {
+                    capture->unsupported("water_submission_chunk_unavailable",
+                                         0,
+                                         DiagnosticOwnership::Live,
+                                         DiagnosticPass::Forward);
+                    throw std::runtime_error("Water diagnostic chunk is not exactly representable");
+                }
+                chunk[index] = static_cast<std::int32_t>(coordinate);
+            }
+            // At most three int32 coordinates and one uint32 count: under 96 bytes.
+            const std::string mesh_key = "water/chunk/" + std::to_string(chunk[0]) + "/" +
+                                         std::to_string(chunk[1]) + "/" + std::to_string(chunk[2]) +
+                                         "/indices/" + std::to_string(item.element_count);
+            capture->write_current({.mesh_path = {},
+                                    .shader_variant = "water",
+                                    .chunk = chunk,
+                                    .lod = 0,
+                                    .ownership = DiagnosticOwnership::Live,
+                                    .pass = DiagnosticPass::Forward,
+                                    .provenance = DiagnosticProvenance::Mesh,
+                                    .generated_mesh = mesh_key});
+        }
         glBindVertexArray(item.vao_id);
         Luminumbra::Rendering::AttributedGl::Submit(glDrawElements,
                                                     static_cast<GLenum>(GL_TRIANGLES),

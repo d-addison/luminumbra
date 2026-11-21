@@ -1,4 +1,5 @@
 #pragma once
+#include "SaveWorkCounts.h"
 
 #include "SaveTransaction.h"
 #include "WorldPersistenceRoundtrip.h"
@@ -30,6 +31,10 @@ struct EntityRegistrySnapshot;
 }
 
 namespace Luminumbra::Persistence {
+
+// Admission shared by legacy migration, regional resolution and terrain-less reads.
+// Active grids must be complete; dormant grids may retain bounded integer truth.
+bool HasValidWaterColumnState(const Chunk& chunk);
 
 class CreatedWorldArtifacts;
 struct BoundPublicationStage;
@@ -725,6 +730,9 @@ public:
     static std::uint64_t record_compression_count_for_testing();
     // Number of lod-0 chunk record payload decodes since process start.
     static std::uint64_t chunk_record_decode_count_for_testing();
+    // Calling-thread cumulative work. Take differences within one save worker boundary;
+    // parallel encoders contribute their plain per-record counts after joining.
+    [[nodiscard]] static SaveWorkCounts work_counts();
     // Number of region lod-0 fingerprints hashed (not reused from identical bytes) since
     // process start.
     static std::uint64_t region_fingerprint_count_for_testing();
@@ -862,13 +870,16 @@ public:
     // Loads a previously saved snapshot into state. A missing snapshot file is
     // a clean miss (fresh world): returns false WITHOUT appending an error.
     // Malformed or unreadable snapshots return false with diagnostics.
+    // regional_water explicitly opts into column migration; inventory collection
+    // alone preserves the legacy per-chunk layout. Validation never migrates.
     bool load_world(WorldStreamingState& state,
                     const std::filesystem::path& save_dir,
                     std::vector<std::string>& errors,
                     const std::stop_token& stop = {},
                     const std::unordered_set<ChunkID>* retain_chunks = nullptr,
                     std::vector<IVec3>* authoritative_inventory = nullptr,
-                    std::size_t* decoded_chunk_count = nullptr) const;
+                    std::size_t* decoded_chunk_count = nullptr,
+                    bool regional_water = false) const;
 
     // Deterministic hash of the streaming state, reusing the persistence hash
     // machinery (fnv1a_64 over the canonical snapshot bytes). Format
@@ -898,6 +909,7 @@ private:
                          std::vector<std::string>& errors,
                          const std::stop_token& stop,
                          const std::unordered_set<ChunkID>* retain_chunks,
+                         bool regional_water,
                          std::vector<IVec3>* authoritative_inventory,
                          std::size_t* decoded_chunk_count,
                          bool catalog_only,

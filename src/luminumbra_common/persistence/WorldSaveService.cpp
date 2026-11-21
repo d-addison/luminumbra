@@ -18,6 +18,7 @@
 #include "core/CaptureContentPaths.h"
 #include "core/FilesystemPath.h"
 #include "core/Log.h"
+#include "core/NativeFileOwner.h"
 #include "luminumbra/core/Types.h"
 #include "world/ActiveRegionLedger.h"
 #include "world/Chunk.h"
@@ -89,6 +90,43 @@
 #endif
 
 namespace Luminumbra::Persistence {
+
+bool HasValidWaterColumnState(const Chunk& chunk) {
+    const int resolution = chunk.current_water_resolution.load();
+    if (chunk.has_water_sim.load() && resolution != 0) {
+        return chunk.has_complete_water_state();
+    }
+    if (!HasValidWaterPersistenceState(chunk)) {
+        return false;
+    }
+    // Off clears the resolution and float mirrors, retaining integer truth.
+    // Validate its former grid by shape; at most 1,024 cells / 2,048 fluxes.
+    const auto cells = chunk.water_depth_mm.size();
+    if (cells != 0u) {
+        if (resolution == 0) {
+            if (cells != 4u && cells != 16u && cells != 64u && cells != 256u && cells != 1024u) {
+                return false;
+            }
+        } else if (cells !=
+                   static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution)) {
+            return false;
+        }
+    }
+    if (chunk.water_bed_mm.size() != cells || chunk.water_edge_flux.size() != 2u * cells ||
+        (!chunk.water_flow_data.empty() && chunk.water_flow_data.size() != cells)) {
+        return false;
+    }
+    for (const auto* mirror :
+         {&chunk.water_level_data, &chunk.water_sim_terrain_height, &chunk.water_rest_level}) {
+        if ((!mirror->empty() && mirror->size() != cells) ||
+            !std::all_of(
+                mirror->begin(), mirror->end(), [](float value) { return std::isfinite(value); })) {
+            return false;
+        }
+    }
+    return true;
+}
+
 namespace detail {
 
 struct RegionFileSync {
@@ -216,8 +254,10 @@ SavedInputFile::SavedInputFile(const std::filesystem::path& path, LeafSymlinks l
 #endif
 
 #if defined(_WIN32)
+    Filesystem::NativeFileOwner opened_file(m_handle);
     const bool opened = m_handle != INVALID_HANDLE_VALUE;
 #else
+    Filesystem::NativeFileOwner opened_file(m_descriptor);
     const bool opened = m_descriptor >= 0;
 #endif
     if (!opened && m_missing && leaf_symlinks == LeafSymlinks::Refuse)
@@ -231,6 +271,7 @@ SavedInputFile::SavedInputFile(const std::filesystem::path& path, LeafSymlinks l
         if (leaf_symlinks == LeafSymlinks::Refuse)
             m_location_admitted = is_within_save_root();
     }
+    opened_file.release(); // The completed reader now owns the native file.
 }
 
 SavedInputFile::~SavedInputFile() {
@@ -262,22 +303,13 @@ std::shared_ptr<const void> SavedInputFile::retain_identity() const {
     if (!identity(checked))
         return {};
 #if defined(_WIN32)
-    const auto retained = CreatedWorldArtifacts::retain_file_identity(m_handle);
-    return std::shared_ptr<const void>(new HANDLE(retained), [](const void* pointer) {
-        const auto* handle = static_cast<const HANDLE*>(pointer);
-        ::CloseHandle(*handle);
-        delete handle;
-    });
+    Filesystem::NativeFileOwner retained(CreatedWorldArtifacts::retain_file_identity(m_handle));
 #else
-    const auto retained = ::fcntl(m_descriptor, F_DUPFD_CLOEXEC, 0);
-    if (retained < 0)
+    Filesystem::NativeFileOwner retained(::fcntl(m_descriptor, F_DUPFD_CLOEXEC, 0));
+    if (retained.get() < 0)
         return {};
-    return std::shared_ptr<const void>(new int(retained), [](const void* pointer) {
-        const auto* descriptor = static_cast<const int*>(pointer);
-        ::close(*descriptor);
-        delete descriptor;
-    });
 #endif
+    return std::make_shared<Filesystem::NativeFileOwner>(std::move(retained));
 }
 
 namespace {
@@ -2322,7 +2354,10 @@ public:
             try {
                 CreatedWorldArtifacts::remove_bound_entry(m_destination, m_descriptor, false);
                 FlushRemovalDirectory(m_destination, nullptr);
-            } catch (const std::exception&) {}
+            } catch (const std::exception&) {
+                // Best-effort rollback must not throw during stack unwinding. Retain any
+                // artifact that cannot be removed; descriptor and temporary cleanup continue.
+            }
         }
         if (m_descriptor >= 0)
             ::close(m_descriptor);
@@ -2408,13 +2443,20 @@ std::atomic<std::uint64_t>& RecordCompressionCounter() {
     return counter;
 }
 
+SaveWorkCounts& SaveWork() {
+    static thread_local SaveWorkCounts counts;
+    return counts;
+}
+
 bool CompressPayload(const std::string& payload,
                      RegionRecord& record,
-                     std::vector<std::string>* errors) {
+                     std::vector<std::string>* errors,
+                     std::uint64_t& bytes_compressed) {
     if (payload.empty() || payload.size() > SavedInputLimits::kRegionRecordBytes) {
         AddError(errors, "region record payload exceeds the 64 MiB compatibility limit");
         return false;
     }
+    bytes_compressed += payload.size();
     RecordCompressionCounter().fetch_add(1, std::memory_order_relaxed);
     const int bound = LZ4_compressBound(static_cast<int>(payload.size()));
     std::string compressed(static_cast<std::size_t>(bound), '\0');
@@ -2441,6 +2483,8 @@ struct ChunkEncodeWork {
     bool success = false;
     std::vector<std::string> errors{};
     std::exception_ptr exception{};
+    std::uint64_t bytes_compressed = 0;
+    bool serialized = false;
 };
 
 // Matches the budget of the admitted-record cache that receives the retained inputs.
@@ -2479,6 +2523,20 @@ private:
 };
 
 void EncodeChunkRecords(std::vector<ChunkEncodeWork>& work) {
+    struct WorkReport {
+        const std::vector<ChunkEncodeWork>& items;
+        ~WorkReport() {
+            // Workers join before this diagnostic folds their plain per-record counts,
+            // including on failure or thread-creation exceptions. No shared hot counter.
+            auto& counts = SaveWork();
+            for (const auto& item : items) {
+                counts.owners_serialized += item.serialized ? 1u : 0u;
+                counts.clean_siblings_serialized +=
+                    item.serialized && !item.chunk->is_voxel_data_dirty() ? 1u : 0u;
+                counts.bytes_compressed += item.bytes_compressed;
+            }
+        }
+    } work_report{work};
     const auto hook = detail::ChunkEncodeHookForTesting().load(std::memory_order_acquire);
     const auto limit_override =
         detail::ChunkEncodeInFlightLimitForTesting().load(std::memory_order_acquire);
@@ -2514,9 +2572,10 @@ void EncodeChunkRecords(std::vector<ChunkEncodeWork>& work) {
             if (hook)
                 hook(index);
             item.inputs = ChunkSnapshotInputBytes(*item.chunk);
+            item.serialized = true;
             const std::string payload =
                 SerializeChunkRecordPayloadJson(*item.chunk, &item.strict_water_valid);
-            if (!CompressPayload(payload, item.record, &item.errors)) {
+            if (!CompressPayload(payload, item.record, &item.errors, item.bytes_compressed)) {
                 in_flight.release(admitted);
                 admitted = 0;
                 note_failure(index);
@@ -2905,7 +2964,9 @@ bool WriteRegionFile(const std::filesystem::path& path,
     bytes.append(kRegionMagic, sizeof(kRegionMagic));
     AppendU16(bytes, kRegionVersion);
     AppendU16(bytes, static_cast<std::uint16_t>(records.size()));
+    std::uint64_t owners_rewritten = 0;
     for (const RegionRecord& record : records) {
+        owners_rewritten += record.lod_level == 0 ? 1u : 0u;
         AppendU64(bytes, record.id);
         bytes.push_back(static_cast<char>(record.lod_level));
         bytes.push_back(static_cast<char>(record.flags));
@@ -2950,6 +3011,8 @@ bool WriteRegionFile(const std::filesystem::path& path,
         RemoveTemporaryFile(temp_path);
         return false;
     }
+    ++SaveWork().regions_rewritten;
+    SaveWork().owners_rewritten += owners_rewritten;
     return true;
 }
 
@@ -2995,6 +3058,7 @@ std::shared_ptr<Chunk> DecodeChunkRecord(const RegionRecord& record,
                                          bool strict_water = false,
                                          bool* strict_water_valid = nullptr) {
     ChunkRecordDecodeCounter().fetch_add(1, std::memory_order_acq_rel);
+    ++SaveWork().chunk_decodes;
     std::string payload;
     if (!DecompressPayload(record, payload, errors)) {
         return nullptr;
@@ -3055,6 +3119,7 @@ struct ChunkRecordFacts {
     bool lattice_ok = false;
     bool loaded_or_edited = false;
     bool strict_water = false;
+    bool water_owned = false;
 };
 
 struct ChunkRecordKey {
@@ -3313,8 +3378,11 @@ bool SdfLatticeAdmissible(const Chunk& chunk) {
 }
 
 ChunkRecordFacts DecodedChunkRecordFacts(const Chunk& chunk) {
-    return ChunkRecordFacts{
-        chunk.get_coords(), SdfLatticeAdmissible(chunk), chunk.has_simulation_authority(), false};
+    return ChunkRecordFacts{chunk.get_coords(),
+                            SdfLatticeAdmissible(chunk),
+                            chunk.has_simulation_authority(),
+                            false,
+                            chunk.has_water_authority()};
 }
 
 // Exact record bytes gate both facts and the transfer of a cold validation decode.
@@ -3401,12 +3469,151 @@ bool PromoteLegacyWaterRecord(Chunk& chunk, const RegionRecord& record) {
     return true;
 }
 
+class WorldPersistenceRefusal : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
+bool HasWaterArrays(const Chunk& chunk) {
+    return !chunk.water_depth_mm.empty() || !chunk.water_bed_mm.empty() ||
+           !chunk.water_edge_flux.empty() || !chunk.water_level_data.empty() ||
+           !chunk.water_flow_data.empty() || !chunk.water_sim_terrain_height.empty();
+}
+
+bool HasWaterPayload(const Chunk& chunk) {
+    return chunk.has_water_sim.load() || HasWaterArrays(chunk);
+}
+
+bool HasPersistedWater(const Chunk& chunk) {
+    return chunk.has_water_authority() || HasWaterPayload(chunk);
+}
+
+bool IsLegacyWaterRetirement(const Chunk& chunk) {
+    return chunk.has_pending_water_retirement() && !chunk.has_simulation_authority();
+}
+
+bool NeedsLegacyWaterMigration(const Chunk& chunk, bool unowned_legacy, bool legacy_container) {
+    if (unowned_legacy || chunk.get_coords().y != 0) {
+        return HasPersistedWater(chunk);
+    }
+    // Empty owned canonical records can validly be dormant. Present incomplete
+    // legacy payloads must still reach admission and refuse, even if already owned.
+    return legacy_container && HasWaterPayload(chunk) && !chunk.has_complete_water_state();
+}
+
+bool EqualLegacyWater(const Chunk& lhs, const Chunk& rhs) {
+    // Value-equal signed zeros also coalesce. Mirrors participate because
+    // queries, sources and resolution changes consume them after admission.
+    return lhs.water_depth_mm == rhs.water_depth_mm && lhs.water_bed_mm == rhs.water_bed_mm &&
+           lhs.water_edge_flux == rhs.water_edge_flux &&
+           lhs.water_level_data == rhs.water_level_data &&
+           lhs.water_flow_data == rhs.water_flow_data &&
+           lhs.water_sim_terrain_height == rhs.water_sim_terrain_height &&
+           lhs.current_water_resolution.load() == rhs.current_water_resolution.load() &&
+           lhs.has_water_sim.load() == rhs.has_water_sim.load() &&
+           lhs.is_water_sleeping.load() == rhs.is_water_sleeping.load() &&
+           lhs.ticks_below_threshold == rhs.ticks_below_threshold &&
+           lhs.max_water_delta_last_tick == rhs.max_water_delta_last_tick;
+}
+
+// Load-time only: at most 4096 legacy sources and one destination per column.
+// Encoded input and combined source/destination/copy heap have separate 256 MiB
+// budgets; each water grid has at most 1024 cells. No disk writes occur here:
+// the next ordinary save transaction publishes these dirty records.
+void MigrateLegacyWaterColumns(WorldStreamingState& state,
+                               const std::vector<std::shared_ptr<Chunk>>& sources) {
+    std::map<ChunkID, std::shared_ptr<Chunk>> columns;
+    constexpr std::size_t kMaxMigrationBytes = std::size_t{256} * 1024 * 1024;
+    std::size_t migration_bytes = 0;
+    for (const auto& source : sources) {
+        const auto source_bytes = source->estimated_heap_bytes();
+        if (source_bytes > kMaxMigrationBytes - migration_bytes) {
+            throw WorldPersistenceRefusal(
+                "Saved-input admission refused: legacy water migration storage cap.");
+        }
+        migration_bytes += source_bytes;
+        if (!HasValidWaterColumnState(*source)) {
+            throw WorldPersistenceRefusal(
+                "Saved-input admission refused: incomplete legacy water record.");
+        }
+        auto coords = source->get_coords();
+        coords.y = 0;
+        const auto [column, inserted] = columns.emplace(Chunk::calculate_id(coords), source);
+        if (!inserted && !EqualLegacyWater(*column->second, *source)) {
+            throw WorldPersistenceRefusal(
+                "Saved-input admission refused: conflicting legacy water records.");
+        }
+    }
+    // Admission retained every existing destination, including cold Y=0 terrain.
+    // A missing staged destination is proven absent from the validated inventory.
+    std::map<ChunkID, std::shared_ptr<Chunk>> destinations;
+    for (const auto& [id, source] : columns) {
+        auto destination = state.find_chunk(id);
+        if (!destination) {
+            destination = std::make_shared<Chunk>(Chunk::decode_id(id));
+        }
+        // Charge destination terrain plus a second grid before copying. The
+        // extra source charge conservatively includes its terrain and mirrors.
+        const auto destination_bytes = destination->estimated_heap_bytes();
+        const auto copy_bytes = source->estimated_heap_bytes();
+        if (destination_bytes > kMaxMigrationBytes - migration_bytes ||
+            copy_bytes > kMaxMigrationBytes - migration_bytes - destination_bytes) {
+            throw WorldPersistenceRefusal(
+                "Saved-input admission refused: legacy water migration storage cap.");
+        }
+        migration_bytes += destination_bytes + copy_bytes;
+        if (HasPersistedWater(*destination) &&
+            (!HasValidWaterColumnState(*destination) || !EqualLegacyWater(*destination, *source))) {
+            throw WorldPersistenceRefusal(
+                "Saved-input admission refused: conflicting legacy water destination.");
+        }
+        destinations.emplace(id, destination);
+    }
+    // Only private load staging changes below. A subsequent allocation/read
+    // refusal discards the entire staged world; live owners and saved bytes stay intact.
+    for (const auto& [id, source] : columns) {
+        auto& destination = *destinations.at(id);
+        if (&destination != source.get()) {
+            destination.water_depth_mm = source->water_depth_mm;
+            destination.water_bed_mm = source->water_bed_mm;
+            destination.water_edge_flux = source->water_edge_flux;
+            destination.water_level_data = source->water_level_data;
+            destination.water_flow_data = source->water_flow_data;
+            destination.water_sim_terrain_height = source->water_sim_terrain_height;
+            destination.water_rest_level = source->water_rest_level;
+            destination.current_water_resolution.store(source->current_water_resolution.load());
+            destination.has_water_sim.store(source->has_water_sim.load());
+            destination.is_water_sleeping.store(source->is_water_sleeping.load());
+            destination.max_water_delta_last_tick = source->max_water_delta_last_tick;
+            destination.ticks_below_threshold = source->ticks_below_threshold;
+            destination.water_mesh_dirty_ticks = source->water_mesh_dirty_ticks;
+        }
+        destination.set_water_authority();
+        destination.mark_dirty_for_save();
+        if (!state.contains_chunk(id)) {
+            state.insert_chunk(destinations.at(id));
+        }
+    }
+    for (const auto& source : sources) {
+        if (source->get_coords().y != 0) {
+            source->retire_legacy_water();
+            // Preserve terrain ownership. Dirty unowned retirements also stay
+            // retained until commit; claiming terrain here could turn a valid
+            // water-only layer into an invalid owned record without an SDF.
+        }
+    }
+}
+
 std::uint8_t ChunkRecordFlags(const Chunk& chunk, std::uint8_t previous_flags) {
     std::uint8_t flags = 0;
     // Edited/authoritative is sticky: once a chunk record was persisted with
     // post-generation edits it stays authoritative even after the in-memory
     // dirty flag is cleared by the save.
-    if (chunk.has_simulation_authority() || (previous_flags & kRecordFlagEdited) != 0u) {
+    // A pending, unowned migration retirement also retires its former
+    // water-owned flag, independently of terrain generation and dirty revisions.
+    const bool retired_water = IsLegacyWaterRetirement(chunk);
+    if (chunk.has_simulation_authority() ||
+        ((previous_flags & kRecordFlagEdited) != 0u && !retired_water)) {
         flags |= kRecordFlagEdited;
     }
     if (chunk.has_water_sim.load(std::memory_order_acquire) || !chunk.water_mesh_vertices.empty()) {
@@ -3431,11 +3638,6 @@ bool ParseRegionFileName(const std::filesystem::path& path, int& rx, int& rz) {
            z.ptr == begin + stem.size() &&
            stem == "r." + std::to_string(rx) + "." + std::to_string(rz);
 }
-
-class WorldPersistenceRefusal : public std::runtime_error {
-public:
-    using std::runtime_error::runtime_error;
-};
 
 void ChargeInventoryProbe(AuthorityReadBudget* budget) {
     if (budget && !AuthorityReadBudget::Charge(1, budget->limits.probes, budget->probes))
@@ -6159,21 +6361,29 @@ PreparedRegionDigest PrepareRegionDigest(const std::filesystem::path& save_dir,
     if (require_region && save_dir.empty())
         throw std::runtime_error("Cannot read durable region records without a save directory");
     WorldStreamingState region;
-    // Filtering precedes insertion: a live pristine or Loading chunk must not shadow a durable
-    // edited record with the same id. insert_chunk preserves the first record per id.
+    // A pending migration retirement shadows its old durable water until commit.
+    // Terrain-only Loading caches still cannot shadow edited records.
+    // insert_chunk preserves the first record per id.
     const auto qualifies = [&key](const std::shared_ptr<Chunk>& chunk) {
-        if (!chunk || !chunk->has_simulation_authority())
+        if (!chunk || (!chunk->has_simulation_authority() && !IsLegacyWaterRetirement(*chunk)))
             return false;
         int rx = 0, rz = 0;
         WorldSaveService::region_coords_for_chunk(chunk->get_coords(), rx, rz);
         return rx == key.x && rz == key.z;
     };
+    const auto readable_projection = [](const Chunk& chunk) {
+        // In-place terrain backfill never writes water. Its owned water and
+        // pending retirement remain visible without reading worker terrain.
+        return chunk.get_state() != ChunkState::Loading ||
+               (!chunk.has_terrain_authority() &&
+                (chunk.has_water_authority() || chunk.has_pending_water_retirement()));
+    };
     for (const auto& chunk : inputs.live) {
-        if (qualifies(chunk) && chunk->get_state() != ChunkState::Loading)
+        if (qualifies(chunk) && readable_projection(*chunk))
             region.insert_chunk(chunk);
     }
     for (const auto& chunk : inputs.parked) {
-        if (qualifies(chunk) && chunk->get_state() != ChunkState::Loading)
+        if (qualifies(chunk) && readable_projection(*chunk))
             region.insert_chunk(chunk);
     }
     if (!save_dir.empty()) {
@@ -6424,6 +6634,7 @@ bool WorldSaveService::inspect_save(const std::filesystem::path& save_dir,
                                        diagnostics,
                                        stop,
                                        &retain_none,
+                                       false,
                                        nullptr,
                                        nullptr,
                                        true,
@@ -6630,7 +6841,7 @@ bool WorldSaveService::upsert_container_records(const SaveOwnership&,
             raw.id = record.id;
             raw.lod_level = record.lod_level;
             raw.flags = record.flags;
-            if (!CompressPayload(record.payload, raw, errors)) {
+            if (!CompressPayload(record.payload, raw, errors, SaveWork().bytes_compressed)) {
                 return false;
             }
             const auto existing = record_index.find({raw.lod_level, raw.id});
@@ -6680,6 +6891,10 @@ std::uint64_t WorldSaveService::chunk_record_decode_count_for_testing() {
     return ChunkRecordDecodeCounter().load(std::memory_order_acquire);
 }
 
+SaveWorkCounts WorldSaveService::work_counts() {
+    return SaveWork();
+}
+
 std::uint64_t WorldSaveService::region_fingerprint_count_for_testing() {
     return RegionFingerprintCounter().load(std::memory_order_acquire);
 }
@@ -6727,7 +6942,7 @@ bool WorldSaveService::audit_admitted_chunk_records_for_testing(
         const ChunkRecordFacts decoded = DecodedChunkRecordFacts(*chunk);
         if (admitted->coords != decoded.coords || admitted->lattice_ok != decoded.lattice_ok ||
             admitted->loaded_or_edited != decoded.loaded_or_edited ||
-            admitted->strict_water != water_valid)
+            admitted->strict_water != water_valid || admitted->water_owned != decoded.water_owned)
             ++audit.mismatched;
     }
     return true;
@@ -7740,17 +7955,18 @@ struct ReplayPairReadGuard::State {
         const auto name =
             L"Global\\Luminumbra.ReplayPair." + std::to_wstring(info.dwVolumeSerialNumber) + L"." +
             std::to_wstring(info.nFileIndexHigh) + L"." + std::to_wstring(info.nFileIndexLow);
-        handle = ::CreateMutexW(nullptr, FALSE, name.c_str());
-        if (!handle)
+        handle.emplace(::CreateMutexW(nullptr, FALSE, name.c_str()));
+        if (!handle->get())
             return;
-        const auto acquired = ::WaitForSingleObject(handle, 0);
+        const auto acquired = ::WaitForSingleObject(handle->get(), 0);
         locked = acquired == WAIT_OBJECT_0 || acquired == WAIT_ABANDONED;
         if (!locked)
             return;
 #else
         // Lock the existing directory, so playback also works on read-only
         // media and there is no removable lock-file name to substitute.
-        descriptor = ::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        directory_file.emplace(::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+        const int descriptor = directory_file->get();
         struct stat info {};
         if (descriptor < 0 || ::fstat(descriptor, &info) != 0 || !S_ISDIR(info.st_mode))
             return;
@@ -7767,23 +7983,18 @@ struct ReplayPairReadGuard::State {
     }
     ~State() {
 #if defined(_WIN32)
-        if (locked)
-            ::ReleaseMutex(handle);
-        if (handle)
-            ::CloseHandle(handle);
-#else
-        if (descriptor >= 0)
-            ::close(descriptor);
+        if (handle && locked)
+            ::ReleaseMutex(handle->get());
 #endif
     }
     std::unique_ptr<PairDirectoryLock> thread_lock;
     std::filesystem::path directory;
     bool ready = false;
 #if defined(_WIN32)
-    HANDLE handle = nullptr;
+    std::optional<Filesystem::NativeFileOwner> handle;
     bool locked = false;
 #else
-    int descriptor = -1;
+    std::optional<Filesystem::NativeFileOwner> directory_file;
 #endif
 };
 
@@ -9001,6 +9212,7 @@ WorldSaveService::chunk_save_acknowledgement(const std::vector<std::shared_ptr<C
                 revision.chunk->voxel_revision() == revision.voxel &&
                 revision.chunk->water_revision() == revision.water &&
                 revision.chunk->authority_hash_revision() == revision.authority) {
+                revision.chunk->acknowledge_water_retirement();
                 revision.chunk->clear_voxel_data_dirty();
                 revision.chunk->clear_water_state_dirty();
             }
@@ -9012,6 +9224,7 @@ bool WorldSaveService::load_world_impl(WorldStreamingState& state,
                                        std::vector<std::string>& errors,
                                        const std::stop_token& stop,
                                        const std::unordered_set<ChunkID>* retain_chunks,
+                                       bool regional_water,
                                        std::vector<IVec3>* authoritative_inventory,
                                        std::size_t* decoded_chunk_count,
                                        bool catalog_only,
@@ -9019,6 +9232,7 @@ bool WorldSaveService::load_world_impl(WorldStreamingState& state,
     const detail::SnapshotReadOwnership ownership;
     const SavedJsonReadScope json_reads;
     DecodeCounter().fetch_add(1, std::memory_order_acq_rel);
+    ++SaveWork().world_decodes;
     LUMIN_PROFILE_ZONE_N("File world load");
     // Staging lives outside the strict region inventory. Each published file
     // uses its file lock; the snapshot gate excludes partial indexed publication only.
@@ -9121,6 +9335,12 @@ bool WorldSaveService::load_world_impl(WorldStreamingState& state,
         constexpr std::size_t kMaxStagedRepairBytes = std::size_t{256} * 1024 * 1024;
         std::size_t staged_repair_bytes = 0;
         const bool promote_legacy_water = !indexed && authoritative_inventory != nullptr;
+        // Inspection/decoding uses the existing per-region bounds: 65535 records,
+        // 1 GiB decoded work and 64 MiB per record (SavedInputLimits). Migration
+        // retains at most 4096 actual water sources plus their destinations.
+        constexpr std::size_t kMaxLegacyWaterRecords = 4096;
+        std::size_t legacy_bytes = 0;
+        std::vector<std::shared_ptr<Chunk>> legacy_water;
         std::sort(region_files.begin(), region_files.end());
         for (const auto& path : region_files) {
             if (stop.stop_requested())
@@ -9137,6 +9357,7 @@ bool WorldSaveService::load_world_impl(WorldStreamingState& state,
             }
             if (stop.stop_requested())
                 return reject("Saved-world validation cancelled.");
+            const auto first_legacy_source = legacy_water.size();
             for (const auto& record : records) {
                 if (stop.stop_requested())
                     return reject("Saved-world validation cancelled.");
@@ -9160,30 +9381,53 @@ bool WorldSaveService::load_world_impl(WorldStreamingState& state,
                     }
                     std::shared_ptr<Chunk> chunk;
                     ChunkRecordFacts facts;
+                    const bool materialize =
+                        retain || (regional_water && !indexed) || promote_legacy_water;
                     if (!AdmitChunkRecord(record,
                                           path,
                                           &errors,
                                           facts,
-                                          retain || promote_legacy_water ? &chunk : nullptr,
+                                          materialize ? &chunk : nullptr,
                                           retain_chunks && retain_chunks->empty() &&
                                               !authoritative_inventory,
                                           true,
                                           indexed))
                         return reject("");
-                    // Only inventory loads need a repair chunk outside the retain set.
-                    // Validation can use the cached authority facts without materializing it.
-                    if (authoritative_inventory && !chunk &&
-                        (record.flags & kRecordFlagEdited) == 0u && facts.loaded_or_edited &&
+                    // Indexed records can contain unowned legacy water even at Y=0.
+                    // Exact-byte facts let valid canonical owners stay cold; every
+                    // other regional candidate needs its payload inspected.
+                    const bool inspect_legacy_water =
+                        regional_water && (facts.coords.y != 0 || !facts.water_owned);
+                    const bool repair_owned_flag = authoritative_inventory &&
+                                                   (record.flags & kRecordFlagEdited) == 0u &&
+                                                   facts.loaded_or_edited;
+                    if (!chunk && (inspect_legacy_water || repair_owned_flag) &&
                         !AdmitChunkRecord(
                             record, path, &errors, facts, &chunk, false, false, indexed))
                         return reject("");
                     // Retain promotions and flag repairs until the save that records them commits.
                     // A pure validation (no inventory) re-derives repairs on every load, so it
                     // never retains them, and loads bound the staged repair chunks by bytes.
+                    // An already-owned canonical column can validly be dormant.
+                    // It needs only the existing flag repair, not legacy migration.
+                    const bool unowned_legacy_water = chunk && !chunk->has_water_authority();
                     const bool promoted =
                         chunk &&
                         (promote_legacy_water ? PromoteLegacyWaterRecord(*chunk, record)
                                               : RepairOwnedWaterRecordFlag(*chunk, record));
+                    const bool migrate_water =
+                        regional_water && chunk &&
+                        NeedsLegacyWaterMigration(*chunk, unowned_legacy_water, !indexed);
+                    if (migrate_water) {
+                        if (legacy_water.size() == kMaxLegacyWaterRecords ||
+                            record.uncompressed_size > kMaxStagedRepairBytes - legacy_bytes) {
+                            return reject(
+                                "Saved-input admission refused: legacy water migration cap.");
+                        }
+                        legacy_bytes += record.uncompressed_size;
+                        legacy_water.push_back(chunk);
+                        facts.loaded_or_edited = true;
+                    }
                     if (promoted)
                         facts.loaded_or_edited = true;
                     if ((indexed || authoritative_inventory) && !facts.lattice_ok)
@@ -9204,7 +9448,8 @@ bool WorldSaveService::load_world_impl(WorldStreamingState& state,
                             return reject("Saved-input admission refused: world exceeds the flag "
                                           "repair staging budget");
                     }
-                    if (retain || (promoted && (promote_legacy_water || authoritative_inventory)))
+                    if (retain || migrate_water ||
+                        (promoted && (promote_legacy_water || authoritative_inventory)))
                         state.insert_chunk(chunk);
                     else if (chunk)
                         AdmittedChunkRecordCache().remember_decoded(ChunkRecordKeyOf(record),
@@ -9216,6 +9461,43 @@ bool WorldSaveService::load_world_impl(WorldStreamingState& state,
                                       Filesystem::GenericUtf8PathString(path));
                     if (!AdmitFarLodRecord(record, rx, rz, &errors))
                         return reject("");
+                }
+            }
+            if (legacy_water.size() != first_legacy_source) {
+                // All layers of a column share this container. Resolve cold
+                // destinations from the bytes already read, never reopen/scan
+                // a region per column. O(records log records), <=4096 targets.
+                std::set<ChunkID> targets;
+                for (auto i = first_legacy_source; i < legacy_water.size(); ++i) {
+                    auto coords = legacy_water[i]->get_coords();
+                    coords.y = 0;
+                    targets.insert(Chunk::calculate_id(coords));
+                }
+                for (const auto& record : records) {
+                    if (stop.stop_requested()) {
+                        return reject("Saved-world validation cancelled.");
+                    }
+                    if (record.lod_level != 0 || !targets.contains(record.id) ||
+                        state.contains_chunk(record.id)) {
+                        continue;
+                    }
+                    if (record.uncompressed_size > kMaxStagedRepairBytes - legacy_bytes) {
+                        return reject("Saved-input admission refused: legacy water migration cap.");
+                    }
+                    legacy_bytes += record.uncompressed_size;
+                    ChunkRecordFacts destination_facts;
+                    std::shared_ptr<Chunk> destination;
+                    if (!AdmitChunkRecord(record,
+                                          path,
+                                          &errors,
+                                          destination_facts,
+                                          &destination,
+                                          false,
+                                          false,
+                                          indexed)) {
+                        return reject("");
+                    }
+                    state.insert_chunk(destination);
                 }
             }
         }
@@ -9276,6 +9558,18 @@ bool WorldSaveService::load_world_impl(WorldStreamingState& state,
         // must discard the staged chunks just like cancellation during a read.
         if (stop.stop_requested())
             return reject("Saved-world validation cancelled.");
+        // Stable packed-id order also makes the selected equal duplicate independent
+        // of container order. Admission covers every source before any publication.
+        if (!legacy_water.empty()) {
+            std::sort(
+                legacy_water.begin(), legacy_water.end(), [](const auto& lhs, const auto& rhs) {
+                    return lhs->get_id() < rhs->get_id();
+                });
+            MigrateLegacyWaterColumns(state, legacy_water);
+            if (stop.stop_requested()) {
+                return reject("Saved-world validation cancelled.");
+            }
+        }
         if (payloads_verified)
             *payloads_verified = !indexed;
         return true;
@@ -9292,12 +9586,14 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                                   const std::stop_token& stop,
                                   const std::unordered_set<ChunkID>* retain_chunks,
                                   std::vector<IVec3>* authoritative_inventory,
-                                  std::size_t* decoded_chunk_count) const {
+                                  std::size_t* decoded_chunk_count,
+                                  bool regional_water) const {
     return load_world_impl(state,
                            save_dir,
                            errors,
                            stop,
                            retain_chunks,
+                           regional_water,
                            authoritative_inventory,
                            decoded_chunk_count,
                            false);
@@ -9474,7 +9770,8 @@ bool WorldSaveService::PreparedWorldWrite::prepare(const WorldStreamingState& st
                                           SdfLatticeAdmissible(*chunk),
                                           water_authority ||
                                               (record.flags & kRecordFlagEdited) != 0u,
-                                          item.strict_water_valid},
+                                          item.strict_water_valid,
+                                          water_authority},
                          std::move(cached)});
                 }
                 std::string().swap(inputs);

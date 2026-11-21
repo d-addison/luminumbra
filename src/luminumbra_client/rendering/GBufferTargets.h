@@ -38,6 +38,9 @@ public:
     // An aborted frame is never eligible for publication, even if its table is empty.
     void abort() noexcept;
     bool complete() const;
+    // Detached storage can be displayed with unsupported records hatched. This
+    // does not certify identity coverage; publication must still use complete().
+    bool snapshot_ready() const;
     // Const diagnostic: sticky capture failure, including retirement and unwinding.
     bool attachment_failed() const noexcept;
     // Sticky submission refusal, separate from unsupported producer coverage.
@@ -47,10 +50,17 @@ public:
     bool attach_forward(std::uint32_t framebuffer,
                         std::uint32_t color_texture,
                         const DiagnosticExtent& extent);
-    Shader*
-    variant(Shader* shader, bool ladder, const std::vector<std::string>& feedback_varyings = {});
+    // zero_ids preserves an uninstrumented fragment's discard/depth behaviour,
+    // but writes zero for every surviving fragment. Variant failures refuse display.
+    Shader* variant(Shader* shader,
+                    bool ladder,
+                    const std::vector<std::string>& feedback_varyings = {},
+                    bool zero_ids = false);
     void write(const Shader& shader, const DiagnosticSubmission& submission);
     void write_current(const DiagnosticSubmission& submission);
+    // Refused/uncovered fallback draws must not inherit the preceding identity.
+    // No-op unless a variant owned by this capture is currently bound.
+    void clear_current_identity();
     void unsupported(std::string_view producer,
                      std::uint32_t lod = 0,
                      DiagnosticOwnership ownership = DiagnosticOwnership::Live,
@@ -72,6 +82,7 @@ private:
         std::array<std::uint8_t, 4> color_mask{};
         int buffer_count = 0;
         bool failed = false;
+        bool snapshot_failed = false;
         bool captured = false;
         bool refused = false;
         bool forward = false;
@@ -80,6 +91,7 @@ private:
             std::string vertex;
             std::string fragment;
             bool ladder;
+            bool zero_ids;
             std::vector<std::string> feedback_varyings;
             std::unique_ptr<Shader> shader;
             int identity;

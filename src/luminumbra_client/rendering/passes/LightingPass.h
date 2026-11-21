@@ -67,9 +67,18 @@ public:
     }
 
 private:
+    struct UniformNames;
+    std::unique_ptr<UniformNames> m_uniform_names;
     FrameBufferObject m_lighting_fbo;
     u32 m_environment_brdf = 0; // registry-owned; independent of framebuffer size
     std::unique_ptr<Shader> m_lighting_shader;
+    std::unique_ptr<Shader> m_contribution_shader;
+    unsigned int m_contribution_source_program = 0;
+    unsigned int m_contribution_texture = 0;
+    unsigned int m_contribution_width = 0;
+    unsigned int m_contribution_height = 0;
+    void reset_contributions();
+    bool prepare_contributions(const RenderContext& ctx);
     // the lightning overlay program (full-screen additive). Lazily
     // built on first use so non-lightning frames pay nothing.
     std::unique_ptr<Shader> m_lightning_overlay_shader;

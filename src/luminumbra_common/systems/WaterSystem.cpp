@@ -863,6 +863,18 @@ WaterSystem::WaterSystem(JobSystem* job_system, SHIELD_WorldSystem* shield_syste
     : m_job_system(job_system)
     , m_shield_system(shield_system) {}
 
+void WaterSystem::ResetRegionalTimeline() {
+    m_last_regional_tick.reset();
+    m_regional_work = {};
+    m_mesh_invalidations.clear();
+    m_active_chunks = nullptr;
+    m_cells_stepped_last_update = 0;
+    m_grid_candidates_visited_last_update = 0;
+    m_debug_sources_seen = 0;
+    m_debug_source_injected_mm = 0;
+    m_water_activity_cache.clear();
+}
+
 void WaterSystem::set_camera_entity(EntityID camera_entity) {
     m_camera_entity = camera_entity;
 }
@@ -2044,6 +2056,11 @@ void WaterSystem::SetSimResolution(int cells_per_side) {
 
 std::size_t WaterSystem::MigrateChunksToSimResolution(
     const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& chunks) {
+    // Regional preparation owns resizing, including sleeping saved columns. Eager
+    // boot or streaming migration would make eligibility depend on residency.
+    if (m_regional_scheduling) {
+        return 0;
+    }
     const auto target_level = static_cast<WaterDetailLevel>(m_sim_resolution);
     std::size_t migrated = 0;
     for (const auto& entry : chunks) {
@@ -2097,6 +2114,10 @@ bool WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
         if (rebuild_flow) {
             chunk.water_flow_data.assign(cells, Vec2(0.0f));
         }
+        // The rest-level mirror is optional; a stale size would make the column incomplete.
+        if (!chunk.water_rest_level.empty() && chunk.water_rest_level.size() != cells) {
+            chunk.water_rest_level.clear();
+        }
         if (rebuild_surface || rebuild_terrain || rebuild_flow) {
             // Mirror repair changes render inputs, never integer authority or save ownership.
             InvalidateWaterMesh(chunk, m_mesh_invalidations);
@@ -2109,6 +2130,7 @@ bool WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
         chunk.water_level_data.clear();
         chunk.water_flow_data.clear();
         chunk.water_sim_terrain_height.clear();
+        chunk.water_rest_level.clear();
         chunk.has_water_sim.store(false);
         InvalidateWaterMesh(chunk, m_mesh_invalidations);
         chunk.current_water_resolution.store(0);
@@ -2181,6 +2203,9 @@ bool WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
     chunk.water_level_data.resize(new_sim_size);
     chunk.water_flow_data.resize(new_sim_size);
     chunk.water_sim_terrain_height.resize(new_sim_size);
+    // The seed-time rest level belongs to the old grid. It is an optional mirror, so drop it
+    // rather than leave a mis-sized copy that makes the resized column incomplete.
+    chunk.water_rest_level.clear();
 
     // Regenerate terrain height data for new resolution
     const IVec3 c_coords = chunk.get_coords();

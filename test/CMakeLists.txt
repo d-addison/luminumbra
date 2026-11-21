@@ -198,6 +198,7 @@ add_executable(common_tests
     common/StationDiscoveryArguments_test.cpp
     common/StationDiscovery_test.cpp
     common/Crc32_test.cpp
+    common/IntegerPrimitives_test.cpp
     rendering/shader_compositing_contract_test.cpp
     rendering/photo_environment_test.cpp
     common/AnimationRuntime_test.cpp
@@ -644,6 +645,7 @@ add_executable(render_smoke_test
     rendering/FarWorldLegacyIsolation_test.cpp
     rendering/FarWorldShadow_test.cpp
     rendering/FarWorldFogGl_test.cpp
+    rendering/TerrainCoverageCaptureGl_test.cpp
     rendering/FarWorldWaterGl_test.cpp
     rendering/SkyAtmosphereLutGl_test.cpp
     rendering/TerrainCullingTestPeer.h
@@ -790,6 +792,8 @@ endif()
 # default-OFF, so a headless flip is vacuous — this is the non-vacuous proof).
 add_executable(pass_context_test
     rendering/pass_context_test.cpp
+    rendering/diagnostic_inspector_test.cpp
+    rendering/diagnostic_contributions_test.cpp
     # Evidence reuse, stable surface slots and column-local invalidation on both backends.
     rendering/foliage_rebuild_test.cpp
     # Includes deterministic CPU/compute work budgets, idle zero and stale results.
@@ -1646,6 +1650,11 @@ add_executable(regional_scent_allocation_test common/regional_scent_allocation_t
 target_include_directories(regional_scent_allocation_test PRIVATE ../src)
 target_link_libraries(regional_scent_allocation_test PRIVATE gtest_main luminumbra_common)
 
+# Keep throwing allocation replacement isolated from every other test executable.
+add_executable(native_file_ownership_test common/native_file_ownership_test.cpp)
+target_include_directories(native_file_ownership_test PRIVATE ../src ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(native_file_ownership_test PRIVATE gtest_main luminumbra_common)
+
 # Frontier gate fixtures: the lua-api-manifest and scalar-field-diffusion gates
 # assert at static initialization, the instinct and loopback gates are called
 # from the gtest cases in network_state_hash_gate_test.cpp.
@@ -1699,6 +1708,15 @@ add_executable(frontier_gates_test
     persistence/SaveTransaction_test.cpp
 )
 
+# The region consumer regressions also exceed the default COFF section count.
+if(MSVC)
+    set_source_files_properties(common/RegionConsumerGate_test.cpp PROPERTIES
+        COMPILE_OPTIONS "/bigobj")
+elseif(MINGW)
+    set_source_files_properties(common/RegionConsumerGate_test.cpp PROPERTIES
+        COMPILE_OPTIONS "-Wa,-mbig-obj")
+endif()
+
 target_compile_definitions(frontier_gates_test PRIVATE
     LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
     LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts"
@@ -1730,6 +1748,7 @@ add_executable(world_open_refusal_test
     ../src/luminumbra_server/ServerWorldRunner.cpp
     ../src/luminumbra_server/modes/ModeHelpers.cpp
     ../src/luminumbra_server/modes/Replay.cpp
+    ../src/luminumbra_server/modes/Heavy.cpp
 )
 target_include_directories(world_open_refusal_test PRIVATE ../src ../src/luminumbra_common ../src/luminumbra_client)
 target_compile_definitions(world_open_refusal_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
@@ -1982,6 +2001,13 @@ target_link_libraries(bounded_console_sink_test PRIVATE
 )
 luminumbra_configure_first_party_target(bounded_console_sink_test)
 
+# Isolate logger first use from all engine and test-suite initialization.
+add_executable(log_initialization_test common/log_initialization_test.cpp)
+target_include_directories(log_initialization_test PRIVATE ../src/luminumbra_common)
+target_compile_definitions(log_initialization_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+target_link_libraries(log_initialization_test PRIVATE gtest_main luminumbra_common Threads::Threads)
+luminumbra_configure_first_party_target(log_initialization_test)
+
 #  implementation note: occlusion read-back onto ma_sound volume. Pure test of the
 # ComputeFinalVolume helper; includes MiniaudioManager.h so needs miniaudio + nlohmann_json.
 add_executable(audio_volume_readback_test
@@ -2122,7 +2148,8 @@ target_include_directories(frame_attribution_test PRIVATE ../src)
 target_link_libraries(frame_attribution_test PRIVATE gtest_main)
 luminumbra_configure_first_party_target(frame_attribution_test)
 
-add_executable(upload_budget_test rendering/upload_budget_test.cpp)
+add_executable(upload_budget_test rendering/upload_budget_test.cpp
+    rendering/terrain_stream_ring_test.cpp)
 target_include_directories(upload_budget_test PRIVATE ../src)
 target_link_libraries(upload_budget_test PRIVATE gtest_main)
 luminumbra_configure_first_party_target(upload_budget_test)
@@ -2230,6 +2257,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     runtime_world_visual_validation_test
     frontier_gates_test
     regional_scent_allocation_test
+    native_file_ownership_test
     world_open_refusal_test
     runtime_surface_options_test
     jolt_tunneling_test
@@ -2242,6 +2270,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     hang_watchdog_test
     crash_report_test
     bounded_console_sink_test
+    log_initialization_test
     developer_console_pure_test
     developer_console_imgui_test
     developer_settings_test
@@ -2826,6 +2855,9 @@ add_test(NAME FramePacingSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_frame_pacing_contract.py)
 add_test(NAME GraphicsUiSourceContract COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/test/tools/test_graphics_ui_contract.py)
+# Win32 headers turn far/near/interface/... into macros; Windows-only build breaks.
+add_test(NAME Win32MacroIdentifierContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    ${CMAKE_SOURCE_DIR}/test/tools/test_win32_macro_identifiers.py)
 add_test(NAME RenderCrashCapturePython COMMAND "${Python3_EXECUTABLE}" -I -B
     ${CMAKE_SOURCE_DIR}/tools/perf/test_render_crash_capture.py)
 set_tests_properties(RenderCrashCapturePython PROPERTIES TIMEOUT 30)
@@ -2856,14 +2888,20 @@ if(LUMINUMBRA_SHADER_SCENES)
     add_executable(shader_scene_render_test rendering/shader_scene_render_test.cpp)
     # Re-run configuration when the fixture changes so its embedded hash stays current.
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-        "${CMAKE_SOURCE_DIR}/test/rendering/shader_scene_render_test.cpp")
+        "${CMAKE_SOURCE_DIR}/test/rendering/shader_scene_render_test.cpp"
+        "${CMAKE_SOURCE_DIR}/src/luminumbra_client/rendering/Camera.h")
     file(READ "${CMAKE_SOURCE_DIR}/test/rendering/shader_scene_render_test.cpp" _shader_scene_source)
     string(REPLACE "\r\n" "\n" _shader_scene_source "${_shader_scene_source}")
     string(SHA256 _shader_scene_hash "${_shader_scene_source}")
+    file(READ "${CMAKE_SOURCE_DIR}/src/luminumbra_client/rendering/Camera.h" _shader_scene_camera)
+    string(REPLACE "\r\n" "\n" _shader_scene_camera "${_shader_scene_camera}")
+    string(SHA256 _shader_scene_camera_hash "${_shader_scene_camera}")
     target_compile_definitions(shader_scene_render_test PRIVATE
         LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
-        LUMINUMBRA_SHADER_SCENE_INPUT_HASH="${_shader_scene_hash}")
-    target_link_libraries(shader_scene_render_test PRIVATE gtest_main glfw glad)
+        LUMINUMBRA_SHADER_SCENE_INPUT_HASH="${_shader_scene_hash}"
+        LUMINUMBRA_SHADER_SCENE_CAMERA_HASH="${_shader_scene_camera_hash}")
+    target_include_directories(shader_scene_render_test PRIVATE ../src)
+    target_link_libraries(shader_scene_render_test PRIVATE gtest_main glfw glad glm::glm)
     if(WIN32)
         target_link_libraries(shader_scene_render_test PRIVATE opengl32)
     elseif(APPLE)

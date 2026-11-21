@@ -72,6 +72,13 @@ int RunLockstepLoopback(const ServerCliOptions& options) try {
                          options.lockstep_delay_input,
                          options.lockstep_corrupt_tick);
 
+    if (options.avatars < 0 ||
+        options.avatars >
+            static_cast<int>(Luminumbra::world::AuthorityBootDescriptor::kMaxAvatars)) {
+        LUMINUMBRA_CORE_ERROR("lockstep: avatar roster exceeds replay boot bound");
+        return 1;
+    }
+
     // Two runners: host (client 0) + the one remote (client 1). Same seed/preset => the
     // two worlds tick identically and their hashes agree at every cadence.
     auto make_runner = [&](const char* name) {
@@ -79,7 +86,10 @@ int RunLockstepLoopback(const ServerCliOptions& options) try {
         cfg.world_id.clear();
         cfg.world_name = name;
         cfg.autosave_interval_ticks = 0;
-        return std::make_unique<Luminumbra::Server::ServerWorldRunner>(std::move(cfg));
+        return std::make_unique<Luminumbra::Server::ServerWorldRunner>(
+            std::move(cfg),
+            Luminumbra::world::OwnerContinuationOptions{.owner_continuation =
+                                                            !options.weather_schedule});
     };
     Luminumbra::Server::ThrowawaySaveDirGuard host_cleanup;
     Luminumbra::Server::ThrowawaySaveDirGuard peer_cleanup;
@@ -96,7 +106,7 @@ int RunLockstepLoopback(const ServerCliOptions& options) try {
     }
     peer_cleanup.Arm(peer_runner->Session()->GetWorldSaveDir());
 
-    const std::uint64_t seed_num = std::strtoull(options.seed.c_str(), nullptr, 10);
+    const std::uint64_t seed_num = host_runner->Session()->GetMetadata().resolvedSeed;
 
     LockstepPeerContext host_ctx{host_runner.get(), 0, 0};
     LockstepPeerContext peer_ctx{peer_runner.get(), 1, options.lockstep_corrupt_tick};
@@ -124,6 +134,10 @@ int RunLockstepLoopback(const ServerCliOptions& options) try {
     peer_cfg.peer_client_id = 0;
     peer_cfg.system_config_identity = peer_runner->Session()->SystemConfigIdentity();
     peer_cfg.preset_content_hash = peer_runner->Session()->PresetContentHash();
+    host_cfg.replay_header = std::make_shared<const Luminumbra::Replay::ReplayHeader>(
+        host_runner->CaptureReplayHeader());
+    peer_cfg.replay_header = std::make_shared<const Luminumbra::Replay::ReplayHeader>(
+        peer_runner->CaptureReplayHeader());
 
     Luminumbra::Net::LockstepHooks host_hooks = hooks_template;
     host_hooks.user = &host_ctx;

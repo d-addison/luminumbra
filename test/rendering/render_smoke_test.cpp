@@ -26,11 +26,13 @@
 #include "luminumbra_client/rendering/passes/FarWorldPassUniforms.h"
 #include "luminumbra_client/rendering/passes/FoliagePass.h"
 #include "luminumbra_client/rendering/passes/GBufferPass.h"
+#include "luminumbra_client/rendering/passes/GlassOitPass.h"
 #include "luminumbra_client/rendering/passes/LightingPass.h"
 #include "luminumbra_client/rendering/passes/ParticlePass.h"
 #include "luminumbra_client/rendering/passes/SkyboxPass.h"
 #include "luminumbra_client/rendering/passes/SsaoPass.h"
 #include "luminumbra_client/rendering/passes/WaterPass.h"
+#include "luminumbra_client/rendering/passes/WaterfallPass.h"
 #include "luminumbra_common/animation/AnimationRuntime.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/core/FilesystemPath.h"
@@ -541,6 +543,52 @@ std::string ReadTextFile(const fs::path& path) {
     return stream.str();
 }
 
+std::string ReadSourceFile(const std::filesystem::path& path) {
+    auto text = ReadTextFile(path);
+    // Source contracts compare logical lines; retain all non-CRLF bytes.
+    // This in-place pass is bounded by the source bytes already read.
+    std::size_t output = 0;
+    for (std::size_t input = 0; input < text.size(); ++input) {
+        if (text[input] != '\r' || input + 1 == text.size() || text[input + 1] != '\n') {
+            text[output++] = text[input];
+        }
+    }
+    text.resize(output);
+    return text;
+}
+
+TEST(RenderSmokeTest, SourceReaderNormalizesOnlyCrLf) {
+    const Luminumbra::TestSupport::ScopedTempFile temporary("source_lines_", ".cpp");
+    const auto& path = temporary.Path();
+    constexpr std::array<std::string_view, 7> inputs{"",
+                                                     "one\ntwo\n",
+                                                     "one\r\ntwo\r\n",
+                                                     "one\rtwo\r",
+                                                     "one\r\ntwo\nthree\r\n",
+                                                     "\r\r\nlast\r",
+                                                     "no terminator"};
+    constexpr std::array<std::string_view, 7> expected{"",
+                                                       "one\ntwo\n",
+                                                       "one\ntwo\n",
+                                                       "one\rtwo\r",
+                                                       "one\ntwo\nthree\n",
+                                                       "\r\nlast\r",
+                                                       "no terminator"};
+    for (std::size_t index = 0; index < inputs.size(); ++index) {
+        SCOPED_TRACE(index);
+        {
+            std::ofstream output(path, std::ios::binary);
+            output << inputs[index];
+            output.close();
+            ASSERT_TRUE(output.good());
+        }
+        EXPECT_EQ(ReadTextFile(path), inputs[index]);
+        EXPECT_EQ(ReadSourceFile(path), expected[index]);
+    }
+    ASSERT_TRUE(fs::remove(path));
+    EXPECT_TRUE(ReadSourceFile(path).empty());
+}
+
 bool ReadShaderSourceRecursive(const fs::path& path,
                                std::unordered_set<std::string>& include_stack,
                                std::string& source,
@@ -599,7 +647,7 @@ bool ReadShaderSource(const fs::path& path, std::string& source, std::string& di
 // scan the combined pipeline + pass sources.
 std::string ReadRenderPipelineCombinedSources() {
     std::string combined =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
     const fs::path pass_dir = SourceRoot() / "src/luminumbra_client/rendering/passes";
     if (fs::exists(pass_dir)) {
         std::vector<fs::path> pass_files;
@@ -611,7 +659,7 @@ std::string ReadRenderPipelineCombinedSources() {
         }
         std::sort(pass_files.begin(), pass_files.end());
         for (const fs::path& pass_file : pass_files) {
-            combined += ReadTextFile(pass_file);
+            combined += ReadSourceFile(pass_file);
         }
     }
     return combined;
@@ -1692,9 +1740,9 @@ TEST(RenderSmokeTest, RenderHealthGateEmitsAnalysisArtifact) {
     }
 
     const std::string header =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
     const std::string source =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
     ASSERT_FALSE(header.empty());
     ASSERT_FALSE(source.empty());
 
@@ -3002,7 +3050,7 @@ TEST(RenderSmokeTest, CanopyEmptyRecoveryRetainsCoarseHitAcrossForegroundThenSky
             const auto result = probe.draw()[16];
             EXPECT_GE((1 - result.r) / 0.94f, baseOcclusion - 0.000001f);
             EXPECT_NEAR(result.r, 1 - 0.94f * baseOcclusion, 0.000001f);
-            EXPECT_FLOAT_EQ(result.g, openPrevious ? 5 : 11)
+            EXPECT_FLOAT_EQ(result.g, openPrevious ? 5.0f : 11.0f)
                 << "three coarse reads plus two ordinary or eight empty-recovery reads";
             EXPECT_LE(result.g, 40);
             if (ladder != 0) {
@@ -5552,8 +5600,15 @@ TEST(RenderSmokeTest, ColoredShadowTintedTransmissionColorsDirectSun) {
     glUniform1i(glGetUniformLocation(program, "u_materialLUT"), 8);
     glUniform1i(glGetUniformLocation(program, "u_shadowTintCascades"), 9);
     SetMat4Identity(program, "u_inverseView");
-    for (int i = 0; i < 4; ++i)
-        SetMat4Identity(program, ("u_lightSpaceMatrices[" + std::to_string(i) + "]").c_str());
+    // A conventional light projection over signed light-view Z [-4, 4], so the
+    // receiver at z=-3 projects to depth 0.875, inside the light frustum.
+    glm::mat4 light_space(1.0f);
+    light_space[2][2] = -0.25f;
+    for (int i = 0; i < 4; ++i) {
+        const std::string name = "u_lightSpaceMatrices[" + std::to_string(i) + "]";
+        glUniformMatrix4fv(
+            glGetUniformLocation(program, name.c_str()), 1, GL_FALSE, glm::value_ptr(light_space));
+    }
     glUniform4f(glGetUniformLocation(program, "u_cascadeSplits"), 1e9f, 1e9f, 1e9f, 1e9f);
     glUniform1f(glGetUniformLocation(program, "u_time"), 0.0f);
     glUniform1f(glGetUniformLocation(program, "u_sea_level"), -1000.0f);
@@ -5851,13 +5906,13 @@ TEST(RenderSmokeTest, RenderPipelineHotPathLogsAreCounterBacked) {
 
 TEST(RenderSmokeTest, ScheduledNightlyGateRequiresTaskSchedulerProvenance) {
     const fs::path behavior_test_path = SourceRoot() / "tools/gates/test-nightly-provenance.ps1";
-    const std::string runner = ReadTextFile(SourceRoot() / "tools/gates/run-nightly-gate.ps1");
+    const std::string runner = ReadSourceFile(SourceRoot() / "tools/gates/run-nightly-gate.ps1");
     const std::string frontier =
-        ReadTextFile(SourceRoot() / "tools/gates/validate-engine-frontier.ps1");
+        ReadSourceFile(SourceRoot() / "tools/gates/validate-engine-frontier.ps1");
     const std::string registrar =
-        ReadTextFile(SourceRoot() / "tools/gates/register-nightly-gate-task.ps1");
-    const std::string helper = ReadTextFile(SourceRoot() / "tools/gates/nightly-provenance.ps1");
-    const std::string behavior_test = ReadTextFile(behavior_test_path);
+        ReadSourceFile(SourceRoot() / "tools/gates/register-nightly-gate-task.ps1");
+    const std::string helper = ReadSourceFile(SourceRoot() / "tools/gates/nightly-provenance.ps1");
+    const std::string behavior_test = ReadSourceFile(behavior_test_path);
     ASSERT_FALSE(runner.empty());
     ASSERT_FALSE(frontier.empty());
     ASSERT_FALSE(registrar.empty());
@@ -6019,9 +6074,9 @@ TEST(RenderSmokeTest, ScheduledNightlyGateRequiresTaskSchedulerProvenance) {
 
 TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
     const std::string header =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/FarLodSystem.h");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/FarLodSystem.h");
     const std::string source =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/FarLodSystem.cpp");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/FarLodSystem.cpp");
     ASSERT_FALSE(header.empty());
     ASSERT_FALSE(source.empty());
 
@@ -6105,7 +6160,7 @@ TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
         }
     };
     const std::string world_source =
-        ReadTextFile(SourceRoot() / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp");
     ASSERT_FALSE(world_source.empty());
     const auto capture_body = section(world_source,
                                       "SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(",
@@ -6307,7 +6362,7 @@ TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
 
 TEST(RenderSmokeTest, RenderPipelineExposesPassBudgetCounters) {
     const std::string header =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
     const std::string source = ReadRenderPipelineCombinedSources();
     ASSERT_FALSE(header.empty());
     ASSERT_FALSE(source.empty());
@@ -6344,16 +6399,16 @@ TEST(RenderSmokeTest, RenderPipelineExposesPassBudgetCounters) {
 
 TEST(RenderSmokeTest, RenderFrameworkContractsEmitArtifacts) {
     const std::string header =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
     const std::string source = ReadRenderPipelineCombinedSources();
     const std::string shader_header =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/Shader.h");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/Shader.h");
     const std::string shader_source =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/Shader.cpp");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/Shader.cpp");
     const std::string capture_header =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/CaptureHooks.h");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/CaptureHooks.h");
     const std::string capture_source =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/CaptureHooks.cpp");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/CaptureHooks.cpp");
     ASSERT_FALSE(header.empty());
     ASSERT_FALSE(source.empty());
     ASSERT_FALSE(shader_header.empty());
@@ -6383,7 +6438,7 @@ TEST(RenderSmokeTest, RenderFrameworkContractsEmitArtifacts) {
     // pass into the G-buffer pass (the textured albedo and normal-mapped normal
     // are baked into the G-buffer). The contract now lives in g_buffer.frag.
     {
-        const std::string gbuffer_frag = ReadTextFile(SourceRoot() / "res/shaders/g_buffer.frag");
+        const std::string gbuffer_frag = ReadSourceFile(SourceRoot() / "res/shaders/g_buffer.frag");
         EXPECT_NE(gbuffer_frag.find("u_terrainTextures"), std::string::npos);
         EXPECT_NE(gbuffer_frag.find("u_terrainNormals"), std::string::npos);
         EXPECT_NE(gbuffer_frag.find("triplanar_albedo"), std::string::npos);
@@ -9640,6 +9695,7 @@ TEST(RenderSmokeTest, DiagnosticAdmissionBudgetAndScopeRefusalAreSafe) {
         EXPECT_FALSE(DiagnosticFrameCapture::Admitted(extent, retained));
         EXPECT_EQ(retained, 123U);
         DiagnosticFrameCapture refused(extent);
+        EXPECT_FALSE(refused.ready());
         EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
     }
     HiddenGlContext context;
@@ -9650,6 +9706,7 @@ TEST(RenderSmokeTest, DiagnosticAdmissionBudgetAndScopeRefusalAreSafe) {
     {
         DiagnosticFrameCapture capture({1, 2});
         EXPECT_NE(GBufferDiagnosticCapture::Current(), nullptr);
+        EXPECT_FALSE(capture.ready());
         DiagnosticBundleFrame frame;
         frame.extent = {1, 2};
         EXPECT_FALSE(capture.finish({}, {.enabled = true, .probe = std::nullopt}, frame, {}));
@@ -9802,6 +9859,129 @@ TEST(RenderSmokeTest, DiagnosticRetryAndPartialDestinationsPreserveEveryByte) {
     EXPECT_TRUE(pipeline.diagnostic_capture_destination_available({}));
 }
 
+TEST(RenderSmokeTest, ScenarioCaptureRequiresForwardStorageOnlyForSubmittedGeometry) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    RenderResourceRegistry resources;
+    GBufferPass gbuffer;
+    LightingPass lighting;
+    WaterPass water;
+    WaterfallPass waterfall;
+    GlassOitPass glass;
+    gbuffer.init_gbuffer(resources, 32, 32);
+    lighting.init_lighting_fbo(resources, 32, 32);
+    water.init_shader(SourceRoot());
+    water.init_water_fallback_textures(resources);
+    waterfall.init_shader(SourceRoot());
+    ASSERT_TRUE(water.shader()->IsValid());
+    ASSERT_TRUE(waterfall.shader()->IsValid());
+    // Adopted factors start at zero: baked sheets exist, but submit no geometry.
+    WaterfallPass::PreparedGeometry geometry;
+    geometry.sites.resize(1);
+    geometry.vertices.resize(72, 0.0f);
+    waterfall.begin_adoption(std::move(geometry));
+    ASSERT_TRUE(waterfall.adopt_next(nullptr, SourceRoot()));
+
+    GLuint vao = 0, vbo = 0, ebo = 0;
+    const std::array<float, 18> vertices{
+        -1, 0, -5, 1, 0, -5, 0, 1, -5, -1, 0, -5, 1, 0, -5, 0, 1, -5};
+    const std::array<unsigned int, 3> indices{0, 1, 2};
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &vbo);
+    glGenBuffers(1, &ebo);
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+    glVertexAttrib3f(1, 0, 1, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices.data(), GL_STATIC_DRAW);
+    Camera camera;
+    RenderContext ctx;
+    ctx.screen_width = 32;
+    ctx.screen_height = 32;
+    ctx.screen_quad_vao = vao;
+    ctx.camera = &camera;
+    ctx.view = camera.GetViewMatrix();
+    ctx.projection = camera.GetProjectionMatrix(32, 32);
+    ctx.lit_scene = FboHandle{lighting.lighting_fbo().fbo_id, true};
+    ctx.lit_scene_depth = RenderbufferHandle{lighting.lighting_fbo().depth_texture};
+    ctx.opaque_scene = TextureHandle{lighting.lighting_fbo().opaque_color_texture};
+    ctx.gbuffer_depth = TextureHandle{gbuffer.gbuffer().depth_texture};
+    const auto overflow_count = std::numeric_limits<Luminumbra::u32>::max();
+    for (const auto& counts :
+         std::array<std::vector<Luminumbra::u32>, 6>{{{},
+                                                      {0},
+                                                      {overflow_count},
+                                                      {0, overflow_count},
+                                                      {0, overflow_count, 3},
+                                                      {3, 0, overflow_count}}}) {
+        WaterPassInput input;
+        for (const auto count : counts) {
+            input.draw_items.push_back(
+                {.model = glm::mat4(1), .vao_id = vao, .element_count = count});
+        }
+        // Use the same deferred-only owner as scenario capture. No forward
+        // storage is available; an actual submission must still refuse.
+        DiagnosticFrameCapture frame({32, 32});
+        auto* scope = GBufferDiagnosticCapture::Current();
+        ASSERT_NE(scope, nullptr);
+        ASSERT_TRUE(scope->attach(gbuffer.gbuffer(), {32, 32}));
+        scope->detach();
+        ASSERT_TRUE(frame.ready());
+        glBindFramebuffer(GL_FRAMEBUFFER, ctx.lit_scene.id);
+        glViewport(0, 0, 32, 32);
+        const auto stats = water.execute(ctx, input, camera);
+        const bool submitted = std::find(counts.begin(), counts.end(), 3u) != counts.end();
+        EXPECT_EQ(stats.water_draws, submitted ? 1u : 0u);
+        waterfall.execute(ctx);
+        glass.execute_accum(ctx, {});
+        EXPECT_EQ(frame.ready(), !submitted);
+        EXPECT_EQ(scope->attachment_failed(), submitted);
+        if (!submitted) {
+            scope->unsupported("unattributed_forward_producer",
+                               0,
+                               DiagnosticOwnership::Live,
+                               DiagnosticPass::Forward);
+            EXPECT_FALSE(frame.ready());
+        }
+    }
+    Luminumbra::Systems::SHIELD_WorldSystem world(
+        nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    waterfall.update_liveness(world, nullptr); // Unstreamed crest is live.
+    const std::vector<GlassPaneItem> panes(1);
+    GlassOitPassInput glass_input;
+    glass_input.glass_items = &panes;
+    glass_input.glass_vao = vao;
+    glass_input.root_path = SourceRoot();
+    for (const bool draw_glass : {false, true}) {
+        DiagnosticFrameCapture frame({32, 32});
+        auto* scope = GBufferDiagnosticCapture::Current();
+        ASSERT_NE(scope, nullptr);
+        ASSERT_TRUE(scope->attach(gbuffer.gbuffer(), {32, 32}));
+        scope->detach();
+        ASSERT_TRUE(frame.ready());
+        if (draw_glass) {
+            glass.execute_accum(ctx, glass_input);
+            glass.execute_resolve(ctx, glass_input);
+        } else {
+            waterfall.execute(ctx);
+        }
+        EXPECT_FALSE(frame.ready());
+        EXPECT_TRUE(scope->attachment_failed());
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glass.destroy();
+    waterfall.destroy_geometry();
+    water.destroy_water_fallback_textures(resources);
+    lighting.destroy_lighting_fbo(resources);
+    gbuffer.destroy_gbuffer(resources);
+    glDeleteBuffers(1, &ebo);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+}
+
 TEST(RenderSmokeTest, ScenarioBundlesRetainCompletedFrameIdentityAcrossSiblingCaptures) {
     HiddenGlContext context;
     ASSERT_TRUE(context.ready()) << context.error();
@@ -9853,6 +10033,10 @@ TEST(RenderSmokeTest, ScenarioBundlesRetainCompletedFrameIdentityAcrossSiblingCa
                              "creature_slice_smoke",
                              "showcase_motion"}) {
         SCOPED_TRACE(mode);
+        // Admission detaches before observing completion and is repeatable after
+        // finish has consumed the scope, using the retained completed identity.
+        ASSERT_TRUE(pipeline.diagnostic_capture_ready());
+        ASSERT_TRUE(pipeline.diagnostic_capture_ready());
         const auto path = directory / (std::string(mode) + ".ppm");
         ASSERT_TRUE(pipeline.with_diagnostic_capture(
             path,
@@ -9895,9 +10079,17 @@ TEST(RenderSmokeTest, ScenarioBundlesRetainCompletedFrameIdentityAcrossSiblingCa
         EXPECT_EQ(metadata.at("frame"), first_frame);
         EXPECT_TRUE(pipeline.diagnostic_capture_refusal().empty())
             << pipeline.diagnostic_capture_refusal();
+        EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
     }
     pipeline.end_diagnostic_capture();
     EXPECT_EQ(pipeline.diagnostic_capture_refusal(), "completed_frame_unavailable");
+    EXPECT_FALSE(pipeline.diagnostic_capture_ready());
+    pipeline.end_diagnostic_capture();
+    // Empty destinations must also release an admitted completed frame.
+    pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
+    ASSERT_TRUE(pipeline.diagnostic_capture_ready());
+    EXPECT_FALSE(pipeline.capture_diagnostics({}));
+    EXPECT_FALSE(pipeline.diagnostic_capture_ready());
     EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }
@@ -9938,6 +10130,26 @@ TEST(RenderSmokeTest, ScenarioCaptureRefusesUnavailableCoverageAndProbeBeforeOpe
     ASSERT_NE(scope, nullptr);
     scope->unsupported("unattributed_deferred_producer");
     refuses_without_callbacks("producer_coverage_incomplete");
+    pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
+    scope = GBufferDiagnosticCapture::Current();
+    ASSERT_NE(scope, nullptr);
+    // An invalid late attachment records unsupported coverage at once. A GL-free
+    // observation reports it without consuming the scope; publication does.
+    ASSERT_FALSE(scope->attach({}, {32, 32}));
+    EXPECT_EQ(pipeline.diagnostic_capture_refusal(), "producer_coverage_incomplete");
+    EXPECT_EQ(GBufferDiagnosticCapture::Current(), scope);
+    EXPECT_FALSE(pipeline.with_diagnostic_capture(
+        temporary.Path(),
+        []() -> CaptureManifestInput {
+            ADD_FAILURE() << "late attachment failure observed metadata";
+            return {};
+        },
+        [] {
+            ADD_FAILURE() << "late attachment failure opened capture output";
+            return true;
+        }));
+    EXPECT_TRUE(fs::is_empty(temporary.Path().parent_path()));
+    EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
     pipeline.set_capture_diagnostics(
         {.enabled = true, .probe = std::array<std::uint32_t, 2>{32, 0}});
     pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
@@ -9972,16 +10184,138 @@ TEST(RenderSmokeTest, DisabledScenarioAdapterPreservesLegacyImageBytesAndWriterF
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }
 
+TEST(RenderSmokeTest, BackbufferWriterPreservesPixelsAndRefusesInvalidOrIncompleteOutput) {
+    using namespace Luminumbra::Client::ScenarioHarness;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("backbuffer-", ".ppm");
+    const auto directory = temporary.Path().parent_path();
+    for (const auto extent :
+         {std::array{0, 1}, std::array{1, 0}, std::array{-1, 1}, std::array{1, -1}}) {
+        EXPECT_FALSE(WriteBackbufferPpm(temporary.Path(), extent[0], extent[1]));
+        EXPECT_FALSE(fs::exists(temporary.Path()));
+    }
+    glClearColor(0.25f, 0.5f, 0.75f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    std::vector<unsigned char> pixels(2U * 2U * 3U);
+    glReadBuffer(GL_BACK);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, 2, 2, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
+    const auto reference = directory / "reference.ppm";
+    ASSERT_TRUE(WritePixelBufferPpm(reference, 2, 2, pixels));
+    ScreenshotPixelStats stats;
+    LodHolePixelStats hole_stats;
+    ASSERT_TRUE(WriteBackbufferPpm(temporary.Path(), 2, 2, &stats, &hole_stats));
+    EXPECT_EQ(ReadTextFile(temporary.Path()), ReadTextFile(reference));
+    EXPECT_EQ(stats.width, 2);
+    EXPECT_EQ(hole_stats.height, 2);
+    EXPECT_FALSE(WriteBackbufferPpm(directory, 2, 2));
+    EXPECT_FALSE(WriteBackbufferPpm(temporary.Path() / "child.ppm", 2, 2));
+#if defined(__linux__)
+    // This device opens successfully and deterministically fails payload completion.
+    EXPECT_FALSE(WriteBackbufferPpm("/dev/full", 2, 2));
+#endif
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+namespace {
+enum class TimedCaptureCase {
+    Legacy,
+    Diagnostics,
+    Extent,
+    FirstDestination,
+    SecondDestination,
+    PriorRefusal,
+    MissingFrame,
+    ProducerRefusal,
+    Continuation
+};
+
+struct TimedCaptureResult {
+    bool failed = false;
+    std::string failure;
+    std::uint64_t frame_count = 0;
+    int exit_code = 0;
+};
+
+void ExpectTimedCaptureRefusal(
+    TimedCaptureCase capture_case,
+    const Luminumbra::Client::ScenarioHarness::RuntimeScenarioConfig& config,
+    const TimedCaptureResult& result,
+    const std::string& expected_failure,
+    const fs::path& occupied) {
+    const bool destination_refusal = capture_case == TimedCaptureCase::FirstDestination ||
+                                     capture_case == TimedCaptureCase::SecondDestination;
+    EXPECT_TRUE(result.failed);
+    EXPECT_EQ(result.failure, expected_failure);
+    EXPECT_EQ(result.frame_count, destination_refusal ? 1U : 0U);
+    EXPECT_TRUE(glfwWindowShouldClose(glfwGetCurrentContext()) ||
+                capture_case == TimedCaptureCase::PriorRefusal);
+    EXPECT_FALSE(fs::exists(config.artifact_dir / "screenshots/lod-ground-end.ppm"));
+    if (!destination_refusal) {
+        EXPECT_TRUE(fs::is_empty(config.artifact_dir));
+        return;
+    }
+    EXPECT_EQ(ReadTextFile(occupied), "original screenshot");
+    const auto first = config.artifact_dir / "screenshots/lod-ground-start.ppm";
+    if (capture_case == TimedCaptureCase::SecondDestination) {
+        EXPECT_TRUE(fs::exists(first));
+        const auto manifest = nlohmann::json::parse(ReadTextFile(CaptureManifestPath(first)));
+        EXPECT_EQ(manifest.at("status"), "complete");
+    } else {
+        EXPECT_FALSE(fs::exists(config.artifact_dir / "screenshots/lod-ground-mid.ppm"));
+    }
+}
+
+void ExpectTimedCaptureBundles(
+    const Luminumbra::Client::ScenarioHarness::RuntimeScenarioConfig& config,
+    const fs::path& reference,
+    bool diagnostics,
+    const Luminumbra::world::GameSession& session) {
+    nlohmann::json first_frame;
+    for (const auto* role : {"start", "mid", "end"}) {
+        const auto path =
+            config.artifact_dir / "screenshots" / (std::string("lod-ground-") + role + ".ppm");
+        EXPECT_EQ(ReadTextFile(path), ReadTextFile(reference));
+        if (!diagnostics) {
+            EXPECT_FALSE(fs::exists(CaptureManifestPath(path)));
+            EXPECT_FALSE(fs::exists(path.string() + ".diagnostics.json"));
+            continue;
+        }
+        const auto metadata =
+            nlohmann::json::parse(ReadTextFile(path.string() + ".diagnostics.json"));
+        EXPECT_TRUE(metadata.at("identity_complete").get<bool>());
+        const auto manifest = nlohmann::json::parse(ReadTextFile(CaptureManifestPath(path)));
+        EXPECT_EQ(manifest.at("status"), "complete");
+        EXPECT_EQ(manifest.at("render_settings").at("scenario"), config.scenario);
+        EXPECT_EQ(manifest.at("simulation_tick"), session.GetSimulationTickCount());
+        if (first_frame.is_null()) {
+            first_frame = metadata.at("frame");
+        }
+        EXPECT_EQ(metadata.at("frame"), first_frame);
+    }
+}
+} // namespace
+
 TEST(RenderSmokeTest, TimedScenarioPublicHookPublishesSiblingBundlesAndKeepsLegacyBytes) {
     using namespace Luminumbra::Client::ScenarioHarness;
     using namespace Luminumbra::Client::App;
     HiddenGlContext context;
     ASSERT_TRUE(context.ready()) << context.error();
+    // Windows can enforce a minimum window width; captures use the framebuffer,
+    // which can also differ from the requested window size on scaled displays.
+    int framebuffer_width = 0;
+    int framebuffer_height = 0;
+    glfwGetFramebufferSize(glfwGetCurrentContext(), &framebuffer_width, &framebuffer_height);
+    ASSERT_GT(framebuffer_width, 1);
+    ASSERT_GT(framebuffer_height, 0);
     Luminumbra::TestSupport::ScopedTempFile temporary("timed-scenario-", ".ppm");
     const auto directory = temporary.Path().parent_path();
     RenderPipeline pipeline;
     pipeline.enable_static_model_content(false);
-    ASSERT_TRUE(pipeline.startup(64, 64, SourceRoot()));
+    ASSERT_TRUE(pipeline.startup(static_cast<unsigned int>(framebuffer_width),
+                                 static_cast<unsigned int>(framebuffer_height),
+                                 SourceRoot()));
     pipeline.set_far_world_mode(FarWorldMode::Legacy);
     pipeline.set_far_lod_enabled(false);
     pipeline.set_taau_enabled(false);
@@ -9997,22 +10331,35 @@ TEST(RenderSmokeTest, TimedScenarioPublicHookPublishesSiblingBundlesAndKeepsLega
     const auto root_text = root.string();
     const std::string world_type = "synthetic";
     ClientAppContext app;
-    for (const int capture_case : {0, 1, 2}) {
-        SCOPED_TRACE(capture_case);
-        const bool diagnostics = capture_case != 0;
-        const bool mismatched_extent = capture_case == 2;
+    using CaptureCase = TimedCaptureCase;
+    for (const auto capture_case : {CaptureCase::Legacy,
+                                    CaptureCase::Diagnostics,
+                                    CaptureCase::Extent,
+                                    CaptureCase::FirstDestination,
+                                    CaptureCase::SecondDestination,
+                                    CaptureCase::PriorRefusal,
+                                    CaptureCase::MissingFrame,
+                                    CaptureCase::ProducerRefusal,
+                                    CaptureCase::Continuation}) {
+        SCOPED_TRACE(static_cast<int>(capture_case));
+        const bool diagnostics = capture_case != CaptureCase::Legacy;
+        const bool mismatched_extent = capture_case == CaptureCase::Extent;
         RuntimeScenarioConfig config;
         config.scenario = "lod_ground_smoke";
         config.timed_run_seconds = 0;
-        config.artifact_dir = directory / std::to_string(capture_case);
+        config.artifact_dir = directory / std::to_string(static_cast<int>(capture_case));
         RuntimeStateRecorder recorder(config, camera);
         RuntimeScenarioFrameRecorder frame_recorder(false, 0, config.artifact_dir, camera);
-        bool failed = false, ready = true;
-        std::string failure;
-        std::uint64_t frame_count = 0;
+        bool ready = true;
+        TimedCaptureResult result;
+        std::string expected_failure;
+        if (capture_case == CaptureCase::PriorRefusal) {
+            result.failed = true;
+            result.failure = "capture_diagnostics_original_refusal";
+            expected_failure = result.failure;
+        }
         auto started = std::chrono::steady_clock::now() - std::chrono::seconds(2);
         RuntimeReadinessReport readiness;
-        int exit_code = 0;
         auto runner = CreateScenarioRunner({.window = glfwGetCurrentContext(),
                                             .root_dir = root,
                                             .root_path_str = root_text,
@@ -10025,55 +10372,446 @@ TEST(RenderSmokeTest, TimedScenarioPublicHookPublishesSiblingBundlesAndKeepsLega
                                             .g_camera = camera,
                                             .g_app = app,
                                             .scenario_world_type = world_type,
-                                            .scenario_failed = failed,
-                                            .scenario_failure_reason = failure,
+                                            .scenario_failed = result.failed,
+                                            .scenario_failure_reason = result.failure,
                                             .scenario_ready = ready,
-                                            .scenario_frame_count = frame_count,
+                                            .scenario_frame_count = result.frame_count,
                                             .scenario_play_started_at = started,
                                             .last_readiness_report = readiness,
-                                            .exit_code = exit_code});
-        pipeline.on_resize(mismatched_extent ? 32U : 64U, 64U);
+                                            .exit_code = result.exit_code});
+        pipeline.on_resize(static_cast<unsigned int>(mismatched_extent ? framebuffer_width / 2
+                                                                       : framebuffer_width),
+                           static_cast<unsigned int>(framebuffer_height));
         pipeline.set_capture_diagnostics({.enabled = diagnostics, .probe = std::nullopt});
         pipeline.render_frame(registry, world, *camera, 0.0f, false, UploadPresentation::Settled);
+        if (capture_case == CaptureCase::MissingFrame) {
+            pipeline.end_diagnostic_capture();
+            expected_failure = "capture_diagnostics_completed_frame_unavailable";
+        } else if (capture_case == CaptureCase::ProducerRefusal) {
+            auto* scope = GBufferDiagnosticCapture::Current();
+            ASSERT_NE(scope, nullptr);
+            scope->unsupported("unattributed_deferred_producer");
+            expected_failure = "capture_diagnostics_producer_coverage_incomplete";
+        } else if (capture_case == CaptureCase::Continuation) {
+            auto* scope = GBufferDiagnosticCapture::Current();
+            ASSERT_NE(scope, nullptr);
+            const DiagnosticExtent pipeline_extent{
+                static_cast<std::uint32_t>(mismatched_extent ? framebuffer_width / 2
+                                                             : framebuffer_width),
+                static_cast<std::uint32_t>(framebuffer_height)};
+            ASSERT_TRUE(scope->attach(pipeline.gbuffer(), pipeline_extent));
+            // Readiness must detach this valid continuation before observing coverage.
+            EXPECT_FALSE(pipeline.diagnostic_capture_refusal().empty());
+        }
+        if (mismatched_extent) {
+            expected_failure = "capture_diagnostics_capture_extent_mismatch";
+        }
+        const bool destination_refusal = capture_case == CaptureCase::FirstDestination ||
+                                         capture_case == CaptureCase::SecondDestination;
+        const auto occupied =
+            config.artifact_dir / "screenshots" /
+            (capture_case == CaptureCase::SecondDestination ? "lod-ground-mid.ppm"
+                                                            : "lod-ground-start.ppm");
+        if (destination_refusal) {
+            ASSERT_TRUE(WriteCaptureText(occupied, "original screenshot"));
+            expected_failure = "capture_diagnostics_capture_destination_or_publication_failed";
+        }
         const auto reference = config.artifact_dir / "legacy.ppm";
-        if (!mismatched_extent) {
-            ASSERT_TRUE(WriteBackbufferPpm(reference, 64, 64));
+        if (expected_failure.empty()) {
+            ASSERT_TRUE(WriteBackbufferPpm(reference, framebuffer_width, framebuffer_height));
         }
         runner->onPostRenderCapture(0.0f);
-        if (mismatched_extent) {
-            EXPECT_TRUE(failed);
-            EXPECT_EQ(failure, "capture_diagnostics_capture_extent_mismatch");
-            EXPECT_TRUE(fs::is_empty(config.artifact_dir));
-            EXPECT_EQ(frame_count, 0U);
+        if (!expected_failure.empty()) {
+            ExpectTimedCaptureRefusal(capture_case, config, result, expected_failure, occupied);
+            // A later completed frame must not resume a refused scenario or replace its reason.
+            pipeline.render_frame(
+                registry, world, *camera, 0.0f, false, UploadPresentation::Settled);
+            runner->onPostRenderCapture(0.0f);
+            ExpectTimedCaptureRefusal(capture_case, config, result, expected_failure, occupied);
+            runner->onShutdown();
+            const auto shutdown = nlohmann::json::parse(
+                ReadTextFile(config.artifact_dir / "last-known-runtime.json"));
+            EXPECT_EQ(shutdown.at("phase"), "scenario_failed_" + expected_failure);
+            EXPECT_EQ(result.exit_code, 2);
             glfwSetWindowShouldClose(glfwGetCurrentContext(), false);
             continue;
         }
-        EXPECT_FALSE(failed) << failure;
-        EXPECT_EQ(frame_count, 1U);
-        nlohmann::json first_frame;
-        for (const auto* role : {"start", "mid", "end"}) {
-            const auto path =
-                config.artifact_dir / "screenshots" / (std::string("lod-ground-") + role + ".ppm");
-            EXPECT_EQ(ReadTextFile(path), ReadTextFile(reference));
-            if (diagnostics) {
-                const auto metadata =
-                    nlohmann::json::parse(ReadTextFile(path.string() + ".diagnostics.json"));
-                EXPECT_TRUE(metadata.at("identity_complete").get<bool>());
-                const auto manifest =
-                    nlohmann::json::parse(ReadTextFile(CaptureManifestPath(path)));
-                EXPECT_EQ(manifest.at("status"), "complete");
-                EXPECT_EQ(manifest.at("render_settings").at("scenario"), config.scenario);
-                EXPECT_EQ(manifest.at("simulation_tick"), session->GetSimulationTickCount());
-                if (first_frame.is_null()) {
-                    first_frame = metadata.at("frame");
-                }
-                EXPECT_EQ(metadata.at("frame"), first_frame);
-            } else {
-                EXPECT_FALSE(fs::exists(CaptureManifestPath(path)));
-                EXPECT_FALSE(fs::exists(path.string() + ".diagnostics.json"));
-            }
-        }
+        EXPECT_FALSE(result.failed) << result.failure;
+        EXPECT_EQ(result.frame_count, 1U);
+        ExpectTimedCaptureBundles(config, reference, diagnostics, *session);
         EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
     }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, DiagnosticDestinationReservationExcludesOverlappingWritersAndCleansUp) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("diagnostic-reservation-", ".ppm");
+    const auto capture = temporary.Path();
+    auto marker = CaptureManifestPath(capture);
+    marker += ".lck";
+    auto manifest_temporary = CaptureManifestPath(capture);
+    manifest_temporary += ".tmp";
+    EXPECT_EQ(marker.filename().native().size(), manifest_temporary.filename().native().size());
+    RenderPipeline first, second;
+    first.set_capture_diagnostics({.enabled = true, .probe = std::nullopt});
+    second.set_capture_diagnostics({.enabled = true, .probe = std::nullopt});
+    {
+        const RenderPipeline::CaptureDestinationReservation owner(first, capture);
+        ASSERT_TRUE(owner.acquired());
+        // Both admissions happen before either payload exists. A vacancy check
+        // alone admits the delayed second writer and allows it to replace bytes.
+        const RenderPipeline::CaptureDestinationReservation contender(second, capture);
+        EXPECT_FALSE(contender.acquired());
+        auto alternate_extension = capture;
+        alternate_extension.replace_extension(".png");
+        EXPECT_FALSE(
+            RenderPipeline::CaptureDestinationReservation(second, alternate_extension).acquired());
+        const auto manifest = CaptureManifestPath(capture);
+        {
+            std::ofstream image(capture);
+            image << "first image";
+        }
+        {
+            std::ofstream metadata(manifest);
+            metadata << R"({"status":"complete"})";
+        }
+        const auto image_bytes = ReadTextFile(capture);
+        const auto manifest_bytes = ReadTextFile(manifest);
+        if (contender.acquired()) {
+            std::ofstream image(capture);
+            image << "second image";
+            std::ofstream metadata(manifest);
+            metadata << "second manifest";
+        }
+        EXPECT_EQ(ReadTextFile(capture), image_bytes);
+        EXPECT_EQ(ReadTextFile(manifest), manifest_bytes);
+        EXPECT_TRUE(fs::exists(marker));
+        fs::remove(capture);
+        fs::remove(manifest);
+    }
+    EXPECT_FALSE(fs::exists(marker));
+    {
+        const RenderPipeline::CaptureDestinationReservation retry(second, capture);
+        EXPECT_TRUE(retry.acquired());
+    }
+    EXPECT_FALSE(fs::exists(marker));
+    EXPECT_FALSE(RenderPipeline::CaptureDestinationReservation(first, {}).acquired());
+    const auto nested_capture = capture.parent_path() / "nested" / "deeper" / "view.ppm";
+    auto nested_marker = CaptureManifestPath(nested_capture);
+    nested_marker += ".lck";
+    {
+        const RenderPipeline::CaptureDestinationReservation nested(first, nested_capture);
+        EXPECT_TRUE(nested.acquired());
+        EXPECT_TRUE(fs::exists(nested_marker));
+        EXPECT_FALSE(fs::exists(nested_capture));
+    }
+    EXPECT_FALSE(fs::exists(nested_marker));
+    const auto blocked_parent = capture.parent_path() / "not-a-directory";
+    { std::ofstream blocked(blocked_parent); }
+    EXPECT_FALSE(RenderPipeline::CaptureDestinationReservation(first, blocked_parent / "view.ppm")
+                     .acquired());
+    // A pre-existing marker belongs to another writer, even if it is partial.
+    {
+        std::ofstream pending(marker);
+        pending << "occupied";
+    }
+    EXPECT_FALSE(RenderPipeline::CaptureDestinationReservation(second, capture).acquired());
+    EXPECT_EQ(ReadTextFile(marker), "occupied");
+    fs::remove(marker);
+    fs::create_directory(marker);
+    EXPECT_FALSE(RenderPipeline::CaptureDestinationReservation(second, capture).acquired());
+    EXPECT_TRUE(fs::is_directory(marker));
+    fs::remove(marker);
+    std::error_code link_error;
+    fs::create_symlink(capture.parent_path() / "missing", marker, link_error);
+    if (!link_error) {
+        EXPECT_FALSE(RenderPipeline::CaptureDestinationReservation(second, capture).acquired());
+        EXPECT_TRUE(fs::is_symlink(fs::symlink_status(marker)));
+        fs::remove(marker);
+    }
+    // Stack unwinding must retire the reservation before a retry.
+    EXPECT_THROW(
+        {
+            const RenderPipeline::CaptureDestinationReservation owner(first, capture);
+            ASSERT_TRUE(owner.acquired());
+            throw std::runtime_error("capture aborted");
+        },
+        std::runtime_error);
+    EXPECT_FALSE(fs::exists(marker));
+    // Cleanup must preserve an entry that replaced the owned marker.
+    auto displaced = marker;
+    displaced += ".displaced";
+    {
+        const RenderPipeline::CaptureDestinationReservation owner(first, capture);
+        ASSERT_TRUE(owner.acquired());
+        fs::rename(marker, displaced);
+        {
+            std::ofstream replacement(marker);
+            replacement << "replacement";
+        }
+    }
+    EXPECT_EQ(ReadTextFile(marker), "replacement");
+    fs::remove(marker);
+    fs::remove(displaced);
+    first.set_capture_diagnostics({});
+    EXPECT_TRUE(RenderPipeline::CaptureDestinationReservation(first, {}).acquired());
+}
+
+TEST(RenderSmokeTest, DiagnosticRefusalPrecedesManifestAndRetractsLateCompletion) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("diagnostic-refusal-", ".ppm");
+    const auto capture = temporary.Path();
+    const auto manifest = CaptureManifestPath(capture);
+    RenderPipeline pipeline;
+    pipeline.set_capture_diagnostics({.enabled = true, .probe = std::nullopt});
+    CaptureManifestInput input;
+    EXPECT_FALSE(pipeline.capture_diagnostics({}));
+    EXPECT_FALSE(pipeline.capture_diagnostics(capture.parent_path() / ""));
+    input.width = 2;
+    input.height = 2;
+    input.build_id.value = "capture-test";
+    input.asset_hash.unavailable = "test";
+    input.shader_hash.unavailable = "test";
+    input.world_hash.unavailable = "test";
+    bool observed = false, written = false;
+    EXPECT_FALSE(pipeline.with_diagnostic_capture(
+        capture,
+        [&] {
+            observed = true;
+            return input;
+        },
+        [&] {
+            written = true;
+            std::ofstream image(capture);
+            image << "image";
+            return image.good();
+        }));
+    EXPECT_FALSE(observed);
+    EXPECT_FALSE(written);
+    EXPECT_FALSE(fs::exists(capture));
+    EXPECT_FALSE(fs::exists(manifest));
+    // Exercise the late refusal fallback independently of early admission.
+    const RenderPipeline::CaptureDestinationReservation reservation(pipeline, capture);
+    ASSERT_TRUE(reservation.acquired());
+    ASSERT_TRUE(WithCaptureManifest(capture, input, [&] {
+        std::ofstream image(capture);
+        image << "completed image";
+        return image.good();
+    }));
+    ASSERT_EQ(nlohmann::json::parse(ReadTextFile(manifest)).at("status"), "complete");
+    EXPECT_FALSE(pipeline.capture_diagnostics(capture));
+    EXPECT_FALSE(fs::exists(manifest));
+    EXPECT_EQ(ReadTextFile(capture), "completed image");
+    EXPECT_FALSE(pipeline.capture_diagnostics(capture));
+    EXPECT_FALSE(fs::exists(manifest));
+}
+
+namespace {
+// Count the actual resource writes while forwarding every call to the driver.
+// State is scoped to one owner-thread fixture; no native timing is involved.
+class WaterPreparationGlCalls {
+public:
+    WaterPreparationGlCalls(GLuint caustics, GLuint opaque)
+        : m_caustics(caustics)
+        , m_opaque(opaque) {
+        Active() = this;
+        glad_glDrawArrays = Draw;
+        glad_glCopyTexSubImage2D = Copy;
+    }
+    ~WaterPreparationGlCalls() {
+        glad_glDrawArrays = m_draw;
+        glad_glCopyTexSubImage2D = m_copy;
+        Active() = nullptr;
+    }
+    WaterPreparationGlCalls(const WaterPreparationGlCalls&) = delete;
+    WaterPreparationGlCalls& operator=(const WaterPreparationGlCalls&) = delete;
+    unsigned caustics_draws = 0;
+    unsigned opaque_copies = 0;
+
+private:
+    static WaterPreparationGlCalls*& Active() {
+        static WaterPreparationGlCalls* active = nullptr;
+        return active;
+    }
+    static void GLAPIENTRY Draw(GLenum mode, GLint first, GLsizei count) {
+        auto& calls = *Active();
+        GLint fbo = 0;
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &fbo);
+        if (fbo != 0) {
+            GLint type = 0;
+            glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,
+                                                  GL_COLOR_ATTACHMENT0,
+                                                  GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE,
+                                                  &type);
+            if (type == GL_TEXTURE) {
+                GLint texture = 0;
+                glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,
+                                                      GL_COLOR_ATTACHMENT0,
+                                                      GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,
+                                                      &texture);
+                if (static_cast<GLuint>(texture) == calls.m_caustics)
+                    ++calls.caustics_draws;
+            }
+        }
+        calls.m_draw(mode, first, count);
+    }
+    static void GLAPIENTRY Copy(GLenum target,
+                                GLint level,
+                                GLint xoffset,
+                                GLint yoffset,
+                                GLint x,
+                                GLint y,
+                                GLsizei width,
+                                GLsizei height) {
+        auto& calls = *Active();
+        GLint texture = 0;
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
+        if (static_cast<GLuint>(texture) == calls.m_opaque)
+            ++calls.opaque_copies;
+        calls.m_copy(target, level, xoffset, yoffset, x, y, width, height);
+    }
+    GLuint m_caustics;
+    GLuint m_opaque;
+    PFNGLDRAWARRAYSPROC m_draw = glad_glDrawArrays;
+    PFNGLCOPYTEXSUBIMAGE2DPROC m_copy = glad_glCopyTexSubImage2D;
+};
+} // namespace
+
+TEST(RenderSmokeTest, WaterPreparationConsumerTruthTableAndDrawLimits) {
+    for (const bool water : {false, true}) {
+        for (const bool glass : {false, true}) {
+            for (const bool capture : {false, true}) {
+                const WaterPreparationConsumers consumers{
+                    .water = water, .glass = glass, .capture = capture};
+                EXPECT_EQ(consumers.opaque_snapshot(), water || glass || capture);
+                EXPECT_EQ(consumers.caustics(), water || capture);
+            }
+        }
+    }
+    EXPECT_FALSE(WaterPreparationDrawConsumes(0));
+    EXPECT_TRUE(WaterPreparationDrawConsumes(1));
+    EXPECT_TRUE(WaterPreparationDrawConsumes(2147483647u));
+    EXPECT_FALSE(WaterPreparationDrawConsumes(2147483648u));
+    EXPECT_FALSE(WaterPreparationDrawConsumes(4294967295u));
+}
+
+TEST(RenderSmokeTest, WaterPreparationCountsActualWritesForDryGlassCaptureAndWaterFrames) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    RenderPipeline pipeline;
+    pipeline.enable_static_model_content(false);
+    ASSERT_TRUE(pipeline.startup(32, 32, SourceRoot()));
+    pipeline.set_far_world_mode(FarWorldMode::Legacy);
+    pipeline.set_far_lod_enabled(false);
+    pipeline.set_taau_enabled(false);
+    pipeline.set_time_of_day(0.5f);
+    pipeline.set_time_of_day_hold(true); // sun below the horizon: no later ray snapshot
+    pipeline.set_weather(WeatherType::None, 0.0f);
+    Luminumbra::Systems::SHIELD_WorldSystem world(
+        nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    entt::registry registry;
+    Camera camera({8, 12, 8}, {0, 1, 0}, -90, -89);
+    WaterPreparationGlCalls calls(pipeline.water_caustics_texture(),
+                                  pipeline.lighting_fbo().opaque_color_texture);
+    const auto render = [&](unsigned caustics, unsigned copies) {
+        calls.caustics_draws = 0;
+        calls.opaque_copies = 0;
+        pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
+        EXPECT_EQ(calls.caustics_draws, caustics);
+        EXPECT_EQ(calls.opaque_copies, copies);
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    };
+    render(0, 0);
+    pipeline.set_glass_panes(std::vector<GlassPaneItem>(1));
+    render(0, 1);
+    pipeline.set_glass_panes({});
+    render(0, 0);
+    pipeline.set_terrain_coverage_diagnostics_enabled(true);
+    render(0, 1);
+    pipeline.set_terrain_coverage_diagnostics_enabled(false);
+    pipeline.set_water_visibility_capture_enabled(true);
+    render(1, 1);
+    pipeline.set_water_visibility_capture_enabled(false);
+    render(0, 0);
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0));
+    chunk->set_state(Luminumbra::ChunkState::Ready);
+    chunk->water_mesh_vertices = {
+        {{0, 6, 0}, {0, 1, 0}, 0u},
+        {{0, 6, 16}, {0, 1, 0}, 0u},
+        {{16, 6, 0}, {0, 1, 0}, 0u},
+    };
+    chunk->water_mesh_indices = {0u, 1u, 2u};
+    chunk->water_mesh_version.store(1u);
+    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    render(1, 1);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().water_draws, 1u);
+    pipeline.set_isolation_config(
+        {.layer_mask = Luminumbra::Client::ScenarioHarness::IsolationLayer::Terrain,
+         .backdrop = Luminumbra::Client::ScenarioHarness::BackdropMode::Scene});
+    render(0, 0);
+    pipeline.set_isolation_config({});
+    render(1, 1);
+}
+
+TEST(RenderSmokeTest, WaterCausticsRegenerateIdenticallyAfterSkippedFrames) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    RenderResourceRegistry resources;
+    WaterPass water;
+    water.init_shader(SourceRoot());
+    water.init_water_fallback_textures(resources);
+    ASSERT_TRUE(water.shader()->IsValid());
+    FullscreenFloatProbe quad;
+    GLint quad_vao = 0;
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &quad_vao);
+    RenderContext ctx;
+    ctx.screen_width = 32;
+    ctx.screen_height = 32;
+    ctx.screen_quad_vao = static_cast<GLuint>(quad_vao);
+    Camera camera;
+    const auto sample = [&](float time, bool capture) {
+        ctx.time_seconds = time;
+        water.execute(ctx, {}, camera, capture);
+        // Bounded by the fixed 256 x 256 RGBA8 target, independent of the scene.
+        std::vector<unsigned char> pixels(WaterPass::kCausticsResolution *
+                                          WaterPass::kCausticsResolution * 4u);
+        glGetTextureImage(water.caustics_texture(),
+                          0,
+                          GL_RGBA,
+                          GL_UNSIGNED_BYTE,
+                          static_cast<GLsizei>(pixels.size()),
+                          pixels.data());
+        return pixels;
+    };
+    const auto first = sample(1.0f, true);
+    ASSERT_TRUE(water.caustics_valid());
+    const auto expected = sample(4.0f, true);
+    EXPECT_NE(first, expected);
+    {
+        WaterPreparationGlCalls calls(water.caustics_texture(), 0);
+        WaterPassInput invalid;
+        invalid.draw_items.push_back(
+            {.model = glm::mat4(1),
+             .vao_id = 0,
+             .element_count = std::numeric_limits<Luminumbra::u32>::max()});
+        water.execute(ctx, invalid, camera);
+        EXPECT_FALSE(water.caustics_valid());
+        sample(2.0f, false);
+        EXPECT_FALSE(water.caustics_valid());
+        sample(3.0f, false);
+        EXPECT_FALSE(water.caustics_valid());
+        EXPECT_EQ(calls.caustics_draws, 0u);
+    }
+    EXPECT_EQ(sample(4.0f, true), expected);
+    EXPECT_TRUE(water.caustics_valid());
+    water.destroy_water_fallback_textures(resources);
+    EXPECT_FALSE(water.caustics_valid());
+    water.execute(ctx, {}, camera, true); // Unavailable target must not become valid.
+    EXPECT_FALSE(water.caustics_valid());
+    water.reset_shader();
+    EXPECT_FALSE(water.caustics_valid());
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }

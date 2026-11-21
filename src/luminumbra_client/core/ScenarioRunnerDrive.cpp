@@ -852,6 +852,15 @@ bool ScenarioRunnerImpl::driveSkinnedMeshVisual(float deltaTime) {
                                              scenario_config.artifact_dir,
                                              root_dir,
                                              std::max(1, scenario_config.avatars));
+            if (!skinned_mesh_visual_target.spawned) {
+                LUMINUMBRA_CORE_ERROR("skinned_mesh_visual_smoke refused: {}",
+                                      skinned_mesh_visual_target.failure_reason);
+                scenario_failed = true;
+                scenario_failure_reason = skinned_mesh_visual_target.failure_reason;
+                exit_code = 2;
+                glfwSetWindowShouldClose(window, true);
+                return true;
+            }
         }
         //  cinematic: position the animal + human near a water edge and
         // frame a wide side shot. Reuses the 2-grovestrider spawn (entity[0]

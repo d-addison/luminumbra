@@ -24,7 +24,8 @@
 #include "ShadowMap.h"              // ShadowMap (extracted)
 #include "SkyAtmosphereLut.h"       //  Hillaire 2020 scattering LUTs
 #include "StaticModelTex.h"         // StaticModelTex hoisted to namespace scope
-#include "TerrainSubmit.h"          // SubmitTerrainChunksFn + TerrainSubmitStats
+#include "TerrainStreamRing.h"
+#include "TerrainSubmit.h" // SubmitTerrainChunksFn + TerrainSubmitStats
 #include "UploadBudget.h"
 #include "core/AssetManager.h"
 #include "core/IsolationConfig.h" // isolation/layer render mode (backdrop + spawn-suppression)
@@ -34,12 +35,14 @@
 #include "passes/SsaoData.h" // SSAOData (extracted; still read here for stats)
 #include "passes/WaterfallPass.h"
 #include <array>
+#include <cstdint>
 #include <filesystem>
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <map>
 #include <memory>
 #include <nlohmann/json_fwd.hpp>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -117,6 +120,7 @@ struct ChunkRenderData {
     //  pool slice. Packs {block_index, vertex/index slot offsets}.
     static constexpr u32 kInvalidPoolHandle = 0xFFFFFFFFu;
     u32 pool_handle = kInvalidPoolHandle;
+    int diagnostic_lod = -1; // LOD of the resident upload, including retained stale geometry.
 
     void SetPresentedTerrainUpload(FarWorldLiveUpload& upload,
                                    const ChunkGeometryPool& pool) const noexcept {
@@ -126,6 +130,27 @@ struct ChunkRenderData {
         upload.valid_allocation = pool.valid_allocation(pool_handle, element_count);
     }
 };
+
+class GBufferDiagnosticCapture;
+
+struct DiagnosticTerrainDraw {
+    std::array<std::int32_t, 3> chunk{};
+    int lod = -1;
+    std::uint32_t mesh_version = 0;
+    std::uint64_t geometry_generation = 0;
+};
+
+// Capture-only submission of one pool bucket, including its unattributed tail.
+// The caller binds the bucket VAO, origin buffer and original indirect buffer.
+// draws is in command order, bounded by 65,536 records; first is its buffer index.
+// A refusal clears the current identity and disables attribution in later buckets.
+void SubmitDiagnosticTerrainBucket(GBufferDiagnosticCapture*& capture,
+                                   std::span<const DiagnosticTerrainDraw> draws,
+                                   std::size_t first,
+                                   std::size_t command_stride,
+                                   bool ladder,
+                                   ChunkGeometryPool& pool,
+                                   u32 bucket);
 
 struct WaterRenderData {
     u32 vao_id = 0;
@@ -635,10 +660,30 @@ public:
         m_diagnostic_capture_armed = armed;
     }
     void end_diagnostic_capture();
+    // Enabled publication requires this call's image/manifest and a held
+    // CaptureDestinationReservation; refusal retracts that owned manifest.
     bool capture_diagnostics(const std::filesystem::path& capture);
-    // Empty means the completed frame can be published. No output or GL work.
+    // GL-free observation: empty means no observed refusal. Publication must
+    // validate detachment through diagnostic_capture_ready() first.
     std::string_view diagnostic_capture_refusal() const;
+    // Detach, then evaluate diagnostic_capture_refusal() before publication.
+    bool diagnostic_capture_ready();
     bool diagnostic_capture_destination_available(const std::filesystem::path& capture) const;
+    // Owns the destination across image, manifest and bundle publication.
+    class CaptureDestinationReservation {
+    public:
+        CaptureDestinationReservation(const RenderPipeline& pipeline,
+                                      const std::filesystem::path& capture);
+        ~CaptureDestinationReservation();
+        CaptureDestinationReservation(const CaptureDestinationReservation&) = delete;
+        CaptureDestinationReservation& operator=(const CaptureDestinationReservation&) = delete;
+        bool acquired() const;
+
+    private:
+        struct State;
+        std::unique_ptr<State> state_;
+        bool disabled_ = false;
+    };
     bool capture_diagnostics_enabled() const {
         return m_capture_diagnostics.enabled;
     }
@@ -669,8 +714,9 @@ public:
             return write_capture();
         }
         try {
-            if (diagnostic_capture_refusal().empty() &&
-                diagnostic_capture_destination_available(path) &&
+            const CaptureDestinationReservation reservation(*this, path);
+            if (reservation.acquired() && diagnostic_capture_ready() &&
+                diagnostic_capture_refusal().empty() &&
                 WithCaptureManifest(path, observe(), write_capture)) {
                 return capture_diagnostics(path);
             }
@@ -1129,6 +1175,7 @@ private:
     struct ChunkMeshPayload {
         NearTerrainUploadState refinement;
         u32 mesh_version = 0;
+        int diagnostic_lod = -1;
         std::vector<VoxelVertex> vertices;
         std::vector<u32> indices;
         std::shared_ptr<const World::NearTerrainMeshSnapshot> near_terrain_snapshot;
@@ -1497,6 +1544,7 @@ private:
     std::unique_ptr<SsaoPass> m_ssao_pass;
     std::unique_ptr<LightingPass> m_lighting_pass;
     std::unique_ptr<WaterPass> m_water_pass;
+    WaterPassInput m_frame_water_input;
     bool m_water_visibility_capture_enabled = false;
     std::unique_ptr<SkyboxPass> m_skybox_pass;
     std::unique_ptr<ParticlePass> m_particle_pass;          //
@@ -1552,6 +1600,11 @@ private:
     void init_sky_lut();
 
 public:
+    // Production frame counters; diagnostic replays retain GPU ownership separately.
+    const TerrainStreamRing::Diagnostics& terrain_stream_diagnostics() const {
+        return m_mdi_stream.diagnostics();
+    }
+
     const SkyAtmosphereLut& sky_lut() const {
         return m_sky_lut;
     }
@@ -1563,10 +1616,8 @@ private:
     std::vector<WaterRenderData> m_free_water_render_slots;
 
     // shared bucketed persistent-mapped pool backing all live terrain
-    // chunk geometry, plus the per-frame MDI scratch buffers (an indirect
-    // command buffer and a chunk-origin SSBO, double/triple-buffered to avoid
-    // stalling on the GPU still reading last frame's commands). The G-buffer and
-    // shadow passes both submit live terrain through draw_chunks_mdi.
+    // chunk geometry, plus fence-protected terrain command/origin buffer pairs.
+    // The G-buffer and shadow passes both submit live terrain through draw_chunks_mdi.
     ChunkGeometryPool m_chunk_geometry_pool;
 
     struct DrawElementsIndirectCommand {
@@ -1577,7 +1628,6 @@ private:
         GLuint baseInstance;  // gl_DrawID fallback / origin index
     };
 
-    static constexpr std::size_t kMdiRingFrames = 3;
     struct MdiFrameBuffers {
         GLuint indirect_buffer = 0; // GL_DRAW_INDIRECT_BUFFER
         // Per-draw chunk origin (vec4), consumed as an instanced vertex
@@ -1586,16 +1636,17 @@ private:
         // per-draw origin selection work without GLSL 4.6 gl_BaseInstance.
         GLuint origin_buffer = 0;
         std::size_t command_capacity = 0; // commands the buffers can hold
+        GLsync completion = nullptr;      // last consumer; null requires orphaning after first use
     };
-    std::array<MdiFrameBuffers, kMdiRingFrames> m_mdi_frames;
-    std::size_t m_mdi_frame_cursor = 0;
+    std::array<MdiFrameBuffers, TerrainStreamRing::kSlotCount> m_mdi_frames;
+    TerrainStreamRing m_mdi_stream;
     // Reusable CPU scratch so the per-frame submit allocates nothing steady-state.
     std::vector<DrawElementsIndirectCommand> m_mdi_command_scratch;
     std::vector<glm::vec4> m_mdi_origin_scratch;
 
     void init_mdi_buffers();
     void destroy_mdi_buffers();
-    void ensure_mdi_capacity(MdiFrameBuffers& frame, std::size_t commands);
+    void ensure_mdi_capacity(MdiFrameBuffers& frame, std::size_t commands, bool orphan);
     // draw_chunks_mdi is declared after ChunkCullEntry (it takes a vector of
     // those), further down in this class.
 

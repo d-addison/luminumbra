@@ -30,11 +30,14 @@
       "description": "Elevated overview; pose from G04.",
       "scene": {
         "camera": {"pos": [8, 56, 8], "yaw": 35, "pitch": -6, "fov": 110},
-        "time_of_day": 0.04
+        "time_of_day": 0.04,
+        "weather": {"type": "none", "intensity": 0.0}
       },
       "base_layers": null,
       "variants": [
         {"id": "clear", "weather": {"type": "none", "intensity": 0.0}},
+        {"id": "rain", "weather": {"type": "rain", "intensity": 1.0}},
+        {"id": "snow", "weather": {"type": "snow", "intensity": 1.0}},
         {"id": "storm", "weather": {"type": "storm", "intensity": 1.0}},
         {"id": "no-aerial", "exclude_layers": ["aerial"]},
         {"id": "no-particles", "exclude_layers": ["particles"]},
@@ -45,38 +48,65 @@
     {
       "id": "ground",
       "issue_refs": [64],
-      "pose_source": "recorded-evidence",
-      "pose_note": "Pose lives in a private archive; unresolved (Q2).",
+      "pose_source": "explicit",
+      "pose_note": "Re-authored 2026-11-19; derivation and native confirmation requirements: docs/v0.3-acceptance.md#canonical-acceptance-scenes",
       "scene": {
-        "camera": {"pos": null, "yaw": null, "pitch": null, "fov": 110},
-        "time_of_day": null
+        "camera": {"pos": [8, 19.1, 8], "yaw": 35, "pitch": -6, "fov": 110},
+        "time_of_day": 0.04,
+        "weather": {"type": "none", "intensity": 0.0}
       },
       "base_layers": null,
-      "variants": []
+      "variants": [
+        {"id": "clear", "weather": {"type": "none", "intensity": 0.0}},
+        {"id": "rain", "weather": {"type": "rain", "intensity": 1.0}},
+        {"id": "snow", "weather": {"type": "snow", "intensity": 1.0}},
+        {"id": "storm", "weather": {"type": "storm", "intensity": 1.0}}
+      ]
     },
     {
       "id": "high",
       "issue_refs": [64],
-      "pose_source": "recorded-evidence",
-      "pose_note": "Pose lives in a private archive; unresolved (Q2).",
+      "pose_source": "explicit",
+      "pose_note": "Re-authored 2026-11-19; derivation and native confirmation requirements: docs/v0.3-acceptance.md#canonical-acceptance-scenes",
       "scene": {
-        "camera": {"pos": null, "yaw": null, "pitch": null, "fov": 110},
-        "time_of_day": null
+        "camera": {"pos": [8, 112, 8], "yaw": 35, "pitch": -6, "fov": 110},
+        "time_of_day": 0.04,
+        "weather": {"type": "none", "intensity": 0.0}
       },
       "base_layers": null,
-      "variants": []
+      "variants": [
+        {"id": "clear", "weather": {"type": "none", "intensity": 0.0}},
+        {"id": "rain", "weather": {"type": "rain", "intensity": 1.0}},
+        {"id": "snow", "weather": {"type": "snow", "intensity": 1.0}},
+        {"id": "storm", "weather": {"type": "storm", "intensity": 1.0}}
+      ]
     },
     {
       "id": "cave_air",
       "issue_refs": [64],
-      "pose_source": "recorded-evidence",
-      "pose_note": "Pose lives in a private archive; unresolved (Q2).",
+      "pose_source": "explicit",
+      "pose_note": "Re-authored 2026-11-19; derivation and native confirmation requirements: docs/v0.3-acceptance.md#canonical-acceptance-scenes",
       "scene": {
-        "camera": {"pos": null, "yaw": null, "pitch": null, "fov": 110},
-        "time_of_day": null
+        "camera": {"pos": [8.469266, -46.070644, 11.695518], "yaw": 0, "pitch": 0, "fov": 110},
+        "time_of_day": 0.04,
+        "weather": {"type": "none", "intensity": 0.0}
       },
       "base_layers": null,
-      "variants": []
+      "variants": [
+        {"id": "clear", "weather": {"type": "none", "intensity": 0.0}},
+        {"id": "rain", "weather": {"type": "rain", "intensity": 1.0}},
+        {"id": "snow", "weather": {"type": "snow", "intensity": 1.0}},
+        {"id": "storm", "weather": {"type": "storm", "intensity": 1.0}}
+      ]
     }
+  ],
+  "transitions": [
+    {"id": "surface-camera", "kind": "camera", "endpoints": ["ground", "elevated", "high", "elevated", "ground"]},
+    {"id": "cave-camera", "kind": "camera", "endpoints": ["ground", "cave_air", "ground"]},
+    {"id": "near-far-lod", "kind": "lod", "endpoints": ["elevated", "high", "elevated"]},
+    {"id": "elevated-weather", "kind": "weather", "endpoints": ["elevated", "elevated.rain", "elevated.snow", "elevated.storm", "elevated.clear"]},
+    {"id": "ground-weather", "kind": "weather", "endpoints": ["ground", "ground.rain", "ground.snow", "ground.storm", "ground.clear"]},
+    {"id": "high-weather", "kind": "weather", "endpoints": ["high", "high.rain", "high.snow", "high.storm", "high.clear"]},
+    {"id": "cave_air-weather", "kind": "weather", "endpoints": ["cave_air", "cave_air.rain", "cave_air.snow", "cave_air.storm", "cave_air.clear"]}
   ]
 }

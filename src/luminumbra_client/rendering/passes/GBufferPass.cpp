@@ -2,6 +2,7 @@
 #include "../DiagnosticDrawTable.h"
 #include "../FarWorldReplay.h"
 #include "../GBufferTargets.h"
+#include "DebugViewPass.h"
 #include "StaticDrawPass.h"
 #include "core/Profiler.h"
 #include "rendering/AttributedGl.h"
@@ -17,6 +18,7 @@
 #include "core/IsolationConfig.h" // ctx.isolation->renders(...) needs the full type
 #include "core/Log.h"
 #include "luminumbra_common/components/CoreComponents.h"
+#include "luminumbra_common/core/IntegerPrimitives.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "rendering/Camera.h"
 #include "rendering/Mesh.h"
@@ -79,6 +81,19 @@ bool UseDrawProgram(const Shader* shader, GBufferDrawStats& stats) {
     }
     shader->use();
     return true;
+}
+
+// Queued impostor geometry is unsupported even when its program prevents submission.
+// An unavailable base stays the refused program, so it records no second draw.
+Shader* RefusedImpostorProgram(Shader* base, GBufferDiagnosticCapture* capture) {
+    if (!capture) {
+        return base;
+    }
+    capture->unsupported("tree_impostor_fragment_output_unavailable", 3);
+    if (base && base->IsValid()) {
+        return capture->variant(base, false, {}, true);
+    }
+    return base;
 }
 } // namespace
 
@@ -370,6 +385,8 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
     GBufferDiagnosticAttachment diagnostic_attachment(m_gbuffer,
                                                       {ctx.internal_w(), ctx.internal_h()});
 
+    DebugViewPass::SurfaceFrame surface_frame(ctx, m_gbuffer);
+
     //  isolation/layer mode: skip the draws whose layer bit is cleared so an
     // isolated subsystem reads ALONE against the SkyboxPass backdrop. The gbuffer
     // is ALWAYS cleared first, so suppressing a sub-pass just leaves cleared pixels
@@ -402,11 +419,13 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
         // Pass 2: Render all instanced static meshes
         geometry_pass_static_meshes(ctx, input, registry, camera, fp, stats);
         if (authored) {
-            if (auto* capture = GBufferDiagnosticCapture::Current()) {
-                capture->unsupported("authored_static_surface");
-            }
-            const auto authored_stats =
-                m_authored_pass->Render(*input.authored_view, input.authored_draws, m_gbuffer);
+            DebugViewPass::unsupported_surface();
+            // Established above; mesh subpasses only change bindings/culling.
+            const StaticDrawPass::CallerState caller{
+                .depth = {.function = GL_GREATER, .write_mask = GL_TRUE, .test_enabled = GL_TRUE},
+                .draw_framebuffer = m_gbuffer.fbo_id};
+            const auto authored_stats = m_authored_pass->Render(
+                *input.authored_view, input.authored_draws, m_gbuffer, false, &caller);
             stats.authored_draws += authored_stats.draws;
             stats.authored_indices += authored_stats.indices;
         }
@@ -416,6 +435,31 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
     // palettes from the fixed-tick animation runtime, GPU skinning).
     if (iso.renders(SH::IsolationLayer::Skinned)) {
         geometry_pass_skinned_meshes(ctx, input, registry, camera, fp, stats);
+    }
+
+    if (DebugViewPass::geometry_requested() &&
+        DebugViewPass::replay_mode(DebugViewPass::geometry_view()) && !diagnostic_capture &&
+        !ctx.frozen_replay) {
+        // One opt-in replay of participating deferred draws, no clear, no production writes.
+        // Keep the normal draw statistics; diagnostics never count as scene geometry.
+        const double production_static_cpu_ms = m_last_static_prop_cpu_ms;
+        ReplayRollback restore_timing([this, production_static_cpu_ms]() noexcept {
+            m_last_static_prop_cpu_ms = production_static_cpu_ms;
+        });
+        DebugViewPass::SurfaceFrame replay(ctx, m_gbuffer, true);
+        if (replay.ready()) {
+            GBufferDrawStats replay_stats;
+            if (iso.renders(SH::IsolationLayer::Terrain)) {
+                geometry_pass_chunks(ctx, input, camera, fp, replay_stats);
+                geometry_pass_static_meshes(ctx, input, registry, camera, fp, replay_stats);
+                if (authored) {
+                    DebugViewPass::unsupported_surface();
+                }
+            }
+            if (iso.renders(SH::IsolationLayer::Skinned)) {
+                geometry_pass_skinned_meshes(ctx, input, registry, camera, fp, replay_stats);
+            }
+        }
     }
 
     if (!diagnostic_capture) {
@@ -431,14 +475,22 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
                                        GBufferDrawStats& stats) {
     Shader* shader = geometry_shader(input.far_selection.effective).get();
     auto* capture = GBufferDiagnosticCapture::Current();
+    FarWorldDiagnosticDraw diagnostic_draw(capture);
     FarWorldPassUniforms diagnostic_uniforms;
+    const bool surface = DebugViewPass::geometry_requested();
+    if (surface && !capture) {
+        shader = DebugViewPass::surface_variant(
+            shader, input.far_selection.effective == FarWorldMode::Ladder);
+    }
     if (capture) {
         shader = capture->variant(shader, input.far_selection.effective == FarWorldMode::Ladder);
+    }
+    if (capture || surface) {
         if (shader) {
             diagnostic_uniforms.Cache(*shader);
         }
     }
-    auto& uniforms = capture ? diagnostic_uniforms
+    auto& uniforms = (capture || surface) ? diagnostic_uniforms
                      : input.far_selection.effective == FarWorldMode::Ladder
                          ? m_geometry_ladder_uniforms
                          : m_geometry_far_uniforms;
@@ -520,9 +572,6 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
     // cull/draw/index counts; we fold them into the returned stats with the EXACT
     // current policy (terrain_visible_chunks '=', draws/indices '+=').
     const TerrainSubmitStats ts = input.submit_terrain_chunks(frustum_planes);
-    if (capture && ts.draws != 0) {
-        capture->unsupported("live_terrain_mdi_unsupported");
-    }
     stats.terrain_visible_chunks = ts.visible_chunks;
     stats.terrain_draws += ts.draws;
     stats.terrain_indices += ts.indices;
@@ -544,13 +593,21 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
             return result;
         },
         input.submit_ladder,
-        [&uniforms, capture](const FarWorldDrawCommand& command) {
-            if (capture) {
-                capture->unsupported(
-                    "ladder_backend_identity_unavailable", 0, DiagnosticOwnership::LadderFar);
+        [&uniforms, capture, &diagnostic_draw](const FarWorldDrawCommand& command) {
+            if (!uniforms.Prepare(command)) {
+                return false;
             }
-            return uniforms.Prepare(command);
+            // The ladder installs GREATER + writable depth before visiting draws.
+            // Reapply the diagnostic depth policy after that installation.
+            DebugViewPass::replay_depth_policy();
+            if (capture) {
+                diagnostic_draw.prepare(command);
+            }
+            return true;
         });
+    if (capture && far_stats.refused) {
+        capture->abort();
+    }
     stats.far_region_draws += far_stats.draws;
     stats.far_indices += far_stats.indices;
     stats.far_water_indices += far_stats.water_indices;
@@ -580,15 +637,6 @@ void GBufferPass::build_static_prop_cache(entt::registry& registry) {
         m_propMeshPaths.push_back(p);
         pathIntern.emplace(p, idx);
         return idx;
-    };
-    auto fnv64 = [](const std::string& s, std::uint64_t seed) {
-        std::uint64_t h = seed;
-        for (const char character : s) {
-            const auto c = static_cast<unsigned char>(character);
-            h ^= c;
-            h *= 1099511628211ull;
-        }
-        return h;
     };
     // Render-only deterministic position hash -> [0,1] (never feeds sim/world_hash).
     auto hash01 = [](const glm::vec3& p, float salt) {
@@ -639,12 +687,15 @@ void GBufferPass::build_static_prop_cache(entt::registry& registry) {
                 anchorSlots.try_emplace({anchor_coords.x, anchor_coords.y, anchor_coords.z},
                                         static_cast<std::uint32_t>(m_anchorChunks.size()));
             if (inserted) {
-                m_anchorChunks.push_back(
-                    {.coords = anchor_coords, .chunk = nullptr, .resolved = false});
+                m_anchorChunks.push_back({.coords = anchor_coords,
+                                          .chunk = nullptr,
+                                          .resolved = false,
+                                          .supportOwner = {}});
             }
             cp.anchorSlot = slot->second;
         }
-        cp.baseMeshHash = fnv64(mesh_info.meshPath, 1469598103934665603ull);
+        cp.baseMeshHash = Core::Fnv1a64(
+            mesh_info.meshPath.data(), mesh_info.meshPath.size(), Core::kFnv1a64HistoricalBasis);
         cp.pathIndex = intern(mesh_info.meshPath);
         cp.materialId = mesh_info.materialId;
         m_staticPropCache.push_back(cp);
@@ -663,13 +714,20 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     Shader* shader = instanced_static_mesh_shader(input.far_selection.effective).get();
     auto* capture = GBufferDiagnosticCapture::Current();
     FarWorldPassUniforms diagnostic_uniforms;
+    const bool surface = DebugViewPass::geometry_requested();
+    if (surface && !capture) {
+        shader = DebugViewPass::surface_variant(
+            shader, input.far_selection.effective == FarWorldMode::Ladder);
+    }
     if (capture) {
         shader = capture->variant(shader, input.far_selection.effective == FarWorldMode::Ladder);
+    }
+    if (capture || surface) {
         if (shader) {
             diagnostic_uniforms.Cache(*shader);
         }
     }
-    auto& uniforms = capture ? diagnostic_uniforms
+    auto& uniforms = (capture || surface) ? diagnostic_uniforms
                      : input.far_selection.effective == FarWorldMode::Ladder
                          ? m_static_ladder_uniforms
                          : m_static_far_uniforms;
@@ -771,26 +829,31 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     // actually resolved so the group is keyed by what is really drawn.
     auto resolve_mesh = [&](const std::string& candidatePath,
                             const std::string& basePath) -> std::pair<Mesh*, std::string> {
-        if (m_meshCache.find(candidatePath) == m_meshCache.end()) {
+        auto candidate = m_meshCache.find(candidatePath);
+        if (candidate == m_meshCache.end()) {
             if (ctx.frozen_replay)
                 throw std::logic_error("Replay cannot change mesh residency");
             std::string full = (input.root_path / candidatePath).string();
             // Only load the LOD variant if it exists on disk; an absent.lodN.lmesh caches a
             // null and falls back to LOD0 SILENTLY (no MeshLoader "failed header" error spam).
-            m_meshCache[candidatePath] =
-                std::filesystem::exists(full) ? MeshLoader::Load(full) : nullptr;
+            candidate =
+                m_meshCache
+                    .emplace(candidatePath,
+                             std::filesystem::exists(full) ? MeshLoader::Load(full) : nullptr)
+                    .first;
         }
-        Mesh* m = m_meshCache[candidatePath].get();
+        Mesh* m = candidate->second.get();
         if (m)
             return {m, candidatePath};
         if (candidatePath != basePath) {
-            if (m_meshCache.find(basePath) == m_meshCache.end()) {
+            auto base_entry = m_meshCache.find(basePath);
+            if (base_entry == m_meshCache.end()) {
                 if (ctx.frozen_replay)
                     throw std::logic_error("Replay cannot change mesh residency");
                 std::string full = (input.root_path / basePath).string();
-                m_meshCache[basePath] = MeshLoader::Load(full);
+                base_entry = m_meshCache.emplace(basePath, MeshLoader::Load(full)).first;
             }
-            Mesh* base = m_meshCache[basePath].get();
+            Mesh* base = base_entry->second.get();
             if (base)
                 return {base, basePath};
         }
@@ -1014,6 +1077,7 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                 // textured tree parts sway in the wind (rigid props stay at 0).
                 shader->setFloat("u_windStrength", 1.0f);
                 shader->setInt("u_forceFlat", 0);
+                shader->setInt("u_leafSurface", 0);
             } else {
                 glBindTexture(GL_TEXTURE_2D_ARRAY,
                               ctx.skinned_textures.id ? ctx.skinned_textures.id
@@ -1029,15 +1093,18 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                 // key suffix so only procgen leaves flutter.
                 const bool isLeaf = batch.basePath.size() >= 5 &&
                                     batch.basePath.rfind("_leaf") == batch.basePath.size() - 5;
-                shader->setInt("u_alphaTest", isLeaf ? 2 : 0);
-                two_sided = isLeaf;
-                shader->setFloat("u_windStrength", isLeaf ? 0.85f : 0.0f);
-                // Leaves use the dedicated cutout material at every LOD. Other
-                // foliage retains its existing distant flat-material optimization;
-                // near bushes, bark, and rigid props keep terrain texturing.
-                const bool isBush = batch.basePath.find("procgen://bush_") != std::string::npos;
+                const bool isBush = batch.basePath.starts_with("procgen://bush_");
                 const bool isFarLod = batch.drawPath.find(".lod") != std::string::npos;
-                shader->setInt("u_forceFlat", ((isLeaf || isBush) && isFarLod) ? 1 : 0);
+                const bool leafCards = isLeaf || (isBush && !isFarLod);
+                shader->setInt("u_alphaTest", leafCards ? 2 : 0);
+                two_sided = leafCards;
+                // Near bush leaf cards sway like procgen leaves; far hulls and bark stay rigid.
+                shader->setFloat("u_windStrength", leafCards ? 0.85f : 0.0f);
+                // Shrubs are foliage at every distance, never opaque grass-textured stone.
+                // Distant shrubs keep the closed hull; only their near mesh uses leaf cards.
+                shader->setInt("u_forceFlat", (isBush || (isLeaf && isFarLod)) ? 1 : 0);
+                // Near cards and distant hulls share the leaf reflectance, not grass.
+                shader->setInt("u_leafSurface", isBush ? 1 : 0);
             }
         }
         if (two_sided || !cull_was_enabled)
@@ -1085,7 +1152,10 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                     }
                 }
                 const bool generated = batch.drawPath.starts_with("procgen://");
-                const bool unattributed = generated || identity_path_unrecordable;
+                const bool unattributed = identity_path_unrecordable;
+                const std::string generated_key = generated && !identity_path_unrecordable
+                                                      ? "procedural/" + batch.drawPath.substr(10)
+                                                      : std::string{};
                 const std::string_view variant =
                     identity_path_unrecordable ? "static_mesh_identity_path_limit"
                     : input.far_selection.effective == FarWorldMode::Ladder
@@ -1093,14 +1163,16 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                         : "instanced_static_mesh";
                 for (GLsizei instance = 0; instance < instance_count; ++instance) {
                     capture->write(*shader,
-                                   {.mesh_path = unattributed ? std::string_view{} : batch.drawPath,
+                                   {.mesh_path = unattributed || generated ? std::string_view{}
+                                                                           : batch.drawPath,
                                     .shader_variant = variant,
                                     .chunk = {},
                                     .lod = resolved_lod,
                                     .ownership = DiagnosticOwnership::Live,
                                     .pass = DiagnosticPass::GBuffer,
                                     .provenance = unattributed ? DiagnosticProvenance::Unsupported
-                                                               : DiagnosticProvenance::Mesh});
+                                                               : DiagnosticProvenance::Mesh,
+                                    .generated_mesh = generated_key});
                     Luminumbra::Rendering::AttributedGl::Submit(
                         glDrawElementsInstancedBaseInstance,
                         GLenum{GL_TRIANGLES},
@@ -1131,23 +1203,20 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     // for the whole far field (the draw-call/triangle collapse the forest_perf_budget gate
     // targets).
     if (impostorsOn && !impostorInstances.empty()) {
-        // Queued geometry is unsupported even when its program prevents submission.
-        if (capture) {
-            capture->unsupported("tree_impostor_fragment_output_unavailable", 3);
-        }
-        if (!UseDrawProgram(m_tree_impostor_shader.get(), stats)) {
+        Shader* impostor_program = RefusedImpostorProgram(m_tree_impostor_shader.get(), capture);
+        DebugViewPass::unsupported_surface();
+        if (!UseDrawProgram(impostor_program, stats)) {
             return;
         }
-        m_tree_impostor_shader->setMat4("u_view", static_view);
-        m_tree_impostor_shader->setMat4("u_proj", static_proj);
-        m_tree_impostor_shader->setVec3("u_cameraPos", cameraPos);
-        m_tree_impostor_shader->setFloat("u_radius", input.tree_impostor_radius);
-        m_tree_impostor_shader->setVec3("u_center", input.tree_impostor_center);
-        m_tree_impostor_shader->setFloat("u_grid", static_cast<float>(input.tree_impostor_grid));
-        m_tree_impostor_shader->setFloat("u_materialId",
-                                         static_cast<float>(impostorMatId) / 255.0f);
-        m_tree_impostor_shader->setInt("u_albedo", 0);
-        m_tree_impostor_shader->setInt("u_normal", 1);
+        impostor_program->setMat4("u_view", static_view);
+        impostor_program->setMat4("u_proj", static_proj);
+        impostor_program->setVec3("u_cameraPos", cameraPos);
+        impostor_program->setFloat("u_radius", input.tree_impostor_radius);
+        impostor_program->setVec3("u_center", input.tree_impostor_center);
+        impostor_program->setFloat("u_grid", static_cast<float>(input.tree_impostor_grid));
+        impostor_program->setFloat("u_materialId", static_cast<float>(impostorMatId) / 255.0f);
+        impostor_program->setInt("u_albedo", 0);
+        impostor_program->setInt("u_normal", 1);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, input.tree_impostor_albedo);
         glActiveTexture(GL_TEXTURE1);
@@ -1187,13 +1256,20 @@ void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
     Shader* shader = skinned_mesh_shader(input.far_selection.effective).get();
     auto* capture = GBufferDiagnosticCapture::Current();
     FarWorldPassUniforms diagnostic_uniforms;
+    const bool surface = DebugViewPass::geometry_requested();
+    if (surface && !capture) {
+        shader = DebugViewPass::surface_variant(
+            shader, input.far_selection.effective == FarWorldMode::Ladder);
+    }
     if (capture) {
         shader = capture->variant(shader, input.far_selection.effective == FarWorldMode::Ladder);
+    }
+    if (capture || surface) {
         if (shader) {
             diagnostic_uniforms.Cache(*shader);
         }
     }
-    auto& uniforms = capture ? diagnostic_uniforms
+    auto& uniforms = (capture || surface) ? diagnostic_uniforms
                      : input.far_selection.effective == FarWorldMode::Ladder
                          ? m_skinned_ladder_uniforms
                          : m_skinned_far_uniforms;
@@ -1266,13 +1342,16 @@ void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
         auto const& mesh_info = view.get<const Components::SkinnedMeshComponent>(entity);
         auto const& player = view.get<const anim::AnimationPlayerComponent>(entity);
 
-        if (m_skinnedMeshCache.find(mesh_info.meshPath) == m_skinnedMeshCache.end()) {
+        auto mesh_entry = m_skinnedMeshCache.find(mesh_info.meshPath);
+        if (mesh_entry == m_skinnedMeshCache.end()) {
             if (ctx.frozen_replay)
                 throw std::logic_error("Replay cannot change skinned residency");
             std::string full_mesh_path = (input.root_path / mesh_info.meshPath).string();
-            m_skinnedMeshCache[mesh_info.meshPath] = MeshLoader::LoadSkinned(full_mesh_path);
+            mesh_entry = m_skinnedMeshCache
+                             .emplace(mesh_info.meshPath, MeshLoader::LoadSkinned(full_mesh_path))
+                             .first;
         }
-        Mesh* mesh = m_skinnedMeshCache[mesh_info.meshPath].get();
+        Mesh* mesh = mesh_entry->second.get();
         if (!mesh || mesh->jointCount == 0)
             continue;
 

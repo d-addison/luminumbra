@@ -244,16 +244,18 @@ TerrainGenParams MakeFlatSurfaceParams() {
 // Index topology is toolchain-independent; vertex baselines cover each compiler
 // family, with additional independent-world determinism checks.
 TEST(MeshingDeterminism, ArchipelagoChunkHashesAreStable) {
-    // Re-pinned for cave_style/shaping_enabled retirement.
+    // Re-pinned for cave_style/shaping_enabled retirement, then for #867's per-vertex
+    // density-gradient normals (#1047). Index hashes are unchanged: table winding was
+    // already outward on these chunks. MSVC values are provisional until a Windows run.
     const ExpectedMeshHashes expected[3] = {
         {1,
-         ToolchainVertexHash(0x9d9c9b1d3942db3eull, 0x43b033500a7e70afull),
+         ToolchainVertexHash(0x49a0a9efecf9febaull, 0x49a0a9efecf9febaull),
          0x7a014cd2e589b3a1ull},
         {2,
-         ToolchainVertexHash(0x71c0e159fcaa096dull, 0xd055fb106b361fddull),
+         ToolchainVertexHash(0x35eeff6dd38bb83dull, 0x35eeff6dd38bb83dull),
          0x9177a54dc6654457ull},
         {4,
-         ToolchainVertexHash(0x701ce4034488d411ull, 0x701ce4034488d411ull),
+         ToolchainVertexHash(0xbcb5985a162b22edull, 0xbcb5985a162b22edull),
          0x7257517ea6a6be50ull},
     };
     VerifyCurrentCombo(
@@ -265,15 +267,16 @@ TEST(MeshingDeterminism, CaveChunkHashesAreStable) {
     // CPU-specific estimates previously crossed the Worley carve threshold at
     // (0,10,15), changing 52 vertices / 174 indices into 51 / 168. Vertex bytes
     // below follow the corrected field; all three index hashes remain unchanged.
+    // #1047 re-pinned vertex bytes for per-vertex gradient normals; indices unchanged.
     const ExpectedMeshHashes expected[3] = {
         {1,
-         ToolchainVertexHash(0x52a14947bf315497ull, 0x52a14947bf315497ull),
+         ToolchainVertexHash(0x51effc905e71d99cull, 0x51effc905e71d99cull),
          0x501667b909047bbcull},
         {2,
-         ToolchainVertexHash(0x186c4e8e9203bc6eull, 0x186c4e8e9203bc6eull),
+         ToolchainVertexHash(0xb9d140230f2fcaeeull, 0xb9d140230f2fcaeeull),
          0xc026220b072ee6ddull},
         {4,
-         ToolchainVertexHash(0xf5a604c650bdef3full, 0xf5a604c650bdef3full),
+         ToolchainVertexHash(0xf2e6efce8f867a5full, 0xf2e6efce8f867a5full),
          0x7298410a91b6706full},
     };
     VerifyCurrentCombo(

@@ -1,5 +1,7 @@
 #include "StaticDrawPass.h"
+#include "../DiagnosticDrawTable.h"
 #include "../GBuffer.h"
+#include "../GBufferTargets.h"
 #include "../Shader.h"
 #include "rendering/AttributedGl.h"
 #include <algorithm>
@@ -13,6 +15,7 @@
 #include <map>
 #include <set>
 #include <stdexcept>
+#include <string_view>
 #include <tuple>
 
 namespace Luminumbra::Rendering {
@@ -43,9 +46,9 @@ struct TextureObject {
     }
 };
 struct GlState {
-    GLint program{}, vao{}, framebuffer{}, depth_func{}, front_face{}, cull_face{}, active{},
-        array_buffer{}, unpack_buffer{};
-    GLboolean depth{}, cull{}, depth_mask{}, blend{}, framebuffer_srgb{};
+    GLint program{}, vao{}, front_face{}, cull_face{}, active{}, array_buffer{}, unpack_buffer{};
+    GLboolean cull{}, blend{}, framebuffer_srgb{};
+    StaticDrawPass::CallerState caller;
     static constexpr std::array<GLenum, 8> unpack_names{GL_UNPACK_ALIGNMENT,
                                                         GL_UNPACK_ROW_LENGTH,
                                                         GL_UNPACK_SKIP_ROWS,
@@ -56,7 +59,18 @@ struct GlState {
                                                         GL_UNPACK_LSB_FIRST};
     std::array<GLint, 8> unpack_values{};
     std::array<GLint, 5> textures{}, samplers{};
-    GlState() {
+    explicit GlState(const StaticDrawPass::CallerState* known_caller) {
+        if (known_caller) {
+            caller = *known_caller;
+        } else {
+            // Installed preview hosts enter with arbitrary depth/target state.
+            caller.depth = PassDepthState::QueryExternal();
+            GLint framebuffer = 0;
+            glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &framebuffer);
+            caller.draw_framebuffer = static_cast<GLuint>(framebuffer);
+        }
+        // These bindings remain unknown after the preceding mesh subpasses,
+        // including lazy uploads and diagnostic shader selection.
         glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &array_buffer);
         glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &unpack_buffer);
         for (size_t i = 0; i < unpack_names.size(); ++i) {
@@ -66,13 +80,9 @@ struct GlState {
         glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
         glGetIntegerv(GL_CURRENT_PROGRAM, &program);
         glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vao);
-        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &framebuffer);
-        glGetIntegerv(GL_DEPTH_FUNC, &depth_func);
         glGetIntegerv(GL_FRONT_FACE, &front_face);
         glGetIntegerv(GL_CULL_FACE_MODE, &cull_face);
         glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
-        glGetBooleanv(GL_DEPTH_WRITEMASK, &depth_mask);
-        depth = glIsEnabled(GL_DEPTH_TEST);
         cull = glIsEnabled(GL_CULL_FACE);
         blend = glIsEnabled(GL_BLEND);
         framebuffer_srgb = glIsEnabled(GL_FRAMEBUFFER_SRGB);
@@ -85,25 +95,20 @@ struct GlState {
     ~GlState() {
         for (GLuint i = 0; i < textures.size(); ++i) {
             glActiveTexture(GL_TEXTURE0 + i);
-            glBindTexture(GL_TEXTURE_2D, textures[i]);
-            glBindSampler(i, samplers[i]);
+            glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(textures[i]));
+            glBindSampler(i, static_cast<GLuint>(samplers[i]));
         }
-        glActiveTexture(active);
-        Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, program);
-        glBindVertexArray(vao);
-        glBindBuffer(GL_ARRAY_BUFFER, array_buffer);
-        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, unpack_buffer);
+        glActiveTexture(static_cast<GLenum>(active));
+        Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, static_cast<GLuint>(program));
+        glBindVertexArray(static_cast<GLuint>(vao));
+        glBindBuffer(GL_ARRAY_BUFFER, static_cast<GLuint>(array_buffer));
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, static_cast<GLuint>(unpack_buffer));
         for (size_t i = 0; i < unpack_names.size(); ++i)
             glPixelStorei(unpack_names[i], unpack_values[i]);
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
-        glDepthFunc(depth_func);
-        glFrontFace(front_face);
-        glCullFace(cull_face);
-        glDepthMask(depth_mask);
-        if (depth)
-            glEnable(GL_DEPTH_TEST);
-        else
-            glDisable(GL_DEPTH_TEST);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, caller.draw_framebuffer);
+        caller.depth.Restore();
+        glFrontFace(static_cast<GLenum>(front_face));
+        glCullFace(static_cast<GLenum>(cull_face));
         if (cull)
             glEnable(GL_CULL_FACE);
         else
@@ -152,7 +157,7 @@ struct StaticDrawPass::Impl {
         for (size_t i = 0; i < outputs.size(); ++i)
             Require(glGetFragDataLocation(shader.Id(), outputs[i]) == static_cast<GLint>(i),
                     "Static material attachment output missing or wrong location");
-        GlState state;
+        GlState state(nullptr);
         glGenTextures(1, &white);
         glBindTexture(GL_TEXTURE_2D, white);
         const std::array<unsigned char, 4> rgba{255, 255, 255, 255};
@@ -238,13 +243,13 @@ struct StaticDrawPass::Impl {
         glGenBuffers(1, &result->vbo);
         glBindBuffer(GL_ARRAY_BUFFER, result->vbo);
         glBufferData(GL_ARRAY_BUFFER,
-                     mesh->vertices.size() * sizeof(StaticVertex),
+                     static_cast<GLsizeiptr>(mesh->vertices.size() * sizeof(StaticVertex)),
                      mesh->vertices.data(),
                      GL_STATIC_DRAW);
         glGenBuffers(1, &result->ebo);
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, result->ebo);
         glBufferData(GL_ELEMENT_ARRAY_BUFFER,
-                     mesh->indices.size() * sizeof(std::uint32_t),
+                     static_cast<GLsizeiptr>(mesh->indices.size() * sizeof(std::uint32_t)),
                      mesh->indices.data(),
                      GL_STATIC_DRAW);
         for (GLuint attribute = 0; attribute < 3; ++attribute) {
@@ -298,8 +303,8 @@ struct StaticDrawPass::Impl {
             glTexImage2D(GL_TEXTURE_2D,
                          static_cast<GLint>(i),
                          texture->encoding == StaticEncoding::Srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8,
-                         width,
-                         height,
+                         static_cast<GLsizei>(width),
+                         static_cast<GLsizei>(height),
                          0,
                          GL_RGBA,
                          GL_UNSIGNED_BYTE,
@@ -335,10 +340,10 @@ struct StaticDrawPass::Impl {
                 "Unsupported static sampler min filter");
         GLuint result;
         glGenSamplers(1, &result);
-        glSamplerParameteri(result, GL_TEXTURE_WRAP_S, sampler.wrap_s);
-        glSamplerParameteri(result, GL_TEXTURE_WRAP_T, sampler.wrap_t);
-        glSamplerParameteri(result, GL_TEXTURE_MIN_FILTER, sampler.min_filter);
-        glSamplerParameteri(result, GL_TEXTURE_MAG_FILTER, sampler.mag_filter);
+        glSamplerParameteri(result, GL_TEXTURE_WRAP_S, static_cast<GLint>(sampler.wrap_s));
+        glSamplerParameteri(result, GL_TEXTURE_WRAP_T, static_cast<GLint>(sampler.wrap_t));
+        glSamplerParameteri(result, GL_TEXTURE_MIN_FILTER, static_cast<GLint>(sampler.min_filter));
+        glSamplerParameteri(result, GL_TEXTURE_MAG_FILTER, static_cast<GLint>(sampler.mag_filter));
         samplers.emplace(key, result);
         return result;
     }
@@ -350,7 +355,8 @@ StaticDrawPass::~StaticDrawPass() = default;
 StaticDrawStats StaticDrawPass::Render(const RenderView& view,
                                        std::shared_ptr<const StaticDrawSnapshot> snapshot,
                                        const GBuffer& target,
-                                       bool temporal_enabled) {
+                                       bool temporal_enabled,
+                                       const CallerState* caller) {
     Require(!temporal_enabled,
             "Static inspection draws have no temporal history; TAAU must be disabled");
     Require(snapshot && snapshot->draws.size() <= 65536,
@@ -371,7 +377,7 @@ StaticDrawStats StaticDrawPass::Render(const RenderView& view,
                     decoded_bytes += mip.rgba8.size();
         Require(decoded_bytes <= 512ull * 1024 * 1024, "Static draw resource set exceeds 512 MiB");
     }
-    GlState state;
+    GlState state(caller);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, target.fbo_id);
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_GREATER);
@@ -381,7 +387,15 @@ StaticDrawStats StaticDrawPass::Render(const RenderView& view,
     glCullFace(GL_BACK);
     auto& impl = *m_impl;
     Impl::UploadTransaction uploads(impl);
-    auto& shader = impl.shader;
+    auto* capture = GBufferDiagnosticCapture::Current();
+    if (capture && !capture->deferred_attached()) {
+        capture = nullptr;
+    }
+    Shader* selected_shader = &impl.shader;
+    if (capture) {
+        selected_shader = capture->variant(selected_shader, false);
+    }
+    auto& shader = *selected_shader;
     shader.use();
     shader.setMat4("u_view", glm::make_mat4(view.view().data()));
     shader.setMat4("u_projection", glm::make_mat4(view.projection().data()));
@@ -477,8 +491,35 @@ StaticDrawStats StaticDrawPass::Render(const RenderView& view,
         else
             glEnable(GL_CULL_FACE);
         glBindVertexArray(mesh->vao);
+        if (capture) {
+            const auto& identity = draw.mesh->identity;
+            constexpr std::string_view mesh_prefix = "authored/";
+            // Hex encoding is injective and bounded by the 1,024-byte registry key.
+            if (identity.empty() || identity.size() > (1024 - mesh_prefix.size()) / 2) {
+                capture->unsupported("authored_static_surface");
+                capture->clear_current_identity();
+            } else {
+                std::string mesh_key(mesh_prefix);
+                mesh_key.reserve(mesh_prefix.size() + 2 * identity.size());
+                constexpr std::string_view digits = "0123456789abcdef";
+                for (const char character : identity) {
+                    const auto byte = static_cast<unsigned char>(character);
+                    mesh_key += digits[byte >> 4];
+                    mesh_key += digits[byte & 15];
+                }
+                capture->write(shader,
+                               {.mesh_path = {},
+                                .shader_variant = "static_asset",
+                                .chunk = {},
+                                .lod = 0,
+                                .ownership = DiagnosticOwnership::Live,
+                                .pass = DiagnosticPass::GBuffer,
+                                .provenance = DiagnosticProvenance::Mesh,
+                                .generated_mesh = mesh_key});
+            }
+        }
         Luminumbra::Rendering::AttributedGl::Submit(
-            glDrawElements, GL_TRIANGLES, mesh->count, GL_UNSIGNED_INT, nullptr);
+            glDrawElements, GLenum{GL_TRIANGLES}, mesh->count, GLenum{GL_UNSIGNED_INT}, nullptr);
         ++stats.draws;
         stats.indices += static_cast<size_t>(mesh->count);
     }

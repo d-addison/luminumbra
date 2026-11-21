@@ -207,15 +207,72 @@ Vec3 VertexInterp(f32 isolevel, Vec3 p1, Vec3 p2, f32 valp1, f32 valp2) {
     return p1 + mu * (p2 - p1);
 }
 
-Vec3 EstimateDensityGradient(const GridCell& gridcell) {
-    const f32 dx = (gridcell.val[1] + gridcell.val[2] + gridcell.val[5] + gridcell.val[6]) -
-                   (gridcell.val[0] + gridcell.val[3] + gridcell.val[4] + gridcell.val[7]);
-    const f32 dy = (gridcell.val[4] + gridcell.val[5] + gridcell.val[6] + gridcell.val[7]) -
-                   (gridcell.val[0] + gridcell.val[1] + gridcell.val[2] + gridcell.val[3]);
-    const f32 dz = (gridcell.val[2] + gridcell.val[3] + gridcell.val[6] + gridcell.val[7]) -
-                   (gridcell.val[0] + gridcell.val[1] + gridcell.val[4] + gridcell.val[5]);
+// Corner and edge numbering match PolygoniseTerrain: corner bits (x, y, z) are
+// 0 (000), 1 (100), 2 (101), 3 (001), 4 (010), 5 (110), 6 (111), 7 (011).
+struct EdgeGradientStencil {
+    u8 axis;          // the coordinate that varies along the edge
+    u8 lo, hi;        // edge corners, low to high along `axis`
+    u8 across[2];     // the other two coordinates, ascending
+    u8 pair[2][2][2]; // [across][edge end][low, high corner along `across`]
+};
 
-    return Vec3(dx, dy, dz);
+constexpr std::array<EdgeGradientStencil, 12> kEdgeGradientStencils = [] {
+    constexpr u8 kAxis[12] = {0u, 2u, 0u, 2u, 0u, 2u, 0u, 2u, 1u, 1u, 1u, 1u};
+    constexpr u8 kLowCorner[12] = {0u, 1u, 3u, 0u, 4u, 5u, 7u, 4u, 0u, 1u, 2u, 3u};
+    constexpr u8 kBits[8][3] = {
+        {0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1}, {0, 1, 0}, {1, 1, 0}, {1, 1, 1}, {0, 1, 1}};
+    std::array<EdgeGradientStencil, 12> stencils{};
+    for (int e = 0; e < 12; ++e) {
+        auto& stencil = stencils[e];
+        stencil.axis = kAxis[e];
+        const auto corner = [&](int along, int other, int side) {
+            u8 b[3] = {kBits[kLowCorner[e]][0], kBits[kLowCorner[e]][1], kBits[kLowCorner[e]][2]};
+            b[stencil.axis] = static_cast<u8>(along);
+            if (other >= 0) {
+                b[other] = static_cast<u8>(side);
+            }
+            return static_cast<u8>(b[1] * 4 + (b[2] != 0 ? (b[0] != 0 ? 2 : 3) : b[0]));
+        };
+        stencil.lo = corner(0, -1, 0);
+        stencil.hi = corner(1, -1, 0);
+        int k = 0;
+        for (int d = 0; d < 3; ++d) {
+            if (d == stencil.axis) {
+                continue;
+            }
+            stencil.across[k] = static_cast<u8>(d);
+            for (int end = 0; end < 2; ++end) {
+                stencil.pair[k][end][0] = corner(end, d, 0);
+                stencil.pair[k][end][1] = corner(end, d, 1);
+            }
+            ++k;
+        }
+    }
+    return stencils;
+}();
+
+// Different surface components in one cell can face opposite directions, so
+// each vertex takes the trilinear field's gradient at its own position rather
+// than the cell-centre gradient. On an edge both cross coordinates are exactly
+// 0 or 1: the derivative along the edge is that edge's difference, and each
+// cross derivative interpolates two parallel differences along the edge. That
+// equals the full trilinear derivative for one division and two mixes. Cells
+// have positive, equal axis extents at every supported stride; normalization
+// removes that scale.
+Vec3 EdgeDensityGradient(const GridCell& gridcell, int edge, const Vec3& position) {
+    const auto& stencil = kEdgeGradientStencils[static_cast<std::size_t>(edge)];
+    const auto& v = gridcell.val;
+    const int axis = stencil.axis;
+    const f32 t =
+        (position[axis] - gridcell.p[0][axis]) / (gridcell.p[6][axis] - gridcell.p[0][axis]);
+    Vec3 gradient;
+    gradient[axis] = v[stencil.hi] - v[stencil.lo];
+    for (int k = 0; k < 2; ++k) {
+        const auto& pair = stencil.pair[k];
+        gradient[stencil.across[k]] =
+            glm::mix(v[pair[0][1]] - v[pair[0][0]], v[pair[1][1]] - v[pair[1][0]], t);
+    }
+    return gradient;
 }
 
 // Determines terrain material based on world position and height.
@@ -1147,7 +1204,9 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(const World::FarLodTile& tile,
                                                 static_cast<u32>(material)});
                         }
 
-                        const Vec3 gradient = EstimateDensityGradient(cell);
+                        // Table winding already points from negative density
+                        // (solid) to air with this corner order. A cell-average
+                        // gradient must not reverse individual surface pieces.
                         const auto& triangle_row = triTable[cube_index];
                         for (int triangle = 0; triangle_row[triangle] != -1; triangle += 3) {
                             u32 i0 = edge_vertices[triangle_row[triangle]];
@@ -1158,9 +1217,6 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(const World::FarLodTile& tile,
                                            vertices[i2].position - vertices[i0].position);
                             if (glm::dot(face_normal, face_normal) <= 1.0e-10f) {
                                 continue;
-                            }
-                            if (glm::dot(face_normal, gradient) < 0.0f) {
-                                std::swap(i1, i2);
                             }
                             indices.push_back(i0);
                             indices.push_back(i1);
@@ -1543,7 +1599,7 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(const World::FarLodTile& tile,
                                  Vec3(0.0f),
                                  static_cast<u32>(material)});
                         }
-                    const Vec3 gradient = EstimateDensityGradient(cell);
+                    // Preserve the same solid-to-air table winding as live SDFs.
                     for (int t = 0; triTable[cube][t] != -1; t += 3) {
                         u32 a = edge_vertices[triTable[cube][t]],
                             b = edge_vertices[triTable[cube][t + 1]],
@@ -1552,8 +1608,6 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(const World::FarLodTile& tile,
                                                        vertices[c].position - vertices[a].position);
                         if (glm::dot(normal, normal) <= 1.0e-10f)
                             continue;
-                        if (glm::dot(normal, gradient) < 0.0f)
-                            std::swap(b, c);
                         indices.insert(indices.end(), {a, b, c});
                     }
                 }
@@ -1845,18 +1899,9 @@ void PolygoniseTerrain(const Systems::SHIELD_WorldSystem& world_system,
                     }
                 }
 
-                const Vec3 density_gradient = EstimateDensityGradient(gridcell);
-                // #7 SMOOTHER MC NORMALS (rendering contract): the analytic SDF-density
-                // gradient is the true surface normal direction (points toward AIR /
-                // +density = outward). It was computed here only to orient triangle
-                // winding; seed it onto each emitted vertex too, BLENDED with the
-                // area-weighted face-normal smoothing in PASS 2 below. On thin features
-                // / cave walls the pure face-average produced washboard ripple +
-                // faceting; the smooth analytic gradient settles them. Render-only:
-                // mesh NORMALS are excluded from world_hash.
-                const Vec3 grad_n = (glm::dot(density_gradient, density_gradient) > 1.0e-12f)
-                                        ? glm::normalize(density_gradient)
-                                        : Vec3(0.0f);
+                // The table fixes outward winding per surface component. A
+                // cell-centre gradient can point into a smaller component and
+                // would turn its triangles into culled holes after an edit.
                 const auto& tri_row = triTable[cube_index];
                 for (int i = 0; tri_row[i] != -1; i += 3) {
                     u32 i0 = vert_indices[tri_row[i]];
@@ -1875,20 +1920,22 @@ void PolygoniseTerrain(const Systems::SHIELD_WorldSystem& world_system,
                         continue;
                     }
 
-                    if (glm::dot(face_normal, density_gradient) < 0.0f) {
-                        std::swap(i1, i2);
-                    }
-
                     indices.push_back(i0);
                     indices.push_back(i1);
                     indices.push_back(i2);
                 }
-                // Seed the analytic gradient onto every vertex this cell emitted (valid
+                // Seed the local analytic gradient onto every vertex this cell emitted (valid
                 // edges only; vert_indices is set under the same edge_mask gate above).
                 // Shared edge-cache vertices accumulate each adjacent cell's gradient ->
                 // smooth cross-cell averaging before PASS 2 adds the face normals.
                 for (int e = 0; e < 12; ++e) {
                     if (edge_mask & (1u << e)) {
+                        const Vec3 density_gradient =
+                            EdgeDensityGradient(gridcell, e, vertices[vert_indices[e]].position);
+                        const Vec3 grad_n =
+                            (glm::dot(density_gradient, density_gradient) > 1.0e-12f)
+                                ? glm::normalize(density_gradient)
+                                : Vec3(0.0f);
                         vertices[vert_indices[e]].normal += grad_n;
                     }
                 }

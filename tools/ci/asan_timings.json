@@ -319,7 +319,6 @@
   "GameSessionHeadlessWorldTest.IrrigationBorderAdmissionAtCapacityLeavesAuthorityUnchanged": 4,
   "GameSessionHeadlessWorldTest.IrrigationBorderDiscoveryUsesCompletedHistoricalLevels": 8,
   "GameSessionHeadlessWorldTest.LegacyEnergyCapacityAdmissionPreservesLiveStateOnRefusal": 5,
-  "GameSessionHeadlessWorldTest.LegacyEnergyMigratesToOwnerAgesAndSealsFrozenOwners": 18,
   "GameSessionHeadlessWorldTest.PlantOnlyOwnersRefuseUnreconstructableHistoryBeforeAdoption": 3,
   "GameSessionHeadlessWorldTest.RegionalPublicationReservesIdsAgainstCombinedFileCapacity": 12,
   "GameSessionHeadlessWorldTest.RegionalWeatherOwnerWorkIsIndependentOfFrozenAuthority": 9,
