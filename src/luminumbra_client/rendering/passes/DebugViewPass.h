@@ -98,9 +98,10 @@ public:
         ShadowCascade = 34,
         ShadowFootprint = 35,
         Wireframe = 36,
+        Overdraw = 37,
     };
 
-    static constexpr std::array<const char*, 32> identity_mode_names = {
+    static constexpr std::array<const char*, 33> identity_mode_names = {
         "off",          "draw-id",        "mesh-id",          "lod",
         "chunk",        "producer-owner", "mesh-path",        "direct-sun",
         "direct-moon",  "sky-ambient",    "shadow-factor",    "ao",
@@ -108,7 +109,8 @@ public:
         "metallic",     "normal-view",    "normal-world",     "sky-visibility",
         "material-ao",  "lighting",       "forward-plane",    "sky-plane",
         "shadow-plane", "actual-mip",     "texel-density",    "triplanar-weights",
-        "raw-finite",   "shadow-cascade", "shadow-footprint", "wireframe-shaded"};
+        "raw-finite",   "shadow-cascade", "shadow-footprint", "wireframe-shaded",
+        "overdraw"};
     static int identity_mode(std::string_view name) {
         // Shared CLI/panel catalogue; legacy modes retain their original numbers.
         for (std::size_t index = 1; index < identity_mode_names.size(); ++index) {
@@ -255,7 +257,7 @@ public:
         return control;
     }
     static constexpr bool replay_mode(int view) {
-        return view == Wireframe;
+        return view == Wireframe || view == Overdraw;
     }
     static int geometry_view() {
         return controls().wireframe ? Wireframe : controls().view;
@@ -267,8 +269,8 @@ public:
     }
     static void cycle_mode(int& legacy_mode) {
         auto& control = controls();
-        if (control.enabled && control.view >= DrawId && control.view <= Wireframe) {
-            control.view = control.view == Wireframe ? None : control.view + 1;
+        if (control.enabled && control.view >= DrawId && control.view <= Overdraw) {
+            control.view = control.view == Overdraw ? None : control.view + 1;
             legacy_mode = None;
         } else if (control.enabled && legacy_mode == Position) {
             control.view = DrawId;
@@ -320,11 +322,11 @@ public:
         if (control.wireframe) {
             return Wireframe;
         }
-        if (m_mode >= DrawId && (!control.enabled || m_mode > Wireframe)) {
+        if (m_mode >= DrawId && (!control.enabled || m_mode > Overdraw)) {
             return None;
         }
-        return control.enabled && control.view >= DrawId && control.view <= Wireframe ? control.view
-                                                                                      : m_mode;
+        return control.enabled && control.view >= DrawId && control.view <= Overdraw ? control.view
+                                                                                     : m_mode;
     }
 
     // Draw the debug visualization into the CURRENTLY BOUND framebuffer (the caller binds
