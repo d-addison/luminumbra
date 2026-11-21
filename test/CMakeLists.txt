@@ -1636,6 +1636,9 @@ add_executable(regional_scent_allocation_test common/regional_scent_allocation_t
 target_include_directories(regional_scent_allocation_test PRIVATE ../src)
 target_link_libraries(regional_scent_allocation_test PRIVATE gtest_main luminumbra_common)
 
+add_executable(replication_delta_allocation_test common/replication_delta_allocation_test.cpp)
+target_link_libraries(replication_delta_allocation_test PRIVATE gtest_main luminumbra_common)
+
 # Frontier gate fixtures: the lua-api-manifest and scalar-field-diffusion gates
 # assert at static initialization, the instinct and loopback gates are called
 # from the gtest cases in network_state_hash_gate_test.cpp.
@@ -2229,6 +2232,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     runtime_world_visual_validation_test
     frontier_gates_test
     regional_scent_allocation_test
+    replication_delta_allocation_test
     world_open_refusal_test
     runtime_surface_options_test
     jolt_tunneling_test
