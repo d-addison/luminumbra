@@ -60,7 +60,8 @@
 
 namespace Luminumbra::Replay {
 class QueuedReplayRecorder;
-}
+struct ReplayHeader;
+} // namespace Luminumbra::Replay
 
 namespace Luminumbra::Net {
 
@@ -503,6 +504,9 @@ struct LockstepConfig {
     // Handshake fails. One remote means per-peer and aggregate bounds are identical.
     std::size_t peer_retained_byte_limit = 0;
     std::size_t peer_retained_message_limit = 0;
+    // Immutable fresh boot captured by the authority owner before tick one.
+    // Omission retains legacy diagnostics for engine-generic callers.
+    std::shared_ptr<const Replay::ReplayHeader> replay_header = nullptr;
 };
 
 // Construct the same negotiated Hello for sessions and single-process drivers.

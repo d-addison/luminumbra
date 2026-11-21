@@ -7102,11 +7102,23 @@ void SHIELD_WorldSystem::wait_for_streaming_jobs() {
     }
 }
 
+namespace {
+u64& AuthoritySnapshotResidentVisits() {
+    static thread_local u64 visits = 0;
+    return visits;
+}
+} // namespace
+
+u64 SHIELD_WorldSystem::authority_snapshot_resident_visits() const {
+    return AuthoritySnapshotResidentVisits();
+}
+
 std::vector<std::shared_ptr<Luminumbra::Chunk>>
 SHIELD_WorldSystem::snapshot_streamed_chunks() const {
     std::vector<std::shared_ptr<Luminumbra::Chunk>> chunks;
     chunks.reserve(m_streaming_state.chunks.size());
     for (const auto& [id, chunk_ptr] : m_streaming_state.chunks) {
+        ++AuthoritySnapshotResidentVisits();
         (void)id;
         if (chunk_ptr) {
             chunks.push_back(chunk_ptr);

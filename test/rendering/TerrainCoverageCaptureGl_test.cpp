@@ -320,6 +320,79 @@ protected:
         EXPECT_EQ(manifest.at("complete"), true);
         EXPECT_EQ(manifest.at("gbuffer_dimensions"), (nlohmann::json{kExtent, kExtent}));
         EXPECT_EQ(manifest.at("lighting_sources").at("aerial-opacity").at("status"), "captured");
+        ASSERT_NO_FATAL_FAILURE(ExpectLightingEvidence(directory, manifest));
+    }
+
+    static void ExpectLightingEvidence(const std::filesystem::path& directory,
+                                       const nlohmann::json& manifest) {
+        EXPECT_EQ(manifest.at("schema"), "luminumbra.terrain_coverage_capture.v1");
+        EXPECT_EQ(manifest.at("lighting_source_scope"),
+                  "raw_pass_inputs_and_composites_not_additive_terms");
+        EXPECT_EQ(manifest.at("unavailable_terms"),
+                  (nlohmann::json{"canopy_visibility_no_standalone_target"}));
+        struct ExpectedSource {
+            const char* name;
+            int channels;
+        };
+        constexpr std::array<ExpectedSource, 9> expected{{{"lit-scene", 3},
+                                                          {"opaque-scene", 3},
+                                                          {"sky-view", 3},
+                                                          {"transmittance", 3},
+                                                          {"ambient-ssao", 1},
+                                                          {"shadow-depth", 1},
+                                                          {"shadow-tint", 3},
+                                                          {"aerial-inscatter", 3},
+                                                          {"aerial-opacity", 1}}};
+        const auto& sources = manifest.at("lighting_sources");
+        // Check every advertised layer without allocating image-sized buffers.
+        // Capture admits at most 16M pixels and 64 layers per source.
+        constexpr std::size_t max_pixels = 16u * 1024u * 1024u;
+        for (const auto& item : expected) {
+            SCOPED_TRACE(item.name);
+            const auto& source = sources.at(item.name);
+            ASSERT_EQ(source.at("status"), "captured");
+            EXPECT_NE(source.at("texture").get<GLuint>(), 0u);
+            EXPECT_EQ(source.at("channels"), item.channels);
+            const auto dimensions = source.at("dimensions").get<std::array<std::size_t, 3>>();
+            ASSERT_GT(dimensions[0], 0u);
+            ASSERT_GT(dimensions[1], 0u);
+            ASSERT_LE(dimensions[0], max_pixels / dimensions[1]);
+            ASSERT_GT(dimensions[2], 0u);
+            ASSERT_LE(dimensions[2], 64u);
+            const auto& files = source.at("files");
+            ASSERT_EQ(files.size(), dimensions[2]);
+            const std::string header =
+                std::string(item.channels == 3 ? "PF\n" : "Pf\n") + std::to_string(dimensions[0]) +
+                " " + std::to_string(dimensions[1]) + "\n" +
+                (std::endian::native == std::endian::little ? "-1.0\n" : "1.0\n");
+            const auto bytes = dimensions[0] * dimensions[1] *
+                               static_cast<std::size_t>(item.channels) * sizeof(float);
+            for (std::size_t layer = 0; layer < dimensions[2]; ++layer) {
+                const std::string filename =
+                    std::string(item.name) + "-" + std::to_string(layer) + ".pfm";
+                EXPECT_EQ(files.at(layer), filename);
+                std::ifstream input(directory / filename, std::ios::binary | std::ios::ate);
+                ASSERT_TRUE(input.is_open()) << filename;
+                EXPECT_EQ(input.tellg(), static_cast<std::streamoff>(header.size() + bytes));
+                input.seekg(0);
+                std::array<char, 64> actual_header{};
+                ASSERT_LE(header.size(), actual_header.size());
+                input.read(actual_header.data(), static_cast<std::streamsize>(header.size()));
+                ASSERT_EQ(input.gcount(), static_cast<std::streamsize>(header.size()));
+                EXPECT_EQ(std::string(actual_header.data(), header.size()), header);
+            }
+        }
+        // Quality zero never allocates the optional integrated volume.
+        EXPECT_EQ(manifest.at("volumetric_quality"), 0);
+        for (const auto* name : {"fog-inscatter", "fog-transmittance"})
+            EXPECT_EQ(sources.at(name), (nlohmann::json{{"status", "unavailable"}}));
+        const auto& lighting = manifest.at("lighting_uniforms");
+        const auto& fog = manifest.at("fog_uniforms");
+        EXPECT_EQ(lighting.at("u_skyAmbientColor"), manifest.at("ambient_color"));
+        EXPECT_EQ(lighting.at("u_viewPos"), (nlohmann::json{8.0f, 80.0f, 8.0f}));
+        EXPECT_EQ(fog.at("u_viewPos"), lighting.at("u_viewPos"));
+        EXPECT_EQ(fog.at("u_volumetricMode"), 0);
+        EXPECT_GT(fog.at("u_aerialDensity").at(0).get<float>(), 0.0f);
     }
 
 private:
