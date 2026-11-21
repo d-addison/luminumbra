@@ -1743,6 +1743,7 @@ add_executable(frontier_gates_test
     ai/perception_scent_hardening_test.cpp
     ai/utility_instinct_hardening_test.cpp
     ai/flocking_evolution_hardening_test.cpp
+    scripting/SimScriptDeterminism_test.cpp
     scripting/lua_api_manifest_gate_test.cpp
     scripting/lua_sandbox_escape_test.cpp
     scripting/aether_script_binding_test.cpp

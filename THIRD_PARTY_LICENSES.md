@@ -5,7 +5,7 @@ third-party projects below, each under its own license.
 
 Dependencies are obtained in one of two ways, noted per entry:
 
-- **vendored** — source is committed in this repository under `vendor/`
+- **vendored** — source is committed in this repository, usually under `vendor/`
 - **fetched** — downloaded at configure time by CMake `FetchContent`
 
 ---
@@ -16,11 +16,30 @@ Dependencies are obtained in one of two ways, noted per entry:
 | --- | --- | --- |
 | [FastNoise2](https://github.com/Auburn/FastNoise2) | Coherent noise for terrain generation | MIT |
 | [RenderDoc](https://github.com/baldurk/renderdoc) (`renderdoc_app.h` only) | In-application graphics capture API | MIT |
+| fdlibm | Binary64 script trigonometric kernels and constants | Sun permissive notice (below) |
 
 The FastNoise2 copy in `vendor/fastnoise` includes a local correction to AVX
 reciprocal and reciprocal-square-root evaluation. A separate translation unit
 uses precise operations so CPU-specific estimates cannot change cave occupancy.
 The upstream generator expressions and explicit fused operations are retained.
+
+### fdlibm
+
+The binary64 extension in `src/luminumbra_common/core/DeterministicScriptMath.cpp`
+uses fdlibm trigonometric kernels, coefficients and the `2/pi` table. Its fixed
+integer argument reducer and double-double logarithm, exponential and power
+composition use only IEEE basic operations. Square root uses the IEEE operation.
+The existing binary32 helper retains its original results. Retain the Sun notice
+below when redistributing this implementation.
+
+```text
+Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+
+Developed at SunPro, a Sun Microsystems, Inc. business.
+Permission to use, copy, modify, and distribute this
+software is freely granted, provided that this notice
+is preserved.
+```
 
 ## Fetched at configure time
 
