@@ -871,7 +871,7 @@ class RenderRunnerResidencyTests(unittest.TestCase):
         entry = main[main.index('autofinish_world_entry='):main.index('autostart_world_creation=')]
         cap = 'world_system->debug_set_streaming_radius_cap(scenario_config.benchmark_stream_radius);'
         self.assertIn('if(benchmark_v4)' + cap, entry)
-        self.assertLess(entry.index(cap), entry.index('EnsureSurfaceReadyNear('))
+        self.assertLess(entry.index(cap), entry.index('PrepareInitialSimulation('))
         creation = main[main.index('autostart_world_creation='):main.index('autostart_world_load=')]
         load = main[main.index('autostart_world_load='):main.index('if(g_uiManager){', main.index('autostart_world_load='))]
         for path in (creation, load):

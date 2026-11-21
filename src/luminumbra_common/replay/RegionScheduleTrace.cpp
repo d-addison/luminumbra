@@ -19,7 +19,9 @@ constexpr const char* kSchema = "luminumbra.region_schedule_trace.v1";
 bool ValidDigest(const std::string& digest) {
     return digest.size() == 16 && digest.find_first_not_of("0123456789abcdef") == std::string::npos;
 }
-bool EncodeTrace(const RegionScheduleTrace& trace, std::string& bytes) {
+} // namespace
+
+bool EncodeRegionScheduleTrace(const RegionScheduleTrace& trace, std::string& bytes) {
     if (trace.size() > kMaxTraceTicks)
         return false;
     nlohmann::json ticks = nlohmann::json::array();
@@ -36,7 +38,6 @@ bool EncodeTrace(const RegionScheduleTrace& trace, std::string& bytes) {
     bytes += '\n';
     return true;
 }
-} // namespace
 
 bool ReplayWriter::Finalize(std::uint64_t tick_count, const RegionScheduleTrace* trace) {
     if (!m_open)
@@ -44,7 +45,7 @@ bool ReplayWriter::Finalize(std::uint64_t tick_count, const RegionScheduleTrace*
     try {
         std::string bytes;
         if (m_replacement_guard ||
-            (trace && (trace->size() != tick_count || !EncodeTrace(*trace, bytes)))) {
+            (trace && (trace->size() != tick_count || !EncodeRegionScheduleTrace(*trace, bytes)))) {
             m_open = false;
             std::vector<std::uint8_t>{}.swap(m_buffer);
             m_replacement_guard.reset();
@@ -64,7 +65,7 @@ bool WriteRegionScheduleTrace(const std::filesystem::path& replay,
                               std::string& error) {
     error = "Corrupt region schedule trace.";
     std::string bytes;
-    if (!EncodeTrace(trace, bytes))
+    if (!EncodeRegionScheduleTrace(trace, bytes))
         return false;
     auto path = replay;
     path += ".regions.json";

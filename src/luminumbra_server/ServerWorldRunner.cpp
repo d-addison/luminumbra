@@ -4,7 +4,6 @@
 
 #include <algorithm>
 #include <array>
-#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -16,7 +15,6 @@
 #include <utility>
 #include <vector>
 
-#include "core/EngineVersion.h"
 #include "luminumbra_common/ai/EcologyHash.h"
 #include "luminumbra_common/components/AlarmComponents.h"
 #include "luminumbra_common/components/CoreComponents.h"
@@ -172,43 +170,12 @@ bool HorizontalChunkHorizonCovers(const Vec3& center, const Vec3& candidate, int
     return std::max(std::abs(tx - cx), std::abs(tz - cz)) <= std::max(0, radius);
 }
 
-world::AuthorityBootDescriptor DescribeBoot(const ServerWorldRunnerConfig& config,
-                                            const world::GameSession& session,
-                                            std::uint32_t seed,
-                                            const world::WorldCalendar& calendar) {
+world::AuthorityBootDescriptor DescribeWorkload(const ServerWorldRunnerConfig& config) {
     if (config.avatar_count < 0 ||
         config.avatar_count > static_cast<int>(world::AuthorityBootDescriptor::kMaxAvatars)) {
         throw std::invalid_argument("Replay avatar roster exceeds descriptor bound");
     }
     world::AuthorityBootDescriptor boot;
-    const auto values = session.EffectiveIdentityValues();
-    boot.authority_rules_revision =
-        luminumbra::core::SimulationIdentityValues::kAuthorityRulesRevision;
-    boot.resolved_world_seed = seed;
-    boot.system_config_identity = session.SystemConfigIdentity(calendar);
-    static_assert(boot.system_gates.size() == values.enabled.size());
-    static_assert(boot.scalar_bits.size() == values.scalars.size());
-    // Fixed registry slots: at most 25 gates and 46 scalar/vector settings.
-    for (std::size_t i = 0; i < boot.system_gates.size(); ++i) {
-        boot.system_gates[i] = static_cast<std::uint8_t>(values.enabled[i]);
-    }
-    for (std::size_t i = 0; i < boot.scalar_bits.size(); ++i) {
-        boot.scalar_bits[i] = std::bit_cast<std::uint64_t>(values.scalars[i]);
-        for (std::size_t axis = 0; axis < 3; ++axis) {
-            boot.vector_bits[i][axis] =
-                std::bit_cast<std::uint32_t>(values.vectors[i][static_cast<int>(axis)]);
-        }
-    }
-    boot.finite_hydrology = values.finite_hydrology_enabled;
-    boot.weather_rain_scale_mm = values.weather_rain_scale_mm;
-    boot.region_work_limit = values.region_work_limit;
-    boot.region_hold_ticks = values.region_hold_ticks;
-    boot.region_reduced_shift = values.region_reduced_shift;
-    boot.day_length_ticks = calendar.dayLengthTicks;
-    boot.days_per_year = calendar.daysPerYear;
-    boot.daylight_numerator = calendar.daylightNumerator;
-    boot.daylight_denominator = calendar.daylightDenominator;
-    boot.lunar_cycle_days = calendar.lunarCycleDays;
     boot.parked_bytes_limit = config.parked_bytes_limit;
     boot.avatar_count = static_cast<std::uint32_t>(config.avatar_count);
     boot.ecology_roster = config.ecology_roster;
@@ -234,8 +201,10 @@ ServerWorldRunner::DescribeReplayBoot(const ServerWorldRunnerConfig& config) {
     if (config.region_scheduler) {
         session.SetRegionSchedulerConfig(*config.region_scheduler);
     }
-    return DescribeBoot(
-        config, session, world::ResolveWorldSeed(config.seed, 1), world::WorldCalendar{});
+    return Replay::CaptureReplayBoot(session,
+                                     world::ResolveWorldSeed(config.seed, 1),
+                                     world::WorldCalendar{},
+                                     DescribeWorkload(config));
 }
 
 Replay::ReplayHeader ServerWorldRunner::CaptureReplayHeader() const {
@@ -243,26 +212,12 @@ Replay::ReplayHeader ServerWorldRunner::CaptureReplayHeader() const {
         (!m_session->GetWeatherSchedule() && !m_continuationOptions.owner_continuation)) {
         throw std::invalid_argument("Replay requires a fresh boot at tick zero");
     }
-    Replay::ReplayHeader header;
-    header.version = Replay::kLrec1BootVersion;
+    auto header = Replay::CaptureReplayHeader(*m_session,
+                                              static_cast<std::uint32_t>(m_config.surface_radius),
+                                              static_cast<std::uint32_t>(m_config.collision_radius),
+                                              DescribeWorkload(m_config));
+    // Keep the requested seed text: an empty request records a random boot.
     header.seed_string = m_config.seed;
-    header.seed = Replay::kResolvedSeedTag | m_session->GetMetadata().resolvedSeed;
-    header.preset = m_config.preset;
-    header.preset_hash = std::strtoull(Replay::Fnv1a64Hex(header.preset).c_str(), nullptr, 16);
-    header.surface_radius = static_cast<std::uint32_t>(m_config.surface_radius);
-    header.collision_radius = static_cast<std::uint32_t>(m_config.collision_radius);
-    header.engine_version = std::string(luminumbra::core::GetEngineVersionString());
-    header.system_config_identity = m_session->SystemConfigIdentity();
-    header.preset_content_hash = m_session->PresetContentHash();
-    if (const auto* schedule = m_session->GetWeatherSchedule()) {
-        header.version = Replay::kLrec1WeatherVersion;
-        header.weather_schedule = schedule->canonical_bytes();
-    } else {
-        header.authority_boot = DescribeBoot(m_config,
-                                             *m_session,
-                                             m_session->GetMetadata().resolvedSeed,
-                                             m_session->GetRenderCalendar());
-    }
     return header;
 }
 
@@ -551,118 +506,18 @@ bool ServerWorldRunner::Boot() {
         LUMINUMBRA_CORE_INFO("ServerWorldRunner: spawned deterministic plant roster (6 plants).");
     }
 
-    // --- Water determinism warm-up: settle water to a steady state BEFORE the counted sim ---
-    // The water sim only sleeps after 120 consecutive calm ticks, but a short run (e.g. the
-    // 90-tick --smoke) measures water MID-settle, so each chunk's depth depends on WHICH tick
-    // it streamed in (async meshing arrival). That made the WATER sub-hash flake cold-vs-warm
-    // and would desync two lockstep peers with different timing (water is a halting peer hash
-    // oracle). Here we drive streaming + water to a settled steady state on the SHARED boot
-    // path both peers run, so the subsequent sim starts from the (trajectory-independent)
-    // equilibrium. Bounded: settle residency (stable chunk count), then run water until every
-    // chunk is calm (asleep) or a hard cap. If water does NOT reach a static fixed point this
-    // will hit the cap and the smoke will still flake — that result decides option C vs B'
-    // Server/lockstep boot only; interactive streaming uses the normal residency path.
-    {
-        auto* ws = m_session->GetWorldSystem();
-        auto* phys = m_session->GetPhysicsSystem();
-        auto stream_once = [&]() {
-            if (m_avatars.empty()) {
-                ws->update(
-                    m_session->GetRegistry(), continuation ? m_ownerAnchor : spawn_anchor, phys);
-            } else {
-                std::vector<Vec3> anchors;
-                anchors.reserve(m_avatars.size());
-                for (const World::PlayerAvatar& a : m_avatars)
-                    anchors.push_back(a.position);
-                ws->update(m_session->GetRegistry(), anchors, phys);
-            }
-            ws->wait_for_streaming_jobs();
-        };
-        //  settle chunk residency (count stable for several consecutive iters).
-        std::size_t last_count = static_cast<std::size_t>(-1);
-        int stable = 0;
-        for (int i = 0; !continuation && i < 400 && stable < 8; ++i) {
-            stream_once();
-            const std::size_t count = ws->snapshot_streamed_chunks().size();
-            stable = (count == last_count) ? stable + 1 : 0;
-            last_count = count;
-        }
-        // FRESH worlds only — complete water INIT and drain the
-        // initial flood transient. Boot-settle mode lifts the live-play init/sim caps
-        // (see WaterSystem::SetBootSettleMode): under them, init drains at 6/tick while
-        // thousands of chunks wait, and the 64-chunk rotating sim window makes the
-        // 120-calm-tick sleep threshold unreachable for a large awake set. A GLOBAL
-        // all-asleep fixed point does NOT exist for this solver (wet/dry boundary cells
-        // limit-cycle and wake propagation re-wakes neighbours — measured: awake GROWS
-        // past 2500/5433 even after 3000 full-set iterations), so the settle contract
-        // is: (a) every streamed chunk water-initialized (uninited == 0) and (b) a
-        // FIXED, deterministic transient budget of full-set sim ticks — NOT "wait for
-        // calm", which never terminates. Reproducibility across save/load comes from
-        // the loaded-boot water pause + the persisted sim-window cursor, not from
-        // reaching a (nonexistent) static equilibrium.
-        //
-        // LOADED worlds skip this phase entirely: their water is paused for the whole
-        // Boot (see above) — the restored mid-flow state must not be advanced.
-        int settle_iters = 0;
-        if (!continuation && !water_loaded_from_save) {
-            ws->SetWaterBootSettleMode(true);
-            // 2a: init the full backlog (boot mode seeds ALL pending per update; the
-            // loop tolerates late streamers). Bounded.
-            constexpr int kInitSettleCap = 50;
-            std::size_t uninited_now = 0;
-            for (int i = 0; i < kInitSettleCap; ++i) {
-                ++settle_iters;
-                stream_once();
-                uninited_now = 0;
-                for (const auto& c : ws->snapshot_streamed_chunks()) {
-                    if (c && !c->has_water_sim.load(std::memory_order_acquire))
-                        ++uninited_now;
-                }
-                if (uninited_now == 0)
-                    break;
-            }
-            // 2b: exactly kPostInitSettleTicks full-set sim iterations — the flood
-            // transient (lakes/rivers redistributing from their seeded rest levels)
-            // drains and the calm-able majority of chunks reaches sleep. A fixed count
-            // is deterministic (run==replay, host==peer) and bounded by construction.
-            constexpr int kPostInitSettleTicks = 240;
-            for (int i = 0; i < kPostInitSettleTicks; ++i) {
-                ++settle_iters;
-                stream_once();
-            }
-            ws->SetWaterBootSettleMode(false);
-        }
-        // Settle-exit summary: the heavy oracle asserts the settle CONTRACT —
-        // fresh boots leave zero uninitialized chunks; loaded boots skip the settle
-        // (water paused, state preserved). awake > 0 is EXPECTED (the network flows
-        // perpetually); reproducibility comes from the pause + persisted cursor.
-        {
-            std::size_t water_chunks = 0, awake = 0, uninited = 0;
-            for (const auto& c : ws->snapshot_streamed_chunks()) {
-                if (!c)
-                    continue;
-                if (c->has_water_sim.load(std::memory_order_acquire)) {
-                    ++water_chunks;
-                    if (!c->is_water_sleeping.load(std::memory_order_relaxed))
-                        ++awake;
-                } else {
-                    ++uninited;
-                }
-            }
-            LUMINUMBRA_CORE_INFO(
-                "Boot water settle exit: {} water-inited ({} awake), {} NOT water-inited, {} "
-                "chunks total{}",
-                water_chunks,
-                awake,
-                uninited,
-                ws->snapshot_streamed_chunks().size(),
-                water_loaded_from_save ? " [loaded: water settle skipped, state preserved]" : "");
-            m_boot_settle.water_chunks = water_chunks;
-            m_boot_settle.awake = awake;
-            m_boot_settle.uninited = uninited;
-            m_boot_settle.iterations = settle_iters;
-            m_boot_settle.water_settle_skipped = water_loaded_from_save;
-        }
+    // One shared bounded residency/water boot for runner and ordinary clients.
+    // Bounded by the already admitted avatar roster, reused across all boot passes.
+    std::vector<Vec3> boot_anchors;
+    boot_anchors.reserve(m_avatars.size());
+    for (const World::PlayerAvatar& avatar : m_avatars) {
+        boot_anchors.push_back(avatar.position);
+    }
+    if (!m_session->SettleInitialSimulation(boot_anchors, m_boot_settle)) {
+        m_bootError = "Initial simulation preparation failed";
+        m_session.reset();
+        m_jobSystem.shutdown();
+        return false;
     }
 
     // live ticks resume the loaded water state exactly where the save left it.

@@ -241,16 +241,7 @@ public:
     // (water paused through Boot — water_settle_skipped — the restored mid-flow state is
     // authoritative) and resume from the persisted sim-window cursor. awake > 0 at exit
     // is expected and fine. Populated by Boot; asserted by the heavy oracle.
-    struct BootSettleStats {
-        std::size_t water_chunks = 0;      // chunks with has_water_sim at exit
-        std::size_t awake = 0;             // water chunks not asleep at exit (informational)
-        std::size_t uninited = 0;          // streamed chunks never water-initialized
-        int iterations = 0;                // physics-creature settle iterations consumed
-        bool water_settle_skipped = false; // true = loaded boot (water paused, no settle)
-        bool contract_ok() const {
-            return uninited == 0;
-        }
-    };
+    using BootSettleStats = world::GameSession::BootSettleStats;
     const BootSettleStats& GetBootSettleStats() const {
         return m_boot_settle;
     }
