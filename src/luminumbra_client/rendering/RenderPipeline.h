@@ -417,12 +417,14 @@ public:
 
     bool startup(u32 screen_width, u32 screen_height, const std::filesystem::path& root_path);
     void shutdown();
-    void render_frame(entt::registry& registry,
-                      Systems::SHIELD_WorldSystem& world_system,
-                      const Camera& camera,
-                      float deltaTime,
-                      bool wireframe = false,
-                      UploadPresentation presentation = UploadPresentation::Streaming);
+    void render_frame(
+        entt::registry& registry,
+        Systems::SHIELD_WorldSystem& world_system,
+        const Camera& camera,
+        float deltaTime,
+        bool wireframe = false,
+        UploadPresentation presentation = UploadPresentation::Streaming,
+        SkyAtmosphereLut::Publication sky_publication = SkyAtmosphereLut::Publication::SameFrame);
 
     // push the deterministic Aether scalar field to the lighting-pass
     // emissive tap (one-way sim->render bridge, called per frame from the client).
@@ -1261,7 +1263,8 @@ private:
                        const Camera& camera,
                        float deltaTime,
                        bool wireframe,
-                       UploadPresentation presentation);
+                       UploadPresentation presentation,
+                       SkyAtmosphereLut::Publication sky_publication);
     void dispatch_stages(const Camera& camera);
     FarReplayCamera replay_camera(const Camera& camera) const;
 
@@ -1379,7 +1382,9 @@ private:
 
     std::vector<glm::mat4> get_light_space_matrices(const Camera& camera);
 
-    void update_time_of_day(float deltaTime);
+    void update_time_of_day(
+        float deltaTime,
+        SkyAtmosphereLut::Publication sky_publication = SkyAtmosphereLut::Publication::SameFrame);
     float m_timeOfDay = 0.5f;       // Midnight in the noon-origin sky
     double m_elapsedDayPhase = 0.5; // Unwarped, noon-origin presentation time
     bool m_timeOfDayHold = false;   // freeze auto-advance for photo-mode TOD scrub
