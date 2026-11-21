@@ -789,6 +789,9 @@ TEST(RegionalWaterMigration, TerrainLessDormantOwnersReloadAfterSaveAndEviction)
             ASSERT_TRUE(owner->sdf_data.empty());
             ASSERT_TRUE(owner->heightmap_data.empty());
             ASSERT_TRUE(saved.save_dirty(loaded, errors));
+            // Match the save boundary: newly committed owners join the durable
+            // inventory, which still describes the pre-migration records above.
+            inventory.push_back(owner->get_coords());
 
             JobSystem jobs;
             if (threaded)
@@ -810,6 +813,9 @@ TEST(RegionalWaterMigration, TerrainLessDormantOwnersReloadAfterSaveAndEviction)
                 [](const std::string& error) { ADD_FAILURE() << error; });
             const auto admitted = shield.resolve_water_column({0, 0, 0});
             ASSERT_NE(admitted, nullptr);
+            EXPECT_EQ(reads, 1);
+            EXPECT_TRUE(admitted->same_water_state(*source));
+            EXPECT_EQ(shield.water_columns_generated(), 0u);
             ASSERT_EQ(shield.parking_status().parked_count, 1u);
             shield.release_clean_parked_chunks();
             EXPECT_TRUE(shield.snapshot_authoritative_chunks().empty());
@@ -819,6 +825,7 @@ TEST(RegionalWaterMigration, TerrainLessDormantOwnersReloadAfterSaveAndEviction)
             EXPECT_NE(restored, admitted);
             EXPECT_EQ(reads, 2);
             EXPECT_TRUE(restored->same_water_state(*source));
+            EXPECT_EQ(shield.water_columns_generated(), 0u);
             EXPECT_FALSE(shield.durable_read_failed());
             shield.dispatch_generation_jobs(std::vector<IVec3>{{2, 0, 0}});
             shield.wait_for_admitted_streaming_jobs();

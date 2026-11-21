@@ -3543,7 +3543,7 @@ TEST(WaterSeedInputs, DormantOwnershipAcceptsEveryPersistedGridShapeWithoutSeedi
     const auto saved = producer.saved_column();
     saved->has_water_sim.store(false);
     for (const int resolution : {0, 2, 4, 8, 16, 32}) {
-        for (int shape = 0; shape < 5; ++shape) {
+        for (int shape = 0; shape < 6; ++shape) {
             SCOPED_TRACE(resolution);
             SCOPED_TRACE(shape);
             saved->current_water_resolution.store(resolution);
@@ -3553,19 +3553,24 @@ TEST(WaterSeedInputs, DormantOwnershipAcceptsEveryPersistedGridShapeWithoutSeedi
             saved->water_level_data.clear();
             saved->water_flow_data.clear();
             saved->water_sim_terrain_height.clear();
-            if (shape == 1 || shape == 2) {
-                saved->water_depth_mm = {123}; // in-progress initialization is persistable
-                if (shape == 2) {
-                    saved->water_edge_flux = {2, -3};
+            saved->water_rest_level.clear();
+            if (shape != 0) {
+                // Persistence also stores partial initialization, but column
+                // admission requires a coherent grid. Off retains any former
+                // supported grid independently of its cleared resolution.
+                constexpr std::array former_resolutions{2, 4, 8, 16, 32};
+                const int grid = resolution == 0
+                                     ? former_resolutions[static_cast<std::size_t>(shape - 1)]
+                                     : resolution;
+                const auto cells = static_cast<std::size_t>(grid * grid);
+                saved->water_depth_mm.assign(cells, 123);
+                saved->water_bed_mm.assign(cells, -100);
+                saved->water_edge_flux.assign(2u * cells, 1);
+                if (shape >= 2) {
+                    saved->water_level_data.assign(cells, 1.0f);
+                    saved->water_flow_data.assign(cells, Vec2(0.25f, -0.5f));
+                    saved->water_sim_terrain_height.assign(cells, -1.0f);
                 }
-            } else if (shape == 3) {
-                saved->water_depth_mm.assign(1024, 123);
-                saved->water_bed_mm.assign(1024, -100);
-                saved->water_edge_flux.assign(2048, 1);
-            } else if (shape == 4) {
-                saved->water_level_data = {1.0f, 2.0f};
-                saved->water_flow_data = {Vec2(0.25f, -0.5f)};
-                saved->water_sim_terrain_height = {-1.0f};
             }
             bool valid = false;
             const auto encoded = Persistence::SerializeChunkRecordPayloadJson(*saved, &valid);
@@ -3594,7 +3599,7 @@ TEST(WaterSeedInputs, DormantOwnershipAcceptsEveryPersistedGridShapeWithoutSeedi
 
 TEST(WaterSeedInputs, DormantAndOffAuthorityRefusesMalformedPersistedWaterWithoutMutation) {
     for (const bool off : {false, true}) {
-        for (int damage = 0; damage < 13; ++damage) {
+        for (int damage = 0; damage < 20; ++damage) {
             SCOPED_TRACE(off);
             SCOPED_TRACE(damage);
             ColumnFixture fixture;
@@ -3641,6 +3646,37 @@ TEST(WaterSeedInputs, DormantAndOffAuthorityRefusesMalformedPersistedWaterWithou
                     break;
                 case 12:
                     chunk->water_depth_mm.front() = -1;
+                    break;
+                case 13:
+                    chunk->water_level_data = {1.0f, 2.0f};
+                    break;
+                case 14:
+                    chunk->water_flow_data = {Vec2(0.25f, -0.5f)};
+                    break;
+                case 15:
+                    chunk->water_sim_terrain_height = {-1.0f};
+                    break;
+                case 16:
+                    chunk->water_depth_mm = {123};
+                    chunk->water_bed_mm.clear();
+                    chunk->water_edge_flux.clear();
+                    break;
+                case 17:
+                    chunk->water_depth_mm = {123};
+                    chunk->water_bed_mm.clear();
+                    chunk->water_edge_flux = {2, -3};
+                    break;
+                case 18:
+                    chunk->water_depth_mm.assign(off ? 2u : 1024u, 123);
+                    chunk->water_bed_mm.assign(off ? 2u : 1024u, -100);
+                    chunk->water_edge_flux.assign(off ? 4u : 2048u, 1);
+                    chunk->water_level_data.clear();
+                    chunk->water_flow_data.clear();
+                    chunk->water_sim_terrain_height.clear();
+                    chunk->water_rest_level.clear();
+                    break;
+                case 19:
+                    chunk->water_rest_level.assign(64, std::numeric_limits<float>::infinity());
                     break;
             }
             ASSERT_TRUE(fixture.world.adopt_streamed_chunk(chunk));
@@ -3699,12 +3735,20 @@ void ExpectColumnRestorationParity(int saved_resolution, int session_resolution,
     } else if (state == 4 || state == 5) {
         saved->current_water_resolution.store(0);
         saved->has_water_sim.store(state == 5);
-        saved->water_depth_mm = {123, 456};
-        saved->water_bed_mm = {-321, -654};
-        saved->water_edge_flux = {1, -2, 3, -4};
-        saved->water_level_data = {0.5f};
-        saved->water_flow_data = {Vec2(0.25f, -0.5f)};
-        saved->water_sim_terrain_height = {-0.5f, 1.0f};
+        // Off keeps the complete former grid; short arrays are refusal inputs.
+        const auto cells = saved->water_depth_mm.size();
+        saved->water_depth_mm.assign(cells, 123);
+        saved->water_depth_mm[1] = 456;
+        saved->water_bed_mm.assign(cells, -321);
+        saved->water_bed_mm[1] = -654;
+        saved->water_edge_flux.assign(2u * cells, 1);
+        saved->water_edge_flux[1] = -2;
+        saved->water_edge_flux[2] = 3;
+        saved->water_edge_flux[3] = -4;
+        saved->water_level_data.assign(cells, 0.5f);
+        saved->water_flow_data.assign(cells, Vec2(0.25f, -0.5f));
+        saved->water_sim_terrain_height.assign(cells, -0.5f);
+        saved->water_sim_terrain_height[1] = 1.0f;
     } else {
         saved->is_water_sleeping.store(state == 0);
         saved->ticks_below_threshold = state == 0 ? 120 : 7;
