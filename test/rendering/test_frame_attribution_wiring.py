@@ -2721,10 +2721,12 @@ class StormLightningWiring(unittest.TestCase):
         self.assertIn('setInt("u_flashCount", static_cast<int>(flash_count))', lighting)
         self.assertIn("for (std::size_t i = 0; i < flash_count; ++i)", lighting)
         self.assertIn("const auto& flash = lit.flashes.entries[i];", lighting)
-        for uniform, value in (("u_flashNdc", "flash.strike_ndc"),
-                               ("u_flashPulse", "flash.pulse"),
-                               ("u_flashOnscreen", "flash.onscreen ? 1 : 0")):
-            self.assertIn('("' + uniform + '" + suffix, ' + value + ')', lighting)
+        # Indexed names are built once per shader generation, then uploaded by slot.
+        for slot, (uniform, value) in enumerate((("u_flashNdc", "flash.strike_ndc"),
+                                                 ("u_flashPulse", "flash.pulse"),
+                                                 ("u_flashOnscreen", "flash.onscreen ? 1 : 0"))):
+            self.assertIn('"' + uniform + '" + suffix', lighting)
+            self.assertIn("(names[" + str(slot) + "], " + value + ")", lighting)
         for path in ("core/ScenarioRunnerDrive.cpp", "core/scenarios/WorldVisualSweep.cpp"):
             source = read(CLIENT / path)
             self.assertEqual(source.count("lstate.flashes = composed.flashes;"),
