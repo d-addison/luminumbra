@@ -1196,7 +1196,7 @@ TEST_P(ClientReplayProducerTest, AutomaticDumpMatchesCliBootAndReconstructsStart
         std::string trace_error;
         ASSERT_TRUE(replay::ReadRegionScheduleTrace(dump, 1, trace, trace_error)) << trace_error;
         ASSERT_EQ(trace.size(), 1u);
-        EXPECT_EQ(trace.front().second, client.GetRegionSchedule().digest);
+        EXPECT_EQ(trace.front().second, client.Session()->GetRegionSchedule().digest);
         EXPECT_EQ(trace.front().second, playback.Session()->GetRegionSchedule().digest);
         replay::RegionScheduleTrace cli_trace;
         ASSERT_TRUE(replay::ReadRegionScheduleTrace(options.record_path, 1, cli_trace, trace_error))

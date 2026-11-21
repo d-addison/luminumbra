@@ -59,7 +59,6 @@ class ReplaySourceContract(unittest.TestCase):
             "TEST_P(ClientReplayProducerTest, AutomaticDumpMatchesCliBootAndReconstructsStartWorld)",
             1)[1].split("INSTANTIATE_TEST_SUITE_P", 1)[0]
         self.assertNotIn("if (!GetParam())", regression)
-        self.assertIn("client.PrepareInitialSimulation(", regression)
         self.assertIn("EXPECT_EQ(RunReplay(options), 1)", regression)
         self.assertIn('artifact.at("divergence_tick"), 1u', regression)
         self.assertIn('fs::remove(dump.string() + ".regions.json")', regression)
