@@ -2888,13 +2888,14 @@ std::shared_ptr<Chunk> EdgeValueChunk(WorldStreamingState& state) {
     chunk->water_level_data.assign(floats.begin(), floats.begin() + 256);
     chunk->water_sim_terrain_height.assign(floats.rbegin(), floats.rbegin() + 256);
     chunk->material_data = {0, 1, 127, 128, 255};
-    chunk->water_depth_mm = {0,
-                             1,
-                             -1,
-                             std::numeric_limits<std::int32_t>::min(),
-                             std::numeric_limits<std::int32_t>::max()};
+    chunk->water_depth_mm = {0, 1, std::numeric_limits<std::int32_t>::max()};
     chunk->water_bed_mm = {std::numeric_limits<std::int32_t>::min(), 0, 7};
-    chunk->water_edge_flux = {-4, 3, std::numeric_limits<std::int32_t>::max(), 0};
+    chunk->water_edge_flux = {-4,
+                              3,
+                              std::numeric_limits<std::int32_t>::max(),
+                              0,
+                              std::numeric_limits<std::int32_t>::min(),
+                              -1};
     chunk->mesh_vertices = {{Vec3(-0.0f, Limits::denorm_min(), Limits::max()), Vec3(0, 1, 0), 0},
                             {Vec3(Limits::lowest(), 0.1f, -17.125f),
                              Vec3(0.25f, -0.5f, 1),
@@ -3045,7 +3046,8 @@ TEST(WorldSaveRegionFormat, ChunkRecordPayloadRefusesMalformedEncodedArrays) {
     refused("encoded array object",
             [&](nlohmann::json& d) { field(d, "sdf_data") = chunk->sdf_data; });
     refused("encoded array object", [&](nlohmann::json& d) { field(d, "sdf_data") = nullptr; });
-    refused("water_edge_flux", [&](nlohmann::json& d) { d["chunks"][0].erase("water_edge_flux"); });
+    refused("Saved water structure",
+            [&](nlohmann::json& d) { d["chunks"][0].erase("water_edge_flux"); });
     // One byte is "AA==": a set spare bit or a misplaced pad is not canonical base64.
     refused("padding bits are not zero", [&](nlohmann::json& d) {
         field(d, "material_data") = {
@@ -3067,13 +3069,14 @@ TEST(WorldSaveRegionFormat, ChunkRecordPayloadRefusesMalformedEncodedArrays) {
     refused("record format", [](nlohmann::json& d) { d["record_format"] = 3; });
     refused("record format", [](nlohmann::json& d) { d["record_format"] = "2"; });
 
-    // Non-finite values are written as null, which loading refuses as before.
+    // Water arrays refuse non-finite values at encoding; other arrays retain their null form.
     chunk->sdf_data[3] = std::numeric_limits<float>::quiet_NaN();
     chunk->water_flow_data[1].y = std::numeric_limits<float>::infinity();
+    EXPECT_THROW(P::SerializeChunkRecordPayloadJson(*chunk), std::invalid_argument);
+    chunk->water_flow_data[1].y = -4.0f;
     chunk->mesh_vertices[0].normal.z = -std::numeric_limits<float>::infinity();
     const std::string non_finite = P::SerializeChunkRecordPayloadJson(*chunk);
-    for (const char* name :
-         {"\"sdf_data\":null", "\"water_flow_data\":null", "\"mesh_vertices\":null"})
+    for (const char* name : {"\"sdf_data\":null", "\"mesh_vertices\":null"})
         EXPECT_NE(non_finite.find(name), std::string::npos) << name;
     WorldStreamingState loaded;
     std::vector<std::string> errors;
