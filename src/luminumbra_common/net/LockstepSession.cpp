@@ -60,6 +60,22 @@ bool HasValidHorizons(const HelloMsg& hello) {
            hello.horizon_start <= hello.horizon_max;
 }
 
+bool ReplayBootMatches(const Replay::ReplayHeader& captured, const LockstepConfig& config) {
+    const bool complete_boot = captured.version == Replay::kLrec1BootVersion &&
+                               captured.authority_boot &&
+                               captured.authority_boot->resolved_world_seed == config.seed;
+    Systems::WeatherSchedule schedule;
+    // Decode bounds both work and storage to WeatherSchedule::kMaxPhases (32).
+    const bool scheduled_boot =
+        captured.version == Replay::kLrec1WeatherVersion && !captured.authority_boot &&
+        Systems::WeatherSchedule::Decode(captured.weather_schedule, schedule);
+    return (complete_boot || scheduled_boot) &&
+           captured.seed == (Replay::kResolvedSeedTag | config.seed) &&
+           captured.preset == config.preset && captured.tick_rate_hz == config.tick_rate_hz &&
+           Replay::ConfigurationMatches(
+               captured, config.system_config_identity, config.preset_content_hash);
+}
+
 // --- Little-endian fixed-width append helpers (the only on-wire encoders). Identical
 // discipline to ReplayStream.cpp's encoders; kept local so net has no dependency on the
 // replay internals beyond the public ReplayWriter used for the dump. ----------------
@@ -1142,8 +1158,12 @@ LockstepAdmissionStatus LockstepSession::AdmissionStatus() const {
 
 bool LockstepSession::Handshake() {
     m_receive_work = {};
-    // Schedule capture and restoration are not integrated with lockstep yet.
-    if (m_config.system_config_identity.starts_with(Systems::WeatherSchedule::kIdentityPrefix)) {
+    // Scheduled authorities must supply the complete profile captured before tick one.
+    // Generic callers without that capture retain the legacy refusal.
+    if (m_config.system_config_identity.starts_with(Systems::WeatherSchedule::kIdentityPrefix) &&
+        (!m_config.replay_header ||
+         m_config.replay_header->version != Replay::kLrec1WeatherVersion ||
+         !ReplayBootMatches(*m_config.replay_header, m_config))) {
         m_status.handshake_error = "scheduled weather is unsupported by lockstep";
         TransportDisconnected();
         return false;
@@ -1992,6 +2012,15 @@ bool LockstepSession::OpenReplayRecorder() {
     header.preset_hash =
         std::strtoull(Luminumbra::Replay::Fnv1a64Hex(m_config.preset).c_str(), nullptr, 16);
     header.engine_version = std::string(luminumbra::core::GetEngineVersionString());
+    if (m_config.replay_header) {
+        const auto& captured = *m_config.replay_header;
+        if (!ReplayBootMatches(captured, m_config)) {
+            m_replay_failed = true;
+            m_status.replay_error = "replay boot conflicts with session configuration";
+            return false;
+        }
+        header = captured;
+    }
     header.start_world_hash = std::move(boot.world_hash);
     m_replay_open = m_replay->Open(m_dump_path, header);
     m_replay_failed = !m_replay_open;

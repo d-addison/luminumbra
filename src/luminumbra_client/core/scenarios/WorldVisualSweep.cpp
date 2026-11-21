@@ -89,6 +89,9 @@ struct SweepCell {
     std::uint64_t visible_water_pixels = 0;
     bool water_mask_valid = false;
     std::string water_mask_file;
+    std::string attribution_directory;
+    bool attribution_complete = false;
+    double cloud_phase = 0.0;
 };
 
 // Whole-frame mean luminance + a water-like pixel count (teal/blue, the same
@@ -210,71 +213,27 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
     std::error_code ec;
     std::filesystem::create_directories(sweep_dir, ec);
 
-    // --- anchor + framing --------------------------------------------------
-    // Pick a feature-rich LAND anchor: a column comfortably ABOVE sea level (so
-    // the ground foliage actually renders in the down-pitched cells) and, when
-    // possible, near the shore (so the horizon vistas + the water-aimed cell
-    // still frame open water). We scan a grid around spawn and score columns by
-    // (height above sea) + (vegetation density) - (distance from spawn) with a
-    // shoreline bonus when open water sits within a short walk. Deterministic:
-    // pure functions of the generated world (GetTerrainHeightAt / BiomeIdAt).
-    const Luminumbra::Vec3 spawn = game_session->GetMetadata().spawnPoint;
-    Luminumbra::Vec3 land(spawn.x, spawn.y, spawn.z);
-    float land_terrain_h = world_system->GetTerrainHeightAt(spawn.x, spawn.z);
-    {
-        constexpr int kRadius = 384;
-        constexpr int kStep = 16;
-        float best_score = -1.0e30f;
-        bool found_land = false;
-        for (int dz = -kRadius; dz <= kRadius; dz += kStep) {
-            for (int dx = -kRadius; dx <= kRadius; dx += kStep) {
-                const float x = spawn.x + static_cast<float>(dx);
-                const float z = spawn.z + static_cast<float>(dz);
-                const float h = world_system->GetTerrainHeightAt(x, z);
-                const float above_sea = h - Luminumbra::SEA_LEVEL;
-                if (above_sea < 2.0f) {
-                    continue;
-                } // must be dry land
-                const Luminumbra::u8 biome_id = world_system->BiomeIdAt(x, z);
-                const float veg = world_system->biomes_enabled()
-                                      ? world_system->biome_table().vegetation_for(biome_id).density
-                                      : 0.3f;
-                // Shore proximity bonus: open water within ~64 m keeps the sea in
-                // frame for the vistas / water-aimed cell.
-                float shore_bonus = 0.0f;
-                for (int s = 32; s <= 96 && shore_bonus == 0.0f; s += 32) {
-                    if (world_system->GetTerrainHeightAt(x + static_cast<float>(s), z) <
-                            Luminumbra::SEA_LEVEL - 0.5f ||
-                        world_system->GetTerrainHeightAt(x - static_cast<float>(s), z) <
-                            Luminumbra::SEA_LEVEL - 0.5f ||
-                        world_system->GetTerrainHeightAt(x, z + static_cast<float>(s)) <
-                            Luminumbra::SEA_LEVEL - 0.5f ||
-                        world_system->GetTerrainHeightAt(x, z - static_cast<float>(s)) <
-                            Luminumbra::SEA_LEVEL - 0.5f) {
-                        shore_bonus = 30.0f;
-                    }
-                }
-                const float dist = std::sqrt(static_cast<float>(dx * dx + dz * dz));
-                const float score =
-                    veg * 120.0f + std::min(above_sea, 30.0f) * 1.5f + shore_bonus - dist * 0.05f;
-                if (score > best_score) {
-                    best_score = score;
-                    land = Luminumbra::Vec3(x, h, z);
-                    land_terrain_h = h;
-                    found_land = true;
-                }
-            }
+    // The scenario is already an explicit capture opt-in. Preserve a caller's
+    // coverage mode; never enable the camera-region guard bypass for attribution.
+    struct CoverageScope {
+        RenderPipeline* pipeline;
+        bool enabled;
+        bool bypass;
+        ~CoverageScope() {
+            pipeline->set_terrain_coverage_diagnostics_enabled(enabled, bypass);
         }
-        if (!found_land) {
-            // No dry land near spawn (open-ocean spawn): fall back to a lifted
-            // spawn vista so the sweep still produces a full matrix.
-            land = Luminumbra::Vec3(spawn.x, std::max(spawn.y, land_terrain_h), spawn.z);
-        }
-    }
-    // Eye level a person-height above the ground so the down-pitch frames the
-    // nearby foliage-covered ground rather than a distant sea horizon.
-    const float eye_y = std::max(land_terrain_h, Luminumbra::SEA_LEVEL) + 2.5f;
-    const Luminumbra::Vec3 anchor(land.x, eye_y, land.z);
+    };
+    const auto previous_coverage = pipeline->terrain_coverage_diagnostics();
+    const bool previous_bypass =
+        previous_coverage.contains("far") && previous_coverage["far"].is_object() &&
+        previous_coverage["far"].value("camera_region_guard_bypassed", false);
+    const CoverageScope coverage_scope{
+        pipeline, previous_coverage.value("enabled", false), previous_bypass};
+    pipeline->set_terrain_coverage_diagnostics_enabled(true);
+
+    // Fixed audit land pose for issue #873. Do not reselect it as terrain or
+    // vegetation scoring evolves: yaw000/yaw240 must compare the same sightlines.
+    const Luminumbra::Vec3 anchor(168.0f, 10.0505952835083f, -40.0f);
 
     // Resolve a local open patch and sample the sight lines from a dedicated
     // water eye. GPU evidence below validates actual resident geometry as well.
@@ -369,7 +328,8 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
     // Settle + capture one cell.
     std::vector<unsigned char> pixels;
     int fb_w = 0, fb_h = 0;
-    const auto render_settled = [&](int settle_frames) -> bool {
+    const auto render_settled = [&](int settle_frames,
+                                    const std::filesystem::path& attribution_dir) -> bool {
         bool ok = true;
         for (int i = 0; i < settle_frames; ++i) {
             // Rebuild foliage instances around the live camera each settle frame
@@ -392,7 +352,12 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
                     camera->Position,
                     Luminumbra::Rendering::FoliagePass::Preparation::Complete);
             }
-            ok = deps.render_and_read(pixels, fb_w, fb_h, false);
+            ok = deps.render_and_read(pixels,
+                                      fb_w,
+                                      fb_h,
+                                      false,
+                                      i + 1 == settle_frames ? attribution_dir
+                                                             : std::filesystem::path{});
             if (!ok) {
                 break;
             }
@@ -412,7 +377,7 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
     bool streaming_ready = false;
     std::size_t water_indices_drawn = 0;
     while (!streaming_ready && std::chrono::steady_clock::now() < readiness_deadline) {
-        if (!deps.render_and_read(pixels, fb_w, fb_h, true)) {
+        if (!deps.render_and_read(pixels, fb_w, fb_h, true, std::filesystem::path())) {
             LUMINUMBRA_CORE_ERROR("world_visual_sweep: warmup render failed.");
             return false;
         }
@@ -445,7 +410,7 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
     camera->Zoom = 70.0f;
     AimCameraAt(camera, water_target.focus);
     pipeline->set_water_visibility_capture_enabled(true);
-    const bool target_rendered = render_settled(3);
+    const bool target_rendered = render_settled(3, {});
     const bool target_mask_written = WriteSweepWaterMask(
         sweep_dir / "water-target-validation.water-mask.ppm", pipeline->water_visibility_mask());
     if (!target_rendered || !target_mask_written ||
@@ -571,9 +536,24 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
                     // world geometry is already streamed by the warmup, so this stays
                     // small. Storm cells settle a touch longer for the particle fill.
                     const int settle = WorldSweepStillSettleFrames(storm);
-                    const bool ok = render_settled(settle);
+                    // Reuse the audited land framing, time and weather phase;
+                    // attribution is part of the last settled frame, never a rerender.
+                    const bool dusk_attribution =
+                        tod.time_of_day == 0.25f &&
+                        (a.yaw_degrees == 0.0f || a.yaw_degrees == 240.0f) && !a.aim_at_water;
+                    const std::string attribution_directory =
+                        dusk_attribution ? std::string("sweep/") + season.label + "__" + tod.label +
+                                               "__" + a.label + "__" + weathers[wi] + ".attribution"
+                                         : std::string{};
+                    const bool ok =
+                        render_settled(settle,
+                                       dusk_attribution ? deps.artifact_dir / attribution_directory
+                                                        : std::filesystem::path{});
 
                     SweepCell cell;
+                    cell.attribution_directory = attribution_directory;
+                    cell.attribution_complete = dusk_attribution && ok;
+                    cell.cloud_phase = phase_clock;
                     cell.tod = tod.label;
                     cell.angle = a.label;
                     cell.weather = weathers[wi];
@@ -608,13 +588,13 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
                                           cell.non_black,
                                           cell.water_like_pixels,
                                           cell.water_like_ratio);
-                        if (cell.water_aimed) {
+                        const auto write_water_mask = [&] {
                             const auto& mask = pipeline->water_visibility_mask();
                             cell.visible_water_pixels = mask.visible_pixels_in_target();
                             cell.water_mask_file = cell.file + ".water-mask.ppm";
                             cell.water_mask_valid =
                                 WriteSweepWaterMask(deps.artifact_dir / cell.water_mask_file, mask);
-                        }
+                        };
                         const auto capture_path = deps.artifact_dir / cell.file;
                         cell.produced = pipeline->with_diagnostic_capture(
                             capture_path,
@@ -628,7 +608,12 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
                                     "terrain_preset_and_resolved_dependency_content_identity";
                                 return input;
                             },
-                            [&] { return WritePixelBufferPpm(capture_path, fb_w, fb_h, pixels); });
+                            [&] {
+                                if (cell.water_aimed) {
+                                    write_water_mask();
+                                }
+                                return WritePixelBufferPpm(capture_path, fb_w, fb_h, pixels);
+                            });
                     }
                     pipeline->end_diagnostic_capture();
                     cells.push_back(std::move(cell));
@@ -652,6 +637,9 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
             ++produced;
         } else {
             failures.push_back("missing:" + c.file);
+        }
+        if (!c.attribution_directory.empty() && !c.attribution_complete) {
+            failures.push_back("missing_attribution:" + c.file);
         }
         if (c.non_black) {
             ++non_black;
@@ -686,6 +674,8 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
     manifest["generated_by"] = "world_visual_sweep";
     manifest["world_preset"] = "archipelago";
     manifest["anchor"] = Vec3ToJson(anchor);
+    manifest["horizon_fov_degrees"] = 75.0f;
+    manifest["horizon_pitch_degrees"] = 0.0f;
     manifest["water_target_found"] = water_target.found;
     manifest["water_eye"] = Vec3ToJson(water_target.eye);
     manifest["water_focus"] = Vec3ToJson(water_target.focus);
@@ -705,6 +695,9 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
     for (const SweepCell& c : cells) {
         cells_json.push_back({
             {"file", c.file},
+            {"attribution_directory", c.attribution_directory},
+            {"attribution_complete", c.attribution_complete},
+            {"cloud_phase", c.cloud_phase},
             {"season", c.season},
             {"tod", c.tod},
             {"angle", c.angle},

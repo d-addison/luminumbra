@@ -65,6 +65,36 @@ class ReplaySourceContract(unittest.TestCase):
     def test_replay_mode_admits_identity_inputs_and_terminal_before_startup(self):
         self.assert_mode_admission(read_source(MODES + "Replay.cpp"))
 
+    def assert_publication_admission(self, source):
+        recording = source.split("int RunRecord(", 1)[1].split("int RunReplay(", 1)[0]
+        preflight = recording.split("RunnerConfigFrom(options)", 1)[0]
+        self.assertIn("ReplayReadLimits{}.records", preflight)
+        self.assertIn("options.ticks / kCheckpointIntervalTicks +", preflight)
+        self.assertIn("(options.ticks % kCheckpointIntervalTicks != 0 ? 1u : 0u)", preflight)
+        self.assertIn("options.ticks > record_limit || checkpoints > record_limit - options.ticks",
+                      preflight)
+        self.assertRegex(preflight, r'requested workload exceeds replay admission budget"\);'
+                         r'\s*return 1;')
+        playback = source.split("int RunReplay(", 1)[1]
+        before_read = playback.split("Luminumbra::Replay::ReadReplay(", 1)[0]
+        self.assertRegex(before_read,
+                         r'if \(ReplayFinalizationIncomplete\(options.replay_path\)\)\s*\{'
+                         r'\s*LUMINUMBRA_CORE_ERROR\("replay: recording finalization is incomplete"\);'
+                         r'\s*return 1;\s*\}')
+
+    def test_recording_budget_and_incomplete_marker_precede_startup_and_read(self):
+        self.assert_publication_admission(read_source(MODES + "Replay.cpp"))
+
+    def test_publication_admission_contract_detects_isolated_regressions(self):
+        source = read_source(MODES + "Replay.cpp")
+        for token in ("ReplayReadLimits{}.records",
+                      "(options.ticks % kCheckpointIntervalTicks != 0 ? 1u : 0u)",
+                      "options.ticks > record_limit || checkpoints > record_limit - options.ticks",
+                      "ReplayFinalizationIncomplete(options.replay_path)"):
+            self.assertIn(token, source)
+            with self.subTest(token=token), self.assertRaises(AssertionError):
+                self.assert_publication_admission(source.replace(token, "false", 1))
+
     def test_mode_admission_contract_detects_isolated_regressions(self):
         source = read_source(MODES + "Replay.cpp")
         for token in ("header.engine_version != engine_now",
@@ -968,7 +998,15 @@ class AuthorityConsumerSourceContract(unittest.TestCase):
 
     def assert_other_modes_contract(self, sources):
         heavy = sources["heavy"]
-        self.assertIn("intRunHeavy(constServerCliOptions&options)try{", heavy)
+        self.assertIn("intRunHeavy(constServerCliOptions&options,"
+                      "constLuminumbra::world::OwnerContinuationOptions&profile)try{", heavy)
+        cli = capture_body(heavy, "intRunHeavy(constServerCliOptions&options)")
+        self.assertIn("returnRunHeavy(options,{.owner_continuation=!options.weather_schedule});", cli)
+        skip = capture_body(cli, "if(options.weather_schedule)")
+        self.assertIn("ownercomparisonskipped:weatherschedule", skip)
+        for runner, config in (("original", "cfgOrig"), ("loaded", "cfgLoad")):
+            self.assertIn(f"ServerWorldRunner{runner}(std::move({config}),profile);", heavy)
+            self.assertEqual(heavy.count(f"CaptureOwners({runner},profile.owner_continuation)"), 2)
         catch = capture_body(heavy, "catch(constLuminumbra::Persistence::AuthorityCaptureRefused&error)")
         self.assert_ordered(catch, "error.status()", "return1;")
         checked = capture_body(heavy, "intRunHeavy(")
@@ -995,6 +1033,34 @@ class AuthorityConsumerSourceContract(unittest.TestCase):
 
     def test_heavy_and_sibling_modes_stop_on_capture_refusal(self):
         self.assert_other_modes_contract(self.sources())
+
+    def test_heavy_cli_owner_profile_and_skip_have_registered_regressions(self):
+        native = read_source("test/common/ReplayModeAdmission_test.cpp")
+        for case in ("HeavyCliComparesUnchangedOwnerCheckpoints",
+                     "HeavyCliOwnerMismatchFailsBothCheckpointPairs",
+                     "HeavyCliWeatherScheduleLogsSkippedOwnerComparison",
+                     "HeavyCliInvalidWeatherScheduleStillRefusesBeforeSave"):
+            self.assertIn("TEST_F(ReplayModeAdmission, " + case + ")", native)
+        self.assertIn("ASSERT_EQ(RunHeavy(options), 0)", native)
+        self.assertIn("EXPECT_EQ(RunRefusedCaptureHeavy(options), 1)", native)
+        cmake = read_source("test/CMakeLists.txt")
+        target = re.search(r'add_executable\(world_open_refusal_test\s+(.*?)\)', cmake, re.DOTALL)
+        self.assertIsNotNone(target)
+        for path in ("common/ReplayModeAdmission_test.cpp",
+                     "../src/luminumbra_server/modes/Heavy.cpp"):
+            self.assertEqual(target[1].split().count(path), 1)
+        sources = self.sources()
+        for token, replacement in (
+                (".owner_continuation=!options.weather_schedule", ".owner_continuation=false"),
+                (".owner_continuation=!options.weather_schedule", ".owner_continuation=true"),
+                ("ownercomparisonskipped:weatherschedule", ""),
+                ("std::move(cfgOrig),profile", "std::move(cfgOrig)"),
+                ("std::move(cfgLoad),profile", "std::move(cfgLoad)")):
+            changed = dict(sources)
+            self.assertIn(token, changed["heavy"])
+            changed["heavy"] = changed["heavy"].replace(token, replacement, 1)
+            with self.subTest(token=token), self.assertRaises(AssertionError):
+                self.assert_other_modes_contract(changed)
 
     def test_each_capture_guard_and_order_has_an_isolated_mutation(self):
         sources = self.sources()

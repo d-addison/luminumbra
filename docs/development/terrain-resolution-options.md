@@ -424,6 +424,25 @@ Do not add shipping half-metre saves in an intermediate slice. Descriptor-based
 changes outside a slice's file budget, split dormant preparation further and
 keep activation closed until all consumers and refusal paths are qualified.
 
+## Shipping status
+
+Option 1 ships first. Graphics preset revision 4 turns on the render-only,
+budgeted near-terrain refinement for new High and Ultra selections, including
+automatic detection; Low and Medium keep it off. A saved revision 1-3 selection
+and any explicit saved override keep their payloads until the player selects a
+preset again. Refinement stays inside the existing per-frame budget (4 MiB,
+8 uploads, 3 ms) and defers work past its deadline. Native High/Ultra p99 at or
+below 8.33 ms with refinement on is qualified in the release native pass.
+Added edge and centre vertices retain the source triangle's interpolated Stone,
+Soil, Grass, Sand and Deepslate coverage in a render-only packed material word;
+the low byte preserves the flat diagnostic ID. Ordinary live and distant meshes
+keep their one-hot coverage. This repairs refinement-induced material patches
+for issue #872 without changing authoritative mesh storage or save formats.
+The existing 1024-pixel terrain arrays and two-scale sand sampling still require
+native re-capture of the reported sand blur, repetition and material transitions;
+software contracts alone do not establish WorldVisualSweep acceptance.
+Options 2 and 3 remain opt-in or experimental as described below.
+
 ## Combined recommendation
 
 Pursue option 1 (render-only refinement) first for existing and new worlds,

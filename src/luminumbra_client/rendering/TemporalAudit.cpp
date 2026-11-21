@@ -1,12 +1,89 @@
 #include "rendering/TemporalAudit.h"
+#include "luminumbra_common/authoring/PrefabDigest.h"
+#include "luminumbra_common/core/CaptureContentPaths.h"
+#include "luminumbra_common/core/FilesystemPath.h"
+#include "luminumbra_common/persistence/CreatedWorldArtifacts.h"
 #include "luminumbra_common/world/WorldClock.h"
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
+#include <array>
+#include <stdexcept>
 #include <utility>
 
 namespace Luminumbra::Rendering {
 namespace {
 constexpr std::uint32_t kMaxTickRate = 1000;
+constexpr std::size_t kMaxFramePayloads = 12;
+constexpr std::uint64_t kMaxPayloadBytes = 128ULL * 1024 * 1024;
+constexpr std::size_t kMaxSequenceManifestBytes = 16U * 1024 * 1024;
+
+std::string Sha256(std::string_view bytes) {
+    return Authoring::Detail::Sha256(
+        {reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()});
+}
+
+bool BoundedPath(const std::filesystem::path& path) {
+    // Match the verified reader's 32767-native-unit bound before copying paths.
+    return !path.empty() && path.native().size() <= 32767 &&
+           path.native().find(std::filesystem::path::value_type{}) ==
+               std::filesystem::path::string_type::npos;
+}
+
+bool AsciiLeaf(std::string_view name) {
+    // Lowercase ASCII leaves avoid encoding, traversal and case aliases on all hosts.
+    if (name.empty() || name.size() > 128 || name.back() == '.' ||
+        !std::ranges::all_of(name, [](char character) {
+            return (character >= 'a' && character <= 'z') ||
+                   (character >= '0' && character <= '9') || character == '-' || character == '_' ||
+                   character == '.';
+        })) {
+        return false;
+    }
+    const auto stem = name.substr(0, name.find('.'));
+    const bool numbered_device = stem.size() == 4 &&
+                                 (stem.starts_with("com") || stem.starts_with("lpt")) &&
+                                 stem.back() >= '1' && stem.back() <= '9';
+    return stem != "con" && stem != "prn" && stem != "aux" && stem != "nul" && !numbered_device;
+}
+
+bool PayloadName(std::string_view name, std::size_t frame_index) {
+    const auto prefix = "frame-" + std::to_string(frame_index) + ".";
+    return name.size() > prefix.size() && name.starts_with(prefix) && AsciiLeaf(name);
+}
+
+std::string ReadPayload(const Filesystem::VerifiedFileInput& directory,
+                        const std::string& filename,
+                        std::uint64_t remaining) {
+    Filesystem::VerifiedFileInput input(directory.resolved_path() / filename);
+    if (!Filesystem::PathSpellingEqual(input.resolved_path(),
+                                       directory.resolved_path() / filename) ||
+        input.resolved_path().filename() != std::filesystem::path(filename)) {
+        // Preserve the actual leaf spelling for artifacts moved between hosts.
+        throw std::runtime_error("Temporal payload escaped its admitted directory");
+    }
+    const auto size = input.size();
+    if (size == 0 || size > remaining || size > kMaxPayloadBytes) {
+        throw std::runtime_error("Temporal payload exceeded its reservation or was empty");
+    }
+    // One payload at a time, <= 128 MiB, plus the reader's fixed 64 KiB block.
+    std::string bytes(static_cast<std::size_t>(size), '\0');
+    std::array<char, 65536> block{};
+    std::size_t offset = 0;
+    while (offset < bytes.size()) {
+        const auto received = input.read(block);
+        if (received == 0 || received > bytes.size() - offset) {
+            throw std::runtime_error("Temporal payload changed while reading");
+        }
+        std::copy_n(block.data(), received, bytes.data() + offset);
+        offset += received;
+    }
+    if (input.read(block) != 0) {
+        throw std::runtime_error("Temporal payload grew while reading");
+    }
+    return bytes;
+}
 
 std::uint64_t CeilDivide(std::uint64_t value, std::uint64_t divisor) {
     return value / divisor + (value % divisor != 0 ? 1 : 0);
@@ -415,5 +492,162 @@ void TemporalAuditSequence::acknowledge(std::uint64_t actual_tick,
             fail("invalid sequence acknowledgement");
             return;
     }
+}
+
+bool TemporalAuditSequence::acknowledgeCaptureFiles(std::uint64_t actual_tick,
+                                                    const std::filesystem::path& directory,
+                                                    std::span<const std::string> filenames) try {
+    if (!pending_ || pending_->action != TemporalSequenceAction::Capture ||
+        actual_tick != pending_->simulation_tick || payloads_.size() != frame_index_ ||
+        filenames.empty() || filenames.size() > kMaxFramePayloads || !BoundedPath(directory)) {
+        fail("sequence invalid capture payload acknowledgement");
+        return false;
+    }
+    // Validate all names before opening anything. The pairwise pass is bounded
+    // to 12 * 12 comparisons; frame prefixes prevent reuse across frames.
+    for (std::size_t index = 0; index < filenames.size(); ++index) {
+        if (!PayloadName(filenames[index], frame_index_) ||
+            std::find(filenames.begin(),
+                      filenames.begin() + static_cast<std::ptrdiff_t>(index),
+                      filenames[index]) != filenames.begin() + static_cast<std::ptrdiff_t>(index)) {
+            fail("sequence invalid or duplicate payload name");
+            return false;
+        }
+    }
+    const Filesystem::VerifiedFileInput parent(directory,
+                                               Filesystem::VerifiedFileInput::Kind::Directory);
+    if (!payload_directory_.empty() &&
+        !Filesystem::PathSpellingEqual(parent.resolved_path(), payload_directory_)) {
+        fail("sequence capture directory changed");
+        return false;
+    }
+    std::vector<Payload> captured;
+    captured.reserve(filenames.size());
+    std::uint64_t total = 0;
+    for (const auto& filename : filenames) {
+        const auto bytes = ReadPayload(parent, filename, pending_->byte_limit - total);
+        captured.push_back({.path = filename, .sha256 = Sha256(bytes), .bytes = bytes.size()});
+        total += bytes.size();
+    }
+    if (payloads_.empty()) {
+        payloads_.reserve(plan_.frames.size());
+        payload_directory_ = parent.resolved_path();
+    }
+    payloads_.push_back(std::move(captured));
+    acknowledge(actual_tick, true, true, total);
+    return stage_ != TemporalSequenceAction::Refused;
+} catch (const std::exception&) {
+    fail("sequence payload read or hash failed");
+    return false;
+}
+
+std::string TemporalAuditSequence::completionManifest() const {
+    if ((stage_ != TemporalSequenceAction::Publish && stage_ != TemporalSequenceAction::Complete) ||
+        payloads_.size() != plan_.frames.size() || frame_index_ != plan_.frames.size()) {
+        return {};
+    }
+    const auto& request = plan_.request;
+    nlohmann::json plan = {
+        {"span", static_cast<unsigned>(request.span)},
+        {"start_tick", request.start_tick},
+        {"ticks_per_day", request.ticks_per_day},
+        {"ticks_per_second", request.ticks_per_second},
+        {"dawn_tick", request.dawn_tick},
+        {"dusk_tick", request.dusk_tick},
+        {"strike_tick", request.strike_tick},
+        {"night_moon_phase_milli", request.night_moon_phase_milli},
+        {"tick_limit", request.tick_limit},
+        {"frame_limit", request.frame_limit},
+        {"end_tick", plan_.end_tick},
+        {"sparse_interval_ticks", plan_.sparse_interval_ticks},
+        {"boundary_ticks", plan_.boundary_ticks},
+        {"presentation_steps", plan_.presentation_steps},
+        {"max_render_attempts", plan_.max_render_attempts},
+        {"settling",
+         {{"warmup_frames", plan_.settling.warmup_frames},
+          {"initial_readiness_retries", plan_.settling.initial_readiness_retries},
+          {"sample_settle_frames", plan_.settling.sample_settle_frames},
+          {"sample_readiness_retries", plan_.settling.sample_readiness_retries}}},
+        {"frames", nlohmann::json::array()}};
+    // At most 4096 frames * 12 payloads with 128-byte ASCII paths. Both JSON
+    // documents and serialized text are bounded independently of payload size.
+    auto frames = nlohmann::json::array();
+    for (std::size_t index = 0; index < plan_.frames.size(); ++index) {
+        const auto& frame = plan_.frames[index];
+        nlohmann::json scheduled = {{"index", index},
+                                    {"tick", frame.target_tick},
+                                    {"sub_tick_60", frame.sub_tick_60},
+                                    {"kind", static_cast<unsigned>(frame.kind)},
+                                    {"control", static_cast<unsigned>(frame.control)},
+                                    {"dense", frame.dense},
+                                    {"hold_frame", frame.hold_frame}};
+        plan["frames"].push_back(scheduled);
+        scheduled["payloads"] = nlohmann::json::array();
+        for (const auto& payload : payloads_[index]) {
+            scheduled["payloads"].push_back(
+                {{"path", payload.path}, {"sha256", payload.sha256}, {"bytes", payload.bytes}});
+        }
+        frames.push_back(std::move(scheduled));
+    }
+    const nlohmann::json document = {{"schema", "luminumbra.temporal_audit_sequence"},
+                                     {"version", 1},
+                                     {"status", "complete"},
+                                     {"plan_sha256", Sha256(plan.dump())},
+                                     {"plan", std::move(plan)},
+                                     {"frames", std::move(frames)}};
+    auto text = document.dump() + "\n";
+    if (text.size() > kMaxSequenceManifestBytes || text.size() > budget_.manifest_bytes) {
+        return {};
+    }
+    return text;
+}
+
+bool TemporalAuditSequence::publishCompletionManifest(const std::filesystem::path& path) try {
+    if (!pending_ || pending_->action != TemporalSequenceAction::Publish || !BoundedPath(path)) {
+        fail("sequence invalid manifest publication");
+        return false;
+    }
+    if (!AsciiLeaf(Filesystem::GenericUtf8PathString(path.filename()))) {
+        fail("sequence invalid manifest name");
+        return false;
+    }
+    const auto text = completionManifest();
+    if (text.empty()) {
+        fail("sequence manifest missing acknowledgements or exceeds reservation");
+        return false;
+    }
+    const auto parent_path =
+        path.has_parent_path() ? path.parent_path() : std::filesystem::path(".");
+    const Filesystem::VerifiedFileInput parent(parent_path,
+                                               Filesystem::VerifiedFileInput::Kind::Directory);
+    if (!Filesystem::PathSpellingEqual(parent.resolved_path(), payload_directory_)) {
+        fail("sequence manifest is outside the capture directory");
+        return false;
+    }
+    // Use the same identity-checked, exclusive publication journal as A4.
+    // A borrowed parent is never created or removed. Cleanup only retires
+    // identities created by this publication.
+    Persistence::CreatedWorldArtifacts publication;
+    publication.bind_existing_root(parent.resolved_path());
+    const auto destination = parent.resolved_path() / path.filename();
+    publication.reserve_file(destination);
+    auto temporary = destination;
+    temporary += ".tmp";
+    try {
+        publication.write_file(temporary, text);
+        publication.publish_file(temporary, destination);
+    } catch (const std::exception&) {
+        // Windows can report a flush failure after binding the destination.
+        // Retire only this call's identities, including any published alias.
+        // Unowned/replaced entries remain untouched on cleanup refusal.
+        publication.rollback();
+        throw;
+    }
+    publication.release();
+    acknowledge(current_tick_, true, true, text.size());
+    return complete();
+} catch (const std::exception&) {
+    fail("sequence manifest publication failed");
+    return false;
 }
 } // namespace Luminumbra::Rendering
