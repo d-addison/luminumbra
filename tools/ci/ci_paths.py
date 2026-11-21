@@ -67,6 +67,7 @@ PYTHON_TESTS = (
     "tools/ci/test_validate_public_tree.py",
     "tools/ci/test_validate_visual_catalog.py",
     "tools/ci/test_tidy_cache.py",
+    "tools/ci/test_check_tidy_suppressions.py",
     "tools/perf/test_capture_sim_budget.py",
     "tools/perf/test_check_gl_debug_log.py",
     "tools/perf/test_check_residency.py",
