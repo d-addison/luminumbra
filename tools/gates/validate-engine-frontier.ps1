@@ -1098,7 +1098,8 @@ function Test-UiTestBaseline {
         "ui_smoke_test",
         "initial_world_loading_perf_test",
         "runtime_world_visual_validation_test",
-        "octa_impostor_test"
+        "octa_impostor_test",
+        "temporal_sweep_test"
     )) {
         Assert-ArrayContains -Values $ctest.required_executables -Needle $executable -Description "CTest manifest required_executables"
     }

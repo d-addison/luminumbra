@@ -28,12 +28,25 @@ inline constexpr UploadLimits kTerrainUploadLimits{};
 inline constexpr UploadLimits kWaterUploadLimits{1024 * 1024, 8, 1, 1.0};
 static_assert(kTerrainUploadLimits.valid() && kWaterUploadLimits.valid());
 
-// Unmeasured qualification waits still advance the normal upload budgets, but
-// need no intermediate image. Interactive and measured frames always draw.
+// Qualification waits retain gameplay budgets. Hidden world entry may drain a
+// fixed batch before drawing; neither mode changes the geometry being adopted.
 enum class UploadPresentation {
     Streaming,
-    Settled
+    Settled,
+    Loading
 };
+
+// At most 64 indivisible attempts per lane and iteration, even after expensive
+// preparation. The existing size checks still precede every payload allocation.
+// This progress allowance applies only behind the world-entry presentation gate.
+inline constexpr UploadLimits kLoadingUploadLimits{64 * 1024 * 1024, 64, 64, 16.0};
+static_assert(kLoadingUploadLimits.valid());
+
+constexpr UploadLimits upload_limits(UploadPresentation presentation, bool water) {
+    return presentation == UploadPresentation::Loading ? kLoadingUploadLimits
+           : water                                     ? kWaterUploadLimits
+                                                       : kTerrainUploadLimits;
+}
 
 constexpr bool draw_upload_frame(UploadPresentation presentation, bool settled) {
     return presentation == UploadPresentation::Streaming || settled;
