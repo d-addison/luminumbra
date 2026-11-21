@@ -1661,6 +1661,7 @@ add_executable(frontier_gates_test
     ai/creature_identity_test.cpp
     ai/flocking_test.cpp
     ai/foraging_test.cpp
+    ai/resource_order_test.cpp
     ai/creature_divergence_test.cpp
     ai/awareness_test.cpp
     ai/perception_system_test.cpp

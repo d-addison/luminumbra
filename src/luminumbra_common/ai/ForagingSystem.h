@@ -21,6 +21,8 @@
 // scent/creatures/plants).
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <vector>
@@ -28,6 +30,7 @@
 #include "entt/entity/registry.hpp"
 
 #include "../components/ForagingComponents.h"
+#include "../components/SimulationIdentityComponent.h"
 #include "CreatureTickAdmission.h"
 #include "ScentField.h"
 
@@ -49,13 +52,61 @@ struct ForagingStats {
     std::uint64_t foragers = 0;
     std::uint64_t pickups = 0;
     std::uint64_t deliveries = 0; // food delivered to nests THIS tick
+    // Diagnostic: actual identity reads by the radix passes; unrelated residents add no visits.
+    std::uint64_t identity_order_visits = 0;
 };
 
 // Advance every forager one cell. Pure function of registry + field state (+ params).
-inline ForagingStats RunForagingOnTick(entt::registry& reg,
-                                       ScentField& field,
-                                       const ForagingParams& p = {},
-                                       const CreatureTickAdmission* admission = nullptr) {
+namespace detail {
+
+// Eight byte passes bound ordering to O(participants), with scratch bounded by the
+// supplied role view. Unique admitted IDs make the final order independent of input order.
+template<bool IdentityOrder>
+inline std::uint64_t SortForagingEntities(const entt::registry& reg,
+                                          std::vector<entt::entity>& entities) {
+    if constexpr (!IdentityOrder) {
+        std::sort(entities.begin(), entities.end(), [](entt::entity a, entt::entity b) {
+            return entt::to_integral(a) < entt::to_integral(b);
+        });
+        return 0;
+    } else {
+        if (entities.size() < 2)
+            return 0;
+        std::uint64_t visits = 0;
+        std::vector<entt::entity> scratch(entities.size());
+        for (unsigned shift = 0; shift < 64; shift += 8) {
+            std::array<std::size_t, 256> offsets{};
+            for (auto entity : entities) {
+                ++visits;
+                const auto id =
+                    reg.get<::Luminumbra::Components::SimulationIdentityComponent>(entity).id;
+                ++offsets[static_cast<std::size_t>((id >> shift) & 255u)];
+            }
+            std::size_t total = 0;
+            for (auto& offset : offsets) {
+                const auto count = offset;
+                offset = total;
+                total += count; // At most entities.size(), so the prefix sum cannot overflow.
+            }
+            for (auto entity : entities) {
+                ++visits;
+                const auto id =
+                    reg.get<::Luminumbra::Components::SimulationIdentityComponent>(entity).id;
+                scratch[offsets[static_cast<std::size_t>((id >> shift) & 255u)]++] = entity;
+            }
+            entities.swap(scratch);
+        }
+        return visits;
+    }
+}
+
+// Identity mode requires admitted, unique SimulationIdentityComponent IDs on participants
+// and resource sources. Legacy mode deliberately retains runtime-handle ordering.
+template<bool IdentityOrder>
+inline ForagingStats RunForagingOnTickImpl(entt::registry& reg,
+                                           ScentField& field,
+                                           const ForagingParams& p = {},
+                                           const CreatureTickAdmission* admission = nullptr) {
     namespace Comp = ::Luminumbra::Components;
     ForagingStats stats;
 
@@ -67,9 +118,7 @@ inline ForagingStats RunForagingOnTick(entt::registry& reg,
     }
     if (ants.empty())
         return stats; // opt-in: no foragers -> byte-identical no-op
-    std::sort(ants.begin(), ants.end(), [](entt::entity a, entt::entity b) {
-        return entt::to_integral(a) < entt::to_integral(b);
-    });
+    stats.identity_order_visits += SortForagingEntities<IdentityOrder>(reg, ants);
 
     // id-ordered food source cells (with a live handle so pickups can deplete them).
     struct Food {
@@ -80,9 +129,7 @@ inline ForagingStats RunForagingOnTick(entt::registry& reg,
     {
         auto fv = reg.view<Comp::FoodSourceComponent>();
         std::vector<entt::entity> fe(fv.begin(), fv.end());
-        std::sort(fe.begin(), fe.end(), [](entt::entity a, entt::entity b) {
-            return entt::to_integral(a) < entt::to_integral(b);
-        });
+        stats.identity_order_visits += SortForagingEntities<IdentityOrder>(reg, fe);
         for (auto e : fe) {
             if (admission && !admission->Allows(e)) {
                 continue;
@@ -190,6 +237,23 @@ inline ForagingStats RunForagingOnTick(entt::registry& reg,
         }
     }
     return stats;
+}
+
+} // namespace detail
+
+inline ForagingStats RunForagingOnTick(entt::registry& reg,
+                                       ScentField& field,
+                                       const ForagingParams& p = {},
+                                       const CreatureTickAdmission* admission = nullptr) {
+    return detail::RunForagingOnTickImpl<false>(reg, field, p, admission);
+}
+
+// Dormant candidate: shipping callers select this only with the v2 authority activation.
+inline ForagingStats RunForagingOnTickV2(entt::registry& reg,
+                                         ScentField& field,
+                                         const ForagingParams& p = {},
+                                         const CreatureTickAdmission* admission = nullptr) {
+    return detail::RunForagingOnTickImpl<true>(reg, field, p, admission);
 }
 
 } // namespace luminumbra::ai
