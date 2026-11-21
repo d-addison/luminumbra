@@ -47,6 +47,31 @@ TEST(FrameAttribution, ConstScopeTokenRetainsRegisteredObservations) {
     EXPECT_EQ(frame.snapshot().count_generation, 7u);
 }
 
+TEST(FrameAttribution, LoadingWorkSubtractsNestedCollectorsExactlyOnce) {
+    EXPECT_DOUBLE_EQ(foliage_total_ms(), 0);
+    const FoliageFrameScope frame(true);
+    record_foliage_rebuild({}, 7, 0, std::nullopt, 0);
+    const double foliage_before = foliage_total_ms();
+    {
+        const FoliageFrameScope disabled;
+        record_foliage_rebuild({}, 100, 0, std::nullopt, 0);
+        EXPECT_DOUBLE_EQ(foliage_total_ms(), 0);
+    }
+    record_foliage_rebuild({}, 11, 0, std::nullopt, 0);
+    PhaseTotals phases;
+    phases.add(Phase::ShaderFirstUse, 5, 0, 0);
+    constexpr double total = 100, water = 20, observe = 3, scatter = 2;
+    const double nested_foliage = foliage_total_ms() - foliage_before;
+    EXPECT_DOUBLE_EQ(nested_foliage, 11);
+    const FrameBuckets buckets{.stream = water + observe,
+                               .render = total - water - observe - scatter - nested_foliage -
+                                         phases.sum(),
+                               .foliage = nested_foliage,
+                               .scatter = scatter};
+    EXPECT_DOUBLE_EQ(buckets.other(total, phases), 0);
+    EXPECT_DOUBLE_EQ(frame.snapshot().rebuild_ms, 18);
+}
+
 TEST(FrameAttribution, CapacityMarkerIsNeverAnObservedCount) {
     constexpr std::size_t capacity = 262144;
     EXPECT_FALSE(generated_instance_count(true, false, false, capacity).has_value());
