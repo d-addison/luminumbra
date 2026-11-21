@@ -137,7 +137,7 @@
   "inputs": {
     "res/shaders/enhanced_skybox.frag": "dcbd2b15fdca9acfb4b8d4fe01029f0e91727556bce842c9d058362f6c07ee27",
     "res/shaders/g_buffer.frag": "38c27298d127b44f59b033446c8bbc8d23b4cc17d6b8d5b732909c029cc22e31",
-    "res/shaders/g_buffer.vert": "209c1c0801801209e669e60dcadfa7085e8e44780f9e2c7599a7d48a5fe2abed",
+    "res/shaders/g_buffer.vert": "bb20ba2c791ac0d4c087d8c7b792ee45eb6dbfcffa12cfa1838c27002e2b25b4",
     "res/shaders/grass_compact_prefix.comp": "43bcf2b6c883f958cab97d9b88c911701edd1ff1416e0290ef427228b406e677",
     "res/shaders/instanced_mesh.vert": "83198486e34bcb2d2ad4dcd5271efc9b4fd5deab5842768a8a85eac76d245d9c",
     "res/shaders/lighting_pass.frag": "4f1cf13c57aea1a8c4b0c5195e06135a983377b7ca0be591201b5b5cfcfa4d0a",
