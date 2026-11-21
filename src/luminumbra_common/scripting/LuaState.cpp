@@ -2,18 +2,13 @@
 
 #include "LuaApiManifest.h"
 
-// The pimpl in LuaState.h keeps the sol2 dependency confined to this
-// translation unit.
-#include <sol/error.hpp>
-#include <sol/forward.hpp>
-#include <sol/optional_implementation.hpp>
-#include <sol/protected_function_result.hpp>
-#include <sol/state.hpp>
-#include <sol/state_handling.hpp>
-#include <sol/types.hpp>
+#include <Luau/Compiler.h>
+#include <lua.h>
+#include <lualib.h>
 
 #include <cmath>
 #include <memory>
+#include <new>
 #include <optional>
 #include <string>
 
@@ -23,23 +18,46 @@
 namespace Luminumbra::scripting {
 
 struct LuaState::Impl {
-    // NO open_libraries: the sandbox exposes exactly the surface registered
-    // below (manifest-gated) — no io/os/debug/package, no load/dofile, no
-    // wall-clock, no math.random (the escape corpus in test/scripting/ pins
-    // the manifest side of this contract).
-    sol::state lua;
+    std::unique_ptr<lua_State, decltype(&lua_close)> main{luaL_newstate(), lua_close};
+    lua_State* thread = nullptr;
+
+    explicit Impl(LuaState& owner) {
+        if (!main) {
+            throw std::bad_alloc();
+        }
+        // Keep the manifest's two entry points as the entire initial surface.
+        // No standard libraries, loaders, environment access or random source.
+        lua_pushlightuserdata(main.get(), &owner);
+        lua_pushcclosure(main.get(), Sample, "sample_energy_field", 1);
+        lua_setglobal(main.get(), "sample_energy_field");
+        lua_newtable(main.get());
+        lua_getglobal(main.get(), "sample_energy_field");
+        lua_setfield(main.get(), -2, "sample_energy_field");
+        lua_setglobal(main.get(), "world");
+        luaL_sandbox(main.get());
+
+        // The main stack roots this one thread for the lifetime of the VM.
+        // Its private globals persist across every evaluation of this host.
+        thread = lua_newthread(main.get());
+        luaL_sandboxthread(thread);
+    }
+
+    static int Sample(lua_State* state) {
+        const auto* owner =
+            static_cast<const LuaState*>(lua_touserdata(state, lua_upvalueindex(1)));
+        luaL_checktype(state, 1, LUA_TNUMBER);
+        luaL_checktype(state, 2, LUA_TNUMBER);
+        luaL_checktype(state, 3, LUA_TNUMBER);
+        const double x = lua_tonumber(state, 1);
+        const double y = lua_tonumber(state, 2);
+        const double z = lua_tonumber(state, 3);
+        lua_pushnumber(state, owner->sample_energy_field(x, y, z));
+        return 1;
+    }
 };
 
 LuaState::LuaState()
-    : m_impl(std::make_unique<Impl>()) {
-    // Both manifest entry points share this read-only implementation.
-    const auto sampler = [this](double x, double y, double z) {
-        return sample_energy_field(x, y, z);
-    };
-    m_impl->lua.set_function("sample_energy_field", sampler);
-    sol::table world = m_impl->lua.create_named_table("world");
-    world.set_function("sample_energy_field", sampler);
-}
+    : m_impl(std::make_unique<Impl>(*this)) {}
 
 LuaState::~LuaState() = default;
 
@@ -67,25 +85,29 @@ double LuaState::sample_energy_field(double x, double y, double z) const {
 }
 
 LuaEvaluationResult LuaState::Evaluate(const std::string& chunk) const {
-    const sol::protected_function_result result =
-        m_impl->lua.safe_script(chunk, sol::script_pass_on_error);
-    if (!result.valid()) {
-        LuaEvaluationStatus status = LuaEvaluationStatus::OtherError;
-        if (result.status() == sol::call_status::syntax) {
-            status = LuaEvaluationStatus::SyntaxError;
-        } else if (result.status() == sol::call_status::runtime) {
-            status = LuaEvaluationStatus::RuntimeError;
-        }
-        const sol::error error = result;
-        return {status, std::nullopt, error.what()};
+    const std::string bytecode = Luau::compile(chunk);
+    auto* state = m_impl->thread;
+    lua_settop(state, 0);
+    // Repeated loads must not cache imports from this mutable global table.
+    lua_setsafeenv(state, LUA_GLOBALSINDEX, false);
+    int status = luau_load(state, "=LuaState", bytecode.data(), bytecode.size(), 0);
+    if (status == LUA_OK) {
+        status = lua_pcall(state, 0, 1, 0);
     }
     LuaEvaluationResult evaluation;
-    if (result.return_count() > 0) {
-        const sol::optional<double> value = result.get<sol::optional<double>>();
-        if (value) {
-            evaluation.number = *value;
+    if (status != LUA_OK) {
+        evaluation.status = LuaEvaluationStatus::OtherError;
+        if (!bytecode.empty() && bytecode.front() == '\0') {
+            evaluation.status = LuaEvaluationStatus::SyntaxError;
+        } else if (status == LUA_ERRRUN) {
+            evaluation.status = LuaEvaluationStatus::RuntimeError;
         }
+        const char* diagnostic = lua_tostring(state, -1);
+        evaluation.diagnostic = diagnostic != nullptr ? diagnostic : "Luau evaluation failed";
+    } else if (lua_type(state, -1) == LUA_TNUMBER) {
+        evaluation.number = lua_tonumber(state, -1);
     }
+    lua_settop(state, 0);
     return evaluation;
 }
 

@@ -27,8 +27,8 @@ set(MINIAUDIO_BUILD_EXAMPLES OFF)
 set(JSON_BuildTests OFF)
 set(RMLUI_BUILD_TESTS OFF)
 set(RMLUI_BUILD_SAMPLES OFF)
-set(SOL2_BUILD_TESTS OFF)
-set(SOL2_TESTS OFF)
+set(LUAU_BUILD_CLI OFF CACHE BOOL "" FORCE)
+set(LUAU_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(SPDLOG_BUILD_TESTS OFF)
 set(SPDLOG_BUILD_TESTS_HO OFF)
 set(SPDLOG_BUILD_BENCH OFF)
@@ -95,8 +95,8 @@ FetchContent_Declare(freetype      GIT_REPOSITORY https://github.com/freetype/fr
 FetchContent_Declare(soil2         GIT_REPOSITORY https://github.com/SpartanJ/SOIL2.git     GIT_TAG 1.3.0         GIT_SHALLOW TRUE)
 FetchContent_Declare(miniaudio     GIT_REPOSITORY https://github.com/mackron/miniaudio.git  GIT_TAG 0.11.22       GIT_SHALLOW TRUE)
 FetchContent_Declare(meshoptimizer GIT_REPOSITORY https://github.com/zeux/meshoptimizer.git GIT_TAG v0.22         GIT_SHALLOW TRUE)
-FetchContent_Declare(lua_upstream  GIT_REPOSITORY https://github.com/lua/lua.git            GIT_TAG v5.4.8        GIT_SHALLOW TRUE)
-FetchContent_Declare(sol2          GIT_REPOSITORY https://github.com/ThePhD/sol2.git        GIT_TAG v3.3.0        GIT_SHALLOW TRUE)
+# Luau release 0.748; use the immutable commit without a shallow tag checkout.
+FetchContent_Declare(luau          GIT_REPOSITORY https://github.com/luau-lang/luau.git      GIT_TAG 3d91c9d5c280c95bfc4be63aac46012cf861d394)
 FetchContent_Declare(spdlog        GIT_REPOSITORY https://github.com/gabime/spdlog.git      GIT_TAG v1.15.1       GIT_SHALLOW TRUE)
 # Dear ImGui ships no CMake project, so its fetched source tree is built below.
 FetchContent_Declare(imgui_src     GIT_REPOSITORY https://github.com/ocornut/imgui.git      GIT_TAG v1.92.1       GIT_SHALLOW TRUE)
@@ -114,7 +114,9 @@ FetchContent_MakeAvailable(EnTT glm glfw glad nlohmann_json JoltPhysics)
 
 include("${CMAKE_CURRENT_LIST_DIR}/../cmake/rmlui_source.cmake")
 
-FetchContent_MakeAvailable(soil2 miniaudio meshoptimizer lua_upstream sol2 spdlog imgui_src stb googletest lz4_upstream)
+FetchContent_MakeAvailable(soil2 miniaudio meshoptimizer luau spdlog imgui_src stb googletest lz4_upstream)
+# Only the linked interpreter/compiler and their dependencies enter the build.
+set_property(DIRECTORY "${luau_SOURCE_DIR}" PROPERTY EXCLUDE_FROM_ALL TRUE)
 
 # RmlUi 6.1's bundled robin_hood header uses SIZE_MAX and fixed-width integer
 # types without including <cstdint>. Other standard-library implementations
@@ -205,14 +207,6 @@ if (TARGET Jolt)
   endif()
 endif()
 
-# lua: upstream ships no CMake — build a static `lua` target from its core .c
-# (excluding the lua.c / luac.c standalone mains and the onelua.c amalgamation,
-# which embeds the interpreter main unless built with a private make define).
-file(GLOB LUA_CORE_SRC "${lua_upstream_SOURCE_DIR}/*.c")
-list(FILTER LUA_CORE_SRC EXCLUDE REGEX "/(lua|luac|onelua)\\.c$")
-add_library(lua STATIC ${LUA_CORE_SRC})
-target_include_directories(lua PUBLIC "${lua_upstream_SOURCE_DIR}")
-
 # FastNoise: still vendored on-disk (present) — unchanged.
 if (NOT TARGET FastNoise)
   if (EXISTS "${CMAKE_SOURCE_DIR}/external/FastNoiseLite/FastNoiseLite.h")
@@ -246,7 +240,8 @@ endif()
 # Keep the include expressions intact so build/install paths and generated
 # overlays follow the dependency targets rather than a copied directory list.
 foreach(_common_dependency IN ITEMS
-    EnTT Jolt nlohmann_json sol2 lua spdlog lz4_static glm FastNoise
+    EnTT Jolt nlohmann_json Luau.VM Luau.Compiler spdlog lz4_static glm FastNoise
+    Luau.Common Luau.Ast Luau.Bytecode
     meshoptimizer rmlui_core rmlui_debugger glfw miniaudio soil2 glad)
   if(TARGET ${_common_dependency})
     set_property(TARGET ${_common_dependency} APPEND PROPERTY

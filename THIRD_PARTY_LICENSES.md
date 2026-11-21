@@ -38,8 +38,7 @@ The upstream generator expressions and explicit fused operations are retained.
 | [miniaudio](https://github.com/mackron/miniaudio) | Audio playback and mixing | MIT or public domain |
 | [meshoptimizer](https://github.com/zeux/meshoptimizer) | Mesh optimization | MIT |
 | [GameNetworkingSockets](https://github.com/ValveSoftware/GameNetworkingSockets) | UDP networking transport (optional, `LUMINUMBRA_ENABLE_GNS`) | BSD-3-Clause |
-| [Lua](https://github.com/lua/lua) | Runtime scripting language | MIT |
-| [sol2](https://github.com/ThePhD/sol2) | C++ binding layer for Lua | MIT |
+| [Luau](https://github.com/luau-lang/luau) | Runtime scripting interpreter and compiler | MIT |
 | [spdlog](https://github.com/gabime/spdlog) | Logging | MIT |
 | [Dear ImGui](https://github.com/ocornut/imgui) | Immediate-mode debug UI | MIT |
 | [stb](https://github.com/nothings/stb) | Image loading and utility headers | MIT or public domain |

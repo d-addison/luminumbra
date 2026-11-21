@@ -366,7 +366,7 @@ class OfflineDependenciesTests(unittest.TestCase):
 
     def test_declared_lock_matches_generic_dependencies_and_owned_rmlui(self):
         declared = deps.declarations(ROOT)
-        self.assertEqual(set(declared), set("entt glm glfw glad nlohmann_json joltphysics freetype soil2 miniaudio meshoptimizer lua_upstream sol2 spdlog imgui_src stb googletest lz4_upstream".split()))
+        self.assertEqual(set(declared), set("entt glm glfw glad nlohmann_json joltphysics freetype soil2 miniaudio meshoptimizer luau spdlog imgui_src stb googletest lz4_upstream".split()))
         committed = json.loads((ROOT / "tools/ci/deps-lock.json").read_text())
         self.assertEqual(committed, deps.unresolved_lock(ROOT))
         for name, expected in declared.items():
@@ -503,7 +503,7 @@ class OfflineDependenciesTests(unittest.TestCase):
         with patch.object(deps, "verify", return_value=lock):
             self.stage()
         text = (self.root / "scratch/initial cache.cmake").read_text()
-        self.assertEqual(text.count("set(FETCHCONTENT_SOURCE_DIR_"), 17)
+        self.assertEqual(text.count("set(FETCHCONTENT_SOURCE_DIR_"), 16)
         self.assertNotIn("FETCHCONTENT_SOURCE_DIR_RMLUI", text)
         for name in lock["dependencies"]:
             self.assertIn(f"FETCHCONTENT_SOURCE_DIR_{name.upper()} ", text)
@@ -2014,11 +2014,11 @@ class CachedGitSafetyTests(unittest.TestCase):
             self.assertFalse((self.root / "scratch/staged").exists())
             self.assertFalse((self.root / "scratch/init.cmake").exists())
 
-    def test_generic_stage_cli_verifies_all_seventeen_sources_without_rmlui_override(self):
+    def test_generic_stage_cli_verifies_all_sixteen_sources_without_rmlui_override(self):
         template = json.loads((ROOT / "tools/ci/deps-lock.json").read_bytes())
         names = set(template["dependencies"])
         self.assertEqual(names, set(deps.declarations(ROOT)))
-        self.assertEqual(len(names), 17)
+        self.assertEqual(len(names), 16)
         declarations = []
         for name in sorted(names):
             source = self.cache / name
@@ -2043,7 +2043,7 @@ class CachedGitSafetyTests(unittest.TestCase):
         result = subprocess.run(argv, capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         text = (self.root / "scratch/offline-init.cmake").read_text(encoding="utf-8")
-        self.assertEqual(text.count("set(FETCHCONTENT_SOURCE_DIR_"), 17)
+        self.assertEqual(text.count("set(FETCHCONTENT_SOURCE_DIR_"), 16)
         for name in names:
             self.assertIn(f"FETCHCONTENT_SOURCE_DIR_{name.upper()} ", text)
         self.assertNotIn("FETCHCONTENT_SOURCE_DIR_RMLUI", text)

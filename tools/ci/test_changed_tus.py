@@ -34,8 +34,8 @@ class DependencyIncludesTests(unittest.TestCase):
         # probing a compiler, compiling a translation unit or running native code.
         exports = re.search(r"foreach\(_common_dependency\b.*?endforeach\(\)", vendor, re.S)
         self.assertIsNotNone(exports)
-        dependencies = ("EnTT", "Jolt", "nlohmann_json", "sol2", "lua", "spdlog",
-                        "lz4_static", "glm", "FastNoise")
+        dependencies = ("EnTT", "Jolt", "nlohmann_json", "Luau.VM", "Luau.Compiler",
+                        "spdlog", "lz4_static", "glm", "FastNoise")
         aliases = {"EnTT": "entt", "lz4_static": "lz4"}
         links = re.search(r"target_link_libraries\(luminumbra_common PUBLIC(.*?)\)", common, re.S)
         self.assertIsNotNone(links)
@@ -45,8 +45,8 @@ class DependencyIncludesTests(unittest.TestCase):
         # In particular meshoptimizer is declared by MakeAvailable before this
         # loop; testing only common-library links would miss its headers.
         self.assertLess(vendor.index("FetchContent_MakeAvailable(EnTT "), exports.start())
-        dependencies += ("meshoptimizer", "rmlui_core", "rmlui_debugger", "glfw",
-                         "miniaudio", "soil2", "glad")
+        dependencies += ("Luau.Common", "Luau.Ast", "Luau.Bytecode", "meshoptimizer",
+                         "rmlui_core", "rmlui_debugger", "glfw", "miniaudio", "soil2", "glad")
         with tempfile.TemporaryDirectory(prefix="dependency includes ") as temporary:
             source = Path(temporary).resolve()
             build = source / "build"
