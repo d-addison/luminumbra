@@ -888,13 +888,15 @@ TEST_F(ReplayModeAdmission, ExplicitWorkloadConflictsRefuseBeforeBootOrOutput) {
 TEST_F(ReplayModeAdmission, BootDescriptionRefusesEmptySeedAndOutOfRangeRoster) {
     auto config = RunnerConfigFrom(options);
     config.seed.clear();
-    EXPECT_THROW(Luminumbra::Server::ServerWorldRunner::DescribeReplayBoot(config),
-                 std::invalid_argument);
+    EXPECT_THROW(
+        static_cast<void>(Luminumbra::Server::ServerWorldRunner::DescribeReplayBoot(config)),
+        std::invalid_argument);
     config.seed = "424242";
     for (const int avatars : {-1, 1025}) {
         config.avatar_count = avatars;
-        EXPECT_THROW(Luminumbra::Server::ServerWorldRunner::DescribeReplayBoot(config),
-                     std::invalid_argument);
+        EXPECT_THROW(
+            static_cast<void>(Luminumbra::Server::ServerWorldRunner::DescribeReplayBoot(config)),
+            std::invalid_argument);
     }
     EXPECT_FALSE(fs::exists(root / "worlds/saves"));
 }
@@ -921,7 +923,7 @@ TEST_P(ReplayProducerBoot, CliAndAutomaticReconstructEquivalentAuthorityBoots) {
     Luminumbra::Server::ThrowawaySaveDirGuard cleanup;
     Luminumbra::Server::ServerWorldRunner runner(RunnerConfigFrom(options),
                                                  {.owner_continuation = true});
-    EXPECT_THROW(runner.CaptureReplayHeader(), std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(runner.CaptureReplayHeader()), std::invalid_argument);
     ASSERT_TRUE(runner.Boot());
     cleanup.Arm(runner.Session()->GetWorldSaveDir());
     auto header = runner.CaptureReplayHeader();
@@ -970,7 +972,7 @@ TEST_P(ReplayProducerBoot, CliAndAutomaticReconstructEquivalentAuthorityBoots) {
     mismatch.terrain = "different";
     ASSERT_TRUE(peer->SendFrame(net::EncodeHash(mismatch)));
     ASSERT_EQ(session.PumpTick(1).outcome, net::TickOutcome::Desync);
-    EXPECT_THROW(runner.CaptureReplayHeader(), std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(runner.CaptureReplayHeader()), std::invalid_argument);
     const auto automatic = replay::ReadReplay(automatic_path);
     ASSERT_TRUE(automatic.has_value());
     if (!automatic) {
@@ -1318,10 +1320,22 @@ TEST_F(ReplayModeAdmission, EmptyOriginalSeedReconstructsTheRecordedResolvedBoot
 
 TEST_F(ReplayModeAdmission, RecordingBudgetRefusesBeforeBootAndPreservesOutput) {
     std::ofstream(options.record_path) << "retained";
-    for (const std::uint64_t ticks : {std::uint64_t{replay::ReplayReadLimits{}.records},
+    // A regressed preflight must fail promptly instead of simulating a huge run.
+    // The specific diagnostic below distinguishes budget admission from boot failure.
+    options.root = (root / "unopened").string();
+    // At 967741 ticks the inputs plus ceil(ticks / 30) checkpoints fit exactly.
+    // The next tick exceeds the reader budget only when checkpoints are counted;
+    // rounding down would incorrectly admit that off-cadence terminal checkpoint.
+    for (const std::uint64_t ticks : {std::uint64_t{967742},
+                                      std::uint64_t{replay::ReplayReadLimits{}.records},
                                       (std::numeric_limits<std::uint64_t>::max)()}) {
+        SCOPED_TRACE(ticks);
         options.ticks = ticks;
+        logs.str("");
         EXPECT_EQ(RunRecord(options), 1);
+        EXPECT_NE(logs.str().find("requested workload exceeds replay admission budget"),
+                  std::string::npos);
+        EXPECT_FALSE(fs::exists(options.root));
         EXPECT_FALSE(fs::exists(root / "worlds/saves"));
         EXPECT_EQ(ReadReplayModeFile(options.record_path), "retained");
     }
