@@ -734,7 +734,7 @@ TEST(FarWorldPositionContract, EveryGbufferDepthWriterConsumesTheSharedLadderPro
         ExpectContains(body, "if (!ctx.far_world_ladder)");
     }
     // Tree impostors inherit the static writer's projection, including jitter.
-    ExpectContains(gbuffer, "m_tree_impostor_shader->setMat4(\"u_proj\", static_proj);");
+    ExpectContains(gbuffer, "impostor_program->setMat4(\"u_proj\", static_proj);");
     const auto plant = ReadShader("src/luminumbra_client/rendering/passes/PlantProcgenPass.cpp");
     ExpectContains(plant, "ctx.far_world_ladder");
     ExpectContains(plant, "? ctx.gbuffer_projection");
