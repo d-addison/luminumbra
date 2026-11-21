@@ -462,7 +462,7 @@ They do not populate the single-pixel inspector or capture bundles.
 | 32 | triplanar-weights | Production normalized XYZ weights in RGB; yellow if any component is outside [0,1] or sum differs from one by more than 0.001 |
 | 33 | raw-finite | Black for finite raw material/G-buffer values; magenta for NaN/Inf before clamp or storage conversion |
 | 34 | shadow-cascade | Production cascade index and UV; white outside every cascade, orange outside the selected cascade |
-| 35 | shadow-footprint | Production shadow UV and log2 texel footprint, with the existing 5x5 PCF taps |
+| 35 | shadow-footprint | Production shadow UV and log2 texel footprint, with the existing 5x5 PCF taps; unsupported when any derivative-quad lane lacks a valid position |
 | 36 | wireframe-shaded | Depth-tested opaque G-buffer wireframe mask over the shaded frame; no production colour or depth writes |
 | 37 | overdraw | Additive opaque deferred fragment count after material discard, depth test OFF; black=0, blue-to-yellow bands=1..15, cyan=saturated >=16; no production colour or depth writes |
 
@@ -473,6 +473,12 @@ means unsupported or unavailable, including sky/background, stale mode, extent
 mismatch and frozen replay. If the overlay variant itself is unavailable, the
 existing unknown-mode magenta sentinel replaces the scene. The deferred ambient term is not a sky contributor
 plane, and the sampled shadow factor is not a shadow producer identity.
+
+Shadow footprints require valid positions in all four derivative-quad lanes,
+including the diagonal neighbour. Reconstruction failure, cleared positions and
+nonfinite positions make the footprint unsupported for valid neighbouring receivers:
+RGB stays `(-2,-2,-2)` with alpha one, using the existing unsupported hatch.
+Sky/background retains alpha zero. Cascade selection remains independently observable.
 
 Only an enabled supported contribution mode compiles `LUMIN_DIAG_CONTRIBUTIONS`
 and attaches one extra lighting output. It shades during the existing lighting
