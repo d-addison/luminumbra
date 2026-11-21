@@ -2,6 +2,8 @@
 #include "../support/UniqueTempPath.h"
 #include "../support/WorldgenTestData.h"
 #include "luminumbra_client/app/RenderConfiguration.h"
+#include "luminumbra_common/core/Log.h"
+#include "luminumbra_common/core/LogDispatcherSink.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/world/GameSession.h"
 
@@ -29,7 +31,7 @@ class VerifiedSnapshotRegion : public testing::Test {
 protected:
     fs::path root;
     std::ostringstream logs;
-    std::shared_ptr<spdlog::logger> previous_logger;
+    std::shared_ptr<spdlog::sinks::ostream_sink_mt> log_sink;
 
     void SetUp() override {
         root = Luminumbra::TestSupport::CreateUniqueTempDirectory("verified-region-");
@@ -37,13 +39,12 @@ protected:
         fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets/default.json",
                       root / "worlds/atlas/presets/default.json");
         Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root);
-        previous_logger = Log::GetCoreLogger();
-        Log::GetCoreLogger() = std::make_shared<spdlog::logger>(
-            "verified-region", std::make_shared<spdlog::sinks::ostream_sink_mt>(logs));
+        log_sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(logs);
+        Log::GetDispatcherSink()->Attach(log_sink);
     }
 
     void TearDown() override {
-        Log::GetCoreLogger() = previous_logger;
+        Log::GetDispatcherSink()->Detach(log_sink);
         std::error_code error;
         fs::remove_all(root, error);
     }

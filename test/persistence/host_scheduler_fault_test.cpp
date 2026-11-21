@@ -3,6 +3,8 @@
 
 #include "../support/UniqueTempPath.h"
 #include "../support/WorldgenTestData.h"
+#include "luminumbra_common/core/Log.h"
+#include "luminumbra_common/core/LogDispatcherSink.h"
 
 #include "luminumbra_client/app/RenderConfiguration.h"
 #include "luminumbra_client/app/SessionExit.h"
@@ -284,10 +286,9 @@ protected:
     fs::path root;
     HostFaultObservation observation;
     std::ostringstream log_output;
-    std::shared_ptr<spdlog::logger> previous_logger;
+    std::shared_ptr<spdlog::sinks::ostream_sink_mt> log_sink;
 
     void SetUp() override {
-        previous_logger = Log::GetCoreLogger();
         root = Luminumbra::TestSupport::CreateUniqueTempDirectory("luminumbra_host_fault_");
         fs::create_directories(root / "worlds/atlas/presets");
         fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets/default.json",
@@ -295,17 +296,16 @@ protected:
         Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root);
         WriteHostFile(root / "data/common/systems.json",
                       R"({"sim":{"active_regions":{"enabled":true}}})");
-        auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(log_output);
-        auto logger = std::make_shared<spdlog::logger>("host-fault-test", sink);
-        logger->set_pattern("%v");
-        Log::GetCoreLogger() = std::move(logger);
+        log_sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(log_output);
+        log_sink->set_pattern("%v");
+        Log::GetDispatcherSink()->Attach(log_sink);
         HostObservation() = &observation;
     }
 
     void TearDown() override {
         WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
         HostObservation() = nullptr;
-        Log::GetCoreLogger() = previous_logger;
+        Log::GetDispatcherSink()->Detach(log_sink);
         std::error_code error;
         if (!root.empty())
             fs::remove_all(root, error);

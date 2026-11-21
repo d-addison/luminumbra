@@ -1,5 +1,7 @@
 #pragma once
 
+#include "PassDepthState.h"
+
 #include <cstddef>
 #include <filesystem>
 #include <memory>
@@ -20,14 +22,22 @@ struct StaticDrawStats {
 // this same implementation. All owned GL objects require a live owning context.
 class StaticDrawPass {
 public:
+    struct CallerState {
+        PassDepthState depth{};
+        GLuint draw_framebuffer = 0;
+    };
     explicit StaticDrawPass(const std::filesystem::path& resource_root);
     ~StaticDrawPass();
     StaticDrawPass(const StaticDrawPass&) = delete;
     StaticDrawPass& operator=(const StaticDrawPass&) = delete;
+    // GBufferPass supplies known depth/target state. A null caller explicitly
+    // selects external preservation (the installed static preview host).
+    // Program, texture, sampler and upload bindings remain unknown at both seams.
     StaticDrawStats Render(const RenderView& view,
                            std::shared_ptr<const StaticDrawSnapshot> snapshot,
                            const GBuffer& target,
-                           bool temporal_enabled = false);
+                           bool temporal_enabled = false,
+                           const CallerState* caller = nullptr);
 
 private:
     struct Impl;

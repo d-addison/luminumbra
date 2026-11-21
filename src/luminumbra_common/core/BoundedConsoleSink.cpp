@@ -1,4 +1,5 @@
 #include "BoundedConsoleSink.h"
+#include "NativeFileOwner.h"
 
 #include <atomic>
 #include <chrono>
@@ -62,11 +63,8 @@ constexpr std::string_view kTruncationMarker = "...[truncated]\n";
 
 class HandleOutput final : public ConsoleOutput {
 public:
-    explicit HandleOutput(HANDLE handle)
-        : m_handle(handle) {}
-    ~HandleOutput() override {
-        CloseHandle(m_handle);
-    }
+    explicit HandleOutput(Luminumbra::Filesystem::NativeFileOwner&& handle) noexcept
+        : m_handle(std::move(handle)) {}
 
     HandleOutput(const HandleOutput&) = delete;
     HandleOutput& operator=(const HandleOutput&) = delete;
@@ -77,7 +75,7 @@ public:
             DWORD written = 0;
             // ERROR_BROKEN_PIPE, ERROR_INVALID_HANDLE and any other failure are
             // treated as a dead destination.
-            if (!WriteFile(m_handle, data, chunk, &written, nullptr) || written == 0) {
+            if (!WriteFile(m_handle.get(), data, chunk, &written, nullptr) || written == 0) {
                 return Status::Dead;
             }
             data += written;
@@ -87,26 +85,23 @@ public:
     }
 
 private:
-    HANDLE m_handle;
+    Luminumbra::Filesystem::NativeFileOwner m_handle;
 };
 
 #else
 
 class FdOutput final : public ConsoleOutput {
 public:
-    FdOutput(int fd, FileDescriptorWriteFn write_fn)
-        : m_fd(fd)
+    FdOutput(Luminumbra::Filesystem::NativeFileOwner&& fd, FileDescriptorWriteFn write_fn) noexcept
+        : m_fd(std::move(fd))
         , m_write(write_fn) {}
-    ~FdOutput() override {
-        ::close(m_fd);
-    }
 
     FdOutput(const FdOutput&) = delete;
     FdOutput& operator=(const FdOutput&) = delete;
 
     Status write(const char* data, std::size_t length) override {
         while (length > 0) {
-            const ssize_t written = m_write(m_fd, data, length);
+            const ssize_t written = m_write(m_fd.get(), data, length);
             if (written < 0) {
                 if (errno == EINTR) {
                     continue;
@@ -129,7 +124,7 @@ public:
     }
 
 private:
-    int m_fd;
+    Luminumbra::Filesystem::NativeFileOwner m_fd;
     FileDescriptorWriteFn m_write;
 };
 
@@ -282,7 +277,8 @@ std::shared_ptr<ConsoleOutput> BoundedConsoleSink::MakeStdoutOutput() {
                          DUPLICATE_SAME_ACCESS)) {
         return nullptr;
     }
-    return std::make_shared<HandleOutput>(duplicate);
+    Luminumbra::Filesystem::NativeFileOwner retained(duplicate);
+    return std::make_shared<HandleOutput>(std::move(retained));
 #else
     IgnoreDefaultSigpipe();
     return MakeFileDescriptorOutput(STDOUT_FILENO);
@@ -302,11 +298,11 @@ void BoundedConsoleSink::IgnoreDefaultSigpipe() {
 
 std::shared_ptr<ConsoleOutput>
 BoundedConsoleSink::MakeFileDescriptorOutput(int fd, FileDescriptorWriteFn write_fn) {
-    const int duplicate = ::dup(fd);
-    if (duplicate < 0) {
+    Luminumbra::Filesystem::NativeFileOwner retained(::dup(fd));
+    if (retained.get() < 0) {
         return nullptr;
     }
-    return std::make_shared<FdOutput>(duplicate, write_fn);
+    return std::make_shared<FdOutput>(std::move(retained), write_fn);
 }
 #endif
 

@@ -275,9 +275,11 @@ void ScenarioRunnerImpl::onPreRenderWorldSweep() {
 void ScenarioRunnerImpl::onPreRenderCapturePins() {
     // Live weather and clouds have supplied defaults. Apply each atmosphere
     // scenario's final weather, cloud, lightning and particle wind pins once here.
-    (void)driveWeatherVisual();
-    (void)driveCloudShadow();
-    (void)drivePrecipitation();
+    if (g_app.capture.feature_policy.UseLegacyAtmospherePins()) {
+        (void)driveWeatherVisual();
+        (void)driveCloudShadow();
+        (void)drivePrecipitation();
+    }
     if (scenario_config.lod_ground_smoke() || scenario_config.water_visual_smoke() ||
         scenario_config.material_visual_smoke() || scenario_config.skybox_visual_smoke() ||
         scenario_config.weather_visual_smoke() || scenario_config.cloud_shadow_smoke() ||
@@ -288,8 +290,10 @@ void ScenarioRunnerImpl::onPreRenderCapturePins() {
         // 0.04 keeps the sun near its zenith for stable captures.
         renderPipeline.set_time_of_day(0.04f);
     } else if (scenario_config.timeofday_sweep_smoke() && scenario_ready && g_camera) {
-        PinComparisonAtmosphere(
-            renderPipeline, root_dir / "data/common/particles", g_camera->Position, false);
+        if (g_app.capture.feature_policy.UseLegacyAtmospherePins()) {
+            PinComparisonAtmosphere(
+                renderPipeline, root_dir / "data/common/particles", g_camera->Position, false);
+        }
         // SEASON SWEEP. The run is split into two
         // season halves (summer then winter); each half replays
         // the noon/dusk/night phase windows. Both the time-of-day

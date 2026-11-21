@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../IndexedUniformNames.h"
 #include "../RenderContext.h"
 #include "SsaoData.h"
 
@@ -49,6 +50,7 @@ public:
     }
 
 private:
+    IndexedUniformNames<64> m_sample_names;
     SSAOData m_ssao;
 };
 

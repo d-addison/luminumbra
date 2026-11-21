@@ -1,5 +1,6 @@
 """Check that presentation integration uses the tested clock-free policy."""
 from pathlib import Path
+import hashlib
 import math
 import re
 import unittest
@@ -41,6 +42,63 @@ class UploadBudgetWiring(unittest.TestCase):
         cls.pipeline = read(RENDERING / "RenderPipeline.cpp")
         cls.header = read(RENDERING / "RenderPipeline.h")
         cls.main = read(ROOT / "src/luminumbra_client/main_client.cpp")
+
+    def test_terrain_stream_reuse_requires_completion_or_fresh_storage(self):
+        draw = body(self.pipeline, "void RenderPipeline::draw_chunks_mdi(")
+        self.assertIn("TerrainStreamRing::kSlotCount> m_mdi_frames", self.header)
+        ring = read(RENDERING / "TerrainStreamRing.h")
+        self.assertIn("kSubmissionsPerFrame = 5", ring)
+        self.assertIn("kFramesInFlight = 3", ring)
+        self.assertIn("m_live[m_cursor] && !completion_signalled", ring)
+        self.assertIn("m_mdi_stream.begin_frame();", body(self.pipeline, "void RenderPipeline::prepare_frame("))
+        for empty in ("if (visible_chunks.empty() || block_count == 0)", "if (running == 0)"):
+            self.assertIn("return;", body(draw, empty))
+            self.assertLess(draw.index(empty), draw.index("m_mdi_stream.acquire("))
+        # Only init/shutdown may clear lifetime state; replay restores a cursor.
+        self.assertEqual(self.pipeline.count("m_mdi_stream = {};"), 2)
+        self.assertEqual(draw.count("glClientWaitSync("), 1)
+        self.assertIn("glClientWaitSync(frame.completion, 0, 0)", draw)
+        self.assertIn("status == GL_ALREADY_SIGNALED || status == GL_CONDITION_SATISFIED", compact(draw))
+        self.assertIn("bool completed = false;", draw)
+        self.assertIn("m_mdi_stream.acquire( completed, diagnostic_replay || m_gpu_timers_suppressed || m_far_world_paired)", compact(draw))
+        self.assertLess(draw.index("m_mdi_stream.acquire("), draw.index("ensure_mdi_capacity("))
+        self.assertLess(draw.index("ensure_mdi_capacity(frame, running, allocation.orphan)"),
+                        draw.index("glBufferSubData("))
+        self.assertLess(draw.index("ReplayRollback retire_stream"), draw.index("const auto& blocks ="))
+        retire = body(draw, "ReplayRollback retire_stream")
+        self.assertIn("frame.completion = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0)", retire)
+        capacity = compact(body(self.pipeline, "void RenderPipeline::ensure_mdi_capacity("))
+        pair_missing = "frame.indirect_buffer == 0 || frame.origin_buffer == 0"
+        self.assertIn(pair_missing, capacity)
+        self.assertIn("if (m_far_world_paired && (frame.command_capacity < running || " +
+                      pair_missing + ")) throw", compact(draw))
+        self.assertIn("if (!grow && !orphan) return;", capacity)
+        self.assertEqual(capacity.count("glBufferData("), 2)
+        self.assertNotIn("glDeleteBuffers", capacity)  # replay/VAO names remain valid
+        self.assertLess(capacity.index("TerrainStreamRing::storage_bytes("), capacity.index("glGenBuffers("))
+        destroy = body(self.pipeline, "void RenderPipeline::destroy_mdi_buffers()")
+        self.assertIn("glDeleteSync(frame.completion)", destroy)
+        for forbidden in ("glWaitSync(", "glFinish(", "GL_SYNC_FLUSH_COMMANDS_BIT"):
+            self.assertNotIn(forbidden, draw + capacity)
+        self.assertIn('"Terrain upload"', draw)
+        self.assertIn("terrain_stream_diagnostics() const", self.header)
+        regression = read(ROOT / "test/rendering/terrain_stream_ring_test.cpp")
+        self.assertIn("FiveSubmissionsAcrossDelayedFramesNeverOverlapLiveStorage", regression)
+        self.assertIn("ReplayRestoresSchedulingButNeverRollsBackLiveOwnership", regression)
+        self.assertIn("rendering/terrain_stream_ring_test.cpp", read(ROOT / "test/CMakeLists.txt"))
+
+    def test_terrain_stream_preserves_command_bytes_and_offset_zero_bindings(self):
+        draw = body(self.pipeline, "void RenderPipeline::draw_chunks_mdi(")
+        start = draw.index("std::vector<std::size_t> write_cursor = block_offset;")
+        end = draw.index("out_draws = running;", start) + len("out_draws = running;")
+        # Pin the original command/origin producer, independent of storage ownership.
+        self.assertEqual(hashlib.sha256(compact(draw[start:end]).encode()).hexdigest(),
+                         "f7c59add1a863ecb9ed1a98b43f6ac73e2e9aec529290c755a822987919490d1")
+        for target, stride, data in (("GL_DRAW_INDIRECT_BUFFER", "DrawElementsIndirectCommand", "command"),
+                                     ("GL_ARRAY_BUFFER", "glm::vec4", "origin")):
+            self.assertIn(f"glBufferSubData({target}, 0, static_cast<GLsizeiptr>(running * sizeof({stride})), "
+                          f"m_mdi_{data}_scratch.data())", compact(draw))
+        self.assertIn("glBindVertexBuffer(1, frame.origin_buffer, 0, sizeof(glm::vec4))", compact(draw))
 
     def test_waterfall_sheets_retire_excavated_crest_and_landing_before_unknown_water(self):
         source = read(RENDERING / "WaterfallDetect.cpp")
@@ -232,9 +290,9 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("m_terrainCullingCache.chunk_count = sorted_chunk_ids.size();", cache)
         prepare = body(self.pipeline, "void RenderPipeline::prepare_frame(")
         self.assertIn("if (chunk.has_terrain_mesh() && found != m_chunk_render_data.end())", prepare)
-        water = body(self.pipeline, "void RenderPipeline::execute_stage_water(")
+        water = body(self.pipeline, "void RenderPipeline::execute_stage_opaque_snapshot(")
         self.assertIn("for (const auto& chunk : renderable_chunk_snapshots)", water)
-        self.assertIn("water_input.draw_items.push_back(", water)
+        self.assertIn("m_frame_water_input.draw_items.push_back(", water)
 
     def test_water_only_dispatch_preserves_ready_without_terrain_work(self):
         world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
@@ -1751,7 +1809,7 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertLess(water.index("if (!vertex_uploaded"), water.index("it->second = data;"))
         self.assertIn("!vertex_uploaded || !index_uploaded || !attributes_valid", water)
         self.assertIn("delete_water_slot(data);", water)
-        draw = body(self.pipeline, "void RenderPipeline::execute_stage_water(")
+        draw = body(self.pipeline, "void RenderPipeline::execute_stage_opaque_snapshot(")
         self.assertIn("PresentedLadderWaterEligible(", draw)
         self.assertIn("water_data.SetPresentedLadderWaterUpload(", self.pipeline)
         presentation = body(self.header, "void SetPresentedLadderWaterUpload(")
@@ -3217,6 +3275,46 @@ class NightLightingSourceTests(unittest.TestCase):
             self.assertIn(f'.{field} = glGetUniformLocation(program, "{uniform}")', source)
             self.assertIn(f'm_draw_uniforms.{field}', source)
             self.assertIn(f'ctx.{field}', source)
+
+
+
+class UniformCacheWiring(unittest.TestCase):
+    def test_location_hit_has_one_container_lookup_and_misses_remain_cached(self):
+        source = read(RENDERING / "Shader.cpp")
+        lookup = body(source, "GLint Shader::getUniformLocation(")
+        # Container access is the work oracle; glGetUniformLocation alone cannot
+        # distinguish the old double-probe hit from the retained-iterator hit.
+        self.assertEqual(lookup.count("m_uniformLocationCache.find("), 1)
+        self.assertNotRegex(lookup, r"m_uniformLocationCache\s*(?:\[|\.at\s*\()")
+        self.assertRegex(lookup, r"return\s+\w+->second\s*;")
+        self.assertEqual(lookup.count("glGetUniformLocation("), 1)
+        self.assertRegex(lookup, r"m_uniformLocationCache\.(?:try_)?emplace\(name, location\)")
+        self.assertIn("m_uniformLocationCache.clear();", body(source, "bool Shader::Reload("))
+        gbuffer = read(RENDERING / "passes/GBufferPass.cpp")
+        for key in ("candidatePath", "basePath", "mesh_info.meshPath"):
+            self.assertNotRegex(gbuffer, r"m_(?:skinnedMeshCache|meshCache)\s*\[\s*"
+                                + re.escape(key) + r"\s*\]")
+
+    def test_indexed_names_are_built_inside_generation_cache_factories(self):
+        for filename in ("LightingPass.cpp", "SsaoPass.cpp"):
+            source = read(RENDERING / "passes" / filename)
+            # All decimal conversions in these passes must live in a cache
+            # factory. This also catches prefixes/suffixes built before setters.
+            factories = re.findall(r"\.Get\([^;]*?\[\]\(std::size_t index\)\s*\{(.*?)\}\);",
+                                   source, flags=re.S)
+            self.assertTrue(factories, filename)
+            self.assertEqual(source.count("std::to_string("),
+                             sum(factory.count("std::to_string(") for factory in factories), filename)
+        lighting = read(RENDERING / "passes/LightingPass.cpp")
+        self.assertIn("lighting_shader->ProgramGeneration()", lighting)
+        self.assertIn("m_lightning_overlay_shader->ProgramGeneration()", lighting)
+        self.assertIn("m_uniform_names->contribution = {};", lighting)
+        self.assertIn("m_uniform_names->normal = {};", lighting)
+        self.assertIn("m_uniform_names->flashes.Reset();", lighting)
+        self.assertIn("m_uniform_names->bolts.Reset();", lighting)
+        ssao = read(RENDERING / "passes/SsaoPass.cpp")
+        self.assertIn("m_ssao.ssaoShader->ProgramGeneration()", ssao)
+        self.assertIn("m_sample_names.Reset();", body(ssao, "void SsaoPass::init_shaders("))
 
 
 if __name__ == "__main__":

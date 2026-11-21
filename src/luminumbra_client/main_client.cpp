@@ -1558,7 +1558,7 @@ int main(int argc, char* argv[]) {
             scenario_config.hang_watchdog_seconds,
             scenario_config.crash_dir.string());
     }
-    g_app.overlay.imgui_enabled = !scenario_config.no_ui;
+    g_app.overlay.imgui_enabled = g_app.capture.feature_policy.Apply({}, scenario_config.no_ui).ui;
     g_app.scenario_active = scenario_config.active();
     runtime_state_recorder.capture("startup_requested", nullptr, nullptr, nullptr, 0, {});
 
@@ -1815,13 +1815,19 @@ int main(int argc, char* argv[]) {
         if (!cy.empty()) {
             try {
                 g_app.capture.fixed_cam_yaw = std::stof(cy);
-            } catch (...) {}
+            } catch (...) {
+                LUMINUMBRA_CORE_ERROR("Invalid --cam-yaw value; refusing capture");
+                return 2;
+            }
         }
         const std::string cpi = GetCommandLineOption(argc, argv, "--cam-pitch", "");
         if (!cpi.empty()) {
             try {
                 g_app.capture.fixed_cam_pitch = std::stof(cpi);
-            } catch (...) {}
+            } catch (...) {
+                LUMINUMBRA_CORE_ERROR("Invalid --cam-pitch value; refusing capture");
+                return 2;
+            }
         }
     }
     // --scene-config <json>: compose a full scene to match a reference, then capture.
@@ -2076,13 +2082,19 @@ int main(int argc, char* argv[]) {
         if (!ds.empty()) {
             try {
                 g_app.capture.timelapse_daystep = std::stof(ds);
-            } catch (...) {}
+            } catch (...) {
+                LUMINUMBRA_CORE_ERROR("Invalid --timelapse-daystep value; refusing capture");
+                return 2;
+            }
         }
         const std::string t0 = GetCommandLineOption(argc, argv, "--timelapse-tod", "");
         if (!t0.empty()) {
             try {
                 g_app.capture.timelapse_tod = std::stof(t0);
-            } catch (...) {}
+            } catch (...) {
+                LUMINUMBRA_CORE_ERROR("Invalid --timelapse-tod value; refusing capture");
+                return 2;
+            }
         }
         const std::string td = GetCommandLineOption(argc, argv, "--timelapse-dir", "");
         g_app.capture.timelapse_dir = !td.empty()
@@ -2509,6 +2521,33 @@ int main(int argc, char* argv[]) {
             g_uiManager->SetBackdropBlurQuality(resolved_graphics.values.ui_blur);
     } else {
         LUMINUMBRA_CORE_ERROR("Invalid graphics configuration: {}", graphics_error);
+    }
+    if (scenario_config.capture_feature_profile != RuntimeScenarioConfig::FeatureProfile::None) {
+        // Unimplemented adapters stay unsupported. A CLI selection alone must
+        // never remove legacy pins or imply complete feature support.
+        Luminumbra::Rendering::CaptureFeatureContext feature_context;
+        using FeatureMode = Luminumbra::Rendering::CaptureFeatureMode;
+        feature_context.mode = scenario_config.world_visual_sweep() ? FeatureMode::WorldVisualSweep
+                               : scenario_config.timeofday_sweep_smoke()
+                                   ? FeatureMode::TimeOfDaySweep
+                               : scenario_config.weather_visual_smoke() ? FeatureMode::WeatherVisual
+                               : scenario_config.active()               ? FeatureMode::Scenario
+                               : g_app.capture.scene_active             ? FeatureMode::HeadlessScene
+                               : g_app.capture.frame_scan_active
+                                   ? (scenario_config.hidden_window ? FeatureMode::HeadlessScan
+                                                                    : FeatureMode::FrameScan)
+                                   : FeatureMode::Timelapse;
+        try {
+            const auto profile = Luminumbra::Rendering::CaptureFeatureProfile::Resolve(
+                scenario_config, g_systemConfig, resolved_graphics.values, feature_context);
+            g_app.capture.feature_policy = CaptureFeaturePolicy::Resolve(
+                &profile, scenario_config.particle_emitter_determinism_smoke());
+            LUMINUMBRA_CORE_WARN(
+                "Capture feature adapters are unavailable; retaining legacy feature policy");
+        } catch (const std::invalid_argument& error) {
+            // A snapshot refusal cannot change an unadmitted run's features.
+            LUMINUMBRA_CORE_WARN("Capture feature policy unavailable: {}", error.what());
+        }
     }
     if (graphics_ready && (graphics_first_launch || graphics_detect_requested))
         graphics_state.ScheduleSave(glfwGetTime());
@@ -3198,38 +3237,53 @@ int main(int argc, char* argv[]) {
                 }
             });
         // Enumerate saved user presets (user_*.json) so create-world can offer them as chips.
-        g_uiManager->SetWorldPresetList(
-            [root_dir]() -> std::vector<std::pair<std::string, std::string>> {
-                std::vector<std::pair<std::string, std::string>> out;
-                try {
-                    const std::filesystem::path presets_dir =
-                        root_dir / "worlds" / "atlas" / "presets";
-                    if (!std::filesystem::exists(presets_dir))
-                        return out;
-                    for (const auto& entry : std::filesystem::directory_iterator(presets_dir)) {
-                        if (entry.path().extension() != ".json")
-                            continue;
-                        const std::string stem = entry.path().stem().string();
-                        if (stem.rfind("user_", 0) != 0)
-                            continue;
-                        std::string name = stem;
-                        try {
-                            nlohmann::json j;
-                            bool missing = false;
-                            if (Luminumbra::Persistence::ReadSavedJson(
-                                    entry.path(),
-                                    Luminumbra::Persistence::SavedInputLimits::kPresetBytes,
-                                    j,
-                                    missing,
-                                    false) &&
-                                !missing)
-                                name = j.value("name", stem);
-                        } catch (...) {}
-                        out.emplace_back(name, stem);
+        g_uiManager->SetWorldPresetList([root_dir]()
+                                            -> std::vector<std::pair<std::string, std::string>> {
+            std::vector<std::pair<std::string, std::string>> out;
+            const auto report_name_failure = [] {
+                // At most one diagnostic across all presets and UI refreshes.
+                static std::atomic_flag reported{};
+                if (!reported.test_and_set(std::memory_order_relaxed))
+                    LUMINUMBRA_CORE_WARN("Cannot read user preset name; using filename");
+            };
+            try {
+                const std::filesystem::path presets_dir = root_dir / "worlds" / "atlas" / "presets";
+                if (!std::filesystem::exists(presets_dir))
+                    return out;
+                for (const auto& entry : std::filesystem::directory_iterator(presets_dir)) {
+                    if (entry.path().extension() != ".json")
+                        continue;
+                    const std::string stem = entry.path().stem().string();
+                    if (stem.rfind("user_", 0) != 0)
+                        continue;
+                    std::string name = stem;
+                    try {
+                        nlohmann::json j;
+                        bool missing = false;
+                        if (Luminumbra::Persistence::ReadSavedJson(
+                                entry.path(),
+                                Luminumbra::Persistence::SavedInputLimits::kPresetBytes,
+                                j,
+                                missing,
+                                false) &&
+                            !missing) {
+                            name = j.value("name", stem);
+                        } else {
+                            report_name_failure();
+                        }
+                    } catch (...) {
+                        report_name_failure();
                     }
-                } catch (...) {}
-                return out;
-            });
+                    out.emplace_back(name, stem);
+                }
+            } catch (...) {
+                // At most one diagnostic even if the menu repeatedly refreshes the list.
+                static std::atomic_flag reported{};
+                if (!reported.test_and_set(std::memory_order_relaxed))
+                    LUMINUMBRA_CORE_WARN("Cannot enumerate user presets; list may be incomplete");
+            }
+            return out;
+        });
         // Collision check: does saving under this display name target an existing user preset?
         // The saver also enforces no replacement unless the UI supplies explicit consent.
         g_uiManager->SetWorldPresetExists([root_dir](const std::string& displayName) -> bool {
@@ -5807,9 +5861,15 @@ int main(int argc, char* argv[]) {
                         // photograph. Render+client-sim only; the gated headless
                         // world_hash is the server's and is unaffected. Skipped in
                         // capture/scenario modes (they own their own creature handling).
-                        const bool interactive_play =
+                        const bool legacy_interactive_play =
                             !scenario_config.active() && !g_app.capture.timelapse_creatures &&
                             (g_app.capture.timelapse_frames == 0 || g_app.capture.timelapse_living);
+                        const bool interactive_play =
+                            g_app.capture.feature_policy
+                                .Apply(CaptureGameplayFeatures{.ambient_animals =
+                                                                   legacy_interactive_play},
+                                       scenario_config.no_ui)
+                                .ambient_animals;
                         auto pending = std::make_shared<WorldDressingPending>();
                         pending->world = ws;
                         pending->sun_toward = sunToward;
@@ -6250,30 +6310,32 @@ int main(int argc, char* argv[]) {
                         if (g_app.capture.scene_moon >= 0.0f)
                             renderPipeline.set_moon_illumination(
                                 g_app.capture.scene_moon); // rendering
-                        using WT = Luminumbra::Rendering::WeatherType;
-                        const WT wt = (g_app.capture.scene_weather == 1)   ? WT::Rain
-                                      : (g_app.capture.scene_weather == 2) ? WT::Snow
-                                      : (g_app.capture.scene_weather == 3) ? WT::Fog
-                                      : (g_app.capture.scene_weather == 4) ? WT::Storm
-                                                                           : WT::None;
-                        renderPipeline.set_weather(wt, g_app.capture.scene_weather_intensity);
-                        if (auto* particles = renderPipeline.particles()) {
-                            const float intensity = g_app.capture.scene_weather_intensity;
-                            particles->set_precipitation(
-                                root_dir / "data/common/particles",
-                                g_camera->Position,
-                                (wt == WT::Rain || wt == WT::Storm) ? intensity : 0.0f,
-                                wt == WT::Snow ? intensity : 0.0f);
-                        }
-                        if (g_app.capture.scene_clouds) {
-                            Luminumbra::Rendering::CloudRenderState cs;
-                            cs.enabled = true;
-                            cs.shadow_enabled = g_app.capture.scene_cloud_shadow;
-                            cs.coverage_amount = g_app.capture.scene_cloud_coverage;
-                            cs.biome_variation = g_app.capture.scene_cloud_biome;
-                            cs.plane_height = g_app.capture.scene_cloud_plane;
-                            cs.shadow_strength = g_app.capture.scene_cloud_shadow_strength;
-                            renderPipeline.set_cloud_state(cs);
+                        if (g_app.capture.feature_policy.UseLegacyAtmospherePins()) {
+                            using WT = Luminumbra::Rendering::WeatherType;
+                            const WT wt = (g_app.capture.scene_weather == 1)   ? WT::Rain
+                                          : (g_app.capture.scene_weather == 2) ? WT::Snow
+                                          : (g_app.capture.scene_weather == 3) ? WT::Fog
+                                          : (g_app.capture.scene_weather == 4) ? WT::Storm
+                                                                               : WT::None;
+                            renderPipeline.set_weather(wt, g_app.capture.scene_weather_intensity);
+                            if (auto* particles = renderPipeline.particles()) {
+                                const float intensity = g_app.capture.scene_weather_intensity;
+                                particles->set_precipitation(
+                                    root_dir / "data/common/particles",
+                                    g_camera->Position,
+                                    (wt == WT::Rain || wt == WT::Storm) ? intensity : 0.0f,
+                                    wt == WT::Snow ? intensity : 0.0f);
+                            }
+                            if (g_app.capture.scene_clouds) {
+                                Luminumbra::Rendering::CloudRenderState cs;
+                                cs.enabled = true;
+                                cs.shadow_enabled = g_app.capture.scene_cloud_shadow;
+                                cs.coverage_amount = g_app.capture.scene_cloud_coverage;
+                                cs.biome_variation = g_app.capture.scene_cloud_biome;
+                                cs.plane_height = g_app.capture.scene_cloud_plane;
+                                cs.shadow_strength = g_app.capture.scene_cloud_shadow_strength;
+                                renderPipeline.set_cloud_state(cs);
+                            }
                         }
                     }
                     // Apply functional foliage QA after all camera/time overrides.
