@@ -75,7 +75,7 @@ public:
         bind(program);
         // Both operands are plain bool loads. A seen program takes one branch,
         // without a lookup, TLS access, guard construction or phase-stack access.
-        if (static_cast<unsigned>(shader_first_use_collection_enabled) &
+        if (static_cast<unsigned>(shader_first_use_collection_enabled()) &
             static_cast<unsigned>(m_bound->pending)) {
             use_attributed(function, program.name);
             return;
@@ -98,7 +98,7 @@ public:
             // Disabled collection still consumes first submission. Later frames
             // must not attribute a program which has already reached the driver.
             m_bound->pending = false;
-            if (shader_first_use_collection_enabled) {
+            if (shader_first_use_collection_enabled()) {
                 submit_attributed(function, std::forward<Args>(args)...);
                 return;
             }

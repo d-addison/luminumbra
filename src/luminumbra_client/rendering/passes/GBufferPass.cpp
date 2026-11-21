@@ -29,11 +29,13 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include <algorithm>
+#include <bit>
 #include <chrono> // CPU submit cost of the static-prop pass
 #include <cstddef>
 #include <filesystem> // existence-probe LOD variants before loading (avoid load-error spam)
 #include <limits>
 #include <string>
+#include <system_error>
 #include <tuple>
 #include <utility> // std::pair for the LOD-resolve helper return
 
@@ -98,8 +100,12 @@ Shader* RefusedImpostorProgram(Shader* base, GBufferDiagnosticCapture* capture) 
 } // namespace
 
 void GBufferPass::register_cached_mesh(const std::string& key, std::unique_ptr<Mesh> mesh) {
-    if (mesh)
+    if (mesh) {
         m_meshCache[key] = std::move(mesh);
+        m_staticPropIndexValid = false;
+        m_resolveMemo.clear();
+        m_visibleGroups.clear();
+    }
 }
 bool GBufferPass::has_cached_mesh(const std::string& key) const {
     return m_meshCache.find(key) != m_meshCache.end();
@@ -331,18 +337,20 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
     });
     // ON already populated persistent mesh caches. Keep reused per-dispatch
     // scratch exactly as ON left it, including when a later stage throws.
-    auto restore = [this,
-                    groups = ctx.frozen_replay ? m_visibleGroups : decltype(m_visibleGroups){},
-                    memo = ctx.frozen_replay ? m_resolveMemo : decltype(m_resolveMemo){},
-                    impostors =
-                        ctx.frozen_replay ? m_impostorInstances : decltype(m_impostorInstances){},
-                    replay = ctx.frozen_replay]() mutable noexcept {
-        if (replay) {
-            m_visibleGroups.swap(groups);
-            m_resolveMemo.swap(memo);
-            m_impostorInstances.swap(impostors);
-        }
-    };
+    auto restore =
+        [this,
+         groups = ctx.frozen_replay ? m_visibleGroups : decltype(m_visibleGroups){},
+         memo = ctx.frozen_replay ? m_resolveMemo : decltype(m_resolveMemo){},
+         impostors = ctx.frozen_replay ? m_impostorInstances : decltype(m_impostorInstances){},
+         impostor_selection = ctx.frozen_replay ? m_impostorSelection : StaticPropStreamSelection{},
+         replay = ctx.frozen_replay]() mutable noexcept {
+            if (replay) {
+                m_visibleGroups.swap(groups);
+                m_resolveMemo.swap(memo);
+                m_impostorInstances.swap(impostors);
+                std::swap(m_impostorSelection, impostor_selection);
+            }
+        };
     ReplayRollback rollback(std::move(restore));
     GBufferDrawStats stats;
     const bool authored = input.authored_draws && !input.authored_draws->draws.empty();
@@ -615,6 +623,46 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
     glBindVertexArray(0);
 }
 
+namespace {
+template<class Props, class ResolveLod>
+StaticPropSpatialIndex BuildStaticPropSpatialIndex(const Props& props,
+                                                   const ResolveLod& resolveLod,
+                                                   const glm::vec3& impostorCenter,
+                                                   float impostorRadius) {
+    std::vector<StaticPropSpatialIndex::Item> items;
+    if (props.size() > items.max_size())
+        throw std::length_error("Static prop bounds too large");
+    items.reserve(props.size());
+    for (const auto& cp : props) {
+        StaticPropSpatialIndex::Item item;
+        item.position = {cp.position.x, cp.position.y, cp.position.z};
+        for (int lod = 0; lod < kTreeLodCount; ++lod) {
+            Mesh* mesh = resolveLod(cp, lod);
+            if (mesh) {
+                const glm::vec3 center =
+                    glm::vec3(cp.model * glm::vec4(glm::vec3(mesh->boundingSphere), 1.0f));
+                item.lodBounds[static_cast<std::size_t>(lod)].Include(
+                    {center.x, center.y, center.z}, mesh->boundingSphere.w * cp.maxScale);
+            }
+        }
+        if (cp.authoredTree && cp.impostorTree) {
+            // Refused LOD3 billboards rejoin mesh LOD2. Include this even
+            // while the atlas is off, for paired frozen diagnostic replays.
+            item.lodBounds[3].Include(item.lodBounds[2]);
+            if (cp.impostorLeaf) {
+                const glm::vec3 center = glm::vec3(cp.model * glm::vec4(impostorCenter, 1.0f));
+                item.lodBounds[3].Include({center.x, center.y, center.z},
+                                          impostorRadius * cp.maxScale);
+            }
+        }
+        items.push_back(item);
+    }
+    StaticPropSpatialIndex index;
+    index.Build(items);
+    return index;
+}
+} // namespace
+
 //  (re)build the cached static-prop instance data. Runs once
 // (props are scattered once and never move) and again only if the static-mesh
 // population changes. Precomputes the per-instance model matrix + albedo tint +
@@ -622,6 +670,9 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
 // ~84k instances every frame (the measured CPU-submit bottleneck)..
 void GBufferPass::build_static_prop_cache(entt::registry& registry) {
     m_staticPropCache.clear();
+    m_staticPropIndexValid = false;
+    m_impostorSelection = {};
+    m_impostorInstances.clear();
     m_propMeshPaths.clear();
     m_resolveMemo.clear();
     m_visibleGroups.clear();
@@ -677,6 +728,7 @@ void GBufferPass::build_static_prop_cache(entt::registry& registry) {
         cp.tint = tint;
         //  impostor classification (once here; the per-frame loop must not string-search the far
         //  field).
+        cp.authoredTree = bp.starts_with("game-assets/tree-small-02/");
         cp.impostorTree = bp.find("tree") != std::string::npos;
         cp.impostorLeaf = cp.impostorTree && (bp.find("leaf") != std::string::npos ||
                                               bp.find("leaves") != std::string::npos);
@@ -703,6 +755,103 @@ void GBufferPass::build_static_prop_cache(entt::registry& registry) {
     // The per-frame loop records each resolved slot once, so this never grows there.
     m_resolvedAnchorSlots.reserve(m_anchorChunks.size());
     m_staticPropCachePopulation = registry.view<const Components::StaticMeshComponent>().size();
+}
+
+GBufferPass::ResolvedStaticProps::iterator GBufferPass::resolve_static_prop_lod(
+    const RenderContext& ctx, const GBufferPassInput& input, const CachedStaticProp& cp, int lod) {
+    // Resolves (loading + caching) the mesh for a candidate path, falling back to
+    // the base LOD0 path if the LOD variant cannot be loaded. Returns the path that
+    // actually resolved so the group is keyed by what is really drawn.
+    auto resolve_mesh = [&](const std::string& candidatePath,
+                            const std::string& basePath) -> std::pair<Mesh*, std::string> {
+        auto candidate = m_meshCache.find(candidatePath);
+        if (candidate == m_meshCache.end()) {
+            if (ctx.frozen_replay)
+                throw std::logic_error("Replay cannot change mesh residency");
+            std::string full = (input.root_path / candidatePath).string();
+            // Only load the LOD variant if it exists on disk; an absent.lodN.lmesh caches a
+            // null and falls back to LOD0 SILENTLY (no MeshLoader "failed header" error spam).
+            std::error_code error;
+            candidate = m_meshCache
+                            .emplace(candidatePath,
+                                     std::filesystem::exists(full, error) ? MeshLoader::Load(full)
+                                                                          : nullptr)
+                            .first;
+        }
+        Mesh* m = candidate->second.get();
+        if (m)
+            return {m, candidatePath};
+        if (candidatePath != basePath) {
+            auto base_entry = m_meshCache.find(basePath);
+            if (base_entry == m_meshCache.end()) {
+                if (ctx.frozen_replay)
+                    throw std::logic_error("Replay cannot change mesh residency");
+                std::string full = (input.root_path / basePath).string();
+                base_entry = m_meshCache.emplace(basePath, MeshLoader::Load(full)).first;
+            }
+            Mesh* base = base_entry->second.get();
+            if (base)
+                return {base, basePath};
+        }
+        return {nullptr, basePath};
+    };
+    const std::uint64_t rkey =
+        cp.baseMeshHash ^ (static_cast<std::uint64_t>(lod) * std::uint64_t{0x9E3779B97F4A7C15ull});
+    auto rit = m_resolveMemo.find(rkey);
+    if (rit == m_resolveMemo.end()) {
+        const std::string& basePath = m_propMeshPaths[cp.pathIndex];
+        const std::string candidatePath = LodMeshPath(basePath, lod);
+        auto resolved = resolve_mesh(candidatePath, candidatePath);
+        // At most kTreeLodCount probes for authored trees, only on a memo miss.
+        // Cache failed loads too; steady frames do no new probing or allocation.
+        if (cp.authoredTree) {
+            for (int mesh_lod = lod - 1; !resolved.first && mesh_lod >= 0; --mesh_lod) {
+                const std::string fallbackPath = LodMeshPath(basePath, mesh_lod);
+                resolved = resolve_mesh(fallbackPath, fallbackPath);
+            }
+        } else if (!resolved.first) {
+            resolved = resolve_mesh(basePath, basePath);
+        }
+        rit =
+            m_resolveMemo.emplace(rkey, std::make_pair(resolved.first, std::move(resolved.second)))
+                .first;
+    }
+    return rit;
+}
+
+const std::vector<std::size_t>&
+GBufferPass::static_prop_candidates(const RenderContext& ctx,
+                                    const GBufferPassInput& input,
+                                    const glm::vec3& cameraPos,
+                                    const glm::vec4 (&frustum_planes)[6]) {
+    // Resolve each distinct path/LOD once before bounding the population. The
+    // bounds include every fallback, plus both atlas submission and refusal, so
+    // camera, terrain coverage and preset changes need no population rescan.
+    const auto impostorBounds =
+        std::bit_cast<std::array<std::uint32_t, 4>>(std::array{input.tree_impostor_center.x,
+                                                               input.tree_impostor_center.y,
+                                                               input.tree_impostor_center.z,
+                                                               input.tree_impostor_radius});
+    if (!m_staticPropIndexValid || m_staticPropImpostorBounds != impostorBounds) {
+        if (ctx.frozen_replay)
+            throw std::logic_error("Replay cannot rebuild static spatial bounds");
+        m_staticPropIndex = BuildStaticPropSpatialIndex(
+            m_staticPropCache,
+            [&](const auto& cp, int lod) {
+                return resolve_static_prop_lod(ctx, input, cp, lod)->second.first;
+            },
+            input.tree_impostor_center,
+            input.tree_impostor_radius);
+        m_staticPropImpostorBounds = impostorBounds;
+        m_staticPropIndexValid = true;
+    }
+    std::array<std::array<float, 4>, 6> planes{};
+    for (std::size_t plane = 0; plane < planes.size(); ++plane) {
+        const auto& p = frustum_planes[plane];
+        planes[plane] = {p.x, p.y, p.z, p.w};
+    }
+    return m_staticPropIndex.Query(
+        {cameraPos.x, cameraPos.y, cameraPos.z}, planes, input.tree_impostor_enabled);
 }
 
 void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
@@ -824,86 +973,18 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     const glm::vec3 cameraPos = camera.Position;
     const bool impostorsOn = input.tree_impostor_enabled;
     TreeLodConfig kTreeLodCfg; // data-driven defaults; render.tree_lod.* may override later.
-    // Resolves (loading + caching) the mesh for a candidate path, falling back to
-    // the base LOD0 path if the LOD variant cannot be loaded. Returns the path that
-    // actually resolved so the group is keyed by what is really drawn.
-    auto resolve_mesh = [&](const std::string& candidatePath,
-                            const std::string& basePath) -> std::pair<Mesh*, std::string> {
-        auto candidate = m_meshCache.find(candidatePath);
-        if (candidate == m_meshCache.end()) {
-            if (ctx.frozen_replay)
-                throw std::logic_error("Replay cannot change mesh residency");
-            std::string full = (input.root_path / candidatePath).string();
-            // Only load the LOD variant if it exists on disk; an absent.lodN.lmesh caches a
-            // null and falls back to LOD0 SILENTLY (no MeshLoader "failed header" error spam).
-            candidate =
-                m_meshCache
-                    .emplace(candidatePath,
-                             std::filesystem::exists(full) ? MeshLoader::Load(full) : nullptr)
-                    .first;
-        }
-        Mesh* m = candidate->second.get();
-        if (m)
-            return {m, candidatePath};
-        if (candidatePath != basePath) {
-            auto base_entry = m_meshCache.find(basePath);
-            if (base_entry == m_meshCache.end()) {
-                if (ctx.frozen_replay)
-                    throw std::logic_error("Replay cannot change mesh residency");
-                std::string full = (input.root_path / basePath).string();
-                base_entry = m_meshCache.emplace(basePath, MeshLoader::Load(full)).first;
-            }
-            Mesh* base = base_entry->second.get();
-            if (base)
-                return {base, basePath};
-        }
-        return {nullptr, basePath};
-    };
-    auto resolve_lod = [&](const CachedStaticProp& cp, bool authoredTree, int lod) {
-        const std::uint64_t rkey = cp.baseMeshHash ^ (static_cast<std::uint64_t>(lod) *
-                                                      std::uint64_t{0x9E3779B97F4A7C15ull});
-        auto rit = m_resolveMemo.find(rkey);
-        if (rit == m_resolveMemo.end()) {
-            const std::string& basePath = m_propMeshPaths[cp.pathIndex];
-            const std::string candidatePath = LodMeshPath(basePath, lod);
-            auto resolved = resolve_mesh(candidatePath, candidatePath);
-            // At most kTreeLodCount probes for authored trees, only on a memo miss.
-            // Cache failed loads too; steady frames do no new probing or allocation.
-            if (authoredTree) {
-                for (int mesh_lod = lod - 1; !resolved.first && mesh_lod >= 0; --mesh_lod) {
-                    const std::string fallbackPath = LodMeshPath(basePath, mesh_lod);
-                    resolved = resolve_mesh(fallbackPath, fallbackPath);
-                }
-            } else if (!resolved.first) {
-                resolved = resolve_mesh(basePath, basePath);
-            }
-            rit = m_resolveMemo
-                      .emplace(rkey, std::make_pair(resolved.first, std::move(resolved.second)))
-                      .first;
-        }
-        return rit;
-    };
-    // Reuse the per-group buffers across frames: keep capacity, clear contents,
-    // mark inactive. A group's mesh/drawPath/basePath/material are fixed by its key
-    // (rkey encodes baseMeshHash+lod), so the metadata is set once and kept.
+    const auto& candidates = static_prop_candidates(ctx, input, cameraPos, frustum_planes);
     for (auto& kv : m_visibleGroups) {
-        kv.second.mats.clear();
-        kv.second.tints.clear();
+        kv.second.selection.Begin();
         kv.second.active = false;
     }
-    // Per-frame loop over the CACHE (not the registry): distance->LOD->resolve
-    // (persistent memo)->frustum cull (per-LOD mesh sphere -> identical visible
-    // set)->append the PRECOMPUTED matrix + tint. The old per-frame matrix build +
-    // leaf/bark tint hash over all ~84k instances is gone (now done once at cache build).
-    //  far-field tree impostors: collected here, drawn after the mesh groups. One billboard per
-    // tree (triggered on the leaf part; bark/trunk at LOD3 are folded into the same impostor).
     std::vector<ImpostorInstance>& impostorInstances = m_impostorInstances;
-    impostorInstances.clear(); // keep capacity across frames (no per-frame realloc)
+    m_impostorSelection.Begin();
     int impostorMatId = 0;
-    for (const CachedStaticProp& cp : m_staticPropCache) {
+    for (const std::size_t propIndex : candidates) {
+        const CachedStaticProp& cp = m_staticPropCache[propIndex];
         const float dist = glm::length(cp.position - cameraPos);
-        const bool authoredTree =
-            m_propMeshPaths[cp.pathIndex].starts_with("game-assets/tree-small-02/");
+        const bool authoredTree = cp.authoredTree;
         int lod =
             SelectTreeLod(dist, authoredTree ? AuthoredTreeLodConfig(impostorsOn) : kTreeLodCfg);
         // This atlas covers only the authored species. All other trees retain mesh LOD2;
@@ -919,7 +1000,7 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         // impostor. Resolve every eligible part before freezing, including failed
         // probes, so replay only consumes the same memoized fallback chain.
         if (impostor_candidate && !ctx.frozen_replay) {
-            (void)resolve_lod(cp, authoredTree, 2);
+            (void)resolve_static_prop_lod(ctx, input, cp, 2);
         }
         // Submitted chunks are resident too; culling the ground must not remove
         // support while its canopy is still visible (including the authored LOD3 band).
@@ -954,13 +1035,16 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                     }
                 }
                 if (!culled) {
-                    impostorInstances.push_back({cp.model, glm::vec4(cp.tint, 1.0f)});
+                    if (m_impostorSelection.Select(propIndex)) {
+                        impostorInstances.resize(m_impostorSelection.size() - 1);
+                        impostorInstances.push_back({cp.model, glm::vec4(cp.tint, 1.0f)});
+                    }
                     impostorMatId = static_cast<int>(cp.materialId);
                 }
             }
             continue; // all LOD3 tree parts are folded into the billboard
         }
-        const auto rit = resolve_lod(cp, authoredTree, lod);
+        const auto rit = resolve_static_prop_lod(ctx, input, cp, lod);
         const std::uint64_t rkey = rit->first;
         Mesh* mesh = rit->second.first;
         if (!mesh)
@@ -1024,14 +1108,26 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             batch.materialId = cp.materialId;
         }
         batch.active = true;
-        batch.mats.push_back(cp.model);
-        batch.tints.push_back(cp.tint);
+        if (batch.selection.Select(propIndex)) {
+            batch.mats.resize(batch.selection.size() - 1);
+            batch.tints.resize(batch.selection.size() - 1);
+            batch.mats.push_back(cp.model);
+            batch.tints.push_back(cp.tint);
+        }
     }
     for (const std::uint32_t index : m_resolvedAnchorSlots) {
         m_anchorChunks[index].chunk.reset();
         m_anchorChunks[index].resolved = false;
     }
     m_resolvedAnchorSlots.clear();
+    for (auto& kv : m_visibleGroups) {
+        if (kv.second.selection.Finish()) {
+            kv.second.mats.resize(kv.second.selection.size());
+            kv.second.tints.resize(kv.second.selection.size());
+        }
+    }
+    if (m_impostorSelection.Finish())
+        impostorInstances.resize(m_impostorSelection.size());
     const GLboolean cull_was_enabled = glIsEnabled(GL_CULL_FACE);
     for (const auto& kv : m_visibleGroups) {
         const InstanceBatchCached& batch = kv.second;

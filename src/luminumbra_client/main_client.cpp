@@ -54,6 +54,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "core/Profiler.h"
 #include "core/RuntimeScenarioConfig.h"
 #include "core/ScenarioRunner.h"
+#include "core/StrictNumeric.h"
 #include "core/TimelapseVista.h"
 #include "debug/DebugCamera.h" // deterministic feature locator (--debug-goto cave|doline)
 #include "debug/DeveloperConsole.h"
@@ -1745,12 +1746,18 @@ int main(int argc, char* argv[]) {
     g_app.overlay.auto_exposure_metered = HasCommandLineFlag(argc, argv, "--auto-exposure-metered");
     //  rendering (,  ): opt-in froxel volumetrics tier.
     const auto volumetric_option = GetCommandLineOption(argc, argv, "--volumetric-quality", "");
-    const std::optional<int> volumetric_override =
-        volumetric_option.empty() ? std::nullopt : std::optional(std::stoi(volumetric_option));
+    std::optional<int> volumetric_override;
     g_app.capture.profile_fly_seconds = static_cast<double>(GetCommandLineIntOption(
         argc, argv, "--profile-fly", 0)); // runtime telemetry: constant-speed eye-level moving
                                           // profiler (normal-play, self-exits)
     try {
+        if (!volumetric_option.empty()) {
+            int quality = 0;
+            if (!Luminumbra::Core::ParseNumber(volumetric_option, quality))
+                throw std::invalid_argument("Invalid integer value for --volumetric-quality: " +
+                                            volumetric_option);
+            volumetric_override = quality;
+        }
         g_app.capture.render_benchmark_frames = Measurement::benchmark_frame_count(argc, argv);
     } catch (const std::invalid_argument& error) {
         LUMINUMBRA_CORE_ERROR("{}", error.what());
@@ -1813,18 +1820,14 @@ int main(int argc, char* argv[]) {
         }
         const std::string cy = GetCommandLineOption(argc, argv, "--cam-yaw", "");
         if (!cy.empty()) {
-            try {
-                g_app.capture.fixed_cam_yaw = std::stof(cy);
-            } catch (...) {
+            if (!Luminumbra::Core::ParseNumber(cy, g_app.capture.fixed_cam_yaw)) {
                 LUMINUMBRA_CORE_ERROR("Invalid --cam-yaw value; refusing capture");
                 return 2;
             }
         }
         const std::string cpi = GetCommandLineOption(argc, argv, "--cam-pitch", "");
         if (!cpi.empty()) {
-            try {
-                g_app.capture.fixed_cam_pitch = std::stof(cpi);
-            } catch (...) {
+            if (!Luminumbra::Core::ParseNumber(cpi, g_app.capture.fixed_cam_pitch)) {
                 LUMINUMBRA_CORE_ERROR("Invalid --cam-pitch value; refusing capture");
                 return 2;
             }
@@ -1955,7 +1958,8 @@ int main(int argc, char* argv[]) {
     // DIAGNOSTIC-only settle override (see g_app.capture.frame_scan_settle_target): let a
     // fully-loaded capture wait past the gate's 90-frame default. Gates never set this env.
     if (const auto settle_env = Luminumbra::Core::ReadEnvironment("LUMIN_FRAME_SCAN_SETTLE")) {
-        const int v = std::atoi(settle_env->c_str());
+        int v = 0;
+        Luminumbra::Core::ParseNumber(*settle_env, v);
         if (v > 0)
             g_app.capture.frame_scan_settle_target = v;
     }
@@ -2080,18 +2084,14 @@ int main(int argc, char* argv[]) {
     {
         const std::string ds = GetCommandLineOption(argc, argv, "--timelapse-daystep", "");
         if (!ds.empty()) {
-            try {
-                g_app.capture.timelapse_daystep = std::stof(ds);
-            } catch (...) {
+            if (!Luminumbra::Core::ParseNumber(ds, g_app.capture.timelapse_daystep)) {
                 LUMINUMBRA_CORE_ERROR("Invalid --timelapse-daystep value; refusing capture");
                 return 2;
             }
         }
         const std::string t0 = GetCommandLineOption(argc, argv, "--timelapse-tod", "");
         if (!t0.empty()) {
-            try {
-                g_app.capture.timelapse_tod = std::stof(t0);
-            } catch (...) {
+            if (!Luminumbra::Core::ParseNumber(t0, g_app.capture.timelapse_tod)) {
                 LUMINUMBRA_CORE_ERROR("Invalid --timelapse-tod value; refusing capture");
                 return 2;
             }
@@ -2368,6 +2368,7 @@ int main(int argc, char* argv[]) {
     jobSystem.startup();
 
     auto gameSession = std::make_unique<Luminumbra::world::GameSession>();
+    g_app.audio.Reset();
     gameSession->SetJobSystem(&jobSystem);
     gameSession->SetRootPath(root_path_str);
     gameSession->SetSaveRootPath(path_options.save_root);
@@ -2498,8 +2499,11 @@ int main(int argc, char* argv[]) {
     renderPipeline.set_sky_lut_gpu_enabled(
         g_systemConfig.enabled(luminumbra::core::SysKey::RenderSkyLutGpu));
     std::optional<float> environment_render_scale;
-    if (const auto value = Luminumbra::Core::ReadEnvironment("LUMIN_RENDER_SCALE"))
-        environment_render_scale = std::strtof(value->c_str(), nullptr);
+    if (const auto value = Luminumbra::Core::ReadEnvironment("LUMIN_RENDER_SCALE")) {
+        float scale = 0.0f; // Zero keeps malformed input from overriding the graphics settings.
+        Luminumbra::Core::ParseNumber(*value, scale);
+        environment_render_scale = scale;
+    }
     const auto graphics_session_overrides = Luminumbra::Client::GraphicsSessionOverrides(
         perf_profile, environment_render_scale, volumetric_override);
     Luminumbra::Client::GraphicsSettingsState graphics_state(
@@ -2601,11 +2605,13 @@ int main(int argc, char* argv[]) {
     // LUMIN_SSAO_QUALITY=0 to fall back to the legacy full-res paths for A/B.
     int cloud_quality = resolved_graphics.values.cloud_quality;
     if (const auto cq = Luminumbra::Core::ReadEnvironment("LUMIN_CLOUD_QUALITY")) {
-        cloud_quality = std::atoi(cq->c_str());
+        cloud_quality = 0; // Keep the existing malformed-value fallback.
+        Luminumbra::Core::ParseNumber(*cq, cloud_quality);
     }
     int ssao_quality = resolved_graphics.values.ao_quality;
     if (const auto sq = Luminumbra::Core::ReadEnvironment("LUMIN_SSAO_QUALITY")) {
-        ssao_quality = std::atoi(sq->c_str());
+        ssao_quality = 0; // Keep the existing malformed-value fallback.
+        Luminumbra::Core::ParseNumber(*sq, ssao_quality);
     }
     const std::string game_asset_startup_error = VerifyGameAssets(root_dir);
     if (!game_asset_startup_error.empty())
@@ -2725,6 +2731,7 @@ int main(int argc, char* argv[]) {
     // Player ownership marks a live gameplay presentation. Retiring it is the
     // common boundary for menu exits, world replacements and failed-entry drains.
     auto release_player_controller = [&]() {
+        g_app.audio.Reset(audioManager.get());
         if (g_playerController) {
             ReleasePhotoModeAndHud(g_app, renderPipeline);
             g_playerController.reset();
@@ -2809,7 +2816,7 @@ int main(int argc, char* argv[]) {
         g_app.foragers = {};
         g_app.weather = {};
         // Thunder and the flash from the previous world must not carry over.
-        g_app.audio.pendingThunder.clear();
+        g_app.audio.Reset(audioManager.get());
         renderPipeline.set_lightning_state({});
         g_app.interactions = {};
         g_app.foliage.cachedScatter.clear();
@@ -3940,6 +3947,7 @@ int main(int argc, char* argv[]) {
                              runtime_boot_frames,
                              runtime_boot_output.string());
         prepare_world_entry();
+        g_app.audio.Reset(audioManager.get());
         if (auto* world_system = gameSession->GetWorldSystem()) {
             world_system->clear_world(nullptr);
         }
@@ -4128,7 +4136,24 @@ int main(int argc, char* argv[]) {
                 LUMINUMBRA_CORE_ERROR("Could not restore graphics after world preview");
         }
     };
+    namespace Attribution = Luminumbra::Client::Attribution;
+    struct EntryPresentationWork {
+        double total = 0;
+        double water = 0;
+        double scatter = 0;
+        double foliage = 0;
+        double render = 0;
+        double observe = 0;
+        double phases = 0;
+        double nested_foliage = 0;
+    } entry_presentation_work;
     auto wait_for_world_presentation = [&]() {
+        std::size_t entry_horizon_wanted = 0, entry_horizon_missing = 0;
+        std::size_t entry_horizon_stale = 0, entry_horizon_pending = 0;
+        std::size_t entry_horizon_failures = 0;
+        Attribution::StageTimer total_timer(entry_presentation_work.total, true);
+        const double phases_before = Attribution::phase_total_ms();
+        const double foliage_before = Attribution::foliage_total_ms();
         restore_worldgen_preview();
         if (!entry_presentation_started) {
             entry_presentation_started = true;
@@ -4147,6 +4172,7 @@ int main(int argc, char* argv[]) {
         Luminumbra::Client::WorldPresentationReadiness readiness;
         if (world && g_camera) {
             if (!entry_water_prepared) {
+                Attribution::StageTimer water_timer(entry_presentation_work.water, true);
                 entry_water_prepared = world->PrepareInitialWaterPresentationNear(
                     g_camera->Position, presentation_radius());
             }
@@ -4160,19 +4186,36 @@ int main(int argc, char* argv[]) {
                                  false,
                                  scatter_ms,
                                  foliage_ms);
+            entry_presentation_work.scatter += scatter_ms;
+            entry_presentation_work.foliage += foliage_ms;
             auto* legacy = renderPipeline.legacy_far_compatibility();
             const bool diagnostics_enabled = legacy && legacy->coverage_diagnostics().enabled;
             if (legacy) {
                 legacy->set_coverage_diagnostics_enabled(true);
             }
-            renderPipeline.render_frame(
-                gameSession->GetRegistry(), *world, *g_camera, 0.0f, g_app.overlay.wireframe_mode);
+            {
+                Attribution::StageTimer render_timer(entry_presentation_work.render, true);
+                renderPipeline.render_frame(gameSession->GetRegistry(),
+                                            *world,
+                                            *g_camera,
+                                            0.0f,
+                                            g_app.overlay.wireframe_mode,
+                                            Luminumbra::Rendering::UploadPresentation::Loading);
+            }
+            Attribution::StageTimer observe_timer(entry_presentation_work.observe, true);
             readiness = ObserveWorldPresentation(*world,
                                                  renderPipeline,
                                                  g_camera->Position,
                                                  presentation_radius(),
                                                  entry_water_prepared);
             if (legacy) {
+                const auto& coverage = legacy->coverage_diagnostics();
+                const auto& far_stats = legacy->stats();
+                entry_horizon_wanted = coverage.wanted;
+                entry_horizon_missing = coverage.missing;
+                entry_horizon_stale = coverage.stale;
+                entry_horizon_pending = coverage.pending;
+                entry_horizon_failures = far_stats.builds_failed_total;
                 legacy->set_coverage_diagnostics_enabled(diagnostics_enabled);
             }
         }
@@ -4181,7 +4224,28 @@ int main(int argc, char* argv[]) {
             readiness, std::chrono::steady_clock::now() - entry_presentation_started_at);
         if (was_waiting && entry_presentation_gate.timed_out()) {
             log_presentation_timeout(entry_presentation_gate);
+            if (world) {
+                const auto& streaming = world->get_streaming_telemetry_stats();
+                LUMINUMBRA_CORE_WARN(
+                    "Entry readiness: stream_observations={} queue={} generation_batches={} "
+                    "meshing_batches={} pending_lod={} promotion={} | "
+                    "legacy_wanted={} missing={} stale={} pending={} failures={}",
+                    streaming.frames_observed,
+                    streaming.last_queue_depth,
+                    streaming.generation_batches,
+                    streaming.meshing_batches,
+                    streaming.pending_lod_chunks,
+                    streaming.promotion_pending,
+                    entry_horizon_wanted,
+                    entry_horizon_missing,
+                    entry_horizon_stale,
+                    entry_horizon_pending,
+                    entry_horizon_failures);
+            }
         }
+        total_timer.stop();
+        entry_presentation_work.phases += Attribution::phase_total_ms() - phases_before;
+        entry_presentation_work.nested_foliage += Attribution::foliage_total_ms() - foliage_before;
         return entry_presentation_gate.waiting();
     };
     auto activate_loaded_world = [&]() {
@@ -4606,7 +4670,6 @@ int main(int argc, char* argv[]) {
         }
         return WorldEntryResult::Complete;
     };
-    namespace Attribution = Luminumbra::Client::Attribution;
     const bool frame_attribution_enabled =
         frame_csv_enabled || HasCommandLineFlag(argc, argv, "--frame-attribution");
     Attribution::FrameRecorder frame_recorder(frame_csv_enabled, "logs");
@@ -4732,6 +4795,7 @@ int main(int argc, char* argv[]) {
         frame_limiter.pace(pacing.frame_cap, frame_timing);
         LUMIN_PROFILE_ZONE_N("Client frame");
         const auto _frameStart = std::chrono::steady_clock::now();
+        entry_presentation_work = {};
         const Attribution::FoliageFrameScope foliage_scope(frame_attribution_enabled);
         const Luminumbra::WaterAttribution::FrameScope water_scope(frame_attribution_enabled);
         Attribution::PhaseFrameScope phase_scope(frame_attribution_enabled);
@@ -5164,6 +5228,7 @@ int main(int argc, char* argv[]) {
         // Frame audio — 3D listener, player footsteps, and the living-world
         // rain/creature-call region (app/FrameAudio.cpp).
         UpdateFrameAudio(g_app,
+                         g_app.audio,
                          currentState,
                          deltaTime,
                          audioManager.get(),
@@ -7101,6 +7166,17 @@ int main(int argc, char* argv[]) {
                 std::chrono::duration<double, std::milli>(_now - _frameStart).count();
             const double _presentMs =
                 std::chrono::duration<double, std::milli>(_now - _beforeSwap).count();
+            // Entry callers run before the ordinary render bucket is populated,
+            // including benchmark reloads. Keep nested phases/rebuilds exclusive.
+            const double entry_stream_ms =
+                entry_presentation_work.water + entry_presentation_work.observe;
+            rb_stream_ms += entry_stream_ms;
+            rb_render_call_ms += entry_presentation_work.total - entry_stream_ms;
+            rb_render_bucket_ms +=
+                entry_presentation_work.total - entry_stream_ms - entry_presentation_work.scatter -
+                entry_presentation_work.nested_foliage - entry_presentation_work.phases;
+            rb_scatter_ms += entry_presentation_work.scatter;
+            rb_foliage_ms += entry_presentation_work.foliage;
             const auto& foliage_frame = foliage_scope.snapshot();
             const auto& foliage_attribution = foliage_frame.rebuild;
             const Attribution::FrameBuckets buckets{.sim = rb_sim_ms,
@@ -7174,6 +7250,16 @@ int main(int argc, char* argv[]) {
                     Luminumbra::Rendering::FarWorldSubmissionRefusalName(
                         slow_far.submission_refusal),
                     slow_far.coverage_settled);
+                if (entry_presentation_work.total > 0) {
+                    LUMINUMBRA_CORE_WARN("  entry-split: total={:.3f} water={:.3f} scatter={:.3f} "
+                                         "foliage={:.3f} render={:.3f} observe={:.3f}",
+                                         entry_presentation_work.total,
+                                         entry_presentation_work.water,
+                                         entry_presentation_work.scatter,
+                                         entry_presentation_work.foliage,
+                                         entry_presentation_work.render,
+                                         entry_presentation_work.observe);
+                }
                 if (frame_attribution_enabled) {
                     const auto& phases = phase_scope.snapshot();
                     for (std::size_t index = 0; index < Attribution::kPhaseCount; ++index)

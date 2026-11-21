@@ -1294,6 +1294,7 @@ private:
     RenderableViewWork m_renderable_view_work;
     void invalidate_renderable_chunks();
     void set_renderable_chunk_state(Chunk& chunk, ChunkState state);
+    const World::ActivationResidencyIndex::LifecycleCounts& streaming_lifecycle_counts();
     // debug_set_streaming_radius_cap: 0 = uncapped (production behaviour).
     int m_streaming_radius_cap = 0;
     DbgStreamTimings m_dbg_stream; // runtime telemetry
@@ -1360,7 +1361,9 @@ private:
     mutable u64 m_collision_terrain_evaluations = 0;
     mutable u64 m_collision_sample_clock = 0;
     bool m_evictions_suspended = false;
-    std::shared_ptr<Chunk> read_committed_chunk(const IVec3& coords) const;
+    // Only restoration prepares derived seeds; read-only hash/collision probes do no extra work.
+    std::shared_ptr<Chunk> read_committed_chunk(const IVec3& coords,
+                                                bool prepare_water = false) const;
     void migrate_restored_water_column(const std::shared_ptr<Chunk>& chunk);
     // Capacity is reserved before resolution, so reserved renderer caches are
     // not necessarily admitted. Unsaved reservations survive admission cleanup
