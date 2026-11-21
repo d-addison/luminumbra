@@ -514,10 +514,7 @@ bool ServerWorldRunner::Boot() {
         boot_anchors.push_back(avatar.position);
     }
     world::GameSession::BootSettleStats settle_stats;
-    if (!m_session->SettleInitialSimulation(boot_anchors,
-                                            settle_stats,
-                                            m_config.surface_radius != 0 ||
-                                                m_config.collision_radius != 0)) {
+    if (!m_session->SettleInitialSimulation(boot_anchors, settle_stats)) {
         m_bootError = "Initial simulation preparation failed";
         m_session.reset();
         m_jobSystem.shutdown();

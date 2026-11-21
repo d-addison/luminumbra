@@ -184,8 +184,7 @@ class ReplaySourceContract(unittest.TestCase):
                         driver.index("Luminumbra::Replay::CaptureReplayHeader("))
         runner = read_source("src/luminumbra_server/ServerWorldRunner.cpp")
         self.assertRegex(runner, r"m_session->SettleInitialSimulation\(\s*boot_anchors,\s*"
-                         r"settle_stats,\s*m_config.surface_radius != 0 \|\|\s*"
-                         r"m_config.collision_radius != 0\)")
+                         r"settle_stats\)")
         session = read_source("src/luminumbra_common/world/GameSession.cpp")
         entry = session.split("bool GameSession::PrepareInitialSimulation(", 1)[1].split(
             "bool GameSession::SettleInitialSimulation(", 1)[0]
@@ -193,15 +192,15 @@ class ReplaySourceContract(unittest.TestCase):
                         entry.index("EnsureSurfaceReadyNear("))
         self.assertLess(entry.index("SettleInitialSimulation("),
                         entry.index("sync_water_authority()"))
-        self.assertIn("surface_radius != 0 || collision_radius != 0, stop)", entry)
+        self.assertIn("SettleInitialSimulation({}, stats, stop)", entry)
         settle = session.split("bool GameSession::SettleInitialSimulation(", 1)[1].split(
             "struct GameSession::LoadedWorldState", 1)[0]
         self.assertIn("i < 400 && stable < 8", settle)
         self.assertIn("kInitSettleCap = 50", settle)
         self.assertIn("kPostInitSettleTicks = 240", settle)
         self.assertIn("!continuation && !water_loaded_from_save", settle)
-        self.assertIn("settle_streaming && !continuation && i < 400", settle)
-        self.assertIn("settle_streaming && !continuation && !water_loaded_from_save", settle)
+        self.assertIn("for (int i = 0; !continuation && i < 400", settle)
+        self.assertNotIn("settle_streaming", session)
         self.assertNotIn("TickSimulation(", settle)
         self.assertGreaterEqual(settle.count("stop.stop_requested()"), 5)
         native = read_source("test/performance/runtime_world_visual_validation_test.cpp")
@@ -230,7 +229,7 @@ class ReplaySourceContract(unittest.TestCase):
         self.assertIn("if (!chunk->has_terrain_authority()) {\n"
                       "            entry.authority_durable = true;\n        }", capture)
         native = read_source("test/performance/runtime_world_visual_validation_test.cpp")
-        for name in ("RadiusZeroKeepsOnlyThePreparedSurface",
+        for name in ("RadiusZeroSettlesStreamingAndWaterAtTickZero",
                      "DrainedStreamingAndWaterOnlyTerrainArePresentationReady",
                      "StreamingDrainRetainsUnadmittedCandidates"):
             self.assertIn("TEST(ClientBootPreparation, " + name + ")", native)

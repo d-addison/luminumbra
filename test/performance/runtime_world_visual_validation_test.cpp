@@ -1106,7 +1106,7 @@ TEST(ClientBootPreparation, MissingSystemsInvalidRadiiAndCancellationRefuseBefor
     world::GameSession missing;
     world::GameSession::BootSettleStats stats;
     EXPECT_FALSE(missing.PrepareInitialSimulation(0, 0));
-    EXPECT_FALSE(missing.SettleInitialSimulation({}, stats, true));
+    EXPECT_FALSE(missing.SettleInitialSimulation({}, stats));
 
     const TestSupport::HeadlessRoot root;
     JobSystem jobs;
@@ -1124,7 +1124,7 @@ TEST(ClientBootPreparation, MissingSystemsInvalidRadiiAndCancellationRefuseBefor
     std::stop_source cancellation;
     cancellation.request_stop();
     EXPECT_FALSE(client.PrepareInitialSimulation(0, 0, cancellation.get_token()));
-    EXPECT_FALSE(client.SettleInitialSimulation({}, stats, true, cancellation.get_token()));
+    EXPECT_FALSE(client.SettleInitialSimulation({}, stats, cancellation.get_token()));
     EXPECT_EQ(TestSupport::SessionWorldHash(client), before);
     EXPECT_EQ(client.GetSimulationTickCount(), 0u);
     EXPECT_FALSE(fs::exists(client.GetWorldSaveDir() / "desync.lrec1"));
@@ -1159,7 +1159,7 @@ TEST(ClientBootPreparation, LoadedEntryPreservesWaterAtTickZero) {
     EXPECT_EQ(loaded.TickSimulation(loaded.GetSimulationClock().fixed_dt()), 1u);
 }
 
-TEST(ClientBootPreparation, RadiusZeroKeepsOnlyThePreparedSurface) {
+TEST(ClientBootPreparation, RadiusZeroSettlesStreamingAndWaterAtTickZero) {
     const TestSupport::HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
@@ -1168,17 +1168,21 @@ TEST(ClientBootPreparation, RadiusZeroKeepsOnlyThePreparedSurface) {
     client.SetRootPath(root.root_string());
     ASSERT_TRUE(client.CreateWorld("Client", "424242", "default"));
     ASSERT_TRUE(client.LoadWorldState());
+    client.GetWorldSystem()->debug_set_streaming_radius_cap(1);
     ASSERT_TRUE(client.PrepareInitialSimulation(0, 0));
     auto* world_system = client.GetWorldSystem();
-    EXPECT_EQ(world_system->get_streaming_telemetry_stats().frames_observed, 0u);
+    EXPECT_GE(world_system->get_streaming_telemetry_stats().frames_observed, 240u);
     EXPECT_TRUE(world_system->get_streaming_telemetry_stats().quiescent());
     const auto spawn = SHIELD_WorldSystem::world_to_chunk_coords(client.GetMetadata().spawnPoint);
     const auto chunks = world_system->snapshot_streamed_chunks();
     ASSERT_FALSE(chunks.empty());
     for (const auto& chunk : chunks) {
-        EXPECT_EQ(chunk->get_coords().x, spawn.x);
-        EXPECT_EQ(chunk->get_coords().z, spawn.z);
+        ASSERT_TRUE(chunk);
+        EXPECT_TRUE(chunk->has_water_sim.load(std::memory_order_acquire));
     }
+    EXPECT_TRUE(std::any_of(chunks.begin(), chunks.end(), [&](const auto& chunk) {
+        return chunk->get_coords().x != spawn.x || chunk->get_coords().z != spawn.z;
+    }));
     EXPECT_EQ(client.GetSimulationTickCount(), 0u);
 }
 
@@ -1194,8 +1198,12 @@ TEST(ClientBootPreparation, DrainedStreamingAndWaterOnlyTerrainArePresentationRe
     constexpr std::size_t kSamples =
         static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
     chunk->sdf_data.assign(kSamples, -1.0f);
+    // Generated data enters the scheduler as Idle, awaiting its first mesh.
+    chunk->set_state(ChunkState::Idle);
     ASSERT_TRUE(world_system.adopt_streamed_chunk(chunk));
     world_system.update(registry, Vec3(8.0f), nullptr, false);
+    ASSERT_EQ(world_system.get_last_streaming_budget_stats().meshing_candidates, 1u);
+    ASSERT_EQ(world_system.get_last_streaming_budget_stats().submitted_meshing, 1u);
     ASSERT_FALSE(world_system.get_streaming_telemetry_stats().quiescent());
     world_system.wait_for_streaming_jobs();
     EXPECT_TRUE(world_system.get_streaming_telemetry_stats().quiescent());
@@ -1235,7 +1243,7 @@ TEST(ClientBootPreparation, StreamingDrainRetainsUnadmittedCandidates) {
     const auto params = Luminumbra::Test::SyntheticTerrainParams();
     SHIELD_WorldSystem world_system(&jobs, nullptr, params, 4242);
     entt::registry registry;
-    // This backlog selects a 320-item prefix. Empty SDFs keep the fixed
+    // This backlog selects a 320-item prefix. Uniform SDFs keep the fixed
     // workload bounded while exercising snapshot backpressure too.
     constexpr int kChunks = 321;
     constexpr std::size_t kSamples =
@@ -1243,6 +1251,7 @@ TEST(ClientBootPreparation, StreamingDrainRetainsUnadmittedCandidates) {
     for (int x = 0; x < kChunks; ++x) {
         auto chunk = std::make_shared<Chunk>(IVec3(x, 0, 0));
         chunk->sdf_data.assign(kSamples, -1.0f);
+        chunk->set_state(ChunkState::Idle);
         ASSERT_TRUE(world_system.adopt_streamed_chunk(chunk));
     }
     world_system.update(registry, Vec3(8.0f), nullptr, false);

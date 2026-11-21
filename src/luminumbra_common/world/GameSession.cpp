@@ -304,7 +304,7 @@ bool GameSession::PrepareInitialSimulation(int surface_radius,
         return false;
     }
     BootSettleStats stats;
-    if (!SettleInitialSimulation({}, stats, surface_radius != 0 || collision_radius != 0, stop))
+    if (!SettleInitialSimulation({}, stats, stop))
         return false;
     if (loaded)
         m_worldSystem->SetWaterBootPaused(false);
@@ -314,7 +314,6 @@ bool GameSession::PrepareInitialSimulation(int surface_radius,
 
 bool GameSession::SettleInitialSimulation(const std::vector<Vec3>& anchors,
                                           BootSettleStats& stats,
-                                          bool settle_streaming,
                                           const std::stop_token& stop) {
     if (stop.stop_requested() || !m_worldSystem || !m_physicsSystem)
         return false;
@@ -336,7 +335,7 @@ bool GameSession::SettleInitialSimulation(const std::vector<Vec3>& anchors,
     // visit only that bounded resident set. No counted simulation ticks run here.
     std::size_t last_count = static_cast<std::size_t>(-1);
     int stable = 0;
-    for (int i = 0; settle_streaming && !continuation && i < 400 && stable < 8; ++i) {
+    for (int i = 0; !continuation && i < 400 && stable < 8; ++i) {
         if (stop.stop_requested())
             return false;
         stream_once();
@@ -348,7 +347,7 @@ bool GameSession::SettleInitialSimulation(const std::vector<Vec3>& anchors,
     // perpetually wake neighbours. Initialize the backlog, then consume the
     // original fixed transient budget. Loaded/continued water must not advance.
     int settle_iters = 0;
-    if (settle_streaming && !continuation && !water_loaded_from_save) {
+    if (!continuation && !water_loaded_from_save) {
         ws->SetWaterBootSettleMode(true);
         struct SettleModeGuard {
             Systems::SHIELD_WorldSystem& world;
