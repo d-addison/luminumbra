@@ -10,6 +10,7 @@
 #include <string>
 #include <system_error>
 
+#include "../fixtures/AvatarContinuationWorld.h"
 #include "../support/UniqueTempPath.h"
 #include "../support/WorldgenTestData.h"
 #include "luminumbra_common/components/CoreComponents.h"
@@ -17,6 +18,7 @@
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/AetherFieldSystem.h"
+#include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
@@ -530,6 +532,871 @@ TEST(HeavyComparison, MeshEqualTracksMeshOnly) {
         HeavyHashes other = base;
         row.mutate(other);
         EXPECT_TRUE(MeshEqual(base, other));
+    }
+}
+
+using Luminumbra::Server::HeavyOwnerCapture;
+using Luminumbra::Server::HeavyOwnerDifference;
+using Luminumbra::Server::HeavyOwnerFields;
+using Luminumbra::Server::HeavyOwnerScheduler;
+
+struct OwnerMutation {
+    const char* field;
+    void (*mutate)(HeavyOwnerCapture&);
+};
+
+// Independent mutation list: it does not call the comparison's scalar projections.
+// The arity guards below fail compilation when a real encoding gains a member.
+
+const std::array<OwnerMutation, 107>& OwnerMutationTable() {
+    static const std::array<OwnerMutation, 107> table{{
+        {"owner.world_seed",
+         [](HeavyOwnerCapture& h) {
+             ++h.owners.world_seed;
+         }},
+        {"owner.preset_identity",
+         [](HeavyOwnerCapture& h) {
+             h.owners.preset_identity += "x";
+         }},
+        {"owner.slot_count",
+         [](HeavyOwnerCapture& h) {
+             ++h.owners.slot_count;
+         }},
+        {"owner.bodies[0].physics.suspended",
+         [](HeavyOwnerCapture& h) {
+             h.owners.bodies[0].state.suspended = !h.owners.bodies[0].state.suspended;
+         }},
+        {"owner.bodies[0].physics.was_active",
+         [](HeavyOwnerCapture& h) {
+             h.owners.bodies[0].state.was_active = !h.owners.bodies[0].state.was_active;
+         }},
+        {"owner.bodies[0].physics.retained_velocity.x",
+         [](HeavyOwnerCapture& h) {
+             h.owners.bodies[0].state.retained_velocity.x = -0.0f;
+         }},
+        {"owner.bodies[0].physics.retained_velocity.y",
+         [](HeavyOwnerCapture& h) {
+             h.owners.bodies[0].state.retained_velocity.y = -0.0f;
+         }},
+        {"owner.bodies[0].physics.retained_velocity.z",
+         [](HeavyOwnerCapture& h) {
+             h.owners.bodies[0].state.retained_velocity.z = -0.0f;
+         }},
+        {"owner.bodies[0].physics.retained_angular_velocity.x",
+         [](HeavyOwnerCapture& h) {
+             h.owners.bodies[0].state.retained_angular_velocity.x = -0.0f;
+         }},
+        {"owner.bodies[0].physics.retained_angular_velocity.y",
+         [](HeavyOwnerCapture& h) {
+             h.owners.bodies[0].state.retained_angular_velocity.y = -0.0f;
+         }},
+        {"owner.bodies[0].physics.retained_angular_velocity.z",
+         [](HeavyOwnerCapture& h) {
+             h.owners.bodies[0].state.retained_angular_velocity.z = -0.0f;
+         }},
+        {"owner.bodies[0].physics.registration_slot",
+         [](HeavyOwnerCapture& h) {
+             ++h.owners.bodies[0].state.registration_slot;
+         }},
+        {"owner.free_slots.size",
+         [](HeavyOwnerCapture& h) {
+             h.owners.free_slots.clear();
+         }},
+        {"owner.free_slots[0].value",
+         [](HeavyOwnerCapture& h) {
+             ++h.owners.free_slots[0];
+         }},
+        {"owner.simulation_terrain.bodies.size",
+         [](HeavyOwnerCapture& h) {
+             h.owners.simulation_terrain.bodies.clear();
+         }},
+        {"owner.simulation_terrain.bodies[0].value",
+         [](HeavyOwnerCapture& h) {
+             ++h.owners.simulation_terrain.bodies[0];
+         }},
+        {"owner.simulation_terrain.columns.size",
+         [](HeavyOwnerCapture& h) {
+             h.owners.simulation_terrain.columns.clear();
+         }},
+        {"owner.simulation_terrain.columns[0].id",
+         [](HeavyOwnerCapture& h) {
+             ++h.owners.simulation_terrain.columns[0].id;
+         }},
+        {"owner.simulation_terrain.columns[0].heights[0]",
+         [](HeavyOwnerCapture& h) {
+             h.owners.simulation_terrain.columns[0].heights[0] = -0.0f;
+         }},
+        {"owner.simulation_tick",
+         [](HeavyOwnerCapture& h) {
+             ++h.owners.simulation_tick;
+         }},
+        {"owner.stream_tick",
+         [](HeavyOwnerCapture& h) {
+             ++h.owners.stream_tick;
+         }},
+        {"owner.moving_anchor",
+         [](HeavyOwnerCapture& h) {
+             h.owners.moving_anchor = !h.owners.moving_anchor;
+         }},
+        {"owner.water_smoke",
+         [](HeavyOwnerCapture& h) {
+             h.owners.water_smoke = !h.owners.water_smoke;
+         }},
+        {"owner.origin.x",
+         [](HeavyOwnerCapture& h) {
+             h.owners.origin.x = -0.0f;
+         }},
+        {"owner.origin.y",
+         [](HeavyOwnerCapture& h) {
+             h.owners.origin.y = -0.0f;
+         }},
+        {"owner.origin.z",
+         [](HeavyOwnerCapture& h) {
+             h.owners.origin.z = -0.0f;
+         }},
+        {"owner.anchor.x",
+         [](HeavyOwnerCapture& h) {
+             h.owners.anchor.x = -0.0f;
+         }},
+        {"owner.anchor.y",
+         [](HeavyOwnerCapture& h) {
+             h.owners.anchor.y = -0.0f;
+         }},
+        {"owner.anchor.z",
+         [](HeavyOwnerCapture& h) {
+             h.owners.anchor.z = -0.0f;
+         }},
+        {"owner.avatars[0].avatar.player_id",
+         [](HeavyOwnerCapture& h) {
+             ++h.owners.avatars[0].avatar.player_id;
+         }},
+        {"owner.avatars[0].avatar.position.x",
+         [](HeavyOwnerCapture& h) {
+             h.owners.avatars[0].avatar.position.x = -0.0f;
+         }},
+        {"owner.avatars[0].avatar.position.y",
+         [](HeavyOwnerCapture& h) {
+             h.owners.avatars[0].avatar.position.y = -0.0f;
+         }},
+        {"owner.avatars[0].avatar.position.z",
+         [](HeavyOwnerCapture& h) {
+             h.owners.avatars[0].avatar.position.z = -0.0f;
+         }},
+        {"owner.avatars[0].avatar.velocity.x",
+         [](HeavyOwnerCapture& h) {
+             h.owners.avatars[0].avatar.velocity.x = -0.0f;
+         }},
+        {"owner.avatars[0].avatar.velocity.y",
+         [](HeavyOwnerCapture& h) {
+             h.owners.avatars[0].avatar.velocity.y = -0.0f;
+         }},
+        {"owner.avatars[0].avatar.velocity.z",
+         [](HeavyOwnerCapture& h) {
+             h.owners.avatars[0].avatar.velocity.z = -0.0f;
+         }},
+        {"owner.avatars[0].avatar.facing",
+         [](HeavyOwnerCapture& h) {
+             h.owners.avatars[0].avatar.facing = -0.0f;
+         }},
+        {"owner.bodies[0].owner_id",
+         [](HeavyOwnerCapture& h) {
+             h.owners.bodies[0].owner_id += 1;
+         }},
+        {"owner.bodies[0].anchor.x",
+         [](HeavyOwnerCapture& h) {
+             h.owners.bodies[0].anchor.x = -0.0f;
+         }},
+        {"owner.bodies[0].anchor.y",
+         [](HeavyOwnerCapture& h) {
+             h.owners.bodies[0].anchor.y = -0.0f;
+         }},
+        {"owner.bodies[0].anchor.z",
+         [](HeavyOwnerCapture& h) {
+             h.owners.bodies[0].anchor.z = -0.0f;
+         }},
+        {"owner.player.owner_id",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.player) {
+                 ADD_FAILURE() << "Expected populated capture";
+                 return;
+             }
+             (*h.owners.player).owner_id += 1;
+         }},
+        {"owner.player.anchor.x",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.player) {
+                 ADD_FAILURE() << "Expected populated capture";
+                 return;
+             }
+             (*h.owners.player).anchor.x = -0.0f;
+         }},
+        {"owner.player.anchor.y",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.player) {
+                 ADD_FAILURE() << "Expected populated capture";
+                 return;
+             }
+             (*h.owners.player).anchor.y = -0.0f;
+         }},
+        {"owner.player.anchor.z",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.player) {
+                 ADD_FAILURE() << "Expected populated capture";
+                 return;
+             }
+             (*h.owners.player).anchor.z = -0.0f;
+         }},
+        {"owner.terrain[0].chunk_id",
+         [](HeavyOwnerCapture& h) {
+             ++h.owners.terrain[0].chunk_id;
+         }},
+        {"owner.terrain[0].body_id",
+         [](HeavyOwnerCapture& h) {
+             ++h.owners.terrain[0].body_id;
+         }},
+        {"scheduler.active_regions",
+         [](HeavyOwnerCapture& h) {
+             h.scheduler.active_regions = !h.scheduler.active_regions;
+         }},
+        {"scheduler.ledger_tick",
+         [](HeavyOwnerCapture& h) {
+             ++h.scheduler.ledger_tick;
+         }},
+        {"scheduler.ledger_header_tick",
+         [](HeavyOwnerCapture& h) {
+             ++h.scheduler.ledger_header_tick;
+         }},
+        {"scheduler.next_persistent_id",
+         [](HeavyOwnerCapture& h) {
+             ++h.scheduler.next_persistent_id;
+         }},
+        {"scheduler.water_cursor",
+         [](HeavyOwnerCapture& h) {
+             ++h.scheduler.water_cursor;
+         }},
+        {"scheduler.clock.tick",
+         [](HeavyOwnerCapture& h) {
+             h.scheduler.clock.set_tick(1);
+         }},
+        {"scheduler.clock.calendar.dayLengthTicks",
+         [](HeavyOwnerCapture& h) {
+             auto calendar = h.scheduler.clock.calendar();
+             ++calendar.dayLengthTicks;
+             h.scheduler.clock = Luminumbra::world::WorldClock(0, calendar);
+         }},
+        {"scheduler.clock.calendar.daysPerYear",
+         [](HeavyOwnerCapture& h) {
+             auto calendar = h.scheduler.clock.calendar();
+             ++calendar.daysPerYear;
+             h.scheduler.clock = Luminumbra::world::WorldClock(0, calendar);
+         }},
+        {"scheduler.clock.calendar.daylightNumerator",
+         [](HeavyOwnerCapture& h) {
+             auto calendar = h.scheduler.clock.calendar();
+             --calendar.daylightNumerator;
+             h.scheduler.clock = Luminumbra::world::WorldClock(0, calendar);
+         }},
+        {"scheduler.clock.calendar.daylightDenominator",
+         [](HeavyOwnerCapture& h) {
+             auto calendar = h.scheduler.clock.calendar();
+             calendar.daylightDenominator += 2;
+             h.scheduler.clock = Luminumbra::world::WorldClock(0, calendar);
+         }},
+        {"scheduler.clock.calendar.lunarCycleDays",
+         [](HeavyOwnerCapture& h) {
+             auto calendar = h.scheduler.clock.calendar();
+             ++calendar.lunarCycleDays;
+             h.scheduler.clock = Luminumbra::world::WorldClock(0, calendar);
+         }},
+        {"scheduler.config.work_limit",
+         [](HeavyOwnerCapture& h) {
+             --h.scheduler.config.work_limit;
+         }},
+        {"scheduler.config.hold_ticks",
+         [](HeavyOwnerCapture& h) {
+             --h.scheduler.config.hold_ticks;
+         }},
+        {"scheduler.config.reduced_shift",
+         [](HeavyOwnerCapture& h) {
+             --h.scheduler.config.reduced_shift;
+         }},
+        {"scheduler.local_anchor.x",
+         [](HeavyOwnerCapture& h) {
+             if (!h.scheduler.local_anchor) {
+                 ADD_FAILURE() << "Expected populated capture";
+                 return;
+             }
+             h.scheduler.local_anchor->x = -0.0f;
+         }},
+        {"scheduler.local_anchor.y",
+         [](HeavyOwnerCapture& h) {
+             if (!h.scheduler.local_anchor) {
+                 ADD_FAILURE() << "Expected populated capture";
+                 return;
+             }
+             h.scheduler.local_anchor->y = -0.0f;
+         }},
+        {"scheduler.local_anchor.z",
+         [](HeavyOwnerCapture& h) {
+             if (!h.scheduler.local_anchor) {
+                 ADD_FAILURE() << "Expected populated capture";
+                 return;
+             }
+             h.scheduler.local_anchor->z = -0.0f;
+         }},
+        {"scheduler.records[0,0].visited",
+         [](HeavyOwnerCapture& h) {
+             h.scheduler.records.begin()->second.visited =
+                 !h.scheduler.records.begin()->second.visited;
+         }},
+        {"scheduler.records[0,0].edited",
+         [](HeavyOwnerCapture& h) {
+             h.scheduler.records.begin()->second.edited =
+                 !h.scheduler.records.begin()->second.edited;
+         }},
+        {"scheduler.records[0,0].pinned",
+         [](HeavyOwnerCapture& h) {
+             h.scheduler.records.begin()->second.pinned =
+                 !h.scheduler.records.begin()->second.pinned;
+         }},
+        {"scheduler.records[0,0].populated",
+         [](HeavyOwnerCapture& h) {
+             h.scheduler.records.begin()->second.populated =
+                 !h.scheduler.records.begin()->second.populated;
+         }},
+        {"scheduler.records[0,0].first_active",
+         [](HeavyOwnerCapture& h) {
+             ++h.scheduler.records.begin()->second.first_active;
+         }},
+        {"scheduler.records[0,0].last_proximity",
+         [](HeavyOwnerCapture& h) {
+             ++h.scheduler.records.begin()->second.last_proximity;
+         }},
+        {"scheduler.records[0,0].last_edit",
+         [](HeavyOwnerCapture& h) {
+             ++h.scheduler.records.begin()->second.last_edit;
+         }},
+        {"scheduler.records[0,0].last_ticked",
+         [](HeavyOwnerCapture& h) {
+             ++h.scheduler.records.begin()->second.last_ticked;
+         }},
+        {"scheduler.records[0,0].frozen_at",
+         [](HeavyOwnerCapture& h) {
+             ++h.scheduler.records.begin()->second.frozen_at;
+         }},
+        {"scheduler.records[0,0].last_save",
+         [](HeavyOwnerCapture& h) {
+             ++h.scheduler.records.begin()->second.last_save;
+         }},
+        {"scheduler.records[0,0].state",
+         [](HeavyOwnerCapture& h) {
+             h.scheduler.records.begin()->second.state = Luminumbra::world::RegionState::Frozen;
+         }},
+        {"scheduler.records[0,0].cadence_shift",
+         [](HeavyOwnerCapture& h) {
+             ++h.scheduler.records.begin()->second.cadence_shift;
+         }},
+        {"scheduler.records[0,0].cadence_phase",
+         [](HeavyOwnerCapture& h) {
+             ++h.scheduler.records.begin()->second.cadence_phase;
+         }},
+        {"scheduler.records[0,0].pressure",
+         [](HeavyOwnerCapture& h) {
+             ++h.scheduler.records.begin()->second.pressure;
+         }},
+        {"scheduler.records[0,0].over_hold",
+         [](HeavyOwnerCapture& h) {
+             ++h.scheduler.records.begin()->second.over_hold;
+         }},
+        {"scheduler.records[0,0].under_hold",
+         [](HeavyOwnerCapture& h) {
+             ++h.scheduler.records.begin()->second.under_hold;
+         }},
+        {"scheduler.records[0,0].last_decision",
+         [](HeavyOwnerCapture& h) {
+             ++h.scheduler.records.begin()->second.last_decision;
+         }},
+        {"scheduler.records[0,0].water_cursor",
+         [](HeavyOwnerCapture& h) {
+             ++h.scheduler.records.begin()->second.water_cursor;
+         }},
+        {"scheduler.records[0,0].frozen_digest",
+         [](HeavyOwnerCapture& h) {
+             ++h.scheduler.records.begin()->second.frozen_digest;
+         }},
+        {"scheduler.records[0,0].wake_pending",
+         [](HeavyOwnerCapture& h) {
+             h.scheduler.records.begin()->second.wake_pending =
+                 !h.scheduler.records.begin()->second.wake_pending;
+         }},
+        {"scheduler.records[0,0].key.x",
+         [](HeavyOwnerCapture& h) {
+             auto node = h.scheduler.records.extract(h.scheduler.records.begin());
+             ++node.key().x;
+             h.scheduler.records.insert(std::move(node));
+         }},
+        {"scheduler.records[0,0].key.z",
+         [](HeavyOwnerCapture& h) {
+             auto node = h.scheduler.records.extract(h.scheduler.records.begin());
+             ++node.key().z;
+             h.scheduler.records.insert(std::move(node));
+         }},
+        {"scheduler.energy_ages[0,0].key.x",
+         [](HeavyOwnerCapture& h) {
+             auto node = h.scheduler.energy_ages.extract(h.scheduler.energy_ages.begin());
+             ++node.key().x;
+             h.scheduler.energy_ages.insert(std::move(node));
+         }},
+        {"scheduler.energy_ages[0,0].key.z",
+         [](HeavyOwnerCapture& h) {
+             auto node = h.scheduler.energy_ages.extract(h.scheduler.energy_ages.begin());
+             ++node.key().z;
+             h.scheduler.energy_ages.insert(std::move(node));
+         }},
+        {"scheduler.energy_ages[0,0].value",
+         [](HeavyOwnerCapture& h) {
+             ++h.scheduler.energy_ages.begin()->second;
+         }},
+        {"scheduler.water_debts[0,0].key.x",
+         [](HeavyOwnerCapture& h) {
+             auto node = h.scheduler.water_debts.extract(h.scheduler.water_debts.begin());
+             ++node.key().x;
+             h.scheduler.water_debts.insert(std::move(node));
+         }},
+        {"scheduler.water_debts[0,0].key.z",
+         [](HeavyOwnerCapture& h) {
+             auto node = h.scheduler.water_debts.extract(h.scheduler.water_debts.begin());
+             ++node.key().z;
+             h.scheduler.water_debts.insert(std::move(node));
+         }},
+        {"scheduler.water_debts[0,0].value",
+         [](HeavyOwnerCapture& h) {
+             ++h.scheduler.water_debts.begin()->second;
+         }},
+        {"scheduler.completed_work[0,0].key.x",
+         [](HeavyOwnerCapture& h) {
+             auto node = h.scheduler.completed_work.extract(h.scheduler.completed_work.begin());
+             ++node.key().x;
+             h.scheduler.completed_work.insert(std::move(node));
+         }},
+        {"scheduler.completed_work[0,0].key.z",
+         [](HeavyOwnerCapture& h) {
+             auto node = h.scheduler.completed_work.extract(h.scheduler.completed_work.begin());
+             ++node.key().z;
+             h.scheduler.completed_work.insert(std::move(node));
+         }},
+        {"scheduler.completed_work[0,0].value",
+         [](HeavyOwnerCapture& h) {
+             ++h.scheduler.completed_work.begin()->second;
+         }},
+        {"owner.avatars.size",
+         [](HeavyOwnerCapture& h) {
+             h.owners.avatars.clear();
+         }},
+        {"owner.bodies.size",
+         [](HeavyOwnerCapture& h) {
+             h.owners.bodies.clear();
+         }},
+        {"owner.terrain.size",
+         [](HeavyOwnerCapture& h) {
+             h.owners.terrain.clear();
+         }},
+        {"owner.player.present",
+         [](HeavyOwnerCapture& h) {
+             h.owners.player.reset();
+         }},
+        {"scheduler.records.size",
+         [](HeavyOwnerCapture& h) {
+             h.scheduler.records.clear();
+         }},
+        {"scheduler.energy_ages.size",
+         [](HeavyOwnerCapture& h) {
+             h.scheduler.energy_ages.clear();
+         }},
+        {"scheduler.water_debts.size",
+         [](HeavyOwnerCapture& h) {
+             h.scheduler.water_debts.clear();
+         }},
+        {"scheduler.completed_work.size",
+         [](HeavyOwnerCapture& h) {
+             h.scheduler.completed_work.clear();
+         }},
+        {"scheduler.local_anchor.present",
+         [](HeavyOwnerCapture& h) {
+             h.scheduler.local_anchor.reset();
+         }},
+        {"owner.avatars[0].physics.size",
+         [](HeavyOwnerCapture& h) {
+             --h.owners.avatars[0].physics.size;
+         }},
+        {"owner.bodies[0].physics.size",
+         [](HeavyOwnerCapture& h) {
+             --h.owners.bodies[0].state.size;
+         }},
+        {"owner.player.physics.size",
+         [](HeavyOwnerCapture& h) {
+             if (!h.owners.player) {
+                 ADD_FAILURE() << "Expected populated capture";
+                 return;
+             }
+             --h.owners.player->state.size;
+         }},
+    }};
+    return table;
+}
+
+void CheckOwnerEncodingArity(const HeavyOwnerCapture& h) {
+    [[maybe_unused]] const auto& [captured, owners, scheduler] = h;
+    [[maybe_unused]] const auto& [world_seed,
+                                  preset_identity,
+                                  simulation_tick,
+                                  stream_tick,
+                                  moving_anchor,
+                                  water_smoke,
+                                  origin,
+                                  anchor,
+                                  avatars,
+                                  bodies,
+                                  player,
+                                  slot_count,
+                                  free_slots,
+                                  simulation_terrain,
+                                  terrain] = owners;
+    [[maybe_unused]] const auto& [avatar, physics] = owners.avatars.front();
+    [[maybe_unused]] const auto& [id, position, facing, velocity] = avatar;
+    [[maybe_unused]] const auto& [bytes, size] = physics;
+    [[maybe_unused]] const auto& [owner_id, body_anchor, state] = owners.bodies.front();
+    [[maybe_unused]] const auto& [body_bytes,
+                                  body_size,
+                                  suspended,
+                                  retained_velocity,
+                                  retained_angular_velocity,
+                                  was_active,
+                                  registration_slot] = state;
+    if (!player) {
+        ADD_FAILURE() << "Expected populated player";
+        return;
+    }
+    [[maybe_unused]] const auto& [player_id, player_anchor, player_state] = *player;
+    [[maybe_unused]] const auto& [simulation_bodies, columns] = simulation_terrain;
+    [[maybe_unused]] const auto& [column_id, heights] = columns.front();
+    [[maybe_unused]] const auto& [chunk_id, body_id] = owners.terrain.front();
+    [[maybe_unused]] const auto& [active,
+                                  clock,
+                                  tick,
+                                  header_tick,
+                                  next_id,
+                                  water_cursor,
+                                  config,
+                                  local_anchor,
+                                  records,
+                                  energy,
+                                  debts,
+                                  completed] = scheduler;
+    [[maybe_unused]] const auto& [work_limit, hold_ticks, reduced_shift] = config;
+    [[maybe_unused]] const auto& [day, year, numerator, denominator, lunar] = clock.calendar();
+    [[maybe_unused]] const auto& [rx, rz] = records.begin()->first;
+    [[maybe_unused]] const auto& [visited,
+                                  edited,
+                                  pinned,
+                                  populated,
+                                  first_active,
+                                  last_proximity,
+                                  last_edit,
+                                  last_ticked,
+                                  frozen_at,
+                                  last_save,
+                                  region_state,
+                                  cadence_shift,
+                                  cadence_phase,
+                                  pressure,
+                                  over_hold,
+                                  under_hold,
+                                  last_decision,
+                                  cursor,
+                                  digest,
+                                  wake_pending] = records.begin()->second;
+    EXPECT_EQ(HeavyOwnerFields(owners).size(), 12u);
+    EXPECT_EQ(HeavyOwnerFields(avatar).size(), 8u);
+    EXPECT_EQ(HeavyOwnerFields(state).size(), 9u);
+    EXPECT_EQ(HeavyOwnerFields(*player).size(), 4u);
+    EXPECT_EQ(HeavyOwnerFields(owners.bodies.front()).size(), 4u);
+    EXPECT_EQ(HeavyOwnerFields(owners.terrain.front()).size(), 2u);
+    EXPECT_EQ(HeavyOwnerFields(records.begin()->second).size(), 20u);
+    EXPECT_EQ(HeavyOwnerFields(config).size(), 3u);
+    EXPECT_EQ(HeavyOwnerFields(clock.calendar()).size(), 5u);
+    EXPECT_EQ(HeavyOwnerFields(scheduler).size(), 5u);
+    // 12 descriptor scalars + identity string + 9 body metadata + 7 allocator/terrain
+    // rows added to the original 88 rows (which contained 10 descriptor scalars).
+    // 10 descriptor + 8 avatar + 2*4 body/player + 2 terrain + 5 scheduler +
+    // 6 clock/calendar + 3 config + 3 local anchor + 20 record + 8 map key
+    // coordinates + 3 sparse values + 9 sizes/presence + 3 physics lengths.
+    EXPECT_EQ(OwnerMutationTable().size(),
+              12u + 1u + 9u + 7u + 8u + 8u + 2u + 5u + 6u + 3u + 3u + 20u + 8u + 3u + 9u + 3u);
+}
+
+void PopulateOwnerCapture(HeavyOwnerCapture& h) {
+    Luminumbra::TestSupport::AvatarContinuationWorld world;
+    auto& physics = world.physics();
+    h.owners.avatars.emplace_back();
+    const auto index = physics.create_avatar_character(Luminumbra::Vec3(0.0f));
+    ASSERT_TRUE(world.capture_avatar_owner(index, h.owners.avatars.front().physics));
+    h.owners.bodies.emplace_back();
+    const auto body =
+        physics.create_dynamic_sphere(Luminumbra::Vec3(10.0f), Luminumbra::Vec3(0.0f), 0.5f);
+    ASSERT_TRUE(physics.capture_body_owner(body, h.owners.bodies.front().state));
+    h.owners.player.emplace();
+    ASSERT_TRUE(physics.create_player_controller(Luminumbra::Vec3(20.0f)));
+    ASSERT_TRUE(world.capture_player_owner(h.owners.player->state));
+    h.owners.terrain.emplace_back();
+    h.owners.free_slots.push_back(0);
+    h.owners.simulation_terrain.bodies.push_back(0);
+    h.owners.simulation_terrain.columns.emplace_back();
+    h.scheduler.local_anchor.emplace(0.0f);
+    const Luminumbra::world::RegionKey key{};
+    h.scheduler.records.emplace(key, Luminumbra::world::ActiveRegionRecord{});
+    h.scheduler.energy_ages.emplace(key, 0);
+    h.scheduler.water_debts.emplace(key, 1);
+    h.scheduler.completed_work.emplace(key, 0);
+    h.captured = true;
+}
+
+TEST(HeavyComparison, OwnerFieldsMutateIndependentlyAndRespectProfileGate) {
+    HeavyOwnerCapture base;
+    PopulateOwnerCapture(base);
+    ASSERT_TRUE(base.captured);
+    CheckOwnerEncodingArity(base);
+    EXPECT_TRUE(HeavyOwnerDifference(true, base, base).empty());
+    std::set<std::string> names;
+    for (const auto& row : OwnerMutationTable()) {
+        SCOPED_TRACE(row.field);
+        EXPECT_TRUE(names.insert(row.field).second);
+        auto changed = base;
+        row.mutate(changed);
+        EXPECT_EQ(HeavyOwnerDifference(true, base, changed), row.field);
+        EXPECT_FALSE(HeavyOwnerDifference(true, changed, base).empty());
+        EXPECT_TRUE(HeavyOwnerDifference(false, base, changed).empty());
+        EXPECT_TRUE(HeavyOwnerDifference(false, changed, base).empty());
+    }
+    // The exact-bit projection must distinguish a subnormal from zero too.
+    auto changed = base;
+    changed.owners.avatars.front().avatar.facing = std::bit_cast<float>(1u);
+    EXPECT_EQ(HeavyOwnerDifference(true, base, changed), "owner.avatars[0].avatar.facing");
+    changed.owners.stream_tick = 1;
+    EXPECT_EQ(HeavyOwnerDifference(true, base, changed), "owner.stream_tick");
+}
+
+TEST(HeavyComparison, EveryEncodedPhysicsByteIsComparedForEveryOwnerKind) {
+    HeavyOwnerCapture base;
+    PopulateOwnerCapture(base);
+    ASSERT_TRUE(base.captured);
+    struct Payload {
+        const char* path;
+        std::span<std::uint8_t> bytes;
+        std::uint32_t& size;
+    };
+    std::size_t mutated_bytes = 0;
+    std::size_t encoded_bytes = 0;
+    for (std::size_t kind = 0; kind < 3; ++kind) {
+        auto changed = base;
+        if (!changed.owners.player) {
+            ADD_FAILURE() << "Expected populated capture";
+            return;
+        }
+        const std::array<Payload, 3> payloads{{
+            {"owner.avatars[0].physics",
+             changed.owners.avatars[0].physics.bytes,
+             changed.owners.avatars[0].physics.size},
+            {"owner.bodies[0].physics",
+             changed.owners.bodies[0].state.bytes,
+             changed.owners.bodies[0].state.size},
+            {"owner.player.physics",
+             changed.owners.player->state.bytes,
+             changed.owners.player->state.size},
+        }};
+        const auto& [path, bytes, size] = payloads[kind];
+        ASSERT_GT(size, 0u);
+        ASSERT_LT(size, bytes.size());
+        encoded_bytes += size;
+        for (std::size_t i = 0; i < size; ++i) {
+            SCOPED_TRACE(path);
+            SCOPED_TRACE(i);
+            bytes[i] ^= 1u;
+            const auto field = std::string(path) + ".bytes[" + std::to_string(i) + "]";
+            EXPECT_EQ(HeavyOwnerDifference(true, base, changed), field);
+            EXPECT_EQ(HeavyOwnerDifference(true, changed, base), field);
+            EXPECT_TRUE(HeavyOwnerDifference(false, base, changed).empty());
+            bytes[i] ^= 1u;
+            ++mutated_bytes;
+        }
+        // Unused payload storage is outside the encoding; the length itself is covered above.
+        bytes[size] ^= 1u;
+        EXPECT_TRUE(HeavyOwnerDifference(true, base, changed).empty());
+        size = static_cast<std::uint32_t>(bytes.size() + 1);
+        EXPECT_EQ(HeavyOwnerDifference(true, base, changed), std::string(path) + ".invalid_size");
+        EXPECT_EQ(HeavyOwnerDifference(true, changed, base), std::string(path) + ".invalid_size");
+    }
+    EXPECT_EQ(mutated_bytes,
+              encoded_bytes); // Derived from the real owner encoding, including growth.
+    std::array<std::uint8_t, Luminumbra::World::kMaxAvatarOwnerBytes> encoded{};
+    std::size_t written = 0;
+    ASSERT_TRUE(
+        Luminumbra::World::EncodeAvatarOwner(base.owners.avatars.front(), encoded, written));
+    // Eight scalar fields, plus the version and nested length, then all physics bytes.
+    EXPECT_EQ(written,
+              (HeavyOwnerFields(base.owners.avatars.front().avatar).size() + 2) * 4 +
+                  base.owners.avatars.front().physics.size);
+}
+
+TEST(HeavyComparison, OwnerEmptyCapturesAndRefusals) {
+    HeavyOwnerCapture empty;
+    EXPECT_TRUE(HeavyOwnerDifference(false, empty, empty).empty());
+    EXPECT_EQ(HeavyOwnerDifference(true, empty, empty), "owner.capture_refused");
+    auto accepted = empty;
+    accepted.captured = true;
+    EXPECT_TRUE(HeavyOwnerDifference(true, accepted, accepted).empty());
+    EXPECT_EQ(HeavyOwnerDifference(true, empty, accepted), "owner.capture_refused");
+    EXPECT_EQ(HeavyOwnerDifference(true, accepted, empty), "owner.capture_refused");
+    EXPECT_TRUE(HeavyOwnerDifference(false, empty, accepted).empty());
+    auto full = accepted;
+    full.owners.player.emplace();
+    EXPECT_EQ(HeavyOwnerDifference(true, accepted, full), "owner.player.present");
+    EXPECT_EQ(HeavyOwnerDifference(true, full, accepted), "owner.player.present");
+    full = accepted;
+    full.scheduler.local_anchor.emplace(0.0f);
+    EXPECT_EQ(HeavyOwnerDifference(true, accepted, full), "scheduler.local_anchor.present");
+    EXPECT_EQ(HeavyOwnerDifference(true, full, accepted), "scheduler.local_anchor.present");
+}
+
+TEST(HeavyComparison, OwnerSchedulerCaptureIncludesEmptyLedgerRegisters) {
+    using namespace Luminumbra::world;
+    const WorldClock clock(9);
+    const ActiveRegionLedger empty({.work_limit = 10, .hold_ticks = 2, .reduced_shift = 3}, clock);
+    auto capture = Luminumbra::Server::CaptureHeavyOwnerScheduler(true, clock, empty, 17);
+    EXPECT_TRUE(capture.active_regions);
+    EXPECT_EQ(capture.clock.tick(), 9u);
+    EXPECT_EQ(capture.ledger_tick, 9u);
+    EXPECT_EQ(capture.ledger_header_tick, 9u);
+    EXPECT_EQ(capture.next_persistent_id, 1u);
+    EXPECT_EQ(capture.water_cursor, 17u);
+    EXPECT_EQ(capture.config, empty.config());
+    EXPECT_FALSE(capture.local_anchor.has_value());
+    EXPECT_TRUE(capture.records.empty());
+    EXPECT_TRUE(capture.energy_ages.empty());
+    EXPECT_TRUE(capture.water_debts.empty());
+    EXPECT_TRUE(capture.completed_work.empty());
+    ActiveRegionLedger ledger(empty);
+    ledger.set_local_anchor(Luminumbra::Vec3(0.0f));
+    const RegionKey key{};
+    ledger.activate_owned(key, clock);
+    std::uint64_t id = 0;
+    ASSERT_TRUE(ledger.allocate_persistent_id(id));
+    ASSERT_TRUE(ledger.set_energy_age(key, 3));
+    ASSERT_TRUE(ledger.set_water_debts({{key, 4}}));
+    const std::array<RegionWork, 1> work{{{.key = key,
+                                           .region_ticks = 1,
+                                           .entity_updates = 2,
+                                           .water_cells = 3,
+                                           .page_updates = 4}}};
+    ledger.publish_completed_work(work);
+    capture = Luminumbra::Server::CaptureHeavyOwnerScheduler(false, clock, ledger, 18);
+    EXPECT_FALSE(capture.active_regions);
+    const auto& ledger_anchor = ledger.local_anchor();
+    if (!capture.local_anchor || !ledger_anchor) {
+        ADD_FAILURE() << "Expected captured scheduler anchor";
+        return;
+    }
+    EXPECT_EQ(*capture.local_anchor, *ledger_anchor);
+    EXPECT_EQ(capture.records, ledger.records());
+    EXPECT_EQ(capture.next_persistent_id, ledger.next_persistent_id());
+    EXPECT_EQ(capture.energy_ages, ledger.energy_ages());
+    EXPECT_EQ(capture.water_debts, ledger.water_debts());
+    EXPECT_EQ(capture.completed_work, ledger.completed_work());
+}
+
+TEST(HeavyComparison, OwnerLaterEntriesAndMaximumPayloadAreComparedInOrder) {
+    HeavyOwnerCapture base;
+    PopulateOwnerCapture(base);
+    ASSERT_TRUE(base.captured);
+    base.owners.avatars.push_back(base.owners.avatars.front());
+    base.owners.bodies.push_back(base.owners.bodies.front());
+    base.owners.terrain.push_back(base.owners.terrain.front());
+    auto changed = base;
+    changed.owners.avatars.back().avatar.facing = -0.0f;
+    EXPECT_EQ(HeavyOwnerDifference(true, base, changed), "owner.avatars[1].avatar.facing");
+    changed = base;
+    changed.owners.bodies.back().state.bytes[0] ^= 1u;
+    EXPECT_EQ(HeavyOwnerDifference(true, base, changed), "owner.bodies[1].physics.bytes[0]");
+    changed = base;
+    ++changed.owners.terrain.back().body_id;
+    EXPECT_EQ(HeavyOwnerDifference(true, base, changed), "owner.terrain[1].body_id");
+    const Luminumbra::world::RegionKey key{3, -2};
+    base.scheduler.records.emplace(key, Luminumbra::world::ActiveRegionRecord{});
+    base.scheduler.energy_ages.emplace(key, 0);
+    base.scheduler.water_debts.emplace(key, 1);
+    base.scheduler.completed_work.emplace(key, 0);
+    changed = base;
+    changed.scheduler.records.at(key).wake_pending = true;
+    EXPECT_EQ(HeavyOwnerDifference(true, base, changed), "scheduler.records[3,-2].wake_pending");
+    changed = base;
+    ++changed.scheduler.energy_ages.at(key);
+    EXPECT_EQ(HeavyOwnerDifference(true, base, changed), "scheduler.energy_ages[3,-2].value");
+    changed = base;
+    ++changed.scheduler.water_debts.at(key);
+    EXPECT_EQ(HeavyOwnerDifference(true, base, changed), "scheduler.water_debts[3,-2].value");
+    changed = base;
+    ++changed.scheduler.completed_work.at(key);
+    EXPECT_EQ(HeavyOwnerDifference(true, base, changed), "scheduler.completed_work[3,-2].value");
+    changed.scheduler.records.at(key).wake_pending = true;
+    EXPECT_EQ(HeavyOwnerDifference(true, base, changed), "scheduler.records[3,-2].wake_pending");
+    auto& state = base.owners.avatars.front().physics;
+    state.size = static_cast<std::uint32_t>(state.bytes.size());
+    changed = base;
+    changed.owners.avatars.front().physics.bytes.back() ^= 1u;
+    EXPECT_EQ(HeavyOwnerDifference(true, base, changed),
+              "owner.avatars[0].physics.bytes[" + std::to_string(state.size - 1) + "]");
+    EXPECT_TRUE(HeavyOwnerDifference(false, base, changed).empty());
+}
+
+TEST(HeavyComparison, UnavailableOwnerCapturePreservesDiagnosticOutput) {
+    GameSession unavailable({.owner_continuation = true});
+    std::string bytes = "unchanged";
+    EXPECT_FALSE(unavailable.CaptureOwnerContinuation(bytes));
+    EXPECT_EQ(bytes, "unchanged");
+}
+
+TEST(HeavyComparison, SimulationTerrainSamplesAndAllocatorOrderAreComparedExactly) {
+    HeavyOwnerCapture base;
+    base.captured = true;
+    base.owners.free_slots = {1, 2};
+    base.owners.simulation_terrain.bodies = {3, 4};
+    base.owners.simulation_terrain.columns.resize(2);
+    auto changed = base;
+    std::swap(changed.owners.free_slots[0], changed.owners.free_slots[1]);
+    EXPECT_EQ(HeavyOwnerDifference(true, base, changed), "owner.free_slots[0].value");
+    changed = base;
+    std::swap(changed.owners.simulation_terrain.bodies[0],
+              changed.owners.simulation_terrain.bodies[1]);
+    EXPECT_EQ(HeavyOwnerDifference(true, base, changed),
+              "owner.simulation_terrain.bodies[0].value");
+    changed = base;
+    ++changed.owners.simulation_terrain.columns.back().id;
+    EXPECT_EQ(HeavyOwnerDifference(true, base, changed), "owner.simulation_terrain.columns[1].id");
+    changed = base;
+    for (std::size_t column = 0; column < changed.owners.simulation_terrain.columns.size();
+         ++column) {
+        auto& heights = changed.owners.simulation_terrain.columns[column].heights;
+        for (std::size_t sample = 0; sample < heights.size(); ++sample) {
+            SCOPED_TRACE(column);
+            SCOPED_TRACE(sample);
+            heights[sample] = -0.0f;
+            const auto field = "owner.simulation_terrain.columns[" + std::to_string(column) +
+                               "].heights[" + std::to_string(sample) + "]";
+            EXPECT_EQ(HeavyOwnerDifference(true, base, changed), field);
+            EXPECT_EQ(HeavyOwnerDifference(true, changed, base), field);
+            EXPECT_TRUE(HeavyOwnerDifference(false, base, changed).empty());
+            heights[sample] = 0.0f;
+        }
     }
 }
 } // namespace
