@@ -743,13 +743,20 @@ struct AdmittedRuntimeBackend : RuntimeBackend {
         , audit(runtime) {}
     TemporalSweepOutput capture(const TemporalSequenceStep& step) {
         const auto output = RuntimeBackend::capture(step);
-        audit.sequence->acknowledge(actual_tick(), output.success, true, output.bytes);
+        acknowledge(output);
         return output;
     }
     TemporalSweepOutput publish(const TemporalSequenceStep& step) {
         const auto output = RuntimeBackend::publish(step);
-        audit.sequence->acknowledge(actual_tick(), output.success, true, output.bytes);
+        acknowledge(output);
         return output;
+    }
+    void acknowledge(const TemporalSweepOutput& output) {
+        if (!audit.sequence) {
+            ADD_FAILURE() << "the admitted runtime must own an active sequence";
+            return;
+        }
+        audit.sequence->acknowledge(actual_tick(), output.success, true, output.bytes);
     }
 };
 
@@ -767,41 +774,41 @@ TEST(TemporalSweepRuntime, AdmittedSequenceSurvivesAppRenderBoundariesAndStickyF
         SCOPED_TRACE(static_cast<int>(fault));
         Harness::RuntimeTemporalAudit audit{
             .plan = plan, .budget = Budget(plan), .diagnostics = {}};
-        audit.sequence.emplace(plan, audit.budget);
+        auto& sequence = audit.sequence.emplace(plan, audit.budget);
         AdmittedRuntimeBackend backend(audit);
         backend.fault = fault;
         backend.subject.retries = 2;
         Harness::WorldVisualTemporalTransport transport(backend);
         const auto bound = plan.max_render_attempts + plan.frames.size() + 1;
         for (std::uint64_t attempt = 0; attempt < bound; ++attempt) {
-            audit.step = Harness::DriveTemporalAuditTicks(
-                *audit.sequence,
+            const auto& step = audit.step.emplace(Harness::DriveTemporalAuditTicks(
+                sequence,
                 [&] { return transport.actual_tick(); },
                 [&] {
                     return transport.advance_tick({.action = Action::AdvanceTick,
                                                    .simulation_tick = transport.actual_tick() + 1});
-                });
-            if (audit.step->action == Action::Refused) {
+                }));
+            if (step.action == Action::Refused) {
                 break;
             }
-            if (!transport.prepare_render(*audit.step)) {
-                audit.sequence->refuse();
+            if (!transport.prepare_render(step)) {
+                sequence.refuse();
                 break;
             }
             const auto refusal = Harness::RunWorldVisualTemporalSweep(audit, backend, {});
-            if (!refusal.empty() || audit.sequence->complete()) {
+            if (!refusal.empty() || sequence.complete()) {
                 break;
             }
             audit.step.reset();
         }
         if (fault == RuntimeBackend::Fault::None) {
-            EXPECT_TRUE(audit.sequence->complete());
+            EXPECT_TRUE(sequence.complete());
             EXPECT_EQ(backend.subject.captures.size(), plan.frames.size());
             EXPECT_EQ(backend.subject.publications, 1U);
             EXPECT_EQ(backend.subject.ticks, plan.end_tick - plan.request.start_tick);
         } else {
-            ASSERT_FALSE(audit.sequence->refusal().empty());
-            EXPECT_FALSE(audit.sequence->complete());
+            ASSERT_FALSE(sequence.refusal().empty());
+            EXPECT_FALSE(sequence.complete());
             EXPECT_EQ(backend.subject.publications, 0U);
             const auto renders = backend.subject.renders;
             const auto publications = backend.publish_attempts;
@@ -810,6 +817,76 @@ TEST(TemporalSweepRuntime, AdmittedSequenceSurvivesAppRenderBoundariesAndStickyF
             EXPECT_EQ(backend.publish_attempts, publications);
         }
     }
+}
+
+void ExpectStartupPathAdmission(const std::filesystem::path& directory, const std::string& extra) {
+    std::vector<std::string> args{"client",
+                                  "--temporal-audit-plan=day-night",
+                                  "--temporal-start-tick=0",
+                                  "--temporal-tick-rate=30",
+                                  "--temporal-day-ticks=162000",
+                                  "--temporal-dawn-tick=27000",
+                                  "--temporal-dusk-tick=135000",
+                                  "--scenario=temporal_audit",
+                                  "--capture-diagnostics"};
+    if (extra.starts_with("--temporal-start")) {
+        args[2] = extra;
+    } else if (extra.starts_with("--temporal-tick-rate")) {
+        args[3] = extra;
+    } else if (!extra.empty()) {
+        args.push_back(extra);
+    }
+    const auto save_root = directory / "uncreated";
+    if (!extra.empty()) {
+        args.push_back("--save-root=" + save_root.string());
+    }
+    std::vector<char*> argv;
+    for (auto& argument : args) {
+        argv.push_back(argument.data());
+    }
+    const auto argc = static_cast<int>(argv.size());
+    if (extra.empty()) {
+        EXPECT_NO_THROW((void)Harness::ParseRuntimePathOptions(argc, argv.data()));
+        const auto config = Harness::ParseRuntimeScenarioConfig(argc, argv.data(), directory);
+        ASSERT_TRUE(config.temporal_audit_plan);
+        if (!config.temporal_audit) {
+            FAIL() << "the temporal audit runtime must be admitted";
+        }
+        EXPECT_EQ(config.temporal_audit_plan, config.temporal_audit->plan);
+        EXPECT_EQ(config.scenario, "temporal_audit");
+        EXPECT_TRUE(config.auto_create_world);
+        EXPECT_TRUE(config.auto_enter_world);
+    } else {
+        EXPECT_THROW((void)Harness::ParseRuntimePathOptions(argc, argv.data()),
+                     std::invalid_argument);
+        EXPECT_THROW((void)Harness::ParseRuntimeScenarioConfig(argc, argv.data(), directory),
+                     std::invalid_argument);
+        EXPECT_FALSE(std::filesystem::exists(save_root));
+    }
+}
+
+void ExpectDedicatedSweepScenarioRefused(const std::filesystem::path& directory, bool environment) {
+    std::vector<std::string> args{"client",
+                                  "--temporal-audit-plan=day-night",
+                                  "--temporal-start-tick=0",
+                                  "--temporal-tick-rate=30",
+                                  "--temporal-day-ticks=162000",
+                                  "--temporal-dawn-tick=27000",
+                                  "--temporal-dusk-tick=135000",
+                                  "--capture-diagnostics",
+                                  "--save-root=" + (directory / "uncreated").string()};
+    if (!environment) {
+        args.emplace_back("--scenario=world_visual_sweep");
+    }
+    std::vector<char*> argv;
+    for (auto& argument : args) {
+        argv.push_back(argument.data());
+    }
+    const auto argc = static_cast<int>(argv.size());
+    EXPECT_THROW((void)Harness::ParseRuntimePathOptions(argc, argv.data()), std::invalid_argument);
+    EXPECT_THROW((void)Harness::ParseRuntimeScenarioConfig(argc, argv.data(), directory),
+                 std::invalid_argument);
+    EXPECT_FALSE(std::filesystem::exists(directory / "uncreated"));
 }
 
 TEST(TemporalSweepRuntime, BothStartupPathsUseFixedSiteAuditAdmission) {
@@ -831,75 +908,12 @@ TEST(TemporalSweepRuntime, BothStartupPathsUseFixedSiteAuditAdmission) {
                                         "--bake-tree-impostor=",
                                         "--render-parity-frame=1",
                                         "--upscale-seam-parity"}) {
-            std::vector<std::string> args{"client",
-                                          "--temporal-audit-plan=day-night",
-                                          "--temporal-start-tick=0",
-                                          "--temporal-tick-rate=30",
-                                          "--temporal-day-ticks=162000",
-                                          "--temporal-dawn-tick=27000",
-                                          "--temporal-dusk-tick=135000",
-                                          "--scenario=temporal_audit",
-                                          "--capture-diagnostics"};
-            if (extra.starts_with("--temporal-start")) {
-                args[2] = extra;
-            } else if (extra.starts_with("--temporal-tick-rate")) {
-                args[3] = extra;
-            } else if (!extra.empty()) {
-                args.push_back(extra);
-            }
-            const auto save_root = directory / "uncreated";
-            if (!extra.empty()) {
-                args.push_back("--save-root=" + save_root.string());
-            }
-            std::vector<char*> argv;
-            for (auto& argument : args) {
-                argv.push_back(argument.data());
-            }
-            const auto argc = static_cast<int>(argv.size());
-            if (extra.empty()) {
-                EXPECT_NO_THROW((void)Harness::ParseRuntimePathOptions(argc, argv.data()));
-                const auto config =
-                    Harness::ParseRuntimeScenarioConfig(argc, argv.data(), directory);
-                ASSERT_TRUE(config.temporal_audit_plan);
-                ASSERT_TRUE(config.temporal_audit);
-                EXPECT_EQ(config.temporal_audit_plan, config.temporal_audit->plan);
-                EXPECT_EQ(config.scenario, "temporal_audit");
-                EXPECT_TRUE(config.auto_create_world);
-                EXPECT_TRUE(config.auto_enter_world);
-            } else {
-                EXPECT_THROW((void)Harness::ParseRuntimePathOptions(argc, argv.data()),
-                             std::invalid_argument);
-                EXPECT_THROW(
-                    (void)Harness::ParseRuntimeScenarioConfig(argc, argv.data(), directory),
-                    std::invalid_argument);
-                EXPECT_FALSE(std::filesystem::exists(save_root));
-            }
+            ExpectStartupPathAdmission(directory, extra);
         }
     }
     for (const bool environment : {false, true}) {
         ScopedSweepEnvironment override(environment ? "1" : nullptr);
-        std::vector<std::string> args{"client",
-                                      "--temporal-audit-plan=day-night",
-                                      "--temporal-start-tick=0",
-                                      "--temporal-tick-rate=30",
-                                      "--temporal-day-ticks=162000",
-                                      "--temporal-dawn-tick=27000",
-                                      "--temporal-dusk-tick=135000",
-                                      "--capture-diagnostics",
-                                      "--save-root=" + (directory / "uncreated").string()};
-        if (!environment) {
-            args.emplace_back("--scenario=world_visual_sweep");
-        }
-        std::vector<char*> argv;
-        for (auto& argument : args) {
-            argv.push_back(argument.data());
-        }
-        const auto argc = static_cast<int>(argv.size());
-        EXPECT_THROW((void)Harness::ParseRuntimePathOptions(argc, argv.data()),
-                     std::invalid_argument);
-        EXPECT_THROW((void)Harness::ParseRuntimeScenarioConfig(argc, argv.data(), directory),
-                     std::invalid_argument);
-        EXPECT_FALSE(std::filesystem::exists(directory / "uncreated"));
+        ExpectDedicatedSweepScenarioRefused(directory, environment);
     }
     const auto plan = Plan(TemporalAuditSpan::WeatherCycle, 30);
     const auto schedule = Harness::WorldVisualSweepWeatherSchedule(plan);
