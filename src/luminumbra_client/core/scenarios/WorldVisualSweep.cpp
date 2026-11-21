@@ -25,6 +25,7 @@
 #include "luminumbra_common/world/WorldStreamingState.h"
 #include "rendering/Camera.h"
 #include "rendering/LightningBolt.h"
+#include "rendering/TemporalSweep.h"
 #include "rendering/WaterVisibility.h"
 #include "rendering/passes/FoliagePass.h"
 #include "rendering/passes/ParticlePass.h"
@@ -56,21 +57,8 @@ namespace Luminumbra::Client::ScenarioHarness {
 // --- world_visual_sweep ---------------------------------
 namespace {
 
-// One time-of-day pin in the sweep (normalized t, 0 = noon, 0.5 = midnight).
-struct SweepTimeOfDay {
-    const char* label;
-    float time_of_day;
-};
-
-// One camera framing at the anchor. Eye-level vistas use yaw/pitch; the
-// water-aimed cell aims at the resolved water focus instead.
-struct SweepAngle {
-    const char* label;
-    float yaw_degrees;
-    float pitch_degrees;
-    bool aim_at_water;   // override yaw/pitch and aim at the water focus
-    const char* feature; // intended feature the cell must SHOW
-};
+using SweepTimeOfDay = Luminumbra::Rendering::WorldSweepTime;
+using SweepAngle = Luminumbra::Rendering::WorldSweepAngle;
 
 struct SweepCell {
     std::string file; // relative path under artifact_dir
@@ -288,13 +276,13 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
     ParticlePass* particles = pipeline->particles();
 
     // --- matrix dimensions -------------------------------------------------
-    const std::array<SweepTimeOfDay, 4> tods = {{
+    constexpr std::array<SweepTimeOfDay, 4> tods = {{
         {"dawn", 0.17f},
         {"noon", 0.0f},
         {"dusk", 0.25f},
         {"night", 0.5f},
     }};
-    const std::array<SweepAngle, 6> angles = {{
+    constexpr std::array<SweepAngle, 6> angles = {{
         {"yaw000", 0.0f, 0.0f, false, "horizon_vista"},
         {"yaw120", 120.0f, 0.0f, false, "horizon_vista"},
         {"yaw240", 240.0f, 0.0f, false, "horizon_vista"},
@@ -302,7 +290,13 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
         {"up25", 200.0f, 25.0f, false, "sky_clouds"},
         {"water", 0.0f, 0.0f, true, "water_shore"},
     }};
-    const std::array<const char*, 2> weathers = {{"clear", "storm"}};
+    constexpr std::array<const char*, 2> weathers = {{"clear", "storm"}};
+
+    // Keep the legacy source pins intact and enforce adapter parity at compile time.
+    static_assert(tods == kWorldSweepTimes);
+    static_assert(angles == kWorldSweepAngles);
+    static_assert(std::string_view(weathers[0]) == kWorldSweepWeather[0] &&
+                  std::string_view(weathers[1]) == kWorldSweepWeather[1]);
 
     struct SeasonPin {
         const char* label;
@@ -349,7 +343,7 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
             if (foliage != nullptr && foliage_ready) {
                 static const std::vector<Luminumbra::Rendering::FoliagePass::ChunkScatter>
                     kEmptyScatter;
-                const bool looking_up = camera->Pitch > 5.0f;
+                const bool looking_up = WorldSweepClearsFoliage(camera->Pitch);
                 const auto& scatter_for_cell = looking_up ? kEmptyScatter : chunk_scatter;
                 foliage->rebuild_instances(
                     scatter_for_cell,
@@ -541,7 +535,7 @@ bool RunWorldVisualSweep(const WorldVisualSweepDeps& deps) {
                     // and (storm) the rain particles accumulate, then capture. The
                     // world geometry is already streamed by the warmup, so this stays
                     // small. Storm cells settle a touch longer for the particle fill.
-                    const int settle = storm ? 5 : 3;
+                    const int settle = WorldSweepStillSettleFrames(storm);
                     // Reuse the audited land framing, time and weather phase;
                     // attribution is part of the last settled frame, never a rerender.
                     const bool dusk_attribution =
