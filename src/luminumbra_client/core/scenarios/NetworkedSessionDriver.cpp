@@ -103,6 +103,12 @@ std::vector<std::uint8_t> NetSessionCollectInput(std::uint64_t /*tick*/, void* /
     return {};
 }
 
+const std::string* NetSessionRegionScheduleDigest(void* user) {
+    const auto* ctx = static_cast<NetSessionPeerContext*>(user);
+    return ctx->session->ActiveRegionsEnabled() ? &ctx->session->GetRegionSchedule().digest
+                                                : nullptr;
+}
+
 // Applies the agreed merged input set (empty today) and advances the world by
 // EXACTLY one fixed sim tick from the SPAWN ANCHOR. Identical step shape on both
 // peers (same fixed_dt, same anchor, same quiesce) => byte-identical worlds =>
@@ -295,6 +301,7 @@ bool NetworkedSessionDriver::Begin(Luminumbra::world::GameSession* client_sessio
     hooks_template.collect_local_input = &NetSessionCollectInput;
     hooks_template.apply_and_step = &NetSessionApplyStep;
     hooks_template.capture_hashes = &NetSessionCaptureAuthorityHashes;
+    hooks_template.region_schedule_digest = &NetSessionRegionScheduleDigest;
 
     Luminumbra::Net::LockstepConfig host_cfg;
     host_cfg.seed = m_impl->host_session->GetMetadata().resolvedSeed;

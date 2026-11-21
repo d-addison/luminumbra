@@ -29,6 +29,42 @@ def read_source(path):
 
 
 class ReplaySourceContract(unittest.TestCase):
+    def test_automatic_region_trace_uses_shared_encoder_and_pair_publication(self):
+        stream = read_source("src/luminumbra_common/replay/ReplayStream.cpp")
+        bounded = stream.split("bool BoundedReplayRecorder::Finalize(", 1)[1].split(
+            "void BoundedReplayRecorder::Close()", 1)[0]
+        self.assertIn("EncodeRegionScheduleTrace(trace, trace_bytes)", bounded)
+        self.assertIn("out.commit_with_companion(publish_trace ? &trace_bytes : nullptr)", bounded)
+        trace = read_source("src/luminumbra_common/replay/RegionScheduleTrace.cpp")
+        writer = trace.split("bool ReplayWriter::Finalize(", 1)[1].split(
+            "bool WriteRegionScheduleTrace(", 1)[0]
+        self.assertIn("EncodeRegionScheduleTrace(*trace, bytes)", writer)
+        for path, producer in (
+            ("src/luminumbra_client/core/scenarios/NetworkedSessionDriver.cpp",
+             "NetSessionRegionScheduleDigest"),
+            (MODES + "Lockstep.cpp", "LockstepRegionScheduleDigest"),
+        ):
+            source = read_source(path)
+            self.assertIn("hooks_template.region_schedule_digest = &" + producer, source)
+            self.assertIn("GetRegionSchedule().digest", source)
+        lockstep = read_source("src/luminumbra_common/net/LockstepSession.cpp")
+        capture = lockstep.split("void LockstepSession::RecordReplayTick(", 1)[1].split(
+            "void LockstepSession::EmitDesyncDump(", 1)[0]
+        self.assertIn("m_hooks.region_schedule_digest(m_hooks.user)", capture)
+        self.assertIn("std::string_view(*digest)", capture)
+
+    def test_ordinary_client_regional_playback_reaches_oracles(self):
+        source = read_source("test/performance/runtime_world_visual_validation_test.cpp")
+        regression = source.split(
+            "TEST_P(ClientReplayProducerTest, AutomaticDumpMatchesCliBootAndReconstructsStartWorld)",
+            1)[1].split("INSTANTIATE_TEST_SUITE_P", 1)[0]
+        self.assertNotIn("if (!GetParam())", regression)
+        self.assertIn("client.PrepareInitialSimulation(", regression)
+        self.assertIn("EXPECT_EQ(RunReplay(options), 1)", regression)
+        self.assertIn('artifact.at("divergence_tick"), 1u', regression)
+        self.assertIn('fs::remove(dump.string() + ".regions.json")', regression)
+        self.assertIn('stale.at("divergence_section"), "region_schedule"', regression)
+
     # Pin mode-local admission and its ordering without tightening the
     # generic reader/writer, whose opaque and sparse records serve lockstep.
     def assert_mode_admission(self, source):
