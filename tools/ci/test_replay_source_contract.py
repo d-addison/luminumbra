@@ -82,6 +82,45 @@ class ReplaySourceContract(unittest.TestCase):
         self.assertIn("out.world_hash = result.capture->composite;", capture)
         self.assertNotIn("snapshot_streamed_chunks", capture)
 
+    def test_all_client_boot_routes_share_bounded_preparation_before_capture(self):
+        main = read_source("src/luminumbra_client/main_client.cpp")
+        startup = main.split("auto finish_world_entry =", 1)[1].split(
+            "auto start_world_creation =", 1)[0]
+        staged = main.split("auto prepare_entry_horizon =", 1)[1].split(
+            "auto drain_entry =", 1)[0]
+        for entry in (startup, staged):
+            self.assertIn("gameSession->PrepareInitialSimulation(", entry)
+            self.assertNotIn("EnsureSurfaceReadyNear(", entry)
+        self.assertIn("entry_stop.get_token()", staged)
+        driver = read_source("src/luminumbra_client/core/scenarios/NetworkedSessionDriver.cpp")
+        self.assertLess(driver.index("host_session->PrepareInitialSimulation("),
+                        driver.index("Luminumbra::Replay::CaptureReplayHeader("))
+        runner = read_source("src/luminumbra_server/ServerWorldRunner.cpp")
+        self.assertIn("m_session->SettleInitialSimulation(boot_anchors, m_boot_settle)", runner)
+        session = read_source("src/luminumbra_common/world/GameSession.cpp")
+        entry = session.split("bool GameSession::PrepareInitialSimulation(", 1)[1].split(
+            "bool GameSession::SettleInitialSimulation(", 1)[0]
+        self.assertLess(entry.index("SetWaterBootPaused(true)"),
+                        entry.index("EnsureSurfaceReadyNear("))
+        self.assertLess(entry.index("SettleInitialSimulation({}, stats, stop)"),
+                        entry.index("sync_water_authority()"))
+        settle = session.split("bool GameSession::SettleInitialSimulation(", 1)[1].split(
+            "struct GameSession::LoadedWorldState", 1)[0]
+        self.assertIn("i < 400 && stable < 8", settle)
+        self.assertIn("kInitSettleCap = 50", settle)
+        self.assertIn("kPostInitSettleTicks = 240", settle)
+        self.assertIn("!continuation && !water_loaded_from_save", settle)
+        self.assertNotIn("TickSimulation(", settle)
+        self.assertGreaterEqual(settle.count("stop.stop_requested()"), 5)
+        native = read_source("test/performance/runtime_world_visual_validation_test.cpp")
+        regression = native.split("TEST_P(ClientReplayProducerTest,", 1)[1].split(
+            "INSTANTIATE_TEST_SUITE_P(AuthorityBackends", 1)[0]
+        self.assertIn("client.PrepareInitialSimulation(", regression)
+        self.assertNotIn("ServerWorldRunner client", regression)
+        self.assertIn("EXPECT_EQ(start_hash, cli->header.start_world_hash)", regression)
+        self.assertIn("EXPECT_EQ(automatic->header.start_world_hash, start_hash)", regression)
+        self.assertIn("playback.ComputeWorldHash(), automatic->header.start_world_hash", regression)
+
     def test_client_replay_headers_share_authority_capture_for_both_peers(self):
         driver = read_source("src/luminumbra_client/core/scenarios/NetworkedSessionDriver.cpp")
         self.assert_client_capture(driver)
@@ -635,10 +674,11 @@ class ReplaySourceContract(unittest.TestCase):
                          r'[^;]*, 4, 2\)\)\s*\{[^}]*return 2;')
         horizon = main.split("auto prepare_entry_horizon =", 1)[1].split(
             "auto drain_entry =", 1)[0]
-        self.assertRegex(horizon, r'entry_horizon_prepared = gameSession->GetWorldSystem\(\)->'
-                         r'EnsureSurfaceReadyNear\([^;]*,\s*'
+        self.assertRegex(horizon, r'entry_horizon_prepared = gameSession->'
+                         r'PrepareInitialSimulation\(\s*'
                          r'capture_horizon \? scenario_config.horizon_radius : 12,\s*'
-                         r'capture_horizon \? scenario_config.collision_radius : 4\);\s*'
+                         r'capture_horizon \? scenario_config.collision_radius : 4,\s*'
+                         r'entry_stop.get_token\(\)\);\s*'
                          r'return entry_horizon_prepared;')
         staged = main.split("case WorldEntryStage::PrepareHorizon:", 1)[1].split(
             "case WorldEntryStage::Activate:", 1)[0]

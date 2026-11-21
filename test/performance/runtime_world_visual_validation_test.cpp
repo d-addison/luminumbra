@@ -21,6 +21,7 @@
 #include <memory>
 #include <set>
 #include <sstream>
+#include <stop_token>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -1100,6 +1101,63 @@ namespace {
 class ClientReplayProducerTest : public testing::TestWithParam<bool> {};
 } // namespace
 
+TEST(ClientBootPreparation, MissingSystemsInvalidRadiiAndCancellationRefuseBeforeMutation) {
+    world::GameSession missing;
+    world::GameSession::BootSettleStats stats;
+    EXPECT_FALSE(missing.PrepareInitialSimulation(0, 0));
+    EXPECT_FALSE(missing.SettleInitialSimulation({}, stats));
+
+    const TestSupport::HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    world::GameSession client;
+    client.SetJobSystem(&jobs);
+    client.SetRootPath(root.root_string());
+    ASSERT_TRUE(client.CreateWorld("Client", "424242", "default"));
+    ASSERT_TRUE(client.LoadWorldState());
+    const auto before = TestSupport::SessionWorldHash(client);
+    for (const int radius : {-1, 13, (std::numeric_limits<int>::max)()}) {
+        EXPECT_FALSE(client.PrepareInitialSimulation(radius, 0));
+        EXPECT_FALSE(client.PrepareInitialSimulation(0, radius));
+    }
+    std::stop_source cancellation;
+    cancellation.request_stop();
+    EXPECT_FALSE(client.PrepareInitialSimulation(0, 0, cancellation.get_token()));
+    EXPECT_FALSE(client.SettleInitialSimulation({}, stats, cancellation.get_token()));
+    EXPECT_EQ(TestSupport::SessionWorldHash(client), before);
+    EXPECT_EQ(client.GetSimulationTickCount(), 0u);
+    EXPECT_FALSE(fs::exists(client.GetWorldSaveDir() / "desync.lrec1"));
+}
+
+TEST(ClientBootPreparation, LoadedEntryPreservesWaterAtTickZero) {
+    const TestSupport::HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    world::GameSession original;
+    original.SetJobSystem(&jobs);
+    original.SetRootPath(root.root_string());
+    ASSERT_TRUE(original.CreateWorld("Client", "424242", "default"));
+    ASSERT_TRUE(original.LoadWorldState());
+    original.GetWorldSystem()->debug_set_streaming_radius_cap(1);
+    ASSERT_TRUE(original.PrepareInitialSimulation(0, 0));
+    // A full snapshot keeps every settled chunk in the save. With active regions the
+    // loaded entry may regenerate clean chunks instead of adopting them; either way the
+    // shared boot preparation must reproduce the same water state at tick zero.
+    ASSERT_TRUE(original.SaveWorldStateTo(original.GetWorldSaveDir(), nullptr, true));
+    const auto before = original.GetWorldSystem()->debug_water_state_hash();
+
+    world::GameSession loaded;
+    loaded.SetJobSystem(&jobs);
+    loaded.SetRootPath(root.root_string());
+    ASSERT_TRUE(loaded.LoadWorld(original.GetMetadata().worldId));
+    loaded.GetWorldSystem()->debug_set_streaming_radius_cap(1);
+    ASSERT_TRUE(loaded.PrepareInitialSimulation(0, 0));
+    EXPECT_EQ(loaded.GetWorldSystem()->debug_water_state_hash().hash, before.hash);
+    EXPECT_EQ(loaded.GetWorldSystem()->debug_water_state_hash().water_chunks, before.water_chunks);
+    EXPECT_EQ(loaded.GetSimulationTickCount(), 0u);
+    EXPECT_EQ(loaded.TickSimulation(loaded.GetSimulationClock().fixed_dt()), 1u);
+}
+
 TEST_P(ClientReplayProducerTest, AutomaticDumpMatchesCliBootAndReconstructsStartWorld) {
     namespace replay = Luminumbra::Replay;
     const TestSupport::HeadlessRoot root;
@@ -1113,7 +1171,6 @@ TEST_P(ClientReplayProducerTest, AutomaticDumpMatchesCliBootAndReconstructsStart
     options.ticks = 0;
     options.surface_radius = 0;
     options.collision_radius = 0;
-    options.test_streaming_radius_cap = 1;
     options.systems_config_override = systems;
     options.record_path = (root.path() / "cli.lrec1").string();
     ASSERT_EQ(RunRecord(options), 0);
@@ -1122,11 +1179,21 @@ TEST_P(ClientReplayProducerTest, AutomaticDumpMatchesCliBootAndReconstructsStart
     if (!cli)
         return;
 
-    // Supply the rendering peer with an equivalent authority boot. Its actual
-    // scenario driver and automatic recorder produce the dump below.
-    Server::ServerWorldRunner client(RunnerConfigFrom(options), {.owner_continuation = true});
-    ASSERT_TRUE(client.Boot());
-    const auto dump = client.Session()->GetWorldSaveDir() / "desync.lrec1";
+    // Ordinary client entry: create/adopt state, then use the same entry
+    // preparation as main_client before presentation, ticks or recording.
+    JobSystem client_jobs;
+    client_jobs.startup(1);
+    world::GameSession client;
+    client.SetJobSystem(&client_jobs);
+    client.SetRootPath(root.root_string());
+    client.ApplySystemConfig(systems);
+    ASSERT_TRUE(client.CreateWorld("Client", options.seed, options.preset));
+    ASSERT_TRUE(client.LoadWorldState());
+    ASSERT_TRUE(client.PrepareInitialSimulation(options.surface_radius, options.collision_radius));
+    EXPECT_EQ(client.GetSimulationTickCount(), 0u);
+    const auto start_hash = TestSupport::SessionWorldHash(client);
+    EXPECT_EQ(start_hash, cli->header.start_world_hash);
+    const auto dump = client.GetWorldSaveDir() / "desync.lrec1";
     Client::ScenarioHarness::NetworkedSessionDriver::Config config;
     config.seed = GetParam() ? 4294967297ull : 424242ull;
     config.root_path = root.root_string();
@@ -1137,10 +1204,10 @@ TEST_P(ClientReplayProducerTest, AutomaticDumpMatchesCliBootAndReconstructsStart
     config.budget_ticks = 1;
     {
         Client::ScenarioHarness::NetworkedSessionDriver driver;
-        ASSERT_TRUE(driver.Begin(client.Session(), config)) << driver.failure_reason();
+        ASSERT_TRUE(driver.Begin(&client, config)) << driver.failure_reason();
         // A deterministic authority edit AFTER the recorder captured tick zero
         // forces the real desync path to publish the client's recording.
-        const auto chunks = client.Session()->GetWorldSystem()->snapshot_streamed_chunks();
+        const auto chunks = client.GetWorldSystem()->snapshot_streamed_chunks();
         ASSERT_FALSE(chunks.empty());
         const auto edited = std::find_if(chunks.begin(), chunks.end(), [](const auto& chunk) {
             return chunk && !chunk->sdf_data.empty();
@@ -1168,6 +1235,7 @@ TEST_P(ClientReplayProducerTest, AutomaticDumpMatchesCliBootAndReconstructsStart
     EXPECT_EQ(automatic->header.system_config_identity, cli->header.system_config_identity);
     EXPECT_EQ(automatic->header.preset_content_hash, cli->header.preset_content_hash);
     EXPECT_EQ(automatic->header.weather_schedule, cli->header.weather_schedule);
+    EXPECT_EQ(automatic->header.start_world_hash, start_hash);
     EXPECT_EQ(automatic->header.start_world_hash, cli->header.start_world_hash);
     const auto playback_config = ReplayRunnerConfigFrom(options, automatic->header);
     ASSERT_TRUE(playback_config.has_value());
@@ -1233,8 +1301,7 @@ TEST(NetworkedSessionDriverTest, PresentationPreloadPreservesBothStartingAuthori
     ASSERT_TRUE(client.CreateWorld("Presentation", "424242", "default"));
     ASSERT_TRUE(client.LoadWorldState());
     auto* world_system = client.GetWorldSystem();
-    ASSERT_TRUE(world_system->EnsureSurfaceReadyNear(
-        client.GetMetadata().spawnPoint, client.GetPhysicsSystem(), 0, 0));
+    ASSERT_TRUE(client.PrepareInitialSimulation(0, 0));
     const auto before = TestSupport::SessionWorldHash(client);
     ASSERT_TRUE(
         world_system->PrepareInitialWaterPresentationNear(client.GetMetadata().spawnPoint, 0));
@@ -1276,8 +1343,7 @@ protected:
         config.collision_radius = 0;
         config.budget_ticks = 3;
         config.hash_cadence_ticks = 1;
-        ASSERT_TRUE(client.GetWorldSystem()->EnsureSurfaceReadyNear(
-            client.GetMetadata().spawnPoint, client.GetPhysicsSystem(), 0, 0));
+        ASSERT_TRUE(client.PrepareInitialSimulation(0, 0));
 
         auto params = Luminumbra::Test::SyntheticTerrainParams();
         params.base_amplitude = 0;

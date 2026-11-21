@@ -275,9 +275,9 @@ bool NetworkedSessionDriver::Begin(Luminumbra::world::GameSession* client_sessio
         return false;
     }
     m_spawn_anchor = m_impl->host_session->GetMetadata().spawnPoint;
-    if (!host_ws->EnsureSurfaceReadyNear(
-            m_spawn_anchor, host_phys, config.surface_radius, config.collision_radius)) {
-        m_failure_reason = "host_surface_not_ready";
+    if (!m_impl->host_session->PrepareInitialSimulation(config.surface_radius,
+                                                        config.collision_radius)) {
+        m_failure_reason = "host_initial_simulation_not_ready";
         return false;
     }
 
