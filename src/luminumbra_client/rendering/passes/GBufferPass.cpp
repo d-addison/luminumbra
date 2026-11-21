@@ -18,6 +18,7 @@
 #include "core/IsolationConfig.h" // ctx.isolation->renders(...) needs the full type
 #include "core/Log.h"
 #include "luminumbra_common/components/CoreComponents.h"
+#include "luminumbra_common/core/IntegerPrimitives.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "rendering/Camera.h"
 #include "rendering/Mesh.h"
@@ -620,15 +621,6 @@ void GBufferPass::build_static_prop_cache(entt::registry& registry) {
         pathIntern.emplace(p, idx);
         return idx;
     };
-    auto fnv64 = [](const std::string& s, std::uint64_t seed) {
-        std::uint64_t h = seed;
-        for (const char character : s) {
-            const auto c = static_cast<unsigned char>(character);
-            h ^= c;
-            h *= 1099511628211ull;
-        }
-        return h;
-    };
     // Render-only deterministic position hash -> [0,1] (never feeds sim/world_hash).
     auto hash01 = [](const glm::vec3& p, float salt) {
         float s = std::sin(glm::dot(p, glm::vec3(12.9898f, 78.233f, 37.719f)) + salt) * 43758.5453f;
@@ -685,7 +677,8 @@ void GBufferPass::build_static_prop_cache(entt::registry& registry) {
             }
             cp.anchorSlot = slot->second;
         }
-        cp.baseMeshHash = fnv64(mesh_info.meshPath, 1469598103934665603ull);
+        cp.baseMeshHash = Core::Fnv1a64(
+            mesh_info.meshPath.data(), mesh_info.meshPath.size(), Core::kFnv1a64HistoricalBasis);
         cp.pathIndex = intern(mesh_info.meshPath);
         cp.materialId = mesh_info.materialId;
         m_staticPropCache.push_back(cp);
