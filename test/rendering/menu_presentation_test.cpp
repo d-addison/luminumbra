@@ -660,11 +660,11 @@ TEST(MenuPresentation, SeenProgramsBypassFirstUseAttributionOnBindsAndSubmission
     namespace Gl = Luminumbra::Rendering::AttributedGl;
     const PhaseFrameScope frame(true);
     const auto program = Gl::CreateProgram([] { return std::uint32_t{72}; });
-    const auto before = Gl::programs.attributed_calls();
-    const auto lookups = Gl::programs.registry_lookups();
+    const auto before = Gl::programs().attributed_calls();
+    const auto lookups = Gl::programs().registry_lookups();
     Gl::UseProgram([](std::uint32_t) {}, program);
     Gl::Submit([] {});
-    ASSERT_EQ(Gl::programs.attributed_calls(), before + 2);
+    ASSERT_EQ(Gl::programs().attributed_calls(), before + 2);
     int calls = 0;
     for (int index = 0; index < 4; ++index) {
         Gl::UseProgram(
@@ -676,8 +676,8 @@ TEST(MenuPresentation, SeenProgramsBypassFirstUseAttributionOnBindsAndSubmission
         Gl::Submit([&](int value) { calls += value; }, 2);
     }
     EXPECT_EQ(calls, 12);
-    EXPECT_EQ(Gl::programs.attributed_calls(), before + 2);
-    EXPECT_EQ(Gl::programs.registry_lookups(), lookups);
+    EXPECT_EQ(Gl::programs().attributed_calls(), before + 2);
+    EXPECT_EQ(Gl::programs().registry_lookups(), lookups);
     EXPECT_EQ(frame.snapshot().completed_scopes(Phase::ShaderFirstUse), 2u);
     Gl::DeleteProgram([](std::uint32_t) {}, program);
 }
@@ -686,12 +686,12 @@ TEST(MenuPresentation, DisabledCollectorsBypassAttributionAndConsumeFirstSubmiss
     namespace Gl = Luminumbra::Rendering::AttributedGl;
     const PhaseFrameScope frame(true);
     const auto program = Gl::CreateProgram([] { return std::uint32_t{73}; });
-    const auto before = Gl::programs.attributed_calls();
-    const auto lookups = Gl::programs.registry_lookups();
+    const auto before = Gl::programs().attributed_calls();
+    const auto lookups = Gl::programs().registry_lookups();
     int calls = 0;
     {
         const PhaseFrameScope disabled(false);
-        EXPECT_FALSE(shader_first_use_collection_enabled);
+        EXPECT_FALSE(shader_first_use_collection_enabled());
         Gl::UseProgram(
             [&](std::uint32_t name) {
                 EXPECT_EQ(name, program);
@@ -699,18 +699,18 @@ TEST(MenuPresentation, DisabledCollectorsBypassAttributionAndConsumeFirstSubmiss
             },
             program);
         Gl::Submit([&] { ++calls; });
-        EXPECT_FALSE(Gl::programs.pending());
+        EXPECT_FALSE(Gl::programs().pending());
         Gl::UseProgram([&](std::uint32_t) { ++calls; }, program);
         Gl::Submit([&] { ++calls; });
-        EXPECT_EQ(Gl::programs.attributed_calls(), before);
+        EXPECT_EQ(Gl::programs().attributed_calls(), before);
         EXPECT_EQ(disabled.snapshot().completed_scopes(Phase::ShaderFirstUse), 0u);
     }
-    EXPECT_TRUE(shader_first_use_collection_enabled);
+    EXPECT_TRUE(shader_first_use_collection_enabled());
     Gl::UseProgram([&](std::uint32_t) { ++calls; }, program);
     Gl::Submit([&] { ++calls; });
     EXPECT_EQ(calls, 6);
-    EXPECT_EQ(Gl::programs.attributed_calls(), before);
-    EXPECT_EQ(Gl::programs.registry_lookups(), lookups);
+    EXPECT_EQ(Gl::programs().attributed_calls(), before);
+    EXPECT_EQ(Gl::programs().registry_lookups(), lookups);
     EXPECT_EQ(frame.snapshot().completed_scopes(Phase::ShaderFirstUse), 0u);
     Gl::DeleteProgram([](std::uint32_t) {}, program);
 }
@@ -718,18 +718,18 @@ TEST(MenuPresentation, DisabledCollectorsBypassAttributionAndConsumeFirstSubmiss
 TEST(MenuPresentation, DisabledBindingAlonePreservesFirstSubmissionAttribution) {
     namespace Gl = Luminumbra::Rendering::AttributedGl;
     const auto program = Gl::CreateProgram([] { return std::uint32_t{74}; });
-    const auto before = Gl::programs.attributed_calls();
+    const auto before = Gl::programs().attributed_calls();
     {
         const PhaseFrameScope disabled(false);
         Gl::UseProgram([](std::uint32_t) {}, program);
-        EXPECT_TRUE(Gl::programs.pending());
-        EXPECT_EQ(Gl::programs.attributed_calls(), before);
+        EXPECT_TRUE(Gl::programs().pending());
+        EXPECT_EQ(Gl::programs().attributed_calls(), before);
     }
     {
         const PhaseFrameScope frame(true);
         Gl::UseProgram([](std::uint32_t) {}, program);
         Gl::Submit([] {});
-        EXPECT_EQ(Gl::programs.attributed_calls(), before + 2);
+        EXPECT_EQ(Gl::programs().attributed_calls(), before + 2);
         EXPECT_EQ(frame.snapshot().completed_scopes(Phase::ShaderFirstUse), 2u);
     }
     Gl::DeleteProgram([](std::uint32_t) {}, program);
