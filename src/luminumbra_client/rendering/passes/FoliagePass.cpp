@@ -3,6 +3,7 @@
 #include "../FoliageGroundMesh.h"
 #include "../FoliageGroundWork.h"
 #include "luminumbra_common/core/CaptureContentPaths.h"
+#include "luminumbra_common/core/IntegerPrimitives.h"
 #include "rendering/AttributedGl.h"
 #include "rendering/BenchmarkGpuQueries.h"
 
@@ -109,21 +110,10 @@ uint64_t splitmix64(uint64_t x) {
     return foliage_splitmix64(x);
 }
 
-// FNV-1a over a byte range (instance-hash determinism surface).
-uint64_t fnv1a(const void* data, std::size_t len, uint64_t seed = 1469598103934665603ull) {
-    const auto* bytes = static_cast<const uint8_t*>(data);
-    uint64_t hash = seed;
-    for (std::size_t i = 0; i < len; ++i) {
-        hash ^= bytes[i];
-        hash *= 1099511628211ull;
-    }
-    return hash;
-}
-
 uint64_t scatter_signature(const FoliagePass::ChunkScatter& chunk) {
-    uint64_t hash = 1469598103934665603ull;
+    uint64_t hash = Core::kFnv1a64HistoricalBasis;
     const auto mix = [&hash](const auto& value) {
-        hash = fnv1a(&value, sizeof(value), hash);
+        hash = Core::Fnv1a64(&value, sizeof(value), hash);
     };
     mix(chunk.chunk_xz.x);
     mix(chunk.chunk_xz.y);
@@ -1818,16 +1808,18 @@ void FoliagePass::collect_input_hash() {
             m_chunk_params.size() * sizeof(GpuChunk) +
             m_surface_keys.size() * kMaxCandidatesPerChunk * sizeof(glm::vec4) +
             m_palette.size() * sizeof(float) + 5 * sizeof(float);
-    auto hash = fnv1a(m_chunk_params.data(), m_chunk_params.size() * sizeof(GpuChunk));
+    auto hash = Core::Fnv1a64(m_chunk_params.data(),
+                              m_chunk_params.size() * sizeof(GpuChunk),
+                              Core::kFnv1a64HistoricalBasis);
     // Hash the canonical logical stream, independent of slot layout and unused
     // capacity. This is the original full-build recipe without concatenation.
     for (const auto key : m_surface_keys) {
         const auto& samples = m_surf_grid_cache.at(key).samples;
-        hash = fnv1a(samples.data(), samples.size() * sizeof(glm::vec4), hash);
+        hash = Core::Fnv1a64(samples.data(), samples.size() * sizeof(glm::vec4), hash);
     }
-    hash = fnv1a(m_palette.data(), m_palette.size() * sizeof(float), hash);
+    hash = Core::Fnv1a64(m_palette.data(), m_palette.size() * sizeof(float), hash);
     for (const float value : m_uploaded_hash_settings)
-        hash = fnv1a(&value, sizeof(value), hash);
+        hash = Core::Fnv1a64(&value, sizeof(value), hash);
     m_uploaded_input_hash = hash;
 }
 
@@ -2108,7 +2100,7 @@ bool FoliagePass::begin_qualification() {
     m_qualification.gl_renderer = identity(GL_RENDERER);
     m_qualification.gl_version = identity(GL_VERSION);
     auto& proof = m_qualification.rebuild;
-    proof.input_hash = fnv1a(&m_wind_xz[0], sizeof(float) * 2, *input_hash);
+    proof.input_hash = Core::Fnv1a64(&m_wind_xz[0], sizeof(float) * 2, *input_hash);
     proof.first_generation = m_build_generation;
     proof.first_frame = m_build_frame;
     proof.first_hash = instance_hash();
@@ -2321,9 +2313,11 @@ FoliageQualificationEvidence FoliagePass::qualification_evidence() {
 
 uint64_t FoliagePass::instance_hash() const {
     if (m_instances.empty()) {
-        return fnv1a(nullptr, 0);
+        return Core::Fnv1a64(nullptr, 0, Core::kFnv1a64HistoricalBasis);
     }
-    return fnv1a(m_instances.data(), m_instances.size() * sizeof(InstanceRecord));
+    return Core::Fnv1a64(m_instances.data(),
+                         m_instances.size() * sizeof(InstanceRecord),
+                         Core::kFnv1a64HistoricalBasis);
 }
 
 std::size_t FoliagePass::instances_within(const glm::vec3& center, float radius_m) const {

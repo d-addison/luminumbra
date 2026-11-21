@@ -93,13 +93,27 @@ AttributedGl::Program Shader::buildProgram(const char* vertexPath, const char* f
         return {};
     }
 
+    const bool zero_ids =
+        std::find(m_defines.begin(), m_defines.end(), "LUMIN_DIAG_ZERO_IDS 1") != m_defines.end();
     // The same lexer and retained defines apply to initial link and every reload.
     for (auto* source : {&vertexCode, &fragmentCode}) {
-        if (!InjectShaderDefines(*source, m_defines, m_diagnostic)) {
+        auto defines = m_defines;
+        if (zero_ids && source == &fragmentCode) {
+            defines.emplace_back("main lumin_diagnostic_original_main");
+        }
+        if (!InjectShaderDefines(*source, defines, m_diagnostic)) {
             LUMINUMBRA_CORE_ERROR(
                 "SHADER SOURCE ERROR ({} / {}): {}", vertexPath, fragmentPath, m_diagnostic);
             return {};
         }
+    }
+    if (zero_ids) {
+        // Capture-only wrapper: discard still terminates the fragment, while an
+        // early return from the original main still reaches the explicit zero.
+        fragmentCode += "\n#undef main\n"
+                        "layout(location = 6) out uvec4 lumin_diagnostic_zero;\n"
+                        "void main() { lumin_diagnostic_original_main(); "
+                        "lumin_diagnostic_zero = uvec4(0); }\n";
     }
 
     const char* vShaderCode = vertexCode.c_str();
@@ -252,12 +266,12 @@ bool Shader::Reload() {
 
 // Helper function to get uniform location from cache or query it if not present
 GLint Shader::getUniformLocation(const std::string& name) const {
-    if (m_uniformLocationCache.find(name) != m_uniformLocationCache.end()) {
-        return m_uniformLocationCache[name];
+    if (const auto it = m_uniformLocationCache.find(name); it != m_uniformLocationCache.end()) {
+        return it->second;
     }
 
     GLint location = glGetUniformLocation(m_id, name.c_str());
-    m_uniformLocationCache[name] = location;
+    m_uniformLocationCache.emplace(name, location);
     return location;
 }
 

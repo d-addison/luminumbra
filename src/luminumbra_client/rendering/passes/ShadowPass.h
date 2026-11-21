@@ -3,6 +3,7 @@
 #include "../RenderContext.h"
 #include "../RenderInputs.h"
 #include "../ShadowMap.h"
+#include "PassDepthState.h"
 
 #include <array>
 #include <filesystem>
@@ -21,6 +22,17 @@ class RenderResourceRegistry;
 // hierarchy, stats collection, and the GPU timer issue/collect calls.
 class ShadowPass {
 public:
+    struct CallerState {
+        PassDepthState depth{};
+        GLenum clip_origin = GL_LOWER_LEFT;
+        GLenum clip_depth = GL_NEGATIVE_ONE_TO_ONE;
+        GLdouble clear_depth = 1.0;
+        GLenum cull_face = GL_BACK;
+        GLboolean cull_enabled = GL_FALSE;
+
+        static CallerState QueryExternal();
+        void Restore() const;
+    };
     bool tint_dirty() const noexcept {
         return m_tint_dirty;
     }
@@ -45,8 +57,12 @@ public:
     // RenderContext seam. Terrain submission goes through
     // input.submit_terrain (make_terrain_submitter) once per cascade; light-space
     // matrices are precomputed at the call site. Returns per-cascade submit stats.
-    std::array<TerrainSubmitStats, ShadowMap::CASCADE_COUNT> execute(const RenderContext& ctx,
-                                                                     const ShadowPassInput& input);
+    std::array<TerrainSubmitStats, ShadowMap::CASCADE_COUNT>
+    execute(const RenderContext& ctx, const ShadowPassInput& input, const CallerState& caller);
+    // Explicit unknown-state boundary for tools and direct pass callers.
+    // RenderPipeline must always supply its known CallerState to execute().
+    std::array<TerrainSubmitStats, ShadowMap::CASCADE_COUNT>
+    execute_external(const RenderContext& ctx, const ShadowPassInput& input);
 
     ShadowMap& shadow_map() {
         return m_shadow_map;

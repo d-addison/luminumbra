@@ -198,6 +198,7 @@ add_executable(common_tests
     common/StationDiscoveryArguments_test.cpp
     common/StationDiscovery_test.cpp
     common/Crc32_test.cpp
+    common/IntegerPrimitives_test.cpp
     rendering/shader_compositing_contract_test.cpp
     rendering/photo_environment_test.cpp
     common/AnimationRuntime_test.cpp
@@ -464,6 +465,7 @@ luminumbra_configure_first_party_target(capture_manifest_test)
 # GL-free feature selection, runtime resolution and capability manifest contracts.
 add_executable(capture_feature_profile_test
     rendering/capture_feature_profile_test.cpp
+    rendering/capture_feature_policy_test.cpp
     ../src/luminumbra_client/rendering/CaptureFeatureProfile.cpp
     ../src/luminumbra_client/rendering/DiagnosticCapture.cpp
     ../src/luminumbra_client/rendering/TemporalAudit.cpp
@@ -472,6 +474,18 @@ target_include_directories(capture_feature_profile_test PRIVATE ../src ../src/lu
 target_link_libraries(capture_feature_profile_test PRIVATE
     gtest_main luminumbra_common nlohmann_json glm)
 luminumbra_configure_first_party_target(capture_feature_profile_test)
+
+# GL-free sweep pins, profile refusal and continuous exact-tick transport protocol.
+add_executable(temporal_sweep_test
+    rendering/temporal_sweep_test.cpp
+    ../src/luminumbra_client/rendering/CaptureFeatureProfile.cpp
+    ../src/luminumbra_client/rendering/DiagnosticCapture.cpp
+    ../src/luminumbra_client/rendering/TemporalAudit.cpp
+    ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp)
+target_include_directories(temporal_sweep_test PRIVATE ../src ../src/luminumbra_client)
+target_link_libraries(temporal_sweep_test PRIVATE
+    gtest_main luminumbra_common nlohmann_json glm)
+luminumbra_configure_first_party_target(temporal_sweep_test)
 
 # GL-free completed-frame bundle publication and runtime admission contracts.
 add_executable(diagnostic_bundle_test
@@ -1636,6 +1650,11 @@ add_executable(regional_scent_allocation_test common/regional_scent_allocation_t
 target_include_directories(regional_scent_allocation_test PRIVATE ../src)
 target_link_libraries(regional_scent_allocation_test PRIVATE gtest_main luminumbra_common)
 
+# Keep throwing allocation replacement isolated from every other test executable.
+add_executable(native_file_ownership_test common/native_file_ownership_test.cpp)
+target_include_directories(native_file_ownership_test PRIVATE ../src ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(native_file_ownership_test PRIVATE gtest_main luminumbra_common)
+
 # Frontier gate fixtures: the lua-api-manifest and scalar-field-diffusion gates
 # assert at static initialization, the instinct and loopback gates are called
 # from the gtest cases in network_state_hash_gate_test.cpp.
@@ -1982,6 +2001,13 @@ target_link_libraries(bounded_console_sink_test PRIVATE
 )
 luminumbra_configure_first_party_target(bounded_console_sink_test)
 
+# Isolate logger first use from all engine and test-suite initialization.
+add_executable(log_initialization_test common/log_initialization_test.cpp)
+target_include_directories(log_initialization_test PRIVATE ../src/luminumbra_common)
+target_compile_definitions(log_initialization_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+target_link_libraries(log_initialization_test PRIVATE gtest_main luminumbra_common Threads::Threads)
+luminumbra_configure_first_party_target(log_initialization_test)
+
 #  implementation note: occlusion read-back onto ma_sound volume. Pure test of the
 # ComputeFinalVolume helper; includes MiniaudioManager.h so needs miniaudio + nlohmann_json.
 add_executable(audio_volume_readback_test
@@ -2122,7 +2148,8 @@ target_include_directories(frame_attribution_test PRIVATE ../src)
 target_link_libraries(frame_attribution_test PRIVATE gtest_main)
 luminumbra_configure_first_party_target(frame_attribution_test)
 
-add_executable(upload_budget_test rendering/upload_budget_test.cpp)
+add_executable(upload_budget_test rendering/upload_budget_test.cpp
+    rendering/terrain_stream_ring_test.cpp)
 target_include_directories(upload_budget_test PRIVATE ../src)
 target_link_libraries(upload_budget_test PRIVATE gtest_main)
 luminumbra_configure_first_party_target(upload_budget_test)
@@ -2185,6 +2212,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     capture_manifest_test
     diagnostic_bundle_test
     capture_feature_profile_test
+    temporal_sweep_test
     # the hemi-octa mapping test was built but never
     # registered — the atlas-bake/shader shared source of truth had zero
     # executing coverage. GL-free pure math, safe in the default lane.
@@ -2229,6 +2257,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     runtime_world_visual_validation_test
     frontier_gates_test
     regional_scent_allocation_test
+    native_file_ownership_test
     world_open_refusal_test
     runtime_surface_options_test
     jolt_tunneling_test
@@ -2241,6 +2270,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     hang_watchdog_test
     crash_report_test
     bounded_console_sink_test
+    log_initialization_test
     developer_console_pure_test
     developer_console_imgui_test
     developer_settings_test
