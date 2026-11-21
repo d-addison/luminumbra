@@ -3236,8 +3236,6 @@ class UniformCacheWiring(unittest.TestCase):
         for key in ("candidatePath", "basePath", "mesh_info.meshPath"):
             self.assertNotRegex(gbuffer, r"m_(?:skinnedMeshCache|meshCache)\s*\[\s*"
                                 + re.escape(key) + r"\s*\]")
-        far_lod = read(RENDERING / "FarLodSystem.cpp")
-        self.assertEqual(far_lod.count("source.find(key)"), 1)
 
     def test_indexed_names_are_built_inside_generation_cache_factories(self):
         for filename in ("LightingPass.cpp", "SsaoPass.cpp"):

@@ -415,8 +415,7 @@ bool finalize_assembly(Assembly& assembly,
                         source.emplace(key, brick.descriptor.source_kind);
                         continue;
                     }
-                    const auto prior = source.find(key);
-                    const auto prior_source = prior->second;
+                    const auto prior_source = source.find(key)->second;
                     if (prior_source == World::FarLodBrickSourceKind::Authoritative &&
                         brick.descriptor.source_kind ==
                             World::FarLodBrickSourceKind::Authoritative &&
@@ -441,7 +440,7 @@ bool finalize_assembly(Assembly& assembly,
                                brick.descriptor.source_kind ==
                                    World::FarLodBrickSourceKind::Authoritative) {
                         inserted.first->second = value;
-                        prior->second = brick.descriptor.source_kind;
+                        source.find(key)->second = brick.descriptor.source_kind;
                     }
                 }
         if (patched)
