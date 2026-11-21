@@ -17,8 +17,10 @@ void GodRaysPass::init_shader(const std::filesystem::path& root_path) {
                                         (root_path / "res/shaders/god_rays.frag").string().c_str());
     PassGl::label_gl_object(GL_PROGRAM, m_shader ? m_shader->Id() : 0u, "shader.god_rays");
     if (m_shader && m_shader->IsValid()) {
-        if (const ExpectedLayout* layout = FindPassExpectedLayout("god_rays"))
-            m_shader->ValidateLayout(*layout);
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("god_rays");
+            layout && !m_shader->ValidateLayout(*layout)) {
+            m_shader.reset();
+        }
     }
 }
 
@@ -40,7 +42,10 @@ void GodRaysPass::execute(const RenderContext& ctx) {
     const GLuint opaque_tex = ctx.opaque_scene.id;
     if (sun_visible > 0.002f && lit_fbo && opaque_tex && ctx.gbuffer_depth.id) {
         glBindFramebuffer(GL_FRAMEBUFFER, lit_fbo);
-        glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // god-rays into internal lit FBO
+        glViewport(0,
+                   0,
+                   static_cast<GLsizei>(ctx.internal_w()),
+                   static_cast<GLsizei>(ctx.internal_h())); // god-rays into internal lit FBO
         const GLboolean depth_was = glIsEnabled(GL_DEPTH_TEST);
         glDisable(GL_DEPTH_TEST);
         const GLboolean blend_was = glIsEnabled(GL_BLEND);
@@ -57,7 +62,7 @@ void GodRaysPass::execute(const RenderContext& ctx) {
         m_shader->setFloat("u_sunVisible", sun_visible);
         m_shader->setFloat("u_strength", 0.85f);
         glBindVertexArray(ctx.screen_quad_vao);
-        Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
+        Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GLenum{GL_TRIANGLE_STRIP}, 0, 4);
         glBindVertexArray(0);
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, 0);

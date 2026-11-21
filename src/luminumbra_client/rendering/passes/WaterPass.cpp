@@ -60,8 +60,10 @@ void WaterPass::init_shader(const std::filesystem::path& root_path) {
     // validate water.frag's sampler bindings (the caustics generator
     // program binds no samplers, so it has no registry entry).
     if (m_water_shader && m_water_shader->IsValid()) {
-        if (const ExpectedLayout* layout = FindPassExpectedLayout("water"))
-            m_water_shader->ValidateLayout(*layout);
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("water");
+            layout && !m_water_shader->ValidateLayout(*layout)) {
+            m_water_shader.reset();
+        }
     }
     // offscreen caustics generation reuses the shared fullscreen
     // quad layout (lighting_pass.vert) with the dormant caustics fragment
@@ -189,6 +191,9 @@ WaterDrawStats WaterPass::execute(const RenderContext& ctx,
     LUMIN_PROFILE_ZONE_N("GL WaterPass.execute");
     m_visibility_mask = {};
     WaterDrawStats stats;
+    if ((!m_water_shader || !m_water_shader->IsValid()) && !GBufferDiagnosticCapture::Current()) {
+        return stats;
+    }
     // --- 0. Generate the animated caustics pattern (offscreen) ---
     generate_caustics(ctx);
 

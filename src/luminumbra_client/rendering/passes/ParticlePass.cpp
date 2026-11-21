@@ -121,8 +121,10 @@ void ParticlePass::init_shader(const std::filesystem::path& root_path) {
     PassGl::label_gl_object(GL_PROGRAM, m_shader ? m_shader->Id() : 0u, "shader.particles");
     // validate the soft-particle depth sampler against the registry.
     if (m_shader && m_shader->IsValid()) {
-        if (const ExpectedLayout* layout = FindPassExpectedLayout("magical_particles"))
-            m_shader->ValidateLayout(*layout);
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("magical_particles");
+            layout && !m_shader->ValidateLayout(*layout)) {
+            m_shader.reset();
+        }
     }
 }
 
