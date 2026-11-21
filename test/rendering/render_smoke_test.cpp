@@ -32,6 +32,7 @@
 #include "luminumbra_client/rendering/passes/GroundDecalPass.h"
 #include "luminumbra_client/rendering/passes/LightingPass.h"
 #include "luminumbra_client/rendering/passes/ParticlePass.h"
+#include "luminumbra_client/rendering/passes/PassGlHelpers.h"
 #include "luminumbra_client/rendering/passes/SkyboxPass.h"
 #include "luminumbra_client/rendering/passes/SsaoPass.h"
 #include "luminumbra_client/rendering/passes/TaauPass.h"
@@ -8187,7 +8188,7 @@ struct LayoutPassTargets {
     RenderResourceRegistry registry;
     LightingPass lighting;
     Camera camera;
-    const std::vector<glm::mat4> cascade_matrices{4, glm::mat4(1)};
+    ShadowMap shadow_map;
     const DebugViewPass::Controls saved_controls = DebugViewPass::controls();
     RenderContext ctx;
     GLuint vao = 0;
@@ -8199,7 +8200,13 @@ struct LayoutPassTargets {
         ctx.screen_height = 2;
         ctx.screen_quad_vao = vao;
         ctx.camera = &camera;
-        ctx.light_space_matrices = &cascade_matrices;
+        PassGl::set_default_shadow_cascade_splits(shadow_map);
+        shadow_map.light_space_matrices.assign(ShadowMap::CASCADE_COUNT, glm::mat4(1));
+        ctx.cascade_splits = glm::vec4(shadow_map.cascade_splits[1],
+                                       shadow_map.cascade_splits[2],
+                                       shadow_map.cascade_splits[3],
+                                       shadow_map.cascade_splits[4]);
+        ctx.light_space_matrices = &shadow_map.light_space_matrices;
         ctx.lit_scene = FboHandle{lighting.lighting_fbo().fbo_id, true};
         ctx.lit_scene_color = TextureHandle{lighting.lighting_fbo().color_texture};
         ctx.lit_scene_depth = RenderbufferHandle{lighting.lighting_fbo().depth_texture};
@@ -9083,8 +9090,18 @@ TEST(RenderSmokeTest, UnavailableGlassProgramsSkipBeforeAllocatingTargets) {
         LayoutDrawCapture draws;
         glEnable(GL_DEPTH_TEST);
         glEnable(GL_BLEND);
+        if (input == 3 || input == 4) {
+            glDisable(GL_DEBUG_OUTPUT);
+        }
         pass.execute_accum(targets.ctx, glass_input);
+        if (input == 3 || input == 4) {
+            glEnable(GL_DEBUG_OUTPUT);
+        }
         pass.execute_resolve(targets.ctx, glass_input);
+        EXPECT_EQ(glIsEnabled(GL_DEBUG_OUTPUT), GL_TRUE);
+        EXPECT_EQ(pass.accum_shader() && pass.accum_shader()->IsValid(), input == 2 || input == 4);
+        EXPECT_EQ(pass.resolve_shader() && pass.resolve_shader()->IsValid(),
+                  input == 1 || input == 3);
         if (input == 0) {
             EXPECT_EQ(ProgramDeletionCapture::Current().count, 2u);
             EXPECT_EQ(pass.accum_shader(), nullptr);
