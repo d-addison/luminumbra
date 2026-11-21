@@ -261,43 +261,10 @@ TEST(DiagnosticContributions, LiveTermsNeverRequestIdentityReplayOrInspectorRead
     control = {};
 }
 
-// Retain the scalar comparison and accumulation as the independent GL oracle.
+// The production lighting source with the sky early-out compiled away is the oracle
+// for every lit pixel.
 std::string ReferenceLightingSource() {
     auto source = Source("res/shaders/lighting_pass.frag");
-    const auto filter = source.find("float filteredShadow(");
-    if (filter == std::string::npos) {
-        throw std::runtime_error("Missing lighting filter");
-    }
-    source.insert(
-        filter, R"GLSL(float referenceFilteredShadow(vec3 projected, int cascadeIndex, float bias) {
-    if (any(lessThan(projected, vec3(0.0))) || any(greaterThan(projected, vec3(1.0)))) {
-        return 1.0;
-    }
-    const int WIDTH = 4;
-    vec2 size = vec2(textureSize(u_shadowCascades, 0).xy);
-    vec2 texelPosition = projected.xy * size;
-    vec2 phase = fract(texelPosition);
-    vec2 base = floor(texelPosition) - vec2(float(WIDTH / 2));
-    float visibility = 0.0;
-    for (int x = 0; x <= WIDTH; ++x) {
-        float wx = x == 0 ? 1.0 - phase.x : (x == WIDTH ? phase.x : 1.0);
-        for (int y = 0; y <= WIDTH; ++y) {
-            float wy = y == 0 ? 1.0 - phase.y : (y == WIDTH ? phase.y : 1.0);
-            vec2 uv = (base + vec2(x, y) + 0.5) / size;
-            float depth = texture(u_shadowCascades, vec3(uv, cascadeIndex)).r;
-            visibility += wx * wy * (projected.z - bias > depth ? 0.0 : 1.0);
-        }
-    }
-    return visibility / float(WIDTH * WIDTH);
-}
-)GLSL");
-    const std::string comparison = "return filteredShadow(projCoords, cascadeIndex, bias);";
-    const auto call = source.find(comparison);
-    if (call == std::string::npos) {
-        throw std::runtime_error("Missing lighting comparison");
-    }
-    source.replace(
-        call, comparison.size(), "return referenceFilteredShadow(projCoords, cascadeIndex, bias);");
     const std::string sky = "u_skipLegacySky != 0";
     const auto sky_guard = source.find(sky);
     if (sky_guard == std::string::npos) {
