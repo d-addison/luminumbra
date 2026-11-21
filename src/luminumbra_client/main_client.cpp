@@ -1514,11 +1514,9 @@ int main(int argc, char* argv[]) {
         }
         scenario_config.preset_json_override = std::move(json_text);
     }
-#if !defined(LUMINUMBRA_QA_RUNNER)
-    // The shipping client does not compile the QA scenario harness (no
-    // CreateScenarioRunner is linked). Refuse `--scenario` up front, before any
-    // window/GL work, with the dedicated availability exit code.
-    if (scenario_config.active()) {
+    const ScenarioRunnerFactory scenario_runner_factory = GetScenarioRunnerFactory();
+    // Refuse unavailable scenarios before any window/GL work.
+    if (scenario_config.active() && !scenario_runner_factory) {
         // Exit code for a `--scenario` request against a binary compiled WITHOUT the
         // QA harness (the shipping luminumbra_client_app). Distinct from the scenario
         // exit codes the harness itself uses (2 = scenario failed, 3 = memory
@@ -1535,7 +1533,6 @@ int main(int argc, char* argv[]) {
                      kExitScenarioUnavailable);
         return kExitScenarioUnavailable;
     }
-#endif
     RuntimeStateRecorder runtime_state_recorder(scenario_config, g_camera);
     InstallRuntimeCrashHandler(runtime_state_recorder);
     std::unique_ptr<HangWatchdog> hang_watchdog;
@@ -4023,16 +4020,10 @@ int main(int argc, char* argv[]) {
                                                 scenario_play_started_at,
                                                 last_readiness_report,
                                                 exit_code};
-#if defined(LUMINUMBRA_QA_RUNNER)
     const std::unique_ptr<ScenarioRunner> scenario_runner =
-        scenario_config.active() ? CreateScenarioRunner(scenario_frame_context) : nullptr;
-#else
-    // Shipping build: no harness linked; the guard at the top of main() already
-    // rejected any --scenario request, so the runner is permanently null and
-    // the frame loop takes only its non-scenario branches.
-    const std::unique_ptr<ScenarioRunner> scenario_runner;
-    (void)scenario_frame_context;
-#endif
+        scenario_runner_factory && scenario_config.active()
+            ? scenario_runner_factory(scenario_frame_context)
+            : nullptr;
     //  honest CPU-vs-GPU attribution for --render-benchmark.
     // wall = max(CPU_submit, GPU_work) + present. NVML is loaded lazily on the
     // first measured frame (optional / guarded).
