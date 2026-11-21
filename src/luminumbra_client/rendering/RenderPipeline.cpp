@@ -3306,6 +3306,9 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
 
     glEnable(GL_DEPTH_TEST);
 
+    // The scene owns depth writes; transparent stages restore them before exit.
+    glDepthMask(GL_TRUE);
+
     // The wireframe toggle now adds a depth-tested mask over the shaded frame.
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
     glEnable(GL_CULL_FACE);
@@ -3400,7 +3403,16 @@ void RenderPipeline::execute_stage_shadow(const Camera& camera) {
         // translucent occluders for the tint cascade.
         shadow_input.glass_items = &m_glass_pane_items;
         shadow_input.glass_vao = m_glass_quad_vao;
-        const auto shadow_stats = m_shadow_pass->execute(shadow_ctx, shadow_input);
+        // Startup establishes reversed Z; scene stages retain that convention.
+        // dispatch_stages establishes depth writes/testing and back-face culling.
+        const ShadowPass::CallerState caller{
+            .depth = {.function = GL_GREATER, .write_mask = GL_TRUE, .test_enabled = GL_TRUE},
+            .clip_origin = GL_LOWER_LEFT,
+            .clip_depth = GL_ZERO_TO_ONE,
+            .clear_depth = 0.0,
+            .cull_face = GL_BACK,
+            .cull_enabled = GL_TRUE};
+        const auto shadow_stats = m_shadow_pass->execute(shadow_ctx, shadow_input, caller);
         for (std::size_t i = 0; i < ShadowMap::CASCADE_COUNT; ++i) {
             m_last_render_pass_stats.shadow_cascade_visible_chunks[i] =
                 shadow_stats[i].visible_chunks;
@@ -6420,7 +6432,10 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
         if (const auto value = Core::ReadEnvironment("LUMIN_MOON")) {
             try {
                 return std::stof(*value);
-            } catch (...) {}
+            } catch (...) {
+                // The static initializer bounds this diagnostic to once per process.
+                LUMINUMBRA_CORE_WARN("Invalid LUMIN_MOON; using configured illumination");
+            }
         }
         return -1.0f;
     }();
@@ -6788,7 +6803,8 @@ std::vector<glm::mat4> RenderPipeline::get_light_space_matrices(const Camera& ca
         minZ = (minZ < 0) ? minZ * z_mult : minZ / z_mult;
         maxZ = (maxZ < 0) ? maxZ / z_mult : maxZ * z_mult;
         // ShadowPass keeps the conventional [-1,1] orthographic clip convention.
-        glm::mat4 light_proj = glm::orthoRH_NO(minX, maxX, minY, maxY, minZ, maxZ);
+        glm::mat4 light_proj = PassGl::shadow_projection_from_bounds(glm::vec3(minX, minY, minZ),
+                                                                     glm::vec3(maxX, maxY, maxZ));
         matrices.push_back(light_proj * light_view);
     }
     return matrices;

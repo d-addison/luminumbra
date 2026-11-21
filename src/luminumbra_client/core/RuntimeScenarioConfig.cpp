@@ -7,6 +7,7 @@
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/world/SurfaceWorkBudget.h"
 #include "rendering/DiagnosticCapture.h"
+#include "rendering/TemporalSweep.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -152,6 +153,18 @@ std::string ResolveRuntimeScenario(int argc, char* argv[]) {
     return scenario;
 }
 
+// Both startup paths must reject the matrix before creating a save root or world.
+void RefuseIncompatibleSweepProfile(int argc, char* argv[]) {
+    const auto profile = ParseCaptureFeatureProfile(argc, argv);
+    if (ResolveRuntimeScenario(argc, argv) == "world_visual_sweep") {
+        const auto reason = Rendering::WorldSweepMatrixRefusal(
+            profile == RuntimeScenarioConfig::FeatureProfile::AllFeatures);
+        if (!reason.empty()) {
+            throw std::invalid_argument(std::string(reason));
+        }
+    }
+}
+
 // Parses "WxH" (e.g. "1600x900") into width/height. Returns false (leaving the
 // outputs untouched) on any malformed/non-positive value.
 bool ParseResolution(const std::string& value, int& out_width, int& out_height) {
@@ -208,7 +221,7 @@ void ParseSurfaceRadiusOptions(int argc,
 } // namespace
 
 RuntimePathOptions ParseRuntimePathOptions(int argc, char* argv[]) {
-    (void)ParseCaptureFeatureProfile(argc, argv);
+    RefuseIncompatibleSweepProfile(argc, argv);
     const auto temporal_audit = ParseTemporalAuditRuntimeOptions(argc, argv);
     // Admission precedes --save-root directory creation.
     const auto diagnostic_environment = Core::ReadEnvironment("LUMIN_CAPTURE_DIAGNOSTICS");
@@ -323,6 +336,7 @@ RuntimePathOptions ParseRuntimePathOptions(int argc, char* argv[]) {
 
 RuntimeScenarioConfig
 ParseRuntimeScenarioConfig(int argc, char* argv[], const std::filesystem::path& root_dir) {
+    RefuseIncompatibleSweepProfile(argc, argv);
     RuntimeScenarioConfig config;
     config.temporal_audit = ParseTemporalAuditRuntimeOptions(argc, argv);
     config.capture_feature_profile = ParseCaptureFeatureProfile(argc, argv);
@@ -407,7 +421,11 @@ ParseRuntimeScenarioConfig(int argc, char* argv[], const std::filesystem::path& 
                     config.skinned_normal_texture = creature.value("normal_texture", std::string{});
                 }
             } catch (...) {
-                // Leave empty: RenderPipeline keeps the flat fallback.
+                // Keep the render fallback; diagnose at most once across config parses.
+                static std::atomic_flag reported{};
+                if (!reported.test_and_set(std::memory_order_relaxed))
+                    LUMINUMBRA_CORE_WARN(
+                        "Cannot parse creature archetype textures; keeping fallback");
             }
         }
     }

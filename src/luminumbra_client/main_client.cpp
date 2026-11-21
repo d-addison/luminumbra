@@ -1826,13 +1826,19 @@ int main(int argc, char* argv[]) {
         if (!cy.empty()) {
             try {
                 g_app.capture.fixed_cam_yaw = std::stof(cy);
-            } catch (...) {}
+            } catch (...) {
+                LUMINUMBRA_CORE_ERROR("Invalid --cam-yaw value; refusing capture");
+                return 2;
+            }
         }
         const std::string cpi = GetCommandLineOption(argc, argv, "--cam-pitch", "");
         if (!cpi.empty()) {
             try {
                 g_app.capture.fixed_cam_pitch = std::stof(cpi);
-            } catch (...) {}
+            } catch (...) {
+                LUMINUMBRA_CORE_ERROR("Invalid --cam-pitch value; refusing capture");
+                return 2;
+            }
         }
     }
     // --scene-config <json>: compose a full scene to match a reference, then capture.
@@ -2087,13 +2093,19 @@ int main(int argc, char* argv[]) {
         if (!ds.empty()) {
             try {
                 g_app.capture.timelapse_daystep = std::stof(ds);
-            } catch (...) {}
+            } catch (...) {
+                LUMINUMBRA_CORE_ERROR("Invalid --timelapse-daystep value; refusing capture");
+                return 2;
+            }
         }
         const std::string t0 = GetCommandLineOption(argc, argv, "--timelapse-tod", "");
         if (!t0.empty()) {
             try {
                 g_app.capture.timelapse_tod = std::stof(t0);
-            } catch (...) {}
+            } catch (...) {
+                LUMINUMBRA_CORE_ERROR("Invalid --timelapse-tod value; refusing capture");
+                return 2;
+            }
         }
         const std::string td = GetCommandLineOption(argc, argv, "--timelapse-dir", "");
         g_app.capture.timelapse_dir = !td.empty()
@@ -3250,38 +3262,53 @@ int main(int argc, char* argv[]) {
                 }
             });
         // Enumerate saved user presets (user_*.json) so create-world can offer them as chips.
-        g_uiManager->SetWorldPresetList(
-            [root_dir]() -> std::vector<std::pair<std::string, std::string>> {
-                std::vector<std::pair<std::string, std::string>> out;
-                try {
-                    const std::filesystem::path presets_dir =
-                        root_dir / "worlds" / "atlas" / "presets";
-                    if (!std::filesystem::exists(presets_dir))
-                        return out;
-                    for (const auto& entry : std::filesystem::directory_iterator(presets_dir)) {
-                        if (entry.path().extension() != ".json")
-                            continue;
-                        const std::string stem = entry.path().stem().string();
-                        if (stem.rfind("user_", 0) != 0)
-                            continue;
-                        std::string name = stem;
-                        try {
-                            nlohmann::json j;
-                            bool missing = false;
-                            if (Luminumbra::Persistence::ReadSavedJson(
-                                    entry.path(),
-                                    Luminumbra::Persistence::SavedInputLimits::kPresetBytes,
-                                    j,
-                                    missing,
-                                    false) &&
-                                !missing)
-                                name = j.value("name", stem);
-                        } catch (...) {}
-                        out.emplace_back(name, stem);
+        g_uiManager->SetWorldPresetList([root_dir]()
+                                            -> std::vector<std::pair<std::string, std::string>> {
+            std::vector<std::pair<std::string, std::string>> out;
+            const auto report_name_failure = [] {
+                // At most one diagnostic across all presets and UI refreshes.
+                static std::atomic_flag reported{};
+                if (!reported.test_and_set(std::memory_order_relaxed))
+                    LUMINUMBRA_CORE_WARN("Cannot read user preset name; using filename");
+            };
+            try {
+                const std::filesystem::path presets_dir = root_dir / "worlds" / "atlas" / "presets";
+                if (!std::filesystem::exists(presets_dir))
+                    return out;
+                for (const auto& entry : std::filesystem::directory_iterator(presets_dir)) {
+                    if (entry.path().extension() != ".json")
+                        continue;
+                    const std::string stem = entry.path().stem().string();
+                    if (stem.rfind("user_", 0) != 0)
+                        continue;
+                    std::string name = stem;
+                    try {
+                        nlohmann::json j;
+                        bool missing = false;
+                        if (Luminumbra::Persistence::ReadSavedJson(
+                                entry.path(),
+                                Luminumbra::Persistence::SavedInputLimits::kPresetBytes,
+                                j,
+                                missing,
+                                false) &&
+                            !missing) {
+                            name = j.value("name", stem);
+                        } else {
+                            report_name_failure();
+                        }
+                    } catch (...) {
+                        report_name_failure();
                     }
-                } catch (...) {}
-                return out;
-            });
+                    out.emplace_back(name, stem);
+                }
+            } catch (...) {
+                // At most one diagnostic even if the menu repeatedly refreshes the list.
+                static std::atomic_flag reported{};
+                if (!reported.test_and_set(std::memory_order_relaxed))
+                    LUMINUMBRA_CORE_WARN("Cannot enumerate user presets; list may be incomplete");
+            }
+            return out;
+        });
         // Collision check: does saving under this display name target an existing user preset?
         // The saver also enforces no replacement unless the UI supplies explicit consent.
         g_uiManager->SetWorldPresetExists([root_dir](const std::string& displayName) -> bool {

@@ -25,6 +25,7 @@
 #include "luminumbra_client/rendering/passes/LightingPass.h"
 #include "luminumbra_client/rendering/passes/ParticlePass.h"
 #include "luminumbra_client/rendering/passes/ShadowPass.h"
+#include "luminumbra_client/rendering/passes/StaticDrawPass.h"
 #include "luminumbra_common/core/GraphicsPresets.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include <glm/gtc/type_ptr.hpp>
@@ -42,6 +43,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -615,7 +617,7 @@ TEST(PassContext, ShadowCascadesDiscardPreviousFrameDepth) {
             pass.shadow_map().depth_texture_array, 0, GL_DEPTH_COMPONENT, GL_FLOAT, &stale_depth);
         glDepthMask(GL_FALSE); // A preceding transparent pass may disable writes.
         glClearDepth(0.0);     // The shadow pass owns its depth-clear convention.
-        pass.execute(ctx, input);
+        pass.execute_external(ctx, input);
         GLint mode = 0, func = 0;
         GLdouble clear = 1;
         glGetIntegerv(GL_CLIP_DEPTH_MODE, &mode);
@@ -635,6 +637,168 @@ TEST(PassContext, ShadowCascadesDiscardPreviousFrameDepth) {
         }
     }
     pass.destroy_shadow_map(registry);
+}
+
+void ExpectShadowRasterState(const Luminumbra::Rendering::ShadowPass::CallerState& expected) {
+    const auto actual = Luminumbra::Rendering::ShadowPass::CallerState::QueryExternal();
+    EXPECT_EQ(actual.depth.function, expected.depth.function);
+    EXPECT_EQ(actual.depth.write_mask, expected.depth.write_mask);
+    EXPECT_EQ(actual.depth.test_enabled, expected.depth.test_enabled);
+    EXPECT_EQ(actual.clip_origin, expected.clip_origin);
+    EXPECT_EQ(actual.clip_depth, expected.clip_depth);
+    EXPECT_EQ(actual.clear_depth, expected.clear_depth);
+    EXPECT_EQ(actual.cull_face, expected.cull_face);
+    EXPECT_EQ(actual.cull_enabled, expected.cull_enabled);
+    // Neither entry point may change polygon offset, including its dormant values.
+    EXPECT_EQ(glIsEnabled(GL_POLYGON_OFFSET_FILL), GL_TRUE);
+    GLfloat factor = 0, units = 0;
+    glGetFloatv(GL_POLYGON_OFFSET_FACTOR, &factor);
+    glGetFloatv(GL_POLYGON_OFFSET_UNITS, &units);
+    EXPECT_EQ(factor, -2.5f);
+    EXPECT_EQ(units, 3.25f);
+}
+
+TEST(PassContext, ShadowKnownAndExternalRasterRestorationAreEquivalent) {
+    HiddenGlContext gl;
+    ASSERT_TRUE(gl.ready()) << gl.error();
+    using namespace Luminumbra::Rendering;
+    RenderResourceRegistry registry;
+    ShadowPass pass;
+    pass.shadow_map().resolution = 8;
+    pass.init_shader(LUMINUMBRA_SOURCE_ROOT);
+    ASSERT_TRUE(pass.init_shadow_map(registry));
+    struct Cleanup {
+        ShadowPass& pass;
+        RenderResourceRegistry& registry;
+        GLuint vao = 0;
+        GLuint vbo = 0;
+        ~Cleanup() {
+            glDeleteVertexArrays(1, &vao);
+            glDeleteBuffers(1, &vbo);
+            pass.destroy_shadow_map(registry);
+        }
+    } cleanup{pass, registry, 0, 0};
+    glGenVertexArrays(1, &cleanup.vao);
+    glGenBuffers(1, &cleanup.vbo);
+    const std::array<float, 18> vertices{
+        -1, -1, 0, 1, -1, 0, 1, 1, 0, -1, -1, 0, 1, 1, 0, -1, 1, 0};
+    glBindVertexArray(cleanup.vao);
+    glBindBuffer(GL_ARRAY_BUFFER, cleanup.vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    ShadowPassInput input;
+    input.light_space_matrices.assign(ShadowMap::CASCADE_COUNT, glm::mat4(1.0f));
+    unsigned submissions = 0;
+    input.submit_terrain = [&](const glm::vec4(&)[6]) {
+        ++submissions;
+        return TerrainSubmitStats{};
+    };
+    const std::vector<GlassPaneItem> glass{
+        {.model = glm::mat4(1.0f), .tint = glm::vec3(0.25f, 0.5f, 0.75f), .thickness = 1.0f}};
+    input.glass_vao = cleanup.vao;
+    // Three caller conventions, two entry points and four tint transitions.
+    const std::array<ShadowPass::CallerState, 3> callers{
+        ShadowPass::CallerState{
+            .depth = {.function = GL_GREATER, .write_mask = GL_TRUE, .test_enabled = GL_TRUE},
+            .clip_origin = GL_LOWER_LEFT,
+            .clip_depth = GL_ZERO_TO_ONE,
+            .clear_depth = 0.0,
+            .cull_face = GL_BACK,
+            .cull_enabled = GL_TRUE},
+        ShadowPass::CallerState{
+            .depth = {.function = GL_ALWAYS, .write_mask = GL_FALSE, .test_enabled = GL_FALSE},
+            .clip_origin = GL_UPPER_LEFT,
+            .clip_depth = GL_NEGATIVE_ONE_TO_ONE,
+            .clear_depth = 0.375,
+            .cull_face = GL_FRONT,
+            .cull_enabled = GL_FALSE},
+        ShadowPass::CallerState{
+            .depth = {.function = GL_LEQUAL, .write_mask = GL_FALSE, .test_enabled = GL_TRUE},
+            .clip_origin = GL_LOWER_LEFT,
+            .clip_depth = GL_NEGATIVE_ONE_TO_ONE,
+            .clear_depth = 1.0,
+            .cull_face = GL_FRONT_AND_BACK,
+            .cull_enabled = GL_TRUE}};
+    const RenderContext context;
+    glEnable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(-2.5f, 3.25f);
+    for (const auto& caller : callers) {
+        // Eight texels per side, four cascades: fixed-size readback oracle.
+        std::array<std::array<float, 8 * 8 * ShadowMap::CASCADE_COUNT>, 4> reference_depth{};
+        std::array<std::array<unsigned char, 8 * 8 * ShadowMap::CASCADE_COUNT * 4>, 4>
+            reference_tint{};
+        for (const bool external : {false, true}) {
+            for (int phase = 0; phase < 4; ++phase) {
+                SCOPED_TRACE(phase);
+                input.glass_items = phase == 1 ? &glass : nullptr;
+                caller.Restore();
+                const unsigned before = submissions;
+                if (external)
+                    pass.execute_external(context, input);
+                else
+                    pass.execute(context, input, caller);
+                EXPECT_EQ(submissions - before, ShadowMap::CASCADE_COUNT);
+                EXPECT_EQ(pass.tint_dirty(), phase == 1);
+                ExpectShadowRasterState(caller);
+                const auto index = static_cast<std::size_t>(phase);
+                auto depths = reference_depth[index];
+                auto tints = reference_tint[index];
+                glGetTextureImage(pass.shadow_map().depth_texture_array,
+                                  0,
+                                  GL_DEPTH_COMPONENT,
+                                  GL_FLOAT,
+                                  static_cast<GLsizei>(sizeof(depths)),
+                                  depths.data());
+                glGetTextureImage(pass.tint_texture_array(),
+                                  0,
+                                  GL_RGBA,
+                                  GL_UNSIGNED_BYTE,
+                                  static_cast<GLsizei>(sizeof(tints)),
+                                  tints.data());
+                if (external) {
+                    EXPECT_EQ(depths, reference_depth[index]);
+                    EXPECT_EQ(tints, reference_tint[index]);
+                } else {
+                    reference_depth[index] = depths;
+                    reference_tint[index] = tints;
+                }
+                if (phase == 1)
+                    EXPECT_TRUE(std::any_of(tints.begin(), tints.end(), [](unsigned char value) {
+                        return value != 255;
+                    }));
+                else
+                    EXPECT_TRUE(std::all_of(tints.begin(), tints.end(), [](unsigned char value) {
+                        return value == 255;
+                    }));
+            }
+        }
+    }
+    const auto& caller = callers[1];
+    caller.Restore();
+    input.submit_terrain = [](const glm::vec4(&)[6]) -> TerrainSubmitStats {
+        throw std::runtime_error("terrain submission failed");
+    };
+    EXPECT_THROW(pass.execute(context, input, caller), std::runtime_error);
+    ExpectShadowRasterState(caller);
+    EXPECT_THROW(pass.execute_external(context, input), std::runtime_error);
+    ExpectShadowRasterState(caller);
+    // Missing matrices and resources must refuse before changing caller state.
+    for (const std::size_t count : {0u, 3u}) {
+        input.light_space_matrices.assign(count, glm::mat4(1.0f));
+        pass.execute(context, input, caller);
+        ExpectShadowRasterState(caller);
+        pass.execute_external(context, input);
+        ExpectShadowRasterState(caller);
+    }
+    pass.reset_shader();
+    pass.execute(context, input, caller);
+    ExpectShadowRasterState(caller);
+    pass.execute_external(context, input);
+    ExpectShadowRasterState(caller);
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }
 
 } // namespace
@@ -882,6 +1046,44 @@ TEST(PassContext, AuthoredStaticDrawsRespectTerrainIsolation) {
     isolation.layer_mask = SH::IsolationLayer::Terrain;
     EXPECT_EQ(render(), enabled);
     EXPECT_EQ(terrain_submissions, 2u);
+
+    // Exercise both StaticDrawPass boundaries against the same actual draws.
+    // The pipeline already knows depth/target; an installed host may not.
+    StaticDrawPass direct(LUMINUMBRA_SOURCE_ROOT);
+    const StaticDrawPass::CallerState caller{
+        .depth = {.function = GL_LEQUAL, .write_mask = GL_FALSE, .test_enabled = GL_FALSE},
+        .draw_framebuffer = pass.gbuffer().fbo_id};
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, caller.draw_framebuffer);
+    caller.depth.Restore();
+    const auto expect_restored = [&] {
+        const auto restored = PassDepthState::QueryExternal();
+        EXPECT_EQ(restored.function, caller.depth.function);
+        EXPECT_EQ(restored.write_mask, caller.depth.write_mask);
+        EXPECT_EQ(restored.test_enabled, caller.depth.test_enabled);
+        GLint framebuffer = 0;
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &framebuffer);
+        EXPECT_EQ(static_cast<GLuint>(framebuffer), caller.draw_framebuffer);
+    };
+    const auto empty = std::make_shared<StaticDrawSnapshot>();
+    const auto invalid = std::make_shared<StaticDrawSnapshot>(*snapshot);
+    invalid->draws[0].model[0] = std::numeric_limits<double>::infinity();
+    for (const bool known : {false, true}) {
+        const auto stats =
+            direct.Render(view, snapshot, pass.gbuffer(), false, known ? &caller : nullptr);
+        EXPECT_EQ(stats.draws, 1u);
+        expect_restored();
+        EXPECT_EQ(
+            direct.Render(view, empty, pass.gbuffer(), false, known ? &caller : nullptr).draws, 0u);
+        expect_restored();
+        EXPECT_THROW(direct.Render(view, snapshot, pass.gbuffer(), true, known ? &caller : nullptr),
+                     std::invalid_argument);
+        expect_restored();
+        // This refusal happens after the GL guard has changed bindings/depth.
+        EXPECT_THROW(direct.Render(view, invalid, pass.gbuffer(), false, known ? &caller : nullptr),
+                     std::invalid_argument);
+        expect_restored();
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }
 
 TEST(PassContext, FoliageCappedCompactionAndIndependentRebuildAreByteStable) {
