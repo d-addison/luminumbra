@@ -3546,6 +3546,9 @@ class SkyAppearanceWiring(unittest.TestCase):
         self.assertIn("float detail = luminance - dot(mean, weights);", helper)
         gain = re.search(r"float gain = ([^;]+);", helper).group(1)
         result = re.search(r"return ([^;]+);$", helper).group(1)
+        self.assertIn("vec3 delta = color * (gain - 1.0);", helper)
+        self.assertIn("fraction = min(fraction, (upper[channel] - color[channel]) / delta[channel]);", helper)
+        self.assertIn("fraction = min(fraction, (lower[channel] - color[channel]) / delta[channel]);", helper)
         main = compact(body(shader, "void main()"))
         self.assertIn("resolved = sharpenLuma(resolved, mean, nmin, nmax);", main)
         # Grey stellar neighbourhoods make dot(color, weights) equal color.
@@ -3559,6 +3562,15 @@ class SkyAppearanceWiring(unittest.TestCase):
                                  u_sharpness=sharpness, lower=background, upper=peak,
                                  max=max, clamp=lambda x, lo, hi: min(hi, max(lo, x)))
                     scope["gain"] = eval(gain, {"__builtins__": {}}, scope)
+                    # Grey taps share one channel value; mirror the shader's
+                    # per-channel bound on the shared adjustment.
+                    delta = color * (scope["gain"] - 1.0)
+                    fraction = 1.0
+                    if delta > 0.0:
+                        fraction = min(fraction, (peak - color) / delta)
+                    elif delta < 0.0:
+                        fraction = min(fraction, (background - color) / delta)
+                    scope["fraction"] = fraction
                     actual = eval(result, {"__builtins__": {}}, scope)
                     with self.subTest(background=background, color=color, sharpness=sharpness):
                         self.assertGreaterEqual(actual, background)
