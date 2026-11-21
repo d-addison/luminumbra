@@ -1,4 +1,5 @@
 #include "BiomeTable.h"
+#include "MaterialRegistry.h"
 
 #include <algorithm>
 #include <array>
@@ -118,6 +119,18 @@ BiomeClimateRange ParseRange(const nlohmann::json& climate, const char* key) {
 
 BiomeTable BiomeTable::Load(const std::filesystem::path& table_path,
                             const WorldgenFileReader& read_file) {
+    return LoadImpl(table_path, read_file, nullptr);
+}
+
+BiomeTable BiomeTable::LoadWithRegistry(const std::filesystem::path& table_path,
+                                        const MaterialRegistry& registry,
+                                        const WorldgenFileReader& read_file) {
+    return LoadImpl(table_path, read_file, &registry);
+}
+
+BiomeTable BiomeTable::LoadImpl(const std::filesystem::path& table_path,
+                                const WorldgenFileReader& read_file,
+                                const MaterialRegistry* registry) {
     BiomeTable table;
 
     std::string bytes;
@@ -188,7 +201,9 @@ BiomeTable BiomeTable::Load(const std::filesystem::path& table_path,
             const auto assign = [&](const char* key, u8& slot) {
                 if (surface.contains(key) && surface[key].is_string()) {
                     const std::string material_name = surface[key].get<std::string>();
-                    const std::optional<u8> material_id = MaterialIdFromName(material_name);
+                    const std::optional<u8> material_id = registry != nullptr
+                                                              ? registry->Resolve(material_name)
+                                                              : MaterialIdFromName(material_name);
                     if (material_id.has_value()) {
                         slot = *material_id;
                     } else {

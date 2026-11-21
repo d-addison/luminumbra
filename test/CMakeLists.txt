@@ -194,7 +194,9 @@ target_compile_definitions(net_sockets_transport_test PRIVATE LUMINUMBRA_ENABLE_
 target_link_libraries(net_sockets_transport_test PRIVATE gtest_main spdlog::spdlog)
 luminumbra_configure_first_party_target(net_sockets_transport_test)
 
+include("${CMAKE_CURRENT_LIST_DIR}/sources.cmake")
 add_executable(common_tests
+    ${MATERIAL_REGISTRY_TEST_SOURCES}
     common/StationDiscoveryArguments_test.cpp
     common/StationDiscovery_test.cpp
     common/Crc32_test.cpp
