@@ -6543,11 +6543,8 @@ int main(int argc, char* argv[]) {
                         !g_rb_active ||
                         g_app.benchmark.measuredFrames == g_app.capture.render_benchmark_frames);
                     using SkyLut = Luminumbra::Rendering::SkyAtmosphereLut;
-#if defined(LUMINUMBRA_QA_RUNNER)
-                    constexpr bool sky_test_harness = true;
-#else
-                    constexpr bool sky_test_harness = false;
-#endif
+                    // The QA link selects a scenario runner; shipping links none.
+                    const bool sky_test_harness = scenario_runner_factory != nullptr;
                     // This is the sole interactive opt-in. Use the benchmark
                     // request, independent of schema and warmup/measurement state.
                     const auto sky_publication = SkyLut::select_publication(

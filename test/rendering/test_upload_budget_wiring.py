@@ -2960,8 +2960,10 @@ class SkyLutContinuity(unittest.TestCase):
                                "Luminumbra::Rendering::DebugViewPass::geometry_view())"))
         self.assertIn(".headless = hidden_window || g_windowState.mode == WindowMode::Headless", policy)
         self.assertIn(".test_harness = sky_test_harness", policy)
-        self.assertIn("#if defined(LUMINUMBRA_QA_RUNNER)\n"
-                      "                    constexpr bool sky_test_harness = true;", main)
+        # The client main compiles once; the QA link is the one with a runner factory.
+        self.assertIn("const bool sky_test_harness = scenario_runner_factory != nullptr;", main)
+        self.assertIn("const ScenarioRunnerFactory scenario_runner_factory = GetScenarioRunnerFactory();",
+                      main)
         capture = policy.split(".capture = ", 1)[1].split(", .benchmark", 1)[0]
         capture_guards = ("photo_capture_pinned", "capture_pinned", "scenario_config.active()",
                       "g_app.capture.scene_active", "!g_app.capture.frame_scan_path.empty()",
