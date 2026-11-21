@@ -1,5 +1,6 @@
 #include "../fixtures/TerrainFixtureParams.h"
 #include "../support/GameSessionTestWorld.h"
+#include "../support/UniqueTempPath.h"
 #include "luminumbra/core/Types.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/core/JobSystem.h"
@@ -2290,6 +2291,338 @@ TEST(WaterSeedInputs, ExistingGenerationWorkersPrepareBeforeActivation) {
     jobs.shutdown();
 }
 
+void ExpectPreparedConsumption(SHIELD_WorldSystem& world,
+                               WaterSystem& water,
+                               const std::shared_ptr<Chunk>& chunk,
+                               bool deterministic_authority = false) {
+    ASSERT_NE(chunk, nullptr);
+    const auto* inputs = chunk->water_seed_inputs();
+    ASSERT_NE(inputs, nullptr);
+    ASSERT_TRUE(inputs->ready_for(16));
+    EXPECT_EQ(inputs->generation,
+              (WaterSeedGeneration{world.water_seed_terrain_generation(),
+                                   chunk->water_seed_edit_generation()}));
+    const auto coords = chunk->get_coords();
+    // Independent fallback arithmetic and scalar query order, including hydro seams.
+    {
+        const auto scope = world.acquire_worldgen_sample_scope();
+        for (int z = 0; z < 16; ++z) {
+            for (int x = 0; x < 16; ++x) {
+                const float wx = static_cast<float>(coords.x * CHUNK_SIZE_X) +
+                                 (static_cast<float>(x) + 0.5f) * (CHUNK_SIZE_X / 16.0f);
+                const float wz = static_cast<float>(coords.z * CHUNK_SIZE_Z) +
+                                 (static_cast<float>(z) + 0.5f) * (CHUNK_SIZE_Z / 16.0f);
+                const auto cell = static_cast<std::size_t>(z * 16 + x);
+                EXPECT_EQ(std::bit_cast<std::uint32_t>(inputs->rest[cell]),
+                          std::bit_cast<std::uint32_t>(world.WaterLevelAt(wx, wz)));
+                EXPECT_EQ(std::bit_cast<std::uint32_t>(inputs->terrain[cell]),
+                          std::bit_cast<std::uint32_t>(world.GetTerrainHeightAt(wx, wz)));
+            }
+        }
+    }
+    chunk->is_water_sleeping.store(true);
+    WorldStreamingState saved, restored;
+    ASSERT_TRUE(saved.insert_chunk(chunk));
+    std::vector<std::string> errors;
+    ASSERT_TRUE(Persistence::LoadWorldStreamingStateSnapshotJson(
+        Persistence::SerializeWorldStreamingStateSnapshotJson(saved, true), restored, errors));
+    ASSERT_TRUE(errors.empty());
+    const auto reference = restored.find_chunk(coords);
+    ASSERT_NE(reference, nullptr);
+    SHIELD_WorldSystem inline_world(nullptr, nullptr, world.get_params(), world.get_seed());
+    WaterSystem inline_water(nullptr, &inline_world);
+    ASSERT_TRUE(inline_world.adopt_streamed_chunk(reference));
+    ASSERT_FALSE(reference->water_seed_inputs());
+    const std::unordered_map<ChunkID, std::shared_ptr<Chunk>> prepared_chunks{
+        {chunk->get_id(), chunk}};
+    const std::unordered_map<ChunkID, std::shared_ptr<Chunk>> inline_chunks{
+        {reference->get_id(), reference}};
+    entt::registry registry;
+    for (int tick = 0; tick < 3; ++tick) {
+        water.update(registry, prepared_chunks, deterministic_authority);
+        inline_water.update(registry, inline_chunks, deterministic_authority);
+        if (tick == 0) {
+            EXPECT_EQ(water.dbg_seed_attribution().precomputed_columns, 1u);
+            EXPECT_EQ(water.dbg_seed_attribution().fallback_columns, 0u);
+            EXPECT_EQ(water.dbg_seed_attribution().stale_columns, 0u);
+            EXPECT_EQ(inline_water.dbg_seed_attribution().fallback_columns, 1u);
+        }
+        EXPECT_TRUE(chunk->same_water_state(*reference));
+        EXPECT_EQ(world.debug_water_state_hash().hash, inline_world.debug_water_state_hash().hash);
+        EXPECT_EQ(Persistence::SerializeChunkRecordPayloadJson(*chunk),
+                  Persistence::SerializeChunkRecordPayloadJson(*reference));
+        ASSERT_EQ(chunk->water_rest_level.size(), reference->water_rest_level.size());
+        for (std::size_t cell = 0; cell < chunk->water_rest_level.size(); ++cell) {
+            EXPECT_EQ(std::bit_cast<std::uint32_t>(chunk->water_rest_level[cell]),
+                      std::bit_cast<std::uint32_t>(reference->water_rest_level[cell]));
+            EXPECT_EQ(std::bit_cast<std::uint32_t>(chunk->water_sim_terrain_height[cell]),
+                      std::bit_cast<std::uint32_t>(reference->water_sim_terrain_height[cell]));
+        }
+    }
+}
+
+TEST(WaterSeedInputs, ExistingMeshWorkersPrepareEditRestoreCrossingAndGenerationKeys) {
+    JobSystem jobs;
+    jobs.startup(2);
+    // Five event paths, both execution backends and both terrain consumers.
+    // Each fixture admits one mesh candidate; generation and publication counts stay fixed.
+    for (const bool workers : {false, true}) {
+        for (const bool authority : {false, true}) {
+            for (int path = 0; path < 5; ++path) {
+                SCOPED_TRACE(::testing::Message() << workers << ',' << authority << ',' << path);
+                auto params = SeedParams();
+                params.base_amplitude = 0.0f;
+                params.caves_enabled = false;
+                SHIELD_WorldSystem world(workers ? &jobs : nullptr, nullptr, params, 777);
+                WaterSystem water(workers ? &jobs : nullptr, &world);
+                world.SetWaterSystem(&water);
+                world.debug_set_streaming_radius_cap(1);
+                const IVec3 coords(-4, 0, -2);
+                world.dispatch_generation_jobs(std::vector<IVec3>{coords});
+                world.wait_for_streaming_jobs();
+                auto chunk = world.find_streamed_chunk(coords);
+                ASSERT_NE(chunk, nullptr);
+                ASSERT_NE(chunk->water_seed_inputs(), nullptr);
+                if (path == 0) {
+                    ASSERT_EQ(
+                        world.EditTerrainVoxel(Vec3(-56.0f, 8.0f, -24.0f), 2.0f, true, nullptr), 1);
+                } else if (path == 1) {
+                    WorldStreamingState saved, restored;
+                    ASSERT_TRUE(saved.insert_chunk(chunk));
+                    const auto bytes =
+                        Persistence::SerializeWorldStreamingStateSnapshotJson(saved, true);
+                    world.clear_world(nullptr);
+                    std::vector<std::string> errors;
+                    ASSERT_TRUE(
+                        Persistence::LoadWorldStreamingStateSnapshotJson(bytes, restored, errors));
+                    ASSERT_TRUE(errors.empty());
+                    chunk = restored.find_chunk(coords);
+                    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+                    ASSERT_FALSE(chunk->water_seed_inputs());
+                } else if (path == 2) {
+                    // Cross the committed-region seam to a parked, unseeded column.
+                    world.clear_world(nullptr);
+                    world.set_durable_residency(true);
+                    chunk = world.resolve_water_column(
+                        {Persistence::WorldSaveService::kRegionChunkSpan, 0, -2});
+                    ASSERT_NE(chunk, nullptr);
+                    ASSERT_TRUE(world.unpark_chunk(chunk->get_id()));
+                    ASSERT_FALSE(chunk->water_seed_inputs());
+                } else if (path == 3) {
+                    world.set_seed(778);
+                } else {
+                    params.height_offset += 5.0f;
+                    world.set_params(params);
+                }
+                // Empty anchors exercise only the resident candidate: no fresh generation
+                // can accidentally prepare it in place of the meshing worker under test.
+                entt::registry registry;
+                world.update(registry, std::vector<Vec3>{}, nullptr, false);
+                EXPECT_EQ(world.get_last_streaming_budget_stats().scheduled_meshing, 1u);
+                EXPECT_EQ(world.get_last_streaming_budget_stats().scheduled_generation, 0u);
+                world.wait_for_streaming_jobs();
+                ASSERT_NO_FATAL_FAILURE(ExpectPreparedConsumption(world, water, chunk, authority));
+            }
+        }
+    }
+}
+
+TEST(WaterSeedInputs, ExistingCommittedReadWorkerPreparesColdRestoreAndHydroCrossing) {
+    JobSystem jobs;
+    jobs.startup(1);
+    auto params = SeedParams();
+    params.hydro_enabled = true;
+    params.hydro_iterations = 1;
+    SHIELD_WorldSystem world(&jobs, nullptr, params, 777);
+    WaterSystem water(&jobs, &world);
+    world.SetWaterSystem(&water);
+    world.set_durable_residency(true);
+    // Both sides of the negative/positive hydro and committed-region seams.
+    for (const int x : {-1, 0, Persistence::WorldSaveService::kRegionChunkSpan}) {
+        const IVec3 coords(x, 0, -1);
+        auto saved = std::make_shared<Chunk>(coords);
+        world.GenerateChunkData(*saved);
+        saved->mark_sdf_loaded_or_edited();
+        saved->normalize_for_park();
+        const auto bytes = Persistence::SerializeChunkRecordPayloadJson(*saved);
+        // Foreign data with coincident numeric keys must never suppress preparation.
+        auto foreign = std::make_shared<HighWaterSeedInputs>();
+        foreign->generation = {world.water_seed_terrain_generation(),
+                               saved->water_seed_edit_generation()};
+        foreign->terrain.fill(10000.0f);
+        foreign->resolution = 16;
+        foreign->ready.store(true, std::memory_order_release);
+        saved->stage_water_seed_inputs(std::move(foreign));
+        world.remember_durable_chunks({coords});
+        std::atomic<unsigned> reads{0};
+        std::atomic<bool> off_owner{false};
+        world.set_durable_chunk_loader(
+            [&](const IVec3& requested) {
+                EXPECT_EQ(requested, coords);
+                ++reads;
+                off_owner.store(jobs.is_current_worker(), std::memory_order_release);
+                return saved;
+            },
+            {});
+        ASSERT_TRUE(world.restore_authoritative_chunk(coords));
+        ASSERT_FALSE(world.durable_read_failed());
+        EXPECT_EQ(reads.load(), 1u);
+        EXPECT_TRUE(off_owner.load(std::memory_order_acquire));
+        EXPECT_EQ(Persistence::SerializeChunkRecordPayloadJson(*saved), bytes);
+        ASSERT_NO_FATAL_FAILURE(ExpectPreparedConsumption(world, water, saved));
+        world.clear_world(nullptr);
+    }
+}
+
+TEST(WaterSeedInputs, MeshPreparationRetainsReadyInputsAndReplacesInvalidRequests) {
+    JobSystem jobs;
+    jobs.startup(1);
+    for (int payload = 0; payload < 5; ++payload) {
+        SCOPED_TRACE(payload);
+        SHIELD_WorldSystem world(&jobs, nullptr, SeedParams(), 777);
+        WaterSystem water(&jobs, &world);
+        world.SetWaterSystem(&water);
+        auto chunk = std::make_shared<Chunk>(IVec3(-4, 0, -2));
+        world.GenerateChunkData(*chunk);
+        chunk->set_state(ChunkState::Idle);
+        ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+        auto previous = std::make_shared<HighWaterSeedInputs>();
+        previous->generation = {world.water_seed_terrain_generation(),
+                                chunk->water_seed_edit_generation()};
+        if (payload == 0 || payload >= 3) {
+            const auto scope = world.acquire_worldgen_sample_scope();
+            ComputeHighWaterSeedInputs(*previous, chunk->get_coords(), world);
+        } else if (payload == 2) {
+            previous->resolution = 8;
+            previous->ready.store(true, std::memory_order_release);
+        }
+        if (payload == 3)
+            ++previous->generation.terrain;
+        if (payload == 4)
+            ++previous->generation.edit;
+        chunk->stage_water_seed_inputs(previous);
+        entt::registry registry;
+        world.update(registry, std::vector<Vec3>{}, nullptr, false);
+        world.wait_for_streaming_jobs();
+        EXPECT_EQ(chunk->water_seed_inputs() == previous.get(), payload == 0);
+        ASSERT_NO_FATAL_FAILURE(ExpectPreparedConsumption(world, water, chunk));
+        const auto consumed_bytes = Persistence::SerializeChunkRecordPayloadJson(*chunk);
+        // Even a retained late producer can only change retired derived storage.
+        ComputeHighWaterSeedInputs(*previous, chunk->get_coords(), world);
+        EXPECT_EQ(Persistence::SerializeChunkRecordPayloadJson(*chunk), consumed_bytes);
+    }
+}
+
+TEST(WaterSeedInputs, CommittedReadPreparationRespectsWaterAndPresetEligibility) {
+    JobSystem jobs;
+    jobs.startup(1);
+    for (const bool workers : {false, true}) {
+        for (const bool lakes : {false, true}) {
+            for (const int resolution : {2, 4, 8, 16}) {
+                for (const bool initialized : {false, true}) {
+                    SCOPED_TRACE(::testing::Message() << workers << ',' << lakes << ','
+                                                      << resolution << ',' << initialized);
+                    auto params = SeedParams();
+                    params.lakes_enabled = lakes;
+                    SHIELD_WorldSystem world(workers ? &jobs : nullptr, nullptr, params, 777);
+                    WaterSystem water(workers ? &jobs : nullptr, &world);
+                    water.SetSimResolution(resolution);
+                    world.SetWaterSystem(&water);
+                    world.set_durable_residency(true);
+                    const IVec3 coords(-4, 0, -2);
+                    auto saved = std::make_shared<Chunk>(coords);
+                    world.GenerateChunkData(*saved);
+                    if (initialized)
+                        water.InitializeGeneratedWater(*saved);
+                    saved->normalize_for_park();
+                    const auto bytes = Persistence::SerializeChunkRecordPayloadJson(*saved);
+                    world.remember_durable_chunks({coords});
+                    world.set_durable_chunk_loader([&](const IVec3&) { return saved; }, {});
+                    ASSERT_TRUE(world.restore_authoritative_chunk(coords));
+                    ASSERT_FALSE(world.durable_read_failed());
+                    EXPECT_EQ(Persistence::SerializeChunkRecordPayloadJson(*saved), bytes);
+                    EXPECT_EQ(saved->water_seed_inputs() != nullptr,
+                              lakes && resolution == 16 && !initialized);
+                }
+            }
+        }
+    }
+}
+
+TEST(WaterSeedInputs, CommittedReadPreparationRefusesInvalidPayloadsBeforeSamplingOrAdoption) {
+    JobSystem jobs;
+    jobs.startup(1);
+    for (const bool workers : {false, true}) {
+        for (int failure = 0; failure < 4; ++failure) {
+            SCOPED_TRACE(::testing::Message() << workers << ',' << failure);
+            SHIELD_WorldSystem world(workers ? &jobs : nullptr, nullptr, SeedParams(), 777);
+            WaterSystem water(workers ? &jobs : nullptr, &world);
+            world.SetWaterSystem(&water);
+            world.set_durable_residency(true);
+            const IVec3 coords(-4, 0, -2);
+            auto invalid =
+                failure == 0
+                    ? std::shared_ptr<Chunk>{}
+                    : std::make_shared<Chunk>(failure == 1 ? coords + IVec3(1, 0, 0) : coords);
+            if (failure == 1)
+                world.GenerateChunkData(*invalid);
+            world.remember_durable_chunks({coords});
+            unsigned reads = 0, faults = 0;
+            world.set_durable_chunk_loader(
+                [&](const IVec3&) -> std::shared_ptr<Chunk> {
+                    ++reads;
+                    if (failure == 3)
+                        throw std::runtime_error("unreadable committed chunk");
+                    return invalid;
+                },
+                [&](const std::string&) { ++faults; });
+            const auto before = world.debug_water_state_hash().hash;
+            ASSERT_TRUE(world.restore_authoritative_chunk(coords));
+            EXPECT_TRUE(world.durable_read_failed());
+            EXPECT_EQ(reads, 1u);
+            EXPECT_EQ(faults, 1u);
+            EXPECT_EQ(world.find_streamed_chunk(coords), nullptr);
+            EXPECT_EQ(world.debug_water_state_hash().hash, before);
+            if (invalid) {
+                EXPECT_FALSE(invalid->water_seed_inputs());
+            }
+            EXPECT_TRUE(world.restore_authoritative_chunk(coords));
+            EXPECT_EQ(reads, 1u);
+            EXPECT_EQ(faults, 1u);
+        }
+    }
+}
+
+TEST(WaterSeedInputs, ReadOnlyCommittedProbesLeaveSeedPreparationToRestoration) {
+    JobSystem jobs;
+    jobs.startup(1);
+    SHIELD_WorldSystem world(&jobs, nullptr, SeedParams(), 777);
+    WaterSystem water(&jobs, &world);
+    world.SetWaterSystem(&water);
+    world.set_durable_residency(true);
+    const IVec3 coords(-4, 0, -2);
+    auto saved = std::make_shared<Chunk>(coords);
+    world.GenerateChunkData(*saved);
+    saved->normalize_for_park();
+    const auto bytes = Persistence::SerializeChunkRecordPayloadJson(*saved);
+    world.remember_durable_chunks({coords});
+    unsigned reads = 0;
+    world.set_durable_chunk_loader(
+        [&](const IVec3&) {
+            ++reads;
+            return saved;
+        },
+        {});
+    EXPECT_EQ(world.find_authoritative_chunk(coords), saved);
+    EXPECT_EQ(world.inspect_water_column(coords), saved);
+    EXPECT_EQ(reads, 2u);
+    EXPECT_FALSE(saved->water_seed_inputs());
+    EXPECT_EQ(Persistence::SerializeChunkRecordPayloadJson(*saved), bytes);
+    ASSERT_TRUE(world.restore_authoritative_chunk(coords));
+    EXPECT_EQ(reads, 3u);
+    ASSERT_NO_FATAL_FAILURE(ExpectPreparedConsumption(world, water, saved));
+}
+
 TEST(WaterSeedInputs, BootSurfaceJobsPrepareHighInputsAndMediumKeepsExistingPath) {
     for (const int resolution : {8, 16}) {
         SHIELD_WorldSystem world(nullptr, nullptr, SeedParams(), 777);
@@ -3302,7 +3635,9 @@ void ExpectCanonicalDurableColumn(int cache_kind, int failure) {
     fixture.world.remember_durable_chunks({IVec3(0)});
     // A bare Loading placeholder carries no authority: committed data supersedes
     // it exactly as if the column were absent, and its storage is never read.
-    if (failure != 0) {
+    // A water-only committed column (failure 4) with complete authority is a
+    // valid durable read, as legacy migration writes water-only Y=0 owners.
+    if (failure != 0 && failure != 4) {
         EXPECT_THROW(fixture.world.resolve_water_column({0, 0, 0}), std::invalid_argument);
         if (failure < 5) {
             EXPECT_THROW(fixture.world.resolve_water_column({0, 0, 0}), std::invalid_argument);
@@ -3540,7 +3875,7 @@ TEST(WaterSeedInputs, DormantOwnershipAcceptsEveryPersistedGridShapeWithoutSeedi
     const auto saved = producer.saved_column();
     saved->has_water_sim.store(false);
     for (const int resolution : {0, 2, 4, 8, 16, 32}) {
-        for (int shape = 0; shape < 5; ++shape) {
+        for (int shape = 0; shape < 6; ++shape) {
             SCOPED_TRACE(resolution);
             SCOPED_TRACE(shape);
             saved->current_water_resolution.store(resolution);
@@ -3550,19 +3885,24 @@ TEST(WaterSeedInputs, DormantOwnershipAcceptsEveryPersistedGridShapeWithoutSeedi
             saved->water_level_data.clear();
             saved->water_flow_data.clear();
             saved->water_sim_terrain_height.clear();
-            if (shape == 1 || shape == 2) {
-                saved->water_depth_mm = {123}; // in-progress initialization is persistable
-                if (shape == 2) {
-                    saved->water_edge_flux = {2, -3};
+            saved->water_rest_level.clear();
+            if (shape != 0) {
+                // Persistence also stores partial initialization, but column
+                // admission requires a coherent grid. Off retains any former
+                // supported grid independently of its cleared resolution.
+                constexpr std::array former_resolutions{2, 4, 8, 16, 32};
+                const int grid = resolution == 0
+                                     ? former_resolutions[static_cast<std::size_t>(shape - 1)]
+                                     : resolution;
+                const auto cells = static_cast<std::size_t>(grid * grid);
+                saved->water_depth_mm.assign(cells, 123);
+                saved->water_bed_mm.assign(cells, -100);
+                saved->water_edge_flux.assign(2u * cells, 1);
+                if (shape >= 2) {
+                    saved->water_level_data.assign(cells, 1.0f);
+                    saved->water_flow_data.assign(cells, Vec2(0.25f, -0.5f));
+                    saved->water_sim_terrain_height.assign(cells, -1.0f);
                 }
-            } else if (shape == 3) {
-                saved->water_depth_mm.assign(1024, 123);
-                saved->water_bed_mm.assign(1024, -100);
-                saved->water_edge_flux.assign(2048, 1);
-            } else if (shape == 4) {
-                saved->water_level_data = {1.0f, 2.0f};
-                saved->water_flow_data = {Vec2(0.25f, -0.5f)};
-                saved->water_sim_terrain_height = {-1.0f};
             }
             bool valid = false;
             const auto encoded = Persistence::SerializeChunkRecordPayloadJson(*saved, &valid);
@@ -3591,7 +3931,7 @@ TEST(WaterSeedInputs, DormantOwnershipAcceptsEveryPersistedGridShapeWithoutSeedi
 
 TEST(WaterSeedInputs, DormantAndOffAuthorityRefusesMalformedPersistedWaterWithoutMutation) {
     for (const bool off : {false, true}) {
-        for (int damage = 0; damage < 13; ++damage) {
+        for (int damage = 0; damage < 20; ++damage) {
             SCOPED_TRACE(off);
             SCOPED_TRACE(damage);
             ColumnFixture fixture;
@@ -3638,6 +3978,37 @@ TEST(WaterSeedInputs, DormantAndOffAuthorityRefusesMalformedPersistedWaterWithou
                     break;
                 case 12:
                     chunk->water_depth_mm.front() = -1;
+                    break;
+                case 13:
+                    chunk->water_level_data = {1.0f, 2.0f};
+                    break;
+                case 14:
+                    chunk->water_flow_data = {Vec2(0.25f, -0.5f)};
+                    break;
+                case 15:
+                    chunk->water_sim_terrain_height = {-1.0f};
+                    break;
+                case 16:
+                    chunk->water_depth_mm = {123};
+                    chunk->water_bed_mm.clear();
+                    chunk->water_edge_flux.clear();
+                    break;
+                case 17:
+                    chunk->water_depth_mm = {123};
+                    chunk->water_bed_mm.clear();
+                    chunk->water_edge_flux = {2, -3};
+                    break;
+                case 18:
+                    chunk->water_depth_mm.assign(off ? 2u : 1024u, 123);
+                    chunk->water_bed_mm.assign(off ? 2u : 1024u, -100);
+                    chunk->water_edge_flux.assign(off ? 4u : 2048u, 1);
+                    chunk->water_level_data.clear();
+                    chunk->water_flow_data.clear();
+                    chunk->water_sim_terrain_height.clear();
+                    chunk->water_rest_level.clear();
+                    break;
+                case 19:
+                    chunk->water_rest_level.assign(64, std::numeric_limits<float>::infinity());
                     break;
             }
             ASSERT_TRUE(fixture.world.adopt_streamed_chunk(chunk));
@@ -3696,12 +4067,20 @@ void ExpectColumnRestorationParity(int saved_resolution, int session_resolution,
     } else if (state == 4 || state == 5) {
         saved->current_water_resolution.store(0);
         saved->has_water_sim.store(state == 5);
-        saved->water_depth_mm = {123, 456};
-        saved->water_bed_mm = {-321, -654};
-        saved->water_edge_flux = {1, -2, 3, -4};
-        saved->water_level_data = {0.5f};
-        saved->water_flow_data = {Vec2(0.25f, -0.5f)};
-        saved->water_sim_terrain_height = {-0.5f, 1.0f};
+        // Off keeps the complete former grid; short arrays are refusal inputs.
+        const auto cells = saved->water_depth_mm.size();
+        saved->water_depth_mm.assign(cells, 123);
+        saved->water_depth_mm[1] = 456;
+        saved->water_bed_mm.assign(cells, -321);
+        saved->water_bed_mm[1] = -654;
+        saved->water_edge_flux.assign(2u * cells, 1);
+        saved->water_edge_flux[1] = -2;
+        saved->water_edge_flux[2] = 3;
+        saved->water_edge_flux[3] = -4;
+        saved->water_level_data.assign(cells, 0.5f);
+        saved->water_flow_data.assign(cells, Vec2(0.25f, -0.5f));
+        saved->water_sim_terrain_height.assign(cells, -0.5f);
+        saved->water_sim_terrain_height[1] = 1.0f;
     } else {
         saved->is_water_sleeping.store(state == 0);
         saved->ticks_below_threshold = state == 0 ? 120 : 7;
@@ -4298,4 +4677,187 @@ TEST(WaterSeedInputs, RegionalWaterProfileIsDormantWithActiveRegionsOff) {
               Persistence::SerializeChunkRecordPayloadJson(*candidate_chunk));
 }
 
+TEST(WaterSeedInputs, FlagOffPreparedAndDirectLoadsPreserveIndependentLegacyWater) {
+    const TestSupport::HeadlessRoot root;
+    const TestSupport::ScopedTempFile storage("water-world-", ".world");
+    JobSystem jobs;
+    jobs.startup(1);
+    WorldStreamingState original;
+    const Persistence::WorldSaveService service;
+    std::vector<std::string> errors;
+    for (const bool prepared : {false, true}) {
+        SCOPED_TRACE(prepared);
+        world::GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(root.root_string());
+        session.SetActiveRegionsEnabled(true);
+        ASSERT_TRUE(session.CreateTransientWorld("Legacy water", "777", "default"));
+        for (const int y : {1, 3}) {
+            const auto chunk = original.get_or_create_chunk({0, y, 0});
+            session.GetWaterSystem()->InitializeGeneratedWater(*chunk,
+                                                               std::vector<float>(64, 100.0f));
+            chunk->water_depth_mm[0] = y;
+            // Legacy per-chunk admission accepts absent render mirrors. They
+            // must not trigger the stricter regional migration admission.
+            if (y == 1)
+                chunk->water_flow_data.clear();
+        }
+        ASSERT_TRUE(service.save_world(original, storage.Path(), &errors));
+        // Session entry repairs absent derived mirrors at the saved resolution.
+        // Integer water and the independent layer identities must stay unchanged.
+        const auto repaired = original.find_chunk({0, 1, 0});
+        ASSERT_NE(repaired, nullptr);
+        repaired->water_flow_data.assign(repaired->water_depth_mm.size(), Vec2(0.0f));
+        if (prepared) {
+            const auto options = session.CaptureWorldPreparationOptions();
+            EXPECT_FALSE(options.regional_water);
+            const auto candidate = world::GameSession::PrepareWorldState(options, storage.Path());
+            ASSERT_TRUE(session.AdoptPreparedWorld(candidate)) << session.GetWorldOpenError();
+        } else {
+            ASSERT_TRUE(session.LoadWorldStateFrom(storage.Path())) << session.GetWorldOpenError();
+        }
+        for (const int y : {1, 3}) {
+            const auto chunk = session.GetWorldSystem()->find_authoritative_chunk({0, y, 0});
+            ASSERT_NE(chunk, nullptr);
+            EXPECT_TRUE(chunk->same_water_state(*original.find_chunk({0, y, 0})));
+            EXPECT_FALSE(chunk->has_pending_water_retirement());
+        }
+    }
+}
+
+TEST(WaterSeedInputs, PreparedWaterProfileMismatchRefusesBeforeLiveWorldChanges) {
+    const TestSupport::HeadlessRoot root;
+    const TestSupport::ScopedTempFile storage("water-world-", ".world");
+    JobSystem jobs;
+    jobs.startup(1);
+    for (const bool regional_water : {false, true}) {
+        SCOPED_TRACE(regional_water);
+        const world::GameSession::AuthorityProfileOptions profile{.regional_water = regional_water};
+        world::GameSession session(profile, world::GameSession::AuthorityProfileTestOnly{});
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(root.root_string());
+        session.SetActiveRegionsEnabled(true);
+        ASSERT_TRUE(session.CreateTransientWorld("Water profile", "777", "default"));
+        WorldStreamingState original;
+        const auto source = original.get_or_create_chunk({0, 1, 0});
+        session.GetWaterSystem()->InitializeGeneratedWater(*source, std::vector<float>(64, 100.0f));
+        const Persistence::WorldSaveService service;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(service.save_world(original, storage.Path(), &errors));
+        auto options = session.CaptureWorldPreparationOptions();
+        options.regional_water = !regional_water;
+        const auto candidate = world::GameSession::PrepareWorldState(options, storage.Path());
+        ASSERT_NE(candidate, nullptr);
+        ASSERT_TRUE(world::GameSession::WorldPreparationError(*candidate).empty());
+        const auto live_hash = session.ComputeChunkStateHash();
+        EXPECT_FALSE(session.AdoptPreparedWorld(candidate));
+        EXPECT_EQ(session.GetWorldOpenError(),
+                  "World preparation no longer matches session configuration.");
+        EXPECT_EQ(session.ComputeChunkStateHash(), live_hash);
+        EXPECT_EQ(session.GetWorldSystem()->find_authoritative_chunk({0, 1, 0}), nullptr);
+    }
+}
+
+TEST(WaterSeedInputs, RefusedLegacyWaterMigrationPreservesLiveWorldAndLegacyOpening) {
+    const TestSupport::HeadlessRoot root;
+    const TestSupport::ScopedTempFile storage("water-world-", ".world");
+    JobSystem jobs;
+    jobs.startup(1);
+    const world::GameSession::AuthorityProfileOptions profile{.regional_water = true};
+    world::GameSession regional(profile, world::GameSession::AuthorityProfileTestOnly{});
+    world::GameSession legacy;
+    for (auto* session : {&regional, &legacy}) {
+        session->SetJobSystem(&jobs);
+        session->SetRootPath(root.root_string());
+    }
+    regional.SetActiveRegionsEnabled(true);
+    legacy.SetActiveRegionsEnabled(false);
+    ASSERT_TRUE(regional.CreateTransientWorld("Water refusal", "777", "default"));
+    ASSERT_TRUE(legacy.CreateTransientWorld("Legacy water", "777", "default"));
+    const auto live = std::make_shared<Chunk>(IVec3(0, 0, 0));
+    regional.GetWaterSystem()->InitializeGeneratedWater(*live, std::vector<float>(64, 100.0f));
+    live->mark_water_data_dirty();
+    ASSERT_TRUE(regional.GetWorldSystem()->adopt_streamed_chunk(live));
+    const auto live_bytes = Persistence::SerializeChunkAuthoritySnapshotJson(*live);
+    const auto live_hash = regional.ComputeChunkStateHash();
+
+    WorldStreamingState original;
+    for (const int y : {1, 3}) {
+        const auto chunk = original.get_or_create_chunk({0, y, 0});
+        legacy.GetWaterSystem()->InitializeGeneratedWater(*chunk, std::vector<float>(64, 100.0f));
+        chunk->water_depth_mm[0] = y;
+    }
+    const Persistence::WorldSaveService service;
+    std::vector<std::string> errors;
+    ASSERT_TRUE(service.save_world(original, storage.Path(), &errors));
+    EXPECT_FALSE(regional.LoadWorldStateFrom(storage.Path()));
+    EXPECT_TRUE(regional.GetWorldOpenError().starts_with("Saved-input admission refused:"));
+    EXPECT_EQ(regional.ComputeChunkStateHash(), live_hash);
+    EXPECT_EQ(regional.GetWorldSystem()->find_authoritative_chunk({0, 0, 0}), live);
+    EXPECT_EQ(Persistence::SerializeChunkAuthoritySnapshotJson(*live), live_bytes);
+    ASSERT_TRUE(legacy.LoadWorldStateFrom(storage.Path()));
+    for (const int y : {1, 3}) {
+        const auto restored = legacy.GetWorldSystem()->find_authoritative_chunk({0, y, 0});
+        ASSERT_NE(restored, nullptr);
+        EXPECT_EQ(restored->water_depth_mm[0], y);
+    }
+}
+
+TEST(WaterSeedInputs, WaterOnlyLegacyRetirementsStayDirtyUntilCanonicalCommit) {
+    const TestSupport::HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    const world::GameSession::AuthorityProfileOptions profile{.regional_water = true};
+    world::GameSession session(profile, world::GameSession::AuthorityProfileTestOnly{});
+    session.SetJobSystem(&jobs);
+    session.SetRootPath(root.root_string());
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateWorld("Water migration", "777", "default"));
+    const auto path = session.GetWorldSaveDir();
+    WorldStreamingState original;
+    const IVec3 layer(0, 2, 0);
+    const auto source = original.get_or_create_chunk(layer);
+    session.GetWaterSystem()->InitializeGeneratedWater(*source, std::vector<float>(64, 100.0f));
+    source->set_state(ChunkState::Loading); // persisted lifecycle has no job in this session
+    const Persistence::WorldSaveService service;
+    std::vector<std::string> errors;
+    {
+        Persistence::SaveTransaction transaction(
+            path, 0, {}, &Persistence::WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(&errors));
+        ASSERT_TRUE(service.save_world(original, path, &errors));
+        ASSERT_TRUE(Persistence::WorldSaveService::finalize_indexed_envelope(path, &errors));
+        ASSERT_TRUE(transaction.commit(&errors));
+    }
+    ASSERT_TRUE(session.LoadWorldStateFrom(path)) << session.GetWorldOpenError();
+    const auto retired = session.GetWorldSystem()->find_authoritative_chunk(layer);
+    ASSERT_NE(retired, nullptr);
+    EXPECT_EQ(retired->get_state(), ChunkState::Idle);
+    const auto migrated = session.GetWorldSystem()->find_authoritative_chunk({0, 0, 0});
+    ASSERT_NE(migrated, nullptr);
+    EXPECT_EQ(migrated->get_state(), ChunkState::Idle);
+    EXPECT_TRUE(migrated->same_water_state(*source));
+    EXPECT_TRUE(retired->is_voxel_data_dirty());
+    EXPECT_FALSE(retired->has_terrain_authority());
+    EXPECT_FALSE(retired->has_water_authority());
+    EXPECT_FALSE(retired->has_water_sim.load());
+    EXPECT_TRUE(retired->sdf_data.empty());
+    const auto before = session.GetWorldSystem()->durable_chunk_inventory();
+    EXPECT_NE(std::find(before.begin(), before.end(), layer), before.end());
+    ASSERT_TRUE(session.SaveWorldState());
+    EXPECT_FALSE(retired->is_voxel_data_dirty());
+    const auto after = session.GetWorldSystem()->durable_chunk_inventory();
+    EXPECT_EQ(std::find(after.begin(), after.end(), layer), after.end());
+    EXPECT_NE(std::find(after.begin(), after.end(), IVec3(0, 0, 0)), after.end());
+    WorldStreamingState reopened;
+    std::vector<IVec3> inventory;
+    ASSERT_TRUE(service.load_world(reopened, path, errors, {}, nullptr, &inventory));
+    const auto owner = reopened.find_chunk({0, 0, 0});
+    ASSERT_NE(owner, nullptr);
+    EXPECT_TRUE(owner->has_complete_water_state());
+    const auto saved_retirement = reopened.find_chunk(layer);
+    ASSERT_NE(saved_retirement, nullptr);
+    EXPECT_FALSE(saved_retirement->has_simulation_authority());
+    EXPECT_FALSE(saved_retirement->has_water_sim.load());
+}
 } // namespace

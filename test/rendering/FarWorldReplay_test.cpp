@@ -264,10 +264,11 @@ TEST(FarWorldReplay, EveryAuditedObjectConfigurationRestoresOnAllExits) {
         const auto vaos = gl.vaos;
         const auto fbos = gl.fbos;
         const auto programs = gl.programs;
-        if (path == 0)
+        if (path == 0) {
             frame.Replay(gl);
-        else
+        } else {
             EXPECT_THROW(frame.Replay(gl, path == 1, path == 3, path == 2), std::runtime_error);
+        }
         ExpectRestored(frame, on, gl);
         EXPECT_EQ(gl.vaos.at(1).bindings[1].buffer, vaos.at(1).bindings[1].buffer);
         EXPECT_EQ(gl.vaos.at(1).bindings[1].offset, vaos.at(1).bindings[1].offset);
@@ -276,7 +277,7 @@ TEST(FarWorldReplay, EveryAuditedObjectConfigurationRestoresOnAllExits) {
         EXPECT_EQ(gl.vaos, vaos); // all buffers, formats, divisors and enables
         EXPECT_EQ(gl.fbos, fbos); // every attachment and draw/read selector
         EXPECT_EQ(gl.programs, programs);
-        EXPECT_EQ(active_replay_state, nullptr);
+        EXPECT_EQ(active_replay_state(), nullptr);
     }
 }
 TEST(FarWorldReplay, ExposureTimersAndEvidenceAreSuppressed) {

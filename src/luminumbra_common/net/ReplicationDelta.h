@@ -17,36 +17,79 @@
 #include <algorithm>
 #include <cstddef>
 #include <limits>
-#include <map>
 #include <optional>
+#include <stdexcept>
 #include <vector>
 
 namespace Luminumbra::Net {
+
+namespace ReplicationDeltaDetail {
+struct IndexedEntity {
+    const ReplEntityState* entity;
+    std::size_t ordinal;
+};
+
+[[nodiscard]] inline std::vector<IndexedEntity>
+LastEntitiesById(const std::vector<ReplEntityState>& entities) {
+    std::vector<IndexedEntity> index;
+    // Scratch is bounded by the participating input records, never the world set.
+    index.reserve(entities.size());
+    for (std::size_t ordinal = 0; ordinal < entities.size(); ++ordinal)
+        index.push_back({&entities[ordinal], ordinal});
+    std::sort(index.begin(), index.end(), [](const IndexedEntity& a, const IndexedEntity& b) {
+        if (a.entity->entity_id != b.entity->entity_id)
+            return a.entity->entity_id < b.entity->entity_id;
+        return a.ordinal > b.ordinal; // keep the last input record for each id
+    });
+    index.erase(std::unique(index.begin(),
+                            index.end(),
+                            [](const IndexedEntity& a, const IndexedEntity& b) {
+                                return a.entity->entity_id == b.entity->entity_id;
+                            }),
+                index.end());
+    return index;
+}
+
+[[nodiscard]] inline auto FindEntity(const std::vector<IndexedEntity>& index, std::uint32_t id) {
+    return std::lower_bound(
+        index.begin(), index.end(), id, [](const IndexedEntity& entry, std::uint32_t entity_id) {
+            return entry.entity->entity_id < entity_id;
+        });
+}
+} // namespace ReplicationDeltaDetail
 
 // Diff `current` against `baseline`: include an entity iff it is NEW or CHANGED; list the
 // ids present in `baseline` but absent from `current` as removed. Header fields come from
 // `current`. Pure + deterministic (id-ordered).
 [[nodiscard]] inline SnapshotMsg MakeSnapshotDelta(const SnapshotMsg& baseline,
                                                    const SnapshotMsg& current) {
-    std::map<std::uint32_t, const ReplEntityState*> base;
-    for (const ReplEntityState& e : baseline.entities)
-        base[e.entity_id] = &e;
+    const auto base = ReplicationDeltaDetail::LastEntitiesById(baseline.entities);
 
     SnapshotMsg delta;
     delta.server_tick = current.server_tick;
     delta.snapshot_seq = current.snapshot_seq;
     delta.acked_usercmd_tick = current.acked_usercmd_tick;
+    // At most every current record changes, and every baseline record plus each
+    // explicit despawn can contribute a removal before deduplication.
+    delta.entities.reserve(current.entities.size());
+    if (baseline.entities.size() > delta.removed_ids.max_size() ||
+        current.removed_ids.size() > delta.removed_ids.max_size() - baseline.entities.size())
+        throw std::length_error("snapshot removal count exceeds capacity");
+    delta.removed_ids.reserve(baseline.entities.size() + current.removed_ids.size());
 
-    std::map<std::uint32_t, bool> seen;
+    std::vector<std::uint32_t> seen;
+    // Membership scratch holds one id per current input record.
+    seen.reserve(current.entities.size());
     for (const ReplEntityState& e : current.entities) {
-        seen[e.entity_id] = true;
-        const auto it = base.find(e.entity_id);
-        if (it == base.end() || !(*it->second == e)) {
+        seen.push_back(e.entity_id);
+        const auto it = ReplicationDeltaDetail::FindEntity(base, e.entity_id);
+        if (it == base.end() || it->entity->entity_id != e.entity_id || !(*it->entity == e)) {
             delta.entities.push_back(e); // new or changed
         }
     }
+    std::sort(seen.begin(), seen.end());
     for (const ReplEntityState& e : baseline.entities) {
-        if (seen.find(e.entity_id) == seen.end())
+        if (!std::binary_search(seen.begin(), seen.end(), e.entity_id))
             delta.removed_ids.push_back(e.entity_id);
     }
     // ALSO carry the caller-stamped despawns on `current` (explicit/pending removals -- e.g. a
@@ -69,8 +112,8 @@ namespace Luminumbra::Net {
 // Reconstruct the full snapshot from (baseline + delta): keep baseline entities, drop the
 // delta's removed ids, then overwrite/insert the delta's entities. Header fields come from
 // `delta`. Pure + deterministic (id-ordered output).
-// Bound reconstructed state as well as individual delta frames. The map holds
-// at most one frame's entities; reject new ids before allocating beyond that cap.
+// Bound reconstructed state as well as individual delta frames. Scratch indices
+// are bounded by their input record counts; retained state stays within one frame.
 [[nodiscard]] inline std::optional<SnapshotMsg> TryApplySnapshotDelta(const SnapshotMsg& baseline,
                                                                       const SnapshotMsg& delta,
                                                                       std::size_t max_frame_bytes) {
@@ -79,23 +122,29 @@ namespace Luminumbra::Net {
     if (!base_bytes || *base_bytes > max_frame_bytes || !overhead || *overhead > max_frame_bytes)
         return std::nullopt;
     const auto entity_limit = (max_frame_bytes - *overhead) / 23u;
-    std::map<std::uint32_t, ReplEntityState> set;
-    for (const ReplEntityState& e : baseline.entities)
-        set[e.entity_id] = e;
-    for (std::uint32_t id : delta.removed_ids)
-        set.erase(id);
-    for (const ReplEntityState& e : delta.entities) {
-        const auto existing = set.find(e.entity_id);
-        if (existing != set.end()) {
-            existing->second = e;
-        } else {
-            if (set.size() >= entity_limit)
+    auto base = ReplicationDeltaDetail::LastEntitiesById(baseline.entities);
+    auto removed = delta.removed_ids;
+    std::sort(removed.begin(), removed.end());
+    base.erase(std::remove_if(base.begin(),
+                              base.end(),
+                              [&removed](const ReplicationDeltaDetail::IndexedEntity& entry) {
+                                  return std::binary_search(
+                                      removed.begin(), removed.end(), entry.entity->entity_id);
+                              }),
+               base.end());
+    if (base.size() > entity_limit)
+        return std::nullopt;
+    const auto updates = ReplicationDeltaDetail::LastEntitiesById(delta.entities);
+    std::size_t entity_count = base.size();
+    for (const auto& entry : updates) {
+        const auto existing = ReplicationDeltaDetail::FindEntity(base, entry.entity->entity_id);
+        if (existing == base.end() || existing->entity->entity_id != entry.entity->entity_id) {
+            // Check before incrementing or reserving, including at SIZE_MAX.
+            if (entity_count >= entity_limit)
                 return std::nullopt;
-            set.emplace(e.entity_id, e);
+            ++entity_count;
         }
     }
-    if (set.size() > entity_limit)
-        return std::nullopt;
 
     SnapshotMsg full;
     full.server_tick = delta.server_tick;
@@ -107,9 +156,21 @@ namespace Luminumbra::Net {
     // removed_ids is the ONLY signal the consumer gets; dropping it here would leave a stale
     // ghost and break full==delta parity.
     full.removed_ids = delta.removed_ids;
-    full.entities.reserve(set.size());
-    for (const auto& [id, e] : set)
-        full.entities.push_back(e); // map -> ascending id
+    full.entities.reserve(entity_count);
+    auto old = base.begin();
+    auto update = updates.begin();
+    while (old != base.end() || update != updates.end()) {
+        if (update == updates.end() ||
+            (old != base.end() && old->entity->entity_id < update->entity->entity_id)) {
+            full.entities.push_back(*old->entity);
+            ++old;
+        } else {
+            if (old != base.end() && old->entity->entity_id == update->entity->entity_id)
+                ++old;
+            full.entities.push_back(*update->entity);
+            ++update;
+        }
+    }
     return full;
 }
 
