@@ -6,6 +6,7 @@ set(SIMULATION_TEST_SOURCES
 )
 
 set(SCRIPTING_TEST_SOURCES
+    ${CMAKE_CURRENT_LIST_DIR}/scripting/SimScriptDeterminism_test.cpp
     ${CMAKE_CURRENT_LIST_DIR}/scripting/lua_api_manifest_gate_test.cpp
 )
 

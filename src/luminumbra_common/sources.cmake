@@ -66,6 +66,10 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/replay/ReplayStream.cpp
 
     # Scripting
+    ${CMAKE_CURRENT_LIST_DIR}/core/DeterministicScriptMath.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/DeterministicScriptMath.h
+    ${CMAKE_CURRENT_LIST_DIR}/scripting/SimCommandBuffer.h
+    ${CMAKE_CURRENT_LIST_DIR}/scripting/SimScriptHost.h
     ${CMAKE_CURRENT_LIST_DIR}/scripting/LuaApiManifest.cpp
     ${CMAKE_CURRENT_LIST_DIR}/scripting/LuaState.cpp
 
