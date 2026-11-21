@@ -44,7 +44,7 @@ std::vector<std::uint8_t> Read(const fs::path& path, std::uintmax_t limit = 256u
             "Missing or oversized input file");
     std::ifstream input(path, std::ios::binary);
     std::vector<std::uint8_t> bytes(static_cast<size_t>(fs::file_size(path)));
-    input.read(reinterpret_cast<char*>(bytes.data()), bytes.size());
+    input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     Require(input.good() && input.peek() == std::char_traits<char>::eof(),
             "Input changed or could not be read completely");
     return bytes;
@@ -55,7 +55,8 @@ std::string Hash(std::span<const std::uint8_t> bytes) {
 void Write(const fs::path& path, std::span<const std::uint8_t> bytes) {
     Require(!fs::exists(path), "Capture member already exists");
     std::ofstream output(path, std::ios::binary);
-    output.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    output.write(reinterpret_cast<const char*>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
     output.close();
     Require(output.good(), "Capture member write failed");
 }
@@ -101,7 +102,10 @@ public:
                               {{"schema", "luminumbra.static_preview.hang.v1"},
                                {"pid", Pid()},
                                {"deadline_seconds", 60}});
-                } catch (...) {}
+                } catch (...) {
+                    // The report is best-effort: its failure must not prevent the deadline
+                    // diagnostic and exit status 124 below from terminating a hung capture.
+                }
                 std::cerr << "static-preview watchdog deadline exceeded\n" << std::flush;
                 std::_Exit(124);
             }
@@ -381,7 +385,10 @@ int main(int argc, char** argv) {
                 WriteJson(
                     output / "failure.json",
                     {{"status", "refused"}, {"error", error.what()}, {"visual_approved", false}});
-            } catch (...) {}
+            } catch (...) {
+                // The refusal is already on stderr; a best-effort report failure must not
+                // replace that primary error or prevent returning status 1 below.
+            }
         }
         return 1;
     }

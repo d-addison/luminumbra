@@ -2322,7 +2322,10 @@ public:
             try {
                 CreatedWorldArtifacts::remove_bound_entry(m_destination, m_descriptor, false);
                 FlushRemovalDirectory(m_destination, nullptr);
-            } catch (const std::exception&) {}
+            } catch (const std::exception&) {
+                // Best-effort rollback must not throw during stack unwinding. Retain any
+                // artifact that cannot be removed; descriptor and temporary cleanup continue.
+            }
         }
         if (m_descriptor >= 0)
             ::close(m_descriptor);
