@@ -3912,6 +3912,26 @@ class TerrainCaptureResourceWiring(unittest.TestCase):
         self.capture = block(self.source, "bool RenderPipeline::capture_terrain_coverage(")
         self.replay = block(self.source, "bool CaptureFog(")
 
+    def test_manifest_retains_lighting_sources_and_uploaded_uniform_snapshots(self):
+        capture = compact(self.capture)
+        records = (
+            'receipt["lighting_sources"] = std::move(sources);',
+            'receipt["lighting_uniforms"] = CaptureUniforms('
+            'm_lighting_pass ? m_lighting_pass->shader().get() : nullptr);',
+            'receipt["fog_uniforms"] = CaptureUniforms('
+            'm_aerial_pass ? m_aerial_pass->shader().get() : nullptr);',
+        )
+        for record in records:
+            with self.subTest(record=record):
+                self.assertIn(record, capture)
+                self.assertLess(capture.index(record), capture.index('receipt["complete"] = true'))
+        uniforms = block(self.source, "Json CaptureUniforms(")
+        for readback in ("glGetActiveUniform(", "glGetUniformfv(", "glGetUniformiv("):
+            self.assertIn(readback, uniforms)
+        refusal = block(self.capture, 'if (receipt["lighting_uniforms"].contains("status")')
+        self.assertIn('receipt["fog_uniforms"].contains("status")', capture)
+        self.assertEqual(compact(refusal), "return false;")
+
     def test_allocated_frame_owners_supply_nonzero_recorded_source_handles(self):
         # Lighting builds only its own inputs. Capture must fill these from the
         # same owners used by the production scene and aerial consumers.
