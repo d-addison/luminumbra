@@ -86,6 +86,36 @@
       "requirements": []
     },
     {
+      "id": "render.shadow-receivers",
+      "source": "docs/development/visual-diagnostics.md#implementation-inventory",
+      "statement": "Shadow projection converts signed light-view Z bounds to negative-Z plane distances. Surface PCF interpolates comparison results with a four by four box and 25 nearest-depth taps. Depth and tint use identity outside all six light planes. Registered regressions cover asymmetric signed bounds, corner inclusion, culling, depth ordering, fractional receiver motion, every cascade, small and shipping shadow sizes, border taps and out-of-frustum inputs. The orange-brown canopy hue remains unattributed, and native re-capture must qualify both the canopy appearance and the dusk wedge before issue #873 can close. Froxel tint is identity before the light near plane; its single-tap depth filter is unchanged.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "DiagnosticContributions.LightBoundsContainEveryCornerAndOrderDepthTowardTheLight"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DiagnosticContributionsGl.ProductionShadowFiltersInterpolateComparisonsAtEveryResolutionAndCascade"
+        },
+        {
+          "kind": "ctest",
+          "ref": "DiagnosticContributionsGl.FroxelTintIsIdentityOutsideEveryLightPlane"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development/visual-diagnostics.md"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarWorldFogGl.DuskAuditFogIsContinuousAcrossDistanceAndHeightBoundaries",
+          "planned": "Re-capture the fixed audit pose under native GL with paired lighting and fog sources, attribute the canopy hue and qualify the dusk wedge; owner: maintainers"
+        }
+      ],
+      "requirements": []
+    },
+    {
       "id": "render.terrain-coverage-evidence",
       "source": "docs/development/visual-diagnostics.md#implementation-inventory",
       "statement": "Terrain coverage capture schema v1 retains lighting source planes and lighting/fog uniform snapshots. The expanded synthetic capture regression checks all nine available source kinds, every layer file header and payload size, explicit unavailable integrated volume records with volumetrics disabled, and uploaded lighting/fog uniform values. Source-contract regressions guard the three manifest records before completion. Native execution of the expanded checks remains pending.",
@@ -201,6 +231,32 @@
           "kind": "ctest",
           "ref": "TemporalAuditSite.*",
           "planned": "Integrate and validate fixed-site simulation and completed-frame transport before native temporal capture; owner: maintainers"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development/visual-diagnostics.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
+      "id": "render.temporal-sweep-protocol",
+      "source": "docs/development/visual-diagnostics.md#ordered-delivery",
+      "statement": "A GL-free fixed-camera sweep adapter validates feature/camera compatibility and immutable E1c plans and output budgets before transport access, passes the E3b feature policy, and keeps one transport across exact simulation ticks, rational presentation steps, frozen retries and private capture/publication. Registered regressions cover every span, creature-brain progression matching ordinary ticks, modeled particle continuity, camera/profile refusal, invalid plans/budgets/clocks, transport failures and exhausted readiness. The legacy still renderer checks its original camera/TOD/weather catalogue against the adapter pins at compile time and retains its settle counts. Both startup parsers refuse the incompatible all-features still matrix before save-root or world/output creation, including environment launches, with sweep_upward_camera_forces_empty_foliage. Native execution and shipping temporal startup, simulation/weather and completed-frame transport remain pending. This protocol does not certify temporal runtime support or all-features presence.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "TemporalSweep.*"
+        },
+        {
+          "kind": "script",
+          "ref": "tools/ci/test_replay_source_contract.py"
+        },
+        {
+          "kind": "ctest",
+          "ref": "TemporalSweepRuntime.*",
+          "planned": "Wire startup admission and simulation/weather/completed-frame transport, then run native fixed-camera sweep captures; owner: maintainers"
         },
         {
           "kind": "doc",

@@ -13944,14 +13944,26 @@ TEST(GameSessionHeadlessWorldTest, EnergyTransactionChecksExactEncodedByteLimitA
     }
 }
 
-TEST(GameSessionHeadlessWorldTest, LegacyEnergyMigratesToOwnerAgesAndSealsFrozenOwners) {
-    for (const std::uint64_t remaining : {1u, 3u, 8u}) {
-        for (const bool empty : {false, true}) {
-            ASSERT_NO_FATAL_FAILURE(CheckLegacyEnergyMigration(remaining, empty));
-        }
-    }
-    ASSERT_NO_FATAL_FAILURE(CheckLegacyEnergyMigration(3, false, true));
+// Each discovered case retains all 34 tick observations and eight durable
+// save/reopen checkpoints. Combining seven fixtures in one entry exceeds the
+// Windows timeout under parallel filesystem load; bound each entry to one.
+class LegacyEnergyMigrationTest
+    : public testing::TestWithParam<std::tuple<std::uint64_t, bool, bool>> {};
+
+TEST_P(LegacyEnergyMigrationTest, LegacyEnergyMigratesToOwnerAgesAndSealsFrozenOwners) {
+    const auto& [remaining, empty, missing_distant] = GetParam();
+    ASSERT_NO_FATAL_FAILURE(CheckLegacyEnergyMigration(remaining, empty, missing_distant));
 }
+
+INSTANTIATE_TEST_SUITE_P(GameSessionHeadlessWorld,
+                         LegacyEnergyMigrationTest,
+                         testing::Values(std::tuple{std::uint64_t{1}, false, false},
+                                         std::tuple{std::uint64_t{1}, true, false},
+                                         std::tuple{std::uint64_t{3}, false, false},
+                                         std::tuple{std::uint64_t{3}, true, false},
+                                         std::tuple{std::uint64_t{8}, false, false},
+                                         std::tuple{std::uint64_t{8}, true, false},
+                                         std::tuple{std::uint64_t{3}, false, true}));
 
 TEST(GameSessionHeadlessWorldTest, LegacyBoundaryEnergyKeepsInWorldValuesAcrossSaveAndReopen) {
     for (const bool in_world : {false, true}) {

@@ -33,6 +33,7 @@
 #include <utility>
 #include <vector>
 
+#include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/net/LockstepSession.h"
 #include "luminumbra_common/persistence/ReplacementOutputFile.h"
 #include "luminumbra_common/persistence/SaveTransaction.h"
@@ -409,7 +410,18 @@ TEST_F(ReplayStreamTest, PairSuccessReplacesBothAndCanRemoveStaleTrace) {
 }
 
 TEST_F(ReplayStreamTest, AllReplayWritersAcceptLongDestinationComponents) {
-    m_path = (fs::path(m_path).parent_path() / std::string(220, 'r')).string();
+    const auto directory = Luminumbra::Filesystem::AbsolutePath(fs::path(m_path).parent_path());
+    std::size_t component_length = 220;
+#if defined(_WIN32)
+    // Ordinary Win32 paths must fit MAX_PATH including the separator, companion
+    // suffix and terminating NUL. A 220-character leaf alone is only a POSIX-safe
+    // assumption under this fixture's unique temporary directory.
+    constexpr std::size_t max_path = 260;
+    constexpr std::size_t overhead = 1 + sizeof(".regions.json");
+    ASSERT_LT(directory.native().size(), max_path - overhead);
+    component_length = std::min(component_length, max_path - overhead - directory.native().size());
+#endif
+    m_path = (directory / std::string(component_length, 'r')).string();
     replay::ReplayWriter writer;
     ASSERT_TRUE(writer.Open(m_path, MakeHeader()));
     ASSERT_TRUE(writer.Finalize(0));
