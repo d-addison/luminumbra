@@ -41,7 +41,15 @@ _REFLECTION_VARIANTS = (
     "The pilot is excluded from default builds without slangc and defines "
     "PILOT_SHADER_REFLECT_DIR; the GL target defines LUMINUMBRA_TEST_ARTIFACT_DIR.",
 )
+_SERVER_RUNNER_VARIANTS = (
+    frozenset({"runtime_world_visual_validation_test", "world_open_refusal_test"}),
+    "Visual validation links the QA client and defines the test artifact root; "
+    "world-open refusal owns the shipping replay body with common-only headers.",
+)
 ALLOWLIST = {
+    "src/luminumbra_server/ServerWorldRunner.cpp": _SERVER_RUNNER_VARIANTS,
+    "src/luminumbra_server/modes/ModeHelpers.cpp": _SERVER_RUNNER_VARIANTS,
+    "src/luminumbra_server/modes/Replay.cpp": _SERVER_RUNNER_VARIANTS,
     "src/luminumbra_common/core/GraphicsPresetClassifier.cpp": (
         frozenset({"graphics_preset_classifier_test", "hardware_info_test"}),
         "Hardware collection adds the fake SDK include path; the standalone "
