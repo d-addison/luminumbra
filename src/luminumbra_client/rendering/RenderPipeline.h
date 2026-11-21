@@ -1543,6 +1543,7 @@ private:
     std::unique_ptr<SsaoPass> m_ssao_pass;
     std::unique_ptr<LightingPass> m_lighting_pass;
     std::unique_ptr<WaterPass> m_water_pass;
+    WaterPassInput m_frame_water_input;
     bool m_water_visibility_capture_enabled = false;
     std::unique_ptr<SkyboxPass> m_skybox_pass;
     std::unique_ptr<ParticlePass> m_particle_pass;          //

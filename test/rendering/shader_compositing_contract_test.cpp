@@ -1805,8 +1805,12 @@ TEST(FarWorldWaterContract, ProductionWaterUsesIndependentReadinessAndCombinedSu
     // Drawing and ownership must certify the retained presentation, even while
     // the current snapshot is waiting for adoption. Check calls within their
     // owning functions without depending on local names or line wrapping.
-    const auto draw = ExtractBlock(pipeline, "void RenderPipeline::execute_stage_water(");
+    const auto draw = ExtractBlock(pipeline, "void RenderPipeline::execute_stage_opaque_snapshot(");
     EXPECT_TRUE(std::regex_search(draw, std::regex(R"(\.\s*PresentedLadderWaterEligible\s*\()")));
+    ExpectContains(draw, "m_frame_water_input.draw_items.push_back(");
+    const auto water = ExtractBlock(pipeline, "void RenderPipeline::execute_stage_water(");
+    ExpectContains(water, "const auto& water_input = m_frame_water_input;");
+    EXPECT_TRUE(std::regex_search(water, std::regex(R"(water_ctx\s*,\s*water_input\s*,)")));
     const auto prepare = ExtractBlock(pipeline, "void RenderPipeline::prepare_frame(");
     EXPECT_TRUE(
         std::regex_search(prepare, std::regex(R"(\.\s*SetPresentedLadderWaterUpload\s*\()")));

@@ -3702,36 +3702,48 @@ void RenderPipeline::execute_stage_skybox(const Camera& camera) {
 void RenderPipeline::execute_stage_opaque_snapshot(const Camera& camera) {
     LUMIN_PROFILE_ZONE_N("GL opaque_snapshot");
     (void)camera;
-    // 7. SNAPSHOT THE LIT OPAQUE+SKY SCENE, THEN WATER PASS BLENDS OVER IT.
-    // Water keeps depth writes off for transparency. Drawing the sky first prevents
-    // cloud/aurora sky pixels from overwriting water over far-depth/background
-    // samples while still giving refraction a stable pre-water color source.
-    record_frame_stage("opaque_snapshot");
-    m_lighting_pass->copy_lighting_color_to_opaque_texture(m_frame_lighting_ctx);
-}
-
-void RenderPipeline::execute_stage_water(const Camera& camera) {
+    // Prepare once in the original chunk order, before deciding whether to copy.
     const auto& renderable_chunk_snapshots = m_frame_prepared.renderable_chunk_snapshots;
-    glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
-    record_frame_stage("water");
+    m_frame_water_input.draw_items.clear();
     if (m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Water)) {
-        //  (T16): build the water draw list from m_water_render_data in
-        // chunk order (byte-stable) + the ctx, then run the seam.
-        RenderContext water_ctx = make_water_context(camera);
-        WaterPassInput water_input;
         for (const auto& chunk : renderable_chunk_snapshots) {
             auto it = m_water_render_data.find(chunk.id);
-            if (it != m_water_render_data.end() && it->second.element_count > 0 &&
+            if (it != m_water_render_data.end() &&
+                WaterPreparationDrawConsumes(it->second.element_count) &&
                 (m_frame_far_selection.effective != FarWorldMode::Ladder ||
                  it->second.PresentedLadderWaterEligible(m_water_pass->shader() &&
                                                          m_water_pass->shader()->IsValid()))) {
                 glm::mat4 model = glm::translate(
                     glm::mat4(1.0f),
                     glm::vec3(chunk.coords * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z)));
-                water_input.draw_items.push_back(
+                m_frame_water_input.draw_items.push_back(
                     {model, it->second.vao_id, it->second.element_count});
             }
         }
+    }
+    // 7. SNAPSHOT THE LIT OPAQUE+SKY SCENE, THEN WATER PASS BLENDS OVER IT.
+    // Water keeps depth writes off for transparency. Drawing the sky first prevents
+    // cloud/aurora sky pixels from overwriting water over far-depth/background
+    // samples while still giving refraction a stable pre-water color source.
+    record_frame_stage("opaque_snapshot");
+    // Glass uses this pre-water snapshot. Rays and weather refresh it at their
+    // own stages. Terrain capture can read it even when no transparent mesh draws.
+    const WaterPreparationConsumers consumers{
+        .water = !m_frame_water_input.draw_items.empty(),
+        .glass = !m_glass_pane_items.empty() && m_glass_quad_vao != 0,
+        .capture = m_terrain_coverage_enabled || m_water_visibility_capture_enabled};
+    if (consumers.opaque_snapshot()) {
+        m_lighting_pass->copy_lighting_color_to_opaque_texture(m_frame_lighting_ctx);
+    }
+}
+
+void RenderPipeline::execute_stage_water(const Camera& camera) {
+    glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
+    record_frame_stage("water");
+    if (m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Water)) {
+        // Consume the chunk-ordered list prepared before the opaque snapshot.
+        RenderContext water_ctx = make_water_context(camera);
+        const auto& water_input = m_frame_water_input;
         begin_gpu_pass_timer(GpuTimerPass::Water);
         const WaterDrawStats water_stats = m_water_pass->execute(
             water_ctx, water_input, camera, m_water_visibility_capture_enabled);
