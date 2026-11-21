@@ -149,6 +149,9 @@ public:
                                     bool moving_anchor,
                                     bool water_smoke);
     void SetOwnerContinuationAnchor(const Vec3& origin, const Vec3& anchor, std::uint64_t tick);
+    // Const owner-thread diagnostic using the same bounded capture as explicit saves.
+    // Refusal leaves bytes unchanged; call only between completed simulation ticks.
+    bool CaptureOwnerContinuation(std::string& bytes) const;
     const Persistence::OwnerContinuation* RestoredOwnerContinuation() const;
     // Runner boot reserves this storage through SetReplicatedSimulationAnchors.
     void SetOwnerContinuationSimulationAnchors(std::span<const Vec3> anchors);
@@ -781,7 +784,6 @@ private:
     GameSession(const AuthorityProfileOptions& authority_profile, AuthorityProfileTag);
 
     const AuthorityProfileOptions m_authorityProfile;
-    bool CaptureOwnerContinuation(std::string& bytes) const;
     OwnerContinuationOptions m_continuationOptions;
     const std::vector<World::PlayerAvatar>* m_ownerAvatarSources = nullptr;
     std::optional<std::uint32_t> m_ownerRosterCount;
