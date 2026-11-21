@@ -19,6 +19,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace {
 using namespace Luminumbra::Rendering;
@@ -110,12 +111,95 @@ protected:
         }
         DiagnosticInspectorGl::TearDown();
     }
-    void BeginCapture() {
+    enum class Coverage {
+        Complete,
+        Unsupported,
+        Uninstrumented,
+        Discarded,
+        Occluded,
+        Unknown
+    };
+    void ReattachCapture(GBufferDiagnosticCapture& capture) {
+        ASSERT_TRUE(capture.attach(gbuffer_, {2, 2}));
+    }
+    void DrawImpostor(GBufferDiagnosticCapture& capture, Coverage coverage) {
+        const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) / "res/shaders";
+        const auto vertex = (root / "tree_impostor.vert").string();
+        const auto fragment = (root / "tree_impostor.frag").string();
+        Shader original(vertex.c_str(), fragment.c_str());
+        ASSERT_TRUE(original.IsValid());
+        capture.unsupported("tree_impostor_fragment_output_unavailable", 3);
+        auto* shader = capture.variant(&original, false, {}, true);
+        ASSERT_NE(shader, &original);
+        ASSERT_NE(shader, nullptr);
+        ASSERT_TRUE(shader->IsValid());
+        EXPECT_EQ(capture.variant(&original, false, {}, true), shader);
+        shader->use();
+        shader->setMat4("u_view", glm::mat4(1.0f));
+        shader->setMat4("u_proj", glm::mat4(1.0f));
+        shader->setVec3("u_cameraPos", glm::vec3(0.0f, 0.0f, 2.0f));
+        shader->setFloat("u_radius", 1.0f);
+        shader->setVec3("u_center", glm::vec3(0.0f));
+        shader->setFloat("u_grid", 1.0f);
+        shader->setFloat("u_materialId", 17.0f / 255.0f);
+        shader->setInt("u_albedo", 0);
+        shader->setInt("u_normal", 1);
+        // Two 1x1 atlases and a four-vertex quad bound all work in this fixture.
+        std::array<GLuint, 2> textures{};
+        glGenTextures(static_cast<GLsizei>(textures.size()), textures.data());
+        for (std::size_t index = 0; index < textures.size(); ++index) {
+            glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(index));
+            glBindTexture(GL_TEXTURE_2D, textures[index]);
+            glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 1, 1);
+            const std::array<GLubyte, 4> texel{
+                128, 128, 128, coverage == Coverage::Discarded ? GLubyte{0} : GLubyte{255}};
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, texel.data());
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        }
+        GLuint vao = 0;
+        glGenVertexArrays(1, &vao);
+        glBindVertexArray(vao);
+        for (GLuint column = 0; column < 4; ++column) {
+            std::array<GLfloat, 4> value{};
+            value[column] = 1.0f;
+            glVertexAttrib4fv(column, value.data());
+        }
+        glVertexAttrib4f(4, 1.0f, 1.0f, 1.0f, 1.0f);
+        glBindFramebuffer(GL_FRAMEBUFFER, gbuffer_.fbo_id);
+        glViewport(0, 0, 2, 2);
+        glDisable(GL_CULL_FACE);
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_GREATER);
+        glDepthMask(GL_TRUE);
+        const float depth = coverage == Coverage::Occluded ? 0.75f : 0.25f;
+        glClearTexImage(gbuffer_.depth_texture, 0, GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(1, 0, 1, 1);
+        glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, 1);
+        glDisable(GL_SCISSOR_TEST);
+        glDisable(GL_DEPTH_TEST);
+        std::array<DiagnosticId, 4> pixels{};
+        glReadBuffer(GL_COLOR_ATTACHMENT6);
+        glReadPixels(0, 0, 2, 2, GL_RGBA_INTEGER, GL_UNSIGNED_INT, pixels.data());
+        const DiagnosticId underlying{1, 1, 3, 257};
+        EXPECT_EQ(pixels[0], underlying);
+        EXPECT_EQ(pixels[1], coverage == Coverage::Uninstrumented ? DiagnosticId{} : underlying);
+        EXPECT_EQ(pixels[2], underlying);
+        EXPECT_EQ(pixels[3], underlying);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glBindVertexArray(0);
+        glDeleteVertexArrays(1, &vao);
+        glDeleteTextures(static_cast<GLsizei>(textures.size()), textures.data());
+        glUseProgram(variant_program_);
+        EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+    }
+    void BeginCapture(Coverage coverage = Coverage::Complete) {
         frame_ = pass_.begin_frame(ctx_);
         ASSERT_TRUE(frame_);
         auto* capture = GBufferDiagnosticCapture::Current();
         ASSERT_NE(capture, nullptr);
-        ASSERT_TRUE(capture->attach(gbuffer_, {2, 2}));
+        ASSERT_NO_FATAL_FAILURE(ReattachCapture(*capture));
         auto* variant = capture->variant(base_.get(), false);
         ASSERT_NE(variant, base_.get());
         ASSERT_NE(variant, nullptr);
@@ -141,6 +225,28 @@ protected:
         const DiagnosticId id{1, 1, 3, 257};
         glClearTexImage(
             static_cast<GLuint>(identity_texture), 0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, id.data());
+        if (coverage == Coverage::Uninstrumented || coverage == Coverage::Discarded ||
+            coverage == Coverage::Occluded) {
+            ASSERT_NO_FATAL_FAILURE(DrawImpostor(*capture, coverage));
+        } else if (coverage != Coverage::Complete) {
+            capture->write(
+                *variant,
+                {.mesh_path = "res/models/unknown.obj",
+                 .shader_variant = coverage == Coverage::Unsupported ? "instanced_static_mesh"
+                                                                     : "unknown_producer",
+                 .provenance = coverage == Coverage::Unsupported ? DiagnosticProvenance::Unsupported
+                                                                 : DiagnosticProvenance::Mesh});
+            const DiagnosticId unsupported_id{2, 2, 0, 257};
+            glTextureSubImage2D(static_cast<GLuint>(identity_texture),
+                                0,
+                                1,
+                                0,
+                                1,
+                                1,
+                                GL_RGBA_INTEGER,
+                                GL_UNSIGNED_INT,
+                                unsupported_id.data());
+        }
         const std::array<float, 4> normal{0.5f, 0.5f, 0, 17.0f / 255};
         const std::array<float, 4> albedo{0.2f, 0.4f, 0.6f, 1};
         const float depth = 0.25f;
@@ -148,7 +254,9 @@ protected:
         glClearTexImage(gbuffer_.albedo_texture, 0, GL_RGBA, GL_FLOAT, albedo.data());
         glClearTexImage(gbuffer_.depth_texture, 0, GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
         capture->detach();
-        ASSERT_TRUE(capture->complete());
+        ASSERT_EQ(capture->complete(),
+                  coverage == Coverage::Complete || coverage == Coverage::Unknown);
+        ASSERT_TRUE(capture->snapshot_ready());
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         GLint current = 0;
         glGetIntegerv(GL_CURRENT_PROGRAM, &current);
@@ -191,6 +299,8 @@ TEST_F(DiagnosticInspectorFrameGl, CaptureTeardownGatherRestoreAndLaterDisplayKe
     EXPECT_EQ(result.at("record").at("mesh").at("path"), "res/models/rock.obj");
     EXPECT_EQ(result.at("probe").at("material"), 17);
     EXPECT_EQ(result.at("probe").at("depth_hardware"), 0.25f);
+    EXPECT_EQ(result.at("identity_complete"), true);
+    EXPECT_EQ(control.status.find("Identity snapshot (complete coverage)"), 0U);
     const auto captured_result = control.result;
     EXPECT_FALSE(pass_.begin_frame(ctx_));
     Pass::end_frame(frame_, ctx_);
@@ -207,13 +317,162 @@ TEST_F(DiagnosticInspectorFrameGl, CaptureTeardownGatherRestoreAndLaterDisplayKe
     ExpectReleasedProgram();
 }
 
+TEST_F(DiagnosticInspectorFrameGl, MixedCoverageStaysDisplayedAndReportsIncompleteIdentity) {
+    for (const auto coverage :
+         {Coverage::Unsupported, Coverage::Uninstrumented, Coverage::Unknown}) {
+        for (const bool inspect_unsupported : {false, true}) {
+            auto& control = Pass::controls();
+            control.refresh = true;
+            control.x = inspect_unsupported ? 1 : 0;
+            control.y = 1;
+            Pass::request_inspection(control);
+            ASSERT_NO_FATAL_FAILURE(BeginCapture(coverage));
+            Pass::end_frame(frame_, ctx_);
+            ExpectReleasedProgram();
+            EXPECT_NE(control.status.find("incomplete coverage"), std::string::npos);
+            ASSERT_FALSE(control.result.empty());
+            const auto result = nlohmann::json::parse(control.result);
+            EXPECT_EQ(result.at("identity_complete"), false);
+            EXPECT_EQ(result.at("identity_supported"), !inspect_unsupported);
+            if (!inspect_unsupported) {
+                EXPECT_EQ(result.at("record").at("mesh").at("path"), "res/models/rock.obj");
+                EXPECT_EQ(result.at("probe").at("draw"), 1);
+            } else if (coverage == Coverage::Uninstrumented) {
+                EXPECT_TRUE(result.at("record").is_null());
+            } else {
+                EXPECT_EQ(result.at("record").at("draw").at("id"), 2);
+            }
+            pass_.set_mode(Pass::DrawId);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glViewport(0, 0, 8, 8);
+            pass_.execute(ctx_);
+            std::array<GLubyte, 32> colors{};
+            glReadPixels(0, 0, 8, 1, GL_RGBA, GL_UNSIGNED_BYTE, colors.data());
+            const auto hash = Pass::hash_id(1);
+            for (std::size_t channel = 0; channel < 3; ++channel) {
+                EXPECT_NEAR(colors[channel], (hash >> (channel * 8)) & 255U, 1);
+            }
+            // The unsupported texel spans both stripes of the six-pixel hatch.
+            EXPECT_EQ(colors[16], 255);
+            EXPECT_EQ(colors[17], 0);
+            EXPECT_EQ(colors[18], 255);
+            EXPECT_NEAR(colors[28], 0.15 * 255, 1);
+            EXPECT_EQ(colors[29], 0);
+            EXPECT_NEAR(colors[30], 0.15 * 255, 1);
+            EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+        }
+    }
+}
+
 TEST_F(DiagnosticInspectorFrameGl, RefusedCaptureReleasesTheCurrentVariant) {
-    ASSERT_NO_FATAL_FAILURE(BeginCapture());
+    ASSERT_NO_FATAL_FAILURE(BeginCapture(Coverage::Unsupported));
     GBufferDiagnosticCapture::Current()->abort();
     Pass::end_frame(frame_, ctx_);
     EXPECT_FALSE(frame_);
     EXPECT_EQ(Pass::controls().result, "Snapshot refused: incomplete or unsupported coverage");
     ExpectReleasedProgram();
+}
+
+TEST_F(DiagnosticInspectorFrameGl,
+       UninstrumentedCutoutsAndOccludedFragmentsKeepUnderlyingIdentity) {
+    for (const auto coverage : {Coverage::Discarded, Coverage::Occluded}) {
+        auto& control = Pass::controls();
+        control.refresh = true;
+        control.x = 1;
+        control.y = 1;
+        Pass::request_inspection(control);
+        ASSERT_NO_FATAL_FAILURE(BeginCapture(coverage));
+        Pass::end_frame(frame_, ctx_);
+        ASSERT_FALSE(control.result.empty());
+        const auto result = nlohmann::json::parse(control.result);
+        EXPECT_EQ(result.at("identity_complete"), false);
+        EXPECT_EQ(result.at("identity_supported"), true);
+        EXPECT_EQ(result.at("probe").at("draw"), 1);
+        ExpectReleasedProgram();
+    }
+}
+
+TEST_F(DiagnosticInspectorFrameGl, UnsafeVariantAndWriterFallbacksRefusePartialSnapshots) {
+    // Exercise every fallback with a live attachment, including both writer entry points.
+    for (int refusal = 0; refusal < 10; ++refusal) {
+        SCOPED_TRACE(refusal);
+        Pass::controls().refresh = true;
+        ASSERT_NO_FATAL_FAILURE(BeginCapture());
+        auto* capture = GBufferDiagnosticCapture::Current();
+        ASSERT_NE(capture, nullptr);
+        ASSERT_NO_FATAL_FAILURE(ReattachCapture(*capture));
+        const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) / "res/shaders";
+        const auto vertex = (root / "tree_impostor.vert").string();
+        const auto fragment = (root / "tree_impostor.frag").string();
+        Shader original(vertex.c_str(), fragment.c_str());
+        ASSERT_TRUE(original.IsValid());
+        if (refusal == 0) {
+            EXPECT_EQ(capture->variant(nullptr, false, {}, true), nullptr);
+        } else if (refusal == 1) {
+            Shader invalid("missing-diagnostic.vert", "missing-diagnostic.frag");
+            EXPECT_EQ(capture->variant(&invalid, false, {}, true), &invalid);
+        } else if (refusal == 2) {
+            // An uninstrumented shader cannot satisfy an identity-writing request.
+            EXPECT_EQ(capture->variant(&original, false), &original);
+        } else if (refusal == 3) {
+            EXPECT_EQ(capture->variant(&original, false, {"a", "b", "c", "d"}, true), &original);
+        } else if (refusal == 4) {
+            EXPECT_EQ(capture->variant(&original, false, {std::string(65, 'x')}, true), &original);
+        } else if (refusal == 5) {
+            EXPECT_EQ(capture->variant(&original, false, {"missing_output"}, true), &original);
+        } else if (refusal == 6) {
+            // The existing identity variant plus these five exhaust the six-program budget.
+            for (const auto& feedback : {std::vector<std::string>{},
+                                         std::vector<std::string>{"vQuadUV"},
+                                         std::vector<std::string>{"vViewDir"}}) {
+                for (const bool ladder : {false, true}) {
+                    if (feedback.empty() && ladder) {
+                        continue;
+                    }
+                    ASSERT_NE(capture->variant(&original, ladder, feedback, true), &original);
+                }
+            }
+            // A cache hit remains valid at capacity, but a seventh program refuses.
+            EXPECT_NE(capture->variant(&original, false, {}, true), &original);
+            EXPECT_EQ(capture->variant(&original, true, {}, true), &original);
+        } else if (refusal == 7) {
+            auto* zero = capture->variant(&original, false, {}, true);
+            ASSERT_NE(zero, &original);
+            ASSERT_NE(zero, nullptr);
+            capture->write(*zero, {.mesh_path = {}, .shader_variant = "instanced_static_mesh"});
+        } else if (refusal == 8) {
+            capture->write(original, {.mesh_path = {}, .shader_variant = "instanced_static_mesh"});
+        } else {
+            original.use();
+            capture->write_current({.mesh_path = {}, .shader_variant = "instanced_static_mesh"});
+        }
+        capture->detach();
+        EXPECT_FALSE(capture->snapshot_ready());
+        EXPECT_FALSE(capture->complete());
+        Pass::end_frame(frame_, ctx_);
+        EXPECT_EQ(Pass::controls().result, "Snapshot refused: incomplete or unsupported coverage");
+        ExpectReleasedProgram();
+    }
+}
+
+TEST_F(DiagnosticInspectorFrameGl, InvalidStorageOrRefusedMetadataCannotDisplayPartialSnapshot) {
+    for (const bool storage_failure : {false, true}) {
+        Pass::controls().refresh = true;
+        ASSERT_NO_FATAL_FAILURE(BeginCapture(Coverage::Unsupported));
+        auto* capture = GBufferDiagnosticCapture::Current();
+        ASSERT_NE(capture, nullptr);
+        if (storage_failure) {
+            EXPECT_FALSE(capture->attach(GBuffer{}, {2, 2}));
+        } else {
+            capture->unsupported("");
+            EXPECT_TRUE(capture->refused());
+        }
+        EXPECT_FALSE(capture->snapshot_ready());
+        EXPECT_FALSE(capture->complete());
+        Pass::end_frame(frame_, ctx_);
+        EXPECT_EQ(Pass::controls().result, "Snapshot refused: incomplete or unsupported coverage");
+        ExpectReleasedProgram();
+    }
 }
 
 TEST_F(DiagnosticInspectorFrameGl, AbandonedCaptureReleasesTheCurrentVariant) {
@@ -431,13 +690,15 @@ TEST(DiagnosticInspector, InspectorStorageRefusesMissingPartialAndOversizedStore
     EXPECT_NE(begin.find("control.inspect_requested = false;"), std::string::npos);
 }
 
-TEST(DiagnosticInspector, IncompleteAndUnsupportedCapturesRefusePublication) {
+TEST(DiagnosticInspector, DisplayReadinessIsSeparateFromPublicationCompleteness) {
     const auto frame = SourceSection("src/luminumbra_client/rendering/passes/DebugViewPass.cpp",
                                      "class DebugViewPass::Frame",
                                      "std::string DebugViewPass::join(");
-    EXPECT_LT(frame.find("const bool complete = capture_->complete();"),
+    EXPECT_LT(frame.find("const bool ready = capture_->snapshot_ready();"),
               frame.find("capture_.reset();"));
-    EXPECT_LT(frame.find("if (!complete)"), frame.find("pass_.finish_frame(ctx);"));
+    EXPECT_LT(frame.find("identity_complete = capture_->complete();"),
+              frame.find("capture_.reset();"));
+    EXPECT_LT(frame.find("if (!ready)"), frame.find("pass_.finish_frame(ctx);"));
     EXPECT_NE(frame.find("controls().status = controls().result ="), std::string::npos);
     EXPECT_NE(frame.find("Snapshot refused: incomplete or unsupported coverage"),
               std::string::npos);
