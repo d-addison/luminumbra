@@ -1,5 +1,6 @@
 #include "Chunk.h"
 #include "../core/Log.h"
+#include "ChunkLifecycleChanges.h"
 #include "FarLodStore.h"
 #include "core/Profiler.h"
 #include "luminumbra/core/Types.h"
@@ -8,9 +9,51 @@
 #include <cstring>
 #include <memory>
 #include <span>
+#include <unordered_map>
 #include <utility>
 
 namespace Luminumbra {
+
+namespace {
+struct LifecycleBindings {
+    std::mutex mutex;
+    std::unordered_map<const Chunk*, std::weak_ptr<ChunkLifecycleChanges>> owners;
+};
+LifecycleBindings& lifecycle_bindings() {
+    // Bounded by the resident chunks of live indexes. No retained history;
+    // indexes unregister before dropping their resident shared owners.
+    static LifecycleBindings bindings;
+    return bindings;
+}
+} // namespace
+
+void ChunkLifecycleChanges::bind(const Chunk& chunk,
+                                 const std::shared_ptr<ChunkLifecycleChanges>& changes) {
+    auto& bindings = lifecycle_bindings();
+    const std::lock_guard lock(bindings.mutex);
+    if (changes)
+        bindings.owners.insert_or_assign(&chunk, changes);
+    else
+        bindings.owners.erase(&chunk);
+}
+
+void ChunkLifecycleChanges::notify(const Chunk& chunk) {
+    auto& bindings = lifecycle_bindings();
+    const std::lock_guard lock(bindings.mutex);
+    const auto found = bindings.owners.find(&chunk);
+    if (found != bindings.owners.end()) {
+        if (const auto changes = found->second.lock())
+            changes->enqueue(chunk.get_id());
+    }
+}
+
+void Chunk::bind_lifecycle_changes(const std::shared_ptr<ChunkLifecycleChanges>& changes) {
+    ChunkLifecycleChanges::bind(*this, changes);
+}
+
+void Chunk::notify_lifecycle_change() const {
+    ChunkLifecycleChanges::notify(*this);
+}
 
 Chunk::Chunk(const IVec3& coords)
     : m_coords(coords)
@@ -162,6 +205,7 @@ bool Chunk::try_set_state(ChunkState expected_state, ChunkState new_state) {
     }
 
     m_state = new_state;
+    notify_lifecycle_change();
     return true;
 }
 

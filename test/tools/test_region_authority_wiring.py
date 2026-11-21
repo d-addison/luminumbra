@@ -717,7 +717,7 @@ class RegionAuthorityWiring(unittest.TestCase):
         worker = dispatch.split("lane_jobs.emplace_back(", 1)[1]
         # Strong owners hold both the destination and immutable input until the
         # job exits. No mutable live arrays or revisions may be read by workers.
-        self.assertIn("[this, chunk, scratch_owner = std::move(scratch_owner), step, transition_faces, terrain_mesh_required]", worker)
+        self.assertIn("[this, chunk, seed_inputs, scratch_owner = std::move(scratch_owner), step, transition_faces, terrain_mesh_required]", worker)
         for live_read in ("chunk->sdf_data", "chunk->heightmap_data", "chunk->material_data",
                           "chunk->water_level_data", "chunk->water_depth_mm",
                           "chunk->voxel_revision()", "chunk->authority_hash_revision()",
@@ -822,9 +822,12 @@ class RegionAuthorityWiring(unittest.TestCase):
         adopt = function(source, "bool SHIELD_WorldSystem::adopt_streamed_chunk(")
         self.assertNotIn("reset_pending_jobs", adopt)
         self.assertNotIn("pending_lod.store", adopt)
-        self.assertIn("if (chunk_ptr->pending_lod.load(std::memory_order_acquire) >= 0) "
-                      "++m_streaming_telemetry_stats.pending_lod_chunks;",
+        self.assertIn("m_streaming_telemetry_stats.pending_lod_chunks = lifecycle.pending_lod_chunks;",
                       re.sub(r"\s+", " ", source))
+        index = (ROOT / "src/luminumbra_common/world/ActivationResidencyIndex.h").read_text(encoding="utf-8")
+        observe = function(index, "void observe_lifecycle(")
+        self.assertIn("chunk.pending_lod.load(std::memory_order_acquire) >= 0 ? 32u : 0u", observe)
+        self.assertIn("adjust(m_lifecycle_counts.pending_lod_chunks, 32u);", index)
         header = SOURCE.with_suffix(".h").read_text(encoding="utf-8")
         self.assertIn("pending_lod_chunks == 0 && !promotion_pending", header)
         chunk = (ROOT / "src/luminumbra_common/world/Chunk.h").read_text(encoding="utf-8")

@@ -2368,6 +2368,7 @@ int main(int argc, char* argv[]) {
     jobSystem.startup();
 
     auto gameSession = std::make_unique<Luminumbra::world::GameSession>();
+    g_app.audio.Reset();
     gameSession->SetJobSystem(&jobSystem);
     gameSession->SetRootPath(root_path_str);
     gameSession->SetSaveRootPath(path_options.save_root);
@@ -2725,6 +2726,7 @@ int main(int argc, char* argv[]) {
     // Player ownership marks a live gameplay presentation. Retiring it is the
     // common boundary for menu exits, world replacements and failed-entry drains.
     auto release_player_controller = [&]() {
+        g_app.audio.Reset(audioManager.get());
         if (g_playerController) {
             ReleasePhotoModeAndHud(g_app, renderPipeline);
             g_playerController.reset();
@@ -2809,7 +2811,7 @@ int main(int argc, char* argv[]) {
         g_app.foragers = {};
         g_app.weather = {};
         // Thunder and the flash from the previous world must not carry over.
-        g_app.audio.pendingThunder.clear();
+        g_app.audio.Reset(audioManager.get());
         renderPipeline.set_lightning_state({});
         g_app.interactions = {};
         g_app.foliage.cachedScatter.clear();
@@ -3940,6 +3942,7 @@ int main(int argc, char* argv[]) {
                              runtime_boot_frames,
                              runtime_boot_output.string());
         prepare_world_entry();
+        g_app.audio.Reset(audioManager.get());
         if (auto* world_system = gameSession->GetWorldSystem()) {
             world_system->clear_world(nullptr);
         }
@@ -4128,7 +4131,24 @@ int main(int argc, char* argv[]) {
                 LUMINUMBRA_CORE_ERROR("Could not restore graphics after world preview");
         }
     };
+    namespace Attribution = Luminumbra::Client::Attribution;
+    struct EntryPresentationWork {
+        double total = 0;
+        double water = 0;
+        double scatter = 0;
+        double foliage = 0;
+        double render = 0;
+        double observe = 0;
+        double phases = 0;
+        double nested_foliage = 0;
+    } entry_presentation_work;
     auto wait_for_world_presentation = [&]() {
+        std::size_t entry_horizon_wanted = 0, entry_horizon_missing = 0;
+        std::size_t entry_horizon_stale = 0, entry_horizon_pending = 0;
+        std::size_t entry_horizon_failures = 0;
+        Attribution::StageTimer total_timer(entry_presentation_work.total, true);
+        const double phases_before = Attribution::phase_total_ms();
+        const double foliage_before = Attribution::foliage_total_ms();
         restore_worldgen_preview();
         if (!entry_presentation_started) {
             entry_presentation_started = true;
@@ -4147,6 +4167,7 @@ int main(int argc, char* argv[]) {
         Luminumbra::Client::WorldPresentationReadiness readiness;
         if (world && g_camera) {
             if (!entry_water_prepared) {
+                Attribution::StageTimer water_timer(entry_presentation_work.water, true);
                 entry_water_prepared = world->PrepareInitialWaterPresentationNear(
                     g_camera->Position, presentation_radius());
             }
@@ -4160,19 +4181,36 @@ int main(int argc, char* argv[]) {
                                  false,
                                  scatter_ms,
                                  foliage_ms);
+            entry_presentation_work.scatter += scatter_ms;
+            entry_presentation_work.foliage += foliage_ms;
             auto* legacy = renderPipeline.legacy_far_compatibility();
             const bool diagnostics_enabled = legacy && legacy->coverage_diagnostics().enabled;
             if (legacy) {
                 legacy->set_coverage_diagnostics_enabled(true);
             }
-            renderPipeline.render_frame(
-                gameSession->GetRegistry(), *world, *g_camera, 0.0f, g_app.overlay.wireframe_mode);
+            {
+                Attribution::StageTimer render_timer(entry_presentation_work.render, true);
+                renderPipeline.render_frame(gameSession->GetRegistry(),
+                                            *world,
+                                            *g_camera,
+                                            0.0f,
+                                            g_app.overlay.wireframe_mode,
+                                            Luminumbra::Rendering::UploadPresentation::Loading);
+            }
+            Attribution::StageTimer observe_timer(entry_presentation_work.observe, true);
             readiness = ObserveWorldPresentation(*world,
                                                  renderPipeline,
                                                  g_camera->Position,
                                                  presentation_radius(),
                                                  entry_water_prepared);
             if (legacy) {
+                const auto& coverage = legacy->coverage_diagnostics();
+                const auto& far_stats = legacy->stats();
+                entry_horizon_wanted = coverage.wanted;
+                entry_horizon_missing = coverage.missing;
+                entry_horizon_stale = coverage.stale;
+                entry_horizon_pending = coverage.pending;
+                entry_horizon_failures = far_stats.builds_failed_total;
                 legacy->set_coverage_diagnostics_enabled(diagnostics_enabled);
             }
         }
@@ -4181,7 +4219,28 @@ int main(int argc, char* argv[]) {
             readiness, std::chrono::steady_clock::now() - entry_presentation_started_at);
         if (was_waiting && entry_presentation_gate.timed_out()) {
             log_presentation_timeout(entry_presentation_gate);
+            if (world) {
+                const auto& streaming = world->get_streaming_telemetry_stats();
+                LUMINUMBRA_CORE_WARN(
+                    "Entry readiness: stream_observations={} queue={} generation_batches={} "
+                    "meshing_batches={} pending_lod={} promotion={} | "
+                    "legacy_wanted={} missing={} stale={} pending={} failures={}",
+                    streaming.frames_observed,
+                    streaming.last_queue_depth,
+                    streaming.generation_batches,
+                    streaming.meshing_batches,
+                    streaming.pending_lod_chunks,
+                    streaming.promotion_pending,
+                    entry_horizon_wanted,
+                    entry_horizon_missing,
+                    entry_horizon_stale,
+                    entry_horizon_pending,
+                    entry_horizon_failures);
+            }
         }
+        total_timer.stop();
+        entry_presentation_work.phases += Attribution::phase_total_ms() - phases_before;
+        entry_presentation_work.nested_foliage += Attribution::foliage_total_ms() - foliage_before;
         return entry_presentation_gate.waiting();
     };
     auto activate_loaded_world = [&]() {
@@ -4606,7 +4665,6 @@ int main(int argc, char* argv[]) {
         }
         return WorldEntryResult::Complete;
     };
-    namespace Attribution = Luminumbra::Client::Attribution;
     const bool frame_attribution_enabled =
         frame_csv_enabled || HasCommandLineFlag(argc, argv, "--frame-attribution");
     Attribution::FrameRecorder frame_recorder(frame_csv_enabled, "logs");
@@ -4734,6 +4792,7 @@ int main(int argc, char* argv[]) {
         frame_limiter.pace(pacing.frame_cap, frame_timing);
         LUMIN_PROFILE_ZONE_N("Client frame");
         const auto _frameStart = std::chrono::steady_clock::now();
+        entry_presentation_work = {};
         const Attribution::FoliageFrameScope foliage_scope(frame_attribution_enabled);
         const Luminumbra::WaterAttribution::FrameScope water_scope(frame_attribution_enabled);
         Attribution::PhaseFrameScope phase_scope(frame_attribution_enabled);
@@ -5166,6 +5225,7 @@ int main(int argc, char* argv[]) {
         // Frame audio — 3D listener, player footsteps, and the living-world
         // rain/creature-call region (app/FrameAudio.cpp).
         UpdateFrameAudio(g_app,
+                         g_app.audio,
                          currentState,
                          deltaTime,
                          audioManager.get(),
@@ -7103,6 +7163,17 @@ int main(int argc, char* argv[]) {
                 std::chrono::duration<double, std::milli>(_now - _frameStart).count();
             const double _presentMs =
                 std::chrono::duration<double, std::milli>(_now - _beforeSwap).count();
+            // Entry callers run before the ordinary render bucket is populated,
+            // including benchmark reloads. Keep nested phases/rebuilds exclusive.
+            const double entry_stream_ms =
+                entry_presentation_work.water + entry_presentation_work.observe;
+            rb_stream_ms += entry_stream_ms;
+            rb_render_call_ms += entry_presentation_work.total - entry_stream_ms;
+            rb_render_bucket_ms +=
+                entry_presentation_work.total - entry_stream_ms - entry_presentation_work.scatter -
+                entry_presentation_work.nested_foliage - entry_presentation_work.phases;
+            rb_scatter_ms += entry_presentation_work.scatter;
+            rb_foliage_ms += entry_presentation_work.foliage;
             const auto& foliage_frame = foliage_scope.snapshot();
             const auto& foliage_attribution = foliage_frame.rebuild;
             const Attribution::FrameBuckets buckets{.sim = rb_sim_ms,
@@ -7176,6 +7247,16 @@ int main(int argc, char* argv[]) {
                     Luminumbra::Rendering::FarWorldSubmissionRefusalName(
                         slow_far.submission_refusal),
                     slow_far.coverage_settled);
+                if (entry_presentation_work.total > 0) {
+                    LUMINUMBRA_CORE_WARN("  entry-split: total={:.3f} water={:.3f} scatter={:.3f} "
+                                         "foliage={:.3f} render={:.3f} observe={:.3f}",
+                                         entry_presentation_work.total,
+                                         entry_presentation_work.water,
+                                         entry_presentation_work.scatter,
+                                         entry_presentation_work.foliage,
+                                         entry_presentation_work.render,
+                                         entry_presentation_work.observe);
+                }
                 if (frame_attribution_enabled) {
                     const auto& phases = phase_scope.snapshot();
                     for (std::size_t index = 0; index < Attribution::kPhaseCount; ++index)

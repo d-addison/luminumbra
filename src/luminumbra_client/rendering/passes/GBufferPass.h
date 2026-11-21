@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../StaticPropSpatialIndex.h"
 #include "../UploadBudget.h"
 #include "FarWorldPassUniforms.h"
 
@@ -11,6 +12,7 @@
 #include <glad/glad.h>              // GLuint for the owned VBO/VAO/SSBO members
 #include <glm/glm.hpp>              // glm::vec3/vec4/mat4 in the cached-prop structs
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -98,6 +100,10 @@ public:
     }
     GLuint instance_matrix_vbo() const {
         return m_instanceMatrixVBO;
+    }
+    // Const diagnostics for conservative spatial traversal on the last frame.
+    const StaticPropSpatialIndex::Work& static_prop_work() const {
+        return m_staticPropIndex.work();
     }
     // CPU submit cost of the static-prop pass on the last frame (ms).
     double last_static_prop_cpu_ms() const {
@@ -201,6 +207,7 @@ private:
         std::uint32_t materialId = 0;
         //  impostors: classified ONCE at cache build (not per-frame string search). 1 = this prop
         // is a tree part replaced by the LOD3 impostor; impostorLeaf = the per-tree representative.
+        bool authoredTree = false;
         bool impostorTree = false;
         bool impostorLeaf = false;
         bool terrainAnchored = false; // procedural rocks/shrubs retain their generated support
@@ -212,6 +219,13 @@ private:
         mutable bool supportRemoved = false;
     };
     std::vector<CachedStaticProp> m_staticPropCache;
+    StaticPropSpatialIndex m_staticPropIndex;
+    bool m_staticPropIndexValid = false;
+    // Mesh arrivals change resolved bounds, so the index records their generation.
+    std::uint64_t m_staticPropIndexGeneration = 0;
+    // Compare bits so a repeated unknown (NaN) atlas bound does not rebuild every frame.
+    std::array<std::uint32_t, 4> m_staticPropImpostorBounds{};
+    StaticPropStreamSelection m_impostorSelection;
     // One streamed-chunk lookup per anchor chunk per frame, shared by every prop in
     // it. Chunks without terrain authority resolve to null and skip the SDF read.
     // References are dropped after the prop loop, so no chunk outlives a frame here.
@@ -242,6 +256,7 @@ private:
         std::uint32_t materialId = 0;
         std::vector<glm::mat4> mats;
         std::vector<glm::vec3> tints;
+        StaticPropStreamSelection selection;
         bool active = false; // appeared this frame
     };
     std::unordered_map<std::uint64_t, InstanceBatchCached> m_visibleGroups;
@@ -250,8 +265,17 @@ private:
         std::string second;
         std::uint64_t generation = 0;
     };
-    std::unordered_map<std::uint64_t, ResolvedMesh> m_resolveMemo; // persistent
-    double m_last_static_prop_cpu_ms = 0.0;                        // CPU submit cost, last frame
+    using ResolvedStaticProps = std::unordered_map<std::uint64_t, ResolvedMesh>;
+    ResolvedStaticProps m_resolveMemo; // persistent
+    ResolvedStaticProps::iterator resolve_static_prop_lod(const RenderContext& ctx,
+                                                          const GBufferPassInput& input,
+                                                          const CachedStaticProp& cp,
+                                                          int lod);
+    const std::vector<std::size_t>& static_prop_candidates(const RenderContext& ctx,
+                                                           const GBufferPassInput& input,
+                                                           const glm::vec3& cameraPos,
+                                                           const glm::vec4 (&frustum_planes)[6]);
+    double m_last_static_prop_cpu_ms = 0.0; // CPU submit cost, last frame
 };
 
 } // namespace Luminumbra::Rendering
