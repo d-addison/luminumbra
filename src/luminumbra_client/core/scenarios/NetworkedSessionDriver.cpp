@@ -366,6 +366,12 @@ bool NetworkedSessionDriver::Begin(Luminumbra::world::GameSession* client_sessio
         m_failure_reason = "handshake_failed";
         return false;
     }
+    // Match the runner's zero-avatar authority roster before tick preparation.
+    // An explicitly empty replicated set suppresses the local spawn anchor;
+    // leaving it absent would schedule different regions on replay. Wait for
+    // successful admission so a refusal preserves the caller's anchor selection.
+    m_impl->host_session->SetReplicatedSimulationAnchors({});
+    client_session->SetReplicatedSimulationAnchors({});
     return true;
 }
 

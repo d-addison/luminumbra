@@ -64,6 +64,28 @@ class ReplaySourceContract(unittest.TestCase):
         self.assertIn('artifact.at("divergence_tick"), 1u', regression)
         self.assertIn('fs::remove(dump.string() + ".regions.json")', regression)
         self.assertIn('stale.at("divergence_section"), "region_schedule"', regression)
+        self.assertIn("options.ticks = 1;", regression)
+        self.assertIn("playback.RunFixedTicks(1)", regression)
+        self.assertIn("trace.front().second, playback.Session()->GetRegionSchedule().digest",
+                      regression)
+        self.assertIn("EXPECT_EQ(trace, cli_trace)", regression)
+
+    def assert_client_replicated_roster(self, source):
+        begin = source.split("bool NetworkedSessionDriver::Begin(", 1)[1].split(
+            "bool NetworkedSessionDriver::StepAgreedTick()", 1)[0]
+        for session in ("m_impl->host_session", "client_session"):
+            roster = session + "->SetReplicatedSimulationAnchors({});"
+            self.assertIn(roster, begin)
+            self.assertGreater(begin.index(roster), begin.rindex("return false;"))
+            self.assertLess(begin.index(roster), begin.rindex("return true;"))
+
+    def test_client_peers_match_runner_zero_avatar_replicated_roster(self):
+        source = read_source("src/luminumbra_client/core/scenarios/NetworkedSessionDriver.cpp")
+        self.assert_client_replicated_roster(source)
+        for session in ("m_impl->host_session", "client_session"):
+            roster = session + "->SetReplicatedSimulationAnchors({});"
+            with self.subTest(session=session), self.assertRaises(AssertionError):
+                self.assert_client_replicated_roster(source.replace(roster, "", 1))
 
     # Pin mode-local admission and its ordering without tightening the
     # generic reader/writer, whose opaque and sparse records serve lockstep.
