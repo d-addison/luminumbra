@@ -150,6 +150,100 @@ TEST(FarWorldLegacyIsolation,
     EXPECT_EQ(ladder_calls, 0u);
 }
 
+TEST(FarWorldLegacyIsolation, PreparationRefusalAdvancesAndSubmitsLegacyInTheSameFrame) {
+    // All preparation refusals select the same compatibility path, including
+    // missing authority, malformed requests, exhausted budgets and unavailable water.
+    for (const auto refusal : {FarWorldRefusal::ImmutableAuthorityUnavailable,
+                               FarWorldRefusal::MissingLimits,
+                               FarWorldRefusal::BackendUnavailable,
+                               FarWorldRefusal::AdmissionFailed,
+                               FarWorldRefusal::InvalidRequests,
+                               FarWorldRefusal::SpanRejected,
+                               FarWorldRefusal::SpanHistoryExhausted,
+                               FarWorldRefusal::ShaderProgramUnavailable,
+                               FarWorldRefusal::InvalidCavePolicy,
+                               FarWorldRefusal::CavePolicyMismatch,
+                               FarWorldRefusal::WaterUnavailable,
+                               FarWorldRefusal::WaterSpanRefused}) {
+        SCOPED_TRACE(static_cast<int>(refusal));
+        LegacyRuntime runtime;
+        unsigned ladder_calls = 0;
+        auto selection =
+            SelectFarWorld(FarWorldMode::Ladder, FarWorldPurpose::World, FarWorldRefusal::None);
+        AdvanceSelectedFarWorld(
+            selection,
+            [&] { runtime.Advance(); },
+            [&] {
+                ++ladder_calls;
+                selection = SelectFarWorld(FarWorldMode::Ladder, FarWorldPurpose::World, refusal);
+            });
+        const auto submitted = SubmitSelectedFarWorld(
+            selection,
+            [&] { return runtime.Submit(); },
+            [&](const auto&) {
+                ++ladder_calls;
+                return FarWorldSubmitStats{};
+            },
+            {});
+        EXPECT_EQ(selection.requested, FarWorldMode::Ladder);
+        EXPECT_EQ(selection.effective, FarWorldMode::Legacy);
+        EXPECT_EQ(selection.refusal, refusal);
+        EXPECT_EQ(runtime.schedules, 1u);
+        EXPECT_EQ(runtime.writes, 1u);
+        EXPECT_EQ(runtime.submissions, 1u);
+        EXPECT_EQ(submitted.water_indices, 3u);
+        EXPECT_EQ(ladder_calls, 1u);
+    }
+}
+
+TEST(FarWorldLegacyIsolation, PreparationRefusalHonorsSuppressionAndDoesNotRetry) {
+    for (const bool advance : {false, true}) {
+        for (const bool submit : {false, true}) {
+            LegacyRuntime runtime;
+            unsigned ladder_calls = 0;
+            auto selection =
+                SelectFarWorld(FarWorldMode::Ladder, FarWorldPurpose::World, FarWorldRefusal::None);
+            AdvanceSelectedFarWorld(
+                selection,
+                [&] { runtime.Advance(); },
+                [&] {
+                    ++ladder_calls;
+                    selection = SelectFarWorld(FarWorldMode::Ladder,
+                                               FarWorldPurpose::World,
+                                               FarWorldRefusal::ImmutableAuthorityUnavailable);
+                    selection.advance = advance;
+                    selection.submit = submit;
+                });
+            EXPECT_EQ(runtime.schedules, advance ? 1u : 0u);
+            EXPECT_EQ(ladder_calls, 1u);
+        }
+    }
+    // An initially suppressed frame never attempts preparation or fallback.
+    for (const auto purpose :
+         {FarWorldPurpose::World, FarWorldPurpose::Preview, FarWorldPurpose::OffscreenPreview}) {
+        LegacyRuntime runtime;
+        unsigned ladder_calls = 0;
+        auto selection =
+            SelectFarWorld(FarWorldMode::Ladder, purpose, FarWorldRefusal::None, false);
+        AdvanceSelectedFarWorld(selection, [&] { runtime.Advance(); }, [&] { ++ladder_calls; });
+        EXPECT_EQ(runtime.schedules, 0u);
+        EXPECT_EQ(ladder_calls, 0u);
+    }
+}
+
+TEST(FarWorldLegacyIsolation, SuccessfulPreparationDoesNotAdvanceLegacy) {
+    LegacyRuntime runtime;
+    unsigned ladder_calls = 0;
+    auto selection =
+        SelectFarWorld(FarWorldMode::Ladder, FarWorldPurpose::World, FarWorldRefusal::None);
+    // Repeated successful frames retain one preparation each and no compatibility work.
+    for (unsigned frame = 0; frame < 2; ++frame) {
+        AdvanceSelectedFarWorld(selection, [&] { runtime.Advance(); }, [&] { ++ladder_calls; });
+    }
+    EXPECT_EQ(runtime.schedules, 0u);
+    EXPECT_EQ(ladder_calls, 2u);
+}
+
 TEST(FarWorldLegacyIsolation, PairedOffDispatchPreservesSelectedFramePlanePolicyAndOnEvidence) {
     FarWorldRenderer renderer(FarWorldMode::Ladder);
     renderer.SetRequestedCavePolicy(FarCaveMode::BoxFiltered);
