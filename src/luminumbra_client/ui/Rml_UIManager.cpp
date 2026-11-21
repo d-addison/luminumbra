@@ -2,6 +2,7 @@
 #include "app/FrameAttribution.h"
 #include "audio/AudioAcceptance.h"
 #include "audio/IAudioManager.h"
+#include "core/StrictNumeric.h"
 #include "luminumbra_common/core/CaptureContentPaths.h"
 #include "luminumbra_common/core/FramePacing.h"
 #include "rendering/PixelIo.h"
@@ -264,11 +265,8 @@ Rml_UIManager::PreviewState Rml_UIManager::GetWorldCreationPreviewState() const 
     // Time-of-day slider.
     if (Rml::Element* tod = doc->GetElementById("preview_tod")) {
         const std::string v = ReadFormControlValue(tod, "0.24");
-        try {
-            st.tod = std::stof(v);
-        } catch (...) {
-            st.tod = 0.24f;
-        }
+        st.tod = 0.24f;
+        Core::ParseNumber(v, st.tod); // Malformed input keeps the preview default.
     }
 
     // The diorama is full-screen, so there is no bounded pane rect to report; the
@@ -1457,11 +1455,9 @@ void Rml_UIManager::ApplySettingFromElement(Rml::Element* element) {
     Rml::ElementDocument* doc = element->GetOwnerDocument();
 
     auto as_float = [&value](float fallback) {
-        try {
-            return std::stof(value);
-        } catch (...) {
-            return fallback;
-        }
+        float parsed = fallback;
+        Core::ParseNumber(value, parsed);
+        return parsed;
     };
 
     if (id == "setting_resolution") {
