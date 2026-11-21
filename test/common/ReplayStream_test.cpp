@@ -2416,6 +2416,7 @@ TEST_F(ReplayStreamTest, BoundedRecorderPrefixDigestMatchesElidedWireBytes) {
                                              contents.header.system_config_identity,
                                              contents.header.preset_content_hash));
     EXPECT_EQ(contents.elided_through_tick, 1024u);
+    EXPECT_EQ(contents.elided_prefix_digest, UINT64_C(0x876d9f1c8cebb191));
     EXPECT_EQ(contents.elided_prefix_digest, std::stoull(replay::Fnv1a64Hex(prefix), nullptr, 16));
     ASSERT_EQ(contents.inputs.size(), 1024u);
     EXPECT_EQ(contents.inputs.front().tick, 1025u);
@@ -2438,6 +2439,28 @@ TEST_F(ReplayStreamTest, BoundedRecorderPrefixDigestMatchesElidedWireBytes) {
     const auto& invalid_contents = *downgraded;
     EXPECT_TRUE(invalid_contents.truncated);
     EXPECT_EQ(invalid_contents.elided_through_tick, 0u);
+}
+
+TEST_F(ReplayStreamTest, BoundedRecorderStandardDigestResetsAcrossRecordings) {
+    replay::BoundedReplayRecorder recorder;
+    ASSERT_TRUE(recorder.Configure(18, 0));
+    for (int recording = 0; recording < 2; ++recording) {
+        ASSERT_TRUE(recorder.Open(m_path, MakeHeader())) << recorder.OpenRefusal();
+        for (std::uint64_t tick = 1; tick <= 3072; ++tick) {
+            ASSERT_TRUE(
+                recorder.RecordTick(tick, {static_cast<std::uint8_t>(tick)}, nullptr, tick));
+        }
+        ASSERT_TRUE(recorder.Finalize(m_path, 3072, 3072));
+        const auto contents = replay::ReadReplay(m_path);
+        ASSERT_TRUE(contents.has_value());
+        EXPECT_FALSE(contents->truncated);
+        EXPECT_TRUE(contents->trailer_present);
+        EXPECT_EQ(contents->elided_through_tick, 2048u);
+        EXPECT_EQ(contents->elided_prefix_digest, UINT64_C(0xfc31c0fdbea9e11d));
+        ASSERT_EQ(contents->inputs.size(), 1024u);
+        EXPECT_EQ(contents->inputs.front().tick, 2049u);
+        EXPECT_EQ(contents->inputs.back().tick, 3072u);
+    }
 }
 
 TEST_F(ReplayStreamTest, VersionFourHeaderPreservesIdentityAndCompleteRecordLayout) {
@@ -3781,6 +3804,15 @@ TEST_F(ReplayStreamTest, CheckpointEncodeDecodeMultiple) {
     EXPECT_EQ(contents->checkpoints[1].tick, 60u);
     EXPECT_EQ(contents->checkpoints[2].tick, 90u);
     EXPECT_EQ(contents->checkpoints[2].world_hash, "wh90");
+}
+
+TEST_F(ReplayStreamTest, Fnv1a64HexStandardKnownAnswers) {
+    EXPECT_EQ(replay::Fnv1a64Hex(""), "cbf29ce484222325");
+    EXPECT_EQ(replay::Fnv1a64Hex("a"), "af63dc4c8601ec8c");
+    EXPECT_EQ(replay::Fnv1a64Hex("foobar"), "85944171f73967e8");
+    EXPECT_EQ(replay::Fnv1a64Hex("default"), "ebada5168620c5fe");
+    EXPECT_EQ(replay::Fnv1a64Hex(std::string("a\0b", 3)), "e5d29919042666b2");
+    EXPECT_EQ(replay::Fnv1a64Hex(std::string("\x80\xff", 2)), "09e5c907b65d72e0");
 }
 
 // Fnv1a64Hex is stable and 16 lowercase hex chars (the shared hash algorithm).
