@@ -1197,7 +1197,7 @@ bool ValidAmbientContinuation(const AmbientContinuation& state) {
             return false;
         }
     }
-    return true;
+    return std::is_sorted(state.wind.begin(), state.wind.end(), AmbientWindPerturbationLess);
 }
 
 bool WeatherSystem::CaptureContinuation(const WindFieldSystem& wind,

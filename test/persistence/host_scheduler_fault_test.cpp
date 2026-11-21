@@ -407,6 +407,9 @@ void InstallPreparationRefusal(Luminumbra::Server::ServerWorldRunner& runner,
 // The armed durable chunk has no region file, so a regional chunk-slot capture
 // would latch a scheduler fault. Observe resident state and runtime sub-hashes only.
 std::string ResidentStateHash(Luminumbra::Server::ServerWorldRunner& runner) {
+    // Compare the complete admitted work, including batches due after the last tick.
+    // Hash capture only observes; the host's streaming barrier publishes explicitly.
+    runner.Session()->GetWorldSystem()->wait_for_streaming_jobs();
     const auto result = runner.Session()->CaptureAuthorityHashes(
         {}, Luminumbra::Persistence::AuthorityCaptureParts::StreamedAndSubHashes);
     EXPECT_EQ(result.status, Luminumbra::Persistence::AuthorityCaptureStatus::Ready);

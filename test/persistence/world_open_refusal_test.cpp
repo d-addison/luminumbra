@@ -8005,6 +8005,76 @@ TEST_F(WorldOpenRefusal, PartialOwnerResidentPayloadRefusesBeforeWritingAndAdopt
     }
 }
 
+TEST(OwnerContinuationEnvelope, AmbientWindOrderRefusalsPreserveFieldsAndEncodedOutput) {
+    Systems::WeatherSystem weather(1337);
+    weather.LockSchedule();
+    Systems::WindFieldSystem wind(1337);
+    const Systems::AmbientWindPerturbation first{
+        .center_world = {1, 2}, .radius_m = 96, .velocity = {3, 4}, .intensity = 0.5f};
+    Systems::AmbientContinuation state{.tick = 1,
+                                       .anchor = {8, 0, 8},
+                                       .constructor_state = false,
+                                       .storms = {},
+                                       .strikes = {},
+                                       .wind = {}};
+    for (const std::size_t count :
+         {std::size_t{0}, std::size_t{1}, static_cast<std::size_t>(Systems::kMaxStormCells)}) {
+        SCOPED_TRACE(count);
+        state.wind.assign(count, first);
+        ASSERT_TRUE(Systems::ValidAmbientContinuation(state));
+        ASSERT_NO_THROW(weather.RestoreContinuation(state, wind));
+        Systems::AmbientContinuation captured;
+        ASSERT_TRUE(weather.CaptureContinuation(wind, captured));
+        EXPECT_EQ(captured.wind.size(), count);
+    }
+    // Each accepted sort-key component must break ties in the same order as injection.
+    // The remaining component, radius, is fixed to 96 by continuation validation.
+    std::array<Systems::AmbientWindPerturbation, 5> later;
+    later.fill(first);
+    later[0].center_world.x += 1;
+    later[1].center_world.y += 1;
+    later[2].velocity.x += 1;
+    later[3].velocity.y += 1;
+    later[4].intensity += 0.25f;
+    for (std::size_t component = 0; component < later.size(); ++component) {
+        SCOPED_TRACE(component);
+        state.wind = {first, later[component]};
+        ASSERT_TRUE(Systems::ValidAmbientContinuation(state));
+        ASSERT_NO_THROW(weather.RestoreContinuation(state, wind));
+        const auto weather_hash = weather.ComputeWeatherSubHash();
+        const auto wind_hash = wind.ComputeWindSubHash();
+        Systems::WindFieldSystem injected(1337);
+        injected.InjectStormPerturbation(later[component]);
+        injected.InjectStormPerturbation(first);
+        injected.Update(state.tick, state.anchor);
+        EXPECT_EQ(injected.ComputeWindSubHash(), wind_hash);
+
+        Persistence::OwnerContinuation record;
+        record.preset_identity = "0123456789abcdef";
+        record.simulation_tick = state.tick;
+        record.ambient = state;
+        std::string encoded;
+        ASSERT_TRUE(Persistence::EncodeOwnerContinuation(record, encoded));
+        std::swap(state.wind[0], state.wind[1]);
+        EXPECT_FALSE(Systems::ValidAmbientContinuation(state));
+        EXPECT_THROW(wind.RestoreContinuation(state), std::invalid_argument);
+        EXPECT_THROW(weather.RestoreContinuation(state, wind), std::invalid_argument);
+        EXPECT_EQ(weather.ComputeWeatherSubHash(), weather_hash);
+        EXPECT_EQ(wind.ComputeWindSubHash(), wind_hash);
+        record.ambient = state;
+        auto output = encoded;
+        EXPECT_FALSE(Persistence::EncodeOwnerContinuation(record, output));
+        EXPECT_EQ(output, encoded);
+        auto reordered = nlohmann::json::parse(encoded);
+        std::swap(reordered["ambient"]["wind"][0], reordered["ambient"]["wind"][1]);
+        Persistence::OwnerContinuation decoded;
+        ASSERT_TRUE(Persistence::DecodeOwnerContinuation(encoded, decoded));
+        EXPECT_FALSE(Persistence::DecodeOwnerContinuation(reordered.dump(), decoded));
+        ASSERT_TRUE(Persistence::EncodeOwnerContinuation(decoded, output));
+        EXPECT_EQ(output, encoded);
+    }
+}
+
 TEST(OwnerContinuationEnvelope, AmbientCaptureTracksAppliedInputsAndRefusesIncoherentFields) {
     Systems::WeatherSystem weather(1337);
     Systems::WindFieldSystem wind(1337);

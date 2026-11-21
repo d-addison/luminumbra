@@ -57,6 +57,9 @@ struct AmbientWindPerturbation {
     float intensity = 0.0f;
 };
 
+[[nodiscard]] bool AmbientWindPerturbationLess(const AmbientWindPerturbation& left,
+                                               const AmbientWindPerturbation& right);
+
 // Owner envelope v2 only: at most 16 storms, 32 strikes and 16 wind inputs.
 // Floats are encoded as u32 IEEE bits; no raw struct layout is serialized.
 struct AmbientContinuation {

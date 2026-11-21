@@ -267,25 +267,27 @@ void WindFieldSystem::RestoreContinuation(const AmbientContinuation& state) {
     Update(state.tick, state.anchor);
 }
 
+bool AmbientWindPerturbationLess(const AmbientWindPerturbation& left,
+                                 const AmbientWindPerturbation& right) {
+    return std::tie(left.center_world.x,
+                    left.center_world.y,
+                    left.radius_m,
+                    left.velocity.x,
+                    left.velocity.y,
+                    left.intensity) < std::tie(right.center_world.x,
+                                               right.center_world.y,
+                                               right.radius_m,
+                                               right.velocity.x,
+                                               right.velocity.y,
+                                               right.intensity);
+}
+
 void WindFieldSystem::InjectStormPerturbation(const StormPerturbation& perturbation) {
     if (perturbation.radius_m <= 0.0f || perturbation.intensity <= 0.0f)
         return;
     m_storm_perturbations.push_back(perturbation);
-    std::sort(m_storm_perturbations.begin(),
-              m_storm_perturbations.end(),
-              [](const StormPerturbation& a, const StormPerturbation& b) {
-                  return std::tie(a.center_world.x,
-                                  a.center_world.y,
-                                  a.radius_m,
-                                  a.velocity.x,
-                                  a.velocity.y,
-                                  a.intensity) < std::tie(b.center_world.x,
-                                                          b.center_world.y,
-                                                          b.radius_m,
-                                                          b.velocity.x,
-                                                          b.velocity.y,
-                                                          b.intensity);
-              });
+    std::sort(
+        m_storm_perturbations.begin(), m_storm_perturbations.end(), AmbientWindPerturbationLess);
 }
 
 void WindFieldSystem::ClearStormPerturbations() {
