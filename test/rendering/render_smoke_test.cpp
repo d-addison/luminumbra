@@ -10282,7 +10282,14 @@ TEST(RenderSmokeTest, ScenarioBundlesRetainCompletedFrameIdentityAcrossSiblingCa
     registry.emplace<Luminumbra::Components::TransformComponent>(prop);
     registry.emplace<Luminumbra::Components::StaticMeshComponent>(prop).meshPath = mesh_path;
     Camera camera;
-    pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
+    // Settled frames draw only after every requested mesh LOD has resolved.
+    for (int frame = 0; frame < 4 * kTreeLodCount + 1; ++frame) {
+        pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
+        if (pipeline.render_uploads_settled()) {
+            break;
+        }
+    }
+    ASSERT_TRUE(pipeline.render_uploads_settled());
     ASSERT_TRUE(pipeline.diagnostic_capture_refusal().empty())
         << pipeline.diagnostic_capture_refusal();
     std::vector<unsigned char> pixels(32U * 32U * 3U);

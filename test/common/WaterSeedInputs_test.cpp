@@ -2460,7 +2460,7 @@ TEST(WaterSeedInputs, ExistingCommittedReadWorkerPreparesColdRestoreAndHydroCros
             [&](const IVec3& requested) {
                 EXPECT_EQ(requested, coords);
                 ++reads;
-                off_owner.store(jobs.is_current_worker(), std::memory_order_release);
+                off_owner.store(jobs.io_executor().is_current_worker(), std::memory_order_release);
                 return saved;
             },
             {});

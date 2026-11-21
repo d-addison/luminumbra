@@ -6543,9 +6543,6 @@ int main(int argc, char* argv[]) {
                     if (timelapse_waiting) {
                         gameSession->GetWorldSystem()->sync_water_authority();
                     }
-                    renderPipeline.set_diagnostic_capture_armed(
-                        !g_rb_active ||
-                        g_app.benchmark.measuredFrames == g_app.capture.render_benchmark_frames);
                     using SkyLut = Luminumbra::Rendering::SkyAtmosphereLut;
                     // The QA link selects a scenario runner; shipping links none.
                     const bool sky_test_harness = scenario_runner_factory != nullptr;
@@ -6570,6 +6567,9 @@ int main(int argc, char* argv[]) {
                          .benchmark = !g_app.capture.render_benchmark_path.empty(),
                          .headless = hidden_window || g_windowState.mode == WindowMode::Headless,
                          .test_harness = sky_test_harness});
+                    renderPipeline.set_diagnostic_capture_armed(
+                        !g_rb_active ||
+                        g_app.benchmark.measuredFrames == g_app.capture.render_benchmark_frames);
                     renderPipeline.render_frame(
                         gameSession->GetRegistry(),
                         *gameSession->GetWorldSystem(),
