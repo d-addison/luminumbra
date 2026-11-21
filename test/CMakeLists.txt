@@ -198,6 +198,7 @@ add_executable(common_tests
     common/StationDiscoveryArguments_test.cpp
     common/StationDiscovery_test.cpp
     common/Crc32_test.cpp
+    common/IntegerPrimitives_test.cpp
     rendering/shader_compositing_contract_test.cpp
     rendering/photo_environment_test.cpp
     common/AnimationRuntime_test.cpp
