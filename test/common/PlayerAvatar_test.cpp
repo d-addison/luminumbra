@@ -1552,7 +1552,8 @@ namespace {
 static_assert(!std::is_constructible_v<PhysicsSystem::OwnerContinuation, PhysicsSystem&>);
 
 // Use substitution failure for access checks: MSVC can admit private calls
-// inside requires-expressions. Positive controls also catch vacuous probes.
+// inside requires-expressions, and through defaulted arguments, so every
+// argument is spelled out. Positive controls also catch vacuous probes.
 
 template<class Physics, class = void>
 struct PublicAvatarCapture : std::false_type {};
@@ -1566,10 +1567,11 @@ static_assert(PublicAvatarCapture<PhysicsSystem::OwnerContinuation>::value);
 template<class Physics, class = void>
 struct PublicAvatarRestore : std::false_type {};
 template<class Physics>
-struct PublicAvatarRestore<
-    Physics,
-    std::void_t<decltype(std::declval<Physics&>().restore_avatar_owner(
-        std::declval<const PhysicsOwnerState&>(), std::declval<std::size_t&>()))>>
+struct PublicAvatarRestore<Physics,
+                           std::void_t<decltype(std::declval<Physics&>().restore_avatar_owner(
+                               std::declval<const PhysicsOwnerState&>(),
+                               std::declval<std::size_t&>(),
+                               std::declval<std::span<const PhysicsOwnerState>>()))>>
     : std::true_type {};
 static_assert(!PublicAvatarRestore<PhysicsSystem>::value);
 static_assert(PublicAvatarRestore<PhysicsSystem::OwnerContinuation>::value);
