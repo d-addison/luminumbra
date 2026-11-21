@@ -647,7 +647,9 @@ if(MSVC)
         COMPILE_OPTIONS "/bigobj")
 endif()
 
+include(${CMAKE_CURRENT_LIST_DIR}/sources.cmake)
 add_executable(render_smoke_test
+    ${GPU_FRAME_ARENA_TEST_SOURCES}
     rendering/diagnostic_attribution_test.cpp
     rendering/render_smoke_test.cpp
     rendering/FarWorldLegacyIsolation_test.cpp
