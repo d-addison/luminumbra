@@ -733,6 +733,16 @@ leaving storage rounding to the measured error. A surfaceless llvmpipe replay
 measured residual p99 0.00390625; removing `currentUv`'s clamp raised it to
 0.49218750 and failed the invariant. The mutated source was restored byte-exactly.
 
+TAAU sharpening bounds one shared RGB adjustment to the current neighborhood,
+preserving channel ratios even when only one channel reaches a bound. Clipping
+the channels independently after applying a shared gain could still change hue
+and feed that color into history. The registered CPU shader contracts exercise
+brightening, darkening, zero and signed channels, HDR, flat bounds and channel
+permutations. The existing software-GL terrain scene additionally checks the
+production sharpening helper against fixed RGB results. These checks supplement
+the border fixture and impostor cutout/coverage regressions; native issue #871
+re-capture remains pending and is required before closing the issue.
+
 Compute readback dispatches one workgroup of the production grass prefix kernel
 with counts `[0,3,1,0,7,2,5,1]` and instance cap 13. The expected count/draw words
 are `[19,12,13,0,0]`, followed by offsets `[0,0,3,4,4,11,13,18]` in
