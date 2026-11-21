@@ -765,7 +765,8 @@ TEST(TemporalSweepRuntime, AdmittedSequenceSurvivesAppRenderBoundariesAndStickyF
                              RuntimeBackend::Fault::Publish,
                              RuntimeBackend::Fault::EmptyPublish}) {
         SCOPED_TRACE(static_cast<int>(fault));
-        Harness::RuntimeTemporalAudit audit{.plan = plan, .budget = Budget(plan)};
+        Harness::RuntimeTemporalAudit audit{
+            .plan = plan, .budget = Budget(plan), .diagnostics = {}};
         audit.sequence.emplace(plan, audit.budget);
         AdmittedRuntimeBackend backend(audit);
         backend.fault = fault;
