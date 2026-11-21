@@ -113,6 +113,7 @@ void SsaoPass::init_ssao(RenderResourceRegistry& registry, u32 width, u32 height
 
     std::uniform_real_distribution<float> randomFloats(0.0, 1.0);
     std::default_random_engine generator;
+    m_ssao.kernel.clear();
     for (unsigned int i = 0; i < 64; ++i) {
         glm::vec3 sample(randomFloats(generator) * 2.0 - 1.0,
                          randomFloats(generator) * 2.0 - 1.0,

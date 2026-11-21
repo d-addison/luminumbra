@@ -12,6 +12,7 @@
 //     as cleared.
 #include "luminumbra_client/core/IsolationConfig.h"
 #include "luminumbra_client/rendering/Camera.h"
+#include "luminumbra_client/rendering/FarWorldReplayGl.h"
 #include "luminumbra_client/rendering/Mesh.h"
 #include "luminumbra_client/rendering/RenderContext.h"
 #include "luminumbra_client/rendering/RenderPipeline.h"
@@ -29,7 +30,9 @@
 #include "luminumbra_client/rendering/passes/PlantProcgenPass.h"
 #include "luminumbra_client/rendering/passes/ShadowPass.h"
 #include "luminumbra_client/rendering/passes/SkyboxPass.h"
+#include "luminumbra_client/rendering/passes/SsaoPass.h"
 #include "luminumbra_client/rendering/passes/StaticDrawPass.h"
+#include "luminumbra_client/rendering/passes/TaauPass.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/core/GraphicsPresets.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
@@ -1644,6 +1647,213 @@ TEST(PassContext, FoliageActualDrawFeedbackSurvivesReloadAndPreservesFrameIdenti
     glDeleteTextures(1, &target.tex);
 }
 
+TEST(PassContext, SsaoReinitializationKeepsExactlyTheOriginalKernelAndNoise) {
+    HiddenGlContext gl;
+    ASSERT_TRUE(gl.ready()) << gl.error();
+    using namespace Luminumbra::Rendering;
+    RenderResourceRegistry resources;
+    SsaoPass pass;
+    struct Cleanup {
+        SsaoPass& pass;
+        RenderResourceRegistry& resources;
+        ~Cleanup() {
+            pass.destroy_ssao(resources);
+        }
+    } cleanup{pass, resources};
+    pass.init_ssao(resources, 8, 6);
+    const auto original = pass.ssao().kernel;
+    ASSERT_EQ(original.size(), 64u);
+    std::array<float, 16 * 3> original_noise{};
+    glBindTexture(GL_TEXTURE_2D, pass.ssao().noiseTexture);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGB, GL_FLOAT, original_noise.data());
+    // Both unchanged and changed extents use the same default-seeded stream.
+    for (const unsigned width : {8u, 12u, 1u}) {
+        pass.destroy_ssao(resources);
+        pass.init_ssao(resources, width, 6);
+        ASSERT_EQ(pass.ssao().kernel.size(), 64u);
+        EXPECT_EQ(pass.ssao().kernel, original);
+        std::array<float, 16 * 3> noise{};
+        glBindTexture(GL_TEXTURE_2D, pass.ssao().noiseTexture);
+        glGetTexImage(GL_TEXTURE_2D, 0, GL_RGB, GL_FLOAT, noise.data());
+        EXPECT_EQ(noise, original_noise);
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+namespace {
+void ExpectReplayAllocationFailure(Luminumbra::Rendering::TaauPass& pass,
+                                   Luminumbra::Rendering::RenderResourceRegistry& resources) {
+    const auto original = pass.history_state();
+    struct RejectStorage {
+        PFNGLTEXIMAGE2DPROC original = glad_glTexImage2D;
+        GLboolean debug = glIsEnabled(GL_DEBUG_OUTPUT);
+        RejectStorage() {
+            glDisable(GL_DEBUG_OUTPUT);
+            glad_glTexImage2D =
+                [](GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void*) {
+                    // A zero level count deterministically refuses storage.
+                    glTexStorage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, 1, 1);
+                };
+        }
+        ~RejectStorage() {
+            glad_glTexImage2D = original;
+            if (debug)
+                glEnable(GL_DEBUG_OUTPUT);
+        }
+    } reject_storage;
+    EXPECT_FALSE(pass.prepare_replay(resources));
+    EXPECT_FALSE(pass.replay_available());
+    EXPECT_EQ(resources.texture("taau_replay_output").id, 0u);
+    EXPECT_EQ(pass.history_state(), original);
+}
+
+bool PrepareReplayPreservingBindings(Luminumbra::Rendering::TaauPass& pass,
+                                     Luminumbra::Rendering::RenderResourceRegistry& resources,
+                                     GLuint texture,
+                                     GLuint buffer) {
+    using namespace Luminumbra::Rendering;
+    glActiveTexture(GL_TEXTURE4);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, buffer);
+    bool ready = false;
+    {
+        auto access = MakeFarWorldReplayGlAccess();
+        const ReplayGlGuard guard(*access);
+        ready = pass.prepare_replay(resources);
+    }
+    GLint binding = 0;
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &binding);
+    EXPECT_EQ(binding, GL_TEXTURE4);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &binding);
+    EXPECT_EQ(static_cast<GLuint>(binding), texture);
+    glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &binding);
+    EXPECT_EQ(static_cast<GLuint>(binding), buffer);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    glActiveTexture(GL_TEXTURE0);
+    return ready;
+}
+} // namespace
+
+TEST(PassContext, TaauReplayStorageIsLazyReusableAndMatchesNormalResolveAfterResize) {
+    HiddenGlContext gl;
+    ASSERT_TRUE(gl.ready()) << gl.error();
+    using namespace Luminumbra::Rendering;
+    RenderResourceRegistry resources;
+    TaauPass pass;
+    struct Cleanup {
+        TaauPass& pass;
+        RenderResourceRegistry& resources;
+        GLuint quad = 0, buffer = 0;
+        std::array<GLuint, 3> inputs{};
+        RenderTarget target;
+        ~Cleanup() {
+            pass.destroy(resources);
+            glDeleteVertexArrays(1, &quad);
+            glDeleteBuffers(1, &buffer);
+            glDeleteTextures(static_cast<GLsizei>(inputs.size()), inputs.data());
+            glDeleteFramebuffers(1, &target.fbo);
+            glDeleteTextures(1, &target.tex);
+        }
+    } cleanup{pass, resources, 0, 0, {}, {}};
+    EXPECT_FALSE(pass.prepare_replay(resources));
+    pass.init(resources, 0, 6);
+    EXPECT_FALSE(pass.prepare_replay(resources));
+    EXPECT_EQ(resources.texture("taau_replay_output").id, 0u);
+    pass.init_shader(LUMINUMBRA_SOURCE_ROOT);
+    constexpr std::array<float, 20> vertices{-1, 1, 0, 0, 1, -1, -1, 0, 0, 0,
+                                             1,  1, 0, 1, 1, 1,  -1, 0, 1, 0};
+    glGenVertexArrays(1, &cleanup.quad);
+    glGenBuffers(1, &cleanup.buffer);
+    glBindVertexArray(cleanup.quad);
+    glBindBuffer(GL_ARRAY_BUFFER, cleanup.buffer);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), nullptr);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(
+        1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
+    // Two resize cycles cover full-size and scaled lighting inputs. Each cycle
+    // checks both invalid first-frame history and accumulated valid history.
+    for (const unsigned output_width : {8u, 12u}) {
+        SCOPED_TRACE(output_width);
+        pass.init(resources, output_width, 8);
+        ASSERT_FALSE(pass.replay_available());
+        ASSERT_EQ(resources.texture("taau_replay_output").id, 0u);
+        const unsigned input_width = output_width == 8 ? output_width : output_width / 2;
+        const unsigned input_height = output_width == 8 ? 8u : 4u;
+        std::vector<float> pixels(input_width * input_height * 4);
+        for (std::size_t i = 0; i < pixels.size(); ++i) {
+            pixels[i] = static_cast<float>((i * 7) % 16) / 16.0f;
+        }
+        cleanup.inputs[0] =
+            MakeFloatTexture(static_cast<int>(input_width), static_cast<int>(input_height), pixels);
+        cleanup.inputs[1] = MakeFloatTexture(1, 1, {0, 0, 0, 0});
+        cleanup.inputs[2] = MakeFloatTexture(1, 1, {1, 1, 1, 1});
+        cleanup.target = MakeTarget(static_cast<int>(input_width), static_cast<int>(input_height));
+        RenderContext ctx;
+        ctx.screen_width = output_width;
+        ctx.screen_height = 8;
+        ctx.internal_width = input_width;
+        ctx.internal_height = input_height;
+        ctx.screen_quad_vao = cleanup.quad;
+        ctx.lit_scene_color = TextureHandle{cleanup.inputs[0]};
+        ctx.motion_vectors = TextureHandle{cleanup.inputs[1]};
+        ctx.gbuffer_depth = TextureHandle{cleanup.inputs[2]};
+        ctx.lit_scene = FboHandle{cleanup.target.fbo};
+        const auto history = pass.history_state();
+        const std::array<float, 4> seed{.25f, .5f, .75f, 1};
+        for (GLuint texture : history.textures) {
+            glClearTexImage(texture, 0, GL_RGBA, GL_FLOAT, seed.data());
+        }
+        for (bool valid : {false, true}) {
+            const auto frozen = pass.history_state();
+            ASSERT_EQ(frozen.valid, valid);
+            pass.execute(ctx);
+            const auto after_normal = pass.history_state();
+            std::vector<float> expected(output_width * 8 * 4);
+            const auto write_index = static_cast<std::size_t>(frozen.write_index);
+            glBindTexture(GL_TEXTURE_2D, frozen.textures[write_index]);
+            glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_FLOAT, expected.data());
+            if (!valid) {
+                ASSERT_EQ(resources.texture("taau_replay_output").id, 0u);
+                ExpectReplayAllocationFailure(pass, resources);
+            }
+            ASSERT_TRUE(PrepareReplayPreservingBindings(
+                pass, resources, cleanup.inputs[2], cleanup.buffer));
+            const auto scratch = resources.texture("taau_replay_output").id;
+            ASSERT_NE(scratch, 0u);
+            EXPECT_NE(scratch, frozen.textures[0]);
+            EXPECT_NE(scratch, frozen.textures[1]);
+            ASSERT_TRUE(pass.prepare_replay(resources));
+            EXPECT_EQ(resources.texture("taau_replay_output").id, scratch);
+            const auto* desc = resources.owned_texture_desc("taau_replay_output");
+            ASSERT_NE(desc, nullptr);
+            EXPECT_EQ(desc->width, output_width);
+            EXPECT_EQ(desc->height, 8u);
+            EXPECT_EQ(desc->internal_format, static_cast<unsigned>(GL_RGBA16F));
+            pass.execute(ctx, &frozen);
+            EXPECT_EQ(pass.history_state(), after_normal);
+            std::vector<float> actual(expected.size());
+            glBindTexture(GL_TEXTURE_2D, scratch);
+            glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_FLOAT, actual.data());
+            EXPECT_EQ(actual, expected);
+            EXPECT_TRUE(std::any_of(actual.begin(), actual.end(), [](float v) { return v > 0; }));
+            glBindTexture(GL_TEXTURE_2D, frozen.textures[write_index]);
+            glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_FLOAT, actual.data());
+            EXPECT_EQ(actual, expected);
+        }
+        pass.destroy(resources);
+        EXPECT_FALSE(pass.prepare_replay(resources));
+        EXPECT_EQ(resources.texture("taau_replay_output").id, 0u);
+        glDeleteTextures(static_cast<GLsizei>(cleanup.inputs.size()), cleanup.inputs.data());
+        cleanup.inputs.fill(0);
+        glDeleteFramebuffers(1, &cleanup.target.fbo);
+        glDeleteTextures(1, &cleanup.target.tex);
+        cleanup.target = {};
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
 TEST(PassContext, QualificationUploadsDrainBeforeDispatchAndTemporalHistory) {
     HiddenGlContext gl;
     ASSERT_TRUE(gl.ready()) << gl.error();
@@ -1735,12 +1945,19 @@ TEST(PassContext, ShippingTemporalResolveBuildsHistoryJittersAndResets) {
     EXPECT_TRUE(pipeline.taau_history_valid());
     const auto first_jitter = pipeline.taau_jitter_ndc();
     EXPECT_NE(first_jitter, glm::vec2(0.0f));
+    for (int replay = 0; replay < 2; ++replay) {
+        ASSERT_TRUE(pipeline.render_far_world_off_pair(camera));
+        EXPECT_TRUE(pipeline.taau_history_valid());
+        EXPECT_EQ(pipeline.taau_jitter_ndc(), first_jitter);
+    }
     pipeline.render_frame(registry, world, camera, 1.0f / 30.0f);
     EXPECT_NE(pipeline.taau_jitter_ndc(), first_jitter);
     pipeline.on_resize(80, 64);
     EXPECT_FALSE(pipeline.taau_history_valid());
+    EXPECT_FALSE(pipeline.render_far_world_off_pair(camera));
     pipeline.render_frame(registry, world, camera, 1.0f / 30.0f);
     EXPECT_TRUE(pipeline.taau_history_valid());
+    EXPECT_TRUE(pipeline.render_far_world_off_pair(camera));
     pipeline.set_taau_enabled(false);
     EXPECT_FALSE(pipeline.taau_history_valid());
     EXPECT_EQ(pipeline.taau_jitter_ndc(), glm::vec2(0.0f));

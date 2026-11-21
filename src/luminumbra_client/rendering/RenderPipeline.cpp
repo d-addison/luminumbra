@@ -3005,8 +3005,7 @@ bool RenderPipeline::render_far_world_off_pair(const Camera& camera) {
     const bool history_matches = m_taau_enabled == m_far_world_pair_taau_enabled &&
                                  m_taau_frame == m_far_world_pair_jitter_frame &&
                                  m_taau_jitter_ndc == m_far_world_pair_jitter &&
-                                 m_taau_pass->history_state() == m_far_world_pair_taau_after &&
-                                 (!m_taau_enabled || m_taau_pass->replay_available());
+                                 m_taau_pass->history_state() == m_far_world_pair_taau_after;
     if (CheckFarReplay(m_started,
                        m_frame_prepared.valid,
                        m_far_world_paired,
@@ -3017,6 +3016,7 @@ bool RenderPipeline::render_far_world_off_pair(const Camera& camera) {
     static_assert(std::is_nothrow_swappable_v<RenderContext>);
     auto gl = MakeFarWorldReplayGlAccess();
     std::unique_ptr<RenderView> authored_view;
+    bool replay_ready = false;
     RunFarWorldReplay(
         *gl,
         [this, &authored_view] {
@@ -3077,8 +3077,12 @@ bool RenderPipeline::render_far_world_off_pair(const Camera& camera) {
             m_gpu_timers_suppressed = !FarReplayEffects{true}.Timers();
             m_frame_far_selection = FarWorldSubmissionOverride(m_frame_far_selection, false);
         },
-        [this, &camera] { dispatch_stages(camera); });
-    return true;
+        [this, &camera, &replay_ready] {
+            replay_ready = !m_taau_enabled || m_taau_pass->prepare_replay(m_render_registry);
+            if (replay_ready)
+                dispatch_stages(camera);
+        });
+    return replay_ready;
 }
 
 void RenderPipeline::select_frame_far_world(FarWorldSelection selection, const Camera& camera) {
