@@ -22,6 +22,40 @@ struct RenderClockTestPeer {
 } // namespace Luminumbra::Rendering
 
 namespace {
+void ExpectTemporalSweepRetainsCalendarSeason(Luminumbra::Rendering::RenderPipeline& pipeline) {
+    using namespace Luminumbra;
+    for (const auto calendar : {world::WorldCalendar{},
+                                world::WorldCalendar::Legacy(),
+                                world::WorldCalendar{120, 4, 1, 2, 4}}) {
+        const auto year_ticks = world::WorldClock(0, calendar).year_length_ticks();
+        for (const auto tick : {std::uint64_t{0},
+                                std::uint64_t{calendar.dayLengthTicks},
+                                year_ticks / 2,
+                                year_ticks - 1,
+                                year_ticks}) {
+            SCOPED_TRACE(tick);
+            const world::WorldClock clock(tick, calendar);
+            for (const auto time_of_day : {0.0f, 0.5f, 0.17f}) {
+                pipeline.set_time_of_day_hold(true);
+                pipeline.set_world_clock(clock);
+                pipeline.set_time_of_day(time_of_day);
+                for (const auto delta : {0.0f, 123.0f}) {
+                    Rendering::RenderClockTestPeer::Update(pipeline, delta);
+                    EXPECT_FLOAT_EQ(pipeline.get_time_of_day(), time_of_day);
+                    EXPECT_EQ(pipeline.get_season_tick(), tick);
+                    EXPECT_FLOAT_EQ(pipeline.get_season_phase(),
+                                    Rendering::ComputeSeason(clock).phase);
+                    if (tick == 0) {
+                        EXPECT_FLOAT_EQ(pipeline.get_season_phase(), .75f);
+                        EXPECT_NE(pipeline.get_season_phase(),
+                                  Rendering::ComputeSeason(tick, 432000).phase);
+                    }
+                }
+            }
+        }
+    }
+}
+
 // Capture time drives elapsed phase through the retained calendar, independently
 // of frame pacing. Holds, authoritative ticks and explicit day lengths still win.
 void ExpectCaptureTimeDrivesCalendarPhase(Luminumbra::Rendering::RenderPipeline& pipeline) {
@@ -269,4 +303,5 @@ TEST(RenderClock, DefaultPacingAndRestoredCustomCalendarPreserveOverrides) {
         EXPECT_EQ(pipeline.get_lunar_period_ticks(), retained.lunar_period_ticks());
     }
     ExpectCaptureTimeDrivesCalendarPhase(pipeline);
+    ExpectTemporalSweepRetainsCalendarSeason(pipeline);
 }

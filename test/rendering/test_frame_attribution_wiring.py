@@ -3058,6 +3058,44 @@ class TemporalSweepRuntimeWiring(unittest.TestCase):
         self.assertIn("weather->SampleAt(camera.Position)", self.backend)
         self.assertIn("particles->set_precipitation(", self.backend)
 
+    def test_collision_preparation_precedes_all_advancement_and_refuses_visibly(self):
+        tick = compact(block(self.backend, "bool advance_simulation("))
+        barrier = "if (!session.GetPhysicsSystem()->prepare_simulation_collisions({}, step.simulation_tick))"
+        refusal = compact(block(tick[tick.index(barrier) + len(barrier):], ""))
+        self.assertIn('LUMINUMBRA_CORE_ERROR("Temporal sweep collision preparation failed at tick {}", '
+                      'step.simulation_tick);', refusal)
+        self.assertTrue(refusal.endswith("return false;"))
+        for side_effect in ("session.SetLocalPlayerSimulationPosition(",
+                            "GetPhysicsSystem()->update(", "session.TickSimulation(",
+                            "GetWorldSystem()->update(", "GetWorldSystem()->sync_water_authority("):
+            self.assertLess(tick.index(barrier), tick.index(side_effect))
+            self.assertNotIn(side_effect, refusal)
+        self.assertEqual(tick.count("prepare_simulation_collisions("), 1)
+        sequence = read(CLIENT / "rendering/TemporalSweep.h")
+        self.assertIn("success = transport.advance_tick(command);", sequence)
+        self.assertIn("sequence.acknowledge(transport.actual_tick(), success, ready, output.bytes);",
+                      sequence)
+        self.assertIn("return std::string(sequence.refusal());", sequence)
+        dispatch = block(self.capture, "if (scenario_config.temporal_audit_plan)")
+        self.assertIn('LUMINUMBRA_CORE_ERROR("Temporal sweep refused: {}", refusal);', dispatch)
+        self.assertIn("sweep_passed = refusal.empty();", dispatch)
+
+    def test_render_keeps_session_calendar_binding_through_explicit_tod(self):
+        render = compact(block(self.backend, "bool render_completed("))
+        ordered = ("const auto calendar = session.GetRenderCalendar();",
+                   "const Luminumbra::world::WorldClock clock(step.simulation_tick, calendar);",
+                   "pipeline.set_time_of_day_hold(true);", "pipeline.set_world_clock(clock);",
+                   "pipeline.set_time_of_day(tod);", "pipeline.render_frame(")
+        positions = [render.index(token) for token in ordered]
+        self.assertEqual(positions, sorted(positions))
+        for clearing_setter in ("set_render_calendar(", "set_season_tick(", "set_time_of_day_tick("):
+            self.assertNotIn(clearing_setter, render)
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        explicit_tod = block(pipeline, "void RenderPipeline::set_time_of_day(")
+        self.assertNotIn("m_worldClock", explicit_tod)
+        season = compact(block(pipeline, "void RenderPipeline::update_time_of_day("))
+        self.assertIn("m_worldClock ? Rendering::ComputeSeason(*m_worldClock)", season)
+
     def test_completed_frame_phase_and_output_failures(self):
         render = compact(block(self.backend, "bool render_completed("))
         self.assertIn("static_cast<float>(step.presentation_delta_seconds)", render)

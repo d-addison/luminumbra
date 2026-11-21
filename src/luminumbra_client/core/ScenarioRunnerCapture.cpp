@@ -170,6 +170,11 @@ struct RuntimeWorldSweepBackend {
             step.simulation_tick != before + 1 || session.GetRegionSchedulerFault()) {
             return false;
         }
+        if (!session.GetPhysicsSystem()->prepare_simulation_collisions({}, step.simulation_tick)) {
+            LUMINUMBRA_CORE_ERROR("Temporal sweep collision preparation failed at tick {}",
+                                  step.simulation_tick);
+            return false;
+        }
         const auto delta = session.GetSimulationClock().fixed_dt();
         session.SetLocalPlayerSimulationPosition(camera.Position, false);
         session.GetPhysicsSystem()->update(static_cast<float>(delta));
@@ -230,9 +235,7 @@ struct RuntimeWorldSweepBackend {
         const auto calendar = session.GetRenderCalendar();
         const Luminumbra::world::WorldClock clock(step.simulation_tick, calendar);
         pipeline.set_time_of_day_hold(true);
-        pipeline.set_render_calendar(calendar);
-        pipeline.set_season_tick(step.simulation_tick);
-        pipeline.set_time_of_day_tick(step.simulation_tick);
+        pipeline.set_world_clock(clock);
         const double shifted = clock.solar_phase_from_day_phase(step.day_phase) + 0.5;
         const auto tod = step.control == TemporalAuditControl::Noon ? 0.0f
                          : step.control == TemporalAuditControl::Night

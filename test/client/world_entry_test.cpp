@@ -1649,7 +1649,13 @@ TEST(WorldEntryWiring, PresentationWaitPrecedesBothActivationsAndCapture) {
     EXPECT_NE(preload.find("PrepareInitialWaterPresentationNear("), std::string::npos);
     EXPECT_EQ(preload.find("TickSimulation("), std::string::npos);
     EXPECT_NE(preload.find("ObserveWorldPresentation("), std::string::npos);
-    EXPECT_NE(source.find("!timelapse_waiting && Measurement::frame_simulation_enabled"),
+    const auto simulation_gate = source.find("const bool simulate_frame = !timelapse_waiting && "
+                                             "!scenario_config.temporal_audit_plan &&");
+    ASSERT_NE(simulation_gate, std::string::npos);
+    const auto simulation_gate_end = source.find(';', simulation_gate);
+    ASSERT_NE(simulation_gate_end, std::string::npos);
+    EXPECT_NE(source.substr(simulation_gate, simulation_gate_end - simulation_gate)
+                  .find("Measurement::frame_simulation_enabled("),
               std::string::npos);
     EXPECT_NE(source.find("if (!presentation_ready)"), std::string::npos);
     EXPECT_EQ(source.find("kTimelapseSettleFrames"), std::string::npos);
