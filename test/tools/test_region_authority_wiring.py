@@ -554,14 +554,18 @@ class RegionAuthorityWiring(unittest.TestCase):
         self.assertIn("const bool unowned_legacy_water = chunk && !chunk->has_water_authority();",
                       load)
         self.assertIn("if (!chunk && (inspect_legacy_water || repair_owned_flag)", load)
-        admissible = function(service, "bool LegacyWaterStateAdmissible(")
-        self.assertIn("!chunk.has_water_sim.load() || chunk.current_water_resolution.load() == 0",
-                      admissible)
-        self.assertIn("dormant && !HasWaterArrays(chunk) ? HasValidWaterPersistenceState(chunk) "
-                      ": chunk.has_complete_water_state()", admissible)
+        admissible = function(service, "bool HasValidWaterColumnState(")
+        self.assertIn("chunk.has_water_sim.load() && resolution != 0", admissible)
+        self.assertIn("return chunk.has_complete_water_state();", admissible)
+        self.assertIn("!HasValidWaterPersistenceState(chunk)", admissible)
         migrate = function(service, "void MigrateLegacyWaterColumns(")
-        self.assertIn("!LegacyWaterStateAdmissible(*source)", migrate)
-        self.assertIn("!LegacyWaterStateAdmissible(*destination)", migrate)
+        self.assertIn("!HasValidWaterColumnState(*source)", migrate)
+        self.assertIn("!HasValidWaterColumnState(*destination)", migrate)
+        shield = SOURCE.read_text(encoding="utf-8")
+        for signature in ("std::shared_ptr<Chunk> SHIELD_WorldSystem::resolve_water_column(",
+                          "std::shared_ptr<Chunk> SHIELD_WorldSystem::read_committed_chunk("):
+            self.assertIn("Persistence::HasValidWaterColumnState(*chunk)",
+                          function(shield, signature))
         native = (ROOT / "test/common/RegionalWater_test.cpp").read_text(encoding="utf-8")
         # The positive cases run each scenario through a registered helper.
         for name, helper in (

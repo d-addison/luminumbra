@@ -32,6 +32,10 @@ struct EntityRegistrySnapshot;
 
 namespace Luminumbra::Persistence {
 
+// Admission shared by legacy migration, regional resolution and terrain-less reads.
+// Active grids must be complete; dormant grids may retain bounded integer truth.
+bool HasValidWaterColumnState(const Chunk& chunk);
+
 class CreatedWorldArtifacts;
 struct BoundPublicationStage;
 

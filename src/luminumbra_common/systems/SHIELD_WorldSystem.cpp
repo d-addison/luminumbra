@@ -7650,11 +7650,7 @@ std::shared_ptr<Chunk> SHIELD_WorldSystem::resolve_water_column(const IVec3& coo
         chunk = cached;
     }
     if (chunk && chunk->has_water_authority()) {
-        const bool active =
-            chunk->has_water_sim.load() && chunk->current_water_resolution.load() != 0;
-        const bool valid = active ? chunk->has_complete_water_state()
-                                  : Persistence::HasValidWaterPersistenceState(*chunk);
-        if (!valid) {
+        if (!Persistence::HasValidWaterColumnState(*chunk)) {
             throw std::invalid_argument("Incomplete regional water column authority");
         }
     }
@@ -7828,7 +7824,8 @@ std::shared_ptr<Chunk> SHIELD_WorldSystem::read_committed_chunk(const IVec3& coo
         if (!chunk || chunk->get_id() != Chunk::calculate_id(coords) ||
             chunk->get_coords() != coords ||
             (chunk->sdf_data.empty() && chunk->heightmap_data.empty() &&
-             !(coords.y == 0 && chunk->has_water_authority() && chunk->has_complete_water_state())))
+             !(coords.y == 0 && chunk->has_water_authority() &&
+               Persistence::HasValidWaterColumnState(*chunk))))
             throw std::runtime_error(
                 "expected durable chunk is missing, empty or has wrong identity");
         return chunk;

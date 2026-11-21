@@ -767,6 +767,214 @@ TEST(RegionalWaterMigration, DormantOffLayerOwnersMigrateWithoutActiveGrids) {
     }
 }
 
+TEST(RegionalWaterMigration, TerrainLessDormantOwnersReloadAfterSaveAndEviction) {
+    for (const bool threaded : {false, true}) {
+        for (int dormant = 0; dormant < 3; ++dormant) {
+            SCOPED_TRACE(threaded);
+            SCOPED_TRACE(dormant);
+            LegacyWaterSave saved;
+            const auto source = saved.add({0, 2, 0});
+            source->clear_water_data();
+            source->current_water_resolution.store(dormant == 1 ? 8 : 0);
+            source->has_water_sim.store(dormant == 2);
+            source->set_water_authority();
+            std::vector<std::string> errors;
+            ASSERT_TRUE(saved.write(errors));
+            WorldStreamingState loaded;
+            std::vector<IVec3> inventory;
+            ASSERT_TRUE(saved.service.load_world(
+                loaded, saved.path(), errors, {}, nullptr, &inventory, nullptr, true));
+            const auto owner = loaded.find_chunk({0, 0, 0});
+            ASSERT_NE(owner, nullptr);
+            ASSERT_TRUE(owner->sdf_data.empty());
+            ASSERT_TRUE(owner->heightmap_data.empty());
+            ASSERT_TRUE(saved.save_dirty(loaded, errors));
+
+            JobSystem jobs;
+            if (threaded)
+                jobs.startup(1);
+            SHIELD_WorldSystem shield(
+                threaded ? &jobs : nullptr, nullptr, TerrainGenParams{}, 1337);
+            WaterSystem water(nullptr, &shield);
+            water.SetRegionalScheduling(true);
+            shield.SetWaterSystem(&water);
+            shield.set_durable_residency(true);
+            shield.remember_durable_chunks(inventory);
+            int reads = 0;
+            shield.set_durable_chunk_loader(
+                [&](const IVec3& coords) {
+                    ++reads;
+                    return WaterPersistence::WorldSaveService::read_chunk(saved.path(), coords)
+                        .chunk;
+                },
+                [](const std::string& error) { ADD_FAILURE() << error; });
+            const auto admitted = shield.resolve_water_column({0, 0, 0});
+            ASSERT_NE(admitted, nullptr);
+            ASSERT_EQ(shield.parking_status().parked_count, 1u);
+            shield.release_clean_parked_chunks();
+            EXPECT_TRUE(shield.snapshot_authoritative_chunks().empty());
+            EXPECT_EQ(shield.parking_status().parked_count, 0u);
+            const auto restored = shield.resolve_water_column({0, 0, 0});
+            ASSERT_NE(restored, nullptr);
+            EXPECT_NE(restored, admitted);
+            EXPECT_EQ(reads, 2);
+            EXPECT_TRUE(restored->same_water_state(*source));
+            EXPECT_FALSE(shield.durable_read_failed());
+            shield.dispatch_generation_jobs(std::vector<IVec3>{{2, 0, 0}});
+            shield.wait_for_admitted_streaming_jobs();
+            const auto generated = shield.find_streamed_chunk({2, 0, 0});
+            ASSERT_NE(generated, nullptr);
+            EXPECT_EQ(generated->get_state(), ChunkState::Idle);
+            EXPECT_EQ(generated->sdf_data.size(), 17u * 17u * 17u);
+            EXPECT_FALSE(shield.durable_read_failed());
+        }
+    }
+}
+
+TEST(RegionalWaterMigration, RetainedOffArraysMigrateAndRoundTripUnchanged) {
+    for (const bool indexed : {false, true}) {
+        for (const int y : {0, 2}) {
+            for (const int resolution : {4, 8, 16, 32}) {
+                SCOPED_TRACE(indexed);
+                SCOPED_TRACE(y);
+                SCOPED_TRACE(resolution);
+                LegacyWaterSave saved;
+                const auto source = saved.add({0, y, 0});
+                FillWater(*source, resolution);
+                for (std::size_t cell = 0; cell < source->water_depth_mm.size(); ++cell) {
+                    source->water_depth_mm[cell] = static_cast<std::int32_t>(cell);
+                    source->water_bed_mm[cell] = -static_cast<std::int32_t>(cell);
+                    source->water_edge_flux[2u * cell] = static_cast<std::int32_t>(cell + 1u);
+                    source->water_edge_flux[2u * cell + 1u] = -static_cast<std::int32_t>(cell + 2u);
+                }
+                WaterSystem water(nullptr, nullptr);
+                ASSERT_TRUE(water.ResizeSimulationGrid(*source, WaterDetailLevel::Off));
+                ASSERT_FALSE(source->has_water_sim.load());
+                ASSERT_EQ(source->current_water_resolution.load(), 0);
+                const auto depths = source->water_depth_mm;
+                const auto beds = source->water_bed_mm;
+                const auto flux = source->water_edge_flux;
+                std::vector<std::string> errors;
+                ASSERT_TRUE(saved.write(errors, indexed));
+                const auto bytes = saved.bytes();
+                WorldStreamingState loaded;
+                const std::unordered_set<ChunkID> retain_none;
+                ASSERT_TRUE(saved.service.load_world(
+                    loaded, saved.path(), errors, {}, &retain_none, nullptr, nullptr, true));
+                ASSERT_TRUE(errors.empty());
+                EXPECT_EQ(saved.bytes(), bytes);
+                const auto owner = loaded.find_chunk({0, 0, 0});
+                ASSERT_NE(owner, nullptr);
+                EXPECT_TRUE(owner->has_water_authority());
+                EXPECT_TRUE(owner->same_water_state(*source));
+                EXPECT_EQ(owner->water_depth_mm, depths);
+                EXPECT_EQ(owner->water_bed_mm, beds);
+                EXPECT_EQ(owner->water_edge_flux, flux);
+                ASSERT_TRUE(saved.save_dirty(loaded, errors));
+                const auto reopened =
+                    WaterPersistence::WorldSaveService::read_chunk(saved.path(), {0, 0, 0});
+                ASSERT_NE(reopened.chunk, nullptr);
+                EXPECT_TRUE(reopened.chunk->same_water_state(*source));
+                EXPECT_EQ(reopened.chunk->water_depth_mm, depths);
+                EXPECT_EQ(reopened.chunk->water_bed_mm, beds);
+                EXPECT_EQ(reopened.chunk->water_edge_flux, flux);
+            }
+        }
+    }
+}
+
+TEST(RegionalWaterMigration, RetainedOffPartialGridsRefuseWithoutChangingSavedBytes) {
+    for (int fault = 0; fault < 7; ++fault) {
+        SCOPED_TRACE(fault);
+        LegacyWaterSave saved;
+        const auto source = saved.add({0, 2, 0});
+        WaterSystem water(nullptr, nullptr);
+        ASSERT_TRUE(water.ResizeSimulationGrid(*source, WaterDetailLevel::Off));
+        if (fault == 0) {
+            source->water_bed_mm.pop_back();
+        } else if (fault == 1) {
+            source->water_edge_flux.pop_back();
+        } else if (fault == 2) {
+            source->water_depth_mm.resize(9);
+            source->water_bed_mm.resize(9);
+            source->water_edge_flux.resize(18);
+        } else if (fault == 3) {
+            source->current_water_resolution.store(8);
+        } else if (fault == 4) {
+            source->water_level_data = {1.0f};
+        } else if (fault == 5) {
+            source->water_sim_terrain_height = {1.0f};
+        } else {
+            source->water_flow_data = {Vec2(0.0f)};
+        }
+        std::vector<std::string> errors;
+        ASSERT_TRUE(saved.write(errors));
+        const auto bytes = saved.bytes();
+        WorldStreamingState loaded;
+        std::vector<IVec3> inventory;
+        EXPECT_FALSE(saved.service.load_world(
+            loaded, saved.path(), errors, {}, nullptr, &inventory, nullptr, true));
+        EXPECT_FALSE(errors.empty());
+        EXPECT_TRUE(loaded.empty());
+        EXPECT_TRUE(inventory.empty());
+        EXPECT_EQ(saved.bytes(), bytes);
+    }
+}
+
+TEST(RegionalWaterMigration, TerrainLessReadValidatesDormantShapesAndFiniteValues) {
+    for (int fault = 0; fault < 12; ++fault) {
+        SCOPED_TRACE(fault);
+        SHIELD_WorldSystem shield(nullptr, nullptr, TerrainGenParams{}, 1337);
+        WaterSystem water(nullptr, &shield);
+        shield.SetWaterSystem(&water);
+        shield.set_durable_residency(true);
+        const IVec3 coords(0, 0, 0);
+        auto chunk = std::make_shared<Chunk>(coords);
+        FillWater(*chunk, 4);
+        chunk->has_water_sim.store(false);
+        chunk->water_sim_terrain_height.assign(16, 1.0f);
+        chunk->water_flow_data.assign(16, Vec2(0.0f));
+        chunk->set_water_authority();
+        const float nonfinite = std::numeric_limits<float>::infinity();
+        if (fault == 1) {
+            chunk->water_level_data[0] = nonfinite;
+        } else if (fault == 2) {
+            chunk->water_sim_terrain_height[0] = nonfinite;
+        } else if (fault == 3) {
+            chunk->water_flow_data[0].x = nonfinite;
+        } else if (fault == 4) {
+            chunk->water_rest_level.assign(16, nonfinite);
+        } else if (fault == 5) {
+            chunk->water_rest_level = {0.0f};
+        } else if (fault == 6) {
+            chunk->water_depth_mm[0] = -1;
+        } else if (fault == 7) {
+            chunk->current_water_resolution.store(3);
+        } else if (fault == 8) {
+            chunk->water_edge_flux.clear();
+        } else if (fault == 9) {
+            chunk->water_bed_mm.clear();
+        } else if (fault == 10) {
+            chunk->water_flow_data.resize(1025);
+        } else if (fault == 11) {
+            chunk->has_water_sim.store(true);
+            chunk->water_flow_data.clear();
+        }
+        const auto depths = chunk->water_depth_mm;
+        const auto beds = chunk->water_bed_mm;
+        const auto flux = chunk->water_edge_flux;
+        shield.remember_durable_chunks({coords});
+        shield.set_durable_chunk_loader([&](const IVec3&) { return chunk; }, {});
+        const auto read = shield.inspect_water_column(coords);
+        EXPECT_EQ(read, fault == 0 ? chunk : nullptr);
+        EXPECT_EQ(shield.durable_read_failed(), fault != 0);
+        EXPECT_EQ(chunk->water_depth_mm, depths);
+        EXPECT_EQ(chunk->water_bed_mm, beds);
+        EXPECT_EQ(chunk->water_edge_flux, flux);
+        EXPECT_TRUE(shield.snapshot_authoritative_chunks().empty());
+    }
+}
+
 TEST(RegionalWaterMigration, UnownedCanonicalAndDormantOffLayerPartialStatesRefuse) {
     for (const bool indexed : {false, true}) {
         for (const int y : {0, 2}) {
@@ -1010,6 +1218,7 @@ TEST(RegionalWaterMigration, OwnedCanonicalLegacyPayloadsStillRefuseIncompleteGr
             owner->water_edge_flux.pop_back();
         } else {
             owner->has_water_sim.store(false);
+            owner->water_bed_mm.pop_back();
         }
         std::vector<std::string> errors;
         ASSERT_TRUE(saved.write(errors));

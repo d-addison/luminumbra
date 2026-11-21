@@ -89,6 +89,43 @@
 #endif
 
 namespace Luminumbra::Persistence {
+
+bool HasValidWaterColumnState(const Chunk& chunk) {
+    const int resolution = chunk.current_water_resolution.load();
+    if (chunk.has_water_sim.load() && resolution != 0) {
+        return chunk.has_complete_water_state();
+    }
+    if (!HasValidWaterPersistenceState(chunk)) {
+        return false;
+    }
+    // Off clears the resolution and float mirrors, retaining integer truth.
+    // Validate its former grid by shape; at most 1,024 cells / 2,048 fluxes.
+    const auto cells = chunk.water_depth_mm.size();
+    if (cells != 0u) {
+        if (resolution == 0) {
+            if (cells != 4u && cells != 16u && cells != 64u && cells != 256u && cells != 1024u) {
+                return false;
+            }
+        } else if (cells !=
+                   static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution)) {
+            return false;
+        }
+    }
+    if (chunk.water_bed_mm.size() != cells || chunk.water_edge_flux.size() != 2u * cells ||
+        (!chunk.water_flow_data.empty() && chunk.water_flow_data.size() != cells)) {
+        return false;
+    }
+    for (const auto* mirror :
+         {&chunk.water_level_data, &chunk.water_sim_terrain_height, &chunk.water_rest_level}) {
+        if ((!mirror->empty() && mirror->size() != cells) ||
+            !std::all_of(
+                mirror->begin(), mirror->end(), [](float value) { return std::isfinite(value); })) {
+            return false;
+        }
+    }
+    return true;
+}
+
 namespace detail {
 
 struct RegionFileSync {
@@ -3481,14 +3518,6 @@ bool EqualLegacyWater(const Chunk& lhs, const Chunk& rhs) {
            lhs.max_water_delta_last_tick == rhs.max_water_delta_last_tick;
 }
 
-bool LegacyWaterStateAdmissible(const Chunk& chunk) {
-    // Empty dormant/Off owners have no active grid, but their persisted stamps
-    // must still be valid. Present arrays require complete migration admission.
-    const bool dormant = !chunk.has_water_sim.load() || chunk.current_water_resolution.load() == 0;
-    return dormant && !HasWaterArrays(chunk) ? HasValidWaterPersistenceState(chunk)
-                                             : chunk.has_complete_water_state();
-}
-
 // Load-time only: at most 4096 legacy sources and one destination per column.
 // Encoded input and combined source/destination/copy heap have separate 256 MiB
 // budgets; each water grid has at most 1024 cells. No disk writes occur here:
@@ -3505,7 +3534,7 @@ void MigrateLegacyWaterColumns(WorldStreamingState& state,
                 "Saved-input admission refused: legacy water migration storage cap.");
         }
         migration_bytes += source_bytes;
-        if (!LegacyWaterStateAdmissible(*source)) {
+        if (!HasValidWaterColumnState(*source)) {
             throw WorldPersistenceRefusal(
                 "Saved-input admission refused: incomplete legacy water record.");
         }
@@ -3535,8 +3564,8 @@ void MigrateLegacyWaterColumns(WorldStreamingState& state,
                 "Saved-input admission refused: legacy water migration storage cap.");
         }
         migration_bytes += destination_bytes + copy_bytes;
-        if (HasPersistedWater(*destination) && (!LegacyWaterStateAdmissible(*destination) ||
-                                                !EqualLegacyWater(*destination, *source))) {
+        if (HasPersistedWater(*destination) &&
+            (!HasValidWaterColumnState(*destination) || !EqualLegacyWater(*destination, *source))) {
             throw WorldPersistenceRefusal(
                 "Saved-input admission refused: conflicting legacy water destination.");
         }
