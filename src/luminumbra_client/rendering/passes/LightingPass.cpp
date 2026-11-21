@@ -354,14 +354,12 @@ LightingPass::CallerState LightingPass::CallerState::QueryExternal() {
     return {.depth_test_enabled = glIsEnabled(GL_DEPTH_TEST)};
 }
 
-void LightingPass::execute_external(const RenderContext& ctx, bool skybox_follows) {
+void LightingPass::execute_external(const RenderContext& ctx) {
     LUMIN_PROFILE_ZONE_N("GL LightingPass.execute_external");
-    return execute(ctx, CallerState::QueryExternal(), skybox_follows);
+    return execute(ctx, CallerState::QueryExternal());
 }
 
-void LightingPass::execute(const RenderContext& ctx,
-                           const CallerState& caller,
-                           bool skybox_follows) {
+void LightingPass::execute(const RenderContext& ctx, const CallerState& caller) {
     LUMIN_PROFILE_ZONE_N("GL LightingPass.execute");
     if (!ctx.render_view && !ctx.camera)
         throw std::invalid_argument("Lighting requires a validated view or production camera");
@@ -414,7 +412,6 @@ void LightingPass::execute(const RenderContext& ctx,
     lighting_shader->setInt("u_farWorldLadder", ctx.far_world_ladder ? 1 : 0);
     lighting_shader->setMat4("u_gbufferInverseProjection", ctx.gbuffer_inverse_projection);
     lighting_shader->setInt("u_staticStudio", ctx.static_studio ? 1 : 0);
-    lighting_shader->setInt("u_skipLegacySky", skybox_follows && !contribution.ready() ? 1 : 0);
     lighting_shader->setVec3("u_studioBackground", ctx.studio_background);
     lighting_shader->setInt("u_authoredEnabled", ctx.authored_surface.id != 0 ? 1 : 0);
     lighting_shader->setInt("u_authoredSurface", 13);

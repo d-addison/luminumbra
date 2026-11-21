@@ -51,12 +51,11 @@ public:
 
     void copy_lighting_color_to_opaque_texture(const RenderContext& ctx);
     // Shipping dispatch supplies known enable state; direct hosts preserve arbitrary state.
-    // Opt in only when a skybox replaces cleared-depth color before any reader.
-    void execute(const RenderContext& ctx, const CallerState& caller, bool skybox_follows = false);
-    void execute_external(const RenderContext& ctx, bool skybox_follows = false);
+    void execute(const RenderContext& ctx, const CallerState& caller);
+    void execute_external(const RenderContext& ctx);
     // Preserve the existing direct-call boundary for previews and pass consumers.
-    void execute(const RenderContext& ctx, bool skybox_follows = false) {
-        return execute_external(ctx, skybox_follows);
+    void execute(const RenderContext& ctx) {
+        return execute_external(ctx);
     }
 
     // full-scene lightning light-pulse + bolt overlay. A strike is a

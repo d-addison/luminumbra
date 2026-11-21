@@ -24,7 +24,6 @@ uniform sampler2D u_sceneDepth;
 uniform sampler2D u_authoredSurface;
 uniform int u_authoredEnabled = 0;
 uniform int u_staticStudio = 0;
-uniform int u_skipLegacySky = 0;
 uniform vec3 u_studioBackground = vec3(0.02, 0.025, 0.03);
 
 // Material lookup (256 x 4 rows; row 2 holds emissive_intensity/scale)
@@ -624,13 +623,6 @@ void main() {
 #endif
     if (u_staticStudio != 0 && texture(u_sceneDepth, TexCoords).r == 0.0) {
         FragColor = vec4(u_studioBackground, 0.0);
-        return;
-    }
-    // Only the frame pipeline opts in: sky replacement precedes every color
-    // consumer. Standalone lighting and contribution captures retain sky shading.
-    if (u_skipLegacySky != 0 && u_farWorldLadder == 0 && u_staticStudio == 0 &&
-        texture(u_sceneDepth, TexCoords).r == 0.0) {
-        FragColor = vec4(0.0);
         return;
     }
     vec4 authoredSurface = u_authoredEnabled != 0
