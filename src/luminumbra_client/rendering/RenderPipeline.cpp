@@ -2,6 +2,7 @@
 #include "../../include/luminumbra/core/Types.h"
 #include "CelestialBodyModel.h" //  Tier 1: the celestial-body seam
 #include "DiagnosticDrawTable.h"
+#include "DiagnosticReadback.h"
 #include "ExposureModel.h" //  rendering: SelectRenderExposure (manual EV precedence)
 #include "FarLodSystem.h"
 #include "FarVolumeGlBackend.h"
@@ -22,6 +23,7 @@
 #include "TimeOfDayModel.h" // Pure time-of-day policy helpers.
 #include "UploadBudget.h"
 #include "WeatherOverlayModel.h"
+#include "core/EngineVersion.h"
 #include "core/Log.h"
 #include "core/Profiler.h"
 #include "luminumbra_client/core/PresentationClock.h"
@@ -31,6 +33,7 @@
 #include "luminumbra_common/core/DeterministicMath.h"
 #include "luminumbra_common/core/Environment.h"
 #include "luminumbra_common/core/GraphicsPresets.h"
+#include "luminumbra_common/persistence/CreatedWorldArtifacts.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/NearTerrainMeshSnapshot.h"
@@ -273,6 +276,7 @@ void RenderPipeline::set_debug_view(int mode) {
         m_debug_view_pass->set_mode(mode);
 }
 RenderPipeline::~RenderPipeline() {
+    end_diagnostic_capture();
     cleanup_gpu_resources();
 }
 
@@ -411,7 +415,198 @@ bool RenderPipeline::startup(u32 screen_width,
 }
 
 void RenderPipeline::shutdown() {
+    end_diagnostic_capture();
     cleanup_gpu_resources();
+}
+
+void RenderPipeline::set_capture_diagnostics(const DiagnosticCaptureOptions& options) {
+    end_diagnostic_capture();
+    m_capture_diagnostics = options;
+}
+
+void RenderPipeline::end_diagnostic_capture() {
+    m_diagnostic_capture.reset();
+}
+
+bool RenderPipeline::diagnostic_capture_destination_available(
+    const std::filesystem::path& capture) const {
+    return DiagnosticCaptureDestinationAvailable(capture, m_capture_diagnostics);
+}
+
+struct RenderPipeline::CaptureDestinationReservation::State {
+    Persistence::CreatedWorldArtifacts journal;
+    ~State() {
+        (void)journal.rollback();
+    }
+};
+
+RenderPipeline::CaptureDestinationReservation::CaptureDestinationReservation(
+    const RenderPipeline& pipeline, const std::filesystem::path& capture)
+    : disabled_(!pipeline.capture_diagnostics_enabled()) {
+    if (disabled_ || capture.empty() || capture.filename().empty()) {
+        return;
+    }
+    auto pending = std::make_unique<State>();
+    try {
+        const auto parent =
+            capture.has_parent_path() ? capture.parent_path() : std::filesystem::path(".");
+        // Match the capture writers' output-directory preparation. Only the
+        // exclusive marker below admits payload writes into that directory.
+        std::error_code error;
+        std::filesystem::create_directories(parent, error);
+        if (error) {
+            return;
+        }
+        pending->journal.bind_existing_root(parent);
+        auto marker = std::filesystem::canonical(parent) / CaptureManifestPath(capture).filename();
+        // Match the manifest staging suffix width, preserving its filename bound.
+        marker += ".lck";
+        // CREATE_NEW on Windows and exclusive fopen on POSIX; no payload write
+        // can precede this reservation. Rollback removes only its bound identity.
+        pending->journal.write_file(marker, "");
+        if (DiagnosticCaptureDestinationAvailable(capture, pipeline.m_capture_diagnostics, true)) {
+            state_ = std::move(pending);
+        }
+    } catch (const std::exception&) {
+        // The pending journal also retires a marker created before a refusal.
+    }
+}
+
+RenderPipeline::CaptureDestinationReservation::~CaptureDestinationReservation() = default;
+
+bool RenderPipeline::CaptureDestinationReservation::acquired() const {
+    return disabled_ || state_ != nullptr;
+}
+
+bool RenderPipeline::diagnostic_capture_ready() {
+    if (m_capture_diagnostics.enabled && m_diagnostic_capture && m_frame_prepared.valid) {
+        // Detachment can expose a deferred producer failure. Observe only afterward.
+        (void)m_diagnostic_capture->ready();
+    }
+    return diagnostic_capture_refusal().empty();
+}
+
+namespace {
+// A late transport refusal retracts the manifest through its retained identity.
+// The destination reservation remains held until this cleanup has finished.
+class DiagnosticManifestRollback {
+public:
+    explicit DiagnosticManifestRollback(const std::filesystem::path& capture) {
+        const auto manifest = std::filesystem::absolute(CaptureManifestPath(capture));
+        journal_.bind_existing_root(manifest.parent_path());
+#if defined(_WIN32)
+        const auto file = ::CreateFileW(manifest.c_str(),
+                                        FILE_READ_ATTRIBUTES,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                        nullptr,
+                                        OPEN_EXISTING,
+                                        FILE_FLAG_OPEN_REPARSE_POINT,
+                                        nullptr);
+        if (file == INVALID_HANDLE_VALUE) {
+            throw std::runtime_error("Cannot retain capture manifest");
+        }
+#else
+        const auto file = ::open(manifest.c_str(), O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+        if (file < 0) {
+            throw std::runtime_error("Cannot retain capture manifest");
+        }
+#endif
+        try {
+            journal_.record_staged_file(manifest, file);
+        } catch (...) {
+            close_file(file);
+            throw;
+        }
+        close_file(file);
+    }
+    ~DiagnosticManifestRollback() {
+        (void)journal_.rollback();
+    }
+    DiagnosticManifestRollback(const DiagnosticManifestRollback&) = delete;
+    DiagnosticManifestRollback& operator=(const DiagnosticManifestRollback&) = delete;
+    void preserve() {
+        journal_.release();
+    }
+
+private:
+    static void close_file(Persistence::CreatedWorldArtifacts::NativeFile file) {
+#if defined(_WIN32)
+        ::CloseHandle(file);
+#else
+        ::close(file);
+#endif
+    }
+    Persistence::CreatedWorldArtifacts journal_;
+};
+} // namespace
+
+CaptureManifestInput RenderPipeline::diagnostic_capture_manifest() const {
+    CaptureManifestInput input;
+    input.build_id = {std::string(luminumbra::core::GetEngineVersionString()),
+                      "engine_version_string_empty"};
+    input.asset_hash.unavailable = "not observed by scenario capture";
+    input.shader_hash.unavailable = "not observed by scenario capture";
+    input.world_hash.unavailable = "not observed by scenario capture";
+    input.width = static_cast<int>(m_screen_width);
+    input.height = static_cast<int>(m_screen_height);
+    const auto* snapshot = capture_camera();
+    if (!snapshot || !SetCaptureManifestCamera(input, *snapshot)) {
+        input.near_plane = 0;
+    }
+    return input;
+}
+
+std::string_view RenderPipeline::diagnostic_capture_refusal() const {
+    if (!m_capture_diagnostics.enabled) {
+        return {};
+    }
+    if (!m_diagnostic_capture || !m_frame_prepared.valid) {
+        return "completed_frame_unavailable";
+    }
+    if (!std::as_const(*m_diagnostic_capture).ready()) {
+        return "producer_coverage_incomplete";
+    }
+    if (m_capture_diagnostics.probe) {
+        const auto& coordinates = m_capture_diagnostics.probe.value();
+        if (coordinates[0] >= m_internal_width || coordinates[1] >= m_internal_height) {
+            return "probe_out_of_bounds";
+        }
+    }
+    return {};
+}
+
+bool RenderPipeline::capture_diagnostics(const std::filesystem::path& capture) {
+    if (!m_capture_diagnostics.enabled) {
+        return true;
+    }
+    // Retain successful frames for sibling captures; release on every refusal.
+    CaptureCleanup cleanup(*this);
+    if (capture.empty() || capture.filename().empty()) {
+        return false;
+    }
+    try {
+        DiagnosticManifestRollback manifest_rollback(capture);
+        if (!diagnostic_capture_ready()) {
+            return false;
+        }
+        DiagnosticBundleFrame frame;
+        frame.extent = {m_internal_width, m_internal_height};
+        frame.frame = m_far_world_frame;
+        frame.view = m_frame_prepared.replay_camera.view;
+        frame.projection = m_frame_prepared.replay_camera.projection;
+        frame.capture_filename = Filesystem::GenericUtf8PathString(capture.filename());
+        frame.manifest_filename =
+            Filesystem::GenericUtf8PathString(CaptureManifestPath(capture).filename());
+        const bool captured =
+            m_diagnostic_capture->finish(capture, m_capture_diagnostics, frame, gbuffer());
+        if (captured) {
+            manifest_rollback.preserve();
+            cleanup.retain();
+        }
+        return captured;
+    } catch (const std::exception&) {
+        return false;
+    }
 }
 
 void RenderPipeline::register_procgen_mesh(const std::string& key, std::unique_ptr<Mesh> mesh) {
@@ -793,6 +988,7 @@ RenderContext RenderPipeline::make_ssao_context(const Camera& camera) {
 // the frame camera for Depth-mode near/far linearization. Render-only; never hashed.
 RenderContext RenderPipeline::make_debug_view_context(const Camera& camera) {
     RenderContext ctx;
+    ctx.frame_index = m_far_world_frame;
     ctx.frozen_replay = m_far_world_paired;
     ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
                                    m_frame_prepared.projection,
@@ -1341,6 +1537,7 @@ void RenderPipeline::wait_for_world_readers() {
 void RenderPipeline::prepare_world_swap() {
     m_far_world->PrepareWorldSwap();
     m_waterfall_pass->destroy_geometry();
+    m_capture_waterfall_geometry = false;
     m_particle_pass->clear_waterfall_spray();
     ++m_far_world_epoch;
     m_frame_prepared.valid = false;
@@ -2155,6 +2352,14 @@ void SubmitDiagnosticTerrainBucket(GBufferDiagnosticCapture*& capture,
 void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& visible_chunks,
                                      std::size_t& out_draws,
                                      std::size_t& out_indices) {
+    // A diagnostic replay may reuse a ring slot but never advances production ownership.
+    const bool diagnostic_replay = DebugViewPass::replaying();
+    const auto saved_cursor = m_mdi_frame_cursor;
+    ReplayRollback restore_cursor([this, diagnostic_replay, saved_cursor]() noexcept {
+        if (diagnostic_replay) {
+            m_mdi_frame_cursor = saved_cursor;
+        }
+    });
     out_draws = 0;
     out_indices = 0;
     const std::size_t block_count = m_chunk_geometry_pool.block_count();
@@ -2614,6 +2819,7 @@ void RenderPipeline::render_frame(entt::registry& registry,
                                   float deltaTime,
                                   bool wireframe,
                                   UploadPresentation presentation) {
+    end_diagnostic_capture();
     if (!m_started) {
         return;
     }
@@ -2648,7 +2854,34 @@ void RenderPipeline::render_frame(entt::registry& registry,
     m_far_world_pair_jitter_frame = m_taau_frame;
     m_far_world_pair_jitter = m_taau_jitter_ndc;
     m_far_world_pair_mdi_cursor = m_mdi_frame_cursor;
+    std::unique_ptr<DiagnosticFrameCapture> diagnostic_frame;
+    if (m_capture_diagnostics.enabled && m_diagnostic_capture_armed &&
+        purpose == FarWorldPurpose::World) {
+        std::size_t retained = 0;
+        // The current manifest contract describes unjittered output-sized planes.
+        // Refuse scaled/jittered captures rather than mislabel their pixel camera.
+        if (!m_taau_enabled && m_internal_width == m_screen_width &&
+            m_internal_height == m_screen_height &&
+            DiagnosticFrameCapture::Admitted({m_internal_width, m_internal_height}, retained)) {
+            diagnostic_frame = std::make_unique<DiagnosticFrameCapture>(
+                DiagnosticExtent{m_internal_width, m_internal_height});
+        }
+    }
     dispatch_stages(camera);
+    if (auto* scope = GBufferDiagnosticCapture::Current(); diagnostic_frame && scope) {
+        if ((m_plant_procgen_pass && m_plant_procgen_pass->enabled() &&
+             m_plant_procgen_pass->index_count() > 0) ||
+            (m_ground_decal_pass && m_ground_decal_pass->active())) {
+            scope->unsupported("later_deferred_contributors");
+        }
+        // Forward contributors are not represented by the deferred surface plane.
+        // Until separate planes exist, their presence prevents complete publication.
+        if (m_last_render_pass_stats.water_draws || m_last_render_pass_stats.foliage_draws ||
+            m_last_render_pass_stats.particle_draws || !m_glass_pane_items.empty() ||
+            m_capture_waterfall_geometry) {
+            scope->unsupported("forward_contributors");
+        }
+    }
     m_far_world_pair_taau_after = m_taau_pass->history_state();
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -2684,6 +2917,7 @@ void RenderPipeline::render_frame(entt::registry& registry,
     m_prev_time = static_cast<float>(Client::presentation_clock.now(glfwGetTime));
     // Scatter preparation happens before render_frame. Open admission for the
     // next rendered frame here, so nested sweeps/previews need no outer loop.
+    m_diagnostic_capture = std::move(diagnostic_frame);
     m_foliage_pass->begin_ground_frame();
 }
 
@@ -3020,6 +3254,11 @@ void RenderPipeline::prepare_camera_projection(const Camera& camera) {
 }
 
 void RenderPipeline::dispatch_stages(const Camera& camera) {
+    DebugViewPass::controls().wireframe = m_frame_prepared.wireframe;
+    auto diagnostic_frame = m_debug_view_pass && (DebugViewPass::geometry_requested() ||
+                                                  DebugViewPass::controls().enabled)
+                                ? m_debug_view_pass->begin_frame(make_debug_view_context(camera))
+                                : nullptr;
     // the pure GPU stage sequence over the prepared frame. Each
     // execute_stage_* body moved VERBATIM from the pre-split render_frame and
     // reads only FramePrepared + pipeline members. This function must be
@@ -3032,16 +3271,10 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
 
     glEnable(GL_DEPTH_TEST);
 
-    // Configure rendering mode
-    if (m_frame_prepared.wireframe) {
-        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-        glLineWidth(2.0f);
-        glDisable(GL_CULL_FACE); // Disable culling in wireframe for debugging
-    } else {
-        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-        glEnable(GL_CULL_FACE);
-        glCullFace(GL_BACK);
-    }
+    // The wireframe toggle now adds a depth-tested mask over the shaded frame.
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
 
     // reset the frame-graph stage trace, then record each stage id as it
     // dispatches. This is render_frame's REAL dispatch order -- the golden the declarative
@@ -3073,6 +3306,10 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
         assert(fn && "frame-graph node has no executor table entry");
         if (fn)
             (this->*fn)(camera);
+        if (diagnostic_frame && node == "gbuffer") {
+            // Gather the deferred snapshot before plants or decals change its AOVs.
+            DebugViewPass::end_frame(diagnostic_frame, make_debug_view_context(camera));
+        }
     }
 }
 
@@ -3868,6 +4105,9 @@ void RenderPipeline::on_resize(u32 new_width, u32 new_height) {
     if (new_width == 0 || new_height == 0 ||
         (new_width == m_screen_width && new_height == m_screen_height))
         return;
+    if (m_debug_view_pass && DebugViewPass::controls().enabled) {
+        m_debug_view_pass->invalidate();
+    }
     m_screen_width = new_width;
     m_screen_height = new_height;
     // recompute the internal (scaled) extent from the new output size.
@@ -4010,6 +4250,9 @@ bool RenderPipeline::resize_graphics_targets(float scale, u32 shadow_resolution)
             // CONTENT is now stale -- it was resolved at the previous internal scale, so its motion
             // vectors / reprojection no longer match. Invalidate it so the next resolve restarts
             // fresh instead of blending the previous scale's history after a runtime scale change.
+            if (m_debug_view_pass && DebugViewPass::controls().enabled) {
+                m_debug_view_pass->invalidate();
+            }
             m_taau_pass->invalidate_history();
             m_frustumCache.valid = false;
             ++m_resize_generation;
@@ -4497,6 +4740,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     // Release the remaining pass-owned volumes and geometry.
     m_froxel_pass->destroy();
     m_waterfall_pass->destroy_geometry();
+    m_capture_waterfall_geometry = false;
     m_skybox_pass->destroy_geometry();
     if (m_particle_pass) {
         m_particle_pass->destroy_buffers();
@@ -4588,13 +4832,17 @@ void RenderPipeline::cleanup_gpu_resources() {
 // Bake the live waterfall dressing in the pass that owns its geometry and draw.
 void RenderPipeline::cancel_waterfall_adoption() {
     m_waterfall_pass->destroy_geometry();
+    m_capture_waterfall_geometry = false;
     m_waterfall_pass->waterfall_cache().clear();
     if (m_particle_pass)
         m_particle_pass->clear_emitters();
 }
 
 void RenderPipeline::prepare_waterfalls(const Systems::SHIELD_WorldSystem& world) {
+    m_capture_waterfall_geometry = true;
     m_waterfall_pass->prepare(world, m_particle_pass.get(), m_root_path);
+    // prepare populated this exact key; this is an O(1) cache lookup at setup.
+    m_capture_waterfall_geometry = !m_waterfall_pass->waterfall_sites(world).empty();
 }
 
 // --- RESOURCE MANAGEMENT ---

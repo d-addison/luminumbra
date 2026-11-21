@@ -10,21 +10,220 @@ SOURCE = ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp"
 
 def function(source, name):
     # Mask comments and literals before balancing production C++ braces.
-    masked = re.sub(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"',
+    literals = (r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"'
+                r"|'(?:\\.|[^'\\\n])'")
+    masked = re.sub(literals,
                     lambda match: " " * len(match.group()), source, flags=re.S)
     start = masked.index("{", source.index(name))
     depth = 1
     for index in range(start + 1, len(masked)):
         depth += (masked[index] == "{") - (masked[index] == "}")
         if depth == 0:
-            body = re.sub(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"',
-                          lambda match: match.group() if match.group().startswith('"') else " ",
+            body = re.sub(literals,
+                          lambda match: " " if match.group().startswith(("//", "/*"))
+                          else match.group(),
                           source[start + 1:index], flags=re.S)
             return re.sub(r"\s+", " ", body).strip()
     raise AssertionError(f"Unclosed function {name}")
 
 
 class RegionAuthorityWiring(unittest.TestCase):
+    def test_off_columns_are_excluded_by_shared_admission_before_preparation(self):
+        source = (ROOT / "src/luminumbra_common/systems/RegionalWater.cpp").read_text(
+            encoding="utf-8")
+        admit = function(source, "std::vector<Entry> Admit(")
+        self.assertIn("entry.admitted = resident.available && resident.resolution != 0 &&", admit)
+        self.assertLess(admit.index("resident.initialized && !LegalResolution"),
+                        admit.index("entry.admitted ="))
+        build = function(source, "Plan BuildPlan(")
+        self.assertLess(build.index("Admit("), build.index("PlanSources("))
+        self.assertLess(build.index("Admit("), build.index("PlanCandidates("))
+        update = function(source, "void WaterSystem::UpdateRegionalFromSimulation(")
+        self.assertIn("resident.resolution = participants[i]->current_water_resolution.load();", update)
+        self.assertIn("&plan)", update)
+        direct = function(source, "void WaterSystem::UpdateRegional(")
+        self.assertIn(".resolution = chunk->current_water_resolution.load()", direct)
+        self.assertIn("RegionalWater::Build(", direct)
+        native = (ROOT / "test/common/RegionalWater_test.cpp").read_text(encoding="utf-8")
+        case = function(native, "TEST(RegionalWaterAdmission, "
+                        "OffSavedColumnsPreserveRetainedWaterAndDoNotAbortFundedNeighbors)")
+        for token in ("{0, 32}", "entry < 3", "WaterDetailLevel::Off",
+                      "restore_authoritative_chunk(", "water.UpdateRegional(registry, chunks,",
+                      "ASSERT_NO_THROW(water.UpdateRegionalFromSimulation(",
+                      "EXPECT_GT(Mass(*enabled), mass);",
+                      "EXPECT_EQ(TransactionBytes(*disabled), before);",
+                      "EXPECT_EQ(Persistence::SerializeChunkAuthoritySnapshotJson(*disabled), saved);"):
+            self.assertIn(token, case)
+        refusal = function(native, "TEST(RegionalWaterPlanning, "
+                           "OffColumnsStaySealedWhileUnseededColumnsCanPrepare)")
+        for token in ("unseeded.initialized = false;", "disabled.resolution = 0;",
+                      "disabled.initialized = true;", "EXPECT_THROW(",
+                      "EXPECT_TRUE(plan.faces.empty());"):
+            self.assertIn(token, refusal)
+
+    def test_unclaimed_cleanup_retains_reservations_for_every_resident_state(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        cleanup = function(source, "void SHIELD_WorldSystem::discard_unclaimed_water_columns(")
+        candidates = function(cleanup, "for (const auto& chunk : candidates)")
+        self.assertLess(candidates.index("if (parked == m_parked.end()"),
+                        candidates.index("m_water_column_reservations.erase("))
+        reservations = function(cleanup, "for (const auto id : reservations)")
+        self.assertIn("if (!chunk) {", reservations)
+        self.assertEqual(function(reservations, "if (!chunk)"),
+                         "m_water_column_reservations.erase(id);")
+        self.assertNotIn("needs_authority()", reservations)
+        self.assertNotIn("ChunkState::Loading", reservations)
+        for match in re.finditer(r"m_admitted_water_columns.erase\((id|it->first)\);", source):
+            # These are the live/parked retirement sites; publication uses chunk->get_id().
+            tail = source[match.end():]
+            self.assertTrue(tail.lstrip().startswith(
+                f"m_water_column_reservations.erase({match.group(1)});"))
+        native = (ROOT / "test/common/RegionalWater_test.cpp").read_text(encoding="utf-8")
+        case = function(native, "TEST(RegionalWaterAdmission, "
+                        "LiveUnclaimedCleanupCannotRecycleReservationCapacity)")
+        for token in ("cleanup < 4", "repeat < 3", "index < 2 ? chunk : nullptr",
+                      "ChunkState::Loading", "note_persistence_outcome(false)",
+                      "mark_water_state_dirty()", "clear_water_state_dirty()",
+                      "remember_durable_chunks(", "clear_world(nullptr)",
+                      "EXPECT_FALSE(shield.reserve_water_columns(next));",
+                      "EXPECT_TRUE(shield.reserve_water_columns(next));"):
+            self.assertIn(token, case)
+        retired = function(native, "TEST(RegionalWaterAdmission, "
+                           "ParkedRetirementReleasesReservationsWithoutASaveOutcome)")
+        for token in ("{false, true}", "release_clean_parked_chunks()",
+                      "discard_unclaimed_water_columns(candidates)",
+                      "EXPECT_TRUE(shield.reserve_water_columns(next));"):
+            self.assertIn(token, retired)
+
+    def test_water_reconciliation_carries_absent_zero_grants_and_refuses_positive_grants(self):
+        source = (ROOT / "src/luminumbra_common/systems/RegionalWater.cpp").read_text(
+            encoding="utf-8")
+        reconcile = function(source, "void Reconcile(")
+        self.assertIn("const auto found = groups.find(funded.owner);", reconcile)
+        missing = function(reconcile, "if (found == groups.end())")
+        self.assertEqual(function(missing, "if (funded.windows != 0)"), "Refuse();")
+        self.assertTrue(missing.endswith("plan.regions.push_back(funded); continue;"))
+        self.assertNotIn(".at(", reconcile)
+        self.assertLess(reconcile.index("if (found == groups.end())"),
+                        reconcile.index("const auto& group = found->second;"))
+        native = (ROOT / "test/common/RegionalWater_test.cpp").read_text(encoding="utf-8")
+        regression = function(native, "TEST(RegionalWaterAdmission, "
+                              "ZeroWindowOwnersRetainFundingAccountingAndReceiveLaterService)")
+        for token in ("{1u, 2u}", "tick <= 16", "ASSERT_NO_THROW(",
+                      "region.next_cursor", "region.debt", "region.cadence_shift",
+                      "region.cadence_phase", "std::all_of(served.begin()",
+                      "std::all_of(deferred.begin()"):
+            self.assertIn(token, regression)
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("common/RegionalWater_test.cpp", cmake)
+        self.assertIn("gtest_discover_tests(${_lum_gtest_target}", cmake)
+
+    def test_water_reconciliation_selects_funded_interior_keys_including_pairs(self):
+        source = (ROOT / "src/luminumbra_common/systems/RegionalWater.cpp").read_text(
+            encoding="utf-8")
+        reconcile = function(source, "void Reconcile(")
+        self.assertNotIn("SelectInteriorPair(", reconcile)
+        self.assertIn("std::uint64_t awarded = 0, demand = 0;", reconcile)
+        selection = function(reconcile, "if (std::binary_search(")
+        self.assertEqual(selection, "++demand; if (awarded < limit) { "
+                         "entry.selected = true; ++awarded; }")
+        self.assertIn("funding.interiors.begin(), funding.interiors.end(), entry.resident.id)",
+                      reconcile)
+        self.assertIn("region.windows = awarded;", reconcile)
+        self.assertIn("region.debt += (funded.windows - awarded) * world::water_share::kQ32;",
+                      reconcile)
+        build = function(source, "Plan BuildPlan(")
+        self.assertIn("plan.interiors.push_back(entry.resident.id);", build)
+        native = (ROOT / "test/common/RegionalWater_test.cpp").read_text(encoding="utf-8")
+        regression = function(native, "TEST(RegionalWaterAdmission, "
+                              "BorderParticipantsCannotDisplaceFundedInteriorIdentities)")
+        for token in ("{31, 32, 34}", "tick <= 16", "3 * kPlanningCapacity",
+                      "EXPECT_NE(std::find(columns.begin(), columns.end(), visit), columns.end());",
+                      "EXPECT_GT(Mass(*chunks.at(target)), before);",
+                      "EXPECT_GT(target_steps, 0u);"):
+            self.assertIn(token, regression)
+        idle = function(native, "TEST(RegionalWaterAdmission, "
+                        "IdleFundedInteriorCannotBeReplacedByAnAwakeBorderParticipant)")
+        for token in ("chunk->is_water_sleeping.store(x == 34);",
+                      "EXPECT_TRUE(water.regional_work().visits.empty());",
+                      "EXPECT_EQ(water.regional_work().allocated_windows, 0u);",
+                      "EXPECT_FALSE(ledger.water_debts().contains({1, 0}));"):
+            self.assertIn(token, idle)
+
+    def test_sleeping_refunds_cap_demand_to_eligible_funded_interior_identities(self):
+        source = (ROOT / "src/luminumbra_common/systems/RegionalWater.cpp").read_text(
+            encoding="utf-8")
+        reconcile = function(source, "void Reconcile(")
+        candidates = function(reconcile, "for (const auto candidate : group.candidates)")
+        self.assertNotIn("break;", candidates)
+        self.assertEqual(candidates.count("++demand;"), 1)
+        eligible = function(candidates, "if (std::binary_search(")
+        self.assertTrue(eligible.startswith("++demand;"))
+        self.assertNotIn("demand = static_cast<std::uint64_t>(group.candidates.size())", reconcile)
+        self.assertIn("funding.interiors.begin(), funding.interiors.end(), entry.resident.id)",
+                      candidates)
+        self.assertEqual(function(reconcile, "if (demand < funded.windows)"),
+                         "region.debt = std::min(region.debt, demand * world::water_share::kQ32);")
+        native = (ROOT / "test/common/RegionalWater_test.cpp").read_text(encoding="utf-8")
+        regression = function(native, "TEST(RegionalWaterAdmission, "
+                              "SleepingInteriorRefundsExcludeBorderOnlyDemandAndCannotStarveSources)")
+        for token in ("{31, 32, 34, 36}", "tick <= 32", "ledger.schedule(WorldClock(tick))",
+                      "UpdateRegionalFromSimulation(", "completed, 480)", "work.visits",
+                      "3 * world::water_share::kQ32 / 4;",
+                      "const auto previous = ledger.water_debts().find({1, 0});",
+                      "if (tick == 8)", "EXPECT_GT(first_steps, 0u);",
+                      "EXPECT_GT(work.source_mm, 0);", "EXPECT_GT(refunds, 0u);"):
+            self.assertIn(token, regression)
+        self.assertIn("const bool second_funded = "
+                      "ledger.records().at({1, 0}).water_cursor != cursor;", regression)
+        self.assertEqual(function(regression, "if (second_executed)"),
+                         "EXPECT_TRUE(second_funded); "
+                         "EXPECT_EQ(carried + world::water_share::kQ32, credited);")
+        self.assertEqual(function(regression, "else if (second_funded)"),
+                         "++refunds; EXPECT_EQ(carried, 0u);")
+        self.assertIn("else { EXPECT_EQ(carried, credited); }", regression)
+        self.assertNotIn("Planning::Build(", regression)
+
+    def test_simulation_filters_large_due_schedules_before_both_planning_passes(self):
+        source = (ROOT / "src/luminumbra_common/systems/RegionalWater.cpp").read_text(
+            encoding="utf-8")
+        update = function(source, "void WaterSystem::UpdateRegionalFromSimulation(")
+        self.assertIn("schedule.due.size() > world::ActiveRegionLedger::kMaxRegions", update)
+        self.assertNotIn("schedule.due.size() > RegionalWater::kMaxSimulationColumns", update)
+        self.assertIn("const auto selected_schedule = RegionalWater::FilterSchedule(columns, schedule);",
+                      update)
+        planning = update[update.index("auto plan = RegionalWater::BuildPlan("):]
+        self.assertEqual(planning.count("RegionalWater::BuildPlan("), 2)
+        self.assertEqual(planning.count("selected_schedule,"), 2)
+        filtered = function(source, "world::RegionSchedule FilterSchedule(")
+        self.assertIn("std::map<RegionKey, bool> owners;", filtered)
+        self.assertIn("i < columns.size", filtered)
+        self.assertIn("owners.emplace(owner, false);", filtered)
+        self.assertIn("const auto found = owners.find(owner);", filtered)
+        self.assertEqual(function(filtered, "if (found->second)"), "Refuse();")
+        self.assertIn("filtered.due.reserve(owners.size());", filtered)
+        self.assertIn("for (const auto& [owner, due] : owners)", filtered)
+        self.assertIn("filtered.due.push_back(owner);", function(filtered, "if (due)"))
+        self.assertNotIn("= schedule;", filtered)
+        self.assertNotIn("schedule.due.begin()", filtered)
+        native = (ROOT / "test/common/RegionalWater_test.cpp").read_text(encoding="utf-8")
+        regression = function(native, "TEST(RegionalWaterAdmission, "
+                              "LargeLedgerSchedulesFundOnlySelectedDueOwnersInCanonicalOrder)")
+        for token in ("{false, true}", "{0u, 1u, 2u, 3u}", "x < 1024",
+                      "ledger.schedule(WorldClock(1))", "std::erase(schedule.due, RegionKey{2, 0});",
+                      "ASSERT_GT(schedule.due.size(), Planning::kMaxSimulationColumns);",
+                      "ASSERT_NO_THROW(water.UpdateRegionalFromSimulation(",
+                      "EXPECT_EQ(work.visits.size(), due_count);",
+                      "EXPECT_EQ(work.allocated_windows, due_count);",
+                      "EXPECT_EQ(work.participants_visited, due_count);",
+                      "ledger.records().at({x, 0}).water_cursor",
+                      "EXPECT_EQ(ledger.encode(), expected_ledgers[selection]);"):
+            self.assertIn(token, regression)
+        invalid = function(native, "TEST(RegionalWaterAdmission, "
+                           "InvalidContextRefusesBeforeReadingOrPublishing)")
+        self.assertIn("schedule.due.resize(ActiveRegionLedger::kMaxRegions + 1);", invalid)
+        self.assertIn("schedule.due.push_back({0, 0});", invalid)
+
     def test_eviction_ownership_probe_excludes_streaming_residency(self):
         session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(
             encoding="utf-8")
@@ -100,6 +299,222 @@ class RegionAuthorityWiring(unittest.TestCase):
             expected = 1 if rel == "test/CMakeLists.txt" else 0
             self.assertEqual(text.count(seam_name), expected, rel)
 
+    def test_regional_water_is_dormant_until_authority_profile_opt_in(self):
+        session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(
+            encoding="utf-8")
+        for name, operation in (
+                ("void GameSession::ApplyWaterResolutionWiring(", "SetRegionalScheduling"),
+                ("void GameSession::UpdateRegionalWaterFromSimulation(",
+                 "UpdateRegionalFromSimulation"),
+                ("void GameSession::RestoreWorldClock(", "ResetRegionalTimeline"),
+                ("void GameSession::AdoptWorldStateFrom(", "clear_world")):
+            with self.subTest(name=name):
+                body = function(session, name)
+                self.assertIn("m_activeRegionsEnabled && m_authorityProfile.regional_water", body)
+                self.assertIn(operation, body)
+        resolution = function(session, "void GameSession::ApplyWaterResolutionWiring(")
+        self.assertIn("SetRegionalScheduling(m_activeRegionsEnabled && "
+                      "m_authorityProfile.regional_water);", resolution)
+        tick = function(session, "std::uint32_t GameSession::TickSimulation(")
+        helper = function(session, "void GameSession::UpdateRegionalWaterFromSimulation(")
+        gate = "if (m_activeRegionsEnabled && m_authorityProfile.regional_water && m_waterSystem)"
+        water = function(helper, gate)
+        self.assertTrue(helper.startswith(gate))
+        self.assertIn("UpdateRegionalFromSimulation( m_registry, anchors, m_activeRegionLedger, "
+                      "m_regionSchedule, m_regionCompletedWork);", water)
+        self.assertEqual(tick.count("UpdateRegionalWaterFromSimulation();"), 1)
+        self.assertNotIn("UpdateRegionalFromSimulation(", tick)
+        self.assertLess(tick.index("UpdateRegionalWaterFromSimulation();"),
+                        tick.index("PublishRegionCompletedWork("))
+        for token in ("snapshot_", "streamed", "camera", "resident", "for (", "while ("):
+            self.assertNotIn(token, water)
+        for name in ("void GameSession::RestoreWorldClock(",
+                     "void GameSession::AdoptWorldStateFrom("):
+            guarded = function(function(session, name),
+                               "if (m_activeRegionsEnabled && m_authorityProfile.regional_water")
+            self.assertIn("ResetRegionalTimeline" if "Clock" in name else "clear_world", guarded)
+
+    def test_regional_water_follows_foliage_and_callbacks_before_final_work_publication(self):
+        session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(
+            encoding="utf-8")
+        tick = function(session, "std::uint32_t GameSession::TickSimulation(")
+        tail = tick[tick.index("const auto deliver_events"):]
+        idle = function(tail, "if (!foliage_step)")
+        self.assertEqual(idle, "deliver_events();")
+        active = function(tail, "if (foliage_step)")
+        self.assertLess(active.index("foliage_step->Commit(*this);"),
+                        active.index("deliver_events();"))
+        idle_ticks = function(session, "void CompleteIdleTicks(")
+        self.assertEqual(function(idle_ticks, "if (blocked)"),
+                         "RestoreUnpublishedTicks(session);")
+        self.assertIn("else { CommitTicks(session); }", idle_ticks)
+        self.assertIn("m_foliageStep->CompleteIdleTicks(*this);", tail)
+        ordered = ("if (!foliage_step)", "PublishRegionConsumers(",
+                   "m_regionalFieldView = nullptr;", "foliage_step->Commit(*this);",
+                   "UpdateRegionalWaterFromSimulation();", "PublishRegionCompletedWork(")
+        for before, after in zip(ordered, ordered[1:]):
+            self.assertLess(tail.index(before), tail.index(after))
+        self.assertIn("if (m_regionFault) { return i + 1; } "
+                      "UpdateRegionalWaterFromSimulation();", tail)
+        self.assertEqual(tail.count("PublishRegionCompletedWork("), 1)
+        consumers = function(session, "void GameSession::PublishRegionConsumers(")
+        legacy = function(consumers, "if (!m_authorityProfile.regional_water)")
+        self.assertEqual(legacy, "SettleWaterAuthority(defer_water_authority);")
+        self.assertIn("foliage->PreparePublication(*this);", consumers)
+        self.assertIn("m_fieldPages.adopt_scheduled_pages(std::move(*fields));", consumers)
+        self.assertIn("energy->transaction.commit();", consumers)
+        self.assertIn("const auto completed = m_authorityProfile.regional_water "
+                      "? std::span<const RegionWork>{} "
+                      ": std::span<const RegionWork>{m_regionCompletedWork};", consumers)
+        self.assertIn("prepare_energy_work(ages, completed, next_id)", consumers)
+        publish = function(session, "void GameSession::PublishRegionCompletedWork(")
+        self.assertEqual(function(publish, "if (!m_activeRegionsEnabled || "
+                                  "!m_authorityProfile.regional_water)"), "return;")
+        self.assertEqual(publish.count("SettleWaterAuthority(defer_water_authority);"), 1)
+        self.assertLess(publish.index("if (m_regionFault)"),
+                        publish.index("prepare_energy_work({}, m_regionCompletedWork)"))
+        self.assertLess(publish.index("m_activeRegionLedger.commit_energy_work();"),
+                        publish.index("m_regionCompletedWork.clear();"))
+        self.assertNotIn("m_regionalFieldView", publish)
+        native = (ROOT / "test/common/RegionalWater_test.cpp").read_text(encoding="utf-8")
+        case = function(native, "TEST(RegionalWaterSession, "
+                        "CallbackSourcesAffectCurrentTickWithActiveAndIdleFoliage)")
+        for token in ("{false, true}", "{&idle, &active}", "subscribe(",
+                      "emplace<Components::FlowingWaterSourceComponent>",
+                      "remove<Components::FlowingWaterSourceComponent>",
+                      "EXPECT_GT(work.source_mm, 0);", "EXPECT_EQ(work.source_mm, 0);",
+                      "idle.ComputeChunkStateHash(), active.ComputeChunkStateHash()"):
+            self.assertIn(token, case)
+        death = function(native, "TEST(RegionalWaterSession, "
+                         "StagedSourceDeathPrecedesCurrentTickWater)")
+        self.assertIn("EXPECT_FALSE(registry.valid(plant));", death)
+        self.assertIn("EXPECT_EQ(session.GetWaterSystem()->regional_work().source_mm, 0);", death)
+        fault = function(native, "TEST(RegionalWaterSession, "
+                         "CallbackFaultsStopBeforeWaterOnBothFoliagePaths)")
+        for token in ("{false, true}", "failure < 3", "throw std::runtime_error(", "throw 7;",
+                      "find_authoritative_chunk({100, 0, 100})",
+                      "EXPECT_EQ(session.GetWaterSystem()->regional_work(), before);"):
+            self.assertIn(token, fault)
+
+    def test_committed_water_loading_state_settles_on_both_fallback_paths(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        inspect = function(source, "SHIELD_WorldSystem::inspect_water_column(")
+        self.assertEqual(inspect.count("read_committed_chunk(coords)"), 1)
+        self.assertLess(inspect.index("Regional water column is still loading"),
+                        inspect.index("read_committed_chunk(coords)"))
+        guard = "if (committed && committed->get_state() == ChunkState::Loading)"
+        self.assertIn(guard, inspect)
+        normalize = function(inspect, guard)
+        self.assertEqual(normalize, "committed->set_state(ChunkState::Idle);")
+        self.assertLess(inspect.index(normalize), inspect.index("return committed;"))
+        native = (ROOT / "test/common/WaterSeedInputs_test.cpp").read_text(encoding="utf-8")
+        case = function(native, "TEST(WaterSeedInputs, "
+                        "CommittedLoadingColumnsSettleBeforeAdmissionAcrossCacheStates)")
+        for token in ("cache < 4", "ChunkState::Loading, ChunkState::Idle, ChunkState::Ready",
+                      "fixture.world.inspect_water_column(IVec3(0))",
+                      "fixture.world.resolve_water_column(IVec3(0))",
+                      "EXPECT_EQ(reads, reads_after_admission);",
+                      "EXPECT_FALSE(fixture.world.durable_read_failed());"):
+            self.assertIn(token, case)
+
+    def test_regional_water_uses_simulation_anchors_and_scheduler_decisions(self):
+        session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(
+            encoding="utf-8")
+        anchors = function(session, "RegionalWaterAnchors(")
+        self.assertEqual(function(anchors, "if (replicated)"), "return *replicated;")
+        self.assertEqual(function(anchors, "if (local)"), "return {&*local, 1};")
+        self.assertTrue(anchors.endswith("return {};"))
+        self.assertLess(anchors.index("if (replicated)"), anchors.index("if (local)"))
+        update = function(session, "void GameSession::UpdateRegionalWaterFromSimulation(")
+        self.assertIn("RegionalWaterAnchors(m_replicatedSimulationAnchors, "
+                      "m_activeRegionLedger.local_anchor())", update)
+        owner = function(session, "bool GameSession::ScentOwnerDue(")
+        self.assertIn("record.last_decision == m_regionSchedule.tick", owner)
+        self.assertNotIn("last_ticked", owner)
+        regional = (ROOT / "src/luminumbra_common/systems/RegionalWater.cpp").read_text(
+            encoding="utf-8")
+        candidates = function(regional, "void PlanCandidates(")
+        self.assertIn("auto due = schedule.due;", candidates)
+        self.assertNotIn("last_ticked", candidates)
+
+    def test_regional_water_reload_resets_execution_guard_only_at_timeline_boundary(self):
+        session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(
+            encoding="utf-8")
+        restore = function(session, "void GameSession::RestoreWorldClock(")
+        self.assertLess(restore.index("m_simulationClock.reset(clock.tick());"),
+                        restore.index("ResetRegionalTimeline();"))
+        adopt = function(session, "void GameSession::AdoptWorldStateFrom(")
+        self.assertLess(adopt.index("clear_world(m_physicsSystem.get());"),
+                        adopt.index("replace_durable_chunks(saved.durable_inventory);"))
+        self.assertIn("RestoreWorldClock(saved.clock);", adopt)
+        water = (ROOT / "src/luminumbra_common/systems/WaterSystem.cpp").read_text(
+            encoding="utf-8")
+        reset = function(water, "void WaterSystem::ResetRegionalTimeline(")
+        for token in ("m_last_regional_tick.reset();", "m_regional_work = {};",
+                      "m_mesh_invalidations.clear();", "m_active_chunks = nullptr;",
+                      "m_water_activity_cache.clear();"):
+            self.assertIn(token, reset)
+        regional = (ROOT / "src/luminumbra_common/systems/RegionalWater.cpp").read_text(
+            encoding="utf-8")
+        for name in ("void WaterSystem::UpdateRegionalFromSimulation(",
+                     "void WaterSystem::UpdateRegional("):
+            self.assertIn("m_last_regional_tick && schedule.tick <= *m_last_regional_tick",
+                          function(regional, name))
+            self.assertNotIn("ResetRegionalTimeline", function(regional, name))
+
+    def test_regional_water_resizing_is_funded_for_boot_streaming_and_cold_columns(self):
+        water = (ROOT / "src/luminumbra_common/systems/WaterSystem.cpp").read_text(
+            encoding="utf-8")
+        migration = function(water, "std::size_t WaterSystem::MigrateChunksToSimResolution(")
+        self.assertEqual(function(migration, "if (m_regional_scheduling)"), "return 0;")
+        self.assertLess(migration.index("if (m_regional_scheduling)"),
+                        migration.index("for (const auto& entry : chunks)"))
+        world = SOURCE.read_text(encoding="utf-8")
+        helper = function(world, "void SHIELD_WorldSystem::migrate_restored_water_column(")
+        self.assertIn("MigrateChunksToSimResolution(restored);", helper)
+        for name in ("bool SHIELD_WorldSystem::restore_authoritative_chunk(",
+                     "SHIELD_WorldSystem::resolve_water_column("):
+            self.assertIn("migrate_restored_water_column(chunk);", function(world, name))
+        native = (ROOT / "test/common/RegionalWater_test.cpp").read_text(encoding="utf-8")
+        parity = function(native, "TEST(RegionalWaterAdmission, "
+                          "SleepingResizedSavedColumnsHaveTheSameColdAndRestoredEligibility)")
+        self.assertIn("EXPECT_EQ(chunk->current_water_resolution.load(), 4);", parity)
+        self.assertIn("EXPECT_EQ(water.regional_work().preparation_cells, 256u);", parity)
+        self.assertIn("EXPECT_EQ(water.regional_work().total_cells, 512u);", parity)
+
+    def test_session_water_regressions_are_reachable_and_registered(self):
+        native = (ROOT / "test/common/WaterSeedInputs_test.cpp").read_text(encoding="utf-8")
+        for case in ("SessionRegionalParticipantsIgnoreCameraStreamingAndWorkerReadiness",
+                     "DefaultAuthorityProfileKeepsLegacyWaterWithActiveRegionsOn",
+                     "RegionalPressureDefersIdenticallyWithOppositeRendererResidency",
+                     "RegionalWaterRewindMatchesUninterruptedSavedTimeline",
+                     "RegionalSimulationAnchorsPreferReplicatedIncludingEmpty",
+                     "RegionalSavedResolutionParityAcrossBootStreamingAndColdResolution",
+                     "RegionalWaterInvalidSourcesLatchFaultBeforeAdmission",
+                     "RegionalWaterProfileIsDormantWithActiveRegionsOff"):
+            with self.subTest(case=case):
+                regression = function(native, "TEST(WaterSeedInputs, " + case + ")")
+                self.assertLess(regression.index("JobSystem jobs;"),
+                                regression.index("world::GameSession "))
+                self.assertLess(regression.index("jobs.startup(1);"),
+                                regression.index("world::GameSession "))
+                self.assertIn("SetJobSystem(&jobs);", regression)
+                self.assertIn("TickSimulation(SECONDS_PER_TICK)", regression)
+        parity = function(native, "TEST(WaterSeedInputs, "
+                          "RegionalSavedResolutionParityAcrossBootStreamingAndColdResolution)")
+        setup = function(native, "void PrepareRegionalWaterSnapshot(")
+        self.assertIn("ASSERT_NO_FATAL_FAILURE( PrepareRegionalWaterSnapshot(", parity)
+        for token in ("{false, true}", "chunk->is_water_sleeping.store(sleeping);",
+                      "chunk->current_water_resolution.store(8);",
+                      "sim_resolution(), 16", "restore_authoritative_chunk(coords)",
+                      "MigrateWaterSimResolution(), 0u", "same_water_state(*second)",
+                      "GetActiveRegionLedger().encode()", "ComputeChunkStateHash()",
+                      "SerializeChunkRecordPayloadJson(*first)"):
+            self.assertIn(token, parity + setup)
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("common/WaterSeedInputs_test.cpp", cmake)
+        self.assertIn("gtest_discover_tests(${_lum_gtest_target}", cmake)
+
     def test_default_eviction_preserves_legacy_residency_probe(self):
         session = (ROOT / "src/luminumbra_common/world/GameSession.cpp").read_text(
             encoding="utf-8")
@@ -113,13 +528,14 @@ class RegionAuthorityWiring(unittest.TestCase):
         header = (ROOT / "src/luminumbra_common/world/GameSession.h").read_text(
             encoding="utf-8")
         self.assertEqual(function(header, "struct AuthorityProfileOptions"),
-                         "bool residency_free_eviction = false;")
+                         "bool residency_free_eviction = false; bool regional_water = false;")
         self.assertIn("const AuthorityProfileOptions m_authorityProfile;", header)
         self.assertIn(": GameSession(AuthorityProfileOptions{}, AuthorityProfileTag{}) {}", session)
         self.assertIn(": m_authorityProfile(authority_profile)", session)
-        # Construction and the single probe gate are its only production uses.
-        # In particular, preparation, config, hashes and save writers cannot read it.
-        self.assertEqual(session.count("m_authorityProfile"), 2)
+        # Construction, eviction and nine water execution/publication gates are the only uses.
+        # Config, hashes and save writers cannot read this dormant profile.
+        self.assertEqual(session.count("m_authorityProfile"), 11)
+        self.assertEqual(session.count("m_authorityProfile.regional_water"), 9)
         self.assertEqual(session.count("residency_free_eviction"), 1)
         native = (ROOT / "test/common/GameSessionHeadlessWorld_test.cpp").read_text(
             encoding="utf-8")

@@ -785,6 +785,13 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
             }
         }
         if (m_session->ActiveRegionsEnabled() && m_continuationOptions.owner_continuation) {
+            if (!m_session->ReplicatedSimulationAnchorsReserved(
+                    Systems::PhysicsSystem::kMaxRestoredAvatars)) {
+                // A world reload resets session storage after boot reserved it.
+                std::vector<Vec3> simulation_anchors;
+                simulation_anchors.reserve(Systems::PhysicsSystem::kMaxRestoredAvatars);
+                m_session->SetReplicatedSimulationAnchors(std::move(simulation_anchors));
+            }
             m_session->SetOwnerContinuationSimulationAnchors(m_ownerStreamingAnchors);
         } else if (m_session->ActiveRegionsEnabled()) {
             std::vector<Vec3> anchors;

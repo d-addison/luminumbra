@@ -2,6 +2,7 @@
 #include "../DiagnosticDrawTable.h"
 #include "../FarWorldReplay.h"
 #include "../GBufferTargets.h"
+#include "DebugViewPass.h"
 #include "StaticDrawPass.h"
 #include "core/Profiler.h"
 #include "rendering/AttributedGl.h"
@@ -370,6 +371,8 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
     GBufferDiagnosticAttachment diagnostic_attachment(m_gbuffer,
                                                       {ctx.internal_w(), ctx.internal_h()});
 
+    DebugViewPass::SurfaceFrame surface_frame(ctx, m_gbuffer);
+
     //  isolation/layer mode: skip the draws whose layer bit is cleared so an
     // isolated subsystem reads ALONE against the SkyboxPass backdrop. The gbuffer
     // is ALWAYS cleared first, so suppressing a sub-pass just leaves cleared pixels
@@ -402,6 +405,7 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
         // Pass 2: Render all instanced static meshes
         geometry_pass_static_meshes(ctx, input, registry, camera, fp, stats);
         if (authored) {
+            DebugViewPass::unsupported_surface();
             const auto authored_stats =
                 m_authored_pass->Render(*input.authored_view, input.authored_draws, m_gbuffer);
             stats.authored_draws += authored_stats.draws;
@@ -413,6 +417,31 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
     // palettes from the fixed-tick animation runtime, GPU skinning).
     if (iso.renders(SH::IsolationLayer::Skinned)) {
         geometry_pass_skinned_meshes(ctx, input, registry, camera, fp, stats);
+    }
+
+    if (DebugViewPass::geometry_requested() &&
+        DebugViewPass::replay_mode(DebugViewPass::geometry_view()) && !diagnostic_capture &&
+        !ctx.frozen_replay) {
+        // One opt-in replay of participating deferred draws, no clear, no production writes.
+        // Keep the normal draw statistics; diagnostics never count as scene geometry.
+        const double production_static_cpu_ms = m_last_static_prop_cpu_ms;
+        ReplayRollback restore_timing([this, production_static_cpu_ms]() noexcept {
+            m_last_static_prop_cpu_ms = production_static_cpu_ms;
+        });
+        DebugViewPass::SurfaceFrame replay(ctx, m_gbuffer, true);
+        if (replay.ready()) {
+            GBufferDrawStats replay_stats;
+            if (iso.renders(SH::IsolationLayer::Terrain)) {
+                geometry_pass_chunks(ctx, input, camera, fp, replay_stats);
+                geometry_pass_static_meshes(ctx, input, registry, camera, fp, replay_stats);
+                if (authored) {
+                    DebugViewPass::unsupported_surface();
+                }
+            }
+            if (iso.renders(SH::IsolationLayer::Skinned)) {
+                geometry_pass_skinned_meshes(ctx, input, registry, camera, fp, replay_stats);
+            }
+        }
     }
 
     if (!diagnostic_capture) {
@@ -430,13 +459,20 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
     auto* capture = GBufferDiagnosticCapture::Current();
     FarWorldDiagnosticDraw diagnostic_draw(capture);
     FarWorldPassUniforms diagnostic_uniforms;
+    const bool surface = DebugViewPass::geometry_requested();
+    if (surface && !capture) {
+        shader = DebugViewPass::surface_variant(
+            shader, input.far_selection.effective == FarWorldMode::Ladder);
+    }
     if (capture) {
         shader = capture->variant(shader, input.far_selection.effective == FarWorldMode::Ladder);
+    }
+    if (capture || surface) {
         if (shader) {
             diagnostic_uniforms.Cache(*shader);
         }
     }
-    auto& uniforms = capture ? diagnostic_uniforms
+    auto& uniforms = (capture || surface) ? diagnostic_uniforms
                      : input.far_selection.effective == FarWorldMode::Ladder
                          ? m_geometry_ladder_uniforms
                          : m_geometry_far_uniforms;
@@ -543,11 +579,17 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
             if (!uniforms.Prepare(command)) {
                 return false;
             }
+            // The ladder installs GREATER + writable depth before visiting draws.
+            // Reapply the diagnostic depth policy after that installation.
+            DebugViewPass::replay_depth_policy();
             if (capture) {
                 diagnostic_draw.prepare(command);
             }
             return true;
         });
+    if (capture && far_stats.refused) {
+        capture->abort();
+    }
     stats.far_region_draws += far_stats.draws;
     stats.far_indices += far_stats.indices;
     stats.far_water_indices += far_stats.water_indices;
@@ -662,13 +704,20 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     Shader* shader = instanced_static_mesh_shader(input.far_selection.effective).get();
     auto* capture = GBufferDiagnosticCapture::Current();
     FarWorldPassUniforms diagnostic_uniforms;
+    const bool surface = DebugViewPass::geometry_requested();
+    if (surface && !capture) {
+        shader = DebugViewPass::surface_variant(
+            shader, input.far_selection.effective == FarWorldMode::Ladder);
+    }
     if (capture) {
         shader = capture->variant(shader, input.far_selection.effective == FarWorldMode::Ladder);
+    }
+    if (capture || surface) {
         if (shader) {
             diagnostic_uniforms.Cache(*shader);
         }
     }
-    auto& uniforms = capture ? diagnostic_uniforms
+    auto& uniforms = (capture || surface) ? diagnostic_uniforms
                      : input.far_selection.effective == FarWorldMode::Ladder
                          ? m_static_ladder_uniforms
                          : m_static_far_uniforms;
@@ -1143,6 +1192,7 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         if (capture) {
             capture->unsupported("tree_impostor_fragment_output_unavailable", 3);
         }
+        DebugViewPass::unsupported_surface();
         if (!UseDrawProgram(m_tree_impostor_shader.get(), stats)) {
             return;
         }
@@ -1195,13 +1245,20 @@ void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
     Shader* shader = skinned_mesh_shader(input.far_selection.effective).get();
     auto* capture = GBufferDiagnosticCapture::Current();
     FarWorldPassUniforms diagnostic_uniforms;
+    const bool surface = DebugViewPass::geometry_requested();
+    if (surface && !capture) {
+        shader = DebugViewPass::surface_variant(
+            shader, input.far_selection.effective == FarWorldMode::Ladder);
+    }
     if (capture) {
         shader = capture->variant(shader, input.far_selection.effective == FarWorldMode::Ladder);
+    }
+    if (capture || surface) {
         if (shader) {
             diagnostic_uniforms.Cache(*shader);
         }
     }
-    auto& uniforms = capture ? diagnostic_uniforms
+    auto& uniforms = (capture || surface) ? diagnostic_uniforms
                      : input.far_selection.effective == FarWorldMode::Ladder
                          ? m_skinned_ladder_uniforms
                          : m_skinned_far_uniforms;
