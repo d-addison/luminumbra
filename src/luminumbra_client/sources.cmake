@@ -156,6 +156,7 @@ set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/ui/gl3/RmlUi_Renderer_GL3.
 # bodies moved out of main_client.cpp's frame loop (core/ScenarioRunner.h is
 # the seam main() talks to).
 set(CLIENT_QA_SOURCES
+    ${CMAKE_CURRENT_LIST_DIR}/core/ScenarioRunnerFactoryQa.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/RuntimeScenarioHarness.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/AtmosphereAudio.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/CloudShadow.cpp
@@ -188,10 +189,18 @@ set(CLIENT_QA_SOURCES
 # Third-party implementation sources are owned by their dependency targets.
 set(CLIENT_VENDOR_SOURCES)
 
-# Main client executable sources.
+# Shared client main body.
 set(CLIENT_APP_SOURCES
-    ${CMAKE_CURRENT_LIST_DIR}/../startup/RuntimeEntry.cpp
     ${CMAKE_CURRENT_LIST_DIR}/main_client.cpp
+)
+
+# Baseline startup wrapper compiled for each executable.
+set(CLIENT_ENTRY_SOURCES
+    ${CMAKE_CURRENT_LIST_DIR}/../startup/RuntimeEntry.cpp
+)
+
+set(CLIENT_SHIPPING_SOURCES
+    ${CMAKE_CURRENT_LIST_DIR}/core/ScenarioRunnerFactoryShipping.cpp
 )
 
 # Preserve the implementation TU's ISA while routing both client binaries
@@ -199,7 +208,7 @@ set(CLIENT_APP_SOURCES
 set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/main_client.cpp PROPERTIES
     COMPILE_DEFINITIONS "main=LuminumbraApplicationMain")
 
-# Both client executables need room for the entry TU's COFF sections on MSVC.
+# The shared main body needs room for its COFF sections on MSVC.
 if(MSVC)
     set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/main_client.cpp PROPERTIES
         COMPILE_OPTIONS "/bigobj")
@@ -215,6 +224,7 @@ set(CLIENT_SOURCES
     ${CLIENT_QA_SOURCES}
     ${CLIENT_VENDOR_SOURCES}
     ${CLIENT_APP_SOURCES}
+    ${CLIENT_ENTRY_SOURCES}
 )
 
 # RuntimeScenarioHarness.cpp instantiates enough EnTT storage

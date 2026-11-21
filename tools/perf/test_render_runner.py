@@ -265,7 +265,31 @@ class RenderRunnerTests(unittest.TestCase):
     def test_v4_save_load_success(self):
         self.validate_save_load_capture(audio=True)
 
+    def assert_shipping_scenario_refusal(self):
+        for scenario in ('world_visual_sweep', 'unknown_scenario'):
+            for option in (['--scenario', scenario], ['--scenario=' + scenario]):
+                with self.subTest(option=option):
+                    log = self.log_path('scenario-refused')
+                    artifact = self.root / 'scenario-result.json'
+                    result, errors = _run_process(
+                        [str(OPTIONS.client), '--no-audio', *option], cwd=self.root,
+                        environment=self.environment, log=log, artifact=artifact,
+                        retained=log.with_suffix('.json'),
+                        receipt_path=log.with_suffix('.process.json'), expected_exit=6)
+                    output = log.read_text(encoding='utf-8', errors='replace')
+                    self.assertEqual(result.returncode, 6, output)
+                    self.assertIn(
+                        f"--scenario '{scenario}' requested but this binary was built without "
+                        'the QA scenario harness. Use luminumbra_client_qa_app for scenario runs.',
+                        output)
+                    self.assertIn(
+                        'error: --scenario is not available in luminumbra_client_app; '
+                        'use luminumbra_client_qa_app (exit 6)\n', output)
+                    self.assertFalse(artifact.exists())
+                    _require_evidence(errors)
+
     def test_stream_radius_refusal(self):
+        self.assert_shipping_scenario_refusal()
         flag = '--render-benchmark-stream-radius'
         script = self.short_save_load_script()
         for value in ('', '-1', '13', '0junk', '1e38', '99999999999999999999'):

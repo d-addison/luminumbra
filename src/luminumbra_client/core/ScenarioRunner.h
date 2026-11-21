@@ -112,4 +112,8 @@ public:
 
 std::unique_ptr<ScenarioRunner> CreateScenarioRunner(const ScenarioFrameContext& context);
 
+// Selected at link time: shipping returns null; QA returns CreateScenarioRunner.
+using ScenarioRunnerFactory = std::unique_ptr<ScenarioRunner> (*)(const ScenarioFrameContext&);
+ScenarioRunnerFactory GetScenarioRunnerFactory();
+
 } // namespace Luminumbra::Client::ScenarioHarness

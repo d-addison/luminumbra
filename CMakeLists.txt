@@ -264,7 +264,7 @@ add_dependencies(process_assets copy_data)
 # Add the main game source code subdirectory
 add_subdirectory(src)
 
-foreach(CLIENT_EXE_TARGET IN ITEMS luminumbra_client_app luminumbra_client_qa_app)
+foreach(CLIENT_EXE_TARGET IN ITEMS luminumbra_client_app luminumbra_client_qa_app luminumbra_client_main)
   target_compile_definitions(${CLIENT_EXE_TARGET} PRIVATE
       LUMINUMBRA_BUILD_DATA_DIR="${DATA_OUTPUT_DIR}"
       LUMINUMBRA_SOURCE_DATA_DIR="${DATA_SOURCE_DIR}"
@@ -297,6 +297,8 @@ endif()
 foreach(FIRST_PARTY_TARGET IN ITEMS
   asset_processor
   luminumbra_common
+  luminumbra_client_main
+  luminumbra_client_shipping
   luminumbra_client_app
   luminumbra_client_qa_app
   world_generation_test
