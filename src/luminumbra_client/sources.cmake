@@ -50,6 +50,8 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/player/PlayerController.cpp
 
     # Rendering
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/GpuFrameArena.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/GpuFrameArena.h
     ${CMAKE_CURRENT_LIST_DIR}/rendering/AsyncReadbackRing.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/CaptureHooks.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/DiagnosticCapture.cpp
