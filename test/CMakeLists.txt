@@ -432,6 +432,7 @@ target_link_libraries(game_assets_test PRIVATE gtest_main nlohmann_json)
 # so this target needs no client lib / GL link -- just the include root + gtest.
 add_executable(tree_lod_test
     rendering/tree_lod_test.cpp
+    rendering/StaticPropSpatialIndex_test.cpp
 )
 
 target_include_directories(tree_lod_test PRIVATE
@@ -475,6 +476,18 @@ target_link_libraries(capture_feature_profile_test PRIVATE
     gtest_main luminumbra_common nlohmann_json glm)
 luminumbra_configure_first_party_target(capture_feature_profile_test)
 
+# GL-free sweep pins, profile refusal and continuous exact-tick transport protocol.
+add_executable(temporal_sweep_test
+    rendering/temporal_sweep_test.cpp
+    ../src/luminumbra_client/rendering/CaptureFeatureProfile.cpp
+    ../src/luminumbra_client/rendering/DiagnosticCapture.cpp
+    ../src/luminumbra_client/rendering/TemporalAudit.cpp
+    ../src/luminumbra_client/core/RuntimeScenarioConfig.cpp)
+target_include_directories(temporal_sweep_test PRIVATE ../src ../src/luminumbra_client)
+target_link_libraries(temporal_sweep_test PRIVATE
+    gtest_main luminumbra_common nlohmann_json glm)
+luminumbra_configure_first_party_target(temporal_sweep_test)
+
 # GL-free completed-frame bundle publication and runtime admission contracts.
 add_executable(diagnostic_bundle_test
     rendering/diagnostic_bundle_test.cpp
@@ -517,6 +530,13 @@ target_include_directories(mixer_model_test PRIVATE
 target_link_libraries(mixer_model_test PRIVATE
     gtest_main
 )
+
+add_executable(frame_audio_state_test audio/frame_audio_state_test.cpp)
+target_include_directories(frame_audio_state_test PRIVATE ../src ../src/luminumbra_client)
+target_link_libraries(frame_audio_state_test PRIVATE gtest_main glm::glm entt)
+luminumbra_configure_first_party_target(frame_audio_state_test)
+add_test(NAME FrameAudioOwnershipContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/test/tools/test_frame_audio_state_contract.py")
 
 # the day/night-soundscape gating/crossfade and
 # the biome->reverb + delay-proxy mapping math. The header under test
@@ -1641,6 +1661,9 @@ add_executable(regional_scent_allocation_test common/regional_scent_allocation_t
 target_include_directories(regional_scent_allocation_test PRIVATE ../src)
 target_link_libraries(regional_scent_allocation_test PRIVATE gtest_main luminumbra_common)
 
+add_executable(replication_delta_allocation_test common/replication_delta_allocation_test.cpp)
+target_link_libraries(replication_delta_allocation_test PRIVATE gtest_main luminumbra_common)
+
 # Keep throwing allocation replacement isolated from every other test executable.
 add_executable(native_file_ownership_test common/native_file_ownership_test.cpp)
 target_include_directories(native_file_ownership_test PRIVATE ../src ${CMAKE_CURRENT_SOURCE_DIR})
@@ -2203,6 +2226,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     capture_manifest_test
     diagnostic_bundle_test
     capture_feature_profile_test
+    temporal_sweep_test
     # the hemi-octa mapping test was built but never
     # registered — the atlas-bake/shader shared source of truth had zero
     # executing coverage. GL-free pure math, safe in the default lane.
@@ -2212,6 +2236,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     # day/night soundscape + reverb mapping math
     # (CPU-only, GL-free, no audio device).
     environmental_audio_model_test
+    frame_audio_state_test
     # world-dressing placement determinism (CPU-only).
     world_dressing_test
     foliage_cache_prune_test
@@ -2247,6 +2272,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     runtime_world_visual_validation_test
     frontier_gates_test
     regional_scent_allocation_test
+    replication_delta_allocation_test
     native_file_ownership_test
     world_open_refusal_test
     runtime_surface_options_test
