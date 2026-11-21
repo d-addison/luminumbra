@@ -9058,13 +9058,16 @@ TEST(RenderSmokeTest, UnavailableGlassProgramsSkipBeforeAllocatingTargets) {
         SCOPED_TRACE(input);
         ASSERT_TRUE(WriteLayoutShader(accum_fragment, LayoutFragment("u_opaqueScene", input == 0)));
         ASSERT_TRUE(WriteLayoutShader(resolve_fragment, LayoutFragment("u_accum", input == 0)));
-        if (input == 1 || input == 5)
+        if (input == 1 || input == 5) {
             ASSERT_TRUE(fs::remove(accum_fragment));
-        if (input == 2 || input == 5)
+        }
+        if (input == 2 || input == 5) {
             ASSERT_TRUE(fs::remove(resolve_fragment));
-        if (input == 3 || input == 4)
+        }
+        if (input == 3 || input == 4) {
             ASSERT_TRUE(WriteLayoutShader(input == 3 ? accum_fragment : resolve_fragment,
                                           "#version 450 core\nvoid main() {"));
+        }
         LayoutPassTargets targets;
         GlassOitPass pass;
         struct Cleanup {
