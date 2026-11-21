@@ -11,6 +11,35 @@
 #include <utility>
 
 namespace Luminumbra::Rendering {
+
+CaptureFeaturePolicy CaptureFeaturePolicy::Resolve(const CaptureFeatureProfile* profile,
+                                                   bool determinism_fixture) {
+    CaptureFeaturePolicy result;
+    if (profile == nullptr || determinism_fixture ||
+        profile->capability() != CaptureFeatureCapability::Supported) {
+        return result;
+    }
+    // Fixed catalog bound. A supported subset cannot authorize other producers.
+    for (const auto& feature : profile->features()) {
+        if (!feature.requested || feature.effective != true) {
+            return result;
+        }
+    }
+    result.m_admitted = true;
+    return result;
+}
+
+CaptureGameplayFeatures CaptureFeaturePolicy::Apply(const CaptureGameplayFeatures& legacy,
+                                                    bool no_ui) const {
+    CaptureGameplayFeatures result = m_admitted ? CaptureGameplayFeatures{} : legacy;
+    result.ui = legacy.ui && !no_ui;
+    return result;
+}
+
+bool CaptureFeaturePolicy::UseLegacyAtmospherePins() const {
+    return !m_admitted;
+}
+
 namespace {
 using Feature = CaptureFeature;
 using Change = CaptureFeatureChange;
