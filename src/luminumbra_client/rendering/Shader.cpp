@@ -252,12 +252,12 @@ bool Shader::Reload() {
 
 // Helper function to get uniform location from cache or query it if not present
 GLint Shader::getUniformLocation(const std::string& name) const {
-    if (m_uniformLocationCache.find(name) != m_uniformLocationCache.end()) {
-        return m_uniformLocationCache[name];
+    if (const auto it = m_uniformLocationCache.find(name); it != m_uniformLocationCache.end()) {
+        return it->second;
     }
 
     GLint location = glGetUniformLocation(m_id, name.c_str());
-    m_uniformLocationCache[name] = location;
+    m_uniformLocationCache.emplace(name, location);
     return location;
 }
 
