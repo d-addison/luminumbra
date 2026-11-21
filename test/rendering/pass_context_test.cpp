@@ -12,6 +12,7 @@
 //     as cleared.
 #include "luminumbra_client/core/IsolationConfig.h"
 #include "luminumbra_client/rendering/Camera.h"
+#include "luminumbra_client/rendering/Mesh.h"
 #include "luminumbra_client/rendering/RenderContext.h"
 #include "luminumbra_client/rendering/RenderPipeline.h"
 #include "luminumbra_client/rendering/RenderResourceRegistry.h"
@@ -24,7 +25,9 @@
 #include "luminumbra_client/rendering/passes/GroundDecalPass.h"
 #include "luminumbra_client/rendering/passes/LightingPass.h"
 #include "luminumbra_client/rendering/passes/ParticlePass.h"
+#include "luminumbra_client/rendering/passes/PlantProcgenPass.h"
 #include "luminumbra_client/rendering/passes/ShadowPass.h"
+#include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/core/GraphicsPresets.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include <glm/gtc/type_ptr.hpp>
@@ -43,8 +46,10 @@
 #include <array>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <variant>
 #include <vector>
 
 #ifndef LUMINUMBRA_SOURCE_ROOT
@@ -1291,6 +1296,138 @@ TEST(PassContext, ShippingTemporalResolveBuildsHistoryJittersAndResets) {
         ASSERT_TRUE(pipeline.apply_graphics(resolved));
         EXPECT_TRUE(pipeline.taau_history_valid()); // Unchanged application preserves history.
     }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(PassContext, DeferredOnlyDiagnosticPolicyOmitsUnsupportedDrawsForOneAdmittedFrame) {
+    HiddenGlContext gl;
+    ASSERT_TRUE(gl.ready()) << gl.error();
+    using namespace Luminumbra;
+    using namespace Luminumbra::Rendering;
+    using Policy = RenderPipeline::DiagnosticCapturePolicy;
+    ScopedEnv pinned_scale("LUMIN_RENDER_SCALE", "1.0");
+    RenderPipeline pipeline;
+    pipeline.enable_static_model_content(false);
+    ASSERT_TRUE(pipeline.startup(64, 48, LUMINUMBRA_SOURCE_ROOT));
+    pipeline.set_far_world_mode(FarWorldMode::Legacy);
+    pipeline.set_far_lod_enabled(false);
+    pipeline.set_taau_enabled(false);
+    pipeline.set_capture_diagnostics({.enabled = true, .probe = std::nullopt});
+    Systems::TerrainGenParams params;
+    params.biomes_enabled = params.structures_enabled = params.hydro_enabled = false;
+    Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    entt::registry registry;
+    Camera camera({0, 0, 2}, {0, 1, 0}, -90, 0);
+    const std::string mesh_path = "test/diagnostic_policy_triangle.lmesh";
+    pipeline.register_procgen_mesh(mesh_path,
+                                   MeshLoader::CreateFromArrays({{{-2, -2, -1}, {0, 0, 1}, {0, 0}},
+                                                                 {{2, -2, -1}, {0, 0, 1}, {1, 0}},
+                                                                 {{0, 2, -1}, {0, 0, 1}, {.5f, 1}}},
+                                                                {0, 1, 2}));
+    ASSERT_TRUE(pipeline.has_procgen_mesh(mesh_path));
+    const auto prop = registry.create();
+    registry.emplace<Components::TransformComponent>(prop);
+    registry.emplace<Components::StaticMeshComponent>(prop).meshPath = mesh_path;
+    pipeline.render_frame(registry, world, camera, 0.0f);
+    ASSERT_TRUE(pipeline.diagnostic_capture_ready());
+    const auto trace = pipeline.frame_stage_trace();
+    const auto read_depth = [&] {
+        float depth = 0;
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, pipeline.gbuffer().fbo_id);
+        glReadPixels(32, 24, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+        return depth;
+    };
+    const float supported_depth = read_depth();
+    ASSERT_GT(supported_depth, 0.0f);
+    pipeline.render_frame(registry,
+                          world,
+                          camera,
+                          0.0f,
+                          false,
+                          UploadPresentation::Settled,
+                          Policy::DeferredOnlyFixedSite);
+    ASSERT_TRUE(pipeline.diagnostic_capture_ready());
+    EXPECT_FLOAT_EQ(read_depth(), supported_depth);
+
+    Camera mismatched_camera = camera;
+    mismatched_camera.Position.x += 1.0f;
+    EXPECT_FALSE(pipeline.render_far_world_off_pair(mismatched_camera));
+    EXPECT_TRUE(pipeline.diagnostic_capture_ready());
+    EXPECT_TRUE(pipeline.diagnostic_capture_manifest().render_settings.contains("capture_policy"));
+    ASSERT_TRUE(pipeline.render_far_world_off_pair(camera));
+    EXPECT_FALSE(pipeline.diagnostic_capture_ready());
+    EXPECT_FALSE(pipeline.diagnostic_capture_manifest().render_settings.contains("capture_policy"));
+
+    // A visible plant plus active decals/glass would make A4 refuse. The
+    // policy must omit the draws, preserve their inputs, and keep the trace.
+    const std::vector<PlantProcgenPass::Vertex> vertices = {
+        {{-1, -1, 0}, {0, 0, 1}, {0, 0}, {1, 0, 0}},
+        {{1, -1, 0}, {0, 0, 1}, {0, 0}, {1, 0, 0}},
+        {{0, 1, 0}, {0, 0, 1}, {0, 0}, {1, 0, 0}}};
+    pipeline.plant_procgen()->set_plants(vertices, {0, 1, 2}, 1);
+    pipeline.plant_procgen()->set_enabled(true);
+    ScentFieldRenderMirror scent;
+    scent.resize(2);
+    scent.valid = scent.any_scent = true;
+    std::fill(scent.rg.begin(), scent.rg.end(), 1.0f);
+    pipeline.UpdateScentDecals(scent);
+    pipeline.set_glass_panes({GlassPaneItem{}});
+    for (const auto policy : {Policy::DeferredOnlyFixedSite,
+                              Policy::Complete,
+                              Policy::DeferredOnlyFixedSite,
+                              static_cast<Policy>(99)}) {
+        pipeline.render_frame(
+            registry, world, camera, 0.0f, false, UploadPresentation::Settled, policy);
+        const bool deferred = policy == Policy::DeferredOnlyFixedSite;
+        EXPECT_EQ(pipeline.diagnostic_capture_ready(), deferred);
+        EXPECT_EQ(pipeline.frame_stage_trace(), trace);
+        const auto settings = pipeline.diagnostic_capture_manifest().render_settings;
+        EXPECT_EQ(settings.contains("capture_policy"), deferred);
+        if (deferred) {
+            const auto* policy_name = std::get_if<std::string>(&settings.at("capture_policy"));
+            ASSERT_NE(policy_name, nullptr);
+            EXPECT_EQ(*policy_name, "deferred_only_fixed_site");
+            EXPECT_FLOAT_EQ(read_depth(), supported_depth);
+        } else {
+            EXPECT_GT(read_depth(), supported_depth);
+        }
+        EXPECT_TRUE(pipeline.plant_procgen()->enabled());
+        EXPECT_EQ(pipeline.plant_procgen()->index_count(), 3u);
+    }
+    // The default call must retain the refusal after an explicit policy call.
+    pipeline.render_frame(registry,
+                          world,
+                          camera,
+                          0.0f,
+                          false,
+                          UploadPresentation::Settled,
+                          Policy::DeferredOnlyFixedSite);
+    ASSERT_TRUE(pipeline.diagnostic_capture_ready());
+    pipeline.render_frame(registry, world, camera, 0.0f);
+    EXPECT_FALSE(pipeline.diagnostic_capture_ready());
+    EXPECT_FALSE(pipeline.diagnostic_capture_manifest().render_settings.contains("capture_policy"));
+    // No suppression when instrumentation is disarmed, disabled or inadmissible.
+    for (int failure = 0; failure < 3; ++failure) {
+        pipeline.set_diagnostic_capture_armed(failure != 0);
+        pipeline.set_capture_diagnostics({.enabled = failure != 1, .probe = std::nullopt});
+        pipeline.set_taau_enabled(failure == 2);
+        pipeline.render_frame(registry,
+                              world,
+                              camera,
+                              0.0f,
+                              false,
+                              UploadPresentation::Settled,
+                              Policy::DeferredOnlyFixedSite);
+        EXPECT_FALSE(
+            pipeline.diagnostic_capture_manifest().render_settings.contains("capture_policy"));
+        if (failure != 1) {
+            EXPECT_FALSE(pipeline.diagnostic_capture_ready());
+        }
+        EXPECT_GT(read_depth(), supported_depth);
+    }
+    pipeline.end_diagnostic_capture();
+    EXPECT_FALSE(pipeline.diagnostic_capture_manifest().render_settings.contains("capture_policy"));
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }
 

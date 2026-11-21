@@ -1620,7 +1620,7 @@ class FrameAttributionWiring(unittest.TestCase):
                       render)
         self.assertEqual(render.count("m_foliage_pass->begin_ground_frame();"), 1)
         self.assertGreater(render.index("m_foliage_pass->begin_ground_frame();"),
-                           render.index("dispatch_stages(camera);"))
+                           render.index("dispatch_stages(camera, deferred_only_capture);"))
         self.assertTrue(compact(render).endswith("m_foliage_pass->begin_ground_frame();"))
         # Every nested loop uses this common boundary, including callers that do
         # not rebuild foliage themselves (survey, boot metrics, menu screenshots).
@@ -3893,6 +3893,70 @@ class LaterDiagnosticSubmissionWiring(unittest.TestCase):
     def setUp(self):
         self.source = read(CLIENT / "rendering/GBufferTargets.cpp")
         self.attach = block(self.source, "bool GBufferDiagnosticCapture::attach_target(")
+
+    def test_deferred_only_policy_requires_an_admitted_frame_and_is_not_a_default(self):
+        header = read(CLIENT / "rendering/RenderPipeline.h")
+        source = read(CLIENT / "rendering/RenderPipeline.cpp")
+        render = block(source, "void RenderPipeline::render_frame(")
+        predicate = re.search(r"const bool deferred_only_capture\s*=\s*(.*?);", render, re.S).group(1)
+        for admitted in (False, True):
+            for policy in (0, 1, 99):
+                self.assertEqual(cpp_expression(predicate, diagnostic_frame=admitted,
+                                               capture_policy=policy,
+                                               **{"DiagnosticCapturePolicy::DeferredOnlyFixedSite": 1}),
+                                 admitted and policy == 1)
+        self.assertIn("DiagnosticCapturePolicy capture_policy = DiagnosticCapturePolicy::Complete", compact(header))
+        self.assertIn("bool deferred_only_capture = false", header)
+        self.assertIn("dispatch_stages(camera, deferred_only_capture);", render)
+        refusal = block(render, "if (auto* scope = GBufferDiagnosticCapture::Current();")
+        self.assertIn("diagnostic_frame && scope && !deferred_only_capture", render)
+        for reason in ("later_deferred_contributors", "forward_contributors"):
+            self.assertIn(f'scope->unsupported("{reason}")', refusal)
+        end = block(source, "void RenderPipeline::end_diagnostic_capture()")
+        self.assertIn("m_diagnostic_deferred_only = false;", end)
+        manifest = block(source, "CaptureManifestInput RenderPipeline::diagnostic_capture_manifest()")
+        self.assertIn('input.render_settings["capture_policy"] = "deferred_only_fixed_site";',
+                      block(manifest, "if (m_diagnostic_deferred_only)"))
+        self.assertIn("m_diagnostic_deferred_only = deferred_only_capture;", render)
+        # Parity and paired replay call the default dispatcher, so policy cannot leak.
+        self.assertEqual(source.count("dispatch_stages(camera, deferred_only_capture)"), 1)
+        dispatch = block(source, "void RenderPipeline::dispatch_stages(")
+        reset = block(dispatch, "if (!deferred_only_capture && m_diagnostic_deferred_only)")
+        self.assertIn("end_diagnostic_capture();", reset)
+        self.assertLess(dispatch.index("end_diagnostic_capture();"),
+                        dispatch.index("DebugViewPass::controls()"))
+
+    def test_deferred_only_dispatch_omits_every_unsupported_producer_before_submission(self):
+        source = read(CLIENT / "rendering/RenderPipeline.cpp")
+        dispatch = block(source, "void RenderPipeline::dispatch_stages(")
+        predicate = re.search(r"if \((deferred_only_capture &&.*?)\) \{", dispatch, re.S).group(1)
+        omitted = {"plant_procgen", "ground_decals", "water", "waterfall",
+                   "glass_oit_accum", "glass_oit_resolve", "foliage", "particles"}
+        table = block(source, "RenderPipeline::stage_executor_table()")
+        stages = re.findall(r'\{"(\w+)", &RenderPipeline::execute_stage_\w+\}', table)
+        self.assertGreater(len(stages), len(omitted))
+        bindings = {"&RenderPipeline::execute_stage_" + name: name for name in omitted}
+        for enabled in (False, True):
+            for stage in stages:
+                self.assertEqual(cpp_expression(predicate, fn=stage,
+                                               deferred_only_capture=enabled, **bindings),
+                                 enabled and stage in omitted, stage)
+        skip = block(dispatch, "if (deferred_only_capture &&")
+        self.assertIn("record_frame_stage(node.c_str());", skip)
+        self.assertIn("finish_gbuffer_stage();", block(skip,
+                      "if (fn == &RenderPipeline::execute_stage_plant_procgen)"))
+        self.assertIn("continue;", skip)
+        self.assertLess(dispatch.index("if (deferred_only_capture &&"),
+                        dispatch.index("(this->*fn)(camera);"))
+        self.assertIn("finish_gbuffer_stage();", block(source,
+                      "void RenderPipeline::execute_stage_plant_procgen("))
+        epilogue = block(source, "void RenderPipeline::finish_gbuffer_stage()")
+        for operation in ("end_gpu_pass_timer(GpuTimerPass::GBuffer);",
+                          "glBindVertexArray(0);", "glDisable(GL_CULL_FACE);"):
+            self.assertIn(operation, epilogue)
+        native = read(ROOT / "test/rendering/pass_context_test.cpp")
+        self.assertIn("TEST(PassContext, DeferredOnlyDiagnosticPolicyOmitsUnsupportedDrawsForOneAdmittedFrame)",
+                      compact(native))
 
     @staticmethod
     def without_diagnostics(source):

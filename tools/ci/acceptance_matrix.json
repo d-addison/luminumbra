@@ -158,7 +158,7 @@
     {
       "id": "render.temporal-audit-plan",
       "source": "docs/development/visual-diagnostics.md#e1-fixed-camera-time-lapse-audit-runs",
-      "statement": "GL-free admission plans inclusive day/night, 120-second weather and three-day schedules with exact ticks, rational bursts and final-tick holds under 4096-frame and 10-million-tick ceilings. The sequence execution protocol re-admits immutable plans and checks aggregate transport-provided frame/manifest byte reservations against a caller-lowered 512 GiB ceiling before executable steps. It requests and verifies individual simulation ticks, bounds frozen warmup/readiness/settling and presentation substeps, derives calendar phase from ticks and carries explicit lighting controls. Sticky refusal and a final publication acknowledgement prevent partial captures from becoming complete in the protocol. Registered regressions cover schedules, readiness, phase, budgets, clock/transport faults and real creature-brain progression matching ordinary fixed ticking. Both shipping startup parsers still refuse temporal execution before output. Fixed-site app/simulation/A4 transport wiring, enforceable transport byte bounds, weather input, capability checks, existing-frontier native capture and assembly remain pending; no temporal or all-features runtime support is claimed.",
+      "statement": "GL-free admission plans inclusive day/night, 120-second weather and three-day schedules with exact ticks, rational bursts and final-tick holds under 4096-frame and 10-million-tick ceilings. The sequence execution protocol re-admits immutable plans and checks aggregate transport-provided frame/manifest byte reservations against a caller-lowered 512 GiB ceiling before executable steps. It requests and verifies individual simulation ticks, bounds frozen warmup/readiness/settling and presentation substeps, derives calendar phase from ticks and carries explicit lighting controls. Sticky refusal and a final publication acknowledgement prevent partial captures from becoming complete in the protocol. Registered regressions cover schedules, readiness, phase, budgets, clock/transport faults and real creature-brain progression matching ordinary fixed ticking. Both shipping startup parsers still refuse temporal execution before output. Fixed-site app/simulation/A4 transport wiring, enforceable transport byte bounds, weather input, capability checks, existing-frontier native capture and assembly remain pending; no temporal or all-features runtime support is claimed. An explicit per-frame DeferredOnlyFixedSite renderer policy omits unsupported plants, decals, water, waterfalls, glass, foliage and particles only for admitted A4 diagnostic frames, and records deferred_only_fixed_site in capture render settings. Supported deferred geometry and atmospheric stages remain; precipitation and all-features evidence are excluded. Default rendering and other capture dispatch paths retain their refusals. Registered headless and Python source-contract regressions cover the reduced policy; it has no temporal runtime caller and native day/night and weather-cycle verification remain pending.",
       "status": "partial",
       "evidence": [
         {
@@ -168,6 +168,10 @@
         {
           "kind": "ctest",
           "ref": "TemporalAuditSequence.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "PassContext.DeferredOnlyDiagnosticPolicyOmitsUnsupportedDrawsForOneAdmittedFrame"
         },
         {
           "kind": "ctest",

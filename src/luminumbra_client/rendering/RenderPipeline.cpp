@@ -426,6 +426,7 @@ void RenderPipeline::set_capture_diagnostics(const DiagnosticCaptureOptions& opt
 
 void RenderPipeline::end_diagnostic_capture() {
     m_diagnostic_capture.reset();
+    m_diagnostic_deferred_only = false;
 }
 
 bool RenderPipeline::diagnostic_capture_destination_available(
@@ -549,6 +550,9 @@ CaptureManifestInput RenderPipeline::diagnostic_capture_manifest() const {
     input.world_hash.unavailable = "not observed by scenario capture";
     input.width = static_cast<int>(m_screen_width);
     input.height = static_cast<int>(m_screen_height);
+    if (m_diagnostic_deferred_only) {
+        input.render_settings["capture_policy"] = "deferred_only_fixed_site";
+    }
     const auto* snapshot = capture_camera();
     if (!snapshot || !SetCaptureManifestCamera(input, *snapshot)) {
         input.near_plane = 0;
@@ -2818,7 +2822,8 @@ void RenderPipeline::render_frame(entt::registry& registry,
                                   const Camera& camera,
                                   float deltaTime,
                                   bool wireframe,
-                                  UploadPresentation presentation) {
+                                  UploadPresentation presentation,
+                                  DiagnosticCapturePolicy capture_policy) {
     end_diagnostic_capture();
     if (!m_started) {
         return;
@@ -2867,8 +2872,11 @@ void RenderPipeline::render_frame(entt::registry& registry,
                 DiagnosticExtent{m_internal_width, m_internal_height});
         }
     }
-    dispatch_stages(camera);
-    if (auto* scope = GBufferDiagnosticCapture::Current(); diagnostic_frame && scope) {
+    const bool deferred_only_capture =
+        diagnostic_frame && capture_policy == DiagnosticCapturePolicy::DeferredOnlyFixedSite;
+    dispatch_stages(camera, deferred_only_capture);
+    if (auto* scope = GBufferDiagnosticCapture::Current();
+        diagnostic_frame && scope && !deferred_only_capture) {
         if ((m_plant_procgen_pass && m_plant_procgen_pass->enabled() &&
              m_plant_procgen_pass->index_count() > 0) ||
             (m_ground_decal_pass && m_ground_decal_pass->active())) {
@@ -2918,6 +2926,7 @@ void RenderPipeline::render_frame(entt::registry& registry,
     // Scatter preparation happens before render_frame. Open admission for the
     // next rendered frame here, so nested sweeps/previews need no outer loop.
     m_diagnostic_capture = std::move(diagnostic_frame);
+    m_diagnostic_deferred_only = deferred_only_capture;
     m_foliage_pass->begin_ground_frame();
 }
 
@@ -3253,7 +3262,12 @@ void RenderPipeline::prepare_camera_projection(const Camera& camera) {
                 sizeof(m_frame_prepared.frustum_planes));
 }
 
-void RenderPipeline::dispatch_stages(const Camera& camera) {
+void RenderPipeline::dispatch_stages(const Camera& camera, bool deferred_only_capture) {
+    // A full redispatch must not reuse a reduced frame's attribution or label.
+    // Discard it only once the caller has admitted the redispatch.
+    if (!deferred_only_capture && m_diagnostic_deferred_only) {
+        end_diagnostic_capture();
+    }
     DebugViewPass::controls().wireframe = m_frame_prepared.wireframe;
     auto diagnostic_frame = m_debug_view_pass && (DebugViewPass::geometry_requested() ||
                                                   DebugViewPass::controls().enabled)
@@ -3304,6 +3318,23 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
         }
         // Unmapped node = a declaration/executor drift the ctest pins; loud in debug.
         assert(fn && "frame-graph node has no executor table entry");
+        // The fixed graph has a bounded number of stages. Exclude every A4
+        // unsupported producer before submission, retaining the graph trace and
+        // G-buffer timer/state epilogue even when procedural plants are omitted.
+        if (deferred_only_capture && (fn == &RenderPipeline::execute_stage_plant_procgen ||
+                                      fn == &RenderPipeline::execute_stage_ground_decals ||
+                                      fn == &RenderPipeline::execute_stage_water ||
+                                      fn == &RenderPipeline::execute_stage_waterfall ||
+                                      fn == &RenderPipeline::execute_stage_glass_oit_accum ||
+                                      fn == &RenderPipeline::execute_stage_glass_oit_resolve ||
+                                      fn == &RenderPipeline::execute_stage_foliage ||
+                                      fn == &RenderPipeline::execute_stage_particles)) {
+            record_frame_stage(node.c_str());
+            if (fn == &RenderPipeline::execute_stage_plant_procgen) {
+                finish_gbuffer_stage();
+            }
+            continue;
+        }
         if (fn)
             (this->*fn)(camera);
         if (diagnostic_frame && node == "gbuffer") {
@@ -3525,6 +3556,10 @@ void RenderPipeline::execute_stage_plant_procgen(const Camera& camera) {
         m_plant_procgen_pass->execute(plant_ctx, camera);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
+    finish_gbuffer_stage();
+}
+
+void RenderPipeline::finish_gbuffer_stage() {
     end_gpu_pass_timer(GpuTimerPass::GBuffer);
     glBindVertexArray(0); // Unbind after gbuffer pass
     glDisable(GL_CULL_FACE);
