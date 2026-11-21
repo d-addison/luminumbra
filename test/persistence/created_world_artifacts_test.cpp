@@ -784,7 +784,12 @@ BOOL WINAPI Dispose(HANDLE file, FILE_INFO_BY_HANDLE_CLASS kind, LPVOID info, DW
             active->publication_completed = true;
         return result;
     }
-    if (active && kind == FileDispositionInfo && active->publication_completed) {
+    // Publication recovery uses legacy disposition; journal rollback prefers
+    // FileDispositionInfoEx (21). A persistent deletion denial must cover both,
+    // including on volumes that support immediate POSIX-style link removal.
+    const bool disposition_request =
+        kind == FileDispositionInfo || kind == static_cast<FILE_INFO_BY_HANDLE_CLASS>(21);
+    if (active && disposition_request && active->publication_completed) {
         if (!active->source_retired && (Fail(Boundary::PublicationSourceUnlinkDenied) ||
                                         Fail(Boundary::PublicationCleanupReopenDenied))) {
             ::SetLastError(ERROR_ACCESS_DENIED);
@@ -795,8 +800,12 @@ BOOL WINAPI Dispose(HANDLE file, FILE_INFO_BY_HANDLE_CLASS kind, LPVOID info, DW
             ::SetLastError(ERROR_ACCESS_DENIED);
             return FALSE;
         }
-        const auto* disposition = static_cast<const FILE_DISPOSITION_INFO*>(info);
-        if (disposition->DeleteFile && !active->source_retired) {
+        // FILE_DISPOSITION_INFO_EX is a single DWORD of flags; bit 0 requests deletion.
+        const bool delete_request =
+            kind == FileDispositionInfo
+                ? static_cast<const FILE_DISPOSITION_INFO*>(info)->DeleteFile != FALSE
+                : (*static_cast<const DWORD*>(info) & 0x1u) != 0;
+        if (delete_request && !active->source_retired) {
             const auto result = ::SetFileInformationByHandle(file, kind, info, bytes);
             if (result)
                 active->source_retired = true;
