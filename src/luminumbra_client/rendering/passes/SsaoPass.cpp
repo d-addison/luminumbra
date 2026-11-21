@@ -20,6 +20,7 @@ SsaoPass::SsaoPass() = default;
 SsaoPass::~SsaoPass() = default;
 
 void SsaoPass::init_shaders(const std::filesystem::path& root_path) {
+    m_sample_names.Reset();
     m_ssao.ssaoShader =
         std::make_unique<Shader>((root_path / "res/shaders/ssao.vert").string().c_str(),
                                  (root_path / "res/shaders/ssao.frag").string().c_str());
@@ -234,8 +235,14 @@ void SsaoPass::execute_ssao(const RenderContext& ctx) {
         m_ssao.ssaoShader->setInt("gPosition", 0);
         m_ssao.ssaoShader->setInt("gNormalMaterial", 1);
         m_ssao.ssaoShader->setInt("u_noiseTexture", 2);
-        for (unsigned int i = 0; i < 64; ++i)
-            m_ssao.ssaoShader->setVec3("u_samples[" + std::to_string(i) + "]", m_ssao.kernel[i]);
+        for (unsigned int i = 0; i < 64; ++i) {
+            const auto& names = m_sample_names.Get(
+                m_ssao.ssaoShader->ProgramGeneration(), i, [](std::size_t index) {
+                    return IndexedUniformNames<64>::Names{"u_samples[" + std::to_string(index) +
+                                                          "]"};
+                });
+            m_ssao.ssaoShader->setVec3(names[0], m_ssao.kernel[i]);
+        }
         m_ssao.ssaoShader->setMat4("u_projection", projection);
         m_ssao.ssaoShader->setVec2("u_screenSize", screen_size);
     }

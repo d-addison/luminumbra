@@ -198,6 +198,7 @@ add_executable(common_tests
     common/StationDiscoveryArguments_test.cpp
     common/StationDiscovery_test.cpp
     common/Crc32_test.cpp
+    common/IntegerPrimitives_test.cpp
     rendering/shader_compositing_contract_test.cpp
     rendering/photo_environment_test.cpp
     common/AnimationRuntime_test.cpp
@@ -1637,6 +1638,11 @@ add_executable(regional_scent_allocation_test common/regional_scent_allocation_t
 target_include_directories(regional_scent_allocation_test PRIVATE ../src)
 target_link_libraries(regional_scent_allocation_test PRIVATE gtest_main luminumbra_common)
 
+# Keep throwing allocation replacement isolated from every other test executable.
+add_executable(native_file_ownership_test common/native_file_ownership_test.cpp)
+target_include_directories(native_file_ownership_test PRIVATE ../src ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(native_file_ownership_test PRIVATE gtest_main luminumbra_common)
+
 # Frontier gate fixtures: the lua-api-manifest and scalar-field-diffusion gates
 # assert at static initialization, the instinct and loopback gates are called
 # from the gtest cases in network_state_hash_gate_test.cpp.
@@ -2238,6 +2244,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     runtime_world_visual_validation_test
     frontier_gates_test
     regional_scent_allocation_test
+    native_file_ownership_test
     world_open_refusal_test
     runtime_surface_options_test
     jolt_tunneling_test
