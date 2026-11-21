@@ -2356,6 +2356,7 @@ int main(int argc, char* argv[]) {
     jobSystem.startup();
 
     auto gameSession = std::make_unique<Luminumbra::world::GameSession>();
+    g_app.audio.Reset();
     gameSession->SetJobSystem(&jobSystem);
     gameSession->SetRootPath(root_path_str);
     gameSession->SetSaveRootPath(path_options.save_root);
@@ -2713,6 +2714,7 @@ int main(int argc, char* argv[]) {
     // Player ownership marks a live gameplay presentation. Retiring it is the
     // common boundary for menu exits, world replacements and failed-entry drains.
     auto release_player_controller = [&]() {
+        g_app.audio.Reset(audioManager.get());
         if (g_playerController) {
             ReleasePhotoModeAndHud(g_app, renderPipeline);
             g_playerController.reset();
@@ -2797,7 +2799,7 @@ int main(int argc, char* argv[]) {
         g_app.foragers = {};
         g_app.weather = {};
         // Thunder and the flash from the previous world must not carry over.
-        g_app.audio.pendingThunder.clear();
+        g_app.audio.Reset(audioManager.get());
         renderPipeline.set_lightning_state({});
         g_app.interactions = {};
         g_app.foliage.cachedScatter.clear();
@@ -3913,6 +3915,7 @@ int main(int argc, char* argv[]) {
                              runtime_boot_frames,
                              runtime_boot_output.string());
         prepare_world_entry();
+        g_app.audio.Reset(audioManager.get());
         if (auto* world_system = gameSession->GetWorldSystem()) {
             world_system->clear_world(nullptr);
         }
@@ -5137,6 +5140,7 @@ int main(int argc, char* argv[]) {
         // Frame audio — 3D listener, player footsteps, and the living-world
         // rain/creature-call region (app/FrameAudio.cpp).
         UpdateFrameAudio(g_app,
+                         g_app.audio,
                          currentState,
                          deltaTime,
                          audioManager.get(),

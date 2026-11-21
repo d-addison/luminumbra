@@ -517,6 +517,13 @@ target_link_libraries(mixer_model_test PRIVATE
     gtest_main
 )
 
+add_executable(frame_audio_state_test audio/frame_audio_state_test.cpp)
+target_include_directories(frame_audio_state_test PRIVATE ../src ../src/luminumbra_client)
+target_link_libraries(frame_audio_state_test PRIVATE gtest_main glm::glm entt)
+luminumbra_configure_first_party_target(frame_audio_state_test)
+add_test(NAME FrameAudioOwnershipContract COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/test/tools/test_frame_audio_state_contract.py")
+
 # the day/night-soundscape gating/crossfade and
 # the biome->reverb + delay-proxy mapping math. The header under test
 # (src/luminumbra_client/audio/EnvironmentalAudioModel.h) is pure std (no
@@ -2203,6 +2210,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     # day/night soundscape + reverb mapping math
     # (CPU-only, GL-free, no audio device).
     environmental_audio_model_test
+    frame_audio_state_test
     # world-dressing placement determinism (CPU-only).
     world_dressing_test
     foliage_cache_prune_test

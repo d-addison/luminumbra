@@ -256,6 +256,10 @@ class GameplayPhotoRelease(unittest.TestCase):
             self.player = False
             return
         owner = compact(block(self.main, "auto release_player_controller ="))
+        # Frame-audio bookkeeping resets first; it owns no photo or renderer state.
+        audio_reset = "g_app.audio.Reset(audioManager.get()); "
+        self.assertTrue(owner.startswith(audio_reset), owner)
+        owner = owner[len(audio_reset):]
         self.assertEqual(owner, "if (g_playerController) { "
                          "ReleasePhotoModeAndHud(g_app, renderPipeline); "
                          "g_playerController.reset(); }")
