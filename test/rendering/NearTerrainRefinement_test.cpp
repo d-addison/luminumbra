@@ -1,5 +1,6 @@
 #include "../fixtures/TerrainFixtureParams.h"
 #include "../support/UniqueTempPath.h"
+#include "luminumbra_client/rendering/FoliageGroundMesh.h"
 #include "luminumbra_client/rendering/NearTerrainRefinement.h"
 #include "luminumbra_common/core/SystemConfig.h"
 #include "luminumbra_common/world/NearTerrainMeshSnapshot.h"
@@ -389,8 +390,110 @@ TEST(NearTerrainRefinement, EveryChildPreservesFlatProvokingVertexMaterial) {
         ASSERT_LT(provoking, output.vertices.size());
         const auto source_triangle = provoking - first_centre;
         const auto source_provoking = patch.mesh.indices[source_triangle * 3 + 2];
-        EXPECT_EQ(output.vertices[provoking].material_id,
+        EXPECT_EQ(output.vertices[provoking].material_id & 255u,
                   patch.mesh.vertices[source_provoking].material_id);
+    }
+}
+
+TEST(NearTerrainRefinement, AddedVerticesPreserveEveryInterpolatedGroundLane) {
+    // Flat geometry isolates coverage from the bounded height displacement.
+    // Curved geometry must carry the same barycentrics in X/Z as well.
+    for (const bool flat : {false, true}) {
+        for (const u32 first : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 200u, 255u}) {
+            for (const u32 second : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 200u, 255u}) {
+                for (const bool third_lane : {false, true}) {
+                    auto patch = MakePatch(2, flat);
+                    for (std::size_t index = 0; index < patch.mesh.vertices.size(); ++index) {
+                        patch.mesh.vertices[index].material_id =
+                            third_lane && index % 3 == 2 ? 5u : (index % 2 == 0 ? first : second);
+                    }
+                    NearTerrainRenderMesh output;
+                    ASSERT_EQ(RefineNearTerrain(patch.Input(), output),
+                              NearTerrainRefinementResult::Refined);
+                    const auto centres = output.vertices.size() - patch.mesh.indices.size() / 3;
+                    // Every child ends at its source centre. Checking all three
+                    // vertices proves the entire linear coverage interpolant.
+                    for (std::size_t start = 0; start < output.indices.size(); start += 3) {
+                        const auto source = (output.indices[start + 2] - centres) * 3;
+                        const auto& a = patch.mesh.vertices[patch.mesh.indices[source]];
+                        const auto& b = patch.mesh.vertices[patch.mesh.indices[source + 1]];
+                        const auto& c = patch.mesh.vertices[patch.mesh.indices[source + 2]];
+                        const Vec3 ab = b.position - a.position;
+                        const Vec3 ac = c.position - a.position;
+                        const float area = ab.x * ac.z - ac.x * ab.z;
+                        ASSERT_NE(area, 0.0f);
+                        for (std::size_t corner = 0; corner < 3; ++corner) {
+                            const auto& vertex = output.vertices[output.indices[start + corner]];
+                            const Vec3 offset = vertex.position - a.position;
+                            const float beta = (offset.x * ac.z - ac.x * offset.z) / area;
+                            const float gamma = (ab.x * offset.z - offset.x * ab.z) / area;
+                            for (u32 lane = 1; lane <= 5; ++lane) {
+                                const float expected =
+                                    (a.material_id == lane ? 1.0f - beta - gamma : 0.0f) +
+                                    (b.material_id == lane ? beta : 0.0f) +
+                                    (c.material_id == lane ? gamma : 0.0f);
+                                const float actual =
+                                    (vertex.material_id & 0x80000000u) != 0u
+                                        ? static_cast<float>(
+                                              (vertex.material_id >> (8u + 3u * (lane - 1u))) &
+                                              7u) /
+                                              6.0f
+                                        : (vertex.material_id == lane ? 1.0f : 0.0f);
+                                EXPECT_NEAR(actual, expected, 0.00001f);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST(NearTerrainRefinement, PackedAndOutOfByteRangeInputsPreservePriorOutput) {
+    for (const u32 material : {256u, 0x80000001u, std::numeric_limits<u32>::max()}) {
+        auto patch = MakePatch();
+        patch.mesh.vertices.back().material_id = material;
+        ExpectRefusal(patch.Input(), NearTerrainRefinementResult::InvalidMesh);
+    }
+    auto patch = MakePatch();
+    NearTerrainRenderMesh output;
+    ASSERT_EQ(RefineNearTerrain(patch.Input(), output), NearTerrainRefinementResult::Refined);
+    const auto prior = output;
+    auto input = patch.Input();
+    input.vertices = output.vertices;
+    input.indices = output.indices;
+    EXPECT_EQ(RefineNearTerrain(input, output), NearTerrainRefinementResult::InvalidMesh);
+    ExpectSameMesh(output, prior);
+}
+
+TEST(NearTerrainRefinement, FoliageQueriesRetainEveryRefinedGroundTriangle) {
+    for (const u32 material : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 200u, 255u}) {
+        const bool ground_material = material >= 1u && material <= 5u;
+        auto patch = MakePatch();
+        for (auto& vertex : patch.mesh.vertices) {
+            vertex.material_id = material;
+        }
+        auto packed = patch.mesh;
+        for (auto& vertex : packed.vertices) {
+            vertex.material_id =
+                0x80000000u | material | (ground_material ? 6u << (8u + 3u * (material - 1u)) : 0u);
+        }
+        const FoliageGroundMesh packed_ground(Vec3(0), packed.vertices, packed.indices);
+        EXPECT_EQ(packed_ground.sample(8.25f, 8.25f).valid, ground_material);
+        NearTerrainRenderMesh output;
+        ASSERT_EQ(RefineNearTerrain(patch.Input(), output), NearTerrainRefinementResult::Refined);
+        const FoliageGroundMesh ground(Vec3(0), output.vertices, output.indices);
+        for (std::size_t start = 0; start < output.indices.size(); start += 3) {
+            const Vec3 point = (output.vertices[output.indices[start]].position +
+                                output.vertices[output.indices[start + 1]].position +
+                                output.vertices[output.indices[start + 2]].position) /
+                               3.0f;
+            const auto hit = ground.sample(point.x, point.z);
+            EXPECT_EQ(hit.valid, ground_material);
+            if (hit.valid) {
+                EXPECT_NEAR(hit.height, point.y, 0.00001f);
+            }
+        }
     }
 }
 
@@ -723,6 +826,182 @@ NearTerrainUploadResult Prepare(NearTerrainRefinementCache& cache,
                          elapsed);
 }
 } // namespace
+
+TEST(NearTerrainUpload, LoadingAllowanceDrainsBothLanesAndRefinementInBoundedIterations) {
+    UploadQueue<std::size_t> baseline;
+    UploadQueue<std::size_t> refinement;
+    UploadQueue<std::size_t> water;
+    // Fixed workload: 8192 terrain attempts shared by the baseline/refinement
+    // lanes and 435 water attempts. No elapsed-time or GPU dependency.
+    constexpr std::size_t backlog = 8192;
+    constexpr std::size_t baseline_count = backlog - 129;
+    for (std::size_t item = 0; item < backlog; ++item) {
+        (item < baseline_count ? baseline : refinement).refresh(item, item);
+        if (item < 435) {
+            water.refresh(item, item);
+        }
+    }
+    std::size_t terrain_adopted = 0;
+    std::size_t water_adopted = 0;
+    std::size_t draws = 0;
+    const auto cost = [](std::size_t) {
+        return std::size_t{1024};
+    };
+    const auto elapsed = [] {
+        return 1000.0;
+    }; // preparation already exhausted gameplay time
+    for (std::size_t iteration = 0; iteration < backlog / 64; ++iteration) {
+        const auto terrain_work = drain_terrain_uploads(
+            baseline,
+            refinement,
+            cost,
+            [&](std::size_t item) {
+                EXPECT_EQ(item, terrain_adopted++);
+                return true;
+            },
+            elapsed,
+            UploadPresentation::Loading);
+        const auto water_work = drain_uploads(
+            water,
+            upload_limits(UploadPresentation::Loading, true),
+            cost,
+            [&](std::size_t item) {
+                EXPECT_EQ(item, water_adopted++);
+                return true;
+            },
+            elapsed);
+        EXPECT_EQ(terrain_work.attempts, 64u);
+        EXPECT_LE(water_work.attempts, 64u);
+        const bool settled = baseline.size() + refinement.size() + water.size() == 0;
+        draws += draw_upload_frame(UploadPresentation::Loading, settled) ? 1u : 0u;
+    }
+    EXPECT_EQ(terrain_adopted, backlog);
+    EXPECT_EQ(water_adopted, 435u);
+    EXPECT_EQ(baseline.size() + refinement.size() + water.size(), 0u);
+    EXPECT_EQ(draws, 1u);
+    EXPECT_TRUE(draw_upload_frame(UploadPresentation::Loading, true));
+}
+
+TEST(NearTerrainUpload, LoadingAllowanceBoundsFailureRetriesAndHandlesEmptyQueues) {
+    UploadQueue<std::size_t> baseline;
+    UploadQueue<std::size_t> refinement;
+    const auto cost = [](std::size_t) {
+        return std::size_t{1};
+    };
+    const auto elapsed = [] {
+        return 1000.0;
+    };
+    auto work = drain_terrain_uploads(
+        baseline,
+        refinement,
+        cost,
+        [](std::size_t) { return false; },
+        elapsed,
+        UploadPresentation::Loading);
+    EXPECT_EQ(work.attempts, 0u);
+    for (std::size_t item = 0; item < 65; ++item) {
+        baseline.refresh(item, item);
+    }
+    std::array<bool, 65> visited{};
+    work = drain_terrain_uploads(
+        baseline,
+        refinement,
+        cost,
+        [&](std::size_t item) {
+            EXPECT_FALSE(visited.at(item));
+            visited.at(item) = true;
+            return false;
+        },
+        elapsed,
+        UploadPresentation::Loading);
+    EXPECT_EQ(work.attempts, 64u);
+    EXPECT_EQ(work.adopted, 0u);
+    EXPECT_EQ(baseline.size(), 65u);
+    for (std::size_t iteration = 0; iteration < 2; ++iteration) {
+        work = drain_terrain_uploads(
+            baseline,
+            refinement,
+            cost,
+            [](std::size_t) { return true; },
+            elapsed,
+            UploadPresentation::Loading);
+        EXPECT_EQ(work.adopted, iteration == 0 ? 64u : 1u);
+    }
+    EXPECT_EQ(baseline.size(), 0u);
+    refinement.refresh(0, 0);
+    for (const double invalid_elapsed : {-1.0,
+                                         std::numeric_limits<double>::infinity(),
+                                         std::numeric_limits<double>::quiet_NaN()}) {
+        work = drain_terrain_uploads(
+            baseline,
+            refinement,
+            cost,
+            [](std::size_t) {
+                ADD_FAILURE();
+                return true;
+            },
+            [invalid_elapsed] { return invalid_elapsed; },
+            UploadPresentation::Loading);
+        EXPECT_EQ(work.attempts, 0u);
+        EXPECT_EQ(refinement.size(), 1u);
+    }
+}
+
+TEST(NearTerrainUpload, LoadingAllowanceLeavesGameplayAndCaptureBudgetsUnchanged) {
+    for (const auto presentation : {UploadPresentation::Streaming, UploadPresentation::Settled}) {
+        for (const bool water : {false, true}) {
+            const auto limits = upload_limits(presentation, water);
+            EXPECT_EQ(limits.bytes, water ? 1024u * 1024u : 4u * 1024u * 1024u);
+            EXPECT_EQ(limits.count, 8u);
+            EXPECT_EQ(limits.progress, 1u);
+            EXPECT_DOUBLE_EQ(limits.milliseconds, water ? 1.0 : 3.0);
+            UploadBudget budget(limits);
+            EXPECT_TRUE(budget.admits(1, 1000));
+            budget.charge(1, true);
+            EXPECT_FALSE(budget.admits(1, 1000));
+        }
+        EXPECT_EQ(draw_upload_frame(presentation, false),
+                  presentation == UploadPresentation::Streaming);
+    }
+}
+
+TEST(NearTerrainUpload, LoadingRefinementPreservesPayloadAndRejectsInvalidElapsedTime) {
+    EligibilityPatch patch;
+    const auto evidence = patch.Publish();
+    const auto& chunk = *patch.chunks[13];
+    NearTerrainRefinementCache gameplay_cache;
+    gameplay_cache.set_enabled(true);
+    auto expected = MakePatch().mesh;
+    ASSERT_EQ(Prepare(gameplay_cache, patch, expected), NearTerrainUploadResult::Refined);
+    const auto source_densities = chunk.sdf_data;
+    for (const double elapsed : {1000.0,
+                                 -1.0,
+                                 std::numeric_limits<double>::infinity(),
+                                 std::numeric_limits<double>::quiet_NaN()}) {
+        NearTerrainRefinementCache loading_cache;
+        loading_cache.set_enabled(true);
+        auto payload = MakePatch().mesh;
+        const auto result = loading_cache.prepare(chunk,
+                                                  chunk.mesh_version.load(),
+                                                  evidence,
+                                                  0,
+                                                  payload.vertices,
+                                                  payload.indices,
+                                                  elapsed,
+                                                  UploadPresentation::Loading);
+        if (elapsed == 1000.0) {
+            EXPECT_EQ(result, NearTerrainUploadResult::Refined);
+            ExpectIdenticalPayload(payload, expected);
+            EXPECT_EQ(loading_cache.builds(), 1u);
+        } else {
+            EXPECT_EQ(result, NearTerrainUploadResult::Deferred);
+            ExpectIdenticalPayload(payload, MakePatch().mesh);
+            EXPECT_EQ(loading_cache.size(), 0u);
+            EXPECT_EQ(loading_cache.builds(), 0u);
+        }
+        EXPECT_EQ(chunk.sdf_data, source_densities);
+    }
+}
 
 TEST(NearTerrainUpload, PresetSelectionsUseBudgetedRefinementAndExplicitOffPreservesPayload) {
     using namespace luminumbra::core;

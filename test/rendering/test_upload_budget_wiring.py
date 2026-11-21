@@ -1,5 +1,6 @@
 """Check that presentation integration uses the tested clock-free policy."""
 from pathlib import Path
+import hashlib
 import math
 import re
 import unittest
@@ -41,6 +42,120 @@ class UploadBudgetWiring(unittest.TestCase):
         cls.pipeline = read(RENDERING / "RenderPipeline.cpp")
         cls.header = read(RENDERING / "RenderPipeline.h")
         cls.main = read(ROOT / "src/luminumbra_client/main_client.cpp")
+
+    def test_loading_allowance_is_explicit_and_shared_by_all_upload_lanes(self):
+        preload = body(self.main, "auto wait_for_world_presentation =")
+        self.assertIn("UploadPresentation::Loading", preload)
+        # All entry implementations share this call; time-lapse and gameplay keep
+        # the existing Streaming/Settled selection and its default arguments.
+        self.assertEqual(self.main.count("UploadPresentation::Loading"), 1)
+        prepare = compact(body(self.pipeline, "void RenderPipeline::prepare_frame("))
+        self.assertIn("manage_chunk_gpu_resources(renderable_chunk_snapshots, camera, "
+                      "snapshot_ms, presentation)", prepare)
+        self.assertIn("manage_water_gpu_resources(renderable_chunk_snapshots, camera, presentation)",
+                      prepare)
+        manage = compact(body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources("))
+        self.assertIn("const auto limits = upload_limits(presentation, Water)", manage)
+        self.assertIn("drain_uploads(queue, limits, cost, adopt, elapsed)", manage)
+        self.assertIn("cost, adopt, elapsed, presentation)", manage)
+        self.assertRegex(manage, r"m_near_terrain_refinement.prepare\(.*?elapsed\(\), presentation\)")
+        policy = read(RENDERING / "NearTerrainRefinement.h")
+        scheduler = compact(body(policy, "drain_terrain_uploads("))
+        self.assertIn("upload_limits(presentation, false)", scheduler)
+        self.assertIn("UploadBudget budget(limits)", scheduler)
+        self.assertLess(scheduler.index("drain(baseline, false)"),
+                        scheduler.index("drain(refinement, true)"))
+        native = read(ROOT / "test/rendering/NearTerrainRefinement_test.cpp")
+        for name in ("LoadingAllowanceDrainsBothLanesAndRefinementInBoundedIterations",
+                     "LoadingAllowanceBoundsFailureRetriesAndHandlesEmptyQueues",
+                     "LoadingAllowanceLeavesGameplayAndCaptureBudgetsUnchanged",
+                     "LoadingRefinementPreservesPayloadAndRejectsInvalidElapsedTime"):
+            self.assertIn("TEST(NearTerrainUpload, " + name + ")", native)
+        self.assertIn("rendering/NearTerrainRefinement_test.cpp", read(ROOT / "test/CMakeLists.txt"))
+
+    def test_loading_time_joins_frame_buckets_and_names_each_entry_stage(self):
+        preload = body(self.main, "auto wait_for_world_presentation =")
+        for field in ("total", "water", "render", "observe"):
+            self.assertIn("entry_presentation_work." + field + ", true)", preload)
+        self.assertIn("entry_presentation_work.scatter += scatter_ms", preload)
+        self.assertIn("entry_presentation_work.foliage += foliage_ms", preload)
+        self.assertIn("Attribution::phase_total_ms() - phases_before", preload)
+        self.assertIn("Attribution::foliage_total_ms() - foliage_before", preload)
+        loop = self.main.split("while (!glfwWindowShouldClose(window))", 1)[1]
+        self.assertLess(loop.index("entry_presentation_work = {};"),
+                        loop.index("const Attribution::FoliageFrameScope foliage_scope"))
+        accounting = compact(loop).split("const double entry_stream_ms =", 1)[1].split(
+            "const auto& foliage_frame =", 1)[0]
+        self.assertIn("entry_presentation_work.water + entry_presentation_work.observe", accounting)
+        self.assertIn("rb_stream_ms += entry_stream_ms", accounting)
+        self.assertIn("rb_render_call_ms += entry_presentation_work.total - entry_stream_ms", accounting)
+        self.assertIn("rb_render_bucket_ms += entry_presentation_work.total - entry_stream_ms - "
+                      "entry_presentation_work.scatter - entry_presentation_work.nested_foliage - "
+                      "entry_presentation_work.phases", accounting)
+        self.assertIn("rb_scatter_ms += entry_presentation_work.scatter", accounting)
+        self.assertIn("entry-split: total=", loop)
+        self.assertIn("Entry readiness: stream_observations=", preload)
+        self.assertIn("streaming.frames_observed", preload)
+        self.assertIn("legacy_wanted=", preload)
+        native = read(ROOT / "test/rendering/frame_attribution_test.cpp")
+        self.assertIn("TEST(FrameAttribution, LoadingWorkSubtractsNestedCollectorsExactlyOnce)", native)
+
+    def test_terrain_stream_reuse_requires_completion_or_fresh_storage(self):
+        draw = body(self.pipeline, "void RenderPipeline::draw_chunks_mdi(")
+        self.assertIn("TerrainStreamRing::kSlotCount> m_mdi_frames", self.header)
+        ring = read(RENDERING / "TerrainStreamRing.h")
+        self.assertIn("kSubmissionsPerFrame = 5", ring)
+        self.assertIn("kFramesInFlight = 3", ring)
+        self.assertIn("m_live[m_cursor] && !completion_signalled", ring)
+        self.assertIn("m_mdi_stream.begin_frame();", body(self.pipeline, "void RenderPipeline::prepare_frame("))
+        for empty in ("if (visible_chunks.empty() || block_count == 0)", "if (running == 0)"):
+            self.assertIn("return;", body(draw, empty))
+            self.assertLess(draw.index(empty), draw.index("m_mdi_stream.acquire("))
+        # Only init/shutdown may clear lifetime state; replay restores a cursor.
+        self.assertEqual(self.pipeline.count("m_mdi_stream = {};"), 2)
+        self.assertEqual(draw.count("glClientWaitSync("), 1)
+        self.assertIn("glClientWaitSync(frame.completion, 0, 0)", draw)
+        self.assertIn("status == GL_ALREADY_SIGNALED || status == GL_CONDITION_SATISFIED", compact(draw))
+        self.assertIn("bool completed = false;", draw)
+        self.assertIn("m_mdi_stream.acquire( completed, diagnostic_replay || m_gpu_timers_suppressed || m_far_world_paired)", compact(draw))
+        self.assertLess(draw.index("m_mdi_stream.acquire("), draw.index("ensure_mdi_capacity("))
+        self.assertLess(draw.index("ensure_mdi_capacity(frame, running, allocation.orphan)"),
+                        draw.index("glBufferSubData("))
+        self.assertLess(draw.index("ReplayRollback retire_stream"), draw.index("const auto& blocks ="))
+        retire = body(draw, "ReplayRollback retire_stream")
+        self.assertIn("frame.completion = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0)", retire)
+        capacity = compact(body(self.pipeline, "void RenderPipeline::ensure_mdi_capacity("))
+        pair_missing = "frame.indirect_buffer == 0 || frame.origin_buffer == 0"
+        self.assertIn(pair_missing, capacity)
+        self.assertIn("if (m_far_world_paired && (frame.command_capacity < running || " +
+                      pair_missing + ")) throw", compact(draw))
+        self.assertIn("if (!grow && !orphan) return;", capacity)
+        self.assertEqual(capacity.count("glBufferData("), 2)
+        self.assertNotIn("glDeleteBuffers", capacity)  # replay/VAO names remain valid
+        self.assertLess(capacity.index("TerrainStreamRing::storage_bytes("), capacity.index("glGenBuffers("))
+        destroy = body(self.pipeline, "void RenderPipeline::destroy_mdi_buffers()")
+        self.assertIn("glDeleteSync(frame.completion)", destroy)
+        for forbidden in ("glWaitSync(", "glFinish(", "GL_SYNC_FLUSH_COMMANDS_BIT"):
+            self.assertNotIn(forbidden, draw + capacity)
+        self.assertIn('"Terrain upload"', draw)
+        self.assertIn("terrain_stream_diagnostics() const", self.header)
+        regression = read(ROOT / "test/rendering/terrain_stream_ring_test.cpp")
+        self.assertIn("FiveSubmissionsAcrossDelayedFramesNeverOverlapLiveStorage", regression)
+        self.assertIn("ReplayRestoresSchedulingButNeverRollsBackLiveOwnership", regression)
+        self.assertIn("rendering/terrain_stream_ring_test.cpp", read(ROOT / "test/CMakeLists.txt"))
+
+    def test_terrain_stream_preserves_command_bytes_and_offset_zero_bindings(self):
+        draw = body(self.pipeline, "void RenderPipeline::draw_chunks_mdi(")
+        start = draw.index("std::vector<std::size_t> write_cursor = block_offset;")
+        end = draw.index("out_draws = running;", start) + len("out_draws = running;")
+        # Pin the original command/origin producer, independent of storage ownership.
+        self.assertEqual(hashlib.sha256(compact(draw[start:end]).encode()).hexdigest(),
+                         "f7c59add1a863ecb9ed1a98b43f6ac73e2e9aec529290c755a822987919490d1")
+        for target, stride, data in (("GL_DRAW_INDIRECT_BUFFER", "DrawElementsIndirectCommand", "command"),
+                                     ("GL_ARRAY_BUFFER", "glm::vec4", "origin")):
+            self.assertIn(f"glBufferSubData({target}, 0, static_cast<GLsizeiptr>(running * sizeof({stride})), "
+                          f"m_mdi_{data}_scratch.data())", compact(draw))
+        self.assertIn("glBindVertexBuffer(1, frame.origin_buffer, 0, sizeof(glm::vec4))", compact(draw))
 
     def test_waterfall_sheets_retire_excavated_crest_and_landing_before_unknown_water(self):
         source = read(RENDERING / "WaterfallDetect.cpp")
@@ -118,6 +233,41 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("std::min(sites.size(), live_factors.size())", select)
         self.assertIn(".live_factor = std::min(live, 1.0f)", select)
         self.assertNotIn("world", select.replace("no world queries", ""))
+
+    def test_static_prop_spatial_query_precedes_instance_work_and_retains_streams(self):
+        source = read(RENDERING / "passes/GBufferPass.cpp")
+        draw = body(source, "void GBufferPass::geometry_pass_static_meshes(")
+        collect = body(draw, "for (const std::size_t propIndex : candidates)")
+        self.assertLess(draw.index("static_prop_candidates("), draw.index("glm::length("))
+        query = body(source, "GBufferPass::static_prop_candidates(")
+        self.assertIn("m_staticPropIndex.Query(", query)
+        self.assertIn("BuildStaticPropSpatialIndex(", query)
+        self.assertIn("const CachedStaticProp& cp = m_staticPropCache[propIndex];", collect)
+        self.assertIn("const bool authoredTree = cp.authoredTree;", collect)
+        self.assertNotIn("starts_with", collect)
+        self.assertNotIn("kv.second.mats.clear()", draw)
+        self.assertNotIn("kv.second.tints.clear()", draw)
+        mesh_append = body(collect, "if (batch.selection.Select(propIndex))")
+        self.assertIn("batch.mats.push_back(cp.model);", mesh_append)
+        self.assertIn("batch.tints.push_back(cp.tint);", mesh_append)
+        atlas_append = body(collect, "if (m_impostorSelection.Select(propIndex))")
+        self.assertIn("impostorInstances.push_back({cp.model, glm::vec4(cp.tint, 1.0f)});", atlas_append)
+        self.assertIn("kv.second.selection.Begin();", draw)
+        self.assertIn("kv.second.selection.Finish()", draw)
+        self.assertIn("m_impostorSelection.Begin();", draw)
+        self.assertIn("m_impostorSelection.Finish()", draw)
+        cache = body(source, "void GBufferPass::build_static_prop_cache(")
+        self.assertIn('cp.authoredTree = bp.starts_with("game-assets/tree-small-02/");', cache)
+        self.assertIn("m_staticPropIndexValid = false;", cache)
+        bounds = body(source, "StaticPropSpatialIndex BuildStaticPropSpatialIndex(")
+        self.assertIn("item.lodBounds[3].Include(item.lodBounds[2]);", bounds)
+        self.assertIn("impostorRadius * cp.maxScale", bounds)
+        replay = body(source, "if (replay)")
+        self.assertIn("std::swap(m_impostorSelection, impostor_selection);", replay)
+        header = read(RENDERING / "passes/GBufferPass.h")
+        self.assertIn("return m_staticPropIndex.work();", header)
+        cmake = read(ROOT / "test/CMakeLists.txt")
+        self.assertIn("rendering/StaticPropSpatialIndex_test.cpp", cmake)
 
     def test_visible_rocks_and_shrubs_check_resident_support_before_batching(self):
         source = read(RENDERING / "passes/GBufferPass.cpp")
@@ -232,9 +382,9 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("m_terrainCullingCache.chunk_count = sorted_chunk_ids.size();", cache)
         prepare = body(self.pipeline, "void RenderPipeline::prepare_frame(")
         self.assertIn("if (chunk.has_terrain_mesh() && found != m_chunk_render_data.end())", prepare)
-        water = body(self.pipeline, "void RenderPipeline::execute_stage_water(")
+        water = body(self.pipeline, "void RenderPipeline::execute_stage_opaque_snapshot(")
         self.assertIn("for (const auto& chunk : renderable_chunk_snapshots)", water)
-        self.assertIn("water_input.draw_items.push_back(", water)
+        self.assertIn("m_frame_water_input.draw_items.push_back(", water)
 
     def test_water_only_dispatch_preserves_ready_without_terrain_work(self):
         world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
@@ -600,10 +750,10 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertLess(adopt.index("payload.refinement.set("),
                         adopt.index("upload_chunk_mesh(candidate.chunk, payload)"))
         self.assertIn("auto& destination = refinement_only ? refinement_candidates : candidates", manage)
-        self.assertIn("drain_terrain_uploads(queue, m_near_terrain_upload_queue, cost, adopt, elapsed)",
+        self.assertIn("drain_terrain_uploads( queue, m_near_terrain_upload_queue, cost, adopt, elapsed, presentation)",
                       compact(manage))
         policy = read(RENDERING / "NearTerrainRefinement.h")
-        scheduler = body(policy, "UploadWorkStats drain_terrain_uploads(")
+        scheduler = body(policy, "drain_terrain_uploads(")
         self.assertEqual(scheduler.count("UploadBudget budget("), 1)
         self.assertLess(scheduler.index("drain(baseline, false)"),
                         scheduler.index("drain(refinement, true)"))
@@ -687,7 +837,7 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("auto& destination = refinement_only ? refinement_candidates : candidates",
                       manage)
         self.assertIn("refresh_uploads( queue, candidates,", compact(manage))
-        self.assertIn("drain_terrain_uploads(queue, m_near_terrain_upload_queue, cost, adopt, elapsed)",
+        self.assertIn("drain_terrain_uploads( queue, m_near_terrain_upload_queue, cost, adopt, elapsed, presentation)",
                       compact(manage))
 
     def test_last_deferred_baseline_enqueues_refinement_before_settled_accounting(self):
@@ -777,9 +927,26 @@ class UploadBudgetWiring(unittest.TestCase):
                          "HasPublishedFarLodSdf", "published_sdfs == captured_resident_sdfs"):
             self.assertIn(retained, validation)
 
+    def test_ladder_preparation_refusal_advances_legacy_in_the_same_frame(self):
+        selection = read(RENDERING / "FarWorldSelection.h")
+        dispatch = body(selection, "void AdvanceSelectedFarWorld(")
+        fallback = dispatch[dispatch.index("ladder();") + len("ladder();"):]
+        self.assertIn("selection.advance", fallback)
+        self.assertIn("selection.effective == FarWorldMode::Legacy", fallback)
+        self.assertIn("legacy();", fallback)
+        frame = body(self.pipeline, "void RenderPipeline::prepare_frame(")
+        advance = frame[frame.index("AdvanceSelectedFarWorld("):]
+        self.assertLess(advance.index("m_far_world->PrepareFrame("),
+                        advance.index("select_frame_far_world("))
+        tests = read(ROOT / "test/rendering/FarWorldLegacyIsolation_test.cpp")
+        for case in ("PreparationRefusalAdvancesAndSubmitsLegacyInTheSameFrame",
+                     "PreparationRefusalHonorsSuppressionAndDoesNotRetry",
+                     "SuccessfulPreparationDoesNotAdvanceLegacy"):
+            self.assertIn(case, tests)
+
     def test_impostor_collection_requires_submitted_resident_terrain_at_each_tree(self):
         gbuffer = read(RENDERING / "passes/GBufferPass.cpp")
-        collect = body(gbuffer, "for (const CachedStaticProp& cp : m_staticPropCache)")
+        collect = body(gbuffer, "for (const std::size_t propIndex : candidates)")
         self.assertIn("if (impostorsOn && authoredTree && lod == 3 && cp.impostorTree) {", collect)
         self.assertIn("impostor_candidate = true;", collect)
         self.assertIn("input.submitted_live_terrain->covers(cp.position)", collect)
@@ -800,7 +967,7 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertTrue(compact(tree).endswith("continue; // all LOD3 tree parts are folded into the billboard"))
         self.assertLess(collect.index(decision.split("(")[0]), collect.index(guard))
         self.assertLess(collect.index(guard), collect.index("impostorInstances.push_back"))
-        self.assertLess(collect.index("impostorInstances.push_back"), collect.index("const auto rit = resolve_lod(cp, authoredTree, lod)"))
+        self.assertLess(collect.index("impostorInstances.push_back"), collect.index("const auto rit = resolve_static_prop_lod(ctx, input, cp, lod)"))
         legacy = read(RENDERING / "FarLodSystem.cpp")
         policy = compact(body(legacy, "StaticPropSubmission SelectStaticPropSubmission("))
         self.assertLess(policy.index("if (!impostor_candidate)"), policy.index("if (live_terrain_owned)"))
@@ -819,14 +986,14 @@ class UploadBudgetWiring(unittest.TestCase):
 
     def test_refused_impostors_resolve_farthest_available_mesh_through_ordinary_batch(self):
         collect = body(read(RENDERING / "passes/GBufferPass.cpp"),
-                       "for (const CachedStaticProp& cp : m_staticPropCache)")
-        resolver = body(read(RENDERING / "passes/GBufferPass.cpp"), "auto resolve_lod =")
+                       "for (const std::size_t propIndex : candidates)")
+        resolver = body(read(RENDERING / "passes/GBufferPass.cpp"), "GBufferPass::resolve_static_prop_lod(")
         memo = body(resolver, "if (rit == m_resolveMemo.end())")
         self.assertIn("resolve_mesh(candidatePath, candidatePath)", memo)
         self.assertIn("for (int mesh_lod = lod - 1; !resolved.first && mesh_lod >= 0; --mesh_lod)", memo)
         self.assertIn("resolve_mesh(fallbackPath, fallbackPath)", memo)
         self.assertIn("LodMeshPath(basePath, mesh_lod)", memo)
-        self.assertIn("if (authoredTree)", memo)
+        self.assertIn("if (cp.authoredTree)", memo)
         self.assertIn("m_resolveMemo", memo)
         for retained in ("cp.model * glm::vec4(glm::vec3(mesh->boundingSphere), 1.0f)",
                          "batch.materialId = cp.materialId", "batch.mats.push_back(cp.model)",
@@ -842,16 +1009,16 @@ class UploadBudgetWiring(unittest.TestCase):
 
     def test_cold_far_supported_frame_prepares_frozen_mesh_fallback(self):
         source = read(RENDERING / "passes/GBufferPass.cpp")
-        collect = body(source, "for (const CachedStaticProp& cp : m_staticPropCache)")
+        collect = body(source, "for (const std::size_t propIndex : candidates)")
         self.assertIn("if (impostor_candidate && !ctx.frozen_replay)", collect)
         warm = body(collect, "if (impostor_candidate && !ctx.frozen_replay)")
-        self.assertIn("resolve_lod(cp, authoredTree, 2)", warm)
+        self.assertIn("resolve_static_prop_lod(ctx, input, cp, 2)", warm)
         self.assertLess(collect.index("if (impostor_candidate && !ctx.frozen_replay)"),
                         collect.index("if (submission == StaticPropSubmission::Impostor)"))
-        resolver = body(source, "auto resolve_lod =")
+        resolver = body(source, "GBufferPass::resolve_static_prop_lod(")
         self.assertIn("m_resolveMemo.find(rkey)", resolver)
         self.assertIn("m_resolveMemo", body(resolver, "if (rit == m_resolveMemo.end())"))
-        self.assertIn("const auto rit = resolve_lod(cp, authoredTree, lod);", collect)
+        self.assertIn("const auto rit = resolve_static_prop_lod(ctx, input, cp, lod);", collect)
         regression = body(read(ROOT / "test/rendering/render_smoke_test.cpp"),
                           "TEST(RenderSmokeTest, RefusedTreeImpostorsSubmitAvailableMeshLods)")
         cold = regression[regression.index("input.legacy_far = &far;"):
@@ -948,7 +1115,7 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertLess(frame.index("live.clear();"), frame.index("m_gbuffer_pass->execute("))
         self.assertIn("gbuffer_input.submitted_live_terrain = &live", frame)
         collect = body(read(RENDERING / "passes/GBufferPass.cpp"),
-                       "for (const CachedStaticProp& cp : m_staticPropCache)")
+                       "for (const std::size_t propIndex : candidates)")
         self.assertIn("input.submitted_live_terrain && input.submitted_live_terrain->covers(cp.position)", compact(collect))
         self.assertNotIn("kFarClipInnerRadiusMeters", collect)
         return source
@@ -985,7 +1152,7 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertNotIn("resident_live_terrain().clear()", frame)
         self.assertNotIn("resident_live_terrain().add_origin(", frame)
         collect = body(read(RENDERING / "passes/GBufferPass.cpp"),
-                       "for (const CachedStaticProp& cp : m_staticPropCache)")
+                       "for (const std::size_t propIndex : candidates)")
         ownership = compact(collect[collect.index("const bool live_terrain_owned"):
                                     collect.index("const bool far_terrain_resident")])
         self.assertIn("impostor_candidate &&", ownership)
@@ -1067,7 +1234,7 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertLess(policy.index("if (live_terrain_owned)"),
                         policy.index("if (!selection.submit || !far_terrain_resident)"))
         collect = body(read(RENDERING / "passes/GBufferPass.cpp"),
-                       "for (const CachedStaticProp& cp : m_staticPropCache)")
+                       "for (const std::size_t propIndex : candidates)")
         far_support = compact(collect[collect.index("const bool far_terrain_resident"):
                                       collect.index("const auto submission")])
         self.assertIn("input.far_selection.effective == FarWorldMode::Legacy", far_support)
@@ -1544,7 +1711,7 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertNotIn("kMinTerrainUploadsPerFrame", self.pipeline)
         upload = body(self.pipeline, "void RenderPipeline::upload_chunk_mesh(")
         self.assertIn("m_foliage_pass->update_ground_mesh(", upload)
-        self.assertIn("manage_chunk_gpu_resources(renderable_chunk_snapshots, camera, snapshot_ms)",
+        self.assertIn("manage_chunk_gpu_resources(renderable_chunk_snapshots, camera, snapshot_ms, presentation)",
                       self.pipeline)
         self.assertLess(self.pipeline.index("const auto snapshot_start"),
                         self.pipeline.index("build_chunk_snapshots(renderable_chunks)"))
@@ -1734,7 +1901,7 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertLess(water.index("if (!vertex_uploaded"), water.index("it->second = data;"))
         self.assertIn("!vertex_uploaded || !index_uploaded || !attributes_valid", water)
         self.assertIn("delete_water_slot(data);", water)
-        draw = body(self.pipeline, "void RenderPipeline::execute_stage_water(")
+        draw = body(self.pipeline, "void RenderPipeline::execute_stage_opaque_snapshot(")
         self.assertIn("PresentedLadderWaterEligible(", draw)
         self.assertIn("water_data.SetPresentedLadderWaterUpload(", self.pipeline)
         presentation = body(self.header, "void SetPresentedLadderWaterUpload(")
@@ -2923,7 +3090,7 @@ class DuskAttributionWiring(unittest.TestCase):
         self.assertIn("anchor(168.0f, 10.0505952835083f, -40.0f)", sweep)
         for token in ('{"dusk", 0.25f}', '{"yaw000", 0.0f, 0.0f, false',
                       '{"yaw240", 240.0f, 0.0f, false', 'camera->Zoom = 75.0f;',
-                      'const int settle = storm ? 5 : 3;', 'apply_weather(storm, phase_clock,'):
+                      'const int settle = WorldSweepStillSettleFrames(storm);', 'apply_weather(storm, phase_clock,'):
             self.assertIn(token, sweep)
         settled = compact(body(sweep, "const auto render_settled ="))
         self.assertIn("i + 1 == settle_frames ? attribution_dir : std::filesystem::path{}", settled)
@@ -3200,6 +3367,46 @@ class NightLightingSourceTests(unittest.TestCase):
             self.assertIn(f'.{field} = glGetUniformLocation(program, "{uniform}")', source)
             self.assertIn(f'm_draw_uniforms.{field}', source)
             self.assertIn(f'ctx.{field}', source)
+
+
+
+class UniformCacheWiring(unittest.TestCase):
+    def test_location_hit_has_one_container_lookup_and_misses_remain_cached(self):
+        source = read(RENDERING / "Shader.cpp")
+        lookup = body(source, "GLint Shader::getUniformLocation(")
+        # Container access is the work oracle; glGetUniformLocation alone cannot
+        # distinguish the old double-probe hit from the retained-iterator hit.
+        self.assertEqual(lookup.count("m_uniformLocationCache.find("), 1)
+        self.assertNotRegex(lookup, r"m_uniformLocationCache\s*(?:\[|\.at\s*\()")
+        self.assertRegex(lookup, r"return\s+\w+->second\s*;")
+        self.assertEqual(lookup.count("glGetUniformLocation("), 1)
+        self.assertRegex(lookup, r"m_uniformLocationCache\.(?:try_)?emplace\(name, location\)")
+        self.assertIn("m_uniformLocationCache.clear();", body(source, "bool Shader::Reload("))
+        gbuffer = read(RENDERING / "passes/GBufferPass.cpp")
+        for key in ("candidatePath", "basePath", "mesh_info.meshPath"):
+            self.assertNotRegex(gbuffer, r"m_(?:skinnedMeshCache|meshCache)\s*\[\s*"
+                                + re.escape(key) + r"\s*\]")
+
+    def test_indexed_names_are_built_inside_generation_cache_factories(self):
+        for filename in ("LightingPass.cpp", "SsaoPass.cpp"):
+            source = read(RENDERING / "passes" / filename)
+            # All decimal conversions in these passes must live in a cache
+            # factory. This also catches prefixes/suffixes built before setters.
+            factories = re.findall(r"\.Get\([^;]*?\[\]\(std::size_t index\)\s*\{(.*?)\}\);",
+                                   source, flags=re.S)
+            self.assertTrue(factories, filename)
+            self.assertEqual(source.count("std::to_string("),
+                             sum(factory.count("std::to_string(") for factory in factories), filename)
+        lighting = read(RENDERING / "passes/LightingPass.cpp")
+        self.assertIn("lighting_shader->ProgramGeneration()", lighting)
+        self.assertIn("m_lightning_overlay_shader->ProgramGeneration()", lighting)
+        self.assertIn("m_uniform_names->contribution = {};", lighting)
+        self.assertIn("m_uniform_names->normal = {};", lighting)
+        self.assertIn("m_uniform_names->flashes.Reset();", lighting)
+        self.assertIn("m_uniform_names->bolts.Reset();", lighting)
+        ssao = read(RENDERING / "passes/SsaoPass.cpp")
+        self.assertIn("m_ssao.ssaoShader->ProgramGeneration()", ssao)
+        self.assertIn("m_sample_names.Reset();", body(ssao, "void SsaoPass::init_shaders("))
 
 
 if __name__ == "__main__":

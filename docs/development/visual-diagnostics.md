@@ -15,17 +15,17 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | Capture-local draw registry | Implemented with separate asset and generated-geometry identities | `DiagnosticDrawTable.h`; registered `DiagnosticDrawTable.*` regressions in `capture_manifest_test` and generated-key `DiagnosticAttribution.*` regressions in `render_smoke_test`; native execution pending |
 | Deferred attribution producers | Implemented inside a leased deferred scope | `GBufferTargets.h/.cpp` and `GBufferPass.cpp` add a render-thread producer scope, capture-local draw identities and explicit unsupported records; `g_buffer.frag`, `foliage.frag`, `plant_procgen.frag` and `scent_decal.frag` have guarded `LUMIN_DIAG_IDS` outputs; registered `DiagnosticAttribution.*` source-contract and `DiagnosticAttributionGl.*` hidden-GL regressions in `render_smoke_test`; native execution pending |
 | G-buffer ID attachment | Implemented for explicit deferred captures | `GBufferPass` holds an `AttachmentLease` during deferred submission; detachment and lease release precede completion, including rollback, recreation, retirement and exceptional exits; registered `GBufferLeaseGl.*` and `DiagnosticAttributionGl.*` regressions; native execution pending |
-| Exact producer coverage | Partial | Inside an explicit producer scope, file-backed static instances and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier with unsupported generated-mesh metadata. Live terrain MDI produces one identity per original command in pool-bucket order, using resident upload LOD and mesh version. The ladder backend, authored surfaces and tree impostors explicitly invalidate coverage; procedural static meshes also remain unsupported. Uploaded plant/marker batches resume deferred attribution, and additive scent decals use separate contributor storage. Missing contributor storage retains exact Forward records labeled `:contributor_only` and refuses completion. Water surfaces, glass panes and waterfall sheet/pool slots use the separate contributor plane at their original submissions through guarded `water.frag`, `glass_oit.frag` and `waterfall.frag` outputs. Foliage has a guarded shader output but no instrumented forward submission; particles remain uninstrumented |
+| Exact producer coverage | Partial | Inside an explicit producer scope, file-backed static instances and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier with unsupported generated-mesh metadata. Live terrain MDI produces one identity per original command in pool-bucket order, using resident upload LOD and mesh version. The ladder backend, authored surfaces and tree impostors explicitly invalidate coverage; procedural static meshes also remain unsupported. Uploaded plant/marker batches resume deferred attribution, and additive scent decals use separate contributor storage. Missing contributor storage retains exact Forward records labeled `:contributor_only` and refuses completion. Water surfaces, glass panes and waterfall sheet/pool slots use the separate contributor plane at their original submissions through guarded `water.frag`, `glass_oit.frag` and `waterfall.frag` outputs. Foliage has a guarded shader output but no instrumented forward submission. The original particle batch writes the contributor plane through a guarded `magical_particles.frag` output; the separate weather overlay explicitly refuses coverage |
 | Bundle transactions and opt-in admission | Implemented for the admitted capture paths | `DiagnosticCapture.h/.cpp` resolves options, streams normalized planes, joins draw records, enforces staging budgets and publishes completion last using identity-checked ownership. `diagnostic_bundle_test` covers public transports and filesystem refusal/rollback; native execution pending. Runtime admission accepts enabled diagnostics only for `world_visual_sweep`, `--frame-scan`, or `--render-benchmark` with `--render-benchmark-screenshot`; every other scenario and the parity redispatches refuse them before save-root output |
-| Dusk wedge attribution (issue #873) | Capture wiring and regression implemented; native execution pending | Fixed audit land pose, paired pre-present final/depth and available lighting sources; `FarWorldFogGl.DuskAuditFogIsContinuousAcrossDistanceAndHeightBoundaries`; no producer correction or visual approval |
+| Shadow projection and receiver filtering (issue #873) | Projection and surface filtering corrected; native re-capture pending | Signed light-view Z bounds become negative-Z plane distances; surface PCF interpolates comparisons with 25 taps. Registered `DiagnosticContributions.LightBoundsContainEveryCornerAndOrderDepthTowardTheLight` and `DiagnosticContributionsGl.ProductionShadowFiltersInterpolateComparisonsAtEveryResolutionAndCascade` regressions; canopy hue and the captured dusk wedge remain unqualified |
 | Terrain coverage lighting/fog evidence (issue #1107) | Existing capture contract retained; regression expanded; native execution pending | `TerrainCoverageCaptureGl.SyntheticPlanesAndCallerStateSurviveReadback` checks source file headers and payload sizes for every captured layer, lighting/fog uniform values and explicit unavailable volume records; `TerrainCaptureResourceWiring` guards manifest publication |
 | ID views and single-pixel inspector | Implemented as explicit render-thread snapshots | `DebugViewPass`; developer-console debug-view panel; registered `DiagnosticInspector.*` and `DiagnosticInspectorGl.*` regressions in `pass_context_test`; native execution pending. Other B views remain planned |
 | Deferred shader contribution views | Implemented as opt-in live overlays | `DebugViewPass` and `LightingPass`; registered `DiagnosticContributions.*` and `DiagnosticContributionsGl.*` regressions in `pass_context_test`; native execution pending. Fog and separate forward/sky/shadow planes explicitly unsupported |
 | Linux shader compilation and software-GL reference scenes | Partial | Fast Linux steps and material, cutout, night, terrain, normal decode and both depth-convention fixtures registered; bounded sky/terrain shader replays checked under llvmpipe; native scene target execution pending; dusk continuity diagnostic pending issue #918; no required-check or ruleset changes |
 | Bundle validity and image checks | Implemented for schema 1 and reader-only schemas 2/3 | `check-diagnostic-capture.py` and registered `DiagnosticCapturePython` synthetic regressions validate bundles without a renderer. ROI coverage, validity, weather, edge and masked defect measurements plus worst-pixel SVG crops are implemented; synthetic detection is covered, while production thresholds remain advisory/unqualified |
-| Capture feature profile and capability manifest | Implemented as GL-free setup logic; app wiring pending | `CaptureFeatureProfile.h/.cpp`; strict `--capture-feature-profile=none\|all_features` runtime selection; registered `CaptureFeatureProfile.*` regressions; native execution pending |
-| Temporal audit plans and admission | GL-free planning and sequence execution protocol implemented; shipping runtime execution refused | `TemporalAudit.h/.cpp`, `RuntimeScenarioConfig.h/.cpp`; registered `TemporalAudit.*` and `TemporalAuditSequence.*` regressions in `capture_manifest_test`; app/site transport integration and native capture pending |
-| Temporal sequences and non-vacuous evidence (E1–E3) | Planned; gap inventory below describes current capture code | Exact-tick site execution, temporal metrics, shared producer policy and non-vacuous feature evidence require implementation; existing captures do not establish this coverage |
+| Capture feature profile and capability manifest | GL-free setup and shared app policy boundary implemented; adapter admission pending | `CaptureFeatureProfile.h/.cpp`; strict `--capture-feature-profile=none\|all_features` runtime selection; registered `CaptureFeatureProfile.*` and `CaptureFeaturePolicy.*` regressions; native execution pending |
+| Temporal audit plans and admission | GL-free planning, sequence protocol and completion-manifest transport implemented; shipping runtime execution refused | `TemporalAudit.h/.cpp`, `RuntimeScenarioConfig.h/.cpp`; registered `TemporalAudit.*` and `TemporalAuditSequence.*` regressions in `capture_manifest_test`; weather input, app/site admission and A4 runtime integration remain pending; native fixed-site frontier capture is native-pending |
+| Temporal sequences and non-vacuous evidence (E1–E3) | Partial GL-free sequence/profile/policy contracts; runtime coverage pending | Exact-tick site execution, temporal metrics, shipping producer adapters and non-vacuous feature evidence require implementation; existing captures do not establish this coverage |
 
 For issue #873, `world_visual_sweep` fixes the land eye at
 `(168, 10.0505952835083, -40)`. The dusk pin is `0.25`, horizon pitch is 0°
@@ -65,7 +65,26 @@ optional froxel injection samples their depth/tint; those paths can project a
 view-dependent shadow boundary. The production-shader GL fixture isolates aerial
 fog at both audited yaws, legacy/ladder distances and aerosol/valley height
 boundaries, with nonzero opacity and nonconstant filtered sky input. Native
-execution and mutation evidence remain pending; no shader correction is claimed.
+execution of that aerial-only regression remains pending. The shadow projection
+now converts signed light-view bounds to plane distances along negative Z before
+constructing the conventional orthographic matrix. Previously passing the signed
+bounds directly displaced the depth interval whenever its endpoints were asymmetric,
+which could clip casters and falsely shadow receivers. Surface PCF now interpolates
+comparison results across fractional texel positions using a four by four box and
+25 nearest-depth taps, removing whole-texel visibility steps without increasing
+the sample budget. Depth and tint return identity outside all six light planes, including froxel
+tint before the light near plane. The complete froxel compute shader is exercised
+by `DiagnosticContributionsGl.FroxelTintIsIdentityOutsideEveryLightPlane`; its
+source pin is in the scene inventory’s separate `regression_inputs` map because
+the image fixtures do not consume it.
+The registered bounds regression covers positive, negative and mixed Z intervals,
+corner inclusion, culling and depth ordering. The registered production-filter GL
+regression covers sub-texel motion on both axes, every cascade, small and shipping
+shadow sizes, open/blocked regions, border taps and out-of-frustum receivers.
+These code defects do not establish the producer of the audit pixels. Froxel
+injection retains its single-tap depth filter; changing its media appearance requires
+attribution with volumetrics active. Orange-brown canopy hue remains unattributed;
+no palette or art change is justified by the code evidence alone.
 A native review must locate the wedge in paired final/depth first, then compare
 fog opacity/color, cascade layers and matrices, sky LUT, SSAO and canopy controls.
 A clear-depth edge implicates coverage; a continuous fog term over discontinuous
@@ -194,9 +213,16 @@ original attachments.
 
 Completing exact coverage requires changes beyond the deferred attachment owners:
 the ladder submission metadata/backend, `StaticDrawPass`, `FoliagePass` and
-`tree_impostor.frag`, plus particle forward submissions.
+`tree_impostor.frag`, plus the scene-compositing weather overlay.
 A foliage identity belongs to a separate forward contributor plane because its color blends
-with the already lit scene. None of these gaps is represented as a guessed mesh or
+with the already lit scene. The particle pass records its original four-vertex
+instanced billboard batch with Live ownership, Forward pass and LOD zero, using the
+generated mesh key `particles/instanced-billboards`. Magical particles, ambient motes,
+rain, snow, impact foam and waterfall spray share that draw, so the ID identifies the
+batch, not an individual particle or emitter. Existing shape and final-alpha discards
+preserve earlier contributor IDs. The weather overlay has no exact contributor mask and
+records `weather_overlay_contributor_uninstrumented` immediately before its draw, so it
+cannot publish a complete capture. None of these gaps is represented as a guessed mesh or
 as successful background coverage.
 
 ## A: capture bundle and pixel identity
@@ -338,7 +364,7 @@ Keep `DebugViewPass` mode numbers 0=off, 1=albedo, 2=normal, 3=depth,
 | Shadow cascade | Actual cascade selection and shadow UV/texel footprint |
 | Sky visibility only; AO only; lighting only | Isolate sky visibility, SSAO/material AO, and pre-albedo light accumulation separately |
 | NaN/Inf highlight | Scan diagnostic attachments before post; magenta NaN, cyan Inf, preserve raw values |
-| Overdraw | Opt-in additive count replay, depth policy labeled; never inferred from final color |
+| Overdraw | Mode 37 `overdraw`: opt-in additive opaque deferred fragment-count replay after material discard, depth test OFF; 0=black, 1..15 fixed bands, >=16=cyan saturation; never inferred from final color |
 | Mip/texel density; triplanar weights | Explicit instrumented shader variants, sampled mip and normalized XYZ blend weights |
 | Wireframe over shaded | Existing wireframe toggle extended to a depth-tested overlay; restore polygon state |
 
@@ -365,8 +391,14 @@ The same six names are accepted by `--debug-view`; selecting one explicitly
 enables identity diagnostics and requests one snapshot. Existing CLI modes retain
 their meaning.
 
-Magenta hatching labels zero, unresolved and unsupported identities. Producer
-colours are terrain brown, impostor cyan, foliage green, static/skinned yellow and
+Magenta hatching labels zero, unresolved and unsupported identities. Coverage
+may be incomplete without discarding the snapshot: supported identities
+retain their normal colours and inspector joins, while unsupported records and
+pixels remain hatched. The panel explicitly reports incomplete coverage and the
+inspector reports `identity_complete: false`. Aborted captures, failed attachments
+and refused registry submissions remain unavailable. Capture publication still
+requires complete identity; display readiness never certifies a bundle or manifest.
+Producer colours are terrain brown, impostor cyan, foliage green, static/skinned yellow and
 far volume blue; live ownership has full brightness, legacy far 70% and ladder far
 45%. Mesh-path provenance uses hashed mesh colours, orange SDF, blue heightfield
 and explicit magenta hatching for unknown provenance. Producer spellings outside
@@ -442,8 +474,9 @@ They do not populate the single-pixel inspector or capture bundles.
 | 32 | triplanar-weights | Production normalized XYZ weights in RGB; yellow if any component is outside [0,1] or sum differs from one by more than 0.001 |
 | 33 | raw-finite | Black for finite raw material/G-buffer values; magenta for NaN/Inf before clamp or storage conversion |
 | 34 | shadow-cascade | Production cascade index and UV; white outside every cascade, orange outside the selected cascade |
-| 35 | shadow-footprint | Production shadow UV and log2 texel footprint, with the existing 5x5 PCF taps |
+| 35 | shadow-footprint | Production shadow UV and log2 texel footprint, with the existing 5x5 PCF taps; unsupported when any derivative-quad lane lacks a valid position |
 | 36 | wireframe-shaded | Depth-tested opaque G-buffer wireframe mask over the shaded frame; no production colour or depth writes |
+| 37 | overdraw | Additive opaque deferred fragment count after material discard, depth test OFF; black=0, blue-to-yellow bands=1..15, cyan=saturated >=16; no production colour or depth writes |
 
 RGB light terms use the display transfer `max(x,0)/(1+max(x,0))`; scalar material
 and visibility values display directly. Storage remains linear RGBA16F before
@@ -452,6 +485,12 @@ means unsupported or unavailable, including sky/background, stale mode, extent
 mismatch and frozen replay. If the overlay variant itself is unavailable, the
 existing unknown-mode magenta sentinel replaces the scene. The deferred ambient term is not a sky contributor
 plane, and the sampled shadow factor is not a shadow producer identity.
+
+Shadow footprints require valid positions in all four derivative-quad lanes,
+including the diagonal neighbour. Reconstruction failure, cleared positions and
+nonfinite positions make the footprint unsupported for valid neighbouring receivers:
+RGB stays `(-2,-2,-2)` with alpha one, using the existing unsupported hatch.
+Sky/background retains alpha zero. Cascade selection remains independently observable.
 
 Only an enabled supported contribution mode compiles `LUMIN_DIAG_CONTRIBUTIONS`
 and attaches one extra lighting output. It shades during the existing lighting
@@ -497,7 +536,18 @@ using reversed-Z GEQUAL with depth writes disabled. A replay guard restores rast
 indexed blend, framebuffer and texture state on every exit. Authored and impostor
 producers remain unavailable; later opaque occlusion is rejected by the overlay.
 Live overlays retain the inspector's bounded storage binding even before an identity
-snapshot exists. Overdraw remains subsequent instrumentation work.
+snapshot exists. Mode 37 `overdraw` replays the same participating draws once with
+filled polygons, depth testing OFF and depth writes disabled, adding one per fragment
+that survives material discard into a dedicated RGBA32F replay target. Counts are
+integer-exact through 2^24; the fixed display and inspector saturate at 16. Black
+means zero participating fragments, blue-to-yellow bands mean 1..15, and cyan means
+>=16 (saturation, never an exact count). Authored/impostor coverage refuses the view;
+forward and sky remain explicitly unavailable. The live inspector reads one selected
+top-left render texel on request through its fixed 48-byte record; it does not freeze
+counts or infer coverage from final colour. The last requested count stays visible
+until the next inspection or invalidation. Registered source and hidden-GL fixtures
+cover 0..17 overlapping quads, saturation, unavailable producers, state restoration
+and unchanged production colour/depth; native execution remains pending.
 No forward, atmosphere, sky or shadow producer coverage is inferred here.
 
 ## C: Linux shader lane
@@ -824,9 +874,10 @@ Keep `diff-render-health.ps1`, native shader-health checks and current threshold
 
 ## E: temporal audits and all-features captures
 
-Temporal plan admission is implemented, as are the profile selection and GL-free
-capability resolver described under E3; sequence execution, E2 and the rest of E3
-remain planned. Neither adds a capture guarantee, metric enforcement or CI job.
+Temporal plan admission is implemented, as are profile selection, the GL-free
+capability resolver and the shared policy boundary described under E3. Shipping
+sequence execution, E2 and the remaining E3 adapters and evidence remain planned.
+These foundations add no capture guarantee, metric enforcement or CI job.
 The inventory below distinguishes current capture behavior from the proposed
 all-features contract. Existing specialized gates remain useful and retain their
 baselines; passing them does not establish an all-features audit.
@@ -871,7 +922,7 @@ the automatic scatter: `--debug-goto cave` can still light one framed hero cryst
 | --- | --- | --- | --- | --- | --- | --- |
 | `--timelapse` family (`--timelapse-frames`) | Ambient OFF by default; CONDITIONAL `--timelapse-living` permits wildlife; `--timelapse-creatures` uses ecology spawns/markers (`client/main_client.cpp:5555`, `:5933`; `client/app/ClientAppContext.h:165`). | Foliage ON/complete; optional grow/season are FORCED visual rebakes, simgrow uses live plants (`client/main_client.cpp:1012`, `:1024`). Cave flourishes OFF (`client/app/CaveFlourishes.cpp:75`); cave terrain and structures CONDITIONAL; water/rivers/waterfalls CONDITIONAL, dig/drain/rain alter the demo world (`client/main_client.cpp:892`, `:920`, `:976`). | Live weather, precipitation and cloud/shadow bridge ON if configured (`client/main_client.cpp:5706`). Rain demo FORCES hydrology input then evaporation, not a clear–storm–clear atmosphere script (`:980`, `:5274`). | Live strikes CONDITIONAL on schedule/view (`:5736`); motes/precipitation ON via common path (`:5716`, `:6015`), presence unverified. | ON, visibility CONDITIONAL on TOD/view. Start TOD/daystep options exist (`client/app/ClientAppContext.h:149`, `:159`); final frame has intervening live clock writes (`client/main_client.cpp:5692`). | Natural weather can evolve; no scripted full cycle. YES, extra fixed ticks can span days with opted-in creatures, but are added to normal frame ticks (`client/main_client.cpp:994`, `:5339`); not an exact-tick audit schedule. |
 | Frame-scan | Ambient eligible when no scenario is active: the predicate does not exclude frame-scan (`client/main_client.cpp:5555`); assets/species still required (`:5575`). | Foliage ON/complete (`:1044`); cave flourishes OFF (`client/app/CaveFlourishes.cpp:76`); caves/structures/water/rivers/waterfalls CONDITIONAL. Scanner observes a rendered frame, does not enable these (`rendering/FrameScan.cpp:81`). | Live bridge ON/CONDITIONAL (`client/main_client.cpp:5706`); no weather pin in scan camera/TOD block (`:6038`). | Live strikes and common particles CONDITIONAL; no scan-specific guarantee (`:5736`, `:6015`). | FORCED noon `0.04` and fixed pose (`:6041`); sky ON, night moon/star evidence absent by design. | NO cycle or multi-day sequence: settles, writes once, exits (`:6197`, `:6419`). Sim ticks before capture do not prove creature progression over days. |
-| World visual sweep | Ambient OFF because scenario active (`client/main_client.cpp:5555`); no sweep creature fixture. | Foliage FORCED empty for upward cameras (`core/scenarios/WorldVisualSweep.cpp:379`). Other views use complete scatter. Cave terrain/structures/water/rivers/waterfalls CONDITIONAL; water-aimed cells require water draws/indices (`:430`). Cave flourish suppression depends on other capture flags, not scenario alone (`client/app/CaveFlourishes.cpp:75`). | FORCED independent clear/storm cells; clouds/shadows ON in both (`core/scenarios/WorldVisualSweep.cpp:455`, `:509`); storm rain ON, clear rain OFF; emitters cleared each cell (`:452`). | FORCED fixed active storm bolt, clear bolt OFF (`:479`, `:503`); particles reset, storm rain emitter added (`:452`, `:473`), other emitters not preserved. | FORCED discrete TOD/season matrix (`:528`); sky/moon/stars CONDITIONAL on cell/view. | NO temporal cycle: independent still weather cells. NO sim days/creature ticks inside synchronous matrix: callback only updates residency and renders (`core/ScenarioRunnerCapture.cpp:141`); settles are renders (`core/scenarios/WorldVisualSweep.cpp:391`). |
+| World visual sweep (legacy still matrix; all-features profile refused before output) | Ambient OFF because scenario active (`client/main_client.cpp:5555`); no sweep creature fixture. | Foliage FORCED empty for upward cameras (`core/scenarios/WorldVisualSweep.cpp:379`). Other views use complete scatter. Cave terrain/structures/water/rivers/waterfalls CONDITIONAL; water-aimed cells require water draws/indices (`:430`). Cave flourish suppression depends on other capture flags, not scenario alone (`client/app/CaveFlourishes.cpp:75`). | FORCED independent clear/storm cells; clouds/shadows ON in both (`core/scenarios/WorldVisualSweep.cpp:455`, `:509`); storm rain ON, clear rain OFF; emitters cleared each cell (`:452`). | FORCED fixed active storm bolt, clear bolt OFF (`:479`, `:503`); particles reset, storm rain emitter added (`:452`, `:473`), other emitters not preserved. | FORCED discrete TOD/season matrix (`:528`); sky/moon/stars CONDITIONAL on cell/view. | NO temporal cycle: independent still weather cells. NO sim days/creature ticks inside synchronous matrix: callback only updates residency and renders (`core/ScenarioRunnerCapture.cpp:141`); settles are renders (`core/scenarios/WorldVisualSweep.cpp:391`). |
 | Scenario capture (general) | Ambient OFF (`client/main_client.cpp:5555`); CONDITIONAL scenario-owned rigs. CreatureSlice explicitly probes planner and skinned draws before/after stimulus (`core/ScenarioRunnerCapture.cpp:2055`, `:2074`), not a general wildlife guarantee. | Foliage ON/complete except scenario/isolation overrides; caves/structures/water/rivers/waterfalls CONDITIONAL. Water smoke explicitly waits for water draws (`core/ScenarioRunnerCapture.cpp:476`); general capture does not. Cave flourishes not suppressed by scenario alone (`client/app/CaveFlourishes.cpp:75`). | Live defaults ON/CONDITIONAL, then scenario pins override (`core/ScenarioRunnerCapture.cpp:195`); no universal weather schedule. | Live CONDITIONAL or FORCED by atmosphere driver (`core/ScenarioRunnerCapture.cpp:198`). Particle availability/content CONDITIONAL. | Many visual smokes FORCE noon; other scenarios use their own pins/live clock (`core/ScenarioRunnerCapture.cpp:201`). | Scenario-specific; no generic clear–storm–clear or exact multi-day creature audit. Normal sim uses frame delta (`client/main_client.cpp:5339`); capture progress uses elapsed time (`core/ScenarioRunnerCapture.cpp:219`). |
 | Time-of-day sweep | Ambient OFF (scenario); no creature fixture (`client/main_client.cpp:5555`). | Foliage ON; caves/structures/water/rivers/waterfalls CONDITIONAL; emissive discovery can change camera for an extra shot (`core/ScenarioRunnerDrive.cpp:736`). | Live bridge ON/CONDITIONAL; TOD pins do not supply a weather cycle (`core/ScenarioRunnerCapture.cpp:210`). Clouds/shadows follow live sample (`client/main_client.cpp:5724`). | Live strikes/particles CONDITIONAL (`client/main_client.cpp:5736`, `:6015`); no presence qualification. | FORCED summer/winter noon/dusk/night plans, one pending capture at a time (`core/ScenarioRunnerCapture.cpp:235`); not continuous dawn/dusk. | NO scripted weather cycle or multi-day animals. Season tick is a render pin, not elapsed sim days (`:245`). Frontier launches a timed scenario with `--no-ui` (`frontier:3035`). |
 | Weather visual | Ambient OFF (scenario); no creature fixture (`client/main_client.cpp:5555`). | Foliage ON; caves/structures/water/rivers/waterfalls CONDITIONAL, not asserted by this gate. | FORCED clear control then rain floored to 1.0; final precipitation follows pin (`core/ScenarioRunnerDrive.cpp:245`, `:258`, `:282`). Clouds/shadows retain live bridge, not a prescribed full cloud cycle (`client/main_client.cpp:5724`). | FORCED bolt only in progress window 0.80–0.84 (`core/ScenarioRunnerDrive.cpp:305`); rain particles ON in weather phase, emission OFF in clear control (`:282`); ambient motes common. | FORCED noon (`core/ScenarioRunnerCapture.cpp:203`); sky ON, night moon/stars absent. | NO return-to-clear cycle or multi-day animals. Motion clip is 240 render samples at 1/60 s (`core/ScenarioRunnerCapture.cpp:90`); frontier also runs a separate 300-tick weather bench, not an ecological capture (`frontier:2596`). |
@@ -945,8 +996,8 @@ controls, rather than using wall time or assuming symmetric daylight.
 
 Capture acknowledges nonempty output within its reserved frame bound; only after
 all captures does the protocol issue publication of the completion manifest.
-Failure or cancellation remains incomplete even after partial captures. It owns no
-filesystem destination, scenario counters, recorder or runtime state. Registered
+Failure or cancellation remains incomplete even after partial captures. The basic
+protocol owns no filesystem destination, scenario counters, recorder or runtime state. Registered
 `TemporalAuditSequence.*` regressions exercise endpoints, rational bursts, holds,
 readiness exhaustion and last-attempt success, exact settling, phase/controls,
 byte-boundary and altered-plan refusal, clock/transport faults, partial publication
@@ -955,6 +1006,43 @@ are registered, not execution evidence. Shipping startup still refuses temporal
 runs: integration with the fixed site, simulation/physics/streaming dependencies,
 A4 reservations and completed-frame capture, and existing frontier actions remains
 pending. No temporal or all-features runtime support is claimed.
+
+The optional GL-free file transport acknowledges immutable completed payloads with
+`acknowledgeCaptureFiles`. It opens and verifies the directory and each regular
+file, reads at most 128 MiB per payload and at most 12 payloads per frame, and hashes
+the exact binary bytes read using SHA-256. All relative paths are lowercase ASCII leaves
+beginning `frame-<frame_index>.`, at most 128 bytes; duplicate names, wrong frame
+prefixes, empty payloads, directory escapes and byte-reservation excess refuse.
+The caller must enumerate every completed-frame payload, including A4 sidecars,
+and must keep the directory and acknowledged files immutable. All captures and
+the manifest must share that directory; changing it refuses. This is a transport contract; no
+shipping scenario invokes it yet and it does not establish site/ROI admission.
+
+`completionManifest` serializes only after all file-backed captures are acknowledged.
+Its JSON schema is `luminumbra.temporal_audit_sequence`, `version` is 1 and `status`
+is `complete`. `plan` records the full request, settling/work bounds and planned
+frame order; `plan_sha256` hashes its compact, lexicographically keyed JSON bytes
+without a trailing newline. `frames` preserves capture order with `index`, `tick`,
+`sub_tick_60` (denominator 60), `kind`, `control`, `dense`, `hold_frame` and ordered
+`payloads` containing relative `path`, exact `bytes` and lowercase `sha256`.
+Version 1 encodes span as day-night=0, weather-cycle=1, multi-day=2; frame kind as
+sequence=0, steady-hold=1, night-presence-hold=2; control as live=0, noon=1, night=2.
+There are no wall-clock fields. Serialization is bounded to 16 MiB and the admitted
+manifest reservation. E1d can use this format contract for its reader fixtures;
+there is no native sequence artifact yet.
+
+Only a pending publication step can call `publishCompletionManifest`: validate
+first, exclusively write/close a sibling `.tmp`, then publish through A4's shared
+identity-checked journal without replacing an existing destination. The parent
+must already exist. Manifest names are lowercase ASCII leaves of at most 128
+bytes; reserved device stems and NUL in any supplied path refuse before writes.
+This operation creates no parent directories. Failed publication may
+retain staging evidence but never publishes a new complete destination. Cancellation,
+partial captures and byte-only acknowledgements produce no completion manifest.
+Registered sequence regressions cover serialization/version/order, known text and
+binary hashes, exact tick counts through file acknowledgement, malformed/missing/
+oversized payloads, occupied destinations/staging, cancellation and reservation
+failure before filesystem writes. Native execution and mutation runs remain pending.
 
 The planning parser is callable independently. Both shipping startup parsers reject
 even valid temporal plans, and `--scenario=temporal_audit`, with an explicit
@@ -1119,6 +1207,30 @@ weather and both headless legs. Every unimplemented adapter defaults to unsuppor
 with unknown effective state represented as null. No shipping adapter is implemented
 or certified by this foundation.
 
+The shared `CaptureFeaturePolicy` boundary now consumes a resolved snapshot.
+Only a supported snapshot requesting and enabling every catalog feature may remove
+legacy capture suppression. GL-free policy regressions cover the eight mode labels,
+ordinary-play producer-setting equivalence (ambient animals, weather, particles and
+cave flourishes), every missing/disabled adapter, missing identities, incomplete
+subsets, UI composition and the deterministic-fixture guard. These are synthetic
+adapter snapshots, not runtime adapter or rendered-presence certification.
+
+The app routes ambient wildlife and cave automation through that boundary; scenario
+weather/cloud/precipitation and TOD comparison pins, plus scene weather/particle pins,
+use its legacy-pin decision. Camera, time-of-day, season and moon selections remain
+explicit capture inputs. `--no-ui` and pre-existing UI availability remain restrictive;
+developer-widget suppression and the ecology nameplate exception remain unchanged.
+The particle-emitter determinism scenario retains its fixture policy even with a
+supported snapshot. Fixed tick spacing and deterministic descriptor generation are
+not feature-off switches and are unchanged. Both hidden-window scan and scene legs
+use the same app boundary; hidden-window visibility itself changes no feature setting.
+
+Shipping mode adapters and resolved identities remain unavailable, so the CLI still
+retains legacy feature behavior even with `all_features` selected. In particular,
+this slice does not deliver the time-lapse all-features requirement or certify the
+synchronous world sweep. Completing those adapters and native entry-point validation
+is a follow-up; no all-features capture success is claimed here.
+
 The resolver records requested/effective settings, forced/suppressed/unavailable
 reasons, per-feature and aggregate capability, and resolved asset/config identities
 or explicit unavailable reasons. Missing identities prevent aggregate support;
@@ -1205,8 +1317,10 @@ needs a profile-aware spawn path with real rigs/AI; the synchronous world sweep
 needs the E1 tick driver rather than still-cell reuse; frame-scan/headless stills
 need a sequence adapter and night/weather windows; time-of-day/weather smokes need
 continuous tick schedules including dawn and return-to-clear; cave automation
-needs bounded explicit flourish initialization; upward sweep foliage clearing and
-per-cell particle resets need profile-aware alternatives. Live-weather/cloud,
+needs bounded explicit flourish initialization; upward sweep foliage clearing now
+refuses an all-features still matrix before output. The GL-free sweep protocol
+carries one transport across samples; shipping temporal transport must preserve
+particle continuity. Live-weather/cloud,
 lightning and transient precipitation must share one final tick-indexed state,
 with real producer evidence for forward water/particles/sky (A/B coverage gaps).
 A missing asset/system is unsupported, never an automatic fallback to markers.
@@ -1229,20 +1343,20 @@ edits when parallel branches join. No new required CI checks are part of any row
 | A3: exact deferred attribution | `rendering/passes/GBufferPass.cpp`; `rendering/GBufferTargets.cpp`; `rendering/GBufferTargets.h`; `res/shaders/g_buffer.frag`; `res/shaders/foliage.frag`; `rendering/FarLodSystem.cpp`; `test/rendering/diagnostic_attribution_test.cpp`; `test/CMakeLists.txt`; `config/public-asset-inventory.json`; `docs/development/visual-diagnostics.md` (10) | After A2; coordinate owned files with minimal local hunks. Opt-in MRT shader variants mirror actual alpha/depth/LOD ownership; no approximate geometry replay. |
 | A4: scenario bundles and probes | `rendering/DiagnosticCapture.h`; `rendering/DiagnosticCapture.cpp`; `rendering/RenderPipeline.h`; `rendering/RenderPipeline.cpp`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `src/luminumbra_client/core/RuntimeScenarioConfig.cpp`; `test/rendering/diagnostic_bundle_test.cpp`; `test/CMakeLists.txt`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After A3. Shared readback/transaction adapter and once-only opt-in; coordinate owned scenario file. Extend capture_manifest_test for the GL-free adapter; use the client source manifest updated with the codecs in A2. |
 | B1: ID views and inspector | `rendering/passes/DebugViewPass.h`; `rendering/passes/DebugViewPass.cpp`; `res/shaders/debug_view.frag`; `src/luminumbra_client/debug/widgets/RenderControlWidgets.cpp`; `src/luminumbra_client/app/RegisterDeveloperWidgets.cpp`; `rendering/RenderPipeline.cpp`; `test/rendering/diagnostic_inspector_test.cpp`; `test/CMakeLists.txt`; `src/luminumbra_client/main_client.cpp`; `docs/development/visual-diagnostics.md` (10) | After A4. Named CLI/panel ID/LOD/chunk/ownership and mesh-path snapshots, single-pixel inspector; avoids listed owned files. |
-| B2: shader contribution views | `rendering/passes/DebugViewPass.h`; `rendering/passes/DebugViewPass.cpp`; `rendering/passes/LightingPass.h`; `rendering/passes/LightingPass.cpp`; `res/shaders/debug_view.frag`; `res/shaders/lighting_pass.frag`; `test/rendering/diagnostic_contributions_test.cpp`; `test/rendering/diagnostic_inspector_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md` (10) | Implemented after B1. Live deferred contribution and material views, opt-in variants and overlay state; existing G-buffer material channels reused unchanged. Fog and forward/sky/shadow planes remain separately labelled unsupported. Surface mip/density, normalized triplanar weights and raw finite sentinels use opt-in G-buffer variants; other catalogue instrumentation remains planned. |
+| B2: shader contribution views | `rendering/passes/DebugViewPass.h`; `rendering/passes/DebugViewPass.cpp`; `rendering/passes/LightingPass.h`; `rendering/passes/LightingPass.cpp`; `res/shaders/debug_view.frag`; `res/shaders/lighting_pass.frag`; `test/rendering/diagnostic_contributions_test.cpp`; `test/rendering/diagnostic_inspector_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md` (10) | Implemented after B1. Live deferred contribution and material views, opt-in variants and overlay state; existing G-buffer material channels reused unchanged. Fog and forward/sky/shadow planes remain separately labelled unsupported. Surface mip/density, normalized triplanar weights and raw finite sentinels use opt-in G-buffer variants; cascade/footprint and wireframe replay views are implemented. Mode 37 adds opt-in depth-OFF additive overdraw counts, fixed saturation bands and a live selected count; authored/impostor/forward/sky remain unavailable. Native execution remains pending. |
 | C1: every-PR shader compile and link completion | `tools/ci/compile_shaders.py`; `tools/ci/test_compile_shaders.py`; `test/rendering/render_smoke_test.cpp`; `docs/development/visual-diagnostics.md` (4) | Implemented in the existing unconditional fast-job step. Compile every stage permutation, then link the native program registry and compute inventory using the same prepared sources. Refuse missing pass-layout pairs or unlinked stage/define permutations; registered interface-mismatch, matching-pair and missing-program regressions cover linking. |
 | C2: llvmpipe scenes | `tools/gates/shader-scenes.py`; `tools/gates/test_shader_scenes.py`; `test/rendering/shader_scenes/scenes.json`; `test/rendering/shader_scenes/references/`; `test/rendering/shader_scene_render_test.cpp`; `test/CMakeLists.txt`; `tools/ci/validate_assets.py`; `config/public-asset-inventory.json`; `docs/development/visual-diagnostics.md` | Implemented on the existing reference/metric/regeneration path and path gate: seven references include normal decode, both depth conventions and post edge, plus integer-exact production compute SSBO readback. Post clamp and compute binding source mutations failed surfaceless llvmpipe checks and were restored byte-exactly. Native scene execution remains pending; dusk is diagnostic only. The post/compute extension changes seven files including one reference and its asset inventory; no workflow or required-check changes. |
 | D1: bundle/ID/AOV validity checks | `tools/gates/check-diagnostic-capture.py`; `tools/gates/test_diagnostic_capture.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `tools/gates/diff-render-health.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (8) | After A4; parallel with B/C. Registered Python reader tests cover little endian, dimensions, partial payloads, unknown versions and nonfinite values. Avoids owned files. |
 | D2: image metrics and synthetic qualification | `tools/gates/check-diagnostic-capture.py`; `tools/gates/test_diagnostic_capture.py`; `tools/gates/baselines/diagnostic-rois.json`; `tools/gates/build-visual-sweep-montages.py`; `tools/gates/test_diagnostic_checks.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After D1 and relevant C2 fixtures/B2 channels. Implemented masked holes, seam/reference and boundary residuals, cards, bands, wedges, weather/detail and composition checks with isolated synthetic defects and labeled worst-pixel montages. All shipped thresholds remain advisory/unqualified; production enforcement needs separate repeated-capture evidence. Acceptance-row state is unchanged. Avoids owned files. |
 | E1a: exact-tick plan and admission | `rendering/TemporalAudit.h`; `rendering/TemporalAudit.cpp`; `src/luminumbra_client/core/RuntimeScenarioConfig.h`; `src/luminumbra_client/core/RuntimeScenarioConfig.cpp`; `src/luminumbra_client/sources.cmake`; `test/rendering/temporal_audit_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After A4, D1. Register GL-free tick/cadence/overflow/refusal regressions in capture_manifest_test. Coordinate configuration ownership; admission alone cannot advertise runtime support. |
 | E1b: deterministic weather input | `src/luminumbra_common/systems/WeatherSystem.h`; `src/luminumbra_common/systems/WeatherSystem.cpp`; `src/luminumbra_common/world/GameSession.cpp`; `rendering/TemporalAudit.cpp`; `test/rendering/temporal_weather_test.cpp`; `test/CMakeLists.txt`; `src/luminumbra_client/core/ScenarioRunnerDrive.cpp`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E1a. Coordinate simulation owners: register fixed-tick weather/hydrology/strike and identity/replay tests before enabling script support. Exercise normal live bridge; any format migration is a prerequisite separate slice with both readers/writers, not hidden in this count. |
-| E1c: site sequence driver | `src/luminumbra_client/main_client.cpp`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `src/luminumbra_client/core/ScenarioRunnerImpl.h`; `rendering/TemporalAudit.cpp`; `test/rendering/temporal_sequence_test.cpp`; `test/CMakeLists.txt`; `tools/gates/validate-engine-frontier.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E1b, A4, D1. Coordinate app/scenario ownership. GL-free sequence protocol and registered sequence/readiness/phase/creature-tick regressions implemented. App/site transport and native fixed-site capture through existing frontier actions remain pending. No all-features claim before E3. |
+| E1c: site sequence driver | `src/luminumbra_client/main_client.cpp`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `src/luminumbra_client/core/ScenarioRunnerImpl.h`; `rendering/TemporalAudit.cpp`; `test/rendering/temporal_sequence_test.cpp`; `test/CMakeLists.txt`; `tools/gates/validate-engine-frontier.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E1b, A4, D1. GL-free protocol and optional version-1 completion-manifest transport implemented with registered sequence/readiness/phase/creature-tick and file-publication regressions. The manifest transport slice changes `rendering/TemporalAudit.h/.cpp`, `test/rendering/temporal_sequence_test.cpp`, `src/luminumbra_common/sources.cmake` (link the unchanged SHA-256 implementation) and this document (5). App/site admission, A4 reservations/runtime transport and existing frontier action wiring remain pending; native fixed-site capture is native-pending. Shipping startup still refuses execution. No all-features claim before E3. |
 | E1d: manifest-aware assembly | `tools/timelapse.py`; `tools/gates/test_temporal_assembly.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/visual-regression.md`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (8) | After E1c and D1. Register Python manifest/order/hash/partial-input/encoder-failure/budget tests in PYTHON_TESTS and CTest; preserve existing assembler callers. Existing generic workflow invokes the registry. Coordinate shared assembler and document edits. |
 | E2a: temporal measurements | `tools/gates/check-temporal-capture.py`; `tools/gates/test_temporal_capture.py`; `tools/gates/check-diagnostic-capture.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (8) | After E1d, D1, D2. Register Python fixtures for all five metrics, unknown metadata, empty masks and stable cross-frame identity; reuse D1/D2 readers. Avoid owned rendering files. |
 | E2b: qualification and worst events | `tools/gates/check-temporal-capture.py`; `tools/gates/test_temporal_capture.py`; `tools/gates/baselines/diagnostic-rois.json`; `tools/gates/build-visual-sweep-montages.py`; `tools/gates/test_temporal_montages.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E2a and relevant B2/C2 contributions. Register qualification-status, repeated-run, injected-defect and labelled failure-slot tests in PYTHON_TESTS/CTest. Threshold enforcement requires separately reviewed qualification evidence. Coordinate shared ROI/montage edits. |
-| E3a: profile and capability manifest | `rendering/CaptureFeatureProfile.h`; `rendering/CaptureFeatureProfile.cpp`; `src/luminumbra_client/sources.cmake`; `src/luminumbra_client/core/RuntimeScenarioConfig.h`; `src/luminumbra_client/core/RuntimeScenarioConfig.cpp`; `test/rendering/capture_feature_profile_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After A4, D1; may precede E1. Register GL-free profile/capability/unknown-feature/incompatible-option tests. Default every unimplemented adapter to unsupported. Coordinate configuration ownership. |
-| E3b: shared app and scenario policy | `src/luminumbra_client/main_client.cpp`; `src/luminumbra_client/app/ClientAppContext.h`; `src/luminumbra_client/app/CaveFlourishes.cpp`; `src/luminumbra_client/core/ScenarioRunnerDrive.cpp`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `rendering/CaptureFeatureProfile.cpp`; `test/rendering/capture_feature_policy_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `docs/visual-regression.md` (10) | After E3a and E1c. Coordinate app/scenario/cave ownership; register ordinary-play equivalence and profile tests across timelapse, scan, general scenario, TOD/weather and both headless legs, including no-ui and determinism options. Remove suppression only for admitted profile runs. |
-| E3c: sweep profile adapter | `scenarios/WorldVisualSweep.cpp`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `rendering/TemporalAudit.cpp`; `rendering/CaptureFeatureProfile.cpp`; `test/rendering/temporal_sweep_test.cpp`; `test/CMakeLists.txt`; `tools/gates/validate-engine-frontier.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E3b. Coordinate sweep ownership. Register exact-tick sweep/particle-continuity/creature tests; existing still matrix keeps its pins. Feature-incompatible camera/profile combinations refuse explicitly. |
+| E3a: profile and capability manifest | `rendering/CaptureFeatureProfile.h`; `rendering/CaptureFeatureProfile.cpp`; `src/luminumbra_client/sources.cmake`; `src/luminumbra_client/core/RuntimeScenarioConfig.h`; `src/luminumbra_client/core/RuntimeScenarioConfig.cpp`; `test/rendering/capture_feature_profile_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | Profile foundation implemented with registered GL-free profile/capability/unknown-feature/incompatible-option tests. Every unimplemented adapter defaults to unsupported. Shipping adapter admission remains pending. |
+| E3b: shared app and scenario policy | `src/luminumbra_client/main_client.cpp`; `src/luminumbra_client/app/ClientAppContext.h`; `src/luminumbra_client/app/CaveFlourishes.cpp`; `rendering/CaptureFeatureProfile.h`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `rendering/CaptureFeatureProfile.cpp`; `test/rendering/capture_feature_policy_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `docs/visual-regression.md` (10) | Shared policy boundary implemented after E3a and E1c; registered synthetic ordinary-play equivalence, mode-label, admission, no-ui and determinism regressions. Only complete supported snapshots can remove suppression. Shipping adapters and native entry-point validation remain pending; no runtime all-features claim. |
+| E3c: sweep profile adapter | `scenarios/WorldVisualSweep.cpp`; `src/luminumbra_client/core/RuntimeScenarioConfig.cpp`; `rendering/TemporalSweep.h`; `test/rendering/temporal_sweep_test.cpp`; `tools/ci/test_replay_source_contract.py`; `test/CMakeLists.txt`; `tools/gates/validate-engine-frontier.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | Partial after E3b: GL-free fixed-camera sweep transport protocol delegates exact ticks, rational presentation and publication to E1c and passes the shared feature policy without per-cell resets. Registered regressions cover tick plans, creature progression, modeled particle continuity, refusal/failure paths and unchanged legacy camera/TOD/settle pins. Both startup parsers refuse the all-features still matrix before output with `sweep_upward_camera_forces_empty_foliage`, including environment launches. Shipping temporal startup, simulation/weather/completed-frame transport and native validation remain pending; no temporal runtime or all-features presence claim. |
 | E3d: forward feature evidence | `rendering/DiagnosticContributions.h`; `rendering/DiagnosticContributions.cpp`; `rendering/passes/WaterPass.cpp`; `rendering/passes/WaterfallPass.cpp`; `rendering/passes/ParticlePass.cpp`; `rendering/passes/FoliagePass.cpp`; `rendering/RenderPipeline.cpp`; `test/rendering/capture_forward_presence_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md` (10) | After B2 and E3a. Coordinate owned producers. Register GL-free counter joins and native visible-contribution/occlusion fixtures; separate river/waterfall/spray evidence, and report unsupported until instrumented shader contributors land in additional bounded slices with asset inventory updates. |
 | E3e: geometry and atmosphere evidence | `rendering/DiagnosticContributions.h`; `rendering/DiagnosticContributions.cpp`; `rendering/passes/GBufferPass.cpp`; `rendering/passes/SkyboxPass.cpp`; `rendering/passes/LightingPass.cpp`; `rendering/RenderPipeline.cpp`; `test/rendering/capture_scene_presence_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `docs/visual-regression.md` (10) | After E3d. Coordinate owned passes. Register creature/cave/structure/sky/moon/star/cloud-shadow/bolt visibility fixtures, including absent/offscreen cases; shader variants and public asset inventory changes are prerequisite bounded slices under B2, not implicit extra files. |
 | E3f: non-vacuous acceptance report | `rendering/CaptureFeatureProfile.cpp`; `rendering/TemporalAudit.cpp`; `tools/gates/check-temporal-capture.py`; `tools/gates/test_temporal_capture.py`; `test/rendering/capture_feature_profile_test.cpp`; `test/CMakeLists.txt`; `tools/gates/validate-engine-frontier.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E3c–E3e and E2b. Extend registered suites and existing frontier consumers: zero/unknown/unsupported presence, wrong-frame evidence and failed publication cannot pass; full site/span success requires all expected windows. Qualification/visual approval remain distinct. |

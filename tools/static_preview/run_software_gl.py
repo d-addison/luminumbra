@@ -37,7 +37,8 @@ EXPECTED_CASES = frozenset({
 
 SHADER_CASES = frozenset({("ShaderScene", name) for name in (
     "MaterialLinearReferenceAndOcclusionBlend", "TreeImpostorAtlasCutout",
-    "NightSkyHorizonAndRadialStars", "DuskSkyAzimuthContinuity", "TerrainMaterialTransition")})
+    "NightSkyHorizonAndRadialStars", "DuskSkyAzimuthContinuity", "TerrainMaterialTransition",
+    "GrassHasSeparatedBladesAndClutterHasCutoutCorners")})
 
 # Every wait is bounded so display startup, the test child and server cleanup
 # finish inside the smallest CTest TIMEOUT that registers this runner. A CTest

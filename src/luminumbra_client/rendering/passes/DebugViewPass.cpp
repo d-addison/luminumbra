@@ -232,6 +232,7 @@ struct DebugViewPass::Snapshot {
     GLuint sample_fbo = 0;
     GLuint sample_texture = 0;
     bool ready = false;
+    bool identity_complete = false;
     bool images_ready = false;
     bool inspect_requested = false;
     bool freeze_requested = false;
@@ -271,11 +272,12 @@ public:
         if (!capture_) {
             return;
         }
-        const bool complete = capture_->complete();
+        const bool ready = capture_->snapshot_ready();
+        pass_.m_snapshot->identity_complete = capture_->complete();
         // Retire the current variant before deletion so the gather saves a valid binding.
         AttributedGl::UseProgram(glUseProgram, 0U);
         capture_.reset();
-        if (!complete) {
+        if (!ready) {
             controls().status = controls().result =
                 "Snapshot refused: incomplete or unsupported coverage";
             return;
@@ -319,6 +321,10 @@ std::string_view DebugViewPass::contribution_legend(int mode) {
             return "Production shadow footprint: RG=shadow UV; B=log2(texels/pixel)/16+0.5, "
                    "clamped [0,1]; 5x5 PCF taps at +/-2 shadow texels; "
                    "white=outside every cascade, orange=outside selected cascade";
+        case Overdraw:
+            return "Overdraw: additive opaque deferred fragment count after material discard; "
+                   "depth test OFF, no depth writes; 0=black, 1..15=blue-to-yellow bands, "
+                   ">=16=cyan saturation; authored/impostor/forward/sky unavailable";
         case Wireframe:
             return "Wireframe over shaded: depth-tested (reversed-Z GEQUAL), no depth writes; "
                    "opaque G-buffer draws only; authored/impostor producers unavailable";
@@ -499,11 +505,16 @@ struct DebugViewPass::SurfaceState {
         glColorMaski(6, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         glDisablei(GL_BLEND, 6);
         if (replay_mode(view)) {
-            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+            glPolygonMode(GL_FRONT_AND_BACK, view == Overdraw ? GL_FILL : GL_LINE);
             glLineWidth(1.0f); // supported on every core-profile implementation
-            glEnable(GL_DEPTH_TEST);
-            glDepthFunc(GL_GEQUAL);
-            glDepthMask(GL_FALSE);
+            DebugViewPass::replay_depth_policy();
+            if (view == Overdraw) {
+                // Float32 addition is integer-exact through 2^24; larger values remain
+                // saturated in the display (cap 16) and inspector, never an exact claim.
+                glEnablei(GL_BLEND, 6);
+                glBlendFuncSeparatei(6, GL_ONE, GL_ONE, GL_ONE, GL_ONE);
+                glBlendEquationSeparatei(6, GL_FUNC_ADD, GL_FUNC_ADD);
+            }
         }
         supported = glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
         if (!supported) {
@@ -603,8 +614,12 @@ bool DebugViewPass::replaying() {
 }
 void DebugViewPass::replay_depth_policy() {
     if (replaying()) {
-        glEnable(GL_DEPTH_TEST);
-        glDepthFunc(GL_GEQUAL);
+        if (controls().surface_owner->m_surface->view == Overdraw) {
+            glDisable(GL_DEPTH_TEST);
+        } else {
+            glEnable(GL_DEPTH_TEST);
+            glDepthFunc(GL_GEQUAL);
+        }
         glDepthMask(GL_FALSE);
     }
 }
@@ -669,6 +684,17 @@ std::shared_ptr<DebugViewPass::Frame> DebugViewPass::begin_frame(const RenderCon
         m_surface->ready = false;
     }
     if (geometry_requested()) {
+        if (geometry_view() == Overdraw) {
+            const DiagnosticExtent render{ctx.internal_w(), ctx.internal_h()};
+            if (control.extent.width != render.width || control.extent.height != render.height) {
+                invalidate_selection(control);
+            }
+            control.extent = render;
+            control.output = {ctx.screen_width, ctx.screen_height};
+            control.frozen = false; // Counts and selected-pixel values describe this live replay.
+            control.image_texture = control.zoom_texture = 0;
+            control.probe_json.clear();
+        }
         control.refresh = false;
         return {};
     }
@@ -828,6 +854,8 @@ void DebugViewPass::finish_frame(const RenderContext& ctx) {
         }
         const auto kind = producer(draw.at("shader_variant").get<std::string>(),
                                    draw.at("supported").get<bool>());
+        m_snapshot->identity_complete =
+            m_snapshot->identity_complete && kind != ProducerKind::Unsupported;
         metadata[(index + 1) * 2] = *id;
         metadata[(index + 1) * 2 + 1] = {
             chunk, static_cast<std::uint32_t>(kind), mesh.at("provenance").get<std::uint32_t>(), 0};
@@ -866,8 +894,9 @@ void DebugViewPass::finish_frame(const RenderContext& ctx) {
     glBindTexture(GL_TEXTURE_BUFFER, m_snapshot->metadata_texture);
     glTexBuffer(GL_TEXTURE_BUFFER, GL_RGBA32UI, m_snapshot->metadata);
     m_snapshot->ready = true;
-    control.status =
-        "Identity snapshot; refresh to capture a new frame. Magenta hatch = zero / unsupported.";
+    control.status = m_snapshot->identity_complete ? "Identity snapshot (complete coverage)"
+                                                   : "Identity snapshot (incomplete coverage)";
+    control.status += "; refresh to capture a new frame. Magenta hatch = zero / unsupported.";
     if (control.inspector_open && !retain_images(ctx)) {
         control.frozen = false;
         control.result = "Snapshot image storage unavailable";
@@ -1049,6 +1078,7 @@ void DebugViewPass::inspect_snapshot(const RenderContext& ctx) {
                        {"record", record},
                        {"view", m_snapshot->view},
                        {"projection", m_snapshot->projection},
+                       {"identity_complete", m_snapshot->identity_complete},
                        {"identity_supported",
                         !record.is_null() &&
                             producer(record.at("draw").at("shader_variant").get<std::string>(),
@@ -1133,7 +1163,11 @@ void DebugViewPass::execute(const RenderContext& ctx) {
         // sentinel paints magenta instead of leaving a plausible final scene visible.
         const bool overlay_available = m_contribution_shader && m_contribution_shader->IsValid();
         shader = overlay_available ? m_contribution_shader.get() : m_shader.get();
-        controls().result.clear();
+        // Keep the last requested count visible until another inspection or invalidation.
+        // Other contribution views have no single-pixel result.
+        if (mode() != Overdraw || !controls().result.starts_with("Overdraw count ")) {
+            controls().result.clear();
+        }
         controls().status = std::string(contribution_legend(mode()));
         controls().status +=
             overlay_available
@@ -1201,15 +1235,49 @@ void DebugViewPass::execute(const RenderContext& ctx) {
     shader->setFloat("u_far", far_plane);
 
     bind_sources(ctx, *shader);
+    const bool inspect_count =
+        mode() == Overdraw && std::exchange(controls().inspect_requested, false);
+    const bool count_pixel_valid = inspect_count &&
+                                   contribution_extent(ctx.internal_w(), ctx.internal_h()) &&
+                                   controls().x >= 0 && controls().y >= 0 &&
+                                   static_cast<unsigned int>(controls().x) < ctx.internal_w() &&
+                                   static_cast<unsigned int>(controls().y) < ctx.internal_h();
+    if (mode() == Overdraw) {
+        shader->setInt("u_inspect", count_pixel_valid ? 1 : 0);
+        shader->setInt("u_pixelX", count_pixel_valid ? controls().x : 0);
+        shader->setInt("u_pixelY",
+                       count_pixel_valid ? static_cast<int>(ctx.internal_h()) - 1 - controls().y
+                                         : 0);
+    }
     if (identity_view &&
         (!m_snapshot->ready || m_snapshot->targets.extent().width != ctx.internal_w() ||
          m_snapshot->targets.extent().height != ctx.internal_h())) {
         shader->setInt("u_identityReady", 0);
     }
 
+    if (inspect_count) {
+        const InspectorPixel empty{};
+        glNamedBufferSubData(m_snapshot->sample_buffer, 0, sizeof(empty), &empty);
+    }
     glBindVertexArray(m_vao);
     Luminumbra::Rendering::AttributedGl::Submit(
         glDrawArrays, static_cast<GLenum>(GL_TRIANGLES), 0, 3);
+    if (inspect_count) {
+        controls().result = "Overdraw count unavailable (producer, target or selected pixel)";
+        if (count_pixel_valid) {
+            glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+            InspectorPixel pixel{};
+            read_inspector_pixel(m_snapshot->sample_buffer, pixel);
+            if (pixel.normal_depth[3] == 1.0f) {
+                controls().result =
+                    pixel.normal_depth[0] >= 16.0f
+                        ? "Overdraw count >=16 (saturated); depth test OFF"
+                        : "Overdraw count " +
+                              std::to_string(static_cast<int>(pixel.normal_depth[0])) +
+                              "; depth test OFF";
+            }
+        }
+    }
     glBindVertexArray(0);
     if (identity_view) {
         glPolygonMode(GL_FRONT_AND_BACK, static_cast<GLenum>(polygon_mode[0]));

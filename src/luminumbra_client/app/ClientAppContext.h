@@ -1,4 +1,5 @@
 #pragma once
+#include "rendering/CaptureFeatureProfile.h"
 #include "rendering/RenderingDefaults.h"
 
 // The frame loop's non-scenario state clusters, grouped verbatim from the
@@ -12,6 +13,7 @@
 
 #include "app/DeveloperUiPolicy.h"
 #include "app/FarmSpeciesCache.h"
+#include "app/FrameAudioState.h"
 #include "app/PhotoEnvironment.h"
 
 #include "../../../include/luminumbra/core/Types.h"
@@ -40,15 +42,8 @@
 
 namespace Luminumbra::Client::App {
 
-// ->: thunder cues queued by the live lightning
-// consumer (strike sim tick + distance + magnitude); the audio tick drains them
-// with the physical sound delay (distance / 343 m/s). Client-only, never sim.
-struct PendingThunder {
-    std::uint64_t strike_tick = 0;
-    double fired_at_seconds = 0.0; // wall clock when the bolt rendered
-    float distance_m = 0.0f;
-    float magnitude = 0.0f;
-};
+using Rendering::CaptureFeaturePolicy;
+using Rendering::CaptureGameplayFeatures;
 
 struct TimelapseDrainState {
     bool init = false;
@@ -139,6 +134,7 @@ struct OverlayState {
 // render-benchmark / survey / bake-impostor / fixed-cam / play-paths /
 // timeScale. See main_client.cpp's CLI parse for each flag's contract.
 struct CaptureModes {
+    CaptureFeaturePolicy feature_policy;
     // host_timescale-style engine time control (Source/GMod-like). 1.0 = real
     // time, 0 = paused, <1 slow-mo, >1 fast-forward. Render/client playback
     // rate: scales how many FIXED 30 Hz sim ticks run per real frame, NOT the
@@ -296,13 +292,6 @@ struct MouseLookState {
     bool firstMouse = true;
 };
 
-// Frame-audio bookkeeping (the thunder cue queue).
-struct FrameAudioState {
-    std::vector<PendingThunder> pendingThunder;
-    bool waterfallRoarOn = false;
-    glm::vec3 waterfallRoarPosition{0.0f};
-};
-
 // Live forager presentation caches and diagnostics. The environment-gated
 // scent switch retains function-local-static lazy initialization semantics.
 struct ForagerRenderState {
@@ -434,17 +423,19 @@ struct ClientAppContext {
 
 inline bool DeveloperUiAllowed(const ClientAppContext& app) {
     const auto& capture = app.capture;
-    return DeveloperUiAllowed(DeveloperUiPolicy{app.overlay.imgui_enabled,
-                                                app.scenario_active,
-                                                capture.timelapse_frames != 0,
-                                                capture.scene_active,
-                                                !capture.frame_scan_path.empty(),
-                                                capture.render_parity_active,
-                                                !capture.render_benchmark_path.empty(),
-                                                !capture.survey_dir.empty(),
-                                                !capture.bake_impostor_path.empty(),
-                                                !capture.ui_screenshot_screen.empty(),
-                                                capture.ui_thumbs != 0});
+    const bool legacy_ui =
+        DeveloperUiAllowed(DeveloperUiPolicy{app.overlay.imgui_enabled,
+                                             app.scenario_active,
+                                             capture.timelapse_frames != 0,
+                                             capture.scene_active,
+                                             !capture.frame_scan_path.empty(),
+                                             capture.render_parity_active,
+                                             !capture.render_benchmark_path.empty(),
+                                             !capture.survey_dir.empty(),
+                                             !capture.bake_impostor_path.empty(),
+                                             !capture.ui_screenshot_screen.empty(),
+                                             capture.ui_thumbs != 0});
+    return capture.feature_policy.Apply(CaptureGameplayFeatures{.ui = legacy_ui}, false).ui;
 }
 
 } // namespace Luminumbra::Client::App

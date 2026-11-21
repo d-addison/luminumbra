@@ -1322,6 +1322,91 @@ void ShaderScene::ComputeReadback() {
     ASSERT_TRUE(readback);
 }
 
+TEST_F(ShaderScene, GrassHasSeparatedBladesAndClutterHasCutoutCorners) {
+    program = Link(Compile(GL_VERTEX_SHADER, "foliage.vert"),
+                   Compile(GL_FRAGMENT_SHADER, "foliage.frag"));
+    ASSERT_NE(program, 0u);
+    glUseProgram(program);
+    constexpr std::array<float, 16> identity{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    for (const auto* name : {"u_view", "u_projection"}) {
+        glUniformMatrix4fv(Uniform(name), 1, GL_FALSE, identity.data());
+    }
+    glUniform3f(Uniform("u_cameraPos"), 0, 0, 3);
+    glUniform1f(Uniform("u_fadeStart"), 10);
+    glUniform1f(Uniform("u_fadeEnd"), 20);
+    glUniform3f(Uniform("u_sunDirection"), 0, -1, 0);
+    glUniform3f(Uniform("u_moonDir"), 0, 1, 0);
+    glUniform3f(Uniform("u_ambientColor"), .1f, .15f, .2f);
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    // A real crossed-card instance; the second card is edge-on to the view.
+    // The visible card spans NDC [-.8,.8] in both axes above its buried root.
+    glVertexAttrib3f(0, 0, -.8f, 0);
+    glVertexAttrib2f(1, .8f, 1.6f);
+    glVertexAttrib2f(3, 0, 0);
+    glVertexAttrib1f(4, 0);
+    glVertexAttrib1f(5, 0);
+    glGenFramebuffers(1, &framebuffer);
+    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+    glGenTextures(1, attachments.data());
+    glBindTexture(GL_TEXTURE_2D, attachments[0]);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, Size, Size, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, attachments[0], 0);
+    glDrawBuffer(GL_COLOR_ATTACHMENT0);
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+    glDisable(GL_CULL_FACE);
+    glViewport(0, 0, Size, Size);
+    // Three fixed draws, each with 12 vertices and a 128-square RGBA readback.
+    std::array<float, PixelCount * 4> pixels{};
+    const auto alpha = [&pixels](int x, int y) {
+        return pixels[(static_cast<std::size_t>(y) * Size + static_cast<std::size_t>(x)) * 4 + 3];
+    };
+    const auto draw = [&](float sway_flag) {
+        glVertexAttrib4f(2, .19f, .34f, .11f, sway_flag);
+        constexpr std::array<float, 4> clear{};
+        glClearBufferfv(GL_COLOR, 0, clear.data());
+        glDrawArraysInstanced(GL_TRIANGLES, 0, 12, 1);
+        glReadPixels(0, 0, Size, Size, GL_RGBA, GL_FLOAT, pixels.data());
+        ASSERT_EQ(glGetError(), GL_NO_ERROR);
+        for (const float channel : pixels) {
+            ASSERT_TRUE(std::isfinite(channel));
+        }
+    };
+    draw(1);
+    ASSERT_FALSE(HasFailure());
+    // Count opaque runs, not just total coverage: one conical taper can pass a
+    // tip-width test but cannot produce the three separated blades at this row.
+    int runs = 0;
+    bool previous = false;
+    for (int x = 0; x < Size; ++x) {
+        const bool covered = alpha(x, 40) > .5f;
+        runs += covered && !previous;
+        previous = covered;
+    }
+    EXPECT_EQ(runs, 3);
+    EXPECT_GT(alpha(64, 40), .9f);
+    EXPECT_EQ(alpha(50, 40), 0);
+    EXPECT_EQ(alpha(78, 40), 0);
+
+    draw(0);
+    ASSERT_FALSE(HasFailure());
+    EXPECT_GT(alpha(64, 64), .9f);
+    EXPECT_GT(alpha(64, 24), .9f);
+    for (const int x : {18, 109}) {
+        for (const int y : {18, 109}) {
+            EXPECT_EQ(alpha(x, y), 0) << "clutter must not expose rectangular card corners";
+        }
+    }
+
+    glUniform3f(Uniform("u_cameraPos"), 0, 0, 30);
+    draw(1);
+    ASSERT_FALSE(HasFailure());
+    for (std::size_t pixel = 0; pixel < PixelCount; ++pixel) {
+        EXPECT_EQ(pixels[pixel * 4 + 3], 0) << "fully faded cards must leave no silhouette";
+    }
+}
+
 TEST_F(ShaderScene, DuskSkyAzimuthContinuity) {
     Sky(true);
 }

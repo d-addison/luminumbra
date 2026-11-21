@@ -3496,10 +3496,10 @@ TEST(DiagnosticAttribution, WaterAttributesOriginalChunkSubmissionsOnTheContribu
     EXPECT_EQ(Count(draw, "glDrawElements,"), 1u);
     EXPECT_LT(shader.rfind("discard;"), shader.find("gDiagnosticIds ="));
     EXPECT_EQ(SourceHash(WithoutForwardSubmissionDiagnostics(draw, "m_water_shader")),
-              0x11b136e405c12634ull);
+              0x586d00a24b44840aull);
     EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(shader, 3)), 0x9bb7b237f54a53a7ull);
     EXPECT_EQ(SourceHash(WithoutWhitespace(Body(source, "void WaterPass::generate_caustics("))),
-              0x3284c18c119ae4d1ull);
+              0x8c4337d5736a5069ull);
 }
 
 TEST(DiagnosticAttribution, GlassAttributesEachPaneBeforeOitResolveWithoutReplacingItsIds) {
@@ -3559,6 +3559,55 @@ TEST(DiagnosticAttribution, WaterfallAttributesOnlySubmittedSheetPoolSlotsAndNon
     EXPECT_EQ(SourceHash(WithoutForwardSubmissionDiagnostics(draw, "m_shader")),
               0x5f754ad88e5e5b42ull);
     EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(shader, 3)), 0x031258f2195ef329ull);
+}
+
+TEST(DiagnosticAttribution, ParticleBatchAttributesAllEmitterKindsAtTheOriginalDraw) {
+    const auto draw = Body(Read("src/luminumbra_client/rendering/passes/ParticlePass.cpp"),
+                           "std::size_t ParticlePass::execute(");
+    const auto shader = Read("res/shaders/magical_particles.frag");
+    ForwardSubmissionContract(draw, shader);
+    Contains(draw, "m_frame_instance_count == 0 || m_vao == 0");
+    Contains(draw, "if (!ctx.lit_scene.id)");
+    EXPECT_LT(draw.find("if (!ctx.lit_scene.id)"), draw.find("diagnostic_attachment.emplace("));
+    Contains(draw, "glGetNamedFramebufferAttachmentParameteriv(ctx.lit_scene.id,");
+    Contains(draw, "GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE");
+    Contains(draw, "if (attachment_type == GL_TEXTURE)");
+    Contains(draw, "GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME");
+    Contains(draw, ".shader_variant = \"magical_particles\"");
+    Contains(draw, ".generated_mesh = \"particles/instanced-billboards\"");
+    Contains(draw,
+             "glBindVertexBuffer(0, m_instance_vbo[m_ring_cursor], 0, sizeof(InstanceRecord))");
+    Contains(WithoutWhitespace(draw),
+             "AttributedGl::Submit(glDrawArraysInstanced,GLenum{GL_TRIANGLE_STRIP},0,4,"
+             "static_cast<GLsizei>(m_frame_instance_count))");
+    EXPECT_EQ(Count(draw, "glDrawArraysInstanced,"), 1u);
+    Contains(shader, "if (shape <= 0.0)");
+    Contains(shader, "if (finalColor.a < 0.01)");
+    EXPECT_EQ(Count(shader, "discard;"), 2u);
+    EXPECT_LT(shader.rfind("discard;"), shader.find("gDiagnosticIds ="));
+    EXPECT_LT(shader.find("FragColor = finalColor;"), shader.find("gDiagnosticIds ="));
+    EXPECT_EQ(SourceHash(WithoutForwardSubmissionDiagnostics(draw, "m_shader")),
+              0x898d08b83ad897a7ull);
+    EXPECT_EQ(SourceHash(WithoutDiagnosticBlocks(shader, 3)), 0xa054f82b3bb88a66ull);
+}
+
+TEST(DiagnosticAttribution, WeatherOverlayRefusesCoverageOnlyWhenItsOriginalDrawIsSubmitted) {
+    auto draw = Body(Read("src/luminumbra_client/rendering/passes/SkyboxPass.cpp"),
+                     "const glm::mat4& projection)");
+    constexpr std::string_view branch = "if (auto* capture = GBufferDiagnosticCapture::Current())";
+    const auto refusal = Body(draw, branch);
+    Contains(WithoutWhitespace(refusal),
+             "capture->unsupported(\"weather_overlay_contributor_uninstrumented\",0,"
+             "DiagnosticOwnership::Live,DiagnosticPass::Forward);");
+    EXPECT_LT(draw.find("if (!m_weather_shader"), draw.find(branch));
+    EXPECT_LT(draw.find("if (!ctx.lit_scene.id"), draw.find(branch));
+    EXPECT_LT(draw.find(branch), draw.find("AttributedGl::Submit"));
+    EXPECT_EQ(Count(draw, "glDrawArrays,"), 1u);
+    EXPECT_EQ(draw.find("capture->write"), std::string::npos);
+    ASSERT_FALSE(refusal.empty());
+    const auto start = draw.rfind('\n', draw.find(branch)) + 1;
+    draw.erase(start, draw.find(refusal) + refusal.size() - start);
+    EXPECT_EQ(SourceHash(WithoutWhitespace(draw)), 0x522af1534eb516d0ull);
 }
 
 TEST_F(DiagnosticAttributionGl, ContinuationsRetainEachPlaneAndRefuseExtentChangesBeforeLeasing) {

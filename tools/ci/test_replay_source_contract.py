@@ -65,6 +65,36 @@ class ReplaySourceContract(unittest.TestCase):
     def test_replay_mode_admits_identity_inputs_and_terminal_before_startup(self):
         self.assert_mode_admission(read_source(MODES + "Replay.cpp"))
 
+    def assert_publication_admission(self, source):
+        recording = source.split("int RunRecord(", 1)[1].split("int RunReplay(", 1)[0]
+        preflight = recording.split("RunnerConfigFrom(options)", 1)[0]
+        self.assertIn("ReplayReadLimits{}.records", preflight)
+        self.assertIn("options.ticks / kCheckpointIntervalTicks +", preflight)
+        self.assertIn("(options.ticks % kCheckpointIntervalTicks != 0 ? 1u : 0u)", preflight)
+        self.assertIn("options.ticks > record_limit || checkpoints > record_limit - options.ticks",
+                      preflight)
+        self.assertRegex(preflight, r'requested workload exceeds replay admission budget"\);'
+                         r'\s*return 1;')
+        playback = source.split("int RunReplay(", 1)[1]
+        before_read = playback.split("Luminumbra::Replay::ReadReplay(", 1)[0]
+        self.assertRegex(before_read,
+                         r'if \(ReplayFinalizationIncomplete\(options.replay_path\)\)\s*\{'
+                         r'\s*LUMINUMBRA_CORE_ERROR\("replay: recording finalization is incomplete"\);'
+                         r'\s*return 1;\s*\}')
+
+    def test_recording_budget_and_incomplete_marker_precede_startup_and_read(self):
+        self.assert_publication_admission(read_source(MODES + "Replay.cpp"))
+
+    def test_publication_admission_contract_detects_isolated_regressions(self):
+        source = read_source(MODES + "Replay.cpp")
+        for token in ("ReplayReadLimits{}.records",
+                      "(options.ticks % kCheckpointIntervalTicks != 0 ? 1u : 0u)",
+                      "options.ticks > record_limit || checkpoints > record_limit - options.ticks",
+                      "ReplayFinalizationIncomplete(options.replay_path)"):
+            self.assertIn(token, source)
+            with self.subTest(token=token), self.assertRaises(AssertionError):
+                self.assert_publication_admission(source.replace(token, "false", 1))
+
     def test_mode_admission_contract_detects_isolated_regressions(self):
         source = read_source(MODES + "Replay.cpp")
         for token in ("header.engine_version != engine_now",
@@ -628,7 +658,7 @@ class ReplaySourceContract(unittest.TestCase):
         consumers = {name for name, sources in targets.items() if runtime in sources.split()}
         self.assertEqual(consumers, {"capture_manifest_test", "capture_feature_profile_test",
                                      "diagnostic_bundle_test", "runtime_surface_options_test",
-                                     "audio_disabled_test"})
+                                     "audio_disabled_test", "temporal_sweep_test"})
         for target, retained in (
             ("capture_manifest_test", ("rendering/capture_manifest_test.cpp",
                                        "rendering/diagnostic_capture_test.cpp",
@@ -636,6 +666,8 @@ class ReplaySourceContract(unittest.TestCase):
                                        "../src/luminumbra_client/rendering/CaptureManifest.cpp")),
             ("capture_feature_profile_test", ("rendering/capture_feature_profile_test.cpp",
                                               "../src/luminumbra_client/rendering/CaptureFeatureProfile.cpp")),
+            ("temporal_sweep_test", ("rendering/temporal_sweep_test.cpp",
+                                    "../src/luminumbra_client/rendering/CaptureFeatureProfile.cpp")),
         ):
             for source in retained:
                 self.assertEqual(targets[target].split().count(source), 1, (target, source))
@@ -675,6 +707,10 @@ class ReplaySourceContract(unittest.TestCase):
             ("capture_feature_profile_test", "../src/luminumbra_client/rendering/DiagnosticCapture.cpp"),
             ("capture_manifest_test", "rendering/temporal_audit_test.cpp"),
             ("diagnostic_bundle_test", "rendering/diagnostic_bundle_test.cpp"),
+            ("temporal_sweep_test", "rendering/temporal_sweep_test.cpp"),
+            ("temporal_sweep_test", "../src/luminumbra_client/rendering/CaptureFeatureProfile.cpp"),
+            ("temporal_sweep_test", "../src/luminumbra_client/rendering/TemporalAudit.cpp"),
+            ("temporal_sweep_test", "../src/luminumbra_client/rendering/DiagnosticCapture.cpp"),
         ):
             start = cmake.index(f"add_executable({target}")
             changed = cmake[:start] + cmake[start:].replace(token, "", 1)
