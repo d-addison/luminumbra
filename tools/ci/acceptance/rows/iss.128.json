@@ -1,0 +1,26 @@
+{
+  "id": "iss.128",
+  "source": "issue #128",
+  "statement": "Client reports must record GL vendor and renderer strings and emit per-frame render timing distributions through Measurement::add_distributions, alongside profiles, displays and traversal workloads. Cited software tests exercise statistics and synthetic artifact validation, not GL identity recording, distribution emission or client report generation; those runtime paths remain outstanding native qualification.",
+  "status": "needs-native-run",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "RenderContractPython"
+    },
+    {
+      "kind": "ctest",
+      "ref": "RenderMeasurementStatistics"
+    },
+    {
+      "kind": "native",
+      "ref": "tools/perf/run_qualification.py",
+      "planned": "render qualification runner (v0.3.1); owner: ac",
+      "command": "python tools/perf/run_qualification.py --package <dir> --out <dir> --declare-refresh 3840x1600=143",
+      "receipt_schema": "luminumbra.render_qualification.v1"
+    }
+  ],
+  "requirements": [
+    "dw.mappings.033"
+  ]
+}

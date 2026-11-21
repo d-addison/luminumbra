@@ -1,0 +1,33 @@
+{
+  "id": "station.arguments",
+  "source": "docs/distant-world.md#station-discovery-req-e4",
+  "statement": "Required single-use flags, seed/query bounds, independent search and view distances, scene pose fields and deterministic angle conventions have contract, CLI and synthetic query evidence.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "StationDiscoveryContract"
+    },
+    {
+      "kind": "ctest",
+      "ref": "StationDiscoveryCliSmoke"
+    },
+    {
+      "kind": "ctest",
+      "ref": "StationDiscovery.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "StationDiscoveryArguments.*"
+    }
+  ],
+  "requirements": [
+    "dw.station.006",
+    "dw.station.007",
+    "dw.station.008",
+    "dw.station.009",
+    "dw.station.010",
+    "dw.station.011",
+    "dw.station.012"
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "id": "contract.ar.file.03",
+  "source": "docs/active-regions.md#file-and-compatibility",
+  "statement": "Acceptance obligations: Public persistence APIs permit overlapping calls with stable caller-owned inputs. / A process-wide recursive mutex guards region read/merge/write, metadata pairs, shared durable writes and empty-record cleanup. / It serializes writers through reclamation and replacement; / nested calls retain ownership until the outer call returns. / Independently launched processes sharing one save directory are outside this ownership contract. / Incoming pairs are validated before either replacement.",
+  "status": "planned",
+  "requirements": [
+    "ar.file.013",
+    "ar.file.014",
+    "ar.file.015",
+    "ar.file.016",
+    "ar.file.017",
+    "ar.file.018"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArFileContract.Requirements03",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.file.03.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

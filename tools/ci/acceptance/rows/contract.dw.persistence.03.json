@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.persistence.03",
+  "source": "docs/distant-world.md#persistence-and-format-contract",
+  "statement": "Acceptance obligations: | `plant-entities.json` (PLANNED replacement: `luminumbra.plants.v2`; / the shipped payload and identity sidecar remain until activation) | `<save>/chunks/region/` unchanged | PLANNED: refuse an existing save without the v2 envelope; / | scent grid section of `field-pages.fpg` (the near scent field is historical state; / it is persisted so near creatures that consume it resume continuously) | `<save>/chunks/region/` | re-seeded empty | refuse | refuse as future format | / Persisted creature records inventory every evolution-relevant component and reference (creature, genome, needs, mortality and decay, thirst, circadian, alarm, pack, territory and bias, migration, scavenging, sensing, reproduction cooldown and courtship, coarse tier and promotion state) and the slice proves completeness with a projection test: after every system has run, a save and reload must reproduce the ecology hash. / Records under `chunks/region/` (the directory returned by `WorldSaveService::region_directory`) join the integrity scan.",
+  "status": "planned",
+  "requirements": [
+    "dw.persistence.013",
+    "dw.persistence.014",
+    "dw.persistence.015",
+    "dw.persistence.016",
+    "dw.persistence.017",
+    "dw.persistence.018"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwPersistenceContract.Requirements03",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.persistence.03.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

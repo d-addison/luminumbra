@@ -1,0 +1,37 @@
+{
+  "id": "contract.region-content",
+  "source": "docs/active-regions.md#file-and-compatibility",
+  "statement": "The frozen-content projection selects authoritative live, parked and durable edited records in that priority order, and excludes render/lifecycle normalization.",
+  "status": "covered",
+  "requirements": [
+    "ar.file.090",
+    "ar.file.091",
+    "ar.file.092"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.RegionDigestMergesLiveAndDurableSimulationOnly"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.RegionDigestIgnoresLoadTimeCollisionNormalization"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.RegionDigestPriorityIsLiveThenParkedThenDurable"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.RegionDigestExcludesPristineAndLoadingChunks"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.RegionDigestIgnoresUnflaggedDurableRecords"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.RegionDigestIsIndependentOfResidencyAndSaveHistory"
+    }
+  ]
+}

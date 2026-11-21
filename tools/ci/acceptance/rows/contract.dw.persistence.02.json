@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.persistence.02",
+  "source": "docs/distant-world.md#persistence-and-format-contract",
+  "statement": "Acceptance obligations: | `field-pages.fpg` | `<save>/chunks/region/` | pages seeded on activation | refuse | refuse as future format | / | `creature-entities.json` | `<save>/chunks/region/` | no creatures | refuse | refuse as future format | / | `ground-objects.json` | `<save>/chunks/region/` | no objects | refuse | refuse as future format | / | `far/v<tier>.<tx>.<tz>.lmr` (FSV1 payload, edit-baked bricks with tombstones and generation) | `<save>/far/` | regenerate or rebuild from edited chunk records | refuse | refuse as future format | / | `snapshot.json` commit index (members, content identities, generation, tick, anchors) | `<save>/chunks/region/` | legacy save without simulation records: load with defaults | refuse as inconsistent snapshot | refuse as future format | / | `aether_state.efs` (existing) | `<save>/` unchanged | none | refuse | refuse as future format |",
+  "status": "planned",
+  "requirements": [
+    "dw.persistence.007",
+    "dw.persistence.008",
+    "dw.persistence.009",
+    "dw.persistence.010",
+    "dw.persistence.011",
+    "dw.persistence.012"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwPersistenceContract.Requirements02",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.persistence.02.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

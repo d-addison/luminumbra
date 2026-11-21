@@ -1,0 +1,46 @@
+{
+  "id": "contract.region-clock-recovery",
+  "source": "docs/active-regions.md#file-and-compatibility",
+  "statement": "Restore raises the validation ceiling without scheduling or changing canonical state; legacy absence and decode refusals are transactional.",
+  "status": "covered",
+  "requirements": [
+    "ar.file.034",
+    "ar.file.035",
+    "ar.file.036",
+    "ar.file.037",
+    "ar.file.041",
+    "ar.file.043",
+    "ar.file.045",
+    "ar.file.049"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ActiveRegionLedgerTest.RestoringNewerClockPreservesHoldsAndFrozenSimulationState"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ActiveRegionLedgerTest.AcknowledgeWorldClockRaisesOnlyTheCeiling"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ActiveRegionLedgerTest.CorruptTruncatedAndFuturePayloadsRefuseTransactionally"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ActiveRegionLedgerTest.ValidChecksumsCannotHideInvalidRecordSemantics"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.AbsentLedgerAtRestoredTickAllowsEditAndPinBeforeSave"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.LedgerFileAbsenceCorruptionFutureAndDisabledRefusals"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ActiveRegionLedgerTest.V2RefusalMatrix"
+    }
+  ]
+}

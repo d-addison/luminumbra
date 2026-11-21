@@ -1,0 +1,17 @@
+{
+  "id": "contract.dw.perf.02",
+  "source": "docs/distant-world.md#performance-measurement-contract",
+  "statement": "Acceptance obligations: Streaming transients are included; / any excluded window is listed explicitly with a reason.",
+  "status": "planned",
+  "requirements": [
+    "dw.perf.007",
+    "dw.perf.008"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwPerfContract.Requirements02",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.perf.02.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ac"
+    }
+  ]
+}

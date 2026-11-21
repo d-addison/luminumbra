@@ -1,0 +1,21 @@
+{
+  "id": "contract.ar.activation.04",
+  "source": "docs/active-regions.md#activation-and-ordering",
+  "statement": "Acceptance obligations: The queue is not persisted. / its simulation cursor, last-ticked stamp and frozen content digest do not advance. / A scheduler exception, or an edit/pin that cannot be recorded because the ledger is full, is a fail-stop fault: the failed schedule never mutates the ledger, the simulation clock is rewound to the faulting tick (whose systems ran), pending region work is dropped, the validation ceiling is raised to that tick, and every later tick returns zero. / The server saves and exits with status 3, the client saves and quits, and replay recording aborts without a schedule trace. / A faulted session can be saved and the save loads cleanly. / A failed `load_active_regions` clears the world and restores the previous ambient anchor.",
+  "status": "planned",
+  "requirements": [
+    "ar.activation.039",
+    "ar.activation.048",
+    "ar.activation.053",
+    "ar.activation.054",
+    "ar.activation.055",
+    "ar.activation.056"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArActivationContract.Requirements04",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.activation.04.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

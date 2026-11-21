@@ -1,0 +1,19 @@
+{
+  "id": "contract.region-retention",
+  "source": "docs/active-regions.md#activation-and-ordering",
+  "statement": "Idle retention must preserve scheduling history for pending work and all resident chunks, then release consumed work on the next tick.",
+  "status": "planned",
+  "requirements": [
+    "ar.activation.061",
+    "ar.activation.062",
+    "ar.activation.063",
+    "ar.activation.064"
+  ],
+  "evidence": [
+    {
+      "kind": "doc",
+      "ref": "docs/active-regions.md",
+      "planned": "map discriminating regression and qualification evidence for the updated contract; owner: ac"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.vertical.01",
+  "source": "docs/distant-world.md#vertical-coverage-and-the-cave-field",
+  "statement": "Acceptance obligations: The cave field carves without a lower bound, so pristine coverage is bounded by requests rather than by any preset or live-streaming property: a tile's pristine span is initialised to its surface band plus a contract default of 256 m below its lowest surface height (a number chosen for this contract, not a property of today's streaming), and extended, upward and downward, by every anchor, camera and sightline depth request that reaches the tile and by any durable chunk record above or below it. / Requests are bounded per frame, the encoded span bounds are stored in the tile record, and discovery walks only the span, so a camera descending a deep cave extends the spans of the tiles around it without any unbounded column scan, and deep interior sightlines beyond the requested span appear as the request grows. / Pristine bricks sample the same terrain and cave density composition the live path uses. / At spacings of 8 m or less (V1 and V2) the full cave router is sampled unchanged. / At 16 m and beyond, the noise-carved cave terms alias when point-sampled, so two representations are qualified against each other before the ladder is fixed: a band-limited field (noise caves to 4 km, analytic surface openings to 16 km) and a filtered field (noise caves at every tier at higher tile cost). / The design review chooses from measured aliasing and cost on the cave-dense preset;",
+  "status": "planned",
+  "requirements": [
+    "dw.vertical.001",
+    "dw.vertical.002",
+    "dw.vertical.003",
+    "dw.vertical.004",
+    "dw.vertical.005",
+    "dw.vertical.006"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwVerticalContract.Requirements01",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.vertical.01.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: fw"
+    }
+  ]
+}

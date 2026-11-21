@@ -1,0 +1,16 @@
+{
+  "id": "render.ladder-content-identity",
+  "source": "docs/render-benchmark.md#far-mode-reporting-and-ladder-baselines",
+  "statement": "The v2, v3 and v4 benchmark schema readers refuse unavailable zero far authority content identities in every measured Ladder baseline frame; diagnostic captures retain zero as unavailable. Missing, malformed and overflowing identities are refused in both modes.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "script",
+      "ref": "tools/perf/test_perf.py"
+    },
+    {
+      "kind": "ctest",
+      "ref": "RenderContractPython"
+    }
+  ]
+}

@@ -884,7 +884,7 @@ jobs:
           python3 tools/ci/test_asan_shards.py
           python3 -I -B tools/ci/test_ctest_shards.py
           python3 tools/ci/test_check_acceptance_matrix.py
-          python3 tools/ci/check_acceptance_matrix.py --check-doc docs/acceptance-matrix.md
+          python3 tools/ci/check_acceptance_matrix.py
           python3 tools/ci/test_tidy_cache.py
           python3 tools/ci/test_tidy_shard.py
           python3 tools/ci/test_validate_visual_catalog.py
@@ -896,3 +896,14 @@ jobs:
           python3 tools/check_sdf_contract_doc.py
           python3 tools/config_codegen.py --check
           python3 tools/config_codegen.py --check-constants
+      - name: Generate acceptance matrix
+        run: |
+          mkdir -p build
+          python3 tools/ci/check_acceptance_matrix.py --write-doc build/acceptance-matrix.md --check-doc build/acceptance-matrix.md --preparation-receipt-file "$RUNNER_TEMP/acceptance-doc-custody.json"
+      - name: Upload acceptance matrix
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: acceptance-matrix
+          path: build/acceptance-matrix.md
+          if-no-files-found: error
+          retention-days: 30

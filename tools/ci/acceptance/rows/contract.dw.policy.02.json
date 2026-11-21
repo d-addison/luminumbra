@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.policy.02",
+  "source": "docs/distant-world.md#per-system-distant-policy",
+  "statement": "Acceptance obligations: coarse needs, lifespan, reproduction and region-to-region travel at cadence; / promoted to full AI on approach; / travel into a frozen region parks the creature at the border until the region thaws | No advance | / | Water | Rotating cell window | Authoritative water steps on the host fixed tick (today the client host steps it per rendered frame), with eligibility from resident simulation arrays and the ledger, independent of render streaming. / The cell budget is shared in indivisible units of one chunk window: shares are proportional to awake chunks, rounded down, with the remainder carried as persisted service debt; / service is starvation-free in the bounded sense that every due region receives at least one chunk window within a number of its due ticks no greater than the total awake chunks divided by the per-tick window budget, a bound the diagnostic panel publishes;",
+  "status": "planned",
+  "requirements": [
+    "dw.policy.007",
+    "dw.policy.008",
+    "dw.policy.009",
+    "dw.policy.010",
+    "dw.policy.011",
+    "dw.policy.012"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwPolicyContract.Requirements02",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.policy.02.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

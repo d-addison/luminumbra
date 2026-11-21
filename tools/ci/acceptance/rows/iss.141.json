@@ -1,0 +1,42 @@
+{
+  "id": "iss.141",
+  "source": "issue #141",
+  "statement": "The expanded v0.3 contract requires native qualification and production simulation and residency budget enforcement. Performance CI already enforces complete pinned integer stage and total work limits for the 600-tick shipping workload with --require-complete. Representative-world capture and equality qualification remains PENDING; residency classes without engine samples remain unevaluated. The aggregate v0.3 driver does not evaluate simulation or residency budgets; separate budget qualification remains required.",
+  "status": "needs-native-run",
+  "evidence": [
+    {
+      "kind": "script",
+      "ref": "tools/perf/check_residency.py",
+      "planned": "production residency samples and separate budget qualification remain outstanding; owner: ac"
+    },
+    {
+      "kind": "ctest",
+      "ref": "SimBudgetTelemetry.*"
+    },
+    {
+      "kind": "script",
+      "ref": "tools/perf/baselines/sim-budgets.json"
+    },
+    {
+      "kind": "native",
+      "ref": "tools/gates/run-v03-acceptance.ps1",
+      "command": "pwsh tools/gates/run-v03-acceptance.ps1 -Package <dir> -FixtureDir <dir> -OutDir <dir> -BuildDir <dir> -PerfEvidence <file> -AudioChecklist <file>",
+      "receipt_schema": "luminumbra.v03_acceptance.v1"
+    },
+    {
+      "kind": "script",
+      "ref": "tools/perf/check_sim_budgets.py"
+    },
+    {
+      "kind": "ctest",
+      "ref": "SimBudgetGateContract"
+    },
+    {
+      "kind": "script",
+      "ref": ".github/workflows/performance.yml"
+    }
+  ],
+  "requirements": [
+    "dw.mappings.037"
+  ]
+}

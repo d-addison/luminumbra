@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.intro.01",
+  "source": "docs/distant-world.md#distant-world-and-distant-simulation-contract",
+  "statement": "Acceptance obligations: This is the target contract. / No current-candidate native qualification is claimed and no acceptance threshold is waived by source landing. / Generation, meshing, queues, residency, upload accounting and renderer integration are implemented; / normal presets still lack immutable authority and fall back from the default Ladder request to Legacy. / Saved-world far production authority remains fixture-only until FW S8 (v0.3.1); / the renderer reports an explicit unavailable/refusal diagnostic.",
+  "status": "planned",
+  "requirements": [
+    "dw.intro.003",
+    "dw.intro.004",
+    "dw.intro.007",
+    "dw.intro.008",
+    "dw.intro.009",
+    "dw.intro.010"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwIntroContract.Requirements01",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.intro.01.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ac"
+    }
+  ]
+}

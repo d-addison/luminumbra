@@ -1,0 +1,30 @@
+{
+  "id": "render.visual-diagnostic-forward-contributors",
+  "source": "docs/development/visual-diagnostics.md#implementation-inventory",
+  "statement": "The contributor API supports a distinct forward target through the same lease path and preserves its original draw buffers; scent decals invoke it without replacing deferred surface identities. Water surfaces, glass panes and waterfall sheet/pool slots resume the same contributor plane at their original draws; water metadata that cannot recover an exact chunk translation explicitly refuses attribution. Noncontributing fragments preserve prior contributor IDs; glass resolve retains pane identities and unavailable resolve resources refuse capture completion. Particle forward submissions remain uninstrumented. Both continuation planes retain earlier IDs and original color routing, and refuse mid-frame extent changes before resizing or leasing storage. Empty, sky, outside-field and negligible decal fragments discard before writing contributor IDs. Without forward storage or an instrumented current program, exact per-draw Forward records retain metadata with a :contributor_only label and completion remains false. Missing or aliased storage, nested attachment, invalid extents and mismatched contributor passes refuse coverage.",
+  "status": "partial",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticAttribution.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticAttributionGl.*"
+    },
+    {
+      "kind": "script",
+      "ref": "test/rendering/test_frame_attribution_wiring.py"
+    },
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticCaptureIntegration.*",
+      "planned": "Add and run GPU attribution and scenario capture bundle regressions; owner: maintainers"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/development/visual-diagnostics.md"
+    }
+  ],
+  "requirements": []
+}

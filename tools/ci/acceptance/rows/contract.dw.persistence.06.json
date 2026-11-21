@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.persistence.06",
+  "source": "docs/distant-world.md#persistence-and-format-contract",
+  "statement": "Acceptance obligations: Publication is recoverable through a journal carrying the transaction identity and the generation it replaces: before any member is replaced its previous file is copied into the journal with an undo record (created members get a delete record, deleted members a restore record), every changed member is written to a temporary path and renamed, the previous index is retained under its generation, the new index is renamed last, and the journal is deleted only after the new index is durable. / On load, a journal whose transaction is not the committed index is rolled back in reverse order before the index is read; / a journal whose transaction matches the committed index is stale and deleted. / Members whose content identity disagrees with the index are refused as an inconsistent snapshot and a required member that is missing is refused. / A save is legacy only when it has no index and no new-format record; / any new-format record without an index is refused as inconsistent.",
+  "status": "planned",
+  "requirements": [
+    "dw.persistence.031",
+    "dw.persistence.032",
+    "dw.persistence.033",
+    "dw.persistence.034",
+    "dw.persistence.035",
+    "dw.persistence.036"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwPersistenceContract.Requirements06",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.persistence.06.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

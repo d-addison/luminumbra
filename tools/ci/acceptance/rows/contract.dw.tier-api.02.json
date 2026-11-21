@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.tier-api.02",
+  "source": "docs/distant-world.md#far-range-declaration-and-compatibility",
+  "statement": "Acceptance obligations: The legacy two-tier heightfield path remains pinned to F1 = 768 m, F2 = 3,000 m, fragment clips = 176 m and 3,050 m, and camera far plane = 3,200 m. / Removing the unreferenced `NEAR_FIELD_DISTANCE` and `FAR_FIELD_DISTANCE` declarations changes no consumer. / The frontier gate continues to assert the reported missing-region count for the runtime wanted set, without independently computing a coverage radius. / Its existing `luminumbra.farlod_horizon.v1` artifact still writes the historical `thresholds.f2_outer_range_m` value 1,536; / the gate never reads that field. / That value is retained solely to preserve artifact bytes and is not the runtime horizon.",
+  "status": "planned",
+  "requirements": [
+    "dw.tier-api.017",
+    "dw.tier-api.018",
+    "dw.tier-api.019",
+    "dw.tier-api.020",
+    "dw.tier-api.021",
+    "dw.tier-api.022"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwTierApiContract.Requirements02",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.tier-api.02.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: fw"
+    }
+  ]
+}

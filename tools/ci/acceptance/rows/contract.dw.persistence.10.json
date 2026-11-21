@@ -1,0 +1,23 @@
+{
+  "id": "contract.dw.persistence.10",
+  "source": "docs/distant-world.md#persistence-and-format-contract",
+  "statement": "Acceptance obligations: The existing periodic hash exchange is state-divergence detection, not admission: qualified sessions must run with checkpoint exchange enabled, and a mismatch ends the session at the first exchange after it arises. / Preset revision 7 retains revision 6 omission compatibility; / current-format saves without embedded packaged presets use frozen revision-6 copies. / Lockstep Hello is version 4; / LREC1 uses version 3 for complete streams and version 4 for diagnostic suffixes with an elided prefix. / Both replay versions bind effective configuration plus resolved preset/dependency content; / older layouts are refused. / See the [identity contract](development/system-config-identity.md).",
+  "status": "planned",
+  "requirements": [
+    "dw.persistence.055",
+    "dw.persistence.056",
+    "dw.persistence.057",
+    "dw.persistence.058",
+    "dw.persistence.061",
+    "dw.persistence.062",
+    "dw.persistence.059",
+    "dw.persistence.060"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwPersistenceContract.Requirements10",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.persistence.10.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

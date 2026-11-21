@@ -1,0 +1,23 @@
+{
+  "id": "em.performance",
+  "source": "docs/distant-world.md#evidence-map",
+  "statement": "Benchmark schema v3 artifacts exist for six fixed views and three traversals per profile per display, checked by the render contract tools.",
+  "status": "needs-native-run",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "RenderContractPython"
+    },
+    {
+      "kind": "native",
+      "ref": "tools/perf/run_qualification.py",
+      "planned": "render qualification runner (v0.3.1); owner: ac",
+      "command": "python tools/perf/run_qualification.py --package <dir> --out <dir> --declare-refresh 3840x1600=143",
+      "receipt_schema": "luminumbra.render_qualification.v1"
+    }
+  ],
+  "requirements": [
+    "dw.evidence.007",
+    "dw.mappings.023"
+  ]
+}

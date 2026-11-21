@@ -1,0 +1,23 @@
+{
+  "id": "em.client-hang",
+  "source": "docs/distant-world.md#evidence-map",
+  "statement": "The client hang watchdog fires once per stall, never fires while the heartbeat advances, and re-arms after the heartbeat resumes (report archival is campaign evidence, not covered here).",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "HangWatchdog.StalledHeartbeatFiresOnce"
+    },
+    {
+      "kind": "ctest",
+      "ref": "HangWatchdog.AdvancingHeartbeatNeverFires"
+    },
+    {
+      "kind": "ctest",
+      "ref": "HangWatchdog.RearmsAfterHeartbeatResumes"
+    }
+  ],
+  "requirements": [
+    "dw.mappings.024"
+  ]
+}

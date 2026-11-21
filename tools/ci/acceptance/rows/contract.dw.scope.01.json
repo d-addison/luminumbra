@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.scope.01",
+  "source": "docs/distant-world.md#scope",
+  "statement": "Acceptance obligations: - The view radius is **16 km from the camera** and the world has **no fixed edge**: terrain streams procedurally in every direction. / The addressable extent is set by the packed chunk identity (`Chunk.h`, \u00b12^20 chunks of 16 m, about \u00b116,777 km on each horizontal axis; / coordinates are masked, never range checked). / World positions are 32-bit floats. / By owner decision (September 8, 2026) the contract requires qualification within 32 km of the world origin, where positions keep sub-centimetre precision; / the camera-relative (floating-origin) precision work that would qualify the full addressable extent is deliberately residual scope, not an open contract gap.",
+  "status": "planned",
+  "requirements": [
+    "dw.scope.001",
+    "dw.scope.002",
+    "dw.scope.003",
+    "dw.scope.004",
+    "dw.scope.005",
+    "dw.scope.006"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwScopeContract.Requirements01",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.scope.01.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: fw"
+    }
+  ]
+}

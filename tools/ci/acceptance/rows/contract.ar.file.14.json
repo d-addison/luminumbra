@@ -1,0 +1,20 @@
+{
+  "id": "contract.ar.file.14",
+  "source": "docs/active-regions.md#file-and-compatibility",
+  "statement": "Acceptance obligations: Stamps cannot exceed the validation ceiling, counters cannot exceed the hold or both be nonzero, phases must match the region key, and a frozen region's last ticked stamp precedes its freeze stamp. / The ledger tick cannot exceed the saved WorldClock tick, and the canonical tick cannot exceed its validation ceiling. / Configuration is stored and hashed with the ledger rather than read from an unrecorded machine-local budget. / Legacy hashing and serialization are unchanged. / Later durable per-region systems must extend that provider with a declared canonical projection before consuming the scheduler.",
+  "status": "planned",
+  "requirements": [
+    "ar.file.087",
+    "ar.file.088",
+    "ar.file.089",
+    "ar.file.093",
+    "ar.file.094"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArFileContract.Requirements14",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.file.14.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

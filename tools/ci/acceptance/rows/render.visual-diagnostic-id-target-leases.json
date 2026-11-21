@@ -1,0 +1,22 @@
+{
+  "id": "render.visual-diagnostic-id-target-leases",
+  "source": "docs/development/visual-diagnostics.md#implementation-inventory",
+  "statement": "A second standalone helper adds lazy RGBA32UI targets with capability and dimension refusal, transactional resize and caller binding restoration. Move-only attachment leases protect caller attachments on bound and unbound framebuffers: resize, reset and disable refuse while leased, and owner destruction with live leases terminates before deletion. Registered modeled-driver regressions cover lifecycle, refusal, attachment retention, moves and release.",
+  "status": "partial",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticTargetDriver.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticCaptureIntegration.*",
+      "planned": "Add and run GPU attribution and scenario capture bundle regressions; owner: maintainers"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/development/visual-diagnostics.md"
+    }
+  ],
+  "requirements": []
+}

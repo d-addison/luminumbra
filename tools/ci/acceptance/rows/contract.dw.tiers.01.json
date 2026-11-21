@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.tiers.01",
+  "source": "docs/distant-world.md#tier-ladder",
+  "statement": "Acceptance obligations: Far terrain is a ladder of five nested, world-origin-aligned volumetric tiers. / Each tier stores sparse 5\u00d75\u00d75 signed-distance bricks and is polygonised per tile with Marching Cubes; / a brick record exists where the field crosses zero. / Multi-tier residency and draw ownership are new machinery with an explicit arrival-state rule: the coarser tier is always resident and drawn beneath the finer one with a one-brick overlap; / a finer tile replaces the coarser surface inside its band only once it is built and uploaded, and until then the coarser surface stays visible, so a missing or late tile is never a hole; / ownership at the live edge is decided against the live chunks that are actually meshed and uploaded (including cave ceilings and floors), replacing today's camera-region skip;",
+  "status": "planned",
+  "requirements": [
+    "dw.tiers.001",
+    "dw.tiers.002",
+    "dw.tiers.003",
+    "dw.tiers.011",
+    "dw.tiers.012",
+    "dw.tiers.013"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwTiersContract.Requirements01",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.tiers.01.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: fw"
+    }
+  ]
+}

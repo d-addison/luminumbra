@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.persistence.04",
+  "source": "docs/distant-world.md#persistence-and-format-contract",
+  "statement": "Acceptance obligations: Engine builds that predate a record refuse a save containing it as an unknown region file; / that refusal is accepted for the pre-release format and a fixture proves it. / The far authority overlay at the save root is derived render state: older builds ignore it and it never contributes to a world hash. / Entity records declare record and component versions, required fields, duplicate-identity and dangling-reference rules, numeric bounds and unknown-component refusal; / the persistent identity allocator and the species/content identity used by coarse simulation are stored with the ledger and refused on mismatch. / A save is one committed snapshot published through the commit index.",
+  "status": "planned",
+  "requirements": [
+    "dw.persistence.019",
+    "dw.persistence.020",
+    "dw.persistence.021",
+    "dw.persistence.022",
+    "dw.persistence.023",
+    "dw.persistence.024"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwPersistenceContract.Requirements04",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.persistence.04.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

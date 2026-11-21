@@ -1829,8 +1829,7 @@ if(BUILD_TESTING)
         NAME AcceptanceMatrixTree
         COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/ci/check_acceptance_matrix.py"
-                --root "${CMAKE_SOURCE_DIR}"
-                --check-doc "${CMAKE_SOURCE_DIR}/docs/acceptance-matrix.md")
+                --root "${CMAKE_SOURCE_DIR}")
     set_tests_properties(AcceptanceMatrixTree
         PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
     add_test(

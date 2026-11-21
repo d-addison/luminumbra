@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.vertical.02",
+  "source": "docs/distant-world.md#vertical-coverage-and-the-cave-field",
+  "statement": "Acceptance obligations: the band-limited field is the recorded fallback. / Whatever is chosen, openings, overhangs and arches remain silhouette features to the full radius, and the acceptance stations include deep interiors and distant mouths beyond the noise-cave cutoff, not only within it. / Qualification must pin the cave-dense revision and identity. / The packaged `worlds/atlas/presets/cave_dense.json` now uses revision 8; / the revision-6 fixture is frozen in `worlds/atlas/presets-rev6/cave_dense.json`. / See the shipping preset identities under \"Shipping defaults\" in the [engine guide](engine-guide.md) before comparing captures or synchronizing the game repository's fixture and identity sidecar.",
+  "status": "planned",
+  "requirements": [
+    "dw.vertical.007",
+    "dw.vertical.008",
+    "dw.vertical.009",
+    "dw.vertical.010",
+    "dw.vertical.011",
+    "dw.vertical.012"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwVerticalContract.Requirements02",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.vertical.02.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: fw"
+    }
+  ]
+}

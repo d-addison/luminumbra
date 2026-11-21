@@ -1,0 +1,17 @@
+{
+  "id": "perf.cave-walk-and-edited-tour",
+  "source": "docs/distant-world.md#performance-measurement-contract",
+  "statement": "The cave-walk and edited-world-tour traversals exist, include an identified edit, a snapshot commit and the all-tier bake inside the measured window, and meet the floor.",
+  "status": "planned",
+  "evidence": [
+    {
+      "kind": "script",
+      "ref": "tools/perf/qualification/matrix.json",
+      "planned": "traversal v2 and cave poses; ac AC8 spec; owner: fw; issue #132"
+    }
+  ],
+  "requirements": [
+    "dw.perf.017",
+    "dw.mappings.013"
+  ]
+}

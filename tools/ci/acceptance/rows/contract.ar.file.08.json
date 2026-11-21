@@ -1,0 +1,21 @@
+{
+  "id": "contract.ar.file.08",
+  "source": "docs/active-regions.md#file-and-compatibility",
+  "statement": "Acceptance obligations: All integers are little endian, signed integers use two's complement, floats are IEEE binary32 (finite, with positive zero as the sole zero encoding). / The header is exactly 56 bytes: / | 0 | 4 | ASCII ARL1 | / | 4 | 2 | version = 1 or 2 | / | 6 | 2 | reserved zero | / | 8 | 8 | canonical scheduler tick;",
+  "status": "planned",
+  "requirements": [
+    "ar.file.051",
+    "ar.file.052",
+    "ar.file.053",
+    "ar.file.054",
+    "ar.file.055",
+    "ar.file.056"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArFileContract.Requirements08",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.file.08.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "id": "render.visual-diagnostic-reference-scenes",
+  "source": "docs/development/visual-diagnostics.md#implementation-inventory",
+  "statement": "Every-PR Linux shader compilation and path-gated llvmpipe scene tooling are registered. The scene catalogue pins material, tree-impostor cutout, night-sky and terrain-blend references with per-reference origins, source identities, full-image MAE/p99 thresholds and independent cutout, stellar horizon/radial and terrain coverage invariants. Bounded sky/terrain shader replays ran under llvmpipe; native scene target execution remains pending. Dusk azimuth continuity is measured without an accepted baseline, with its proposed threshold pending issue #918.",
+  "status": "partial",
+  "evidence": [
+    {
+      "kind": "doc",
+      "ref": "docs/development/visual-diagnostics.md"
+    },
+    {
+      "kind": "script",
+      "ref": "tools/gates/test_shader_scenes.py"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ShaderScene.*",
+      "planned": "Run the registered opt-in material, tree-impostor, night, dusk and terrain scene target under llvmpipe; owner: maintainers"
+    }
+  ],
+  "requirements": []
+}
