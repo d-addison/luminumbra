@@ -10182,11 +10182,20 @@ TEST(RenderSmokeTest, TimedScenarioPublicHookPublishesSiblingBundlesAndKeepsLega
     using namespace Luminumbra::Client::App;
     HiddenGlContext context;
     ASSERT_TRUE(context.ready()) << context.error();
+    // Windows can enforce a minimum window width; captures use the framebuffer,
+    // which can also differ from the requested window size on scaled displays.
+    int framebuffer_width = 0;
+    int framebuffer_height = 0;
+    glfwGetFramebufferSize(glfwGetCurrentContext(), &framebuffer_width, &framebuffer_height);
+    ASSERT_GT(framebuffer_width, 1);
+    ASSERT_GT(framebuffer_height, 0);
     Luminumbra::TestSupport::ScopedTempFile temporary("timed-scenario-", ".ppm");
     const auto directory = temporary.Path().parent_path();
     RenderPipeline pipeline;
     pipeline.enable_static_model_content(false);
-    ASSERT_TRUE(pipeline.startup(64, 64, SourceRoot()));
+    ASSERT_TRUE(pipeline.startup(static_cast<unsigned int>(framebuffer_width),
+                                 static_cast<unsigned int>(framebuffer_height),
+                                 SourceRoot()));
     pipeline.set_far_world_mode(FarWorldMode::Legacy);
     pipeline.set_far_lod_enabled(false);
     pipeline.set_taau_enabled(false);
@@ -10237,12 +10246,14 @@ TEST(RenderSmokeTest, TimedScenarioPublicHookPublishesSiblingBundlesAndKeepsLega
                                             .scenario_play_started_at = started,
                                             .last_readiness_report = readiness,
                                             .exit_code = exit_code});
-        pipeline.on_resize(mismatched_extent ? 32U : 64U, 64U);
+        pipeline.on_resize(static_cast<unsigned int>(mismatched_extent ? framebuffer_width / 2
+                                                                       : framebuffer_width),
+                           static_cast<unsigned int>(framebuffer_height));
         pipeline.set_capture_diagnostics({.enabled = diagnostics, .probe = std::nullopt});
         pipeline.render_frame(registry, world, *camera, 0.0f, false, UploadPresentation::Settled);
         const auto reference = config.artifact_dir / "legacy.ppm";
         if (!mismatched_extent) {
-            ASSERT_TRUE(WriteBackbufferPpm(reference, 64, 64));
+            ASSERT_TRUE(WriteBackbufferPpm(reference, framebuffer_width, framebuffer_height));
         }
         runner->onPostRenderCapture(0.0f);
         if (mismatched_extent) {
@@ -10255,11 +10266,13 @@ TEST(RenderSmokeTest, TimedScenarioPublicHookPublishesSiblingBundlesAndKeepsLega
         }
         EXPECT_FALSE(failed) << failure;
         EXPECT_EQ(frame_count, 1U);
+        const auto reference_bytes = ReadTextFile(reference);
+        ASSERT_FALSE(reference_bytes.empty());
         nlohmann::json first_frame;
         for (const auto* role : {"start", "mid", "end"}) {
             const auto path =
                 config.artifact_dir / "screenshots" / (std::string("lod-ground-") + role + ".ppm");
-            EXPECT_EQ(ReadTextFile(path), ReadTextFile(reference));
+            EXPECT_EQ(ReadTextFile(path), reference_bytes);
             if (diagnostics) {
                 const auto metadata =
                     nlohmann::json::parse(ReadTextFile(path.string() + ".diagnostics.json"));
