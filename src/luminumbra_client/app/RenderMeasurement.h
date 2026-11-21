@@ -44,18 +44,19 @@ inline int benchmark_frame_count(int argc, char* argv[]) {
     return count;
 }
 
-inline constexpr std::size_t kPassCount = 11;
-inline constexpr std::array<const char*, kPassCount> kPassNames = {"shadow",
-                                                                   "gbuffer",
-                                                                   "ssao",
-                                                                   "ssao_blur",
-                                                                   "lighting",
-                                                                   "water",
-                                                                   "skybox",
-                                                                   "particle",
-                                                                   "foliage",
-                                                                   "aerial",
-                                                                   "final_blit"};
+inline constexpr std::size_t kLegacyPassCount = 11;
+// Skybox includes both cloud sub-stages; only the first 19 intervals are disjoint.
+inline constexpr std::size_t kSummedPassCount = 19;
+inline constexpr std::size_t kPassCount = 21;
+inline constexpr std::array<const char*, kPassCount> kPassNames = {
+    "shadow",          "gbuffer",       "ssao",
+    "ssao_blur",       "lighting",      "water",
+    "skybox",          "particle",      "foliage",
+    "aerial",          "final_blit",    "depth_blit_to_lighting",
+    "opaque_snapshot", "froxel_inject", "froxel_integrate",
+    "taau_resolve",    "foliage_count", "foliage_prefix",
+    "foliage_emit",    "cloud_dome",    "cloud_composite",
+};
 
 // Mirror tools/perf/perf.py: linear interpolation at (n - 1) * fraction.
 inline double percentile(std::vector<double> values, double fraction) {
@@ -270,7 +271,7 @@ private:
             if (!slot.invalid[pass])
                 sample.passes[pass] = slot.accumulated[pass];
             complete = complete && sample.passes[pass].has_value();
-            if (sample.passes[pass])
+            if (pass < kSummedPassCount && sample.passes[pass])
                 sum += *sample.passes[pass];
         }
         if (complete)

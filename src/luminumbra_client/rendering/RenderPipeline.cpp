@@ -221,17 +221,13 @@ bool gl_extension_present(const char* extension_name) {
 }
 
 constexpr const char* kGpuTimerPassNames[] = {
-    "shadow",
-    "gbuffer",
-    "ssao",
-    "ssao_blur",
-    "lighting",
-    "water",
-    "skybox",
-    "particles",
-    "foliage",
-    "aerial",
-    "final_blit",
+    "shadow",          "gbuffer",       "ssao",
+    "ssao_blur",       "lighting",      "water",
+    "skybox",          "particles",     "foliage",
+    "aerial",          "final_blit",    "depth_blit_to_lighting",
+    "opaque_snapshot", "froxel_inject", "froxel_integrate",
+    "taau_resolve",    "foliage_count", "foliage_prefix",
+    "foliage_emit",    "cloud_dome",    "cloud_composite",
 };
 
 } // namespace
@@ -2548,6 +2544,7 @@ void RenderPipeline::init_gpu_pass_timers() {
                   "GPU timer pass name table must mirror GpuTimerPass");
 
     m_gpu_timers = {};
+    m_gpu_stage_queries_created = false;
 
     // Capability gate: GL_TIMESTAMP queries require GL 3.3+ or
     // GL_ARB_timer_query, and the glad-resolved entry points must be non-null.
@@ -2562,9 +2559,12 @@ void RenderPipeline::init_gpu_pass_timers() {
         return;
     }
 
+    static_assert(kGpuTimerPassCount == Client::Measurement::kPassCount);
     for (GpuTimerFrameSlot& slot : m_gpu_timers.slots) {
-        glGenQueries(static_cast<GLsizei>(kGpuTimerPassCount), slot.begin_queries.data());
-        glGenQueries(static_cast<GLsizei>(kGpuTimerPassCount), slot.end_queries.data());
+        glGenQueries(static_cast<GLsizei>(Client::Measurement::kLegacyPassCount),
+                     slot.begin_queries.data());
+        glGenQueries(static_cast<GLsizei>(Client::Measurement::kLegacyPassCount),
+                     slot.end_queries.data());
     }
     m_gpu_timers.supported = true;
 }
@@ -2585,7 +2585,52 @@ void RenderPipeline::destroy_gpu_pass_timers() {
     m_gpu_timers = {};
 }
 
+void RenderPipeline::set_benchmark_gpu_queries(BenchmarkGpuQueries* queries) {
+    m_benchmark_gpu_queries = queries;
+    refresh_scatter_gpu_timers();
+}
+
+void RenderPipeline::set_gpu_stage_attribution(bool enabled) {
+    m_gpu_stage_attribution = enabled;
+    if (enabled && m_gpu_timers.supported && !m_gpu_stage_queries_created) {
+        constexpr auto first = Client::Measurement::kLegacyPassCount;
+        constexpr auto count = static_cast<GLsizei>(kGpuTimerPassCount - first);
+        for (GpuTimerFrameSlot& slot : m_gpu_timers.slots) {
+            glGenQueries(count, slot.begin_queries.data() + first);
+            glGenQueries(count, slot.end_queries.data() + first);
+        }
+        m_gpu_stage_queries_created = true;
+    }
+    refresh_scatter_gpu_timers();
+}
+
+GpuPassTimer RenderPipeline::gpu_pass_timer(GpuTimerPass pass) {
+    const auto index = static_cast<std::size_t>(pass);
+    if (m_gpu_timers_suppressed ||
+        (index >= Client::Measurement::kLegacyPassCount && !m_gpu_stage_attribution)) {
+        return {};
+    }
+    GpuTimerFrameSlot& slot = m_gpu_timers.slots[m_gpu_timers.frame_index % kGpuTimerFrameRing];
+    return {.begin_query = slot.begin_queries[index],
+            .end_query = slot.end_queries[index],
+            .issued = &slot.issued[index],
+            .benchmark = m_benchmark_gpu_queries,
+            .pass = index};
+}
+
+void RenderPipeline::refresh_scatter_gpu_timers() {
+    if (m_foliage_pass) {
+        m_foliage_pass->set_scatter_gpu_timers({gpu_pass_timer(GpuTimerPass::FoliageCount),
+                                                gpu_pass_timer(GpuTimerPass::FoliagePrefix),
+                                                gpu_pass_timer(GpuTimerPass::FoliageEmit)});
+    }
+}
+
 void RenderPipeline::begin_gpu_pass_timer(GpuTimerPass pass) {
+    if (static_cast<std::size_t>(pass) >= Client::Measurement::kLegacyPassCount &&
+        !m_gpu_stage_attribution) {
+        return;
+    }
     // open a KHR_debug group named for the pass so Nsight/RenderDoc
     // captures show a labelled span. Pushed BEFORE the support-guard so markers
     // bracket the pass even on contexts without GL timestamp queries. Pure
@@ -2605,6 +2650,10 @@ void RenderPipeline::begin_gpu_pass_timer(GpuTimerPass pass) {
 }
 
 void RenderPipeline::end_gpu_pass_timer(GpuTimerPass pass) {
+    if (static_cast<std::size_t>(pass) >= Client::Measurement::kLegacyPassCount &&
+        !m_gpu_stage_attribution) {
+        return;
+    }
     if (m_benchmark_gpu_queries && !m_gpu_timers_suppressed)
         m_benchmark_gpu_queries->end_pass(static_cast<std::size_t>(pass));
     if (!m_far_world_paired)
@@ -2625,8 +2674,13 @@ void RenderPipeline::collect_gpu_pass_timers() {
         // the next frame, so polling here never has to block the CPU.
         GpuTimerFrameSlot& read_slot =
             m_gpu_timers.slots[(m_gpu_timers.frame_index + 1u) % kGpuTimerFrameRing];
-        for (size_t pass = 0; pass < kGpuTimerPassCount; ++pass) {
+        const auto count =
+            m_gpu_stage_attribution ? kGpuTimerPassCount : Client::Measurement::kLegacyPassCount;
+        for (size_t pass = 0; pass < count; ++pass) {
             if (!read_slot.issued[pass]) {
+                if (pass >= Client::Measurement::kLegacyPassCount) {
+                    m_gpu_timers.last_gpu_ms[pass] = 0.0;
+                }
                 continue;
             }
             GLint begin_available = GL_FALSE;
@@ -2690,6 +2744,29 @@ void RenderPipeline::collect_gpu_pass_timers() {
     m_last_render_pass_stats.final_blit_gpu_ms =
         m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::FinalBlit)];
 
+    if (m_gpu_stage_attribution) {
+        m_last_render_pass_stats.depth_blit_to_lighting_gpu_ms =
+            m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::DepthBlitToLighting)];
+        m_last_render_pass_stats.opaque_snapshot_gpu_ms =
+            m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::OpaqueSnapshot)];
+        m_last_render_pass_stats.froxel_inject_gpu_ms =
+            m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::FroxelInject)];
+        m_last_render_pass_stats.froxel_integrate_gpu_ms =
+            m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::FroxelIntegrate)];
+        m_last_render_pass_stats.taau_resolve_gpu_ms =
+            m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::TaauResolve)];
+        m_last_render_pass_stats.foliage_count_gpu_ms =
+            m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::FoliageCount)];
+        m_last_render_pass_stats.foliage_prefix_gpu_ms =
+            m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::FoliagePrefix)];
+        m_last_render_pass_stats.foliage_emit_gpu_ms =
+            m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::FoliageEmit)];
+        m_last_render_pass_stats.cloud_dome_gpu_ms =
+            m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::CloudDome)];
+        m_last_render_pass_stats.cloud_composite_gpu_ms =
+            m_gpu_timers.last_gpu_ms[static_cast<size_t>(GpuTimerPass::CloudComposite)];
+    }
+
     // One-time diagnostic so smoke runs prove the ring resolves real samples.
     if (resolved_sample_this_frame && !m_gpu_timers.first_sample_logged) {
         m_gpu_timers.first_sample_logged = true;
@@ -2718,7 +2795,7 @@ void RenderPipeline::finish_gpu_pass_timer_frame() {
     if (!m_gpu_timers.labeled && m_gpu_timers.frame_index + 1u >= kGpuTimerFrameRing) {
         for (size_t slot_index = 0; slot_index < kGpuTimerFrameRing; ++slot_index) {
             const GpuTimerFrameSlot& slot = m_gpu_timers.slots[slot_index];
-            for (size_t pass = 0; pass < kGpuTimerPassCount; ++pass) {
+            for (size_t pass = 0; pass < Client::Measurement::kLegacyPassCount; ++pass) {
                 const std::string base = "gpu_timer." + std::string(kGpuTimerPassNames[pass]) +
                                          "." + std::to_string(slot_index);
                 label_gl_object(GL_QUERY, slot.begin_queries[pass], base + ".begin");
@@ -2728,6 +2805,9 @@ void RenderPipeline::finish_gpu_pass_timer_frame() {
         m_gpu_timers.labeled = true;
     }
     ++m_gpu_timers.frame_index;
+    if (m_gpu_stage_attribution) {
+        refresh_scatter_gpu_timers();
+    }
 }
 
 void RenderPipeline::gather_lights(entt::registry& registry, const glm::vec3& camera_pos) {
@@ -3660,6 +3740,7 @@ void RenderPipeline::execute_stage_depth_blit_to_lighting(const Camera& camera) 
     (void)camera;
     // 5. COPY DEPTH TO LIGHTING FBO SO SKYBOX AND WATER SHARE THE G-BUFFER OCCLUSION
     record_frame_stage("depth_blit_to_lighting");
+    begin_gpu_pass_timer(GpuTimerPass::DepthBlitToLighting);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_gbuffer_pass->gbuffer().fbo_id);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
     // both G-buffer and lighting are internal-sized; copy the internal depth rect
@@ -3675,6 +3756,7 @@ void RenderPipeline::execute_stage_depth_blit_to_lighting(const Camera& camera) 
                       static_cast<GLint>(m_internal_height),
                       GL_DEPTH_BUFFER_BIT,
                       GL_NEAREST);
+    end_gpu_pass_timer(GpuTimerPass::DepthBlitToLighting);
 }
 
 void RenderPipeline::execute_stage_skybox(const Camera& camera) {
@@ -3695,6 +3777,7 @@ void RenderPipeline::execute_stage_skybox(const Camera& camera) {
         //
         // (a) Dome -> reduced-res FBO. No depth attachment / depth test off: the
         //     dome fills every texel (the sky mask is reapplied at composite time).
+        begin_gpu_pass_timer(GpuTimerPass::CloudDome);
         const GLboolean blend_was = glIsEnabled(GL_BLEND);
         if (blend_was)
             glDisable(GL_BLEND);
@@ -3706,6 +3789,8 @@ void RenderPipeline::execute_stage_skybox(const Camera& camera) {
         glDisable(GL_DEPTH_TEST);
         glDepthMask(GL_FALSE);
         m_skybox_pass->execute(skybox_ctx, camera, false);
+        end_gpu_pass_timer(GpuTimerPass::CloudDome);
+        begin_gpu_pass_timer(GpuTimerPass::CloudComposite);
         // (b) Depth-masked upsample composite -> lighting FBO (full res). Writes the
         //     bilinear-upsampled sky only where the scene depth is the far plane.
         glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
@@ -3733,7 +3818,9 @@ void RenderPipeline::execute_stage_skybox(const Camera& camera) {
         glEnable(GL_DEPTH_TEST);
         if (blend_was)
             glEnable(GL_BLEND);
+        end_gpu_pass_timer(GpuTimerPass::CloudComposite);
     } else {
+        begin_gpu_pass_timer(GpuTimerPass::CloudDome);
         glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
         glViewport(0,
                    0,
@@ -3741,6 +3828,7 @@ void RenderPipeline::execute_stage_skybox(const Camera& camera) {
                    static_cast<GLsizei>(
                        m_internal_height)); // skybox must not inherit a stale (screen) viewport
         m_skybox_pass->execute(skybox_ctx, camera, false);
+        end_gpu_pass_timer(GpuTimerPass::CloudDome);
     }
     end_gpu_pass_timer(GpuTimerPass::Skybox);
     glBindVertexArray(0); // Unbind after skybox pass
@@ -3780,7 +3868,9 @@ void RenderPipeline::execute_stage_opaque_snapshot(const Camera& camera) {
         .glass = !m_glass_pane_items.empty() && m_glass_quad_vao != 0,
         .capture = m_terrain_coverage_enabled || m_water_visibility_capture_enabled};
     if (consumers.opaque_snapshot()) {
+        begin_gpu_pass_timer(GpuTimerPass::OpaqueSnapshot);
         m_lighting_pass->copy_lighting_color_to_opaque_texture(m_frame_lighting_ctx);
+        end_gpu_pass_timer(GpuTimerPass::OpaqueSnapshot);
     }
 }
 
@@ -3879,15 +3969,19 @@ void RenderPipeline::execute_stage_weather_overlay(const Camera& camera) {
 void RenderPipeline::execute_stage_froxel_inject(const Camera& camera) {
     record_frame_stage("froxel_inject");
     RenderContext ctx = make_froxel_context(camera);
+    begin_gpu_pass_timer(GpuTimerPass::FroxelInject);
     if (!m_froxel_pass->execute_inject(ctx, m_root_path)) {
         m_volumetric_quality = 0;
     }
+    end_gpu_pass_timer(GpuTimerPass::FroxelInject);
 }
 
 void RenderPipeline::execute_stage_froxel_integrate(const Camera& camera) {
     record_frame_stage("froxel_integrate");
     RenderContext ctx = make_froxel_context(camera);
+    begin_gpu_pass_timer(GpuTimerPass::FroxelIntegrate);
     m_froxel_pass->execute_integrate(ctx);
+    end_gpu_pass_timer(GpuTimerPass::FroxelIntegrate);
 }
 
 void RenderPipeline::execute_stage_aerial(const Camera& camera) {
@@ -3961,7 +4055,9 @@ void RenderPipeline::execute_stage_taau_resolve(const Camera& camera) {
     record_frame_stage("taau_resolve");
     if (m_taau_enabled) {
         RenderContext taau_ctx = make_taau_context();
+        begin_gpu_pass_timer(GpuTimerPass::TaauResolve);
         m_taau_pass->execute(taau_ctx, m_far_world_paired ? &m_far_world_pair_taau : nullptr);
+        end_gpu_pass_timer(GpuTimerPass::TaauResolve);
     }
 }
 

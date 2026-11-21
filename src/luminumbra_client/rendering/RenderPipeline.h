@@ -74,6 +74,7 @@ struct WaterVisibilityMask;
 class SkyboxPass;
 class ParticlePass;
 class FoliagePass;
+struct GpuPassTimer;
 class PlantProcgenPass;
 class FarLodSystem;
 class GroundDecalPass;
@@ -327,6 +328,17 @@ public:
         // against the transient ≤ 0.5 ms budget (documented design).
         double lightning_pulse_gpu_ms = 0.0;
         double final_blit_gpu_ms = 0.0;
+        double depth_blit_to_lighting_gpu_ms = 0.0;
+        double opaque_snapshot_gpu_ms = 0.0;
+        double froxel_inject_gpu_ms = 0.0;
+        double froxel_integrate_gpu_ms = 0.0;
+        double taau_resolve_gpu_ms = 0.0;
+        double foliage_count_gpu_ms = 0.0;
+        double foliage_prefix_gpu_ms = 0.0;
+        double foliage_emit_gpu_ms = 0.0;
+        double cloud_dome_gpu_ms = 0.0;
+        double cloud_composite_gpu_ms = 0.0;
+
         //  sky scattering LUT precompute timings (CPU build + GL upload).
         // sky_full_precompute_ms is the startup one-shot (budget ≤ 8.0 ms on
         // release); sky_view_refresh_ms is the last per-frame sky-view recompute
@@ -477,9 +489,8 @@ public:
     // after this, for the A/B capture path). Also safe at runtime (a settings change): when
     // already started it reallocates the scaled intermediates like on_resize (the output-res
     // TAAU/backbuffer targets are untouched -- only the internal extent moved).
-    void set_benchmark_gpu_queries(BenchmarkGpuQueries* queries) {
-        m_benchmark_gpu_queries = queries;
-    }
+    void set_benchmark_gpu_queries(BenchmarkGpuQueries* queries);
+    void set_gpu_stage_attribution(bool enabled);
     void set_render_scale(float scale);
     // Render-thread startup/live application. Session overrides are resolved by
     // the host before entry. Unchanged values do not allocate or reset history.
@@ -1343,6 +1354,16 @@ private:
         Foliage, // Instanced foliage scatter pass.
         Aerial,  // Analytic aerial-perspective fullscreen pass.
         FinalBlit,
+        DepthBlitToLighting,
+        OpaqueSnapshot,
+        FroxelInject,
+        FroxelIntegrate,
+        TaauResolve,
+        FoliageCount,
+        FoliagePrefix,
+        FoliageEmit,
+        CloudDome,
+        CloudComposite,
         Count,
     };
     static constexpr size_t kGpuTimerPassCount = static_cast<size_t>(GpuTimerPass::Count);
@@ -1366,6 +1387,10 @@ private:
     };
     GpuPassTimers m_gpu_timers;
     BenchmarkGpuQueries* m_benchmark_gpu_queries = nullptr;
+    bool m_gpu_stage_attribution = false;
+    bool m_gpu_stage_queries_created = false;
+    GpuPassTimer gpu_pass_timer(GpuTimerPass pass);
+    void refresh_scatter_gpu_timers();
 
     void init_gpu_pass_timers();
     void destroy_gpu_pass_timers();
