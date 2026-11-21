@@ -744,10 +744,10 @@ class FrameAttributionWiring(unittest.TestCase):
 
     def test_capture_simulation_decision_covers_ticks_physics_and_water(self):
         main = compact(self.main)
-        self.assertIn('const bool simulate_frame = !timelapse_waiting && Measurement::frame_simulation_enabled('
+        self.assertIn('const bool simulate_frame = !timelapse_waiting && !scenario_config.temporal_audit && Measurement::frame_simulation_enabled('
                       'benchmark_v4, traversal.has_value(), measuring_v3, '
                       'g_app.hud.paused, g_app.capture.timeScale);', main)
-        self.assertIn('const bool advance_frame_simulation = !timelapse_waiting && (!g_rb_active || simulate_frame);', main)
+        self.assertIn('const bool advance_frame_simulation = !timelapse_waiting && !scenario_config.temporal_audit && (!g_rb_active || simulate_frame);', main)
         session = block(self.main, 'if (!scenario_config.networked_session_smoke())')
         ticking = block(session, 'if (simulate_frame)')
         self.assertEqual(session.count('gameSession->TickSimulation('),
@@ -3238,6 +3238,183 @@ class PhotoEnvironmentWiring(unittest.TestCase):
                 inputs = dict(defaults)
                 inputs[flag] = not inputs[flag]
                 self.assertTrue(cpp_expression(guard, **inputs))
+
+
+class TemporalSweepRuntimeWiring(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.main = read(CLIENT / "main_client.cpp")
+        cls.config = read(CLIENT / "core/RuntimeScenarioConfig.cpp")
+        cls.seam = read(CLIENT / "core/RuntimeScenarioConfig.h")
+        cls.capture = read(CLIENT / "core/ScenarioRunnerCapture.cpp")
+        cls.backend = block(cls.capture, "struct ScenarioRunnerImpl::RuntimeWorldSweepBackend")
+
+    def test_temporal_startup_and_frame_ownership(self):
+        for parser in ("RuntimePathOptions ParseRuntimePathOptions(",
+                       "ParseRuntimeScenarioConfig(int argc"):
+            body = block(self.config, parser)
+            self.assertIn("ParseTemporalAuditRuntimeOptions(argc, argv)", body)
+        admission = block(self.config, "ParseTemporalAuditRuntimeOptions(int argc")
+        self.assertIn('scenario != "temporal_audit"', admission)
+        for condition in ("request.start_tick != 0", "request.ticks_per_second != 30",
+                          "request.ticks_per_day != 162000", "request.dawn_tick != 27000",
+                          "request.dusk_tick != 135000", "!diagnostics.enabled"):
+            self.assertIn(condition, admission)
+        self.assertNotIn("RefuseUnsupportedTemporalAuditExecution", self.config + self.seam)
+        self.assertIn("config.temporal_audit_plan = config.temporal_audit->plan;", self.config)
+        for flag in ("--load-world", "--runtime-boot"):
+            self.assertIn(f'"{flag}"', admission)
+        self.assertIn("presentation_clock().set_capture_tick(0, 60);", self.main)
+        self.assertIn("scenario_config.capture_heartbeat = &MainLoopHeartbeat();", self.main)
+        self.assertNotIn("if (scenario_config.temporal_audit) { deltaTime = 0.0f; }",
+                         compact(self.main))
+        self.assertIn("deltaTime = static_cast<float>(scenario_config.temporal_presentation_delta);",
+                      self.main)
+        simulation = re.search(r"const bool simulate_frame = (.*?);", self.main, re.S).group(1)
+        simulation = re.sub(r"Measurement::frame_simulation_enabled\([^;]+\)",
+                            "ordinary", simulation)
+        advancement = re.search(r"const bool advance_frame_simulation = (.*?);",
+                                self.main, re.S).group(1)
+        for temporal in (False, True):
+            for waiting in (False, True):
+                for ordinary in (False, True):
+                    self.assertEqual(cpp_expression(simulation, timelapse_waiting=waiting,
+                        ordinary=ordinary, **{"scenario_config.temporal_audit": temporal}),
+                        not waiting and not temporal and ordinary)
+                    for benchmark in (False, True):
+                        self.assertEqual(cpp_expression(advancement, timelapse_waiting=waiting,
+                            g_rb_active=benchmark, simulate_frame=ordinary,
+                            **{"scenario_config.temporal_audit": temporal}),
+                            not waiting and not temporal and (not benchmark or ordinary))
+        install = self.main.index("BuildTemporalAuditWeatherSchedule(*scenario_config.temporal_audit)")
+        self.assertLess(install, self.main.index("gameSession->SetRequiredClientAssets("))
+        self.assertIn("temporal_weather_ready = gameSession->SetWeatherSchedule(schedule);", self.main)
+        self.assertIn("return WorldVisualSweepWeatherSchedule(audit.plan);", self.config)
+        self.assertIn("graphics_ready = graphics_ready && temporal_weather_ready;", self.main)
+        self.assertLess(self.main.index("graphics_ready = graphics_ready && temporal_weather_ready;"),
+                        self.main.index("if (!graphics_ready || !renderPipeline.startup("))
+        begin = block(self.backend, "bool begin(")
+        for guard in ("TemporalSweepClockMatches(", "!session.IsSimulationTickBoundary()",
+                      "!pipeline.capture_diagnostics_enabled()", "BuildTemporalAuditWeatherSchedule(audit)"):
+            self.assertIn(guard, begin)
+        self.assertIn("camera.Position = glm::vec3(spawn.x, spawn.y + 1.8f, spawn.z);", begin)
+        self.assertIn("camera.Yaw = -90.0f;", begin)
+        self.assertIn("camera.Pitch = -10.0f;", begin)
+
+    def test_tick_weather_and_continuity_wiring(self):
+        tick = block(self.backend, "bool advance_simulation(")
+        ordered = ("GetPhysicsSystem()->update(", "session.TickSimulation(delta, true)",
+                   "GetWorldSystem()->update(", "GetWorldSystem()->sync_water_authority();")
+        positions = [tick.index(token) for token in ordered]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(tick.count("TickSimulation("), 1)
+        self.assertIn("session.TickSimulation(delta, true) != 1", tick)
+        self.assertIn("actual_tick() != step.simulation_tick", tick)
+        self.assertIn("session.GetRegionSchedulerFault()", tick)
+        adapter = compact(block(self.seam, "bool advance_tick("))
+        self.assertIn("return backend_.advance_simulation(step) && "
+                      "backend_.weather_ready(step.simulation_tick);", adapter)
+        weather = compact(block(self.backend, "bool weather_ready("))
+        self.assertIn("weather != nullptr && weather->last_tick() == tick", weather)
+        prepare = compact(block(self.seam, "bool prepare_render("))
+        self.assertIn("backend_.weather_ready(step.simulation_tick) && backend_.apply_weather(step)",
+                      prepare)
+        complete = compact(block(self.seam, "bool complete_render("))
+        self.assertIn("backend_.weather_ready(step.simulation_tick) && backend_.render_completed(",
+                      complete)
+        self.assertNotIn("clear_emitters", self.backend)
+        self.assertNotIn("CreateWorld", self.backend)
+        self.assertIn("weather->SampleAt(camera.Position)", self.backend)
+        self.assertIn("particles->set_precipitation(", self.backend)
+
+    def test_collision_preparation_precedes_all_advancement_and_refuses_visibly(self):
+        tick = compact(block(self.backend, "bool advance_simulation("))
+        barrier = "if (!session.GetPhysicsSystem()->prepare_simulation_collisions({}, step.simulation_tick))"
+        refusal = compact(block(tick[tick.index(barrier) + len(barrier):], ""))
+        self.assertIn('LUMINUMBRA_CORE_ERROR("Temporal sweep collision preparation failed at tick {}", '
+                      'step.simulation_tick);', refusal)
+        self.assertTrue(refusal.endswith("return false;"))
+        for side_effect in ("session.SetLocalPlayerSimulationPosition(",
+                            "GetPhysicsSystem()->update(", "session.TickSimulation(",
+                            "GetWorldSystem()->update(", "GetWorldSystem()->sync_water_authority("):
+            self.assertLess(tick.index(barrier), tick.index(side_effect))
+            self.assertNotIn(side_effect, refusal)
+        self.assertEqual(tick.count("prepare_simulation_collisions("), 1)
+        sequence = read(CLIENT / "rendering/TemporalSweep.h")
+        self.assertIn("success = transport.advance_tick(command);", sequence)
+        self.assertIn("sequence.acknowledge(transport.actual_tick(), success, ready, output.bytes);",
+                      sequence)
+        self.assertIn("return std::string(sequence.refusal());", sequence)
+        drive = block(self.capture, "bool ScenarioRunnerImpl::driveTemporalAudit()")
+        self.assertIn("return transport.advance_tick(step);", drive)
+        self.assertIn("DriveTemporalAuditTicks(", drive)
+        dispatch = block(self.capture, "void ScenarioRunnerImpl::onPostRenderCapture(")
+        self.assertIn('LUMINUMBRA_CORE_ERROR("Temporal sweep refused: {}", refusal);', dispatch)
+        self.assertIn("refuseScenarioCapture(temporal_sequence->refusal())", dispatch)
+
+    def test_render_keeps_session_calendar_binding_through_explicit_tod(self):
+        pins = block(self.capture, "void ScenarioRunnerImpl::onPreRenderCapturePins()")
+        ordered = ("transport.prepare_render(command)", "gameSession->GetRenderCalendar()",
+                   "clock.solar_phase_from_day_phase(command.day_phase)",
+                   "renderPipeline.set_time_of_day(tod)")
+        positions = [pins.index(token) for token in ordered]
+        self.assertEqual(positions, sorted(positions))
+        binding = block(self.main, "if (gameSession->ActiveRegionsEnabled() || scenario_config.temporal_audit)")
+        self.assertIn("renderPipeline.set_world_clock(gameSession->GetWorldClock());", binding)
+        self.assertLess(self.main.index("renderPipeline.set_world_clock(gameSession->GetWorldClock());"),
+                        self.main.index("scenario_runner->onPreRenderCapturePins();"))
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        explicit_tod = block(pipeline, "void RenderPipeline::set_time_of_day(")
+        self.assertNotIn("m_worldClock", explicit_tod)
+        season = compact(block(pipeline, "void RenderPipeline::update_time_of_day("))
+        self.assertIn("m_worldClock ? Rendering::ComputeSeason(*m_worldClock)", season)
+
+    def test_completed_frame_phase_and_output_failures(self):
+        drive = compact(block(self.capture, "bool ScenarioRunnerImpl::driveTemporalAudit()"))
+        self.assertIn("if (scenario_config.temporal_presentation_delta > 0) { ++presentation_frames; }",
+                      drive)
+        self.assertIn("presentation_clock().set_capture_tick(presentation_frames, 60);", drive)
+        complete = compact(block(self.backend, "bool render_completed("))
+        self.assertIn("actual_tick() != step.simulation_tick", complete)
+        self.assertIn("glGetError() != GL_NO_ERROR", complete)
+        self.assertIn("width != kCapturePinnedWidth", complete)
+        self.assertIn("height != kCapturePinnedHeight", complete)
+        self.assertIn("heartbeat->fetch_add(1, std::memory_order_relaxed);", complete)
+        self.assertNotIn("TickSimulation", complete)
+        self.assertNotIn("steady_clock", self.backend)
+        capture = compact(block(self.backend, "capture(const"))
+        for field in ("simulation_tick", "sub_tick_60", "frame_index", "control"):
+            self.assertIn(f"audit.completed->{field} != step.{field}", capture)
+        self.assertLess(capture.index("writeScenarioBackbuffer("),
+                        capture.index("acknowledgeCaptureFiles("))
+        for suffix in (".albedo.pfm", ".normal.pfm", ".depth.pfm", ".material.pfm",
+                       ".ids.bin", ".draws.json", ".diagnostics.json", ".probe-"):
+            self.assertIn(suffix, capture)
+        self.assertIn("CaptureManifestPath(path)", capture)
+        self.assertIn("glGetError() != GL_NO_ERROR", capture)
+        self.assertLess(self.main.index("scenario_runner->onPostRenderCapture(deltaTime)"),
+                        self.main.rindex("glfwSwapBuffers(window)"))
+
+    def test_sequence_publication_and_still_dispatch(self):
+        begin = compact(block(self.backend, "bool begin("))
+        self.assertIn("if (!std::filesystem::create_directory(output, error) || error) "
+                      "{ return false; }", begin)
+        self.assertLess(begin.index("TemporalSweepClockMatches("), begin.index("create_directory("))
+        self.assertLess(begin.index("create_directory(output, error)"), begin.index("camera.Yaw ="))
+        publish = compact(block(self.backend, "publish(const"))
+        self.assertIn('audit.sequence->publishCompletionManifest(output / "sequence.json")', publish)
+        run = block(self.seam, "std::string RunWorldVisualTemporalSweep(RuntimeTemporalAudit&")
+        self.assertIn("transport.complete_render(", run)
+        self.assertIn("transport.capture(command)", run)
+        self.assertIn("transport.publish(command)", run)
+        self.assertIn("sequence.acknowledge(transport.actual_tick(), true, ready)", run)
+        dispatch = block(self.capture, "void ScenarioRunnerImpl::onPostRenderCapture(")
+        self.assertRegex(compact(dispatch), r"RunWorldVisualTemporalSweep\(\s*\*scenario_config.temporal_audit")
+        self.assertIn("temporal_sequence->complete()", dispatch)
+        still = block(self.capture, "void ScenarioRunnerImpl::onPreRenderWorldSweep()")
+        self.assertEqual(still.count("RunWorldVisualSweep(deps)"), 1)
+        self.assertNotIn("temporal_audit_plan", still)
+        self.assertNotIn("RunWorldVisualTemporalSweep", still)
 
 
 class WorldVisualSweepWiring(unittest.TestCase):

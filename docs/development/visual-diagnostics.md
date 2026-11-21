@@ -987,6 +987,39 @@ assembler's legacy path naturally sorts filenames and loads all frames, using
 Pillow for GIF and optionally ffmpeg for MP4. Manifest-aware assembly is described
 below; it does not produce a temporal contact sheet.
 
+The temporal world visual sweep uses the admitted `temporal_audit` scenario runtime:
+`--scenario=temporal_audit`, a canonical fresh-world plan and enabled completed-frame
+diagnostics. Its camera is the fixed spawn-eye view described below. Temporal plans
+with `--scenario=world_visual_sweep` or its environment fallback refuse before
+startup writes. The ordinary still matrix retains its pins, order and all-features
+refusal; the temporal runtime bypasses it entirely.
+
+The GL-free `WorldVisualTemporalTransport` seam separates weather preparation from
+completed-backbuffer validation around the app's existing render call.
+`RunWorldVisualTemporalSweep` consumes each completed step through the same
+`RuntimeTemporalAudit` sequence that owns simulation advancement and output
+reservations. Each requested tick runs physics, normal session simulation
+(including creatures and weather), streaming/water and water-authority promotion
+in host order. Initial streaming may progress while simulation is frozen.
+Readiness uses bounded protocol attempts. Positive planned deltas advance the
+shared presentation clock at 60 Hz; frozen retries advance neither simulation nor
+presentation. Clock admission checks the actual start tick, tick rate and resolved
+calendar before reserving the output directory.
+
+Weather-cycle runs use the shared `WorldVisualSweepWeatherSchedule` builder through
+the admitted runtime's weather contract, installing five clear/ramp/storm/return
+keyframes and the declared strike before world creation. The existing schedule
+identity and persistence format cover these inputs. Other spans use natural
+weather. Real weather/cloud/precipitation inputs retain particle state across
+samples; this transport does not certify lightning or other visible-feature presence.
+
+Output remains the runtime's RGB plus completed-frame diagnostic bundle, with its
+full per-frame and aggregate reservations. The exclusive `<artifact_dir>/temporal`
+directory and verified-file `sequence.json` completion publication described below
+replace the sweep's former RGB-only manifest and completion-directory convention.
+Failed runs retain incomplete evidence. Native captures and all-features presence
+remain pending validation.
+
 ### E1: fixed-camera time-lapse audit runs
 
 `BuildTemporalAuditPlan` implements the three span schedules below without driving
@@ -1159,7 +1192,7 @@ and weather precipitation uses forward particles: this wiring does not yet enabl
 a complete native sequence with those contributors active. A fixed-site producer
 policy or the missing A4 producer coverage is a separate prerequisite; admission
 does not promise that coverage. Manifest-aware assembly follows; shared
-producer policy and all-features evidence remain E3.
+producer policy and all-features evidence remain pending.
 No save-format, authority revision or hash algorithm changes are made. The remaining
 section specifies the broader execution contract.
 
@@ -1171,7 +1204,7 @@ or invalid explicit manifests refuse without legacy fallback. Assembly joins
 capture records by index to planned tick order, preserving equal-tick holds,
 and requires exactly one image per frame under the existing pattern option.
 Missing, extra, duplicate, malformed or hash-mismatched inputs refuse. Every
-payload, including sidecars, is size/hash checked through D1's shared verified-file
+payload, including sidecars, is size/hash checked through the shared verified-file
 reader; image bytes are copied from those same descriptors into private staging.
 The assembler admits at most 4,096 frames, 12 payloads per frame, 128 MiB per
 payload and 512 MiB total payload bytes before decoding/encoding. The selected
@@ -1489,7 +1522,7 @@ edits when parallel branches join. No new required CI checks are part of any row
 | E2b: qualification and worst events | `tools/gates/check-temporal-capture.py`; `tools/gates/test_temporal_capture.py`; `tools/gates/baselines/diagnostic-rois.json`; `tools/gates/build-visual-sweep-montages.py`; `tools/gates/test_temporal_montages.py`; `tools/ci/ci_paths.py`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E2a and relevant B2/C2 contributions. Register qualification-status, repeated-run, injected-defect and labelled failure-slot tests in PYTHON_TESTS/CTest. Threshold enforcement requires separately reviewed qualification evidence. Coordinate shared ROI/montage edits. |
 | E3a: profile and capability manifest | `rendering/CaptureFeatureProfile.h`; `rendering/CaptureFeatureProfile.cpp`; `src/luminumbra_client/sources.cmake`; `src/luminumbra_client/core/RuntimeScenarioConfig.h`; `src/luminumbra_client/core/RuntimeScenarioConfig.cpp`; `test/rendering/capture_feature_profile_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | Profile foundation implemented with registered GL-free profile/capability/unknown-feature/incompatible-option tests. Every unimplemented adapter defaults to unsupported. Shipping adapter admission remains pending. |
 | E3b: shared app and scenario policy | `src/luminumbra_client/main_client.cpp`; `src/luminumbra_client/app/ClientAppContext.h`; `src/luminumbra_client/app/CaveFlourishes.cpp`; `rendering/CaptureFeatureProfile.h`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `rendering/CaptureFeatureProfile.cpp`; `test/rendering/capture_feature_policy_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `docs/visual-regression.md` (10) | Shared policy boundary implemented after E3a and E1c; registered synthetic ordinary-play equivalence, mode-label, admission, no-ui and determinism regressions. Only complete supported snapshots can remove suppression. Shipping adapters and native entry-point validation remain pending; no runtime all-features claim. |
-| E3c: sweep profile adapter | `scenarios/WorldVisualSweep.cpp`; `src/luminumbra_client/core/RuntimeScenarioConfig.cpp`; `rendering/TemporalSweep.h`; `test/rendering/temporal_sweep_test.cpp`; `tools/ci/test_replay_source_contract.py`; `test/CMakeLists.txt`; `tools/gates/validate-engine-frontier.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | Partial after E3b: GL-free fixed-camera sweep transport protocol delegates exact ticks, rational presentation and publication to E1c and passes the shared feature policy without per-cell resets. Registered regressions cover tick plans, creature progression, modeled particle continuity, refusal/failure paths and unchanged legacy camera/TOD/settle pins. Both startup parsers refuse the all-features still matrix before output with `sweep_upward_camera_forces_empty_foliage`, including environment launches. Shipping temporal startup, simulation/weather/completed-frame transport and native validation remain pending; no temporal runtime or all-features presence claim. |
+| Sweep profile adapter | `src/luminumbra_client/main_client.cpp`; `src/luminumbra_client/core/RuntimeScenarioConfig.h`; `src/luminumbra_client/core/RuntimeScenarioConfig.cpp`; `src/luminumbra_client/core/ScenarioRunnerDrive.cpp`; `src/luminumbra_client/core/ScenarioRunnerImpl.h`; `src/luminumbra_client/core/ScenarioRunnerCapture.cpp`; `rendering/TemporalSweep.h`; `test/rendering/temporal_sweep_test.cpp`; `test/rendering/test_frame_attribution_wiring.py`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (12) | The fixed-camera sweep transport runs through the admitted `temporal_audit` runtime and its single sequence. It advances normal session/creature/weather ticks with physics and streaming/water dependencies, retains particle state and applies exact calendar/presentation controls. Runtime admission checks the resolved clock/calendar; weather uses the existing identity-bearing schedule before world creation. Completed RGB/diagnostic bundles are file-acknowledged before `sequence.json` publication. Failed steps/output cannot publish completion. The original still matrix, pins, order and all-features refusal remain unchanged. Registered `TemporalSweepRuntime.*` and `TemporalSweep.*` regressions cover continuity, admission and failures; native execution remains pending. No all-features presence claim. |
 | E3d: forward feature evidence | `rendering/DiagnosticContributions.h`; `rendering/DiagnosticContributions.cpp`; `rendering/passes/WaterPass.cpp`; `rendering/passes/WaterfallPass.cpp`; `rendering/passes/ParticlePass.cpp`; `rendering/passes/FoliagePass.cpp`; `rendering/RenderPipeline.cpp`; `test/rendering/capture_forward_presence_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md` (10) | After B2 and E3a. Coordinate owned producers. Register GL-free counter joins and native visible-contribution/occlusion fixtures; separate river/waterfall/spray evidence, and report unsupported until instrumented shader contributors land in additional bounded slices with asset inventory updates. |
 | E3e: geometry and atmosphere evidence | `rendering/DiagnosticContributions.h`; `rendering/DiagnosticContributions.cpp`; `rendering/passes/GBufferPass.cpp`; `rendering/passes/SkyboxPass.cpp`; `rendering/passes/LightingPass.cpp`; `rendering/RenderPipeline.cpp`; `test/rendering/capture_scene_presence_test.cpp`; `test/CMakeLists.txt`; `docs/development/visual-diagnostics.md`; `docs/visual-regression.md` (10) | After E3d. Coordinate owned passes. Register creature/cave/structure/sky/moon/star/cloud-shadow/bolt visibility fixtures, including absent/offscreen cases; shader variants and public asset inventory changes are prerequisite bounded slices under B2, not implicit extra files. |
 | E3f: non-vacuous acceptance report | `rendering/CaptureFeatureProfile.cpp`; `rendering/TemporalAudit.cpp`; `tools/gates/check-temporal-capture.py`; `tools/gates/test_temporal_capture.py`; `test/rendering/capture_feature_profile_test.cpp`; `test/CMakeLists.txt`; `tools/gates/validate-engine-frontier.ps1`; `docs/development/visual-diagnostics.md`; `tools/ci/acceptance_matrix.json`; `docs/acceptance-matrix.md` (10) | After E3c–E3e and E2b. Extend registered suites and existing frontier consumers: zero/unknown/unsupported presence, wrong-frame evidence and failed publication cannot pass; full site/span success requires all expected windows. Qualification/visual approval remain distinct. |
