@@ -40,6 +40,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <limits>
 #include <map>
 #include <memory>
@@ -7465,6 +7466,229 @@ TEST(GameSessionHeadlessWorldTest, GenuineWaterChangesAfterCleanInitializationPe
     }
 }
 
+TEST(GameSessionHeadlessWorldTest, SaveWorkReportClearsOnPreflightRefusal) {
+    GameSession session;
+    Luminumbra::world::WorldStateSaveReport report;
+    const P::SaveWorkCounts previous{.world_decodes = 1,
+                                     .chunk_decodes = 2,
+                                     .owners_serialized = 3,
+                                     .clean_siblings_serialized = 4,
+                                     .owners_rewritten = 5,
+                                     .regions_rewritten = 6,
+                                     .bytes_compressed = 7};
+    report.work = previous;
+    EXPECT_FALSE(session.SaveWorldStateTo({}, &report));
+    EXPECT_EQ(report.work, P::SaveWorkCounts{});
+    report.work = previous;
+    EXPECT_FALSE(session.SaveWorldState(&report));
+    EXPECT_EQ(report.work, P::SaveWorkCounts{});
+}
+
+namespace {
+
+void PopulateAuthorityWorkload(RegionalWaterScenario& scenario, int unrelated_owners) {
+    auto& session = scenario.session;
+    auto* world = session.GetWorldSystem();
+    // Constant lattices keep the debug/ASan fixture compact while retaining valid
+    // persisted terrain authority, including admission through the cold-owner reader.
+    for (int index = 0; index < unrelated_owners; ++index) {
+        auto chunk = std::make_shared<Chunk>(Luminumbra::IVec3(4096 + index, 0, 0));
+        chunk->set_state(Luminumbra::ChunkState::Idle);
+        chunk->sdf_data.assign(17u * 17u * 17u, 1.0f);
+        chunk->heightmap_data.assign(17u * 17u, 10000.0f);
+        chunk->mark_voxel_data_dirty();
+        ASSERT_TRUE(world->adopt_streamed_chunk(chunk));
+    }
+    for (int x = 0; x < 2; ++x) {
+        auto chunk = std::make_shared<Chunk>(Luminumbra::IVec3(x, 0, 0));
+        chunk->set_state(Luminumbra::ChunkState::Idle);
+        chunk->sdf_data.assign(17u * 17u * 17u, 1.0f);
+        chunk->heightmap_data.assign(17u * 17u, 10000.0f);
+        chunk->mark_sdf_generated_current_params();
+        ASSERT_TRUE(world->adopt_streamed_chunk(chunk));
+        scenario.water_chunks.emplace(chunk->get_id(), chunk);
+    }
+    auto* water = session.GetWaterSystem();
+    water->SetHydrology(true, 2, 0);
+    water->update(session.GetRegistry(), scenario.water_chunks, true);
+    const auto flowing = world->find_streamed_chunk({0, 0, 0});
+    ASSERT_NE(flowing, nullptr);
+    ASSERT_TRUE(flowing->has_complete_water_state());
+    ASSERT_EQ(flowing->water_depth_mm.size(), 64u);
+    flowing->water_depth_mm[27] += 1000;
+    flowing->mark_water_state_dirty();
+    session.PinActiveRegion({0, 0}, true);
+    for (int index = 0; index < 6; ++index) {
+        ClockTestPlant(session.GetRegistry(), {8.0f + static_cast<float>(index), 0, 8});
+    }
+    for (int index = 0; index < 8; ++index) {
+        const auto creature = session.GetRegistry().create();
+        session.GetRegistry().emplace<C::TransformComponent>(creature).position = {
+            8.0f + static_cast<float>(index), 0, 12};
+        auto& state = session.GetRegistry().emplace<C::CreatureComponent>(creature);
+        state.species_id = C::CreatureSpeciesId16("grovestrider");
+        session.GetRegistry().emplace<C::MortalComponent>(creature).lifespan_ticks = 1000;
+    }
+}
+
+void SaveAndMeasurePopulated(GameSession& session,
+                             const char* phase,
+                             std::size_t expected_owners,
+                             Luminumbra::world::WorldStateSaveReport& report) {
+    ASSERT_TRUE(session.SaveWorldState(&report));
+    EXPECT_EQ(report.chunks_total, expected_owners);
+    EXPECT_LE(report.work.world_decodes, 1u);
+    EXPECT_LE(report.work.chunk_decodes, report.chunks_total);
+    std::cout << "PopulatedSaveWork phase=" << phase << " residents=" << report.chunks_total
+              << " owners=" << report.work.owners_rewritten
+              << " regions=" << report.work.regions_rewritten
+              << " serialized=" << report.work.owners_serialized
+              << " siblings=" << report.work.clean_siblings_serialized
+              << " validations=" << report.work.world_decodes
+              << " decodes=" << report.work.chunk_decodes
+              << " bytes_compressed=" << report.work.bytes_compressed << '\n';
+}
+
+void ExpectPopulatedSaveParity(GameSession& session, const HeadlessRoot& root, JobSystem& jobs) {
+    // Compare every chunk record byte with a full save at the same evolved tick.
+    const auto incremental = session.GetWorldSaveDir();
+    const auto complete = root.path() / "complete-populated-save";
+    ASSERT_TRUE(session.SaveWorldStateTo(complete, nullptr, true));
+    const auto region_bytes = [](const fs::path& directory) {
+        auto bytes = ReadClockTestDirectory(P::WorldSaveService::region_directory(directory));
+        std::erase_if(bytes, [](const auto& member) { return member.first.extension() != ".lmr"; });
+        return bytes;
+    };
+    EXPECT_EQ(region_bytes(complete), region_bytes(incremental));
+    GameSession restored_incremental, restored_complete;
+    for (auto* restored : {&restored_incremental, &restored_complete}) {
+        EnableSnapshotSession(*restored, root, jobs);
+        ASSERT_TRUE(restored->CreateWorld("Restored populated work", "1337", "default"));
+    }
+    ASSERT_TRUE(restored_incremental.LoadWorldStateFrom(incremental));
+    ASSERT_TRUE(restored_complete.LoadWorldStateFrom(complete));
+    const auto chunk_hash = session.ComputeChunkStateHash();
+    ASSERT_FALSE(chunk_hash.empty());
+    const auto plant_hash = session.ComputePlantSubHash();
+    ASSERT_FALSE(plant_hash.empty());
+    // Capture each cold restored world once. Equal component hashes imply equal
+    // composite world hashes without decoding the cold owners again for diagnostics.
+    const auto incremental_hashes = SessionWorldSubHashes(restored_incremental);
+    const auto complete_hashes = SessionWorldSubHashes(restored_complete);
+    EXPECT_EQ(incremental_hashes.at("chunk"), chunk_hash);
+    EXPECT_EQ(complete_hashes.at("chunk"), chunk_hash);
+    EXPECT_EQ(incremental_hashes.at("plants"), plant_hash);
+    EXPECT_EQ(complete_hashes.at("plants"), plant_hash);
+    EXPECT_EQ(incremental_hashes, complete_hashes);
+}
+
+} // namespace
+
+TEST(GameSessionHeadlessWorldTest, PopulatedEvolutionBoundsAuthorityPreparationAndSaveWork) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    RegionalWaterScenario scenario;
+    auto& session = scenario.session;
+    EnableSnapshotSession(session, root, jobs);
+    ASSERT_TRUE(session.CreateWorld("Populated work", "1337", "default"));
+    auto* world = session.GetWorldSystem();
+    constexpr int unrelated_owners = 2048;
+    constexpr std::uint64_t ticks = 64;
+    constexpr auto total_owners = static_cast<std::size_t>(unrelated_owners + 2);
+    ASSERT_NO_FATAL_FAILURE(PopulateAuthorityWorkload(scenario, unrelated_owners));
+    auto* water = session.GetWaterSystem();
+    const auto flowing = world->find_streamed_chunk({0, 0, 0});
+    ASSERT_NE(flowing, nullptr);
+    {
+        const auto visits = world->authority_snapshot_resident_visits();
+        const auto residents = world->snapshot_streamed_chunks();
+        ASSERT_EQ(residents.size(), total_owners);
+        EXPECT_EQ(world->authority_snapshot_resident_visits() - visits, residents.size());
+    }
+    Luminumbra::world::WorldStateSaveReport baseline;
+    ASSERT_NO_FATAL_FAILURE(SaveAndMeasurePopulated(session, "baseline", total_owners, baseline));
+    EXPECT_EQ(baseline.work.owners_serialized, baseline.chunks_total);
+    EXPECT_EQ(baseline.work.owners_rewritten, baseline.chunks_total);
+    EXPECT_GT(baseline.work.bytes_compressed, 0u);
+    const auto resident_visits_before_ticks = world->authority_snapshot_resident_visits();
+    const auto depth_before = flowing->water_depth_mm;
+    std::uint64_t max_water_inputs = 0, max_capture_inputs = 0;
+    bool observed_flow = false;
+    for (std::uint64_t tick = 0; tick < ticks; ++tick) {
+        SCOPED_TRACE(tick);
+        const auto snapshots = world->authority_snapshot_resident_visits();
+        const auto inputs = world->water_authority_input_items();
+        const auto capture_inputs = world->far_lod_capture_input_items();
+        water->update(session.GetRegistry(), scenario.water_chunks, true);
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        const auto capture = world->capture_far_lod_sdf_snapshot(0, 0);
+        ASSERT_NE(capture, nullptr);
+        EXPECT_EQ(capture->entries.size(), 2u);
+        const auto water_inputs = world->water_authority_input_items() - inputs;
+        const auto captured = world->far_lod_capture_input_items() - capture_inputs;
+        EXPECT_LE(water_inputs, 2u);
+        EXPECT_EQ(captured, 2u);
+        EXPECT_EQ(world->authority_snapshot_resident_visits(), snapshots);
+        max_water_inputs = std::max(max_water_inputs, water_inputs);
+        max_capture_inputs = std::max(max_capture_inputs, captured);
+        observed_flow = observed_flow || std::any_of(flowing->water_edge_flux.begin(),
+                                                     flowing->water_edge_flux.end(),
+                                                     [](std::int32_t flux) { return flux != 0; });
+    }
+    const auto resident_tick_visits =
+        world->authority_snapshot_resident_visits() - resident_visits_before_ticks;
+    EXPECT_TRUE(observed_flow);
+    EXPECT_NE(flowing->water_depth_mm, depth_before);
+    EXPECT_GT(max_water_inputs, 0u);
+    ASSERT_EQ(session.GetRegistry().view<C::CreatureComponent>().size(), 8u);
+    ASSERT_EQ(session.GetRegistry().view<C::PlantGrowthComponent>().size(), 6u);
+    for (const auto creature : session.GetRegistry().view<C::CreatureComponent>()) {
+        EXPECT_EQ(session.GetRegistry().get<C::MortalComponent>(creature).age_ticks, ticks);
+    }
+    for (const auto plant : session.GetRegistry().view<C::PlantGrowthComponent>()) {
+        const auto& growth = session.GetRegistry().get<C::PlantGrowthComponent>(plant);
+        EXPECT_EQ(growth.last_tick, ticks);
+        EXPECT_TRUE(growth.growth_points > 0u || growth.stress_points > 0u);
+    }
+    Luminumbra::world::WorldStateSaveReport evolved, unchanged, edited;
+    ASSERT_NO_FATAL_FAILURE(SaveAndMeasurePopulated(session, "evolved", total_owners, evolved));
+    EXPECT_GT(evolved.chunks_dirty, 0u);
+    EXPECT_LE(evolved.chunks_dirty, 2u);
+    EXPECT_EQ(evolved.work.owners_rewritten, 2u);
+    EXPECT_EQ(evolved.work.regions_rewritten, 1u);
+    EXPECT_LE(evolved.work.owners_serialized, 2u);
+    EXPECT_EQ(evolved.work.chunk_decodes, 0u);
+    EXPECT_GT(evolved.work.bytes_compressed, 0u);
+    ASSERT_NO_FATAL_FAILURE(SaveAndMeasurePopulated(session, "no-edit", total_owners, unchanged));
+    EXPECT_EQ(unchanged.chunks_dirty, 0u);
+    EXPECT_EQ(unchanged.work.owners_rewritten, 0u);
+    EXPECT_EQ(unchanged.work.regions_rewritten, 0u);
+    EXPECT_EQ(unchanged.work.owners_serialized, 0u);
+    EXPECT_EQ(unchanged.work.bytes_compressed, 0u);
+    EXPECT_EQ(unchanged.work.chunk_decodes, 0u);
+    flowing->sdf_data.front() -= 0.25f;
+    flowing->mark_voxel_data_dirty();
+    ASSERT_NO_FATAL_FAILURE(
+        SaveAndMeasurePopulated(session, "one-owner-edit", total_owners, edited));
+    EXPECT_EQ(edited.chunks_dirty, 1u);
+    EXPECT_EQ(edited.work.regions_rewritten, 1u);
+    EXPECT_EQ(edited.work.owners_rewritten, 2u); // The dirty region includes its clean sibling.
+    // Optional serialization-input caching can be full from earlier worlds. Either
+    // reuse the sibling's bytes or serialize that one sibling, never another region.
+    EXPECT_LE(edited.work.clean_siblings_serialized, 1u);
+    EXPECT_EQ(edited.work.owners_serialized, 1u + edited.work.clean_siblings_serialized);
+    EXPECT_EQ(edited.work.chunk_decodes, 0u);
+    EXPECT_GT(edited.work.bytes_compressed, 0u);
+
+    ASSERT_NO_FATAL_FAILURE(ExpectPopulatedSaveParity(session, root, jobs));
+    std::cout << "PopulatedTickWork ticks=" << ticks << " residents=" << unrelated_owners + 2
+              << " resident_scan_visits=" << resident_tick_visits
+              << " max_water_inputs=" << max_water_inputs
+              << " max_capture_inputs=" << max_capture_inputs << '\n';
+}
+
 TEST(GameSessionHeadlessWorldTest, SnapshotSelectionRetainsOwnedAndDirtyChunks) {
     const HeadlessRoot root;
     JobSystem jobs;
@@ -7526,7 +7750,14 @@ TEST(GameSessionHeadlessWorldTest, SnapshotSelectionDoesNotHideMalformedQueuedWa
     chunk->max_water_delta_last_tick = std::numeric_limits<float>::quiet_NaN();
     chunk->mark_water_state_dirty();
     ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
-    EXPECT_FALSE(session.SaveWorldStateTo(destination));
+    Luminumbra::world::WorldStateSaveReport report;
+    EXPECT_FALSE(session.SaveWorldStateTo(destination, &report));
+    EXPECT_LE(report.work.world_decodes, 1u);
+    EXPECT_EQ(report.work.owners_serialized, 1u);
+    // The region is replaced inside the transaction before snapshot validation
+    // refuses it; the report counts that work even though the rollback restores disk.
+    EXPECT_EQ(report.work.owners_rewritten, 1u);
+    EXPECT_EQ(report.work.regions_rewritten, 1u);
     EXPECT_TRUE(chunk->is_voxel_data_dirty());
     EXPECT_TRUE(chunk->has_water_authority());
     EXPECT_EQ(SavedPresetTestDiskBytes(destination), before);

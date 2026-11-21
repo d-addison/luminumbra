@@ -10177,6 +10177,119 @@ TEST(RenderSmokeTest, DisabledScenarioAdapterPreservesLegacyImageBytesAndWriterF
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }
 
+TEST(RenderSmokeTest, BackbufferWriterPreservesPixelsAndRefusesInvalidOrIncompleteOutput) {
+    using namespace Luminumbra::Client::ScenarioHarness;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("backbuffer-", ".ppm");
+    const auto directory = temporary.Path().parent_path();
+    for (const auto extent :
+         {std::array{0, 1}, std::array{1, 0}, std::array{-1, 1}, std::array{1, -1}}) {
+        EXPECT_FALSE(WriteBackbufferPpm(temporary.Path(), extent[0], extent[1]));
+        EXPECT_FALSE(fs::exists(temporary.Path()));
+    }
+    glClearColor(0.25f, 0.5f, 0.75f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    std::vector<unsigned char> pixels(2U * 2U * 3U);
+    glReadBuffer(GL_BACK);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, 2, 2, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
+    const auto reference = directory / "reference.ppm";
+    ASSERT_TRUE(WritePixelBufferPpm(reference, 2, 2, pixels));
+    ScreenshotPixelStats stats;
+    LodHolePixelStats hole_stats;
+    ASSERT_TRUE(WriteBackbufferPpm(temporary.Path(), 2, 2, &stats, &hole_stats));
+    EXPECT_EQ(ReadTextFile(temporary.Path()), ReadTextFile(reference));
+    EXPECT_EQ(stats.width, 2);
+    EXPECT_EQ(hole_stats.height, 2);
+    EXPECT_FALSE(WriteBackbufferPpm(directory, 2, 2));
+    EXPECT_FALSE(WriteBackbufferPpm(temporary.Path() / "child.ppm", 2, 2));
+#if defined(__linux__)
+    // This device opens successfully and deterministically fails payload completion.
+    EXPECT_FALSE(WriteBackbufferPpm("/dev/full", 2, 2));
+#endif
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+namespace {
+enum class TimedCaptureCase {
+    Legacy,
+    Diagnostics,
+    Extent,
+    FirstDestination,
+    SecondDestination,
+    PriorRefusal,
+    MissingFrame,
+    ProducerRefusal,
+    Continuation
+};
+
+struct TimedCaptureResult {
+    bool failed = false;
+    std::string failure;
+    std::uint64_t frame_count = 0;
+    int exit_code = 0;
+};
+
+void ExpectTimedCaptureRefusal(
+    TimedCaptureCase capture_case,
+    const Luminumbra::Client::ScenarioHarness::RuntimeScenarioConfig& config,
+    const TimedCaptureResult& result,
+    const std::string& expected_failure,
+    const fs::path& occupied) {
+    const bool destination_refusal = capture_case == TimedCaptureCase::FirstDestination ||
+                                     capture_case == TimedCaptureCase::SecondDestination;
+    EXPECT_TRUE(result.failed);
+    EXPECT_EQ(result.failure, expected_failure);
+    EXPECT_EQ(result.frame_count, destination_refusal ? 1U : 0U);
+    EXPECT_TRUE(glfwWindowShouldClose(glfwGetCurrentContext()) ||
+                capture_case == TimedCaptureCase::PriorRefusal);
+    EXPECT_FALSE(fs::exists(config.artifact_dir / "screenshots/lod-ground-end.ppm"));
+    if (!destination_refusal) {
+        EXPECT_TRUE(fs::is_empty(config.artifact_dir));
+        return;
+    }
+    EXPECT_EQ(ReadTextFile(occupied), "original screenshot");
+    const auto first = config.artifact_dir / "screenshots/lod-ground-start.ppm";
+    if (capture_case == TimedCaptureCase::SecondDestination) {
+        EXPECT_TRUE(fs::exists(first));
+        const auto manifest = nlohmann::json::parse(ReadTextFile(CaptureManifestPath(first)));
+        EXPECT_EQ(manifest.at("status"), "complete");
+    } else {
+        EXPECT_FALSE(fs::exists(config.artifact_dir / "screenshots/lod-ground-mid.ppm"));
+    }
+}
+
+void ExpectTimedCaptureBundles(
+    const Luminumbra::Client::ScenarioHarness::RuntimeScenarioConfig& config,
+    const fs::path& reference,
+    bool diagnostics,
+    const Luminumbra::world::GameSession& session) {
+    nlohmann::json first_frame;
+    for (const auto* role : {"start", "mid", "end"}) {
+        const auto path =
+            config.artifact_dir / "screenshots" / (std::string("lod-ground-") + role + ".ppm");
+        EXPECT_EQ(ReadTextFile(path), ReadTextFile(reference));
+        if (!diagnostics) {
+            EXPECT_FALSE(fs::exists(CaptureManifestPath(path)));
+            EXPECT_FALSE(fs::exists(path.string() + ".diagnostics.json"));
+            continue;
+        }
+        const auto metadata =
+            nlohmann::json::parse(ReadTextFile(path.string() + ".diagnostics.json"));
+        EXPECT_TRUE(metadata.at("identity_complete").get<bool>());
+        const auto manifest = nlohmann::json::parse(ReadTextFile(CaptureManifestPath(path)));
+        EXPECT_EQ(manifest.at("status"), "complete");
+        EXPECT_EQ(manifest.at("render_settings").at("scenario"), config.scenario);
+        EXPECT_EQ(manifest.at("simulation_tick"), session.GetSimulationTickCount());
+        if (first_frame.is_null()) {
+            first_frame = metadata.at("frame");
+        }
+        EXPECT_EQ(metadata.at("frame"), first_frame);
+    }
+}
+} // namespace
+
 TEST(RenderSmokeTest, TimedScenarioPublicHookPublishesSiblingBundlesAndKeepsLegacyBytes) {
     using namespace Luminumbra::Client::ScenarioHarness;
     using namespace Luminumbra::Client::App;
@@ -10211,22 +10324,35 @@ TEST(RenderSmokeTest, TimedScenarioPublicHookPublishesSiblingBundlesAndKeepsLega
     const auto root_text = root.string();
     const std::string world_type = "synthetic";
     ClientAppContext app;
-    for (const int capture_case : {0, 1, 2}) {
-        SCOPED_TRACE(capture_case);
-        const bool diagnostics = capture_case != 0;
-        const bool mismatched_extent = capture_case == 2;
+    using CaptureCase = TimedCaptureCase;
+    for (const auto capture_case : {CaptureCase::Legacy,
+                                    CaptureCase::Diagnostics,
+                                    CaptureCase::Extent,
+                                    CaptureCase::FirstDestination,
+                                    CaptureCase::SecondDestination,
+                                    CaptureCase::PriorRefusal,
+                                    CaptureCase::MissingFrame,
+                                    CaptureCase::ProducerRefusal,
+                                    CaptureCase::Continuation}) {
+        SCOPED_TRACE(static_cast<int>(capture_case));
+        const bool diagnostics = capture_case != CaptureCase::Legacy;
+        const bool mismatched_extent = capture_case == CaptureCase::Extent;
         RuntimeScenarioConfig config;
         config.scenario = "lod_ground_smoke";
         config.timed_run_seconds = 0;
-        config.artifact_dir = directory / std::to_string(capture_case);
+        config.artifact_dir = directory / std::to_string(static_cast<int>(capture_case));
         RuntimeStateRecorder recorder(config, camera);
         RuntimeScenarioFrameRecorder frame_recorder(false, 0, config.artifact_dir, camera);
-        bool failed = false, ready = true;
-        std::string failure;
-        std::uint64_t frame_count = 0;
+        bool ready = true;
+        TimedCaptureResult result;
+        std::string expected_failure;
+        if (capture_case == CaptureCase::PriorRefusal) {
+            result.failed = true;
+            result.failure = "capture_diagnostics_original_refusal";
+            expected_failure = result.failure;
+        }
         auto started = std::chrono::steady_clock::now() - std::chrono::seconds(2);
         RuntimeReadinessReport readiness;
-        int exit_code = 0;
         auto runner = CreateScenarioRunner({.window = glfwGetCurrentContext(),
                                             .root_dir = root,
                                             .root_path_str = root_text,
@@ -10239,58 +10365,69 @@ TEST(RenderSmokeTest, TimedScenarioPublicHookPublishesSiblingBundlesAndKeepsLega
                                             .g_camera = camera,
                                             .g_app = app,
                                             .scenario_world_type = world_type,
-                                            .scenario_failed = failed,
-                                            .scenario_failure_reason = failure,
+                                            .scenario_failed = result.failed,
+                                            .scenario_failure_reason = result.failure,
                                             .scenario_ready = ready,
-                                            .scenario_frame_count = frame_count,
+                                            .scenario_frame_count = result.frame_count,
                                             .scenario_play_started_at = started,
                                             .last_readiness_report = readiness,
-                                            .exit_code = exit_code});
+                                            .exit_code = result.exit_code});
         pipeline.on_resize(static_cast<unsigned int>(mismatched_extent ? framebuffer_width / 2
                                                                        : framebuffer_width),
                            static_cast<unsigned int>(framebuffer_height));
         pipeline.set_capture_diagnostics({.enabled = diagnostics, .probe = std::nullopt});
         pipeline.render_frame(registry, world, *camera, 0.0f, false, UploadPresentation::Settled);
+        if (capture_case == CaptureCase::MissingFrame) {
+            pipeline.end_diagnostic_capture();
+            expected_failure = "capture_diagnostics_completed_frame_unavailable";
+        } else if (capture_case == CaptureCase::ProducerRefusal) {
+            auto* scope = GBufferDiagnosticCapture::Current();
+            ASSERT_NE(scope, nullptr);
+            scope->unsupported("unattributed_deferred_producer");
+            expected_failure = "capture_diagnostics_producer_coverage_incomplete";
+        } else if (capture_case == CaptureCase::Continuation) {
+            auto* scope = GBufferDiagnosticCapture::Current();
+            ASSERT_NE(scope, nullptr);
+            ASSERT_TRUE(scope->attach(pipeline.gbuffer(), {64, 64}));
+            // Readiness must detach this valid continuation before observing coverage.
+            EXPECT_FALSE(pipeline.diagnostic_capture_refusal().empty());
+        }
+        if (mismatched_extent) {
+            expected_failure = "capture_diagnostics_capture_extent_mismatch";
+        }
+        const bool destination_refusal = capture_case == CaptureCase::FirstDestination ||
+                                         capture_case == CaptureCase::SecondDestination;
+        const auto occupied =
+            config.artifact_dir / "screenshots" /
+            (capture_case == CaptureCase::SecondDestination ? "lod-ground-mid.ppm"
+                                                            : "lod-ground-start.ppm");
+        if (destination_refusal) {
+            ASSERT_TRUE(WriteCaptureText(occupied, "original screenshot"));
+            expected_failure = "capture_diagnostics_capture_destination_or_publication_failed";
+        }
         const auto reference = config.artifact_dir / "legacy.ppm";
-        if (!mismatched_extent) {
+        if (expected_failure.empty()) {
             ASSERT_TRUE(WriteBackbufferPpm(reference, framebuffer_width, framebuffer_height));
         }
         runner->onPostRenderCapture(0.0f);
-        if (mismatched_extent) {
-            EXPECT_TRUE(failed);
-            EXPECT_EQ(failure, "capture_diagnostics_capture_extent_mismatch");
-            EXPECT_TRUE(fs::is_empty(config.artifact_dir));
-            EXPECT_EQ(frame_count, 0U);
+        if (!expected_failure.empty()) {
+            ExpectTimedCaptureRefusal(capture_case, config, result, expected_failure, occupied);
+            // A later completed frame must not resume a refused scenario or replace its reason.
+            pipeline.render_frame(
+                registry, world, *camera, 0.0f, false, UploadPresentation::Settled);
+            runner->onPostRenderCapture(0.0f);
+            ExpectTimedCaptureRefusal(capture_case, config, result, expected_failure, occupied);
+            runner->onShutdown();
+            const auto shutdown = nlohmann::json::parse(
+                ReadTextFile(config.artifact_dir / "last-known-runtime.json"));
+            EXPECT_EQ(shutdown.at("phase"), "scenario_failed_" + expected_failure);
+            EXPECT_EQ(result.exit_code, 2);
             glfwSetWindowShouldClose(glfwGetCurrentContext(), false);
             continue;
         }
-        EXPECT_FALSE(failed) << failure;
-        EXPECT_EQ(frame_count, 1U);
-        const auto reference_bytes = ReadTextFile(reference);
-        ASSERT_FALSE(reference_bytes.empty());
-        nlohmann::json first_frame;
-        for (const auto* role : {"start", "mid", "end"}) {
-            const auto path =
-                config.artifact_dir / "screenshots" / (std::string("lod-ground-") + role + ".ppm");
-            EXPECT_EQ(ReadTextFile(path), reference_bytes);
-            if (diagnostics) {
-                const auto metadata =
-                    nlohmann::json::parse(ReadTextFile(path.string() + ".diagnostics.json"));
-                EXPECT_TRUE(metadata.at("identity_complete").get<bool>());
-                const auto manifest =
-                    nlohmann::json::parse(ReadTextFile(CaptureManifestPath(path)));
-                EXPECT_EQ(manifest.at("status"), "complete");
-                EXPECT_EQ(manifest.at("render_settings").at("scenario"), config.scenario);
-                EXPECT_EQ(manifest.at("simulation_tick"), session->GetSimulationTickCount());
-                if (first_frame.is_null()) {
-                    first_frame = metadata.at("frame");
-                }
-                EXPECT_EQ(metadata.at("frame"), first_frame);
-            } else {
-                EXPECT_FALSE(fs::exists(CaptureManifestPath(path)));
-                EXPECT_FALSE(fs::exists(path.string() + ".diagnostics.json"));
-            }
-        }
+        EXPECT_FALSE(result.failed) << result.failure;
+        EXPECT_EQ(result.frame_count, 1U);
+        ExpectTimedCaptureBundles(config, reference, diagnostics, *session);
         EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
     }
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
