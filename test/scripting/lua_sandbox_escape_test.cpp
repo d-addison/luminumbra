@@ -177,4 +177,66 @@ TEST(LuaEvaluation, SyntaxAndRuntimeFailuresHaveDistinctDiagnostics) {
     // Errors leave the interpreter usable; this is not a state-rollback claim.
     EXPECT_EQ(lua.Evaluate("return 1").status, LuaEvaluationStatus::Succeeded);
 }
+TEST(LuaSandboxEscape, GlobalsArePrivateToEachState) {
+    const LuaState first;
+    const LuaState second;
+    ASSERT_EQ(first.Evaluate("private_value = 41").status, LuaEvaluationStatus::Succeeded);
+    EXPECT_EQ(first.Evaluate("return private_value + 1").number, 42.0);
+    EXPECT_EQ(second.Evaluate("return private_value == nil and 1 or 0").number, 1.0);
+    ASSERT_EQ(second.Evaluate("private_value = 7").status, LuaEvaluationStatus::Succeeded);
+    EXPECT_EQ(first.Evaluate("return private_value").number, 41.0);
+    EXPECT_EQ(second.Evaluate("return private_value").number, 7.0);
+}
+
+TEST(LuaSandboxEscape, BuiltinBindingsCannotBeMutated) {
+    const LuaState lua;
+    for (const auto* chunk :
+         {"world.sample_energy_field = nil", "world.extra = 1", "math.sin = nil", "string.x = 1"}) {
+        SCOPED_TRACE(chunk);
+        const auto result = lua.Evaluate(chunk);
+        EXPECT_EQ(result.status, LuaEvaluationStatus::RuntimeError);
+        EXPECT_FALSE(result.number.has_value());
+        EXPECT_FALSE(result.diagnostic.empty());
+        EXPECT_EQ(lua.Evaluate("return world.sample_energy_field(0, 0, 0)").number, 0.0);
+    }
+    EXPECT_EQ(lua.Evaluate("return world.extra == nil and 1 or 0").number, 1.0);
+}
+
+TEST(LuaEvaluation, ExistingFunctionsObserveGlobalChangesAcrossChunks) {
+    const LuaState lua;
+    ASSERT_EQ(lua.Evaluate("holder = {value = 41}; function read() return holder.value end").status,
+              LuaEvaluationStatus::Succeeded);
+    EXPECT_EQ(lua.Evaluate("return read()").number, 41.0);
+    ASSERT_EQ(lua.Evaluate("holder = {value = 7}").status, LuaEvaluationStatus::Succeeded);
+    EXPECT_EQ(lua.Evaluate("return read()").number, 7.0);
+    ASSERT_EQ(lua.Evaluate("holder.value = 42").status, LuaEvaluationStatus::Succeeded);
+    EXPECT_EQ(lua.Evaluate("return read()").number, 42.0);
+}
+
+TEST(LuaEvaluation, NumericStringsRemainNonnumeric) {
+    const LuaState lua;
+    const auto result = lua.Evaluate("return '42'");
+    EXPECT_EQ(result.status, LuaEvaluationStatus::Succeeded);
+    EXPECT_FALSE(result.number.has_value());
+    double unchanged = 123;
+    EXPECT_FALSE(lua.EvalNumber("return '42'", unchanged));
+    EXPECT_DOUBLE_EQ(unchanged, 123.0);
+}
+
+TEST(LuaEvaluation, SamplersRequireThreeNumericArguments) {
+    const LuaState lua;
+    for (const auto* sampler : {"sample_energy_field", "world.sample_energy_field"}) {
+        for (const auto* arguments :
+             {"()", "(0, 0)", "('1', 0, 0)", "(nil, 0, 0)", "(0, false, 0)", "(0, 0, {})"}) {
+            const auto chunk = std::string("return ") + sampler + arguments;
+            SCOPED_TRACE(chunk);
+            const auto result = lua.Evaluate(chunk);
+            EXPECT_EQ(result.status, LuaEvaluationStatus::RuntimeError);
+            EXPECT_FALSE(result.number.has_value());
+            EXPECT_FALSE(result.diagnostic.empty());
+        }
+    }
+    EXPECT_EQ(lua.Evaluate("return sample_energy_field(0, 0, 0)").number, 0.0);
+}
+
 } // namespace

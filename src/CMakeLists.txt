@@ -44,8 +44,6 @@ target_link_libraries(luminumbra_client PUBLIC
     spdlog
     glm
     nlohmann_json
-    sol2
-    lua
     imgui
     stb_headers
 )
