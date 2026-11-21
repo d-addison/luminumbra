@@ -4311,6 +4311,22 @@ class DiagnosticContributorWiring(unittest.TestCase):
 
 
 class DiagnosticSnapshotStageWiring(unittest.TestCase):
+    def test_plant_submission_has_an_explicit_foliage_identity_mapping(self):
+        plant = block(read(CLIENT / "rendering/passes/PlantProcgenPass.cpp"),
+                      "void PlantProcgenPass::execute(")
+        variants = re.findall(r'\.shader_variant = "([^"]+)"', plant)
+        self.assertEqual(variants, ["plant_procgen"])
+        producer = block(read(CLIENT / "rendering/passes/DebugViewPass.h"),
+                         "static ProducerKind producer(")
+        self.assertIn("return ProducerKind::Unsupported;", block(producer, "if (!supported)"))
+        foliage = re.search(r'if \(([^{}]+)\)\s*\{\s*return ProducerKind::Foliage;', producer)
+        self.assertIsNotNone(foliage)
+        spellings = re.findall(r'variant == "([^"]+)"', foliage.group(1))
+        self.assertIn(variants[0], spellings)
+        for unknown in ("", "plant_procgen_ladder", "plant_procgen_unknown"):
+            with self.subTest(variant=unknown):
+                self.assertNotIn(unknown, spellings)
+
     def test_snapshot_finishes_after_decal_submission_before_lighting_and_post(self):
         source = read(CLIENT / "rendering/RenderPipeline.cpp")
         dispatch = block(source, "void RenderPipeline::dispatch_stages(")

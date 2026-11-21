@@ -140,7 +140,8 @@ public:
         if (variant == "tree_impostor" || variant == "tree_impostor_ladder") {
             return ProducerKind::Impostor;
         }
-        if (variant == "foliage" || variant == "foliage_ladder") {
+        // PlantProcgenPass submits plant/marker batches as plant_procgen.
+        if (variant == "foliage" || variant == "foliage_ladder" || variant == "plant_procgen") {
             return ProducerKind::Foliage;
         }
         // StaticDrawPass submits authored and file statics as static_asset.

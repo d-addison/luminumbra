@@ -295,9 +295,30 @@ TEST_F(DiagnosticInspectorContributorsGl, SnapshotRecordsPlantsAndDecalsOnSepara
     ASSERT_TRUE(GBufferDiagnosticCapture::Current()->complete());
     Pass::end_frame(frame_, ctx_);
     ExpectReleasedProgram();
-    const auto record = nlohmann::json::parse(Pass::controls().result).at("record");
+    EXPECT_NE(Pass::producer("plant_procgen", true), Pass::ProducerKind::Unsupported);
+    EXPECT_EQ(Pass::producer("plant_procgen", true), Pass::ProducerKind::Foliage);
+    const auto result = nlohmann::json::parse(Pass::controls().result);
+    EXPECT_EQ(result.at("identity_supported"), true);
+    const auto& record = result.at("record");
     EXPECT_EQ(record.at("draw").at("shader_variant"), "plant_procgen");
     EXPECT_EQ(record.at("mesh").at("generated"), "plants/batch/42/indices/6");
+    const auto hash = Pass::hash_id(plant[0]);
+    const std::array<int, 3> draw_color{static_cast<int>(hash & 255U),
+                                        static_cast<int>((hash >> 8U) & 255U),
+                                        static_cast<int>((hash >> 16U) & 255U)};
+    // Render the captured plant texel through the real metadata upload and shader.
+    for (const auto& [mode, expected] : std::array<std::pair<int, std::array<int, 3>>, 2>{
+             {{Pass::DrawId, draw_color}, {Pass::Producer, {51, 204, 51}}}}) {
+        pass_.set_mode(mode);
+        glViewport(0, 0, 2, 2);
+        pass_.execute(ctx_);
+        std::array<GLubyte, 4> color{};
+        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, color.data());
+        for (std::size_t channel = 0; channel < expected.size(); ++channel) {
+            EXPECT_NEAR(color[channel], expected[channel], 1) << mode;
+        }
+    }
+    EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
 }
 
 TEST_F(DiagnosticInspectorContributorsGl, RefreshWithInactiveProducersRetainsOnlyNewSurfaceIds) {
@@ -389,13 +410,16 @@ TEST(DiagnosticInspector, CaptureTeardownUnbindsBeforeDeletingVariants) {
 
 TEST(DiagnosticInspector, ProducerMappingIncludesUnknownAndExplicitUnsupported) {
     using Kind = Pass::ProducerKind;
-    const std::array<std::pair<std::string_view, Kind>, 13> cases = {{
+    const std::array<std::pair<std::string_view, Kind>, 16> cases = {{
         {"terrain_mdi", Kind::Terrain},
         {"terrain_mdi_ladder", Kind::Terrain},
         {"live_terrain_mdi", Kind::Unsupported},
         {"legacy_far_terrain", Kind::Terrain},
         {"tree_impostor", Kind::Impostor},
         {"foliage_ladder", Kind::Foliage},
+        {"plant_procgen", Kind::Foliage},
+        {"plant_procgen_ladder", Kind::Unsupported},
+        {"plant_procgen_unknown", Kind::Unsupported},
         {"instanced_static_mesh", Kind::Static},
         {"skinned_mesh_ladder", Kind::Static},
         {"static_asset", Kind::Static},
