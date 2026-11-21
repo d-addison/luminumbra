@@ -18,6 +18,7 @@ and producer without changing simulation, saves, hashes or authority revisions.
 | Exact producer coverage | Partial | Inside an explicit producer scope, file-backed static instances and skinned draws upload capture-local identities at submission. Legacy far terrain/water upload the actual tier with unsupported generated-mesh metadata. Live terrain MDI produces one identity per original command in pool-bucket order, using resident upload LOD and mesh version. The ladder backend, authored surfaces and tree impostors explicitly invalidate coverage; procedural static meshes also remain unsupported. Uploaded plant/marker batches resume deferred attribution, and additive scent decals use separate contributor storage. Missing contributor storage retains exact Forward records labeled `:contributor_only` and refuses completion. Water surfaces, glass panes and waterfall sheet/pool slots use the separate contributor plane at their original submissions through guarded `water.frag`, `glass_oit.frag` and `waterfall.frag` outputs. Foliage has a guarded shader output but no instrumented forward submission. The original particle batch writes the contributor plane through a guarded `magical_particles.frag` output; the separate weather overlay explicitly refuses coverage |
 | Bundle transactions and opt-in admission | Implemented for the admitted capture paths | `DiagnosticCapture.h/.cpp` resolves options, streams normalized planes, joins draw records, enforces staging budgets and publishes completion last using identity-checked ownership. `diagnostic_bundle_test` covers public transports and filesystem refusal/rollback; native execution pending. Runtime admission accepts enabled diagnostics only for `world_visual_sweep`, `--frame-scan`, or `--render-benchmark` with `--render-benchmark-screenshot`; every other scenario and the parity redispatches refuse them before save-root output |
 | Dusk wedge attribution (issue #873) | Capture wiring and regression implemented; native execution pending | Fixed audit land pose, paired pre-present final/depth and available lighting sources; `FarWorldFogGl.DuskAuditFogIsContinuousAcrossDistanceAndHeightBoundaries`; no producer correction or visual approval |
+| Sky layer corrections (issue #874) | Code corrections and registered regressions present; native re-capture pending | Ambient dust rejects sky depth; radial stars fade at the horizon; aurora precedes cloud compositing; CPU/GPU atmosphere inputs use bilinear filtering. Numeric source regressions cover celestial attenuation and bounded sharpening. Keep the issue open until native re-capture |
 | Terrain coverage lighting/fog evidence (issue #1107) | Existing capture contract retained; regression expanded; native execution pending | `TerrainCoverageCaptureGl.SyntheticPlanesAndCallerStateSurviveReadback` checks source file headers and payload sizes for every captured layer, lighting/fog uniform values and explicit unavailable volume records; `TerrainCaptureResourceWiring` guards manifest publication |
 | ID views and single-pixel inspector | Implemented as explicit render-thread snapshots | `DebugViewPass`; developer-console debug-view panel; registered `DiagnosticInspector.*` and `DiagnosticInspectorGl.*` regressions in `pass_context_test`; native execution pending. Other B views remain planned |
 | Deferred shader contribution views | Implemented as opt-in live overlays | `DebugViewPass` and `LightingPass`; registered `DiagnosticContributions.*` and `DiagnosticContributionsGl.*` regressions in `pass_context_test`; native execution pending. Fog and separate forward/sky/shadow planes explicitly unsupported |
@@ -619,6 +620,28 @@ software evidence of an A17-style discontinuity, not qualification of the
 production camera or the separate fix. The proposed 0.005 threshold is recorded
 as pending issue #918. Dusk capture remains mandatory and finite, but comparison
 and regeneration cannot accept a dusk baseline.
+
+The issue #874 code corrections are already present in devel. Ambient motes use
+a render-instance tag shared by the live vertex and retained geometry paths;
+their fragment branch scatters local light, rejects clear reversed-Z sky depth
+and fades with camera distance without changing authored particle layers.
+Stars use compact nonnegative radial profiles and fade to zero at the horizon
+in both LUT and fallback skies. Aurora and stars enter the background before
+the cloud composite. Atmosphere integration uses texel-centred bilinear inputs
+in both CPU builders and both consuming compute kernels, removing the nearest-bin
+meridian step. The dusk fixture remains diagnostic as described above.
+
+The old star shader's projected noise thresholds explain boxed peaks, but do
+not subtract light to form a dark ring. Unbounded post-resolve sharpening could
+darken a star's neighbours below their background; the current sharpen helper
+clamps to the current neighbourhood range, and interior sky bypasses temporal
+accumulation. Registered `SkyAppearanceWiring` regressions evaluate the production
+cloud composition order at clear, partial and opaque cover, and the production
+sharpen expressions on dark neighbours and bright peaks. Existing regressions
+cover mote tagging, horizon exclusion, radial profiles and CPU/GPU LUT sampling.
+These code and software contracts do not establish native visual acceptance.
+Keep issue #874 open until a native re-capture checks daytime motes, the horizon,
+stellar boxes/rings, the dusk meridian and aurora behind partial clouds.
 
 Terrain draws two triangles with Stone on the left vertices and Sand on the
 right, exercising the real vertex coverage interpolation across a diagonal with

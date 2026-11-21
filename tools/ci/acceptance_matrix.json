@@ -78,6 +78,37 @@
       "requirements": []
     },
     {
+      "id": "render.sky-layer-corrections",
+      "source": "docs/development/visual-diagnostics.md#implementation-inventory",
+      "statement": "Issue #874 code corrections are present: render-tagged ambient dust scatters local light, rejects clear sky depth and fades with distance; compact radial stars fade to zero at the horizon; aurora and stars precede cloud compositing; CPU/GPU atmosphere integration uses texel-centred bilinear LUT inputs. Bounded post-resolve sharpening and the interior-sky temporal bypass address a separate possible dark-ring producer. Registered source and numeric regressions cover these contracts, including independent celestial contributions under clear, partial and opaque cover and sharpening at dark neighbours and bright peaks. Dusk remains diagnostic. Native re-capture of every audited symptom remains pending; the issue is not closed and visual acceptance is not claimed.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "script",
+          "ref": "test/rendering/test_upload_budget_wiring.py"
+        },
+        {
+          "kind": "script",
+          "ref": "test/rendering/test_frame_attribution_wiring.py"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RenderSmokeTest.ReversedDepthSoftParticlesFadeAgainstGeometry",
+          "planned": "Run the particle regression and re-capture all issue #874 sky symptoms on the native release build; owner: release"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ShaderScene.*",
+          "planned": "Run the registered sky shader scenes under llvmpipe; owner: maintainers"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/development/visual-diagnostics.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
       "id": "render.terrain-coverage-evidence",
       "source": "docs/development/visual-diagnostics.md#implementation-inventory",
       "statement": "Terrain coverage capture schema v1 retains lighting source planes and lighting/fog uniform snapshots. The expanded synthetic capture regression checks all nine available source kinds, every layer file header and payload size, explicit unavailable integrated volume records with volumetrics disabled, and uploaded lighting/fog uniform values. Source-contract regressions guard the three manifest records before completion. Native execution of the expanded checks remains pending.",
