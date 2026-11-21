@@ -3055,6 +3055,7 @@ struct ChunkRecordFacts {
     bool lattice_ok = false;
     bool loaded_or_edited = false;
     bool strict_water = false;
+    bool water_owned = false;
 };
 
 struct ChunkRecordKey {
@@ -3313,8 +3314,11 @@ bool SdfLatticeAdmissible(const Chunk& chunk) {
 }
 
 ChunkRecordFacts DecodedChunkRecordFacts(const Chunk& chunk) {
-    return ChunkRecordFacts{
-        chunk.get_coords(), SdfLatticeAdmissible(chunk), chunk.has_simulation_authority(), false};
+    return ChunkRecordFacts{chunk.get_coords(),
+                            SdfLatticeAdmissible(chunk),
+                            chunk.has_simulation_authority(),
+                            false,
+                            chunk.has_water_authority()};
 }
 
 // Exact record bytes gate both facts and the transfer of a cold validation decode.
@@ -3406,11 +3410,14 @@ public:
     using std::runtime_error::runtime_error;
 };
 
+bool HasWaterArrays(const Chunk& chunk) {
+    return !chunk.water_depth_mm.empty() || !chunk.water_bed_mm.empty() ||
+           !chunk.water_edge_flux.empty() || !chunk.water_level_data.empty() ||
+           !chunk.water_flow_data.empty() || !chunk.water_sim_terrain_height.empty();
+}
+
 bool HasWaterPayload(const Chunk& chunk) {
-    return chunk.has_water_sim.load() || !chunk.water_depth_mm.empty() ||
-           !chunk.water_bed_mm.empty() || !chunk.water_edge_flux.empty() ||
-           !chunk.water_level_data.empty() || !chunk.water_flow_data.empty() ||
-           !chunk.water_sim_terrain_height.empty();
+    return chunk.has_water_sim.load() || HasWaterArrays(chunk);
 }
 
 bool HasPersistedWater(const Chunk& chunk) {
@@ -3445,6 +3452,14 @@ bool EqualLegacyWater(const Chunk& lhs, const Chunk& rhs) {
            lhs.max_water_delta_last_tick == rhs.max_water_delta_last_tick;
 }
 
+bool LegacyWaterStateAdmissible(const Chunk& chunk) {
+    // Empty dormant/Off owners have no active grid, but their persisted stamps
+    // must still be valid. Present arrays require complete migration admission.
+    const bool dormant = !chunk.has_water_sim.load() || chunk.current_water_resolution.load() == 0;
+    return dormant && !HasWaterArrays(chunk) ? HasValidWaterPersistenceState(chunk)
+                                             : chunk.has_complete_water_state();
+}
+
 // Load-time only: at most 4096 legacy sources and one destination per column.
 // Encoded input and combined source/destination/copy heap have separate 256 MiB
 // budgets; each water grid has at most 1024 cells. No disk writes occur here:
@@ -3461,7 +3476,7 @@ void MigrateLegacyWaterColumns(WorldStreamingState& state,
                 "Saved-input admission refused: legacy water migration storage cap.");
         }
         migration_bytes += source_bytes;
-        if (!source->has_complete_water_state()) {
+        if (!LegacyWaterStateAdmissible(*source)) {
             throw WorldPersistenceRefusal(
                 "Saved-input admission refused: incomplete legacy water record.");
         }
@@ -3491,7 +3506,7 @@ void MigrateLegacyWaterColumns(WorldStreamingState& state,
                 "Saved-input admission refused: legacy water migration storage cap.");
         }
         migration_bytes += destination_bytes + copy_bytes;
-        if (HasPersistedWater(*destination) && (!destination->has_complete_water_state() ||
+        if (HasPersistedWater(*destination) && (!LegacyWaterStateAdmissible(*destination) ||
                                                 !EqualLegacyWater(*destination, *source))) {
             throw WorldPersistenceRefusal(
                 "Saved-input admission refused: conflicting legacy water destination.");
@@ -6867,7 +6882,7 @@ bool WorldSaveService::audit_admitted_chunk_records_for_testing(
         const ChunkRecordFacts decoded = DecodedChunkRecordFacts(*chunk);
         if (admitted->coords != decoded.coords || admitted->lattice_ok != decoded.lattice_ok ||
             admitted->loaded_or_edited != decoded.loaded_or_edited ||
-            admitted->strict_water != water_valid)
+            admitted->strict_water != water_valid || admitted->water_owned != decoded.water_owned)
             ++audit.mismatched;
     }
     return true;
@@ -9292,10 +9307,6 @@ bool WorldSaveService::load_world_impl(WorldStreamingState& state,
                 if (record.lod_level == 0) {
                     // A decoded record carries its own id (DecodeChunkRecord checks it).
                     const bool retain = !retain_chunks || retain_chunks->contains(record.id);
-                    // Indexed canonical records already use the regional column layout.
-                    // Cold noncanonical payloads can still contain unflagged legacy water.
-                    const bool inspect_legacy_water =
-                        regional_water && (!indexed || Chunk::decode_id(record.id).y != 0);
                     // ReadRegionFile has already admitted every header and payload length.
                     // Catalogs need no chunk objects; the index below checks their exact bytes.
                     // Complete validation must still admit cold payloads outside the retain set.
@@ -9313,7 +9324,8 @@ bool WorldSaveService::load_world_impl(WorldStreamingState& state,
                     }
                     std::shared_ptr<Chunk> chunk;
                     ChunkRecordFacts facts;
-                    const bool materialize = retain || inspect_legacy_water || promote_legacy_water;
+                    const bool materialize =
+                        retain || (regional_water && !indexed) || promote_legacy_water;
                     if (!AdmitChunkRecord(record,
                                           path,
                                           &errors,
@@ -9324,10 +9336,15 @@ bool WorldSaveService::load_world_impl(WorldStreamingState& state,
                                           true,
                                           indexed))
                         return reject("");
-                    // Only inventory loads need a repair chunk outside the retain set.
-                    // Validation can use the cached authority facts without materializing it.
-                    if (authoritative_inventory && !chunk &&
-                        (record.flags & kRecordFlagEdited) == 0u && facts.loaded_or_edited &&
+                    // Indexed records can contain unowned legacy water even at Y=0.
+                    // Exact-byte facts let valid canonical owners stay cold; every
+                    // other regional candidate needs its payload inspected.
+                    const bool inspect_legacy_water =
+                        regional_water && (facts.coords.y != 0 || !facts.water_owned);
+                    const bool repair_owned_flag = authoritative_inventory &&
+                                                   (record.flags & kRecordFlagEdited) == 0u &&
+                                                   facts.loaded_or_edited;
+                    if (!chunk && (inspect_legacy_water || repair_owned_flag) &&
                         !AdmitChunkRecord(
                             record, path, &errors, facts, &chunk, false, false, indexed))
                         return reject("");
@@ -9336,8 +9353,7 @@ bool WorldSaveService::load_world_impl(WorldStreamingState& state,
                     // never retains them, and loads bound the staged repair chunks by bytes.
                     // An already-owned canonical column can validly be dormant.
                     // It needs only the existing flag repair, not legacy migration.
-                    const bool unowned_legacy_water =
-                        !indexed && chunk && !chunk->has_water_authority();
+                    const bool unowned_legacy_water = chunk && !chunk->has_water_authority();
                     const bool promoted =
                         chunk &&
                         (promote_legacy_water ? PromoteLegacyWaterRecord(*chunk, record)
@@ -9697,7 +9713,8 @@ bool WorldSaveService::PreparedWorldWrite::prepare(const WorldStreamingState& st
                                           SdfLatticeAdmissible(*chunk),
                                           water_authority ||
                                               (record.flags & kRecordFlagEdited) != 0u,
-                                          item.strict_water_valid},
+                                          item.strict_water_valid,
+                                          water_authority},
                          std::move(cached)});
                 }
                 std::string().swap(inputs);

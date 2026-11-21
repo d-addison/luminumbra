@@ -539,10 +539,44 @@ class RegionAuthorityWiring(unittest.TestCase):
         self.assertIn("legacy_water.size() == kMaxLegacyWaterRecords", candidates)
         self.assertIn("legacy_bytes += record.uncompressed_size;", candidates)
         self.assertNotIn("legacy_records", load)
-        self.assertIn("regional_water && (!indexed || Chunk::decode_id(record.id).y != 0)", load)
+        self.assertIn("regional_water && (facts.coords.y != 0 || !facts.water_owned)", load)
         native = (ROOT / "test/common/RegionalWater_test.cpp").read_text(encoding="utf-8")
         for name in ("LargeDryLegacySaveDoesNotConsumeWaterCandidateBudget",
                      "WaterCandidateCapRefusesWithoutChangingLegacyBytes"):
+            case = function(native, f"TEST(RegionalWaterMigration, {name})")
+            self.assertIn("saved.service.load_world(", case)
+            self.assertIn("EXPECT_EQ(saved.bytes(), bytes);", case)
+
+    def test_indexed_unowned_and_dormant_water_share_migration_admission(self):
+        service = (ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp").read_text(
+            encoding="utf-8")
+        load = function(service, "bool WorldSaveService::load_world_impl(")
+        self.assertIn("const bool unowned_legacy_water = chunk && !chunk->has_water_authority();",
+                      load)
+        self.assertIn("if (!chunk && (inspect_legacy_water || repair_owned_flag)", load)
+        admissible = function(service, "bool LegacyWaterStateAdmissible(")
+        self.assertIn("!chunk.has_water_sim.load() || chunk.current_water_resolution.load() == 0",
+                      admissible)
+        self.assertIn("dormant && !HasWaterArrays(chunk) ? HasValidWaterPersistenceState(chunk) "
+                      ": chunk.has_complete_water_state()", admissible)
+        migrate = function(service, "void MigrateLegacyWaterColumns(")
+        self.assertIn("!LegacyWaterStateAdmissible(*source)", migrate)
+        self.assertIn("!LegacyWaterStateAdmissible(*destination)", migrate)
+        native = (ROOT / "test/common/RegionalWater_test.cpp").read_text(encoding="utf-8")
+        # The positive cases run each scenario through a registered helper.
+        for name, helper in (
+                ("IndexedUnownedCanonicalWaterSurvivesLoadAndResolution",
+                 "VerifyIndexedUnownedCanonicalWater"),
+                ("DormantOffLayerOwnersMigrateWithoutActiveGrids",
+                 "VerifyDormantOffLayerMigration")):
+            case = function(native, f"TEST(RegionalWaterMigration, {name})")
+            self.assertIn(f"{helper}(scenario);", case)
+            body = function(native, f"void {helper}(int scenario)")
+            self.assertIn("saved.service.load_world(", body)
+            self.assertIn("EXPECT_EQ(saved.bytes(), bytes);", body)
+            self.assertIn("ASSERT_TRUE(saved.save_dirty(loaded, errors));", body)
+        for name in ("UnownedCanonicalAndDormantOffLayerPartialStatesRefuse",
+                     "ConflictingDormantOwnersRefuseWithoutChangingSavedBytes"):
             case = function(native, f"TEST(RegionalWaterMigration, {name})")
             self.assertIn("saved.service.load_world(", case)
             self.assertIn("EXPECT_EQ(saved.bytes(), bytes);", case)
