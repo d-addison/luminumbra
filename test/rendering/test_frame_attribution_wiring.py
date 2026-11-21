@@ -3618,6 +3618,14 @@ class DeferredRasterDiagnosticWiring(unittest.TestCase):
     def test_overdraw_inspection_reads_one_live_top_left_pixel_and_refuses_stale_values(self):
         count = block(self.overlay, "if (u_mode == 37)")
         execute = block(self.debug, "void DebugViewPass::execute(")
+        begin = block(self.debug, "DebugViewPass::begin_frame(")
+        geometry = block(begin, "if (geometry_requested())")
+        self.assertIn("return {};", geometry)
+        self.assertNotIn("inspect_requested", geometry)
+        self.assertLess(begin.index("if (geometry_requested())"),
+                        begin.index("std::exchange(control.inspect_requested, false)"))
+        self.assertIn("mode() == Overdraw && std::exchange(controls().inspect_requested, false)", execute)
+        self.assertNotIn("inspector_open", execute)
         self.assertIn("all(equal(ivec2(gl_FragCoord.xy), ivec2(0)))", count)
         self.assertIn("texelFetch(gContribution, ivec2(u_pixelX, u_pixelY), 0).r", count)
         self.assertIn("inspectorNormalDepth = vec4(selected, 0.0, 0.0, float(u_contributionReady));", count)

@@ -835,13 +835,28 @@ void CheckOverdrawReplay(const Draw& draw,
                           production_bytes[index].data());
     }
     control.view = Pass::Overdraw;
+    EXPECT_FALSE(pass.begin_frame(ctx)); // Establish the extent before selecting a pixel.
     for (int overlap = 0; overlap <= 17; ++overlap) {
         SCOPED_TRACE(overlap);
+        glBindFramebuffer(GL_FRAMEBUFFER, composite);
+        glDrawBuffer(GL_COLOR_ATTACHMENT0);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        control.result = "Previous identity result";
+        control.inspector_open = false;
+        pass.execute(ctx);
+        EXPECT_TRUE(control.result.empty());
+        EXPECT_FALSE(control.inspect_requested);
+        control.inspector_open = true;
+        control.x = 4;
+        control.y = 0;
+        Pass::request_inspection(control);
+        ASSERT_TRUE(control.inspect_requested);
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
         glBindVertexArray(vao);
         glBindBuffer(GL_ARRAY_BUFFER, vbo);
         glBufferData(GL_ARRAY_BUFFER, sizeof(triangle), triangle.data(), GL_STATIC_DRAW);
         EXPECT_FALSE(pass.begin_frame(ctx));
+        EXPECT_TRUE(control.inspect_requested); // Replay must leave the live count for execute.
         GLuint count_texture = 0;
         {
             Pass::SurfaceFrame frame(ctx, gbuffer, true);
@@ -885,13 +900,6 @@ void CheckOverdrawReplay(const Draw& draw,
         glBindFramebuffer(GL_FRAMEBUFFER, composite);
         glDrawBuffer(GL_COLOR_ATTACHMENT0);
         glReadBuffer(GL_COLOR_ATTACHMENT0);
-        control.result = "Previous identity result";
-        control.inspector_open = false;
-        pass.execute(ctx);
-        EXPECT_TRUE(control.result.empty());
-        control.inspector_open = control.inspect_requested = true;
-        control.x = 4;
-        control.y = 0;
         pass.execute(ctx);
         EXPECT_EQ(control.result,
                   overlap >= 16 ? "Overdraw count >=16 (saturated); depth test OFF"
@@ -927,17 +935,19 @@ void CheckOverdrawReplay(const Draw& draw,
     }
     // Refusals never publish a stale selected count, including a completed but unsupported replay.
     for (int refusal = 0; refusal < 4; ++refusal) {
+        control.x = refusal == 1 ? -1 : refusal == 2 ? 8 : 4;
+        Pass::request_inspection(control);
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
         EXPECT_FALSE(pass.begin_frame(ctx));
+        EXPECT_TRUE(control.inspect_requested);
         if (refusal == 0) {
             Pass::SurfaceFrame frame(ctx, gbuffer, true);
             ASSERT_TRUE(frame.ready());
             Pass::unsupported_surface();
         }
-        control.x = refusal == 1 ? -1 : refusal == 2 ? 8 : 4;
-        control.inspect_requested = true;
         glBindFramebuffer(GL_FRAMEBUFFER, composite);
         pass.execute(ctx);
+        EXPECT_FALSE(control.inspect_requested);
         EXPECT_EQ(control.result,
                   "Overdraw count unavailable (producer, target or selected pixel)");
         for (const auto* producer : {"authored", "impostor", "forward", "sky"}) {

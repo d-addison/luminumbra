@@ -1229,8 +1229,8 @@ void DebugViewPass::execute(const RenderContext& ctx) {
     shader->setFloat("u_far", far_plane);
 
     bind_sources(ctx, *shader);
-    const bool inspect_count = mode() == Overdraw && controls().inspector_open &&
-                               std::exchange(controls().inspect_requested, false);
+    const bool inspect_count =
+        mode() == Overdraw && std::exchange(controls().inspect_requested, false);
     const bool count_pixel_valid = inspect_count &&
                                    contribution_extent(ctx.internal_w(), ctx.internal_h()) &&
                                    controls().x >= 0 && controls().y >= 0 &&
