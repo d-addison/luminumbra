@@ -515,7 +515,7 @@ class GpuStageAttributionWiring(unittest.TestCase):
                 'Measurement::kSummedPassCount': summed_count}), contributes)
             self.assertEqual(cpp_expression(query_condition, **{
                 'pass': legacy_count + index, 'kSummedPassCount': summed_count,
-                'sample.passes[pass]': True}), contributes)
+                'pass_sample': True}), contributes)
         self.assertIn('gpu_stage_totals[stage] += stage_times[stage]', self.main)
         self.assertIn('rb_total += stage_times[stage]', self.main)
         self.assertIn('gpu_stage_totals[stage] / n', self.main)
