@@ -57,6 +57,8 @@ private:
     std::vector<ChunkID> m_pending;
 };
 
+class ChunkLifecycleChanges;
+
 struct VoxelVertex {
     Vec3 position;
     Vec3 normal;
@@ -89,7 +91,10 @@ public:
         LUMIN_PROFILE_LOCK(
             std::lock_guard<std::mutex>, lock, m_state_mutex, "Chunk state lock wait");
         m_state = new_state;
+        notify_lifecycle_change();
     }
+    // Derived census binding; never authority, serialized state or hash input.
+    void bind_lifecycle_changes(const std::shared_ptr<ChunkLifecycleChanges>& changes);
     void bind_far_world_authority_changes(std::weak_ptr<World::FarWorldAuthorityChanges> changes) {
         m_far_world_changes.store(std::move(changes), std::memory_order_release);
     }
@@ -157,14 +162,25 @@ public:
     // water state, including persisted mirrors consumed by queries and sources.
     bool has_complete_water_state() const;
     bool same_water_state(const Chunk& other) const;
-    // Owner-thread retirement after a column migration is durably committed.
-    // Terrain ownership and geometry are preserved independently.
+    // Clear water while preserving terrain ownership and geometry.
     void clear_water_data();
+    // Runtime-only write obligation, independent of terrain provenance/revisions.
+    // Generation and promotion preserve it; only a committed save acknowledges it.
+    void retire_legacy_water() {
+        clear_water_data();
+        m_pending_water_retirement.store(true, std::memory_order_release);
+    }
+    bool has_pending_water_retirement() const {
+        return m_pending_water_retirement.load(std::memory_order_acquire);
+    }
+    void acknowledge_water_retirement() {
+        m_pending_water_retirement.store(false, std::memory_order_release);
+    }
     bool has_simulation_authority() const {
         return has_water_authority() || has_terrain_authority();
     }
     bool is_voxel_data_dirty() const {
-        return m_voxel_data_dirty.load(std::memory_order_acquire);
+        return m_voxel_data_dirty.load(std::memory_order_acquire) || has_pending_water_retirement();
     }
     void mark_sdf_generated_current_params() {
         invalidate_near_terrain_snapshot();
@@ -563,6 +579,7 @@ private:
     mutable std::shared_ptr<const World::FarLodSdfSnapshot> m_far_lod_snapshot;
     const IVec3 m_coords;
     const ChunkID m_id;
+    void notify_lifecycle_change() const;
     ChunkState m_state;
     mutable std::mutex m_state_mutex; // mutable for use in const getter
     std::atomic<bool> m_voxel_data_dirty{false};
@@ -571,6 +588,7 @@ private:
     std::atomic<u32> m_voxel_revision{0};
     std::atomic<bool> m_water_state_dirty{false};
     std::atomic<bool> m_water_authority{false};
+    std::atomic<bool> m_pending_water_retirement{false};
     std::atomic<bool> m_terrain_authority{false};
     void notify_far_world_change(World::FarWorldAuthorityChange change) const {
         if (const auto changes = m_far_world_changes.load(std::memory_order_acquire).lock()) {

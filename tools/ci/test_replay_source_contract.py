@@ -658,7 +658,7 @@ class ReplaySourceContract(unittest.TestCase):
         consumers = {name for name, sources in targets.items() if runtime in sources.split()}
         self.assertEqual(consumers, {"capture_manifest_test", "capture_feature_profile_test",
                                      "diagnostic_bundle_test", "runtime_surface_options_test",
-                                     "audio_disabled_test"})
+                                     "audio_disabled_test", "temporal_sweep_test"})
         for target, retained in (
             ("capture_manifest_test", ("rendering/capture_manifest_test.cpp",
                                        "rendering/diagnostic_capture_test.cpp",
@@ -666,6 +666,8 @@ class ReplaySourceContract(unittest.TestCase):
                                        "../src/luminumbra_client/rendering/CaptureManifest.cpp")),
             ("capture_feature_profile_test", ("rendering/capture_feature_profile_test.cpp",
                                               "../src/luminumbra_client/rendering/CaptureFeatureProfile.cpp")),
+            ("temporal_sweep_test", ("rendering/temporal_sweep_test.cpp",
+                                    "../src/luminumbra_client/rendering/CaptureFeatureProfile.cpp")),
         ):
             for source in retained:
                 self.assertEqual(targets[target].split().count(source), 1, (target, source))
@@ -705,6 +707,10 @@ class ReplaySourceContract(unittest.TestCase):
             ("capture_feature_profile_test", "../src/luminumbra_client/rendering/DiagnosticCapture.cpp"),
             ("capture_manifest_test", "rendering/temporal_audit_test.cpp"),
             ("diagnostic_bundle_test", "rendering/diagnostic_bundle_test.cpp"),
+            ("temporal_sweep_test", "rendering/temporal_sweep_test.cpp"),
+            ("temporal_sweep_test", "../src/luminumbra_client/rendering/CaptureFeatureProfile.cpp"),
+            ("temporal_sweep_test", "../src/luminumbra_client/rendering/TemporalAudit.cpp"),
+            ("temporal_sweep_test", "../src/luminumbra_client/rendering/DiagnosticCapture.cpp"),
         ):
             start = cmake.index(f"add_executable({target}")
             changed = cmake[:start] + cmake[start:].replace(token, "", 1)
