@@ -131,4 +131,27 @@ private:
     bool m_all_features = false;
 };
 
+// Producer settings only, not evidence that a feature contributes visible pixels.
+struct CaptureGameplayFeatures {
+    bool ambient_animals = true;
+    bool weather = true;
+    bool particles = true;
+    bool cave_flourishes = true;
+    bool ui = true;
+    bool operator==(const CaptureGameplayFeatures&) const = default;
+};
+
+// A complete supported snapshot may remove capture-only suppressions. Explicit
+// determinism fixtures retain their pins; admission never changes UI choices.
+class CaptureFeaturePolicy {
+public:
+    static CaptureFeaturePolicy Resolve(const CaptureFeatureProfile* profile,
+                                        bool determinism_fixture = false);
+    CaptureGameplayFeatures Apply(const CaptureGameplayFeatures& legacy, bool no_ui) const;
+    bool UseLegacyAtmospherePins() const;
+
+private:
+    bool m_admitted = false;
+};
+
 } // namespace Luminumbra::Rendering
