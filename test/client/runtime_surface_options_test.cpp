@@ -1,9 +1,13 @@
 #include "../support/UniqueTempPath.h"
 #include "core/RuntimeScenarioConfig.h"
+#include "core/StrictNumeric.h"
+#include "core/TimelapseVista.h"
 
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <filesystem>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -13,6 +17,7 @@ namespace {
 
 namespace fs = std::filesystem;
 using Luminumbra::Client::ScenarioHarness::ParseRuntimeScenarioConfig;
+using Luminumbra::Core::ParseNumber;
 
 auto Parse(std::vector<std::string> arguments, const fs::path& root = {}) {
     std::vector<char*> argv;
@@ -40,6 +45,160 @@ public:
     }
     fs::path path;
 };
+
+TEST(StrictNumericParsing, RefusesMalformedAndOutOfRangeNumbersWithoutAssignment) {
+    for (const std::string text : {"12abc",
+                                   "nan",
+                                   "inf",
+                                   " 12",
+                                   "",
+                                   "12 ",
+                                   "\t12",
+                                   "1e9999",
+                                   "1e999",
+                                   "+",
+                                   "-",
+                                   "++12",
+                                   "+-12",
+                                   "0x",
+                                   "0x-1",
+                                   "-0x",
+                                   "0x1p2junk"}) {
+        SCOPED_TRACE(text);
+        int integer = 7;
+        float single = 7.0f;
+        double wide = 7.0;
+        EXPECT_FALSE(ParseNumber(text, integer));
+        EXPECT_FALSE(ParseNumber(text, single));
+        EXPECT_FALSE(ParseNumber(text, wide));
+        EXPECT_EQ(integer, 7);
+        EXPECT_EQ(single, 7.0f);
+        EXPECT_EQ(wide, 7.0);
+    }
+    for (const std::string text :
+         {"1e-9999", "-1e-9999", "0x1p99999", "0x1p-99999", "NaN(payload)", "-infinity"}) {
+        float single = 7.0f;
+        double wide = 7.0;
+        EXPECT_FALSE(ParseNumber(text, single)) << text;
+        EXPECT_FALSE(ParseNumber(text, wide)) << text;
+        EXPECT_EQ(single, 7.0f);
+        EXPECT_EQ(wide, 7.0);
+    }
+    int integer = 7;
+    double wide = 7.0;
+    EXPECT_FALSE(ParseNumber("2147483648", integer));
+    EXPECT_FALSE(ParseNumber("-2147483649", integer));
+    EXPECT_FALSE(ParseNumber(std::string("12\0abc", 6), wide));
+    EXPECT_EQ(integer, 7);
+    EXPECT_EQ(wide, 7.0);
+    uint64_t count = 7;
+    for (const std::string text : {"-1", "18446744073709551616", "12abc", " 12", ""}) {
+        EXPECT_FALSE(ParseNumber(text, count)) << text;
+        EXPECT_EQ(count, 7);
+    }
+}
+
+TEST(StrictNumericParsing, ValidNumbersMatchPreviousConversionsIncludingSignsAndHexFloats) {
+    for (const std::string text : {"12", "+12", "-12", "0", "012", "2147483647", "-2147483648"}) {
+        int parsed = 0;
+        ASSERT_TRUE(ParseNumber(text, parsed)) << text;
+        EXPECT_EQ(parsed, std::stoi(text));
+    }
+    for (const std::string text : {"12",
+                                   "+12",
+                                   "-12",
+                                   "0",
+                                   "-0",
+                                   "+0.5",
+                                   ".25",
+                                   "12.",
+                                   "1.25e-2",
+                                   "3.4028234e38",
+                                   "1.1754944e-38",
+                                   "0x1.8p2",
+                                   "-0X1.8p+2",
+                                   "+0x1p-2"}) {
+        float single = 0.0f;
+        double wide = 0.0;
+        ASSERT_TRUE(ParseNumber(text, single)) << text;
+        ASSERT_TRUE(ParseNumber(text, wide)) << text;
+        EXPECT_EQ(single, std::stof(text));
+        EXPECT_EQ(wide, std::stod(text));
+        EXPECT_EQ(std::signbit(single), std::signbit(std::stof(text)));
+        EXPECT_EQ(std::signbit(wide), std::signbit(std::stod(text)));
+    }
+    uint64_t count = 0;
+    ASSERT_TRUE(ParseNumber("18446744073709551615", count));
+    EXPECT_EQ(count, std::numeric_limits<uint64_t>::max());
+    ASSERT_TRUE(ParseNumber("+12", count));
+    EXPECT_EQ(count, 12u);
+}
+
+TEST(RuntimeSurfaceOptionsTest, StrictScalarOptionsKeepTheirExistingFallbacksAndClamps) {
+    namespace Harness = Luminumbra::Client::ScenarioHarness;
+    for (const std::string text : {"12abc", "nan", "inf", " 12", "", "999999999999999999999999"}) {
+        SCOPED_TRACE(text);
+        std::vector<std::string> arguments{"client", "--number=" + text};
+        std::vector<char*> argv;
+        for (auto& argument : arguments)
+            argv.push_back(argument.data());
+        EXPECT_EQ(Harness::GetCommandLineIntOption(2, argv.data(), "--number", 9), 9);
+        EXPECT_EQ(Harness::GetCommandLineUInt64Option(2, argv.data(), "--number", 9), 9u);
+        const auto config =
+            Parse({"client", "--foliage-density-scale=" + text, "--hang-watchdog-seconds=" + text});
+        EXPECT_EQ(config.foliage_density_scale, 1.0f);
+        EXPECT_EQ(config.hang_watchdog_seconds, 0);
+    }
+    const auto config = Parse({"client",
+                               "--avatars=-2",
+                               "--foliage-density-scale=2.5",
+                               "--hang-watchdog-seconds=12",
+                               "--memory-watermark-mb=+12"});
+    EXPECT_EQ(config.avatars, 1); // Integer options retain their minimum-one clamp.
+    EXPECT_EQ(config.foliage_density_scale, 2.5f);
+    EXPECT_EQ(config.hang_watchdog_seconds, 12);
+    EXPECT_EQ(config.memory_watermark_mb, 12u);
+    EXPECT_EQ(Parse({"client", "--memory-watermark-mb=-1"}).memory_watermark_mb, 0u);
+    EXPECT_EQ(Parse({"client", "--hang-watchdog-seconds=-1"}).hang_watchdog_seconds, 0);
+    EXPECT_EQ(Parse({"client", "--foliage-density-scale=9"}).foliage_density_scale, 1.0f);
+}
+
+TEST(RuntimeSurfaceOptionsTest, StrictResolutionFailureKeepsBothDimensions) {
+    const auto defaults = Parse({"client"});
+    for (const std::string text : {"12abcx900",
+                                   "1600x900abc",
+                                   " 1600x900",
+                                   "1600x 900",
+                                   "",
+                                   "nanx900",
+                                   "1600xinf",
+                                   "1600x",
+                                   "x900",
+                                   "1600",
+                                   "0x900",
+                                   "1600x0",
+                                   "-1x900",
+                                   "1600x99999999999999999999999",
+                                   "1600x900x1"}) {
+        const auto config = Parse({"client", "--resolution=" + text});
+        EXPECT_EQ(config.windowed_width, defaults.windowed_width) << text;
+        EXPECT_EQ(config.windowed_height, defaults.windowed_height) << text;
+    }
+    for (const std::string text : {"1600x900", "+1600X+900"}) {
+        const auto config = Parse({"client", "--resolution=" + text});
+        EXPECT_EQ(config.windowed_width, 1600);
+        EXPECT_EQ(config.windowed_height, 900);
+    }
+}
+
+TEST(StrictNumericParsing, TimelapsePanRefusesPrefixesAndKeepsItsClamp) {
+    namespace Vista = Luminumbra::TimelapseVista;
+    for (const std::string text : {"12abc", "nan", "inf", " 12", "", "1e9999"})
+        EXPECT_EQ(Vista::ParsePanDegrees(text), std::nullopt) << text;
+    EXPECT_EQ(Vista::ParsePanDegrees("+0.5"), std::optional<float>(0.5f));
+    EXPECT_EQ(Vista::ParsePanDegrees("-12"), std::optional<float>(-2.0f));
+    EXPECT_EQ(Vista::ParsePanDegrees("12"), std::optional<float>(2.0f));
+}
 
 TEST(RuntimeSurfaceOptionsTest, RefusesBeforeCreatingSaveRootInEitherArgumentOrder) {
     const TemporaryDirectory directory;

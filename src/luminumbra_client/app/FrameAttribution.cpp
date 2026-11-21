@@ -232,11 +232,11 @@ void PhaseTotals::add(Phase phase, double inclusive_ms, double child_ms, double 
 PhaseFrameScope::PhaseFrameScope(bool enabled)
     : m_previous(current_phases()) {
     current_phases() = enabled ? &m_totals : nullptr;
-    shader_first_use_collection_enabled = current_phases() != nullptr;
+    shader_first_use_collection_enabled() = current_phases() != nullptr;
 }
 PhaseFrameScope::~PhaseFrameScope() {
     current_phases() = m_previous;
-    shader_first_use_collection_enabled = current_phases() != nullptr;
+    shader_first_use_collection_enabled() = current_phases() != nullptr;
 }
 bool PhaseFrameScope::is_current() const {
     return current_phases() == &m_totals;
