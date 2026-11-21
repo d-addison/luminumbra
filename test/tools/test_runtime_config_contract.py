@@ -1405,5 +1405,73 @@ class RegionalEnergySourceContract(unittest.TestCase):
         self.assertIn("returndiffuse<EdgeGate>(iterations,diffusion_rate,gate);", source)
 
 
+class StreamingLifecycleSourceContract(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.world = compact_cpp((ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+                                .read_text(encoding="utf-8"))
+        cls.index = compact_cpp((ROOT / "src/luminumbra_common/world/ActivationResidencyIndex.h")
+                                .read_text(encoding="utf-8"))
+        cls.native = (ROOT / "test/common/ActivationResidencyIndex_test.cpp").read_text(encoding="utf-8")
+
+    def test_both_census_boundaries_read_exact_transition_counts(self):
+        update = cpp_block(self.world, "voidSHIELD_WorldSystem::update(entt::registry&registry,"
+                           "conststd::vector<Vec3>&anchor_positions,")
+        before = update[update.index("m_last_streaming_budget_stats.active_chunks_before="):]
+        before = before[:before.index("_dbg_split(")]
+        after = update[update.index("m_last_streaming_budget_stats.active_chunks_after="):]
+        after = after[:after.index("m_streaming_telemetry_stats.generation_batches=")]
+        for boundary in (before, after):
+            self.assertEqual(boundary.count("streaming_lifecycle_counts()"), 1)
+            self.assertNotIn("for(", boundary)
+        read = cpp_block(self.world, "SHIELD_WorldSystem::streaming_lifecycle_counts()")
+        self.assertIn("#ifndefNDEBUG", read)
+        self.assertIn("assert(counts==expected)", read)
+        self.assertIn("pending_lod.load(std::memory_order_acquire)>=0", read)
+        for match in re.finditer(r"(chunk|item\.chunk)->pending_lod\.store\([^;]+;", self.world):
+            self.assertTrue(self.world[match.end():].startswith(
+                "m_activation_index.observe_lifecycle(*" + match[1] + ");"))
+        state = cpp_block(self.world, "voidSHIELD_WorldSystem::set_renderable_chunk_state(")
+        self.assertIn("chunk.set_state(state)", state)
+        self.assertNotIn("m_activation_index", state)
+        self.assertIn("observe_lifecycle(*chunk)", cpp_block(self.index, "voidinsert("))
+        self.assertIn("adjust_lifecycle(previous->second.mask,false)",
+                      cpp_block(self.index, "voiderase("))
+        self.assertIn("m_lifecycle_counts={}", cpp_block(self.index, "voidclear()"))
+        self.assertIn("++m_counters.lifecycle_chunk_visits", self.index)
+        read_index = cpp_block(self.index, "constLifecycleCounts&lifecycle_counts()")
+        self.assertIn("for(constautoid:m_pending_lifecycle)", read_index)
+        self.assertNotIn("resident_columns()", read_index)
+        self.assertNotIn(":m_columns)", read_index)
+        self.assertIn("TEST(ActivationResidencyIndex, SettledLifecycleReadsVisitOnlyChangedResidents)",
+                      self.native)
+
+    def test_equivalence_and_worker_handoff_use_registered_production_paths(self):
+        # The native old/new oracle must exercise the production census reads,
+        # not only a standalone model that would leave the old full walks live.
+        self.assertEqual(self.world.count("streaming_lifecycle_counts()"), 3)
+        case = cpp_block(compact_cpp(self.native),
+                         "TEST(ActivationResidencyIndex,LifecycleCensusPreservesScriptedSelectionAndOrder)")
+        for expression in ("FullScan(world,anchors,2)", "ExpectLifecycleStats(world)",
+                           "world.generation_queue_prefix(1024)",
+                           "expected[index].coords", "lifecycle_snapshots"):
+            self.assertIn(expression, case)
+        self.assertIn("LifecycleTransitionsMatchCensusIncludingReplacementAndStaleWork", self.native)
+        self.assertIn("DirectStateWritersCoalesceAndRefusalsLeaveCensusUnchanged", self.native)
+        chunk = compact_cpp((ROOT / "src/luminumbra_common/world/Chunk.h").read_text(encoding="utf-8"))
+        chunk_source = compact_cpp((ROOT / "src/luminumbra_common/world/Chunk.cpp")
+                                   .read_text(encoding="utf-8"))
+        for setter in (cpp_block(chunk, "voidset_state("),
+                       cpp_block(chunk_source, "boolChunk::try_set_state(")):
+            self.assertIn("m_state=new_state;notify_lifecycle_change();", setter)
+        self.assertIn("m_lifecycle_changes->take(m_pending_lifecycle)", self.index)
+        ready = cpp_block(self.world, "boolSHIELD_WorldSystem::EnsureSurfaceReadyNear(")
+        self.assertIn("set_renderable_chunk_state(*chunk,ChunkState::Meshing)", ready)
+        self.assertIn("set_renderable_chunk_state(*chunk,ChunkState::Ready)", ready)
+        self.assertNotIn("observe_lifecycle", ready)
+        cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn("common/ActivationResidencyIndex_test.cpp", cmake)
+
+
 if __name__ == "__main__":
     unittest.main()

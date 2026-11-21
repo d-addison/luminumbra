@@ -702,9 +702,12 @@ class RegionAuthorityWiring(unittest.TestCase):
         adopt = function(source, "bool SHIELD_WorldSystem::adopt_streamed_chunk(")
         self.assertNotIn("reset_pending_jobs", adopt)
         self.assertNotIn("pending_lod.store", adopt)
-        self.assertIn("if (chunk_ptr->pending_lod.load(std::memory_order_acquire) >= 0) "
-                      "++m_streaming_telemetry_stats.pending_lod_chunks;",
+        self.assertIn("m_streaming_telemetry_stats.pending_lod_chunks = lifecycle.pending_lod_chunks;",
                       re.sub(r"\s+", " ", source))
+        index = (ROOT / "src/luminumbra_common/world/ActivationResidencyIndex.h").read_text(encoding="utf-8")
+        observe = function(index, "void observe_lifecycle(")
+        self.assertIn("chunk.pending_lod.load(std::memory_order_acquire) >= 0 ? 32u : 0u", observe)
+        self.assertIn("adjust(m_lifecycle_counts.pending_lod_chunks, 32u);", index)
         header = SOURCE.with_suffix(".h").read_text(encoding="utf-8")
         self.assertIn("pending_lod_chunks == 0 && !promotion_pending", header)
         chunk = (ROOT / "src/luminumbra_common/world/Chunk.h").read_text(encoding="utf-8")

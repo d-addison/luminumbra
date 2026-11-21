@@ -114,6 +114,197 @@ TEST(ActivationResidencyIndex, ResidencyDeltasPreserveFullScanOrder) {
     EXPECT_TRUE(index.dirty_columns().empty());
 }
 
+// Independent copy of the historical census predicates, also used with
+// release builds where the production debug cross-check is compiled out.
+Index::LifecycleCounts FullLifecycleCensus(const std::vector<std::shared_ptr<Chunk>>& chunks) {
+    Index::LifecycleCounts counts;
+    for (const auto& chunk : chunks) {
+        if (!chunk)
+            continue;
+        switch (chunk->get_state()) {
+            case ChunkState::Ready:
+                ++counts.ready_chunks;
+                if (!chunk->mesh_vertices.empty() && !chunk->mesh_indices.empty())
+                    ++counts.renderable_chunks;
+                break;
+            case ChunkState::Idle:
+                ++counts.idle_chunks;
+                break;
+            case ChunkState::Loading:
+                ++counts.loading_chunks;
+                break;
+            case ChunkState::Meshing:
+                ++counts.meshing_chunks;
+                break;
+            default:
+                break;
+        }
+        if (chunk->pending_lod.load(std::memory_order_acquire) >= 0)
+            ++counts.pending_lod_chunks;
+    }
+    return counts;
+}
+
+void ExpectLifecycleStats(const SHIELD_WorldSystem& world) {
+    const auto expected = FullLifecycleCensus(world.snapshot_streamed_chunks());
+    const auto& stats = world.get_last_streaming_budget_stats();
+    EXPECT_EQ(stats.ready_chunks, expected.ready_chunks);
+    EXPECT_EQ(stats.renderable_chunks, expected.renderable_chunks);
+    EXPECT_EQ(stats.idle_chunks, expected.idle_chunks);
+    EXPECT_EQ(stats.loading_chunks, expected.loading_chunks);
+    EXPECT_EQ(stats.meshing_chunks, expected.meshing_chunks);
+    EXPECT_EQ(world.get_streaming_telemetry_stats().pending_lod_chunks,
+              expected.pending_lod_chunks);
+}
+
+TEST(ActivationResidencyIndex, LifecycleTransitionsMatchCensusIncludingReplacementAndStaleWork) {
+    Index index;
+    auto chunk = std::make_shared<Chunk>(IVec3(1, 0, 0));
+    // Empty, unadopted and orphan observations must not create membership.
+    EXPECT_EQ(index.lifecycle_counts(), Index::LifecycleCounts{});
+    index.observe_lifecycle(*chunk);
+    EXPECT_EQ(index.counters().lifecycle_chunk_visits, 0u);
+    index.insert(chunk);
+    // Six states, both reservation states and all four mesh-presence cases.
+    // Bound: 48 cases, two observations each, independent of world size.
+    for (const auto state : {ChunkState::Unloaded,
+                             ChunkState::Loading,
+                             ChunkState::Idle,
+                             ChunkState::Meshing,
+                             ChunkState::Ready,
+                             ChunkState::Unloading}) {
+        for (const int pending : {-1, 0}) {
+            for (unsigned geometry = 0; geometry < 4; ++geometry) {
+                chunk->set_state(state);
+                chunk->pending_lod.store(pending, std::memory_order_release);
+                chunk->mesh_vertices.resize((geometry & 1u) != 0u ? 1u : 0u);
+                chunk->mesh_indices.resize((geometry & 2u) != 0u ? 1u : 0u);
+                const auto before = index.counters().lifecycle_chunk_visits;
+                index.observe_lifecycle(*chunk);
+                EXPECT_EQ(index.counters().lifecycle_chunk_visits - before, 1u);
+                EXPECT_EQ(index.lifecycle_counts(), FullLifecycleCensus({chunk}));
+                index.insert(chunk); // repeated insertion cannot double-count
+                EXPECT_EQ(index.lifecycle_counts(), FullLifecycleCensus({chunk}));
+            }
+        }
+    }
+    auto replacement = std::make_shared<Chunk>(chunk->get_coords());
+    replacement->set_state(ChunkState::Idle);
+    index.insert(replacement);
+    const auto visits = index.counters().lifecycle_chunk_visits;
+    index.observe_lifecycle(*chunk); // completion from the replaced owner
+    EXPECT_EQ(index.counters().lifecycle_chunk_visits, visits);
+    EXPECT_EQ(index.lifecycle_counts(), FullLifecycleCensus({replacement}));
+    index.erase(*replacement);
+    index.erase(*replacement); // repeated retirement is harmless
+    index.observe_lifecycle(*replacement);
+    EXPECT_EQ(index.lifecycle_counts(), Index::LifecycleCounts{});
+    index.insert(chunk); // unpark/adopt retains the new contribution
+    EXPECT_EQ(index.lifecycle_counts(), FullLifecycleCensus({chunk}));
+    index.clear();
+    EXPECT_EQ(index.lifecycle_counts(), Index::LifecycleCounts{});
+    index.insert(replacement);
+    EXPECT_EQ(index.lifecycle_counts(), FullLifecycleCensus({replacement}));
+}
+
+TEST(ActivationResidencyIndex, DirectStateWritersCoalesceAndRefusalsLeaveCensusUnchanged) {
+    Index index;
+    auto chunk = std::make_shared<Chunk>(IVec3(0));
+    index.insert(chunk);
+    const auto before = index.counters().lifecycle_chunk_visits;
+    EXPECT_FALSE(chunk->try_set_state(ChunkState::Ready, ChunkState::Meshing));
+    EXPECT_FALSE(chunk->try_set_state(ChunkState::Unloaded, ChunkState::Ready));
+    EXPECT_EQ(index.lifecycle_counts(), FullLifecycleCensus({chunk}));
+    EXPECT_EQ(index.counters().lifecycle_chunk_visits, before);
+    ASSERT_TRUE(chunk->try_set_state(ChunkState::Unloaded, ChunkState::Loading));
+    EXPECT_EQ(index.lifecycle_counts(), FullLifecycleCensus({chunk}));
+    EXPECT_EQ(index.counters().lifecycle_chunk_visits - before, 1u);
+    const auto coalesced_before = index.counters().lifecycle_chunk_visits;
+    // 4096 transitions of one participant must still drain one changed ID.
+    for (int step = 0; step < 4096; ++step)
+        chunk->set_state(step % 2 == 0 ? ChunkState::Ready : ChunkState::Idle);
+    EXPECT_EQ(index.lifecycle_counts(), FullLifecycleCensus({chunk}));
+    EXPECT_EQ(index.counters().lifecycle_chunk_visits - coalesced_before, 1u);
+    // Identical IDs in different worlds retain independent bindings and counts.
+    auto other = std::make_shared<Chunk>(chunk->get_coords());
+    {
+        Index second;
+        second.insert(other);
+        chunk->set_state(ChunkState::Loading);
+        other->set_state(ChunkState::Meshing);
+        EXPECT_EQ(index.lifecycle_counts(), FullLifecycleCensus({chunk}));
+        EXPECT_EQ(second.lifecycle_counts(), FullLifecycleCensus({other}));
+    }
+    other->set_state(ChunkState::Ready); // destruction unregisters borrowed pointers
+    chunk->set_state(ChunkState::Ready); // queued before retirement
+    index.erase(*chunk);
+    chunk->set_state(ChunkState::Idle); // stale writer after retirement
+    EXPECT_EQ(index.lifecycle_counts(), Index::LifecycleCounts{});
+    EXPECT_EQ(index.counters().lifecycle_chunk_visits, coalesced_before + 2u);
+}
+
+TEST(ActivationResidencyIndex, SettledLifecycleReadsVisitOnlyChangedResidents) {
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.caves_enabled = false;
+    params.base_amplitude = 0.0f;
+    params.height_offset = 5.0f;
+    // Real owner update path, two resident counts, eight settled frames each.
+    for (const int radius : {1, 2}) {
+        SHIELD_WorldSystem world(nullptr, nullptr, params, 12345);
+        world.debug_set_streaming_radius_cap(radius);
+        entt::registry registry;
+        const Vec3 anchor(0.25f, 7.0f, 0.25f);
+        int quiet_frames = 0;
+        for (int frame = 0; frame < 128 && quiet_frames < 8; ++frame) {
+            const auto before = world.activation_index_counters();
+            world.update(registry, {anchor}, nullptr, false);
+            ExpectLifecycleStats(world);
+            world.wait_for_streaming_jobs();
+            const auto after = world.activation_index_counters();
+            if (after.lifecycle_chunk_visits == before.lifecycle_chunk_visits)
+                ++quiet_frames;
+            else
+                quiet_frames = 0;
+        }
+        ASSERT_EQ(quiet_frames, 8);
+        ASSERT_GE(world.snapshot_streamed_chunks().size(), 15u);
+        for (int frame = 0; frame < 8; ++frame) {
+            const auto before = world.activation_index_counters();
+            world.update(registry, {anchor}, nullptr, false);
+            const auto after = world.activation_index_counters();
+            EXPECT_EQ(after.lifecycle_snapshots - before.lifecycle_snapshots, 2u);
+            EXPECT_EQ(after.lifecycle_chunk_visits, before.lifecycle_chunk_visits);
+            ExpectLifecycleStats(world);
+        }
+        world.clear_world(nullptr);
+        world.update(registry, std::vector<Vec3>{}, nullptr, false);
+        ExpectLifecycleStats(world);
+    }
+}
+
+TEST(ActivationResidencyIndex, LifecycleCensusWorkAtResidentLimitIsDeltaBounded) {
+    Index index;
+    std::vector<std::shared_ptr<Chunk>> chunks;
+    constexpr int resident_limit = 8192;
+    chunks.reserve(resident_limit);
+    for (int x = 0; x < resident_limit; ++x) {
+        auto chunk = std::make_shared<Chunk>(IVec3(x, 0, 0));
+        chunk->set_state(ChunkState::Loading);
+        index.insert(chunk);
+        chunks.push_back(std::move(chunk));
+    }
+    const auto before = index.counters().lifecycle_chunk_visits;
+    for (int frame = 0; frame < 8; ++frame) {
+        EXPECT_EQ(index.lifecycle_counts(), FullLifecycleCensus(chunks));
+        EXPECT_EQ(index.lifecycle_counts(), FullLifecycleCensus(chunks));
+    }
+    EXPECT_EQ(index.counters().lifecycle_chunk_visits, before);
+    chunks.front()->set_state(ChunkState::Ready);
+    chunks.back()->set_state(ChunkState::Idle);
+    EXPECT_EQ(index.lifecycle_counts(), FullLifecycleCensus(chunks));
+    EXPECT_EQ(index.counters().lifecycle_chunk_visits - before, 2u);
+}
+
 TEST(ActivationResidencyIndex, EveryContentVersionInvalidatesItsSpan) {
     Index index;
     int samples = 0;
@@ -441,6 +632,67 @@ TEST_P(ActivationFullScanParity, RandomEditsAnchorMotionAndRegionCrossings) {
     }
     EXPECT_GT(dig_changes, 0);
     EXPECT_GT(fill_changes, 0);
+}
+
+TEST(ActivationResidencyIndex, LifecycleCensusPreservesScriptedSelectionAndOrder) {
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.caves_enabled = false;
+    params.base_amplitude = 0.0f;
+    params.height_offset = 5.0f;
+    JobSystem jobs;
+    jobs.startup(1);
+    SHIELD_WorldSystem world(&jobs, nullptr, params, 12345);
+    world.debug_set_streaming_radius_cap(2);
+    entt::registry registry;
+    const Vec3 anchor(0.25f, 7.0f, 0.25f);
+    const Vec3 crossed = anchor + Vec3(CHUNK_SIZE_X, 0, 0);
+    const std::vector<std::vector<Vec3>> script{{anchor},
+                                                {anchor},
+                                                {anchor + Vec3(0.125f, 0, 0)},
+                                                {crossed},
+                                                {crossed, anchor + Vec3(0, 0, CHUNK_SIZE_Z)},
+                                                {crossed}};
+    std::int64_t tick = 0;
+    // Radius two settles in fewer than 32 explicitly drained updates. Keep
+    // activation alignment so every script entry ends at the fourth update.
+    for (int frame = 0; frame < 32; ++frame) {
+        world.begin_tick(tick++);
+        world.update(registry, {anchor}, nullptr, false);
+        world.wait_for_streaming_jobs();
+    }
+    ASSERT_TRUE(world.get_streaming_telemetry_stats().quiescent());
+    // Six activation intervals: settled, exact sub-chunk motion, crossing,
+    // overlapping anchors and anchor removal. All worker results drain explicitly.
+    for (const auto& anchors : script) {
+        for (int frame = 0; frame < 3; ++frame) {
+            world.begin_tick(tick++);
+            world.update(registry, anchors, nullptr, false);
+            ExpectLifecycleStats(world);
+            world.wait_for_streaming_jobs();
+        }
+        const auto expected = FullScan(world, anchors, 2);
+        const auto before = world.activation_index_counters();
+        world.begin_tick(tick++);
+        world.update(registry, anchors, nullptr, false);
+        ExpectLifecycleStats(world);
+        EXPECT_EQ(
+            world.activation_index_counters().lifecycle_snapshots - before.lifecycle_snapshots, 2u);
+        const auto& stats = world.get_last_streaming_budget_stats();
+        EXPECT_EQ(stats.generation_candidates, expected.size());
+        const auto actual = world.generation_queue_prefix(1024);
+        ASSERT_EQ(actual.size(), stats.scheduled_generation);
+        ASSERT_LE(actual.size(), expected.size());
+        for (std::size_t index = 0; index < actual.size(); ++index)
+            EXPECT_EQ(actual[index], expected[index].coords);
+        world.quiesce_streaming_jobs_for_save();
+        EXPECT_EQ(world.generation_queue_prefix(1024), actual);
+        world.wait_for_streaming_jobs();
+    }
+    // More than 128 ready-build jobs exercises the parallel blocking backend;
+    // census container updates belong to the owner after all worker joins.
+    ASSERT_TRUE(world.EnsureSurfaceReadyNear(anchor, nullptr, 4, 0));
+    world.update(registry, script.back(), nullptr, false);
+    ExpectLifecycleStats(world);
 }
 
 INSTANTIATE_TEST_SUITE_P(FixedSeeds, ActivationFullScanParity, testing::Values(12345u, 424242u));

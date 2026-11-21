@@ -57,6 +57,8 @@ private:
     std::vector<ChunkID> m_pending;
 };
 
+class ChunkLifecycleChanges;
+
 struct VoxelVertex {
     Vec3 position;
     Vec3 normal;
@@ -89,7 +91,10 @@ public:
         LUMIN_PROFILE_LOCK(
             std::lock_guard<std::mutex>, lock, m_state_mutex, "Chunk state lock wait");
         m_state = new_state;
+        notify_lifecycle_change();
     }
+    // Derived census binding; never authority, serialized state or hash input.
+    void bind_lifecycle_changes(const std::shared_ptr<ChunkLifecycleChanges>& changes);
     void bind_far_world_authority_changes(std::weak_ptr<World::FarWorldAuthorityChanges> changes) {
         m_far_world_changes.store(std::move(changes), std::memory_order_release);
     }
@@ -563,6 +568,7 @@ private:
     mutable std::shared_ptr<const World::FarLodSdfSnapshot> m_far_lod_snapshot;
     const IVec3 m_coords;
     const ChunkID m_id;
+    void notify_lifecycle_change() const;
     ChunkState m_state;
     mutable std::mutex m_state_mutex; // mutable for use in const getter
     std::atomic<bool> m_voxel_data_dirty{false};
