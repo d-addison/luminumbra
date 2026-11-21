@@ -1318,9 +1318,10 @@ private:
     void upload_chunk_mesh(const ChunkMeshSnapshot& chunk, const ChunkMeshPayload& payload);
     void unload_chunk_resources(ChunkID chunk_id);
 
-    void manage_water_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks,
-                                    const Camera& camera,
-                                    UploadPresentation presentation = UploadPresentation::Streaming);
+    void
+    manage_water_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks,
+                               const Camera& camera,
+                               UploadPresentation presentation = UploadPresentation::Streaming);
     bool copy_water_mesh_payload(const ChunkMeshSnapshot& chunk, ChunkMeshPayload& payload) const;
     void upload_water_mesh(const ChunkMeshSnapshot& chunk, const ChunkMeshPayload& payload);
     void unload_water_resources(ChunkID chunk_id);
