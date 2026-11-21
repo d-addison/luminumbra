@@ -488,7 +488,10 @@ void LightingPass::execute(const RenderContext& ctx) {
             if (const auto value = Core::ReadEnvironment("LUMIN_MOON_WRAP_FLOOR")) {
                 try {
                     return std::stof(*value);
-                } catch (...) {}
+                } catch (...) {
+                    // The static initializer bounds this diagnostic to once per process.
+                    LUMINUMBRA_CORE_WARN("Invalid LUMIN_MOON_WRAP_FLOOR; using 0.25");
+                }
             }
             return 0.25f;
         }();
