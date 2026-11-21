@@ -96,6 +96,44 @@
       "requirements": []
     },
     {
+      "id": "render.legacy-refusal-fallback",
+      "source": "docs/far-world-horizon-v2.md#legacy-refusal-fallback",
+      "statement": "Ladder preparation refusal advances effective Legacy in the same frame, preserving suppression and avoiding Legacy work after successful Ladder preparation. Existing region-scoped freshness and terrain residency checks protect Legacy terrain/water uploads and impostor support. Native preview and archipelago horizon re-capture remains pending for issue #867; no native visual qualification is claimed.",
+      "status": "partial",
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "FarWorldLegacyIsolation.*"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarLodPersistence.RenderSnapshotsIgnoreUnrelatedAuthorityButRetainHaloAndInputChecks"
+        },
+        {
+          "kind": "ctest",
+          "ref": "FarLodWorker.CameraRegionCoveragePreservesLiveTerrainAndWaterOwnership",
+          "planned": "Run the registered terrain/water GL regression and re-capture the native preview and archipelago horizon before closing issue #867; owner: maintainers"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RenderSmokeTest.StaticPropCollectionGatesOnlyFarImpostorsAndKeepsMeshFallback"
+        },
+        {
+          "kind": "ctest",
+          "ref": "RenderSmokeTest.RefusedTreeImpostorsSubmitAvailableMeshLods"
+        },
+        {
+          "kind": "script",
+          "ref": "test/rendering/test_upload_budget_wiring.py"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/far-world-horizon-v2.md"
+        }
+      ],
+      "requirements": []
+    },
+    {
       "id": "render.capture-feature-capabilities",
       "source": "docs/development/visual-diagnostics.md#e3-all-features-profile-and-non-vacuous-evidence",
       "statement": "GL-free capture feature resolution names 31 producer/settings features, records requested/effective state and forced, suppressed or unavailable reasons, and serializes a versioned capability manifest with resolved asset/config identities or unavailable reasons. Strict runtime all_features selection is validated by both launch parsers before save-root creation. Unimplemented adapters default to unsupported across all eight capture modes; disabled requested settings refuse support and missing identities prevent aggregate support. Explicit final forced/suppressed observations take precedence over baseline producer controls; resolved isolation masks and sky backdrops still suppress forced enabled settings while preserving explicit suppression reasons. Registered regressions cover selections, catalog completeness, explicit subsets, every missing or suppressed feature, actual system and graphics gates, terrain cave/structure and static-plant isolation, skinned creature isolation, vegetation requiring both terrain and foliage consumers, missing-adapter and explicit-subset isolation refusals, independent ungated stages, tuning-default semantics, malformed metadata/enums, exact bounds, snapshot ownership and stream write/flush failures. Native execution, app/scenario producer policy, admission/publication wiring and per-frame presence evidence remain pending; selection and capability do not certify an all-features capture.",
