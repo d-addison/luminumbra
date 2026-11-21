@@ -1354,7 +1354,9 @@ private:
     mutable u64 m_collision_terrain_evaluations = 0;
     mutable u64 m_collision_sample_clock = 0;
     bool m_evictions_suspended = false;
-    std::shared_ptr<Chunk> read_committed_chunk(const IVec3& coords) const;
+    // Only restoration prepares derived seeds; read-only hash/collision probes do no extra work.
+    std::shared_ptr<Chunk> read_committed_chunk(const IVec3& coords,
+                                                bool prepare_water = false) const;
     void migrate_restored_water_column(const std::shared_ptr<Chunk>& chunk);
     // Capacity is reserved before resolution, so reserved renderer caches are
     // not necessarily admitted. Unsaved reservations survive admission cleanup
