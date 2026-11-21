@@ -1436,6 +1436,9 @@ target_link_libraries(ecology_tick_perf_test PRIVATE
 
 add_executable(runtime_world_visual_validation_test
     performance/runtime_world_visual_validation_test.cpp
+    ../src/luminumbra_server/ServerWorldRunner.cpp
+    ../src/luminumbra_server/modes/ModeHelpers.cpp
+    ../src/luminumbra_server/modes/Replay.cpp
 )
 
 target_compile_definitions(runtime_world_visual_validation_test PRIVATE

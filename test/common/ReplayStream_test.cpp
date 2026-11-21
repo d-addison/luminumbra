@@ -1250,6 +1250,132 @@ TEST_F(ReplayStreamTest, InvalidPairTraceRefusesBeforeEitherDestinationChanges) 
     fs::remove(m_path + ".regions.json");
 }
 
+TEST_P(ReplayOutputFailureTest, FailedMarkerPublicationRetiresRetainedCompleteGeneration) {
+    for (const bool retained : {false, true}) {
+        SCOPED_TRACE(retained);
+        if (retained) {
+            replay::ReplayWriter old;
+            ASSERT_TRUE(old.Open(m_path, MakeHeader()));
+            ASSERT_TRUE(old.Finalize(0));
+            ASSERT_TRUE(replay::ReadReplay(m_path).has_value());
+        }
+        replay::QueuedReplayRecorder recorder;
+        ASSERT_TRUE(recorder.Configure(17, 0));
+        ASSERT_TRUE(recorder.Open(m_path, MakeHeader())) << recorder.OpenRefusal();
+        EXPECT_FALSE(recorder.RecordTick(
+            1, std::make_shared<const std::vector<std::uint8_t>>(1, 0), nullptr, 0));
+        OutputFailure failure{GetParam(), m_path + ".incomplete", 0, 0};
+        {
+            const ScopedOutputFailure control(failure);
+            EXPECT_FALSE(recorder.Finalize(m_path, 1, 1));
+        }
+        EXPECT_EQ(failure.hits, 1u);
+        EXPECT_FALSE(fs::exists(m_path));
+        EXPECT_FALSE(fs::exists(m_path + ".incomplete"));
+        EXPECT_FALSE(replay::ReadReplay(m_path).has_value());
+        EXPECT_EQ(recorder.PendingTicks(), 0u);
+        EXPECT_EQ(recorder.SegmentCount(), 0u);
+        EXPECT_FALSE(recorder.Finalize(m_path, 1, 1));
+        ASSERT_TRUE(recorder.Open(m_path, MakeHeader())) << recorder.OpenRefusal();
+        const auto empty = std::make_shared<const std::vector<std::uint8_t>>();
+        ASSERT_TRUE(recorder.RecordTick(1, empty, nullptr, 1));
+        ASSERT_TRUE(recorder.Finalize(m_path, 1, 1));
+        ASSERT_TRUE(replay::ReadReplay(m_path).has_value());
+        fs::remove(m_path);
+    }
+}
+
+TEST_P(ReplayOutputFailureTest, FailedMarkerPublicationStillAllowsACompleteReplacement) {
+    replay::ReplayWriter old;
+    ASSERT_TRUE(old.Open(m_path, MakeHeader()));
+    ASSERT_TRUE(old.Finalize(0));
+    replay::QueuedReplayRecorder recorder;
+    ASSERT_TRUE(recorder.Configure(17, 0));
+    ASSERT_TRUE(recorder.Open(m_path, MakeHeader())) << recorder.OpenRefusal();
+    ASSERT_TRUE(
+        recorder.RecordTick(1, std::make_shared<const std::vector<std::uint8_t>>(), nullptr, 1));
+    OutputFailure failure{GetParam(), m_path + ".incomplete", 0, 0};
+    {
+        const ScopedOutputFailure control(failure);
+        ASSERT_TRUE(recorder.Finalize(m_path, 1, 1));
+    }
+    EXPECT_EQ(failure.hits, 1u);
+    EXPECT_FALSE(fs::exists(m_path + ".incomplete"));
+    const auto contents = replay::ReadReplay(m_path);
+    ASSERT_TRUE(contents.has_value());
+    if (contents) {
+        EXPECT_EQ(contents->tick_count, 1u);
+    }
+}
+
+TEST_F(ReplayStreamTest, FinalizationCompletionPreservesForeignMarkersAndAcceptsAbsence) {
+    const auto marker = fs::path(m_path + ".incomplete");
+    for (const int replacement : {0, 1, 2}) {
+        SCOPED_TRACE(replacement);
+        replay::ReplayFinalization publication(m_path, "Incomplete replay\n");
+        ASSERT_TRUE(publication.ready());
+        {
+            const Luminumbra::Persistence::ReplayPairReadGuard owner(m_path);
+            ASSERT_TRUE(owner.is_open());
+            EXPECT_FALSE(publication.Complete());
+            EXPECT_TRUE(fs::exists(marker));
+        }
+        // Keep the old inode alive so identity reuse cannot hide the substitution.
+        fs::rename(marker, m_path + ".retained-marker");
+        if (replacement == 1) {
+            std::ofstream foreign(marker);
+            foreign << "another attempt";
+            ASSERT_TRUE(foreign.good());
+        } else if (replacement == 2) {
+            fs::create_directory(marker);
+        }
+        replay::ReplayWriter writer;
+        ASSERT_TRUE(writer.Open(m_path, MakeHeader()));
+        ASSERT_TRUE(writer.Finalize(0));
+        EXPECT_EQ(publication.Complete(), replacement == 0);
+        EXPECT_EQ(fs::exists(marker), replacement != 0);
+        if (replacement == 1) {
+            std::ifstream foreign(marker);
+            EXPECT_EQ(std::string(std::istreambuf_iterator<char>(foreign), {}), "another attempt");
+        }
+        fs::remove(marker);
+        fs::remove(m_path + ".retained-marker");
+    }
+}
+
+TEST_F(ReplayStreamTest, FinalizationCompletionAcceptsRemovalBeforeAReportedFailure) {
+    replay::ReplayFinalization publication(m_path, "Incomplete replay\n");
+    ASSERT_TRUE(publication.ready());
+    replay::ReplayWriter writer;
+    ASSERT_TRUE(writer.Open(m_path, MakeHeader()));
+    ASSERT_TRUE(writer.Finalize(0));
+    OutputFailure failure{"crash-artifact-removed", m_path + ".incomplete", 0, 0};
+    {
+        const ScopedOutputFailure control(failure);
+        EXPECT_TRUE(publication.Complete());
+    }
+    EXPECT_EQ(failure.hits, 1u);
+    EXPECT_FALSE(fs::exists(m_path + ".incomplete"));
+    EXPECT_TRUE(replay::ReadReplay(m_path).has_value());
+}
+
+TEST_F(ReplayStreamTest, FinalizationPreconditionRefusesContendedAndWrongTypeDestinations) {
+    {
+        const Luminumbra::Persistence::ReplayPairReadGuard owner(m_path);
+        ASSERT_TRUE(owner.is_open());
+        replay::ReplayFinalization publication(m_path, "Incomplete replay\n");
+        EXPECT_FALSE(publication.ready());
+        EXPECT_FALSE(publication.Complete());
+        EXPECT_FALSE(fs::exists(m_path + ".incomplete"));
+    }
+    fs::create_directory(m_path);
+    replay::ReplayFinalization publication(m_path, "Incomplete replay\n");
+    EXPECT_FALSE(publication.ready());
+    EXPECT_FALSE(publication.Complete());
+    EXPECT_TRUE(fs::is_directory(m_path));
+    EXPECT_FALSE(fs::exists(m_path + ".incomplete"));
+}
+
 INSTANTIATE_TEST_SUITE_P(OutputBoundaries,
                          ReplayOutputFailureTest,
                          testing::Values("output-open",
@@ -1640,17 +1766,52 @@ void SubstituteOutput(const char* step, const fs::path& destination) {
     std::ofstream foreign(substitution->staging, std::ios::binary);
     foreign << "foreign occupant";
 }
+void SubstituteRetainedReplay(const char* step, const fs::path& destination) {
+    auto* substitution = OutputSubstitution();
+    if (!substitution || std::string_view(step) != "output-publish" ||
+        destination != fs::path(substitution->destination.string() + ".incomplete"))
+        return;
+    fs::rename(substitution->destination, substitution->retained);
+    fs::rename(substitution->staging, substitution->destination);
+    throw std::runtime_error("marker refused after destination substitution");
+}
 class ScopedOutputSubstitution {
 public:
-    explicit ScopedOutputSubstitution(SubstitutedOutput& substitution) {
+    explicit ScopedOutputSubstitution(
+        SubstitutedOutput& substitution,
+        Luminumbra::Persistence::SnapshotStepHook hook = SubstituteOutput) {
         OutputSubstitution() = &substitution;
-        Luminumbra::Persistence::set_snapshot_step_hook_for_testing(SubstituteOutput);
+        Luminumbra::Persistence::set_snapshot_step_hook_for_testing(hook);
     }
     ~ScopedOutputSubstitution() {
         Luminumbra::Persistence::set_snapshot_step_hook_for_testing(nullptr);
         OutputSubstitution() = nullptr;
     }
 };
+
+TEST_F(ReplayStreamTest, FailedMarkerRetirementNeverRemovesAChangedGeneration) {
+    replay::ReplayWriter writer;
+    ASSERT_TRUE(writer.Open(m_path, MakeHeader()));
+    ASSERT_TRUE(writer.Finalize(0));
+    const auto original = ReadBytes();
+    const auto replacement = fs::path(m_path + ".replacement");
+    {
+        std::ofstream output(replacement);
+        output << "different generation";
+        ASSERT_TRUE(output.good());
+    }
+    SubstitutedOutput substitution{false, m_path, replacement, m_path + ".retained"};
+    {
+        const ScopedOutputSubstitution control(substitution, SubstituteRetainedReplay);
+        const replay::ReplayFinalization publication(m_path, "Incomplete replay\n");
+        EXPECT_FALSE(publication.ready());
+    }
+    EXPECT_EQ(ReadBytes(), "different generation");
+    std::ifstream retained(substitution.retained, std::ios::binary);
+    EXPECT_EQ(std::string(std::istreambuf_iterator<char>(retained), {}), original);
+    retained.close();
+    fs::remove(substitution.retained);
+}
 
 TEST_F(ReplayStreamTest, ChangedStagingOwnershipRefusesAndPreservesForeignOccupant) {
     {

@@ -50,6 +50,11 @@ namespace Luminumbra::Persistence {
 class ReplayPairReadGuard;
 }
 
+namespace Luminumbra::world {
+class GameSession;
+struct WorldCalendar;
+} // namespace Luminumbra::world
+
 namespace Luminumbra::Replay {
 
 // On-wire constants. Allocate a new version on incompatible layout changes;
@@ -120,6 +125,35 @@ struct ReplayHeader {
     std::optional<world::AuthorityBootDescriptor> authority_boot = std::nullopt;
     // Canonical WSC1, at most 856 bytes; present only in versions 7/8.
     std::string weather_schedule;
+};
+
+// Shared producer capture. Workload fields (rosters, anchor policy and parked
+// budget) come from the caller; effective simulation settings come from session.
+[[nodiscard]] world::AuthorityBootDescriptor
+CaptureReplayBoot(const world::GameSession& session,
+                  std::uint32_t seed,
+                  const world::WorldCalendar& calendar,
+                  world::AuthorityBootDescriptor workload = {});
+[[nodiscard]] ReplayHeader CaptureReplayHeader(const world::GameSession& session,
+                                               std::uint32_t surface_radius,
+                                               std::uint32_t collision_radius,
+                                               world::AuthorityBootDescriptor workload = {});
+
+// Establish refusal before attempting publication: own a failure companion or
+// retire the retained generation. Complete clears only this attempt's companion,
+// after payload publication. A failed precondition never attempts publication.
+class ReplayFinalization {
+public:
+    ReplayFinalization(const std::string& destination, const std::string& message);
+    ~ReplayFinalization();
+    ReplayFinalization(const ReplayFinalization&) = delete;
+    ReplayFinalization& operator=(const ReplayFinalization&) = delete;
+    [[nodiscard]] bool ready() const;
+    [[nodiscard]] bool Complete();
+
+private:
+    struct State;
+    std::unique_ptr<State> m_state;
 };
 
 // Playback admission, required in addition to start/checkpoint hashes.
@@ -323,8 +357,9 @@ private:
 // Outstanding work (including the active tick) is bounded by both 4096 ticks and
 // max(64 MiB, maximum encoded tick) bytes, plus fixed-size queue metadata. Full
 // queues latch failure without waiting: simulation never depends on disk progress.
-// Finalize drains accepted ticks and reports failure with a .incomplete companion
-// containing the first rejected/failed tick and reason. Close drains then removes
+// Finalize drains accepted ticks and establishes refusal with a .incomplete
+// companion containing the first rejected/failed tick and reason, or by retiring
+// the previous artifact if companion publication fails. Close drains then removes
 // working files; an in-sync shutdown does not publish an artifact.
 class QueuedReplayRecorder {
 public:
