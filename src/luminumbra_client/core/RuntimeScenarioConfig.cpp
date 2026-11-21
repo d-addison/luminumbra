@@ -236,8 +236,10 @@ RuntimePathOptions ParseRuntimePathOptions(int argc, char* argv[]) {
             }
         }
         const auto scenario = ResolveRuntimeScenario(argc, argv);
-        if (!scenario.empty() && (HasCommandLineOption(argc, argv, "--frame-scan") ||
-                                  HasCommandLineOption(argc, argv, "--render-benchmark"))) {
+        const bool frame_scan = HasCommandLineOption(argc, argv, "--frame-scan");
+        const bool render_benchmark = HasCommandLineOption(argc, argv, "--render-benchmark");
+        if ((!scenario.empty() && (frame_scan || render_benchmark)) ||
+            (frame_scan && render_benchmark)) {
             throw std::invalid_argument("capture diagnostics refuse multiple capture drivers");
         }
         // These producers transform pixels, resize/redispatch targets or require forward

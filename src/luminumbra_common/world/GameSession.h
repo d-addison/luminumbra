@@ -11,6 +11,7 @@
 #include "../core/SimulationClock.h"
 #include "../core/SystemConfig.h"
 #include "../fields/FieldPageState.h"
+#include "../persistence/SaveWorkCounts.h"
 #include "../simulation/SimBudgetTelemetry.h"
 #include "../simulation/SimulationEventBus.h"
 #include "../systems/PollinationSystem.h"
@@ -97,14 +98,15 @@ struct WorldConfigValidationResult {
     std::vector<std::string> errors;
 };
 
-// Counters for one runtime world-state save pass. The on-disk layout
-// is a whole-world snapshot, so chunks_saved is the full streamed chunk count
-// whenever a write happened and zero otherwise.
+// Selection counters for one runtime save pass. chunks_saved retains the selected
+// chunk count when writing is requested; work measures actual chunk serialization,
+// region rewrites (including siblings), compression and validation, even on refusal.
 struct WorldStateSaveReport {
     std::size_t chunks_total = 0;
     std::size_t chunks_dirty = 0;
     std::size_t chunks_saved = 0;
     bool saved = false;
+    Persistence::SaveWorkCounts work{};
 };
 
 struct PersistenceStatus {
@@ -147,9 +149,16 @@ public:
                                     bool moving_anchor,
                                     bool water_smoke);
     void SetOwnerContinuationAnchor(const Vec3& origin, const Vec3& anchor, std::uint64_t tick);
+    // Const owner-thread diagnostic using the same bounded capture as explicit saves.
+    // Refusal leaves bytes unchanged; call only between completed simulation ticks.
+    bool CaptureOwnerContinuation(std::string& bytes) const;
     const Persistence::OwnerContinuation* RestoredOwnerContinuation() const;
     // Runner boot reserves this storage through SetReplicatedSimulationAnchors.
     void SetOwnerContinuationSimulationAnchors(std::span<const Vec3> anchors);
+    // World reloads clear the reserved storage; the runner reserves it again before reuse.
+    bool ReplicatedSimulationAnchorsReserved(std::size_t count) const {
+        return m_replicatedSimulationAnchors && m_replicatedSimulationAnchors->capacity() >= count;
+    }
 
     ~GameSession();
 
@@ -474,6 +483,8 @@ public:
     [[nodiscard]] const std::string& PresetContentHash() const {
         return m_presetContentHash;
     }
+    // Const snapshot of the effective values used by identity and replay admission.
+    [[nodiscard]] luminumbra::core::SimulationIdentityValues EffectiveIdentityValues() const;
     [[nodiscard]] std::map<std::string, bool> EffectiveSimulationGates() const;
 
     void SetEcologyTuning(const luminumbra::ai::EcologyTuning& t) {
@@ -773,7 +784,6 @@ private:
     GameSession(const AuthorityProfileOptions& authority_profile, AuthorityProfileTag);
 
     const AuthorityProfileOptions m_authorityProfile;
-    bool CaptureOwnerContinuation(std::string& bytes) const;
     OwnerContinuationOptions m_continuationOptions;
     const std::vector<World::PlayerAvatar>* m_ownerAvatarSources = nullptr;
     std::optional<std::uint32_t> m_ownerRosterCount;
@@ -805,7 +815,6 @@ private:
     std::uint64_t m_worldRevision = 0;
     bool m_transientWorld = false;
     void ResetWorldSystems();
-    [[nodiscard]] luminumbra::core::SimulationIdentityValues EffectiveIdentityValues() const;
     void RestoreWorldClock(const WorldClock& clock);
     void RestoreAmbientFieldsAtTick(std::uint64_t tick);
     bool SaveWorldMetadataTo(const std::filesystem::path& save_dir,

@@ -2,11 +2,17 @@
 
 #include "../ServerCliOptions.h"
 
+namespace Luminumbra::world {
+struct OwnerContinuationOptions;
+}
+
 int RunSmoke(const ServerCliOptions& options);
 int RunWindBench(const ServerCliOptions& options);
 int RunAetherBench(const ServerCliOptions& options);
 int RunWeatherBench(const ServerCliOptions& options);
 int RunHeavy(const ServerCliOptions& options);
+int RunHeavy(const ServerCliOptions& options,
+             const Luminumbra::world::OwnerContinuationOptions& profile);
 int RunRecord(const ServerCliOptions& options);
 int RunReplay(const ServerCliOptions& options);
 int RunMutateReplayFixture(const ServerCliOptions& options);

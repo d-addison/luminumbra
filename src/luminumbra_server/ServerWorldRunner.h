@@ -27,8 +27,13 @@
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/world/ActiveRegionLedger.h"
+#include "luminumbra_common/world/AuthorityBootDescriptor.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/PlayerAvatar.h"
+
+namespace Luminumbra::Replay {
+struct ReplayHeader;
+}
 
 namespace Luminumbra::Server {
 
@@ -217,6 +222,13 @@ public:
     // authoritative; generation only fills gaps), then synchronous
     // spawn-anchor streaming with collision ready around the spawn point.
     bool Boot();
+    // Fresh-boot recordings only. Requires tick zero and owner continuations for
+    // unscheduled worlds; throws invalid_argument on a precondition violation.
+    [[nodiscard]] Replay::ReplayHeader CaptureReplayHeader() const;
+    // Resolves a fresh boot without creating a world or writing output.
+    // Requires a nonempty seed and a roster within the descriptor bound.
+    [[nodiscard]] static world::AuthorityBootDescriptor
+    DescribeReplayBoot(const ServerWorldRunnerConfig& config);
     const std::string& GetBootError() const {
         return m_bootError;
     }

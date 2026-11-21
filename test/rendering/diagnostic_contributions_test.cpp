@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -481,6 +482,178 @@ TEST_F(DiagnosticContributionsGl,
     glDeleteBuffers(1, &vbo);
     glDeleteVertexArrays(1, &vao);
     glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(static_cast<GLsizei>(textures.size()), textures.data());
+}
+
+TEST_F(DiagnosticContributionsGl, ShadowFootprintStaysLocalAcrossSplitQuadsAndBypassedReceivers) {
+    const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) / "res/shaders";
+    const auto vertex = (root / "lighting_pass.vert").string();
+    const auto fragment = (root / "lighting_pass.frag").string();
+    Shader diagnostic(vertex.c_str(), fragment.c_str(), {}, {"LUMIN_DIAG_CONTRIBUTIONS 1"});
+    Shader ladder(vertex.c_str(),
+                  fragment.c_str(),
+                  {},
+                  {"LUMIN_DIAG_CONTRIBUTIONS 1", "LUMINUMBRA_FAR_WORLD_LADDER 1"});
+    ASSERT_TRUE(diagnostic.IsValid());
+    ASSERT_TRUE(ladder.IsValid());
+
+    // Nine fixed 2x2 RGBA32F textures: seven inputs and two outputs, one derivative quad.
+    std::array<GLuint, 9> textures{};
+    glCreateTextures(GL_TEXTURE_2D, static_cast<GLsizei>(textures.size()), textures.data());
+    for (GLuint texture : textures) {
+        glTextureStorage2D(texture, 1, GL_RGBA32F, 2, 2);
+        glTextureParameteri(texture, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTextureParameteri(texture, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTextureParameteri(texture, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTextureParameteri(texture, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        constexpr std::array<float, 4> value = {0.5f, 0.5f, 0.5f, 1};
+        glClearTexImage(texture, 0, GL_RGBA, GL_FLOAT, value.data());
+    }
+    for (GLuint unit = 0; unit < 7; ++unit) {
+        glBindTextureUnit(unit, textures[unit]);
+    }
+    GLuint shadows = 0;
+    glCreateTextures(GL_TEXTURE_2D_ARRAY, 1, &shadows);
+    glTextureStorage3D(shadows, 1, GL_R32F, 64, 64, 4);
+    glTextureParameteri(shadows, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTextureParameteri(shadows, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    constexpr float stored_depth = 1;
+    glClearTexImage(shadows, 0, GL_RED, GL_FLOAT, &stored_depth);
+    glBindTextureUnit(7, shadows);
+    GLuint fbo = 0;
+    glCreateFramebuffers(1, &fbo);
+    glNamedFramebufferTexture(fbo, GL_COLOR_ATTACHMENT0, textures[7], 0);
+    glNamedFramebufferTexture(fbo, GL_COLOR_ATTACHMENT1, textures[8], 0);
+    constexpr std::array<GLenum, 2> outputs = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+    glNamedFramebufferDrawBuffers(fbo, 2, outputs.data());
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER),
+              static_cast<GLenum>(GL_FRAMEBUFFER_COMPLETE));
+    GLuint vao = 0;
+    GLuint vbo = 0;
+    constexpr std::array<float, 20> quad = {-1, -1, 0, 0, 0, 1, -1, 0, 1, 0,
+                                            -1, 1,  0, 0, 1, 1, 1,  0, 1, 1};
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &vbo);
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), nullptr);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(
+        1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
+    glViewport(0, 0, 2, 2);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    const auto draw = [&](Shader& shader, const glm::vec4& splits, int mode) {
+        shader.setVec4("u_cascadeSplits", splits);
+        shader.setInt("u_contributionMode", mode);
+        AttributedGl::Submit(glDrawArrays, static_cast<GLenum>(GL_TRIANGLE_STRIP), 0, 4);
+        glReadBuffer(GL_COLOR_ATTACHMENT1);
+        std::array<float, 16> result{};
+        glReadPixels(0, 0, 2, 2, GL_RGBA, GL_FLOAT, result.data());
+        return result;
+    };
+    for (Shader* variant : {&diagnostic, &ladder}) {
+        variant->use();
+        variant->setInt("gPosition", 0);
+        variant->setInt("gNormalMaterial", 1);
+        variant->setInt("gAlbedoRoughness", 2);
+        variant->setInt("gMetallicAO", 3);
+        variant->setInt("u_sceneDepth", 4);
+        variant->setInt("u_materialLUT", 5);
+        variant->setInt("u_environmentBrdf", 5);
+        variant->setInt("u_authoredSurface", 6);
+        variant->setInt("u_shadowCascades", 7);
+        variant->setInt("u_shadowTintCascades", 7);
+        variant->setMat4("u_inverseView", glm::mat4(1));
+        variant->setInt("u_farWorldLadder", variant == &ladder ? 1 : 0);
+        glm::mat4 inverse_projection(1);
+        inverse_projection[2][2] = -1;
+        variant->setMat4("u_gbufferInverseProjection", inverse_projection);
+        variant->setVec3("u_sun.direction", glm::vec3(0, 0, -1));
+        variant->setVec3("u_moonDir", glm::vec3(0, 0, -1));
+        for (bool perspective : {false, true}) {
+            for (int index = 0; index < 4; ++index) {
+                glm::mat4 light(1);
+                light[0][0] = light[1][1] = 0.25f * static_cast<float>(index + 1);
+                light[2][2] = 0;
+                light[3][0] = 0.2f * static_cast<float>(index);
+                light[0][3] = perspective ? 0.5f : 0.0f;
+                light[1][3] = perspective ? 0.25f : 0.0f;
+                variant->setMat4("u_lightSpaceMatrices[" + std::to_string(index) + "]", light);
+            }
+            for (int split = 1; split <= 3; ++split) {
+                for (bool vertical : {false, true}) {
+                    std::array<float, 16> positions{};
+                    for (std::size_t pixel = 0; pixel < 4; ++pixel) {
+                        const std::size_t x = pixel % 2;
+                        const std::size_t y = pixel / 2;
+                        positions[4 * pixel] = 0.02f * static_cast<float>(x);
+                        positions[4 * pixel + 1] = 0.02f * static_cast<float>(y);
+                        positions[4 * pixel + 2] =
+                            -static_cast<float>(split) + ((vertical ? y : x) == 0 ? 0.02f : -0.02f);
+                        positions[4 * pixel + 3] = 1;
+                    }
+                    glTextureSubImage2D(
+                        textures[0], 0, 0, 0, 2, 2, GL_RGBA, GL_FLOAT, positions.data());
+                    for (bool night : {false, true}) {
+                        SCOPED_TRACE(::testing::Message() << (variant == &ladder) << perspective
+                                                          << split << vertical << night);
+                        variant->setVec3("u_sun.color", glm::vec3(night ? 0.0f : 0.5f));
+                        constexpr std::array<float, 4> regular = {0.5f, 1, 0, 0};
+                        glClearTexImage(textures[3], 0, GL_RGBA, GL_FLOAT, regular.data());
+                        // Force each neighbour's cascade uniformly for a single-cascade oracle.
+                        glm::vec4 lower_splits(100);
+                        glm::vec4 upper_splits(100);
+                        for (int index = 0; index < split; ++index) {
+                            upper_splits[index] = -100;
+                            if (index < split - 1) {
+                                lower_splits[index] = -100;
+                            }
+                        }
+                        const auto lower_reference =
+                            draw(*variant, lower_splits, Pass::ShadowFootprint);
+                        const auto upper_reference =
+                            draw(*variant, upper_splits, Pass::ShadowFootprint);
+                        const auto actual =
+                            draw(*variant, glm::vec4(1, 2, 3, 4), Pass::ShadowFootprint);
+                        const auto cascades =
+                            draw(*variant, glm::vec4(1, 2, 3, 4), Pass::ShadowCascade);
+                        for (std::size_t pixel = 0; pixel < 4; ++pixel) {
+                            const bool upper = (vertical ? pixel / 2 : pixel % 2) != 0;
+                            const auto& reference = upper ? upper_reference : lower_reference;
+                            EXPECT_FLOAT_EQ(cascades[4 * pixel],
+                                            static_cast<float>(split - 1 + upper));
+                            EXPECT_FLOAT_EQ(actual[4 * pixel + 3], 1);
+                            const float ratio =
+                                std::exp2(actual[4 * pixel + 2] - reference[4 * pixel + 2]);
+                            EXPECT_GT(ratio, 0.8f);
+                            EXPECT_LT(ratio, 1.25f);
+                            EXPECT_GT(std::exp2(reference[4 * pixel + 2]), 0.1f);
+                        }
+                        // One lane of the same quad bypasses both shadow calls.
+                        constexpr std::array<float, 4> bypassTexel = {0.5f, -2, 0, 0};
+                        glTextureSubImage2D(
+                            textures[3], 0, 0, 0, 1, 1, GL_RGBA, GL_FLOAT, bypassTexel.data());
+                        const auto mixed =
+                            draw(*variant, glm::vec4(1, 2, 3, 4), Pass::ShadowFootprint);
+                        EXPECT_EQ((std::array<float, 4>{mixed[0], mixed[1], mixed[2], mixed[3]}),
+                                  (std::array<float, 4>{-2, -2, -2, 1}));
+                        for (std::size_t pixel = 1; pixel < 4; ++pixel) {
+                            EXPECT_NEAR(mixed[4 * pixel + 2], actual[4 * pixel + 2], 0.0001f);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &shadows);
     glDeleteTextures(static_cast<GLsizei>(textures.size()), textures.data());
 }
 

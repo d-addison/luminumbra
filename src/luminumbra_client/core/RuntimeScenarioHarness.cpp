@@ -493,21 +493,13 @@ bool WriteBackbufferPpm(const std::filesystem::path& path,
                         int height,
                         ScreenshotPixelStats* out_stats,
                         LodHolePixelStats* out_lod_hole_stats) {
-    if (width <= 0 || height <= 0) {
+    std::size_t bytes = 0;
+    if (!Rendering::CapturePixelBytes(width, height, 3, bytes)) {
         return false;
     }
 
-    std::error_code ec;
-    std::filesystem::create_directories(path.parent_path(), ec);
-    if (ec) {
-        LUMINUMBRA_CORE_ERROR("Failed to create screenshot directory '{}': {}",
-                              path.parent_path().string(),
-                              ec.message());
-        return false;
-    }
-
-    std::vector<unsigned char> pixels(static_cast<std::size_t>(width) *
-                                      static_cast<std::size_t>(height) * 3u);
+    // CapturePixelBytes bounds the readback to 64M pixels before allocation.
+    std::vector<unsigned char> pixels(bytes);
     glReadBuffer(GL_BACK);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
@@ -518,20 +510,7 @@ bool WriteBackbufferPpm(const std::filesystem::path& path,
         *out_lod_hole_stats = AnalyzeLodHolePixels(pixels, width, height);
     }
 
-    std::ofstream output(path, std::ios::binary);
-    if (!output) {
-        LUMINUMBRA_CORE_ERROR("Failed to write screenshot artifact: {}", path.string());
-        return false;
-    }
-
-    output << "P6\n" << width << ' ' << height << "\n255\n";
-    const std::size_t row_stride = static_cast<std::size_t>(width) * 3u;
-    for (int row = height - 1; row >= 0; --row) {
-        const std::size_t offset = static_cast<std::size_t>(row) * row_stride;
-        output.write(reinterpret_cast<const char*>(pixels.data() + offset),
-                     static_cast<std::streamsize>(row_stride));
-    }
-    return true;
+    return WritePixelBufferPpm(path, width, height, pixels);
 }
 
 nlohmann::json LodHolePixelStatsToJson(const LodHolePixelStats& stats) {
