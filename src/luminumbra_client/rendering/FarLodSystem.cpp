@@ -9,6 +9,7 @@
 #include "Shader.h"
 #include "core/Log.h"
 #include "luminumbra_common/core/Crc32.h"
+#include "luminumbra_common/core/IntegerPrimitives.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
@@ -33,15 +34,12 @@ constexpr float kRegionSize = static_cast<float>(Luminumbra::World::kFarLodRegio
 constexpr int kChunksPerFarLodRegion =
     Luminumbra::World::kFarLodRegionSizeMeters / Luminumbra::CHUNK_SIZE_X;
 
-int floor_divide(int value, int divisor) {
-    const int quotient = value / divisor;
-    const int remainder = value % divisor;
-    return remainder < 0 ? quotient - 1 : quotient;
-}
+// The former local division helper required this positive divisor.
+static_assert(kChunksPerFarLodRegion > 0);
 
 bool belongs_to_region(const Luminumbra::Systems::FarLodSdfSnapshotEntry& entry, int rx, int rz) {
-    return floor_divide(entry.coords.x, kChunksPerFarLodRegion) == rx &&
-           floor_divide(entry.coords.z, kChunksPerFarLodRegion) == rz;
+    return Core::FloorDiv(entry.coords.x, kChunksPerFarLodRegion) == rx &&
+           Core::FloorDiv(entry.coords.z, kChunksPerFarLodRegion) == rz;
 }
 
 std::size_t far_lod_tile_bytes(const Luminumbra::World::FarLodTile& tile) {
@@ -207,7 +205,7 @@ bool valid_world_brick(const WorldBrick& brick) {
 }
 
 int region_for_chunk(int chunk) {
-    return floor_divide(chunk, kChunksPerFarLodRegion);
+    return Core::FloorDiv(chunk, kChunksPerFarLodRegion);
 }
 
 bool is_home_chunk(int chunk_x, int chunk_z, int rx, int rz) {
