@@ -2,6 +2,7 @@
 #include "../support/WorldgenTestData.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/core/Log.h"
+#include "luminumbra_common/core/LogDispatcherSink.h"
 #include "luminumbra_common/net/LockstepSession.h"
 #include "luminumbra_common/persistence/ReplacementOutputFile.h"
 #include "luminumbra_common/persistence/SaveTransaction.h"
@@ -134,10 +135,9 @@ protected:
     fs::path root;
     ServerCliOptions options;
     std::ostringstream logs;
-    std::shared_ptr<spdlog::logger> previous_logger;
+    std::shared_ptr<spdlog::sinks::ostream_sink_mt> log_sink;
 
     void SetUp() override {
-        previous_logger = Log::GetCoreLogger();
         root = Luminumbra::TestSupport::CreateUniqueTempDirectory("replay_mode_");
         Luminumbra::TestSupport::CopyWorldgenTestData(LUMINUMBRA_SOURCE_ROOT, root);
         fs::create_directories(root / "worlds/atlas/presets");
@@ -158,15 +158,14 @@ protected:
         options.record_path = (root / "recording.lrec").string();
         options.replay_path = options.record_path;
         options.artifact_path = (root / "playback.json").string();
-        auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(logs);
-        auto logger = std::make_shared<spdlog::logger>("replay-mode-test", sink);
-        logger->set_pattern("%v");
-        Log::GetCoreLogger() = std::move(logger);
+        log_sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(logs);
+        log_sink->set_pattern("%v");
+        Log::GetDispatcherSink()->Attach(log_sink);
     }
 
     void TearDown() override {
         CaptureFault() = {};
-        Log::GetCoreLogger() = previous_logger;
+        Log::GetDispatcherSink()->Detach(log_sink);
         std::error_code error;
         fs::remove_all(root, error);
     }
