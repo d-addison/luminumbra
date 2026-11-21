@@ -5,10 +5,15 @@
     [string]$BuildPreset = "debug",
     [int]$SmokeSeconds = 30,
     [ValidateSet("Legacy", "Ladder")]
-    [string]$FarWorldRenderer = "Ladder"
+    [string]$FarWorldRenderer = "Ladder",
+    # Opt-in leg of the existing TimeOfDaySweep family; native-pending.
+    [switch]$TemporalAudit
 )
 
 $ErrorActionPreference = "Stop"
+if ($TemporalAudit -and $Mode -ne "TimeOfDaySweep") {
+    throw "-TemporalAudit requires -Mode TimeOfDaySweep"
+}
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $ScriptDir "nightly-provenance.ps1")
 . (Join-Path $ScriptDir "capture-artifact-validation.ps1")
@@ -3033,6 +3038,10 @@ function Test-Precipitation {
 }
 
 function Test-TimeOfDaySweep {
+    if ($TemporalAudit) {
+        Test-FixedSiteTemporalAudit
+        return
+    }
     $exe = Get-ClientExe
     $visualDir = "build/$BuildPreset/test-artifacts/runtime/timeofday-sweep"
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $visualDir
@@ -3192,6 +3201,113 @@ function Test-TimeOfDaySweep {
     if (-not $analysis.passed) {
         throw "Time-of-day sweep analysis reported failure"
     }
+}
+
+# Native-pending: this leg requires a native completed-frame A4-capable site.
+# It is explicit, so All retains the existing frontier workload.
+function Test-FixedSiteTemporalAudit {
+    $exe = Get-ClientExe
+    $visualDir = "build/$BuildPreset/test-artifacts/runtime/temporal-audit"
+    if (Test-Path $visualDir) {
+        throw "Temporal output already exists; choose a fresh runtime output tree"
+    }
+    Invoke-Checked -FilePath $exe -ArgumentList @(
+        "--scenario=temporal_audit", "--capture-diagnostics",
+        "--temporal-audit-plan=weather-cycle", "--temporal-start-tick=0",
+        "--temporal-tick-rate=30", "--temporal-day-ticks=162000",
+        "--temporal-dawn-tick=27000", "--temporal-dusk-tick=135000",
+        "--temporal-strike-tick=1800", "--temporal-site=spawn",
+        "--temporal-roi=full-frame", "--no-audio", "--no-ui",
+        "--runtime-artifact-dir", $visualDir
+    ) -TimeoutSeconds ([Math]::Max(150, $SmokeSeconds + 90))
+    $sequenceDir = Join-Path $visualDir "temporal"
+    $manifestStream = [System.IO.File]::OpenRead(
+        [System.IO.Path]::GetFullPath((Join-Path $sequenceDir "sequence.json")))
+    try {
+        # Match the transport's 16 MiB manifest reservation, using one handle.
+        $manifestLength = $manifestStream.Length
+        if ($manifestLength -le 0 -or $manifestLength -gt 16777216) {
+            throw "Temporal completion manifest exceeds its reservation"
+        }
+        $manifestBytes = New-Object byte[] ([int]$manifestLength)
+        $offset = 0
+        while ($offset -lt $manifestBytes.Length) {
+            $received = $manifestStream.Read($manifestBytes, $offset, $manifestBytes.Length - $offset)
+            if ($received -eq 0) { throw "Temporal completion manifest truncated" }
+            $offset += $received
+        }
+        if ($manifestStream.ReadByte() -ne -1) { throw "Temporal completion manifest grew" }
+        $utf8 = [System.Text.UTF8Encoding]::new($false, $true)
+        $manifest = $utf8.GetString($manifestBytes) | ConvertFrom-Json
+    } finally {
+        $manifestStream.Dispose()
+    }
+    if ($manifest.schema -ne "luminumbra.temporal_audit_sequence" -or
+        $manifest.version -ne 1 -or $manifest.status -ne "complete" -or
+        @($manifest.frames).Count -eq 0 -or @($manifest.frames).Count -gt 4096 -or
+        @($manifest.frames).Count -ne @($manifest.plan.frames).Count) {
+        throw "Temporal completion manifest missing, partial or unsupported"
+    }
+    $index = 0
+    [long]$totalBytes = $manifestLength
+    foreach ($frame in $manifest.frames) {
+        $planned = $manifest.plan.frames[$index]
+        $expectedNames = @("frame-$index.ppm", "frame-$index.manifest.json")
+        foreach ($suffix in @("albedo.pfm", "normal.pfm", "depth.pfm", "material.pfm",
+                              "ids.bin", "draws.json", "diagnostics.json")) {
+            $expectedNames += "frame-$index.ppm.$suffix"
+        }
+        if ($frame.index -ne $index -or $frame.tick -ne $planned.tick -or
+            $frame.sub_tick_60 -ne $planned.sub_tick_60 -or
+            $frame.kind -ne $planned.kind -or $frame.control -ne $planned.control -or
+            $frame.hold_frame -ne $planned.hold_frame -or
+            @($frame.payloads).Count -ne $expectedNames.Count) {
+            throw "Temporal frame order/schedule/payload count mismatch"
+        }
+        $payloadIndex = 0
+        foreach ($payload in $frame.payloads) {
+            $leaf = [string]$payload.path
+            if ($leaf -cne $expectedNames[$payloadIndex] -or
+                $payload.bytes -le 0 -or $payload.bytes -gt 134217728 -or
+                $payload.bytes -gt 549755813888 - $totalBytes) {
+                throw "Temporal payload must match the expected completed-frame A4 bundle"
+            }
+            $totalBytes += $payload.bytes
+            $path = Join-Path $sequenceDir $leaf
+            $stream = [System.IO.File]::OpenRead([System.IO.Path]::GetFullPath($path))
+            $hash = $null
+            try {
+                $hash = [System.Security.Cryptography.SHA256]::Create()
+                if ($stream.Length -ne $payload.bytes) {
+                    throw "Temporal payload length mismatch: $leaf"
+                }
+                # Hash from the same handle; at most 128 MiB and a 64 KiB buffer.
+                $buffer = New-Object byte[] 65536
+                [long]$remaining = $payload.bytes
+                while ($remaining -gt 0) {
+                    $received = $stream.Read($buffer, 0, [int][Math]::Min($remaining, 65536))
+                    if ($received -eq 0) { throw "Temporal payload truncated: $leaf" }
+                    $null = $hash.TransformBlock($buffer, 0, $received, $buffer, 0)
+                    $remaining -= $received
+                }
+                if ($stream.ReadByte() -ne -1) { throw "Temporal payload grew: $leaf" }
+                $null = $hash.TransformFinalBlock([byte[]]@(), 0, 0)
+                $digest = [BitConverter]::ToString($hash.Hash).Replace("-", "").ToLowerInvariant()
+                if ($digest -cne $payload.sha256) {
+                    throw "Temporal payload length/hash mismatch: $leaf"
+                }
+            } finally {
+                try {
+                    if ($null -ne $hash) { $hash.Dispose() }
+                } finally {
+                    $stream.Dispose()
+                }
+            }
+            ++$payloadIndex
+        }
+        ++$index
+    }
+    Write-Host "Temporal fixed-site capture completed; visual qualification remains native-pending"
 }
 
 # ---  WorldVisualSweep mode ---

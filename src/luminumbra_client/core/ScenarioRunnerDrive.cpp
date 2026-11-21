@@ -9,6 +9,7 @@
 #include "core/ScenarioRunnerImpl.h"
 
 #include "core/Log.h"
+#include "core/PresentationClock.h"
 #include "core/scenarios/ScenarioCommon.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
@@ -93,11 +94,79 @@ ScenarioRunner::InGameDrive ScenarioRunnerImpl::onGameStateInGame(float deltaTim
     if (drivePersistenceRoundtrip()) {
         return InGameDrive::kBreakCase;
     }
-    if (driveLodGround() || driveWaterVisual() || driveMaterialVisual() || driveSkyboxVisual() ||
-        driveAtmosphereCamera() || driveParticleDeterminism() || driveFoliageVisual() ||
-        driveTimeOfDaySweep() || driveLodBoundaryOscillation() || driveLodSeamArrival() ||
-        drivePlayerView() || driveFarLodHorizon() || driveSkinnedMeshVisual(deltaTime) ||
-        driveCreatureSlice(deltaTime) || driveNetworkedSession()) {
+    const auto drive_temporal = [&] {
+        if (!scenario_config.temporal_audit) {
+            return false;
+        }
+        auto& temporal_sequence = scenario_config.temporal_audit->sequence;
+        auto& temporal_step = scenario_config.temporal_audit->step;
+        auto& temporal_directory = scenario_config.temporal_audit->directory;
+        scenario_config.temporal_presentation_delta = 0;
+        if (!scenario_ready || scenario_failed) {
+            return true;
+        }
+        if (!g_camera) {
+            (void)refuseScenarioCapture("temporal_camera_unavailable");
+            return true;
+        }
+        if (!temporal_sequence) {
+            const auto& audit = *scenario_config.temporal_audit;
+            temporal_sequence.emplace(audit.plan, audit.budget);
+            if (gameSession->GetSimulationTickCount() != audit.plan.request.start_tick ||
+                !gameSession->IsSimulationTickBoundary() ||
+                gameSession->GetRenderCalendar() != Luminumbra::world::WorldCalendar{}) {
+                temporal_sequence->refuse();
+            }
+            temporal_directory = scenario_config.artifact_dir / "temporal";
+            // Exclusive creation: never reuse another run's partial or complete data.
+            std::error_code error;
+            if (!temporal_sequence->refusal().empty() ||
+                !std::filesystem::create_directory(temporal_directory, error) || error) {
+                (void)refuseScenarioCapture("temporal_initialization_failed");
+                return true;
+            }
+        }
+        const auto spawn = gameSession->GetMetadata().spawnPoint;
+        g_camera->Position = glm::vec3(spawn.x, spawn.y + 1.8f, spawn.z);
+        g_camera->Yaw = -90.0f;
+        g_camera->Pitch = -10.0f;
+        g_camera->updateCameraVectors();
+        gameSession->SetLocalPlayerSimulationPosition(g_camera->Position, false);
+        temporal_step = DriveTemporalAuditTicks(
+            *temporal_sequence,
+            [&] { return gameSession->GetSimulationTickCount(); },
+            [&] {
+                if (auto* physics = gameSession->GetPhysicsSystem()) {
+                    if (!physics->prepare_simulation_collisions(
+                            {}, gameSession->GetSimulationTickCount() + 1)) {
+                        return false;
+                    }
+                    physics->update(1.0f / 30.0f);
+                }
+                // The ordinary GameSession tick includes creature brains and all
+                // enabled simulation systems. A refused barrier fails this run.
+                return gameSession->TickSimulation(1.0 / 30.0) == 1;
+            });
+        if (temporal_step->action == Rendering::TemporalSequenceAction::Refused) {
+            (void)refuseScenarioCapture(temporal_sequence->refusal());
+            return true;
+        }
+        scenario_config.temporal_presentation_delta = temporal_step->presentation_delta_seconds;
+        // Canonical 30 Hz plans present in exact 1/60-second steps. Repeated
+        // readiness/settling/capture renders keep the same shader clock.
+        auto& presentation_frames = scenario_config.temporal_audit->presentation_frames;
+        if (scenario_config.temporal_presentation_delta > 0) {
+            ++presentation_frames;
+        }
+        presentation_clock.set_capture_tick(presentation_frames, 60);
+        return true;
+    };
+    if (drive_temporal() || driveLodGround() || driveWaterVisual() || driveMaterialVisual() ||
+        driveSkyboxVisual() || driveAtmosphereCamera() || driveParticleDeterminism() ||
+        driveFoliageVisual() || driveTimeOfDaySweep() || driveLodBoundaryOscillation() ||
+        driveLodSeamArrival() || drivePlayerView() || driveFarLodHorizon() ||
+        driveSkinnedMeshVisual(deltaTime) || driveCreatureSlice(deltaTime) ||
+        driveNetworkedSession()) {
         return scenario_failed ? InGameDrive::kBreakCase : InGameDrive::kHandled;
     }
     return InGameDrive::kFallThrough;

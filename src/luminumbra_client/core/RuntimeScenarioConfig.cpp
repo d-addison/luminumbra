@@ -4,6 +4,7 @@
 #include "luminumbra_common/core/CaptureContentPaths.h"
 #include "luminumbra_common/core/Environment.h"
 #include "luminumbra_common/core/FilesystemPath.h"
+#include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/world/SurfaceWorkBudget.h"
 #include "rendering/DiagnosticCapture.h"
 #include <algorithm>
@@ -208,71 +209,75 @@ void ParseSurfaceRadiusOptions(int argc,
 
 RuntimePathOptions ParseRuntimePathOptions(int argc, char* argv[]) {
     (void)ParseCaptureFeatureProfile(argc, argv);
-    RefuseUnsupportedTemporalAuditExecution(argc, argv);
+    const auto temporal_audit = ParseTemporalAuditRuntimeOptions(argc, argv);
     // Admission precedes --save-root directory creation.
     const auto diagnostic_environment = Core::ReadEnvironment("LUMIN_CAPTURE_DIAGNOSTICS");
     const auto diagnostics = Rendering::ResolveDiagnosticCaptureOptions(
         std::span<char* const>(argv + 1, static_cast<std::size_t>(std::max(0, argc - 1))),
         diagnostic_environment ? std::optional<std::string_view>(*diagnostic_environment)
                                : std::nullopt);
+    // Temporal admission above owns its fixed site, ROI and producer exclusions.
     if (diagnostics.enabled) {
-        for (const auto* parity : {"--render-parity-frame", "--upscale-seam-parity"}) {
-            if (!GetCommandLineOption(argc, argv, parity, "").empty()) {
-                throw std::invalid_argument(std::string("capture diagnostics refuse ") + parity +
-                                            "; parity redispatches require separate captures");
+        if (!temporal_audit) {
+            for (const auto* parity : {"--render-parity-frame", "--upscale-seam-parity"}) {
+                if (!GetCommandLineOption(argc, argv, parity, "").empty()) {
+                    throw std::invalid_argument(std::string("capture diagnostics refuse ") +
+                                                parity +
+                                                "; parity redispatches require separate captures");
+                }
             }
-        }
-        for (const auto* producer : {"--render-parity-ssao",
-                                     "--bake-tree-impostor",
-                                     "--survey",
-                                     "--ui-screenshot",
-                                     "--ui-thumbs",
-                                     "--scene-config",
-                                     "--timelapse",
-                                     "--timelapse-frames"}) {
-            if (HasCommandLineOption(argc, argv, producer)) {
-                throw std::invalid_argument(std::string("capture diagnostics refuse ") + producer +
-                                            "; completed-frame adapter unavailable");
+            for (const auto* producer : {"--render-parity-ssao",
+                                         "--bake-tree-impostor",
+                                         "--survey",
+                                         "--ui-screenshot",
+                                         "--ui-thumbs",
+                                         "--scene-config",
+                                         "--timelapse",
+                                         "--timelapse-frames"}) {
+                if (HasCommandLineOption(argc, argv, producer)) {
+                    throw std::invalid_argument(std::string("capture diagnostics refuse ") +
+                                                producer + "; completed-frame adapter unavailable");
+                }
             }
-        }
-        const auto scenario = ResolveRuntimeScenario(argc, argv);
-        const bool frame_scan = HasCommandLineOption(argc, argv, "--frame-scan");
-        const bool render_benchmark = HasCommandLineOption(argc, argv, "--render-benchmark");
-        if ((!scenario.empty() && (frame_scan || render_benchmark)) ||
-            (frame_scan && render_benchmark)) {
-            throw std::invalid_argument("capture diagnostics refuse multiple capture drivers");
-        }
-        // These producers transform pixels, resize/redispatch targets or require forward
-        // contributors that the completed-frame adapter cannot yet attribute.
-        // Admission must precede save-root and scenario artifact creation.
-        for (const auto* unsupported : {"window_mode_stress_smoke",
-                                        "material_visual_smoke",
-                                        "farlod_horizon_smoke",
-                                        "water_visual_smoke",
-                                        "weather_visual_smoke",
-                                        "particle_emitter_determinism_smoke",
-                                        "foliage_visual_smoke",
-                                        "precipitation_smoke"}) {
-            if (scenario == unsupported) {
-                throw std::invalid_argument(std::string("capture diagnostics refuse ") +
-                                            unsupported +
-                                            "; producer or extent coverage unavailable");
+            const auto scenario = ResolveRuntimeScenario(argc, argv);
+            const bool frame_scan = HasCommandLineOption(argc, argv, "--frame-scan");
+            const bool render_benchmark = HasCommandLineOption(argc, argv, "--render-benchmark");
+            if ((!scenario.empty() && (frame_scan || render_benchmark)) ||
+                (frame_scan && render_benchmark)) {
+                throw std::invalid_argument("capture diagnostics refuse multiple capture drivers");
             }
-        }
-        const bool scenario_capture =
-            scenario == "world_visual_sweep" || scenario == "lod_seam_arrival_smoke" ||
-            scenario == "lod_ground_smoke" || scenario == "skybox_visual_smoke" ||
-            scenario == "cloud_shadow_smoke" || scenario == "timeofday_sweep_smoke" ||
-            scenario == "player_view_smoke" || scenario == "skinned_mesh_visual_smoke" ||
-            scenario == "creature_slice_smoke";
-        const bool benchmark =
-            !GetCommandLineOption(argc, argv, "--render-benchmark", "").empty() &&
-            !GetCommandLineOption(argc, argv, "--render-benchmark-screenshot", "").empty();
-        if ((!scenario.empty() && !scenario_capture) ||
-            (scenario.empty() && GetCommandLineOption(argc, argv, "--frame-scan", "").empty() &&
-             !benchmark)) {
-            throw std::invalid_argument("capture diagnostics refuse unsupported capture mode: " +
-                                        scenario);
+            // These producers transform pixels, resize/redispatch targets or require forward
+            // contributors that the completed-frame adapter cannot yet attribute.
+            // Admission must precede save-root and scenario artifact creation.
+            for (const auto* unsupported : {"window_mode_stress_smoke",
+                                            "material_visual_smoke",
+                                            "farlod_horizon_smoke",
+                                            "water_visual_smoke",
+                                            "weather_visual_smoke",
+                                            "particle_emitter_determinism_smoke",
+                                            "foliage_visual_smoke",
+                                            "precipitation_smoke"}) {
+                if (scenario == unsupported) {
+                    throw std::invalid_argument(std::string("capture diagnostics refuse ") +
+                                                unsupported +
+                                                "; producer or extent coverage unavailable");
+                }
+            }
+            const bool scenario_capture =
+                scenario == "world_visual_sweep" || scenario == "lod_seam_arrival_smoke" ||
+                scenario == "lod_ground_smoke" || scenario == "skybox_visual_smoke" ||
+                scenario == "cloud_shadow_smoke" || scenario == "timeofday_sweep_smoke" ||
+                scenario == "player_view_smoke" || scenario == "skinned_mesh_visual_smoke" ||
+                scenario == "creature_slice_smoke";
+            const bool benchmark =
+                !GetCommandLineOption(argc, argv, "--render-benchmark", "").empty() &&
+                !GetCommandLineOption(argc, argv, "--render-benchmark-screenshot", "").empty();
+            if ((!scenario.empty() && !scenario_capture) ||
+                (scenario.empty() && GetCommandLineOption(argc, argv, "--frame-scan", "").empty() &&
+                 !benchmark)) {
+                throw std::invalid_argument(
+                    "capture diagnostics refuse unsupported capture mode: " + scenario);
+            }
         }
     }
     int surface_radius = 0;
@@ -318,8 +323,8 @@ RuntimePathOptions ParseRuntimePathOptions(int argc, char* argv[]) {
 
 RuntimeScenarioConfig
 ParseRuntimeScenarioConfig(int argc, char* argv[], const std::filesystem::path& root_dir) {
-    RefuseUnsupportedTemporalAuditExecution(argc, argv);
     RuntimeScenarioConfig config;
+    config.temporal_audit = ParseTemporalAuditRuntimeOptions(argc, argv);
     config.capture_feature_profile = ParseCaptureFeatureProfile(argc, argv);
     ParseSurfaceRadiusOptions(
         argc, argv, config.horizon_radius, config.collision_radius, config.benchmark_stream_radius);
@@ -434,7 +439,7 @@ ParseRuntimeScenarioConfig(int argc, char* argv[], const std::filesystem::path& 
         config.lod_seam_arrival_smoke() || config.persistence_roundtrip_smoke() ||
         config.player_view_smoke() || config.farlod_horizon_smoke() ||
         config.skinned_mesh_visual_smoke() || config.creature_slice_smoke() ||
-        config.window_mode_stress_smoke() || config.world_visual_sweep()) {
+        config.window_mode_stress_smoke() || config.world_visual_sweep() || config.temporal_audit) {
         config.auto_create_world = true;
         config.auto_enter_world = true;
     }
@@ -519,7 +524,7 @@ RuntimeScenarioConfig::FeatureProfile ParseCaptureFeatureProfile(int argc, char*
 // Temporal plan admission: shared by both startup paths and planning callers.
 namespace Luminumbra::Client::ScenarioHarness {
 std::optional<Rendering::TemporalAuditPlan> ParseTemporalAuditPlanOptions(int argc, char* argv[]) {
-    constexpr std::array<std::string_view, 10> flags = {"--temporal-audit-plan",
+    constexpr std::array<std::string_view, 13> flags = {"--temporal-audit-plan",
                                                         "--temporal-start-tick",
                                                         "--temporal-tick-rate",
                                                         "--temporal-day-ticks",
@@ -528,13 +533,16 @@ std::optional<Rendering::TemporalAuditPlan> ParseTemporalAuditPlanOptions(int ar
                                                         "--temporal-strike-tick",
                                                         "--temporal-frame-limit",
                                                         "--temporal-tick-limit",
-                                                        "--temporal-moon-phase-milli"};
+                                                        "--temporal-moon-phase-milli",
+                                                        "--temporal-site",
+                                                        "--temporal-roi",
+                                                        "--temporal-output-bytes"};
     std::array<bool, flags.size()> seen{};
     std::array<std::uint64_t, flags.size()> values = {
         0, 0, 0, 0, 0, 0, 0, Rendering::kTemporalMaxFrames, Rendering::kTemporalMaxTicks, 1000};
     Rendering::TemporalAuditSpan span = Rendering::TemporalAuditSpan::DayNight;
     bool any = false;
-    // O(argc * 10), with fixed storage. Check every occurrence and both forms.
+    // O(argc * 13), with fixed storage. Check every occurrence and both forms.
     for (int argument_index = 1; argument_index < argc; ++argument_index) {
         const std::string_view argument(argv[argument_index]);
         if (!argument.starts_with("--temporal-"))
@@ -556,7 +564,12 @@ std::optional<Rendering::TemporalAuditPlan> ParseTemporalAuditPlanOptions(int ar
             value = argv[++argument_index];
         if (value.empty())
             throw std::invalid_argument(std::string(name) + " requires a nonempty value");
-        if (index == 0) {
+        if (index == 10 || index == 11) {
+            if (value != (index == 10 ? "spawn" : "full-frame")) {
+                throw std::invalid_argument(
+                    "temporal site/ROI unsupported: require spawn/full-frame");
+            }
+        } else if (index == 0) {
             if (value == "day-night")
                 span = Rendering::TemporalAuditSpan::DayNight;
             else if (value == "weather-cycle")
@@ -598,9 +611,133 @@ std::optional<Rendering::TemporalAuditPlan> ParseTemporalAuditPlanOptions(int ar
     return std::move(admission.plan);
 }
 
-void RefuseUnsupportedTemporalAuditExecution(int argc, char* argv[]) {
-    const auto plan = ParseTemporalAuditPlanOptions(argc, argv);
-    if (plan || GetCommandLineOption(argc, argv, "--scenario", "") == "temporal_audit")
-        throw std::invalid_argument("temporal audit execution unsupported: plan admission only");
+std::optional<RuntimeTemporalAudit> ParseTemporalAuditRuntimeOptions(int argc, char* argv[]) {
+    auto plan = ParseTemporalAuditPlanOptions(argc, argv);
+    const auto scenario = GetCommandLineOption(argc, argv, "--scenario", "");
+    if (!plan && scenario != "temporal_audit") {
+        return std::nullopt;
+    }
+    if (!plan || scenario != "temporal_audit") {
+        throw std::invalid_argument(
+            "temporal execution requires --scenario=temporal_audit and a plan");
+    }
+    const auto& request = plan->request;
+    if (request.start_tick != 0 || request.ticks_per_second != 30 ||
+        request.ticks_per_day != 162000 || request.dawn_tick != 27000 ||
+        request.dusk_tick != 135000) {
+        throw std::invalid_argument(
+            "temporal execution requires the fresh canonical 30 Hz calendar");
+    }
+    // These options select independent writers, cameras or session inputs. A
+    // temporal run owns one fresh seed-424242 default world and one fixed view.
+    for (int index = 1; index < argc; ++index) {
+        const std::string_view argument(argv[index]);
+        if (argument.starts_with("--timelapse-") || argument.starts_with("--render-benchmark-")) {
+            throw std::invalid_argument("temporal execution refuses other capture controls");
+        }
+    }
+    for (const auto* incompatible : {"--load-world",
+                                     "--systems-config",
+                                     "--preset-json",
+                                     "--world-preset",
+                                     "--cam-pos",
+                                     "--cam-look",
+                                     "--cam-dir",
+                                     "--debug-goto",
+                                     "--play-paths",
+                                     "--profile-fly",
+                                     "--scene-config",
+                                     "--timelapse",
+                                     "--timelapse-frames",
+                                     "--frame-scan",
+                                     "--render-benchmark",
+                                     "--survey",
+                                     "--ui-screenshot",
+                                     "--ui-thumbs",
+                                     "--timed-run",
+                                     "--isolation-layers",
+                                     "--isolation-backdrop",
+                                     "--traversal",
+                                     "--capture-size",
+                                     "--cam-yaw",
+                                     "--cam-pitch",
+                                     "--render-parity-frame",
+                                     "--upscale-seam-parity",
+                                     "--render-parity-ssao",
+                                     "--bake-tree-impostor",
+                                     "--render-benchmark-schema",
+                                     "--debug-glass-pane",
+                                     "--debug-view"}) {
+        if (HasCommandLineOption(argc, argv, incompatible)) {
+            throw std::invalid_argument(std::string("temporal execution refuses ") + incompatible);
+        }
+    }
+    if (ParseCaptureFeatureProfile(argc, argv) ==
+        RuntimeScenarioConfig::FeatureProfile::AllFeatures) {
+        throw std::invalid_argument(
+            "temporal execution refuses the unsupported all_features profile");
+    }
+    const auto environment = Core::ReadEnvironment("LUMIN_CAPTURE_DIAGNOSTICS");
+    const auto diagnostics = Rendering::ResolveDiagnosticCaptureOptions(
+        std::span<char* const>(argv + 1, static_cast<std::size_t>(std::max(0, argc - 1))),
+        environment ? std::optional<std::string_view>(*environment) : std::nullopt);
+    // The only admitted extent is compile-time fixed. Mirror A4's reservation:
+    // 128 MiB registry, 64 MiB workspace + 4 KiB codec scratch, 64 KiB row,
+    // two RGBA32UI planes and retained RGB. No GL header enters startup admission.
+    constexpr std::uint64_t pixels = std::uint64_t{kCapturePinnedWidth} * kCapturePinnedHeight;
+    static_assert(kCapturePinnedWidth > 0 && kCapturePinnedWidth <= 16384 &&
+                  kCapturePinnedHeight > 0 && kCapturePinnedHeight <= 16384 && pixels <= 16777216);
+    static_assert(pixels * (2 * sizeof(Rendering::DiagnosticId) + 3) + 192ULL * 1024 * 1024 + 4096 +
+                      65536 <=
+                  512ULL * 1024 * 1024);
+    if (!diagnostics.enabled ||
+        (diagnostics.probe && ((*diagnostics.probe)[0] >= kCapturePinnedWidth ||
+                               (*diagnostics.probe)[1] >= kCapturePinnedHeight))) {
+        throw std::invalid_argument("temporal execution requires admitted A4 diagnostics and ROI");
+    }
+    // A4 output: RGB (3), two RGB float planes (24), depth/material (8),
+    // RGBA32UI (16) bytes/pixel. Reserve its conservative 64 MiB metadata
+    // workspace too; this covers headers, draw JSON, probe and capture manifest.
+    Rendering::TemporalSequenceBudget budget{.frame_bytes = pixels * 51 + 64ULL * 1024 * 1024,
+                                             .manifest_bytes = 16ULL * 1024 * 1024,
+                                             .output_bytes = Rendering::kTemporalMaxOutputBytes};
+    if (HasCommandLineOption(argc, argv, "--temporal-output-bytes")) {
+        const auto value = GetCommandLineOption(argc, argv, "--temporal-output-bytes", "");
+        const auto result =
+            std::from_chars(value.data(), value.data() + value.size(), budget.output_bytes);
+        if (result.ec != std::errc{} || result.ptr != value.data() + value.size()) {
+            throw std::invalid_argument("temporal output budget requires an unsigned integer");
+        }
+    }
+    Rendering::TemporalAuditSequence admission(*plan, budget);
+    if (!admission.refusal().empty()) {
+        throw std::invalid_argument("temporal execution refused: " +
+                                    std::string(admission.refusal()));
+    }
+    return RuntimeTemporalAudit{
+        .plan = std::move(*plan), .budget = budget, .diagnostics = diagnostics};
+}
+
+Systems::WeatherSchedule BuildTemporalAuditWeatherSchedule(const RuntimeTemporalAudit& audit) {
+    const auto& request = audit.plan.request;
+    if (request.span != Rendering::TemporalAuditSpan::WeatherCycle || request.start_tick != 0 ||
+        request.ticks_per_second != 30 || request.strike_tick < 1500 ||
+        request.strike_tick >= 2700) {
+        throw std::invalid_argument("temporal weather requires an admitted canonical weather plan");
+    }
+    using Category = Systems::WeatherCategory;
+    return {.phases =
+                {{.start_tick = 0, .category = Category::Clear, .precipitation = 0, .storm = 0},
+                 {.start_tick = 600, .category = Category::Clear, .precipitation = 0, .storm = 0},
+                 {.start_tick = 1500,
+                  .category = Category::Rain,
+                  .precipitation = 65535,
+                  .storm = 65535},
+                 {.start_tick = 2700,
+                  .category = Category::Rain,
+                  .precipitation = 65535,
+                  .storm = 65535},
+                 {.start_tick = 3600, .category = Category::Clear, .precipitation = 0, .storm = 0}},
+            .strike_tick = request.strike_tick};
 }
 } // namespace Luminumbra::Client::ScenarioHarness
