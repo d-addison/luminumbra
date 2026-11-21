@@ -432,6 +432,7 @@ target_link_libraries(game_assets_test PRIVATE gtest_main nlohmann_json)
 # so this target needs no client lib / GL link -- just the include root + gtest.
 add_executable(tree_lod_test
     rendering/tree_lod_test.cpp
+    rendering/StaticPropSpatialIndex_test.cpp
 )
 
 target_include_directories(tree_lod_test PRIVATE
