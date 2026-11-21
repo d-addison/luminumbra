@@ -1,0 +1,21 @@
+{
+  "id": "contract.ar.file.06",
+  "source": "docs/active-regions.md#file-and-compatibility",
+  "statement": "Acceptance obligations: The ledger therefore carries two tick values. / The canonical scheduler tick advances only when the scheduler runs and is part of the hash projection. / The validation ceiling is the latest world time the ledger knows about, bounds every persisted record stamp, and is observational bookkeeping excluded from the hash. / Saving does not raise the ceiling: a save whose clock runs ahead of everything the ledger knows about stamps a last-save value above the ceiling and fails its own decode check, which is how an inconsistent metadata and ledger pair is refused rather than written. / The raw persistence reader still exposes the durable older header for validation and inspection. / Recovery tests reload rewind metadata failures, forward ledger failures and terminated ledger writes into fresh sessions and save immediately, both unchanged and after an edit.",
+  "status": "planned",
+  "requirements": [
+    "ar.file.031",
+    "ar.file.032",
+    "ar.file.033",
+    "ar.file.038",
+    "ar.file.039",
+    "ar.file.040"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArFileContract.Requirements06",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.file.06.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

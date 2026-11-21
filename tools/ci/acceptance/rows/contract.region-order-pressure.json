@@ -1,0 +1,38 @@
+{
+  "id": "contract.region-order-pressure",
+  "source": "docs/active-regions.md#activation-and-ordering",
+  "statement": "Priority and integer pressure are deterministic, saturating and strict at equality; reduction, recovery and forced wakes use the declared order.",
+  "status": "covered",
+  "requirements": [
+    "ar.activation.018",
+    "ar.activation.019",
+    "ar.activation.020",
+    "ar.activation.022",
+    "ar.activation.023",
+    "ar.activation.031",
+    "ar.activation.032",
+    "ar.activation.033",
+    "ar.activation.034",
+    "ar.activation.035",
+    "ar.activation.036",
+    "ar.activation.040"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ActiveRegionLedgerTest.FullTickIntegerSumsAreStrictAndOrderIndependent"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ActiveRegionLedgerTest.PrioritySelectsLowestForReductionAndHighestForRecovery"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ActiveRegionLedgerTest.NearbyRegionsStayFullCadenceAndWakeInPriorityOrder"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ActiveRegionLedgerTest.ReductionFreezeRecoveryAndHoldsSurviveReload"
+    }
+  ]
+}

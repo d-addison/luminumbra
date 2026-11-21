@@ -1,0 +1,21 @@
+{
+  "id": "sim.budget-capture",
+  "source": "docs/sim-budget-telemetry.md",
+  "statement": "Per-system simulation tick work counts must be captured deterministically on representative worlds. SimBudgetCaptureContract validates synthetic artifacts and command construction; retained populated default/mountains/archipelago before/after captures with per-stage p50/p95/p99 durations and measured workload identities remain PENDING.",
+  "status": "needs-native-run",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "SimBudgetCaptureContract"
+    },
+    {
+      "kind": "native",
+      "ref": "tools/perf/capture_sim_budget.py",
+      "command": "python3 tools/perf/capture_sim_budget.py --binary <server> --evidence-dir <capture-dir>",
+      "receipt_schema": "luminumbra.sim_budget_capture.v1"
+    }
+  ],
+  "requirements": [
+    "dw.mappings.025"
+  ]
+}

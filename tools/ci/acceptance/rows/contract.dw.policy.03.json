@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.policy.03",
+  "source": "docs/distant-world.md#per-system-distant-policy",
+  "statement": "Acceptance obligations: reduced cadences use power-of-two divisors with a common phase so neighbouring due ticks coincide, a border steps only on ticks when both regions are due (at the coarser cadence) with a paired reservation and paired accounting, and a border to a frozen region is sealed | Millimetre arrays kept, no flow | / | Wind, weather, aether ambience | Stateful world-anchored pages in C4; / C1 uses a persisted fixed ambient anchor independent of respawn | A 24 m cell is owned by the region containing its centre; / a page update is masked to owned cells whose region is due this tick, a partially active page seeds only its owned cells on first activation, and exchange across a cell boundary follows the same shared-boundary schedule as water (both owners due, at the coarser cadence, sealed toward frozen regions), so a frozen region's cells and digest never change; / storms are owned by the region containing their centre, carry an absolute spawn tick and an active-age accumulator, advance and schedule strikes only while their region is due, and transfer ownership across a border only on a tick when the destination is due, otherwise waiting at the border; / a page entering activation is seeded from seed, tick and position | Owned cells immutable;",
+  "status": "planned",
+  "requirements": [
+    "dw.policy.013",
+    "dw.policy.014",
+    "dw.policy.015",
+    "dw.policy.016",
+    "dw.policy.017",
+    "dw.policy.018"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwPolicyContract.Requirements03",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.policy.03.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

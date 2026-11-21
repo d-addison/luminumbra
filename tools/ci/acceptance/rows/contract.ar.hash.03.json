@@ -1,0 +1,21 @@
+{
+  "id": "contract.ar.hash.03",
+  "source": "docs/active-regions.md#hash-and-replay",
+  "statement": "Acceptance obligations: Readers limit the file to 96 MiB and the roster to 1,000,000 ticks, require the exact replay tick count, and reject unknown keys, invalid digests and checksum mismatches as `Corrupt region schedule trace.` Absence is `Missing region schedule trace.`; / a higher numeric schema suffix is `Unsupported future region schedule trace version.` An off replay with a companion refuses incompatible configuration. / Finalizing a disabled recording removes any previous companion at that path; / a filesystem removal error makes recording fail and reports the path and cause. / The sidecar is diagnostic replay evidence, never a save member or world-hash input. / Recording and playback emit and verify one digest after each host tick;",
+  "status": "planned",
+  "requirements": [
+    "ar.hash.017",
+    "ar.hash.018",
+    "ar.hash.019",
+    "ar.hash.020",
+    "ar.hash.021",
+    "ar.hash.022"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArHashContract.Requirements03",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.hash.03.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

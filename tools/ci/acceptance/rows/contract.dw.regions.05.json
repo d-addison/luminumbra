@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.regions.05",
+  "source": "docs/distant-world.md#persistent-active-regions",
+  "statement": "Acceptance obligations: see [the active-region format and scheduling guide](active-regions.md) for its canonical bytes, refusal behaviours and bounded slice boundaries. / It has no per-system consumers and no measured budget caps yet. / Dirty parking, snapshot transactions and the diagnostic panel are planned for v0.3.1. / Current default behaviour still evicts dirty chunks without a flush, the client saves only on quit or shutdown, and the dedicated server autosave interval defaults to 9000 ticks (five minutes at the canonical 30 Hz clock). / Explicit zero disables autosave; / capture and determinism fixtures explicitly use 30 ticks.",
+  "status": "planned",
+  "requirements": [
+    "dw.regions.025",
+    "dw.regions.026",
+    "dw.regions.027",
+    "dw.regions.028",
+    "dw.regions.029",
+    "dw.regions.030"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwRegionsContract.Requirements05",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.regions.05.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

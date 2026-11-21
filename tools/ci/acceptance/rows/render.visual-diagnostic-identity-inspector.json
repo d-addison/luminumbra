@@ -1,0 +1,30 @@
+{
+  "id": "render.visual-diagnostic-identity-inspector",
+  "source": "docs/development/visual-diagnostics.md#implementation-inventory",
+  "statement": "Identity views and the developer-console pixel inspector retain deferred IDs, camera and draw metadata on explicit refresh. Armed viewport picking converts window/DPI coordinates once, labels render/output resolutions and ignores disarmed or out-of-image clicks. A fixed nearest-texel 9 by 9 deferred-albedo zoom shares the one-record 48-byte inspection readback. Freeze retains one frame of albedo, normal/material, depth, IDs, camera and draw table; output resize and render-scale changes invalidate pending selections and retained storage. Clipboard export copies the exact schema-1 probe; closed and idle inspectors do not read back. Registered DiagnosticInspector, DiagnosticInspectorGl and DiagnosticViewportGl regressions cover conversion, refusal, consistency, resize, request counts and export; native execution remains pending.",
+  "status": "partial",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticInspector.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticInspectorGl.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticViewportGl.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticCaptureIntegration.*",
+      "planned": "Add and run GPU attribution and scenario capture bundle regressions; owner: maintainers"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/development/visual-diagnostics.md"
+    }
+  ],
+  "requirements": []
+}

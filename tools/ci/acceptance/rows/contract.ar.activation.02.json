@@ -1,0 +1,21 @@
+{
+  "id": "contract.ar.activation.02",
+  "source": "docs/active-regions.md#activation-and-ordering",
+  "statement": "Acceptance obligations: The game has explicit `NotifyGroundObjectEdit` and `PinActiveRegion` entry points; / ground-object records and simulation are not introduced here. / forced wakes and that transition are applied in forward priority order. / An unknown region in work input is an error. / Work is supplied by the host, never by timers or streaming telemetry. / No consumer counters are invented here.",
+  "status": "planned",
+  "requirements": [
+    "ar.activation.013",
+    "ar.activation.014",
+    "ar.activation.021",
+    "ar.activation.024",
+    "ar.activation.025",
+    "ar.activation.026"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArActivationContract.Requirements02",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.activation.02.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

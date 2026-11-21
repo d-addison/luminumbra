@@ -1,0 +1,47 @@
+{
+  "id": "contract.tier-values",
+  "source": "docs/distant-world.md#far-range-declaration-and-compatibility",
+  "statement": "The published one-based tier dimensions, nominal horizontal bands and invalid-input refusals have landed unit evidence; runtime adoption is tracked separately.",
+  "status": "covered",
+  "requirements": [
+    "dw.tiers.004",
+    "dw.tiers.005",
+    "dw.tiers.006",
+    "dw.tiers.007",
+    "dw.tiers.008",
+    "dw.tiers.009",
+    "dw.tiers.010",
+    "dw.tier-api.001",
+    "dw.tier-api.003",
+    "dw.tier-api.004",
+    "dw.tier-api.005",
+    "dw.tier-api.006",
+    "dw.tier-api.007",
+    "dw.tier-api.010",
+    "dw.tier-api.012",
+    "dw.tier-api.013",
+    "dw.tier-api.015"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "FarTierTable.PublishedValues"
+    },
+    {
+      "kind": "ctest",
+      "ref": "FarTierTable.NestedDimensions"
+    },
+    {
+      "kind": "ctest",
+      "ref": "FarTierTable.UniformAngularSampleDensity"
+    },
+    {
+      "kind": "ctest",
+      "ref": "FarTierTable.HorizontalDistanceBoundaries"
+    },
+    {
+      "kind": "ctest",
+      "ref": "FarTierTable.RejectsInvalidInputs"
+    }
+  ]
+}

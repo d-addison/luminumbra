@@ -1,0 +1,20 @@
+{
+  "id": "perf.statistics",
+  "source": "docs/distant-world.md#performance-measurement-contract",
+  "statement": "C++ summarize and tools/perf/perf.py compute p50, p95, p99, maximum and median absolute deviation against the shared fixture. The render capture validator checks synthetic distributions against frame samples and rejects a forged p95 or mean.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "RenderMeasurementStatistics"
+    },
+    {
+      "kind": "ctest",
+      "ref": "RenderContractPython"
+    },
+    {
+      "kind": "script",
+      "ref": "tools/perf/perf.py"
+    }
+  ]
+}

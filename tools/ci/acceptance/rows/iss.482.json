@@ -1,0 +1,25 @@
+{
+  "id": "iss.482",
+  "source": "issue #482",
+  "statement": "Synthetic v2 and v3 report-frame captures accept float rotation rounding at large camera positions with a bounded position-scaled translation allowance, and reject wrong matrices while preserving the small-position tolerance. Receipt evidence retains testcase attribution and requires successful execution metadata; software rendering evidence requires exact testcase identities.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "RenderContractPython"
+    },
+    {
+      "kind": "ctest",
+      "ref": "AmbientReceiptComparatorContract"
+    },
+    {
+      "kind": "ctest",
+      "ref": "QualificationCaptureContract"
+    },
+    {
+      "kind": "ctest",
+      "ref": "SoftwareGlEvidenceContract"
+    }
+  ],
+  "requirements": []
+}

@@ -1,0 +1,69 @@
+{
+  "id": "net.replication-receive-work",
+  "source": "docs/engine-guide.md#persistence-replay-and-networking",
+  "statement": "Replication public calls share at most 1024 receive polls and a 256 KiB payload threshold plus one bounded frame across clients, admission control and nested refusals. Control-batch yields preserve closing links until commands, ACKs and authoritative snapshots drain. Send and receive capacities remain distinct and enforced. Clean-disconnect artifacts require terminal, non-desynced sessions. Native regressions are registered; execution and qualification remain pending.",
+  "status": "covered",
+  "requirements": [],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ReplicationEndpoint.ContinuousReceiveSourcesYieldAndOtherClientsProgress"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ReplicationEndpoint.ReceiveBytesBoundMalformedFramesAndPreserveQueuedMessages"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ReplicationEndpoint.SnapshotRefusalsRetainClosingLinksUntilCommandsAndAcksDrain"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ReplicationEndpoint.ContinuousTerminalRefusalsRetainTransportContinuation"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ReplicationEndpoint.UsercmdAndNestedAckRefusalsShareReceiveBudgetAndKeepFinalSnapshot"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ReplicationEndpoint.TransientBroadcastRefusalsShareBudgetAcrossClients"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ReplicationEndpoint.BackpressureDeadlineRetainsRefillingLinkUntilFinalCommandsDrain"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ReplicationEndpoint.ReceiveCapacityIsIndependentAndStillRejectsOversizedSnapshots"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ReplicationEndpoint.TransportUsercmdAndAckLimitsAreTerminalBeforeSending"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ReplicationAdmission.ForwardsDirectionalReceiveLimitBeforeAndAfterAdmission"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ReplicationAdmission.ControlBatchYieldPreservesClosingClientAndFinalSnapshot"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ReplicationAdmission.ControlFramesShareTheEndpointByteBudget"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ReplicationAdmission.BoundedEndpointReceiveRetainsAdmissionRefusals"
+    },
+    {
+      "kind": "ctest",
+      "ref": "NetworkedSessionDriverTest.MissingOrFailedSessionsCannotAdvertiseCleanDisconnect"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/engine-guide.md"
+    }
+  ]
+}

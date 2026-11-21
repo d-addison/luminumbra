@@ -1,0 +1,19 @@
+{
+  "id": "contract.ar.history.05",
+  "source": "docs/active-regions.md#historical-ambient-hash-portability-investigation",
+  "statement": "Acceptance obligations: These are standard Git bundle and format-patch artifacts, not engine inputs. / Absence supplies no commit; / corruption or an unsupported bundle version is refused by Git's bundle verifier, and a patch with invalid context is refused by Git's patch application. / Neither artifact grants permission to alter another checkout.",
+  "status": "planned",
+  "requirements": [
+    "ar.history.044",
+    "ar.history.045",
+    "ar.history.046",
+    "ar.history.047"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArHistoryContract.Requirements05",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.history.05.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ac"
+    }
+  ]
+}

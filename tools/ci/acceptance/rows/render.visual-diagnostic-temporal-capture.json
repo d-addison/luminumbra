@@ -1,0 +1,26 @@
+{
+  "id": "render.visual-diagnostic-temporal-capture",
+  "source": "docs/development/visual-diagnostics.md#implementation-inventory",
+  "statement": "GL-free temporal audit planning and sequence execution protocols are implemented; shipping runtime execution is refused. App/site transport integration, native capture, temporal metrics and non-vacuous feature evidence remain pending.",
+  "status": "partial",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "TemporalAudit.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "TemporalAuditSequence.*"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/development/visual-diagnostics.md"
+    },
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticCaptureIntegration.*",
+      "planned": "Add and run GPU attribution and scenario capture bundle regressions; owner: maintainers"
+    }
+  ],
+  "requirements": []
+}

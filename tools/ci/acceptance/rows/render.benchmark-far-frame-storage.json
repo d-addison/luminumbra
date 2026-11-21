@@ -1,0 +1,16 @@
+{
+  "id": "render.benchmark-far-frame-storage",
+  "source": "docs/render-benchmark.md#compatibility-and-commands",
+  "statement": "All three benchmark schemas allocate a bounded far-mode frame ring; ordinary play allocates none. V3 and v4 issue additional GL queries.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "FarWorldDiagnostics.BenchmarkFrameCountStrictlyParsesBeforeApplyingBounds"
+    },
+    {
+      "kind": "ctest",
+      "ref": "FarWorldDiagnostics.BenchmarkSerializesEveryMeasuredFarStateAndSummary"
+    }
+  ]
+}

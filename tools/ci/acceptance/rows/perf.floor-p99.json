@@ -1,0 +1,30 @@
+{
+  "id": "perf.floor-p99",
+  "source": "docs/distant-world.md#performance-measurement-contract",
+  "statement": "Both profiles meet p99 frame_wall of at most 16.67 ms on every workload.",
+  "status": "needs-native-run",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "RenderContractPython"
+    },
+    {
+      "kind": "script",
+      "ref": "tools/perf/validate_render_capture.py"
+    },
+    {
+      "kind": "script",
+      "ref": "tools/perf/render_budget.py"
+    },
+    {
+      "kind": "native",
+      "ref": "tools/gates/run-render-qualification.ps1",
+      "planned": "render qualification gate (v0.3.1); owner: ac",
+      "command": "pwsh tools/gates/run-render-qualification.ps1 -Package <dir> -OutDir <dir>",
+      "receipt_schema": "luminumbra.render_qualification.v1"
+    }
+  ],
+  "requirements": [
+    "dw.mappings.006"
+  ]
+}

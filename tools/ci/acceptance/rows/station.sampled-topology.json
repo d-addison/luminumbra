@@ -1,0 +1,32 @@
+{
+  "id": "station.sampled-topology",
+  "source": "docs/distant-world.md#station-discovery-req-e4",
+  "statement": "Synthetic topology and placement fixtures verify sampled-portals.v1 lattice enumeration, clipping, indices, density thresholds, connected mouth exterior and arch roof/support predicates. Upper-bound portals use the same 12 m extent as anchor clipping; out-of-span binary32 samples reject individual candidates without refusing the query.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "StationDiscovery.*"
+    },
+    {
+      "kind": "doc",
+      "ref": "test/common/StationDiscovery_test.cpp"
+    }
+  ],
+  "requirements": [
+    "dw.station.035",
+    "dw.station.036",
+    "dw.station.037",
+    "dw.station.038",
+    "dw.station.039",
+    "dw.station.040",
+    "dw.station.041",
+    "dw.station.042",
+    "dw.station.043",
+    "dw.station.044",
+    "dw.station.045",
+    "dw.station.046",
+    "dw.station.047",
+    "dw.station.088"
+  ]
+}

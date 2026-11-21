@@ -1,0 +1,17 @@
+{
+  "id": "iss.63",
+  "source": "issue #63",
+  "statement": "A no-UI saved-world load exits cleanly and produces a nonblack capture whose context agrees with the artifact.",
+  "status": "needs-native-run",
+  "evidence": [
+    {
+      "kind": "native",
+      "ref": "tools/gates/run-noui-load.ps1",
+      "command": "pwsh tools/gates/run-noui-load.ps1 -Package <dir> -WorldId <id> -OutDir <dir>",
+      "receipt_schema": "luminumbra.noui_load.v1"
+    }
+  ],
+  "requirements": [
+    "dw.mappings.030"
+  ]
+}

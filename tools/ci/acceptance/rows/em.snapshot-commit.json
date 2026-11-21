@@ -1,0 +1,21 @@
+{
+  "id": "em.snapshot-commit",
+  "source": "docs/distant-world.md#evidence-map",
+  "statement": "Snapshot commit survives interruption after every rename and during the bake, and the catalog inspects read-only.",
+  "status": "partial",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "WorldOpenRefusal.CatalogSeparatesEmptyUnavailableAndRealMetadataWithoutWriting"
+    },
+    {
+      "kind": "ctest",
+      "ref": "SnapshotCommit.*",
+      "planned": "snapshot commit interruption regression; owner: fw"
+    }
+  ],
+  "requirements": [
+    "dw.evidence.004",
+    "dw.mappings.020"
+  ]
+}

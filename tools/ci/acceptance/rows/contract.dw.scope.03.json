@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.scope.03",
+  "source": "docs/distant-world.md#scope",
+  "statement": "Acceptance obligations: Raising the camera far plane over the existing heightfield far tiles does not satisfy this contract. / - Simulation over distance runs only in **persistent active regions** and only while the world host runs. / There is no wall-clock progression while a world is shut down. / - Ordinary client startup has audio on by default; / nothing in this contract depends on audio. / qualification, preview and capture commands pass `--no-audio` explicitly;",
+  "status": "planned",
+  "requirements": [
+    "dw.scope.013",
+    "dw.scope.014",
+    "dw.scope.015",
+    "dw.scope.016",
+    "dw.scope.017",
+    "dw.scope.018"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwScopeContract.Requirements03",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.scope.03.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: fw"
+    }
+  ]
+}

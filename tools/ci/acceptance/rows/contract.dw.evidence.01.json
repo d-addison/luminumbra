@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.evidence.01",
+  "source": "docs/distant-world.md#evidence-map",
+  "statement": "Acceptance obligations: | Far ladder, caves, seams | `far_volume_horizon_smoke` scenario (v2 artifact) through `validate-engine-frontier.ps1 -Mode FarLodHorizon` on default, mountains, archipelago and the cave-dense fixture; / `FarVolumeTile`, mesher and store gtests in the default ctest lane | / | Edits and far authority | `edit_bake_all_tiers_test`, `far_volume_store_test`, `world_open_refusal_test` cases, the `PersistenceRoundtrip` gate with the edited-world tour save | / | Snapshot commit and recovery | `snapshot_commit_test` (interruption after every rename and during the bake), catalog read-only inspection test, refusal matrix in `world_open_refusal_test` | / | Clock, ledger, pages, creatures, water | Unit gtests per record, `HeadlessServerTickHeavy` oracle extended to N-save-load-K versus N+K over every persisted subsystem with negative controls, `MovingResidency` 20 km drift, `PopulatedWorldReplay` | / | Hash and determinism | `validate-determinism-matrix.ps1` pins, `ecology_hash_test` additivity guards, `ReplayRoundtrip`, `LockstepLoopback` with checkpoint exchange enabled |",
+  "status": "planned",
+  "requirements": [
+    "dw.evidence.001",
+    "dw.evidence.002",
+    "dw.evidence.003",
+    "dw.evidence.004",
+    "dw.evidence.005",
+    "dw.evidence.006"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwEvidenceContract.Requirements01",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.evidence.01.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ac"
+    }
+  ]
+}

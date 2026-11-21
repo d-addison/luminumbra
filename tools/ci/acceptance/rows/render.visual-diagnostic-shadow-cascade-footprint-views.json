@@ -1,0 +1,26 @@
+{
+  "id": "render.visual-diagnostic-shadow-cascade-footprint-views",
+  "source": "docs/development/visual-diagnostics.md#implementation-inventory",
+  "statement": "Cascade and footprint views observe the production deferred shadow selector and projection, including the production UV and texel footprint. Registered GL-free source/catalogue and hidden-GL regressions cover these views; native execution remains pending.",
+  "status": "partial",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticContributions.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticContributionsGl.*"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/development/visual-diagnostics.md"
+    },
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticCaptureIntegration.*",
+      "planned": "Add and run GPU attribution and scenario capture bundle regressions; owner: maintainers"
+    }
+  ],
+  "requirements": []
+}

@@ -1,0 +1,21 @@
+{
+  "id": "render.visual-lint",
+  "source": "docs/visual-regression.md#world-sweep-review-sheets",
+  "statement": "The offline PNG checker emits deterministic JSON and a human summary for sentinel clusters, below-horizon sky candidates, gradient banding, opaque rectangles, unchanged matched weather captures and optional baseline histogram drift. Bounded inputs and synthetic regressions cover diagnostics and input refusals; heuristic findings do not establish rendering causes or visual approval.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "VisualLintCaptures"
+    },
+    {
+      "kind": "script",
+      "ref": "tools/gates/test_visual_lint.py"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/visual-regression.md"
+    }
+  ],
+  "requirements": []
+}

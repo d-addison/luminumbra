@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.render.01",
+  "source": "docs/distant-world.md#depth-fog-shadows-horizon",
+  "statement": "Acceptance obligations: - Depth uses reversed-Z with a 32-bit float attachment and a 17,408 m far plane. / The flip lands first with the far plane held at 3,200 m so parity baselines attribute differences to the depth change alone. / Frustum-culling planes and shadow coordinate extraction are audited for the changed clip convention as part of that slice. / - Aerial perspective extends to the ladder outer radius. / The invariant is enforced on the composited result, including the altitude fog path: measured transmittance at the outer clip along any qualified sightline is at most 5%, with an explicit outer-distance fade if the analytic density alone cannot guarantee it. / - Shadow cascades still end at 250 m.",
+  "status": "planned",
+  "requirements": [
+    "dw.render.001",
+    "dw.render.002",
+    "dw.render.003",
+    "dw.render.004",
+    "dw.render.005",
+    "dw.render.006"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwRenderContract.Requirements01",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.render.01.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: fw"
+    }
+  ]
+}

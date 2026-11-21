@@ -1,0 +1,33 @@
+{
+  "id": "station.refusals",
+  "source": "docs/distant-world.md#station-discovery-req-e4",
+  "statement": "Query domain and deterministic operation budgets refuse without partial candidates; lattice visits remain observable on refusal, empty catalogues succeed, CLI syntax and usage errors exit 2 while integer overflow and out-of-range query values exit 1, and failed stdout writes or flushes exit 1.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "StationDiscovery.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "StationDiscoveryContract"
+    },
+    {
+      "kind": "ctest",
+      "ref": "StationDiscoveryCliSmoke"
+    }
+  ],
+  "requirements": [
+    "dw.station.065",
+    "dw.station.066",
+    "dw.station.067",
+    "dw.station.068",
+    "dw.station.069",
+    "dw.station.070",
+    "dw.station.071",
+    "dw.station.072",
+    "dw.station.073",
+    "dw.station.074",
+    "dw.station.075"
+  ]
+}

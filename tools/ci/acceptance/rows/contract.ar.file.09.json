@@ -1,0 +1,21 @@
+{
+  "id": "contract.ar.file.09",
+  "source": "docs/active-regions.md#file-and-compatibility",
+  "statement": "Acceptance obligations: advances only when scheduling runs | / | 16 | 8 | validation ceiling; / observational restored clock bound | / | 24 | 8 | work limit; / UINT64_MAX is unlimited | / | 32 | 4 | nonzero hold ticks |",
+  "status": "planned",
+  "requirements": [
+    "ar.file.057",
+    "ar.file.058",
+    "ar.file.059",
+    "ar.file.060",
+    "ar.file.061",
+    "ar.file.062"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArFileContract.Requirements09",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.file.09.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

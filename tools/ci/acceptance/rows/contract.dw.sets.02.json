@@ -1,0 +1,18 @@
+{
+  "id": "contract.dw.sets.02",
+  "source": "docs/distant-world.md#three-explicit-sets",
+  "statement": "Acceptance obligations: The host's simulation anchor for the local player is the last walking feet position; / noclip and debug-camera movement do not move it, and it is persisted with the ledger and restored before the first tick. / A differential test proves that host activation, scheduling and authoritative hashes are identical with the camera elsewhere, in noclip, or with rendering disabled.",
+  "status": "planned",
+  "requirements": [
+    "dw.sets.013",
+    "dw.sets.014",
+    "dw.sets.015"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwSetsContract.Requirements02",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.sets.02.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

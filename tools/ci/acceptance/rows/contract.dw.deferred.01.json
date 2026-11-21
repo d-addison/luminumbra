@@ -1,0 +1,16 @@
+{
+  "id": "contract.dw.deferred.01",
+  "source": "docs/distant-world.md#deferred",
+  "statement": "Acceptance obligations: Traversal beyond 32 km from the origin (origin rebasing), views beyond 16 km, far shadows and terrain occlusion beyond the cascade range, depth handling on other rendering backends, hardware tiers beyond the primary machine, delivery of coarse state and the far authority overlay to remote clients, scent and foraging at distance, a simulation-only residency class, scheduled game events and Workshop content distribution are tracked separately and are not part of this contract.",
+  "status": "planned",
+  "requirements": [
+    "dw.deferred.001"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwDeferredContract.Requirements01",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.deferred.01.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ac"
+    }
+  ]
+}

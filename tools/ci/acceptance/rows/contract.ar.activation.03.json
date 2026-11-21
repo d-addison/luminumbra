@@ -1,0 +1,21 @@
+{
+  "id": "contract.ar.activation.03",
+  "source": "docs/active-regions.md#activation-and-ordering",
+  "statement": "Acceptance obligations: The telemetry v2 `events` timer ends after the ordered event drain, before region scheduling. / The server's physics timer ends before anchor submission. / Scheduler measurement remains part of the later diagnostics work; / it does not change the existing telemetry stage identities or units. / recovery reverses those steps after the under-hold. / Queued work makes a host tick incomplete for snapshot purposes: metadata and world saves refuse until the next simulation tick consumes it.",
+  "status": "planned",
+  "requirements": [
+    "ar.activation.027",
+    "ar.activation.028",
+    "ar.activation.029",
+    "ar.activation.030",
+    "ar.activation.037",
+    "ar.activation.038"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ArActivationContract.Requirements03",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/ar.activation.03.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

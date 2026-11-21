@@ -1,0 +1,28 @@
+{
+  "id": "contract.region-addressing",
+  "source": "docs/active-regions.md#activation-and-ordering",
+  "statement": "Signed 512 m addressing and height-independent membership have unit evidence. Edge tangencies and outside-corner square refusal still need discriminating portable regression evidence.",
+  "status": "partial",
+  "requirements": [
+    "ar.activation.001",
+    "ar.activation.002",
+    "ar.activation.003",
+    "ar.activation.004",
+    "ar.activation.005"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ActiveRegionLedgerTest.RegionAddressingAndFixedDiscIgnoreHeight"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ActiveRegionLedgerTest.ValidAnchorBoundaries"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ActiveRegionLedgerTest.DiscTangenciesAndOutsideCorners",
+      "planned": "prove exact edge tangencies count and outside-corner squares do not; owner: ac"
+    }
+  ]
+}

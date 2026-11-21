@@ -1,0 +1,17 @@
+{
+  "id": "perf.save-load-oracle",
+  "source": "docs/distant-world.md#performance-measurement-contract",
+  "statement": "A world saved at tick N, loaded and advanced K ticks equals an uninterrupted N+K run over every persisted subsystem, with negative controls per subsystem.",
+  "status": "planned",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "HeadlessServerTickHeavy.SaveLoadEqualsUninterrupted",
+      "planned": "save/load versus uninterrupted simulation oracle; owner: ds"
+    }
+  ],
+  "requirements": [
+    "dw.perf.016",
+    "dw.mappings.017"
+  ]
+}

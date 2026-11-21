@@ -1,0 +1,41 @@
+{
+  "id": "contract.region-rejections",
+  "source": "docs/active-regions.md#activation-and-ordering",
+  "statement": "Invalid host and scheduler inputs are counted; nonzero rejections enter the trace; fail-stop faults leave a savable session.",
+  "status": "covered",
+  "requirements": [
+    "ar.activation.049",
+    "ar.activation.051",
+    "ar.activation.052"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ActiveRegionLedgerTest.TrySetLocalAnchorDoesNotThrowAndKeepsPreviousAnchor"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ActiveRegionLedgerTest.InvalidSchedulerInputsAreSkippedAndCounted"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ActiveRegionLedgerTest.RejectedCountsAreAppendedToTheTraceOnlyWhenNonZero"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.InvalidHostInputsNeverThrowAndAreCounted"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.SchedulerFaultStopsTheFrameAndLeavesASavableConsistentSession"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.ThrowingDigestProviderWithQueuedWorkLeavesNoStaleWork"
+    },
+    {
+      "kind": "ctest",
+      "ref": "GameSessionHeadlessWorldTest.CorruptLedgerLoadClearsTheWorld"
+    }
+  ]
+}

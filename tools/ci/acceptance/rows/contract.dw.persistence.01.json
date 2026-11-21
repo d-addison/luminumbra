@@ -1,0 +1,21 @@
+{
+  "id": "contract.dw.persistence.01",
+  "source": "docs/distant-world.md#persistence-and-format-contract",
+  "statement": "Acceptance obligations: Unchanged: LMR1 container v2 for `chunks/region/*.lmr` including its lod-level and flag validation, FSD2 far payload v3 (kept decodable with its existing dimensions and validation; / no longer written by the runtime once the volumetric ladder lands), the `aether_state.efs` payload bytes and placement, the currently shipped plant record payload, canonical in-memory serialization, the replay checkpoint bytes and lockstep hash message. / There is no obsolete-world migration. / New records, each declared before its slice lands with exact version identity, byte order, lengths, checksums, allocation limits and section-evolution rules in the engine guide: / | `simulationTick`, `calendar` keys in `world_info.json` | existing file | tick 0 and pinned defaults | corrupt-metadata refusal | not applicable | / | `active-regions.arl` | `<save>/chunks/region/` | empty ledger | refuse | refuse as future format |",
+  "status": "planned",
+  "requirements": [
+    "dw.persistence.001",
+    "dw.persistence.002",
+    "dw.persistence.003",
+    "dw.persistence.004",
+    "dw.persistence.005",
+    "dw.persistence.006"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "DwPersistenceContract.Requirements01",
+      "planned": "Named future oracle for the complete requirements listed here; not a landed test. Planned fixture: test/fixtures/acceptance/dw.persistence.01.json; use the exact limits, thresholds, format identities and refusals in the linked inventory texts; no native execution or artifact qualification is supplied by this row.; owner: ds"
+    }
+  ]
+}

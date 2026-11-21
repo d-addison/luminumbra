@@ -1,0 +1,27 @@
+{
+  "id": "perf.fixed-view-workload",
+  "source": "docs/distant-world.md#performance-measurement-contract",
+  "statement": "Fixed views run 400 warm-up and 240 measured frames at pinned seed, preset, time of day and field of view.",
+  "status": "needs-native-run",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "RenderContractPython"
+    },
+    {
+      "kind": "script",
+      "ref": "tools/perf/qualification/matrix.json",
+      "planned": "render qualification workload manifest (v0.3.1); owner: ac"
+    },
+    {
+      "kind": "native",
+      "ref": "tools/perf/run_qualification.py",
+      "planned": "render qualification runner (v0.3.1); owner: ac",
+      "command": "python tools/perf/run_qualification.py --package <dir> --out <dir> --declare-refresh 3840x1600=143",
+      "receipt_schema": "luminumbra.render_qualification.v1"
+    }
+  ],
+  "requirements": [
+    "dw.mappings.011"
+  ]
+}

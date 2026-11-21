@@ -1,0 +1,18 @@
+{
+  "id": "render.visual-diagnostic-overdraw",
+  "source": "docs/development/visual-diagnostics.md#implementation-inventory",
+  "statement": "Overdraw instrumentation remains planned; no completed overdraw capture is qualified.",
+  "status": "partial",
+  "evidence": [
+    {
+      "kind": "doc",
+      "ref": "docs/development/visual-diagnostics.md"
+    },
+    {
+      "kind": "ctest",
+      "ref": "DiagnosticCaptureIntegration.*",
+      "planned": "Add and run GPU attribution and scenario capture bundle regressions; owner: maintainers"
+    }
+  ],
+  "requirements": []
+}

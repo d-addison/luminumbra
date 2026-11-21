@@ -1,0 +1,31 @@
+{
+  "id": "iss.129",
+  "source": "issue #129",
+  "statement": "Per-system simulation tick budgets must be measured on representative worlds and proposed from observed work. Capture and proposal tooling is available and tested with synthetic inputs. Complete pinned integer work limits for the 600-tick shipping workload do not qualify representative-world captures, duration distributions or telemetry-on/off state-hash and replay-work equality; those remain PENDING. Retain populated default/mountains/archipelago before/after capture and proposal receipts, per-stage p50/p95/p99 durations and measured workload identities. Equality qualification includes the existing populated 3,600-tick parity configurations with active regions enabled and disabled.",
+  "status": "needs-native-run",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "SimBudgetCaptureContract"
+    },
+    {
+      "kind": "ctest",
+      "ref": "SimBudgetGateContract"
+    },
+    {
+      "kind": "native",
+      "ref": "tools/perf/capture_sim_budget.py",
+      "command": "python3 tools/perf/capture_sim_budget.py --binary <server> --evidence-dir <capture-dir>",
+      "receipt_schema": "luminumbra.sim_budget_capture.v1"
+    },
+    {
+      "kind": "native",
+      "ref": "tools/perf/propose_sim_budgets.py",
+      "command": "python3 tools/perf/propose_sim_budgets.py <capture-dir> --output <proposal.json>",
+      "receipt_schema": "luminumbra.sim_budget_proposal.v1"
+    }
+  ],
+  "requirements": [
+    "dw.mappings.034"
+  ]
+}

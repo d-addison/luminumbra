@@ -1,0 +1,28 @@
+{
+  "id": "station.poses-and-ranking",
+  "source": "docs/distant-world.md#station-discovery-req-e4",
+  "statement": "Synthetic queries verify ordered cardinal viewing directions, eye and sightline clearance, upward millimetre rounding, nearest signed-cell ranking and stable IDs before limiting.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "StationDiscovery.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "StationDiscoveryContract"
+    }
+  ],
+  "requirements": [
+    "dw.station.048",
+    "dw.station.049",
+    "dw.station.050",
+    "dw.station.051",
+    "dw.station.052",
+    "dw.station.053",
+    "dw.station.054",
+    "dw.station.055",
+    "dw.station.056",
+    "dw.station.057"
+  ]
+}

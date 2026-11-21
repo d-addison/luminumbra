@@ -1,0 +1,42 @@
+{
+  "id": "em.hash-determinism",
+  "source": "docs/distant-world.md#evidence-map",
+  "statement": "Hash pins and additivity guards hold; replay and lockstep require native qualification with checkpoint exchange enabled. ReplayRoundtrip verifies checkpoints at ticks 30/60/90, ReplayDivergence rejects the corrupted tick-30 checkpoint, and LockstepLoopback runs two peers for 90 ticks with cadence hash exchange. Qualification receipts remain outstanding.",
+  "status": "needs-native-run",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "EcologyHash.AppendingEmptyEcologyAddsOnlyTheSuffix"
+    },
+    {
+      "kind": "script",
+      "ref": "tools/gates/validate-determinism-matrix.ps1"
+    },
+    {
+      "kind": "ctest",
+      "ref": "AmbientInputBounds.*"
+    },
+    {
+      "kind": "native",
+      "ref": "tools/gates/validate-engine-frontier.ps1",
+      "command": "pwsh tools/gates/validate-engine-frontier.ps1 -BuildPreset debug -Mode LockstepLoopback",
+      "receipt_schema": "luminumbra.lockstep_loopback.v1"
+    },
+    {
+      "kind": "native",
+      "ref": "tools/gates/validate-engine-frontier.ps1",
+      "command": "pwsh tools/gates/validate-engine-frontier.ps1 -BuildPreset debug -Mode ReplayRoundtrip",
+      "receipt_schema": "luminumbra.replay_roundtrip.v1"
+    },
+    {
+      "kind": "native",
+      "ref": "tools/gates/validate-engine-frontier.ps1",
+      "command": "pwsh tools/gates/validate-engine-frontier.ps1 -BuildPreset debug -Mode ReplayDivergence",
+      "receipt_schema": "luminumbra.replay_divergence.v1"
+    }
+  ],
+  "requirements": [
+    "dw.evidence.006",
+    "dw.mappings.022"
+  ]
+}

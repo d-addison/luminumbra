@@ -1,0 +1,42 @@
+{
+  "id": "iss.429",
+  "source": "issue #429",
+  "statement": "Client defaults, server boot, network admission and replay preflight load systems configuration from the runtime root with native filesystem paths. Replay preflight freezes that configuration for identity matching and boot. Registered regressions use a conflicting launch directory and cover unavailable or partial runtime defaults, user overlays and explicit overrides. Source checks also require runtime-root UI watches; native execution remains required. Directory watches retain RML and RCSS filters together and discover nested additions; registered regressions also cover duplicate registration, wildcards and removed directories.",
+  "status": "needs-native-run",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "RuntimeSystemConfig.DefaultsAndUserOverlayComeFromRuntimeRoot"
+    },
+    {
+      "kind": "ctest",
+      "ref": "RuntimeSystemConfig.UnavailableOrPartialRuntimeDefaultsNeverUseLaunchDirectory"
+    },
+    {
+      "kind": "ctest",
+      "ref": "RuntimeConfigStartup.HostAndNetworkAdmissionIgnoreConflictingLaunchDefaults"
+    },
+    {
+      "kind": "ctest",
+      "ref": "RuntimeConfigSourceContract"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorldOpenRefusal.DirectoryWatchesRetainBothFiltersAndDiscoverNestedFiles"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorldOpenRefusal.DirectoryWatchWildcardAndMissingDirectoryRemainSafe"
+    },
+    {
+      "kind": "native",
+      "ref": "tools/ci/check_acceptance_matrix.py",
+      "command": "python3 tools/ci/check_acceptance_matrix.py --discovery <discovery.json> --junit <native.junit.xml> --execution-receipt <acceptance-execution.json> --preparation-receipt-file <caller-metadata.json>",
+      "receipt_schema": "luminumbra.acceptance_execution.v1"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/v0.3-acceptance.md"
+    }
+  ]
+}

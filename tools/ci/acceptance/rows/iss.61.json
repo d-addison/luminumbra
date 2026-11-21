@@ -1,0 +1,21 @@
+{
+  "id": "iss.61",
+  "source": "issue #61",
+  "statement": "A packaged build completes create, edit, save, restart, select, load and world switching with byte-identical authority replacement.",
+  "status": "needs-native-run",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "WorldOpenRefusal.CreateEditSaveRestartAndSwitchPreserveAuthority"
+    },
+    {
+      "kind": "native",
+      "ref": "tools/gates/run-saved-world-lifecycle.ps1",
+      "command": "pwsh tools/gates/run-saved-world-lifecycle.ps1 -Package <dir> -FixtureDir <dir> -OutDir <dir>",
+      "receipt_schema": "luminumbra.saved_world_acceptance.v1"
+    }
+  ],
+  "requirements": [
+    "dw.mappings.028"
+  ]
+}

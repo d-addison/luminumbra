@@ -1,0 +1,37 @@
+{
+  "id": "station.identity",
+  "source": "docs/distant-world.md#station-discovery-req-e4",
+  "statement": "The build revision and exact-byte relative-name input manifest identify preset, biome, placement and piece inputs; validation precedes loading and snapshot comparison refuses observable changes. Callers supply immutable pinned files because concurrent filesystem races are outside the guarantee.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "StationDiscoveryContract"
+    },
+    {
+      "kind": "ctest",
+      "ref": "StationDiscoveryCliSmoke"
+    },
+    {
+      "kind": "doc",
+      "ref": "tools/CMakeLists.txt"
+    },
+    {
+      "kind": "doc",
+      "ref": "tools/station_discovery.cpp"
+    }
+  ],
+  "requirements": [
+    "dw.station.022",
+    "dw.station.023",
+    "dw.station.024",
+    "dw.station.025",
+    "dw.station.026",
+    "dw.station.027",
+    "dw.station.030",
+    "dw.station.031",
+    "dw.station.032",
+    "dw.station.033",
+    "dw.station.034"
+  ]
+}

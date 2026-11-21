@@ -1,0 +1,25 @@
+{
+  "id": "ci.ucrt64-routing",
+  "source": "docs/development.md#continuous-integration",
+  "statement": "Full MSVC and UCRT64 validation runs on the self-hosted daily runner for schedules, manual dispatches and same-repository pull requests labelled windows-proof. Every admitted proof selects full native validation; aggregates reject drafts, missing draft metadata, unsuccessful classification and skipped expected producers. Normal CI retains its non-Windows jobs and base-retarget handling. Windows proof gates the v0.3.1 tag rather than landings.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "script",
+      "ref": "tools/ci/test_ci_paths.py"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorkflowPolicyContractPart11"
+    },
+    {
+      "kind": "ctest",
+      "ref": "WorkflowPolicyContractPart12"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/development.md"
+    }
+  ],
+  "requirements": []
+}

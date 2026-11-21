@@ -1,0 +1,37 @@
+{
+  "id": "iss.500",
+  "source": "issue #500",
+  "statement": "Direct compile and tidy selection honors a nonempty LUMINUMBRA_BASE_REF, defaults to origin/devel when it is unset or empty, and gives explicit --base-ref priority. Unavailable or invalid refs fail without fallback or native work. The documented shell recipe uses the same environment default.",
+  "status": "covered",
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "ChangedTranslationUnitsContract"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ChangedTranslationUnitsContractPart1"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ChangedTranslationUnitsContractPart2"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ChangedTranslationUnitsContractPart3"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ChangedTranslationUnitsContractPart4"
+    },
+    {
+      "kind": "ctest",
+      "ref": "ChangedTranslationUnitsContractPart5"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/ci/local-checks.md"
+    }
+  ],
+  "requirements": []
+}

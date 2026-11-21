@@ -1,0 +1,40 @@
+{
+  "id": "sim.budget-enforcement",
+  "source": "docs/sim-budget-telemetry.md",
+  "statement": "Synthetic caps are enforced in SimBudgetProfileTest and SimBudgetTelemetry: stage work above the cap is a violation, equality passes, missing residency samples remain unevaluated, and synthetic smoke artifacts fail on a stage violation. Performance CI captures shipping simulation defaults on populated default/mountains/archipelago worlds with seed 1337, 600 ticks, surface radius 1 and collision radius 1, then runs check_sim_budgets.py with --require-complete against the committed baseline. Each preset has nonnegative integer max_work_per_tick limits for all 30 stages and the per-tick total (221289), including zero limits for idle stages; wind and weather are explicitly expected inactive on the combined wind_weather path. The checker rejects stage or total overages and incomplete entries or unexpected inactivity; durations remain advisory. Revision and fixture hash remain unpinned. Representative-world capture, duration and equality qualification remains PENDING.",
+  "status": "partial",
+  "evidence": [
+    {
+      "kind": "script",
+      "ref": "tools/perf/check_sim_budgets.py"
+    },
+    {
+      "kind": "ctest",
+      "ref": "SimBudgetGateContract"
+    },
+    {
+      "kind": "ctest",
+      "ref": "SimBudgetProfileTest.*"
+    },
+    {
+      "kind": "ctest",
+      "ref": "SimBudgetTelemetry.*"
+    },
+    {
+      "kind": "script",
+      "ref": "tools/perf/baselines/sim-budgets.json"
+    },
+    {
+      "kind": "script",
+      "ref": ".github/workflows/performance.yml"
+    },
+    {
+      "kind": "doc",
+      "ref": "docs/v0.3-acceptance.md",
+      "planned": "retain representative-world before/after captures, per-stage p50/p95/p99 durations, measured workload identities and telemetry-on/off state-hash and replay-work equality receipts; owner: ac"
+    }
+  ],
+  "requirements": [
+    "dw.mappings.026"
+  ]
+}

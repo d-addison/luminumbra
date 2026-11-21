@@ -1,0 +1,16 @@
+{
+  "id": "contract.calendar-lunar-period",
+  "source": "docs/distant-world.md#simulation-clock-and-calendar",
+  "statement": "The lunar month is independent of solar phase and year length, and imported calendars use their recorded day length for the eight-day lunar period.",
+  "status": "covered",
+  "requirements": [
+    "dw.calendar.021",
+    "dw.calendar.022"
+  ],
+  "evidence": [
+    {
+      "kind": "ctest",
+      "ref": "WorldClockTest.LunarMonthIsIndependentOfYearAndImportsRecordedDayLength"
+    }
+  ]
+}
