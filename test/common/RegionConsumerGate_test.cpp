@@ -4,6 +4,7 @@
 #include "luminumbra_common/ai/CreatureBrainSystem.h"
 #include "luminumbra_common/ai/CreatureReproductionSystem.h"
 #include "luminumbra_common/ai/DecompositionSystem.h"
+#include "luminumbra_common/ai/EcologyHash.h"
 #include "luminumbra_common/ai/HerdAlarmSystem.h"
 #include "luminumbra_common/ai/InstinctLocomotionSystem.h"
 #include "luminumbra_common/ai/InstinctSystem.h"
@@ -21,6 +22,8 @@
 #include "luminumbra_common/components/ThirstComponents.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/persistence/PlantPersistence.h"
+#include "luminumbra_common/persistence/SavedInputFile.h"
+#include "luminumbra_common/persistence/SavedInputLimits.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/CropLifecycleSystem.h"
 #include "luminumbra_common/systems/FireSpreadSystem.h"
@@ -30,19 +33,26 @@
 #include "luminumbra_common/systems/PlantCoarse.h"
 #include "luminumbra_common/systems/PlantDiseaseSystem.h"
 #include "luminumbra_common/systems/PollinationSystem.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/SoilNutrientSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/MarchingCubes.h"
 
 #include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <array>
 #include <bit>
 #include <cstdint>
 #include <filesystem>
+#include <iterator>
 #include <limits>
+#include <map>
+#include <memory>
+#include <set>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -532,6 +542,10 @@ RunMatingResolveOnTick(entt::registry& reg,
         cr.hunger = 0.5f;
         cr.stamina = 1.0f;
         cr.move_speed = b.genome.move_speed;
+        // Lifecycle participation is required for newborns; keep the independent
+        // brute-force partner selection above as the full-rate oracle.
+        reg.emplace<Comp::MortalComponent>(child).lifespan_ticks = tuning.lifespan_ticks;
+        reg.emplace<Comp::DecayComponent>(child).decay_duration = 900u;
         auto& gn = reg.emplace<Comp::CreatureGenomeComponent>(child);
         gn.move_speed = b.genome.move_speed;
         gn.vigilance = b.genome.vigilance;
@@ -551,6 +565,78 @@ RunMatingResolveOnTick(entt::registry& reg,
         pc.ear.range = b.genome.hearing_range;
         ++stats.born;
     }
+    return stats;
+}
+
+// Independent historical decay traversal for compatibility comparisons.
+inline DecompositionStats
+RunDecompositionOnTick(entt::registry& reg,
+                       std::uint64_t /*tick*/,
+                       const CreatureTickAdmission* admission = nullptr,
+                       const ::Luminumbra::world::RegionConsumerGate& gate = {}) {
+    DecompositionStats stats;
+
+    auto view = reg.view<Comp::DecayComponent>();
+
+    // id-ordered participant list (deterministic traversal).
+    std::vector<entt::entity> ents(view.begin(), view.end());
+    std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
+        return entt::to_integral(a) < entt::to_integral(b);
+    });
+    if (ents.empty())
+        return stats; // empty roster -> pure no-op.
+
+    for (auto e : ents) {
+        const bool allowed = admission && reg.all_of<Comp::CreatureComponent>(e)
+                                 ? admission->Allows(e)
+                                 : gate.Allows(e);
+        if (!allowed) {
+            continue;
+        }
+        auto& dc = view.get<Comp::DecayComponent>(e);
+
+        // Already finished: inert and stable (latched) — never advance again.
+        if (dc.fully_decomposed != 0)
+            continue;
+
+        // A degenerate duration is treated as immediate-complete on first dead tick (avoids a
+        // divide-by-zero and keeps the contract: a 0-duration corpse releases its full load at
+        // once). A live entity still must not advance.
+        if (!DecompIsDead(reg, e))
+            continue; // LIVE -> does not decay.
+
+        // The pre-tick cumulative release for this corpse (already accounted in the component).
+        const std::uint32_t prev_total = dc.nutrient_released_milli;
+
+        // Advance the decomposition clock by one tick, saturating at the duration.
+        if (dc.decay_ticks < dc.decay_duration) {
+            ++dc.decay_ticks;
+        }
+        ++stats.decaying;
+
+        // Cumulative release is EXACTLY proportional to elapsed decay (integer division), so it
+        // rises monotonically and lands on kNutrientPerCorpseMilli precisely at decay_duration.
+        std::uint32_t new_total;
+        if (dc.decay_duration == 0u || dc.decay_ticks >= dc.decay_duration) {
+            new_total = kNutrientPerCorpseMilli; // finished -> full load.
+        } else {
+            new_total = static_cast<std::uint32_t>(
+                (static_cast<std::uint64_t>(kNutrientPerCorpseMilli) * dc.decay_ticks) /
+                dc.decay_duration);
+        }
+        if (new_total < prev_total)
+            new_total = prev_total; // clamp monotonic (defensive).
+
+        dc.nutrient_released_milli = static_cast<std::uint16_t>(new_total);
+        stats.released_total += (new_total - prev_total);
+
+        // Latch full decomposition once the clock reaches the duration.
+        if (dc.decay_ticks >= dc.decay_duration) {
+            dc.fully_decomposed = 1;
+            ++stats.finished;
+        }
+    }
+
     return stats;
 }
 
@@ -1786,6 +1872,34 @@ TEST(RegionConsumerGate, EmptyAndInvalidCreatureOwnersAreDeniedBeforeCoreWork) {
     }
 }
 
+TEST(RegionConsumerGate, SessionRefusesUnversionedLifecycleOverridesBeforeChangingTuning) {
+    W::GameSession session;
+    ASSERT_NO_THROW(session.ApplySystemConfig(luminumbra::core::SystemConfig::Defaults()));
+    const auto before = session.SystemConfigIdentity();
+    AI::ReproductionTuning defaults;
+    EXPECT_NO_THROW(session.SetReproductionTuning(defaults));
+    EXPECT_EQ(session.SystemConfigIdentity(), before);
+    for (const bool capacity : {false, true}) {
+        for (const std::uint32_t value : {0u, 1u, std::numeric_limits<std::uint32_t>::max()}) {
+            auto tuning = defaults;
+            tuning.maturity_ticks = 1; // a partial assignment would change the existing identity
+            if (capacity) {
+                tuning.species_capacity = value;
+            } else {
+                tuning.lifespan_ticks = value;
+            }
+            EXPECT_THROW(session.SetReproductionTuning(tuning), std::invalid_argument);
+            EXPECT_EQ(session.SystemConfigIdentity(), before);
+        }
+    }
+    // Existing identified tuning remains writable and contributes to the same identity slots.
+    defaults.maturity_ticks = 1;
+    EXPECT_NO_THROW(session.SetReproductionTuning(defaults));
+    EXPECT_NE(session.SystemConfigIdentity(), before);
+    EXPECT_NO_THROW(session.ApplySystemConfig(luminumbra::core::SystemConfig::Defaults()));
+    EXPECT_EQ(session.SystemConfigIdentity(), before);
+}
+
 TEST(RegionConsumerGate, InactiveCreaturePipelineMatchesIndependentFullRateOracle) {
     entt::registry actual, reference;
     for (auto* registry : {&actual, &reference}) {
@@ -2054,6 +2168,193 @@ TEST(RegionConsumerGate, SessionDefersDecompositionAndCompletionUntilPlantOwnerI
         EXPECT_EQ(decay.nutrient_released_milli, duration == 0u ? 1000u : 500u);
         EXPECT_EQ(decay.fully_decomposed, duration == 0u ? 1u : 0u);
         EXPECT_EQ(registry.get<C::MortalComponent>(plant).age_ticks, 1u);
+    }
+}
+
+TEST(RegionConsumerGate, DetachedDecayBorrowsOnlyUnfinishedLiveParticipants) {
+    struct DecayUpdates {
+        std::size_t count = 0;
+        void Observe(entt::registry&, entt::entity) {
+            ++count;
+        }
+    } updates;
+    entt::registry registry;
+    registry.on_update<C::DecayComponent>().connect<&DecayUpdates::Observe>(updates);
+    F::FoliageRegistryStage stage;
+    for (std::uint64_t tick = 0; tick < 128; ++tick) {
+        const auto corpse = Creature(registry, 10.0f, tick % 2 == 0);
+        registry.get<C::CreatureComponent>(corpse).eaten = true;
+        registry.emplace<C::DecayComponent>(corpse).decay_duration = 1;
+        const auto& participants = AI::DecompositionParticipants(registry);
+        ASSERT_EQ(participants.size(), 1u);
+        stage.Begin(registry, 1);
+        const auto stats =
+            AI::RunDecompositionOnTick(stage.registry(), tick, nullptr, {}, &participants);
+        ASSERT_EQ(stats.visited, 1u);
+        ASSERT_EQ(stats.finished, 1);
+        // A discarded candidate cannot retire or advance its live participant.
+        EXPECT_EQ(registry.get<C::DecayComponent>(corpse).fully_decomposed, 0u);
+        EXPECT_EQ(AI::DecompositionParticipants(registry).size(), 1u);
+        stage.PreparePublication(registry);
+        stage.Commit(registry);
+        // Publication must not queue unrelated component-update consumers.
+        EXPECT_EQ(updates.count, 0u);
+        EXPECT_EQ(registry.get<C::DecayComponent>(corpse).fully_decomposed, 1u);
+        EXPECT_TRUE(AI::DecompositionParticipants(registry).empty());
+        EXPECT_EQ(registry.view<C::DecayComponent>().size(), tick + 1);
+    }
+    const auto pending = registry.create();
+    registry.emplace<C::DecayComponent>(pending);
+    const auto& participants = AI::DecompositionParticipants(registry);
+    entt::registry missing_candidate;
+    const auto missing =
+        AI::RunDecompositionOnTick(missing_candidate, 200, nullptr, {}, &participants);
+    EXPECT_EQ(missing.visited, 1u);
+    EXPECT_EQ(missing.decaying, 0);
+    EXPECT_EQ(AI::DecompositionParticipants(registry).size(), 1u);
+
+    // A staged pool smaller than the live roster bounds the detached traversal
+    // to the staged unfinished handles, never every live carcass.
+    for (int i = 0; i < 63; ++i) {
+        registry.emplace<C::DecayComponent>(registry.create());
+    }
+    ASSERT_EQ(AI::DecompositionParticipants(registry).size(), 64u);
+    entt::registry staged;
+    ASSERT_EQ(staged.create(pending), pending);
+    staged.emplace<C::DecayComponent>(pending);
+    std::vector<entt::entity> scratch;
+    const auto bounded = AI::RunDetachedDecompositionOnTick(
+        staged, 201, nullptr, {}, AI::DecompositionParticipants(registry), scratch);
+    EXPECT_EQ(bounded.visited, 1u);
+    EXPECT_EQ(scratch, std::vector<entt::entity>{pending});
+    // A larger staged pool (finished history) traverses the live roster instead.
+    for (int i = 0; i < 128; ++i) {
+        staged.emplace<C::DecayComponent>(staged.create()).fully_decomposed = 1;
+    }
+    const auto roster = AI::RunDetachedDecompositionOnTick(
+        staged, 202, nullptr, {}, AI::DecompositionParticipants(registry), scratch);
+    EXPECT_EQ(roster.visited, 64u);
+}
+
+TEST(RegionConsumerGate, DetachedDecayDoesNotPruneLivingRosterBeforeBoundedTraversal) {
+    entt::registry registry;
+    constexpr std::size_t living_count = 4096;
+    constexpr std::size_t staged_count = 3;
+    std::array<entt::entity, staged_count> selected{};
+    entt::entity outside = entt::null;
+    // Initialize once so subsequent entries use ordinary signal admission.
+    ASSERT_TRUE(AI::DecompositionParticipants(registry).empty());
+    for (std::size_t index = 0; index < living_count; ++index) {
+        const auto entity = registry.create();
+        registry.emplace<C::DecayComponent>(entity);
+        if (index == 0) {
+            outside = entity;
+        }
+        if (index >= living_count - staged_count) {
+            selected[index - (living_count - staged_count)] = entity;
+        }
+    }
+    ASSERT_EQ(AI::DecompositionParticipants(registry).size(), living_count);
+    // A direct completion outside the staged pool is a scan sentinel: an eager
+    // prune removes it even though this regional tick must never examine it.
+    registry.get<C::DecayComponent>(outside).fully_decomposed = 1;
+    entt::registry detached;
+    std::vector<entt::entity> scratch;
+    for (const auto entity : selected) {
+        ASSERT_EQ(detached.create(entity), entity);
+        detached.emplace<C::DecayComponent>(entity);
+    }
+    for (std::uint64_t tick = 0; tick < 8; ++tick) {
+        const auto& participants = AI::DecompositionParticipants(registry);
+        ASSERT_EQ(participants.size(), living_count);
+        ASSERT_TRUE(participants.contains(outside));
+        const auto stats =
+            AI::RunDetachedDecompositionOnTick(detached, tick, nullptr, {}, participants, scratch);
+        EXPECT_EQ(stats.visited, staged_count);
+        EXPECT_EQ(stats.decaying, 0);
+        EXPECT_EQ(scratch, (std::vector<entt::entity>{selected.begin(), selected.end()}));
+        EXPECT_EQ(participants.size(), living_count);
+    }
+    detached.clear();
+    const auto empty = AI::RunDetachedDecompositionOnTick(
+        detached, 8, nullptr, {}, AI::DecompositionParticipants(registry), scratch);
+    EXPECT_EQ(empty.visited, 0u);
+    EXPECT_TRUE(scratch.empty());
+    EXPECT_EQ(AI::DecompositionParticipants(registry).size(), living_count);
+    // The owning live traversal eventually visits and retires the sentinel.
+    const auto live = AI::RunDecompositionOnTick(registry, 9);
+    EXPECT_EQ(live.visited, living_count);
+    EXPECT_EQ(live.decaying, 0);
+    EXPECT_EQ(AI::DecompositionParticipants(registry).size(), living_count - 1);
+    EXPECT_FALSE(AI::DecompositionParticipants(registry).contains(outside));
+}
+
+TEST(RegionConsumerGate, LiveDecayRetiresInOrderWithOwnedAndBorrowedRoster) {
+    for (const bool borrowed : {false, true}) {
+        entt::registry registry;
+        std::array<entt::entity, 6> entities{};
+        for (auto& entity : entities) {
+            entity = Creature(registry, 10.0f);
+            registry.get<C::MortalComponent>(entity).dead = 1;
+            registry.emplace<C::DecayComponent>(entity).decay_duration = 2;
+        }
+        const auto& participants = AI::DecompositionParticipants(registry);
+        ASSERT_EQ(participants.size(), entities.size());
+        // Retire a direct completion even when its region is not due; consecutive
+        // zero/one-duration completions must not skip their unfinished successor.
+        registry.get<C::DecayComponent>(entities[0]).fully_decomposed = 1;
+        registry.get<C::TransformComponent>(entities[0]).position.x = 513.0f;
+        registry.get<C::DecayComponent>(entities[1]).decay_duration = 0;
+        registry.get<C::DecayComponent>(entities[2]).decay_duration = 1;
+        registry.get<C::TransformComponent>(entities[4]).position.x = 513.0f;
+        registry.get<C::MortalComponent>(entities[5]).dead = 0;
+        const std::array<RegionKey, 1> due{{{0, 0}}};
+        const RegionConsumerGate gate(registry, due);
+        const auto stats = AI::RunDecompositionOnTick(
+            registry, 1, nullptr, gate, borrowed ? &participants : nullptr);
+        EXPECT_EQ(stats.visited, entities.size());
+        EXPECT_EQ(stats.decaying, 3);
+        EXPECT_EQ(stats.finished, 2);
+        EXPECT_EQ(stats.released_total, 2500u);
+        EXPECT_EQ(participants, (std::set<entt::entity>{entities[3], entities[4], entities[5]}));
+        EXPECT_EQ(registry.get<C::DecayComponent>(entities[3]).decay_ticks, 1u);
+        EXPECT_EQ(registry.get<C::DecayComponent>(entities[4]).decay_ticks, 0u);
+        EXPECT_EQ(registry.get<C::DecayComponent>(entities[5]).decay_ticks, 0u);
+        EXPECT_EQ(registry.get<C::DecayComponent>(entities[0]).fully_decomposed, 1u);
+    }
+}
+
+TEST(RegionConsumerGate, SessionCompletedDecayRosterStaysEmptyWithBothTickPaths) {
+    for (const bool regional : {false, true}) {
+        W::GameSession session;
+        session.SetActiveRegionsEnabled(regional);
+        session.SetReplicatedSimulationAnchors({});
+        session.PinActiveRegion({0, 0}, true);
+        session.GetSimBudgetTelemetry().SetEnabled(true);
+        auto& registry = session.GetRegistry();
+        for (std::uint64_t cycle = 0; cycle < 16; ++cycle) {
+            const auto corpse = Creature(registry, 10.0f);
+            registry.get<C::CreatureComponent>(corpse).eaten = true;
+            registry.emplace<C::DecayComponent>(corpse).decay_duration = 1;
+            ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+            ASSERT_FALSE(session.GetRegionSchedulerFault());
+            EXPECT_EQ(registry.get<C::DecayComponent>(corpse).fully_decomposed, 1u);
+            EXPECT_TRUE(AI::DecompositionParticipants(registry).empty());
+            EXPECT_EQ(registry.view<C::DecayComponent>().size(), cycle + 1);
+            const auto& samples =
+                session.GetSimBudgetTelemetry().SamplesByStage()[static_cast<std::size_t>(
+                    luminumbra::simulation::SimBudgetStage::Decay)];
+            ASSERT_FALSE(samples.empty());
+            EXPECT_EQ(samples.back().work, 1u);
+        }
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        const auto& samples =
+            session.GetSimBudgetTelemetry().SamplesByStage()[static_cast<std::size_t>(
+                luminumbra::simulation::SimBudgetStage::Decay)];
+        ASSERT_FALSE(samples.empty());
+        EXPECT_EQ(samples.back().work, 0u);
+        EXPECT_EQ(session.GetFoliageRegistryStageVisits() != 0u, regional);
     }
 }
 
@@ -2539,7 +2840,7 @@ TEST(RegionConsumerGate, AvatarWithoutCapsuleCanResumeOrBeRemovedAndCleared) {
     }
 }
 
-TEST(RegionConsumerGate, AvatarSlotCountIncludesRemovalHolesUntilClear) {
+TEST(RegionConsumerGate, AvatarSlotCountReusesRemovalHolesUntilClear) {
     Luminumbra::Systems::PhysicsSystem physics;
     physics.startup();
     const glm::vec3 position(513.0f, 10000.0f, 10.0f);
@@ -2557,14 +2858,139 @@ TEST(RegionConsumerGate, AvatarSlotCountIncludesRemovalHolesUntilClear) {
     physics.update_avatars(1.0f / 30.0f);
     EXPECT_GT(physics.get_avatar_position(survivor).x, position.x);
     EXPECT_EQ(physics.work_items().characters, 1u);
-    EXPECT_EQ(physics.create_avatar_character(position), 2u);
-    EXPECT_EQ(physics.avatar_character_slot_count(), 3u);
+    EXPECT_EQ(physics.create_avatar_character(position), removed);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 2u);
     physics.remove_avatar_character(survivor);
-    physics.remove_avatar_character(2u);
-    EXPECT_EQ(physics.avatar_character_slot_count(), 3u);
+    physics.remove_avatar_character(removed);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 2u);
     physics.clear_avatar_characters();
     EXPECT_EQ(physics.avatar_character_slot_count(), 0u);
     EXPECT_EQ(physics.create_avatar_character(position), 0u);
+}
+
+TEST(RegionConsumerGate, AvatarReuseIsLowestFirstAndPreservesSurvivorStepBits) {
+    Luminumbra::Systems::PhysicsSystem physics, reference;
+    physics.startup();
+    reference.startup();
+    for (std::size_t index = 0; index < 5; ++index) {
+        const glm::vec3 position(513.0f + 10.0f * static_cast<float>(index), 10000.0f, 10.0f);
+        ASSERT_EQ(physics.create_avatar_character(position), index);
+        ASSERT_EQ(reference.create_avatar_character(position), index);
+        physics.set_avatar_wish_velocity(index, {2.0f, 1.0f});
+        reference.set_avatar_wish_velocity(index, {2.0f, 1.0f});
+    }
+    physics.update_avatars(1.0f / 30.0f);
+    reference.update_avatars(1.0f / 30.0f);
+    // Retire in non-index order, including a frozen capsule and a repeated removal.
+    for (const std::size_t index : {3u, 0u, 2u, 0u}) {
+        physics.set_avatar_frozen(index, true, physics.get_avatar_position(index));
+        physics.remove_avatar_character(index);
+        reference.remove_avatar_character(index);
+    }
+    physics.set_avatar_wish_velocity(0, {9.0f, 7.0f});
+    physics.set_avatar_frozen(0, true, {0, 0, 0});
+    for (const std::size_t index : {0u, 2u, 3u}) {
+        const glm::vec3 replacement(600.0f + 10.0f * static_cast<float>(index), 10000.0f, 10.0f);
+        ASSERT_EQ(physics.create_avatar_character(replacement), index);
+        EXPECT_EQ(PositionBits(physics.get_avatar_position(index)), PositionBits(replacement));
+        EXPECT_EQ(physics.get_avatar_velocity(index), glm::vec3(0.0f));
+    }
+    EXPECT_EQ(physics.avatar_character_slot_count(), 5u);
+    EXPECT_FALSE(physics.audio_raycast({512, 10001.3f, 10}, {514, 10001.3f, 10}).hit);
+    for (int tick = 0; tick < 4; ++tick) {
+        for (const std::size_t index : {1u, 4u}) {
+            EXPECT_EQ(PositionBits(physics.get_avatar_position(index)),
+                      PositionBits(reference.get_avatar_position(index)));
+            EXPECT_EQ(PositionBits(physics.get_avatar_velocity(index)),
+                      PositionBits(reference.get_avatar_velocity(index)));
+        }
+        physics.update_avatars(1.0f / 30.0f);
+        reference.update_avatars(1.0f / 30.0f);
+    }
+    // Clear must discard free-list entries before the next generation of slots.
+    physics.remove_avatar_character(2);
+    physics.clear_avatar_characters();
+    physics.clear_avatar_characters();
+    EXPECT_EQ(physics.create_avatar_character({1, 10000, 1}), 0u);
+    EXPECT_EQ(physics.create_avatar_character({3, 10000, 1}), 1u);
+}
+
+TEST(RegionConsumerGate, ReusedAvatarsJoinLiveTailAndInvalidatePreparedCollisions) {
+    using Luminumbra::Systems::PhysicsSystem;
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0;
+    params.peaks_amplitude = 0;
+    params.height_offset = 8;
+    params.continental_spline = {{{-1, 0}}, {{1, 0}}};
+    auto world =
+        std::make_unique<Luminumbra::Systems::SHIELD_WorldSystem>(nullptr, nullptr, params, 4242);
+    world->set_durable_residency(true);
+    PhysicsSystem physics;
+    physics.startup();
+    physics.set_world_system(world.get());
+    const auto expect_order = [&physics](const std::vector<std::size_t>& expected) {
+        const auto diagnostic = physics.avatar_character_diagnostics();
+        EXPECT_EQ(diagnostic.live_count, expected.size());
+        EXPECT_EQ(diagnostic.creation_order, expected);
+    };
+    expect_order({});
+    ASSERT_EQ(physics.create_avatar_character({8, 10000, 8}), 0u);
+    ASSERT_EQ(physics.create_avatar_character({168, 10000, 8}), 1u);
+    ASSERT_EQ(physics.create_avatar_character({328, 10000, 8}), 2u);
+    expect_order({0, 1, 2});
+    constexpr std::uint64_t tick = 42;
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}, tick));
+    EXPECT_EQ(physics.simulation_collision_owner_visit_count(), 3u);
+    physics.remove_avatar_character(1);
+    physics.remove_avatar_character(1);
+    physics.remove_avatar_character(PhysicsSystem::kInvalidAvatar);
+    expect_order({0, 2});
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}, tick));
+    EXPECT_EQ(physics.simulation_collision_owner_visit_count(), 2u);
+    EXPECT_EQ(physics.simulation_collision_sample_count(), 18u);
+    // Admission refusal must preserve the hole, list, count and ready publication.
+    EXPECT_EQ(physics.create_avatar_character({std::numeric_limits<float>::quiet_NaN(), 10, 8}),
+              PhysicsSystem::kInvalidAvatar);
+    expect_order({0, 2});
+    auto steps = physics.work_items().characters;
+    physics.update_avatars(1.0f / 30.0f);
+    EXPECT_EQ(physics.work_items().characters, steps + 2);
+
+    const glm::vec3 replacement(488, 10000, 8);
+    ASSERT_EQ(physics.create_avatar_character(replacement), 1u);
+    EXPECT_EQ(physics.avatar_character_slot_count(), 3u);
+    expect_order({0, 2, 1});
+    steps = physics.work_items().characters;
+    physics.update_avatars(1.0f / 30.0f);
+    EXPECT_EQ(physics.work_items().characters, steps);
+    EXPECT_EQ(physics.get_avatar_position(1), replacement);
+    // Reusing the same tick must rebuild rather than return the cached two owners.
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}, tick));
+    EXPECT_EQ(physics.simulation_collision_owner_visit_count(), 3u);
+    EXPECT_EQ(physics.simulation_collision_sample_count(), 27u);
+    physics.update_avatars(1.0f / 30.0f);
+    EXPECT_EQ(physics.work_items().characters, steps + 3);
+
+    // Exercise both ends, then reuse into an empty list with a nonzero slot extent.
+    physics.remove_avatar_character(0);
+    expect_order({2, 1});
+    physics.remove_avatar_character(1);
+    expect_order({2});
+    physics.remove_avatar_character(2);
+    expect_order({});
+    ASSERT_EQ(physics.create_avatar_character(replacement), 0u);
+    expect_order({0});
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}, tick));
+    physics.clear_avatar_characters();
+    expect_order({});
+    EXPECT_EQ(physics.avatar_character_slot_count(), 0u);
+    ASSERT_TRUE(physics.prepare_simulation_collisions({}, tick));
+    EXPECT_EQ(physics.simulation_collision_owner_visit_count(), 0u);
+    EXPECT_EQ(physics.simulation_collision_sample_count(), 0u);
+    physics.clear_avatar_characters();
+    ASSERT_EQ(physics.create_avatar_character(replacement), 0u);
+    ASSERT_EQ(physics.create_avatar_character({8, 10000, 8}), 1u);
+    expect_order({0, 1});
 }
 
 TEST(RegionConsumerGate, TerrainCollisionSkipsDoNotRequestRetry) {
@@ -2867,14 +3293,16 @@ TEST(RegionConsumerGate, SessionDeniedAvatarStaysFrozenWithoutCapsuleAndRetriesO
         EXPECT_EQ(physics->audio_raycast({512.0f, 10001.3f, 10.0f}, {514.0f, 10001.3f, 10.0f}).hit,
                   tick == 3);
         if (tick == 0) {
-            // Terrain can still take a reserved slot while the avatar is refused.
-            Luminumbra::Chunk chunk({0, 0, 0});
-            chunk.heightmap_data.assign(static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
-                                            static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_Z + 1),
-                                        8.0f);
-            EXPECT_TRUE(physics->add_chunk_collision(chunk));
-            EXPECT_TRUE(physics->audio_raycast({8.0f, 10.0f, 8.0f}, {8.0f, 6.0f, 8.0f}).hit);
-            physics->remove_chunk_collision(chunk.get_id());
+            // The session-prepared terrain horizon uses reserved headroom even
+            // while the dynamic pool is full and the avatar capsule is refused.
+            auto* world = session.GetWorldSystem();
+            ASSERT_NE(world, nullptr);
+            std::array<float, (Luminumbra::CHUNK_SIZE_X + 1) * (Luminumbra::CHUNK_SIZE_Z + 1)>
+                heights{};
+            ASSERT_TRUE(world->sample_simulation_collision(0, 0, heights));
+            const float floor = heights[8u * (Luminumbra::CHUNK_SIZE_X + 1) + 8u];
+            EXPECT_GT(physics->simulation_collision_sample_count(), 0u);
+            EXPECT_TRUE(physics->audio_raycast({8, floor + 2, 8}, {8, floor - 2, 8}).hit);
         }
         // Integration remains denied even when another caller submits input.
         physics->set_avatar_wish_velocity(avatar, {9.0f, 7.0f});
@@ -3785,6 +4213,265 @@ TEST(RegionConsumerGate, ResourceApplyHelpersRejectIdleCellsEvenWithAccumulatedA
         F::ApplyDepositDiffuseDrain(empty_water, deposit, gate);
         EXPECT_EQ(F::ApplyConsumptionAndRegen(empty_soil, demand, gate), 0);
     }
+}
+
+TEST(RegionConsumerGate, SessionRetiresNewbornAfterCallbacksAndReleasesFrozenPhysics) {
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    for (const bool regional : {false, true}) {
+        SCOPED_TRACE(regional);
+        W::GameSession session;
+        session.SetRootPath(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT).generic_string() + '/');
+        session.SetJobSystem(&jobs);
+        session.SetActiveRegionsEnabled(regional);
+        session.SetAetherStateEnabled(false);
+        ASSERT_TRUE(session.CreateTransientWorld("Newborn retirement", "985", "default"));
+        session.SetReplicatedSimulationAnchors({});
+        session.PinActiveRegion({0, 0}, true);
+        auto& registry = session.GetRegistry();
+        const auto mother = Creature(registry, 10.0f, true);
+        const auto father = Creature(registry, 10.0f, false);
+        ASSERT_EQ(AI::RunMatingResolveOnTick(registry, 0, 985).born, 1);
+        const auto born = registry.view<AI::ReproductionBorn>();
+        ASSERT_FALSE(born.empty());
+        const auto child = *born.begin();
+        registry.remove<C::CreatureGenomeComponent>(mother);
+        registry.remove<C::CreatureGenomeComponent>(father);
+        registry.get<C::CreatureComponent>(child).eaten = true;
+        registry.get<C::DecayComponent>(child).decay_duration = 1;
+        const Luminumbra::Vec3 position(10.0f, 10000.0f, 10.0f);
+        registry.get<C::TransformComponent>(child).position = position;
+        auto* physics = session.GetPhysicsSystem();
+        ASSERT_NE(physics, nullptr);
+        const auto avatar = physics->create_avatar_character(position);
+        registry.emplace<C::CreaturePhysicsComponent>(child, avatar);
+        physics->set_avatar_frozen(avatar, true, position);
+        EXPECT_TRUE(physics->audio_raycast({9, 10001.3f, 10}, {11, 10001.3f, 10}).hit);
+        int observed = 0;
+        auto& events = session.GetSimulationEventBus();
+        events.subscribe([&](const auto&) {
+            ++observed;
+            ASSERT_TRUE(registry.valid(child));
+            const auto& decay = registry.get<C::DecayComponent>(child);
+            EXPECT_EQ(decay.fully_decomposed, 1u);
+            EXPECT_EQ(decay.nutrient_released_milli, AI::kNutrientPerCorpseMilli);
+            EXPECT_FALSE(AI::ComputeEcologySubHash(registry).empty());
+        });
+        events.publish(1, "retirement", "");
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        EXPECT_EQ(observed, 1);
+        EXPECT_FALSE(registry.valid(child));
+        EXPECT_FALSE(physics->audio_raycast({9, 10001.3f, 10}, {11, 10001.3f, 10}).hit);
+        EXPECT_EQ(physics->get_avatar_position(avatar), glm::vec3(0.0f));
+        EXPECT_EQ(AI::RunScavengingOnTick(registry, 2).carcasses, 0);
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_FALSE(session.GetRegionSchedulerFault());
+        EXPECT_FALSE(registry.valid(child));
+    }
+}
+
+TEST(RegionConsumerGate, SessionContinuousBreedingAndDeathReuseRetiredAvatarSlots) {
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    for (const bool regional : {false, true}) {
+        SCOPED_TRACE(regional);
+        W::GameSession session;
+        session.SetRootPath(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT).generic_string() + '/');
+        session.SetJobSystem(&jobs);
+        session.SetActiveRegionsEnabled(regional);
+        session.SetAetherStateEnabled(false);
+        ASSERT_TRUE(session.CreateTransientWorld("Avatar turnover", "985", "default"));
+        session.SetReplicatedSimulationAnchors({});
+        session.PinActiveRegion({0, 0}, true);
+        auto& registry = session.GetRegistry();
+        auto* physics = session.GetPhysicsSystem();
+        ASSERT_NE(physics, nullptr);
+        const auto mother = Creature(registry, 10.0f, true);
+        const auto father = Creature(registry, 10.0f, false);
+        const auto mother_genome = registry.get<C::CreatureGenomeComponent>(mother);
+        const auto father_genome = registry.get<C::CreatureGenomeComponent>(father);
+        const auto healthy = registry.get<C::CreatureComponent>(mother);
+        const glm::vec3 survivor_position(40, 10000, 10);
+        const auto survivor = physics->create_avatar_character(survivor_position);
+        ASSERT_EQ(survivor, 0u);
+        physics->set_avatar_frozen(survivor, true, survivor_position);
+        for (std::uint64_t cycle = 0; cycle < 128; ++cycle) {
+            SCOPED_TRACE(cycle);
+            // Reset only parent readiness to accelerate otherwise ordinary births.
+            registry.get<C::CreatureGenomeComponent>(mother) = mother_genome;
+            registry.get<C::CreatureGenomeComponent>(father) = father_genome;
+            for (const auto parent : {mother, father}) {
+                registry.get<C::CreatureComponent>(parent) = healthy;
+                registry.get<C::TransformComponent>(parent).position = {10, 10000, 10};
+            }
+            ASSERT_EQ(AI::RunMatingResolveOnTick(registry, cycle, 985).born, 1);
+            const auto born = registry.view<AI::ReproductionBorn>();
+            ASSERT_EQ(std::distance(born.begin(), born.end()), 1);
+            const auto child = *born.begin();
+            const auto position = registry.get<C::TransformComponent>(child).position;
+            const auto avatar = physics->create_avatar_character(position);
+            ASSERT_EQ(avatar, 1u);
+            registry.emplace<C::CreaturePhysicsComponent>(child, avatar);
+            physics->set_avatar_frozen(avatar, true, position);
+            registry.get<C::CreatureComponent>(child).eaten = true;
+            registry.get<C::DecayComponent>(child).decay_duration = 1;
+            ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+            ASSERT_FALSE(session.GetRegionSchedulerFault());
+            ASSERT_FALSE(registry.valid(child));
+            EXPECT_TRUE(registry.view<C::CreaturePhysicsComponent>().empty());
+            EXPECT_EQ(physics->avatar_character_slot_count(), 2u);
+            EXPECT_EQ(PositionBits(physics->get_avatar_position(survivor)),
+                      PositionBits(survivor_position));
+        }
+    }
+}
+
+std::map<std::string, std::string> RetirementSaveBytes(const std::filesystem::path& root) {
+    std::map<std::string, std::string> bytes;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(root)) {
+        if (entry.is_regular_file()) {
+            const Luminumbra::Persistence::SavedInputFile input(entry.path());
+            std::string payload;
+            // This fixture writes a single plant and small state records. The
+            // reader verifies type/length and reads bytes from the same handle.
+            EXPECT_TRUE(
+                input.read(payload, Luminumbra::Persistence::SavedInputLimits::kPlantFileBytes));
+            const auto relative = entry.path().lexically_relative(root).generic_string();
+            if (relative == "world_info.json") {
+                // Each session stamps its own wall-clock creation second; sessions
+                // created across a second boundary must still compare equal.
+                auto info = nlohmann::json::parse(payload);
+                EXPECT_TRUE(info.contains("creationTime"));
+                info.erase("creationTime");
+                payload = info.dump(4);
+            }
+            bytes.emplace(relative, std::move(payload));
+        }
+    }
+    return bytes;
+}
+
+TEST(RegionConsumerGate, UnfinishedDecayMatchesLegacySnapshotsHashesAndSaves) {
+    const Luminumbra::TestSupport::ScopedTempFile temporary("unfinished_decay_", ".json");
+    const auto directory = temporary.Path().parent_path();
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    W::GameSession actual, reference;
+    for (auto* session : {&actual, &reference}) {
+        session->SetRootPath(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT).generic_string() + '/');
+        session->SetJobSystem(&jobs);
+        session->SetActiveRegionsEnabled(false);
+        session->SetAetherStateEnabled(false);
+        ASSERT_TRUE(session->CreateTransientWorld("Unfinished decay", "1004", "default"));
+        auto& registry = session->GetRegistry();
+        Plant(registry, 10.0f);
+        luminumbra::core::DeterministicRng rng(1004);
+        for (int index = 0; index < 24; ++index) {
+            const auto entity = Creature(registry, rng.next_range(1.0f, 20.0f), index % 2 == 0);
+            registry.get<C::CreatureComponent>(entity).eaten = index % 3 == 0;
+            registry.get<C::MortalComponent>(entity).dead = index % 3 == 1 ? 1 : 0;
+            auto& decay = registry.emplace<C::DecayComponent>(entity);
+            decay.decay_duration = 10000;
+            decay.decay_ticks = static_cast<std::uint32_t>(index);
+        }
+    }
+    auto& registry = actual.GetRegistry();
+    auto& legacy = reference.GetRegistry();
+    F::FoliageRegistryStage stage;
+    for (std::uint64_t tick = 0; tick < 64; ++tick) {
+        const auto expected = LegacyCreatureTickOracle::RunDecompositionOnTick(legacy, tick);
+        const auto& participants = AI::DecompositionParticipants(registry);
+        stage.Begin(registry, 1);
+        const auto stats =
+            AI::RunDecompositionOnTick(stage.registry(), tick, nullptr, {}, &participants);
+        stage.PreparePublication(registry);
+        stage.Commit(registry);
+        EXPECT_EQ(stats.decaying, expected.decaying);
+        EXPECT_EQ(stats.released_total, expected.released_total);
+        EXPECT_EQ(stats.finished, 0);
+        for (const auto entity : registry.view<C::DecayComponent>()) {
+            ASSERT_TRUE(legacy.valid(entity));
+            const auto& decay = registry.get<C::DecayComponent>(entity);
+            const auto& old = legacy.get<C::DecayComponent>(entity);
+            EXPECT_EQ(decay.decay_ticks, old.decay_ticks);
+            EXPECT_EQ(decay.decay_duration, old.decay_duration);
+            EXPECT_EQ(decay.nutrient_released_milli, old.nutrient_released_milli);
+            EXPECT_EQ(decay.fully_decomposed, old.fully_decomposed);
+            EXPECT_EQ(CreatureBytes(registry, entity), CreatureBytes(legacy, entity));
+        }
+        EXPECT_EQ(PlantBytes(registry), PlantBytes(legacy));
+        EXPECT_EQ(AI::ComputeEcologySubHash(registry), AI::ComputeEcologySubHash(legacy));
+        EXPECT_EQ(actual.ComputePlantSubHash(), reference.ComputePlantSubHash());
+        EXPECT_EQ(actual.ComputeScentSubHash(), reference.ComputeScentSubHash());
+        EXPECT_EQ(actual.ComputeChunkStateHash(), reference.ComputeChunkStateHash());
+    }
+    const auto actual_save = directory / "actual";
+    const auto legacy_save = directory / "legacy";
+    ASSERT_TRUE(actual.SaveWorldStateTo(actual_save));
+    ASSERT_TRUE(reference.SaveWorldStateTo(legacy_save));
+    const auto actual_bytes = RetirementSaveBytes(actual_save);
+    ASSERT_FALSE(actual_bytes.empty());
+    EXPECT_EQ(actual_bytes, RetirementSaveBytes(legacy_save));
+}
+
+TEST(RegionConsumerGate, RetiredCarcassCannotReturnOnLoadAndSaveBytesStayIdentical) {
+    const Luminumbra::TestSupport::ScopedTempFile temporary("carcass_save_", ".json");
+    const auto directory = temporary.Path().parent_path();
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    W::GameSession cleaned, retained, loaded_first, loaded_second;
+    for (auto* session : {&cleaned, &retained, &loaded_first, &loaded_second}) {
+        session->SetRootPath(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT).generic_string() + '/');
+        session->SetJobSystem(&jobs);
+        session->SetActiveRegionsEnabled(false);
+        session->SetAetherStateEnabled(false);
+        ASSERT_TRUE(session->CreateTransientWorld("Carcass save", "985", "default"));
+    }
+    for (auto* session : {&cleaned, &retained}) {
+        auto& registry = session->GetRegistry();
+        // Keep the legacy plant handle identical to a fresh load (creatures are transient).
+        Plant(registry, 10.0f);
+        const auto mother = Creature(registry, 10.0f, true);
+        const auto father = Creature(registry, 10.0f, false);
+        ASSERT_EQ(AI::RunMatingResolveOnTick(registry, 0, 985).born, 1);
+        const auto child = *registry.view<AI::ReproductionBorn>().begin();
+        // Retained is the historical control: identical components and inputs,
+        // with cleanup ownership removed. Creature state is not a save member.
+        if (session == &retained) {
+            registry.remove<AI::ReproductionBorn>(child);
+        }
+        registry.remove<C::CreatureGenomeComponent>(mother);
+        registry.remove<C::CreatureGenomeComponent>(father);
+        registry.get<C::CreatureComponent>(child).eaten = true;
+        registry.get<C::DecayComponent>(child).decay_duration = 0;
+        ASSERT_EQ(session->TickSimulation(session->GetSimulationClock().fixed_dt()), 1u);
+        EXPECT_EQ(registry.valid(child), session == &retained);
+    }
+    const auto clean_save = directory / "clean";
+    const auto retained_save = directory / "retained";
+    ASSERT_TRUE(cleaned.SaveWorldStateTo(clean_save));
+    ASSERT_TRUE(retained.SaveWorldStateTo(retained_save));
+    const auto expected_bytes = RetirementSaveBytes(clean_save);
+    ASSERT_FALSE(expected_bytes.empty());
+    EXPECT_EQ(expected_bytes, RetirementSaveBytes(retained_save));
+    // Loading into the cleaned session cannot recreate its removed entity, either.
+    ASSERT_TRUE(cleaned.LoadWorldStateFrom(clean_save));
+    EXPECT_TRUE(cleaned.GetRegistry().view<C::DecayComponent>().empty());
+    for (auto* session : {&loaded_first, &loaded_second}) {
+        ASSERT_TRUE(session->LoadWorldStateFrom(clean_save));
+        EXPECT_TRUE(session->GetRegistry().view<C::CreatureComponent>().empty());
+        EXPECT_TRUE(session->GetRegistry().view<C::DecayComponent>().empty());
+        EXPECT_TRUE(session->GetRegistry().view<AI::ReproductionBorn>().empty());
+    }
+    EXPECT_EQ(loaded_first.ComputePlantSubHash(), loaded_second.ComputePlantSubHash());
+    EXPECT_EQ(loaded_first.ComputeChunkStateHash(), loaded_second.ComputeChunkStateHash());
+    const auto first_save = directory / "loaded-first";
+    const auto second_save = directory / "loaded-second";
+    ASSERT_TRUE(loaded_first.SaveWorldStateTo(first_save));
+    ASSERT_TRUE(loaded_second.SaveWorldStateTo(second_save));
+    EXPECT_EQ(expected_bytes, RetirementSaveBytes(first_save));
+    EXPECT_EQ(RetirementSaveBytes(first_save), RetirementSaveBytes(second_save));
 }
 
 TEST(RegionConsumerGate, SessionLegacyResourceFieldsAndDecayRemainFullRate) {

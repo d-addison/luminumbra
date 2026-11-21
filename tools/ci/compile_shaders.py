@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile the complete desktop OpenGL shader inventory without a GL context.
+"""Compile and link the desktop OpenGL shader inventory without a GL context.
 
 Shader.cpp expands quoted includes before ShaderSource.cpp injects defines.
 The compute loaders in FoliagePass, FroxelPass and LuminanceMeterPass read raw
@@ -23,6 +23,7 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
 
 
 # Explicit inventory: additions, deletions and unknown extensions require review.
@@ -50,7 +51,7 @@ EXCLUDED = frozenset({"pilot/debug_view.frag.hlsl", "pilot/ssao.frag.hlsl"})
 LADDER_FILES = frozenset({"g_buffer.vert", "g_buffer.frag", "instanced_mesh.vert", "skinned_mesh.vert"})
 LADDER_DEFINES = ("LUMINUMBRA_FAR_WORLD_LADDER 1",)
 DIAGNOSTIC_FILES = frozenset({
-    "g_buffer.frag", "static_asset.frag", "tree_impostor.frag", "plant_procgen.frag",
+    "g_buffer.frag", "static_asset.frag", "plant_procgen.frag",
     "scent_decal.frag", "foliage.frag", "water.frag", "glass_oit.frag", "waterfall.frag",
     "magical_particles.frag", "weather_system.frag",
 })
@@ -60,6 +61,7 @@ MAX_ENTRIES = 256
 MAX_SOURCE_BYTES = 1024 * 1024
 MAX_EXPANDED_BYTES = 8 * MAX_SOURCE_BYTES
 MAX_INCLUDE_DEPTH = 32
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class ShaderError(ValueError):
@@ -78,6 +80,12 @@ class Unit:
     stage: str
     defines: tuple[str, ...]
     source: Source
+
+
+@dataclass(frozen=True)
+class Program:
+    name: str
+    units: tuple[Unit, ...]
 
 
 def read_source(path: Path) -> str:
@@ -292,6 +300,144 @@ def compile_unit(unit: Unit, validator: str) -> str:
     return diagnostic
 
 
+def without_comments(text: str) -> str:
+    return re.sub(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"',
+                  lambda match: match[0] if match[0].startswith('"') else ' ', text,
+                  flags=re.DOTALL)
+
+
+def registry_entries(text: str) -> list[tuple[str, tuple[str, ...]]]:
+    """Read the existing native registry, refusing unparsed entries or code.
+
+    This deliberately accepts literal aggregate entries only, rather than silently
+    ignoring a future computed registration. Input is bounded by read_source.
+    """
+    text = without_comments(text)
+    match = re.search(r'\bPipelineProgramSpecs\(\)\s*\{\s*return\s*\{(.*?)\};\s*\}',
+                      text, re.DOTALL)
+    if not match:
+        raise ShaderError("missing or unsupported PipelineProgramSpecs registry")
+    body = match[1]
+    entry_pattern = re.compile(r'\{\s*"([\w-]+)"\s*,\s*"([\w-]+\.vert)"\s*,\s*'
+                               r'"([\w-]+\.frag)"(?:\s*,\s*"([\w-]+\.geom)")?\s*\}\s*,?')
+    entries = []
+    cursor = 0
+    for entry in entry_pattern.finditer(body):
+        if body[cursor:entry.start()].strip():
+            raise ShaderError("unsupported program registry entry")
+        if len(entries) >= MAX_ENTRIES:
+            raise ShaderError("program registry entry bound exceeded")
+        entries.append((entry[1], tuple(path for path in entry.groups()[1:] if path)))
+        cursor = entry.end()
+    if body[cursor:].strip() or not entries:
+        raise ShaderError("empty or unsupported program registry entry")
+    if len({name for name, _ in entries}) != len(entries):
+        raise ShaderError("duplicate program registry name")
+    return entries
+
+
+def layout_pairs(layouts: str) -> set[tuple[str, str]]:
+    """Extract literal layouts and the table's copy-and-replace-vertex loop.
+
+    Refuse any shader literal outside these forms so new table construction
+    syntax requires an explicit parser update instead of losing pair coverage.
+    """
+    layouts = without_comments(layouts)
+    layout_paths = list(re.finditer(r'"res/shaders/([^"\n]+)"', layouts))
+    literals = list(re.finditer(r'"res/shaders/([\w-]+\.vert)"\s*,\s*'
+                                r'"res/shaders/([\w-]+\.frag)"', layouts))
+    pairs = {(match[1], match[2]) for match in literals}
+    consumed = [(match.start(), match.end()) for match in literals]
+    expansion = re.compile(
+        r'const auto (\w+) = v\.back\(\);\s*'
+        r'for \(const auto& (\w+) : \{(.*?)\}\) \{\s*'
+        r'auto (\w+) = \1;(.*?)v\.push_back\(std::move\(\4\)\);\s*\}', re.DOTALL)
+    for match in expansion.finditer(layouts):
+        previous = [literal for literal in literals if literal.end() < match.start()]
+        replacements = list(re.finditer(r'std::pair\{"[\w-]+",\s*"res/shaders/([\w-]+\.vert)"\}', match[3]))
+        assignment = rf'\b{re.escape(match[4])}\.vert\s*=\s*{re.escape(match[2])}\.second;'
+        if (not previous or not replacements or not re.search(assignment, match[5])
+                or re.search(r'\.frag\s*=', match[5])):
+            raise ShaderError("unsupported derived pass layout")
+        pairs.update((vertex[1], previous[-1][2]) for vertex in replacements)
+        consumed.extend((match.start(3) + vertex.start(), match.start(3) + vertex.end())
+                        for vertex in replacements)
+    uncovered = sorted({path[1] for path in layout_paths
+                        if not any(start <= path.start() and path.end() <= end for start, end in consumed)})
+    if not pairs or uncovered:
+        raise ShaderError(f"empty or unsupported pass layout paths: {sorted(uncovered)}")
+    return pairs
+
+
+def link_programs(units: list[Unit], registry: str, layouts: str) -> list[Program]:
+    entries = registry_entries(registry)
+    registered = {paths for _, paths in entries}
+    missing_pairs = layout_pairs(layouts) - registered
+    if missing_pairs:
+        raise ShaderError("pass layout program missing from link registry: "
+                          f"pairs={sorted(missing_pairs)}")
+    by_key = {(unit.name, unit.defines): unit for unit in units}
+    if len(by_key) != len(units):
+        raise ShaderError("duplicate shader permutation")
+    # Compute programs are single-stage, registered by the existing stage inventory.
+    entries.extend((name, (name,)) for name in sorted({unit.name for unit in units if unit.stage == "comp"}))
+    programs = []
+    covered = set()
+    for name, paths in entries:
+        permutations = sorted({unit.defines for unit in units if unit.name in paths})
+        for defines in permutations:
+            selected = []
+            for path in paths:
+                # Non-variant stages are reused unchanged in a variant pipeline.
+                key = (path, defines) if (path, defines) in by_key else (path, ())
+                if key not in by_key:
+                    raise ShaderError(f"{name}: registered stage missing from compile set: {path}")
+                selected.append(by_key[key])
+                covered.add(key)
+            programs.append(Program(name, tuple(selected)))
+        if not permutations:
+            raise ShaderError(f"{name}: registered program has no compiled stages")
+    missing = sorted(by_key.keys() - covered)
+    if missing:
+        raise ShaderError(f"shader permutations missing from link set: {missing}")
+    return programs
+
+
+def link_program(program: Program, validator: str) -> str:
+    """Link the exact prepared stage texts, with stage suffixes for glslang.
+
+    At most three files per registered program, each already limited to 8 MiB.
+    Close files before invoking the validator (also required on Windows).
+    """
+    with tempfile.TemporaryDirectory(prefix="shader-link-") as directory:
+        paths = []
+        for unit in program.units:
+            path = Path(directory) / unit.name
+            path.write_bytes(unit.source.text.encode("utf-8"))
+            paths.append(str(path))
+        result = subprocess.run([validator, "-d", "-l", *paths], text=True, encoding="utf-8",
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                timeout=30, check=False)
+        diagnostic = result.stdout
+        for path, unit in zip(paths, program.units):
+            def location(match: re.Match[str]) -> str:
+                number = int(match[2])
+                if 1 <= number <= len(unit.source.locations):
+                    name, line = unit.source.locations[number - 1]
+                    return f"{name}:{line}: {match[1].lower()}:"
+                return f"{unit.name}:{number}: {match[1].lower()}:"
+
+            diagnostic = re.sub(r'(?m)^(ERROR|WARNING): ' + re.escape(path) + r':(\d+):',
+                                location, diagnostic)
+            diagnostic = diagnostic.replace(path, unit.name)
+    if result.returncode:
+        defines = sorted({define for unit in program.units for define in unit.defines})
+        stages = ", ".join(f"{unit.stage}={unit.name}" for unit in program.units)
+        raise ShaderError(f"program {program.name} [{', '.join(defines) or 'default'}] "
+                          f"({stages}): glslangValidator link failed ({result.returncode})\n{diagnostic}")
+    return diagnostic
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2] / "res/shaders")
@@ -300,6 +446,9 @@ def main() -> int:
     try:
         sources = inventory(args.root)
         units = compile_units(sources)
+        programs = link_programs(
+            units, read_source(REPO_ROOT / "test/rendering/render_smoke_test.cpp"),
+            read_source(REPO_ROOT / "src/luminumbra_client/rendering/PassShaderLayouts.cpp"))
         failures = []
         for unit in units:
             try:
@@ -308,9 +457,17 @@ def main() -> int:
                     print(diagnostic, end="" if diagnostic.endswith("\n") else "\n")
             except ShaderError as error:
                 failures.append(str(error))
+        for program in programs:
+            try:
+                diagnostic = link_program(program, args.validator)
+                if diagnostic:
+                    print(diagnostic, end="" if diagnostic.endswith("\n") else "\n")
+            except ShaderError as error:
+                failures.append(str(error))
         if failures:
             raise ShaderError("\n".join(failures))
-        print(f"Compiled {len(units)} shader permutations; covered {len(sources) - len(EXCLUDED)} GLSL files; "
+        print(f"Compiled {len(units)} shader permutations; linked {len(programs)} program permutations; "
+              f"covered {len(sources) - len(EXCLUDED)} GLSL files; "
               f"excluded {len(EXCLUDED)} Slang HLSL pilots.")
         return 0
     except (OSError, UnicodeError, ShaderError, subprocess.TimeoutExpired) as error:

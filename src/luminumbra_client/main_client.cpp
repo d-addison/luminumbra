@@ -17,6 +17,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "app/CaveFlourishes.h"
 #include "app/ClientAppContext.h"
 #include "app/CrashHandler.h"
+#include "app/CreatureBodyAttachment.h"
 #include "app/DebugOverlays.h"
 #include "app/FarmSpeciesCache.h"
 #include "app/FrameAttribution.h"
@@ -53,6 +54,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "core/Profiler.h"
 #include "core/RuntimeScenarioConfig.h"
 #include "core/ScenarioRunner.h"
+#include "core/TimelapseVista.h"
 #include "debug/DebugCamera.h" // deterministic feature locator (--debug-goto cave|doline)
 #include "debug/DeveloperConsole.h"
 #include "debug/DeveloperLogAttachment.h"
@@ -132,6 +134,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "rendering/UploadBudget.h"
 #include "rendering/WeatherRenderBridge.h" // Live weather bridge.
 #include "rendering/WorldLoadingVisualizer.h"
+#include "rendering/passes/DebugViewPass.h"
 #include "rendering/passes/ParticlePass.h"     //  EmitterDescriptor + accessor type
 #include "rendering/passes/PlantProcgenPass.h" //  render-only procedural plant bake (flag-gated)
 #include "rendering/passes/WaterPass.h"
@@ -140,6 +143,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "ui/core/UIDataStream.h"
 #include "ui/core/UIHotReload.h"
 #include "world/WorldEntry.h"
+#include "world/WorldPresentation.h"
 #include "world/WorldgenOverride.h"
 #include "world/WorldgenPreview.h"
 #include <algorithm>
@@ -280,34 +284,11 @@ static void DrainWorldDressing(Luminumbra::JobSystem& jobs,
     worldDressing.reset();
 }
 
-//  give any creature that still lacks a Jolt body (e.g. an offspring just born in the
-// sim) a deterministic avatar character so the GameSession physics bridge drives it and it
-// COLLIDES with the terrain instead of walking through mountains. Amortized (a few per frame)
-// so a birth  spikes the frame. Render/demo-only.
-void AttachMissingCreatureBodies(Luminumbra::Systems::PhysicsSystem* phys,
-                                 entt::registry& reg,
-                                 int maxPerFrame = 4) {
-    if (!phys)
-        return;
-    int made = 0;
-    auto view = reg.view<const Luminumbra::Components::CreatureComponent,
-                         const Luminumbra::Components::TransformComponent>();
-    for (auto e : view) {
-        if (made >= maxPerFrame)
-            break;
-        if (reg.all_of<Luminumbra::Components::CreaturePhysicsComponent>(e))
-            continue;
-        const auto& tf = view.get<const Luminumbra::Components::TransformComponent>(e);
-        const std::size_t idx = phys->create_avatar_character(tf.position);
-        reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
-        ++made;
-    }
-}
-
 struct ClientRuntimeState {
     std::unique_ptr<Luminumbra::Rendering::Camera> camera;
     std::unique_ptr<Luminumbra::Client::PlayerController> playerController;
     ClientAppContext app;
+    Luminumbra::Client::CreatureBodyAttachmentCursor creatureBodyAttachmentCursor;
     luminumbra::core::SystemConfig systemConfig;
     std::shared_ptr<WorldDressingPending> worldDressing;
     Luminumbra::JobHandle worldDressingHandle;
@@ -535,7 +516,9 @@ static void ConsumeWorldDressing(ClientAppContext& g_app,
                 if (phys) {
                     const std::size_t idx = phys->create_avatar_character(
                         glm::vec3(c.position.x, c.position.y, c.position.z));
-                    reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
+                    if (idx != Luminumbra::Systems::PhysicsSystem::kInvalidAvatar) {
+                        reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
+                    }
                 }
                 ++pend.creatures_spawned;
             }
@@ -770,7 +753,9 @@ static void ConsumeWorldDressing(ClientAppContext& g_app,
                     if (phys) {
                         const std::size_t idx =
                             phys->create_avatar_character(glm::vec3(cx, cy, cz));
-                        reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
+                        if (idx != Luminumbra::Systems::PhysicsSystem::kInvalidAvatar) {
+                            reg.emplace<Luminumbra::Components::CreaturePhysicsComponent>(e, idx);
+                        }
                     }
                 };
                 if (g_app.capture.timelapse_calm) {
@@ -839,6 +824,7 @@ static void ConsumeWorldDressing(ClientAppContext& g_app,
 static bool CaptureTimelapseFrame(ClientAppContext& g_app,
                                   GLFWwindow* window,
                                   GameState currentState,
+                                  bool presentation_ready,
                                   Luminumbra::world::GameSession* gameSession,
                                   Luminumbra::Rendering::RenderPipeline& renderPipeline,
                                   const luminumbra::core::ResolvedGraphics& graphics,
@@ -846,10 +832,16 @@ static bool CaptureTimelapseFrame(ClientAppContext& g_app,
     // --timelapse: dump the rendered frame, then fast-forward sim-time (+ the day clock)
     // for the next one. Pair with --no-ui so no overlay is baked into the frame.
     if (g_app.capture.timelapse_frames > 0 && currentState == GameState::IN_GAME && gameSession) {
-        if (g_app.capture.timelapse_settle < kTimelapseSettleFrames) {
+        // --timelapse-settle frames still render after the gate reports ready.
+        if (presentation_ready &&
+            g_app.capture.timelapse_settle < g_app.capture.timelapse_settle_frames) {
+            ++g_app.capture.timelapse_settle;
+            presentation_ready = false;
+        }
+        if (!presentation_ready) {
             renderPipeline.set_time_of_day(
                 g_app.capture.timelapse_tod); // settle at the start time-of-day
-            ++g_app.capture.timelapse_settle; // let the world stream/settle before frame 0
+            // The shared gate owns settling; keep the capture clock at frame zero.
         } else {
             int vw = 0, vh = 0;
             glfwGetFramebufferSize(window, &vw, &vh);
@@ -1197,6 +1189,45 @@ static void UpdateFoliageScatter(ClientAppContext& g_app,
                                 .count(); //
         }
     }
+}
+
+// Entry/capture only: the local query visits at most (2 * 12 + 1)^2 columns.
+// No world-store traversal or allocation is added to the simulation tick path.
+static Luminumbra::Client::WorldPresentationReadiness
+ObserveWorldPresentation(const Luminumbra::Systems::SHIELD_WorldSystem& world,
+                         const Luminumbra::Rendering::RenderPipeline& pipeline,
+                         const Luminumbra::Vec3& position,
+                         int radius,
+                         bool water_prepared) {
+    const auto coverage = world.get_camera_local_coverage_stats(position, radius);
+    const auto& streaming = world.get_streaming_telemetry_stats();
+    const auto& uploads = pipeline.get_last_mesh_upload_stats();
+    // Not `far`: <windows.h> defines `far` (and `near`) as empty macros.
+    const auto far_world = pipeline.far_world_reporting_state();
+    bool horizon = far_world.coverage_settled;
+    if (far_world.selection.effective == Luminumbra::Rendering::FarWorldMode::Legacy) {
+        if (!far_world.selection.advance) {
+            horizon = true; // Explicitly disabled optional far terrain.
+        } else if (const auto* legacy = pipeline.legacy_far_compatibility()) {
+            const auto& diagnostic = legacy->coverage_diagnostics();
+            horizon = diagnostic.enabled && diagnostic.wanted > 0 && diagnostic.missing == 0 &&
+                      diagnostic.stale == 0 && diagnostic.pending == 0 &&
+                      diagnostic.resident == diagnostic.wanted;
+        }
+    }
+    const auto* foliage = pipeline.foliage();
+    return {.terrain = Luminumbra::Client::NearTerrainPrepared(coverage.expected_surface_chunks,
+                                                               coverage.ready_surface_chunks,
+                                                               coverage.pending_lod_chunks,
+                                                               coverage.lod_unknown_chunks) &&
+                       uploads.terrain_uploads_deferred == 0,
+            .horizon = horizon,
+            .water = Luminumbra::Client::InitialWaterPrepared(water_prepared,
+                                                              uploads.water_uploads_deferred),
+            .foliage = !foliage || !foliage->enabled() ||
+                       (foliage->archetype_count() > 0 && !foliage->build_pending()),
+            .uploads = pipeline.render_uploads_settled(),
+            .streaming = streaming.quiescent()};
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -1563,6 +1594,13 @@ int main(int argc, char* argv[]) {
             g_app.overlay.debug_view_mode = 4;
         else if (dv == "position")
             g_app.overlay.debug_view_mode = 5;
+        else if (const int identity_mode = Luminumbra::Rendering::DebugViewPass::identity_mode(dv);
+                 identity_mode != Luminumbra::Rendering::DebugViewPass::None) {
+            auto& diagnostics = Luminumbra::Rendering::DebugViewPass::controls();
+            diagnostics.enabled = true;
+            diagnostics.view = identity_mode;
+            diagnostics.refresh = true;
+        }
     }
     g_app.capture.render_benchmark_path =
         GetCommandLineOption(argc, argv, "--render-benchmark", "");
@@ -2021,6 +2059,14 @@ int main(int argc, char* argv[]) {
         g_app.capture.timelapse_creatures = true; // calm mode is a creature scenario
     g_app.capture.timelapse_fire = HasCommandLineFlag(argc, argv, "--timelapse-fire");
     g_app.capture.timelapse_dig = HasCommandLineFlag(argc, argv, "--timelapse-dig");
+    g_app.capture.timelapse_vista = HasCommandLineFlag(argc, argv, "--timelapse-vista");
+    const int default_settle = g_app.capture.timelapse_settle_frames;
+    g_app.capture.timelapse_settle_frames = Luminumbra::TimelapseVista::ClampSettleFrames(
+        GetCommandLineIntOption(argc, argv, "--timelapse-settle", default_settle), default_settle);
+    if (const auto pan = Luminumbra::TimelapseVista::ParsePanDegrees(
+            GetCommandLineOption(argc, argv, "--timelapse-pan", ""))) {
+        g_app.capture.timelapse_pan = *pan;
+    }
     g_app.capture.timelapse_drain = HasCommandLineFlag(argc, argv, "--timelapse-drain");
     g_app.capture.timelapse_rain = HasCommandLineFlag(argc, argv, "--timelapse-rain");
     g_app.capture.timelapse_rain_mm =
@@ -2213,6 +2259,10 @@ int main(int argc, char* argv[]) {
     // can be applied immediately. Never hashed; missing overlay -> struct defaults.
     g_systemConfig = luminumbra::core::SystemConfig::LoadFromRuntimeRoot(
         root_dir, luminumbra::core::SystemConfig::DefaultUserOverlayPath());
+    runtime_state_recorder.bind_audio_acceptance(audioManager,
+                                                 g_systemConfig,
+                                                 g_uiManager,
+                                                 HasCommandLineFlag(argc, argv, "--enable-audio"));
     if (scenario_config.systems_config_override) {
         // Retain player settings and their load report, including Recovery save protection.
         g_systemConfig.ReplaceSystemsFrom(*scenario_config.systems_config_override);
@@ -2400,6 +2450,8 @@ int main(int argc, char* argv[]) {
 
     render_pipeline_owner = std::make_unique<Luminumbra::Rendering::RenderPipeline>();
     auto& renderPipeline = *render_pipeline_owner;
+    renderPipeline.set_capture_diagnostics(path_options.diagnostics);
+    renderPipeline.set_diagnostic_capture_armed(g_app.capture.render_benchmark_path.empty());
     //  isolation/layer mode: parse CLI strings -> IsolationConfig (default
     // {All, Scene} when both empty = no-op). Drives the SkyboxPass backdrop override
     // + (next slice) scenario spawn-suppression.
@@ -2631,11 +2683,22 @@ int main(int argc, char* argv[]) {
         jobSystem.wait(s_worldDressingHandle);
     };
 
+    // Player ownership marks a live gameplay presentation. Retiring it is the
+    // common boundary for menu exits, world replacements and failed-entry drains.
+    auto release_player_controller = [&]() {
+        if (g_playerController) {
+            ReleasePhotoModeAndHud(g_app, renderPipeline);
+            g_playerController.reset();
+        }
+    };
+
     auto entry_world_revision = gameSession->WorldRevision();
     auto finish_world_replacement = [&]() {
         // An open can refuse before adoption. Preserve the still-live world's visuals/results.
-        if (gameSession->WorldRevision() != entry_world_revision)
+        if (gameSession->WorldRevision() != entry_world_revision) {
+            release_player_controller();
             prepare_world_entry();
+        }
     };
     std::string world_entry_error;
     auto refuse_world_entry = [&](const std::string& fallback, bool use_world_error = true) {
@@ -2647,7 +2710,7 @@ int main(int argc, char* argv[]) {
             g_uiManager->ShowMessage(error);
         if (gameSession->WorldRevision() != entry_world_revision) {
             g_app.menu.menu_backdrop_active = false;
-            g_playerController.reset();
+            release_player_controller();
         }
         scenario_failed = benchmark_v3 || scenario_config.active() ||
                           HasCommandLineOption(argc, argv, "--load-world") ||
@@ -2675,14 +2738,33 @@ int main(int argc, char* argv[]) {
         }
         if (Luminumbra::Rendering::TreeImpostorsRequested(
                 Luminumbra::Core::ReadEnvironment("LUMIN_TREE_IMPOSTORS")) &&
-            !renderPipeline.tree_impostor_enabled())
+            !renderPipeline.tree_impostor_enabled() &&
+            !renderPipeline.tree_impostor_coverage().refused())
             return "Required tree impostor baking failed. Check the client log for the renderer "
                    "error.";
         return {};
     };
 
+    Luminumbra::Client::WorldPresentationGate entry_presentation_gate;
+    Luminumbra::Client::WorldPresentationGate timelapse_presentation_gate;
+    std::chrono::steady_clock::time_point entry_presentation_started_at{};
+    std::chrono::steady_clock::time_point timelapse_presentation_started_at{};
+    bool entry_presentation_started = false;
+    bool entry_horizon_prepared = false;
+    bool entry_water_prepared = false;
+    bool timelapse_mode_prepared = false;
+    bool timelapse_presentation_ready = false;
     auto finish_world_entry = [&](bool staged_entry = false) {
-        g_playerController.reset();
+        entry_presentation_gate = {};
+        timelapse_presentation_gate = {};
+        entry_presentation_started = false;
+        entry_horizon_prepared = false;
+        entry_water_prepared = false;
+        timelapse_mode_prepared = false;
+        timelapse_presentation_ready = false;
+        timelapse_presentation_started_at = {};
+        scenario_ready = false;
+        release_player_controller();
         g_procgen = {};
         g_app.worldDressing = {};
         g_app.foragers = {};
@@ -2720,7 +2802,8 @@ int main(int argc, char* argv[]) {
             !staged_entry && (benchmark_v4 || runtime_boot_recorder.enabled() ||
                               (scenario_config.active() && scenario_config.auto_enter_world));
         if (bypass_loading_ui) {
-            LUMINUMBRA_CORE_INFO("Runtime scenario mode: entered world without loading UI.");
+            LUMINUMBRA_CORE_INFO(
+                "Runtime scenario mode: preparing world presentation before entry.");
             bool horizon_ready = true;
             if (gameSession->GetWorldSystem() && gameSession->GetPhysicsSystem()) {
                 horizon_ready = gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
@@ -2733,48 +2816,7 @@ int main(int argc, char* argv[]) {
                 refuse_world_entry("Surface preparation exceeds the supported work budget.", false);
                 return;
             }
-            g_camera = std::make_unique<Luminumbra::Rendering::Camera>(
-                gameSession->GetMetadata().spawnPoint);
-            g_camera->MouseSensitivity =
-                g_systemConfig.user().mouse_sensitivity; // user.video.mouse_sensitivity
-            g_camera->Zoom = g_systemConfig.user().fov;  // user.video.fov
-            g_playerController = std::make_unique<Luminumbra::Client::PlayerController>(
-                window,
-                g_camera.get(),
-                gameSession->GetPhysicsSystem(),
-                gameSession->ActiveRegionsEnabled() &&
-                        gameSession->GetActiveRegionLedger().tick() > 0
-                    ? gameSession->GetActiveRegionLedger().local_anchor()
-                    : std::nullopt);
-            g_playerController->ApplyKeyBindings(g_systemConfig); // user.controls.* (rebindable)
-            if (g_app.loading.world_render_data_initialized) {
-                renderPipeline.clear_all_chunk_data();
-            }
-            g_app.loading.world_render_data_initialized = true;
-            SetGameState(window, gameStateManager, GameState::IN_GAME);
-            if (benchmark_v4 && g_uiManager)
-                g_uiManager->RequestLoadDocument("hud.rml");
-            last_readiness_report = EvaluateReadiness(scenario_config, gameSession.get());
-            if (!horizon_ready || !last_readiness_report.ready) {
-                scenario_failed = true;
-                scenario_failure_reason = "world_readiness_failed";
-                runtime_state_recorder.capture("world_readiness_failed",
-                                               &jobSystem,
-                                               gameSession.get(),
-                                               &renderPipeline,
-                                               scenario_frame_count,
-                                               last_readiness_report);
-            } else {
-                scenario_ready = true;
-                scenario_play_started_at = std::chrono::steady_clock::now();
-                runtime_state_recorder.capture("world_entered",
-                                               &jobSystem,
-                                               gameSession.get(),
-                                               &renderPipeline,
-                                               scenario_frame_count,
-                                               last_readiness_report);
-            }
-            return;
+            entry_horizon_prepared = true;
         }
 
         // Hide the main menu UI
@@ -2794,7 +2836,7 @@ int main(int argc, char* argv[]) {
             SetGameState(window, gameStateManager, GameState::WORLD_LOADING);
 
         // 3. Get the list of chunks to generate and start the visualizer
-        if (runtime_boot_recorder.enabled()) {
+        if (bypass_loading_ui || runtime_boot_recorder.enabled()) {
             g_app.loading.initial_chunks_to_load.clear();
         } else {
             g_app.loading.initial_chunks_to_load = gameSession->TakeInitialChunkLoadList();
@@ -3419,7 +3461,7 @@ int main(int argc, char* argv[]) {
                     return;
                 }
                 prepare_world_entry();
-                g_playerController.reset();
+                release_player_controller();
                 SetGamePaused(window, false);
                 SetGameState(window, gameStateManager, GameState::MAIN_MENU);
                 if (g_uiManager)
@@ -3462,8 +3504,10 @@ int main(int argc, char* argv[]) {
             g_app.overlay.debug_view_mode = static_cast<int>(
                 std::find(modes.begin(), modes.end(), std::get<std::string>(args[0])) -
                 modes.begin());
+            Luminumbra::Rendering::DebugViewPass::controls().view =
+                Luminumbra::Rendering::DebugViewPass::None;
         } else if (name == "render debug-cycle")
-            g_app.overlay.debug_view_mode = (g_app.overlay.debug_view_mode + 1) % 6;
+            Luminumbra::Rendering::DebugViewPass::cycle_mode(g_app.overlay.debug_view_mode);
         else if (name == "render wireframe")
             g_app.overlay.wireframe_mode = std::get<bool>(args[0]);
         else if (name == "render wireframe-toggle")
@@ -3728,6 +3772,8 @@ int main(int argc, char* argv[]) {
 
     SetGameState(window, gameStateManager, GameState::MAIN_MENU);
     audioManager->PlayMusic("music_main_menu");
+    // Ordinary menu startup also needs a backend observation, without a scenario/world.
+    runtime_state_recorder.capture("audio_startup", &jobSystem, gameSession.get(), nullptr, 0, {});
     if (g_uiManager) {
         // --ui-screenshot: open the requested screen directly in menu state instead of the menu.
         const std::string boot_doc = g_app.capture.ui_screenshot_screen.empty()
@@ -4004,17 +4050,88 @@ int main(int argc, char* argv[]) {
     using Luminumbra::Client::WorldEntryResult;
     using Luminumbra::Client::WorldEntryStage;
     using Luminumbra::Client::WorldEntryState;
+    const auto presentation_radius = [&]() {
+        const bool capture_horizon = benchmark_v4 || runtime_boot_recorder.enabled() ||
+                                     (scenario_config.active() && scenario_config.auto_enter_world);
+        const int horizon_radius = capture_horizon ? scenario_config.horizon_radius : 12;
+        return benchmark_v4 && scenario_config.benchmark_stream_radius > 0
+                   ? std::min(horizon_radius, scenario_config.benchmark_stream_radius)
+                   : horizon_radius;
+    };
+    const auto log_presentation_timeout = [](const auto& gate) {
+        LUMINUMBRA_CORE_WARN("World presentation timeout: missing={}", gate.missing_parts());
+    };
+    auto restore_worldgen_preview = [&]() {
+        const auto currentState = gameStateManager.GetCurrentState();
+        // The create-world view shares the foliage pass. Restore the resolved
+        // gameplay configuration on every exit, including cancellation to the
+        // menu, even when the saved settings have not changed.
+        if (worldgenPreview->active() && (currentState != GameState::MAIN_MENU || !g_uiManager ||
+                                          !g_uiManager->GetWorldCreationPreviewState().active)) {
+            if (renderPipeline.apply_graphics(resolved_graphics))
+                worldgenPreview->set_active(false);
+            else
+                LUMINUMBRA_CORE_ERROR("Could not restore graphics after world preview");
+        }
+    };
+    auto wait_for_world_presentation = [&]() {
+        restore_worldgen_preview();
+        if (!entry_presentation_started) {
+            entry_presentation_started = true;
+            entry_presentation_started_at = std::chrono::steady_clock::now();
+            g_camera = std::make_unique<Luminumbra::Rendering::Camera>(
+                gameSession->GetMetadata().spawnPoint);
+            g_camera->MouseSensitivity =
+                g_systemConfig.user().mouse_sensitivity; // user.video.mouse_sensitivity
+            g_camera->Zoom = g_systemConfig.user().fov;  // user.video.fov
+            if (g_app.loading.world_render_data_initialized) {
+                renderPipeline.clear_all_chunk_data();
+            }
+            g_app.loading.world_render_data_initialized = true;
+        }
+        auto* world = gameSession->GetWorldSystem();
+        Luminumbra::Client::WorldPresentationReadiness readiness;
+        if (world && g_camera) {
+            if (!entry_water_prepared) {
+                entry_water_prepared = world->PrepareInitialWaterPresentationNear(
+                    g_camera->Position, presentation_radius());
+            }
+            double scatter_ms = 0.0, foliage_ms = 0.0;
+            UpdateFoliageScatter(g_app,
+                                 root_dir,
+                                 scenario_config,
+                                 g_camera.get(),
+                                 gameSession.get(),
+                                 renderPipeline,
+                                 false,
+                                 scatter_ms,
+                                 foliage_ms);
+            auto* legacy = renderPipeline.legacy_far_compatibility();
+            const bool diagnostics_enabled = legacy && legacy->coverage_diagnostics().enabled;
+            if (legacy) {
+                legacy->set_coverage_diagnostics_enabled(true);
+            }
+            renderPipeline.render_frame(
+                gameSession->GetRegistry(), *world, *g_camera, 0.0f, g_app.overlay.wireframe_mode);
+            readiness = ObserveWorldPresentation(*world,
+                                                 renderPipeline,
+                                                 g_camera->Position,
+                                                 presentation_radius(),
+                                                 entry_water_prepared);
+            if (legacy) {
+                legacy->set_coverage_diagnostics_enabled(diagnostics_enabled);
+            }
+        }
+        const bool was_waiting = entry_presentation_gate.waiting();
+        entry_presentation_gate.observe(
+            readiness, std::chrono::steady_clock::now() - entry_presentation_started_at);
+        if (was_waiting && entry_presentation_gate.timed_out()) {
+            log_presentation_timeout(entry_presentation_gate);
+        }
+        return entry_presentation_gate.waiting();
+    };
     auto activate_loaded_world = [&]() {
         LUMINUMBRA_CORE_INFO("World generation phase complete. Entering world.");
-        g_camera =
-            std::make_unique<Luminumbra::Rendering::Camera>(gameSession->GetMetadata().spawnPoint);
-        g_camera->MouseSensitivity =
-            g_systemConfig.user().mouse_sensitivity; // user.video.mouse_sensitivity
-        g_camera->Zoom = g_systemConfig.user().fov;  // user.video.fov
-        if (g_app.loading.world_render_data_initialized) {
-            renderPipeline.clear_all_chunk_data();
-        }
-        g_app.loading.world_render_data_initialized = true;
 
         audioManager->StopMusic();
         audioManager->PlayOneShot2D("ui_world_loaded",
@@ -4060,7 +4177,8 @@ int main(int argc, char* argv[]) {
         }
         if (scenario_config.active() || benchmark_v4 || runtime_boot_recorder.enabled()) {
             last_readiness_report = EvaluateReadiness(scenario_config, gameSession.get());
-            if (!last_readiness_report.ready) {
+            if (!entry_presentation_gate.permits_entry(true, last_readiness_report.ready)) {
+                scenario_ready = false;
                 scenario_failed = true;
                 scenario_failure_reason = "world_readiness_failed";
                 runtime_state_recorder.capture("world_readiness_failed",
@@ -4123,14 +4241,20 @@ int main(int argc, char* argv[]) {
                    : WorldEntryResult::Pending;
     };
     auto prepare_entry_horizon = [&]() {
+        if (entry_horizon_prepared) {
+            return true;
+        }
         const bool capture_horizon = benchmark_v4 || runtime_boot_recorder.enabled() ||
                                      (scenario_config.active() && scenario_config.auto_enter_world);
-        if (gameSession->GetWorldSystem() && gameSession->GetPhysicsSystem())
-            return gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
+        if (gameSession->GetWorldSystem() && gameSession->GetPhysicsSystem()) {
+            entry_horizon_prepared = gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
                 gameSession->GetMetadata().spawnPoint,
                 gameSession->GetPhysicsSystem(),
                 capture_horizon ? scenario_config.horizon_radius : 12,
                 capture_horizon ? scenario_config.collision_radius : 4);
+            return entry_horizon_prepared;
+        }
+        entry_horizon_prepared = true;
         return true;
     };
     auto drain_entry = [&]() {
@@ -4148,7 +4272,7 @@ int main(int argc, char* argv[]) {
             if (auto* world = gameSession->GetWorldSystem())
                 world->clear_world(gameSession->GetPhysicsSystem());
             g_app.menu.menu_backdrop_active = false;
-            g_playerController.reset();
+            release_player_controller();
         }
         const auto rollback_error = entry_artifacts.rollback();
         if (!rollback_error.empty()) {
@@ -4183,6 +4307,7 @@ int main(int argc, char* argv[]) {
         return WorldEntryResult::Complete;
     };
     auto return_entry_to_menu = [&]() {
+        release_player_controller();
         SetGameState(window, gameStateManager, GameState::MAIN_MENU);
         if (g_uiManager)
             g_uiManager->RequestLoadDocument("main_menu.rml");
@@ -4412,6 +4537,9 @@ int main(int argc, char* argv[]) {
                 }
                 break;
             case WorldEntryStage::Activate:
+                if (wait_for_world_presentation()) {
+                    return WorldEntryResult::Pending;
+                }
                 activate_loaded_world();
                 if (benchmark_v4 && request.create)
                     benchmark_created_world_id = gameSession->GetMetadata().worldId;
@@ -4441,11 +4569,44 @@ int main(int argc, char* argv[]) {
     bool frame_scan_complete = false;
     bool survey_complete = false;
     bool scene_capture_complete = false;
-    const auto capture_failure = [&](const std::filesystem::path& report, const char* reason) {
+    const auto write_capture_failure_report = [&](const std::filesystem::path& report,
+                                                  const auto& write_report,
+                                                  bool destination_reserved = false) {
+        if (!renderPipeline.capture_diagnostics_enabled() || destination_reserved) {
+            return write_report();
+        }
+        std::filesystem::path diagnostic_failure_image;
+        if (g_app.capture.frame_scan_active &&
+            report == std::filesystem::path(g_app.capture.frame_scan_path)) {
+            diagnostic_failure_image = report;
+            diagnostic_failure_image.replace_extension(".ppm");
+        } else if (!g_app.capture.render_benchmark_screenshot.empty() &&
+                   report ==
+                       std::filesystem::path(g_app.capture.render_benchmark_screenshot + ".json")) {
+            diagnostic_failure_image =
+                std::filesystem::path(g_app.capture.render_benchmark_screenshot);
+        } else {
+            return write_report();
+        }
+        const Luminumbra::Rendering::RenderPipeline::CaptureDestinationReservation reservation(
+            renderPipeline, diagnostic_failure_image);
+        return reservation.acquired() && write_report();
+    };
+    const auto capture_failure = [&](const std::filesystem::path& report,
+                                     const char* reason,
+                                     bool destination_reserved = false) {
         exit_code = 2;
         const nlohmann::json failure{
             {"status", "failed"}, {"capture_complete", false}, {"reason", reason}};
-        if (!Luminumbra::Rendering::WriteCaptureText(report, failure.dump(2) + "\n"))
+        if (!write_capture_failure_report(
+                report,
+                [&] {
+                    if (!Luminumbra::Rendering::WriteCaptureText(report, failure.dump(2) + "\n")) {
+                        return false;
+                    }
+                    return true;
+                },
+                destination_reserved))
             LUMINUMBRA_CORE_ERROR(
                 "Capture failed ({}); cannot retain report: {}", reason, report.string());
         glfwSetWindowShouldClose(window, GLFW_TRUE);
@@ -4465,7 +4626,10 @@ int main(int argc, char* argv[]) {
                                          {"settling_frames", wait.frames()},
                                          {"uploads_pending", pending}};
             if (!report.empty()) {
-                if (!Luminumbra::Rendering::WriteCaptureText(report, failure.dump(2) + "\n"))
+                if (!write_capture_failure_report(report, [&] {
+                        return Luminumbra::Rendering::WriteCaptureText(report,
+                                                                       failure.dump(2) + "\n");
+                    }))
                     LUMINUMBRA_CORE_ERROR("Cannot retain upload failure report: {}",
                                           report.string());
             }
@@ -4492,6 +4656,8 @@ int main(int argc, char* argv[]) {
     }
     while (!glfwWindowShouldClose(window)) {
         LUMIN_PROFILE_FRAME_N("Client");
+        // Release weather before any frame writer, including menu previews.
+        g_app.hud.photoWeather.Restore(renderPipeline);
         if (benchmark_v4 && Luminumbra::Filesystem::capture_content_paths().refused()) {
             LUMINUMBRA_CORE_ERROR("Benchmark content reference escapes inventoried trees");
             exit_code = 2;
@@ -4538,10 +4704,12 @@ int main(int argc, char* argv[]) {
         if (benchmark_v3 && !benchmark_world_checked && gameSession &&
             gameStateManager.GetCurrentState() == GameState::IN_GAME) {
             try {
-                const auto saved =
-                    Luminumbra::Persistence::InspectSavedWorld(gameSession->GetSaveRootPath(),
-                                                               root_path_str,
-                                                               gameSession->GetMetadata().worldId);
+                const auto saved = Luminumbra::Persistence::InspectSavedWorld(
+                    gameSession->GetSaveRootPath(),
+                    root_path_str,
+                    gameSession->GetMetadata().worldId,
+                    {},
+                    Luminumbra::Persistence::SavedWorldValidation::Catalog);
                 if (!saved.error.empty())
                     throw std::runtime_error(saved.error);
                 const auto preset = nlohmann::json::parse(saved.preset_json);
@@ -4645,7 +4813,7 @@ int main(int argc, char* argv[]) {
                         }
                         if (saved && main_menu) {
                             prepare_world_entry();
-                            g_playerController.reset();
+                            release_player_controller();
                             SetGamePaused(window, false);
                             SetGameState(window, gameStateManager, GameState::MAIN_MENU);
                             g_uiManager->RequestLoadDocument("main_menu.rml");
@@ -4658,6 +4826,31 @@ int main(int argc, char* argv[]) {
                                                     std::chrono::steady_clock::now());
                         const std::string id = gameSession->GetMetadata().worldId;
                         start_world_load(id);
+                        // Workload actions complete inside their measured frame. Loading now
+                        // includes presentation, so finish that gate before the reload-residency
+                        // loop (which requires IN_GAME) or the next simulation tick can run.
+                        for (unsigned pass = 0;
+                             pass < Luminumbra::Client::kWorldPresentationFrameDeadline &&
+                             gameStateManager.GetCurrentState() == GameState::WORLD_LOADING &&
+                             !glfwWindowShouldClose(window);
+                             ++pass) {
+                            const bool waiting = wait_for_world_presentation();
+                            benchmark_queries->checkpoint_passes();
+                            glfwPollEvents();
+                            MainLoopHeartbeat().fetch_add(1, std::memory_order_relaxed);
+                            if (glfwWindowShouldClose(window)) {
+                                break;
+                            }
+                            if (!waiting) {
+                                activate_loaded_world();
+                                break;
+                            }
+                        }
+                        if (gameStateManager.GetCurrentState() != GameState::IN_GAME ||
+                            !scenario_ready) {
+                            scenario_failed = true;
+                            scenario_failure_reason = "world_readiness_failed";
+                        }
                         if (g_uiManager)
                             g_uiManager->RequestLoadDocument("hud.rml");
                         reload_settling_pending = reload && !scenario_failed;
@@ -4848,6 +5041,8 @@ int main(int argc, char* argv[]) {
                     focused->Blur();
             }
         }
+        restore_worldgen_preview();
+
         if (world_entry.active()) {
             world_entry.advance(
                 [&](WorldEntryStage stage, const EntryRequest& request) {
@@ -4890,6 +5085,14 @@ int main(int argc, char* argv[]) {
 
         if (g_uiManager) {
             g_uiManager->Update();
+            if (runtime_state_recorder.audio_controls_changed()) {
+                runtime_state_recorder.capture("audio_controls_observed",
+                                               &jobSystem,
+                                               gameSession.get(),
+                                               nullptr,
+                                               scenario_frame_count,
+                                               last_readiness_report);
+            }
             if ((world_entry.state() == WorldEntryState::Failed ||
                  world_entry.state() == WorldEntryState::Cancelled) &&
                 !world_entry_error.empty()) {
@@ -4903,17 +5106,6 @@ int main(int argc, char* argv[]) {
         // simulation starts on the following frame, never with a loading delta.
         GameState currentState = entry_activated_this_frame ? GameState::WORLD_LOADING
                                                             : gameStateManager.GetCurrentState();
-
-        // The create-world view shares the foliage pass. Restore the resolved
-        // gameplay configuration on every exit, including cancellation to the
-        // menu, even when the saved settings have not changed.
-        if (worldgenPreview->active() && (currentState != GameState::MAIN_MENU || !g_uiManager ||
-                                          !g_uiManager->GetWorldCreationPreviewState().active)) {
-            if (renderPipeline.apply_graphics(resolved_graphics))
-                worldgenPreview->set_active(false);
-            else
-                LUMINUMBRA_CORE_ERROR("Could not restore graphics after world preview");
-        }
 
         // Frame audio — 3D listener, player footsteps, and the living-world
         // rain/creature-call region (app/FrameAudio.cpp).
@@ -5051,13 +5243,17 @@ int main(int argc, char* argv[]) {
             RefreshInputOwnership(window);
         }
 
-        const bool simulate_frame = Measurement::frame_simulation_enabled(benchmark_v4,
-                                                                          traversal.has_value(),
-                                                                          measuring_v3,
-                                                                          g_app.hud.paused,
-                                                                          g_app.capture.timeScale);
+        const bool timelapse_waiting =
+            g_app.capture.timelapse_frames > 0 && !timelapse_presentation_ready;
+        const bool simulate_frame =
+            !timelapse_waiting && Measurement::frame_simulation_enabled(benchmark_v4,
+                                                                        traversal.has_value(),
+                                                                        measuring_v3,
+                                                                        g_app.hud.paused,
+                                                                        g_app.capture.timeScale);
         // Preserve the historical frame-driven behavior outside benchmark capture.
-        const bool advance_frame_simulation = !g_rb_active || simulate_frame;
+        const bool advance_frame_simulation =
+            !timelapse_waiting && (!g_rb_active || simulate_frame);
         switch (currentState) {
             case GameState::WORLD_LOADING: {
                 glClearColor(0.01f, 0.02f, 0.05f, 1.0f);
@@ -5112,20 +5308,43 @@ int main(int argc, char* argv[]) {
                                 "Surface preparation exceeds the supported work budget.", false);
                             break;
                         }
-                        activate_loaded_world();
+                        const bool waiting = wait_for_world_presentation();
+                        // The preload draw is never presented as an in-game frame.
+                        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+                        if (waiting) {
+                            Luminumbra::Client::DrawLoadingOverlay(
+                                "Preparing world presentation", 0.95f, 0, 1, "Streaming terrain");
+                        } else {
+                            activate_loaded_world();
+                        }
                     }
                 }
                 break;
             }
 
             case GameState::IN_GAME:
+                // Prepare before the local character driver as well as the rigid-body
+                // step below. Render camera/streaming inputs never enter this horizon.
+                if (advance_frame_simulation && !scenario_config.networked_session_smoke()) {
+                    if (auto* physics = gameSession->GetPhysicsSystem()) {
+                        if (!physics->prepare_simulation_collisions(
+                                {}, std::numeric_limits<std::uint64_t>::max())) {
+                            Luminumbra::Client::PollSessionFault(
+                                *gameSession, [&] { glfwSetWindowShouldClose(window, GLFW_TRUE); });
+                            Luminumbra::Client::SaveSessionWhenDue(gameSession.get(),
+                                                                   session_persistence_allowed());
+                            break; // Leave this frame's simulation unconsumed on refusal.
+                        }
+                    }
+                }
                 // Scenario driving (the persistence phase + the per-scenario
                 // camera/scene drivers) runs behind the ScenarioRunner seam.
                 // kBreakCase preserves the persistence phase's original
                 // `break;` out of this case; kHandled skips the non-scenario
                 // branches below exactly like the original else-if chain did.
-                scenario_drive = scenario_runner ? scenario_runner->onGameStateInGame(deltaTime)
-                                                 : ScenarioRunner::InGameDrive::kFallThrough;
+                scenario_drive = scenario_runner && !timelapse_waiting
+                                     ? scenario_runner->onGameStateInGame(deltaTime)
+                                     : ScenarioRunner::InGameDrive::kFallThrough;
                 if (scenario_drive == ScenarioRunner::InGameDrive::kBreakCase) {
                     break;
                 }
@@ -5176,7 +5395,10 @@ int main(int argc, char* argv[]) {
                     // toward the nearest prey) reads as clear motion across the ground, and
                     // nobody runs out of frame as they spread.
                     const glm::vec3 camPos =
-                        g_app.capture.timelapse_rain
+                        g_app.capture.timelapse_vista
+                            ? Luminumbra::TimelapseVista::VistaFraming(glm::vec3(sp.x, sp.y, sp.z))
+                                  .position
+                        : g_app.capture.timelapse_rain
                             ? glm::vec3(sp.x + 2.0f,
                                         sp.y + 16.0f,
                                         sp.z + 26.0f) // elevated overlook for rain pooling
@@ -5192,7 +5414,10 @@ int main(int argc, char* argv[]) {
                         : showcase ? glm::vec3(sp.x, sp.y + 4.0f, sp.z + 22.0f)
                                    : glm::vec3(sp.x, sp.y + 7.0f, sp.z + 20.0f);
                     const glm::vec3 target =
-                        g_app.capture.timelapse_rain
+                        g_app.capture.timelapse_vista
+                            ? Luminumbra::TimelapseVista::VistaFraming(glm::vec3(sp.x, sp.y, sp.z))
+                                  .target
+                        : g_app.capture.timelapse_rain
                             ? glm::vec3(sp.x,
                                         sp.y - 2.0f,
                                         sp.z) // look down over the filling valley
@@ -5205,6 +5430,10 @@ int main(int argc, char* argv[]) {
                     const glm::vec3 d = glm::normalize(target - camPos);
                     g_camera->Position = camPos;
                     g_camera->Yaw = glm::degrees(std::atan2(d.z, d.x));
+                    if (g_app.capture.timelapse_vista) {
+                        g_camera->Yaw += Luminumbra::TimelapseVista::PanYawOffset(
+                            g_app.capture.timelapse_pan, g_app.capture.timelapse_captured);
+                    }
                     g_camera->Pitch = glm::degrees(std::asin(std::clamp(d.y, -1.0f, 1.0f)));
                     g_camera->updateCameraVectors();
                 }
@@ -5214,7 +5443,7 @@ int main(int argc, char* argv[]) {
                 // block.
                 if (g_app.capture.timelapse_drain && g_camera && gameSession &&
                     gameSession->GetWorldSystem() &&
-                    g_app.capture.timelapse_settle >= kTimelapseSettleFrames) {
+                    (timelapse_mode_prepared || !timelapse_presentation_gate.waiting())) {
                     auto* ws = gameSession->GetWorldSystem();
                     if (!g_app.capture.drain_state.init) {
                         // Anchor on a real SHORELINE — deep water beside a tall DRY bank — so
@@ -5240,7 +5469,10 @@ int main(int argc, char* argv[]) {
                                 tlz);
                         }
                     }
-                    if (g_app.capture.drain_state.init) {
+                    // Vista keeps its horizon framing; the drain setup above still runs.
+                    if (g_app.capture.drain_state.init &&
+                        Luminumbra::TimelapseVista::ScenarioMayFrameCamera(
+                            g_app.capture.timelapse_vista)) {
                         const glm::vec3 P(g_app.capture.drain_state.P.x,
                                           g_app.capture.drain_state.P.y,
                                           g_app.capture.drain_state.P.z);
@@ -5267,7 +5499,7 @@ int main(int argc, char* argv[]) {
                 // it.
                 if (g_app.capture.timelapse_rain && g_camera && gameSession &&
                     gameSession->GetWorldSystem() &&
-                    g_app.capture.timelapse_settle >= kTimelapseSettleFrames) {
+                    (timelapse_mode_prepared || !timelapse_presentation_gate.waiting())) {
                     auto* ws = gameSession->GetWorldSystem();
                     if (!g_app.capture.drain_state.init) {
                         ws->SetWaterHydrology(
@@ -5290,7 +5522,10 @@ int main(int argc, char* argv[]) {
                                                  bed);
                         }
                     }
-                    if (g_app.capture.drain_state.init) {
+                    // Vista keeps its horizon framing; rain and the basin edit still run.
+                    if (g_app.capture.drain_state.init &&
+                        Luminumbra::TimelapseVista::ScenarioMayFrameCamera(
+                            g_app.capture.timelapse_vista)) {
                         const glm::vec3 P(g_app.capture.drain_state.P.x,
                                           g_app.capture.drain_state.P.y,
                                           g_app.capture.drain_state.P.z);
@@ -5301,6 +5536,19 @@ int main(int argc, char* argv[]) {
                         g_camera->Yaw = glm::degrees(std::atan2(dd.z, dd.x));
                         g_camera->Pitch = glm::degrees(std::asin(std::clamp(dd.y, -1.0f, 1.0f)));
                         g_camera->updateCameraVectors();
+                    }
+                }
+                if (g_app.capture.timelapse_frames > 0 && !timelapse_mode_prepared &&
+                    !timelapse_presentation_gate.waiting()) {
+                    const bool mode_ready =
+                        (!g_app.capture.timelapse_drain && !g_app.capture.timelapse_rain) ||
+                        g_app.capture.drain_state.init;
+                    if (mode_ready) {
+                        timelapse_mode_prepared = true;
+                        timelapse_presentation_gate.restart_for_view();
+                    } else {
+                        capture_failure(g_app.capture.timelapse_dir / "timelapse.json",
+                                        "timelapse_mode_preparation_failed");
                     }
                 }
                 if (advance_frame_simulation) {
@@ -5332,9 +5580,14 @@ int main(int argc, char* argv[]) {
                         } else if (traversal) {
                             while (!gameSession->GetRegionSchedulerFault() &&
                                    traversal_ticks <
-                                       static_cast<std::uint64_t>(traversal_target_tick))
-                                traversal_ticks +=
+                                       static_cast<std::uint64_t>(traversal_target_tick)) {
+                                const auto advanced =
                                     gameSession->TickSimulation(1.0 / traversal->tickRate);
+                                if (advanced == 0) {
+                                    break; // A refused collider barrier retries next frame.
+                                }
+                                traversal_ticks += advanced;
+                            }
                         } else if (g_app.capture.timeScale == 1.0f) {
                             gameSession->TickSimulation(static_cast<double>(
                                 deltaTime)); // byte-identical default (gates run here)
@@ -5679,10 +5932,12 @@ int main(int argc, char* argv[]) {
                 }
                 // world_visual_sweep: the synchronous capture matrix runs at
                 // this exact point, before the per-frame render below.
-                if (scenario_runner) {
+                if (scenario_runner && !timelapse_waiting) {
                     scenario_runner->onPreRenderWorldSweep();
                 }
                 if (gameSession->GetWorldSystem() && g_camera) {
+                    // Release the previous photo hold before sampling live defaults.
+                    renderPipeline.set_time_of_day_hold(false);
                     // Live play runs on the
                     // authoritative sim tick — season AND time-of-day become pure
                     // functions of it (no more frozen season-neutral tick 0; no more
@@ -5788,19 +6043,15 @@ int main(int argc, char* argv[]) {
                                         g_camera->GetViewMatrix();
                                     const auto project = [&](const glm::vec3& wp) -> glm::vec2 {
                                         const glm::vec4 clip = vp * glm::vec4(wp, 1.0f);
-                                        if (clip.w <= 0.0f)
+                                        if (!std::isfinite(clip.w) || !(clip.w > 0.0f)) {
                                             return Luminumbra::Rendering::kLiveBoltPenUp;
-                                        return glm::vec2(clip.x / clip.w, clip.y / clip.w);
+                                        }
+                                        const glm::vec2 ndc(clip.x / clip.w, clip.y / clip.w);
+                                        if (!std::isfinite(ndc.x) || !std::isfinite(ndc.y)) {
+                                            return Luminumbra::Rendering::kLiveBoltPenUp;
+                                        }
+                                        return ndc;
                                     };
-                                    const auto project_stroke =
-                                        [&](const std::vector<glm::vec3>& stroke) {
-                                            std::vector<glm::vec2> points;
-                                            points.reserve(stroke.size());
-                                            for (const glm::vec3& wp : stroke) {
-                                                points.push_back(project(wp));
-                                            }
-                                            return points;
-                                        };
                                     const auto project_strike = [&](std::size_t index) {
                                         const auto& strike = *consumed[index].event;
                                         const float gy = consumed[index].ground_y;
@@ -5811,16 +6062,8 @@ int main(int argc, char* argv[]) {
                                             strike.magnitude,
                                             (static_cast<std::uint64_t>(strike.storm_salt) << 32) ^
                                                 strike.strike_tick);
-                                        Luminumbra::Rendering::ProjectedLiveStrike projected;
-                                        projected.main_channel = project_stroke(bolt.main_channel);
-                                        projected.branches.reserve(bolt.branches.size());
-                                        for (const auto& br : bolt.branches) {
-                                            projected.branches.push_back(project_stroke(br));
-                                        }
-                                        projected.pulse = pulses[index];
-                                        projected.strike_ndc =
-                                            project(glm::vec3(strike.world_x, gy, strike.world_z));
-                                        return projected;
+                                        return Luminumbra::Rendering::ProjectLightningBolt(
+                                            bolt, vp, pulses[index]);
                                     };
                                     // Each candidate has 33 channel points and at most three
                                     // 4-point branches. Test visibility before the 48-strike cap;
@@ -5836,20 +6079,34 @@ int main(int argc, char* argv[]) {
                                                     LiveStrikeMayBeVisible(project_strike(index),
                                                                            view_margin);
                                             });
-                                    // At most 48 geometry candidates plus one flash-only entry.
-                                    frame_strikes.reserve(selected.size() + 1);
-                                    const auto strongest = static_cast<std::size_t>(
-                                        std::max_element(pulses.begin(), pulses.end()) -
-                                        pulses.begin());
-                                    const auto& flash = *consumed[strongest].event;
-                                    auto& flash_only = frame_strikes.emplace_back();
-                                    flash_only.pulse = pulses[strongest];
-                                    flash_only.strike_ndc =
-                                        project(glm::vec3(flash.world_x,
-                                                          consumed[strongest].ground_y,
-                                                          flash.world_z));
-                                    for (const std::size_t index : selected) {
-                                        frame_strikes.push_back(project_strike(index));
+                                    const auto flash_selected =
+                                        Luminumbra::Rendering::SelectLiveStrikeFlashCandidates(
+                                            pulses);
+                                    // At most 48 geometry candidates plus eight flash candidates.
+                                    // Merge by original input index so ties have the same stable
+                                    // key.
+                                    auto frame_indices = selected;
+                                    for (const std::size_t index : flash_selected) {
+                                        if (!std::binary_search(
+                                                selected.begin(), selected.end(), index)) {
+                                            frame_indices.push_back(index);
+                                        }
+                                    }
+                                    std::sort(frame_indices.begin(), frame_indices.end());
+                                    frame_strikes.reserve(frame_indices.size());
+                                    for (const std::size_t index : frame_indices) {
+                                        if (std::binary_search(
+                                                selected.begin(), selected.end(), index)) {
+                                            frame_strikes.push_back(project_strike(index));
+                                        } else {
+                                            const auto& flash = *consumed[index].event;
+                                            auto& flash_only = frame_strikes.emplace_back();
+                                            flash_only.pulse = pulses[index];
+                                            flash_only.strike_ndc =
+                                                project(glm::vec3(flash.world_x,
+                                                                  consumed[index].ground_y,
+                                                                  flash.world_z));
+                                        }
                                     }
                                 }
                                 if (!frame_strikes.empty()) {
@@ -5863,7 +6120,7 @@ int main(int argc, char* argv[]) {
                                     g_app.weather.liveBolt.bolt_points_ndc =
                                         std::move(composed.points);
                                     g_app.weather.liveBolt.pulse_intensity = composed.pulse;
-                                    g_app.weather.liveBolt.strike_ndc = composed.strike_ndc;
+                                    g_app.weather.liveBolt.flashes = composed.flashes;
                                     g_app.weather.liveBolt.bolt_width_ndc = bolt_width;
                                     g_app.weather.liveBolt.bolt_glow_ndc = bolt_glow;
                                     g_app.weather.boltFramesLeft = 3; // a few frames of flash
@@ -5921,6 +6178,26 @@ int main(int argc, char* argv[]) {
                             }
                         }
                     }
+                    // Environment writer order: live clock/weather, photo selection,
+                    // scenario pins, benchmark/scene pins, foliage QA, frame-scan pin,
+                    // render. World sweeps render their own pins before this path;
+                    // timelapse advances its next-frame pin after capture.
+                    const bool photo_capture_pinned =
+                        scenario_config.active() || g_rb_active ||
+                        g_app.capture.timelapse_frames != 0 || g_app.capture.scene_active ||
+                        g_app.capture.frame_scan_active || g_app.capture.render_parity_active ||
+                        g_app.capture.survey_active || !g_app.capture.bake_impostor_path.empty() ||
+                        !g_app.capture.ui_screenshot_screen.empty() || g_app.capture.ui_thumbs != 0;
+                    UpdatePhotoEnvironment(
+                        g_app, g_playerController.get(), renderPipeline, photo_capture_pinned);
+                    // Time-lapse day drift: the live clock above rewrites time of day every
+                    // frame, so re-apply the capture's drifting value here (frame order,
+                    // like the scene pins). daystep 0 keeps the live clock. It runs before
+                    // the scenario pins so a scenario's fixed time of day still wins.
+                    if (g_app.capture.timelapse_frames > 0 &&
+                        g_app.capture.timelapse_daystep > 0.0f) {
+                        renderPipeline.set_time_of_day(g_app.capture.timelapse_tod);
+                    }
                     // Scenario capture render pins (fixed time-of-day for the
                     // visual smokes; the season sweep's pin schedule) run at
                     // this exact point so they override the live-tick
@@ -5934,8 +6211,10 @@ int main(int argc, char* argv[]) {
                         // Newborn offspring start bodyless; give them avatar bodies so they
                         // collide with the terrain (no more walking through mountains), then
                         // bake markers from the physics-resolved positions.
-                        AttachMissingCreatureBodies(gameSession->GetPhysicsSystem(),
-                                                    gameSession->GetRegistry());
+                        Luminumbra::Client::AttachMissingCreatureBodies(
+                            gameSession->GetPhysicsSystem(),
+                            gameSession->GetRegistry(),
+                            runtime.creatureBodyAttachmentCursor);
                         BakeCreatureMarkers(renderPipeline.plant_procgen(),
                                             gameSession->GetRegistry(),
                                             gameSession.get());
@@ -5997,7 +6276,8 @@ int main(int argc, char* argv[]) {
                     }
                     // Apply functional foliage QA after all camera/time overrides.
                     // Normal play, other scenarios and --play-paths retain the common path.
-                    if (!scenario_runner || !scenario_runner->onPreRenderFoliage()) {
+                    if (!scenario_runner || timelapse_waiting ||
+                        !scenario_runner->onPreRenderFoliage()) {
                         UpdateFoliageScatter(g_app,
                                              root_dir,
                                              scenario_config,
@@ -6070,6 +6350,26 @@ int main(int argc, char* argv[]) {
                         (g_app.capture.survey_active && g_app.capture.survey_settle >= 45) ||
                         (g_app.capture.frame_scan_active &&
                          g_app.capture.frame_scan_settle >= g_app.capture.frame_scan_settle_target);
+                    auto* timelapse_legacy =
+                        timelapse_waiting ? renderPipeline.legacy_far_compatibility() : nullptr;
+                    const bool timelapse_diagnostics_enabled =
+                        timelapse_legacy && timelapse_legacy->coverage_diagnostics().enabled;
+                    if (timelapse_legacy) {
+                        timelapse_legacy->set_coverage_diagnostics_enabled(true);
+                    }
+                    const bool water_prepared =
+                        timelapse_waiting &&
+                        gameSession->GetWorldSystem()->PrepareInitialWaterPresentationNear(
+                            g_camera->Position,
+                            presentation_radius(),
+                            /*initialize_capture_water=*/
+                            !scenario_config.networked_session_smoke());
+                    if (timelapse_waiting) {
+                        gameSession->GetWorldSystem()->sync_water_authority();
+                    }
+                    renderPipeline.set_diagnostic_capture_armed(
+                        !g_rb_active ||
+                        g_app.benchmark.measuredFrames == g_app.capture.render_benchmark_frames);
                     renderPipeline.render_frame(
                         gameSession->GetRegistry(),
                         *gameSession->GetWorldSystem(),
@@ -6079,6 +6379,33 @@ int main(int argc, char* argv[]) {
                         settling_benchmark_uploads || settling_capture_uploads
                             ? Luminumbra::Rendering::UploadPresentation::Settled
                             : Luminumbra::Rendering::UploadPresentation::Streaming);
+                    if (timelapse_waiting) {
+                        if (timelapse_presentation_started_at ==
+                            std::chrono::steady_clock::time_point{}) {
+                            timelapse_presentation_started_at = std::chrono::steady_clock::now();
+                        }
+                        const auto readiness =
+                            ObserveWorldPresentation(*gameSession->GetWorldSystem(),
+                                                     renderPipeline,
+                                                     g_camera->Position,
+                                                     presentation_radius(),
+                                                     water_prepared);
+                        timelapse_presentation_gate.observe(readiness,
+                                                            std::chrono::steady_clock::now() -
+                                                                timelapse_presentation_started_at);
+                        if (timelapse_presentation_gate.timed_out()) {
+                            log_presentation_timeout(timelapse_presentation_gate);
+                            capture_failure(g_app.capture.timelapse_dir / "timelapse.json",
+                                            "timelapse_presentation_timeout");
+                        }
+                        timelapse_presentation_ready =
+                            timelapse_mode_prepared &&
+                            timelapse_presentation_gate.permits_entry(true, !scenario_failed);
+                    }
+                    if (timelapse_legacy) {
+                        timelapse_legacy->set_coverage_diagnostics_enabled(
+                            timelapse_diagnostics_enabled);
+                    }
                     rb_render_call_ms = std::chrono::duration<double, std::milli>(
                                             std::chrono::steady_clock::now() - _rb_rcall_t0)
                                             .count();
@@ -6218,7 +6545,18 @@ int main(int argc, char* argv[]) {
                         } else if (wait_for_uploads(scan_upload_wait,
                                                     "frame_scan",
                                                     g_app.capture.frame_scan_path)) {
-                            const bool capture_finished =
+                            Luminumbra::Rendering::RenderPipeline::CaptureCleanup
+                                diagnostic_cleanup(renderPipeline);
+                            auto diagnostic_image =
+                                std::filesystem::path(g_app.capture.frame_scan_path);
+                            diagnostic_image.replace_extension(".ppm");
+                            const Luminumbra::Rendering::RenderPipeline::
+                                CaptureDestinationReservation destination_reservation(
+                                    renderPipeline, diagnostic_image);
+                            const bool destination_available = destination_reservation.acquired();
+                            bool capture_finished =
+                                destination_available &&
+                                renderPipeline.diagnostic_capture_ready() &&
                                 Luminumbra::Rendering::WithCaptureManifest(
                                     std::filesystem::path(g_app.capture.frame_scan_path),
                                     frame_scan_manifest,
@@ -6416,8 +6754,24 @@ int main(int argc, char* argv[]) {
                                                         g_app.capture.frame_scan_path));
                                         return capture_ok;
                                     });
+                            if (capture_finished && renderPipeline.capture_diagnostics_enabled()) {
+                                auto image = std::filesystem::path(g_app.capture.frame_scan_path);
+                                image.replace_extension(".ppm");
+                                capture_finished = renderPipeline.capture_diagnostics(image);
+                            }
                             frame_scan_complete = capture_finished;
-                            if (!capture_finished)
+                            renderPipeline.end_diagnostic_capture();
+                            if (destination_available && !capture_finished &&
+                                renderPipeline.capture_diagnostics_enabled()) {
+                                capture_failure(g_app.capture.frame_scan_path,
+                                                "frame_capture_incomplete",
+                                                true);
+                            } else if (!destination_available) {
+                                exit_code = 2;
+                                LUMINUMBRA_CORE_ERROR(
+                                    "Frame-scan destination occupied or inaccessible: {}",
+                                    diagnostic_image.string());
+                            } else if (!capture_finished)
                                 capture_failure(g_app.capture.frame_scan_path,
                                                 "frame_capture_incomplete");
                             glfwSetWindowShouldClose(window, GLFW_TRUE);
@@ -6456,7 +6810,7 @@ int main(int argc, char* argv[]) {
                     // the timed-run completion check. The runner exists iff
                     // scenario_config.active(), preserving the original guard
                     // at this exact position (currentState is IN_GAME here).
-                    if (scenario_runner) {
+                    if (scenario_runner && !timelapse_waiting) {
                         scenario_runner->onPostRenderCapture(deltaTime);
                     }
                     if (runtime_boot_recorder.enabled()) {
@@ -6562,11 +6916,19 @@ int main(int argc, char* argv[]) {
             g_app.benchmark.measuredFrames == g_app.capture.render_benchmark_frames &&
             renderPipeline.render_uploads_settled() &&
             !g_app.capture.render_benchmark_screenshot.empty()) {
+            Luminumbra::Rendering::RenderPipeline::CaptureCleanup diagnostic_cleanup(
+                renderPipeline);
             int width = 0, height = 0;
             glfwGetFramebufferSize(window, &width, &height);
             bool screenshot_complete = false;
+            const auto screenshot =
+                std::filesystem::path(g_app.capture.render_benchmark_screenshot);
+            const Luminumbra::Rendering::RenderPipeline::CaptureDestinationReservation
+                destination_reservation(renderPipeline, screenshot);
+            const bool destination_available = destination_reservation.acquired();
             std::size_t pixel_bytes = 0;
-            if (Luminumbra::Rendering::CapturePixelBytes(width, height, 3, pixel_bytes)) {
+            if (destination_available &&
+                Luminumbra::Rendering::CapturePixelBytes(width, height, 3, pixel_bytes)) {
                 GLint previous_read_fbo = 0, previous_pack_alignment = 0;
                 glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read_fbo);
                 glGetIntegerv(GL_PACK_ALIGNMENT, &previous_pack_alignment);
@@ -6575,13 +6937,30 @@ int main(int argc, char* argv[]) {
                 glPixelStorei(GL_PACK_ALIGNMENT, 1);
                 std::vector<unsigned char> pixels(pixel_bytes);
                 glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
-                screenshot_complete =
-                    glGetError() == GL_NO_ERROR &&
-                    WritePixelBufferPpm(
-                        std::filesystem::path(g_app.capture.render_benchmark_screenshot),
-                        width,
-                        height,
-                        pixels);
+                if (glGetError() == GL_NO_ERROR) {
+                    const auto write_screenshot = [&] {
+                        return WritePixelBufferPpm(screenshot, width, height, pixels);
+                    };
+                    if (!renderPipeline.capture_diagnostics_enabled()) {
+                        screenshot_complete = write_screenshot();
+                    } else {
+                        screenshot_complete = renderPipeline.diagnostic_capture_ready() &&
+                                              Luminumbra::Rendering::WithCaptureManifest(
+                                                  screenshot,
+                                                  Luminumbra::Rendering::ObserveCaptureManifest(
+                                                      *gameSession,
+                                                      renderPipeline,
+                                                      width,
+                                                      height,
+                                                      resolved_graphics,
+                                                      g_app.overlay.wireframe_mode,
+                                                      true),
+                                                  write_screenshot);
+                    }
+                    if (screenshot_complete && renderPipeline.capture_diagnostics_enabled()) {
+                        screenshot_complete = renderPipeline.capture_diagnostics(screenshot);
+                    }
+                }
                 glPixelStorei(GL_PACK_ALIGNMENT, previous_pack_alignment);
                 glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(previous_read_fbo));
                 if (screenshot_complete)
@@ -6591,9 +6970,15 @@ int main(int argc, char* argv[]) {
                         width,
                         height);
             }
-            if (!screenshot_complete)
+            renderPipeline.end_diagnostic_capture();
+            if (!destination_available) {
+                exit_code = 2;
+                LUMINUMBRA_CORE_ERROR("Benchmark capture destination occupied or inaccessible: {}",
+                                      screenshot.string());
+            } else if (!screenshot_complete)
                 capture_failure(g_app.capture.render_benchmark_screenshot + ".json",
-                                "benchmark_screenshot_incomplete");
+                                "benchmark_screenshot_incomplete",
+                                true);
         }
 
         if (g_rb_active && currentState == GameState::IN_GAME &&
@@ -6611,6 +6996,7 @@ int main(int argc, char* argv[]) {
             if (!CaptureTimelapseFrame(g_app,
                                        window,
                                        currentState,
+                                       timelapse_presentation_ready,
                                        gameSession.get(),
                                        renderPipeline,
                                        resolved_graphics,
@@ -7654,7 +8040,7 @@ int main(int argc, char* argv[]) {
         world_system->clear_world(gameSession->GetPhysicsSystem());
         mark_shutdown("world_cleared");
     }
-    g_playerController.reset();
+    release_player_controller();
     mark_shutdown("player_controller_reset");
     g_camera.reset();
     mark_shutdown("camera_reset");

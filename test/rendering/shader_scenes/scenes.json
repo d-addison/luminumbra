@@ -1,0 +1,206 @@
+{
+  "analytical": {
+    "background": [
+      0.0625,
+      0.125,
+      0.1875
+    ],
+    "grass": [
+      0.2,
+      0.6,
+      0.15
+    ],
+    "leaf": [
+      0.1,
+      0.24,
+      0.045
+    ],
+    "max_error": 1e-06,
+    "name": "shrub-leaf",
+    "normal": "shrub-normal",
+    "object_normal": [
+      1,
+      1,
+      1
+    ],
+    "panels": [
+      "default",
+      "hull",
+      "front-card",
+      "back-card"
+    ],
+    "scale_y": [
+      2,
+      1
+    ]
+  },
+  "compute": [
+    {
+      "encoding": "uint32_le",
+      "groups": [
+        0,
+        3,
+        1,
+        0,
+        7,
+        2,
+        5,
+        1
+      ],
+      "kernel": "res/shaders/grass_compact_prefix.comp",
+      "max_instances": 13,
+      "name": "compute-ssbo"
+    }
+  ],
+  "defines": [],
+  "diagnostics": [
+    {
+      "metric": "max_adjacent_column_mean_luminance_step",
+      "name": "dusk-sky",
+      "pending_tolerance": 0.005,
+      "tracking_issue": 918
+    }
+  ],
+  "encoding": "linear_rgb_bottom_first",
+  "fixtures": [
+    {
+      "mask": [
+        0,
+        0,
+        128,
+        128
+      ],
+      "name": "material",
+      "reference": "references/material.ppm"
+    },
+    {
+      "mask": [
+        0,
+        0,
+        128,
+        128
+      ],
+      "name": "tree-cutout",
+      "reference": "references/tree-cutout.ppm"
+    },
+    {
+      "mask": [
+        0,
+        0,
+        128,
+        128
+      ],
+      "name": "night-sky",
+      "reference": "references/night-sky.ppm"
+    },
+    {
+      "mask": [
+        0,
+        0,
+        128,
+        128
+      ],
+      "name": "terrain-blend",
+      "reference": "references/terrain-blend.ppm"
+    },
+    {
+      "mask": [
+        0,
+        0,
+        128,
+        128
+      ],
+      "name": "normal-decode",
+      "reference": "references/normal-decode.ppm"
+    },
+    {
+      "mask": [
+        0,
+        0,
+        128,
+        128
+      ],
+      "name": "reversed-z",
+      "reference": "references/reversed-z.ppm"
+    },
+    {
+      "mask": [
+        0,
+        0,
+        128,
+        128
+      ],
+      "name": "post-edge",
+      "reference": "references/post-edge.ppm"
+    }
+  ],
+  "inputs": {
+    "res/shaders/enhanced_skybox.frag": "dcbd2b15fdca9acfb4b8d4fe01029f0e91727556bce842c9d058362f6c07ee27",
+    "res/shaders/g_buffer.frag": "38c27298d127b44f59b033446c8bbc8d23b4cc17d6b8d5b732909c029cc22e31",
+    "res/shaders/g_buffer.vert": "209c1c0801801209e669e60dcadfa7085e8e44780f9e2c7599a7d48a5fe2abed",
+    "res/shaders/grass_compact_prefix.comp": "43bcf2b6c883f958cab97d9b88c911701edd1ff1416e0290ef427228b406e677",
+    "res/shaders/instanced_mesh.vert": "83198486e34bcb2d2ad4dcd5271efc9b4fd5deab5842768a8a85eac76d245d9c",
+    "res/shaders/lighting_pass.frag": "4f1cf13c57aea1a8c4b0c5195e06135a983377b7ca0be591201b5b5cfcfa4d0a",
+    "res/shaders/magical_particles.frag": "4b04d290eba44750b4c908a8195a9d5f94d14b9a00b4ff19e9eb5d862e6b4e2d",
+    "res/shaders/ssao.vert": "f5c6db443362910b98714dd5dcfb5bc1c54e4e23e4a87f1cfc043f07ee01777c",
+    "res/shaders/static_asset.frag": "38945ff338541c021f1b4d736648794cc556ce09183d520d76a28e7843e08d2c",
+    "res/shaders/static_asset.vert": "3c6ca3b3154e0f28bbecd1c5fa2048b09e6623a1a58823b64d6a01e5f78e475d",
+    "res/shaders/taau_resolve.frag": "55660682fe8af5e1aef38d95c16c837cf161cae371997c0443c05a13b755b0c8",
+    "res/shaders/tree_impostor.frag": "25391749ee76bcbf3804cbacd7746426bf97926e7e1b0dc07ca8b90306e74764",
+    "res/shaders/tree_impostor.vert": "6e69ff1391d2d6dd6ef93d7c72c3c387cc4009b3bccf317e5c050018f2e1d796",
+    "src/luminumbra_client/rendering/Camera.h": "eccf0f45502d6a41b96833328a5c45258cf19599eb6a23aafd76dccf1009546c",
+    "src/luminumbra_client/rendering/SkyAtmosphereLut.ipp": "50fe51e78e3ba33c36e4bad2248a57d09c0289ed730142c0aa447e4bc6567930",
+    "test/rendering/shader_scene_render_test.cpp": "bbfd3d65d5ebdc6337ae69b11cea5177880ae4a70708e8b5352623b0aa3ded04"
+  },
+  "reference_capture": {
+    "material": {
+      "origin": "analytical",
+      "renderer": "analytical material and tree cutout fixtures",
+      "version": "not captured"
+    },
+    "night-sky": {
+      "origin": "llvmpipe",
+      "renderer": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "version": "4.5 (Core Profile) Mesa 25.2.8-0ubuntu0.24.04.4"
+    },
+    "normal-decode": {
+      "origin": "analytical",
+      "renderer": "analytical normals and finite perspective planes",
+      "version": "not captured"
+    },
+    "post-edge": {
+      "origin": "analytical",
+      "renderer": "analytical fixed TAAU neighbourhood",
+      "version": "not captured"
+    },
+    "reversed-z": {
+      "origin": "analytical",
+      "renderer": "analytical normals and finite perspective planes",
+      "version": "not captured"
+    },
+    "terrain-blend": {
+      "origin": "analytical",
+      "renderer": "analytical Stone/Sand coverage ramp",
+      "version": "not captured"
+    },
+    "tree-cutout": {
+      "origin": "analytical",
+      "renderer": "analytical material and tree cutout fixtures",
+      "version": "not captured"
+    }
+  },
+  "reference_sha256": {
+    "material": "a7b13d68514eae8135d6f6b4921a85157476061fee5e1e70807978daba64b855",
+    "night-sky": "b0c91db903d9f48edda3769d458eade2cdf21fc1dda7a2c670cd10fd53e0d774",
+    "normal-decode": "b516ca7cc9bffbd12cecedcc0f0c28ee7f076b287601f4a99dd54bcae1fc4ad2",
+    "post-edge": "3cda07bc6988509ceeaa5522822948086fd78f9c5a8764ef06bfcd93ffdfcb72",
+    "reversed-z": "d2c0f9e1a62e750c2ea88959818e53b9e155e1ecf1516e5f1603fd9a612c1c26",
+    "terrain-blend": "b079254cb96c67ae0eeaada25d0da87536d672d333cc8b130a43b8279a5d29c3",
+    "tree-cutout": "d2f7312235786b11c22e66a155d2f4699ab7112bd80a65e30e88558a89705e95"
+  },
+  "schema": 3,
+  "size": [
+    128,
+    128
+  ]
+}

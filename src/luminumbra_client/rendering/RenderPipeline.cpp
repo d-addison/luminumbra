@@ -2,6 +2,7 @@
 #include "../../include/luminumbra/core/Types.h"
 #include "CelestialBodyModel.h" //  Tier 1: the celestial-body seam
 #include "DiagnosticDrawTable.h"
+#include "DiagnosticReadback.h"
 #include "ExposureModel.h" //  rendering: SelectRenderExposure (manual EV precedence)
 #include "FarLodSystem.h"
 #include "FarVolumeGlBackend.h"
@@ -22,6 +23,7 @@
 #include "TimeOfDayModel.h" // Pure time-of-day policy helpers.
 #include "UploadBudget.h"
 #include "WeatherOverlayModel.h"
+#include "core/EngineVersion.h"
 #include "core/Log.h"
 #include "core/Profiler.h"
 #include "luminumbra_client/core/PresentationClock.h"
@@ -31,8 +33,10 @@
 #include "luminumbra_common/core/DeterministicMath.h"
 #include "luminumbra_common/core/Environment.h"
 #include "luminumbra_common/core/GraphicsPresets.h"
+#include "luminumbra_common/persistence/CreatedWorldArtifacts.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
+#include "luminumbra_common/world/NearTerrainMeshSnapshot.h"
 #include "passes/AerialPass.h"
 #include "passes/DebugViewPass.h" // render-only G-buffer debug visualizer (default-OFF)
 #include "passes/FinalBlitPass.h" // -T01: FinalBlit on the RenderContext seam
@@ -62,6 +66,7 @@
 #include <array>
 #include <bit>
 #include <cassert>
+#include <charconv>
 #include <chrono> // CPU per-phase submit cost
 #include <cmath>
 #include <cstdint>
@@ -271,6 +276,7 @@ void RenderPipeline::set_debug_view(int mode) {
         m_debug_view_pass->set_mode(mode);
 }
 RenderPipeline::~RenderPipeline() {
+    end_diagnostic_capture();
     cleanup_gpu_resources();
 }
 
@@ -366,7 +372,8 @@ bool RenderPipeline::startup(u32 screen_width,
             g.tileResolution = 384;
             const ImpostorAtlasTextures ia =
                 BakeTreeImpostorAtlasToTextures(m_root_path.string(), *this, g);
-            if (ia.ok) {
+            m_treeImpostorCoverage = ia.alpha_coverage;
+            if (ia.drawable()) {
                 m_treeImpostorAlbedo = ia.albedoTex;
                 m_treeImpostorNormal = ia.normalTex;
                 m_treeImpostorGrid = ia.grid;
@@ -380,7 +387,7 @@ bool RenderPipeline::startup(u32 screen_width,
                     ia.grid,
                     g.tileResolution,
                     ia.radius);
-            } else {
+            } else if (!ia.alpha_coverage.refused()) {
                 LUMINUMBRA_CORE_WARN("Tree impostor bake failed: {}", ia.error);
             }
         }
@@ -408,7 +415,198 @@ bool RenderPipeline::startup(u32 screen_width,
 }
 
 void RenderPipeline::shutdown() {
+    end_diagnostic_capture();
     cleanup_gpu_resources();
+}
+
+void RenderPipeline::set_capture_diagnostics(const DiagnosticCaptureOptions& options) {
+    end_diagnostic_capture();
+    m_capture_diagnostics = options;
+}
+
+void RenderPipeline::end_diagnostic_capture() {
+    m_diagnostic_capture.reset();
+}
+
+bool RenderPipeline::diagnostic_capture_destination_available(
+    const std::filesystem::path& capture) const {
+    return DiagnosticCaptureDestinationAvailable(capture, m_capture_diagnostics);
+}
+
+struct RenderPipeline::CaptureDestinationReservation::State {
+    Persistence::CreatedWorldArtifacts journal;
+    ~State() {
+        (void)journal.rollback();
+    }
+};
+
+RenderPipeline::CaptureDestinationReservation::CaptureDestinationReservation(
+    const RenderPipeline& pipeline, const std::filesystem::path& capture)
+    : disabled_(!pipeline.capture_diagnostics_enabled()) {
+    if (disabled_ || capture.empty() || capture.filename().empty()) {
+        return;
+    }
+    auto pending = std::make_unique<State>();
+    try {
+        const auto parent =
+            capture.has_parent_path() ? capture.parent_path() : std::filesystem::path(".");
+        // Match the capture writers' output-directory preparation. Only the
+        // exclusive marker below admits payload writes into that directory.
+        std::error_code error;
+        std::filesystem::create_directories(parent, error);
+        if (error) {
+            return;
+        }
+        pending->journal.bind_existing_root(parent);
+        auto marker = std::filesystem::canonical(parent) / CaptureManifestPath(capture).filename();
+        // Match the manifest staging suffix width, preserving its filename bound.
+        marker += ".lck";
+        // CREATE_NEW on Windows and exclusive fopen on POSIX; no payload write
+        // can precede this reservation. Rollback removes only its bound identity.
+        pending->journal.write_file(marker, "");
+        if (DiagnosticCaptureDestinationAvailable(capture, pipeline.m_capture_diagnostics, true)) {
+            state_ = std::move(pending);
+        }
+    } catch (const std::exception&) {
+        // The pending journal also retires a marker created before a refusal.
+    }
+}
+
+RenderPipeline::CaptureDestinationReservation::~CaptureDestinationReservation() = default;
+
+bool RenderPipeline::CaptureDestinationReservation::acquired() const {
+    return disabled_ || state_ != nullptr;
+}
+
+bool RenderPipeline::diagnostic_capture_ready() {
+    if (m_capture_diagnostics.enabled && m_diagnostic_capture && m_frame_prepared.valid) {
+        // Detachment can expose a deferred producer failure. Observe only afterward.
+        (void)m_diagnostic_capture->ready();
+    }
+    return diagnostic_capture_refusal().empty();
+}
+
+namespace {
+// A late transport refusal retracts the manifest through its retained identity.
+// The destination reservation remains held until this cleanup has finished.
+class DiagnosticManifestRollback {
+public:
+    explicit DiagnosticManifestRollback(const std::filesystem::path& capture) {
+        const auto manifest = std::filesystem::absolute(CaptureManifestPath(capture));
+        journal_.bind_existing_root(manifest.parent_path());
+#if defined(_WIN32)
+        const auto file = ::CreateFileW(manifest.c_str(),
+                                        FILE_READ_ATTRIBUTES,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                        nullptr,
+                                        OPEN_EXISTING,
+                                        FILE_FLAG_OPEN_REPARSE_POINT,
+                                        nullptr);
+        if (file == INVALID_HANDLE_VALUE) {
+            throw std::runtime_error("Cannot retain capture manifest");
+        }
+#else
+        const auto file = ::open(manifest.c_str(), O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+        if (file < 0) {
+            throw std::runtime_error("Cannot retain capture manifest");
+        }
+#endif
+        try {
+            journal_.record_staged_file(manifest, file);
+        } catch (...) {
+            close_file(file);
+            throw;
+        }
+        close_file(file);
+    }
+    ~DiagnosticManifestRollback() {
+        (void)journal_.rollback();
+    }
+    DiagnosticManifestRollback(const DiagnosticManifestRollback&) = delete;
+    DiagnosticManifestRollback& operator=(const DiagnosticManifestRollback&) = delete;
+    void preserve() {
+        journal_.release();
+    }
+
+private:
+    static void close_file(Persistence::CreatedWorldArtifacts::NativeFile file) {
+#if defined(_WIN32)
+        ::CloseHandle(file);
+#else
+        ::close(file);
+#endif
+    }
+    Persistence::CreatedWorldArtifacts journal_;
+};
+} // namespace
+
+CaptureManifestInput RenderPipeline::diagnostic_capture_manifest() const {
+    CaptureManifestInput input;
+    input.build_id = {std::string(luminumbra::core::GetEngineVersionString()),
+                      "engine_version_string_empty"};
+    input.asset_hash.unavailable = "not observed by scenario capture";
+    input.shader_hash.unavailable = "not observed by scenario capture";
+    input.world_hash.unavailable = "not observed by scenario capture";
+    input.width = static_cast<int>(m_screen_width);
+    input.height = static_cast<int>(m_screen_height);
+    const auto* snapshot = capture_camera();
+    if (!snapshot || !SetCaptureManifestCamera(input, *snapshot)) {
+        input.near_plane = 0;
+    }
+    return input;
+}
+
+std::string_view RenderPipeline::diagnostic_capture_refusal() const {
+    if (!m_capture_diagnostics.enabled) {
+        return {};
+    }
+    if (!m_diagnostic_capture || !m_frame_prepared.valid) {
+        return "completed_frame_unavailable";
+    }
+    if (!std::as_const(*m_diagnostic_capture).ready()) {
+        return "producer_coverage_incomplete";
+    }
+    if (m_capture_diagnostics.probe) {
+        const auto& coordinates = m_capture_diagnostics.probe.value();
+        if (coordinates[0] >= m_internal_width || coordinates[1] >= m_internal_height) {
+            return "probe_out_of_bounds";
+        }
+    }
+    return {};
+}
+
+bool RenderPipeline::capture_diagnostics(const std::filesystem::path& capture) {
+    if (!m_capture_diagnostics.enabled) {
+        return true;
+    }
+    // Retain successful frames for sibling captures; release on every refusal.
+    CaptureCleanup cleanup(*this);
+    if (capture.empty() || capture.filename().empty()) {
+        return false;
+    }
+    try {
+        DiagnosticManifestRollback manifest_rollback(capture);
+        if (!diagnostic_capture_ready()) {
+            return false;
+        }
+        DiagnosticBundleFrame frame;
+        frame.extent = {m_internal_width, m_internal_height};
+        frame.frame = m_far_world_frame;
+        frame.view = m_frame_prepared.replay_camera.view;
+        frame.projection = m_frame_prepared.replay_camera.projection;
+        frame.capture_filename = Filesystem::GenericUtf8PathString(capture.filename());
+        frame.manifest_filename =
+            Filesystem::GenericUtf8PathString(CaptureManifestPath(capture).filename());
+        const bool captured =
+            m_diagnostic_capture->finish(capture, m_capture_diagnostics, frame, gbuffer());
+        if (captured) {
+            manifest_rollback.preserve();
+            cleanup.retain();
+        }
+        return captured;
+    } catch (const std::exception&) {
+        return false;
+    }
 }
 
 void RenderPipeline::register_procgen_mesh(const std::string& key, std::unique_ptr<Mesh> mesh) {
@@ -455,6 +653,12 @@ bool RenderPipeline::capture_frame_parity(const Camera& camera,
     std::size_t capture_bytes = 0;
     if (!CapturePixelBytes(w, h, 4, capture_bytes))
         return false;
+
+    // Resource allocation during redispatch can consume GL error state.
+    // Refuse a faulty prepared frame before any capture work can clear it.
+    if (glGetError() != GL_NO_ERROR) {
+        return false;
+    }
 
     auto make_target = [&](GLuint& fbo, GLuint& tex) {
         glGenTextures(1, &tex);
@@ -590,6 +794,12 @@ bool RenderPipeline::capture_upscale_seam_parity(const Camera& camera,
     std::size_t capture_bytes = 0;
     if (!CapturePixelBytes(w, h, 4, capture_bytes))
         return false;
+
+    // Resource allocation during redispatch can consume GL error state.
+    // Refuse a faulty prepared frame before any capture work can clear it.
+    if (glGetError() != GL_NO_ERROR) {
+        return false;
+    }
 
     auto make_target = [&](GLuint& fbo, GLuint& tex) {
         glGenTextures(1, &tex);
@@ -778,6 +988,7 @@ RenderContext RenderPipeline::make_ssao_context(const Camera& camera) {
 // the frame camera for Depth-mode near/far linearization. Render-only; never hashed.
 RenderContext RenderPipeline::make_debug_view_context(const Camera& camera) {
     RenderContext ctx;
+    ctx.frame_index = m_far_world_frame;
     ctx.frozen_replay = m_far_world_paired;
     ctx.set_gbuffer_depth_contract(m_frame_far_selection.effective == FarWorldMode::Ladder,
                                    m_frame_prepared.projection,
@@ -1072,6 +1283,7 @@ RenderContext RenderPipeline::make_water_context(const Camera& camera) {
     ctx.sun = m_sun;
     ctx.lit_scene =
         m_render_registry.adopt_fbo("lit_scene", m_lighting_pass->lighting_fbo().fbo_id);
+    ctx.lit_scene_depth = RenderbufferHandle{m_lighting_pass->lighting_fbo().depth_texture};
     ctx.opaque_scene = m_render_registry.adopt_texture(
         "opaque_scene", m_lighting_pass->lighting_fbo().opaque_color_texture);
     ctx.gbuffer_depth =
@@ -1237,6 +1449,12 @@ bool RenderPipeline::capture_ssao_parity(const std::filesystem::path& out_dir,
     if (!CapturePixelBytes(w, h, 4, capture_bytes))
         return false;
 
+    // Resource allocation during redispatch can consume GL error state.
+    // Refuse a faulty prepared frame before any capture work can clear it.
+    if (glGetError() != GL_NO_ERROR) {
+        return false;
+    }
+
     RenderContext ctx = make_ssao_context(camera);
     // (1) Mapping check: ctx fields must equal the raw pipeline sources.
     bool mapping_ok = ctx.screen_width == m_screen_width && ctx.screen_height == m_screen_height &&
@@ -1319,6 +1537,7 @@ void RenderPipeline::wait_for_world_readers() {
 void RenderPipeline::prepare_world_swap() {
     m_far_world->PrepareWorldSwap();
     m_waterfall_pass->destroy_geometry();
+    m_capture_waterfall_geometry = false;
     m_particle_pass->clear_waterfall_spray();
     ++m_far_world_epoch;
     m_frame_prepared.valid = false;
@@ -2039,9 +2258,108 @@ void RenderPipeline::ensure_mdi_capacity(MdiFrameBuffers& frame, std::size_t com
     frame.command_capacity = new_capacity;
 }
 
+void SubmitDiagnosticTerrainBucket(GBufferDiagnosticCapture*& capture,
+                                   std::span<const DiagnosticTerrainDraw> draws,
+                                   std::size_t first,
+                                   std::size_t command_stride,
+                                   bool ladder,
+                                   ChunkGeometryPool& pool,
+                                   u32 bucket) {
+    const std::size_t count = draws.size();
+    std::size_t mdi_first = first;
+    // One retirement per bucket covers its individual and batched draws, and
+    // still covers consumed draws if an identity write throws.
+    struct BucketRetirement {
+        ChunkGeometryPool& pool;
+        u32 bucket;
+        bool submitted = false;
+        ~BucketRetirement() {
+            if (submitted) {
+                pool.mark_submitted(bucket);
+            }
+        }
+    } retirement{pool, bucket};
+    if (capture) {
+        // Submit each original indirect command once, preserving its index,
+        // base vertex and base instance, in the same pool-bucket order.
+        for (std::size_t draw = first; draw < first + count; ++draw, mdi_first = draw) {
+            const auto& resident = draws[draw - first];
+            if (resident.lod < 0 || resident.lod > 255) {
+                // Coverage ends (the capture is marked failed); the remaining
+                // draws of this and later buckets render without identities.
+                capture->unsupported("terrain_resident_lod_unavailable");
+                capture->clear_current_identity();
+                capture = nullptr;
+                break;
+            }
+            // At most 94 bytes: three signed int32 coordinates, uint32 version,
+            // uint64 generation and fixed separators. Reserve once;
+            // format the generation on the stack to avoid another draw allocation.
+            std::string mesh_key;
+            mesh_key.reserve(94);
+            mesh_key += "terrain/";
+            mesh_key += std::to_string(resident.chunk[0]);
+            mesh_key += '/';
+            mesh_key += std::to_string(resident.chunk[1]);
+            mesh_key += '/';
+            mesh_key += std::to_string(resident.chunk[2]);
+            mesh_key += "/version/";
+            mesh_key += std::to_string(resident.mesh_version);
+            mesh_key += "/generation/";
+            std::array<char, 20> generation{}; // uint64 has at most 20 decimal digits.
+            const auto* generation_end = std::to_chars(generation.data(),
+                                                       generation.data() + generation.size(),
+                                                       resident.geometry_generation)
+                                             .ptr;
+            mesh_key.append(generation.data(),
+                            static_cast<std::size_t>(generation_end - generation.data()));
+            capture->write_current(
+                {.mesh_path = {},
+                 .shader_variant = ladder ? "terrain_mdi_ladder" : "terrain_mdi",
+                 .chunk = {resident.chunk[0], resident.chunk[1], resident.chunk[2]},
+                 .lod = static_cast<std::uint32_t>(resident.lod),
+                 .ownership = DiagnosticOwnership::Live,
+                 .pass = DiagnosticPass::GBuffer,
+                 .provenance = DiagnosticProvenance::Unknown,
+                 .generated_mesh = mesh_key});
+            if (capture->refused()) {
+                // A full identity table ends coverage: this command and every later
+                // terrain command return to batched multi-draws without identities.
+                capture->clear_current_identity();
+                capture = nullptr;
+                break;
+            }
+            Luminumbra::Rendering::AttributedGl::Submit(
+                glDrawElementsIndirect,
+                GLenum{GL_TRIANGLES},
+                GLenum{GL_UNSIGNED_INT},
+                reinterpret_cast<const void*>(draw * command_stride));
+            retirement.submitted = true;
+        }
+    }
+    if (mdi_first < first + count) {
+        Luminumbra::Rendering::AttributedGl::Submit(
+            glMultiDrawElementsIndirect,
+            GLenum{GL_TRIANGLES},
+            GLenum{GL_UNSIGNED_INT},
+            reinterpret_cast<const void*>(mdi_first * command_stride),
+            static_cast<GLsizei>(first + count - mdi_first),
+            static_cast<GLsizei>(command_stride));
+        retirement.submitted = true;
+    }
+}
+
 void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& visible_chunks,
                                      std::size_t& out_draws,
                                      std::size_t& out_indices) {
+    // A diagnostic replay may reuse a ring slot but never advances production ownership.
+    const bool diagnostic_replay = DebugViewPass::replaying();
+    const auto saved_cursor = m_mdi_frame_cursor;
+    ReplayRollback restore_cursor([this, diagnostic_replay, saved_cursor]() noexcept {
+        if (diagnostic_replay) {
+            m_mdi_frame_cursor = saved_cursor;
+        }
+    });
     out_draws = 0;
     out_indices = 0;
     const std::size_t block_count = m_chunk_geometry_pool.block_count();
@@ -2079,15 +2397,18 @@ void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& v
     if (diagnostic_capture && !diagnostic_capture->deferred_attached()) {
         diagnostic_capture = nullptr; // The shared shadow submitter has no identity attachment.
     }
-    // Capture staging is bounded by the registry's 65,536 draws (512 KiB of
-    // pointers on 64-bit hosts). Normal rendering allocates no diagnostic staging.
-    std::vector<const ChunkCullEntry*> diagnostic_chunks;
+    // Capture staging is bounded by the registry's 65,536 resident records.
+    // Normal rendering allocates no diagnostic staging.
+    // A null array owner also avoids debug iterator-proxy allocation while disabled.
+    std::unique_ptr<DiagnosticTerrainDraw[]> diagnostic_chunks;
+    if (diagnostic_capture && running > 65536) {
+        // Coverage ends here; the frame still renders through ordinary MDI.
+        diagnostic_capture->unsupported("terrain_identity_draw_limit");
+        diagnostic_capture->clear_current_identity();
+        diagnostic_capture = nullptr;
+    }
     if (diagnostic_capture) {
-        if (running > 65536) {
-            diagnostic_capture->unsupported("terrain_identity_draw_limit");
-            throw std::runtime_error("Terrain diagnostic draw limit exceeded");
-        }
-        diagnostic_chunks.resize(running);
+        diagnostic_chunks = std::make_unique<DiagnosticTerrainDraw[]>(running);
     }
     m_mdi_command_scratch.resize(running);
     m_mdi_origin_scratch.resize(running);
@@ -2110,7 +2431,10 @@ void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& v
         cmd.baseVertex = a.vertex_offset;
         cmd.baseInstance = static_cast<GLuint>(dst); // origins[baseInstance]
         if (diagnostic_capture) {
-            diagnostic_chunks[dst] = chunk;
+            diagnostic_chunks[dst] = {.chunk = {chunk->coords.x, chunk->coords.y, chunk->coords.z},
+                                      .lod = rd.diagnostic_lod,
+                                      .mesh_version = rd.mesh_version,
+                                      .geometry_generation = a.geometry_generation};
         }
 
         const glm::ivec3 cc = chunk->coords;
@@ -2155,47 +2479,28 @@ void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& v
         PreserveReplayObject(ReplayObjectKind::VertexArray, blocks[b].vao);
         glBindVertexBuffer(1, frame.origin_buffer, 0, sizeof(glm::vec4));
         glBindBuffer(GL_DRAW_INDIRECT_BUFFER, frame.indirect_buffer);
-        if (diagnostic_capture) {
-            // Submit each original indirect command once, preserving its index,
-            // base vertex and base instance, in the same pool-bucket order.
-            for (std::size_t draw = first; draw < first + count; ++draw) {
-                const auto& chunk = *diagnostic_chunks[draw];
-                const auto& resident = m_chunk_render_data.at(chunk.id);
-                if (resident.diagnostic_lod < 0 || resident.diagnostic_lod > 255) {
-                    diagnostic_capture->unsupported("terrain_resident_lod_unavailable");
-                    throw std::runtime_error("Terrain diagnostic resident LOD unavailable");
-                }
-                const std::string mesh_key = "terrain/" + std::to_string(chunk.coords.x) + "/" +
-                                             std::to_string(chunk.coords.y) + "/" +
-                                             std::to_string(chunk.coords.z) + "/version/" +
-                                             std::to_string(resident.mesh_version);
-                diagnostic_capture->write_current(
-                    {.mesh_path = {},
-                     .shader_variant = m_frame_far_selection.effective == FarWorldMode::Ladder
-                                           ? "terrain_mdi_ladder"
-                                           : "terrain_mdi",
-                     .chunk = {chunk.coords.x, chunk.coords.y, chunk.coords.z},
-                     .lod = static_cast<std::uint32_t>(resident.diagnostic_lod),
-                     .ownership = DiagnosticOwnership::Live,
-                     .pass = DiagnosticPass::GBuffer,
-                     .provenance = DiagnosticProvenance::Unknown,
-                     .generated_mesh = mesh_key});
-                Luminumbra::Rendering::AttributedGl::Submit(
-                    glDrawElementsIndirect,
-                    GLenum{GL_TRIANGLES},
-                    GLenum{GL_UNSIGNED_INT},
-                    reinterpret_cast<const void*>(draw * sizeof(DrawElementsIndirectCommand)));
-            }
-        } else {
+        if (diagnostic_chunks) {
+            SubmitDiagnosticTerrainBucket(diagnostic_capture,
+                                          {diagnostic_chunks.get() + first, count},
+                                          first,
+                                          sizeof(DrawElementsIndirectCommand),
+                                          m_frame_far_selection.effective == FarWorldMode::Ladder,
+                                          m_chunk_geometry_pool,
+                                          static_cast<u32>(b));
+            continue;
+        }
+        // Draws from mdi_first onward go through one ordinary multi-draw.
+        std::size_t mdi_first = first;
+        if (mdi_first < first + count) {
             Luminumbra::Rendering::AttributedGl::Submit(
                 glMultiDrawElementsIndirect,
                 GLenum{GL_TRIANGLES},
                 GLenum{GL_UNSIGNED_INT},
-                reinterpret_cast<const void*>(first * sizeof(DrawElementsIndirectCommand)),
-                static_cast<GLsizei>(count),
+                reinterpret_cast<const void*>(mdi_first * sizeof(DrawElementsIndirectCommand)),
+                static_cast<GLsizei>(first + count - mdi_first),
                 static_cast<GLsizei>(sizeof(DrawElementsIndirectCommand)));
+            m_chunk_geometry_pool.mark_submitted(static_cast<u32>(b));
         }
-        m_chunk_geometry_pool.mark_submitted(static_cast<u32>(b));
     }
 
     glBindVertexArray(0);
@@ -2445,6 +2750,8 @@ RenderPipeline::build_chunk_snapshots(const std::vector<Chunk*>& renderable_chun
         snapshot.coords = chunk->get_coords();
         snapshot.source_chunk = chunk;
         snapshot.mesh_version = chunk->mesh_version.load(std::memory_order_acquire);
+        snapshot.near_terrain_snapshot =
+            chunk->near_terrain_snapshot.load(std::memory_order_acquire);
         snapshot.water_mesh_version = chunk->water_mesh_version.load(std::memory_order_acquire);
         snapshot.terrain_vertex_count = chunk->mesh_vertices.size();
         snapshot.terrain_index_count = chunk->mesh_indices.size();
@@ -2455,6 +2762,7 @@ RenderPipeline::build_chunk_snapshots(const std::vector<Chunk*>& renderable_chun
         const u32 water_version_after_metadata =
             chunk->water_mesh_version.load(std::memory_order_acquire);
         if (version_after_metadata != snapshot.mesh_version) {
+            snapshot.near_terrain_snapshot.reset();
             snapshot.mesh_version = version_after_metadata;
             snapshot.terrain_vertex_count = 0;
             snapshot.terrain_index_count = 0;
@@ -2477,7 +2785,9 @@ void RenderPipeline::ensure_terrain_culling_hierarchy(
     std::vector<ChunkID> sorted_chunk_ids;
     sorted_chunk_ids.reserve(renderable_chunks.size());
     for (const auto& chunk : renderable_chunks) {
-        sorted_chunk_ids.push_back(chunk.id);
+        if (chunk.has_terrain_mesh()) {
+            sorted_chunk_ids.push_back(chunk.id);
+        }
     }
     std::sort(sorted_chunk_ids.begin(), sorted_chunk_ids.end());
 
@@ -2488,7 +2798,7 @@ void RenderPipeline::ensure_terrain_culling_hierarchy(
     }
 
     const bool needs_rebuild = !m_terrainCullingCache.valid ||
-                               m_terrainCullingCache.chunk_count != renderable_chunks.size() ||
+                               m_terrainCullingCache.chunk_count != sorted_chunk_ids.size() ||
                                m_terrainCullingCache.chunk_set_signature != signature;
     if (!needs_rebuild) {
         m_last_render_pass_stats.culling_hierarchy_chunks = m_terrainCullingCache.chunk_count;
@@ -2497,10 +2807,10 @@ void RenderPipeline::ensure_terrain_culling_hierarchy(
 
     m_hierarchicalCuller.BuildHierarchy(renderable_chunks);
     m_terrainCullingCache.chunk_set_signature = signature;
-    m_terrainCullingCache.chunk_count = renderable_chunks.size();
+    m_terrainCullingCache.chunk_count = sorted_chunk_ids.size();
     m_terrainCullingCache.valid = true;
     m_last_render_pass_stats.culling_hierarchy_rebuilds++;
-    m_last_render_pass_stats.culling_hierarchy_chunks = renderable_chunks.size();
+    m_last_render_pass_stats.culling_hierarchy_chunks = sorted_chunk_ids.size();
 }
 
 void RenderPipeline::render_frame(entt::registry& registry,
@@ -2509,6 +2819,7 @@ void RenderPipeline::render_frame(entt::registry& registry,
                                   float deltaTime,
                                   bool wireframe,
                                   UploadPresentation presentation) {
+    end_diagnostic_capture();
     if (!m_started) {
         return;
     }
@@ -2543,7 +2854,34 @@ void RenderPipeline::render_frame(entt::registry& registry,
     m_far_world_pair_jitter_frame = m_taau_frame;
     m_far_world_pair_jitter = m_taau_jitter_ndc;
     m_far_world_pair_mdi_cursor = m_mdi_frame_cursor;
+    std::unique_ptr<DiagnosticFrameCapture> diagnostic_frame;
+    if (m_capture_diagnostics.enabled && m_diagnostic_capture_armed &&
+        purpose == FarWorldPurpose::World) {
+        std::size_t retained = 0;
+        // The current manifest contract describes unjittered output-sized planes.
+        // Refuse scaled/jittered captures rather than mislabel their pixel camera.
+        if (!m_taau_enabled && m_internal_width == m_screen_width &&
+            m_internal_height == m_screen_height &&
+            DiagnosticFrameCapture::Admitted({m_internal_width, m_internal_height}, retained)) {
+            diagnostic_frame = std::make_unique<DiagnosticFrameCapture>(
+                DiagnosticExtent{m_internal_width, m_internal_height});
+        }
+    }
     dispatch_stages(camera);
+    if (auto* scope = GBufferDiagnosticCapture::Current(); diagnostic_frame && scope) {
+        if ((m_plant_procgen_pass && m_plant_procgen_pass->enabled() &&
+             m_plant_procgen_pass->index_count() > 0) ||
+            (m_ground_decal_pass && m_ground_decal_pass->active())) {
+            scope->unsupported("later_deferred_contributors");
+        }
+        // Forward contributors are not represented by the deferred surface plane.
+        // Until separate planes exist, their presence prevents complete publication.
+        if (m_last_render_pass_stats.water_draws || m_last_render_pass_stats.foliage_draws ||
+            m_last_render_pass_stats.particle_draws || !m_glass_pane_items.empty() ||
+            m_capture_waterfall_geometry) {
+            scope->unsupported("forward_contributors");
+        }
+    }
     m_far_world_pair_taau_after = m_taau_pass->history_state();
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -2579,6 +2917,7 @@ void RenderPipeline::render_frame(entt::registry& registry,
     m_prev_time = static_cast<float>(Client::presentation_clock.now(glfwGetTime));
     // Scatter preparation happens before render_frame. Open admission for the
     // next rendered frame here, so nested sweeps/previews need no outer loop.
+    m_diagnostic_capture = std::move(diagnostic_frame);
     m_foliage_pass->begin_ground_frame();
 }
 
@@ -2775,7 +3114,7 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
             FarWorldLiveUpload upload;
             upload.cell = {chunk.coords.x, chunk.coords.y, chunk.coords.z, 0};
             upload.snapshot_version = chunk.mesh_version;
-            if (found != m_chunk_render_data.end()) {
+            if (chunk.has_terrain_mesh() && found != m_chunk_render_data.end()) {
                 const auto& data = found->second;
                 // Ownership describes the retained surface actually drawn,
                 // even while a newer snapshot waits in the upload queue.
@@ -2856,6 +3195,8 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
         m_taau_jitter_ndc = glm::vec2(0.0f);
     }
 
+    m_waterfall_pass->update_liveness(world_system, m_particle_pass.get());
+
     // particle MOTION advances in prepare (once per frame), so the
     // dispatch below only draws — running dispatch twice must not double-advance
     // motion. Guarded identically to the particles stage's execute.
@@ -2913,6 +3254,11 @@ void RenderPipeline::prepare_camera_projection(const Camera& camera) {
 }
 
 void RenderPipeline::dispatch_stages(const Camera& camera) {
+    DebugViewPass::controls().wireframe = m_frame_prepared.wireframe;
+    auto diagnostic_frame = m_debug_view_pass && (DebugViewPass::geometry_requested() ||
+                                                  DebugViewPass::controls().enabled)
+                                ? m_debug_view_pass->begin_frame(make_debug_view_context(camera))
+                                : nullptr;
     // the pure GPU stage sequence over the prepared frame. Each
     // execute_stage_* body moved VERBATIM from the pre-split render_frame and
     // reads only FramePrepared + pipeline members. This function must be
@@ -2925,16 +3271,10 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
 
     glEnable(GL_DEPTH_TEST);
 
-    // Configure rendering mode
-    if (m_frame_prepared.wireframe) {
-        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-        glLineWidth(2.0f);
-        glDisable(GL_CULL_FACE); // Disable culling in wireframe for debugging
-    } else {
-        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-        glEnable(GL_CULL_FACE);
-        glCullFace(GL_BACK);
-    }
+    // The wireframe toggle now adds a depth-tested mask over the shaded frame.
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
 
     // reset the frame-graph stage trace, then record each stage id as it
     // dispatches. This is render_frame's REAL dispatch order -- the golden the declarative
@@ -2966,6 +3306,10 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
         assert(fn && "frame-graph node has no executor table entry");
         if (fn)
             (this->*fn)(camera);
+        if (diagnostic_frame && node == "gbuffer") {
+            // Gather the deferred snapshot before plants or decals change its AOVs.
+            DebugViewPass::end_frame(diagnostic_frame, make_debug_view_context(camera));
+        }
     }
 }
 
@@ -3050,6 +3394,12 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
         RenderContext gbuffer_ctx = make_gbuffer_context(camera, frustum_planes);
         gbuffer_ctx.frozen_replay = m_far_world_paired;
         GBufferPassInput gbuffer_input;
+        if (m_farlod) {
+            auto& live = m_farlod->submitted_live_terrain();
+            live.clear();
+            gbuffer_input.submitted_live_terrain = &live;
+            gbuffer_input.resident_live_terrain = &m_farlod->resident_live_terrain();
+        }
         m_authored_view.reset();
         if (m_authored_draws && !m_authored_draws->draws.empty()) {
             if (m_taau_enabled || m_render_scale != 1.0f)
@@ -3076,9 +3426,29 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
             gbuffer_input.authored_draws = m_authored_draws;
             gbuffer_input.authored_view = m_authored_view.get();
         }
-        // Live-terrain submit: the shared callback (CullHierarchical +
-        // draw_chunks_mdi, byte-identical), shared with ShadowPass.
-        gbuffer_input.submit_terrain_chunks = make_terrain_submitter(true);
+        // G-buffer submission also records the successful live draws supporting props.
+        // Shadow submission keeps the same cull/draw sequence without publishing support.
+        gbuffer_input.submit_terrain_chunks =
+            [this](const glm::vec4(&planes)[6]) -> TerrainSubmitStats {
+            std::vector<const ChunkCullEntry*> visible_chunks;
+            m_hierarchicalCuller.CullHierarchical(planes, visible_chunks);
+            if (m_terrain_coverage_enabled && !m_far_world_paired) {
+                m_terrain_coverage_live_submit_observed = true;
+                m_terrain_coverage_visible.clear();
+                for (const auto* chunk : visible_chunks) {
+                    m_terrain_coverage_visible.insert(chunk->id);
+                }
+            }
+            std::size_t draws = 0;
+            std::size_t indices = 0;
+            draw_chunks_mdi(visible_chunks, draws, indices);
+            if (m_farlod) {
+                auto& live = m_farlod->submitted_live_terrain();
+                // Only successful MDI commands have origins; zero draws ignores stale scratch.
+                live.assign_origins(std::span<const glm::vec4>(m_mdi_origin_scratch.data(), draws));
+            }
+            return TerrainSubmitStats{visible_chunks.size(), draws, indices};
+        };
         gbuffer_input.far_selection = m_frame_far_selection;
         gbuffer_input.legacy_far = legacy_far_compatibility();
         if (m_frame_far_selection.effective == FarWorldMode::Ladder)
@@ -3363,12 +3733,22 @@ void RenderPipeline::execute_stage_water(const Camera& camera) {
             }
         }
         begin_gpu_pass_timer(GpuTimerPass::Water);
-        const WaterDrawStats water_stats = m_water_pass->execute(water_ctx, water_input, camera);
+        const WaterDrawStats water_stats = m_water_pass->execute(
+            water_ctx, water_input, camera, m_water_visibility_capture_enabled);
         m_last_render_pass_stats.water_draws += water_stats.water_draws;
         m_last_render_pass_stats.water_indices_drawn += water_stats.water_indices;
         end_gpu_pass_timer(GpuTimerPass::Water);
         glBindVertexArray(0); // Unbind after water pass
     }
+}
+
+const WaterVisibilityMask& RenderPipeline::water_visibility_mask() const {
+    if (!m_water_visibility_capture_enabled ||
+        !m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Water)) {
+        static const WaterVisibilityMask empty;
+        return empty;
+    }
+    return m_water_pass->visibility_mask();
 }
 
 void RenderPipeline::execute_stage_waterfall(const Camera& camera) {
@@ -3725,6 +4105,9 @@ void RenderPipeline::on_resize(u32 new_width, u32 new_height) {
     if (new_width == 0 || new_height == 0 ||
         (new_width == m_screen_width && new_height == m_screen_height))
         return;
+    if (m_debug_view_pass && DebugViewPass::controls().enabled) {
+        m_debug_view_pass->invalidate();
+    }
     m_screen_width = new_width;
     m_screen_height = new_height;
     // recompute the internal (scaled) extent from the new output size.
@@ -3867,6 +4250,9 @@ bool RenderPipeline::resize_graphics_targets(float scale, u32 shadow_resolution)
             // CONTENT is now stale -- it was resolved at the previous internal scale, so its motion
             // vectors / reprojection no longer match. Invalidate it so the next resolve restarts
             // fresh instead of blending the previous scale's history after a runtime scale change.
+            if (m_debug_view_pass && DebugViewPass::controls().enabled) {
+                m_debug_view_pass->invalidate();
+            }
             m_taau_pass->invalidate_history();
             m_frustumCache.valid = false;
             ++m_resize_generation;
@@ -3888,6 +4274,10 @@ bool RenderPipeline::apply_graphics(const luminumbra::core::ResolvedGraphics& re
     m_farlod->set_horizon(config.far_radius_m, config.far_outer_clip_m);
     set_volumetric_quality(config.volumetric_quality);
     m_ui_blur = config.ui_blur;
+    if (m_near_terrain_refinement.set_enabled(resolved.values.terrain_near_refinement)) {
+        m_taau_pass->invalidate_history();
+        m_frustumCache.valid = false;
+    }
     // Scale changes already reset history during target publication. Other presentation
     // changes also invalidate the accumulated image, even with unchanged target extents.
     if (config != previous && config.render_scale == previous.render_scale) {
@@ -3931,6 +4321,10 @@ void RenderPipeline::clear_offscreen_target() {
 }
 
 void RenderPipeline::clear_all_chunk_data() {
+    if (m_farlod) {
+        m_farlod->resident_live_terrain().clear();
+        m_farlod->submitted_live_terrain().clear();
+    }
     m_foliage_pass->clear_ground_meshes();
     // Force clear all cached chunk render data to ensure fresh uploads.
     // Retire the world's pool slices while keeping pending GPU storage charged
@@ -3941,6 +4335,8 @@ void RenderPipeline::clear_all_chunk_data() {
     }
     m_chunk_render_data.clear();
     m_terrain_upload_queue.clear();
+    m_near_terrain_upload_queue.clear();
+    m_near_terrain_refinement.clear();
     for (auto& data : m_free_chunk_render_slots) {
         delete_chunk_slot(data);
     }
@@ -4273,6 +4669,8 @@ RenderContext RenderPipeline::make_taau_context() {
     ctx.lit_scene = m_render_registry.adopt_fbo("lit_scene", lfbo.fbo_id);
     ctx.motion_vectors = m_render_registry.adopt_texture(
         "motion_vectors", m_gbuffer_pass->gbuffer().motion_vector_texture);
+    ctx.gbuffer_depth =
+        m_render_registry.adopt_texture("gbuffer_depth", m_gbuffer_pass->gbuffer().depth_texture);
     return ctx;
 }
 
@@ -4293,6 +4691,8 @@ void RenderPipeline::cleanup_gpu_resources() {
     }
     m_chunk_render_data.clear();
     m_terrain_upload_queue.clear();
+    m_near_terrain_upload_queue.clear();
+    m_near_terrain_refinement.clear();
     for (auto& d : m_free_chunk_render_slots) {
         delete_chunk_slot(d);
     }
@@ -4340,6 +4740,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     // Release the remaining pass-owned volumes and geometry.
     m_froxel_pass->destroy();
     m_waterfall_pass->destroy_geometry();
+    m_capture_waterfall_geometry = false;
     m_skybox_pass->destroy_geometry();
     if (m_particle_pass) {
         m_particle_pass->destroy_buffers();
@@ -4385,6 +4786,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_staticModelTextures.clear();
     m_staticModelNextLayer = 0;
     m_treeImpostorsEnabled = false;
+    m_treeImpostorCoverage = {};
     m_treeImpostorGrid = 0;
     m_treeImpostorAtlasSize = 0;
     m_treeImpostorRadius = 0.0f;
@@ -4430,13 +4832,17 @@ void RenderPipeline::cleanup_gpu_resources() {
 // Bake the live waterfall dressing in the pass that owns its geometry and draw.
 void RenderPipeline::cancel_waterfall_adoption() {
     m_waterfall_pass->destroy_geometry();
+    m_capture_waterfall_geometry = false;
     m_waterfall_pass->waterfall_cache().clear();
     if (m_particle_pass)
         m_particle_pass->clear_emitters();
 }
 
 void RenderPipeline::prepare_waterfalls(const Systems::SHIELD_WorldSystem& world) {
+    m_capture_waterfall_geometry = true;
     m_waterfall_pass->prepare(world, m_particle_pass.get(), m_root_path);
+    // prepare populated this exact key; this is an O(1) cache lookup at setup.
+    m_capture_waterfall_geometry = !m_waterfall_pass->waterfall_sites(world).empty();
 }
 
 // --- RESOURCE MANAGEMENT ---
@@ -4496,14 +4902,25 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
     std::unordered_set<ChunkID> active;
     active.reserve(chunks.size());
     for (const auto& chunk : chunks) {
-        active.insert(chunk.id);
+        // Water-only owners keep their water record alive, but terrain activity
+        // ends with its geometry. The terrain grace period then releases both
+        // the pool allocation and foliage ground support through the usual unload.
+        if (Water || chunk.has_terrain_mesh()) {
+            active.insert(chunk.id);
+        }
     }
     std::vector<ChunkID> expired;
     for (auto& [id, data] : records) {
         if (active.contains(id))
             data.frames_since_inactive = 0;
-        else if (++data.frames_since_inactive > inactive_ttl)
-            expired.push_back(id);
+        else {
+            if constexpr (!Water) {
+                m_near_terrain_refinement.forget(id);
+            }
+            if (++data.frames_since_inactive > inactive_ttl) {
+                expired.push_back(id);
+            }
+        }
     }
     for (const auto id : expired) {
         if constexpr (Water)
@@ -4514,6 +4931,8 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
 
     std::vector<MeshUploadCandidate> candidates;
     candidates.reserve(chunks.size());
+    // Metadata only: each visible chunk enters at most one of these queues.
+    std::vector<MeshUploadCandidate> refinement_candidates;
     std::size_t invalid_payloads = 0;
     for (const auto& chunk : chunks) {
         if constexpr (Water) {
@@ -4524,11 +4943,34 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
                 continue;
             }
         }
+        const glm::vec3 center(chunk.coords.x * CHUNK_SIZE_X + CHUNK_SIZE_X * 0.5f,
+                               chunk.coords.y * CHUNK_SIZE_Y + CHUNK_SIZE_Y * 0.5f,
+                               chunk.coords.z * CHUNK_SIZE_Z + CHUNK_SIZE_Z * 0.5f);
+        const auto delta = center - camera.Position;
+        const float distance = glm::dot(delta, delta);
+        bool refinement_requested = false;
+        bool refinement_changed = false;
+        if constexpr (!Water) {
+            if (chunk.source_chunk) {
+                const auto evidence = m_near_terrain_refinement.observe(
+                    *chunk.source_chunk, chunk.mesh_version, chunk.near_terrain_snapshot, distance);
+                refinement_requested = static_cast<bool>(evidence);
+                const auto resident = records.find(chunk.id);
+                refinement_changed =
+                    resident != records.end() && !resident->second.refinement.matches(evidence);
+            }
+        }
         const auto found = records.find(chunk.id);
+        bool retire_refined = false;
+        if constexpr (!Water) {
+            retire_refined = found != records.end() && found->second.refinement.requested;
+        }
         // A published empty water mesh is a real replacement, adopted through
-        // the same bounded queue. Absent chunks still use the inactivity grace.
+        // the same bounded queue. An emptied refined terrain mesh also retires
+        // its displaced surface. Absent chunks still use the inactivity grace.
         if (!(Water ? chunk.has_water_mesh() : chunk.has_terrain_mesh()) &&
-            (!Water || found == records.end() || found->second.element_count == 0))
+            ((!Water && !retire_refined) || found == records.end() ||
+             found->second.element_count == 0))
             continue;
         const bool is_new = found == records.end() || found->second.element_count == 0;
         bool is_stale = !is_new && found->second.mesh_version !=
@@ -4538,6 +4980,9 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
                 is_stale || (!is_new && m_frame_far_selection.effective == FarWorldMode::Ladder &&
                              !found->second.LadderUploadValid());
         }
+        const bool refinement_only =
+            !Water && !is_new && !is_stale && refinement_requested && !retire_refined;
+        is_stale = is_stale || refinement_changed;
         if (!is_new && !is_stale)
             continue;
         ++(is_new
@@ -4557,24 +5002,28 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
                             : stats.terrain_stale_uploads_deferred));
             continue;
         }
-        const glm::vec3 center(chunk.coords.x * CHUNK_SIZE_X + CHUNK_SIZE_X * 0.5f,
-                               chunk.coords.y * CHUNK_SIZE_Y + CHUNK_SIZE_Y * 0.5f,
-                               chunk.coords.z * CHUNK_SIZE_Z + CHUNK_SIZE_Z * 0.5f);
-        const auto delta = center - camera.Position;
-        const float distance = glm::dot(delta, delta);
-        candidates.push_back(
+        if constexpr (!Water) {
+            bytes = NearTerrainRefinementCache::upload_cost(
+                refinement_requested, chunk.terrain_vertex_count, chunk.terrain_index_count, bytes);
+        }
+        auto& destination = refinement_only ? refinement_candidates : candidates;
+        destination.push_back(
             {chunk,
              is_new,
              is_stale,
              std::isfinite(distance) ? distance : std::numeric_limits<float>::max(),
-             bytes});
+             bytes,
+             refinement_only});
     }
     (Water ? stats.water_upload_candidates : stats.terrain_upload_candidates) =
-        candidates.size() + invalid_payloads;
-    if (!candidates.empty()) {
+        candidates.size() + refinement_candidates.size() + invalid_payloads;
+    if (!candidates.empty() || !refinement_candidates.empty()) {
         float nearest = std::numeric_limits<float>::max();
-        for (const auto& candidate : candidates)
-            nearest = std::min(nearest, candidate.distance_sq);
+        for (const auto* pending : {&candidates, &refinement_candidates}) {
+            for (const auto& candidate : *pending) {
+                nearest = std::min(nearest, candidate.distance_sq);
+            }
+        }
         (Water ? stats.water_nearest_candidate_distance_sq
                : stats.terrain_nearest_candidate_distance_sq) = nearest;
     }
@@ -4590,66 +5039,115 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
                     << 1u) |
                    (item.is_new ? 0u : 1u);
         });
+    if constexpr (!Water) {
+        refresh_uploads(
+            m_near_terrain_upload_queue,
+            refinement_candidates,
+            [](const auto& item) { return static_cast<std::uint64_t>(item.chunk.id); },
+            [](const auto& item) { return static_cast<std::uint64_t>(item.chunk.id); });
+    }
     float farthest_selected = 0;
-    const auto work = drain_uploads(
-        queue,
-        Water ? kWaterUploadLimits : kTerrainUploadLimits,
-        [](const auto& candidate) { return candidate.bytes; },
-        [&](const auto& candidate) {
-            ++(candidate.is_new
-                   ? (Water ? stats.water_new_uploads_selected : stats.terrain_new_uploads_selected)
-                   : (Water ? stats.water_stale_uploads_selected
-                            : stats.terrain_stale_uploads_selected));
-            farthest_selected = std::max(farthest_selected, candidate.distance_sq);
-            ChunkMeshPayload payload;
-            const bool copied = Water ? copy_water_mesh_payload(candidate.chunk, payload)
-                                      : copy_terrain_mesh_payload(candidate.chunk, payload);
-            if (!copied) {
-                ++(Water ? stats.water_upload_failures : stats.terrain_upload_failures);
+    const auto adopt = [&](const auto& candidate) {
+        ++(candidate.is_new
+               ? (Water ? stats.water_new_uploads_selected : stats.terrain_new_uploads_selected)
+               : (Water ? stats.water_stale_uploads_selected
+                        : stats.terrain_stale_uploads_selected));
+        farthest_selected = std::max(farthest_selected, candidate.distance_sq);
+        ChunkMeshPayload payload;
+        const bool copied = Water ? copy_water_mesh_payload(candidate.chunk, payload)
+                                  : copy_terrain_mesh_payload(candidate.chunk, payload);
+        if (!copied) {
+            ++(Water ? stats.water_upload_failures : stats.terrain_upload_failures);
+            return false;
+        }
+        ++(Water ? stats.water_payload_copies : stats.terrain_payload_copies);
+        (Water ? stats.water_payload_bytes : stats.terrain_payload_bytes) += candidate.bytes;
+        const auto failures = Water ? stats.water_upload_failures : stats.terrain_upload_failures;
+        if constexpr (Water) {
+            if (payload.has_mesh())
+                upload_water_mesh(candidate.chunk, payload);
+            else
+                unload_water_resources(candidate.chunk.id);
+        } else {
+            const auto evidence = m_near_terrain_refinement.observe(*candidate.chunk.source_chunk,
+                                                                    payload.mesh_version,
+                                                                    payload.near_terrain_snapshot,
+                                                                    candidate.distance_sq);
+            const auto result = m_near_terrain_refinement.prepare(*candidate.chunk.source_chunk,
+                                                                  payload.mesh_version,
+                                                                  evidence,
+                                                                  candidate.distance_sq,
+                                                                  payload.vertices,
+                                                                  payload.indices,
+                                                                  elapsed());
+            if (candidate.refinement_only && result == NearTerrainUploadResult::Deferred) {
                 return false;
             }
-            ++(Water ? stats.water_payload_copies : stats.terrain_payload_copies);
-            (Water ? stats.water_payload_bytes : stats.terrain_payload_bytes) += candidate.bytes;
-            const auto failures =
-                Water ? stats.water_upload_failures : stats.terrain_upload_failures;
-            if constexpr (Water) {
-                if (payload.has_mesh())
-                    upload_water_mesh(candidate.chunk, payload);
-                else
-                    unload_water_resources(candidate.chunk.id);
-            } else
+            // A deferred baseline remains eligible for a separate optional
+            // replacement; only completed/refused requests stamp evidence.
+            payload.refinement.set(result == NearTerrainUploadResult::Deferred ? nullptr
+                                                                               : evidence);
+            if (payload.has_mesh()) {
                 upload_chunk_mesh(candidate.chunk, payload);
-            return failures ==
-                   (Water ? stats.water_upload_failures : stats.terrain_upload_failures);
-        },
-        elapsed);
+            } else {
+                unload_chunk_resources(candidate.chunk.id);
+            }
+            if (result == NearTerrainUploadResult::Deferred &&
+                failures == stats.terrain_upload_failures) {
+                // One metadata entry per adopted baseline keeps settling aware
+                // of its pending refinement before the next frame's discovery.
+                auto refinement = candidate;
+                refinement.is_new = false;
+                refinement.is_stale = true;
+                refinement.refinement_only = true;
+                m_near_terrain_upload_queue.refresh(candidate.chunk.id, refinement);
+            }
+        }
+        return failures == (Water ? stats.water_upload_failures : stats.terrain_upload_failures);
+    };
+    const auto cost = [](const auto& candidate) {
+        return candidate.bytes;
+    };
+    const auto work = [&] {
+        if constexpr (Water) {
+            return drain_uploads(queue, kWaterUploadLimits, cost, adopt, elapsed);
+        } else {
+            return drain_terrain_uploads(queue, m_near_terrain_upload_queue, cost, adopt, elapsed);
+        }
+    }();
     (Water ? stats.water_budget : stats.terrain_budget) = work;
     (Water ? stats.water_uploads : stats.terrain_uploads) = work.adopted;
     (Water ? stats.water_uploads_deferred : stats.terrain_uploads_deferred) =
-        queue.size() + invalid_payloads;
+        queue.size() + (Water ? 0 : m_near_terrain_upload_queue.size()) + invalid_payloads;
     (Water ? stats.water_farthest_selected_distance_sq
            : stats.terrain_farthest_selected_distance_sq) = farthest_selected;
     float nearest_deferred = std::numeric_limits<float>::max();
-    for (const auto& candidate : candidates) {
-        if (!queue.contains(candidate.chunk.id))
-            continue;
-        ++(candidate.is_new
-               ? (Water ? stats.water_new_uploads_deferred : stats.terrain_new_uploads_deferred)
-               : (Water ? stats.water_stale_uploads_deferred
-                        : stats.terrain_stale_uploads_deferred));
-        nearest_deferred = std::min(nearest_deferred, candidate.distance_sq);
-        if (work.attempts && candidate.distance_sq < farthest_selected)
-            ++(Water ? stats.water_deferred_nearer_than_selected
-                     : stats.terrain_deferred_nearer_than_selected);
+    for (const auto* pending : {&candidates, &refinement_candidates}) {
+        for (const auto& candidate : *pending) {
+            if (!queue.contains(candidate.chunk.id) &&
+                (Water || !m_near_terrain_upload_queue.contains(candidate.chunk.id))) {
+                continue;
+            }
+            ++(candidate.is_new
+                   ? (Water ? stats.water_new_uploads_deferred : stats.terrain_new_uploads_deferred)
+                   : (Water ? stats.water_stale_uploads_deferred
+                            : stats.terrain_stale_uploads_deferred));
+            nearest_deferred = std::min(nearest_deferred, candidate.distance_sq);
+            if (work.attempts && candidate.distance_sq < farthest_selected) {
+                ++(Water ? stats.water_deferred_nearer_than_selected
+                         : stats.terrain_deferred_nearer_than_selected);
+            }
+        }
     }
-    if (queue.size())
+    if (queue.size() || (!Water && m_near_terrain_upload_queue.size()))
         (Water ? stats.water_nearest_deferred_distance_sq
                : stats.terrain_nearest_deferred_distance_sq) = nearest_deferred;
 }
 
 bool RenderPipeline::copy_terrain_mesh_payload(const ChunkMeshSnapshot& chunk,
                                                ChunkMeshPayload& payload) const {
-    if (!chunk.source_chunk || !chunk.has_terrain_mesh()) {
+    if (!chunk.source_chunk ||
+        ((chunk.terrain_vertex_count == 0) != (chunk.terrain_index_count == 0))) {
         return false;
     }
 
@@ -4669,9 +5167,15 @@ bool RenderPipeline::copy_terrain_mesh_payload(const ChunkMeshSnapshot& chunk,
     payload.diagnostic_lod = chunk.source_chunk->current_lod.load(std::memory_order_acquire);
     payload.vertices = chunk.source_chunk->mesh_vertices;
     payload.indices = chunk.source_chunk->mesh_indices;
+    payload.near_terrain_snapshot = chunk.near_terrain_snapshot;
+    if (payload.near_terrain_snapshot &&
+        !payload.near_terrain_snapshot->matches(*chunk.source_chunk, version_before)) {
+        payload.near_terrain_snapshot.reset();
+    }
 
     const u32 version_after = chunk.source_chunk->mesh_version.load(std::memory_order_acquire);
-    if (version_after != version_before || !payload.has_mesh()) {
+    if (version_after != version_before || (payload.vertices.empty() != payload.indices.empty())) {
+        payload.near_terrain_snapshot.reset();
         payload.vertices.clear();
         payload.indices.clear();
         return false;
@@ -4915,8 +5419,14 @@ void RenderPipeline::upload_chunk_mesh(const ChunkMeshSnapshot& chunk,
     render_data.index_capacity = alloc.index_slot;
     render_data.element_count = index_count;
     render_data.mesh_version = payload.mesh_version;
+    render_data.refinement = payload.refinement;
     render_data.diagnostic_lod = payload.diagnostic_lod;
     render_data.frames_since_inactive = 0;
+
+    if (m_farlod) {
+        m_farlod->resident_live_terrain().add_origin(
+            glm::vec3(chunk.coords) * glm::vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z));
+    }
 
     // Telemetry parity with the legacy slot accounting: a brand-new record is a
     // "slot created"; an existing chunk whose mesh outgrew its reserved slot
@@ -4951,6 +5461,11 @@ void RenderPipeline::unload_water_resources(ChunkID chunk_id) {
 }
 
 void RenderPipeline::unload_chunk_resources(ChunkID chunk_id) {
+    if (m_farlod) {
+        m_farlod->resident_live_terrain().remove_chunk(chunk_id);
+        m_farlod->submitted_live_terrain().remove_chunk(chunk_id);
+    }
+    m_near_terrain_refinement.forget(chunk_id);
     m_foliage_pass->remove_ground_mesh(chunk_id);
     auto it = m_chunk_render_data.find(chunk_id);
     if (it != m_chunk_render_data.end()) {

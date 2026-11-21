@@ -46,13 +46,17 @@ class ReplaySourceContract(unittest.TestCase):
         self.assertNotIn("FindInput(", playback)
         self.assertRegex(recording, r'if \(executed != 0 && '
                          r'\(executed % kCheckpointIntervalTicks\) != 0\)\s*\{\s*'
-                         r'writer.RecordCheckpoint\(CaptureCheckpoint\(executed, runner\)\);\s*\}'
-                         r'\s*const auto\* trace = [^;]*;'
-                         r'\s*if \(!writer.Finalize\(executed, trace\)\)')
+                         r'const auto checkpoint = CaptureCheckpoint\(executed, runner\);\s*'
+                         r'if \(!checkpoint\)\s*\{\s*return 1;\s*\}\s*'
+                         r'writer.RecordCheckpoint\(\*checkpoint\);\s*\}\s*'
+                         r'const auto final_hash = CaptureWorldHash\(executed, runner\);\s*'
+                         r'if \(!final_hash\)\s*\{\s*return 1;\s*\}\s*'
+                         r'const auto\* trace = [^;]*;\s*'
+                         r'if \(!writer.Finalize\(executed, trace\)\)')
         self.assertIn("(executed % kCheckpointIntervalTicks) == 0 || "
                       "executed == contents->tick_count", startup)
         for field in ("world_hash", "terrain", "water", "entities"):
-            self.assertIn(f"live.{field} != recorded->{field}", startup)
+            self.assertIn(f"live->{field} != recorded->{field}", startup)
         self.assertIn("terminal ? terminal->world_hash : header.start_world_hash", startup)
         tick_loop = startup.split("while (!diverged", 1)[1].split("const std::string live_end", 1)[0]
         self.assertNotIn("FindCheckpoint(", tick_loop)
@@ -81,7 +85,8 @@ class ReplaySourceContract(unittest.TestCase):
         self.assertIsNotNone(target)
         self.assertEqual(target[1].split().count(path), 1)
         native = read_source("test/" + path)
-        self.assertNotIn("#define Run", native)
+        shipping_cases = native.split("#undef ServerWorldRunner\n", 1)[-1]
+        self.assertNotIn("#define Run", shipping_cases)
         self.assertRegex(native, r'ASSERT_EQ\(RunRecord\(options\), 0\)')
         self.assertRegex(native, r'ASSERT_EQ\(RunReplay\(options\), 0\)')
         self.assertIn("testing::Values(std::uint64_t{0}, 1, 2, 29, 30, 31, 60, 90)", native)
@@ -579,15 +584,24 @@ class ReplaySourceContract(unittest.TestCase):
             "auto start_world_creation =", 1)[0]
         self.assertRegex(entry, r'if \(!horizon_ready\)\s*\{\s*refuse_world_entry\('
                          r'[^;]*;\s*return;')
-        self.assertLess(entry.index("if (!horizon_ready)"), entry.index("g_camera ="))
+        self.assertLess(entry.index("if (!horizon_ready)"),
+                        entry.index("entry_horizon_prepared = true;"))
+        self.assertNotIn("GameState::IN_GAME", entry)
+        preload = main.split("auto wait_for_world_presentation =", 1)[1].split(
+            "auto activate_loaded_world =", 1)[0]
+        self.assertLess(preload.index("g_camera ="),
+                        preload.index("PrepareInitialWaterPresentationNear("))
+        self.assertNotIn("world->update(", preload)
+        self.assertIn("return entry_presentation_gate.waiting();", preload)
         self.assertRegex(main, r'if \(!gameSession->GetWorldSystem\(\)->EnsureSurfaceReadyNear\('
                          r'[^;]*, 4, 2\)\)\s*\{[^}]*return 2;')
         horizon = main.split("auto prepare_entry_horizon =", 1)[1].split(
             "auto drain_entry =", 1)[0]
-        self.assertRegex(horizon, r'return gameSession->GetWorldSystem\(\)->'
+        self.assertRegex(horizon, r'entry_horizon_prepared = gameSession->GetWorldSystem\(\)->'
                          r'EnsureSurfaceReadyNear\([^;]*,\s*'
                          r'capture_horizon \? scenario_config.horizon_radius : 12,\s*'
-                         r'capture_horizon \? scenario_config.collision_radius : 4\);')
+                         r'capture_horizon \? scenario_config.collision_radius : 4\);\s*'
+                         r'return entry_horizon_prepared;')
         staged = main.split("case WorldEntryStage::PrepareHorizon:", 1)[1].split(
             "case WorldEntryStage::Activate:", 1)[0]
         self.assertRegex(staged, r'if \(!prepare_entry_horizon\(\)\)\s*\{\s*'
@@ -606,6 +620,75 @@ class ReplaySourceContract(unittest.TestCase):
                          r'ws->EnsureSurfaceReadyNear\(')
         self.assertIn('refuse_world_entry("Menu surface preparation failed.", false);', backdrop)
 
+    def assert_diagnostic_bundle_build_graph(self, cmake):
+        targets = dict(re.findall(r'add_executable\((\w+)\s+(.*?)\)', cmake, re.DOTALL))
+        runtime = "../src/luminumbra_client/core/RuntimeScenarioConfig.cpp"
+        capture = "../src/luminumbra_client/rendering/DiagnosticCapture.cpp"
+        temporal = "../src/luminumbra_client/rendering/TemporalAudit.cpp"
+        consumers = {name for name, sources in targets.items() if runtime in sources.split()}
+        self.assertEqual(consumers, {"capture_manifest_test", "capture_feature_profile_test",
+                                     "diagnostic_bundle_test", "runtime_surface_options_test",
+                                     "audio_disabled_test"})
+        for target, retained in (
+            ("capture_manifest_test", ("rendering/capture_manifest_test.cpp",
+                                       "rendering/diagnostic_capture_test.cpp",
+                                       "rendering/temporal_audit_test.cpp",
+                                       "../src/luminumbra_client/rendering/CaptureManifest.cpp")),
+            ("capture_feature_profile_test", ("rendering/capture_feature_profile_test.cpp",
+                                              "../src/luminumbra_client/rendering/CaptureFeatureProfile.cpp")),
+        ):
+            for source in retained:
+                self.assertEqual(targets[target].split().count(source), 1, (target, source))
+        for target in sorted(consumers):
+            sources = targets[target].split()
+            for extra in re.findall(rf'target_sources\({target}\s+PRIVATE\s+(.*?)\)',
+                                    cmake, re.DOTALL):
+                sources.extend(extra.split())
+            for source in (runtime, capture, temporal):
+                self.assertEqual(sources.count(source), 1, (target, source))
+            for source in sources:
+                self.assertTrue((ROOT / "test" / source).is_file(), source)
+            libraries = re.search(rf'target_link_libraries\({target}\s+PRIVATE\s+(.*?)\)',
+                                  cmake, re.DOTALL)
+            self.assertIsNotNone(libraries)
+            self.assertIn("luminumbra_common", libraries[1].split())
+        bundle = "rendering/diagnostic_bundle_test.cpp"
+        attribution = "rendering/diagnostic_attribution_test.cpp"
+        self.assertEqual([name for name, sources in targets.items() if bundle in sources.split()],
+                         ["diagnostic_bundle_test"])
+        self.assertEqual([name for name, sources in targets.items()
+                          if attribution in sources.split()], ["render_smoke_test"])
+        registered = re.search(r'^set\(LUMINUMBRA_GTEST_TARGETS\s+(.*?)^\)', cmake,
+                               re.DOTALL | re.MULTILINE)
+        self.assertIsNotNone(registered)
+        for target in consumers:
+            self.assertEqual(registered[1].split().count(target), 1, target)
+        self.assertIn("gtest_discover_tests(${_lum_gtest_target}", cmake)
+
+    def test_diagnostic_bundle_and_runtime_consumers_keep_current_dependencies(self):
+        self.assert_diagnostic_bundle_build_graph(read_source("test/CMakeLists.txt"))
+
+    def test_diagnostic_bundle_build_graph_rejects_missing_dependencies_and_duplicate_owner(self):
+        cmake = read_source("test/CMakeLists.txt")
+        for target, token in (
+            ("diagnostic_bundle_test", "../src/luminumbra_client/rendering/TemporalAudit.cpp"),
+            ("capture_feature_profile_test", "../src/luminumbra_client/rendering/DiagnosticCapture.cpp"),
+            ("capture_manifest_test", "rendering/temporal_audit_test.cpp"),
+            ("diagnostic_bundle_test", "rendering/diagnostic_bundle_test.cpp"),
+        ):
+            start = cmake.index(f"add_executable({target}")
+            changed = cmake[:start] + cmake[start:].replace(token, "", 1)
+            with self.subTest(target=target, token=token), self.assertRaises(AssertionError):
+                self.assert_diagnostic_bundle_build_graph(changed)
+        changed = cmake.replace("add_executable(capture_manifest_test",
+                                "add_executable(capture_manifest_test\n"
+                                "    rendering/diagnostic_attribution_test.cpp", 1)
+        with self.assertRaises(AssertionError):
+            self.assert_diagnostic_bundle_build_graph(changed)
+        changed = cmake.replace("    diagnostic_bundle_test\n", "", 1)
+        with self.assertRaises(AssertionError):
+            self.assert_diagnostic_bundle_build_graph(changed)
+
     def assert_runtime_surface_owner(self, cmake, native):
         target = "runtime_surface_options_test"
         sources = re.search(rf'add_executable\({target}\s+(.*?)\)', cmake, re.DOTALL)
@@ -613,6 +696,7 @@ class ReplaySourceContract(unittest.TestCase):
         self.assertEqual(sources[1].split(), [
             "client/runtime_surface_options_test.cpp",
             "../src/luminumbra_client/core/RuntimeScenarioConfig.cpp",
+            "../src/luminumbra_client/rendering/DiagnosticCapture.cpp",
         ])
         for command, dependencies in (
             ("target_include_directories", ("../src", "../src/luminumbra_client")),
@@ -659,6 +743,7 @@ class ReplaySourceContract(unittest.TestCase):
         native = read_source("test/client/runtime_surface_options_test.cpp")
         for token in ("client/runtime_surface_options_test.cpp",
                       "../src/luminumbra_client/core/RuntimeScenarioConfig.cpp",
+                      "../src/luminumbra_client/rendering/DiagnosticCapture.cpp",
                       "    runtime_surface_options_test\n"):
             # Mutate the new target itself, even when another target owns the
             # same production source. The target must retain every dependency.
@@ -673,7 +758,557 @@ class ReplaySourceContract(unittest.TestCase):
                 self.assert_runtime_surface_owner(cmake, native.replace(original, "", 1))
 
 
+def compact_capture_source(source):
+    return re.sub(r"\s+", "", without_comments(source))
+
+
+def capture_body(source, anchor):
+    start = source.index("{", source.index(anchor))
+    depth = 0
+    for match in re.finditer(r'"(?:\\.|[^"\\])*"|[{}]', source[start:]):
+        if match[0] == "{":
+            depth += 1
+        elif match[0] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:start + match.end()]
+    raise AssertionError("unclosed capture block: " + anchor)
+
+
+class ThrowawaySaveSourceContract(unittest.TestCase):
+    # A guard must outlive all writers of its directory, including Shutdown()
+    # from a runner destructor on an early return or function-try-block unwind.
+    sites = (
+        ("Replay", "intRunRecord(", "save_cleanup", "runner", "."),
+        ("Replay", "intRunReplay(", "save_cleanup", "runner", "."),
+        ("Heavy", "intRunHeavy(", "save_cleanup", "original", "."),
+        ("Smoke", "RunSmokeOnce(", "save_cleanup", "runner", "."),
+        ("Lockstep", "intRunLockstepLoopback(", "host_cleanup", "host_runner", "->"),
+        ("Lockstep", "intRunLockstepLoopback(", "peer_cleanup", "peer_runner", "->"),
+        ("Replicate", "intRunReplicate(", "save_cleanup", "runner", "."),
+    )
+
+    def sources(self):
+        return {mode: compact_capture_source(read_source(MODES + mode + ".cpp"))
+                for mode, *_ in self.sites}
+
+    def assert_cleanup(self, sources):
+        for mode, entry, guard, runner, access in self.sites:
+            body = capture_body(sources[mode], entry)
+            declaration = "Luminumbra::Server::ThrowawaySaveDirGuard" + guard + ";"
+            runner_declaration = ("auto" + runner + "=make_runner(" if access == "->" else
+                                  "Luminumbra::Server::ServerWorldRunner" + runner + "(")
+            self.assertIn(declaration, body)
+            self.assertLess(body.index(declaration), body.index(runner_declaration))
+            boot = "if(!" + runner + access + "Boot())"
+            arm = guard + ".Arm(" + runner + access + "Session()->GetWorldSaveDir());"
+            # Arming is the first statement after successful Boot, before any
+            # capture, snapshot, other boot, or refusal return can intervene.
+            refusal = capture_body(body, boot)
+            self.assertIn("returnresult;" if mode == "Smoke" else "return1;", refusal)
+            self.assertIn(boot + refusal + arm, body)
+            self.assertEqual(body.count(guard + ".Arm("), 1)
+            if mode == "Heavy":
+                self.assertLess(body.index(declaration), body.index(
+                    "Luminumbra::Server::ServerWorldRunnerloaded("))
+                self.assertLess(body.index(arm), body.index("original.SaveFullSnapshot();"))
+                self.assertIn("cfgLoad.world_id=world_id;", body)
+                self.assertIn("conststd::stringworld_id=original.Session()->GetMetadata().worldId;", body)
+            if mode == "Lockstep":
+                self.assertLess(body.index(declaration), body.index("autohost_runner="))
+                self.assertLess(body.index(declaration), body.index("autopeer_runner="))
+                self.assertLess(body.index("host_cleanup.Arm("), body.index("if(!peer_runner->Boot())"))
+
+    def test_every_throwaway_mode_arms_cleanup_before_capture_and_outlives_runners(self):
+        self.assert_cleanup(self.sources())
+
+    def test_each_mode_and_peer_detects_removed_late_or_unarmed_guard(self):
+        sources = self.sources()
+        for mode, entry, guard, runner, access in self.sites:
+            body = capture_body(sources[mode], entry)
+            declaration = "Luminumbra::Server::ThrowawaySaveDirGuard" + guard + ";"
+            arm = guard + ".Arm(" + runner + access + "Session()->GetWorldSaveDir());"
+            boot = "if(!" + runner + access + "Boot())"
+            boot_block = boot + capture_body(body, boot)
+            mutations = (
+                body.replace(declaration, "", 1),
+                body.replace(arm, "", 1),
+                body.replace(arm, guard + ".Arm({});", 1),
+                body.replace(declaration, "", 1).replace(arm, declaration + arm, 1),
+                body.replace(arm, "", 1).replace(boot_block, arm + boot_block, 1),
+                body.replace(boot_block, boot_block.replace(
+                    "returnresult;" if mode == "Smoke" else "return1;", ""), 1),
+            )
+            for mutation, changed_body in enumerate(mutations):
+                changed = dict(sources)
+                changed[mode] = sources[mode].replace(body, changed_body, 1)
+                with self.subTest(mode=mode, entry=entry, guard=guard, mutation=mutation):
+                    with self.assertRaises((AssertionError, ValueError)):
+                        self.assert_cleanup(changed)
+
+    def assert_guard(self, header):
+        guard = capture_body(header, "classThrowawaySaveDirGuard")
+        self.assertIn("ThrowawaySaveDirGuard(constThrowawaySaveDirGuard&)=delete;", guard)
+        self.assertIn("ThrowawaySaveDirGuard&operator=(constThrowawaySaveDirGuard&)=delete;", guard)
+        self.assertIn("m_save_dir=save_dir;", capture_body(guard, "voidArm("))
+        self.assertIn("~ThrowawaySaveDirGuard()noexcept{", guard)
+        destructor = capture_body(guard, "~ThrowawaySaveDirGuard()")
+        self.assertIn("if(!m_save_dir.empty())", destructor)
+        self.assertIn("try{std::error_codeerror;std::filesystem::remove_all(m_save_dir,error);}", destructor)
+        self.assertIn("catch(...){}", destructor)
+
+    def test_guard_removal_is_nonthrowing_and_mutation_checked(self):
+        header = compact_capture_source(read_source("src/luminumbra_server/ServerWorldRunner.h"))
+        self.assert_guard(header)
+        for token in ("std::filesystem::remove_all(m_save_dir,error);", "noexcept",
+                      "if(!m_save_dir.empty())", "catch(...){}", "m_save_dir=save_dir;"):
+            with self.subTest(token=token), self.assertRaises((AssertionError, ValueError)):
+                self.assert_guard(header.replace(token, "", 1))
+
+    def test_persistent_modes_do_not_delete_user_saves(self):
+        for mode in ("Server", "NetTcp", "NetRuntime", "NetSoak", "Gns", "Steam"):
+            source = read_source(MODES + mode + ".cpp")
+            self.assertNotIn("ThrowawaySaveDirGuard", source)
+            self.assertNotIn("remove_all(", source)
+
+    def test_registered_native_refusals_check_save_cleanup_and_destructor_order(self):
+        native = read_source("test/common/ReplayModeAdmission_test.cpp")
+        for case in ("RefusedVerifyCapturesNeverPublishDivergenceArtifacts",
+                     "RefusedRecordCapturesNeverPublishReplayOrRegionTrace",
+                     "RefusedHeavyCapturesFailBeforeComparisonOrArtifact"):
+            body = capture_body(native, case + ")")
+            self.assertIn("ExpectRefusedSaveRemoved();", body)
+        self.assertIn("ASSERT_TRUE(std::filesystem::is_directory(fault.save_dir));", native)
+        self.assertIn("EXPECT_FALSE(fs::exists(CaptureFault().save_dir));", native)
+        self.assertIn('EXPECT_TRUE(fs::is_empty(root / "worlds/saves"));', native)
+        self.assertRegex(native, r'TEST_P\(ThrowawaySaveCleanup,\s*'
+                         r'RemovesSavesAfterEveryRunnerOnReturnAndRefusal\)')
+        self.assertIn("const SavingRunner first{first_save, first_saved};", native)
+        self.assertIn("const SavingRunner second{second_save, second_saved};", native)
+        self.assertIn("testing::Combine(testing::Values(0, 1, 2, 3), testing::Bool())", native)
+        self.assertIn("ThrowawayCleanupToleratesUnarmedEmptyMissingAndRemovalError", native)
+        self.assertIn("common/ReplayModeAdmission_test.cpp", read_source("test/CMakeLists.txt"))
+        self.assertIn("tools/ci/test_replay_source_contract.py", read_source("tools/ci/ci_paths.py"))
+
+
+class AuthorityConsumerSourceContract(unittest.TestCase):
+    paths = {
+        "runner": "src/luminumbra_server/ServerWorldRunner.cpp",
+        "header": "src/luminumbra_common/persistence/WorldSaveService.h",
+        "replay": MODES + "Replay.cpp",
+        "heavy": MODES + "Heavy.cpp",
+        "smoke": MODES + "Smoke.cpp",
+        "lockstep": MODES + "Lockstep.cpp",
+    }
+
+    def sources(self):
+        return {name: compact_capture_source(read_source(path))
+                for name, path in self.paths.items()}
+
+    def assert_ordered(self, source, *tokens):
+        positions = [source.index(token) for token in tokens]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(len(positions), len(set(positions)))
+
+    def assert_runner_contract(self, sources):
+        for name, request, publication in (
+                ("ComputeWorldHash", "{},Persistence::AuthorityCaptureParts::Composite",
+                 "returnresult.capture->composite;"),
+                ("ComputeWorldSubHashes", "entities_snapshot,Persistence::AuthorityCaptureParts::SubHashes",
+                 "returnresult.capture->sub;"),
+                ("ComputeWorldHashAndSubHashes", "entities_snapshot",
+                 "out_world_hash=result.capture->composite;out_sub=result.capture->sub;")):
+            body = capture_body(sources["runner"], "ServerWorldRunner::" + name + "(")
+            self.assert_ordered(body,
+                                "if(!m_booted||!m_session){throwPersistence::AuthorityCaptureRefused("
+                                "Persistence::AuthorityCaptureStatus::MissingCursor);}",
+                                "m_session->CaptureAuthorityHashes(" + request + ");",
+                                "if(!result.capture){throwPersistence::AuthorityCaptureRefused(result.status);}",
+                                publication)
+            self.assertNotIn("snapshot_streamed_chunks", body)
+            self.assertNotIn(".clear()", body)
+        exception = capture_body(sources["header"], "classAuthorityCaptureRefused")
+        self.assertIn(":m_status(capture_status){}", exception)
+        self.assertIn("AuthorityCaptureStatusstatus()constnoexcept{returnm_status;}", exception)
+
+    def assert_replay_contract(self, sources):
+        replay = sources["replay"]
+        for helper, call in (("CaptureWorldHash", "returnrunner.ComputeWorldHash();"),
+                             ("CaptureCheckpoint", "runner.ComputeWorldHashAndSubHashes(cp.world_hash,sub);")):
+            body = capture_body(replay, helper + "(")
+            self.assert_ordered(body, call,
+                                "catch(constLuminumbra::Persistence::AuthorityCaptureRefused&error)",
+                                "error.status()", "returnstd::nullopt;")
+        record = capture_body(replay, "intRunRecord(")
+        verify = capture_body(replay, "intRunReplay(")
+        self.assert_ordered(record, "constautostart_hash=CaptureWorldHash(0,runner);",
+                            "if(!start_hash){return1;}", "header.start_world_hash=*start_hash;",
+                            "writer.Open(")
+        for cadence in ("if((executed%kCheckpointIntervalTicks)==0)",
+                        "if(executed!=0&&(executed%kCheckpointIntervalTicks)!=0)"):
+            body = capture_body(record, cadence)
+            self.assert_ordered(body, "constautocheckpoint=CaptureCheckpoint(executed,runner);",
+                                "if(!checkpoint){return1;}", "writer.RecordCheckpoint(*checkpoint);")
+        self.assert_ordered(record, "constautofinal_hash=CaptureWorldHash(executed,runner);",
+                            "if(!final_hash){return1;}", "writer.Finalize(")
+        self.assert_ordered(verify, "constautostart_hash=CaptureWorldHash(0,runner);",
+                            "if(!start_hash){return1;}", "conststd::stringlive_start=*start_hash;",
+                            "constboolstart_match=", "if(!start_match)")
+        self.assert_ordered(verify, "constautolive=CaptureCheckpoint(executed,runner);",
+                            "if(!live){return1;}", "if(live->world_hash!=recorded->world_hash")
+        self.assert_ordered(verify, "constautoend_hash=", "CaptureWorldHash(executed,runner);",
+                            "if(!end_hash){return1;}", "conststd::stringlive_end=*end_hash;",
+                            'if(diverged){', '"luminumbra.replay_divergence.v1"')
+
+    def assert_other_modes_contract(self, sources):
+        heavy = sources["heavy"]
+        self.assertIn("intRunHeavy(constServerCliOptions&options,"
+                      "constLuminumbra::world::OwnerContinuationOptions&profile)try{", heavy)
+        cli = capture_body(heavy, "intRunHeavy(constServerCliOptions&options)")
+        self.assertIn("returnRunHeavy(options,{.owner_continuation=!options.weather_schedule});", cli)
+        skip = capture_body(cli, "if(options.weather_schedule)")
+        self.assertIn("ownercomparisonskipped:weatherschedule", skip)
+        for runner, config in (("original", "cfgOrig"), ("loaded", "cfgLoad")):
+            self.assertIn(f"ServerWorldRunner{runner}(std::move({config}),profile);", heavy)
+            self.assertEqual(heavy.count(f"CaptureOwners({runner},profile.owner_continuation)"), 2)
+        catch = capture_body(heavy, "catch(constLuminumbra::Persistence::AuthorityCaptureRefused&error)")
+        self.assert_ordered(catch, "error.status()", "return1;")
+        checked = capture_body(heavy, "intRunHeavy(")
+        self.assert_ordered(checked, "original.SaveFullSnapshot();",
+                            "constHeavyHashesorig_at_save=CaptureHashes(original);",
+                            "constHeavyHashesloaded_at_load=CaptureHashes(loaded);",
+                            "constHeavyHashesorig_final=CaptureHashes(original);",
+                            "constHeavyHashesloaded_final=CaptureHashes(loaded);",
+                            "AuthoritativeStateEqual(orig_at_save,loaded_at_load)",
+                            "AuthoritativeStateEqual(orig_final,loaded_final)", "std::ofstreamout(artifact_path)")
+        for key, entry in (("smoke", "RunSmoke"), ("lockstep", "RunLockstepLoopback")):
+            source = sources[key]
+            self.assertIn("int" + entry + "(constServerCliOptions&options)try{", source)
+            self.assertIn("catch(constLuminumbra::Persistence::AuthorityCaptureRefused&error)", source)
+            catch = capture_body(source, "catch(constLuminumbra::Persistence::AuthorityCaptureRefused&error)")
+            self.assertIn("error.status()", catch)
+            self.assertIn("return1;", catch)
+
+    def test_runner_slots_and_status_are_checked_before_publication(self):
+        self.assert_runner_contract(self.sources())
+
+    def test_replay_refusals_precede_comparisons_and_publication(self):
+        self.assert_replay_contract(self.sources())
+
+    def test_heavy_and_sibling_modes_stop_on_capture_refusal(self):
+        self.assert_other_modes_contract(self.sources())
+
+    def test_heavy_cli_owner_profile_and_skip_have_registered_regressions(self):
+        native = read_source("test/common/ReplayModeAdmission_test.cpp")
+        for case in ("HeavyCliComparesUnchangedOwnerCheckpoints",
+                     "HeavyCliOwnerMismatchFailsBothCheckpointPairs",
+                     "HeavyCliWeatherScheduleLogsSkippedOwnerComparison",
+                     "HeavyCliInvalidWeatherScheduleStillRefusesBeforeSave"):
+            self.assertIn("TEST_F(ReplayModeAdmission, " + case + ")", native)
+        self.assertIn("ASSERT_EQ(RunHeavy(options), 0)", native)
+        self.assertIn("EXPECT_EQ(RunRefusedCaptureHeavy(options), 1)", native)
+        cmake = read_source("test/CMakeLists.txt")
+        target = re.search(r'add_executable\(world_open_refusal_test\s+(.*?)\)', cmake, re.DOTALL)
+        self.assertIsNotNone(target)
+        for path in ("common/ReplayModeAdmission_test.cpp",
+                     "../src/luminumbra_server/modes/Heavy.cpp"):
+            self.assertEqual(target[1].split().count(path), 1)
+        sources = self.sources()
+        for token, replacement in (
+                (".owner_continuation=!options.weather_schedule", ".owner_continuation=false"),
+                (".owner_continuation=!options.weather_schedule", ".owner_continuation=true"),
+                ("ownercomparisonskipped:weatherschedule", ""),
+                ("std::move(cfgOrig),profile", "std::move(cfgOrig)"),
+                ("std::move(cfgLoad),profile", "std::move(cfgLoad)")):
+            changed = dict(sources)
+            self.assertIn(token, changed["heavy"])
+            changed["heavy"] = changed["heavy"].replace(token, replacement, 1)
+            with self.subTest(token=token), self.assertRaises(AssertionError):
+                self.assert_other_modes_contract(changed)
+
+    def test_each_capture_guard_and_order_has_an_isolated_mutation(self):
+        sources = self.sources()
+        mutations = []
+        for slot in ("Composite", "SubHashes"):
+            mutations.append(("runner", "Persistence::AuthorityCaptureParts::" + slot, "All"))
+        # Each runner refusal and output publication, including every status bridge.
+        for token in ("result.status", "MissingCursor", "out_world_hash=result.capture->composite;"):
+            for occurrence in range(sources["runner"].count(token)):
+                mutations.append(("runner", token, occurrence))
+        mutations.extend(("header", token, "") for token in
+                         (":m_status(capture_status)", "returnm_status;"))
+        for token in ("if((executed%kCheckpointIntervalTicks)==0)",
+                      "if(executed!=0&&(executed%kCheckpointIntervalTicks)!=0)",
+                      "constautocheckpoint=CaptureCheckpoint(executed,runner);",
+                      "writer.RecordCheckpoint(*checkpoint);", "writer.Finalize(executed,trace)",
+                      "if(!start_hash){return1;}", "if(!checkpoint){return1;}",
+                      "if(!final_hash){return1;}", "if(!live){return1;}",
+                      "if(!end_hash){return1;}", "returnstd::nullopt;"):
+            for occurrence in range(sources["replay"].count(token)):
+                mutations.append(("replay", token, occurrence))
+        for match in re.finditer(r'if\(!(?:start_hash|checkpoint|final_hash|live|end_hash)\)\{return1;\}',
+                                 sources["replay"]):
+            changed = dict(sources)
+            changed["replay"] = (sources["replay"][:match.start()] +
+                                 match[0].replace("return1;", "") + sources["replay"][match.end():])
+            with self.subTest(refusal_return=match.start()), self.assertRaises((AssertionError, ValueError)):
+                self.assert_replay_contract(changed)
+        for key in ("heavy", "smoke", "lockstep"):
+            mutations.append((key, "catch(constLuminumbra::Persistence::AuthorityCaptureRefused&error)", ""))
+        mutations.append(("heavy", "constHeavyHashesloaded_final=CaptureHashes(loaded);", ""))
+        for key, token, replacement in mutations:
+            with self.subTest(path=self.paths[key], token=token, replacement=replacement):
+                changed = dict(sources)
+                if isinstance(replacement, int):
+                    parts = changed[key].split(token)
+                    changed[key] = token.join(parts[:replacement + 1]) + "REMOVED" + token.join(parts[replacement + 1:])
+                else:
+                    changed[key] = changed[key].replace(token, replacement, 1)
+                checker = (self.assert_runner_contract if key in ("runner", "header") else
+                           self.assert_replay_contract if key == "replay" else
+                           self.assert_other_modes_contract)
+                with self.assertRaises((AssertionError, ValueError)):
+                    checker(changed)
+        # Moving the last refused capture below comparison or publication also fails.
+        for key, capture, later in (
+                ("replay", "if(!end_hash){return1;}", 'if(diverged){'),
+                ("replay", "if(!final_hash){return1;}", "if(!writer.Finalize"),
+                ("heavy", "constHeavyHashesloaded_final=CaptureHashes(loaded);", "constboolresim_ok=")):
+            changed = dict(sources)
+            moved = changed[key].replace(capture, "", 1)
+            position = moved.index(later)
+            changed[key] = moved[:position] + later + capture + moved[position + len(later):]
+            with self.subTest(key=key, order=capture), self.assertRaises((AssertionError, ValueError)):
+                (self.assert_replay_contract if key == "replay" else self.assert_other_modes_contract)(changed)
+
+    def test_native_refusals_use_real_modes_and_registered_target(self):
+        native = read_source("test/common/ReplayModeAdmission_test.cpp")
+        for case in ("RefusedVerifyCapturesNeverPublishDivergenceArtifacts",
+                     "RefusedRecordCapturesNeverPublishReplayOrRegionTrace",
+                     "RefusedHeavyCapturesFailBeforeComparisonOrArtifact",
+                     "RunnerCapturePreservesStatusAndCombinedOutputsOnRefusal",
+                     "SubHashCaptureSkipsRefusedRegionalPreparation"):
+            self.assertRegex(native, rf'TEST_[FP]\(\w+,\s*{case}\)')
+        for mode in ("Replay", "Heavy"):
+            self.assertIn(f'#include "../../src/luminumbra_server/modes/{mode}.cpp"', native)
+        first_include = native.index('#include "../../src/luminumbra_server/modes/Heavy.cpp"')
+        last_include = native.index('#include "../../src/luminumbra_server/modes/Replay.cpp"')
+        first_case = native.index("TEST_P(")
+        for original, adapted in (("ServerWorldRunner", "RefusedCaptureRunner"),
+                                  ("RunRecord", "RunRefusedCaptureRecord"),
+                                  ("RunReplay", "RunRefusedCaptureReplay"),
+                                  ("RunMutateReplayFixture", "RunRefusedCaptureMutateReplayFixture"),
+                                  ("RunHeavy", "RunRefusedCaptureHeavy")):
+            define = f"#define {original} {adapted}\n"
+            undef = f"#undef {original}\n"
+            self.assertEqual(native.count(define), 1)
+            self.assertEqual(native.count(undef), 1)
+            self.assertLess(native.index(define), first_include)
+            self.assertLess(last_include, native.index(undef))
+            self.assertLess(native.index(undef), first_case)
+        self.assertIn("ServerWorldRunner::ComputeWorldHash()", native)
+        self.assertIn("ServerWorldRunner::ComputeWorldHashAndSubHashes(hash, sub)", native)
+        self.assertIn("m_incomplete->set_state(ChunkState::Loading)", native)
+        self.assertIn("EXPECT_EQ(fs::exists(options.artifact_path), retained)", native)
+        self.assertIn('EXPECT_EQ(ReadReplayModeFile(options.artifact_path), "retained")', native)
+        self.assertIn("common/ReplayModeAdmission_test.cpp", read_source("test/CMakeLists.txt"))
+
+
 class SessionUsabilitySourceContract(unittest.TestCase):
+    def assert_concrete_ecology_admission(self, source):
+        self.assertRegex(source, r"const auto plant_env\s*=\s*\[")
+        self.assertNotRegex(source, r"\bEnvSampler\b")
+        self.assertRegex(
+            source,
+            r"RunPlantGrowthSystemOnTick\(\s*foliage_registry, current_tick, plant_env, foliage_gate\)")
+        initialize = self.function(source, "InitializeScentField")
+        self.assertIn("m_scentField->BindSessionAdmission(*this);", initialize)
+        self.assertNotIn("BindDepositGate", initialize)
+        admission = self.function(source, "SessionCellAllowed", "luminumbra::ai::ScentField::")
+        self.assertIn("return m_admissionSession->ScentCellDue(x, z);", admission)
+
+    def test_shipping_plant_and_scent_admission_use_concrete_dispatch(self):
+        self.assert_concrete_ecology_admission(
+            read_source("src/luminumbra_common/world/GameSession.cpp"))
+        header = read_source("src/luminumbra_common/ai/ScentField.h")
+        self.assertIn("const ::Luminumbra::world::GameSession* m_admissionSession", header)
+        admission = self.function(header, "SimulationCellAllowed", "")
+        self.assertRegex(admission, r"if \(m_admissionSession\)\s*\{\s*"
+                         r"return SessionCellAllowed\(x, z\);\s*\}")
+        deposit = self.function(header, "Deposit", "")
+        self.assertIn("!SimulationCellAllowed(x, z)", deposit)
+        self.assertNotIn("m_deposit_gate", deposit)
+
+    def test_concrete_ecology_guard_rejects_erased_shipping_regressions(self):
+        source = read_source("src/luminumbra_common/world/GameSession.cpp")
+        for before, after in (
+            ("const auto plant_env", "const luminumbra::foliage::EnvSampler plant_env"),
+            ("m_scentField->BindSessionAdmission(*this);",
+             "m_scentField->BindDepositGate([this](int x, int z) { return ScentCellDue(x, z); });"),
+            ("return m_admissionSession->ScentCellDue(x, z);", "return m_deposit_gate(x, z);"),
+        ):
+            with self.subTest(regression=after):
+                self.assertIn(before, source)
+                with self.assertRaises(AssertionError):
+                    self.assert_concrete_ecology_admission(source.replace(before, after, 1))
+
+    def assert_concrete_regional_samplers(self, source):
+        binding = self.function(source, "BindRegionalFieldQueries")
+        self.assertNotIn("[this]", binding)
+        for system in ("windFieldSystem", "weatherSystem", "aetherFieldSystem"):
+            self.assertEqual(binding.count(f"m_{system}->BindRegionalSession(*this);"), 1)
+            # Only the empty compatibility call is allowed, to clear legacy sessions.
+            self.assertEqual(binding.count(f"m_{system}->BindRegionalBackend("), 1)
+            self.assertIn(f"m_{system}->BindRegionalBackend({{}}, {{}});", binding)
+
+    def test_shipping_regional_samplers_use_concrete_dispatch(self):
+        self.assert_concrete_regional_samplers(
+            read_source("src/luminumbra_common/world/GameSession.cpp"))
+        for system, sample in (("WindFieldSystem", "Wind"),
+                               ("WeatherSystem", "Weather"),
+                               ("AetherFieldSystem", "Aether")):
+            source = read_source(f"src/luminumbra_common/systems/{system}.cpp")
+            binding = self.function(source, "BindRegionalSession", system + "::")
+            self.assertIn("m_sessionBinding.session = &session;", binding)
+            self.assertIn("m_regional_sample = {};", binding)
+            sampler = self.function(source, "SampleRegional", system + "::")
+            self.assertRegex(sampler, r"if \(m_sessionBinding.session\)\s*\{\s*return "
+                             + rf"m_sessionBinding.session->SampleRegional{sample}\(")
+
+    def assert_regional_self_assignment(self, header, source, system):
+        binding = header.split("struct SessionBinding {", 1)[1].split("SessionBinding m_sessionBinding", 1)[0]
+        self.assertRegex(binding, r"operator=\(const SessionBinding& other\) noexcept\s*\{\s*"
+                         r"if \(this != &other\)\s*\{\s*session = nullptr;\s*\}\s*return \*this;")
+        move = self.function(source, "operator=", system + "::")
+        self.assertRegex(move, r"\{\s*if \(this == &other\)\s*\{\s*return \*this;\s*\}")
+        # The guarded move must retain the full default memberwise assignment contract.
+        members = set(re.findall(r"\bm_\w+\b", header))
+        assignments = set(re.findall(r"\b(m_\w+) = (?:std::move\()?other\.\1\)?;", move))
+        self.assertEqual(assignments, members)
+
+    def test_regional_self_assignment_guards_and_registered_regressions(self):
+        native = read_source("test/common/GameSessionHeadlessWorld_test.cpp")
+        cmake = read_source("test/CMakeLists.txt")
+        self.assertIn("common/GameSessionHeadlessWorld_test.cpp", cmake)
+        self.assertIn("gtest_discover_tests(${_lum_gtest_target}", cmake)
+        helper = self.function(native, "CheckRegionalSamplerSelfAssignment", "")
+        for operation in ("system = alias;", "system = std::move(alias);"):
+            self.assertIn(operation, helper)
+        self.assertIn("ASSERT_NE(legacy_sample, expected_sample)", helper)
+        self.assertIn("ASSERT_NE(legacy_hash, expected_hash)", helper)
+        for system, name in (("WindFieldSystem", "Wind"), ("WeatherSystem", "Weather"),
+                             ("AetherFieldSystem", "Aether")):
+            with self.subTest(system=system):
+                header = read_source(f"src/luminumbra_common/systems/{system}.h")
+                source = read_source(f"src/luminumbra_common/systems/{system}.cpp")
+                self.assert_regional_self_assignment(header, source, system)
+                self.assertRegex(native, r"TEST\(GameSessionHeadlessWorldTest,\s*"
+                                 + f"Regional{name}SelfAssignmentPreservesSessionBinding" + r"\)")
+
+    def assert_weather_detachment(self, header, source, native):
+        members = set(re.findall(r"\bm_\w+\b", header))
+        normalize = (r"if \(other\.m_sessionBinding\.session\)\s*\{\s*"
+                     r"SelectRegionalBackend\(false\);")
+        for parameter in ("const WeatherSystem&", "WeatherSystem&&"):
+            signature = f"WeatherSystem::WeatherSystem({parameter} other)"
+            self.assertIn(signature, source)
+            constructor = source.split(signature, 1)[1]
+            constructor = constructor.split("\n}", 1)[0]
+            initialized = set(re.findall(
+                r"\b(m_\w+)\((?:std::move\()?other\.\1\)?\)", constructor))
+            self.assertEqual(initialized, members)
+            self.assertRegex(constructor, normalize)
+        move = self.function(source, "operator=", "WeatherSystem::")
+        self.assertRegex(move, r"if \(other\.m_sessionBinding\.session\)\s*\{\s*"
+                         r"WeatherSystem detached\(std::move\(other\)\);\s*"
+                         r"return \*this = std::move\(detached\);")
+        copy_source = source.split(
+            "WeatherSystem& WeatherSystem::operator=(const WeatherSystem& other)", 1)[1]
+        copy = copy_source.split("\n}", 1)[0]
+        self.assertRegex(copy, r"if \(this == &other\)\s*\{\s*return \*this;")
+        self.assertIn("return *this = WeatherSystem(other);", copy)
+        clear = self.function(source, "SelectRegionalBackend", "WeatherSystem::")
+        for projection in ("m_storm_cells = StormCells();", "m_strikes = StrikeSchedule();"):
+            self.assertLess(clear.index(projection), clear.index("m_regionalWeatherKeyed = false;"))
+        for member in ("m_regionalStorms", "m_regionalStrikes", "m_regionalStormIndex",
+                       "m_regionalStormCache", "m_regionalStrikeCache"):
+            self.assertIn(member + ".clear();", clear)
+        self.assertIn("m_regionalStrikesDeliveredThrough.reset();", clear)
+        self.assertIn("m_hiddenRegionalStrikes = 0;", clear)
+        factory = self.function(native, "DetachRegionalWeather", "")
+        for operation in ("return WeatherSystem(source);", "return WeatherSystem(std::move(source));",
+                          "destination = source;", "destination = std::move(source);"):
+            self.assertIn(operation, factory)
+        helper = self.function(native, "CheckDetachedRegionalWeatherCase", "")
+        for operation in ("detached.Update(302, Vec3(0), nullptr);",
+                          "source.RevealRegionalStrikeSchedule();"):
+            self.assertIn(operation, helper)
+        for name, arguments in (("CopyConstruction", "false, false"),
+                                ("MoveConstruction", "true, false"),
+                                ("CopyAssignment", "false, true"),
+                                ("MoveAssignment", "true, true")):
+            regression = re.search(
+                r"TEST\(GameSessionHeadlessWorldTest,\s*RegionalWeather" + name
+                + r"NormalizesDetachedStorage\)\s*\{([^}]+)\}", native)
+            self.assertIsNotNone(regression)
+            self.assertIn("CheckDetachedRegionalWeather<" + arguments + ">()", regression[1])
+
+    def test_weather_detachment_preserves_members_and_registers_all_operations(self):
+        self.assert_weather_detachment(
+            read_source("src/luminumbra_common/systems/WeatherSystem.h"),
+            read_source("src/luminumbra_common/systems/WeatherSystem.cpp"),
+            read_source("test/common/GameSessionHeadlessWorld_test.cpp"))
+
+    def test_weather_detachment_guard_rejects_each_lost_normalization(self):
+        header = read_source("src/luminumbra_common/systems/WeatherSystem.h")
+        source = read_source("src/luminumbra_common/systems/WeatherSystem.cpp")
+        native = read_source("test/common/GameSessionHeadlessWorld_test.cpp")
+        for signature in ("WeatherSystem::WeatherSystem(const WeatherSystem& other)",
+                          "WeatherSystem::WeatherSystem(WeatherSystem&& other)",
+                          "WeatherSystem& WeatherSystem::operator=(WeatherSystem&& other)",
+                          "WeatherSystem& WeatherSystem::operator=(const WeatherSystem& other)"):
+            with self.subTest(operation=signature):
+                start = source.index(signature)
+                end = source.index("\n}", start)
+                body = source[start:end]
+                if "const WeatherSystem&" in signature and "operator=" in signature:
+                    mutated = body.replace("return *this = WeatherSystem(other);", "return *this;")
+                elif "operator=" in signature:
+                    mutated = re.sub(r"WeatherSystem detached\(std::move\(other\)\);\s*"
+                                     r"return \*this = std::move\(detached\);", "", body)
+                else:
+                    mutated = body.replace("SelectRegionalBackend(false);", "")
+                self.assertNotEqual(mutated, body)
+                with self.assertRaises(AssertionError):
+                    self.assert_weather_detachment(header, source[:start] + mutated + source[end:], native)
+
+    def test_regional_hash_interface_has_fixed_inputs(self):
+        header = read_source("src/luminumbra_common/world/GameSession.h")
+        source = read_source("src/luminumbra_common/world/GameSession.cpp")
+        declaration = "std::string RegionalAmbientHash(std::uint8_t channels, bool weather) const;"
+        self.assertEqual(header.count(declaration), 1)
+        self.assertGreater(header.index(declaration), header.rindex("\nprivate:"))
+        for system, name, inputs in (("WindFieldSystem", "Wind", "3, false"),
+                                     ("WeatherSystem", "Weather", "12, true"),
+                                     ("AetherFieldSystem", "Aether", "16, false")):
+            with self.subTest(system=system):
+                projection = self.function(source, f"ComputeRegional{name}SubHash")
+                self.assertRegex(projection, r"\{\s*return RegionalAmbientHash\("
+                                 + re.escape(inputs) + r"\);\s*\}")
+                sampler = read_source(f"src/luminumbra_common/systems/{system}.cpp")
+                self.assertNotIn("->RegionalAmbientHash(", sampler)
+                self.assertIn(f"->ComputeRegional{name}SubHash()", sampler)
+
+    def test_concrete_regional_guard_rejects_each_erased_binding(self):
+        source = read_source("src/luminumbra_common/world/GameSession.cpp")
+        for system in ("windFieldSystem", "weatherSystem", "aetherFieldSystem"):
+            before = f"m_{system}->BindRegionalSession(*this);"
+            after = f"m_{system}->BindRegionalBackend([this](const auto& p) {{ return p; }}, {{}});"
+            with self.subTest(system=system):
+                self.assertIn(before, source)
+                with self.assertRaises(AssertionError):
+                    self.assert_concrete_regional_samplers(source.replace(before, after, 1))
+
     def test_serialization_reuse_covers_every_canonical_chunk_input(self):
         source = read_source("src/luminumbra_common/persistence/WorldPersistenceRoundtrip.cpp")
         serialized = (self.function(source, "ChunkToJson", "") +
@@ -768,12 +1403,27 @@ class SessionUsabilitySourceContract(unittest.TestCase):
         self.assertIn("::read(m_descriptor, &trailing, 1)", admission)
         self.assertIn("::ReadFile(m_handle, &trailing, 1, &received, nullptr) && received == 0",
                       admission)
-        world = self.function(source, "load_world", "WorldSaveService::")
+        world = self.function(source, "load_world_impl", "WorldSaveService::")
         self.assertIn("load_plant_entities(plants, save_dir, &errors, stop)", world)
         session = self.function(read_source("src/luminumbra_common/world/GameSession.cpp"),
                                 "ReadPreparedWorldState")
         self.assertRegex(session, r"WorldSaveService::load_plant_entities\(\s*state.plants, "
                          r"save_dir, &errors, stop\)")
+
+    def test_catalog_inspection_keeps_complete_validation_for_load_and_writers(self):
+        source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
+        load = self.function(source, "load_world", "WorldSaveService::")
+        inspect = self.function(source, "inspect_save", "WorldSaveService::")
+        validate = self.function(source, "validate_save", "WorldSaveService::")
+        self.assertRegex(load, r"return load_world_impl\([\s\S]*,\s*false\);")
+        self.assertRegex(inspect, r"load_world_impl\([\s\S]*nullptr,\s*nullptr,\s*true,\s*payloads_verified\);")
+        self.assertIn(".load_world(", validate)
+        self.assertNotIn("load_world_impl", validate)
+        world = self.function(source, "load_world_impl", "WorldSaveService::")
+        skip = world.index("if (catalog_only && indexed && !retain)")
+        self.assertLess(world.index("ReadRegionFile(path, records, &errors, stop)"), skip)
+        self.assertLess(world.index("retain_chunks->contains(record.id)"), skip)
+        self.assertLess(skip, world.index("AdmitChunkRecord(record,"))
 
     def test_native_saved_input_holds_publication_until_after_close(self):
         source = read_source("src/luminumbra_common/persistence/WorldSaveService.cpp")
@@ -919,6 +1569,43 @@ class SessionUsabilitySourceContract(unittest.TestCase):
                         metadata_admission.index("BoundedJsonDump("))
         pair = self.function(source, "save_metadata_and_active_regions", "WorldSaveService::")
         self.assertLess(pair.index("admit_metadata_bytes(bytes"), pair.index("save_active_regions("))
+
+    def test_clean_generated_chunk_omission_is_incremental_only(self):
+        session = read_source("src/luminumbra_common/world/GameSession.cpp")
+        save = self.function(session, "SaveWorldStateToImpl")
+        selection = save.split("WorldStreamingState state;", 1)[1].split(
+            "result.chunks_total = state.size();", 1)[0]
+        self.assertRegex(
+            selection,
+            r"if\s*\(m_activeRegionsEnabled\s*&&\s*!full_snapshot\s*&&\s*chunk\s*&&\s*"
+            r"chunk->sdf_provenance\(\)\s*==\s*ChunkSdfProvenance::GeneratedCurrentParams\s*&&\s*"
+            r"!chunk->needs_authority\(\)\s*&&\s*!chunk->is_voxel_data_dirty\(\)\)\s*"
+            r"continue;\s*state.insert_chunk\(chunk\);")
+        self.assertLess(save.index("m_worldSystem->sync_water_authority();"),
+                        save.index("WorldStreamingState state;"))
+        regression = read_source("test/common/GameSessionHeadlessWorld_test.cpp")
+        for name in ("FirstEnabledChunkSaveIncludesCleanResidentRegions",
+                     "IndexedFullSnapshotsIncludeCleanGeneratedWater",
+                     "IndexedFullSnapshotsAdmitEmptyAndRejectMalformedCleanWater"):
+            self.assertIn("TEST(GameSessionHeadlessWorldTest, " + name + ")", regression)
+
+    def test_water_mutation_roundtrip_matches_saved_resolution_before_adoption(self):
+        regression = read_source("test/common/GameSessionHeadlessWorld_test.cpp")
+        body = regression.split(
+            "TEST(GameSessionHeadlessWorldTest, GenuineWaterChangesAfterCleanInitializationPersistAndRoundTrip)",
+            1)[1].split("\nTEST(", 1)[0]
+        self.assertIn("mutation < 5", body)
+        self.assertIn("water->ResizeSimulationGrid(*chunk, Luminumbra::Systems::WaterDetailLevel::High)",
+                      body)
+        self.assertIn("if (mutation != 4)", body)
+        self.assertRegex(
+            body,
+            r"EnableSnapshotSession\(reopened, root, jobs\);\s*"
+            r"reopened.SetWaterHighResEnabled\(mutation == 4\);\s*"
+            r'ASSERT_TRUE\(reopened.CreateWorld\("Water mutation reload", "1337", "default"\)\);\s*'
+            r"ASSERT_TRUE\(reopened.LoadWorldStateFrom\(session.GetWorldSaveDir\(\)\)\);")
+        self.assertIn("EXPECT_TRUE(adopted->same_water_state(*chunk));", body)
+        self.assertIn("EXPECT_EQ(reopened.ComputeChunkStateHash(), before_save);", body)
 
     def test_saved_json_depth_is_admitted_before_parsing_and_component_copying(self):
         admission = read_source("src/luminumbra_common/persistence/SavedJsonAdmission.h")
@@ -1156,10 +1843,44 @@ class FarVolumeAdmissionSourceContract(unittest.TestCase):
                  "void FarVolumeResidency::Reject(")):
             with self.subTest(path=path):
                 body = self.method(path, start, end)
-                self.assertIn("std::sort(incoming.begin(), incoming.end()", body)
-                self.assertIn("tier.key_index[tier.entries.size() + count++]", body)
-                self.assertLess(body.index("count == tier.entries.size()"),
-                                body.index("tier.key_index[tier.entries.size() + count++]"))
+                if path == "FarVolumeHandoff.cpp":
+                    start_body = self.method(
+                        path, "FarHandoffAdmissionStatus FarVolumeHandoff::StartTarget(",
+                        "FarHandoffAdmissionStatus FarVolumeHandoff::StartSessionTarget(")
+                    self.assertNotIn("PrepareTarget(", start_body)
+                    self.assertNotIn("std::sort(", start_body)
+                    self.assertIn("pending->scratch.resize(manifest.tiles.size())", start_body)
+                    prepare = self.method(
+                        path, "FarWorldRefusal FarVolumeHandoff::PrepareStep(",
+                        "FarWorldRefusal FarVolumeHandoff::AdmissionStep(")
+                    self.assertNotRegex(prepare, r"\b(?:for|while)\s*\(")
+                    self.assertNotIn("std::sort(", prepare)
+                    self.assertIn("pending.scratch[pending.output++]", prepare)
+                    self.assertIn("incoming[pending.cursor] = pending.scratch[pending.cursor]",
+                                  prepare)
+                    self.assertIn("pending.width >= count - pending.width ? count : 2 * pending.width",
+                                  prepare)
+                    self.assertIn("++admission_work_.key_comparisons", prepare)
+                    pump = self.method(
+                        path, "FarHandoffAdmissionPump FarVolumeHandoff::PumpAdmission(",
+                        "bool FarVolumeHandoff::StageTarget(")
+                    self.assertIn("while (result.work < budget && pending.tile < pending.count)",
+                                  pump)
+                    self.assertLess(pump.index("++result.work"),
+                                    pump.index("AdmissionStep(pending)"))
+                    self.assertNotIn("PrepareTarget(", pump)
+                    step = self.method(
+                        path, "FarWorldRefusal FarVolumeHandoff::AdmissionStep(",
+                        "FarHandoffAdmissionPump FarVolumeHandoff::PumpAdmission(")
+                    self.assertIn("return PrepareStep(pending)", step)
+                    self.assertNotIn("std::sort(", body)
+                    body = prepare + body
+                    write = "incoming[count++]"
+                else:
+                    self.assertIn("std::sort(incoming.begin(), incoming.end()", body)
+                    write = "tier.key_index[tier.entries.size() + count++]"
+                self.assertIn(write, body)
+                self.assertLess(body.index("count == tier.entries.size()"), body.index(write))
                 self.assertIn("tier.order[index] == 0", body)
                 self.assertIn("auto& cursor = next_free[number]", body)
                 self.assertIn("entry = &tier.entries[cursor++]", body)
@@ -1203,7 +1924,8 @@ class FarVolumeAdmissionSourceContract(unittest.TestCase):
 
 def load_tests(loader, tests, pattern):
     tests.addTests(loader.discover(str(ROOT / "test/tools"),
-                                   pattern="test_region_authority_wiring.py"))
+                                   pattern="test_region_authority_wiring.py",
+                                   top_level_dir=str(ROOT / "test/tools")))
     return tests
 
 

@@ -52,8 +52,46 @@ void WaterfallPass::destroy_geometry() {
     m_adopted_spray = 0;
     m_replace_spray = false;
     m_sheet_sites.clear();
+    m_live_factors.clear();
     m_sites.clear();
     m_geometry_built = false;
+}
+
+void WaterfallPass::update_liveness(const Systems::SHIELD_WorldSystem& world,
+                                    ParticlePass* particle_pass) {
+    // One query per baked site, including the existing two support anchors.
+    // Adoption sizes the factor storage; incomplete adoption remains silent.
+    if (m_geometry_built) {
+        for (std::size_t i = 0; i < m_sheet_sites.size(); ++i) {
+            const float live = Rendering::LiveWaterFactorAt(world, m_sheet_sites[i]);
+            m_live_factors[i] = std::isfinite(live) ? std::clamp(live, 0.0f, 1.0f) : 0.0f;
+        }
+    }
+    if (particle_pass) {
+        particle_pass->set_waterfall_live_factors(m_live_factors);
+    }
+}
+
+WaterfallPass::RoarSource WaterfallPass::SelectRoarSource(std::span<const WaterfallSite> sites,
+                                                          std::span<const float> live_factors,
+                                                          const glm::vec3& listener) {
+    RoarSource best;
+    float best_d2 = 400.0f * 400.0f;
+    // Bounded by the baked site set, with no world queries or allocations.
+    const auto count = std::min(sites.size(), live_factors.size());
+    for (std::size_t i = 0; i < count; ++i) {
+        const float live = live_factors[i];
+        if (!std::isfinite(live) || live <= 0.0f) {
+            continue;
+        }
+        const glm::vec3 delta = sites[i].crest - listener;
+        const float distance2 = glm::dot(delta, delta);
+        if (distance2 < best_d2) {
+            best_d2 = distance2;
+            best = {.site = &sites[i], .live_factor = std::min(live, 1.0f)};
+        }
+    }
+    return best;
 }
 
 void WaterfallPass::execute(const RenderContext& ctx) {
@@ -67,7 +105,10 @@ void WaterfallPass::execute(const RenderContext& ctx) {
     if (m_geometry_built && !m_pages.empty() && !m_sheet_sites.empty() && m_shader &&
         m_shader->IsValid()) {
         glBindFramebuffer(GL_FRAMEBUFFER, ctx.lit_scene.id);
-        glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // into internal lighting FBO
+        glViewport(0,
+                   0,
+                   static_cast<GLsizei>(ctx.internal_w()),
+                   static_cast<GLsizei>(ctx.internal_h())); // into internal lighting FBO
 
         // Save GL state we toggle so it is restored exactly afterwards.
         const GLboolean blend_was = glIsEnabled(GL_BLEND);
@@ -78,22 +119,29 @@ void WaterfallPass::execute(const RenderContext& ctx) {
         Shader* draw_shader = m_shader.get();
         std::optional<GBufferDiagnosticAttachment> diagnostic_attachment;
         if (auto* capture = GBufferDiagnosticCapture::Current()) {
-            GLint color_texture = 0;
-            GLint attachment_type = 0;
-            glGetNamedFramebufferAttachmentParameteriv(ctx.lit_scene.id,
-                                                       GL_COLOR_ATTACHMENT0,
-                                                       GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE,
-                                                       &attachment_type);
-            if (attachment_type == GL_TEXTURE) {
+            // Extinguished sheets submit nothing and need no contributor plane. Scan at most
+            // the baked site factors, only while capturing, matching the draw-loop skip.
+            if (std::any_of(m_live_factors.begin(), m_live_factors.end(), [](float live) {
+                    return !(live < 0.02f);
+                })) {
+                GLint color_texture = 0;
+                GLint attachment_type = 0;
                 glGetNamedFramebufferAttachmentParameteriv(ctx.lit_scene.id,
                                                            GL_COLOR_ATTACHMENT0,
-                                                           GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,
-                                                           &color_texture);
+                                                           GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE,
+                                                           &attachment_type);
+                if (attachment_type == GL_TEXTURE) {
+                    glGetNamedFramebufferAttachmentParameteriv(
+                        ctx.lit_scene.id,
+                        GL_COLOR_ATTACHMENT0,
+                        GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,
+                        &color_texture);
+                }
+                diagnostic_attachment.emplace(ctx.lit_scene.id,
+                                              static_cast<GLuint>(color_texture),
+                                              DiagnosticExtent{ctx.internal_w(), ctx.internal_h()});
+                draw_shader = capture->variant(draw_shader, false);
             }
-            diagnostic_attachment.emplace(ctx.lit_scene.id,
-                                          static_cast<GLuint>(color_texture),
-                                          DiagnosticExtent{ctx.internal_w(), ctx.internal_h()});
-            draw_shader = capture->variant(draw_shader, false);
         }
 
         draw_shader->use();
@@ -136,11 +184,8 @@ void WaterfallPass::execute(const RenderContext& ctx) {
             // a dammed/drained crest extinguishes its fall. Reads the live float
             // mirror (one-way from mm, legal after derived-state reclassification); stable within
             // the frame (the sim ticks outside render_frame), so dispatch stays bit-idempotent.
-            // Unstreamed crests read neutral 1.0.
-            float live = 1.0f;
-            if (ctx.world_system != nullptr) {
-                live = Rendering::LiveWaterFactorAt(*ctx.world_system, s);
-            }
+            // Unstreamed crests read neutral 1.0. Prepared before particle motion.
+            const float live = m_live_factors[i];
             if (live < 0.02f) {
                 continue; // extinguished: no sheet, no plunge pool
             }
@@ -162,7 +207,10 @@ void WaterfallPass::execute(const RenderContext& ctx) {
             }
             // 12 verts/site: the vertical sheet (0..5) + the horizontal plunge-pool quad (6..11).
             Luminumbra::Rendering::AttributedGl::Submit(
-                glDrawArrays, GL_TRIANGLES, static_cast<GLint>((i % kSitesPerPage) * 12), 12);
+                glDrawArrays,
+                static_cast<GLenum>(GL_TRIANGLES),
+                static_cast<GLint>((i % kSitesPerPage) * 12),
+                12);
         }
         glBindVertexArray(0);
 
@@ -310,10 +358,12 @@ void WaterfallPass::begin_adoption(PreparedGeometry geometry) {
         throw std::length_error("Invalid prepared waterfall geometry");
     // The CPU preparation already surveyed this world. Replacing GPU geometry
     // must retain that cache for the first audio query after adoption.
+    std::vector<float> live_factors(geometry.sites.size(), 0.0f);
     auto prepared_sites = std::move(m_sites);
     destroy_geometry();
     m_sites = std::move(prepared_sites);
     m_sheet_sites = std::move(geometry.sites);
+    m_live_factors = std::move(live_factors);
     m_pending_vertices = std::move(geometry.vertices);
     const auto page_count = m_sheet_sites.size() / kSitesPerPage +
                             (m_sheet_sites.size() % kSitesPerPage != 0 ? 1u : 0u);
@@ -376,11 +426,13 @@ bool WaterfallPass::adopt_next(ParticlePass* particle_pass,
     constexpr std::size_t kMaxSpray = 24;
     const auto spray_count = particle_pass ? std::min(m_sheet_sites.size(), kMaxSpray) : 0;
     if (m_adopted_spray < spray_count) {
-        const auto& site = m_sheet_sites[m_adopted_spray++];
+        const auto site_index = m_adopted_spray++;
+        const auto& site = m_sheet_sites[site_index];
         particle_pass->add_waterfall_spray(root_path / "data/common/particles/waterfall_spray.json",
                                            site.foot,
                                            site.drop_height,
-                                           site.width);
+                                           site.width,
+                                           site_index);
     }
     if (m_uploaded_floats != m_pending_vertices.size() || m_adopted_spray != spray_count)
         return false;

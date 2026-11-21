@@ -3,7 +3,10 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <limits>
+#include <memory>
 #include <optional>
+#include <vector>
 
 #include "../ServerCliOptions.h"
 #include "../ServerWorldRunner.h"
@@ -13,6 +16,7 @@
 #include "luminumbra_common/persistence/SavedJsonAdmission.h"
 #include "luminumbra_common/replay/ReplayStream.h"
 #include "luminumbra_common/simulation/SimBudgetProfile.h"
+#include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/SurfaceWorkBudget.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
@@ -54,6 +58,9 @@ Luminumbra::Net::HelloMsg RuntimeHelloFrom(const ServerCliOptions& options) {
     session.SetFiniteHydrologyEnabled(runner_config.finite_hydrology);
     if (runner_config.region_scheduler)
         session.SetRegionSchedulerConfig(*runner_config.region_scheduler);
+    if (runner_config.weather_schedule &&
+        !session.SetWeatherSchedule(*runner_config.weather_schedule))
+        return hello;
     // Network hosts create a new world with this calendar, even when active regions are off.
     hello.system_config_identity = session.SystemConfigIdentity(Luminumbra::world::WorldCalendar{});
     try {
@@ -79,6 +86,7 @@ Luminumbra::Server::ServerWorldRunnerConfig RunnerConfigFrom(const ServerCliOpti
     config.root_path = options.root;
     config.systems_config_override = options.systems_config_override;
     config.preset_json_override = options.preset_json_override;
+    config.weather_schedule = options.weather_schedule;
     config.seed = options.seed;
     config.preset = options.preset;
     config.world_id = options.world_id;
@@ -140,6 +148,58 @@ ReplayRunnerConfigFrom(const ServerCliOptions& options,
     identity_session.SetFiniteHydrologyEnabled(config.finite_hydrology);
     if (config.region_scheduler)
         identity_session.SetRegionSchedulerConfig(*config.region_scheduler);
+    if (!Luminumbra::Replay::PlaybackVersion(header.version) ||
+        Luminumbra::Replay::WeatherVersion(header.version) != !header.weather_schedule.empty() ||
+        ((header.version == Luminumbra::Replay::kLrec1BootVersion ||
+          header.version == Luminumbra::Replay::kLrec1BootElidedVersion) !=
+         header.authority_boot.has_value()))
+        return std::nullopt;
+    if (header.authority_boot) {
+        const auto& boot = *header.authority_boot;
+        std::vector<std::uint8_t> encoded;
+        std::string error;
+        if (header.version != Luminumbra::Replay::kLrec1BootVersion || header.tick_rate_hz != 30 ||
+            header.seed != (Luminumbra::Replay::kResolvedSeedTag | boot.resolved_world_seed) ||
+            (!header.seed_string.empty() &&
+             Luminumbra::world::ResolveWorldSeed(header.seed_string, 1) !=
+                 boot.resolved_world_seed) ||
+            !Luminumbra::world::EncodeAuthorityBootDescriptor(boot, encoded, error) ||
+            (options.avatars != 0 && options.avatars != static_cast<int>(boot.avatar_count)) ||
+            (options.ecology_roster && !boot.ecology_roster) ||
+            (options.planted_roster && !boot.planted_roster) ||
+            (options.moving && !boot.moving_anchor) || (options.water_smoke && !boot.water_smoke) ||
+            (options.parked_bytes_limit != config.parked_bytes_limit &&
+             options.parked_bytes_limit != boot.parked_bytes_limit) ||
+            boot.parked_bytes_limit > (std::numeric_limits<std::size_t>::max)()) {
+            return std::nullopt;
+        }
+        config.finite_hydrology = boot.finite_hydrology;
+        config.parked_bytes_limit = boot.parked_bytes_limit;
+        config.avatar_count = static_cast<int>(boot.avatar_count);
+        config.ecology_roster = boot.ecology_roster;
+        config.planted_roster = boot.planted_roster;
+        config.moving_anchor = boot.moving_anchor;
+        config.water_smoke = boot.water_smoke;
+        if (!config.region_scheduler) {
+            config.region_scheduler = Luminumbra::world::RegionSchedulerConfig{
+                .work_limit = boot.region_work_limit,
+                .hold_ticks = boot.region_hold_ticks,
+                .reduced_shift = boot.region_reduced_shift};
+        }
+        if (Luminumbra::Server::ServerWorldRunner::DescribeReplayBoot(config) != boot) {
+            return std::nullopt;
+        }
+        identity_session.SetFiniteHydrologyEnabled(config.finite_hydrology);
+        identity_session.SetRegionSchedulerConfig(*config.region_scheduler);
+    }
+    if (!header.weather_schedule.empty()) {
+        Luminumbra::Systems::WeatherSchedule schedule;
+        if (!Luminumbra::Systems::WeatherSchedule::Decode(header.weather_schedule, schedule) ||
+            !identity_session.SetWeatherSchedule(schedule))
+            return std::nullopt;
+        config.weather_schedule =
+            std::make_shared<const Luminumbra::Systems::WeatherSchedule>(schedule);
+    }
     try {
         nlohmann::json source;
         std::filesystem::path preset_path;

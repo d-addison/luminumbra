@@ -294,6 +294,8 @@ void WriteSkyboxVisualAnalysis(
 // streak structure (horizontal luminance gradient energy, since vertical
 // streaks create high-frequency variation across columns).
 struct WeatherPixelStats {
+    // Resolved render inputs captured with these pixels; diagnostic JSON only.
+    nlohmann::json atmosphere = nlohmann::json::object();
     int width = 0;
     int height = 0;
     std::uint64_t sky_roi_pixels = 0;
@@ -556,6 +558,8 @@ void WritePrecipitationAnalysis(
 // generic emissive-material night check with an honest fallback when no
 // emissive registry material is discoverable in a surface capture.
 struct TimeOfDayPixelStats {
+    // Resolved render inputs captured with these pixels; diagnostic JSON only.
+    nlohmann::json atmosphere = nlohmann::json::object();
     int width = 0;
     int height = 0;
     double frame_mean_luminance = 0.0;
@@ -890,6 +894,7 @@ struct PlayerViewStationCapture {
     PlayerViewPixelStats sky;
     LodHolePixelStats holes;
     Luminumbra::Systems::SHIELD_WorldSystem::FrustumSurfaceCoverageStats coverage;
+    nlohmann::json terrain_peak;
 };
 
 // True when any column within the player-view coverage range holds open
@@ -1492,9 +1497,13 @@ struct WorldVisualSweepDeps {
     // then reads the backbuffer into `out_pixels` (RGB, bottom-up glReadPixels
     // layout) and reports the framebuffer size. stream_world runs the normal
     // streaming/water update at the camera, only during warmup.
-    // Returns false on a GL/size error.
-    std::function<bool(
-        std::vector<unsigned char>& out_pixels, int& width, int& height, bool stream_world)>
+    // A nonempty attribution_dir captures this exact frame before present.
+    // Returns false on a GL/size or attribution write error.
+    std::function<bool(std::vector<unsigned char>& out_pixels,
+                       int& width,
+                       int& height,
+                       bool stream_world,
+                       const std::filesystem::path& attribution_dir)>
         render_and_read;
     int readiness_timeout_seconds = 120;
     // Whether to also capture the winter season pass (summer is always captured).

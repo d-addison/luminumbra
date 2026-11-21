@@ -15,6 +15,7 @@
 #include "ai/ScavengingSystem.h"
 #include "components/CoreComponents.h"
 #include "components/CreatureComponents.h"
+#include "components/DecayComponents.h"
 #include "components/MortalComponents.h"
 #include "components/ScavengerComponent.h"
 
@@ -164,6 +165,35 @@ TEST(Scavenging, MortalDeadCountsAsCarcass) {
     EXPECT_EQ(st.carcasses, 1);
     EXPECT_EQ(st.feeding, 1);
     EXPECT_EQ(scav(r, s).feeding, 1);
+}
+
+// A fully decomposed carcass is no longer food: it is not counted, steered toward or eaten,
+// while a carcass still decomposing remains a target (#1007).
+TEST(Scavenging, FullyDecomposedCarcassIsNotFood) {
+    entt::registry r;
+    auto s = spawnScavenger(r, 0.0f, 0.0f, 0.9f);
+    auto gone = spawnCarcassMortal(r, kScavengeFeedRadius * 0.5f, 0.0f); // in feed range
+    r.emplace<Comp::DecayComponent>(gone).fully_decomposed = 1;
+    auto rotting = spawnCarcassEaten(r, 10.0f, 0.0f); // out of range, +x
+    auto& decay = r.emplace<Comp::DecayComponent>(rotting);
+    decay.decay_ticks = decay.decay_duration / 2;
+
+    const float h0 = hungerOf(r, s);
+    ScavengingStats st = RunScavengingOnTick(r, 0);
+    EXPECT_EQ(st.carcasses, 1);
+    EXPECT_EQ(st.seeking, 1);
+    EXPECT_EQ(st.feeding, 0);
+    EXPECT_EQ(scav(r, s).feeding, 0);
+    EXPECT_FLOAT_EQ(hungerOf(r, s), h0);
+    EXPECT_GT(scav(r, s).wish_x, 0.0f); // steers to the partially decomposed carcass.
+
+    // Once that one finishes too, nothing is left to seek.
+    decay.fully_decomposed = 1;
+    st = RunScavengingOnTick(r, 1);
+    EXPECT_EQ(st.carcasses, 0);
+    EXPECT_EQ(st.seeking, 0);
+    EXPECT_FLOAT_EQ(scav(r, s).wish_x, 0.0f);
+    EXPECT_FLOAT_EQ(scav(r, s).wish_z, 0.0f);
 }
 
 // ---- a well-fed scavenger doesn't seek or feed ----

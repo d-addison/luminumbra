@@ -1,5 +1,6 @@
 #include "ModeHelpers.h"
 #include "Modes.h"
+#include "luminumbra_common/persistence/WorldSaveService.h"
 
 namespace fs = std::filesystem;
 
@@ -41,7 +42,7 @@ bool LockstepApplyStep(std::uint64_t /*tick*/,
                        void* user) {
     auto* ctx = static_cast<LockstepPeerContext*>(user);
     const auto step = ctx->runner->RunFixedTicks(1);
-    return step.ticks_executed == 1;
+    return step.ticks_executed == 1 && !step.region_fault;
 }
 
 void LockstepCaptureHashes(std::uint64_t tick, Luminumbra::Net::HashMsg& out, void* user) {
@@ -62,7 +63,7 @@ void LockstepCaptureHashes(std::uint64_t tick, Luminumbra::Net::HashMsg& out, vo
 
 } // namespace
 
-int RunLockstepLoopback(const ServerCliOptions& options) {
+int RunLockstepLoopback(const ServerCliOptions& options) try {
     LUMINUMBRA_CORE_INFO("Headless server LOCKSTEP loopback: preset={} seed={} ticks={} "
                          "delay_input={} corrupt_tick={}",
                          options.preset,
@@ -71,6 +72,13 @@ int RunLockstepLoopback(const ServerCliOptions& options) {
                          options.lockstep_delay_input,
                          options.lockstep_corrupt_tick);
 
+    if (options.avatars < 0 ||
+        options.avatars >
+            static_cast<int>(Luminumbra::world::AuthorityBootDescriptor::kMaxAvatars)) {
+        LUMINUMBRA_CORE_ERROR("lockstep: avatar roster exceeds replay boot bound");
+        return 1;
+    }
+
     // Two runners: host (client 0) + the one remote (client 1). Same seed/preset => the
     // two worlds tick identically and their hashes agree at every cadence.
     auto make_runner = [&](const char* name) {
@@ -78,16 +86,27 @@ int RunLockstepLoopback(const ServerCliOptions& options) {
         cfg.world_id.clear();
         cfg.world_name = name;
         cfg.autosave_interval_ticks = 0;
-        return std::make_unique<Luminumbra::Server::ServerWorldRunner>(std::move(cfg));
+        return std::make_unique<Luminumbra::Server::ServerWorldRunner>(
+            std::move(cfg),
+            Luminumbra::world::OwnerContinuationOptions{.owner_continuation =
+                                                            !options.weather_schedule});
     };
+    Luminumbra::Server::ThrowawaySaveDirGuard host_cleanup;
+    Luminumbra::Server::ThrowawaySaveDirGuard peer_cleanup;
     auto host_runner = make_runner("Lockstep Host");
     auto peer_runner = make_runner("Lockstep Peer");
-    if (!host_runner->Boot() || !peer_runner->Boot()) {
+    if (!host_runner->Boot()) {
         LUMINUMBRA_CORE_ERROR("lockstep: a peer session failed to boot");
         return 1;
     }
+    host_cleanup.Arm(host_runner->Session()->GetWorldSaveDir());
+    if (!peer_runner->Boot()) {
+        LUMINUMBRA_CORE_ERROR("lockstep: a peer session failed to boot");
+        return 1;
+    }
+    peer_cleanup.Arm(peer_runner->Session()->GetWorldSaveDir());
 
-    const std::uint64_t seed_num = std::strtoull(options.seed.c_str(), nullptr, 10);
+    const std::uint64_t seed_num = host_runner->Session()->GetMetadata().resolvedSeed;
 
     LockstepPeerContext host_ctx{host_runner.get(), 0, 0};
     LockstepPeerContext peer_ctx{peer_runner.get(), 1, options.lockstep_corrupt_tick};
@@ -115,6 +134,10 @@ int RunLockstepLoopback(const ServerCliOptions& options) {
     peer_cfg.peer_client_id = 0;
     peer_cfg.system_config_identity = peer_runner->Session()->SystemConfigIdentity();
     peer_cfg.preset_content_hash = peer_runner->Session()->PresetContentHash();
+    host_cfg.replay_header = std::make_shared<const Luminumbra::Replay::ReplayHeader>(
+        host_runner->CaptureReplayHeader());
+    peer_cfg.replay_header = std::make_shared<const Luminumbra::Replay::ReplayHeader>(
+        peer_runner->CaptureReplayHeader());
 
     Luminumbra::Net::LockstepHooks host_hooks = hooks_template;
     host_hooks.user = &host_ctx;
@@ -172,6 +195,37 @@ int RunLockstepLoopback(const ServerCliOptions& options) {
     int pumps = 0;
     bool diverged = false;
     for (; pumps < max_pumps; ++pumps) {
+        // Prepare both peers before either PumpTick schedules or consumes input.
+        // A retry leaves both input sets and agreed ticks available for replay.
+        bool retry = false;
+        bool terminal = false;
+        for (auto* runner : {host_runner.get(), peer_runner.get()}) {
+            auto* session = runner->Session();
+            if (session->GetRegionSchedulerFault()) {
+                terminal = true;
+                break;
+            }
+            if (session->GetSimulationTickCount() >= budget) {
+                continue;
+            }
+            if (!session->GetPhysicsSystem()->prepare_simulation_collisions(
+                    {}, session->GetSimulationTickCount() + 1)) {
+                terminal = session->GetRegionSchedulerFault().has_value();
+                if (!terminal) {
+                    retry = true;
+                    continue; // Still inspect the other peer for terminal faults.
+                }
+                break;
+            }
+        }
+        if (terminal) {
+            LUMINUMBRA_CORE_ERROR("lockstep: terminal region preparation fault");
+            return 1;
+        }
+        if (retry) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(33));
+            continue;
+        }
         hr = host.PumpTick(budget);
         if (delay_remaining > 0) {
             // Peer is stalled this round (delayed input). Decrement once the host has
@@ -311,4 +365,8 @@ int RunLockstepLoopback(const ServerCliOptions& options) {
     }
     (void)diverged;
     return 0;
+} catch (const Luminumbra::Persistence::AuthorityCaptureRefused& error) {
+    LUMINUMBRA_CORE_ERROR("lockstep: authority hash capture refused (status={}); aborted",
+                          static_cast<int>(error.status()));
+    return 1;
 }

@@ -4,15 +4,19 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <stdexcept>
+#include <thread>
 #include <utility>
 #include <vector>
 
+#include "core/EngineVersion.h"
 #include "luminumbra_common/ai/EcologyHash.h"
 #include "luminumbra_common/components/AlarmComponents.h"
 #include "luminumbra_common/components/CoreComponents.h"
@@ -30,16 +34,14 @@
 #include "luminumbra_common/ecs/EntitySnapshot.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
-#include "luminumbra_common/systems/AetherFieldSystem.h"
+#include "luminumbra_common/replay/ReplayStream.h"
 #include "luminumbra_common/systems/FarmingSystem.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WaterSystem.h" // water-smoke telemetry reads
 #include "luminumbra_common/systems/WeatherSystem.h"
-#include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/SurfaceWorkBudget.h"
-#include "luminumbra_common/world/WorldStreamingState.h"
 
 namespace Luminumbra::Server {
 
@@ -71,59 +73,6 @@ Vec3 FindWetAnchor(const Systems::SHIELD_WorldSystem& world, const Vec3& spawn) 
         }
     }
     return Vec3(spawn.x, world.GetTerrainHeightAt(spawn.x, spawn.z) + 2.0f, spawn.z);
-}
-
-//   world_hash hash revision: the wind sub-hash from the session's wind
-// field, or empty when no wind field exists (defensive; the headless runner
-// always constructs one on world create/load).
-std::string WindSubHash(world::GameSession* session) {
-    if (!session) {
-        return {};
-    }
-    const Systems::WindFieldSystem* wind = session->GetWindFieldSystem();
-    return wind ? wind->ComputeWindSubHash() : std::string();
-}
-
-//   world_hash hash revision: the weather sub-hash from the session's
-// weather core, or empty when none exists (defensive; the headless runner always
-// constructs one on world create/load).
-std::string WeatherSubHash(world::GameSession* session) {
-    if (!session) {
-        return {};
-    }
-    const Systems::WeatherSystem* weather = session->GetWeatherSystem();
-    return weather ? weather->ComputeWeatherSubHash() : std::string();
-}
-
-//  world_hash bump #4: the aether sub-hash from the session's Aether
-// scalar field, or empty when none exists (defensive; the headless runner always
-// constructs one on world create/load).
-//
-//  (, -3): when the STATEFUL energy layer is active and
-// nonzero, its aether_state:v1: sub-hash folds into THIS EXISTING slot (the
-// composite becomes StableChecksum(rederivable + "|state:" + state)) rather
-// than adding an 8th ComposeWorldHash term — a new term literal would move the
-// canonical composite even while empty (the |plants: precedent), violating the
-// zero-re-pin contract. Default OFF -> the state hash is empty -> this function
-// returns the re-derivable value byte-identically. Activation (the owner-menu
-// bump) moves this slot with NO further code change.
-std::string AetherSubHash(world::GameSession* session) {
-    if (!session) {
-        return {};
-    }
-    const Systems::AetherFieldSystem* aether = session->GetAetherFieldSystem();
-    std::string rederivable = aether ? aether->ComputeAetherSubHash() : std::string();
-    const std::string state = session->ComputeAetherStateSubHash();
-    if (state.empty()) {
-        return rederivable;
-    }
-    return Persistence::StableChecksum(rederivable + "|state:" + state);
-}
-
-// scent/stigmergy sub-hash from the session-owned ecology
-// field. Empty when no entity has opted into scent emission/sensing.
-std::string ScentSubHash(world::GameSession* session) {
-    return session ? session->ComputeScentSubHash() : std::string();
 }
 
 // gate-populated-world-replay: spawn the deterministic KINEMATIC creature
@@ -193,8 +142,9 @@ void SpawnEcologyRoster(entt::registry& r, const Vec3& anchor) {
 // rather than only the empty-neutral path. Uses the  MakePlantFromSpecies (sample genome ->
 // PlantSeed -> stamp CropLifecycle) from an INLINE species template (no file I/O), seeded from
 // ints, so the roster is a pure function of (seed, preset) via the anchor -> run==replay.
-void SpawnPlantRoster(entt::registry& r, const Vec3& anchor) {
+void SpawnPlantRoster(world::GameSession& session, const Vec3& anchor) {
     namespace fol = luminumbra::foliage;
+    auto& r = session.GetRegistry();
     fol::SpeciesTemplate tmpl;
     tmpl.id = "smoke_crop";
     tmpl.perennial = false;
@@ -204,6 +154,9 @@ void SpawnPlantRoster(entt::registry& r, const Vec3& anchor) {
     auto rng = luminumbra::core::DeterministicRng::seeded(fol::kPlantSeedOffset, 9001u, 7u);
     for (int i = 0; i < 6; ++i) {
         const Vec3 pos(anchor.x - 6.0f + static_cast<float>(i) * 2.0f, anchor.y, anchor.z + 4.0f);
+        // Admit only the six roster positions' regions, even with no avatar anchors.
+        // The consumer gate resolves these legacy plants' owners from their transforms.
+        session.PinActiveRegion(world::ActiveRegionLedger::region_at(pos), true);
         fol::MakePlantFromSpecies(r, pos, tmpl, rng, 0u);
     }
 }
@@ -219,10 +172,107 @@ bool HorizontalChunkHorizonCovers(const Vec3& center, const Vec3& candidate, int
     return std::max(std::abs(tx - cx), std::abs(tz - cz)) <= std::max(0, radius);
 }
 
+world::AuthorityBootDescriptor DescribeBoot(const ServerWorldRunnerConfig& config,
+                                            const world::GameSession& session,
+                                            std::uint32_t seed,
+                                            const world::WorldCalendar& calendar) {
+    if (config.avatar_count < 0 ||
+        config.avatar_count > static_cast<int>(world::AuthorityBootDescriptor::kMaxAvatars)) {
+        throw std::invalid_argument("Replay avatar roster exceeds descriptor bound");
+    }
+    world::AuthorityBootDescriptor boot;
+    const auto values = session.EffectiveIdentityValues();
+    boot.authority_rules_revision =
+        luminumbra::core::SimulationIdentityValues::kAuthorityRulesRevision;
+    boot.resolved_world_seed = seed;
+    boot.system_config_identity = session.SystemConfigIdentity(calendar);
+    static_assert(boot.system_gates.size() == values.enabled.size());
+    static_assert(boot.scalar_bits.size() == values.scalars.size());
+    // Fixed registry slots: at most 25 gates and 46 scalar/vector settings.
+    for (std::size_t i = 0; i < boot.system_gates.size(); ++i) {
+        boot.system_gates[i] = static_cast<std::uint8_t>(values.enabled[i]);
+    }
+    for (std::size_t i = 0; i < boot.scalar_bits.size(); ++i) {
+        boot.scalar_bits[i] = std::bit_cast<std::uint64_t>(values.scalars[i]);
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            boot.vector_bits[i][axis] =
+                std::bit_cast<std::uint32_t>(values.vectors[i][static_cast<int>(axis)]);
+        }
+    }
+    boot.finite_hydrology = values.finite_hydrology_enabled;
+    boot.weather_rain_scale_mm = values.weather_rain_scale_mm;
+    boot.region_work_limit = values.region_work_limit;
+    boot.region_hold_ticks = values.region_hold_ticks;
+    boot.region_reduced_shift = values.region_reduced_shift;
+    boot.day_length_ticks = calendar.dayLengthTicks;
+    boot.days_per_year = calendar.daysPerYear;
+    boot.daylight_numerator = calendar.daylightNumerator;
+    boot.daylight_denominator = calendar.daylightDenominator;
+    boot.lunar_cycle_days = calendar.lunarCycleDays;
+    boot.parked_bytes_limit = config.parked_bytes_limit;
+    boot.avatar_count = static_cast<std::uint32_t>(config.avatar_count);
+    boot.ecology_roster = config.ecology_roster;
+    boot.planted_roster = config.planted_roster;
+    boot.moving_anchor = config.moving_anchor;
+    boot.water_smoke = config.water_smoke;
+    return boot;
+}
+
 } // namespace
 
+world::AuthorityBootDescriptor
+ServerWorldRunner::DescribeReplayBoot(const ServerWorldRunnerConfig& config) {
+    if (config.seed.empty()) {
+        throw std::invalid_argument("Replay boot description requires a nonempty seed");
+    }
+    world::GameSession session;
+    session.ApplySystemConfig(
+        config.systems_config_override
+            ? *config.systems_config_override
+            : luminumbra::core::SystemConfig::LoadFromRuntimeRoot(config.root_path));
+    session.SetFiniteHydrologyEnabled(config.finite_hydrology);
+    if (config.region_scheduler) {
+        session.SetRegionSchedulerConfig(*config.region_scheduler);
+    }
+    return DescribeBoot(
+        config, session, world::ResolveWorldSeed(config.seed, 1), world::WorldCalendar{});
+}
+
+Replay::ReplayHeader ServerWorldRunner::CaptureReplayHeader() const {
+    if (!m_booted || !m_session || !m_config.world_id.empty() || TickCount() != 0 ||
+        (!m_session->GetWeatherSchedule() && !m_continuationOptions.owner_continuation)) {
+        throw std::invalid_argument("Replay requires a fresh boot at tick zero");
+    }
+    Replay::ReplayHeader header;
+    header.version = Replay::kLrec1BootVersion;
+    header.seed_string = m_config.seed;
+    header.seed = Replay::kResolvedSeedTag | m_session->GetMetadata().resolvedSeed;
+    header.preset = m_config.preset;
+    header.preset_hash = std::strtoull(Replay::Fnv1a64Hex(header.preset).c_str(), nullptr, 16);
+    header.surface_radius = static_cast<std::uint32_t>(m_config.surface_radius);
+    header.collision_radius = static_cast<std::uint32_t>(m_config.collision_radius);
+    header.engine_version = std::string(luminumbra::core::GetEngineVersionString());
+    header.system_config_identity = m_session->SystemConfigIdentity();
+    header.preset_content_hash = m_session->PresetContentHash();
+    if (const auto* schedule = m_session->GetWeatherSchedule()) {
+        header.version = Replay::kLrec1WeatherVersion;
+        header.weather_schedule = schedule->canonical_bytes();
+    } else {
+        header.authority_boot = DescribeBoot(m_config,
+                                             *m_session,
+                                             m_session->GetMetadata().resolvedSeed,
+                                             m_session->GetRenderCalendar());
+    }
+    return header;
+}
+
 ServerWorldRunner::ServerWorldRunner(ServerWorldRunnerConfig config)
-    : m_config(std::move(config)) {}
+    : ServerWorldRunner(std::move(config), world::OwnerContinuationOptions{}) {}
+
+ServerWorldRunner::ServerWorldRunner(ServerWorldRunnerConfig config,
+                                     const world::OwnerContinuationOptions& options)
+    : m_config(std::move(config))
+    , m_continuationOptions(options) {}
 
 ServerWorldRunner::~ServerWorldRunner() {
     Shutdown();
@@ -249,7 +299,20 @@ bool ServerWorldRunner::Boot() {
         m_jobSystem.startup();
     }
 
-    m_session = std::make_unique<world::GameSession>();
+    if (m_continuationOptions.owner_continuation &&
+        (m_config.avatar_count < 0 || static_cast<std::size_t>(m_config.avatar_count) >
+                                          Systems::PhysicsSystem::kMaxRestoredAvatars)) {
+        m_bootError = "Owner continuation avatar roster exceeds its bound.";
+        m_jobSystem.shutdown();
+        return false;
+    }
+    m_session = std::make_unique<world::GameSession>(m_continuationOptions);
+    if (m_continuationOptions.owner_continuation) {
+        m_session->ConfigureOwnerContinuation(m_avatars,
+                                              static_cast<std::uint32_t>(m_config.avatar_count),
+                                              m_config.moving_anchor,
+                                              m_config.water_smoke);
+    }
     m_session->SetSimBudgetTelemetryEnabled(m_config.sim_budget);
     m_session->SetJobSystem(&m_jobSystem);
     m_session->SetRootPath(m_config.root_path);
@@ -268,6 +331,17 @@ bool ServerWorldRunner::Boot() {
         m_session->SetParkedBytesLimit(static_cast<std::size_t>(m_config.parked_bytes_limit));
     }
     m_session->SetFiniteHydrologyEnabled(m_config.finite_hydrology);
+    if (m_session->ActiveRegionsEnabled() &&
+        m_config.avatar_count > static_cast<int>(Systems::PhysicsSystem::kSimulationOwnerBudget)) {
+        m_bootError = "Avatar collider preparation budget exceeded";
+        m_session.reset();
+        m_jobSystem.shutdown();
+        return false;
+    }
+    if (m_config.weather_schedule && !m_session->SetWeatherSchedule(*m_config.weather_schedule)) {
+        m_bootError = "Invalid weather schedule";
+        return false;
+    }
     // A headless host has no client asset manifest; simulation assets alone are
     // validated and every voxel field uses the authoritative CPU generator.
 
@@ -322,7 +396,8 @@ bool ServerWorldRunner::Boot() {
     // stepping advances the loaded session past the original's saved state and the
     // water sub-hash can never round-trip. Pause BEFORE the first streaming call
     // (EnsureSurfaceReadyNear runs the water update too); unpause at the end of Boot.
-    const bool water_loaded_from_save = m_session->GetLastLoadedChunkCount() > 0;
+    const auto* continuation = m_session->RestoredOwnerContinuation();
+    const bool water_loaded_from_save = continuation || m_session->GetLastLoadedChunkCount() > 0;
     if (water_loaded_from_save) {
         world_system->SetWaterBootPaused(true);
     }
@@ -331,8 +406,16 @@ bool ServerWorldRunner::Boot() {
     // ready so the physics system can query terrain from tick 1. Meshing
     // stays on because the supported server profile keeps meshes resident.
     const Vec3 spawn_anchor = m_session->GetMetadata().spawnPoint;
-    const bool horizon_ready = world_system->EnsureSurfaceReadyNear(
-        spawn_anchor, physics_system, m_config.surface_radius, m_config.collision_radius);
+    m_ownerOrigin = continuation ? continuation->origin : spawn_anchor;
+    m_ownerAnchor = continuation ? continuation->anchor : spawn_anchor;
+    m_ownerStreamTick = continuation ? continuation->stream_tick : 0;
+    // A continuation already restored its terrain and owners at a counted
+    // boundary. Boot-time streaming would allocate colliders ahead of the next
+    // tick and change both authority flags and the subsequent BodyID sequence.
+    const bool horizon_ready =
+        continuation ||
+        world_system->EnsureSurfaceReadyNear(
+            spawn_anchor, physics_system, m_config.surface_radius, m_config.collision_radius);
     if (!horizon_ready) {
         LUMINUMBRA_CORE_ERROR(
             "ServerWorldRunner: spawn-anchor surface horizon failed to become ready");
@@ -358,9 +441,18 @@ bool ServerWorldRunner::Boot() {
     // vector in RunFixedTicks and fold into the `entities` sub-hash. avatar_count
     // == 0 leaves m_avatars empty -> the zero-avatar single-anchor / empty-entity lane.
     m_avatars.clear();
-    physics_system->clear_avatar_characters();
-    if (m_config.avatar_count > 0) {
-        m_avatars.reserve(static_cast<std::size_t>(m_config.avatar_count));
+    m_spawnedAvatarCount = 0;
+    if (continuation) {
+        m_avatars.reserve(continuation->avatars.size());
+        for (const auto& owner : continuation->avatars) {
+            m_avatars.push_back(owner.avatar);
+        }
+    } else {
+        physics_system->clear_avatar_characters();
+    }
+    if (!continuation && m_config.avatar_count > 0) {
+        m_avatars.reserve(std::min(static_cast<std::size_t>(m_config.avatar_count),
+                                   Systems::PhysicsSystem::kSimulationOwnerBudget));
         for (int i = 0; i < m_config.avatar_count; ++i) {
             const Vec3 offset =
                 World::DeterministicAvatarSpawnOffset(static_cast<std::uint32_t>(i));
@@ -374,9 +466,17 @@ bool ServerWorldRunner::Boot() {
             avatar.position = Vec3(ax, ay, az);
             // Deterministic initial facing fanned around the circle (pure id fn).
             avatar.facing = static_cast<float>(i) * 2.39996323f;
+            // Publish the roster only after its corresponding controller exists.
+            const auto character = physics_system->create_avatar_character(avatar.position);
+            if (character == Systems::PhysicsSystem::kInvalidAvatar) {
+                m_bootError = "Avatar collider preparation budget exceeded";
+                m_avatars.clear();
+                m_session.reset();
+                m_jobSystem.shutdown();
+                return false;
+            }
             m_avatars.push_back(avatar);
-            // Create one server-authoritative physics capsule per avatar.
-            physics_system->create_avatar_character(avatar.position);
+            ++m_spawnedAvatarCount;
         }
         LUMINUMBRA_CORE_INFO(
             "ServerWorldRunner: spawned {} deterministic player avatar(s) (+physics characters).",
@@ -447,7 +547,7 @@ bool ServerWorldRunner::Boot() {
     //  opt-in plant roster so the smoke exercises the plant sub-hash + growth +
     // persistence end-to-end (empty otherwise -> plant_hash neutral). Pure fn of (seed, preset).
     if (m_config.planted_roster) {
-        SpawnPlantRoster(m_session->GetRegistry(), spawn_anchor);
+        SpawnPlantRoster(*m_session, spawn_anchor);
         LUMINUMBRA_CORE_INFO("ServerWorldRunner: spawned deterministic plant roster (6 plants).");
     }
 
@@ -467,7 +567,8 @@ bool ServerWorldRunner::Boot() {
         auto* phys = m_session->GetPhysicsSystem();
         auto stream_once = [&]() {
             if (m_avatars.empty()) {
-                ws->update(m_session->GetRegistry(), spawn_anchor, phys);
+                ws->update(
+                    m_session->GetRegistry(), continuation ? m_ownerAnchor : spawn_anchor, phys);
             } else {
                 std::vector<Vec3> anchors;
                 anchors.reserve(m_avatars.size());
@@ -480,7 +581,7 @@ bool ServerWorldRunner::Boot() {
         //  settle chunk residency (count stable for several consecutive iters).
         std::size_t last_count = static_cast<std::size_t>(-1);
         int stable = 0;
-        for (int i = 0; i < 400 && stable < 8; ++i) {
+        for (int i = 0; !continuation && i < 400 && stable < 8; ++i) {
             stream_once();
             const std::size_t count = ws->snapshot_streamed_chunks().size();
             stable = (count == last_count) ? stable + 1 : 0;
@@ -503,7 +604,7 @@ bool ServerWorldRunner::Boot() {
         // LOADED worlds skip this phase entirely: their water is paused for the whole
         // Boot (see above) — the restored mid-flow state must not be advanced.
         int settle_iters = 0;
-        if (!water_loaded_from_save) {
+        if (!continuation && !water_loaded_from_save) {
             ws->SetWaterBootSettleMode(true);
             // 2a: init the full backlog (boot mode seeds ALL pending per update; the
             // loop tolerates late streamers). Bounded.
@@ -572,6 +673,23 @@ bool ServerWorldRunner::Boot() {
     // Boot settles water outside the counted ticks. Publish its ownership before any initial
     // checkpoint or save; hash reads themselves only observe this completed boundary.
     world_system->sync_water_authority();
+    if (m_continuationOptions.owner_continuation) {
+        m_ownerStreamingAnchors.reserve(Systems::PhysicsSystem::kMaxRestoredAvatars);
+        std::vector<Vec3> simulation_anchors;
+        simulation_anchors.reserve(Systems::PhysicsSystem::kMaxRestoredAvatars);
+        m_session->SetReplicatedSimulationAnchors(std::move(simulation_anchors));
+        m_session->ConfigureOwnerContinuation(m_avatars,
+                                              static_cast<std::uint32_t>(m_config.avatar_count),
+                                              m_config.moving_anchor,
+                                              m_config.water_smoke);
+        if (!m_avatars.empty()) {
+            m_ownerAnchor = m_avatars.front().position;
+        }
+        if (!continuation && m_config.water_smoke) {
+            m_ownerOrigin = FindWetAnchor(*world_system, spawn_anchor);
+        }
+        m_session->SetOwnerContinuationAnchor(m_ownerOrigin, m_ownerAnchor, m_ownerStreamTick);
+    }
     m_booted = true;
     return true;
 }
@@ -591,6 +709,8 @@ void ServerWorldRunner::SetAvatarMove(std::uint32_t player_id, float move_x, flo
 ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
     ServerTickReport report;
     if (!m_booted || !m_session) {
+        report.region_fault = true;
+        report.region_fault_message = "Server world is not booted";
         return report;
     }
 
@@ -620,7 +740,35 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
     }
 
     const auto wall_start = std::chrono::steady_clock::now();
+    // Keep batch tick indices and telemetry in this invocation. Retries cannot
+    // exceed the requested tick budget, even if preparation refuses permanently.
+    const std::uint64_t max_preparation_retries = tick_count;
+    std::uint64_t preparation_retries = 0;
     while (report.ticks_executed < tick_count) {
+        if (m_continuationOptions.owner_continuation &&
+            m_ownerStreamTick == world::WorldClock::kTickLimit) {
+            report.region_fault = true;
+            report.region_fault_message = "Owner continuation stream clock exhausted.";
+            break;
+        }
+
+        if (m_continuationOptions.owner_continuation && m_avatars.empty()) {
+            Vec3 next = m_ownerOrigin;
+            const auto next_tick = m_ownerStreamTick + 1;
+            if (m_config.water_smoke) {
+                next.x += 2.0f * static_cast<float>(next_tick);
+            } else if (m_config.moving_anchor) {
+                const float distance = 0.5f * static_cast<float>(next_tick);
+                next.x += distance;
+                next.z += distance;
+            }
+            if (!world::ActiveRegionLedger::valid_anchor(next)) {
+                report.region_fault = true;
+                report.region_fault_message = "Owner continuation stream anchor exhausted.";
+                break;
+            }
+        }
+
         if (const auto& region_fault = m_session->GetRegionSchedulerFault();
             region_fault.has_value()) {
             report.region_fault = true;
@@ -635,11 +783,29 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         auto& budget = m_session->GetSimBudgetTelemetry();
         const auto snapshots_before = budget.Enabled() ? world_system->snapshot_copies() : 0;
         const std::uint64_t budget_tick = m_session->GetSimulationTickCount() + 1;
-        luminumbra::simulation::SimBudgetTelemetry::TickScope physics_budget(budget, budget_tick);
-        physics_budget.Next(BudgetStage::ServerPhysics, [] { return 1u; });
+        // A refused preparation consumes no tick, so it records no ServerPhysics
+        // sample: completed-tick work traces stay identical across retries.
+        const auto physics_start = std::chrono::steady_clock::now();
+        // Every host gathers the same registered controllers and projectiles.
+        // No host-specific spawn/camera anchor can change the horizon or its budget.
+        if (!physics_system->prepare_simulation_collisions({}, budget_tick)) {
+            // Zero progress without a region fault is the retry outcome. A durable
+            // read failure can latch a terminal fault during preparation itself.
+            if (const auto& fault = m_session->GetRegionSchedulerFault()) {
+                report.region_fault = true;
+                report.region_fault_message = fault->message;
+                break;
+            }
+            if (preparation_retries < max_preparation_retries) {
+                ++preparation_retries;
+                std::this_thread::sleep_for(std::chrono::milliseconds(33));
+                continue; // No physics, input or tick state was consumed.
+            }
+            break; // Return retryable partial progress when the retry budget is spent.
+        }
         physics_system->update(static_cast<float>(fixed_dt));
         //  step the server-authoritative avatar characters (gravity +
-        // world collision; deterministic index order) and read their settled
+        // world collision; deterministic creation order) and read their settled
         // transforms back into m_avatars, so the streaming anchors + the
         // `entities` sub-hash reflect the physics-authoritative positions.
         if (!m_avatars.empty()) {
@@ -649,8 +815,30 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
                 m_avatars[i].velocity = physics_system->get_avatar_velocity(i);
             }
         }
-        physics_budget.Finish();
-        if (m_session->ActiveRegionsEnabled()) {
+        budget.Record(BudgetStage::ServerPhysics,
+                      budget_tick,
+                      1u,
+                      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                                physics_start)
+                          .count());
+        if (m_continuationOptions.owner_continuation) {
+            m_ownerAnchorVisits = 0;
+            m_ownerStreamingAnchors.clear();
+            for (const auto& avatar : m_avatars) {
+                m_ownerStreamingAnchors.push_back(avatar.position);
+                ++m_ownerAnchorVisits;
+            }
+        }
+        if (m_session->ActiveRegionsEnabled() && m_continuationOptions.owner_continuation) {
+            if (!m_session->ReplicatedSimulationAnchorsReserved(
+                    Systems::PhysicsSystem::kMaxRestoredAvatars)) {
+                // A world reload resets session storage after boot reserved it.
+                std::vector<Vec3> simulation_anchors;
+                simulation_anchors.reserve(Systems::PhysicsSystem::kMaxRestoredAvatars);
+                m_session->SetReplicatedSimulationAnchors(std::move(simulation_anchors));
+            }
+            m_session->SetOwnerContinuationSimulationAnchors(m_ownerStreamingAnchors);
+        } else if (m_session->ActiveRegionsEnabled()) {
             std::vector<Vec3> anchors;
             for (const auto& avatar : m_avatars)
                 anchors.push_back(avatar.position);
@@ -659,18 +847,23 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         report.ticks_executed +=
             m_session->TickSimulation(fixed_dt, /*defer_water_authority=*/true);
         report.frames_executed += 1;
+        if (m_continuationOptions.owner_continuation) {
+            ++m_ownerStreamTick;
+        }
         if (const auto& fault = m_session->GetRegionSchedulerFault()) {
             report.region_fault = true;
             report.region_fault_message = fault->message;
             break;
         }
-        const std::uint64_t simulation_tick = m_session->ActiveRegionsEnabled()
-                                                  ? m_session->GetSimulationTickCount()
-                                                  : report.ticks_executed;
+        const std::uint64_t simulation_tick =
+            m_continuationOptions.owner_continuation ? m_ownerStreamTick
+            : m_session->ActiveRegionsEnabled()      ? m_session->GetSimulationTickCount()
+                                                     : report.ticks_executed;
 
         // Supply the simulation tick to the activation queue so dispatched
         // batches receive deterministic due ticks.
-        world_system->begin_tick(static_cast<std::int64_t>(simulation_tick));
+        world_system->begin_tick(static_cast<std::int64_t>(simulation_tick),
+                                 m_continuationOptions.owner_continuation);
         // Drive activation-latency telemetry from the same tick base used by
         // the availability digest.
         // Observability only — gated on --avail-trace like the digest itself.
@@ -692,18 +885,35 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
                     // streaming fresh columns THROUGH/along the wet body — first-time grid
                     // inits, the rotating sim window, and cross-chunk seam flux all engage
                     // every activation. Pure fn of the tick -> run==replay holds.
-                    const float d = 2.0f * static_cast<float>(report.ticks_executed);
-                    anchor = Vec3(water_walk_start.x + d, water_walk_start.y, water_walk_start.z);
+                    const auto tick = m_continuationOptions.owner_continuation
+                                          ? m_ownerStreamTick
+                                          : report.ticks_executed;
+                    const float d = 2.0f * static_cast<float>(tick);
+                    const Vec3 origin =
+                        m_continuationOptions.owner_continuation ? m_ownerOrigin : water_walk_start;
+                    anchor = Vec3(origin.x + d, origin.y, origin.z);
                 } else if (m_config.moving_anchor) {
                     // B' harness: walk the streaming anchor +X/+Z each tick so chunks stream IN
                     // ahead and OUT behind during the run. ~0.5 m/tick -> ~45 m over 90 ticks (~3
                     // chunks). Pure fn of the tick -> both --smoke runs drift identically; any
                     // run!=replay is the moving-case water nondeterminism (boot warm-up only
                     // settles the INITIAL residency).
-                    const float d = 0.5f * static_cast<float>(report.ticks_executed);
-                    anchor = Vec3(spawn_anchor.x + d, spawn_anchor.y, spawn_anchor.z + d);
+                    const auto tick = m_continuationOptions.owner_continuation
+                                          ? m_ownerStreamTick
+                                          : report.ticks_executed;
+                    const float d = 0.5f * static_cast<float>(tick);
+                    const Vec3 origin =
+                        m_continuationOptions.owner_continuation ? m_ownerOrigin : spawn_anchor;
+                    anchor = Vec3(origin.x + d, origin.y, origin.z + d);
+                }
+                if (m_continuationOptions.owner_continuation) {
+                    m_ownerAnchor = anchor;
                 }
                 world_system->update(m_session->GetRegistry(), anchor, physics_system);
+            } else if (m_continuationOptions.owner_continuation) {
+                m_ownerAnchor = m_avatars.front().position;
+                world_system->update(
+                    m_session->GetRegistry(), m_ownerStreamingAnchors, physics_system);
             } else {
                 std::vector<Vec3> anchors;
                 anchors.reserve(m_avatars.size());
@@ -713,6 +923,9 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
                 world_system->update(m_session->GetRegistry(), anchors, physics_system);
             }
         });
+        if (m_continuationOptions.owner_continuation) {
+            m_session->SetOwnerContinuationAnchor(m_ownerOrigin, m_ownerAnchor, m_ownerStreamTick);
+        }
         // water-smoke: sample the water sub-phase timings + sim-load counters the
         // update above just produced. Const reads of never-hashed telemetry (the same
         // read class as the availability digest) — hash-neutral, off by default.
@@ -732,18 +945,23 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
                     std::max(report.water.seam_wet_pairs_max, water->dbg_seam_wet_pairs());
             }
         }
-        //  5b (activation queue ): THE SWAP. The per-tick full barrier
-        // is replaced by tick-keyed activation — publish exactly the batches
-        // due this tick (dispatch + K), blocking only on a due-but-unfinished
-        // batch. The activation-wait timing now measures activate_due's block time (the
-        // number the queue exists to shrink). Wall-clock, never feeds
-        // world_hash. Explicit full drains remain at boot / hash / mutate /
-        // teardown sites via wait_for_streaming_jobs.
+        // Ordinary runs publish only batches due this tick (dispatch + K).
+        // Continuations finish the current admitted work at the counted boundary,
+        // since their snapshots cannot retain process-local publication queues.
+        // This wall-clock timing never feeds world_hash.
         const auto _wait_t0 = std::chrono::steady_clock::now();
         {
             LUMIN_PROFILE_ZONE_N(
                 "streaming_activate_due"); // the p99 latency the queue exists to shrink
-            world_system->activate_due(static_cast<std::int64_t>(simulation_tick));
+            if (m_continuationOptions.owner_continuation) {
+                // A resumable tick cannot retain unpublished generation/promotion
+                // or mesh work: the save format carries chunks, not job queues.
+                // Settle only the admitted/deferred work, without another update,
+                // water step or collision pass. Saves remain non-publishing.
+                world_system->wait_for_streaming_jobs();
+            } else {
+                world_system->activate_due(static_cast<std::int64_t>(simulation_tick));
+            }
         }
         const double _wait_ms =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - _wait_t0)
@@ -978,131 +1196,47 @@ std::string ServerWorldRunner::ComputeAvailabilityDigest() {
 }
 
 std::string ServerWorldRunner::ComputeWorldHash() {
-    // Boot and RunFixedTicks settle water authority before all three hash entry points.
-    if (!m_booted || !m_session || !m_session->GetWorldSystem()) {
-        return {};
+    if (!m_booted || !m_session) {
+        throw Persistence::AuthorityCaptureRefused(
+            Persistence::AuthorityCaptureStatus::MissingCursor);
     }
-
-    auto* world_system = m_session->GetWorldSystem();
-    world_system->wait_for_streaming_jobs();
-
-    WorldStreamingState state;
-    for (const auto& chunk : world_system->snapshot_streamed_chunks()) {
-        state.insert_chunk(chunk);
+    const auto result =
+        m_session->CaptureAuthorityHashes({}, Persistence::AuthorityCaptureParts::Composite);
+    if (!result.capture) {
+        throw Persistence::AuthorityCaptureRefused(result.status);
     }
-
-    Persistence::WorldSaveService service;
-    // Fold the cursor-bound chunk hash and the session's runtime sub-hashes
-    // using the shared append-only order.
-    return Persistence::ComposeWorldHash(
-        m_session->ActiveRegionsEnabled()
-            ? m_session->ComputeChunkStateHash()
-            : service.world_hash(state, world_system->GetWaterSimWindowCursor()),
-        WindSubHash(m_session.get()),
-        WeatherSubHash(m_session.get()),
-        AetherSubHash(m_session.get()),
-        ScentSubHash(m_session.get()),
-        ComputeEcologySubHash(),
-        m_session->ComputePlantSubHash()); //  plant fold (empty-neutral)
+    return result.capture->composite;
 }
 
 Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHashes() {
-    // per-system sub-hashes over the SAME streamed-chunk snapshot the
-    // top-level world_hash is built from, including the same water cursor.
-    Persistence::WorldStreamingStateSubHashes empty;
-    if (!m_booted || !m_session || !m_session->GetWorldSystem()) {
-        return empty;
+    if (!m_booted || !m_session) {
+        throw Persistence::AuthorityCaptureRefused(
+            Persistence::AuthorityCaptureStatus::MissingCursor);
     }
-
-    auto* world_system = m_session->GetWorldSystem();
-    world_system->wait_for_streaming_jobs();
-
-    WorldStreamingState state;
-    for (const auto& chunk : world_system->snapshot_streamed_chunks()) {
-        state.insert_chunk(chunk);
-    }
-
-    // The entities sub-hash is the stable checksum of the canonical ECS snapshot.
-    //  that snapshot now carries the deterministic player avatars (empty
-    // when avatar_count == 0 -> byte-identical to the zero-avatar terrain/water-only
-    // lane, so the default world_hash/entities sub-hash is unchanged).
     const std::string entities_snapshot =
         Ecs::SerializeEntityRegistrySnapshotJson(World::BuildAvatarEntitySnapshot(m_avatars));
-    Persistence::WorldStreamingStateSubHashes sub =
-        Persistence::ComputeWorldStreamingStateSubHashes(
-            state, entities_snapshot, world_system->GetWaterSimWindowCursor());
-    // the wind sub-hash slot, supplied from the session's wind
-    // field (not chunk-derived). Present + stable for the WindFieldDeterminism
-    // gate and the desync-localization oracle.
-    sub.wind = WindSubHash(m_session.get());
-    // the weather sub-hash slot, supplied from the session's weather
-    // core (not chunk-derived). Present + stable for the WeatherVisual state-hash
-    // assertion and the desync-localization oracle.
-    sub.weather = WeatherSubHash(m_session.get());
-    // the aether sub-hash slot, supplied from the session's Aether
-    // scalar field (not chunk-derived). Present + stable for the
-    // AetherFieldDeterminism gate and the desync-localization oracle.
-    sub.aether = AetherSubHash(m_session.get());
-    // the STATE-ONLY stateful-layer sub-hash — the heavy
-    // oracle's authoritative-compare slot when sim.aether_state is ON.
-    // Always empty on the default (OFF) world.
-    sub.aether_state = m_session ? m_session->ComputeAetherStateSubHash() : std::string();
-    return sub;
+    const auto result = m_session->CaptureAuthorityHashes(
+        entities_snapshot, Persistence::AuthorityCaptureParts::SubHashes);
+    if (!result.capture) {
+        throw Persistence::AuthorityCaptureRefused(result.status);
+    }
+    return result.capture->sub;
 }
 
 void ServerWorldRunner::ComputeWorldHashAndSubHashes(
     std::string& out_world_hash, Persistence::WorldStreamingStateSubHashes& out_sub) {
-    // single quiesce + single chunk snapshot feeding BOTH hashes. This
-    // is the recorder/replayer's mid-run checkpoint capture; minimizing the
-    // settled-state reads keeps the capture window tight. The produced values are
-    // byte-identical to ComputeWorldHash and ComputeWorldSubHashes called
-    // separately (same WorldSaveService::world_hash + same projection).
-    out_world_hash.clear();
-    out_sub = Persistence::WorldStreamingStateSubHashes{};
-    if (!m_booted || !m_session || !m_session->GetWorldSystem()) {
-        return;
+    if (!m_booted || !m_session) {
+        throw Persistence::AuthorityCaptureRefused(
+            Persistence::AuthorityCaptureStatus::MissingCursor);
     }
-
-    auto* world_system = m_session->GetWorldSystem();
-    world_system->wait_for_streaming_jobs();
-
-    WorldStreamingState state;
-    for (const auto& chunk : world_system->snapshot_streamed_chunks()) {
-        state.insert_chunk(chunk);
-    }
-
-    const std::string wind_hash = WindSubHash(m_session.get());
-    const std::string weather_hash = WeatherSubHash(m_session.get());
-    const std::string aether_hash = AetherSubHash(m_session.get());
-    const std::string scent_hash = ScentSubHash(m_session.get());
-    const std::string ecology_hash = ComputeEcologySubHash();
-    const std::string plant_hash = m_session->ComputePlantSubHash(); //  empty-neutral
-
-    Persistence::WorldSaveService service;
-    //   +   +  + gate-populated-world-replay +
-    // hash revisionS: composite world_hash (chunk + wind + weather + aether + scents + ecology +
-    // plants).
-    out_world_hash = Persistence::ComposeWorldHash(
-        m_session->ActiveRegionsEnabled()
-            ? m_session->ComputeChunkStateHash()
-            : service.world_hash(state, world_system->GetWaterSimWindowCursor()),
-        wind_hash,
-        weather_hash,
-        aether_hash,
-        scent_hash,
-        ecology_hash,
-        plant_hash);
-
     const std::string entities_snapshot =
         Ecs::SerializeEntityRegistrySnapshotJson(World::BuildAvatarEntitySnapshot(m_avatars));
-    out_sub = Persistence::ComputeWorldStreamingStateSubHashes(
-        state, entities_snapshot, world_system->GetWaterSimWindowCursor());
-    out_sub.wind = wind_hash;
-    out_sub.weather = weather_hash;
-    out_sub.aether = aether_hash;
-    // state-only slot for LREC1 checkpoint localization
-    // (always empty on the default OFF world).
-    out_sub.aether_state = m_session->ComputeAetherStateSubHash();
+    const auto result = m_session->CaptureAuthorityHashes(entities_snapshot);
+    if (!result.capture) {
+        throw Persistence::AuthorityCaptureRefused(result.status);
+    }
+    out_world_hash = result.capture->composite;
+    out_sub = result.capture->sub;
 }
 
 std::size_t ServerWorldRunner::SaveFullSnapshot() {

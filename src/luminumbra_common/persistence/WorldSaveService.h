@@ -1,6 +1,8 @@
 #pragma once
+#include "SaveWorkCounts.h"
 
 #include "SaveTransaction.h"
+#include "WorldPersistenceRoundtrip.h"
 #include "fields/FieldPageState.h"
 #include "world/ActiveRegionLedger.h"
 #include "world/FarVolumeMemory.h"
@@ -10,6 +12,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <functional>
 #include <initializer_list>
@@ -55,12 +58,111 @@ struct RegionDigestInputs {
     std::string field_page_bytes{};
 };
 
+// Prepared on the owner boundary; chunk references stay fenced until hashing finishes.
+// Chunks are already filtered and sorted by id, with live over parked over durable precedence.
+struct PreparedRegionDigest {
+    std::vector<std::shared_ptr<Chunk>> chunks;
+    std::string ground_object_bytes;
+    std::string field_page_bytes;
+};
+std::uint64_t HashPreparedRegionDigest(const PreparedRegionDigest& prepared);
+
+// Process-local values only: never serialized or used as a cache key.
+struct AuthorityRuntimeHashes {
+    std::string wind;
+    std::string weather;
+    std::string aether;
+    std::string scent;
+    std::string ecology;
+    std::string plant;
+    std::string aether_state;
+};
+
+// Each legacy consumer selects its own quantity from the same immutable observation.
+struct AuthorityHashCapture {
+    const std::string streamed;
+    const std::string chunk;
+    const std::string composite;
+    const WorldStreamingStateSubHashes sub;
+};
+
+enum class AuthorityCaptureStatus {
+    Ready,
+    MissingCursor,
+    IncompleteOwner,
+    PreparationRefused
+};
+// Bridges the legacy void hash callbacks. The checked API itself returns status.
+class AuthorityCaptureRefused final : public std::exception {
+public:
+    explicit AuthorityCaptureRefused(
+        AuthorityCaptureStatus capture_status = AuthorityCaptureStatus::PreparationRefused) noexcept
+        : m_status(capture_status) {}
+    AuthorityCaptureStatus status() const noexcept {
+        return m_status;
+    }
+    const char* what() const noexcept override {
+        return "authority capture refused";
+    }
+
+private:
+    AuthorityCaptureStatus m_status;
+};
+// Which slots a consumer reads. Skipped slots stay empty; every requested slot is computed
+// from the same observation as a full capture. Single-slot consumers avoid re-serializing
+// the streamed state for slots they discard.
+enum class AuthorityCaptureParts {
+    All,                 // streamed, chunk, composite and sub-hashes
+    Composite,           // streamed, chunk and composite
+    SubHashes,           // sub-hashes only
+    Chunk,               // streamed and chunk only
+    StreamedAndSubHashes // streamed and sub-hashes; never prepares regional owners
+};
+struct AuthorityCaptureResult {
+    AuthorityCaptureStatus status = AuthorityCaptureStatus::PreparationRefused;
+    std::optional<AuthorityHashCapture> capture;
+};
+
+// Owner-thread, settled inputs only. Refusal never returns a partially filled capture.
+// An absent regional projection selects the legacy streamed chunk slot.
+[[nodiscard]] AuthorityCaptureResult
+CaptureAuthorityHashes(const WorldStreamingState& state,
+                       std::optional<std::uint64_t> water_sim_cursor,
+                       const std::optional<std::string>& regional_projection = std::nullopt,
+                       const std::string& entity_snapshot_json = {},
+                       const AuthorityRuntimeHashes& runtime = {},
+                       AuthorityCaptureParts parts = AuthorityCaptureParts::All);
+
+// Caller-selected participating regions, in canonical (x,z) order with no duplicates.
+// Frozen digests bypass preparation, matching the settled ledger's existing projection.
+struct AuthorityRegionInput {
+    world::RegionKey key;
+    RegionDigestInputs inputs;
+    std::optional<std::uint64_t> frozen_digest;
+};
+struct AuthorityRegionalInputs {
+    std::filesystem::path save_dir;
+    bool require_index = true;
+    std::vector<AuthorityRegionInput> regions;
+};
+
+// Reads, hashes and releases one prepared region at a time. No decoded owner collection
+// spans the region loop. SubHashes and StreamedAndSubHashes do not inspect regional inputs.
+[[nodiscard]] AuthorityCaptureResult
+CaptureAuthorityHashes(const WorldStreamingState& state,
+                       std::optional<std::uint64_t> water_sim_cursor,
+                       const AuthorityRegionalInputs& regional,
+                       const std::string& entity_snapshot_json = {},
+                       const AuthorityRuntimeHashes& runtime = {},
+                       AuthorityCaptureParts parts = AuthorityCaptureParts::All);
+
 // One owner-thread digest operation admits the index once. Durable authority is cached by
 // publication revision and native file versions; live and parked inputs are always projected.
 class RegionDigestOperation {
 public:
     RegionDigestOperation(const std::filesystem::path& save_dir, bool require_index);
     std::uint64_t digest(world::RegionKey key, const RegionDigestInputs& inputs);
+    PreparedRegionDigest prepare(world::RegionKey key, const RegionDigestInputs& inputs);
     [[nodiscard]] std::size_t index_reads() const {
         return m_index_reads;
     }
@@ -69,6 +171,7 @@ public:
     }
 
 private:
+    PreparedRegionDigest PrepareChunks(world::RegionKey key, const RegionDigestInputs& inputs);
     std::filesystem::path m_save_dir;
     SnapshotIndex m_index;
     std::uint64_t m_publication_revision = 0;
@@ -257,6 +360,15 @@ public:
     static bool validate_save(const std::filesystem::path& save_dir,
                               std::vector<std::string>* errors = nullptr,
                               const std::stop_token& stop = {});
+
+    // Read-only catalog inspection. Indexed saves check container structure and all snapshot
+    // fingerprints without decoding lod-0 payloads. Unindexed saves use complete validation.
+    // This verdict never authorizes loading or writing: those require validate_save/load_world.
+    // The optional output stays false on refusal or when indexed payloads were skipped.
+    static bool inspect_save(const std::filesystem::path& save_dir,
+                             std::vector<std::string>* errors = nullptr,
+                             const std::stop_token& stop = {},
+                             bool* payloads_verified = nullptr);
 
     // Uses the same durable temporary-file/atomic replacement path as chunk containers.
     // Refuses an unsupported existing save before touching its metadata.
@@ -614,6 +726,9 @@ public:
     static std::uint64_t record_compression_count_for_testing();
     // Number of lod-0 chunk record payload decodes since process start.
     static std::uint64_t chunk_record_decode_count_for_testing();
+    // Calling-thread cumulative work. Take differences within one save worker boundary;
+    // parallel encoders contribute their plain per-record counts after joining.
+    [[nodiscard]] static SaveWorkCounts work_counts();
     // Number of region lod-0 fingerprints hashed (not reused from identical bytes) since
     // process start.
     static std::uint64_t region_fingerprint_count_for_testing();
@@ -780,6 +895,17 @@ public:
                                            const std::filesystem::path& save_dir,
                                            std::vector<std::string>* errors = nullptr,
                                            bool acknowledge_dirty = true) const;
+
+private:
+    bool load_world_impl(WorldStreamingState& state,
+                         const std::filesystem::path& save_dir,
+                         std::vector<std::string>& errors,
+                         const std::stop_token& stop,
+                         const std::unordered_set<ChunkID>* retain_chunks,
+                         std::vector<IVec3>* authoritative_inventory,
+                         std::size_t* decoded_chunk_count,
+                         bool catalog_only,
+                         bool* payloads_verified = nullptr) const;
 };
 
 } // namespace Luminumbra::Persistence

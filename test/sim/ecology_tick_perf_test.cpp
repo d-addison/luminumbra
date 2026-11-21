@@ -269,4 +269,48 @@ TEST(EcologyTickPerf, MeasuresMedianAndP99AcrossRosterSizes) {
     }
 }
 
+TEST(EcologyTickPerf, MatingCandidateVisitsScaleWithUniformPopulation) {
+    namespace AI = luminumbra::ai;
+    std::size_t previous_seek = 0;
+    std::size_t previous_resolve = 0;
+    for (const int side : {16, 32, 64}) {
+        entt::registry registry;
+        AI::ReproductionTuning tuning;
+        tuning.mate_seek_radius = 4;
+        tuning.courtship_radius = 4;
+        tuning.species_capacity = static_cast<std::uint32_t>(2 * side * side + 1);
+        for (int x = 0; x < side; ++x) {
+            for (int z = 0; z < side; ++z) {
+                for (const bool female : {false, true}) {
+                    const auto entity = registry.create();
+                    auto& transform = registry.emplace<Comp::TransformComponent>(entity);
+                    transform.position.x = static_cast<float>(x * 32) - 1024.0f;
+                    transform.position.z = static_cast<float>(z * 32) - 1024.0f;
+                    auto& creature = registry.emplace<Comp::CreatureComponent>(entity);
+                    creature.hunger = 0;
+                    creature.stamina = 1;
+                    auto& genome = registry.emplace<Comp::CreatureGenomeComponent>(entity);
+                    genome.female = female;
+                    genome.age_ticks = 120;
+                }
+            }
+        }
+        const auto seeking = AI::RunMateSeekingOnTick(registry, tuning);
+        const auto resolve = AI::RunMatingResolveOnTick(registry, 1, 985, tuning);
+        const auto population = static_cast<std::size_t>(2 * side * side);
+        EXPECT_EQ(resolve.population_visits, population);
+        EXPECT_GT(seeking.mate_candidate_visits, 0u);
+        EXPECT_GT(resolve.mate_candidate_visits, 0u);
+        // At this fixed density each of nine cells contains at most one pair.
+        EXPECT_LE(seeking.mate_candidate_visits, 18 * population);
+        EXPECT_LE(resolve.mate_candidate_visits, 9 * population);
+        if (previous_seek != 0) {
+            EXPECT_LE(seeking.mate_candidate_visits, 4 * previous_seek);
+            EXPECT_LE(resolve.mate_candidate_visits, 4 * previous_resolve);
+        }
+        previous_seek = seeking.mate_candidate_visits;
+        previous_resolve = resolve.mate_candidate_visits;
+    }
+}
+
 } // namespace

@@ -28,6 +28,7 @@
 #endif
 
 #include "net/LockstepSession.h"
+#include "persistence/WorldSaveService.h"
 
 #include <algorithm>
 #include <array>
@@ -47,6 +48,7 @@
 #include "core/EngineVersion.h"
 #include "core/Log.h"
 #include "replay/ReplayStream.h"
+#include "systems/WeatherSystem.h"
 
 namespace Luminumbra::Net {
 namespace {
@@ -56,6 +58,22 @@ namespace fs = std::filesystem;
 bool HasValidHorizons(const HelloMsg& hello) {
     return hello.horizon_min > 0 && hello.horizon_min <= hello.horizon_start &&
            hello.horizon_start <= hello.horizon_max;
+}
+
+bool ReplayBootMatches(const Replay::ReplayHeader& captured, const LockstepConfig& config) {
+    const bool complete_boot = captured.version == Replay::kLrec1BootVersion &&
+                               captured.authority_boot &&
+                               captured.authority_boot->resolved_world_seed == config.seed;
+    Systems::WeatherSchedule schedule;
+    // Decode bounds both work and storage to WeatherSchedule::kMaxPhases (32).
+    const bool scheduled_boot =
+        captured.version == Replay::kLrec1WeatherVersion && !captured.authority_boot &&
+        Systems::WeatherSchedule::Decode(captured.weather_schedule, schedule);
+    return (complete_boot || scheduled_boot) &&
+           captured.seed == (Replay::kResolvedSeedTag | config.seed) &&
+           captured.preset == config.preset && captured.tick_rate_hz == config.tick_rate_hz &&
+           Replay::ConfigurationMatches(
+               captured, config.system_config_identity, config.preset_content_hash);
 }
 
 // --- Little-endian fixed-width append helpers (the only on-wire encoders). Identical
@@ -1140,6 +1158,16 @@ LockstepAdmissionStatus LockstepSession::AdmissionStatus() const {
 
 bool LockstepSession::Handshake() {
     m_receive_work = {};
+    // Scheduled authorities must supply the complete profile captured before tick one.
+    // Generic callers without that capture retain the legacy refusal.
+    if (m_config.system_config_identity.starts_with(Systems::WeatherSchedule::kIdentityPrefix) &&
+        (!m_config.replay_header ||
+         m_config.replay_header->version != Replay::kLrec1WeatherVersion ||
+         !ReplayBootMatches(*m_config.replay_header, m_config))) {
+        m_status.handshake_error = "scheduled weather is unsupported by lockstep";
+        TransportDisconnected();
+        return false;
+    }
     // Send our Hello, then drain until the peer's Hello arrives (loopback: the peer's
     // Hello must already be queued by the single-process driver). A mismatched
     // protocol/version/seed/preset/tick-rate/config identity is rejected loudly.
@@ -1248,6 +1276,9 @@ bool LockstepSession::Handshake() {
     // Disk setup and worker startup belong to handshake, never the tick path.
     // Recorder failure affects diagnostics only, not handshake or simulation.
     OpenReplayRecorder();
+    if (m_status.desynced) {
+        return false;
+    }
     // Pre-schedule the local input for ticks [1.. horizon]: delay-based lockstep sends
     // inputs `horizon` ticks ahead, so the first `horizon` ticks' local inputs are in
     // flight before the first tick runs.
@@ -1851,8 +1882,21 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
     if (hash_due) {
         HashMsg local;
         local.tick = want;
-        if (m_hooks.capture_hashes) {
-            m_hooks.capture_hashes(want, local, m_hooks.user);
+        try {
+            if (m_hooks.capture_hashes) {
+                m_hooks.capture_hashes(want, local, m_hooks.user);
+            }
+        } catch (const Persistence::AuthorityCaptureRefused&) {
+            // Preserve the executed input without publishing a refused checkpoint, in the
+            // session's own recording and in a caller-owned sink: the hook runs once per
+            // executed tick, so it still sees this tick's merged inputs (with no hash).
+            RecordReplayTick(want, recorded_inputs, nullptr);
+            if (m_hooks.record_replay_tick) {
+                m_hooks.record_replay_tick(want, merged, nullptr, m_hooks.user);
+            }
+            EmitDesyncDump(want, "authority_capture");
+            result.outcome = TickOutcome::Desync;
+            return result;
         }
         m_local_hashes[want] = std::make_shared<const HashMsg>(std::move(local));
     }
@@ -1944,6 +1988,19 @@ bool LockstepSession::OpenReplayRecorder() {
         return true;
     if (m_replay_failed)
         return false;
+    HashMsg boot;
+    try {
+        if (m_hooks.capture_hashes) {
+            m_hooks.capture_hashes(0, boot, m_hooks.user);
+        }
+    } catch (const Persistence::AuthorityCaptureRefused&) {
+        m_replay_failed = true;
+        m_status.desynced = true;
+        m_status.desync_tick = 0;
+        m_status.desync_section = "authority_capture";
+        m_status.replay_error = "authority capture refused";
+        return false;
+    }
     Luminumbra::Replay::ReplayHeader header;
     header.version = Luminumbra::Replay::kLrec1Version;
     header.system_config_identity = m_config.system_config_identity;
@@ -1955,11 +2012,16 @@ bool LockstepSession::OpenReplayRecorder() {
     header.preset_hash =
         std::strtoull(Luminumbra::Replay::Fnv1a64Hex(m_config.preset).c_str(), nullptr, 16);
     header.engine_version = std::string(luminumbra::core::GetEngineVersionString());
-    if (m_hooks.capture_hashes) {
-        HashMsg boot;
-        m_hooks.capture_hashes(0, boot, m_hooks.user);
-        header.start_world_hash = std::move(boot.world_hash);
+    if (m_config.replay_header) {
+        const auto& captured = *m_config.replay_header;
+        if (!ReplayBootMatches(captured, m_config)) {
+            m_replay_failed = true;
+            m_status.replay_error = "replay boot conflicts with session configuration";
+            return false;
+        }
+        header = captured;
     }
+    header.start_world_hash = std::move(boot.world_hash);
     m_replay_open = m_replay->Open(m_dump_path, header);
     m_replay_failed = !m_replay_open;
     if (m_replay_failed) {

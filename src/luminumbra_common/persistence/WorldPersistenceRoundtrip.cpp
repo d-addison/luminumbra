@@ -1,5 +1,8 @@
 #include "WorldPersistenceRoundtrip.h"
+#include "../systems/PhysicsSystem.h"
+#include "../world/WorldClock.h"
 #include "SavedInputLimits.h"
+#include "SavedJsonAdmission.h"
 #include "WorldSaveEncoding.h"
 
 #include "../HashCheckpoint.h"
@@ -19,6 +22,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -26,6 +30,483 @@
 #include <utility>
 
 namespace Luminumbra::Persistence {
+namespace {
+using Bits3 = std::array<std::uint32_t, 3>;
+std::string Base64Encode(std::string_view bytes);
+std::string Base64Decode(std::string_view text, std::size_t byte_count);
+std::mutex& ChunkRecordSerializerConstructionMutex();
+Bits3 AnchorBits(const Vec3& value) {
+    return {std::bit_cast<std::uint32_t>(value.x),
+            std::bit_cast<std::uint32_t>(value.y),
+            std::bit_cast<std::uint32_t>(value.z)};
+}
+bool ValidOwnerAnchor(const Vec3& value) {
+    // Match the region-anchor coordinate range on every axis, before world
+    // streaming converts saved positions to integral chunk coordinates.
+    constexpr float limit = 16777216.0f;
+    for (int axis = 0; axis < 3; ++axis) {
+        if (!std::isfinite(value[axis]) || value[axis] < -limit || value[axis] >= limit) {
+            return false;
+        }
+    }
+    return true;
+}
+Vec3 ReadAnchor(const nlohmann::json& value) {
+    if (!value.is_array() || value.size() != 3) {
+        throw std::invalid_argument("owner anchor");
+    }
+    Bits3 bits{};
+    for (std::size_t i = 0; i < bits.size(); ++i) {
+        if (!value[i].is_number_unsigned() || value[i].get<std::uint64_t>() > UINT32_MAX) {
+            throw std::invalid_argument("owner anchor bits");
+        }
+        bits[i] = value[i].get<std::uint32_t>();
+    }
+    const Vec3 result(std::bit_cast<float>(bits[0]),
+                      std::bit_cast<float>(bits[1]),
+                      std::bit_cast<float>(bits[2]));
+    if (!ValidOwnerAnchor(result)) {
+        throw std::invalid_argument("invalid owner anchor");
+    }
+    return result;
+}
+std::uint64_t OwnerUnsigned(const nlohmann::json& value) {
+    if (!value.is_number_unsigned()) {
+        throw std::invalid_argument("owner integer");
+    }
+    return value.get<std::uint64_t>();
+}
+std::string OwnerPayload(std::span<const std::uint8_t> bytes) {
+    return Base64Encode(
+        std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
+}
+bool ReadOwnerPayload(const nlohmann::json& value,
+                      std::span<std::uint8_t> output,
+                      std::size_t& size,
+                      std::size_t& aggregate) {
+    if (!value.is_string()) {
+        return false;
+    }
+    const auto& text = value.get_ref<const std::string&>();
+    // Every payload is at most 64 KiB plus the 40-byte avatar header. Admit
+    // encoded and decoded lengths before the base64 decoder allocates storage.
+    if (text.empty() || text.size() % 4 != 0 || text.size() > (output.size() + 2) / 3 * 4) {
+        return false;
+    }
+    const std::size_t padding =
+        (text.back() == '=' ? 1u : 0u) + (text[text.size() - 2] == '=' ? 1u : 0u);
+    size = text.size() / 4 * 3 - padding;
+    if (size > output.size() || size > kOwnerContinuationPayloadBytes - aggregate) {
+        return false;
+    }
+    const auto decoded = Base64Decode(text, size);
+    for (std::size_t i = 0; i < size; ++i) {
+        output[i] = static_cast<std::uint8_t>(static_cast<unsigned char>(decoded[i]));
+    }
+    aggregate += size;
+    return true;
+}
+template<class State>
+std::uint32_t OwnerWord(const State& state, std::size_t offset) {
+    std::uint32_t value = 0;
+    for (unsigned i = 0; i < 4; ++i) {
+        value |= static_cast<std::uint32_t>(state.bytes[offset + i]) << (8 * i);
+    }
+    return value;
+}
+bool ValidBodyDescriptor(const PhysicsOwnerContinuation& body) {
+#ifdef JPH_DOUBLE_PRECISION
+    constexpr std::uint32_t version = 0x00010002u;
+#else
+    constexpr std::uint32_t version = 2u;
+#endif
+    if (!ValidOwnerAnchor(body.anchor) || body.state.size < 12 ||
+        body.state.size > body.state.bytes.size() || OwnerWord(body.state, 0) != version ||
+        OwnerWord(body.state, 8) != body.owner_id) {
+        return false;
+    }
+    const auto kind = OwnerWord(body.state, 4);
+    const std::size_t start = kind == 3u ? 20u : 12u;
+    if ((kind != 1u && kind != 3u) || body.state.size < start + 24u) {
+        return false;
+    }
+    Bits3 position{};
+    for (std::size_t i = 0; i < position.size(); ++i) {
+        const auto offset = start + 8 * i;
+        const auto bits = static_cast<std::uint64_t>(OwnerWord(body.state, offset)) |
+                          (static_cast<std::uint64_t>(OwnerWord(body.state, offset + 4)) << 32);
+        const auto coordinate = std::bit_cast<double>(bits);
+        const auto limit = static_cast<double>((std::numeric_limits<float>::max)());
+        if (!std::isfinite(coordinate) || coordinate < -limit || coordinate > limit) {
+            return false;
+        }
+        position[i] = std::bit_cast<std::uint32_t>(static_cast<float>(coordinate));
+    }
+    return position == AnchorBits(body.anchor);
+}
+bool ValidOwnerContinuation(const OwnerContinuation& record) {
+    if (record.preset_identity.size() != 16 || !ValidOwnerAnchor(record.origin) ||
+        !ValidOwnerAnchor(record.anchor) || record.stream_tick > world::WorldClock::kTickLimit ||
+        record.simulation_tick > world::WorldClock::kTickLimit ||
+        record.avatars.size() > Systems::PhysicsSystem::kMaxRestoredAvatars ||
+        record.bodies.size() > Systems::PhysicsSystem::kMaxRestoredBodies ||
+        record.terrain.size() > Systems::PhysicsSystem::kTerrainBodyHeadroom ||
+        record.slot_count > 10240 || record.free_slots.size() > record.slot_count ||
+        record.simulation_terrain.bodies.size() >
+            Systems::PhysicsSystem::kSimulationColliderBudget ||
+        record.simulation_terrain.columns.size() > record.simulation_terrain.bodies.size()) {
+        return false;
+    }
+    if (!record.avatars.empty()) {
+        if (AnchorBits(record.anchor) != AnchorBits(record.avatars.front().avatar.position)) {
+            return false;
+        }
+    } else if (record.stream_tick != 0) {
+        Vec3 expected = record.origin;
+        if (record.water_smoke) {
+            expected.x += 2.0f * static_cast<float>(record.stream_tick);
+        } else if (record.moving_anchor) {
+            const float distance = 0.5f * static_cast<float>(record.stream_tick);
+            expected.x += distance;
+            expected.z += distance;
+        }
+        if (AnchorBits(record.anchor) != AnchorBits(expected)) {
+            return false;
+        }
+    }
+    if (record.player &&
+        (record.player->owner_id != 0 || !ValidOwnerAnchor(record.player->anchor) ||
+         !World::ValidatePhysicsOwner(record.player->state) ||
+         OwnerWord(record.player->state, 4) != 2)) {
+        return false;
+    }
+    // Jolt's 10240-slot pool includes terrain, dynamic owners and frozen capsules.
+    std::array<bool, 10240> occupied{};
+    const auto claim = [&occupied](std::uint32_t id) {
+        const auto slot = id & JPH::BodyID::cMaxBodyIndex;
+        if (id == JPH::BodyID::cInvalidBodyID || (id & JPH::BodyID::cBroadPhaseBit) != 0 ||
+            slot >= occupied.size() || occupied[slot]) {
+            return false;
+        }
+        occupied[slot] = true;
+        return true;
+    };
+    for (std::size_t i = 0; i < record.terrain.size(); ++i) {
+        if (!claim(record.terrain[i].body_id) ||
+            (i != 0 && record.terrain[i - 1].chunk_id >= record.terrain[i].chunk_id)) {
+            return false;
+        }
+    }
+    for (const auto id : record.simulation_terrain.bodies) {
+        if (!claim(id)) {
+            return false;
+        }
+    }
+    for (std::size_t i = 0; i < record.bodies.size(); ++i) {
+        if (!ValidBodyDescriptor(record.bodies[i]) || !claim(record.bodies[i].owner_id) ||
+            (i != 0 && record.bodies[i - 1].owner_id >= record.bodies[i].owner_id)) {
+            return false;
+        }
+    }
+    std::array<bool, 10240> frozen_claimed{};
+    for (std::size_t i = 0; i < record.avatars.size(); ++i) {
+        const auto& avatar = record.avatars[i];
+        if (avatar.avatar.player_id != i || !ValidOwnerAnchor(avatar.avatar.position) ||
+            !World::ValidateAvatarOwner(avatar)) {
+            return false;
+        }
+        const auto id = OwnerWord(avatar.physics, 20);
+        if (id != JPH::BodyID::cInvalidBodyID) {
+            const auto body =
+                std::find_if(record.bodies.begin(), record.bodies.end(), [id](const auto& value) {
+                    return value.owner_id == id;
+                });
+            const auto slot = id & JPH::BodyID::cMaxBodyIndex;
+            if (body == record.bodies.end() || OwnerWord(body->state, 4) != 1u ||
+                slot >= frozen_claimed.size() || frozen_claimed[slot]) {
+                return false;
+            }
+            frozen_claimed[slot] = true;
+        }
+    }
+    for (const auto& body : record.bodies) {
+        if (OwnerWord(body.state, 4) == 1u &&
+            !frozen_claimed[body.owner_id & JPH::BodyID::cMaxBodyIndex]) {
+            return false;
+        }
+    }
+    for (const auto id : record.free_slots) {
+        if (!claim(id)) {
+            return false;
+        }
+    }
+    for (std::size_t i = 0; i < occupied.size(); ++i) {
+        if (occupied[i] != (i < record.slot_count)) {
+            return false;
+        }
+    }
+    return true;
+}
+} // namespace
+
+bool EncodeOwnerContinuation(const OwnerContinuation& record, std::string& bytes) {
+    if (!ValidOwnerContinuation(record)) {
+        return false;
+    }
+    nlohmann::json avatars = nlohmann::json::array();
+    nlohmann::json bodies = nlohmann::json::array();
+    nlohmann::json terrain = nlohmann::json::array();
+    for (const auto& owner : record.terrain) {
+        terrain.push_back({{"chunk_id", owner.chunk_id}, {"body_id", owner.body_id}});
+    }
+    nlohmann::json columns = nlohmann::json::array();
+    for (const auto& column : record.simulation_terrain.columns) {
+        std::vector<std::uint32_t> heights;
+        heights.reserve(column.heights.size());
+        for (const auto height : column.heights) {
+            if (!std::isfinite(height) || height < -16777216.0f || height >= 16777216.0f) {
+                return false;
+            }
+            heights.push_back(std::bit_cast<std::uint32_t>(height));
+        }
+        columns.push_back({{"id", column.id}, {"heights", std::move(heights)}});
+    }
+    // Fixed terrain samples consume part of the same 1 MiB aggregate budget.
+    std::size_t aggregate =
+        record.simulation_terrain.columns.size() *
+        Systems::PhysicsSystem::SimulationTerrainState::Column{}.heights.size() * sizeof(float);
+    std::array<std::uint8_t, World::kMaxAvatarOwnerBytes> encoded{};
+    for (const auto& avatar : record.avatars) {
+        std::size_t written = 0;
+        if (!World::EncodeAvatarOwner(avatar, encoded, written) ||
+            written > kOwnerContinuationPayloadBytes - aggregate) {
+            return false;
+        }
+        aggregate += written;
+        avatars.push_back({{"id", avatar.avatar.player_id},
+                           {"anchor", AnchorBits(avatar.avatar.position)},
+                           {"state", OwnerPayload(std::span(encoded).first(written))}});
+    }
+    for (const auto& body : record.bodies) {
+        if (body.state.size > kOwnerContinuationPayloadBytes - aggregate) {
+            return false;
+        }
+        aggregate += body.state.size;
+        bodies.push_back(
+            {{"id", body.owner_id},
+             {"anchor", AnchorBits(body.anchor)},
+             {"state", OwnerPayload(std::span(body.state.bytes).first(body.state.size))},
+             {"suspended", body.state.suspended},
+             {"velocity", AnchorBits(body.state.retained_velocity)},
+             {"angular_velocity", AnchorBits(body.state.retained_angular_velocity)},
+             {"was_active", body.state.was_active},
+             {"registration_slot", body.state.registration_slot}});
+    }
+    nlohmann::json player = nullptr;
+    if (record.player) {
+        if (record.player->state.size > kOwnerContinuationPayloadBytes - aggregate) {
+            return false;
+        }
+        player = {
+            {"id", record.player->owner_id},
+            {"anchor", AnchorBits(record.player->anchor)},
+            {"state",
+             OwnerPayload(std::span(record.player->state.bytes).first(record.player->state.size))}};
+    }
+    const nlohmann::json envelope = {{"version", 1u},
+                                     {"world_seed", record.world_seed},
+                                     {"preset_identity", record.preset_identity},
+                                     {"simulation_tick", record.simulation_tick},
+                                     {"stream_tick", record.stream_tick},
+                                     {"moving_anchor", record.moving_anchor},
+                                     {"water_smoke", record.water_smoke},
+                                     {"origin", AnchorBits(record.origin)},
+                                     {"anchor", AnchorBits(record.anchor)},
+                                     {"avatar_count", record.avatars.size()},
+                                     {"body_count", record.bodies.size()},
+                                     {"avatars", std::move(avatars)},
+                                     {"bodies", std::move(bodies)},
+                                     {"player", std::move(player)},
+                                     {"terrain", std::move(terrain)},
+                                     {"slot_count", record.slot_count},
+                                     {"free_slots", record.free_slots},
+                                     {"simulation_bodies", record.simulation_terrain.bodies},
+                                     {"simulation_columns", std::move(columns)}};
+    std::string candidate;
+    const std::lock_guard construction(ChunkRecordSerializerConstructionMutex());
+    if (!BoundedJsonDump(envelope, kOwnerContinuationRecordBytes, candidate)) {
+        return false;
+    }
+    bytes = std::move(candidate);
+    return true;
+}
+
+bool DecodeOwnerContinuation(const std::string& bytes, OwnerContinuation& record) {
+    if (bytes.size() > kOwnerContinuationRecordBytes ||
+        !SavedInputLimits::JsonDepthAllowed(bytes)) {
+        return false;
+    }
+    try {
+        const auto json = nlohmann::json::parse(bytes);
+        if (OwnerUnsigned(json.at("version")) != 1 || !json.at("moving_anchor").is_boolean() ||
+            !json.at("water_smoke").is_boolean()) {
+            return false;
+        }
+        const auto avatar_count = OwnerUnsigned(json.at("avatar_count"));
+        const auto body_count = OwnerUnsigned(json.at("body_count"));
+        const auto& avatars = json.at("avatars");
+        const auto& bodies = json.at("bodies");
+        const auto& terrain = json.at("terrain");
+        if (avatar_count > Systems::PhysicsSystem::kMaxRestoredAvatars ||
+            body_count > Systems::PhysicsSystem::kMaxRestoredBodies || !avatars.is_array() ||
+            !bodies.is_array() || avatar_count != avatars.size() || body_count != bodies.size() ||
+            !terrain.is_array() || terrain.size() > Systems::PhysicsSystem::kTerrainBodyHeadroom) {
+            return false;
+        }
+        OwnerContinuation candidate;
+        const auto seed = OwnerUnsigned(json.at("world_seed"));
+        if (seed > UINT32_MAX || !json.at("preset_identity").is_string() ||
+            json.at("preset_identity").get_ref<const std::string&>().size() != 16) {
+            return false;
+        }
+        candidate.world_seed = static_cast<std::uint32_t>(seed);
+        candidate.preset_identity = json.at("preset_identity").get<std::string>();
+        candidate.simulation_tick = OwnerUnsigned(json.at("simulation_tick"));
+        candidate.stream_tick = OwnerUnsigned(json.at("stream_tick"));
+        candidate.moving_anchor = json.at("moving_anchor").get<bool>();
+        candidate.water_smoke = json.at("water_smoke").get<bool>();
+        candidate.origin = ReadAnchor(json.at("origin"));
+        candidate.anchor = ReadAnchor(json.at("anchor"));
+        for (const auto& item : terrain) {
+            const auto id = OwnerUnsigned(item.at("body_id"));
+            if (id > UINT32_MAX) {
+                return false;
+            }
+            candidate.terrain.push_back({.chunk_id = OwnerUnsigned(item.at("chunk_id")),
+                                         .body_id = static_cast<std::uint32_t>(id)});
+        }
+        const auto slot_count = OwnerUnsigned(json.at("slot_count"));
+        const auto& free_slots = json.at("free_slots");
+        const auto& simulation_bodies = json.at("simulation_bodies");
+        const auto& columns = json.at("simulation_columns");
+        if (slot_count > 10240 || !free_slots.is_array() || free_slots.size() > slot_count ||
+            !simulation_bodies.is_array() ||
+            simulation_bodies.size() > Systems::PhysicsSystem::kSimulationColliderBudget ||
+            !columns.is_array() || columns.size() > simulation_bodies.size()) {
+            return false;
+        }
+        candidate.slot_count = static_cast<std::uint32_t>(slot_count);
+        const auto read_ids = [](const auto& values, auto& output) {
+            for (const auto& value : values) {
+                const auto id = OwnerUnsigned(value);
+                if (id > UINT32_MAX) {
+                    throw std::invalid_argument("owner body id");
+                }
+                output.push_back(static_cast<std::uint32_t>(id));
+            }
+        };
+        read_ids(free_slots, candidate.free_slots);
+        read_ids(simulation_bodies, candidate.simulation_terrain.bodies);
+        for (const auto& item : columns) {
+            Systems::PhysicsSystem::SimulationTerrainState::Column column;
+            column.id = OwnerUnsigned(item.at("id"));
+            const auto& heights = item.at("heights");
+            if (!heights.is_array() || heights.size() != column.heights.size()) {
+                return false;
+            }
+            for (std::size_t i = 0; i < column.heights.size(); ++i) {
+                const auto bits = OwnerUnsigned(heights[i]);
+                if (bits > UINT32_MAX) {
+                    return false;
+                }
+                column.heights[i] = std::bit_cast<float>(static_cast<std::uint32_t>(bits));
+                if (!std::isfinite(column.heights[i]) || column.heights[i] < -16777216.0f ||
+                    column.heights[i] >= 16777216.0f) {
+                    return false;
+                }
+            }
+            candidate.simulation_terrain.columns.push_back(column);
+        }
+        std::size_t aggregate =
+            columns.size() *
+            Systems::PhysicsSystem::SimulationTerrainState::Column{}.heights.size() * sizeof(float);
+        std::array<std::uint8_t, World::kMaxAvatarOwnerBytes> encoded{};
+        for (const auto& item : avatars) {
+            World::PlayerAvatarOwnerState avatar;
+            std::size_t size = 0;
+            if (!ReadOwnerPayload(item.at("state"), encoded, size, aggregate) ||
+                !World::DecodeAvatarOwner(std::span(encoded).first(size), avatar) ||
+                OwnerUnsigned(item.at("id")) != avatar.avatar.player_id ||
+                AnchorBits(ReadAnchor(item.at("anchor"))) != AnchorBits(avatar.avatar.position)) {
+                return false;
+            }
+            candidate.avatars.push_back(avatar);
+        }
+        for (const auto& item : bodies) {
+            PhysicsOwnerContinuation body;
+            const auto id = OwnerUnsigned(item.at("id"));
+            std::size_t size = 0;
+            if (id > UINT32_MAX ||
+                !ReadOwnerPayload(item.at("state"), body.state.bytes, size, aggregate)) {
+                return false;
+            }
+            body.owner_id = static_cast<std::uint32_t>(id);
+            body.anchor = ReadAnchor(item.at("anchor"));
+            body.state.size = static_cast<std::uint32_t>(size);
+            if (!item.at("suspended").is_boolean() || !item.at("was_active").is_boolean()) {
+                return false;
+            }
+            body.state.suspended = item.at("suspended").get<bool>();
+            body.state.was_active = item.at("was_active").get<bool>();
+            const auto read_velocity = [](const nlohmann::json& value) {
+                if (!value.is_array() || value.size() != 3) {
+                    throw std::invalid_argument("owner velocity");
+                }
+                Vec3 result{};
+                for (std::size_t i = 0; i < 3; ++i) {
+                    const auto bits = OwnerUnsigned(value[i]);
+                    if (bits > UINT32_MAX) {
+                        throw std::invalid_argument("owner velocity bits");
+                    }
+                    result[static_cast<int>(i)] =
+                        std::bit_cast<float>(static_cast<std::uint32_t>(bits));
+                    if (!std::isfinite(result[static_cast<int>(i)])) {
+                        throw std::invalid_argument("non-finite owner velocity");
+                    }
+                }
+                return result;
+            };
+            body.state.retained_velocity = read_velocity(item.at("velocity"));
+            body.state.retained_angular_velocity = read_velocity(item.at("angular_velocity"));
+            const auto registration = OwnerUnsigned(item.at("registration_slot"));
+            if (registration > 10240) {
+                return false;
+            }
+            body.state.registration_slot = static_cast<std::uint32_t>(registration);
+            candidate.bodies.push_back(body);
+        }
+        const auto& player = json.at("player");
+        if (!player.is_null()) {
+            candidate.player.emplace();
+            std::size_t size = 0;
+            if (OwnerUnsigned(player.at("id")) != 0 ||
+                !ReadOwnerPayload(
+                    player.at("state"), candidate.player->state.bytes, size, aggregate)) {
+                return false;
+            }
+            candidate.player->anchor = ReadAnchor(player.at("anchor"));
+            candidate.player->state.size = static_cast<std::uint32_t>(size);
+        }
+        if (!ValidOwnerContinuation(candidate)) {
+            return false;
+        }
+        record = std::move(candidate);
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
 namespace {
 
 constexpr const char* kRoundtripSchema = "luminumbra.persistence.world_roundtrip.v1";
@@ -747,6 +1228,18 @@ void RequireWaterFloat(const nlohmann::json& value) {
         throw std::invalid_argument("Saved water finite float range refused");
 }
 
+bool WaterGridShapeValid(
+    int resolution, bool simulating, std::size_t depths, std::size_t beds, std::size_t fluxes) {
+    // Resolution is validated by the caller before this bounded multiplication.
+    const bool active = simulating && resolution != 0;
+    const auto cells = static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
+    const bool no_integers = depths == 0u && beds == 0u && fluxes == 0u;
+    const bool flux_valid = fluxes == 0u || fluxes == 2u * depths;
+    const bool complete_integers = depths == beds && flux_valid && (!active || depths == cells);
+    const bool initializing = !simulating && beds == 0u && flux_valid;
+    return no_integers || complete_integers || initializing;
+}
+
 void RequireWaterArrays(const nlohmann::json& value, bool encoded) try {
     const auto& state = value.contains("water_state") ? value.at("water_state") : value;
     const auto& resolution_json = state.at("current_water_resolution");
@@ -806,15 +1299,8 @@ void RequireWaterArrays(const nlohmann::json& value, bool encoded) try {
     }
     // Empty arrays retain historical defaults. Dormant grids and render mirrors are
     // independent of the resolution stamp; populated active integer grids must fill it.
-    const bool active = state.at("has_water_sim").get<bool>() && resolution != 0;
-    const auto cells = static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
-    const bool no_integers = counts[0] == 0u && counts[1] == 0u && counts[2] == 0u;
-    const bool flux_valid = counts[2] == 0u || counts[2] == 2u * counts[0];
-    const bool complete_integers =
-        counts[0] == counts[1] && flux_valid && (!active || counts[0] == cells);
-    const bool initializing =
-        !state.at("has_water_sim").get<bool>() && counts[1] == 0u && flux_valid;
-    if (!no_integers && !complete_integers && !initializing)
+    if (!WaterGridShapeValid(
+            resolution, state.at("has_water_sim").get<bool>(), counts[0], counts[1], counts[2]))
         throw std::invalid_argument("Saved water grid shape refused");
 } catch (const nlohmann::json::exception&) {
     throw std::invalid_argument("Saved water structure refused");
@@ -1353,6 +1839,38 @@ bool ValidateChunkFormatObject(const nlohmann::json& chunk, std::vector<std::str
 }
 
 } // namespace
+
+bool HasValidWaterPersistenceState(const Chunk& chunk) {
+    const int resolution = chunk.current_water_resolution.load();
+    if (resolution < 0 || resolution > 32 ||
+        (resolution != 0 && (resolution < 2 || 32 % resolution != 0)) ||
+        chunk.ticks_below_threshold < 0 || !std::isfinite(chunk.max_water_delta_last_tick)) {
+        return false;
+    }
+    // Reject sizes before visiting cells. Persistence bounds every grid/mirror
+    // to 32x32 cells, and momentum to twice that; no storage is allocated here.
+    if (chunk.water_depth_mm.size() > 1024u || chunk.water_bed_mm.size() > 1024u ||
+        chunk.water_edge_flux.size() > 2048u || chunk.water_level_data.size() > 1024u ||
+        chunk.water_flow_data.size() > 1024u || chunk.water_sim_terrain_height.size() > 1024u ||
+        !WaterGridShapeValid(resolution,
+                             chunk.has_water_sim.load(),
+                             chunk.water_depth_mm.size(),
+                             chunk.water_bed_mm.size(),
+                             chunk.water_edge_flux.size()) ||
+        !WaterDepthValid(chunk)) {
+        return false;
+    }
+    for (const auto* mirror : {&chunk.water_level_data, &chunk.water_sim_terrain_height}) {
+        if (!std::all_of(
+                mirror->begin(), mirror->end(), [](float value) { return std::isfinite(value); })) {
+            return false;
+        }
+    }
+    return std::all_of(
+        chunk.water_flow_data.begin(), chunk.water_flow_data.end(), [](const Vec2& value) {
+            return std::isfinite(value.x) && std::isfinite(value.y);
+        });
+}
 
 const char* WorldPersistenceRoundtripSchema() {
     return kRoundtripSchema;

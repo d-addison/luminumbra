@@ -12,8 +12,10 @@
 
 #include <GLFW/glfw3.h>
 #include <glm/gtc/matrix_transform.hpp>
+#include <limits>
 #include <string>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <limits>
@@ -23,6 +25,13 @@
 namespace Luminumbra::Rendering {
 
 namespace {
+
+GLsizei WaterElementCount(u32 count) {
+    if (count > static_cast<u32>(std::numeric_limits<GLsizei>::max())) {
+        return 0;
+    }
+    return static_cast<GLsizei>(count);
+}
 
 GLuint make_solid_rgba_texture(const unsigned char rgba[4], const std::string& label) {
     GLuint texture = 0;
@@ -163,17 +172,22 @@ void WaterPass::generate_caustics(const RenderContext& ctx) {
     m_caustics_shader->setVec2("u_resolution", glm::vec2(kCausticsResolution, kCausticsResolution));
 
     glBindVertexArray(ctx.screen_quad_vao);
-    Luminumbra::Rendering::AttributedGl::Submit(glDrawArrays, GL_TRIANGLE_STRIP, 0, 4);
+    Luminumbra::Rendering::AttributedGl::Submit(
+        glDrawArrays, static_cast<GLenum>(GL_TRIANGLE_STRIP), 0, 4);
     glBindVertexArray(0);
 
     glEnable(GL_DEPTH_TEST);
     glBindFramebuffer(GL_FRAMEBUFFER, ctx.lit_scene.id);
-    glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // water composite into the internal scene
+    glViewport(
+        0, 0, static_cast<GLsizei>(ctx.internal_w()), static_cast<GLsizei>(ctx.internal_h()));
 }
 
-WaterDrawStats
-WaterPass::execute(const RenderContext& ctx, const WaterPassInput& input, const Camera& camera) {
+WaterDrawStats WaterPass::execute(const RenderContext& ctx,
+                                  const WaterPassInput& input,
+                                  const Camera& camera,
+                                  bool capture_visibility_requested) {
     LUMIN_PROFILE_ZONE_N("GL WaterPass.execute");
+    m_visibility_mask = {};
     WaterDrawStats stats;
     // --- 0. Generate the animated caustics pattern (offscreen) ---
     generate_caustics(ctx);
@@ -194,22 +208,28 @@ WaterPass::execute(const RenderContext& ctx, const WaterPassInput& input, const 
                 "water_shader_unavailable", 0, DiagnosticOwnership::Live, DiagnosticPass::Forward);
             throw std::runtime_error("Water diagnostic shader is unavailable");
         }
-        GLint color_texture = 0;
-        GLint attachment_type = 0;
-        glGetNamedFramebufferAttachmentParameteriv(ctx.lit_scene.id,
-                                                   GL_COLOR_ATTACHMENT0,
-                                                   GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE,
-                                                   &attachment_type);
-        if (attachment_type == GL_TEXTURE) {
+        // Only submitted water needs a contributor plane. Scan at most the prepared draw list,
+        // only while capturing, using the same count conversion as the draw loop.
+        if (std::any_of(input.draw_items.begin(), input.draw_items.end(), [](const auto& item) {
+                return WaterElementCount(item.element_count) != 0;
+            })) {
+            GLint color_texture = 0;
+            GLint attachment_type = 0;
             glGetNamedFramebufferAttachmentParameteriv(ctx.lit_scene.id,
                                                        GL_COLOR_ATTACHMENT0,
-                                                       GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,
-                                                       &color_texture);
+                                                       GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE,
+                                                       &attachment_type);
+            if (attachment_type == GL_TEXTURE) {
+                glGetNamedFramebufferAttachmentParameteriv(ctx.lit_scene.id,
+                                                           GL_COLOR_ATTACHMENT0,
+                                                           GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,
+                                                           &color_texture);
+            }
+            diagnostic_attachment.emplace(ctx.lit_scene.id,
+                                          static_cast<GLuint>(color_texture),
+                                          DiagnosticExtent{ctx.internal_w(), ctx.internal_h()});
+            draw_shader = capture->variant(draw_shader, false);
         }
-        diagnostic_attachment.emplace(ctx.lit_scene.id,
-                                      static_cast<GLuint>(color_texture),
-                                      DiagnosticExtent{ctx.internal_w(), ctx.internal_h()});
-        draw_shader = capture->variant(draw_shader, false);
     }
 
     // --- 2. Activate Shader and Set Uniforms ---
@@ -277,6 +297,10 @@ WaterPass::execute(const RenderContext& ctx, const WaterPassInput& input, const 
     // iterate the pre-built draw list (same chunk order -> byte-stable);
     // stats returned for the call site to fold in.
     for (const auto& item : input.draw_items) {
+        const GLsizei count = WaterElementCount(item.element_count);
+        if (count == 0) {
+            continue;
+        }
         draw_shader->setMat4("u_model", item.model);
         if (auto* capture = GBufferDiagnosticCapture::Current()) {
             // The input contract is a chunk translation, never a guessed asset or GL name.
@@ -322,10 +346,17 @@ WaterPass::execute(const RenderContext& ctx, const WaterPassInput& input, const 
                                     .generated_mesh = mesh_key});
         }
         glBindVertexArray(item.vao_id);
-        Luminumbra::Rendering::AttributedGl::Submit(
-            glDrawElements, GL_TRIANGLES, item.element_count, GL_UNSIGNED_INT, nullptr);
+        Luminumbra::Rendering::AttributedGl::Submit(glDrawElements,
+                                                    static_cast<GLenum>(GL_TRIANGLES),
+                                                    count,
+                                                    static_cast<GLenum>(GL_UNSIGNED_INT),
+                                                    nullptr);
         stats.water_draws++;
         stats.water_indices += item.element_count;
+    }
+
+    if (capture_visibility_requested) {
+        capture_visibility(ctx, input);
     }
 
     // --- 4. Restore OpenGL State ---
@@ -334,6 +365,87 @@ WaterPass::execute(const RenderContext& ctx, const WaterPassInput& input, const 
     glDisable(GL_BLEND);
     glEnable(GL_CULL_FACE);
     return stats;
+}
+
+void WaterPass::capture_visibility(const RenderContext& ctx, const WaterPassInput& input) {
+    if (ctx.frozen_replay || ctx.internal_w() > 4096u || ctx.internal_h() > 4096u) {
+        return;
+    }
+    const int width = static_cast<int>(ctx.internal_w());
+    const int height = static_cast<int>(ctx.internal_h());
+    if (!WaterVisibilityMask::valid_size(width, height) || ctx.lit_scene_depth.id == 0) {
+        return;
+    }
+
+    GLint draw_fbo = 0, read_fbo = 0, texture = 0, pack_buffer = 0;
+    GLint pack_alignment = 0, pack_row_length = 0, pack_skip_rows = 0, pack_skip_pixels = 0;
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw_fbo);
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read_fbo);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
+    glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &pack_buffer);
+    glGetIntegerv(GL_PACK_ALIGNMENT, &pack_alignment);
+    glGetIntegerv(GL_PACK_ROW_LENGTH, &pack_row_length);
+    glGetIntegerv(GL_PACK_SKIP_ROWS, &pack_skip_rows);
+    glGetIntegerv(GL_PACK_SKIP_PIXELS, &pack_skip_pixels);
+
+    // Bound checked before allocation: at most kMaxPixels * 4 bytes read back.
+    const std::size_t count = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    std::vector<unsigned char> rgba(count * 4u);
+    GLuint fbo = 0, color = 0;
+    glGenFramebuffers(1, &fbo);
+    glGenTextures(1, &color);
+    glBindTexture(GL_TEXTURE_2D, color);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, width, height);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color, 0);
+    glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(texture));
+    // Share the exact opaque depth used by the real draw. Depth writes stay OFF.
+    glFramebufferRenderbuffer(
+        GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, ctx.lit_scene_depth.id);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+        const GLfloat zero[4] = {0, 0, 0, 0};
+        // Initialize every texel even when the real draw inherits a scissor or
+        // color write mask. Unwritten pixels must never become water evidence.
+        glClearTexImage(color, 0, GL_RGBA, GL_FLOAT, zero);
+        glDisable(GL_BLEND);
+        // Same program, uniforms, animated vertices and fragment discards. Alpha
+        // is nonzero for every surviving water fragment, independent of its hue.
+        for (const auto& item : input.draw_items) {
+            const GLsizei elements = WaterElementCount(item.element_count);
+            if (elements == 0) {
+                continue;
+            }
+            m_water_shader->setMat4("u_model", item.model);
+            glBindVertexArray(item.vao_id);
+            AttributedGl::Submit(glDrawElements,
+                                 static_cast<GLenum>(GL_TRIANGLES),
+                                 elements,
+                                 static_cast<GLenum>(GL_UNSIGNED_INT),
+                                 nullptr);
+        }
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+        glPixelStorei(GL_PACK_SKIP_ROWS, 0);
+        glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
+        glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+        if (glGetError() == GL_NO_ERROR) {
+            m_visibility_mask = WaterVisibilityMask::FromRgba(width, height, rgba);
+        }
+        glEnable(GL_BLEND);
+    }
+    glPixelStorei(GL_PACK_ALIGNMENT, pack_alignment);
+    glPixelStorei(GL_PACK_ROW_LENGTH, pack_row_length);
+    glPixelStorei(GL_PACK_SKIP_ROWS, pack_skip_rows);
+    glPixelStorei(GL_PACK_SKIP_PIXELS, pack_skip_pixels);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, static_cast<GLuint>(pack_buffer));
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(draw_fbo));
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(read_fbo));
+    glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(texture));
+    glDeleteTextures(1, &color);
+    glDeleteFramebuffers(1, &fbo);
 }
 
 } // namespace Luminumbra::Rendering

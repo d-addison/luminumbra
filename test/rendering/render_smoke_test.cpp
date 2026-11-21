@@ -1,24 +1,44 @@
+#include "../fixtures/TerrainFixtureParams.h"
+#include "../support/UniqueTempPath.h"
 #include "TerrainCullingTestPeer.h"
+#include "luminumbra_client/app/ClientAppContext.h"
+#include "luminumbra_client/app/RuntimeStateRecorder.h"
 #include "luminumbra_client/core/IsolationConfig.h"
+#include "luminumbra_client/core/PresentationClock.h"
+#include "luminumbra_client/core/RuntimeScenarioHarness.h"
+#include "luminumbra_client/core/ScenarioRunner.h"
+#include "luminumbra_client/core/scenarios/ScenarioCommon.h"
 #include "luminumbra_client/rendering/Camera.h"
+#include "luminumbra_client/rendering/DiagnosticReadback.h"
 #include "luminumbra_client/rendering/EnvironmentBrdfLut.gen.h"
+#include "luminumbra_client/rendering/FarLodSystem.h"
 #include "luminumbra_client/rendering/FarVolumeGlBackend.h"
 #include "luminumbra_client/rendering/FarWorldDepthBias.h"
 #include "luminumbra_client/rendering/Mesh.h"
 #include "luminumbra_client/rendering/RenderGraph.h"
 #include "luminumbra_client/rendering/Shader.h"
 #include "luminumbra_client/rendering/ShaderSource.h"
+#include "luminumbra_client/rendering/SkyAtmosphereLut.h"
+#include "luminumbra_client/rendering/TimeOfDayModel.h"
+#include "luminumbra_client/rendering/TreeLod.h"
 #include "luminumbra_client/rendering/passes/AerialPass.h"
 #include "luminumbra_client/rendering/passes/DebugViewPass.h"
 #include "luminumbra_client/rendering/passes/FarWorldPassUniforms.h"
+#include "luminumbra_client/rendering/passes/FoliagePass.h"
 #include "luminumbra_client/rendering/passes/GBufferPass.h"
+#include "luminumbra_client/rendering/passes/GlassOitPass.h"
 #include "luminumbra_client/rendering/passes/LightingPass.h"
 #include "luminumbra_client/rendering/passes/ParticlePass.h"
+#include "luminumbra_client/rendering/passes/SkyboxPass.h"
 #include "luminumbra_client/rendering/passes/SsaoPass.h"
 #include "luminumbra_client/rendering/passes/WaterPass.h"
+#include "luminumbra_client/rendering/passes/WaterfallPass.h"
 #include "luminumbra_common/animation/AnimationRuntime.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/core/FilesystemPath.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/world/Chunk.h"
+#include "luminumbra_common/world/GameSession.h"
 #include "gtest/gtest.h"
 #include <glm/gtc/type_ptr.hpp>
 #include <nlohmann/json.hpp>
@@ -42,6 +62,7 @@
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -49,6 +70,38 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+namespace {
+class DiagnosticGlOutput final : public Luminumbra::Rendering::DiagnosticBundleOutput {
+public:
+    std::array<std::ostringstream, 8> streams;
+    bool committed = false;
+    bool reserve(std::span<const std::string> names) override {
+        return names.size() <= streams.size();
+    }
+    std::ostream* open(std::size_t index) override {
+        return &streams.at(index);
+    }
+    bool close() override {
+        return true;
+    }
+    bool commit() override {
+        committed = true;
+        return true;
+    }
+    void rollback() noexcept override {
+        committed = false;
+    }
+};
+std::uint32_t DiagnosticGlWord(const std::string& bytes, std::size_t offset) {
+    std::uint32_t result = 0;
+    for (unsigned int i = 0; i < 4; ++i) {
+        result |= static_cast<std::uint32_t>(static_cast<unsigned char>(bytes.at(offset + i)))
+                  << (i * 8U);
+    }
+    return result;
+}
+} // namespace
 
 namespace fs = std::filesystem;
 
@@ -61,6 +114,331 @@ namespace {
 #ifndef LUMINUMBRA_TEST_ARTIFACT_DIR
 #define LUMINUMBRA_TEST_ARTIFACT_DIR "."
 #endif
+
+TEST(RenderSmokeTest, StaticPropCollectionPreservesSubmittedLiveTerrainAtEveryLod) {
+    using namespace Luminumbra;
+    using namespace Luminumbra::Rendering;
+    SubmittedLiveTerrain live;
+    const FarWorldSelection suppressed{.requested = FarWorldMode::Legacy,
+                                       .effective = FarWorldMode::Legacy,
+                                       .refusal = FarWorldRefusal::None,
+                                       .advance = false,
+                                       .submit = false};
+    for (const float distance : {65.0f,
+                                 100.0f,
+                                 175.99f,
+                                 176.0f,
+                                 191.99f,
+                                 192.0f,
+                                 192.01f,
+                                 200.0f,
+                                 383.99f,
+                                 384.0f,
+                                 384.01f,
+                                 639.99f,
+                                 640.0f}) {
+        for (const float sign : {-1.0f, 1.0f}) {
+            const glm::vec3 position(sign * distance, 12.0f, -1.0f);
+            const glm::vec3 origin(std::floor(position.x / CHUNK_SIZE_X) * CHUNK_SIZE_X,
+                                   0.0f,
+                                   -static_cast<float>(CHUNK_SIZE_Z));
+            const bool candidate = SelectTreeLod(distance, AuthoredTreeLodConfig(true)) == 3;
+            ASSERT_TRUE(candidate);
+            EXPECT_FALSE(live.covers(position));
+            EXPECT_EQ(SelectStaticPropSubmission({}, candidate, live.covers(position), false),
+                      StaticPropSubmission::Refused);
+            live.add_origin(origin);
+            live.add_origin(origin);
+            ASSERT_TRUE(live.covers(position));
+            EXPECT_EQ(
+                SelectStaticPropSubmission(suppressed, candidate, live.covers(position), false),
+                StaticPropSubmission::Impostor);
+            EXPECT_EQ(SelectStaticPropSubmission(suppressed, false, live.covers(position), false),
+                      StaticPropSubmission::Mesh);
+            EXPECT_FALSE(live.covers(position + glm::vec3(0, 0, CHUNK_SIZE_Z)));
+            live.clear();
+            EXPECT_FALSE(live.covers(position));
+        }
+    }
+    // Preview support follows the submitted slice, independent of the orbit camera.
+    const glm::vec3 anchor(1000.0f, 200.0f, 0.0f);
+    live.add_origin({992.0f, 192.0f, 0.0f});
+    EXPECT_TRUE(live.covers(anchor));
+    EXPECT_FALSE(live.covers(glm::vec3(0.0f)));
+    for (const float invalid : {std::numeric_limits<float>::infinity(),
+                                std::numeric_limits<float>::quiet_NaN(),
+                                std::numeric_limits<float>::max()}) {
+        EXPECT_FALSE(live.covers({invalid, 0, 0}));
+        EXPECT_FALSE(live.covers({0, invalid, 0}));
+        EXPECT_FALSE(live.covers({0, 0, invalid}));
+        live.add_origin({invalid, 0, 0});
+    }
+    EXPECT_FALSE(live.covers(glm::vec3(0.0f)));
+    live.clear();
+    EXPECT_FALSE(live.covers(anchor));
+}
+
+TEST(RenderSmokeTest, SubmittedLiveTerrainRejectsMissingAndInvalidChunksAtBoundaries) {
+    using namespace Luminumbra::Rendering;
+    SubmittedLiveTerrain live;
+    live.add_origin({192, -16, -16});
+    EXPECT_TRUE(live.covers({200, -1, -1}));
+    EXPECT_TRUE(live.covers({200, 0, -1}));
+    EXPECT_FALSE(live.covers({200, 1, -1}));
+    EXPECT_FALSE(live.covers({200, -17, -1}));
+    EXPECT_FALSE(live.covers({191.99f, -1, -1}));
+    EXPECT_FALSE(live.covers({208, -1, -1}));
+    EXPECT_FALSE(live.covers({200, -1, 0}));
+    live.clear();
+    for (const glm::vec3 invalid : {glm::vec3(std::numeric_limits<float>::infinity(), 0, 0),
+                                    glm::vec3(0, std::numeric_limits<float>::quiet_NaN(), 0),
+                                    glm::vec3(0, 0, std::numeric_limits<float>::max()),
+                                    glm::vec3(0, std::numeric_limits<float>::max(), 0)}) {
+        live.add_origin(invalid);
+        EXPECT_FALSE(live.covers(invalid));
+    }
+    EXPECT_FALSE(live.covers({0, 0, 0}));
+    live.add_origin({0, -33554432.0f, 0});
+    EXPECT_TRUE(live.covers({0, -33554432.0f, 0}));
+    EXPECT_FALSE(live.covers({16, -33554432.0f, 0}));
+    live.clear();
+    EXPECT_FALSE(live.covers({0, -33554432.0f, 0}));
+    live.add_origin({0, 33554416.0f, 0});
+    EXPECT_TRUE(live.covers({0, 33554432.0f, 0}));
+    EXPECT_FALSE(live.covers({0, 33554436.0f, 0}));
+    FarLodSystem far;
+    far.submitted_live_terrain().add_origin({0, 0, 0});
+    ASSERT_TRUE(far.submitted_live_terrain().covers({0, 1, 0}));
+    far.prepare_world_swap();
+    EXPECT_FALSE(far.submitted_live_terrain().covers({0, 1, 0}));
+}
+
+TEST(RenderSmokeTest, SubmittedLiveTerrainBulkFramesRetainCapacityAndReplaceCoverage) {
+    using namespace Luminumbra::Rendering;
+    SubmittedLiveTerrain live;
+    const std::array<glm::vec4, 6> origins{{{32, 0, 0, 1},
+                                            {-16, -16, 0, 1},
+                                            {0, 0, 0, 1},
+                                            {32, 0, 0, 1},
+                                            {std::numeric_limits<float>::infinity(), 0, 0, 1},
+                                            {0, std::numeric_limits<float>::max(), 0, 1}}};
+    live.assign_origins(origins);
+    const auto capacity = live.submission_capacity();
+    ASSERT_GE(capacity, origins.size());
+    // Repeated, reversed, shrinking, empty and invalid-only frames all reuse storage.
+    for (int frame = 0; frame < 8; ++frame) {
+        live.clear();
+        EXPECT_EQ(live.submission_capacity(), capacity);
+        live.assign_origins(origins);
+        EXPECT_TRUE(live.covers({32, 1, 0}));
+        EXPECT_TRUE(live.covers({-1, 0, 0}));
+        EXPECT_TRUE(live.covers({0, 1, 0}));
+        EXPECT_FALSE(live.covers({16, 1, 0}));
+        live.remove_chunk(Luminumbra::Chunk::calculate_id({1, 0, 0}));
+        EXPECT_TRUE(live.covers({32, 1, 0}));
+        live.remove_chunk(Luminumbra::Chunk::calculate_id({2, 0, 0}));
+        EXPECT_FALSE(live.covers({32, 1, 0}));
+        EXPECT_TRUE(live.covers({0, 1, 0}));
+        EXPECT_TRUE(live.covers({-1, 0, 0}));
+        live.remove_chunk(Luminumbra::Chunk::calculate_id({2, 0, 0}));
+        auto reversed = origins;
+        std::reverse(reversed.begin(), reversed.end());
+        live.assign_origins(reversed);
+        EXPECT_TRUE(live.covers({32, 1, 0}));
+        live.assign_origins(std::span<const glm::vec4>(origins).subspan(4));
+        EXPECT_FALSE(live.covers({0, 1, 0}));
+        live.assign_origins({});
+        EXPECT_FALSE(live.covers({-1, 0, 0}));
+        EXPECT_EQ(live.submission_capacity(), capacity);
+    }
+    // Incremental residency and bulk submission can both be queried and retired.
+    live.add_origin({16, 0, 0});
+    EXPECT_TRUE(live.covers({16, 1, 0}));
+    live.assign_origins(origins);
+    EXPECT_FALSE(live.covers({16, 1, 0}));
+}
+
+TEST(RenderSmokeTest, StaticPropCollectionKeepsFarSupportAfterLiveSubmissionDisappears) {
+    using namespace Luminumbra::Rendering;
+    SubmittedLiveTerrain live;
+    const glm::vec3 position(200, 12, 0);
+    live.add_origin({192, 0, 0});
+    EXPECT_EQ(SelectStaticPropSubmission({}, true, live.covers(position), false),
+              StaticPropSubmission::Impostor);
+    live.clear();
+    EXPECT_EQ(SelectStaticPropSubmission({}, true, live.covers(position), true),
+              StaticPropSubmission::Impostor);
+    EXPECT_EQ(SelectStaticPropSubmission({}, true, live.covers(position), false),
+              StaticPropSubmission::Refused);
+}
+
+TEST(RenderSmokeTest, VisibleCanopyKeepsResidentSupportWhenGroundIsFrustumCulled) {
+    using namespace Luminumbra;
+    using namespace Luminumbra::Rendering;
+    const glm::vec3 root(100, 12, 0);
+    const IVec3 ground(6, 0, 0);
+    const IVec3 canopy(6, 3, 0);
+    // An upward view can include the canopy above y=32 but exclude its ground.
+    glm::vec4 planes[6];
+    std::fill_n(planes, 6, glm::vec4(0, 0, 0, 1));
+    planes[0] = glm::vec4(0, 1, 0, -32);
+    const auto visible = TerrainCullingTestPeer::Cull({ground, canopy}, planes);
+    ASSERT_FALSE(visible.contains(Chunk::calculate_id(ground)));
+    ASSERT_TRUE(visible.contains(Chunk::calculate_id(canopy)));
+
+    FarLodSystem far;
+    auto& resident = far.resident_live_terrain();
+    auto& submitted = far.submitted_live_terrain();
+    resident.add_origin({96, 0, 0});
+    submitted.add_origin({96, 0, 0});
+    ASSERT_TRUE(submitted.covers(root));
+    submitted.clear(); // No ground draw in the upward view.
+    ASSERT_FALSE(submitted.covers(root));
+    ASSERT_TRUE(resident.covers(root));
+    ASSERT_EQ(SelectTreeLod(glm::length(root), AuthoredTreeLodConfig(true)), 3);
+    EXPECT_EQ(SelectStaticPropSubmission({}, true, resident.covers(root), false),
+              StaticPropSubmission::Impostor);
+    resident.remove_chunk(Chunk::calculate_id(ground));
+    EXPECT_FALSE(resident.covers(root));
+    EXPECT_EQ(SelectStaticPropSubmission({}, true, resident.covers(root), false),
+              StaticPropSubmission::Refused);
+}
+
+TEST(RenderSmokeTest, AuthoredTreeBandUsesResidentLiveTerrainWithoutFarSupport) {
+    using namespace Luminumbra;
+    using namespace Luminumbra::Rendering;
+    FarLodSystem far;
+    far.set_enabled(true);
+    const auto refused = SelectFarWorld(
+        FarWorldMode::Ladder, FarWorldPurpose::World, FarWorldRefusal::BackendUnavailable);
+    for (const float distance : {65.0f, 100.0f, 175.99f, 176.0f, 200.0f, 384.0f, 640.0f}) {
+        for (const float sign : {-1.0f, 1.0f}) {
+            SCOPED_TRACE(::testing::Message() << distance << " sign " << sign);
+            const glm::vec3 root(sign * distance, 0, 0);
+            // A root on a top face must also find the resident chunk below it.
+            const IVec3 coords(static_cast<int>(std::floor(root.x / CHUNK_SIZE_X)), -1, 0);
+            auto& resident = far.resident_live_terrain();
+            resident.add_origin(glm::vec3(coords) *
+                                glm::vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z));
+            far.submitted_live_terrain().clear();
+            ASSERT_FALSE(far.submitted_live_terrain().covers(root));
+            ASSERT_FALSE(far.terrain_resident_at(root));
+            ASSERT_TRUE(resident.covers(root));
+            const bool candidate = SelectTreeLod(distance, AuthoredTreeLodConfig(true)) == 3;
+            ASSERT_TRUE(candidate);
+            for (auto selection : {FarWorldSelection{}, refused}) {
+                for (const bool submit : {false, true}) {
+                    selection.submit = submit;
+                    EXPECT_EQ(SelectStaticPropSubmission(
+                                  selection, candidate, resident.covers(root), false),
+                              StaticPropSubmission::Impostor);
+                    resident.remove_chunk(Chunk::calculate_id(coords));
+                    EXPECT_FALSE(resident.covers(root));
+                    EXPECT_EQ(SelectStaticPropSubmission(
+                                  selection, candidate, resident.covers(root), false),
+                              StaticPropSubmission::Refused);
+                    resident.add_origin(glm::vec3(coords) *
+                                        glm::vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z));
+                }
+            }
+            resident.clear();
+        }
+    }
+}
+
+TEST(RenderSmokeTest, ResidentLiveTerrainRetirementDoesNotRetainStaleSupport) {
+    using namespace Luminumbra;
+    using namespace Luminumbra::Rendering;
+    FarLodSystem far;
+    auto& resident = far.resident_live_terrain();
+    resident.add_origin({96, 0, 0});
+    resident.add_origin({96, 0, 0}); // Replacement keeps one ownership entry.
+    resident.add_origin({112, 0, 0});
+    resident.remove_chunk(Chunk::calculate_id({6, 0, 0}));
+    resident.remove_chunk(Chunk::calculate_id({6, 0, 0})); // Missing removal is harmless.
+    EXPECT_FALSE(resident.covers({100, 12, 0}));
+    EXPECT_TRUE(resident.covers({116, 12, 0}));
+    far.set_enabled(false);
+    EXPECT_TRUE(resident.covers({116, 12, 0}));
+    for (const float invalid : {std::numeric_limits<float>::quiet_NaN(),
+                                std::numeric_limits<float>::infinity(),
+                                std::numeric_limits<float>::max()}) {
+        resident.add_origin({invalid, 0, 0});
+        EXPECT_FALSE(resident.covers({invalid, 0, 0}));
+    }
+    far.prepare_world_swap();
+    EXPECT_TRUE(resident.covers({116, 12, 0})); // The drain retains live GPU allocations.
+    far.shutdown();
+    EXPECT_FALSE(resident.covers({116, 12, 0}));
+}
+
+TEST(RenderSmokeTest, StaticPropCollectionGatesOnlyFarImpostorsAndKeepsMeshFallback) {
+    using namespace Luminumbra::Rendering;
+    GBufferPass pass;
+    const auto legacy =
+        SelectFarWorld(FarWorldMode::Legacy, FarWorldPurpose::World, FarWorldRefusal::None);
+    const auto ladder =
+        SelectFarWorld(FarWorldMode::Ladder, FarWorldPurpose::World, FarWorldRefusal::None);
+    const auto refused = SelectFarWorld(
+        FarWorldMode::Ladder, FarWorldPurpose::World, FarWorldRefusal::BackendUnavailable);
+    const auto shader_refused = pass.SelectFarWorldRenderer(ladder);
+    ASSERT_EQ(refused.requested, FarWorldMode::Ladder);
+    ASSERT_EQ(refused.effective, FarWorldMode::Legacy);
+    ASSERT_EQ(shader_refused.effective, FarWorldMode::Legacy);
+    ASSERT_EQ(shader_refused.refusal, FarWorldRefusal::ShaderProgramUnavailable);
+    ASSERT_TRUE(refused.submit);
+    ASSERT_TRUE(shader_refused.submit);
+    for (auto selection : {legacy, ladder, refused, shader_refused}) {
+        for (const bool submit : {false, true}) {
+            selection.submit = submit;
+            for (const bool resident : {false, true}) {
+                EXPECT_EQ(SelectStaticPropSubmission(selection, true, true, resident),
+                          StaticPropSubmission::Impostor);
+                EXPECT_EQ(SelectStaticPropSubmission(selection, false, true, resident),
+                          StaticPropSubmission::Mesh);
+                EXPECT_EQ(SelectStaticPropSubmission(selection, false, false, resident),
+                          StaticPropSubmission::Mesh);
+                const bool far_allowed = submit && resident;
+                EXPECT_EQ(SelectStaticPropSubmission(selection, true, false, resident),
+                          far_allowed ? StaticPropSubmission::Impostor
+                                      : StaticPropSubmission::Refused);
+            }
+        }
+    }
+}
+
+TEST(RenderSmokeTest, LadderImpostorsRequireConfirmedTerrainCoverage) {
+    using namespace Luminumbra;
+    using namespace Luminumbra::Rendering;
+    auto ladder =
+        SelectFarWorld(FarWorldMode::Ladder, FarWorldPurpose::World, FarWorldRefusal::None);
+    ASSERT_EQ(ladder.effective, FarWorldMode::Ladder);
+    FarLodSystem far;
+    const glm::vec3 root(200, 12, 0);
+    // No submitted chunks, no resident live chunks, and unknown Ladder coverage.
+    EXPECT_FALSE(far.submitted_live_terrain().covers(root));
+    EXPECT_FALSE(far.resident_live_terrain().covers(root));
+    EXPECT_EQ(SelectStaticPropSubmission(ladder, true, false, false),
+              StaticPropSubmission::Refused);
+    // Confirmed selected-backend far coverage can support an impostor.
+    EXPECT_EQ(SelectStaticPropSubmission(ladder, true, false, true),
+              StaticPropSubmission::Impostor);
+    far.resident_live_terrain().add_origin({192, 0, 0});
+    for (const bool submit : {false, true}) {
+        ladder.submit = submit;
+        EXPECT_EQ(SelectStaticPropSubmission(
+                      ladder, true, far.resident_live_terrain().covers(root), false),
+                  StaticPropSubmission::Impostor);
+        EXPECT_EQ(SelectStaticPropSubmission(ladder, true, false, true),
+                  submit ? StaticPropSubmission::Impostor : StaticPropSubmission::Refused);
+        EXPECT_EQ(SelectStaticPropSubmission(ladder, false, false, false),
+                  StaticPropSubmission::Mesh);
+    }
+    far.resident_live_terrain().remove_chunk(Chunk::calculate_id({12, 0, 0}));
+    EXPECT_EQ(
+        SelectStaticPropSubmission(ladder, true, far.resident_live_terrain().covers(root), false),
+        StaticPropSubmission::Refused);
+}
 
 struct ShaderProgramSpec {
     const char* name;
@@ -165,6 +543,52 @@ std::string ReadTextFile(const fs::path& path) {
     return stream.str();
 }
 
+std::string ReadSourceFile(const std::filesystem::path& path) {
+    auto text = ReadTextFile(path);
+    // Source contracts compare logical lines; retain all non-CRLF bytes.
+    // This in-place pass is bounded by the source bytes already read.
+    std::size_t output = 0;
+    for (std::size_t input = 0; input < text.size(); ++input) {
+        if (text[input] != '\r' || input + 1 == text.size() || text[input + 1] != '\n') {
+            text[output++] = text[input];
+        }
+    }
+    text.resize(output);
+    return text;
+}
+
+TEST(RenderSmokeTest, SourceReaderNormalizesOnlyCrLf) {
+    const Luminumbra::TestSupport::ScopedTempFile temporary("source_lines_", ".cpp");
+    const auto& path = temporary.Path();
+    constexpr std::array<std::string_view, 7> inputs{"",
+                                                     "one\ntwo\n",
+                                                     "one\r\ntwo\r\n",
+                                                     "one\rtwo\r",
+                                                     "one\r\ntwo\nthree\r\n",
+                                                     "\r\r\nlast\r",
+                                                     "no terminator"};
+    constexpr std::array<std::string_view, 7> expected{"",
+                                                       "one\ntwo\n",
+                                                       "one\ntwo\n",
+                                                       "one\rtwo\r",
+                                                       "one\ntwo\nthree\n",
+                                                       "\r\nlast\r",
+                                                       "no terminator"};
+    for (std::size_t index = 0; index < inputs.size(); ++index) {
+        SCOPED_TRACE(index);
+        {
+            std::ofstream output(path, std::ios::binary);
+            output << inputs[index];
+            output.close();
+            ASSERT_TRUE(output.good());
+        }
+        EXPECT_EQ(ReadTextFile(path), inputs[index]);
+        EXPECT_EQ(ReadSourceFile(path), expected[index]);
+    }
+    ASSERT_TRUE(fs::remove(path));
+    EXPECT_TRUE(ReadSourceFile(path).empty());
+}
+
 bool ReadShaderSourceRecursive(const fs::path& path,
                                std::unordered_set<std::string>& include_stack,
                                std::string& source,
@@ -223,7 +647,7 @@ bool ReadShaderSource(const fs::path& path, std::string& source, std::string& di
 // scan the combined pipeline + pass sources.
 std::string ReadRenderPipelineCombinedSources() {
     std::string combined =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
     const fs::path pass_dir = SourceRoot() / "src/luminumbra_client/rendering/passes";
     if (fs::exists(pass_dir)) {
         std::vector<fs::path> pass_files;
@@ -235,7 +659,7 @@ std::string ReadRenderPipelineCombinedSources() {
         }
         std::sort(pass_files.begin(), pass_files.end());
         for (const fs::path& pass_file : pass_files) {
-            combined += ReadTextFile(pass_file);
+            combined += ReadSourceFile(pass_file);
         }
     }
     return combined;
@@ -414,6 +838,8 @@ GLuint LinkProgram(const ShaderProgramSpec& spec) {
 }
 
 std::vector<ShaderProgramSpec> PipelineProgramSpecs() {
+    // Also consumed by the offline GLSL linker. Keep entries literal so additions
+    // cannot escape its exhaustive registry parser and permutation coverage check.
     return {
         {"basic", "basic.vert", "basic.frag"},
         {"g_buffer", "g_buffer.vert", "g_buffer.frag"},
@@ -443,6 +869,22 @@ std::vector<ShaderProgramSpec> PipelineProgramSpecs() {
         {"ssao_bilateral_upsample", "ssao.vert", "ssao_bilateral_upsample.frag"},
         // Fidelity: screen-space crepuscular rays (god rays).
         {"god_rays", "ssao.vert", "god_rays.frag"},
+        {"tree_impostor", "tree_impostor.vert", "tree_impostor.frag"},
+        {"static_asset", "static_asset.vert", "static_asset.frag"},
+        {"shadow_tint", "shadow_tint.vert", "shadow_tint.frag"},
+        {"plant_procgen", "plant_procgen.vert", "plant_procgen.frag"},
+        {"waterfall", "basic.vert", "waterfall.frag"},
+        {"caustics_generator", "lighting_pass.vert", "caustics_generator.frag"},
+        {"taau_resolve", "ssao.vert", "taau_resolve.frag"},
+        {"glass_oit", "glass_oit.vert", "glass_oit.frag"},
+        {"glass_oit_resolve", "volumetric_lighting.vert", "glass_oit_resolve.frag"},
+        {"aerial_perspective", "ssao.vert", "volumetric_lighting.frag"},
+        {"lightning_overlay", "lightning_overlay.vert", "lightning_overlay.frag"},
+        {"weather_overlay", "ssao.vert", "weather_system.frag"},
+        {"debug_view", "fullscreen_tri.vert", "debug_view.frag"},
+        {"scent_decal", "fullscreen_tri.vert", "scent_decal.frag"},
+        // The live particle path omits geometry; retain both registered pipelines.
+        {"magical_particles_billboards", "magical_particles.vert", "magical_particles.frag"},
     };
 }
 
@@ -1298,9 +1740,9 @@ TEST(RenderSmokeTest, RenderHealthGateEmitsAnalysisArtifact) {
     }
 
     const std::string header =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
     const std::string source =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
     ASSERT_FALSE(header.empty());
     ASSERT_FALSE(source.empty());
 
@@ -2365,7 +2807,457 @@ private:
     GLuint target = 0, fbo = 0, vao = 0, vbo = 0;
     std::array<GLuint, 6> inputs{};
 };
+void CompileCanopyProbeProgram(GLuint& program) {
+    std::string source, positions, diagnostic;
+    ASSERT_TRUE(
+        ReadShaderSource(SourceRoot() / "res/shaders/lighting_pass.frag", source, diagnostic))
+        << diagnostic;
+    ASSERT_TRUE(ReadShaderSource(
+        SourceRoot() / "res/shaders/far_world_position.glsl", positions, diagnostic))
+        << diagnostic;
+    const auto begin = source.find("float computeSkyVisibility(");
+    ASSERT_NE(begin, std::string::npos);
+    const auto end = source.find("void main()", begin);
+    ASSERT_NE(end, std::string::npos);
+    // Compile the shipping march and position decoder with controlled geometry.
+    std::string fragmentSource = R"(#version 450 core
+out vec4 FragColor;
+uniform sampler2D gPosition, u_sceneDepth;
+uniform mat4 u_inverseView, u_projection;
+uniform float u_caveSkyMaxDist, u_caveThickness, u_caveAmbientFloor;
+uniform int u_caveSkySteps;
+uniform vec3 probePosition;
+#define farWorldPosition decodePosition
+)" + positions + R"(
+#undef farWorldPosition
+int positionTaps = 0;
+bool farWorldPosition(sampler2D storedPosition, sampler2D floatDepth, vec2 uv,
+                      inout vec3 position) {
+    ++positionTaps;
+    return decodePosition(storedPosition, floatDepth, uv, position);
+}
+)" + source.substr(begin, end - begin) +
+                                 R"(
+void main() {
+    float visibility = computeSkyVisibility(probePosition, vec3(0, 1, 0));
+    FragColor = vec4(visibility, float(positionTaps), 0, 1);
+})";
+    const GLuint fragment = glCreateShader(GL_FRAGMENT_SHADER);
+    const char* fragmentText = fragmentSource.c_str();
+    glShaderSource(fragment, 1, &fragmentText, nullptr);
+    glCompileShader(fragment);
+    GLint compiled = GL_FALSE;
+    glGetShaderiv(fragment, GL_COMPILE_STATUS, &compiled);
+    ASSERT_EQ(compiled, GL_TRUE) << GetShaderInfoLog(fragment);
+    const GLuint vertex = CompileShader(SourceRoot() / "res/shaders/ssao.vert", GL_VERTEX_SHADER);
+    ASSERT_NE(vertex, 0u);
+    program = glCreateProgram();
+    glAttachShader(program, vertex);
+    glAttachShader(program, fragment);
+    glLinkProgram(program);
+    glDeleteShader(vertex);
+    glDeleteShader(fragment);
+    GLint linked = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    ASSERT_EQ(linked, GL_TRUE) << GetProgramInfoLog(program);
+}
+
+void ExpectCanopyRoomCrossings(GLuint program,
+                               FullscreenFloatProbe& probe,
+                               const glm::mat4& projection) {
+    constexpr int planeRows = 4096;
+    const auto roomPositions = [&](float ceilingHeight, bool floorVisible = true) {
+        // The fixed row count bounds storage; include the fragment's floor so
+        // samples below the horizon contain actual open-side geometry.
+        std::vector<glm::vec4> room(planeRows, glm::vec4(0));
+        for (int row = 0; row < planeRows; ++row) {
+            const float ndcY = 2 * (static_cast<float>(row) + 0.5f) / planeRows - 1;
+            if (!floorVisible && ndcY < 0) {
+                continue;
+            }
+            const float surfaceY = ndcY > 0 ? ceilingHeight : -1.7f;
+            room[static_cast<std::size_t>(row)] =
+                glm::vec4(0, surfaceY, -surfaceY * projection[1][1] / ndcY, 1);
+        }
+        return room;
+    };
+    glUniform1f(glGetUniformLocation(program, "u_caveSkyMaxDist"), 24);
+    glUniform1f(glGetUniformLocation(program, "u_caveThickness"), 1.5f);
+    glUniform1i(glGetUniformLocation(program, "u_caveSkySteps"), 8);
+    // All these room samples are near-lane positions; float depth still
+    // validates each Ladder read independently of the stored positions.
+    probe.texture(1, {glm::vec4(0.5f)});
+    for (bool floorVisible : {false, true}) {
+        probe.texture(0, roomPositions(1, floorVisible), planeRows);
+        const auto firstCeiling = probe.draw()[16];
+        EXPECT_LT(firstCeiling.r, 0.3f) << "a ceiling crossed in the first 3 m interval occludes";
+        EXPECT_GT(firstCeiling.g, 2);
+        EXPECT_LE(firstCeiling.g, 40);
+    }
+    glUniform3f(glGetUniformLocation(program, "probePosition"), 0, -0.85f, -12);
+    probe.texture(0, roomPositions(0.1f, false), planeRows);
+    EXPECT_LT(probe.draw()[16].r, 0.3f)
+        << "the first refined back-side hit can precede an empty open-side probe";
+    glUniform3f(glGetUniformLocation(program, "probePosition"), 0, -1.7f, -12);
+
+    // Account for the sampled texel centre when placing the ceiling around
+    // the second coarse tap's thickness cutoff.
+    const float coarseY = -1.65f + 6;
+    const float coarseUv = 0.5f + 0.5f * projection[1][1] * coarseY / 12;
+    const float sampledNdc = 2 * (std::floor(coarseUv * planeRows) + 0.5f) / planeRows - 1;
+    const float surfaceScale = glm::length(glm::vec2(1, projection[1][1] / sampledNdc));
+    float cutoffVisibility[2]{};
+    int cutoffIndex = 0;
+    for (float gap : {1.499f, 1.501f}) {
+        const float height = (glm::length(glm::vec2(coarseY, 12)) - gap) / surfaceScale;
+        probe.texture(0, roomPositions(height), planeRows);
+        const auto result = probe.draw()[16];
+        EXPECT_LT(result.r, 0.4f);
+        EXPECT_LE(result.g, 40);
+        cutoffVisibility[cutoffIndex++] = result.r;
+    }
+    EXPECT_NEAR(cutoffVisibility[0], cutoffVisibility[1], 0.005f)
+        << "crossings on both sides of the thickness cutoff use the same intersection";
+}
 } // namespace
+
+TEST(RenderSmokeTest, CanopySkyVisibilityRecoversCeilingAfterEmptyCoarseSample) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    GLuint program = 0;
+    ASSERT_NO_FATAL_FAILURE(CompileCanopyProbeProgram(program));
+    FullscreenFloatProbe probe;
+    glUseProgram(program);
+    glUniform1i(glGetUniformLocation(program, "gPosition"), 0);
+    glUniform1i(glGetUniformLocation(program, "u_sceneDepth"), 1);
+    SetMat4Identity(program, "u_inverseView");
+    const auto projection =
+        Luminumbra::Rendering::ReversedZPerspective(glm::radians(60.0f), 1.0f, 0.1f, 3200.0f);
+    const auto inverseProjection = glm::inverse(projection);
+    glUniformMatrix4fv(
+        glGetUniformLocation(program, "u_projection"), 1, GL_FALSE, &projection[0][0]);
+    glUniformMatrix4fv(glGetUniformLocation(program, "u_gbufferInverseProjection"),
+                       1,
+                       GL_FALSE,
+                       &inverseProjection[0][0]);
+    glUniform3f(glGetUniformLocation(program, "probePosition"), 0, -3, -12);
+    glUniform1f(glGetUniformLocation(program, "u_caveSkyMaxDist"), 24);
+    glUniform1f(glGetUniformLocation(program, "u_caveAmbientFloor"), 0.06f);
+    glUniform1f(glGetUniformLocation(program, "u_caveThickness"), 1.5f);
+    glUniform1i(glGetUniformLocation(program, "u_caveSkySteps"), 8);
+    // A finite y=2 roof, z in [-60,-2.5]. The first coarse ray point at
+    // y=0.05 projects beyond its far edge; the next two gaps exceed 1.5 m.
+    // Fixed 4096-row buffers bound storage and resolve the refined crossing.
+    constexpr int rows = 4096;
+    std::vector<glm::vec4> positions(rows, glm::vec4(0));
+    std::vector<glm::vec4> depths(rows, glm::vec4(0));
+    for (int row = 0; row < rows; ++row) {
+        const float ndcY = 2 * (static_cast<float>(row) + 0.5f) / rows - 1;
+        if (ndcY <= 0) {
+            continue;
+        }
+        const glm::vec4 position(0, 2, -2 * projection[1][1] / ndcY, 1);
+        if (position.z < -60 || position.z > -2.5f) {
+            continue;
+        }
+        const glm::vec4 clip = projection * position;
+        positions[static_cast<std::size_t>(row)] = position;
+        depths[static_cast<std::size_t>(row)] = glm::vec4(clip.z / clip.w);
+    }
+    for (int ladder : {0, 1}) {
+        SCOPED_TRACE(ladder);
+        glUniform1i(glGetUniformLocation(program, "u_farWorldLadder"), ladder);
+        probe.texture(0, positions, rows);
+        probe.texture(1, depths, rows);
+        for (int steps : {8, 16}) {
+            glUniform1i(glGetUniformLocation(program, "u_caveSkySteps"), steps);
+            const auto ceiling = probe.draw()[16];
+            EXPECT_LT(ceiling.r, 0.4f) << "empty coarse taps must not hide the real ceiling";
+            EXPECT_GT(ceiling.g, 3);
+            EXPECT_LE(ceiling.g, 40);
+        }
+        probe.texture(0, std::vector<glm::vec4>(rows, glm::vec4(0)), rows);
+        EXPECT_FLOAT_EQ(probe.draw()[16].r, 1) << "empty recovery cannot invent geometry";
+        if (ladder != 0) {
+            probe.texture(0, positions, rows);
+            probe.texture(1, std::vector<glm::vec4>(rows, glm::vec4(0)), rows);
+            EXPECT_FLOAT_EQ(probe.draw()[16].r, 1) << "stale positions need valid depth";
+        }
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteProgram(program);
+}
+
+TEST(RenderSmokeTest, CanopyEmptyRecoveryRetainsCoarseHitAcrossForegroundThenSky) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    GLuint program = 0;
+    ASSERT_NO_FATAL_FAILURE(CompileCanopyProbeProgram(program));
+    FullscreenFloatProbe probe;
+    glUseProgram(program);
+    glUniform1i(glGetUniformLocation(program, "gPosition"), 0);
+    glUniform1i(glGetUniformLocation(program, "u_sceneDepth"), 1);
+    SetMat4Identity(program, "u_inverseView");
+    const auto projection =
+        Luminumbra::Rendering::ReversedZPerspective(glm::radians(60.0f), 1.0f, 0.1f, 3200.0f);
+    const auto inverseProjection = glm::inverse(projection);
+    glUniformMatrix4fv(
+        glGetUniformLocation(program, "u_projection"), 1, GL_FALSE, &projection[0][0]);
+    glUniformMatrix4fv(glGetUniformLocation(program, "u_gbufferInverseProjection"),
+                       1,
+                       GL_FALSE,
+                       &inverseProjection[0][0]);
+    glUniform3f(glGetUniformLocation(program, "probePosition"), 0, -3.05f, -12);
+    glUniform1f(glGetUniformLocation(program, "u_caveSkyMaxDist"), 24);
+    glUniform1f(glGetUniformLocation(program, "u_caveAmbientFloor"), 0.06f);
+    glUniform1f(glGetUniformLocation(program, "u_caveThickness"), 1.5f);
+    glUniform1i(glGetUniformLocation(program, "u_caveSkySteps"), 8);
+    // Fixed 4096-row textures isolate the 6 m coarse hit and 4.5 m midpoint.
+    // Exercise empty recovery and ordinary refinement with an open 3 m tap.
+    constexpr int rows = 4096;
+    for (bool openPrevious : {false, true}) {
+        SCOPED_TRACE(openPrevious);
+        std::vector<glm::vec4> positions(rows, glm::vec4(0));
+        std::vector<glm::vec4> depths(rows, glm::vec4(0));
+        glm::vec3 coarsePosition(0);
+        for (float distance : {3.0f, 6.0f, 4.5f}) {
+            if (distance == 3 && !openPrevious) {
+                continue;
+            }
+            const glm::vec3 point(0, distance - 3, -12);
+            const float gap = distance == 3 ? 0.0f : distance == 6 ? 0.8f : 8.0f;
+            const glm::vec3 position = point * (1 - gap / glm::length(point));
+            const glm::vec4 clip = projection * glm::vec4(position, 1);
+            const auto row = static_cast<std::size_t>((0.5f + 0.5f * clip.y / clip.w) * rows);
+            ASSERT_LT(row, positions.size());
+            positions[row] = glm::vec4(position, 1);
+            depths[row] = glm::vec4(clip.z / clip.w);
+            if (distance == 6) {
+                coarsePosition = position;
+            }
+        }
+        // Evaluate the base formula independently using the uploaded coarse hit.
+        const float gap = glm::length(glm::vec3(0, 3, -12)) - glm::length(coarsePosition);
+        const float ramp = (gap - 0.75f) / 0.75f;
+        const float baseOcclusion = (1 - glm::length(coarsePosition - glm::vec3(0, -3, -12)) / 24) *
+                                    (1 - ramp * ramp * (3 - 2 * ramp));
+        ASSERT_GT(baseOcclusion, 0.7f);
+        for (int ladder : {0, 1}) {
+            SCOPED_TRACE(ladder);
+            glUniform1i(glGetUniformLocation(program, "u_farWorldLadder"), ladder);
+            probe.texture(0, positions, rows);
+            probe.texture(1, depths, rows);
+            const auto result = probe.draw()[16];
+            EXPECT_GE((1 - result.r) / 0.94f, baseOcclusion - 0.000001f);
+            EXPECT_NEAR(result.r, 1 - 0.94f * baseOcclusion, 0.000001f);
+            EXPECT_FLOAT_EQ(result.g, openPrevious ? 5.0f : 11.0f)
+                << "three coarse reads plus two ordinary or eight empty-recovery reads";
+            EXPECT_LE(result.g, 40);
+            if (ladder != 0) {
+                probe.texture(1, std::vector<glm::vec4>(rows, glm::vec4(0)), rows);
+                EXPECT_FLOAT_EQ(probe.draw()[16].r, 1)
+                    << "coarse preservation still requires valid Ladder depth";
+            }
+        }
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteProgram(program);
+}
+
+TEST(RenderSmokeTest, CanopySkyVisibilityRejectsForegroundAndRetainsRealCeilings) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    GLuint program = 0;
+    ASSERT_NO_FATAL_FAILURE(CompileCanopyProbeProgram(program));
+    FullscreenFloatProbe probe;
+    glUseProgram(program);
+    glUniform1i(glGetUniformLocation(program, "gPosition"), 0);
+    glUniform1i(glGetUniformLocation(program, "u_sceneDepth"), 1);
+    probe.texture(1, {glm::vec4(0.5f)});
+    SetMat4Identity(program, "u_inverseView");
+    glm::mat4 projection(1);
+    projection[1][1] = 0.01f; // Keep the entire 24 m upward march in view.
+    glUniformMatrix4fv(
+        glGetUniformLocation(program, "u_projection"), 1, GL_FALSE, &projection[0][0]);
+    glm::mat4 inverseProjection(1);
+    inverseProjection[2][2] = -1; // Valid depth reconstruction; the near lane reads gPosition.
+    glUniformMatrix4fv(glGetUniformLocation(program, "u_gbufferInverseProjection"),
+                       1,
+                       GL_FALSE,
+                       &inverseProjection[0][0]);
+    glUniform1f(glGetUniformLocation(program, "u_caveAmbientFloor"), 0.06f);
+    glUniform3f(glGetUniformLocation(program, "probePosition"), 0, 0, -10);
+    const auto settings = [&](float distance, float thickness, int steps) {
+        glUniform1f(glGetUniformLocation(program, "u_caveSkyMaxDist"), distance);
+        glUniform1f(glGetUniformLocation(program, "u_caveThickness"), thickness);
+        glUniform1i(glGetUniformLocation(program, "u_caveSkySteps"), steps);
+    };
+    const auto visibility = [&](const glm::vec3& position) {
+        probe.texture(0, {glm::vec4(position, 1)});
+        return probe.draw()[16].r;
+    };
+    for (int ladder : {0, 1}) {
+        glUniform1i(glGetUniformLocation(program, "u_farWorldLadder"), ladder);
+        settings(24, 1.5f, 8);
+        EXPECT_FLOAT_EQ(visibility({0, 0, -2}), 1)
+            << "foreground foliage eight metres from the ray is not a roof";
+        EXPECT_FLOAT_EQ(visibility({0, 0, 0}), 1) << "missing geometry leaves the sky open";
+        const float ceiling = visibility({0, 1.5f, -10});
+        EXPECT_GT(ceiling, 0.06f);
+        EXPECT_LT(ceiling, 0.3f) << "a nearby ceiling must still block sky ambient";
+        const float movedCeiling = visibility({0, 1.6f, -10});
+        EXPECT_GT(movedCeiling - ceiling, 0.003f)
+            << "occlusion must track observed distance within one march step";
+        settings(3, 1.5f, 2);
+        const float rayDepth = glm::length(glm::vec3(0, 3.05f, -10));
+        const auto unbracketedVisibility = [&](const glm::vec3& position) {
+            // A missing first coarse sample isolates the direct thickness
+            // acceptance interval from the known-open origin's refinement.
+            constexpr int rows = 512;
+            std::vector<glm::vec4> samples(rows, glm::vec4(position, 1));
+            const auto firstRow = static_cast<std::size_t>((0.5f + 0.005f * 1.55f) * rows);
+            samples[firstRow] = glm::vec4(0);
+            probe.texture(0, samples, rows);
+            return probe.draw()[16].r;
+        };
+        for (float gap : {-0.1f, 0.01f, 1.5f, 1.6f}) {
+            EXPECT_NEAR(unbracketedVisibility({0, 0, -(rayDepth - gap)}), 1, 0.000001f)
+                << "only the open depth interval (0.05, thickness) occludes: " << gap;
+        }
+        const float innerBand = unbracketedVisibility({0, 0, -(rayDepth - 0.8f)});
+        const float outerBand = unbracketedVisibility({0, 0, -(rayDepth - 1.4f)});
+        EXPECT_LT(innerBand, outerBand);
+        EXPECT_LT(outerBand, 1);
+        settings(24, 1.5f, 32);
+        const float bounded = visibility({0, 20, -10});
+        EXPECT_LT(bounded, 0.9f);
+        settings(24, 1.5f, 64);
+        EXPECT_FLOAT_EQ(visibility({0, 20, -10}), bounded)
+            << "the capped march must still cover the requested distance";
+        for (float invalid : {0.0f, -1.0f}) {
+            settings(invalid, 1.5f, 8);
+            EXPECT_FLOAT_EQ(visibility({0, 1.5f, -10}), 1);
+            settings(24, invalid, 8);
+            EXPECT_FLOAT_EQ(visibility({0, 1.5f, -10}), 1);
+        }
+        for (int invalid : {0, -1}) {
+            settings(24, 1.5f, invalid);
+            EXPECT_FLOAT_EQ(visibility({0, 1.5f, -10}), 1);
+        }
+        settings(24, 1.5f, 8);
+        if (ladder != 0) {
+            probe.texture(1, {glm::vec4(0)});
+            EXPECT_FLOAT_EQ(visibility({0, 1.5f, -10}), 1)
+                << "cleared depth refuses an occluder even if position is stale";
+        }
+    }
+
+    // A level perspective camera sees the underside of a horizontal plane at
+    // y=1.5. Each texel stores its camera-ray/plane intersection, not a constant
+    // position. The fixed 4096-row buffer resolves the thin acceptance band.
+    constexpr int planeRows = 4096;
+    std::vector<glm::vec4> planePositions(planeRows, glm::vec4(0));
+    std::vector<glm::vec4> planeDepths(planeRows, glm::vec4(0));
+    projection =
+        Luminumbra::Rendering::ReversedZPerspective(glm::radians(60.0f), 1.0f, 0.1f, 3200.0f);
+    inverseProjection = glm::inverse(projection);
+    for (int row = 0; row < planeRows; ++row) {
+        const float ndcY = 2 * (static_cast<float>(row) + 0.5f) / planeRows - 1;
+        if (ndcY <= 0) {
+            continue;
+        }
+        const glm::vec4 position(0, 1.5f, -1.5f * projection[1][1] / ndcY, 1);
+        const glm::vec4 clip = projection * position;
+        if (clip.z <= 0) {
+            continue;
+        }
+        planePositions[static_cast<std::size_t>(row)] = position;
+        planeDepths[static_cast<std::size_t>(row)] = glm::vec4(clip.z / clip.w);
+    }
+    glUniformMatrix4fv(
+        glGetUniformLocation(program, "u_projection"), 1, GL_FALSE, &projection[0][0]);
+    glUniformMatrix4fv(glGetUniformLocation(program, "u_gbufferInverseProjection"),
+                       1,
+                       GL_FALSE,
+                       &inverseProjection[0][0]);
+    glUniform3f(glGetUniformLocation(program, "probePosition"), 0, -1.7f, -12);
+    for (int ladder : {0, 1}) {
+        SCOPED_TRACE(ladder);
+        glUniform1i(glGetUniformLocation(program, "u_farWorldLadder"), ladder);
+        ExpectCanopyRoomCrossings(program, probe, projection);
+
+        probe.texture(0, planePositions, planeRows);
+        probe.texture(1, planeDepths, planeRows);
+        settings(24, 1.5f, 8);
+        const auto ceiling = probe.draw()[16];
+        EXPECT_LT(ceiling.r, 0.3f) << "the default 3 m steps must retain a real ceiling";
+        EXPECT_GT(ceiling.g, 2) << "the two on-screen coarse taps need crossing refinement";
+        EXPECT_LE(ceiling.g, 40);
+        settings(24, 0.12f, 8);
+        const auto canopy = probe.draw()[16];
+        EXPECT_GT(canopy.r, 0.85f) << "a thin band must retain its thickness falloff";
+        EXPECT_LT(canopy.r, 0.99f) << "a thin crossing must still be found between coarse taps";
+        EXPECT_LE(canopy.g, 40);
+        settings(24, 0.05f, 8);
+        EXPECT_FLOAT_EQ(probe.draw()[16].r, 1) << "a band inside the self-bias stays open";
+
+        settings(24, 1.5f, 8);
+        // The first midpoint lies at y=2.85. Missing geometry must abort the
+        // bracket rather than inventing a crossing from its endpoints.
+        const float midpointUv = 0.5f + 0.5f * projection[1][1] * 2.85f / 12;
+        const auto midpointRow = static_cast<std::size_t>(midpointUv * planeRows);
+        auto missing = planePositions;
+        missing[midpointRow] = glm::vec4(0);
+        probe.texture(0, missing, planeRows);
+        EXPECT_FLOAT_EQ(probe.draw()[16].r, 1);
+        if (ladder != 0) {
+            probe.texture(0, planePositions, planeRows);
+            auto cleared = planeDepths;
+            cleared[midpointRow] = glm::vec4(0);
+            probe.texture(1, cleared, planeRows);
+            EXPECT_FLOAT_EQ(probe.draw()[16].r, 1)
+                << "cleared depth invalidates a refined sample even with stale position";
+        }
+        probe.texture(1, planeDepths, planeRows);
+        auto silhouette = planePositions;
+        for (int row = 0; row < planeRows; ++row) {
+            const float uv = (static_cast<float>(row) + 0.5f) / planeRows;
+            silhouette[static_cast<std::size_t>(row)] =
+                glm::vec4(0, 0, uv < 0.7f ? -100.0f : -2.0f, 1);
+        }
+        probe.texture(0, silhouette, planeRows);
+        const auto discontinuity = probe.draw()[16];
+        EXPECT_FLOAT_EQ(discontinuity.r, 1)
+            << "a silhouette depth jump never supplies a sample inside the thickness band";
+        EXPECT_FLOAT_EQ(discontinuity.g, 10) << "two coarse taps plus eight failed refinements";
+    }
+
+    // Alternating foreground/background stripes make repeated false brackets.
+    // The refinement budget is shared across the whole march, not per bracket.
+    projection = glm::mat4(1);
+    projection[1][1] = 0.01f;
+    glUniformMatrix4fv(
+        glGetUniformLocation(program, "u_projection"), 1, GL_FALSE, &projection[0][0]);
+    glUniform3f(glGetUniformLocation(program, "probePosition"), 0, 0, -10);
+    for (int row = 0; row < planeRows; ++row) {
+        const float uv = (static_cast<float>(row) + 0.5f) / planeRows;
+        const float viewY = (2 * uv - 1) / projection[1][1];
+        const int band = static_cast<int>(std::floor((viewY - 0.05f) / 0.75f + 0.5f));
+        planePositions[static_cast<std::size_t>(row)] =
+            glm::vec4(0, 0, band % 2 == 0 ? -2.0f : -100.0f, 1);
+    }
+    probe.texture(0, planePositions, planeRows);
+    probe.texture(1, {glm::vec4(0.5f)});
+    for (int ladder : {0, 1}) {
+        glUniform1i(glGetUniformLocation(program, "u_farWorldLadder"), ladder);
+        settings(24, 1.5f, 64);
+        const auto bounded = probe.draw()[16];
+        EXPECT_FLOAT_EQ(bounded.r, 1);
+        EXPECT_FLOAT_EQ(bounded.g, 40) << "32 coarse taps and at most eight refinements total";
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteProgram(program);
+}
 
 TEST(RenderSmokeTest, ReversedDepthCloudMaskPreservesDistantGeometry) {
     HiddenGlContext context;
@@ -2392,6 +3284,58 @@ TEST(RenderSmokeTest, ReversedDepthCloudMaskPreservesDistantGeometry) {
     glDeleteProgram(program);
 }
 
+TEST(RenderSmokeTest, TaauSkyKeepsCurrentColorWhileDistantGeometryAccumulates) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    const GLuint program = LinkProgram({"taau_resolve", "ssao.vert", "taau_resolve.frag"});
+    ASSERT_NE(program, 0u);
+    FullscreenFloatProbe probe;
+    glUseProgram(program);
+    glUniform1i(glGetUniformLocation(program, "u_current"), 0);
+    glUniform1i(glGetUniformLocation(program, "u_history"), 1);
+    glUniform1i(glGetUniformLocation(program, "u_motion"), 2);
+    glUniform1i(glGetUniformLocation(program, "u_sceneDepth"), 3);
+    glUniform2f(glGetUniformLocation(program, "u_texel"), 1.0f / 32.0f, 1.0f);
+    glUniform1f(glGetUniformLocation(program, "u_blend"), 0.9f);
+    // Include sharpening in the test: bypass must precede both temporal operations.
+    glUniform1f(glGetUniformLocation(program, "u_sharpness"), 0.4f);
+    std::vector<glm::vec4> current;
+    std::vector<glm::vec4> depth;
+    // Fixed 32-texel probe; adjacent colors admit the stale history through its AABB.
+    current.reserve(32);
+    depth.reserve(32);
+    for (int x = 0; x < 32; ++x) {
+        current.emplace_back(x % 2 == 0 ? 0.25f : 0.75f);
+        depth.emplace_back(x < 16 ? 0.0f : 1e-9f);
+    }
+    probe.texture(0, current);
+    probe.texture(1, {glm::vec4(0.5f)});
+    probe.texture(2, {glm::vec4(0.0f)});
+    probe.texture(3, depth);
+    for (const int valid : {0, 1}) {
+        glUniform1i(glGetUniformLocation(program, "u_history_valid"), valid);
+        const auto pixels = probe.draw();
+        for (std::size_t x = 0; x < pixels.size(); ++x) {
+            // Texel 15 is cleared sky beside geometry and must retain edge coverage.
+            if (valid == 0 || x < 15) {
+                EXPECT_FLOAT_EQ(pixels[x].r, current[x].r);
+                EXPECT_FLOAT_EQ(pixels[x].g, current[x].g);
+                EXPECT_FLOAT_EQ(pixels[x].b, current[x].b);
+            } else {
+                EXPECT_GT(std::abs(pixels[x].r - current[x].r), 0.1f);
+            }
+        }
+    }
+    // Off-screen reprojection still rejects history for positive-depth geometry.
+    probe.texture(2, {glm::vec4(4.0f, 0.0f, 0.0f, 0.0f)});
+    const auto offscreen = probe.draw();
+    for (std::size_t x = 0; x < offscreen.size(); ++x) {
+        EXPECT_FLOAT_EQ(offscreen[x].r, current[x].r);
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteProgram(program);
+}
+
 TEST(RenderSmokeTest, ReversedDepthSoftParticlesFadeAgainstGeometry) {
     HiddenGlContext context;
     ASSERT_TRUE(context.ready()) << context.error();
@@ -2400,12 +3344,13 @@ TEST(RenderSmokeTest, ReversedDepthSoftParticlesFadeAgainstGeometry) {
     ASSERT_NE(program, 0u);
     FullscreenFloatProbe probe;
     // One round billboard at 30 m, using the production vertex and fragment stages.
-    for (GLuint attribute = 0; attribute < 6; ++attribute)
+    for (GLuint attribute = 0; attribute < 7; ++attribute)
         glDisableVertexAttribArray(attribute);
     glVertexAttrib3f(0, 0, 0, -30);
     glVertexAttrib1f(1, 60);
     glVertexAttrib4f(2, 1, 1, 1, 1);
     glVertexAttribI1ui(3, 0);
+    glVertexAttribI1i(6, 0);
     glVertexAttrib1f(4, 0);
     glVertexAttrib1f(5, 0);
     glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
@@ -2433,6 +3378,41 @@ TEST(RenderSmokeTest, ReversedDepthSoftParticlesFadeAgainstGeometry) {
     EXPECT_NEAR(alpha(30.75f), 0.5f, 0.001f);
     EXPECT_FLOAT_EQ(alpha(29), 0.0f);
     EXPECT_NEAR(alpha(0), 1.0f, 0.001f) << "cleared sky must not fade particles";
+    // The render-only ambient tag must not glow against sky or survive far away.
+    glVertexAttribI1i(6, -128);
+    EXPECT_FLOAT_EQ(alpha(0), 0.0f);
+    EXPECT_FLOAT_EQ(alpha(32), 0.0f);
+    glVertexAttrib3f(0, 0, 0, -3);
+    glVertexAttrib1f(1, 6);
+    glUniform3f(glGetUniformLocation(program, "u_ambientColor"), 0.25f, 0.25f, 0.25f);
+    EXPECT_NEAR(alpha(5), 1.0f, 0.001f) << "nearby dust remains visible over geometry";
+    EXPECT_NEAR(probe.draw()[16].r, 0.25f, 0.001f) << "dust has no emissive core";
+    EXPECT_NEAR(alpha(3.75f), 0.5f, 0.001f);
+    EXPECT_FLOAT_EQ(alpha(2), 0.0f);
+    EXPECT_FLOAT_EQ(alpha(0), 0.0f);
+    // Nonzero depth, however distant, still means geometry rather than sky.
+    EXPECT_NEAR(alpha(3000), 1.0f, 0.001f);
+    glVertexAttrib3f(0, 0, 0, -14);
+    glVertexAttrib1f(1, 28);
+    EXPECT_NEAR(alpha(32), 0.5f, 0.001f) << "dust fades continuously with camera distance";
+    glVertexAttribI1i(6, 0);
+    for (GLuint layer : {0u, 1u, 2u, 3u, 4u, 65535u}) {
+        glVertexAttribI1ui(3, layer);
+        EXPECT_GT(alpha(0), 0.0f) << "only ambient dust is suppressed over sky: " << layer;
+    }
+    // Every ordinary rotation code, including both endpoints, keeps authored
+    // layer 3 emissive over sky and distant geometry.
+    glVertexAttribI1ui(3, 3);
+    glVertexAttrib3f(0, 0, 0, -30);
+    glVertexAttrib1f(1, 60);
+    for (GLint rotation : {-127, -1, 0, 1, 127}) {
+        glVertexAttribI1i(6, rotation);
+        EXPECT_NEAR(alpha(0), 1.0f, 0.001f);
+        EXPECT_NEAR(alpha(30.75f), 0.5f, 0.001f);
+        EXPECT_FLOAT_EQ(alpha(29), 0.0f);
+        EXPECT_NEAR(alpha(32), 1.0f, 0.001f);
+        EXPECT_GT(probe.draw()[16].r, 0.25f);
+    }
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
     glDeleteProgram(program);
 }
@@ -2531,6 +3511,419 @@ FragColor = vec4(shadow, shadow, shadow, 1); })";
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
     for (GLuint program : programs)
         glDeleteProgram(program);
+}
+
+// A reduced-resolution G-buffer silhouette moves between depth texels across
+// subpixel jitter phases. Check both sides of the unjittered channel and glow.
+void ExpectLightningJitteredSilhouettes(
+    Luminumbra::Rendering::Shader& shader,
+    FullscreenFloatProbe& probe,
+    const glm::mat4& projection,
+    float occluder_depth,
+    const std::array<glm::vec4, FullscreenFloatProbe::width>& flash_pixels,
+    const std::array<glm::vec4, FullscreenFloatProbe::width>& sky_pixels) {
+    std::array<glm::vec4, FullscreenFloatProbe::width> first_phase{};
+    for (int phase = 0; phase < 2; ++phase) {
+        const glm::vec2 jitter =
+            phase == 0 ? glm::vec2(0.025f, -0.015f) : glm::vec2(-0.025f, 0.015f);
+        auto jittered_projection = projection;
+        jittered_projection[2][0] += jitter.x;
+        jittered_projection[2][1] += jitter.y;
+        shader.setMat4("u_gbufferInverseProjection", glm::inverse(jittered_projection));
+        shader.setVec2("u_jitter_ndc", jitter);
+        // Fixed 24-texel storage models a 75-percent internal render scale.
+        std::vector<glm::vec4> silhouette_depth(24, glm::vec4(0));
+        for (std::size_t texel = 0; texel < silhouette_depth.size(); ++texel) {
+            const float raster_uv = (static_cast<float>(texel) + 0.5f) / 24.0f;
+            const float unjittered_uv = raster_uv + jitter.x * 0.5f;
+            if (unjittered_uv < 0.56f) {
+                silhouette_depth[texel] = glm::vec4(occluder_depth);
+            }
+        }
+        probe.texture(1, silhouette_depth);
+        const auto pixels = probe.draw();
+        EXPECT_FLOAT_EQ(pixels[17].r, flash_pixels[17].r);
+        EXPECT_FLOAT_EQ(pixels[18].r, sky_pixels[18].r);
+        if (phase == 0) {
+            first_phase = pixels;
+        } else {
+            for (std::size_t pixel = 0; pixel < pixels.size(); ++pixel) {
+                EXPECT_FLOAT_EQ(pixels[pixel].r, first_phase[pixel].r);
+                EXPECT_FLOAT_EQ(pixels[pixel].g, first_phase[pixel].g);
+                EXPECT_FLOAT_EQ(pixels[pixel].b, first_phase[pixel].b);
+            }
+        }
+        // Also cross a horizontal silhouette: the single output row's ray
+        // stays behind terrain while its depth row changes with Y jitter.
+        for (std::size_t texel = 0; texel < silhouette_depth.size(); ++texel) {
+            const float raster_uv = (static_cast<float>(texel) + 0.5f) / 24.0f;
+            silhouette_depth[texel] =
+                glm::vec4(raster_uv + jitter.y * 0.5f < 0.515f ? occluder_depth : 0.0f);
+        }
+        probe.texture(1, silhouette_depth, 24);
+        const auto horizontal_pixels = probe.draw();
+        for (std::size_t pixel = 0; pixel < horizontal_pixels.size(); ++pixel) {
+            EXPECT_FLOAT_EQ(horizontal_pixels[pixel].r, flash_pixels[pixel].r);
+            EXPECT_FLOAT_EQ(horizontal_pixels[pixel].g, flash_pixels[pixel].g);
+            EXPECT_FLOAT_EQ(horizontal_pixels[pixel].b, flash_pixels[pixel].b);
+        }
+    }
+    shader.setVec2("u_jitter_ndc", {0, 0});
+    shader.setMat4("u_gbufferInverseProjection", glm::inverse(projection));
+}
+
+TEST(RenderSmokeTest, LightningChannelAndGlowRespectReversedSceneDepthAndRidges) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    const auto vertex = (SourceRoot() / "res/shaders/lightning_overlay.vert").string();
+    const auto fragment = (SourceRoot() / "res/shaders/lightning_overlay.frag").string();
+    Luminumbra::Rendering::Shader shader(vertex.c_str(), fragment.c_str());
+    ASSERT_TRUE(shader.IsValid());
+    FullscreenFloatProbe probe;
+    shader.use();
+    shader.setInt("u_scene", 0);
+    shader.setInt("u_sceneDepth", 1);
+    shader.setVec2("u_jitter_ndc", {0, 0});
+    shader.setInt("u_active", 1);
+    shader.setFloat("u_pulse", 1);
+    shader.setFloat("u_aspect", 1);
+    shader.setFloat("u_boltWidth", 0.010f);
+    shader.setFloat("u_boltGlow", 0.034f);
+    // Keep a localized world flash present: occlusion must affect only geometry.
+    shader.setInt("u_flashCount", 1);
+    shader.setVec2("u_flashNdc[0]", {0, 0});
+    shader.setFloat("u_flashPulse[0]", 0.2f);
+    shader.setInt("u_flashOnscreen[0]", 1);
+    probe.texture(0, {glm::vec4(0.1f, 0.1f, 0.1f, 1)});
+    const auto bolt = [&](float y, float inverse_depth) {
+        shader.setInt("u_boltCount", 2);
+        shader.setVec2("u_bolt[0]", {-0.9f, y});
+        shader.setVec2("u_bolt[1]", {0.9f, y});
+        shader.setFloat("u_boltInverseDepth[0]", inverse_depth);
+        shader.setFloat("u_boltInverseDepth[1]", inverse_depth);
+    };
+    for (float far_plane : {3200.0f, 17408.0f}) {
+        auto projection =
+            Luminumbra::Rendering::ReversedZPerspective(glm::radians(70.0f), 1.0f, 0.1f, far_plane);
+        shader.setMat4("u_gbufferInverseProjection", glm::inverse(projection));
+        const auto depth_at = [&](float distance) {
+            const glm::vec4 clip = projection * glm::vec4(0, 0, -distance, 1);
+            return clip.z / clip.w;
+        };
+        bolt(0, 0.01f);                   // channel 100 m away
+        probe.texture(1, {glm::vec4(0)}); // cleared sky never occludes
+        const auto sky_pixels = probe.draw();
+        const auto sky = sky_pixels[16];
+        EXPECT_GT(sky.r, 3.2f);
+        for (float distance : {100.0f, 200.0f, 14000.0f}) {
+            if (distance < far_plane) {
+                probe.texture(1, {glm::vec4(depth_at(distance))});
+                EXPECT_NEAR(probe.draw()[16].r, sky.r, 0.0001f);
+            }
+        }
+        shader.setInt("u_boltCount", 0);
+        const auto flash_pixels = probe.draw();
+        const auto flash_only = flash_pixels[16];
+        EXPECT_GT(flash_only.r, 0.1f);
+        EXPECT_NEAR(sky.r, flash_only.r + 3.46112f, 0.0001f);
+        EXPECT_FLOAT_EQ(sky_pixels.front().r, flash_pixels.front().r);
+        EXPECT_FLOAT_EQ(sky_pixels.back().r, flash_pixels.back().r);
+        bolt(0, 0.01f);
+        probe.texture(1, {glm::vec4(depth_at(25))}); // opaque cave wall / hill
+        EXPECT_NEAR(probe.draw()[16].r, flash_only.r, 0.0001f);
+        probe.texture(1, {glm::vec4(depth_at(99.5f))}); // near-contact ridge: soft edge
+        const auto ridge = probe.draw()[16];
+        EXPECT_GT(ridge.r, flash_only.r + 0.5f);
+        EXPECT_LT(ridge.r, sky.r - 0.5f);
+        // The tight glow, as well as the core, is suppressed below the ridge;
+        // the sky on its other side retains exactly the unobstructed response.
+        bolt(0.015f, 0.01f);
+        probe.texture(1, {glm::vec4(0)});
+        const auto sky_glow = probe.draw();
+        EXPECT_GT(sky_glow[16].r, flash_only.r + 0.01f);
+        std::vector<glm::vec4> ridge_depth(FullscreenFloatProbe::width, glm::vec4(0));
+        std::fill_n(ridge_depth.begin(), FullscreenFloatProbe::width / 2, glm::vec4(depth_at(25)));
+        probe.texture(1, ridge_depth);
+        const auto ridge_glow = probe.draw();
+        EXPECT_NEAR(ridge_glow[15].r, flash_only.r, 0.0001f);
+        EXPECT_FLOAT_EQ(ridge_glow[16].r, sky_glow[16].r);
+        bolt(0, 0.01f);
+        ExpectLightningJitteredSilhouettes(
+            shader, probe, projection, depth_at(25), flash_pixels, sky_pixels);
+        // A hidden closest segment must not erase an overlapping visible one.
+        bolt(0, 0.01f);
+        shader.setInt("u_boltCount", 5);
+        shader.setVec2("u_bolt[2]", {-3, -3});
+        shader.setFloat("u_boltInverseDepth[2]", 0);
+        shader.setVec2("u_bolt[3]", {-0.9f, 0});
+        shader.setVec2("u_bolt[4]", {0.9f, 0});
+        shader.setFloat("u_boltInverseDepth[3]", 0.1f);
+        shader.setFloat("u_boltInverseDepth[4]", 0.1f);
+        probe.texture(1, {glm::vec4(depth_at(25))});
+        EXPECT_NEAR(probe.draw()[16].r, sky.r, 0.0001f);
+        for (float invalid : {0.0f,
+                              -1.0f,
+                              std::numeric_limits<float>::infinity(),
+                              std::numeric_limits<float>::quiet_NaN()}) {
+            bolt(0, invalid);
+            probe.texture(1, {glm::vec4(0)});
+            EXPECT_NEAR(probe.draw()[16].r, flash_only.r, 0.0001f);
+        }
+        for (float invalid : {-1.0f,
+                              2.0f,
+                              std::numeric_limits<float>::infinity(),
+                              std::numeric_limits<float>::quiet_NaN()}) {
+            bolt(0, 0.01f);
+            probe.texture(1, {glm::vec4(invalid)});
+            EXPECT_NEAR(probe.draw()[16].r, sky.r, 0.0001f);
+        }
+        // Collapsed or subpixel strokes use the nearer endpoint in either order.
+        for (float span : {0.0f, 0.00001f}) {
+            for (float first_depth : {0.01f, 0.1f}) {
+                bolt(0, first_depth);
+                shader.setVec2("u_bolt[0]", {0.03125f - span, 0});
+                shader.setVec2("u_bolt[1]", {0.03125f + span, 0});
+                shader.setFloat("u_boltInverseDepth[1]", first_depth == 0.01f ? 0.1f : 0.01f);
+                probe.texture(1, {glm::vec4(depth_at(25))});
+                EXPECT_NEAR(probe.draw()[16].r, sky.r, 0.0001f);
+            }
+        }
+        // A zero or sub-core glow radius still has a core, with no inverted halo.
+        for (float radius : {-0.01f, 0.0f, 0.0005f, 0.001f}) {
+            shader.setFloat("u_boltGlow", radius);
+            bolt(0, 0.01f);
+            probe.texture(1, {glm::vec4(depth_at(25))});
+            EXPECT_NEAR(probe.draw()[16].r, flash_only.r, 0.0001f);
+            probe.texture(1, {glm::vec4(0)});
+            const auto core_only = probe.draw();
+            EXPECT_NEAR(core_only[16].r, flash_only.r + 3.17312f, 0.0001f);
+            EXPECT_FLOAT_EQ(core_only.front().r, flash_pixels.front().r);
+        }
+        shader.setFloat("u_boltGlow", 0.034f);
+        // Unavailable or malformed reconstruction must not manufacture an occluder.
+        std::array<glm::mat4, 5> invalid_inverse{
+            glm::mat4(0), glm::mat4(1), glm::mat4(-1), glm::mat4(1), glm::mat4(1)};
+        invalid_inverse[3][0][0] = std::numeric_limits<float>::quiet_NaN();
+        invalid_inverse[4][2][2] = -std::numeric_limits<float>::min();
+        probe.texture(1, {glm::vec4(depth_at(25))});
+        for (const auto& inverse : invalid_inverse) {
+            shader.setMat4("u_gbufferInverseProjection", inverse);
+            EXPECT_NEAR(probe.draw()[16].r, sky.r, 0.0001f);
+        }
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, LightningOverlayUploadsCurrentProjectionJitter) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    FullscreenFloatProbe probe;
+    probe.texture(1, {glm::vec4(0)});
+    // Exercise the production upload too: make_lighting_context supplies the
+    // jittered depth contract but leaves its generic taau_jitter_ndc at zero.
+    GLint quad = 0;
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &quad);
+    glActiveTexture(GL_TEXTURE1);
+    GLint depth_texture = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &depth_texture);
+    Luminumbra::Rendering::RenderResourceRegistry registry;
+    Luminumbra::Rendering::LightingPass lighting;
+    lighting.init_shader(SourceRoot());
+    lighting.init_lighting_fbo(registry, FullscreenFloatProbe::width, 1);
+    Luminumbra::Rendering::LightningRenderState lightning;
+    lightning.active = true;
+    lightning.pulse_intensity = 1;
+    Luminumbra::Rendering::RenderContext ctx;
+    ctx.screen_width = FullscreenFloatProbe::width;
+    ctx.screen_height = 1;
+    ctx.lightning_state = &lightning;
+    ctx.screen_quad_vao = static_cast<GLuint>(quad);
+    ctx.gbuffer_depth.id = static_cast<GLuint>(depth_texture);
+    for (bool ladder : {false, true}) {
+        const auto projection = Luminumbra::Rendering::ReversedZPerspective(
+            glm::radians(70.0f), 1.0f, 0.1f, ladder ? 17408.0f : 3200.0f);
+        for (const glm::vec2 jitter :
+             {glm::vec2(0), glm::vec2(0.025f, -0.015f), glm::vec2(-0.025f, 0.015f)}) {
+            ctx.set_gbuffer_depth_contract(ladder, projection, jitter);
+            lighting.execute_lightning_overlay(ctx);
+            GLint program = 0;
+            glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+            const auto overlay = static_cast<GLuint>(program);
+            const GLint location = glGetUniformLocation(overlay, "u_jitter_ndc");
+            ASSERT_GE(location, 0);
+            glm::vec2 uploaded(0);
+            glGetUniformfv(overlay, location, &uploaded.x);
+            EXPECT_EQ(uploaded, jitter);
+        }
+    }
+    lighting.destroy_lighting_fbo(registry);
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, WaterVisibilityAcceptsBlueAndWarmSurvivorsOnlyInTargetRegion) {
+    using Luminumbra::Rendering::WaterVisibilityMask;
+    for (const auto& rgb :
+         {std::array<unsigned char, 3>{20, 100, 200}, std::array<unsigned char, 3>{220, 90, 20}}) {
+        std::vector<unsigned char> rgba(8u * 8u * 4u, 0);
+        const std::size_t center = (4u * 8u + 4u) * 4u;
+        std::copy(rgb.begin(), rgb.end(), rgba.begin() + static_cast<std::ptrdiff_t>(center));
+        rgba[center + 3u] = 150;
+        const auto visible = WaterVisibilityMask::FromRgba(8, 8, rgba);
+        ASSERT_TRUE(visible.valid());
+        EXPECT_EQ(visible.visible_pixels_in_target(), 1u);
+        rgba[center + 3u] = 0; // no surviving water, even with a blue background
+        EXPECT_EQ(WaterVisibilityMask::FromRgba(8, 8, rgba).visible_pixels_in_target(), 0u);
+        rgba[3] = 150; // water outside the intended region is insufficient
+        EXPECT_EQ(WaterVisibilityMask::FromRgba(8, 8, rgba).visible_pixels_in_target(), 0u);
+    }
+    EXPECT_FALSE(WaterVisibilityMask::FromRgba(0, 8, {}).valid());
+    EXPECT_FALSE(WaterVisibilityMask::FromRgba(-1, 8, {}).valid());
+    EXPECT_FALSE(WaterVisibilityMask::FromRgba(4097, 8, {}).valid());
+    EXPECT_FALSE(WaterVisibilityMask::FromRgba(8, 8, std::vector<unsigned char>(255)).valid());
+    EXPECT_FALSE(WaterVisibilityMask::FromRgba(8, 8, std::vector<unsigned char>(257)).valid());
+    EXPECT_EQ(WaterVisibilityMask{}.visible_pixels_in_target(), 0u);
+}
+
+TEST(RenderSmokeTest, WaterTargetSearchIsBoundedAndRefusesDryObstructedOrUnknownTerrain) {
+    using Luminumbra::Rendering::FindWaterVisibilityTarget;
+    int queries = 0;
+    const auto open = FindWaterVisibilityTarget(glm::vec3(0), 0.0f, [&](float, float) {
+        ++queries;
+        return -2.0f;
+    });
+    ASSERT_TRUE(open.found);
+    EXPECT_EQ(open.focus, glm::vec3(0, 0.1f, 0));
+    EXPECT_EQ(open.eye, open.focus + glm::vec3(0, 12, 16));
+    EXPECT_LE(queries, 169 * (25 + 9 * 33));
+    for (const float height : {1.0f,
+                               -0.5f,
+                               std::numeric_limits<float>::quiet_NaN(),
+                               std::numeric_limits<float>::infinity()}) {
+        queries = 0;
+        const auto absent = FindWaterVisibilityTarget(glm::vec3(0), 0.0f, [&](float, float) {
+            ++queries;
+            return height;
+        });
+        EXPECT_FALSE(absent.found);
+        EXPECT_LE(queries, 169 * (25 + 9 * 33));
+    }
+    // Every grid point is submerged, but each sight line crosses a narrow ridge
+    // between those points. A nearest-height-only search would accept this.
+    const auto ridged = FindWaterVisibilityTarget(glm::vec3(0), 0.0f, [](float, float z) {
+        const float phase = z - 8.0f * std::floor(z / 8.0f);
+        return phase > 3.0f && phase < 5.0f ? 30.0f : -2.0f;
+    });
+    EXPECT_FALSE(ridged.found);
+    queries = 0;
+    const auto invalid = FindWaterVisibilityTarget(
+        glm::vec3(std::numeric_limits<float>::infinity()), 0.0f, [&](float, float) {
+            ++queries;
+            return -2.0f;
+        });
+    EXPECT_FALSE(invalid.found);
+    EXPECT_EQ(queries, 0);
+}
+
+TEST(RenderSmokeTest, WaterVisibilityReplayRejectsSubmittedOccludedWaterAndEmptyBlueSky) {
+    using namespace Luminumbra::Rendering;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
+    RenderResourceRegistry resources;
+    LightingPass lighting;
+    GBufferPass gbuffer;
+    WaterPass water;
+    lighting.init_lighting_fbo(resources, 64, 64);
+    gbuffer.init_gbuffer(resources, 64, 64);
+    water.init_shader(SourceRoot());
+    water.init_water_fallback_textures(resources);
+    ASSERT_TRUE(water.shader()->IsValid());
+    GLuint vao = 0, vbo = 0, ebo = 0;
+    const std::array<float, 12> vertices{-40, 0, -40, 40, 0, -40, 40, 0, 40, -40, 0, 40};
+    const std::array<unsigned int, 6> indices{0, 1, 2, 0, 2, 3};
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &vbo);
+    glGenBuffers(1, &ebo);
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+    glVertexAttrib3f(1, 0, 1, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices.data(), GL_STATIC_DRAW);
+    Camera camera({0, 12, 16}, {0, 1, 0}, -90, -36.87f);
+    RenderContext ctx;
+    ctx.screen_width = 64;
+    ctx.screen_height = 64;
+    ctx.screen_quad_vao = vao;
+    ctx.lit_scene = FboHandle{lighting.lighting_fbo().fbo_id, true};
+    ctx.lit_scene_depth = RenderbufferHandle{lighting.lighting_fbo().depth_texture};
+    ctx.opaque_scene = TextureHandle{lighting.lighting_fbo().opaque_color_texture};
+    ctx.gbuffer_depth = TextureHandle{gbuffer.gbuffer().depth_texture};
+    ctx.sun.direction = glm::normalize(glm::vec3(0, -1, -1));
+    ctx.sun.color = glm::vec3(1);
+    ctx.sun.intensity = 1;
+    WaterPassInput input;
+    input.draw_items.push_back({glm::mat4(1), vao, 6});
+    const glm::vec4 sky(0.1f, 0.4f, 0.9f, 1.0f);
+    glClearTexImage(ctx.opaque_scene.id, 0, GL_RGBA, GL_FLOAT, &sky[0]);
+    const auto draw = [&](double depth, bool capture, bool empty, double sampled_depth = 0.0) {
+        glViewport(0, 0, 64, 64);
+        glBindFramebuffer(GL_FRAMEBUFFER, gbuffer.gbuffer().fbo_id);
+        glDepthMask(GL_TRUE);
+        glClearDepth(sampled_depth);
+        glClear(GL_DEPTH_BUFFER_BIT);
+        glBindFramebuffer(GL_FRAMEBUFFER, ctx.lit_scene.id);
+        glClearDepth(depth);
+        glClearColor(0.1f, 0.4f, 0.9f, 1); // blue sky must never enter the mask
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        return water.execute(ctx, empty ? WaterPassInput{} : input, camera, capture);
+    };
+    for (const bool ladder : {false, true}) {
+        ctx.set_gbuffer_depth_contract(ladder, camera.GetProjectionMatrix(64, 64), {});
+        const auto visible = draw(0, true, false);
+        EXPECT_EQ(visible.water_draws, 1u);
+        ASSERT_TRUE(water.visibility_mask().valid());
+        EXPECT_GT(water.visibility_mask().visible_pixels_in_target(), 0u);
+        const auto occluded = draw(1, true, false);
+        EXPECT_EQ(occluded.water_draws, 1u);
+        EXPECT_EQ(occluded.water_indices, 6u);
+        ASSERT_TRUE(water.visibility_mask().valid());
+        EXPECT_EQ(water.visibility_mask().visible_pixels_in_target(), 0u);
+        draw(0, true, true);
+        EXPECT_EQ(water.visibility_mask().visible_pixels_in_target(), 0u);
+        draw(0, true, false, 1); // shader discard, even though attachment depth permits it
+        EXPECT_EQ(water.visibility_mask().visible_pixels_in_target(), 0u);
+        draw(0, false, false);
+        EXPECT_FALSE(water.visibility_mask().valid());
+        ctx.frozen_replay = true;
+        draw(0, true, false);
+        EXPECT_FALSE(water.visibility_mask().valid());
+        ctx.frozen_replay = false;
+    }
+    for (const auto invalid : {0u, std::numeric_limits<Luminumbra::u32>::max()}) {
+        input.draw_items[0].element_count = invalid;
+        const auto refused = draw(0, true, false);
+        EXPECT_EQ(refused.water_draws, 0u);
+        EXPECT_EQ(refused.water_indices, 0u);
+        EXPECT_EQ(water.visibility_mask().visible_pixels_in_target(), 0u);
+    }
+    input.draw_items[0].element_count = 6;
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    ctx.internal_width = 4097;
+    draw(0, true, false);
+    EXPECT_FALSE(water.visibility_mask().valid());
+    ctx.internal_width = 0;
+    ctx.lit_scene_depth = {};
+    draw(0, true, false);
+    EXPECT_FALSE(water.visibility_mask().valid());
+    glDeleteBuffers(1, &ebo);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    water.destroy_water_fallback_textures(resources);
+    lighting.destroy_lighting_fbo(resources);
+    gbuffer.destroy_gbuffer(resources);
 }
 
 TEST(RenderSmokeTest, WaterCausticsRetainPatternInNormalizedTarget) {
@@ -2748,6 +4141,237 @@ TEST(RenderSmokeTest, GodRaysUseSkyOcclusionAndRemainVisibleInAir) {
     EXPECT_FLOAT_EQ(probe.draw()[24].r, 0.0f);
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
     glDeleteProgram(program);
+}
+
+namespace {
+struct ComparisonClockGuard {
+    Luminumbra::Client::PresentationClock saved = Luminumbra::Client::presentation_clock;
+    ~ComparisonClockGuard() {
+        Luminumbra::Client::presentation_clock = saved;
+    }
+};
+
+// Fixed 256x144 colour and depth storage bounds this controlled particle probe.
+struct ComparisonParticleTarget {
+    static constexpr int width = 256;
+    static constexpr int height = 144;
+    GLuint fbo = 0;
+    std::array<GLuint, 2> textures{};
+    std::vector<unsigned char> background;
+    ComparisonParticleTarget()
+        : background(static_cast<std::size_t>(width * height * 3)) {
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                const auto offset = static_cast<std::size_t>((y * width + x) * 3);
+                for (std::size_t channel = 0; channel < 3; ++channel) {
+                    background[offset + channel] = static_cast<unsigned char>(
+                        static_cast<std::size_t>(100 + x / 32 + y / 12) + channel * 15u);
+                }
+            }
+        }
+        glGenFramebuffers(1, &fbo);
+        glGenTextures(2, textures.data());
+        for (const auto texture : textures) {
+            glBindTexture(GL_TEXTURE_2D, texture);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        }
+        const std::vector<float> depth(static_cast<std::size_t>(width * height), 0.0f);
+        glTexImage2D(GL_TEXTURE_2D,
+                     0,
+                     GL_DEPTH_COMPONENT32F,
+                     width,
+                     height,
+                     0,
+                     GL_DEPTH_COMPONENT,
+                     GL_FLOAT,
+                     depth.data());
+        glBindTexture(GL_TEXTURE_2D, textures[0]);
+        glTexImage2D(GL_TEXTURE_2D,
+                     0,
+                     GL_RGB8,
+                     width,
+                     height,
+                     0,
+                     GL_RGB,
+                     GL_UNSIGNED_BYTE,
+                     background.data());
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, textures[0], 0);
+    }
+    ~ComparisonParticleTarget() {
+        glDeleteTextures(2, textures.data());
+        glDeleteFramebuffers(1, &fbo);
+    }
+    void Reset() const {
+        glBindTexture(GL_TEXTURE_2D, textures[0]);
+        glTexSubImage2D(
+            GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, background.data());
+    }
+    std::vector<unsigned char> Read() const {
+        std::vector<unsigned char> pixels(background.size());
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
+        return pixels;
+    }
+};
+} // namespace
+
+TEST(RenderSmokeTest, ComparisonAtmosphereReplacesAdverseDefaultsBeforeEveryPhase) {
+    using namespace Luminumbra::Rendering;
+    using namespace Luminumbra::Client::ScenarioHarness;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    const ComparisonClockGuard clock_guard;
+    RenderPipeline pipeline;
+    Luminumbra::Client::presentation_clock.use_wall_clock();
+    EXPECT_TRUE(ResolvedAtmosphereToJson(pipeline)["presentation_seconds"].is_null());
+    auto* particles = pipeline.particles();
+    ASSERT_NE(particles, nullptr);
+    particles->init_buffers();
+    const auto data_root = SourceRoot() / "data/common/particles";
+    // Control, rain, six season/solar captures, then a repeated clear control.
+    for (int phase = -2; phase <= kTimeOfDaySweepCaptureCount; ++phase) {
+        const bool rain = phase == -1;
+        WeatherRenderState adverse;
+        adverse.rain_intensity = 1;
+        adverse.snow_intensity = 1;
+        adverse.fog_density = 1;
+        adverse.storm_intensity = 1;
+        adverse.wetness = 1;
+        adverse.wind_direction = glm::vec3(0, 0, -1);
+        adverse.wind_strength = 1;
+        pipeline.set_weather_state(adverse);
+        CloudRenderState clouds;
+        clouds.enabled = true;
+        clouds.shadow_enabled = true;
+        clouds.coverage_amount = 1;
+        clouds.biome_variation = -1;
+        clouds.plane_height = 12;
+        clouds.shadow_strength = 1;
+        pipeline.set_cloud_state(clouds);
+        LightningRenderState lightning;
+        lightning.active = true;
+        lightning.pulse_intensity = 1;
+        pipeline.set_lightning_state(lightning);
+        particles->set_precipitation(data_root, glm::vec3(0), 1, 1);
+        particles->set_wind(glm::vec3(20, 0, -30));
+        Luminumbra::Client::presentation_clock.set_capture_tick(9999, 30);
+        PinComparisonAtmosphere(pipeline, data_root, glm::vec3(0), rain);
+        const auto expected = BuildComparisonAtmosphere(rain);
+        const auto& actual = pipeline.get_weather_state();
+        EXPECT_TRUE(actual.driven);
+        EXPECT_FLOAT_EQ(actual.rain_intensity, expected.weather.rain_intensity);
+        EXPECT_FLOAT_EQ(actual.snow_intensity, 0);
+        EXPECT_FLOAT_EQ(actual.fog_density, expected.weather.fog_density);
+        EXPECT_FLOAT_EQ(actual.storm_intensity, expected.weather.storm_intensity);
+        EXPECT_FLOAT_EQ(actual.wetness, expected.weather.wetness);
+        EXPECT_EQ(actual.wind_direction, glm::vec3(1, 0, 0));
+        EXPECT_FLOAT_EQ(actual.wind_strength, 0);
+        const auto& resolved_clouds = pipeline.get_cloud_state();
+        EXPECT_TRUE(resolved_clouds.enabled);
+        EXPECT_TRUE(resolved_clouds.shadow_enabled);
+        EXPECT_FLOAT_EQ(resolved_clouds.coverage_amount, expected.clouds.coverage_amount);
+        EXPECT_FLOAT_EQ(resolved_clouds.biome_variation, 0);
+        EXPECT_FLOAT_EQ(resolved_clouds.plane_height, 900);
+        EXPECT_FLOAT_EQ(resolved_clouds.shadow_strength, expected.clouds.shadow_strength);
+        EXPECT_EQ(particles->wind_velocity(), glm::vec3(0));
+        // Drain prior drops while applying the resolved emission, without clearing
+        // the pool: returning from rain to clear must really stop precipitation.
+        for (int frame = 0; frame < 50; ++frame) {
+            particles->update(0.1f);
+        }
+        if (rain) {
+            EXPECT_GT(particles->frame_instance_count(), 0u);
+        } else {
+            EXPECT_EQ(particles->frame_instance_count(), 0u);
+        }
+        const auto json = ResolvedAtmosphereToJson(pipeline);
+        EXPECT_EQ(json["weather"]["rain_intensity"], actual.rain_intensity);
+        EXPECT_EQ(json["clouds"]["coverage_amount"], resolved_clouds.coverage_amount);
+        EXPECT_EQ(json["clouds"]["scroll_offset"][0], resolved_clouds.scroll_offset.x);
+        EXPECT_EQ(json["particles"]["wind_velocity"], nlohmann::json::array({0, 0, 0}));
+        EXPECT_EQ(json["presentation_seconds"], 4.0);
+        EXPECT_EQ(json["lightning_active"], false);
+        if (phase >= 0 && phase < kTimeOfDaySweepCaptureCount) {
+            const auto& plan = TimeOfDaySweepCapturePlanAt(phase);
+            pipeline.set_season_tick(SeasonSweepTick(plan.season_index));
+            pipeline.set_time_of_day(plan.phase_time);
+            const auto phase_json = ResolvedAtmosphereToJson(pipeline);
+            EXPECT_EQ(phase_json["season_tick"], SeasonSweepTick(plan.season_index));
+            EXPECT_EQ(phase_json["time_of_day"], plan.phase_time);
+        }
+    }
+    particles->destroy_buffers();
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, ControlledRainParticlePairRejectsZeroRainNegativeControl) {
+    using namespace Luminumbra::Rendering;
+    using namespace Luminumbra::Client::ScenarioHarness;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    const ComparisonClockGuard clock_guard;
+    RenderPipeline pipeline;
+    auto* particles = pipeline.particles();
+    ASSERT_NE(particles, nullptr);
+    particles->init_shader(SourceRoot());
+    particles->init_buffers();
+    ComparisonParticleTarget target;
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+    Camera camera;
+    camera.Position = glm::vec3(0, 20, 0);
+    camera.Zoom = 60;
+    const std::vector<PointLight> lights;
+    RenderContext frame;
+    frame.screen_width = ComparisonParticleTarget::width;
+    frame.screen_height = ComparisonParticleTarget::height;
+    frame.lit_scene = {.id = target.fbo, .valid = true};
+    frame.gbuffer_depth = {.id = target.textures[1]};
+    frame.point_lights = &lights;
+    frame.sky_ambient_color = glm::vec3(0.3f);
+    frame.time_seconds = 4;
+    const auto data_root = SourceRoot() / "data/common/particles";
+    const auto draw = [&](bool rain, bool zero_rain) {
+        particles->clear_emitters();
+        PinComparisonAtmosphere(pipeline, data_root, camera.Position, rain);
+        if (zero_rain) {
+            particles->set_precipitation(data_root, camera.Position, 0, 0);
+        }
+        particles->rebuild_emitter_descriptors(1337, 120);
+        target.Reset();
+        // Prime the production screen basis, then warm a bounded 90 frames.
+        for (int frame_index = 0; frame_index < 90; ++frame_index) {
+            particles->update(1.0f / 60.0f);
+            (void)particles->execute(frame, camera);
+        }
+        target.Reset();
+        const auto drawn = particles->execute(frame, camera);
+        if (rain && !zero_rain) {
+            EXPECT_GT(drawn, 0u);
+        } else {
+            EXPECT_EQ(drawn, 0u);
+        }
+        return target.Read();
+    };
+    const auto baseline = draw(false, false);
+    const auto rain = draw(true, false);
+    const auto zero_rain = draw(true, true);
+    EXPECT_EQ(zero_rain, baseline);
+    EXPECT_NE(rain, baseline);
+    const auto baseline_stats = AnalyzeWeatherPixels(baseline, target.width, target.height);
+    const auto rain_stats = AnalyzeWeatherPixels(rain, target.width, target.height);
+    const auto zero_stats = AnalyzeWeatherPixels(zero_rain, target.width, target.height);
+    ASSERT_GT(baseline_stats.sky_horizontal_gradient_mean, 0);
+    const auto ratio =
+        rain_stats.sky_horizontal_gradient_mean / baseline_stats.sky_horizontal_gradient_mean;
+    EXPECT_GE(ratio, 1.25) << "shipping rain must add streak energy to the fixed background";
+    EXPECT_LT(zero_stats.sky_horizontal_gradient_mean / baseline_stats.sky_horizontal_gradient_mean,
+              1.25);
+    particles->destroy_buffers();
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }
 
 TEST(RenderSmokeTest, WeatherFogIntegratesTheGroundLayerFromAnElevatedCamera) {
@@ -4275,13 +5899,13 @@ TEST(RenderSmokeTest, RenderPipelineHotPathLogsAreCounterBacked) {
 
 TEST(RenderSmokeTest, ScheduledNightlyGateRequiresTaskSchedulerProvenance) {
     const fs::path behavior_test_path = SourceRoot() / "tools/gates/test-nightly-provenance.ps1";
-    const std::string runner = ReadTextFile(SourceRoot() / "tools/gates/run-nightly-gate.ps1");
+    const std::string runner = ReadSourceFile(SourceRoot() / "tools/gates/run-nightly-gate.ps1");
     const std::string frontier =
-        ReadTextFile(SourceRoot() / "tools/gates/validate-engine-frontier.ps1");
+        ReadSourceFile(SourceRoot() / "tools/gates/validate-engine-frontier.ps1");
     const std::string registrar =
-        ReadTextFile(SourceRoot() / "tools/gates/register-nightly-gate-task.ps1");
-    const std::string helper = ReadTextFile(SourceRoot() / "tools/gates/nightly-provenance.ps1");
-    const std::string behavior_test = ReadTextFile(behavior_test_path);
+        ReadSourceFile(SourceRoot() / "tools/gates/register-nightly-gate-task.ps1");
+    const std::string helper = ReadSourceFile(SourceRoot() / "tools/gates/nightly-provenance.ps1");
+    const std::string behavior_test = ReadSourceFile(behavior_test_path);
     ASSERT_FALSE(runner.empty());
     ASSERT_FALSE(frontier.empty());
     ASSERT_FALSE(registrar.empty());
@@ -4443,9 +6067,9 @@ TEST(RenderSmokeTest, ScheduledNightlyGateRequiresTaskSchedulerProvenance) {
 
 TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
     const std::string header =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/FarLodSystem.h");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/FarLodSystem.h");
     const std::string source =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/FarLodSystem.cpp");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/FarLodSystem.cpp");
     ASSERT_FALSE(header.empty());
     ASSERT_FALSE(source.empty());
 
@@ -4529,7 +6153,7 @@ TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
         }
     };
     const std::string world_source =
-        ReadTextFile(SourceRoot() / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp");
     ASSERT_FALSE(world_source.empty());
     const auto capture_body = section(world_source,
                                       "SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(",
@@ -4674,7 +6298,7 @@ TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
          "result.authority_revision == result.sdf_snapshot->authority_revision &&",
          "result.region_authority_revision == result.sdf_snapshot->region_authority_revision &&",
          "m_world->far_lod_region_authority_revision(result.rx, result.rz) &&",
-         "m_world->is_far_lod_sdf_snapshot_current(*result.sdf_snapshot);",
+         "m_world->is_far_lod_sdf_snapshot_current(*result.sdf_snapshot, true);",
          "if (!build_result_current(result) || result.authority_build_failed ||",
          "result.mesh.vertices.empty() || result.mesh.indices.empty())",
          "++m_stats.builds_failed_total;",
@@ -4706,6 +6330,11 @@ TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
                                  "SHIELD_WorldSystem::find_streamed_chunk(");
     expect_ordered(current,
                    {"snapshot.params_hash != World::ComputeTerrainParamsHash(m_params, m_seed) ||",
+                    "if (region_scoped)",
+                    "home_x % kRegionSpan != 0 || home_z % kRegionSpan != 0 ||",
+                    "snapshot.region_authority_revision !=",
+                    "far_lod_region_authority_revision(home_x / kRegionSpan, home_z / kRegionSpan)",
+                    "return false;",
                     "snapshot.authority_revision !=",
                     "m_far_lod_authority_revision.load(std::memory_order_acquire)",
                     "return false;",
@@ -4726,7 +6355,7 @@ TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
 
 TEST(RenderSmokeTest, RenderPipelineExposesPassBudgetCounters) {
     const std::string header =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
     const std::string source = ReadRenderPipelineCombinedSources();
     ASSERT_FALSE(header.empty());
     ASSERT_FALSE(source.empty());
@@ -4763,16 +6392,16 @@ TEST(RenderSmokeTest, RenderPipelineExposesPassBudgetCounters) {
 
 TEST(RenderSmokeTest, RenderFrameworkContractsEmitArtifacts) {
     const std::string header =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
     const std::string source = ReadRenderPipelineCombinedSources();
     const std::string shader_header =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/Shader.h");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/Shader.h");
     const std::string shader_source =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/Shader.cpp");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/Shader.cpp");
     const std::string capture_header =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/CaptureHooks.h");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/CaptureHooks.h");
     const std::string capture_source =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/CaptureHooks.cpp");
+        ReadSourceFile(SourceRoot() / "src/luminumbra_client/rendering/CaptureHooks.cpp");
     ASSERT_FALSE(header.empty());
     ASSERT_FALSE(source.empty());
     ASSERT_FALSE(shader_header.empty());
@@ -4802,7 +6431,7 @@ TEST(RenderSmokeTest, RenderFrameworkContractsEmitArtifacts) {
     // pass into the G-buffer pass (the textured albedo and normal-mapped normal
     // are baked into the G-buffer). The contract now lives in g_buffer.frag.
     {
-        const std::string gbuffer_frag = ReadTextFile(SourceRoot() / "res/shaders/g_buffer.frag");
+        const std::string gbuffer_frag = ReadSourceFile(SourceRoot() / "res/shaders/g_buffer.frag");
         EXPECT_NE(gbuffer_frag.find("u_terrainTextures"), std::string::npos);
         EXPECT_NE(gbuffer_frag.find("u_terrainNormals"), std::string::npos);
         EXPECT_NE(gbuffer_frag.find("triplanar_albedo"), std::string::npos);
@@ -6450,6 +8079,237 @@ struct ReloadShaderSources {
     }
 };
 
+// Observe real driver submissions through the public pass, restoring GL entry points.
+struct TreeSubmissionCapture {
+    struct Counts {
+        std::size_t mesh_draws = 0, impostor_draws = 0;
+        GLsizei mesh_indices = 0;
+        PFNGLDRAWELEMENTSINSTANCEDPROC elements = nullptr;
+        PFNGLDRAWARRAYSINSTANCEDPROC arrays = nullptr;
+    };
+    static Counts& Current() {
+        static Counts counts;
+        return counts;
+    }
+    static void APIENTRY
+    DrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instances) {
+        auto& state = Current();
+        if (!state.elements) {
+            ADD_FAILURE() << "Missing indexed draw entry point";
+            return;
+        }
+        ++state.mesh_draws;
+        state.mesh_indices = count;
+        state.elements(mode, count, type, indices, instances);
+    }
+    static void APIENTRY DrawArrays(GLenum mode, GLint first, GLsizei count, GLsizei instances) {
+        auto& state = Current();
+        if (!state.arrays) {
+            ADD_FAILURE() << "Missing array draw entry point";
+            return;
+        }
+        ++state.impostor_draws;
+        state.arrays(mode, first, count, instances);
+    }
+    TreeSubmissionCapture() {
+        auto& capture = Current();
+        capture = {.mesh_draws = 0,
+                   .impostor_draws = 0,
+                   .mesh_indices = 0,
+                   .elements = glDrawElementsInstanced,
+                   .arrays = glDrawArraysInstanced};
+        glad_glDrawElementsInstanced = DrawElements;
+        glad_glDrawArraysInstanced = DrawArrays;
+    }
+    ~TreeSubmissionCapture() {
+        glDrawElementsInstanced = Current().elements;
+        glDrawArraysInstanced = Current().arrays;
+    }
+};
+
+TEST(RenderSmokeTest, RefusedTreeImpostorsSubmitAvailableMeshLods) {
+    using namespace Luminumbra::Rendering;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    ReloadShaderSources sources;
+    RenderResourceRegistry resources;
+    GBufferPass pass;
+    pass.init_geometry_shader(SourceRoot());
+    pass.init_instanced_static_mesh(SourceRoot());
+    pass.init_skinned_mesh(SourceRoot());
+    pass.init_gbuffer(resources, 32, 32);
+    struct Cleanup {
+        GBufferPass& pass;
+        RenderResourceRegistry& resources;
+        ~Cleanup() {
+            pass.destroy_instanced_static_mesh();
+            pass.destroy_skinned_mesh();
+            pass.destroy_gbuffer(resources);
+        }
+    } cleanup{pass, resources};
+    Camera camera({0, 0, 0});
+    Luminumbra::Client::ScenarioHarness::IsolationConfig isolation;
+    glm::vec4 planes[6];
+    std::fill_n(planes, 6, glm::vec4(0, 0, 0, 1));
+    RenderContext ctx;
+    ctx.camera = &camera;
+    ctx.screen_width = 32;
+    ctx.screen_height = 32;
+    ctx.isolation = &isolation;
+    ctx.frustum_planes = planes;
+    GBufferPassInput input;
+    input.root_path = sources.directory;
+    input.submit_terrain_chunks = [](const glm::vec4(&)[6]) {
+        return TerrainSubmitStats{};
+    };
+    input.submit_ladder = [](const FarWorldPrepareDraw&) {
+        return FarWorldSubmitStats{};
+    };
+    input.static_model_tex = [](const std::string&) -> const StaticModelTex* {
+        return nullptr;
+    };
+    input.tree_impostor_enabled = true;
+    input.tree_impostor_grid = 1;
+    input.tree_impostor_radius = 1;
+    const glm::vec3 root(200, 12, 0);
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    auto params = Luminumbra::Test::SyntheticTerrainParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = root.y;
+    params.caves_enabled = false;
+    params.island_mask_enabled = false;
+    Luminumbra::Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    FarLodSystem far;
+    far.attach_job_system(&jobs);
+    struct FarCleanup {
+        FarLodSystem& far;
+        Luminumbra::JobSystem& jobs;
+        ~FarCleanup() {
+            far.shutdown();
+            jobs.shutdown();
+        }
+    } far_cleanup{far, jobs};
+    far.set_horizon(FarLodSystem::kF1OuterRangeMeters, FarLodSystem::kF1OuterRangeMeters + 50.0f);
+    for (int frame = 0; frame < 12; ++frame) {
+        far.update(world, camera.Position);
+        jobs.wait(jobs.dispatch_batch({[] {
+        }}));
+    }
+    ASSERT_TRUE(far.terrain_resident_at(root));
+    SubmittedLiveTerrain support;
+    entt::registry entities;
+    TreeSubmissionCapture submissions;
+    auto& capture = TreeSubmissionCapture::Current();
+    // Empty, sparse and complete sets; missing, partial and wrong-type higher LODs.
+    for (const int highest_lod : {-1, 0, 1, 2}) {
+        SCOPED_TRACE(highest_lod);
+        for (const char* part : {"leaf", "bark", "trunk"}) {
+            const std::string base = "game-assets/tree-small-02/residency-" +
+                                     std::to_string(highest_lod) + "-" + part + ".lmesh";
+            fs::create_directories((sources.directory / base).parent_path());
+            if (highest_lod == 0) {
+                std::ofstream partial(sources.directory / LodMeshPath(base, 2), std::ios::binary);
+                partial << "LM";
+            }
+            if (highest_lod == 1) {
+                fs::create_directories(sources.directory / LodMeshPath(base, 2));
+            }
+            for (int mesh_lod = 0; mesh_lod <= highest_lod; ++mesh_lod) {
+                const std::vector<std::uint32_t> indices(
+                    static_cast<std::size_t>(3 * (mesh_lod + 1)), 0);
+                auto mesh = MeshLoader::CreateFromArrays({{{-1, -1, -5}, {0, 0, 1}, {0, 0}},
+                                                          {{1, -1, -5}, {0, 0, 1}, {1, 0}},
+                                                          {{0, 1, -5}, {0, 0, 1}, {.5f, 1}}},
+                                                         indices);
+                ASSERT_NE(mesh, nullptr);
+                pass.register_cached_mesh(LodMeshPath(base, mesh_lod), std::move(mesh));
+            }
+            const auto entity = entities.create();
+            entities.emplace<Luminumbra::Components::TransformComponent>(entity).position = root;
+            entities.emplace<Luminumbra::Components::StaticMeshComponent>(entity).meshPath = base;
+        }
+        // Cold far-supported ON frame goes directly to frozen OFF. No mesh-support
+        // warm-up is allowed, even for empty or malformed fallback chains.
+        input.far_selection =
+            SelectFarWorld(FarWorldMode::Legacy, FarWorldPurpose::World, FarWorldRefusal::None);
+        input.legacy_far = &far;
+        ctx.far_world_ladder = false;
+        input.resident_live_terrain = nullptr;
+        input.submitted_live_terrain = nullptr;
+        ctx.frozen_replay = false;
+        capture.mesh_draws = 0;
+        capture.impostor_draws = 0;
+        ASSERT_NO_THROW((void)pass.execute(ctx, entities, input));
+        EXPECT_EQ(capture.mesh_draws, 0u);
+        EXPECT_EQ(capture.impostor_draws, 1u);
+        input.far_selection.submit = false;
+        ctx.frozen_replay = true;
+        capture.mesh_draws = 0;
+        capture.impostor_draws = 0;
+        ASSERT_NO_THROW((void)pass.execute(ctx, entities, input));
+        EXPECT_EQ(capture.mesh_draws, highest_lod >= 0 ? 3u : 0u);
+        EXPECT_EQ(capture.impostor_draws, 0u);
+        if (highest_lod >= 0) {
+            EXPECT_EQ(capture.mesh_indices, 3 * (highest_lod + 1));
+        }
+        ctx.frozen_replay = false;
+        input.legacy_far = nullptr;
+        for (const auto mode : {FarWorldMode::Legacy, FarWorldMode::Ladder}) {
+            input.far_selection =
+                SelectFarWorld(mode, FarWorldPurpose::World, FarWorldRefusal::None);
+            ASSERT_TRUE(pass.instanced_static_mesh_shader(mode)->IsValid());
+            ctx.far_world_ladder = mode == FarWorldMode::Ladder;
+            // Null, empty and retired support all require meshes. Confirmed support
+            // uses one leaf representative, folding in bark and trunk, in either mode.
+            for (const int support_state : {0, 1, 2, 3, 4}) {
+                support.clear();
+                input.resident_live_terrain = nullptr;
+                input.submitted_live_terrain = nullptr;
+                if (support_state != 0) {
+                    input.resident_live_terrain = &support;
+                }
+                if (support_state >= 2) {
+                    support.add_origin({192, 0, 0});
+                }
+                if (support_state == 3) {
+                    input.resident_live_terrain = nullptr;
+                    input.submitted_live_terrain = &support;
+                }
+                if (support_state == 4) {
+                    support.clear();
+                }
+                const bool confirmed = support_state == 2 || support_state == 3;
+                for (const bool submit : {false, true}) {
+                    input.far_selection.submit = submit;
+                    // Warm normally, then verify frozen reuse without loading meshes.
+                    for (const bool replay : {false, true}) {
+                        ctx.frozen_replay = replay;
+                        capture.mesh_draws = 0;
+                        capture.impostor_draws = 0;
+                        const auto stats = pass.execute(ctx, entities, input);
+                        EXPECT_EQ(stats.invalid_program_refusals, 0u);
+                        EXPECT_EQ(capture.mesh_draws, !confirmed && highest_lod >= 0 ? 3u : 0u);
+                        EXPECT_EQ(capture.impostor_draws, confirmed ? 1u : 0u);
+                        if (!confirmed && highest_lod >= 0) {
+                            EXPECT_EQ(capture.mesh_indices, 3 * (highest_lod + 1));
+                            glm::mat4 model(0);
+                            glBindBuffer(GL_ARRAY_BUFFER, pass.instance_matrix_vbo());
+                            glGetBufferSubData(
+                                GL_ARRAY_BUFFER, 0, sizeof(model), glm::value_ptr(model));
+                            EXPECT_EQ(glm::vec3(model[3]), root);
+                        }
+                    }
+                }
+            }
+        }
+        ctx.frozen_replay = false;
+        entities.clear();
+        (void)pass.execute(ctx, entities, input); // Invalidate the population cache.
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
 void CheckDirectFarWorldReload(bool prepare_first) {
     ReloadShaderSources sources;
     ASSERT_TRUE(sources.EnableFarWorldClipInputs());
@@ -7087,6 +8947,141 @@ void ExpectProjectionPlane(const glm::mat4& projection, float far_plane, glm::ve
 }
 } // namespace
 
+TEST(RenderSmokeTest, WaterOnlyOwnerSubmitsWaterAndTracksTerrainPresence) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    RenderPipeline pipeline;
+    pipeline.enable_static_model_content(false);
+    ASSERT_TRUE(pipeline.startup(32, 32, SourceRoot()));
+    pipeline.set_far_world_mode(FarWorldMode::Legacy);
+    pipeline.set_far_lod_enabled(false);
+    pipeline.set_taau_enabled(false);
+    Luminumbra::Systems::SHIELD_WorldSystem world(
+        nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0));
+    chunk->set_state(Luminumbra::ChunkState::Ready);
+    chunk->water_mesh_vertices = {
+        {{0, 6, 0}, {0, 1, 0}, 0u},
+        {{0, 6, 16}, {0, 1, 0}, 0u},
+        {{16, 6, 0}, {0, 1, 0}, 0u},
+    };
+    chunk->water_mesh_indices = {0u, 1u, 2u};
+    chunk->water_mesh_version.store(1u);
+    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+    entt::registry registry;
+    Camera camera({8, 12, 8}, {0, 1, 0}, -90, -89);
+    const auto render = [&] {
+        pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    };
+    render();
+    EXPECT_EQ(world.renderable_chunks_view(), std::vector<Luminumbra::Chunk*>{chunk.get()});
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().snapshot_count, 1u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().water_draws, 1u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().water_indices_drawn, 3u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().terrain_draws, 0u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().shadow_draws, 0u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().culling_hierarchy_chunks, 0u);
+    EXPECT_EQ(pipeline.get_last_mesh_upload_stats().terrain_upload_candidates, 0u);
+
+    // Membership stays identical when terrain appears: its culling cache must change.
+    chunk->mesh_vertices = chunk->water_mesh_vertices;
+    for (auto& vertex : chunk->mesh_vertices) {
+        vertex.material_id = 3u;
+    }
+    const auto terrain_vertices = chunk->mesh_vertices;
+    chunk->mesh_indices = chunk->water_mesh_indices;
+    ++chunk->mesh_version;
+    world.notify_renderable_chunks_changed();
+    render();
+    EXPECT_EQ(world.renderable_chunks_view(), std::vector<Luminumbra::Chunk*>{chunk.get()});
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().water_draws, 1u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().terrain_draws, 1u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().culling_hierarchy_chunks, 1u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().culling_hierarchy_rebuilds, 1u);
+    EXPECT_EQ(pipeline.get_runtime_render_stats().terrain_gpu_chunks, 1u);
+    EXPECT_GT(pipeline.get_runtime_render_stats().terrain_vertex_capacity, 0u);
+
+    // Probe the uploaded ground through public scatter behavior. Keeping this
+    // input after terrain disappears detects stale support under the water owner.
+    auto& foliage = *pipeline.foliage();
+    foliage.destroy_compute();
+    ASSERT_TRUE(foliage.load_scatter_set(SourceRoot() / "data/common/foliage/scatter_set.json"));
+    FoliagePass::ChunkScatter scatter;
+    scatter.extent_m = 16.0f;
+    scatter.biome_id = 1;
+    scatter.density = 0.5f;
+    // A null query deactivates scatter outright. The pipeline samples rendered
+    // ground, so this visibly wrong analytic surface is never the support.
+    const auto fallback = +[](void*, float, float) {
+        FoliagePass::SurfaceSample sample;
+        sample.height = 100.0f;
+        return sample;
+    };
+    const auto rebuild_foliage = [&] {
+        foliage.rebuild_instances(
+            {scatter}, fallback, nullptr, camera.Position, FoliagePass::Preparation::Complete);
+    };
+    rebuild_foliage();
+    ASSERT_FALSE(foliage.instances().empty());
+    for (const auto& blade : foliage.instances()) {
+        EXPECT_NEAR(blade.pos[1], 6.0f, 0.001f) << "support must come from the uploaded terrain";
+    }
+
+    // A retained terrain GPU record must not draw once only water remains.
+    chunk->mesh_vertices.clear();
+    chunk->mesh_indices.clear();
+    ++chunk->mesh_version;
+    world.notify_renderable_chunks_changed();
+    render();
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().water_draws, 1u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().terrain_draws, 0u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().shadow_draws, 0u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().culling_hierarchy_chunks, 0u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().culling_hierarchy_rebuilds, 1u);
+
+    // Unrefined empty terrain is skipped by uploads, so its independent activity
+    // must expire after the existing 15-frame grace, even while water draws.
+    for (int frame = 1; frame <= 15; ++frame) {
+        SCOPED_TRACE(frame);
+        EXPECT_EQ(pipeline.get_runtime_render_stats().terrain_gpu_chunks, 1u);
+        render();
+        EXPECT_EQ(pipeline.get_last_render_pass_stats().water_draws, 1u);
+        EXPECT_EQ(pipeline.get_last_render_pass_stats().terrain_draws, 0u);
+        EXPECT_EQ(pipeline.get_last_render_pass_stats().shadow_draws, 0u);
+    }
+    EXPECT_EQ(pipeline.get_runtime_render_stats().terrain_gpu_chunks, 0u);
+    EXPECT_EQ(pipeline.get_runtime_render_stats().terrain_vertex_capacity, 0u);
+    EXPECT_EQ(pipeline.get_runtime_render_stats().terrain_index_capacity, 0u);
+    EXPECT_EQ(pipeline.get_runtime_render_stats().water_gpu_chunks, 1u);
+    rebuild_foliage();
+    EXPECT_TRUE(foliage.instances().empty());
+
+    // A later terrain replacement reuses the retired record and restores support.
+    chunk->mesh_vertices = terrain_vertices;
+    chunk->mesh_indices = chunk->water_mesh_indices;
+    ++chunk->mesh_version;
+    world.notify_renderable_chunks_changed();
+    render();
+    EXPECT_EQ(pipeline.get_runtime_render_stats().terrain_gpu_chunks, 1u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().terrain_draws, 1u);
+    rebuild_foliage();
+    EXPECT_FALSE(foliage.instances().empty());
+    chunk->mesh_vertices.clear();
+    chunk->mesh_indices.clear();
+    ++chunk->mesh_version;
+    world.notify_renderable_chunks_changed();
+    chunk->water_mesh_vertices.clear();
+    chunk->water_mesh_indices.clear();
+    ++chunk->water_mesh_version;
+    world.notify_renderable_chunks_changed();
+    render();
+    EXPECT_TRUE(world.renderable_chunks_view().empty());
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().snapshot_count, 0u);
+    EXPECT_EQ(pipeline.get_last_render_pass_stats().water_draws, 0u);
+    pipeline.shutdown();
+}
+
 TEST(RenderSmokeTest, WorldSwapRetainsLegacyDiagnosticInventoryUntilShutdown) {
     HiddenGlContext context;
     ASSERT_TRUE(context.ready()) << context.error();
@@ -7271,4 +9266,1323 @@ TEST(RenderSmokeTest, FarWorldPlaneCoherenceThroughProductionConsumers) {
         ExpectProjectionPlane(glm::make_mat4(stored_projection.data()), expected, jitter);
         EXPECT_EQ(glGetError(), GL_NO_ERROR);
     }
+}
+
+namespace {
+// All captures are fixed at 320x180: one RGB float target and fixed RGB
+// float/byte readbacks (172,800 channels each, under 1 MiB per buffer).
+// No window, atmosphere input or presentation clock varies.
+struct ControlledSkyCapture {
+    static constexpr int width = 320;
+    static constexpr int height = 180;
+    static constexpr std::size_t channels = static_cast<std::size_t>(width) * height * 3u;
+    SkyboxPass pass;
+    SkyAtmosphereLut atmosphere;
+    Camera camera;
+    Luminumbra::Client::ScenarioHarness::IsolationConfig isolation;
+    WeatherRenderState weather;
+    std::size_t draws = 0;
+    GLuint framebuffer = 0, target = 0, bright_lut = 0;
+
+    ControlledSkyCapture() {
+        const auto toward_sun = -ComputeSunGeometry(0.04f, 0.0f).direction;
+        camera.Yaw = glm::degrees(std::atan2(toward_sun.z, toward_sun.x));
+        camera.Pitch = 30.0f;
+        camera.Zoom = 90.0f;
+        camera.updateCameraVectors();
+    }
+    ~ControlledSkyCapture() {
+        pass.destroy_geometry();
+        glDeleteFramebuffers(1, &framebuffer);
+        glDeleteTextures(1, &target);
+        glDeleteTextures(1, &bright_lut);
+    }
+    void Init(bool gpu) {
+        pass.init_shader(SourceRoot());
+        ASSERT_TRUE(pass.shader()->IsValid());
+        pass.init_geometry();
+        atmosphere.set_gpu_skyview_enabled(gpu);
+        ASSERT_TRUE(atmosphere.initialize(-ComputeSunGeometry(0.04f, 0.0f).direction));
+        glGenFramebuffers(1, &framebuffer);
+        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+        glGenTextures(1, &target);
+        glBindTexture(GL_TEXTURE_2D, target);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB32F, width, height, 0, GL_RGB, GL_FLOAT, nullptr);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, target, 0);
+        ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+        glGenTextures(1, &bright_lut);
+        glBindTexture(GL_TEXTURE_2D, bright_lut);
+        // Deliberately bright, coloured radiance at the shipping exposure. This
+        // exercises the filmic curve's asymptote without changing a render flag.
+        constexpr std::array<float, 3> radiance{1.0f, 0.8f, 0.6f};
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB32F, 1, 1, 0, GL_RGB, GL_FLOAT, radiance.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_BLEND);
+        glDisable(GL_DITHER);
+        glDisable(GL_FRAMEBUFFER_SRGB);
+        glViewport(0, 0, width, height);
+    }
+    std::vector<unsigned char> Draw(float time_of_day,
+                                    float declination,
+                                    float coverage,
+                                    bool use_lut = true,
+                                    bool bright = false) {
+        const auto sun = ComputeSunGeometry(time_of_day, declination);
+        (void)atmosphere.refresh_sky_view(-sun.direction);
+        RenderContext ctx;
+        ctx.screen_width = width;
+        ctx.screen_height = height;
+        ctx.sun.direction = sun.direction;
+        ctx.sun.intensity = sun.sunIntensity;
+        ctx.sky_day_factor = sun.skyDomeDayFactor;
+        ctx.moon_direction = -sun.direction;
+        ctx.sky_lut_ready = use_lut;
+        ctx.sky_view_lut.id = bright ? bright_lut : atmosphere.sky_view_texture();
+        ctx.transmittance_lut.id = atmosphere.transmittance_texture();
+        ctx.weather_state = &weather;
+        ctx.isolation = &isolation;
+        ctx.skybox_draw_counter = &draws;
+        ctx.cloud_state.coverage_amount = coverage;
+        ctx.cloud_state.scroll_offset = glm::vec2(0);
+        ctx.time_seconds = 0;
+        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+        pass.execute(ctx, camera, false);
+        std::vector<float> pixels(channels);
+        glReadPixels(0, 0, width, height, GL_RGB, GL_FLOAT, pixels.data());
+        std::vector<unsigned char> bytes(channels);
+        for (std::size_t channel = 0; channel < channels; ++channel) {
+            const float value = pixels[channel];
+            if (!std::isfinite(value) || value < 0 || value > 1.000001f) {
+                ADD_FAILURE() << "sky channel out of gamut: " << value;
+                return {};
+            }
+            bytes[channel] =
+                static_cast<unsigned char>(std::lround(std::clamp(value, 0.f, 1.f) * 255));
+        }
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+        return bytes;
+    }
+};
+
+// Independent image oracle using the scenario's unchanged 254 luminance,
+// 0.30-height cluster radius and top-55% ROI. Keep QA scenario symbols out of
+// the shipping renderer test target, which links only luminumbra_client.
+struct ControlledSkyStats {
+    double sky_mean_luminance = 0;
+    double sky_warm_half_r_b_ratio = 0;
+    std::size_t sun_disc_pixels = 0, sun_disc_pixels_near_expected = 0;
+    double sun_disc_centroid_x = 0, sun_disc_centroid_y = 0;
+};
+
+ControlledSkyStats
+AnalyzeControlledSky(const std::vector<unsigned char>& bytes, double sun_x = 0, double sun_y = 0) {
+    constexpr int width = ControlledSkyCapture::width, height = ControlledSkyCapture::height;
+    constexpr int sky_rows = height * 55 / 100;
+    constexpr double cluster_radius = .30 * height;
+    ControlledSkyStats stats;
+    std::array<double, 2> red{}, blue{};
+    std::size_t count = 0;
+    for (int y = height - sky_rows; y < height; ++y) {
+        for (int x = width / 64; x < width - width / 64; ++x) {
+            const auto offset =
+                (static_cast<std::size_t>(y) * width + static_cast<std::size_t>(x)) * 3;
+            const double r = bytes[offset], g = bytes[offset + 1], b = bytes[offset + 2];
+            const double luminance = .2126 * r + .7152 * g + .0722 * b;
+            stats.sky_mean_luminance += luminance;
+            const std::size_t half = x < width / 2 ? 0u : 1u;
+            red[half] += r;
+            blue[half] += b;
+            ++count;
+            if (luminance >= 254) {
+                ++stats.sun_disc_pixels;
+                const double from_top = height - 1 - y;
+                stats.sun_disc_centroid_x += static_cast<double>(x) / width;
+                stats.sun_disc_centroid_y += from_top / height;
+                const double dx = x - sun_x * width, dy = from_top - sun_y * height;
+                if (dx * dx + dy * dy <= cluster_radius * cluster_radius) {
+                    ++stats.sun_disc_pixels_near_expected;
+                }
+            }
+        }
+    }
+    stats.sky_mean_luminance /= static_cast<double>(count);
+    stats.sky_warm_half_r_b_ratio =
+        std::max(red[0] / std::max(blue[0], 1.0), red[1] / std::max(blue[1], 1.0));
+    if (stats.sun_disc_pixels > 0) {
+        stats.sun_disc_centroid_x /= static_cast<double>(stats.sun_disc_pixels);
+        stats.sun_disc_centroid_y /= static_cast<double>(stats.sun_disc_pixels);
+    }
+    return stats;
+}
+
+} // namespace
+
+TEST(RenderSmokeTest, SkyDiscSeparatesBrightDomeAcrossSeasonsAndFallback) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    ControlledSkyCapture capture;
+    capture.Init(false);
+    ASSERT_FALSE(HasFatalFailure());
+    for (const float declination : {-kSeasonalTiltAmplitude, 0.f, kSeasonalTiltAmplitude}) {
+        for (const bool use_lut : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << declination << " lut=" << use_lut);
+            const auto bytes = capture.Draw(.04f, declination, 0, use_lut, true);
+            ASSERT_EQ(bytes.size(), ControlledSkyCapture::channels);
+            const auto direction = -ComputeSunGeometry(.04f, declination).direction;
+            const auto clip = capture.camera.GetProjectionMatrix(ControlledSkyCapture::width,
+                                                                 ControlledSkyCapture::height) *
+                              glm::vec4(glm::mat3(capture.camera.GetViewMatrix()) * direction, 0);
+            const double x = (static_cast<double>(clip.x / clip.w) + 1) * .5;
+            const double y = (1 - static_cast<double>(clip.y / clip.w)) * .5;
+            const bool visible = clip.w > 0 && x >= 0 && x <= 1 && y >= 0 && y <= 1;
+            const auto stats = AnalyzeControlledSky(bytes, x, y);
+            if (visible) {
+                ASSERT_GT(stats.sun_disc_pixels, 0u);
+                EXPECT_GE(static_cast<double>(stats.sun_disc_pixels_near_expected) /
+                              static_cast<double>(stats.sun_disc_pixels),
+                          0.6);
+                EXPECT_NEAR(stats.sun_disc_centroid_x, x, .02);
+                EXPECT_NEAR(stats.sun_disc_centroid_y, y, .02);
+            } else {
+                EXPECT_EQ(stats.sun_disc_pixels, 0u);
+            }
+        }
+    }
+}
+
+TEST(RenderSmokeTest, SkyControlledNoonDuskNightAndBrightCloudsRetainOrdering) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    // Both shipping LUT backends feed the same skybox shader and pass. Each
+    // backend has 18 bounded captures (three seasons, two coverages, three times).
+    for (const bool gpu : {false, true}) {
+        ControlledSkyCapture capture;
+        capture.Init(gpu);
+        ASSERT_FALSE(HasFatalFailure());
+        for (const float declination : {-kSeasonalTiltAmplitude, 0.f, kSeasonalTiltAmplitude}) {
+            for (const float coverage : {0.f, 1.f}) {
+                SCOPED_TRACE(::testing::Message()
+                             << "gpu=" << gpu << " tilt=" << declination << " clouds=" << coverage);
+                std::array<ControlledSkyStats, 3> stats{};
+                constexpr std::array<float, 3> times{.04f, .22f, .45f};
+                for (std::size_t phase = 0; phase < times.size(); ++phase) {
+                    const auto bytes = capture.Draw(times[phase], declination, coverage);
+                    ASSERT_EQ(bytes.size(), ControlledSkyCapture::channels);
+                    stats[phase] = AnalyzeControlledSky(bytes);
+                }
+                EXPECT_GT(stats[0].sky_mean_luminance, stats[1].sky_mean_luminance + 3);
+                EXPECT_GT(stats[1].sky_mean_luminance, stats[2].sky_mean_luminance + 10);
+                EXPECT_LT(stats[2].sky_mean_luminance, 60);
+                EXPECT_GE(stats[1].sky_warm_half_r_b_ratio, .95);
+                EXPECT_GE(stats[1].sky_warm_half_r_b_ratio, stats[0].sky_warm_half_r_b_ratio + .05);
+            }
+        }
+    }
+}
+
+TEST(RenderSmokeTest, ShippingSkyGradePreservesColouredLuminanceAndGamut) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    FullscreenFloatProbe probe;
+    const auto source = ReadTextFile(SourceRoot() / "res/shaders/enhanced_skybox.frag");
+    const auto begin = source.find("vec3 preserveSkyLuminance(");
+    ASSERT_NE(begin, std::string::npos);
+    const auto end = source.find("void main()", begin);
+    ASSERT_NE(end, std::string::npos);
+    const auto fragment_source = std::string("#version 450 core\nout vec4 FragColor;\n") +
+                                 source.substr(begin, end - begin) + R"(
+uniform vec3 inputColor, candidateColor;
+void main() { FragColor = vec4(preserveSkyLuminance(inputColor, candidateColor), 1); }
+)";
+    const GLuint fragment = glCreateShader(GL_FRAGMENT_SHADER);
+    const char* text = fragment_source.c_str();
+    glShaderSource(fragment, 1, &text, nullptr);
+    glCompileShader(fragment);
+    GLint compiled = GL_FALSE;
+    glGetShaderiv(fragment, GL_COMPILE_STATUS, &compiled);
+    ASSERT_EQ(compiled, GL_TRUE) << GetShaderInfoLog(fragment);
+    const GLuint vertex = CompileShader(SourceRoot() / "res/shaders/ssao.vert", GL_VERTEX_SHADER);
+    ASSERT_NE(vertex, 0u);
+    const GLuint program = glCreateProgram();
+    glAttachShader(program, vertex);
+    glAttachShader(program, fragment);
+    glLinkProgram(program);
+    glDeleteShader(vertex);
+    glDeleteShader(fragment);
+    GLint linked = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    ASSERT_EQ(linked, GL_TRUE) << GetProgramInfoLog(program);
+    glUseProgram(program);
+    const std::array<glm::vec3, 10> colors{{{0, 0, 0},
+                                            {1, 1, 1},
+                                            {.5f, .5f, .5f},
+                                            {1, 0, 0},
+                                            {0, 1, 0},
+                                            {0, 0, 1},
+                                            {.9f, .7f, .3f},
+                                            {.01f, .6f, .98f},
+                                            {.999f, .998f, .995f},
+                                            {1e-6f, 2e-6f, 3e-6f}}};
+    const std::array<glm::vec3, 5> tints{
+        {{1, 1, 1}, {1, .7f, .1f}, {.01f, 1, .2f}, {0, 0, 0}, {4, .1f, 2}}};
+    const glm::vec3 weights(.2126f, .7152f, .0722f);
+    // 50 actual shipping-helper readbacks cover identity, zero candidate, black,
+    // white, primaries, coloured midtones, gamut faces and small positive values.
+    for (const auto& color : colors) {
+        for (const auto& tint : tints) {
+            const auto candidate = color * tint;
+            glUniform3fv(glGetUniformLocation(program, "inputColor"), 1, glm::value_ptr(color));
+            glUniform3fv(
+                glGetUniformLocation(program, "candidateColor"), 1, glm::value_ptr(candidate));
+            const glm::vec3 graded(probe.draw()[16]);
+            EXPECT_NEAR(glm::dot(graded, weights), glm::dot(color, weights), 3e-6f);
+            for (int channel = 0; channel < 3; ++channel) {
+                EXPECT_TRUE(std::isfinite(graded[channel]));
+                EXPECT_GE(graded[channel], 0);
+                EXPECT_LE(graded[channel], 1);
+                if (tint == glm::vec3(0) || tint == glm::vec3(1)) {
+                    EXPECT_NEAR(graded[channel], color[channel], 3e-6f);
+                }
+            }
+        }
+    }
+    glDeleteProgram(program);
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, DiagnosticReadbackDecodesAndNormalizesWhileRestoringState) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    RenderResourceRegistry resources;
+    GBuffer gbuffer;
+    CreateGBufferTargets(gbuffer, resources, 1, 2);
+    DiagnosticTargets targets;
+    ASSERT_TRUE(targets.ensure(true, {1, 2}, 7));
+    DiagnosticDrawTable draws;
+    DiagnosticId id{};
+    ASSERT_TRUE(draws.submit({.mesh_path = "models/pattern.lmesh",
+                              .shader_variant = "pattern",
+                              .chunk = {},
+                              .lod = 0,
+                              .ownership = DiagnosticOwnership::Live,
+                              .pass = DiagnosticPass::GBuffer,
+                              .provenance = DiagnosticProvenance::Mesh},
+                             id));
+    const std::array<DiagnosticId, 2> ids{DiagnosticId{}, id};
+    glBindTexture(GL_TEXTURE_2D, targets.texture());
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 2, GL_RGBA_INTEGER, GL_UNSIGNED_INT, ids.data());
+    const std::array<unsigned char, 8> normal{255, 128, 0, 17, 255, 255, 0, 251};
+    glBindTexture(GL_TEXTURE_2D, gbuffer.normal_texture);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 2, GL_RGBA, GL_UNSIGNED_BYTE, normal.data());
+    const std::array<unsigned char, 8> albedo{0, 51, 102, 255, 153, 204, 255, 255};
+    glBindTexture(GL_TEXTURE_2D, gbuffer.albedo_texture);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 2, GL_RGBA, GL_UNSIGNED_BYTE, albedo.data());
+    const std::array<float, 2> depth{.25f, .75f};
+    glBindTexture(GL_TEXTURE_2D, gbuffer.depth_texture);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 2, GL_DEPTH_COMPONENT, GL_FLOAT, depth.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+    // Preserve both source FBO read-buffer choices and an unrelated caller FBO.
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, gbuffer.fbo_id);
+    glReadBuffer(GL_COLOR_ATTACHMENT3);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, targets.framebuffer());
+    glReadBuffer(GL_NONE);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    glReadBuffer(GL_BACK);
+    GLuint pack = 0;
+    glGenBuffers(1, &pack);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, pack);
+    glBufferData(GL_PIXEL_PACK_BUFFER, 4, nullptr, GL_STREAM_READ);
+    const std::array<GLenum, 6> names{GL_PACK_ALIGNMENT,
+                                      GL_PACK_ROW_LENGTH,
+                                      GL_PACK_SKIP_ROWS,
+                                      GL_PACK_SKIP_PIXELS,
+                                      GL_PACK_SWAP_BYTES,
+                                      GL_PACK_LSB_FIRST};
+    const std::array<GLint, 6> values{8, 11, 2, 3, GL_TRUE, GL_TRUE};
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        glPixelStorei(names[i], values[i]);
+    }
+    DiagnosticGlSource source(gbuffer, targets, {1, 2});
+    std::array<float, 6> normals{};
+    ASSERT_TRUE(source.read_aov(DiagnosticAov::Normal, normals));
+    EXPECT_NEAR(normals[0], 1.0f, .001f);
+    EXPECT_NEAR(normals[1], 0.0f, .001f);
+    EXPECT_NEAR(normals[2], -1.0f / 255.0f, .001f);
+    EXPECT_EQ(normals[3], 0.0f);
+    EXPECT_EQ(normals[4], 0.0f);
+    EXPECT_EQ(normals[5], -1.0f);
+    DiagnosticBundleFrame frame;
+    frame.extent = {1, 2};
+    frame.identity_complete = true;
+    frame.capture_filename = "pattern.ppm";
+    frame.manifest_filename = "pattern.manifest.json";
+    DiagnosticGlOutput output;
+    ASSERT_TRUE(
+        WriteDiagnosticBundle({.enabled = true, .probe = std::array<std::uint32_t, 2>{0, 0}},
+                              frame,
+                              draws,
+                              source,
+                              output));
+    EXPECT_TRUE(output.committed);
+    const auto serialized = output.streams[4].str();
+    ASSERT_EQ(serialized.size(), 48U);
+    EXPECT_EQ(DiagnosticGlWord(serialized, 16), id[0]);
+    EXPECT_EQ(DiagnosticGlWord(serialized, 32), 0U);
+    const auto probe = nlohmann::json::parse(output.streams[6].str());
+    EXPECT_EQ(probe["material"], 251);
+    EXPECT_EQ(probe["depth_hardware"], .75f);
+    EXPECT_EQ(probe["normal_view"], (nlohmann::json::array({0, 0, -1})));
+    EXPECT_NEAR(probe["albedo_linear"][0].get<float>(), .6f, .00001f);
+    EXPECT_NEAR(probe["albedo_linear"][1].get<float>(), .8f, .00001f);
+    EXPECT_EQ(probe["albedo_linear"][2], 1.0f);
+    std::array<float, 1> wrong_size{};
+    EXPECT_FALSE(source.read_aov(DiagnosticAov::Normal, wrong_size));
+    EXPECT_FALSE(source.read_aov(static_cast<DiagnosticAov>(99), wrong_size));
+    GLuint incomplete = 0;
+    glGenFramebuffers(1, &incomplete);
+    GBuffer missing;
+    missing.fbo_id = incomplete;
+    DiagnosticGlSource refused(missing, targets, {1, 2});
+    std::array<float, 2> refused_depth{};
+    EXPECT_FALSE(refused.read_aov(DiagnosticAov::Depth, refused_depth));
+    EXPECT_FALSE(source.read_ids({}));
+    glDeleteFramebuffers(1, &incomplete);
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        GLint actual = 0;
+        glGetIntegerv(names[i], &actual);
+        EXPECT_EQ(actual, values[i]);
+        glPixelStorei(names[i], i == 0 ? 4 : 0);
+    }
+    GLint actual = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &actual);
+    EXPECT_EQ(actual, 0);
+    glGetIntegerv(GL_READ_BUFFER, &actual);
+    EXPECT_EQ(actual, GL_BACK);
+    glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &actual);
+    EXPECT_EQ(static_cast<GLuint>(actual), pack);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    glDeleteBuffers(1, &pack);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, gbuffer.fbo_id);
+    glGetIntegerv(GL_READ_BUFFER, &actual);
+    EXPECT_EQ(actual, GL_COLOR_ATTACHMENT3);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, targets.framebuffer());
+    glGetIntegerv(GL_READ_BUFFER, &actual);
+    EXPECT_EQ(actual, GL_NONE);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    DestroyGBufferTargets(gbuffer, resources);
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, DiagnosticAdmissionBudgetAndScopeRefusalAreSafe) {
+    // Size refusal must work before a context exists or a GL entry point is read.
+    std::size_t admitted_bytes = 0;
+    EXPECT_TRUE(DiagnosticReadbackBudget({3840, 1600}, admitted_bytes));
+    EXPECT_EQ(admitted_bytes,
+              128U * 1024U * 1024U + 65536U + 3840U * 1600U * (sizeof(DiagnosticId) + 3U));
+    std::size_t retained = 123;
+    for (const DiagnosticExtent extent :
+         {DiagnosticExtent{0, 1}, {1, 0}, {16385, 1}, {16384, 16384}, {4096, 4096}, {3200, 3000}}) {
+        EXPECT_FALSE(DiagnosticFrameCapture::Admitted(extent, retained));
+        EXPECT_EQ(retained, 123U);
+        DiagnosticFrameCapture refused(extent);
+        EXPECT_FALSE(refused.ready());
+        EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
+    }
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    ASSERT_TRUE(DiagnosticFrameCapture::Admitted({1, 2}, retained));
+    EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
+    // An unattached frame refuses and consumes its capture scope.
+    {
+        DiagnosticFrameCapture capture({1, 2});
+        EXPECT_NE(GBufferDiagnosticCapture::Current(), nullptr);
+        EXPECT_FALSE(capture.ready());
+        DiagnosticBundleFrame frame;
+        frame.extent = {1, 2};
+        EXPECT_FALSE(capture.finish({}, {.enabled = true, .probe = std::nullopt}, frame, {}));
+        EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
+    }
+    EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
+    try {
+        DiagnosticFrameCapture capture({1, 2});
+        throw std::runtime_error("capture aborted");
+    } catch (const std::runtime_error&) {
+        EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
+    }
+    RenderPipeline pipeline;
+    bool called = false;
+    EXPECT_TRUE(pipeline.capture_diagnostics({}));
+    EXPECT_TRUE(pipeline.with_diagnostic_capture(
+        {},
+        [&]() -> CaptureManifestInput {
+            ADD_FAILURE() << "disabled capture observed metadata";
+            return {};
+        },
+        [&] {
+            called = true;
+            return true;
+        }));
+    EXPECT_TRUE(called);
+    EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, DiagnosticRetryAndPartialDestinationsPreserveEveryByte) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("diagnostic-retry-", ".ppm");
+    const auto capture = temporary.Path();
+    const auto directory = capture.parent_path();
+    RenderPipeline pipeline;
+    const DiagnosticCaptureOptions options{.enabled = true,
+                                           .probe = std::array<std::uint32_t, 2>{1, 0}};
+    pipeline.set_capture_diagnostics(options);
+    CaptureManifestInput input;
+    input.width = 2;
+    input.height = 2;
+    input.build_id.value = "capture-test";
+    input.asset_hash.unavailable = "test";
+    input.shader_hash.unavailable = "test";
+    input.world_hash.unavailable = "test";
+    class BackgroundSource final : public DiagnosticBundleSource {
+    public:
+        bool read_aov(DiagnosticAov, std::span<float> samples) override {
+            std::fill(samples.begin(), samples.end(), 0.0f);
+            return true;
+        }
+        bool read_ids(std::span<DiagnosticId> ids) override {
+            std::fill(ids.begin(), ids.end(), DiagnosticId{});
+            return true;
+        }
+    } source;
+    DiagnosticBundleFrame frame;
+    frame.extent = {2, 2};
+    frame.identity_complete = true;
+    frame.capture_filename = Luminumbra::Filesystem::GenericUtf8PathString(capture.filename());
+    frame.manifest_filename =
+        Luminumbra::Filesystem::GenericUtf8PathString(CaptureManifestPath(capture).filename());
+    DiagnosticDrawTable draws;
+    ASSERT_TRUE(pipeline.diagnostic_capture_destination_available(capture));
+    ASSERT_TRUE(WithCaptureManifest(capture, input, [&] {
+        std::ofstream image(capture, std::ios::binary);
+        image << "original capture";
+        image.close();
+        return !image.fail();
+    }));
+    ASSERT_TRUE(WriteDiagnosticBundle(capture, options, frame, draws, source));
+    const auto snapshot = [&] {
+        std::map<fs::path, std::string> bytes;
+        for (const auto& entry : fs::directory_iterator(directory)) {
+            bytes.emplace(entry.path(), ReadTextFile(entry.path()));
+        }
+        return bytes;
+    };
+    const auto original = snapshot();
+    ASSERT_EQ(original.size(), 10U);
+    bool observed = false, written = false;
+    const auto retry = [&] {
+        return pipeline.with_diagnostic_capture(
+            capture,
+            [&] {
+                observed = true;
+                return input;
+            },
+            [&] {
+                written = true;
+                std::ofstream image(capture, std::ios::binary);
+                image << "replacement";
+                return image.good();
+            });
+    };
+    EXPECT_FALSE(retry());
+    EXPECT_FALSE(observed);
+    EXPECT_FALSE(written);
+    EXPECT_EQ(snapshot(), original);
+    for (const auto& [path, bytes] : original) {
+        (void)bytes;
+        fs::remove(path);
+    }
+    // Every individual partial member must block before either callback runs.
+    auto partial = original;
+    auto pending = capture;
+    pending += ".diagnostics.json.pending";
+    partial.emplace(pending, "partial");
+    auto manifest_temporary = CaptureManifestPath(capture);
+    manifest_temporary += ".tmp";
+    partial.emplace(manifest_temporary, "partial");
+    for (const auto& [path, bytes] : partial) {
+        {
+            std::ofstream file(path, std::ios::binary);
+            file << bytes;
+        }
+        EXPECT_FALSE(retry()) << path;
+        EXPECT_FALSE(observed);
+        EXPECT_FALSE(written);
+        EXPECT_EQ(snapshot(), (std::map<fs::path, std::string>{{path, bytes}}));
+        fs::remove(path);
+        fs::create_directory(path);
+        EXPECT_FALSE(pipeline.diagnostic_capture_destination_available(capture));
+        fs::remove(path);
+        std::error_code error;
+        fs::create_symlink(directory / "missing", path, error);
+        if (!error) {
+            EXPECT_FALSE(pipeline.diagnostic_capture_destination_available(capture));
+            fs::remove(path);
+        } else {
+            EXPECT_TRUE(pipeline.diagnostic_capture_destination_available(capture));
+        }
+    }
+    EXPECT_TRUE(pipeline.diagnostic_capture_destination_available(capture));
+    EXPECT_FALSE(pipeline.diagnostic_capture_destination_available({}));
+    const auto blocked_parent = directory / "not-a-directory";
+    { std::ofstream file(blocked_parent); }
+    EXPECT_FALSE(pipeline.with_diagnostic_capture(
+        blocked_parent / "view.ppm",
+        [&] { return input; },
+        [] {
+            ADD_FAILURE() << "capture wrote through a non-directory parent";
+            return true;
+        }));
+    pipeline.set_capture_diagnostics({.enabled = true, .probe = std::nullopt});
+    EXPECT_TRUE(pipeline.diagnostic_capture_destination_available(capture));
+    pipeline.set_capture_diagnostics({});
+    EXPECT_TRUE(pipeline.diagnostic_capture_destination_available({}));
+}
+
+TEST(RenderSmokeTest, ScenarioCaptureRequiresForwardStorageOnlyForSubmittedGeometry) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    RenderResourceRegistry resources;
+    GBufferPass gbuffer;
+    LightingPass lighting;
+    WaterPass water;
+    WaterfallPass waterfall;
+    GlassOitPass glass;
+    gbuffer.init_gbuffer(resources, 32, 32);
+    lighting.init_lighting_fbo(resources, 32, 32);
+    water.init_shader(SourceRoot());
+    water.init_water_fallback_textures(resources);
+    waterfall.init_shader(SourceRoot());
+    ASSERT_TRUE(water.shader()->IsValid());
+    ASSERT_TRUE(waterfall.shader()->IsValid());
+    // Adopted factors start at zero: baked sheets exist, but submit no geometry.
+    WaterfallPass::PreparedGeometry geometry;
+    geometry.sites.resize(1);
+    geometry.vertices.resize(72, 0.0f);
+    waterfall.begin_adoption(std::move(geometry));
+    ASSERT_TRUE(waterfall.adopt_next(nullptr, SourceRoot()));
+
+    GLuint vao = 0, vbo = 0, ebo = 0;
+    const std::array<float, 18> vertices{
+        -1, 0, -5, 1, 0, -5, 0, 1, -5, -1, 0, -5, 1, 0, -5, 0, 1, -5};
+    const std::array<unsigned int, 3> indices{0, 1, 2};
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &vbo);
+    glGenBuffers(1, &ebo);
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+    glVertexAttrib3f(1, 0, 1, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices.data(), GL_STATIC_DRAW);
+    Camera camera;
+    RenderContext ctx;
+    ctx.screen_width = 32;
+    ctx.screen_height = 32;
+    ctx.screen_quad_vao = vao;
+    ctx.camera = &camera;
+    ctx.view = camera.GetViewMatrix();
+    ctx.projection = camera.GetProjectionMatrix(32, 32);
+    ctx.lit_scene = FboHandle{lighting.lighting_fbo().fbo_id, true};
+    ctx.lit_scene_depth = RenderbufferHandle{lighting.lighting_fbo().depth_texture};
+    ctx.opaque_scene = TextureHandle{lighting.lighting_fbo().opaque_color_texture};
+    ctx.gbuffer_depth = TextureHandle{gbuffer.gbuffer().depth_texture};
+    const auto overflow_count = std::numeric_limits<Luminumbra::u32>::max();
+    for (const auto& counts :
+         std::array<std::vector<Luminumbra::u32>, 6>{{{},
+                                                      {0},
+                                                      {overflow_count},
+                                                      {0, overflow_count},
+                                                      {0, overflow_count, 3},
+                                                      {3, 0, overflow_count}}}) {
+        WaterPassInput input;
+        for (const auto count : counts) {
+            input.draw_items.push_back(
+                {.model = glm::mat4(1), .vao_id = vao, .element_count = count});
+        }
+        // Use the same deferred-only owner as scenario capture. No forward
+        // storage is available; an actual submission must still refuse.
+        DiagnosticFrameCapture frame({32, 32});
+        auto* scope = GBufferDiagnosticCapture::Current();
+        ASSERT_NE(scope, nullptr);
+        ASSERT_TRUE(scope->attach(gbuffer.gbuffer(), {32, 32}));
+        scope->detach();
+        ASSERT_TRUE(frame.ready());
+        glBindFramebuffer(GL_FRAMEBUFFER, ctx.lit_scene.id);
+        glViewport(0, 0, 32, 32);
+        const auto stats = water.execute(ctx, input, camera);
+        const bool submitted = std::find(counts.begin(), counts.end(), 3u) != counts.end();
+        EXPECT_EQ(stats.water_draws, submitted ? 1u : 0u);
+        waterfall.execute(ctx);
+        glass.execute_accum(ctx, {});
+        EXPECT_EQ(frame.ready(), !submitted);
+        EXPECT_EQ(scope->attachment_failed(), submitted);
+        if (!submitted) {
+            scope->unsupported("unattributed_forward_producer",
+                               0,
+                               DiagnosticOwnership::Live,
+                               DiagnosticPass::Forward);
+            EXPECT_FALSE(frame.ready());
+        }
+    }
+    Luminumbra::Systems::SHIELD_WorldSystem world(
+        nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    waterfall.update_liveness(world, nullptr); // Unstreamed crest is live.
+    const std::vector<GlassPaneItem> panes(1);
+    GlassOitPassInput glass_input;
+    glass_input.glass_items = &panes;
+    glass_input.glass_vao = vao;
+    glass_input.root_path = SourceRoot();
+    for (const bool draw_glass : {false, true}) {
+        DiagnosticFrameCapture frame({32, 32});
+        auto* scope = GBufferDiagnosticCapture::Current();
+        ASSERT_NE(scope, nullptr);
+        ASSERT_TRUE(scope->attach(gbuffer.gbuffer(), {32, 32}));
+        scope->detach();
+        ASSERT_TRUE(frame.ready());
+        if (draw_glass) {
+            glass.execute_accum(ctx, glass_input);
+            glass.execute_resolve(ctx, glass_input);
+        } else {
+            waterfall.execute(ctx);
+        }
+        EXPECT_FALSE(frame.ready());
+        EXPECT_TRUE(scope->attachment_failed());
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glass.destroy();
+    waterfall.destroy_geometry();
+    water.destroy_water_fallback_textures(resources);
+    lighting.destroy_lighting_fbo(resources);
+    gbuffer.destroy_gbuffer(resources);
+    glDeleteBuffers(1, &ebo);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+}
+
+TEST(RenderSmokeTest, ScenarioBundlesRetainCompletedFrameIdentityAcrossSiblingCaptures) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("scenario-bundles-", ".ppm");
+    const auto directory = temporary.Path().parent_path();
+    RenderPipeline pipeline;
+    pipeline.enable_static_model_content(false);
+    ASSERT_TRUE(pipeline.startup(32, 32, SourceRoot()));
+    pipeline.set_far_world_mode(FarWorldMode::Legacy);
+    pipeline.set_far_lod_enabled(false);
+    pipeline.set_taau_enabled(false);
+    pipeline.set_capture_diagnostics(
+        {.enabled = true, .probe = std::array<std::uint32_t, 2>{16, 16}});
+    Luminumbra::Systems::SHIELD_WorldSystem world(
+        nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    entt::registry registry;
+    // Static instances already provide capture attribution; resident terrain MDI
+    // requires separate producer support. Match the cached attribution fixture.
+    const std::string mesh_path = "test/diagnostic_triangle.lmesh";
+    pipeline.register_procgen_mesh(mesh_path,
+                                   MeshLoader::CreateFromArrays({{{-1, -1, -5}, {0, 0, 1}, {0, 0}},
+                                                                 {{1, -1, -5}, {0, 0, 1}, {1, 0}},
+                                                                 {{0, 1, -5}, {0, 0, 1}, {.5f, 1}}},
+                                                                {0, 1, 2}));
+    ASSERT_TRUE(pipeline.has_procgen_mesh(mesh_path));
+    const auto prop = registry.create();
+    registry.emplace<Luminumbra::Components::TransformComponent>(prop);
+    registry.emplace<Luminumbra::Components::StaticMeshComponent>(prop).meshPath = mesh_path;
+    Camera camera;
+    pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
+    ASSERT_TRUE(pipeline.diagnostic_capture_refusal().empty())
+        << pipeline.diagnostic_capture_refusal();
+    std::vector<unsigned char> pixels(32U * 32U * 3U);
+    glReadBuffer(GL_BACK);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, 32, 32, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
+    const auto captured_camera = pipeline.diagnostic_capture_manifest();
+    // Moving the live camera cannot relabel an already completed frame.
+    camera.Position += glm::vec3(100, 20, 30);
+    std::string first_ids, first_draws;
+    nlohmann::json first_frame;
+    for (const auto* mode : {"lod_seam_arrival_smoke",
+                             "lod_ground_smoke",
+                             "skybox_visual_smoke",
+                             "cloud_shadow_smoke",
+                             "timeofday_sweep_smoke",
+                             "player_view_smoke",
+                             "skinned_mesh_visual_smoke",
+                             "creature_slice_smoke",
+                             "showcase_motion"}) {
+        SCOPED_TRACE(mode);
+        // Admission detaches before observing completion and is repeatable after
+        // finish has consumed the scope, using the retained completed identity.
+        ASSERT_TRUE(pipeline.diagnostic_capture_ready());
+        ASSERT_TRUE(pipeline.diagnostic_capture_ready());
+        const auto path = directory / (std::string(mode) + ".ppm");
+        ASSERT_TRUE(pipeline.with_diagnostic_capture(
+            path,
+            [&] {
+                auto input = pipeline.diagnostic_capture_manifest();
+                input.simulation_tick = 123;
+                input.world_seed = "1337";
+                input.render_settings["scenario"] = std::string(mode);
+                return input;
+            },
+            [&] { return WritePixelBufferPpm(path, 32, 32, pixels); }));
+        const auto manifest = nlohmann::json::parse(ReadTextFile(CaptureManifestPath(path)));
+        EXPECT_EQ(manifest.at("status"), "complete");
+        EXPECT_EQ(manifest.at("camera").at("view"), captured_camera.view);
+        EXPECT_EQ(manifest.at("camera").at("projection"), captured_camera.projection);
+        const auto metadata =
+            nlohmann::json::parse(ReadTextFile(path.string() + ".diagnostics.json"));
+        EXPECT_TRUE(metadata.at("identity_complete").get<bool>());
+        EXPECT_EQ(metadata.at("capture_manifest"), CaptureManifestPath(path).filename().string());
+        const auto ids = ReadTextFile(path.string() + ".ids.bin");
+        const auto draws = ReadTextFile(path.string() + ".draws.json");
+        const auto table = nlohmann::json::parse(draws);
+        EXPECT_FALSE(table.at("draws").empty());
+        ASSERT_EQ(table.at("draws").size(), 1U);
+        ASSERT_EQ(table.at("meshes").size(), 1U);
+        EXPECT_EQ(table.at("meshes").at(0).at("path"), mesh_path);
+        EXPECT_EQ(table.at("draws").at(0).at("shader_variant"), "instanced_static_mesh");
+        const auto probe = nlohmann::json::parse(ReadTextFile(path.string() + ".probe-16-16.json"));
+        // A rasterized identity at the probe proves the attributed producer drew.
+        EXPECT_GT(probe.at("id").at(0).get<std::uint32_t>(), 0U);
+        EXPECT_EQ(probe.at("id").at(0), table.at("draws").at(0).at("id"));
+        EXPECT_EQ(probe.at("id").at(1), table.at("meshes").at(0).at("id"));
+        if (first_ids.empty()) {
+            first_ids = ids;
+            first_draws = draws;
+            first_frame = metadata.at("frame");
+        }
+        EXPECT_EQ(ids, first_ids);
+        EXPECT_EQ(draws, first_draws);
+        EXPECT_EQ(metadata.at("frame"), first_frame);
+        EXPECT_TRUE(pipeline.diagnostic_capture_refusal().empty())
+            << pipeline.diagnostic_capture_refusal();
+        EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
+    }
+    pipeline.end_diagnostic_capture();
+    EXPECT_EQ(pipeline.diagnostic_capture_refusal(), "completed_frame_unavailable");
+    EXPECT_FALSE(pipeline.diagnostic_capture_ready());
+    pipeline.end_diagnostic_capture();
+    // Empty destinations must also release an admitted completed frame.
+    pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
+    ASSERT_TRUE(pipeline.diagnostic_capture_ready());
+    EXPECT_FALSE(pipeline.capture_diagnostics({}));
+    EXPECT_FALSE(pipeline.diagnostic_capture_ready());
+    EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, ScenarioCaptureRefusesUnavailableCoverageAndProbeBeforeOpeningOutput) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("scenario-refusal-", ".ppm");
+    RenderPipeline pipeline;
+    pipeline.enable_static_model_content(false);
+    ASSERT_TRUE(pipeline.startup(32, 32, SourceRoot()));
+    pipeline.set_far_world_mode(FarWorldMode::Legacy);
+    pipeline.set_far_lod_enabled(false);
+    pipeline.set_taau_enabled(false);
+    Luminumbra::Systems::SHIELD_WorldSystem world(
+        nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    entt::registry registry;
+    Camera camera({8, 12, 8}, {0, 1, 0}, -90, -89);
+    const auto refuses_without_callbacks = [&](std::string_view reason) {
+        EXPECT_EQ(pipeline.diagnostic_capture_refusal(), reason);
+        EXPECT_FALSE(pipeline.with_diagnostic_capture(
+            temporary.Path(),
+            []() -> CaptureManifestInput {
+                ADD_FAILURE() << "refused frame observed metadata";
+                return {};
+            },
+            [] {
+                ADD_FAILURE() << "refused frame opened capture output";
+                return true;
+            }));
+        EXPECT_TRUE(fs::is_empty(temporary.Path().parent_path()));
+        EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
+    };
+    pipeline.set_capture_diagnostics({.enabled = true, .probe = std::nullopt});
+    refuses_without_callbacks("completed_frame_unavailable");
+    pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
+    auto* scope = GBufferDiagnosticCapture::Current();
+    ASSERT_NE(scope, nullptr);
+    scope->unsupported("unattributed_deferred_producer");
+    refuses_without_callbacks("producer_coverage_incomplete");
+    pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
+    scope = GBufferDiagnosticCapture::Current();
+    ASSERT_NE(scope, nullptr);
+    // An invalid late attachment records unsupported coverage at once. A GL-free
+    // observation reports it without consuming the scope; publication does.
+    ASSERT_FALSE(scope->attach({}, {32, 32}));
+    EXPECT_EQ(pipeline.diagnostic_capture_refusal(), "producer_coverage_incomplete");
+    EXPECT_EQ(GBufferDiagnosticCapture::Current(), scope);
+    EXPECT_FALSE(pipeline.with_diagnostic_capture(
+        temporary.Path(),
+        []() -> CaptureManifestInput {
+            ADD_FAILURE() << "late attachment failure observed metadata";
+            return {};
+        },
+        [] {
+            ADD_FAILURE() << "late attachment failure opened capture output";
+            return true;
+        }));
+    EXPECT_TRUE(fs::is_empty(temporary.Path().parent_path()));
+    EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
+    pipeline.set_capture_diagnostics(
+        {.enabled = true, .probe = std::array<std::uint32_t, 2>{32, 0}});
+    pipeline.render_frame(registry, world, camera, 0.0f, false, UploadPresentation::Settled);
+    refuses_without_callbacks("probe_out_of_bounds");
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, DisabledScenarioAdapterPreservesLegacyImageBytesAndWriterFailure) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("scenario-disabled-", ".ppm");
+    const auto directory = temporary.Path().parent_path();
+    RenderPipeline pipeline;
+    const std::vector<unsigned char> pixels{0, 1, 2, 17, 128, 255, 41, 42, 43, 251, 252, 253};
+    const auto legacy = directory / "legacy.ppm";
+    ASSERT_TRUE(WritePixelBufferPpm(legacy, 2, 2, pixels));
+    for (const auto* mode : {"specialized", "timed", "atmos_motion", "showcase_motion"}) {
+        const auto path = directory / (std::string(mode) + ".ppm");
+        ASSERT_TRUE(pipeline.with_diagnostic_capture(
+            path,
+            []() -> CaptureManifestInput {
+                ADD_FAILURE() << "disabled capture observed identity";
+                return {};
+            },
+            [&] { return WritePixelBufferPpm(path, 2, 2, pixels); }));
+        EXPECT_EQ(ReadTextFile(path), ReadTextFile(legacy));
+        EXPECT_FALSE(fs::exists(CaptureManifestPath(path)));
+        EXPECT_FALSE(fs::exists(path.string() + ".diagnostics.json"));
+    }
+    EXPECT_FALSE(pipeline.with_diagnostic_capture(
+        {}, [] { return CaptureManifestInput{}; }, [] { return false; }));
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, BackbufferWriterPreservesPixelsAndRefusesInvalidOrIncompleteOutput) {
+    using namespace Luminumbra::Client::ScenarioHarness;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("backbuffer-", ".ppm");
+    const auto directory = temporary.Path().parent_path();
+    for (const auto extent :
+         {std::array{0, 1}, std::array{1, 0}, std::array{-1, 1}, std::array{1, -1}}) {
+        EXPECT_FALSE(WriteBackbufferPpm(temporary.Path(), extent[0], extent[1]));
+        EXPECT_FALSE(fs::exists(temporary.Path()));
+    }
+    glClearColor(0.25f, 0.5f, 0.75f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    std::vector<unsigned char> pixels(2U * 2U * 3U);
+    glReadBuffer(GL_BACK);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, 2, 2, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
+    const auto reference = directory / "reference.ppm";
+    ASSERT_TRUE(WritePixelBufferPpm(reference, 2, 2, pixels));
+    ScreenshotPixelStats stats;
+    LodHolePixelStats hole_stats;
+    ASSERT_TRUE(WriteBackbufferPpm(temporary.Path(), 2, 2, &stats, &hole_stats));
+    EXPECT_EQ(ReadTextFile(temporary.Path()), ReadTextFile(reference));
+    EXPECT_EQ(stats.width, 2);
+    EXPECT_EQ(hole_stats.height, 2);
+    EXPECT_FALSE(WriteBackbufferPpm(directory, 2, 2));
+    EXPECT_FALSE(WriteBackbufferPpm(temporary.Path() / "child.ppm", 2, 2));
+#if defined(__linux__)
+    // This device opens successfully and deterministically fails payload completion.
+    EXPECT_FALSE(WriteBackbufferPpm("/dev/full", 2, 2));
+#endif
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+namespace {
+enum class TimedCaptureCase {
+    Legacy,
+    Diagnostics,
+    Extent,
+    FirstDestination,
+    SecondDestination,
+    PriorRefusal,
+    MissingFrame,
+    ProducerRefusal,
+    Continuation
+};
+
+struct TimedCaptureResult {
+    bool failed = false;
+    std::string failure;
+    std::uint64_t frame_count = 0;
+    int exit_code = 0;
+};
+
+void ExpectTimedCaptureRefusal(
+    TimedCaptureCase capture_case,
+    const Luminumbra::Client::ScenarioHarness::RuntimeScenarioConfig& config,
+    const TimedCaptureResult& result,
+    const std::string& expected_failure,
+    const fs::path& occupied) {
+    const bool destination_refusal = capture_case == TimedCaptureCase::FirstDestination ||
+                                     capture_case == TimedCaptureCase::SecondDestination;
+    EXPECT_TRUE(result.failed);
+    EXPECT_EQ(result.failure, expected_failure);
+    EXPECT_EQ(result.frame_count, destination_refusal ? 1U : 0U);
+    EXPECT_TRUE(glfwWindowShouldClose(glfwGetCurrentContext()) ||
+                capture_case == TimedCaptureCase::PriorRefusal);
+    EXPECT_FALSE(fs::exists(config.artifact_dir / "screenshots/lod-ground-end.ppm"));
+    if (!destination_refusal) {
+        EXPECT_TRUE(fs::is_empty(config.artifact_dir));
+        return;
+    }
+    EXPECT_EQ(ReadTextFile(occupied), "original screenshot");
+    const auto first = config.artifact_dir / "screenshots/lod-ground-start.ppm";
+    if (capture_case == TimedCaptureCase::SecondDestination) {
+        EXPECT_TRUE(fs::exists(first));
+        const auto manifest = nlohmann::json::parse(ReadTextFile(CaptureManifestPath(first)));
+        EXPECT_EQ(manifest.at("status"), "complete");
+    } else {
+        EXPECT_FALSE(fs::exists(config.artifact_dir / "screenshots/lod-ground-mid.ppm"));
+    }
+}
+
+void ExpectTimedCaptureBundles(
+    const Luminumbra::Client::ScenarioHarness::RuntimeScenarioConfig& config,
+    const fs::path& reference,
+    bool diagnostics,
+    const Luminumbra::world::GameSession& session) {
+    nlohmann::json first_frame;
+    for (const auto* role : {"start", "mid", "end"}) {
+        const auto path =
+            config.artifact_dir / "screenshots" / (std::string("lod-ground-") + role + ".ppm");
+        EXPECT_EQ(ReadTextFile(path), ReadTextFile(reference));
+        if (!diagnostics) {
+            EXPECT_FALSE(fs::exists(CaptureManifestPath(path)));
+            EXPECT_FALSE(fs::exists(path.string() + ".diagnostics.json"));
+            continue;
+        }
+        const auto metadata =
+            nlohmann::json::parse(ReadTextFile(path.string() + ".diagnostics.json"));
+        EXPECT_TRUE(metadata.at("identity_complete").get<bool>());
+        const auto manifest = nlohmann::json::parse(ReadTextFile(CaptureManifestPath(path)));
+        EXPECT_EQ(manifest.at("status"), "complete");
+        EXPECT_EQ(manifest.at("render_settings").at("scenario"), config.scenario);
+        EXPECT_EQ(manifest.at("simulation_tick"), session.GetSimulationTickCount());
+        if (first_frame.is_null()) {
+            first_frame = metadata.at("frame");
+        }
+        EXPECT_EQ(metadata.at("frame"), first_frame);
+    }
+}
+} // namespace
+
+TEST(RenderSmokeTest, TimedScenarioPublicHookPublishesSiblingBundlesAndKeepsLegacyBytes) {
+    using namespace Luminumbra::Client::ScenarioHarness;
+    using namespace Luminumbra::Client::App;
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("timed-scenario-", ".ppm");
+    const auto directory = temporary.Path().parent_path();
+    RenderPipeline pipeline;
+    pipeline.enable_static_model_content(false);
+    ASSERT_TRUE(pipeline.startup(64, 64, SourceRoot()));
+    pipeline.set_far_world_mode(FarWorldMode::Legacy);
+    pipeline.set_far_lod_enabled(false);
+    pipeline.set_taau_enabled(false);
+    Luminumbra::Systems::SHIELD_WorldSystem world(
+        nullptr, nullptr, Luminumbra::Test::SyntheticTerrainParams(), 1337);
+    entt::registry registry;
+    auto camera = std::make_unique<Camera>(glm::vec3(8, 12, 8), glm::vec3(0, 1, 0), -90, -89);
+    Luminumbra::JobSystem jobs;
+    jobs.startup(1);
+    auto session = std::make_unique<Luminumbra::world::GameSession>();
+    session->SetJobSystem(&jobs);
+    const auto root = SourceRoot();
+    const auto root_text = root.string();
+    const std::string world_type = "synthetic";
+    ClientAppContext app;
+    using CaptureCase = TimedCaptureCase;
+    for (const auto capture_case : {CaptureCase::Legacy,
+                                    CaptureCase::Diagnostics,
+                                    CaptureCase::Extent,
+                                    CaptureCase::FirstDestination,
+                                    CaptureCase::SecondDestination,
+                                    CaptureCase::PriorRefusal,
+                                    CaptureCase::MissingFrame,
+                                    CaptureCase::ProducerRefusal,
+                                    CaptureCase::Continuation}) {
+        SCOPED_TRACE(static_cast<int>(capture_case));
+        const bool diagnostics = capture_case != CaptureCase::Legacy;
+        const bool mismatched_extent = capture_case == CaptureCase::Extent;
+        RuntimeScenarioConfig config;
+        config.scenario = "lod_ground_smoke";
+        config.timed_run_seconds = 0;
+        config.artifact_dir = directory / std::to_string(static_cast<int>(capture_case));
+        RuntimeStateRecorder recorder(config, camera);
+        RuntimeScenarioFrameRecorder frame_recorder(false, 0, config.artifact_dir, camera);
+        bool ready = true;
+        TimedCaptureResult result;
+        std::string expected_failure;
+        if (capture_case == CaptureCase::PriorRefusal) {
+            result.failed = true;
+            result.failure = "capture_diagnostics_original_refusal";
+            expected_failure = result.failure;
+        }
+        auto started = std::chrono::steady_clock::now() - std::chrono::seconds(2);
+        RuntimeReadinessReport readiness;
+        auto runner = CreateScenarioRunner({.window = glfwGetCurrentContext(),
+                                            .root_dir = root,
+                                            .root_path_str = root_text,
+                                            .scenario_config = config,
+                                            .runtime_state_recorder = recorder,
+                                            .lod_ground_frame_recorder = frame_recorder,
+                                            .jobSystem = jobs,
+                                            .gameSession = session,
+                                            .renderPipeline = pipeline,
+                                            .g_camera = camera,
+                                            .g_app = app,
+                                            .scenario_world_type = world_type,
+                                            .scenario_failed = result.failed,
+                                            .scenario_failure_reason = result.failure,
+                                            .scenario_ready = ready,
+                                            .scenario_frame_count = result.frame_count,
+                                            .scenario_play_started_at = started,
+                                            .last_readiness_report = readiness,
+                                            .exit_code = result.exit_code});
+        pipeline.on_resize(mismatched_extent ? 32U : 64U, 64U);
+        pipeline.set_capture_diagnostics({.enabled = diagnostics, .probe = std::nullopt});
+        pipeline.render_frame(registry, world, *camera, 0.0f, false, UploadPresentation::Settled);
+        if (capture_case == CaptureCase::MissingFrame) {
+            pipeline.end_diagnostic_capture();
+            expected_failure = "capture_diagnostics_completed_frame_unavailable";
+        } else if (capture_case == CaptureCase::ProducerRefusal) {
+            auto* scope = GBufferDiagnosticCapture::Current();
+            ASSERT_NE(scope, nullptr);
+            scope->unsupported("unattributed_deferred_producer");
+            expected_failure = "capture_diagnostics_producer_coverage_incomplete";
+        } else if (capture_case == CaptureCase::Continuation) {
+            auto* scope = GBufferDiagnosticCapture::Current();
+            ASSERT_NE(scope, nullptr);
+            ASSERT_TRUE(scope->attach(pipeline.gbuffer(), {64, 64}));
+            // Readiness must detach this valid continuation before observing coverage.
+            EXPECT_FALSE(pipeline.diagnostic_capture_refusal().empty());
+        }
+        if (mismatched_extent) {
+            expected_failure = "capture_diagnostics_capture_extent_mismatch";
+        }
+        const bool destination_refusal = capture_case == CaptureCase::FirstDestination ||
+                                         capture_case == CaptureCase::SecondDestination;
+        const auto occupied =
+            config.artifact_dir / "screenshots" /
+            (capture_case == CaptureCase::SecondDestination ? "lod-ground-mid.ppm"
+                                                            : "lod-ground-start.ppm");
+        if (destination_refusal) {
+            ASSERT_TRUE(WriteCaptureText(occupied, "original screenshot"));
+            expected_failure = "capture_diagnostics_capture_destination_or_publication_failed";
+        }
+        const auto reference = config.artifact_dir / "legacy.ppm";
+        if (expected_failure.empty()) {
+            ASSERT_TRUE(WriteBackbufferPpm(reference, 64, 64));
+        }
+        runner->onPostRenderCapture(0.0f);
+        if (!expected_failure.empty()) {
+            ExpectTimedCaptureRefusal(capture_case, config, result, expected_failure, occupied);
+            // A later completed frame must not resume a refused scenario or replace its reason.
+            pipeline.render_frame(
+                registry, world, *camera, 0.0f, false, UploadPresentation::Settled);
+            runner->onPostRenderCapture(0.0f);
+            ExpectTimedCaptureRefusal(capture_case, config, result, expected_failure, occupied);
+            runner->onShutdown();
+            const auto shutdown = nlohmann::json::parse(
+                ReadTextFile(config.artifact_dir / "last-known-runtime.json"));
+            EXPECT_EQ(shutdown.at("phase"), "scenario_failed_" + expected_failure);
+            EXPECT_EQ(result.exit_code, 2);
+            glfwSetWindowShouldClose(glfwGetCurrentContext(), false);
+            continue;
+        }
+        EXPECT_FALSE(result.failed) << result.failure;
+        EXPECT_EQ(result.frame_count, 1U);
+        ExpectTimedCaptureBundles(config, reference, diagnostics, *session);
+        EXPECT_EQ(GBufferDiagnosticCapture::Current(), nullptr);
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, DiagnosticDestinationReservationExcludesOverlappingWritersAndCleansUp) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("diagnostic-reservation-", ".ppm");
+    const auto capture = temporary.Path();
+    auto marker = CaptureManifestPath(capture);
+    marker += ".lck";
+    auto manifest_temporary = CaptureManifestPath(capture);
+    manifest_temporary += ".tmp";
+    EXPECT_EQ(marker.filename().native().size(), manifest_temporary.filename().native().size());
+    RenderPipeline first, second;
+    first.set_capture_diagnostics({.enabled = true, .probe = std::nullopt});
+    second.set_capture_diagnostics({.enabled = true, .probe = std::nullopt});
+    {
+        const RenderPipeline::CaptureDestinationReservation owner(first, capture);
+        ASSERT_TRUE(owner.acquired());
+        // Both admissions happen before either payload exists. A vacancy check
+        // alone admits the delayed second writer and allows it to replace bytes.
+        const RenderPipeline::CaptureDestinationReservation contender(second, capture);
+        EXPECT_FALSE(contender.acquired());
+        auto alternate_extension = capture;
+        alternate_extension.replace_extension(".png");
+        EXPECT_FALSE(
+            RenderPipeline::CaptureDestinationReservation(second, alternate_extension).acquired());
+        const auto manifest = CaptureManifestPath(capture);
+        {
+            std::ofstream image(capture);
+            image << "first image";
+        }
+        {
+            std::ofstream metadata(manifest);
+            metadata << R"({"status":"complete"})";
+        }
+        const auto image_bytes = ReadTextFile(capture);
+        const auto manifest_bytes = ReadTextFile(manifest);
+        if (contender.acquired()) {
+            std::ofstream image(capture);
+            image << "second image";
+            std::ofstream metadata(manifest);
+            metadata << "second manifest";
+        }
+        EXPECT_EQ(ReadTextFile(capture), image_bytes);
+        EXPECT_EQ(ReadTextFile(manifest), manifest_bytes);
+        EXPECT_TRUE(fs::exists(marker));
+        fs::remove(capture);
+        fs::remove(manifest);
+    }
+    EXPECT_FALSE(fs::exists(marker));
+    {
+        const RenderPipeline::CaptureDestinationReservation retry(second, capture);
+        EXPECT_TRUE(retry.acquired());
+    }
+    EXPECT_FALSE(fs::exists(marker));
+    EXPECT_FALSE(RenderPipeline::CaptureDestinationReservation(first, {}).acquired());
+    const auto nested_capture = capture.parent_path() / "nested" / "deeper" / "view.ppm";
+    auto nested_marker = CaptureManifestPath(nested_capture);
+    nested_marker += ".lck";
+    {
+        const RenderPipeline::CaptureDestinationReservation nested(first, nested_capture);
+        EXPECT_TRUE(nested.acquired());
+        EXPECT_TRUE(fs::exists(nested_marker));
+        EXPECT_FALSE(fs::exists(nested_capture));
+    }
+    EXPECT_FALSE(fs::exists(nested_marker));
+    const auto blocked_parent = capture.parent_path() / "not-a-directory";
+    { std::ofstream blocked(blocked_parent); }
+    EXPECT_FALSE(RenderPipeline::CaptureDestinationReservation(first, blocked_parent / "view.ppm")
+                     .acquired());
+    // A pre-existing marker belongs to another writer, even if it is partial.
+    {
+        std::ofstream pending(marker);
+        pending << "occupied";
+    }
+    EXPECT_FALSE(RenderPipeline::CaptureDestinationReservation(second, capture).acquired());
+    EXPECT_EQ(ReadTextFile(marker), "occupied");
+    fs::remove(marker);
+    fs::create_directory(marker);
+    EXPECT_FALSE(RenderPipeline::CaptureDestinationReservation(second, capture).acquired());
+    EXPECT_TRUE(fs::is_directory(marker));
+    fs::remove(marker);
+    std::error_code link_error;
+    fs::create_symlink(capture.parent_path() / "missing", marker, link_error);
+    if (!link_error) {
+        EXPECT_FALSE(RenderPipeline::CaptureDestinationReservation(second, capture).acquired());
+        EXPECT_TRUE(fs::is_symlink(fs::symlink_status(marker)));
+        fs::remove(marker);
+    }
+    // Stack unwinding must retire the reservation before a retry.
+    EXPECT_THROW(
+        {
+            const RenderPipeline::CaptureDestinationReservation owner(first, capture);
+            ASSERT_TRUE(owner.acquired());
+            throw std::runtime_error("capture aborted");
+        },
+        std::runtime_error);
+    EXPECT_FALSE(fs::exists(marker));
+    // Cleanup must preserve an entry that replaced the owned marker.
+    auto displaced = marker;
+    displaced += ".displaced";
+    {
+        const RenderPipeline::CaptureDestinationReservation owner(first, capture);
+        ASSERT_TRUE(owner.acquired());
+        fs::rename(marker, displaced);
+        {
+            std::ofstream replacement(marker);
+            replacement << "replacement";
+        }
+    }
+    EXPECT_EQ(ReadTextFile(marker), "replacement");
+    fs::remove(marker);
+    fs::remove(displaced);
+    first.set_capture_diagnostics({});
+    EXPECT_TRUE(RenderPipeline::CaptureDestinationReservation(first, {}).acquired());
+}
+
+TEST(RenderSmokeTest, DiagnosticRefusalPrecedesManifestAndRetractsLateCompletion) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    Luminumbra::TestSupport::ScopedTempFile temporary("diagnostic-refusal-", ".ppm");
+    const auto capture = temporary.Path();
+    const auto manifest = CaptureManifestPath(capture);
+    RenderPipeline pipeline;
+    pipeline.set_capture_diagnostics({.enabled = true, .probe = std::nullopt});
+    CaptureManifestInput input;
+    EXPECT_FALSE(pipeline.capture_diagnostics({}));
+    EXPECT_FALSE(pipeline.capture_diagnostics(capture.parent_path() / ""));
+    input.width = 2;
+    input.height = 2;
+    input.build_id.value = "capture-test";
+    input.asset_hash.unavailable = "test";
+    input.shader_hash.unavailable = "test";
+    input.world_hash.unavailable = "test";
+    bool observed = false, written = false;
+    EXPECT_FALSE(pipeline.with_diagnostic_capture(
+        capture,
+        [&] {
+            observed = true;
+            return input;
+        },
+        [&] {
+            written = true;
+            std::ofstream image(capture);
+            image << "image";
+            return image.good();
+        }));
+    EXPECT_FALSE(observed);
+    EXPECT_FALSE(written);
+    EXPECT_FALSE(fs::exists(capture));
+    EXPECT_FALSE(fs::exists(manifest));
+    // Exercise the late refusal fallback independently of early admission.
+    const RenderPipeline::CaptureDestinationReservation reservation(pipeline, capture);
+    ASSERT_TRUE(reservation.acquired());
+    ASSERT_TRUE(WithCaptureManifest(capture, input, [&] {
+        std::ofstream image(capture);
+        image << "completed image";
+        return image.good();
+    }));
+    ASSERT_EQ(nlohmann::json::parse(ReadTextFile(manifest)).at("status"), "complete");
+    EXPECT_FALSE(pipeline.capture_diagnostics(capture));
+    EXPECT_FALSE(fs::exists(manifest));
+    EXPECT_EQ(ReadTextFile(capture), "completed image");
+    EXPECT_FALSE(pipeline.capture_diagnostics(capture));
+    EXPECT_FALSE(fs::exists(manifest));
 }

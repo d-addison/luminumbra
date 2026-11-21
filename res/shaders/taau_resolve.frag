@@ -8,13 +8,14 @@
 in vec2 TexCoords;
 out vec4 FragColor;
 
-uniform sampler2D u_current; // this frame's lit HDR color (RGBA16F)
-uniform sampler2D u_history; // previous resolved color (RGBA16F)
-uniform sampler2D u_motion;  // RG16F screen motion vector (NDC delta = curr - prev), G-buffer
-uniform vec2 u_texel;        // 1 / screen size
-uniform float u_blend;       // history weight when stable (e.g. 0.9); first frame forced to 0
-uniform float u_sharpness;   // post-resolve unsharp strength (recovers temporal-blur softness)
-uniform int u_history_valid; // 0 on the first frame / after a resize -> use current only
+uniform sampler2D u_current;    // this frame's lit HDR color (RGBA16F)
+uniform sampler2D u_history;    // previous resolved color (RGBA16F)
+uniform sampler2D u_motion;     // RG16F screen motion vector (NDC delta = curr - prev), G-buffer
+uniform sampler2D u_sceneDepth; // reversed-Z: cleared depth has no geometry motion
+uniform vec2 u_texel;           // 1 / screen size
+uniform float u_blend;          // history weight when stable (e.g. 0.9); first frame forced to 0
+uniform float u_sharpness;      // post-resolve unsharp strength (recovers temporal-blur softness)
+uniform int u_history_valid;    // 0 on the first frame / after a resize -> use current only
 
 vec2 currentUv(vec2 uv) {
     // Clamp to texel centres, including when upsampling: the lighting input can
@@ -35,7 +36,22 @@ vec3 sharpenLuma(vec3 color, vec3 mean, vec3 lower, vec3 upper) {
 void main() {
     vec3 curr = texture(u_current, currentUv(TexCoords)).rgb;
 
-    if (u_history_valid == 0) {
+    // The sky is drawn after the G-buffer and has no motion vectors. Reusing
+    // zero-motion history smears moving clouds/camera turns; sharpening that
+    // stale color independently per channel creates cyan cloud fringes.
+    // Keep temporal edge coverage when jitter puts a silhouette pixel on sky.
+    float skyDepth = texture(u_sceneDepth, TexCoords).r;
+    if (skyDepth <= 0.0) {
+        // Clamp the fixed 3x3 scan at image borders instead of wrapping.
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                vec2 depthUV = clamp(TexCoords + vec2(float(dx), float(dy)) * u_texel,
+                                     vec2(0.0), vec2(1.0));
+                skyDepth = max(skyDepth, texture(u_sceneDepth, depthUV).r);
+            }
+        }
+    }
+    if (u_history_valid == 0 || skyDepth <= 0.0) {
         FragColor = vec4(curr, 1.0);
         return;
     }
