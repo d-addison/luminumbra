@@ -1,5 +1,7 @@
 #pragma once
 
+#include "IoExecutor.h"
+
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
@@ -71,6 +73,11 @@ public:
     RuntimeStats get_runtime_stats() const;
     // True only on a worker belonging to this pool, including shutdown draining.
     bool is_current_worker() const noexcept;
+    // Owned with the CPU pool, so every host and standalone world shares its
+    // existing startup/shutdown lifetime without a process-global executor.
+    IoExecutor& io_executor() noexcept {
+        return m_io_executor;
+    }
 
 private:
     // a pooled, allocation-free job slot. The
@@ -143,6 +150,7 @@ private:
     // the private PooledJob type.
     static void run_slot(PooledJob& slot);
 
+    IoExecutor m_io_executor;
     std::vector<std::thread> m_workers;
     PooledQueue m_high_queue;
     PooledQueue m_normal_queue;

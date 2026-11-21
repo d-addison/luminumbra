@@ -7849,7 +7849,7 @@ std::shared_ptr<Chunk> SHIELD_WorldSystem::read_committed_chunk(const IVec3& coo
         std::shared_ptr<Chunk> chunk;
         // Admission and fault publication stay on the owner. Loading and derived
         // preparation share one worker; waiting keeps restoration ahead of simulation edits.
-        RunWorkerBoundary(m_job_system, [&] {
+        RunWorkerBoundary(m_job_system, "committed-chunk-read", [&] {
             chunk = m_durable_chunk_loader(coords);
             if (!chunk || chunk->get_id() != Chunk::calculate_id(coords) ||
                 chunk->get_coords() != coords ||

@@ -1203,7 +1203,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                             .read_text(encoding="utf-8"))
         read = cpp_block(world, "SHIELD_WorldSystem::read_committed_chunk(")
         self.assertEqual(read.count("RunWorkerBoundary("), 1)
-        worker = cpp_block(read, "RunWorkerBoundary(m_job_system,[&]")
+        worker = cpp_block(read, "RunWorkerBoundary(m_job_system,\"committed-chunk-read\",[&]")
         self.assertIn("chunk=m_durable_chunk_loader(coords);", worker)
         self.assertLess(worker.index("chunk->get_coords()!=coords"),
                         worker.index("if(prepare_water)"))
@@ -1212,14 +1212,14 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                         read.index("m_durable_chunk_fault(error.what())"))
         helper = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorkerBoundary.h")
                              .read_text(encoding="utf-8"))
-        self.assertIn("jobs->try_dispatch(&Task::Execute,task,", helper)
+        self.assertIn("jobs->io_executor().dispatch(&Task::Execute,task,operation)", helper)
         self.assertIn("completed.get();", helper)
         self.assertIn("if(!jobs||Persistence::detail::CurrentThreadOwnsSaveTransaction())", helper)
-        inline = cpp_block(helper, "if(jobs->is_current_worker())")
+        inline = cpp_block(helper, "if(jobs->is_current_worker()||jobs->io_executor().is_current_worker())")
         self.assertIn("work();return;", inline)
-        self.assertLess(helper.index("if(jobs->is_current_worker())"),
+        self.assertLess(helper.index("if(jobs->is_current_worker()||jobs->io_executor().is_current_worker())"),
                         helper.index("std::make_shared<Task>"))
-        refusal = cpp_block(helper, "if(!jobs->try_dispatch(")
+        refusal = cpp_block(helper, "if(!jobs->io_executor().dispatch(")
         # The compacted form has no whitespace, including after throw.
         self.assertIn("throwWorkerBoundaryUnavailable();", refusal)
         self.assertNotIn("work();", refusal)
@@ -1245,10 +1245,10 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertIn("digest_operation.emplace(directory,m_regionRequiresIndex)", digest)
         self.assertIn("digest_operation->digest(key,inputs)", digest)
         state_hash = cpp_block(session, "GameSession::CaptureAuthorityHashes(")
-        self.assertIn("RunWorkerBoundary(m_jobSystem,[&]{"
+        self.assertIn("RunWorkerBoundary(m_jobSystem,\"authority-digest-open\",[&]{"
                       "operation.emplace(directory,m_regionRequiresIndex);});", state_hash)
         self.assertIn("prepared=operation->prepare(key,inputs)",
-                      cpp_block(state_hash, "RunWorkerBoundary(m_jobSystem,[&]{if(operation)"))
+                      cpp_block(state_hash, "RunWorkerBoundary(m_jobSystem,\"authority-digest-prepare\",[&]{if(operation)"))
         attach = cpp_block(session, "GameSession::EnableFarWorldAuthorityProducer(")
         self.assertIn("candidate->admit_saved_source(",
                       cpp_block(attach, "RunWorkerBoundary(m_jobSystem,"))
@@ -1256,7 +1256,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertIn("refresh_saved_source(",
                       cpp_block(pump, "RunWorkerBoundary(m_jobSystem,"))
         active = cpp_block(pump, "if(m_farWorldAuthorityProducer->capture_status().active)")
-        self.assertIn("RunWorkerBoundary(m_jobSystem,[&]{"
+        self.assertIn("RunWorkerBoundary(m_jobSystem,\"far-source-capture\",[&]{"
                       "pump_started=true;m_farWorldAuthorityProducer->pump_capture();});", active)
         refused = cpp_block(active, "if(!pump_started)")
         self.assertIn("FenceFarWorldAuthorityReads(true);", refused)
@@ -1273,7 +1273,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         self.assertIn("ClockConfigurationCompatible(save_dir)", cpp_block(save, "constautosave="))
         self.assertIn("return save();".replace(" ", ""),
                       cpp_block(save, "if(Persistence::SaveTransaction::active_for(save_dir))"))
-        self.assertIn("RunWorkerBoundary(m_jobSystem,[&]{saved=save();});", save)
+        self.assertIn("RunWorkerBoundary(m_jobSystem,\"world-save\",[&]{saved=save();});", save)
 
     def test_session_save_owns_validation_payloads_metadata_and_acknowledgement(self):
         session = compact_cpp((ROOT / "src/luminumbra_common/world/GameSession.cpp")

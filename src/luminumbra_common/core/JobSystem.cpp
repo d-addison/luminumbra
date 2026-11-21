@@ -237,9 +237,15 @@ void JobSystem::startup(std::size_t worker_count) {
         }
     }
 
-    m_workers.reserve(num_threads);
-    for (std::size_t i = 0; i < num_threads; ++i) {
-        m_workers.emplace_back(&JobSystem::worker_loop, this);
+    try {
+        m_io_executor.startup(m_throttle_seed);
+        m_workers.reserve(num_threads);
+        for (std::size_t i = 0; i < num_threads; ++i) {
+            m_workers.emplace_back(&JobSystem::worker_loop, this);
+        }
+    } catch (...) {
+        shutdown();
+        throw;
     }
     if (m_throttle_enabled) {
         LUMINUMBRA_CORE_INFO("JobSystem started with " + std::to_string(num_threads) +
@@ -275,6 +281,9 @@ void JobSystem::shutdown() {
             std::unique_lock<std::mutex>, lock, m_queue_mutex, "Job queue lock wait");
         m_workers.clear();
     }
+    // CPU workers may enter nested persistence boundaries while draining.
+    // Join them before closing I/O admission, then drain the storage lane.
+    m_io_executor.shutdown();
 }
 
 JobSystem::PooledQueue& JobSystem::queue_for(JobPriority priority) {
