@@ -29,6 +29,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -986,8 +987,14 @@ public:
     // (due = dispatch + kActivationPipelineLatencyTicks) and drives
     // activate_due after the swap. The client never calls it (tick stays -1:
     // batches carry due_tick -1 = publish-when-drained, today's semantics).
-    void begin_tick(std::int64_t sim_tick) {
+    void begin_tick(std::int64_t sim_tick, bool continuation = false) {
         m_current_sim_tick = sim_tick;
+        if (continuation) {
+            // Continuations count one anchored update per positive simulation tick.
+            // Rebase the existing four-update activation cadence, excluding boot
+            // updates and process-local update history. No scheduler state is saved.
+            m_update_tick_counter = static_cast<int>((sim_tick % 4 + 3) % 4);
+        }
     }
     std::int64_t current_sim_tick() const {
         return m_current_sim_tick;
@@ -1021,6 +1028,9 @@ public:
     [[nodiscard]] std::uint64_t snapshot_copies() const {
         return m_snapshot_copies.load(std::memory_order_relaxed);
     }
+    // Calling-thread lifetime resident-map visits for complete authority snapshots,
+    // including rejected entries across worlds. Tick preparation must use footprints/queues.
+    [[nodiscard]] u64 authority_snapshot_resident_visits() const;
     // Owner-thread capture for a 32x32 chunk far region plus a one-chunk X/Z
     // halo. Only exact full SDF lattices enter the shared immutable result.
     std::shared_ptr<const FarLodSdfSnapshot> capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const;
@@ -1096,13 +1106,30 @@ public:
     std::shared_ptr<::Luminumbra::Chunk> find_authoritative_chunk(const IVec3& coords) const;
     // Owner-thread admission of one canonical Y=0 column. Generated renderer caches
     // cannot seed authority; incomplete or legacy saved water requires migration.
-    // Returns nullptr on parking pressure; Loading owners refuse until publication.
-    // Admitted handles remain canonical until cleanup or residency retirement.
+    // Returns nullptr on reservation or parking pressure, without replacing owners.
+    // Admitted or authority-bearing Loading owners refuse until publication; a bare
+    // Loading placeholder is superseded. Admitted handles remain canonical
+    // until cleanup or residency retirement, independently of save reservations.
     std::shared_ptr<Chunk> resolve_water_column(const IVec3& coords);
     // Canonical authority only: never generates or reads Loading worker storage.
     std::shared_ptr<Chunk> inspect_water_column(const IVec3& coords) const;
-    // Release only matching, still-unclaimed parked candidates; at most 832 per call.
-    void discard_unclaimed_water_columns(std::span<const std::shared_ptr<Chunk>> candidates);
+    // Reserve equally for resident and absent participants before terrain generation.
+    // False requests saving and leaves reservations unchanged (bounded backpressure).
+    bool reserve_water_columns(std::span<const ChunkID> ids);
+    // Maximum simultaneous unsaved columns, independent of resident storage.
+    [[nodiscard]] std::size_t water_column_capacity() const;
+    // A fixed 128 KiB charge covers full terrain plus a 32x32 water grid;
+    // using a fixed charge keeps admission identical across supported ABIs.
+    static constexpr std::size_t kWaterColumnReservationBytes = 128 * 1024;
+    static_assert(sizeof(Chunk) + std::size_t{17} * 17 * 17 * (sizeof(float) + sizeof(u8)) +
+                      std::size_t{17} * 17 * sizeof(float) +
+                      std::size_t{32} * 32 *
+                          (5 * sizeof(std::int32_t) + 3 * sizeof(float) + sizeof(Vec2)) <=
+                  kWaterColumnReservationBytes);
+    // Retire matching unclaimed parked admissions; at most 832 per span. Live
+    // caches keep their reservations until a clean committed save or retirement.
+    void discard_unclaimed_water_columns(std::span<const std::shared_ptr<Chunk>> candidates,
+                                         std::span<const ChunkID> reservations = {});
     // Const work diagnostic: full terrain generations performed by column admission.
     std::uint64_t water_columns_generated() const {
         return m_water_columns_generated;
@@ -1154,12 +1181,7 @@ public:
 
     bool restore_authoritative_chunk(const IVec3& coords);
     void release_clean_parked_chunks();
-    void note_persistence_outcome(bool ok) {
-        if (m_evictions_suspended != !ok) {
-            m_evictions_suspended = !ok;
-            ++m_dirty_generation;
-        }
-    }
+    void note_persistence_outcome(bool ok);
 
 private:
     struct StreamingState {
@@ -1331,8 +1353,13 @@ private:
     bool m_evictions_suspended = false;
     std::shared_ptr<Chunk> read_committed_chunk(const IVec3& coords) const;
     void migrate_restored_water_column(const std::shared_ptr<Chunk>& chunk);
-    // Process-local admission, independent of simulation/save authority. At most
-    // 832 outstanding candidates; residency retirement and cleanup remove entries.
+    // Capacity is reserved before resolution, so reserved renderer caches are
+    // not necessarily admitted. Unsaved reservations survive admission cleanup
+    // until a clean committed save; at most 4096 fixed charges, also byte-limited.
+    static constexpr std::size_t kMaxWaterReservations = 4096;
+    std::set<ChunkID> m_water_column_reservations;
+    // Canonical handles after successful resolution; at most 832 candidates.
+    // Cleanup and residency retirement release these independently of saving.
     std::unordered_set<ChunkID> m_admitted_water_columns;
     std::uint64_t m_water_columns_generated = 0;
     std::size_t m_parked_bytes = 0;
