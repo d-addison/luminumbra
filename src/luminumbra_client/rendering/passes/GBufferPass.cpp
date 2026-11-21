@@ -1192,7 +1192,10 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         // Queued geometry is unsupported even when its program prevents submission.
         if (capture) {
             capture->unsupported("tree_impostor_fragment_output_unavailable", 3);
-            impostor_program = capture->variant(impostor_program, false, {}, true);
+            // An unavailable base stays the refused program, so it records no second draw.
+            if (impostor_program && impostor_program->IsValid()) {
+                impostor_program = capture->variant(impostor_program, false, {}, true);
+            }
         }
         DebugViewPass::unsupported_surface();
         if (!UseDrawProgram(impostor_program, stats)) {
