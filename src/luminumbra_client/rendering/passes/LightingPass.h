@@ -44,7 +44,8 @@ public:
     void reset_shader();
 
     void copy_lighting_color_to_opaque_texture(const RenderContext& ctx);
-    void execute(const RenderContext& ctx);
+    // Opt in only when a skybox replaces cleared-depth color before any reader.
+    void execute(const RenderContext& ctx, bool skybox_follows = false);
 
     // full-scene lightning light-pulse + bolt overlay. A strike is a
     // deterministic SIM world event (in the `weather` world_hash sub-hash); this is

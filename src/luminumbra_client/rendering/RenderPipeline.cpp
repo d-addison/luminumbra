@@ -3650,7 +3650,9 @@ void RenderPipeline::execute_stage_lighting(const Camera& camera) {
     record_frame_stage("lighting");
     m_frame_lighting_ctx = make_lighting_context(camera);
     begin_gpu_pass_timer(GpuTimerPass::Lighting);
-    m_lighting_pass->execute(m_frame_lighting_ctx);
+    const bool sky_replaces_color = m_cloud_quality > 0 && m_halfres_cloud.fbo &&
+                                    m_cloud_composite_shader && m_cloud_composite_shader->IsValid();
+    m_lighting_pass->execute(m_frame_lighting_ctx, sky_replaces_color);
     end_gpu_pass_timer(GpuTimerPass::Lighting);
     glBindVertexArray(0); // Unbind after lighting pass
 }

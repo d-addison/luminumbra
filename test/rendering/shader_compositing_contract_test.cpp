@@ -942,13 +942,13 @@ TEST(FarWorldShadowContract, NegativeAOBypassesOnlyTheThreeCascadeLookups) {
     // call the cascade samplers. The untagged operands are the original calls.
     ExpectContains(body,
                    "float shadow = (isFarSurface || u_staticStudio != 0) ? 1.0 : "
-                   "CalculateShadow(FragPos, Normal, L_sun, abs(viewPos.z));");
+                   "CalculateShadow(FragPos, Normal, L_sun, abs(viewPos.z), shadowDepths);");
     ExpectContains(body,
                    "vec3 shadowTint = isFarSurface ? vec3(1.0) : "
                    "SampleShadowTint(FragPos, abs(viewPos.z));");
     ExpectContains(body,
                    "float moonShadow = isFarSurface ? 1.0 : "
-                   "CalculateShadow(FragPos, Normal, L_moon, abs(viewPos.z));");
+                   "CalculateShadow(FragPos, Normal, L_moon, abs(viewPos.z), shadowDepths);");
     ExpectContains(body, "if (!isFarSurface) moonShadow = mix(moonShadowFloor, 1.0, moonShadow);");
     EXPECT_EQ(CountOccurrences(body, "CalculateShadow("), 2u);
     EXPECT_EQ(CountOccurrences(body, "SampleShadowTint("), 1u);

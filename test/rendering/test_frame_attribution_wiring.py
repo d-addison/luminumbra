@@ -3695,6 +3695,73 @@ class DeferredRasterDiagnosticWiring(unittest.TestCase):
         self.debug = read(CLIENT / "rendering/passes/DebugViewPass.cpp")
         self.gbuffer = read(CLIENT / "rendering/passes/GBufferPass.cpp")
 
+    def test_shadow_fetch_budget_and_shared_comparison_order(self):
+        gather = block(self.lighting, "vec4 gatherShadowDepths(")
+        fetch = block(self.lighting, "void fetchShadowDepths(")
+        filtered = block(self.lighting, "float filteredShadow(")
+        main = block(self.lighting, "void main()")
+        self.assertEqual(gather.count("textureGather("), 1)
+        self.assertIn("vec3((base + 1.0) / size, cascadeIndex), 0)", gather)
+        self.assertNotRegex(self.lighting, r"\btexture\s*\(\s*u_shadowCascades")
+        self.assertNotRegex(fetch, r"\b(?:texture|texelFetch)\s*\(")
+        # 2*2 interior tiles + 2*(column + row) edge tiles + one corner = 9 gathers.
+        self.assertIn("for (int x = 0; x < 4; x += 2)", fetch)
+        self.assertIn("for (int y = 0; y < 4; y += 2)", fetch)
+        self.assertIn("for (int offset = 0; offset < 4; offset += 2)", fetch)
+        self.assertEqual(fetch.count("gatherShadowDepths("), 4)
+        for assignment in (
+                "depths[x * 5 + y] = depths4.w;",
+                "depths[x * 5 + y + 1] = depths4.x;",
+                "depths[(x + 1) * 5 + y] = depths4.z;",
+                "depths[(x + 1) * 5 + y + 1] = depths4.y;",
+                "depths[20 + offset] = column.z;",
+                "depths[21 + offset] = column.y;",
+                "depths[offset * 5 + 4] = row.x;",
+                "depths[(offset + 1) * 5 + 4] = row.y;",
+                "depths[24] = gatherShadowDepths(base + vec2(3), size, cascadeIndex).y;"):
+            self.assertIn(assignment, fetch)
+        once = block(filtered, "if (!samples.fetched)")
+        self.assertEqual(filtered.count("fetchShadowDepths("), 1)
+        self.assertIn("fetchShadowDepths(base, size, cascadeIndex, samples.values);", once)
+        self.assertIn("samples.fetched = true;", once)
+        self.assertIn("for (int x = 0; x <= WIDTH; ++x)", filtered)
+        self.assertIn("for (int y = 0; y <= WIDTH; ++y)", filtered)
+        self.assertIn("float depth = samples.values[x * 5 + y];", filtered)
+        self.assertIn("visibility += wx * wy * (projected.z - bias > depth ? 0.0 : 1.0);", filtered)
+        self.assertEqual(main.count("shadowDepths.fetched = false;"), 1)
+        for light in ("sun", "moon"):
+            self.assertIn(f"CalculateShadow(FragPos, Normal, L_{light}, abs(viewPos.z), shadowDepths)", main)
+
+    def test_legacy_sky_skip_requires_replacement_and_preserves_other_consumers(self):
+        main = block(self.lighting, "void main()")
+        guard = "if (u_skipLegacySky != 0 && u_farWorldLadder == 0 && u_staticStudio == 0 &&"
+        early = block(main, guard)
+        self.assertIn("texture(u_sceneDepth, TexCoords).r == 0.0)", main)
+        self.assertIn("FragColor = vec4(0.0);", early)
+        self.assertIn("return;", early)
+        self.assertLess(main.index("u_staticStudio != 0"), main.index(guard))
+        self.assertLess(main.index(guard), main.index("vec4 authoredSurface"))
+        header = read(CLIENT / "rendering/passes/LightingPass.h")
+        self.assertIn("bool skybox_follows = false", header)
+        lighting = read(CLIENT / "rendering/passes/LightingPass.cpp")
+        self.assertIn('setInt("u_skipLegacySky", skybox_follows && !contribution.ready() ? 1 : 0)', lighting)
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        stage = block(pipeline, "void RenderPipeline::execute_stage_lighting(")
+        self.assertIn("m_lighting_pass->execute(m_frame_lighting_ctx, sky_replaces_color);", stage)
+        skybox = block(pipeline, "void RenderPipeline::execute_stage_skybox(")
+        predicate = re.search(r"sky_replaces_color = ([^;]+);", stage).group(1)
+        sky_predicate = re.search(r"if \((.*?)\) \{", skybox, re.S).group(1)
+        self.assertEqual("".join(predicate.split()), "".join(sky_predicate.split()))
+        replacement = block(skybox, "if (m_cloud_quality > 0")
+        self.assertLess(replacement.index("glDisable(GL_BLEND)"),
+                        replacement.index("m_cloud_composite_shader->use()"))
+        schedule = pipeline[pipeline.index("kTable = {"):]
+        for consumer in ("opaque_snapshot", "god_rays", "aerial", "taau_resolve", "debug_view"):
+            self.assertLess(schedule.index('{"skybox"'), schedule.index('{"' + consumer + '"'))
+        composite = read(ROOT / "res/shaders/cloud_composite.frag")
+        self.assertIn("if (d > 0.0)", composite)
+        self.assertIn("FragColor = vec4(texture(u_cloudColor, TexCoords).rgb, 1.0);", composite)
+
     def test_cascade_observation_matches_actual_selector_at_every_split(self):
         selector = block(self.lighting, "float CalculateShadow(")
         tint = block(self.lighting, "vec3 SampleShadowTint(")
@@ -4019,7 +4086,7 @@ class DeferredRasterDiagnosticWiring(unittest.TestCase):
             return value
 
         self.assertEqual(fingerprint(without_guard(self.lighting, "LUMIN_DIAG_CONTRIBUTIONS")),
-                         0xf8fca67f768319ee)
+                         0x10c0f1a579f34e4d)
         self.assertEqual(fingerprint(without_guard(self.fragment, "LUMIN_DIAG_SURFACE")),
                          0x7289f9525f762361)
 

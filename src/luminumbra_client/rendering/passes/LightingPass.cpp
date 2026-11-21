@@ -350,7 +350,7 @@ void LightingPass::copy_lighting_color_to_opaque_texture(const RenderContext& ct
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 }
 
-void LightingPass::execute(const RenderContext& ctx) {
+void LightingPass::execute(const RenderContext& ctx, bool skybox_follows) {
     LUMIN_PROFILE_ZONE_N("GL LightingPass.execute");
     if (!ctx.render_view && !ctx.camera)
         throw std::invalid_argument("Lighting requires a validated view or production camera");
@@ -403,6 +403,7 @@ void LightingPass::execute(const RenderContext& ctx) {
     lighting_shader->setInt("u_farWorldLadder", ctx.far_world_ladder ? 1 : 0);
     lighting_shader->setMat4("u_gbufferInverseProjection", ctx.gbuffer_inverse_projection);
     lighting_shader->setInt("u_staticStudio", ctx.static_studio ? 1 : 0);
+    lighting_shader->setInt("u_skipLegacySky", skybox_follows && !contribution.ready() ? 1 : 0);
     lighting_shader->setVec3("u_studioBackground", ctx.studio_background);
     lighting_shader->setInt("u_authoredEnabled", ctx.authored_surface.id != 0 ? 1 : 0);
     lighting_shader->setInt("u_authoredSurface", 13);
