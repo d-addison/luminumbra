@@ -169,6 +169,16 @@ color routing. Continuations refuse extent changes with
 lease. The contributor plane identifies the last contributing submission at a
 pixel; table entries retain all instrumented submissions, not every blended layer.
 
+The explicit debug snapshot keeps attribution active through `plant_procgen` and
+`ground_decals`, finalizing after the decal stage and before SSAO, lighting and post.
+It owns distinct lazy contributor storage for decals, so blended albedo retains
+the underlying deferred surface identity. Refresh resets both identity planes and
+the draw table; inactive producers add no submissions. Registered hidden-GL
+`DiagnosticInspectorContributorsGl.*` regressions exercise uploaded plant and scent
+submissions, separate surface/contributor readback and refresh with inactive
+producers. Native execution remains pending. Scenario bundle admission remains
+separately gated; this snapshot does not claim completed-frame forward coverage.
+
 Water surfaces resume the contributor plane after offscreen caustics generation;
 dry-ground discards preserve earlier IDs. Generated water keys identify the
 submitted chunk translation and index count, with Live ownership, Forward pass and
