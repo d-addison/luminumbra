@@ -1199,6 +1199,7 @@ private:
     template<bool Water>
     void manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks,
                                    const Camera& camera,
+                                   UploadPresentation presentation,
                                    double preparation_ms = 0);
 
     // build the SSAO pass contract from pipeline state.
@@ -1310,13 +1311,15 @@ private:
     void ensure_terrain_culling_hierarchy(const std::vector<ChunkMeshSnapshot>& renderable_chunks);
     void manage_chunk_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks,
                                     const Camera& camera,
-                                    double preparation_ms);
+                                    double preparation_ms,
+                                    UploadPresentation presentation);
     bool copy_terrain_mesh_payload(const ChunkMeshSnapshot& chunk, ChunkMeshPayload& payload) const;
     void upload_chunk_mesh(const ChunkMeshSnapshot& chunk, const ChunkMeshPayload& payload);
     void unload_chunk_resources(ChunkID chunk_id);
 
     void manage_water_gpu_resources(const std::vector<ChunkMeshSnapshot>& renderable_chunks,
-                                    const Camera& camera);
+                                    const Camera& camera,
+                                    UploadPresentation presentation);
     bool copy_water_mesh_payload(const ChunkMeshSnapshot& chunk, ChunkMeshPayload& payload) const;
     void upload_water_mesh(const ChunkMeshSnapshot& chunk, const ChunkMeshPayload& payload);
     void unload_water_resources(ChunkID chunk_id);

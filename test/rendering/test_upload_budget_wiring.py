@@ -42,6 +42,63 @@ class UploadBudgetWiring(unittest.TestCase):
         cls.header = read(RENDERING / "RenderPipeline.h")
         cls.main = read(ROOT / "src/luminumbra_client/main_client.cpp")
 
+    def test_loading_allowance_is_explicit_and_shared_by_all_upload_lanes(self):
+        preload = body(self.main, "auto wait_for_world_presentation =")
+        self.assertIn("UploadPresentation::Loading", preload)
+        # All entry implementations share this call; time-lapse and gameplay keep
+        # the existing Streaming/Settled selection and its default arguments.
+        self.assertEqual(self.main.count("UploadPresentation::Loading"), 1)
+        prepare = compact(body(self.pipeline, "void RenderPipeline::prepare_frame("))
+        self.assertIn("manage_chunk_gpu_resources(renderable_chunk_snapshots, camera, "
+                      "snapshot_ms, presentation)", prepare)
+        self.assertIn("manage_water_gpu_resources(renderable_chunk_snapshots, camera, presentation)",
+                      prepare)
+        manage = compact(body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources("))
+        self.assertIn("const auto limits = upload_limits(presentation, Water)", manage)
+        self.assertIn("drain_uploads(queue, limits, cost, adopt, elapsed)", manage)
+        self.assertIn("cost, adopt, elapsed, presentation)", manage)
+        self.assertRegex(manage, r"m_near_terrain_refinement.prepare\(.*?elapsed\(\), presentation\)")
+        policy = read(RENDERING / "NearTerrainRefinement.h")
+        scheduler = compact(body(policy, "drain_terrain_uploads("))
+        self.assertIn("upload_limits(presentation, false)", scheduler)
+        self.assertIn("UploadBudget budget(limits)", scheduler)
+        self.assertLess(scheduler.index("drain(baseline, false)"),
+                        scheduler.index("drain(refinement, true)"))
+        native = read(ROOT / "test/rendering/NearTerrainRefinement_test.cpp")
+        for name in ("LoadingAllowanceDrainsBothLanesAndRefinementInBoundedIterations",
+                     "LoadingAllowanceBoundsFailureRetriesAndHandlesEmptyQueues",
+                     "LoadingAllowanceLeavesGameplayAndCaptureBudgetsUnchanged",
+                     "LoadingRefinementPreservesPayloadAndRejectsInvalidElapsedTime"):
+            self.assertIn("TEST(NearTerrainUpload, " + name + ")", native)
+        self.assertIn("rendering/NearTerrainRefinement_test.cpp", read(ROOT / "test/CMakeLists.txt"))
+
+    def test_loading_time_joins_frame_buckets_and_names_each_entry_stage(self):
+        preload = body(self.main, "auto wait_for_world_presentation =")
+        for field in ("total", "water", "render", "observe"):
+            self.assertIn("entry_presentation_work." + field + ", true)", preload)
+        self.assertIn("entry_presentation_work.scatter += scatter_ms", preload)
+        self.assertIn("entry_presentation_work.foliage += foliage_ms", preload)
+        self.assertIn("Attribution::phase_total_ms() - phases_before", preload)
+        self.assertIn("Attribution::foliage_total_ms() - foliage_before", preload)
+        loop = self.main.split("while (!glfwWindowShouldClose(window))", 1)[1]
+        self.assertLess(loop.index("entry_presentation_work = {};"),
+                        loop.index("const Attribution::FoliageFrameScope foliage_scope"))
+        accounting = compact(loop).split("const double entry_stream_ms =", 1)[1].split(
+            "const auto& foliage_frame =", 1)[0]
+        self.assertIn("entry_presentation_work.water + entry_presentation_work.observe", accounting)
+        self.assertIn("rb_stream_ms += entry_stream_ms", accounting)
+        self.assertIn("rb_render_call_ms += entry_presentation_work.total - entry_stream_ms", accounting)
+        self.assertIn("rb_render_bucket_ms += entry_presentation_work.total - entry_stream_ms - "
+                      "entry_presentation_work.scatter - entry_presentation_work.nested_foliage - "
+                      "entry_presentation_work.phases", accounting)
+        self.assertIn("rb_scatter_ms += entry_presentation_work.scatter", accounting)
+        self.assertIn("entry-split: total=", loop)
+        self.assertIn("Entry readiness: stream_observations=", preload)
+        self.assertIn("streaming.frames_observed", preload)
+        self.assertIn("legacy_wanted=", preload)
+        native = read(ROOT / "test/rendering/frame_attribution_test.cpp")
+        self.assertIn("TEST(FrameAttribution, LoadingWorkSubtractsNestedCollectorsExactlyOnce)", native)
+
     def test_waterfall_sheets_retire_excavated_crest_and_landing_before_unknown_water(self):
         source = read(RENDERING / "WaterfallDetect.cpp")
         live = compact(body(source, "float LiveWaterFactorAt("))
@@ -600,10 +657,10 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertLess(adopt.index("payload.refinement.set("),
                         adopt.index("upload_chunk_mesh(candidate.chunk, payload)"))
         self.assertIn("auto& destination = refinement_only ? refinement_candidates : candidates", manage)
-        self.assertIn("drain_terrain_uploads(queue, m_near_terrain_upload_queue, cost, adopt, elapsed)",
+        self.assertIn("drain_terrain_uploads( queue, m_near_terrain_upload_queue, cost, adopt, elapsed, presentation)",
                       compact(manage))
         policy = read(RENDERING / "NearTerrainRefinement.h")
-        scheduler = body(policy, "UploadWorkStats drain_terrain_uploads(")
+        scheduler = body(policy, "drain_terrain_uploads(")
         self.assertEqual(scheduler.count("UploadBudget budget("), 1)
         self.assertLess(scheduler.index("drain(baseline, false)"),
                         scheduler.index("drain(refinement, true)"))
@@ -687,7 +744,7 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("auto& destination = refinement_only ? refinement_candidates : candidates",
                       manage)
         self.assertIn("refresh_uploads( queue, candidates,", compact(manage))
-        self.assertIn("drain_terrain_uploads(queue, m_near_terrain_upload_queue, cost, adopt, elapsed)",
+        self.assertIn("drain_terrain_uploads( queue, m_near_terrain_upload_queue, cost, adopt, elapsed, presentation)",
                       compact(manage))
 
     def test_last_deferred_baseline_enqueues_refinement_before_settled_accounting(self):
@@ -1544,7 +1601,7 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertNotIn("kMinTerrainUploadsPerFrame", self.pipeline)
         upload = body(self.pipeline, "void RenderPipeline::upload_chunk_mesh(")
         self.assertIn("m_foliage_pass->update_ground_mesh(", upload)
-        self.assertIn("manage_chunk_gpu_resources(renderable_chunk_snapshots, camera, snapshot_ms)",
+        self.assertIn("manage_chunk_gpu_resources(renderable_chunk_snapshots, camera, snapshot_ms, presentation)",
                       self.pipeline)
         self.assertLess(self.pipeline.index("const auto snapshot_start"),
                         self.pipeline.index("build_chunk_snapshots(renderable_chunks)"))
