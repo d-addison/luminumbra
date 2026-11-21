@@ -28,6 +28,7 @@
 #include <glm/geometric.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
+#include <initializer_list>
 #include <iterator>
 #include <limits>
 #include <sstream>
@@ -1770,7 +1771,8 @@ TEST_F(FarWorldWaterGl, WithinSlotBlockErrorsNeverFallThroughToResidentReuse) {
     completion.result = GL_ALREADY_SIGNALED;
     vertices[0].position = {4, 5, 6};
     indices[0] = 2;
-    for (const GLenum target : {GL_ARRAY_BUFFER, GL_ELEMENT_ARRAY_BUFFER}) {
+    for (const GLenum target :
+         std::initializer_list<GLenum>{GL_ARRAY_BUFFER, GL_ELEMENT_ARRAY_BUFFER}) {
         for (const bool storage_failure : {false, true}) {
             FailedPoolBlock failure(target, storage_failure);
             EXPECT_EQ(
