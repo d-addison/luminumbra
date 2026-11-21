@@ -1,0 +1,49 @@
+{
+  "rules": [
+    {
+      "adapter": "source-pattern",
+      "anchor": "call",
+      "auto_fix": "No blind fix. Establish owned GL state or asynchronous observation and prove identical pixels.",
+      "description": "GL state queries, synchronization and readback in frame execution.",
+      "family": "performance",
+      "id": "hot-gl-query",
+      "pattern": "\\b(?:glGet\\w*|glIsEnabled|glFinish|glReadPixels|glClientWaitSync)\\s*\\(",
+      "rationale": "Driver queries add recurring work; synchronous APIs may wait. RC7 inventories 31 UI boundary queries and four shadow queries.",
+      "scope": "runtime"
+    },
+    {
+      "adapter": "source-pattern",
+      "anchor": "call",
+      "auto_fix": "Prepare mesh data before drawing and adopt GL resources without changing draw order; no automatic rewrite.",
+      "description": "Mesh file loading in draw pass bodies and their registered geometry helpers.",
+      "family": "performance",
+      "id": "hot-draw-file-load",
+      "pattern": "\\bMeshLoader\\s*::\\s*(?:Load|LoadSkinned)\\s*\\(",
+      "rationale": "Cold mesh and skinned-mesh loads can hitch the rendering owner; warm caches do not remove cold exposure.",
+      "scope": "runtime"
+    },
+    {
+      "adapter": "source-pattern",
+      "anchor": "call",
+      "auto_fix": "Requires a lifetime-safe completion state machine preserving deterministic publication; no automatic rewrite.",
+      "description": "Immediate worker-boundary waits in registered owner functions.",
+      "family": "performance",
+      "id": "owner-blocking-wait",
+      "pattern": "\\bRunWorkerBoundary\\s*\\(",
+      "rationale": "Dispatch followed by a wait blocks the owner during save, scheduler and committed chunk reads.",
+      "scope": "runtime"
+    },
+    {
+      "adapter": "source-pattern",
+      "anchor": "match",
+      "auto_fix": "Store the find iterator and return iterator->second on a hit; review miss insertion separately.",
+      "description": "A successful container find followed by return through subscript for the same key.",
+      "family": "code-practices",
+      "id": "double-lookup-after-find",
+      "pattern": "\\bif\\s*\\(\\s*(?P<container>\\w+)\\s*\\.\\s*find\\s*\\(\\s*(?P<key>\\w+)\\s*\\)\\s*!=\\s*(?P=container)\\s*\\.\\s*end\\s*\\(\\s*\\)\\s*\\)\\s*\\{\\s*return\\s+(?P=container)\\s*\\[\\s*(?P=key)\\s*\\]\\s*;\\s*\\}",
+      "rationale": "The successful lookup already located the value; subscript hashes and probes the same key again.",
+      "scope": "runtime"
+    }
+  ],
+  "schema": 1
+}

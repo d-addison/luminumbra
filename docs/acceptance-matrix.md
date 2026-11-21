@@ -6,11 +6,11 @@ Statuses declare the available evidence. Static validation requires a mapping fo
 
 | Status | Rows |
 | --- | ---: |
-| covered | 63 |
+| covered | 64 |
 | partial | 27 |
 | needs-native-run | 22 |
 | planned | 88 |
-| Total | 200 |
+| Total | 201 |
 
 | Row | Status | Source | Requirements | Statement | Evidence |
 | --- | --- | --- | --- | --- | --- |
@@ -214,3 +214,4 @@ Statuses declare the available evidence. Static validation requires a mapping fo
 | worldgen.band-limited-preset | partial | `issue #876` |  | The additional mountains_band_limited preset uses four octaves, base amplitude 66.6666667 and authored continental, erosion and peaks splines with all other mountains generation parameters preserved. Python pins the canonical preset checksum and content hash with an empty dependency manifest; registered loader coverage checks parsed controls, new-world resolution, saved JSON identity and a distinct dependency-inclusive identity from mountains. The frozen revision-6 catalog remains separate. Binary packages include the preset through the worlds directory install. UI selection, generated height pins and native qualification remain pending. | ctest: `FrozenTerrainPresetsContract`<br>script: `tools/test_frozen_terrain_presets.py`<br>ctest: `TerrainPresetLoaderTest.BandLimitedMountainsPreservesResolvedContent` (planned: Run registered loader regression; generated height pins and native qualification remain pending; owner: maintainers)<br>ctest: `TerrainPresetLoaderTest.AllShippedPresetsLoadWithoutErrorsOrWarnings`<br>script: `CMakeLists.txt` |
 | terrain.resolution-options | planned | `issue #876` |  | Terrain resolution design compares an opt-in band-limited new-world preset and a half-metre authoritative grid, including parameter sources, identity and save compatibility, resource costs, consumer audit and bounded delivery slices. Implementation, measured candidate facet reduction and native performance qualification remain pending. | doc: `docs/development/terrain-resolution-options.md` (planned: Qualify captured-pose terrain, existing-world continuation, grid admission and High/Ultra performance before activation; owner: terrain) |
 | rendering.near-terrain-refinement | partial | `issue #876` |  | Graphics preset revision 4 enables the render-only, budgeted near-terrain refinement for new High and Ultra selections; Low and Medium keep it off. Saved revisions 1-3 and explicit saved overrides keep their payloads until the player reselects a preset. Refinement stays within the existing 4 MiB, 8-upload and 3 ms per-frame budget and defers past its deadline. Native High/Ultra p99 at or below 8.33 ms is qualified in the release native pass. | ctest: `NearTerrainUpload.PresetSelectionsUseBudgetedRefinementAndExplicitOffPreservesPayload`<br>ctest: `GraphicsPresetStartup.DetectedHighAndUltraPersistRefinementAndSavedOffSurvivesStartup`<br>script: `test/tools/test_graphics_ui_contract.py`<br>doc: `docs/development/terrain-resolution-options.md` (planned: Qualify native High/Ultra p99 at or below 8.33 ms with refinement on in the release native pass; owner: rendering) |
+| ci.source-ratchet | covered | `docs/development/ratchet.md` |  | The registered Python source ratchet compares finding keys and multiplicities against committed target baselines, permits a reviewed seed only for newly registered rule ids, refuses incomplete analysis and updates baselines only by shrinking existing rules. Explicit runtime scopes cover GL queries, draw-time mesh loads, owner worker-boundary waits and the direct duplicate-lookup form. | script: `tools/ci/test_ratchet.py`<br>doc: `docs/development/ratchet.md` |
