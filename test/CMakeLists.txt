@@ -1650,6 +1650,9 @@ add_executable(regional_scent_allocation_test common/regional_scent_allocation_t
 target_include_directories(regional_scent_allocation_test PRIVATE ../src)
 target_link_libraries(regional_scent_allocation_test PRIVATE gtest_main luminumbra_common)
 
+add_executable(replication_delta_allocation_test common/replication_delta_allocation_test.cpp)
+target_link_libraries(replication_delta_allocation_test PRIVATE gtest_main luminumbra_common)
+
 # Keep throwing allocation replacement isolated from every other test executable.
 add_executable(native_file_ownership_test common/native_file_ownership_test.cpp)
 target_include_directories(native_file_ownership_test PRIVATE ../src ${CMAKE_CURRENT_SOURCE_DIR})
@@ -2257,6 +2260,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     runtime_world_visual_validation_test
     frontier_gates_test
     regional_scent_allocation_test
+    replication_delta_allocation_test
     native_file_ownership_test
     world_open_refusal_test
     runtime_surface_options_test
