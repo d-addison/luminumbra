@@ -32,6 +32,69 @@ def cpp_block(source, anchor):
 
 
 class RuntimeConfigSourceContract(unittest.TestCase):
+    def test_strict_numeric_input_sites_share_the_checked_parser(self):
+        sites = {
+            "core/RuntimeScenarioConfig.cpp": (
+                "Core::ParseNumber(value,parsed)",
+                "Core::ParseNumber(dimensions.substr(0,x_pos),width)",
+                "Core::ParseNumber(dimensions.substr(x_pos+1),height)",
+                "Core::ParseNumber(s,v)",
+                'Core::ParseNumber(GetCommandLineOption(argc,argv,"--hang-watchdog-seconds","0"),watchdog_seconds)',
+            ),
+            "core/TimelapseVista.h": ("Core::ParseNumber(text,parsed)",),
+            "ui/components/common/Input.cpp": ("Core::ParseNumber(value,parsed)",),
+            "ui/Rml_UIManager.cpp": ("Core::ParseNumber(v,st.tod)",
+                                     "Core::ParseNumber(value,parsed)"),
+            "main_client.cpp": (
+                "Luminumbra::Core::ParseNumber(volumetric_option,quality)",
+                "Luminumbra::Core::ParseNumber(cy,g_app.capture.fixed_cam_yaw)",
+                "Luminumbra::Core::ParseNumber(cpi,g_app.capture.fixed_cam_pitch)",
+                "Luminumbra::Core::ParseNumber(*settle_env,v)",
+                "Luminumbra::Core::ParseNumber(ds,g_app.capture.timelapse_daystep)",
+                "Luminumbra::Core::ParseNumber(t0,g_app.capture.timelapse_tod)",
+                "Luminumbra::Core::ParseNumber(*value,scale)",
+                "Luminumbra::Core::ParseNumber(*cq,cloud_quality)",
+                "Luminumbra::Core::ParseNumber(*sq,ssao_quality)",
+            ),
+        }
+        for relative, calls in sites.items():
+            source = compact_cpp((ROOT / "src/luminumbra_client" / relative)
+                                 .read_text(encoding="utf-8"))
+            with self.subTest(source=relative):
+                self.assertNotRegex(source, r"\b(?:std::)?(?:sto[ifd]|stoull|atoi|atof|strtof)\(")
+                for call in calls:
+                    self.assertIn(call, source)
+
+    def test_strict_numeric_policies_and_volumetric_error_boundary(self):
+        source = compact_cpp((ROOT / "src/luminumbra_client/main_client.cpp")
+                             .read_text(encoding="utf-8"))
+        boundary = cpp_block(source, "try{if(!volumetric_option.empty())")
+        self.assertIn("if(!Luminumbra::Core::ParseNumber(volumetric_option,quality))"
+                      'throwstd::invalid_argument("Invalidintegervaluefor--volumetric-quality:"+'
+                      "volumetric_option);", boundary)
+        self.assertIn(boundary + 'catch(conststd::invalid_argument&error){'
+                      'LUMINUMBRA_CORE_ERROR("{}",error.what());return2;}', source)
+        for policy in ("intv=0;Luminumbra::Core::ParseNumber(*settle_env,v);if(v>0)",
+                       "floatscale=0.0f;Luminumbra::Core::ParseNumber(*value,scale);",
+                       "cloud_quality=0;Luminumbra::Core::ParseNumber(*cq,cloud_quality);",
+                       "ssao_quality=0;Luminumbra::Core::ParseNumber(*sq,ssao_quality);"):
+            self.assertIn(policy, source)
+        ui = compact_cpp((ROOT / "src/luminumbra_client/ui/Rml_UIManager.cpp")
+                         .read_text(encoding="utf-8"))
+        self.assertIn("st.tod=0.24f;Core::ParseNumber(v,st.tod);", ui)
+        self.assertIn("floatparsed=fallback;Core::ParseNumber(value,parsed);returnparsed;", ui)
+
+    def test_fixed_email_regex_has_one_immutable_cached_construction(self):
+        source = compact_cpp((ROOT / "src/luminumbra_client/ui/components/common/Input.cpp")
+                             .read_text(encoding="utf-8"))
+        email = cpp_block(source, "caseType::Email:")
+        self.assertEqual(email, '{staticconststd::regexemailPattern('
+                         'R"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})");'
+                         'returnstd::regex_match(value,emailPattern);}')
+        self.assertEqual(source.count("std::regexemailPattern("), 1)
+        # Optional fields retain their existing empty-value exemption.
+        self.assertIn("if(!m_required&&value.empty()){returntrue;}", source)
+
     @classmethod
     def setUpClass(cls):
         cls.client = compact_cpp((ROOT / "src/luminumbra_client/main_client.cpp").read_text(encoding="utf-8"))
@@ -47,8 +110,11 @@ class RuntimeConfigSourceContract(unittest.TestCase):
                 ("t0", "timelapse_tod", "--timelapse-tod")):
             with self.subTest(flag=flag):
                 body = cpp_block(self.client, f"if(!{variable}.empty())")
-                self.assertIn(f"g_app.capture.{target}=std::stof({variable});", body)
-                failure = cpp_block(body, "catch(...)")
+                # Strict parsing rejects trailing junk and non-finite values.
+                parse = f"if(!Luminumbra::Core::ParseNumber({variable},g_app.capture.{target}))"
+                self.assertIn(parse, body)
+                self.assertNotIn("std::stof(", body)
+                failure = cpp_block(body, parse)
                 self.assertIn("return2;", failure)
                 self.assertIn("LUMINUMBRA_CORE_ERROR(", failure)
                 self.assertIn(flag, failure)
@@ -1136,8 +1202,12 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         world = compact_cpp((ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
                             .read_text(encoding="utf-8"))
         read = cpp_block(world, "SHIELD_WorldSystem::read_committed_chunk(")
-        self.assertIn("RunWorkerBoundary(m_job_system,\"committed-chunk-read\",[&]{"
-                      "chunk=m_durable_chunk_loader(coords);});", read)
+        self.assertEqual(read.count("RunWorkerBoundary("), 1)
+        worker = cpp_block(read, "RunWorkerBoundary(m_job_system,\"committed-chunk-read\",[&]")
+        self.assertIn("chunk=m_durable_chunk_loader(coords);", worker)
+        self.assertLess(worker.index("chunk->get_coords()!=coords"),
+                        worker.index("if(prepare_water)"))
+        self.assertIn("ComputeHighWaterSeedInputs(*inputs,coords,*this);", worker)
         self.assertLess(read.index("RunWorkerBoundary("),
                         read.index("m_durable_chunk_fault(error.what())"))
         helper = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorkerBoundary.h")
