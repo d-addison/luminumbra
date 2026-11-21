@@ -5,13 +5,16 @@
 
 #include <algorithm>
 #include <array>
+#include <barrier>
 #include <cmath>
 #include <cstdint>
 #include <map>
 #include <memory>
 #include <random>
 #include <set>
+#include <thread>
 #include <tuple>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -206,6 +209,93 @@ TEST(ActivationResidencyIndex, LifecycleTransitionsMatchCensusIncludingReplaceme
     EXPECT_EQ(index.lifecycle_counts(), Index::LifecycleCounts{});
     index.insert(replacement);
     EXPECT_EQ(index.lifecycle_counts(), FullLifecycleCensus({replacement}));
+}
+
+TEST(ActivationResidencyIndex, ConcurrentChunkTransitionsMatchTableAndNotifyOnlyOnSuccess) {
+    constexpr std::array states{ChunkState::Unloaded,
+                                ChunkState::Loading,
+                                ChunkState::Idle,
+                                ChunkState::Meshing,
+                                ChunkState::Ready,
+                                ChunkState::Unloading,
+                                static_cast<ChunkState>(255)};
+    constexpr std::array<std::array<bool, 7>, 7> allowed{{
+        {true, true, false, false, false, false, false},
+        {false, true, true, false, false, true, false},
+        {false, false, true, true, false, true, false},
+        {false, false, false, true, true, true, false},
+        {false, false, false, true, true, true, false},
+        {true, false, false, false, false, true, false},
+        {false, false, false, false, false, false, true},
+    }};
+    for (std::size_t from = 0; from < states.size(); ++from) {
+        for (std::size_t to = 0; to < states.size(); ++to) {
+            SCOPED_TRACE(::testing::Message() << from << " -> " << to);
+            Chunk chunk(IVec3(0));
+            chunk.set_state(states[from]);
+            auto changes = std::make_shared<ChunkLifecycleChanges>();
+            chunk.bind_lifecycle_changes(changes);
+            std::array<bool, 4> results{};
+            std::barrier start(5);
+            {
+                std::array<std::jthread, 4> workers;
+                for (std::size_t worker = 0; worker < workers.size(); ++worker) {
+                    workers[worker] = std::jthread([&, worker]() {
+                        start.arrive_and_wait();
+                        results[worker] = chunk.try_set_state(states[from], states[to]);
+                    });
+                }
+                start.arrive_and_wait();
+            }
+            const auto winners = std::count(results.begin(), results.end(), true);
+            const auto expected_winners = allowed[from][to] ? (from == to ? 4 : 1) : 0;
+            EXPECT_EQ(winners, expected_winners);
+            EXPECT_EQ(Chunk::is_valid_state_transition(states[from], states[to]),
+                      allowed[from][to]);
+            EXPECT_EQ(chunk.get_state(), allowed[from][to] ? states[to] : states[from]);
+            std::unordered_set<ChunkID> pending;
+            changes->take(pending);
+            EXPECT_EQ(pending.size(), allowed[from][to] ? 1u : 0u);
+            if (allowed[from][to]) {
+                EXPECT_TRUE(pending.contains(chunk.get_id()));
+            }
+            // Unconditional setters notify even when writing the current state.
+            chunk.set_state(chunk.get_state());
+            changes->take(pending);
+            EXPECT_EQ(pending, std::unordered_set<ChunkID>{chunk.get_id()});
+            chunk.bind_lifecycle_changes(nullptr);
+        }
+    }
+}
+
+TEST(ActivationResidencyIndex, MismatchedChunkTransitionsLeaveStateAndNotificationsUnchanged) {
+    constexpr std::array states{ChunkState::Unloaded,
+                                ChunkState::Loading,
+                                ChunkState::Idle,
+                                ChunkState::Meshing,
+                                ChunkState::Ready,
+                                ChunkState::Unloading,
+                                static_cast<ChunkState>(255)};
+    Chunk chunk(IVec3(0));
+    auto changes = std::make_shared<ChunkLifecycleChanges>();
+    chunk.bind_lifecycle_changes(changes);
+    std::unordered_set<ChunkID> pending;
+    for (const auto current : states) {
+        chunk.set_state(current);
+        changes->take(pending);
+        for (const auto expected : states) {
+            if (expected == current) {
+                continue;
+            }
+            for (const auto next : states) {
+                EXPECT_FALSE(chunk.try_set_state(expected, next));
+                EXPECT_EQ(chunk.get_state(), current);
+                changes->take(pending);
+                EXPECT_TRUE(pending.empty());
+            }
+        }
+    }
+    chunk.bind_lifecycle_changes(nullptr);
 }
 
 TEST(ActivationResidencyIndex, DirectStateWritersCoalesceAndRefusalsLeaveCensusUnchanged) {

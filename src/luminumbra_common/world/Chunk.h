@@ -2,7 +2,6 @@
 
 #include "../../../include/luminumbra/core/Types.h"
 #include "FarWorldAuthorityChanges.h"
-#include "core/Log.h"
 #include "core/Profiler.h"
 #include "core/WaterSeedInputs.h"
 #include <atomic>
@@ -82,15 +81,11 @@ public:
 
     // Thread-safe state management
     ChunkState get_state() const {
-        LUMIN_PROFILE_LOCK(
-            std::lock_guard<std::mutex>, lock, m_state_mutex, "Chunk state lock wait");
-        return m_state;
+        return m_state.load(std::memory_order_acquire);
     }
 
     void set_state(ChunkState new_state) {
-        LUMIN_PROFILE_LOCK(
-            std::lock_guard<std::mutex>, lock, m_state_mutex, "Chunk state lock wait");
-        m_state = new_state;
+        m_state.store(new_state, std::memory_order_release);
         notify_lifecycle_change();
     }
     // Derived census binding; never authority, serialized state or hash input.
@@ -580,8 +575,7 @@ private:
     const IVec3 m_coords;
     const ChunkID m_id;
     void notify_lifecycle_change() const;
-    ChunkState m_state;
-    mutable std::mutex m_state_mutex; // mutable for use in const getter
+    std::atomic<ChunkState> m_state;
     std::atomic<bool> m_voxel_data_dirty{false};
     std::atomic<u8> m_sdf_provenance{static_cast<u8>(ChunkSdfProvenance::GeneratedCurrentParams)};
     std::atomic<u64> m_hash_revision{0};

@@ -1605,9 +1605,12 @@ class StreamingLifecycleSourceContract(unittest.TestCase):
         chunk = compact_cpp((ROOT / "src/luminumbra_common/world/Chunk.h").read_text(encoding="utf-8"))
         chunk_source = compact_cpp((ROOT / "src/luminumbra_common/world/Chunk.cpp")
                                    .read_text(encoding="utf-8"))
-        for setter in (cpp_block(chunk, "voidset_state("),
-                       cpp_block(chunk_source, "boolChunk::try_set_state(")):
-            self.assertIn("m_state=new_state;notify_lifecycle_change();", setter)
+        setter = cpp_block(chunk, "voidset_state(")
+        self.assertIn("m_state.store(new_state,std::memory_order_release);"
+                      "notify_lifecycle_change();", setter)
+        transition = cpp_block(chunk_source, "boolChunk::try_set_state(")
+        self.assertIn("std::memory_order_acq_rel,std::memory_order_acquire));"
+                      "notify_lifecycle_change();returntrue;", transition)
         self.assertIn("m_lifecycle_changes->take(m_pending_lifecycle)", self.index)
         ready = cpp_block(self.world, "boolSHIELD_WorldSystem::EnsureSurfaceReadyNear(")
         self.assertIn("set_renderable_chunk_state(*chunk,ChunkState::Meshing)", ready)
@@ -1615,6 +1618,28 @@ class StreamingLifecycleSourceContract(unittest.TestCase):
         self.assertNotIn("observe_lifecycle", ready)
         cmake = (ROOT / "test/CMakeLists.txt").read_text(encoding="utf-8")
         self.assertIn("common/ActivationResidencyIndex_test.cpp", cmake)
+
+
+class ChunkStateSourceContract(unittest.TestCase):
+    def test_state_access_has_no_mutex_acquisitions(self):
+        header = compact_cpp((ROOT / "src/luminumbra_common/world/Chunk.h")
+                             .read_text(encoding="utf-8"))
+        source = compact_cpp((ROOT / "src/luminumbra_common/world/Chunk.cpp")
+                             .read_text(encoding="utf-8"))
+        self.assertIn("std::atomic<ChunkState>m_state;", header)
+        self.assertNotIn("m_state_mutex", header + source)
+        getter = cpp_block(header, "ChunkStateget_state()const")
+        self.assertIn("m_state.load(std::memory_order_acquire)", getter)
+        transition = cpp_block(source, "boolChunk::try_set_state(")
+        self.assertIn("m_state.load(std::memory_order_acquire)", transition)
+        self.assertIn("m_state.compare_exchange_weak(", transition)
+        for body in (getter, cpp_block(header, "voidset_state("), transition):
+            self.assertNotIn("LUMIN_PROFILE_LOCK", body)
+            self.assertNotIn("lock_guard", body)
+
+    def test_chunk_header_does_not_include_logging(self):
+        header = (ROOT / "src/luminumbra_common/world/Chunk.h").read_text(encoding="utf-8")
+        self.assertNotRegex(header, r'#\s*include\s*[<"](?:[^">]*/)?Log\.h[">]')
 
 
 if __name__ == "__main__":
