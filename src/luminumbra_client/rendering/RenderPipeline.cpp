@@ -3655,7 +3655,10 @@ void RenderPipeline::execute_stage_lighting(const Camera& camera) {
     record_frame_stage("lighting");
     m_frame_lighting_ctx = make_lighting_context(camera);
     begin_gpu_pass_timer(GpuTimerPass::Lighting);
-    m_lighting_pass->execute(m_frame_lighting_ctx);
+    // G-buffer establishes depth testing; plant/decal stages retain or restore it,
+    // SSAO only changes bindings, and diagnostic replay restores its entry state.
+    const LightingPass::CallerState caller{.depth_test_enabled = GL_TRUE};
+    m_lighting_pass->execute(m_frame_lighting_ctx, caller);
     end_gpu_pass_timer(GpuTimerPass::Lighting);
     glBindVertexArray(0); // Unbind after lighting pass
 }
@@ -3689,6 +3692,9 @@ void RenderPipeline::execute_stage_skybox(const Camera& camera) {
     record_frame_stage("skybox");
     begin_gpu_pass_timer(GpuTimerPass::Skybox);
     RenderContext skybox_ctx = make_skybox_context(camera);
+    // Lighting explicitly enables culling; neither lighting nor the depth blit changes it.
+    // Both cloud-resolution paths therefore enter the dome with culling enabled.
+    const SkyboxPass::CallerState caller{.cull_enabled = GL_TRUE};
     if (m_cloud_quality > 0 && m_halfres_cloud.fbo && m_cloud_composite_shader &&
         m_cloud_composite_shader->IsValid()) {
         // Render-optimization (cloud-raymarch-optimization, ): raymarch the
@@ -3710,7 +3716,7 @@ void RenderPipeline::execute_stage_skybox(const Camera& camera) {
                    static_cast<GLsizei>(m_halfres_cloud.height));
         glDisable(GL_DEPTH_TEST);
         glDepthMask(GL_FALSE);
-        m_skybox_pass->execute(skybox_ctx, camera, false);
+        m_skybox_pass->execute(skybox_ctx, camera, false, caller);
         // (b) Depth-masked upsample composite -> lighting FBO (full res). Writes the
         //     bilinear-upsampled sky only where the scene depth is the far plane.
         glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
@@ -3745,7 +3751,7 @@ void RenderPipeline::execute_stage_skybox(const Camera& camera) {
                    static_cast<GLsizei>(m_internal_width),
                    static_cast<GLsizei>(
                        m_internal_height)); // skybox must not inherit a stale (screen) viewport
-        m_skybox_pass->execute(skybox_ctx, camera, false);
+        m_skybox_pass->execute(skybox_ctx, camera, false, caller);
     }
     end_gpu_pass_timer(GpuTimerPass::Skybox);
     glBindVertexArray(0); // Unbind after skybox pass
@@ -3938,7 +3944,10 @@ void RenderPipeline::execute_stage_foliage(const Camera& camera) {
         RenderContext foliage_ctx = make_foliage_context(camera);
         foliage_ctx.frozen_replay = m_far_world_paired;
         begin_gpu_pass_timer(GpuTimerPass::Foliage);
-        const std::size_t foliage_drawn = m_foliage_pass->execute(foliage_ctx, camera);
+        // Skybox preserves culling; water/glass restore it enabled, waterfall
+        // preserves it, and god rays only change depth/blend. Skipped stages retain it.
+        const FoliagePass::CallerState caller{.cull_enabled = GL_TRUE};
+        const std::size_t foliage_drawn = m_foliage_pass->execute(foliage_ctx, camera, caller);
         // Submission is observable even when the indirect count has no CPU readback.
         if (foliage_drawn > 0 || (!m_foliage_pass->frame_instance_count_known() &&
                                   m_foliage_pass->last_draw_calls() > 0)) {

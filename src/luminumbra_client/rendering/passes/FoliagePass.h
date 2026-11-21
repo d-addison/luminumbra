@@ -87,6 +87,11 @@ class Shader;
 // ===========================================================================
 class FoliagePass {
 public:
+    struct CallerState {
+        // GLboolean storage; this header stays GL-free for non-GL test hosts.
+        unsigned char cull_enabled = 0;
+        static CallerState QueryExternal();
+    };
     // --- Pinned capacities. ---
     static constexpr std::size_t kMaxInstances = 262144; // global scatter pool
     // Instance stride: pos(12) + size(8) + color(4) + sway(8) + phase(2) + facing(2).
@@ -366,7 +371,13 @@ public:
     // disabled. -T17: reads frame state from the RenderContext seam
     // (sun/ambient/moon/cloud/time/lit_scene) instead of RenderPipeline; RETURNS
     // the known instance count drawn (0 if unknown); last_draw_calls reports submission.
-    std::size_t execute(const RenderContext& ctx, const Camera& camera);
+    // Shipping dispatch supplies known enable state; direct hosts preserve arbitrary state.
+    std::size_t execute(const RenderContext& ctx, const Camera& camera, const CallerState& caller);
+    std::size_t execute_external(const RenderContext& ctx, const Camera& camera);
+    // Preserve the existing direct-call boundary for previews and pass consumers.
+    std::size_t execute(const RenderContext& ctx, const Camera& camera) {
+        return execute_external(ctx, camera);
+    }
 
     // Opt-in, same-device qualification. Freezes uploaded public scatter/surface
     // inputs; the output is cleared and independently dispatched before capture.

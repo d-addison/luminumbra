@@ -49,6 +49,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -1932,7 +1933,19 @@ void FoliagePass::map_instances_for_frame() {
     m_draw_instance_limit = count;
 }
 
-std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera) {
+static_assert(std::is_same_v<GLboolean, unsigned char>);
+
+FoliagePass::CallerState FoliagePass::CallerState::QueryExternal() {
+    return {.cull_enabled = glIsEnabled(GL_CULL_FACE)};
+}
+
+std::size_t FoliagePass::execute_external(const RenderContext& ctx, const Camera& camera) {
+    LUMIN_PROFILE_ZONE_N("GL FoliagePass.execute_external");
+    return execute(ctx, camera, CallerState::QueryExternal());
+}
+
+std::size_t
+FoliagePass::execute(const RenderContext& ctx, const Camera& camera, const CallerState& caller) {
     LUMIN_PROFILE_ZONE_N("GL FoliagePass.execute");
     const auto saved_draws = m_last_draw_calls;
     const auto saved_time = m_last_draw_shader_time;
@@ -1990,7 +2003,7 @@ std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera)
     glDepthFunc(GL_GEQUAL);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    const GLboolean cull_was_enabled = glIsEnabled(GL_CULL_FACE);
+    const GLboolean cull_was_enabled = caller.cull_enabled;
     if (cull_was_enabled) {
         glDisable(GL_CULL_FACE); // two-sided cards
     }
