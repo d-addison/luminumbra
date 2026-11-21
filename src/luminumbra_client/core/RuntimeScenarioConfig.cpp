@@ -1,11 +1,13 @@
 #include "core/RuntimeScenarioConfig.h"
 #include "core/Log.h"
+#include "core/StrictNumeric.h"
 #include "luminumbra/core/Types.h"
 #include "luminumbra_common/core/CaptureContentPaths.h"
 #include "luminumbra_common/core/Environment.h"
 #include "luminumbra_common/core/FilesystemPath.h"
 #include "luminumbra_common/world/SurfaceWorkBudget.h"
 #include "rendering/DiagnosticCapture.h"
+#include "rendering/TemporalSweep.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -26,16 +28,17 @@
 
 namespace Luminumbra::Client::ScenarioHarness {
 
-std::atomic<uint64_t> g_gl_debug_message_count{0};
-std::atomic<uint64_t> g_gl_debug_error_count{0};
-std::atomic<uint64_t> g_gl_debug_warning_count{0};
-std::atomic<uint64_t> g_gl_debug_notification_count{0};
+GLDebugRuntimeCounters& GetGLDebugRuntimeCounters() {
+    static GLDebugRuntimeCounters counters;
+    return counters;
+}
 
 GLDebugRuntimeStats CurrentGLDebugRuntimeStats() {
-    return {g_gl_debug_message_count.load(std::memory_order_relaxed),
-            g_gl_debug_error_count.load(std::memory_order_relaxed),
-            g_gl_debug_warning_count.load(std::memory_order_relaxed),
-            g_gl_debug_notification_count.load(std::memory_order_relaxed)};
+    const auto& counters = GetGLDebugRuntimeCounters();
+    return {counters.messages.load(std::memory_order_relaxed),
+            counters.errors.load(std::memory_order_relaxed),
+            counters.warnings.load(std::memory_order_relaxed),
+            counters.notifications.load(std::memory_order_relaxed)};
 }
 
 bool HasCommandLineFlag(int argc, char* argv[], const std::string& flag) {
@@ -77,12 +80,11 @@ int GetCommandLineIntOption(int argc, char* argv[], const std::string& flag, int
     if (value.empty()) {
         return fallback;
     }
-    try {
-        return std::max(1, std::stoi(value));
-    } catch (...) {
-        LUMINUMBRA_CORE_WARN("Invalid integer value '{}' for {}; using {}", value, flag, fallback);
-        return fallback;
-    }
+    int parsed = 0;
+    if (Core::ParseNumber(value, parsed))
+        return std::max(1, parsed);
+    LUMINUMBRA_CORE_WARN("Invalid integer value '{}' for {}; using {}", value, flag, fallback);
+    return fallback;
 }
 
 uint64_t
@@ -91,13 +93,12 @@ GetCommandLineUInt64Option(int argc, char* argv[], const std::string& flag, uint
     if (value.empty()) {
         return fallback;
     }
-    try {
-        return std::stoull(value);
-    } catch (...) {
-        LUMINUMBRA_CORE_WARN(
-            "Invalid unsigned integer value '{}' for {}; using {}", value, flag, fallback);
-        return fallback;
-    }
+    uint64_t parsed = 0;
+    if (Core::ParseNumber(value, parsed))
+        return parsed;
+    LUMINUMBRA_CORE_WARN(
+        "Invalid unsigned integer value '{}' for {}; using {}", value, flag, fallback);
+    return fallback;
 }
 
 WindowMode ParseWindowMode(const std::string& value, WindowMode fallback) {
@@ -151,6 +152,18 @@ std::string ResolveRuntimeScenario(int argc, char* argv[]) {
     return scenario;
 }
 
+// Both startup paths must reject the matrix before creating a save root or world.
+void RefuseIncompatibleSweepProfile(int argc, char* argv[]) {
+    const auto profile = ParseCaptureFeatureProfile(argc, argv);
+    if (ResolveRuntimeScenario(argc, argv) == "world_visual_sweep") {
+        const auto reason = Rendering::WorldSweepMatrixRefusal(
+            profile == RuntimeScenarioConfig::FeatureProfile::AllFeatures);
+        if (!reason.empty()) {
+            throw std::invalid_argument(std::string(reason));
+        }
+    }
+}
+
 // Parses "WxH" (e.g. "1600x900") into width/height. Returns false (leaving the
 // outputs untouched) on any malformed/non-positive value.
 bool ParseResolution(const std::string& value, int& out_width, int& out_height) {
@@ -158,17 +171,15 @@ bool ParseResolution(const std::string& value, int& out_width, int& out_height) 
     if (x_pos == std::string::npos || x_pos == 0 || x_pos + 1 >= value.size()) {
         return false;
     }
-    try {
-        const int w = std::stoi(value.substr(0, x_pos));
-        const int h = std::stoi(value.substr(x_pos + 1));
-        if (w <= 0 || h <= 0)
-            return false;
-        out_width = w;
-        out_height = h;
-        return true;
-    } catch (...) {
+    const std::string_view dimensions(value);
+    int width = 0;
+    int height = 0;
+    if (!Core::ParseNumber(dimensions.substr(0, x_pos), width) ||
+        !Core::ParseNumber(dimensions.substr(x_pos + 1), height) || width <= 0 || height <= 0)
         return false;
-    }
+    out_width = width;
+    out_height = height;
+    return true;
 }
 
 void ParseSurfaceRadiusOptions(int argc,
@@ -207,7 +218,7 @@ void ParseSurfaceRadiusOptions(int argc,
 } // namespace
 
 RuntimePathOptions ParseRuntimePathOptions(int argc, char* argv[]) {
-    (void)ParseCaptureFeatureProfile(argc, argv);
+    RefuseIncompatibleSweepProfile(argc, argv);
     RefuseUnsupportedTemporalAuditExecution(argc, argv);
     // Admission precedes --save-root directory creation.
     const auto diagnostic_environment = Core::ReadEnvironment("LUMIN_CAPTURE_DIAGNOSTICS");
@@ -318,6 +329,7 @@ RuntimePathOptions ParseRuntimePathOptions(int argc, char* argv[]) {
 
 RuntimeScenarioConfig
 ParseRuntimeScenarioConfig(int argc, char* argv[], const std::filesystem::path& root_dir) {
+    RefuseIncompatibleSweepProfile(argc, argv);
     RefuseUnsupportedTemporalAuditExecution(argc, argv);
     RuntimeScenarioConfig config;
     config.capture_feature_profile = ParseCaptureFeatureProfile(argc, argv);
@@ -353,11 +365,7 @@ ParseRuntimeScenarioConfig(int argc, char* argv[], const std::filesystem::path& 
         // #1b-lush: render-only foliage density multiplier (showcase/photo scenes).
         const std::string s = GetCommandLineOption(argc, argv, "--foliage-density-scale", "1.0");
         float v = 1.0f;
-        try {
-            v = std::stof(s);
-        } catch (...) {
-            v = 1.0f;
-        }
+        Core::ParseNumber(s, v); // Malformed input keeps the default.
         config.foliage_density_scale = (v > 0.0f && v <= 8.0f) ? v : 1.0f;
     }
     //  avatar showcase: avatar showcase row count (skinned_mesh_visual_smoke). Clamp to a
@@ -451,8 +459,10 @@ ParseRuntimeScenarioConfig(int argc, char* argv[], const std::filesystem::path& 
     // Disabled normal play must not write a telemetry JSON on every listener update.
     config.audio_telemetry_path = GetCommandLineOption(argc, argv, "--audio-telemetry-path", "");
     config.crash_dir = GetCommandLineOption(argc, argv, "--crash-dir", default_crash_dir.string());
-    config.hang_watchdog_seconds = std::max(
-        0, std::atoi(GetCommandLineOption(argc, argv, "--hang-watchdog-seconds", "0").c_str()));
+    int watchdog_seconds = 0;
+    Core::ParseNumber(GetCommandLineOption(argc, argv, "--hang-watchdog-seconds", "0"),
+                      watchdog_seconds); // Malformed input keeps the watchdog disabled.
+    config.hang_watchdog_seconds = std::max(0, watchdog_seconds);
     return config;
 }
 
