@@ -873,10 +873,11 @@ TEST(DiagnosticDrawTable, SubmissionOrderSharedMeshesExactMetadataAndReset) {
     const auto doc = nlohmann::json::parse(bytes);
     ASSERT_EQ(doc.at("meshes").size(), 2U);
     ASSERT_EQ(doc.at("draws").size(), 3U);
-    EXPECT_EQ(doc.at("meshes")[0].at("path"), Submission().mesh_path);
+    EXPECT_EQ(doc.at("meshes")[0].at("path").get<std::string>(), Submission().mesh_path);
     EXPECT_EQ(doc.at("meshes")[0].at("provenance"), 2);
     EXPECT_EQ(doc.at("draws")[0].at("chunk"), nlohmann::json(Submission().chunk));
-    EXPECT_EQ(doc.at("draws")[0].at("shader_variant"), Submission().shader_variant);
+    EXPECT_EQ(doc.at("draws")[0].at("shader_variant").get<std::string>(),
+              Submission().shader_variant);
     EXPECT_EQ(doc.at("draws")[0].at("pass"), 1);
     EXPECT_EQ(doc.at("draws")[0].at("ownership"), 3);
     ASSERT_NE(table.resolve(1), nullptr);
