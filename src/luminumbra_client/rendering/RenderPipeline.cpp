@@ -6432,7 +6432,10 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
         if (const auto value = Core::ReadEnvironment("LUMIN_MOON")) {
             try {
                 return std::stof(*value);
-            } catch (...) {}
+            } catch (...) {
+                // The static initializer bounds this diagnostic to once per process.
+                LUMINUMBRA_CORE_WARN("Invalid LUMIN_MOON; using configured illumination");
+            }
         }
         return -1.0f;
     }();
