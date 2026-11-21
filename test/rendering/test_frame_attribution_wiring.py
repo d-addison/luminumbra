@@ -256,6 +256,10 @@ class GameplayPhotoRelease(unittest.TestCase):
             self.player = False
             return
         owner = compact(block(self.main, "auto release_player_controller ="))
+        # Frame-audio bookkeeping resets first; it owns no photo or renderer state.
+        audio_reset = "g_app.audio.Reset(audioManager.get()); "
+        self.assertTrue(owner.startswith(audio_reset), owner)
+        owner = owner[len(audio_reset):]
         self.assertEqual(owner, "if (g_playerController) { "
                          "ReleasePhotoModeAndHud(g_app, renderPipeline); "
                          "g_playerController.reset(); }")
@@ -1093,6 +1097,17 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn("Phase::ShaderLoad", block(shader, "AttributedGl::Program Shader::buildProgram("))
         self.assertIn("AttributedGl::UseProgram(glUseProgram,", block(shader, "void Shader::use()"))
 
+    def test_mutable_header_state_uses_function_local_storage(self):
+        for path, signature, storage in (
+                ("app/FrameAttribution.h", "inline bool& shader_first_use_collection_enabled()",
+                 "static constinit bool enabled = false; return enabled;"),
+                ("rendering/AttributedGl.h", "inline Client::Attribution::ProgramFirstUse& programs()",
+                 "static Client::Attribution::ProgramFirstUse state; return state;"),
+                ("rendering/FarWorldReplay.h", "inline ReplayStateAccess*& active_replay_state()",
+                 "static thread_local ReplayStateAccess* state = nullptr; return state;")):
+            with self.subTest(path=path):
+                self.assertEqual(compact(block(read(CLIENT / path), signature)), storage)
+
     def test_all_program_lifetimes_and_submissions_use_first_use_attribution(self):
         # Enumerate the rendering and both UI backends, including state restores,
         # platform branches, compute kernels, indirect and instanced submissions.
@@ -1116,7 +1131,7 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertNotIn("PhaseScope", submit)
         self.assertNotIn("lookup(", submit)
         self.assertLess(submit.index("m_bound->pending = false;"),
-                        submit.index("if (shader_first_use_collection_enabled)"))
+                        submit.index("if (shader_first_use_collection_enabled())"))
         for method, invocation in (("use_attributed(", "function(program);"),
                                    ("submit_attributed(", "function(std::forward<Args>(args)...);")):
             cold = compact(block(helper, "void " + method))
@@ -1126,7 +1141,7 @@ class FrameAttributionWiring(unittest.TestCase):
             self.assertIn("LUMINUMBRA_FIRST_USE_COLD void " + method, helper)
             self.assertNotIn("phase.stop", cold)
         use = compact(block(helper, "void use("))
-        self.assertIn("if (static_cast<unsigned>(shader_first_use_collection_enabled) & "
+        self.assertIn("if (static_cast<unsigned>(shader_first_use_collection_enabled()) & "
                       "static_cast<unsigned>(m_bound->pending))", use)
         self.assertNotIn("PhaseScope", use)
         self.assertNotIn("lookup(", use)
@@ -1135,17 +1150,17 @@ class FrameAttributionWiring(unittest.TestCase):
         self.assertIn("__declspec(noinline)", helper)
         self.assertIn("__attribute__((cold, noinline))", helper)
         gl = read(CLIENT / "rendering/AttributedGl.h")
-        self.assertIn("return programs.created(function());", block(gl, "CreateProgram("))
-        self.assertIn("programs.deleted(program);", block(gl, "DeleteProgram("))
-        self.assertIn("programs.use(function, program);", block(gl, "UseProgram("))
-        self.assertIn("programs.submit(function, std::forward<Args>(args)...);",
+        self.assertIn("return programs().created(function());", block(gl, "CreateProgram("))
+        self.assertIn("programs().deleted(program);", block(gl, "DeleteProgram("))
+        self.assertIn("programs().use(function, program);", block(gl, "UseProgram("))
+        self.assertIn("programs().submit(function, std::forward<Args>(args)...);",
                       block(gl, "Submit("))
         self.assertNotIn("thread_local", gl)
         self.assertNotIn("PhaseScope", gl)
-        self.assertIn("inline constinit bool shader_first_use_collection_enabled = false;",
-                      self.header)
+        self.assertEqual(compact(block(self.header, "inline bool& shader_first_use_collection_enabled()")),
+                         "static constinit bool enabled = false; return enabled;")
         for method in ("PhaseFrameScope::PhaseFrameScope(", "PhaseFrameScope::~PhaseFrameScope()"):
-            self.assertIn("shader_first_use_collection_enabled = current_phases() != nullptr;",
+            self.assertIn("shader_first_use_collection_enabled() = current_phases() != nullptr;",
                           block(self.collector, method))
         preview = read(ROOT / "tools/static_preview/CMakeLists.txt")
         self.assertIn('"${STATIC_PREVIEW_ROOT}/src/luminumbra_client/app/FrameAttribution.cpp"',
@@ -2319,6 +2334,54 @@ class FrameAttributionWiring(unittest.TestCase):
                      "BootSurfaceAndGenerationJobsRespectPresetAndResolutionEligibility",
                      "ReadinessRequiresPublishedSupportedAndMatchingResolution"):
             self.assertIn("TEST(WaterSeedInputs, " + name + ")", native)
+
+    def test_existing_worker_seed_coverage_keeps_dispatch_and_publication_boundaries(self):
+        world = read(ROOT / "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp")
+        mesh_source = block(world, "SHIELD_WorldSystem::dispatch_meshing_jobs(")
+        mesh = compact(mesh_source)
+        request = "const auto seed_inputs = request_water_seed_inputs(*chunk);"
+        self.assertIn(request, mesh)
+        self.assertLess(mesh.index("mesh_batch.chunks.push_back("), mesh.index(request))
+        self.assertLess(mesh.index(request), mesh.index("lane_jobs.emplace_back("))
+        worker = compact(block(mesh_source, "lane_jobs.emplace_back("))
+        compute = "ComputeHighWaterSeedInputs(*seed_inputs, scratch.get_coords(), *this);"
+        self.assertIn(compute, worker)
+        self.assertLess(worker.index("acquire_worldgen_sample_scope()"), worker.index(compute))
+        self.assertNotIn("request_water_seed_inputs", worker)
+        self.assertNotIn("seed_chunk_water", worker)
+        reader_source = block(world, "SHIELD_WorldSystem::read_committed_chunk(")
+        reader = compact(reader_source)
+        self.assertEqual(reader.count("RunWorkerBoundary("), 1)
+        worker_source = block(reader_source, "RunWorkerBoundary(")
+        worker = compact(worker_source)
+        self.assertLess(worker.index("chunk->get_coords() != coords"),
+                        worker.index("if (prepare_water)"))
+        preparation = compact(block(worker_source, "if (prepare_water)"))
+        self.assertLess(preparation.index("stage_water_seed_inputs({})"),
+                        preparation.index("request_water_seed_inputs(*chunk)"))
+        self.assertIn("ComputeHighWaterSeedInputs(*inputs, coords, *this);", preparation)
+        restore = compact(block(world, "bool SHIELD_WorldSystem::restore_authoritative_chunk("))
+        self.assertIn("read_committed_chunk(coords, true)", restore)
+        self.assertLess(restore.index("take_water_seed_inputs()"),
+                        restore.index("adopt_streamed_chunk(chunk)"))
+        self.assertLess(restore.index("adopt_streamed_chunk(chunk)"),
+                        restore.index("stage_water_seed_inputs(std::move(seed_inputs))"))
+        adoption = compact(block(world, "bool SHIELD_WorldSystem::adopt_streamed_chunk("))
+        self.assertIn("chunk->stage_water_seed_inputs({});", adoption)
+        # Hash/collision/admission inspection keeps the non-preparing default.
+        self.assertEqual(world.count("read_committed_chunk(coords, true)"), 1)
+        native = read(ROOT / "test/common/WaterSeedInputs_test.cpp")
+        for name in ("ExistingMeshWorkersPrepareEditRestoreCrossingAndGenerationKeys",
+                     "ExistingCommittedReadWorkerPreparesColdRestoreAndHydroCrossing",
+                     "MeshPreparationRetainsReadyInputsAndReplacesInvalidRequests",
+                     "CommittedReadPreparationRespectsWaterAndPresetEligibility",
+                     "CommittedReadPreparationRefusesInvalidPayloadsBeforeSamplingOrAdoption"):
+            self.assertIn("TEST(WaterSeedInputs, " + name + ")", native)
+        consumer = compact(block(native, "void ExpectPreparedConsumption("))
+        for proof in ("precomputed_columns, 1u", "fallback_columns, 0u", "stale_columns, 0u",
+                      "std::bit_cast<std::uint32_t>", "same_water_state(*reference)",
+                      "SerializeChunkRecordPayloadJson(*reference)"):
+            self.assertIn(proof, consumer)
 
     def test_water_seed_inputs_require_supported_preset_and_matching_publication(self):
         header = read(ROOT / "src/luminumbra_common/core/WaterSeedInputs.h")
