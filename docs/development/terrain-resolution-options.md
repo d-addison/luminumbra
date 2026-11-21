@@ -424,6 +424,17 @@ Do not add shipping half-metre saves in an intermediate slice. Descriptor-based
 changes outside a slice's file budget, split dormant preparation further and
 keep activation closed until all consumers and refusal paths are qualified.
 
+## Shipping status
+
+Option 1 ships first. Graphics preset revision 4 turns on the render-only,
+budgeted near-terrain refinement for new High and Ultra selections, including
+automatic detection; Low and Medium keep it off. A saved revision 1-3 selection
+and any explicit saved override keep their payloads until the player selects a
+preset again. Refinement stays inside the existing per-frame budget (4 MiB,
+8 uploads, 3 ms) and defers work past its deadline. Native High/Ultra p99 at or
+below 8.33 ms with refinement on is qualified in the release native pass.
+Options 2 and 3 remain opt-in or experimental as described below.
+
 ## Combined recommendation
 
 Pursue option 1 (render-only refinement) first for existing and new worlds,

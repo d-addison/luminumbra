@@ -32,6 +32,10 @@ struct TransformComponent;
 
 namespace Luminumbra::Systems {
 
+namespace RegionalWater {
+struct Plan;
+}
+
 namespace WaterScheduling {
 
 // Integer-only scheduler input. Activity is derived from persisted water edge flux, and chunk ids
@@ -157,6 +161,8 @@ public:
     void SetRegionalScheduling(bool enabled) {
         m_regional_scheduling = enabled;
     }
+    // Adoption starts a new execution timeline; repeated ticks still refuse within it.
+    void ResetRegionalTimeline();
     struct RegionalWork {
         std::uint64_t global_windows = 0, border_windows = 0, allocated_windows = 0;
         std::uint64_t preparation_cells = 0, water_cells = 0, total_cells = 0;
@@ -171,6 +177,17 @@ public:
     [[nodiscard]] const RegionalWork& regional_work() const {
         return m_regional_work;
     }
+    // Explicit simulation admission; session integration is separate. The supplied
+    // schedule is authoritative and contains at most 832 due owners. Admission uses
+    // at most 64 anchors, 256 source components and 832 candidates;
+    // only funded columns may read committed payloads or generate terrain.
+    // Parking pressure defers the whole call without publishing accounting.
+    void UpdateRegionalFromSimulation(entt::registry& registry,
+                                      std::span<const Vec3> anchors,
+                                      world::ActiveRegionLedger& ledger,
+                                      const world::RegionSchedule& schedule,
+                                      std::vector<world::RegionWork>& completed,
+                                      std::uint64_t cell_budget = 4096);
     void UpdateRegional(entt::registry& registry,
                         std::span<const std::shared_ptr<Chunk>> resident,
                         world::ActiveRegionLedger& ledger,
@@ -294,7 +311,8 @@ public:
         return m_sim_resolution;
     }
 
-    // boot-time save-migration pass: resize EVERY loaded water chunk to the session
+    // Legacy boot-time save-migration pass; regional scheduling defers all resizing
+    // to funded preparation. Resize every loaded legacy water chunk to the session
     // resolution in one call, bypassing MAX_WATER_RESIZES_PER_TICK (that cap bounds
     // LIVE frame cost; a loaded world whose saved resolution mismatches the session
     // flag would otherwise converge at 1 chunk/tick while the seam pass — which
@@ -384,6 +402,12 @@ public:
     bool ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level);
 
 private:
+    void ExecuteRegionalPlan(const RegionalWater::Plan& plan,
+                             std::span<const std::shared_ptr<Chunk>> participants,
+                             world::ActiveRegionLedger& ledger,
+                             std::uint64_t tick,
+                             std::vector<world::RegionWork>& completed,
+                             std::size_t source_count);
     // (water performance contract) The float render-mirror sim (dispatch_simulation_jobs /
     // simulate_chunk_water + its WaterChunkSnapshot/Output/Neighbors structs) was DEAD CODE — zero
     // callers; the live path is the integer  StepChunkWaterFixed. Removed.

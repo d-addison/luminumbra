@@ -76,7 +76,7 @@ ctest --preset release -L manual \
 
 ## Continuous integration
 
-The Linux/GCC and ASan lanes use bounded ccache at 400M and 600M respectively.
+The Linux/GCC and ASan lanes use bounded ccache at 400M and 1200M respectively.
 Diligent RHI, preview-frame and paired performance use 250M each; UCRT64 and MSVC
 use 1200M (1.2 GB) each on the daily runner's disk. Qualification captures bypass
 the cache. Hosted lanes' immutable save keys include
@@ -84,17 +84,17 @@ the commit SHA; restores prefer the matching CMake configuration prefix where
 available, then the lane prefix. Caches are trimmed with `ccache --cleanup`
 before saving, and cache-save failures cannot
 fail a job. At the five hosted lanes' configured caps, one generation per branch totals
-400 + 600 + 250 + 250 + 250 = 1750 MB (1.75 GB), or 3.5 GB across
-main/devel, fitting within the 9.5 GB cleanup budget with 6 GB to spare. That
-leaves 6.5 GB of the repository's 10 GB cache limit for package and analysis
+400 + 1200 + 250 + 250 + 250 = 2350 MB (2.35 GB), or 4.7 GB across
+main/devel, fitting within the 9.5 GB cleanup budget with 4.8 GB to spare. That
+leaves 5.3 GB of the repository's 10 GB cache limit for package and analysis
 caches, grace-window generations and saves in progress. Devel receives frequent pushes; main rarely
 does. Main's newest caches remain reserved even when old, so infrequent main
 pushes do not create more headroom. The hosted lanes use standard runners and the
 existing cache actions, with zero extra cache spend and no paid cache service.
 Fast compile also saves verified FetchContent sources under an exact dependency
 key, with a 500 MB uncompressed save cap and one retained generation per branch.
-Those two source generations add at most 1 GB to the 3.5 GB compiler-cache total,
-leaving 5 GB within the unchanged 9.5 GB cleanup budget for other caches and
+Those two source generations add at most 1 GB to the 4.7 GB compiler-cache total,
+leaving 3.8 GB within the unchanged 9.5 GB cleanup budget for other caches and
 protected generations. See [fast hosted validation](ci/local-checks.md).
 
 All Actions caches, including performance, clang-tidy results, and MSYS2 packages,
@@ -114,17 +114,21 @@ It retains the newest generation by creation time per branch and lane across
 configuration changes and SHA keys, protecting both live branch heads' keys and
 the triggering SHA (`workflow_run.head_sha`)
 even when cleanup is delayed until the branch advances. The named `RECENCY_GRACE`
-constant in `cache-cleanup.yml` is six hours: caches whose creation or last access
-(whichever is later) falls within that window are never deleted, preserving caches
-for queued reruns and in-flight runs, including concurrent saves. It also
+constant in `cache-cleanup.yml` is one hour: caches created within that window are
+never deleted, preserving concurrent saves. Access time is ignored, because every
+pull-request restore refreshes it through the lane prefix; counting it kept every
+generation of a frequently pushed branch inside the window. Instead, cleanup lists
+requested, pending, waiting, queued and in-progress workflow runs and keeps every
+cache whose key ends in one of their SHAs, so queued or running reruns of older
+pushes keep their caches. If that listing fails, cleanup deletes nothing. It also
 targets 9.5 GB total repository cache storage, including package and other caches,
 when reserved caches fit that budget. Both branches' newest compiler generations
-at the hosted caps total 3.5 GB, leaving cleanup room to retire obsolete generations outside
+at the hosted caps total 4.7 GB, leaving cleanup room to retire obsolete generations outside
 the grace window. Extra protected or grace-window caches can exceed the budget
-and force cleanup to skip deletion. The 6.5 GB margin below the 10 GB
+and force cleanup to skip deletion. The 5.3 GB margin below the 10 GB
 repository limit must accommodate all other caches and grace-window generations;
 GitHub's free least-recently-used eviction can still apply at that limit. Frequent
-devel saves and the six-hour grace window can retain multiple generations;
+devel saves within the one-hour grace window can retain more than one generation;
 eviction can remove reusable caches, including main's rarely refreshed caches.
 The margin is therefore not a guarantee against cache churn.
 Cleanup uses trusted inline workflow code with no checkout or PR triggers;

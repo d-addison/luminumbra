@@ -5,11 +5,14 @@ Pure library: no process launch and no file writes at import or call time. The
 committed matrix is qualification/matrix.json; plan_qualification.py is the dry-run
 CLI built on top of this module.
 """
+import hashlib
 import json
 import math
+import os
 from decimal import Decimal
 from pathlib import Path
 import re
+import stat
 
 SCHEMA = 'luminumbra.qualification_matrix.v1'
 PROFILE_IDS = ('quality', 'performance')
@@ -23,6 +26,10 @@ WORLD_KEYS = frozenset(('kind', 'note'))
 FLOOR_MS = 16.67
 TARGET_MS = 8.33
 FIXED_KEYS = frozenset(('id', 'kind', 'pose', 'pose_provenance'))
+POSE_SOURCE_KEYS = frozenset(('scene_id', 'sha256'))
+SCENE_MATRIX = 'tools/rendering/acceptance/scene_matrix.json'
+ROOT = Path(__file__).resolve().parents[2]
+MAX_SCENE_BYTES = 1024 * 1024  # Bound the authored scene document and its JSON scans.
 TRAVERSAL_KEYS = frozenset(('id', 'kind', 'script', 'script_sha256', 'blocked_by'))
 POSE_KEYS = ('x', 'y', 'z', 'yaw', 'pitch')
 WORKLOAD_ID = re.compile(r'[a-z0-9-]+')
@@ -201,7 +208,9 @@ def _require_keys(workload, expected):
 
 
 def _validate_fixed_view(workload):
-    _require_keys(workload, FIXED_KEYS)
+    # Recorded operator poses remain valid without an authored-scene binding.
+    expected = FIXED_KEYS | ({'pose_source'} if 'pose_source' in workload else set())
+    _require_keys(workload, expected)
     pose = workload['pose']
     if pose is not None:
         _validate_pose(pose, workload['id'])
@@ -209,11 +218,74 @@ def _validate_fixed_view(workload):
     if not isinstance(provenance, str) or not provenance:
         raise MatrixError(f'matrix: workload {workload["id"]!r} pose_provenance must be a '
                           'non-empty string')
+    if 'pose_source' in workload:
+        _validate_pose_source(workload['pose_source'], pose, workload['id'], ROOT)
+
+
+def _scene_bytes(root):
+    path = Path(root) / SCENE_MATRIX
+    # Open once, reject devices/FIFOs before reading, and hash/parse the same content.
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0)
+                         | getattr(os, 'O_BINARY', 0))
+    with os.fdopen(descriptor, 'rb') as source:
+        if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+            raise MatrixError('matrix: pose_source must name a regular scene document')
+        payload = source.read(MAX_SCENE_BYTES + 1)
+    if len(payload) > MAX_SCENE_BYTES:
+        raise MatrixError('matrix: pose_source scene document exceeds byte cap')
+    return payload
+
+
+def _validate_pose_source(source, pose, workload_id, root):
+    _require_exact(source, POSE_SOURCE_KEYS, 'pose_source')
+    scene_id, digest = source['scene_id'], source['sha256']
+    if not isinstance(scene_id, str) or re.fullmatch(r'[a-z0-9_-]+', scene_id) is None:
+        raise MatrixError('matrix: pose_source scene_id must match [a-z0-9_-]+')
+    if not isinstance(digest, str) or re.fullmatch(r'[0-9a-f]{64}', digest) is None:
+        raise MatrixError('matrix: pose_source sha256 must be 64 lowercase hexadecimal digits')
+    _validate_pose(pose, workload_id)
+    try:
+        payload = _scene_bytes(root)
+        document = json.loads(payload.decode('utf-8'), object_pairs_hook=_no_duplicate_keys,
+                              parse_constant=_reject_constant)
+        # Match the qualification runner's canonical JSON identity, including all
+        # scene metadata. Git's Windows CRLF checkout must not change this identity.
+        identity = json.dumps(document, sort_keys=True, separators=(',', ':'),
+                              allow_nan=False).encode('utf-8')
+        if hashlib.sha256(identity).hexdigest() != digest:
+            raise MatrixError('matrix: pose_source SHA-256 mismatch')
+    except (OSError, UnicodeError, ValueError, RecursionError) as error:
+        raise MatrixError(f'matrix: pose_source unavailable or invalid: {error}') from error
+    if (not isinstance(document, dict)
+            or document.get('schema') != 'luminumbra.scene_matrix.v1'
+            or not isinstance(document.get('scenes'), list)):
+        raise MatrixError('matrix: pose_source invalid scene matrix')
+    matches = [scene for scene in document['scenes']
+               if isinstance(scene, dict) and scene.get('id') == scene_id]
+    if len(matches) != 1 or matches[0].get('pose_source') != 'explicit':
+        raise MatrixError('matrix: pose_source needs exactly one explicit scene')
+    body = matches[0].get('scene')
+    camera = body.get('camera') if isinstance(body, dict) else None
+    if not isinstance(camera, dict):
+        raise MatrixError('matrix: pose_source scene camera missing')
+    position = camera.get('pos')
+    if not isinstance(position, list) or len(position) != 3:
+        raise MatrixError('matrix: pose_source scene position missing')
+    values = [*position, camera.get('yaw'), camera.get('pitch')]
+    if any(type(value) not in (int, float) for value in values):
+        raise MatrixError('matrix: pose_source scene camera must contain finite numbers')
+    try:
+        source_pose = dict(zip(POSE_KEYS, map(float, values)))
+    except OverflowError as error:
+        raise MatrixError('matrix: pose_source scene camera number out of range') from error
+    _validate_pose(source_pose, workload_id)
+    if source_pose != pose or body.get('time_of_day') != 0.04:
+        raise MatrixError('matrix: pose_source pose/time identity mismatch')
 
 
 def _validate_pose(pose, workload_id):
     if not isinstance(pose, dict) or set(pose) != set(POSE_KEYS):
-        raise MatrixError(f'matrix: workload {workload_id!r} pose must be null or an object '
+        raise MatrixError(f'matrix: workload {workload_id!r} pose must be an object '
                           f'with exactly the keys {list(POSE_KEYS)}')
     for key in POSE_KEYS:
         value = pose[key]
@@ -261,6 +333,8 @@ def cells(matrix):
                     refresh_hz=display['refresh_hz'],
                     pose=None if pose is None else dict(pose),
                     pose_provenance=workload['pose_provenance'] if fixed else None,
+                    pose_source=dict(workload['pose_source'])
+                    if fixed and 'pose_source' in workload else None,
                     script=None if fixed else workload['script'],
                     script_sha256=None if fixed else workload['script_sha256'],
                     blocked_by=None if fixed else workload['blocked_by'],
@@ -274,6 +348,18 @@ def readiness(cell, root):
     if cell['kind'] == 'fixed_view':
         if cell['pose'] is None:
             return ('unevaluated', 'pose-unrecorded')
+        if cell.get('pose_source') is not None:
+            try:
+                _validate_pose_source(cell['pose_source'], cell['pose'], cell['workload'], root)
+            except MatrixError as error:
+                return ('unevaluated', str(error))
+        # Confirmation is opt-in: keep authored/unknown provenance pending. The
+        # suffix records the native evidence for the exact pose in this matrix.
+        provenance = cell.get('pose_provenance')
+        prefix = 'native-confirmed:'
+        if (not isinstance(provenance, str) or not provenance.startswith(prefix)
+                or not provenance[len(prefix):].strip()):
+            return ('unevaluated', 'pose-native-unconfirmed')
         return ('ready', None)
     if cell['blocked_by'] is not None:
         return ('unevaluated', f"blocked: {cell['blocked_by']}")
