@@ -4,7 +4,6 @@
 
 #include <algorithm>
 #include <array>
-#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -16,7 +15,6 @@
 #include <utility>
 #include <vector>
 
-#include "core/EngineVersion.h"
 #include "luminumbra_common/ai/EcologyHash.h"
 #include "luminumbra_common/components/AlarmComponents.h"
 #include "luminumbra_common/components/CoreComponents.h"
@@ -172,43 +170,12 @@ bool HorizontalChunkHorizonCovers(const Vec3& center, const Vec3& candidate, int
     return std::max(std::abs(tx - cx), std::abs(tz - cz)) <= std::max(0, radius);
 }
 
-world::AuthorityBootDescriptor DescribeBoot(const ServerWorldRunnerConfig& config,
-                                            const world::GameSession& session,
-                                            std::uint32_t seed,
-                                            const world::WorldCalendar& calendar) {
+world::AuthorityBootDescriptor DescribeWorkload(const ServerWorldRunnerConfig& config) {
     if (config.avatar_count < 0 ||
         config.avatar_count > static_cast<int>(world::AuthorityBootDescriptor::kMaxAvatars)) {
         throw std::invalid_argument("Replay avatar roster exceeds descriptor bound");
     }
     world::AuthorityBootDescriptor boot;
-    const auto values = session.EffectiveIdentityValues();
-    boot.authority_rules_revision =
-        luminumbra::core::SimulationIdentityValues::kAuthorityRulesRevision;
-    boot.resolved_world_seed = seed;
-    boot.system_config_identity = session.SystemConfigIdentity(calendar);
-    static_assert(boot.system_gates.size() == values.enabled.size());
-    static_assert(boot.scalar_bits.size() == values.scalars.size());
-    // Fixed registry slots: at most 25 gates and 46 scalar/vector settings.
-    for (std::size_t i = 0; i < boot.system_gates.size(); ++i) {
-        boot.system_gates[i] = static_cast<std::uint8_t>(values.enabled[i]);
-    }
-    for (std::size_t i = 0; i < boot.scalar_bits.size(); ++i) {
-        boot.scalar_bits[i] = std::bit_cast<std::uint64_t>(values.scalars[i]);
-        for (std::size_t axis = 0; axis < 3; ++axis) {
-            boot.vector_bits[i][axis] =
-                std::bit_cast<std::uint32_t>(values.vectors[i][static_cast<int>(axis)]);
-        }
-    }
-    boot.finite_hydrology = values.finite_hydrology_enabled;
-    boot.weather_rain_scale_mm = values.weather_rain_scale_mm;
-    boot.region_work_limit = values.region_work_limit;
-    boot.region_hold_ticks = values.region_hold_ticks;
-    boot.region_reduced_shift = values.region_reduced_shift;
-    boot.day_length_ticks = calendar.dayLengthTicks;
-    boot.days_per_year = calendar.daysPerYear;
-    boot.daylight_numerator = calendar.daylightNumerator;
-    boot.daylight_denominator = calendar.daylightDenominator;
-    boot.lunar_cycle_days = calendar.lunarCycleDays;
     boot.parked_bytes_limit = config.parked_bytes_limit;
     boot.avatar_count = static_cast<std::uint32_t>(config.avatar_count);
     boot.ecology_roster = config.ecology_roster;
@@ -234,8 +201,10 @@ ServerWorldRunner::DescribeReplayBoot(const ServerWorldRunnerConfig& config) {
     if (config.region_scheduler) {
         session.SetRegionSchedulerConfig(*config.region_scheduler);
     }
-    return DescribeBoot(
-        config, session, world::ResolveWorldSeed(config.seed, 1), world::WorldCalendar{});
+    return Replay::CaptureReplayBoot(session,
+                                     world::ResolveWorldSeed(config.seed, 1),
+                                     world::WorldCalendar{},
+                                     DescribeWorkload(config));
 }
 
 Replay::ReplayHeader ServerWorldRunner::CaptureReplayHeader() const {
@@ -243,26 +212,12 @@ Replay::ReplayHeader ServerWorldRunner::CaptureReplayHeader() const {
         (!m_session->GetWeatherSchedule() && !m_continuationOptions.owner_continuation)) {
         throw std::invalid_argument("Replay requires a fresh boot at tick zero");
     }
-    Replay::ReplayHeader header;
-    header.version = Replay::kLrec1BootVersion;
+    auto header = Replay::CaptureReplayHeader(*m_session,
+                                              static_cast<std::uint32_t>(m_config.surface_radius),
+                                              static_cast<std::uint32_t>(m_config.collision_radius),
+                                              DescribeWorkload(m_config));
+    // Keep the requested seed text: an empty request records a random boot.
     header.seed_string = m_config.seed;
-    header.seed = Replay::kResolvedSeedTag | m_session->GetMetadata().resolvedSeed;
-    header.preset = m_config.preset;
-    header.preset_hash = std::strtoull(Replay::Fnv1a64Hex(header.preset).c_str(), nullptr, 16);
-    header.surface_radius = static_cast<std::uint32_t>(m_config.surface_radius);
-    header.collision_radius = static_cast<std::uint32_t>(m_config.collision_radius);
-    header.engine_version = std::string(luminumbra::core::GetEngineVersionString());
-    header.system_config_identity = m_session->SystemConfigIdentity();
-    header.preset_content_hash = m_session->PresetContentHash();
-    if (const auto* schedule = m_session->GetWeatherSchedule()) {
-        header.version = Replay::kLrec1WeatherVersion;
-        header.weather_schedule = schedule->canonical_bytes();
-    } else {
-        header.authority_boot = DescribeBoot(m_config,
-                                             *m_session,
-                                             m_session->GetMetadata().resolvedSeed,
-                                             m_session->GetRenderCalendar());
-    }
     return header;
 }
 

@@ -29,6 +29,63 @@ def read_source(path):
 
 
 class ReplaySourceContract(unittest.TestCase):
+    def test_automatic_region_trace_uses_shared_encoder_and_pair_publication(self):
+        stream = read_source("src/luminumbra_common/replay/ReplayStream.cpp")
+        bounded = stream.split("bool BoundedReplayRecorder::Finalize(", 1)[1].split(
+            "void BoundedReplayRecorder::Close()", 1)[0]
+        self.assertIn("EncodeRegionScheduleTrace(trace, trace_bytes)", bounded)
+        self.assertIn("out.commit_with_companion(publish_trace ? &trace_bytes : nullptr)", bounded)
+        trace = read_source("src/luminumbra_common/replay/RegionScheduleTrace.cpp")
+        writer = trace.split("bool ReplayWriter::Finalize(", 1)[1].split(
+            "bool WriteRegionScheduleTrace(", 1)[0]
+        self.assertIn("EncodeRegionScheduleTrace(*trace, bytes)", writer)
+        for path, producer in (
+            ("src/luminumbra_client/core/scenarios/NetworkedSessionDriver.cpp",
+             "NetSessionRegionScheduleDigest"),
+            (MODES + "Lockstep.cpp", "LockstepRegionScheduleDigest"),
+        ):
+            source = read_source(path)
+            self.assertIn("hooks_template.region_schedule_digest = &" + producer, source)
+            self.assertIn("GetRegionSchedule().digest", source)
+        lockstep = read_source("src/luminumbra_common/net/LockstepSession.cpp")
+        capture = lockstep.split("void LockstepSession::RecordReplayTick(", 1)[1].split(
+            "void LockstepSession::EmitDesyncDump(", 1)[0]
+        self.assertIn("m_hooks.region_schedule_digest(m_hooks.user)", capture)
+        self.assertIn("std::string_view(*digest)", capture)
+
+    def test_ordinary_client_regional_playback_reaches_oracles(self):
+        source = read_source("test/performance/runtime_world_visual_validation_test.cpp")
+        regression = source.split(
+            "TEST_P(ClientReplayProducerTest, AutomaticDumpMatchesCliBootAndReconstructsStartWorld)",
+            1)[1].split("INSTANTIATE_TEST_SUITE_P", 1)[0]
+        self.assertNotIn("if (!GetParam())", regression)
+        self.assertIn("EXPECT_EQ(RunReplay(options), 1)", regression)
+        self.assertIn('artifact.at("divergence_tick"), 1u', regression)
+        self.assertIn('fs::remove(dump.string() + ".regions.json")', regression)
+        self.assertIn('stale.at("divergence_section"), "region_schedule"', regression)
+        self.assertIn("options.ticks = 1;", regression)
+        self.assertIn("playback.RunFixedTicks(1)", regression)
+        self.assertIn("trace.front().second, playback.Session()->GetRegionSchedule().digest",
+                      regression)
+        self.assertIn("EXPECT_EQ(trace, cli_trace)", regression)
+
+    def assert_client_replicated_roster(self, source):
+        begin = source.split("bool NetworkedSessionDriver::Begin(", 1)[1].split(
+            "bool NetworkedSessionDriver::StepAgreedTick()", 1)[0]
+        for session in ("m_impl->host_session", "client_session"):
+            roster = session + "->SetReplicatedSimulationAnchors({});"
+            self.assertIn(roster, begin)
+            self.assertGreater(begin.index(roster), begin.rindex("return false;"))
+            self.assertLess(begin.index(roster), begin.rindex("return true;"))
+
+    def test_client_peers_match_runner_zero_avatar_replicated_roster(self):
+        source = read_source("src/luminumbra_client/core/scenarios/NetworkedSessionDriver.cpp")
+        self.assert_client_replicated_roster(source)
+        for session in ("m_impl->host_session", "client_session"):
+            roster = session + "->SetReplicatedSimulationAnchors({});"
+            with self.subTest(session=session), self.assertRaises(AssertionError):
+                self.assert_client_replicated_roster(source.replace(roster, "", 1))
+
     # Pin mode-local admission and its ordering without tightening the
     # generic reader/writer, whose opaque and sparse records serve lockstep.
     def assert_mode_admission(self, source):
@@ -52,7 +109,10 @@ class ReplaySourceContract(unittest.TestCase):
                          r'const auto final_hash = CaptureWorldHash\(executed, runner\);\s*'
                          r'if \(!final_hash\)\s*\{\s*return 1;\s*\}\s*'
                          r'const auto\* trace = [^;]*;\s*'
-                         r'if \(!writer.Finalize\(executed, trace\)\)')
+                         r'Luminumbra::Replay::ReplayFinalization publication\(\s*'
+                         r'options.record_path, \"[^\"]*\"\);\s*'
+                         r'if \(!publication.ready\(\) \|\| !writer.Finalize\(executed, trace\)'
+                         r' \|\| !publication.Complete\(\)\)')
         self.assertIn("(executed % kCheckpointIntervalTicks) == 0 || "
                       "executed == contents->tick_count", startup)
         for field in ("world_hash", "terrain", "water", "entities"):
@@ -95,6 +155,40 @@ class ReplaySourceContract(unittest.TestCase):
             with self.subTest(token=token), self.assertRaises(AssertionError):
                 self.assert_publication_admission(source.replace(token, "false", 1))
 
+    def assert_client_capture(self, driver):
+        for peer, session in (("host", "*m_impl->host_session"), ("client", "*client_session")):
+            self.assertRegex(driver, peer + r"_cfg.replay_header = std::make_shared<const\s*"
+                             r"Luminumbra::Replay::ReplayHeader>\(\s*"
+                             r"Luminumbra::Replay::CaptureReplayHeader\(\s*" + re.escape(session) +
+                             r",\s*static_cast<std::uint32_t>\(config.surface_radius\),\s*"
+                             r"static_cast<std::uint32_t>\(config.collision_radius\)\)\);")
+        self.assertIn("hooks_template.capture_hashes = &NetSessionCaptureAuthorityHashes;", driver)
+        capture = driver.split("void NetSessionCaptureAuthorityHashes(", 1)[1].split("} // namespace", 1)[0]
+        self.assertIn("AuthorityCaptureParts::All", capture)
+        self.assertLess(capture.index("if (!result.capture)"), capture.index("out.tick"))
+        self.assertIn("out.world_hash = result.capture->composite;", capture)
+        self.assertNotIn("snapshot_streamed_chunks", capture)
+
+    def test_client_replay_headers_share_authority_capture_for_both_peers(self):
+        driver = read_source("src/luminumbra_client/core/scenarios/NetworkedSessionDriver.cpp")
+        self.assert_client_capture(driver)
+        runner = read_source("src/luminumbra_server/ServerWorldRunner.cpp")
+        capture = runner.split("ServerWorldRunner::CaptureReplayHeader() const", 1)[1].split(
+            "ServerWorldRunner::ServerWorldRunner(", 1)[0]
+        self.assertIn("auto header = Replay::CaptureReplayHeader(*m_session,", capture)
+        # Server headers keep the requested seed text; empty means a random boot.
+        self.assertIn("header.seed_string = m_config.seed;", capture)
+        self.assertNotIn("header.authority_boot =", capture)
+
+    def test_client_capture_contract_detects_isolated_regressions(self):
+        driver = read_source("src/luminumbra_client/core/scenarios/NetworkedSessionDriver.cpp")
+        for token in ("host_cfg.replay_header", "client_cfg.replay_header",
+                      "hooks_template.capture_hashes = &NetSessionCaptureAuthorityHashes;",
+                      "out.world_hash = result.capture->composite;"):
+            self.assertIn(token, driver)
+            with self.subTest(token=token), self.assertRaises(AssertionError):
+                self.assert_client_capture(driver.replace(token, "removed", 1))
+
     def test_mode_admission_contract_detects_isolated_regressions(self):
         source = read_source(MODES + "Replay.cpp")
         for token in ("header.engine_version != engine_now",
@@ -103,7 +197,8 @@ class ReplaySourceContract(unittest.TestCase):
                       "contents->tick_count != 0 && terminal == nullptr",
                       "executed != 0 && (executed % kCheckpointIntervalTicks) != 0",
                       " || executed == contents->tick_count",
-                      "terminal ? terminal->world_hash : header.start_world_hash"):
+                      "terminal ? terminal->world_hash : header.start_world_hash",
+                      "!publication.ready()", "!publication.Complete()"):
             self.assertIn(token, source)
             with self.subTest(token=token), self.assertRaises(AssertionError):
                 self.assert_mode_admission(source.replace(token, "false", 1))

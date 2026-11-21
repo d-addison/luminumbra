@@ -128,6 +128,43 @@ std::string ReadReplayModeFile(const fs::path& path) {
     return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
 }
 
+struct FinalizationOutputFault {
+    fs::path replay_path;
+    std::string step;
+    bool refuse_payload = false;
+    bool refuse_marker = true;
+    std::size_t payload_hits = 0;
+    std::size_t marker_hits = 0;
+};
+FinalizationOutputFault*& CurrentFinalizationOutputFault() {
+    static FinalizationOutputFault* fault = nullptr;
+    return fault;
+}
+void RefuseFinalizationOutput(const char* step, const fs::path& path) {
+    auto* fault = CurrentFinalizationOutputFault();
+    if (!fault || step != fault->step)
+        return;
+    if (fault->refuse_marker && path == fs::path(fault->replay_path.string() + ".incomplete")) {
+        ++fault->marker_hits;
+        throw std::runtime_error("marker publication refused");
+    }
+    if (fault->refuse_payload && path == fault->replay_path) {
+        ++fault->payload_hits;
+        throw std::runtime_error("replay publication refused");
+    }
+}
+class ScopedFinalizationOutputFault {
+public:
+    explicit ScopedFinalizationOutputFault(FinalizationOutputFault& fault) {
+        CurrentFinalizationOutputFault() = &fault;
+        Luminumbra::Persistence::set_snapshot_step_hook_for_testing(RefuseFinalizationOutput);
+    }
+    ~ScopedFinalizationOutputFault() {
+        Luminumbra::Persistence::set_snapshot_step_hook_for_testing(nullptr);
+        CurrentFinalizationOutputFault() = nullptr;
+    }
+};
+
 // Exercise the public shipping modes, with real checkpoint/configuration
 // fields. Mutations change only the field named by each case, never a stub runner.
 class ReplayModeAdmission : public testing::Test {
@@ -1226,6 +1263,58 @@ TEST_F(ReplayModeAdmission, FailedAutomaticFinalizationCannotAdmitAnOlderComplet
     EXPECT_EQ(RunRecord(options), 1);
     EXPECT_EQ(ReadReplayModeFile(options.record_path), original);
     EXPECT_EQ(ReadReplayModeFile(options.record_path + ".incomplete"), marker);
+}
+
+TEST_F(ReplayModeAdmission, MarkerPublicationFailureCannotAdmitRetainedAutomaticOrCliGeneration) {
+    options.ticks = 0;
+    for (const bool cli : {false, true}) {
+        SCOPED_TRACE(cli);
+        for (const char* step :
+             {"output-open", "output-write", "output-flush", "output-close", "output-publish"}) {
+            SCOPED_TRACE(step);
+            ASSERT_EQ(RunRecord(options), 0) << logs.str();
+            const auto recorded = replay::ReadReplay(options.record_path);
+            ASSERT_TRUE(recorded.has_value());
+            if (!recorded)
+                return;
+            FinalizationOutputFault fault{options.record_path, step, cli, true, 0, 0};
+            if (cli) {
+                const ScopedFinalizationOutputFault control(fault);
+                EXPECT_EQ(RunRecord(options), 1);
+                EXPECT_EQ(fault.payload_hits, 1u);
+            } else {
+                replay::QueuedReplayRecorder recorder;
+                ASSERT_TRUE(recorder.Configure(17, 0));
+                ASSERT_TRUE(recorder.Open(options.record_path, recorded->header));
+                EXPECT_FALSE(recorder.RecordTick(
+                    1, std::make_shared<const std::vector<std::uint8_t>>(1, 0), nullptr, 0));
+                const ScopedFinalizationOutputFault control(fault);
+                EXPECT_FALSE(recorder.Finalize(options.record_path, 1, 1));
+            }
+            EXPECT_EQ(fault.marker_hits, 1u);
+            EXPECT_FALSE(fs::exists(options.record_path));
+            EXPECT_FALSE(fs::exists(options.record_path + ".incomplete"));
+            ExpectAdmissionRefused("invalid or has an unsupported LREC1 version");
+            EXPECT_TRUE(fs::is_empty(root / "worlds/saves"));
+        }
+    }
+}
+
+TEST_F(ReplayModeAdmission, FailedCliFinalizationRetainsARefusedGenerationWhenMarkerPublishes) {
+    options.ticks = 0;
+    ASSERT_EQ(RunRecord(options), 0);
+    const auto original = ReadReplayModeFile(options.record_path);
+    FinalizationOutputFault fault{options.record_path, "output-publish", true, false, 0, 0};
+    {
+        const ScopedFinalizationOutputFault control(fault);
+        EXPECT_EQ(RunRecord(options), 1);
+    }
+    EXPECT_EQ(fault.payload_hits, 1u);
+    EXPECT_EQ(ReadReplayModeFile(options.record_path), original);
+    ASSERT_TRUE(fs::exists(options.record_path + ".incomplete"));
+    ExpectAdmissionRefused("recording finalization is incomplete");
+    EXPECT_EQ(RunRecord(options), 1);
+    EXPECT_EQ(ReadReplayModeFile(options.record_path), original);
 }
 
 TEST_F(ReplayModeAdmission, IncompleteMarkerRefusesEmptyPartialAndWrongTypeBeforeOutput) {

@@ -189,7 +189,9 @@ int RunRecord(const ServerCliOptions& options) {
         return 1;
     }
     const auto* trace = runner.Session()->ActiveRegionsEnabled() ? &schedule_trace : nullptr;
-    if (!writer.Finalize(executed, trace)) {
+    Luminumbra::Replay::ReplayFinalization publication(
+        options.record_path, "Incomplete replay: CLI finalization failed\n");
+    if (!publication.ready() || !writer.Finalize(executed, trace) || !publication.Complete()) {
         LUMINUMBRA_CORE_ERROR("record: failed to finalize replay pair '{}': {}",
                               options.record_path,
                               trace
