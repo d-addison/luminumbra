@@ -42,6 +42,13 @@
 #include <unordered_set>
 #include <vector>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace {
 
 using Luminumbra::Chunk;
@@ -187,6 +194,64 @@ std::string ReadFileBytes(const std::filesystem::path& path) {
     std::ostringstream buffer;
     buffer << input.rdbuf();
     return buffer.str();
+}
+
+// Preserve the native identity, length and mtime that publication compares.
+// Change time must still expose the tamper to digest reuse checks.
+bool TamperFirstBytePreservingMtime(const std::filesystem::path& path) {
+    Luminumbra::Persistence::SavedInputFile::Version before{}, after{};
+    bool missing = false;
+    if (!WorldSaveService::artifact_version(path, before, missing) || missing)
+        return false;
+#if defined(_WIN32)
+    // UCRT filesystem timestamps can lose subsecond precision. Avoid truncation
+    // and timestamp conversion: edit one byte and restore the exact FILETIME on
+    // the same handle, with sharing compatible with retained staging identities.
+    const HANDLE file = ::CreateFileW(path.c_str(),
+                                      GENERIC_READ | GENERIC_WRITE,
+                                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                      nullptr,
+                                      OPEN_EXISTING,
+                                      FILE_FLAG_OPEN_REPARSE_POINT,
+                                      nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        ADD_FAILURE() << "Cannot open tamper target: " << ::GetLastError();
+        return false;
+    }
+    FILETIME timestamp{};
+    char original = 0;
+    DWORD received = 0, written = 0;
+    LARGE_INTEGER start{};
+    const bool changed = ::GetFileTime(file, nullptr, nullptr, &timestamp) &&
+                         ::ReadFile(file, &original, 1, &received, nullptr) && received == 1 &&
+                         original != 'X' && ::SetFilePointerEx(file, start, nullptr, FILE_BEGIN) &&
+                         ::WriteFile(file, "X", 1, &written, nullptr) && written == 1 &&
+                         ::FlushFileBuffers(file) &&
+                         ::SetFileTime(file, nullptr, nullptr, &timestamp);
+    EXPECT_TRUE(changed) << "Cannot tamper and restore native mtime: " << ::GetLastError();
+    const bool closed = ::CloseHandle(file) != 0;
+    EXPECT_TRUE(closed) << "Cannot close tamper target: " << ::GetLastError();
+    if (!changed || !closed)
+        return false;
+#else
+    const auto timestamp = std::filesystem::last_write_time(path);
+    auto bytes = ReadFileBytes(path);
+    if (bytes.empty() || bytes.front() == 'X')
+        return false;
+    bytes.front() = 'X';
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output << bytes;
+    output.close();
+    if (!output.good())
+        return false;
+    std::filesystem::last_write_time(path, timestamp);
+#endif
+    if (!WorldSaveService::artifact_version(path, after, missing) || missing)
+        return false;
+    // Publication compares these six fields; ctime is deliberately excluded.
+    const bool preserved = std::equal(before.begin(), before.begin() + 6, after.begin());
+    EXPECT_TRUE(preserved) << "Tamper changed native identity, length or mtime";
+    return preserved;
 }
 
 // Keep every chunk in region (0, 0); the encoder threshold applies per region.
@@ -3228,33 +3293,20 @@ TEST(WorldSaveRegionFormat, WrittenRegionDigestIsReusedOnlyWhileItsFileVersionMa
                 for (const auto& entry : std::filesystem::directory_iterator(directory)) {
                     if (!entry.path().filename().string().starts_with("r.0.0.lmr.tmp."))
                         continue;
-                    const auto& staged = entry.path();
-                    const auto timestamp = std::filesystem::last_write_time(staged);
-                    auto bytes = ReadFileBytes(staged);
-                    bytes.front() = 'X';
-                    std::ofstream output(staged, std::ios::binary | std::ios::trunc);
-                    output << bytes;
-                    output.close();
-                    injected = output.good();
-                    std::filesystem::last_write_time(staged, timestamp);
+                    injected = TamperFirstBytePreservingMtime(entry.path());
+                    if (!injected)
+                        return false;
                 }
                 return true;
             });
             chunk->sdf_data.front() = -7.0f;
-            ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path));
+            std::vector<std::string> save_errors;
+            ASSERT_TRUE(WorldSaveService{}.save_world(state, save.path, &save_errors))
+                << ::testing::PrintToString(save_errors);
             ASSERT_TRUE(injected);
         }
         if (change == 2) {
-            const auto timestamp = std::filesystem::last_write_time(region);
-            auto bytes = ReadFileBytes(region);
-            bytes.front() = 'X';
-            {
-                std::ofstream output(region, std::ios::binary | std::ios::trunc);
-                output << bytes;
-                output.close();
-                ASSERT_TRUE(output.good());
-            }
-            std::filesystem::last_write_time(region, timestamp);
+            ASSERT_TRUE(TamperFirstBytePreservingMtime(region));
         }
         const auto reads = WorldSaveService::region_read_count_for_testing();
         std::vector<std::string> errors;

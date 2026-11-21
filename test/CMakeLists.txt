@@ -464,6 +464,7 @@ luminumbra_configure_first_party_target(capture_manifest_test)
 # GL-free feature selection, runtime resolution and capability manifest contracts.
 add_executable(capture_feature_profile_test
     rendering/capture_feature_profile_test.cpp
+    rendering/capture_feature_policy_test.cpp
     ../src/luminumbra_client/rendering/CaptureFeatureProfile.cpp
     ../src/luminumbra_client/rendering/DiagnosticCapture.cpp
     ../src/luminumbra_client/rendering/TemporalAudit.cpp
@@ -1688,6 +1689,15 @@ add_executable(frontier_gates_test
     persistence/save_load_corruption_corpus_test.cpp
     persistence/SaveTransaction_test.cpp
 )
+
+# The region consumer regressions also exceed the default COFF section count.
+if(MSVC)
+    set_source_files_properties(common/RegionConsumerGate_test.cpp PROPERTIES
+        COMPILE_OPTIONS "/bigobj")
+elseif(MINGW)
+    set_source_files_properties(common/RegionConsumerGate_test.cpp PROPERTIES
+        COMPILE_OPTIONS "-Wa,-mbig-obj")
+endif()
 
 target_compile_definitions(frontier_gates_test PRIVATE
     LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"

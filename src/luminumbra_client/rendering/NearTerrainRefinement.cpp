@@ -45,6 +45,10 @@ bool HeightLike(const std::span<const float>& densities) {
 
 bool ValidMesh(const NearTerrainRefinementInput& input) {
     for (const auto& vertex : input.vertices) {
+        // Inputs are authoritative byte material IDs, never a refined render copy.
+        if (vertex.material_id > 255u) {
+            return false;
+        }
         for (int axis = 0; axis < 3; ++axis) {
             if (!std::isfinite(vertex.position[axis]) || vertex.position[axis] < 0.0f ||
                 vertex.position[axis] > 16.0f || !std::isfinite(vertex.normal[axis])) {
@@ -89,6 +93,10 @@ float HeightDerivative(const VoxelVertex& from, const VoxelVertex& to) {
     return -(from.normal.x * direction.x + from.normal.z * direction.z) / from.normal.y;
 }
 
+u32 GroundContribution(u32 material, u32 numerator) {
+    return material >= 1u && material <= 5u ? numerator << (8u + 3u * (material - 1u)) : 0u;
+}
+
 VoxelVertex
 CurvedVertex(const Vec3& linear, const Vec3& normal, u32 material, float curved_height) {
     Vec3 position = linear;
@@ -107,7 +115,12 @@ CurvedVertex(const Vec3& linear, const Vec3& normal, u32 material, float curved_
 VoxelVertex Midpoint(const VoxelVertex& a, const VoxelVertex& b) {
     const Vec3 linear = (a.position + b.position) * 0.5f;
     const float height = linear.y + (HeightDerivative(a, b) + HeightDerivative(b, a)) * 0.125f;
-    return CurvedVertex(linear, a.normal + b.normal, a.material_id, height);
+    // Sixths represent both edge halves and triangle thirds exactly. The low
+    // byte keeps the flat ID; the five three-bit fields carry smooth coverage.
+    const u32 material =
+        0x80000000u | a.material_id |
+        (GroundContribution(a.material_id, 3u) + GroundContribution(b.material_id, 3u));
+    return CurvedVertex(linear, a.normal + b.normal, material, height);
 }
 
 VoxelVertex Centre(const VoxelVertex& a, const VoxelVertex& b, const VoxelVertex& c) {
@@ -118,9 +131,13 @@ VoxelVertex Centre(const VoxelVertex& a, const VoxelVertex& b, const VoxelVertex
         linear.y + (HeightDerivative(a, b) + HeightDerivative(b, a) + HeightDerivative(b, c) +
                     HeightDerivative(c, b) + HeightDerivative(c, a) + HeightDerivative(a, c)) /
                        18.0f;
-    // Every child ends with this centre. Preserve the source triangle's last
-    // (provoking) vertex material used by the terrain G-buffer's flat input.
-    return CurvedVertex(linear, a.normal + b.normal + c.normal, c.material_id, height);
+    // Every child ends with this centre. Preserve the source's flat ID while
+    // interpolating coverage independently, including repeated/absent lanes.
+    const u32 material =
+        0x80000000u | c.material_id |
+        (GroundContribution(a.material_id, 2u) + GroundContribution(b.material_id, 2u) +
+         GroundContribution(c.material_id, 2u));
+    return CurvedVertex(linear, a.normal + b.normal + c.normal, material, height);
 }
 
 bool BuildSplits(const NearTerrainRefinementInput& input,
