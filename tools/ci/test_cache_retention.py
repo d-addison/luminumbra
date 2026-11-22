@@ -489,7 +489,7 @@ class CacheRetentionTests(unittest.TestCase):
             ("ci", "linux", "400M"),
             ("asan", "asan-shard", "1200M"),
             ("ci", "diligent-rhi", "250M"),
-            ("windows-build", "windows-msvc", "1200M"),
+            ("windows-build", "windows-msvc", "4G"),
             ("windows-build", "windows-ucrt64", "1200M"),
         ):
             with self.subTest(workflow=workflow, job=job):

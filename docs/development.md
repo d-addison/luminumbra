@@ -77,8 +77,9 @@ ctest --preset release -L manual \
 ## Continuous integration
 
 The Linux/GCC and ASan lanes use bounded ccache at 400M and 1200M respectively.
-Diligent RHI, preview-frame and paired performance use 250M each; UCRT64 and MSVC
-use 1200M (1.2 GB) each on the daily runner's disk. Qualification captures bypass
+Diligent RHI, preview-frame and paired performance use 250M each; UCRT64 uses
+1200M (1.2 GB) and MSVC 4G on the daily runner's disk, outside the repository
+cache limit. Qualification captures bypass
 the cache. Hosted lanes' immutable save keys include
 the commit SHA; restores prefer the matching CMake configuration prefix where
 available, then the lane prefix. Caches are trimmed with `ccache --cleanup`
