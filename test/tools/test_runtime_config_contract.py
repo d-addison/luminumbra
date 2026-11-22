@@ -32,6 +32,26 @@ def cpp_block(source, anchor):
 
 
 class RuntimeConfigSourceContract(unittest.TestCase):
+    def test_clock_authority_uses_registered_legacy_adapter(self):
+        service = compact_cpp((ROOT / "src/luminumbra_common/persistence/WorldSaveService.cpp")
+                              .read_text(encoding="utf-8"))
+        session = compact_cpp((ROOT / "src/luminumbra_common/world/GameSession.cpp")
+                              .read_text(encoding="utf-8"))
+        self.assertNotIn("world::WorldClock::from_metadata(", service)
+        self.assertNotIn("clock.write_metadata(metadata)", service)
+        self.assertIn("Game::WorldClockAuthorityAdapter::ReadMetadata(metadata,clock,error)", service)
+        self.assertIn("Game::WorldClockAuthorityAdapter::WriteMetadata(clock,metadata)", service)
+        fold = cpp_block(session, "GameSession::FoldClockIntoEcologyHash(")
+        self.assertIn("Game::WorldClockAuthorityAdapter::CanonicalBytes(m_worldClock)", fold)
+        self.assertIn("Game::WorldClockAuthorityAdapter::WriteMetadata(m_worldClock,metadata_json)", session)
+        adapter = compact_cpp((ROOT / "src/luminumbra_common/game/WorldClockAuthorityAdapter.h")
+                              .read_text(encoding="utf-8"))
+        self.assertIn("contributors.RegisterMetadata(adapter,kModuleId)", adapter)
+        self.assertIn("modules.register_module(", adapter)
+        self.assertIn("contributors.RestoreMetadata(modules,kRequiredModules,metadata,error)", adapter)
+        self.assertIn("contributors.WriteMetadata(modules,kRequiredModules,metadata)", adapter)
+        self.assertIn("contributors.LegacyCanonicalState(modules,kRequiredModules,kContributorId)", adapter)
+
     def test_strict_numeric_input_sites_share_the_checked_parser(self):
         sites = {
             "core/RuntimeScenarioConfig.cpp": (
@@ -1092,7 +1112,7 @@ class RuntimeConfigSourceContract(unittest.TestCase):
         metadata = service[start:service.index("boolWorldSaveService::save_metadata_and_active_regions(", start)]
         reclaim = metadata.index("ReclaimAbandonedStaging(destination);")
         for validation in ("validate_save(save_dir,errors)",
-                           "world::WorldClock::from_metadata(metadata,clock,clock_error)",
+                           "Game::WorldClockAuthorityAdapter::ReadMetadata(metadata,clock,clock_error)",
                            "ReadAmbientAnchor(metadata,ambient_anchor,clock_error)",
                            "read_clock_metadata(save_dir,previous_clock,requires_active_regions,errors)",
                            "if(requires_active_regions&&!has_clock)"):
