@@ -1,3 +1,4 @@
+#include "../support/PollinationOracle.h"
 #include "../support/UniqueTempPath.h"
 
 #include <gtest/gtest.h>
@@ -6,6 +7,7 @@
 
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/PlantComponents.h"
+#include "luminumbra_common/persistence/PlantPersistence.h"
 #include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/simulation/SimBudgetTelemetry.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
@@ -288,6 +290,59 @@ TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
         runner.Shutdown();
     }
 }
+TEST_P(SimBudgetWorldParity, PollinationIndexMatchesBruteForceWorldHash) {
+    namespace C = Luminumbra::Components;
+    namespace F = luminumbra::foliage;
+    using Gate = Luminumbra::world::RegionConsumerGate;
+    std::string reference_hash;
+    std::string reference_bytes;
+    for (const bool indexed : {false, true}) {
+        Luminumbra::Server::ServerWorldRunnerConfig config;
+        config.root_path = Root().generic_string() + "/";
+        config.seed = "1337";
+        config.surface_radius = 1;
+        config.collision_radius = 1;
+        config.ecology_roster = true;
+        config.planted_roster = true;
+        config.autosave_interval_ticks = 0;
+        config.finite_hydrology = false;
+        Luminumbra::Server::ServerWorldRunner runner(config);
+        ASSERT_TRUE(runner.Boot());
+        auto& registry = runner.Session()->GetRegistry();
+        std::uint32_t count = 0;
+        for (const auto plant : registry.view<C::PlantTag, C::PlantGrowthComponent>()) {
+            registry.get<C::PlantGrowthComponent>(plant).stage =
+                static_cast<std::uint8_t>(C::PlantStage::Flowering);
+            registry.emplace_or_replace<C::PollinationTag>(plant);
+            registry.emplace_or_replace<C::PollinationComponent>(plant);
+            // Coincident donors exercise identity ties.
+            registry.get<C::TransformComponent>(plant).position = {0.0f, 0.0f, 0.0f};
+            ++count;
+        }
+        ASSERT_GE(count, 2u);
+        const Gate gate;
+        for (const auto tick : {1u, 2u, 99u}) {
+            const auto stats =
+                indexed ? F::RunPollinationOnTick(registry, tick, {1.0f, -1.0f}, 99, 0.05f, gate)
+                        : Luminumbra::TestSupport::PollinationOracle::BrutePollination(
+                              registry, tick, {1.0f, -1.0f}, gate);
+            EXPECT_EQ(stats.crossed, count);
+        }
+        const auto bytes = Luminumbra::Ecs::SerializeEntityRegistrySnapshotJson(
+            F::BuildPlantEntitySnapshot(registry, true));
+        const auto hash = runner.ComputeWorldHash();
+        ASSERT_FALSE(hash.empty());
+        if (indexed) {
+            EXPECT_EQ(bytes, reference_bytes);
+            EXPECT_EQ(hash, reference_hash);
+        } else {
+            reference_bytes = bytes;
+            reference_hash = hash;
+        }
+        runner.Shutdown();
+    }
+}
+
 INSTANTIATE_TEST_SUITE_P(ActiveRegions,
                          SimBudgetWorldParity,
                          testing::Bool(),
