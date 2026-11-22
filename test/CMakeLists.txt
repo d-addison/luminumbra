@@ -2269,6 +2269,9 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME JoltStartupPatchContract COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/tools/ci/test_jolt_startup.py")
 set_tests_properties(JoltStartupPatchContract PROPERTIES LABELS "ci;tools" TIMEOUT 30)
+add_test(NAME InlineTextureQualification COMMAND "${Python3_EXECUTABLE}" -I -B
+    "${CMAKE_SOURCE_DIR}/test/tools/test_inline_texture_qualification.py")
+set_tests_properties(InlineTextureQualification PROPERTIES LABELS "tools" TIMEOUT 30)
 add_test(NAME DiagnosticCapturePython COMMAND "${Python3_EXECUTABLE}" -I -B
     "${CMAKE_SOURCE_DIR}/tools/gates/test_diagnostic_capture.py")
 set_tests_properties(DiagnosticCapturePython PROPERTIES LABELS "tools" TIMEOUT 60)

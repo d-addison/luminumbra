@@ -1,3 +1,4 @@
+#include "../support/InlineTextureFixture.h"
 #include "../support/UniqueTempPath.h"
 
 #include <gtest/gtest.h>
@@ -1127,4 +1128,74 @@ TEST(LtexRoundTrip, OddCutoutRetainsCompiledBytesAcrossCoefficientPacking) {
         checksum = (checksum ^ byte) * 1099511628211ull;
     }
     EXPECT_EQ(checksum, 4632687360821141353ull);
+    ASSERT_EQ(Import({input.string(), output.string(), "--srgb", "--alpha-cutoff", "0.35"}), 0);
+    EXPECT_EQ(FileBytes(output), bytes);
+}
+
+TEST(LtexRoundTrip, InlineCutoffsRepeatExactV1BytesAndLeaveLegacyConversionsUnchanged) {
+    namespace Fixture = Luminumbra::TestSupport::InlineTexture;
+    const TempDirectory temp;
+    const auto input = temp.path() / "inline.png";
+    const auto mask = temp.path() / "mask.png";
+    const auto output = temp.path() / "inline.ltex";
+    const auto repeated = temp.path() / "repeated.ltex";
+    ASSERT_NE(stbi_write_png(input.string().c_str(), 2, 2, 4, Fixture::kPixels.data(), 8), 0);
+    const std::array<std::uint8_t, 4> opacity = {0, 64, 128, 255};
+    ASSERT_NE(stbi_write_png(mask.string().c_str(), 2, 2, 1, opacity.data(), 2), 0);
+    const auto expect_bytes = [&](const std::filesystem::path& path, std::uint8_t alpha) {
+        const auto expected = Fixture::LtexBytes(alpha);
+        const auto actual = FileBytes(path);
+        ASSERT_EQ(actual.size(), expected.size());
+        EXPECT_EQ(std::memcmp(actual.data(), expected.data(), expected.size()), 0);
+    };
+    for (const auto& sample : Fixture::kCutoffs) {
+        SCOPED_TRACE(sample.argument);
+        ASSERT_EQ(
+            Import({input.string(), output.string(), "--srgb", "--alpha-cutoff", sample.argument}),
+            0);
+        expect_bytes(output, sample.mip_alpha);
+        // Interleave native, color and opacity-mask imports to catch option state leaking.
+        ASSERT_TRUE(process_texture(input.string(), repeated.string()));
+        expect_bytes(repeated, 112);
+        ASSERT_EQ(Import({input.string(), repeated.string()}), 0);
+        expect_bytes(repeated, 112);
+        ASSERT_EQ(Import({input.string(), repeated.string(), "--srgb"}), 0);
+        expect_bytes(repeated, 112);
+        ASSERT_EQ(Import({input.string(), repeated.string(), "--alpha-mask", mask.string()}), 0);
+        expect_bytes(repeated, 128);
+        // The cutoff alone selects material filtering, even without an explicit --srgb.
+        ASSERT_EQ(Import({input.string(), repeated.string(), "--alpha-cutoff", sample.argument}),
+                  0);
+        expect_bytes(repeated, sample.mip_alpha);
+        EXPECT_EQ(FileBytes(output), FileBytes(repeated));
+        ASSERT_EQ(
+            Import({input.string(), output.string(), "--srgb", "--alpha-cutoff", sample.argument}),
+            0);
+        expect_bytes(output, sample.mip_alpha);
+        ASSERT_EQ(Import({input.string(),
+                          repeated.string(),
+                          "--alpha-mask",
+                          mask.string(),
+                          "--alpha-cutoff",
+                          sample.argument}),
+                  0);
+        expect_bytes(repeated, sample.mip_alpha);
+    }
+}
+
+TEST(LtexRoundTrip, LegacyConversionsMatchCommittedCompleteTextureBytesAfterCutoffs) {
+    const TempDirectory temp;
+    const auto output = temp.path() / "legacy.ltex";
+    for (const auto stem : {"checker_16", "gradient_16", "framed_32x8"}) {
+        SCOPED_TRACE(stem);
+        const auto input = TestTexturePath((std::string(stem) + ".png").c_str());
+        const auto reference = TestTexturePath((std::string(stem) + ".ltex").c_str());
+        const auto expected = FileBytes(reference);
+        ASSERT_FALSE(expected.empty());
+        ASSERT_TRUE(process_texture(input.string(), output.string()));
+        EXPECT_EQ(FileBytes(output), expected);
+        ASSERT_EQ(Import({input.string(), output.string(), "--srgb", "--alpha-cutoff", "0.75"}), 0);
+        ASSERT_EQ(Import({input.string(), output.string()}), 0);
+        EXPECT_EQ(FileBytes(output), expected);
+    }
 }

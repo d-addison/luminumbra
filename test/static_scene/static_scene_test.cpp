@@ -3,6 +3,7 @@
 #include "components/CoreComponents.h"
 #include <luminumbra/rendering/StaticScene.h>
 
+#include "../support/InlineTextureFixture.h"
 #include "../support/UniqueTempPath.h"
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -198,6 +199,54 @@ TEST_F(StaticSceneTest, DecodesOwnedRawGeometryAndTrueMaterialBindings) {
     EXPECT_EQ(binding.texture->mips[0].rgba8, (std::vector<std::uint8_t>{255, 128, 0, 200}));
     EXPECT_EQ(draw.mesh, snapshot->draws[1].mesh);
     EXPECT_EQ(draw.material, snapshot->draws[1].material);
+}
+TEST_F(StaticSceneTest, InlineCutoffMipBytesAndAuthoredMaterialSurviveDecoding) {
+    namespace Fixture = Luminumbra::TestSupport::InlineTexture;
+    for (const auto& sample : Fixture::kCutoffs) {
+        SCOPED_TRACE(sample.argument);
+        const auto bytes = Fixture::LtexBytes(sample.mip_alpha);
+        files[kTexture] = {bytes.begin(), bytes.end()};
+        auto& metrics = manifest["outputs"][kTexture];
+        metrics["width"] = 2;
+        metrics["height"] = 2;
+        metrics["mip_levels"] = 2;
+        auto& material = descriptor["materials"]["mat.copper"];
+        material["base_color"][3] = .8;
+        material["alpha_cutoff"] = sample.cutoff * .8;
+        Publish();
+        auto asset = StaticPrefab::Load(project.string(), kGeneration, digest);
+        StaticScene scene;
+        scene.Replace("instance.cutout", asset, kStaticIdentity, 0);
+        const auto snapshot = scene.Snapshot();
+        ASSERT_EQ(snapshot->draws.size(), 2u);
+        const auto& draw = snapshot->draws.front();
+        ASSERT_TRUE(draw.material);
+        EXPECT_EQ(draw.material->alpha_mode, StaticAlphaMode::Mask);
+        EXPECT_DOUBLE_EQ(draw.material->alpha_cutoff, sample.cutoff * .8);
+        EXPECT_DOUBLE_EQ(draw.material->base_color[3], .8);
+        const auto& binding = draw.material->textures[0];
+        ASSERT_TRUE(binding.texture);
+        EXPECT_EQ(binding.texture->encoding, StaticEncoding::Srgb);
+        EXPECT_EQ(binding.source_uv_set, 1u);
+        EXPECT_EQ(binding.scale, (std::array<double, 2>{2, 3}));
+        EXPECT_EQ(binding.offset, (std::array<double, 2>{.25, .5}));
+        EXPECT_DOUBLE_EQ(binding.rotation, .2);
+        EXPECT_EQ(binding.sampler.wrap_t, 33071u);
+        ASSERT_EQ(binding.texture->mips.size(), 2u);
+        const auto& base = binding.texture->mips[0];
+        EXPECT_EQ(base.width, 2u);
+        EXPECT_EQ(base.height, 2u);
+        EXPECT_EQ(base.rgba8,
+                  (std::vector<std::uint8_t>{Fixture::kPixels.begin(), Fixture::kPixels.end()}));
+        const auto& mip = binding.texture->mips[1];
+        EXPECT_EQ(mip.width, 1u);
+        EXPECT_EQ(mip.height, 1u);
+        EXPECT_EQ(mip.rgba8, (std::vector<std::uint8_t>{255, 0, 0, sample.mip_alpha}));
+        ASSERT_TRUE(draw.mesh);
+        ASSERT_GE(draw.mesh->vertices.size(), 2u);
+        EXPECT_EQ(draw.mesh->vertices[1].uv, (std::array<float, 2>{1, 0}));
+        EXPECT_EQ(draw.material, snapshot->draws[1].material);
+    }
 }
 TEST_F(StaticSceneTest, TransformBatchPreservesGeometryAndImmutableOldSnapshot) {
     auto asset = StaticPrefab::Load(project.string(), kGeneration, digest);
