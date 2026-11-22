@@ -62,6 +62,7 @@ class CreatureSpeciesRegistry; // per-world species definition table
 } // namespace luminumbra::ai
 
 namespace luminumbra::foliage {
+class PlantTerrainCache;
 class SoilGrid;       // soil nutrient field (systems/SoilNutrientSystem.h)
 class IrrigationGrid; // soil-moisture field (systems/IrrigationSystem.h)
 } // namespace luminumbra::foliage
@@ -647,6 +648,8 @@ public:
     [[nodiscard]] std::uint32_t GetFoliageReplayRemainingSteps() const;
     [[nodiscard]] std::uint64_t GetFoliageReplayCellVisits() const;
     [[nodiscard]] std::uint64_t GetFoliageReplayPreparationPages() const;
+    // Lifetime terrain height/material query pairs; derived cache work, never hashed or saved.
+    [[nodiscard]] std::uint64_t GetPlantTerrainQueryMisses() const;
     // Read-only diagnostics of the live legacy foliage grids.
     [[nodiscard]] const luminumbra::foliage::SoilGrid* GetFoliageSoilGrid() const;
     [[nodiscard]] const luminumbra::foliage::IrrigationGrid* GetFoliageIrrigationGrid() const;
@@ -802,6 +805,7 @@ private:
     entt::registry m_registry;
     struct FoliageStep;
     std::unique_ptr<FoliageStep> m_foliageStep;
+    std::unique_ptr<luminumbra::foliage::PlantTerrainCache> m_plantTerrainCache;
     luminumbra::ai::EcologyTuning m_ecologyTuning{}; // Defaults match compiled constants.
     luminumbra::ai::WildlifeFoliageTuning
         m_wildlifeFoliageTuning{}; // full-control: defaults preserved

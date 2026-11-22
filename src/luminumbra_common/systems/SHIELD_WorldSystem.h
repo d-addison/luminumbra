@@ -1050,6 +1050,11 @@ public:
     u64 far_lod_authority_revision() const {
         return m_far_lod_authority_revision.load(std::memory_order_acquire);
     }
+    // Terrain authority changes only; ordinary water simulation does not invalidate terrain
+    // samples.
+    [[nodiscard]] u64 terrain_edit_revision() const {
+        return m_terrain_edit_revision.load(std::memory_order_acquire);
+    }
     u64 far_lod_region_authority_revision(i32 rx, i32 rz) const;
     // External owner-thread edits hold SaveOwnership before changing any bytes
     // and through this notification, exactly like EditTerrainVoxel.
@@ -1262,9 +1267,10 @@ private:
     std::shared_ptr<HighWaterSeedInputs> request_water_seed_inputs(Chunk& chunk) const;
     mutable std::atomic<u64> m_far_lod_capture_epoch{0};
     std::atomic<u64> m_far_lod_authority_revision{0};
+    std::atomic<u64> m_terrain_edit_revision{0};
     mutable std::mutex m_far_lod_region_revision_mutex;
     std::map<std::pair<i32, i32>, u64> m_far_lod_region_revisions;
-    void bump_far_lod_authority_revision(const IVec3& chunk_coords);
+    void bump_far_lod_authority_revision(const IVec3& chunk_coords, bool terrain_changed = true);
     //  telemetry (main-thread, never hashed).
     std::uint64_t m_promotion_batches_dispatched = 0;
     std::uint64_t m_promotion_chunks_dispatched = 0;

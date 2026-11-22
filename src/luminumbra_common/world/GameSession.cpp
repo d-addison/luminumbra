@@ -84,7 +84,8 @@
 #include "../systems/PhysicsSystem.h"
 #include "../systems/PlantDiseaseSystem.h" // Plant disease propagation.
 #include "../systems/PlantGrowthSystem.h"  // Plant growth tick.
-#include "../systems/PollinationSystem.h"  // Cross-pollination.
+#include "../systems/PlantTerrainCache.h"
+#include "../systems/PollinationSystem.h" // Cross-pollination.
 #include "../systems/RegionalFoliage.h"
 #include "../systems/SHIELD_WorldSystem.h" // This includes TerrainGenParams
 #include "../systems/SoilNutrientSystem.h" // Soil-nutrient cycling.
@@ -1515,6 +1516,9 @@ std::uint64_t GameSession::GetFoliageReplayCellVisits() const {
 std::uint64_t GameSession::GetFoliageReplayPreparationPages() const {
     return m_foliageStep ? m_foliageStep->preparation_pages : 0;
 }
+std::uint64_t GameSession::GetPlantTerrainQueryMisses() const {
+    return m_plantTerrainCache ? m_plantTerrainCache->misses() : 0;
+}
 const luminumbra::foliage::SoilGrid* GameSession::GetFoliageSoilGrid() const {
     return m_soilGrid.get();
 }
@@ -1685,6 +1689,7 @@ void GameSession::ResetWorldSystems() {
     m_regionalEnergyStep.reset();
     m_registry.ctx().erase<luminumbra::foliage::FarmingReplayGate>();
     m_foliageStep.reset();
+    m_plantTerrainCache.reset();
     m_worldUsable = false;
     if (m_worldSystem)
         m_worldSystem->quiesce_streaming_jobs_for_save();
@@ -2458,6 +2463,11 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
             // growth runs AFTER weather. Integer/fixed-point + id-ordered = run==replay.
             // Temperature, light, soil, weather, and irrigation are sampled below.
             if (!foliage_registry.view<const Luminumbra::Components::PlantTag>().empty()) {
+                if (!m_plantTerrainCache) {
+                    m_plantTerrainCache =
+                        std::make_unique<luminumbra::foliage::PlantTerrainCache>();
+                }
+                m_plantTerrainCache->BeginTick(m_worldSystem.get());
                 const auto plant_env = [this, current_tick](
                                            const Luminumbra::Components::TransformComponent& tf) {
                     luminumbra::foliage::PlantEnvSample s;
@@ -2474,36 +2484,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         s.moisture = luminumbra::foliage::clamp01(
                             s.moisture + static_cast<float>(moist) / 1000.0f * 0.5f);
                     }
-                    // Soil + temperature from the TERRAIN: surface-material favourability
-                    // (grass/soil rich, sand/stone poor) and an altitude lapse (higher
-                    // ground is colder -> alpine vs lowland growth). The real atmospheric/
-                    // terrain coupling. (Only runs for opt-in sim plants, so the per-plant
-                    // world queries are bounded.)
-                    float soil = 0.5f, temp = 0.55f;
-                    if (m_worldSystem) {
-                        const float th = m_worldSystem->GetTerrainHeightAt(p.x, p.z);
-                        switch (m_worldSystem->SurfaceVertexMaterial(p.x, p.z, th)) {
-                            case Luminumbra::MaterialType::Grass:
-                                soil = 0.95f;
-                                break;
-                            case Luminumbra::MaterialType::Soil:
-                                soil = 0.85f;
-                                break;
-                            case Luminumbra::MaterialType::Sand:
-                                soil = 0.45f;
-                                break;
-                            case Luminumbra::MaterialType::Stone:
-                                soil = 0.30f;
-                                break;
-                            default:
-                                soil = 0.25f;
-                                break;
-                        }
-                        const float altitude = th - static_cast<float>(Luminumbra::SEA_LEVEL);
-                        temp = luminumbra::foliage::clamp01(
-                            0.60f - (altitude > 0.0f ? altitude : 0.0f) * 0.00045f);
-                    }
-                    s.soil_quality = soil;
+                    const auto terrain = m_plantTerrainCache->At(m_worldSystem.get(), p.x, p.z);
+                    s.soil_quality = terrain.soil;
                     // fold the freshly-updated SOIL-NUTRIENT grid (milli 0..1000) into soil
                     // quality. Foragers/feeders DEPLETE the cell, so a monoculture on one cell
                     // starves itself (monoculture-starves). No grid -> unchanged terrain
@@ -2521,7 +2503,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                         s.soil_quality =
                             luminumbra::foliage::clamp01(s.soil_quality * 0.5f + nutFrac * 0.5f);
                     }
-                    s.temperature = temp;
+                    s.temperature = terrain.temperature;
                     // Real day/night light from the sim clock. Triangular day
                     // curve peaking at noon, with a twilight floor so growth slows (not halts)
                     // at night. kTicksPerDay = 20-min day @30Hz (mirrors the circadian slot).
@@ -2557,6 +2539,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt, bool defer_water_auth
                 };
                 luminumbra::foliage::RunPlantGrowthSystemOnTick(
                     foliage_registry, current_tick, plant_env, foliage_gate);
+                m_plantTerrainCache->EndTick();
             }
 
             // 7. LIVING-WORLD SYSTEMS: pollination / disease / fire / wildlife-grazing /
@@ -6389,6 +6372,7 @@ void GameSession::AdoptWorldStateFrom(const fs::path& save_dir, LoadedWorldState
     // All refusing readers have passed; publish the staged state together.
     m_registry.ctx().erase<luminumbra::foliage::FarmingReplayGate>();
     m_foliageStep.reset();
+    m_plantTerrainCache.reset();
     m_lastLoadedChunkCount = 0;
     if (m_activeRegionsEnabled && m_authorityProfile.regional_water) {
         m_worldSystem->clear_world(m_physicsSystem.get());
