@@ -1,5 +1,9 @@
 # Changelog
 
+
+- Stream plain-JSON terrain snapshot samples into native arrays while preserving fallback decoding and complete-load validation.
+- Make terminal Hello refusals stop input admission and simulation while allowing pending connected handshakes to retry.
+
 ## v0.3.1 — in preparation
 
 - Development continues on top of v0.3.0.

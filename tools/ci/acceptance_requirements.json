@@ -5189,6 +5189,48 @@
       "source": "docs/active-regions.md#planned-shared-simulation-identity",
       "quote": "this preparation changes no saved bytes, hash/fixture pins, `kAuthorityRulesRevision` or configuration identity.",
       "text": "this preparation changes no saved bytes, hash/fixture pins, `kAuthorityRulesRevision` or configuration identity."
+    },
+    {
+      "id": "ar.snapshot-peer.001",
+      "source": "docs/active-regions.md#snapshot-decoding-and-peer-admission",
+      "quote": "Plain JSON terrain snapshots stream SDF and heightmap samples into native float arrays while retaining the existing snapshot schema, record encoding and serialization bytes.",
+      "text": "Plain JSON terrain snapshots stream SDF and heightmap samples into native float arrays while retaining the existing snapshot schema, record encoding and serialization bytes."
+    },
+    {
+      "id": "ar.snapshot-peer.002",
+      "source": "docs/active-regions.md#snapshot-decoding-and-peer-admission",
+      "quote": "Duplicate terrain keys and noncanonical containers use the legacy decoder with its last-key-wins semantics, and both paths reject boolean samples consistently across all four float arrays.",
+      "text": "Duplicate terrain keys and noncanonical containers use the legacy decoder with its last-key-wins semantics, and both paths reject boolean samples consistently across all four float arrays."
+    },
+    {
+      "id": "ar.snapshot-peer.003",
+      "source": "docs/active-regions.md#snapshot-decoding-and-peer-admission",
+      "quote": "Snapshot publication follows complete record validation, preserves serialized insertion order and leaves no partial world on refusal.",
+      "text": "Snapshot publication follows complete record validation, preserves serialized insertion order and leaves no partial world on refusal."
+    },
+    {
+      "id": "ar.snapshot-peer.004",
+      "source": "docs/active-regions.md#snapshot-decoding-and-peer-admission",
+      "quote": "A terminal Hello refusal prevents later inputs, checkpoints, replay output and simulation ticks while draining received frames under the existing receive budgets.",
+      "text": "A terminal Hello refusal prevents later inputs, checkpoints, replay output and simulation ticks while draining received frames under the existing receive budgets."
+    },
+    {
+      "id": "ar.snapshot-peer.005",
+      "source": "docs/active-regions.md#snapshot-decoding-and-peer-admission",
+      "quote": "A connected peer with no Hello yet or a transient send refusal can retry, and a successfully sent Hello is not transmitted twice.",
+      "text": "A connected peer with no Hello yet or a transient send refusal can retry, and a successfully sent Hello is not transmitted twice."
+    },
+    {
+      "id": "ar.snapshot-peer.006",
+      "source": "docs/active-regions.md#snapshot-decoding-and-peer-admission",
+      "quote": "The current authority rules revision remains 8, and existing captures already bind the persisted raw water-scheduler cursor in both active-region modes without introducing another hash envelope.",
+      "text": "The current authority rules revision remains 8, and existing captures already bind the persisted raw water-scheduler cursor in both active-region modes without introducing another hash envelope."
+    },
+    {
+      "id": "ar.snapshot-peer.007",
+      "source": "docs/active-regions.md#snapshot-decoding-and-peer-admission",
+      "quote": "Both world load entries restore that cursor, including empty and below-budget worlds whose later continuation can depend on its unnormalized value.",
+      "text": "Both world load entries restore that cursor, including empty and below-budget worlds whose later continuation can depend on its unnormalized value."
     }
   ],
   "exclusions": [

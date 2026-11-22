@@ -66,6 +66,7 @@ endforeach()
 # Add the world generation test executable
 add_executable(world_generation_test
     shield/test_world_generation.cpp
+    shield/water_column_diagnostics_test.cpp
     shield/test_meshing_determinism.cpp
     shield/worldgen_hardening_test.cpp
     shield/meshing_hardening_test.cpp
