@@ -988,7 +988,7 @@ class FrameAttributionWiring(unittest.TestCase):
             ("m_scatter_uniforms", ("chunk_count", "archetype_count", "total_weight",
                                      "max_candidates", "max_instances", "density_scale",
                                      "camera_xz", "fade_end_m", "wind_xz", "emit")),
-            ("m_prefix_uniforms", ("group_count", "max_instances")),
+            ("m_prefix_uniforms", ("group_count", "max_instances", "pass")),
         ):
             self.assertIn(f"{cache} = {{", init)
             self.assertIn(f"{cache} = {{}};", destroy)
@@ -2097,8 +2097,7 @@ class FrameAttributionWiring(unittest.TestCase):
                            "first_vertex = 0u;", "base_instance = 0u;"):
             self.assertIn(assignment, prefix)
         dispatch = compact(block(self.foliage, "void FoliagePass::dispatch_scatter()"))
-        self.assertIn("Luminumbra::Rendering::AttributedGl::Submit(glDispatchCompute, 1u, 1u, 1u); "
-                      "glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT); "
+        self.assertIn("glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, m_chunk_ssbo); "
                       "m_scatter_gpu_timers[1].end(); m_scatter_gpu_timers[2].begin(); "
                       "Luminumbra::Rendering::AttributedGl::UseProgram(glUseProgram, m_compute_prog); "
                       "glUniform1i(m_scatter_uniforms.emit, GL_TRUE);", dispatch)

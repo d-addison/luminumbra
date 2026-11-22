@@ -524,14 +524,15 @@ class PostComputeTests(unittest.TestCase):
         shader = (ROOT / 'res/shaders/taau_resolve.frag').read_text(encoding='utf-8')
         self.assertIn('return clamp(uv, u_texel * 0.5, vec2(1.0) - u_texel * 0.5);', shader)
         self.assertIn('currentUv(TexCoords + vec2(float(dx), float(dy)) * u_texel)', shader)
-        compute = fixture.split('void ShaderScene::ComputeReadback()', 1)[1]
-        for expression in ('Compile(GL_COMPUTE_SHADER, "grass_compact_prefix.comp")',
-                           'bindings{3, 5, 6}', 'glDispatchCompute(1u, 1u, 1u)',
+        compute = fixture.split('void ShaderScene::PrefixScan(', 1)[1]
+        for expression in ('Source("res/shaders/grass_compact_prefix.comp")',
+                           'GrassPrefixParity();', 'PrefixScan(counts, cap, offsets, serial)',
                            'GL_BUFFER_UPDATE_BARRIER_BIT', 'glGetBufferSubData(',
-                           'EXPECT_EQ(actual[index], expected[index])'):
+                           'EXPECT_EQ(blades, reference)', 'EXPECT_EQ(work, expectedWork)',
+                           'counts.size() / 100', 'Compile(GL_COMPUTE_SHADER, "grass_scatter.comp")'):
             self.assertIn(expression, compute)
         kernel = (ROOT / 'res/shaders/grass_compact_prefix.comp').read_text(encoding='utf-8')
-        self.assertIn('layout(std430, binding = 6) writeonly buffer GroupOffsets', kernel)
+        self.assertIn('layout(std430, binding = 6) buffer GroupOffsets', kernel)
         # Helpers are reached by an already registered native case; keep the
         # runner's exact inventory and opt-in CTest/path gate unchanged.
         terrain = fixture.split('TEST_F(ShaderScene, TerrainMaterialTransition)', 1)[1].split(
