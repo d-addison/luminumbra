@@ -22,8 +22,10 @@ void TaauPass::init_shader(const std::filesystem::path& root_path) {
                                  (root_path / "res/shaders/taau_resolve.frag").string().c_str());
     PassGl::label_gl_object(GL_PROGRAM, m_shader ? m_shader->Id() : 0u, "shader.taau_resolve");
     if (m_shader && m_shader->IsValid()) {
-        if (const ExpectedLayout* layout = FindPassExpectedLayout("taau_resolve"))
-            m_shader->ValidateLayout(*layout);
+        if (const ExpectedLayout* layout = FindPassExpectedLayout("taau_resolve");
+            layout && !m_shader->ValidateLayout(*layout)) {
+            m_shader.reset();
+        }
     }
 }
 

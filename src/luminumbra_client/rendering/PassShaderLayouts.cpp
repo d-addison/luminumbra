@@ -255,6 +255,18 @@ const std::vector<PassShaderLayout>& AllPassShaderLayouts() {
                  return e;
              }()});
 
+        v.push_back({"taau_resolve", "res/shaders/ssao.vert", "res/shaders/taau_resolve.frag", [] {
+                         ExpectedLayout expected;
+                         expected.pass_name = "taau_resolve";
+                         expected.samplers = {
+                             {"u_current", GL_SAMPLER_2D, -1},
+                             {"u_history", GL_SAMPLER_2D, -1},
+                             {"u_motion", GL_SAMPLER_2D, -1},
+                             {"u_sceneDepth", GL_SAMPLER_2D, -1},
+                         };
+                         return expected;
+                     }()});
+
         return v;
     }();
     return kLayouts;

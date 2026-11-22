@@ -60,7 +60,7 @@ public:
     // sampler) is logged at WARN and returns true. The expected layout is
     // remembered so a later hot-reload re-validates against it and
     // rolls back on mismatch.
-    bool ValidateLayout(const ExpectedLayout& expected);
+    [[nodiscard]] bool ValidateLayout(const ExpectedLayout& expected);
 
     //  hot-reload safety: recompile+relink from the stored source paths
     // into a SEPARATE program, reflect it, and (if an expected layout was
