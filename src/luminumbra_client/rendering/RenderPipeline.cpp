@@ -2282,7 +2282,8 @@ void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& v
     // origin attribute (binding 1, divisor 1) fetches origins[baseInstance] for
     // that draw. This is portable to GL 4.3 (no gl_BaseInstance/gl_DrawID in the
     // shader required). One glMultiDrawElementsIndirect per block (per bucket).
-    std::vector<std::size_t> per_block_count(block_count, 0u);
+    // The geometry pool bounds all bucket indices to kMaxBlocks (16).
+    std::array<std::size_t, ChunkGeometryPool::kMaxBlocks> per_block_count{};
     for (const ChunkCullEntry* chunk : visible_chunks) {
         auto it = m_chunk_render_data.find(chunk->id);
         if (it == m_chunk_render_data.end())
@@ -2292,7 +2293,7 @@ void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& v
             continue;
         ++per_block_count[m_chunk_geometry_pool.allocation(rd.pool_handle).block_index];
     }
-    std::vector<std::size_t> block_offset(block_count, 0u);
+    std::array<std::size_t, ChunkGeometryPool::kMaxBlocks> block_offset{};
     std::size_t running = 0;
     for (std::size_t b = 0; b < block_count; ++b) {
         block_offset[b] = running;
@@ -2324,7 +2325,7 @@ void RenderPipeline::draw_chunks_mdi(const std::vector<const ChunkCullEntry*>& v
     m_mdi_command_scratch.resize(running);
     m_mdi_origin_scratch.resize(running);
 
-    std::vector<std::size_t> write_cursor = block_offset;
+    auto write_cursor = block_offset;
     for (const ChunkCullEntry* chunk : visible_chunks) {
         auto it = m_chunk_render_data.find(chunk->id);
         if (it == m_chunk_render_data.end())
@@ -2725,11 +2726,8 @@ void RenderPipeline::gather_lights(entt::registry& registry, const glm::vec3& ca
     // NEAREST MAX_POINT_LIGHTS. Fixes the gap where the old code took the first 32 in
     // arbitrary ECS order — so a cave full of crystals lights the ones AROUND the player,
     // not random distant ones. Render-only (never touches world_hash).
-    struct Cand {
-        PointLight light;
-        float d2;
-    };
-    std::vector<Cand> cands;
+    auto& cands = m_light_candidate_scratch;
+    cands.clear();
     for (auto entity : view) {
         auto const& transform = view.get<const Components::TransformComponent>(entity);
         auto const& light_data = view.get<const Components::PointLightComponent>(entity);
@@ -2743,21 +2741,29 @@ void RenderPipeline::gather_lights(entt::registry& registry, const glm::vec3& ca
         cands.push_back({light, glm::dot(d, d)});
     }
     if (static_cast<int>(cands.size()) > MAX_POINT_LIGHTS) {
-        std::nth_element(cands.begin(),
-                         cands.begin() + MAX_POINT_LIGHTS,
-                         cands.end(),
-                         [](const Cand& a, const Cand& b) { return a.d2 < b.d2; });
+        std::nth_element(
+            cands.begin(),
+            cands.begin() + MAX_POINT_LIGHTS,
+            cands.end(),
+            [](const LightCandidate& a, const LightCandidate& b) { return a.d2 < b.d2; });
         cands.resize(static_cast<std::size_t>(MAX_POINT_LIGHTS));
     }
-    m_point_lights_this_frame.reserve(cands.size());
+    if (m_point_lights_this_frame.capacity() < cands.size()) {
+        m_point_lights_this_frame.reserve(cands.size());
+        ++m_preparation_scratch_allocations;
+    }
     for (const auto& c : cands)
         m_point_lights_this_frame.push_back(c.light);
 }
 
-std::vector<RenderPipeline::ChunkMeshSnapshot>
-RenderPipeline::build_chunk_snapshots(const std::vector<Chunk*>& renderable_chunks) const {
-    std::vector<ChunkMeshSnapshot> snapshots;
-    snapshots.reserve(renderable_chunks.size());
+void RenderPipeline::build_chunk_snapshots(const std::vector<Chunk*>& renderable_chunks) {
+    auto& snapshots = m_frame_prepared.renderable_chunk_snapshots;
+    snapshots.clear();
+    if (snapshots.capacity() < renderable_chunks.size()) {
+        snapshots.reserve(renderable_chunks.size());
+        ++m_preparation_scratch_allocations;
+    }
+    m_terrain_residency.begin_frame();
 
     for (const auto* chunk : renderable_chunks) {
         if (!chunk) {
@@ -2794,42 +2800,29 @@ RenderPipeline::build_chunk_snapshots(const std::vector<Chunk*>& renderable_chun
         }
 
         snapshots.push_back(snapshot);
+        if (snapshot.has_terrain_mesh()) {
+            m_terrain_residency.mark(snapshot.id);
+        }
     }
-
-    return snapshots;
+    m_terrain_residency.end_frame();
 }
 
 void RenderPipeline::ensure_terrain_culling_hierarchy(
     const std::vector<ChunkMeshSnapshot>& renderable_chunks) {
-    std::vector<ChunkID> sorted_chunk_ids;
-    sorted_chunk_ids.reserve(renderable_chunks.size());
-    for (const auto& chunk : renderable_chunks) {
-        if (chunk.has_terrain_mesh()) {
-            sorted_chunk_ids.push_back(chunk.id);
-        }
-    }
-    std::sort(sorted_chunk_ids.begin(), sorted_chunk_ids.end());
-
-    u64 signature = 1469598103934665603ull;
-    for (const ChunkID id : sorted_chunk_ids) {
-        signature ^= id;
-        signature *= 1099511628211ull;
-    }
-
-    const bool needs_rebuild = !m_terrainCullingCache.valid ||
-                               m_terrainCullingCache.chunk_count != sorted_chunk_ids.size() ||
-                               m_terrainCullingCache.chunk_set_signature != signature;
+    const bool needs_rebuild =
+        !m_terrainCullingCache.valid ||
+        m_terrainCullingCache.residency_revision != m_terrain_residency.revision();
     if (!needs_rebuild) {
         m_last_render_pass_stats.culling_hierarchy_chunks = m_terrainCullingCache.chunk_count;
         return;
     }
 
     m_hierarchicalCuller.BuildHierarchy(renderable_chunks);
-    m_terrainCullingCache.chunk_set_signature = signature;
-    m_terrainCullingCache.chunk_count = sorted_chunk_ids.size();
+    m_terrainCullingCache.residency_revision = m_terrain_residency.revision();
+    m_terrainCullingCache.chunk_count = m_terrain_residency.size();
     m_terrainCullingCache.valid = true;
     m_last_render_pass_stats.culling_hierarchy_rebuilds++;
-    m_last_render_pass_stats.culling_hierarchy_chunks = sorted_chunk_ids.size();
+    m_last_render_pass_stats.culling_hierarchy_chunks = m_terrain_residency.size();
 }
 
 void RenderPipeline::render_frame(entt::registry& registry,
@@ -3125,7 +3118,8 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
     m_last_mesh_upload_stats.asset_uploads_deferred = assets.pending;
     const auto snapshot_start = std::chrono::steady_clock::now();
     const auto& renderable_chunks = world_system.renderable_chunks_view();
-    auto renderable_chunk_snapshots = build_chunk_snapshots(renderable_chunks);
+    build_chunk_snapshots(renderable_chunks);
+    const auto& renderable_chunk_snapshots = m_frame_prepared.renderable_chunk_snapshots;
     m_last_mesh_upload_stats.snapshot_count = renderable_chunk_snapshots.size();
     m_last_render_pass_stats = {};
     m_last_render_pass_stats.snapshot_count = renderable_chunk_snapshots.size();
@@ -3257,7 +3251,6 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
     m_frame_prepared.world_system = &world_system;
     m_frame_prepared.delta_time = deltaTime;
     m_frame_prepared.wireframe = wireframe;
-    m_frame_prepared.renderable_chunk_snapshots = std::move(renderable_chunk_snapshots);
     m_frame_prepared.valid = true;
 
     m_cpu_frame_prep = std::chrono::steady_clock::now(); //
@@ -5002,7 +4995,7 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
                                                double preparation_ms) {
     const auto limits = upload_limits(presentation, Water);
     const auto start = std::chrono::steady_clock::now();
-    // Construct before scratch containers, so their destruction is timed too.
+    // Include all resource preparation in the upload measurement.
     struct UploadMeasurement {
         UploadWorkStats& work;
         const std::size_t& pending;
@@ -5037,19 +5030,22 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
             return m_chunk_render_data;
     }();
     constexpr u32 inactive_ttl = Water ? 30 : 15;
-    std::unordered_set<ChunkID> active;
-    active.reserve(chunks.size());
+    auto& resource_frame = Water ? m_water_resource_frame : m_terrain_resource_frame;
+    resource_frame = NextRenderFrameStamp(resource_frame, records);
     for (const auto& chunk : chunks) {
         // Water-only owners keep their water record alive, but terrain activity
-        // ends with its geometry. The terrain grace period then releases both
-        // the pool allocation and foliage ground support through the usual unload.
+        // ends with its geometry. Retain the independent inactivity grace periods.
         if (Water || chunk.has_terrain_mesh()) {
-            active.insert(chunk.id);
+            const auto found = records.find(chunk.id);
+            if (found != records.end()) {
+                found->second.last_seen_frame = resource_frame;
+            }
         }
     }
-    std::vector<ChunkID> expired;
+    auto& expired = m_expired_scratch;
+    expired.clear();
     for (auto& [id, data] : records) {
-        if (active.contains(id))
+        if (data.last_seen_frame == resource_frame)
             data.frames_since_inactive = 0;
         else {
             if constexpr (!Water) {
@@ -5067,10 +5063,11 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
             unload_chunk_resources(id);
     }
 
-    std::vector<MeshUploadCandidate> candidates;
-    candidates.reserve(chunks.size());
+    auto& candidates = m_upload_candidate_scratch;
+    candidates.clear();
     // Metadata only: each visible chunk enters at most one of these queues.
-    std::vector<MeshUploadCandidate> refinement_candidates;
+    auto& refinement_candidates = m_refinement_candidate_scratch;
+    refinement_candidates.clear();
     std::size_t invalid_payloads = 0;
     for (const auto& chunk : chunks) {
         if constexpr (Water) {
@@ -5282,6 +5279,9 @@ void RenderPipeline::manage_mesh_gpu_resources(const std::vector<ChunkMeshSnapsh
     if (queue.size() || (!Water && m_near_terrain_upload_queue.size()))
         (Water ? stats.water_nearest_deferred_distance_sq
                : stats.terrain_nearest_deferred_distance_sq) = nearest_deferred;
+    // Release snapshot owners at the same boundary as the local candidate lists.
+    candidates.clear();
+    refinement_candidates.clear();
 }
 
 bool RenderPipeline::copy_terrain_mesh_payload(const ChunkMeshSnapshot& chunk,

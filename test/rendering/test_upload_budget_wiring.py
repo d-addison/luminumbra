@@ -160,11 +160,12 @@ class UploadBudgetWiring(unittest.TestCase):
 
     def test_terrain_stream_preserves_command_bytes_and_offset_zero_bindings(self):
         draw = body(self.pipeline, "void RenderPipeline::draw_chunks_mdi(")
-        start = draw.index("std::vector<std::size_t> write_cursor = block_offset;")
+        start = draw.index("for (const ChunkCullEntry* chunk : visible_chunks)",
+                           draw.index("auto write_cursor = block_offset;"))
         end = draw.index("out_draws = running;", start) + len("out_draws = running;")
         # Pin the original command/origin producer, independent of storage ownership.
         self.assertEqual(hashlib.sha256(compact(draw[start:end]).encode()).hexdigest(),
-                         "f7c59add1a863ecb9ed1a98b43f6ac73e2e9aec529290c755a822987919490d1")
+                         "943d23c9344e6f6acb907bb60d1414c775c1fabe3d6f6469bc4c06d155faa474")
         for target, stride, data in (("GL_DRAW_INDIRECT_BUFFER", "DrawElementsIndirectCommand", "command"),
                                      ("GL_ARRAY_BUFFER", "glm::vec4", "origin")):
             self.assertIn(f"glBufferSubData({target}, 0, static_cast<GLsizeiptr>(running * sizeof({stride})), "
@@ -389,11 +390,13 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertEqual(compact(body(build, "if (chunk_refs.empty())")),
                          "m_root.reset(); return;")
         cache = body(self.pipeline, "void RenderPipeline::ensure_terrain_culling_hierarchy(")
-        ids = body(cache, "for (const auto& chunk : renderable_chunks)")
-        self.assertEqual(compact(body(ids, "if (chunk.has_terrain_mesh())")),
-                         "sorted_chunk_ids.push_back(chunk.id);")
-        self.assertIn("m_terrainCullingCache.chunk_count != sorted_chunk_ids.size()", cache)
-        self.assertIn("m_terrainCullingCache.chunk_count = sorted_chunk_ids.size();", cache)
+        snapshots = body(self.pipeline, "void RenderPipeline::build_chunk_snapshots(")
+        self.assertEqual(compact(body(snapshots, "if (snapshot.has_terrain_mesh())")),
+                         "m_terrain_residency.mark(snapshot.id);")
+        self.assertIn("m_terrain_residency.begin_frame();", snapshots)
+        self.assertIn("m_terrain_residency.end_frame();", snapshots)
+        self.assertIn("m_terrainCullingCache.residency_revision != m_terrain_residency.revision()", cache)
+        self.assertIn("m_terrainCullingCache.chunk_count = m_terrain_residency.size();", cache)
         prepare = body(self.pipeline, "void RenderPipeline::prepare_frame(")
         self.assertIn("if (chunk.has_terrain_mesh() && found != m_chunk_render_data.end())", prepare)
         water = body(self.pipeline, "void RenderPipeline::execute_stage_opaque_snapshot(")
@@ -416,10 +419,10 @@ class UploadBudgetWiring(unittest.TestCase):
     def test_water_only_activity_retires_terrain_allocation_and_ground_support(self):
         manage = body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources(")
         activity = compact(body(manage, "for (const auto& chunk : chunks)"))
-        self.assertEqual(activity.count("active.insert(chunk.id);"), 1)
+        self.assertEqual(activity.count("found->second.last_seen_frame = resource_frame;"), 1)
         # Evaluate the actual admission condition for both template instantiations.
         # The old unconditional insert must fail on a water-only terrain record.
-        match = re.search(r"if \((.*?)\) \{ active.insert\(chunk.id\); \}", activity)
+        match = re.search(r"if \((.*?)\) \{ const auto found = records.find\(chunk.id\);", activity)
         condition = match.group(1) if match else "True"
         condition = condition.replace("chunk.has_terrain_mesh()", "terrain")
         condition = condition.replace("||", " or ").replace("&&", " and ")
@@ -430,7 +433,7 @@ class UploadBudgetWiring(unittest.TestCase):
         # Retain the existing grace periods and shared resource teardown.
         self.assertIn("constexpr u32 inactive_ttl = Water ? 30 : 15;", manage)
         inactive = body(manage, "for (auto& [id, data] : records)")
-        self.assertIn("if (active.contains(id))", inactive)
+        self.assertIn("if (data.last_seen_frame == resource_frame)", inactive)
         self.assertIn("if (++data.frames_since_inactive > inactive_ttl)", inactive)
         self.assertIn("expired.push_back(id);", inactive)
         teardown = body(manage, "for (const auto id : expired)")
@@ -1714,7 +1717,7 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("manage_mesh_gpu_resources<false>", self.pipeline)
         self.assertIn("manage_mesh_gpu_resources<true>", self.pipeline)
         integrate = body(self.pipeline, "void RenderPipeline::manage_mesh_gpu_resources(")
-        self.assertLess(integrate.index("steady_clock::now()"), integrate.index("active.reserve"))
+        self.assertLess(integrate.index("steady_clock::now()"), integrate.index("NextRenderFrameStamp("))
         self.assertLess(integrate.index("steady_clock::now()"), integrate.index("refresh_uploads("))
         self.assertIn("preparation_ms +", integrate)
         self.assertRegex(integrate, r"drain_uploads\(\s*queue,")
@@ -1737,7 +1740,7 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertNotIn("order_uploads(candidates", integrate)
         scheduler = read(RENDERING / "UploadBudget.h")
         refresh = compact(body(scheduler, "void refresh_uploads("))
-        self.assertIn("const std::vector<Item>& candidates", scheduler)
+        self.assertIn("const std::vector<Item, Allocator>& candidates", scheduler)
         self.assertIn("std::vector<const Item*> arrivals;", refresh)
         self.assertIn("if (queue.contains(id(candidate))) queue.refresh(id(candidate), candidate); "
                       "else arrivals.push_back(&candidate);", refresh)
@@ -1747,7 +1750,7 @@ class UploadBudgetWiring(unittest.TestCase):
         self.assertIn("return priority(*item);", refresh)
         self.assertLess(refresh.index("queue.begin_refresh()"), refresh.index("queue.contains("))
         self.assertLess(refresh.index("queue.refresh(id(*arrival), *arrival)"),
-                        refresh.index("queue.end_refresh()"))
+                        refresh.rindex("queue.end_refresh()"))
         native = read(ROOT / "test/rendering/upload_budget_test.cpp")
         for name in ("RetainedBacklogIsRefreshedWithoutRepeatedPriorityWork",
                      "OnlyArrivalsAreSortedAndTheyFollowRetainedWork"):
