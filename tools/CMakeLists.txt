@@ -1,5 +1,17 @@
 # tools/CMakeLists.txt
 
+option(LUMINUMBRA_BUILD_TOOLS "Build optional command-line content tools" OFF)
+if(LUMINUMBRA_BUILD_TOOLS)
+    add_executable(lumpack lumpack/main.cpp lumpack/Lumpack.cpp)
+    target_include_directories(lumpack PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(lumpack PRIVATE luminumbra_common nlohmann_json)
+    luminumbra_configure_first_party_target(lumpack)
+    luminumbra_pin_fp_determinism(lumpack)
+    if(MINGW)
+        target_link_options(lumpack PRIVATE -municode)
+    endif()
+endif()
+
 add_executable(asset_processor
     asset_processor.cpp
     morph_asset_processor.cpp

@@ -32,6 +32,11 @@ target_link_libraries(capture_profile_test_support PRIVATE gtest_main luminumbra
 luminumbra_configure_first_party_target(capture_profile_test_support)
 
 include("${CMAKE_CURRENT_LIST_DIR}/sources.cmake")
+add_executable(lumpack_test ${LUMPACK_TEST_SOURCES})
+target_include_directories(lumpack_test PRIVATE ../src)
+target_link_libraries(lumpack_test PRIVATE gtest_main luminumbra_common nlohmann_json)
+luminumbra_configure_first_party_target(lumpack_test)
+
 add_executable(mod_dependency_solver_test ${MOD_DEPENDENCY_TEST_SOURCES})
 target_include_directories(mod_dependency_solver_test PRIVATE ../src)
 target_link_libraries(mod_dependency_solver_test PRIVATE gtest_main luminumbra_common)
@@ -2276,6 +2281,7 @@ add_test(NAME DiagnosticChecksPython COMMAND "${Python3_EXECUTABLE}" -I -B
 set_tests_properties(DiagnosticChecksPython PROPERTIES LABELS "tools" TIMEOUT 60)
 
 set(LUMINUMBRA_GTEST_TARGETS
+    lumpack_test
     content_vfs_test
     mod_dependency_solver_test
     native_plugin_loader_test
