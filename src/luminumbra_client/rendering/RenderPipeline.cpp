@@ -3097,6 +3097,8 @@ bool RenderPipeline::render_far_world_off_pair(const Camera& camera) {
     auto gl = MakeFarWorldReplayGlAccess();
     std::unique_ptr<RenderView> authored_view;
     bool replay_ready = false;
+    const ReplayRollback release_replay(
+        [this]() noexcept { m_taau_pass->release_replay(m_render_registry); });
     RunFarWorldReplay(
         *gl,
         [this, &authored_view] {

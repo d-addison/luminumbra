@@ -2734,6 +2734,30 @@ class CloudRenderingWiring(unittest.TestCase):
                 rectangle = [cpp_expression(arg, **values) for arg in arguments[:8]]
                 self.assertEqual(rectangle, [0, 0, width, height, 0, 0, dest_w, dest_h])
 
+
+class TaauReplayLifetimeWiring(unittest.TestCase):
+    def test_replay_storage_is_released_outside_the_gl_guard_on_every_exit(self):
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        pair = block(pipeline, "bool RenderPipeline::render_far_world_off_pair(")
+        release = block(pair, "const ReplayRollback release_replay(")
+        self.assertIn("[this]() noexcept", pair)
+        self.assertIn("m_taau_pass->release_replay(m_render_registry);", release)
+        self.assertLess(pair.index("const ReplayRollback release_replay("),
+                        pair.index("RunFarWorldReplay("))
+        self.assertLess(pair.index("RunFarWorldReplay("),
+                        pair.index("m_taau_pass->prepare_replay(m_render_registry)"))
+        taau = read(CLIENT / "rendering/passes/TaauPass.cpp")
+        release = block(taau, "void TaauPass::release_replay(")
+        self.assertIn("if (!m_replay_output)", release)
+        self.assertIn("glIsFramebuffer(m_replay_fbo)", release)
+        detach = "glNamedFramebufferTexture(m_replay_fbo, GL_COLOR_ATTACHMENT0, 0, 0)"
+        destroy = 'registry.destroy_owned("taau_replay_output")'
+        self.assertLess(release.index(detach), release.index(destroy))
+        self.assertLess(release.index(destroy), release.index("m_replay_output = 0"))
+        self.assertNotIn("create_texture", block(taau, "void TaauPass::execute("))
+        self.assertNotIn("taau_replay_output", block(taau, "void TaauPass::init("))
+
+
 class StormLightningWiring(unittest.TestCase):
     def test_every_scenario_projects_world_geometry_without_screen_remapping(self):
         sweep = read(CLIENT / "core/scenarios/WorldVisualSweep.cpp")
