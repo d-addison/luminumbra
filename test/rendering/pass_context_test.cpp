@@ -446,6 +446,268 @@ TEST(PassContext, FoliageKnownAndExternalEntriesAreEquivalentOnBothBackends) {
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
 }
 
+TEST(PassContext, GBufferKnownAndExternalEntriesAreEquivalentOnBothBackends) {
+    HiddenGlContext gl;
+    ASSERT_TRUE(gl.ready()) << gl.error();
+    using namespace Luminumbra::Rendering;
+    namespace SH = Luminumbra::Client::ScenarioHarness;
+    constexpr unsigned extent = 32;
+    RenderResourceRegistry resources;
+    GBufferPass pass;
+    const GLuint material = MakeFloatTexture(1, 1, {.2f, .6f, .9f, 1});
+    struct Cleanup {
+        GBufferPass& pass;
+        RenderResourceRegistry& resources;
+        GLuint material;
+        ~Cleanup() {
+            pass.destroy_gbuffer(resources);
+            pass.destroy_instanced_static_mesh();
+            pass.destroy_skinned_mesh();
+            glDeleteTextures(1, &material);
+        }
+    } cleanup{pass, resources, material};
+    pass.init_geometry_shader(LUMINUMBRA_SOURCE_ROOT);
+    pass.init_instanced_static_mesh(LUMINUMBRA_SOURCE_ROOT);
+    pass.init_skinned_mesh(LUMINUMBRA_SOURCE_ROOT);
+    pass.init_gbuffer(resources, extent, extent);
+    entt::registry entities;
+    for (const char* key : {"state_mesh", "state_leaf"}) {
+        auto mesh = MeshLoader::CreateFromArrays({{{-.5f, -.5f, 0}, {0, 0, 1}, {0, 0}},
+                                                  {{.5f, -.5f, 0}, {0, 0, 1}, {1, 0}},
+                                                  {{0, .5f, 0}, {0, 0, 1}, {.5f, 1}}},
+                                                 {0, 1, 2});
+        ASSERT_NE(mesh, nullptr);
+        pass.register_cached_mesh(key, std::move(mesh));
+        const auto entity = entities.create();
+        entities.emplace<Luminumbra::Components::TransformComponent>(entity).position =
+            glm::vec3(std::strcmp(key, "state_mesh") == 0 ? -.6f : .6f, 0, -3);
+        entities.emplace<Luminumbra::Components::StaticMeshComponent>(entity).meshPath = key;
+    }
+    Camera camera({0, 0, 0}, {0, 1, 0}, -90, 0);
+    glm::vec4 planes[6];
+    // All fixture triangles are visible; the pass still traverses its normal cull loop.
+    std::fill_n(planes, 6, glm::vec4(0, 0, 0, 1));
+    SH::IsolationConfig isolation;
+    RenderContext ctx;
+    ctx.camera = &camera;
+    ctx.registry = &resources;
+    ctx.screen_width = ctx.screen_height = extent;
+    ctx.frustum_planes = planes;
+    ctx.isolation = &isolation;
+    ctx.material_lut = TextureHandle{material};
+    GBufferPassInput input;
+    input.root_path = LUMINUMBRA_SOURCE_ROOT;
+    input.submit_terrain_chunks = [](const glm::vec4(&)[6]) {
+        return TerrainSubmitStats{};
+    };
+    input.submit_ladder = [](const FarWorldPrepareDraw&) {
+        return FarWorldSubmitStats{};
+    };
+    input.static_model_tex = [](const std::string&) -> const StaticModelTex* {
+        return nullptr;
+    };
+    const auto readback = [&] {
+        // Five RGBA attachments and depth, bounded by this 32 x 32 fixture.
+        constexpr std::size_t pixels = extent * extent;
+        std::vector<float> data(pixels * 21);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, pass.gbuffer().fbo_id);
+        for (unsigned attachment = 0; attachment < 5; ++attachment) {
+            glReadBuffer(GL_COLOR_ATTACHMENT0 + attachment);
+            glReadPixels(
+                0, 0, extent, extent, GL_RGBA, GL_FLOAT, data.data() + pixels * 4 * attachment);
+        }
+        glReadPixels(0, 0, extent, extent, GL_DEPTH_COMPONENT, GL_FLOAT, data.data() + pixels * 20);
+        return data;
+    };
+    for (const auto mode : {FarWorldMode::Legacy, FarWorldMode::Ladder}) {
+        ASSERT_TRUE(pass.geometry_shader(mode)->IsValid());
+        ASSERT_TRUE(pass.instanced_static_mesh_shader(mode)->IsValid());
+        ASSERT_TRUE(pass.skinned_mesh_shader(mode)->IsValid());
+        camera.SelectFarWorldPlane(mode);
+        ctx.far_world_ladder = mode == FarWorldMode::Ladder;
+        ctx.gbuffer_projection = camera.GetProjectionMatrix(extent, extent);
+        input.far_selection = SelectFarWorld(mode, FarWorldPurpose::World, FarWorldRefusal::None);
+        for (const bool replay : {false, true}) {
+            ctx.frozen_replay = replay;
+            for (const bool empty : {false, true}) {
+                isolation.layer_mask = empty ? 0 : SH::IsolationLayer::All;
+                for (const GLboolean enabled : {GLboolean{GL_FALSE}, GLboolean{GL_TRUE}}) {
+                    std::vector<float> reference;
+                    std::array<GLint, 9> reference_state{};
+                    for (const bool external : {false, true}) {
+                        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                        glViewport(0, 0, extent, extent);
+                        glClearColor(0, 0, 0, 0);
+                        glDisable(GL_BLEND);
+                        glDisable(GL_SCISSOR_TEST);
+                        glCullFace(GL_BACK);
+                        if (enabled) {
+                            glEnable(GL_CULL_FACE);
+                        } else {
+                            glDisable(GL_CULL_FACE);
+                        }
+                        const GBufferPass::CallerState caller{.cull_enabled = enabled};
+                        const auto stats = external ? pass.execute_external(ctx, entities, input)
+                                                    : pass.execute(ctx, entities, input, caller);
+                        EXPECT_EQ(stats.invalid_program_refusals, 0u);
+                        EXPECT_EQ(glIsEnabled(GL_CULL_FACE), enabled);
+                        const auto state = PassBoundaryState();
+                        const auto data = readback();
+                        const auto depth_begin = data.begin() + extent * extent * 20;
+                        const auto covered = std::count_if(
+                            depth_begin, data.end(), [](float depth) { return depth > 0; });
+                        EXPECT_EQ(covered > 0, !empty);
+                        if (external) {
+                            EXPECT_EQ(state, reference_state);
+                            EXPECT_EQ(data, reference);
+                        } else {
+                            reference_state = state;
+                            reference = data;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Invalid authored input refuses before changing state or any target attachment.
+    auto authored = std::make_shared<StaticDrawSnapshot>();
+    authored->draws.emplace_back();
+    input.authored_draws = authored;
+    for (const GLboolean enabled : {GLboolean{GL_FALSE}, GLboolean{GL_TRUE}}) {
+        if (enabled) {
+            glEnable(GL_CULL_FACE);
+        } else {
+            glDisable(GL_CULL_FACE);
+        }
+        const auto pixels = readback();
+        const auto before = PassBoundaryState();
+        const GBufferPass::CallerState caller{.cull_enabled = enabled};
+        EXPECT_THROW(pass.execute(ctx, entities, input, caller), std::invalid_argument);
+        EXPECT_EQ(PassBoundaryState(), before);
+        EXPECT_EQ(readback(), pixels);
+        EXPECT_THROW(pass.execute_external(ctx, entities, input), std::invalid_argument);
+        EXPECT_EQ(PassBoundaryState(), before);
+        EXPECT_EQ(readback(), pixels);
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(PassContext, ParticleKnownAndExternalEntriesAreEquivalent) {
+    HiddenGlContext gl;
+    ASSERT_TRUE(gl.ready()) << gl.error();
+    using namespace Luminumbra::Rendering;
+    const auto target = MakeTarget(64, 64);
+    const GLuint depth = MakeFloatTexture(1, 1, {0, 0, 0, 0});
+    ParticlePass pass;
+    struct Cleanup {
+        ParticlePass& pass;
+        RenderTarget target;
+        GLuint depth;
+        ~Cleanup() {
+            pass.destroy_buffers();
+            glDeleteFramebuffers(1, &target.fbo);
+            glDeleteTextures(1, &target.tex);
+            glDeleteTextures(1, &depth);
+        }
+    } cleanup{pass, target, depth};
+    pass.init_shader(LUMINUMBRA_SOURCE_ROOT);
+    pass.init_buffers();
+    ASSERT_TRUE(pass.shader()->IsValid());
+    Camera camera({0, 2, 0}, {0, 1, 0}, -90, 0);
+    const std::vector<PointLight> lights;
+    RenderContext ctx;
+    ctx.screen_width = ctx.screen_height = 64;
+    ctx.lit_scene = FboHandle{target.fbo};
+    ctx.gbuffer_depth = TextureHandle{depth};
+    ctx.point_lights = &lights;
+    ctx.sky_ambient_color = {.3f, .3f, .3f};
+    for (const bool alpha : {false, true}) {
+        pass.clear_emitters();
+        const auto data_root =
+            std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) / "data/common/particles";
+        ASSERT_NE(pass.add_emitter(data_root / "fixture_sparkle.json", {0, 0, -4}),
+                  ParticlePass::kInvalidEmitter);
+        if (alpha) {
+            ASSERT_NE(pass.add_emitter(data_root / "precip_snow.json", {0, -4, -12}),
+                      ParticlePass::kInvalidEmitter);
+        }
+        pass.rebuild_emitter_descriptors(1337, 120);
+        pass.update(.25f);
+        ASSERT_GT(pass.frame_instance_count(), 0u);
+        for (const bool replay : {false, true}) {
+            ctx.frozen_replay = replay;
+            for (const GLboolean enabled : {GLboolean{GL_FALSE}, GLboolean{GL_TRUE}}) {
+                std::vector<unsigned char> reference;
+                std::array<GLint, 9> reference_state{};
+                for (const bool external : {false, true}) {
+                    glBindFramebuffer(GL_FRAMEBUFFER, target.fbo);
+                    glClearColor(0, 0, 0, 0);
+                    glClear(GL_COLOR_BUFFER_BIT);
+                    glDisable(GL_SCISSOR_TEST);
+                    if (enabled) {
+                        glEnable(GL_CULL_FACE);
+                    } else {
+                        glDisable(GL_CULL_FACE);
+                    }
+                    const ParticlePass::CallerState caller{.cull_enabled = enabled};
+                    const auto drawn = external ? pass.execute_external(ctx, camera)
+                                                : pass.execute(ctx, camera, caller);
+                    EXPECT_EQ(drawn, pass.frame_instance_count());
+                    EXPECT_EQ(glIsEnabled(GL_CULL_FACE), enabled);
+                    const auto state = PassBoundaryState();
+                    const auto pixels = ReadTarget(target);
+                    EXPECT_TRUE(std::any_of(pixels.begin(), pixels.end(), [](unsigned char value) {
+                        return value != 0;
+                    }));
+                    if (external) {
+                        EXPECT_EQ(state, reference_state);
+                        EXPECT_EQ(pixels, reference);
+                    } else {
+                        reference_state = state;
+                        reference = pixels;
+                    }
+                }
+            }
+        }
+    }
+    // Missing target, empty instances, missing shader and destroyed buffers are true no-ops.
+    for (const int phase : {0, 1, 2, 3}) {
+        ctx.lit_scene = phase == 0 ? FboHandle{} : FboHandle{target.fbo};
+        if (phase == 1) {
+            pass.clear_emitters();
+            pass.update(0);
+        } else if (phase == 2) {
+            pass.add_emitter(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) /
+                                 "data/common/particles/fixture_sparkle.json",
+                             {0, 0, -4});
+            pass.update(.25f);
+            ASSERT_GT(pass.frame_instance_count(), 0u);
+            pass.reset_shader();
+        } else if (phase == 3) {
+            pass.init_shader(LUMINUMBRA_SOURCE_ROOT);
+            ASSERT_TRUE(pass.shader()->IsValid());
+            pass.destroy_buffers();
+        }
+        for (const GLboolean enabled : {GLboolean{GL_FALSE}, GLboolean{GL_TRUE}}) {
+            if (enabled) {
+                glEnable(GL_CULL_FACE);
+            } else {
+                glDisable(GL_CULL_FACE);
+            }
+            const auto before = PassBoundaryState();
+            const auto pixels = ReadTarget(target);
+            const ParticlePass::CallerState caller{.cull_enabled = enabled};
+            EXPECT_EQ(pass.execute(ctx, camera, caller), 0u);
+            EXPECT_EQ(PassBoundaryState(), before);
+            EXPECT_EQ(ReadTarget(target), pixels);
+            EXPECT_EQ(pass.execute_external(ctx, camera), 0u);
+            EXPECT_EQ(PassBoundaryState(), before);
+            EXPECT_EQ(ReadTarget(target), pixels);
+        }
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
 // Scoped override of an environment variable, restored on destruction, so the test
 // does not inherit (or leak) a render-scale setting from the surrounding session.
 class ScopedEnv {
@@ -1049,14 +1311,15 @@ TEST(PassContext, ShadowKnownAndExternalRasterRestorationAreEquivalent) {
                     reference_depth[index] = depths;
                     reference_tint[index] = tints;
                 }
-                if (phase == 1)
+                if (phase == 1) {
                     EXPECT_TRUE(std::any_of(tints.begin(), tints.end(), [](unsigned char value) {
                         return value != 255;
                     }));
-                else
+                } else {
                     EXPECT_TRUE(std::all_of(tints.begin(), tints.end(), [](unsigned char value) {
                         return value == 255;
                     }));
+                }
             }
         }
     }
@@ -1408,15 +1671,16 @@ TEST(PassContext, FoliageCappedCompactionAndIndependentRebuildAreByteStable) {
         }
         ASSERT_EQ(pass.instances().size(), FoliagePass::kMaxInstances)
             << "must exercise saturation";
-        if (run == 0)
+        if (run == 0) {
             reference = pass.instances();
-        else
+        } else {
             ASSERT_EQ(std::memcmp(reference.data(),
                                   pass.instances().data(),
                                   reference.size() * sizeof(reference[0])),
                       0)
                 << "fresh output allocation and reversed chunk input order must preserve capped "
                    "bytes";
+        }
         ASSERT_TRUE(pass.begin_qualification());
         glFinish();
         pass.set_evidence_frame(5, 1);
@@ -1632,9 +1896,9 @@ TEST(PassContext, FoliageActualDrawFeedbackSurvivesReloadAndPreservesFrameIdenti
             const auto& b = proof.vertices[1].vertices[blade * 12 + j];
             const double displacement =
                 glm::distance(glm::dvec3(a[0], a[1], a[2]), glm::dvec3(b[0], b[1], b[2]));
-            if (a[3] == 0 || !proof.vertices[0].sways[blade])
+            if (a[3] == 0 || !proof.vertices[0].sways[blade]) {
                 EXPECT_LE(displacement, .00001);
-            else {
+            } else {
                 EXPECT_GT(displacement, .00001);
                 EXPECT_LE(displacement, proof.vertices[0].blade_heights[blade] * .45 + .0001);
             }
@@ -2472,10 +2736,11 @@ TEST(PassContext, FroxelInitializationFailureCleansUpAndRequiresExplicitRetry) {
         calls.invalid_layout = failure == 6;
         calls.label_exception = failure == 8;
         const std::filesystem::path root = LUMINUMBRA_SOURCE_ROOT;
-        if (calls.label_exception)
+        if (calls.label_exception) {
             EXPECT_THROW(pass.execute_inject(ctx, root), std::runtime_error);
-        else
+        } else {
             EXPECT_FALSE(pass.execute_inject(ctx, failure == 7 ? root / "res" : root));
+        }
         EXPECT_EQ(pass.integrated_texture(), 0u);
         EXPECT_EQ(calls.live_programs, 0);
         EXPECT_EQ(calls.live_textures, 0);
