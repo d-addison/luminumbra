@@ -13,6 +13,9 @@ import tempfile
 import time
 import unittest
 
+# Resolve sibling modules for direct execution with isolated Python.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import render_crash_capture as crash_capture
 
 import render_contract as contract

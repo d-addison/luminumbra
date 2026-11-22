@@ -3513,8 +3513,8 @@
     {
       "id": "ar.scope.007",
       "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "quote": "Durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), and strict distant policy and distant creatures (S8) are planned for v0.3.1.",
-      "text": "Durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), and strict distant policy and distant creatures (S8) are planned for v0.3.1."
+      "quote": "Durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), and strict distant policy and distant creatures are planned for v0.3.1.",
+      "text": "Durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), and strict distant policy and distant creatures are planned for v0.3.1."
     },
     {
       "id": "ar.scope.008",
@@ -5231,6 +5231,30 @@
       "source": "docs/active-regions.md#snapshot-decoding-and-peer-admission",
       "quote": "Both world load entries restore that cursor, including empty and below-budget worlds whose later continuation can depend on its unnormalized value.",
       "text": "Both world load entries restore that cursor, including empty and below-budget worlds whose later continuation can depend on its unnormalized value."
+    },
+    {
+      "id": "ar.continuation.001",
+      "source": "docs/active-regions.md#regional-continuation-compatibility",
+      "quote": "The [regional continuation implementation](regional-water-continuation.md) retains bounded foliage pages, persistent plant identities, due growth, capped resume acknowledgement and conserving irrigation seam transfers.",
+      "text": "The [regional continuation implementation](regional-water-continuation.md) retains bounded foliage pages, persistent plant identities, due growth, capped resume acknowledgement and conserving irrigation seam transfers."
+    },
+    {
+      "id": "ar.continuation.002",
+      "source": "docs/active-regions.md#regional-continuation-compatibility",
+      "quote": "Fixed-tick regional water remains behind the test-only authority profile, which the active-region switch alone does not select.",
+      "text": "Fixed-tick regional water remains behind the test-only authority profile, which the active-region switch alone does not select."
+    },
+    {
+      "id": "ar.continuation.003",
+      "source": "docs/active-regions.md#regional-continuation-compatibility",
+      "quote": "The current transaction planner validates immutable inputs, funds preparation and seam reservations, and publishes only completed work without elapsed-time catch-up on restore.",
+      "text": "The current transaction planner validates immutable inputs, funds preparation and seam reservations, and publishes only completed work without elapsed-time catch-up on restore."
+    },
+    {
+      "id": "ar.continuation.004",
+      "source": "docs/active-regions.md#regional-continuation-compatibility",
+      "quote": "This integration preserves authority revision 8, existing hash bindings and all save, replay, checkpoint, Hello and configuration layouts.",
+      "text": "This integration preserves authority revision 8, existing hash bindings and all save, replay, checkpoint, Hello and configuration layouts."
     }
   ],
   "exclusions": [
@@ -5413,8 +5437,8 @@
     {
       "id": "ar.history.002",
       "source": "docs/active-regions.md#historical-ambient-hash-portability-investigation",
-      "quote": "At the time of the C2 investigation, terrain used `NewWorldNoise` with an AVX2 cap;",
-      "text": "At the time of the C2 investigation, terrain used `NewWorldNoise` with an AVX2 cap;",
+      "quote": "At the time of the terrain-consumer investigation, terrain used `NewWorldNoise` with an AVX2 cap;",
+      "text": "At the time of the terrain-consumer investigation, terrain used `NewWorldNoise` with an AVX2 cap;",
       "reason": "Historical ambient-dispatch investigation and provenance observations; these pre-repair results are not the current engine contract.",
       "category": "historical"
     },
@@ -5517,8 +5541,8 @@
     {
       "id": "ar.history.015",
       "source": "docs/active-regions.md#historical-ambient-hash-portability-investigation",
-      "quote": "That C2 change left ambient runtime behavior unchanged and did not resolve cross-CPU ambient hash equality.",
-      "text": "That C2 change left ambient runtime behavior unchanged and did not resolve cross-CPU ambient hash equality.",
+      "quote": "That terrain-consumer change left ambient runtime behavior unchanged and did not resolve cross-CPU ambient hash equality.",
+      "text": "That terrain-consumer change left ambient runtime behavior unchanged and did not resolve cross-CPU ambient hash equality.",
       "reason": "Historical ambient-dispatch investigation and provenance observations; these pre-repair results are not the current engine contract.",
       "category": "historical"
     },

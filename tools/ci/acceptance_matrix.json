@@ -5250,7 +5250,7 @@
     {
       "id": "contract.ar.scope.01",
       "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
-      "statement": "Acceptance obligations: The host ledger implements the persistent-active scheduling foundation in [distant-world.md](distant-world.md). / It is gated by the existing `sim.active_regions` switch, enabled in compiled and packaged defaults for v0.3.0. / Budgets remain unlimited in shipped configuration. / No distant system consumes this schedule yet; / field pages, creature records, water shares, diagnostics and measured budget activation remain separate work. / Durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), and strict distant policy and distant creatures (S8) are planned for v0.3.1. / Regional continuation performance/default enablement is planned for v0.4.0 as [issue #320](https://github.com/d-addison/luminumbra/issues/320). / These consumers are outside the shipping scheduler foundation. / The dedicated server autosaves every five minutes; / this does not implement those continuation consumers.",
+      "statement": "Acceptance obligations: The host ledger implements the persistent-active scheduling foundation in [distant-world.md](distant-world.md). / It is gated by the existing `sim.active_regions` switch, enabled in compiled and packaged defaults for v0.3.0. / Budgets remain unlimited in shipped configuration. / No distant system consumes this schedule yet; / field pages, creature records, water shares, diagnostics and measured budget activation remain separate work. / Durable completed work and ground-object continuation, durable regional fields/weather/scent/energy, regional foliage/water continuation (issue #242), and strict distant policy and distant creatures are planned for v0.3.1. / Regional continuation performance/default enablement is planned for v0.4.0 as [issue #320](https://github.com/d-addison/luminumbra/issues/320). / These consumers are outside the shipping scheduler foundation. / The dedicated server autosaves every five minutes; / this does not implement those continuation consumers.",
       "status": "planned",
       "requirements": [
         "ar.scope.001",
@@ -8769,6 +8769,84 @@
         {
           "kind": "ctest",
           "ref": "GameSessionHeadlessWorldTest.DisabledRegionsIncrementalSaveRestoresSchedulerAndAuthorityHash"
+        }
+      ]
+    },
+    {
+      "id": "contract.regional-continuation-compatibility",
+      "source": "docs/active-regions.md#regional-continuation-compatibility",
+      "statement": "The current regional continuation implementations retain foliage integer pages, persistent plant ownership, bounded growth resume and conserving irrigation seams. Fixed-tick water remains behind its test-only profile. Authority revision 8, hash bindings and serialized layouts are unchanged; production activation and native qualification remain pending.",
+      "status": "partial",
+      "requirements": [
+        "ar.continuation.001",
+        "ar.continuation.002",
+        "ar.continuation.003",
+        "ar.continuation.004"
+      ],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "FoliageFieldPages.BorderExchangeRejectsPartialEndpointsAndInvalidFluxBeforeAnyWrites"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.FoliageReplayAllowanceIsIndependentOfHostFrameBatching"
+        },
+        {
+          "kind": "doc",
+          "ref": "docs/regional-water-continuation.md",
+          "planned": "Qualify native continuation and obtain a separate owner decision before production activation or additional byte bindings; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.region-input-bounds",
+      "source": "docs/active-regions.md#activation-and-ordering",
+      "statement": "Walking anchors and ground-object edit positions require finite coordinates and -2^24 <= x,z < 2^24; region pins require -32768 <= x,z < 32768. Invalid inputs are ignored and counted observationally. The boundary predicate and host refusal paths have authored unit evidence; static validation does not prove execution.",
+      "status": "covered",
+      "requirements": [],
+      "evidence": [
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.ValidAnchorBoundaries"
+        },
+        {
+          "kind": "ctest",
+          "ref": "GameSessionHeadlessWorldTest.InvalidHostInputsNeverThrowAndAreCounted"
+        },
+        {
+          "kind": "ctest",
+          "ref": "ActiveRegionLedgerTest.PinBoundariesOnBothAxes"
+        }
+      ]
+    },
+    {
+      "id": "contract.region-default-qualification",
+      "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
+      "statement": "Regional continuation performance and default enablement remain planned for v0.4.0 under issue #320; compiled switch defaults do not qualify those release obligations.",
+      "status": "planned",
+      "requirements": [
+        "ar.scope.008"
+      ],
+      "evidence": [
+        {
+          "kind": "doc",
+          "ref": "docs/regional-water-continuation.md",
+          "planned": "Qualify representative-world regional continuation performance and release defaults for v0.4.0; owner: ds"
+        }
+      ]
+    },
+    {
+      "id": "contract.region-diagnostics",
+      "source": "docs/active-regions.md#active-region-ledger-and-scheduler",
+      "statement": "Diagnostics and measured budget activation remain separate qualification work.",
+      "status": "planned",
+      "requirements": [],
+      "evidence": [
+        {
+          "kind": "doc",
+          "ref": "docs/distant-world.md",
+          "planned": "Qualify the regional diagnostic panel and measured budget activation together with representative-world evidence; owner: ds"
         }
       ]
     }

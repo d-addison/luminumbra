@@ -1950,3 +1950,109 @@ TEST(FieldPageStateTest, ScentCapacityRetiresThawedOwnerHistoryAcrossReload) {
         }
     }
 }
+
+namespace {
+TEST(FieldPageStateTest, DenseScentBatchPreservesBytesAcrossEraseInsertAndMovingDomains) {
+    FieldPageState store, reference;
+    for (int tick = 0; tick < 6; ++tick) {
+        std::vector<std::pair<ScentCellKey, ScentCell>> updates;
+        for (int z = -8 + tick; z < 8 + tick; ++z)
+            for (int x = -8 - tick; x < 8 - tick; ++x) {
+                ScentCell value{};
+                if ((x + z + tick) % 3 != 0)
+                    value[tick % 4] = std::bit_cast<std::uint64_t>(1.0 + tick);
+                updates.emplace_back(ScentCellKey{x, z}, value);
+                ASSERT_TRUE(reference.set_scent({x, z}, value));
+            }
+        ASSERT_TRUE(store.update_scent(updates));
+        EXPECT_EQ(store.serialize(), reference.serialize());
+        EXPECT_EQ(store.canonical_bytes(), reference.canonical_bytes());
+    }
+}
+
+TEST(FieldPageStateTest, InitializationCountsFollowMasksAcrossPartialSnapshotsLoadAndClear) {
+    FieldPageState store;
+    const std::vector<RegionKey> keys{{-32768, 0}, {-2, -1}, {-1, 0}, {0, 0}, {1, 0}, {32767, 0}};
+    const auto check = [&keys](const FieldPageState& state) {
+        for (const auto key : keys) {
+            std::size_t count = 0;
+            for (const auto& [x, z] : FieldPageState::cells_of_region(key))
+                count += state.initialized(x, z);
+            EXPECT_EQ(state.owned_initialized_cells(key), count);
+            EXPECT_EQ(state.owns_region(key), count != 0);
+        }
+    };
+    for (const auto key : keys) {
+        ASSERT_TRUE(store.activate_region(key, kSeed, 0));
+        check(store);
+        const auto before = store.serialize();
+        ASSERT_TRUE(store.activate_region(key, 9999, 800));
+        EXPECT_EQ(store.serialize(), before); // Fully initialized admission must not reseed.
+    }
+    std::map<RegionKey, ActiveRegionRecord> records;
+    records[{0, 0}] = {};
+    const std::vector<RegionKey> due{{0, 0}};
+    auto subset = store.scheduled_snapshot(records, due, 1);
+    check(subset); // Shared pages can contain only part of another owner's cells.
+    const auto partial = subset.owned_initialized_cells({1, 0});
+    EXPECT_GT(partial, 0u);
+    EXPECT_LT(partial, FieldPageState::cells_of_region({1, 0}).size());
+    ASSERT_TRUE(subset.activate_region({1, 0}, kSeed, 2));
+    check(subset);
+    EXPECT_EQ(subset.owned_initialized_cells({1, 0}),
+              FieldPageState::cells_of_region({1, 0}).size());
+    const auto bytes = store.serialize();
+    std::string error;
+    FieldPageState restored;
+    ASSERT_TRUE(FieldPageState::parse(bytes, restored, error)) << error;
+    check(restored);
+    FieldPageState assigned;
+    ASSERT_TRUE(assigned.activate_region({7, 7}, kSeed, 0));
+    assigned = restored;
+    check(assigned);
+    EXPECT_EQ(assigned.owned_initialized_cells({7, 7}), 0u);
+    EXPECT_EQ(assigned.serialize(), bytes);
+    const auto& self = assigned;
+    assigned = self;
+    check(assigned);
+    auto copied = assigned;
+    check(copied);
+    assigned = std::move(copied);
+    check(assigned);
+    auto corrupt = bytes;
+    corrupt.back() ^= 1;
+    EXPECT_FALSE(FieldPageState::parse(corrupt, restored, error));
+    check(restored);
+    EXPECT_EQ(restored.serialize(), bytes);
+    restored.clear();
+    check(restored);
+    ASSERT_TRUE(restored.activate_region({0, 0}, kSeed, 9));
+    check(restored);
+}
+
+TEST(FieldPageStateTest, ScentColumnWalkHandlesEmptyColumnsErasureEditsLoadAndWideFallback) {
+    FieldPageState store, reference;
+    const ScentCell one{std::bit_cast<std::uint64_t>(1.0), 0, 0, 0};
+    // Empty columns' lower_bound would alias the node erased in the adjacent column.
+    ASSERT_TRUE(store.set_scent({1, 0}, one));
+    ASSERT_TRUE(reference.set_scent({1, 0}, one));
+    const auto apply = [&store, &reference](const auto& updates) {
+        for (const auto& [key, value] : updates)
+            ASSERT_TRUE(reference.set_scent(key, value));
+        ASSERT_TRUE(store.update_scent(updates));
+        EXPECT_EQ(store.serialize(), reference.serialize());
+    };
+    apply(std::vector<std::pair<ScentCellKey, ScentCell>>{
+        {{0, 0}, {}}, {{1, 0}, {}}, {{0, 1}, one}, {{1, 1}, one}});
+    ASSERT_TRUE(store.set_scent({0, 1}, {}));
+    ASSERT_TRUE(reference.set_scent({0, 1}, {}));
+    FieldPageState restored;
+    std::string error;
+    ASSERT_TRUE(FieldPageState::parse(store.serialize(), restored, error)) << error;
+    store = std::move(restored);
+    apply(std::vector<std::pair<ScentCellKey, ScentCell>>{
+        {{-2, -1}, one}, {{1, 1}, {}}, {{-2, 4}, one}, {{1, 4}, {}}});
+    apply(std::vector<std::pair<ScentCellKey, ScentCell>>{
+        {{-200, -2}, one}, {{200, -2}, one}, {{-200, 9}, {}}, {{200, 9}, one}});
+}
+} // namespace

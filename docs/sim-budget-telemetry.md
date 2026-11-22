@@ -1,5 +1,12 @@
 # Simulation budget telemetry
 
+Regional resume can revisit a stage several times during one host tick. The
+collector sums those visits into one stage sample for that tick, including their
+work and measured durations. Integer work-item observations remain independent.
+The parameterised 3,600-tick parity test retains three passes per region mode,
+comparing telemetry work, world hashes and saves without adding another long test
+to the sanitizer shards.
+
 The additive time-free work-item traces and standard CI fixture ceilings for
 issue #396 are documented in [Deterministic work budgets](deterministic-work-budgets.md).
 
