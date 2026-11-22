@@ -33,6 +33,7 @@
 #include "luminumbra_client/rendering/passes/ParticlePass.h"
 #include "luminumbra_client/rendering/passes/SkyboxPass.h"
 #include "luminumbra_client/rendering/passes/SsaoPass.h"
+#include "luminumbra_client/rendering/passes/TaauPass.h"
 #include "luminumbra_client/rendering/passes/WaterPass.h"
 #include "luminumbra_client/rendering/passes/WaterfallPass.h"
 #include "luminumbra_common/animation/AnimationRuntime.h"
@@ -9225,6 +9226,339 @@ void ExpectProjectionPlane(const glm::mat4& projection, float far_plane, glm::ve
 }
 } // namespace
 
+namespace {
+std::size_t LedgerBytes(const std::vector<RenderResourceRegistry::AllocationRecord>& ledger,
+                        std::string_view name) {
+    const auto found = std::find_if(
+        ledger.begin(), ledger.end(), [&](const auto& entry) { return entry.name == name; });
+    return found == ledger.end() ? 0 : found->bytes;
+}
+
+std::size_t GlTextureAllocationBytes(GLuint texture) {
+    std::size_t total = 0;
+    // 32-bit dimensions have at most 32 levels. Stop at the first unallocated level.
+    for (GLint mip = 0; mip < 32; ++mip) {
+        GLint width = 0, height = 0, layers = 0;
+        glGetTextureLevelParameteriv(texture, mip, GL_TEXTURE_WIDTH, &width);
+        if (width == 0) {
+            break;
+        }
+        glGetTextureLevelParameteriv(texture, mip, GL_TEXTURE_HEIGHT, &height);
+        glGetTextureLevelParameteriv(texture, mip, GL_TEXTURE_DEPTH, &layers);
+        GLint bits = 0;
+        for (const GLenum component : std::array<GLenum, 6>{GL_TEXTURE_RED_SIZE,
+                                                            GL_TEXTURE_GREEN_SIZE,
+                                                            GL_TEXTURE_BLUE_SIZE,
+                                                            GL_TEXTURE_ALPHA_SIZE,
+                                                            GL_TEXTURE_DEPTH_SIZE,
+                                                            GL_TEXTURE_STENCIL_SIZE}) {
+            GLint component_bits = 0;
+            glGetTextureLevelParameteriv(texture, mip, component, &component_bits);
+            bits += component_bits;
+        }
+        total += static_cast<std::size_t>(width) * static_cast<std::size_t>(height) *
+                 static_cast<std::size_t>(layers) * static_cast<std::size_t>((bits + 7) / 8);
+    }
+    return total;
+}
+} // namespace
+
+TEST(RenderSmokeTest, AllocationLedgerMipSizesAreBoundedAndSaturating) {
+    TextureDesc desc;
+    desc.width = 5;
+    desc.height = 3;
+    desc.layers = 3;
+    desc.internal_format = GL_RGBA8;
+    EXPECT_EQ(RenderResourceRegistry::texture_allocation_bytes(desc, 32), 216u);
+    EXPECT_EQ(RenderResourceRegistry::texture_allocation_bytes(desc), 180u);
+    desc.width = 1;
+    desc.height = 7;
+    EXPECT_EQ(RenderResourceRegistry::texture_allocation_bytes(desc, 32), 132u);
+    desc.width = 1024;
+    desc.height = 1024;
+    desc.layers = 5;
+    EXPECT_EQ(RenderResourceRegistry::texture_allocation_bytes(desc, 11), 27962020u);
+    EXPECT_EQ(RenderResourceRegistry::texture_allocation_bytes(desc, 0), 0u);
+    for (const auto& [format, bytes] :
+         std::array<std::pair<Luminumbra::u32, std::size_t>, 17>{{{GL_R8, 1},
+                                                                  {GL_R16F, 2},
+                                                                  {GL_RG8, 2},
+                                                                  {GL_RGB8, 3},
+                                                                  {GL_SRGB8, 3},
+                                                                  {GL_R32F, 4},
+                                                                  {GL_RG16F, 4},
+                                                                  {GL_RGBA8, 4},
+                                                                  {GL_SRGB8_ALPHA8, 4},
+                                                                  {GL_RGB10_A2, 4},
+                                                                  {GL_DEPTH_COMPONENT24, 4},
+                                                                  {GL_DEPTH_COMPONENT32F, 4},
+                                                                  {GL_RGB16F, 6},
+                                                                  {GL_RGBA16F, 8},
+                                                                  {GL_RG32F, 8},
+                                                                  {GL_RGB32F, 12},
+                                                                  {GL_RGBA32F, 16}}}) {
+        desc.width = desc.height = desc.layers = 1;
+        desc.internal_format = format;
+        EXPECT_EQ(RenderResourceRegistry::texture_allocation_bytes(desc, 32), bytes);
+    }
+    const auto maximum = std::numeric_limits<std::size_t>::max();
+    desc.internal_format = 0;
+    EXPECT_EQ(RenderResourceRegistry::texture_allocation_bytes(desc), maximum);
+    desc.internal_format = GL_RGBA32F;
+    desc.width = desc.height = desc.layers = std::numeric_limits<Luminumbra::u32>::max();
+    EXPECT_EQ(RenderResourceRegistry::texture_allocation_bytes(desc, 32), maximum);
+    desc.internal_format = GL_R8;
+    desc.layers = 1;
+    EXPECT_EQ(RenderResourceRegistry::texture_allocation_bytes(desc, 32), maximum);
+    desc.width = 0;
+    EXPECT_EQ(RenderResourceRegistry::texture_allocation_bytes(desc), 0u);
+    desc.width = 1;
+    desc.height = 0;
+    EXPECT_EQ(RenderResourceRegistry::texture_allocation_bytes(desc), 0u);
+    desc.height = 1;
+    desc.layers = 0;
+    EXPECT_EQ(RenderResourceRegistry::texture_allocation_bytes(desc), 0u);
+
+    RenderResourceRegistry resources;
+    std::size_t first = maximum - 1, second = 4;
+    resources.track_backing_allocation("first", first);
+    resources.track_backing_allocation("second", second);
+    EXPECT_EQ(resources.allocated_bytes(), maximum);
+    second = 0;
+    EXPECT_EQ(resources.allocated_bytes(), maximum - 1);
+    first = 0;
+    EXPECT_TRUE(resources.allocation_ledger().empty());
+    resources.record_buffer_allocation(1, maximum - 1);
+    resources.record_buffer_allocation(2, 4);
+    EXPECT_EQ(resources.allocated_bytes(), maximum);
+    resources.forget_buffer_allocation(2);
+    EXPECT_EQ(resources.allocated_bytes(), maximum - 1);
+    resources.record_buffer_allocation(1, 4);
+    EXPECT_EQ(resources.allocated_bytes(), 4u);
+    resources.record_buffer_allocation(2, maximum);
+    resources.record_buffer_allocation(1, 1);
+    EXPECT_EQ(resources.allocated_bytes(), maximum);
+    resources.forget_buffer_allocation(2);
+    EXPECT_EQ(resources.allocated_bytes(), 1u);
+    resources.forget_buffer_allocation(1);
+    EXPECT_EQ(resources.allocated_bytes(), 0u);
+}
+
+TEST(RenderSmokeTest, AllocationLedgerOwnedTargetsReconcileResizeFailureAndPixelParity) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    RenderResourceRegistry resources;
+    TextureDesc desc;
+    desc.width = 8;
+    desc.height = 6;
+    desc.internal_format = GL_RGBA16F;
+    desc.format = GL_RGBA;
+    desc.type = GL_FLOAT;
+    desc.lifetime = ResourceLifetime::History;
+    const auto texture = resources.create_texture("history", desc);
+    ASSERT_NE(texture.id, 0u);
+    RenderbufferDesc depth;
+    depth.width = desc.width;
+    depth.height = desc.height;
+    depth.internal_format = GL_DEPTH_COMPONENT32F;
+    const auto renderbuffer = resources.create_renderbuffer("depth", depth);
+    ASSERT_NE(renderbuffer.id, 0u);
+    FboDesc fbo;
+    fbo.attachments = {{GL_COLOR_ATTACHMENT0, "history"}, {GL_DEPTH_ATTACHMENT, "depth"}};
+    const auto target = resources.create_fbo("target", fbo);
+    ASSERT_NE(target.id, 0u);
+    EXPECT_EQ(resources.allocated_bytes(), 8u * 6u * 12u);
+    resources.adopt_texture("alias", texture.id);
+    resources.adopt_texture("another_alias", texture.id);
+    resources.clear_adopted();
+    EXPECT_EQ(resources.allocated_bytes(), 8u * 6u * 12u);
+    EXPECT_EQ(resources.allocation_ledger().size(), 2u);
+    EXPECT_EQ(LedgerBytes(resources.allocation_ledger(), "history"),
+              GlTextureAllocationBytes(texture.id));
+
+    const std::array invalid{RenderResourceRegistry::TargetExtent{"history", 0, 6}};
+    EXPECT_FALSE(resources.replace_targets(invalid));
+    EXPECT_EQ(resources.allocated_bytes(), 8u * 6u * 12u);
+    EXPECT_EQ(resources.create_texture("history", desc).id, 0u);
+    desc.width = 0;
+    EXPECT_EQ(resources.create_texture("invalid", desc).id, 0u);
+    desc.width = 8;
+    desc.internal_format = std::numeric_limits<Luminumbra::u32>::max();
+    glDisable(GL_DEBUG_OUTPUT); // This invalid format deliberately provokes a driver error.
+    const auto failed_texture = resources.create_texture("failed", desc);
+    glEnable(GL_DEBUG_OUTPUT);
+    EXPECT_EQ(failed_texture.id, 0u);
+    EXPECT_EQ(resources.allocated_bytes(), 8u * 6u * 12u);
+    glDisable(GL_DEBUG_OUTPUT); // This invalid extent deliberately provokes a driver error.
+    const bool resized =
+        resources.resize_texture("history", std::numeric_limits<Luminumbra::u32>::max(), 6);
+    glEnable(GL_DEBUG_OUTPUT);
+    EXPECT_FALSE(resized);
+    EXPECT_EQ(resources.allocated_bytes(), 8u * 6u * 12u);
+
+    const std::array replacement{RenderResourceRegistry::TargetExtent{"history", 12, 9},
+                                 RenderResourceRegistry::TargetExtent{"depth", 12, 9}};
+    ASSERT_TRUE(resources.replace_targets(replacement));
+    EXPECT_EQ(resources.allocated_bytes(), 12u * 9u * 12u);
+    ASSERT_TRUE(resources.resize_texture("history", 12, 9));
+    glBindFramebuffer(GL_FRAMEBUFFER, resources.fbo("target").id);
+    glClearColor(0.125f, 0.25f, 0.5f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    std::array<std::uint16_t, 12 * 9 * 4> before{}, after{};
+    glGetTextureImage(resources.texture("history").id,
+                      0,
+                      GL_RGBA,
+                      GL_HALF_FLOAT,
+                      static_cast<GLsizei>(sizeof(before)),
+                      before.data());
+    for (int query = 0; query < 3; ++query) {
+        EXPECT_EQ(resources.allocated_bytes(), 12u * 9u * 12u);
+        EXPECT_EQ(resources.allocation_ledger().size(), 2u);
+    }
+    glGetTextureImage(resources.texture("history").id,
+                      0,
+                      GL_RGBA,
+                      GL_HALF_FLOAT,
+                      static_cast<GLsizei>(sizeof(after)),
+                      after.data());
+    EXPECT_EQ(before, after);
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    resources.destroy_owned("history");
+    EXPECT_EQ(resources.allocated_bytes(), 12u * 9u * 4u);
+    resources.destroy_all_owned();
+    EXPECT_EQ(resources.allocated_bytes(), 0u);
+    EXPECT_TRUE(resources.allocation_ledger().empty());
+}
+
+TEST(RenderSmokeTest, AllocationLedgerTracksCompleteTerrainBackingThroughRetirement) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    ChunkGeometryPool pool;
+    RenderResourceRegistry resources;
+    resources.track_backing_allocation("terrain_pool", pool.storage_bytes());
+    EXPECT_EQ(resources.allocated_bytes(), 0u);
+    const std::array<Luminumbra::VoxelVertex, 3> vertices{};
+    const std::array<Luminumbra::u32, 3> indices{0, 1, 2};
+    const auto handle = pool.allocate(vertices.data(), 3, indices.data(), 3, "terrain");
+    ASSERT_NE(handle, ChunkGeometryPool::kInvalid);
+    std::size_t backing = 0;
+    for (const auto& block : pool.blocks()) {
+        for (const GLuint buffer : {block.vbo, block.ebo}) {
+            GLint64 bytes = 0;
+            glGetNamedBufferParameteri64v(buffer, GL_BUFFER_SIZE, &bytes);
+            ASSERT_GT(bytes, 0);
+            backing += static_cast<std::size_t>(bytes);
+        }
+    }
+    EXPECT_EQ(resources.allocated_bytes(), backing);
+    EXPECT_GT(backing, sizeof(vertices) + sizeof(indices));
+    pool.mark_submitted(pool.allocation(handle).block_index);
+    pool.free(handle);
+    EXPECT_EQ(resources.allocated_bytes(), backing);
+    pool.clear();
+    EXPECT_EQ(resources.allocated_bytes(), backing);
+    pool.destroy();
+    EXPECT_EQ(resources.allocated_bytes(), 0u);
+    EXPECT_TRUE(resources.allocation_ledger().empty());
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, AllocationLedgerCountsOnlyAllocatedReplayAndBuffers) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    RenderResourceRegistry resources;
+    TaauPass pass;
+    EXPECT_FALSE(pass.prepare_replay(resources));
+    EXPECT_TRUE(resources.allocation_ledger().empty());
+    for (const Luminumbra::u32 width : {8u, 12u}) {
+        pass.init(resources, width, 6);
+        const auto history_bytes = static_cast<std::size_t>(width) * 6u * 8u;
+        EXPECT_EQ(resources.allocated_bytes(), history_bytes * 2u);
+        EXPECT_EQ(LedgerBytes(resources.allocation_ledger(), "taau_replay_output"), 0u);
+        ASSERT_TRUE(pass.prepare_replay(resources));
+        EXPECT_EQ(resources.allocated_bytes(), history_bytes * 3u);
+        EXPECT_EQ(LedgerBytes(resources.allocation_ledger(), "taau_replay_output"), history_bytes);
+        ASSERT_TRUE(pass.prepare_replay(resources));
+        EXPECT_EQ(resources.allocated_bytes(), history_bytes * 3u);
+        for (const auto& entry : resources.allocation_ledger()) {
+            EXPECT_EQ(entry.bytes, GlTextureAllocationBytes(entry.gl_id));
+        }
+        pass.destroy(resources);
+        EXPECT_EQ(resources.allocated_bytes(), 0u);
+    }
+    GLuint external = 0;
+    TextureDesc array;
+    array.width = 5;
+    array.height = 3;
+    array.layers = 3;
+    array.internal_format = GL_RGBA8;
+    resources.track_texture_allocation("external", external, array, 3);
+    EXPECT_EQ(resources.allocated_bytes(), 0u);
+    glCreateTextures(GL_TEXTURE_2D_ARRAY, 1, &external);
+    glTextureStorage3D(external, 3, GL_RGBA8, 5, 3, 3);
+    glGenerateTextureMipmap(external);
+    resources.track_texture_allocation("external", external, array, 3);
+    EXPECT_EQ(resources.allocated_bytes(), GlTextureAllocationBytes(external));
+    EXPECT_EQ(resources.allocated_bytes(), 216u);
+    EXPECT_EQ(resources.allocation_ledger().size(), 1u);
+    glDeleteTextures(1, &external);
+    external = 0;
+    EXPECT_TRUE(resources.allocation_ledger().empty());
+    GLuint buffer = 0;
+    glCreateBuffers(1, &buffer);
+    glNamedBufferData(buffer, 16, nullptr, GL_STATIC_DRAW);
+    resources.record_buffer_allocation(buffer, 16);
+    EXPECT_EQ(resources.allocated_bytes(), 16u);
+    resources.record_buffer_allocation(0, 99);
+    resources.forget_buffer_allocation(0);
+    resources.record_buffer_allocation(buffer, 32);
+    glNamedBufferData(buffer, 32, nullptr, GL_STATIC_DRAW);
+    EXPECT_EQ(resources.allocated_bytes(), 32u);
+    EXPECT_EQ(resources.allocation_ledger().size(), 1u);
+    resources.forget_buffer_allocation(buffer);
+    glDeleteBuffers(1, &buffer);
+    EXPECT_EQ(resources.allocated_bytes(), 0u);
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(RenderSmokeTest, AllocationLedgerPipelineReconcilesTexturesAtEachRenderScale) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    RenderPipeline pipeline;
+    pipeline.enable_static_model_content(false);
+    ASSERT_TRUE(pipeline.startup(32, 24, SourceRoot()));
+    for (const float scale : {1.0f, 0.5f}) {
+        pipeline.set_render_scale(scale);
+        const auto ledger = pipeline.allocation_ledger();
+        for (const auto name : {"terrain_albedo",
+                                "terrain_normal",
+                                "terrain_roughness",
+                                "skinned_array",
+                                "taau_history_0",
+                                "taau_history_1",
+                                "shadow_tint_cascades"}) {
+            EXPECT_GT(LedgerBytes(ledger, name), 0u) << name;
+        }
+        EXPECT_EQ(LedgerBytes(ledger, "terrain_roughness"), 27962020u);
+        EXPECT_EQ(LedgerBytes(ledger, "taau_history_0"), 32u * 24u * 8u);
+        EXPECT_EQ(LedgerBytes(ledger, "taau_history_1"), 32u * 24u * 8u);
+        EXPECT_EQ(LedgerBytes(ledger, "taau_replay_output"), 0u);
+        std::size_t reconciled = 0;
+        for (const auto& entry : ledger) {
+            SCOPED_TRACE(entry.name);
+            if (entry.kind == RenderResourceRegistry::AllocationKind::Texture) {
+                EXPECT_EQ(entry.bytes, GlTextureAllocationBytes(entry.gl_id));
+            }
+            reconciled += entry.bytes;
+        }
+        EXPECT_EQ(pipeline.get_runtime_render_stats().estimated_vram_bytes, reconciled);
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    }
+    pipeline.shutdown();
+    EXPECT_EQ(pipeline.get_runtime_render_stats().estimated_vram_bytes, 0u);
+    EXPECT_TRUE(pipeline.allocation_ledger().empty());
+}
+
 TEST(RenderSmokeTest, WaterOnlyOwnerSubmitsWaterAndTracksTerrainPresence) {
     HiddenGlContext context;
     ASSERT_TRUE(context.ready()) << context.error();
@@ -9260,6 +9594,21 @@ TEST(RenderSmokeTest, WaterOnlyOwnerSubmitsWaterAndTracksTerrainPresence) {
     EXPECT_EQ(pipeline.get_last_render_pass_stats().terrain_draws, 0u);
     EXPECT_EQ(pipeline.get_last_render_pass_stats().shadow_draws, 0u);
     EXPECT_EQ(pipeline.get_last_render_pass_stats().culling_hierarchy_chunks, 0u);
+    std::size_t water_backing = 0;
+    for (const auto& entry : pipeline.allocation_ledger()) {
+        if (entry.kind == RenderResourceRegistry::AllocationKind::Buffer &&
+            entry.name.starts_with("buffer.")) {
+            GLint64 bytes = 0;
+            glGetNamedBufferParameteri64v(entry.gl_id, GL_BUFFER_SIZE, &bytes);
+            EXPECT_EQ(entry.bytes, static_cast<std::size_t>(bytes));
+            water_backing += entry.bytes;
+        }
+    }
+    EXPECT_GT(water_backing, 0u);
+    const auto water_stats = pipeline.get_runtime_render_stats();
+    EXPECT_EQ(water_backing,
+              water_stats.water_vertex_capacity * sizeof(Luminumbra::VoxelVertex) +
+                  water_stats.water_index_capacity * sizeof(Luminumbra::u32));
     EXPECT_EQ(pipeline.get_last_mesh_upload_stats().terrain_upload_candidates, 0u);
 
     // Membership stays identical when terrain appears: its culling cache must change.
@@ -9279,6 +9628,11 @@ TEST(RenderSmokeTest, WaterOnlyOwnerSubmitsWaterAndTracksTerrainPresence) {
     EXPECT_EQ(pipeline.get_last_render_pass_stats().culling_hierarchy_rebuilds, 1u);
     EXPECT_EQ(pipeline.get_runtime_render_stats().terrain_gpu_chunks, 1u);
     EXPECT_GT(pipeline.get_runtime_render_stats().terrain_vertex_capacity, 0u);
+    const auto terrain_backing = LedgerBytes(pipeline.allocation_ledger(), "terrain_pool");
+    const auto terrain_stats = pipeline.get_runtime_render_stats();
+    EXPECT_GT(terrain_backing,
+              terrain_stats.terrain_vertex_capacity * sizeof(Luminumbra::VoxelVertex) +
+                  terrain_stats.terrain_index_capacity * sizeof(Luminumbra::u32));
 
     // Probe the uploaded ground through public scatter behavior. Keeping this
     // input after terrain disappears detects stale support under the water owner.
@@ -9331,6 +9685,7 @@ TEST(RenderSmokeTest, WaterOnlyOwnerSubmitsWaterAndTracksTerrainPresence) {
     EXPECT_EQ(pipeline.get_runtime_render_stats().terrain_gpu_chunks, 0u);
     EXPECT_EQ(pipeline.get_runtime_render_stats().terrain_vertex_capacity, 0u);
     EXPECT_EQ(pipeline.get_runtime_render_stats().terrain_index_capacity, 0u);
+    EXPECT_EQ(LedgerBytes(pipeline.allocation_ledger(), "terrain_pool"), terrain_backing);
     EXPECT_EQ(pipeline.get_runtime_render_stats().water_gpu_chunks, 1u);
     rebuild_foliage();
     EXPECT_TRUE(foliage.instances().empty());
@@ -9357,7 +9712,13 @@ TEST(RenderSmokeTest, WaterOnlyOwnerSubmitsWaterAndTracksTerrainPresence) {
     EXPECT_TRUE(world.renderable_chunks_view().empty());
     EXPECT_EQ(pipeline.get_last_render_pass_stats().snapshot_count, 0u);
     EXPECT_EQ(pipeline.get_last_render_pass_stats().water_draws, 0u);
+    pipeline.clear_all_chunk_data();
+    for (const auto& entry : pipeline.allocation_ledger()) {
+        EXPECT_FALSE(entry.name.starts_with("buffer."));
+    }
+    EXPECT_EQ(LedgerBytes(pipeline.allocation_ledger(), "terrain_pool"), terrain_backing);
     pipeline.shutdown();
+    EXPECT_TRUE(pipeline.allocation_ledger().empty());
 }
 
 TEST(RenderSmokeTest, WorldSwapRetainsLegacyDiagnosticInventoryUntilShutdown) {

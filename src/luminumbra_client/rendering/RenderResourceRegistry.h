@@ -3,6 +3,7 @@
 #include "RenderResourceHandles.h"
 #include "rhi/RhiResource.h"
 
+#include <cstddef>
 #include <span>
 #include <string>
 #include <string_view>
@@ -93,6 +94,35 @@ struct FboDesc {
 
 class RenderResourceRegistry {
 public:
+    enum class AllocationKind : u8 {
+        Texture,
+        Renderbuffer,
+        Buffer,
+        BackingStorage
+    };
+    struct AllocationRecord {
+        std::string name;
+        AllocationKind kind;
+        u32 gl_id;
+        std::size_t bytes;
+    };
+    // Logical storage estimates exclude driver overhead. Unknown formats and
+    // arithmetic overflow saturate to SIZE_MAX instead of undercounting.
+    static std::size_t texture_allocation_bytes(const TextureDesc& desc, u32 mip_levels = 1);
+    // External owners retain GL lifetime. Tracked handles/counters must remain
+    // alive at stable addresses during ledger queries. Zero means released.
+    void track_texture_allocation(std::string_view name,
+                                  const u32& gl_id,
+                                  const TextureDesc& desc,
+                                  u32 mip_levels = 1);
+    void track_buffer_allocation(std::string_view name, const u32& gl_id, std::size_t bytes);
+    void track_backing_allocation(std::string_view name, const std::size_t& bytes);
+    void record_buffer_allocation(u32 gl_id, std::size_t bytes);
+    void forget_buffer_allocation(u32 gl_id);
+    std::size_t allocated_bytes() const;
+    // Render-thread diagnostic snapshot; adopted aliases never add storage.
+    // Owned targets follow successful storage allocation, including History and replay.
+    std::vector<AllocationRecord> allocation_ledger() const;
     struct TargetExtent {
         std::string_view name;
         u32 width;
@@ -200,6 +230,7 @@ private:
     struct OwnedTexture {
         u32 gl_id = 0;
         TextureDesc desc;
+        std::size_t allocation_bytes = 0;
         Rhi::RhiTexture rhi_backing{};
     };
     struct OwnedFbo {
@@ -222,6 +253,21 @@ private:
 
     bool attach_fbo(OwnedFbo& fbo_entry); // (re)binds attachments per desc
 
+    struct TrackedAllocation {
+        AllocationKind kind;
+        const u32* gl_id;
+        const std::size_t* backing_bytes;
+        std::size_t bytes;
+        std::size_t current_bytes() const {
+            return backing_bytes ? *backing_bytes : (gl_id && *gl_id ? bytes : 0);
+        }
+    };
+    std::unordered_map<std::string, TrackedAllocation> m_tracked_allocations;
+    std::unordered_map<u32, std::size_t> m_buffer_allocations;
+    // Exact two-word sum, bounded by the u32 object-name space. Removal can
+    // recover from saturation without scanning buffers during frame diagnostics.
+    std::size_t m_buffer_bytes_low = 0;
+    std::size_t m_buffer_bytes_high = 0;
     std::unordered_map<std::string, FboHandle> m_fbos;
     std::unordered_map<std::string, TextureHandle> m_textures;
     std::unordered_map<std::string, OwnedTexture> m_owned_textures;
