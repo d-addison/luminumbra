@@ -4273,6 +4273,49 @@ class DeferredRasterDiagnosticWiring(unittest.TestCase):
         self.debug = read(CLIENT / "rendering/passes/DebugViewPass.cpp")
         self.gbuffer = read(CLIENT / "rendering/passes/GBufferPass.cpp")
 
+    def test_shadow_filter_keeps_scalar_taps(self):
+        # A shared depth cache or gathers changed compiler contraction even with the
+        # same tap order, so the filter keeps one scalar fetch per tap.
+        self.assertIn("float filteredShadow(vec3 projected, int cascadeIndex, float bias)",
+                      self.lighting)
+        self.assertNotIn("ShadowDepths", self.lighting)
+        self.assertNotIn("textureGather(", self.lighting)
+        selector = block(self.lighting, "float CalculateShadow(")
+        self.assertIn("return filteredShadow(projCoords, cascadeIndex, bias);", selector)
+        main = block(self.lighting, "void main()")
+        for light in ("sun", "moon"):
+            self.assertIn(f"CalculateShadow(FragPos, Normal, L_{light}, abs(viewPos.z))", main)
+
+    def test_legacy_sky_skip_requires_replacement_and_preserves_other_consumers(self):
+        main = block(self.lighting, "void main()")
+        guard = "if (u_skipLegacySky != 0 && u_farWorldLadder == 0 && u_staticStudio == 0 &&"
+        early = block(main, guard)
+        self.assertIn("texture(u_sceneDepth, TexCoords).r == 0.0)", main)
+        self.assertIn("FragColor = vec4(0.0);", early)
+        self.assertIn("return;", early)
+        self.assertLess(main.index("u_staticStudio != 0"), main.index(guard))
+        self.assertLess(main.index(guard), main.index("vec4 authoredSurface"))
+        header = read(CLIENT / "rendering/passes/LightingPass.h")
+        self.assertIn("bool skybox_follows = false", header)
+        lighting = read(CLIENT / "rendering/passes/LightingPass.cpp")
+        self.assertIn('setInt("u_skipLegacySky", skybox_follows && !contribution.ready() ? 1 : 0)', lighting)
+        pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
+        stage = block(pipeline, "void RenderPipeline::execute_stage_lighting(")
+        self.assertIn("m_lighting_pass->execute(m_frame_lighting_ctx, caller, sky_replaces_color);", stage)
+        skybox = block(pipeline, "void RenderPipeline::execute_stage_skybox(")
+        predicate = re.search(r"sky_replaces_color = ([^;]+);", stage).group(1)
+        sky_predicate = re.search(r"if \((.*?)\) \{", skybox, re.S).group(1)
+        self.assertEqual("".join(predicate.split()), "".join(sky_predicate.split()))
+        replacement = block(skybox, "if (m_cloud_quality > 0")
+        self.assertLess(replacement.index("glDisable(GL_BLEND)"),
+                        replacement.index("m_cloud_composite_shader->use()"))
+        schedule = pipeline[pipeline.index("kTable = {"):]
+        for consumer in ("opaque_snapshot", "god_rays", "aerial", "taau_resolve", "debug_view"):
+            self.assertLess(schedule.index('{"skybox"'), schedule.index('{"' + consumer + '"'))
+        composite = read(ROOT / "res/shaders/cloud_composite.frag")
+        self.assertIn("if (d > 0.0)", composite)
+        self.assertIn("FragColor = vec4(texture(u_cloudColor, TexCoords).rgb, 1.0);", composite)
+
     def test_cascade_observation_matches_actual_selector_at_every_split(self):
         selector = block(self.lighting, "float CalculateShadow(")
         tint = block(self.lighting, "vec3 SampleShadowTint(")
@@ -4597,7 +4640,7 @@ class DeferredRasterDiagnosticWiring(unittest.TestCase):
             return value
 
         self.assertEqual(fingerprint(without_guard(self.lighting, "LUMIN_DIAG_CONTRIBUTIONS")),
-                         0xf8fca67f768319ee)
+                         0xb2f4c0d0889a7501)
         self.assertEqual(fingerprint(without_guard(self.fragment, "LUMIN_DIAG_SURFACE")),
                          0x7289f9525f762361)
 
@@ -5508,7 +5551,7 @@ class PassCallerStateContract(unittest.TestCase):
     def test_ordinary_passes_have_zero_shipping_preservation_enable_queries(self):
         pipeline = read(CLIENT / "rendering/RenderPipeline.cpp")
         cases = (("Lighting", "lighting", ".depth_test_enabled = GL_TRUE",
-                  "m_lighting_pass->execute(m_frame_lighting_ctx, caller)"),
+                  "m_lighting_pass->execute(m_frame_lighting_ctx, caller, sky_replaces_color)"),
                  ("Skybox", "skybox", ".cull_enabled = GL_TRUE",
                   "m_skybox_pass->execute(skybox_ctx, camera, false, caller)"),
                  ("Foliage", "foliage", ".cull_enabled = GL_TRUE",
