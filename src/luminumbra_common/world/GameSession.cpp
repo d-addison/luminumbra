@@ -11,6 +11,7 @@
 #include "ActiveRegionLedger.h"
 #include "Chunk.h"
 #include "FarWorldAuthorityProducer.h"
+#include "SurfaceWorkBudget.h"
 #include "entt/entity/fwd.hpp"
 #include "entt/entt.hpp"
 #include "luminumbra/core/Types.h"
@@ -319,6 +320,146 @@ void StepCreatureAvatars(entt::registry& registry,
 } // namespace
 
 namespace Luminumbra::world {
+
+bool GameSession::PrepareInitialSimulation(int surface_radius,
+                                           int collision_radius,
+                                           const std::stop_token& stop) {
+    if (stop.stop_requested() || !m_worldSystem || !m_physicsSystem ||
+        !World::SurfaceRadiiSupported(surface_radius, collision_radius)) {
+        return false;
+    }
+    const bool loaded = RestoredOwnerContinuation() || GetLastLoadedChunkCount() > 0;
+    struct WaterPauseGuard {
+        Systems::SHIELD_WorldSystem& world;
+        bool loaded;
+        ~WaterPauseGuard() {
+            if (loaded)
+                world.SetWaterBootPaused(false);
+        }
+    } pause_guard{*m_worldSystem, loaded};
+    if (loaded)
+        m_worldSystem->SetWaterBootPaused(true);
+    if (!RestoredOwnerContinuation() &&
+        !m_worldSystem->EnsureSurfaceReadyNear(
+            m_metadata.spawnPoint, m_physicsSystem.get(), surface_radius, collision_radius)) {
+        return false;
+    }
+    BootSettleStats stats;
+    if (!SettleInitialSimulation({}, stats, stop))
+        return false;
+    if (loaded)
+        m_worldSystem->SetWaterBootPaused(false);
+    m_worldSystem->sync_water_authority();
+    return true;
+}
+
+bool GameSession::SettleInitialSimulation(const std::vector<Vec3>& anchors,
+                                          BootSettleStats& stats,
+                                          const std::stop_token& stop) {
+    if (stop.stop_requested() || !m_worldSystem || !m_physicsSystem)
+        return false;
+    auto* ws = m_worldSystem.get();
+    auto* phys = m_physicsSystem.get();
+    const auto* continuation = RestoredOwnerContinuation();
+    const bool water_loaded_from_save = continuation || GetLastLoadedChunkCount() > 0;
+    const auto stream_once = [&] {
+        if (anchors.empty()) {
+            ws->update(
+                m_registry, continuation ? continuation->anchor : m_metadata.spawnPoint, phys);
+        } else {
+            ws->update(m_registry, anchors, phys);
+        }
+        ws->wait_for_streaming_jobs();
+    };
+    // Residency: at most 400 streaming barriers, ending after eight stable counts.
+    // Each update retains the streamer's existing radius/chunk budgets; snapshots
+    // visit only that bounded resident set. No counted simulation ticks run here.
+    std::size_t last_count = static_cast<std::size_t>(-1);
+    int stable = 0;
+    for (int i = 0; !continuation && i < 400 && stable < 8; ++i) {
+        if (stop.stop_requested())
+            return false;
+        stream_once();
+        const std::size_t count = ws->snapshot_streamed_chunks().size();
+        stable = (count == last_count) ? stable + 1 : 0;
+        last_count = count;
+    }
+    // Fresh water has no global all-asleep fixed point: wet/dry seams can
+    // perpetually wake neighbours. Initialize the backlog, then consume the
+    // original fixed transient budget. Loaded/continued water must not advance.
+    int settle_iters = 0;
+    if (!continuation && !water_loaded_from_save) {
+        ws->SetWaterBootSettleMode(true);
+        struct SettleModeGuard {
+            Systems::SHIELD_WorldSystem& world;
+            ~SettleModeGuard() {
+                world.SetWaterBootSettleMode(false);
+            }
+        } settle_guard{*ws};
+        // 2a: init the full backlog (boot mode seeds ALL pending per update; the
+        // loop tolerates late streamers). Bounded.
+        constexpr int kInitSettleCap = 50;
+        std::size_t uninited_now = 0;
+        for (int i = 0; i < kInitSettleCap; ++i) {
+            ++settle_iters;
+            if (stop.stop_requested())
+                return false;
+            stream_once();
+            uninited_now = 0;
+            for (const auto& c : ws->snapshot_streamed_chunks()) {
+                if (c && !c->has_water_sim.load(std::memory_order_acquire))
+                    ++uninited_now;
+            }
+            if (uninited_now == 0)
+                break;
+        }
+        // 2b: exactly kPostInitSettleTicks full-set sim iterations — the flood
+        // transient (lakes/rivers redistributing from their seeded rest levels)
+        // drains and the calm-able majority of chunks reaches sleep. A fixed count
+        // is deterministic (run==replay, host==peer) and bounded by construction.
+        constexpr int kPostInitSettleTicks = 240;
+        for (int i = 0; i < kPostInitSettleTicks; ++i) {
+            ++settle_iters;
+            if (stop.stop_requested())
+                return false;
+            stream_once();
+        }
+    }
+    if (stop.stop_requested())
+        return false;
+    // Settle-exit summary: the heavy oracle asserts the settle CONTRACT —
+    // fresh boots leave zero uninitialized chunks; loaded boots skip the settle
+    // (water paused, state preserved). awake > 0 is EXPECTED (the network flows
+    // perpetually); reproducibility comes from the pause + persisted cursor.
+    {
+        std::size_t water_chunks = 0, awake = 0, uninited = 0;
+        for (const auto& c : ws->snapshot_streamed_chunks()) {
+            if (!c)
+                continue;
+            if (c->has_water_sim.load(std::memory_order_acquire)) {
+                ++water_chunks;
+                if (!c->is_water_sleeping.load(std::memory_order_relaxed))
+                    ++awake;
+            } else {
+                ++uninited;
+            }
+        }
+        LUMINUMBRA_CORE_INFO(
+            "Boot water settle exit: {} water-inited ({} awake), {} NOT water-inited, {} "
+            "chunks total{}",
+            water_chunks,
+            awake,
+            uninited,
+            ws->snapshot_streamed_chunks().size(),
+            water_loaded_from_save ? " [loaded: water settle skipped, state preserved]" : "");
+        stats.water_chunks = water_chunks;
+        stats.awake = awake;
+        stats.uninited = uninited;
+        stats.iterations = settle_iters;
+        stats.water_settle_skipped = water_loaded_from_save;
+    }
+    return true;
+}
 
 struct GameSession::LoadedWorldState {
     WorldStreamingState chunks;

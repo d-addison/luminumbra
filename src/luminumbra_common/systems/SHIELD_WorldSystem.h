@@ -1403,6 +1403,9 @@ private:
     // Outstanding candidates survive frames between activation passes; the
     // per-frame generation counters reset even when activation does not run.
     std::size_t m_deferred_generation_candidates = 0;
+    // Candidates outside the retained scheduler prefix, recomputed by update.
+    // Publication barriers consume the prefix but cannot satisfy this backlog.
+    std::size_t m_unadmitted_meshing_candidates = 0;
     std::size_t m_last_chunk_count = 0;
     bool m_last_pass_drained = false; // sticky: false forces the next tick's candidate pass to run
 

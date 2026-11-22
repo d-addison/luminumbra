@@ -358,6 +358,31 @@ public:
         return m_requiredClientAssets;
     }
 
+    struct BootSettleStats {
+        std::size_t water_chunks = 0;
+        std::size_t awake = 0;
+        std::size_t uninited = 0;
+        int iterations = 0;
+        bool water_settle_skipped = false; // Loaded water was preserved throughout boot.
+        bool contract_ok() const {
+            return uninited == 0;
+        }
+    };
+
+    // Owner-thread entry only, after world/state adoption and before ticks or capture.
+    // Prepares the surface, bounded residency and fresh water, then publishes authority.
+    // Every fresh entry settles streaming and water, including radius-zero entry.
+    // Loaded water is paused throughout; cancellation refuses entry without saving.
+    bool PrepareInitialSimulation(int surface_radius,
+                                  int collision_radius,
+                                  const std::stop_token& stop = {});
+    // Runner variant: surface/rosters are already ready, loaded water already paused.
+    // Empty anchors select spawn. Continuations skip streaming; callers resume loaded
+    // water and publish authority after success. Never call from a live tick/frame.
+    bool SettleInitialSimulation(const std::vector<Vec3>& anchors,
+                                 BootSettleStats& stats,
+                                 const std::stop_token& stop = {});
+
     // Get world metadata
     const WorldMetadata& GetMetadata() const {
         return m_metadata;
